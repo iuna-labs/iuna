@@ -32,15 +32,25 @@ window.mivoraApp = function mivoraApp() {
 
     tabFromHash() {
       const hash = window.location.hash.replace(/^#\/?/, "");
-      return ["wallet", "mining", "p2p", "chain"].includes(hash) ? hash : "wallet";
+      return ["wallet", "mining", "p2p", "chain", "config"].includes(hash) ? hash : "wallet";
     },
 
     setTab(tab) {
-      if (!["wallet", "mining", "p2p", "chain"].includes(tab)) return;
+      if (!["wallet", "mining", "p2p", "chain", "config"].includes(tab)) return;
       this.tab = tab;
       if (window.location.hash !== `#${tab}`) {
         window.location.hash = tab;
       }
+    },
+
+    pageTitle() {
+      return {
+        wallet: "Mivora",
+        mining: "Mining",
+        p2p: "P2P",
+        chain: "Chain",
+        config: "Configuration",
+      }[this.tab] || "Mivora";
     },
 
     async refresh() {

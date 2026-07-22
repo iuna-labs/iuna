@@ -25,7 +25,6 @@ const IMPORT_REBROADCAST_LIMIT: usize = 128;
 
 #[derive(Clone, Debug)]
 pub struct NodeConfig {
-    pub name: String,
     pub wallet: Wallet,
     pub genesis_allocations: BTreeMap<String, Amount>,
     pub vdf_rounds: u32,
@@ -90,7 +89,6 @@ pub struct BlockInventory {
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 pub struct NodeStatus {
-    pub name: String,
     pub wallet_address: String,
     pub wallet_balance: Amount,
     pub launch_profile: LaunchProfileStatus,
@@ -131,7 +129,6 @@ pub struct AutoMinePlan {
 
 #[derive(Clone, Debug)]
 pub struct NodeCore {
-    name: String,
     wallet: Wallet,
     ledger: Ledger,
     burn_per_block: Amount,
@@ -142,27 +139,17 @@ pub struct NodeCore {
 impl NodeCore {
     pub fn new(config: NodeConfig) -> Self {
         let ledger = Ledger::new(config.genesis_allocations, config.vdf_rounds);
-        Self::from_ledger(config.name, config.wallet, ledger, config.burn_per_block)
+        Self::from_ledger(config.wallet, ledger, config.burn_per_block)
     }
 
-    pub fn from_ledger(
-        name: String,
-        wallet: Wallet,
-        ledger: Ledger,
-        burn_per_block: Amount,
-    ) -> Self {
+    pub fn from_ledger(wallet: Wallet, ledger: Ledger, burn_per_block: Amount) -> Self {
         Self {
-            name,
             wallet,
             ledger,
             burn_per_block,
             last_auto_burn_height: None,
             outbox: Vec::new(),
         }
-    }
-
-    pub fn name(&self) -> &str {
-        &self.name
     }
 
     pub fn wallet_address(&self) -> &str {
@@ -309,7 +296,6 @@ impl NodeCore {
             .is_none_or(|leader| leader == self.wallet.address());
 
         NodeStatus {
-            name: self.name.clone(),
             wallet_address: self.wallet.address().to_string(),
             wallet_balance: self.ledger.balance_of(self.wallet.address()),
             launch_profile: LaunchProfileStatus {
@@ -697,7 +683,6 @@ mod tests {
         let mut allocations = BTreeMap::new();
         allocations.insert(alice.address().to_string(), 1_000);
         let mut node = NodeCore::new(NodeConfig {
-            name: "alice".to_string(),
             wallet: alice,
             genesis_allocations: allocations,
             vdf_rounds: 10,

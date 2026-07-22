@@ -263,8 +263,9 @@ const INDEX_HTML: &str = r#"<!doctype html>
     .nav-button svg.chain-icon { stroke-width: 1.35; }
     .nav-button span { font-size: 11px; font-weight: 800; }
     .nav-button:hover, .nav-button.active { background: #202328; border-color: #3b4448; color: #d5f55f; }
-    .content { min-width: 0; padding: 22px 24px 48px; }
-    main { max-width: 1240px; margin: 0 auto; }
+    .content { width: 100%; min-width: 0; padding: 22px 24px 48px; }
+    main { width: 100%; }
+    main > section { width: 100%; }
     header { display: flex; justify-content: space-between; gap: 18px; align-items: flex-start; padding: 0 0 18px; }
     h1 { margin: 0 0 4px; font-size: 28px; }
     h2 { margin: 0 0 12px; font-size: 18px; }
@@ -295,9 +296,10 @@ const INDEX_HTML: &str = r#"<!doctype html>
     .flash.error { color: #ffb1a8; background: #2a1717; border-color: #713434; }
     .ok { color: #d5f55f; }
     .page-title { margin-bottom: 16px; }
-    .wallet-grid { display: grid; grid-template-columns: minmax(0, 1fr) minmax(300px, .8fr); gap: 12px; align-items: start; }
+    .wallet-grid { width: 100%; display: grid; grid-template-columns: minmax(0, 1fr) minmax(300px, .8fr); gap: 12px; align-items: start; }
     .wallet-actions { display: grid; gap: 12px; }
-    .mining-grid { display: grid; grid-template-columns: minmax(0, .95fr) minmax(300px, .7fr); gap: 12px; align-items: start; }
+    .mining-grid { width: 100%; display: grid; grid-template-columns: minmax(0, .95fr) minmax(300px, .7fr); gap: 12px; align-items: start; }
+    .config-grid { width: 100%; display: grid; grid-template-columns: minmax(0, .9fr) minmax(300px, .75fr); gap: 12px; align-items: start; }
     .receive-address { display: grid; gap: 8px; }
     .address-box { border: 1px solid #2f363c; border-radius: 8px; padding: 11px; background: #111316; }
     .panel-head { display: flex; justify-content: space-between; gap: 12px; align-items: center; margin-bottom: 12px; }
@@ -309,7 +311,7 @@ const INDEX_HTML: &str = r#"<!doctype html>
     .wallet-tx-main { display: grid; gap: 4px; min-width: 0; }
     .wallet-tx-amount { font-weight: 900; }
     .panel .grid + form { margin-top: 12px; }
-    .explorer-shell { display: grid; gap: 12px; }
+    .explorer-shell { width: 100%; display: grid; gap: 12px; }
     .block-rail-wrap { background: #181b1f; border: 1px solid #2a3035; border-radius: 8px; padding: 12px; overflow: hidden; }
     .block-rail-head { display: flex; justify-content: space-between; gap: 10px; align-items: center; margin-bottom: 10px; }
     .block-rail { display: flex; gap: 8px; overflow-x: auto; padding: 1px 0 10px; scroll-snap-type: x proximity; }
@@ -339,22 +341,23 @@ const INDEX_HTML: &str = r#"<!doctype html>
     .pill.transfer { background: #17312a; color: #8de9cd; }
     .mempool-strip { display: flex; gap: 8px; overflow-x: auto; padding-bottom: 4px; }
     .mempool-item { flex: 0 0 200px; border: 1px solid #2f363c; border-radius: 8px; padding: 10px; background: #111316; }
-    @media (max-width: 920px) { .wallet-grid, .mining-grid, .detail-grid { grid-template-columns: 1fr; } }
+    @media (max-width: 920px) { .wallet-grid, .mining-grid, .config-grid, .detail-grid { grid-template-columns: 1fr; } }
     @media (max-width: 760px) {
       .app-shell { grid-template-columns: 1fr; }
       .sidebar { position: sticky; z-index: 5; bottom: 0; top: auto; height: auto; flex-direction: row; justify-content: space-between; padding: 8px; border-right: 0; border-bottom: 1px solid #262b2f; }
       .brand-mark { width: 38px; height: 38px; font-size: 19px; }
       .side-nav { display: flex; width: auto; gap: 8px; }
-      .nav-button { width: 58px; min-height: 48px; }
+      .nav-button { width: 52px; min-height: 48px; }
+      .nav-button span { font-size: 10px; }
       .content { padding: 16px 12px 36px; }
-      header, .split, .wallet-grid, .mining-grid, .detail-grid, .wallet-tx-row { grid-template-columns: 1fr; }
+      header, .split, .wallet-grid, .mining-grid, .config-grid, .detail-grid, .wallet-tx-row { grid-template-columns: 1fr; }
       header { display: grid; }
       input { min-width: 0; width: 100%; }
       .switch input { width: auto; }
       .block-card { flex-basis: 108px; }
     }
   </style>
-  <script defer src="/assets/mivora-ui.js?v=13"></script>
+  <script defer src="/assets/mivora-ui.js?v=15"></script>
   <script defer src="/assets/alpine.min.js"></script>
 </head>
 <body x-data="mivoraApp()" x-init="init()" x-cloak>
@@ -378,14 +381,17 @@ const INDEX_HTML: &str = r#"<!doctype html>
           <svg class="chain-icon" viewBox="0 0 24 24" aria-hidden="true"><rect x="1.5" y="9" width="5.5" height="5.5"></rect><rect x="9.25" y="9" width="5.5" height="5.5"></rect><rect x="17" y="9" width="5.5" height="5.5"></rect></svg>
           <span>Chain</span>
         </button>
+        <button class="nav-button" :class="{ active: tab === 'config' }" @click="setTab('config')" type="button" title="Configuration" aria-label="Configuration">
+          <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M4 21v-7"></path><path d="M4 10V3"></path><path d="M12 21v-9"></path><path d="M12 8V3"></path><path d="M20 21v-5"></path><path d="M20 12V3"></path><path d="M2 14h4"></path><path d="M10 8h4"></path><path d="M18 16h4"></path></svg>
+          <span>Config</span>
+        </button>
       </nav>
     </aside>
 
     <main class="content">
     <header>
       <div>
-        <h1>Mivora</h1>
-        <div class="muted">Consensus node console</div>
+        <h1 x-text="pageTitle()">Mivora</h1>
       </div>
       <div class="muted" x-text="lastUpdatedLabel()"></div>
     </header>
@@ -394,7 +400,6 @@ const INDEX_HTML: &str = r#"<!doctype html>
 
     <section x-show="tab === 'wallet'">
       <div class="page-title">
-        <h2>Wallet</h2>
         <div class="muted">Balance <strong x-text="status.wallet_balance ?? '-'"></strong></div>
       </div>
       <div class="wallet-grid">
@@ -444,7 +449,6 @@ const INDEX_HTML: &str = r#"<!doctype html>
 
     <section x-show="tab === 'mining'">
       <div class="page-title">
-        <h2>Mining</h2>
         <div class="muted">Automatic VDF-paced block production</div>
       </div>
       <div class="mining-grid">
@@ -457,19 +461,12 @@ const INDEX_HTML: &str = r#"<!doctype html>
             <div class="metric"><div class="label">Target</div><div class="value" x-text="targetSecondsLabel()"></div></div>
           </div>
         </div>
-        <div class="panel">
-          <h3>Burn Rate</h3>
-          <form @submit.prevent="saveBurn">
-            <label>Coins per block<input x-model.number="burnAmount" type="number" min="0"></label>
-            <button class="primary" type="submit">Save</button>
-          </form>
-        </div>
       </div>
     </section>
 
     <section x-show="tab === 'p2p'">
       <div class="panel">
-        <h2>P2P</h2>
+        <h2>Add Peer</h2>
         <form @submit.prevent="addPeer">
           <label>Peer address<input x-model="peerAddress" placeholder="127.0.0.1:9445"></label>
           <button class="primary" type="submit">Add</button>
@@ -485,6 +482,21 @@ const INDEX_HTML: &str = r#"<!doctype html>
             <tr x-show="peers.length === 0"><td colspan="7">No peers</td></tr>
           </tbody>
         </table>
+      </div>
+    </section>
+
+    <section x-show="tab === 'config'">
+      <div class="page-title">
+        <div class="muted">Runtime node settings</div>
+      </div>
+      <div class="config-grid">
+        <div class="panel">
+          <h3>Mining</h3>
+          <form @submit.prevent="saveBurn">
+            <label>Coins per block<input x-model.number="burnAmount" type="number" min="0"></label>
+            <button class="primary" type="submit">Save</button>
+          </form>
+        </div>
       </div>
     </section>
 

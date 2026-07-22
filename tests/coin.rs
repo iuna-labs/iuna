@@ -9,9 +9,8 @@ use mivora::{
 };
 use tempfile::tempdir;
 
-fn node(name: &str, wallet: Wallet, allocations: BTreeMap<String, Amount>) -> NodeCore {
+fn node(_network_key: &str, wallet: Wallet, allocations: BTreeMap<String, Amount>) -> NodeCore {
     NodeCore::new(NodeConfig {
-        name: name.to_string(),
         wallet,
         genesis_allocations: allocations,
         vdf_rounds: 25,
@@ -72,19 +71,19 @@ fn fork_with_worse_vrf_block(
     None
 }
 
-fn starter_node(name: &str, wallet: Wallet) -> NodeCore {
+fn starter_node(wallet: Wallet) -> NodeCore {
     let mut genesis = BTreeMap::new();
     genesis.insert(wallet.address().to_string(), 1);
     let ledger =
         Ledger::new_with_genesis_burns(genesis, vec![GenesisBurn::new(wallet.address(), 1)], 25)
             .unwrap();
-    NodeCore::from_ledger(name.to_string(), wallet, ledger, DEFAULT_BURN_PER_BLOCK)
+    NodeCore::from_ledger(wallet, ledger, DEFAULT_BURN_PER_BLOCK)
 }
 
 #[test]
 fn genesis_burn_starts_chain_with_zero_balance_and_first_leader() {
     let alice = Wallet::from_seed("alice");
-    let node = starter_node("alice", alice.clone());
+    let node = starter_node(alice.clone());
 
     let genesis = &node.ledger().chain()[0];
     assert_eq!(node.ledger().balance_of(alice.address()), 0);
@@ -101,7 +100,7 @@ fn genesis_burn_starts_chain_with_zero_balance_and_first_leader() {
 #[test]
 fn starter_node_mines_first_reward_from_genesis_ticket() {
     let alice = Wallet::from_seed("alice");
-    let mut node = starter_node("alice", alice.clone());
+    let mut node = starter_node(alice.clone());
 
     let outcome = node.automatic_mine_once(1);
     assert!(outcome.burned.is_none());
@@ -312,7 +311,6 @@ fn automatic_mining_burns_configured_amount_once_per_height() {
     allocations.insert(alice.address().to_string(), 1_000);
 
     let mut node = NodeCore::new(NodeConfig {
-        name: "alice".to_string(),
         wallet: alice.clone(),
         genesis_allocations: allocations,
         vdf_rounds: 10,
@@ -645,12 +643,7 @@ fn joined_nodes_import_transfer_block_and_every_wallet_mines() {
     let mut network = InMemoryNetwork::default();
     network.insert(
         "a",
-        NodeCore::from_ledger(
-            "a".to_string(),
-            alice.clone(),
-            alice_ledger,
-            DEFAULT_BURN_PER_BLOCK,
-        ),
+        NodeCore::from_ledger(alice.clone(), alice_ledger, DEFAULT_BURN_PER_BLOCK),
     );
     let mut mined_by = Vec::new();
 
@@ -665,12 +658,7 @@ fn joined_nodes_import_transfer_block_and_every_wallet_mines() {
     let bob_ledger = Ledger::from_snapshot(network.node("a").unwrap().chain_snapshot()).unwrap();
     network.insert(
         "b",
-        NodeCore::from_ledger(
-            "b".to_string(),
-            bob.clone(),
-            bob_ledger,
-            DEFAULT_BURN_PER_BLOCK,
-        ),
+        NodeCore::from_ledger(bob.clone(), bob_ledger, DEFAULT_BURN_PER_BLOCK),
     );
 
     for height in 3..=4 {
@@ -684,12 +672,7 @@ fn joined_nodes_import_transfer_block_and_every_wallet_mines() {
     let carol_ledger = Ledger::from_snapshot(network.node("a").unwrap().chain_snapshot()).unwrap();
     network.insert(
         "c",
-        NodeCore::from_ledger(
-            "c".to_string(),
-            carol.clone(),
-            carol_ledger,
-            DEFAULT_BURN_PER_BLOCK,
-        ),
+        NodeCore::from_ledger(carol.clone(), carol_ledger, DEFAULT_BURN_PER_BLOCK),
     );
 
     network
@@ -814,12 +797,7 @@ fn persisted_joined_nodes_restart_and_keep_syncing_without_tcp() {
     let mut network = InMemoryNetwork::default();
     network.insert(
         "a",
-        NodeCore::from_ledger(
-            "a".to_string(),
-            alice.clone(),
-            alice_ledger,
-            DEFAULT_BURN_PER_BLOCK,
-        ),
+        NodeCore::from_ledger(alice.clone(), alice_ledger, DEFAULT_BURN_PER_BLOCK),
     );
 
     network.node_mut("a").unwrap().burn(1).unwrap();
@@ -833,12 +811,7 @@ fn persisted_joined_nodes_restart_and_keep_syncing_without_tcp() {
     let bob_joined_ledger = Ledger::from_snapshot(bob_store.load().unwrap().unwrap()).unwrap();
     network.insert(
         "b",
-        NodeCore::from_ledger(
-            "b".to_string(),
-            bob.clone(),
-            bob_joined_ledger,
-            DEFAULT_BURN_PER_BLOCK,
-        ),
+        NodeCore::from_ledger(bob.clone(), bob_joined_ledger, DEFAULT_BURN_PER_BLOCK),
     );
     assert_eq!(
         network.node("b").unwrap().ledger().status().tip_hash,
@@ -869,12 +842,7 @@ fn persisted_joined_nodes_restart_and_keep_syncing_without_tcp() {
     let bob_restarted_ledger = Ledger::from_snapshot(bob_store.load().unwrap().unwrap()).unwrap();
     network.insert(
         "b",
-        NodeCore::from_ledger(
-            "b".to_string(),
-            bob.clone(),
-            bob_restarted_ledger,
-            DEFAULT_BURN_PER_BLOCK,
-        ),
+        NodeCore::from_ledger(bob.clone(), bob_restarted_ledger, DEFAULT_BURN_PER_BLOCK),
     );
     assert_eq!(
         network.node("b").unwrap().ledger().status().tip_hash,
@@ -889,12 +857,7 @@ fn persisted_joined_nodes_restart_and_keep_syncing_without_tcp() {
     let carol_joined_ledger = Ledger::from_snapshot(carol_store.load().unwrap().unwrap()).unwrap();
     network.insert(
         "c",
-        NodeCore::from_ledger(
-            "c".to_string(),
-            carol,
-            carol_joined_ledger,
-            DEFAULT_BURN_PER_BLOCK,
-        ),
+        NodeCore::from_ledger(carol, carol_joined_ledger, DEFAULT_BURN_PER_BLOCK),
     );
 
     network.node_mut("b").unwrap().burn(1).unwrap();
@@ -955,7 +918,6 @@ fn mined_block_gossip_does_not_include_full_chain_snapshot() {
     let allocations = allocations(&wallets, 1_000);
 
     let mut alice_node = NodeCore::new(NodeConfig {
-        name: "alice".to_string(),
         wallet: alice,
         genesis_allocations: allocations.clone(),
         vdf_rounds: 10,
@@ -1273,12 +1235,7 @@ fn friend_node_can_join_snapshot_from_started_chain() {
     alice_node.automatic_mine_once(1);
 
     let joined_ledger = Ledger::from_snapshot(alice_node.chain_snapshot()).unwrap();
-    let mut bob_node = NodeCore::from_ledger(
-        "bob".to_string(),
-        bob.clone(),
-        joined_ledger,
-        DEFAULT_BURN_PER_BLOCK,
-    );
+    let mut bob_node = NodeCore::from_ledger(bob.clone(), joined_ledger, DEFAULT_BURN_PER_BLOCK);
 
     assert_eq!(
         bob_node.ledger().status().tip_hash,

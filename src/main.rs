@@ -24,10 +24,9 @@ async fn main() -> Result<()> {
     let ledger = initialize_ledger(&opts, wallet.address(), &chain_store).await?;
 
     let node: SharedNode = Arc::new(Mutex::new(NodeCore::from_ledger(
-        opts.node_name,
         wallet,
         ledger,
-        opts.burn_per_block,
+        DEFAULT_BURN_PER_BLOCK,
     )));
     let peers: SharedPeerBook = Arc::new(Mutex::new(PeerBook::from_addresses(opts.peers)));
     let initial_snapshot = { node.lock().await.chain_snapshot() };
@@ -40,7 +39,7 @@ async fn main() -> Result<()> {
     println!("p2p listener: {}", opts.p2p_addr);
     println!(
         "automatic mining: VDF-driven, burning {} coins per block",
-        opts.burn_per_block
+        DEFAULT_BURN_PER_BLOCK
     );
 
     let persistence_node = Arc::clone(&node);
@@ -94,7 +93,6 @@ async fn initialize_ledger(
 
 #[derive(Debug)]
 struct CliOptions {
-    node_name: String,
     wallet_path: Option<PathBuf>,
     chain_db_path: Option<PathBuf>,
     http_addr: SocketAddr,
@@ -104,7 +102,6 @@ struct CliOptions {
     start_new_chain: bool,
     genesis_amount: Amount,
     vdf_rounds: u32,
-    burn_per_block: Amount,
     data_dir: PathBuf,
 }
 
@@ -115,7 +112,6 @@ impl CliOptions {
 
     fn parse_from(args: impl IntoIterator<Item = String>) -> Result<Option<Self>> {
         let mut opts = Self {
-            node_name: "mivora-dev".to_string(),
             wallet_path: None,
             chain_db_path: None,
             http_addr: SocketAddr::from_str("127.0.0.1:8443")?,
@@ -125,7 +121,6 @@ impl CliOptions {
             start_new_chain: false,
             genesis_amount: 1,
             vdf_rounds: DEFAULT_VDF_ROUNDS,
-            burn_per_block: DEFAULT_BURN_PER_BLOCK,
             data_dir: PathBuf::from(".mivora"),
         };
 
@@ -139,7 +134,6 @@ impl CliOptions {
         while let Some(arg) = args.next() {
             match arg.as_str() {
                 "--start" => opts.start_new_chain = true,
-                "--name" => opts.node_name = next_value(&mut args, "--name")?,
                 "--wallet" => {
                     opts.wallet_path = Some(PathBuf::from(next_value(&mut args, "--wallet")?))
                 }
@@ -161,7 +155,6 @@ impl CliOptions {
                         .parse()
                         .context("invalid --p2p address")?;
                 }
-                "--peer" => opts.peers.push(next_value(&mut args, "--peer")?),
                 "--join" => {
                     let peer = next_value(&mut args, "--join")?;
                     opts.peers.push(peer.clone());
@@ -179,11 +172,6 @@ impl CliOptions {
                     opts.vdf_rounds = next_value(&mut args, "--vdf-rounds")?
                         .parse()
                         .context("invalid --vdf-rounds")?;
-                }
-                "--burn-per-block" => {
-                    opts.burn_per_block = next_value(&mut args, "--burn-per-block")?
-                        .parse()
-                        .context("invalid --burn-per-block")?;
                 }
                 "--data-dir" => opts.data_dir = PathBuf::from(next_value(&mut args, "--data-dir")?),
                 "--help" | "-h" => {
@@ -217,9 +205,9 @@ impl CliOptions {
     }
 }
 
-fn next_value(args: &mut impl Iterator<Item = String>, name: &str) -> Result<String> {
+fn next_value(args: &mut impl Iterator<Item = String>, flag: &str) -> Result<String> {
     args.next()
-        .with_context(|| format!("missing value after {name}"))
+        .with_context(|| format!("missing value after {flag}"))
 }
 
 fn print_help() {
@@ -230,16 +218,13 @@ fn print_help() {
            mivora --join <addr:port> [options]\n\n\
          Options:\n\
            --start                       Create a new chain with a genesis burn\n\
-           --name <name>                 Node display name\n\
            --wallet <path>               Wallet file (default <data-dir>/wallet.json)\n\
            --chain-db <path>             Chain SQLite database (default <data-dir>/chain.sqlite3)\n\
            --http <addr:port>            HTTP management UI address (default 127.0.0.1:8443)\n\
            --p2p <addr:port>             P2P TCP listener address (default 127.0.0.1:9444)\n\
-           --peer <addr:port>            P2P peer to gossip to; may be repeated\n\
            --join <addr:port>            Fetch chain snapshot from this peer before mining\n\
            --genesis-amount <amount>     Genesis allocation before the 1-coin bootstrap ticket (default 1)\n\
            --vdf-rounds <rounds>         Initial VDF delay rounds; protocol retargets toward 60s blocks\n\
-           --burn-per-block <amount>     Fixed automatic burn before each block attempt\n\
            --data-dir <path>             Local wallet directory\n"
     );
 }
@@ -460,6 +445,17 @@ mod tests {
     }
 
     #[test]
+    fn runtime_configuration_flags_are_rejected() {
+        for flag in ["--name", "--burn-per-block", "--peer"] {
+            let error = parse(&["--start", flag, "value"]).unwrap_err();
+            assert!(
+                error.to_string().contains("unknown argument"),
+                "{flag} should not be accepted"
+            );
+        }
+    }
+
+    #[test]
     fn start_mode_is_explicit() {
         let opts = parse(&["--start"]).unwrap().unwrap();
         assert!(opts.start_new_chain);
@@ -623,7 +619,6 @@ VALUES (1, 4, 'bad-tip', '{"not":"a chain snapshot"}', 0)
         let wallet = Wallet::from_seed("background-persistence");
         let ledger = ledger_with_one_spendable_coin(&wallet);
         let node = Arc::new(Mutex::new(NodeCore::from_ledger(
-            "persistence".to_string(),
             wallet.clone(),
             ledger,
             DEFAULT_BURN_PER_BLOCK,

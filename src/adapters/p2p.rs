@@ -1603,14 +1603,14 @@ mod tests {
         assert!(addresses.contains(&"127.0.0.1:9546".to_string()));
     }
 
-    fn node(name: &str, wallet: Wallet, allocations: BTreeMap<String, Amount>) -> NodeCore {
+    fn node(_network_key: &str, wallet: Wallet, allocations: BTreeMap<String, Amount>) -> NodeCore {
         let ledger = Ledger::new_with_genesis_burns(
             allocations,
             vec![GenesisBurn::new(wallet.address(), 1)],
             25,
         )
         .unwrap();
-        NodeCore::from_ledger(name.to_string(), wallet, ledger, 0)
+        NodeCore::from_ledger(wallet, ledger, 0)
     }
 
     fn allocations(wallets: &[Wallet], amount: Amount) -> BTreeMap<String, Amount> {
