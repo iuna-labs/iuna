@@ -18,7 +18,7 @@ After setup, restart with genesis mode:
 cargo run -- --genesis --http 127.0.0.1:18661 --p2p 127.0.0.1:9444
 ```
 
-`--genesis` only works when the wallet file already exists. It creates the starter chain, measures 10,000 VDF rounds locally, extrapolates that measurement to a 60-second initial round count, and persists the validated chain to `.mivora/chain.sqlite3`. The same data directory resumes automatically on later runs.
+`--genesis` only works when the wallet file already exists. It creates the starter chain, adaptively measures VDF throughput locally, extrapolates that measurement to a 60-second initial round count, and persists the validated chain to `.mivora/chain.sqlite3`. The same data directory resumes automatically on later runs.
 
 Mining is automatic. There is no "mine block" button and no exact sleep. Each node can burn its configured amount once per chain height. Those burns become one-shot leader tickets for a future height after the launch profile's maturity delay. Only the selected ticket owner builds the next block, signs a leader proof, performs the VDF work, and gossips the finished block. The VDF is the clock.
 

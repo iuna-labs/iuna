@@ -16,7 +16,9 @@ use mivora::{
 use tokio::sync::Mutex;
 
 const GENESIS_SPENDABLE_AMOUNT: u64 = 1;
-const VDF_MEASUREMENT_ROUNDS: u32 = 10_000;
+const VDF_MEASUREMENT_INITIAL_ROUNDS: u32 = 1_000_000;
+const VDF_MEASUREMENT_MAX_ROUNDS: u32 = 100_000_000;
+const VDF_MEASUREMENT_MIN_ELAPSED: Duration = Duration::from_millis(150);
 
 #[tokio::main]
 async fn main() -> Result<()> {
@@ -298,15 +300,41 @@ fn start_genesis_ledger(wallet_address: &str) -> Result<Ledger> {
 
 fn measure_initial_vdf_rounds() -> u32 {
     let seed = "mivora-vdf-calibration";
-    let started = Instant::now();
-    let _ = run_vdf(seed, VDF_MEASUREMENT_ROUNDS);
-    let elapsed = started.elapsed();
-    let rounds = extrapolate_vdf_rounds(VDF_MEASUREMENT_ROUNDS, elapsed, Duration::from_secs(60));
+    let (measured_rounds, elapsed) = measure_vdf_rounds(
+        seed,
+        VDF_MEASUREMENT_INITIAL_ROUNDS,
+        VDF_MEASUREMENT_MIN_ELAPSED,
+        VDF_MEASUREMENT_MAX_ROUNDS,
+    );
+    let rounds = extrapolate_vdf_rounds(measured_rounds, elapsed, Duration::from_secs(60));
     println!(
-        "measured {VDF_MEASUREMENT_ROUNDS} VDF rounds in {}ms; initial VDF rounds: {rounds}",
-        elapsed.as_millis()
+        "measured {measured_rounds} VDF rounds in {:.3}ms; initial VDF rounds: {rounds}",
+        elapsed.as_secs_f64() * 1000.0
     );
     rounds
+}
+
+fn measure_vdf_rounds(
+    seed: &str,
+    initial_rounds: u32,
+    min_elapsed: Duration,
+    max_rounds_per_attempt: u32,
+) -> (u32, Duration) {
+    let mut rounds = initial_rounds.max(1).min(max_rounds_per_attempt.max(1));
+    let mut measured_rounds = 0_u32;
+    let mut measured_elapsed = Duration::ZERO;
+
+    loop {
+        let started = Instant::now();
+        let _ = run_vdf(seed, rounds);
+        measured_elapsed += started.elapsed();
+        measured_rounds = measured_rounds.saturating_add(rounds);
+
+        if measured_elapsed >= min_elapsed || rounds >= max_rounds_per_attempt {
+            return (measured_rounds, measured_elapsed);
+        }
+        rounds = rounds.saturating_mul(2).min(max_rounds_per_attempt);
+    }
 }
 
 fn extrapolate_vdf_rounds(measured_rounds: u32, elapsed: Duration, target: Duration) -> u32 {
@@ -477,8 +505,8 @@ mod tests {
     use tokio::sync::Mutex;
 
     use super::{
-        ChainMode, CliOptions, extrapolate_vdf_rounds, initialize_ledger, persist_chain_snapshot,
-        run_chain_persistence_with_interval, validate_wallet_for_mode,
+        ChainMode, CliOptions, extrapolate_vdf_rounds, initialize_ledger, measure_vdf_rounds,
+        persist_chain_snapshot, run_chain_persistence_with_interval, validate_wallet_for_mode,
     };
 
     fn parse(args: &[&str]) -> anyhow::Result<Option<CliOptions>> {
@@ -659,6 +687,19 @@ mod tests {
             extrapolate_vdf_rounds(10_000, Duration::from_secs(0), Duration::from_secs(60)),
             u32::MAX
         );
+    }
+
+    #[test]
+    fn vdf_measurement_keeps_sampling_until_elapsed_is_useful() {
+        let (rounds, elapsed) = measure_vdf_rounds(
+            "mivora-test-vdf-calibration",
+            1,
+            Duration::from_millis(1),
+            1_000_000,
+        );
+
+        assert!(rounds > 1);
+        assert!(elapsed > Duration::ZERO);
     }
 
     #[tokio::test]
