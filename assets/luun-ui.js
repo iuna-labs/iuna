@@ -6,6 +6,7 @@ window.luunApp = function luunApp() {
     selectedBlock: null,
     loadingOlder: false,
     hasMoreBlocks: true,
+    walletTxs: [],
     mempool: [],
     peers: [],
     p2pMetrics: {},
@@ -28,7 +29,6 @@ window.luunApp = function luunApp() {
     transferAmount: null,
     transferFee: 1,
     peerAddress: "",
-    showBurnTransactions: false,
     flash: null,
     flashTimer: null,
     lastUpdated: null,
@@ -249,10 +249,11 @@ window.luunApp = function luunApp() {
 
     async refresh() {
       try {
-        const [config, status, blocks, mempool, peers, p2pMetrics] = await Promise.all([
+        const [config, status, blocks, walletTxs, mempool, peers, p2pMetrics] = await Promise.all([
           this.fetchJson("/api/config"),
           this.fetchJson("/api/status"),
           this.fetchJson("/api/blocks"),
+          this.fetchJson("/api/wallet/transactions"),
           this.fetchJson("/api/mempool"),
           this.fetchJson("/api/peers"),
           this.fetchJson("/api/p2p/metrics"),
@@ -263,6 +264,7 @@ window.luunApp = function luunApp() {
         }
         this.status = status;
         this.mergeFreshBlocks(blocks, { animateHead: true });
+        this.walletTxs = walletTxs;
         this.mempool = mempool;
         this.peers = peers;
         this.p2pMetrics = p2pMetrics;
@@ -576,53 +578,7 @@ window.luunApp = function luunApp() {
     },
 
     walletTransactions() {
-      const wallet = this.status.wallet_address;
-      if (!wallet) return [];
-
-      const rows = [];
-      for (const [index, tx] of this.mempool.entries()) {
-        if (!this.walletTxMatches(tx, wallet)) continue;
-        rows.push(this.walletTxRow(tx, {
-          status: "pending",
-          blockHeight: null,
-          sortKey: Number.MAX_SAFE_INTEGER - index,
-        }));
-      }
-
-      for (const block of this.blocks) {
-        const transactions = [...block.transactions].reverse();
-        for (const [index, tx] of transactions.entries()) {
-          if (!this.walletTxMatches(tx, wallet)) continue;
-          rows.push(this.walletTxRow(tx, {
-            status: "confirmed",
-            blockHeight: block.height,
-            sortKey: block.height * 10_000 + index,
-          }));
-        }
-      }
-
-      return rows
-        .filter((row) => this.showBurnTransactions || row.kind !== "burn")
-        .sort((left, right) => right.sortKey - left.sortKey);
-    },
-
-    walletTxMatches(tx, wallet) {
-      return tx.from === wallet || tx.to === wallet;
-    },
-
-    walletTxRow(tx, meta) {
-      const wallet = this.status.wallet_address;
-      let direction = "sent";
-      if (tx.kind === "burn") {
-        direction = "burn";
-      } else if (tx.to === wallet) {
-        direction = "received";
-      }
-      return {
-        ...tx,
-        ...meta,
-        direction,
-      };
+      return this.walletTxs;
     },
 
     txTitle(tx) {

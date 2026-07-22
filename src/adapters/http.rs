@@ -88,6 +88,21 @@ struct WalletSetupResponse {
     dev_verify_bypass: bool,
 }
 
+#[derive(Clone, Debug, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct WalletTransactionRow {
+    kind: &'static str,
+    from: String,
+    to: Option<String>,
+    amount: Amount,
+    fee: Amount,
+    nonce: u64,
+    signature: String,
+    status: &'static str,
+    block_height: Option<u64>,
+    direction: &'static str,
+}
+
 pub async fn serve(
     node: SharedNode,
     peers: SharedPeerBook,
@@ -115,6 +130,7 @@ pub async fn serve(
         .route("/api/wallet/setup", get(api_wallet_setup))
         .route("/api/wallet/generate", post(api_wallet_generate_form))
         .route("/api/wallet/import", post(api_wallet_import_form))
+        .route("/api/wallet/transactions", get(api_wallet_transactions))
         .route("/api/mempool", get(api_mempool))
         .route("/api/peers", get(api_peers).post(api_peer_form))
         .route("/api/p2p/metrics", get(api_p2p_metrics))
@@ -190,6 +206,17 @@ async fn api_wallet_setup(State(state): State<HttpState>) -> Json<WalletSetupRes
 
 async fn api_mempool(State(state): State<HttpState>) -> Json<Vec<Transaction>> {
     Json(state.node.lock().await.pending_transactions())
+}
+
+async fn api_wallet_transactions(
+    State(state): State<HttpState>,
+) -> Json<Vec<WalletTransactionRow>> {
+    let node = state.node.lock().await;
+    Json(wallet_transaction_rows(
+        node.wallet_address(),
+        node.pending_transactions(),
+        node.chain(),
+    ))
 }
 
 async fn api_peers(State(state): State<HttpState>) -> Json<Vec<PeerInfo>> {
@@ -323,6 +350,61 @@ async fn wallet_setup_response(state: &HttpState) -> Result<WalletSetupResponse>
         seed_phrase,
         dev_verify_bypass: dev_seed_verify_bypass_enabled(),
     })
+}
+
+fn wallet_transaction_rows(
+    wallet: &str,
+    pending: Vec<Transaction>,
+    chain: &[Block],
+) -> Vec<WalletTransactionRow> {
+    let mut rows = Vec::new();
+
+    for (index, tx) in pending.iter().enumerate() {
+        if let Some(row) = wallet_transaction_row(wallet, tx, "pending", None) {
+            rows.push((u128::MAX - index as u128, row));
+        }
+    }
+
+    for block in chain {
+        for (index, tx) in block.transactions.iter().rev().enumerate() {
+            if let Some(row) = wallet_transaction_row(wallet, tx, "confirmed", Some(block.height)) {
+                rows.push((block.height as u128 * 10_000 + index as u128, row));
+            }
+        }
+    }
+
+    rows.sort_by(|left, right| right.0.cmp(&left.0));
+    rows.into_iter().map(|(_, row)| row).collect()
+}
+
+fn wallet_transaction_row(
+    wallet: &str,
+    tx: &Transaction,
+    status: &'static str,
+    block_height: Option<u64>,
+) -> Option<WalletTransactionRow> {
+    match tx {
+        Transaction::Transfer {
+            from,
+            to,
+            amount,
+            fee,
+            nonce,
+            signature,
+        } if from == wallet || to == wallet => Some(WalletTransactionRow {
+            kind: "transfer",
+            from: from.clone(),
+            to: Some(to.clone()),
+            amount: *amount,
+            fee: *fee,
+            nonce: *nonce,
+            signature: signature.clone(),
+            status,
+            block_height,
+            direction: if to == wallet { "received" } else { "sent" },
+        }),
+        _ => None,
+    }
 }
 
 async fn replace_setup_wallet_with_generated_seed(
@@ -608,7 +690,7 @@ const INDEX_HTML: &str = r#"<!doctype html>
       .block-card { flex-basis: 108px; }
     }
   </style>
-  <script defer src="/assets/luun-ui.js?v=35"></script>
+  <script defer src="/assets/luun-ui.js?v=36"></script>
   <script defer src="/assets/alpine.min.js"></script>
 </head>
 <body x-data="luunApp()" x-init="init()" x-cloak>
@@ -677,7 +759,6 @@ const INDEX_HTML: &str = r#"<!doctype html>
         <div class="panel">
           <div class="panel-head">
             <h3>Transactions</h3>
-            <label class="switch"><input x-model="showBurnTransactions" type="checkbox">Show burns</label>
           </div>
           <div class="wallet-tx-list">
             <template x-for="tx in walletTransactions()" :key="tx.status + '-' + tx.signature">
@@ -976,17 +1057,58 @@ mod tests {
 
     use tokio::sync::Mutex;
 
-    use crate::adapters::{config_store, config_store::UiConfig};
+    use crate::{
+        adapters::{config_store, config_store::UiConfig},
+        domain::{Block, Transaction, Wallet},
+    };
 
     use super::{
         TransferForm, dev_seed_verify_bypass_allowed, persist_burn_settings_config,
-        validate_transfer_form,
+        validate_transfer_form, wallet_transaction_rows,
     };
 
     #[test]
     fn dev_seed_verify_bypass_requires_env_flag() {
         assert!(dev_seed_verify_bypass_allowed(true));
         assert!(!dev_seed_verify_bypass_allowed(false));
+    }
+
+    #[test]
+    fn wallet_transactions_include_old_confirmed_transfers_without_burns_or_explorer_pagination() {
+        let alice = Wallet::from_seed("wallet-history-alice");
+        let bob = Wallet::from_seed("wallet-history-bob");
+        let carol = Wallet::from_seed("wallet-history-carol");
+        let old_received = bob.transfer(alice.address(), 31, 1);
+        let pending_burn = alice.burn_with_fee(2, 1, 2);
+        let chain = vec![
+            fake_block(30, vec![carol.transfer(bob.address(), 5, 1)]),
+            fake_block(31, vec![old_received.clone()]),
+            fake_block(32, vec![carol.burn(1, 2)]),
+        ];
+
+        let rows = wallet_transaction_rows(alice.address(), vec![pending_burn.clone()], &chain);
+
+        assert_eq!(rows.len(), 1);
+        assert_ne!(rows[0].signature, pending_burn.signature());
+        assert_eq!(rows[0].signature, old_received.signature());
+        assert_eq!(rows[0].status, "confirmed");
+        assert_eq!(rows[0].block_height, Some(31));
+        assert_eq!(rows[0].direction, "received");
+    }
+
+    fn fake_block(height: u64, transactions: Vec<Transaction>) -> Block {
+        Block {
+            height,
+            prev_hash: format!("prev-{height}"),
+            timestamp_ms: height,
+            miner: "miner".to_string(),
+            reward: 100,
+            vdf_rounds: 0,
+            vdf_output: "vdf".to_string(),
+            leader_proof: None,
+            transactions,
+            hash: format!("hash-{height}"),
+        }
     }
 
     #[tokio::test]
