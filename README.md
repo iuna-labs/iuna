@@ -10,7 +10,7 @@ The current devnet assumes friendly nodes. It has one binary that acts as wallet
 cargo run -- --http 127.0.0.1:8443 --p2p 127.0.0.1:9444
 ```
 
-Open `http://127.0.0.1:8443` and complete the initial setup screen. The wallet is generated into `.mivora/`, peers and setup state are stored in `.mivora/config.json`, and no chain is created yet.
+Open `http://127.0.0.1:8443` and complete the initial setup modal. The setup flow lets you generate a local recovery phrase or import one, verifies generated phrases with a 4-word check, stores the wallet in `.mivora/wallet.json`, stores peers and setup state in `.mivora/config.json`, and does not create a chain yet.
 
 After setup, restart with genesis mode:
 
@@ -83,7 +83,7 @@ The measured VDF round count is only the initial delay. After the first blocks, 
 
 ## Wallet Storage
 
-Mivora creates a new wallet file the first time a node starts or joins a chain. By default it lives at `.mivora/wallet.json`, or at `<data-dir>/wallet.json` when `--data-dir` is set. Pass `--wallet path/to/wallet.json` to choose a specific wallet file.
+Mivora creates a new wallet file the first time a node starts or joins a chain. By default it lives at `.mivora/wallet.json`, or at `<data-dir>/wallet.json` when `--data-dir` is set. Pass `--wallet path/to/wallet.json` to choose a specific wallet file. New wallet files store a 24-word recovery phrase and the derived Ed25519 public key address.
 
 There is no default wallet seed in the binary. Keep the wallet file private; it contains the local wallet seed used to derive the address.
 

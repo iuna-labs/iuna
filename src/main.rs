@@ -84,7 +84,16 @@ async fn main() -> Result<()> {
         println!("setup mode: no chain selected; skipping mining and chain persistence");
     }
 
-    http::serve(node, peers, gossip, ui_config, config_path, opts.http_addr).await
+    http::serve(
+        node,
+        peers,
+        gossip,
+        ui_config,
+        config_path,
+        wallet_path,
+        opts.http_addr,
+    )
+    .await
 }
 
 async fn initialize_ledger(

@@ -9,6 +9,14 @@ window.mivoraApp = function mivoraApp() {
     mempool: [],
     peers: [],
     config: { setup_complete: false },
+    setupWallet: { address: null, seed_phrase: null },
+    setupWalletMode: "create",
+    setupSeedStep: "write",
+    generatedSeedPhrase: "",
+    verifyChallenges: [],
+    verifyAnswers: {},
+    importSeedPhrase: "",
+    walletVerified: false,
     burnAmount: 0,
     transferTo: "",
     transferAmount: 25,
@@ -28,6 +36,9 @@ window.mivoraApp = function mivoraApp() {
 
     async bootstrap() {
       await this.refreshConfig();
+      if (!this.config.setup_complete) {
+        await this.refreshWalletSetup();
+      }
       this.tab = this.tabFromHash();
       window.addEventListener("hashchange", () => {
         this.tab = this.tabFromHash();
@@ -67,8 +78,133 @@ window.mivoraApp = function mivoraApp() {
       this.config = await this.fetchJson("/api/config");
     },
 
+    async refreshWalletSetup() {
+      const payload = await this.fetchJson("/api/wallet/setup");
+      if (!payload.ok) {
+        throw new Error(payload.error || "Could not load wallet setup");
+      }
+      this.setupWallet = payload;
+      if (
+        payload.seed_phrase &&
+        payload.seed_phrase !== this.generatedSeedPhrase &&
+        this.setupWalletMode === "create" &&
+        !this.walletVerified
+      ) {
+        this.generatedSeedPhrase = payload.seed_phrase;
+        this.walletVerified = false;
+        this.setupSeedStep = "write";
+        this.verifyChallenges = [];
+        this.verifyAnswers = {};
+      }
+    },
+
+    setupSeedWords() {
+      return this.generatedSeedPhrase ? this.generatedSeedPhrase.split(/\s+/) : [];
+    },
+
+    setupAddress() {
+      return this.setupWallet.address || this.status.wallet_address || "-";
+    },
+
+    selectSetupWalletMode(mode) {
+      this.setupWalletMode = mode;
+      this.walletVerified = mode === "import" ? this.walletVerified && !this.generatedSeedPhrase : false;
+    },
+
+    async generateSetupSeed() {
+      try {
+        const payload = await this.postWalletSetup("/api/wallet/generate", {});
+        this.setupWallet = payload;
+        this.generatedSeedPhrase = payload.seed_phrase || "";
+        this.setupWalletMode = "create";
+        this.setupSeedStep = "write";
+        this.walletVerified = false;
+        this.verifyChallenges = [];
+        this.verifyAnswers = {};
+        await this.refresh();
+      } catch (error) {
+        this.showFlash(error.message, "error");
+      }
+    },
+
+    beginSeedVerification() {
+      const words = this.setupSeedWords();
+      if (words.length < 4) {
+        this.showFlash("Generate a recovery phrase first", "error");
+        return;
+      }
+      const positions = words.map((_, index) => index);
+      for (let index = positions.length - 1; index > 0; index -= 1) {
+        const swapIndex = Math.floor(Math.random() * (index + 1));
+        [positions[index], positions[swapIndex]] = [positions[swapIndex], positions[index]];
+      }
+      this.verifyChallenges = positions
+        .slice(0, 4)
+        .sort((left, right) => left - right)
+        .map((index) => ({ index, position: index + 1 }));
+      this.verifyAnswers = {};
+      for (const challenge of this.verifyChallenges) {
+        this.verifyAnswers[challenge.index] = "";
+      }
+      this.setupSeedStep = "verify";
+    },
+
+    verifyGeneratedSeed() {
+      const words = this.setupSeedWords();
+      const ok = this.verifyChallenges.every((challenge) => {
+        const expected = words[challenge.index] || "";
+        const actual = (this.verifyAnswers[challenge.index] || "").trim().toLowerCase();
+        return actual === expected;
+      });
+      if (!ok) {
+        this.showFlash("Seed word check failed", "error");
+        return;
+      }
+      this.walletVerified = true;
+      this.setupSeedStep = "verified";
+      this.showFlash("Recovery phrase verified", "success");
+    },
+
+    async importSetupSeed() {
+      try {
+        const payload = await this.postWalletSetup("/api/wallet/import", {
+          seed_phrase: this.importSeedPhrase,
+        });
+        this.setupWallet = payload;
+        this.generatedSeedPhrase = "";
+        this.verifyChallenges = [];
+        this.verifyAnswers = {};
+        this.walletVerified = true;
+        this.setupSeedStep = "verified";
+        await this.refresh();
+        this.showFlash("Recovery phrase imported", "success");
+      } catch (error) {
+        this.showFlash(error.message, "error");
+      }
+    },
+
+    async postWalletSetup(path, fields) {
+      const body = new URLSearchParams();
+      for (const [key, value] of Object.entries(fields)) {
+        body.set(key, value);
+      }
+      const response = await fetch(path, {
+        method: "POST",
+        headers: { Accept: "application/json", "Content-Type": "application/x-www-form-urlencoded" },
+        body,
+      });
+      const payload = await response.json();
+      if (!response.ok || !payload.ok) {
+        throw new Error(payload.error || `${path} returned ${response.status}`);
+      }
+      return payload;
+    },
+
     async completeSetup() {
       try {
+        if (!this.walletVerified) {
+          throw new Error("Verify or import a recovery phrase first");
+        }
         const response = await fetch("/api/config", {
           method: "POST",
           headers: {
@@ -82,6 +218,10 @@ window.mivoraApp = function mivoraApp() {
           throw new Error(payload.error || `/api/config returned ${response.status}`);
         }
         await this.refreshConfig();
+        this.generatedSeedPhrase = "";
+        this.importSeedPhrase = "";
+        this.verifyChallenges = [];
+        this.verifyAnswers = {};
         this.showFlash("Setup complete", "success");
         this.setTab("wallet");
       } catch (error) {
@@ -99,6 +239,9 @@ window.mivoraApp = function mivoraApp() {
           this.fetchJson("/api/peers"),
         ]);
         this.config = config;
+        if (!this.config.setup_complete) {
+          await this.refreshWalletSetup();
+        }
         this.status = status;
         this.mergeFreshBlocks(blocks, { animateHead: true });
         this.mempool = mempool;
@@ -279,7 +422,7 @@ window.mivoraApp = function mivoraApp() {
 
     async copyAddress() {
       try {
-        await navigator.clipboard.writeText(this.status.wallet_address || "");
+        await navigator.clipboard.writeText(this.setupAddress());
         this.showFlash("Address copied", "success");
       } catch (error) {
         this.showFlash("Could not copy address", "error");

@@ -156,6 +156,11 @@ impl NodeCore {
         self.wallet.address()
     }
 
+    pub fn replace_wallet(&mut self, wallet: Wallet) {
+        self.wallet = wallet;
+        self.last_auto_burn_height = None;
+    }
+
     pub fn ledger(&self) -> &Ledger {
         &self.ledger
     }

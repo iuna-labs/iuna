@@ -1,6 +1,6 @@
 use std::{net::SocketAddr, path::PathBuf, sync::Arc};
 
-use anyhow::{Context, Result};
+use anyhow::{Context, Result, bail};
 use axum::{
     Form, Json, Router,
     extract::{Query, State},
@@ -12,7 +12,7 @@ use serde::{Deserialize, Serialize};
 use tokio::{net::TcpListener, sync::Mutex};
 
 use crate::{
-    adapters::{config_store, config_store::UiConfig, p2p::GossipNetwork},
+    adapters::{config_store, config_store::UiConfig, p2p::GossipNetwork, wallet_store},
     app::{NodeStatus, PeerInfo, SharedNode, SharedPeerBook},
     domain::{Amount, Block, Transaction},
 };
@@ -27,6 +27,7 @@ struct HttpState {
     gossip: GossipNetwork,
     ui_config: Arc<Mutex<UiConfig>>,
     config_path: PathBuf,
+    wallet_path: PathBuf,
 }
 
 #[derive(Debug, Deserialize)]
@@ -51,6 +52,11 @@ struct ConfigForm {
 }
 
 #[derive(Debug, Deserialize)]
+struct SeedPhraseForm {
+    seed_phrase: String,
+}
+
+#[derive(Debug, Deserialize)]
 struct BlocksQuery {
     before_height: Option<u64>,
     limit: Option<usize>,
@@ -62,12 +68,21 @@ struct ActionResponse {
     error: Option<String>,
 }
 
+#[derive(Debug, Serialize)]
+struct WalletSetupResponse {
+    ok: bool,
+    error: Option<String>,
+    address: Option<String>,
+    seed_phrase: Option<String>,
+}
+
 pub async fn serve(
     node: SharedNode,
     peers: SharedPeerBook,
     gossip: GossipNetwork,
     ui_config: Arc<Mutex<UiConfig>>,
     config_path: PathBuf,
+    wallet_path: PathBuf,
     addr: SocketAddr,
 ) -> Result<()> {
     let state = HttpState {
@@ -76,6 +91,7 @@ pub async fn serve(
         gossip,
         ui_config,
         config_path,
+        wallet_path,
     };
     let app = Router::new()
         .route("/", get(index))
@@ -84,6 +100,9 @@ pub async fn serve(
         .route("/api/status", get(api_status))
         .route("/api/blocks", get(api_blocks))
         .route("/api/config", get(api_config).post(api_config_form))
+        .route("/api/wallet/setup", get(api_wallet_setup))
+        .route("/api/wallet/generate", post(api_wallet_generate_form))
+        .route("/api/wallet/import", post(api_wallet_import_form))
         .route("/api/mempool", get(api_mempool))
         .route("/api/peers", get(api_peers).post(api_peer_form))
         .route(
@@ -152,6 +171,10 @@ async fn api_config(State(state): State<HttpState>) -> Json<UiConfig> {
     Json(state.ui_config.lock().await.clone())
 }
 
+async fn api_wallet_setup(State(state): State<HttpState>) -> Json<WalletSetupResponse> {
+    wallet_setup_json(wallet_setup_response(&state).await)
+}
+
 async fn api_mempool(State(state): State<HttpState>) -> Json<Vec<Transaction>> {
     Json(state.node.lock().await.pending_transactions())
 }
@@ -167,6 +190,17 @@ async fn api_config_form(
     let mut config = state.ui_config.lock().await;
     config.setup_complete = form.setup_complete;
     action_json(config_store::save(&state.config_path, &config))
+}
+
+async fn api_wallet_generate_form(State(state): State<HttpState>) -> Json<WalletSetupResponse> {
+    wallet_setup_json(replace_setup_wallet_with_generated_seed(&state).await)
+}
+
+async fn api_wallet_import_form(
+    State(state): State<HttpState>,
+    Form(form): Form<SeedPhraseForm>,
+) -> Json<WalletSetupResponse> {
+    wallet_setup_json(import_setup_wallet_seed(&state, &form.seed_phrase).await)
 }
 
 async fn api_burn_per_block_form(
@@ -242,6 +276,74 @@ async fn add_peer(state: &HttpState, peer: String) -> Result<()> {
     config_store::save(&state.config_path, &config)
 }
 
+async fn wallet_setup_response(state: &HttpState) -> Result<WalletSetupResponse> {
+    let setup_complete = state.ui_config.lock().await.setup_complete;
+    let seed_phrase = if setup_complete {
+        None
+    } else {
+        wallet_store::setup_seed_phrase(&state.wallet_path)?
+    };
+    let address = state.node.lock().await.wallet_address().to_string();
+    Ok(WalletSetupResponse {
+        ok: true,
+        error: None,
+        address: Some(address),
+        seed_phrase,
+    })
+}
+
+async fn replace_setup_wallet_with_generated_seed(
+    state: &HttpState,
+) -> Result<WalletSetupResponse> {
+    ensure_wallet_setup_open(state).await?;
+    let (wallet, seed_phrase) =
+        wallet_store::replace_with_generated_seed_phrase(&state.wallet_path)?;
+    let address = wallet.address().to_string();
+    state.node.lock().await.replace_wallet(wallet);
+    Ok(WalletSetupResponse {
+        ok: true,
+        error: None,
+        address: Some(address),
+        seed_phrase: Some(seed_phrase),
+    })
+}
+
+async fn import_setup_wallet_seed(
+    state: &HttpState,
+    seed_phrase: &str,
+) -> Result<WalletSetupResponse> {
+    ensure_wallet_setup_open(state).await?;
+    let wallet = wallet_store::replace_with_imported_seed_phrase(&state.wallet_path, seed_phrase)?;
+    let address = wallet.address().to_string();
+    state.node.lock().await.replace_wallet(wallet);
+    Ok(WalletSetupResponse {
+        ok: true,
+        error: None,
+        address: Some(address),
+        seed_phrase: None,
+    })
+}
+
+async fn ensure_wallet_setup_open(state: &HttpState) -> Result<()> {
+    let setup_complete = state.ui_config.lock().await.setup_complete;
+    if setup_complete {
+        bail!("wallet setup is already complete");
+    }
+    Ok(())
+}
+
+fn wallet_setup_json(result: Result<WalletSetupResponse>) -> Json<WalletSetupResponse> {
+    match result {
+        Ok(response) => Json(response),
+        Err(error) => Json(WalletSetupResponse {
+            ok: false,
+            error: Some(format!("{error:#}")),
+            address: None,
+            seed_phrase: None,
+        }),
+    }
+}
+
 async fn transfer(state: &HttpState, form: TransferForm) -> Result<()> {
     let result = {
         let mut node = state.node.lock().await;
@@ -312,6 +414,7 @@ const INDEX_HTML: &str = r#"<!doctype html>
     button:hover { border-color: #d5f55f; color: #d5f55f; }
     button.primary { background: #d5f55f; border-color: #d5f55f; color: #15171a; }
     button.primary:hover { background: #e4ff83; color: #15171a; }
+    button.subtle { background: transparent; }
     button:disabled { cursor: default; opacity: .5; }
     .grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(150px, 1fr)); gap: 10px; }
     .metric, .panel { background: #181b1f; border: 1px solid #2a3035; border-radius: 8px; padding: 13px; }
@@ -321,8 +424,9 @@ const INDEX_HTML: &str = r#"<!doctype html>
     .split { display: grid; grid-template-columns: minmax(0, 1fr) minmax(320px, .72fr); gap: 12px; }
     form { display: flex; flex-wrap: wrap; gap: 10px; align-items: end; }
     label { display: grid; gap: 5px; color: #a8b2b8; font-size: 13px; }
-    input { min-width: 180px; border: 1px solid #3a444b; border-radius: 6px; padding: 9px 10px; font: inherit; background: #101215; color: #edf2f5; }
-    input:focus { outline: 2px solid #d5f55f; outline-offset: 1px; }
+    input, textarea { min-width: 180px; border: 1px solid #3a444b; border-radius: 6px; padding: 9px 10px; font: inherit; background: #101215; color: #edf2f5; }
+    textarea { min-height: 118px; resize: vertical; line-height: 1.45; }
+    input:focus, textarea:focus { outline: 2px solid #d5f55f; outline-offset: 1px; }
     table { width: 100%; border-collapse: collapse; font-size: 13px; }
     th, td { text-align: left; border-bottom: 1px solid #2a3035; padding: 8px; vertical-align: top; }
     th { color: #8d989f; font-size: 11px; text-transform: uppercase; }
@@ -335,16 +439,26 @@ const INDEX_HTML: &str = r#"<!doctype html>
     .ok { color: #d5f55f; }
     .page-title { margin-bottom: 16px; }
     .setup-overlay { position: fixed; inset: 0; z-index: 30; display: grid; place-items: center; padding: 22px; background: rgba(8, 9, 10, .72); backdrop-filter: blur(8px); }
-    .setup-modal { width: min(860px, 100%); max-height: calc(100vh - 44px); overflow: auto; border: 1px solid #3b4448; border-radius: 8px; padding: 18px; background: #181b1f; box-shadow: 0 24px 80px rgba(0, 0, 0, .42); }
+    .setup-modal { width: min(980px, 100%); max-height: calc(100vh - 44px); overflow: auto; border: 1px solid #3b4448; border-radius: 8px; padding: 18px; background: #181b1f; box-shadow: 0 24px 80px rgba(0, 0, 0, .42); }
     .setup-modal-head { display: grid; gap: 5px; margin-bottom: 16px; }
     .setup-modal-head h2 { margin: 0; font-size: 24px; }
     .setup-welcome { color: #d5f55f; font-size: 12px; font-weight: 900; text-transform: uppercase; }
     .setup-copy { max-width: 620px; color: #a8b2b8; line-height: 1.45; }
     .setup-grid { width: 100%; display: grid; grid-template-columns: minmax(0, .9fr) minmax(320px, .7fr); gap: 12px; align-items: start; }
     .setup-section { border: 1px solid #2f363c; border-radius: 8px; padding: 13px; background: #111316; }
-    .setup-actions { display: flex; justify-content: flex-end; margin-top: 14px; }
+    .setup-actions { display: flex; justify-content: flex-end; gap: 10px; margin-top: 14px; }
     .setup-peer-list { margin-top: 14px; display: grid; gap: 8px; }
     .setup-peer-row { display: flex; justify-content: space-between; gap: 12px; align-items: center; border: 1px solid #2f363c; border-radius: 8px; padding: 10px; background: #181b1f; }
+    .segmented { display: inline-flex; gap: 4px; padding: 4px; border: 1px solid #2f363c; border-radius: 8px; background: #181b1f; }
+    .segmented button { border-color: transparent; background: transparent; color: #9fa8ad; }
+    .segmented button.active { background: #d5f55f; color: #15171a; }
+    .seed-panel { display: grid; gap: 12px; }
+    .seed-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(132px, 1fr)); gap: 8px; }
+    .seed-word { display: grid; grid-template-columns: 30px minmax(0, 1fr); gap: 7px; align-items: center; border: 1px solid #2f363c; border-radius: 6px; padding: 7px 8px; background: #181b1f; }
+    .seed-word .index { color: #8d989f; font-size: 11px; font-weight: 800; }
+    .seed-word .word { font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; font-weight: 800; color: #c7f5ea; }
+    .verify-grid { display: grid; gap: 8px; }
+    .setup-status { border: 1px solid #566d25; border-radius: 8px; padding: 10px; background: #1c2516; color: #d5f55f; font-weight: 800; }
     .wallet-grid { width: 100%; display: grid; grid-template-columns: minmax(0, 1fr) minmax(300px, .8fr); gap: 12px; align-items: start; }
     .wallet-actions { display: grid; gap: 12px; }
     .mining-grid { width: 100%; display: grid; grid-template-columns: minmax(0, .95fr) minmax(300px, .7fr); gap: 12px; align-items: start; }
@@ -406,7 +520,7 @@ const INDEX_HTML: &str = r#"<!doctype html>
       .block-card { flex-basis: 108px; }
     }
   </style>
-  <script defer src="/assets/mivora-ui.js?v=18"></script>
+  <script defer src="/assets/mivora-ui.js?v=19"></script>
   <script defer src="/assets/alpine.min.js"></script>
 </head>
 <body x-data="mivoraApp()" x-init="init()" x-cloak>
@@ -635,15 +749,67 @@ const INDEX_HTML: &str = r#"<!doctype html>
         <div class="setup-copy">Confirm the local wallet address and add any peers before this node starts from a saved configuration.</div>
       </div>
       <div class="setup-grid">
-        <div class="setup-section">
+        <div class="setup-section seed-panel">
           <div class="panel-head">
             <h3>Wallet</h3>
             <button type="button" @click="copyAddress">Copy</button>
           </div>
-          <div class="receive-address">
-            <div class="muted">Public key / address</div>
-            <div class="address-box"><code x-text="status.wallet_address || '-'"></code></div>
-            <div class="muted">Balance <strong x-text="status.wallet_balance ?? '-'"></strong></div>
+          <div class="address-box"><code x-text="setupAddress()"></code></div>
+          <div class="segmented" role="tablist" aria-label="Wallet setup mode">
+            <button type="button" :class="{ active: setupWalletMode === 'create' }" @click="selectSetupWalletMode('create')">Create</button>
+            <button type="button" :class="{ active: setupWalletMode === 'import' }" @click="selectSetupWalletMode('import')">Import</button>
+          </div>
+          <div x-show="setupWalletMode === 'create'" class="seed-panel">
+            <template x-if="setupSeedWords().length > 0 && setupSeedStep === 'write'">
+              <div class="seed-panel">
+                <div class="seed-grid">
+                  <template x-for="(word, index) in setupSeedWords()" :key="index">
+                    <div class="seed-word">
+                      <span class="index" x-text="index + 1"></span>
+                      <span class="word" x-text="word"></span>
+                    </div>
+                  </template>
+                </div>
+                <div class="setup-actions">
+                  <button type="button" class="subtle" @click="generateSetupSeed">Regenerate</button>
+                  <button type="button" class="primary" @click="beginSeedVerification">I wrote it down</button>
+                </div>
+              </div>
+            </template>
+            <template x-if="setupSeedWords().length === 0">
+              <div class="seed-panel">
+                <div class="muted">This wallet does not have a recovery phrase yet.</div>
+                <button type="button" class="primary" @click="generateSetupSeed">Generate recovery phrase</button>
+              </div>
+            </template>
+            <template x-if="setupSeedStep === 'verify'">
+              <div class="seed-panel">
+                <div class="verify-grid">
+                  <template x-for="challenge in verifyChallenges" :key="challenge.index">
+                    <label>
+                      Word <span x-text="challenge.position"></span>
+                      <input x-model="verifyAnswers[challenge.index]" autocomplete="off">
+                    </label>
+                  </template>
+                </div>
+                <div class="setup-actions">
+                  <button type="button" class="subtle" @click="setupSeedStep = 'write'">Back</button>
+                  <button type="button" class="primary" @click="verifyGeneratedSeed">Verify</button>
+                </div>
+              </div>
+            </template>
+            <template x-if="setupSeedStep === 'verified' && walletVerified">
+              <div class="setup-status">Recovery phrase verified</div>
+            </template>
+          </div>
+          <div x-show="setupWalletMode === 'import'" class="seed-panel">
+            <form @submit.prevent="importSetupSeed">
+              <label>Recovery phrase<textarea x-model="importSeedPhrase" autocomplete="off" spellcheck="false"></textarea></label>
+              <button class="primary" type="submit">Import</button>
+            </form>
+            <template x-if="walletVerified">
+              <div class="setup-status">Recovery phrase imported</div>
+            </template>
           </div>
         </div>
         <div class="setup-section">
@@ -664,7 +830,7 @@ const INDEX_HTML: &str = r#"<!doctype html>
         </div>
       </div>
       <div class="setup-actions">
-        <button class="primary" type="button" @click="completeSetup">Continue</button>
+        <button class="primary" type="button" :disabled="!walletVerified" @click="completeSetup">Continue</button>
       </div>
     </section>
   </div>
