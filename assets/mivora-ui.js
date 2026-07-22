@@ -487,6 +487,11 @@ window.mivoraApp = function mivoraApp() {
       return `${count} transfer${count === 1 ? "" : "s"}`;
     },
 
+    blockMinerLabel(block) {
+      const miner = this.short(block.miner);
+      return block.miner === this.status.wallet_address ? `${miner} (me)` : miner;
+    },
+
     walletTransactions() {
       const wallet = this.status.wallet_address;
       if (!wallet) return [];

@@ -24,7 +24,7 @@ cargo run -- --genesis --http 127.0.0.1:18661 --p2p 127.0.0.1:9444
 
 Mining is automatic. There is no "mine block" button and no exact sleep. Each node can burn its configured amount once per chain height. Those burns become one-shot leader tickets for a future height after the launch profile's maturity delay. Only the selected ticket owner builds the next block, signs a leader proof, performs the VDF work, and gossips the finished block. The VDF is the clock.
 
-Genesis leaves the starter wallet with 1 spendable coin after the 1-coin bootstrap burn creates the first leader ticket. Because non-genesis blocks must include at least one burn, the default 0-coin burn rate will wait instead of starting VDF work until the burn rate is raised in the Configuration tab.
+Genesis leaves the starter wallet with 100 spendable coins after the 1-coin bootstrap burn creates the first leader ticket and the genesis block pays its 100-coin reward. `--genesis` starts the automatic burn rate at 100 coins per block, so the starter can immediately create the block 1 burn ticket.
 
 The management UI is a small AlpineJS app served from local vendored assets. It polls JSON endpoints every few seconds and includes:
 
@@ -63,15 +63,14 @@ cargo run -- --p2p 0.0.0.0:9444 --http 127.0.0.1:18661
 cargo run -- --genesis --p2p 0.0.0.0:9444 --http 127.0.0.1:18661
 ```
 
-3. Open the Configuration tab and set the starter burn rate so block 1 has a burn.
-4. Give friends your public `host:9444`.
-5. Friends join your chain:
+3. Give friends your public `host:9444`.
+4. Friends join your chain:
 
 ```sh
 cargo run -- --data-dir .mivora-friend --p2p 0.0.0.0:9445 --http 127.0.0.1:18661 --join your-host:9444
 ```
 
-Friends who join after you start will adopt your genesis and current chain. The starter wallet begins with 1 spendable coin after the bootstrap burn, which can be configured as the block 1 burn from the UI, creating the ticket for block 2. After the starter mines the first block reward, send friends coins from the UI; then they can choose a burn amount and compete for future blocks. Every joining node starts with a 0-coin automatic burn unless it is configured otherwise.
+Friends who join after you start will adopt your genesis and current chain. The starter wallet begins with 100 spendable coins after the bootstrap burn and genesis reward, and `--genesis` starts it with a 100-coin automatic burn rate. After the starter mines additional block rewards, send friends coins from the UI; then they can choose a burn amount and compete for future blocks. Every joining node starts with a 0-coin automatic burn unless it is configured otherwise.
 
 The genesis block bootstraps the chain with a 1-coin burn from the starter wallet. Burns included in a block create one-shot tickets for a future height through a deterministic ticket lottery. The selected leader creates the next block content, signs a proof for the selected ticket, and runs a hash-chain VDF before gossiping the block.
 
@@ -79,7 +78,7 @@ Every non-genesis block must consume the selected mature ticket and include at l
 
 The protocol targets 60-second blocks by retargeting the expected VDF rounds after each block. It uses a rolling average of recent block intervals and only moves the next round count by about 10% per block, so short bursts do not make the delay swing wildly. Every node derives the same next-round count from the validated chain.
 
-The block reward is fixed at 100 coins. The default burn is 0 coins per block, so new nodes can join before they own coins. After a wallet has coins, raise the burn from the Configuration screen.
+The block reward is fixed at 100 coins. The default burn is 0 coins per block, so new nodes can join before they own coins. Genesis starters begin at 100 coins per block; after another wallet has coins, raise its burn from the Configuration screen.
 
 The measured VDF round count is only the initial delay. After the first blocks, the protocol steers rounds toward the 60-second target.
 

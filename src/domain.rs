@@ -1416,6 +1416,8 @@ fn build_genesis_block(
     genesis_allocations: &BTreeMap<String, Amount>,
     transactions: Vec<Transaction>,
 ) -> Block {
+    let miner = genesis_miner(genesis_allocations, &transactions);
+    let reward = genesis_reward(genesis_allocations, &transactions);
     let txs = transactions
         .iter()
         .map(Transaction::canonical)
@@ -1426,8 +1428,8 @@ fn build_genesis_block(
         height: 0,
         prev_hash: "0".repeat(64),
         timestamp_ms: 0,
-        miner: "genesis".to_string(),
-        reward: 0,
+        miner,
+        reward,
         vdf_rounds: 0,
         vdf_output,
         leader_proof: None,
@@ -1448,11 +1450,11 @@ fn validate_genesis_block(block: &Block) -> Result<()> {
     if block.timestamp_ms != 0 {
         bail!("genesis block timestamp must be 0");
     }
-    if block.miner != "genesis" {
-        bail!("genesis block miner must be genesis");
+    if block.miner == "genesis" && block.reward != 0 {
+        bail!("genesis placeholder miner must not receive a reward");
     }
-    if block.reward != 0 {
-        bail!("genesis block reward must be 0");
+    if block.miner != "genesis" && block.reward != 0 && block.reward != BLOCK_REWARD {
+        bail!("genesis block reward is invalid");
     }
     if block.vdf_rounds != 0 {
         bail!("genesis block VDF rounds must be 0");
@@ -1464,6 +1466,33 @@ fn validate_genesis_block(block: &Block) -> Result<()> {
         bail!("genesis block hash is invalid");
     }
     Ok(())
+}
+
+fn genesis_miner(
+    genesis_allocations: &BTreeMap<String, Amount>,
+    transactions: &[Transaction],
+) -> String {
+    transactions
+        .iter()
+        .filter_map(|transaction| match transaction {
+            Transaction::Burn { from, .. } => Some(from.as_str()),
+            Transaction::Transfer { .. } => None,
+        })
+        .find(|from| genesis_allocations.contains_key(*from))
+        .or_else(|| genesis_allocations.keys().next().map(String::as_str))
+        .unwrap_or("genesis")
+        .to_string()
+}
+
+fn genesis_reward(
+    genesis_allocations: &BTreeMap<String, Amount>,
+    transactions: &[Transaction],
+) -> Amount {
+    if genesis_allocations.is_empty() || transactions.is_empty() {
+        0
+    } else {
+        BLOCK_REWARD
+    }
 }
 
 fn balances_after_genesis(
@@ -1482,6 +1511,11 @@ fn balances_after_genesis(
             }
             Transaction::Transfer { .. } => bail!("genesis only supports burn transactions"),
         }
+    }
+    let reward = genesis_reward(genesis_allocations, transactions);
+    if reward > 0 {
+        let miner = genesis_miner(genesis_allocations, transactions);
+        credit_balance(&mut balances, &miner, reward)?;
     }
     Ok(balances)
 }

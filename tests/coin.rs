@@ -81,13 +81,15 @@ fn starter_node(wallet: Wallet) -> NodeCore {
 }
 
 #[test]
-fn genesis_burn_starts_chain_with_zero_balance_and_first_leader() {
+fn genesis_burn_starts_chain_with_reward_and_first_leader() {
     let alice = Wallet::from_seed("alice");
     let node = starter_node(alice.clone());
 
     let genesis = &node.ledger().chain()[0];
-    assert_eq!(node.ledger().balance_of(alice.address()), 0);
+    assert_eq!(node.ledger().balance_of(alice.address()), BLOCK_REWARD);
     assert_eq!(genesis.height, 0);
+    assert_eq!(genesis.miner, alice.address());
+    assert_eq!(genesis.reward, BLOCK_REWARD);
     assert_eq!(genesis.transactions.len(), 1);
     assert!(genesis.transactions[0].is_burn());
     assert_eq!(genesis.transactions[0].amount(), 1);
@@ -112,7 +114,7 @@ fn starter_node_waits_for_a_burn_before_vdf_work() {
             .is_some_and(|reason| reason.contains("at least one burn"))
     );
     assert_eq!(node.ledger().status().height, 0);
-    assert_eq!(node.ledger().balance_of(alice.address()), 0);
+    assert_eq!(node.ledger().balance_of(alice.address()), BLOCK_REWARD);
 }
 
 #[test]

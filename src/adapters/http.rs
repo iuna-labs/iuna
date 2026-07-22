@@ -501,7 +501,7 @@ const INDEX_HTML: &str = r#"<!doctype html>
     @keyframes block-arrive { from { opacity: .2; transform: translateX(-12px); } to { opacity: 1; transform: translateX(0); } }
     .block-height { font-size: 18px; font-weight: 900; }
     .block-meta { display: flex; gap: 8px; color: #8d989f; font-size: 12px; }
-    .block-hash { font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; font-size: 11px; overflow-wrap: anywhere; color: #9eb3bc; }
+    .block-miner { font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; font-size: 11px; overflow-wrap: anywhere; color: #9eb3bc; }
     .skeleton-card { pointer-events: none; position: relative; overflow: hidden; }
     .skeleton-card::after { content: ""; position: absolute; inset: 0; background: linear-gradient(90deg, transparent, rgba(213, 245, 95, .12), transparent); animation: skeleton-sweep 1.15s ease-in-out infinite; }
     @keyframes skeleton-sweep { from { transform: translateX(-100%); } to { transform: translateX(100%); } }
@@ -536,7 +536,7 @@ const INDEX_HTML: &str = r#"<!doctype html>
       .block-card { flex-basis: 108px; }
     }
   </style>
-  <script defer src="/assets/mivora-ui.js?v=21"></script>
+  <script defer src="/assets/mivora-ui.js?v=22"></script>
   <script defer src="/assets/alpine.min.js"></script>
 </head>
 <body x-data="mivoraApp()" x-init="init()" x-cloak>
@@ -694,7 +694,7 @@ const INDEX_HTML: &str = r#"<!doctype html>
                   <span x-text="burnCountLabel(block)"></span>
                   <span x-text="transferCountLabel(block)"></span>
                 </div>
-                <div class="block-hash" x-text="short(block.hash)"></div>
+                <div class="block-miner" x-text="blockMinerLabel(block)"></div>
               </button>
             </template>
             <template x-if="loadingOlder">

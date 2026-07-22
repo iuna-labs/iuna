@@ -11,11 +11,12 @@ use anyhow::{Context, Result, bail};
 use mivora::{
     adapters::{chain_store::SqliteChainStore, config_store, http, p2p, wallet_store},
     app::{DEFAULT_BURN_PER_BLOCK, NodeCore, PeerBook, SharedNode, SharedPeerBook, now_ms},
-    domain::{ChainSnapshot, GenesisBurn, Ledger, run_vdf},
+    domain::{Amount, ChainSnapshot, GenesisBurn, Ledger, run_vdf},
 };
 use tokio::sync::Mutex;
 
-const GENESIS_SPENDABLE_AMOUNT: u64 = 1;
+const GENESIS_BOOTSTRAP_BURN_AMOUNT: u64 = 1;
+const GENESIS_INITIAL_BURN_PER_BLOCK: Amount = 100;
 const VDF_MEASUREMENT_INITIAL_ROUNDS: u32 = 1_000_000;
 const VDF_MEASUREMENT_MAX_ROUNDS: u32 = 100_000_000;
 const VDF_MEASUREMENT_MIN_ELAPSED: Duration = Duration::from_millis(150);
@@ -35,11 +36,12 @@ async fn main() -> Result<()> {
     let persisted_chain_exists = chain_store.load()?.is_some();
     let ledger = initialize_ledger(&opts, wallet.address(), &chain_store).await?;
     let has_chain = opts.has_chain() || persisted_chain_exists;
+    let initial_burn_per_block = initial_burn_per_block(&opts);
 
     let node: SharedNode = Arc::new(Mutex::new(NodeCore::from_ledger(
         wallet,
         ledger,
-        DEFAULT_BURN_PER_BLOCK,
+        initial_burn_per_block,
     )));
     let ui_config = Arc::new(Mutex::new(ui_config));
     let mut peers = ui_config.lock().await.peers.clone();
@@ -58,7 +60,7 @@ async fn main() -> Result<()> {
     println!("p2p listener: {}", opts.p2p_addr);
     println!(
         "automatic mining: VDF-driven, burning {} coins per block",
-        DEFAULT_BURN_PER_BLOCK
+        initial_burn_per_block
     );
 
     let gossip =
@@ -257,6 +259,13 @@ fn validate_wallet_for_mode(
     Ok(())
 }
 
+fn initial_burn_per_block(opts: &CliOptions) -> Amount {
+    match opts.chain_mode {
+        ChainMode::Genesis => GENESIS_INITIAL_BURN_PER_BLOCK,
+        ChainMode::Setup | ChainMode::Join => DEFAULT_BURN_PER_BLOCK,
+    }
+}
+
 fn print_help() {
     println!("{}", help_text());
 }
@@ -294,10 +303,13 @@ fn setup_ledger() -> Ledger {
 fn start_genesis_ledger(wallet_address: &str) -> Result<Ledger> {
     let vdf_rounds = measure_initial_vdf_rounds();
     let mut genesis = BTreeMap::new();
-    genesis.insert(wallet_address.to_string(), GENESIS_SPENDABLE_AMOUNT + 1);
+    genesis.insert(wallet_address.to_string(), GENESIS_BOOTSTRAP_BURN_AMOUNT);
     Ledger::new_with_genesis_burns(
         genesis,
-        vec![GenesisBurn::new(wallet_address, 1)],
+        vec![GenesisBurn::new(
+            wallet_address,
+            GENESIS_BOOTSTRAP_BURN_AMOUNT,
+        )],
         vdf_rounds,
     )
 }
@@ -509,9 +521,9 @@ mod tests {
     use tokio::sync::Mutex;
 
     use super::{
-        ChainMode, CliOptions, extrapolate_vdf_rounds, help_text, initialize_ledger,
-        measure_vdf_rounds, persist_chain_snapshot, run_chain_persistence_with_interval,
-        validate_wallet_for_mode,
+        ChainMode, CliOptions, extrapolate_vdf_rounds, help_text, initial_burn_per_block,
+        initialize_ledger, measure_vdf_rounds, persist_chain_snapshot,
+        run_chain_persistence_with_interval, validate_wallet_for_mode,
     };
 
     fn parse(args: &[&str]) -> anyhow::Result<Option<CliOptions>> {
@@ -584,6 +596,18 @@ mod tests {
         let opts = parse(&["--join", "127.0.0.1:9444"]).unwrap().unwrap();
         assert_eq!(opts.chain_mode, ChainMode::Join);
         assert_eq!(opts.join_peers, vec!["127.0.0.1:9444"]);
+    }
+
+    #[test]
+    fn genesis_mode_starts_with_full_reward_burn_rate() {
+        let genesis = parse(&["--genesis"]).unwrap().unwrap();
+        assert_eq!(initial_burn_per_block(&genesis), 100);
+
+        let setup = parse(&[]).unwrap().unwrap();
+        assert_eq!(initial_burn_per_block(&setup), DEFAULT_BURN_PER_BLOCK);
+
+        let join = parse(&["--join", "127.0.0.1:9444"]).unwrap().unwrap();
+        assert_eq!(initial_burn_per_block(&join), DEFAULT_BURN_PER_BLOCK);
     }
 
     #[test]
