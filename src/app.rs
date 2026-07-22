@@ -9,8 +9,8 @@ use serde::{Deserialize, Serialize};
 use tokio::sync::Mutex;
 
 use crate::domain::{
-    Amount, Block, ChainSnapshot, ChainStatus, DEFAULT_TRANSACTION_FEE, Ledger, PreparedBlock,
-    Transaction, VDF_TARGET_BLOCK_MS, Wallet, run_vdf,
+    Amount, Block, ChainSnapshot, ChainStatus, DEFAULT_TRANSACTION_FEE, LaunchProfile, Ledger,
+    PreparedBlock, Transaction, VDF_TARGET_BLOCK_MS, Wallet, run_vdf,
 };
 
 pub type SharedNode = Arc<Mutex<NodeCore>>;
@@ -22,6 +22,7 @@ pub const PROTOCOL_VERSION: u32 = 1;
 pub const NETWORK_ID: &str = "luun-devnet-v0";
 pub const BLOCK_REQUEST_LIMIT: usize = 128;
 const IMPORT_REBROADCAST_LIMIT: usize = 128;
+const MICRO_LUUN: u64 = 1_000_000;
 
 #[derive(Clone, Debug)]
 pub struct NodeConfig {
@@ -29,6 +30,7 @@ pub struct NodeConfig {
     pub genesis_allocations: BTreeMap<String, Amount>,
     pub vdf_rounds: u32,
     pub burn_per_block: Amount,
+    pub burn_fee: Amount,
 }
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
@@ -100,6 +102,8 @@ pub struct NodeStatus {
 pub struct LaunchProfileStatus {
     pub profile_id: String,
     pub profile_hash: String,
+    pub ticket_maturity_delay_heights: u64,
+    pub ticket_expiry_window_heights: u64,
 }
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
@@ -107,11 +111,21 @@ pub struct MiningStatus {
     pub automatic: bool,
     pub burn_per_block: Amount,
     pub automatic_burn_fee: Amount,
+    pub economics: MiningEconomicsStatus,
     pub vdf_rounds: u32,
     pub vdf_target_block_ms: u64,
     pub current_leader: Option<String>,
     pub wallet_is_current_leader: bool,
     pub last_auto_burn_height: Option<u64>,
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+pub struct MiningEconomicsStatus {
+    pub slider_max: Amount,
+    pub last_payout: Amount,
+    pub estimated_active_burn: Amount,
+    pub estimated_other_burn_rate_microluun: u64,
+    pub break_even_burn_microluun: u64,
 }
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
@@ -133,6 +147,7 @@ pub struct NodeCore {
     wallet: Wallet,
     ledger: Ledger,
     burn_per_block: Amount,
+    burn_fee: Amount,
     last_auto_burn_height: Option<u64>,
     outbox: Vec<GossipEnvelope>,
 }
@@ -140,14 +155,29 @@ pub struct NodeCore {
 impl NodeCore {
     pub fn new(config: NodeConfig) -> Self {
         let ledger = Ledger::new(config.genesis_allocations, config.vdf_rounds);
-        Self::from_ledger(config.wallet, ledger, config.burn_per_block)
+        Self::from_ledger_with_burn_fee(
+            config.wallet,
+            ledger,
+            config.burn_per_block,
+            config.burn_fee,
+        )
     }
 
     pub fn from_ledger(wallet: Wallet, ledger: Ledger, burn_per_block: Amount) -> Self {
+        Self::from_ledger_with_burn_fee(wallet, ledger, burn_per_block, DEFAULT_TRANSACTION_FEE)
+    }
+
+    pub fn from_ledger_with_burn_fee(
+        wallet: Wallet,
+        ledger: Ledger,
+        burn_per_block: Amount,
+        burn_fee: Amount,
+    ) -> Self {
         Self {
             wallet,
             ledger,
             burn_per_block,
+            burn_fee,
             last_auto_burn_height: None,
             outbox: Vec::new(),
         }
@@ -307,11 +337,14 @@ impl NodeCore {
             launch_profile: LaunchProfileStatus {
                 profile_id: launch_profile.profile_id.clone(),
                 profile_hash: chain.launch_profile_hash.clone(),
+                ticket_maturity_delay_heights: launch_profile.ticket_maturity_delay_heights,
+                ticket_expiry_window_heights: launch_profile.ticket_expiry_window_heights,
             },
             mining: MiningStatus {
                 automatic: true,
                 burn_per_block: self.burn_per_block,
-                automatic_burn_fee: automatic_burn_fee(self.burn_per_block),
+                automatic_burn_fee: self.burn_fee,
+                economics: self.mining_economics(),
                 vdf_rounds: self.ledger.vdf_rounds(),
                 vdf_target_block_ms: VDF_TARGET_BLOCK_MS,
                 current_leader,
@@ -322,9 +355,51 @@ impl NodeCore {
         }
     }
 
+    fn mining_economics(&self) -> MiningEconomicsStatus {
+        let launch_profile = self.ledger.launch_profile();
+        let chain = self.ledger.chain();
+        let window = launch_profile.ticket_expiry_window_heights.max(1);
+        let last_payout = chain
+            .last()
+            .map(|block| block.reward)
+            .unwrap_or_else(|| self.ledger.status().block_reward);
+        let estimated_active_burn = estimated_active_burn_for_next_block(chain, launch_profile);
+        let average_active_burn_rate_microluun = u128::from(estimated_active_burn)
+            .saturating_mul(u128::from(MICRO_LUUN))
+            / u128::from(window);
+        let configured_burn_microluun =
+            u128::from(self.burn_per_block).saturating_mul(u128::from(MICRO_LUUN));
+        let estimated_other_burn_rate_microluun = average_active_burn_rate_microluun
+            .saturating_sub(configured_burn_microluun)
+            .min(u128::from(u64::MAX)) as u64;
+        let break_even_burn_microluun = low_break_even_burn_microluun(
+            last_payout,
+            estimated_other_burn_rate_microluun,
+            self.burn_fee,
+            last_payout,
+        );
+
+        MiningEconomicsStatus {
+            slider_max: last_payout,
+            last_payout,
+            estimated_active_burn,
+            estimated_other_burn_rate_microluun,
+            break_even_burn_microluun,
+        }
+    }
+
     pub fn set_burn_per_block(&mut self, amount: Amount) -> Result<Option<Transaction>> {
+        self.set_automatic_burn(amount, self.burn_fee)
+    }
+
+    pub fn set_automatic_burn(
+        &mut self,
+        amount: Amount,
+        fee: Amount,
+    ) -> Result<Option<Transaction>> {
         let was_disabled = self.burn_per_block == 0;
         self.burn_per_block = amount;
+        self.burn_fee = fee;
         if was_disabled && amount > 0 {
             self.last_auto_burn_height = None;
         }
@@ -447,7 +522,7 @@ impl NodeCore {
             return Ok(None);
         }
 
-        let fee = automatic_burn_fee(self.burn_per_block);
+        let fee = self.burn_fee;
         let balance = self.ledger.balance_of(self.wallet.address());
         let amount = if balance >= self.burn_per_block.saturating_add(fee) {
             self.burn_per_block
@@ -582,8 +657,99 @@ impl NodeCore {
     }
 }
 
-fn automatic_burn_fee(_burn_per_block: Amount) -> Amount {
+fn estimated_active_burn_for_next_block(chain: &[Block], launch_profile: &LaunchProfile) -> Amount {
+    let Some(tip) = chain.last() else {
+        return 0;
+    };
+    let window = launch_profile.ticket_expiry_window_heights.max(1);
+    let target_height = tip.height.saturating_add(1);
+    if target_height < launch_profile.ticket_maturity_delay_heights {
+        return block_burned(tip).saturating_mul(window);
+    }
+
+    let last_eligible_burn_height =
+        target_height.saturating_sub(launch_profile.ticket_maturity_delay_heights);
+    let first_eligible_burn_height =
+        last_eligible_burn_height.saturating_sub(window.saturating_sub(1));
+    let mut matching_blocks = 0_u64;
+    let mut total = 0_u64;
+    for block in chain {
+        if first_eligible_burn_height <= block.height && block.height <= last_eligible_burn_height {
+            matching_blocks = matching_blocks.saturating_add(1);
+            total = total.saturating_add(block_burned(block));
+        }
+    }
+
+    if matching_blocks >= window {
+        total
+    } else {
+        block_burned(tip).saturating_mul(window)
+    }
+}
+
+fn block_burned(block: &Block) -> Amount {
+    block
+        .transactions
+        .iter()
+        .filter(|tx| tx.is_burn())
+        .fold(0, |total, tx| total.saturating_add(tx.amount()))
+}
+
+fn low_break_even_burn_microluun(
+    payout: Amount,
+    other_burn_rate_microluun: u64,
+    fee: Amount,
+    slider_max: Amount,
+) -> u64 {
+    if payout == 0 || slider_max == 0 {
+        return 0;
+    }
+    if fee == 0 {
+        return 0;
+    }
+
+    let max = slider_max.saturating_mul(MICRO_LUUN);
+    let steps = 1_000_u64;
+    let mut previous = 0_u64;
+    for step in 1..=steps {
+        let candidate = ((u128::from(max) * u128::from(step)) / u128::from(steps)) as u64;
+        if expected_burn_profit(candidate, other_burn_rate_microluun, payout, fee) >= 0.0 {
+            let mut low = previous;
+            let mut high = candidate;
+            for _ in 0..32 {
+                let middle = low + (high - low) / 2;
+                if expected_burn_profit(middle, other_burn_rate_microluun, payout, fee) >= 0.0 {
+                    high = middle;
+                } else {
+                    low = middle;
+                }
+            }
+            return high;
+        }
+        previous = candidate;
+    }
     0
+}
+
+fn expected_burn_profit(
+    burn_microluun: u64,
+    other_burn_rate_microluun: u64,
+    payout: Amount,
+    fee: Amount,
+) -> f64 {
+    if burn_microluun == 0 {
+        return -(fee as f64);
+    }
+
+    let burn = burn_microluun as f64 / MICRO_LUUN as f64;
+    let other_burn_rate = other_burn_rate_microluun as f64 / MICRO_LUUN as f64;
+    let total_burn_rate = burn + other_burn_rate;
+    let win_chance = if total_burn_rate > 0.0 {
+        burn / total_burn_rate
+    } else {
+        1.0
+    };
+    payout as f64 * win_chance - burn - fee as f64
 }
 
 #[derive(Clone, Debug, Default, Deserialize, Eq, PartialEq, Serialize)]
@@ -709,7 +875,22 @@ mod tests {
 
     use crate::domain::Wallet;
 
-    use super::{NodeConfig, NodeCore};
+    use super::{
+        MICRO_LUUN, NodeConfig, NodeCore, expected_burn_profit, low_break_even_burn_microluun,
+    };
+
+    #[test]
+    fn break_even_uses_low_root_for_weighted_burn_rate() {
+        let other_burn_rate = 10 * MICRO_LUUN;
+        let break_even = low_break_even_burn_microluun(102, other_burn_rate, 1, 102);
+
+        assert!(
+            break_even > 100_000 && break_even < 120_000,
+            "expected low break-even around 0.11 LUUN, got {break_even} microluun"
+        );
+        assert!(break_even < MICRO_LUUN);
+        assert!(expected_burn_profit(MICRO_LUUN, other_burn_rate, 102, 1) > 0.0);
+    }
 
     #[test]
     fn same_height_verified_import_does_not_reset_auto_burn_guard() {
@@ -721,6 +902,7 @@ mod tests {
             genesis_allocations: allocations,
             vdf_rounds: 10,
             burn_per_block: 1,
+            burn_fee: 1,
         });
 
         let first = node.prepare_automatic_mining(1);

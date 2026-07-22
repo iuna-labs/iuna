@@ -16,6 +16,7 @@ fn node(_network_key: &str, wallet: Wallet, allocations: BTreeMap<String, Amount
         genesis_allocations: allocations,
         vdf_rounds: 25,
         burn_per_block: DEFAULT_BURN_PER_BLOCK,
+        burn_fee: 1,
     })
 }
 
@@ -97,6 +98,36 @@ fn genesis_burn_starts_chain_with_reward_and_first_leader() {
     assert_eq!(
         node.ledger().expected_leader_for_next_block().as_deref(),
         Some(alice.address())
+    );
+}
+
+#[test]
+fn burn_amount_weights_leader_selection() {
+    let mut high_weight_leaders = 0;
+    for sample in 0..100 {
+        let low = Wallet::from_seed(&format!("weighted-low-{sample}"));
+        let high = Wallet::from_seed(&format!("weighted-high-{sample}"));
+        let mut allocations = BTreeMap::new();
+        allocations.insert(low.address().to_string(), 1_000);
+        allocations.insert(high.address().to_string(), 1_000);
+        let ledger = Ledger::new_with_genesis_burns(
+            allocations,
+            vec![
+                GenesisBurn::new(low.address(), 1),
+                GenesisBurn::new(high.address(), 99),
+            ],
+            25,
+        )
+        .unwrap();
+
+        if ledger.expected_leader_for_next_block().as_deref() == Some(high.address()) {
+            high_weight_leaders += 1;
+        }
+    }
+
+    assert!(
+        high_weight_leaders >= 90,
+        "high burn ticket should win most weighted draws, won {high_weight_leaders}/100"
     );
 }
 
@@ -487,6 +518,7 @@ fn automatic_mining_burns_configured_amount_once_per_height() {
         genesis_allocations: allocations,
         vdf_rounds: 10,
         burn_per_block: 25,
+        burn_fee: 1,
     });
 
     let first = node.automatic_mine_once(1);
@@ -498,6 +530,7 @@ fn automatic_mining_burns_configured_amount_once_per_height() {
     let second = node.automatic_mine_once(2);
     assert!(second.burned.is_some());
     assert_eq!(second.burned.as_ref().map(|tx| tx.amount()), Some(25));
+    assert_eq!(second.burned.as_ref().map(|tx| tx.fee()), Some(1));
 }
 
 #[test]
@@ -543,15 +576,27 @@ fn automatic_burn_status_shows_configured_fee() {
     allocations.insert(alice.address().to_string(), 1_000);
     let mut node = node("alice", alice, allocations);
 
-    assert_eq!(node.status().mining.automatic_burn_fee, 0);
+    assert_eq!(node.status().mining.automatic_burn_fee, 1);
 
     node.set_burn_per_block(1).unwrap();
     assert_eq!(node.status().mining.burn_per_block, 1);
-    assert_eq!(node.status().mining.automatic_burn_fee, 0);
+    assert_eq!(node.status().mining.automatic_burn_fee, 1);
 
-    node.set_burn_per_block(50).unwrap();
+    node.set_automatic_burn(50, 3).unwrap();
     assert_eq!(node.status().mining.burn_per_block, 50);
-    assert_eq!(node.status().mining.automatic_burn_fee, 0);
+    assert_eq!(node.status().mining.automatic_burn_fee, 3);
+}
+
+#[test]
+fn automatic_mining_uses_configured_burn_fee() {
+    let alice = Wallet::from_seed("auto-fee-burn-alice");
+    let mut allocations = BTreeMap::new();
+    allocations.insert(alice.address().to_string(), 1_000);
+    let mut node = node("alice", alice, allocations);
+
+    let burned = node.set_automatic_burn(50, 3).unwrap().unwrap();
+    assert_eq!(burned.amount(), 50);
+    assert_eq!(burned.fee(), 3);
 }
 
 #[test]
@@ -1148,6 +1193,7 @@ fn mined_block_gossip_does_not_include_full_chain_snapshot() {
         genesis_allocations: allocations.clone(),
         vdf_rounds: 10,
         burn_per_block: 1,
+        burn_fee: 1,
     });
 
     let plan = alice_node.prepare_automatic_mining(1);

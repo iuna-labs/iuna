@@ -10,12 +10,25 @@ use serde::{Deserialize, Serialize};
 use crate::domain::Amount;
 
 const CONFIG_FILE_VERSION: u32 = 1;
+pub const DEFAULT_BURN_FEE: Amount = 1;
 
-#[derive(Clone, Debug, Default, Deserialize, Eq, PartialEq, Serialize)]
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 pub struct UiConfig {
     pub setup_complete: bool,
     pub burn_per_block: Amount,
+    pub burn_fee: Amount,
     pub peers: Vec<String>,
+}
+
+impl Default for UiConfig {
+    fn default() -> Self {
+        Self {
+            setup_complete: false,
+            burn_per_block: 0,
+            burn_fee: DEFAULT_BURN_FEE,
+            peers: Vec::new(),
+        }
+    }
 }
 
 #[derive(Debug, Deserialize, Serialize)]
@@ -24,8 +37,14 @@ struct ConfigFile {
     setup_complete: bool,
     #[serde(default)]
     burn_per_block: Amount,
+    #[serde(default = "default_burn_fee")]
+    burn_fee: Amount,
     #[serde(default)]
     peers: Vec<String>,
+}
+
+fn default_burn_fee() -> Amount {
+    DEFAULT_BURN_FEE
 }
 
 pub fn load_or_create(path: &Path) -> Result<UiConfig> {
@@ -48,6 +67,7 @@ pub fn save(path: &Path, config: &UiConfig) -> Result<()> {
         version: CONFIG_FILE_VERSION,
         setup_complete: config.setup_complete,
         burn_per_block: config.burn_per_block,
+        burn_fee: config.burn_fee,
         peers: config.peers.clone(),
     };
     let bytes = serde_json::to_vec_pretty(&stored).context("failed to serialize config file")?;
@@ -76,6 +96,7 @@ fn load(path: &Path) -> Result<UiConfig> {
     Ok(UiConfig {
         setup_complete: stored.setup_complete,
         burn_per_block: stored.burn_per_block,
+        burn_fee: stored.burn_fee,
         peers: stored.peers,
     })
 }
@@ -95,7 +116,7 @@ mod tests {
 
     use tempfile::tempdir;
 
-    use super::{UiConfig, load_or_create, save};
+    use super::{DEFAULT_BURN_FEE, UiConfig, load_or_create, save};
 
     #[test]
     fn creates_default_config_file() {
@@ -109,6 +130,7 @@ mod tests {
         assert!(stored.contains("\"version\": 1"));
         assert!(stored.contains("\"setup_complete\": false"));
         assert!(stored.contains("\"burn_per_block\": 0"));
+        assert!(stored.contains("\"burn_fee\": 1"));
         assert!(stored.contains("\"peers\": []"));
     }
 
@@ -122,6 +144,7 @@ mod tests {
             &UiConfig {
                 setup_complete: true,
                 burn_per_block: 50,
+                burn_fee: 3,
                 peers: vec!["127.0.0.1:9444".to_string()],
             },
         )
@@ -130,6 +153,7 @@ mod tests {
 
         assert!(config.setup_complete);
         assert_eq!(config.burn_per_block, 50);
+        assert_eq!(config.burn_fee, 3);
         assert_eq!(config.peers, vec!["127.0.0.1:9444"]);
     }
 
@@ -152,6 +176,7 @@ mod tests {
 
         assert!(config.setup_complete);
         assert_eq!(config.burn_per_block, 0);
+        assert_eq!(config.burn_fee, DEFAULT_BURN_FEE);
         assert_eq!(config.peers, vec!["127.0.0.1:9444"]);
     }
 }

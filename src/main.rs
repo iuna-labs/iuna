@@ -47,11 +47,13 @@ async fn main() -> Result<()> {
     let ledger = initialize_ledger(&opts, wallet.address(), &chain_store).await?;
     let has_chain = opts.has_chain() || persisted_chain_exists;
     let initial_burn_per_block = initial_burn_per_block(&opts, &ui_config);
+    let initial_burn_fee = ui_config.burn_fee;
 
-    let node: SharedNode = Arc::new(Mutex::new(NodeCore::from_ledger(
+    let node: SharedNode = Arc::new(Mutex::new(NodeCore::from_ledger_with_burn_fee(
         wallet,
         ledger,
         initial_burn_per_block,
+        initial_burn_fee,
     )));
     let ui_config = Arc::new(Mutex::new(ui_config));
     let mut peers = ui_config.lock().await.peers.clone();
@@ -69,8 +71,8 @@ async fn main() -> Result<()> {
     println!("management UI: http://{}", opts.http_addr);
     println!("p2p listener: {}", opts.p2p_addr);
     println!(
-        "automatic mining: VDF-driven, burning {} LUUN per block",
-        initial_burn_per_block
+        "automatic mining: VDF-driven, burning {} LUUN per block with {} LUUN fee",
+        initial_burn_per_block, initial_burn_fee
     );
 
     let gossip =
@@ -619,6 +621,7 @@ mod tests {
         let genesis = parse(&["--genesis"]).unwrap().unwrap();
         let configured = UiConfig {
             burn_per_block: 50,
+            burn_fee: 3,
             ..UiConfig::default()
         };
         assert_eq!(initial_burn_per_block(&genesis, &configured), 100);
@@ -628,6 +631,7 @@ mod tests {
     fn non_genesis_modes_start_with_configured_burn_rate() {
         let configured = UiConfig {
             burn_per_block: 50,
+            burn_fee: 3,
             ..UiConfig::default()
         };
 

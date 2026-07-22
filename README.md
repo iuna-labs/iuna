@@ -75,13 +75,13 @@ cargo run -- --data-dir .luun-friend --p2p 0.0.0.0:9445 --http 127.0.0.1:18661 -
 
 Friends who join after you start will adopt your genesis and current chain. The starter wallet begins with 100 spendable LUUN after the bootstrap burn and genesis reward, and `--genesis` starts it with a 100-LUUN automatic burn rate. After the starter mines additional block rewards, send friends LUUN from the UI; then they can choose a burn amount and compete for future blocks. Every joining node starts with a 0-LUUN automatic burn unless it is configured otherwise.
 
-The genesis block bootstraps the chain with a 1-LUUN burn from the starter wallet. Genesis turns that burn into launch tickets for blocks 1 through 3 so the chain can move until normal burn tickets mature. Burns included after genesis create one-shot tickets through a deterministic ticket lottery. The selected leader creates the next block content, signs a proof for the selected ticket, and runs a hash-chain VDF before gossiping the block.
+The genesis block bootstraps the chain with a 1-LUUN burn from the starter wallet. Genesis turns that burn into launch tickets for blocks 1 through 3 so the chain can move until normal burn tickets mature. Burns included after genesis create one-shot tickets through a deterministic weighted lottery: a burn of `X` among total eligible burn weight `Y` has `X / Y` chance for that block. The selected leader creates the next block content, signs a proof for the selected ticket, and runs a hash-chain VDF before gossiping the block.
 
 Every non-genesis block must consume the selected eligible ticket, include at least one burn transaction, and fit under the 100kB serialized block limit. The VDF seed is bound to the parent hash and child height; the block hash separately commits to the miner, timestamp, miner payout, rounds, previous hash, leader proof, VDF output, and transactions.
 
 The protocol targets 60-second blocks by retargeting the expected VDF rounds after each block. It uses a rolling average of recent block intervals and only moves the next round count by about 10% per block, so short bursts do not make the delay swing wildly. Every node derives the same next-round count from the validated chain.
 
-The base block reward is fixed at 100 LUUN, and miners collect transfer fees on top. Burns do not need an extra fee because the burned amount is already the cost of entering the leader lottery. The miner includes the best valid burn for liveness, then fills the remaining block space by fee-rate while respecting nonce and balance validity. The default burn is 0 LUUN per block, so new nodes can join before they own LUUN. Genesis starters begin at 100 LUUN per block; after another wallet has LUUN, raise its burn from the Mining screen.
+The base block reward is fixed at 100 LUUN, and miners collect transaction fees on top. The automatic burn setting has a burn amount and a fee; the burn amount is the ticket weight, while the fee is paid to the miner that includes it. The miner includes the best valid burn for liveness, then fills the remaining block space by fee-rate while respecting nonce and balance validity. The default burn is 0 LUUN per block with a 1-LUUN fee, so new nodes can join before they own LUUN. Genesis starters begin at 100 LUUN per block; after another wallet has LUUN, raise its burn from the Mining screen.
 
 The measured VDF round count is only the initial delay. After the first blocks, the protocol steers rounds toward the 60-second target.
 
@@ -93,7 +93,7 @@ There is no default wallet seed in the binary. Keep the wallet file private; it 
 
 ## Node Config
 
-Luun stores UI setup state, configured peers, and the configured automatic burn rate in `<data-dir>/config.json`. If `setup_complete` is false, the management UI opens the initial setup screen for wallet and peer setup. Completing setup and later runtime changes write the file through the HTTP API, so the choices follow the node data directory instead of a browser session.
+Luun stores UI setup state, configured peers, the configured automatic burn rate, and the automatic burn fee in `<data-dir>/config.json`. If `setup_complete` is false, the management UI opens the initial setup screen for wallet and peer setup. Completing setup and later runtime changes write the file through the HTTP API, so the choices follow the node data directory instead of a browser session.
 
 ## Chain Storage
 
@@ -101,7 +101,7 @@ Luun stores the latest validated `ChainSnapshot` in SQLite at `<data-dir>/chain.
 
 ## Architecture
 
-- `src/domain.rs`: wallet, fee-paying transfers, fee-free burns, balances, genesis burn bootstrap, 100-LUUN base rewards, 100kB blocks, rolling-window leader tickets, leader proofs, fork choice, launch profile, and VDF checks.
+- `src/domain.rs`: wallet, fee-paying transactions, balances, genesis burn bootstrap, 100-LUUN base rewards, 100kB blocks, rolling-window leader tickets, leader proofs, fork choice, launch profile, and VDF checks.
 - `src/app.rs`: node use cases, automatic VDF-paced mining, peer bookkeeping, and an in-memory network harness.
 - `src/adapters/http.rs`: HTTP management UI and status endpoint.
 - `src/adapters/p2p.rs`: line-delimited JSON gossip, block-range catch-up, and chain snapshots over one TCP port.

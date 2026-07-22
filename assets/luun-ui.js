@@ -20,6 +20,8 @@ window.luunApp = function luunApp() {
     setupFeedback: null,
     burnAmount: 0,
     burnAmountDraft: 0,
+    burnFee: 1,
+    burnFeeDraft: 1,
     burnAmountDirty: false,
     transferTo: "",
     transferAmount: null,
@@ -262,8 +264,10 @@ window.luunApp = function luunApp() {
         this.mempool = mempool;
         this.peers = peers;
         this.burnAmount = status.mining?.burn_per_block ?? this.burnAmount;
+        this.burnFee = status.mining?.automatic_burn_fee ?? this.burnFee;
         if (!this.burnAmountDirty) {
           this.burnAmountDraft = this.burnAmount;
+          this.burnFeeDraft = this.burnFee;
         }
         this.lastUpdated = new Date();
       } catch (error) {
@@ -404,23 +408,83 @@ window.luunApp = function luunApp() {
     async saveBurn() {
       try {
         const amount = Math.max(0, Math.trunc(Number(this.burnAmountDraft) || 0));
+        const fee = Math.max(0, Math.trunc(Number(this.burnFeeDraft) || 0));
         this.burnAmountDraft = amount;
+        this.burnFeeDraft = fee;
         await this.postForm(
           "/api/settings/burn-per-block",
-          { amount },
-          `Burn rate set to ${amount} LUUN per block`
+          { amount, fee },
+          `Burn rate set to ${amount} LUUN per block with ${fee} fee`
         );
         this.burnAmountDirty = false;
         this.burnAmount = amount;
+        this.burnFee = fee;
       } catch (error) {
         this.showFlash(error.message, "error");
       }
     },
 
     automaticBurnFeeDraft() {
-      const amount = Math.max(0, Math.trunc(Number(this.burnAmountDraft) || 0));
-      const savedFee = this.status.mining?.automatic_burn_fee ?? 0;
-      return Math.min(savedFee, Math.max(amount - 1, 0));
+      return Math.max(0, Math.trunc(Number(this.burnFeeDraft) || 0));
+    },
+
+    miningEconomics() {
+      return this.status.mining?.economics || {};
+    },
+
+    burnSliderMax() {
+      return Math.max(0, Math.trunc(Number(this.miningEconomics().slider_max ?? this.latestBlockReward())));
+    },
+
+    latestBlock() {
+      return this.blocks[0] || null;
+    },
+
+    latestBlockReward() {
+      const latest = this.latestBlock();
+      return Math.max(0, Math.trunc(Number(latest?.reward ?? this.status.chain?.block_reward ?? 0)));
+    },
+
+    ticketWindow() {
+      return Math.max(
+        1,
+        Math.trunc(Number(this.status.launch_profile?.ticket_expiry_window_heights) || 1)
+      );
+    },
+
+    estimatedActiveBurnTotal() {
+      return Math.max(0, Math.trunc(Number(this.miningEconomics().estimated_active_burn ?? 0)));
+    },
+
+    breakEvenBurn() {
+      const microluun = Math.max(
+        0,
+        Math.trunc(Number(this.miningEconomics().break_even_burn_microluun) || 0)
+      );
+      return microluun / 1000000;
+    },
+
+    breakEvenPercent() {
+      const max = this.burnSliderMax();
+      return max > 0 ? Math.min(100, Math.max(0, (this.breakEvenBurn() / max) * 100)) : 0;
+    },
+
+    breakEvenStyle() {
+      return `left: ${this.breakEvenPercent()}%`;
+    },
+
+    burnBreakEvenLabel() {
+      const marker = this.breakEvenBurn();
+      const payout = Math.max(0, Math.trunc(Number(this.miningEconomics().last_payout ?? this.latestBlockReward())));
+      const burned = this.estimatedActiveBurnTotal();
+      const fee = this.status.mining?.automatic_burn_fee ?? this.automaticBurnFeeDraft();
+      const window = this.ticketWindow();
+      return `Marker: break-even near ${this.formatBurn(marker)} LUUN, using last payout ${payout}, estimated active burns ${this.formatBurn(burned)}, fee ${fee}, and ${window} eligible blocks.`;
+    },
+
+    formatBurn(value) {
+      const amount = Math.max(0, Number(value) || 0);
+      return amount >= 10 ? amount.toFixed(1) : amount.toFixed(2);
     },
 
     async sendTransfer() {

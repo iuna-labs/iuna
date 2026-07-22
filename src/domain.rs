@@ -1345,15 +1345,7 @@ impl Ledger {
     }
 
     fn selected_ticket_for_height(&self, height: u64) -> Option<BurnTicket> {
-        self.tickets
-            .iter()
-            .filter(|ticket| ticket_is_eligible_for_height(ticket, height))
-            .min_by(|left, right| {
-                ticket_rank(self.tip(), height, left)
-                    .cmp(&ticket_rank(self.tip(), height, right))
-                    .then_with(|| left.id.cmp(&right.id))
-            })
-            .cloned()
+        select_weighted_ticket(self.tip(), height, &self.tickets)
     }
 
     fn tip(&self) -> &Block {
@@ -1363,11 +1355,44 @@ impl Ledger {
     }
 }
 
-fn ticket_rank(parent: &Block, target_height: u64, ticket: &BurnTicket) -> String {
-    hex_hash(format!(
-        "luun-ticket-rank:{}:{}:{}:{}:{}",
-        target_height, parent.hash, parent.vdf_output, ticket.id, ticket.amount
-    ))
+fn select_weighted_ticket(
+    parent: &Block,
+    target_height: u64,
+    tickets: &[BurnTicket],
+) -> Option<BurnTicket> {
+    let eligible = tickets
+        .iter()
+        .filter(|ticket| ticket_is_eligible_for_height(ticket, target_height))
+        .collect::<Vec<_>>();
+    let total_weight = eligible.iter().try_fold(0_u128, |total, ticket| {
+        total.checked_add(u128::from(ticket.amount))
+    })?;
+    if total_weight == 0 {
+        return None;
+    }
+
+    let draw = weighted_ticket_draw(parent, target_height, total_weight);
+    let mut cumulative = 0_u128;
+    for ticket in eligible {
+        cumulative = cumulative.checked_add(u128::from(ticket.amount))?;
+        if draw < cumulative {
+            return Some(ticket.clone());
+        }
+    }
+    None
+}
+
+fn weighted_ticket_draw(parent: &Block, target_height: u64, total_weight: u128) -> u128 {
+    let digest = Sha256::digest(
+        format!(
+            "luun-ticket-draw:{}:{}:{}",
+            target_height, parent.hash, parent.vdf_output
+        )
+        .as_bytes(),
+    );
+    let mut bytes = [0_u8; 16];
+    bytes.copy_from_slice(&digest[..16]);
+    u128::from_be_bytes(bytes) % total_weight
 }
 
 fn tickets_created_by_block(block: &Block, profile: &LaunchProfile) -> Result<Vec<BurnTicket>> {

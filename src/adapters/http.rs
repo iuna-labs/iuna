@@ -35,8 +35,9 @@ struct HttpState {
 }
 
 #[derive(Debug, Deserialize)]
-struct AmountForm {
+struct BurnSettingsForm {
     amount: Amount,
+    fee: Amount,
 }
 
 #[derive(Debug, Deserialize)]
@@ -211,17 +212,17 @@ async fn api_wallet_import_form(
 
 async fn api_burn_per_block_form(
     State(state): State<HttpState>,
-    Form(form): Form<AmountForm>,
+    Form(form): Form<BurnSettingsForm>,
 ) -> Json<ActionResponse> {
-    let result = set_burn_per_block(&state, form.amount).await;
+    let result = set_burn_settings(&state, form.amount, form.fee).await;
     action_json(result)
 }
 
 async fn burn_per_block_form(
     State(state): State<HttpState>,
-    Form(form): Form<AmountForm>,
+    Form(form): Form<BurnSettingsForm>,
 ) -> Response {
-    match set_burn_per_block(&state, form.amount).await {
+    match set_burn_settings(&state, form.amount, form.fee).await {
         Ok(_) => Redirect::to("/").into_response(),
         Err(error) => api_error(error).into_response(),
     }
@@ -257,30 +258,32 @@ async fn peer_form(State(state): State<HttpState>, Form(form): Form<PeerForm>) -
     }
 }
 
-async fn set_burn_per_block(state: &HttpState, amount: Amount) -> Result<()> {
+async fn set_burn_settings(state: &HttpState, amount: Amount, fee: Amount) -> Result<()> {
     let result = {
         let mut node = state.node.lock().await;
-        let result = node.set_burn_per_block(amount);
+        let result = node.set_automatic_burn(amount, fee);
         let outbox = node.drain_outbox();
         (result, outbox)
     };
 
     match result.0 {
         Ok(_) => {
-            persist_burn_per_block_config(&state.ui_config, &state.config_path, amount).await?;
+            persist_burn_settings_config(&state.ui_config, &state.config_path, amount, fee).await?;
             state.gossip.broadcast(result.1).await
         }
         Err(error) => Err(error),
     }
 }
 
-async fn persist_burn_per_block_config(
+async fn persist_burn_settings_config(
     ui_config: &Arc<Mutex<UiConfig>>,
     config_path: &Path,
     amount: Amount,
+    fee: Amount,
 ) -> Result<()> {
     let mut config = ui_config.lock().await;
     config.burn_per_block = amount;
+    config.burn_fee = fee;
     config_store::save(config_path, &config)
 }
 
@@ -516,7 +519,17 @@ const INDEX_HTML: &str = r#"<!doctype html>
     .setup-status { border: 1px solid #566d25; border-radius: 8px; padding: 10px; background: #1c2516; color: #d5f55f; font-weight: 800; }
     .wallet-grid { width: 100%; display: grid; grid-template-columns: minmax(0, 1fr) minmax(300px, .8fr); gap: 12px; align-items: start; }
     .wallet-actions { display: grid; gap: 12px; }
+    .wallet-balance-line { display: inline-grid; grid-template-columns: auto auto; gap: 10px; align-items: baseline; padding: 8px 10px; border: 1px solid #2f363c; border-radius: 8px; background: #111316; }
+    .wallet-balance-line .tx-value { font-size: 16px; font-weight: 850; }
     .mining-grid { width: 100%; display: grid; grid-template-columns: minmax(0, 1fr); gap: 12px; align-items: start; }
+    .mining-form { width: 100%; display: grid; grid-template-columns: minmax(220px, .45fr) minmax(280px, 1fr); gap: 14px; align-items: end; }
+    .burn-fields { display: flex; flex-wrap: wrap; gap: 10px; align-items: end; }
+    .burn-slider-panel { display: grid; gap: 8px; min-width: 0; }
+    .burn-slider-head, .burn-slider-scale { display: flex; justify-content: space-between; gap: 10px; color: #8d989f; font-size: 11px; font-weight: 800; text-transform: uppercase; }
+    .burn-slider-track { position: relative; min-height: 28px; display: flex; align-items: center; }
+    .burn-range { width: 100%; min-width: 0; accent-color: #d5f55f; }
+    .break-even-marker { position: absolute; top: 2px; bottom: 2px; width: 2px; transform: translateX(-1px); background: #ffd070; box-shadow: 0 0 0 1px #111316, 0 0 0 4px rgba(255, 208, 112, .18); pointer-events: none; }
+    .burn-slider-note { color: #a8b2b8; font-size: 12px; line-height: 1.4; }
     .receive-address { display: grid; gap: 8px; }
     .address-box { border: 1px solid #2f363c; border-radius: 8px; padding: 11px; background: #111316; }
     .panel-head { display: flex; justify-content: space-between; gap: 12px; align-items: center; margin-bottom: 12px; }
@@ -567,6 +580,7 @@ const INDEX_HTML: &str = r#"<!doctype html>
     .mempool-strip { display: flex; gap: 8px; overflow-x: auto; padding-bottom: 4px; }
     .mempool-item { flex: 0 0 220px; }
     @media (max-width: 920px) { .setup-grid, .wallet-grid, .mining-grid, .detail-grid { grid-template-columns: 1fr; } }
+    @media (max-width: 920px) { .mining-form { grid-template-columns: 1fr; } }
     @media (max-width: 760px) {
       .app-shell { grid-template-columns: 1fr; }
       .sidebar { position: sticky; z-index: 5; bottom: 0; top: auto; height: auto; flex-direction: row; justify-content: space-between; padding: 8px; border-right: 0; border-bottom: 1px solid #262b2f; }
@@ -583,7 +597,7 @@ const INDEX_HTML: &str = r#"<!doctype html>
       .block-card { flex-basis: 108px; }
     }
   </style>
-  <script defer src="/assets/luun-ui.js?v=31"></script>
+  <script defer src="/assets/luun-ui.js?v=32"></script>
   <script defer src="/assets/alpine.min.js"></script>
 </head>
 <body x-data="luunApp()" x-init="init()" x-cloak>
@@ -622,7 +636,10 @@ const INDEX_HTML: &str = r#"<!doctype html>
 
     <section x-show="tab === 'wallet'">
       <div class="page-title">
-        <div class="muted">Balance <strong x-text="status.wallet_balance ?? '-'"></strong></div>
+        <div class="wallet-balance-line">
+          <span class="tx-label">Balance</span>
+          <span class="tx-value money">LUUN <span x-text="status.wallet_balance ?? '-'"></span></span>
+        </div>
       </div>
       <div class="wallet-grid">
         <div class="wallet-actions">
@@ -687,10 +704,21 @@ const INDEX_HTML: &str = r#"<!doctype html>
         </div>
         <div class="panel">
           <h3>Mining</h3>
-          <form @submit.prevent="saveBurn">
-            <label>LUUN per block<input x-model.number="burnAmountDraft" @input="burnAmountDirty = true" type="number" min="0"></label>
-            <label>Fee<input :value="automaticBurnFeeDraft()" type="number" readonly></label>
-            <button class="primary" type="submit">Save</button>
+          <form class="mining-form" @submit.prevent="saveBurn">
+            <div class="burn-fields">
+              <label>LUUN per block<input x-model.number="burnAmountDraft" @input="burnAmountDirty = true" type="number" min="0" :max="burnSliderMax()"></label>
+              <label>Fee<input x-model.number="burnFeeDraft" @input="burnAmountDirty = true" type="number" min="0"></label>
+              <button class="primary" type="submit">Save</button>
+            </div>
+            <div class="burn-slider-panel">
+              <div class="burn-slider-head"><span>Burn range</span><span><span x-text="burnAmountDraft"></span> LUUN</span></div>
+              <div class="burn-slider-track">
+                <input class="burn-range" x-model.number="burnAmountDraft" @input="burnAmountDirty = true" type="range" min="0" :max="burnSliderMax()" step="1">
+                <div class="break-even-marker" :style="breakEvenStyle()" title="Estimated break-even burn"></div>
+              </div>
+              <div class="burn-slider-scale"><span>0</span><span x-text="`${burnSliderMax()} LUUN`"></span></div>
+              <div class="burn-slider-note" x-text="burnBreakEvenLabel()"></div>
+            </div>
           </form>
         </div>
       </div>
@@ -915,7 +943,7 @@ mod tests {
     use crate::adapters::{config_store, config_store::UiConfig};
 
     use super::{
-        TransferForm, dev_seed_verify_bypass_allowed, persist_burn_per_block_config,
+        TransferForm, dev_seed_verify_bypass_allowed, persist_burn_settings_config,
         validate_transfer_form,
     };
 
@@ -926,7 +954,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn burn_rate_config_persistence_updates_config_file() {
+    async fn burn_settings_config_persistence_updates_config_file() {
         let dir = tempfile::tempdir().unwrap();
         let config_path = dir.path().join("config.json");
         let ui_config = Arc::new(Mutex::new(UiConfig {
@@ -936,12 +964,13 @@ mod tests {
         let initial_config = ui_config.lock().await.clone();
         config_store::save(&config_path, &initial_config).expect("initial config should save");
 
-        persist_burn_per_block_config(&ui_config, &config_path, 50)
+        persist_burn_settings_config(&ui_config, &config_path, 50, 3)
             .await
             .unwrap();
         let config = config_store::load_or_create(&config_path).unwrap();
 
         assert_eq!(config.burn_per_block, 50);
+        assert_eq!(config.burn_fee, 3);
     }
 
     #[test]
