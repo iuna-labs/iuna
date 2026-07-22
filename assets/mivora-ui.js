@@ -19,6 +19,8 @@ window.mivoraApp = function mivoraApp() {
     walletVerified: false,
     setupFeedback: null,
     burnAmount: 0,
+    burnAmountDraft: 0,
+    burnAmountDirty: false,
     transferTo: "",
     transferAmount: 25,
     peerAddress: "",
@@ -260,6 +262,9 @@ window.mivoraApp = function mivoraApp() {
         this.mempool = mempool;
         this.peers = peers;
         this.burnAmount = status.mining?.burn_per_block ?? this.burnAmount;
+        if (!this.burnAmountDirty) {
+          this.burnAmountDraft = this.burnAmount;
+        }
         this.lastUpdated = new Date();
       } catch (error) {
         this.showFlash(error.message, "error");
@@ -398,11 +403,15 @@ window.mivoraApp = function mivoraApp() {
 
     async saveBurn() {
       try {
+        const amount = Math.max(0, Math.trunc(Number(this.burnAmountDraft) || 0));
+        this.burnAmountDraft = amount;
         await this.postForm(
           "/api/settings/burn-per-block",
-          { amount: this.burnAmount || 0 },
-          `Burn rate set to ${this.burnAmount || 0} coin(s) per block`
+          { amount },
+          `Burn rate set to ${amount} coin(s) per block`
         );
+        this.burnAmountDirty = false;
+        this.burnAmount = amount;
       } catch (error) {
         this.showFlash(error.message, "error");
       }

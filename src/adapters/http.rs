@@ -536,7 +536,7 @@ const INDEX_HTML: &str = r#"<!doctype html>
       .block-card { flex-basis: 108px; }
     }
   </style>
-  <script defer src="/assets/mivora-ui.js?v=22"></script>
+  <script defer src="/assets/mivora-ui.js?v=23"></script>
   <script defer src="/assets/alpine.min.js"></script>
 </head>
 <body x-data="mivoraApp()" x-init="init()" x-cloak>
@@ -672,7 +672,7 @@ const INDEX_HTML: &str = r#"<!doctype html>
         <div class="panel">
           <h3>Mining</h3>
           <form @submit.prevent="saveBurn">
-            <label>Coins per block<input x-model.number="burnAmount" type="number" min="0"></label>
+            <label>Coins per block<input x-model.number="burnAmountDraft" @input="burnAmountDirty = true" type="number" min="0"></label>
             <button class="primary" type="submit">Save</button>
           </form>
         </div>
