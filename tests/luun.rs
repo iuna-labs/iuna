@@ -1,6 +1,6 @@
 use std::collections::BTreeMap;
 
-use mivora::{
+use luun::{
     adapters::chain_store::SqliteChainStore,
     app::{DEFAULT_BURN_PER_BLOCK, InMemoryNetwork, NodeConfig, NodeCore, PeerBook, PeerDirection},
     domain::{
@@ -190,7 +190,7 @@ fn forged_transaction_is_rejected() {
     let mut ledger = Ledger::new(allocations, 10);
 
     let mut forged = bob.burn(10, 1);
-    if let mivora::domain::Transaction::Burn { from, .. } = &mut forged {
+    if let luun::domain::Transaction::Burn { from, .. } = &mut forged {
         *from = alice.address().to_string();
     }
 
@@ -209,7 +209,7 @@ fn block_with_forged_transaction_is_rejected() {
         .unwrap();
 
     let mut block = ledger.mine_next_block(&alice, 1).unwrap();
-    if let mivora::domain::Transaction::Burn { signature, .. } = &mut block.transactions[0] {
+    if let luun::domain::Transaction::Burn { signature, .. } = &mut block.transactions[0] {
         signature.push_str("00");
     }
     block.vdf_output = run_vdf(&block.vdf_seed(), block.vdf_rounds);
@@ -220,7 +220,7 @@ fn block_with_forged_transaction_is_rejected() {
 }
 
 #[test]
-fn block_reward_is_fixed_at_one_hundred_coins() {
+fn block_reward_is_fixed_at_one_hundred_luun() {
     let alice = Wallet::from_seed("alice");
     let mut allocations = BTreeMap::new();
     allocations.insert(alice.address().to_string(), 1_000);
@@ -559,9 +559,7 @@ fn setting_burn_rate_after_running_at_zero_adds_mempool_burn() {
 
     let mut bob_node = node("bob", bob.clone(), allocations);
     bob_node
-        .receive(mivora::app::GossipEnvelope::ChainSnapshot(
-            ledger.snapshot(),
-        ))
+        .receive(luun::app::GossipEnvelope::ChainSnapshot(ledger.snapshot()))
         .unwrap();
 
     let skipped = bob_node.automatic_mine_once(2);
@@ -594,9 +592,7 @@ fn automatic_mining_waits_when_wallet_is_not_selected_leader() {
     let mut bob_node = node("bob", bob.clone(), allocations);
     bob_node.set_burn_per_block(10).unwrap();
     bob_node
-        .receive(mivora::app::GossipEnvelope::Block(
-            ledger.chain()[1].clone(),
-        ))
+        .receive(luun::app::GossipEnvelope::Block(ledger.chain()[1].clone()))
         .unwrap();
 
     let outcome = bob_node.automatic_mine_once(2);
@@ -870,7 +866,7 @@ fn joined_nodes_import_transfer_block_and_every_wallet_mines() {
         block5
             .transactions
             .iter()
-            .any(|tx| matches!(tx, mivora::domain::Transaction::Transfer { to, amount, .. } if to == bob.address() && *amount == 30))
+            .any(|tx| matches!(tx, luun::domain::Transaction::Transfer { to, amount, .. } if to == bob.address() && *amount == 30))
     );
     mined_by.push(block5.miner.clone());
     let block5_outbox = network.node_mut("a").unwrap().drain_outbox();
@@ -1112,7 +1108,7 @@ fn mined_block_gossip_does_not_include_full_chain_snapshot() {
     assert_eq!(burn_outbox.len(), 1);
     assert!(matches!(
         burn_outbox[0],
-        mivora::app::GossipEnvelope::Transaction(_)
+        luun::app::GossipEnvelope::Transaction(_)
     ));
 
     let work = plan.work.unwrap();
@@ -1125,7 +1121,7 @@ fn mined_block_gossip_does_not_include_full_chain_snapshot() {
     assert_eq!(block_outbox.len(), 1);
     assert!(matches!(
         block_outbox[0],
-        mivora::app::GossipEnvelope::Block(_)
+        luun::app::GossipEnvelope::Block(_)
     ));
 }
 
@@ -1145,13 +1141,13 @@ fn received_transaction_is_rebroadcast_to_other_peers_without_networking() {
     let tx = carol_node.burn(25).unwrap();
     carol_node.drain_outbox();
 
-    hub.receive(mivora::app::GossipEnvelope::Transaction(tx.clone()))
+    hub.receive(luun::app::GossipEnvelope::Transaction(tx.clone()))
         .unwrap();
     let forwarded = hub.drain_outbox();
     assert_eq!(forwarded.len(), 1);
     assert!(matches!(
         forwarded[0],
-        mivora::app::GossipEnvelope::Transaction(_)
+        luun::app::GossipEnvelope::Transaction(_)
     ));
 
     for envelope in forwarded {
@@ -1165,7 +1161,7 @@ fn received_transaction_is_rebroadcast_to_other_peers_without_networking() {
             .any(|pending| pending.signature() == tx.signature())
     );
 
-    hub.receive(mivora::app::GossipEnvelope::Transaction(tx))
+    hub.receive(luun::app::GossipEnvelope::Transaction(tx))
         .unwrap();
     assert!(hub.drain_outbox().is_empty());
 }
@@ -1184,14 +1180,14 @@ fn mempool_gossip_repairs_future_nonce_gap_without_networking() {
     alice_node.drain_outbox();
 
     bob_node
-        .receive(mivora::app::GossipEnvelope::Transaction(second.clone()))
+        .receive(luun::app::GossipEnvelope::Transaction(second.clone()))
         .unwrap();
     assert_eq!(bob_node.ledger().pending().len(), 1);
 
     let mut requests = Vec::new();
     for envelope in alice_node.mempool_gossip() {
         match envelope {
-            mivora::app::GossipEnvelope::Inventory { txs, blocks } => {
+            luun::app::GossipEnvelope::Inventory { txs, blocks } => {
                 requests.extend(bob_node.missing_inventory_requests(&txs, &blocks));
             }
             other => bob_node.receive(other).unwrap(),
@@ -1199,9 +1195,9 @@ fn mempool_gossip_repairs_future_nonce_gap_without_networking() {
     }
     for request in requests {
         match request {
-            mivora::app::GossipEnvelope::TransactionRequest { signatures } => {
+            luun::app::GossipEnvelope::TransactionRequest { signatures } => {
                 bob_node
-                    .receive(mivora::app::GossipEnvelope::Transactions {
+                    .receive(luun::app::GossipEnvelope::Transactions {
                         transactions: alice_node.transactions_by_signature(&signatures),
                     })
                     .unwrap();
@@ -1238,14 +1234,11 @@ fn received_block_is_rebroadcast_to_other_peers_without_networking() {
     let block = miner.mine_one_at(1).unwrap();
     miner.drain_outbox();
 
-    hub.receive(mivora::app::GossipEnvelope::Block(block.clone()))
+    hub.receive(luun::app::GossipEnvelope::Block(block.clone()))
         .unwrap();
     let forwarded = hub.drain_outbox();
     assert_eq!(forwarded.len(), 1);
-    assert!(matches!(
-        forwarded[0],
-        mivora::app::GossipEnvelope::Block(_)
-    ));
+    assert!(matches!(forwarded[0], luun::app::GossipEnvelope::Block(_)));
 
     for envelope in forwarded {
         carol_node.receive(envelope).unwrap();
@@ -1256,7 +1249,7 @@ fn received_block_is_rebroadcast_to_other_peers_without_networking() {
         miner.ledger().status().tip_hash
     );
 
-    hub.receive(mivora::app::GossipEnvelope::Block(block))
+    hub.receive(luun::app::GossipEnvelope::Block(block))
         .unwrap();
     assert!(hub.drain_outbox().is_empty());
 }
@@ -1284,7 +1277,7 @@ fn imported_snapshot_blocks_are_rebroadcast_without_networking() {
     let outbox = hub.drain_outbox();
     assert_eq!(outbox.len(), 1);
     match &outbox[0] {
-        mivora::app::GossipEnvelope::Blocks { blocks } => {
+        luun::app::GossipEnvelope::Blocks { blocks } => {
             assert_eq!(blocks.len(), 2);
             assert_eq!(blocks[0].height, 1);
             assert_eq!(blocks[1].height, 2);
@@ -1515,8 +1508,8 @@ fn fork_choice_preflight_rejects_invalid_fork_before_vrf_scoring() {
     let mut invalid_snapshot = remote.snapshot();
     if let Some(transaction) = invalid_snapshot.blocks[6].transactions.first_mut() {
         match transaction {
-            mivora::domain::Transaction::Burn { signature, .. }
-            | mivora::domain::Transaction::Transfer { signature, .. } => signature.push_str("00"),
+            luun::domain::Transaction::Burn { signature, .. }
+            | luun::domain::Transaction::Transfer { signature, .. } => signature.push_str("00"),
         }
     }
 
@@ -1720,7 +1713,7 @@ fn node_receives_chain_snapshot_envelope_when_joining_without_tcp() {
     let mut bob_node = node("bob", bob, shared_genesis);
 
     bob_node
-        .receive(mivora::app::GossipEnvelope::ChainSnapshot(
+        .receive(luun::app::GossipEnvelope::ChainSnapshot(
             alice_node.chain_snapshot(),
         ))
         .unwrap();

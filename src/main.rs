@@ -8,7 +8,7 @@ use std::{
 };
 
 use anyhow::{Context, Result, bail};
-use mivora::{
+use luun::{
     adapters::{chain_store::SqliteChainStore, config_store, http, p2p, wallet_store},
     app::{NodeCore, PeerBook, SharedNode, SharedPeerBook, now_ms},
     domain::{Amount, ChainSnapshot, GenesisBurn, Ledger, run_vdf},
@@ -52,14 +52,14 @@ async fn main() -> Result<()> {
         persist_chain_snapshot(&chain_store, initial_snapshot).await?;
     }
 
-    println!("mivora wallet: {}", node.lock().await.wallet_address());
+    println!("luun wallet: {}", node.lock().await.wallet_address());
     println!("wallet file: {}", wallet_path.display());
     println!("config file: {}", config_path.display());
     println!("chain database: {}", chain_store.path().display());
     println!("management UI: http://{}", opts.http_addr);
     println!("p2p listener: {}", opts.p2p_addr);
     println!(
-        "automatic mining: VDF-driven, burning {} coins per block",
+        "automatic mining: VDF-driven, burning {} LUUN per block",
         initial_burn_per_block
     );
 
@@ -166,7 +166,7 @@ impl CliOptions {
             peers: Vec::new(),
             join_peers: Vec::new(),
             chain_mode: ChainMode::Setup,
-            data_dir: PathBuf::from(".mivora"),
+            data_dir: PathBuf::from(".luun"),
         };
 
         let raw_args = args.into_iter().collect::<Vec<_>>();
@@ -187,7 +187,7 @@ impl CliOptions {
                 }
                 "--wallet-seed" => {
                     bail!(
-                        "--wallet-seed was removed; wallets are stored in --wallet <path> or .mivora/wallet.json"
+                        "--wallet-seed was removed; wallets are stored in --wallet <path> or .luun/wallet.json"
                     )
                 }
                 "--http" => {
@@ -277,11 +277,11 @@ fn print_help() {
 }
 
 fn help_text() -> &'static str {
-    "mivora\n\n\
+    "luun\n\n\
          Usage:\n\
-           mivora [options]\n\
-           mivora --genesis [options]\n\
-           mivora --join <addr:port> [options]\n\n\
+           luun [options]\n\
+           luun --genesis [options]\n\
+           luun --join <addr:port> [options]\n\n\
          Options:\n\
            --genesis                     Create a new chain from an existing setup wallet\n\
            --wallet <path>               Wallet file (default <data-dir>/wallet.json)\n\
@@ -291,7 +291,7 @@ fn help_text() -> &'static str {
            --join <addr:port>            Fetch chain snapshot from this peer before mining\n\
            --data-dir <path>             Local wallet directory\n\n\
          Environment:\n\
-           MIVORA_DEV_SKIP_SEED_VERIFY=1 Show a setup button to skip seed verification\n"
+           LUUN_DEV_SKIP_SEED_VERIFY=1 Show a setup button to skip seed verification\n"
 }
 
 fn snapshot_height(snapshot: &ChainSnapshot) -> u64 {
@@ -321,7 +321,7 @@ fn start_genesis_ledger(wallet_address: &str) -> Result<Ledger> {
 }
 
 fn measure_initial_vdf_rounds() -> u32 {
-    let seed = "mivora-vdf-calibration";
+    let seed = "luun-vdf-calibration";
     let (measured_rounds, elapsed) = measure_vdf_rounds(
         seed,
         VDF_MEASUREMENT_INITIAL_ROUNDS,
@@ -517,7 +517,7 @@ async fn persist_chain_snapshot(store: &SqliteChainStore, snapshot: ChainSnapsho
 mod tests {
     use std::{collections::BTreeMap, sync::Arc, time::Duration};
 
-    use mivora::{
+    use luun::{
         adapters::{chain_store::SqliteChainStore, config_store::UiConfig},
         app::{DEFAULT_BURN_PER_BLOCK, NodeCore},
         domain::{GenesisBurn, Ledger, Wallet},
@@ -538,11 +538,11 @@ mod tests {
 
     #[test]
     fn help_mentions_dev_seed_verify_bypass_env() {
-        assert!(help_text().contains("MIVORA_DEV_SKIP_SEED_VERIFY=1"));
+        assert!(help_text().contains("LUUN_DEV_SKIP_SEED_VERIFY=1"));
         assert!(help_text().contains("skip seed verification"));
     }
 
-    fn ledger_with_one_spendable_coin(wallet: &Wallet) -> Ledger {
+    fn ledger_with_one_spendable_luun(wallet: &Wallet) -> Ledger {
         let mut genesis = BTreeMap::new();
         genesis.insert(wallet.address().to_string(), 2);
         Ledger::new_with_genesis_burns(genesis, vec![GenesisBurn::new(wallet.address(), 1)], 1)
@@ -550,7 +550,7 @@ mod tests {
     }
 
     fn ledger_with_one_mined_block(wallet: &Wallet) -> Ledger {
-        let mut ledger = ledger_with_one_spendable_coin(wallet);
+        let mut ledger = ledger_with_one_spendable_luun(wallet);
         ledger
             .submit_transaction(wallet.burn(1, ledger.next_nonce(wallet.address())))
             .unwrap();
@@ -659,7 +659,7 @@ mod tests {
     }
 
     #[test]
-    fn http_management_port_defaults_to_mivora_port() {
+    fn http_management_port_defaults_to_luun_port() {
         let opts = parse(&[]).unwrap().unwrap();
         assert_eq!(opts.http_addr.to_string(), "127.0.0.1:18661");
     }
@@ -749,14 +749,13 @@ mod tests {
 
     #[test]
     fn vdf_measurement_keeps_sampling_until_elapsed_is_useful() {
-        let (rounds, elapsed) = measure_vdf_rounds(
-            "mivora-test-vdf-calibration",
-            1,
-            Duration::from_millis(1),
-            1_000_000,
-        );
+        let min_elapsed = Duration::from_millis(1);
+        let max_rounds = 1_000_000;
+        let (rounds, elapsed) =
+            measure_vdf_rounds("luun-test-vdf-calibration", 1, min_elapsed, max_rounds);
 
-        assert!(rounds > 1);
+        assert!(rounds >= 1);
+        assert!(elapsed >= min_elapsed || rounds >= max_rounds);
         assert!(elapsed > Duration::ZERO);
     }
 
@@ -867,7 +866,7 @@ VALUES (1, 4, 'bad-tip', '{"not":"a chain snapshot"}', 0)
         let dir = tempdir().unwrap();
         let store = SqliteChainStore::open(dir.path().join("chain.sqlite3")).unwrap();
         let wallet = Wallet::from_seed("background-persistence");
-        let ledger = ledger_with_one_spendable_coin(&wallet);
+        let ledger = ledger_with_one_spendable_luun(&wallet);
         let node = Arc::new(Mutex::new(NodeCore::from_ledger(
             wallet.clone(),
             ledger,

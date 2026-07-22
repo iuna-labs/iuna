@@ -102,7 +102,7 @@ pub async fn serve(
     let app = Router::new()
         .route("/", get(index))
         .route("/assets/alpine.min.js", get(alpine_js))
-        .route("/assets/mivora-ui.js", get(app_js))
+        .route("/assets/luun-ui.js", get(app_js))
         .route("/api/status", get(api_status))
         .route("/api/blocks", get(api_blocks))
         .route("/api/config", get(api_config).post(api_config_form))
@@ -149,7 +149,7 @@ async fn app_js() -> impl IntoResponse {
             header::CONTENT_TYPE,
             "application/javascript; charset=utf-8",
         )],
-        include_str!("../../assets/mivora-ui.js"),
+        include_str!("../../assets/luun-ui.js"),
     )
 }
 
@@ -368,7 +368,7 @@ fn wallet_setup_json(result: Result<WalletSetupResponse>) -> Json<WalletSetupRes
 }
 
 fn dev_seed_verify_bypass_enabled() -> bool {
-    dev_seed_verify_bypass_allowed(std::env::var_os("MIVORA_DEV_SKIP_SEED_VERIFY").is_some())
+    dev_seed_verify_bypass_allowed(std::env::var_os("LUUN_DEV_SKIP_SEED_VERIFY").is_some())
 }
 
 fn dev_seed_verify_bypass_allowed(env_present: bool) -> bool {
@@ -428,7 +428,7 @@ const INDEX_HTML: &str = r#"<!doctype html>
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
-  <title>Mivora</title>
+  <title>Luun</title>
   <style>
     [x-cloak] { display: none !important; }
     :root {
@@ -577,13 +577,13 @@ const INDEX_HTML: &str = r#"<!doctype html>
       .block-card { flex-basis: 108px; }
     }
   </style>
-  <script defer src="/assets/mivora-ui.js?v=31"></script>
+  <script defer src="/assets/luun-ui.js?v=31"></script>
   <script defer src="/assets/alpine.min.js"></script>
 </head>
-<body x-data="mivoraApp()" x-init="init()" x-cloak>
+<body x-data="luunApp()" x-init="init()" x-cloak>
   <div class="app-shell">
-    <aside class="sidebar" aria-label="Mivora navigation">
-      <div class="brand-mark" title="Mivora">M</div>
+    <aside class="sidebar" aria-label="Luun navigation">
+      <div class="brand-mark" title="Luun">L</div>
       <nav class="side-nav">
         <button class="nav-button" :class="{ active: tab === 'wallet' }" @click="setTab('wallet')" type="button" title="Wallet" aria-label="Wallet">
           <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M3 7h16a2 2 0 0 1 2 2v8a2 2 0 0 1-2 2H3z"></path><path d="M3 7V5a2 2 0 0 1 2-2h12"></path><path d="M16 13h3"></path></svg>
@@ -607,7 +607,7 @@ const INDEX_HTML: &str = r#"<!doctype html>
     <main class="content">
     <header>
       <div>
-        <h1 x-text="pageTitle()">Mivora</h1>
+        <h1 x-text="pageTitle()">Luun</h1>
       </div>
       <div class="muted" x-text="lastUpdatedLabel()"></div>
     </header>
@@ -650,8 +650,8 @@ const INDEX_HTML: &str = r#"<!doctype html>
               <div class="wallet-tx-row" :class="{ pending: tx.status === 'pending' }">
                 <span class="pill" :class="tx.kind" x-text="tx.direction"></span>
                 <div class="wallet-tx-main">
-                  <div class="tx-field"><span class="tx-label">Amount</span><span class="tx-value money">MVR$ <span x-text="tx.amount"></span></span></div>
-                  <div class="tx-field"><span class="tx-label">Fee</span><span class="tx-value money">MVR$ <span x-text="tx.fee ?? 0"></span></span></div>
+                  <div class="tx-field"><span class="tx-label">Amount</span><span class="tx-value money">LUUN <span x-text="tx.amount"></span></span></div>
+                  <div class="tx-field"><span class="tx-label">Fee</span><span class="tx-value money">LUUN <span x-text="tx.fee ?? 0"></span></span></div>
                   <div class="tx-field"><span class="tx-label">Status</span><span class="tx-value text" x-text="txTitle(tx)"></span></div>
                   <div class="tx-field"><span class="tx-label">From</span><code class="tx-value hash" x-text="short(tx.from)"></code></div>
                   <div class="tx-field" x-show="tx.to"><span class="tx-label">To</span><code class="tx-value hash" x-text="short(tx.to)"></code></div>
@@ -682,7 +682,7 @@ const INDEX_HTML: &str = r#"<!doctype html>
         <div class="panel">
           <h3>Mining</h3>
           <form @submit.prevent="saveBurn">
-            <label>Coins per block<input x-model.number="burnAmountDraft" @input="burnAmountDirty = true" type="number" min="0"></label>
+            <label>LUUN per block<input x-model.number="burnAmountDraft" @input="burnAmountDirty = true" type="number" min="0"></label>
             <label>Fee<input :value="automaticBurnFeeDraft()" type="number" readonly></label>
             <button class="primary" type="submit">Save</button>
           </form>
@@ -759,8 +759,8 @@ const INDEX_HTML: &str = r#"<!doctype html>
                 <template x-for="tx in selectedBlock.transactions" :key="tx.signature">
                   <div class="tx-card">
                     <span class="pill" :class="tx.kind" x-text="tx.kind"></span>
-                    <div class="tx-field"><span class="tx-label">Amount</span><span class="tx-value money">MVR$ <span x-text="tx.amount"></span></span></div>
-                    <div class="tx-field"><span class="tx-label">Fee</span><span class="tx-value money">MVR$ <span x-text="tx.fee ?? 0"></span></span></div>
+                    <div class="tx-field"><span class="tx-label">Amount</span><span class="tx-value money">LUUN <span x-text="tx.amount"></span></span></div>
+                    <div class="tx-field"><span class="tx-label">Fee</span><span class="tx-value money">LUUN <span x-text="tx.fee ?? 0"></span></span></div>
                     <div class="tx-field"><span class="tx-label">From</span><code class="tx-value hash" x-text="short(tx.from)"></code></div>
                     <div class="tx-field" x-show="tx.to"><span class="tx-label">To</span><code class="tx-value hash" x-text="short(tx.to)"></code></div>
                     <div class="tx-field"><span class="tx-label">Nonce</span><span class="tx-value number" x-text="tx.nonce"></span></div>
@@ -780,8 +780,8 @@ const INDEX_HTML: &str = r#"<!doctype html>
             <template x-for="tx in mempool" :key="tx.signature">
               <div class="mempool-item">
                 <span class="pill" :class="tx.kind" x-text="tx.kind"></span>
-                <div class="tx-field"><span class="tx-label">Amount</span><span class="tx-value money">MVR$ <span x-text="tx.amount"></span></span></div>
-                <div class="tx-field"><span class="tx-label">Fee</span><span class="tx-value money">MVR$ <span x-text="tx.fee ?? 0"></span></span></div>
+                <div class="tx-field"><span class="tx-label">Amount</span><span class="tx-value money">LUUN <span x-text="tx.amount"></span></span></div>
+                <div class="tx-field"><span class="tx-label">Fee</span><span class="tx-value money">LUUN <span x-text="tx.fee ?? 0"></span></span></div>
                 <div class="tx-field"><span class="tx-label">From</span><code class="tx-value hash" x-text="short(tx.from)"></code></div>
                 <div class="tx-field" x-show="tx.to"><span class="tx-label">To</span><code class="tx-value hash" x-text="short(tx.to)"></code></div>
                 <div class="tx-field"><span class="tx-label">Nonce</span><span class="tx-value number" x-text="tx.nonce"></span></div>
@@ -797,7 +797,7 @@ const INDEX_HTML: &str = r#"<!doctype html>
   <div class="setup-overlay" x-show="showingSetup()" x-transition.opacity role="dialog" aria-modal="true" aria-labelledby="setup-title">
     <section class="setup-modal">
       <div class="setup-modal-head">
-        <div class="setup-welcome">Welcome to Mivora</div>
+        <div class="setup-welcome">Welcome to Luun</div>
         <h2 id="setup-title">Initial Setup</h2>
         <div class="setup-copy">Confirm the local wallet address and add any peers before this node starts from a saved configuration.</div>
       </div>

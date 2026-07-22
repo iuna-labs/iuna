@@ -19,7 +19,7 @@ pub type SharedPeerBook = Arc<Mutex<PeerBook>>;
 pub const DEFAULT_BURN_PER_BLOCK: Amount = 0;
 pub const DEFAULT_VDF_ROUNDS: u32 = 67_000_000;
 pub const PROTOCOL_VERSION: u32 = 1;
-pub const NETWORK_ID: &str = "mivora-devnet-v0";
+pub const NETWORK_ID: &str = "luun-devnet-v0";
 pub const BLOCK_REQUEST_LIMIT: usize = 128;
 const IMPORT_REBROADCAST_LIMIT: usize = 128;
 

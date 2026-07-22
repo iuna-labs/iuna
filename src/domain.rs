@@ -19,6 +19,7 @@ const MAX_VDF_RETARGET_STEP_PERCENT: u128 = 10;
 const FORK_FINALITY_DEPTH: u64 = 6;
 const VDF_MODULUS: u128 = 4_611_685_975_477_714_963;
 const VDF_CHALLENGE_MIN: u64 = 1_073_741_827;
+const WALLET_SEED_DOMAIN: &str = "luun-wallet-seed";
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct Wallet {
@@ -28,7 +29,7 @@ pub struct Wallet {
 
 impl Wallet {
     pub fn from_seed(seed: &str) -> Self {
-        let seed_hash = Sha256::digest(format!("mivora-wallet-seed:{seed}").as_bytes());
+        let seed_hash = Sha256::digest(format!("{WALLET_SEED_DOMAIN}:{seed}").as_bytes());
         let mut signing_seed = [0_u8; 32];
         signing_seed.copy_from_slice(&seed_hash);
         let signing_key = SigningKey::from_bytes(&signing_seed);
@@ -200,7 +201,7 @@ pub enum Transaction {
 impl Transaction {
     pub fn genesis_burn(from: impl Into<String>, amount: Amount) -> Self {
         let from = from.into();
-        let signature = hex_hash(format!("mivora-genesis-burn:{from}:{amount}"));
+        let signature = hex_hash(format!("luun-genesis-burn:{from}:{amount}"));
         Self::Burn {
             from,
             amount,
@@ -404,7 +405,7 @@ pub struct LeaderProof {
 impl LeaderProof {
     fn rank(&self) -> String {
         hex_hash(format!(
-            "mivora-leader-rank:{}:{}",
+            "luun-leader-rank:{}:{}",
             self.ticket_id, self.signature
         ))
     }
@@ -423,7 +424,7 @@ struct LeaderProofPayload {
 impl LeaderProofPayload {
     fn canonical(&self) -> String {
         format!(
-            "mivora-leader-proof:{}:{}:{}:{}:{}:{}",
+            "luun-leader-proof:{}:{}:{}:{}:{}:{}",
             self.height,
             self.prev_hash,
             self.vdf_output,
@@ -537,7 +538,7 @@ pub struct LaunchProfile {
 impl Default for LaunchProfile {
     fn default() -> Self {
         Self {
-            profile_id: "mivora-devnet-v2".to_string(),
+            profile_id: "luun-devnet-v2".to_string(),
             ticket_maturity_delay_heights: DEFAULT_TICKET_MATURITY_DELAY,
             max_pending_transactions: MAX_PENDING_TRANSACTIONS,
             max_block_transactions: MAX_BLOCK_TRANSACTIONS,
@@ -553,7 +554,7 @@ fn default_max_block_bytes() -> usize {
 impl LaunchProfile {
     pub fn hash(&self) -> String {
         hex_hash(format!(
-            "mivora-launch-profile:{}:{}:{}:{}:{}",
+            "luun-launch-profile:{}:{}:{}:{}:{}",
             self.profile_id,
             self.ticket_maturity_delay_heights,
             self.max_pending_transactions,
@@ -1355,7 +1356,7 @@ impl Ledger {
 
 fn ticket_rank(parent: &Block, target_height: u64, ticket: &BurnTicket) -> String {
     hex_hash(format!(
-        "mivora-ticket-rank:{}:{}:{}:{}:{}",
+        "luun-ticket-rank:{}:{}:{}:{}:{}",
         target_height, parent.hash, parent.vdf_output, ticket.id, ticket.amount
     ))
 }
@@ -1401,12 +1402,16 @@ fn genesis_tickets(
         return Ok(tickets);
     }
 
-    let Some((owner, amount)) = genesis_allocations.iter().find(|(_, amount)| **amount > 0) else {
+    let Some((owner, amount)) = genesis_allocations
+        .iter()
+        .rev()
+        .find(|(_, amount)| **amount > 0)
+    else {
         return Ok(Vec::new());
     };
     Ok(vec![BurnTicket {
         id: hex_hash(format!(
-            "mivora-genesis-ticket:{owner}:{amount}:{}",
+            "luun-genesis-ticket:{owner}:{amount}:{}",
             genesis.hash
         )),
         owner: owner.clone(),
@@ -1544,7 +1549,7 @@ fn verify_leader_signature(proof: &LeaderProof, payload: &LeaderProofPayload) ->
 }
 
 fn vdf_seed_for_child(prev_hash: &str, height: u64) -> String {
-    hex_hash(format!("mivora-vdf-child:{prev_hash}:{height}"))
+    hex_hash(format!("luun-vdf-child:{prev_hash}:{height}"))
 }
 
 fn apply_transaction(
@@ -1626,7 +1631,7 @@ fn build_genesis_block(
         .map(Transaction::canonical)
         .collect::<Vec<_>>()
         .join("|");
-    let vdf_output = hex_hash(format!("mivora-genesis-vdf:{genesis_allocations:?}:{txs}"));
+    let vdf_output = hex_hash(format!("luun-genesis-vdf:{genesis_allocations:?}:{txs}"));
     let mut genesis = Block {
         height: 0,
         prev_hash: "0".repeat(64),
@@ -1751,14 +1756,14 @@ pub fn verify_vdf(seed: &str, rounds: u32, solution: &str) -> bool {
 }
 
 fn vdf_seed_element(seed: &str) -> u128 {
-    let digest = Sha256::digest(format!("mivora-vdf-seed:{seed}").as_bytes());
+    let digest = Sha256::digest(format!("luun-vdf-seed:{seed}").as_bytes());
     let mut bytes = [0_u8; 16];
     bytes.copy_from_slice(&digest[..16]);
     2 + (u128::from_be_bytes(bytes) % (VDF_MODULUS - 3))
 }
 
 fn vdf_challenge_prime(seed: &str, rounds: u32, output: u128) -> u64 {
-    let digest = Sha256::digest(format!("mivora-vdf-challenge:{seed}:{rounds}:{output:x}"));
+    let digest = Sha256::digest(format!("luun-vdf-challenge:{seed}:{rounds}:{output:x}"));
     let mut bytes = [0_u8; 8];
     bytes.copy_from_slice(&digest[..8]);
     let candidate = VDF_CHALLENGE_MIN + (u64::from_be_bytes(bytes) % VDF_CHALLENGE_MIN);

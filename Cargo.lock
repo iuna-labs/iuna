@@ -474,6 +474,22 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "0ceec5bc11778974d1bcb055b18002eba7f4b3518b6a0081b3af5f21666da9ad"
 
 [[package]]
+name = "luun"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "axum",
+ "ed25519-dalek",
+ "getrandom 0.2.17",
+ "rusqlite",
+ "serde",
+ "serde_json",
+ "sha2",
+ "tempfile",
+ "tokio",
+]
+
+[[package]]
 name = "matchit"
 version = "0.8.4"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -500,22 +516,6 @@ dependencies = [
  "libc",
  "wasi",
  "windows-sys",
-]
-
-[[package]]
-name = "mivora"
-version = "0.1.0"
-dependencies = [
- "anyhow",
- "axum",
- "ed25519-dalek",
- "getrandom 0.2.17",
- "rusqlite",
- "serde",
- "serde_json",
- "sha2",
- "tempfile",
- "tokio",
 ]
 
 [[package]]

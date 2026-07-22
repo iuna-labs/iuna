@@ -1,4 +1,4 @@
-window.mivoraApp = function mivoraApp() {
+window.luunApp = function luunApp() {
   return {
     tab: "wallet",
     status: {},
@@ -66,11 +66,11 @@ window.mivoraApp = function mivoraApp() {
 
     pageTitle() {
       return {
-        wallet: "Mivora",
+        wallet: "Luun",
         mining: "Mining",
         p2p: "P2P",
         chain: "Chain",
-      }[this.tab] || "Mivora";
+      }[this.tab] || "Luun";
     },
 
     showingSetup() {
@@ -408,7 +408,7 @@ window.mivoraApp = function mivoraApp() {
         await this.postForm(
           "/api/settings/burn-per-block",
           { amount },
-          `Burn rate set to ${amount} coin(s) per block`
+          `Burn rate set to ${amount} LUUN per block`
         );
         this.burnAmountDirty = false;
         this.burnAmount = amount;
@@ -431,7 +431,7 @@ window.mivoraApp = function mivoraApp() {
         await this.postForm(
           "/api/transfer",
           { to: this.transferTo, amount, fee },
-          `Queued transfer of ${amount} coin(s) to ${recipient} with ${fee} fee`
+          `Queued transfer of ${amount} LUUN to ${recipient} with ${fee} fee`
         );
         this.transferTo = "";
       } catch (error) {
