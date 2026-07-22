@@ -11,7 +11,6 @@ use crate::domain::Wallet;
 
 const WALLET_FILE_VERSION: u32 = 2;
 const GENERATED_SEED_WORDS: usize = 24;
-const IMPORT_SEED_WORD_COUNTS: [usize; 2] = [12, 24];
 const SEED_WORDS: &[&str] = &[
     "able", "acid", "acorn", "adapt", "agent", "anchor", "angle", "apple", "asset", "atlas",
     "badge", "balance", "beacon", "benefit", "binary", "bitter", "blanket", "border", "brave",
@@ -170,8 +169,8 @@ fn normalize_seed_phrase(seed_phrase: &str) -> Result<String> {
         .map(|word| word.trim().to_ascii_lowercase())
         .filter(|word| !word.is_empty())
         .collect::<Vec<_>>();
-    if !IMPORT_SEED_WORD_COUNTS.contains(&words.len()) {
-        bail!("seed phrase must contain 12 or 24 words");
+    if words.len() != GENERATED_SEED_WORDS {
+        bail!("seed phrase must contain 24 words");
     }
     for word in &words {
         if !word.chars().all(|ch| ch.is_ascii_lowercase()) {
@@ -297,7 +296,7 @@ mod tests {
 
         let wallet = replace_with_imported_seed_phrase(
             &path,
-            " Able  ACID acorn adapt agent anchor angle apple asset atlas badge balance ",
+            " Able  ACID acorn adapt agent anchor angle apple asset atlas badge balance beacon benefit binary bitter blanket border brave bright broker budget cactus canvas ",
         )
         .unwrap();
         let loaded = load_or_create(&path).unwrap();
@@ -305,7 +304,9 @@ mod tests {
         assert_eq!(wallet.address(), loaded.address());
         assert_eq!(
             setup_seed_phrase(&path).unwrap().as_deref(),
-            Some("able acid acorn adapt agent anchor angle apple asset atlas badge balance")
+            Some(
+                "able acid acorn adapt agent anchor angle apple asset atlas badge balance beacon benefit binary bitter blanket border brave bright broker budget cactus canvas"
+            )
         );
     }
 
@@ -316,7 +317,7 @@ mod tests {
 
         let error = replace_with_imported_seed_phrase(&path, "too few words").unwrap_err();
 
-        assert!(error.to_string().contains("12 or 24 words"));
+        assert!(error.to_string().contains("24 words"));
     }
 
     fn assert_recovery_words_verify(seed_phrase: &str, indexes: &[usize]) {

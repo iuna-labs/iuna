@@ -496,6 +496,11 @@ const INDEX_HTML: &str = r#"<!doctype html>
     .setup-feedback.error { color: #ffb1a8; background: #2a1717; border-color: #713434; }
     .setup-grid { width: 100%; display: grid; grid-template-columns: minmax(0, .9fr) minmax(320px, .7fr); gap: 12px; align-items: start; }
     .setup-section { border: 1px solid #2f363c; border-radius: 8px; padding: 13px; background: #111316; }
+    .setup-field { display: grid; gap: 6px; }
+    .setup-field-label { color: #8d989f; font-size: 11px; font-weight: 800; text-transform: uppercase; letter-spacing: 0; }
+    .setup-address-box { display: flex; justify-content: space-between; gap: 10px; align-items: center; }
+    .setup-address-box code { min-width: 0; }
+    .setup-address-box button { flex: 0 0 auto; }
     .setup-actions { display: flex; justify-content: flex-end; gap: 10px; margin-top: 14px; }
     .setup-peer-list { margin-top: 14px; display: grid; gap: 8px; }
     .setup-peer-row { display: flex; justify-content: space-between; gap: 12px; align-items: center; border: 1px solid #2f363c; border-radius: 8px; padding: 10px; background: #181b1f; }
@@ -503,7 +508,7 @@ const INDEX_HTML: &str = r#"<!doctype html>
     .segmented button { border-color: transparent; background: transparent; color: #9fa8ad; }
     .segmented button.active { background: #d5f55f; color: #15171a; }
     .seed-panel { display: grid; gap: 12px; }
-    .seed-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(132px, 1fr)); gap: 8px; }
+    .seed-grid { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 8px; }
     .seed-word { display: grid; grid-template-columns: 30px minmax(0, 1fr); gap: 7px; align-items: center; border: 1px solid #2f363c; border-radius: 6px; padding: 7px 8px; background: #181b1f; }
     .seed-word .index { color: #8d989f; font-size: 11px; font-weight: 800; }
     .seed-word .word { font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; font-weight: 800; color: #c7f5ea; }
@@ -574,6 +579,7 @@ const INDEX_HTML: &str = r#"<!doctype html>
       header { display: grid; }
       input { min-width: 0; width: 100%; }
       .switch input { width: auto; }
+      .seed-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); }
       .block-card { flex-basis: 108px; }
     }
   </style>
@@ -806,23 +812,31 @@ const INDEX_HTML: &str = r#"<!doctype html>
         <div class="setup-section seed-panel">
           <div class="panel-head">
             <h3>Wallet</h3>
-            <button type="button" @click="copyAddress">Copy</button>
           </div>
-          <div class="address-box"><code x-text="setupAddress()"></code></div>
           <div class="segmented" role="tablist" aria-label="Wallet setup mode">
             <button type="button" :class="{ active: setupWalletMode === 'create' }" @click="selectSetupWalletMode('create')">Create</button>
             <button type="button" :class="{ active: setupWalletMode === 'import' }" @click="selectSetupWalletMode('import')">Import</button>
           </div>
           <div x-show="setupWalletMode === 'create'" class="seed-panel">
+            <div class="setup-field">
+              <div class="setup-field-label">Address</div>
+              <div class="address-box setup-address-box">
+                <code x-text="setupAddress()"></code>
+                <button type="button" @click="copyAddress">Copy</button>
+              </div>
+            </div>
             <template x-if="setupSeedWords().length > 0 && setupSeedStep === 'write'">
               <div class="seed-panel">
-                <div class="seed-grid">
-                  <template x-for="(word, index) in setupSeedWords()" :key="index">
-                    <div class="seed-word">
-                      <span class="index" x-text="index + 1"></span>
-                      <span class="word" x-text="word"></span>
-                    </div>
-                  </template>
+                <div class="setup-field">
+                  <div class="setup-field-label">Recovery phrase</div>
+                  <div class="seed-grid">
+                    <template x-for="(word, index) in setupSeedWords()" :key="index">
+                      <div class="seed-word">
+                        <span class="index" x-text="index + 1"></span>
+                        <span class="word" x-text="word"></span>
+                      </div>
+                    </template>
+                  </div>
                 </div>
                 <div class="setup-actions">
                   <button type="button" class="subtle" @click="generateSetupSeed">Regenerate</button>
@@ -859,7 +873,7 @@ const INDEX_HTML: &str = r#"<!doctype html>
           </div>
           <div x-show="setupWalletMode === 'import'" class="seed-panel">
             <form @submit.prevent="importSetupSeed">
-              <label>Recovery phrase<textarea x-model="importSeedPhrase" autocomplete="off" spellcheck="false"></textarea></label>
+              <label>Recovery phrase<textarea x-model="importSeedPhrase" autocomplete="off" spellcheck="false" placeholder="24 words, separated by spaces or new lines"></textarea></label>
               <button class="primary" type="submit">Import</button>
             </form>
             <template x-if="walletVerified">
