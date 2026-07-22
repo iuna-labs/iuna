@@ -431,7 +431,9 @@ const INDEX_HTML: &str = r#"<!doctype html>
     body { margin: 0; min-height: 100vh; background: #0f1012; color: #e8edf0; }
     .app-shell { min-height: 100vh; display: grid; grid-template-columns: 84px minmax(0, 1fr); }
     .sidebar { position: sticky; top: 0; height: 100vh; display: flex; flex-direction: column; align-items: center; gap: 20px; padding: 16px 10px; background: #15171a; border-right: 1px solid #262b2f; }
-    .brand-mark { width: 44px; height: 44px; display: grid; place-items: center; border-radius: 8px; background: #d5f55f; color: #11140c; font-size: 22px; font-weight: 900; }
+    .brand-mark { width: 44px; height: 44px; display: grid; place-items: center; border-radius: 8px; background: #d5f55f; color: #11140c; font-size: 22px; font-weight: 900; user-select: none; cursor: default; }
+    .brand-mark:hover { animation: brand-wink .7s ease both; }
+    @keyframes brand-wink { 0%, 100% { transform: translateY(0) rotate(0deg); box-shadow: none; } 35% { transform: translateY(-2px) rotate(-3deg); box-shadow: 0 8px 20px rgba(213, 245, 95, .18); } 70% { transform: translateY(0) rotate(2deg); } }
     .side-nav { display: grid; gap: 10px; width: 100%; }
     .nav-button { width: 64px; min-height: 58px; display: grid; place-items: center; gap: 4px; border: 1px solid transparent; border-radius: 8px; padding: 7px 4px; background: transparent; color: #9fa8ad; }
     .nav-button svg { width: 21px; height: 21px; stroke: currentColor; stroke-width: 2; fill: none; }
@@ -507,10 +509,17 @@ const INDEX_HTML: &str = r#"<!doctype html>
     .switch { display: inline-flex; grid-template-columns: none; align-items: center; gap: 8px; color: #d6dee2; font-weight: 700; }
     .switch input { width: auto; min-width: 0; accent-color: #d5f55f; }
     .wallet-tx-list { display: grid; gap: 8px; }
-    .wallet-tx-row { display: grid; grid-template-columns: minmax(88px, .35fr) minmax(0, 1fr) auto; gap: 12px; align-items: center; border: 1px solid #2f363c; border-radius: 8px; padding: 10px; background: #111316; }
+    .wallet-tx-row { position: relative; display: grid; grid-template-columns: minmax(0, 1fr); gap: 8px; align-items: start; border: 1px solid #2f363c; border-radius: 8px; padding: 12px; background: #111316; }
     .wallet-tx-row.pending { border-color: #3a4147; background: #191c20; box-shadow: inset 3px 0 0 #6f7880; }
-    .wallet-tx-main { display: grid; gap: 4px; min-width: 0; }
-    .wallet-tx-amount { font-weight: 900; }
+    .wallet-tx-row .pill { position: absolute; top: 10px; right: 10px; }
+    .wallet-tx-main { display: grid; gap: 5px; min-width: 0; padding-right: 92px; }
+    .tx-field { display: grid; grid-template-columns: 74px minmax(0, 1fr); gap: 8px; align-items: baseline; min-width: 0; }
+    .tx-label { color: #879198; font-size: 10px; font-weight: 800; text-transform: uppercase; letter-spacing: 0; }
+    .tx-value { min-width: 0; color: #dce4e7; font-size: 13px; font-weight: 600; overflow-wrap: anywhere; }
+    .tx-value.money { color: #d5f55f; font-variant-numeric: tabular-nums; }
+    .tx-value.hash { color: #9eb3bc; font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; font-size: 12px; font-weight: 500; }
+    .tx-value.number { color: #c7d0d5; font-variant-numeric: tabular-nums; }
+    .tx-value.text { color: #e8edf0; }
     .panel .grid + form { margin-top: 12px; }
     .explorer-shell { width: 100%; display: grid; gap: 12px; }
     .block-rail-wrap { background: #181b1f; border: 1px solid #2a3035; border-radius: 8px; padding: 12px; overflow: hidden; }
@@ -535,13 +544,13 @@ const INDEX_HTML: &str = r#"<!doctype html>
     .detail-kv { display: grid; grid-template-columns: 90px minmax(0, 1fr); gap: 8px; font-size: 13px; margin: 7px 0; }
     .detail-kv .key { color: #8d989f; }
     .tx-list { display: grid; gap: 8px; }
-    .tx-card { border: 1px solid #2f363c; border-radius: 8px; padding: 10px; background: #111316; }
-    .tx-head { display: flex; justify-content: space-between; gap: 8px; margin-bottom: 6px; font-weight: 800; }
+    .tx-card, .mempool-item { position: relative; display: grid; gap: 6px; border: 1px solid #2f363c; border-radius: 8px; padding: 12px; background: #111316; }
+    .tx-card .pill, .mempool-item .pill { position: absolute; top: 10px; right: 10px; }
     .pill { display: inline-flex; align-items: center; border-radius: 999px; padding: 2px 8px; font-size: 12px; font-weight: 800; background: #2b3136; color: #d6dee2; }
     .pill.burn { background: #332918; color: #ffd070; }
     .pill.transfer { background: #17312a; color: #8de9cd; }
     .mempool-strip { display: flex; gap: 8px; overflow-x: auto; padding-bottom: 4px; }
-    .mempool-item { flex: 0 0 200px; border: 1px solid #2f363c; border-radius: 8px; padding: 10px; background: #111316; }
+    .mempool-item { flex: 0 0 220px; }
     @media (max-width: 920px) { .setup-grid, .wallet-grid, .mining-grid, .detail-grid { grid-template-columns: 1fr; } }
     @media (max-width: 760px) {
       .app-shell { grid-template-columns: 1fr; }
@@ -558,7 +567,7 @@ const INDEX_HTML: &str = r#"<!doctype html>
       .block-card { flex-basis: 108px; }
     }
   </style>
-  <script defer src="/assets/mivora-ui.js?v=28"></script>
+  <script defer src="/assets/mivora-ui.js?v=29"></script>
   <script defer src="/assets/alpine.min.js"></script>
 </head>
 <body x-data="mivoraApp()" x-init="init()" x-cloak>
@@ -631,13 +640,13 @@ const INDEX_HTML: &str = r#"<!doctype html>
               <div class="wallet-tx-row" :class="{ pending: tx.status === 'pending' }">
                 <span class="pill" :class="tx.kind" x-text="tx.direction"></span>
                 <div class="wallet-tx-main">
-                  <div><span class="wallet-tx-amount" x-text="tx.amount"></span> coin(s)</div>
-                  <div class="muted">fee <span x-text="tx.fee ?? 0"></span></div>
-                  <div class="muted" x-text="txTitle(tx)"></div>
-                  <div><span class="muted">from </span><code x-text="short(tx.from)"></code></div>
-                  <div x-show="tx.to"><span class="muted">to </span><code x-text="short(tx.to)"></code></div>
+                  <div class="tx-field"><span class="tx-label">Amount</span><span class="tx-value money">MVR$ <span x-text="tx.amount"></span></span></div>
+                  <div class="tx-field"><span class="tx-label">Fee</span><span class="tx-value money">MVR$ <span x-text="tx.fee ?? 0"></span></span></div>
+                  <div class="tx-field"><span class="tx-label">Status</span><span class="tx-value text" x-text="txTitle(tx)"></span></div>
+                  <div class="tx-field"><span class="tx-label">From</span><code class="tx-value hash" x-text="short(tx.from)"></code></div>
+                  <div class="tx-field" x-show="tx.to"><span class="tx-label">To</span><code class="tx-value hash" x-text="short(tx.to)"></code></div>
+                  <div class="tx-field"><span class="tx-label">Signature</span><code class="tx-value hash" x-text="short(tx.signature)"></code></div>
                 </div>
-                <code x-text="short(tx.signature)"></code>
               </div>
             </template>
             <div class="muted" x-show="walletTransactions().length === 0">No wallet transactions</div>
@@ -739,12 +748,13 @@ const INDEX_HTML: &str = r#"<!doctype html>
                 <h3>Transactions</h3>
                 <template x-for="tx in selectedBlock.transactions" :key="tx.signature">
                   <div class="tx-card">
-                    <div class="tx-head"><span class="pill" :class="tx.kind" x-text="tx.kind"></span><strong x-text="tx.amount"></strong></div>
-                    <div class="muted">fee <span x-text="tx.fee ?? 0"></span></div>
-                    <div><span class="muted">from </span><code x-text="short(tx.from)"></code></div>
-                    <div x-show="tx.to"><span class="muted">to </span><code x-text="short(tx.to)"></code></div>
-                    <div class="muted">nonce <span x-text="tx.nonce"></span></div>
-                    <div><code x-text="short(tx.signature)"></code></div>
+                    <span class="pill" :class="tx.kind" x-text="tx.kind"></span>
+                    <div class="tx-field"><span class="tx-label">Amount</span><span class="tx-value money">MVR$ <span x-text="tx.amount"></span></span></div>
+                    <div class="tx-field"><span class="tx-label">Fee</span><span class="tx-value money">MVR$ <span x-text="tx.fee ?? 0"></span></span></div>
+                    <div class="tx-field"><span class="tx-label">From</span><code class="tx-value hash" x-text="short(tx.from)"></code></div>
+                    <div class="tx-field" x-show="tx.to"><span class="tx-label">To</span><code class="tx-value hash" x-text="short(tx.to)"></code></div>
+                    <div class="tx-field"><span class="tx-label">Nonce</span><span class="tx-value number" x-text="tx.nonce"></span></div>
+                    <div class="tx-field"><span class="tx-label">Signature</span><code class="tx-value hash" x-text="short(tx.signature)"></code></div>
                   </div>
                 </template>
                 <div class="muted" x-show="selectedBlock.transactions.length === 0">No transactions</div>
@@ -759,11 +769,13 @@ const INDEX_HTML: &str = r#"<!doctype html>
           <div class="mempool-strip">
             <template x-for="tx in mempool" :key="tx.signature">
               <div class="mempool-item">
-                <div class="tx-head"><span class="pill" :class="tx.kind" x-text="tx.kind"></span><strong x-text="tx.amount"></strong></div>
-                <div class="muted">fee <span x-text="tx.fee ?? 0"></span></div>
-                <div><span class="muted">from </span><code x-text="short(tx.from)"></code></div>
-                <div x-show="tx.to"><span class="muted">to </span><code x-text="short(tx.to)"></code></div>
-                <div class="muted">nonce <span x-text="tx.nonce"></span></div>
+                <span class="pill" :class="tx.kind" x-text="tx.kind"></span>
+                <div class="tx-field"><span class="tx-label">Amount</span><span class="tx-value money">MVR$ <span x-text="tx.amount"></span></span></div>
+                <div class="tx-field"><span class="tx-label">Fee</span><span class="tx-value money">MVR$ <span x-text="tx.fee ?? 0"></span></span></div>
+                <div class="tx-field"><span class="tx-label">From</span><code class="tx-value hash" x-text="short(tx.from)"></code></div>
+                <div class="tx-field" x-show="tx.to"><span class="tx-label">To</span><code class="tx-value hash" x-text="short(tx.to)"></code></div>
+                <div class="tx-field"><span class="tx-label">Nonce</span><span class="tx-value number" x-text="tx.nonce"></span></div>
+                <div class="tx-field"><span class="tx-label">Signature</span><code class="tx-value hash" x-text="short(tx.signature)"></code></div>
               </div>
             </template>
           </div>
