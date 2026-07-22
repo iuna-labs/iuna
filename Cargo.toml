@@ -1,0 +1,18 @@
+[package]
+name = "mivora"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+anyhow = "1.0.98"
+axum = "0.8.4"
+ed25519-dalek = "2.2.0"
+getrandom = "0.2.17"
+serde = { version = "1.0.228", features = ["derive"] }
+serde_json = "1.0.150"
+sha2 = "0.10.9"
+rusqlite = { version = "0.32.1", features = ["bundled"] }
+tokio = { version = "1.45.1", features = ["full"] }
+
+[dev-dependencies]
+tempfile = "3.20.0"
