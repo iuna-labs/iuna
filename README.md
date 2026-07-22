@@ -15,7 +15,7 @@ The validated chain is persisted to `.mivora/chain.sqlite3` and resumes automati
 
 Mining is automatic. There is no "mine block" button and no exact sleep. Each node can burn its configured amount once per chain height. Those burns become one-shot leader tickets for a future height after the launch profile's maturity delay. Only the selected ticket owner builds the next block, signs a leader proof, performs the VDF work, and gossips the finished block. The VDF is the clock.
 
-The plain command above creates the default zero-balance starter chain: genesis mints 1 coin and immediately burns it into the first leader ticket. That is enough to mine block 1 and earn the first reward. For a local demo with room to configure automatic burns, leave one extra coin after genesis and set the burn rate in the Configuration tab before block 1 is mined:
+The plain command above creates the default zero-balance starter chain: genesis mints 1 coin and immediately burns it into the first leader ticket. Because non-genesis blocks must include at least one burn, the default 0-coin burn rate will wait instead of starting VDF work. For a local demo with room to configure automatic burns, leave one extra coin after genesis and set the burn rate in the Configuration tab:
 
 ```sh
 cargo run -- --start --genesis-amount 2 --http 127.0.0.1:8443 --p2p 127.0.0.1:9444
@@ -52,7 +52,7 @@ To start a small friendly network:
 cargo run -- --start --genesis-amount 2 --p2p 0.0.0.0:9444 --http 127.0.0.1:8443
 ```
 
-2. Open the Configuration tab and set the starter burn rate before block 1 is mined.
+2. Open the Configuration tab and set the starter burn rate so block 1 has a burn.
 3. Give friends your public `host:9444`.
 4. Friends join your chain:
 
@@ -64,7 +64,7 @@ Friends who join after you start will adopt your genesis and current chain. With
 
 The genesis block bootstraps the chain with a 1-coin burn from the starter wallet. Burns included in a block create one-shot tickets for a future height through a deterministic ticket lottery. The selected leader creates the next block content, signs a proof for the selected ticket, and runs a hash-chain VDF before gossiping the block.
 
-Every non-genesis block must consume the selected mature ticket. A block may contain zero burns, but then it does not create future tickets. The VDF seed is bound to the parent hash and child height; the block hash separately commits to the miner, timestamp, reward, rounds, previous hash, leader proof, VDF output, and transactions.
+Every non-genesis block must consume the selected mature ticket and include at least one burn transaction. The VDF seed is bound to the parent hash and child height; the block hash separately commits to the miner, timestamp, reward, rounds, previous hash, leader proof, VDF output, and transactions.
 
 The protocol targets 60-second blocks by retargeting the expected VDF rounds after each block. It uses a rolling average of recent block intervals and only moves the next round count by about 10% per block, so short bursts do not make the delay swing wildly. Every node derives the same next-round count from the validated chain.
 

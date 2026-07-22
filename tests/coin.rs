@@ -98,16 +98,21 @@ fn genesis_burn_starts_chain_with_zero_balance_and_first_leader() {
 }
 
 #[test]
-fn starter_node_mines_first_reward_from_genesis_ticket() {
+fn starter_node_waits_for_a_burn_before_vdf_work() {
     let alice = Wallet::from_seed("alice");
     let mut node = starter_node(alice.clone());
 
     let outcome = node.automatic_mine_once(1);
     assert!(outcome.burned.is_none());
-    assert_eq!(outcome.block.as_ref().map(|block| block.height), Some(1));
-    assert!(outcome.skipped_reason.is_none());
-    assert_eq!(node.ledger().status().height, 1);
-    assert_eq!(node.ledger().balance_of(alice.address()), BLOCK_REWARD);
+    assert!(outcome.block.is_none());
+    assert!(
+        outcome
+            .skipped_reason
+            .as_deref()
+            .is_some_and(|reason| reason.contains("at least one burn"))
+    );
+    assert_eq!(node.ledger().status().height, 0);
+    assert_eq!(node.ledger().balance_of(alice.address()), 0);
 }
 
 #[test]
@@ -272,19 +277,33 @@ fn block_without_mature_ticket_cannot_be_mined() {
 }
 
 #[test]
-fn leader_block_can_create_no_future_tickets() {
+fn vdf_work_requires_at_least_one_pending_burn() {
+    let alice = Wallet::from_seed("alice");
+    let mut allocations = BTreeMap::new();
+    allocations.insert(alice.address().to_string(), 1_000);
+
+    let ledger = Ledger::new(allocations, 10);
+    let error = ledger.prepare_next_block(alice.address(), 1).unwrap_err();
+
+    assert!(format!("{error:#}").contains("at least one burn"));
+}
+
+#[test]
+fn leader_block_without_burn_is_rejected() {
     let alice = Wallet::from_seed("alice");
     let mut allocations = BTreeMap::new();
     allocations.insert(alice.address().to_string(), 1_000);
 
     let mut ledger = Ledger::new(allocations, 10);
+    ledger
+        .submit_transaction(alice.burn(1, ledger.next_nonce(alice.address())))
+        .unwrap();
     let mut block = ledger.mine_next_block(&alice, 1).unwrap();
     block.transactions.clear();
-    block.vdf_output = run_vdf(&block.vdf_seed(), block.vdf_rounds);
     block.hash = block.compute_hash();
 
-    ledger.apply_block(block).unwrap();
-    assert_eq!(ledger.status().height, 1);
+    let error = ledger.apply_block(block).unwrap_err();
+    assert!(format!("{error:#}").contains("at least one burn"));
 }
 
 #[test]
@@ -339,9 +358,14 @@ fn default_automatic_mining_does_not_burn() {
 
     let outcome = node.automatic_mine_once(1);
     assert!(outcome.burned.is_none());
-    assert_eq!(outcome.block.as_ref().map(|block| block.height), Some(1));
-    assert!(outcome.skipped_reason.is_none());
-    assert_eq!(node.ledger().balance_of(alice.address()), 1_100);
+    assert!(outcome.block.is_none());
+    assert!(
+        outcome
+            .skipped_reason
+            .as_deref()
+            .is_some_and(|reason| reason.contains("at least one burn"))
+    );
+    assert_eq!(node.ledger().balance_of(alice.address()), 1_000);
 }
 
 #[test]

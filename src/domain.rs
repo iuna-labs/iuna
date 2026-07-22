@@ -1005,6 +1005,7 @@ impl Ledger {
             .into_iter()
             .take(self.launch_profile.max_block_transactions)
             .collect::<Vec<_>>();
+        ensure_block_has_burn(&transactions)?;
 
         let tip = self.tip();
         let prev_hash = tip.hash.clone();
@@ -1120,6 +1121,7 @@ impl Ledger {
         if block.transactions.len() > self.launch_profile.max_block_transactions {
             bail!("block has too many transactions");
         }
+        ensure_block_has_burn(&block.transactions)?;
         let Some(leader) = self.expected_leader_for_next_block() else {
             bail!("no selected leader for block {}", block.height);
         };
@@ -1293,6 +1295,13 @@ fn consume_leader_ticket(block: &Block, tickets: &mut Vec<BurnTicket>) -> Result
         bail!("leader ticket is not pending for block {}", block.height);
     };
     tickets.remove(index);
+    Ok(())
+}
+
+fn ensure_block_has_burn(transactions: &[Transaction]) -> Result<()> {
+    if !transactions.iter().any(Transaction::is_burn) {
+        bail!("block must include at least one burn transaction");
+    }
     Ok(())
 }
 
