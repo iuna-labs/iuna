@@ -16,7 +16,12 @@ use serde::{Deserialize, Serialize};
 use tokio::{net::TcpListener, sync::Mutex};
 
 use crate::{
-    adapters::{config_store, config_store::UiConfig, p2p::GossipNetwork, wallet_store},
+    adapters::{
+        config_store,
+        config_store::UiConfig,
+        p2p::{GossipNetwork, P2pMetrics},
+        wallet_store,
+    },
     app::{NodeStatus, PeerInfo, SharedNode, SharedPeerBook},
     domain::{Amount, Block, Transaction},
 };
@@ -112,6 +117,7 @@ pub async fn serve(
         .route("/api/wallet/import", post(api_wallet_import_form))
         .route("/api/mempool", get(api_mempool))
         .route("/api/peers", get(api_peers).post(api_peer_form))
+        .route("/api/p2p/metrics", get(api_p2p_metrics))
         .route(
             "/api/settings/burn-per-block",
             post(api_burn_per_block_form),
@@ -188,6 +194,10 @@ async fn api_mempool(State(state): State<HttpState>) -> Json<Vec<Transaction>> {
 
 async fn api_peers(State(state): State<HttpState>) -> Json<Vec<PeerInfo>> {
     Json(state.peers.lock().await.list())
+}
+
+async fn api_p2p_metrics(State(state): State<HttpState>) -> Json<P2pMetrics> {
+    Json(state.gossip.metrics())
 }
 
 async fn api_config_form(
@@ -548,6 +558,7 @@ const INDEX_HTML: &str = r#"<!doctype html>
     .tx-value.hash { color: #9eb3bc; font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; font-size: 12px; font-weight: 500; }
     .tx-value.number { color: #c7d0d5; font-variant-numeric: tabular-nums; }
     .tx-value.text { color: #e8edf0; }
+    .metric-context { display: grid; gap: 5px; margin-top: 12px; }
     .panel .grid + form { margin-top: 12px; }
     .explorer-shell { width: 100%; display: grid; gap: 12px; }
     .block-rail-wrap { background: #181b1f; border: 1px solid #2a3035; border-radius: 8px; padding: 12px; overflow: hidden; }
@@ -597,7 +608,7 @@ const INDEX_HTML: &str = r#"<!doctype html>
       .block-card { flex-basis: 108px; }
     }
   </style>
-  <script defer src="/assets/luun-ui.js?v=32"></script>
+  <script defer src="/assets/luun-ui.js?v=35"></script>
   <script defer src="/assets/alpine.min.js"></script>
 </head>
 <body x-data="luunApp()" x-init="init()" x-cloak>
@@ -725,6 +736,31 @@ const INDEX_HTML: &str = r#"<!doctype html>
     </section>
 
     <section x-show="tab === 'p2p'">
+      <div class="panel">
+        <h2>Metrics</h2>
+        <div class="grid">
+          <div class="metric"><div class="label">Inbound Sessions</div><div class="value" x-text="p2pMetrics.inbound_sessions_started ?? 0"></div></div>
+          <div class="metric"><div class="label">Outbound Attempts</div><div class="value" x-text="p2pMetrics.outbound_connect_attempts ?? 0"></div></div>
+          <div class="metric"><div class="label">Connect Failures</div><div class="value" x-text="p2pMetrics.outbound_connect_failures ?? 0"></div></div>
+          <div class="metric"><div class="label">Session Failures</div><div class="value" x-text="p2pMetrics.session_failures ?? 0"></div></div>
+          <div class="metric"><div class="label">Parse Errors</div><div class="value" x-text="p2pMetrics.parse_errors ?? 0"></div></div>
+          <div class="metric"><div class="label">Empty Frames</div><div class="value" x-text="p2pMetrics.empty_frames ?? 0"></div></div>
+          <div class="metric"><div class="label">Self Rejects</div><div class="value" x-text="p2pMetrics.self_peer_rejections ?? 0"></div></div>
+          <div class="metric"><div class="label">Self Skips</div><div class="value" x-text="p2pMetrics.self_peer_skips ?? 0"></div></div>
+          <div class="metric"><div class="label">Received</div><div class="value" x-text="p2pMetrics.envelopes_received ?? 0"></div></div>
+          <div class="metric"><div class="label">Bytes In</div><div class="value" x-text="p2pMetrics.bytes_received ?? 0"></div></div>
+          <div class="metric"><div class="label">Status Rx</div><div class="value" x-text="p2pMetrics.peer_status_envelopes_received ?? 0"></div></div>
+          <div class="metric"><div class="label">Hello Rx</div><div class="value" x-text="p2pMetrics.hello_envelopes_received ?? 0"></div></div>
+          <div class="metric"><div class="label">Inventory Rx</div><div class="value" x-text="p2pMetrics.inventory_envelopes_received ?? 0"></div></div>
+          <div class="metric"><div class="label">Data Rx</div><div class="value" x-text="p2pMetrics.data_envelopes_received ?? 0"></div></div>
+          <div class="metric"><div class="label">Control Rx</div><div class="value" x-text="p2pMetrics.control_envelopes_received ?? 0"></div></div>
+        </div>
+        <div class="metric-context">
+          <div class="tx-field"><span class="tx-label">Last Failure</span><span class="tx-value text" x-text="p2pMetrics.last_session_failure || '-'"></span></div>
+          <div class="tx-field"><span class="tx-label">Last Empty</span><span class="tx-value text" x-text="p2pMetrics.last_empty_frame_remote || '-'"></span></div>
+          <div class="tx-field"><span class="tx-label">Last Parse</span><span class="tx-value text" x-text="p2pMetrics.last_parse_error || '-'"></span></div>
+        </div>
+      </div>
       <div class="panel">
         <h2>Add Peer</h2>
         <form @submit.prevent="addPeer">

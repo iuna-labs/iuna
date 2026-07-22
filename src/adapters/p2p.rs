@@ -1,8 +1,18 @@
-use std::{collections::BTreeMap, io::ErrorKind, net::SocketAddr, sync::Arc, time::Duration};
+use std::{
+    collections::BTreeMap,
+    io::ErrorKind,
+    net::SocketAddr,
+    sync::{
+        Arc, Mutex as StdMutex,
+        atomic::{AtomicU64, Ordering},
+    },
+    time::Duration,
+};
 
 use anyhow::{Context, Result};
+use serde::Serialize;
 use tokio::{
-    io::{AsyncBufReadExt, AsyncWriteExt, BufReader},
+    io::{AsyncBufReadExt, AsyncRead, AsyncWriteExt, BufReader},
     net::{
         TcpListener, TcpStream,
         tcp::{OwnedReadHalf, OwnedWriteHalf},
@@ -47,6 +57,122 @@ struct GossipNetworkInner {
     peers: SharedPeerBook,
     listen_addr: SocketAddr,
     sessions: Mutex<BTreeMap<String, mpsc::Sender<OutboundBatch>>>,
+    metrics: P2pMetricsCounters,
+}
+
+#[derive(Default)]
+struct P2pMetricsCounters {
+    inbound_sessions_started: AtomicU64,
+    outbound_connect_attempts: AtomicU64,
+    outbound_connect_successes: AtomicU64,
+    outbound_connect_failures: AtomicU64,
+    outbound_sessions_started: AtomicU64,
+    sessions_closed: AtomicU64,
+    session_failures: AtomicU64,
+    quiet_disconnects: AtomicU64,
+    envelopes_received: AtomicU64,
+    hello_envelopes_received: AtomicU64,
+    peer_status_envelopes_received: AtomicU64,
+    inventory_envelopes_received: AtomicU64,
+    data_envelopes_received: AtomicU64,
+    control_envelopes_received: AtomicU64,
+    bytes_received: AtomicU64,
+    parse_errors: AtomicU64,
+    empty_frames: AtomicU64,
+    self_peer_rejections: AtomicU64,
+    self_peer_skips: AtomicU64,
+    outbound_queue_full: AtomicU64,
+    outbound_queue_closed: AtomicU64,
+    last_session_failure: StdMutex<Option<String>>,
+    last_empty_frame_remote: StdMutex<Option<String>>,
+    last_parse_error: StdMutex<Option<String>>,
+}
+
+#[derive(Clone, Debug, Default, Eq, PartialEq, Serialize)]
+pub struct P2pMetrics {
+    pub inbound_sessions_started: u64,
+    pub outbound_connect_attempts: u64,
+    pub outbound_connect_successes: u64,
+    pub outbound_connect_failures: u64,
+    pub outbound_sessions_started: u64,
+    pub sessions_closed: u64,
+    pub session_failures: u64,
+    pub quiet_disconnects: u64,
+    pub envelopes_received: u64,
+    pub hello_envelopes_received: u64,
+    pub peer_status_envelopes_received: u64,
+    pub inventory_envelopes_received: u64,
+    pub data_envelopes_received: u64,
+    pub control_envelopes_received: u64,
+    pub bytes_received: u64,
+    pub parse_errors: u64,
+    pub empty_frames: u64,
+    pub self_peer_rejections: u64,
+    pub self_peer_skips: u64,
+    pub outbound_queue_full: u64,
+    pub outbound_queue_closed: u64,
+    pub last_session_failure: Option<String>,
+    pub last_empty_frame_remote: Option<String>,
+    pub last_parse_error: Option<String>,
+}
+
+impl P2pMetricsCounters {
+    fn inc(counter: &AtomicU64) {
+        counter.fetch_add(1, Ordering::Relaxed);
+    }
+
+    fn add(counter: &AtomicU64, amount: u64) {
+        counter.fetch_add(amount, Ordering::Relaxed);
+    }
+
+    fn set_last(target: &StdMutex<Option<String>>, value: impl Into<String>) {
+        if let Ok(mut last) = target.lock() {
+            *last = Some(value.into());
+        }
+    }
+
+    fn snapshot(&self) -> P2pMetrics {
+        P2pMetrics {
+            inbound_sessions_started: self.inbound_sessions_started.load(Ordering::Relaxed),
+            outbound_connect_attempts: self.outbound_connect_attempts.load(Ordering::Relaxed),
+            outbound_connect_successes: self.outbound_connect_successes.load(Ordering::Relaxed),
+            outbound_connect_failures: self.outbound_connect_failures.load(Ordering::Relaxed),
+            outbound_sessions_started: self.outbound_sessions_started.load(Ordering::Relaxed),
+            sessions_closed: self.sessions_closed.load(Ordering::Relaxed),
+            session_failures: self.session_failures.load(Ordering::Relaxed),
+            quiet_disconnects: self.quiet_disconnects.load(Ordering::Relaxed),
+            envelopes_received: self.envelopes_received.load(Ordering::Relaxed),
+            hello_envelopes_received: self.hello_envelopes_received.load(Ordering::Relaxed),
+            peer_status_envelopes_received: self
+                .peer_status_envelopes_received
+                .load(Ordering::Relaxed),
+            inventory_envelopes_received: self.inventory_envelopes_received.load(Ordering::Relaxed),
+            data_envelopes_received: self.data_envelopes_received.load(Ordering::Relaxed),
+            control_envelopes_received: self.control_envelopes_received.load(Ordering::Relaxed),
+            bytes_received: self.bytes_received.load(Ordering::Relaxed),
+            parse_errors: self.parse_errors.load(Ordering::Relaxed),
+            empty_frames: self.empty_frames.load(Ordering::Relaxed),
+            self_peer_rejections: self.self_peer_rejections.load(Ordering::Relaxed),
+            self_peer_skips: self.self_peer_skips.load(Ordering::Relaxed),
+            outbound_queue_full: self.outbound_queue_full.load(Ordering::Relaxed),
+            outbound_queue_closed: self.outbound_queue_closed.load(Ordering::Relaxed),
+            last_session_failure: self
+                .last_session_failure
+                .lock()
+                .ok()
+                .and_then(|last| last.clone()),
+            last_empty_frame_remote: self
+                .last_empty_frame_remote
+                .lock()
+                .ok()
+                .and_then(|last| last.clone()),
+            last_parse_error: self
+                .last_parse_error
+                .lock()
+                .ok()
+                .and_then(|last| last.clone()),
+        }
+    }
 }
 
 impl GossipNetwork {
@@ -60,6 +186,7 @@ impl GossipNetwork {
                 peers,
                 listen_addr: addr,
                 sessions: Mutex::new(BTreeMap::new()),
+                metrics: P2pMetricsCounters::default(),
             }),
         };
 
@@ -67,6 +194,10 @@ impl GossipNetwork {
         tokio::spawn(outbound_supervisor(network.clone()));
         network.ensure_outbound_sessions().await;
         Ok(network)
+    }
+
+    pub fn metrics(&self) -> P2pMetrics {
+        self.inner.metrics.snapshot()
     }
 
     pub async fn broadcast(&self, envelopes: Vec<GossipEnvelope>) -> Result<()> {
@@ -80,6 +211,7 @@ impl GossipNetwork {
             match sender.try_send(envelopes.clone()) {
                 Ok(()) => {}
                 Err(mpsc::error::TrySendError::Full(_)) => {
+                    P2pMetricsCounters::inc(&self.inner.metrics.outbound_queue_full);
                     self.inner
                         .peers
                         .lock()
@@ -87,6 +219,7 @@ impl GossipNetwork {
                         .record_error(&peer, "outbound gossip queue is full");
                 }
                 Err(mpsc::error::TrySendError::Closed(_)) => {
+                    P2pMetricsCounters::inc(&self.inner.metrics.outbound_queue_closed);
                     self.inner.sessions.lock().await.remove(&peer);
                 }
             }
@@ -148,7 +281,15 @@ impl GossipNetwork {
 
     pub async fn peer_exchange(&self) -> GossipEnvelope {
         let self_addr = self.inner.listen_addr.to_string();
-        let peers = self.inner.peers.lock().await.addresses_except(&self_addr);
+        let peers = self
+            .inner
+            .peers
+            .lock()
+            .await
+            .addresses_except(&self_addr)
+            .into_iter()
+            .filter(|peer| !is_self_peer_address(peer, self.inner.listen_addr))
+            .collect::<Vec<_>>();
         GossipEnvelope::PeerList {
             peers: std::iter::once(self_addr)
                 .chain(peers.into_iter())
@@ -159,7 +300,18 @@ impl GossipNetwork {
     async fn ensure_outbound_sessions(&self) {
         let addresses = self.inner.peers.lock().await.addresses();
         let mut sessions = self.inner.sessions.lock().await;
+        sessions.retain(|peer, _| {
+            let keep = !is_self_peer_address(peer, self.inner.listen_addr);
+            if !keep {
+                P2pMetricsCounters::inc(&self.inner.metrics.self_peer_skips);
+            }
+            keep
+        });
         for peer in addresses {
+            if is_self_peer_address(&peer, self.inner.listen_addr) {
+                P2pMetricsCounters::inc(&self.inner.metrics.self_peer_skips);
+                continue;
+            }
             if sessions.contains_key(&peer) {
                 continue;
             }
@@ -183,11 +335,29 @@ async fn accept_loop(network: GossipNetwork, listener: TcpListener) {
         match listener.accept().await {
             Ok((stream, remote_addr)) => {
                 let network = network.clone();
+                P2pMetricsCounters::inc(&network.inner.metrics.inbound_sessions_started);
                 tokio::spawn(async move {
-                    let result =
-                        session_loop(network, stream, remote_addr, None, mpsc::channel(1).1).await;
-                    if let Err(error) = result {
-                        if !is_quiet_disconnect(&error) {
+                    let result = session_loop(
+                        network.clone(),
+                        stream,
+                        remote_addr,
+                        None,
+                        mpsc::channel(1).1,
+                    )
+                    .await;
+                    match result {
+                        Ok(()) => {
+                            P2pMetricsCounters::inc(&network.inner.metrics.sessions_closed);
+                        }
+                        Err(error) if is_quiet_disconnect(&error) => {
+                            P2pMetricsCounters::inc(&network.inner.metrics.quiet_disconnects);
+                        }
+                        Err(error) => {
+                            P2pMetricsCounters::inc(&network.inner.metrics.session_failures);
+                            P2pMetricsCounters::set_last(
+                                &network.inner.metrics.last_session_failure,
+                                format!("{remote_addr}: {error:#}"),
+                            );
                             eprintln!(
                                 "p2p inbound connection from {remote_addr} failed: {error:#}"
                             );
@@ -215,9 +385,14 @@ async fn outbound_session(
 ) {
     let mut reconnect_delay = INITIAL_RECONNECT_DELAY;
     loop {
+        P2pMetricsCounters::inc(&network.inner.metrics.outbound_connect_attempts);
         let stream = match timeout(CONNECT_TIMEOUT, TcpStream::connect(&peer)).await {
-            Ok(Ok(stream)) => stream,
+            Ok(Ok(stream)) => {
+                P2pMetricsCounters::inc(&network.inner.metrics.outbound_connect_successes);
+                stream
+            }
             Ok(Err(error)) => {
+                P2pMetricsCounters::inc(&network.inner.metrics.outbound_connect_failures);
                 network
                     .inner
                     .peers
@@ -229,6 +404,7 @@ async fn outbound_session(
                 continue;
             }
             Err(_) => {
+                P2pMetricsCounters::inc(&network.inner.metrics.outbound_connect_failures);
                 network
                     .inner
                     .peers
@@ -246,6 +422,7 @@ async fn outbound_session(
             peer.parse()
                 .unwrap_or_else(|_| SocketAddr::from(([0, 0, 0, 0], 0)))
         });
+        P2pMetricsCounters::inc(&network.inner.metrics.outbound_sessions_started);
         let result = session_loop(
             network.clone(),
             stream,
@@ -255,10 +432,19 @@ async fn outbound_session(
         )
         .await;
         match result {
-            Ok(()) => {}
-            Err(error) if is_quiet_disconnect(&error) => {}
+            Ok(()) => {
+                P2pMetricsCounters::inc(&network.inner.metrics.sessions_closed);
+            }
+            Err(error) if is_quiet_disconnect(&error) => {
+                P2pMetricsCounters::inc(&network.inner.metrics.quiet_disconnects);
+            }
             Err(error) => {
+                P2pMetricsCounters::inc(&network.inner.metrics.session_failures);
                 let message = format!("{error:#}");
+                P2pMetricsCounters::set_last(
+                    &network.inner.metrics.last_session_failure,
+                    format!("{peer}: {message}"),
+                );
                 network
                     .inner
                     .peers
@@ -290,6 +476,10 @@ async fn session_loop(
     mut outbound: mpsc::Receiver<OutboundBatch>,
 ) -> Result<()> {
     let (reader, mut writer) = stream.into_split();
+    let connection_label = stable_peer
+        .as_ref()
+        .map(|peer| format!("outbound {peer}"))
+        .unwrap_or_else(|| format!("inbound {remote_addr}"));
     let hello = network
         .inner
         .node
@@ -297,7 +487,7 @@ async fn session_loop(
         .await
         .hello(Some(network.inner.listen_addr.to_string()));
     write_envelope(&mut writer, &hello).await?;
-    let mut reader = BufReader::new(reader);
+    let mut reader = LimitedLineReader::new(reader);
     let mut sync_tick = interval_at(
         Instant::now() + SESSION_SYNC_INTERVAL,
         SESSION_SYNC_INTERVAL,
@@ -307,9 +497,12 @@ async fn session_loop(
     let mut known_peer = stable_peer;
 
     if known_peer.is_some() {
-        if let Ok(Ok(Some(line))) = timeout(HANDSHAKE_TIMEOUT, read_limited_line(&mut reader)).await
+        if let Ok(Ok(Some(envelope))) = timeout(
+            HANDSHAKE_TIMEOUT,
+            read_session_envelope(&network, &connection_label, &mut reader),
+        )
+        .await
         {
-            let envelope = parse_envelope(&line)?;
             if let GossipEnvelope::Hello(hello) = envelope {
                 peer_status =
                     Some(process_hello(&network, remote_addr, &mut known_peer, hello).await?);
@@ -358,11 +551,10 @@ async fn session_loop(
                     }
                 }
             }
-            line = read_limited_line(&mut reader) => {
-                let Some(line) = line? else {
+            envelope = read_session_envelope(&network, &connection_label, &mut reader) => {
+                let Some(envelope) = envelope? else {
                     return Ok(());
                 };
-                let envelope = parse_envelope(&line)?;
                 if let GossipEnvelope::Hello(hello) = envelope {
                     peer_status = Some(process_hello(&network, remote_addr, &mut known_peer, hello).await?);
                     maybe_request_catchup(&network, &mut writer, peer_status.as_ref().unwrap()).await?;
@@ -591,12 +783,13 @@ async fn apply_peer_list(
     remote_addr: SocketAddr,
     peers: Vec<String>,
 ) -> Result<()> {
-    let self_addr = network.inner.listen_addr.to_string();
     let mut peerbook = network.inner.peers.lock().await;
     for address in peers {
         let peer = normalize_advertised_peer(&address, remote_addr)?;
-        if peer != self_addr {
+        if !is_self_peer_address(&peer, network.inner.listen_addr) {
             peerbook.add_peer(peer);
+        } else {
+            P2pMetricsCounters::inc(&network.inner.metrics.self_peer_skips);
         }
     }
     Ok(())
@@ -623,41 +816,122 @@ async fn write_envelope(writer: &mut OwnedWriteHalf, envelope: &GossipEnvelope) 
     Ok(())
 }
 
-async fn read_limited_line(reader: &mut BufReader<OwnedReadHalf>) -> Result<Option<String>> {
-    let mut bytes = Vec::new();
-    loop {
-        let available = reader.fill_buf().await?;
-        if available.is_empty() {
-            if bytes.is_empty() {
-                return Ok(None);
-            }
-            anyhow::bail!("peer closed before completing a gossip message");
-        }
+struct LimitedLineReader<R> {
+    reader: BufReader<R>,
+    pending: Vec<u8>,
+}
 
-        if let Some(newline) = available.iter().position(|byte| *byte == b'\n') {
-            if bytes.len() + newline > MAX_GOSSIP_LINE_BYTES {
+impl<R: AsyncRead + Unpin> LimitedLineReader<R> {
+    fn new(reader: R) -> Self {
+        Self {
+            reader: BufReader::new(reader),
+            pending: Vec::new(),
+        }
+    }
+
+    async fn read_line(&mut self) -> Result<Option<String>> {
+        loop {
+            let available = self.reader.fill_buf().await?;
+            if available.is_empty() {
+                if self.pending.is_empty() {
+                    return Ok(None);
+                }
+                anyhow::bail!("peer closed before completing a gossip message");
+            }
+
+            if let Some(newline) = available.iter().position(|byte| *byte == b'\n') {
+                if self.pending.len() + newline > MAX_GOSSIP_LINE_BYTES {
+                    anyhow::bail!("p2p message exceeds {} byte limit", MAX_GOSSIP_LINE_BYTES);
+                }
+                self.pending.extend_from_slice(&available[..newline]);
+                self.reader.consume(newline + 1);
+                if self.pending.ends_with(b"\r") {
+                    self.pending.pop();
+                }
+                let bytes = std::mem::take(&mut self.pending);
+                return String::from_utf8(bytes)
+                    .context("p2p message is not valid UTF-8")
+                    .map(Some);
+            }
+
+            if self.pending.len() + available.len() > MAX_GOSSIP_LINE_BYTES {
                 anyhow::bail!("p2p message exceeds {} byte limit", MAX_GOSSIP_LINE_BYTES);
             }
-            bytes.extend_from_slice(&available[..newline]);
-            reader.consume(newline + 1);
-            if bytes.ends_with(b"\r") {
-                bytes.pop();
-            }
-            return String::from_utf8(bytes)
-                .context("p2p message is not valid UTF-8")
-                .map(Some);
+            let consumed = available.len();
+            self.pending.extend_from_slice(available);
+            self.reader.consume(consumed);
         }
+    }
+}
 
-        if bytes.len() + available.len() > MAX_GOSSIP_LINE_BYTES {
-            anyhow::bail!("p2p message exceeds {} byte limit", MAX_GOSSIP_LINE_BYTES);
+async fn read_session_envelope(
+    network: &GossipNetwork,
+    connection_label: &str,
+    reader: &mut LimitedLineReader<OwnedReadHalf>,
+) -> Result<Option<GossipEnvelope>> {
+    let Some(line) = reader.read_line().await? else {
+        return Ok(None);
+    };
+    P2pMetricsCounters::add(&network.inner.metrics.bytes_received, line.len() as u64 + 1);
+    if line.trim().is_empty() {
+        P2pMetricsCounters::inc(&network.inner.metrics.empty_frames);
+        P2pMetricsCounters::set_last(
+            &network.inner.metrics.last_empty_frame_remote,
+            connection_label.to_string(),
+        );
+        anyhow::bail!("empty p2p envelope");
+    }
+
+    match parse_envelope(&line) {
+        Ok(envelope) => {
+            P2pMetricsCounters::inc(&network.inner.metrics.envelopes_received);
+            record_received_envelope_kind(&network.inner.metrics, &envelope);
+            Ok(Some(envelope))
         }
-        let consumed = available.len();
-        bytes.extend_from_slice(available);
-        reader.consume(consumed);
+        Err(error) => {
+            P2pMetricsCounters::inc(&network.inner.metrics.parse_errors);
+            P2pMetricsCounters::set_last(
+                &network.inner.metrics.last_parse_error,
+                format!("{connection_label}: {error:#}"),
+            );
+            Err(error)
+        }
+    }
+}
+
+fn record_received_envelope_kind(metrics: &P2pMetricsCounters, envelope: &GossipEnvelope) {
+    match envelope {
+        GossipEnvelope::Hello(_) => {
+            P2pMetricsCounters::inc(&metrics.hello_envelopes_received);
+        }
+        GossipEnvelope::PeerStatus { .. } => {
+            P2pMetricsCounters::inc(&metrics.peer_status_envelopes_received);
+        }
+        GossipEnvelope::Inventory { .. } => {
+            P2pMetricsCounters::inc(&metrics.inventory_envelopes_received);
+        }
+        GossipEnvelope::Transaction(_)
+        | GossipEnvelope::Transactions { .. }
+        | GossipEnvelope::Block(_)
+        | GossipEnvelope::Blocks { .. }
+        | GossipEnvelope::ChainSnapshot(_) => {
+            P2pMetricsCounters::inc(&metrics.data_envelopes_received);
+        }
+        GossipEnvelope::ChainSnapshotRequest
+        | GossipEnvelope::BlockRangeRequest { .. }
+        | GossipEnvelope::TransactionRequest { .. }
+        | GossipEnvelope::BlockRequest { .. }
+        | GossipEnvelope::PeerAnnouncement { .. }
+        | GossipEnvelope::PeerList { .. } => {
+            P2pMetricsCounters::inc(&metrics.control_envelopes_received);
+        }
     }
 }
 
 fn parse_envelope(line: &str) -> Result<GossipEnvelope> {
+    if line.trim().is_empty() {
+        anyhow::bail!("empty p2p envelope");
+    }
     let envelope = serde_json::from_str(line).context("invalid p2p envelope JSON")?;
     validate_envelope_limits(&envelope)?;
     Ok(envelope)
@@ -782,8 +1056,9 @@ async fn fetch_peer_status(peer: &str) -> Result<PeerStatus> {
         .await
         .with_context(|| format!("connecting to peer {peer}"))?;
     let (reader, _writer) = stream.into_split();
-    let mut reader = BufReader::new(reader);
-    let line = read_limited_line(&mut reader)
+    let mut reader = LimitedLineReader::new(reader);
+    let line = reader
+        .read_line()
         .await?
         .with_context(|| format!("peer {peer} closed before sending its peer status"))?;
     match parse_envelope(&line)? {
@@ -817,8 +1092,9 @@ pub async fn fetch_snapshot_with_announcement(
         .await
         .with_context(|| format!("connecting to join peer {peer}"))?;
     let (reader, mut writer) = stream.into_split();
-    let mut reader = BufReader::new(reader);
-    let line = read_limited_line(&mut reader)
+    let mut reader = LimitedLineReader::new(reader);
+    let line = reader
+        .read_line()
         .await?
         .with_context(|| format!("join peer {peer} closed before sending its peer status"))?;
     match parse_envelope(&line)? {
@@ -853,9 +1129,7 @@ pub async fn fetch_snapshot_with_announcement(
         })?;
         writer.write_all(line.as_bytes()).await?;
         writer.write_all(b"\n").await?;
-        if let Ok(Ok(Some(line))) =
-            timeout(Duration::from_secs(2), read_limited_line(&mut reader)).await
-        {
+        if let Ok(Ok(Some(line))) = timeout(Duration::from_secs(2), reader.read_line()).await {
             if let GossipEnvelope::ChainSnapshot(fresh_snapshot) = parse_envelope(&line)? {
                 if snapshot_height(&fresh_snapshot) >= snapshot_height(&snapshot) {
                     return Ok(fresh_snapshot);
@@ -869,10 +1143,10 @@ pub async fn fetch_snapshot_with_announcement(
 
 async fn read_join_snapshot_response(
     peer: &str,
-    reader: &mut BufReader<OwnedReadHalf>,
+    reader: &mut LimitedLineReader<OwnedReadHalf>,
 ) -> Result<ChainSnapshot> {
     for _ in 0..MAX_JOIN_RESPONSE_ENVELOPES {
-        let line = timeout(JOIN_RESPONSE_TIMEOUT, read_limited_line(reader))
+        let line = timeout(JOIN_RESPONSE_TIMEOUT, reader.read_line())
             .await
             .with_context(|| format!("join peer {peer} timed out waiting for a chain snapshot"))??
             .with_context(|| format!("join peer {peer} closed before sending a chain snapshot"))?;
@@ -1020,10 +1294,12 @@ async fn process_hello(
 
     if let Some(listen_addr) = &hello.listen_addr {
         let peer = normalize_advertised_peer(listen_addr, remote_addr)?;
-        if peer != network.inner.listen_addr.to_string() {
-            *known_peer = Some(peer.clone());
-            network.inner.peers.lock().await.add_peer(peer);
+        if is_self_peer_address(&peer, network.inner.listen_addr) {
+            P2pMetricsCounters::inc(&network.inner.metrics.self_peer_rejections);
+            anyhow::bail!("peer announced our own p2p address {peer}");
         }
+        *known_peer = Some(peer.clone());
+        network.inner.peers.lock().await.add_peer(peer);
     }
     record_peer_status(
         network,
@@ -1107,6 +1383,31 @@ fn normalize_advertised_peer(address: &str, remote_addr: SocketAddr) -> Result<S
     Ok(reachable_advertised_addr(advertised_addr, remote_addr).to_string())
 }
 
+fn is_self_peer_address(address: &str, listen_addr: SocketAddr) -> bool {
+    address
+        .parse::<SocketAddr>()
+        .is_ok_and(|candidate| is_self_socket_addr(candidate, listen_addr))
+}
+
+fn is_self_socket_addr(candidate: SocketAddr, listen_addr: SocketAddr) -> bool {
+    if candidate == listen_addr {
+        return true;
+    }
+    if candidate.port() != listen_addr.port() {
+        return false;
+    }
+
+    let candidate_ip = candidate.ip();
+    let listen_ip = listen_addr.ip();
+    if listen_ip.is_unspecified() {
+        return candidate_ip.is_unspecified() || candidate_ip.is_loopback();
+    }
+    if candidate_ip.is_unspecified() {
+        return listen_ip.is_loopback();
+    }
+    false
+}
+
 fn is_quiet_disconnect(error: &anyhow::Error) -> bool {
     error.chain().any(|cause| {
         cause.downcast_ref::<std::io::Error>().is_some_and(|error| {
@@ -1139,6 +1440,7 @@ mod tests {
         },
         domain::{Amount, GenesisBurn, Ledger, Wallet},
     };
+    use tokio::io::AsyncWriteExt;
 
     use super::{
         MAX_INVENTORY_ITEMS, MAX_OBJECT_REQUESTS, next_reconnect_delay, parse_envelope,
@@ -1165,6 +1467,19 @@ mod tests {
             reachable_advertised_addr(advertised, remote).to_string(),
             "127.0.0.1:9445"
         );
+    }
+
+    #[test]
+    fn loopback_peer_on_unspecified_listen_port_is_self() {
+        let listen_addr: SocketAddr = "0.0.0.0:9545".parse().unwrap();
+
+        assert!(super::is_self_peer_address("127.0.0.1:9545", listen_addr));
+        assert!(super::is_self_peer_address("0.0.0.0:9545", listen_addr));
+        assert!(!super::is_self_peer_address("127.0.0.1:9546", listen_addr));
+        assert!(!super::is_self_peer_address(
+            "203.0.113.10:9545",
+            listen_addr
+        ));
     }
 
     #[test]
@@ -1200,6 +1515,77 @@ mod tests {
         let error = parse_envelope(&line).unwrap_err();
 
         assert!(error.to_string().contains("block request"));
+    }
+
+    #[test]
+    fn parser_rejects_empty_envelope_without_json_eof() {
+        let error = parse_envelope("").unwrap_err();
+
+        assert!(error.to_string().contains("empty p2p envelope"));
+        assert!(!format!("{error:#}").contains("EOF while parsing"));
+    }
+
+    #[test]
+    fn received_envelope_metrics_are_categorized() {
+        let metrics = super::P2pMetricsCounters::default();
+
+        super::record_received_envelope_kind(
+            &metrics,
+            &GossipEnvelope::PeerStatus {
+                height: 7,
+                tip_hash: "tip".to_string(),
+            },
+        );
+        super::record_received_envelope_kind(
+            &metrics,
+            &GossipEnvelope::Inventory {
+                txs: Vec::new(),
+                blocks: Vec::new(),
+            },
+        );
+        super::record_received_envelope_kind(
+            &metrics,
+            &GossipEnvelope::Blocks { blocks: Vec::new() },
+        );
+        super::record_received_envelope_kind(&metrics, &GossipEnvelope::ChainSnapshotRequest);
+
+        let snapshot = metrics.snapshot();
+        assert_eq!(snapshot.peer_status_envelopes_received, 1);
+        assert_eq!(snapshot.inventory_envelopes_received, 1);
+        assert_eq!(snapshot.data_envelopes_received, 1);
+        assert_eq!(snapshot.control_envelopes_received, 1);
+    }
+
+    #[tokio::test]
+    async fn limited_line_reader_keeps_partial_line_after_cancelled_read() {
+        let (mut writer, reader) = tokio::io::duplex(1024);
+        let mut reader = super::LimitedLineReader::new(reader);
+        let line = serde_json::to_string(&GossipEnvelope::PeerStatus {
+            height: 7,
+            tip_hash: "tip".to_string(),
+        })
+        .unwrap();
+        let split_at = line.len() / 2;
+
+        writer
+            .write_all(&line.as_bytes()[..split_at])
+            .await
+            .unwrap();
+        let cancelled =
+            tokio::time::timeout(std::time::Duration::from_millis(25), reader.read_line()).await;
+
+        assert!(cancelled.is_err());
+
+        writer
+            .write_all(&line.as_bytes()[split_at..])
+            .await
+            .unwrap();
+        writer.write_all(b"\n").await.unwrap();
+
+        assert_eq!(
+            reader.read_line().await.unwrap().as_deref(),
+            Some(line.as_str())
+        );
     }
 
     #[test]
@@ -1288,6 +1674,7 @@ mod tests {
                 peers: Arc::new(tokio::sync::Mutex::new(PeerBook::default())),
                 listen_addr: "127.0.0.1:9544".parse().unwrap(),
                 sessions: tokio::sync::Mutex::new(BTreeMap::new()),
+                metrics: super::P2pMetricsCounters::default(),
             }),
         };
 
@@ -1435,6 +1822,7 @@ mod tests {
                 peers: Arc::new(tokio::sync::Mutex::new(PeerBook::default())),
                 listen_addr: "127.0.0.1:9544".parse().unwrap(),
                 sessions: tokio::sync::Mutex::new(BTreeMap::new()),
+                metrics: super::P2pMetricsCounters::default(),
             }),
         };
 
@@ -1500,6 +1888,7 @@ mod tests {
                 peers: Arc::clone(&peers),
                 listen_addr: "127.0.0.1:9544".parse().unwrap(),
                 sessions: tokio::sync::Mutex::new(BTreeMap::new()),
+                metrics: super::P2pMetricsCounters::default(),
             }),
         };
 
@@ -1563,6 +1952,7 @@ mod tests {
                 peers,
                 listen_addr: "127.0.0.1:9544".parse().unwrap(),
                 sessions: tokio::sync::Mutex::new(BTreeMap::new()),
+                metrics: super::P2pMetricsCounters::default(),
             }),
         };
 
@@ -1587,6 +1977,7 @@ mod tests {
                 peers: Arc::clone(&peers),
                 listen_addr: "127.0.0.1:9544".parse().unwrap(),
                 sessions: tokio::sync::Mutex::new(BTreeMap::new()),
+                metrics: super::P2pMetricsCounters::default(),
             }),
         };
 
@@ -1601,6 +1992,81 @@ mod tests {
         let addresses = peers.lock().await.addresses();
         assert!(!addresses.contains(&"127.0.0.1:9544".to_string()));
         assert!(addresses.contains(&"127.0.0.1:9546".to_string()));
+    }
+
+    #[tokio::test]
+    async fn peer_list_ignores_loopback_alias_for_unspecified_self() {
+        let alice = Wallet::from_seed("px-self-alias-alice");
+        let allocations = allocations(std::slice::from_ref(&alice), 1_000);
+        let node = Arc::new(tokio::sync::Mutex::new(node("alice", alice, allocations)));
+        let peers = Arc::new(tokio::sync::Mutex::new(PeerBook::default()));
+        let network = super::GossipNetwork {
+            inner: Arc::new(super::GossipNetworkInner {
+                node,
+                peers: Arc::clone(&peers),
+                listen_addr: "0.0.0.0:9545".parse().unwrap(),
+                sessions: tokio::sync::Mutex::new(BTreeMap::new()),
+                metrics: super::P2pMetricsCounters::default(),
+            }),
+        };
+
+        super::apply_peer_list(
+            &network,
+            "127.0.0.1:9544".parse().unwrap(),
+            vec!["127.0.0.1:9545".to_string(), "127.0.0.1:9546".to_string()],
+        )
+        .await
+        .unwrap();
+
+        let addresses = peers.lock().await.addresses();
+        assert!(!addresses.contains(&"127.0.0.1:9545".to_string()));
+        assert!(addresses.contains(&"127.0.0.1:9546".to_string()));
+        assert_eq!(network.metrics().self_peer_skips, 1);
+    }
+
+    #[tokio::test]
+    async fn hello_rejects_loopback_alias_for_unspecified_self() {
+        let alice = Wallet::from_seed("hello-self-alias-alice");
+        let allocations = allocations(std::slice::from_ref(&alice), 1_000);
+        let node = Arc::new(tokio::sync::Mutex::new(node("alice", alice, allocations)));
+        let network = super::GossipNetwork {
+            inner: Arc::new(super::GossipNetworkInner {
+                node,
+                peers: Arc::new(tokio::sync::Mutex::new(PeerBook::default())),
+                listen_addr: "0.0.0.0:9545".parse().unwrap(),
+                sessions: tokio::sync::Mutex::new(BTreeMap::new()),
+                metrics: super::P2pMetricsCounters::default(),
+            }),
+        };
+        let hello = ProtocolHello {
+            protocol_version: PROTOCOL_VERSION,
+            network_id: NETWORK_ID.to_string(),
+            genesis_hash: network
+                .inner
+                .node
+                .lock()
+                .await
+                .ledger()
+                .genesis_hash()
+                .to_string(),
+            listen_addr: Some("127.0.0.1:9545".to_string()),
+            height: 0,
+            tip_hash: "tip".to_string(),
+        };
+
+        assert!(
+            super::process_hello(
+                &network,
+                "127.0.0.1:52144".parse().unwrap(),
+                &mut None,
+                hello,
+            )
+            .await
+            .unwrap_err()
+            .to_string()
+            .contains("our own p2p address")
+        );
+        assert_eq!(network.metrics().self_peer_rejections, 1);
     }
 
     fn node(_network_key: &str, wallet: Wallet, allocations: BTreeMap<String, Amount>) -> NodeCore {

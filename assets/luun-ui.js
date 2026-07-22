@@ -8,6 +8,7 @@ window.luunApp = function luunApp() {
     hasMoreBlocks: true,
     mempool: [],
     peers: [],
+    p2pMetrics: {},
     config: { setup_complete: false },
     setupWallet: { address: null, seed_phrase: null, dev_verify_bypass: false },
     setupWalletMode: "create",
@@ -248,12 +249,13 @@ window.luunApp = function luunApp() {
 
     async refresh() {
       try {
-        const [config, status, blocks, mempool, peers] = await Promise.all([
+        const [config, status, blocks, mempool, peers, p2pMetrics] = await Promise.all([
           this.fetchJson("/api/config"),
           this.fetchJson("/api/status"),
           this.fetchJson("/api/blocks"),
           this.fetchJson("/api/mempool"),
           this.fetchJson("/api/peers"),
+          this.fetchJson("/api/p2p/metrics"),
         ]);
         this.config = config;
         if (!this.config.setup_complete) {
@@ -263,6 +265,7 @@ window.luunApp = function luunApp() {
         this.mergeFreshBlocks(blocks, { animateHead: true });
         this.mempool = mempool;
         this.peers = peers;
+        this.p2pMetrics = p2pMetrics;
         this.burnAmount = status.mining?.burn_per_block ?? this.burnAmount;
         this.burnFee = status.mining?.automatic_burn_fee ?? this.burnFee;
         if (!this.burnAmountDirty) {
