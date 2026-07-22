@@ -24,7 +24,7 @@ window.mivoraApp = function mivoraApp() {
     transferTo: "",
     transferAmount: 25,
     peerAddress: "",
-    showBurnTransactions: true,
+    showBurnTransactions: false,
     flash: null,
     flashTimer: null,
     lastUpdated: null,

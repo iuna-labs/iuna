@@ -1,4 +1,8 @@
-use std::{net::SocketAddr, path::PathBuf, sync::Arc};
+use std::{
+    net::SocketAddr,
+    path::{Path, PathBuf},
+    sync::Arc,
+};
 
 use anyhow::{Context, Result, bail};
 use axum::{
@@ -261,9 +265,22 @@ async fn set_burn_per_block(state: &HttpState, amount: Amount) -> Result<()> {
     };
 
     match result.0 {
-        Ok(_) => state.gossip.broadcast(result.1).await,
+        Ok(_) => {
+            persist_burn_per_block_config(&state.ui_config, &state.config_path, amount).await?;
+            state.gossip.broadcast(result.1).await
+        }
         Err(error) => Err(error),
     }
+}
+
+async fn persist_burn_per_block_config(
+    ui_config: &Arc<Mutex<UiConfig>>,
+    config_path: &Path,
+    amount: Amount,
+) -> Result<()> {
+    let mut config = ui_config.lock().await;
+    config.burn_per_block = amount;
+    config_store::save(config_path, &config)
 }
 
 async fn add_peer(state: &HttpState, peer: String) -> Result<()> {
@@ -487,6 +504,7 @@ const INDEX_HTML: &str = r#"<!doctype html>
     .switch input { width: auto; min-width: 0; accent-color: #d5f55f; }
     .wallet-tx-list { display: grid; gap: 8px; }
     .wallet-tx-row { display: grid; grid-template-columns: minmax(88px, .35fr) minmax(0, 1fr) auto; gap: 12px; align-items: center; border: 1px solid #2f363c; border-radius: 8px; padding: 10px; background: #111316; }
+    .wallet-tx-row.pending { border-color: #3a4147; background: #191c20; box-shadow: inset 3px 0 0 #6f7880; }
     .wallet-tx-main { display: grid; gap: 4px; min-width: 0; }
     .wallet-tx-amount { font-weight: 900; }
     .panel .grid + form { margin-top: 12px; }
@@ -536,7 +554,7 @@ const INDEX_HTML: &str = r#"<!doctype html>
       .block-card { flex-basis: 108px; }
     }
   </style>
-  <script defer src="/assets/mivora-ui.js?v=23"></script>
+  <script defer src="/assets/mivora-ui.js?v=24"></script>
   <script defer src="/assets/alpine.min.js"></script>
 </head>
 <body x-data="mivoraApp()" x-init="init()" x-cloak>
@@ -609,7 +627,7 @@ const INDEX_HTML: &str = r#"<!doctype html>
           </div>
           <div class="wallet-tx-list">
             <template x-for="tx in walletTransactions()" :key="tx.status + '-' + tx.signature">
-              <div class="wallet-tx-row">
+              <div class="wallet-tx-row" :class="{ pending: tx.status === 'pending' }">
                 <span class="pill" :class="tx.kind" x-text="tx.direction"></span>
                 <div class="wallet-tx-main">
                   <div><span class="wallet-tx-amount" x-text="tx.amount"></span> coin(s)</div>
@@ -857,11 +875,36 @@ const INDEX_HTML: &str = r#"<!doctype html>
 
 #[cfg(test)]
 mod tests {
-    use super::dev_seed_verify_bypass_allowed;
+    use std::sync::Arc;
+
+    use tokio::sync::Mutex;
+
+    use crate::adapters::{config_store, config_store::UiConfig};
+
+    use super::{dev_seed_verify_bypass_allowed, persist_burn_per_block_config};
 
     #[test]
     fn dev_seed_verify_bypass_requires_env_flag() {
         assert!(dev_seed_verify_bypass_allowed(true));
         assert!(!dev_seed_verify_bypass_allowed(false));
+    }
+
+    #[tokio::test]
+    async fn burn_rate_config_persistence_updates_config_file() {
+        let dir = tempfile::tempdir().unwrap();
+        let config_path = dir.path().join("config.json");
+        let ui_config = Arc::new(Mutex::new(UiConfig {
+            setup_complete: true,
+            ..UiConfig::default()
+        }));
+        let initial_config = ui_config.lock().await.clone();
+        config_store::save(&config_path, &initial_config).expect("initial config should save");
+
+        persist_burn_per_block_config(&ui_config, &config_path, 50)
+            .await
+            .unwrap();
+        let config = config_store::load_or_create(&config_path).unwrap();
+
+        assert_eq!(config.burn_per_block, 50);
     }
 }

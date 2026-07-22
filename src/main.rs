@@ -10,7 +10,7 @@ use std::{
 use anyhow::{Context, Result, bail};
 use mivora::{
     adapters::{chain_store::SqliteChainStore, config_store, http, p2p, wallet_store},
-    app::{DEFAULT_BURN_PER_BLOCK, NodeCore, PeerBook, SharedNode, SharedPeerBook, now_ms},
+    app::{NodeCore, PeerBook, SharedNode, SharedPeerBook, now_ms},
     domain::{Amount, ChainSnapshot, GenesisBurn, Ledger, run_vdf},
 };
 use tokio::sync::Mutex;
@@ -36,7 +36,7 @@ async fn main() -> Result<()> {
     let persisted_chain_exists = chain_store.load()?.is_some();
     let ledger = initialize_ledger(&opts, wallet.address(), &chain_store).await?;
     let has_chain = opts.has_chain() || persisted_chain_exists;
-    let initial_burn_per_block = initial_burn_per_block(&opts);
+    let initial_burn_per_block = initial_burn_per_block(&opts, &ui_config);
 
     let node: SharedNode = Arc::new(Mutex::new(NodeCore::from_ledger(
         wallet,
@@ -106,6 +106,12 @@ async fn initialize_ledger(
     chain_store: &SqliteChainStore,
 ) -> Result<Ledger> {
     if let Some(snapshot) = chain_store.load()? {
+        if opts.chain_mode == ChainMode::Genesis {
+            bail!(
+                "--genesis refuses to run because chain database already contains a blockchain at {}; start without --genesis to resume it",
+                chain_store.path().display()
+            );
+        }
         let height = snapshot_height(&snapshot);
         let ledger = Ledger::from_snapshot(snapshot).with_context(|| {
             format!(
@@ -259,10 +265,10 @@ fn validate_wallet_for_mode(
     Ok(())
 }
 
-fn initial_burn_per_block(opts: &CliOptions) -> Amount {
+fn initial_burn_per_block(opts: &CliOptions, ui_config: &config_store::UiConfig) -> Amount {
     match opts.chain_mode {
         ChainMode::Genesis => GENESIS_INITIAL_BURN_PER_BLOCK,
-        ChainMode::Setup | ChainMode::Join => DEFAULT_BURN_PER_BLOCK,
+        ChainMode::Setup | ChainMode::Join => ui_config.burn_per_block,
     }
 }
 
@@ -512,7 +518,7 @@ mod tests {
     use std::{collections::BTreeMap, sync::Arc, time::Duration};
 
     use mivora::{
-        adapters::chain_store::SqliteChainStore,
+        adapters::{chain_store::SqliteChainStore, config_store::UiConfig},
         app::{DEFAULT_BURN_PER_BLOCK, NodeCore},
         domain::{GenesisBurn, Ledger, Wallet},
     };
@@ -601,13 +607,30 @@ mod tests {
     #[test]
     fn genesis_mode_starts_with_full_reward_burn_rate() {
         let genesis = parse(&["--genesis"]).unwrap().unwrap();
-        assert_eq!(initial_burn_per_block(&genesis), 100);
+        let configured = UiConfig {
+            burn_per_block: 50,
+            ..UiConfig::default()
+        };
+        assert_eq!(initial_burn_per_block(&genesis, &configured), 100);
+    }
+
+    #[test]
+    fn non_genesis_modes_start_with_configured_burn_rate() {
+        let configured = UiConfig {
+            burn_per_block: 50,
+            ..UiConfig::default()
+        };
 
         let setup = parse(&[]).unwrap().unwrap();
-        assert_eq!(initial_burn_per_block(&setup), DEFAULT_BURN_PER_BLOCK);
+        assert_eq!(initial_burn_per_block(&setup, &configured), 50);
 
         let join = parse(&["--join", "127.0.0.1:9444"]).unwrap().unwrap();
-        assert_eq!(initial_burn_per_block(&join), DEFAULT_BURN_PER_BLOCK);
+        assert_eq!(initial_burn_per_block(&join, &configured), 50);
+
+        assert_eq!(
+            initial_burn_per_block(&setup, &UiConfig::default()),
+            DEFAULT_BURN_PER_BLOCK
+        );
     }
 
     #[test]
@@ -738,7 +761,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn startup_resumes_persisted_chain_instead_of_creating_new_genesis() {
+    async fn genesis_refuses_to_start_when_chain_database_exists() {
         let dir = tempdir().unwrap();
         let chain_path = dir.path().join("chain.sqlite3");
         let store = SqliteChainStore::open(&chain_path).unwrap();
@@ -747,6 +770,29 @@ mod tests {
         store.save(&persisted.snapshot()).unwrap();
         let fresh_wallet = Wallet::from_seed("fresh-start-wallet");
         let opts = parse(&["--genesis", "--chain-db", chain_path.to_str().unwrap()])
+            .unwrap()
+            .unwrap();
+
+        let error = initialize_ledger(&opts, fresh_wallet.address(), &store)
+            .await
+            .unwrap_err();
+
+        assert!(
+            error.to_string().contains("already contains a blockchain"),
+            "{error:#}"
+        );
+    }
+
+    #[tokio::test]
+    async fn startup_resumes_persisted_chain_without_genesis_flag() {
+        let dir = tempdir().unwrap();
+        let chain_path = dir.path().join("chain.sqlite3");
+        let store = SqliteChainStore::open(&chain_path).unwrap();
+        let persisted_wallet = Wallet::from_seed("persisted-chain-owner");
+        let persisted = ledger_with_one_mined_block(&persisted_wallet);
+        store.save(&persisted.snapshot()).unwrap();
+        let fresh_wallet = Wallet::from_seed("fresh-start-wallet");
+        let opts = parse(&["--chain-db", chain_path.to_str().unwrap()])
             .unwrap()
             .unwrap();
 

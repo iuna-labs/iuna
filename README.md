@@ -10,7 +10,7 @@ The current devnet assumes friendly nodes. It has one binary that acts as wallet
 cargo run -- --http 127.0.0.1:18661 --p2p 127.0.0.1:9444
 ```
 
-Open `http://127.0.0.1:18661` and complete the initial setup modal. The setup flow lets you generate a local recovery phrase or import one, verifies generated phrases with a 4-word check, stores the wallet in `.mivora/wallet.json`, stores peers and setup state in `.mivora/config.json`, and does not create a chain yet.
+Open `http://127.0.0.1:18661` and complete the initial setup modal. The setup flow lets you generate a local recovery phrase or import one, verifies generated phrases with a 4-word check, stores the wallet in `.mivora/wallet.json`, stores runtime config in `.mivora/config.json`, and does not create a chain yet.
 
 For fast local development, set `MIVORA_DEV_SKIP_SEED_VERIFY=1` before starting the node to show a setup-only skip button for the recovery phrase check.
 
@@ -20,7 +20,7 @@ After setup, restart with genesis mode:
 cargo run -- --genesis --http 127.0.0.1:18661 --p2p 127.0.0.1:9444
 ```
 
-`--genesis` only works when the wallet file already exists. It creates the starter chain, adaptively measures VDF throughput locally, extrapolates that measurement to a 60-second initial round count, and persists the validated chain to `.mivora/chain.sqlite3`. The same data directory resumes automatically on later runs.
+`--genesis` only works when the wallet file already exists and `.mivora/chain.sqlite3` does not already contain a blockchain. It creates the starter chain, adaptively measures VDF throughput locally, extrapolates that measurement to a 60-second initial round count, and persists the validated chain. The same data directory resumes automatically on later runs without `--genesis`.
 
 Mining is automatic. There is no "mine block" button and no exact sleep. Each node can burn its configured amount once per chain height. Those burns become one-shot leader tickets for a future height after the launch profile's maturity delay. Only the selected ticket owner builds the next block, signs a leader proof, performs the VDF work, and gossips the finished block. The VDF is the clock.
 
@@ -90,7 +90,7 @@ There is no default wallet seed in the binary. Keep the wallet file private; it 
 
 ## Node Config
 
-Mivora stores UI setup state and configured peers in `<data-dir>/config.json`. If `setup_complete` is false, the management UI opens the initial setup screen for wallet and peer setup. Completing setup writes the file through the HTTP API, so the choice follows the node data directory instead of a browser session.
+Mivora stores UI setup state, configured peers, and the configured automatic burn rate in `<data-dir>/config.json`. If `setup_complete` is false, the management UI opens the initial setup screen for wallet and peer setup. Completing setup and later runtime changes write the file through the HTTP API, so the choices follow the node data directory instead of a browser session.
 
 ## Chain Storage
 
