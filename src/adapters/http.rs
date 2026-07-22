@@ -499,8 +499,7 @@ const INDEX_HTML: &str = r#"<!doctype html>
     .setup-status { border: 1px solid #566d25; border-radius: 8px; padding: 10px; background: #1c2516; color: #d5f55f; font-weight: 800; }
     .wallet-grid { width: 100%; display: grid; grid-template-columns: minmax(0, 1fr) minmax(300px, .8fr); gap: 12px; align-items: start; }
     .wallet-actions { display: grid; gap: 12px; }
-    .mining-grid { width: 100%; display: grid; grid-template-columns: minmax(0, .95fr) minmax(300px, .7fr); gap: 12px; align-items: start; }
-    .config-grid { width: 100%; display: grid; grid-template-columns: minmax(0, .9fr) minmax(300px, .75fr); gap: 12px; align-items: start; }
+    .mining-grid { width: 100%; display: grid; grid-template-columns: minmax(0, 1fr); gap: 12px; align-items: start; }
     .receive-address { display: grid; gap: 8px; }
     .address-box { border: 1px solid #2f363c; border-radius: 8px; padding: 11px; background: #111316; }
     .panel-head { display: flex; justify-content: space-between; gap: 12px; align-items: center; margin-bottom: 12px; }
@@ -543,7 +542,7 @@ const INDEX_HTML: &str = r#"<!doctype html>
     .pill.transfer { background: #17312a; color: #8de9cd; }
     .mempool-strip { display: flex; gap: 8px; overflow-x: auto; padding-bottom: 4px; }
     .mempool-item { flex: 0 0 200px; border: 1px solid #2f363c; border-radius: 8px; padding: 10px; background: #111316; }
-    @media (max-width: 920px) { .setup-grid, .wallet-grid, .mining-grid, .config-grid, .detail-grid { grid-template-columns: 1fr; } }
+    @media (max-width: 920px) { .setup-grid, .wallet-grid, .mining-grid, .detail-grid { grid-template-columns: 1fr; } }
     @media (max-width: 760px) {
       .app-shell { grid-template-columns: 1fr; }
       .sidebar { position: sticky; z-index: 5; bottom: 0; top: auto; height: auto; flex-direction: row; justify-content: space-between; padding: 8px; border-right: 0; border-bottom: 1px solid #262b2f; }
@@ -552,14 +551,14 @@ const INDEX_HTML: &str = r#"<!doctype html>
       .nav-button { width: 52px; min-height: 48px; }
       .nav-button span { font-size: 10px; }
       .content { padding: 16px 12px 36px; }
-      header, .split, .setup-grid, .wallet-grid, .mining-grid, .config-grid, .detail-grid, .wallet-tx-row { grid-template-columns: 1fr; }
+      header, .split, .setup-grid, .wallet-grid, .mining-grid, .detail-grid, .wallet-tx-row { grid-template-columns: 1fr; }
       header { display: grid; }
       input { min-width: 0; width: 100%; }
       .switch input { width: auto; }
       .block-card { flex-basis: 108px; }
     }
   </style>
-  <script defer src="/assets/mivora-ui.js?v=26"></script>
+  <script defer src="/assets/mivora-ui.js?v=28"></script>
   <script defer src="/assets/alpine.min.js"></script>
 </head>
 <body x-data="mivoraApp()" x-init="init()" x-cloak>
@@ -582,10 +581,6 @@ const INDEX_HTML: &str = r#"<!doctype html>
         <button class="nav-button" :class="{ active: tab === 'chain' }" @click="setTab('chain')" type="button" title="Explorer" aria-label="Explorer">
           <svg class="chain-icon" viewBox="0 0 24 24" aria-hidden="true"><rect x="1.5" y="9" width="5.5" height="5.5"></rect><rect x="9.25" y="9" width="5.5" height="5.5"></rect><rect x="17" y="9" width="5.5" height="5.5"></rect></svg>
           <span>Chain</span>
-        </button>
-        <button class="nav-button" :class="{ active: tab === 'config' }" @click="setTab('config')" type="button" title="Configuration" aria-label="Configuration">
-          <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M4 21v-7"></path><path d="M4 10V3"></path><path d="M12 21v-9"></path><path d="M12 8V3"></path><path d="M20 21v-5"></path><path d="M20 12V3"></path><path d="M2 14h4"></path><path d="M10 8h4"></path><path d="M18 16h4"></path></svg>
-          <span>Config</span>
         </button>
       </nav>
     </aside>
@@ -665,6 +660,14 @@ const INDEX_HTML: &str = r#"<!doctype html>
             <div class="metric"><div class="label">Target</div><div class="value" x-text="targetSecondsLabel()"></div></div>
           </div>
         </div>
+        <div class="panel">
+          <h3>Mining</h3>
+          <form @submit.prevent="saveBurn">
+            <label>Coins per block<input x-model.number="burnAmountDraft" @input="burnAmountDirty = true" type="number" min="0"></label>
+            <label>Fee<input :value="automaticBurnFeeDraft()" type="number" readonly></label>
+            <button class="primary" type="submit">Save</button>
+          </form>
+        </div>
       </div>
     </section>
 
@@ -686,22 +689,6 @@ const INDEX_HTML: &str = r#"<!doctype html>
             <tr x-show="peers.length === 0"><td colspan="7">No peers</td></tr>
           </tbody>
         </table>
-      </div>
-    </section>
-
-    <section x-show="tab === 'config'">
-      <div class="page-title">
-        <div class="muted">Runtime node settings</div>
-      </div>
-      <div class="config-grid">
-        <div class="panel">
-          <h3>Mining</h3>
-          <form @submit.prevent="saveBurn">
-            <label>Coins per block<input x-model.number="burnAmountDraft" @input="burnAmountDirty = true" type="number" min="0"></label>
-            <label>Fee<input :value="automaticBurnFeeDraft()" type="number" readonly></label>
-            <button class="primary" type="submit">Save</button>
-          </form>
-        </div>
       </div>
     </section>
 
@@ -753,6 +740,7 @@ const INDEX_HTML: &str = r#"<!doctype html>
                 <template x-for="tx in selectedBlock.transactions" :key="tx.signature">
                   <div class="tx-card">
                     <div class="tx-head"><span class="pill" :class="tx.kind" x-text="tx.kind"></span><strong x-text="tx.amount"></strong></div>
+                    <div class="muted">fee <span x-text="tx.fee ?? 0"></span></div>
                     <div><span class="muted">from </span><code x-text="short(tx.from)"></code></div>
                     <div x-show="tx.to"><span class="muted">to </span><code x-text="short(tx.to)"></code></div>
                     <div class="muted">nonce <span x-text="tx.nonce"></span></div>

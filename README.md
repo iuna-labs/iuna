@@ -29,7 +29,8 @@ Genesis leaves the starter wallet with 100 spendable coins after the 1-coin boot
 The management UI is a small AlpineJS app served from local vendored assets. It polls JSON endpoints every few seconds and includes:
 
 - wallet and transaction controls,
-- runtime mining and peer settings in the Configuration screen,
+- runtime mining settings in the Mining screen,
+- peer setup and status in the P2P screen,
 - P2P peer status with gossip send/receive counters and last error,
 - a blockchain explorer and mempool view.
 
@@ -39,7 +40,7 @@ For a second local node joining Alice's chain:
 cargo run -- --data-dir .mivora-bob --http 127.0.0.1:18662 --p2p 127.0.0.1:9445 --join 127.0.0.1:9444
 ```
 
-`--join` fetches a chain snapshot from the peer before mining starts and announces this node's P2P listener back to that peer, so newly mined blocks can flow back without restarting the first node. If the peer cannot provide a snapshot, the node exits instead of silently starting a separate chain. Additional peers can be added from the Configuration screen.
+`--join` fetches a chain snapshot from the peer before mining starts and announces this node's P2P listener back to that peer, so newly mined blocks can flow back without restarting the first node. If the peer cannot provide a snapshot, the node exits instead of silently starting a separate chain. Additional peers can be added from the P2P screen.
 
 If `<data-dir>/chain.sqlite3` already exists, the node resumes that chain first. That makes restarts boring in the good way: `--genesis` will not create a new genesis over an existing local chain, and `--join` remains useful for reconnecting to peers without replacing local state. Pass `--chain-db path/to/chain.sqlite3` to override the database path.
 
@@ -78,7 +79,7 @@ Every non-genesis block must consume the selected mature ticket, include at leas
 
 The protocol targets 60-second blocks by retargeting the expected VDF rounds after each block. It uses a rolling average of recent block intervals and only moves the next round count by about 10% per block, so short bursts do not make the delay swing wildly. Every node derives the same next-round count from the validated chain.
 
-The base block reward is fixed at 100 coins, and miners collect transaction fees on top. The miner includes the best valid burn for liveness, then fills the remaining block space by fee-rate while respecting nonce and balance validity. The default burn is 0 coins per block, so new nodes can join before they own coins. Genesis starters begin at 100 coins per block; after another wallet has coins, raise its burn from the Configuration screen.
+The base block reward is fixed at 100 coins, and miners collect transaction fees on top. The miner includes the best valid burn for liveness, then fills the remaining block space by fee-rate while respecting nonce and balance validity. The default burn is 0 coins per block, so new nodes can join before they own coins. Genesis starters begin at 100 coins per block; after another wallet has coins, raise its burn from the Mining screen.
 
 The measured VDF round count is only the initial delay. After the first blocks, the protocol steers rounds toward the 60-second target.
 
