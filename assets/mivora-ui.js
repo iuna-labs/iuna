@@ -12,16 +12,35 @@ window.mivoraApp = function mivoraApp() {
     transferTo: "",
     transferAmount: 25,
     peerAddress: "",
+    showBurnTransactions: true,
     flash: null,
     flashTimer: null,
     lastUpdated: null,
     pollHandle: null,
     newBlockHashes: new Set(),
     newBlockTimer: null,
+    blockPageSize: 20,
 
     init() {
+      this.tab = this.tabFromHash();
+      window.addEventListener("hashchange", () => {
+        this.tab = this.tabFromHash();
+      });
       this.refresh();
       this.pollHandle = setInterval(() => this.refresh(), 5000);
+    },
+
+    tabFromHash() {
+      const hash = window.location.hash.replace(/^#\/?/, "");
+      return ["wallet", "mining", "p2p", "chain"].includes(hash) ? hash : "wallet";
+    },
+
+    setTab(tab) {
+      if (!["wallet", "mining", "p2p", "chain"].includes(tab)) return;
+      this.tab = tab;
+      if (window.location.hash !== `#${tab}`) {
+        window.location.hash = tab;
+      }
     },
 
     async refresh() {
@@ -72,7 +91,9 @@ window.mivoraApp = function mivoraApp() {
       } else {
         this.selectedBlock = known.get(this.selectedBlock.hash);
       }
-      this.hasMoreBlocks = this.blocks.some((block) => block.height > 0);
+      this.hasMoreBlocks =
+        this.blocks.some((block) => block.height > 0) &&
+        !this.blocks.some((block) => block.height === 0);
 
       const newHeadBlocks = options.animateHead
         ? this.blocks.filter(
@@ -87,6 +108,7 @@ window.mivoraApp = function mivoraApp() {
           this.slideNewHeadBlocks(previousScrollWidth, { force: wasFollowingHead })
         );
       }
+      this.$nextTick(() => this.maybeLoadOlderBlocksFromRail());
     },
 
     markNewBlocks(hashes) {
@@ -122,8 +144,14 @@ window.mivoraApp = function mivoraApp() {
       }
       this.loadingOlder = true;
       try {
-        const older = await this.fetchJson(`/api/blocks?before_height=${oldest}&limit=30`);
-        if (older.length === 0 || older.some((block) => block.height === 0)) {
+        const older = await this.fetchJson(
+          `/api/blocks?before_height=${oldest}&limit=${this.blockPageSize}`
+        );
+        if (
+          older.length === 0 ||
+          older.length < this.blockPageSize ||
+          older.some((block) => block.height === 0)
+        ) {
           this.hasMoreBlocks = false;
         }
         this.mergeFreshBlocks(older);
@@ -135,9 +163,13 @@ window.mivoraApp = function mivoraApp() {
     },
 
     maybeLoadOlderBlocks(event) {
-      const rail = event.currentTarget;
+      this.maybeLoadOlderBlocksFromRail(event.currentTarget);
+    },
+
+    maybeLoadOlderBlocksFromRail(rail = this.$refs.blockRail) {
+      if (this.tab !== "chain" || !rail || this.loadingOlder || !this.hasMoreBlocks) return;
       const remaining = rail.scrollWidth - rail.scrollLeft - rail.clientWidth;
-      if (remaining < 280) {
+      if (remaining <= 180) {
         this.loadOlderBlocks();
       }
     },
@@ -197,6 +229,15 @@ window.mivoraApp = function mivoraApp() {
       }
     },
 
+    async copyAddress() {
+      try {
+        await navigator.clipboard.writeText(this.status.wallet_address || "");
+        this.showFlash("Address copied", "success");
+      } catch (error) {
+        this.showFlash("Could not copy address", "error");
+      }
+    },
+
     showFlash(message, kind) {
       this.flash = { message, kind };
       if (this.flashTimer) {
@@ -238,6 +279,61 @@ window.mivoraApp = function mivoraApp() {
       return `${count} transfer${count === 1 ? "" : "s"}`;
     },
 
+    walletTransactions() {
+      const wallet = this.status.wallet_address;
+      if (!wallet) return [];
+
+      const rows = [];
+      for (const [index, tx] of this.mempool.entries()) {
+        if (!this.walletTxMatches(tx, wallet)) continue;
+        rows.push(this.walletTxRow(tx, {
+          status: "pending",
+          blockHeight: null,
+          sortKey: Number.MAX_SAFE_INTEGER - index,
+        }));
+      }
+
+      for (const block of this.blocks) {
+        const transactions = [...block.transactions].reverse();
+        for (const [index, tx] of transactions.entries()) {
+          if (!this.walletTxMatches(tx, wallet)) continue;
+          rows.push(this.walletTxRow(tx, {
+            status: "confirmed",
+            blockHeight: block.height,
+            sortKey: block.height * 10_000 + index,
+          }));
+        }
+      }
+
+      return rows
+        .filter((row) => this.showBurnTransactions || row.kind !== "burn")
+        .sort((left, right) => right.sortKey - left.sortKey);
+    },
+
+    walletTxMatches(tx, wallet) {
+      return tx.from === wallet || tx.to === wallet;
+    },
+
+    walletTxRow(tx, meta) {
+      const wallet = this.status.wallet_address;
+      let direction = "sent";
+      if (tx.kind === "burn") {
+        direction = "burn";
+      } else if (tx.to === wallet) {
+        direction = "received";
+      }
+      return {
+        ...tx,
+        ...meta,
+        direction,
+      };
+    },
+
+    txTitle(tx) {
+      if (tx.status === "pending") return "Pending";
+      return tx.blockHeight === null ? "Confirmed" : `Block ${tx.blockHeight}`;
+    },
+
     isLeaderLabel() {
       if (!this.status.mining) return "-";
       return this.status.mining.wallet_is_current_leader ? "yes" : "no";
@@ -257,11 +353,6 @@ window.mivoraApp = function mivoraApp() {
     targetSecondsLabel() {
       const ms = this.status.mining?.vdf_target_block_ms;
       return ms ? `${Math.round(ms / 1000)}s` : "-";
-    },
-
-    olderButtonLabel() {
-      if (this.loadingOlder) return "Loading";
-      return this.hasMoreBlocks ? "Load older blocks" : "Genesis loaded";
     },
 
     lastUpdatedLabel() {

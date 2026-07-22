@@ -18,7 +18,7 @@ use crate::{
 };
 
 const EXPLORER_LIMIT: usize = 50;
-const EXPLORER_PAGE_LIMIT: usize = 30;
+const EXPLORER_PAGE_LIMIT: usize = 20;
 
 #[derive(Clone)]
 struct HttpState {
@@ -246,105 +246,215 @@ const INDEX_HTML: &str = r#"<!doctype html>
   <title>Mivora</title>
   <style>
     [x-cloak] { display: none !important; }
-    :root { color-scheme: light; font-family: Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif; }
-    body { margin: 0; background: #f7f8fa; color: #17202a; }
-    main { max-width: 1180px; margin: 0 auto; padding: 18px 18px 48px; }
-    header { display: flex; justify-content: space-between; gap: 18px; align-items: flex-start; padding: 0 0 16px; border-bottom: 1px solid #d9e0e7; }
-    h1 { margin: 0 0 4px; font-size: 26px; }
+    :root {
+      color-scheme: dark;
+      font-family: Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+      background: #0f1012;
+      color: #e8edf0;
+    }
+    * { box-sizing: border-box; }
+    body { margin: 0; min-height: 100vh; background: #0f1012; color: #e8edf0; }
+    .app-shell { min-height: 100vh; display: grid; grid-template-columns: 84px minmax(0, 1fr); }
+    .sidebar { position: sticky; top: 0; height: 100vh; display: flex; flex-direction: column; align-items: center; gap: 20px; padding: 16px 10px; background: #15171a; border-right: 1px solid #262b2f; }
+    .brand-mark { width: 44px; height: 44px; display: grid; place-items: center; border-radius: 8px; background: #d5f55f; color: #11140c; font-size: 22px; font-weight: 900; }
+    .side-nav { display: grid; gap: 10px; width: 100%; }
+    .nav-button { width: 64px; min-height: 58px; display: grid; place-items: center; gap: 4px; border: 1px solid transparent; border-radius: 8px; padding: 7px 4px; background: transparent; color: #9fa8ad; }
+    .nav-button svg { width: 21px; height: 21px; stroke: currentColor; stroke-width: 2; fill: none; }
+    .nav-button svg.chain-icon { stroke-width: 1.35; }
+    .nav-button span { font-size: 11px; font-weight: 800; }
+    .nav-button:hover, .nav-button.active { background: #202328; border-color: #3b4448; color: #d5f55f; }
+    .content { min-width: 0; padding: 22px 24px 48px; }
+    main { max-width: 1240px; margin: 0 auto; }
+    header { display: flex; justify-content: space-between; gap: 18px; align-items: flex-start; padding: 0 0 18px; }
+    h1 { margin: 0 0 4px; font-size: 28px; }
     h2 { margin: 0 0 12px; font-size: 18px; }
     h3 { margin: 0 0 10px; font-size: 15px; }
-    button { border: 1px solid #c9d2dc; border-radius: 6px; padding: 8px 11px; font: inherit; font-weight: 700; background: white; color: #17202a; cursor: pointer; }
-    button:hover { border-color: #157a6e; color: #0f665d; }
-    button.primary { background: #116149; border-color: #116149; color: white; }
-    button.primary:hover { background: #0b4f3b; color: white; }
-    button:disabled { cursor: default; opacity: .55; }
-    .tabs { display: flex; flex-wrap: wrap; gap: 8px; margin: 18px 0; }
-    .tabs button.active { background: #17202a; border-color: #17202a; color: white; }
-    .grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(150px, 1fr)); gap: 8px; }
-    .metric, .panel { background: white; border: 1px solid #dde3ea; border-radius: 8px; padding: 12px; }
-    .metric .label { color: #667789; font-size: 12px; text-transform: uppercase; letter-spacing: .06em; }
-    .metric .value { margin-top: 6px; font-weight: 800; overflow-wrap: anywhere; }
+    button { border: 1px solid #3a4248; border-radius: 6px; padding: 8px 11px; font: inherit; font-weight: 700; background: #191c20; color: #e8edf0; cursor: pointer; }
+    button:hover { border-color: #d5f55f; color: #d5f55f; }
+    button.primary { background: #d5f55f; border-color: #d5f55f; color: #15171a; }
+    button.primary:hover { background: #e4ff83; color: #15171a; }
+    button:disabled { cursor: default; opacity: .5; }
+    .grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(150px, 1fr)); gap: 10px; }
+    .metric, .panel { background: #181b1f; border: 1px solid #2a3035; border-radius: 8px; padding: 13px; }
+    .metric .label { color: #8d989f; font-size: 11px; text-transform: uppercase; }
+    .metric .value { margin-top: 7px; font-weight: 850; overflow-wrap: anywhere; }
     .panel { margin-bottom: 12px; }
-    .split { display: grid; grid-template-columns: minmax(0, 1fr) minmax(320px, .7fr); gap: 12px; }
+    .split { display: grid; grid-template-columns: minmax(0, 1fr) minmax(320px, .72fr); gap: 12px; }
     form { display: flex; flex-wrap: wrap; gap: 10px; align-items: end; }
-    label { display: grid; gap: 5px; color: #465564; font-size: 13px; }
-    input { min-width: 180px; border: 1px solid #b8c4cf; border-radius: 6px; padding: 9px 10px; font: inherit; background: white; }
+    label { display: grid; gap: 5px; color: #a8b2b8; font-size: 13px; }
+    input { min-width: 180px; border: 1px solid #3a444b; border-radius: 6px; padding: 9px 10px; font: inherit; background: #101215; color: #edf2f5; }
+    input:focus { outline: 2px solid #d5f55f; outline-offset: 1px; }
     table { width: 100%; border-collapse: collapse; font-size: 13px; }
-    th, td { text-align: left; border-bottom: 1px solid #e2e7ed; padding: 8px; vertical-align: top; }
-    th { color: #667789; font-size: 11px; text-transform: uppercase; letter-spacing: .05em; }
-    code { overflow-wrap: anywhere; }
+    th, td { text-align: left; border-bottom: 1px solid #2a3035; padding: 8px; vertical-align: top; }
+    th { color: #8d989f; font-size: 11px; text-transform: uppercase; }
+    code { overflow-wrap: anywhere; color: #c7f5ea; }
     .table-wrap { overflow-x: auto; }
-    .muted { color: #667789; }
+    .muted { color: #8d989f; }
     .flash { border-radius: 6px; padding: 10px 12px; margin: 12px 0; border: 1px solid; font-weight: 700; }
-    .flash.success { color: #0b5e43; background: #effbf4; border-color: #a7dfbd; }
-    .flash.error { color: #9b1c1c; background: #fff1f1; border-color: #f0b7b7; }
-    .ok { color: #0b5e43; }
-    .summary-row { display: grid; grid-template-columns: repeat(5, minmax(0, 1fr)); gap: 8px; }
+    .flash.success { color: #d5f55f; background: #1c2516; border-color: #566d25; }
+    .flash.error { color: #ffb1a8; background: #2a1717; border-color: #713434; }
+    .ok { color: #d5f55f; }
+    .page-title { margin-bottom: 16px; }
+    .wallet-grid { display: grid; grid-template-columns: minmax(0, 1fr) minmax(300px, .8fr); gap: 12px; align-items: start; }
+    .wallet-actions { display: grid; gap: 12px; }
+    .mining-grid { display: grid; grid-template-columns: minmax(0, .95fr) minmax(300px, .7fr); gap: 12px; align-items: start; }
+    .receive-address { display: grid; gap: 8px; }
+    .address-box { border: 1px solid #2f363c; border-radius: 8px; padding: 11px; background: #111316; }
+    .panel-head { display: flex; justify-content: space-between; gap: 12px; align-items: center; margin-bottom: 12px; }
+    .panel-head h2, .panel-head h3 { margin-bottom: 0; }
+    .switch { display: inline-flex; grid-template-columns: none; align-items: center; gap: 8px; color: #d6dee2; font-weight: 700; }
+    .switch input { width: auto; min-width: 0; accent-color: #d5f55f; }
+    .wallet-tx-list { display: grid; gap: 8px; }
+    .wallet-tx-row { display: grid; grid-template-columns: minmax(88px, .35fr) minmax(0, 1fr) auto; gap: 12px; align-items: center; border: 1px solid #2f363c; border-radius: 8px; padding: 10px; background: #111316; }
+    .wallet-tx-main { display: grid; gap: 4px; min-width: 0; }
+    .wallet-tx-amount { font-weight: 900; }
+    .panel .grid + form { margin-top: 12px; }
     .explorer-shell { display: grid; gap: 12px; }
-    .block-rail-wrap { background: white; border: 1px solid #dde3ea; border-radius: 8px; padding: 12px; overflow: hidden; }
+    .block-rail-wrap { background: #181b1f; border: 1px solid #2a3035; border-radius: 8px; padding: 12px; overflow: hidden; }
     .block-rail-head { display: flex; justify-content: space-between; gap: 10px; align-items: center; margin-bottom: 10px; }
     .block-rail { display: flex; gap: 8px; overflow-x: auto; padding: 1px 0 10px; scroll-snap-type: x proximity; }
-    .block-card { flex: 0 0 118px; min-height: 96px; display: grid; gap: 6px; border: 1px solid #dde3ea; border-radius: 8px; padding: 9px; background: #fbfcfd; color: #17202a; text-align: left; scroll-snap-align: start; }
-    .block-card:hover { border-color: #8bbdb5; color: #0f665d; }
-    .block-card.selected { background: #eef8f5; border-color: #157a6e; box-shadow: inset 0 0 0 1px #157a6e; }
+    .block-card { flex: 0 0 122px; min-height: 100px; display: grid; gap: 6px; border: 1px solid #2f363c; border-radius: 8px; padding: 9px; background: #111316; color: #e8edf0; text-align: left; scroll-snap-align: start; }
+    .block-card:hover { border-color: #d5f55f; color: #d5f55f; }
+    .block-card.selected { background: #202616; border-color: #d5f55f; box-shadow: inset 0 0 0 1px #d5f55f; }
     .block-card.new-block { animation: block-arrive .45s ease both; }
     @keyframes block-arrive { from { opacity: .2; transform: translateX(-12px); } to { opacity: 1; transform: translateX(0); } }
     .block-height { font-size: 18px; font-weight: 900; }
-    .block-meta { display: flex; gap: 8px; color: #667789; font-size: 12px; }
-    .block-hash { font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; font-size: 11px; overflow-wrap: anywhere; color: #465564; }
-    .rail-actions { display: flex; justify-content: flex-end; padding-top: 2px; }
+    .block-meta { display: flex; gap: 8px; color: #8d989f; font-size: 12px; }
+    .block-hash { font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; font-size: 11px; overflow-wrap: anywhere; color: #9eb3bc; }
+    .skeleton-card { pointer-events: none; position: relative; overflow: hidden; }
+    .skeleton-card::after { content: ""; position: absolute; inset: 0; background: linear-gradient(90deg, transparent, rgba(213, 245, 95, .12), transparent); animation: skeleton-sweep 1.15s ease-in-out infinite; }
+    @keyframes skeleton-sweep { from { transform: translateX(-100%); } to { transform: translateX(100%); } }
+    .skeleton-line { height: 12px; border-radius: 6px; background: #2b3136; }
+    .skeleton-line.short { width: 42%; }
+    .skeleton-line.medium { width: 68%; }
+    .skeleton-line.long { width: 88%; }
     .detail-grid { display: grid; grid-template-columns: minmax(0, .9fr) minmax(0, 1.1fr); gap: 12px; }
     .detail-kv { display: grid; grid-template-columns: 90px minmax(0, 1fr); gap: 8px; font-size: 13px; margin: 7px 0; }
-    .detail-kv .key { color: #667789; }
+    .detail-kv .key { color: #8d989f; }
     .tx-list { display: grid; gap: 8px; }
-    .tx-card { border: 1px solid #e2e7ed; border-radius: 8px; padding: 10px; background: #fbfcfd; }
+    .tx-card { border: 1px solid #2f363c; border-radius: 8px; padding: 10px; background: #111316; }
     .tx-head { display: flex; justify-content: space-between; gap: 8px; margin-bottom: 6px; font-weight: 800; }
-    .pill { display: inline-flex; align-items: center; border-radius: 999px; padding: 2px 8px; font-size: 12px; font-weight: 800; background: #e8eef4; color: #34495e; }
-    .pill.burn { background: #fff0d9; color: #845400; }
-    .pill.transfer { background: #e5f5ee; color: #0b5e43; }
+    .pill { display: inline-flex; align-items: center; border-radius: 999px; padding: 2px 8px; font-size: 12px; font-weight: 800; background: #2b3136; color: #d6dee2; }
+    .pill.burn { background: #332918; color: #ffd070; }
+    .pill.transfer { background: #17312a; color: #8de9cd; }
     .mempool-strip { display: flex; gap: 8px; overflow-x: auto; padding-bottom: 4px; }
-    .mempool-item { flex: 0 0 200px; border: 1px solid #e2e7ed; border-radius: 8px; padding: 10px; background: white; }
-    @media (max-width: 920px) { .summary-row, .detail-grid { grid-template-columns: 1fr 1fr; } }
-    @media (max-width: 760px) { .split, .summary-row, .detail-grid { grid-template-columns: 1fr; } input { min-width: 0; width: 100%; } .block-card { flex-basis: 108px; } }
+    .mempool-item { flex: 0 0 200px; border: 1px solid #2f363c; border-radius: 8px; padding: 10px; background: #111316; }
+    @media (max-width: 920px) { .wallet-grid, .mining-grid, .detail-grid { grid-template-columns: 1fr; } }
+    @media (max-width: 760px) {
+      .app-shell { grid-template-columns: 1fr; }
+      .sidebar { position: sticky; z-index: 5; bottom: 0; top: auto; height: auto; flex-direction: row; justify-content: space-between; padding: 8px; border-right: 0; border-bottom: 1px solid #262b2f; }
+      .brand-mark { width: 38px; height: 38px; font-size: 19px; }
+      .side-nav { display: flex; width: auto; gap: 8px; }
+      .nav-button { width: 58px; min-height: 48px; }
+      .content { padding: 16px 12px 36px; }
+      header, .split, .wallet-grid, .mining-grid, .detail-grid, .wallet-tx-row { grid-template-columns: 1fr; }
+      header { display: grid; }
+      input { min-width: 0; width: 100%; }
+      .switch input { width: auto; }
+      .block-card { flex-basis: 108px; }
+    }
   </style>
-  <script defer src="/assets/mivora-ui.js?v=9"></script>
+  <script defer src="/assets/mivora-ui.js?v=13"></script>
   <script defer src="/assets/alpine.min.js"></script>
 </head>
 <body x-data="mivoraApp()" x-init="init()" x-cloak>
-  <main>
+  <div class="app-shell">
+    <aside class="sidebar" aria-label="Mivora navigation">
+      <div class="brand-mark" title="Mivora">M</div>
+      <nav class="side-nav">
+        <button class="nav-button" :class="{ active: tab === 'wallet' }" @click="setTab('wallet')" type="button" title="Wallet" aria-label="Wallet">
+          <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M3 7h16a2 2 0 0 1 2 2v8a2 2 0 0 1-2 2H3z"></path><path d="M3 7V5a2 2 0 0 1 2-2h12"></path><path d="M16 13h3"></path></svg>
+          <span>Wallet</span>
+        </button>
+        <button class="nav-button" :class="{ active: tab === 'mining' }" @click="setTab('mining')" type="button" title="Mining" aria-label="Mining">
+          <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M4 19V5"></path><path d="M4 19h16"></path><path d="M7 15l4-4 3 3 5-7"></path></svg>
+          <span>Mining</span>
+        </button>
+        <button class="nav-button" :class="{ active: tab === 'p2p' }" @click="setTab('p2p')" type="button" title="P2P" aria-label="P2P">
+          <svg viewBox="0 0 24 24" aria-hidden="true"><circle cx="6" cy="12" r="3"></circle><circle cx="18" cy="6" r="3"></circle><circle cx="18" cy="18" r="3"></circle><path d="M8.5 10.5 15.5 7.5"></path><path d="M8.5 13.5 15.5 16.5"></path></svg>
+          <span>P2P</span>
+        </button>
+        <button class="nav-button" :class="{ active: tab === 'chain' }" @click="setTab('chain')" type="button" title="Explorer" aria-label="Explorer">
+          <svg class="chain-icon" viewBox="0 0 24 24" aria-hidden="true"><rect x="1.5" y="9" width="5.5" height="5.5"></rect><rect x="9.25" y="9" width="5.5" height="5.5"></rect><rect x="17" y="9" width="5.5" height="5.5"></rect></svg>
+          <span>Chain</span>
+        </button>
+      </nav>
+    </aside>
+
+    <main class="content">
     <header>
       <div>
         <h1>Mivora</h1>
-        <div class="muted">Burn lottery devnet</div>
+        <div class="muted">Consensus node console</div>
       </div>
       <div class="muted" x-text="lastUpdatedLabel()"></div>
     </header>
 
     <div class="flash" :class="flash?.kind" x-show="flash" x-transition x-text="flash?.message"></div>
 
-    <section class="summary-row">
-      <div class="metric"><div class="label">Node</div><div class="value" x-text="status.name || '-'"></div></div>
-      <div class="metric"><div class="label">Local Height</div><div class="value" x-text="status.chain?.height ?? '-'"></div></div>
-      <div class="metric"><div class="label">Shared Height</div><div class="value" x-text="sharedHeightLabel()"></div></div>
-      <div class="metric"><div class="label">Wallet Balance</div><div class="value" x-text="status.wallet_balance ?? '-'"></div></div>
-      <div class="metric"><div class="label">Mempool</div><div class="value" x-text="mempool.length"></div></div>
+    <section x-show="tab === 'wallet'">
+      <div class="page-title">
+        <h2>Wallet</h2>
+        <div class="muted">Balance <strong x-text="status.wallet_balance ?? '-'"></strong></div>
+      </div>
+      <div class="wallet-grid">
+        <div class="wallet-actions">
+          <div class="panel">
+            <h3>Send</h3>
+            <form @submit.prevent="sendTransfer">
+              <label>Recipient<input x-model="transferTo" autocomplete="off"></label>
+              <label>Amount<input x-model.number="transferAmount" type="number" min="1"></label>
+              <button class="primary" type="submit">Send</button>
+            </form>
+          </div>
+          <div class="panel">
+            <div class="panel-head">
+              <h3>Receive</h3>
+              <button type="button" @click="copyAddress">Copy</button>
+            </div>
+            <div class="receive-address">
+              <div class="muted">Public key / address</div>
+              <div class="address-box"><code x-text="status.wallet_address || '-'"></code></div>
+            </div>
+          </div>
+        </div>
+        <div class="panel">
+          <div class="panel-head">
+            <h3>Transactions</h3>
+            <label class="switch"><input x-model="showBurnTransactions" type="checkbox">Show burns</label>
+          </div>
+          <div class="wallet-tx-list">
+            <template x-for="tx in walletTransactions()" :key="tx.status + '-' + tx.signature">
+              <div class="wallet-tx-row">
+                <span class="pill" :class="tx.kind" x-text="tx.direction"></span>
+                <div class="wallet-tx-main">
+                  <div><span class="wallet-tx-amount" x-text="tx.amount"></span> coin(s)</div>
+                  <div class="muted" x-text="txTitle(tx)"></div>
+                  <div><span class="muted">from </span><code x-text="short(tx.from)"></code></div>
+                  <div x-show="tx.to"><span class="muted">to </span><code x-text="short(tx.to)"></code></div>
+                </div>
+                <code x-text="short(tx.signature)"></code>
+              </div>
+            </template>
+            <div class="muted" x-show="walletTransactions().length === 0">No wallet transactions</div>
+          </div>
+        </div>
+      </div>
     </section>
 
-    <nav class="tabs">
-      <button :class="{ active: tab === 'wallet' }" @click="tab = 'wallet'">Wallet</button>
-      <button :class="{ active: tab === 'p2p' }" @click="tab = 'p2p'">P2P</button>
-      <button :class="{ active: tab === 'chain' }" @click="tab = 'chain'">Explorer</button>
-    </nav>
-
-    <section x-show="tab === 'wallet'">
-      <div class="split">
+    <section x-show="tab === 'mining'">
+      <div class="page-title">
+        <h2>Mining</h2>
+        <div class="muted">Automatic VDF-paced block production</div>
+      </div>
+      <div class="mining-grid">
         <div class="panel">
-          <h2>Wallet</h2>
-          <p><code x-text="status.wallet_address || '-'"></code></p>
+          <h3>Status</h3>
           <div class="grid">
-            <div class="metric"><div class="label">Balance</div><div class="value" x-text="status.wallet_balance ?? '-'"></div></div>
             <div class="metric"><div class="label">Current Leader</div><div class="value" x-text="isLeaderLabel()"></div></div>
             <div class="metric"><div class="label">Last Burn Height</div><div class="value" x-text="status.mining?.last_auto_burn_height ?? '-'"></div></div>
+            <div class="metric"><div class="label">VDF Rounds</div><div class="value" x-text="status.mining?.vdf_rounds ?? '-'"></div></div>
+            <div class="metric"><div class="label">Target</div><div class="value" x-text="targetSecondsLabel()"></div></div>
           </div>
         </div>
         <div class="panel">
@@ -354,14 +464,6 @@ const INDEX_HTML: &str = r#"<!doctype html>
             <button class="primary" type="submit">Save</button>
           </form>
         </div>
-      </div>
-      <div class="panel">
-        <h3>Send Coins</h3>
-        <form @submit.prevent="sendTransfer">
-          <label>Recipient<input x-model="transferTo" autocomplete="off"></label>
-          <label>Amount<input x-model.number="transferAmount" type="number" min="1"></label>
-          <button class="primary" type="submit">Send</button>
-        </form>
       </div>
     </section>
 
@@ -404,9 +506,13 @@ const INDEX_HTML: &str = r#"<!doctype html>
                 <div class="block-hash" x-text="short(block.hash)"></div>
               </button>
             </template>
-          </div>
-          <div class="rail-actions">
-            <button @click="loadOlderBlocks" :disabled="loadingOlder || !hasMoreBlocks" x-text="olderButtonLabel()"></button>
+            <template x-if="loadingOlder">
+              <div class="block-card skeleton-card" aria-hidden="true">
+                <div class="skeleton-line short"></div>
+                <div class="skeleton-line medium"></div>
+                <div class="skeleton-line long"></div>
+              </div>
+            </template>
           </div>
         </div>
 
@@ -458,6 +564,7 @@ const INDEX_HTML: &str = r#"<!doctype html>
         </section>
       </div>
     </section>
-  </main>
+    </main>
+  </div>
 </body>
 </html>"#;

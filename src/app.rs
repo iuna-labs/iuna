@@ -93,8 +93,15 @@ pub struct NodeStatus {
     pub name: String,
     pub wallet_address: String,
     pub wallet_balance: Amount,
+    pub launch_profile: LaunchProfileStatus,
     pub mining: MiningStatus,
     pub chain: ChainStatus,
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+pub struct LaunchProfileStatus {
+    pub profile_id: String,
+    pub profile_hash: String,
 }
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
@@ -294,6 +301,8 @@ impl NodeCore {
     }
 
     pub fn status(&self) -> NodeStatus {
+        let chain = self.ledger.status();
+        let launch_profile = self.ledger.launch_profile();
         let current_leader = self.ledger.expected_leader_for_next_block();
         let wallet_is_current_leader = current_leader
             .as_deref()
@@ -303,6 +312,10 @@ impl NodeCore {
             name: self.name.clone(),
             wallet_address: self.wallet.address().to_string(),
             wallet_balance: self.ledger.balance_of(self.wallet.address()),
+            launch_profile: LaunchProfileStatus {
+                profile_id: launch_profile.profile_id.clone(),
+                profile_hash: chain.launch_profile_hash.clone(),
+            },
             mining: MiningStatus {
                 automatic: true,
                 burn_per_block: self.burn_per_block,
@@ -312,7 +325,7 @@ impl NodeCore {
                 wallet_is_current_leader,
                 last_auto_burn_height: self.last_auto_burn_height,
             },
-            chain: self.ledger.status(),
+            chain,
         }
     }
 
@@ -431,9 +444,7 @@ impl NodeCore {
     }
 
     pub fn mine_one_at(&mut self, timestamp_ms: u64) -> Result<Block> {
-        let block = self
-            .ledger
-            .mine_next_block(self.wallet.address(), timestamp_ms)?;
+        let block = self.ledger.mine_next_block(&self.wallet, timestamp_ms)?;
         self.ledger.apply_locally_mined_block(block.clone())?;
         self.outbox.push(GossipEnvelope::Block(block.clone()));
         Ok(block)
@@ -444,7 +455,7 @@ impl NodeCore {
         work: PreparedBlock,
         vdf_output: String,
     ) -> Result<Block> {
-        let block = work.finish(vdf_output);
+        let block = work.finish(&self.wallet, vdf_output);
         self.ledger.apply_locally_mined_block(block.clone())?;
         self.outbox.push(GossipEnvelope::Block(block.clone()));
         Ok(block)

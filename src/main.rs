@@ -172,7 +172,7 @@ impl CliOptions {
                         .parse()
                         .context("invalid --genesis-amount")?;
                     if opts.genesis_amount < 1 {
-                        bail!("--genesis-amount must be at least 1 for the genesis burn");
+                        bail!("--genesis-amount must be at least 1 for the genesis ticket");
                     }
                 }
                 "--vdf-rounds" => {
@@ -237,7 +237,7 @@ fn print_help() {
            --p2p <addr:port>             P2P TCP listener address (default 127.0.0.1:9444)\n\
            --peer <addr:port>            P2P peer to gossip to; may be repeated\n\
            --join <addr:port>            Fetch chain snapshot from this peer before mining\n\
-           --genesis-amount <amount>     Pre-burn genesis amount for this wallet (default 1)\n\
+           --genesis-amount <amount>     Genesis allocation before the 1-coin bootstrap ticket (default 1)\n\
            --vdf-rounds <rounds>         Initial VDF delay rounds; protocol retargets toward 60s blocks\n\
            --burn-per-block <amount>     Fixed automatic burn before each block attempt\n\
            --data-dir <path>             Local wallet directory\n"
@@ -443,7 +443,7 @@ mod tests {
         ledger
             .submit_transaction(wallet.burn(1, ledger.next_nonce(wallet.address())))
             .unwrap();
-        let block = ledger.mine_next_block(wallet.address(), 1_000).unwrap();
+        let block = ledger.mine_next_block(wallet, 1_000).unwrap();
         ledger.apply_locally_mined_block(block).unwrap();
         ledger
     }

@@ -13,9 +13,9 @@ cargo run -- --start --http 127.0.0.1:8443 --p2p 127.0.0.1:9444
 Open `http://127.0.0.1:8443`. The wallet is generated into `.mivora/`.
 The validated chain is persisted to `.mivora/chain.sqlite3` and resumes automatically when the same data directory is started again.
 
-Mining is automatic. There is no "mine block" button and no exact sleep. Each node burns its configured amount once per chain height, then only the VRF-selected leader builds a block containing burned coins, performs the VDF work, and gossips the finished block. The VDF is the clock.
+Mining is automatic. There is no "mine block" button and no exact sleep. Each node can burn its configured amount once per chain height. Those burns become one-shot leader tickets for a future height after the launch profile's maturity delay. Only the selected ticket owner builds the next block, signs a leader proof, performs the VDF work, and gossips the finished block. The VDF is the clock.
 
-The plain command above creates the default zero-balance starter chain: genesis mints 1 coin and immediately burns it, selecting the starter as the first leader. Because non-genesis blocks must include a positive burn, that chain will wait until a wallet has spendable coins to burn. For a self-running local demo, leave one extra coin after genesis and burn it into the first block:
+The plain command above creates the default zero-balance starter chain: genesis mints 1 coin and immediately burns it into the first leader ticket. That is enough to mine block 1 and earn the first reward. For a self-running local demo, leave one extra coin after genesis and burn it into block 1 so block 2 already has a ticket:
 
 ```sh
 cargo run -- --start --genesis-amount 2 --burn-per-block 1 --http 127.0.0.1:8443 --p2p 127.0.0.1:9444
@@ -59,11 +59,11 @@ cargo run -- --start --genesis-amount 2 --burn-per-block 1 --p2p 0.0.0.0:9444 --
 cargo run -- --data-dir .mivora-friend --p2p 0.0.0.0:9445 --http 127.0.0.1:8443 --join your-host:9444
 ```
 
-Friends who join after you start will adopt your genesis and current chain. With the default genesis amount, the starter wallet begins with a 0 balance because genesis mints 1 coin and immediately burns it as the first lottery ticket. For a moving demo, `--genesis-amount 2 --burn-per-block 1` leaves the starter one coin to burn into block 1. After the starter mines the first block reward, send friends coins from the UI; then they can choose a burn amount and compete for future blocks. Every joining node starts with a 0-coin automatic burn unless it is configured otherwise.
+Friends who join after you start will adopt your genesis and current chain. With the default genesis amount, the starter wallet begins with a 0 balance because genesis mints 1 coin and immediately burns it as the first leader ticket. For a moving demo, `--genesis-amount 2 --burn-per-block 1` leaves the starter one coin to burn into block 1, creating the ticket for block 2. After the starter mines the first block reward, send friends coins from the UI; then they can choose a burn amount and compete for future blocks. Every joining node starts with a 0-coin automatic burn unless it is configured otherwise.
 
-The genesis block bootstraps the chain with a 1-coin burn from the starter wallet. Burns included in the latest block select the leader for the next block through a deterministic VRF-style lottery. The selected leader creates the next block content and runs a hash-chain VDF before gossiping the block.
+The genesis block bootstraps the chain with a 1-coin burn from the starter wallet. Burns included in a block create one-shot tickets for a future height through a deterministic ticket lottery. The selected leader creates the next block content, signs a proof for the selected ticket, and runs a hash-chain VDF before gossiping the block.
 
-Every non-genesis block must include at least one positive burn. Blocks without burns are rejected because they would leave the next height without lottery tickets. The VDF input is the pre-proof hash of the candidate block content, so changing the miner, timestamp, reward, rounds, previous hash, or transactions requires rerunning the VDF.
+Every non-genesis block must consume the selected mature ticket. A block may contain zero burns, but then it does not create future tickets. The VDF seed is bound to the parent hash and child height; the block hash separately commits to the miner, timestamp, reward, rounds, previous hash, leader proof, VDF output, and transactions.
 
 The protocol targets 60-second blocks by retargeting the expected VDF rounds after each block. It uses a rolling average of recent block intervals and only moves the next round count by about 10% per block, so short bursts do not make the delay swing wildly. Every node derives the same next-round count from the validated chain.
 
@@ -91,7 +91,7 @@ Mivora stores the latest validated `ChainSnapshot` in SQLite at `<data-dir>/chai
 
 ## Architecture
 
-- `src/domain.rs`: wallet, transactions, balances, genesis burn bootstrap, fixed 100-coin rewards, blocks, burn lottery, and VDF checks.
+- `src/domain.rs`: wallet, transactions, balances, genesis burn bootstrap, fixed 100-coin rewards, blocks, mature leader tickets, leader proofs, fork choice, launch profile, and VDF checks.
 - `src/app.rs`: node use cases, automatic VDF-paced mining, peer bookkeeping, and an in-memory network harness.
 - `src/adapters/http.rs`: HTTP management UI and status endpoint.
 - `src/adapters/p2p.rs`: line-delimited JSON gossip, block-range catch-up, and chain snapshots over one TCP port.

@@ -10,11 +10,11 @@ pub const BLOCK_REWARD: Amount = 100;
 pub const VDF_TARGET_BLOCK_MS: u64 = 60_000;
 const MAX_PENDING_TRANSACTIONS: usize = 10_000;
 const MAX_BLOCK_TRANSACTIONS: usize = 1_000;
+const DEFAULT_TICKET_MATURITY_DELAY: u64 = 1;
 const MIN_VDF_ROUNDS: u32 = 1;
 const VDF_RETARGET_WINDOW_BLOCKS: usize = 10;
 const MAX_VDF_RETARGET_STEP_PERCENT: u128 = 10;
 const FORK_FINALITY_DEPTH: u64 = 6;
-const BETTER_VRF_MAX_SHORTER_BY: u64 = 2;
 const VDF_MODULUS: u128 = 4_611_685_975_477_714_963;
 const VDF_CHALLENGE_MIN: u64 = 1_073_741_827;
 
@@ -63,6 +63,15 @@ impl Wallet {
         let signing_key = SigningKey::from_bytes(&seed);
         let signature: Signature = signing_key.sign(payload.as_bytes());
         hex_encode(signature.to_bytes())
+    }
+
+    fn leader_proof(&self, payload: &LeaderProofPayload) -> LeaderProof {
+        let signature = self.sign_payload(&payload.canonical());
+        LeaderProof {
+            ticket_id: payload.ticket_id.clone(),
+            public_key: self.address.clone(),
+            signature,
+        }
     }
 }
 
@@ -230,6 +239,7 @@ pub struct Block {
     pub reward: Amount,
     pub vdf_rounds: u32,
     pub vdf_output: String,
+    pub leader_proof: Option<LeaderProof>,
     pub transactions: Vec<Transaction>,
     pub hash: String,
 }
@@ -244,6 +254,7 @@ impl Block {
             reward: draft.reward,
             vdf_rounds: draft.vdf_rounds,
             vdf_output: draft.vdf_output,
+            leader_proof: draft.leader_proof,
             transactions: draft.transactions,
             hash: String::new(),
         };
@@ -252,36 +263,105 @@ impl Block {
     }
 
     pub fn compute_hash(&self) -> String {
-        hex_hash(format!("block:{}:{}", self.vdf_seed(), self.vdf_output,))
+        hex_hash(format!(
+            "block:{}:{}:{}",
+            self.content_hash(),
+            self.vdf_seed(),
+            self.vdf_output,
+        ))
     }
 
     pub fn vdf_seed(&self) -> String {
-        block_content_hash(
+        vdf_seed_for_child(&self.prev_hash, self.height)
+    }
+
+    fn content_hash(&self) -> String {
+        let txs = self
+            .transactions
+            .iter()
+            .map(Transaction::canonical)
+            .collect::<Vec<_>>()
+            .join("|");
+        let leader_proof = self
+            .leader_proof
+            .as_ref()
+            .map(|proof| {
+                format!(
+                    "{}:{}:{}",
+                    proof.ticket_id, proof.public_key, proof.signature
+                )
+            })
+            .unwrap_or_default();
+        hex_hash(format!(
+            "block-content:{}:{}:{}:{}:{}:{}:{}:{}",
             self.height,
-            &self.prev_hash,
+            self.prev_hash,
             self.timestamp_ms,
-            &self.miner,
+            self.miner,
             self.reward,
             self.vdf_rounds,
-            &self.transactions,
+            leader_proof,
+            txs
+        ))
+    }
+
+    fn leader_score(&self) -> LeaderScore {
+        LeaderScore(
+            self.leader_proof
+                .as_ref()
+                .map(LeaderProof::rank)
+                .unwrap_or_else(|| self.hash.clone()),
         )
     }
+}
 
-    pub fn burn_tickets(&self) -> Vec<(&str, Amount)> {
-        self.transactions
-            .iter()
-            .filter_map(|tx| match tx {
-                Transaction::Burn { from, amount, .. } if *amount > 0 => {
-                    Some((from.as_str(), *amount))
-                }
-                _ => None,
-            })
-            .collect()
-    }
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+pub struct LeaderProof {
+    pub ticket_id: String,
+    pub public_key: String,
+    pub signature: String,
+}
 
-    fn leader_score(&self) -> LeaderScore<'_> {
-        LeaderScore(&self.hash)
+impl LeaderProof {
+    fn rank(&self) -> String {
+        hex_hash(format!(
+            "mivora-leader-rank:{}:{}",
+            self.ticket_id, self.signature
+        ))
     }
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+struct LeaderProofPayload {
+    height: u64,
+    prev_hash: String,
+    vdf_output: String,
+    ticket_id: String,
+    ticket_amount: Amount,
+    ticket_owner: String,
+}
+
+impl LeaderProofPayload {
+    fn canonical(&self) -> String {
+        format!(
+            "mivora-leader-proof:{}:{}:{}:{}:{}:{}",
+            self.height,
+            self.prev_hash,
+            self.vdf_output,
+            self.ticket_id,
+            self.ticket_amount,
+            self.ticket_owner
+        )
+    }
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+struct BurnTicket {
+    id: String,
+    owner: String,
+    amount: Amount,
+    target_height: u64,
+    maturity_height: u64,
 }
 
 #[derive(Clone, Debug)]
@@ -293,6 +373,7 @@ pub struct PreparedBlock {
     reward: Amount,
     vdf_rounds: u32,
     vdf_seed: String,
+    leader_ticket: BurnTicket,
     transactions: Vec<Transaction>,
 }
 
@@ -309,7 +390,15 @@ impl PreparedBlock {
         self.height
     }
 
-    pub fn finish(self, vdf_output: String) -> Block {
+    pub fn finish(self, wallet: &Wallet, vdf_output: String) -> Block {
+        let proof_payload = LeaderProofPayload {
+            height: self.height,
+            prev_hash: self.prev_hash.clone(),
+            vdf_output: vdf_output.clone(),
+            ticket_id: self.leader_ticket.id.clone(),
+            ticket_amount: self.leader_ticket.amount,
+            ticket_owner: self.leader_ticket.owner.clone(),
+        };
         Block::new(BlockDraft {
             height: self.height,
             prev_hash: self.prev_hash,
@@ -318,6 +407,7 @@ impl PreparedBlock {
             reward: self.reward,
             vdf_rounds: self.vdf_rounds,
             vdf_output,
+            leader_proof: Some(wallet.leader_proof(&proof_payload)),
             transactions: self.transactions,
         })
     }
@@ -332,6 +422,7 @@ struct BlockDraft {
     reward: Amount,
     vdf_rounds: u32,
     vdf_output: String,
+    leader_proof: Option<LeaderProof>,
     transactions: Vec<Transaction>,
 }
 
@@ -340,6 +431,7 @@ pub struct ChainStatus {
     pub height: u64,
     pub tip_hash: String,
     pub next_leader: Option<String>,
+    pub launch_profile_hash: String,
     pub block_reward: Amount,
     pub balances: BTreeMap<String, Amount>,
     pub pending_transactions: usize,
@@ -349,7 +441,39 @@ pub struct ChainStatus {
 pub struct ChainSnapshot {
     pub genesis_allocations: BTreeMap<String, Amount>,
     pub vdf_rounds: u32,
+    pub launch_profile: LaunchProfile,
     pub blocks: Vec<Block>,
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+pub struct LaunchProfile {
+    pub profile_id: String,
+    pub ticket_maturity_delay_heights: u64,
+    pub max_pending_transactions: usize,
+    pub max_block_transactions: usize,
+}
+
+impl Default for LaunchProfile {
+    fn default() -> Self {
+        Self {
+            profile_id: "mivora-devnet-v1".to_string(),
+            ticket_maturity_delay_heights: DEFAULT_TICKET_MATURITY_DELAY,
+            max_pending_transactions: MAX_PENDING_TRANSACTIONS,
+            max_block_transactions: MAX_BLOCK_TRANSACTIONS,
+        }
+    }
+}
+
+impl LaunchProfile {
+    pub fn hash(&self) -> String {
+        hex_hash(format!(
+            "mivora-launch-profile:{}:{}:{}:{}",
+            self.profile_id,
+            self.ticket_maturity_delay_heights,
+            self.max_pending_transactions,
+            self.max_block_transactions
+        ))
+    }
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -378,16 +502,16 @@ impl ForkPoint {
     }
 }
 
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-struct LeaderScore<'a>(&'a str);
+#[derive(Clone, Debug, Eq, PartialEq)]
+struct LeaderScore(String);
 
-impl Ord for LeaderScore<'_> {
+impl Ord for LeaderScore {
     fn cmp(&self, other: &Self) -> std::cmp::Ordering {
-        self.0.cmp(other.0)
+        self.0.cmp(&other.0)
     }
 }
 
-impl PartialOrd for LeaderScore<'_> {
+impl PartialOrd for LeaderScore {
     fn partial_cmp(&self, other: &Self) -> Option<std::cmp::Ordering> {
         Some(self.cmp(other))
     }
@@ -422,10 +546,12 @@ pub struct Ledger {
     genesis_allocations: BTreeMap<String, Amount>,
     balances: BTreeMap<String, Amount>,
     nonces: BTreeMap<String, u64>,
+    tickets: Vec<BurnTicket>,
     pending: Vec<Transaction>,
     block_reward: Amount,
     initial_vdf_rounds: u32,
     vdf_rounds: u32,
+    launch_profile: LaunchProfile,
 }
 
 impl Ledger {
@@ -451,17 +577,21 @@ impl Ledger {
         genesis_transactions: Vec<Transaction>,
         vdf_rounds: u32,
     ) -> Result<Self> {
+        let launch_profile = LaunchProfile::default();
         let balances = balances_after_genesis(&genesis_allocations, &genesis_transactions)?;
         let genesis = build_genesis_block(&genesis_allocations, genesis_transactions);
+        let tickets = genesis_tickets(&genesis_allocations, &genesis, &launch_profile)?;
         Ok(Self {
             chain: vec![genesis],
             genesis_allocations: genesis_allocations.clone(),
             balances,
             nonces: BTreeMap::new(),
+            tickets,
             pending: Vec::new(),
             block_reward: BLOCK_REWARD,
             initial_vdf_rounds: vdf_rounds,
             vdf_rounds,
+            launch_profile,
         })
     }
 
@@ -473,6 +603,7 @@ impl Ledger {
         let ChainSnapshot {
             genesis_allocations,
             vdf_rounds,
+            launch_profile,
             blocks,
         } = snapshot;
 
@@ -494,11 +625,18 @@ impl Ledger {
             genesis_allocations,
             balances,
             nonces: BTreeMap::new(),
+            tickets: Vec::new(),
             pending: Vec::new(),
             block_reward: BLOCK_REWARD,
             initial_vdf_rounds: vdf_rounds,
             vdf_rounds,
+            launch_profile,
         };
+        ledger.tickets = genesis_tickets(
+            &ledger.genesis_allocations,
+            ledger.tip(),
+            &ledger.launch_profile,
+        )?;
 
         for block in blocks.into_iter().skip(1) {
             if verify_vdf {
@@ -560,6 +698,9 @@ impl Ledger {
         }
         if snapshot.vdf_rounds != self.initial_vdf_rounds {
             bail!("chain snapshot initial VDF rounds do not match local chain");
+        }
+        if snapshot.launch_profile != self.launch_profile {
+            bail!("chain snapshot launch profile does not match local chain");
         }
         if snapshot.genesis_allocations != self.genesis_allocations {
             bail!("chain snapshot genesis allocations do not match local chain");
@@ -623,24 +764,16 @@ impl Ledger {
             return ForkChoice::KeepLocal;
         }
 
-        match self.fork_quality(candidate, fork_point) {
-            ForkQuality::RemoteBetter => {
-                if remote_height + BETTER_VRF_MAX_SHORTER_BY >= local_height {
-                    return ForkChoice::SwitchToCandidate;
-                }
-            }
-            ForkQuality::LocalBetter => {
-                if local_height + BETTER_VRF_MAX_SHORTER_BY >= remote_height {
-                    return ForkChoice::KeepLocal;
-                }
-            }
-            ForkQuality::Equal => {}
+        if remote_height > local_height {
+            return ForkChoice::SwitchToCandidate;
+        }
+        if remote_height < local_height {
+            return ForkChoice::KeepLocal;
         }
 
-        if remote_height > local_height {
-            ForkChoice::SwitchToCandidate
-        } else {
-            ForkChoice::KeepLocal
+        match self.fork_quality(candidate, fork_point) {
+            ForkQuality::RemoteBetter => ForkChoice::SwitchToCandidate,
+            ForkQuality::LocalBetter | ForkQuality::Equal => ForkChoice::KeepLocal,
         }
     }
 
@@ -692,6 +825,7 @@ impl Ledger {
         ChainSnapshot {
             genesis_allocations: self.genesis_allocations.clone(),
             vdf_rounds: self.initial_vdf_rounds,
+            launch_profile: self.launch_profile.clone(),
             blocks: self.chain.clone(),
         }
     }
@@ -701,6 +835,7 @@ impl Ledger {
             height: self.tip().height,
             tip_hash: self.tip().hash.clone(),
             next_leader: self.expected_leader_for_next_block(),
+            launch_profile_hash: self.launch_profile.hash(),
             block_reward: self.block_reward,
             balances: self.balances.clone(),
             pending_transactions: self.pending.len(),
@@ -777,6 +912,10 @@ impl Ledger {
         self.vdf_rounds
     }
 
+    pub fn launch_profile(&self) -> &LaunchProfile {
+        &self.launch_profile
+    }
+
     pub fn balance_of(&self, address: &str) -> Amount {
         self.balances.get(address).copied().unwrap_or(0)
     }
@@ -842,41 +981,35 @@ impl Ledger {
         Ok(true)
     }
 
-    pub fn mine_next_block(&self, miner: &str, timestamp_ms: u64) -> Result<Block> {
-        let prepared = self.prepare_next_block(miner, timestamp_ms)?;
+    pub fn mine_next_block(&self, wallet: &Wallet, timestamp_ms: u64) -> Result<Block> {
+        let prepared = self.prepare_next_block(wallet.address(), timestamp_ms)?;
         let vdf_output = run_vdf(prepared.vdf_seed(), prepared.vdf_rounds());
-        Ok(prepared.finish(vdf_output))
+        Ok(prepared.finish(wallet, vdf_output))
     }
 
     pub fn prepare_next_block(&self, miner: &str, timestamp_ms: u64) -> Result<PreparedBlock> {
+        let height = self.tip().height + 1;
+        let Some(leader_ticket) = self.selected_ticket_for_height(height) else {
+            bail!("cannot mine block without a mature burn ticket");
+        };
         if let Some(leader) = self.expected_leader_for_next_block() {
             if leader != miner {
                 bail!("wallet {miner} is not the selected leader; expected {leader}");
             }
+        } else {
+            bail!("no selected leader for block {height}");
         }
 
         let transactions = self
             .valid_pending_transactions()
             .into_iter()
-            .take(MAX_BLOCK_TRANSACTIONS)
+            .take(self.launch_profile.max_block_transactions)
             .collect::<Vec<_>>();
-        if !contains_positive_burn(&transactions) {
-            bail!("cannot mine block without burned coins");
-        }
 
         let tip = self.tip();
         let prev_hash = tip.hash.clone();
-        let height = tip.height + 1;
         let timestamp_ms = timestamp_ms.max(tip.timestamp_ms + 1);
-        let vdf_seed = block_content_hash(
-            height,
-            &prev_hash,
-            timestamp_ms,
-            miner,
-            self.block_reward,
-            self.vdf_rounds,
-            &transactions,
-        );
+        let vdf_seed = vdf_seed_for_child(&prev_hash, height);
         Ok(PreparedBlock {
             height,
             prev_hash,
@@ -885,6 +1018,7 @@ impl Ledger {
             reward: self.block_reward,
             vdf_rounds: self.vdf_rounds,
             vdf_seed,
+            leader_ticket,
             transactions,
         })
     }
@@ -924,7 +1058,10 @@ impl Ledger {
             }
             apply_transaction(tx, &mut balances, &mut nonces)?;
         }
+        let mut tickets = self.tickets.clone();
+        consume_leader_ticket(&block, &mut tickets)?;
         credit_balance(&mut balances, &block.miner, block.reward)?;
+        tickets.extend(tickets_created_by_block(&block, &self.launch_profile)?);
 
         let mined_signatures = block
             .transactions
@@ -933,6 +1070,7 @@ impl Ledger {
             .collect::<BTreeSet<_>>();
         self.balances = balances;
         self.nonces = nonces;
+        self.tickets = tickets;
         self.pending.retain(|tx| {
             !mined_signatures.contains(tx.signature())
                 && tx.nonce() > self.nonces.get(tx.sender()).copied().unwrap_or(0)
@@ -979,20 +1117,29 @@ impl Ledger {
         if block.timestamp_ms <= self.tip().timestamp_ms {
             bail!("block timestamp must increase");
         }
-        if block.transactions.len() > MAX_BLOCK_TRANSACTIONS {
+        if block.transactions.len() > self.launch_profile.max_block_transactions {
             bail!("block has too many transactions");
         }
-        if !contains_positive_burn(&block.transactions) {
-            bail!("block must include burned coins");
+        let Some(leader) = self.expected_leader_for_next_block() else {
+            bail!("no selected leader for block {}", block.height);
+        };
+        if leader != block.miner {
+            bail!(
+                "block miner {} is not selected leader {leader}",
+                block.miner
+            );
         }
-        if let Some(leader) = self.expected_leader_for_next_block() {
-            if leader != block.miner {
-                bail!(
-                    "block miner {} is not selected leader {leader}",
-                    block.miner
-                );
-            }
+        let selected_ticket = self
+            .selected_ticket_for_height(block.height)
+            .context("no selected ticket for leader block")?;
+        if block
+            .leader_proof
+            .as_ref()
+            .is_none_or(|proof| proof.ticket_id != selected_ticket.id)
+        {
+            bail!("block does not prove the selected leader ticket");
         }
+        verify_leader_proof(block, &self.tickets)?;
 
         Ok(true)
     }
@@ -1020,25 +1167,8 @@ impl Ledger {
     }
 
     pub fn expected_leader_for_next_block(&self) -> Option<String> {
-        let tip = self.tip();
-        let tickets = tip.burn_tickets();
-        if tickets.is_empty() {
-            return None;
-        }
-        let total_burned = tickets
-            .iter()
-            .map(|(_, amount)| u128::from(*amount))
-            .sum::<u128>();
-        let seed = hash_to_u64(format!("leader:{}:{}", tip.hash, tip.vdf_output));
-        let winning_ticket = u128::from(seed) % total_burned;
-        let mut cumulative = 0_u128;
-        for (address, amount) in tickets {
-            cumulative += u128::from(amount);
-            if winning_ticket < cumulative {
-                return Some(address.to_string());
-            }
-        }
-        None
+        self.selected_ticket_for_height(self.tip().height + 1)
+            .map(|ticket| ticket.owner)
     }
 
     fn valid_pending_transactions(&self) -> Vec<Transaction> {
@@ -1070,6 +1200,18 @@ impl Ledger {
         valid
     }
 
+    fn selected_ticket_for_height(&self, height: u64) -> Option<BurnTicket> {
+        self.tickets
+            .iter()
+            .filter(|ticket| ticket.target_height == height && ticket.maturity_height <= height)
+            .min_by(|left, right| {
+                ticket_rank(self.tip(), height, left)
+                    .cmp(&ticket_rank(self.tip(), height, right))
+                    .then_with(|| left.id.cmp(&right.id))
+            })
+            .cloned()
+    }
+
     fn tip(&self) -> &Block {
         self.chain
             .last()
@@ -1077,29 +1219,128 @@ impl Ledger {
     }
 }
 
-fn contains_positive_burn(transactions: &[Transaction]) -> bool {
-    transactions
-        .iter()
-        .any(|tx| matches!(tx, Transaction::Burn { amount, .. } if *amount > 0))
+fn ticket_rank(parent: &Block, target_height: u64, ticket: &BurnTicket) -> String {
+    hex_hash(format!(
+        "mivora-ticket-rank:{}:{}:{}:{}:{}",
+        target_height, parent.hash, parent.vdf_output, ticket.id, ticket.amount
+    ))
 }
 
-fn block_content_hash(
-    height: u64,
-    prev_hash: &str,
-    timestamp_ms: u64,
-    miner: &str,
-    reward: Amount,
-    vdf_rounds: u32,
-    transactions: &[Transaction],
-) -> String {
-    let txs = transactions
+fn tickets_created_by_block(block: &Block, profile: &LaunchProfile) -> Result<Vec<BurnTicket>> {
+    let mut tickets = Vec::new();
+    for tx in &block.transactions {
+        let Transaction::Burn {
+            from,
+            amount,
+            signature,
+            ..
+        } = tx
+        else {
+            continue;
+        };
+        if *amount == 0 {
+            continue;
+        }
+        let target_height = block
+            .height
+            .checked_add(profile.ticket_maturity_delay_heights)
+            .with_context(|| format!("ticket target height overflow at block {}", block.height))?;
+        let maturity_height = target_height;
+        tickets.push(BurnTicket {
+            id: signature.clone(),
+            owner: from.clone(),
+            amount: *amount,
+            target_height,
+            maturity_height,
+        });
+    }
+    Ok(tickets)
+}
+
+fn genesis_tickets(
+    genesis_allocations: &BTreeMap<String, Amount>,
+    genesis: &Block,
+    profile: &LaunchProfile,
+) -> Result<Vec<BurnTicket>> {
+    let tickets = tickets_created_by_block(genesis, profile)?;
+    if !tickets.is_empty() {
+        return Ok(tickets);
+    }
+
+    let Some((owner, amount)) = genesis_allocations.iter().find(|(_, amount)| **amount > 0) else {
+        return Ok(Vec::new());
+    };
+    Ok(vec![BurnTicket {
+        id: hex_hash(format!(
+            "mivora-genesis-ticket:{owner}:{amount}:{}",
+            genesis.hash
+        )),
+        owner: owner.clone(),
+        amount: 1,
+        target_height: profile.ticket_maturity_delay_heights,
+        maturity_height: profile.ticket_maturity_delay_heights,
+    }])
+}
+
+fn consume_leader_ticket(block: &Block, tickets: &mut Vec<BurnTicket>) -> Result<()> {
+    let Some(proof) = &block.leader_proof else {
+        bail!("block is missing leader proof");
+    };
+    let Some(index) = tickets
         .iter()
-        .map(Transaction::canonical)
-        .collect::<Vec<_>>()
-        .join("|");
-    hex_hash(format!(
-        "block-content:{height}:{prev_hash}:{timestamp_ms}:{miner}:{reward}:{vdf_rounds}:{txs}"
-    ))
+        .position(|ticket| ticket.id == proof.ticket_id && ticket.target_height == block.height)
+    else {
+        bail!("leader ticket is not pending for block {}", block.height);
+    };
+    tickets.remove(index);
+    Ok(())
+}
+
+fn verify_leader_proof(block: &Block, tickets: &[BurnTicket]) -> Result<()> {
+    let Some(proof) = &block.leader_proof else {
+        bail!("block is missing leader proof");
+    };
+    if proof.public_key != block.miner {
+        bail!("leader proof public key does not match block miner");
+    }
+    let ticket = tickets
+        .iter()
+        .find(|ticket| ticket.id == proof.ticket_id && ticket.target_height == block.height)
+        .context("leader ticket is not pending for this height")?;
+    if ticket.owner != block.miner {
+        bail!("leader ticket owner does not match block miner");
+    }
+    if ticket.maturity_height > block.height {
+        bail!("leader ticket is not mature");
+    }
+
+    let payload = LeaderProofPayload {
+        height: block.height,
+        prev_hash: block.prev_hash.clone(),
+        vdf_output: block.vdf_output.clone(),
+        ticket_id: ticket.id.clone(),
+        ticket_amount: ticket.amount,
+        ticket_owner: ticket.owner.clone(),
+    };
+    verify_leader_signature(proof, &payload)?;
+    Ok(())
+}
+
+fn verify_leader_signature(proof: &LeaderProof, payload: &LeaderProofPayload) -> Result<()> {
+    let public_key = decode_hex_array::<32>(&proof.public_key)
+        .with_context(|| format!("invalid leader public key {}", proof.public_key))?;
+    let signature =
+        decode_hex_array::<64>(&proof.signature).context("invalid leader signature hex")?;
+    let verifying_key =
+        VerifyingKey::from_bytes(&public_key).context("invalid leader public key")?;
+    let signature = Signature::from_bytes(&signature);
+    verifying_key
+        .verify(payload.canonical().as_bytes(), &signature)
+        .context("leader signature is invalid")
+}
+
+fn vdf_seed_for_child(prev_hash: &str, height: u64) -> String {
+    hex_hash(format!("mivora-vdf-child:{prev_hash}:{height}"))
 }
 
 fn apply_transaction(
@@ -1180,6 +1421,7 @@ fn build_genesis_block(
         reward: 0,
         vdf_rounds: 0,
         vdf_output,
+        leader_proof: None,
         transactions,
         hash: String::new(),
     };
@@ -1205,6 +1447,9 @@ fn validate_genesis_block(block: &Block) -> Result<()> {
     }
     if block.vdf_rounds != 0 {
         bail!("genesis block VDF rounds must be 0");
+    }
+    if block.leader_proof.is_some() {
+        bail!("genesis block must not carry a leader proof");
     }
     if block.compute_hash() != block.hash {
         bail!("genesis block hash is invalid");
@@ -1401,16 +1646,6 @@ fn hex_value(byte: u8) -> Result<u8> {
         b'A'..=b'F' => Ok(byte - b'A' + 10),
         _ => bail!("invalid hex character"),
     }
-}
-
-fn hash_to_u64(input: impl AsRef<[u8]>) -> u64 {
-    let digest = Sha256::digest(input.as_ref());
-    u64::from_be_bytes(
-        digest[..8]
-            .try_into()
-            .map_err(|_| anyhow!("sha256 digest had unexpected length"))
-            .expect("sha256 digest is at least eight bytes"),
-    )
 }
 
 fn hex_encode(bytes: impl AsRef<[u8]>) -> String {

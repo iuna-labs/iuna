@@ -1134,10 +1134,10 @@ mod tests {
 
     use crate::{
         app::{
-            BlockInventory, GossipEnvelope, NETWORK_ID, NodeConfig, NodeCore, PROTOCOL_VERSION,
-            PeerBook, PeerDirection, ProtocolHello,
+            BlockInventory, GossipEnvelope, NETWORK_ID, NodeCore, PROTOCOL_VERSION, PeerBook,
+            PeerDirection, ProtocolHello,
         },
-        domain::{Amount, Wallet},
+        domain::{Amount, GenesisBurn, Ledger, Wallet},
     };
 
     use super::{
@@ -1212,6 +1212,7 @@ mod tests {
             reward: 100,
             vdf_rounds: 1,
             vdf_output: "vdf".to_string(),
+            leader_proof: None,
             transactions: Vec::new(),
             hash: "hash".to_string(),
         };
@@ -1603,13 +1604,13 @@ mod tests {
     }
 
     fn node(name: &str, wallet: Wallet, allocations: BTreeMap<String, Amount>) -> NodeCore {
-        NodeCore::new(NodeConfig {
-            name: name.to_string(),
-            wallet,
-            genesis_allocations: allocations,
-            vdf_rounds: 25,
-            burn_per_block: 0,
-        })
+        let ledger = Ledger::new_with_genesis_burns(
+            allocations,
+            vec![GenesisBurn::new(wallet.address(), 1)],
+            25,
+        )
+        .unwrap();
+        NodeCore::from_ledger(name.to_string(), wallet, ledger, 0)
     }
 
     fn allocations(wallets: &[Wallet], amount: Amount) -> BTreeMap<String, Amount> {
