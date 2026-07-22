@@ -30,10 +30,20 @@ async fn main() -> Result<()> {
     let config_path = opts.config_path();
     let wallet_file_exists = wallet_path.exists();
     validate_wallet_for_mode(&opts, &wallet_path, wallet_file_exists)?;
-    let wallet = wallet_store::load_or_create(&wallet_path)?;
-    let ui_config = config_store::load_or_create(&config_path)?;
     let chain_store = SqliteChainStore::open(opts.chain_db_path())?;
     let persisted_chain_exists = chain_store.load()?.is_some();
+    if opts.chain_mode == ChainMode::Genesis && persisted_chain_exists {
+        bail!(
+            "--genesis refuses to run because chain database already contains a blockchain at {}; start without --genesis to resume it",
+            chain_store.path().display()
+        );
+    }
+    let wallet = wallet_store::load_or_create(&wallet_path)?;
+    let mut ui_config = config_store::load_or_create(&config_path)?;
+    if opts.chain_mode == ChainMode::Genesis {
+        ui_config.setup_complete = false;
+        config_store::save(&config_path, &ui_config)?;
+    }
     let ledger = initialize_ledger(&opts, wallet.address(), &chain_store).await?;
     let has_chain = opts.has_chain() || persisted_chain_exists;
     let initial_burn_per_block = initial_burn_per_block(&opts, &ui_config);
@@ -256,9 +266,9 @@ fn validate_wallet_for_mode(
     wallet_path: &Path,
     wallet_file_exists: bool,
 ) -> Result<()> {
-    if opts.chain_mode == ChainMode::Genesis && !wallet_file_exists {
+    if opts.chain_mode == ChainMode::Genesis && wallet_file_exists {
         bail!(
-            "--genesis requires an existing wallet file at {}; start once without --genesis and complete UI setup first",
+            "--genesis requires a fresh wallet path, but {} already exists; start without --genesis to reuse it or choose an empty --data-dir/--wallet",
             wallet_path.display()
         );
     }
@@ -283,7 +293,7 @@ fn help_text() -> &'static str {
            luun --genesis [options]\n\
            luun --join <addr:port> [options]\n\n\
          Options:\n\
-           --genesis                     Create a new chain from an existing setup wallet\n\
+           --genesis                     Create a new chain with a fresh setup wallet\n\
            --wallet <path>               Wallet file (default <data-dir>/wallet.json)\n\
            --chain-db <path>             Chain SQLite database (default <data-dir>/chain.sqlite3)\n\
            --http <addr:port>            HTTP management UI address (default 127.0.0.1:18661)\n\
@@ -720,19 +730,16 @@ mod tests {
     }
 
     #[test]
-    fn genesis_requires_existing_wallet_file() {
+    fn genesis_requires_fresh_wallet_path() {
         let opts = parse(&["--genesis"]).unwrap().unwrap();
-        let missing = std::path::Path::new("missing-wallet.json");
-        let error = validate_wallet_for_mode(&opts, missing, false).unwrap_err();
-        assert!(
-            error
-                .to_string()
-                .contains("requires an existing wallet file")
-        );
+        let wallet_path = std::path::Path::new("wallet.json");
 
-        validate_wallet_for_mode(&opts, missing, true).unwrap();
+        validate_wallet_for_mode(&opts, wallet_path, false).unwrap();
+        let error = validate_wallet_for_mode(&opts, wallet_path, true).unwrap_err();
+        assert!(error.to_string().contains("requires a fresh wallet path"));
+
         let setup = parse(&[]).unwrap().unwrap();
-        validate_wallet_for_mode(&setup, missing, false).unwrap();
+        validate_wallet_for_mode(&setup, wallet_path, true).unwrap();
     }
 
     #[test]

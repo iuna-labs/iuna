@@ -6,21 +6,23 @@ The current devnet assumes friendly nodes. It has one binary that acts as wallet
 
 ## Run
 
-```sh
-cargo run -- --http 127.0.0.1:18661 --p2p 127.0.0.1:9444
-```
-
-Open `http://127.0.0.1:18661` and complete the initial setup modal. The setup flow lets you generate a local recovery phrase or import one, verifies generated phrases with a 4-word check, stores the wallet in `.luun/wallet.json`, stores runtime config in `.luun/config.json`, and does not create a chain yet.
-
-For fast local development, set `LUUN_DEV_SKIP_SEED_VERIFY=1` before starting the node to show a setup-only skip button for the recovery phrase check.
-
-After setup, restart with genesis mode:
+To start a fresh chain, run genesis mode from an empty wallet path:
 
 ```sh
 cargo run -- --genesis --http 127.0.0.1:18661 --p2p 127.0.0.1:9444
 ```
 
-`--genesis` only works when the wallet file already exists and `.luun/chain.sqlite3` does not already contain a blockchain. It creates the starter chain, adaptively measures VDF throughput locally, extrapolates that measurement to a 60-second initial round count, and persists the validated chain. The same data directory resumes automatically on later runs without `--genesis`.
+Open `http://127.0.0.1:18661` and complete the initial setup modal. The setup flow verifies the generated 24-word recovery phrase with a 4-word check, stores the wallet in `.luun/wallet.json`, and stores runtime config in `.luun/config.json`.
+
+`--genesis` only works when the wallet file does not already exist and `.luun/chain.sqlite3` does not already contain a blockchain. It creates a fresh setup wallet, opens the setup modal so the recovery phrase can be recorded, creates the starter chain, adaptively measures VDF throughput locally, extrapolates that measurement to a 60-second initial round count, and persists the validated chain. The same data directory resumes automatically on later runs without `--genesis`.
+
+For setup-only local development without creating a chain yet:
+
+```sh
+cargo run -- --http 127.0.0.1:18661 --p2p 127.0.0.1:9444
+```
+
+For fast local development, set `LUUN_DEV_SKIP_SEED_VERIFY=1` before starting the node to show a setup-only skip button for the recovery phrase check.
 
 Mining is automatic. There is no "mine block" button and no exact sleep. Each node can burn its configured amount once per chain height. Those burns become one-shot leader tickets after the launch profile's maturity delay. The current devnet uses a 3-block maturity delay and a 3-block eligibility window: a burn included at height `h` can win heights `h + 3` through `h + 5`, then expires if it was not selected. Only the selected ticket owner builds the next block, signs a leader proof, performs the VDF work, and gossips the finished block. The VDF is the clock.
 
