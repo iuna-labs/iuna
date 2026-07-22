@@ -8,6 +8,7 @@ window.mivoraApp = function mivoraApp() {
     hasMoreBlocks: true,
     mempool: [],
     peers: [],
+    config: { setup_complete: false },
     burnAmount: 0,
     transferTo: "",
     transferAmount: 25,
@@ -22,11 +23,16 @@ window.mivoraApp = function mivoraApp() {
     blockPageSize: 20,
 
     init() {
+      this.bootstrap();
+    },
+
+    async bootstrap() {
+      await this.refreshConfig();
       this.tab = this.tabFromHash();
       window.addEventListener("hashchange", () => {
         this.tab = this.tabFromHash();
       });
-      this.refresh();
+      await this.refresh();
       this.pollHandle = setInterval(() => this.refresh(), 5000);
     },
 
@@ -53,14 +59,46 @@ window.mivoraApp = function mivoraApp() {
       }[this.tab] || "Mivora";
     },
 
+    showingSetup() {
+      return !this.config.setup_complete;
+    },
+
+    async refreshConfig() {
+      this.config = await this.fetchJson("/api/config");
+    },
+
+    async completeSetup() {
+      try {
+        const response = await fetch("/api/config", {
+          method: "POST",
+          headers: {
+            Accept: "application/json",
+            "Content-Type": "application/x-www-form-urlencoded",
+          },
+          body: new URLSearchParams({ setup_complete: "true" }),
+        });
+        const payload = await response.json();
+        if (!response.ok || !payload.ok) {
+          throw new Error(payload.error || `/api/config returned ${response.status}`);
+        }
+        await this.refreshConfig();
+        this.showFlash("Setup complete", "success");
+        this.setTab("wallet");
+      } catch (error) {
+        this.showFlash(error.message, "error");
+      }
+    },
+
     async refresh() {
       try {
-        const [status, blocks, mempool, peers] = await Promise.all([
+        const [config, status, blocks, mempool, peers] = await Promise.all([
+          this.fetchJson("/api/config"),
           this.fetchJson("/api/status"),
           this.fetchJson("/api/blocks"),
           this.fetchJson("/api/mempool"),
           this.fetchJson("/api/peers"),
         ]);
+        this.config = config;
         this.status = status;
         this.mergeFreshBlocks(blocks, { animateHead: true });
         this.mempool = mempool;

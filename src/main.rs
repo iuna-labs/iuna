@@ -1,17 +1,22 @@
 use std::{
-    collections::BTreeMap, net::SocketAddr, path::PathBuf, str::FromStr, sync::Arc, time::Duration,
+    collections::BTreeMap,
+    net::SocketAddr,
+    path::{Path, PathBuf},
+    str::FromStr,
+    sync::Arc,
+    time::{Duration, Instant},
 };
 
 use anyhow::{Context, Result, bail};
 use mivora::{
-    adapters::{chain_store::SqliteChainStore, http, p2p, wallet_store},
-    app::{
-        DEFAULT_BURN_PER_BLOCK, DEFAULT_VDF_ROUNDS, NodeCore, PeerBook, SharedNode, SharedPeerBook,
-        now_ms,
-    },
-    domain::{Amount, ChainSnapshot, GenesisBurn, Ledger, run_vdf},
+    adapters::{chain_store::SqliteChainStore, config_store, http, p2p, wallet_store},
+    app::{DEFAULT_BURN_PER_BLOCK, NodeCore, PeerBook, SharedNode, SharedPeerBook, now_ms},
+    domain::{ChainSnapshot, GenesisBurn, Ledger, run_vdf},
 };
 use tokio::sync::Mutex;
+
+const GENESIS_SPENDABLE_AMOUNT: u64 = 1;
+const VDF_MEASUREMENT_ROUNDS: u32 = 10_000;
 
 #[tokio::main]
 async fn main() -> Result<()> {
@@ -19,21 +24,33 @@ async fn main() -> Result<()> {
         return Ok(());
     };
     let wallet_path = opts.wallet_path();
+    let config_path = opts.config_path();
+    let wallet_file_exists = wallet_path.exists();
+    validate_wallet_for_mode(&opts, &wallet_path, wallet_file_exists)?;
     let wallet = wallet_store::load_or_create(&wallet_path)?;
+    let ui_config = config_store::load_or_create(&config_path)?;
     let chain_store = SqliteChainStore::open(opts.chain_db_path())?;
+    let persisted_chain_exists = chain_store.load()?.is_some();
     let ledger = initialize_ledger(&opts, wallet.address(), &chain_store).await?;
+    let has_chain = opts.has_chain() || persisted_chain_exists;
 
     let node: SharedNode = Arc::new(Mutex::new(NodeCore::from_ledger(
         wallet,
         ledger,
         DEFAULT_BURN_PER_BLOCK,
     )));
-    let peers: SharedPeerBook = Arc::new(Mutex::new(PeerBook::from_addresses(opts.peers)));
-    let initial_snapshot = { node.lock().await.chain_snapshot() };
-    persist_chain_snapshot(&chain_store, initial_snapshot).await?;
+    let ui_config = Arc::new(Mutex::new(ui_config));
+    let mut peers = ui_config.lock().await.peers.clone();
+    peers.extend(opts.peers);
+    let peers: SharedPeerBook = Arc::new(Mutex::new(PeerBook::from_addresses(peers)));
+    if has_chain {
+        let initial_snapshot = { node.lock().await.chain_snapshot() };
+        persist_chain_snapshot(&chain_store, initial_snapshot).await?;
+    }
 
     println!("mivora wallet: {}", node.lock().await.wallet_address());
     println!("wallet file: {}", wallet_path.display());
+    println!("config file: {}", config_path.display());
     println!("chain database: {}", chain_store.path().display());
     println!("management UI: http://{}", opts.http_addr);
     println!("p2p listener: {}", opts.p2p_addr);
@@ -42,28 +59,32 @@ async fn main() -> Result<()> {
         DEFAULT_BURN_PER_BLOCK
     );
 
-    let persistence_node = Arc::clone(&node);
-    let persistence_store = chain_store.clone();
-    tokio::spawn(async move {
-        run_chain_persistence(persistence_node, persistence_store).await;
-    });
-
     let gossip =
         p2p::GossipNetwork::start(Arc::clone(&node), Arc::clone(&peers), opts.p2p_addr).await?;
 
-    let miner_node = Arc::clone(&node);
-    let miner_gossip = gossip.clone();
-    tokio::spawn(async move {
-        run_automatic_miner(miner_node, miner_gossip).await;
-    });
+    if has_chain {
+        let persistence_node = Arc::clone(&node);
+        let persistence_store = chain_store.clone();
+        tokio::spawn(async move {
+            run_chain_persistence(persistence_node, persistence_store).await;
+        });
 
-    let sync_node = Arc::clone(&node);
-    let sync_gossip = gossip.clone();
-    tokio::spawn(async move {
-        run_peer_sync(sync_node, sync_gossip).await;
-    });
+        let miner_node = Arc::clone(&node);
+        let miner_gossip = gossip.clone();
+        tokio::spawn(async move {
+            run_automatic_miner(miner_node, miner_gossip).await;
+        });
 
-    http::serve(node, peers, gossip, opts.http_addr).await
+        let sync_node = Arc::clone(&node);
+        let sync_gossip = gossip.clone();
+        tokio::spawn(async move {
+            run_peer_sync(sync_node, sync_gossip).await;
+        });
+    } else {
+        println!("setup mode: no chain selected; skipping mining and chain persistence");
+    }
+
+    http::serve(node, peers, gossip, ui_config, config_path, opts.http_addr).await
 }
 
 async fn initialize_ledger(
@@ -84,11 +105,20 @@ async fn initialize_ledger(
             chain_store.path().display()
         );
         Ok(ledger)
-    } else if opts.start_new_chain {
-        start_new_chain_ledger(wallet_address, opts.genesis_amount, opts.vdf_rounds)
     } else {
-        join_chain_ledger(&opts.join_peers, opts.p2p_addr).await
+        match opts.chain_mode {
+            ChainMode::Setup => Ok(setup_ledger()),
+            ChainMode::Genesis => start_genesis_ledger(wallet_address),
+            ChainMode::Join => join_chain_ledger(&opts.join_peers, opts.p2p_addr).await,
+        }
     }
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum ChainMode {
+    Setup,
+    Genesis,
+    Join,
 }
 
 #[derive(Debug)]
@@ -99,9 +129,7 @@ struct CliOptions {
     p2p_addr: SocketAddr,
     peers: Vec<String>,
     join_peers: Vec<String>,
-    start_new_chain: bool,
-    genesis_amount: Amount,
-    vdf_rounds: u32,
+    chain_mode: ChainMode,
     data_dir: PathBuf,
 }
 
@@ -118,22 +146,20 @@ impl CliOptions {
             p2p_addr: SocketAddr::from_str("127.0.0.1:9444")?,
             peers: Vec::new(),
             join_peers: Vec::new(),
-            start_new_chain: false,
-            genesis_amount: 1,
-            vdf_rounds: DEFAULT_VDF_ROUNDS,
+            chain_mode: ChainMode::Setup,
             data_dir: PathBuf::from(".mivora"),
         };
 
         let raw_args = args.into_iter().collect::<Vec<_>>();
-        if raw_args.is_empty() {
-            print_help();
-            return Ok(None);
-        }
-
         let mut args = raw_args.into_iter();
         while let Some(arg) = args.next() {
             match arg.as_str() {
-                "--start" => opts.start_new_chain = true,
+                "--genesis" => {
+                    if opts.chain_mode == ChainMode::Join {
+                        bail!("choose either --genesis or --join, not both");
+                    }
+                    opts.chain_mode = ChainMode::Genesis;
+                }
                 "--wallet" => {
                     opts.wallet_path = Some(PathBuf::from(next_value(&mut args, "--wallet")?))
                 }
@@ -156,22 +182,13 @@ impl CliOptions {
                         .context("invalid --p2p address")?;
                 }
                 "--join" => {
+                    if opts.chain_mode == ChainMode::Genesis {
+                        bail!("choose either --genesis or --join, not both");
+                    }
                     let peer = next_value(&mut args, "--join")?;
+                    opts.chain_mode = ChainMode::Join;
                     opts.peers.push(peer.clone());
                     opts.join_peers.push(peer);
-                }
-                "--genesis-amount" => {
-                    opts.genesis_amount = next_value(&mut args, "--genesis-amount")?
-                        .parse()
-                        .context("invalid --genesis-amount")?;
-                    if opts.genesis_amount < 1 {
-                        bail!("--genesis-amount must be at least 1 for the genesis ticket");
-                    }
-                }
-                "--vdf-rounds" => {
-                    opts.vdf_rounds = next_value(&mut args, "--vdf-rounds")?
-                        .parse()
-                        .context("invalid --vdf-rounds")?;
                 }
                 "--data-dir" => opts.data_dir = PathBuf::from(next_value(&mut args, "--data-dir")?),
                 "--help" | "-h" => {
@@ -182,11 +199,8 @@ impl CliOptions {
             }
         }
 
-        if opts.start_new_chain && !opts.join_peers.is_empty() {
-            bail!("choose either --start or --join, not both");
-        }
-        if !opts.start_new_chain && opts.join_peers.is_empty() {
-            bail!("pass --start to create a new chain, or --join <addr:port> to join one");
+        if opts.chain_mode == ChainMode::Genesis && !opts.join_peers.is_empty() {
+            bail!("choose either --genesis or --join, not both");
         }
 
         Ok(Some(opts))
@@ -203,6 +217,14 @@ impl CliOptions {
             .clone()
             .unwrap_or_else(|| self.data_dir.join("chain.sqlite3"))
     }
+
+    fn config_path(&self) -> PathBuf {
+        self.data_dir.join("config.json")
+    }
+
+    fn has_chain(&self) -> bool {
+        self.chain_mode != ChainMode::Setup
+    }
 }
 
 fn next_value(args: &mut impl Iterator<Item = String>, flag: &str) -> Result<String> {
@@ -210,21 +232,34 @@ fn next_value(args: &mut impl Iterator<Item = String>, flag: &str) -> Result<Str
         .with_context(|| format!("missing value after {flag}"))
 }
 
+fn validate_wallet_for_mode(
+    opts: &CliOptions,
+    wallet_path: &Path,
+    wallet_file_exists: bool,
+) -> Result<()> {
+    if opts.chain_mode == ChainMode::Genesis && !wallet_file_exists {
+        bail!(
+            "--genesis requires an existing wallet file at {}; start once without --genesis and complete UI setup first",
+            wallet_path.display()
+        );
+    }
+    Ok(())
+}
+
 fn print_help() {
     println!(
         "mivora\n\n\
          Usage:\n\
-           mivora --start [options]\n\
+           mivora [options]\n\
+           mivora --genesis [options]\n\
            mivora --join <addr:port> [options]\n\n\
          Options:\n\
-           --start                       Create a new chain with a genesis burn\n\
+           --genesis                     Create a new chain from an existing setup wallet\n\
            --wallet <path>               Wallet file (default <data-dir>/wallet.json)\n\
            --chain-db <path>             Chain SQLite database (default <data-dir>/chain.sqlite3)\n\
            --http <addr:port>            HTTP management UI address (default 127.0.0.1:8443)\n\
            --p2p <addr:port>             P2P TCP listener address (default 127.0.0.1:9444)\n\
            --join <addr:port>            Fetch chain snapshot from this peer before mining\n\
-           --genesis-amount <amount>     Genesis allocation before the 1-coin bootstrap ticket (default 1)\n\
-           --vdf-rounds <rounds>         Initial VDF delay rounds; protocol retargets toward 60s blocks\n\
            --data-dir <path>             Local wallet directory\n"
     );
 }
@@ -237,18 +272,42 @@ fn snapshot_height(snapshot: &ChainSnapshot) -> u64 {
         .unwrap_or(0)
 }
 
-fn start_new_chain_ledger(
-    wallet_address: &str,
-    genesis_amount: Amount,
-    vdf_rounds: u32,
-) -> Result<Ledger> {
+fn setup_ledger() -> Ledger {
+    Ledger::new(BTreeMap::new(), 1)
+}
+
+fn start_genesis_ledger(wallet_address: &str) -> Result<Ledger> {
+    let vdf_rounds = measure_initial_vdf_rounds();
     let mut genesis = BTreeMap::new();
-    genesis.insert(wallet_address.to_string(), genesis_amount);
+    genesis.insert(wallet_address.to_string(), GENESIS_SPENDABLE_AMOUNT + 1);
     Ledger::new_with_genesis_burns(
         genesis,
         vec![GenesisBurn::new(wallet_address, 1)],
         vdf_rounds,
     )
+}
+
+fn measure_initial_vdf_rounds() -> u32 {
+    let seed = "mivora-vdf-calibration";
+    let started = Instant::now();
+    let _ = run_vdf(seed, VDF_MEASUREMENT_ROUNDS);
+    let elapsed = started.elapsed();
+    let rounds = extrapolate_vdf_rounds(VDF_MEASUREMENT_ROUNDS, elapsed, Duration::from_secs(60));
+    println!(
+        "measured {VDF_MEASUREMENT_ROUNDS} VDF rounds in {}ms; initial VDF rounds: {rounds}",
+        elapsed.as_millis()
+    );
+    rounds
+}
+
+fn extrapolate_vdf_rounds(measured_rounds: u32, elapsed: Duration, target: Duration) -> u32 {
+    let elapsed_ns = elapsed.as_nanos().max(1);
+    let target_ns = target.as_nanos().max(1);
+    let rounds = u128::from(measured_rounds)
+        .saturating_mul(target_ns)
+        .saturating_div(elapsed_ns)
+        .max(1);
+    rounds.min(u128::from(u32::MAX)) as u32
 }
 
 async fn join_chain_ledger(join_peers: &[String], advertised_addr: SocketAddr) -> Result<Ledger> {
@@ -409,7 +468,8 @@ mod tests {
     use tokio::sync::Mutex;
 
     use super::{
-        CliOptions, initialize_ledger, persist_chain_snapshot, run_chain_persistence_with_interval,
+        ChainMode, CliOptions, extrapolate_vdf_rounds, initialize_ledger, persist_chain_snapshot,
+        run_chain_persistence_with_interval, validate_wallet_for_mode,
     };
 
     fn parse(args: &[&str]) -> anyhow::Result<Option<CliOptions>> {
@@ -434,20 +494,29 @@ mod tests {
     }
 
     #[test]
-    fn no_args_prints_help_without_starting() {
-        assert!(parse(&[]).unwrap().is_none());
+    fn no_args_starts_setup_mode() {
+        let opts = parse(&[]).unwrap().unwrap();
+        assert_eq!(opts.chain_mode, ChainMode::Setup);
+        assert!(opts.join_peers.is_empty());
     }
 
     #[test]
     fn removed_wallet_seed_is_rejected() {
-        let error = parse(&["--wallet-seed", "alice", "--start"]).unwrap_err();
+        let error = parse(&["--wallet-seed", "alice", "--genesis"]).unwrap_err();
         assert!(error.to_string().contains("--wallet-seed was removed"));
     }
 
     #[test]
     fn runtime_configuration_flags_are_rejected() {
-        for flag in ["--name", "--burn-per-block", "--peer"] {
-            let error = parse(&["--start", flag, "value"]).unwrap_err();
+        for flag in [
+            "--start",
+            "--name",
+            "--burn-per-block",
+            "--peer",
+            "--genesis-amount",
+            "--vdf-rounds",
+        ] {
+            let error = parse(&["--genesis", flag, "value"]).unwrap_err();
             assert!(
                 error.to_string().contains("unknown argument"),
                 "{flag} should not be accepted"
@@ -456,22 +525,39 @@ mod tests {
     }
 
     #[test]
-    fn start_mode_is_explicit() {
-        let opts = parse(&["--start"]).unwrap().unwrap();
-        assert!(opts.start_new_chain);
+    fn genesis_mode_is_explicit() {
+        let opts = parse(&["--genesis"]).unwrap().unwrap();
+        assert_eq!(opts.chain_mode, ChainMode::Genesis);
         assert!(opts.join_peers.is_empty());
     }
 
     #[test]
     fn join_mode_does_not_start_new_chain() {
         let opts = parse(&["--join", "127.0.0.1:9444"]).unwrap().unwrap();
-        assert!(!opts.start_new_chain);
+        assert_eq!(opts.chain_mode, ChainMode::Join);
         assert_eq!(opts.join_peers, vec!["127.0.0.1:9444"]);
     }
 
     #[test]
+    fn genesis_and_join_are_exclusive() {
+        let error = parse(&["--genesis", "--join", "127.0.0.1:9444"]).unwrap_err();
+        assert!(
+            error
+                .to_string()
+                .contains("choose either --genesis or --join")
+        );
+
+        let error = parse(&["--join", "127.0.0.1:9444", "--genesis"]).unwrap_err();
+        assert!(
+            error
+                .to_string()
+                .contains("choose either --genesis or --join")
+        );
+    }
+
+    #[test]
     fn http_management_port_can_be_configured() {
-        let opts = parse(&["--start", "--http", "127.0.0.1:18443"])
+        let opts = parse(&["--genesis", "--http", "127.0.0.1:18443"])
             .unwrap()
             .unwrap();
         assert_eq!(opts.http_addr.to_string(), "127.0.0.1:18443");
@@ -479,7 +565,7 @@ mod tests {
 
     #[test]
     fn wallet_defaults_under_data_dir() {
-        let opts = parse(&["--start", "--data-dir", "tmp-node"])
+        let opts = parse(&["--genesis", "--data-dir", "tmp-node"])
             .unwrap()
             .unwrap();
         assert_eq!(
@@ -490,7 +576,7 @@ mod tests {
 
     #[test]
     fn chain_db_defaults_under_data_dir() {
-        let opts = parse(&["--start", "--data-dir", "tmp-node"])
+        let opts = parse(&["--genesis", "--data-dir", "tmp-node"])
             .unwrap()
             .unwrap();
         assert_eq!(
@@ -500,8 +586,19 @@ mod tests {
     }
 
     #[test]
+    fn config_defaults_under_data_dir() {
+        let opts = parse(&["--genesis", "--data-dir", "tmp-node"])
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            opts.config_path(),
+            std::path::PathBuf::from("tmp-node/config.json")
+        );
+    }
+
+    #[test]
     fn wallet_path_can_be_explicit() {
-        let opts = parse(&["--start", "--wallet", "alice-wallet.json"])
+        let opts = parse(&["--genesis", "--wallet", "alice-wallet.json"])
             .unwrap()
             .unwrap();
         assert_eq!(
@@ -512,12 +609,40 @@ mod tests {
 
     #[test]
     fn chain_db_path_can_be_explicit() {
-        let opts = parse(&["--start", "--chain-db", "alice-chain.sqlite3"])
+        let opts = parse(&["--genesis", "--chain-db", "alice-chain.sqlite3"])
             .unwrap()
             .unwrap();
         assert_eq!(
             opts.chain_db_path(),
             std::path::PathBuf::from("alice-chain.sqlite3")
+        );
+    }
+
+    #[test]
+    fn genesis_requires_existing_wallet_file() {
+        let opts = parse(&["--genesis"]).unwrap().unwrap();
+        let missing = std::path::Path::new("missing-wallet.json");
+        let error = validate_wallet_for_mode(&opts, missing, false).unwrap_err();
+        assert!(
+            error
+                .to_string()
+                .contains("requires an existing wallet file")
+        );
+
+        validate_wallet_for_mode(&opts, missing, true).unwrap();
+        let setup = parse(&[]).unwrap().unwrap();
+        validate_wallet_for_mode(&setup, missing, false).unwrap();
+    }
+
+    #[test]
+    fn vdf_measurement_extrapolates_to_target() {
+        assert_eq!(
+            extrapolate_vdf_rounds(10_000, Duration::from_secs(1), Duration::from_secs(60)),
+            600_000
+        );
+        assert_eq!(
+            extrapolate_vdf_rounds(10_000, Duration::from_secs(0), Duration::from_secs(60)),
+            u32::MAX
         );
     }
 
@@ -530,15 +655,9 @@ mod tests {
         let persisted = ledger_with_one_mined_block(&persisted_wallet);
         store.save(&persisted.snapshot()).unwrap();
         let fresh_wallet = Wallet::from_seed("fresh-start-wallet");
-        let opts = parse(&[
-            "--start",
-            "--genesis-amount",
-            "1",
-            "--chain-db",
-            chain_path.to_str().unwrap(),
-        ])
-        .unwrap()
-        .unwrap();
+        let opts = parse(&["--genesis", "--chain-db", chain_path.to_str().unwrap()])
+            .unwrap()
+            .unwrap();
 
         let resumed = initialize_ledger(&opts, fresh_wallet.address(), &store)
             .await
@@ -592,15 +711,9 @@ VALUES (1, 4, 'bad-tip', '{"not":"a chain snapshot"}', 0)
             )
             .unwrap();
         let wallet = Wallet::from_seed("bad-db-wallet");
-        let opts = parse(&[
-            "--start",
-            "--genesis-amount",
-            "2",
-            "--chain-db",
-            chain_path.to_str().unwrap(),
-        ])
-        .unwrap()
-        .unwrap();
+        let opts = parse(&["--genesis", "--chain-db", chain_path.to_str().unwrap()])
+            .unwrap()
+            .unwrap();
 
         let error = initialize_ledger(&opts, wallet.address(), &store)
             .await

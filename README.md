@@ -7,19 +7,22 @@ The current devnet assumes friendly nodes. It has one binary that acts as wallet
 ## Run
 
 ```sh
-cargo run -- --start --http 127.0.0.1:8443 --p2p 127.0.0.1:9444
+cargo run -- --http 127.0.0.1:8443 --p2p 127.0.0.1:9444
 ```
 
-Open `http://127.0.0.1:8443`. The wallet is generated into `.mivora/`.
-The validated chain is persisted to `.mivora/chain.sqlite3` and resumes automatically when the same data directory is started again.
+Open `http://127.0.0.1:8443` and complete the initial setup screen. The wallet is generated into `.mivora/`, peers and setup state are stored in `.mivora/config.json`, and no chain is created yet.
+
+After setup, restart with genesis mode:
+
+```sh
+cargo run -- --genesis --http 127.0.0.1:8443 --p2p 127.0.0.1:9444
+```
+
+`--genesis` only works when the wallet file already exists. It creates the starter chain, measures 10,000 VDF rounds locally, extrapolates that measurement to a 60-second initial round count, and persists the validated chain to `.mivora/chain.sqlite3`. The same data directory resumes automatically on later runs.
 
 Mining is automatic. There is no "mine block" button and no exact sleep. Each node can burn its configured amount once per chain height. Those burns become one-shot leader tickets for a future height after the launch profile's maturity delay. Only the selected ticket owner builds the next block, signs a leader proof, performs the VDF work, and gossips the finished block. The VDF is the clock.
 
-The plain command above creates the default zero-balance starter chain: genesis mints 1 coin and immediately burns it into the first leader ticket. Because non-genesis blocks must include at least one burn, the default 0-coin burn rate will wait instead of starting VDF work. For a local demo with room to configure automatic burns, leave one extra coin after genesis and set the burn rate in the Configuration tab:
-
-```sh
-cargo run -- --start --genesis-amount 2 --http 127.0.0.1:8443 --p2p 127.0.0.1:9444
-```
+Genesis leaves the starter wallet with 1 spendable coin after the 1-coin bootstrap burn creates the first leader ticket. Because non-genesis blocks must include at least one burn, the default 0-coin burn rate will wait instead of starting VDF work until the burn rate is raised in the Configuration tab.
 
 The management UI is a small AlpineJS app served from local vendored assets. It polls JSON endpoints every few seconds and includes:
 
@@ -36,7 +39,7 @@ cargo run -- --data-dir .mivora-bob --http 127.0.0.1:8444 --p2p 127.0.0.1:9445 -
 
 `--join` fetches a chain snapshot from the peer before mining starts and announces this node's P2P listener back to that peer, so newly mined blocks can flow back without restarting the first node. If the peer cannot provide a snapshot, the node exits instead of silently starting a separate chain. Additional peers can be added from the Configuration screen.
 
-If `<data-dir>/chain.sqlite3` already exists, the node resumes that chain first. That makes restarts boring in the good way: `--start` will not create a new genesis over an existing local chain, and `--join` remains useful for reconnecting to peers without replacing local state. Pass `--chain-db path/to/chain.sqlite3` to override the database path.
+If `<data-dir>/chain.sqlite3` already exists, the node resumes that chain first. That makes restarts boring in the good way: `--genesis` will not create a new genesis over an existing local chain, and `--join` remains useful for reconnecting to peers without replacing local state. Pass `--chain-db path/to/chain.sqlite3` to override the database path.
 
 Nodes also run a self-healing sync loop. They periodically compare known peer heights and tip hashes, request missing block ranges when a peer is ahead, and validate those blocks before importing them. Full snapshots are kept for initial join and fallback cases, not as the normal catch-up path. The mempool tolerates future-nonce transactions from peers and mines them once the missing nonce gap is filled.
 
@@ -46,21 +49,27 @@ The UI separates local height from shared height. Local height is the node's own
 
 To start a small friendly network:
 
-1. Start your node with a public P2P bind:
+1. Start setup with a public P2P bind and complete the initial setup screen:
 
 ```sh
-cargo run -- --start --genesis-amount 2 --p2p 0.0.0.0:9444 --http 127.0.0.1:8443
+cargo run -- --p2p 0.0.0.0:9444 --http 127.0.0.1:8443
 ```
 
-2. Open the Configuration tab and set the starter burn rate so block 1 has a burn.
-3. Give friends your public `host:9444`.
-4. Friends join your chain:
+2. Restart with genesis mode:
+
+```sh
+cargo run -- --genesis --p2p 0.0.0.0:9444 --http 127.0.0.1:8443
+```
+
+3. Open the Configuration tab and set the starter burn rate so block 1 has a burn.
+4. Give friends your public `host:9444`.
+5. Friends join your chain:
 
 ```sh
 cargo run -- --data-dir .mivora-friend --p2p 0.0.0.0:9445 --http 127.0.0.1:8443 --join your-host:9444
 ```
 
-Friends who join after you start will adopt your genesis and current chain. With the default genesis amount, the starter wallet begins with a 0 balance because genesis mints 1 coin and immediately burns it as the first leader ticket. For a moving demo, `--genesis-amount 2` leaves the starter one coin that can be configured as the block 1 burn from the UI, creating the ticket for block 2. After the starter mines the first block reward, send friends coins from the UI; then they can choose a burn amount and compete for future blocks. Every joining node starts with a 0-coin automatic burn unless it is configured otherwise.
+Friends who join after you start will adopt your genesis and current chain. The starter wallet begins with 1 spendable coin after the bootstrap burn, which can be configured as the block 1 burn from the UI, creating the ticket for block 2. After the starter mines the first block reward, send friends coins from the UI; then they can choose a burn amount and compete for future blocks. Every joining node starts with a 0-coin automatic burn unless it is configured otherwise.
 
 The genesis block bootstraps the chain with a 1-coin burn from the starter wallet. Burns included in a block create one-shot tickets for a future height through a deterministic ticket lottery. The selected leader creates the next block content, signs a proof for the selected ticket, and runs a hash-chain VDF before gossiping the block.
 
@@ -70,17 +79,17 @@ The protocol targets 60-second blocks by retargeting the expected VDF rounds aft
 
 The block reward is fixed at 100 coins. The default burn is 0 coins per block, so new nodes can join before they own coins. After a wallet has coins, raise the burn from the Configuration screen.
 
-The default VDF round count is only the initial delay. After the first blocks, the protocol steers rounds toward the 60-second target. For fast local demos and tests, pass a smaller initial value:
-
-```sh
-cargo run -- --vdf-rounds 10000
-```
+The measured VDF round count is only the initial delay. After the first blocks, the protocol steers rounds toward the 60-second target.
 
 ## Wallet Storage
 
 Mivora creates a new wallet file the first time a node starts or joins a chain. By default it lives at `.mivora/wallet.json`, or at `<data-dir>/wallet.json` when `--data-dir` is set. Pass `--wallet path/to/wallet.json` to choose a specific wallet file.
 
 There is no default wallet seed in the binary. Keep the wallet file private; it contains the local wallet seed used to derive the address.
+
+## Node Config
+
+Mivora stores UI setup state and configured peers in `<data-dir>/config.json`. If `setup_complete` is false, the management UI opens the initial setup screen for wallet and peer setup. Completing setup writes the file through the HTTP API, so the choice follows the node data directory instead of a browser session.
 
 ## Chain Storage
 
@@ -93,6 +102,7 @@ Mivora stores the latest validated `ChainSnapshot` in SQLite at `<data-dir>/chai
 - `src/adapters/http.rs`: HTTP management UI and status endpoint.
 - `src/adapters/p2p.rs`: line-delimited JSON gossip, block-range catch-up, and chain snapshots over one TCP port.
 - `src/adapters/chain_store.rs`: SQLite chain snapshot persistence.
+- `src/adapters/config_store.rs`: node-local UI setup config persistence.
 - `src/adapters/wallet_store.rs`: local wallet file creation and loading.
 - `assets/`: vendored browser assets for the management UI.
 

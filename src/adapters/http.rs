@@ -1,4 +1,4 @@
-use std::net::SocketAddr;
+use std::{net::SocketAddr, path::PathBuf, sync::Arc};
 
 use anyhow::{Context, Result};
 use axum::{
@@ -9,10 +9,10 @@ use axum::{
     routing::{get, post},
 };
 use serde::{Deserialize, Serialize};
-use tokio::net::TcpListener;
+use tokio::{net::TcpListener, sync::Mutex};
 
 use crate::{
-    adapters::p2p::GossipNetwork,
+    adapters::{config_store, config_store::UiConfig, p2p::GossipNetwork},
     app::{NodeStatus, PeerInfo, SharedNode, SharedPeerBook},
     domain::{Amount, Block, Transaction},
 };
@@ -25,6 +25,8 @@ struct HttpState {
     node: SharedNode,
     peers: SharedPeerBook,
     gossip: GossipNetwork,
+    ui_config: Arc<Mutex<UiConfig>>,
+    config_path: PathBuf,
 }
 
 #[derive(Debug, Deserialize)]
@@ -44,6 +46,11 @@ struct PeerForm {
 }
 
 #[derive(Debug, Deserialize)]
+struct ConfigForm {
+    setup_complete: bool,
+}
+
+#[derive(Debug, Deserialize)]
 struct BlocksQuery {
     before_height: Option<u64>,
     limit: Option<usize>,
@@ -59,12 +66,16 @@ pub async fn serve(
     node: SharedNode,
     peers: SharedPeerBook,
     gossip: GossipNetwork,
+    ui_config: Arc<Mutex<UiConfig>>,
+    config_path: PathBuf,
     addr: SocketAddr,
 ) -> Result<()> {
     let state = HttpState {
         node,
         peers,
         gossip,
+        ui_config,
+        config_path,
     };
     let app = Router::new()
         .route("/", get(index))
@@ -72,6 +83,7 @@ pub async fn serve(
         .route("/assets/mivora-ui.js", get(app_js))
         .route("/api/status", get(api_status))
         .route("/api/blocks", get(api_blocks))
+        .route("/api/config", get(api_config).post(api_config_form))
         .route("/api/mempool", get(api_mempool))
         .route("/api/peers", get(api_peers).post(api_peer_form))
         .route(
@@ -136,12 +148,25 @@ async fn api_blocks(
     Json(blocks)
 }
 
+async fn api_config(State(state): State<HttpState>) -> Json<UiConfig> {
+    Json(state.ui_config.lock().await.clone())
+}
+
 async fn api_mempool(State(state): State<HttpState>) -> Json<Vec<Transaction>> {
     Json(state.node.lock().await.pending_transactions())
 }
 
 async fn api_peers(State(state): State<HttpState>) -> Json<Vec<PeerInfo>> {
     Json(state.peers.lock().await.list())
+}
+
+async fn api_config_form(
+    State(state): State<HttpState>,
+    Form(form): Form<ConfigForm>,
+) -> Json<ActionResponse> {
+    let mut config = state.ui_config.lock().await;
+    config.setup_complete = form.setup_complete;
+    action_json(config_store::save(&state.config_path, &config))
 }
 
 async fn api_burn_per_block_form(
@@ -181,13 +206,15 @@ async fn api_peer_form(
     State(state): State<HttpState>,
     Form(form): Form<PeerForm>,
 ) -> Json<ActionResponse> {
-    state.peers.lock().await.add_peer(form.peer);
-    action_json(Ok(()))
+    let result = add_peer(&state, form.peer).await;
+    action_json(result)
 }
 
-async fn peer_form(State(state): State<HttpState>, Form(form): Form<PeerForm>) -> Redirect {
-    state.peers.lock().await.add_peer(form.peer);
-    Redirect::to("/")
+async fn peer_form(State(state): State<HttpState>, Form(form): Form<PeerForm>) -> Response {
+    match add_peer(&state, form.peer).await {
+        Ok(()) => Redirect::to("/").into_response(),
+        Err(error) => api_error(error).into_response(),
+    }
 }
 
 async fn set_burn_per_block(state: &HttpState, amount: Amount) -> Result<()> {
@@ -202,6 +229,17 @@ async fn set_burn_per_block(state: &HttpState, amount: Amount) -> Result<()> {
         Ok(_) => state.gossip.broadcast(result.1).await,
         Err(error) => Err(error),
     }
+}
+
+async fn add_peer(state: &HttpState, peer: String) -> Result<()> {
+    let addresses = {
+        let mut peers = state.peers.lock().await;
+        peers.add_peer(peer);
+        peers.addresses()
+    };
+    let mut config = state.ui_config.lock().await;
+    config.peers = addresses;
+    config_store::save(&state.config_path, &config)
 }
 
 async fn transfer(state: &HttpState, form: TransferForm) -> Result<()> {
@@ -296,6 +334,17 @@ const INDEX_HTML: &str = r#"<!doctype html>
     .flash.error { color: #ffb1a8; background: #2a1717; border-color: #713434; }
     .ok { color: #d5f55f; }
     .page-title { margin-bottom: 16px; }
+    .setup-overlay { position: fixed; inset: 0; z-index: 30; display: grid; place-items: center; padding: 22px; background: rgba(8, 9, 10, .72); backdrop-filter: blur(8px); }
+    .setup-modal { width: min(860px, 100%); max-height: calc(100vh - 44px); overflow: auto; border: 1px solid #3b4448; border-radius: 8px; padding: 18px; background: #181b1f; box-shadow: 0 24px 80px rgba(0, 0, 0, .42); }
+    .setup-modal-head { display: grid; gap: 5px; margin-bottom: 16px; }
+    .setup-modal-head h2 { margin: 0; font-size: 24px; }
+    .setup-welcome { color: #d5f55f; font-size: 12px; font-weight: 900; text-transform: uppercase; }
+    .setup-copy { max-width: 620px; color: #a8b2b8; line-height: 1.45; }
+    .setup-grid { width: 100%; display: grid; grid-template-columns: minmax(0, .9fr) minmax(320px, .7fr); gap: 12px; align-items: start; }
+    .setup-section { border: 1px solid #2f363c; border-radius: 8px; padding: 13px; background: #111316; }
+    .setup-actions { display: flex; justify-content: flex-end; margin-top: 14px; }
+    .setup-peer-list { margin-top: 14px; display: grid; gap: 8px; }
+    .setup-peer-row { display: flex; justify-content: space-between; gap: 12px; align-items: center; border: 1px solid #2f363c; border-radius: 8px; padding: 10px; background: #181b1f; }
     .wallet-grid { width: 100%; display: grid; grid-template-columns: minmax(0, 1fr) minmax(300px, .8fr); gap: 12px; align-items: start; }
     .wallet-actions { display: grid; gap: 12px; }
     .mining-grid { width: 100%; display: grid; grid-template-columns: minmax(0, .95fr) minmax(300px, .7fr); gap: 12px; align-items: start; }
@@ -341,7 +390,7 @@ const INDEX_HTML: &str = r#"<!doctype html>
     .pill.transfer { background: #17312a; color: #8de9cd; }
     .mempool-strip { display: flex; gap: 8px; overflow-x: auto; padding-bottom: 4px; }
     .mempool-item { flex: 0 0 200px; border: 1px solid #2f363c; border-radius: 8px; padding: 10px; background: #111316; }
-    @media (max-width: 920px) { .wallet-grid, .mining-grid, .config-grid, .detail-grid { grid-template-columns: 1fr; } }
+    @media (max-width: 920px) { .setup-grid, .wallet-grid, .mining-grid, .config-grid, .detail-grid { grid-template-columns: 1fr; } }
     @media (max-width: 760px) {
       .app-shell { grid-template-columns: 1fr; }
       .sidebar { position: sticky; z-index: 5; bottom: 0; top: auto; height: auto; flex-direction: row; justify-content: space-between; padding: 8px; border-right: 0; border-bottom: 1px solid #262b2f; }
@@ -350,14 +399,14 @@ const INDEX_HTML: &str = r#"<!doctype html>
       .nav-button { width: 52px; min-height: 48px; }
       .nav-button span { font-size: 10px; }
       .content { padding: 16px 12px 36px; }
-      header, .split, .wallet-grid, .mining-grid, .config-grid, .detail-grid, .wallet-tx-row { grid-template-columns: 1fr; }
+      header, .split, .setup-grid, .wallet-grid, .mining-grid, .config-grid, .detail-grid, .wallet-tx-row { grid-template-columns: 1fr; }
       header { display: grid; }
       input { min-width: 0; width: 100%; }
       .switch input { width: auto; }
       .block-card { flex-basis: 108px; }
     }
   </style>
-  <script defer src="/assets/mivora-ui.js?v=15"></script>
+  <script defer src="/assets/mivora-ui.js?v=18"></script>
   <script defer src="/assets/alpine.min.js"></script>
 </head>
 <body x-data="mivoraApp()" x-init="init()" x-cloak>
@@ -577,6 +626,47 @@ const INDEX_HTML: &str = r#"<!doctype html>
       </div>
     </section>
     </main>
+  </div>
+  <div class="setup-overlay" x-show="showingSetup()" x-transition.opacity role="dialog" aria-modal="true" aria-labelledby="setup-title">
+    <section class="setup-modal">
+      <div class="setup-modal-head">
+        <div class="setup-welcome">Welcome to Mivora</div>
+        <h2 id="setup-title">Initial Setup</h2>
+        <div class="setup-copy">Confirm the local wallet address and add any peers before this node starts from a saved configuration.</div>
+      </div>
+      <div class="setup-grid">
+        <div class="setup-section">
+          <div class="panel-head">
+            <h3>Wallet</h3>
+            <button type="button" @click="copyAddress">Copy</button>
+          </div>
+          <div class="receive-address">
+            <div class="muted">Public key / address</div>
+            <div class="address-box"><code x-text="status.wallet_address || '-'"></code></div>
+            <div class="muted">Balance <strong x-text="status.wallet_balance ?? '-'"></strong></div>
+          </div>
+        </div>
+        <div class="setup-section">
+          <h3>Peers</h3>
+          <form @submit.prevent="addPeer">
+            <label>Peer address<input x-model="peerAddress" placeholder="127.0.0.1:9445"></label>
+            <button class="primary" type="submit">Add</button>
+          </form>
+          <div class="setup-peer-list">
+            <template x-for="peer in peers" :key="peer.address">
+              <div class="setup-peer-row">
+                <code x-text="peer.address"></code>
+                <span class="muted" x-text="peer.direction"></span>
+              </div>
+            </template>
+            <div class="muted" x-show="peers.length === 0">No peers</div>
+          </div>
+        </div>
+      </div>
+      <div class="setup-actions">
+        <button class="primary" type="button" @click="completeSetup">Continue</button>
+      </div>
+    </section>
   </div>
 </body>
 </html>"#;
