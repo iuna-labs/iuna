@@ -18,7 +18,7 @@ use tokio::{net::TcpListener, sync::Mutex};
 use crate::{
     adapters::{config_store, config_store::UiConfig, p2p::GossipNetwork, wallet_store},
     app::{NodeStatus, PeerInfo, SharedNode, SharedPeerBook},
-    domain::{Amount, Block, DEFAULT_TRANSACTION_FEE, Transaction},
+    domain::{Amount, Block, Transaction},
 };
 
 const EXPLORER_LIMIT: usize = 50;
@@ -376,13 +376,11 @@ fn dev_seed_verify_bypass_allowed(env_present: bool) -> bool {
 }
 
 async fn transfer(state: &HttpState, form: TransferForm) -> Result<()> {
+    let (to, amount, fee) = validate_transfer_form(form)?;
+
     let result = {
         let mut node = state.node.lock().await;
-        let result = node.transfer_with_fee(
-            form.to,
-            form.amount,
-            form.fee.unwrap_or(DEFAULT_TRANSACTION_FEE),
-        );
+        let result = node.transfer_with_fee(to, amount, fee);
         let outbox = node.drain_outbox();
         (result, outbox)
     };
@@ -391,6 +389,18 @@ async fn transfer(state: &HttpState, form: TransferForm) -> Result<()> {
         Ok(_) => state.gossip.broadcast(result.1).await,
         Err(error) => Err(error),
     }
+}
+
+fn validate_transfer_form(form: TransferForm) -> Result<(String, Amount, Amount)> {
+    let to = form.to.trim();
+    if to.is_empty() {
+        bail!("recipient is required");
+    }
+    if form.amount == 0 {
+        bail!("amount must be greater than zero");
+    }
+    let fee = form.fee.context("fee is required")?;
+    Ok((to.to_string(), form.amount, fee))
 }
 
 fn action_json(result: Result<()>) -> Json<ActionResponse> {
@@ -567,7 +577,7 @@ const INDEX_HTML: &str = r#"<!doctype html>
       .block-card { flex-basis: 108px; }
     }
   </style>
-  <script defer src="/assets/mivora-ui.js?v=29"></script>
+  <script defer src="/assets/mivora-ui.js?v=31"></script>
   <script defer src="/assets/alpine.min.js"></script>
 </head>
 <body x-data="mivoraApp()" x-init="init()" x-cloak>
@@ -613,9 +623,9 @@ const INDEX_HTML: &str = r#"<!doctype html>
           <div class="panel">
             <h3>Send</h3>
             <form @submit.prevent="sendTransfer">
-              <label>Recipient<input x-model="transferTo" autocomplete="off"></label>
-              <label>Amount<input x-model.number="transferAmount" type="number" min="1"></label>
-              <label>Fee<input x-model.number="transferFee" type="number" min="0"></label>
+              <label>Recipient<input x-model="transferTo" autocomplete="off" required></label>
+              <label>Amount<input x-model.number="transferAmount" type="number" min="1" required></label>
+              <label>Fee<input x-model.number="transferFee" type="number" min="0" required></label>
               <button class="primary" type="submit">Send</button>
             </form>
           </div>
@@ -890,7 +900,10 @@ mod tests {
 
     use crate::adapters::{config_store, config_store::UiConfig};
 
-    use super::{dev_seed_verify_bypass_allowed, persist_burn_per_block_config};
+    use super::{
+        TransferForm, dev_seed_verify_bypass_allowed, persist_burn_per_block_config,
+        validate_transfer_form,
+    };
 
     #[test]
     fn dev_seed_verify_bypass_requires_env_flag() {
@@ -915,5 +928,50 @@ mod tests {
         let config = config_store::load_or_create(&config_path).unwrap();
 
         assert_eq!(config.burn_per_block, 50);
+    }
+
+    #[test]
+    fn transfer_form_requires_recipient_amount_and_fee() {
+        let error = validate_transfer_form(TransferForm {
+            to: " ".to_string(),
+            amount: 1,
+            fee: Some(1),
+        })
+        .unwrap_err();
+        assert!(error.to_string().contains("recipient is required"));
+
+        let error = validate_transfer_form(TransferForm {
+            to: "abc".to_string(),
+            amount: 0,
+            fee: Some(1),
+        })
+        .unwrap_err();
+        assert!(
+            error
+                .to_string()
+                .contains("amount must be greater than zero")
+        );
+
+        let error = validate_transfer_form(TransferForm {
+            to: "abc".to_string(),
+            amount: 1,
+            fee: None,
+        })
+        .unwrap_err();
+        assert!(error.to_string().contains("fee is required"));
+    }
+
+    #[test]
+    fn transfer_form_trims_recipient() {
+        let (to, amount, fee) = validate_transfer_form(TransferForm {
+            to: "  abc  ".to_string(),
+            amount: 2,
+            fee: Some(3),
+        })
+        .unwrap();
+
+        assert_eq!(to, "abc");
+        assert_eq!(amount, 2);
+        assert_eq!(fee, 3);
     }
 }

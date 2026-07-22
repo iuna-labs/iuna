@@ -22,7 +22,7 @@ window.mivoraApp = function mivoraApp() {
     burnAmountDraft: 0,
     burnAmountDirty: false,
     transferTo: "",
-    transferAmount: 25,
+    transferAmount: null,
     transferFee: 1,
     peerAddress: "",
     showBurnTransactions: false,
@@ -425,8 +425,8 @@ window.mivoraApp = function mivoraApp() {
 
     async sendTransfer() {
       try {
-        const amount = this.transferAmount || 0;
-        const fee = this.transferFee || 0;
+        const amount = this.transferAmount;
+        const fee = this.transferFee;
         const recipient = this.short(this.transferTo);
         await this.postForm(
           "/api/transfer",
