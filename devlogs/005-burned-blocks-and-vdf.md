@@ -2,7 +2,7 @@
 
 I tightened the rule that felt wrong during local testing: a normal block cannot be empty of burns anymore.
 
-That means a block has to carry at least one positive burn transaction. Otherwise it would create a tip with no lottery tickets for the next leader, which is basically a protocol pothole.
+That means a block has to carry at least one positive burn transaction. Otherwise it would create a future stretch with no rolling-window lottery tickets, which is basically a protocol pothole.
 
 The VDF also now runs over the candidate block content hash instead of just the previous hash. So if the leader changes the timestamp, miner, reward, rounds, previous hash, or transactions after doing the VDF, peers reject it.
 

@@ -2,7 +2,7 @@
 
 The first UI had a "mine next block" button. That was useful for proving the ledger worked, but it was the wrong feeling for Luun.
 
-Now the node runs by itself. Each wallet has a fixed burn amount. If that amount is above zero, once per chain height the node creates a burn transaction for that amount. Those burns become lottery tickets in the block, and the latest block's burns choose who gets to make the next block.
+Now the node runs by itself. Each wallet has a fixed burn amount. If that amount is above zero, once per chain height the node creates a burn transaction for that amount. Those burns become lottery tickets after a short maturity delay, then stay eligible for a small future block window.
 
 The important correction is that there is no exact timer like "sleep 10 minutes, then make a block." The selected leader makes the block content and then does the VDF work. When the VDF is finished, the block is gossiped. That means the VDF is the clock.
 

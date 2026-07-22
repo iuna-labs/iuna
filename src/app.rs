@@ -332,7 +332,7 @@ impl NodeCore {
     }
 
     pub fn burn(&mut self, amount: Amount) -> Result<Transaction> {
-        self.burn_with_fee(amount, DEFAULT_TRANSACTION_FEE)
+        self.burn_with_fee(amount, 0)
     }
 
     pub fn burn_with_fee(&mut self, amount: Amount, fee: Amount) -> Result<Transaction> {
@@ -582,8 +582,8 @@ impl NodeCore {
     }
 }
 
-fn automatic_burn_fee(burn_per_block: Amount) -> Amount {
-    DEFAULT_TRANSACTION_FEE.min(burn_per_block.saturating_sub(1))
+fn automatic_burn_fee(_burn_per_block: Amount) -> Amount {
+    0
 }
 
 #[derive(Clone, Debug, Default, Deserialize, Eq, PartialEq, Serialize)]

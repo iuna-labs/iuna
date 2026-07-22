@@ -119,7 +119,7 @@ fn starter_node_waits_for_a_burn_before_vdf_work() {
 }
 
 #[test]
-fn burn_in_latest_block_creates_next_height_ticket() {
+fn burn_in_block_creates_ticket_after_maturity_delay() {
     let alice = Wallet::from_seed("alice");
     let bob = Wallet::from_seed("bob");
     let mut allocations = BTreeMap::new();
@@ -128,34 +128,46 @@ fn burn_in_latest_block_creates_next_height_ticket() {
 
     let mut ledger = Ledger::new(allocations, 10);
     ledger
-        .submit_transaction(alice.burn(20, ledger.next_nonce(alice.address())))
-        .unwrap();
-    ledger
         .submit_transaction(bob.burn(80, ledger.next_nonce(bob.address())))
         .unwrap();
 
-    let first = ledger.mine_next_block(&alice, 1).unwrap();
+    let launch_leader =
+        if ledger.expected_leader_for_next_block().as_deref() == Some(alice.address()) {
+            &alice
+        } else {
+            &bob
+        };
+    let first = ledger.mine_next_block(launch_leader, 1).unwrap();
     ledger.apply_block(first).unwrap();
 
-    let expected = ledger.expected_leader_for_next_block().unwrap();
-    assert!(expected == alice.address() || expected == bob.address());
+    for height in 2..=3 {
+        let leader_wallet =
+            if ledger.expected_leader_for_next_block().as_deref() == Some(alice.address()) {
+                &alice
+            } else {
+                &bob
+            };
+        ledger
+            .submit_transaction(leader_wallet.burn(1, ledger.next_nonce(leader_wallet.address())))
+            .unwrap();
+        let block = ledger.mine_next_block(leader_wallet, height).unwrap();
+        ledger.apply_block(block).unwrap();
+    }
 
-    let non_leader = if expected == alice.address() {
-        &bob
-    } else {
-        &alice
-    };
-    assert!(ledger.mine_next_block(non_leader, 2).is_err());
+    assert_eq!(
+        ledger.expected_leader_for_next_block().as_deref(),
+        Some(bob.address())
+    );
 
-    let leader_wallet = if expected == alice.address() {
-        &alice
-    } else {
-        &bob
-    };
+    assert!(
+        ledger.mine_next_block(&alice, 4).is_err(),
+        "the block 1 burn should not be eligible before its maturity delay, and only Bob should hold it at block 4"
+    );
+
     ledger
-        .submit_transaction(leader_wallet.burn(1, ledger.next_nonce(leader_wallet.address())))
+        .submit_transaction(bob.burn(1, ledger.next_nonce(bob.address())))
         .unwrap();
-    assert!(ledger.mine_next_block(leader_wallet, 2).is_ok());
+    assert!(ledger.mine_next_block(&bob, 4).is_ok());
 }
 
 #[test]
@@ -539,7 +551,7 @@ fn automatic_burn_status_shows_configured_fee() {
 
     node.set_burn_per_block(50).unwrap();
     assert_eq!(node.status().mining.burn_per_block, 50);
-    assert_eq!(node.status().mining.automatic_burn_fee, 1);
+    assert_eq!(node.status().mining.automatic_burn_fee, 0);
 }
 
 #[test]
@@ -905,6 +917,25 @@ fn joined_nodes_import_transfer_block_and_every_wallet_mines() {
     mined_by.push(block6.miner.clone());
     network.deliver_until_idle().unwrap();
 
+    network.node_mut("a").unwrap().burn(1).unwrap();
+    network.deliver_until_idle().unwrap();
+    let block7 = network.node_mut("a").unwrap().mine_one_at(7).unwrap();
+    mined_by.push(block7.miner.clone());
+    network.deliver_until_idle().unwrap();
+
+    network.node_mut("a").unwrap().burn(1).unwrap();
+    network.deliver_until_idle().unwrap();
+    let block8 = network.node_mut("a").unwrap().mine_one_at(8).unwrap();
+    mined_by.push(block8.miner.clone());
+    network.deliver_until_idle().unwrap();
+
+    network
+        .node_mut("b")
+        .unwrap()
+        .transfer(carol.address(), 10)
+        .unwrap();
+    network.node_mut("b").unwrap().burn(1).unwrap();
+    network.deliver_until_idle().unwrap();
     assert_eq!(
         network
             .node("a")
@@ -913,21 +944,26 @@ fn joined_nodes_import_transfer_block_and_every_wallet_mines() {
             .expected_leader_for_next_block(),
         Some(bob.address().to_string())
     );
-    network
-        .node_mut("b")
-        .unwrap()
-        .transfer(carol.address(), 10)
-        .unwrap();
-    network.node_mut("b").unwrap().burn(1).unwrap();
-    network.deliver_until_idle().unwrap();
-    let block7 = network.node_mut("b").unwrap().mine_one_at(7).unwrap();
-    mined_by.push(block7.miner.clone());
+    let block9 = network.node_mut("b").unwrap().mine_one_at(9).unwrap();
+    mined_by.push(block9.miner.clone());
     network.deliver_until_idle().unwrap();
 
     network.node_mut("c").unwrap().burn(5).unwrap();
     network.deliver_until_idle().unwrap();
-    let block8 = network.node_mut("b").unwrap().mine_one_at(8).unwrap();
-    mined_by.push(block8.miner.clone());
+    let block10 = network.node_mut("a").unwrap().mine_one_at(10).unwrap();
+    mined_by.push(block10.miner.clone());
+    network.deliver_until_idle().unwrap();
+
+    network.node_mut("a").unwrap().burn(1).unwrap();
+    network.deliver_until_idle().unwrap();
+    let block11 = network.node_mut("a").unwrap().mine_one_at(11).unwrap();
+    mined_by.push(block11.miner.clone());
+    network.deliver_until_idle().unwrap();
+
+    network.node_mut("b").unwrap().burn(1).unwrap();
+    network.deliver_until_idle().unwrap();
+    let block12 = network.node_mut("b").unwrap().mine_one_at(12).unwrap();
+    mined_by.push(block12.miner.clone());
     network.deliver_until_idle().unwrap();
 
     assert_eq!(
@@ -940,13 +976,13 @@ fn joined_nodes_import_transfer_block_and_every_wallet_mines() {
     );
     network.node_mut("c").unwrap().burn(1).unwrap();
     network.deliver_until_idle().unwrap();
-    let block9 = network.node_mut("c").unwrap().mine_one_at(9).unwrap();
-    mined_by.push(block9.miner.clone());
+    let block13 = network.node_mut("c").unwrap().mine_one_at(13).unwrap();
+    mined_by.push(block13.miner.clone());
     network.deliver_until_idle().unwrap();
 
     let final_tip = network.node("a").unwrap().ledger().status().tip_hash;
     for id in ["a", "b", "c"] {
-        assert_eq!(network.node(id).unwrap().ledger().status().height, 9);
+        assert_eq!(network.node(id).unwrap().ledger().status().height, 13);
         assert_eq!(
             network.node(id).unwrap().ledger().status().tip_hash,
             final_tip
@@ -1043,6 +1079,17 @@ fn persisted_joined_nodes_restart_and_keep_syncing_without_tcp() {
     network.deliver_until_idle().unwrap();
     network.node_mut("a").unwrap().mine_one_at(3).unwrap();
     network.deliver_until_idle().unwrap();
+
+    network.node_mut("a").unwrap().burn(1).unwrap();
+    network.deliver_until_idle().unwrap();
+    network.node_mut("a").unwrap().mine_one_at(4).unwrap();
+    network.deliver_until_idle().unwrap();
+
+    network.node_mut("a").unwrap().burn(1).unwrap();
+    network.deliver_until_idle().unwrap();
+    network.node_mut("a").unwrap().mine_one_at(5).unwrap();
+    network.deliver_until_idle().unwrap();
+
     assert_eq!(
         network
             .node("a")
@@ -1055,7 +1102,7 @@ fn persisted_joined_nodes_restart_and_keep_syncing_without_tcp() {
 
     network.node_mut("b").unwrap().burn(1).unwrap();
     network.deliver_until_idle().unwrap();
-    let bob_block = network.node_mut("b").unwrap().mine_one_at(4).unwrap();
+    let bob_block = network.node_mut("b").unwrap().mine_one_at(6).unwrap();
     assert_eq!(bob_block.miner, bob.address());
     network.deliver_until_idle().unwrap();
 

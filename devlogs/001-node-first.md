@@ -9,7 +9,7 @@ The important design choice is the hexagonal split. The Luun rules live in the d
 The consensus sketch is intentionally small:
 
 - burn LUUN into a block,
-- turn those burns into mature one-shot tickets for future blocks,
+- turn those burns into mature one-shot tickets for a short future block window,
 - use parent-bound VDF work as the pacing signal,
 - give the selected ticket owner the signed right to mine the next block,
 - forget the stake because the LUUN were already burned.

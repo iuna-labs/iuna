@@ -8,6 +8,6 @@ So the P2P port now does one extra friendly thing. When a node connects, the pee
 
 The default burn is now zero. That matters because a friend who just joined probably has no LUUN yet. They can still follow the chain, receive LUUN, and only then decide how much to burn per block.
 
-Genesis changed too. The starter does not begin rich anymore. The starter gets 1 synthetic Luun in genesis and burns it immediately, so their visible balance is 0, but the chain has a first lottery ticket. That ticket lets the starter produce the first real reward block.
+Genesis changed too. The starter does not begin rich anymore. The starter gets 1 synthetic Luun in genesis and burns it immediately, so their visible balance is 0, but the chain has bootstrap lottery tickets. Those tickets let the starter produce the first real reward blocks while normal burn tickets mature.
 
 This is still not real adversarial sync. It trusts the friend you join. But for the current Luun phase, that is exactly the point: make a small network feel real first, then harden it later.

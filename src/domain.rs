@@ -12,7 +12,8 @@ pub const MAX_BLOCK_BYTES: usize = 100_000;
 pub const VDF_TARGET_BLOCK_MS: u64 = 60_000;
 const MAX_PENDING_TRANSACTIONS: usize = 10_000;
 const MAX_BLOCK_TRANSACTIONS: usize = 1_000;
-const DEFAULT_TICKET_MATURITY_DELAY: u64 = 1;
+const DEFAULT_TICKET_MATURITY_DELAY: u64 = 3;
+const DEFAULT_TICKET_EXPIRY_WINDOW: u64 = 3;
 const MIN_VDF_ROUNDS: u32 = 1;
 const VDF_RETARGET_WINDOW_BLOCKS: usize = 10;
 const MAX_VDF_RETARGET_STEP_PERCENT: u128 = 10;
@@ -440,8 +441,8 @@ struct BurnTicket {
     id: String,
     owner: String,
     amount: Amount,
-    target_height: u64,
-    maturity_height: u64,
+    eligible_from_height: u64,
+    eligible_until_height: u64,
 }
 
 #[derive(Clone, Debug)]
@@ -529,6 +530,8 @@ pub struct ChainSnapshot {
 pub struct LaunchProfile {
     pub profile_id: String,
     pub ticket_maturity_delay_heights: u64,
+    #[serde(default = "default_ticket_expiry_window_heights")]
+    pub ticket_expiry_window_heights: u64,
     pub max_pending_transactions: usize,
     pub max_block_transactions: usize,
     #[serde(default = "default_max_block_bytes")]
@@ -538,8 +541,9 @@ pub struct LaunchProfile {
 impl Default for LaunchProfile {
     fn default() -> Self {
         Self {
-            profile_id: "luun-devnet-v2".to_string(),
+            profile_id: "luun-devnet-v3".to_string(),
             ticket_maturity_delay_heights: DEFAULT_TICKET_MATURITY_DELAY,
+            ticket_expiry_window_heights: DEFAULT_TICKET_EXPIRY_WINDOW,
             max_pending_transactions: MAX_PENDING_TRANSACTIONS,
             max_block_transactions: MAX_BLOCK_TRANSACTIONS,
             max_block_bytes: MAX_BLOCK_BYTES,
@@ -551,12 +555,17 @@ fn default_max_block_bytes() -> usize {
     MAX_BLOCK_BYTES
 }
 
+fn default_ticket_expiry_window_heights() -> u64 {
+    DEFAULT_TICKET_EXPIRY_WINDOW
+}
+
 impl LaunchProfile {
     pub fn hash(&self) -> String {
         hex_hash(format!(
-            "luun-launch-profile:{}:{}:{}:{}:{}",
+            "luun-launch-profile:{}:{}:{}:{}:{}:{}",
             self.profile_id,
             self.ticket_maturity_delay_heights,
+            self.ticket_expiry_window_heights,
             self.max_pending_transactions,
             self.max_block_transactions,
             self.max_block_bytes
@@ -1338,7 +1347,7 @@ impl Ledger {
     fn selected_ticket_for_height(&self, height: u64) -> Option<BurnTicket> {
         self.tickets
             .iter()
-            .filter(|ticket| ticket.target_height == height && ticket.maturity_height <= height)
+            .filter(|ticket| ticket_is_eligible_for_height(ticket, height))
             .min_by(|left, right| {
                 ticket_rank(self.tip(), height, left)
                     .cmp(&ticket_rank(self.tip(), height, right))
@@ -1362,6 +1371,9 @@ fn ticket_rank(parent: &Block, target_height: u64, ticket: &BurnTicket) -> Strin
 }
 
 fn tickets_created_by_block(block: &Block, profile: &LaunchProfile) -> Result<Vec<BurnTicket>> {
+    if profile.ticket_expiry_window_heights == 0 {
+        bail!("ticket expiry window must be at least one height");
+    }
     let mut tickets = Vec::new();
     for tx in &block.transactions {
         let Transaction::Burn {
@@ -1380,13 +1392,15 @@ fn tickets_created_by_block(block: &Block, profile: &LaunchProfile) -> Result<Ve
             .height
             .checked_add(profile.ticket_maturity_delay_heights)
             .with_context(|| format!("ticket target height overflow at block {}", block.height))?;
-        let maturity_height = target_height;
+        let eligible_until_height = target_height
+            .checked_add(profile.ticket_expiry_window_heights - 1)
+            .with_context(|| format!("ticket expiry height overflow at block {}", block.height))?;
         tickets.push(BurnTicket {
             id: signature.clone(),
             owner: from.clone(),
             amount: *amount,
-            target_height,
-            maturity_height,
+            eligible_from_height: target_height,
+            eligible_until_height,
         });
     }
     Ok(tickets)
@@ -1397,9 +1411,29 @@ fn genesis_tickets(
     genesis: &Block,
     profile: &LaunchProfile,
 ) -> Result<Vec<BurnTicket>> {
-    let tickets = tickets_created_by_block(genesis, profile)?;
-    if !tickets.is_empty() {
-        return Ok(tickets);
+    if profile.ticket_maturity_delay_heights == 0 {
+        return tickets_created_by_block(genesis, profile);
+    }
+
+    let burn_tickets = genesis
+        .transactions
+        .iter()
+        .filter_map(|tx| {
+            let Transaction::Burn {
+                from,
+                amount,
+                signature,
+                ..
+            } = tx
+            else {
+                return None;
+            };
+            (*amount > 0).then(|| (from.clone(), *amount, signature.clone()))
+        })
+        .collect::<Vec<_>>();
+
+    if !burn_tickets.is_empty() {
+        return genesis_bootstrap_tickets(burn_tickets, profile, genesis);
     }
 
     let Some((owner, amount)) = genesis_allocations
@@ -1409,30 +1443,59 @@ fn genesis_tickets(
     else {
         return Ok(Vec::new());
     };
-    Ok(vec![BurnTicket {
-        id: hex_hash(format!(
-            "luun-genesis-ticket:{owner}:{amount}:{}",
-            genesis.hash
-        )),
-        owner: owner.clone(),
-        amount: 1,
-        target_height: profile.ticket_maturity_delay_heights,
-        maturity_height: profile.ticket_maturity_delay_heights,
-    }])
+    genesis_bootstrap_tickets(
+        vec![(
+            owner.clone(),
+            1,
+            hex_hash(format!(
+                "luun-genesis-ticket:{owner}:{amount}:{}",
+                genesis.hash
+            )),
+        )],
+        profile,
+        genesis,
+    )
+}
+
+fn genesis_bootstrap_tickets(
+    source_tickets: Vec<(String, Amount, String)>,
+    profile: &LaunchProfile,
+    genesis: &Block,
+) -> Result<Vec<BurnTicket>> {
+    let mut tickets = Vec::new();
+    for height in 1..=profile.ticket_maturity_delay_heights {
+        for (owner, amount, source_id) in &source_tickets {
+            tickets.push(BurnTicket {
+                id: hex_hash(format!(
+                    "luun-genesis-bootstrap-ticket:{}:{source_id}:{height}",
+                    genesis.hash
+                )),
+                owner: owner.clone(),
+                amount: *amount,
+                eligible_from_height: height,
+                eligible_until_height: height,
+            });
+        }
+    }
+    Ok(tickets)
 }
 
 fn consume_leader_ticket(block: &Block, tickets: &mut Vec<BurnTicket>) -> Result<()> {
     let Some(proof) = &block.leader_proof else {
         bail!("block is missing leader proof");
     };
-    let Some(index) = tickets
-        .iter()
-        .position(|ticket| ticket.id == proof.ticket_id && ticket.target_height == block.height)
-    else {
+    let Some(index) = tickets.iter().position(|ticket| {
+        ticket.id == proof.ticket_id && ticket_is_eligible_for_height(ticket, block.height)
+    }) else {
         bail!("leader ticket is not pending for block {}", block.height);
     };
     tickets.remove(index);
+    tickets.retain(|ticket| ticket.eligible_until_height > block.height);
     Ok(())
+}
+
+fn ticket_is_eligible_for_height(ticket: &BurnTicket, height: u64) -> bool {
+    ticket.eligible_from_height <= height && height <= ticket.eligible_until_height
 }
 
 fn ensure_block_has_burn(transactions: &[Transaction]) -> Result<()> {
@@ -1514,12 +1577,14 @@ fn verify_leader_proof(block: &Block, tickets: &[BurnTicket]) -> Result<()> {
     }
     let ticket = tickets
         .iter()
-        .find(|ticket| ticket.id == proof.ticket_id && ticket.target_height == block.height)
+        .find(|ticket| {
+            ticket.id == proof.ticket_id && ticket_is_eligible_for_height(ticket, block.height)
+        })
         .context("leader ticket is not pending for this height")?;
     if ticket.owner != block.miner {
         bail!("leader ticket owner does not match block miner");
     }
-    if ticket.maturity_height > block.height {
+    if ticket.eligible_from_height > block.height {
         bail!("leader ticket is not mature");
     }
 

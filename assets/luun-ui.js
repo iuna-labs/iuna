@@ -419,8 +419,8 @@ window.luunApp = function luunApp() {
 
     automaticBurnFeeDraft() {
       const amount = Math.max(0, Math.trunc(Number(this.burnAmountDraft) || 0));
-      const savedFee = this.status.mining?.automatic_burn_fee ?? 1;
-      return Math.min(savedFee || 1, Math.max(amount - 1, 0));
+      const savedFee = this.status.mining?.automatic_burn_fee ?? 0;
+      return Math.min(savedFee, Math.max(amount - 1, 0));
     },
 
     async sendTransfer() {
