@@ -4,7 +4,8 @@ use mivora::{
     adapters::chain_store::SqliteChainStore,
     app::{DEFAULT_BURN_PER_BLOCK, InMemoryNetwork, NodeConfig, NodeCore, PeerBook, PeerDirection},
     domain::{
-        Amount, BLOCK_REWARD, GenesisBurn, Ledger, VDF_TARGET_BLOCK_MS, Wallet, run_vdf, verify_vdf,
+        Amount, BLOCK_REWARD, GenesisBurn, Ledger, MAX_BLOCK_BYTES, VDF_TARGET_BLOCK_MS, Wallet,
+        run_vdf, verify_vdf,
     },
 };
 use tempfile::tempdir;
@@ -236,6 +237,144 @@ fn block_reward_is_fixed_at_one_hundred_coins() {
 }
 
 #[test]
+fn transaction_fees_are_paid_to_the_block_miner() {
+    let alice = Wallet::from_seed("fee-miner-alice");
+    let bob = Wallet::from_seed("fee-payer-bob");
+    let mut allocations = BTreeMap::new();
+    allocations.insert(alice.address().to_string(), 1);
+    allocations.insert(bob.address().to_string(), 200);
+
+    let mut ledger =
+        Ledger::new_with_genesis_burns(allocations, vec![GenesisBurn::new(alice.address(), 1)], 10)
+            .unwrap();
+    ledger
+        .submit_transaction(alice.burn(1, ledger.next_nonce(alice.address())))
+        .unwrap();
+    ledger
+        .submit_transaction(bob.transfer_with_fee(
+            alice.address(),
+            10,
+            7,
+            ledger.next_nonce(bob.address()),
+        ))
+        .unwrap();
+
+    let block = ledger.mine_next_block(&alice, 1).unwrap();
+    assert_eq!(block.reward, BLOCK_REWARD + 7);
+    ledger.apply_block(block).unwrap();
+
+    assert_eq!(ledger.balance_of(alice.address()), 216);
+    assert_eq!(ledger.balance_of(bob.address()), 183);
+}
+
+#[test]
+fn miner_orders_block_transactions_by_fee_rate_after_required_burn() {
+    let wallets = wallets(&["fee-order-alice", "fee-order-bob", "fee-order-carol"]);
+    let alice = &wallets[0];
+    let bob = &wallets[1];
+    let carol = &wallets[2];
+    let mut allocations = allocations(&wallets, 1_000);
+    allocations.insert(alice.address().to_string(), 1);
+    let mut ledger =
+        Ledger::new_with_genesis_burns(allocations, vec![GenesisBurn::new(alice.address(), 1)], 10)
+            .unwrap();
+    let required_burn = alice.burn(1, ledger.next_nonce(alice.address()));
+    let low_fee = bob.transfer_with_fee(alice.address(), 1, 1, ledger.next_nonce(bob.address()));
+    let high_fee =
+        carol.transfer_with_fee(alice.address(), 1, 20, ledger.next_nonce(carol.address()));
+    ledger.submit_transaction(low_fee.clone()).unwrap();
+    ledger.submit_transaction(high_fee.clone()).unwrap();
+    ledger.submit_transaction(required_burn.clone()).unwrap();
+
+    let block = ledger.mine_next_block(alice, 1).unwrap();
+    let signatures = block
+        .transactions
+        .iter()
+        .map(|tx| tx.signature().to_string())
+        .collect::<Vec<_>>();
+
+    assert_eq!(signatures[0], required_burn.signature());
+    assert!(
+        signatures
+            .iter()
+            .position(|signature| signature == high_fee.signature())
+            < signatures
+                .iter()
+                .position(|signature| signature == low_fee.signature())
+    );
+}
+
+#[test]
+fn oversized_blocks_are_rejected() {
+    let alice = Wallet::from_seed("oversized-block-alice");
+    let bob = Wallet::from_seed("oversized-block-bob");
+    let mut allocations = BTreeMap::new();
+    allocations.insert(alice.address().to_string(), 1);
+    allocations.insert(bob.address().to_string(), 1_000);
+    let mut ledger =
+        Ledger::new_with_genesis_burns(allocations, vec![GenesisBurn::new(alice.address(), 1)], 10)
+            .unwrap();
+    ledger
+        .submit_transaction(alice.burn(1, ledger.next_nonce(alice.address())))
+        .unwrap();
+    let mut block = ledger.mine_next_block(&alice, 1).unwrap();
+    let oversized_transfer = bob.transfer_with_fee(
+        "x".repeat(MAX_BLOCK_BYTES),
+        1,
+        3,
+        ledger.next_nonce(bob.address()),
+    );
+    block.transactions.push(oversized_transfer);
+    block.reward = BLOCK_REWARD + 3;
+    block.hash = block.compute_hash();
+
+    let error = ledger.apply_block(block).unwrap_err();
+
+    assert!(format!("{error:#}").contains("max block size"));
+}
+
+#[test]
+fn miner_skips_oversized_pending_transaction_and_keeps_fitting_fee_transaction() {
+    let wallets = wallets(&[
+        "oversized-select-alice",
+        "oversized-select-bob",
+        "oversized-select-carol",
+    ]);
+    let alice = &wallets[0];
+    let bob = &wallets[1];
+    let carol = &wallets[2];
+    let mut allocations = allocations(&wallets, 200_000);
+    allocations.insert(alice.address().to_string(), 1);
+    let mut ledger =
+        Ledger::new_with_genesis_burns(allocations, vec![GenesisBurn::new(alice.address(), 1)], 10)
+            .unwrap();
+    ledger
+        .submit_transaction(alice.burn(1, ledger.next_nonce(alice.address())))
+        .unwrap();
+    let oversized = bob.transfer_with_fee(
+        "x".repeat(MAX_BLOCK_BYTES),
+        1,
+        100_000,
+        ledger.next_nonce(bob.address()),
+    );
+    let fitting =
+        carol.transfer_with_fee(alice.address(), 1, 5, ledger.next_nonce(carol.address()));
+    ledger.submit_transaction(oversized.clone()).unwrap();
+    ledger.submit_transaction(fitting.clone()).unwrap();
+
+    let block = ledger.mine_next_block(alice, 1).unwrap();
+    let signatures = block
+        .transactions
+        .iter()
+        .map(|tx| tx.signature().to_string())
+        .collect::<Vec<_>>();
+
+    assert!(!signatures.contains(&oversized.signature().to_string()));
+    assert!(signatures.contains(&fitting.signature().to_string()));
+    assert!(block.serialized_size_bytes().unwrap() <= MAX_BLOCK_BYTES);
+}
+
+#[test]
 fn transfer_that_would_overflow_recipient_balance_is_rejected() {
     let alice = Wallet::from_seed("alice");
     let bob = Wallet::from_seed("bob");
@@ -383,6 +522,24 @@ fn burn_per_block_can_be_set_to_zero() {
     let burned = node.set_burn_per_block(0).unwrap();
     assert!(burned.is_none());
     assert_eq!(node.status().mining.burn_per_block, 0);
+}
+
+#[test]
+fn automatic_burn_status_shows_configured_fee() {
+    let alice = Wallet::from_seed("auto-fee-status-alice");
+    let mut allocations = BTreeMap::new();
+    allocations.insert(alice.address().to_string(), 1_000);
+    let mut node = node("alice", alice, allocations);
+
+    assert_eq!(node.status().mining.automatic_burn_fee, 0);
+
+    node.set_burn_per_block(1).unwrap();
+    assert_eq!(node.status().mining.burn_per_block, 1);
+    assert_eq!(node.status().mining.automatic_burn_fee, 0);
+
+    node.set_burn_per_block(50).unwrap();
+    assert_eq!(node.status().mining.burn_per_block, 50);
+    assert_eq!(node.status().mining.automatic_burn_fee, 1);
 }
 
 #[test]

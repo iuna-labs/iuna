@@ -74,11 +74,11 @@ Friends who join after you start will adopt your genesis and current chain. The 
 
 The genesis block bootstraps the chain with a 1-coin burn from the starter wallet. Burns included in a block create one-shot tickets for a future height through a deterministic ticket lottery. The selected leader creates the next block content, signs a proof for the selected ticket, and runs a hash-chain VDF before gossiping the block.
 
-Every non-genesis block must consume the selected mature ticket and include at least one burn transaction. The VDF seed is bound to the parent hash and child height; the block hash separately commits to the miner, timestamp, reward, rounds, previous hash, leader proof, VDF output, and transactions.
+Every non-genesis block must consume the selected mature ticket, include at least one burn transaction, and fit under the 100kB serialized block limit. The VDF seed is bound to the parent hash and child height; the block hash separately commits to the miner, timestamp, miner payout, rounds, previous hash, leader proof, VDF output, and transactions.
 
 The protocol targets 60-second blocks by retargeting the expected VDF rounds after each block. It uses a rolling average of recent block intervals and only moves the next round count by about 10% per block, so short bursts do not make the delay swing wildly. Every node derives the same next-round count from the validated chain.
 
-The block reward is fixed at 100 coins. The default burn is 0 coins per block, so new nodes can join before they own coins. Genesis starters begin at 100 coins per block; after another wallet has coins, raise its burn from the Configuration screen.
+The base block reward is fixed at 100 coins, and miners collect transaction fees on top. The miner includes the best valid burn for liveness, then fills the remaining block space by fee-rate while respecting nonce and balance validity. The default burn is 0 coins per block, so new nodes can join before they own coins. Genesis starters begin at 100 coins per block; after another wallet has coins, raise its burn from the Configuration screen.
 
 The measured VDF round count is only the initial delay. After the first blocks, the protocol steers rounds toward the 60-second target.
 
@@ -98,7 +98,7 @@ Mivora stores the latest validated `ChainSnapshot` in SQLite at `<data-dir>/chai
 
 ## Architecture
 
-- `src/domain.rs`: wallet, transactions, balances, genesis burn bootstrap, fixed 100-coin rewards, blocks, mature leader tickets, leader proofs, fork choice, launch profile, and VDF checks.
+- `src/domain.rs`: wallet, fee-paying transactions, balances, genesis burn bootstrap, 100-coin base rewards, 100kB blocks, mature leader tickets, leader proofs, fork choice, launch profile, and VDF checks.
 - `src/app.rs`: node use cases, automatic VDF-paced mining, peer bookkeeping, and an in-memory network harness.
 - `src/adapters/http.rs`: HTTP management UI and status endpoint.
 - `src/adapters/p2p.rs`: line-delimited JSON gossip, block-range catch-up, and chain snapshots over one TCP port.

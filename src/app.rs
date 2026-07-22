@@ -9,8 +9,8 @@ use serde::{Deserialize, Serialize};
 use tokio::sync::Mutex;
 
 use crate::domain::{
-    Amount, Block, ChainSnapshot, ChainStatus, Ledger, PreparedBlock, Transaction,
-    VDF_TARGET_BLOCK_MS, Wallet, run_vdf,
+    Amount, Block, ChainSnapshot, ChainStatus, DEFAULT_TRANSACTION_FEE, Ledger, PreparedBlock,
+    Transaction, VDF_TARGET_BLOCK_MS, Wallet, run_vdf,
 };
 
 pub type SharedNode = Arc<Mutex<NodeCore>>;
@@ -106,6 +106,7 @@ pub struct LaunchProfileStatus {
 pub struct MiningStatus {
     pub automatic: bool,
     pub burn_per_block: Amount,
+    pub automatic_burn_fee: Amount,
     pub vdf_rounds: u32,
     pub vdf_target_block_ms: u64,
     pub current_leader: Option<String>,
@@ -310,6 +311,7 @@ impl NodeCore {
             mining: MiningStatus {
                 automatic: true,
                 burn_per_block: self.burn_per_block,
+                automatic_burn_fee: automatic_burn_fee(self.burn_per_block),
                 vdf_rounds: self.ledger.vdf_rounds(),
                 vdf_target_block_ms: VDF_TARGET_BLOCK_MS,
                 current_leader,
@@ -330,9 +332,13 @@ impl NodeCore {
     }
 
     pub fn burn(&mut self, amount: Amount) -> Result<Transaction> {
-        let tx = self
-            .wallet
-            .burn(amount, self.ledger.next_nonce(self.wallet.address()));
+        self.burn_with_fee(amount, DEFAULT_TRANSACTION_FEE)
+    }
+
+    pub fn burn_with_fee(&mut self, amount: Amount, fee: Amount) -> Result<Transaction> {
+        let tx =
+            self.wallet
+                .burn_with_fee(amount, fee, self.ledger.next_nonce(self.wallet.address()));
         if self.ledger.submit_transaction(tx.clone())? {
             self.outbox.push(GossipEnvelope::Transaction(tx.clone()));
         }
@@ -340,9 +346,21 @@ impl NodeCore {
     }
 
     pub fn transfer(&mut self, to: impl Into<String>, amount: Amount) -> Result<Transaction> {
-        let tx = self
-            .wallet
-            .transfer(to, amount, self.ledger.next_nonce(self.wallet.address()));
+        self.transfer_with_fee(to, amount, DEFAULT_TRANSACTION_FEE)
+    }
+
+    pub fn transfer_with_fee(
+        &mut self,
+        to: impl Into<String>,
+        amount: Amount,
+        fee: Amount,
+    ) -> Result<Transaction> {
+        let tx = self.wallet.transfer_with_fee(
+            to,
+            amount,
+            fee,
+            self.ledger.next_nonce(self.wallet.address()),
+        );
         if self.ledger.submit_transaction(tx.clone())? {
             self.outbox.push(GossipEnvelope::Transaction(tx.clone()));
         }
@@ -429,7 +447,14 @@ impl NodeCore {
             return Ok(None);
         }
 
-        let tx = self.burn(self.burn_per_block)?;
+        let fee = automatic_burn_fee(self.burn_per_block);
+        let balance = self.ledger.balance_of(self.wallet.address());
+        let amount = if balance >= self.burn_per_block.saturating_add(fee) {
+            self.burn_per_block
+        } else {
+            self.burn_per_block.saturating_sub(fee)
+        };
+        let tx = self.burn_with_fee(amount, fee)?;
         self.last_auto_burn_height = Some(current_height);
         Ok(Some(tx))
     }
@@ -555,6 +580,10 @@ impl NodeCore {
             self.outbox.push(GossipEnvelope::Blocks { blocks });
         }
     }
+}
+
+fn automatic_burn_fee(burn_per_block: Amount) -> Amount {
+    DEFAULT_TRANSACTION_FEE.min(burn_per_block.saturating_sub(1))
 }
 
 #[derive(Clone, Debug, Default, Deserialize, Eq, PartialEq, Serialize)]

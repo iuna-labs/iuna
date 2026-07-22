@@ -7,6 +7,8 @@ use sha2::{Digest, Sha256};
 
 pub type Amount = u64;
 pub const BLOCK_REWARD: Amount = 100;
+pub const DEFAULT_TRANSACTION_FEE: Amount = 1;
+pub const MAX_BLOCK_BYTES: usize = 100_000;
 pub const VDF_TARGET_BLOCK_MS: u64 = 60_000;
 const MAX_PENDING_TRANSACTIONS: usize = 10_000;
 const MAX_BLOCK_TRANSACTIONS: usize = 1_000;
@@ -40,19 +42,35 @@ impl Wallet {
     }
 
     pub fn burn(&self, amount: Amount, nonce: u64) -> Transaction {
+        self.burn_with_fee(amount, 0, nonce)
+    }
+
+    pub fn burn_with_fee(&self, amount: Amount, fee: Amount, nonce: u64) -> Transaction {
         let unsigned = UnsignedTransaction::Burn {
             from: self.address.clone(),
             amount,
+            fee,
             nonce,
         };
         unsigned.sign(self)
     }
 
     pub fn transfer(&self, to: impl Into<String>, amount: Amount, nonce: u64) -> Transaction {
+        self.transfer_with_fee(to, amount, 0, nonce)
+    }
+
+    pub fn transfer_with_fee(
+        &self,
+        to: impl Into<String>,
+        amount: Amount,
+        fee: Amount,
+        nonce: u64,
+    ) -> Transaction {
         let unsigned = UnsignedTransaction::Transfer {
             from: self.address.clone(),
             to: to.into(),
             amount,
+            fee,
             nonce,
         };
         unsigned.sign(self)
@@ -81,11 +99,13 @@ pub enum UnsignedTransaction {
         from: String,
         to: String,
         amount: Amount,
+        fee: Amount,
         nonce: u64,
     },
     Burn {
         from: String,
         amount: Amount,
+        fee: Amount,
         nonce: u64,
     },
 }
@@ -98,21 +118,25 @@ impl UnsignedTransaction {
                 from,
                 to,
                 amount,
+                fee,
                 nonce,
             } => Transaction::Transfer {
                 from,
                 to,
                 amount,
+                fee,
                 nonce,
                 signature,
             },
             Self::Burn {
                 from,
                 amount,
+                fee,
                 nonce,
             } => Transaction::Burn {
                 from,
                 amount,
+                fee,
                 nonce,
                 signature,
             },
@@ -125,13 +149,28 @@ impl UnsignedTransaction {
                 from,
                 to,
                 amount,
+                fee,
                 nonce,
-            } => format!("transfer:{from}:{to}:{amount}:{nonce}"),
+            } if *fee == 0 => format!("transfer:{from}:{to}:{amount}:{nonce}"),
+            Self::Transfer {
+                from,
+                to,
+                amount,
+                fee,
+                nonce,
+            } => format!("transfer:{from}:{to}:{amount}:{fee}:{nonce}"),
             Self::Burn {
                 from,
                 amount,
+                fee,
                 nonce,
-            } => format!("burn:{from}:{amount}:{nonce}"),
+            } if *fee == 0 => format!("burn:{from}:{amount}:{nonce}"),
+            Self::Burn {
+                from,
+                amount,
+                fee,
+                nonce,
+            } => format!("burn:{from}:{amount}:{fee}:{nonce}"),
         }
     }
 }
@@ -143,12 +182,16 @@ pub enum Transaction {
         from: String,
         to: String,
         amount: Amount,
+        #[serde(default)]
+        fee: Amount,
         nonce: u64,
         signature: String,
     },
     Burn {
         from: String,
         amount: Amount,
+        #[serde(default)]
+        fee: Amount,
         nonce: u64,
         signature: String,
     },
@@ -161,6 +204,7 @@ impl Transaction {
         Self::Burn {
             from,
             amount,
+            fee: 0,
             nonce: 0,
             signature,
         }
@@ -184,6 +228,18 @@ impl Transaction {
         }
     }
 
+    pub fn fee(&self) -> Amount {
+        match self {
+            Self::Transfer { fee, .. } | Self::Burn { fee, .. } => *fee,
+        }
+    }
+
+    pub fn total_debit(&self) -> Result<Amount> {
+        self.amount()
+            .checked_add(self.fee())
+            .context("transaction amount plus fee overflows")
+    }
+
     pub fn signature(&self) -> &str {
         match self {
             Self::Transfer { signature, .. } | Self::Burn { signature, .. } => signature,
@@ -204,15 +260,32 @@ impl Transaction {
                 from,
                 to,
                 amount,
+                fee,
                 nonce,
                 ..
-            } => format!("transfer:{from}:{to}:{amount}:{nonce}"),
+            } if *fee == 0 => format!("transfer:{from}:{to}:{amount}:{nonce}"),
+            Self::Transfer {
+                from,
+                to,
+                amount,
+                fee,
+                nonce,
+                ..
+            } => format!("transfer:{from}:{to}:{amount}:{fee}:{nonce}"),
             Self::Burn {
                 from,
                 amount,
+                fee,
                 nonce,
                 ..
-            } => format!("burn:{from}:{amount}:{nonce}"),
+            } if *fee == 0 => format!("burn:{from}:{amount}:{nonce}"),
+            Self::Burn {
+                from,
+                amount,
+                fee,
+                nonce,
+                ..
+            } => format!("burn:{from}:{amount}:{fee}:{nonce}"),
         }
     }
 
@@ -312,6 +385,12 @@ impl Block {
                 .map(LeaderProof::rank)
                 .unwrap_or_else(|| self.hash.clone()),
         )
+    }
+
+    pub fn serialized_size_bytes(&self) -> Result<usize> {
+        serde_json::to_vec(self)
+            .map(|bytes| bytes.len())
+            .context("failed to serialize block for size check")
     }
 }
 
@@ -451,27 +530,35 @@ pub struct LaunchProfile {
     pub ticket_maturity_delay_heights: u64,
     pub max_pending_transactions: usize,
     pub max_block_transactions: usize,
+    #[serde(default = "default_max_block_bytes")]
+    pub max_block_bytes: usize,
 }
 
 impl Default for LaunchProfile {
     fn default() -> Self {
         Self {
-            profile_id: "mivora-devnet-v1".to_string(),
+            profile_id: "mivora-devnet-v2".to_string(),
             ticket_maturity_delay_heights: DEFAULT_TICKET_MATURITY_DELAY,
             max_pending_transactions: MAX_PENDING_TRANSACTIONS,
             max_block_transactions: MAX_BLOCK_TRANSACTIONS,
+            max_block_bytes: MAX_BLOCK_BYTES,
         }
     }
+}
+
+fn default_max_block_bytes() -> usize {
+    MAX_BLOCK_BYTES
 }
 
 impl LaunchProfile {
     pub fn hash(&self) -> String {
         hex_hash(format!(
-            "mivora-launch-profile:{}:{}:{}:{}",
+            "mivora-launch-profile:{}:{}:{}:{}:{}",
             self.profile_id,
             self.ticket_maturity_delay_heights,
             self.max_pending_transactions,
-            self.max_block_transactions
+            self.max_block_transactions,
+            self.max_block_bytes
         ))
     }
 }
@@ -538,6 +625,11 @@ impl From<std::cmp::Ordering> for ForkQuality {
 enum ForkChoice {
     KeepLocal,
     SwitchToCandidate,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum TransactionKind {
+    Burn,
 }
 
 #[derive(Clone, Debug)]
@@ -1000,11 +1092,7 @@ impl Ledger {
             bail!("no selected leader for block {height}");
         }
 
-        let transactions = self
-            .valid_pending_transactions()
-            .into_iter()
-            .take(self.launch_profile.max_block_transactions)
-            .collect::<Vec<_>>();
+        let transactions = self.select_block_transactions()?;
         ensure_block_has_burn(&transactions)?;
 
         let tip = self.tip();
@@ -1016,7 +1104,7 @@ impl Ledger {
             prev_hash,
             timestamp_ms,
             miner: miner.to_string(),
-            reward: self.block_reward,
+            reward: reward_with_fees(self.block_reward, &transactions)?,
             vdf_rounds: self.vdf_rounds,
             vdf_seed,
             leader_ticket,
@@ -1058,6 +1146,9 @@ impl Ledger {
                 bail!("duplicate transaction in block");
             }
             apply_transaction(tx, &mut balances, &mut nonces)?;
+        }
+        if block.reward != reward_with_fees(self.block_reward, &block.transactions)? {
+            bail!("block reward is invalid");
         }
         let mut tickets = self.tickets.clone();
         consume_leader_ticket(&block, &mut tickets)?;
@@ -1109,7 +1200,7 @@ impl Ledger {
         if block.compute_hash() != block.hash {
             bail!("block hash is invalid");
         }
-        if block.reward != self.block_reward {
+        if block.reward != reward_with_fees(self.block_reward, &block.transactions)? {
             bail!("block reward is invalid");
         }
         if block.vdf_rounds != self.vdf_rounds {
@@ -1120,6 +1211,9 @@ impl Ledger {
         }
         if block.transactions.len() > self.launch_profile.max_block_transactions {
             bail!("block has too many transactions");
+        }
+        if block.serialized_size_bytes()? > self.launch_profile.max_block_bytes {
+            bail!("block exceeds max block size");
         }
         ensure_block_has_burn(&block.transactions)?;
         let Some(leader) = self.expected_leader_for_next_block() else {
@@ -1200,6 +1294,44 @@ impl Ledger {
         }
 
         valid
+    }
+
+    fn select_block_transactions(&self) -> Result<Vec<Transaction>> {
+        let mut balances = self.balances.clone();
+        let mut nonces = self.nonces.clone();
+        let mut remaining = self.valid_pending_transactions();
+        let mut selected = Vec::new();
+
+        if let Some(index) = best_selectable_transaction_index(
+            &remaining,
+            &balances,
+            &nonces,
+            Some(TransactionKind::Burn),
+        ) {
+            let tx = remaining.remove(index);
+            let mut candidate = selected.clone();
+            candidate.push(tx.clone());
+            if estimated_block_size_bytes(&candidate)? <= self.launch_profile.max_block_bytes {
+                apply_transaction(&tx, &mut balances, &mut nonces)?;
+                selected.push(tx);
+            }
+        }
+
+        while selected.len() < self.launch_profile.max_block_transactions {
+            let Some(index) =
+                best_selectable_transaction_index(&remaining, &balances, &nonces, None)
+            else {
+                break;
+            };
+            let tx = remaining.remove(index);
+            let mut candidate = selected.clone();
+            candidate.push(tx.clone());
+            if estimated_block_size_bytes(&candidate)? <= self.launch_profile.max_block_bytes {
+                apply_transaction(&tx, &mut balances, &mut nonces)?;
+                selected.push(tx);
+            }
+        }
+        Ok(selected)
     }
 
     fn selected_ticket_for_height(&self, height: u64) -> Option<BurnTicket> {
@@ -1305,6 +1437,69 @@ fn ensure_block_has_burn(transactions: &[Transaction]) -> Result<()> {
     Ok(())
 }
 
+fn fee_rate_key(transaction: &Transaction) -> u128 {
+    let size = serialized_transaction_size_bytes(transaction).unwrap_or(usize::MAX);
+    if size == 0 || size == usize::MAX {
+        return 0;
+    }
+    u128::from(transaction.fee()) * 1_000_000 / size as u128
+}
+
+fn best_selectable_transaction_index(
+    transactions: &[Transaction],
+    balances: &BTreeMap<String, Amount>,
+    nonces: &BTreeMap<String, u64>,
+    required_kind: Option<TransactionKind>,
+) -> Option<usize> {
+    transactions
+        .iter()
+        .enumerate()
+        .filter(|(_, tx)| match required_kind {
+            Some(TransactionKind::Burn) => tx.is_burn(),
+            None => true,
+        })
+        .filter(|(_, tx)| {
+            let mut balances = balances.clone();
+            let mut nonces = nonces.clone();
+            apply_transaction(tx, &mut balances, &mut nonces).is_ok()
+        })
+        .max_by(|(_, left), (_, right)| {
+            fee_rate_key(left)
+                .cmp(&fee_rate_key(right))
+                .then_with(|| left.fee().cmp(&right.fee()))
+                .then_with(|| left.is_burn().cmp(&right.is_burn()))
+                .then_with(|| right.nonce().cmp(&left.nonce()))
+                .then_with(|| right.signature().cmp(left.signature()))
+        })
+        .map(|(index, _)| index)
+}
+
+fn serialized_transaction_size_bytes(transaction: &Transaction) -> Result<usize> {
+    serde_json::to_vec(transaction)
+        .map(|bytes| bytes.len())
+        .context("failed to serialize transaction for size check")
+}
+
+fn estimated_block_size_bytes(transactions: &[Transaction]) -> Result<usize> {
+    let block = Block {
+        height: u64::MAX,
+        prev_hash: "f".repeat(64),
+        timestamp_ms: u64::MAX,
+        miner: "f".repeat(64),
+        reward: u64::MAX,
+        vdf_rounds: u32::MAX,
+        vdf_output: "f".repeat(64),
+        leader_proof: Some(LeaderProof {
+            ticket_id: "f".repeat(64),
+            public_key: "f".repeat(64),
+            signature: "f".repeat(128),
+        }),
+        transactions: transactions.to_vec(),
+        hash: "f".repeat(64),
+    };
+    block.serialized_size_bytes()
+}
+
 fn verify_leader_proof(block: &Block, tickets: &[BurnTicket]) -> Result<()> {
     let Some(proof) = &block.leader_proof else {
         bail!("block is missing leader proof");
@@ -1367,7 +1562,7 @@ fn apply_transaction(
             transaction.nonce()
         );
     }
-    debit_balance(balances, from, transaction.amount())?;
+    debit_balance(balances, from, transaction.total_debit()?)?;
     match transaction {
         Transaction::Transfer { to, amount, .. } => {
             credit_balance(balances, to, *amount)?;
@@ -1376,6 +1571,14 @@ fn apply_transaction(
     }
     nonces.insert(from.to_string(), transaction.nonce());
     Ok(())
+}
+
+fn reward_with_fees(base_reward: Amount, transactions: &[Transaction]) -> Result<Amount> {
+    transactions.iter().try_fold(base_reward, |total, tx| {
+        total
+            .checked_add(tx.fee())
+            .context("block reward plus fees overflows")
+    })
 }
 
 fn next_expected_nonce(nonces: &BTreeMap<String, u64>, address: &str) -> Result<u64> {

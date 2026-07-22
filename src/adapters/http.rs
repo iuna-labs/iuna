@@ -18,7 +18,7 @@ use tokio::{net::TcpListener, sync::Mutex};
 use crate::{
     adapters::{config_store, config_store::UiConfig, p2p::GossipNetwork, wallet_store},
     app::{NodeStatus, PeerInfo, SharedNode, SharedPeerBook},
-    domain::{Amount, Block, Transaction},
+    domain::{Amount, Block, DEFAULT_TRANSACTION_FEE, Transaction},
 };
 
 const EXPLORER_LIMIT: usize = 50;
@@ -43,6 +43,7 @@ struct AmountForm {
 struct TransferForm {
     to: String,
     amount: Amount,
+    fee: Option<Amount>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -377,7 +378,11 @@ fn dev_seed_verify_bypass_allowed(env_present: bool) -> bool {
 async fn transfer(state: &HttpState, form: TransferForm) -> Result<()> {
     let result = {
         let mut node = state.node.lock().await;
-        let result = node.transfer(form.to, form.amount);
+        let result = node.transfer_with_fee(
+            form.to,
+            form.amount,
+            form.fee.unwrap_or(DEFAULT_TRANSACTION_FEE),
+        );
         let outbox = node.drain_outbox();
         (result, outbox)
     };
@@ -554,7 +559,7 @@ const INDEX_HTML: &str = r#"<!doctype html>
       .block-card { flex-basis: 108px; }
     }
   </style>
-  <script defer src="/assets/mivora-ui.js?v=24"></script>
+  <script defer src="/assets/mivora-ui.js?v=26"></script>
   <script defer src="/assets/alpine.min.js"></script>
 </head>
 <body x-data="mivoraApp()" x-init="init()" x-cloak>
@@ -606,6 +611,7 @@ const INDEX_HTML: &str = r#"<!doctype html>
             <form @submit.prevent="sendTransfer">
               <label>Recipient<input x-model="transferTo" autocomplete="off"></label>
               <label>Amount<input x-model.number="transferAmount" type="number" min="1"></label>
+              <label>Fee<input x-model.number="transferFee" type="number" min="0"></label>
               <button class="primary" type="submit">Send</button>
             </form>
           </div>
@@ -631,6 +637,7 @@ const INDEX_HTML: &str = r#"<!doctype html>
                 <span class="pill" :class="tx.kind" x-text="tx.direction"></span>
                 <div class="wallet-tx-main">
                   <div><span class="wallet-tx-amount" x-text="tx.amount"></span> coin(s)</div>
+                  <div class="muted">fee <span x-text="tx.fee ?? 0"></span></div>
                   <div class="muted" x-text="txTitle(tx)"></div>
                   <div><span class="muted">from </span><code x-text="short(tx.from)"></code></div>
                   <div x-show="tx.to"><span class="muted">to </span><code x-text="short(tx.to)"></code></div>
@@ -691,6 +698,7 @@ const INDEX_HTML: &str = r#"<!doctype html>
           <h3>Mining</h3>
           <form @submit.prevent="saveBurn">
             <label>Coins per block<input x-model.number="burnAmountDraft" @input="burnAmountDirty = true" type="number" min="0"></label>
+            <label>Fee<input :value="automaticBurnFeeDraft()" type="number" readonly></label>
             <button class="primary" type="submit">Save</button>
           </form>
         </div>
@@ -764,6 +772,7 @@ const INDEX_HTML: &str = r#"<!doctype html>
             <template x-for="tx in mempool" :key="tx.signature">
               <div class="mempool-item">
                 <div class="tx-head"><span class="pill" :class="tx.kind" x-text="tx.kind"></span><strong x-text="tx.amount"></strong></div>
+                <div class="muted">fee <span x-text="tx.fee ?? 0"></span></div>
                 <div><span class="muted">from </span><code x-text="short(tx.from)"></code></div>
                 <div x-show="tx.to"><span class="muted">to </span><code x-text="short(tx.to)"></code></div>
                 <div class="muted">nonce <span x-text="tx.nonce"></span></div>

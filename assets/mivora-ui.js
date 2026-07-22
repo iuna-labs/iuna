@@ -23,6 +23,7 @@ window.mivoraApp = function mivoraApp() {
     burnAmountDirty: false,
     transferTo: "",
     transferAmount: 25,
+    transferFee: 1,
     peerAddress: "",
     showBurnTransactions: false,
     flash: null,
@@ -417,14 +418,21 @@ window.mivoraApp = function mivoraApp() {
       }
     },
 
+    automaticBurnFeeDraft() {
+      const amount = Math.max(0, Math.trunc(Number(this.burnAmountDraft) || 0));
+      const savedFee = this.status.mining?.automatic_burn_fee ?? 1;
+      return Math.min(savedFee || 1, Math.max(amount - 1, 0));
+    },
+
     async sendTransfer() {
       try {
         const amount = this.transferAmount || 0;
+        const fee = this.transferFee || 0;
         const recipient = this.short(this.transferTo);
         await this.postForm(
           "/api/transfer",
-          { to: this.transferTo, amount },
-          `Queued transfer of ${amount} coin(s) to ${recipient}`
+          { to: this.transferTo, amount, fee },
+          `Queued transfer of ${amount} coin(s) to ${recipient} with ${fee} fee`
         );
         this.transferTo = "";
       } catch (error) {
