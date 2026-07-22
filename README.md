@@ -7,15 +7,15 @@ The current devnet assumes friendly nodes. It has one binary that acts as wallet
 ## Run
 
 ```sh
-cargo run -- --http 127.0.0.1:8443 --p2p 127.0.0.1:9444
+cargo run -- --http 127.0.0.1:18661 --p2p 127.0.0.1:9444
 ```
 
-Open `http://127.0.0.1:8443` and complete the initial setup modal. The setup flow lets you generate a local recovery phrase or import one, verifies generated phrases with a 4-word check, stores the wallet in `.mivora/wallet.json`, stores peers and setup state in `.mivora/config.json`, and does not create a chain yet.
+Open `http://127.0.0.1:18661` and complete the initial setup modal. The setup flow lets you generate a local recovery phrase or import one, verifies generated phrases with a 4-word check, stores the wallet in `.mivora/wallet.json`, stores peers and setup state in `.mivora/config.json`, and does not create a chain yet.
 
 After setup, restart with genesis mode:
 
 ```sh
-cargo run -- --genesis --http 127.0.0.1:8443 --p2p 127.0.0.1:9444
+cargo run -- --genesis --http 127.0.0.1:18661 --p2p 127.0.0.1:9444
 ```
 
 `--genesis` only works when the wallet file already exists. It creates the starter chain, measures 10,000 VDF rounds locally, extrapolates that measurement to a 60-second initial round count, and persists the validated chain to `.mivora/chain.sqlite3`. The same data directory resumes automatically on later runs.
@@ -34,7 +34,7 @@ The management UI is a small AlpineJS app served from local vendored assets. It 
 For a second local node joining Alice's chain:
 
 ```sh
-cargo run -- --data-dir .mivora-bob --http 127.0.0.1:8444 --p2p 127.0.0.1:9445 --join 127.0.0.1:9444
+cargo run -- --data-dir .mivora-bob --http 127.0.0.1:18662 --p2p 127.0.0.1:9445 --join 127.0.0.1:9444
 ```
 
 `--join` fetches a chain snapshot from the peer before mining starts and announces this node's P2P listener back to that peer, so newly mined blocks can flow back without restarting the first node. If the peer cannot provide a snapshot, the node exits instead of silently starting a separate chain. Additional peers can be added from the Configuration screen.
@@ -52,13 +52,13 @@ To start a small friendly network:
 1. Start setup with a public P2P bind and complete the initial setup screen:
 
 ```sh
-cargo run -- --p2p 0.0.0.0:9444 --http 127.0.0.1:8443
+cargo run -- --p2p 0.0.0.0:9444 --http 127.0.0.1:18661
 ```
 
 2. Restart with genesis mode:
 
 ```sh
-cargo run -- --genesis --p2p 0.0.0.0:9444 --http 127.0.0.1:8443
+cargo run -- --genesis --p2p 0.0.0.0:9444 --http 127.0.0.1:18661
 ```
 
 3. Open the Configuration tab and set the starter burn rate so block 1 has a burn.
@@ -66,7 +66,7 @@ cargo run -- --genesis --p2p 0.0.0.0:9444 --http 127.0.0.1:8443
 5. Friends join your chain:
 
 ```sh
-cargo run -- --data-dir .mivora-friend --p2p 0.0.0.0:9445 --http 127.0.0.1:8443 --join your-host:9444
+cargo run -- --data-dir .mivora-friend --p2p 0.0.0.0:9445 --http 127.0.0.1:18661 --join your-host:9444
 ```
 
 Friends who join after you start will adopt your genesis and current chain. The starter wallet begins with 1 spendable coin after the bootstrap burn, which can be configured as the block 1 burn from the UI, creating the ticket for block 2. After the starter mines the first block reward, send friends coins from the UI; then they can choose a burn amount and compete for future blocks. Every joining node starts with a 0-coin automatic burn unless it is configured otherwise.

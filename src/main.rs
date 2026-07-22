@@ -151,7 +151,7 @@ impl CliOptions {
         let mut opts = Self {
             wallet_path: None,
             chain_db_path: None,
-            http_addr: SocketAddr::from_str("127.0.0.1:8443")?,
+            http_addr: SocketAddr::from_str("127.0.0.1:18661")?,
             p2p_addr: SocketAddr::from_str("127.0.0.1:9444")?,
             peers: Vec::new(),
             join_peers: Vec::new(),
@@ -266,7 +266,7 @@ fn print_help() {
            --genesis                     Create a new chain from an existing setup wallet\n\
            --wallet <path>               Wallet file (default <data-dir>/wallet.json)\n\
            --chain-db <path>             Chain SQLite database (default <data-dir>/chain.sqlite3)\n\
-           --http <addr:port>            HTTP management UI address (default 127.0.0.1:8443)\n\
+           --http <addr:port>            HTTP management UI address (default 127.0.0.1:18661)\n\
            --p2p <addr:port>             P2P TCP listener address (default 127.0.0.1:9444)\n\
            --join <addr:port>            Fetch chain snapshot from this peer before mining\n\
            --data-dir <path>             Local wallet directory\n"
@@ -570,6 +570,12 @@ mod tests {
             .unwrap()
             .unwrap();
         assert_eq!(opts.http_addr.to_string(), "127.0.0.1:18443");
+    }
+
+    #[test]
+    fn http_management_port_defaults_to_mivora_port() {
+        let opts = parse(&[]).unwrap().unwrap();
+        assert_eq!(opts.http_addr.to_string(), "127.0.0.1:18661");
     }
 
     #[test]
