@@ -258,8 +258,11 @@ fn validate_wallet_for_mode(
 }
 
 fn print_help() {
-    println!(
-        "mivora\n\n\
+    println!("{}", help_text());
+}
+
+fn help_text() -> &'static str {
+    "mivora\n\n\
          Usage:\n\
            mivora [options]\n\
            mivora --genesis [options]\n\
@@ -271,8 +274,9 @@ fn print_help() {
            --http <addr:port>            HTTP management UI address (default 127.0.0.1:18661)\n\
            --p2p <addr:port>             P2P TCP listener address (default 127.0.0.1:9444)\n\
            --join <addr:port>            Fetch chain snapshot from this peer before mining\n\
-           --data-dir <path>             Local wallet directory\n"
-    );
+           --data-dir <path>             Local wallet directory\n\n\
+         Environment:\n\
+           MIVORA_DEV_SKIP_SEED_VERIFY=1 Show a setup button to skip seed verification\n"
 }
 
 fn snapshot_height(snapshot: &ChainSnapshot) -> u64 {
@@ -505,12 +509,19 @@ mod tests {
     use tokio::sync::Mutex;
 
     use super::{
-        ChainMode, CliOptions, extrapolate_vdf_rounds, initialize_ledger, measure_vdf_rounds,
-        persist_chain_snapshot, run_chain_persistence_with_interval, validate_wallet_for_mode,
+        ChainMode, CliOptions, extrapolate_vdf_rounds, help_text, initialize_ledger,
+        measure_vdf_rounds, persist_chain_snapshot, run_chain_persistence_with_interval,
+        validate_wallet_for_mode,
     };
 
     fn parse(args: &[&str]) -> anyhow::Result<Option<CliOptions>> {
         CliOptions::parse_from(args.iter().map(|arg| arg.to_string()))
+    }
+
+    #[test]
+    fn help_mentions_dev_seed_verify_bypass_env() {
+        assert!(help_text().contains("MIVORA_DEV_SKIP_SEED_VERIFY=1"));
+        assert!(help_text().contains("skip seed verification"));
     }
 
     fn ledger_with_one_spendable_coin(wallet: &Wallet) -> Ledger {

@@ -9,7 +9,7 @@ window.mivoraApp = function mivoraApp() {
     mempool: [],
     peers: [],
     config: { setup_complete: false },
-    setupWallet: { address: null, seed_phrase: null },
+    setupWallet: { address: null, seed_phrase: null, dev_verify_bypass: false },
     setupWalletMode: "create",
     setupSeedStep: "write",
     generatedSeedPhrase: "",
@@ -17,6 +17,7 @@ window.mivoraApp = function mivoraApp() {
     verifyAnswers: {},
     importSeedPhrase: "",
     walletVerified: false,
+    setupFeedback: null,
     burnAmount: 0,
     transferTo: "",
     transferAmount: 25,
@@ -109,10 +110,12 @@ window.mivoraApp = function mivoraApp() {
     selectSetupWalletMode(mode) {
       this.setupWalletMode = mode;
       this.walletVerified = mode === "import" ? this.walletVerified && !this.generatedSeedPhrase : false;
+      this.setupFeedback = null;
     },
 
     async generateSetupSeed() {
       try {
+        this.setupFeedback = null;
         const payload = await this.postWalletSetup("/api/wallet/generate", {});
         this.setupWallet = payload;
         this.generatedSeedPhrase = payload.seed_phrase || "";
@@ -123,14 +126,15 @@ window.mivoraApp = function mivoraApp() {
         this.verifyAnswers = {};
         await this.refresh();
       } catch (error) {
-        this.showFlash(error.message, "error");
+        this.showSetupFeedback(error.message, "error");
       }
     },
 
     beginSeedVerification() {
+      this.setupFeedback = null;
       const words = this.setupSeedWords();
       if (words.length < 4) {
-        this.showFlash("Generate a recovery phrase first", "error");
+        this.showSetupFeedback("Generate a recovery phrase first", "error");
         return;
       }
       const positions = words.map((_, index) => index);
@@ -157,16 +161,24 @@ window.mivoraApp = function mivoraApp() {
         return actual === expected;
       });
       if (!ok) {
-        this.showFlash("Seed word check failed", "error");
+        this.showSetupFeedback("Seed word check failed", "error");
         return;
       }
       this.walletVerified = true;
       this.setupSeedStep = "verified";
-      this.showFlash("Recovery phrase verified", "success");
+      this.showSetupFeedback("Recovery phrase verified", "success");
+    },
+
+    skipSeedVerificationForDev() {
+      if (!this.setupWallet.dev_verify_bypass) return;
+      this.walletVerified = true;
+      this.setupSeedStep = "verified";
+      this.showSetupFeedback("Recovery phrase verification skipped", "success");
     },
 
     async importSetupSeed() {
       try {
+        this.setupFeedback = null;
         const payload = await this.postWalletSetup("/api/wallet/import", {
           seed_phrase: this.importSeedPhrase,
         });
@@ -177,9 +189,9 @@ window.mivoraApp = function mivoraApp() {
         this.walletVerified = true;
         this.setupSeedStep = "verified";
         await this.refresh();
-        this.showFlash("Recovery phrase imported", "success");
+        this.showSetupFeedback("Recovery phrase imported", "success");
       } catch (error) {
-        this.showFlash(error.message, "error");
+        this.showSetupFeedback(error.message, "error");
       }
     },
 
@@ -218,6 +230,7 @@ window.mivoraApp = function mivoraApp() {
           throw new Error(payload.error || `/api/config returned ${response.status}`);
         }
         await this.refreshConfig();
+        this.setupFeedback = null;
         this.generatedSeedPhrase = "";
         this.importSeedPhrase = "";
         this.verifyChallenges = [];
@@ -225,7 +238,7 @@ window.mivoraApp = function mivoraApp() {
         this.showFlash("Setup complete", "success");
         this.setTab("wallet");
       } catch (error) {
-        this.showFlash(error.message, "error");
+        this.showSetupFeedback(error.message, "error");
       }
     },
 
@@ -438,6 +451,10 @@ window.mivoraApp = function mivoraApp() {
         this.flash = null;
         this.flashTimer = null;
       }, kind === "error" ? 7000 : 3500);
+    },
+
+    showSetupFeedback(message, kind) {
+      this.setupFeedback = { message, kind };
     },
 
     short(value) {

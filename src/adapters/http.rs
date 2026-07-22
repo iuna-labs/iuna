@@ -74,6 +74,7 @@ struct WalletSetupResponse {
     error: Option<String>,
     address: Option<String>,
     seed_phrase: Option<String>,
+    dev_verify_bypass: bool,
 }
 
 pub async fn serve(
@@ -289,6 +290,7 @@ async fn wallet_setup_response(state: &HttpState) -> Result<WalletSetupResponse>
         error: None,
         address: Some(address),
         seed_phrase,
+        dev_verify_bypass: dev_seed_verify_bypass_enabled(),
     })
 }
 
@@ -305,6 +307,7 @@ async fn replace_setup_wallet_with_generated_seed(
         error: None,
         address: Some(address),
         seed_phrase: Some(seed_phrase),
+        dev_verify_bypass: dev_seed_verify_bypass_enabled(),
     })
 }
 
@@ -321,6 +324,7 @@ async fn import_setup_wallet_seed(
         error: None,
         address: Some(address),
         seed_phrase: None,
+        dev_verify_bypass: dev_seed_verify_bypass_enabled(),
     })
 }
 
@@ -340,8 +344,17 @@ fn wallet_setup_json(result: Result<WalletSetupResponse>) -> Json<WalletSetupRes
             error: Some(format!("{error:#}")),
             address: None,
             seed_phrase: None,
+            dev_verify_bypass: dev_seed_verify_bypass_enabled(),
         }),
     }
+}
+
+fn dev_seed_verify_bypass_enabled() -> bool {
+    dev_seed_verify_bypass_allowed(std::env::var_os("MIVORA_DEV_SKIP_SEED_VERIFY").is_some())
+}
+
+fn dev_seed_verify_bypass_allowed(env_present: bool) -> bool {
+    env_present
 }
 
 async fn transfer(state: &HttpState, form: TransferForm) -> Result<()> {
@@ -444,6 +457,9 @@ const INDEX_HTML: &str = r#"<!doctype html>
     .setup-modal-head h2 { margin: 0; font-size: 24px; }
     .setup-welcome { color: #d5f55f; font-size: 12px; font-weight: 900; text-transform: uppercase; }
     .setup-copy { max-width: 620px; color: #a8b2b8; line-height: 1.45; }
+    .setup-feedback { border: 1px solid; border-radius: 8px; padding: 10px 12px; margin-bottom: 14px; font-weight: 800; }
+    .setup-feedback.success { color: #d5f55f; background: #1c2516; border-color: #566d25; }
+    .setup-feedback.error { color: #ffb1a8; background: #2a1717; border-color: #713434; }
     .setup-grid { width: 100%; display: grid; grid-template-columns: minmax(0, .9fr) minmax(320px, .7fr); gap: 12px; align-items: start; }
     .setup-section { border: 1px solid #2f363c; border-radius: 8px; padding: 13px; background: #111316; }
     .setup-actions { display: flex; justify-content: flex-end; gap: 10px; margin-top: 14px; }
@@ -520,7 +536,7 @@ const INDEX_HTML: &str = r#"<!doctype html>
       .block-card { flex-basis: 108px; }
     }
   </style>
-  <script defer src="/assets/mivora-ui.js?v=19"></script>
+  <script defer src="/assets/mivora-ui.js?v=21"></script>
   <script defer src="/assets/alpine.min.js"></script>
 </head>
 <body x-data="mivoraApp()" x-init="init()" x-cloak>
@@ -748,6 +764,7 @@ const INDEX_HTML: &str = r#"<!doctype html>
         <h2 id="setup-title">Initial Setup</h2>
         <div class="setup-copy">Confirm the local wallet address and add any peers before this node starts from a saved configuration.</div>
       </div>
+      <div class="setup-feedback" :class="setupFeedback?.kind" x-show="setupFeedback" x-transition x-text="setupFeedback?.message"></div>
       <div class="setup-grid">
         <div class="setup-section seed-panel">
           <div class="panel-head">
@@ -772,6 +789,7 @@ const INDEX_HTML: &str = r#"<!doctype html>
                 </div>
                 <div class="setup-actions">
                   <button type="button" class="subtle" @click="generateSetupSeed">Regenerate</button>
+                  <button type="button" class="subtle" x-show="setupWallet.dev_verify_bypass" @click="skipSeedVerificationForDev">Skip verification</button>
                   <button type="button" class="primary" @click="beginSeedVerification">I wrote it down</button>
                 </div>
               </div>
@@ -787,7 +805,7 @@ const INDEX_HTML: &str = r#"<!doctype html>
                 <div class="verify-grid">
                   <template x-for="challenge in verifyChallenges" :key="challenge.index">
                     <label>
-                      Word <span x-text="challenge.position"></span>
+                      <span>Word <span x-text="challenge.position"></span></span>
                       <input x-model="verifyAnswers[challenge.index]" autocomplete="off">
                     </label>
                   </template>
@@ -836,3 +854,14 @@ const INDEX_HTML: &str = r#"<!doctype html>
   </div>
 </body>
 </html>"#;
+
+#[cfg(test)]
+mod tests {
+    use super::dev_seed_verify_bypass_allowed;
+
+    #[test]
+    fn dev_seed_verify_bypass_requires_env_flag() {
+        assert!(dev_seed_verify_bypass_allowed(true));
+        assert!(!dev_seed_verify_bypass_allowed(false));
+    }
+}

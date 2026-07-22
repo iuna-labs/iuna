@@ -12,6 +12,8 @@ cargo run -- --http 127.0.0.1:18661 --p2p 127.0.0.1:9444
 
 Open `http://127.0.0.1:18661` and complete the initial setup modal. The setup flow lets you generate a local recovery phrase or import one, verifies generated phrases with a 4-word check, stores the wallet in `.mivora/wallet.json`, stores peers and setup state in `.mivora/config.json`, and does not create a chain yet.
 
+For fast local development, set `MIVORA_DEV_SKIP_SEED_VERIFY=1` before starting the node to show a setup-only skip button for the recovery phrase check.
+
 After setup, restart with genesis mode:
 
 ```sh
