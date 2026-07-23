@@ -2288,3 +2288,54 @@ fn hex_encode(bytes: impl AsRef<[u8]>) -> String {
     }
     encoded
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn winning_burn_ticket_is_consumed_even_when_window_remains() {
+        let mut tickets = vec![
+            BurnTicket {
+                id: "high-burn".to_string(),
+                owner: "alice".to_string(),
+                amount: 10_000,
+                eligible_from_height: 4,
+                eligible_until_height: 6,
+            },
+            BurnTicket {
+                id: "small-burn".to_string(),
+                owner: "bob".to_string(),
+                amount: 1,
+                eligible_from_height: 5,
+                eligible_until_height: 7,
+            },
+        ];
+        let block = Block::new(BlockDraft {
+            height: 4,
+            prev_hash: "0".repeat(64),
+            timestamp_ms: 1,
+            miner: "alice".to_string(),
+            reward: BLOCK_REWARD,
+            vdf_rounds: 1,
+            vdf_output: "vdf".to_string(),
+            leader_proof: Some(LeaderProof {
+                ticket_id: "high-burn".to_string(),
+                public_key: "alice".to_string(),
+                signature: "signature".to_string(),
+            }),
+            transactions: Vec::new(),
+        });
+
+        consume_leader_ticket(&block, &mut tickets).unwrap();
+
+        assert!(
+            tickets.iter().all(|ticket| ticket.id != "high-burn"),
+            "a winning burn must not remain eligible for the rest of its window"
+        );
+        assert!(
+            tickets.iter().any(|ticket| ticket.id == "small-burn"),
+            "unselected future tickets should remain pending"
+        );
+    }
+}
