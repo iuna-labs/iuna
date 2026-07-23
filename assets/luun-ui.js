@@ -548,10 +548,22 @@ window.luunApp = function luunApp() {
       return `${value.slice(0, 8)}...${value.slice(-8)}`;
     },
 
+    txFrom(tx) {
+      return tx.from ?? tx.inputs?.[0]?.owner ?? "";
+    },
+
+    txTo(tx) {
+      return tx.to ?? tx.outputs?.[0]?.address ?? null;
+    },
+
+    txAmount(tx) {
+      return tx.amount ?? tx.outputs?.[0]?.amount ?? 0;
+    },
+
     blockBurned(block) {
       return block.transactions
         .filter((tx) => tx.kind === "burn")
-        .reduce((sum, tx) => sum + tx.amount, 0);
+        .reduce((sum, tx) => sum + this.txAmount(tx), 0);
     },
 
     blockBurnCount(block) {

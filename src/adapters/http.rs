@@ -96,7 +96,6 @@ struct WalletTransactionRow {
     to: Option<String>,
     amount: Amount,
     fee: Amount,
-    nonce: u64,
     signature: String,
     status: &'static str,
     block_height: Option<u64>,
@@ -384,25 +383,25 @@ fn wallet_transaction_row(
     block_height: Option<u64>,
 ) -> Option<WalletTransactionRow> {
     match tx {
-        Transaction::Transfer {
-            from,
-            to,
-            amount,
-            fee,
-            nonce,
-            signature,
-        } if from == wallet || to == wallet => Some(WalletTransactionRow {
-            kind: "transfer",
-            from: from.clone(),
-            to: Some(to.clone()),
-            amount: *amount,
-            fee: *fee,
-            nonce: *nonce,
-            signature: signature.clone(),
-            status,
-            block_height,
-            direction: if to == wallet { "received" } else { "sent" },
-        }),
+        Transaction::Transfer { fee, signature, .. }
+            if tx.sender() == wallet || tx.to() == Some(wallet) =>
+        {
+            Some(WalletTransactionRow {
+                kind: "transfer",
+                from: tx.sender().to_string(),
+                to: tx.to().map(str::to_string),
+                amount: tx.amount(),
+                fee: *fee,
+                signature: signature.clone(),
+                status,
+                block_height,
+                direction: if tx.to() == Some(wallet) {
+                    "received"
+                } else {
+                    "sent"
+                },
+            })
+        }
         _ => None,
     }
 }
@@ -910,11 +909,10 @@ const INDEX_HTML: &str = r#"<!doctype html>
                 <template x-for="tx in selectedBlock.transactions" :key="tx.signature">
                   <div class="tx-card">
                     <span class="pill" :class="tx.kind" x-text="tx.kind"></span>
-                    <div class="tx-field"><span class="tx-label">Amount</span><span class="tx-value money">LUUN <span x-text="tx.amount"></span></span></div>
+                    <div class="tx-field"><span class="tx-label">Amount</span><span class="tx-value money">LUUN <span x-text="txAmount(tx)"></span></span></div>
                     <div class="tx-field"><span class="tx-label">Fee</span><span class="tx-value money">LUUN <span x-text="tx.fee ?? 0"></span></span></div>
-                    <div class="tx-field"><span class="tx-label">From</span><code class="tx-value hash" x-text="short(tx.from)"></code></div>
-                    <div class="tx-field" x-show="tx.to"><span class="tx-label">To</span><code class="tx-value hash" x-text="short(tx.to)"></code></div>
-                    <div class="tx-field"><span class="tx-label">Nonce</span><span class="tx-value number" x-text="tx.nonce"></span></div>
+                    <div class="tx-field"><span class="tx-label">From</span><code class="tx-value hash" x-text="short(txFrom(tx))"></code></div>
+                    <div class="tx-field" x-show="txTo(tx)"><span class="tx-label">To</span><code class="tx-value hash" x-text="short(txTo(tx))"></code></div>
                     <div class="tx-field"><span class="tx-label">Signature</span><code class="tx-value hash" x-text="short(tx.signature)"></code></div>
                   </div>
                 </template>
@@ -931,11 +929,10 @@ const INDEX_HTML: &str = r#"<!doctype html>
             <template x-for="tx in mempool" :key="tx.signature">
               <div class="mempool-item">
                 <span class="pill" :class="tx.kind" x-text="tx.kind"></span>
-                <div class="tx-field"><span class="tx-label">Amount</span><span class="tx-value money">LUUN <span x-text="tx.amount"></span></span></div>
+                <div class="tx-field"><span class="tx-label">Amount</span><span class="tx-value money">LUUN <span x-text="txAmount(tx)"></span></span></div>
                 <div class="tx-field"><span class="tx-label">Fee</span><span class="tx-value money">LUUN <span x-text="tx.fee ?? 0"></span></span></div>
-                <div class="tx-field"><span class="tx-label">From</span><code class="tx-value hash" x-text="short(tx.from)"></code></div>
-                <div class="tx-field" x-show="tx.to"><span class="tx-label">To</span><code class="tx-value hash" x-text="short(tx.to)"></code></div>
-                <div class="tx-field"><span class="tx-label">Nonce</span><span class="tx-value number" x-text="tx.nonce"></span></div>
+                <div class="tx-field"><span class="tx-label">From</span><code class="tx-value hash" x-text="short(txFrom(tx))"></code></div>
+                <div class="tx-field" x-show="txTo(tx)"><span class="tx-label">To</span><code class="tx-value hash" x-text="short(txTo(tx))"></code></div>
                 <div class="tx-field"><span class="tx-label">Signature</span><code class="tx-value hash" x-text="short(tx.signature)"></code></div>
               </div>
             </template>
@@ -1053,7 +1050,7 @@ const INDEX_HTML: &str = r#"<!doctype html>
 
 #[cfg(test)]
 mod tests {
-    use std::sync::Arc;
+    use std::{collections::BTreeMap, sync::Arc};
 
     use tokio::sync::Mutex;
 
@@ -1078,12 +1075,19 @@ mod tests {
         let alice = Wallet::from_seed("wallet-history-alice");
         let bob = Wallet::from_seed("wallet-history-bob");
         let carol = Wallet::from_seed("wallet-history-carol");
-        let old_received = bob.transfer(alice.address(), 31, 1);
-        let pending_burn = alice.burn_with_fee(2, 1, 2);
+        let mut allocations = BTreeMap::new();
+        allocations.insert(alice.address().to_string(), 100);
+        allocations.insert(bob.address().to_string(), 100);
+        allocations.insert(carol.address().to_string(), 100);
+        let ledger = crate::domain::Ledger::new(allocations, 1);
+        let old_received = ledger.build_transfer(&bob, alice.address(), 31, 0).unwrap();
+        let pending_burn = ledger.build_burn(&alice, 2, 1).unwrap();
+        let carol_transfer = ledger.build_transfer(&carol, bob.address(), 5, 0).unwrap();
+        let carol_burn = ledger.build_burn(&carol, 1, 0).unwrap();
         let chain = vec![
-            fake_block(30, vec![carol.transfer(bob.address(), 5, 1)]),
+            fake_block(30, vec![carol_transfer]),
             fake_block(31, vec![old_received.clone()]),
-            fake_block(32, vec![carol.burn(1, 2)]),
+            fake_block(32, vec![carol_burn]),
         ];
 
         let rows = wallet_transaction_rows(alice.address(), vec![pending_burn.clone()], &chain);

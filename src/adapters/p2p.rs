@@ -1717,9 +1717,9 @@ mod tests {
     async fn inventory_requests_only_missing_objects() {
         let alice = Wallet::from_seed("missing-inv-alice");
         let bob = Wallet::from_seed("missing-inv-bob");
-        let allocations = allocations(&[alice.clone(), bob.clone()], 1_000);
+        let allocations = allocations(&[alice.clone(), bob], 1_000);
         let mut local = node("local", alice.clone(), allocations.clone());
-        let mut remote = node("remote", bob, allocations);
+        let mut remote = node("remote", alice, allocations);
         let tx = local.burn(1).unwrap();
         let block = local.mine_one_at(1).unwrap();
 

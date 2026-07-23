@@ -161,7 +161,7 @@ mod tests {
                 .unwrap();
         store.save(&ledger.snapshot()).unwrap();
 
-        let burn = wallet.burn(1, ledger.next_nonce(wallet.address()));
+        let burn = ledger.build_burn(&wallet, 1, 0).unwrap();
         ledger.submit_transaction(burn).unwrap();
         let block = ledger.mine_next_block(&wallet, 1_000).unwrap();
         ledger.apply_locally_mined_block(block).unwrap();

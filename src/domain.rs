@@ -43,41 +43,6 @@ impl Wallet {
         &self.address
     }
 
-    pub fn burn(&self, amount: Amount, nonce: u64) -> Transaction {
-        self.burn_with_fee(amount, 0, nonce)
-    }
-
-    pub fn burn_with_fee(&self, amount: Amount, fee: Amount, nonce: u64) -> Transaction {
-        let unsigned = UnsignedTransaction::Burn {
-            from: self.address.clone(),
-            amount,
-            fee,
-            nonce,
-        };
-        unsigned.sign(self)
-    }
-
-    pub fn transfer(&self, to: impl Into<String>, amount: Amount, nonce: u64) -> Transaction {
-        self.transfer_with_fee(to, amount, 0, nonce)
-    }
-
-    pub fn transfer_with_fee(
-        &self,
-        to: impl Into<String>,
-        amount: Amount,
-        fee: Amount,
-        nonce: u64,
-    ) -> Transaction {
-        let unsigned = UnsignedTransaction::Transfer {
-            from: self.address.clone(),
-            to: to.into(),
-            amount,
-            fee,
-            nonce,
-        };
-        unsigned.sign(self)
-    }
-
     fn sign_payload(&self, payload: &str) -> String {
         let seed = decode_hex_array::<32>(&self.secret).expect("wallet secret is valid hex");
         let signing_key = SigningKey::from_bytes(&seed);
@@ -95,106 +60,41 @@ impl Wallet {
     }
 }
 
-#[derive(Clone, Debug, Eq, PartialEq)]
-pub enum UnsignedTransaction {
-    Transfer {
-        from: String,
-        to: String,
-        amount: Amount,
-        fee: Amount,
-        nonce: u64,
-    },
-    Burn {
-        from: String,
-        amount: Amount,
-        fee: Amount,
-        nonce: u64,
-    },
+#[derive(Clone, Debug, Deserialize, Eq, Ord, PartialEq, PartialOrd, Serialize)]
+pub struct OutPoint {
+    pub txid: String,
+    pub index: u32,
 }
 
-impl UnsignedTransaction {
-    fn sign(self, wallet: &Wallet) -> Transaction {
-        let signature = wallet.sign_payload(&self.canonical());
-        match self {
-            Self::Transfer {
-                from,
-                to,
-                amount,
-                fee,
-                nonce,
-            } => Transaction::Transfer {
-                from,
-                to,
-                amount,
-                fee,
-                nonce,
-                signature,
-            },
-            Self::Burn {
-                from,
-                amount,
-                fee,
-                nonce,
-            } => Transaction::Burn {
-                from,
-                amount,
-                fee,
-                nonce,
-                signature,
-            },
-        }
-    }
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+pub struct TxInput {
+    pub outpoint: OutPoint,
+    pub owner: String,
+    pub signature: String,
+}
 
-    fn canonical(&self) -> String {
-        match self {
-            Self::Transfer {
-                from,
-                to,
-                amount,
-                fee,
-                nonce,
-            } if *fee == 0 => format!("transfer:{from}:{to}:{amount}:{nonce}"),
-            Self::Transfer {
-                from,
-                to,
-                amount,
-                fee,
-                nonce,
-            } => format!("transfer:{from}:{to}:{amount}:{fee}:{nonce}"),
-            Self::Burn {
-                from,
-                amount,
-                fee,
-                nonce,
-            } if *fee == 0 => format!("burn:{from}:{amount}:{nonce}"),
-            Self::Burn {
-                from,
-                amount,
-                fee,
-                nonce,
-            } => format!("burn:{from}:{amount}:{fee}:{nonce}"),
-        }
-    }
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+pub struct TxOutput {
+    pub address: String,
+    pub amount: Amount,
 }
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(tag = "kind", rename_all = "snake_case")]
 pub enum Transaction {
     Transfer {
-        from: String,
-        to: String,
-        amount: Amount,
+        inputs: Vec<TxInput>,
+        outputs: Vec<TxOutput>,
         #[serde(default)]
         fee: Amount,
-        nonce: u64,
         signature: String,
     },
     Burn {
-        from: String,
+        inputs: Vec<TxInput>,
+        change: Vec<TxOutput>,
         amount: Amount,
         #[serde(default)]
         fee: Amount,
-        nonce: u64,
         signature: String,
     },
 }
@@ -202,31 +102,74 @@ pub enum Transaction {
 impl Transaction {
     pub fn genesis_burn(from: impl Into<String>, amount: Amount) -> Self {
         let from = from.into();
-        let signature = hex_hash(format!("luun-genesis-burn:{from}:{amount}"));
-        Self::Burn {
-            from,
+        Self::genesis_burn_with_change(from, amount, Vec::new())
+    }
+
+    fn genesis_burn_with_allocation(
+        from: impl Into<String>,
+        amount: Amount,
+        allocation: Amount,
+    ) -> Result<Self> {
+        if amount > allocation {
+            bail!("genesis burn exceeds allocation");
+        }
+        let from = from.into();
+        let change_amount = allocation - amount;
+        let change = if change_amount > 0 {
+            vec![TxOutput {
+                address: from.clone(),
+                amount: change_amount,
+            }]
+        } else {
+            Vec::new()
+        };
+        Ok(Self::genesis_burn_with_change(from, amount, change))
+    }
+
+    fn genesis_burn_with_change(from: String, amount: Amount, change: Vec<TxOutput>) -> Self {
+        let input = TxInput {
+            outpoint: genesis_allocation_outpoint(&from),
+            owner: from.clone(),
+            signature: "genesis".to_string(),
+        };
+        let unsigned = UnsignedUtxoTransaction::Burn {
+            inputs: vec![input.without_signature()],
+            change: change.clone(),
             amount,
             fee: 0,
-            nonce: 0,
+        };
+        let signature = hex_hash(format!("luun-genesis-burn:{}", unsigned.canonical()));
+        Self::Burn {
+            inputs: vec![input],
+            change,
+            amount,
+            fee: 0,
             signature,
         }
     }
 
     pub fn sender(&self) -> &str {
         match self {
-            Self::Transfer { from, .. } | Self::Burn { from, .. } => from,
+            Self::Transfer { inputs, .. } | Self::Burn { inputs, .. } => inputs
+                .first()
+                .map(|input| input.owner.as_str())
+                .unwrap_or(""),
         }
     }
 
-    pub fn nonce(&self) -> u64 {
+    pub fn to(&self) -> Option<&str> {
         match self {
-            Self::Transfer { nonce, .. } | Self::Burn { nonce, .. } => *nonce,
+            Self::Transfer { outputs, .. } => outputs.first().map(|output| output.address.as_str()),
+            Self::Burn { .. } => None,
         }
     }
 
     pub fn amount(&self) -> Amount {
         match self {
-            Self::Transfer { amount, .. } | Self::Burn { amount, .. } => *amount,
+            Self::Transfer { outputs, .. } => {
+                outputs.first().map(|output| output.amount).unwrap_or(0)
+            }
+            Self::Burn { amount, .. } => *amount,
         }
     }
 
@@ -259,41 +202,46 @@ impl Transaction {
     fn signing_payload(&self) -> String {
         match self {
             Self::Transfer {
-                from,
-                to,
-                amount,
+                inputs,
+                outputs,
                 fee,
-                nonce,
                 ..
-            } if *fee == 0 => format!("transfer:{from}:{to}:{amount}:{nonce}"),
-            Self::Transfer {
-                from,
-                to,
-                amount,
-                fee,
-                nonce,
-                ..
-            } => format!("transfer:{from}:{to}:{amount}:{fee}:{nonce}"),
+            } => UnsignedUtxoTransaction::Transfer {
+                inputs: unsigned_inputs(inputs),
+                outputs: outputs.clone(),
+                fee: *fee,
+            }
+            .canonical(),
             Self::Burn {
-                from,
+                inputs,
+                change,
                 amount,
                 fee,
-                nonce,
                 ..
-            } if *fee == 0 => format!("burn:{from}:{amount}:{nonce}"),
-            Self::Burn {
-                from,
-                amount,
-                fee,
-                nonce,
-                ..
-            } => format!("burn:{from}:{amount}:{fee}:{nonce}"),
+            } => UnsignedUtxoTransaction::Burn {
+                inputs: unsigned_inputs(inputs),
+                change: change.clone(),
+                amount: *amount,
+                fee: *fee,
+            }
+            .canonical(),
         }
     }
 
     fn verify_signature(&self) -> Result<()> {
-        let public_key = decode_hex_array::<32>(self.sender())
-            .with_context(|| format!("invalid public key for {}", self.sender()))?;
+        if self.signature().starts_with("luun-genesis-burn:") || self.inputs_are_genesis_signed() {
+            return Ok(());
+        }
+        if !self
+            .inputs()
+            .iter()
+            .all(|input| input.signature == self.signature())
+        {
+            bail!("transaction input signature does not match transaction signature");
+        }
+        let sender = self.sender();
+        let public_key = decode_hex_array::<32>(sender)
+            .with_context(|| format!("invalid public key for {sender}"))?;
         let signature =
             decode_hex_array::<64>(self.signature()).context("invalid signature hex")?;
         let verifying_key =
@@ -303,6 +251,176 @@ impl Transaction {
             .verify(self.signing_payload().as_bytes(), &signature)
             .context("transaction signature is invalid")
     }
+
+    fn inputs(&self) -> &[TxInput] {
+        match self {
+            Self::Transfer { inputs, .. } | Self::Burn { inputs, .. } => inputs,
+        }
+    }
+
+    fn outputs(&self) -> &[TxOutput] {
+        match self {
+            Self::Transfer { outputs, .. } => outputs,
+            Self::Burn { change, .. } => change,
+        }
+    }
+
+    fn inputs_are_genesis_signed(&self) -> bool {
+        self.inputs()
+            .iter()
+            .all(|input| input.signature == "genesis")
+    }
+}
+
+impl TxInput {
+    fn without_signature(&self) -> UnsignedTxInput {
+        UnsignedTxInput {
+            outpoint: self.outpoint.clone(),
+            owner: self.owner.clone(),
+        }
+    }
+}
+
+impl OutPoint {
+    fn id(&self) -> String {
+        format!("{}:{}", self.txid, self.index)
+    }
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+struct UnsignedTxInput {
+    outpoint: OutPoint,
+    owner: String,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+enum UnsignedUtxoTransaction {
+    Transfer {
+        inputs: Vec<UnsignedTxInput>,
+        outputs: Vec<TxOutput>,
+        fee: Amount,
+    },
+    Burn {
+        inputs: Vec<UnsignedTxInput>,
+        change: Vec<TxOutput>,
+        amount: Amount,
+        fee: Amount,
+    },
+}
+
+impl UnsignedUtxoTransaction {
+    fn sign(self, wallet: &Wallet) -> Transaction {
+        let signature = wallet.sign_payload(&self.canonical());
+        let signed_inputs = self
+            .inputs()
+            .iter()
+            .map(|input| TxInput {
+                outpoint: input.outpoint.clone(),
+                owner: input.owner.clone(),
+                signature: signature.clone(),
+            })
+            .collect::<Vec<_>>();
+        match self {
+            Self::Transfer { outputs, fee, .. } => Transaction::Transfer {
+                inputs: signed_inputs,
+                outputs,
+                fee,
+                signature,
+            },
+            Self::Burn {
+                change,
+                amount,
+                fee,
+                ..
+            } => Transaction::Burn {
+                inputs: signed_inputs,
+                change,
+                amount,
+                fee,
+                signature,
+            },
+        }
+    }
+
+    fn inputs(&self) -> &[UnsignedTxInput] {
+        match self {
+            Self::Transfer { inputs, .. } | Self::Burn { inputs, .. } => inputs,
+        }
+    }
+
+    fn canonical(&self) -> String {
+        match self {
+            Self::Transfer {
+                inputs,
+                outputs,
+                fee,
+            } => format!(
+                "utxo-transfer:{}:{}:{fee}",
+                canonical_inputs(inputs),
+                canonical_outputs(outputs)
+            ),
+            Self::Burn {
+                inputs,
+                change,
+                amount,
+                fee,
+            } => format!(
+                "utxo-burn:{}:{}:{amount}:{fee}",
+                canonical_inputs(inputs),
+                canonical_outputs(change)
+            ),
+        }
+    }
+}
+
+fn unsigned_inputs(inputs: &[TxInput]) -> Vec<UnsignedTxInput> {
+    inputs.iter().map(TxInput::without_signature).collect()
+}
+
+fn canonical_inputs(inputs: &[UnsignedTxInput]) -> String {
+    inputs
+        .iter()
+        .map(|input| {
+            format!(
+                "{}:{}:{}",
+                input.outpoint.txid, input.outpoint.index, input.owner
+            )
+        })
+        .collect::<Vec<_>>()
+        .join("|")
+}
+
+fn canonical_outputs(outputs: &[TxOutput]) -> String {
+    outputs
+        .iter()
+        .map(|output| format!("{}:{}", output.address, output.amount))
+        .collect::<Vec<_>>()
+        .join("|")
+}
+
+fn pending_spent_outpoints(pending: &[Transaction]) -> BTreeSet<OutPoint> {
+    pending
+        .iter()
+        .flat_map(|tx| tx.inputs().iter().map(|input| input.outpoint.clone()))
+        .collect()
+}
+
+fn transaction_inputs_spent_by(transaction: &Transaction, pending: &[Transaction]) -> bool {
+    let spent = pending_spent_outpoints(pending);
+    transaction
+        .inputs()
+        .iter()
+        .any(|input| spent.contains(&input.outpoint))
+}
+
+fn transaction_inputs_available(
+    transaction: &Transaction,
+    utxos: &BTreeMap<OutPoint, TxOutput>,
+) -> bool {
+    transaction
+        .inputs()
+        .iter()
+        .all(|input| utxos.contains_key(&input.outpoint))
 }
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
@@ -541,7 +659,7 @@ pub struct LaunchProfile {
 impl Default for LaunchProfile {
     fn default() -> Self {
         Self {
-            profile_id: "luun-devnet-v3".to_string(),
+            profile_id: "luun-devnet-v4".to_string(),
             ticket_maturity_delay_heights: DEFAULT_TICKET_MATURITY_DELAY,
             ticket_expiry_window_heights: DEFAULT_TICKET_EXPIRY_WINDOW,
             max_pending_transactions: MAX_PENDING_TRANSACTIONS,
@@ -646,8 +764,7 @@ enum TransactionKind {
 pub struct Ledger {
     chain: Vec<Block>,
     genesis_allocations: BTreeMap<String, Amount>,
-    balances: BTreeMap<String, Amount>,
-    nonces: BTreeMap<String, u64>,
+    utxos: BTreeMap<OutPoint, TxOutput>,
     tickets: Vec<BurnTicket>,
     pending: Vec<Transaction>,
     block_reward: Amount,
@@ -669,8 +786,14 @@ impl Ledger {
     ) -> Result<Self> {
         let transactions = genesis_burns
             .into_iter()
-            .map(|burn| Transaction::genesis_burn(burn.from, burn.amount))
-            .collect();
+            .map(|burn| {
+                let allocation = genesis_allocations
+                    .get(&burn.from)
+                    .copied()
+                    .unwrap_or_default();
+                Transaction::genesis_burn_with_allocation(burn.from, burn.amount, allocation)
+            })
+            .collect::<Result<Vec<_>>>()?;
         Self::new_with_genesis_transactions(genesis_allocations, transactions, vdf_rounds)
     }
 
@@ -680,14 +803,13 @@ impl Ledger {
         vdf_rounds: u32,
     ) -> Result<Self> {
         let launch_profile = LaunchProfile::default();
-        let balances = balances_after_genesis(&genesis_allocations, &genesis_transactions)?;
         let genesis = build_genesis_block(&genesis_allocations, genesis_transactions);
+        let utxos = utxos_after_genesis(&genesis_allocations, &genesis)?;
         let tickets = genesis_tickets(&genesis_allocations, &genesis, &launch_profile)?;
         Ok(Self {
             chain: vec![genesis],
             genesis_allocations: genesis_allocations.clone(),
-            balances,
-            nonces: BTreeMap::new(),
+            utxos,
             tickets,
             pending: Vec::new(),
             block_reward: BLOCK_REWARD,
@@ -715,18 +837,17 @@ impl Ledger {
 
         let genesis = blocks[0].clone();
         validate_genesis_block(&genesis)?;
-        let balances = balances_after_genesis(&genesis_allocations, &genesis.transactions)?;
         let expected_genesis =
             build_genesis_block(&genesis_allocations, genesis.transactions.clone());
         if genesis != expected_genesis {
             bail!("chain snapshot genesis does not match its allocations and transactions");
         }
+        let utxos = utxos_after_genesis(&genesis_allocations, &genesis)?;
 
         let mut ledger = Self {
             chain: vec![genesis],
             genesis_allocations,
-            balances,
-            nonces: BTreeMap::new(),
+            utxos,
             tickets: Vec::new(),
             pending: Vec::new(),
             block_reward: BLOCK_REWARD,
@@ -939,7 +1060,7 @@ impl Ledger {
             next_leader: self.expected_leader_for_next_block(),
             launch_profile_hash: self.launch_profile.hash(),
             block_reward: self.block_reward,
-            balances: self.balances.clone(),
+            balances: balances_from_utxos(&self.utxos),
             pending_transactions: self.pending.len(),
         }
     }
@@ -1019,25 +1140,85 @@ impl Ledger {
     }
 
     pub fn balance_of(&self, address: &str) -> Amount {
-        self.balances.get(address).copied().unwrap_or(0)
+        self.utxos
+            .values()
+            .filter(|output| output.address == address)
+            .map(|output| output.amount)
+            .sum()
     }
 
     pub fn next_nonce(&self, address: &str) -> u64 {
-        let base = self.nonces.get(address).copied().unwrap_or(0);
-        let Some(mut next) = base.checked_add(1) else {
-            return u64::MAX;
-        };
-        while self
-            .pending
-            .iter()
-            .any(|tx| tx.sender() == address && tx.nonce() == next)
-        {
-            let Some(candidate) = next.checked_add(1) else {
-                return u64::MAX;
-            };
-            next = candidate;
+        self.utxos
+            .keys()
+            .chain(
+                self.pending
+                    .iter()
+                    .flat_map(|tx| tx.inputs().iter().map(|input| &input.outpoint)),
+            )
+            .filter(|outpoint| outpoint.txid.contains(address))
+            .count() as u64
+            + 1
+    }
+
+    pub fn build_transfer(
+        &self,
+        wallet: &Wallet,
+        to: impl Into<String>,
+        amount: Amount,
+        fee: Amount,
+    ) -> Result<Transaction> {
+        let required = amount
+            .checked_add(fee)
+            .context("transfer amount plus fee overflows")?;
+        let (inputs, input_total) = self.select_inputs(wallet.address(), required)?;
+        let mut outputs = vec![TxOutput {
+            address: to.into(),
+            amount,
+        }];
+        let change = input_total
+            .checked_sub(required)
+            .context("selected inputs do not cover transfer")?;
+        if change > 0 {
+            outputs.push(TxOutput {
+                address: wallet.address().to_string(),
+                amount: change,
+            });
         }
-        next
+        let transaction = UnsignedUtxoTransaction::Transfer {
+            inputs,
+            outputs,
+            fee,
+        }
+        .sign(wallet);
+        self.validate_new_transaction(&transaction)?;
+        Ok(transaction)
+    }
+
+    pub fn build_burn(&self, wallet: &Wallet, amount: Amount, fee: Amount) -> Result<Transaction> {
+        let required = amount
+            .checked_add(fee)
+            .context("burn amount plus fee overflows")?;
+        let (inputs, input_total) = self.select_inputs(wallet.address(), required)?;
+        let change_amount = input_total
+            .checked_sub(required)
+            .context("selected inputs do not cover burn")?;
+        let change = if change_amount > 0 {
+            vec![TxOutput {
+                address: wallet.address().to_string(),
+                amount: change_amount,
+            }]
+        } else {
+            Vec::new()
+        };
+        let transaction = UnsignedUtxoTransaction::Burn {
+            inputs,
+            change,
+            amount,
+            fee,
+        }
+        .sign(wallet);
+        self.validate_new_transaction(&transaction)?;
+        Ok(transaction)
     }
 
     pub fn submit_transaction(&mut self, transaction: Transaction) -> Result<bool> {
@@ -1051,11 +1232,7 @@ impl Ledger {
 
         transaction.verify_signature()?;
 
-        if self
-            .pending
-            .iter()
-            .any(|tx| tx.sender() == transaction.sender() && tx.nonce() == transaction.nonce())
-        {
+        if transaction_inputs_spent_by(&transaction, &self.pending) {
             return Ok(false);
         }
 
@@ -1063,22 +1240,12 @@ impl Ledger {
             bail!("mempool is full");
         }
 
-        let mut balances = self.balances.clone();
-        let mut nonces = self.nonces.clone();
-        for pending in self.valid_pending_transactions() {
-            apply_transaction(&pending, &mut balances, &mut nonces)?;
-        }
-
-        let expected_nonce = next_expected_nonce(&nonces, transaction.sender())?;
-        if transaction.nonce() < expected_nonce {
-            return Ok(false);
-        }
-        if transaction.nonce() > expected_nonce {
+        let mut utxos = self.utxos_after_valid_pending()?;
+        if transaction_has_missing_inputs(&transaction, &utxos) {
             self.pending.push(transaction);
             return Ok(true);
         }
-
-        apply_transaction(&transaction, &mut balances, &mut nonces)?;
+        apply_transaction(&transaction, &mut utxos)?;
         self.pending.push(transaction);
         Ok(true)
     }
@@ -1148,21 +1315,20 @@ impl Ledger {
             bail!("block VDF output is invalid");
         }
 
-        let mut balances = self.balances.clone();
-        let mut nonces = self.nonces.clone();
+        let mut utxos = self.utxos.clone();
         let mut signatures = BTreeSet::new();
         for tx in &block.transactions {
             if !signatures.insert(tx.signature()) {
                 bail!("duplicate transaction in block");
             }
-            apply_transaction(tx, &mut balances, &mut nonces)?;
+            apply_transaction(tx, &mut utxos)?;
         }
         if block.reward != reward_with_fees(self.block_reward, &block.transactions)? {
             bail!("block reward is invalid");
         }
         let mut tickets = self.tickets.clone();
         consume_leader_ticket(&block, &mut tickets)?;
-        credit_balance(&mut balances, &block.miner, block.reward)?;
+        credit_reward_output(&mut utxos, &block)?;
         tickets.extend(tickets_created_by_block(&block, &self.launch_profile)?);
 
         let mined_signatures = block
@@ -1170,12 +1336,12 @@ impl Ledger {
             .iter()
             .map(|tx| tx.signature().to_string())
             .collect::<BTreeSet<_>>();
-        self.balances = balances;
-        self.nonces = nonces;
+        self.utxos = utxos;
         self.tickets = tickets;
+        let available = self.utxos.clone();
         self.pending.retain(|tx| {
             !mined_signatures.contains(tx.signature())
-                && tx.nonce() > self.nonces.get(tx.sender()).copied().unwrap_or(0)
+                && transaction_inputs_available(tx, &available)
         });
         self.chain.push(block);
         self.vdf_rounds = self.next_vdf_rounds_after_tip();
@@ -1278,8 +1444,7 @@ impl Ledger {
     }
 
     fn valid_pending_transactions(&self) -> Vec<Transaction> {
-        let mut balances = self.balances.clone();
-        let mut nonces = self.nonces.clone();
+        let mut utxos = self.utxos.clone();
         let mut valid = Vec::new();
         let mut remaining = self.pending.iter().collect::<Vec<_>>();
 
@@ -1288,7 +1453,7 @@ impl Ledger {
             let mut still_pending = Vec::new();
 
             for tx in remaining {
-                if apply_transaction(tx, &mut balances, &mut nonces).is_ok() {
+                if apply_transaction(tx, &mut utxos).is_ok() {
                     valid.push(tx.clone());
                     progressed = true;
                 } else {
@@ -1307,41 +1472,74 @@ impl Ledger {
     }
 
     fn select_block_transactions(&self) -> Result<Vec<Transaction>> {
-        let mut balances = self.balances.clone();
-        let mut nonces = self.nonces.clone();
+        let mut utxos = self.utxos.clone();
         let mut remaining = self.valid_pending_transactions();
         let mut selected = Vec::new();
 
-        if let Some(index) = best_selectable_transaction_index(
-            &remaining,
-            &balances,
-            &nonces,
-            Some(TransactionKind::Burn),
-        ) {
+        if let Some(index) =
+            best_selectable_transaction_index(&remaining, &utxos, Some(TransactionKind::Burn))
+        {
             let tx = remaining.remove(index);
             let mut candidate = selected.clone();
             candidate.push(tx.clone());
             if estimated_block_size_bytes(&candidate)? <= self.launch_profile.max_block_bytes {
-                apply_transaction(&tx, &mut balances, &mut nonces)?;
+                apply_transaction(&tx, &mut utxos)?;
                 selected.push(tx);
             }
         }
 
         while selected.len() < self.launch_profile.max_block_transactions {
-            let Some(index) =
-                best_selectable_transaction_index(&remaining, &balances, &nonces, None)
-            else {
+            let Some(index) = best_selectable_transaction_index(&remaining, &utxos, None) else {
                 break;
             };
             let tx = remaining.remove(index);
             let mut candidate = selected.clone();
             candidate.push(tx.clone());
             if estimated_block_size_bytes(&candidate)? <= self.launch_profile.max_block_bytes {
-                apply_transaction(&tx, &mut balances, &mut nonces)?;
+                apply_transaction(&tx, &mut utxos)?;
                 selected.push(tx);
             }
         }
         Ok(selected)
+    }
+
+    fn select_inputs(
+        &self,
+        address: &str,
+        amount: Amount,
+    ) -> Result<(Vec<UnsignedTxInput>, Amount)> {
+        let utxos = self.utxos_after_valid_pending()?;
+        let mut selected = Vec::new();
+        let mut total = 0_u64;
+        for (outpoint, output) in &utxos {
+            if output.address != address {
+                continue;
+            }
+            selected.push(UnsignedTxInput {
+                outpoint: outpoint.clone(),
+                owner: address.to_string(),
+            });
+            total = total
+                .checked_add(output.amount)
+                .context("selected input total overflows")?;
+            if total >= amount {
+                return Ok((selected, total));
+            }
+        }
+        bail!("insufficient funds for {address}")
+    }
+
+    fn validate_new_transaction(&self, transaction: &Transaction) -> Result<()> {
+        let mut utxos = self.utxos_after_valid_pending()?;
+        apply_transaction(transaction, &mut utxos)
+    }
+
+    fn utxos_after_valid_pending(&self) -> Result<BTreeMap<OutPoint, TxOutput>> {
+        let mut utxos = self.utxos.clone();
+        for pending in self.valid_pending_transactions() {
+            apply_transaction(&pending, &mut utxos)?;
+        }
+        Ok(utxos)
     }
 
     fn selected_ticket_for_height(&self, height: u64) -> Option<BurnTicket> {
@@ -1402,12 +1600,15 @@ fn tickets_created_by_block(block: &Block, profile: &LaunchProfile) -> Result<Ve
     let mut tickets = Vec::new();
     for tx in &block.transactions {
         let Transaction::Burn {
-            from,
+            inputs,
             amount,
             signature,
             ..
         } = tx
         else {
+            continue;
+        };
+        let Some(owner) = inputs.first().map(|input| input.owner.clone()) else {
             continue;
         };
         if *amount == 0 {
@@ -1422,7 +1623,7 @@ fn tickets_created_by_block(block: &Block, profile: &LaunchProfile) -> Result<Ve
             .with_context(|| format!("ticket expiry height overflow at block {}", block.height))?;
         tickets.push(BurnTicket {
             id: signature.clone(),
-            owner: from.clone(),
+            owner,
             amount: *amount,
             eligible_from_height: target_height,
             eligible_until_height,
@@ -1445,7 +1646,7 @@ fn genesis_tickets(
         .iter()
         .filter_map(|tx| {
             let Transaction::Burn {
-                from,
+                inputs,
                 amount,
                 signature,
                 ..
@@ -1453,7 +1654,8 @@ fn genesis_tickets(
             else {
                 return None;
             };
-            (*amount > 0).then(|| (from.clone(), *amount, signature.clone()))
+            let owner = inputs.first()?.owner.clone();
+            (*amount > 0).then(|| (owner, *amount, signature.clone()))
         })
         .collect::<Vec<_>>();
 
@@ -1540,8 +1742,7 @@ fn fee_rate_key(transaction: &Transaction) -> u128 {
 
 fn best_selectable_transaction_index(
     transactions: &[Transaction],
-    balances: &BTreeMap<String, Amount>,
-    nonces: &BTreeMap<String, u64>,
+    utxos: &BTreeMap<OutPoint, TxOutput>,
     required_kind: Option<TransactionKind>,
 ) -> Option<usize> {
     transactions
@@ -1552,16 +1753,14 @@ fn best_selectable_transaction_index(
             None => true,
         })
         .filter(|(_, tx)| {
-            let mut balances = balances.clone();
-            let mut nonces = nonces.clone();
-            apply_transaction(tx, &mut balances, &mut nonces).is_ok()
+            let mut utxos = utxos.clone();
+            apply_transaction(tx, &mut utxos).is_ok()
         })
         .max_by(|(_, left), (_, right)| {
             fee_rate_key(left)
                 .cmp(&fee_rate_key(right))
                 .then_with(|| left.fee().cmp(&right.fee()))
                 .then_with(|| left.is_burn().cmp(&right.is_burn()))
-                .then_with(|| right.nonce().cmp(&left.nonce()))
                 .then_with(|| right.signature().cmp(left.signature()))
         })
         .map(|(index, _)| index)
@@ -1644,27 +1843,40 @@ fn vdf_seed_for_child(prev_hash: &str, height: u64) -> String {
 
 fn apply_transaction(
     transaction: &Transaction,
-    balances: &mut BTreeMap<String, Amount>,
-    nonces: &mut BTreeMap<String, u64>,
+    utxos: &mut BTreeMap<OutPoint, TxOutput>,
 ) -> Result<()> {
     transaction.verify_signature()?;
-
-    let from = transaction.sender();
-    let expected_nonce = next_expected_nonce(nonces, from)?;
-    if transaction.nonce() != expected_nonce {
-        bail!(
-            "invalid nonce for {from}: expected {expected_nonce}, got {}",
-            transaction.nonce()
+    ensure_single_input_owner(transaction)?;
+    let input_total = spend_inputs(transaction, utxos)?;
+    let output_total = transaction
+        .outputs()
+        .iter()
+        .try_fold(0_u64, |total, output| {
+            total
+                .checked_add(output.amount)
+                .context("transaction outputs overflow")
+        })?;
+    let required = output_total
+        .checked_add(transaction.fee())
+        .context("transaction outputs plus fee overflow")?
+        .checked_add(match transaction {
+            Transaction::Burn { amount, .. } => *amount,
+            Transaction::Transfer { .. } => 0,
+        })
+        .context("transaction outputs plus burn overflow")?;
+    if input_total != required {
+        bail!("transaction inputs do not balance outputs, burn, and fee");
+    }
+    ensure_outputs_do_not_overflow(utxos, transaction.outputs())?;
+    for (index, output) in transaction.outputs().iter().enumerate() {
+        utxos.insert(
+            OutPoint {
+                txid: transaction.signature().to_string(),
+                index: index as u32,
+            },
+            output.clone(),
         );
     }
-    debit_balance(balances, from, transaction.total_debit()?)?;
-    match transaction {
-        Transaction::Transfer { to, amount, .. } => {
-            credit_balance(balances, to, *amount)?;
-        }
-        Transaction::Burn { .. } => {}
-    }
-    nonces.insert(from.to_string(), transaction.nonce());
     Ok(())
 }
 
@@ -1676,37 +1888,83 @@ fn reward_with_fees(base_reward: Amount, transactions: &[Transaction]) -> Result
     })
 }
 
-fn next_expected_nonce(nonces: &BTreeMap<String, u64>, address: &str) -> Result<u64> {
-    nonces
-        .get(address)
-        .copied()
-        .unwrap_or(0)
-        .checked_add(1)
-        .with_context(|| format!("nonce space exhausted for {address}"))
+fn spend_inputs(
+    transaction: &Transaction,
+    utxos: &mut BTreeMap<OutPoint, TxOutput>,
+) -> Result<Amount> {
+    let mut seen = BTreeSet::new();
+    let mut total = 0_u64;
+    for input in transaction.inputs() {
+        if !seen.insert(input.outpoint.clone()) {
+            bail!("duplicate input in transaction");
+        }
+        let output = utxos.remove(&input.outpoint).with_context(|| {
+            format!("transaction spends missing output {}", input.outpoint.id())
+        })?;
+        if output.address != input.owner {
+            bail!("transaction input owner does not match spent output");
+        }
+        total = total
+            .checked_add(output.amount)
+            .context("transaction input total overflows")?;
+    }
+    Ok(total)
 }
 
-fn debit_balance(
-    balances: &mut BTreeMap<String, Amount>,
-    address: &str,
-    amount: Amount,
-) -> Result<()> {
-    let balance = balances.entry(address.to_string()).or_insert(0);
-    if *balance < amount {
-        bail!("insufficient funds for {address}");
+fn transaction_has_missing_inputs(
+    transaction: &Transaction,
+    utxos: &BTreeMap<OutPoint, TxOutput>,
+) -> bool {
+    transaction
+        .inputs()
+        .iter()
+        .any(|input| !utxos.contains_key(&input.outpoint))
+}
+
+fn ensure_single_input_owner(transaction: &Transaction) -> Result<()> {
+    let Some(first) = transaction.inputs().first() else {
+        bail!("transaction has no inputs");
+    };
+    if transaction
+        .inputs()
+        .iter()
+        .any(|input| input.owner != first.owner)
+    {
+        bail!("transaction inputs must have one owner");
     }
-    *balance -= amount;
     Ok(())
 }
 
-fn credit_balance(
-    balances: &mut BTreeMap<String, Amount>,
-    address: &str,
-    amount: Amount,
+fn credit_reward_output(utxos: &mut BTreeMap<OutPoint, TxOutput>, block: &Block) -> Result<()> {
+    if block.reward == 0 {
+        return Ok(());
+    }
+    let output = TxOutput {
+        address: block.miner.clone(),
+        amount: block.reward,
+    };
+    ensure_outputs_do_not_overflow(utxos, std::slice::from_ref(&output))?;
+    utxos.insert(reward_outpoint(&block.hash), output);
+    Ok(())
+}
+
+fn ensure_outputs_do_not_overflow(
+    utxos: &BTreeMap<OutPoint, TxOutput>,
+    outputs: &[TxOutput],
 ) -> Result<()> {
-    let balance = balances.entry(address.to_string()).or_insert(0);
-    *balance = balance
-        .checked_add(amount)
-        .with_context(|| format!("balance overflow for {address}"))?;
+    let mut balances = BTreeMap::new();
+    for output in utxos.values() {
+        let balance = balances.entry(output.address.clone()).or_insert(0_u64);
+        *balance = balance
+            .checked_add(output.amount)
+            .with_context(|| format!("balance overflow for {}", output.address))?;
+    }
+    for output in outputs {
+        let balance = balances.entry(output.address.clone()).or_insert(0_u64);
+        *balance = balance
+            .checked_add(output.amount)
+            .with_context(|| format!("balance overflow for {}", output.address))?;
+    }
     Ok(())
 }
 
@@ -1736,6 +1994,62 @@ fn build_genesis_block(
     };
     genesis.hash = genesis.compute_hash();
     genesis
+}
+
+fn utxos_after_genesis(
+    genesis_allocations: &BTreeMap<String, Amount>,
+    genesis: &Block,
+) -> Result<BTreeMap<OutPoint, TxOutput>> {
+    let mut utxos = genesis_allocation_utxos(genesis_allocations);
+    for transaction in &genesis.transactions {
+        match transaction {
+            Transaction::Burn { .. } => apply_transaction(transaction, &mut utxos)?,
+            Transaction::Transfer { .. } => bail!("genesis only supports burn transactions"),
+        }
+    }
+    credit_reward_output(&mut utxos, genesis)?;
+    Ok(utxos)
+}
+
+fn genesis_allocation_utxos(
+    genesis_allocations: &BTreeMap<String, Amount>,
+) -> BTreeMap<OutPoint, TxOutput> {
+    genesis_allocations
+        .iter()
+        .filter(|(_, amount)| **amount > 0)
+        .map(|(address, amount)| {
+            (
+                genesis_allocation_outpoint(address),
+                TxOutput {
+                    address: address.clone(),
+                    amount: *amount,
+                },
+            )
+        })
+        .collect()
+}
+
+fn balances_from_utxos(utxos: &BTreeMap<OutPoint, TxOutput>) -> BTreeMap<String, Amount> {
+    let mut balances = BTreeMap::new();
+    for output in utxos.values() {
+        let balance = balances.entry(output.address.clone()).or_insert(0_u64);
+        *balance = balance.saturating_add(output.amount);
+    }
+    balances
+}
+
+fn genesis_allocation_outpoint(address: &str) -> OutPoint {
+    OutPoint {
+        txid: hex_hash(format!("luun-genesis-allocation:{address}")),
+        index: 0,
+    }
+}
+
+fn reward_outpoint(block_hash: &str) -> OutPoint {
+    OutPoint {
+        txid: block_hash.to_string(),
+        index: u32::MAX,
+    }
 }
 
 fn validate_genesis_block(block: &Block) -> Result<()> {
@@ -1773,7 +2087,7 @@ fn genesis_miner(
     transactions
         .iter()
         .filter_map(|transaction| match transaction {
-            Transaction::Burn { from, .. } => Some(from.as_str()),
+            Transaction::Burn { inputs, .. } => inputs.first().map(|input| input.owner.as_str()),
             Transaction::Transfer { .. } => None,
         })
         .find(|from| genesis_allocations.contains_key(*from))
@@ -1791,31 +2105,6 @@ fn genesis_reward(
     } else {
         BLOCK_REWARD
     }
-}
-
-fn balances_after_genesis(
-    genesis_allocations: &BTreeMap<String, Amount>,
-    transactions: &[Transaction],
-) -> Result<BTreeMap<String, Amount>> {
-    let mut balances = genesis_allocations.clone();
-    for transaction in transactions {
-        match transaction {
-            Transaction::Burn { from, amount, .. } => {
-                let balance = balances.entry(from.clone()).or_insert(0);
-                if *balance < *amount {
-                    bail!("genesis burn exceeds allocation for {from}");
-                }
-                *balance -= *amount;
-            }
-            Transaction::Transfer { .. } => bail!("genesis only supports burn transactions"),
-        }
-    }
-    let reward = genesis_reward(genesis_allocations, transactions);
-    if reward > 0 {
-        let miner = genesis_miner(genesis_allocations, transactions);
-        credit_balance(&mut balances, &miner, reward)?;
-    }
-    Ok(balances)
 }
 
 pub fn run_vdf(seed: &str, rounds: u32) -> String {

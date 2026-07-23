@@ -32,13 +32,40 @@ fn allocations(wallets: &[Wallet], amount: Amount) -> BTreeMap<String, Amount> {
 }
 
 fn mine_wallet_burn_block(ledger: &mut Ledger, wallet: &Wallet, timestamp_ms: u64) -> String {
-    ledger
-        .submit_transaction(wallet.burn(1, ledger.next_nonce(wallet.address())))
-        .unwrap();
+    let burn = ledger.build_burn(wallet, 1, 0).unwrap();
+    ledger.submit_transaction(burn).unwrap();
     let block = ledger.mine_next_block(wallet, timestamp_ms).unwrap();
     let hash = block.hash.clone();
     ledger.apply_block(block).unwrap();
     hash
+}
+
+fn submit_burn(ledger: &mut Ledger, wallet: &Wallet, amount: Amount) {
+    let tx = ledger.build_burn(wallet, amount, 0).unwrap();
+    ledger.submit_transaction(tx).unwrap();
+}
+
+fn burn_tx(ledger: &Ledger, wallet: &Wallet, amount: Amount) -> luun::domain::Transaction {
+    ledger.build_burn(wallet, amount, 0).unwrap()
+}
+
+fn transfer_tx(
+    ledger: &Ledger,
+    wallet: &Wallet,
+    to: impl Into<String>,
+    amount: Amount,
+) -> luun::domain::Transaction {
+    ledger.build_transfer(wallet, to, amount, 0).unwrap()
+}
+
+fn transfer_fee_tx(
+    ledger: &Ledger,
+    wallet: &Wallet,
+    to: impl Into<String>,
+    amount: Amount,
+    fee: Amount,
+) -> luun::domain::Transaction {
+    ledger.build_transfer(wallet, to, amount, fee).unwrap()
 }
 
 fn fork_with_better_vrf_block(
@@ -158,9 +185,7 @@ fn burn_in_block_creates_ticket_after_maturity_delay() {
     allocations.insert(bob.address().to_string(), 1_000);
 
     let mut ledger = Ledger::new(allocations, 10);
-    ledger
-        .submit_transaction(bob.burn(80, ledger.next_nonce(bob.address())))
-        .unwrap();
+    submit_burn(&mut ledger, &bob, 80);
 
     let launch_leader =
         if ledger.expected_leader_for_next_block().as_deref() == Some(alice.address()) {
@@ -178,9 +203,7 @@ fn burn_in_block_creates_ticket_after_maturity_delay() {
             } else {
                 &bob
             };
-        ledger
-            .submit_transaction(leader_wallet.burn(1, ledger.next_nonce(leader_wallet.address())))
-            .unwrap();
+        submit_burn(&mut ledger, leader_wallet, 1);
         let block = ledger.mine_next_block(leader_wallet, height).unwrap();
         ledger.apply_block(block).unwrap();
     }
@@ -195,9 +218,7 @@ fn burn_in_block_creates_ticket_after_maturity_delay() {
         "the block 1 burn should not be eligible before its maturity delay, and only Bob should hold it at block 4"
     );
 
-    ledger
-        .submit_transaction(bob.burn(1, ledger.next_nonce(bob.address())))
-        .unwrap();
+    submit_burn(&mut ledger, &bob, 1);
     assert!(ledger.mine_next_block(&bob, 4).is_ok());
 }
 
@@ -210,12 +231,10 @@ fn transfer_and_burn_update_balances_when_block_is_applied() {
     allocations.insert(bob.address().to_string(), 100);
 
     let mut ledger = Ledger::new(allocations, 10);
-    ledger
-        .submit_transaction(alice.transfer(bob.address(), 125, ledger.next_nonce(alice.address())))
-        .unwrap();
-    ledger
-        .submit_transaction(alice.burn(25, ledger.next_nonce(alice.address())))
-        .unwrap();
+    let transfer = transfer_tx(&ledger, &alice, bob.address(), 125);
+    ledger.submit_transaction(transfer).unwrap();
+    let burn = burn_tx(&ledger, &alice, 25);
+    ledger.submit_transaction(burn).unwrap();
     let block = ledger.mine_next_block(&alice, 1).unwrap();
     ledger.apply_block(block).unwrap();
 
@@ -232,9 +251,9 @@ fn forged_transaction_is_rejected() {
     allocations.insert(bob.address().to_string(), 1_000);
     let mut ledger = Ledger::new(allocations, 10);
 
-    let mut forged = bob.burn(10, 1);
-    if let luun::domain::Transaction::Burn { from, .. } = &mut forged {
-        *from = alice.address().to_string();
+    let mut forged = burn_tx(&ledger, &bob, 10);
+    if let luun::domain::Transaction::Burn { inputs, .. } = &mut forged {
+        inputs[0].owner = alice.address().to_string();
     }
 
     let error = ledger.submit_transaction(forged).unwrap_err();
@@ -247,9 +266,7 @@ fn block_with_forged_transaction_is_rejected() {
     let mut allocations = BTreeMap::new();
     allocations.insert(alice.address().to_string(), 1_000);
     let mut ledger = Ledger::new(allocations, 10);
-    ledger
-        .submit_transaction(alice.burn(1, ledger.next_nonce(alice.address())))
-        .unwrap();
+    submit_burn(&mut ledger, &alice, 1);
 
     let mut block = ledger.mine_next_block(&alice, 1).unwrap();
     if let luun::domain::Transaction::Burn { signature, .. } = &mut block.transactions[0] {
@@ -269,9 +286,7 @@ fn block_reward_is_fixed_at_one_hundred_luun() {
     allocations.insert(alice.address().to_string(), 1_000);
 
     let mut ledger = Ledger::new(allocations, 10);
-    ledger
-        .submit_transaction(alice.burn(1, ledger.next_nonce(alice.address())))
-        .unwrap();
+    submit_burn(&mut ledger, &alice, 1);
     let block = ledger.mine_next_block(&alice, 1).unwrap();
     assert_eq!(block.reward, BLOCK_REWARD);
 
@@ -290,17 +305,9 @@ fn transaction_fees_are_paid_to_the_block_miner() {
     let mut ledger =
         Ledger::new_with_genesis_burns(allocations, vec![GenesisBurn::new(alice.address(), 1)], 10)
             .unwrap();
-    ledger
-        .submit_transaction(alice.burn(1, ledger.next_nonce(alice.address())))
-        .unwrap();
-    ledger
-        .submit_transaction(bob.transfer_with_fee(
-            alice.address(),
-            10,
-            7,
-            ledger.next_nonce(bob.address()),
-        ))
-        .unwrap();
+    submit_burn(&mut ledger, &alice, 1);
+    let tx = transfer_fee_tx(&ledger, &bob, alice.address(), 10, 7);
+    ledger.submit_transaction(tx).unwrap();
 
     let block = ledger.mine_next_block(&alice, 1).unwrap();
     assert_eq!(block.reward, BLOCK_REWARD + 7);
@@ -321,10 +328,9 @@ fn miner_orders_block_transactions_by_fee_rate_after_required_burn() {
     let mut ledger =
         Ledger::new_with_genesis_burns(allocations, vec![GenesisBurn::new(alice.address(), 1)], 10)
             .unwrap();
-    let required_burn = alice.burn(1, ledger.next_nonce(alice.address()));
-    let low_fee = bob.transfer_with_fee(alice.address(), 1, 1, ledger.next_nonce(bob.address()));
-    let high_fee =
-        carol.transfer_with_fee(alice.address(), 1, 20, ledger.next_nonce(carol.address()));
+    let required_burn = burn_tx(&ledger, alice, 1);
+    let low_fee = transfer_fee_tx(&ledger, bob, alice.address(), 1, 1);
+    let high_fee = transfer_fee_tx(&ledger, carol, alice.address(), 1, 20);
     ledger.submit_transaction(low_fee.clone()).unwrap();
     ledger.submit_transaction(high_fee.clone()).unwrap();
     ledger.submit_transaction(required_burn.clone()).unwrap();
@@ -357,16 +363,9 @@ fn oversized_blocks_are_rejected() {
     let mut ledger =
         Ledger::new_with_genesis_burns(allocations, vec![GenesisBurn::new(alice.address(), 1)], 10)
             .unwrap();
-    ledger
-        .submit_transaction(alice.burn(1, ledger.next_nonce(alice.address())))
-        .unwrap();
+    submit_burn(&mut ledger, &alice, 1);
     let mut block = ledger.mine_next_block(&alice, 1).unwrap();
-    let oversized_transfer = bob.transfer_with_fee(
-        "x".repeat(MAX_BLOCK_BYTES),
-        1,
-        3,
-        ledger.next_nonce(bob.address()),
-    );
+    let oversized_transfer = transfer_fee_tx(&ledger, &bob, "x".repeat(MAX_BLOCK_BYTES), 1, 3);
     block.transactions.push(oversized_transfer);
     block.reward = BLOCK_REWARD + 3;
     block.hash = block.compute_hash();
@@ -391,17 +390,9 @@ fn miner_skips_oversized_pending_transaction_and_keeps_fitting_fee_transaction()
     let mut ledger =
         Ledger::new_with_genesis_burns(allocations, vec![GenesisBurn::new(alice.address(), 1)], 10)
             .unwrap();
-    ledger
-        .submit_transaction(alice.burn(1, ledger.next_nonce(alice.address())))
-        .unwrap();
-    let oversized = bob.transfer_with_fee(
-        "x".repeat(MAX_BLOCK_BYTES),
-        1,
-        100_000,
-        ledger.next_nonce(bob.address()),
-    );
-    let fitting =
-        carol.transfer_with_fee(alice.address(), 1, 5, ledger.next_nonce(carol.address()));
+    submit_burn(&mut ledger, alice, 1);
+    let oversized = transfer_fee_tx(&ledger, bob, "x".repeat(MAX_BLOCK_BYTES), 1, 100_000);
+    let fitting = transfer_fee_tx(&ledger, carol, alice.address(), 1, 5);
     ledger.submit_transaction(oversized.clone()).unwrap();
     ledger.submit_transaction(fitting.clone()).unwrap();
 
@@ -425,9 +416,9 @@ fn transfer_that_would_overflow_recipient_balance_is_rejected() {
     allocations.insert(alice.address().to_string(), 1);
     allocations.insert(bob.address().to_string(), Amount::MAX);
 
-    let mut ledger = Ledger::new(allocations, 10);
+    let ledger = Ledger::new(allocations, 10);
     let error = ledger
-        .submit_transaction(alice.transfer(bob.address(), 1, ledger.next_nonce(alice.address())))
+        .build_transfer(&alice, bob.address(), 1, 0)
         .unwrap_err();
 
     assert!(format!("{error:#}").contains("balance overflow"));
@@ -440,9 +431,7 @@ fn block_reward_that_would_overflow_miner_balance_is_rejected() {
     allocations.insert(alice.address().to_string(), Amount::MAX);
 
     let mut ledger = Ledger::new(allocations, 10);
-    ledger
-        .submit_transaction(alice.burn(1, ledger.next_nonce(alice.address())))
-        .unwrap();
+    submit_burn(&mut ledger, &alice, 1);
     let block = ledger.mine_next_block(&alice, 1).unwrap();
 
     let error = ledger.apply_block(block).unwrap_err();
@@ -479,9 +468,7 @@ fn leader_block_without_burn_is_rejected() {
     allocations.insert(alice.address().to_string(), 1_000);
 
     let mut ledger = Ledger::new(allocations, 10);
-    ledger
-        .submit_transaction(alice.burn(1, ledger.next_nonce(alice.address())))
-        .unwrap();
+    submit_burn(&mut ledger, &alice, 1);
     let mut block = ledger.mine_next_block(&alice, 1).unwrap();
     block.transactions.clear();
     block.hash = block.compute_hash();
@@ -497,9 +484,7 @@ fn block_hash_is_bound_to_block_contents() {
     allocations.insert(alice.address().to_string(), 1_000);
 
     let mut ledger = Ledger::new(allocations, 10);
-    ledger
-        .submit_transaction(alice.burn(1, ledger.next_nonce(alice.address())))
-        .unwrap();
+    submit_burn(&mut ledger, &alice, 1);
     let mut block = ledger.mine_next_block(&alice, 1).unwrap();
     block.timestamp_ms += 1;
 
@@ -608,9 +593,7 @@ fn setting_burn_rate_after_running_at_zero_adds_mempool_burn() {
     allocations.insert(bob.address().to_string(), 100);
 
     let mut ledger = Ledger::new(allocations.clone(), 25);
-    ledger
-        .submit_transaction(alice.burn(1, ledger.next_nonce(alice.address())))
-        .unwrap();
+    submit_burn(&mut ledger, &alice, 1);
     let first = ledger.mine_next_block(&alice, 1).unwrap();
     ledger.apply_block(first).unwrap();
 
@@ -640,9 +623,7 @@ fn automatic_mining_waits_when_wallet_is_not_selected_leader() {
     allocations.insert(bob.address().to_string(), 1_000);
 
     let mut ledger = Ledger::new(allocations.clone(), 25);
-    ledger
-        .submit_transaction(alice.burn(1, ledger.next_nonce(alice.address())))
-        .unwrap();
+    submit_burn(&mut ledger, &alice, 1);
     let first = ledger.mine_next_block(&alice, 1).unwrap();
     ledger.apply_block(first).unwrap();
 
@@ -667,9 +648,7 @@ fn block_with_wrong_vdf_rounds_is_rejected() {
     let mut ledger =
         Ledger::new_with_genesis_burns(genesis, vec![GenesisBurn::new(wallet.address(), 1)], 25)
             .unwrap();
-    ledger
-        .submit_transaction(wallet.burn(1, ledger.next_nonce(wallet.address())))
-        .unwrap();
+    submit_burn(&mut ledger, &wallet, 1);
 
     let mut block = ledger.mine_next_block(&wallet, 1).unwrap();
     block.vdf_rounds = 1;
@@ -696,9 +675,7 @@ fn vdf_rounds_retarget_toward_one_minute_blocks() {
     genesis.insert(wallet.address().to_string(), 1_000);
     let mut ledger = Ledger::new(genesis, 100);
 
-    ledger
-        .submit_transaction(wallet.burn(1, ledger.next_nonce(wallet.address())))
-        .unwrap();
+    submit_burn(&mut ledger, &wallet, 1);
     let block1 = ledger
         .mine_next_block(&wallet, VDF_TARGET_BLOCK_MS)
         .unwrap();
@@ -706,9 +683,7 @@ fn vdf_rounds_retarget_toward_one_minute_blocks() {
     ledger.apply_block(block1).unwrap();
     assert_eq!(ledger.vdf_rounds(), 100);
 
-    ledger
-        .submit_transaction(wallet.burn(1, ledger.next_nonce(wallet.address())))
-        .unwrap();
+    submit_burn(&mut ledger, &wallet, 1);
     let block2 = ledger
         .mine_next_block(&wallet, VDF_TARGET_BLOCK_MS + VDF_TARGET_BLOCK_MS / 2)
         .unwrap();
@@ -716,9 +691,7 @@ fn vdf_rounds_retarget_toward_one_minute_blocks() {
     ledger.apply_block(block2).unwrap();
     assert_eq!(ledger.vdf_rounds(), 110);
 
-    ledger
-        .submit_transaction(wallet.burn(1, ledger.next_nonce(wallet.address())))
-        .unwrap();
+    submit_burn(&mut ledger, &wallet, 1);
     let block3 = ledger
         .mine_next_block(
             &wallet,
@@ -731,28 +704,24 @@ fn vdf_rounds_retarget_toward_one_minute_blocks() {
 }
 
 #[test]
-fn future_nonce_transactions_wait_for_missing_gap() {
+fn conflicting_utxo_spends_are_not_accepted_together() {
     let wallet = Wallet::from_seed("alice");
     let mut genesis = BTreeMap::new();
     genesis.insert(wallet.address().to_string(), 1_000);
     let mut ledger = Ledger::new(genesis, 25);
 
-    let tx3 = wallet.burn(3, 3);
-    ledger.submit_transaction(tx3.clone()).unwrap();
-    assert_eq!(ledger.next_nonce(wallet.address()), 1);
+    let first = burn_tx(&ledger, &wallet, 3);
+    let conflicting = burn_tx(&ledger, &wallet, 4);
+    ledger.submit_transaction(first.clone()).unwrap();
+    assert!(!ledger.submit_transaction(conflicting).unwrap());
     assert_eq!(ledger.pending().len(), 1);
-
-    ledger.submit_transaction(wallet.burn(1, 1)).unwrap();
-    assert_eq!(ledger.next_nonce(wallet.address()), 2);
-    ledger.submit_transaction(wallet.burn(2, 2)).unwrap();
-    assert_eq!(ledger.next_nonce(wallet.address()), 4);
 
     let block = ledger
         .prepare_next_block(wallet.address(), 1)
         .unwrap()
         .finish(&wallet, "test-vdf".to_string());
-    assert_eq!(block.transactions.len(), 3);
-    assert!(block.transactions.contains(&tx3));
+    assert_eq!(block.transactions.len(), 1);
+    assert!(block.transactions.contains(&first));
 }
 
 #[test]
@@ -923,7 +892,7 @@ fn joined_nodes_import_transfer_block_and_every_wallet_mines() {
         block5
             .transactions
             .iter()
-            .any(|tx| matches!(tx, luun::domain::Transaction::Transfer { to, amount, .. } if to == bob.address() && *amount == 30))
+            .any(|tx| tx.to() == Some(bob.address()) && tx.amount() == 30)
     );
     mined_by.push(block5.miner.clone());
     let block5_outbox = network.node_mut("a").unwrap().drain_outbox();
@@ -1477,9 +1446,7 @@ fn chain_snapshot_round_trips_ledger_state() {
     allocations.insert(alice.address().to_string(), 1_000);
 
     let mut ledger = Ledger::new(allocations, 10);
-    ledger
-        .submit_transaction(alice.burn(10, ledger.next_nonce(alice.address())))
-        .unwrap();
+    submit_burn(&mut ledger, &alice, 10);
     let block = ledger.mine_next_block(&alice, 1).unwrap();
     ledger.apply_block(block).unwrap();
 
@@ -1722,7 +1689,7 @@ fn transactions_from_abandoned_fork_blocks_return_to_mempool_after_switch() {
     mine_wallet_burn_block(&mut common, &alice, 1);
 
     let mut local = common.clone();
-    let abandoned_transfer = bob.transfer(carol.address(), 7, local.next_nonce(bob.address()));
+    let abandoned_transfer = transfer_tx(&local, &bob, carol.address(), 7);
     local
         .submit_transaction(abandoned_transfer.clone())
         .unwrap();
@@ -1762,21 +1729,17 @@ fn longer_valid_fork_snapshot_reorgs_and_preserves_local_transactions() {
     )
     .unwrap();
 
-    let local_burn = alice.burn(1, local.next_nonce(alice.address()));
+    let local_burn = burn_tx(&local, &alice, 1);
     local.submit_transaction(local_burn.clone()).unwrap();
     let local_block = local.mine_next_block(&alice, 1).unwrap();
     local.apply_block(local_block).unwrap();
-    let local_transfer = bob.transfer(alice.address(), 5, local.next_nonce(bob.address()));
+    let local_transfer = transfer_tx(&local, &bob, alice.address(), 5);
     local.submit_transaction(local_transfer.clone()).unwrap();
 
-    remote
-        .submit_transaction(alice.burn(1, remote.next_nonce(alice.address())))
-        .unwrap();
+    submit_burn(&mut remote, &alice, 1);
     let remote_block_1 = remote.mine_next_block(&alice, 1).unwrap();
     remote.apply_block(remote_block_1).unwrap();
-    remote
-        .submit_transaction(alice.burn(1, remote.next_nonce(alice.address())))
-        .unwrap();
+    submit_burn(&mut remote, &alice, 1);
     let remote_block_2 = remote.mine_next_block(&alice, 2).unwrap();
     remote.apply_block(remote_block_2).unwrap();
 

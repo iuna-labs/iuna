@@ -563,9 +563,8 @@ mod tests {
 
     fn ledger_with_one_mined_block(wallet: &Wallet) -> Ledger {
         let mut ledger = ledger_with_one_spendable_luun(wallet);
-        ledger
-            .submit_transaction(wallet.burn(1, ledger.next_nonce(wallet.address())))
-            .unwrap();
+        let burn = ledger.build_burn(wallet, 1, 0).unwrap();
+        ledger.submit_transaction(burn).unwrap();
         let block = ledger.mine_next_block(wallet, 1_000).unwrap();
         ledger.apply_locally_mined_block(block).unwrap();
         ledger

@@ -19,7 +19,7 @@ pub type SharedPeerBook = Arc<Mutex<PeerBook>>;
 pub const DEFAULT_BURN_PER_BLOCK: Amount = 0;
 pub const DEFAULT_VDF_ROUNDS: u32 = 67_000_000;
 pub const PROTOCOL_VERSION: u32 = 1;
-pub const NETWORK_ID: &str = "luun-devnet-v0";
+pub const NETWORK_ID: &str = "luun-devnet-v1";
 pub const BLOCK_REQUEST_LIMIT: usize = 128;
 const IMPORT_REBROADCAST_LIMIT: usize = 128;
 const MICRO_LUUN: u64 = 1_000_000;
@@ -411,9 +411,7 @@ impl NodeCore {
     }
 
     pub fn burn_with_fee(&mut self, amount: Amount, fee: Amount) -> Result<Transaction> {
-        let tx =
-            self.wallet
-                .burn_with_fee(amount, fee, self.ledger.next_nonce(self.wallet.address()));
+        let tx = self.ledger.build_burn(&self.wallet, amount, fee)?;
         if self.ledger.submit_transaction(tx.clone())? {
             self.outbox.push(GossipEnvelope::Transaction(tx.clone()));
         }
@@ -430,12 +428,7 @@ impl NodeCore {
         amount: Amount,
         fee: Amount,
     ) -> Result<Transaction> {
-        let tx = self.wallet.transfer_with_fee(
-            to,
-            amount,
-            fee,
-            self.ledger.next_nonce(self.wallet.address()),
-        );
+        let tx = self.ledger.build_transfer(&self.wallet, to, amount, fee)?;
         if self.ledger.submit_transaction(tx.clone())? {
             self.outbox.push(GossipEnvelope::Transaction(tx.clone()));
         }
