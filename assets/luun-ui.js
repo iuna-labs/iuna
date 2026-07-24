@@ -434,9 +434,17 @@ window.luunApp = function luunApp() {
         headers: { Accept: "application/json", "Content-Type": "application/x-www-form-urlencoded" },
         body,
       });
-      const payload = await response.json();
+      const text = await response.text();
+      let payload = { ok: response.ok, error: null };
+      if (text) {
+        try {
+          payload = JSON.parse(text);
+        } catch {
+          payload = { ok: false, error: text };
+        }
+      }
       if (!response.ok || !payload.ok) {
-        throw new Error(payload.error || `${path} returned ${response.status}`);
+        throw new Error(payload?.error || `${path} returned ${response.status}`);
       }
       await this.refresh();
       this.showFlash(successMessage, "success");
@@ -546,7 +554,7 @@ window.luunApp = function luunApp() {
         const recipient = this.short(this.transferTo);
         await this.postForm(
           "/api/transfer",
-          { to: this.transferTo, amount, fee, utxos: this.selectedTransferUtxos },
+          { to: this.transferTo, amount, fee, utxos: this.selectedTransferUtxos.join("\n") },
           `Queued transfer of ${this.amountLabel(amount)} LUUN to ${recipient} with ${this.amountLabel(fee)} fee`
         );
         this.transferTo = "";

@@ -52,7 +52,7 @@ struct TransferForm {
     amount: Amount,
     fee: Option<Amount>,
     #[serde(default)]
-    utxos: Vec<String>,
+    utxos: String,
 }
 
 #[derive(Debug, Deserialize)]
@@ -774,9 +774,11 @@ fn validate_transfer_form(form: TransferForm) -> Result<(String, Amount, Amount,
     let fee = form.fee.context("fee is required")?;
     let selected_utxos = form
         .utxos
-        .iter()
+        .lines()
+        .flat_map(|line| line.split(','))
+        .map(str::trim)
         .filter(|value| !value.trim().is_empty())
-        .map(|value| parse_outpoint(value))
+        .map(parse_outpoint)
         .collect::<Result<Vec<_>>>()?;
     Ok((to.to_string(), form.amount, fee, selected_utxos))
 }
@@ -910,11 +912,12 @@ const INDEX_HTML: &str = r#"<!doctype html>
     .setup-status { border: 1px solid #566d25; border-radius: 8px; padding: 10px; background: #1c2516; color: #d5f55f; font-weight: 800; }
     .wallet-grid { width: 100%; display: grid; grid-template-columns: minmax(0, 1fr) minmax(300px, .8fr); gap: 12px; align-items: start; }
     .wallet-actions { display: grid; gap: 12px; }
-    .advanced-toggle { justify-self: start; border: 0; padding: 0; background: transparent; color: #d5f55f; }
+    .advanced-toggle { flex-basis: 100%; width: max-content; align-self: flex-start; border-color: #3a4248; padding: 4px 7px; background: #202328; color: #9fa8ad; font-size: 12px; }
+    .advanced-toggle:hover { border-color: #5a646b; color: #d6dee2; }
     .send-utxo-list { display: grid; gap: 8px; max-height: 260px; overflow: auto; border: 1px solid #2f363c; border-radius: 8px; padding: 8px; background: #111316; }
     .send-utxo-option { display: grid; grid-template-columns: auto minmax(0, 1fr); gap: 8px; align-items: start; border: 1px solid #2f363c; border-radius: 8px; padding: 8px; background: #181b1f; }
     .send-utxo-option input { min-width: auto; margin-top: 3px; }
-    .send-utxo-summary { display: grid; gap: 5px; color: #9eb3bc; font-size: 13px; }
+    .send-utxo-summary { flex-basis: 100%; width: 100%; display: grid; gap: 5px; color: #9eb3bc; font-size: 13px; }
     .wallet-balance-line { display: inline-grid; grid-template-columns: auto auto; gap: 10px; align-items: baseline; padding: 8px 10px; border: 1px solid #2f363c; border-radius: 8px; background: #111316; color: inherit; cursor: pointer; }
     .wallet-balance-line:hover, .wallet-balance-line:focus-visible { border-color: #d5f55f; outline: none; }
     .wallet-balance-line .tx-value { font-size: 16px; font-weight: 850; }
@@ -1575,7 +1578,7 @@ mod tests {
             to: " ".to_string(),
             amount: 1,
             fee: Some(1),
-            utxos: Vec::new(),
+            utxos: String::new(),
         })
         .unwrap_err();
         assert!(error.to_string().contains("recipient is required"));
@@ -1584,7 +1587,7 @@ mod tests {
             to: "abc".to_string(),
             amount: 0,
             fee: Some(1),
-            utxos: Vec::new(),
+            utxos: String::new(),
         })
         .unwrap_err();
         assert!(
@@ -1597,7 +1600,7 @@ mod tests {
             to: "abc".to_string(),
             amount: 1,
             fee: None,
-            utxos: Vec::new(),
+            utxos: String::new(),
         })
         .unwrap_err();
         assert!(error.to_string().contains("fee is required"));
@@ -1609,7 +1612,7 @@ mod tests {
             to: "  abc  ".to_string(),
             amount: 2,
             fee: Some(3),
-            utxos: Vec::new(),
+            utxos: String::new(),
         })
         .unwrap();
 
@@ -1625,11 +1628,7 @@ mod tests {
             to: "abc".to_string(),
             amount: 2,
             fee: Some(3),
-            utxos: vec![
-                "tx-one:0".to_string(),
-                "tx:with:colons:7".to_string(),
-                "".to_string(),
-            ],
+            utxos: "tx-one:0\ntx:with:colons:7,\n".to_string(),
         })
         .unwrap();
 
