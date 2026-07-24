@@ -110,6 +110,28 @@ pub enum Transaction {
 }
 
 impl Transaction {
+    pub fn genesis_mine(to: impl Into<String>) -> Result<Self> {
+        let output = TxOutput {
+            address: to.into(),
+            amount: MINE_REWARD,
+        };
+        let anchor = genesis_mine_anchor();
+        let difficulty_bits = MINE_DIFFICULTY_BITS;
+        for nonce in 0..u64::MAX {
+            let signature = mine_signature(&output, &anchor, nonce, difficulty_bits);
+            if hash_meets_difficulty(&signature, difficulty_bits) {
+                return Ok(Self::Mine {
+                    output,
+                    anchor,
+                    nonce,
+                    difficulty_bits,
+                    signature,
+                });
+            }
+        }
+        bail!("could not find valid genesis mine proof");
+    }
+
     pub fn genesis_burn(from: impl Into<String>, amount: Amount) -> Self {
         let from = from.into();
         Self::genesis_burn_with_change(from, amount, Vec::new())
@@ -451,6 +473,10 @@ fn mine_payload(output: &TxOutput, anchor: &str, nonce: u64, difficulty_bits: u3
 
 fn mine_signature(output: &TxOutput, anchor: &str, nonce: u64, difficulty_bits: u32) -> String {
     hex_hash(mine_payload(output, anchor, nonce, difficulty_bits))
+}
+
+fn genesis_mine_anchor() -> String {
+    "0".repeat(64)
 }
 
 fn hash_meets_difficulty(hash: &str, difficulty_bits: u32) -> bool {
@@ -882,6 +908,14 @@ impl Ledger {
             })
             .collect::<Result<Vec<_>>>()?;
         Self::new_with_genesis_transactions(genesis_allocations, transactions, vdf_rounds)
+    }
+
+    pub fn new_with_genesis_mine(recipient: impl Into<String>, vdf_rounds: u32) -> Result<Self> {
+        Self::new_with_genesis_transactions(
+            BTreeMap::new(),
+            vec![Transaction::genesis_mine(recipient)?],
+            vdf_rounds,
+        )
     }
 
     fn new_with_genesis_transactions(
@@ -2243,8 +2277,12 @@ fn utxos_after_genesis(
     for transaction in &genesis.transactions {
         match transaction {
             Transaction::Burn { .. } => apply_transaction(transaction, &mut utxos)?,
-            Transaction::Transfer { .. } | Transaction::Mine { .. } => {
-                bail!("genesis only supports burn transactions")
+            Transaction::Mine { .. } => {
+                validate_genesis_mine_transaction(transaction)?;
+                apply_transaction(transaction, &mut utxos)?;
+            }
+            Transaction::Transfer { .. } => {
+                bail!("genesis only supports burn and mine transactions")
             }
         }
     }
@@ -2319,6 +2357,28 @@ fn validate_genesis_block(block: &Block) -> Result<()> {
         bail!("genesis block hash is invalid");
     }
     Ok(())
+}
+
+fn validate_genesis_mine_transaction(transaction: &Transaction) -> Result<()> {
+    let Transaction::Mine {
+        output,
+        anchor,
+        difficulty_bits,
+        ..
+    } = transaction
+    else {
+        bail!("genesis transaction is not a mine transaction");
+    };
+    if output.amount != MINE_REWARD {
+        bail!("genesis mine reward is invalid");
+    }
+    if anchor != &genesis_mine_anchor() {
+        bail!("genesis mine anchor is invalid");
+    }
+    if *difficulty_bits != MINE_DIFFICULTY_BITS {
+        bail!("genesis mine difficulty is invalid");
+    }
+    transaction.verify_signature()
 }
 
 fn genesis_miner(
