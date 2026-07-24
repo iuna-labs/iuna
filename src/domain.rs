@@ -13,6 +13,12 @@ pub const DEFAULT_TRANSACTION_FEE: Amount = MICRO_LUUN;
 pub const MAX_BLOCK_BYTES: usize = 100_000;
 pub const VDF_TARGET_BLOCK_MS: u64 = 60_000;
 pub const MINE_DIFFICULTY_BITS: u32 = 12;
+const MINE_RETARGET_WINDOW_BLOCKS: u64 = 10;
+const MINE_TARGET_ACTIONS_PER_BLOCK: u64 = 1;
+const MINE_MAX_RETARGET_STEP_BITS: u32 = 2;
+const MINE_MIN_DIFFICULTY_BITS: u32 = 1;
+const MINE_MAX_DIFFICULTY_BITS: u32 = 32;
+const MINE_MAX_ANCHOR_AGE_BLOCKS: u64 = MINE_RETARGET_WINDOW_BLOCKS;
 const MAX_PENDING_TRANSACTIONS: usize = 10_000;
 const MAX_BLOCK_TRANSACTIONS: usize = 1_000;
 const DEFAULT_TICKET_MATURITY_DELAY: u64 = 3;
@@ -711,6 +717,7 @@ pub struct ChainStatus {
     pub next_leader: Option<String>,
     pub launch_profile_hash: String,
     pub mine_reward: Amount,
+    pub current_mine_difficulty_bits: u32,
     pub balances: BTreeMap<String, Amount>,
     pub pending_transactions: usize,
 }
@@ -1147,6 +1154,7 @@ impl Ledger {
             next_leader: self.expected_leader_for_next_block(),
             launch_profile_hash: self.launch_profile.hash(),
             mine_reward: self.mine_reward,
+            current_mine_difficulty_bits: self.current_mine_difficulty_bits(),
             balances: balances_from_utxos(&self.utxos),
             pending_transactions: self.pending.len(),
         }
@@ -1224,6 +1232,10 @@ impl Ledger {
 
     pub fn launch_profile(&self) -> &LaunchProfile {
         &self.launch_profile
+    }
+
+    pub fn current_mine_difficulty_bits(&self) -> u32 {
+        self.mine_difficulty_bits_for_anchor_height(self.tip().height)
     }
 
     pub fn balance_of(&self, address: &str) -> Amount {
@@ -1367,7 +1379,7 @@ impl Ledger {
             amount: self.mine_reward,
         };
         let anchor = self.tip().hash.clone();
-        let difficulty_bits = self.launch_profile.mine_difficulty_bits;
+        let difficulty_bits = self.current_mine_difficulty_bits();
         for nonce in 0..u64::MAX {
             let signature = mine_signature(&output, &anchor, nonce, difficulty_bits);
             if !hash_meets_difficulty(&signature, difficulty_bits) {
@@ -1751,11 +1763,19 @@ impl Ledger {
             if output.amount != self.mine_reward {
                 bail!("mine transaction reward is invalid");
             }
-            if *difficulty_bits != self.launch_profile.mine_difficulty_bits {
-                bail!("mine transaction difficulty is invalid");
+            let anchor_block = self
+                .chain
+                .iter()
+                .find(|block| block.hash == *anchor)
+                .context("mine transaction anchor is not on this chain")?;
+            let anchor_age = self.tip().height.saturating_sub(anchor_block.height);
+            if anchor_age > MINE_MAX_ANCHOR_AGE_BLOCKS {
+                bail!("mine transaction anchor is too old");
             }
-            if !self.has_block(anchor) {
-                bail!("mine transaction anchor is not on this chain");
+            let required_difficulty =
+                self.mine_difficulty_bits_for_anchor_height(anchor_block.height);
+            if *difficulty_bits != required_difficulty {
+                bail!("mine transaction difficulty is invalid");
             }
         }
         Ok(())
@@ -1771,6 +1791,23 @@ impl Ledger {
 
     fn selected_ticket_for_height(&self, height: u64) -> Option<BurnTicket> {
         select_weighted_ticket(self.tip(), height, &self.tickets)
+    }
+
+    fn mine_difficulty_bits_for_anchor_height(&self, anchor_height: u64) -> u32 {
+        let mut difficulty = self.launch_profile.mine_difficulty_bits;
+        let mut window_end = MINE_RETARGET_WINDOW_BLOCKS;
+        while window_end <= anchor_height {
+            let window_start = window_end + 1 - MINE_RETARGET_WINDOW_BLOCKS;
+            let mine_actions = self
+                .chain
+                .iter()
+                .filter(|block| window_start <= block.height && block.height <= window_end)
+                .map(mine_action_count)
+                .sum::<u64>();
+            difficulty = retarget_mine_difficulty_bits(difficulty, mine_actions);
+            window_end = window_end.saturating_add(MINE_RETARGET_WINDOW_BLOCKS);
+        }
+        difficulty
     }
 
     fn tip(&self) -> &Block {
@@ -1950,6 +1987,55 @@ fn consume_leader_ticket(block: &Block, tickets: &mut Vec<BurnTicket>) -> Result
 
 fn ticket_is_eligible_for_height(ticket: &BurnTicket, height: u64) -> bool {
     ticket.eligible_from_height <= height && height <= ticket.eligible_until_height
+}
+
+fn mine_action_count(block: &Block) -> u64 {
+    block
+        .transactions
+        .iter()
+        .filter(|transaction| matches!(transaction, Transaction::Mine { .. }))
+        .count() as u64
+}
+
+fn retarget_mine_difficulty_bits(current: u32, mine_actions: u64) -> u32 {
+    let target = MINE_RETARGET_WINDOW_BLOCKS.saturating_mul(MINE_TARGET_ACTIONS_PER_BLOCK);
+    if target == 0 || mine_actions == target {
+        return current.clamp(MINE_MIN_DIFFICULTY_BITS, MINE_MAX_DIFFICULTY_BITS);
+    }
+
+    let step = if mine_actions > target {
+        floor_log2_ratio(mine_actions, target).min(MINE_MAX_RETARGET_STEP_BITS)
+    } else if mine_actions == 0 {
+        MINE_MAX_RETARGET_STEP_BITS
+    } else {
+        floor_log2_ratio(target, mine_actions).min(MINE_MAX_RETARGET_STEP_BITS)
+    };
+
+    if step == 0 {
+        return current.clamp(MINE_MIN_DIFFICULTY_BITS, MINE_MAX_DIFFICULTY_BITS);
+    }
+    if mine_actions > target {
+        current
+            .saturating_add(step)
+            .clamp(MINE_MIN_DIFFICULTY_BITS, MINE_MAX_DIFFICULTY_BITS)
+    } else {
+        current
+            .saturating_sub(step)
+            .clamp(MINE_MIN_DIFFICULTY_BITS, MINE_MAX_DIFFICULTY_BITS)
+    }
+}
+
+fn floor_log2_ratio(numerator: u64, denominator: u64) -> u32 {
+    if denominator == 0 || numerator <= denominator {
+        return 0;
+    }
+    let mut step = 0_u32;
+    let mut threshold = denominator;
+    while threshold <= numerator / 2 {
+        threshold = threshold.saturating_mul(2);
+        step = step.saturating_add(1);
+    }
+    step
 }
 
 fn ensure_block_has_burn(transactions: &[Transaction]) -> Result<()> {
@@ -2559,6 +2645,23 @@ mod tests {
         balances_from_utxos(&ledger.utxos_after_valid_pending().unwrap())
     }
 
+    fn ledger_with_allocation(wallet: &Wallet, amount: Amount) -> Ledger {
+        let mut genesis = BTreeMap::new();
+        genesis.insert(wallet.address().to_string(), amount);
+        Ledger::new(genesis, 1)
+    }
+
+    fn mine_burn_block_with_mines(ledger: &mut Ledger, wallet: &Wallet, mine_actions: usize) {
+        let burn = ledger.build_burn(wallet, MICRO_LUUN, 0).unwrap();
+        ledger.submit_transaction(burn).unwrap();
+        for _ in 0..mine_actions {
+            let mine = ledger.build_mine(wallet.address()).unwrap();
+            ledger.submit_transaction(mine).unwrap();
+        }
+        let block = ledger.mine_next_block(wallet, ledger.height() + 1).unwrap();
+        ledger.apply_block(block).unwrap();
+    }
+
     #[test]
     fn wallet_utxos_only_include_outputs_owned_by_address() {
         let alice = Wallet::from_seed("wallet-utxos-alice");
@@ -2832,5 +2935,57 @@ mod tests {
             tickets.iter().any(|ticket| ticket.id == "small-burn"),
             "unselected future tickets should remain pending"
         );
+    }
+
+    #[test]
+    fn mine_difficulty_increases_when_issuance_exceeds_target_window() {
+        let alice = Wallet::from_seed("mine-difficulty-up-alice");
+        let mut ledger = ledger_with_allocation(&alice, 100 * MICRO_LUUN);
+
+        for _ in 0..MINE_RETARGET_WINDOW_BLOCKS {
+            mine_burn_block_with_mines(&mut ledger, &alice, 2);
+        }
+
+        assert_eq!(
+            ledger.current_mine_difficulty_bits(),
+            MINE_DIFFICULTY_BITS + 1
+        );
+        let mine = ledger.build_mine(alice.address()).unwrap();
+        let Transaction::Mine {
+            difficulty_bits, ..
+        } = mine
+        else {
+            panic!("expected mine action");
+        };
+        assert_eq!(difficulty_bits, MINE_DIFFICULTY_BITS + 1);
+    }
+
+    #[test]
+    fn mine_difficulty_decreases_when_issuance_is_below_target_window() {
+        let alice = Wallet::from_seed("mine-difficulty-down-alice");
+        let mut ledger = ledger_with_allocation(&alice, 100 * MICRO_LUUN);
+
+        for _ in 0..MINE_RETARGET_WINDOW_BLOCKS {
+            mine_burn_block_with_mines(&mut ledger, &alice, 0);
+        }
+
+        assert_eq!(
+            ledger.current_mine_difficulty_bits(),
+            MINE_DIFFICULTY_BITS - MINE_MAX_RETARGET_STEP_BITS
+        );
+    }
+
+    #[test]
+    fn mine_actions_expire_when_anchor_is_too_old() {
+        let alice = Wallet::from_seed("mine-anchor-expiry-alice");
+        let mut ledger = ledger_with_allocation(&alice, 100 * MICRO_LUUN);
+        let stale_mine = ledger.build_mine(alice.address()).unwrap();
+
+        for _ in 0..=MINE_MAX_ANCHOR_AGE_BLOCKS {
+            mine_burn_block_with_mines(&mut ledger, &alice, 0);
+        }
+
+        let error = ledger.submit_transaction(stale_mine).unwrap_err();
+        assert!(format!("{error:#}").contains("mine transaction anchor is too old"));
     }
 }

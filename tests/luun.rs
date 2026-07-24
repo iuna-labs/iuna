@@ -110,7 +110,13 @@ fn starter_node(wallet: Wallet) -> NodeCore {
     let ledger =
         Ledger::new_with_genesis_burns(genesis, vec![GenesisBurn::new(wallet.address(), 1)], 25)
             .unwrap();
-    NodeCore::from_ledger(wallet, ledger, DEFAULT_BURN_PER_BLOCK)
+    NodeCore::from_ledger_with_burn_fee_and_enabled(
+        wallet,
+        ledger,
+        true,
+        DEFAULT_BURN_PER_BLOCK,
+        MICRO_LUUN,
+    )
 }
 
 #[test]
@@ -593,7 +599,7 @@ fn default_automatic_mining_does_not_burn() {
         outcome
             .skipped_reason
             .as_deref()
-            .is_some_and(|reason| reason.contains("at least one burn"))
+            .is_some_and(|reason| reason.contains("automatic mining is off"))
     );
     assert_eq!(node.ledger().balance_of(alice.address()), 1_000);
 }
@@ -607,9 +613,11 @@ fn burn_per_block_can_be_set_to_zero() {
 
     let burned = node.set_burn_per_block(25).unwrap();
     assert!(burned.is_some());
+    assert!(node.status().mining.automatic);
     assert_eq!(node.status().mining.burn_per_block, 25);
     let burned = node.set_burn_per_block(0).unwrap();
     assert!(burned.is_none());
+    assert!(!node.status().mining.automatic);
     assert_eq!(node.status().mining.burn_per_block, 0);
 }
 
@@ -739,7 +747,13 @@ fn waiting_wallet_gossips_pending_burn_to_selected_leader() {
         Some(bob.address())
     );
     let mut alice_node = NodeCore::from_ledger(alice.clone(), ledger.clone(), 1);
-    let mut bob_node = NodeCore::from_ledger(bob.clone(), ledger, DEFAULT_BURN_PER_BLOCK);
+    let mut bob_node = NodeCore::from_ledger_with_burn_fee_and_enabled(
+        bob.clone(),
+        ledger,
+        true,
+        DEFAULT_BURN_PER_BLOCK,
+        MICRO_LUUN,
+    );
 
     let alice_outcome = alice_node.automatic_mine_once(1);
     assert!(alice_outcome.burned.is_some());
@@ -1593,6 +1607,9 @@ fn friend_node_can_join_snapshot_from_started_chain() {
     let mut alice_genesis = BTreeMap::new();
     alice_genesis.insert(alice.address().to_string(), 1_000);
     let mut alice_node = node("alice", alice.clone(), alice_genesis);
+    alice_node
+        .set_automatic_burn_settings(true, DEFAULT_BURN_PER_BLOCK, MICRO_LUUN)
+        .unwrap();
     alice_node.burn(1).unwrap();
     alice_node.automatic_mine_once(1);
 

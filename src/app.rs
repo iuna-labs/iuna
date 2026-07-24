@@ -4,13 +4,13 @@ use std::{
     time::{SystemTime, UNIX_EPOCH},
 };
 
-use anyhow::Result;
+use anyhow::{Context, Result};
 use serde::{Deserialize, Serialize};
 use tokio::sync::Mutex;
 
 use crate::domain::{
-    Amount, Block, ChainSnapshot, ChainStatus, DEFAULT_TRANSACTION_FEE, LaunchProfile, Ledger,
-    OutPoint, PreparedBlock, Transaction, VDF_TARGET_BLOCK_MS, Wallet, run_vdf,
+    Amount, Block, ChainSnapshot, ChainStatus, DEFAULT_TRANSACTION_FEE, Ledger, OutPoint,
+    PreparedBlock, Transaction, VDF_TARGET_BLOCK_MS, Wallet, run_vdf,
 };
 
 pub type SharedNode = Arc<Mutex<NodeCore>>;
@@ -119,9 +119,9 @@ pub struct LaunchProfileStatus {
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 pub struct MiningStatus {
     pub automatic: bool,
+    pub pow_mining_enabled: bool,
     pub burn_per_block: Amount,
     pub automatic_burn_fee: Amount,
-    pub economics: MiningEconomicsStatus,
     pub vdf_rounds: u32,
     pub vdf_target_block_ms: u64,
     pub current_leader: Option<String>,
@@ -130,16 +130,8 @@ pub struct MiningStatus {
 }
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
-pub struct MiningEconomicsStatus {
-    pub slider_max: Amount,
-    pub last_payout: Amount,
-    pub estimated_active_burn: Amount,
-    pub estimated_other_burn_rate_microluun: u64,
-    pub break_even_burn_microluun: u64,
-}
-
-#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 pub struct AutoMineOutcome {
+    pub pow_mined: Option<Transaction>,
     pub burned: Option<Transaction>,
     pub block: Option<Block>,
     pub skipped_reason: Option<String>,
@@ -147,6 +139,7 @@ pub struct AutoMineOutcome {
 
 #[derive(Clone, Debug)]
 pub struct AutoMinePlan {
+    pub pow_mined: Option<Transaction>,
     pub burned: Option<Transaction>,
     pub work: Option<PreparedBlock>,
     pub skipped_reason: Option<String>,
@@ -156,9 +149,12 @@ pub struct AutoMinePlan {
 pub struct NodeCore {
     wallet: Wallet,
     ledger: Ledger,
+    automatic_mining_enabled: bool,
+    pow_mining_enabled: bool,
     burn_per_block: Amount,
     burn_fee: Amount,
     last_auto_burn_height: Option<u64>,
+    last_auto_pow_mine_anchor: Option<String>,
     outbox: Vec<GossipEnvelope>,
 }
 
@@ -183,12 +179,31 @@ impl NodeCore {
         burn_per_block: Amount,
         burn_fee: Amount,
     ) -> Self {
+        Self::from_ledger_with_burn_fee_and_enabled(
+            wallet,
+            ledger,
+            burn_per_block > 0,
+            burn_per_block,
+            burn_fee,
+        )
+    }
+
+    pub fn from_ledger_with_burn_fee_and_enabled(
+        wallet: Wallet,
+        ledger: Ledger,
+        automatic_mining_enabled: bool,
+        burn_per_block: Amount,
+        burn_fee: Amount,
+    ) -> Self {
         Self {
             wallet,
             ledger,
+            automatic_mining_enabled,
+            pow_mining_enabled: false,
             burn_per_block,
             burn_fee,
             last_auto_burn_height: None,
+            last_auto_pow_mine_anchor: None,
             outbox: Vec::new(),
         }
     }
@@ -200,6 +215,7 @@ impl NodeCore {
     pub fn replace_wallet(&mut self, wallet: Wallet) {
         self.wallet = wallet;
         self.last_auto_burn_height = None;
+        self.last_auto_pow_mine_anchor = None;
     }
 
     pub fn ledger(&self) -> &Ledger {
@@ -344,10 +360,10 @@ impl NodeCore {
                 mine_difficulty_bits: launch_profile.mine_difficulty_bits,
             },
             mining: MiningStatus {
-                automatic: true,
+                automatic: self.automatic_mining_enabled,
+                pow_mining_enabled: self.pow_mining_enabled,
                 burn_per_block: self.burn_per_block,
                 automatic_burn_fee: self.burn_fee,
-                economics: self.mining_economics(),
                 vdf_rounds: self.ledger.vdf_rounds(),
                 vdf_target_block_ms: VDF_TARGET_BLOCK_MS,
                 current_leader,
@@ -355,34 +371,6 @@ impl NodeCore {
                 last_auto_burn_height: self.last_auto_burn_height,
             },
             chain,
-        }
-    }
-
-    fn mining_economics(&self) -> MiningEconomicsStatus {
-        let launch_profile = self.ledger.launch_profile();
-        let chain = self.ledger.chain();
-        let window = launch_profile.ticket_expiry_window_heights.max(1);
-        let last_payout = chain.last().map(|block| block.reward).unwrap_or(0);
-        let estimated_active_burn = estimated_active_burn_for_next_block(chain, launch_profile);
-        let average_active_burn_rate_microluun =
-            u128::from(estimated_active_burn) / u128::from(window);
-        let configured_burn_microluun = u128::from(self.burn_per_block);
-        let estimated_other_burn_rate_microluun = average_active_burn_rate_microluun
-            .saturating_sub(configured_burn_microluun)
-            .min(u128::from(u64::MAX)) as u64;
-        let break_even_burn_microluun = low_break_even_burn_microluun(
-            last_payout,
-            estimated_other_burn_rate_microluun,
-            self.burn_fee,
-            last_payout,
-        );
-
-        MiningEconomicsStatus {
-            slider_max: last_payout,
-            last_payout,
-            estimated_active_burn,
-            estimated_other_burn_rate_microluun,
-            break_even_burn_microluun,
         }
     }
 
@@ -395,13 +383,30 @@ impl NodeCore {
         amount: Amount,
         fee: Amount,
     ) -> Result<Option<Transaction>> {
-        let was_disabled = self.burn_per_block == 0;
+        self.set_automatic_burn_settings(amount > 0, amount, fee)
+    }
+
+    pub fn set_automatic_burn_settings(
+        &mut self,
+        enabled: bool,
+        amount: Amount,
+        fee: Amount,
+    ) -> Result<Option<Transaction>> {
+        let was_disabled = !self.automatic_mining_enabled || self.burn_per_block == 0;
+        self.automatic_mining_enabled = enabled;
         self.burn_per_block = amount;
         self.burn_fee = fee;
-        if was_disabled && amount > 0 {
+        if was_disabled && enabled && amount > 0 {
             self.last_auto_burn_height = None;
         }
         self.prepare_automatic_burn()
+    }
+
+    pub fn set_pow_mining_enabled(&mut self, enabled: bool) {
+        self.pow_mining_enabled = enabled;
+        if !enabled {
+            self.last_auto_pow_mine_anchor = None;
+        }
     }
 
     pub fn burn(&mut self, amount: Amount) -> Result<Transaction> {
@@ -472,6 +477,7 @@ impl NodeCore {
     pub fn automatic_mine_once(&mut self, timestamp_ms: u64) -> AutoMineOutcome {
         let plan = self.prepare_automatic_mining(timestamp_ms);
         let mut outcome = AutoMineOutcome {
+            pow_mined: plan.pow_mined,
             burned: plan.burned,
             block: None,
             skipped_reason: plan.skipped_reason,
@@ -496,10 +502,30 @@ impl NodeCore {
 
     pub fn prepare_automatic_mining(&mut self, timestamp_ms: u64) -> AutoMinePlan {
         let mut plan = AutoMinePlan {
+            pow_mined: None,
             burned: None,
             work: None,
             skipped_reason: None,
         };
+
+        let pow_error = match self.prepare_automatic_pow_mine() {
+            Ok(tx) => {
+                plan.pow_mined = tx;
+                None
+            }
+            Err(error) => Some(format!("automatic PoW mining failed: {error:#}")),
+        };
+
+        if !self.automatic_mining_enabled {
+            plan.skipped_reason =
+                Some(pow_error.unwrap_or_else(|| "automatic mining is off".to_string()));
+            return plan;
+        }
+
+        if let Some(error) = pow_error {
+            plan.skipped_reason = Some(error);
+            return plan;
+        }
 
         match self.prepare_automatic_burn() {
             Ok(tx) => plan.burned = tx,
@@ -535,8 +561,48 @@ impl NodeCore {
         plan
     }
 
+    fn prepare_automatic_pow_mine(&mut self) -> Result<Option<Transaction>> {
+        if !self.pow_mining_enabled {
+            return Ok(None);
+        }
+        let anchor = self
+            .ledger
+            .chain()
+            .last()
+            .map(|block| block.hash.clone())
+            .context("ledger has no anchor block")?;
+        if self.last_auto_pow_mine_anchor.as_deref() == Some(anchor.as_str())
+            || self.wallet_has_mine_for_anchor(&anchor)
+        {
+            return Ok(None);
+        }
+        let tx = self.ledger.build_mine(self.wallet.address())?;
+        if self.ledger.submit_transaction(tx.clone())? {
+            self.last_auto_pow_mine_anchor = Some(anchor);
+            self.outbox.push(GossipEnvelope::Transaction(tx.clone()));
+            return Ok(Some(tx));
+        }
+        Ok(None)
+    }
+
+    fn wallet_has_mine_for_anchor(&self, anchor: &str) -> bool {
+        self.ledger.pending().iter().any(|tx| {
+            matches!(
+                tx,
+                Transaction::Mine {
+                    output,
+                    anchor: tx_anchor,
+                    ..
+                } if tx_anchor == anchor && output.address == self.wallet.address()
+            )
+        })
+    }
+
     fn prepare_automatic_burn(&mut self) -> Result<Option<Transaction>> {
         let current_height = self.ledger.status().height;
+        if !self.automatic_mining_enabled {
+            return Ok(None);
+        }
         if self.burn_per_block == 0 {
             self.last_auto_burn_height = Some(current_height);
             return Ok(None);
@@ -644,6 +710,7 @@ impl NodeCore {
         let imported = self.ledger.extend_from_snapshot(snapshot)?;
         if imported {
             self.last_auto_burn_height = None;
+            self.last_auto_pow_mine_anchor = None;
             self.enqueue_imported_blocks(previous_height);
         }
         Ok(())
@@ -660,6 +727,7 @@ impl NodeCore {
 
         self.ledger = ledger;
         self.last_auto_burn_height = None;
+        self.last_auto_pow_mine_anchor = None;
         self.enqueue_imported_blocks(previous_height);
         Ok(true)
     }
@@ -679,101 +747,6 @@ impl NodeCore {
             self.outbox.push(GossipEnvelope::Blocks { blocks });
         }
     }
-}
-
-fn estimated_active_burn_for_next_block(chain: &[Block], launch_profile: &LaunchProfile) -> Amount {
-    let Some(tip) = chain.last() else {
-        return 0;
-    };
-    let window = launch_profile.ticket_expiry_window_heights.max(1);
-    let target_height = tip.height.saturating_add(1);
-    if target_height < launch_profile.ticket_maturity_delay_heights {
-        return block_burned(tip).saturating_mul(window);
-    }
-
-    let last_eligible_burn_height =
-        target_height.saturating_sub(launch_profile.ticket_maturity_delay_heights);
-    let first_eligible_burn_height =
-        last_eligible_burn_height.saturating_sub(window.saturating_sub(1));
-    let mut matching_blocks = 0_u64;
-    let mut total = 0_u64;
-    for block in chain {
-        if first_eligible_burn_height <= block.height && block.height <= last_eligible_burn_height {
-            matching_blocks = matching_blocks.saturating_add(1);
-            total = total.saturating_add(block_burned(block));
-        }
-    }
-
-    if matching_blocks >= window {
-        total
-    } else {
-        block_burned(tip).saturating_mul(window)
-    }
-}
-
-fn block_burned(block: &Block) -> Amount {
-    block
-        .transactions
-        .iter()
-        .filter(|tx| tx.is_burn())
-        .fold(0, |total, tx| total.saturating_add(tx.amount()))
-}
-
-fn low_break_even_burn_microluun(
-    payout: Amount,
-    other_burn_rate_microluun: u64,
-    fee: Amount,
-    slider_max: Amount,
-) -> u64 {
-    if payout == 0 || slider_max == 0 {
-        return 0;
-    }
-    if fee == 0 {
-        return 0;
-    }
-
-    let max = slider_max;
-    let steps = 1_000_u64;
-    let mut previous = 0_u64;
-    for step in 1..=steps {
-        let candidate = ((u128::from(max) * u128::from(step)) / u128::from(steps)) as u64;
-        if expected_burn_profit(candidate, other_burn_rate_microluun, payout, fee) >= 0.0 {
-            let mut low = previous;
-            let mut high = candidate;
-            for _ in 0..32 {
-                let middle = low + (high - low) / 2;
-                if expected_burn_profit(middle, other_burn_rate_microluun, payout, fee) >= 0.0 {
-                    high = middle;
-                } else {
-                    low = middle;
-                }
-            }
-            return high;
-        }
-        previous = candidate;
-    }
-    0
-}
-
-fn expected_burn_profit(
-    burn_microluun: u64,
-    other_burn_rate_microluun: u64,
-    payout: Amount,
-    fee: Amount,
-) -> f64 {
-    if burn_microluun == 0 {
-        return -(fee as f64);
-    }
-
-    let burn = burn_microluun as f64;
-    let other_burn_rate = other_burn_rate_microluun as f64;
-    let total_burn_rate = burn + other_burn_rate;
-    let win_chance = if total_burn_rate > 0.0 {
-        burn / total_burn_rate
-    } else {
-        1.0
-    };
-    payout as f64 * win_chance - burn - fee as f64
 }
 
 #[derive(Clone, Debug, Default, Deserialize, Eq, PartialEq, Serialize)]
@@ -897,24 +870,9 @@ pub fn now_ms() -> u64 {
 mod tests {
     use std::collections::BTreeMap;
 
-    use crate::domain::{MICRO_LUUN, Wallet};
+    use crate::domain::{Transaction, Wallet};
 
-    use super::{NodeConfig, NodeCore, expected_burn_profit, low_break_even_burn_microluun};
-
-    #[test]
-    fn break_even_uses_low_root_for_weighted_burn_rate() {
-        let other_burn_rate = 10 * MICRO_LUUN;
-        let payout = 102 * MICRO_LUUN;
-        let fee = MICRO_LUUN;
-        let break_even = low_break_even_burn_microluun(payout, other_burn_rate, fee, payout);
-
-        assert!(
-            break_even > 100_000 && break_even < 120_000,
-            "expected low break-even around 0.11 LUUN, got {break_even} microluun"
-        );
-        assert!(break_even < MICRO_LUUN);
-        assert!(expected_burn_profit(MICRO_LUUN, other_burn_rate, payout, fee) > 0.0);
-    }
+    use super::{NodeConfig, NodeCore};
 
     #[test]
     fn same_height_verified_import_does_not_reset_auto_burn_guard() {
@@ -939,6 +897,49 @@ mod tests {
 
         let second = node.prepare_automatic_mining(2);
         assert!(second.burned.is_none());
+    }
+
+    #[test]
+    fn automatic_pow_mining_queues_one_mine_action_per_anchor() {
+        let wallet = Wallet::from_seed("automatic-pow-mining-wallet");
+        let mut node = NodeCore::new(NodeConfig {
+            wallet: wallet.clone(),
+            genesis_allocations: BTreeMap::new(),
+            vdf_rounds: 10,
+            burn_per_block: 0,
+            burn_fee: 0,
+        });
+
+        let disabled = node.prepare_automatic_mining(1);
+        assert!(disabled.pow_mined.is_none());
+        assert_eq!(
+            disabled.skipped_reason.as_deref(),
+            Some("automatic mining is off")
+        );
+
+        node.set_pow_mining_enabled(true);
+        let first = node.prepare_automatic_mining(2);
+        let first_mine = first.pow_mined.as_ref().expect("PoW should be queued");
+        let Transaction::Mine {
+            anchor,
+            output,
+            difficulty_bits,
+            ..
+        } = first_mine
+        else {
+            panic!("expected mine transaction");
+        };
+        assert_eq!(anchor, &node.chain().last().unwrap().hash);
+        assert_eq!(output.address, wallet.address());
+        assert_eq!(
+            *difficulty_bits,
+            node.ledger().current_mine_difficulty_bits()
+        );
+        assert_eq!(node.ledger().pending().len(), 1);
+
+        let second = node.prepare_automatic_mining(3);
+        assert!(second.pow_mined.is_none());
+        assert_eq!(node.ledger().pending().len(), 1);
     }
 }
 

@@ -11,12 +11,13 @@ use anyhow::{Context, Result, bail};
 use luun::{
     adapters::{chain_store::SqliteChainStore, config_store, http, p2p, wallet_store},
     app::{NodeCore, PeerBook, SharedNode, SharedPeerBook, now_ms},
-    domain::{Amount, BLOCK_REWARD, ChainSnapshot, GenesisBurn, Ledger, MICRO_LUUN, run_vdf},
+    domain::{Amount, ChainSnapshot, GenesisBurn, Ledger, MICRO_LUUN, run_vdf},
 };
 use tokio::sync::Mutex;
 
 const GENESIS_BOOTSTRAP_BURN_AMOUNT: Amount = MICRO_LUUN;
-const GENESIS_INITIAL_BURN_PER_BLOCK: Amount = BLOCK_REWARD;
+const GENESIS_INITIAL_BURN_PER_BLOCK: Amount = GENESIS_BOOTSTRAP_BURN_AMOUNT;
+const GENESIS_INITIAL_BURN_FEE: Amount = 0;
 const VDF_MEASUREMENT_INITIAL_ROUNDS: u32 = 1_000_000;
 const VDF_MEASUREMENT_MAX_ROUNDS: u32 = 100_000_000;
 const VDF_MEASUREMENT_MIN_ELAPSED: Duration = Duration::from_millis(150);
@@ -42,19 +43,26 @@ async fn main() -> Result<()> {
     let mut ui_config = config_store::load_or_create(&config_path)?;
     if opts.chain_mode == ChainMode::Genesis {
         ui_config.setup_complete = false;
+        ui_config.mining_enabled = true;
+        ui_config.pow_mining_enabled = false;
+        ui_config.burn_per_block = GENESIS_INITIAL_BURN_PER_BLOCK;
+        ui_config.burn_fee = GENESIS_INITIAL_BURN_FEE;
         config_store::save(&config_path, &ui_config)?;
     }
     let ledger = initialize_ledger(&opts, wallet.address(), &chain_store).await?;
     let has_chain = opts.has_chain() || persisted_chain_exists;
     let initial_burn_per_block = initial_burn_per_block(&opts, &ui_config);
-    let initial_burn_fee = ui_config.burn_fee;
+    let initial_burn_fee = initial_burn_fee(&opts, &ui_config);
 
-    let node: SharedNode = Arc::new(Mutex::new(NodeCore::from_ledger_with_burn_fee(
+    let mut node_core = NodeCore::from_ledger_with_burn_fee_and_enabled(
         wallet,
         ledger,
+        ui_config.mining_enabled,
         initial_burn_per_block,
         initial_burn_fee,
-    )));
+    );
+    node_core.set_pow_mining_enabled(ui_config.pow_mining_enabled);
+    let node: SharedNode = Arc::new(Mutex::new(node_core));
     let ui_config = Arc::new(Mutex::new(ui_config));
     let mut peers = ui_config.lock().await.peers.clone();
     peers.extend(opts.peers);
@@ -296,6 +304,13 @@ fn initial_burn_per_block(opts: &CliOptions, ui_config: &config_store::UiConfig)
     match opts.chain_mode {
         ChainMode::Genesis => GENESIS_INITIAL_BURN_PER_BLOCK,
         ChainMode::Setup | ChainMode::Join => ui_config.burn_per_block,
+    }
+}
+
+fn initial_burn_fee(opts: &CliOptions, ui_config: &config_store::UiConfig) -> Amount {
+    match opts.chain_mode {
+        ChainMode::Genesis => GENESIS_INITIAL_BURN_FEE,
+        ChainMode::Setup | ChainMode::Join => ui_config.burn_fee,
     }
 }
 
@@ -547,14 +562,15 @@ mod tests {
     use luun::{
         adapters::{chain_store::SqliteChainStore, config_store::UiConfig},
         app::{DEFAULT_BURN_PER_BLOCK, NodeCore},
-        domain::{BLOCK_REWARD, GenesisBurn, Ledger, Wallet},
+        domain::{BLOCK_REWARD, GenesisBurn, Ledger, MICRO_LUUN, Wallet},
     };
     use rusqlite::Connection;
     use tempfile::tempdir;
     use tokio::sync::Mutex;
 
     use super::{
-        ChainMode, CliOptions, extrapolate_vdf_rounds, help_text, initial_burn_per_block,
+        ChainMode, CliOptions, GENESIS_INITIAL_BURN_FEE, GENESIS_INITIAL_BURN_PER_BLOCK,
+        extrapolate_vdf_rounds, help_text, initial_burn_fee, initial_burn_per_block,
         initialize_ledger, measure_vdf_rounds, persist_chain_snapshot,
         run_chain_persistence_with_interval, validate_wallet_for_mode,
     };
@@ -631,18 +647,65 @@ mod tests {
     }
 
     #[test]
-    fn genesis_mode_starts_with_full_reward_burn_rate() {
+    fn genesis_mode_starts_with_bootstrap_burn_rate_and_zero_fee() {
         let genesis = parse(&["--genesis"]).unwrap().unwrap();
         let configured = UiConfig {
             burn_per_block: 50,
             burn_fee: 3,
             ..UiConfig::default()
         };
-        assert_eq!(initial_burn_per_block(&genesis, &configured), BLOCK_REWARD);
+        assert_eq!(
+            initial_burn_per_block(&genesis, &configured),
+            GENESIS_INITIAL_BURN_PER_BLOCK
+        );
+        assert_eq!(
+            initial_burn_fee(&genesis, &configured),
+            GENESIS_INITIAL_BURN_FEE
+        );
     }
 
     #[test]
-    fn non_genesis_modes_start_with_configured_burn_rate() {
+    fn genesis_default_auto_mining_keeps_burning_after_first_block() {
+        let wallet = Wallet::from_seed("genesis-auto-burn-wallet");
+        let mut genesis = BTreeMap::new();
+        genesis.insert(wallet.address().to_string(), MICRO_LUUN);
+        let ledger = Ledger::new_with_genesis_burns(
+            genesis,
+            vec![GenesisBurn::new(wallet.address(), MICRO_LUUN)],
+            1,
+        )
+        .unwrap();
+        let mut node = NodeCore::from_ledger_with_burn_fee(
+            wallet.clone(),
+            ledger,
+            GENESIS_INITIAL_BURN_PER_BLOCK,
+            GENESIS_INITIAL_BURN_FEE,
+        );
+
+        let first = node.automatic_mine_once(1_000);
+        let second = node.automatic_mine_once(2_000);
+
+        assert_eq!(
+            first.burned.as_ref().map(|tx| tx.amount()),
+            Some(MICRO_LUUN)
+        );
+        assert!(first.block.is_some(), "{first:?}");
+        assert_eq!(
+            second.burned.as_ref().map(|tx| tx.amount()),
+            Some(MICRO_LUUN)
+        );
+        assert!(second.block.is_some(), "{second:?}");
+        assert!(
+            second.skipped_reason.as_deref().is_none_or(|reason| {
+                !reason.contains("block must include at least one burn transaction")
+            }),
+            "{second:?}"
+        );
+        assert!(node.ledger().balance_of(wallet.address()) >= BLOCK_REWARD - 2 * MICRO_LUUN);
+    }
+
+    #[test]
+    fn non_genesis_modes_start_with_configured_burn_rate_and_fee() {
         let configured = UiConfig {
             burn_per_block: 50,
             burn_fee: 3,
@@ -651,9 +714,11 @@ mod tests {
 
         let setup = parse(&[]).unwrap().unwrap();
         assert_eq!(initial_burn_per_block(&setup, &configured), 50);
+        assert_eq!(initial_burn_fee(&setup, &configured), 3);
 
         let join = parse(&["--join", "127.0.0.1:9444"]).unwrap().unwrap();
         assert_eq!(initial_burn_per_block(&join, &configured), 50);
+        assert_eq!(initial_burn_fee(&join, &configured), 3);
 
         assert_eq!(
             initial_burn_per_block(&setup, &UiConfig::default()),

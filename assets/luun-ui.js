@@ -26,6 +26,8 @@ window.luunApp = function luunApp() {
     burnAmountDraft: 0,
     burnFee: 1000000,
     burnFeeDraft: "1",
+    miningEnabled: false,
+    powMiningEnabled: false,
     burnAmountDirty: false,
     transferTo: "",
     transferAmount: null,
@@ -36,6 +38,7 @@ window.luunApp = function luunApp() {
     flash: null,
     flashTimer: null,
     showWalletUtxos: false,
+    showPowDifficultyInfo: false,
     lastUpdated: null,
     pollHandle: null,
     newBlockHashes: new Set(),
@@ -277,6 +280,8 @@ window.luunApp = function luunApp() {
         this.p2pMetrics = p2pMetrics;
         this.burnAmount = status.mining?.burn_per_block ?? this.burnAmount;
         this.burnFee = status.mining?.automatic_burn_fee ?? this.burnFee;
+        this.miningEnabled = status.mining?.automatic ?? this.miningEnabled;
+        this.powMiningEnabled = status.mining?.pow_mining_enabled ?? this.powMiningEnabled;
         if (!this.burnAmountDirty) {
           this.burnAmountDraft = this.amountLabel(this.burnAmount);
           this.burnFeeDraft = this.amountLabel(this.burnFee);
@@ -376,9 +381,18 @@ window.luunApp = function luunApp() {
       this.showWalletUtxos = false;
     },
 
+    openPowDifficultyInfo() {
+      this.showPowDifficultyInfo = true;
+    },
+
+    closePowDifficultyInfo() {
+      this.showPowDifficultyInfo = false;
+    },
+
     closeModals() {
       this.closeTransactionModal();
       this.closeWalletUtxosModal();
+      this.closePowDifficultyInfo();
     },
 
     async loadOlderBlocks() {
@@ -458,8 +472,10 @@ window.luunApp = function luunApp() {
         this.burnFeeDraft = this.amountLabel(fee);
         await this.postForm(
           "/api/settings/burn-per-block",
-          { amount, fee },
-          `Burn rate set to ${this.amountLabel(amount)} LUUN per block with ${this.amountLabel(fee)} fee`
+          { enabled: this.miningEnabled, amount, fee },
+          this.miningEnabled
+            ? `Mining on: ${this.amountLabel(amount)} LUUN per block with ${this.amountLabel(fee)} fee`
+            : `Mining settings saved while off`
         );
         this.burnAmountDirty = false;
         this.burnAmount = amount;
@@ -469,73 +485,47 @@ window.luunApp = function luunApp() {
       }
     },
 
-    async minePowReward() {
+    async setMiningEnabled(enabled) {
+      const previous = this.miningEnabled;
       try {
+        const amount = this.parseLuunAmount(this.burnAmountDraft);
+        const fee = this.parseLuunAmount(this.burnFeeDraft);
+        if (enabled && amount === 0) {
+          this.miningEnabled = false;
+          throw new Error("Set LUUN per block before turning mining on");
+        }
+        this.miningEnabled = enabled;
         await this.postForm(
-          "/api/mine",
-          {},
-          `Queued PoW mine action for ${this.amountLabel(this.status.chain?.mine_reward ?? 0)} LUUN`
+          "/api/settings/burn-per-block",
+          { enabled, amount, fee },
+          enabled ? "Mining turned on" : "Mining turned off"
+        );
+        this.burnAmountDirty = false;
+        this.burnAmount = amount;
+        this.burnFee = fee;
+      } catch (error) {
+        this.miningEnabled = previous;
+        this.showFlash(error.message, "error");
+      }
+    },
+
+    async setPowMiningEnabled(enabled) {
+      const previous = this.powMiningEnabled;
+      try {
+        this.powMiningEnabled = enabled;
+        await this.postForm(
+          "/api/settings/pow-mining",
+          { enabled },
+          enabled ? "PoW mining turned on" : "PoW mining turned off"
         );
       } catch (error) {
+        this.powMiningEnabled = previous;
         this.showFlash(error.message, "error");
       }
     },
 
     automaticBurnFeeDraft() {
       return this.parseLuunAmount(this.burnFeeDraft);
-    },
-
-    miningEconomics() {
-      return this.status.mining?.economics || {};
-    },
-
-    burnSliderMax() {
-      return this.amountNumber(this.miningEconomics().slider_max ?? this.latestBlockReward());
-    },
-
-    latestBlock() {
-      return this.blocks[0] || null;
-    },
-
-    latestBlockReward() {
-      const latest = this.latestBlock();
-      return Math.max(0, Math.trunc(Number(latest?.reward ?? 0)));
-    },
-
-    ticketWindow() {
-      return Math.max(
-        1,
-        Math.trunc(Number(this.status.launch_profile?.ticket_expiry_window_heights) || 1)
-      );
-    },
-
-    estimatedActiveBurnTotal() {
-      return Math.max(0, Math.trunc(Number(this.miningEconomics().estimated_active_burn ?? 0)));
-    },
-
-    breakEvenBurn() {
-      return Math.max(
-        0,
-        Math.trunc(Number(this.miningEconomics().break_even_burn_microluun) || 0)
-      );
-    },
-
-    breakEvenPercent() {
-      const max = Math.max(0, Math.trunc(Number(this.miningEconomics().slider_max ?? this.latestBlockReward())));
-      return max > 0 ? Math.min(100, Math.max(0, (this.breakEvenBurn() / max) * 100)) : 0;
-    },
-
-    breakEvenStyle() {
-      return `left: ${this.breakEvenPercent()}%`;
-    },
-
-    burnBreakEvenLabel() {
-      const marker = this.breakEvenBurn();
-      const payout = Math.max(0, Math.trunc(Number(this.miningEconomics().last_payout ?? this.latestBlockReward())));
-      const burned = this.estimatedActiveBurnTotal();
-      const fee = this.status.mining?.automatic_burn_fee ?? this.automaticBurnFeeDraft();
-      const window = this.ticketWindow();
-      return `Marker: break-even near ${this.amountLabel(marker)} LUUN, using last payout ${this.amountLabel(payout)}, estimated active burns ${this.amountLabel(burned)}, fee ${this.amountLabel(fee)}, and ${window} eligible blocks.`;
     },
 
     amountLabel(value) {
@@ -635,6 +625,22 @@ window.luunApp = function luunApp() {
 
     txAmount(tx) {
       return tx.amount ?? tx.outputs?.[0]?.amount ?? 0;
+    },
+
+    isMineTx(tx) {
+      return tx?.kind === "mine";
+    },
+
+    txDifficultyBits(tx) {
+      return tx?.difficulty_bits ?? tx?.difficultyBits ?? null;
+    },
+
+    txProofBits(tx) {
+      return tx?.proof_bits ?? tx?.proofBits ?? null;
+    },
+
+    txProofHash(tx) {
+      return tx?.proof_hash ?? tx?.proofHash ?? tx?.signature ?? null;
     },
 
     txInputs(tx) {

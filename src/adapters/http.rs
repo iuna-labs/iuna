@@ -42,8 +42,14 @@ struct HttpState {
 
 #[derive(Debug, Deserialize)]
 struct BurnSettingsForm {
+    enabled: Option<bool>,
     amount: Amount,
     fee: Amount,
+}
+
+#[derive(Debug, Deserialize)]
+struct PowMiningForm {
+    enabled: bool,
 }
 
 #[derive(Debug, Deserialize)]
@@ -107,6 +113,9 @@ struct WalletTransactionRow {
     block_height: Option<u64>,
     block_miner: Option<String>,
     direction: &'static str,
+    difficulty_bits: Option<u32>,
+    proof_bits: Option<u32>,
+    proof_hash: Option<String>,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq, Serialize)]
@@ -142,6 +151,9 @@ struct UiTransaction {
     outputs: Vec<TxOutput>,
     change: Vec<TxOutput>,
     signature: String,
+    difficulty_bits: Option<u32>,
+    proof_bits: Option<u32>,
+    proof_hash: Option<String>,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq, Serialize)]
@@ -189,7 +201,7 @@ pub async fn serve(
             "/api/settings/burn-per-block",
             post(api_burn_per_block_form),
         )
-        .route("/api/mine", post(api_mine_form))
+        .route("/api/settings/pow-mining", post(api_pow_mining_form))
         .route("/api/transfer", post(api_transfer_form))
         .route("/settings/burn-per-block", post(burn_per_block_form))
         .route("/transfer", post(transfer_form))
@@ -347,12 +359,16 @@ async fn api_burn_per_block_form(
     State(state): State<HttpState>,
     Form(form): Form<BurnSettingsForm>,
 ) -> Json<ActionResponse> {
-    let result = set_burn_settings(&state, form.amount, form.fee).await;
+    let enabled = form.enabled.unwrap_or(form.amount > 0);
+    let result = set_burn_settings(&state, enabled, form.amount, form.fee).await;
     action_json(result)
 }
 
-async fn api_mine_form(State(state): State<HttpState>) -> Json<ActionResponse> {
-    let result = mine_pow_reward(&state).await;
+async fn api_pow_mining_form(
+    State(state): State<HttpState>,
+    Form(form): Form<PowMiningForm>,
+) -> Json<ActionResponse> {
+    let result = set_pow_mining(&state, form.enabled).await;
     action_json(result)
 }
 
@@ -360,7 +376,8 @@ async fn burn_per_block_form(
     State(state): State<HttpState>,
     Form(form): Form<BurnSettingsForm>,
 ) -> Response {
-    match set_burn_settings(&state, form.amount, form.fee).await {
+    let enabled = form.enabled.unwrap_or(form.amount > 0);
+    match set_burn_settings(&state, enabled, form.amount, form.fee).await {
         Ok(_) => Redirect::to("/").into_response(),
         Err(error) => api_error(error).into_response(),
     }
@@ -396,17 +413,29 @@ async fn peer_form(State(state): State<HttpState>, Form(form): Form<PeerForm>) -
     }
 }
 
-async fn set_burn_settings(state: &HttpState, amount: Amount, fee: Amount) -> Result<()> {
+async fn set_burn_settings(
+    state: &HttpState,
+    enabled: bool,
+    amount: Amount,
+    fee: Amount,
+) -> Result<()> {
     let result = {
         let mut node = state.node.lock().await;
-        let result = node.set_automatic_burn(amount, fee);
+        let result = node.set_automatic_burn_settings(enabled, amount, fee);
         let outbox = node.drain_outbox();
         (result, outbox)
     };
 
     match result.0 {
         Ok(_) => {
-            persist_burn_settings_config(&state.ui_config, &state.config_path, amount, fee).await?;
+            persist_burn_settings_config(
+                &state.ui_config,
+                &state.config_path,
+                enabled,
+                amount,
+                fee,
+            )
+            .await?;
             state.gossip.broadcast(result.1).await
         }
         Err(error) => Err(error),
@@ -416,12 +445,32 @@ async fn set_burn_settings(state: &HttpState, amount: Amount, fee: Amount) -> Re
 async fn persist_burn_settings_config(
     ui_config: &Arc<Mutex<UiConfig>>,
     config_path: &Path,
+    enabled: bool,
     amount: Amount,
     fee: Amount,
 ) -> Result<()> {
     let mut config = ui_config.lock().await;
+    config.mining_enabled = enabled;
     config.burn_per_block = amount;
     config.burn_fee = fee;
+    config_store::save(config_path, &config)
+}
+
+async fn set_pow_mining(state: &HttpState, enabled: bool) -> Result<()> {
+    {
+        let mut node = state.node.lock().await;
+        node.set_pow_mining_enabled(enabled);
+    }
+    persist_pow_mining_config(&state.ui_config, &state.config_path, enabled).await
+}
+
+async fn persist_pow_mining_config(
+    ui_config: &Arc<Mutex<UiConfig>>,
+    config_path: &Path,
+    enabled: bool,
+) -> Result<()> {
+    let mut config = ui_config.lock().await;
+    config.pow_mining_enabled = enabled;
     config_store::save(config_path, &config)
 }
 
@@ -518,9 +567,15 @@ fn wallet_transaction_row(
             } else {
                 "sent"
             },
+            difficulty_bits: None,
+            proof_bits: None,
+            proof_hash: None,
         }),
         Transaction::Mine {
-            output, signature, ..
+            output,
+            difficulty_bits,
+            signature,
+            ..
         } if output.address == wallet => Some(WalletTransactionRow {
             kind: "mine",
             from: "pow".to_string(),
@@ -535,6 +590,9 @@ fn wallet_transaction_row(
             block_height,
             block_miner,
             direction: "received",
+            difficulty_bits: Some(*difficulty_bits),
+            proof_bits: Some(proof_bits(signature)),
+            proof_hash: Some(signature.clone()),
         }),
         _ => None,
     }
@@ -592,6 +650,9 @@ fn ui_transaction(
             outputs: outputs.clone(),
             change: Vec::new(),
             signature: signature.clone(),
+            difficulty_bits: None,
+            proof_bits: None,
+            proof_hash: None,
         },
         Transaction::Burn {
             inputs,
@@ -609,9 +670,15 @@ fn ui_transaction(
             outputs: Vec::new(),
             change: change.clone(),
             signature: signature.clone(),
+            difficulty_bits: None,
+            proof_bits: None,
+            proof_hash: None,
         },
         Transaction::Mine {
-            output, signature, ..
+            output,
+            difficulty_bits,
+            signature,
+            ..
         } => UiTransaction {
             kind: "mine",
             from: "pow".to_string(),
@@ -622,6 +689,9 @@ fn ui_transaction(
             outputs: vec![output.clone()],
             change: Vec::new(),
             signature: signature.clone(),
+            difficulty_bits: Some(*difficulty_bits),
+            proof_bits: Some(proof_bits(signature)),
+            proof_hash: Some(signature.clone()),
         },
     }
 }
@@ -643,6 +713,31 @@ fn ui_inputs(
             }
         })
         .collect()
+}
+
+fn proof_bits(hex_hash: &str) -> u32 {
+    let mut bits = 0_u32;
+    for byte in hex_hash.as_bytes() {
+        let Some(nibble) = hex_nibble(*byte) else {
+            break;
+        };
+        if nibble == 0 {
+            bits += 4;
+            continue;
+        }
+        bits += nibble.leading_zeros() - 4;
+        break;
+    }
+    bits
+}
+
+fn hex_nibble(byte: u8) -> Option<u8> {
+    match byte {
+        b'0'..=b'9' => Some(byte - b'0'),
+        b'a'..=b'f' => Some(byte - b'a' + 10),
+        b'A'..=b'F' => Some(byte - b'A' + 10),
+        _ => None,
+    }
 }
 
 fn known_output_index(
@@ -800,20 +895,6 @@ async fn transfer(state: &HttpState, form: TransferForm) -> Result<()> {
     }
 }
 
-async fn mine_pow_reward(state: &HttpState) -> Result<()> {
-    let result = {
-        let mut node = state.node.lock().await;
-        let result = node.mine_pow_reward();
-        let outbox = node.drain_outbox();
-        (result, outbox)
-    };
-
-    match result.0 {
-        Ok(_) => state.gossip.broadcast(result.1).await,
-        Err(error) => Err(error),
-    }
-}
-
 fn validate_transfer_form(form: TransferForm) -> Result<(String, Amount, Amount, Vec<OutPoint>)> {
     let to = form.to.trim();
     if to.is_empty() {
@@ -926,7 +1007,7 @@ const INDEX_HTML: &str = r#"<!doctype html>
     code { overflow-wrap: anywhere; color: #c7f5ea; }
     .table-wrap { overflow-x: auto; }
     .muted { color: #8d989f; }
-    .flash { border-radius: 6px; padding: 10px 12px; margin: 12px 0; border: 1px solid; font-weight: 700; }
+    .flash { position: fixed; top: 18px; right: 18px; z-index: 80; width: min(420px, calc(100vw - 36px)); border-radius: 6px; padding: 10px 12px; border: 1px solid; font-weight: 700; box-shadow: 0 18px 48px rgba(0, 0, 0, .38); }
     .flash.success { color: #d5f55f; background: #1c2516; border-color: #566d25; }
     .flash.error { color: #ffb1a8; background: #2a1717; border-color: #713434; }
     .ok { color: #d5f55f; }
@@ -977,16 +1058,33 @@ const INDEX_HTML: &str = r#"<!doctype html>
     .wallet-balance-line:hover, .wallet-balance-line:focus-visible { border-color: #d5f55f; outline: none; }
     .wallet-balance-line .tx-value { font-size: 16px; font-weight: 850; }
     .mining-grid { width: 100%; display: grid; grid-template-columns: minmax(0, 1fr); gap: 12px; align-items: start; }
-    .mining-form { width: 100%; display: grid; grid-template-columns: minmax(220px, .45fr) minmax(280px, 1fr); gap: 14px; align-items: end; }
+    .panel-description { max-width: 760px; margin: -4px 0 12px; color: #9eb3bc; font-size: 13px; line-height: 1.45; }
+    .mining-form { width: 100%; display: flex; flex-wrap: wrap; gap: 10px; align-items: end; }
     .burn-fields { display: flex; flex-wrap: wrap; gap: 10px; align-items: end; }
-    .burn-slider-panel { display: grid; gap: 8px; min-width: 0; }
-    .burn-slider-head, .burn-slider-scale { display: flex; justify-content: space-between; gap: 10px; color: #8d989f; font-size: 11px; font-weight: 800; text-transform: uppercase; }
-    .burn-slider-track { position: relative; min-height: 28px; display: flex; align-items: center; }
-    .burn-range { width: 100%; min-width: 0; accent-color: #d5f55f; }
-    .break-even-marker { position: absolute; top: 2px; bottom: 2px; width: 2px; transform: translateX(-1px); background: #ffd070; box-shadow: 0 0 0 1px #111316, 0 0 0 4px rgba(255, 208, 112, .18); pointer-events: none; }
-    .burn-slider-note { color: #a8b2b8; font-size: 12px; line-height: 1.4; }
-    .mine-action-row { display: flex; flex-wrap: wrap; justify-content: space-between; gap: 10px; align-items: center; }
-    .mine-action-meta { color: #9eb3bc; font-size: 13px; }
+    .mine-action-row { display: grid; grid-template-columns: minmax(0, 1fr) auto; gap: 12px; align-items: center; }
+    .mine-stats { display: grid; grid-template-columns: repeat(3, minmax(112px, 1fr)); gap: 8px; min-width: 0; }
+    .mine-stat { min-width: 0; border: 1px solid #2f363c; border-radius: 8px; padding: 9px 10px; background: #111316; }
+    .mine-stat-label { display: flex; gap: 5px; align-items: center; color: #879198; font-size: 10px; font-weight: 850; text-transform: uppercase; }
+    .mine-stat-value { margin-top: 5px; color: #dce4e7; font-size: 14px; font-weight: 850; font-variant-numeric: tabular-nums; overflow-wrap: anywhere; }
+    .mine-stat-value.money { color: #d5f55f; }
+    .info-button { display: inline-grid; place-items: center; width: 18px; height: 18px; padding: 0; border-radius: 999px; border-color: #3a4248; background: #181b1f; color: #9eb3bc; font-size: 11px; line-height: 1; }
+    .info-button:hover, .info-button:focus-visible { border-color: #d5f55f; color: #d5f55f; outline: none; }
+    .info-copy { display: grid; gap: 10px; color: #c3cbd0; line-height: 1.45; }
+    .info-copy p { margin: 0; }
+    .info-facts { display: grid; grid-template-columns: repeat(auto-fit, minmax(150px, 1fr)); gap: 8px; }
+    .info-fact { border: 1px solid #2f363c; border-radius: 8px; padding: 10px; background: #111316; }
+    .info-fact .label { color: #879198; font-size: 10px; font-weight: 850; text-transform: uppercase; }
+    .info-fact .value { margin-top: 5px; color: #d5f55f; font-weight: 850; }
+    .mining-head { align-items: center; }
+    .toggle-switch { display: inline-flex; grid-template-columns: none; align-items: center; gap: 9px; color: #9fa8ad; font-size: 12px; font-weight: 850; cursor: pointer; user-select: none; }
+    .toggle-switch input { position: absolute; opacity: 0; pointer-events: none; }
+    .toggle-track { position: relative; width: 46px; height: 26px; border: 1px solid #3a4248; border-radius: 999px; background: #101215; transition: background .16s ease, border-color .16s ease; }
+    .toggle-thumb { position: absolute; top: 3px; left: 3px; width: 18px; height: 18px; border-radius: 999px; background: #879198; transition: transform .16s ease, background .16s ease; }
+    .toggle-switch.active { color: #d5f55f; }
+    .toggle-switch.active .toggle-track { border-color: #d5f55f; background: #263219; }
+    .toggle-switch.active .toggle-thumb { transform: translateX(20px); background: #d5f55f; }
+    .toggle-switch:focus-within .toggle-track { outline: 2px solid #d5f55f; outline-offset: 2px; }
+    .toggle-text { min-width: 22px; text-align: right; }
     .receive-address { display: grid; gap: 8px; }
     .address-box { border: 1px solid #2f363c; border-radius: 8px; padding: 11px; background: #111316; }
     .panel-head { display: flex; justify-content: space-between; gap: 12px; align-items: center; margin-bottom: 12px; }
@@ -1057,9 +1155,8 @@ const INDEX_HTML: &str = r#"<!doctype html>
     .tx-modal-empty { border: 1px dashed #3a4248; border-radius: 8px; padding: 10px; color: #8d989f; }
     .utxo-list { display: grid; gap: 8px; }
     .wallet-utxo-row { display: grid; gap: 6px; border: 1px solid #2f363c; border-radius: 8px; padding: 10px; background: #111316; }
-    @media (max-width: 760px) { .utxo-flow { grid-template-columns: 1fr; } .utxo-arrow { min-height: 28px; transform: rotate(90deg); } .tx-modal-head { align-items: stretch; } }
+    @media (max-width: 760px) { .utxo-flow, .mine-action-row, .mine-stats { grid-template-columns: 1fr; } .utxo-arrow { min-height: 28px; transform: rotate(90deg); } .tx-modal-head { align-items: stretch; } }
     @media (max-width: 920px) { .setup-grid, .wallet-grid, .mining-grid, .detail-grid { grid-template-columns: 1fr; } }
-    @media (max-width: 920px) { .mining-form { grid-template-columns: 1fr; } }
     @media (max-width: 760px) {
       .app-shell { grid-template-columns: 1fr; }
       .sidebar { position: sticky; z-index: 5; bottom: 0; top: auto; height: auto; flex-direction: row; justify-content: space-between; padding: 8px; border-right: 0; border-bottom: 1px solid #262b2f; }
@@ -1076,7 +1173,7 @@ const INDEX_HTML: &str = r#"<!doctype html>
       .block-card { flex-basis: 108px; }
     }
   </style>
-  <script defer src="/assets/luun-ui.js?v=43"></script>
+  <script defer src="/assets/luun-ui.js?v=45"></script>
   <script defer src="/assets/alpine.min.js"></script>
 </head>
 <body x-data="luunApp()" x-init="init()" @keydown.window.escape="closeModals()" x-cloak>
@@ -1182,6 +1279,8 @@ const INDEX_HTML: &str = r#"<!doctype html>
                   <div class="tx-field"><span class="tx-label">Status</span><span class="tx-value text" x-text="txTitle(tx)"></span></div>
                   <div class="tx-field"><span class="tx-label">From</span><code class="tx-value hash" x-text="short(tx.from)"></code></div>
                   <div class="tx-field" x-show="tx.to"><span class="tx-label">To</span><code class="tx-value hash" x-text="short(tx.to)"></code></div>
+                  <div class="tx-field" x-show="isMineTx(tx)"><span class="tx-label">Proof Bits</span><span class="tx-value number"><span x-text="txProofBits(tx) ?? '-'"></span> / <span x-text="txDifficultyBits(tx) ?? '-'"></span></span></div>
+                  <div class="tx-field" x-show="isMineTx(tx)"><span class="tx-label">Proof Hash</span><code class="tx-value hash" x-text="short(txProofHash(tx))"></code></div>
                   <div class="tx-field"><span class="tx-label">Signature</span><code class="tx-value hash" x-text="short(tx.signature)"></code></div>
                 </div>
               </div>
@@ -1207,29 +1306,46 @@ const INDEX_HTML: &str = r#"<!doctype html>
           </div>
         </div>
         <div class="panel">
-          <h3>Mining</h3>
+          <div class="panel-head mining-head">
+            <h3>Burn</h3>
+            <label class="toggle-switch" :class="{ active: miningEnabled }">
+              <input type="checkbox" :checked="miningEnabled" @change="setMiningEnabled($event.target.checked)">
+              <span class="toggle-track" aria-hidden="true"><span class="toggle-thumb"></span></span>
+              <span class="toggle-text" x-text="miningEnabled ? 'On' : 'Off'"></span>
+            </label>
+          </div>
+          <div class="panel-description">Burn LUUN to compete for block leadership. Winning burns produce PoB/VDF blocks and earn the transaction fees in those blocks.</div>
           <form class="mining-form" @submit.prevent="saveBurn">
             <div class="burn-fields">
-              <label>LUUN per block<input x-model="burnAmountDraft" @input="burnAmountDirty = true" type="number" min="0" :max="burnSliderMax()" step="0.000001"></label>
+              <label>LUUN per block<input x-model="burnAmountDraft" @input="burnAmountDirty = true" type="number" min="0" step="0.000001"></label>
               <label>Fee<input x-model="burnFeeDraft" @input="burnAmountDirty = true" type="number" min="0" step="0.000001"></label>
               <button class="primary" type="submit">Save</button>
-            </div>
-            <div class="burn-slider-panel">
-              <div class="burn-slider-head"><span>Burn range</span><span><span x-text="burnAmountDraft"></span> LUUN</span></div>
-              <div class="burn-slider-track">
-                <input class="burn-range" x-model="burnAmountDraft" @input="burnAmountDirty = true" type="range" min="0" :max="burnSliderMax()" step="0.000001">
-                <div class="break-even-marker" :style="breakEvenStyle()" title="Estimated break-even burn"></div>
-              </div>
-              <div class="burn-slider-scale"><span>0</span><span x-text="`${burnSliderMax()} LUUN`"></span></div>
-              <div class="burn-slider-note" x-text="burnBreakEvenLabel()"></div>
             </div>
           </form>
         </div>
         <div class="panel">
-          <h3>PoW issuance</h3>
+          <h3>Mine</h3>
+          <div class="panel-description">Mine with PoW to introduce new LUUN. Accepted mine actions pay the fixed mine reward to this wallet when included in a block.</div>
           <div class="mine-action-row">
-            <div class="mine-action-meta">Mine action reward: LUUN <span x-text="amountLabel(status.chain?.mine_reward ?? 0)"></span> / difficulty <span x-text="status.launch_profile?.mine_difficulty_bits ?? '-'"></span> bits</div>
-            <button class="primary" type="button" @click="minePowReward">Mine coin</button>
+            <div class="mine-stats" aria-label="PoW issuance settings">
+              <div class="mine-stat">
+                <div class="mine-stat-label">Reward</div>
+                <div class="mine-stat-value money">LUUN <span x-text="amountLabel(status.chain?.mine_reward ?? 0)"></span></div>
+              </div>
+              <div class="mine-stat">
+                <div class="mine-stat-label">Difficulty <button class="info-button" type="button" @click="openPowDifficultyInfo" title="How difficulty is adjusted" aria-label="How PoW difficulty is adjusted">i</button></div>
+                <div class="mine-stat-value"><span x-text="status.chain?.current_mine_difficulty_bits ?? status.launch_profile?.mine_difficulty_bits ?? '-'"></span> bits</div>
+              </div>
+              <div class="mine-stat">
+                <div class="mine-stat-label">Status</div>
+                <div class="mine-stat-value" x-text="powMiningEnabled ? 'On' : 'Off'"></div>
+              </div>
+            </div>
+            <label class="toggle-switch" :class="{ active: powMiningEnabled }" title="Automatically queue one PoW mine action per chain tip">
+              <input type="checkbox" :checked="powMiningEnabled" @change="setPowMiningEnabled($event.target.checked)">
+              <span class="toggle-track"><span class="toggle-thumb"></span></span>
+              <span class="toggle-text" x-text="powMiningEnabled ? 'On' : 'Off'"></span>
+            </label>
           </div>
         </div>
       </div>
@@ -1342,6 +1458,8 @@ const INDEX_HTML: &str = r#"<!doctype html>
                     <div class="tx-field"><span class="tx-label">Fee</span><span class="tx-value money">LUUN <span x-text="amountLabel(tx.fee ?? 0)"></span></span></div>
                     <div class="tx-field"><span class="tx-label">From</span><code class="tx-value hash" x-text="short(txFrom(tx))"></code></div>
                     <div class="tx-field" x-show="txTo(tx)"><span class="tx-label">To</span><code class="tx-value hash" x-text="short(txTo(tx))"></code></div>
+                    <div class="tx-field" x-show="isMineTx(tx)"><span class="tx-label">Proof Bits</span><span class="tx-value number"><span x-text="txProofBits(tx) ?? '-'"></span> / <span x-text="txDifficultyBits(tx) ?? '-'"></span></span></div>
+                    <div class="tx-field" x-show="isMineTx(tx)"><span class="tx-label">Proof Hash</span><code class="tx-value hash" x-text="short(txProofHash(tx))"></code></div>
                     <div class="tx-field"><span class="tx-label">Signature</span><code class="tx-value hash" x-text="short(tx.signature)"></code></div>
                   </div>
                 </template>
@@ -1362,6 +1480,8 @@ const INDEX_HTML: &str = r#"<!doctype html>
                 <div class="tx-field"><span class="tx-label">Fee</span><span class="tx-value money">LUUN <span x-text="amountLabel(tx.fee ?? 0)"></span></span></div>
                 <div class="tx-field"><span class="tx-label">From</span><code class="tx-value hash" x-text="short(txFrom(tx))"></code></div>
                 <div class="tx-field" x-show="txTo(tx)"><span class="tx-label">To</span><code class="tx-value hash" x-text="short(txTo(tx))"></code></div>
+                <div class="tx-field" x-show="isMineTx(tx)"><span class="tx-label">Proof Bits</span><span class="tx-value number"><span x-text="txProofBits(tx) ?? '-'"></span> / <span x-text="txDifficultyBits(tx) ?? '-'"></span></span></div>
+                <div class="tx-field" x-show="isMineTx(tx)"><span class="tx-label">Proof Hash</span><code class="tx-value hash" x-text="short(txProofHash(tx))"></code></div>
                 <div class="tx-field"><span class="tx-label">Signature</span><code class="tx-value hash" x-text="short(tx.signature)"></code></div>
               </div>
             </template>
@@ -1392,6 +1512,25 @@ const INDEX_HTML: &str = r#"<!doctype html>
       </div>
     </section>
   </div>
+  <div class="setup-overlay transaction-overlay" x-show="showPowDifficultyInfo" x-transition.opacity @click.self="closePowDifficultyInfo()" role="dialog" aria-modal="true" aria-labelledby="pow-difficulty-title">
+    <section class="tx-modal">
+      <div class="tx-modal-head">
+        <div class="tx-modal-title">
+          <h2 id="pow-difficulty-title">PoW Difficulty</h2>
+        </div>
+        <button type="button" @click="closePowDifficultyInfo">Close</button>
+      </div>
+      <div class="info-copy">
+        <p>Difficulty is adjusted to target about one mine action per block.</p>
+        <div class="info-facts">
+          <div class="info-fact"><div class="label">Window</div><div class="value">10 blocks</div></div>
+          <div class="info-fact"><div class="label">Target</div><div class="value">10 mine actions</div></div>
+          <div class="info-fact"><div class="label">Max step</div><div class="value">2 bits</div></div>
+        </div>
+        <p>If a window includes more mine actions than the target, difficulty rises. If it includes fewer, difficulty falls. The initial difficulty is 12 bits.</p>
+      </div>
+    </section>
+  </div>
   <div class="setup-overlay transaction-overlay" x-show="selectedTransaction" x-transition.opacity @click.self="closeTransactionModal()" role="dialog" aria-modal="true" aria-labelledby="tx-modal-title">
     <section class="tx-modal">
       <div class="tx-modal-head">
@@ -1408,6 +1547,9 @@ const INDEX_HTML: &str = r#"<!doctype html>
         <div class="tx-field"><span class="tx-label">Fee</span><span class="tx-value money">LUUN <span x-text="amountLabel(selectedTransaction?.tx?.fee ?? 0)"></span></span></div>
         <div class="tx-field"><span class="tx-label">From</span><code class="tx-value hash" x-text="txFrom(selectedTransaction?.tx || {})"></code></div>
         <div class="tx-field" x-show="txTo(selectedTransaction?.tx || {})"><span class="tx-label">To</span><code class="tx-value hash" x-text="txTo(selectedTransaction?.tx || {})"></code></div>
+        <div class="tx-field" x-show="isMineTx(selectedTransaction?.tx)"><span class="tx-label">Difficulty</span><span class="tx-value number" x-text="txDifficultyBits(selectedTransaction?.tx) ?? '-'"></span></div>
+        <div class="tx-field" x-show="isMineTx(selectedTransaction?.tx)"><span class="tx-label">Proof Bits</span><span class="tx-value number" x-text="txProofBits(selectedTransaction?.tx) ?? '-'"></span></div>
+        <div class="tx-field" x-show="isMineTx(selectedTransaction?.tx)"><span class="tx-label">Proof Hash</span><code class="tx-value hash" x-text="txProofHash(selectedTransaction?.tx) || '-'"></code></div>
       </div>
       <div class="utxo-flow">
         <div class="utxo-column">
@@ -1562,7 +1704,7 @@ mod tests {
 
     use super::{
         TransferForm, dev_seed_verify_bypass_allowed, persist_burn_settings_config,
-        validate_transfer_form, wallet_transaction_rows,
+        persist_pow_mining_config, validate_transfer_form, wallet_transaction_rows,
     };
 
     #[test]
@@ -1636,13 +1778,39 @@ mod tests {
         let initial_config = ui_config.lock().await.clone();
         config_store::save(&config_path, &initial_config).expect("initial config should save");
 
-        persist_burn_settings_config(&ui_config, &config_path, 50 * MICRO_LUUN, 3 * MICRO_LUUN)
+        persist_burn_settings_config(
+            &ui_config,
+            &config_path,
+            true,
+            50 * MICRO_LUUN,
+            3 * MICRO_LUUN,
+        )
+        .await
+        .unwrap();
+        let config = config_store::load_or_create(&config_path).unwrap();
+
+        assert!(config.mining_enabled);
+        assert_eq!(config.burn_per_block, 50 * MICRO_LUUN);
+        assert_eq!(config.burn_fee, 3 * MICRO_LUUN);
+    }
+
+    #[tokio::test]
+    async fn pow_mining_config_persistence_updates_config_file() {
+        let dir = tempfile::tempdir().unwrap();
+        let config_path = dir.path().join("config.json");
+        let ui_config = Arc::new(Mutex::new(UiConfig {
+            setup_complete: true,
+            ..UiConfig::default()
+        }));
+        let initial_config = ui_config.lock().await.clone();
+        config_store::save(&config_path, &initial_config).expect("initial config should save");
+
+        persist_pow_mining_config(&ui_config, &config_path, true)
             .await
             .unwrap();
         let config = config_store::load_or_create(&config_path).unwrap();
 
-        assert_eq!(config.burn_per_block, 50 * MICRO_LUUN);
-        assert_eq!(config.burn_fee, 3 * MICRO_LUUN);
+        assert!(config.pow_mining_enabled);
     }
 
     #[test]

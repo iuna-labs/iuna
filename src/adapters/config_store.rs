@@ -16,6 +16,8 @@ pub const DEFAULT_BURN_FEE: Amount = DEFAULT_TRANSACTION_FEE;
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 pub struct UiConfig {
     pub setup_complete: bool,
+    pub mining_enabled: bool,
+    pub pow_mining_enabled: bool,
     pub burn_per_block: Amount,
     pub burn_fee: Amount,
     pub peers: Vec<String>,
@@ -25,6 +27,8 @@ impl Default for UiConfig {
     fn default() -> Self {
         Self {
             setup_complete: false,
+            mining_enabled: false,
+            pow_mining_enabled: false,
             burn_per_block: 0,
             burn_fee: DEFAULT_BURN_FEE,
             peers: Vec::new(),
@@ -38,6 +42,10 @@ struct ConfigFile {
     #[serde(default)]
     amount_unit: Option<String>,
     setup_complete: bool,
+    #[serde(default)]
+    mining_enabled: Option<bool>,
+    #[serde(default)]
+    pow_mining_enabled: bool,
     #[serde(default)]
     burn_per_block: Amount,
     #[serde(default = "default_burn_fee")]
@@ -70,6 +78,8 @@ pub fn save(path: &Path, config: &UiConfig) -> Result<()> {
         version: CONFIG_FILE_VERSION,
         amount_unit: Some(AMOUNT_UNIT_MICROLUUN.to_string()),
         setup_complete: config.setup_complete,
+        mining_enabled: Some(config.mining_enabled),
+        pow_mining_enabled: config.pow_mining_enabled,
         burn_per_block: config.burn_per_block,
         burn_fee: config.burn_fee,
         peers: config.peers.clone(),
@@ -105,6 +115,8 @@ fn load(path: &Path) -> Result<UiConfig> {
 
     Ok(UiConfig {
         setup_complete: stored.setup_complete,
+        mining_enabled: stored.mining_enabled.unwrap_or(stored.burn_per_block > 0),
+        pow_mining_enabled: stored.pow_mining_enabled,
         burn_per_block: stored.burn_per_block.saturating_mul(scale),
         burn_fee: stored.burn_fee.saturating_mul(scale),
         peers: stored.peers,
@@ -142,6 +154,8 @@ mod tests {
         assert!(stored.contains("\"version\": 1"));
         assert!(stored.contains("\"amount_unit\": \"microluun\""));
         assert!(stored.contains("\"setup_complete\": false"));
+        assert!(stored.contains("\"mining_enabled\": false"));
+        assert!(stored.contains("\"pow_mining_enabled\": false"));
         assert!(stored.contains("\"burn_per_block\": 0"));
         assert!(stored.contains("\"burn_fee\": 1000000"));
         assert!(stored.contains("\"peers\": []"));
@@ -156,6 +170,8 @@ mod tests {
             &path,
             &UiConfig {
                 setup_complete: true,
+                mining_enabled: true,
+                pow_mining_enabled: true,
                 burn_per_block: 50 * MICRO_LUUN,
                 burn_fee: 3 * MICRO_LUUN,
                 peers: vec!["127.0.0.1:9444".to_string()],
@@ -165,6 +181,8 @@ mod tests {
         let config = load_or_create(&path).unwrap();
 
         assert!(config.setup_complete);
+        assert!(config.mining_enabled);
+        assert!(config.pow_mining_enabled);
         assert_eq!(config.burn_per_block, 50 * MICRO_LUUN);
         assert_eq!(config.burn_fee, 3 * MICRO_LUUN);
         assert_eq!(config.peers, vec!["127.0.0.1:9444"]);
@@ -188,8 +206,34 @@ mod tests {
         let config = load_or_create(&path).unwrap();
 
         assert!(config.setup_complete);
+        assert!(!config.mining_enabled);
+        assert!(!config.pow_mining_enabled);
         assert_eq!(config.burn_per_block, 0);
         assert_eq!(config.burn_fee, DEFAULT_BURN_FEE);
         assert_eq!(config.peers, vec!["127.0.0.1:9444"]);
+    }
+
+    #[test]
+    fn loads_old_config_with_burn_rate_as_mining_enabled() {
+        let dir = tempdir().unwrap();
+        let path = dir.path().join("config.json");
+        fs::write(
+            &path,
+            r#"{
+  "version": 1,
+  "setup_complete": true,
+  "burn_per_block": 2,
+  "burn_fee": 1,
+  "peers": []
+}
+"#,
+        )
+        .unwrap();
+
+        let config = load_or_create(&path).unwrap();
+
+        assert!(config.mining_enabled);
+        assert_eq!(config.burn_per_block, 2 * MICRO_LUUN);
+        assert_eq!(config.burn_fee, MICRO_LUUN);
     }
 }
