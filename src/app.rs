@@ -19,10 +19,9 @@ pub type SharedPeerBook = Arc<Mutex<PeerBook>>;
 pub const DEFAULT_BURN_PER_BLOCK: Amount = 0;
 pub const DEFAULT_VDF_ROUNDS: u32 = 67_000_000;
 pub const PROTOCOL_VERSION: u32 = 1;
-pub const NETWORK_ID: &str = "luun-devnet-v1";
+pub const NETWORK_ID: &str = "luun-devnet-v2";
 pub const BLOCK_REQUEST_LIMIT: usize = 128;
 const IMPORT_REBROADCAST_LIMIT: usize = 128;
-const MICRO_LUUN: u64 = 1_000_000;
 
 #[derive(Clone, Debug)]
 pub struct NodeConfig {
@@ -366,11 +365,9 @@ impl NodeCore {
             .map(|block| block.reward)
             .unwrap_or_else(|| self.ledger.status().block_reward);
         let estimated_active_burn = estimated_active_burn_for_next_block(chain, launch_profile);
-        let average_active_burn_rate_microluun = u128::from(estimated_active_burn)
-            .saturating_mul(u128::from(MICRO_LUUN))
-            / u128::from(window);
-        let configured_burn_microluun =
-            u128::from(self.burn_per_block).saturating_mul(u128::from(MICRO_LUUN));
+        let average_active_burn_rate_microluun =
+            u128::from(estimated_active_burn) / u128::from(window);
+        let configured_burn_microluun = u128::from(self.burn_per_block);
         let estimated_other_burn_rate_microluun = average_active_burn_rate_microluun
             .saturating_sub(configured_burn_microluun)
             .min(u128::from(u64::MAX)) as u64;
@@ -712,7 +709,7 @@ fn low_break_even_burn_microluun(
         return 0;
     }
 
-    let max = slider_max.saturating_mul(MICRO_LUUN);
+    let max = slider_max;
     let steps = 1_000_u64;
     let mut previous = 0_u64;
     for step in 1..=steps {
@@ -745,8 +742,8 @@ fn expected_burn_profit(
         return -(fee as f64);
     }
 
-    let burn = burn_microluun as f64 / MICRO_LUUN as f64;
-    let other_burn_rate = other_burn_rate_microluun as f64 / MICRO_LUUN as f64;
+    let burn = burn_microluun as f64;
+    let other_burn_rate = other_burn_rate_microluun as f64;
     let total_burn_rate = burn + other_burn_rate;
     let win_chance = if total_burn_rate > 0.0 {
         burn / total_burn_rate
@@ -877,23 +874,23 @@ pub fn now_ms() -> u64 {
 mod tests {
     use std::collections::BTreeMap;
 
-    use crate::domain::Wallet;
+    use crate::domain::{MICRO_LUUN, Wallet};
 
-    use super::{
-        MICRO_LUUN, NodeConfig, NodeCore, expected_burn_profit, low_break_even_burn_microluun,
-    };
+    use super::{NodeConfig, NodeCore, expected_burn_profit, low_break_even_burn_microluun};
 
     #[test]
     fn break_even_uses_low_root_for_weighted_burn_rate() {
         let other_burn_rate = 10 * MICRO_LUUN;
-        let break_even = low_break_even_burn_microluun(102, other_burn_rate, 1, 102);
+        let payout = 102 * MICRO_LUUN;
+        let fee = MICRO_LUUN;
+        let break_even = low_break_even_burn_microluun(payout, other_burn_rate, fee, payout);
 
         assert!(
             break_even > 100_000 && break_even < 120_000,
             "expected low break-even around 0.11 LUUN, got {break_even} microluun"
         );
         assert!(break_even < MICRO_LUUN);
-        assert!(expected_burn_profit(MICRO_LUUN, other_burn_rate, 102, 1) > 0.0);
+        assert!(expected_burn_profit(MICRO_LUUN, other_burn_rate, payout, fee) > 0.0);
     }
 
     #[test]

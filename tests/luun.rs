@@ -4,11 +4,15 @@ use luun::{
     adapters::chain_store::SqliteChainStore,
     app::{DEFAULT_BURN_PER_BLOCK, InMemoryNetwork, NodeConfig, NodeCore, PeerBook, PeerDirection},
     domain::{
-        Amount, BLOCK_REWARD, GenesisBurn, Ledger, MAX_BLOCK_BYTES, VDF_TARGET_BLOCK_MS, Wallet,
-        run_vdf, verify_vdf,
+        Amount, BLOCK_REWARD, GenesisBurn, Ledger, MAX_BLOCK_BYTES, MICRO_LUUN,
+        VDF_TARGET_BLOCK_MS, Wallet, run_vdf, verify_vdf,
     },
 };
 use tempfile::tempdir;
+
+fn luun(amount: Amount) -> Amount {
+    amount * MICRO_LUUN
+}
 
 fn node(_network_key: &str, wallet: Wallet, allocations: BTreeMap<String, Amount>) -> NodeCore {
     NodeCore::new(NodeConfig {
@@ -227,19 +231,19 @@ fn transfer_and_burn_update_balances_when_block_is_applied() {
     let alice = Wallet::from_seed("alice");
     let bob = Wallet::from_seed("bob");
     let mut allocations = BTreeMap::new();
-    allocations.insert(alice.address().to_string(), 1_000);
-    allocations.insert(bob.address().to_string(), 100);
+    allocations.insert(alice.address().to_string(), luun(1_000));
+    allocations.insert(bob.address().to_string(), luun(100));
 
     let mut ledger = Ledger::new(allocations, 10);
-    let transfer = transfer_tx(&ledger, &alice, bob.address(), 125);
+    let transfer = transfer_tx(&ledger, &alice, bob.address(), luun(125));
     ledger.submit_transaction(transfer).unwrap();
-    let burn = burn_tx(&ledger, &alice, 25);
+    let burn = burn_tx(&ledger, &alice, luun(25));
     ledger.submit_transaction(burn).unwrap();
     let block = ledger.mine_next_block(&alice, 1).unwrap();
     ledger.apply_block(block).unwrap();
 
-    assert_eq!(ledger.balance_of(alice.address()), 950);
-    assert_eq!(ledger.balance_of(bob.address()), 225);
+    assert_eq!(ledger.balance_of(alice.address()), luun(950));
+    assert_eq!(ledger.balance_of(bob.address()), luun(225));
 }
 
 #[test]
@@ -283,25 +287,25 @@ fn block_with_forged_transaction_is_rejected() {
 fn block_reward_is_fixed_at_one_hundred_luun() {
     let alice = Wallet::from_seed("alice");
     let mut allocations = BTreeMap::new();
-    allocations.insert(alice.address().to_string(), 1_000);
+    allocations.insert(alice.address().to_string(), luun(1_000));
 
     let mut ledger = Ledger::new(allocations, 10);
-    submit_burn(&mut ledger, &alice, 1);
+    submit_burn(&mut ledger, &alice, MICRO_LUUN);
     let block = ledger.mine_next_block(&alice, 1).unwrap();
     assert_eq!(block.reward, BLOCK_REWARD);
 
     ledger.apply_block(block).unwrap();
-    assert_eq!(ledger.balance_of(alice.address()), 1_099);
+    assert_eq!(ledger.balance_of(alice.address()), luun(1_099));
 }
 
 #[test]
 fn burn_larger_than_block_reward_is_paid_from_existing_utxos() {
     let alice = Wallet::from_seed("large-burn-existing-utxos-alice");
     let mut allocations = BTreeMap::new();
-    allocations.insert(alice.address().to_string(), BLOCK_REWARD + 50);
+    allocations.insert(alice.address().to_string(), BLOCK_REWARD + luun(50));
 
     let mut ledger = Ledger::new(allocations, 10);
-    let burn_amount = BLOCK_REWARD + 25;
+    let burn_amount = BLOCK_REWARD + luun(25);
     let burn = ledger.build_burn(&alice, burn_amount, 0).unwrap();
     ledger.submit_transaction(burn).unwrap();
 
@@ -310,7 +314,7 @@ fn burn_larger_than_block_reward_is_paid_from_existing_utxos() {
     assert_eq!(block.reward, BLOCK_REWARD);
 
     ledger.apply_block(block).unwrap();
-    assert_eq!(ledger.balance_of(alice.address()), BLOCK_REWARD + 25);
+    assert_eq!(ledger.balance_of(alice.address()), BLOCK_REWARD + luun(25));
 }
 
 #[test]
@@ -320,7 +324,9 @@ fn burn_larger_than_existing_balance_cannot_use_next_block_reward() {
     allocations.insert(alice.address().to_string(), BLOCK_REWARD);
 
     let ledger = Ledger::new(allocations, 10);
-    let error = ledger.build_burn(&alice, BLOCK_REWARD + 1, 0).unwrap_err();
+    let error = ledger
+        .build_burn(&alice, BLOCK_REWARD + MICRO_LUUN, 0)
+        .unwrap_err();
 
     assert!(format!("{error:#}").contains("insufficient funds"));
 }
@@ -330,22 +336,25 @@ fn transaction_fees_are_paid_to_the_block_miner() {
     let alice = Wallet::from_seed("fee-miner-alice");
     let bob = Wallet::from_seed("fee-payer-bob");
     let mut allocations = BTreeMap::new();
-    allocations.insert(alice.address().to_string(), 1);
-    allocations.insert(bob.address().to_string(), 200);
+    allocations.insert(alice.address().to_string(), MICRO_LUUN);
+    allocations.insert(bob.address().to_string(), luun(200));
 
-    let mut ledger =
-        Ledger::new_with_genesis_burns(allocations, vec![GenesisBurn::new(alice.address(), 1)], 10)
-            .unwrap();
-    submit_burn(&mut ledger, &alice, 1);
-    let tx = transfer_fee_tx(&ledger, &bob, alice.address(), 10, 7);
+    let mut ledger = Ledger::new_with_genesis_burns(
+        allocations,
+        vec![GenesisBurn::new(alice.address(), MICRO_LUUN)],
+        10,
+    )
+    .unwrap();
+    submit_burn(&mut ledger, &alice, MICRO_LUUN);
+    let tx = transfer_fee_tx(&ledger, &bob, alice.address(), luun(10), luun(7));
     ledger.submit_transaction(tx).unwrap();
 
     let block = ledger.mine_next_block(&alice, 1).unwrap();
-    assert_eq!(block.reward, BLOCK_REWARD + 7);
+    assert_eq!(block.reward, BLOCK_REWARD + luun(7));
     ledger.apply_block(block).unwrap();
 
-    assert_eq!(ledger.balance_of(alice.address()), 216);
-    assert_eq!(ledger.balance_of(bob.address()), 183);
+    assert_eq!(ledger.balance_of(alice.address()), luun(216));
+    assert_eq!(ledger.balance_of(bob.address()), luun(183));
 }
 
 #[test]
@@ -527,26 +536,26 @@ fn block_hash_is_bound_to_block_contents() {
 fn automatic_mining_burns_configured_amount_once_per_height() {
     let alice = Wallet::from_seed("alice");
     let mut allocations = BTreeMap::new();
-    allocations.insert(alice.address().to_string(), 1_000);
+    allocations.insert(alice.address().to_string(), luun(1_000));
 
     let mut node = NodeCore::new(NodeConfig {
         wallet: alice.clone(),
         genesis_allocations: allocations,
         vdf_rounds: 10,
-        burn_per_block: 25,
-        burn_fee: 1,
+        burn_per_block: luun(25),
+        burn_fee: MICRO_LUUN,
     });
 
     let first = node.automatic_mine_once(1);
     assert!(first.burned.is_some());
     assert!(first.block.is_some());
     assert_eq!(node.ledger().chain().len(), 2);
-    assert_eq!(node.ledger().balance_of(alice.address()), 1_075);
+    assert_eq!(node.ledger().balance_of(alice.address()), luun(1_075));
 
     let second = node.automatic_mine_once(2);
     assert!(second.burned.is_some());
-    assert_eq!(second.burned.as_ref().map(|tx| tx.amount()), Some(25));
-    assert_eq!(second.burned.as_ref().map(|tx| tx.fee()), Some(1));
+    assert_eq!(second.burned.as_ref().map(|tx| tx.amount()), Some(luun(25)));
+    assert_eq!(second.burned.as_ref().map(|tx| tx.fee()), Some(MICRO_LUUN));
 }
 
 #[test]
@@ -624,16 +633,22 @@ fn automatic_mining_caps_burn_to_spendable_balance_after_fee() {
         wallet: alice.clone(),
         genesis_allocations: allocations,
         vdf_rounds: 10,
-        burn_per_block: BLOCK_REWARD + 50,
-        burn_fee: 1,
+        burn_per_block: BLOCK_REWARD + luun(50),
+        burn_fee: MICRO_LUUN,
     });
 
     let outcome = node.automatic_mine_once(1);
 
-    assert_eq!(outcome.burned.as_ref().map(|tx| tx.amount()), Some(99));
-    assert_eq!(outcome.burned.as_ref().map(|tx| tx.fee()), Some(1));
+    assert_eq!(
+        outcome.burned.as_ref().map(|tx| tx.amount()),
+        Some(BLOCK_REWARD - MICRO_LUUN)
+    );
+    assert_eq!(outcome.burned.as_ref().map(|tx| tx.fee()), Some(MICRO_LUUN));
     assert!(outcome.block.is_some());
-    assert_eq!(node.ledger().balance_of(alice.address()), BLOCK_REWARD + 1);
+    assert_eq!(
+        node.ledger().balance_of(alice.address()),
+        BLOCK_REWARD + MICRO_LUUN
+    );
 }
 
 #[test]
@@ -697,8 +712,8 @@ fn waiting_wallet_gossips_pending_burn_to_selected_leader() {
     let alice = Wallet::from_seed("deadlock-alice");
     let bob = Wallet::from_seed("deadlock-bob");
     let mut allocations = BTreeMap::new();
-    allocations.insert(alice.address().to_string(), 1_000);
-    allocations.insert(bob.address().to_string(), 1_000);
+    allocations.insert(alice.address().to_string(), luun(1_000));
+    allocations.insert(bob.address().to_string(), luun(1_000));
     let ledger =
         Ledger::new_with_genesis_burns(allocations, vec![GenesisBurn::new(bob.address(), 1)], 25)
             .unwrap();
@@ -932,10 +947,13 @@ fn joined_nodes_import_transfer_block_and_every_wallet_mines() {
     let bob = Wallet::from_seed("flow-bob");
     let carol = Wallet::from_seed("flow-carol");
     let mut genesis = BTreeMap::new();
-    genesis.insert(alice.address().to_string(), 100);
-    let alice_ledger =
-        Ledger::new_with_genesis_burns(genesis, vec![GenesisBurn::new(alice.address(), 1)], 5)
-            .unwrap();
+    genesis.insert(alice.address().to_string(), luun(100));
+    let alice_ledger = Ledger::new_with_genesis_burns(
+        genesis,
+        vec![GenesisBurn::new(alice.address(), MICRO_LUUN)],
+        5,
+    )
+    .unwrap();
 
     let mut network = InMemoryNetwork::default();
     network.insert(
@@ -975,7 +993,7 @@ fn joined_nodes_import_transfer_block_and_every_wallet_mines() {
     network
         .node_mut("a")
         .unwrap()
-        .transfer(bob.address(), 30)
+        .transfer_with_fee(bob.address(), luun(30), 0)
         .unwrap();
     network.node_mut("a").unwrap().burn(1).unwrap();
     network.deliver_until_idle().unwrap();
@@ -984,7 +1002,7 @@ fn joined_nodes_import_transfer_block_and_every_wallet_mines() {
         block5
             .transactions
             .iter()
-            .any(|tx| tx.to() == Some(bob.address()) && tx.amount() == 30)
+            .any(|tx| tx.to() == Some(bob.address()) && tx.amount() == luun(30))
     );
     mined_by.push(block5.miner.clone());
     let block5_outbox = network.node_mut("a").unwrap().drain_outbox();
@@ -1012,7 +1030,7 @@ fn joined_nodes_import_transfer_block_and_every_wallet_mines() {
         );
         assert_eq!(
             network.node(id).unwrap().ledger().balance_of(bob.address()),
-            30,
+            luun(30),
             "{id} did not apply A -> B transfer"
         );
     }
@@ -1038,7 +1056,7 @@ fn joined_nodes_import_transfer_block_and_every_wallet_mines() {
     network
         .node_mut("b")
         .unwrap()
-        .transfer(carol.address(), 10)
+        .transfer_with_fee(carol.address(), luun(10), 0)
         .unwrap();
     network.node_mut("b").unwrap().burn(1).unwrap();
     network.deliver_until_idle().unwrap();

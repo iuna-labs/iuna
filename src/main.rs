@@ -11,12 +11,12 @@ use anyhow::{Context, Result, bail};
 use luun::{
     adapters::{chain_store::SqliteChainStore, config_store, http, p2p, wallet_store},
     app::{NodeCore, PeerBook, SharedNode, SharedPeerBook, now_ms},
-    domain::{Amount, ChainSnapshot, GenesisBurn, Ledger, run_vdf},
+    domain::{Amount, BLOCK_REWARD, ChainSnapshot, GenesisBurn, Ledger, MICRO_LUUN, run_vdf},
 };
 use tokio::sync::Mutex;
 
-const GENESIS_BOOTSTRAP_BURN_AMOUNT: u64 = 1;
-const GENESIS_INITIAL_BURN_PER_BLOCK: Amount = 100;
+const GENESIS_BOOTSTRAP_BURN_AMOUNT: Amount = MICRO_LUUN;
+const GENESIS_INITIAL_BURN_PER_BLOCK: Amount = BLOCK_REWARD;
 const VDF_MEASUREMENT_INITIAL_ROUNDS: u32 = 1_000_000;
 const VDF_MEASUREMENT_MAX_ROUNDS: u32 = 100_000_000;
 const VDF_MEASUREMENT_MIN_ELAPSED: Duration = Duration::from_millis(150);
@@ -72,7 +72,8 @@ async fn main() -> Result<()> {
     println!("p2p listener: {}", opts.p2p_addr);
     println!(
         "automatic mining: VDF-driven, burning {} LUUN per block with {} LUUN fee",
-        initial_burn_per_block, initial_burn_fee
+        format_luun(initial_burn_per_block),
+        format_luun(initial_burn_fee)
     );
 
     let gossip =
@@ -110,6 +111,20 @@ async fn main() -> Result<()> {
         opts.http_addr,
     )
     .await
+}
+
+fn format_luun(amount: Amount) -> String {
+    let whole = amount / MICRO_LUUN;
+    let fractional = amount % MICRO_LUUN;
+    if fractional == 0 {
+        whole.to_string()
+    } else {
+        let mut fractional = format!("{fractional:06}");
+        while fractional.ends_with('0') {
+            fractional.pop();
+        }
+        format!("{whole}.{fractional}")
+    }
 }
 
 async fn initialize_ledger(
@@ -532,7 +547,7 @@ mod tests {
     use luun::{
         adapters::{chain_store::SqliteChainStore, config_store::UiConfig},
         app::{DEFAULT_BURN_PER_BLOCK, NodeCore},
-        domain::{GenesisBurn, Ledger, Wallet},
+        domain::{BLOCK_REWARD, GenesisBurn, Ledger, Wallet},
     };
     use rusqlite::Connection;
     use tempfile::tempdir;
@@ -623,7 +638,7 @@ mod tests {
             burn_fee: 3,
             ..UiConfig::default()
         };
-        assert_eq!(initial_burn_per_block(&genesis, &configured), 100);
+        assert_eq!(initial_burn_per_block(&genesis, &configured), BLOCK_REWARD);
     }
 
     #[test]

@@ -24,12 +24,12 @@ window.luunApp = function luunApp() {
     setupFeedback: null,
     burnAmount: 0,
     burnAmountDraft: 0,
-    burnFee: 1,
-    burnFeeDraft: 1,
+    burnFee: 1000000,
+    burnFeeDraft: "1",
     burnAmountDirty: false,
     transferTo: "",
     transferAmount: null,
-    transferFee: 1,
+    transferFee: "1",
     peerAddress: "",
     flash: null,
     flashTimer: null,
@@ -276,8 +276,8 @@ window.luunApp = function luunApp() {
         this.burnAmount = status.mining?.burn_per_block ?? this.burnAmount;
         this.burnFee = status.mining?.automatic_burn_fee ?? this.burnFee;
         if (!this.burnAmountDirty) {
-          this.burnAmountDraft = this.burnAmount;
-          this.burnFeeDraft = this.burnFee;
+          this.burnAmountDraft = this.amountLabel(this.burnAmount);
+          this.burnFeeDraft = this.amountLabel(this.burnFee);
         }
         this.lastUpdated = new Date();
       } catch (error) {
@@ -438,14 +438,14 @@ window.luunApp = function luunApp() {
 
     async saveBurn() {
       try {
-        const amount = Math.max(0, Math.trunc(Number(this.burnAmountDraft) || 0));
-        const fee = Math.max(0, Math.trunc(Number(this.burnFeeDraft) || 0));
-        this.burnAmountDraft = amount;
-        this.burnFeeDraft = fee;
+        const amount = this.parseLuunAmount(this.burnAmountDraft);
+        const fee = this.parseLuunAmount(this.burnFeeDraft);
+        this.burnAmountDraft = this.amountLabel(amount);
+        this.burnFeeDraft = this.amountLabel(fee);
         await this.postForm(
           "/api/settings/burn-per-block",
           { amount, fee },
-          `Burn rate set to ${amount} LUUN per block with ${fee} fee`
+          `Burn rate set to ${this.amountLabel(amount)} LUUN per block with ${this.amountLabel(fee)} fee`
         );
         this.burnAmountDirty = false;
         this.burnAmount = amount;
@@ -456,7 +456,7 @@ window.luunApp = function luunApp() {
     },
 
     automaticBurnFeeDraft() {
-      return Math.max(0, Math.trunc(Number(this.burnFeeDraft) || 0));
+      return this.parseLuunAmount(this.burnFeeDraft);
     },
 
     miningEconomics() {
@@ -464,7 +464,7 @@ window.luunApp = function luunApp() {
     },
 
     burnSliderMax() {
-      return Math.max(0, Math.trunc(Number(this.miningEconomics().slider_max ?? this.latestBlockReward())));
+      return this.amountNumber(this.miningEconomics().slider_max ?? this.latestBlockReward());
     },
 
     latestBlock() {
@@ -488,15 +488,14 @@ window.luunApp = function luunApp() {
     },
 
     breakEvenBurn() {
-      const microluun = Math.max(
+      return Math.max(
         0,
         Math.trunc(Number(this.miningEconomics().break_even_burn_microluun) || 0)
       );
-      return microluun / 1000000;
     },
 
     breakEvenPercent() {
-      const max = this.burnSliderMax();
+      const max = Math.max(0, Math.trunc(Number(this.miningEconomics().slider_max ?? this.latestBlockReward())));
       return max > 0 ? Math.min(100, Math.max(0, (this.breakEvenBurn() / max) * 100)) : 0;
     },
 
@@ -510,25 +509,42 @@ window.luunApp = function luunApp() {
       const burned = this.estimatedActiveBurnTotal();
       const fee = this.status.mining?.automatic_burn_fee ?? this.automaticBurnFeeDraft();
       const window = this.ticketWindow();
-      return `Marker: break-even near ${this.formatBurn(marker)} LUUN, using last payout ${payout}, estimated active burns ${this.formatBurn(burned)}, fee ${fee}, and ${window} eligible blocks.`;
+      return `Marker: break-even near ${this.amountLabel(marker)} LUUN, using last payout ${this.amountLabel(payout)}, estimated active burns ${this.amountLabel(burned)}, fee ${this.amountLabel(fee)}, and ${window} eligible blocks.`;
     },
 
-    formatBurn(value) {
-      const amount = Math.max(0, Number(value) || 0);
-      return amount >= 10 ? amount.toFixed(1) : amount.toFixed(2);
+    amountLabel(value) {
+      const microluun = Math.max(0, Math.trunc(Number(value) || 0));
+      const whole = Math.floor(microluun / 1000000);
+      const fractional = String(microluun % 1000000).padStart(6, "0").replace(/0+$/, "");
+      return fractional ? `${whole}.${fractional}` : `${whole}`;
+    },
+
+    amountNumber(value) {
+      return Number(this.amountLabel(value));
+    },
+
+    parseLuunAmount(value) {
+      const text = String(value ?? "").trim();
+      if (!text) return 0;
+      const match = text.match(/^(\d+)(?:\.(\d{0,6})\d*)?$/);
+      if (!match) return 0;
+      const whole = Number(match[1] || 0);
+      const fractional = Number((match[2] || "").padEnd(6, "0"));
+      return Math.max(0, Math.trunc(whole * 1000000 + fractional));
     },
 
     async sendTransfer() {
       try {
-        const amount = this.transferAmount;
-        const fee = this.transferFee;
+        const amount = this.parseLuunAmount(this.transferAmount);
+        const fee = this.parseLuunAmount(this.transferFee);
         const recipient = this.short(this.transferTo);
         await this.postForm(
           "/api/transfer",
           { to: this.transferTo, amount, fee },
-          `Queued transfer of ${amount} LUUN to ${recipient} with ${fee} fee`
+          `Queued transfer of ${this.amountLabel(amount)} LUUN to ${recipient} with ${this.amountLabel(fee)} fee`
         );
         this.transferTo = "";
+        this.transferAmount = null;
       } catch (error) {
         this.showFlash(error.message, "error");
       }
@@ -646,7 +662,7 @@ window.luunApp = function luunApp() {
     },
 
     txInputAmountLabel(input) {
-      return input.amount === null || input.amount === undefined ? "-" : `LUUN ${input.amount}`;
+      return input.amount === null || input.amount === undefined ? "-" : `LUUN ${this.amountLabel(input.amount)}`;
     },
 
     txFeeRecipient(tx) {

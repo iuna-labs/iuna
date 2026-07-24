@@ -7,10 +7,11 @@ use std::{
 use anyhow::{Context, Result, bail};
 use serde::{Deserialize, Serialize};
 
-use crate::domain::Amount;
+use crate::domain::{Amount, DEFAULT_TRANSACTION_FEE, MICRO_LUUN};
 
 const CONFIG_FILE_VERSION: u32 = 1;
-pub const DEFAULT_BURN_FEE: Amount = 1;
+const AMOUNT_UNIT_MICROLUUN: &str = "microluun";
+pub const DEFAULT_BURN_FEE: Amount = DEFAULT_TRANSACTION_FEE;
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 pub struct UiConfig {
@@ -34,6 +35,8 @@ impl Default for UiConfig {
 #[derive(Debug, Deserialize, Serialize)]
 struct ConfigFile {
     version: u32,
+    #[serde(default)]
+    amount_unit: Option<String>,
     setup_complete: bool,
     #[serde(default)]
     burn_per_block: Amount,
@@ -44,7 +47,7 @@ struct ConfigFile {
 }
 
 fn default_burn_fee() -> Amount {
-    DEFAULT_BURN_FEE
+    1
 }
 
 pub fn load_or_create(path: &Path) -> Result<UiConfig> {
@@ -65,6 +68,7 @@ pub fn save(path: &Path, config: &UiConfig) -> Result<()> {
 
     let stored = ConfigFile {
         version: CONFIG_FILE_VERSION,
+        amount_unit: Some(AMOUNT_UNIT_MICROLUUN.to_string()),
         setup_complete: config.setup_complete,
         burn_per_block: config.burn_per_block,
         burn_fee: config.burn_fee,
@@ -93,10 +97,16 @@ fn load(path: &Path) -> Result<UiConfig> {
         );
     }
 
+    let scale = if stored.amount_unit.as_deref() == Some(AMOUNT_UNIT_MICROLUUN) {
+        1
+    } else {
+        MICRO_LUUN
+    };
+
     Ok(UiConfig {
         setup_complete: stored.setup_complete,
-        burn_per_block: stored.burn_per_block,
-        burn_fee: stored.burn_fee,
+        burn_per_block: stored.burn_per_block.saturating_mul(scale),
+        burn_fee: stored.burn_fee.saturating_mul(scale),
         peers: stored.peers,
     })
 }
@@ -116,6 +126,8 @@ mod tests {
 
     use tempfile::tempdir;
 
+    use crate::domain::MICRO_LUUN;
+
     use super::{DEFAULT_BURN_FEE, UiConfig, load_or_create, save};
 
     #[test]
@@ -128,9 +140,10 @@ mod tests {
         assert!(!config.setup_complete);
         let stored = fs::read_to_string(path).unwrap();
         assert!(stored.contains("\"version\": 1"));
+        assert!(stored.contains("\"amount_unit\": \"microluun\""));
         assert!(stored.contains("\"setup_complete\": false"));
         assert!(stored.contains("\"burn_per_block\": 0"));
-        assert!(stored.contains("\"burn_fee\": 1"));
+        assert!(stored.contains("\"burn_fee\": 1000000"));
         assert!(stored.contains("\"peers\": []"));
     }
 
@@ -143,8 +156,8 @@ mod tests {
             &path,
             &UiConfig {
                 setup_complete: true,
-                burn_per_block: 50,
-                burn_fee: 3,
+                burn_per_block: 50 * MICRO_LUUN,
+                burn_fee: 3 * MICRO_LUUN,
                 peers: vec!["127.0.0.1:9444".to_string()],
             },
         )
@@ -152,8 +165,8 @@ mod tests {
         let config = load_or_create(&path).unwrap();
 
         assert!(config.setup_complete);
-        assert_eq!(config.burn_per_block, 50);
-        assert_eq!(config.burn_fee, 3);
+        assert_eq!(config.burn_per_block, 50 * MICRO_LUUN);
+        assert_eq!(config.burn_fee, 3 * MICRO_LUUN);
         assert_eq!(config.peers, vec!["127.0.0.1:9444"]);
     }
 

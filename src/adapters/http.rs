@@ -982,7 +982,7 @@ const INDEX_HTML: &str = r#"<!doctype html>
       .block-card { flex-basis: 108px; }
     }
   </style>
-  <script defer src="/assets/luun-ui.js?v=42"></script>
+  <script defer src="/assets/luun-ui.js?v=43"></script>
   <script defer src="/assets/alpine.min.js"></script>
 </head>
 <body x-data="luunApp()" x-init="init()" @keydown.window.escape="closeModals()" x-cloak>
@@ -1023,7 +1023,7 @@ const INDEX_HTML: &str = r#"<!doctype html>
       <div class="page-title">
         <button class="wallet-balance-line" type="button" @click="openWalletUtxosModal" title="Show wallet UTXOs">
           <span class="tx-label">Balance</span>
-          <span class="tx-value money">LUUN <span x-text="status.wallet_balance ?? '-'"></span></span>
+          <span class="tx-value money">LUUN <span x-text="amountLabel(status.wallet_balance)"></span></span>
         </button>
       </div>
       <div class="wallet-grid">
@@ -1032,8 +1032,8 @@ const INDEX_HTML: &str = r#"<!doctype html>
             <h3>Send</h3>
             <form @submit.prevent="sendTransfer">
               <label>Recipient<input x-model="transferTo" autocomplete="off" required></label>
-              <label>Amount<input x-model.number="transferAmount" type="number" min="1" required></label>
-              <label>Fee<input x-model.number="transferFee" type="number" min="0" required></label>
+              <label>Amount<input x-model="transferAmount" type="number" min="0.000001" step="0.000001" required></label>
+              <label>Fee<input x-model="transferFee" type="number" min="0" step="0.000001" required></label>
               <button class="primary" type="submit">Send</button>
             </form>
           </div>
@@ -1057,8 +1057,8 @@ const INDEX_HTML: &str = r#"<!doctype html>
               <div class="wallet-tx-row" :class="{ pending: tx.status === 'pending' }" role="button" tabindex="0" @click="openTransactionModal(tx, { source: 'Wallet' })" @keydown.enter.prevent="openTransactionModal(tx, { source: 'Wallet' })" @keydown.space.prevent="openTransactionModal(tx, { source: 'Wallet' })">
                 <span class="pill" :class="tx.kind" x-text="tx.direction"></span>
                 <div class="wallet-tx-main">
-                  <div class="tx-field"><span class="tx-label">Amount</span><span class="tx-value money">LUUN <span x-text="tx.amount"></span></span></div>
-                  <div class="tx-field"><span class="tx-label">Fee</span><span class="tx-value money">LUUN <span x-text="tx.fee ?? 0"></span></span></div>
+                  <div class="tx-field"><span class="tx-label">Amount</span><span class="tx-value money">LUUN <span x-text="amountLabel(tx.amount)"></span></span></div>
+                  <div class="tx-field"><span class="tx-label">Fee</span><span class="tx-value money">LUUN <span x-text="amountLabel(tx.fee ?? 0)"></span></span></div>
                   <div class="tx-field"><span class="tx-label">Status</span><span class="tx-value text" x-text="txTitle(tx)"></span></div>
                   <div class="tx-field"><span class="tx-label">From</span><code class="tx-value hash" x-text="short(tx.from)"></code></div>
                   <div class="tx-field" x-show="tx.to"><span class="tx-label">To</span><code class="tx-value hash" x-text="short(tx.to)"></code></div>
@@ -1090,14 +1090,14 @@ const INDEX_HTML: &str = r#"<!doctype html>
           <h3>Mining</h3>
           <form class="mining-form" @submit.prevent="saveBurn">
             <div class="burn-fields">
-              <label>LUUN per block<input x-model.number="burnAmountDraft" @input="burnAmountDirty = true" type="number" min="0" :max="burnSliderMax()"></label>
-              <label>Fee<input x-model.number="burnFeeDraft" @input="burnAmountDirty = true" type="number" min="0"></label>
+              <label>LUUN per block<input x-model="burnAmountDraft" @input="burnAmountDirty = true" type="number" min="0" :max="burnSliderMax()" step="0.000001"></label>
+              <label>Fee<input x-model="burnFeeDraft" @input="burnAmountDirty = true" type="number" min="0" step="0.000001"></label>
               <button class="primary" type="submit">Save</button>
             </div>
             <div class="burn-slider-panel">
               <div class="burn-slider-head"><span>Burn range</span><span><span x-text="burnAmountDraft"></span> LUUN</span></div>
               <div class="burn-slider-track">
-                <input class="burn-range" x-model.number="burnAmountDraft" @input="burnAmountDirty = true" type="range" min="0" :max="burnSliderMax()" step="1">
+                <input class="burn-range" x-model="burnAmountDraft" @input="burnAmountDirty = true" type="range" min="0" :max="burnSliderMax()" step="0.000001">
                 <div class="break-even-marker" :style="breakEvenStyle()" title="Estimated break-even burn"></div>
               </div>
               <div class="burn-slider-scale"><span>0</span><span x-text="`${burnSliderMax()} LUUN`"></span></div>
@@ -1199,10 +1199,10 @@ const INDEX_HTML: &str = r#"<!doctype html>
                 <div class="detail-kv"><div class="key">Hash</div><code x-text="selectedBlock.hash"></code></div>
                 <div class="detail-kv"><div class="key">Previous</div><code x-text="short(selectedBlock.prev_hash)"></code></div>
                 <div class="detail-kv"><div class="key">Miner</div><code x-text="short(selectedBlock.miner)"></code></div>
-                <div class="detail-kv"><div class="key">Reward</div><div x-text="selectedBlock.reward"></div></div>
+                <div class="detail-kv"><div class="key">Reward</div><div>LUUN <span x-text="amountLabel(selectedBlock.reward)"></span></div></div>
                 <div class="detail-kv"><div class="key">Burns</div><div x-text="blockBurnCount(selectedBlock)"></div></div>
                 <div class="detail-kv"><div class="key">Transfers</div><div x-text="blockTransferCount(selectedBlock)"></div></div>
-                <div class="detail-kv"><div class="key">Total Burned</div><div x-text="blockBurned(selectedBlock)"></div></div>
+                <div class="detail-kv"><div class="key">Total Burned</div><div>LUUN <span x-text="amountLabel(blockBurned(selectedBlock))"></span></div></div>
                 <div class="detail-kv"><div class="key">VDF</div><div><span x-text="selectedBlock.vdf_rounds"></span> rounds</div></div>
               </div>
               <div class="tx-list">
@@ -1210,8 +1210,8 @@ const INDEX_HTML: &str = r#"<!doctype html>
                 <template x-for="tx in selectedBlock.transactions" :key="tx.signature">
                   <div class="tx-card" role="button" tabindex="0" @click="openTransactionModal(tx, { source: 'Block', blockHeight: selectedBlock.height, blockMiner: selectedBlock.miner })" @keydown.enter.prevent="openTransactionModal(tx, { source: 'Block', blockHeight: selectedBlock.height, blockMiner: selectedBlock.miner })" @keydown.space.prevent="openTransactionModal(tx, { source: 'Block', blockHeight: selectedBlock.height, blockMiner: selectedBlock.miner })">
                     <span class="pill" :class="tx.kind" x-text="tx.kind"></span>
-                    <div class="tx-field"><span class="tx-label">Amount</span><span class="tx-value money">LUUN <span x-text="txAmount(tx)"></span></span></div>
-                    <div class="tx-field"><span class="tx-label">Fee</span><span class="tx-value money">LUUN <span x-text="tx.fee ?? 0"></span></span></div>
+                    <div class="tx-field"><span class="tx-label">Amount</span><span class="tx-value money">LUUN <span x-text="amountLabel(txAmount(tx))"></span></span></div>
+                    <div class="tx-field"><span class="tx-label">Fee</span><span class="tx-value money">LUUN <span x-text="amountLabel(tx.fee ?? 0)"></span></span></div>
                     <div class="tx-field"><span class="tx-label">From</span><code class="tx-value hash" x-text="short(txFrom(tx))"></code></div>
                     <div class="tx-field" x-show="txTo(tx)"><span class="tx-label">To</span><code class="tx-value hash" x-text="short(txTo(tx))"></code></div>
                     <div class="tx-field"><span class="tx-label">Signature</span><code class="tx-value hash" x-text="short(tx.signature)"></code></div>
@@ -1230,8 +1230,8 @@ const INDEX_HTML: &str = r#"<!doctype html>
             <template x-for="tx in mempool" :key="tx.signature">
               <div class="mempool-item" role="button" tabindex="0" @click="openTransactionModal(tx, { source: 'Mempool' })" @keydown.enter.prevent="openTransactionModal(tx, { source: 'Mempool' })" @keydown.space.prevent="openTransactionModal(tx, { source: 'Mempool' })">
                 <span class="pill" :class="tx.kind" x-text="tx.kind"></span>
-                <div class="tx-field"><span class="tx-label">Amount</span><span class="tx-value money">LUUN <span x-text="txAmount(tx)"></span></span></div>
-                <div class="tx-field"><span class="tx-label">Fee</span><span class="tx-value money">LUUN <span x-text="tx.fee ?? 0"></span></span></div>
+                <div class="tx-field"><span class="tx-label">Amount</span><span class="tx-value money">LUUN <span x-text="amountLabel(txAmount(tx))"></span></span></div>
+                <div class="tx-field"><span class="tx-label">Fee</span><span class="tx-value money">LUUN <span x-text="amountLabel(tx.fee ?? 0)"></span></span></div>
                 <div class="tx-field"><span class="tx-label">From</span><code class="tx-value hash" x-text="short(txFrom(tx))"></code></div>
                 <div class="tx-field" x-show="txTo(tx)"><span class="tx-label">To</span><code class="tx-value hash" x-text="short(txTo(tx))"></code></div>
                 <div class="tx-field"><span class="tx-label">Signature</span><code class="tx-value hash" x-text="short(tx.signature)"></code></div>
@@ -1248,14 +1248,14 @@ const INDEX_HTML: &str = r#"<!doctype html>
       <div class="tx-modal-head">
         <div class="tx-modal-title">
           <h2 id="wallet-utxos-title">Wallet UTXOs</h2>
-          <div class="tx-field"><span class="tx-label">Total</span><span class="tx-value money">LUUN <span x-text="status.wallet_balance ?? '-'"></span></span></div>
+          <div class="tx-field"><span class="tx-label">Total</span><span class="tx-value money">LUUN <span x-text="amountLabel(status.wallet_balance)"></span></span></div>
         </div>
         <button type="button" @click="closeWalletUtxosModal">Close</button>
       </div>
       <div class="utxo-list">
         <template x-for="utxo in walletUtxos" :key="`${utxo.outpoint.txid}:${utxo.outpoint.index}`">
           <div class="wallet-utxo-row">
-            <div class="utxo-node-label"><span>UTXO</span><span class="utxo-node-amount">LUUN <span x-text="utxo.amount"></span></span></div>
+            <div class="utxo-node-label"><span>UTXO</span><span class="utxo-node-amount">LUUN <span x-text="amountLabel(utxo.amount)"></span></span></div>
             <div class="tx-field"><span class="tx-label">Outpoint</span><code class="tx-value hash" x-text="txInputOutpoint({ outpoint: utxo.outpoint })"></code></div>
             <div class="tx-field"><span class="tx-label">Address</span><code class="tx-value hash" x-text="utxo.address"></code></div>
           </div>
@@ -1276,8 +1276,8 @@ const INDEX_HTML: &str = r#"<!doctype html>
       </div>
       <div class="tx-modal-summary">
         <div class="tx-field"><span class="tx-label">Source</span><span class="tx-value text" x-text="selectedTransactionLabel()"></span></div>
-        <div class="tx-field"><span class="tx-label">Amount</span><span class="tx-value money">LUUN <span x-text="txAmount(selectedTransaction?.tx || {})"></span></span></div>
-        <div class="tx-field"><span class="tx-label">Fee</span><span class="tx-value money">LUUN <span x-text="selectedTransaction?.tx?.fee ?? 0"></span></span></div>
+        <div class="tx-field"><span class="tx-label">Amount</span><span class="tx-value money">LUUN <span x-text="amountLabel(txAmount(selectedTransaction?.tx || {}))"></span></span></div>
+        <div class="tx-field"><span class="tx-label">Fee</span><span class="tx-value money">LUUN <span x-text="amountLabel(selectedTransaction?.tx?.fee ?? 0)"></span></span></div>
         <div class="tx-field"><span class="tx-label">From</span><code class="tx-value hash" x-text="txFrom(selectedTransaction?.tx || {})"></code></div>
         <div class="tx-field" x-show="txTo(selectedTransaction?.tx || {})"><span class="tx-label">To</span><code class="tx-value hash" x-text="txTo(selectedTransaction?.tx || {})"></code></div>
       </div>
@@ -1301,7 +1301,7 @@ const INDEX_HTML: &str = r#"<!doctype html>
           <template x-for="(output, index) in txVisualOutputs(selectedTransaction?.tx || {})" :key="txOutputKey(output, index)">
             <div class="utxo-node" :class="{ burned: output.kind === 'burned', fee: output.kind === 'fee' }">
               <div class="utxo-node-label"><span x-text="output.label"></span><span x-text="output.kind"></span></div>
-              <div class="utxo-node-amount">LUUN <span x-text="output.amount"></span></div>
+              <div class="utxo-node-amount">LUUN <span x-text="amountLabel(output.amount)"></span></div>
               <template x-if="output.address">
                 <div class="tx-field"><span class="tx-label">To</span><code class="tx-value hash" x-text="output.address"></code></div>
               </template>
@@ -1429,7 +1429,7 @@ mod tests {
 
     use crate::{
         adapters::{config_store, config_store::UiConfig},
-        domain::{Block, Transaction, Wallet},
+        domain::{Block, MICRO_LUUN, Transaction, Wallet},
     };
 
     use super::{
@@ -1508,13 +1508,13 @@ mod tests {
         let initial_config = ui_config.lock().await.clone();
         config_store::save(&config_path, &initial_config).expect("initial config should save");
 
-        persist_burn_settings_config(&ui_config, &config_path, 50, 3)
+        persist_burn_settings_config(&ui_config, &config_path, 50 * MICRO_LUUN, 3 * MICRO_LUUN)
             .await
             .unwrap();
         let config = config_store::load_or_create(&config_path).unwrap();
 
-        assert_eq!(config.burn_per_block, 50);
-        assert_eq!(config.burn_fee, 3);
+        assert_eq!(config.burn_per_block, 50 * MICRO_LUUN);
+        assert_eq!(config.burn_fee, 3 * MICRO_LUUN);
     }
 
     #[test]

@@ -6,8 +6,9 @@ use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 
 pub type Amount = u64;
-pub const BLOCK_REWARD: Amount = 100;
-pub const DEFAULT_TRANSACTION_FEE: Amount = 1;
+pub const MICRO_LUUN: Amount = 1_000_000;
+pub const BLOCK_REWARD: Amount = 100 * MICRO_LUUN;
+pub const DEFAULT_TRANSACTION_FEE: Amount = MICRO_LUUN;
 pub const MAX_BLOCK_BYTES: usize = 100_000;
 pub const VDF_TARGET_BLOCK_MS: u64 = 60_000;
 const MAX_PENDING_TRANSACTIONS: usize = 10_000;
