@@ -360,13 +360,17 @@ impl GossipNetwork {
     }
 
     async fn prepare_gossip(&self, envelopes: Vec<GossipEnvelope>) -> Vec<GossipEnvelope> {
+        let mut full_transactions = Vec::new();
         let mut txs = Vec::new();
         let mut blocks = Vec::new();
         let mut passthrough = Vec::new();
 
         for envelope in envelopes {
             match envelope {
-                GossipEnvelope::Transaction(tx) => txs.push(tx.signature().to_string()),
+                GossipEnvelope::Transaction(tx) => {
+                    txs.push(tx.signature().to_string());
+                    full_transactions.push(tx);
+                }
                 GossipEnvelope::Transactions { transactions } => {
                     txs.extend(
                         transactions
@@ -395,6 +399,12 @@ impl GossipNetwork {
                 }
                 other => passthrough.push(other),
             }
+        }
+
+        if !full_transactions.is_empty() {
+            passthrough.push(GossipEnvelope::Transactions {
+                transactions: full_transactions,
+            });
         }
 
         txs.sort();
@@ -1929,7 +1939,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn tx_and_block_gossip_is_announced_as_inventory() {
+    async fn tx_and_block_gossip_sends_full_transaction_and_inventory() {
         let alice = Wallet::from_seed("inventory-alice");
         let allocations = allocations(std::slice::from_ref(&alice), 1_000);
         let node = Arc::new(tokio::sync::Mutex::new(node("alice", alice, allocations)));
@@ -1968,8 +1978,15 @@ mod tests {
             ])
             .await;
 
-        assert_eq!(prepared.len(), 1);
+        assert_eq!(prepared.len(), 2);
         match &prepared[0] {
+            GossipEnvelope::Transactions { transactions } => {
+                assert_eq!(transactions.len(), 1);
+                assert_eq!(transactions[0].signature(), tx_signature);
+            }
+            other => panic!("expected transaction batch, got {other:?}"),
+        }
+        match &prepared[1] {
             GossipEnvelope::Inventory { txs, blocks } => {
                 assert_eq!(txs, &[tx_signature]);
                 assert_eq!(blocks.len(), 1);

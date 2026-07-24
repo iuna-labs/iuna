@@ -61,7 +61,7 @@ async fn main() -> Result<()> {
         initial_burn_per_block,
         initial_burn_fee,
     );
-    node_core.set_pow_mining_enabled(ui_config.pow_mining_enabled);
+    node_core.set_pow_mining_settings(ui_config.pow_mining_enabled, ui_config.pow_mine_fee)?;
     let node: SharedNode = Arc::new(Mutex::new(node_core));
     let ui_config = Arc::new(Mutex::new(ui_config));
     let mut peers = ui_config.lock().await.peers.clone();

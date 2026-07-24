@@ -50,6 +50,7 @@ struct BurnSettingsForm {
 #[derive(Debug, Deserialize)]
 struct PowMiningForm {
     enabled: bool,
+    fee: Amount,
 }
 
 #[derive(Debug, Deserialize)]
@@ -368,7 +369,7 @@ async fn api_pow_mining_form(
     State(state): State<HttpState>,
     Form(form): Form<PowMiningForm>,
 ) -> Json<ActionResponse> {
-    let result = set_pow_mining(&state, form.enabled).await;
+    let result = set_pow_mining(&state, form.enabled, form.fee).await;
     action_json(result)
 }
 
@@ -456,21 +457,23 @@ async fn persist_burn_settings_config(
     config_store::save(config_path, &config)
 }
 
-async fn set_pow_mining(state: &HttpState, enabled: bool) -> Result<()> {
+async fn set_pow_mining(state: &HttpState, enabled: bool, fee: Amount) -> Result<()> {
     {
         let mut node = state.node.lock().await;
-        node.set_pow_mining_enabled(enabled);
+        node.set_pow_mining_settings(enabled, fee)?;
     }
-    persist_pow_mining_config(&state.ui_config, &state.config_path, enabled).await
+    persist_pow_mining_config(&state.ui_config, &state.config_path, enabled, fee).await
 }
 
 async fn persist_pow_mining_config(
     ui_config: &Arc<Mutex<UiConfig>>,
     config_path: &Path,
     enabled: bool,
+    fee: Amount,
 ) -> Result<()> {
     let mut config = ui_config.lock().await;
     config.pow_mining_enabled = enabled;
+    config.pow_mine_fee = fee;
     config_store::save(config_path, &config)
 }
 
@@ -574,6 +577,7 @@ fn wallet_transaction_row(
         Transaction::Mine {
             output,
             difficulty_bits,
+            fee,
             signature,
             ..
         } if output.address == wallet => Some(WalletTransactionRow {
@@ -581,7 +585,7 @@ fn wallet_transaction_row(
             from: "pow".to_string(),
             to: Some(output.address.clone()),
             amount: output.amount,
-            fee: 0,
+            fee: *fee,
             inputs: Vec::new(),
             outputs: vec![output.clone()],
             change: Vec::new(),
@@ -677,6 +681,7 @@ fn ui_transaction(
         Transaction::Mine {
             output,
             difficulty_bits,
+            fee,
             signature,
             ..
         } => UiTransaction {
@@ -684,7 +689,7 @@ fn ui_transaction(
             from: "pow".to_string(),
             to: Some(output.address.clone()),
             amount: output.amount,
-            fee: 0,
+            fee: *fee,
             inputs: Vec::new(),
             outputs: vec![output.clone()],
             change: Vec::new(),
@@ -1062,7 +1067,9 @@ const INDEX_HTML: &str = r#"<!doctype html>
     .mining-form { width: 100%; display: flex; flex-wrap: wrap; gap: 10px; align-items: end; }
     .burn-fields { display: flex; flex-wrap: wrap; gap: 10px; align-items: end; }
     .mine-action-row { display: grid; grid-template-columns: minmax(0, 1fr) auto; gap: 12px; align-items: center; }
-    .mine-stats { display: grid; grid-template-columns: repeat(3, minmax(112px, 1fr)); gap: 8px; min-width: 0; }
+    .mine-settings-form { display: grid; gap: 10px; }
+    .mine-fee-fields { display: flex; flex-wrap: wrap; gap: 10px; align-items: end; }
+    .mine-stats { display: grid; grid-template-columns: repeat(4, minmax(112px, 1fr)); gap: 8px; min-width: 0; }
     .mine-stat { min-width: 0; border: 1px solid #2f363c; border-radius: 8px; padding: 9px 10px; background: #111316; }
     .mine-stat-label { display: flex; gap: 5px; align-items: center; color: #879198; font-size: 10px; font-weight: 850; text-transform: uppercase; }
     .mine-stat-value { margin-top: 5px; color: #dce4e7; font-size: 14px; font-weight: 850; font-variant-numeric: tabular-nums; overflow-wrap: anywhere; }
@@ -1173,7 +1180,7 @@ const INDEX_HTML: &str = r#"<!doctype html>
       .block-card { flex-basis: 108px; }
     }
   </style>
-  <script defer src="/assets/luun-ui.js?v=45"></script>
+  <script defer src="/assets/luun-ui.js?v=46"></script>
   <script defer src="/assets/alpine.min.js"></script>
 </head>
 <body x-data="luunApp()" x-init="init()" @keydown.window.escape="closeModals()" x-cloak>
@@ -1325,28 +1332,38 @@ const INDEX_HTML: &str = r#"<!doctype html>
         </div>
         <div class="panel">
           <h3>Mine</h3>
-          <div class="panel-description">Mine with PoW to introduce new LUUN. Accepted mine actions pay the fixed mine reward to this wallet when included in a block.</div>
-          <div class="mine-action-row">
-            <div class="mine-stats" aria-label="PoW issuance settings">
-              <div class="mine-stat">
-                <div class="mine-stat-label">Reward</div>
-                <div class="mine-stat-value money">LUUN <span x-text="amountLabel(status.chain?.mine_reward ?? 0)"></span></div>
+          <div class="panel-description">Mine with PoW to introduce new LUUN. The miner chooses the fee paid to the block finalizer; the rest of the fixed mine reward goes to this wallet.</div>
+          <form class="mine-settings-form" @submit.prevent="savePowMining">
+            <div class="mine-action-row">
+              <div class="mine-stats" aria-label="PoW issuance settings">
+                <div class="mine-stat">
+                  <div class="mine-stat-label">Total reward</div>
+                  <div class="mine-stat-value money">LUUN <span x-text="amountLabel(status.chain?.mine_reward ?? 0)"></span></div>
+                </div>
+                <div class="mine-stat">
+                  <div class="mine-stat-label">Finalizer fee</div>
+                  <div class="mine-stat-value">LUUN <span x-text="amountLabel(powMineFeeValue())"></span></div>
+                </div>
+                <div class="mine-stat">
+                  <div class="mine-stat-label">Miner receives</div>
+                  <div class="mine-stat-value money">LUUN <span x-text="amountLabel(powMineNetReward())"></span></div>
+                </div>
+                <div class="mine-stat">
+                  <div class="mine-stat-label">Difficulty <button class="info-button" type="button" @click="openPowDifficultyInfo" title="How difficulty is adjusted" aria-label="How PoW difficulty is adjusted">i</button></div>
+                  <div class="mine-stat-value"><span x-text="status.chain?.current_mine_difficulty_bits ?? status.launch_profile?.mine_difficulty_bits ?? '-'"></span> bits</div>
+                </div>
               </div>
-              <div class="mine-stat">
-                <div class="mine-stat-label">Difficulty <button class="info-button" type="button" @click="openPowDifficultyInfo" title="How difficulty is adjusted" aria-label="How PoW difficulty is adjusted">i</button></div>
-                <div class="mine-stat-value"><span x-text="status.chain?.current_mine_difficulty_bits ?? status.launch_profile?.mine_difficulty_bits ?? '-'"></span> bits</div>
-              </div>
-              <div class="mine-stat">
-                <div class="mine-stat-label">Status</div>
-                <div class="mine-stat-value" x-text="powMiningEnabled ? 'On' : 'Off'"></div>
-              </div>
+              <label class="toggle-switch" :class="{ active: powMiningEnabled }" title="Automatically queue one PoW mine action per chain tip">
+                <input type="checkbox" :checked="powMiningEnabled" @change="setPowMiningEnabled($event.target.checked)">
+                <span class="toggle-track"><span class="toggle-thumb"></span></span>
+                <span class="toggle-text" x-text="powMiningEnabled ? 'On' : 'Off'"></span>
+              </label>
             </div>
-            <label class="toggle-switch" :class="{ active: powMiningEnabled }" title="Automatically queue one PoW mine action per chain tip">
-              <input type="checkbox" :checked="powMiningEnabled" @change="setPowMiningEnabled($event.target.checked)">
-              <span class="toggle-track"><span class="toggle-thumb"></span></span>
-              <span class="toggle-text" x-text="powMiningEnabled ? 'On' : 'Off'"></span>
-            </label>
-          </div>
+            <div class="mine-fee-fields">
+              <label>Fee<input x-model="powMineFeeDraft" @input="powMineFeeDirty = true" type="number" min="0" step="0.000001"></label>
+              <button class="primary" type="submit">Save</button>
+            </div>
+          </form>
         </div>
       </div>
     </section>
@@ -1699,7 +1716,7 @@ mod tests {
 
     use crate::{
         adapters::{config_store, config_store::UiConfig},
-        domain::{Block, MICRO_LUUN, OutPoint, Transaction, Wallet},
+        domain::{Block, Ledger, MICRO_LUUN, MINE_REWARD, OutPoint, Transaction, Wallet},
     };
 
     use super::{
@@ -1750,6 +1767,27 @@ mod tests {
         assert_eq!(rows[0].block_height, Some(31));
         assert_eq!(rows[0].block_miner.as_deref(), Some("miner"));
         assert_eq!(rows[0].direction, "received");
+    }
+
+    #[test]
+    fn mine_transaction_views_include_miner_chosen_fee() {
+        let alice = Wallet::from_seed("wallet-mine-fee-alice");
+        let ledger = Ledger::new(BTreeMap::new(), 1);
+        let mine_fee = MICRO_LUUN / 5;
+        let mine = ledger
+            .build_mine_with_fee(alice.address(), mine_fee)
+            .unwrap();
+        let chain = vec![fake_block(1, vec![mine.clone()])];
+        let outputs = super::known_output_index(&BTreeMap::new(), &chain, &[]);
+
+        let rows = wallet_transaction_rows(alice.address(), Vec::new(), &chain, &outputs);
+        let transaction = super::ui_transaction(&mine, &outputs);
+
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].amount, MINE_REWARD - mine_fee);
+        assert_eq!(rows[0].fee, mine_fee);
+        assert_eq!(transaction.amount, MINE_REWARD - mine_fee);
+        assert_eq!(transaction.fee, mine_fee);
     }
 
     fn fake_block(height: u64, transactions: Vec<Transaction>) -> Block {
@@ -1805,12 +1843,13 @@ mod tests {
         let initial_config = ui_config.lock().await.clone();
         config_store::save(&config_path, &initial_config).expect("initial config should save");
 
-        persist_pow_mining_config(&ui_config, &config_path, true)
+        persist_pow_mining_config(&ui_config, &config_path, true, 2 * MICRO_LUUN)
             .await
             .unwrap();
         let config = config_store::load_or_create(&config_path).unwrap();
 
         assert!(config.pow_mining_enabled);
+        assert_eq!(config.pow_mine_fee, 2 * MICRO_LUUN);
     }
 
     #[test]

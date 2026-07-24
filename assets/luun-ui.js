@@ -28,6 +28,9 @@ window.luunApp = function luunApp() {
     burnFeeDraft: "1",
     miningEnabled: false,
     powMiningEnabled: false,
+    powMineFee: 10000,
+    powMineFeeDraft: "0.01",
+    powMineFeeDirty: false,
     burnAmountDirty: false,
     transferTo: "",
     transferAmount: null,
@@ -282,9 +285,13 @@ window.luunApp = function luunApp() {
         this.burnFee = status.mining?.automatic_burn_fee ?? this.burnFee;
         this.miningEnabled = status.mining?.automatic ?? this.miningEnabled;
         this.powMiningEnabled = status.mining?.pow_mining_enabled ?? this.powMiningEnabled;
+        this.powMineFee = status.mining?.automatic_pow_mine_fee ?? this.powMineFee;
         if (!this.burnAmountDirty) {
           this.burnAmountDraft = this.amountLabel(this.burnAmount);
           this.burnFeeDraft = this.amountLabel(this.burnFee);
+        }
+        if (!this.powMineFeeDirty) {
+          this.powMineFeeDraft = this.amountLabel(this.powMineFee);
         }
         this.lastUpdated = new Date();
       } catch (error) {
@@ -512,20 +519,54 @@ window.luunApp = function luunApp() {
     async setPowMiningEnabled(enabled) {
       const previous = this.powMiningEnabled;
       try {
+        const fee = this.parseLuunAmount(this.powMineFeeDraft);
         this.powMiningEnabled = enabled;
         await this.postForm(
           "/api/settings/pow-mining",
-          { enabled },
+          { enabled, fee },
           enabled ? "PoW mining turned on" : "PoW mining turned off"
         );
+        this.powMineFeeDirty = false;
+        this.powMineFee = fee;
       } catch (error) {
         this.powMiningEnabled = previous;
         this.showFlash(error.message, "error");
       }
     },
 
+    async savePowMining() {
+      try {
+        const fee = this.parseLuunAmount(this.powMineFeeDraft);
+        this.powMineFeeDraft = this.amountLabel(fee);
+        await this.postForm(
+          "/api/settings/pow-mining",
+          { enabled: this.powMiningEnabled, fee },
+          this.powMiningEnabled
+            ? `Mine fee set to ${this.amountLabel(fee)} LUUN`
+            : `Mine settings saved while off`
+        );
+        this.powMineFeeDirty = false;
+        this.powMineFee = fee;
+      } catch (error) {
+        this.showFlash(error.message, "error");
+      }
+    },
+
     automaticBurnFeeDraft() {
       return this.parseLuunAmount(this.burnFeeDraft);
+    },
+
+    powMineFeeValue() {
+      try {
+        return this.parseLuunAmount(this.powMineFeeDraft);
+      } catch {
+        return this.powMineFee;
+      }
+    },
+
+    powMineNetReward() {
+      const reward = Math.max(0, Math.trunc(Number(this.status.chain?.mine_reward ?? 0)));
+      return Math.max(0, reward - this.powMineFeeValue());
     },
 
     amountLabel(value) {

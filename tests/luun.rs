@@ -310,6 +310,31 @@ fn mine_action_introduces_one_luun_and_block_author_gets_fees_only() {
 }
 
 #[test]
+fn mine_action_fee_is_chosen_by_pow_miner_and_paid_to_block_finalizer() {
+    let alice = Wallet::from_seed("mine-fee-alice");
+    let bob = Wallet::from_seed("mine-fee-bob");
+    let mut allocations = BTreeMap::new();
+    allocations.insert(bob.address().to_string(), 2 * MICRO_LUUN);
+
+    let mut ledger = Ledger::new(allocations, 10);
+    let mine_fee = MICRO_LUUN / 4;
+    let mine = ledger
+        .build_mine_with_fee(alice.address(), mine_fee)
+        .unwrap();
+    assert_eq!(mine.amount(), MINE_REWARD - mine_fee);
+    assert_eq!(mine.fee(), mine_fee);
+    ledger.submit_transaction(mine).unwrap();
+    submit_burn(&mut ledger, &bob, MICRO_LUUN);
+
+    let block = ledger.mine_next_block(&bob, 1).unwrap();
+    assert_eq!(block.reward, mine_fee);
+    ledger.apply_block(block).unwrap();
+
+    assert_eq!(ledger.balance_of(alice.address()), MINE_REWARD - mine_fee);
+    assert_eq!(ledger.balance_of(bob.address()), MICRO_LUUN + mine_fee);
+}
+
+#[test]
 fn forged_mine_action_cannot_introduce_luun() {
     let alice = Wallet::from_seed("forged-mine-alice");
     let mut allocations = BTreeMap::new();
@@ -775,6 +800,63 @@ fn waiting_wallet_gossips_pending_burn_to_selected_leader() {
     let bob_outcome = bob_node.automatic_mine_once(1);
     assert!(bob_outcome.skipped_reason.is_none());
     assert!(bob_outcome.block.is_some());
+}
+
+#[test]
+fn pow_only_node_gossips_mine_action_to_pob_only_finalizer() {
+    let alice = Wallet::from_seed("pob-only-finalizer-alice");
+    let bob = Wallet::from_seed("pow-only-miner-bob");
+    let mut allocations = BTreeMap::new();
+    allocations.insert(alice.address().to_string(), 2 * MICRO_LUUN);
+    let ledger = Ledger::new_with_genesis_burns(
+        allocations,
+        vec![GenesisBurn::new(alice.address(), MICRO_LUUN)],
+        25,
+    )
+    .unwrap();
+
+    assert_eq!(
+        ledger.expected_leader_for_next_block().as_deref(),
+        Some(alice.address())
+    );
+    let mut alice_node = NodeCore::from_ledger_with_burn_fee_and_enabled(
+        alice,
+        ledger.clone(),
+        true,
+        DEFAULT_BURN_PER_BLOCK,
+        MICRO_LUUN,
+    );
+    let mut bob_node = NodeCore::from_ledger_with_burn_fee_and_enabled(
+        bob.clone(),
+        ledger,
+        false,
+        DEFAULT_BURN_PER_BLOCK,
+        MICRO_LUUN,
+    );
+    bob_node
+        .set_pow_mining_settings(true, MICRO_LUUN / 100)
+        .unwrap();
+
+    let bob_plan = bob_node.prepare_automatic_mining(1);
+    let mine = bob_plan.pow_mined.expect("B should queue a mine action");
+    assert_eq!(
+        bob_plan.skipped_reason.as_deref(),
+        Some("automatic mining is off")
+    );
+    assert!(alice_node.ledger().pending().is_empty());
+
+    for envelope in bob_node.drain_outbox() {
+        alice_node.receive(envelope).unwrap();
+    }
+
+    assert!(
+        alice_node
+            .ledger()
+            .pending()
+            .iter()
+            .any(|pending| pending.signature() == mine.signature()),
+        "A did not receive B's mine action"
+    );
 }
 
 #[test]

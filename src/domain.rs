@@ -9,6 +9,7 @@ pub type Amount = u64;
 pub const MICRO_LUUN: Amount = 1_000_000;
 pub const BLOCK_REWARD: Amount = 100 * MICRO_LUUN;
 pub const MINE_REWARD: Amount = MICRO_LUUN;
+pub const DEFAULT_MINE_FEE: Amount = MINE_REWARD / 100;
 pub const DEFAULT_TRANSACTION_FEE: Amount = MICRO_LUUN;
 pub const MAX_BLOCK_BYTES: usize = 100_000;
 pub const VDF_TARGET_BLOCK_MS: u64 = 60_000;
@@ -111,6 +112,8 @@ pub enum Transaction {
         anchor: String,
         nonce: u64,
         difficulty_bits: u32,
+        #[serde(default)]
+        fee: Amount,
         signature: String,
     },
 }
@@ -195,7 +198,7 @@ impl Transaction {
     pub fn fee(&self) -> Amount {
         match self {
             Self::Transfer { fee, .. } | Self::Burn { fee, .. } => *fee,
-            Self::Mine { .. } => 0,
+            Self::Mine { fee, .. } => *fee,
         }
     }
 
@@ -254,8 +257,9 @@ impl Transaction {
                 anchor,
                 nonce,
                 difficulty_bits,
+                fee,
                 ..
-            } => mine_payload(output, anchor, *nonce, *difficulty_bits),
+            } => mine_payload(output, anchor, *nonce, *difficulty_bits, *fee),
         }
     }
 
@@ -265,10 +269,11 @@ impl Transaction {
             anchor,
             nonce,
             difficulty_bits,
+            fee,
             signature,
         } = self
         {
-            let expected = mine_signature(output, anchor, *nonce, *difficulty_bits);
+            let expected = mine_signature(output, anchor, *nonce, *difficulty_bits, *fee);
             if *signature != expected {
                 bail!("mine transaction proof hash is invalid");
             }
@@ -448,15 +453,32 @@ fn canonical_outputs(outputs: &[TxOutput]) -> String {
         .join("|")
 }
 
-fn mine_payload(output: &TxOutput, anchor: &str, nonce: u64, difficulty_bits: u32) -> String {
-    format!(
+fn mine_payload(
+    output: &TxOutput,
+    anchor: &str,
+    nonce: u64,
+    difficulty_bits: u32,
+    fee: Amount,
+) -> String {
+    let payload = format!(
         "luun-mine:{}:{}:{}:{}",
         output.address, output.amount, anchor, nonce
-    ) + &format!(":{difficulty_bits}")
+    ) + &format!(":{difficulty_bits}");
+    if fee == 0 {
+        payload
+    } else {
+        format!("{payload}:{fee}")
+    }
 }
 
-fn mine_signature(output: &TxOutput, anchor: &str, nonce: u64, difficulty_bits: u32) -> String {
-    hex_hash(mine_payload(output, anchor, nonce, difficulty_bits))
+fn mine_signature(
+    output: &TxOutput,
+    anchor: &str,
+    nonce: u64,
+    difficulty_bits: u32,
+    fee: Amount,
+) -> String {
+    hex_hash(mine_payload(output, anchor, nonce, difficulty_bits, fee))
 }
 
 fn hash_meets_difficulty(hash: &str, difficulty_bits: u32) -> bool {
@@ -1373,15 +1395,26 @@ impl Ledger {
     }
 
     pub fn build_mine(&self, recipient: impl Into<String>) -> Result<Transaction> {
+        self.build_mine_with_fee(recipient, 0)
+    }
+
+    pub fn build_mine_with_fee(
+        &self,
+        recipient: impl Into<String>,
+        fee: Amount,
+    ) -> Result<Transaction> {
         let recipient = recipient.into();
+        if fee > self.mine_reward {
+            bail!("mine transaction fee exceeds reward");
+        }
         let output = TxOutput {
             address: recipient,
-            amount: self.mine_reward,
+            amount: self.mine_reward - fee,
         };
         let anchor = self.tip().hash.clone();
         let difficulty_bits = self.current_mine_difficulty_bits();
         for nonce in 0..u64::MAX {
-            let signature = mine_signature(&output, &anchor, nonce, difficulty_bits);
+            let signature = mine_signature(&output, &anchor, nonce, difficulty_bits, fee);
             if !hash_meets_difficulty(&signature, difficulty_bits) {
                 continue;
             }
@@ -1390,6 +1423,7 @@ impl Ledger {
                 anchor: anchor.clone(),
                 nonce,
                 difficulty_bits,
+                fee,
                 signature,
             };
             if self.has_transaction(transaction.signature()) {
@@ -1757,10 +1791,16 @@ impl Ledger {
             output,
             anchor,
             difficulty_bits,
+            fee,
             ..
         } = transaction
         {
-            if output.amount != self.mine_reward {
+            if output
+                .amount
+                .checked_add(*fee)
+                .context("mine transaction output plus fee overflows")?
+                != self.mine_reward
+            {
                 bail!("mine transaction reward is invalid");
             }
             let anchor_block = self
@@ -2662,6 +2702,34 @@ mod tests {
         ledger.apply_block(block).unwrap();
     }
 
+    fn mine_with_output_and_fee(
+        ledger: &Ledger,
+        recipient: &str,
+        output_amount: Amount,
+        fee: Amount,
+    ) -> Transaction {
+        let output = TxOutput {
+            address: recipient.to_string(),
+            amount: output_amount,
+        };
+        let anchor = ledger.tip().hash.clone();
+        let difficulty_bits = ledger.current_mine_difficulty_bits();
+        for nonce in 0..u64::MAX {
+            let signature = mine_signature(&output, &anchor, nonce, difficulty_bits, fee);
+            if hash_meets_difficulty(&signature, difficulty_bits) {
+                return Transaction::Mine {
+                    output,
+                    anchor,
+                    nonce,
+                    difficulty_bits,
+                    fee,
+                    signature,
+                };
+            }
+        }
+        panic!("expected to find mine proof");
+    }
+
     #[test]
     fn wallet_utxos_only_include_outputs_owned_by_address() {
         let alice = Wallet::from_seed("wallet-utxos-alice");
@@ -2935,6 +3003,79 @@ mod tests {
             tickets.iter().any(|ticket| ticket.id == "small-burn"),
             "unselected future tickets should remain pending"
         );
+    }
+
+    #[test]
+    fn mine_fee_cannot_exceed_reward() {
+        let alice = Wallet::from_seed("mine-fee-too-high-alice");
+        let ledger = ledger_with_allocation(&alice, MICRO_LUUN);
+
+        let error = ledger
+            .build_mine_with_fee(alice.address(), MINE_REWARD + 1)
+            .unwrap_err();
+
+        assert!(format!("{error:#}").contains("fee exceeds reward"));
+    }
+
+    #[test]
+    fn mine_output_plus_fee_must_equal_reward_even_with_valid_pow() {
+        let alice = Wallet::from_seed("mine-invalid-split-alice");
+        let mut ledger = ledger_with_allocation(&alice, MICRO_LUUN);
+        let forged = mine_with_output_and_fee(&ledger, alice.address(), MINE_REWARD, 1);
+
+        let error = ledger.submit_transaction(forged).unwrap_err();
+
+        assert!(format!("{error:#}").contains("mine transaction reward is invalid"));
+    }
+
+    #[test]
+    fn mine_fee_can_take_entire_reward_for_finalizer() {
+        let alice = Wallet::from_seed("mine-full-fee-alice");
+        let mut ledger = ledger_with_allocation(&alice, MICRO_LUUN);
+
+        let mine = ledger
+            .build_mine_with_fee(alice.address(), MINE_REWARD)
+            .unwrap();
+
+        assert_eq!(mine.amount(), 0);
+        assert_eq!(mine.fee(), MINE_REWARD);
+        assert!(ledger.submit_transaction(mine).unwrap());
+    }
+
+    #[test]
+    fn block_selection_prefers_higher_fee_mine_action_when_space_is_limited() {
+        let alice = Wallet::from_seed("mine-fee-priority-alice");
+        let mut ledger = ledger_with_allocation(&alice, 10 * MICRO_LUUN);
+        ledger.launch_profile.max_block_transactions = 2;
+
+        let low_fee_mine = ledger
+            .build_mine_with_fee(alice.address(), MICRO_LUUN / 100)
+            .unwrap();
+        let high_fee_mine = ledger
+            .build_mine_with_fee(alice.address(), MICRO_LUUN / 2)
+            .unwrap();
+        let burn = ledger.build_burn(&alice, MICRO_LUUN, 0).unwrap();
+        ledger.submit_transaction(low_fee_mine.clone()).unwrap();
+        ledger.submit_transaction(high_fee_mine.clone()).unwrap();
+        ledger.submit_transaction(burn).unwrap();
+
+        let block = ledger.mine_next_block(&alice, 1).unwrap();
+
+        assert_eq!(block.transactions.len(), 2);
+        assert!(block.transactions.iter().any(Transaction::is_burn));
+        assert!(
+            block
+                .transactions
+                .iter()
+                .any(|tx| tx.signature() == high_fee_mine.signature())
+        );
+        assert!(
+            block
+                .transactions
+                .iter()
+                .all(|tx| tx.signature() != low_fee_mine.signature())
+        );
+        assert_eq!(block.reward, high_fee_mine.fee());
     }
 
     #[test]

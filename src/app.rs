@@ -4,13 +4,13 @@ use std::{
     time::{SystemTime, UNIX_EPOCH},
 };
 
-use anyhow::{Context, Result};
+use anyhow::{Context, Result, bail};
 use serde::{Deserialize, Serialize};
 use tokio::sync::Mutex;
 
 use crate::domain::{
-    Amount, Block, ChainSnapshot, ChainStatus, DEFAULT_TRANSACTION_FEE, Ledger, OutPoint,
-    PreparedBlock, Transaction, VDF_TARGET_BLOCK_MS, Wallet, run_vdf,
+    Amount, Block, ChainSnapshot, ChainStatus, DEFAULT_MINE_FEE, DEFAULT_TRANSACTION_FEE, Ledger,
+    OutPoint, PreparedBlock, Transaction, VDF_TARGET_BLOCK_MS, Wallet, run_vdf,
 };
 
 pub type SharedNode = Arc<Mutex<NodeCore>>;
@@ -122,6 +122,7 @@ pub struct MiningStatus {
     pub pow_mining_enabled: bool,
     pub burn_per_block: Amount,
     pub automatic_burn_fee: Amount,
+    pub automatic_pow_mine_fee: Amount,
     pub vdf_rounds: u32,
     pub vdf_target_block_ms: u64,
     pub current_leader: Option<String>,
@@ -151,6 +152,7 @@ pub struct NodeCore {
     ledger: Ledger,
     automatic_mining_enabled: bool,
     pow_mining_enabled: bool,
+    pow_mine_fee: Amount,
     burn_per_block: Amount,
     burn_fee: Amount,
     last_auto_burn_height: Option<u64>,
@@ -200,6 +202,7 @@ impl NodeCore {
             ledger,
             automatic_mining_enabled,
             pow_mining_enabled: false,
+            pow_mine_fee: DEFAULT_MINE_FEE,
             burn_per_block,
             burn_fee,
             last_auto_burn_height: None,
@@ -364,6 +367,7 @@ impl NodeCore {
                 pow_mining_enabled: self.pow_mining_enabled,
                 burn_per_block: self.burn_per_block,
                 automatic_burn_fee: self.burn_fee,
+                automatic_pow_mine_fee: self.pow_mine_fee,
                 vdf_rounds: self.ledger.vdf_rounds(),
                 vdf_target_block_ms: VDF_TARGET_BLOCK_MS,
                 current_leader,
@@ -407,6 +411,18 @@ impl NodeCore {
         if !enabled {
             self.last_auto_pow_mine_anchor = None;
         }
+    }
+
+    pub fn set_pow_mining_settings(&mut self, enabled: bool, fee: Amount) -> Result<()> {
+        if fee > self.ledger.status().mine_reward {
+            bail!("mine fee cannot exceed mine reward");
+        }
+        self.pow_mining_enabled = enabled;
+        self.pow_mine_fee = fee;
+        if !enabled {
+            self.last_auto_pow_mine_anchor = None;
+        }
+        Ok(())
     }
 
     pub fn burn(&mut self, amount: Amount) -> Result<Transaction> {
@@ -455,7 +471,9 @@ impl NodeCore {
     }
 
     pub fn mine_pow_reward(&mut self) -> Result<Transaction> {
-        let tx = self.ledger.build_mine(self.wallet.address())?;
+        let tx = self
+            .ledger
+            .build_mine_with_fee(self.wallet.address(), self.pow_mine_fee)?;
         if self.ledger.submit_transaction(tx.clone())? {
             self.outbox.push(GossipEnvelope::Transaction(tx.clone()));
         }
@@ -576,7 +594,9 @@ impl NodeCore {
         {
             return Ok(None);
         }
-        let tx = self.ledger.build_mine(self.wallet.address())?;
+        let tx = self
+            .ledger
+            .build_mine_with_fee(self.wallet.address(), self.pow_mine_fee)?;
         if self.ledger.submit_transaction(tx.clone())? {
             self.last_auto_pow_mine_anchor = Some(anchor);
             self.outbox.push(GossipEnvelope::Transaction(tx.clone()));
@@ -870,7 +890,7 @@ pub fn now_ms() -> u64 {
 mod tests {
     use std::collections::BTreeMap;
 
-    use crate::domain::{Transaction, Wallet};
+    use crate::domain::{DEFAULT_MINE_FEE, Transaction, Wallet};
 
     use super::{NodeConfig, NodeCore};
 
@@ -924,6 +944,7 @@ mod tests {
             anchor,
             output,
             difficulty_bits,
+            fee,
             ..
         } = first_mine
         else {
@@ -931,6 +952,7 @@ mod tests {
         };
         assert_eq!(anchor, &node.chain().last().unwrap().hash);
         assert_eq!(output.address, wallet.address());
+        assert_eq!(*fee, DEFAULT_MINE_FEE);
         assert_eq!(
             *difficulty_bits,
             node.ledger().current_mine_difficulty_bits()
@@ -940,6 +962,49 @@ mod tests {
         let second = node.prepare_automatic_mining(3);
         assert!(second.pow_mined.is_none());
         assert_eq!(node.ledger().pending().len(), 1);
+    }
+
+    #[test]
+    fn automatic_pow_mining_uses_configured_mine_fee() {
+        let wallet = Wallet::from_seed("automatic-pow-mining-fee-wallet");
+        let mut node = NodeCore::new(NodeConfig {
+            wallet,
+            genesis_allocations: BTreeMap::new(),
+            vdf_rounds: 10,
+            burn_per_block: 0,
+            burn_fee: 0,
+        });
+
+        let configured_fee = DEFAULT_MINE_FEE * 2;
+        node.set_pow_mining_settings(true, configured_fee).unwrap();
+        let plan = node.prepare_automatic_mining(1);
+        let mine = plan.pow_mined.expect("PoW should be queued");
+
+        assert_eq!(mine.fee(), configured_fee);
+        assert_eq!(
+            mine.amount(),
+            node.ledger().status().mine_reward - configured_fee
+        );
+        assert_eq!(node.status().mining.automatic_pow_mine_fee, configured_fee);
+    }
+
+    #[test]
+    fn automatic_pow_mining_rejects_fee_above_reward() {
+        let wallet = Wallet::from_seed("automatic-pow-mining-too-high-fee-wallet");
+        let mut node = NodeCore::new(NodeConfig {
+            wallet,
+            genesis_allocations: BTreeMap::new(),
+            vdf_rounds: 10,
+            burn_per_block: 0,
+            burn_fee: 0,
+        });
+
+        let error = node
+            .set_pow_mining_settings(true, node.ledger().status().mine_reward + 1)
+            .unwrap_err();
+
+        assert!(format!("{error:#}").contains("mine fee cannot exceed mine reward"));
+        assert!(!node.status().mining.pow_mining_enabled);
     }
 }
 
