@@ -481,6 +481,18 @@ window.luunApp = function luunApp() {
       }
     },
 
+    async mineGenesis() {
+      try {
+        await this.postForm(
+          "/api/genesis/mine",
+          {},
+          `Mined genesis with ${this.amountLabel(this.status.chain?.mine_reward ?? 0)} LUUN`
+        );
+      } catch (error) {
+        this.showFlash(error.message, "error");
+      }
+    },
+
     automaticBurnFeeDraft() {
       return this.parseLuunAmount(this.burnFeeDraft);
     },
