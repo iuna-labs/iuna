@@ -13,6 +13,12 @@ window.luunApp = function luunApp() {
     peers: [],
     p2pMetrics: {},
     config: { setup_complete: false },
+    auth: { configured: false, authenticated: false },
+    authLoaded: false,
+    authPassword: "",
+    authPasswordConfirm: "",
+    loginPassword: "",
+    authFeedback: null,
     setupWallet: { address: null, seed_phrase: null, dev_verify_bypass: false },
     setupWalletMode: "create",
     setupSeedStep: "write",
@@ -44,6 +50,7 @@ window.luunApp = function luunApp() {
     showPowDifficultyInfo: false,
     lastUpdated: null,
     pollHandle: null,
+    hashListenerInstalled: false,
     newBlockHashes: new Set(),
     newBlockTimer: null,
     blockPageSize: 20,
@@ -53,16 +60,27 @@ window.luunApp = function luunApp() {
     },
 
     async bootstrap() {
+      await this.refreshAuth();
+      if (this.showingAuth()) return;
+      await this.bootstrapAuthenticated();
+    },
+
+    async bootstrapAuthenticated() {
       await this.refreshConfig();
       if (!this.config.setup_complete) {
         await this.refreshWalletSetup();
       }
       this.tab = this.tabFromHash();
-      window.addEventListener("hashchange", () => {
-        this.tab = this.tabFromHash();
-      });
+      if (!this.hashListenerInstalled) {
+        window.addEventListener("hashchange", () => {
+          this.tab = this.tabFromHash();
+        });
+        this.hashListenerInstalled = true;
+      }
       await this.refresh();
-      this.pollHandle = setInterval(() => this.refresh(), 5000);
+      if (!this.pollHandle) {
+        this.pollHandle = setInterval(() => this.refresh(), 5000);
+      }
     },
 
     tabFromHash() {
@@ -88,7 +106,77 @@ window.luunApp = function luunApp() {
     },
 
     showingSetup() {
-      return !this.config.setup_complete;
+      return this.authLoaded && !this.showingAuth() && !this.config.setup_complete;
+    },
+
+    showingAuth() {
+      return this.authLoaded && (!this.auth.configured || !this.auth.authenticated);
+    },
+
+    async refreshAuth() {
+      this.auth = await this.fetchJson("/api/auth/status");
+      this.authLoaded = true;
+    },
+
+    async setupPassword() {
+      try {
+        this.authFeedback = null;
+        if (this.authPassword !== this.authPasswordConfirm) {
+          throw new Error("Passwords do not match");
+        }
+        await this.postAuth("/api/auth/setup", this.authPassword);
+        this.authPassword = "";
+        this.authPasswordConfirm = "";
+        await this.refreshAuth();
+        await this.bootstrapAuthenticated();
+        this.showFlash("Password set", "success");
+      } catch (error) {
+        this.showAuthFeedback(error.message, "error");
+      }
+    },
+
+    async login() {
+      try {
+        this.authFeedback = null;
+        await this.postAuth("/api/auth/login", this.loginPassword);
+        this.loginPassword = "";
+        await this.refreshAuth();
+        await this.bootstrapAuthenticated();
+        this.showFlash("Logged in", "success");
+      } catch (error) {
+        this.showAuthFeedback(error.message, "error");
+      }
+    },
+
+    async postAuth(path, password) {
+      const response = await fetch(path, {
+        method: "POST",
+        headers: { Accept: "application/json", "Content-Type": "application/x-www-form-urlencoded" },
+        body: new URLSearchParams({ password }),
+      });
+      const text = await response.text();
+      let payload = { ok: response.ok, error: null };
+      if (text) {
+        try {
+          payload = JSON.parse(text);
+        } catch {
+          payload = { ok: false, error: text };
+        }
+      }
+      if (!response.ok || !payload.ok) {
+        throw new Error(payload.error || `${path} returned ${response.status}`);
+      }
+      return payload;
+    },
+
+    async logout() {
+      try {
+        await this.postAuth("/api/auth/logout", "");
+        await this.refreshAuth();
+        this.showFlash("Locked", "success");
+      } catch (error) {
+        this.showFlash(error.message, "error");
+      }
     },
 
     async refreshConfig() {
@@ -295,6 +383,10 @@ window.luunApp = function luunApp() {
         }
         this.lastUpdated = new Date();
       } catch (error) {
+        if (String(error.message || "").includes("401")) {
+          await this.refreshAuth();
+          return;
+        }
         this.showFlash(error.message, "error");
       }
     },
@@ -648,6 +740,10 @@ window.luunApp = function luunApp() {
 
     showSetupFeedback(message, kind) {
       this.setupFeedback = { message, kind };
+    },
+
+    showAuthFeedback(message, kind) {
+      this.authFeedback = { message, kind };
     },
 
     short(value) {

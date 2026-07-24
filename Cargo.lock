@@ -487,6 +487,7 @@ dependencies = [
  "sha2",
  "tempfile",
  "tokio",
+ "tower",
 ]
 
 [[package]]

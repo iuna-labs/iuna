@@ -216,6 +216,20 @@ impl P2pMetricsCounters {
 }
 
 impl GossipNetwork {
+    #[cfg(test)]
+    pub(crate) fn new_for_tests(node: SharedNode, peers: SharedPeerBook) -> Self {
+        Self {
+            inner: Arc::new(GossipNetworkInner {
+                node,
+                peers,
+                listen_addr: "127.0.0.1:0".parse().unwrap(),
+                sessions: Mutex::new(BTreeMap::new()),
+                tx_delivery: Mutex::new(BTreeMap::new()),
+                metrics: P2pMetricsCounters::default(),
+            }),
+        }
+    }
+
     pub async fn start(node: SharedNode, peers: SharedPeerBook, addr: SocketAddr) -> Result<Self> {
         let listener = TcpListener::bind(addr)
             .await

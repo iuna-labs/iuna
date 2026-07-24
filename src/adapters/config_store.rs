@@ -1,3 +1,5 @@
+#[cfg(unix)]
+use std::os::unix::fs::OpenOptionsExt;
 use std::{
     fs::{self, File, OpenOptions},
     io::Write,
@@ -16,6 +18,8 @@ pub const DEFAULT_BURN_FEE: Amount = DEFAULT_TRANSACTION_FEE;
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 pub struct UiConfig {
     pub setup_complete: bool,
+    #[serde(skip_serializing, default)]
+    pub auth_password_hash: Option<String>,
     pub mining_enabled: bool,
     pub pow_mining_enabled: bool,
     pub burn_per_block: Amount,
@@ -28,6 +32,7 @@ impl Default for UiConfig {
     fn default() -> Self {
         Self {
             setup_complete: false,
+            auth_password_hash: None,
             mining_enabled: false,
             pow_mining_enabled: false,
             burn_per_block: 0,
@@ -44,6 +49,8 @@ struct ConfigFile {
     #[serde(default)]
     amount_unit: Option<String>,
     setup_complete: bool,
+    #[serde(default)]
+    auth_password_hash: Option<String>,
     #[serde(default)]
     mining_enabled: Option<bool>,
     #[serde(default)]
@@ -82,6 +89,7 @@ pub fn save(path: &Path, config: &UiConfig) -> Result<()> {
         version: CONFIG_FILE_VERSION,
         amount_unit: Some(AMOUNT_UNIT_MICROLUUN.to_string()),
         setup_complete: config.setup_complete,
+        auth_password_hash: config.auth_password_hash.clone(),
         mining_enabled: Some(config.mining_enabled),
         pow_mining_enabled: config.pow_mining_enabled,
         burn_per_block: config.burn_per_block,
@@ -120,6 +128,7 @@ fn load(path: &Path) -> Result<UiConfig> {
 
     Ok(UiConfig {
         setup_complete: stored.setup_complete,
+        auth_password_hash: stored.auth_password_hash,
         mining_enabled: stored.mining_enabled.unwrap_or(stored.burn_per_block > 0),
         pow_mining_enabled: stored.pow_mining_enabled,
         burn_per_block: stored.burn_per_block.saturating_mul(scale),
@@ -133,10 +142,11 @@ fn load(path: &Path) -> Result<UiConfig> {
 }
 
 fn create_config_file(path: &Path) -> Result<File> {
-    OpenOptions::new()
-        .write(true)
-        .create(true)
-        .truncate(true)
+    let mut options = OpenOptions::new();
+    options.write(true).create(true).truncate(true);
+    #[cfg(unix)]
+    options.mode(0o600);
+    options
         .open(path)
         .with_context(|| format!("failed to create config file {}", path.display()))
 }
@@ -163,6 +173,7 @@ mod tests {
         assert!(stored.contains("\"version\": 1"));
         assert!(stored.contains("\"amount_unit\": \"microluun\""));
         assert!(stored.contains("\"setup_complete\": false"));
+        assert!(stored.contains("\"auth_password_hash\": null"));
         assert!(stored.contains("\"mining_enabled\": false"));
         assert!(stored.contains("\"pow_mining_enabled\": false"));
         assert!(stored.contains("\"burn_per_block\": 0"));
@@ -180,6 +191,7 @@ mod tests {
             &path,
             &UiConfig {
                 setup_complete: true,
+                auth_password_hash: Some("auth-hash".to_string()),
                 mining_enabled: true,
                 pow_mining_enabled: true,
                 burn_per_block: 50 * MICRO_LUUN,
@@ -192,12 +204,25 @@ mod tests {
         let config = load_or_create(&path).unwrap();
 
         assert!(config.setup_complete);
+        assert_eq!(config.auth_password_hash.as_deref(), Some("auth-hash"));
         assert!(config.mining_enabled);
         assert!(config.pow_mining_enabled);
         assert_eq!(config.burn_per_block, 50 * MICRO_LUUN);
         assert_eq!(config.burn_fee, 3 * MICRO_LUUN);
         assert_eq!(config.pow_mine_fee, 2 * MICRO_LUUN);
         assert_eq!(config.peers, vec!["127.0.0.1:9444"]);
+    }
+
+    #[test]
+    fn ui_config_json_does_not_expose_password_hash() {
+        let json = serde_json::to_string(&UiConfig {
+            auth_password_hash: Some("secret-password-hash".to_string()),
+            ..UiConfig::default()
+        })
+        .unwrap();
+
+        assert!(!json.contains("secret-password-hash"));
+        assert!(!json.contains("auth_password_hash"));
     }
 
     #[test]

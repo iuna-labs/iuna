@@ -3,17 +3,22 @@ use std::{
     net::SocketAddr,
     path::{Path, PathBuf},
     sync::Arc,
+    time::{SystemTime, UNIX_EPOCH},
 };
 
 use anyhow::{Context, Result, bail};
 use axum::{
     Form, Json, Router,
+    body::Body,
     extract::{Query, State},
-    http::header,
+    http::{HeaderMap, Request, StatusCode, header},
+    middleware::{self, Next},
     response::{Html, IntoResponse, Redirect, Response},
     routing::{get, post},
 };
+use getrandom::getrandom;
 use serde::{Deserialize, Serialize};
+use sha2::{Digest, Sha256};
 use tokio::{net::TcpListener, sync::Mutex};
 
 use crate::{
@@ -29,6 +34,10 @@ use crate::{
 
 const EXPLORER_LIMIT: usize = 50;
 const EXPLORER_PAGE_LIMIT: usize = 20;
+const AUTH_COOKIE_NAME: &str = "luun_session";
+const AUTH_SESSION_TTL_MS: u64 = 12 * 60 * 60 * 1_000;
+const PASSWORD_KDF_ALGORITHM: &str = "pbkdf2-sha256";
+const PASSWORD_KDF_ITERATIONS: u32 = 120_000;
 
 #[derive(Clone)]
 struct HttpState {
@@ -38,6 +47,18 @@ struct HttpState {
     ui_config: Arc<Mutex<UiConfig>>,
     config_path: PathBuf,
     wallet_path: PathBuf,
+    auth_sessions: Arc<Mutex<BTreeMap<String, u64>>>,
+}
+
+#[derive(Debug, Deserialize)]
+struct AuthForm {
+    password: String,
+}
+
+#[derive(Debug, Serialize)]
+struct AuthStatusResponse {
+    configured: bool,
+    authenticated: bool,
 }
 
 #[derive(Debug, Deserialize)]
@@ -182,11 +203,16 @@ pub async fn serve(
         ui_config,
         config_path,
         wallet_path,
+        auth_sessions: Arc::new(Mutex::new(BTreeMap::new())),
     };
     let app = Router::new()
         .route("/", get(index))
         .route("/assets/alpine.min.js", get(alpine_js))
         .route("/assets/luun-ui.js", get(app_js))
+        .route("/api/auth/status", get(api_auth_status))
+        .route("/api/auth/setup", post(api_auth_setup_form))
+        .route("/api/auth/login", post(api_auth_login_form))
+        .route("/api/auth/logout", post(api_auth_logout_form))
         .route("/api/status", get(api_status))
         .route("/api/blocks", get(api_blocks))
         .route("/api/config", get(api_config).post(api_config_form))
@@ -207,6 +233,10 @@ pub async fn serve(
         .route("/settings/burn-per-block", post(burn_per_block_form))
         .route("/transfer", post(transfer_form))
         .route("/peers", post(peer_form))
+        .layer(middleware::from_fn_with_state(
+            state.clone(),
+            require_auth_middleware,
+        ))
         .with_state(state);
 
     let listener = TcpListener::bind(addr)
@@ -239,6 +269,98 @@ async fn app_js() -> impl IntoResponse {
         )],
         include_str!("../../assets/luun-ui.js"),
     )
+}
+
+async fn require_auth_middleware(
+    State(state): State<HttpState>,
+    headers: HeaderMap,
+    request: Request<Body>,
+    next: Next,
+) -> Response {
+    let path = request.uri().path();
+    if auth_exempt_path(path) {
+        return next.run(request).await;
+    }
+    let configured = state.ui_config.lock().await.auth_password_hash.is_some();
+    if !configured {
+        return auth_error("authentication setup is required").into_response();
+    }
+    if request_is_authenticated(&state, &headers).await {
+        return next.run(request).await;
+    }
+    auth_error("authentication required").into_response()
+}
+
+fn auth_exempt_path(path: &str) -> bool {
+    path == "/"
+        || path == "/assets/alpine.min.js"
+        || path == "/assets/luun-ui.js"
+        || path == "/api/auth/status"
+        || path == "/api/auth/setup"
+        || path == "/api/auth/login"
+}
+
+async fn request_is_authenticated(state: &HttpState, headers: &HeaderMap) -> bool {
+    let Some(token) = auth_cookie(headers) else {
+        return false;
+    };
+    let token_hash = session_token_hash(token);
+    let now = now_ms();
+    let mut sessions = state.auth_sessions.lock().await;
+    sessions.retain(|_, expires_at| *expires_at > now);
+    sessions
+        .get(&token_hash)
+        .is_some_and(|expires_at| *expires_at > now)
+}
+
+async fn api_auth_status(
+    State(state): State<HttpState>,
+    headers: HeaderMap,
+) -> Json<AuthStatusResponse> {
+    let configured = state.ui_config.lock().await.auth_password_hash.is_some();
+    let authenticated = configured && request_is_authenticated(&state, &headers).await;
+    Json(AuthStatusResponse {
+        configured,
+        authenticated,
+    })
+}
+
+async fn api_auth_setup_form(
+    State(state): State<HttpState>,
+    Form(form): Form<AuthForm>,
+) -> Response {
+    match setup_auth_password(&state, &form.password).await {
+        Ok(cookie) => ([(header::SET_COOKIE, cookie)], action_json(Ok(()))).into_response(),
+        Err(error) => action_json(Err(error)).into_response(),
+    }
+}
+
+async fn api_auth_login_form(
+    State(state): State<HttpState>,
+    Form(form): Form<AuthForm>,
+) -> Response {
+    match login_auth_password(&state, &form.password).await {
+        Ok(cookie) => ([(header::SET_COOKIE, cookie)], action_json(Ok(()))).into_response(),
+        Err(error) => action_json(Err(error)).into_response(),
+    }
+}
+
+async fn api_auth_logout_form(State(state): State<HttpState>, headers: HeaderMap) -> Response {
+    if let Some(token) = auth_cookie(&headers) {
+        state
+            .auth_sessions
+            .lock()
+            .await
+            .remove(&session_token_hash(token));
+    }
+    (
+        [(
+            header::SET_COOKIE,
+            format!("{AUTH_COOKIE_NAME}=; Path=/; HttpOnly; SameSite=Strict; Max-Age=0"),
+        )],
+        action_json(Ok(())),
+    )
+        .into_response()
 }
 
 async fn api_status(State(state): State<HttpState>) -> Json<NodeStatus> {
@@ -948,11 +1070,226 @@ fn action_json(result: Result<()>) -> Json<ActionResponse> {
     }
 }
 
+fn auth_error(message: &str) -> (StatusCode, Json<ActionResponse>) {
+    (
+        StatusCode::UNAUTHORIZED,
+        Json(ActionResponse {
+            ok: false,
+            error: Some(message.to_string()),
+        }),
+    )
+}
+
 fn api_error(error: anyhow::Error) -> Json<ActionResponse> {
     Json(ActionResponse {
         ok: false,
         error: Some(format!("{error:#}")),
     })
+}
+
+async fn setup_auth_password(state: &HttpState, password: &str) -> Result<String> {
+    validate_password(password)?;
+    let mut config = state.ui_config.lock().await;
+    if config.auth_password_hash.is_some() {
+        bail!("authentication is already configured");
+    }
+    config.auth_password_hash = Some(hash_password(password)?);
+    config_store::save(&state.config_path, &config)?;
+    drop(config);
+    create_session_cookie(state).await
+}
+
+async fn login_auth_password(state: &HttpState, password: &str) -> Result<String> {
+    let hash = state
+        .ui_config
+        .lock()
+        .await
+        .auth_password_hash
+        .clone()
+        .context("authentication setup is required")?;
+    if !verify_password(password, &hash)? {
+        bail!("invalid password");
+    }
+    create_session_cookie(state).await
+}
+
+fn validate_password(password: &str) -> Result<()> {
+    if password.len() < 12 {
+        bail!("password must be at least 12 characters");
+    }
+    if password.len() > 1024 {
+        bail!("password is too long");
+    }
+    Ok(())
+}
+
+async fn create_session_cookie(state: &HttpState) -> Result<String> {
+    let token = random_hex(32)?;
+    let token_hash = session_token_hash(&token);
+    let expires_at = now_ms().saturating_add(AUTH_SESSION_TTL_MS);
+    state
+        .auth_sessions
+        .lock()
+        .await
+        .insert(token_hash, expires_at);
+    Ok(format!(
+        "{AUTH_COOKIE_NAME}={token}; Path=/; HttpOnly; SameSite=Strict; Max-Age={}",
+        AUTH_SESSION_TTL_MS / 1000
+    ))
+}
+
+fn session_token_hash(token: &str) -> String {
+    hex_encode(Sha256::digest(format!("luun-session:{token}").as_bytes()))
+}
+
+fn auth_cookie(headers: &HeaderMap) -> Option<&str> {
+    let cookie = headers.get(header::COOKIE)?.to_str().ok()?;
+    cookie.split(';').find_map(|part| {
+        let (name, value) = part.trim().split_once('=')?;
+        (name == AUTH_COOKIE_NAME).then_some(value)
+    })
+}
+
+fn hash_password(password: &str) -> Result<String> {
+    let salt = random_bytes::<16>()?;
+    let hash = pbkdf2_sha256(password.as_bytes(), &salt, PASSWORD_KDF_ITERATIONS);
+    Ok(format!(
+        "{PASSWORD_KDF_ALGORITHM}${PASSWORD_KDF_ITERATIONS}${}${}",
+        hex_encode(salt),
+        hex_encode(hash)
+    ))
+}
+
+fn verify_password(password: &str, encoded: &str) -> Result<bool> {
+    let parts = encoded.split('$').collect::<Vec<_>>();
+    if parts.len() != 4 || parts[0] != PASSWORD_KDF_ALGORITHM {
+        bail!("unsupported password hash");
+    }
+    let iterations = parts[1]
+        .parse::<u32>()
+        .context("invalid password hash iterations")?;
+    let salt = decode_hex(parts[2]).context("invalid password hash salt")?;
+    let expected = decode_hex(parts[3]).context("invalid password hash")?;
+    let actual = pbkdf2_sha256(password.as_bytes(), &salt, iterations);
+    Ok(constant_time_eq(&actual, &expected))
+}
+
+fn pbkdf2_sha256(password: &[u8], salt: &[u8], iterations: u32) -> [u8; 32] {
+    let mut block_salt = Vec::with_capacity(salt.len() + 4);
+    block_salt.extend_from_slice(salt);
+    block_salt.extend_from_slice(&1_u32.to_be_bytes());
+    let hmac = HmacSha256Key::new(password);
+    let mut u = hmac.digest(&block_salt);
+    let mut output = u;
+    for _ in 1..iterations {
+        u = hmac.digest(&u);
+        for (left, right) in output.iter_mut().zip(u) {
+            *left ^= right;
+        }
+    }
+    output
+}
+
+struct HmacSha256Key {
+    outer_key_pad: [u8; 64],
+    inner_key_pad: [u8; 64],
+}
+
+impl HmacSha256Key {
+    fn new(key: &[u8]) -> Self {
+        let mut key_block = [0_u8; 64];
+        if key.len() > 64 {
+            key_block[..32].copy_from_slice(&Sha256::digest(key));
+        } else {
+            key_block[..key.len()].copy_from_slice(key);
+        }
+
+        let mut outer_key_pad = [0x5c_u8; 64];
+        let mut inner_key_pad = [0x36_u8; 64];
+        for index in 0..64 {
+            outer_key_pad[index] ^= key_block[index];
+            inner_key_pad[index] ^= key_block[index];
+        }
+        Self {
+            outer_key_pad,
+            inner_key_pad,
+        }
+    }
+
+    fn digest(&self, message: &[u8]) -> [u8; 32] {
+        let mut inner = Sha256::new();
+        inner.update(self.inner_key_pad);
+        inner.update(message);
+        let inner_hash = inner.finalize();
+
+        let mut outer = Sha256::new();
+        outer.update(self.outer_key_pad);
+        outer.update(inner_hash);
+        outer.finalize().into()
+    }
+}
+
+fn constant_time_eq(left: &[u8], right: &[u8]) -> bool {
+    if left.len() != right.len() {
+        return false;
+    }
+    left.iter()
+        .zip(right)
+        .fold(0_u8, |diff, (left, right)| diff | (left ^ right))
+        == 0
+}
+
+fn random_bytes<const N: usize>() -> Result<[u8; N]> {
+    let mut bytes = [0_u8; N];
+    getrandom(&mut bytes)
+        .map_err(|error| anyhow::anyhow!("secure random generation failed: {error}"))?;
+    Ok(bytes)
+}
+
+fn random_hex(bytes: usize) -> Result<String> {
+    let mut value = vec![0_u8; bytes];
+    getrandom(&mut value)
+        .map_err(|error| anyhow::anyhow!("secure random generation failed: {error}"))?;
+    Ok(hex_encode(value))
+}
+
+fn hex_encode(bytes: impl AsRef<[u8]>) -> String {
+    const HEX: &[u8; 16] = b"0123456789abcdef";
+    let mut encoded = String::with_capacity(bytes.as_ref().len() * 2);
+    for byte in bytes.as_ref() {
+        encoded.push(HEX[(byte >> 4) as usize] as char);
+        encoded.push(HEX[(byte & 0x0f) as usize] as char);
+    }
+    encoded
+}
+
+fn decode_hex(input: &str) -> Result<Vec<u8>> {
+    if input.len() % 2 != 0 {
+        bail!("hex string has odd length");
+    }
+    let mut bytes = Vec::with_capacity(input.len() / 2);
+    for pair in input.as_bytes().chunks_exact(2) {
+        let high = decode_hex_nibble(pair[0])?;
+        let low = decode_hex_nibble(pair[1])?;
+        bytes.push((high << 4) | low);
+    }
+    Ok(bytes)
+}
+
+fn decode_hex_nibble(byte: u8) -> Result<u8> {
+    match byte {
+        b'0'..=b'9' => Ok(byte - b'0'),
+        b'a'..=b'f' => Ok(byte - b'a' + 10),
+        b'A'..=b'F' => Ok(byte - b'A' + 10),
+        _ => bail!("invalid hex character"),
+    }
+}
+
+fn now_ms() -> u64 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_millis() as u64
 }
 
 const INDEX_HTML: &str = r#"<!doctype html>
@@ -986,6 +1323,9 @@ const INDEX_HTML: &str = r#"<!doctype html>
     main { width: 100%; }
     main > section { width: 100%; }
     header { display: flex; justify-content: space-between; gap: 18px; align-items: flex-start; padding: 0 0 18px; }
+    .header-actions { display: flex; gap: 10px; align-items: center; }
+    .lock-button { padding: 5px 8px; border-color: #3a4248; background: #202328; color: #9fa8ad; font-size: 12px; }
+    .lock-button:hover { border-color: #d5f55f; color: #d5f55f; }
     h1 { margin: 0 0 4px; font-size: 28px; }
     h2 { margin: 0 0 12px; font-size: 18px; }
     h3 { margin: 0 0 10px; font-size: 15px; }
@@ -1047,6 +1387,9 @@ const INDEX_HTML: &str = r#"<!doctype html>
     .seed-word .word { font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; font-weight: 800; color: #c7f5ea; }
     .verify-grid { display: grid; gap: 8px; }
     .setup-status { border: 1px solid #566d25; border-radius: 8px; padding: 10px; background: #1c2516; color: #d5f55f; font-weight: 800; }
+    .auth-form { width: min(420px, 100%); display: grid; gap: 10px; }
+    .auth-form form { display: grid; gap: 10px; align-items: stretch; }
+    .auth-form input { width: 100%; }
     .wallet-grid { width: 100%; display: grid; grid-template-columns: minmax(0, 1fr) minmax(300px, .8fr); gap: 12px; align-items: start; }
     .wallet-actions { display: grid; gap: 12px; }
     .advanced-toggle { flex-basis: 100%; width: max-content; align-self: flex-start; border-color: #3a4248; padding: 4px 7px; background: #202328; color: #9fa8ad; font-size: 12px; }
@@ -1180,7 +1523,7 @@ const INDEX_HTML: &str = r#"<!doctype html>
       .block-card { flex-basis: 108px; }
     }
   </style>
-  <script defer src="/assets/luun-ui.js?v=46"></script>
+  <script defer src="/assets/luun-ui.js?v=47"></script>
   <script defer src="/assets/alpine.min.js"></script>
 </head>
 <body x-data="luunApp()" x-init="init()" @keydown.window.escape="closeModals()" x-cloak>
@@ -1212,7 +1555,10 @@ const INDEX_HTML: &str = r#"<!doctype html>
       <div>
         <h1 x-text="pageTitle()">Luun</h1>
       </div>
-      <div class="muted" x-text="lastUpdatedLabel()"></div>
+      <div class="header-actions">
+        <div class="muted" x-text="lastUpdatedLabel()"></div>
+        <button class="lock-button" type="button" x-show="auth.authenticated" @click="logout">Lock</button>
+      </div>
     </header>
 
     <div class="flash" :class="flash?.kind" x-show="flash" x-transition x-text="flash?.message"></div>
@@ -1508,6 +1854,26 @@ const INDEX_HTML: &str = r#"<!doctype html>
     </section>
     </main>
   </div>
+  <div class="setup-overlay" x-show="showingAuth()" x-transition.opacity role="dialog" aria-modal="true" aria-labelledby="auth-title">
+    <section class="setup-modal auth-form">
+      <div class="setup-modal-head">
+        <div class="setup-welcome">Luun Access</div>
+        <h2 id="auth-title" x-text="auth.configured ? 'Unlock Luun' : 'Set Password'"></h2>
+        <div class="setup-copy" x-show="!auth.configured">Choose a local password before wallet setup continues.</div>
+        <div class="setup-copy" x-show="auth.configured">Enter the local password to unlock this node.</div>
+      </div>
+      <div class="setup-feedback" :class="authFeedback?.kind" x-show="authFeedback" x-transition x-text="authFeedback?.message"></div>
+      <form x-show="!auth.configured" @submit.prevent="setupPassword">
+        <label>Password<input x-model="authPassword" type="password" autocomplete="new-password" minlength="12" required></label>
+        <label>Confirm password<input x-model="authPasswordConfirm" type="password" autocomplete="new-password" minlength="12" required></label>
+        <div class="setup-actions"><button class="primary" type="submit">Set password</button></div>
+      </form>
+      <form x-show="auth.configured && !auth.authenticated" @submit.prevent="login">
+        <label>Password<input x-model="loginPassword" type="password" autocomplete="current-password" required></label>
+        <div class="setup-actions"><button class="primary" type="submit">Unlock</button></div>
+      </form>
+    </section>
+  </div>
   <div class="setup-overlay transaction-overlay" x-show="showWalletUtxos" x-transition.opacity @click.self="closeWalletUtxosModal()" role="dialog" aria-modal="true" aria-labelledby="wallet-utxos-title">
     <section class="tx-modal">
       <div class="tx-modal-head">
@@ -1712,22 +2078,165 @@ const INDEX_HTML: &str = r#"<!doctype html>
 mod tests {
     use std::{collections::BTreeMap, sync::Arc};
 
+    use axum::{
+        Router,
+        body::{Body, to_bytes},
+        http::{HeaderMap, Method, Request, StatusCode, header},
+        middleware,
+        routing::{get, post},
+    };
     use tokio::sync::Mutex;
+    use tower::ServiceExt;
 
     use crate::{
-        adapters::{config_store, config_store::UiConfig},
+        adapters::{config_store, config_store::UiConfig, p2p::GossipNetwork},
+        app::{NodeCore, PeerBook},
         domain::{Block, Ledger, MICRO_LUUN, MINE_REWARD, OutPoint, Transaction, Wallet},
     };
 
     use super::{
-        TransferForm, dev_seed_verify_bypass_allowed, persist_burn_settings_config,
-        persist_pow_mining_config, validate_transfer_form, wallet_transaction_rows,
+        AUTH_COOKIE_NAME, HttpState, TransferForm, api_auth_login_form, api_auth_setup_form,
+        api_auth_status, dev_seed_verify_bypass_allowed, hash_password, hex_encode, pbkdf2_sha256,
+        persist_burn_settings_config, persist_pow_mining_config, require_auth_middleware,
+        validate_password, validate_transfer_form, verify_password, wallet_transaction_rows,
     };
 
     #[test]
     fn dev_seed_verify_bypass_requires_env_flag() {
         assert!(dev_seed_verify_bypass_allowed(true));
         assert!(!dev_seed_verify_bypass_allowed(false));
+    }
+
+    #[test]
+    fn password_policy_rejects_short_or_excessive_passwords() {
+        let short = validate_password("too-short").unwrap_err();
+        assert!(short.to_string().contains("at least 12"));
+
+        let long_password = "x".repeat(1025);
+        let long = validate_password(&long_password).unwrap_err();
+        assert!(long.to_string().contains("too long"));
+
+        validate_password("correct horse battery staple").unwrap();
+    }
+
+    #[test]
+    fn password_hash_round_trips_without_storing_plaintext() {
+        let password = "correct horse battery staple";
+        let encoded = hash_password(password).unwrap();
+
+        assert!(!encoded.contains(password));
+        assert!(verify_password(password, &encoded).unwrap());
+        assert!(!verify_password("wrong horse battery staple", &encoded).unwrap());
+    }
+
+    #[test]
+    fn pbkdf2_sha256_matches_known_vectors() {
+        let one_iteration = pbkdf2_sha256(b"password", b"salt", 1);
+        assert_eq!(
+            hex_encode(one_iteration),
+            "120fb6cffcf8b32c43e7225256c4f837a86548c92ccc35480805987cb70be17b"
+        );
+
+        let two_iterations = pbkdf2_sha256(b"password", b"salt", 2);
+        assert_eq!(
+            hex_encode(two_iterations),
+            "ae4d0c95af6b46d32d0adff928f06dd02a303f8ef3c251dfd6e2d85a95474c43"
+        );
+    }
+
+    #[tokio::test]
+    async fn protected_endpoints_require_authentication_setup() {
+        let dir = tempfile::tempdir().unwrap();
+        let state = auth_test_state(
+            dir.path().join("config.json"),
+            UiConfig {
+                auth_password_hash: None,
+                ..UiConfig::default()
+            },
+        )
+        .await;
+        let app = auth_test_app(state);
+
+        let protected = http_request(app.clone(), Method::GET, "/api/protected", None, "").await;
+        assert_eq!(protected.status, StatusCode::UNAUTHORIZED);
+        assert!(protected.body.contains("authentication setup is required"));
+
+        let status = http_request(app, Method::GET, "/api/auth/status", None, "").await;
+        assert_eq!(status.status, StatusCode::OK);
+        assert!(status.body.contains("\"configured\":false"));
+    }
+
+    #[tokio::test]
+    async fn protected_endpoints_require_valid_session_after_authentication_setup() {
+        let dir = tempfile::tempdir().unwrap();
+        let password = "correct horse battery staple";
+        let state = auth_test_state(
+            dir.path().join("config.json"),
+            UiConfig {
+                auth_password_hash: Some(hash_password(password).unwrap()),
+                ..UiConfig::default()
+            },
+        )
+        .await;
+        let app = auth_test_app(state);
+
+        let missing_cookie =
+            http_request(app.clone(), Method::GET, "/api/protected", None, "").await;
+        assert_eq!(missing_cookie.status, StatusCode::UNAUTHORIZED);
+        assert!(missing_cookie.body.contains("authentication required"));
+
+        let bad_cookie = http_request(
+            app.clone(),
+            Method::GET,
+            "/api/protected",
+            Some("luun_session=bogus"),
+            "",
+        )
+        .await;
+        assert_eq!(bad_cookie.status, StatusCode::UNAUTHORIZED);
+
+        let login = http_request(
+            app.clone(),
+            Method::POST,
+            "/api/auth/login",
+            None,
+            "password=correct+horse+battery+staple",
+        )
+        .await;
+        assert_eq!(login.status, StatusCode::OK);
+        assert!(login.body.contains("\"ok\":true"));
+        let cookie = set_cookie_pair(&login.headers);
+        assert!(cookie.starts_with(AUTH_COOKIE_NAME));
+
+        let protected = http_request(app, Method::GET, "/api/protected", Some(&cookie), "").await;
+        assert_eq!(protected.status, StatusCode::OK);
+        assert_eq!(protected.body, "protected");
+    }
+
+    #[tokio::test]
+    async fn password_setup_creates_session_for_protected_endpoints() {
+        let dir = tempfile::tempdir().unwrap();
+        let config_path = dir.path().join("config.json");
+        let state = auth_test_state(config_path.clone(), UiConfig::default()).await;
+        let app = auth_test_app(state);
+
+        let setup = http_request(
+            app.clone(),
+            Method::POST,
+            "/api/auth/setup",
+            None,
+            "password=correct+horse+battery+staple",
+        )
+        .await;
+        assert_eq!(setup.status, StatusCode::OK);
+        assert!(setup.body.contains("\"ok\":true"));
+        let cookie = set_cookie_pair(&setup.headers);
+
+        let stored = config_store::load_or_create(&config_path).unwrap();
+        assert!(stored.auth_password_hash.is_some());
+        let protected = http_request(app, Method::GET, "/api/protected", Some(&cookie), "").await;
+        assert_eq!(protected.status, StatusCode::OK);
+        assert_eq!(protected.body, "protected");
     }
 
     #[test]
@@ -1803,6 +2312,92 @@ mod tests {
             transactions,
             hash: format!("hash-{height}"),
         }
+    }
+
+    async fn auth_test_state(config_path: std::path::PathBuf, config: UiConfig) -> HttpState {
+        config_store::save(&config_path, &config).unwrap();
+        let wallet = Wallet::from_seed("auth-test-wallet");
+        let ledger = Ledger::new(BTreeMap::new(), 1);
+        let node = Arc::new(Mutex::new(NodeCore::from_ledger(wallet, ledger, 0)));
+        let peers = Arc::new(Mutex::new(PeerBook::default()));
+        let gossip = GossipNetwork::new_for_tests(node.clone(), peers.clone());
+        HttpState {
+            node,
+            peers,
+            gossip,
+            ui_config: Arc::new(Mutex::new(
+                config_store::load_or_create(&config_path).unwrap(),
+            )),
+            config_path,
+            wallet_path: std::path::PathBuf::from("wallet.json"),
+            auth_sessions: Arc::new(Mutex::new(BTreeMap::new())),
+        }
+    }
+
+    fn auth_test_app(state: HttpState) -> Router {
+        Router::new()
+            .route("/api/auth/status", get(api_auth_status))
+            .route("/api/auth/setup", post(api_auth_setup_form))
+            .route("/api/auth/login", post(api_auth_login_form))
+            .route("/api/protected", get(protected_auth_test_endpoint))
+            .layer(middleware::from_fn_with_state(
+                state.clone(),
+                require_auth_middleware,
+            ))
+            .with_state(state)
+    }
+
+    async fn protected_auth_test_endpoint() -> &'static str {
+        "protected"
+    }
+
+    struct TestHttpResponse {
+        status: StatusCode,
+        headers: HeaderMap,
+        body: String,
+    }
+
+    async fn http_request(
+        app: Router,
+        method: Method,
+        path: &str,
+        cookie: Option<&str>,
+        body: &str,
+    ) -> TestHttpResponse {
+        let mut builder = Request::builder()
+            .method(method)
+            .uri(path)
+            .header(header::ACCEPT, "application/json")
+            .header(header::CONTENT_TYPE, "application/x-www-form-urlencoded");
+        if let Some(cookie) = cookie {
+            builder = builder.header(header::COOKIE, cookie);
+        }
+        let response = app
+            .oneshot(builder.body(Body::from(body.to_string())).unwrap())
+            .await
+            .unwrap();
+        let status = response.status();
+        let headers = response.headers().clone();
+        let body = String::from_utf8(
+            to_bytes(response.into_body(), usize::MAX)
+                .await
+                .unwrap()
+                .to_vec(),
+        )
+        .unwrap();
+        TestHttpResponse {
+            status,
+            headers,
+            body,
+        }
+    }
+
+    fn set_cookie_pair(headers: &HeaderMap) -> String {
+        let header = headers
+            .get(header::SET_COOKIE)
+            .and_then(|value| value.to_str().ok())
+            .expect("response should include Set-Cookie header");
+        header.split(';').next().unwrap().to_string()
     }
 
     #[tokio::test]
