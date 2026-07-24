@@ -469,6 +469,18 @@ window.luunApp = function luunApp() {
       }
     },
 
+    async minePowReward() {
+      try {
+        await this.postForm(
+          "/api/mine",
+          {},
+          `Queued PoW mine action for ${this.amountLabel(this.status.chain?.mine_reward ?? 0)} LUUN`
+        );
+      } catch (error) {
+        this.showFlash(error.message, "error");
+      }
+    },
+
     automaticBurnFeeDraft() {
       return this.parseLuunAmount(this.burnFeeDraft);
     },
@@ -487,7 +499,7 @@ window.luunApp = function luunApp() {
 
     latestBlockReward() {
       const latest = this.latestBlock();
-      return Math.max(0, Math.trunc(Number(latest?.reward ?? this.status.chain?.block_reward ?? 0)));
+      return Math.max(0, Math.trunc(Number(latest?.reward ?? 0)));
     },
 
     ticketWindow() {
@@ -745,6 +757,10 @@ window.luunApp = function luunApp() {
       return block.transactions.filter((tx) => tx.kind === "transfer").length;
     },
 
+    blockMineCount(block) {
+      return block.transactions.filter((tx) => tx.kind === "mine").length;
+    },
+
     burnCountLabel(block) {
       const count = this.blockBurnCount(block);
       return `${count} burn${count === 1 ? "" : "s"}`;
@@ -753,6 +769,11 @@ window.luunApp = function luunApp() {
     transferCountLabel(block) {
       const count = this.blockTransferCount(block);
       return `${count} transfer${count === 1 ? "" : "s"}`;
+    },
+
+    mineCountLabel(block) {
+      const count = this.blockMineCount(block);
+      return `${count} mine${count === 1 ? "" : "s"}`;
     },
 
     blockMinerLabel(block) {

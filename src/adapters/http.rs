@@ -189,6 +189,7 @@ pub async fn serve(
             "/api/settings/burn-per-block",
             post(api_burn_per_block_form),
         )
+        .route("/api/mine", post(api_mine_form))
         .route("/api/transfer", post(api_transfer_form))
         .route("/settings/burn-per-block", post(burn_per_block_form))
         .route("/transfer", post(transfer_form))
@@ -347,6 +348,11 @@ async fn api_burn_per_block_form(
     Form(form): Form<BurnSettingsForm>,
 ) -> Json<ActionResponse> {
     let result = set_burn_settings(&state, form.amount, form.fee).await;
+    action_json(result)
+}
+
+async fn api_mine_form(State(state): State<HttpState>) -> Json<ActionResponse> {
+    let result = mine_pow_reward(&state).await;
     action_json(result)
 }
 
@@ -513,6 +519,23 @@ fn wallet_transaction_row(
                 "sent"
             },
         }),
+        Transaction::Mine {
+            output, signature, ..
+        } if output.address == wallet => Some(WalletTransactionRow {
+            kind: "mine",
+            from: "pow".to_string(),
+            to: Some(output.address.clone()),
+            amount: output.amount,
+            fee: 0,
+            inputs: Vec::new(),
+            outputs: vec![output.clone()],
+            change: Vec::new(),
+            signature: signature.clone(),
+            status,
+            block_height,
+            block_miner,
+            direction: "received",
+        }),
         _ => None,
     }
 }
@@ -587,6 +610,19 @@ fn ui_transaction(
             change: change.clone(),
             signature: signature.clone(),
         },
+        Transaction::Mine {
+            output, signature, ..
+        } => UiTransaction {
+            kind: "mine",
+            from: "pow".to_string(),
+            to: Some(output.address.clone()),
+            amount: output.amount,
+            fee: 0,
+            inputs: Vec::new(),
+            outputs: vec![output.clone()],
+            change: Vec::new(),
+            signature: signature.clone(),
+        },
     }
 }
 
@@ -654,6 +690,7 @@ fn index_transaction_outputs(
     let created_outputs = match transaction {
         Transaction::Transfer { outputs, .. } => outputs,
         Transaction::Burn { change, .. } => change,
+        Transaction::Mine { output, .. } => std::slice::from_ref(output),
     };
     for (index, output) in created_outputs.iter().enumerate() {
         outputs.insert(
@@ -753,6 +790,20 @@ async fn transfer(state: &HttpState, form: TransferForm) -> Result<()> {
         } else {
             node.transfer_with_fee_spending(to, amount, fee, &selected_utxos)
         };
+        let outbox = node.drain_outbox();
+        (result, outbox)
+    };
+
+    match result.0 {
+        Ok(_) => state.gossip.broadcast(result.1).await,
+        Err(error) => Err(error),
+    }
+}
+
+async fn mine_pow_reward(state: &HttpState) -> Result<()> {
+    let result = {
+        let mut node = state.node.lock().await;
+        let result = node.mine_pow_reward();
         let outbox = node.drain_outbox();
         (result, outbox)
     };
@@ -934,6 +985,8 @@ const INDEX_HTML: &str = r#"<!doctype html>
     .burn-range { width: 100%; min-width: 0; accent-color: #d5f55f; }
     .break-even-marker { position: absolute; top: 2px; bottom: 2px; width: 2px; transform: translateX(-1px); background: #ffd070; box-shadow: 0 0 0 1px #111316, 0 0 0 4px rgba(255, 208, 112, .18); pointer-events: none; }
     .burn-slider-note { color: #a8b2b8; font-size: 12px; line-height: 1.4; }
+    .mine-action-row { display: flex; flex-wrap: wrap; justify-content: space-between; gap: 10px; align-items: center; }
+    .mine-action-meta { color: #9eb3bc; font-size: 13px; }
     .receive-address { display: grid; gap: 8px; }
     .address-box { border: 1px solid #2f363c; border-radius: 8px; padding: 11px; background: #111316; }
     .panel-head { display: flex; justify-content: space-between; gap: 12px; align-items: center; margin-bottom: 12px; }
@@ -983,6 +1036,7 @@ const INDEX_HTML: &str = r#"<!doctype html>
     .pill { display: inline-flex; align-items: center; border-radius: 999px; padding: 2px 8px; font-size: 12px; font-weight: 800; background: #2b3136; color: #d6dee2; }
     .pill.burn { background: #332918; color: #ffd070; }
     .pill.transfer { background: #17312a; color: #8de9cd; }
+    .pill.mine { background: #172a34; color: #8bdcff; }
     .mempool-strip { display: flex; gap: 8px; overflow-x: auto; padding-bottom: 4px; }
     .mempool-item { flex: 0 0 220px; }
     .tx-modal { width: min(940px, 100%); max-height: calc(100vh - 44px); overflow: auto; border: 1px solid #3b4448; border-radius: 8px; padding: 16px; background: #181b1f; box-shadow: 0 24px 80px rgba(0, 0, 0, .46); }
@@ -1140,7 +1194,7 @@ const INDEX_HTML: &str = r#"<!doctype html>
 
     <section x-show="tab === 'mining'">
       <div class="page-title">
-        <div class="muted">Automatic VDF-paced block production</div>
+        <div class="muted">PoB/VDF block production with PoW issuance actions</div>
       </div>
       <div class="mining-grid">
         <div class="panel">
@@ -1170,6 +1224,13 @@ const INDEX_HTML: &str = r#"<!doctype html>
               <div class="burn-slider-note" x-text="burnBreakEvenLabel()"></div>
             </div>
           </form>
+        </div>
+        <div class="panel">
+          <h3>PoW issuance</h3>
+          <div class="mine-action-row">
+            <div class="mine-action-meta">Mine action reward: LUUN <span x-text="amountLabel(status.chain?.mine_reward ?? 0)"></span> / difficulty <span x-text="status.launch_profile?.mine_difficulty_bits ?? '-'"></span> bits</div>
+            <button class="primary" type="button" @click="minePowReward">Mine coin</button>
+          </div>
         </div>
       </div>
     </section>
@@ -1242,6 +1303,7 @@ const INDEX_HTML: &str = r#"<!doctype html>
                 <div class="block-meta">
                   <span x-text="burnCountLabel(block)"></span>
                   <span x-text="transferCountLabel(block)"></span>
+                  <span x-text="mineCountLabel(block)"></span>
                 </div>
                 <div class="block-miner" x-text="blockMinerLabel(block)"></div>
               </button>

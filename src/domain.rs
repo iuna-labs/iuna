@@ -8,9 +8,11 @@ use sha2::{Digest, Sha256};
 pub type Amount = u64;
 pub const MICRO_LUUN: Amount = 1_000_000;
 pub const BLOCK_REWARD: Amount = 100 * MICRO_LUUN;
+pub const MINE_REWARD: Amount = MICRO_LUUN;
 pub const DEFAULT_TRANSACTION_FEE: Amount = MICRO_LUUN;
 pub const MAX_BLOCK_BYTES: usize = 100_000;
 pub const VDF_TARGET_BLOCK_MS: u64 = 60_000;
+pub const MINE_DIFFICULTY_BITS: u32 = 12;
 const MAX_PENDING_TRANSACTIONS: usize = 10_000;
 const MAX_BLOCK_TRANSACTIONS: usize = 1_000;
 const DEFAULT_TICKET_MATURITY_DELAY: u64 = 3;
@@ -98,6 +100,13 @@ pub enum Transaction {
         fee: Amount,
         signature: String,
     },
+    Mine {
+        output: TxOutput,
+        anchor: String,
+        nonce: u64,
+        difficulty_bits: u32,
+        signature: String,
+    },
 }
 
 impl Transaction {
@@ -155,6 +164,7 @@ impl Transaction {
                 .first()
                 .map(|input| input.owner.as_str())
                 .unwrap_or(""),
+            Self::Mine { output, .. } => output.address.as_str(),
         }
     }
 
@@ -162,6 +172,7 @@ impl Transaction {
         match self {
             Self::Transfer { outputs, .. } => outputs.first().map(|output| output.address.as_str()),
             Self::Burn { .. } => None,
+            Self::Mine { output, .. } => Some(output.address.as_str()),
         }
     }
 
@@ -171,16 +182,21 @@ impl Transaction {
                 outputs.first().map(|output| output.amount).unwrap_or(0)
             }
             Self::Burn { amount, .. } => *amount,
+            Self::Mine { output, .. } => output.amount,
         }
     }
 
     pub fn fee(&self) -> Amount {
         match self {
             Self::Transfer { fee, .. } | Self::Burn { fee, .. } => *fee,
+            Self::Mine { .. } => 0,
         }
     }
 
     pub fn total_debit(&self) -> Result<Amount> {
+        if matches!(self, Self::Mine { .. }) {
+            return Ok(0);
+        }
         self.amount()
             .checked_add(self.fee())
             .context("transaction amount plus fee overflows")
@@ -189,6 +205,7 @@ impl Transaction {
     pub fn signature(&self) -> &str {
         match self {
             Self::Transfer { signature, .. } | Self::Burn { signature, .. } => signature,
+            Self::Mine { signature, .. } => signature,
         }
     }
 
@@ -226,10 +243,34 @@ impl Transaction {
                 fee: *fee,
             }
             .canonical(),
+            Self::Mine {
+                output,
+                anchor,
+                nonce,
+                difficulty_bits,
+                ..
+            } => mine_payload(output, anchor, *nonce, *difficulty_bits),
         }
     }
 
     fn verify_signature(&self) -> Result<()> {
+        if let Self::Mine {
+            output,
+            anchor,
+            nonce,
+            difficulty_bits,
+            signature,
+        } = self
+        {
+            let expected = mine_signature(output, anchor, *nonce, *difficulty_bits);
+            if *signature != expected {
+                bail!("mine transaction proof hash is invalid");
+            }
+            if !hash_meets_difficulty(signature, *difficulty_bits) {
+                bail!("mine transaction proof does not meet difficulty");
+            }
+            return Ok(());
+        }
         if self.signature().starts_with("luun-genesis-burn:") || self.inputs_are_genesis_signed() {
             return Ok(());
         }
@@ -256,6 +297,7 @@ impl Transaction {
     fn inputs(&self) -> &[TxInput] {
         match self {
             Self::Transfer { inputs, .. } | Self::Burn { inputs, .. } => inputs,
+            Self::Mine { .. } => &[],
         }
     }
 
@@ -263,6 +305,7 @@ impl Transaction {
         match self {
             Self::Transfer { outputs, .. } => outputs,
             Self::Burn { change, .. } => change,
+            Self::Mine { output, .. } => std::slice::from_ref(output),
         }
     }
 
@@ -397,6 +440,41 @@ fn canonical_outputs(outputs: &[TxOutput]) -> String {
         .map(|output| format!("{}:{}", output.address, output.amount))
         .collect::<Vec<_>>()
         .join("|")
+}
+
+fn mine_payload(output: &TxOutput, anchor: &str, nonce: u64, difficulty_bits: u32) -> String {
+    format!(
+        "luun-mine:{}:{}:{}:{}",
+        output.address, output.amount, anchor, nonce
+    ) + &format!(":{difficulty_bits}")
+}
+
+fn mine_signature(output: &TxOutput, anchor: &str, nonce: u64, difficulty_bits: u32) -> String {
+    hex_hash(mine_payload(output, anchor, nonce, difficulty_bits))
+}
+
+fn hash_meets_difficulty(hash: &str, difficulty_bits: u32) -> bool {
+    let full_zero_nibbles = (difficulty_bits / 4) as usize;
+    let remaining_bits = difficulty_bits % 4;
+    if hash.len() < full_zero_nibbles + usize::from(remaining_bits > 0) {
+        return false;
+    }
+    if !hash.as_bytes()[..full_zero_nibbles]
+        .iter()
+        .all(|byte| *byte == b'0')
+    {
+        return false;
+    }
+    if remaining_bits == 0 {
+        return true;
+    }
+    let Some(next) = hash.as_bytes().get(full_zero_nibbles).copied() else {
+        return false;
+    };
+    let Some(value) = (next as char).to_digit(16) else {
+        return false;
+    };
+    value < (1 << (4 - remaining_bits))
 }
 
 fn pending_spent_outpoints(pending: &[Transaction]) -> BTreeSet<OutPoint> {
@@ -632,7 +710,7 @@ pub struct ChainStatus {
     pub tip_hash: String,
     pub next_leader: Option<String>,
     pub launch_profile_hash: String,
-    pub block_reward: Amount,
+    pub mine_reward: Amount,
     pub balances: BTreeMap<String, Amount>,
     pub pending_transactions: usize,
 }
@@ -651,6 +729,8 @@ pub struct LaunchProfile {
     pub ticket_maturity_delay_heights: u64,
     #[serde(default = "default_ticket_expiry_window_heights")]
     pub ticket_expiry_window_heights: u64,
+    #[serde(default = "default_mine_difficulty_bits")]
+    pub mine_difficulty_bits: u32,
     pub max_pending_transactions: usize,
     pub max_block_transactions: usize,
     #[serde(default = "default_max_block_bytes")]
@@ -660,9 +740,10 @@ pub struct LaunchProfile {
 impl Default for LaunchProfile {
     fn default() -> Self {
         Self {
-            profile_id: "luun-devnet-v4".to_string(),
+            profile_id: "luun-devnet-v5".to_string(),
             ticket_maturity_delay_heights: DEFAULT_TICKET_MATURITY_DELAY,
             ticket_expiry_window_heights: DEFAULT_TICKET_EXPIRY_WINDOW,
+            mine_difficulty_bits: MINE_DIFFICULTY_BITS,
             max_pending_transactions: MAX_PENDING_TRANSACTIONS,
             max_block_transactions: MAX_BLOCK_TRANSACTIONS,
             max_block_bytes: MAX_BLOCK_BYTES,
@@ -678,13 +759,18 @@ fn default_ticket_expiry_window_heights() -> u64 {
     DEFAULT_TICKET_EXPIRY_WINDOW
 }
 
+fn default_mine_difficulty_bits() -> u32 {
+    MINE_DIFFICULTY_BITS
+}
+
 impl LaunchProfile {
     pub fn hash(&self) -> String {
         hex_hash(format!(
-            "luun-launch-profile:{}:{}:{}:{}:{}:{}",
+            "luun-launch-profile:{}:{}:{}:{}:{}:{}:{}",
             self.profile_id,
             self.ticket_maturity_delay_heights,
             self.ticket_expiry_window_heights,
+            self.mine_difficulty_bits,
             self.max_pending_transactions,
             self.max_block_transactions,
             self.max_block_bytes
@@ -768,7 +854,7 @@ pub struct Ledger {
     utxos: BTreeMap<OutPoint, TxOutput>,
     tickets: Vec<BurnTicket>,
     pending: Vec<Transaction>,
-    block_reward: Amount,
+    mine_reward: Amount,
     initial_vdf_rounds: u32,
     vdf_rounds: u32,
     launch_profile: LaunchProfile,
@@ -813,7 +899,7 @@ impl Ledger {
             utxos,
             tickets,
             pending: Vec::new(),
-            block_reward: BLOCK_REWARD,
+            mine_reward: MINE_REWARD,
             initial_vdf_rounds: vdf_rounds,
             vdf_rounds,
             launch_profile,
@@ -851,7 +937,7 @@ impl Ledger {
             utxos,
             tickets: Vec::new(),
             pending: Vec::new(),
-            block_reward: BLOCK_REWARD,
+            mine_reward: MINE_REWARD,
             initial_vdf_rounds: vdf_rounds,
             vdf_rounds,
             launch_profile,
@@ -1060,7 +1146,7 @@ impl Ledger {
             tip_hash: self.tip().hash.clone(),
             next_leader: self.expected_leader_for_next_block(),
             launch_profile_hash: self.launch_profile.hash(),
-            block_reward: self.block_reward,
+            mine_reward: self.mine_reward,
             balances: balances_from_utxos(&self.utxos),
             pending_transactions: self.pending.len(),
         }
@@ -1274,16 +1360,42 @@ impl Ledger {
         Ok(transaction)
     }
 
+    pub fn build_mine(&self, recipient: impl Into<String>) -> Result<Transaction> {
+        let recipient = recipient.into();
+        let output = TxOutput {
+            address: recipient,
+            amount: self.mine_reward,
+        };
+        let anchor = self.tip().hash.clone();
+        let difficulty_bits = self.launch_profile.mine_difficulty_bits;
+        for nonce in 0..u64::MAX {
+            let signature = mine_signature(&output, &anchor, nonce, difficulty_bits);
+            if !hash_meets_difficulty(&signature, difficulty_bits) {
+                continue;
+            }
+            let transaction = Transaction::Mine {
+                output: output.clone(),
+                anchor: anchor.clone(),
+                nonce,
+                difficulty_bits,
+                signature,
+            };
+            if self.has_transaction(transaction.signature()) {
+                continue;
+            }
+            self.validate_new_transaction(&transaction)?;
+            return Ok(transaction);
+        }
+        bail!("could not find valid mine proof");
+    }
+
     pub fn submit_transaction(&mut self, transaction: Transaction) -> Result<bool> {
-        if self
-            .pending
-            .iter()
-            .any(|tx| tx.signature() == transaction.signature())
-        {
+        if self.has_transaction(transaction.signature()) {
             return Ok(false);
         }
 
         transaction.verify_signature()?;
+        self.validate_transaction_terms(&transaction)?;
 
         if transaction_inputs_spent_by(&transaction, &self.pending) {
             return Ok(false);
@@ -1334,7 +1446,7 @@ impl Ledger {
             prev_hash,
             timestamp_ms,
             miner: miner.to_string(),
-            reward: reward_with_fees(self.block_reward, &transactions)?,
+            reward: fee_reward(&transactions)?,
             vdf_rounds: self.vdf_rounds,
             vdf_seed,
             leader_ticket,
@@ -1374,9 +1486,10 @@ impl Ledger {
             if !signatures.insert(tx.signature()) {
                 bail!("duplicate transaction in block");
             }
+            self.validate_transaction_terms(tx)?;
             apply_transaction(tx, &mut utxos)?;
         }
-        if block.reward != reward_with_fees(self.block_reward, &block.transactions)? {
+        if block.reward != fee_reward(&block.transactions)? {
             bail!("block reward is invalid");
         }
         let mut tickets = self.tickets.clone();
@@ -1429,7 +1542,7 @@ impl Ledger {
         if block.compute_hash() != block.hash {
             bail!("block hash is invalid");
         }
-        if block.reward != reward_with_fees(self.block_reward, &block.transactions)? {
+        if block.reward != fee_reward(&block.transactions)? {
             bail!("block reward is invalid");
         }
         if block.vdf_rounds != self.vdf_rounds {
@@ -1506,7 +1619,9 @@ impl Ledger {
             let mut still_pending = Vec::new();
 
             for tx in remaining {
-                if apply_transaction(tx, &mut utxos).is_ok() {
+                if self.validate_transaction_terms(tx).is_ok()
+                    && apply_transaction(tx, &mut utxos).is_ok()
+                {
                     valid.push(tx.clone());
                     progressed = true;
                 } else {
@@ -1620,8 +1735,30 @@ impl Ledger {
     }
 
     fn validate_new_transaction(&self, transaction: &Transaction) -> Result<()> {
+        self.validate_transaction_terms(transaction)?;
         let mut utxos = self.utxos_after_valid_pending()?;
         apply_transaction(transaction, &mut utxos)
+    }
+
+    fn validate_transaction_terms(&self, transaction: &Transaction) -> Result<()> {
+        if let Transaction::Mine {
+            output,
+            anchor,
+            difficulty_bits,
+            ..
+        } = transaction
+        {
+            if output.amount != self.mine_reward {
+                bail!("mine transaction reward is invalid");
+            }
+            if *difficulty_bits != self.launch_profile.mine_difficulty_bits {
+                bail!("mine transaction difficulty is invalid");
+            }
+            if !self.has_block(anchor) {
+                bail!("mine transaction anchor is not on this chain");
+            }
+        }
+        Ok(())
     }
 
     fn utxos_after_valid_pending(&self) -> Result<BTreeMap<OutPoint, TxOutput>> {
@@ -1936,6 +2073,17 @@ fn apply_transaction(
     utxos: &mut BTreeMap<OutPoint, TxOutput>,
 ) -> Result<()> {
     transaction.verify_signature()?;
+    if let Transaction::Mine { output, .. } = transaction {
+        ensure_outputs_do_not_overflow(utxos, std::slice::from_ref(output))?;
+        utxos.insert(
+            OutPoint {
+                txid: transaction.signature().to_string(),
+                index: 0,
+            },
+            output.clone(),
+        );
+        return Ok(());
+    }
     ensure_single_input_owner(transaction)?;
     let input_total = spend_inputs(transaction, utxos)?;
     let output_total = transaction
@@ -1951,7 +2099,7 @@ fn apply_transaction(
         .context("transaction outputs plus fee overflow")?
         .checked_add(match transaction {
             Transaction::Burn { amount, .. } => *amount,
-            Transaction::Transfer { .. } => 0,
+            Transaction::Transfer { .. } | Transaction::Mine { .. } => 0,
         })
         .context("transaction outputs plus burn overflow")?;
     if input_total != required {
@@ -1970,11 +2118,9 @@ fn apply_transaction(
     Ok(())
 }
 
-fn reward_with_fees(base_reward: Amount, transactions: &[Transaction]) -> Result<Amount> {
-    transactions.iter().try_fold(base_reward, |total, tx| {
-        total
-            .checked_add(tx.fee())
-            .context("block reward plus fees overflows")
+fn fee_reward(transactions: &[Transaction]) -> Result<Amount> {
+    transactions.iter().try_fold(0_u64, |total, tx| {
+        total.checked_add(tx.fee()).context("block fees overflow")
     })
 }
 
@@ -2012,6 +2158,9 @@ fn transaction_has_missing_inputs(
 }
 
 fn ensure_single_input_owner(transaction: &Transaction) -> Result<()> {
+    if matches!(transaction, Transaction::Mine { .. }) {
+        return Ok(());
+    }
     let Some(first) = transaction.inputs().first() else {
         bail!("transaction has no inputs");
     };
@@ -2094,7 +2243,9 @@ fn utxos_after_genesis(
     for transaction in &genesis.transactions {
         match transaction {
             Transaction::Burn { .. } => apply_transaction(transaction, &mut utxos)?,
-            Transaction::Transfer { .. } => bail!("genesis only supports burn transactions"),
+            Transaction::Transfer { .. } | Transaction::Mine { .. } => {
+                bail!("genesis only supports burn transactions")
+            }
         }
     }
     credit_reward_output(&mut utxos, genesis)?;
@@ -2178,7 +2329,7 @@ fn genesis_miner(
         .iter()
         .filter_map(|transaction| match transaction {
             Transaction::Burn { inputs, .. } => inputs.first().map(|input| input.owner.as_str()),
-            Transaction::Transfer { .. } => None,
+            Transaction::Transfer { .. } | Transaction::Mine { .. } => None,
         })
         .find(|from| genesis_allocations.contains_key(*from))
         .or_else(|| genesis_allocations.keys().next().map(String::as_str))

@@ -113,6 +113,7 @@ pub struct LaunchProfileStatus {
     pub profile_hash: String,
     pub ticket_maturity_delay_heights: u64,
     pub ticket_expiry_window_heights: u64,
+    pub mine_difficulty_bits: u32,
 }
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
@@ -340,6 +341,7 @@ impl NodeCore {
                 profile_hash: chain.launch_profile_hash.clone(),
                 ticket_maturity_delay_heights: launch_profile.ticket_maturity_delay_heights,
                 ticket_expiry_window_heights: launch_profile.ticket_expiry_window_heights,
+                mine_difficulty_bits: launch_profile.mine_difficulty_bits,
             },
             mining: MiningStatus {
                 automatic: true,
@@ -360,10 +362,7 @@ impl NodeCore {
         let launch_profile = self.ledger.launch_profile();
         let chain = self.ledger.chain();
         let window = launch_profile.ticket_expiry_window_heights.max(1);
-        let last_payout = chain
-            .last()
-            .map(|block| block.reward)
-            .unwrap_or_else(|| self.ledger.status().block_reward);
+        let last_payout = chain.last().map(|block| block.reward).unwrap_or(0);
         let estimated_active_burn = estimated_active_burn_for_next_block(chain, launch_profile);
         let average_active_burn_rate_microluun =
             u128::from(estimated_active_burn) / u128::from(window);
@@ -444,6 +443,14 @@ impl NodeCore {
         let tx =
             self.ledger
                 .build_transfer_with_inputs(&self.wallet, to, amount, fee, outpoints)?;
+        if self.ledger.submit_transaction(tx.clone())? {
+            self.outbox.push(GossipEnvelope::Transaction(tx.clone()));
+        }
+        Ok(tx)
+    }
+
+    pub fn mine_pow_reward(&mut self) -> Result<Transaction> {
+        let tx = self.ledger.build_mine(self.wallet.address())?;
         if self.ledger.submit_transaction(tx.clone())? {
             self.outbox.push(GossipEnvelope::Transaction(tx.clone()));
         }

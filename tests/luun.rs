@@ -4,7 +4,7 @@ use luun::{
     adapters::chain_store::SqliteChainStore,
     app::{DEFAULT_BURN_PER_BLOCK, InMemoryNetwork, NodeConfig, NodeCore, PeerBook, PeerDirection},
     domain::{
-        Amount, BLOCK_REWARD, GenesisBurn, Ledger, MAX_BLOCK_BYTES, MICRO_LUUN,
+        Amount, BLOCK_REWARD, GenesisBurn, Ledger, MAX_BLOCK_BYTES, MICRO_LUUN, MINE_REWARD,
         VDF_TARGET_BLOCK_MS, Wallet, run_vdf, verify_vdf,
     },
 };
@@ -242,7 +242,7 @@ fn transfer_and_burn_update_balances_when_block_is_applied() {
     let block = ledger.mine_next_block(&alice, 1).unwrap();
     ledger.apply_block(block).unwrap();
 
-    assert_eq!(ledger.balance_of(alice.address()), luun(950));
+    assert_eq!(ledger.balance_of(alice.address()), luun(850));
     assert_eq!(ledger.balance_of(bob.address()), luun(225));
 }
 
@@ -284,22 +284,44 @@ fn block_with_forged_transaction_is_rejected() {
 }
 
 #[test]
-fn block_reward_is_fixed_at_one_hundred_luun() {
+fn mine_action_introduces_one_luun_and_block_author_gets_fees_only() {
     let alice = Wallet::from_seed("alice");
     let mut allocations = BTreeMap::new();
-    allocations.insert(alice.address().to_string(), luun(1_000));
+    allocations.insert(alice.address().to_string(), 2 * MICRO_LUUN);
 
     let mut ledger = Ledger::new(allocations, 10);
+    let mine = ledger.build_mine(alice.address()).unwrap();
+    assert_eq!(mine.amount(), MINE_REWARD);
+    ledger.submit_transaction(mine.clone()).unwrap();
     submit_burn(&mut ledger, &alice, MICRO_LUUN);
     let block = ledger.mine_next_block(&alice, 1).unwrap();
-    assert_eq!(block.reward, BLOCK_REWARD);
+    assert_eq!(block.reward, 0);
 
     ledger.apply_block(block).unwrap();
-    assert_eq!(ledger.balance_of(alice.address()), luun(1_099));
+    assert_eq!(ledger.balance_of(alice.address()), 2 * MICRO_LUUN);
+    assert!(!ledger.submit_transaction(mine).unwrap());
+    assert_eq!(ledger.balance_of(alice.address()), 2 * MICRO_LUUN);
 }
 
 #[test]
-fn burn_larger_than_block_reward_is_paid_from_existing_utxos() {
+fn forged_mine_action_cannot_introduce_luun() {
+    let alice = Wallet::from_seed("forged-mine-alice");
+    let mut allocations = BTreeMap::new();
+    allocations.insert(alice.address().to_string(), MICRO_LUUN);
+    let mut ledger = Ledger::new(allocations, 10);
+
+    let mut forged = ledger.build_mine(alice.address()).unwrap();
+    if let luun::domain::Transaction::Mine { nonce, .. } = &mut forged {
+        *nonce += 1;
+    }
+
+    let error = ledger.submit_transaction(forged).unwrap_err();
+    assert!(format!("{error:#}").contains("mine transaction proof hash is invalid"));
+    assert_eq!(ledger.balance_of(alice.address()), MICRO_LUUN);
+}
+
+#[test]
+fn burn_larger_than_mine_reward_is_paid_from_existing_utxos() {
     let alice = Wallet::from_seed("large-burn-existing-utxos-alice");
     let mut allocations = BTreeMap::new();
     allocations.insert(alice.address().to_string(), BLOCK_REWARD + luun(50));
@@ -311,10 +333,10 @@ fn burn_larger_than_block_reward_is_paid_from_existing_utxos() {
 
     let block = ledger.mine_next_block(&alice, 1).unwrap();
     assert_eq!(block.transactions[0].amount(), burn_amount);
-    assert_eq!(block.reward, BLOCK_REWARD);
+    assert_eq!(block.reward, 0);
 
     ledger.apply_block(block).unwrap();
-    assert_eq!(ledger.balance_of(alice.address()), BLOCK_REWARD + luun(25));
+    assert_eq!(ledger.balance_of(alice.address()), luun(25));
 }
 
 #[test]
@@ -350,10 +372,10 @@ fn transaction_fees_are_paid_to_the_block_miner() {
     ledger.submit_transaction(tx).unwrap();
 
     let block = ledger.mine_next_block(&alice, 1).unwrap();
-    assert_eq!(block.reward, BLOCK_REWARD + luun(7));
+    assert_eq!(block.reward, luun(7));
     ledger.apply_block(block).unwrap();
 
-    assert_eq!(ledger.balance_of(alice.address()), luun(216));
+    assert_eq!(ledger.balance_of(alice.address()), luun(116));
     assert_eq!(ledger.balance_of(bob.address()), luun(183));
 }
 
@@ -407,7 +429,7 @@ fn oversized_blocks_are_rejected() {
     let mut block = ledger.mine_next_block(&alice, 1).unwrap();
     let oversized_transfer = transfer_fee_tx(&ledger, &bob, "x".repeat(MAX_BLOCK_BYTES), 1, 3);
     block.transactions.push(oversized_transfer);
-    block.reward = BLOCK_REWARD + 3;
+    block.reward = 3;
     block.hash = block.compute_hash();
 
     let error = ledger.apply_block(block).unwrap_err();
@@ -465,16 +487,13 @@ fn transfer_that_would_overflow_recipient_balance_is_rejected() {
 }
 
 #[test]
-fn block_reward_that_would_overflow_miner_balance_is_rejected() {
+fn mine_reward_that_would_overflow_recipient_balance_is_rejected() {
     let alice = Wallet::from_seed("alice");
     let mut allocations = BTreeMap::new();
     allocations.insert(alice.address().to_string(), Amount::MAX);
 
-    let mut ledger = Ledger::new(allocations, 10);
-    submit_burn(&mut ledger, &alice, 1);
-    let block = ledger.mine_next_block(&alice, 1).unwrap();
-
-    let error = ledger.apply_block(block).unwrap_err();
+    let ledger = Ledger::new(allocations, 10);
+    let error = ledger.build_mine(alice.address()).unwrap_err();
 
     assert!(format!("{error:#}").contains("balance overflow"));
 }
@@ -550,7 +569,7 @@ fn automatic_mining_burns_configured_amount_once_per_height() {
     assert!(first.burned.is_some());
     assert!(first.block.is_some());
     assert_eq!(node.ledger().chain().len(), 2);
-    assert_eq!(node.ledger().balance_of(alice.address()), luun(1_075));
+    assert_eq!(node.ledger().balance_of(alice.address()), luun(975));
 
     let second = node.automatic_mine_once(2);
     assert!(second.burned.is_some());
@@ -645,10 +664,7 @@ fn automatic_mining_caps_burn_to_spendable_balance_after_fee() {
     );
     assert_eq!(outcome.burned.as_ref().map(|tx| tx.fee()), Some(MICRO_LUUN));
     assert!(outcome.block.is_some());
-    assert_eq!(
-        node.ledger().balance_of(alice.address()),
-        BLOCK_REWARD + MICRO_LUUN
-    );
+    assert_eq!(node.ledger().balance_of(alice.address()), MICRO_LUUN);
 }
 
 #[test]
@@ -1679,7 +1695,8 @@ fn fork_choice_preflight_rejects_invalid_fork_before_vrf_scoring() {
     if let Some(transaction) = invalid_snapshot.blocks[6].transactions.first_mut() {
         match transaction {
             luun::domain::Transaction::Burn { signature, .. }
-            | luun::domain::Transaction::Transfer { signature, .. } => signature.push_str("00"),
+            | luun::domain::Transaction::Transfer { signature, .. }
+            | luun::domain::Transaction::Mine { signature, .. } => signature.push_str("00"),
         }
     }
 
