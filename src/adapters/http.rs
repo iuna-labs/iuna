@@ -23,7 +23,7 @@ use crate::{
         wallet_store,
     },
     app::{NodeStatus, PeerInfo, SharedNode, SharedPeerBook},
-    domain::{Amount, Block, Transaction},
+    domain::{Amount, Block, Transaction, TxInput, TxOutput},
 };
 
 const EXPLORER_LIMIT: usize = 50;
@@ -96,6 +96,9 @@ struct WalletTransactionRow {
     to: Option<String>,
     amount: Amount,
     fee: Amount,
+    inputs: Vec<TxInput>,
+    outputs: Vec<TxOutput>,
+    change: Vec<TxOutput>,
     signature: String,
     status: &'static str,
     block_height: Option<u64>,
@@ -383,25 +386,29 @@ fn wallet_transaction_row(
     block_height: Option<u64>,
 ) -> Option<WalletTransactionRow> {
     match tx {
-        Transaction::Transfer { fee, signature, .. }
-            if tx.sender() == wallet || tx.to() == Some(wallet) =>
-        {
-            Some(WalletTransactionRow {
-                kind: "transfer",
-                from: tx.sender().to_string(),
-                to: tx.to().map(str::to_string),
-                amount: tx.amount(),
-                fee: *fee,
-                signature: signature.clone(),
-                status,
-                block_height,
-                direction: if tx.to() == Some(wallet) {
-                    "received"
-                } else {
-                    "sent"
-                },
-            })
-        }
+        Transaction::Transfer {
+            inputs,
+            outputs,
+            fee,
+            signature,
+        } if tx.sender() == wallet || tx.to() == Some(wallet) => Some(WalletTransactionRow {
+            kind: "transfer",
+            from: tx.sender().to_string(),
+            to: tx.to().map(str::to_string),
+            amount: tx.amount(),
+            fee: *fee,
+            inputs: inputs.clone(),
+            outputs: outputs.clone(),
+            change: Vec::new(),
+            signature: signature.clone(),
+            status,
+            block_height,
+            direction: if tx.to() == Some(wallet) {
+                "received"
+            } else {
+                "sent"
+            },
+        }),
         _ => None,
     }
 }
@@ -580,6 +587,7 @@ const INDEX_HTML: &str = r#"<!doctype html>
     .ok { color: #d5f55f; }
     .page-title { margin-bottom: 16px; }
     .setup-overlay { position: fixed; inset: 0; z-index: 30; display: grid; place-items: center; padding: 22px; background: rgba(8, 9, 10, .72); backdrop-filter: blur(8px); }
+    .transaction-overlay { z-index: 40; }
     .setup-modal { width: min(980px, 100%); max-height: calc(100vh - 44px); overflow: auto; border: 1px solid #3b4448; border-radius: 8px; padding: 18px; background: #181b1f; box-shadow: 0 24px 80px rgba(0, 0, 0, .42); }
     .setup-modal-head { display: grid; gap: 5px; margin-bottom: 16px; }
     .setup-modal-head h2 { margin: 0; font-size: 24px; }
@@ -628,7 +636,8 @@ const INDEX_HTML: &str = r#"<!doctype html>
     .switch { display: inline-flex; grid-template-columns: none; align-items: center; gap: 8px; color: #d6dee2; font-weight: 700; }
     .switch input { width: auto; min-width: 0; accent-color: #d5f55f; }
     .wallet-tx-list { display: grid; gap: 8px; }
-    .wallet-tx-row { position: relative; display: grid; grid-template-columns: minmax(0, 1fr); gap: 8px; align-items: start; border: 1px solid #2f363c; border-radius: 8px; padding: 12px; background: #111316; }
+    .wallet-tx-row { position: relative; display: grid; grid-template-columns: minmax(0, 1fr); gap: 8px; align-items: start; border: 1px solid #2f363c; border-radius: 8px; padding: 12px; background: #111316; cursor: pointer; text-align: left; }
+    .wallet-tx-row:hover, .wallet-tx-row:focus-visible, .tx-card:hover, .tx-card:focus-visible, .mempool-item:hover, .mempool-item:focus-visible { border-color: #d5f55f; box-shadow: 0 0 0 1px rgba(213, 245, 95, .22); outline: none; }
     .wallet-tx-row.pending { border-color: #3a4147; background: #191c20; box-shadow: inset 3px 0 0 #6f7880; }
     .wallet-tx-row .pill { position: absolute; top: 10px; right: 10px; }
     .wallet-tx-main { display: grid; gap: 5px; min-width: 0; padding-right: 92px; }
@@ -664,13 +673,29 @@ const INDEX_HTML: &str = r#"<!doctype html>
     .detail-kv { display: grid; grid-template-columns: 90px minmax(0, 1fr); gap: 8px; font-size: 13px; margin: 7px 0; }
     .detail-kv .key { color: #8d989f; }
     .tx-list { display: grid; gap: 8px; }
-    .tx-card, .mempool-item { position: relative; display: grid; gap: 6px; border: 1px solid #2f363c; border-radius: 8px; padding: 12px; background: #111316; }
+    .tx-card, .mempool-item { position: relative; display: grid; gap: 6px; border: 1px solid #2f363c; border-radius: 8px; padding: 12px; background: #111316; cursor: pointer; text-align: left; }
     .tx-card .pill, .mempool-item .pill { position: absolute; top: 10px; right: 10px; }
     .pill { display: inline-flex; align-items: center; border-radius: 999px; padding: 2px 8px; font-size: 12px; font-weight: 800; background: #2b3136; color: #d6dee2; }
     .pill.burn { background: #332918; color: #ffd070; }
     .pill.transfer { background: #17312a; color: #8de9cd; }
     .mempool-strip { display: flex; gap: 8px; overflow-x: auto; padding-bottom: 4px; }
     .mempool-item { flex: 0 0 220px; }
+    .tx-modal { width: min(940px, 100%); max-height: calc(100vh - 44px); overflow: auto; border: 1px solid #3b4448; border-radius: 8px; padding: 16px; background: #181b1f; box-shadow: 0 24px 80px rgba(0, 0, 0, .46); }
+    .tx-modal-head { display: flex; justify-content: space-between; gap: 16px; align-items: flex-start; margin-bottom: 14px; }
+    .tx-modal-title { display: grid; gap: 6px; min-width: 0; }
+    .tx-modal-title h2 { margin: 0; }
+    .tx-modal-summary { display: grid; grid-template-columns: repeat(auto-fit, minmax(180px, 1fr)); gap: 8px; margin-bottom: 12px; }
+    .utxo-flow { display: grid; grid-template-columns: minmax(0, 1fr) auto minmax(0, 1fr); gap: 12px; align-items: stretch; }
+    .utxo-column { display: grid; align-content: start; gap: 8px; min-width: 0; }
+    .utxo-column h3 { margin: 0; color: #8d989f; font-size: 11px; text-transform: uppercase; }
+    .utxo-node { display: grid; gap: 5px; border: 1px solid #2f363c; border-radius: 8px; padding: 10px; background: #111316; min-width: 0; }
+    .utxo-node.burned { border-color: #5e4821; background: #1f1a12; }
+    .utxo-node-label { display: flex; justify-content: space-between; gap: 8px; color: #8d989f; font-size: 11px; font-weight: 800; text-transform: uppercase; }
+    .utxo-node-amount { color: #d5f55f; font-weight: 850; font-variant-numeric: tabular-nums; }
+    .utxo-node-address, .utxo-node-ref { color: #9eb3bc; font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; font-size: 12px; overflow-wrap: anywhere; }
+    .utxo-arrow { display: grid; place-items: center; color: #d5f55f; font-size: 24px; font-weight: 900; }
+    .tx-modal-empty { border: 1px dashed #3a4248; border-radius: 8px; padding: 10px; color: #8d989f; }
+    @media (max-width: 760px) { .utxo-flow { grid-template-columns: 1fr; } .utxo-arrow { min-height: 28px; transform: rotate(90deg); } .tx-modal-head { align-items: stretch; } }
     @media (max-width: 920px) { .setup-grid, .wallet-grid, .mining-grid, .detail-grid { grid-template-columns: 1fr; } }
     @media (max-width: 920px) { .mining-form { grid-template-columns: 1fr; } }
     @media (max-width: 760px) {
@@ -689,10 +714,10 @@ const INDEX_HTML: &str = r#"<!doctype html>
       .block-card { flex-basis: 108px; }
     }
   </style>
-  <script defer src="/assets/luun-ui.js?v=36"></script>
+  <script defer src="/assets/luun-ui.js?v=37"></script>
   <script defer src="/assets/alpine.min.js"></script>
 </head>
-<body x-data="luunApp()" x-init="init()" x-cloak>
+<body x-data="luunApp()" x-init="init()" @keydown.window.escape="closeTransactionModal()" x-cloak>
   <div class="app-shell">
     <aside class="sidebar" aria-label="Luun navigation">
       <div class="brand-mark" title="Luun">L</div>
@@ -761,7 +786,7 @@ const INDEX_HTML: &str = r#"<!doctype html>
           </div>
           <div class="wallet-tx-list">
             <template x-for="tx in walletTransactions()" :key="tx.status + '-' + tx.signature">
-              <div class="wallet-tx-row" :class="{ pending: tx.status === 'pending' }">
+              <div class="wallet-tx-row" :class="{ pending: tx.status === 'pending' }" role="button" tabindex="0" @click="openTransactionModal(tx, { source: 'Wallet' })" @keydown.enter.prevent="openTransactionModal(tx, { source: 'Wallet' })" @keydown.space.prevent="openTransactionModal(tx, { source: 'Wallet' })">
                 <span class="pill" :class="tx.kind" x-text="tx.direction"></span>
                 <div class="wallet-tx-main">
                   <div class="tx-field"><span class="tx-label">Amount</span><span class="tx-value money">LUUN <span x-text="tx.amount"></span></span></div>
@@ -907,7 +932,7 @@ const INDEX_HTML: &str = r#"<!doctype html>
               <div class="tx-list">
                 <h3>Transactions</h3>
                 <template x-for="tx in selectedBlock.transactions" :key="tx.signature">
-                  <div class="tx-card">
+                  <div class="tx-card" role="button" tabindex="0" @click="openTransactionModal(tx, { source: 'Block', blockHeight: selectedBlock.height })" @keydown.enter.prevent="openTransactionModal(tx, { source: 'Block', blockHeight: selectedBlock.height })" @keydown.space.prevent="openTransactionModal(tx, { source: 'Block', blockHeight: selectedBlock.height })">
                     <span class="pill" :class="tx.kind" x-text="tx.kind"></span>
                     <div class="tx-field"><span class="tx-label">Amount</span><span class="tx-value money">LUUN <span x-text="txAmount(tx)"></span></span></div>
                     <div class="tx-field"><span class="tx-label">Fee</span><span class="tx-value money">LUUN <span x-text="tx.fee ?? 0"></span></span></div>
@@ -927,7 +952,7 @@ const INDEX_HTML: &str = r#"<!doctype html>
           <h2>Mempool</h2>
           <div class="mempool-strip">
             <template x-for="tx in mempool" :key="tx.signature">
-              <div class="mempool-item">
+              <div class="mempool-item" role="button" tabindex="0" @click="openTransactionModal(tx, { source: 'Mempool' })" @keydown.enter.prevent="openTransactionModal(tx, { source: 'Mempool' })" @keydown.space.prevent="openTransactionModal(tx, { source: 'Mempool' })">
                 <span class="pill" :class="tx.kind" x-text="tx.kind"></span>
                 <div class="tx-field"><span class="tx-label">Amount</span><span class="tx-value money">LUUN <span x-text="txAmount(tx)"></span></span></div>
                 <div class="tx-field"><span class="tx-label">Fee</span><span class="tx-value money">LUUN <span x-text="tx.fee ?? 0"></span></span></div>
@@ -941,6 +966,53 @@ const INDEX_HTML: &str = r#"<!doctype html>
       </div>
     </section>
     </main>
+  </div>
+  <div class="setup-overlay transaction-overlay" x-show="selectedTransaction" x-transition.opacity @click.self="closeTransactionModal()" role="dialog" aria-modal="true" aria-labelledby="tx-modal-title">
+    <section class="tx-modal">
+      <div class="tx-modal-head">
+        <div class="tx-modal-title">
+          <span class="pill" :class="selectedTransaction?.tx?.kind" x-text="selectedTransaction?.tx?.kind"></span>
+          <h2 id="tx-modal-title">Transaction</h2>
+          <code class="tx-value hash" x-text="selectedTransaction?.tx?.signature || '-'"></code>
+        </div>
+        <button type="button" @click="closeTransactionModal">Close</button>
+      </div>
+      <div class="tx-modal-summary">
+        <div class="tx-field"><span class="tx-label">Source</span><span class="tx-value text" x-text="selectedTransactionLabel()"></span></div>
+        <div class="tx-field"><span class="tx-label">Amount</span><span class="tx-value money">LUUN <span x-text="txAmount(selectedTransaction?.tx || {})"></span></span></div>
+        <div class="tx-field"><span class="tx-label">Fee</span><span class="tx-value money">LUUN <span x-text="selectedTransaction?.tx?.fee ?? 0"></span></span></div>
+        <div class="tx-field"><span class="tx-label">From</span><code class="tx-value hash" x-text="txFrom(selectedTransaction?.tx || {})"></code></div>
+        <div class="tx-field" x-show="txTo(selectedTransaction?.tx || {})"><span class="tx-label">To</span><code class="tx-value hash" x-text="txTo(selectedTransaction?.tx || {})"></code></div>
+      </div>
+      <div class="utxo-flow">
+        <div class="utxo-column">
+          <h3>Inputs</h3>
+          <template x-for="(input, index) in txInputs(selectedTransaction?.tx || {})" :key="txInputKey(input, index)">
+            <div class="utxo-node">
+              <div class="utxo-node-label"><span>Input <span x-text="index + 1"></span></span><span>spent</span></div>
+              <div class="utxo-node-ref" x-text="txInputOutpoint(input)"></div>
+              <div class="tx-field"><span class="tx-label">Owner</span><code class="tx-value hash" x-text="input.owner"></code></div>
+              <div class="tx-field"><span class="tx-label">Sig</span><code class="tx-value hash" x-text="short(input.signature)"></code></div>
+            </div>
+          </template>
+          <div class="tx-modal-empty" x-show="txInputs(selectedTransaction?.tx || {}).length === 0">No inputs</div>
+        </div>
+        <div class="utxo-arrow" aria-hidden="true">&rarr;</div>
+        <div class="utxo-column">
+          <h3>Outputs</h3>
+          <template x-for="(output, index) in txVisualOutputs(selectedTransaction?.tx || {})" :key="txOutputKey(output, index)">
+            <div class="utxo-node" :class="{ burned: output.kind === 'burned' }">
+              <div class="utxo-node-label"><span x-text="output.label"></span><span x-text="output.kind"></span></div>
+              <div class="utxo-node-amount">LUUN <span x-text="output.amount"></span></div>
+              <template x-if="output.address">
+                <div class="tx-field"><span class="tx-label">Address</span><code class="tx-value hash" x-text="output.address"></code></div>
+              </template>
+            </div>
+          </template>
+          <div class="tx-modal-empty" x-show="txVisualOutputs(selectedTransaction?.tx || {}).length === 0">No outputs</div>
+        </div>
+      </div>
+    </section>
   </div>
   <div class="setup-overlay" x-show="showingSetup()" x-transition.opacity role="dialog" aria-modal="true" aria-labelledby="setup-title">
     <section class="setup-modal">

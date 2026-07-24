@@ -4,6 +4,7 @@ window.luunApp = function luunApp() {
     status: {},
     blocks: [],
     selectedBlock: null,
+    selectedTransaction: null,
     loadingOlder: false,
     hasMoreBlocks: true,
     walletTxs: [],
@@ -353,6 +354,14 @@ window.luunApp = function luunApp() {
       this.selectedBlock = block;
     },
 
+    openTransactionModal(tx, context = {}) {
+      this.selectedTransaction = { tx, context };
+    },
+
+    closeTransactionModal() {
+      this.selectedTransaction = null;
+    },
+
     async loadOlderBlocks() {
       if (this.loadingOlder || !this.hasMoreBlocks || this.blocks.length === 0) return;
       const oldest = Math.min(...this.blocks.map((block) => block.height));
@@ -558,6 +567,66 @@ window.luunApp = function luunApp() {
 
     txAmount(tx) {
       return tx.amount ?? tx.outputs?.[0]?.amount ?? 0;
+    },
+
+    txInputs(tx) {
+      return Array.isArray(tx.inputs) ? tx.inputs : [];
+    },
+
+    txVisualOutputs(tx) {
+      const rows = [];
+      if (tx.kind === "burn" && Number(tx.amount || 0) > 0) {
+        rows.push({
+          kind: "burned",
+          label: "Burn",
+          amount: tx.amount,
+          address: null,
+        });
+      }
+      const directOutputs = Array.isArray(tx.outputs) ? tx.outputs : [];
+      for (const [index, output] of directOutputs.entries()) {
+        rows.push({
+          kind: "output",
+          label: `Output ${index + 1}`,
+          amount: output.amount,
+          address: output.address,
+        });
+      }
+      const changeOutputs = Array.isArray(tx.change) ? tx.change : [];
+      for (const [index, output] of changeOutputs.entries()) {
+        rows.push({
+          kind: "change",
+          label: `Change ${index + 1}`,
+          amount: output.amount,
+          address: output.address,
+        });
+      }
+      return rows;
+    },
+
+    txInputKey(input, index) {
+      return `${input.outpoint?.txid || "input"}:${input.outpoint?.index ?? index}`;
+    },
+
+    txOutputKey(output, index) {
+      return `${output.kind}:${output.address || "burn"}:${output.amount}:${index}`;
+    },
+
+    txInputOutpoint(input) {
+      const txid = input.outpoint?.txid || "-";
+      const index = input.outpoint?.index ?? "-";
+      return `${txid}:${index}`;
+    },
+
+    selectedTransactionLabel() {
+      if (!this.selectedTransaction) return "-";
+      const { tx, context } = this.selectedTransaction;
+      if (context.blockHeight !== undefined) return `Block ${context.blockHeight}`;
+      if (tx?.status === "pending") return "Wallet pending";
+      if (tx?.blockHeight !== null && tx?.blockHeight !== undefined) {
+        return `Wallet block ${tx.blockHeight}`;
+      }
+      return context.source || "-";
     },
 
     blockBurned(block) {
