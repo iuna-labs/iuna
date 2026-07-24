@@ -1147,6 +1147,14 @@ impl Ledger {
             .sum()
     }
 
+    pub fn utxos_for_address(&self, address: &str) -> Vec<(OutPoint, TxOutput)> {
+        self.utxos
+            .iter()
+            .filter(|(_, output)| output.address == address)
+            .map(|(outpoint, output)| (outpoint.clone(), output.clone()))
+            .collect()
+    }
+
     pub fn next_nonce(&self, address: &str) -> u64 {
         self.utxos
             .keys()
@@ -2316,6 +2324,37 @@ mod tests {
 
     fn pending_balances(ledger: &Ledger) -> BTreeMap<String, Amount> {
         balances_from_utxos(&ledger.utxos_after_valid_pending().unwrap())
+    }
+
+    #[test]
+    fn wallet_utxos_only_include_outputs_owned_by_address() {
+        let alice = Wallet::from_seed("wallet-utxos-alice");
+        let bob = Wallet::from_seed("wallet-utxos-bob");
+        let mut ledger = ledger_with_wallet_utxos(&alice, &[2, 3]);
+        ledger.utxos.insert(
+            OutPoint {
+                txid: "bob-utxo".to_string(),
+                index: 0,
+            },
+            TxOutput {
+                address: bob.address().to_string(),
+                amount: 5,
+            },
+        );
+
+        let alice_utxos = ledger.utxos_for_address(alice.address());
+        let total = alice_utxos
+            .iter()
+            .map(|(_, output)| output.amount)
+            .sum::<Amount>();
+
+        assert_eq!(alice_utxos.len(), 2);
+        assert_eq!(total, ledger.balance_of(alice.address()));
+        assert!(
+            alice_utxos
+                .iter()
+                .all(|(_, output)| output.address == alice.address())
+        );
     }
 
     #[test]

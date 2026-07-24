@@ -56,6 +56,10 @@ pub enum GossipEnvelope {
         txs: Vec<String>,
         blocks: Vec<BlockInventory>,
     },
+    TransactionAck {
+        accepted: Vec<String>,
+        rejected: Vec<TransactionRejection>,
+    },
     Transaction(Transaction),
     Transactions {
         transactions: Vec<Transaction>,
@@ -87,6 +91,12 @@ pub struct ProtocolHello {
 pub struct BlockInventory {
     pub height: u64,
     pub hash: String,
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+pub struct TransactionRejection {
+    pub signature: String,
+    pub reason: String,
 }
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
@@ -221,19 +231,11 @@ impl NodeCore {
     }
 
     pub fn mempool_gossip(&self) -> Vec<GossipEnvelope> {
-        let txs = self
-            .ledger
-            .pending()
-            .iter()
-            .map(|tx| tx.signature().to_string())
-            .collect::<Vec<_>>();
-        if txs.is_empty() {
+        let transactions = self.ledger.pending().to_vec();
+        if transactions.is_empty() {
             Vec::new()
         } else {
-            vec![GossipEnvelope::Inventory {
-                txs,
-                blocks: Vec::new(),
-            }]
+            vec![GossipEnvelope::Transactions { transactions }]
         }
     }
 
@@ -435,6 +437,14 @@ impl NodeCore {
         Ok(tx)
     }
 
+    pub fn receive_transaction(&mut self, tx: Transaction) -> Result<bool> {
+        let accepted = self.ledger.submit_transaction(tx.clone())?;
+        if accepted {
+            self.outbox.push(GossipEnvelope::Transaction(tx));
+        }
+        Ok(accepted)
+    }
+
     pub fn mine_one(&mut self) -> Result<Block> {
         self.mine_one_at(now_ms())
     }
@@ -520,8 +530,12 @@ impl NodeCore {
         let amount = if balance >= self.burn_per_block.saturating_add(fee) {
             self.burn_per_block
         } else {
-            self.burn_per_block.saturating_sub(fee)
+            balance.saturating_sub(fee)
         };
+        if amount == 0 {
+            self.last_auto_burn_height = Some(current_height);
+            return Ok(None);
+        }
         let tx = self.burn_with_fee(amount, fee)?;
         self.last_auto_burn_height = Some(current_height);
         Ok(Some(tx))
@@ -553,18 +567,15 @@ impl NodeCore {
             | GossipEnvelope::BlockRangeRequest { .. }
             | GossipEnvelope::TransactionRequest { .. }
             | GossipEnvelope::BlockRequest { .. }
+            | GossipEnvelope::TransactionAck { .. }
             | GossipEnvelope::Inventory { .. } => Ok(()),
             GossipEnvelope::Transaction(tx) => {
-                if self.ledger.submit_transaction(tx.clone())? {
-                    self.outbox.push(GossipEnvelope::Transaction(tx));
-                }
+                self.receive_transaction(tx)?;
                 Ok(())
             }
             GossipEnvelope::Transactions { transactions } => {
                 for tx in transactions {
-                    if self.ledger.submit_transaction(tx.clone())? {
-                        self.outbox.push(GossipEnvelope::Transaction(tx));
-                    }
+                    self.receive_transaction(tx)?;
                 }
                 Ok(())
             }

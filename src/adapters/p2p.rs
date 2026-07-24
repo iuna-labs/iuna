@@ -1,5 +1,5 @@
 use std::{
-    collections::BTreeMap,
+    collections::{BTreeMap, BTreeSet},
     io::ErrorKind,
     net::SocketAddr,
     sync::{
@@ -24,9 +24,9 @@ use tokio::{
 use crate::{
     app::{
         BlockInventory, GossipEnvelope, NETWORK_ID, PROTOCOL_VERSION, ProtocolHello, SharedNode,
-        SharedPeerBook,
+        SharedPeerBook, TransactionRejection,
     },
-    domain::{Block, ChainSnapshot, Ledger, verify_vdf},
+    domain::{Block, ChainSnapshot, Ledger, Transaction, verify_vdf},
 };
 
 const MAX_BLOCK_BATCH: usize = 128;
@@ -39,6 +39,7 @@ const PEER_QUEUE_SIZE: usize = 256;
 const CONNECT_TIMEOUT: Duration = Duration::from_secs(5);
 const HANDSHAKE_TIMEOUT: Duration = Duration::from_secs(5);
 const SESSION_SYNC_INTERVAL: Duration = Duration::from_secs(2);
+const TRANSACTION_ACK_RETRY_INTERVAL: Duration = Duration::from_secs(3);
 const JOIN_RESPONSE_TIMEOUT: Duration = Duration::from_secs(5);
 const MAX_JOIN_RESPONSE_ENVELOPES: usize = 16;
 const INITIAL_RECONNECT_DELAY: Duration = Duration::from_secs(1);
@@ -57,7 +58,15 @@ struct GossipNetworkInner {
     peers: SharedPeerBook,
     listen_addr: SocketAddr,
     sessions: Mutex<BTreeMap<String, mpsc::Sender<OutboundBatch>>>,
+    tx_delivery: Mutex<BTreeMap<String, PeerTransactionDelivery>>,
     metrics: P2pMetricsCounters,
+}
+
+#[derive(Default)]
+struct PeerTransactionDelivery {
+    accepted: BTreeSet<String>,
+    rejected: BTreeSet<String>,
+    sent: BTreeMap<String, Instant>,
 }
 
 #[derive(Default)]
@@ -83,6 +92,13 @@ struct P2pMetricsCounters {
     self_peer_skips: AtomicU64,
     outbound_queue_full: AtomicU64,
     outbound_queue_closed: AtomicU64,
+    transaction_ack_envelopes_sent: AtomicU64,
+    transaction_ack_envelopes_received: AtomicU64,
+    transactions_accepted_sent: AtomicU64,
+    transactions_accepted_received: AtomicU64,
+    transactions_rejected_sent: AtomicU64,
+    transactions_rejected_received: AtomicU64,
+    transaction_retries_sent: AtomicU64,
     last_session_failure: StdMutex<Option<String>>,
     last_empty_frame_remote: StdMutex<Option<String>>,
     last_parse_error: StdMutex<Option<String>>,
@@ -111,6 +127,14 @@ pub struct P2pMetrics {
     pub self_peer_skips: u64,
     pub outbound_queue_full: u64,
     pub outbound_queue_closed: u64,
+    pub transaction_ack_envelopes_sent: u64,
+    pub transaction_ack_envelopes_received: u64,
+    pub transactions_accepted_sent: u64,
+    pub transactions_accepted_received: u64,
+    pub transactions_rejected_sent: u64,
+    pub transactions_rejected_received: u64,
+    pub transaction_retries_sent: u64,
+    pub transaction_ack_pending: u64,
     pub last_session_failure: Option<String>,
     pub last_empty_frame_remote: Option<String>,
     pub last_parse_error: Option<String>,
@@ -156,6 +180,22 @@ impl P2pMetricsCounters {
             self_peer_skips: self.self_peer_skips.load(Ordering::Relaxed),
             outbound_queue_full: self.outbound_queue_full.load(Ordering::Relaxed),
             outbound_queue_closed: self.outbound_queue_closed.load(Ordering::Relaxed),
+            transaction_ack_envelopes_sent: self
+                .transaction_ack_envelopes_sent
+                .load(Ordering::Relaxed),
+            transaction_ack_envelopes_received: self
+                .transaction_ack_envelopes_received
+                .load(Ordering::Relaxed),
+            transactions_accepted_sent: self.transactions_accepted_sent.load(Ordering::Relaxed),
+            transactions_accepted_received: self
+                .transactions_accepted_received
+                .load(Ordering::Relaxed),
+            transactions_rejected_sent: self.transactions_rejected_sent.load(Ordering::Relaxed),
+            transactions_rejected_received: self
+                .transactions_rejected_received
+                .load(Ordering::Relaxed),
+            transaction_retries_sent: self.transaction_retries_sent.load(Ordering::Relaxed),
+            transaction_ack_pending: 0,
             last_session_failure: self
                 .last_session_failure
                 .lock()
@@ -186,6 +226,7 @@ impl GossipNetwork {
                 peers,
                 listen_addr: addr,
                 sessions: Mutex::new(BTreeMap::new()),
+                tx_delivery: Mutex::new(BTreeMap::new()),
                 metrics: P2pMetricsCounters::default(),
             }),
         };
@@ -197,7 +238,19 @@ impl GossipNetwork {
     }
 
     pub fn metrics(&self) -> P2pMetrics {
-        self.inner.metrics.snapshot()
+        let mut metrics = self.inner.metrics.snapshot();
+        metrics.transaction_ack_pending = self
+            .inner
+            .tx_delivery
+            .try_lock()
+            .map(|delivery| {
+                delivery
+                    .values()
+                    .map(|peer_delivery| peer_delivery.sent.len() as u64)
+                    .sum()
+            })
+            .unwrap_or(0);
+        metrics
     }
 
     pub async fn broadcast(&self, envelopes: Vec<GossipEnvelope>) -> Result<()> {
@@ -227,6 +280,85 @@ impl GossipNetwork {
         Ok(())
     }
 
+    async fn record_sent_transactions(&self, peer: &str, envelopes: &[GossipEnvelope]) {
+        let now = Instant::now();
+        let mut delivery = self.inner.tx_delivery.lock().await;
+        let peer_delivery = delivery.entry(peer.to_string()).or_default();
+        for (signature, _) in transactions_in_envelopes(envelopes) {
+            if peer_delivery.accepted.contains(&signature)
+                || peer_delivery.rejected.contains(&signature)
+            {
+                continue;
+            }
+            peer_delivery.sent.insert(signature, now);
+        }
+    }
+
+    async fn record_transaction_ack(
+        &self,
+        peer: &str,
+        accepted: &[String],
+        rejected: &[TransactionRejection],
+    ) {
+        if !accepted.is_empty() || !rejected.is_empty() {
+            P2pMetricsCounters::inc(&self.inner.metrics.transaction_ack_envelopes_received);
+            P2pMetricsCounters::add(
+                &self.inner.metrics.transactions_accepted_received,
+                accepted.len() as u64,
+            );
+            P2pMetricsCounters::add(
+                &self.inner.metrics.transactions_rejected_received,
+                rejected.len() as u64,
+            );
+        }
+        let mut delivery = self.inner.tx_delivery.lock().await;
+        let peer_delivery = delivery.entry(peer.to_string()).or_default();
+        for signature in accepted {
+            peer_delivery.accepted.insert(signature.clone());
+            peer_delivery.rejected.remove(signature);
+            peer_delivery.sent.remove(signature);
+        }
+        for rejection in rejected {
+            peer_delivery.rejected.insert(rejection.signature.clone());
+            peer_delivery.accepted.remove(&rejection.signature);
+            peer_delivery.sent.remove(&rejection.signature);
+        }
+    }
+
+    async fn pending_transactions_for_retry(&self, peer: &str) -> Vec<Transaction> {
+        let pending = self.inner.node.lock().await.pending_transactions();
+        let pending_signatures = pending
+            .iter()
+            .map(|tx| tx.signature().to_string())
+            .collect::<BTreeSet<_>>();
+        let now = Instant::now();
+        let mut delivery = self.inner.tx_delivery.lock().await;
+        let peer_delivery = delivery.entry(peer.to_string()).or_default();
+        peer_delivery
+            .sent
+            .retain(|signature, _| pending_signatures.contains(signature));
+
+        let retry = pending
+            .into_iter()
+            .filter(|tx| {
+                let signature = tx.signature();
+                if peer_delivery.accepted.contains(signature)
+                    || peer_delivery.rejected.contains(signature)
+                {
+                    return false;
+                }
+                peer_delivery.sent.get(signature).is_none_or(|last_sent| {
+                    now.duration_since(*last_sent) >= TRANSACTION_ACK_RETRY_INTERVAL
+                })
+            })
+            .collect::<Vec<_>>();
+
+        for tx in &retry {
+            peer_delivery.sent.insert(tx.signature().to_string(), now);
+        }
+        retry
+    }
+
     async fn prepare_gossip(&self, envelopes: Vec<GossipEnvelope>) -> Vec<GossipEnvelope> {
         let mut txs = Vec::new();
         let mut blocks = Vec::new();
@@ -242,6 +374,7 @@ impl GossipNetwork {
                             .map(|tx| tx.signature().to_string())
                             .collect::<Vec<_>>(),
                     );
+                    passthrough.push(GossipEnvelope::Transactions { transactions });
                 }
                 GossipEnvelope::Block(block) => blocks.push(BlockInventory {
                     height: block.height,
@@ -536,6 +669,7 @@ async fn session_loop(
                         ).await;
                         write_payload(&mut writer, &payload).await?;
                         if let Some(peer) = &known_peer {
+                            network.record_sent_transactions(peer, &payload).await;
                             network.inner.peers.lock().await.record_sent(peer, payload.len() as u64);
                         }
                     }
@@ -548,6 +682,15 @@ async fn session_loop(
                 if let Some(status) = peer_status.as_mut() {
                     if let Some(updated_status) = push_catchup_to_peer(&network, &mut writer, status).await? {
                         *status = updated_status;
+                    }
+                }
+                if let Some(peer) = &known_peer {
+                    let transactions = network.pending_transactions_for_retry(peer).await;
+                    if !transactions.is_empty() {
+                        let retry = GossipEnvelope::Transactions { transactions };
+                        write_envelope(&mut writer, &retry).await?;
+                        P2pMetricsCounters::inc(&network.inner.metrics.transaction_retries_sent);
+                        network.inner.peers.lock().await.record_sent(peer, 1);
                     }
                 }
             }
@@ -643,6 +786,21 @@ async fn process_envelope(
         GossipEnvelope::PeerList { peers } => {
             apply_peer_list(network, remote_addr, peers).await?;
         }
+        GossipEnvelope::Transaction(tx) => {
+            process_transactions(network, writer, remote_addr, known_peer, vec![tx]).await?;
+        }
+        GossipEnvelope::Transactions { transactions } => {
+            process_transactions(network, writer, remote_addr, known_peer, transactions).await?;
+        }
+        GossipEnvelope::TransactionAck { accepted, rejected } => {
+            let peer = known_peer
+                .clone()
+                .unwrap_or_else(|| remote_addr.to_string());
+            network
+                .record_transaction_ack(&peer, &accepted, &rejected)
+                .await;
+            record_inbound_result(network, known_peer, remote_addr, Ok(())).await;
+        }
         GossipEnvelope::Block(block) => {
             let needs_vdf = {
                 let node = network.inner.node.lock().await;
@@ -704,6 +862,62 @@ async fn process_envelope(
             network.forward_outbox().await;
         }
     }
+    Ok(())
+}
+
+async fn process_transactions(
+    network: &GossipNetwork,
+    writer: &mut OwnedWriteHalf,
+    remote_addr: SocketAddr,
+    known_peer: &Option<String>,
+    transactions: Vec<Transaction>,
+) -> Result<()> {
+    let mut accepted = Vec::new();
+    let mut rejected = Vec::new();
+    {
+        let mut node = network.inner.node.lock().await;
+        for tx in transactions {
+            let signature = tx.signature().to_string();
+            match node.receive_transaction(tx) {
+                Ok(_) => accepted.push(signature),
+                Err(error) => rejected.push(TransactionRejection {
+                    signature,
+                    reason: format!("{error:#}"),
+                }),
+            }
+        }
+    }
+
+    if !accepted.is_empty() || !rejected.is_empty() {
+        let ack = GossipEnvelope::TransactionAck {
+            accepted: accepted.clone(),
+            rejected: rejected.clone(),
+        };
+        write_envelope(writer, &ack).await?;
+        P2pMetricsCounters::inc(&network.inner.metrics.transaction_ack_envelopes_sent);
+        P2pMetricsCounters::add(
+            &network.inner.metrics.transactions_accepted_sent,
+            accepted.len() as u64,
+        );
+        P2pMetricsCounters::add(
+            &network.inner.metrics.transactions_rejected_sent,
+            rejected.len() as u64,
+        );
+    }
+
+    for rejection in rejected {
+        let peer = known_peer
+            .clone()
+            .unwrap_or_else(|| remote_addr.to_string());
+        network
+            .inner
+            .peers
+            .lock()
+            .await
+            .record_inbound_error(&peer, rejection.reason);
+    }
+    network.forward_outbox().await;
+    record_inbound_result(network, known_peer, remote_addr, Ok(())).await;
     Ok(())
 }
 
@@ -800,6 +1014,25 @@ async fn write_payload(writer: &mut OwnedWriteHalf, payload: &[GossipEnvelope]) 
         write_envelope(writer, envelope).await?;
     }
     Ok(())
+}
+
+fn transactions_in_envelopes(envelopes: &[GossipEnvelope]) -> Vec<(String, Transaction)> {
+    let mut transactions = Vec::new();
+    for envelope in envelopes {
+        match envelope {
+            GossipEnvelope::Transaction(tx) => {
+                transactions.push((tx.signature().to_string(), tx.clone()));
+            }
+            GossipEnvelope::Transactions { transactions: txs } => {
+                transactions.extend(
+                    txs.iter()
+                        .map(|tx| (tx.signature().to_string(), tx.clone())),
+                );
+            }
+            _ => {}
+        }
+    }
+    transactions
 }
 
 async fn write_envelope(writer: &mut OwnedWriteHalf, envelope: &GossipEnvelope) -> Result<()> {
@@ -921,6 +1154,7 @@ fn record_received_envelope_kind(metrics: &P2pMetricsCounters, envelope: &Gossip
         | GossipEnvelope::BlockRangeRequest { .. }
         | GossipEnvelope::TransactionRequest { .. }
         | GossipEnvelope::BlockRequest { .. }
+        | GossipEnvelope::TransactionAck { .. }
         | GossipEnvelope::PeerAnnouncement { .. }
         | GossipEnvelope::PeerList { .. } => {
             P2pMetricsCounters::inc(&metrics.control_envelopes_received);
@@ -951,6 +1185,18 @@ fn validate_envelope_limits(envelope: &GossipEnvelope) -> Result<()> {
         GossipEnvelope::Inventory { txs, blocks } => {
             ensure_len("transaction inventory", txs.len(), MAX_INVENTORY_ITEMS)?;
             ensure_len("block inventory", blocks.len(), MAX_INVENTORY_ITEMS)?;
+        }
+        GossipEnvelope::TransactionAck { accepted, rejected } => {
+            ensure_len(
+                "transaction ack accepted",
+                accepted.len(),
+                MAX_OBJECT_REQUESTS,
+            )?;
+            ensure_len(
+                "transaction ack rejected",
+                rejected.len(),
+                MAX_OBJECT_REQUESTS,
+            )?;
         }
         GossipEnvelope::Transactions { transactions } => {
             ensure_len("transaction batch", transactions.len(), MAX_OBJECT_REQUESTS)?;
@@ -1506,6 +1752,18 @@ mod tests {
     }
 
     #[test]
+    fn oversized_transaction_ack_is_rejected_before_processing() {
+        let envelope = GossipEnvelope::TransactionAck {
+            accepted: vec!["sig".to_string(); MAX_OBJECT_REQUESTS + 1],
+            rejected: Vec::new(),
+        };
+
+        let error = validate_envelope_limits(&envelope).unwrap_err();
+
+        assert!(error.to_string().contains("transaction ack accepted"));
+    }
+
+    #[test]
     fn parser_applies_envelope_limits() {
         let line = serde_json::to_string(&GossipEnvelope::BlockRequest {
             hashes: vec!["hash".to_string(); MAX_OBJECT_REQUESTS + 1],
@@ -1547,13 +1805,20 @@ mod tests {
             &metrics,
             &GossipEnvelope::Blocks { blocks: Vec::new() },
         );
+        super::record_received_envelope_kind(
+            &metrics,
+            &GossipEnvelope::TransactionAck {
+                accepted: Vec::new(),
+                rejected: Vec::new(),
+            },
+        );
         super::record_received_envelope_kind(&metrics, &GossipEnvelope::ChainSnapshotRequest);
 
         let snapshot = metrics.snapshot();
         assert_eq!(snapshot.peer_status_envelopes_received, 1);
         assert_eq!(snapshot.inventory_envelopes_received, 1);
         assert_eq!(snapshot.data_envelopes_received, 1);
-        assert_eq!(snapshot.control_envelopes_received, 1);
+        assert_eq!(snapshot.control_envelopes_received, 2);
     }
 
     #[tokio::test]
@@ -1674,6 +1939,7 @@ mod tests {
                 peers: Arc::new(tokio::sync::Mutex::new(PeerBook::default())),
                 listen_addr: "127.0.0.1:9544".parse().unwrap(),
                 sessions: tokio::sync::Mutex::new(BTreeMap::new()),
+                tx_delivery: tokio::sync::Mutex::new(BTreeMap::new()),
                 metrics: super::P2pMetricsCounters::default(),
             }),
         };
@@ -1711,6 +1977,88 @@ mod tests {
             }
             other => panic!("expected inventory, got {other:?}"),
         }
+    }
+
+    #[tokio::test]
+    async fn transaction_batch_gossip_keeps_full_transactions_for_mempool_repair() {
+        let alice = Wallet::from_seed("mempool-repair-alice");
+        let allocations = allocations(std::slice::from_ref(&alice), 1_000);
+        let node = Arc::new(tokio::sync::Mutex::new(node("alice", alice, allocations)));
+        let network = super::GossipNetwork {
+            inner: Arc::new(super::GossipNetworkInner {
+                node: Arc::clone(&node),
+                peers: Arc::new(tokio::sync::Mutex::new(PeerBook::default())),
+                listen_addr: "127.0.0.1:9544".parse().unwrap(),
+                sessions: tokio::sync::Mutex::new(BTreeMap::new()),
+                tx_delivery: tokio::sync::Mutex::new(BTreeMap::new()),
+                metrics: super::P2pMetricsCounters::default(),
+            }),
+        };
+
+        let (tx, signature) = {
+            let mut node = node.lock().await;
+            let tx = node.burn(1).unwrap();
+            (tx.clone(), tx.signature().to_string())
+        };
+
+        let prepared = network
+            .prepare_gossip(vec![GossipEnvelope::Transactions {
+                transactions: vec![tx],
+            }])
+            .await;
+
+        assert_eq!(prepared.len(), 2);
+        assert!(matches!(
+            &prepared[0],
+            GossipEnvelope::Transactions { transactions } if transactions.len() == 1
+        ));
+        match &prepared[1] {
+            GossipEnvelope::Inventory { txs, blocks } => {
+                assert_eq!(txs, &[signature]);
+                assert!(blocks.is_empty());
+            }
+            other => panic!("expected inventory, got {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn unacked_pending_transactions_retry_until_peer_accepts() {
+        let alice = Wallet::from_seed("tx-ack-retry-alice");
+        let allocations = allocations(std::slice::from_ref(&alice), 1_000);
+        let node = Arc::new(tokio::sync::Mutex::new(node("alice", alice, allocations)));
+        let network = super::GossipNetwork {
+            inner: Arc::new(super::GossipNetworkInner {
+                node: Arc::clone(&node),
+                peers: Arc::new(tokio::sync::Mutex::new(PeerBook::default())),
+                listen_addr: "127.0.0.1:9544".parse().unwrap(),
+                sessions: tokio::sync::Mutex::new(BTreeMap::new()),
+                tx_delivery: tokio::sync::Mutex::new(BTreeMap::new()),
+                metrics: super::P2pMetricsCounters::default(),
+            }),
+        };
+        let peer = "127.0.0.1:9545";
+        let signature = {
+            let mut node = node.lock().await;
+            node.burn(1).unwrap().signature().to_string()
+        };
+
+        let first_retry = network.pending_transactions_for_retry(peer).await;
+        assert_eq!(first_retry.len(), 1);
+        assert_eq!(first_retry[0].signature(), signature);
+        assert_eq!(network.metrics().transaction_ack_pending, 1);
+        let immediate_retry = network.pending_transactions_for_retry(peer).await;
+        assert!(immediate_retry.is_empty());
+
+        network
+            .record_transaction_ack(peer, std::slice::from_ref(&signature), &[])
+            .await;
+        let after_ack_retry = network.pending_transactions_for_retry(peer).await;
+
+        assert!(after_ack_retry.is_empty());
+        let metrics = network.metrics();
+        assert_eq!(metrics.transaction_ack_pending, 0);
+        assert_eq!(metrics.transaction_ack_envelopes_received, 1);
+        assert_eq!(metrics.transactions_accepted_received, 1);
     }
 
     #[tokio::test]
@@ -1822,6 +2170,7 @@ mod tests {
                 peers: Arc::new(tokio::sync::Mutex::new(PeerBook::default())),
                 listen_addr: "127.0.0.1:9544".parse().unwrap(),
                 sessions: tokio::sync::Mutex::new(BTreeMap::new()),
+                tx_delivery: tokio::sync::Mutex::new(BTreeMap::new()),
                 metrics: super::P2pMetricsCounters::default(),
             }),
         };
@@ -1888,6 +2237,7 @@ mod tests {
                 peers: Arc::clone(&peers),
                 listen_addr: "127.0.0.1:9544".parse().unwrap(),
                 sessions: tokio::sync::Mutex::new(BTreeMap::new()),
+                tx_delivery: tokio::sync::Mutex::new(BTreeMap::new()),
                 metrics: super::P2pMetricsCounters::default(),
             }),
         };
@@ -1952,6 +2302,7 @@ mod tests {
                 peers,
                 listen_addr: "127.0.0.1:9544".parse().unwrap(),
                 sessions: tokio::sync::Mutex::new(BTreeMap::new()),
+                tx_delivery: tokio::sync::Mutex::new(BTreeMap::new()),
                 metrics: super::P2pMetricsCounters::default(),
             }),
         };
@@ -1977,6 +2328,7 @@ mod tests {
                 peers: Arc::clone(&peers),
                 listen_addr: "127.0.0.1:9544".parse().unwrap(),
                 sessions: tokio::sync::Mutex::new(BTreeMap::new()),
+                tx_delivery: tokio::sync::Mutex::new(BTreeMap::new()),
                 metrics: super::P2pMetricsCounters::default(),
             }),
         };
@@ -2006,6 +2358,7 @@ mod tests {
                 peers: Arc::clone(&peers),
                 listen_addr: "0.0.0.0:9545".parse().unwrap(),
                 sessions: tokio::sync::Mutex::new(BTreeMap::new()),
+                tx_delivery: tokio::sync::Mutex::new(BTreeMap::new()),
                 metrics: super::P2pMetricsCounters::default(),
             }),
         };
@@ -2035,6 +2388,7 @@ mod tests {
                 peers: Arc::new(tokio::sync::Mutex::new(PeerBook::default())),
                 listen_addr: "0.0.0.0:9545".parse().unwrap(),
                 sessions: tokio::sync::Mutex::new(BTreeMap::new()),
+                tx_delivery: tokio::sync::Mutex::new(BTreeMap::new()),
                 metrics: super::P2pMetricsCounters::default(),
             }),
         };

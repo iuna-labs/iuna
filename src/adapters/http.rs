@@ -1,4 +1,5 @@
 use std::{
+    collections::BTreeMap,
     net::SocketAddr,
     path::{Path, PathBuf},
     sync::Arc,
@@ -23,7 +24,7 @@ use crate::{
         wallet_store,
     },
     app::{NodeStatus, PeerInfo, SharedNode, SharedPeerBook},
-    domain::{Amount, Block, Transaction, TxInput, TxOutput},
+    domain::{Amount, Block, OutPoint, Transaction, TxInput, TxOutput, hex_hash},
 };
 
 const EXPLORER_LIMIT: usize = 50;
@@ -96,13 +97,58 @@ struct WalletTransactionRow {
     to: Option<String>,
     amount: Amount,
     fee: Amount,
-    inputs: Vec<TxInput>,
+    inputs: Vec<UiTxInput>,
     outputs: Vec<TxOutput>,
     change: Vec<TxOutput>,
     signature: String,
     status: &'static str,
     block_height: Option<u64>,
+    block_miner: Option<String>,
     direction: &'static str,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct WalletUtxoRow {
+    outpoint: OutPoint,
+    address: String,
+    amount: Amount,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Serialize)]
+struct UiBlock {
+    height: u64,
+    prev_hash: String,
+    timestamp_ms: u64,
+    miner: String,
+    reward: Amount,
+    vdf_rounds: u32,
+    vdf_output: String,
+    leader_proof: Option<crate::domain::LeaderProof>,
+    transactions: Vec<UiTransaction>,
+    hash: String,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Serialize)]
+struct UiTransaction {
+    kind: &'static str,
+    from: String,
+    to: Option<String>,
+    amount: Amount,
+    fee: Amount,
+    inputs: Vec<UiTxInput>,
+    outputs: Vec<TxOutput>,
+    change: Vec<TxOutput>,
+    signature: String,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Serialize)]
+struct UiTxInput {
+    outpoint: OutPoint,
+    owner: String,
+    signature: String,
+    amount: Option<Amount>,
+    address: Option<String>,
 }
 
 pub async fn serve(
@@ -133,6 +179,7 @@ pub async fn serve(
         .route("/api/wallet/generate", post(api_wallet_generate_form))
         .route("/api/wallet/import", post(api_wallet_import_form))
         .route("/api/wallet/transactions", get(api_wallet_transactions))
+        .route("/api/wallet/utxos", get(api_wallet_utxos))
         .route("/api/mempool", get(api_mempool))
         .route("/api/peers", get(api_peers).post(api_peer_form))
         .route("/api/p2p/metrics", get(api_p2p_metrics))
@@ -185,17 +232,24 @@ async fn api_status(State(state): State<HttpState>) -> Json<NodeStatus> {
 async fn api_blocks(
     State(state): State<HttpState>,
     Query(query): Query<BlocksQuery>,
-) -> Json<Vec<Block>> {
+) -> Json<Vec<UiBlock>> {
     let limit = query
         .limit
         .unwrap_or(EXPLORER_PAGE_LIMIT)
         .min(EXPLORER_LIMIT);
     let node = state.node.lock().await;
+    let snapshot = node.chain_snapshot();
+    let pending = node.pending_transactions();
     let blocks = match query.before_height {
         Some(before_height) => node.blocks_before(before_height, limit),
         None => node.recent_blocks(limit),
     };
-    Json(blocks)
+    Json(ui_blocks(
+        blocks,
+        &snapshot.genesis_allocations,
+        &snapshot.blocks,
+        &pending,
+    ))
 }
 
 async fn api_config(State(state): State<HttpState>) -> Json<UiConfig> {
@@ -206,19 +260,55 @@ async fn api_wallet_setup(State(state): State<HttpState>) -> Json<WalletSetupRes
     wallet_setup_json(wallet_setup_response(&state).await)
 }
 
-async fn api_mempool(State(state): State<HttpState>) -> Json<Vec<Transaction>> {
-    Json(state.node.lock().await.pending_transactions())
+async fn api_mempool(State(state): State<HttpState>) -> Json<Vec<UiTransaction>> {
+    let node = state.node.lock().await;
+    let snapshot = node.chain_snapshot();
+    let pending = node.pending_transactions();
+    let outputs = known_output_index(&snapshot.genesis_allocations, &snapshot.blocks, &pending);
+    Json(
+        pending
+            .iter()
+            .map(|tx| ui_transaction(tx, &outputs))
+            .collect(),
+    )
 }
 
 async fn api_wallet_transactions(
     State(state): State<HttpState>,
 ) -> Json<Vec<WalletTransactionRow>> {
     let node = state.node.lock().await;
+    let snapshot = node.chain_snapshot();
+    let pending = node.pending_transactions();
+    let outputs = known_output_index(&snapshot.genesis_allocations, &snapshot.blocks, &pending);
     Json(wallet_transaction_rows(
         node.wallet_address(),
-        node.pending_transactions(),
-        node.chain(),
+        pending,
+        &snapshot.blocks,
+        &outputs,
     ))
+}
+
+async fn api_wallet_utxos(State(state): State<HttpState>) -> Json<Vec<WalletUtxoRow>> {
+    let node = state.node.lock().await;
+    let wallet = node.wallet_address().to_string();
+    let mut utxos = node
+        .ledger()
+        .utxos_for_address(&wallet)
+        .into_iter()
+        .map(|(outpoint, output)| WalletUtxoRow {
+            outpoint,
+            address: output.address,
+            amount: output.amount,
+        })
+        .collect::<Vec<_>>();
+    utxos.sort_by(|left, right| {
+        right
+            .amount
+            .cmp(&left.amount)
+            .then_with(|| left.outpoint.txid.cmp(&right.outpoint.txid))
+            .then_with(|| left.outpoint.index.cmp(&right.outpoint.index))
+    });
+    Json(utxos)
 }
 
 async fn api_peers(State(state): State<HttpState>) -> Json<Vec<PeerInfo>> {
@@ -358,18 +448,26 @@ fn wallet_transaction_rows(
     wallet: &str,
     pending: Vec<Transaction>,
     chain: &[Block],
+    outputs: &BTreeMap<OutPoint, TxOutput>,
 ) -> Vec<WalletTransactionRow> {
     let mut rows = Vec::new();
 
     for (index, tx) in pending.iter().enumerate() {
-        if let Some(row) = wallet_transaction_row(wallet, tx, "pending", None) {
+        if let Some(row) = wallet_transaction_row(wallet, tx, outputs, "pending", None, None) {
             rows.push((u128::MAX - index as u128, row));
         }
     }
 
     for block in chain {
         for (index, tx) in block.transactions.iter().rev().enumerate() {
-            if let Some(row) = wallet_transaction_row(wallet, tx, "confirmed", Some(block.height)) {
+            if let Some(row) = wallet_transaction_row(
+                wallet,
+                tx,
+                outputs,
+                "confirmed",
+                Some(block.height),
+                Some(block.miner.clone()),
+            ) {
                 rows.push((block.height as u128 * 10_000 + index as u128, row));
             }
         }
@@ -382,8 +480,10 @@ fn wallet_transaction_rows(
 fn wallet_transaction_row(
     wallet: &str,
     tx: &Transaction,
+    outputs_by_outpoint: &BTreeMap<OutPoint, TxOutput>,
     status: &'static str,
     block_height: Option<u64>,
+    block_miner: Option<String>,
 ) -> Option<WalletTransactionRow> {
     match tx {
         Transaction::Transfer {
@@ -397,12 +497,13 @@ fn wallet_transaction_row(
             to: tx.to().map(str::to_string),
             amount: tx.amount(),
             fee: *fee,
-            inputs: inputs.clone(),
+            inputs: ui_inputs(inputs, outputs_by_outpoint),
             outputs: outputs.clone(),
             change: Vec::new(),
             signature: signature.clone(),
             status,
             block_height,
+            block_miner,
             direction: if tx.to() == Some(wallet) {
                 "received"
             } else {
@@ -410,6 +511,169 @@ fn wallet_transaction_row(
             },
         }),
         _ => None,
+    }
+}
+
+fn ui_blocks(
+    blocks: Vec<Block>,
+    genesis_allocations: &BTreeMap<String, Amount>,
+    chain: &[Block],
+    pending: &[Transaction],
+) -> Vec<UiBlock> {
+    let outputs = known_output_index(genesis_allocations, chain, pending);
+    blocks
+        .into_iter()
+        .map(|block| ui_block(block, &outputs))
+        .collect()
+}
+
+fn ui_block(block: Block, outputs: &BTreeMap<OutPoint, TxOutput>) -> UiBlock {
+    UiBlock {
+        height: block.height,
+        prev_hash: block.prev_hash,
+        timestamp_ms: block.timestamp_ms,
+        miner: block.miner,
+        reward: block.reward,
+        vdf_rounds: block.vdf_rounds,
+        vdf_output: block.vdf_output,
+        leader_proof: block.leader_proof,
+        transactions: block
+            .transactions
+            .iter()
+            .map(|tx| ui_transaction(tx, outputs))
+            .collect(),
+        hash: block.hash,
+    }
+}
+
+fn ui_transaction(
+    transaction: &Transaction,
+    outputs_by_outpoint: &BTreeMap<OutPoint, TxOutput>,
+) -> UiTransaction {
+    match transaction {
+        Transaction::Transfer {
+            inputs,
+            outputs,
+            fee,
+            signature,
+        } => UiTransaction {
+            kind: "transfer",
+            from: transaction.sender().to_string(),
+            to: transaction.to().map(str::to_string),
+            amount: transaction.amount(),
+            fee: *fee,
+            inputs: ui_inputs(inputs, outputs_by_outpoint),
+            outputs: outputs.clone(),
+            change: Vec::new(),
+            signature: signature.clone(),
+        },
+        Transaction::Burn {
+            inputs,
+            change,
+            amount,
+            fee,
+            signature,
+        } => UiTransaction {
+            kind: "burn",
+            from: transaction.sender().to_string(),
+            to: None,
+            amount: *amount,
+            fee: *fee,
+            inputs: ui_inputs(inputs, outputs_by_outpoint),
+            outputs: Vec::new(),
+            change: change.clone(),
+            signature: signature.clone(),
+        },
+    }
+}
+
+fn ui_inputs(
+    inputs: &[TxInput],
+    outputs_by_outpoint: &BTreeMap<OutPoint, TxOutput>,
+) -> Vec<UiTxInput> {
+    inputs
+        .iter()
+        .map(|input| {
+            let spent_output = outputs_by_outpoint.get(&input.outpoint);
+            UiTxInput {
+                outpoint: input.outpoint.clone(),
+                owner: input.owner.clone(),
+                signature: input.signature.clone(),
+                amount: spent_output.map(|output| output.amount),
+                address: spent_output.map(|output| output.address.clone()),
+            }
+        })
+        .collect()
+}
+
+fn known_output_index(
+    genesis_allocations: &BTreeMap<String, Amount>,
+    chain: &[Block],
+    pending: &[Transaction],
+) -> BTreeMap<OutPoint, TxOutput> {
+    let mut outputs = BTreeMap::new();
+    for (address, amount) in genesis_allocations {
+        if *amount == 0 {
+            continue;
+        }
+        outputs.insert(
+            genesis_allocation_outpoint(address),
+            TxOutput {
+                address: address.clone(),
+                amount: *amount,
+            },
+        );
+    }
+    for block in chain {
+        for transaction in &block.transactions {
+            index_transaction_outputs(&mut outputs, transaction);
+        }
+        if block.reward > 0 {
+            outputs.insert(
+                reward_outpoint(&block.hash),
+                TxOutput {
+                    address: block.miner.clone(),
+                    amount: block.reward,
+                },
+            );
+        }
+    }
+    for transaction in pending {
+        index_transaction_outputs(&mut outputs, transaction);
+    }
+    outputs
+}
+
+fn index_transaction_outputs(
+    outputs: &mut BTreeMap<OutPoint, TxOutput>,
+    transaction: &Transaction,
+) {
+    let created_outputs = match transaction {
+        Transaction::Transfer { outputs, .. } => outputs,
+        Transaction::Burn { change, .. } => change,
+    };
+    for (index, output) in created_outputs.iter().enumerate() {
+        outputs.insert(
+            OutPoint {
+                txid: transaction.signature().to_string(),
+                index: index as u32,
+            },
+            output.clone(),
+        );
+    }
+}
+
+fn genesis_allocation_outpoint(address: &str) -> OutPoint {
+    OutPoint {
+        txid: hex_hash(format!("luun-genesis-allocation:{address}")),
+        index: 0,
+    }
+}
+
+fn reward_outpoint(block_hash: &str) -> OutPoint {
+    OutPoint {
+        txid: block_hash.to_string(),
+        index: u32::MAX,
     }
 }
 
@@ -618,7 +882,8 @@ const INDEX_HTML: &str = r#"<!doctype html>
     .setup-status { border: 1px solid #566d25; border-radius: 8px; padding: 10px; background: #1c2516; color: #d5f55f; font-weight: 800; }
     .wallet-grid { width: 100%; display: grid; grid-template-columns: minmax(0, 1fr) minmax(300px, .8fr); gap: 12px; align-items: start; }
     .wallet-actions { display: grid; gap: 12px; }
-    .wallet-balance-line { display: inline-grid; grid-template-columns: auto auto; gap: 10px; align-items: baseline; padding: 8px 10px; border: 1px solid #2f363c; border-radius: 8px; background: #111316; }
+    .wallet-balance-line { display: inline-grid; grid-template-columns: auto auto; gap: 10px; align-items: baseline; padding: 8px 10px; border: 1px solid #2f363c; border-radius: 8px; background: #111316; color: inherit; cursor: pointer; }
+    .wallet-balance-line:hover, .wallet-balance-line:focus-visible { border-color: #d5f55f; outline: none; }
     .wallet-balance-line .tx-value { font-size: 16px; font-weight: 850; }
     .mining-grid { width: 100%; display: grid; grid-template-columns: minmax(0, 1fr); gap: 12px; align-items: start; }
     .mining-form { width: 100%; display: grid; grid-template-columns: minmax(220px, .45fr) minmax(280px, 1fr); gap: 14px; align-items: end; }
@@ -682,7 +947,7 @@ const INDEX_HTML: &str = r#"<!doctype html>
     .mempool-item { flex: 0 0 220px; }
     .tx-modal { width: min(940px, 100%); max-height: calc(100vh - 44px); overflow: auto; border: 1px solid #3b4448; border-radius: 8px; padding: 16px; background: #181b1f; box-shadow: 0 24px 80px rgba(0, 0, 0, .46); }
     .tx-modal-head { display: flex; justify-content: space-between; gap: 16px; align-items: flex-start; margin-bottom: 14px; }
-    .tx-modal-title { display: grid; gap: 6px; min-width: 0; }
+    .tx-modal-title { display: grid; justify-items: start; gap: 6px; min-width: 0; }
     .tx-modal-title h2 { margin: 0; }
     .tx-modal-summary { display: grid; grid-template-columns: repeat(auto-fit, minmax(180px, 1fr)); gap: 8px; margin-bottom: 12px; }
     .utxo-flow { display: grid; grid-template-columns: minmax(0, 1fr) auto minmax(0, 1fr); gap: 12px; align-items: stretch; }
@@ -690,11 +955,14 @@ const INDEX_HTML: &str = r#"<!doctype html>
     .utxo-column h3 { margin: 0; color: #8d989f; font-size: 11px; text-transform: uppercase; }
     .utxo-node { display: grid; gap: 5px; border: 1px solid #2f363c; border-radius: 8px; padding: 10px; background: #111316; min-width: 0; }
     .utxo-node.burned { border-color: #5e4821; background: #1f1a12; }
+    .utxo-node.fee { border-color: #4b5260; background: #171a20; }
     .utxo-node-label { display: flex; justify-content: space-between; gap: 8px; color: #8d989f; font-size: 11px; font-weight: 800; text-transform: uppercase; }
     .utxo-node-amount { color: #d5f55f; font-weight: 850; font-variant-numeric: tabular-nums; }
     .utxo-node-address, .utxo-node-ref { color: #9eb3bc; font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; font-size: 12px; overflow-wrap: anywhere; }
     .utxo-arrow { display: grid; place-items: center; color: #d5f55f; font-size: 24px; font-weight: 900; }
     .tx-modal-empty { border: 1px dashed #3a4248; border-radius: 8px; padding: 10px; color: #8d989f; }
+    .utxo-list { display: grid; gap: 8px; }
+    .wallet-utxo-row { display: grid; gap: 6px; border: 1px solid #2f363c; border-radius: 8px; padding: 10px; background: #111316; }
     @media (max-width: 760px) { .utxo-flow { grid-template-columns: 1fr; } .utxo-arrow { min-height: 28px; transform: rotate(90deg); } .tx-modal-head { align-items: stretch; } }
     @media (max-width: 920px) { .setup-grid, .wallet-grid, .mining-grid, .detail-grid { grid-template-columns: 1fr; } }
     @media (max-width: 920px) { .mining-form { grid-template-columns: 1fr; } }
@@ -714,10 +982,10 @@ const INDEX_HTML: &str = r#"<!doctype html>
       .block-card { flex-basis: 108px; }
     }
   </style>
-  <script defer src="/assets/luun-ui.js?v=37"></script>
+  <script defer src="/assets/luun-ui.js?v=42"></script>
   <script defer src="/assets/alpine.min.js"></script>
 </head>
-<body x-data="luunApp()" x-init="init()" @keydown.window.escape="closeTransactionModal()" x-cloak>
+<body x-data="luunApp()" x-init="init()" @keydown.window.escape="closeModals()" x-cloak>
   <div class="app-shell">
     <aside class="sidebar" aria-label="Luun navigation">
       <div class="brand-mark" title="Luun">L</div>
@@ -753,10 +1021,10 @@ const INDEX_HTML: &str = r#"<!doctype html>
 
     <section x-show="tab === 'wallet'">
       <div class="page-title">
-        <div class="wallet-balance-line">
+        <button class="wallet-balance-line" type="button" @click="openWalletUtxosModal" title="Show wallet UTXOs">
           <span class="tx-label">Balance</span>
           <span class="tx-value money">LUUN <span x-text="status.wallet_balance ?? '-'"></span></span>
-        </div>
+        </button>
       </div>
       <div class="wallet-grid">
         <div class="wallet-actions">
@@ -859,6 +1127,14 @@ const INDEX_HTML: &str = r#"<!doctype html>
           <div class="metric"><div class="label">Inventory Rx</div><div class="value" x-text="p2pMetrics.inventory_envelopes_received ?? 0"></div></div>
           <div class="metric"><div class="label">Data Rx</div><div class="value" x-text="p2pMetrics.data_envelopes_received ?? 0"></div></div>
           <div class="metric"><div class="label">Control Rx</div><div class="value" x-text="p2pMetrics.control_envelopes_received ?? 0"></div></div>
+          <div class="metric"><div class="label">Tx Ack Sent</div><div class="value" x-text="p2pMetrics.transaction_ack_envelopes_sent ?? 0"></div></div>
+          <div class="metric"><div class="label">Tx Ack Rx</div><div class="value" x-text="p2pMetrics.transaction_ack_envelopes_received ?? 0"></div></div>
+          <div class="metric"><div class="label">Tx Accepted Sent</div><div class="value" x-text="p2pMetrics.transactions_accepted_sent ?? 0"></div></div>
+          <div class="metric"><div class="label">Tx Accepted Rx</div><div class="value" x-text="p2pMetrics.transactions_accepted_received ?? 0"></div></div>
+          <div class="metric"><div class="label">Tx Rejected Sent</div><div class="value" x-text="p2pMetrics.transactions_rejected_sent ?? 0"></div></div>
+          <div class="metric"><div class="label">Tx Rejected Rx</div><div class="value" x-text="p2pMetrics.transactions_rejected_received ?? 0"></div></div>
+          <div class="metric"><div class="label">Tx Retries</div><div class="value" x-text="p2pMetrics.transaction_retries_sent ?? 0"></div></div>
+          <div class="metric"><div class="label">Tx Ack Pending</div><div class="value" x-text="p2pMetrics.transaction_ack_pending ?? 0"></div></div>
         </div>
         <div class="metric-context">
           <div class="tx-field"><span class="tx-label">Last Failure</span><span class="tx-value text" x-text="p2pMetrics.last_session_failure || '-'"></span></div>
@@ -932,7 +1208,7 @@ const INDEX_HTML: &str = r#"<!doctype html>
               <div class="tx-list">
                 <h3>Transactions</h3>
                 <template x-for="tx in selectedBlock.transactions" :key="tx.signature">
-                  <div class="tx-card" role="button" tabindex="0" @click="openTransactionModal(tx, { source: 'Block', blockHeight: selectedBlock.height })" @keydown.enter.prevent="openTransactionModal(tx, { source: 'Block', blockHeight: selectedBlock.height })" @keydown.space.prevent="openTransactionModal(tx, { source: 'Block', blockHeight: selectedBlock.height })">
+                  <div class="tx-card" role="button" tabindex="0" @click="openTransactionModal(tx, { source: 'Block', blockHeight: selectedBlock.height, blockMiner: selectedBlock.miner })" @keydown.enter.prevent="openTransactionModal(tx, { source: 'Block', blockHeight: selectedBlock.height, blockMiner: selectedBlock.miner })" @keydown.space.prevent="openTransactionModal(tx, { source: 'Block', blockHeight: selectedBlock.height, blockMiner: selectedBlock.miner })">
                     <span class="pill" :class="tx.kind" x-text="tx.kind"></span>
                     <div class="tx-field"><span class="tx-label">Amount</span><span class="tx-value money">LUUN <span x-text="txAmount(tx)"></span></span></div>
                     <div class="tx-field"><span class="tx-label">Fee</span><span class="tx-value money">LUUN <span x-text="tx.fee ?? 0"></span></span></div>
@@ -967,6 +1243,27 @@ const INDEX_HTML: &str = r#"<!doctype html>
     </section>
     </main>
   </div>
+  <div class="setup-overlay transaction-overlay" x-show="showWalletUtxos" x-transition.opacity @click.self="closeWalletUtxosModal()" role="dialog" aria-modal="true" aria-labelledby="wallet-utxos-title">
+    <section class="tx-modal">
+      <div class="tx-modal-head">
+        <div class="tx-modal-title">
+          <h2 id="wallet-utxos-title">Wallet UTXOs</h2>
+          <div class="tx-field"><span class="tx-label">Total</span><span class="tx-value money">LUUN <span x-text="status.wallet_balance ?? '-'"></span></span></div>
+        </div>
+        <button type="button" @click="closeWalletUtxosModal">Close</button>
+      </div>
+      <div class="utxo-list">
+        <template x-for="utxo in walletUtxos" :key="`${utxo.outpoint.txid}:${utxo.outpoint.index}`">
+          <div class="wallet-utxo-row">
+            <div class="utxo-node-label"><span>UTXO</span><span class="utxo-node-amount">LUUN <span x-text="utxo.amount"></span></span></div>
+            <div class="tx-field"><span class="tx-label">Outpoint</span><code class="tx-value hash" x-text="txInputOutpoint({ outpoint: utxo.outpoint })"></code></div>
+            <div class="tx-field"><span class="tx-label">Address</span><code class="tx-value hash" x-text="utxo.address"></code></div>
+          </div>
+        </template>
+        <div class="tx-modal-empty" x-show="walletUtxos.length === 0">No wallet UTXOs</div>
+      </div>
+    </section>
+  </div>
   <div class="setup-overlay transaction-overlay" x-show="selectedTransaction" x-transition.opacity @click.self="closeTransactionModal()" role="dialog" aria-modal="true" aria-labelledby="tx-modal-title">
     <section class="tx-modal">
       <div class="tx-modal-head">
@@ -991,6 +1288,7 @@ const INDEX_HTML: &str = r#"<!doctype html>
             <div class="utxo-node">
               <div class="utxo-node-label"><span>Input <span x-text="index + 1"></span></span><span>spent</span></div>
               <div class="utxo-node-ref" x-text="txInputOutpoint(input)"></div>
+              <div class="tx-field"><span class="tx-label">Value</span><span class="tx-value money" x-text="txInputAmountLabel(input)"></span></div>
               <div class="tx-field"><span class="tx-label">Owner</span><code class="tx-value hash" x-text="input.owner"></code></div>
               <div class="tx-field"><span class="tx-label">Sig</span><code class="tx-value hash" x-text="short(input.signature)"></code></div>
             </div>
@@ -1001,11 +1299,14 @@ const INDEX_HTML: &str = r#"<!doctype html>
         <div class="utxo-column">
           <h3>Outputs</h3>
           <template x-for="(output, index) in txVisualOutputs(selectedTransaction?.tx || {})" :key="txOutputKey(output, index)">
-            <div class="utxo-node" :class="{ burned: output.kind === 'burned' }">
+            <div class="utxo-node" :class="{ burned: output.kind === 'burned', fee: output.kind === 'fee' }">
               <div class="utxo-node-label"><span x-text="output.label"></span><span x-text="output.kind"></span></div>
               <div class="utxo-node-amount">LUUN <span x-text="output.amount"></span></div>
               <template x-if="output.address">
-                <div class="tx-field"><span class="tx-label">Address</span><code class="tx-value hash" x-text="output.address"></code></div>
+                <div class="tx-field"><span class="tx-label">To</span><code class="tx-value hash" x-text="output.address"></code></div>
+              </template>
+              <template x-if="output.detail">
+                <div class="tx-field"><span class="tx-label" x-text="output.detailLabel"></span><code class="tx-value hash" x-text="output.detail"></code></div>
               </template>
             </div>
           </template>
@@ -1151,7 +1452,7 @@ mod tests {
         allocations.insert(alice.address().to_string(), 100);
         allocations.insert(bob.address().to_string(), 100);
         allocations.insert(carol.address().to_string(), 100);
-        let ledger = crate::domain::Ledger::new(allocations, 1);
+        let ledger = crate::domain::Ledger::new(allocations.clone(), 1);
         let old_received = ledger.build_transfer(&bob, alice.address(), 31, 0).unwrap();
         let pending_burn = ledger.build_burn(&alice, 2, 1).unwrap();
         let carol_transfer = ledger.build_transfer(&carol, bob.address(), 5, 0).unwrap();
@@ -1162,13 +1463,22 @@ mod tests {
             fake_block(32, vec![carol_burn]),
         ];
 
-        let rows = wallet_transaction_rows(alice.address(), vec![pending_burn.clone()], &chain);
+        let outputs =
+            super::known_output_index(&allocations, &chain, std::slice::from_ref(&pending_burn));
+        let rows = wallet_transaction_rows(
+            alice.address(),
+            vec![pending_burn.clone()],
+            &chain,
+            &outputs,
+        );
 
         assert_eq!(rows.len(), 1);
         assert_ne!(rows[0].signature, pending_burn.signature());
         assert_eq!(rows[0].signature, old_received.signature());
+        assert_eq!(rows[0].inputs[0].amount, Some(100));
         assert_eq!(rows[0].status, "confirmed");
         assert_eq!(rows[0].block_height, Some(31));
+        assert_eq!(rows[0].block_miner.as_deref(), Some("miner"));
         assert_eq!(rows[0].direction, "received");
     }
 

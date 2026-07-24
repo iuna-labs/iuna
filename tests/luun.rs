@@ -295,6 +295,37 @@ fn block_reward_is_fixed_at_one_hundred_luun() {
 }
 
 #[test]
+fn burn_larger_than_block_reward_is_paid_from_existing_utxos() {
+    let alice = Wallet::from_seed("large-burn-existing-utxos-alice");
+    let mut allocations = BTreeMap::new();
+    allocations.insert(alice.address().to_string(), BLOCK_REWARD + 50);
+
+    let mut ledger = Ledger::new(allocations, 10);
+    let burn_amount = BLOCK_REWARD + 25;
+    let burn = ledger.build_burn(&alice, burn_amount, 0).unwrap();
+    ledger.submit_transaction(burn).unwrap();
+
+    let block = ledger.mine_next_block(&alice, 1).unwrap();
+    assert_eq!(block.transactions[0].amount(), burn_amount);
+    assert_eq!(block.reward, BLOCK_REWARD);
+
+    ledger.apply_block(block).unwrap();
+    assert_eq!(ledger.balance_of(alice.address()), BLOCK_REWARD + 25);
+}
+
+#[test]
+fn burn_larger_than_existing_balance_cannot_use_next_block_reward() {
+    let alice = Wallet::from_seed("large-burn-cannot-use-next-reward-alice");
+    let mut allocations = BTreeMap::new();
+    allocations.insert(alice.address().to_string(), BLOCK_REWARD);
+
+    let ledger = Ledger::new(allocations, 10);
+    let error = ledger.build_burn(&alice, BLOCK_REWARD + 1, 0).unwrap_err();
+
+    assert!(format!("{error:#}").contains("insufficient funds"));
+}
+
+#[test]
 fn transaction_fees_are_paid_to_the_block_miner() {
     let alice = Wallet::from_seed("fee-miner-alice");
     let bob = Wallet::from_seed("fee-payer-bob");
@@ -585,6 +616,27 @@ fn automatic_mining_uses_configured_burn_fee() {
 }
 
 #[test]
+fn automatic_mining_caps_burn_to_spendable_balance_after_fee() {
+    let alice = Wallet::from_seed("auto-burn-cap-alice");
+    let mut allocations = BTreeMap::new();
+    allocations.insert(alice.address().to_string(), BLOCK_REWARD);
+    let mut node = NodeCore::new(NodeConfig {
+        wallet: alice.clone(),
+        genesis_allocations: allocations,
+        vdf_rounds: 10,
+        burn_per_block: BLOCK_REWARD + 50,
+        burn_fee: 1,
+    });
+
+    let outcome = node.automatic_mine_once(1);
+
+    assert_eq!(outcome.burned.as_ref().map(|tx| tx.amount()), Some(99));
+    assert_eq!(outcome.burned.as_ref().map(|tx| tx.fee()), Some(1));
+    assert!(outcome.block.is_some());
+    assert_eq!(node.ledger().balance_of(alice.address()), BLOCK_REWARD + 1);
+}
+
+#[test]
 fn setting_burn_rate_after_running_at_zero_adds_mempool_burn() {
     let alice = Wallet::from_seed("alice");
     let bob = Wallet::from_seed("bob");
@@ -638,6 +690,46 @@ fn automatic_mining_waits_when_wallet_is_not_selected_leader() {
     assert!(outcome.block.is_none());
     assert!(outcome.skipped_reason.unwrap().contains(alice.address()));
     assert_eq!(bob_node.ledger().chain().len(), 2);
+}
+
+#[test]
+fn waiting_wallet_gossips_pending_burn_to_selected_leader() {
+    let alice = Wallet::from_seed("deadlock-alice");
+    let bob = Wallet::from_seed("deadlock-bob");
+    let mut allocations = BTreeMap::new();
+    allocations.insert(alice.address().to_string(), 1_000);
+    allocations.insert(bob.address().to_string(), 1_000);
+    let ledger =
+        Ledger::new_with_genesis_burns(allocations, vec![GenesisBurn::new(bob.address(), 1)], 25)
+            .unwrap();
+
+    assert_eq!(
+        ledger.expected_leader_for_next_block().as_deref(),
+        Some(bob.address())
+    );
+    let mut alice_node = NodeCore::from_ledger(alice.clone(), ledger.clone(), 1);
+    let mut bob_node = NodeCore::from_ledger(bob.clone(), ledger, DEFAULT_BURN_PER_BLOCK);
+
+    let alice_outcome = alice_node.automatic_mine_once(1);
+    assert!(alice_outcome.burned.is_some());
+    assert!(alice_outcome.block.is_none());
+    assert!(
+        alice_outcome
+            .skipped_reason
+            .unwrap()
+            .contains(bob.address())
+    );
+    assert!(bob_node.ledger().pending().is_empty());
+
+    for envelope in alice_node.mempool_gossip() {
+        bob_node.receive(envelope).unwrap();
+    }
+
+    assert_eq!(bob_node.ledger().pending().len(), 1);
+    assert_eq!(bob_node.ledger().pending()[0].sender(), alice.address());
+    let bob_outcome = bob_node.automatic_mine_once(1);
+    assert!(bob_outcome.skipped_reason.is_none());
+    assert!(bob_outcome.block.is_some());
 }
 
 #[test]

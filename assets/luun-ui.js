@@ -8,6 +8,7 @@ window.luunApp = function luunApp() {
     loadingOlder: false,
     hasMoreBlocks: true,
     walletTxs: [],
+    walletUtxos: [],
     mempool: [],
     peers: [],
     p2pMetrics: {},
@@ -32,6 +33,7 @@ window.luunApp = function luunApp() {
     peerAddress: "",
     flash: null,
     flashTimer: null,
+    showWalletUtxos: false,
     lastUpdated: null,
     pollHandle: null,
     newBlockHashes: new Set(),
@@ -250,11 +252,12 @@ window.luunApp = function luunApp() {
 
     async refresh() {
       try {
-        const [config, status, blocks, walletTxs, mempool, peers, p2pMetrics] = await Promise.all([
+        const [config, status, blocks, walletTxs, walletUtxos, mempool, peers, p2pMetrics] = await Promise.all([
           this.fetchJson("/api/config"),
           this.fetchJson("/api/status"),
           this.fetchJson("/api/blocks"),
           this.fetchJson("/api/wallet/transactions"),
+          this.fetchJson("/api/wallet/utxos"),
           this.fetchJson("/api/mempool"),
           this.fetchJson("/api/peers"),
           this.fetchJson("/api/p2p/metrics"),
@@ -266,6 +269,7 @@ window.luunApp = function luunApp() {
         this.status = status;
         this.mergeFreshBlocks(blocks, { animateHead: true });
         this.walletTxs = walletTxs;
+        this.walletUtxos = walletUtxos;
         this.mempool = mempool;
         this.peers = peers;
         this.p2pMetrics = p2pMetrics;
@@ -360,6 +364,19 @@ window.luunApp = function luunApp() {
 
     closeTransactionModal() {
       this.selectedTransaction = null;
+    },
+
+    openWalletUtxosModal() {
+      this.showWalletUtxos = true;
+    },
+
+    closeWalletUtxosModal() {
+      this.showWalletUtxos = false;
+    },
+
+    closeModals() {
+      this.closeTransactionModal();
+      this.closeWalletUtxosModal();
     },
 
     async loadOlderBlocks() {
@@ -583,6 +600,16 @@ window.luunApp = function luunApp() {
           address: null,
         });
       }
+      if (Number(tx.fee || 0) > 0) {
+        rows.push({
+          kind: "fee",
+          label: "Fee",
+          amount: tx.fee,
+          address: null,
+          detailLabel: "To",
+          detail: this.txFeeRecipient(tx),
+        });
+      }
       const directOutputs = Array.isArray(tx.outputs) ? tx.outputs : [];
       for (const [index, output] of directOutputs.entries()) {
         rows.push({
@@ -609,13 +636,22 @@ window.luunApp = function luunApp() {
     },
 
     txOutputKey(output, index) {
-      return `${output.kind}:${output.address || "burn"}:${output.amount}:${index}`;
+      return `${output.kind}:${output.address || output.kind}:${output.amount}:${index}`;
     },
 
     txInputOutpoint(input) {
       const txid = input.outpoint?.txid || "-";
       const index = input.outpoint?.index ?? "-";
       return `${txid}:${index}`;
+    },
+
+    txInputAmountLabel(input) {
+      return input.amount === null || input.amount === undefined ? "-" : `LUUN ${input.amount}`;
+    },
+
+    txFeeRecipient(tx) {
+      const context = this.selectedTransaction?.context || {};
+      return tx.blockMiner ?? context.blockMiner ?? "future block miner";
     },
 
     selectedTransactionLabel() {
