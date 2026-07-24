@@ -2293,6 +2293,142 @@ fn hex_encode(bytes: impl AsRef<[u8]>) -> String {
 mod tests {
     use super::*;
 
+    fn ledger_with_wallet_utxos(wallet: &Wallet, amounts: &[Amount]) -> Ledger {
+        let mut ledger = Ledger::new(BTreeMap::new(), 1);
+        ledger.utxos = amounts
+            .iter()
+            .enumerate()
+            .map(|(index, amount)| {
+                (
+                    OutPoint {
+                        txid: format!("test-utxo-{index}"),
+                        index: 0,
+                    },
+                    TxOutput {
+                        address: wallet.address().to_string(),
+                        amount: *amount,
+                    },
+                )
+            })
+            .collect();
+        ledger
+    }
+
+    fn pending_balances(ledger: &Ledger) -> BTreeMap<String, Amount> {
+        balances_from_utxos(&ledger.utxos_after_valid_pending().unwrap())
+    }
+
+    #[test]
+    fn transfer_combines_multiple_small_utxos_to_cover_amount_and_fee() {
+        let alice = Wallet::from_seed("combine-small-utxos-alice");
+        let bob = Wallet::from_seed("combine-small-utxos-bob");
+        let mut ledger = ledger_with_wallet_utxos(&alice, &[1, 1, 1]);
+
+        let tx = ledger.build_transfer(&alice, bob.address(), 2, 1).unwrap();
+
+        let Transaction::Transfer {
+            inputs,
+            outputs,
+            fee,
+            ..
+        } = &tx
+        else {
+            panic!("expected transfer");
+        };
+        assert_eq!(inputs.len(), 3);
+        assert_eq!(*fee, 1);
+        assert_eq!(
+            outputs,
+            &[TxOutput {
+                address: bob.address().to_string(),
+                amount: 2
+            }]
+        );
+
+        ledger.submit_transaction(tx).unwrap();
+        let balances = pending_balances(&ledger);
+        assert_eq!(
+            balances.get(alice.address()).copied().unwrap_or_default(),
+            0
+        );
+        assert_eq!(balances.get(bob.address()).copied().unwrap_or_default(), 2);
+    }
+
+    #[test]
+    fn transfer_returns_change_when_combined_utxos_exceed_payment() {
+        let alice = Wallet::from_seed("combine-change-alice");
+        let bob = Wallet::from_seed("combine-change-bob");
+        let mut ledger = ledger_with_wallet_utxos(&alice, &[1, 1, 2]);
+
+        let tx = ledger.build_transfer(&alice, bob.address(), 3, 0).unwrap();
+
+        let Transaction::Transfer {
+            inputs, outputs, ..
+        } = &tx
+        else {
+            panic!("expected transfer");
+        };
+        assert_eq!(inputs.len(), 3);
+        assert_eq!(
+            outputs,
+            &[
+                TxOutput {
+                    address: bob.address().to_string(),
+                    amount: 3
+                },
+                TxOutput {
+                    address: alice.address().to_string(),
+                    amount: 1
+                }
+            ]
+        );
+
+        ledger.submit_transaction(tx).unwrap();
+        let balances = pending_balances(&ledger);
+        assert_eq!(balances.get(alice.address()).copied(), Some(1));
+        assert_eq!(balances.get(bob.address()).copied(), Some(3));
+    }
+
+    #[test]
+    fn transfer_rejects_when_combined_utxos_do_not_cover_amount_plus_fee() {
+        let alice = Wallet::from_seed("combine-insufficient-alice");
+        let bob = Wallet::from_seed("combine-insufficient-bob");
+        let ledger = ledger_with_wallet_utxos(&alice, &[1, 1, 1]);
+
+        let error = ledger
+            .build_transfer(&alice, bob.address(), 3, 1)
+            .unwrap_err();
+
+        assert!(format!("{error:#}").contains("insufficient funds"));
+    }
+
+    #[test]
+    fn pending_change_from_combined_utxos_can_fund_next_transaction() {
+        let alice = Wallet::from_seed("combine-pending-change-alice");
+        let bob = Wallet::from_seed("combine-pending-change-bob");
+        let mut ledger = ledger_with_wallet_utxos(&alice, &[1, 1, 2]);
+
+        let first = ledger.build_transfer(&alice, bob.address(), 3, 0).unwrap();
+        let first_signature = first.signature().to_string();
+        ledger.submit_transaction(first).unwrap();
+
+        let second = ledger.build_transfer(&alice, bob.address(), 1, 0).unwrap();
+        let Transaction::Transfer { inputs, .. } = &second else {
+            panic!("expected transfer");
+        };
+        assert_eq!(inputs.len(), 1);
+        assert_eq!(inputs[0].outpoint.txid, first_signature);
+        assert_eq!(inputs[0].outpoint.index, 1);
+
+        ledger.submit_transaction(second).unwrap();
+        let balances = pending_balances(&ledger);
+        assert_eq!(
+            balances.get(alice.address()).copied().unwrap_or_default(),
+            0
+        );
+        assert_eq!(balances.get(bob.address()).copied(), Some(4));
+    }
+
     #[test]
     fn winning_burn_ticket_is_consumed_even_when_window_remains() {
         let mut tickets = vec![
