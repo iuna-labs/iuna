@@ -24,7 +24,7 @@ use crate::{
         wallet_store,
     },
     app::{NodeStatus, PeerInfo, SharedNode, SharedPeerBook},
-    domain::{Amount, Block, MINE_REWARD, OutPoint, Transaction, TxInput, TxOutput, hex_hash},
+    domain::{Amount, Block, OutPoint, Transaction, TxInput, TxOutput, hex_hash},
 };
 
 const EXPLORER_LIMIT: usize = 50;
@@ -189,7 +189,6 @@ pub async fn serve(
             "/api/settings/burn-per-block",
             post(api_burn_per_block_form),
         )
-        .route("/api/genesis/mine", post(api_mine_genesis_form))
         .route("/api/mine", post(api_mine_form))
         .route("/api/transfer", post(api_transfer_form))
         .route("/settings/burn-per-block", post(burn_per_block_form))
@@ -354,11 +353,6 @@ async fn api_burn_per_block_form(
 
 async fn api_mine_form(State(state): State<HttpState>) -> Json<ActionResponse> {
     let result = mine_pow_reward(&state).await;
-    action_json(result)
-}
-
-async fn api_mine_genesis_form(State(state): State<HttpState>) -> Json<ActionResponse> {
-    let result = mine_genesis(&state).await;
     action_json(result)
 }
 
@@ -816,24 +810,6 @@ async fn mine_pow_reward(state: &HttpState) -> Result<()> {
 
     match result.0 {
         Ok(_) => state.gossip.broadcast(result.1).await,
-        Err(error) => Err(error),
-    }
-}
-
-async fn mine_genesis(state: &HttpState) -> Result<()> {
-    let result = {
-        let mut node = state.node.lock().await;
-        let result = node.mine_genesis();
-        let outbox = node.drain_outbox();
-        (result, outbox)
-    };
-
-    match result.0 {
-        Ok(_) => {
-            persist_burn_settings_config(&state.ui_config, &state.config_path, MINE_REWARD, 0)
-                .await?;
-            state.gossip.broadcast(result.1).await
-        }
         Err(error) => Err(error),
     }
 }
@@ -1314,15 +1290,6 @@ const INDEX_HTML: &str = r#"<!doctype html>
     </section>
 
     <section x-show="tab === 'chain'">
-      <div class="panel" x-show="status.chain && !status.chain.started">
-        <div class="mine-action-row">
-          <div>
-            <h2>Start Chain</h2>
-            <div class="muted">Mine genesis to create the first LUUN and enable burn-based blocks.</div>
-          </div>
-          <button class="primary" type="button" @click="mineGenesis">Mine genesis</button>
-        </div>
-      </div>
       <div class="explorer-shell">
         <div class="block-rail-wrap">
           <div class="block-rail-head">

@@ -10,7 +10,7 @@ use tokio::sync::Mutex;
 
 use crate::domain::{
     Amount, Block, ChainSnapshot, ChainStatus, DEFAULT_TRANSACTION_FEE, LaunchProfile, Ledger,
-    MINE_REWARD, OutPoint, PreparedBlock, Transaction, VDF_TARGET_BLOCK_MS, Wallet, run_vdf,
+    OutPoint, PreparedBlock, Transaction, VDF_TARGET_BLOCK_MS, Wallet, run_vdf,
 };
 
 pub type SharedNode = Arc<Mutex<NodeCore>>;
@@ -218,10 +218,6 @@ impl NodeCore {
         self.ledger.height()
     }
 
-    pub fn chain_started(&self) -> bool {
-        self.ledger.is_started()
-    }
-
     pub fn recent_blocks(&self, limit: usize) -> Vec<Block> {
         self.ledger.recent_blocks(limit)
     }
@@ -333,10 +329,9 @@ impl NodeCore {
         let chain = self.ledger.status();
         let launch_profile = self.ledger.launch_profile();
         let current_leader = self.ledger.expected_leader_for_next_block();
-        let wallet_is_current_leader = chain.started
-            && current_leader
-                .as_deref()
-                .is_none_or(|leader| leader == self.wallet.address());
+        let wallet_is_current_leader = current_leader
+            .as_deref()
+            .is_none_or(|leader| leader == self.wallet.address());
 
         NodeStatus {
             wallet_address: self.wallet.address().to_string(),
@@ -462,21 +457,6 @@ impl NodeCore {
         Ok(tx)
     }
 
-    pub fn mine_genesis(&mut self) -> Result<Block> {
-        if self.ledger.is_started() {
-            anyhow::bail!("chain has already started");
-        }
-        let ledger =
-            Ledger::new_with_genesis_mine(self.wallet.address(), self.ledger.vdf_rounds())?;
-        let block = ledger.chain()[0].clone();
-        self.ledger = ledger;
-        self.burn_per_block = MINE_REWARD;
-        self.burn_fee = 0;
-        self.last_auto_burn_height = None;
-        self.outbox.push(GossipEnvelope::Block(block.clone()));
-        Ok(block)
-    }
-
     pub fn receive_transaction(&mut self, tx: Transaction) -> Result<bool> {
         let accepted = self.ledger.submit_transaction(tx.clone())?;
         if accepted {
@@ -520,11 +500,6 @@ impl NodeCore {
             work: None,
             skipped_reason: None,
         };
-
-        if !self.ledger.is_started() {
-            plan.skipped_reason = Some("mine genesis first".to_string());
-            return plan;
-        }
 
         match self.prepare_automatic_burn() {
             Ok(tx) => plan.burned = tx,
@@ -665,13 +640,6 @@ impl NodeCore {
     }
 
     pub fn import_chain_snapshot(&mut self, snapshot: ChainSnapshot) -> Result<()> {
-        if !self.ledger.is_started() {
-            let ledger = Ledger::from_snapshot(snapshot)?;
-            self.ledger = ledger;
-            self.last_auto_burn_height = None;
-            self.enqueue_imported_blocks(0);
-            return Ok(());
-        }
         let previous_height = self.ledger.height();
         let imported = self.ledger.extend_from_snapshot(snapshot)?;
         if imported {

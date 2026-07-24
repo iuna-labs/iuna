@@ -677,7 +677,7 @@ pub struct PreparedBlock {
     reward: Amount,
     vdf_rounds: u32,
     vdf_seed: String,
-    leader_ticket: Option<BurnTicket>,
+    leader_ticket: BurnTicket,
     transactions: Vec<Transaction>,
 }
 
@@ -695,17 +695,14 @@ impl PreparedBlock {
     }
 
     pub fn finish(self, wallet: &Wallet, vdf_output: String) -> Block {
-        let leader_proof = self.leader_ticket.as_ref().map(|leader_ticket| {
-            let proof_payload = LeaderProofPayload {
-                height: self.height,
-                prev_hash: self.prev_hash.clone(),
-                vdf_output: vdf_output.clone(),
-                ticket_id: leader_ticket.id.clone(),
-                ticket_amount: leader_ticket.amount,
-                ticket_owner: leader_ticket.owner.clone(),
-            };
-            wallet.leader_proof(&proof_payload)
-        });
+        let proof_payload = LeaderProofPayload {
+            height: self.height,
+            prev_hash: self.prev_hash.clone(),
+            vdf_output: vdf_output.clone(),
+            ticket_id: self.leader_ticket.id.clone(),
+            ticket_amount: self.leader_ticket.amount,
+            ticket_owner: self.leader_ticket.owner.clone(),
+        };
         Block::new(BlockDraft {
             height: self.height,
             prev_hash: self.prev_hash,
@@ -714,7 +711,7 @@ impl PreparedBlock {
             reward: self.reward,
             vdf_rounds: self.vdf_rounds,
             vdf_output,
-            leader_proof,
+            leader_proof: Some(wallet.leader_proof(&proof_payload)),
             transactions: self.transactions,
         })
     }
@@ -735,7 +732,6 @@ struct BlockDraft {
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 pub struct ChainStatus {
-    pub started: bool,
     pub height: u64,
     pub tip_hash: String,
     pub next_leader: Option<String>,
@@ -1180,7 +1176,6 @@ impl Ledger {
 
     pub fn status(&self) -> ChainStatus {
         ChainStatus {
-            started: self.is_started(),
             height: self.tip().height,
             tip_hash: self.tip().hash.clone(),
             next_leader: self.expected_leader_for_next_block(),
@@ -1193,12 +1188,6 @@ impl Ledger {
 
     pub fn chain(&self) -> &[Block] {
         &self.chain
-    }
-
-    pub fn is_started(&self) -> bool {
-        self.chain.first().is_some_and(|genesis| {
-            !genesis.transactions.is_empty() || !self.genesis_allocations.is_empty()
-        })
     }
 
     pub fn genesis_hash(&self) -> &str {
@@ -1468,25 +1457,19 @@ impl Ledger {
 
     pub fn prepare_next_block(&self, miner: &str, timestamp_ms: u64) -> Result<PreparedBlock> {
         let height = self.tip().height + 1;
-        let is_bootstrap = self.needs_post_genesis_bootstrap_block(height);
-        let leader_ticket = if is_bootstrap {
-            None
-        } else {
-            let Some(leader_ticket) = self.selected_ticket_for_height(height) else {
-                bail!("cannot mine block without a mature burn ticket");
-            };
-            if leader_ticket.owner != miner {
-                let leader = &leader_ticket.owner;
+        let Some(leader_ticket) = self.selected_ticket_for_height(height) else {
+            bail!("cannot mine block without a mature burn ticket");
+        };
+        if let Some(leader) = self.expected_leader_for_next_block() {
+            if leader != miner {
                 bail!("wallet {miner} is not the selected leader; expected {leader}");
             }
-            Some(leader_ticket)
-        };
-
-        let transactions = self.select_block_transactions(is_bootstrap.then_some(miner))?;
-        ensure_block_has_burn(&transactions)?;
-        if is_bootstrap {
-            ensure_bootstrap_block_burn_owner(miner, &transactions)?;
+        } else {
+            bail!("no selected leader for block {height}");
         }
+
+        let transactions = self.select_block_transactions()?;
+        ensure_block_has_burn(&transactions)?;
 
         let tip = self.tip();
         let prev_hash = tip.hash.clone();
@@ -1544,24 +1527,9 @@ impl Ledger {
             bail!("block reward is invalid");
         }
         let mut tickets = self.tickets.clone();
-        if self.needs_post_genesis_bootstrap_block(block.height) {
-            ensure_bootstrap_block_burn_owner(&block.miner, &block.transactions)?;
-            if block.leader_proof.is_some() {
-                bail!("post-genesis bootstrap block must not carry a leader proof");
-            }
-        } else {
-            consume_leader_ticket(&block, &mut tickets)?;
-        }
+        consume_leader_ticket(&block, &mut tickets)?;
         credit_reward_output(&mut utxos, &block)?;
-        tickets.extend(tickets_created_by_block_with_delay(
-            &block,
-            &self.launch_profile,
-            if self.needs_post_genesis_bootstrap_block(block.height) {
-                1
-            } else {
-                self.launch_profile.ticket_maturity_delay_heights
-            },
-        )?);
+        tickets.extend(tickets_created_by_block(&block, &self.launch_profile)?);
 
         let mined_signatures = block
             .transactions
@@ -1624,13 +1592,6 @@ impl Ledger {
             bail!("block exceeds max block size");
         }
         ensure_block_has_burn(&block.transactions)?;
-        if self.needs_post_genesis_bootstrap_block(block.height) {
-            if block.leader_proof.is_some() {
-                bail!("post-genesis bootstrap block must not carry a leader proof");
-            }
-            ensure_bootstrap_block_burn_owner(&block.miner, &block.transactions)?;
-            return Ok(true);
-        }
         let Some(leader) = self.expected_leader_for_next_block() else {
             bail!("no selected leader for block {}", block.height);
         };
@@ -1712,21 +1673,14 @@ impl Ledger {
         valid
     }
 
-    fn select_block_transactions(
-        &self,
-        required_burn_owner: Option<&str>,
-    ) -> Result<Vec<Transaction>> {
+    fn select_block_transactions(&self) -> Result<Vec<Transaction>> {
         let mut utxos = self.utxos.clone();
         let mut remaining = self.valid_pending_transactions();
         let mut selected = Vec::new();
 
-        let burn_index = match required_burn_owner {
-            Some(owner) => best_selectable_burn_index_for_owner(&remaining, &utxos, owner),
-            None => {
-                best_selectable_transaction_index(&remaining, &utxos, Some(TransactionKind::Burn))
-            }
-        };
-        if let Some(index) = burn_index {
+        if let Some(index) =
+            best_selectable_transaction_index(&remaining, &utxos, Some(TransactionKind::Burn))
+        {
             let tx = remaining.remove(index);
             let mut candidate = selected.clone();
             candidate.push(tx.clone());
@@ -1853,19 +1807,6 @@ impl Ledger {
         select_weighted_ticket(self.tip(), height, &self.tickets)
     }
 
-    fn needs_post_genesis_bootstrap_block(&self, height: u64) -> bool {
-        height == 1
-            && self.chain.len() == 1
-            && self.genesis_allocations.is_empty()
-            && self.tickets.is_empty()
-            && self.chain.first().is_some_and(|genesis| {
-                genesis
-                    .transactions
-                    .iter()
-                    .any(|tx| matches!(tx, Transaction::Mine { .. }))
-            })
-    }
-
     fn tip(&self) -> &Block {
         self.chain
             .last()
@@ -1914,14 +1855,6 @@ fn weighted_ticket_draw(parent: &Block, target_height: u64, total_weight: u128) 
 }
 
 fn tickets_created_by_block(block: &Block, profile: &LaunchProfile) -> Result<Vec<BurnTicket>> {
-    tickets_created_by_block_with_delay(block, profile, profile.ticket_maturity_delay_heights)
-}
-
-fn tickets_created_by_block_with_delay(
-    block: &Block,
-    profile: &LaunchProfile,
-    maturity_delay_heights: u64,
-) -> Result<Vec<BurnTicket>> {
     if profile.ticket_expiry_window_heights == 0 {
         bail!("ticket expiry window must be at least one height");
     }
@@ -1944,7 +1877,7 @@ fn tickets_created_by_block_with_delay(
         }
         let target_height = block
             .height
-            .checked_add(maturity_delay_heights)
+            .checked_add(profile.ticket_maturity_delay_heights)
             .with_context(|| format!("ticket target height overflow at block {}", block.height))?;
         let eligible_until_height = target_height
             .checked_add(profile.ticket_expiry_window_heights - 1)
@@ -2060,16 +1993,6 @@ fn ensure_block_has_burn(transactions: &[Transaction]) -> Result<()> {
     Ok(())
 }
 
-fn ensure_bootstrap_block_burn_owner(miner: &str, transactions: &[Transaction]) -> Result<()> {
-    let Some(owner) = transactions.iter().find_map(transaction_burn_owner) else {
-        bail!("post-genesis bootstrap block must include a burn transaction");
-    };
-    if owner != miner {
-        bail!("post-genesis bootstrap block miner must own its burn transaction");
-    }
-    Ok(())
-}
-
 fn fee_rate_key(transaction: &Transaction) -> u128 {
     let size = serialized_transaction_size_bytes(transaction).unwrap_or(usize::MAX);
     if size == 0 || size == usize::MAX {
@@ -2102,36 +2025,6 @@ fn best_selectable_transaction_index(
                 .then_with(|| right.signature().cmp(left.signature()))
         })
         .map(|(index, _)| index)
-}
-
-fn best_selectable_burn_index_for_owner(
-    transactions: &[Transaction],
-    utxos: &BTreeMap<OutPoint, TxOutput>,
-    owner: &str,
-) -> Option<usize> {
-    transactions
-        .iter()
-        .enumerate()
-        .filter(|(_, tx)| tx.is_burn())
-        .filter(|(_, tx)| transaction_burn_owner(tx) == Some(owner))
-        .filter(|(_, tx)| {
-            let mut utxos = utxos.clone();
-            apply_transaction(tx, &mut utxos).is_ok()
-        })
-        .max_by(|(_, left), (_, right)| {
-            fee_rate_key(left)
-                .cmp(&fee_rate_key(right))
-                .then_with(|| left.fee().cmp(&right.fee()))
-                .then_with(|| right.signature().cmp(left.signature()))
-        })
-        .map(|(index, _)| index)
-}
-
-fn transaction_burn_owner(transaction: &Transaction) -> Option<&str> {
-    let Transaction::Burn { inputs, .. } = transaction else {
-        return None;
-    };
-    inputs.first().map(|input| input.owner.as_str())
 }
 
 fn serialized_transaction_size_bytes(transaction: &Transaction) -> Result<usize> {
@@ -2953,36 +2846,6 @@ mod tests {
             0
         );
         assert_eq!(balances.get(bob.address()).copied(), Some(4));
-    }
-
-    #[test]
-    fn mined_genesis_bootstraps_first_burn_block_without_leader_ticket() {
-        let alice = Wallet::from_seed("mined-genesis-bootstrap-alice");
-        let mut ledger = Ledger::new_with_genesis_mine(alice.address(), 1).unwrap();
-
-        assert!(ledger.is_started());
-        assert_eq!(ledger.expected_leader_for_next_block(), None);
-
-        let burn = ledger.build_burn(&alice, MINE_REWARD, 0).unwrap();
-        ledger.submit_transaction(burn.clone()).unwrap();
-        let block = ledger.mine_next_block(&alice, 1_000).unwrap();
-
-        assert_eq!(block.height, 1);
-        assert_eq!(block.miner, alice.address());
-        assert_eq!(block.leader_proof, None);
-        assert!(
-            block
-                .transactions
-                .iter()
-                .any(|tx| tx.signature() == burn.signature())
-        );
-
-        ledger.apply_locally_mined_block(block).unwrap();
-
-        assert_eq!(
-            ledger.expected_leader_for_next_block(),
-            Some(alice.address().to_string())
-        );
     }
 
     #[test]
