@@ -688,6 +688,14 @@ window.luunApp = function luunApp() {
       return this.txInputOutpoint({ outpoint: utxo.outpoint });
     },
 
+    selectAllTransferUtxos() {
+      this.selectedTransferUtxos = this.walletUtxos.map((utxo) => this.utxoOutpoint(utxo));
+    },
+
+    clearTransferUtxos() {
+      this.selectedTransferUtxos = [];
+    },
+
     selectedTransferUtxoTotal() {
       const selected = new Set(this.selectedTransferUtxos);
       return this.walletUtxos

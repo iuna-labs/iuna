@@ -915,6 +915,10 @@ const INDEX_HTML: &str = r#"<!doctype html>
     .advanced-toggle { flex-basis: 100%; width: max-content; align-self: flex-start; border-color: #3a4248; padding: 4px 7px; background: #202328; color: #9fa8ad; font-size: 12px; }
     .advanced-toggle:hover { border-color: #5a646b; color: #d6dee2; }
     .send-utxo-list { display: grid; gap: 8px; max-height: 260px; overflow: auto; border: 1px solid #2f363c; border-radius: 8px; padding: 8px; background: #111316; }
+    .send-utxo-list-head { display: flex; justify-content: space-between; gap: 8px; align-items: center; color: #8d989f; font-size: 12px; font-weight: 800; }
+    .send-utxo-actions { display: flex; gap: 6px; align-items: center; }
+    .utxo-select-button { padding: 3px 7px; border-color: #3a4248; background: #202328; color: #9fa8ad; font-size: 12px; }
+    .utxo-select-button:hover { border-color: #5a646b; color: #d6dee2; }
     .send-utxo-option { display: grid; grid-template-columns: auto minmax(0, 1fr); gap: 8px; align-items: start; border: 1px solid #2f363c; border-radius: 8px; padding: 8px; background: #181b1f; }
     .send-utxo-option input { min-width: auto; margin-top: 3px; }
     .send-utxo-summary { flex-basis: 100%; width: 100%; display: grid; gap: 5px; color: #9eb3bc; font-size: 13px; }
@@ -1077,6 +1081,13 @@ const INDEX_HTML: &str = r#"<!doctype html>
                 <div>Required: LUUN <span x-text="amountLabel(transferRequiredTotal())"></span></div>
                 <div class="setup-feedback error" x-show="!selectedTransferUtxosCoverTransfer()">Selected UTXOs do not cover amount plus fee</div>
                 <div class="send-utxo-list">
+                  <div class="send-utxo-list-head">
+                    <span>Spendable UTXOs</span>
+                    <span class="send-utxo-actions">
+                      <button class="utxo-select-button" type="button" @click="selectAllTransferUtxos" :disabled="walletUtxos.length === 0">Select all</button>
+                      <button class="utxo-select-button" type="button" @click="clearTransferUtxos" :disabled="selectedTransferUtxos.length === 0">None</button>
+                    </span>
+                  </div>
                   <template x-for="utxo in walletUtxos" :key="utxoOutpoint(utxo)">
                     <label class="send-utxo-option">
                       <input type="checkbox" :value="utxoOutpoint(utxo)" x-model="selectedTransferUtxos">
