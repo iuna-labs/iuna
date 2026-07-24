@@ -1156,6 +1156,14 @@ impl Ledger {
             .collect()
     }
 
+    pub fn available_utxos_for_address(&self, address: &str) -> Result<Vec<(OutPoint, TxOutput)>> {
+        Ok(self
+            .utxos_after_valid_pending()?
+            .into_iter()
+            .filter(|(_, output)| output.address == address)
+            .collect())
+    }
+
     pub fn next_nonce(&self, address: &str) -> u64 {
         self.utxos
             .keys()
@@ -1180,6 +1188,42 @@ impl Ledger {
             .checked_add(fee)
             .context("transfer amount plus fee overflows")?;
         let (inputs, input_total) = self.select_inputs(wallet.address(), required)?;
+        let mut outputs = vec![TxOutput {
+            address: to.into(),
+            amount,
+        }];
+        let change = input_total
+            .checked_sub(required)
+            .context("selected inputs do not cover transfer")?;
+        if change > 0 {
+            outputs.push(TxOutput {
+                address: wallet.address().to_string(),
+                amount: change,
+            });
+        }
+        let transaction = UnsignedUtxoTransaction::Transfer {
+            inputs,
+            outputs,
+            fee,
+        }
+        .sign(wallet);
+        self.validate_new_transaction(&transaction)?;
+        Ok(transaction)
+    }
+
+    pub fn build_transfer_with_inputs(
+        &self,
+        wallet: &Wallet,
+        to: impl Into<String>,
+        amount: Amount,
+        fee: Amount,
+        outpoints: &[OutPoint],
+    ) -> Result<Transaction> {
+        let required = amount
+            .checked_add(fee)
+            .context("transfer amount plus fee overflows")?;
+        let (inputs, input_total) =
+            self.select_inputs_by_outpoint(wallet.address(), required, outpoints)?;
         let mut outputs = vec![TxOutput {
             address: to.into(),
             amount,
@@ -1536,6 +1580,43 @@ impl Ledger {
             }
         }
         bail!("insufficient funds for {address}")
+    }
+
+    fn select_inputs_by_outpoint(
+        &self,
+        address: &str,
+        amount: Amount,
+        outpoints: &[OutPoint],
+    ) -> Result<(Vec<UnsignedTxInput>, Amount)> {
+        if outpoints.is_empty() {
+            bail!("at least one UTXO must be selected");
+        }
+        let utxos = self.utxos_after_valid_pending()?;
+        let mut seen = BTreeSet::new();
+        let mut selected = Vec::new();
+        let mut total = 0_u64;
+        for outpoint in outpoints {
+            if !seen.insert(outpoint.clone()) {
+                bail!("selected UTXO {} is duplicated", outpoint.id());
+            }
+            let output = utxos
+                .get(outpoint)
+                .with_context(|| format!("selected UTXO {} is not spendable", outpoint.id()))?;
+            if output.address != address {
+                bail!("selected UTXO {} is not owned by {address}", outpoint.id());
+            }
+            selected.push(UnsignedTxInput {
+                outpoint: outpoint.clone(),
+                owner: address.to_string(),
+            });
+            total = total
+                .checked_add(output.amount)
+                .context("selected input total overflows")?;
+        }
+        if total < amount {
+            bail!("selected UTXOs do not cover transfer amount plus fee");
+        }
+        Ok((selected, total))
     }
 
     fn validate_new_transaction(&self, transaction: &Transaction) -> Result<()> {
@@ -2427,6 +2508,93 @@ mod tests {
         let balances = pending_balances(&ledger);
         assert_eq!(balances.get(alice.address()).copied(), Some(1));
         assert_eq!(balances.get(bob.address()).copied(), Some(3));
+    }
+
+    #[test]
+    fn transfer_can_spend_selected_utxos_when_they_cover_amount_and_fee() {
+        let alice = Wallet::from_seed("selected-utxos-alice");
+        let bob = Wallet::from_seed("selected-utxos-bob");
+        let mut ledger = ledger_with_wallet_utxos(&alice, &[2, 3, 5]);
+        let selected = vec![OutPoint {
+            txid: "test-utxo-2".to_string(),
+            index: 0,
+        }];
+
+        let tx = ledger
+            .build_transfer_with_inputs(&alice, bob.address(), 2, 1, &selected)
+            .unwrap();
+
+        let Transaction::Transfer {
+            inputs, outputs, ..
+        } = &tx
+        else {
+            panic!("expected transfer");
+        };
+        assert_eq!(inputs.len(), 1);
+        assert_eq!(inputs[0].outpoint, selected[0]);
+        assert_eq!(
+            outputs,
+            &[
+                TxOutput {
+                    address: bob.address().to_string(),
+                    amount: 2
+                },
+                TxOutput {
+                    address: alice.address().to_string(),
+                    amount: 2
+                }
+            ]
+        );
+
+        ledger.submit_transaction(tx).unwrap();
+        let balances = pending_balances(&ledger);
+        assert_eq!(balances.get(bob.address()).copied(), Some(2));
+        assert_eq!(balances.get(alice.address()).copied(), Some(7));
+    }
+
+    #[test]
+    fn transfer_rejects_selected_utxos_that_do_not_cover_amount_plus_fee() {
+        let alice = Wallet::from_seed("selected-utxos-insufficient-alice");
+        let bob = Wallet::from_seed("selected-utxos-insufficient-bob");
+        let ledger = ledger_with_wallet_utxos(&alice, &[2, 3, 5]);
+        let selected = vec![OutPoint {
+            txid: "test-utxo-0".to_string(),
+            index: 0,
+        }];
+
+        let error = ledger
+            .build_transfer_with_inputs(&alice, bob.address(), 2, 1, &selected)
+            .unwrap_err();
+
+        assert!(format!("{error:#}").contains("selected UTXOs do not cover"));
+    }
+
+    #[test]
+    fn transfer_rejects_selected_utxos_owned_by_someone_else() {
+        let alice = Wallet::from_seed("selected-utxos-owner-alice");
+        let bob = Wallet::from_seed("selected-utxos-owner-bob");
+        let carol = Wallet::from_seed("selected-utxos-owner-carol");
+        let mut ledger = ledger_with_wallet_utxos(&alice, &[5]);
+        ledger.utxos.insert(
+            OutPoint {
+                txid: "carol-utxo".to_string(),
+                index: 0,
+            },
+            TxOutput {
+                address: carol.address().to_string(),
+                amount: 5,
+            },
+        );
+        let selected = vec![OutPoint {
+            txid: "carol-utxo".to_string(),
+            index: 0,
+        }];
+
+        let error = ledger
+            .build_transfer_with_inputs(&alice, bob.address(), 2, 1, &selected)
+            .unwrap_err();
+
+        assert!(format!("{error:#}").contains("is not owned"));
     }
 
     #[test]

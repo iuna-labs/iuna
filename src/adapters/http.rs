@@ -51,6 +51,8 @@ struct TransferForm {
     to: String,
     amount: Amount,
     fee: Option<Amount>,
+    #[serde(default)]
+    utxos: Vec<String>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -293,7 +295,8 @@ async fn api_wallet_utxos(State(state): State<HttpState>) -> Json<Vec<WalletUtxo
     let wallet = node.wallet_address().to_string();
     let mut utxos = node
         .ledger()
-        .utxos_for_address(&wallet)
+        .available_utxos_for_address(&wallet)
+        .unwrap_or_default()
         .into_iter()
         .map(|(outpoint, output)| WalletUtxoRow {
             outpoint,
@@ -741,11 +744,15 @@ fn dev_seed_verify_bypass_allowed(env_present: bool) -> bool {
 }
 
 async fn transfer(state: &HttpState, form: TransferForm) -> Result<()> {
-    let (to, amount, fee) = validate_transfer_form(form)?;
+    let (to, amount, fee, selected_utxos) = validate_transfer_form(form)?;
 
     let result = {
         let mut node = state.node.lock().await;
-        let result = node.transfer_with_fee(to, amount, fee);
+        let result = if selected_utxos.is_empty() {
+            node.transfer_with_fee(to, amount, fee)
+        } else {
+            node.transfer_with_fee_spending(to, amount, fee, &selected_utxos)
+        };
         let outbox = node.drain_outbox();
         (result, outbox)
     };
@@ -756,7 +763,7 @@ async fn transfer(state: &HttpState, form: TransferForm) -> Result<()> {
     }
 }
 
-fn validate_transfer_form(form: TransferForm) -> Result<(String, Amount, Amount)> {
+fn validate_transfer_form(form: TransferForm) -> Result<(String, Amount, Amount, Vec<OutPoint>)> {
     let to = form.to.trim();
     if to.is_empty() {
         bail!("recipient is required");
@@ -765,7 +772,28 @@ fn validate_transfer_form(form: TransferForm) -> Result<(String, Amount, Amount)
         bail!("amount must be greater than zero");
     }
     let fee = form.fee.context("fee is required")?;
-    Ok((to.to_string(), form.amount, fee))
+    let selected_utxos = form
+        .utxos
+        .iter()
+        .filter(|value| !value.trim().is_empty())
+        .map(|value| parse_outpoint(value))
+        .collect::<Result<Vec<_>>>()?;
+    Ok((to.to_string(), form.amount, fee, selected_utxos))
+}
+
+fn parse_outpoint(value: &str) -> Result<OutPoint> {
+    let (txid, index) = value
+        .rsplit_once(':')
+        .with_context(|| format!("invalid UTXO reference {value}"))?;
+    if txid.is_empty() {
+        bail!("invalid UTXO reference {value}");
+    }
+    Ok(OutPoint {
+        txid: txid.to_string(),
+        index: index
+            .parse::<u32>()
+            .with_context(|| format!("invalid UTXO reference {value}"))?,
+    })
 }
 
 fn action_json(result: Result<()>) -> Json<ActionResponse> {
@@ -882,6 +910,11 @@ const INDEX_HTML: &str = r#"<!doctype html>
     .setup-status { border: 1px solid #566d25; border-radius: 8px; padding: 10px; background: #1c2516; color: #d5f55f; font-weight: 800; }
     .wallet-grid { width: 100%; display: grid; grid-template-columns: minmax(0, 1fr) minmax(300px, .8fr); gap: 12px; align-items: start; }
     .wallet-actions { display: grid; gap: 12px; }
+    .advanced-toggle { justify-self: start; border: 0; padding: 0; background: transparent; color: #d5f55f; }
+    .send-utxo-list { display: grid; gap: 8px; max-height: 260px; overflow: auto; border: 1px solid #2f363c; border-radius: 8px; padding: 8px; background: #111316; }
+    .send-utxo-option { display: grid; grid-template-columns: auto minmax(0, 1fr); gap: 8px; align-items: start; border: 1px solid #2f363c; border-radius: 8px; padding: 8px; background: #181b1f; }
+    .send-utxo-option input { min-width: auto; margin-top: 3px; }
+    .send-utxo-summary { display: grid; gap: 5px; color: #9eb3bc; font-size: 13px; }
     .wallet-balance-line { display: inline-grid; grid-template-columns: auto auto; gap: 10px; align-items: baseline; padding: 8px 10px; border: 1px solid #2f363c; border-radius: 8px; background: #111316; color: inherit; cursor: pointer; }
     .wallet-balance-line:hover, .wallet-balance-line:focus-visible { border-color: #d5f55f; outline: none; }
     .wallet-balance-line .tx-value { font-size: 16px; font-weight: 850; }
@@ -1034,6 +1067,25 @@ const INDEX_HTML: &str = r#"<!doctype html>
               <label>Recipient<input x-model="transferTo" autocomplete="off" required></label>
               <label>Amount<input x-model="transferAmount" type="number" min="0.000001" step="0.000001" required></label>
               <label>Fee<input x-model="transferFee" type="number" min="0" step="0.000001" required></label>
+              <button class="advanced-toggle" type="button" @click="toggleSendAdvanced" x-text="showSendAdvanced ? 'Hide advanced' : 'Advanced'"></button>
+              <div class="send-utxo-summary" x-show="showSendAdvanced">
+                <div>Selected UTXOs: <span x-text="selectedTransferUtxos.length"></span></div>
+                <div>Selected total: LUUN <span x-text="amountLabel(selectedTransferUtxoTotal())"></span></div>
+                <div>Required: LUUN <span x-text="amountLabel(transferRequiredTotal())"></span></div>
+                <div class="setup-feedback error" x-show="!selectedTransferUtxosCoverTransfer()">Selected UTXOs do not cover amount plus fee</div>
+                <div class="send-utxo-list">
+                  <template x-for="utxo in walletUtxos" :key="utxoOutpoint(utxo)">
+                    <label class="send-utxo-option">
+                      <input type="checkbox" :value="utxoOutpoint(utxo)" x-model="selectedTransferUtxos">
+                      <span>
+                        <span class="utxo-node-label"><span>UTXO</span><span class="utxo-node-amount">LUUN <span x-text="amountLabel(utxo.amount)"></span></span></span>
+                        <code class="tx-value hash" x-text="utxoOutpoint(utxo)"></code>
+                      </span>
+                    </label>
+                  </template>
+                  <div class="tx-modal-empty" x-show="walletUtxos.length === 0">No spendable UTXOs</div>
+                </div>
+              </div>
               <button class="primary" type="submit">Send</button>
             </form>
           </div>
@@ -1429,7 +1481,7 @@ mod tests {
 
     use crate::{
         adapters::{config_store, config_store::UiConfig},
-        domain::{Block, MICRO_LUUN, Transaction, Wallet},
+        domain::{Block, MICRO_LUUN, OutPoint, Transaction, Wallet},
     };
 
     use super::{
@@ -1523,6 +1575,7 @@ mod tests {
             to: " ".to_string(),
             amount: 1,
             fee: Some(1),
+            utxos: Vec::new(),
         })
         .unwrap_err();
         assert!(error.to_string().contains("recipient is required"));
@@ -1531,6 +1584,7 @@ mod tests {
             to: "abc".to_string(),
             amount: 0,
             fee: Some(1),
+            utxos: Vec::new(),
         })
         .unwrap_err();
         assert!(
@@ -1543,6 +1597,7 @@ mod tests {
             to: "abc".to_string(),
             amount: 1,
             fee: None,
+            utxos: Vec::new(),
         })
         .unwrap_err();
         assert!(error.to_string().contains("fee is required"));
@@ -1550,15 +1605,46 @@ mod tests {
 
     #[test]
     fn transfer_form_trims_recipient() {
-        let (to, amount, fee) = validate_transfer_form(TransferForm {
+        let (to, amount, fee, utxos) = validate_transfer_form(TransferForm {
             to: "  abc  ".to_string(),
             amount: 2,
             fee: Some(3),
+            utxos: Vec::new(),
         })
         .unwrap();
 
         assert_eq!(to, "abc");
         assert_eq!(amount, 2);
         assert_eq!(fee, 3);
+        assert!(utxos.is_empty());
+    }
+
+    #[test]
+    fn transfer_form_parses_selected_utxos() {
+        let (_, _, _, utxos) = validate_transfer_form(TransferForm {
+            to: "abc".to_string(),
+            amount: 2,
+            fee: Some(3),
+            utxos: vec![
+                "tx-one:0".to_string(),
+                "tx:with:colons:7".to_string(),
+                "".to_string(),
+            ],
+        })
+        .unwrap();
+
+        assert_eq!(
+            utxos,
+            vec![
+                OutPoint {
+                    txid: "tx-one".to_string(),
+                    index: 0
+                },
+                OutPoint {
+                    txid: "tx:with:colons".to_string(),
+                    index: 7
+                }
+            ]
+        );
     }
 }

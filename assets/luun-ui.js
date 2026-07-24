@@ -30,6 +30,8 @@ window.luunApp = function luunApp() {
     transferTo: "",
     transferAmount: null,
     transferFee: "1",
+    showSendAdvanced: false,
+    selectedTransferUtxos: [],
     peerAddress: "",
     flash: null,
     flashTimer: null,
@@ -421,7 +423,11 @@ window.luunApp = function luunApp() {
     async postForm(path, fields, successMessage) {
       const body = new URLSearchParams();
       for (const [key, value] of Object.entries(fields)) {
-        body.set(key, value);
+        if (Array.isArray(value)) {
+          for (const item of value) body.append(key, item);
+        } else {
+          body.set(key, value);
+        }
       }
       const response = await fetch(path, {
         method: "POST",
@@ -540,13 +546,22 @@ window.luunApp = function luunApp() {
         const recipient = this.short(this.transferTo);
         await this.postForm(
           "/api/transfer",
-          { to: this.transferTo, amount, fee },
+          { to: this.transferTo, amount, fee, utxos: this.selectedTransferUtxos },
           `Queued transfer of ${this.amountLabel(amount)} LUUN to ${recipient} with ${this.amountLabel(fee)} fee`
         );
         this.transferTo = "";
         this.transferAmount = null;
+        this.selectedTransferUtxos = [];
+        this.showSendAdvanced = false;
       } catch (error) {
         this.showFlash(error.message, "error");
+      }
+    },
+
+    toggleSendAdvanced() {
+      this.showSendAdvanced = !this.showSendAdvanced;
+      if (!this.showSendAdvanced) {
+        this.selectedTransferUtxos = [];
       }
     },
 
@@ -659,6 +674,25 @@ window.luunApp = function luunApp() {
       const txid = input.outpoint?.txid || "-";
       const index = input.outpoint?.index ?? "-";
       return `${txid}:${index}`;
+    },
+
+    utxoOutpoint(utxo) {
+      return this.txInputOutpoint({ outpoint: utxo.outpoint });
+    },
+
+    selectedTransferUtxoTotal() {
+      const selected = new Set(this.selectedTransferUtxos);
+      return this.walletUtxos
+        .filter((utxo) => selected.has(this.utxoOutpoint(utxo)))
+        .reduce((sum, utxo) => sum + Number(utxo.amount || 0), 0);
+    },
+
+    transferRequiredTotal() {
+      return this.parseLuunAmount(this.transferAmount) + this.parseLuunAmount(this.transferFee);
+    },
+
+    selectedTransferUtxosCoverTransfer() {
+      return this.selectedTransferUtxos.length === 0 || this.selectedTransferUtxoTotal() >= this.transferRequiredTotal();
     },
 
     txInputAmountLabel(input) {

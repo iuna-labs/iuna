@@ -10,7 +10,7 @@ use tokio::sync::Mutex;
 
 use crate::domain::{
     Amount, Block, ChainSnapshot, ChainStatus, DEFAULT_TRANSACTION_FEE, LaunchProfile, Ledger,
-    PreparedBlock, Transaction, VDF_TARGET_BLOCK_MS, Wallet, run_vdf,
+    OutPoint, PreparedBlock, Transaction, VDF_TARGET_BLOCK_MS, Wallet, run_vdf,
 };
 
 pub type SharedNode = Arc<Mutex<NodeCore>>;
@@ -428,6 +428,22 @@ impl NodeCore {
         fee: Amount,
     ) -> Result<Transaction> {
         let tx = self.ledger.build_transfer(&self.wallet, to, amount, fee)?;
+        if self.ledger.submit_transaction(tx.clone())? {
+            self.outbox.push(GossipEnvelope::Transaction(tx.clone()));
+        }
+        Ok(tx)
+    }
+
+    pub fn transfer_with_fee_spending(
+        &mut self,
+        to: impl Into<String>,
+        amount: Amount,
+        fee: Amount,
+        outpoints: &[OutPoint],
+    ) -> Result<Transaction> {
+        let tx =
+            self.ledger
+                .build_transfer_with_inputs(&self.wallet, to, amount, fee, outpoints)?;
         if self.ledger.submit_transaction(tx.clone())? {
             self.outbox.push(GossipEnvelope::Transaction(tx.clone()));
         }
