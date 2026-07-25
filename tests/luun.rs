@@ -4,8 +4,8 @@ use luun::{
     adapters::chain_store::SqliteChainStore,
     app::{DEFAULT_BURN_PER_BLOCK, InMemoryNetwork, NodeConfig, NodeCore, PeerBook, PeerDirection},
     domain::{
-        Amount, BLOCK_REWARD, GenesisBurn, Ledger, MAX_BLOCK_BYTES, MICRO_LUUN, MINE_REWARD,
-        VDF_TARGET_BLOCK_MS, Wallet, run_vdf, verify_vdf,
+        Amount, BLOCK_REWARD, DEFAULT_FEE_PER_BYTE, GenesisBurn, Ledger, MAX_BLOCK_BYTES,
+        MICRO_LUUN, MINE_REWARD, VDF_TARGET_BLOCK_MS, Wallet, run_vdf, verify_vdf,
     },
 };
 use tempfile::tempdir;
@@ -115,7 +115,7 @@ fn starter_node(wallet: Wallet) -> NodeCore {
         ledger,
         true,
         DEFAULT_BURN_PER_BLOCK,
-        MICRO_LUUN,
+        DEFAULT_FEE_PER_BYTE,
     )
 }
 
@@ -192,7 +192,7 @@ fn burn_in_block_creates_ticket_after_maturity_delay() {
     let bob = Wallet::from_seed("bob");
     let mut allocations = BTreeMap::new();
     allocations.insert(alice.address().to_string(), 1_000);
-    allocations.insert(bob.address().to_string(), 1_000);
+    allocations.insert(bob.address().to_string(), MICRO_LUUN);
 
     let mut ledger = Ledger::new(allocations, 10);
     submit_burn(&mut ledger, &bob, 80);
@@ -258,7 +258,7 @@ fn forged_transaction_is_rejected() {
     let bob = Wallet::from_seed("bob");
     let mut allocations = BTreeMap::new();
     allocations.insert(alice.address().to_string(), 1_000);
-    allocations.insert(bob.address().to_string(), 1_000);
+    allocations.insert(bob.address().to_string(), MICRO_LUUN);
     let mut ledger = Ledger::new(allocations, 10);
 
     let mut forged = burn_tx(&ledger, &bob, 10);
@@ -593,7 +593,7 @@ fn automatic_mining_burns_configured_amount_once_per_height() {
         genesis_allocations: allocations,
         vdf_rounds: 10,
         burn_per_block: luun(25),
-        burn_fee: MICRO_LUUN,
+        burn_fee: DEFAULT_FEE_PER_BYTE,
     });
 
     let first = node.automatic_mine_once(1);
@@ -604,8 +604,12 @@ fn automatic_mining_burns_configured_amount_once_per_height() {
 
     let second = node.automatic_mine_once(2);
     assert!(second.burned.is_some());
-    assert_eq!(second.burned.as_ref().map(|tx| tx.amount()), Some(luun(25)));
-    assert_eq!(second.burned.as_ref().map(|tx| tx.fee()), Some(MICRO_LUUN));
+    let burned = second.burned.as_ref().unwrap();
+    assert_eq!(burned.amount(), luun(25));
+    assert_eq!(
+        burned.fee(),
+        burned.serialized_size_bytes().unwrap() as u64 * DEFAULT_FEE_PER_BYTE
+    );
 }
 
 #[test]
@@ -668,12 +672,15 @@ fn automatic_burn_status_shows_configured_fee() {
 fn automatic_mining_uses_configured_burn_fee() {
     let alice = Wallet::from_seed("auto-fee-burn-alice");
     let mut allocations = BTreeMap::new();
-    allocations.insert(alice.address().to_string(), 1_000);
+    allocations.insert(alice.address().to_string(), MICRO_LUUN);
     let mut node = node("alice", alice, allocations);
 
     let burned = node.set_automatic_burn(50, 3).unwrap().unwrap();
     assert_eq!(burned.amount(), 50);
-    assert_eq!(burned.fee(), 3);
+    assert_eq!(
+        burned.fee(),
+        burned.serialized_size_bytes().unwrap() as u64 * 3
+    );
 }
 
 #[test]
@@ -686,18 +693,23 @@ fn automatic_mining_caps_burn_to_spendable_balance_after_fee() {
         genesis_allocations: allocations,
         vdf_rounds: 10,
         burn_per_block: BLOCK_REWARD + luun(50),
-        burn_fee: MICRO_LUUN,
+        burn_fee: DEFAULT_FEE_PER_BYTE,
     });
 
     let outcome = node.automatic_mine_once(1);
 
+    let burned = outcome.burned.as_ref().unwrap();
+    let unspent = BLOCK_REWARD - burned.amount() - burned.fee();
+    assert!(unspent <= DEFAULT_FEE_PER_BYTE);
     assert_eq!(
-        outcome.burned.as_ref().map(|tx| tx.amount()),
-        Some(BLOCK_REWARD - MICRO_LUUN)
+        burned.fee(),
+        burned.serialized_size_bytes().unwrap() as u64 * DEFAULT_FEE_PER_BYTE
     );
-    assert_eq!(outcome.burned.as_ref().map(|tx| tx.fee()), Some(MICRO_LUUN));
     assert!(outcome.block.is_some());
-    assert_eq!(node.ledger().balance_of(alice.address()), MICRO_LUUN);
+    assert_eq!(
+        node.ledger().balance_of(alice.address()),
+        burned.fee() + unspent
+    );
 }
 
 #[test]
@@ -706,7 +718,7 @@ fn setting_burn_rate_after_running_at_zero_adds_mempool_burn() {
     let bob = Wallet::from_seed("bob");
     let mut allocations = BTreeMap::new();
     allocations.insert(alice.address().to_string(), 1_000);
-    allocations.insert(bob.address().to_string(), 100);
+    allocations.insert(bob.address().to_string(), MICRO_LUUN);
 
     let mut ledger = Ledger::new(allocations.clone(), 25);
     submit_burn(&mut ledger, &alice, 1);
@@ -736,7 +748,7 @@ fn automatic_mining_waits_when_wallet_is_not_selected_leader() {
     let bob = Wallet::from_seed("bob");
     let mut allocations = BTreeMap::new();
     allocations.insert(alice.address().to_string(), 1_000);
-    allocations.insert(bob.address().to_string(), 1_000);
+    allocations.insert(bob.address().to_string(), MICRO_LUUN);
 
     let mut ledger = Ledger::new(allocations.clone(), 25);
     submit_burn(&mut ledger, &alice, 1);
@@ -824,17 +836,17 @@ fn pow_only_node_gossips_mine_action_to_pob_only_finalizer() {
         ledger.clone(),
         true,
         DEFAULT_BURN_PER_BLOCK,
-        MICRO_LUUN,
+        DEFAULT_FEE_PER_BYTE,
     );
     let mut bob_node = NodeCore::from_ledger_with_burn_fee_and_enabled(
         bob.clone(),
         ledger,
         false,
         DEFAULT_BURN_PER_BLOCK,
-        MICRO_LUUN,
+        DEFAULT_FEE_PER_BYTE,
     );
     bob_node
-        .set_pow_mining_settings(true, MICRO_LUUN / 100)
+        .set_pow_mining_settings(true, DEFAULT_FEE_PER_BYTE)
         .unwrap();
 
     let bob_plan = bob_node.prepare_automatic_mining(1);
@@ -1690,7 +1702,7 @@ fn friend_node_can_join_snapshot_from_started_chain() {
     alice_genesis.insert(alice.address().to_string(), 1_000);
     let mut alice_node = node("alice", alice.clone(), alice_genesis);
     alice_node
-        .set_automatic_burn_settings(true, DEFAULT_BURN_PER_BLOCK, MICRO_LUUN)
+        .set_automatic_burn_settings(true, DEFAULT_BURN_PER_BLOCK, DEFAULT_FEE_PER_BYTE)
         .unwrap();
     alice_node.burn(1).unwrap();
     alice_node.automatic_mine_once(1);

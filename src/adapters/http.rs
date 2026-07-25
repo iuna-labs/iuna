@@ -28,7 +28,7 @@ use crate::{
         p2p::{GossipNetwork, P2pMetrics},
         wallet_store,
     },
-    app::{NodeStatus, PeerInfo, SharedNode, SharedPeerBook},
+    app::{FeeEstimate, NodeStatus, PeerInfo, SharedNode, SharedPeerBook},
     domain::{Amount, Block, OutPoint, Transaction, TxInput, TxOutput, hex_hash},
 };
 
@@ -47,7 +47,13 @@ struct HttpState {
     ui_config: Arc<Mutex<UiConfig>>,
     config_path: PathBuf,
     wallet_path: PathBuf,
-    auth_sessions: Arc<Mutex<BTreeMap<String, u64>>>,
+    auth_sessions: Arc<Mutex<BTreeMap<String, AuthSession>>>,
+}
+
+#[derive(Clone)]
+struct AuthSession {
+    expires_at: u64,
+    wallet_password: String,
 }
 
 #[derive(Debug, Deserialize)]
@@ -65,20 +71,20 @@ struct AuthStatusResponse {
 struct BurnSettingsForm {
     enabled: Option<bool>,
     amount: Amount,
-    fee: Amount,
+    fee_per_byte: Option<Amount>,
 }
 
 #[derive(Debug, Deserialize)]
 struct PowMiningForm {
     enabled: bool,
-    fee: Amount,
+    fee_per_byte: Option<Amount>,
 }
 
 #[derive(Debug, Deserialize)]
 struct TransferForm {
     to: String,
     amount: Amount,
-    fee: Option<Amount>,
+    fee_per_byte: Option<Amount>,
     #[serde(default)]
     utxos: String,
 }
@@ -108,6 +114,15 @@ struct BlocksQuery {
 struct ActionResponse {
     ok: bool,
     error: Option<String>,
+}
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct FeeEstimateResponse {
+    ok: bool,
+    error: Option<String>,
+    bytes: Option<usize>,
+    fee: Option<Amount>,
 }
 
 #[derive(Debug, Serialize)]
@@ -155,6 +170,7 @@ struct UiBlock {
     timestamp_ms: u64,
     miner: String,
     reward: Amount,
+    total_fees: Amount,
     vdf_rounds: u32,
     vdf_output: String,
     leader_proof: Option<crate::domain::LeaderProof>,
@@ -221,6 +237,12 @@ pub async fn serve(
         .route("/api/wallet/import", post(api_wallet_import_form))
         .route("/api/wallet/transactions", get(api_wallet_transactions))
         .route("/api/wallet/utxos", get(api_wallet_utxos))
+        .route(
+            "/api/fee-estimate/transfer",
+            post(api_transfer_fee_estimate_form),
+        )
+        .route("/api/fee-estimate/burn", post(api_burn_fee_estimate_form))
+        .route("/api/fee-estimate/mine", post(api_mine_fee_estimate_form))
         .route("/api/mempool", get(api_mempool))
         .route("/api/peers", get(api_peers).post(api_peer_form))
         .route("/api/p2p/metrics", get(api_p2p_metrics))
@@ -307,10 +329,22 @@ async fn request_is_authenticated(state: &HttpState, headers: &HeaderMap) -> boo
     let token_hash = session_token_hash(token);
     let now = now_ms();
     let mut sessions = state.auth_sessions.lock().await;
-    sessions.retain(|_, expires_at| *expires_at > now);
+    sessions.retain(|_, session| session.expires_at > now);
     sessions
         .get(&token_hash)
-        .is_some_and(|expires_at| *expires_at > now)
+        .is_some_and(|session| session.expires_at > now)
+}
+
+async fn wallet_password_for_request(state: &HttpState, headers: &HeaderMap) -> Option<String> {
+    let token = auth_cookie(headers)?;
+    let token_hash = session_token_hash(token);
+    let now = now_ms();
+    let mut sessions = state.auth_sessions.lock().await;
+    sessions.retain(|_, session| session.expires_at > now);
+    sessions
+        .get(&token_hash)
+        .filter(|session| session.expires_at > now)
+        .map(|session| session.wallet_password.clone())
 }
 
 async fn api_auth_status(
@@ -394,8 +428,11 @@ async fn api_config(State(state): State<HttpState>) -> Json<UiConfig> {
     Json(state.ui_config.lock().await.clone())
 }
 
-async fn api_wallet_setup(State(state): State<HttpState>) -> Json<WalletSetupResponse> {
-    wallet_setup_json(wallet_setup_response(&state).await)
+async fn api_wallet_setup(
+    State(state): State<HttpState>,
+    headers: HeaderMap,
+) -> Json<WalletSetupResponse> {
+    wallet_setup_json(wallet_setup_response(&state, &headers).await)
 }
 
 async fn api_mempool(State(state): State<HttpState>) -> Json<Vec<UiTransaction>> {
@@ -467,15 +504,40 @@ async fn api_config_form(
     action_json(config_store::save(&state.config_path, &config))
 }
 
-async fn api_wallet_generate_form(State(state): State<HttpState>) -> Json<WalletSetupResponse> {
-    wallet_setup_json(replace_setup_wallet_with_generated_seed(&state).await)
+async fn api_wallet_generate_form(
+    State(state): State<HttpState>,
+    headers: HeaderMap,
+) -> Json<WalletSetupResponse> {
+    wallet_setup_json(replace_setup_wallet_with_generated_seed(&state, &headers).await)
 }
 
 async fn api_wallet_import_form(
     State(state): State<HttpState>,
+    headers: HeaderMap,
     Form(form): Form<SeedPhraseForm>,
 ) -> Json<WalletSetupResponse> {
-    wallet_setup_json(import_setup_wallet_seed(&state, &form.seed_phrase).await)
+    wallet_setup_json(import_setup_wallet_seed(&state, &headers, &form.seed_phrase).await)
+}
+
+async fn api_transfer_fee_estimate_form(
+    State(state): State<HttpState>,
+    Form(form): Form<TransferForm>,
+) -> Json<FeeEstimateResponse> {
+    fee_estimate_json(estimate_transfer_fee(&state, form).await)
+}
+
+async fn api_burn_fee_estimate_form(
+    State(state): State<HttpState>,
+    Form(form): Form<BurnSettingsForm>,
+) -> Json<FeeEstimateResponse> {
+    fee_estimate_json(estimate_burn_fee(&state, form).await)
+}
+
+async fn api_mine_fee_estimate_form(
+    State(state): State<HttpState>,
+    Form(form): Form<PowMiningForm>,
+) -> Json<FeeEstimateResponse> {
+    fee_estimate_json(estimate_mine_fee(&state, form).await)
 }
 
 async fn api_burn_per_block_form(
@@ -483,7 +545,10 @@ async fn api_burn_per_block_form(
     Form(form): Form<BurnSettingsForm>,
 ) -> Json<ActionResponse> {
     let enabled = form.enabled.unwrap_or(form.amount > 0);
-    let result = set_burn_settings(&state, enabled, form.amount, form.fee).await;
+    let result = match required_fee_per_byte_burn(&form) {
+        Ok(fee_per_byte) => set_burn_settings(&state, enabled, form.amount, fee_per_byte).await,
+        Err(error) => Err(error),
+    };
     action_json(result)
 }
 
@@ -491,7 +556,10 @@ async fn api_pow_mining_form(
     State(state): State<HttpState>,
     Form(form): Form<PowMiningForm>,
 ) -> Json<ActionResponse> {
-    let result = set_pow_mining(&state, form.enabled, form.fee).await;
+    let result = match required_fee_per_byte_mine(&form) {
+        Ok(fee_per_byte) => set_pow_mining(&state, form.enabled, fee_per_byte).await,
+        Err(error) => Err(error),
+    };
     action_json(result)
 }
 
@@ -500,7 +568,11 @@ async fn burn_per_block_form(
     Form(form): Form<BurnSettingsForm>,
 ) -> Response {
     let enabled = form.enabled.unwrap_or(form.amount > 0);
-    match set_burn_settings(&state, enabled, form.amount, form.fee).await {
+    let result = match required_fee_per_byte_burn(&form) {
+        Ok(fee_per_byte) => set_burn_settings(&state, enabled, form.amount, fee_per_byte).await,
+        Err(error) => Err(error),
+    };
+    match result {
         Ok(_) => Redirect::to("/").into_response(),
         Err(error) => api_error(error).into_response(),
     }
@@ -610,12 +682,16 @@ async fn add_peer(state: &HttpState, peer: String) -> Result<()> {
     config_store::save(&state.config_path, &config)
 }
 
-async fn wallet_setup_response(state: &HttpState) -> Result<WalletSetupResponse> {
+async fn wallet_setup_response(
+    state: &HttpState,
+    headers: &HeaderMap,
+) -> Result<WalletSetupResponse> {
     let setup_complete = state.ui_config.lock().await.setup_complete;
+    let password = wallet_password_for_request(state, headers).await;
     let seed_phrase = if setup_complete {
         None
     } else {
-        wallet_store::setup_seed_phrase(&state.wallet_path)?
+        wallet_store::setup_seed_phrase_with_password(&state.wallet_path, password.as_deref())?
     };
     let address = state.node.lock().await.wallet_address().to_string();
     Ok(WalletSetupResponse {
@@ -744,6 +820,7 @@ fn ui_block(block: Block, outputs: &BTreeMap<OutPoint, TxOutput>) -> UiBlock {
         timestamp_ms: block.timestamp_ms,
         miner: block.miner,
         reward: block.reward,
+        total_fees: block.reward,
         vdf_rounds: block.vdf_rounds,
         vdf_output: block.vdf_output,
         leader_proof: block.leader_proof,
@@ -941,10 +1018,14 @@ fn reward_outpoint(block_hash: &str) -> OutPoint {
 
 async fn replace_setup_wallet_with_generated_seed(
     state: &HttpState,
+    headers: &HeaderMap,
 ) -> Result<WalletSetupResponse> {
     ensure_wallet_setup_open(state).await?;
+    let password = wallet_password_for_request(state, headers)
+        .await
+        .context("wallet password session is required")?;
     let (wallet, seed_phrase) =
-        wallet_store::replace_with_generated_seed_phrase(&state.wallet_path)?;
+        wallet_store::replace_with_generated_seed_phrase_encrypted(&state.wallet_path, &password)?;
     let address = wallet.address().to_string();
     state.node.lock().await.replace_wallet(wallet);
     Ok(WalletSetupResponse {
@@ -958,10 +1039,18 @@ async fn replace_setup_wallet_with_generated_seed(
 
 async fn import_setup_wallet_seed(
     state: &HttpState,
+    headers: &HeaderMap,
     seed_phrase: &str,
 ) -> Result<WalletSetupResponse> {
     ensure_wallet_setup_open(state).await?;
-    let wallet = wallet_store::replace_with_imported_seed_phrase(&state.wallet_path, seed_phrase)?;
+    let password = wallet_password_for_request(state, headers)
+        .await
+        .context("wallet password session is required")?;
+    let wallet = wallet_store::replace_with_imported_seed_phrase_encrypted(
+        &state.wallet_path,
+        seed_phrase,
+        &password,
+    )?;
     let address = wallet.address().to_string();
     state.node.lock().await.replace_wallet(wallet);
     Ok(WalletSetupResponse {
@@ -1003,15 +1092,11 @@ fn dev_seed_verify_bypass_allowed(env_present: bool) -> bool {
 }
 
 async fn transfer(state: &HttpState, form: TransferForm) -> Result<()> {
-    let (to, amount, fee, selected_utxos) = validate_transfer_form(form)?;
+    let (to, amount, fee_per_byte, selected_utxos) = validate_transfer_form(form)?;
 
     let result = {
         let mut node = state.node.lock().await;
-        let result = if selected_utxos.is_empty() {
-            node.transfer_with_fee(to, amount, fee)
-        } else {
-            node.transfer_with_fee_spending(to, amount, fee, &selected_utxos)
-        };
+        let result = node.transfer_with_fee_rate(to, amount, fee_per_byte, &selected_utxos);
         let outbox = node.drain_outbox();
         (result, outbox)
     };
@@ -1030,7 +1115,7 @@ fn validate_transfer_form(form: TransferForm) -> Result<(String, Amount, Amount,
     if form.amount == 0 {
         bail!("amount must be greater than zero");
     }
-    let fee = form.fee.context("fee is required")?;
+    let fee = required_fee_per_byte_transfer(&form)?;
     let selected_utxos = form
         .utxos
         .lines()
@@ -1040,6 +1125,61 @@ fn validate_transfer_form(form: TransferForm) -> Result<(String, Amount, Amount,
         .map(parse_outpoint)
         .collect::<Result<Vec<_>>>()?;
     Ok((to.to_string(), form.amount, fee, selected_utxos))
+}
+
+async fn estimate_transfer_fee(state: &HttpState, form: TransferForm) -> Result<FeeEstimate> {
+    let (to, amount, fee_per_byte, selected_utxos) = validate_transfer_form(form)?;
+    state
+        .node
+        .lock()
+        .await
+        .estimate_transfer_fee(to, amount, fee_per_byte, &selected_utxos)
+}
+
+async fn estimate_burn_fee(state: &HttpState, form: BurnSettingsForm) -> Result<FeeEstimate> {
+    let fee_per_byte = required_fee_per_byte_burn(&form)?;
+    if form.amount == 0 {
+        bail!("amount must be greater than zero");
+    }
+    state
+        .node
+        .lock()
+        .await
+        .estimate_burn_fee(form.amount, fee_per_byte)
+}
+
+async fn estimate_mine_fee(state: &HttpState, form: PowMiningForm) -> Result<FeeEstimate> {
+    let fee_per_byte = required_fee_per_byte_mine(&form)?;
+    state.node.lock().await.estimate_mine_fee(fee_per_byte)
+}
+
+fn required_fee_per_byte_transfer(form: &TransferForm) -> Result<Amount> {
+    form.fee_per_byte.context("fee per byte is required")
+}
+
+fn required_fee_per_byte_burn(form: &BurnSettingsForm) -> Result<Amount> {
+    form.fee_per_byte.context("fee per byte is required")
+}
+
+fn required_fee_per_byte_mine(form: &PowMiningForm) -> Result<Amount> {
+    form.fee_per_byte.context("fee per byte is required")
+}
+
+fn fee_estimate_json(result: Result<FeeEstimate>) -> Json<FeeEstimateResponse> {
+    match result {
+        Ok(estimate) => Json(FeeEstimateResponse {
+            ok: true,
+            error: None,
+            bytes: Some(estimate.bytes),
+            fee: Some(estimate.fee),
+        }),
+        Err(error) => Json(FeeEstimateResponse {
+            ok: false,
+            error: Some(format!("{error:#}")),
+            bytes: None,
+            fee: None,
+        }),
+    }
 }
 
 fn parse_outpoint(value: &str) -> Result<OutPoint> {
@@ -1096,7 +1236,10 @@ async fn setup_auth_password(state: &HttpState, password: &str) -> Result<String
     config.auth_password_hash = Some(hash_password(password)?);
     config_store::save(&state.config_path, &config)?;
     drop(config);
-    create_session_cookie(state).await
+    wallet_store::encrypt_existing_with_password(&state.wallet_path, password)?;
+    let wallet = wallet_store::load_with_password(&state.wallet_path, password)?;
+    state.node.lock().await.replace_wallet(wallet);
+    create_session_cookie(state, password).await
 }
 
 async fn login_auth_password(state: &HttpState, password: &str) -> Result<String> {
@@ -1110,7 +1253,10 @@ async fn login_auth_password(state: &HttpState, password: &str) -> Result<String
     if !verify_password(password, &hash)? {
         bail!("invalid password");
     }
-    create_session_cookie(state).await
+    wallet_store::encrypt_existing_with_password(&state.wallet_path, password)?;
+    let wallet = wallet_store::load_with_password(&state.wallet_path, password)?;
+    state.node.lock().await.replace_wallet(wallet);
+    create_session_cookie(state, password).await
 }
 
 fn validate_password(password: &str) -> Result<()> {
@@ -1123,15 +1269,17 @@ fn validate_password(password: &str) -> Result<()> {
     Ok(())
 }
 
-async fn create_session_cookie(state: &HttpState) -> Result<String> {
+async fn create_session_cookie(state: &HttpState, password: &str) -> Result<String> {
     let token = random_hex(32)?;
     let token_hash = session_token_hash(&token);
     let expires_at = now_ms().saturating_add(AUTH_SESSION_TTL_MS);
-    state
-        .auth_sessions
-        .lock()
-        .await
-        .insert(token_hash, expires_at);
+    state.auth_sessions.lock().await.insert(
+        token_hash,
+        AuthSession {
+            expires_at,
+            wallet_password: password.to_string(),
+        },
+    );
     Ok(format!(
         "{AUTH_COOKIE_NAME}={token}; Path=/; HttpOnly; SameSite=Strict; Max-Age={}",
         AUTH_SESSION_TTL_MS / 1000
@@ -1412,7 +1560,9 @@ const INDEX_HTML: &str = r#"<!doctype html>
     .mine-action-row { display: grid; grid-template-columns: minmax(0, 1fr) auto; gap: 12px; align-items: center; }
     .mine-settings-form { display: grid; gap: 10px; }
     .mine-fee-fields { display: flex; flex-wrap: wrap; gap: 10px; align-items: end; }
+    .fee-preview { flex-basis: 100%; color: #9eb3bc; font-size: 12px; font-weight: 700; }
     .mine-stats { display: grid; grid-template-columns: repeat(4, minmax(112px, 1fr)); gap: 8px; min-width: 0; }
+    .fee-history { grid-template-columns: repeat(3, minmax(112px, 1fr)); margin-top: 12px; }
     .mine-stat { min-width: 0; border: 1px solid #2f363c; border-radius: 8px; padding: 9px 10px; background: #111316; }
     .mine-stat-label { display: flex; gap: 5px; align-items: center; color: #879198; font-size: 10px; font-weight: 850; text-transform: uppercase; }
     .mine-stat-value { margin-top: 5px; color: #dce4e7; font-size: 14px; font-weight: 850; font-variant-numeric: tabular-nums; overflow-wrap: anywhere; }
@@ -1523,7 +1673,7 @@ const INDEX_HTML: &str = r#"<!doctype html>
       .block-card { flex-basis: 108px; }
     }
   </style>
-  <script defer src="/assets/luun-ui.js?v=47"></script>
+  <script defer src="/assets/luun-ui.js?v=49"></script>
   <script defer src="/assets/alpine.min.js"></script>
 </head>
 <body x-data="luunApp()" x-init="init()" @keydown.window.escape="closeModals()" x-cloak>
@@ -1575,9 +1725,10 @@ const INDEX_HTML: &str = r#"<!doctype html>
           <div class="panel">
             <h3>Send</h3>
             <form @submit.prevent="sendTransfer">
-              <label>Recipient<input x-model="transferTo" autocomplete="off" required></label>
-              <label>Amount<input x-model="transferAmount" type="number" min="0.000001" step="0.000001" required></label>
-              <label>Fee<input x-model="transferFee" type="number" min="0" step="0.000001" required></label>
+              <label>Recipient<input x-model="transferTo" @input="scheduleFeeEstimates" autocomplete="off" required></label>
+              <label>Amount<input x-model="transferAmount" @input="scheduleFeeEstimates" type="number" min="0.000001" step="0.000001" required></label>
+              <label>Fee / byte<input x-model="transferFee" @input="scheduleFeeEstimates" type="number" min="0" step="0.000001" required></label>
+              <div class="fee-preview" x-text="feeEstimateLabel('transfer')"></div>
               <button class="advanced-toggle" type="button" @click="toggleSendAdvanced" x-text="showSendAdvanced ? 'Hide advanced' : 'Advanced'"></button>
               <div class="send-utxo-summary" x-show="showSendAdvanced">
                 <div>Selected UTXOs: <span x-text="selectedTransferUtxos.length"></span></div>
@@ -1594,7 +1745,7 @@ const INDEX_HTML: &str = r#"<!doctype html>
                   </div>
                   <template x-for="utxo in walletUtxos" :key="utxoOutpoint(utxo)">
                     <label class="send-utxo-option">
-                      <input type="checkbox" :value="utxoOutpoint(utxo)" x-model="selectedTransferUtxos">
+                      <input type="checkbox" :value="utxoOutpoint(utxo)" x-model="selectedTransferUtxos" @change="scheduleFeeEstimates">
                       <span>
                         <span class="utxo-node-label"><span>UTXO</span><span class="utxo-node-amount">LUUN <span x-text="amountLabel(utxo.amount)"></span></span></span>
                         <code class="tx-value hash" x-text="utxoOutpoint(utxo)"></code>
@@ -1670,11 +1821,26 @@ const INDEX_HTML: &str = r#"<!doctype html>
           <div class="panel-description">Burn LUUN to compete for block leadership. Winning burns produce PoB/VDF blocks and earn the transaction fees in those blocks.</div>
           <form class="mining-form" @submit.prevent="saveBurn">
             <div class="burn-fields">
-              <label>LUUN per block<input x-model="burnAmountDraft" @input="burnAmountDirty = true" type="number" min="0" step="0.000001"></label>
-              <label>Fee<input x-model="burnFeeDraft" @input="burnAmountDirty = true" type="number" min="0" step="0.000001"></label>
+              <label>LUUN per block<input x-model="burnAmountDraft" @input="burnAmountDirty = true; scheduleFeeEstimates()" type="number" min="0" step="0.000001"></label>
+              <label>Fee / byte<input x-model="burnFeeDraft" @input="burnAmountDirty = true; scheduleFeeEstimates()" type="number" min="0" step="0.000001" required></label>
               <button class="primary" type="submit">Save</button>
             </div>
+            <div class="fee-preview" x-text="feeEstimateLabel('burn')"></div>
           </form>
+          <div class="mine-stats fee-history" aria-label="Recent block fees">
+            <div class="mine-stat">
+              <div class="mine-stat-label">Last block fees</div>
+              <div class="mine-stat-value money">LUUN <span x-text="amountLabel(recentBlockFeeAverage(1))"></span></div>
+            </div>
+            <div class="mine-stat">
+              <div class="mine-stat-label">5 block avg</div>
+              <div class="mine-stat-value money">LUUN <span x-text="amountLabel(recentBlockFeeAverage(5))"></span></div>
+            </div>
+            <div class="mine-stat">
+              <div class="mine-stat-label">30 block avg</div>
+              <div class="mine-stat-value money">LUUN <span x-text="amountLabel(recentBlockFeeAverage(30))"></span></div>
+            </div>
+          </div>
         </div>
         <div class="panel">
           <h3>Mine</h3>
@@ -1688,7 +1854,7 @@ const INDEX_HTML: &str = r#"<!doctype html>
                 </div>
                 <div class="mine-stat">
                   <div class="mine-stat-label">Finalizer fee</div>
-                  <div class="mine-stat-value">LUUN <span x-text="amountLabel(powMineFeeValue())"></span></div>
+                  <div class="mine-stat-value">LUUN <span x-text="amountLabel(feeEstimates.mine?.fee ?? 0)"></span></div>
                 </div>
                 <div class="mine-stat">
                   <div class="mine-stat-label">Miner receives</div>
@@ -1706,9 +1872,10 @@ const INDEX_HTML: &str = r#"<!doctype html>
               </label>
             </div>
             <div class="mine-fee-fields">
-              <label>Fee<input x-model="powMineFeeDraft" @input="powMineFeeDirty = true" type="number" min="0" step="0.000001"></label>
+              <label>Fee / byte<input x-model="powMineFeeDraft" @input="powMineFeeDirty = true; scheduleFeeEstimates()" type="number" min="0" step="0.000001" required></label>
               <button class="primary" type="submit">Save</button>
             </div>
+            <div class="fee-preview" x-text="feeEstimateLabel('mine')"></div>
           </form>
         </div>
       </div>
@@ -2089,7 +2256,7 @@ mod tests {
     use tower::ServiceExt;
 
     use crate::{
-        adapters::{config_store, config_store::UiConfig, p2p::GossipNetwork},
+        adapters::{config_store, config_store::UiConfig, p2p::GossipNetwork, wallet_store},
         app::{NodeCore, PeerBook},
         domain::{Block, Ledger, MICRO_LUUN, MINE_REWARD, OutPoint, Transaction, Wallet},
     };
@@ -2098,7 +2265,8 @@ mod tests {
         AUTH_COOKIE_NAME, HttpState, TransferForm, api_auth_login_form, api_auth_setup_form,
         api_auth_status, dev_seed_verify_bypass_allowed, hash_password, hex_encode, pbkdf2_sha256,
         persist_burn_settings_config, persist_pow_mining_config, require_auth_middleware,
-        validate_password, validate_transfer_form, verify_password, wallet_transaction_rows,
+        required_fee_per_byte_burn, required_fee_per_byte_mine, validate_password,
+        validate_transfer_form, verify_password, wallet_transaction_rows,
     };
 
     #[test]
@@ -2316,7 +2484,8 @@ mod tests {
 
     async fn auth_test_state(config_path: std::path::PathBuf, config: UiConfig) -> HttpState {
         config_store::save(&config_path, &config).unwrap();
-        let wallet = Wallet::from_seed("auth-test-wallet");
+        let wallet_path = config_path.with_file_name("wallet.json");
+        let (wallet, _) = wallet_store::replace_with_generated_seed_phrase(&wallet_path).unwrap();
         let ledger = Ledger::new(BTreeMap::new(), 1);
         let node = Arc::new(Mutex::new(NodeCore::from_ledger(wallet, ledger, 0)));
         let peers = Arc::new(Mutex::new(PeerBook::default()));
@@ -2329,7 +2498,7 @@ mod tests {
                 config_store::load_or_create(&config_path).unwrap(),
             )),
             config_path,
-            wallet_path: std::path::PathBuf::from("wallet.json"),
+            wallet_path,
             auth_sessions: Arc::new(Mutex::new(BTreeMap::new())),
         }
     }
@@ -2452,7 +2621,7 @@ mod tests {
         let error = validate_transfer_form(TransferForm {
             to: " ".to_string(),
             amount: 1,
-            fee: Some(1),
+            fee_per_byte: Some(1),
             utxos: String::new(),
         })
         .unwrap_err();
@@ -2461,7 +2630,7 @@ mod tests {
         let error = validate_transfer_form(TransferForm {
             to: "abc".to_string(),
             amount: 0,
-            fee: Some(1),
+            fee_per_byte: Some(1),
             utxos: String::new(),
         })
         .unwrap_err();
@@ -2474,11 +2643,29 @@ mod tests {
         let error = validate_transfer_form(TransferForm {
             to: "abc".to_string(),
             amount: 1,
-            fee: None,
+            fee_per_byte: None,
             utxos: String::new(),
         })
         .unwrap_err();
-        assert!(error.to_string().contains("fee is required"));
+        assert!(error.to_string().contains("fee per byte is required"));
+    }
+
+    #[test]
+    fn burn_and_mine_forms_require_fee_per_byte() {
+        let burn = required_fee_per_byte_burn(&super::BurnSettingsForm {
+            enabled: Some(true),
+            amount: 1,
+            fee_per_byte: None,
+        })
+        .unwrap_err();
+        assert!(burn.to_string().contains("fee per byte is required"));
+
+        let mine = required_fee_per_byte_mine(&super::PowMiningForm {
+            enabled: true,
+            fee_per_byte: None,
+        })
+        .unwrap_err();
+        assert!(mine.to_string().contains("fee per byte is required"));
     }
 
     #[test]
@@ -2486,7 +2673,7 @@ mod tests {
         let (to, amount, fee, utxos) = validate_transfer_form(TransferForm {
             to: "  abc  ".to_string(),
             amount: 2,
-            fee: Some(3),
+            fee_per_byte: Some(3),
             utxos: String::new(),
         })
         .unwrap();
@@ -2502,7 +2689,7 @@ mod tests {
         let (_, _, _, utxos) = validate_transfer_form(TransferForm {
             to: "abc".to_string(),
             amount: 2,
-            fee: Some(3),
+            fee_per_byte: Some(3),
             utxos: "tx-one:0\ntx:with:colons:7,\n".to_string(),
         })
         .unwrap();

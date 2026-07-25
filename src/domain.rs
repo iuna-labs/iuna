@@ -11,6 +11,7 @@ pub const BLOCK_REWARD: Amount = 100 * MICRO_LUUN;
 pub const MINE_REWARD: Amount = MICRO_LUUN;
 pub const DEFAULT_MINE_FEE: Amount = MINE_REWARD / 100;
 pub const DEFAULT_TRANSACTION_FEE: Amount = MICRO_LUUN;
+pub const DEFAULT_FEE_PER_BYTE: Amount = 1;
 pub const MAX_BLOCK_BYTES: usize = 100_000;
 pub const VDF_TARGET_BLOCK_MS: u64 = 60_000;
 pub const MINE_DIFFICULTY_BITS: u32 = 12;
@@ -224,6 +225,10 @@ impl Transaction {
 
     pub fn canonical(&self) -> String {
         format!("{}:{}", self.signing_payload(), self.signature())
+    }
+
+    pub fn serialized_size_bytes(&self) -> Result<usize> {
+        serialized_transaction_size_bytes(self)
     }
 
     fn signing_payload(&self) -> String {

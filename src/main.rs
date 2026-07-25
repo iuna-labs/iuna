@@ -39,8 +39,9 @@ async fn main() -> Result<()> {
             chain_store.path().display()
         );
     }
-    let wallet = wallet_store::load_or_create(&wallet_path)?;
     let mut ui_config = config_store::load_or_create(&config_path)?;
+    let wallet_load = load_startup_wallet(&wallet_path)?;
+    let wallet_address = wallet_load.address().to_string();
     if opts.chain_mode == ChainMode::Genesis {
         ui_config.setup_complete = false;
         ui_config.mining_enabled = true;
@@ -49,18 +50,27 @@ async fn main() -> Result<()> {
         ui_config.burn_fee = GENESIS_INITIAL_BURN_FEE;
         config_store::save(&config_path, &ui_config)?;
     }
-    let ledger = initialize_ledger(&opts, wallet.address(), &chain_store).await?;
+    let ledger = initialize_ledger(&opts, &wallet_address, &chain_store).await?;
     let has_chain = opts.has_chain() || persisted_chain_exists;
     let initial_burn_per_block = initial_burn_per_block(&opts, &ui_config);
     let initial_burn_fee = initial_burn_fee(&opts, &ui_config);
 
-    let mut node_core = NodeCore::from_ledger_with_burn_fee_and_enabled(
-        wallet,
-        ledger,
-        ui_config.mining_enabled,
-        initial_burn_per_block,
-        initial_burn_fee,
-    );
+    let mut node_core = match wallet_load {
+        StartupWallet::Unlocked(wallet) => NodeCore::from_ledger_with_burn_fee_and_enabled(
+            wallet,
+            ledger,
+            ui_config.mining_enabled,
+            initial_burn_per_block,
+            initial_burn_fee,
+        ),
+        StartupWallet::Locked { address } => NodeCore::from_locked_wallet_address(
+            address,
+            ledger,
+            ui_config.mining_enabled,
+            initial_burn_per_block,
+            initial_burn_fee,
+        ),
+    };
     node_core.set_pow_mining_settings(ui_config.pow_mining_enabled, ui_config.pow_mine_fee)?;
     let node: SharedNode = Arc::new(Mutex::new(node_core));
     let ui_config = Arc::new(Mutex::new(ui_config));
@@ -73,13 +83,16 @@ async fn main() -> Result<()> {
     }
 
     println!("luun wallet: {}", node.lock().await.wallet_address());
+    if node.lock().await.wallet_is_locked() {
+        println!("wallet locked: unlock it in the management UI");
+    }
     println!("wallet file: {}", wallet_path.display());
     println!("config file: {}", config_path.display());
     println!("chain database: {}", chain_store.path().display());
     println!("management UI: http://{}", opts.http_addr);
     println!("p2p listener: {}", opts.p2p_addr);
     println!(
-        "automatic mining: VDF-driven, burning {} LUUN per block with {} LUUN fee",
+        "automatic mining: VDF-driven, burning {} LUUN per block with {} LUUN per byte fee rate",
         format_luun(initial_burn_per_block),
         format_luun(initial_burn_fee)
     );
@@ -119,6 +132,38 @@ async fn main() -> Result<()> {
         opts.http_addr,
     )
     .await
+}
+
+enum StartupWallet {
+    Unlocked(luun::domain::Wallet),
+    Locked { address: String },
+}
+
+impl StartupWallet {
+    fn address(&self) -> &str {
+        match self {
+            Self::Unlocked(wallet) => wallet.address(),
+            Self::Locked { address } => address,
+        }
+    }
+}
+
+fn load_startup_wallet(wallet_path: &Path) -> Result<StartupWallet> {
+    match wallet_store::load_or_create(wallet_path) {
+        Ok(wallet) => Ok(StartupWallet::Unlocked(wallet)),
+        Err(error) => {
+            let Some(metadata) = wallet_store::metadata(wallet_path)? else {
+                return Err(error);
+            };
+            if metadata.encrypted {
+                Ok(StartupWallet::Locked {
+                    address: metadata.address,
+                })
+            } else {
+                Err(error)
+            }
+        }
+    }
 }
 
 fn format_luun(amount: Amount) -> String {
@@ -560,7 +605,7 @@ mod tests {
     use std::{collections::BTreeMap, sync::Arc, time::Duration};
 
     use luun::{
-        adapters::{chain_store::SqliteChainStore, config_store::UiConfig},
+        adapters::{chain_store::SqliteChainStore, config_store::UiConfig, wallet_store},
         app::{DEFAULT_BURN_PER_BLOCK, NodeCore},
         domain::{BLOCK_REWARD, GenesisBurn, Ledger, MICRO_LUUN, Wallet},
     };
@@ -570,8 +615,8 @@ mod tests {
 
     use super::{
         ChainMode, CliOptions, GENESIS_INITIAL_BURN_FEE, GENESIS_INITIAL_BURN_PER_BLOCK,
-        extrapolate_vdf_rounds, help_text, initial_burn_fee, initial_burn_per_block,
-        initialize_ledger, measure_vdf_rounds, persist_chain_snapshot,
+        StartupWallet, extrapolate_vdf_rounds, help_text, initial_burn_fee, initial_burn_per_block,
+        initialize_ledger, load_startup_wallet, measure_vdf_rounds, persist_chain_snapshot,
         run_chain_persistence_with_interval, validate_wallet_for_mode,
     };
 
@@ -599,6 +644,22 @@ mod tests {
         let block = ledger.mine_next_block(wallet, 1_000).unwrap();
         ledger.apply_locally_mined_block(block).unwrap();
         ledger
+    }
+
+    #[test]
+    fn encrypted_startup_wallet_loads_as_locked_metadata() {
+        let dir = tempdir().unwrap();
+        let path = dir.path().join("wallet.json");
+        let (wallet, _) =
+            wallet_store::replace_with_generated_seed_phrase_encrypted(&path, "password-123456")
+                .unwrap();
+
+        let startup = load_startup_wallet(&path).unwrap();
+
+        match startup {
+            StartupWallet::Locked { address } => assert_eq!(address, wallet.address()),
+            StartupWallet::Unlocked(_) => panic!("encrypted wallet should start locked"),
+        }
     }
 
     #[test]

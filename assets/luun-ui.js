@@ -30,17 +30,19 @@ window.luunApp = function luunApp() {
     setupFeedback: null,
     burnAmount: 0,
     burnAmountDraft: 0,
-    burnFee: 1000000,
-    burnFeeDraft: "1",
+    burnFee: 1,
+    burnFeeDraft: "0.000001",
     miningEnabled: false,
     powMiningEnabled: false,
-    powMineFee: 10000,
-    powMineFeeDraft: "0.01",
+    powMineFee: 1,
+    powMineFeeDraft: "0.000001",
     powMineFeeDirty: false,
     burnAmountDirty: false,
     transferTo: "",
     transferAmount: null,
-    transferFee: "1",
+    transferFee: "0.000001",
+    feeEstimates: { transfer: null, burn: null, mine: null },
+    feeEstimateTimer: null,
     showSendAdvanced: false,
     selectedTransferUtxos: [],
     peerAddress: "",
@@ -351,7 +353,7 @@ window.luunApp = function luunApp() {
         const [config, status, blocks, walletTxs, walletUtxos, mempool, peers, p2pMetrics] = await Promise.all([
           this.fetchJson("/api/config"),
           this.fetchJson("/api/status"),
-          this.fetchJson("/api/blocks"),
+          this.fetchJson("/api/blocks?limit=30"),
           this.fetchJson("/api/wallet/transactions"),
           this.fetchJson("/api/wallet/utxos"),
           this.fetchJson("/api/mempool"),
@@ -382,6 +384,7 @@ window.luunApp = function luunApp() {
           this.powMineFeeDraft = this.amountLabel(this.powMineFee);
         }
         this.lastUpdated = new Date();
+        this.scheduleFeeEstimates();
       } catch (error) {
         if (String(error.message || "").includes("401")) {
           await this.refreshAuth();
@@ -563,17 +566,93 @@ window.luunApp = function luunApp() {
       this.showFlash(successMessage, "success");
     },
 
+    scheduleFeeEstimates() {
+      if (this.feeEstimateTimer) clearTimeout(this.feeEstimateTimer);
+      this.feeEstimateTimer = setTimeout(() => this.refreshFeeEstimates(), 220);
+    },
+
+    async refreshFeeEstimates() {
+      if (this.showingAuth()) return;
+      await Promise.all([
+        this.refreshBurnFeeEstimate(),
+        this.refreshMineFeeEstimate(),
+        this.refreshTransferFeeEstimate(),
+      ]);
+    },
+
+    async refreshBurnFeeEstimate() {
+      const amount = this.parseLuunAmount(this.burnAmountDraft);
+      const feePerByte = this.parseLuunAmount(this.burnFeeDraft);
+      if (amount <= 0) {
+        this.feeEstimates.burn = null;
+        return;
+      }
+      this.feeEstimates.burn = await this.fetchFeeEstimate("/api/fee-estimate/burn", {
+        amount,
+        fee_per_byte: feePerByte,
+      });
+    },
+
+    async refreshMineFeeEstimate() {
+      const feePerByte = this.parseLuunAmount(this.powMineFeeDraft);
+      this.feeEstimates.mine = await this.fetchFeeEstimate("/api/fee-estimate/mine", {
+        enabled: this.powMiningEnabled,
+        fee_per_byte: feePerByte,
+      });
+    },
+
+    async refreshTransferFeeEstimate() {
+      const amount = this.parseLuunAmount(this.transferAmount);
+      const feePerByte = this.parseLuunAmount(this.transferFee);
+      if (!this.transferTo.trim() || amount <= 0) {
+        this.feeEstimates.transfer = null;
+        return;
+      }
+      this.feeEstimates.transfer = await this.fetchFeeEstimate("/api/fee-estimate/transfer", {
+        to: this.transferTo,
+        amount,
+        fee_per_byte: feePerByte,
+        utxos: this.selectedTransferUtxos.join("\n"),
+      });
+    },
+
+    async fetchFeeEstimate(path, fields) {
+      try {
+        const body = new URLSearchParams();
+        for (const [key, value] of Object.entries(fields)) body.set(key, value);
+        const response = await fetch(path, {
+          method: "POST",
+          headers: { Accept: "application/json", "Content-Type": "application/x-www-form-urlencoded" },
+          body,
+        });
+        const payload = await response.json();
+        if (!response.ok || !payload.ok) {
+          return { error: payload.error || `${path} returned ${response.status}` };
+        }
+        return payload;
+      } catch (error) {
+        return { error: error.message };
+      }
+    },
+
+    feeEstimateLabel(kind) {
+      const estimate = this.feeEstimates[kind];
+      if (!estimate) return "Enter details to estimate fee";
+      if (estimate.error) return estimate.error;
+      return `${estimate.bytes} bytes -> LUUN ${this.amountLabel(estimate.fee)}`;
+    },
+
     async saveBurn() {
       try {
         const amount = this.parseLuunAmount(this.burnAmountDraft);
-        const fee = this.parseLuunAmount(this.burnFeeDraft);
+        const fee = this.parseLuunAmountRequired(this.burnFeeDraft, "Burn fee per byte is required");
         this.burnAmountDraft = this.amountLabel(amount);
         this.burnFeeDraft = this.amountLabel(fee);
         await this.postForm(
           "/api/settings/burn-per-block",
-          { enabled: this.miningEnabled, amount, fee },
+          { enabled: this.miningEnabled, amount, fee_per_byte: fee },
           this.miningEnabled
-            ? `Mining on: ${this.amountLabel(amount)} LUUN per block with ${this.amountLabel(fee)} fee`
+            ? `Mining on: ${this.amountLabel(amount)} LUUN per block with ${this.amountLabel(fee)} per byte`
             : `Mining settings saved while off`
         );
         this.burnAmountDirty = false;
@@ -588,7 +667,7 @@ window.luunApp = function luunApp() {
       const previous = this.miningEnabled;
       try {
         const amount = this.parseLuunAmount(this.burnAmountDraft);
-        const fee = this.parseLuunAmount(this.burnFeeDraft);
+        const fee = this.parseLuunAmountRequired(this.burnFeeDraft, "Burn fee per byte is required");
         if (enabled && amount === 0) {
           this.miningEnabled = false;
           throw new Error("Set LUUN per block before turning mining on");
@@ -596,7 +675,7 @@ window.luunApp = function luunApp() {
         this.miningEnabled = enabled;
         await this.postForm(
           "/api/settings/burn-per-block",
-          { enabled, amount, fee },
+          { enabled, amount, fee_per_byte: fee },
           enabled ? "Mining turned on" : "Mining turned off"
         );
         this.burnAmountDirty = false;
@@ -611,11 +690,11 @@ window.luunApp = function luunApp() {
     async setPowMiningEnabled(enabled) {
       const previous = this.powMiningEnabled;
       try {
-        const fee = this.parseLuunAmount(this.powMineFeeDraft);
+        const fee = this.parseLuunAmountRequired(this.powMineFeeDraft, "Mine fee per byte is required");
         this.powMiningEnabled = enabled;
         await this.postForm(
           "/api/settings/pow-mining",
-          { enabled, fee },
+          { enabled, fee_per_byte: fee },
           enabled ? "PoW mining turned on" : "PoW mining turned off"
         );
         this.powMineFeeDirty = false;
@@ -628,13 +707,13 @@ window.luunApp = function luunApp() {
 
     async savePowMining() {
       try {
-        const fee = this.parseLuunAmount(this.powMineFeeDraft);
+        const fee = this.parseLuunAmountRequired(this.powMineFeeDraft, "Mine fee per byte is required");
         this.powMineFeeDraft = this.amountLabel(fee);
         await this.postForm(
           "/api/settings/pow-mining",
-          { enabled: this.powMiningEnabled, fee },
+          { enabled: this.powMiningEnabled, fee_per_byte: fee },
           this.powMiningEnabled
-            ? `Mine fee set to ${this.amountLabel(fee)} LUUN`
+            ? `Mine fee rate set to ${this.amountLabel(fee)} LUUN per byte`
             : `Mine settings saved while off`
         );
         this.powMineFeeDirty = false;
@@ -658,7 +737,7 @@ window.luunApp = function luunApp() {
 
     powMineNetReward() {
       const reward = Math.max(0, Math.trunc(Number(this.status.chain?.mine_reward ?? 0)));
-      return Math.max(0, reward - this.powMineFeeValue());
+      return Math.max(0, reward - (this.feeEstimates.mine?.fee ?? this.powMineFeeValue()));
     },
 
     amountLabel(value) {
@@ -682,20 +761,29 @@ window.luunApp = function luunApp() {
       return Math.max(0, Math.trunc(whole * 1000000 + fractional));
     },
 
+    parseLuunAmountRequired(value, message) {
+      const text = String(value ?? "").trim();
+      if (!text) throw new Error(message);
+      const parsed = this.parseLuunAmount(text);
+      if (parsed === 0 && !/^0(?:\.0*)?$/.test(text)) throw new Error(message);
+      return parsed;
+    },
+
     async sendTransfer() {
       try {
         const amount = this.parseLuunAmount(this.transferAmount);
-        const fee = this.parseLuunAmount(this.transferFee);
+        const fee = this.parseLuunAmountRequired(this.transferFee, "Transfer fee per byte is required");
         const recipient = this.short(this.transferTo);
         await this.postForm(
           "/api/transfer",
-          { to: this.transferTo, amount, fee, utxos: this.selectedTransferUtxos.join("\n") },
-          `Queued transfer of ${this.amountLabel(amount)} LUUN to ${recipient} with ${this.amountLabel(fee)} fee`
+          { to: this.transferTo, amount, fee_per_byte: fee, utxos: this.selectedTransferUtxos.join("\n") },
+          `Queued transfer of ${this.amountLabel(amount)} LUUN to ${recipient}`
         );
         this.transferTo = "";
         this.transferAmount = null;
         this.selectedTransferUtxos = [];
         this.showSendAdvanced = false;
+        this.feeEstimates.transfer = null;
       } catch (error) {
         this.showFlash(error.message, "error");
       }
@@ -845,10 +933,12 @@ window.luunApp = function luunApp() {
 
     selectAllTransferUtxos() {
       this.selectedTransferUtxos = this.walletUtxos.map((utxo) => this.utxoOutpoint(utxo));
+      this.scheduleFeeEstimates();
     },
 
     clearTransferUtxos() {
       this.selectedTransferUtxos = [];
+      this.scheduleFeeEstimates();
     },
 
     selectedTransferUtxoTotal() {
@@ -859,7 +949,7 @@ window.luunApp = function luunApp() {
     },
 
     transferRequiredTotal() {
-      return this.parseLuunAmount(this.transferAmount) + this.parseLuunAmount(this.transferFee);
+      return this.parseLuunAmount(this.transferAmount) + Number(this.feeEstimates.transfer?.fee || 0);
     },
 
     selectedTransferUtxosCoverTransfer() {
@@ -890,6 +980,18 @@ window.luunApp = function luunApp() {
       return block.transactions
         .filter((tx) => tx.kind === "burn")
         .reduce((sum, tx) => sum + this.txAmount(tx), 0);
+    },
+
+    blockTotalFees(block) {
+      const explicitTotal = block?.totalFees ?? block?.total_fees ?? block?.reward;
+      if (explicitTotal !== null && explicitTotal !== undefined) return Number(explicitTotal) || 0;
+      return (block?.transactions || []).reduce((sum, tx) => sum + Number(tx.fee || 0), 0);
+    },
+
+    recentBlockFeeAverage(count) {
+      const sample = this.blocks.filter((block) => block.height > 0).slice(0, count);
+      if (sample.length === 0) return 0;
+      return Math.round(sample.reduce((sum, block) => sum + this.blockTotalFees(block), 0) / sample.length);
     },
 
     blockBurnCount(block) {

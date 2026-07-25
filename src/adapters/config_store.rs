@@ -9,11 +9,11 @@ use std::{
 use anyhow::{Context, Result, bail};
 use serde::{Deserialize, Serialize};
 
-use crate::domain::{Amount, DEFAULT_MINE_FEE, DEFAULT_TRANSACTION_FEE, MICRO_LUUN};
+use crate::domain::{Amount, DEFAULT_FEE_PER_BYTE, MICRO_LUUN};
 
 const CONFIG_FILE_VERSION: u32 = 1;
 const AMOUNT_UNIT_MICROLUUN: &str = "microluun";
-pub const DEFAULT_BURN_FEE: Amount = DEFAULT_TRANSACTION_FEE;
+pub const DEFAULT_BURN_FEE: Amount = DEFAULT_FEE_PER_BYTE;
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 pub struct UiConfig {
@@ -37,7 +37,7 @@ impl Default for UiConfig {
             pow_mining_enabled: false,
             burn_per_block: 0,
             burn_fee: DEFAULT_BURN_FEE,
-            pow_mine_fee: DEFAULT_MINE_FEE,
+            pow_mine_fee: DEFAULT_FEE_PER_BYTE,
             peers: Vec::new(),
         }
     }
@@ -57,16 +57,12 @@ struct ConfigFile {
     pow_mining_enabled: bool,
     #[serde(default)]
     burn_per_block: Amount,
-    #[serde(default = "default_burn_fee")]
-    burn_fee: Amount,
+    #[serde(default)]
+    burn_fee: Option<Amount>,
     #[serde(default)]
     pow_mine_fee: Option<Amount>,
     #[serde(default)]
     peers: Vec<String>,
-}
-
-fn default_burn_fee() -> Amount {
-    1
 }
 
 pub fn load_or_create(path: &Path) -> Result<UiConfig> {
@@ -93,7 +89,7 @@ pub fn save(path: &Path, config: &UiConfig) -> Result<()> {
         mining_enabled: Some(config.mining_enabled),
         pow_mining_enabled: config.pow_mining_enabled,
         burn_per_block: config.burn_per_block,
-        burn_fee: config.burn_fee,
+        burn_fee: Some(config.burn_fee),
         pow_mine_fee: Some(config.pow_mine_fee),
         peers: config.peers.clone(),
     };
@@ -132,11 +128,14 @@ fn load(path: &Path) -> Result<UiConfig> {
         mining_enabled: stored.mining_enabled.unwrap_or(stored.burn_per_block > 0),
         pow_mining_enabled: stored.pow_mining_enabled,
         burn_per_block: stored.burn_per_block.saturating_mul(scale),
-        burn_fee: stored.burn_fee.saturating_mul(scale),
+        burn_fee: stored
+            .burn_fee
+            .map(|fee| fee.saturating_mul(scale))
+            .unwrap_or(DEFAULT_BURN_FEE),
         pow_mine_fee: stored
             .pow_mine_fee
             .map(|fee| fee.saturating_mul(scale))
-            .unwrap_or(DEFAULT_MINE_FEE),
+            .unwrap_or(DEFAULT_FEE_PER_BYTE),
         peers: stored.peers,
     })
 }
@@ -159,7 +158,7 @@ mod tests {
 
     use crate::domain::MICRO_LUUN;
 
-    use super::{DEFAULT_BURN_FEE, DEFAULT_MINE_FEE, UiConfig, load_or_create, save};
+    use super::{DEFAULT_BURN_FEE, DEFAULT_FEE_PER_BYTE, UiConfig, load_or_create, save};
 
     #[test]
     fn creates_default_config_file() {
@@ -177,8 +176,8 @@ mod tests {
         assert!(stored.contains("\"mining_enabled\": false"));
         assert!(stored.contains("\"pow_mining_enabled\": false"));
         assert!(stored.contains("\"burn_per_block\": 0"));
-        assert!(stored.contains("\"burn_fee\": 1000000"));
-        assert!(stored.contains("\"pow_mine_fee\": 10000"));
+        assert!(stored.contains("\"burn_fee\": 1"));
+        assert!(stored.contains("\"pow_mine_fee\": 1"));
         assert!(stored.contains("\"peers\": []"));
     }
 
@@ -247,7 +246,7 @@ mod tests {
         assert!(!config.pow_mining_enabled);
         assert_eq!(config.burn_per_block, 0);
         assert_eq!(config.burn_fee, DEFAULT_BURN_FEE);
-        assert_eq!(config.pow_mine_fee, DEFAULT_MINE_FEE);
+        assert_eq!(config.pow_mine_fee, DEFAULT_FEE_PER_BYTE);
         assert_eq!(config.peers, vec!["127.0.0.1:9444"]);
     }
 
@@ -273,6 +272,6 @@ mod tests {
         assert!(config.mining_enabled);
         assert_eq!(config.burn_per_block, 2 * MICRO_LUUN);
         assert_eq!(config.burn_fee, MICRO_LUUN);
-        assert_eq!(config.pow_mine_fee, DEFAULT_MINE_FEE);
+        assert_eq!(config.pow_mine_fee, DEFAULT_FEE_PER_BYTE);
     }
 }

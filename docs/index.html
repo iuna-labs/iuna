@@ -1,0 +1,140 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Luun</title>
+  <style>
+    :root {
+      color-scheme: dark;
+      font-family: Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+      background: #0f1012;
+      color: #edf2f5;
+    }
+    * { box-sizing: border-box; }
+    body { margin: 0; background: #0f1012; color: #edf2f5; }
+    a { color: #d5f55f; }
+    code { color: #c7f5ea; overflow-wrap: anywhere; }
+    pre { margin: 0; overflow-x: auto; border: 1px solid #2a3035; border-radius: 8px; padding: 14px; background: #111316; }
+    .hero { min-height: 78vh; display: grid; align-items: end; padding: 56px 22px 28px; background: linear-gradient(180deg, #15171a 0%, #0f1012 100%); }
+    .wrap { width: min(980px, 100%); margin: 0 auto; }
+    .mark { width: 54px; height: 54px; display: grid; place-items: center; border-radius: 8px; background: #d5f55f; color: #11140c; font-size: 28px; font-weight: 950; }
+    h1 { margin: 24px 0 12px; font-size: clamp(44px, 9vw, 96px); line-height: .95; letter-spacing: 0; }
+    h2 { margin: 0 0 12px; font-size: 25px; }
+    h3 { margin: 0 0 10px; font-size: 17px; }
+    p { max-width: 700px; color: #b8c2c8; font-size: 18px; line-height: 1.55; }
+    .lead { color: #edf2f5; font-size: 22px; }
+    .next { margin-top: 52px; color: #8d989f; font-size: 13px; font-weight: 800; text-transform: uppercase; }
+    section { padding: 34px 22px; border-top: 1px solid #22282d; }
+    .grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(240px, 1fr)); gap: 14px; margin-top: 18px; }
+    .card { border: 1px solid #2a3035; border-radius: 8px; padding: 16px; background: #181b1f; }
+    .card p { margin: 0; font-size: 15px; }
+    .steps { display: grid; gap: 14px; margin-top: 18px; }
+    .step { display: grid; grid-template-columns: 38px minmax(0, 1fr); gap: 12px; align-items: start; }
+    .num { width: 32px; height: 32px; display: grid; place-items: center; border-radius: 999px; background: #d5f55f; color: #11140c; font-weight: 900; }
+    .note { border-left: 3px solid #d5f55f; padding-left: 14px; color: #cbd3d7; }
+    .footer { padding-bottom: 56px; color: #8d989f; }
+    @media (max-width: 640px) {
+      .hero { min-height: 70vh; }
+      p { font-size: 16px; }
+      .lead { font-size: 19px; }
+      .step { grid-template-columns: 1fr; }
+    }
+  </style>
+</head>
+<body>
+  <header class="hero">
+    <div class="wrap">
+      <div class="mark">L</div>
+      <h1>Luun</h1>
+      <p class="lead">A small experimental currency where blocks are finalized by burning LUUN, while new coins are introduced by proof-of-work mine actions.</p>
+      <p>Luun is not a mainnet and not money yet. It is a devnet prototype for learning how a wallet, node, miner, mempool, and peer network behave when real people run it on real machines.</p>
+      <div class="next">Start a node below</div>
+    </div>
+  </header>
+
+  <section>
+    <div class="wrap">
+      <h2>What Makes It Different</h2>
+      <div class="grid">
+        <div class="card">
+          <h3>Burn To Finalize</h3>
+          <p>Nodes burn LUUN to enter the block lottery. The selected burner finalizes the next block and earns the byte-priced fees inside it.</p>
+        </div>
+        <div class="card">
+          <h3>Mine To Issue</h3>
+          <p>Proof-of-work mine actions introduce new LUUN. A miner chooses a fee rate for the finalizer; the rest of the 1 LUUN reward goes to the miner.</p>
+        </div>
+        <div class="card">
+          <h3>Friendly Devnet</h3>
+          <p>The current network is for testing with people you trust. Expect resets, bugs, and protocol changes.</p>
+        </div>
+      </div>
+    </div>
+  </section>
+
+  <section>
+    <div class="wrap">
+      <h2>Run The First Node</h2>
+      <p>Clone the repo, build it with Cargo, and start a fresh chain from an empty data directory.</p>
+      <div class="steps">
+        <div class="step">
+          <div class="num">1</div>
+          <div>
+            <h3>Start Genesis</h3>
+            <pre><code>cargo run -- --genesis --data-dir .luun-devnet --p2p 0.0.0.0:9444 --http 127.0.0.1:18661</code></pre>
+          </div>
+        </div>
+        <div class="step">
+          <div class="num">2</div>
+          <div>
+            <h3>Open The Local UI</h3>
+            <p>Go to <code>http://127.0.0.1:18661</code>, set a password, write down the recovery phrase, and finish setup. The wallet file is encrypted with that password.</p>
+          </div>
+        </div>
+        <div class="step">
+          <div class="num">3</div>
+          <div>
+            <h3>Share Your P2P Address</h3>
+            <p>Give friends your public host and P2P port, for example <code>your-host.example:9444</code>. Keep the management UI bound to <code>127.0.0.1</code>.</p>
+          </div>
+        </div>
+      </div>
+    </div>
+  </section>
+
+  <section>
+    <div class="wrap">
+      <h2>Join A Friend</h2>
+      <p>Use a separate data directory and join the seed node your friend gives you.</p>
+      <pre><code>cargo run -- --data-dir .luun-friend --p2p 0.0.0.0:9445 --http 127.0.0.1:18661 --join your-friend-host:9444</code></pre>
+      <p>After joining, open the local UI, set your password, back up your recovery phrase, and wait for your friend to send you LUUN. Then you can send transactions, burn for block leadership, or enable PoW mine actions.</p>
+    </div>
+  </section>
+
+  <section>
+    <div class="wrap">
+      <h2>Important Safety Notes</h2>
+      <div class="grid">
+        <div class="card">
+          <h3>Do Not Expose The UI</h3>
+          <p>The management UI is password protected, but it should stay local. Use SSH tunneling or a private network if you need remote access.</p>
+        </div>
+        <div class="card">
+          <h3>Back Up The Phrase</h3>
+          <p>The encrypted wallet protects the file at rest. The recovery phrase is still the thing that restores the wallet.</p>
+        </div>
+        <div class="card">
+          <h3>Expect Resets</h3>
+          <p>This is a devnet. Chain state can be reset, protocol rules can change, and LUUN has no real-world value.</p>
+        </div>
+      </div>
+      <p class="note">For more technical details, see the README in the repository.</p>
+    </div>
+  </section>
+
+  <section class="footer">
+    <div class="wrap">Luun devnet prototype.</div>
+  </section>
+</body>
+</html>

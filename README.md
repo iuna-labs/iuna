@@ -81,19 +81,21 @@ Every non-genesis block must consume the selected eligible ticket, include at le
 
 The protocol targets 60-second blocks by retargeting the expected VDF rounds after each block. It uses a rolling average of recent block intervals and only moves the next round count by about 10% per block, so short bursts do not make the delay swing wildly. Every node derives the same next-round count from the validated chain.
 
-The base block reward is fixed at 100 LUUN, and miners collect transaction fees on top. The automatic burn setting has a burn amount and a fee; the burn amount is the ticket weight, while the fee is paid to the miner that includes it. The miner includes the best valid burn for liveness, then fills the remaining block space by fee-rate while respecting nonce and balance validity. The default burn is 0 LUUN per block with a 1-LUUN fee, so new nodes can join before they own LUUN. Genesis starters begin at 100 LUUN per block; after another wallet has LUUN, raise its burn from the Mining screen.
+The base block reward is fixed at 100 LUUN, and miners collect transaction fees on top. Transfers, burns, and PoW mine actions all set fees as LUUN per serialized byte; the node calculates the total fee from the final transaction size before submitting it. The automatic burn setting has a burn amount and a fee rate; the burn amount is the ticket weight, while the resulting fee is paid to the miner that includes it. The miner includes the best valid burn for liveness, then fills the remaining block space by fee-rate while respecting nonce and balance validity. The default burn is 0 LUUN per block with a 0.000001-LUUN-per-byte fee rate, so new nodes can join before they own LUUN. Genesis starters begin at 100 LUUN per block; after another wallet has LUUN, raise its burn from the Mining screen.
 
 The measured VDF round count is only the initial delay. After the first blocks, the protocol steers rounds toward the 60-second target.
 
 ## Wallet Storage
 
-Luun creates a new wallet file the first time a node starts or joins a chain. By default it lives at `.luun/wallet.json`, or at `<data-dir>/wallet.json` when `--data-dir` is set. Pass `--wallet path/to/wallet.json` to choose a specific wallet file. New wallet files store a 24-word recovery phrase and the derived Ed25519 public key address.
+Luun creates a new wallet file the first time a node starts or joins a chain. By default it lives at `.luun/wallet.json`, or at `<data-dir>/wallet.json` when `--data-dir` is set. Pass `--wallet path/to/wallet.json` to choose a specific wallet file.
 
-There is no default wallet seed in the binary. Keep the wallet file private; it contains the local wallet seed used to derive the address.
+During setup, the UI password encrypts the wallet seed at rest with PBKDF2-SHA256 and ChaCha20-Poly1305. On restart the node can read the wallet address from metadata, but the wallet remains locked until the password is entered in the management UI. Locked nodes can sync and show chain state, but cannot sign burns, transfers, or finalized blocks.
+
+There is no default wallet seed in the binary. Keep the wallet file and recovery phrase private.
 
 ## Node Config
 
-Luun stores UI setup state, configured peers, the configured automatic burn rate, and the automatic burn fee in `<data-dir>/config.json`. If `setup_complete` is false, the management UI opens the initial setup screen for wallet and peer setup. Completing setup and later runtime changes write the file through the HTTP API, so the choices follow the node data directory instead of a browser session.
+Luun stores UI setup state, configured peers, the configured automatic burn amount, and the burn/mine fee rates in `<data-dir>/config.json`. If `setup_complete` is false, the management UI opens the initial setup screen for wallet and peer setup. Completing setup and later runtime changes write the file through the HTTP API, so the choices follow the node data directory instead of a browser session.
 
 ## Chain Storage
 

@@ -5,11 +5,21 @@ use std::{
 };
 
 use anyhow::{Context, Result, anyhow, bail};
+use chacha20poly1305::{
+    ChaCha20Poly1305, KeyInit, Nonce,
+    aead::{Aead, Payload},
+};
+use pbkdf2::pbkdf2_hmac;
 use serde::{Deserialize, Serialize};
+use sha2::Sha256;
 
 use crate::domain::Wallet;
 
-const WALLET_FILE_VERSION: u32 = 2;
+const WALLET_FILE_VERSION: u32 = 3;
+const PLAINTEXT_WALLET_FILE_VERSION: u32 = 2;
+const WALLET_ENCRYPTION_ALGORITHM: &str = "chacha20poly1305";
+const WALLET_ENCRYPTION_KDF: &str = "pbkdf2-sha256";
+const WALLET_ENCRYPTION_ITERATIONS: u32 = 210_000;
 const GENERATED_SEED_WORDS: usize = 24;
 const SEED_WORDS: &[&str] = &[
     "able", "acid", "acorn", "adapt", "agent", "anchor", "angle", "apple", "asset", "atlas",
@@ -42,8 +52,27 @@ const SEED_WORDS: &[&str] = &[
 #[derive(Debug, Serialize, Deserialize)]
 struct WalletFile {
     version: u32,
-    seed: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    seed: Option<String>,
     address: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    encryption: Option<EncryptedWalletSeed>,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct WalletMetadata {
+    pub address: String,
+    pub encrypted: bool,
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+struct EncryptedWalletSeed {
+    algorithm: String,
+    kdf: String,
+    kdf_iterations: u32,
+    salt: String,
+    nonce: String,
+    ciphertext: String,
 }
 
 pub fn load_or_create(path: &Path) -> Result<Wallet> {
@@ -66,42 +95,116 @@ pub fn replace_with_generated_seed_phrase(path: &Path) -> Result<(Wallet, String
     Ok((wallet, seed))
 }
 
+pub fn replace_with_generated_seed_phrase_encrypted(
+    path: &Path,
+    password: &str,
+) -> Result<(Wallet, String)> {
+    let seed = generate_seed_phrase()?;
+    let wallet = write_wallet_encrypted(path, seed.clone(), password, WalletFileMode::Replace)?;
+    Ok((wallet, seed))
+}
+
 pub fn replace_with_imported_seed_phrase(path: &Path, seed_phrase: &str) -> Result<Wallet> {
     let seed = normalize_seed_phrase(seed_phrase)?;
     write_wallet(path, seed, WalletFileMode::Replace)
 }
 
+pub fn replace_with_imported_seed_phrase_encrypted(
+    path: &Path,
+    seed_phrase: &str,
+    password: &str,
+) -> Result<Wallet> {
+    let seed = normalize_seed_phrase(seed_phrase)?;
+    write_wallet_encrypted(path, seed, password, WalletFileMode::Replace)
+}
+
 pub fn setup_seed_phrase(path: &Path) -> Result<Option<String>> {
+    setup_seed_phrase_with_password(path, None)
+}
+
+pub fn setup_seed_phrase_with_password(
+    path: &Path,
+    password: Option<&str>,
+) -> Result<Option<String>> {
     if !path.exists() {
         return Ok(None);
     }
     let stored = read_wallet_file(path)?;
-    let normalized = match normalize_seed_phrase(&stored.seed) {
+    let seed = match wallet_seed(&stored, password) {
         Ok(seed) => seed,
         Err(_) => return Ok(None),
     };
-    if normalized == stored.seed {
+    let normalized = match normalize_seed_phrase(&seed) {
+        Ok(seed) => seed,
+        Err(_) => return Ok(None),
+    };
+    if normalized == seed {
         Ok(Some(normalized))
     } else {
         Ok(None)
     }
 }
 
-fn load(path: &Path) -> Result<Wallet> {
+pub fn metadata(path: &Path) -> Result<Option<WalletMetadata>> {
+    if !path.exists() {
+        return Ok(None);
+    }
     let stored = read_wallet_file(path)?;
+    Ok(Some(WalletMetadata {
+        address: stored.address,
+        encrypted: stored.encryption.is_some(),
+    }))
+}
 
-    let wallet = Wallet::from_seed(&stored.seed);
+pub fn load_with_password(path: &Path, password: &str) -> Result<Wallet> {
+    load_encrypted_or_plaintext(path, Some(password))
+}
+
+pub fn encrypt_existing_with_password(path: &Path, password: &str) -> Result<()> {
+    if !path.exists() {
+        return Ok(());
+    }
+    let stored = read_wallet_file(path)?;
+    if stored.encryption.is_some() {
+        let _ = wallet_from_stored(&stored, Some(password))?;
+        return Ok(());
+    }
+    let seed = stored.seed.context("wallet file does not contain a seed")?;
+    let seed = normalize_seed_phrase(&seed).unwrap_or(seed);
+    let wallet = Wallet::from_seed(&seed);
+    if wallet.address() != stored.address {
+        bail!(
+            "wallet file has address {}, but its seed derives {}",
+            stored.address,
+            wallet.address()
+        );
+    }
+    let mut file = open_wallet_file(path, WalletFileMode::Replace)?;
+    write_encrypted_wallet_file(&mut file, seed, wallet.address(), password)
+        .with_context(|| format!("failed to encrypt wallet file {}", path.display()))
+}
+
+fn load(path: &Path) -> Result<Wallet> {
+    load_encrypted_or_plaintext(path, None)
+}
+
+fn load_encrypted_or_plaintext(path: &Path, password: Option<&str>) -> Result<Wallet> {
+    let stored = read_wallet_file(path)?;
+    let wallet = wallet_from_stored(&stored, password)?;
     if stored.version == 1 {
         let mut file = OpenOptions::new()
             .write(true)
             .truncate(true)
             .open(path)
             .with_context(|| format!("failed to migrate wallet file {}", path.display()))?;
-        write_wallet_file(&mut file, stored.seed, wallet.address())
+        let seed = stored
+            .seed
+            .context("legacy wallet file does not contain a seed")?;
+        write_wallet_file(&mut file, seed, wallet.address())
             .with_context(|| format!("failed to migrate wallet file {}", path.display()))?;
         return Ok(wallet);
     }
-    if stored.version != WALLET_FILE_VERSION {
+    if stored.version != WALLET_FILE_VERSION && stored.version != PLAINTEXT_WALLET_FILE_VERSION {
         bail!(
             "unsupported wallet file version {} in {}",
             stored.version,
@@ -118,6 +221,22 @@ fn load(path: &Path) -> Result<Wallet> {
     }
 
     Ok(wallet)
+}
+
+fn wallet_from_stored(stored: &WalletFile, password: Option<&str>) -> Result<Wallet> {
+    let seed = wallet_seed(stored, password)?;
+    Ok(Wallet::from_seed(&seed))
+}
+
+fn wallet_seed(stored: &WalletFile, password: Option<&str>) -> Result<String> {
+    if let Some(encryption) = &stored.encryption {
+        let password = password.context("wallet is encrypted; unlock it with the UI password")?;
+        return decrypt_seed(encryption, &stored.address, password);
+    }
+    stored
+        .seed
+        .clone()
+        .context("wallet file does not contain a seed")
 }
 
 fn read_wallet_file(path: &Path) -> Result<WalletFile> {
@@ -140,16 +259,113 @@ fn write_wallet(path: &Path, seed: String, mode: WalletFileMode) -> Result<Walle
     Ok(wallet)
 }
 
+fn write_wallet_encrypted(
+    path: &Path,
+    seed: String,
+    password: &str,
+    mode: WalletFileMode,
+) -> Result<Wallet> {
+    let wallet = Wallet::from_seed(&seed);
+    let mut file = open_wallet_file(path, mode)?;
+    write_encrypted_wallet_file(&mut file, seed, wallet.address(), password)
+        .with_context(|| format!("failed to write wallet file {}", path.display()))?;
+    Ok(wallet)
+}
+
 fn write_wallet_file(file: &mut File, seed: String, address: &str) -> Result<()> {
     let stored = WalletFile {
-        version: WALLET_FILE_VERSION,
-        seed,
+        version: PLAINTEXT_WALLET_FILE_VERSION,
+        seed: Some(seed),
         address: address.to_string(),
+        encryption: None,
     };
     let bytes = serde_json::to_vec_pretty(&stored).context("failed to serialize wallet file")?;
     file.write_all(&bytes)?;
     file.write_all(b"\n")?;
     Ok(())
+}
+
+fn write_encrypted_wallet_file(
+    file: &mut File,
+    seed: String,
+    address: &str,
+    password: &str,
+) -> Result<()> {
+    let encryption = encrypt_seed(&seed, address, password)?;
+    let stored = WalletFile {
+        version: WALLET_FILE_VERSION,
+        seed: None,
+        address: address.to_string(),
+        encryption: Some(encryption),
+    };
+    let bytes = serde_json::to_vec_pretty(&stored).context("failed to serialize wallet file")?;
+    file.write_all(&bytes)?;
+    file.write_all(b"\n")?;
+    Ok(())
+}
+
+fn encrypt_seed(seed: &str, address: &str, password: &str) -> Result<EncryptedWalletSeed> {
+    let salt = random_bytes::<16>()?;
+    let nonce = random_bytes::<12>()?;
+    let key = wallet_encryption_key(password, &salt, WALLET_ENCRYPTION_ITERATIONS);
+    let cipher = ChaCha20Poly1305::new((&key).into());
+    let ciphertext = cipher
+        .encrypt(
+            Nonce::from_slice(&nonce),
+            Payload {
+                msg: seed.as_bytes(),
+                aad: address.as_bytes(),
+            },
+        )
+        .map_err(|_| anyhow!("failed to encrypt wallet seed"))?;
+    Ok(EncryptedWalletSeed {
+        algorithm: WALLET_ENCRYPTION_ALGORITHM.to_string(),
+        kdf: WALLET_ENCRYPTION_KDF.to_string(),
+        kdf_iterations: WALLET_ENCRYPTION_ITERATIONS,
+        salt: hex_encode(salt),
+        nonce: hex_encode(nonce),
+        ciphertext: hex_encode(ciphertext),
+    })
+}
+
+fn decrypt_seed(encryption: &EncryptedWalletSeed, address: &str, password: &str) -> Result<String> {
+    if encryption.algorithm != WALLET_ENCRYPTION_ALGORITHM {
+        bail!("unsupported wallet encryption algorithm");
+    }
+    if encryption.kdf != WALLET_ENCRYPTION_KDF {
+        bail!("unsupported wallet encryption kdf");
+    }
+    let salt = decode_hex(&encryption.salt).context("invalid wallet encryption salt")?;
+    let nonce = decode_hex(&encryption.nonce).context("invalid wallet encryption nonce")?;
+    let ciphertext = decode_hex(&encryption.ciphertext).context("invalid wallet encrypted seed")?;
+    if nonce.len() != 12 {
+        bail!("invalid wallet encryption nonce length");
+    }
+    let key = wallet_encryption_key(password, &salt, encryption.kdf_iterations);
+    let cipher = ChaCha20Poly1305::new((&key).into());
+    let plaintext = cipher
+        .decrypt(
+            Nonce::from_slice(&nonce),
+            Payload {
+                msg: &ciphertext,
+                aad: address.as_bytes(),
+            },
+        )
+        .map_err(|_| anyhow!("invalid wallet password"))?;
+    String::from_utf8(plaintext).context("wallet seed is not valid utf-8")
+}
+
+fn wallet_encryption_key(password: &str, salt: &[u8], iterations: u32) -> [u8; 32] {
+    let mut key = [0_u8; 32];
+    pbkdf2_hmac::<Sha256>(password.as_bytes(), salt, iterations, &mut key);
+    key
+}
+
+fn random_bytes<const N: usize>() -> Result<[u8; N]> {
+    let mut bytes = [0_u8; N];
+    getrandom::getrandom(&mut bytes)
+        .map_err(|error| anyhow!("failed to read system randomness: {error:?}"))?;
+    Ok(bytes)
 }
 
 fn generate_seed_phrase() -> Result<String> {
@@ -161,6 +377,38 @@ fn generate_seed_phrase() -> Result<String> {
         .map(|byte| SEED_WORDS[usize::from(*byte) % SEED_WORDS.len()])
         .collect::<Vec<_>>();
     Ok(words.join(" "))
+}
+
+fn hex_encode(bytes: impl AsRef<[u8]>) -> String {
+    const HEX: &[u8; 16] = b"0123456789abcdef";
+    let mut encoded = String::with_capacity(bytes.as_ref().len() * 2);
+    for byte in bytes.as_ref() {
+        encoded.push(HEX[(byte >> 4) as usize] as char);
+        encoded.push(HEX[(byte & 0x0f) as usize] as char);
+    }
+    encoded
+}
+
+fn decode_hex(input: &str) -> Result<Vec<u8>> {
+    if input.len() % 2 != 0 {
+        bail!("hex string has odd length");
+    }
+    let mut bytes = Vec::with_capacity(input.len() / 2);
+    for pair in input.as_bytes().chunks_exact(2) {
+        let high = decode_hex_nibble(pair[0])?;
+        let low = decode_hex_nibble(pair[1])?;
+        bytes.push((high << 4) | low);
+    }
+    Ok(bytes)
+}
+
+fn decode_hex_nibble(byte: u8) -> Result<u8> {
+    match byte {
+        b'0'..=b'9' => Ok(byte - b'0'),
+        b'a'..=b'f' => Ok(byte - b'a' + 10),
+        b'A'..=b'F' => Ok(byte - b'A' + 10),
+        _ => bail!("invalid hex character"),
+    }
 }
 
 fn normalize_seed_phrase(seed_phrase: &str) -> Result<String> {
@@ -219,8 +467,9 @@ mod tests {
     use tempfile::tempdir;
 
     use super::{
-        load_or_create, replace_with_generated_seed_phrase, replace_with_imported_seed_phrase,
-        setup_seed_phrase,
+        encrypt_existing_with_password, load_or_create, load_with_password, metadata,
+        replace_with_generated_seed_phrase, replace_with_generated_seed_phrase_encrypted,
+        replace_with_imported_seed_phrase, setup_seed_phrase, setup_seed_phrase_with_password,
     };
 
     #[test]
@@ -286,6 +535,59 @@ mod tests {
         assert_eq!(
             setup_seed_phrase(&generated_path).unwrap(),
             setup_seed_phrase(&imported_path).unwrap()
+        );
+    }
+
+    #[test]
+    fn encrypted_generated_wallet_hides_seed_and_requires_password() {
+        let dir = tempdir().unwrap();
+        let path = dir.path().join("wallet.json");
+
+        let (wallet, seed_phrase) =
+            replace_with_generated_seed_phrase_encrypted(&path, "correct horse battery staple")
+                .unwrap();
+        let stored = fs::read_to_string(&path).unwrap();
+
+        assert!(stored.contains("\"version\": 3"));
+        assert!(stored.contains("\"encryption\""));
+        assert!(!stored.contains(&seed_phrase));
+        assert_eq!(metadata(&path).unwrap().unwrap().address, wallet.address());
+        assert!(metadata(&path).unwrap().unwrap().encrypted);
+        assert!(
+            load_or_create(&path)
+                .unwrap_err()
+                .to_string()
+                .contains("encrypted")
+        );
+        assert!(load_with_password(&path, "wrong password").is_err());
+
+        let loaded = load_with_password(&path, "correct horse battery staple").unwrap();
+        assert_eq!(loaded.address(), wallet.address());
+        assert_eq!(
+            setup_seed_phrase_with_password(&path, Some("correct horse battery staple"))
+                .unwrap()
+                .as_deref(),
+            Some(seed_phrase.as_str())
+        );
+        assert!(setup_seed_phrase(&path).unwrap().is_none());
+    }
+
+    #[test]
+    fn plaintext_wallet_can_be_encrypted_in_place() {
+        let dir = tempdir().unwrap();
+        let path = dir.path().join("wallet.json");
+
+        let (wallet, seed_phrase) = replace_with_generated_seed_phrase(&path).unwrap();
+        encrypt_existing_with_password(&path, "correct horse battery staple").unwrap();
+        let stored = fs::read_to_string(&path).unwrap();
+
+        assert!(stored.contains("\"version\": 3"));
+        assert!(!stored.contains(&seed_phrase));
+        assert_eq!(
+            load_with_password(&path, "correct horse battery staple")
+                .unwrap()
+                .address(),
+            wallet.address()
         );
     }
 

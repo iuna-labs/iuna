@@ -9,8 +9,8 @@ use serde::{Deserialize, Serialize};
 use tokio::sync::Mutex;
 
 use crate::domain::{
-    Amount, Block, ChainSnapshot, ChainStatus, DEFAULT_MINE_FEE, DEFAULT_TRANSACTION_FEE, Ledger,
-    OutPoint, PreparedBlock, Transaction, VDF_TARGET_BLOCK_MS, Wallet, run_vdf,
+    Amount, Block, ChainSnapshot, ChainStatus, DEFAULT_FEE_PER_BYTE, DEFAULT_TRANSACTION_FEE,
+    Ledger, OutPoint, PreparedBlock, Transaction, VDF_TARGET_BLOCK_MS, Wallet, run_vdf,
 };
 
 pub type SharedNode = Arc<Mutex<NodeCore>>;
@@ -30,6 +30,38 @@ pub struct NodeConfig {
     pub vdf_rounds: u32,
     pub burn_per_block: Amount,
     pub burn_fee: Amount,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct FeeEstimate {
+    pub bytes: usize,
+    pub fee: Amount,
+}
+
+#[derive(Clone, Debug)]
+enum NodeWallet {
+    Unlocked(Wallet),
+    Locked { address: String },
+}
+
+impl NodeWallet {
+    fn address(&self) -> &str {
+        match self {
+            Self::Unlocked(wallet) => wallet.address(),
+            Self::Locked { address } => address,
+        }
+    }
+
+    fn unlocked(&self) -> Result<&Wallet> {
+        match self {
+            Self::Unlocked(wallet) => Ok(wallet),
+            Self::Locked { .. } => bail!("wallet is locked"),
+        }
+    }
+
+    fn is_locked(&self) -> bool {
+        matches!(self, Self::Locked { .. })
+    }
 }
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
@@ -102,6 +134,7 @@ pub struct TransactionRejection {
 pub struct NodeStatus {
     pub wallet_address: String,
     pub wallet_balance: Amount,
+    pub wallet_locked: bool,
     pub launch_profile: LaunchProfileStatus,
     pub mining: MiningStatus,
     pub chain: ChainStatus,
@@ -148,7 +181,7 @@ pub struct AutoMinePlan {
 
 #[derive(Clone, Debug)]
 pub struct NodeCore {
-    wallet: Wallet,
+    wallet: NodeWallet,
     ledger: Ledger,
     automatic_mining_enabled: bool,
     pow_mining_enabled: bool,
@@ -172,7 +205,25 @@ impl NodeCore {
     }
 
     pub fn from_ledger(wallet: Wallet, ledger: Ledger, burn_per_block: Amount) -> Self {
-        Self::from_ledger_with_burn_fee(wallet, ledger, burn_per_block, DEFAULT_TRANSACTION_FEE)
+        Self::from_ledger_with_burn_fee(wallet, ledger, burn_per_block, DEFAULT_FEE_PER_BYTE)
+    }
+
+    pub fn from_locked_wallet_address(
+        address: impl Into<String>,
+        ledger: Ledger,
+        automatic_mining_enabled: bool,
+        burn_per_block: Amount,
+        burn_fee: Amount,
+    ) -> Self {
+        Self::from_node_wallet_with_burn_fee_and_enabled(
+            NodeWallet::Locked {
+                address: address.into(),
+            },
+            ledger,
+            automatic_mining_enabled,
+            burn_per_block,
+            burn_fee,
+        )
     }
 
     pub fn from_ledger_with_burn_fee(
@@ -197,12 +248,28 @@ impl NodeCore {
         burn_per_block: Amount,
         burn_fee: Amount,
     ) -> Self {
+        Self::from_node_wallet_with_burn_fee_and_enabled(
+            NodeWallet::Unlocked(wallet),
+            ledger,
+            automatic_mining_enabled,
+            burn_per_block,
+            burn_fee,
+        )
+    }
+
+    fn from_node_wallet_with_burn_fee_and_enabled(
+        wallet: NodeWallet,
+        ledger: Ledger,
+        automatic_mining_enabled: bool,
+        burn_per_block: Amount,
+        burn_fee: Amount,
+    ) -> Self {
         Self {
             wallet,
             ledger,
             automatic_mining_enabled,
             pow_mining_enabled: false,
-            pow_mine_fee: DEFAULT_MINE_FEE,
+            pow_mine_fee: DEFAULT_FEE_PER_BYTE,
             burn_per_block,
             burn_fee,
             last_auto_burn_height: None,
@@ -215,8 +282,12 @@ impl NodeCore {
         self.wallet.address()
     }
 
+    pub fn wallet_is_locked(&self) -> bool {
+        self.wallet.is_locked()
+    }
+
     pub fn replace_wallet(&mut self, wallet: Wallet) {
-        self.wallet = wallet;
+        self.wallet = NodeWallet::Unlocked(wallet);
         self.last_auto_burn_height = None;
         self.last_auto_pow_mine_anchor = None;
     }
@@ -355,6 +426,7 @@ impl NodeCore {
         NodeStatus {
             wallet_address: self.wallet.address().to_string(),
             wallet_balance: self.ledger.balance_of(self.wallet.address()),
+            wallet_locked: self.wallet.is_locked(),
             launch_profile: LaunchProfileStatus {
                 profile_id: launch_profile.profile_id.clone(),
                 profile_hash: chain.launch_profile_hash.clone(),
@@ -414,9 +486,6 @@ impl NodeCore {
     }
 
     pub fn set_pow_mining_settings(&mut self, enabled: bool, fee: Amount) -> Result<()> {
-        if fee > self.ledger.status().mine_reward {
-            bail!("mine fee cannot exceed mine reward");
-        }
         self.pow_mining_enabled = enabled;
         self.pow_mine_fee = fee;
         if !enabled {
@@ -430,11 +499,30 @@ impl NodeCore {
     }
 
     pub fn burn_with_fee(&mut self, amount: Amount, fee: Amount) -> Result<Transaction> {
-        let tx = self.ledger.build_burn(&self.wallet, amount, fee)?;
+        let tx = self
+            .ledger
+            .build_burn(self.wallet.unlocked()?, amount, fee)?;
         if self.ledger.submit_transaction(tx.clone())? {
             self.outbox.push(GossipEnvelope::Transaction(tx.clone()));
         }
         Ok(tx)
+    }
+
+    pub fn burn_with_fee_rate(
+        &mut self,
+        amount: Amount,
+        fee_per_byte: Amount,
+    ) -> Result<(Transaction, FeeEstimate)> {
+        let (tx, estimate) = self.build_burn_with_fee_rate(amount, fee_per_byte)?;
+        if self.ledger.submit_transaction(tx.clone())? {
+            self.outbox.push(GossipEnvelope::Transaction(tx.clone()));
+        }
+        Ok((tx, estimate))
+    }
+
+    pub fn estimate_burn_fee(&self, amount: Amount, fee_per_byte: Amount) -> Result<FeeEstimate> {
+        self.build_burn_with_fee_rate(amount, fee_per_byte)
+            .map(|(_, estimate)| estimate)
     }
 
     pub fn transfer(&mut self, to: impl Into<String>, amount: Amount) -> Result<Transaction> {
@@ -447,7 +535,9 @@ impl NodeCore {
         amount: Amount,
         fee: Amount,
     ) -> Result<Transaction> {
-        let tx = self.ledger.build_transfer(&self.wallet, to, amount, fee)?;
+        let tx = self
+            .ledger
+            .build_transfer(self.wallet.unlocked()?, to, amount, fee)?;
         if self.ledger.submit_transaction(tx.clone())? {
             self.outbox.push(GossipEnvelope::Transaction(tx.clone()));
         }
@@ -461,23 +551,56 @@ impl NodeCore {
         fee: Amount,
         outpoints: &[OutPoint],
     ) -> Result<Transaction> {
-        let tx =
-            self.ledger
-                .build_transfer_with_inputs(&self.wallet, to, amount, fee, outpoints)?;
+        let tx = self.ledger.build_transfer_with_inputs(
+            self.wallet.unlocked()?,
+            to,
+            amount,
+            fee,
+            outpoints,
+        )?;
         if self.ledger.submit_transaction(tx.clone())? {
             self.outbox.push(GossipEnvelope::Transaction(tx.clone()));
         }
         Ok(tx)
     }
 
+    pub fn transfer_with_fee_rate(
+        &mut self,
+        to: impl Into<String>,
+        amount: Amount,
+        fee_per_byte: Amount,
+        outpoints: &[OutPoint],
+    ) -> Result<(Transaction, FeeEstimate)> {
+        let (tx, estimate) =
+            self.build_transfer_with_fee_rate(to, amount, fee_per_byte, outpoints)?;
+        if self.ledger.submit_transaction(tx.clone())? {
+            self.outbox.push(GossipEnvelope::Transaction(tx.clone()));
+        }
+        Ok((tx, estimate))
+    }
+
+    pub fn estimate_transfer_fee(
+        &self,
+        to: impl Into<String>,
+        amount: Amount,
+        fee_per_byte: Amount,
+        outpoints: &[OutPoint],
+    ) -> Result<FeeEstimate> {
+        self.build_transfer_with_fee_rate(to, amount, fee_per_byte, outpoints)
+            .map(|(_, estimate)| estimate)
+    }
+
     pub fn mine_pow_reward(&mut self) -> Result<Transaction> {
-        let tx = self
-            .ledger
-            .build_mine_with_fee(self.wallet.address(), self.pow_mine_fee)?;
+        let (tx, _) = self.build_mine_with_fee_rate(self.pow_mine_fee)?;
         if self.ledger.submit_transaction(tx.clone())? {
             self.outbox.push(GossipEnvelope::Transaction(tx.clone()));
         }
         Ok(tx)
+    }
+
+    pub fn estimate_mine_fee(&self, fee_per_byte: Amount) -> Result<FeeEstimate> {
+        self.build_mine_with_fee_rate(fee_per_byte)
+            .map(|(_, estimate)| estimate)
     }
 
     pub fn receive_transaction(&mut self, tx: Transaction) -> Result<bool> {
@@ -486,6 +609,46 @@ impl NodeCore {
             self.outbox.push(GossipEnvelope::Transaction(tx));
         }
         Ok(accepted)
+    }
+
+    fn build_burn_with_fee_rate(
+        &self,
+        amount: Amount,
+        fee_per_byte: Amount,
+    ) -> Result<(Transaction, FeeEstimate)> {
+        converge_fee_by_byte(fee_per_byte, |fee| {
+            self.ledger.build_burn(self.wallet.unlocked()?, amount, fee)
+        })
+    }
+
+    fn build_transfer_with_fee_rate(
+        &self,
+        to: impl Into<String>,
+        amount: Amount,
+        fee_per_byte: Amount,
+        outpoints: &[OutPoint],
+    ) -> Result<(Transaction, FeeEstimate)> {
+        let to = to.into();
+        converge_fee_by_byte(fee_per_byte, |fee| {
+            if outpoints.is_empty() {
+                self.ledger
+                    .build_transfer(self.wallet.unlocked()?, to.clone(), amount, fee)
+            } else {
+                self.ledger.build_transfer_with_inputs(
+                    self.wallet.unlocked()?,
+                    to.clone(),
+                    amount,
+                    fee,
+                    outpoints,
+                )
+            }
+        })
+    }
+
+    fn build_mine_with_fee_rate(&self, fee_per_byte: Amount) -> Result<(Transaction, FeeEstimate)> {
+        converge_fee_by_byte(fee_per_byte, |fee| {
+            self.ledger.build_mine_with_fee(self.wallet.address(), fee)
+        })
     }
 
     pub fn mine_one(&mut self) -> Result<Block> {
@@ -525,6 +688,15 @@ impl NodeCore {
             work: None,
             skipped_reason: None,
         };
+
+        if self.wallet.is_locked() {
+            return AutoMinePlan {
+                pow_mined: None,
+                burned: None,
+                work: None,
+                skipped_reason: Some("wallet is locked".to_string()),
+            };
+        }
 
         let pow_error = match self.prepare_automatic_pow_mine() {
             Ok(tx) => {
@@ -594,9 +766,7 @@ impl NodeCore {
         {
             return Ok(None);
         }
-        let tx = self
-            .ledger
-            .build_mine_with_fee(self.wallet.address(), self.pow_mine_fee)?;
+        let (tx, _) = self.build_mine_with_fee_rate(self.pow_mine_fee)?;
         if self.ledger.submit_transaction(tx.clone())? {
             self.last_auto_pow_mine_anchor = Some(anchor);
             self.outbox.push(GossipEnvelope::Transaction(tx.clone()));
@@ -631,24 +801,48 @@ impl NodeCore {
             return Ok(None);
         }
 
-        let fee = self.burn_fee;
+        let fee_per_byte = self.burn_fee;
         let balance = self.ledger.balance_of(self.wallet.address());
-        let amount = if balance >= self.burn_per_block.saturating_add(fee) {
-            self.burn_per_block
-        } else {
-            balance.saturating_sub(fee)
-        };
-        if amount == 0 {
+        let mut low = 1;
+        let mut high = self.burn_per_block.min(balance);
+        let mut best = None;
+        while low <= high {
+            let amount = low + (high - low) / 2;
+            match self.build_burn_with_fee_rate(amount, fee_per_byte) {
+                Ok((tx, estimate)) => {
+                    let fits = amount
+                        .checked_add(estimate.fee)
+                        .is_some_and(|required| required <= balance);
+                    if fits {
+                        best = Some(tx);
+                        if amount == Amount::MAX {
+                            break;
+                        }
+                        low = amount + 1;
+                    } else {
+                        high = amount.saturating_sub(1);
+                    }
+                }
+                Err(_) => {
+                    high = amount.saturating_sub(1);
+                }
+            }
+        }
+        let Some(tx) = best else {
             self.last_auto_burn_height = Some(current_height);
             return Ok(None);
+        };
+        if self.ledger.submit_transaction(tx.clone())? {
+            self.outbox.push(GossipEnvelope::Transaction(tx.clone()));
         }
-        let tx = self.burn_with_fee(amount, fee)?;
         self.last_auto_burn_height = Some(current_height);
         Ok(Some(tx))
     }
 
     pub fn mine_one_at(&mut self, timestamp_ms: u64) -> Result<Block> {
-        let block = self.ledger.mine_next_block(&self.wallet, timestamp_ms)?;
+        let block = self
+            .ledger
+            .mine_next_block(self.wallet.unlocked()?, timestamp_ms)?;
         self.ledger.apply_locally_mined_block(block.clone())?;
         self.outbox.push(GossipEnvelope::Block(block.clone()));
         Ok(block)
@@ -659,7 +853,7 @@ impl NodeCore {
         work: PreparedBlock,
         vdf_output: String,
     ) -> Result<Block> {
-        let block = work.finish(&self.wallet, vdf_output);
+        let block = work.finish(self.wallet.unlocked()?, vdf_output);
         self.ledger.apply_locally_mined_block(block.clone())?;
         self.outbox.push(GossipEnvelope::Block(block.clone()));
         Ok(block)
@@ -886,11 +1080,69 @@ pub fn now_ms() -> u64 {
         .as_millis() as u64
 }
 
+fn converge_fee_by_byte(
+    fee_per_byte: Amount,
+    mut build: impl FnMut(Amount) -> Result<Transaction>,
+) -> Result<(Transaction, FeeEstimate)> {
+    let mut fee = 0;
+    let mut best = None;
+    for _ in 0..64 {
+        let tx = build(fee)?;
+        let bytes = tx.serialized_size_bytes()?;
+        let required_fee = fee_per_byte
+            .checked_mul(bytes as Amount)
+            .context("fee per byte times transaction bytes overflows")?;
+        if fee == required_fee {
+            return Ok((tx, FeeEstimate { bytes, fee }));
+        }
+        if fee > required_fee
+            && best
+                .as_ref()
+                .is_none_or(|(_, estimate): &(Transaction, FeeEstimate)| fee < estimate.fee)
+        {
+            best = Some((tx, FeeEstimate { bytes, fee }));
+        }
+        fee = required_fee;
+    }
+
+    let tx = build(fee)?;
+    let bytes = tx.serialized_size_bytes()?;
+    let required_fee = fee_per_byte
+        .checked_mul(bytes as Amount)
+        .context("fee per byte times transaction bytes overflows")?;
+    if fee >= required_fee {
+        if best
+            .as_ref()
+            .is_none_or(|(_, estimate): &(Transaction, FeeEstimate)| fee < estimate.fee)
+        {
+            best = Some((tx, FeeEstimate { bytes, fee }));
+        }
+        if let Some(best) = best {
+            return Ok(best);
+        }
+    }
+    let tx = build(required_fee)?;
+    let bytes = tx.serialized_size_bytes()?;
+    let final_required_fee = fee_per_byte
+        .checked_mul(bytes as Amount)
+        .context("fee per byte times transaction bytes overflows")?;
+    if required_fee < final_required_fee {
+        bail!("fee per byte did not converge");
+    }
+    Ok((
+        tx,
+        FeeEstimate {
+            bytes,
+            fee: required_fee,
+        },
+    ))
+}
+
 #[cfg(test)]
 mod tests {
     use std::collections::BTreeMap;
 
-    use crate::domain::{DEFAULT_MINE_FEE, Transaction, Wallet};
+    use crate::domain::{MICRO_LUUN, Transaction, Wallet};
 
     use super::{NodeConfig, NodeCore};
 
@@ -952,7 +1204,9 @@ mod tests {
         };
         assert_eq!(anchor, &node.chain().last().unwrap().hash);
         assert_eq!(output.address, wallet.address());
-        assert_eq!(*fee, DEFAULT_MINE_FEE);
+        let minimum_fee = first_mine.serialized_size_bytes().unwrap() as u64;
+        assert!(*fee >= minimum_fee);
+        assert!(*fee <= minimum_fee + 1);
         assert_eq!(
             *difficulty_bits,
             node.ledger().current_mine_difficulty_bits()
@@ -975,21 +1229,27 @@ mod tests {
             burn_fee: 0,
         });
 
-        let configured_fee = DEFAULT_MINE_FEE * 2;
-        node.set_pow_mining_settings(true, configured_fee).unwrap();
+        let configured_fee_per_byte = 2;
+        node.set_pow_mining_settings(true, configured_fee_per_byte)
+            .unwrap();
         let plan = node.prepare_automatic_mining(1);
         let mine = plan.pow_mined.expect("PoW should be queued");
 
-        assert_eq!(mine.fee(), configured_fee);
+        let minimum_fee = mine.serialized_size_bytes().unwrap() as u64 * configured_fee_per_byte;
+        assert!(mine.fee() >= minimum_fee);
+        assert!(mine.fee() <= minimum_fee + configured_fee_per_byte);
         assert_eq!(
             mine.amount(),
-            node.ledger().status().mine_reward - configured_fee
+            node.ledger().status().mine_reward - mine.fee()
         );
-        assert_eq!(node.status().mining.automatic_pow_mine_fee, configured_fee);
+        assert_eq!(
+            node.status().mining.automatic_pow_mine_fee,
+            configured_fee_per_byte
+        );
     }
 
     #[test]
-    fn automatic_pow_mining_rejects_fee_above_reward() {
+    fn automatic_pow_mining_reports_fee_rate_above_reward() {
         let wallet = Wallet::from_seed("automatic-pow-mining-too-high-fee-wallet");
         let mut node = NodeCore::new(NodeConfig {
             wallet,
@@ -999,12 +1259,37 @@ mod tests {
             burn_fee: 0,
         });
 
-        let error = node
-            .set_pow_mining_settings(true, node.ledger().status().mine_reward + 1)
-            .unwrap_err();
+        node.set_pow_mining_settings(true, MICRO_LUUN).unwrap();
+        let plan = node.prepare_automatic_mining(1);
 
-        assert!(format!("{error:#}").contains("mine fee cannot exceed mine reward"));
-        assert!(!node.status().mining.pow_mining_enabled);
+        assert!(plan.pow_mined.is_none());
+        assert!(
+            plan.skipped_reason
+                .as_deref()
+                .unwrap_or_default()
+                .contains("fee exceeds reward")
+        );
+        assert!(node.status().mining.pow_mining_enabled);
+    }
+
+    #[test]
+    fn fee_rate_transfer_and_burn_pay_at_least_bytes_times_rate() {
+        let alice = Wallet::from_seed("fee-rate-alice");
+        let bob = Wallet::from_seed("fee-rate-bob");
+        let mut genesis = BTreeMap::new();
+        genesis.insert(alice.address().to_string(), 10 * MICRO_LUUN);
+        let ledger = crate::domain::Ledger::new(genesis, 1);
+        let mut node = NodeCore::from_ledger(alice, ledger, 0);
+
+        let (transfer, _) = node
+            .transfer_with_fee_rate(bob.address(), MICRO_LUUN, 2, &[])
+            .unwrap();
+        let minimum_transfer_fee = transfer.serialized_size_bytes().unwrap() as u64 * 2;
+        assert!(transfer.fee() >= minimum_transfer_fee);
+
+        let (burn, _) = node.burn_with_fee_rate(MICRO_LUUN, 3).unwrap();
+        let minimum_burn_fee = burn.serialized_size_bytes().unwrap() as u64 * 3;
+        assert!(burn.fee() >= minimum_burn_fee);
     }
 }
 
