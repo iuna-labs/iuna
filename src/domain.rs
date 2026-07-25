@@ -111,10 +111,14 @@ pub enum Transaction {
     Mine {
         output: TxOutput,
         anchor: String,
+        #[serde(default)]
+        salt: u64,
         nonce: u64,
         difficulty_bits: u32,
         #[serde(default)]
         fee: Amount,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        proof_header: Option<String>,
         signature: String,
     },
 }
@@ -260,11 +264,12 @@ impl Transaction {
             Self::Mine {
                 output,
                 anchor,
+                salt,
                 nonce,
                 difficulty_bits,
                 fee,
                 ..
-            } => mine_payload(output, anchor, *nonce, *difficulty_bits, *fee),
+            } => mine_payload(output, anchor, *salt, *nonce, *difficulty_bits, *fee),
         }
     }
 
@@ -272,13 +277,31 @@ impl Transaction {
         if let Self::Mine {
             output,
             anchor,
+            salt,
             nonce,
             difficulty_bits,
             fee,
+            proof_header,
             signature,
         } = self
         {
-            let expected = mine_signature(output, anchor, *nonce, *difficulty_bits, *fee);
+            let expected = if let Some(proof_header) = proof_header {
+                let header = stratum_mine_header_bytes(
+                    output,
+                    anchor,
+                    *salt,
+                    *nonce,
+                    *difficulty_bits,
+                    *fee,
+                )?;
+                let expected_header = hex_encode(header);
+                if *proof_header != expected_header {
+                    bail!("mine transaction proof header is invalid");
+                }
+                stratum_mine_signature(&header)
+            } else {
+                mine_signature(output, anchor, *salt, *nonce, *difficulty_bits, *fee)
+            };
             if *signature != expected {
                 bail!("mine transaction proof hash is invalid");
             }
@@ -461,14 +484,22 @@ fn canonical_outputs(outputs: &[TxOutput]) -> String {
 fn mine_payload(
     output: &TxOutput,
     anchor: &str,
+    salt: u64,
     nonce: u64,
     difficulty_bits: u32,
     fee: Amount,
 ) -> String {
-    let payload = format!(
-        "luun-mine:{}:{}:{}:{}",
-        output.address, output.amount, anchor, nonce
-    ) + &format!(":{difficulty_bits}");
+    let payload = if salt == 0 {
+        format!(
+            "luun-mine:{}:{}:{}:{}",
+            output.address, output.amount, anchor, nonce
+        )
+    } else {
+        format!(
+            "luun-mine:{}:{}:{}:{}:{}",
+            output.address, output.amount, anchor, salt, nonce
+        )
+    } + &format!(":{difficulty_bits}");
     if fee == 0 {
         payload
     } else {
@@ -479,11 +510,174 @@ fn mine_payload(
 fn mine_signature(
     output: &TxOutput,
     anchor: &str,
+    salt: u64,
     nonce: u64,
     difficulty_bits: u32,
     fee: Amount,
 ) -> String {
-    hex_hash(mine_payload(output, anchor, nonce, difficulty_bits, fee))
+    hex_hash(mine_payload(
+        output,
+        anchor,
+        salt,
+        nonce,
+        difficulty_bits,
+        fee,
+    ))
+}
+
+pub const STRATUM_EXTRANONCE1_HEX: &str = "00000000";
+pub const STRATUM_EXTRANONCE2_SIZE: usize = 4;
+const STRATUM_MINE_VERSION: [u8; 4] = [1, 0, 0, 0];
+const STRATUM_MINE_NTIME: [u8; 4] = [0, 0, 0, 0];
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct StratumMineTemplate {
+    pub recipient: String,
+    pub output_amount: Amount,
+    pub fee: Amount,
+    pub anchor: String,
+    pub salt: u64,
+    pub difficulty_bits: u32,
+    pub coinbase_prefix: Vec<u8>,
+    pub version_hex: String,
+    pub prev_hash_hex: String,
+    pub nbits_hex: String,
+    pub ntime_hex: String,
+}
+
+impl StratumMineTemplate {
+    pub fn coinb1_hex(&self) -> String {
+        hex_encode(&self.coinbase_prefix)
+    }
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct StratumMineShare {
+    pub extranonce2: [u8; 4],
+    pub header_nonce: [u8; 4],
+}
+
+pub fn pack_stratum_nonce(extranonce2: [u8; 4], header_nonce: [u8; 4]) -> u64 {
+    let extra = u32::from_be_bytes(extranonce2) as u64;
+    let nonce = u32::from_le_bytes(header_nonce) as u64;
+    (extra << 32) | nonce
+}
+
+fn unpack_stratum_nonce(nonce: u64) -> ([u8; 4], [u8; 4]) {
+    (
+        ((nonce >> 32) as u32).to_be_bytes(),
+        (nonce as u32).to_le_bytes(),
+    )
+}
+
+fn stratum_coinbase_prefix(
+    output: &TxOutput,
+    anchor: &str,
+    salt: u64,
+    difficulty_bits: u32,
+    fee: Amount,
+) -> Vec<u8> {
+    if salt == 0 {
+        format!(
+            "luun-stratum-mine:{}:{}:{}:{}:{}:",
+            output.address, output.amount, fee, anchor, difficulty_bits
+        )
+    } else {
+        format!(
+            "luun-stratum-mine:{}:{}:{}:{}:{}:{}:",
+            output.address, output.amount, fee, anchor, salt, difficulty_bits
+        )
+    }
+    .into_bytes()
+}
+
+fn stratum_coinbase_bytes(
+    output: &TxOutput,
+    anchor: &str,
+    salt: u64,
+    nonce: u64,
+    difficulty_bits: u32,
+    fee: Amount,
+) -> Vec<u8> {
+    let (extranonce2, _) = unpack_stratum_nonce(nonce);
+    let mut coinbase = stratum_coinbase_prefix(output, anchor, salt, difficulty_bits, fee);
+    coinbase.extend_from_slice(&[0, 0, 0, 0]);
+    coinbase.extend_from_slice(&extranonce2);
+    coinbase
+}
+
+fn double_sha256(bytes: &[u8]) -> [u8; 32] {
+    let first = Sha256::digest(bytes);
+    let second = Sha256::digest(first);
+    second.into()
+}
+
+fn stratum_mine_header_bytes(
+    output: &TxOutput,
+    anchor: &str,
+    salt: u64,
+    nonce: u64,
+    difficulty_bits: u32,
+    fee: Amount,
+) -> Result<[u8; 80]> {
+    let mut header = [0_u8; 80];
+    header[0..4].copy_from_slice(&STRATUM_MINE_VERSION);
+    let anchor_bytes =
+        decode_hex_array::<32>(anchor).context("mine transaction anchor is not hex")?;
+    header[4..36].copy_from_slice(&anchor_bytes);
+    let merkle_root = double_sha256(&stratum_coinbase_bytes(
+        output,
+        anchor,
+        salt,
+        nonce,
+        difficulty_bits,
+        fee,
+    ));
+    header[36..68].copy_from_slice(&merkle_root);
+    header[68..72].copy_from_slice(&STRATUM_MINE_NTIME);
+    header[72..76].copy_from_slice(&difficulty_bits.to_le_bytes());
+    let (_, header_nonce) = unpack_stratum_nonce(nonce);
+    header[76..80].copy_from_slice(&header_nonce);
+    Ok(header)
+}
+
+fn stratum_mine_signature(header: &[u8; 80]) -> String {
+    let mut digest = double_sha256(header);
+    digest.reverse();
+    hex_encode(digest)
+}
+
+fn stratum_mine_template(
+    recipient: impl Into<String>,
+    mine_reward: Amount,
+    fee: Amount,
+    anchor: &str,
+    salt: u64,
+    difficulty_bits: u32,
+) -> Result<StratumMineTemplate> {
+    let recipient = recipient.into();
+    if fee > mine_reward {
+        bail!("mine transaction fee exceeds reward");
+    }
+    let output = TxOutput {
+        address: recipient.clone(),
+        amount: mine_reward - fee,
+    };
+    let anchor_bytes =
+        decode_hex_array::<32>(anchor).context("mine transaction anchor is not hex")?;
+    Ok(StratumMineTemplate {
+        recipient,
+        output_amount: output.amount,
+        fee,
+        anchor: anchor.to_string(),
+        salt,
+        difficulty_bits,
+        coinbase_prefix: stratum_coinbase_prefix(&output, anchor, salt, difficulty_bits, fee),
+        version_hex: hex_encode(STRATUM_MINE_VERSION),
+        prev_hash_hex: hex_encode(anchor_bytes),
+        nbits_hex: hex_encode(difficulty_bits.to_le_bytes()),
+        ntime_hex: hex_encode(STRATUM_MINE_NTIME),
+    })
 }
 
 fn hash_meets_difficulty(hash: &str, difficulty_bits: u32) -> bool {
@@ -1417,18 +1611,21 @@ impl Ledger {
             amount: self.mine_reward - fee,
         };
         let anchor = self.tip().hash.clone();
+        let salt = 1;
         let difficulty_bits = self.current_mine_difficulty_bits();
         for nonce in 0..u64::MAX {
-            let signature = mine_signature(&output, &anchor, nonce, difficulty_bits, fee);
+            let signature = mine_signature(&output, &anchor, salt, nonce, difficulty_bits, fee);
             if !hash_meets_difficulty(&signature, difficulty_bits) {
                 continue;
             }
             let transaction = Transaction::Mine {
                 output: output.clone(),
                 anchor: anchor.clone(),
+                salt,
                 nonce,
                 difficulty_bits,
                 fee,
+                proof_header: None,
                 signature,
             };
             if self.has_transaction(transaction.signature()) {
@@ -1438,6 +1635,56 @@ impl Ledger {
             return Ok(transaction);
         }
         bail!("could not find valid mine proof");
+    }
+
+    pub fn stratum_mine_template(
+        &self,
+        recipient: impl Into<String>,
+        fee: Amount,
+        anchor: impl AsRef<str>,
+        salt: u64,
+        difficulty_bits: u32,
+    ) -> Result<StratumMineTemplate> {
+        stratum_mine_template(
+            recipient,
+            self.mine_reward,
+            fee,
+            anchor.as_ref(),
+            salt,
+            difficulty_bits,
+        )
+    }
+
+    pub fn build_stratum_mine(
+        &self,
+        template: StratumMineTemplate,
+        share: StratumMineShare,
+    ) -> Result<Transaction> {
+        let output = TxOutput {
+            address: template.recipient,
+            amount: template.output_amount,
+        };
+        let nonce = pack_stratum_nonce(share.extranonce2, share.header_nonce);
+        let header = stratum_mine_header_bytes(
+            &output,
+            &template.anchor,
+            template.salt,
+            nonce,
+            template.difficulty_bits,
+            template.fee,
+        )?;
+        let transaction = Transaction::Mine {
+            output,
+            anchor: template.anchor,
+            salt: template.salt,
+            nonce,
+            difficulty_bits: template.difficulty_bits,
+            fee: template.fee,
+            proof_header: Some(hex_encode(header)),
+            signature: stratum_mine_signature(&header),
+        };
+        self.validate_new_transaction(&transaction)?;
+        Ok(transaction)
     }
 
     pub fn submit_transaction(&mut self, transaction: Transaction) -> Result<bool> {
@@ -1614,7 +1861,7 @@ impl Ledger {
         };
         if leader != block.miner {
             bail!(
-                "block miner {} is not selected leader {leader}",
+                "block finalizer {} is not selected leader {leader}",
                 block.miner
             );
         }
@@ -2155,7 +2402,7 @@ fn verify_leader_proof(block: &Block, tickets: &[BurnTicket]) -> Result<()> {
         bail!("block is missing leader proof");
     };
     if proof.public_key != block.miner {
-        bail!("leader proof public key does not match block miner");
+        bail!("leader proof public key does not match block finalizer");
     }
     let ticket = tickets
         .iter()
@@ -2164,7 +2411,7 @@ fn verify_leader_proof(block: &Block, tickets: &[BurnTicket]) -> Result<()> {
         })
         .context("leader ticket is not pending for this height")?;
     if ticket.owner != block.miner {
-        bail!("leader ticket owner does not match block miner");
+        bail!("leader ticket owner does not match block finalizer");
     }
     if ticket.eligible_from_height > block.height {
         bail!("leader ticket is not mature");
@@ -2720,14 +2967,17 @@ mod tests {
         let anchor = ledger.tip().hash.clone();
         let difficulty_bits = ledger.current_mine_difficulty_bits();
         for nonce in 0..u64::MAX {
-            let signature = mine_signature(&output, &anchor, nonce, difficulty_bits, fee);
+            let salt = 1;
+            let signature = mine_signature(&output, &anchor, salt, nonce, difficulty_bits, fee);
             if hash_meets_difficulty(&signature, difficulty_bits) {
                 return Transaction::Mine {
                     output,
                     anchor,
+                    salt,
                     nonce,
                     difficulty_bits,
                     fee,
+                    proof_header: None,
                     signature,
                 };
             }
@@ -3133,5 +3383,84 @@ mod tests {
 
         let error = ledger.submit_transaction(stale_mine).unwrap_err();
         assert!(format!("{error:#}").contains("mine transaction anchor is too old"));
+    }
+
+    #[test]
+    fn stratum_mine_header_proof_is_validated() {
+        let alice = Wallet::from_seed("stratum-proof-alice");
+        let ledger = ledger_with_allocation(&alice, 100 * MICRO_LUUN);
+        let anchor = ledger.tip().hash.clone();
+        let difficulty_bits = ledger.current_mine_difficulty_bits();
+        let template = ledger
+            .stratum_mine_template(alice.address(), 0, anchor, 1, difficulty_bits)
+            .unwrap();
+
+        let mut accepted = None;
+        for nonce in 0_u32..50_000 {
+            let result = ledger.build_stratum_mine(
+                template.clone(),
+                StratumMineShare {
+                    extranonce2: [0, 0, 0, 0],
+                    header_nonce: nonce.to_le_bytes(),
+                },
+            );
+            if let Ok(tx) = result {
+                accepted = Some(tx);
+                break;
+            }
+        }
+
+        let tx = accepted.expect("expected Stratum proof within search range");
+        let Transaction::Mine {
+            proof_header,
+            signature,
+            ..
+        } = tx
+        else {
+            panic!("expected mine action");
+        };
+        assert_eq!(proof_header.as_deref().unwrap_or_default().len(), 160);
+        assert!(hash_meets_difficulty(&signature, difficulty_bits));
+    }
+
+    #[test]
+    fn stratum_mine_salt_allows_multiple_actions_for_same_anchor() {
+        let alice = Wallet::from_seed("stratum-salt-alice");
+        let mut ledger = ledger_with_allocation(&alice, 100 * MICRO_LUUN);
+        let anchor = ledger.tip().hash.clone();
+        let difficulty_bits = ledger.current_mine_difficulty_bits();
+
+        for salt in [1, 2] {
+            let template = ledger
+                .stratum_mine_template(alice.address(), 0, anchor.clone(), salt, difficulty_bits)
+                .unwrap();
+            let mut accepted = None;
+            for nonce in 0_u32..50_000 {
+                let result = ledger.build_stratum_mine(
+                    template.clone(),
+                    StratumMineShare {
+                        extranonce2: [0, 0, 0, 0],
+                        header_nonce: nonce.to_le_bytes(),
+                    },
+                );
+                if let Ok(tx) = result {
+                    accepted = Some(tx);
+                    break;
+                }
+            }
+            let tx = accepted.expect("expected Stratum proof within search range");
+            assert!(ledger.submit_transaction(tx).unwrap());
+        }
+
+        assert_eq!(ledger.pending().len(), 2);
+        let salts = ledger
+            .pending()
+            .iter()
+            .map(|tx| match tx {
+                Transaction::Mine { salt, .. } => *salt,
+                _ => panic!("expected mine action"),
+            })
+            .collect::<BTreeSet<_>>();
+        assert_eq!(salts, BTreeSet::from([1, 2]));
     }
 }

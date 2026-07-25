@@ -28,7 +28,7 @@ use crate::{
         p2p::{GossipNetwork, P2pMetrics},
         wallet_store,
     },
-    app::{FeeEstimate, NodeStatus, PeerInfo, SharedNode, SharedPeerBook},
+    app::{FeeEstimate, NodeStatus, PeerInfo, SharedNode, SharedPeerBook, StratumStatus},
     domain::{Amount, Block, OutPoint, Transaction, TxInput, TxOutput, hex_hash},
 };
 
@@ -47,6 +47,7 @@ struct HttpState {
     ui_config: Arc<Mutex<UiConfig>>,
     config_path: PathBuf,
     wallet_path: PathBuf,
+    stratum: StratumStatus,
     auth_sessions: Arc<Mutex<BTreeMap<String, AuthSession>>>,
 }
 
@@ -54,6 +55,13 @@ struct HttpState {
 struct AuthSession {
     expires_at: u64,
     wallet_password: String,
+}
+
+pub struct ServeOptions {
+    pub config_path: PathBuf,
+    pub wallet_path: PathBuf,
+    pub stratum: StratumStatus,
+    pub addr: SocketAddr,
 }
 
 #[derive(Debug, Deserialize)]
@@ -148,7 +156,7 @@ struct WalletTransactionRow {
     signature: String,
     status: &'static str,
     block_height: Option<u64>,
-    block_miner: Option<String>,
+    block_finalizer: Option<String>,
     direction: &'static str,
     difficulty_bits: Option<u32>,
     proof_bits: Option<u32>,
@@ -208,17 +216,17 @@ pub async fn serve(
     peers: SharedPeerBook,
     gossip: GossipNetwork,
     ui_config: Arc<Mutex<UiConfig>>,
-    config_path: PathBuf,
-    wallet_path: PathBuf,
-    addr: SocketAddr,
+    options: ServeOptions,
 ) -> Result<()> {
+    let addr = options.addr;
     let state = HttpState {
         node,
         peers,
         gossip,
         ui_config,
-        config_path,
-        wallet_path,
+        config_path: options.config_path,
+        wallet_path: options.wallet_path,
+        stratum: options.stratum,
         auth_sessions: Arc::new(Mutex::new(BTreeMap::new())),
     };
     let app = Router::new()
@@ -398,7 +406,9 @@ async fn api_auth_logout_form(State(state): State<HttpState>, headers: HeaderMap
 }
 
 async fn api_status(State(state): State<HttpState>) -> Json<NodeStatus> {
-    Json(state.node.lock().await.status())
+    let mut status = state.node.lock().await.status();
+    status.stratum = state.stratum.clone();
+    Json(status)
 }
 
 async fn api_blocks(
@@ -742,7 +752,7 @@ fn wallet_transaction_row(
     outputs_by_outpoint: &BTreeMap<OutPoint, TxOutput>,
     status: &'static str,
     block_height: Option<u64>,
-    block_miner: Option<String>,
+    block_finalizer: Option<String>,
 ) -> Option<WalletTransactionRow> {
     match tx {
         Transaction::Transfer {
@@ -762,7 +772,7 @@ fn wallet_transaction_row(
             signature: signature.clone(),
             status,
             block_height,
-            block_miner,
+            block_finalizer,
             direction: if tx.to() == Some(wallet) {
                 "received"
             } else {
@@ -790,7 +800,7 @@ fn wallet_transaction_row(
             signature: signature.clone(),
             status,
             block_height,
-            block_miner,
+            block_finalizer,
             direction: "received",
             difficulty_bits: Some(*difficulty_bits),
             proof_bits: Some(proof_bits(signature)),
@@ -1567,6 +1577,15 @@ const INDEX_HTML: &str = r#"<!doctype html>
     .mine-stat-label { display: flex; gap: 5px; align-items: center; color: #879198; font-size: 10px; font-weight: 850; text-transform: uppercase; }
     .mine-stat-value { margin-top: 5px; color: #dce4e7; font-size: 14px; font-weight: 850; font-variant-numeric: tabular-nums; overflow-wrap: anywhere; }
     .mine-stat-value.money { color: #d5f55f; }
+    .panel-separator { border-top: 1px solid #2f363c; margin: 14px 0 12px; }
+    .stratum-config { display: grid; gap: 10px; }
+    .stratum-note { max-width: 760px; color: #9eb3bc; font-size: 12px; line-height: 1.45; }
+    .stratum-note code { color: #dce4e7; }
+    .stratum-fields { display: grid; gap: 8px; }
+    .stratum-field { display: grid; grid-template-columns: 86px minmax(0, 1fr); gap: 10px; align-items: baseline; min-width: 0; }
+    .stratum-label { color: #879198; font-size: 10px; font-weight: 850; text-transform: uppercase; }
+    .stratum-value { min-width: 0; color: #dce4e7; font-size: 13px; font-weight: 650; overflow-wrap: anywhere; }
+    .stratum-value.hash { color: #9eb3bc; font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; font-size: 12px; font-weight: 500; }
     .info-button { display: inline-grid; place-items: center; width: 18px; height: 18px; padding: 0; border-radius: 999px; border-color: #3a4248; background: #181b1f; color: #9eb3bc; font-size: 11px; line-height: 1; }
     .info-button:hover, .info-button:focus-visible { border-color: #d5f55f; color: #d5f55f; outline: none; }
     .info-copy { display: grid; gap: 10px; color: #c3cbd0; line-height: 1.45; }
@@ -1673,7 +1692,7 @@ const INDEX_HTML: &str = r#"<!doctype html>
       .block-card { flex-basis: 108px; }
     }
   </style>
-  <script defer src="/assets/luun-ui.js?v=49"></script>
+  <script defer src="/assets/luun-ui.js?v=53"></script>
   <script defer src="/assets/alpine.min.js"></script>
 </head>
 <body x-data="luunApp()" x-init="init()" @keydown.window.escape="closeModals()" x-cloak>
@@ -1818,7 +1837,7 @@ const INDEX_HTML: &str = r#"<!doctype html>
               <span class="toggle-text" x-text="miningEnabled ? 'On' : 'Off'"></span>
             </label>
           </div>
-          <div class="panel-description">Burn LUUN to compete for block leadership. Winning burns produce PoB/VDF blocks and earn the transaction fees in those blocks.</div>
+          <div class="panel-description">Burn LUUN to compete for block finalization. Winning burns finalize PoB/VDF blocks and earn the transaction fees in those blocks.</div>
           <form class="mining-form" @submit.prevent="saveBurn">
             <div class="burn-fields">
               <label>LUUN per block<input x-model="burnAmountDraft" @input="burnAmountDirty = true; scheduleFeeEstimates()" type="number" min="0" step="0.000001"></label>
@@ -1877,6 +1896,24 @@ const INDEX_HTML: &str = r#"<!doctype html>
             </div>
             <div class="fee-preview" x-text="feeEstimateLabel('mine')"></div>
           </form>
+          <div class="panel-separator"></div>
+          <div class="stratum-config">
+            <div class="stratum-note">Start the node with <code>--stratum 0.0.0.0:3333</code> to expose a Stratum V1 endpoint for ASIC miners. Use the pool URL below in the miner configuration.</div>
+            <div class="stratum-fields" aria-label="Stratum settings">
+              <div class="stratum-field">
+                <div class="stratum-label">Status</div>
+                <div class="stratum-value" x-text="status.stratum?.enabled ? 'On' : 'Off'"></div>
+              </div>
+              <div class="stratum-field">
+                <div class="stratum-label">Listener</div>
+                <code class="stratum-value hash" x-text="stratumListenAddr()"></code>
+              </div>
+              <div class="stratum-field">
+                <div class="stratum-label">Pool URL</div>
+                <code class="stratum-value hash" x-text="stratumPoolUrl()"></code>
+              </div>
+            </div>
+          </div>
         </div>
       </div>
     </section>
@@ -1951,7 +1988,7 @@ const INDEX_HTML: &str = r#"<!doctype html>
                   <span x-text="transferCountLabel(block)"></span>
                   <span x-text="mineCountLabel(block)"></span>
                 </div>
-                <div class="block-miner" x-text="blockMinerLabel(block)"></div>
+                <div class="block-miner" x-text="blockFinalizerLabel(block)"></div>
               </button>
             </template>
             <template x-if="loadingOlder">
@@ -1972,7 +2009,7 @@ const INDEX_HTML: &str = r#"<!doctype html>
                 <div class="detail-kv"><div class="key">Height</div><div x-text="selectedBlock.height"></div></div>
                 <div class="detail-kv"><div class="key">Hash</div><code x-text="selectedBlock.hash"></code></div>
                 <div class="detail-kv"><div class="key">Previous</div><code x-text="short(selectedBlock.prev_hash)"></code></div>
-                <div class="detail-kv"><div class="key">Miner</div><code x-text="short(selectedBlock.miner)"></code></div>
+                <div class="detail-kv"><div class="key">Finalizer</div><code x-text="short(selectedBlock.miner)"></code></div>
                 <div class="detail-kv"><div class="key">Reward</div><div>LUUN <span x-text="amountLabel(selectedBlock.reward)"></span></div></div>
                 <div class="detail-kv"><div class="key">Burns</div><div x-text="blockBurnCount(selectedBlock)"></div></div>
                 <div class="detail-kv"><div class="key">Transfers</div><div x-text="blockTransferCount(selectedBlock)"></div></div>
@@ -1982,7 +2019,7 @@ const INDEX_HTML: &str = r#"<!doctype html>
               <div class="tx-list">
                 <h3>Transactions</h3>
                 <template x-for="tx in selectedBlock.transactions" :key="tx.signature">
-                  <div class="tx-card" role="button" tabindex="0" @click="openTransactionModal(tx, { source: 'Block', blockHeight: selectedBlock.height, blockMiner: selectedBlock.miner })" @keydown.enter.prevent="openTransactionModal(tx, { source: 'Block', blockHeight: selectedBlock.height, blockMiner: selectedBlock.miner })" @keydown.space.prevent="openTransactionModal(tx, { source: 'Block', blockHeight: selectedBlock.height, blockMiner: selectedBlock.miner })">
+                  <div class="tx-card" role="button" tabindex="0" @click="openTransactionModal(tx, { source: 'Block', blockHeight: selectedBlock.height, blockFinalizer: selectedBlock.miner })" @keydown.enter.prevent="openTransactionModal(tx, { source: 'Block', blockHeight: selectedBlock.height, blockFinalizer: selectedBlock.miner })" @keydown.space.prevent="openTransactionModal(tx, { source: 'Block', blockHeight: selectedBlock.height, blockFinalizer: selectedBlock.miner })">
                     <span class="pill" :class="tx.kind" x-text="tx.kind"></span>
                     <div class="tx-field"><span class="tx-label">Amount</span><span class="tx-value money">LUUN <span x-text="amountLabel(txAmount(tx))"></span></span></div>
                     <div class="tx-field"><span class="tx-label">Fee</span><span class="tx-value money">LUUN <span x-text="amountLabel(tx.fee ?? 0)"></span></span></div>
@@ -2257,7 +2294,7 @@ mod tests {
 
     use crate::{
         adapters::{config_store, config_store::UiConfig, p2p::GossipNetwork, wallet_store},
-        app::{NodeCore, PeerBook},
+        app::{NodeCore, PeerBook, StratumStatus},
         domain::{Block, Ledger, MICRO_LUUN, MINE_REWARD, OutPoint, Transaction, Wallet},
     };
 
@@ -2442,7 +2479,7 @@ mod tests {
         assert_eq!(rows[0].inputs[0].amount, Some(100));
         assert_eq!(rows[0].status, "confirmed");
         assert_eq!(rows[0].block_height, Some(31));
-        assert_eq!(rows[0].block_miner.as_deref(), Some("miner"));
+        assert_eq!(rows[0].block_finalizer.as_deref(), Some("miner"));
         assert_eq!(rows[0].direction, "received");
     }
 
@@ -2499,6 +2536,10 @@ mod tests {
             )),
             config_path,
             wallet_path,
+            stratum: StratumStatus {
+                enabled: false,
+                listen_addr: None,
+            },
             auth_sessions: Arc::new(Mutex::new(BTreeMap::new())),
         }
     }

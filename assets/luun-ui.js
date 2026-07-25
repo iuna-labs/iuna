@@ -652,8 +652,8 @@ window.luunApp = function luunApp() {
           "/api/settings/burn-per-block",
           { enabled: this.miningEnabled, amount, fee_per_byte: fee },
           this.miningEnabled
-            ? `Mining on: ${this.amountLabel(amount)} LUUN per block with ${this.amountLabel(fee)} per byte`
-            : `Mining settings saved while off`
+            ? `Finalization burns on: ${this.amountLabel(amount)} LUUN per block with ${this.amountLabel(fee)} per byte`
+            : `Burn settings saved while off`
         );
         this.burnAmountDirty = false;
         this.burnAmount = amount;
@@ -670,13 +670,13 @@ window.luunApp = function luunApp() {
         const fee = this.parseLuunAmountRequired(this.burnFeeDraft, "Burn fee per byte is required");
         if (enabled && amount === 0) {
           this.miningEnabled = false;
-          throw new Error("Set LUUN per block before turning mining on");
+          throw new Error("Set LUUN per block before turning finalization burns on");
         }
         this.miningEnabled = enabled;
         await this.postForm(
           "/api/settings/burn-per-block",
           { enabled, amount, fee_per_byte: fee },
-          enabled ? "Mining turned on" : "Mining turned off"
+          enabled ? "Finalization burns turned on" : "Finalization burns turned off"
         );
         this.burnAmountDirty = false;
         this.burnAmount = amount;
@@ -962,7 +962,7 @@ window.luunApp = function luunApp() {
 
     txFeeRecipient(tx) {
       const context = this.selectedTransaction?.context || {};
-      return tx.blockMiner ?? context.blockMiner ?? "future block miner";
+      return tx.blockFinalizer ?? tx.blockMiner ?? context.blockFinalizer ?? context.blockMiner ?? "future block finalizer";
     },
 
     selectedTransactionLabel() {
@@ -1021,9 +1021,9 @@ window.luunApp = function luunApp() {
       return `${count} mine${count === 1 ? "" : "s"}`;
     },
 
-    blockMinerLabel(block) {
-      const miner = this.short(block.miner);
-      return block.miner === this.status.wallet_address ? `${miner} (me)` : miner;
+    blockFinalizerLabel(block) {
+      const finalizer = this.short(block.miner);
+      return block.miner === this.status.wallet_address ? `${finalizer} (me)` : finalizer;
     },
 
     walletTransactions() {
@@ -1054,6 +1054,23 @@ window.luunApp = function luunApp() {
     targetSecondsLabel() {
       const ms = this.status.mining?.vdf_target_block_ms;
       return ms ? `${Math.round(ms / 1000)}s` : "-";
+    },
+
+    stratumListenAddr() {
+      return this.status.stratum?.listen_addr || "-";
+    },
+
+    stratumPoolUrl() {
+      const listen = this.status.stratum?.listen_addr;
+      if (!this.status.stratum?.enabled || !listen) return "-";
+      const lastColon = listen.lastIndexOf(":");
+      if (lastColon < 0) return `stratum+tcp://${listen}`;
+      let host = listen.slice(0, lastColon);
+      const port = listen.slice(lastColon + 1);
+      if (host === "0.0.0.0" || host === "::" || host === "[::]") {
+        host = window.location.hostname || "127.0.0.1";
+      }
+      return `stratum+tcp://${host}:${port}`;
     },
 
     lastUpdatedLabel() {

@@ -10,7 +10,8 @@ use tokio::sync::Mutex;
 
 use crate::domain::{
     Amount, Block, ChainSnapshot, ChainStatus, DEFAULT_FEE_PER_BYTE, DEFAULT_TRANSACTION_FEE,
-    Ledger, OutPoint, PreparedBlock, Transaction, VDF_TARGET_BLOCK_MS, Wallet, run_vdf,
+    Ledger, OutPoint, PreparedBlock, StratumMineShare, StratumMineTemplate, Transaction, TxOutput,
+    VDF_TARGET_BLOCK_MS, Wallet, run_vdf,
 };
 
 pub type SharedNode = Arc<Mutex<NodeCore>>;
@@ -36,6 +37,11 @@ pub struct NodeConfig {
 pub struct FeeEstimate {
     pub bytes: usize,
     pub fee: Amount,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct ExternalMineJob {
+    pub template: StratumMineTemplate,
 }
 
 #[derive(Clone, Debug)]
@@ -137,6 +143,7 @@ pub struct NodeStatus {
     pub wallet_locked: bool,
     pub launch_profile: LaunchProfileStatus,
     pub mining: MiningStatus,
+    pub stratum: StratumStatus,
     pub chain: ChainStatus,
 }
 
@@ -161,6 +168,12 @@ pub struct MiningStatus {
     pub current_leader: Option<String>,
     pub wallet_is_current_leader: bool,
     pub last_auto_burn_height: Option<u64>,
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+pub struct StratumStatus {
+    pub enabled: bool,
+    pub listen_addr: Option<String>,
 }
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
@@ -446,6 +459,10 @@ impl NodeCore {
                 wallet_is_current_leader,
                 last_auto_burn_height: self.last_auto_burn_height,
             },
+            stratum: StratumStatus {
+                enabled: false,
+                listen_addr: None,
+            },
             chain,
         }
     }
@@ -603,6 +620,46 @@ impl NodeCore {
             .map(|(_, estimate)| estimate)
     }
 
+    pub fn external_mine_job(
+        &self,
+        recipient: impl Into<String>,
+        salt: u64,
+    ) -> Result<ExternalMineJob> {
+        let recipient = recipient.into();
+        let tip = self
+            .chain()
+            .last()
+            .context("cannot build mine job without a chain tip")?;
+        let difficulty_bits = self.ledger.current_mine_difficulty_bits();
+        let fee = self.estimate_external_mine_fee(&recipient, &tip.hash, difficulty_bits)?;
+        Ok(ExternalMineJob {
+            template: self.ledger.stratum_mine_template(
+                recipient,
+                fee,
+                &tip.hash,
+                salt,
+                difficulty_bits,
+            )?,
+        })
+    }
+
+    pub fn submit_external_mine(
+        &mut self,
+        recipient: impl Into<String>,
+        template: StratumMineTemplate,
+        share: StratumMineShare,
+    ) -> Result<Transaction> {
+        let tx = self.ledger.build_stratum_mine(template, share)?;
+        let recipient = recipient.into();
+        if tx.to() != Some(recipient.as_str()) {
+            bail!("submitted mine recipient does not match worker");
+        }
+        if self.ledger.submit_transaction(tx.clone())? {
+            self.outbox.push(GossipEnvelope::Transaction(tx.clone()));
+        }
+        Ok(tx)
+    }
+
     pub fn receive_transaction(&mut self, tx: Transaction) -> Result<bool> {
         let accepted = self.ledger.submit_transaction(tx.clone())?;
         if accepted {
@@ -649,6 +706,44 @@ impl NodeCore {
         converge_fee_by_byte(fee_per_byte, |fee| {
             self.ledger.build_mine_with_fee(self.wallet.address(), fee)
         })
+    }
+
+    fn estimate_external_mine_fee(
+        &self,
+        recipient: &str,
+        anchor: &str,
+        difficulty_bits: u32,
+    ) -> Result<Amount> {
+        let fee_per_byte = self.pow_mine_fee;
+        let mine_reward = self.ledger.status().mine_reward;
+        let mut fee = 0;
+        for _ in 0..16 {
+            if fee > mine_reward {
+                bail!("mine transaction fee exceeds reward");
+            }
+            let tx = Transaction::Mine {
+                output: TxOutput {
+                    address: recipient.to_string(),
+                    amount: mine_reward - fee,
+                },
+                anchor: anchor.to_string(),
+                salt: 1,
+                nonce: u64::MAX,
+                difficulty_bits,
+                fee,
+                proof_header: Some("00".repeat(80)),
+                signature: "00".repeat(32),
+            };
+            let bytes = tx.serialized_size_bytes()?;
+            let next_fee = fee_per_byte
+                .checked_mul(bytes as Amount)
+                .context("fee per byte times transaction bytes overflows")?;
+            if fee >= next_fee {
+                return Ok(fee);
+            }
+            fee = next_fee;
+        }
+        Ok(fee.min(mine_reward))
     }
 
     pub fn mine_one(&mut self) -> Result<Block> {
@@ -1205,8 +1300,11 @@ mod tests {
         assert_eq!(anchor, &node.chain().last().unwrap().hash);
         assert_eq!(output.address, wallet.address());
         let minimum_fee = first_mine.serialized_size_bytes().unwrap() as u64;
+        let (_, expected_estimate) = node
+            .build_mine_with_fee_rate(node.status().mining.automatic_pow_mine_fee)
+            .unwrap();
         assert!(*fee >= minimum_fee);
-        assert!(*fee <= minimum_fee + 1);
+        assert_eq!(*fee, expected_estimate.fee);
         assert_eq!(
             *difficulty_bits,
             node.ledger().current_mine_difficulty_bits()
@@ -1236,8 +1334,11 @@ mod tests {
         let mine = plan.pow_mined.expect("PoW should be queued");
 
         let minimum_fee = mine.serialized_size_bytes().unwrap() as u64 * configured_fee_per_byte;
+        let (_, expected_estimate) = node
+            .build_mine_with_fee_rate(configured_fee_per_byte)
+            .unwrap();
         assert!(mine.fee() >= minimum_fee);
-        assert!(mine.fee() <= minimum_fee + configured_fee_per_byte);
+        assert_eq!(mine.fee(), expected_estimate.fee);
         assert_eq!(
             mine.amount(),
             node.ledger().status().mine_reward - mine.fee()

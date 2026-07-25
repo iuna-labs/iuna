@@ -385,7 +385,7 @@ fn burn_larger_than_existing_balance_cannot_use_next_block_reward() {
 }
 
 #[test]
-fn transaction_fees_are_paid_to_the_block_miner() {
+fn transaction_fees_are_paid_to_the_block_finalizer() {
     let alice = Wallet::from_seed("fee-miner-alice");
     let bob = Wallet::from_seed("fee-payer-bob");
     let mut allocations = BTreeMap::new();

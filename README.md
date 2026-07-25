@@ -2,7 +2,7 @@
 
 Luun is a tiny L1 prototype built from the node first, then explained as it grows.
 
-The current devnet assumes friendly nodes. It has one binary that acts as wallet, node, miner, HTTP management UI, and P2P TCP listener. The core ledger is separated from the adapters so a whole network can be tested in memory without opening sockets.
+The current devnet assumes friendly nodes. It has one binary that acts as wallet, node, block finalizer, PoW miner, HTTP management UI, and P2P TCP listener. The core ledger is separated from the adapters so a whole network can be tested in memory without opening sockets.
 
 ## Run
 
@@ -24,7 +24,7 @@ cargo run -- --http 127.0.0.1:18661 --p2p 127.0.0.1:9444
 
 For fast local development, set `LUUN_DEV_SKIP_SEED_VERIFY=1` before starting the node to show a setup-only skip button for the recovery phrase check.
 
-Mining is automatic. There is no "mine block" button and no exact sleep. Each node can burn its configured amount once per chain height. Those burns become one-shot leader tickets after the launch profile's maturity delay. The current devnet uses a 3-block maturity delay and a 3-block eligibility window: a burn included at height `h` can win heights `h + 3` through `h + 5`, then expires if it was not selected. Only the selected ticket owner builds the next block, signs a leader proof, performs the VDF work, and gossips the finished block. The VDF is the clock.
+Block finalization is automatic. There is no "mine block" button and no exact sleep. Each node can burn its configured amount once per chain height. Those burns become one-shot leader tickets after the launch profile's maturity delay. The current devnet uses a 3-block maturity delay and a 3-block eligibility window: a burn included at height `h` can win heights `h + 3` through `h + 5`, then expires if it was not selected. Only the selected ticket owner builds the next block, signs a leader proof, performs the VDF work, and gossips the finished block. The VDF is the clock.
 
 Genesis leaves the starter wallet with 100 spendable LUUN after the 1-LUUN bootstrap burn creates launch tickets for blocks 1, 2, and 3, and the genesis block pays its 100-LUUN reward. `--genesis` starts the automatic burn rate at 100 LUUN per block, so the starter can create the block 1 burn that becomes eligible at block 4.
 
@@ -42,7 +42,7 @@ For a second local node joining Alice's chain:
 cargo run -- --data-dir .luun-bob --http 127.0.0.1:18662 --p2p 127.0.0.1:9445 --join 127.0.0.1:9444
 ```
 
-`--join` fetches a chain snapshot from the peer before mining starts and announces this node's P2P listener back to that peer, so newly mined blocks can flow back without restarting the first node. If the peer cannot provide a snapshot, the node exits instead of silently starting a separate chain. Additional peers can be added from the P2P screen.
+`--join` fetches a chain snapshot from the peer before finalization starts and announces this node's P2P listener back to that peer, so newly finalized blocks can flow back without restarting the first node. If the peer cannot provide a snapshot, the node exits instead of silently starting a separate chain. Additional peers can be added from the P2P screen.
 
 If `<data-dir>/chain.sqlite3` already exists, the node resumes that chain first. That makes restarts boring in the good way: `--genesis` will not create a new genesis over an existing local chain, and `--join` remains useful for reconnecting to peers without replacing local state. Pass `--chain-db path/to/chain.sqlite3` to override the database path.
 
@@ -73,15 +73,25 @@ cargo run -- --genesis --p2p 0.0.0.0:9444 --http 127.0.0.1:18661
 cargo run -- --data-dir .luun-friend --p2p 0.0.0.0:9445 --http 127.0.0.1:18661 --join your-host:9444
 ```
 
-Friends who join after you start will adopt your genesis and current chain. The starter wallet begins with 100 spendable LUUN after the bootstrap burn and genesis reward, and `--genesis` starts it with a 100-LUUN automatic burn rate. After the starter mines additional block rewards, send friends LUUN from the UI; then they can choose a burn amount and compete for future blocks. Every joining node starts with a 0-LUUN automatic burn unless it is configured otherwise.
+Friends who join after you start will adopt your genesis and current chain. The starter wallet begins with 100 spendable LUUN after the bootstrap burn and genesis reward, and `--genesis` starts it with a 100-LUUN automatic burn rate. After the starter finalizes additional blocks, send friends LUUN from the UI; then they can choose a burn amount and compete for future blocks. Every joining node starts with a 0-LUUN automatic burn unless it is configured otherwise.
+
+## Bitaxe / Stratum
+
+Run a Stratum V1 listener when you want SHA-256 ASIC miners such as a Bitaxe to create Luun PoW mine actions:
+
+```sh
+cargo run -- --data-dir .luun --stratum 0.0.0.0:3333
+```
+
+Point the miner at the node's Stratum host and port, and use your Luun wallet address as the worker username. The usual `address.worker` format is also accepted; Luun pays the address before the dot. Accepted ASIC shares become Luun mine actions in the node mempool and are gossiped to peers. The Stratum job commits to the current chain tip, recipient address, mine reward, finalizer fee, and Luun mine difficulty.
 
 The genesis block bootstraps the chain with a 1-LUUN burn from the starter wallet. Genesis turns that burn into launch tickets for blocks 1 through 3 so the chain can move until normal burn tickets mature. Burns included after genesis create one-shot tickets through a deterministic weighted lottery: a burn of `X` among total eligible burn weight `Y` has `X / Y` chance for that block. The selected leader creates the next block content, signs a proof for the selected ticket, and runs a hash-chain VDF before gossiping the block.
 
-Every non-genesis block must consume the selected eligible ticket, include at least one burn transaction, and fit under the 100kB serialized block limit. The VDF seed is bound to the parent hash and child height; the block hash separately commits to the miner, timestamp, miner payout, rounds, previous hash, leader proof, VDF output, and transactions.
+Every non-genesis block must consume the selected eligible ticket, include at least one burn transaction, and fit under the 100kB serialized block limit. The VDF seed is bound to the parent hash and child height; the block hash separately commits to the finalizer, timestamp, finalizer payout, rounds, previous hash, leader proof, VDF output, and transactions.
 
 The protocol targets 60-second blocks by retargeting the expected VDF rounds after each block. It uses a rolling average of recent block intervals and only moves the next round count by about 10% per block, so short bursts do not make the delay swing wildly. Every node derives the same next-round count from the validated chain.
 
-The base block reward is fixed at 100 LUUN, and miners collect transaction fees on top. Transfers, burns, and PoW mine actions all set fees as LUUN per serialized byte; the node calculates the total fee from the final transaction size before submitting it. The automatic burn setting has a burn amount and a fee rate; the burn amount is the ticket weight, while the resulting fee is paid to the miner that includes it. The miner includes the best valid burn for liveness, then fills the remaining block space by fee-rate while respecting nonce and balance validity. The default burn is 0 LUUN per block with a 0.000001-LUUN-per-byte fee rate, so new nodes can join before they own LUUN. Genesis starters begin at 100 LUUN per block; after another wallet has LUUN, raise its burn from the Mining screen.
+The base block finalizer reward is the block's total transaction fees. Transfers, burns, and PoW mine actions all set fees as LUUN per serialized byte; the node calculates the total fee from the final transaction size before submitting it. The automatic burn setting has a burn amount and a fee rate; the burn amount is the ticket weight, while the resulting fee is paid to the finalizer that includes it. The finalizer includes the best valid burn for liveness, then fills the remaining block space by fee-rate while respecting nonce and balance validity. PoW mine actions introduce new LUUN separately. The default burn is 0 LUUN per block with a 0.000001-LUUN-per-byte fee rate, so new nodes can join before they own LUUN. Genesis starters begin at 100 LUUN per block; after another wallet has LUUN, raise its burn from the Mining screen.
 
 The measured VDF round count is only the initial delay. After the first blocks, the protocol steers rounds toward the 60-second target.
 
@@ -104,7 +114,7 @@ Luun stores the latest validated `ChainSnapshot` in SQLite at `<data-dir>/chain.
 ## Architecture
 
 - `src/domain.rs`: wallet, fee-paying transactions, balances, genesis burn bootstrap, 100-LUUN base rewards, 100kB blocks, rolling-window leader tickets, leader proofs, fork choice, launch profile, and VDF checks.
-- `src/app.rs`: node use cases, automatic VDF-paced mining, peer bookkeeping, and an in-memory network harness.
+- `src/app.rs`: node use cases, automatic VDF-paced finalization, peer bookkeeping, and an in-memory network harness.
 - `src/adapters/http.rs`: HTTP management UI and status endpoint.
 - `src/adapters/p2p.rs`: line-delimited JSON gossip, block-range catch-up, and chain snapshots over one TCP port.
 - `src/adapters/chain_store.rs`: SQLite chain snapshot persistence.

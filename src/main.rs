@@ -9,8 +9,8 @@ use std::{
 
 use anyhow::{Context, Result, bail};
 use luun::{
-    adapters::{chain_store::SqliteChainStore, config_store, http, p2p, wallet_store},
-    app::{NodeCore, PeerBook, SharedNode, SharedPeerBook, now_ms},
+    adapters::{chain_store::SqliteChainStore, config_store, http, p2p, stratum, wallet_store},
+    app::{NodeCore, PeerBook, SharedNode, SharedPeerBook, StratumStatus, now_ms},
     domain::{Amount, ChainSnapshot, GenesisBurn, Ledger, MICRO_LUUN, run_vdf},
 };
 use tokio::sync::Mutex;
@@ -92,13 +92,26 @@ async fn main() -> Result<()> {
     println!("management UI: http://{}", opts.http_addr);
     println!("p2p listener: {}", opts.p2p_addr);
     println!(
-        "automatic mining: VDF-driven, burning {} LUUN per block with {} LUUN per byte fee rate",
+        "automatic finalization: VDF-driven, burning {} LUUN per block with {} LUUN per byte fee rate",
         format_luun(initial_burn_per_block),
         format_luun(initial_burn_fee)
     );
 
     let gossip =
         p2p::GossipNetwork::start(Arc::clone(&node), Arc::clone(&peers), opts.p2p_addr).await?;
+    let mut stratum_status = StratumStatus {
+        enabled: false,
+        listen_addr: None,
+    };
+    if let Some(stratum_addr) = opts.stratum_addr {
+        let stratum =
+            stratum::StratumServer::start(Arc::clone(&node), gossip.clone(), stratum_addr).await?;
+        println!("stratum listener: {}", stratum.listen_addr());
+        stratum_status = StratumStatus {
+            enabled: true,
+            listen_addr: Some(stratum.listen_addr().to_string()),
+        };
+    }
 
     if has_chain {
         let persistence_node = Arc::clone(&node);
@@ -107,10 +120,10 @@ async fn main() -> Result<()> {
             run_chain_persistence(persistence_node, persistence_store).await;
         });
 
-        let miner_node = Arc::clone(&node);
-        let miner_gossip = gossip.clone();
+        let finalizer_node = Arc::clone(&node);
+        let finalizer_gossip = gossip.clone();
         tokio::spawn(async move {
-            run_automatic_miner(miner_node, miner_gossip).await;
+            run_automatic_finalizer(finalizer_node, finalizer_gossip).await;
         });
 
         let sync_node = Arc::clone(&node);
@@ -119,7 +132,7 @@ async fn main() -> Result<()> {
             run_peer_sync(sync_node, sync_gossip).await;
         });
     } else {
-        println!("setup mode: no chain selected; skipping mining and chain persistence");
+        println!("setup mode: no chain selected; skipping finalization and chain persistence");
     }
 
     http::serve(
@@ -127,9 +140,12 @@ async fn main() -> Result<()> {
         peers,
         gossip,
         ui_config,
-        config_path,
-        wallet_path,
-        opts.http_addr,
+        http::ServeOptions {
+            config_path,
+            wallet_path,
+            stratum: stratum_status,
+            addr: opts.http_addr,
+        },
     )
     .await
 }
@@ -226,6 +242,7 @@ struct CliOptions {
     chain_db_path: Option<PathBuf>,
     http_addr: SocketAddr,
     p2p_addr: SocketAddr,
+    stratum_addr: Option<SocketAddr>,
     peers: Vec<String>,
     join_peers: Vec<String>,
     chain_mode: ChainMode,
@@ -243,6 +260,7 @@ impl CliOptions {
             chain_db_path: None,
             http_addr: SocketAddr::from_str("127.0.0.1:18661")?,
             p2p_addr: SocketAddr::from_str("127.0.0.1:9444")?,
+            stratum_addr: None,
             peers: Vec::new(),
             join_peers: Vec::new(),
             chain_mode: ChainMode::Setup,
@@ -279,6 +297,13 @@ impl CliOptions {
                     opts.p2p_addr = next_value(&mut args, "--p2p")?
                         .parse()
                         .context("invalid --p2p address")?;
+                }
+                "--stratum" => {
+                    opts.stratum_addr = Some(
+                        next_value(&mut args, "--stratum")?
+                            .parse()
+                            .context("invalid --stratum address")?,
+                    );
                 }
                 "--join" => {
                     if opts.chain_mode == ChainMode::Genesis {
@@ -375,7 +400,8 @@ fn help_text() -> &'static str {
            --chain-db <path>             Chain SQLite database (default <data-dir>/chain.sqlite3)\n\
            --http <addr:port>            HTTP management UI address (default 127.0.0.1:18661)\n\
            --p2p <addr:port>             P2P TCP listener address (default 127.0.0.1:9444)\n\
-           --join <addr:port>            Fetch chain snapshot from this peer before mining\n\
+           --stratum <addr:port>         Stratum V1 listener for SHA-256 ASIC miners\n\
+           --join <addr:port>            Fetch chain snapshot from this peer before finalization\n\
            --data-dir <path>             Local wallet directory\n\n\
          Environment:\n\
            LUUN_DEV_SKIP_SEED_VERIFY=1 Show a setup button to skip seed verification\n"
@@ -481,7 +507,7 @@ async fn join_chain_ledger(join_peers: &[String], advertised_addr: SocketAddr) -
     )
 }
 
-async fn run_automatic_miner(node: SharedNode, gossip: p2p::GossipNetwork) {
+async fn run_automatic_finalizer(node: SharedNode, gossip: p2p::GossipNetwork) {
     let mut last_logged_skip: Option<(u64, String)> = None;
     loop {
         let (height, plan, outbox) = {
@@ -500,7 +526,7 @@ async fn run_automatic_miner(node: SharedNode, gossip: p2p::GossipNetwork) {
             if let Some(reason) = &plan.skipped_reason {
                 let skip = (height, reason.clone());
                 if last_logged_skip.as_ref() != Some(&skip) {
-                    println!("auto-mining skipped at height {height}: {reason}");
+                    println!("auto-finalization skipped at height {height}: {reason}");
                     last_logged_skip = Some(skip);
                 }
             }
@@ -525,18 +551,18 @@ async fn run_automatic_miner(node: SharedNode, gossip: p2p::GossipNetwork) {
             }
         };
 
-        let (mined, outbox) = {
+        let (finalized, outbox) = {
             let mut node = node.lock().await;
-            let mined = node.complete_prepared_block(work, vdf_output);
+            let finalized = node.complete_prepared_block(work, vdf_output);
             let outbox = node.drain_outbox();
-            (mined, outbox)
+            (finalized, outbox)
         };
 
-        match mined {
+        match finalized {
             Ok(block) => {
-                println!("auto-mined block {} ({})", block.height, block.hash);
+                println!("auto-finalized block {} ({})", block.height, block.hash);
             }
-            Err(error) => println!("auto-mining skipped after VDF: {error:#}"),
+            Err(error) => println!("auto-finalization skipped after VDF: {error:#}"),
         }
 
         if let Err(error) = gossip.broadcast(outbox).await {
@@ -628,6 +654,7 @@ mod tests {
     fn help_mentions_dev_seed_verify_bypass_env() {
         assert!(help_text().contains("LUUN_DEV_SKIP_SEED_VERIFY=1"));
         assert!(help_text().contains("skip seed verification"));
+        assert!(help_text().contains("--stratum <addr:port>"));
     }
 
     fn ledger_with_one_spendable_luun(wallet: &Wallet) -> Ledger {
@@ -667,6 +694,12 @@ mod tests {
         let opts = parse(&[]).unwrap().unwrap();
         assert_eq!(opts.chain_mode, ChainMode::Setup);
         assert!(opts.join_peers.is_empty());
+    }
+
+    #[test]
+    fn stratum_port_can_be_configured() {
+        let opts = parse(&["--stratum", "127.0.0.1:3333"]).unwrap().unwrap();
+        assert_eq!(opts.stratum_addr, Some("127.0.0.1:3333".parse().unwrap()));
     }
 
     #[test]
