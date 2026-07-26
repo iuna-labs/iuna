@@ -36,7 +36,7 @@ jobs:
 
     steps:
       - name: Checkout
-        uses: actions/checkout@v4
+        uses: actions/checkout@v7
 
       - name: Install Rust
         shell: bash
@@ -70,7 +70,7 @@ jobs:
           Compress-Archive -Path "dist/$package" -DestinationPath "dist/$package.zip" -Force
 
       - name: Upload build artifact
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: iuna-${{ github.ref_name }}-${{ matrix.platform }}
           path: dist/iuna-${{ github.ref_name }}-${{ matrix.platform }}.*
@@ -83,7 +83,7 @@ jobs:
     if: startsWith(github.ref, 'refs/tags/')
     steps:
       - name: Download artifacts
-        uses: actions/download-artifact@v4
+        uses: actions/download-artifact@v8
         with:
           path: dist
           merge-multiple: true
