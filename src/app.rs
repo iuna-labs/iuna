@@ -20,7 +20,7 @@ pub type SharedPeerBook = Arc<Mutex<PeerBook>>;
 pub const DEFAULT_BURN_PER_BLOCK: Amount = 0;
 pub const DEFAULT_VDF_ROUNDS: u32 = 67_000_000;
 pub const PROTOCOL_VERSION: u32 = 1;
-pub const NETWORK_ID: &str = "luun-devnet-v2";
+pub const NETWORK_ID: &str = "iuna-devnet-v2";
 pub const BLOCK_REQUEST_LIMIT: usize = 128;
 const IMPORT_REBROADCAST_LIMIT: usize = 128;
 
@@ -1237,7 +1237,7 @@ fn converge_fee_by_byte(
 mod tests {
     use std::collections::BTreeMap;
 
-    use crate::domain::{MICRO_LUUN, Transaction, Wallet};
+    use crate::domain::{MICRO_IUNA, Transaction, Wallet};
 
     use super::{NodeConfig, NodeCore};
 
@@ -1360,7 +1360,7 @@ mod tests {
             burn_fee: 0,
         });
 
-        node.set_pow_mining_settings(true, MICRO_LUUN).unwrap();
+        node.set_pow_mining_settings(true, MICRO_IUNA).unwrap();
         let plan = node.prepare_automatic_mining(1);
 
         assert!(plan.pow_mined.is_none());
@@ -1378,17 +1378,17 @@ mod tests {
         let alice = Wallet::from_seed("fee-rate-alice");
         let bob = Wallet::from_seed("fee-rate-bob");
         let mut genesis = BTreeMap::new();
-        genesis.insert(alice.address().to_string(), 10 * MICRO_LUUN);
+        genesis.insert(alice.address().to_string(), 10 * MICRO_IUNA);
         let ledger = crate::domain::Ledger::new(genesis, 1);
         let mut node = NodeCore::from_ledger(alice, ledger, 0);
 
         let (transfer, _) = node
-            .transfer_with_fee_rate(bob.address(), MICRO_LUUN, 2, &[])
+            .transfer_with_fee_rate(bob.address(), MICRO_IUNA, 2, &[])
             .unwrap();
         let minimum_transfer_fee = transfer.serialized_size_bytes().unwrap() as u64 * 2;
         assert!(transfer.fee() >= minimum_transfer_fee);
 
-        let (burn, _) = node.burn_with_fee_rate(MICRO_LUUN, 3).unwrap();
+        let (burn, _) = node.burn_with_fee_rate(MICRO_IUNA, 3).unwrap();
         let minimum_burn_fee = burn.serialized_size_bytes().unwrap() as u64 * 3;
         assert!(burn.fee() >= minimum_burn_fee);
     }

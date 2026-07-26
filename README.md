@@ -1,6 +1,6 @@
-# Luun
+# iuna
 
-Luun is a tiny L1 prototype built from the node first, then explained as it grows.
+iuna is a tiny L1 prototype built from the node first, then explained as it grows.
 
 The current devnet assumes friendly nodes. It has one binary that acts as wallet, node, block finalizer, PoW miner, HTTP management UI, and P2P TCP listener. The core ledger is separated from the adapters so a whole network can be tested in memory without opening sockets.
 
@@ -12,9 +12,9 @@ To start a fresh chain, run genesis mode from an empty wallet path:
 cargo run -- --genesis --http 127.0.0.1:18661 --p2p 127.0.0.1:9444
 ```
 
-Open `http://127.0.0.1:18661` and complete the initial setup modal. The setup flow verifies the generated 24-word recovery phrase with a 4-word check, stores the wallet in `.luun/wallet.json`, and stores runtime config in `.luun/config.json`.
+Open `http://127.0.0.1:18661` and complete the initial setup modal. The setup flow verifies the generated 24-word recovery phrase with a 4-word check, stores the wallet in `.iuna/wallet.json`, and stores runtime config in `.iuna/config.json`.
 
-`--genesis` only works when the wallet file does not already exist and `.luun/chain.sqlite3` does not already contain a blockchain. It creates a fresh setup wallet, opens the setup modal so the recovery phrase can be recorded, creates the starter chain, adaptively measures VDF throughput locally, extrapolates that measurement to a 60-second initial round count, and persists the validated chain. The same data directory resumes automatically on later runs without `--genesis`.
+`--genesis` only works when the wallet file does not already exist and `.iuna/chain.sqlite3` does not already contain a blockchain. It creates a fresh setup wallet, opens the setup modal so the recovery phrase can be recorded, creates the starter chain, adaptively measures VDF throughput locally, extrapolates that measurement to a 60-second initial round count, and persists the validated chain. The same data directory resumes automatically on later runs without `--genesis`.
 
 For setup-only local development without creating a chain yet:
 
@@ -22,11 +22,11 @@ For setup-only local development without creating a chain yet:
 cargo run -- --http 127.0.0.1:18661 --p2p 127.0.0.1:9444
 ```
 
-For fast local development, set `LUUN_DEV_SKIP_SEED_VERIFY=1` before starting the node to show a setup-only skip button for the recovery phrase check.
+For fast local development, set `IUNA_DEV_SKIP_SEED_VERIFY=1` before starting the node to show a setup-only skip button for the recovery phrase check.
 
 Block finalization is automatic. There is no "mine block" button and no exact sleep. Each node can burn its configured amount once per chain height. Those burns become one-shot leader tickets after the launch profile's maturity delay. The current devnet uses a 3-block maturity delay and a 3-block eligibility window: a burn included at height `h` can win heights `h + 3` through `h + 5`, then expires if it was not selected. Eligible tickets are ranked deterministically for each height. Rank 0 gets the normal VDF delay; rank 1 may finalize with double VDF rounds, rank 2 with triple rounds, and so on. That lets the chain continue if the first selected finalizer is offline, while the VDF remains the clock.
 
-Genesis leaves the starter wallet with 100 spendable LUUN after the 1-LUUN bootstrap burn creates launch tickets for blocks 1, 2, and 3, and the genesis block pays its 100-LUUN reward. `--genesis` starts the automatic burn rate at 100 LUUN per block, so the starter can create the block 1 burn that becomes eligible at block 4.
+Genesis leaves the starter wallet with 100 spendable IUNA after the 1-IUNA bootstrap burn creates launch tickets for blocks 1, 2, and 3, and the genesis block pays its 100-IUNA reward. `--genesis` starts the automatic burn rate at 100 IUNA per block, so the starter can create the block 1 burn that becomes eligible at block 4.
 
 The management UI is a small AlpineJS app served from local vendored assets. It polls JSON endpoints every few seconds and includes:
 
@@ -39,7 +39,7 @@ The management UI is a small AlpineJS app served from local vendored assets. It 
 For a second local node joining Alice's chain:
 
 ```sh
-cargo run -- --data-dir .luun-bob --http 127.0.0.1:18662 --p2p 127.0.0.1:9445 --join 127.0.0.1:9444
+cargo run -- --data-dir .iuna-bob --http 127.0.0.1:18662 --p2p 127.0.0.1:9445 --join 127.0.0.1:9444
 ```
 
 `--join` fetches a chain snapshot from the peer before finalization starts and announces this node's P2P listener back to that peer, so newly finalized blocks can flow back without restarting the first node. If the peer cannot provide a snapshot, the node exits instead of silently starting a separate chain. Additional peers can be added from the P2P screen.
@@ -70,34 +70,34 @@ cargo run -- --genesis --p2p 0.0.0.0:9444 --http 127.0.0.1:18661
 4. Friends join your chain:
 
 ```sh
-cargo run -- --data-dir .luun-friend --p2p 0.0.0.0:9445 --http 127.0.0.1:18661 --join your-host:9444
+cargo run -- --data-dir .iuna-friend --p2p 0.0.0.0:9445 --http 127.0.0.1:18661 --join your-host:9444
 ```
 
-Friends who join after you start will adopt your genesis and current chain. The starter wallet begins with 100 spendable LUUN after the bootstrap burn and genesis reward, and `--genesis` starts it with a 100-LUUN automatic burn rate. After the starter finalizes additional blocks, send friends LUUN from the UI; then they can choose a burn amount and compete for future blocks. Every joining node starts with a 0-LUUN automatic burn unless it is configured otherwise.
+Friends who join after you start will adopt your genesis and current chain. The starter wallet begins with 100 spendable IUNA after the bootstrap burn and genesis reward, and `--genesis` starts it with a 100-IUNA automatic burn rate. After the starter finalizes additional blocks, send friends IUNA from the UI; then they can choose a burn amount and compete for future blocks. Every joining node starts with a 0-IUNA automatic burn unless it is configured otherwise.
 
 ## Bitaxe / Stratum
 
-Run a Stratum V1 listener when you want SHA-256 ASIC miners such as a Bitaxe to create Luun PoW mine actions:
+Run a Stratum V1 listener when you want SHA-256 ASIC miners such as a Bitaxe to create iuna PoW mine actions:
 
 ```sh
-cargo run -- --data-dir .luun --stratum 0.0.0.0:3333
+cargo run -- --data-dir .iuna --stratum 0.0.0.0:3333
 ```
 
-Point the miner at the node's Stratum host and port, and use your Luun wallet address as the worker username. The usual `address.worker` format is also accepted; Luun pays the address before the dot. Accepted ASIC shares become Luun mine actions in the node mempool and are gossiped to peers. The Stratum job commits to the current chain tip, recipient address, mine reward, finalizer fee, and Luun mine difficulty.
+Point the miner at the node's Stratum host and port, and use your iuna wallet address as the worker username. The usual `address.worker` format is also accepted; iuna pays the address before the dot. Accepted ASIC shares become iuna mine actions in the node mempool and are gossiped to peers. The Stratum job commits to the current chain tip, recipient address, mine reward, finalizer fee, and iuna mine difficulty.
 
-The genesis block bootstraps the chain with a 1-LUUN burn from the starter wallet. Genesis turns that burn into launch tickets for blocks 1 through 3 so the chain can move until normal burn tickets mature. Burns included after genesis create one-shot tickets through a deterministic weighted lottery: a burn of `X` among total eligible burn weight `Y` has `X / Y` chance for that block. The selected leader creates the next block content, signs a proof for the selected ticket, and runs a hash-chain VDF before gossiping the block.
+The genesis block bootstraps the chain with a 1-IUNA burn from the starter wallet. Genesis turns that burn into launch tickets for blocks 1 through 3 so the chain can move until normal burn tickets mature. Burns included after genesis create one-shot tickets through a deterministic weighted lottery: a burn of `X` among total eligible burn weight `Y` has `X / Y` chance for that block. The selected leader creates the next block content, signs a proof for the selected ticket, and runs a hash-chain VDF before gossiping the block.
 
 Every non-genesis block must consume the selected eligible ticket, include at least one burn transaction, and fit under the 100kB serialized block limit. The VDF seed is bound to the parent hash and child height; the block hash separately commits to the finalizer, timestamp, finalizer payout, rounds, previous hash, leader proof, VDF output, and transactions.
 
 The protocol targets 60-second blocks by retargeting the expected VDF rounds after each block. It uses a rolling average of recent block intervals and only moves the next round count by about 10% per block, so short bursts do not make the delay swing wildly. Every node derives the same next-round count from the validated chain.
 
-The base block finalizer reward is the block's total transaction fees. Transfers, burns, and PoW mine actions all set fees as LUUN per serialized byte; the node calculates the total fee from the final transaction size before submitting it. The automatic burn setting has a burn amount and a fee rate; the burn amount is the ticket weight, while the resulting fee is paid to the finalizer that includes it. The finalizer includes the best valid burn for liveness, then fills the remaining block space by fee-rate while respecting nonce and balance validity. PoW mine actions introduce new LUUN separately. The default burn is 0 LUUN per block with a 0.000001-LUUN-per-byte fee rate, so new nodes can join before they own LUUN. Genesis starters begin at 100 LUUN per block; after another wallet has LUUN, raise its burn from the Mining screen.
+The base block finalizer reward is the block's total transaction fees. Transfers, burns, and PoW mine actions all set fees as IUNA per serialized byte; the node calculates the total fee from the final transaction size before submitting it. The automatic burn setting has a burn amount and a fee rate; the burn amount is the ticket weight, while the resulting fee is paid to the finalizer that includes it. The finalizer includes the best valid burn for liveness, then fills the remaining block space by fee-rate while respecting nonce and balance validity. PoW mine actions introduce new IUNA separately. The default burn is 0 IUNA per block with a 0.000001-IUNA-per-byte fee rate, so new nodes can join before they own IUNA. Genesis starters begin at 100 IUNA per block; after another wallet has IUNA, raise its burn from the Mining screen.
 
 The measured VDF round count is only the initial delay. After the first blocks, the protocol steers rounds toward the 60-second target.
 
 ## Wallet Storage
 
-Luun creates a new wallet file the first time a node starts or joins a chain. By default it lives at `.luun/wallet.json`, or at `<data-dir>/wallet.json` when `--data-dir` is set. Pass `--wallet path/to/wallet.json` to choose a specific wallet file.
+iuna creates a new wallet file the first time a node starts or joins a chain. By default it lives at `.iuna/wallet.json`, or at `<data-dir>/wallet.json` when `--data-dir` is set. Pass `--wallet path/to/wallet.json` to choose a specific wallet file.
 
 During setup, the UI password encrypts the wallet seed at rest with PBKDF2-SHA256 and ChaCha20-Poly1305. On restart the node can read the wallet address from metadata, but the wallet remains locked until the password is entered in the management UI. Locked nodes can sync and show chain state, but cannot sign burns, transfers, or finalized blocks.
 
@@ -105,15 +105,15 @@ There is no default wallet seed in the binary. Keep the wallet file and recovery
 
 ## Node Config
 
-Luun stores UI setup state, configured peers, the configured automatic burn amount, and the burn/mine fee rates in `<data-dir>/config.json`. If `setup_complete` is false, the management UI opens the initial setup screen for wallet and peer setup. Completing setup and later runtime changes write the file through the HTTP API, so the choices follow the node data directory instead of a browser session.
+iuna stores UI setup state, configured peers, the configured automatic burn amount, and the burn/mine fee rates in `<data-dir>/config.json`. If `setup_complete` is false, the management UI opens the initial setup screen for wallet and peer setup. Completing setup and later runtime changes write the file through the HTTP API, so the choices follow the node data directory instead of a browser session.
 
 ## Chain Storage
 
-Luun stores the latest validated `ChainSnapshot` in SQLite at `<data-dir>/chain.sqlite3`. The database is updated by a small background persistence task when the tip changes, so web requests, P2P sessions, and VDF work do not perform chain database writes on their main async paths.
+iuna stores the latest validated `ChainSnapshot` in SQLite at `<data-dir>/chain.sqlite3`. The database is updated by a small background persistence task when the tip changes, so web requests, P2P sessions, and VDF work do not perform chain database writes on their main async paths.
 
 ## Architecture
 
-- `src/domain.rs`: wallet, fee-paying transactions, balances, genesis burn bootstrap, 100-LUUN base rewards, 100kB blocks, rolling-window leader tickets, leader proofs, fork choice, launch profile, and VDF checks.
+- `src/domain.rs`: wallet, fee-paying transactions, balances, genesis burn bootstrap, 100-IUNA base rewards, 100kB blocks, rolling-window leader tickets, leader proofs, fork choice, launch profile, and VDF checks.
 - `src/app.rs`: node use cases, automatic VDF-paced finalization, peer bookkeeping, and an in-memory network harness.
 - `src/adapters/http.rs`: HTTP management UI and status endpoint.
 - `src/adapters/p2p.rs`: line-delimited JSON gossip, block-range catch-up, and chain snapshots over one TCP port.

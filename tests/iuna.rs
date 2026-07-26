@@ -1,17 +1,17 @@
 use std::collections::BTreeMap;
 
-use luun::{
+use iuna::{
     adapters::chain_store::SqliteChainStore,
     app::{DEFAULT_BURN_PER_BLOCK, InMemoryNetwork, NodeConfig, NodeCore, PeerBook, PeerDirection},
     domain::{
         Amount, BLOCK_REWARD, DEFAULT_FEE_PER_BYTE, GenesisBurn, Ledger, MAX_BLOCK_BYTES,
-        MICRO_LUUN, MINE_REWARD, VDF_TARGET_BLOCK_MS, Wallet, run_vdf, verify_vdf,
+        MICRO_IUNA, MINE_REWARD, VDF_TARGET_BLOCK_MS, Wallet, run_vdf, verify_vdf,
     },
 };
 use tempfile::tempdir;
 
-fn luun(amount: Amount) -> Amount {
-    amount * MICRO_LUUN
+fn iuna(amount: Amount) -> Amount {
+    amount * MICRO_IUNA
 }
 
 fn node(_network_key: &str, wallet: Wallet, allocations: BTreeMap<String, Amount>) -> NodeCore {
@@ -49,7 +49,7 @@ fn submit_burn(ledger: &mut Ledger, wallet: &Wallet, amount: Amount) {
     ledger.submit_transaction(tx).unwrap();
 }
 
-fn burn_tx(ledger: &Ledger, wallet: &Wallet, amount: Amount) -> luun::domain::Transaction {
+fn burn_tx(ledger: &Ledger, wallet: &Wallet, amount: Amount) -> iuna::domain::Transaction {
     ledger.build_burn(wallet, amount, 0).unwrap()
 }
 
@@ -58,7 +58,7 @@ fn transfer_tx(
     wallet: &Wallet,
     to: impl Into<String>,
     amount: Amount,
-) -> luun::domain::Transaction {
+) -> iuna::domain::Transaction {
     ledger.build_transfer(wallet, to, amount, 0).unwrap()
 }
 
@@ -68,7 +68,7 @@ fn transfer_fee_tx(
     to: impl Into<String>,
     amount: Amount,
     fee: Amount,
-) -> luun::domain::Transaction {
+) -> iuna::domain::Transaction {
     ledger.build_transfer(wallet, to, amount, fee).unwrap()
 }
 
@@ -192,7 +192,7 @@ fn burn_in_block_creates_ticket_after_maturity_delay() {
     let bob = Wallet::from_seed("bob");
     let mut allocations = BTreeMap::new();
     allocations.insert(alice.address().to_string(), 1_000);
-    allocations.insert(bob.address().to_string(), MICRO_LUUN);
+    allocations.insert(bob.address().to_string(), MICRO_IUNA);
 
     let mut ledger = Ledger::new(allocations, 10);
     submit_burn(&mut ledger, &bob, 80);
@@ -237,19 +237,19 @@ fn transfer_and_burn_update_balances_when_block_is_applied() {
     let alice = Wallet::from_seed("alice");
     let bob = Wallet::from_seed("bob");
     let mut allocations = BTreeMap::new();
-    allocations.insert(alice.address().to_string(), luun(1_000));
-    allocations.insert(bob.address().to_string(), luun(100));
+    allocations.insert(alice.address().to_string(), iuna(1_000));
+    allocations.insert(bob.address().to_string(), iuna(100));
 
     let mut ledger = Ledger::new(allocations, 10);
-    let transfer = transfer_tx(&ledger, &alice, bob.address(), luun(125));
+    let transfer = transfer_tx(&ledger, &alice, bob.address(), iuna(125));
     ledger.submit_transaction(transfer).unwrap();
-    let burn = burn_tx(&ledger, &alice, luun(25));
+    let burn = burn_tx(&ledger, &alice, iuna(25));
     ledger.submit_transaction(burn).unwrap();
     let block = ledger.mine_next_block(&alice, 1).unwrap();
     ledger.apply_block(block).unwrap();
 
-    assert_eq!(ledger.balance_of(alice.address()), luun(850));
-    assert_eq!(ledger.balance_of(bob.address()), luun(225));
+    assert_eq!(ledger.balance_of(alice.address()), iuna(850));
+    assert_eq!(ledger.balance_of(bob.address()), iuna(225));
 }
 
 #[test]
@@ -258,11 +258,11 @@ fn forged_transaction_is_rejected() {
     let bob = Wallet::from_seed("bob");
     let mut allocations = BTreeMap::new();
     allocations.insert(alice.address().to_string(), 1_000);
-    allocations.insert(bob.address().to_string(), MICRO_LUUN);
+    allocations.insert(bob.address().to_string(), MICRO_IUNA);
     let mut ledger = Ledger::new(allocations, 10);
 
     let mut forged = burn_tx(&ledger, &bob, 10);
-    if let luun::domain::Transaction::Burn { inputs, .. } = &mut forged {
+    if let iuna::domain::Transaction::Burn { inputs, .. } = &mut forged {
         inputs[0].owner = alice.address().to_string();
     }
 
@@ -279,7 +279,7 @@ fn block_with_forged_transaction_is_rejected() {
     submit_burn(&mut ledger, &alice, 1);
 
     let mut block = ledger.mine_next_block(&alice, 1).unwrap();
-    if let luun::domain::Transaction::Burn { signature, .. } = &mut block.transactions[0] {
+    if let iuna::domain::Transaction::Burn { signature, .. } = &mut block.transactions[0] {
         signature.push_str("00");
     }
     block.vdf_output = run_vdf(&block.vdf_seed(), block.vdf_rounds);
@@ -290,23 +290,23 @@ fn block_with_forged_transaction_is_rejected() {
 }
 
 #[test]
-fn mine_action_introduces_one_luun_and_block_author_gets_fees_only() {
+fn mine_action_introduces_one_iuna_and_block_author_gets_fees_only() {
     let alice = Wallet::from_seed("alice");
     let mut allocations = BTreeMap::new();
-    allocations.insert(alice.address().to_string(), 2 * MICRO_LUUN);
+    allocations.insert(alice.address().to_string(), 2 * MICRO_IUNA);
 
     let mut ledger = Ledger::new(allocations, 10);
     let mine = ledger.build_mine(alice.address()).unwrap();
     assert_eq!(mine.amount(), MINE_REWARD);
     ledger.submit_transaction(mine.clone()).unwrap();
-    submit_burn(&mut ledger, &alice, MICRO_LUUN);
+    submit_burn(&mut ledger, &alice, MICRO_IUNA);
     let block = ledger.mine_next_block(&alice, 1).unwrap();
     assert_eq!(block.reward, 0);
 
     ledger.apply_block(block).unwrap();
-    assert_eq!(ledger.balance_of(alice.address()), 2 * MICRO_LUUN);
+    assert_eq!(ledger.balance_of(alice.address()), 2 * MICRO_IUNA);
     assert!(!ledger.submit_transaction(mine).unwrap());
-    assert_eq!(ledger.balance_of(alice.address()), 2 * MICRO_LUUN);
+    assert_eq!(ledger.balance_of(alice.address()), 2 * MICRO_IUNA);
 }
 
 #[test]
@@ -314,51 +314,51 @@ fn mine_action_fee_is_chosen_by_pow_miner_and_paid_to_block_finalizer() {
     let alice = Wallet::from_seed("mine-fee-alice");
     let bob = Wallet::from_seed("mine-fee-bob");
     let mut allocations = BTreeMap::new();
-    allocations.insert(bob.address().to_string(), 2 * MICRO_LUUN);
+    allocations.insert(bob.address().to_string(), 2 * MICRO_IUNA);
 
     let mut ledger = Ledger::new(allocations, 10);
-    let mine_fee = MICRO_LUUN / 4;
+    let mine_fee = MICRO_IUNA / 4;
     let mine = ledger
         .build_mine_with_fee(alice.address(), mine_fee)
         .unwrap();
     assert_eq!(mine.amount(), MINE_REWARD - mine_fee);
     assert_eq!(mine.fee(), mine_fee);
     ledger.submit_transaction(mine).unwrap();
-    submit_burn(&mut ledger, &bob, MICRO_LUUN);
+    submit_burn(&mut ledger, &bob, MICRO_IUNA);
 
     let block = ledger.mine_next_block(&bob, 1).unwrap();
     assert_eq!(block.reward, mine_fee);
     ledger.apply_block(block).unwrap();
 
     assert_eq!(ledger.balance_of(alice.address()), MINE_REWARD - mine_fee);
-    assert_eq!(ledger.balance_of(bob.address()), MICRO_LUUN + mine_fee);
+    assert_eq!(ledger.balance_of(bob.address()), MICRO_IUNA + mine_fee);
 }
 
 #[test]
-fn forged_mine_action_cannot_introduce_luun() {
+fn forged_mine_action_cannot_introduce_iuna() {
     let alice = Wallet::from_seed("forged-mine-alice");
     let mut allocations = BTreeMap::new();
-    allocations.insert(alice.address().to_string(), MICRO_LUUN);
+    allocations.insert(alice.address().to_string(), MICRO_IUNA);
     let mut ledger = Ledger::new(allocations, 10);
 
     let mut forged = ledger.build_mine(alice.address()).unwrap();
-    if let luun::domain::Transaction::Mine { nonce, .. } = &mut forged {
+    if let iuna::domain::Transaction::Mine { nonce, .. } = &mut forged {
         *nonce += 1;
     }
 
     let error = ledger.submit_transaction(forged).unwrap_err();
     assert!(format!("{error:#}").contains("mine transaction proof hash is invalid"));
-    assert_eq!(ledger.balance_of(alice.address()), MICRO_LUUN);
+    assert_eq!(ledger.balance_of(alice.address()), MICRO_IUNA);
 }
 
 #[test]
 fn burn_larger_than_mine_reward_is_paid_from_existing_utxos() {
     let alice = Wallet::from_seed("large-burn-existing-utxos-alice");
     let mut allocations = BTreeMap::new();
-    allocations.insert(alice.address().to_string(), BLOCK_REWARD + luun(50));
+    allocations.insert(alice.address().to_string(), BLOCK_REWARD + iuna(50));
 
     let mut ledger = Ledger::new(allocations, 10);
-    let burn_amount = BLOCK_REWARD + luun(25);
+    let burn_amount = BLOCK_REWARD + iuna(25);
     let burn = ledger.build_burn(&alice, burn_amount, 0).unwrap();
     ledger.submit_transaction(burn).unwrap();
 
@@ -367,7 +367,7 @@ fn burn_larger_than_mine_reward_is_paid_from_existing_utxos() {
     assert_eq!(block.reward, 0);
 
     ledger.apply_block(block).unwrap();
-    assert_eq!(ledger.balance_of(alice.address()), luun(25));
+    assert_eq!(ledger.balance_of(alice.address()), iuna(25));
 }
 
 #[test]
@@ -378,7 +378,7 @@ fn burn_larger_than_existing_balance_cannot_use_next_block_reward() {
 
     let ledger = Ledger::new(allocations, 10);
     let error = ledger
-        .build_burn(&alice, BLOCK_REWARD + MICRO_LUUN, 0)
+        .build_burn(&alice, BLOCK_REWARD + MICRO_IUNA, 0)
         .unwrap_err();
 
     assert!(format!("{error:#}").contains("insufficient funds"));
@@ -389,25 +389,25 @@ fn transaction_fees_are_paid_to_the_block_finalizer() {
     let alice = Wallet::from_seed("fee-miner-alice");
     let bob = Wallet::from_seed("fee-payer-bob");
     let mut allocations = BTreeMap::new();
-    allocations.insert(alice.address().to_string(), MICRO_LUUN);
-    allocations.insert(bob.address().to_string(), luun(200));
+    allocations.insert(alice.address().to_string(), MICRO_IUNA);
+    allocations.insert(bob.address().to_string(), iuna(200));
 
     let mut ledger = Ledger::new_with_genesis_burns(
         allocations,
-        vec![GenesisBurn::new(alice.address(), MICRO_LUUN)],
+        vec![GenesisBurn::new(alice.address(), MICRO_IUNA)],
         10,
     )
     .unwrap();
-    submit_burn(&mut ledger, &alice, MICRO_LUUN);
-    let tx = transfer_fee_tx(&ledger, &bob, alice.address(), luun(10), luun(7));
+    submit_burn(&mut ledger, &alice, MICRO_IUNA);
+    let tx = transfer_fee_tx(&ledger, &bob, alice.address(), iuna(10), iuna(7));
     ledger.submit_transaction(tx).unwrap();
 
     let block = ledger.mine_next_block(&alice, 1).unwrap();
-    assert_eq!(block.reward, luun(7));
+    assert_eq!(block.reward, iuna(7));
     ledger.apply_block(block).unwrap();
 
-    assert_eq!(ledger.balance_of(alice.address()), luun(116));
-    assert_eq!(ledger.balance_of(bob.address()), luun(183));
+    assert_eq!(ledger.balance_of(alice.address()), iuna(116));
+    assert_eq!(ledger.balance_of(bob.address()), iuna(183));
 }
 
 #[test]
@@ -586,13 +586,13 @@ fn block_hash_is_bound_to_block_contents() {
 fn automatic_mining_burns_configured_amount_once_per_height() {
     let alice = Wallet::from_seed("alice");
     let mut allocations = BTreeMap::new();
-    allocations.insert(alice.address().to_string(), luun(1_000));
+    allocations.insert(alice.address().to_string(), iuna(1_000));
 
     let mut node = NodeCore::new(NodeConfig {
         wallet: alice.clone(),
         genesis_allocations: allocations,
         vdf_rounds: 10,
-        burn_per_block: luun(25),
+        burn_per_block: iuna(25),
         burn_fee: DEFAULT_FEE_PER_BYTE,
     });
 
@@ -600,12 +600,12 @@ fn automatic_mining_burns_configured_amount_once_per_height() {
     assert!(first.burned.is_some());
     assert!(first.block.is_some());
     assert_eq!(node.ledger().chain().len(), 2);
-    assert_eq!(node.ledger().balance_of(alice.address()), luun(975));
+    assert_eq!(node.ledger().balance_of(alice.address()), iuna(975));
 
     let second = node.automatic_mine_once(2);
     assert!(second.burned.is_some());
     let burned = second.burned.as_ref().unwrap();
-    assert_eq!(burned.amount(), luun(25));
+    assert_eq!(burned.amount(), iuna(25));
     assert_eq!(
         burned.fee(),
         burned.serialized_size_bytes().unwrap() as u64 * DEFAULT_FEE_PER_BYTE
@@ -672,7 +672,7 @@ fn automatic_burn_status_shows_configured_fee() {
 fn automatic_mining_uses_configured_burn_fee() {
     let alice = Wallet::from_seed("auto-fee-burn-alice");
     let mut allocations = BTreeMap::new();
-    allocations.insert(alice.address().to_string(), MICRO_LUUN);
+    allocations.insert(alice.address().to_string(), MICRO_IUNA);
     let mut node = node("alice", alice, allocations);
 
     let burned = node.set_automatic_burn(50, 3).unwrap().unwrap();
@@ -692,7 +692,7 @@ fn automatic_mining_caps_burn_to_spendable_balance_after_fee() {
         wallet: alice.clone(),
         genesis_allocations: allocations,
         vdf_rounds: 10,
-        burn_per_block: BLOCK_REWARD + luun(50),
+        burn_per_block: BLOCK_REWARD + iuna(50),
         burn_fee: DEFAULT_FEE_PER_BYTE,
     });
 
@@ -718,7 +718,7 @@ fn setting_burn_rate_after_running_at_zero_adds_mempool_burn() {
     let bob = Wallet::from_seed("bob");
     let mut allocations = BTreeMap::new();
     allocations.insert(alice.address().to_string(), 1_000);
-    allocations.insert(bob.address().to_string(), MICRO_LUUN);
+    allocations.insert(bob.address().to_string(), MICRO_IUNA);
 
     let mut ledger = Ledger::new(allocations.clone(), 25);
     submit_burn(&mut ledger, &alice, 1);
@@ -727,7 +727,7 @@ fn setting_burn_rate_after_running_at_zero_adds_mempool_burn() {
 
     let mut bob_node = node("bob", bob.clone(), allocations);
     bob_node
-        .receive(luun::app::GossipEnvelope::ChainSnapshot(ledger.snapshot()))
+        .receive(iuna::app::GossipEnvelope::ChainSnapshot(ledger.snapshot()))
         .unwrap();
 
     let skipped = bob_node.automatic_mine_once(2);
@@ -748,7 +748,7 @@ fn automatic_mining_waits_when_wallet_is_not_selected_leader() {
     let bob = Wallet::from_seed("bob");
     let mut allocations = BTreeMap::new();
     allocations.insert(alice.address().to_string(), 1_000);
-    allocations.insert(bob.address().to_string(), MICRO_LUUN);
+    allocations.insert(bob.address().to_string(), MICRO_IUNA);
 
     let mut ledger = Ledger::new(allocations.clone(), 25);
     submit_burn(&mut ledger, &alice, 1);
@@ -758,7 +758,7 @@ fn automatic_mining_waits_when_wallet_is_not_selected_leader() {
     let mut bob_node = node("bob", bob.clone(), allocations);
     bob_node.set_burn_per_block(10).unwrap();
     bob_node
-        .receive(luun::app::GossipEnvelope::Block(ledger.chain()[1].clone()))
+        .receive(iuna::app::GossipEnvelope::Block(ledger.chain()[1].clone()))
         .unwrap();
 
     let outcome = bob_node.automatic_mine_once(2);
@@ -773,8 +773,8 @@ fn waiting_wallet_gossips_pending_burn_to_selected_leader() {
     let alice = Wallet::from_seed("deadlock-alice");
     let bob = Wallet::from_seed("deadlock-bob");
     let mut allocations = BTreeMap::new();
-    allocations.insert(alice.address().to_string(), luun(1_000));
-    allocations.insert(bob.address().to_string(), luun(1_000));
+    allocations.insert(alice.address().to_string(), iuna(1_000));
+    allocations.insert(bob.address().to_string(), iuna(1_000));
     let ledger =
         Ledger::new_with_genesis_burns(allocations, vec![GenesisBurn::new(bob.address(), 1)], 25)
             .unwrap();
@@ -789,7 +789,7 @@ fn waiting_wallet_gossips_pending_burn_to_selected_leader() {
         ledger,
         true,
         DEFAULT_BURN_PER_BLOCK,
-        MICRO_LUUN,
+        MICRO_IUNA,
     );
 
     let alice_outcome = alice_node.automatic_mine_once(1);
@@ -819,10 +819,10 @@ fn pow_only_node_gossips_mine_action_to_pob_only_finalizer() {
     let alice = Wallet::from_seed("pob-only-finalizer-alice");
     let bob = Wallet::from_seed("pow-only-miner-bob");
     let mut allocations = BTreeMap::new();
-    allocations.insert(alice.address().to_string(), 2 * MICRO_LUUN);
+    allocations.insert(alice.address().to_string(), 2 * MICRO_IUNA);
     let ledger = Ledger::new_with_genesis_burns(
         allocations,
-        vec![GenesisBurn::new(alice.address(), MICRO_LUUN)],
+        vec![GenesisBurn::new(alice.address(), MICRO_IUNA)],
         25,
     )
     .unwrap();
@@ -895,8 +895,8 @@ fn fallback_finalizer_can_build_block_with_extra_vdf_rounds() {
     let bob = Wallet::from_seed("fallback-finalizer-bob");
     let wallets = [&alice, &bob];
     let mut genesis = BTreeMap::new();
-    genesis.insert(alice.address().to_string(), luun(10));
-    genesis.insert(bob.address().to_string(), luun(10));
+    genesis.insert(alice.address().to_string(), iuna(10));
+    genesis.insert(bob.address().to_string(), iuna(10));
     let mut ledger = Ledger::new_with_genesis_burns(
         genesis,
         vec![
@@ -927,8 +927,8 @@ fn fallback_finalizer_with_primary_vdf_rounds_is_rejected() {
     let bob = Wallet::from_seed("fallback-rounds-bob");
     let wallets = [&alice, &bob];
     let mut genesis = BTreeMap::new();
-    genesis.insert(alice.address().to_string(), luun(10));
-    genesis.insert(bob.address().to_string(), luun(10));
+    genesis.insert(alice.address().to_string(), iuna(10));
+    genesis.insert(bob.address().to_string(), iuna(10));
     let mut ledger = Ledger::new_with_genesis_burns(
         genesis,
         vec![
@@ -960,8 +960,8 @@ fn fork_choice_prefers_primary_finalizer_over_fallback_rank() {
     let bob = Wallet::from_seed("fallback-fork-bob");
     let wallets = [&alice, &bob];
     let mut genesis = BTreeMap::new();
-    genesis.insert(alice.address().to_string(), luun(10));
-    genesis.insert(bob.address().to_string(), luun(10));
+    genesis.insert(alice.address().to_string(), iuna(10));
+    genesis.insert(bob.address().to_string(), iuna(10));
     let common = Ledger::new_with_genesis_burns(
         genesis,
         vec![
@@ -1181,10 +1181,10 @@ fn joined_nodes_import_transfer_block_and_every_wallet_mines() {
     let bob = Wallet::from_seed("flow-bob");
     let carol = Wallet::from_seed("flow-carol");
     let mut genesis = BTreeMap::new();
-    genesis.insert(alice.address().to_string(), luun(100));
+    genesis.insert(alice.address().to_string(), iuna(100));
     let alice_ledger = Ledger::new_with_genesis_burns(
         genesis,
-        vec![GenesisBurn::new(alice.address(), MICRO_LUUN)],
+        vec![GenesisBurn::new(alice.address(), MICRO_IUNA)],
         5,
     )
     .unwrap();
@@ -1227,7 +1227,7 @@ fn joined_nodes_import_transfer_block_and_every_wallet_mines() {
     network
         .node_mut("a")
         .unwrap()
-        .transfer_with_fee(bob.address(), luun(30), 0)
+        .transfer_with_fee(bob.address(), iuna(30), 0)
         .unwrap();
     network.node_mut("a").unwrap().burn(1).unwrap();
     network.deliver_until_idle().unwrap();
@@ -1236,7 +1236,7 @@ fn joined_nodes_import_transfer_block_and_every_wallet_mines() {
         block5
             .transactions
             .iter()
-            .any(|tx| tx.to() == Some(bob.address()) && tx.amount() == luun(30))
+            .any(|tx| tx.to() == Some(bob.address()) && tx.amount() == iuna(30))
     );
     mined_by.push(block5.miner.clone());
     let block5_outbox = network.node_mut("a").unwrap().drain_outbox();
@@ -1264,7 +1264,7 @@ fn joined_nodes_import_transfer_block_and_every_wallet_mines() {
         );
         assert_eq!(
             network.node(id).unwrap().ledger().balance_of(bob.address()),
-            luun(30),
+            iuna(30),
             "{id} did not apply A -> B transfer"
         );
     }
@@ -1290,7 +1290,7 @@ fn joined_nodes_import_transfer_block_and_every_wallet_mines() {
     network
         .node_mut("b")
         .unwrap()
-        .transfer_with_fee(carol.address(), luun(10), 0)
+        .transfer_with_fee(carol.address(), iuna(10), 0)
         .unwrap();
     network.node_mut("b").unwrap().burn(1).unwrap();
     network.deliver_until_idle().unwrap();
@@ -1514,7 +1514,7 @@ fn mined_block_gossip_does_not_include_full_chain_snapshot() {
     assert_eq!(burn_outbox.len(), 1);
     assert!(matches!(
         burn_outbox[0],
-        luun::app::GossipEnvelope::Transaction(_)
+        iuna::app::GossipEnvelope::Transaction(_)
     ));
 
     let work = plan.work.unwrap();
@@ -1527,7 +1527,7 @@ fn mined_block_gossip_does_not_include_full_chain_snapshot() {
     assert_eq!(block_outbox.len(), 1);
     assert!(matches!(
         block_outbox[0],
-        luun::app::GossipEnvelope::Block(_)
+        iuna::app::GossipEnvelope::Block(_)
     ));
 }
 
@@ -1547,13 +1547,13 @@ fn received_transaction_is_rebroadcast_to_other_peers_without_networking() {
     let tx = carol_node.burn(25).unwrap();
     carol_node.drain_outbox();
 
-    hub.receive(luun::app::GossipEnvelope::Transaction(tx.clone()))
+    hub.receive(iuna::app::GossipEnvelope::Transaction(tx.clone()))
         .unwrap();
     let forwarded = hub.drain_outbox();
     assert_eq!(forwarded.len(), 1);
     assert!(matches!(
         forwarded[0],
-        luun::app::GossipEnvelope::Transaction(_)
+        iuna::app::GossipEnvelope::Transaction(_)
     ));
 
     for envelope in forwarded {
@@ -1567,7 +1567,7 @@ fn received_transaction_is_rebroadcast_to_other_peers_without_networking() {
             .any(|pending| pending.signature() == tx.signature())
     );
 
-    hub.receive(luun::app::GossipEnvelope::Transaction(tx))
+    hub.receive(iuna::app::GossipEnvelope::Transaction(tx))
         .unwrap();
     assert!(hub.drain_outbox().is_empty());
 }
@@ -1586,14 +1586,14 @@ fn mempool_gossip_repairs_future_nonce_gap_without_networking() {
     alice_node.drain_outbox();
 
     bob_node
-        .receive(luun::app::GossipEnvelope::Transaction(second.clone()))
+        .receive(iuna::app::GossipEnvelope::Transaction(second.clone()))
         .unwrap();
     assert_eq!(bob_node.ledger().pending().len(), 1);
 
     let mut requests = Vec::new();
     for envelope in alice_node.mempool_gossip() {
         match envelope {
-            luun::app::GossipEnvelope::Inventory { txs, blocks } => {
+            iuna::app::GossipEnvelope::Inventory { txs, blocks } => {
                 requests.extend(bob_node.missing_inventory_requests(&txs, &blocks));
             }
             other => bob_node.receive(other).unwrap(),
@@ -1601,9 +1601,9 @@ fn mempool_gossip_repairs_future_nonce_gap_without_networking() {
     }
     for request in requests {
         match request {
-            luun::app::GossipEnvelope::TransactionRequest { signatures } => {
+            iuna::app::GossipEnvelope::TransactionRequest { signatures } => {
                 bob_node
-                    .receive(luun::app::GossipEnvelope::Transactions {
+                    .receive(iuna::app::GossipEnvelope::Transactions {
                         transactions: alice_node.transactions_by_signature(&signatures),
                     })
                     .unwrap();
@@ -1640,11 +1640,11 @@ fn received_block_is_rebroadcast_to_other_peers_without_networking() {
     let block = miner.mine_one_at(1).unwrap();
     miner.drain_outbox();
 
-    hub.receive(luun::app::GossipEnvelope::Block(block.clone()))
+    hub.receive(iuna::app::GossipEnvelope::Block(block.clone()))
         .unwrap();
     let forwarded = hub.drain_outbox();
     assert_eq!(forwarded.len(), 1);
-    assert!(matches!(forwarded[0], luun::app::GossipEnvelope::Block(_)));
+    assert!(matches!(forwarded[0], iuna::app::GossipEnvelope::Block(_)));
 
     for envelope in forwarded {
         carol_node.receive(envelope).unwrap();
@@ -1655,7 +1655,7 @@ fn received_block_is_rebroadcast_to_other_peers_without_networking() {
         miner.ledger().status().tip_hash
     );
 
-    hub.receive(luun::app::GossipEnvelope::Block(block))
+    hub.receive(iuna::app::GossipEnvelope::Block(block))
         .unwrap();
     assert!(hub.drain_outbox().is_empty());
 }
@@ -1683,7 +1683,7 @@ fn imported_snapshot_blocks_are_rebroadcast_without_networking() {
     let outbox = hub.drain_outbox();
     assert_eq!(outbox.len(), 1);
     match &outbox[0] {
-        luun::app::GossipEnvelope::Blocks { blocks } => {
+        iuna::app::GossipEnvelope::Blocks { blocks } => {
             assert_eq!(blocks.len(), 2);
             assert_eq!(blocks[0].height, 1);
             assert_eq!(blocks[1].height, 2);
@@ -1915,9 +1915,9 @@ fn fork_choice_preflight_rejects_invalid_fork_before_vrf_scoring() {
     let mut invalid_snapshot = remote.snapshot();
     if let Some(transaction) = invalid_snapshot.blocks[6].transactions.first_mut() {
         match transaction {
-            luun::domain::Transaction::Burn { signature, .. }
-            | luun::domain::Transaction::Transfer { signature, .. }
-            | luun::domain::Transaction::Mine { signature, .. } => signature.push_str("00"),
+            iuna::domain::Transaction::Burn { signature, .. }
+            | iuna::domain::Transaction::Transfer { signature, .. }
+            | iuna::domain::Transaction::Mine { signature, .. } => signature.push_str("00"),
         }
     }
 
@@ -2117,7 +2117,7 @@ fn node_receives_chain_snapshot_envelope_when_joining_without_tcp() {
     let mut bob_node = node("bob", bob, shared_genesis);
 
     bob_node
-        .receive(luun::app::GossipEnvelope::ChainSnapshot(
+        .receive(iuna::app::GossipEnvelope::ChainSnapshot(
             alice_node.chain_snapshot(),
         ))
         .unwrap();

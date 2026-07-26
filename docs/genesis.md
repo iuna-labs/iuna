@@ -1,6 +1,6 @@
 # Starting The Genesis Node
 
-This is operator documentation for bootstrapping a Luun devnet. Most users should join an existing seed node instead.
+This is operator documentation for bootstrapping a iuna devnet. Most users should join an existing seed node instead.
 
 ## Start Setup
 
@@ -20,7 +20,7 @@ Restart from a fresh chain database with `--genesis`:
 cargo run -- --genesis --p2p 0.0.0.0:9444 --http 127.0.0.1:18661
 ```
 
-Genesis bootstraps the chain with a 1 LUUN burn, creates launch tickets for the first blocks, measures an initial VDF delay, and leaves the starter wallet with spendable LUUN for early testing.
+Genesis bootstraps the chain with a 1 IUNA burn, creates launch tickets for the first blocks, measures an initial VDF delay, and leaves the starter wallet with spendable IUNA for early testing.
 
 ## Invite Nodes
 
@@ -33,7 +33,7 @@ your-host.example:9444
 They can join with:
 
 ```sh
-cargo run -- --data-dir .luun --p2p 0.0.0.0:9445 --http 127.0.0.1:18661 --join your-host.example:9444
+cargo run -- --data-dir .iuna --p2p 0.0.0.0:9445 --http 127.0.0.1:18661 --join your-host.example:9444
 ```
 
 Keep the management UI bound to `127.0.0.1`.

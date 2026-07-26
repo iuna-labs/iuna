@@ -4,8 +4,8 @@
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <meta name="color-scheme" content="dark">
-  <meta name="description" content="Luun is a low-energy currency prototype where block finalization requires sacrificing coins, while new supply is earned through open proof-of-work.">
-  <title>Luun Devnet</title>
+  <meta name="description" content="iuna is a low-energy currency prototype where block finalization requires sacrificing coins, while new supply is earned through open proof-of-work.">
+  <title>iuna Devnet</title>
   <style>
     :root {
       color-scheme: dark;
@@ -201,9 +201,9 @@
 <body>
   <div class="topbar">
     <div class="wrap">
-      <div class="brand"><span class="mark">L</span><span>Luun</span></div>
+      <div class="brand"><span class="mark">i</span><span>iuna</span></div>
       <nav aria-label="Page sections">
-        <a href="#what">What is Luun</a>
+        <a href="#what">What is iuna</a>
         <a href="#join">Join</a>
       </nav>
     </div>
@@ -213,11 +213,11 @@
     <div class="wrap hero-grid">
       <div>
         <div class="eyebrow"><span class="dot"></span> Devnet prototype</div>
-        <h1>Luun</h1>
+        <h1>iuna</h1>
         <p class="lead">A low-energy currency where block finalization requires sacrificing coins, while new supply is earned through open proof-of-work.</p>
-        <p>Luun is not a mainnet and not money yet. It is a small L1 lab for learning how a wallet, node, finalizer, miner, mempool, and peer network behave when real people run it on real machines.</p>
+        <p>iuna is not a mainnet and not money yet. It is a small L1 lab for learning how a wallet, node, finalizer, miner, mempool, and peer network behave when real people run it on real machines.</p>
         <div class="actions">
-          <a class="button primary" href="#what">What is Luun</a>
+          <a class="button primary" href="#what">What is iuna</a>
           <a class="button" href="#join">How to join</a>
         </div>
       </div>
@@ -237,14 +237,14 @@
     <section id="what">
       <div class="wrap">
         <div class="section-head">
-          <h2>What Is Luun?</h2>
-          <p>Luun combines proof-of-burn finalization, a VDF clock, and open proof-of-work issuance.</p>
+          <h2>What Is iuna?</h2>
+          <p>iuna combines proof-of-burn finalization, a VDF clock, and open proof-of-work issuance.</p>
         </div>
         <div class="grid">
           <div class="card">
             <span class="tag green">PoB</span>
             <h3>Proof Of Burn</h3>
-            <p>Nodes burn LUUN to enter the block lottery. The top-ranked burner finalizes first; lower ranks can take over with extra VDF delay if the first one disappears.</p>
+            <p>Nodes burn IUNA to enter the block lottery. The top-ranked burner finalizes first; lower ranks can take over with extra VDF delay if the first one disappears.</p>
           </div>
           <div class="card">
             <span class="tag cyan">VDF</span>
@@ -254,7 +254,7 @@
           <div class="card">
             <span class="tag blue">PoW</span>
             <h3>Proof Of Work Issuance</h3>
-            <p>PoW mine actions introduce new LUUN. Miners create 1 LUUN at a time and choose the fee paid to the block finalizer that includes the action.</p>
+            <p>PoW mine actions introduce new IUNA. Miners create 1 IUNA at a time and choose the fee paid to the block finalizer that includes the action.</p>
           </div>
         </div>
       </div>
@@ -264,9 +264,9 @@
       <div class="wrap split">
         <div>
           <h2>How To Join</h2>
-          <p>Ask for a public seed node address, then start Luun with a local data directory and that peer as your join target.</p>
-          <pre><code>cargo run -- --data-dir .luun --p2p 0.0.0.0:9445 --http 127.0.0.1:18661 --join seed.example:9444</code></pre>
-          <p>Open <code>http://127.0.0.1:18661</code>, set a password, back up your recovery phrase, and let the node sync. After you receive LUUN, you can send transactions, burn for block finalization, or enable PoW mine actions.</p>
+          <p>Ask for a public seed node address, then start iuna with a local data directory and that peer as your join target.</p>
+          <pre><code>cargo run -- --data-dir .iuna --p2p 0.0.0.0:9445 --http 127.0.0.1:18661 --join seed.example:9444</code></pre>
+          <p>Open <code>http://127.0.0.1:18661</code>, set a password, back up your recovery phrase, and let the node sync. After you receive IUNA, you can send transactions, burn for block finalization, or enable PoW mine actions.</p>
           <p class="note">Keep the management UI local. The P2P port is for node traffic; the wallet UI should stay on <code>127.0.0.1</code>.</p>
         </div>
         <aside class="card">
@@ -279,7 +279,7 @@
   </main>
 
   <section class="footer">
-    <div class="wrap">Luun devnet prototype.</div>
+    <div class="wrap">iuna devnet prototype.</div>
   </section>
 </body>
 </html>

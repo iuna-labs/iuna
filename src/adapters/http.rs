@@ -34,7 +34,7 @@ use crate::{
 
 const EXPLORER_LIMIT: usize = 50;
 const EXPLORER_PAGE_LIMIT: usize = 20;
-const AUTH_COOKIE_NAME: &str = "luun_session";
+const AUTH_COOKIE_NAME: &str = "iuna_session";
 const AUTH_SESSION_TTL_MS: u64 = 12 * 60 * 60 * 1_000;
 const PASSWORD_KDF_ALGORITHM: &str = "pbkdf2-sha256";
 const PASSWORD_KDF_ITERATIONS: u32 = 120_000;
@@ -233,7 +233,7 @@ pub async fn serve(
     let app = Router::new()
         .route("/", get(index))
         .route("/assets/alpine.min.js", get(alpine_js))
-        .route("/assets/luun-ui.js", get(app_js))
+        .route("/assets/iuna-ui.js", get(app_js))
         .route("/api/auth/status", get(api_auth_status))
         .route("/api/auth/setup", post(api_auth_setup_form))
         .route("/api/auth/login", post(api_auth_login_form))
@@ -298,7 +298,7 @@ async fn app_js() -> impl IntoResponse {
             header::CONTENT_TYPE,
             "application/javascript; charset=utf-8",
         )],
-        include_str!("../../assets/luun-ui.js"),
+        include_str!("../../assets/iuna-ui.js"),
     )
 }
 
@@ -325,7 +325,7 @@ async fn require_auth_middleware(
 fn auth_exempt_path(path: &str) -> bool {
     path == "/"
         || path == "/assets/alpine.min.js"
-        || path == "/assets/luun-ui.js"
+        || path == "/assets/iuna-ui.js"
         || path == "/api/auth/status"
         || path == "/api/auth/setup"
         || path == "/api/auth/login"
@@ -1016,7 +1016,7 @@ fn index_transaction_outputs(
 
 fn genesis_allocation_outpoint(address: &str) -> OutPoint {
     OutPoint {
-        txid: hex_hash(format!("luun-genesis-allocation:{address}")),
+        txid: hex_hash(format!("iuna-genesis-allocation:{address}")),
         index: 0,
     }
 }
@@ -1096,7 +1096,7 @@ fn wallet_setup_json(result: Result<WalletSetupResponse>) -> Json<WalletSetupRes
 }
 
 fn dev_seed_verify_bypass_enabled() -> bool {
-    dev_seed_verify_bypass_allowed(std::env::var_os("LUUN_DEV_SKIP_SEED_VERIFY").is_some())
+    dev_seed_verify_bypass_allowed(std::env::var_os("IUNA_DEV_SKIP_SEED_VERIFY").is_some())
 }
 
 fn dev_seed_verify_bypass_allowed(env_present: bool) -> bool {
@@ -1299,7 +1299,7 @@ async fn create_session_cookie(state: &HttpState, password: &str) -> Result<Stri
 }
 
 fn session_token_hash(token: &str) -> String {
-    hex_encode(Sha256::digest(format!("luun-session:{token}").as_bytes()))
+    hex_encode(Sha256::digest(format!("iuna-session:{token}").as_bytes()))
 }
 
 fn auth_cookie(headers: &HeaderMap) -> Option<&str> {
@@ -1457,7 +1457,7 @@ const INDEX_HTML: &str = r#"<!doctype html>
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
-  <title>Luun</title>
+  <title>iuna</title>
   <style>
     [x-cloak] { display: none !important; }
     :root {
@@ -1694,13 +1694,13 @@ const INDEX_HTML: &str = r#"<!doctype html>
       .block-card { flex-basis: 108px; }
     }
   </style>
-  <script defer src="/assets/luun-ui.js?v=53"></script>
+  <script defer src="/assets/iuna-ui.js?v=53"></script>
   <script defer src="/assets/alpine.min.js"></script>
 </head>
-<body x-data="luunApp()" x-init="init()" @keydown.window.escape="closeModals()" x-cloak>
+<body x-data="iunaApp()" x-init="init()" @keydown.window.escape="closeModals()" x-cloak>
   <div class="app-shell">
-    <aside class="sidebar" aria-label="Luun navigation">
-      <div class="brand-mark" title="Luun">L</div>
+    <aside class="sidebar" aria-label="iuna navigation">
+      <div class="brand-mark" title="iuna">i</div>
       <nav class="side-nav">
         <button class="nav-button" :class="{ active: tab === 'wallet' }" @click="setTab('wallet')" type="button" title="Wallet" aria-label="Wallet">
           <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M3 7h16a2 2 0 0 1 2 2v8a2 2 0 0 1-2 2H3z"></path><path d="M3 7V5a2 2 0 0 1 2-2h12"></path><path d="M16 13h3"></path></svg>
@@ -1724,7 +1724,7 @@ const INDEX_HTML: &str = r#"<!doctype html>
     <main class="content">
     <header>
       <div>
-        <h1 x-text="pageTitle()">Luun</h1>
+        <h1 x-text="pageTitle()">iuna</h1>
       </div>
       <div class="header-actions">
         <div class="muted" x-text="lastUpdatedLabel()"></div>
@@ -1738,7 +1738,7 @@ const INDEX_HTML: &str = r#"<!doctype html>
       <div class="page-title">
         <button class="wallet-balance-line" type="button" @click="openWalletUtxosModal" title="Show wallet UTXOs">
           <span class="tx-label">Balance</span>
-          <span class="tx-value money">LUUN <span x-text="amountLabel(status.wallet_balance)"></span></span>
+          <span class="tx-value money">IUNA <span x-text="amountLabel(status.wallet_balance)"></span></span>
         </button>
       </div>
       <div class="wallet-grid">
@@ -1753,8 +1753,8 @@ const INDEX_HTML: &str = r#"<!doctype html>
               <button class="advanced-toggle" type="button" @click="toggleSendAdvanced" x-text="showSendAdvanced ? 'Hide advanced' : 'Advanced'"></button>
               <div class="send-utxo-summary" x-show="showSendAdvanced">
                 <div>Selected UTXOs: <span x-text="selectedTransferUtxos.length"></span></div>
-                <div>Selected total: LUUN <span x-text="amountLabel(selectedTransferUtxoTotal())"></span></div>
-                <div>Required: LUUN <span x-text="amountLabel(transferRequiredTotal())"></span></div>
+                <div>Selected total: IUNA <span x-text="amountLabel(selectedTransferUtxoTotal())"></span></div>
+                <div>Required: IUNA <span x-text="amountLabel(transferRequiredTotal())"></span></div>
                 <div class="setup-feedback error" x-show="!selectedTransferUtxosCoverTransfer()">Selected UTXOs do not cover amount plus fee</div>
                 <div class="send-utxo-list">
                   <div class="send-utxo-list-head">
@@ -1768,7 +1768,7 @@ const INDEX_HTML: &str = r#"<!doctype html>
                     <label class="send-utxo-option">
                       <input type="checkbox" :value="utxoOutpoint(utxo)" x-model="selectedTransferUtxos" @change="scheduleFeeEstimates">
                       <span>
-                        <span class="utxo-node-label"><span>UTXO</span><span class="utxo-node-amount">LUUN <span x-text="amountLabel(utxo.amount)"></span></span></span>
+                        <span class="utxo-node-label"><span>UTXO</span><span class="utxo-node-amount">IUNA <span x-text="amountLabel(utxo.amount)"></span></span></span>
                         <code class="tx-value hash" x-text="utxoOutpoint(utxo)"></code>
                       </span>
                     </label>
@@ -1799,8 +1799,8 @@ const INDEX_HTML: &str = r#"<!doctype html>
               <div class="wallet-tx-row" :class="{ pending: tx.status === 'pending' }" role="button" tabindex="0" @click="openTransactionModal(tx, { source: 'Wallet' })" @keydown.enter.prevent="openTransactionModal(tx, { source: 'Wallet' })" @keydown.space.prevent="openTransactionModal(tx, { source: 'Wallet' })">
                 <span class="pill" :class="tx.kind" x-text="tx.direction"></span>
                 <div class="wallet-tx-main">
-                  <div class="tx-field"><span class="tx-label">Amount</span><span class="tx-value money">LUUN <span x-text="amountLabel(tx.amount)"></span></span></div>
-                  <div class="tx-field"><span class="tx-label">Fee</span><span class="tx-value money">LUUN <span x-text="amountLabel(tx.fee ?? 0)"></span></span></div>
+                  <div class="tx-field"><span class="tx-label">Amount</span><span class="tx-value money">IUNA <span x-text="amountLabel(tx.amount)"></span></span></div>
+                  <div class="tx-field"><span class="tx-label">Fee</span><span class="tx-value money">IUNA <span x-text="amountLabel(tx.fee ?? 0)"></span></span></div>
                   <div class="tx-field"><span class="tx-label">Status</span><span class="tx-value text" x-text="txTitle(tx)"></span></div>
                   <div class="tx-field"><span class="tx-label">From</span><code class="tx-value hash" x-text="short(tx.from)"></code></div>
                   <div class="tx-field" x-show="tx.to"><span class="tx-label">To</span><code class="tx-value hash" x-text="short(tx.to)"></code></div>
@@ -1839,10 +1839,10 @@ const INDEX_HTML: &str = r#"<!doctype html>
               <span class="toggle-text" x-text="miningEnabled ? 'On' : 'Off'"></span>
             </label>
           </div>
-          <div class="panel-description">Burn LUUN to compete for block finalization. Winning burns finalize PoB/VDF blocks and earn the transaction fees in those blocks.</div>
+          <div class="panel-description">Burn IUNA to compete for block finalization. Winning burns finalize PoB/VDF blocks and earn the transaction fees in those blocks.</div>
           <form class="mining-form" @submit.prevent="saveBurn">
             <div class="burn-fields">
-              <label>LUUN per block<input x-model="burnAmountDraft" @input="burnAmountDirty = true; scheduleFeeEstimates()" type="number" min="0" step="0.000001"></label>
+              <label>IUNA per block<input x-model="burnAmountDraft" @input="burnAmountDirty = true; scheduleFeeEstimates()" type="number" min="0" step="0.000001"></label>
               <label>Fee / byte<input x-model="burnFeeDraft" @input="burnAmountDirty = true; scheduleFeeEstimates()" type="number" min="0" step="0.000001" required></label>
               <button class="primary" type="submit">Save</button>
             </div>
@@ -1851,35 +1851,35 @@ const INDEX_HTML: &str = r#"<!doctype html>
           <div class="mine-stats fee-history" aria-label="Recent block fees">
             <div class="mine-stat">
               <div class="mine-stat-label">Last block fees</div>
-              <div class="mine-stat-value money">LUUN <span x-text="amountLabel(recentBlockFeeAverage(1))"></span></div>
+              <div class="mine-stat-value money">IUNA <span x-text="amountLabel(recentBlockFeeAverage(1))"></span></div>
             </div>
             <div class="mine-stat">
               <div class="mine-stat-label">5 block avg</div>
-              <div class="mine-stat-value money">LUUN <span x-text="amountLabel(recentBlockFeeAverage(5))"></span></div>
+              <div class="mine-stat-value money">IUNA <span x-text="amountLabel(recentBlockFeeAverage(5))"></span></div>
             </div>
             <div class="mine-stat">
               <div class="mine-stat-label">30 block avg</div>
-              <div class="mine-stat-value money">LUUN <span x-text="amountLabel(recentBlockFeeAverage(30))"></span></div>
+              <div class="mine-stat-value money">IUNA <span x-text="amountLabel(recentBlockFeeAverage(30))"></span></div>
             </div>
           </div>
         </div>
         <div class="panel">
           <h3>Mine</h3>
-          <div class="panel-description">Mine with PoW to introduce new LUUN. The miner chooses the fee paid to the block finalizer; the rest of the fixed mine reward goes to this wallet.</div>
+          <div class="panel-description">Mine with PoW to introduce new IUNA. The miner chooses the fee paid to the block finalizer; the rest of the fixed mine reward goes to this wallet.</div>
           <form class="mine-settings-form" @submit.prevent="savePowMining">
             <div class="mine-action-row">
               <div class="mine-stats" aria-label="PoW issuance settings">
                 <div class="mine-stat">
                   <div class="mine-stat-label">Total reward</div>
-                  <div class="mine-stat-value money">LUUN <span x-text="amountLabel(status.chain?.mine_reward ?? 0)"></span></div>
+                  <div class="mine-stat-value money">IUNA <span x-text="amountLabel(status.chain?.mine_reward ?? 0)"></span></div>
                 </div>
                 <div class="mine-stat">
                   <div class="mine-stat-label">Finalizer fee</div>
-                  <div class="mine-stat-value">LUUN <span x-text="amountLabel(feeEstimates.mine?.fee ?? 0)"></span></div>
+                  <div class="mine-stat-value">IUNA <span x-text="amountLabel(feeEstimates.mine?.fee ?? 0)"></span></div>
                 </div>
                 <div class="mine-stat">
                   <div class="mine-stat-label">Miner receives</div>
-                  <div class="mine-stat-value money">LUUN <span x-text="amountLabel(powMineNetReward())"></span></div>
+                  <div class="mine-stat-value money">IUNA <span x-text="amountLabel(powMineNetReward())"></span></div>
                 </div>
                 <div class="mine-stat">
                   <div class="mine-stat-label">Difficulty <button class="info-button" type="button" @click="openPowDifficultyInfo" title="How difficulty is adjusted" aria-label="How PoW difficulty is adjusted">i</button></div>
@@ -2013,10 +2013,10 @@ const INDEX_HTML: &str = r#"<!doctype html>
                 <div class="detail-kv"><div class="key">Previous</div><code x-text="short(selectedBlock.prev_hash)"></code></div>
                 <div class="detail-kv"><div class="key">Finalizer</div><code x-text="short(selectedBlock.miner)"></code></div>
                 <div class="detail-kv"><div class="key">Rank</div><div x-text="selectedBlock.finalizer_rank ?? 0"></div></div>
-                <div class="detail-kv"><div class="key">Reward</div><div>LUUN <span x-text="amountLabel(selectedBlock.reward)"></span></div></div>
+                <div class="detail-kv"><div class="key">Reward</div><div>IUNA <span x-text="amountLabel(selectedBlock.reward)"></span></div></div>
                 <div class="detail-kv"><div class="key">Burns</div><div x-text="blockBurnCount(selectedBlock)"></div></div>
                 <div class="detail-kv"><div class="key">Transfers</div><div x-text="blockTransferCount(selectedBlock)"></div></div>
-                <div class="detail-kv"><div class="key">Total Burned</div><div>LUUN <span x-text="amountLabel(blockBurned(selectedBlock))"></span></div></div>
+                <div class="detail-kv"><div class="key">Total Burned</div><div>IUNA <span x-text="amountLabel(blockBurned(selectedBlock))"></span></div></div>
                 <div class="detail-kv"><div class="key">VDF</div><div><span x-text="selectedBlock.vdf_rounds"></span> rounds</div></div>
               </div>
               <div class="tx-list">
@@ -2024,8 +2024,8 @@ const INDEX_HTML: &str = r#"<!doctype html>
                 <template x-for="tx in selectedBlock.transactions" :key="tx.signature">
                   <div class="tx-card" role="button" tabindex="0" @click="openTransactionModal(tx, { source: 'Block', blockHeight: selectedBlock.height, blockFinalizer: selectedBlock.miner })" @keydown.enter.prevent="openTransactionModal(tx, { source: 'Block', blockHeight: selectedBlock.height, blockFinalizer: selectedBlock.miner })" @keydown.space.prevent="openTransactionModal(tx, { source: 'Block', blockHeight: selectedBlock.height, blockFinalizer: selectedBlock.miner })">
                     <span class="pill" :class="tx.kind" x-text="tx.kind"></span>
-                    <div class="tx-field"><span class="tx-label">Amount</span><span class="tx-value money">LUUN <span x-text="amountLabel(txAmount(tx))"></span></span></div>
-                    <div class="tx-field"><span class="tx-label">Fee</span><span class="tx-value money">LUUN <span x-text="amountLabel(tx.fee ?? 0)"></span></span></div>
+                    <div class="tx-field"><span class="tx-label">Amount</span><span class="tx-value money">IUNA <span x-text="amountLabel(txAmount(tx))"></span></span></div>
+                    <div class="tx-field"><span class="tx-label">Fee</span><span class="tx-value money">IUNA <span x-text="amountLabel(tx.fee ?? 0)"></span></span></div>
                     <div class="tx-field"><span class="tx-label">From</span><code class="tx-value hash" x-text="short(txFrom(tx))"></code></div>
                     <div class="tx-field" x-show="txTo(tx)"><span class="tx-label">To</span><code class="tx-value hash" x-text="short(txTo(tx))"></code></div>
                     <div class="tx-field" x-show="isMineTx(tx)"><span class="tx-label">Proof Bits</span><span class="tx-value number"><span x-text="txProofBits(tx) ?? '-'"></span> / <span x-text="txDifficultyBits(tx) ?? '-'"></span></span></div>
@@ -2046,8 +2046,8 @@ const INDEX_HTML: &str = r#"<!doctype html>
             <template x-for="tx in mempool" :key="tx.signature">
               <div class="mempool-item" role="button" tabindex="0" @click="openTransactionModal(tx, { source: 'Mempool' })" @keydown.enter.prevent="openTransactionModal(tx, { source: 'Mempool' })" @keydown.space.prevent="openTransactionModal(tx, { source: 'Mempool' })">
                 <span class="pill" :class="tx.kind" x-text="tx.kind"></span>
-                <div class="tx-field"><span class="tx-label">Amount</span><span class="tx-value money">LUUN <span x-text="amountLabel(txAmount(tx))"></span></span></div>
-                <div class="tx-field"><span class="tx-label">Fee</span><span class="tx-value money">LUUN <span x-text="amountLabel(tx.fee ?? 0)"></span></span></div>
+                <div class="tx-field"><span class="tx-label">Amount</span><span class="tx-value money">IUNA <span x-text="amountLabel(txAmount(tx))"></span></span></div>
+                <div class="tx-field"><span class="tx-label">Fee</span><span class="tx-value money">IUNA <span x-text="amountLabel(tx.fee ?? 0)"></span></span></div>
                 <div class="tx-field"><span class="tx-label">From</span><code class="tx-value hash" x-text="short(txFrom(tx))"></code></div>
                 <div class="tx-field" x-show="txTo(tx)"><span class="tx-label">To</span><code class="tx-value hash" x-text="short(txTo(tx))"></code></div>
                 <div class="tx-field" x-show="isMineTx(tx)"><span class="tx-label">Proof Bits</span><span class="tx-value number"><span x-text="txProofBits(tx) ?? '-'"></span> / <span x-text="txDifficultyBits(tx) ?? '-'"></span></span></div>
@@ -2064,8 +2064,8 @@ const INDEX_HTML: &str = r#"<!doctype html>
   <div class="setup-overlay" x-show="showingAuth()" x-transition.opacity role="dialog" aria-modal="true" aria-labelledby="auth-title">
     <section class="setup-modal auth-form">
       <div class="setup-modal-head">
-        <div class="setup-welcome">Luun Access</div>
-        <h2 id="auth-title" x-text="auth.configured ? 'Unlock Luun' : 'Set Password'"></h2>
+        <div class="setup-welcome">iuna Access</div>
+        <h2 id="auth-title" x-text="auth.configured ? 'Unlock iuna' : 'Set Password'"></h2>
         <div class="setup-copy" x-show="!auth.configured">Choose a local password before wallet setup continues.</div>
         <div class="setup-copy" x-show="auth.configured">Enter the local password to unlock this node.</div>
       </div>
@@ -2086,14 +2086,14 @@ const INDEX_HTML: &str = r#"<!doctype html>
       <div class="tx-modal-head">
         <div class="tx-modal-title">
           <h2 id="wallet-utxos-title">Wallet UTXOs</h2>
-          <div class="tx-field"><span class="tx-label">Total</span><span class="tx-value money">LUUN <span x-text="amountLabel(status.wallet_balance)"></span></span></div>
+          <div class="tx-field"><span class="tx-label">Total</span><span class="tx-value money">IUNA <span x-text="amountLabel(status.wallet_balance)"></span></span></div>
         </div>
         <button type="button" @click="closeWalletUtxosModal">Close</button>
       </div>
       <div class="utxo-list">
         <template x-for="utxo in walletUtxos" :key="`${utxo.outpoint.txid}:${utxo.outpoint.index}`">
           <div class="wallet-utxo-row">
-            <div class="utxo-node-label"><span>UTXO</span><span class="utxo-node-amount">LUUN <span x-text="amountLabel(utxo.amount)"></span></span></div>
+            <div class="utxo-node-label"><span>UTXO</span><span class="utxo-node-amount">IUNA <span x-text="amountLabel(utxo.amount)"></span></span></div>
             <div class="tx-field"><span class="tx-label">Outpoint</span><code class="tx-value hash" x-text="txInputOutpoint({ outpoint: utxo.outpoint })"></code></div>
             <div class="tx-field"><span class="tx-label">Address</span><code class="tx-value hash" x-text="utxo.address"></code></div>
           </div>
@@ -2133,8 +2133,8 @@ const INDEX_HTML: &str = r#"<!doctype html>
       </div>
       <div class="tx-modal-summary">
         <div class="tx-field"><span class="tx-label">Source</span><span class="tx-value text" x-text="selectedTransactionLabel()"></span></div>
-        <div class="tx-field"><span class="tx-label">Amount</span><span class="tx-value money">LUUN <span x-text="amountLabel(txAmount(selectedTransaction?.tx || {}))"></span></span></div>
-        <div class="tx-field"><span class="tx-label">Fee</span><span class="tx-value money">LUUN <span x-text="amountLabel(selectedTransaction?.tx?.fee ?? 0)"></span></span></div>
+        <div class="tx-field"><span class="tx-label">Amount</span><span class="tx-value money">IUNA <span x-text="amountLabel(txAmount(selectedTransaction?.tx || {}))"></span></span></div>
+        <div class="tx-field"><span class="tx-label">Fee</span><span class="tx-value money">IUNA <span x-text="amountLabel(selectedTransaction?.tx?.fee ?? 0)"></span></span></div>
         <div class="tx-field"><span class="tx-label">From</span><code class="tx-value hash" x-text="txFrom(selectedTransaction?.tx || {})"></code></div>
         <div class="tx-field" x-show="txTo(selectedTransaction?.tx || {})"><span class="tx-label">To</span><code class="tx-value hash" x-text="txTo(selectedTransaction?.tx || {})"></code></div>
         <div class="tx-field" x-show="isMineTx(selectedTransaction?.tx)"><span class="tx-label">Difficulty</span><span class="tx-value number" x-text="txDifficultyBits(selectedTransaction?.tx) ?? '-'"></span></div>
@@ -2161,7 +2161,7 @@ const INDEX_HTML: &str = r#"<!doctype html>
           <template x-for="(output, index) in txVisualOutputs(selectedTransaction?.tx || {})" :key="txOutputKey(output, index)">
             <div class="utxo-node" :class="{ burned: output.kind === 'burned', fee: output.kind === 'fee' }">
               <div class="utxo-node-label"><span x-text="output.label"></span><span x-text="output.kind"></span></div>
-              <div class="utxo-node-amount">LUUN <span x-text="amountLabel(output.amount)"></span></div>
+              <div class="utxo-node-amount">IUNA <span x-text="amountLabel(output.amount)"></span></div>
               <template x-if="output.address">
                 <div class="tx-field"><span class="tx-label">To</span><code class="tx-value hash" x-text="output.address"></code></div>
               </template>
@@ -2178,7 +2178,7 @@ const INDEX_HTML: &str = r#"<!doctype html>
   <div class="setup-overlay" x-show="showingSetup()" x-transition.opacity role="dialog" aria-modal="true" aria-labelledby="setup-title">
     <section class="setup-modal">
       <div class="setup-modal-head">
-        <div class="setup-welcome">Welcome to Luun</div>
+        <div class="setup-welcome">Welcome to iuna</div>
         <h2 id="setup-title">Initial Setup</h2>
         <div class="setup-copy">Confirm the local wallet address and add any peers before this node starts from a saved configuration.</div>
       </div>
@@ -2298,7 +2298,7 @@ mod tests {
     use crate::{
         adapters::{config_store, config_store::UiConfig, p2p::GossipNetwork, wallet_store},
         app::{NodeCore, PeerBook, StratumStatus},
-        domain::{Block, Ledger, MICRO_LUUN, MINE_REWARD, OutPoint, Transaction, Wallet},
+        domain::{Block, Ledger, MICRO_IUNA, MINE_REWARD, OutPoint, Transaction, Wallet},
     };
 
     use super::{
@@ -2397,7 +2397,7 @@ mod tests {
             app.clone(),
             Method::GET,
             "/api/protected",
-            Some("luun_session=bogus"),
+            Some("iuna_session=bogus"),
             "",
         )
         .await;
@@ -2490,7 +2490,7 @@ mod tests {
     fn mine_transaction_views_include_miner_chosen_fee() {
         let alice = Wallet::from_seed("wallet-mine-fee-alice");
         let ledger = Ledger::new(BTreeMap::new(), 1);
-        let mine_fee = MICRO_LUUN / 5;
+        let mine_fee = MICRO_IUNA / 5;
         let mine = ledger
             .build_mine_with_fee(alice.address(), mine_fee)
             .unwrap();
@@ -2629,16 +2629,16 @@ mod tests {
             &ui_config,
             &config_path,
             true,
-            50 * MICRO_LUUN,
-            3 * MICRO_LUUN,
+            50 * MICRO_IUNA,
+            3 * MICRO_IUNA,
         )
         .await
         .unwrap();
         let config = config_store::load_or_create(&config_path).unwrap();
 
         assert!(config.mining_enabled);
-        assert_eq!(config.burn_per_block, 50 * MICRO_LUUN);
-        assert_eq!(config.burn_fee, 3 * MICRO_LUUN);
+        assert_eq!(config.burn_per_block, 50 * MICRO_IUNA);
+        assert_eq!(config.burn_fee, 3 * MICRO_IUNA);
     }
 
     #[tokio::test]
@@ -2652,13 +2652,13 @@ mod tests {
         let initial_config = ui_config.lock().await.clone();
         config_store::save(&config_path, &initial_config).expect("initial config should save");
 
-        persist_pow_mining_config(&ui_config, &config_path, true, 2 * MICRO_LUUN)
+        persist_pow_mining_config(&ui_config, &config_path, true, 2 * MICRO_IUNA)
             .await
             .unwrap();
         let config = config_store::load_or_create(&config_path).unwrap();
 
         assert!(config.pow_mining_enabled);
-        assert_eq!(config.pow_mine_fee, 2 * MICRO_LUUN);
+        assert_eq!(config.pow_mine_fee, 2 * MICRO_IUNA);
     }
 
     #[test]

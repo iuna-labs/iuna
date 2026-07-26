@@ -6,11 +6,11 @@ use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 
 pub type Amount = u64;
-pub const MICRO_LUUN: Amount = 1_000_000;
-pub const BLOCK_REWARD: Amount = 100 * MICRO_LUUN;
-pub const MINE_REWARD: Amount = MICRO_LUUN;
+pub const MICRO_IUNA: Amount = 1_000_000;
+pub const BLOCK_REWARD: Amount = 100 * MICRO_IUNA;
+pub const MINE_REWARD: Amount = MICRO_IUNA;
 pub const DEFAULT_MINE_FEE: Amount = MINE_REWARD / 100;
-pub const DEFAULT_TRANSACTION_FEE: Amount = MICRO_LUUN;
+pub const DEFAULT_TRANSACTION_FEE: Amount = MICRO_IUNA;
 pub const DEFAULT_FEE_PER_BYTE: Amount = 1;
 pub const MAX_BLOCK_BYTES: usize = 100_000;
 pub const VDF_TARGET_BLOCK_MS: u64 = 60_000;
@@ -31,7 +31,7 @@ const MAX_VDF_RETARGET_STEP_PERCENT: u128 = 10;
 const FORK_FINALITY_DEPTH: u64 = 6;
 const VDF_MODULUS: u128 = 4_611_685_975_477_714_963;
 const VDF_CHALLENGE_MIN: u64 = 1_073_741_827;
-const WALLET_SEED_DOMAIN: &str = "luun-wallet-seed";
+const WALLET_SEED_DOMAIN: &str = "iuna-wallet-seed";
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct Wallet {
@@ -162,7 +162,7 @@ impl Transaction {
             amount,
             fee: 0,
         };
-        let signature = hex_hash(format!("luun-genesis-burn:{}", unsigned.canonical()));
+        let signature = hex_hash(format!("iuna-genesis-burn:{}", unsigned.canonical()));
         Self::Burn {
             inputs: vec![input],
             change,
@@ -310,7 +310,7 @@ impl Transaction {
             }
             return Ok(());
         }
-        if self.signature().starts_with("luun-genesis-burn:") || self.inputs_are_genesis_signed() {
+        if self.signature().starts_with("iuna-genesis-burn:") || self.inputs_are_genesis_signed() {
             return Ok(());
         }
         if !self
@@ -491,12 +491,12 @@ fn mine_payload(
 ) -> String {
     let payload = if salt == 0 {
         format!(
-            "luun-mine:{}:{}:{}:{}",
+            "iuna-mine:{}:{}:{}:{}",
             output.address, output.amount, anchor, nonce
         )
     } else {
         format!(
-            "luun-mine:{}:{}:{}:{}:{}",
+            "iuna-mine:{}:{}:{}:{}:{}",
             output.address, output.amount, anchor, salt, nonce
         )
     } + &format!(":{difficulty_bits}");
@@ -579,12 +579,12 @@ fn stratum_coinbase_prefix(
 ) -> Vec<u8> {
     if salt == 0 {
         format!(
-            "luun-stratum-mine:{}:{}:{}:{}:{}:",
+            "iuna-stratum-mine:{}:{}:{}:{}:{}:",
             output.address, output.amount, fee, anchor, difficulty_bits
         )
     } else {
         format!(
-            "luun-stratum-mine:{}:{}:{}:{}:{}:{}:",
+            "iuna-stratum-mine:{}:{}:{}:{}:{}:{}:",
             output.address, output.amount, fee, anchor, salt, difficulty_bits
         )
     }
@@ -856,7 +856,7 @@ pub struct LeaderProof {
 impl LeaderProof {
     fn rank(&self) -> String {
         hex_hash(format!(
-            "luun-leader-rank:{}:{}",
+            "iuna-leader-rank:{}:{}",
             self.ticket_id, self.signature
         ))
     }
@@ -877,7 +877,7 @@ impl LeaderProofPayload {
     fn canonical(&self) -> String {
         if self.finalizer_rank == 0 {
             format!(
-                "luun-leader-proof:{}:{}:{}:{}:{}:{}",
+                "iuna-leader-proof:{}:{}:{}:{}:{}:{}",
                 self.height,
                 self.prev_hash,
                 self.vdf_output,
@@ -887,7 +887,7 @@ impl LeaderProofPayload {
             )
         } else {
             format!(
-                "luun-leader-proof-v2:{}:{}:{}:{}:{}:{}:{}",
+                "iuna-leader-proof-v2:{}:{}:{}:{}:{}:{}:{}",
                 self.height,
                 self.prev_hash,
                 self.finalizer_rank,
@@ -1012,7 +1012,7 @@ pub struct LaunchProfile {
 impl Default for LaunchProfile {
     fn default() -> Self {
         Self {
-            profile_id: "luun-devnet-v5".to_string(),
+            profile_id: "iuna-devnet-v5".to_string(),
             ticket_maturity_delay_heights: DEFAULT_TICKET_MATURITY_DELAY,
             ticket_expiry_window_heights: DEFAULT_TICKET_EXPIRY_WINDOW,
             mine_difficulty_bits: MINE_DIFFICULTY_BITS,
@@ -1038,7 +1038,7 @@ fn default_mine_difficulty_bits() -> u32 {
 impl LaunchProfile {
     pub fn hash(&self) -> String {
         hex_hash(format!(
-            "luun-launch-profile:{}:{}:{}:{}:{}:{}:{}",
+            "iuna-launch-profile:{}:{}:{}:{}:{}:{}:{}",
             self.profile_id,
             self.ticket_maturity_delay_heights,
             self.ticket_expiry_window_heights,
@@ -2233,12 +2233,12 @@ fn select_weighted_ticket_index(
 fn weighted_ticket_draw(parent: &Block, target_height: u64, rank: u32, total_weight: u128) -> u128 {
     let seed = if rank == 0 {
         format!(
-            "luun-ticket-draw:{}:{}:{}",
+            "iuna-ticket-draw:{}:{}:{}",
             target_height, parent.hash, parent.vdf_output
         )
     } else {
         format!(
-            "luun-ticket-draw-rank:{}:{}:{}:{}",
+            "iuna-ticket-draw-rank:{}:{}:{}:{}",
             target_height, rank, parent.hash, parent.vdf_output
         )
     };
@@ -2340,7 +2340,7 @@ fn genesis_tickets(
             owner.clone(),
             1,
             hex_hash(format!(
-                "luun-genesis-ticket:{owner}:{amount}:{}",
+                "iuna-genesis-ticket:{owner}:{amount}:{}",
                 genesis.hash
             )),
         )],
@@ -2359,7 +2359,7 @@ fn genesis_bootstrap_tickets(
         for (owner, amount, source_id) in &source_tickets {
             tickets.push(BurnTicket {
                 id: hex_hash(format!(
-                    "luun-genesis-bootstrap-ticket:{}:{source_id}:{height}",
+                    "iuna-genesis-bootstrap-ticket:{}:{source_id}:{height}",
                     genesis.hash
                 )),
                 owner: owner.clone(),
@@ -2554,7 +2554,7 @@ fn verify_leader_signature(proof: &LeaderProof, payload: &LeaderProofPayload) ->
 }
 
 fn vdf_seed_for_child(prev_hash: &str, height: u64) -> String {
-    hex_hash(format!("luun-vdf-child:{prev_hash}:{height}"))
+    hex_hash(format!("iuna-vdf-child:{prev_hash}:{height}"))
 }
 
 fn apply_transaction(
@@ -2707,7 +2707,7 @@ fn build_genesis_block(
         .map(Transaction::canonical)
         .collect::<Vec<_>>()
         .join("|");
-    let vdf_output = hex_hash(format!("luun-genesis-vdf:{genesis_allocations:?}:{txs}"));
+    let vdf_output = hex_hash(format!("iuna-genesis-vdf:{genesis_allocations:?}:{txs}"));
     let mut genesis = Block {
         height: 0,
         prev_hash: "0".repeat(64),
@@ -2771,7 +2771,7 @@ fn balances_from_utxos(utxos: &BTreeMap<OutPoint, TxOutput>) -> BTreeMap<String,
 
 fn genesis_allocation_outpoint(address: &str) -> OutPoint {
     OutPoint {
-        txid: hex_hash(format!("luun-genesis-allocation:{address}")),
+        txid: hex_hash(format!("iuna-genesis-allocation:{address}")),
         index: 0,
     }
 }
@@ -2866,14 +2866,14 @@ pub fn verify_vdf(seed: &str, rounds: u32, solution: &str) -> bool {
 }
 
 fn vdf_seed_element(seed: &str) -> u128 {
-    let digest = Sha256::digest(format!("luun-vdf-seed:{seed}").as_bytes());
+    let digest = Sha256::digest(format!("iuna-vdf-seed:{seed}").as_bytes());
     let mut bytes = [0_u8; 16];
     bytes.copy_from_slice(&digest[..16]);
     2 + (u128::from_be_bytes(bytes) % (VDF_MODULUS - 3))
 }
 
 fn vdf_challenge_prime(seed: &str, rounds: u32, output: u128) -> u64 {
-    let digest = Sha256::digest(format!("luun-vdf-challenge:{seed}:{rounds}:{output:x}"));
+    let digest = Sha256::digest(format!("iuna-vdf-challenge:{seed}:{rounds}:{output:x}"));
     let mut bytes = [0_u8; 8];
     bytes.copy_from_slice(&digest[..8]);
     let candidate = VDF_CHALLENGE_MIN + (u64::from_be_bytes(bytes) % VDF_CHALLENGE_MIN);
@@ -3056,7 +3056,7 @@ mod tests {
     }
 
     fn mine_burn_block_with_mines(ledger: &mut Ledger, wallet: &Wallet, mine_actions: usize) {
-        let burn = ledger.build_burn(wallet, MICRO_LUUN, 0).unwrap();
+        let burn = ledger.build_burn(wallet, MICRO_IUNA, 0).unwrap();
         ledger.submit_transaction(burn).unwrap();
         for _ in 0..mine_actions {
             let mine = ledger.build_mine(wallet.address()).unwrap();
@@ -3376,7 +3376,7 @@ mod tests {
     #[test]
     fn mine_fee_cannot_exceed_reward() {
         let alice = Wallet::from_seed("mine-fee-too-high-alice");
-        let ledger = ledger_with_allocation(&alice, MICRO_LUUN);
+        let ledger = ledger_with_allocation(&alice, MICRO_IUNA);
 
         let error = ledger
             .build_mine_with_fee(alice.address(), MINE_REWARD + 1)
@@ -3388,7 +3388,7 @@ mod tests {
     #[test]
     fn mine_output_plus_fee_must_equal_reward_even_with_valid_pow() {
         let alice = Wallet::from_seed("mine-invalid-split-alice");
-        let mut ledger = ledger_with_allocation(&alice, MICRO_LUUN);
+        let mut ledger = ledger_with_allocation(&alice, MICRO_IUNA);
         let forged = mine_with_output_and_fee(&ledger, alice.address(), MINE_REWARD, 1);
 
         let error = ledger.submit_transaction(forged).unwrap_err();
@@ -3399,7 +3399,7 @@ mod tests {
     #[test]
     fn mine_fee_can_take_entire_reward_for_finalizer() {
         let alice = Wallet::from_seed("mine-full-fee-alice");
-        let mut ledger = ledger_with_allocation(&alice, MICRO_LUUN);
+        let mut ledger = ledger_with_allocation(&alice, MICRO_IUNA);
 
         let mine = ledger
             .build_mine_with_fee(alice.address(), MINE_REWARD)
@@ -3413,16 +3413,16 @@ mod tests {
     #[test]
     fn block_selection_prefers_higher_fee_mine_action_when_space_is_limited() {
         let alice = Wallet::from_seed("mine-fee-priority-alice");
-        let mut ledger = ledger_with_allocation(&alice, 10 * MICRO_LUUN);
+        let mut ledger = ledger_with_allocation(&alice, 10 * MICRO_IUNA);
         ledger.launch_profile.max_block_transactions = 2;
 
         let low_fee_mine = ledger
-            .build_mine_with_fee(alice.address(), MICRO_LUUN / 100)
+            .build_mine_with_fee(alice.address(), MICRO_IUNA / 100)
             .unwrap();
         let high_fee_mine = ledger
-            .build_mine_with_fee(alice.address(), MICRO_LUUN / 2)
+            .build_mine_with_fee(alice.address(), MICRO_IUNA / 2)
             .unwrap();
-        let burn = ledger.build_burn(&alice, MICRO_LUUN, 0).unwrap();
+        let burn = ledger.build_burn(&alice, MICRO_IUNA, 0).unwrap();
         ledger.submit_transaction(low_fee_mine.clone()).unwrap();
         ledger.submit_transaction(high_fee_mine.clone()).unwrap();
         ledger.submit_transaction(burn).unwrap();
@@ -3449,7 +3449,7 @@ mod tests {
     #[test]
     fn mine_difficulty_increases_when_issuance_exceeds_target_window() {
         let alice = Wallet::from_seed("mine-difficulty-up-alice");
-        let mut ledger = ledger_with_allocation(&alice, 100 * MICRO_LUUN);
+        let mut ledger = ledger_with_allocation(&alice, 100 * MICRO_IUNA);
 
         for _ in 0..MINE_RETARGET_WINDOW_BLOCKS {
             mine_burn_block_with_mines(&mut ledger, &alice, 2);
@@ -3472,7 +3472,7 @@ mod tests {
     #[test]
     fn mine_difficulty_decreases_when_issuance_is_below_target_window() {
         let alice = Wallet::from_seed("mine-difficulty-down-alice");
-        let mut ledger = ledger_with_allocation(&alice, 100 * MICRO_LUUN);
+        let mut ledger = ledger_with_allocation(&alice, 100 * MICRO_IUNA);
 
         for _ in 0..MINE_RETARGET_WINDOW_BLOCKS {
             mine_burn_block_with_mines(&mut ledger, &alice, 0);
@@ -3487,7 +3487,7 @@ mod tests {
     #[test]
     fn mine_actions_expire_when_anchor_is_too_old() {
         let alice = Wallet::from_seed("mine-anchor-expiry-alice");
-        let mut ledger = ledger_with_allocation(&alice, 100 * MICRO_LUUN);
+        let mut ledger = ledger_with_allocation(&alice, 100 * MICRO_IUNA);
         let stale_mine = ledger.build_mine(alice.address()).unwrap();
 
         for _ in 0..=MINE_MAX_ANCHOR_AGE_BLOCKS {
@@ -3501,7 +3501,7 @@ mod tests {
     #[test]
     fn stratum_mine_header_proof_is_validated() {
         let alice = Wallet::from_seed("stratum-proof-alice");
-        let ledger = ledger_with_allocation(&alice, 100 * MICRO_LUUN);
+        let ledger = ledger_with_allocation(&alice, 100 * MICRO_IUNA);
         let anchor = ledger.tip().hash.clone();
         let difficulty_bits = ledger.current_mine_difficulty_bits();
         let template = ledger
@@ -3539,7 +3539,7 @@ mod tests {
     #[test]
     fn stratum_mine_salt_allows_multiple_actions_for_same_anchor() {
         let alice = Wallet::from_seed("stratum-salt-alice");
-        let mut ledger = ledger_with_allocation(&alice, 100 * MICRO_LUUN);
+        let mut ledger = ledger_with_allocation(&alice, 100 * MICRO_IUNA);
         let anchor = ledger.tip().hash.clone();
         let difficulty_bits = ledger.current_mine_difficulty_bits();
 

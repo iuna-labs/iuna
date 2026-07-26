@@ -9,10 +9,10 @@ use std::{
 use anyhow::{Context, Result, bail};
 use serde::{Deserialize, Serialize};
 
-use crate::domain::{Amount, DEFAULT_FEE_PER_BYTE, MICRO_LUUN};
+use crate::domain::{Amount, DEFAULT_FEE_PER_BYTE, MICRO_IUNA};
 
 const CONFIG_FILE_VERSION: u32 = 1;
-const AMOUNT_UNIT_MICROLUUN: &str = "microluun";
+const AMOUNT_UNIT_MICROIUNA: &str = "microiuna";
 pub const DEFAULT_BURN_FEE: Amount = DEFAULT_FEE_PER_BYTE;
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
@@ -83,7 +83,7 @@ pub fn save(path: &Path, config: &UiConfig) -> Result<()> {
 
     let stored = ConfigFile {
         version: CONFIG_FILE_VERSION,
-        amount_unit: Some(AMOUNT_UNIT_MICROLUUN.to_string()),
+        amount_unit: Some(AMOUNT_UNIT_MICROIUNA.to_string()),
         setup_complete: config.setup_complete,
         auth_password_hash: config.auth_password_hash.clone(),
         mining_enabled: Some(config.mining_enabled),
@@ -116,10 +116,10 @@ fn load(path: &Path) -> Result<UiConfig> {
         );
     }
 
-    let scale = if stored.amount_unit.as_deref() == Some(AMOUNT_UNIT_MICROLUUN) {
+    let scale = if stored.amount_unit.as_deref() == Some(AMOUNT_UNIT_MICROIUNA) {
         1
     } else {
-        MICRO_LUUN
+        MICRO_IUNA
     };
 
     Ok(UiConfig {
@@ -156,7 +156,7 @@ mod tests {
 
     use tempfile::tempdir;
 
-    use crate::domain::MICRO_LUUN;
+    use crate::domain::MICRO_IUNA;
 
     use super::{DEFAULT_BURN_FEE, DEFAULT_FEE_PER_BYTE, UiConfig, load_or_create, save};
 
@@ -170,7 +170,7 @@ mod tests {
         assert!(!config.setup_complete);
         let stored = fs::read_to_string(path).unwrap();
         assert!(stored.contains("\"version\": 1"));
-        assert!(stored.contains("\"amount_unit\": \"microluun\""));
+        assert!(stored.contains("\"amount_unit\": \"microiuna\""));
         assert!(stored.contains("\"setup_complete\": false"));
         assert!(stored.contains("\"auth_password_hash\": null"));
         assert!(stored.contains("\"mining_enabled\": false"));
@@ -193,9 +193,9 @@ mod tests {
                 auth_password_hash: Some("auth-hash".to_string()),
                 mining_enabled: true,
                 pow_mining_enabled: true,
-                burn_per_block: 50 * MICRO_LUUN,
-                burn_fee: 3 * MICRO_LUUN,
-                pow_mine_fee: 2 * MICRO_LUUN,
+                burn_per_block: 50 * MICRO_IUNA,
+                burn_fee: 3 * MICRO_IUNA,
+                pow_mine_fee: 2 * MICRO_IUNA,
                 peers: vec!["127.0.0.1:9444".to_string()],
             },
         )
@@ -206,9 +206,9 @@ mod tests {
         assert_eq!(config.auth_password_hash.as_deref(), Some("auth-hash"));
         assert!(config.mining_enabled);
         assert!(config.pow_mining_enabled);
-        assert_eq!(config.burn_per_block, 50 * MICRO_LUUN);
-        assert_eq!(config.burn_fee, 3 * MICRO_LUUN);
-        assert_eq!(config.pow_mine_fee, 2 * MICRO_LUUN);
+        assert_eq!(config.burn_per_block, 50 * MICRO_IUNA);
+        assert_eq!(config.burn_fee, 3 * MICRO_IUNA);
+        assert_eq!(config.pow_mine_fee, 2 * MICRO_IUNA);
         assert_eq!(config.peers, vec!["127.0.0.1:9444"]);
     }
 
@@ -270,8 +270,8 @@ mod tests {
         let config = load_or_create(&path).unwrap();
 
         assert!(config.mining_enabled);
-        assert_eq!(config.burn_per_block, 2 * MICRO_LUUN);
-        assert_eq!(config.burn_fee, MICRO_LUUN);
+        assert_eq!(config.burn_per_block, 2 * MICRO_IUNA);
+        assert_eq!(config.burn_fee, MICRO_IUNA);
         assert_eq!(config.pow_mine_fee, DEFAULT_FEE_PER_BYTE);
     }
 }

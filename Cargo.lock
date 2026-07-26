@@ -501,6 +501,25 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "8f42a60cbdf9a97f5d2305f08a87dc4e09308d1276d28c869c684d7777685682"
 
 [[package]]
+name = "iuna"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "axum",
+ "chacha20poly1305",
+ "ed25519-dalek",
+ "getrandom 0.2.17",
+ "pbkdf2",
+ "rusqlite",
+ "serde",
+ "serde_json",
+ "sha2",
+ "tempfile",
+ "tokio",
+ "tower",
+]
+
+[[package]]
 name = "libc"
 version = "0.2.188"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -537,25 +556,6 @@ name = "log"
 version = "0.4.33"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "0ceec5bc11778974d1bcb055b18002eba7f4b3518b6a0081b3af5f21666da9ad"
-
-[[package]]
-name = "luun"
-version = "0.1.0"
-dependencies = [
- "anyhow",
- "axum",
- "chacha20poly1305",
- "ed25519-dalek",
- "getrandom 0.2.17",
- "pbkdf2",
- "rusqlite",
- "serde",
- "serde_json",
- "sha2",
- "tempfile",
- "tokio",
- "tower",
-]
 
 [[package]]
 name = "matchit"

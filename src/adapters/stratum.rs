@@ -117,7 +117,7 @@ impl StratumSession {
                 self.send_response(
                     id,
                     json!([
-                        [["mining.set_difficulty", "luun"], ["mining.notify", "luun"]],
+                        [["mining.set_difficulty", "iuna"], ["mining.notify", "iuna"]],
                         STRATUM_EXTRANONCE1_HEX,
                         STRATUM_EXTRANONCE2_SIZE
                     ]),
@@ -332,7 +332,7 @@ mod tests {
     use super::StratumServer;
 
     #[tokio::test]
-    async fn stratum_session_accepts_valid_luun_share() {
+    async fn stratum_session_accepts_valid_iuna_share() {
         let wallet = Wallet::from_seed("stratum-session-wallet");
         let ledger = Ledger::new(BTreeMap::new(), 1);
         let node = Arc::new(Mutex::new(NodeCore::from_ledger(wallet.clone(), ledger, 0)));

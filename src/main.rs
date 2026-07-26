@@ -8,14 +8,14 @@ use std::{
 };
 
 use anyhow::{Context, Result, bail};
-use luun::{
+use iuna::{
     adapters::{chain_store::SqliteChainStore, config_store, http, p2p, stratum, wallet_store},
     app::{NodeCore, PeerBook, SharedNode, SharedPeerBook, StratumStatus, now_ms},
-    domain::{Amount, ChainSnapshot, GenesisBurn, Ledger, MICRO_LUUN, run_vdf},
+    domain::{Amount, ChainSnapshot, GenesisBurn, Ledger, MICRO_IUNA, run_vdf},
 };
 use tokio::sync::Mutex;
 
-const GENESIS_BOOTSTRAP_BURN_AMOUNT: Amount = MICRO_LUUN;
+const GENESIS_BOOTSTRAP_BURN_AMOUNT: Amount = MICRO_IUNA;
 const GENESIS_INITIAL_BURN_PER_BLOCK: Amount = GENESIS_BOOTSTRAP_BURN_AMOUNT;
 const GENESIS_INITIAL_BURN_FEE: Amount = 0;
 const VDF_MEASUREMENT_INITIAL_ROUNDS: u32 = 1_000_000;
@@ -82,7 +82,7 @@ async fn main() -> Result<()> {
         persist_chain_snapshot(&chain_store, initial_snapshot).await?;
     }
 
-    println!("luun wallet: {}", node.lock().await.wallet_address());
+    println!("iuna wallet: {}", node.lock().await.wallet_address());
     if node.lock().await.wallet_is_locked() {
         println!("wallet locked: unlock it in the management UI");
     }
@@ -92,9 +92,9 @@ async fn main() -> Result<()> {
     println!("management UI: http://{}", opts.http_addr);
     println!("p2p listener: {}", opts.p2p_addr);
     println!(
-        "automatic finalization: VDF-driven, burning {} LUUN per block with {} LUUN per byte fee rate",
-        format_luun(initial_burn_per_block),
-        format_luun(initial_burn_fee)
+        "automatic finalization: VDF-driven, burning {} IUNA per block with {} IUNA per byte fee rate",
+        format_iuna(initial_burn_per_block),
+        format_iuna(initial_burn_fee)
     );
 
     let gossip =
@@ -151,7 +151,7 @@ async fn main() -> Result<()> {
 }
 
 enum StartupWallet {
-    Unlocked(luun::domain::Wallet),
+    Unlocked(iuna::domain::Wallet),
     Locked { address: String },
 }
 
@@ -182,9 +182,9 @@ fn load_startup_wallet(wallet_path: &Path) -> Result<StartupWallet> {
     }
 }
 
-fn format_luun(amount: Amount) -> String {
-    let whole = amount / MICRO_LUUN;
-    let fractional = amount % MICRO_LUUN;
+fn format_iuna(amount: Amount) -> String {
+    let whole = amount / MICRO_IUNA;
+    let fractional = amount % MICRO_IUNA;
     if fractional == 0 {
         whole.to_string()
     } else {
@@ -264,7 +264,7 @@ impl CliOptions {
             peers: Vec::new(),
             join_peers: Vec::new(),
             chain_mode: ChainMode::Setup,
-            data_dir: PathBuf::from(".luun"),
+            data_dir: PathBuf::from(".iuna"),
         };
 
         let raw_args = args.into_iter().collect::<Vec<_>>();
@@ -285,7 +285,7 @@ impl CliOptions {
                 }
                 "--wallet-seed" => {
                     bail!(
-                        "--wallet-seed was removed; wallets are stored in --wallet <path> or .luun/wallet.json"
+                        "--wallet-seed was removed; wallets are stored in --wallet <path> or .iuna/wallet.json"
                     )
                 }
                 "--http" => {
@@ -389,11 +389,11 @@ fn print_help() {
 }
 
 fn help_text() -> &'static str {
-    "luun\n\n\
+    "iuna\n\n\
          Usage:\n\
-           luun [options]\n\
-           luun --genesis [options]\n\
-           luun --join <addr:port> [options]\n\n\
+           iuna [options]\n\
+           iuna --genesis [options]\n\
+           iuna --join <addr:port> [options]\n\n\
          Options:\n\
            --genesis                     Create a new chain with a fresh setup wallet\n\
            --wallet <path>               Wallet file (default <data-dir>/wallet.json)\n\
@@ -404,7 +404,7 @@ fn help_text() -> &'static str {
            --join <addr:port>            Fetch chain snapshot from this peer before finalization\n\
            --data-dir <path>             Local wallet directory\n\n\
          Environment:\n\
-           LUUN_DEV_SKIP_SEED_VERIFY=1 Show a setup button to skip seed verification\n"
+           IUNA_DEV_SKIP_SEED_VERIFY=1 Show a setup button to skip seed verification\n"
 }
 
 fn snapshot_height(snapshot: &ChainSnapshot) -> u64 {
@@ -434,7 +434,7 @@ fn start_genesis_ledger(wallet_address: &str) -> Result<Ledger> {
 }
 
 fn measure_initial_vdf_rounds() -> u32 {
-    let seed = "luun-vdf-calibration";
+    let seed = "iuna-vdf-calibration";
     let (measured_rounds, elapsed) = measure_vdf_rounds(
         seed,
         VDF_MEASUREMENT_INITIAL_ROUNDS,
@@ -630,10 +630,10 @@ async fn persist_chain_snapshot(store: &SqliteChainStore, snapshot: ChainSnapsho
 mod tests {
     use std::{collections::BTreeMap, sync::Arc, time::Duration};
 
-    use luun::{
+    use iuna::{
         adapters::{chain_store::SqliteChainStore, config_store::UiConfig, wallet_store},
         app::{DEFAULT_BURN_PER_BLOCK, NodeCore},
-        domain::{BLOCK_REWARD, GenesisBurn, Ledger, MICRO_LUUN, Wallet},
+        domain::{BLOCK_REWARD, GenesisBurn, Ledger, MICRO_IUNA, Wallet},
     };
     use rusqlite::Connection;
     use tempfile::tempdir;
@@ -652,12 +652,12 @@ mod tests {
 
     #[test]
     fn help_mentions_dev_seed_verify_bypass_env() {
-        assert!(help_text().contains("LUUN_DEV_SKIP_SEED_VERIFY=1"));
+        assert!(help_text().contains("IUNA_DEV_SKIP_SEED_VERIFY=1"));
         assert!(help_text().contains("skip seed verification"));
         assert!(help_text().contains("--stratum <addr:port>"));
     }
 
-    fn ledger_with_one_spendable_luun(wallet: &Wallet) -> Ledger {
+    fn ledger_with_one_spendable_iuna(wallet: &Wallet) -> Ledger {
         let mut genesis = BTreeMap::new();
         genesis.insert(wallet.address().to_string(), 2);
         Ledger::new_with_genesis_burns(genesis, vec![GenesisBurn::new(wallet.address(), 1)], 1)
@@ -665,7 +665,7 @@ mod tests {
     }
 
     fn ledger_with_one_mined_block(wallet: &Wallet) -> Ledger {
-        let mut ledger = ledger_with_one_spendable_luun(wallet);
+        let mut ledger = ledger_with_one_spendable_iuna(wallet);
         let burn = ledger.build_burn(wallet, 1, 0).unwrap();
         ledger.submit_transaction(burn).unwrap();
         let block = ledger.mine_next_block(wallet, 1_000).unwrap();
@@ -762,10 +762,10 @@ mod tests {
     fn genesis_default_auto_mining_keeps_burning_after_first_block() {
         let wallet = Wallet::from_seed("genesis-auto-burn-wallet");
         let mut genesis = BTreeMap::new();
-        genesis.insert(wallet.address().to_string(), MICRO_LUUN);
+        genesis.insert(wallet.address().to_string(), MICRO_IUNA);
         let ledger = Ledger::new_with_genesis_burns(
             genesis,
-            vec![GenesisBurn::new(wallet.address(), MICRO_LUUN)],
+            vec![GenesisBurn::new(wallet.address(), MICRO_IUNA)],
             1,
         )
         .unwrap();
@@ -781,12 +781,12 @@ mod tests {
 
         assert_eq!(
             first.burned.as_ref().map(|tx| tx.amount()),
-            Some(MICRO_LUUN)
+            Some(MICRO_IUNA)
         );
         assert!(first.block.is_some(), "{first:?}");
         assert_eq!(
             second.burned.as_ref().map(|tx| tx.amount()),
-            Some(MICRO_LUUN)
+            Some(MICRO_IUNA)
         );
         assert!(second.block.is_some(), "{second:?}");
         assert!(
@@ -795,7 +795,7 @@ mod tests {
             }),
             "{second:?}"
         );
-        assert!(node.ledger().balance_of(wallet.address()) >= BLOCK_REWARD - 2 * MICRO_LUUN);
+        assert!(node.ledger().balance_of(wallet.address()) >= BLOCK_REWARD - 2 * MICRO_IUNA);
     }
 
     #[test]
@@ -846,7 +846,7 @@ mod tests {
     }
 
     #[test]
-    fn http_management_port_defaults_to_luun_port() {
+    fn http_management_port_defaults_to_iuna_port() {
         let opts = parse(&[]).unwrap().unwrap();
         assert_eq!(opts.http_addr.to_string(), "127.0.0.1:18661");
     }
@@ -936,7 +936,7 @@ mod tests {
         let min_elapsed = Duration::from_millis(1);
         let max_rounds = 1_000_000;
         let (rounds, elapsed) =
-            measure_vdf_rounds("luun-test-vdf-calibration", 1, min_elapsed, max_rounds);
+            measure_vdf_rounds("iuna-test-vdf-calibration", 1, min_elapsed, max_rounds);
 
         assert!(rounds >= 1);
         assert!(elapsed >= min_elapsed || rounds >= max_rounds);
@@ -1050,7 +1050,7 @@ VALUES (1, 4, 'bad-tip', '{"not":"a chain snapshot"}', 0)
         let dir = tempdir().unwrap();
         let store = SqliteChainStore::open(dir.path().join("chain.sqlite3")).unwrap();
         let wallet = Wallet::from_seed("background-persistence");
-        let ledger = ledger_with_one_spendable_luun(&wallet);
+        let ledger = ledger_with_one_spendable_iuna(&wallet);
         let node = Arc::new(Mutex::new(NodeCore::from_ledger(
             wallet.clone(),
             ledger,

@@ -2,7 +2,7 @@
 
 The P2P protocol now starts with a real `Hello`. A node tells the peer its protocol version, network id, genesis hash, listen address, height, and tip hash. If the protocol, network, or genesis does not match, the session is rejected early.
 
-That matters because "it connected" is not enough for a Luun. A node on a different genesis should not be able to quietly trade blocks with us and create weird local errors later.
+That matters because "it connected" is not enough for a iuna. A node on a different genesis should not be able to quietly trade blocks with us and create weird local errors later.
 
 Gossip also changed. Instead of pushing full transactions and blocks every time, nodes announce inventory: transaction signatures and block hashes. Peers then request only the objects they do not have yet.
 

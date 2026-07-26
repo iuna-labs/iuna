@@ -1,4 +1,4 @@
-window.luunApp = function luunApp() {
+window.iunaApp = function iunaApp() {
   return {
     tab: "wallet",
     status: {},
@@ -100,11 +100,11 @@ window.luunApp = function luunApp() {
 
     pageTitle() {
       return {
-        wallet: "Luun",
+        wallet: "iuna",
         mining: "Mining",
         p2p: "P2P",
         chain: "Chain",
-      }[this.tab] || "Luun";
+      }[this.tab] || "iuna";
     },
 
     showingSetup() {
@@ -581,8 +581,8 @@ window.luunApp = function luunApp() {
     },
 
     async refreshBurnFeeEstimate() {
-      const amount = this.parseLuunAmount(this.burnAmountDraft);
-      const feePerByte = this.parseLuunAmount(this.burnFeeDraft);
+      const amount = this.parseiunaAmount(this.burnAmountDraft);
+      const feePerByte = this.parseiunaAmount(this.burnFeeDraft);
       if (amount <= 0) {
         this.feeEstimates.burn = null;
         return;
@@ -594,7 +594,7 @@ window.luunApp = function luunApp() {
     },
 
     async refreshMineFeeEstimate() {
-      const feePerByte = this.parseLuunAmount(this.powMineFeeDraft);
+      const feePerByte = this.parseiunaAmount(this.powMineFeeDraft);
       this.feeEstimates.mine = await this.fetchFeeEstimate("/api/fee-estimate/mine", {
         enabled: this.powMiningEnabled,
         fee_per_byte: feePerByte,
@@ -602,8 +602,8 @@ window.luunApp = function luunApp() {
     },
 
     async refreshTransferFeeEstimate() {
-      const amount = this.parseLuunAmount(this.transferAmount);
-      const feePerByte = this.parseLuunAmount(this.transferFee);
+      const amount = this.parseiunaAmount(this.transferAmount);
+      const feePerByte = this.parseiunaAmount(this.transferFee);
       if (!this.transferTo.trim() || amount <= 0) {
         this.feeEstimates.transfer = null;
         return;
@@ -639,20 +639,20 @@ window.luunApp = function luunApp() {
       const estimate = this.feeEstimates[kind];
       if (!estimate) return "Enter details to estimate fee";
       if (estimate.error) return estimate.error;
-      return `${estimate.bytes} bytes -> LUUN ${this.amountLabel(estimate.fee)}`;
+      return `${estimate.bytes} bytes -> IUNA ${this.amountLabel(estimate.fee)}`;
     },
 
     async saveBurn() {
       try {
-        const amount = this.parseLuunAmount(this.burnAmountDraft);
-        const fee = this.parseLuunAmountRequired(this.burnFeeDraft, "Burn fee per byte is required");
+        const amount = this.parseiunaAmount(this.burnAmountDraft);
+        const fee = this.parseiunaAmountRequired(this.burnFeeDraft, "Burn fee per byte is required");
         this.burnAmountDraft = this.amountLabel(amount);
         this.burnFeeDraft = this.amountLabel(fee);
         await this.postForm(
           "/api/settings/burn-per-block",
           { enabled: this.miningEnabled, amount, fee_per_byte: fee },
           this.miningEnabled
-            ? `Finalization burns on: ${this.amountLabel(amount)} LUUN per block with ${this.amountLabel(fee)} per byte`
+            ? `Finalization burns on: ${this.amountLabel(amount)} IUNA per block with ${this.amountLabel(fee)} per byte`
             : `Burn settings saved while off`
         );
         this.burnAmountDirty = false;
@@ -666,11 +666,11 @@ window.luunApp = function luunApp() {
     async setMiningEnabled(enabled) {
       const previous = this.miningEnabled;
       try {
-        const amount = this.parseLuunAmount(this.burnAmountDraft);
-        const fee = this.parseLuunAmountRequired(this.burnFeeDraft, "Burn fee per byte is required");
+        const amount = this.parseiunaAmount(this.burnAmountDraft);
+        const fee = this.parseiunaAmountRequired(this.burnFeeDraft, "Burn fee per byte is required");
         if (enabled && amount === 0) {
           this.miningEnabled = false;
-          throw new Error("Set LUUN per block before turning finalization burns on");
+          throw new Error("Set IUNA per block before turning finalization burns on");
         }
         this.miningEnabled = enabled;
         await this.postForm(
@@ -690,7 +690,7 @@ window.luunApp = function luunApp() {
     async setPowMiningEnabled(enabled) {
       const previous = this.powMiningEnabled;
       try {
-        const fee = this.parseLuunAmountRequired(this.powMineFeeDraft, "Mine fee per byte is required");
+        const fee = this.parseiunaAmountRequired(this.powMineFeeDraft, "Mine fee per byte is required");
         this.powMiningEnabled = enabled;
         await this.postForm(
           "/api/settings/pow-mining",
@@ -707,13 +707,13 @@ window.luunApp = function luunApp() {
 
     async savePowMining() {
       try {
-        const fee = this.parseLuunAmountRequired(this.powMineFeeDraft, "Mine fee per byte is required");
+        const fee = this.parseiunaAmountRequired(this.powMineFeeDraft, "Mine fee per byte is required");
         this.powMineFeeDraft = this.amountLabel(fee);
         await this.postForm(
           "/api/settings/pow-mining",
           { enabled: this.powMiningEnabled, fee_per_byte: fee },
           this.powMiningEnabled
-            ? `Mine fee rate set to ${this.amountLabel(fee)} LUUN per byte`
+            ? `Mine fee rate set to ${this.amountLabel(fee)} IUNA per byte`
             : `Mine settings saved while off`
         );
         this.powMineFeeDirty = false;
@@ -724,12 +724,12 @@ window.luunApp = function luunApp() {
     },
 
     automaticBurnFeeDraft() {
-      return this.parseLuunAmount(this.burnFeeDraft);
+      return this.parseiunaAmount(this.burnFeeDraft);
     },
 
     powMineFeeValue() {
       try {
-        return this.parseLuunAmount(this.powMineFeeDraft);
+        return this.parseiunaAmount(this.powMineFeeDraft);
       } catch {
         return this.powMineFee;
       }
@@ -741,9 +741,9 @@ window.luunApp = function luunApp() {
     },
 
     amountLabel(value) {
-      const microluun = Math.max(0, Math.trunc(Number(value) || 0));
-      const whole = Math.floor(microluun / 1000000);
-      const fractional = String(microluun % 1000000).padStart(6, "0").replace(/0+$/, "");
+      const microiuna = Math.max(0, Math.trunc(Number(value) || 0));
+      const whole = Math.floor(microiuna / 1000000);
+      const fractional = String(microiuna % 1000000).padStart(6, "0").replace(/0+$/, "");
       return fractional ? `${whole}.${fractional}` : `${whole}`;
     },
 
@@ -751,7 +751,7 @@ window.luunApp = function luunApp() {
       return Number(this.amountLabel(value));
     },
 
-    parseLuunAmount(value) {
+    parseiunaAmount(value) {
       const text = String(value ?? "").trim();
       if (!text) return 0;
       const match = text.match(/^(\d+)(?:\.(\d{0,6})\d*)?$/);
@@ -761,23 +761,23 @@ window.luunApp = function luunApp() {
       return Math.max(0, Math.trunc(whole * 1000000 + fractional));
     },
 
-    parseLuunAmountRequired(value, message) {
+    parseiunaAmountRequired(value, message) {
       const text = String(value ?? "").trim();
       if (!text) throw new Error(message);
-      const parsed = this.parseLuunAmount(text);
+      const parsed = this.parseiunaAmount(text);
       if (parsed === 0 && !/^0(?:\.0*)?$/.test(text)) throw new Error(message);
       return parsed;
     },
 
     async sendTransfer() {
       try {
-        const amount = this.parseLuunAmount(this.transferAmount);
-        const fee = this.parseLuunAmountRequired(this.transferFee, "Transfer fee per byte is required");
+        const amount = this.parseiunaAmount(this.transferAmount);
+        const fee = this.parseiunaAmountRequired(this.transferFee, "Transfer fee per byte is required");
         const recipient = this.short(this.transferTo);
         await this.postForm(
           "/api/transfer",
           { to: this.transferTo, amount, fee_per_byte: fee, utxos: this.selectedTransferUtxos.join("\n") },
-          `Queued transfer of ${this.amountLabel(amount)} LUUN to ${recipient}`
+          `Queued transfer of ${this.amountLabel(amount)} IUNA to ${recipient}`
         );
         this.transferTo = "";
         this.transferAmount = null;
@@ -949,7 +949,7 @@ window.luunApp = function luunApp() {
     },
 
     transferRequiredTotal() {
-      return this.parseLuunAmount(this.transferAmount) + Number(this.feeEstimates.transfer?.fee || 0);
+      return this.parseiunaAmount(this.transferAmount) + Number(this.feeEstimates.transfer?.fee || 0);
     },
 
     selectedTransferUtxosCoverTransfer() {
@@ -957,7 +957,7 @@ window.luunApp = function luunApp() {
     },
 
     txInputAmountLabel(input) {
-      return input.amount === null || input.amount === undefined ? "-" : `LUUN ${this.amountLabel(input.amount)}`;
+      return input.amount === null || input.amount === undefined ? "-" : `IUNA ${this.amountLabel(input.amount)}`;
     },
 
     txFeeRecipient(tx) {

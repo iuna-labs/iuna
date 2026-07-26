@@ -1,9 +1,9 @@
 use std::collections::{BTreeMap, BTreeSet};
 
-use luun::{
+use iuna::{
     app::{InMemoryNetwork, NodeCore},
     domain::{
-        Amount, ChainSnapshot, GenesisBurn, Ledger, MICRO_LUUN, MINE_REWARD, OutPoint, Transaction,
+        Amount, ChainSnapshot, GenesisBurn, Ledger, MICRO_IUNA, MINE_REWARD, OutPoint, Transaction,
         TxInput, TxOutput, Wallet, hex_hash, verify_vdf,
     },
 };
@@ -70,8 +70,8 @@ fn genesis_burns(wallets: &[Wallet], amount: Amount) -> Vec<GenesisBurn> {
 fn property_ledger(seed: u64, wallet_count: usize) -> (Vec<Wallet>, Ledger) {
     let wallets = test_wallets(seed, wallet_count);
     let ledger = Ledger::new_with_genesis_burns(
-        allocations(&wallets, 250 * MICRO_LUUN),
-        genesis_burns(&wallets, MICRO_LUUN),
+        allocations(&wallets, 250 * MICRO_IUNA),
+        genesis_burns(&wallets, MICRO_IUNA),
         1,
     )
     .expect("property genesis is valid");
@@ -81,8 +81,8 @@ fn property_ledger(seed: u64, wallet_count: usize) -> (Vec<Wallet>, Ledger) {
 fn single_finalizer_ledger(seed: u64, wallet_count: usize) -> (Vec<Wallet>, Ledger) {
     let wallets = test_wallets(seed, wallet_count);
     let ledger = Ledger::new_with_genesis_burns(
-        allocations(&wallets, 250 * MICRO_LUUN),
-        vec![GenesisBurn::new(wallets[0].address(), MICRO_LUUN)],
+        allocations(&wallets, 250 * MICRO_IUNA),
+        vec![GenesisBurn::new(wallets[0].address(), MICRO_IUNA)],
         1,
     )
     .expect("single-finalizer property genesis is valid");
@@ -229,7 +229,7 @@ fn seed_reference_genesis_allocations(
         }
         utxos.insert(
             OutPoint {
-                txid: hex_hash(format!("luun-genesis-allocation:{address}")),
+                txid: hex_hash(format!("iuna-genesis-allocation:{address}")),
                 index: 0,
             },
             TxOutput {
@@ -355,7 +355,7 @@ fn try_random_transaction(
     match rng.index(5) {
         0 => {
             let (from, to) = random_wallet_pair(rng, wallets);
-            let amount = rng.amount(5 * MICRO_LUUN);
+            let amount = rng.amount(5 * MICRO_IUNA);
             let fee = rng.next_u64() % 4;
             if let Ok(tx) = ledger.build_transfer(from, to.address(), amount, fee) {
                 let _ = ledger.submit_transaction(tx);
@@ -363,7 +363,7 @@ fn try_random_transaction(
         }
         1 => {
             let wallet = &wallets[rng.index(wallets.len())];
-            let amount = rng.amount(3 * MICRO_LUUN);
+            let amount = rng.amount(3 * MICRO_IUNA);
             let fee = rng.next_u64() % 4;
             if let Ok(tx) = ledger.build_burn(wallet, amount, fee) {
                 let _ = ledger.submit_transaction(tx);
@@ -377,7 +377,7 @@ fn try_random_transaction(
         }
         3 => {
             let wallet = &wallets[rng.index(wallets.len())];
-            let impossible = (seed + round as u64 + 1) * MICRO_LUUN * 10_000;
+            let impossible = (seed + round as u64 + 1) * MICRO_IUNA * 10_000;
             assert!(ledger.build_burn(wallet, impossible, 0).is_err());
         }
         _ => {}
@@ -392,7 +392,7 @@ fn try_finalize_next_block(round: usize, wallets: &[Wallet], ledger: &mut Ledger
         return;
     };
 
-    if let Ok(tx) = ledger.build_burn(wallet, MICRO_LUUN, 0) {
+    if let Ok(tx) = ledger.build_burn(wallet, MICRO_IUNA, 0) {
         let _ = ledger.submit_transaction(tx);
     }
 
@@ -405,7 +405,7 @@ fn try_finalize_next_block(round: usize, wallets: &[Wallet], ledger: &mut Ledger
 
 fn finalize_with_wallet(ledger: &mut Ledger, wallet: &Wallet, timestamp_ms: u64) {
     let burn = ledger
-        .build_burn(wallet, MICRO_LUUN, 0)
+        .build_burn(wallet, MICRO_IUNA, 0)
         .expect("finalizer can build burn");
     let _ = ledger
         .submit_transaction(burn)
@@ -453,7 +453,7 @@ fn generated_forks_reorg_only_inside_finality_and_preserve_local_transactions() 
 
         let mut local = common.clone();
         let abandoned = local
-            .build_transfer(sender, recipient.address(), MICRO_LUUN + rng.amount(5), 0)
+            .build_transfer(sender, recipient.address(), MICRO_IUNA + rng.amount(5), 0)
             .expect("abandoned fork transfer builds");
         local
             .submit_transaction(abandoned.clone())
@@ -516,7 +516,7 @@ fn in_memory_network_converges_under_generated_node_actions() {
                     wallet.clone(),
                     joined,
                     true,
-                    MICRO_LUUN,
+                    MICRO_IUNA,
                     0,
                 ),
             );
@@ -537,13 +537,13 @@ fn in_memory_network_converges_under_generated_node_actions() {
                     let _ = network
                         .node_mut(&node_id)
                         .expect("node exists")
-                        .transfer_with_fee(recipient, rng.amount(2 * MICRO_LUUN), 0);
+                        .transfer_with_fee(recipient, rng.amount(2 * MICRO_IUNA), 0);
                 }
                 1 => {
                     let _ = network
                         .node_mut(&node_id)
                         .expect("node exists")
-                        .burn_with_fee(MICRO_LUUN, 0);
+                        .burn_with_fee(MICRO_IUNA, 0);
                 }
                 2 => {
                     let _ = network
@@ -653,7 +653,7 @@ fn deliver_with_chaos(
 fn receive_chaotic_envelope(
     network: &mut InMemoryNetwork,
     id: &str,
-    envelope: luun::app::GossipEnvelope,
+    envelope: iuna::app::GossipEnvelope,
 ) {
     if let Err(error) = network.node_mut(id).expect("node exists").receive(envelope) {
         let message = error.to_string();
@@ -696,7 +696,7 @@ fn in_memory_network_converges_after_generated_offline_and_reordered_delivery() 
                     wallet.clone(),
                     joined,
                     true,
-                    MICRO_LUUN,
+                    MICRO_IUNA,
                     0,
                 ),
             );
@@ -721,7 +721,7 @@ fn in_memory_network_converges_after_generated_offline_and_reordered_delivery() 
                     let _ = network
                         .node_mut(&actor_id)
                         .expect("actor node exists")
-                        .transfer_with_fee(recipient, MICRO_LUUN + rng.amount(17), 0);
+                        .transfer_with_fee(recipient, MICRO_IUNA + rng.amount(17), 0);
                 }
                 1 => {
                     let _ = network
@@ -733,7 +733,7 @@ fn in_memory_network_converges_after_generated_offline_and_reordered_delivery() 
                     let _ = network
                         .node_mut("n0")
                         .expect("finalizer node exists")
-                        .burn_with_fee(MICRO_LUUN, 0);
+                        .burn_with_fee(MICRO_IUNA, 0);
                 }
             }
 
