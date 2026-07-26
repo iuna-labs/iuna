@@ -72,7 +72,7 @@ iuna combines three mechanisms:
 - **VDF clock:** the selected finalizer must run sequential delay work before publishing a block.
 - **PoW issuance:** miners create new IUNA through mine actions and choose the fee paid to the finalizer that includes them.
 
-The current devnet targets 60-second blocks, uses local wallet encryption, stores chain state in SQLite, and includes an in-memory network test harness for protocol testing.
+The current devnet targets 10-minute blocks, uses local wallet encryption, stores chain state in SQLite, and includes an in-memory network test harness for protocol testing.
 
 ## Contributing
 

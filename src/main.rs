@@ -11,7 +11,9 @@ use anyhow::{Context, Result, bail};
 use iuna::{
     adapters::{chain_store::SqliteChainStore, config_store, http, p2p, stratum, wallet_store},
     app::{NodeCore, PeerBook, SharedNode, SharedPeerBook, StratumStatus, now_ms},
-    domain::{Amount, ChainSnapshot, GenesisBurn, Ledger, MICRO_IUNA, run_vdf},
+    domain::{
+        Amount, ChainSnapshot, GenesisBurn, Ledger, MICRO_IUNA, VDF_TARGET_BLOCK_MS, run_vdf,
+    },
 };
 use tokio::sync::Mutex;
 
@@ -441,7 +443,11 @@ fn measure_initial_vdf_rounds() -> u32 {
         VDF_MEASUREMENT_MIN_ELAPSED,
         VDF_MEASUREMENT_MAX_ROUNDS,
     );
-    let rounds = extrapolate_vdf_rounds(measured_rounds, elapsed, Duration::from_secs(60));
+    let rounds = extrapolate_vdf_rounds(
+        measured_rounds,
+        elapsed,
+        Duration::from_millis(VDF_TARGET_BLOCK_MS),
+    );
     println!(
         "measured {measured_rounds} VDF rounds in {:.3}ms; initial VDF rounds: {rounds}",
         elapsed.as_secs_f64() * 1000.0
@@ -633,7 +639,7 @@ mod tests {
     use iuna::{
         adapters::{chain_store::SqliteChainStore, config_store::UiConfig, wallet_store},
         app::{DEFAULT_BURN_PER_BLOCK, NodeCore},
-        domain::{BLOCK_REWARD, GenesisBurn, Ledger, MICRO_IUNA, Wallet},
+        domain::{BLOCK_REWARD, GenesisBurn, Ledger, MICRO_IUNA, VDF_TARGET_BLOCK_MS, Wallet},
     };
     use rusqlite::Connection;
     use tempfile::tempdir;
@@ -922,11 +928,19 @@ mod tests {
     #[test]
     fn vdf_measurement_extrapolates_to_target() {
         assert_eq!(
-            extrapolate_vdf_rounds(10_000, Duration::from_secs(1), Duration::from_secs(60)),
-            600_000
+            extrapolate_vdf_rounds(
+                10_000,
+                Duration::from_secs(1),
+                Duration::from_millis(VDF_TARGET_BLOCK_MS),
+            ),
+            6_000_000
         );
         assert_eq!(
-            extrapolate_vdf_rounds(10_000, Duration::from_secs(0), Duration::from_secs(60)),
+            extrapolate_vdf_rounds(
+                10_000,
+                Duration::from_secs(0),
+                Duration::from_millis(VDF_TARGET_BLOCK_MS),
+            ),
             u32::MAX
         );
     }

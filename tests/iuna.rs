@@ -1010,7 +1010,7 @@ fn vdf_solution_verifies_without_rerunning_delay() {
 }
 
 #[test]
-fn vdf_rounds_retarget_toward_one_minute_blocks() {
+fn vdf_rounds_retarget_toward_target_block_time() {
     let wallet = Wallet::from_seed("alice");
     let mut genesis = BTreeMap::new();
     genesis.insert(wallet.address().to_string(), 1_000);

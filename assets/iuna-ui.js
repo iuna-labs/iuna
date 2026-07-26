@@ -1053,7 +1053,10 @@ window.iunaApp = function iunaApp() {
 
     targetSecondsLabel() {
       const ms = this.status.mining?.vdf_target_block_ms;
-      return ms ? `${Math.round(ms / 1000)}s` : "-";
+      if (!ms) return "-";
+      const seconds = Math.round(ms / 1000);
+      if (seconds % 60 === 0) return `${seconds / 60}m`;
+      return `${seconds}s`;
     },
 
     stratumListenAddr() {
