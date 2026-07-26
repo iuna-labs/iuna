@@ -890,6 +890,116 @@ fn block_with_wrong_vdf_rounds_is_rejected() {
 }
 
 #[test]
+fn fallback_finalizer_can_build_block_with_extra_vdf_rounds() {
+    let alice = Wallet::from_seed("fallback-finalizer-alice");
+    let bob = Wallet::from_seed("fallback-finalizer-bob");
+    let wallets = [&alice, &bob];
+    let mut genesis = BTreeMap::new();
+    genesis.insert(alice.address().to_string(), luun(10));
+    genesis.insert(bob.address().to_string(), luun(10));
+    let mut ledger = Ledger::new_with_genesis_burns(
+        genesis,
+        vec![
+            GenesisBurn::new(alice.address(), 1),
+            GenesisBurn::new(bob.address(), 1),
+        ],
+        25,
+    )
+    .unwrap();
+    let leader = ledger.expected_leader_for_next_block().unwrap();
+    let fallback = wallets
+        .into_iter()
+        .find(|wallet| wallet.address() != leader)
+        .unwrap();
+
+    submit_burn(&mut ledger, fallback, 1);
+    let block = ledger.mine_next_block(fallback, 1).unwrap();
+
+    assert_eq!(block.miner, fallback.address());
+    assert_eq!(block.finalizer_rank, 1);
+    assert_eq!(block.vdf_rounds, 50);
+    ledger.apply_block(block).unwrap();
+}
+
+#[test]
+fn fallback_finalizer_with_primary_vdf_rounds_is_rejected() {
+    let alice = Wallet::from_seed("fallback-rounds-alice");
+    let bob = Wallet::from_seed("fallback-rounds-bob");
+    let wallets = [&alice, &bob];
+    let mut genesis = BTreeMap::new();
+    genesis.insert(alice.address().to_string(), luun(10));
+    genesis.insert(bob.address().to_string(), luun(10));
+    let mut ledger = Ledger::new_with_genesis_burns(
+        genesis,
+        vec![
+            GenesisBurn::new(alice.address(), 1),
+            GenesisBurn::new(bob.address(), 1),
+        ],
+        25,
+    )
+    .unwrap();
+    let leader = ledger.expected_leader_for_next_block().unwrap();
+    let fallback = wallets
+        .into_iter()
+        .find(|wallet| wallet.address() != leader)
+        .unwrap();
+
+    submit_burn(&mut ledger, fallback, 1);
+    let mut block = ledger.mine_next_block(fallback, 1).unwrap();
+    block.vdf_rounds = 25;
+    block.vdf_output = run_vdf(&block.vdf_seed(), block.vdf_rounds);
+    block.hash = block.compute_hash();
+
+    let error = ledger.apply_block(block).unwrap_err();
+    assert!(format!("{error:#}").contains("block VDF rounds are invalid"));
+}
+
+#[test]
+fn fork_choice_prefers_primary_finalizer_over_fallback_rank() {
+    let alice = Wallet::from_seed("fallback-fork-alice");
+    let bob = Wallet::from_seed("fallback-fork-bob");
+    let wallets = [&alice, &bob];
+    let mut genesis = BTreeMap::new();
+    genesis.insert(alice.address().to_string(), luun(10));
+    genesis.insert(bob.address().to_string(), luun(10));
+    let common = Ledger::new_with_genesis_burns(
+        genesis,
+        vec![
+            GenesisBurn::new(alice.address(), 1),
+            GenesisBurn::new(bob.address(), 1),
+        ],
+        25,
+    )
+    .unwrap();
+    let leader_address = common.expected_leader_for_next_block().unwrap();
+    let leader = wallets
+        .iter()
+        .copied()
+        .find(|wallet| wallet.address() == leader_address)
+        .unwrap();
+    let fallback = wallets
+        .into_iter()
+        .find(|wallet| wallet.address() != leader_address)
+        .unwrap();
+
+    let mut local = common.clone();
+    submit_burn(&mut local, fallback, 1);
+    let fallback_block = local.mine_next_block(fallback, 1).unwrap();
+    assert_eq!(fallback_block.finalizer_rank, 1);
+    local.apply_block(fallback_block).unwrap();
+
+    let mut remote = common;
+    submit_burn(&mut remote, leader, 1);
+    let leader_block = remote.mine_next_block(leader, 1).unwrap();
+    assert_eq!(leader_block.finalizer_rank, 0);
+    let leader_hash = leader_block.hash.clone();
+    remote.apply_block(leader_block).unwrap();
+
+    assert!(local.extend_from_snapshot(remote.snapshot()).unwrap());
+    assert_eq!(local.status().tip_hash, leader_hash);
+}
+
+#[test]
 fn vdf_solution_verifies_without_rerunning_delay() {
     let solution = run_vdf("test-seed", 128);
 

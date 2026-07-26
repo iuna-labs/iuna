@@ -820,13 +820,13 @@ impl NodeCore {
             }
         }
 
-        let selected_leader = self.ledger.expected_leader_for_next_block();
-        if selected_leader
-            .as_deref()
-            .is_some_and(|leader| leader != self.wallet.address())
-        {
+        let wallet_rank = self
+            .ledger
+            .finalizer_rank_for_next_block(self.wallet.address());
+        if wallet_rank.is_none() {
+            let selected_leader = self.ledger.expected_leader_for_next_block();
             plan.skipped_reason = selected_leader.map(|leader| {
-                format!("wallet is waiting for selected leader {leader} to finish the VDF")
+                format!("wallet is waiting for selected finalizer {leader} to finish the VDF")
             });
             return plan;
         }

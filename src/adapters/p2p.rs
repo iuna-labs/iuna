@@ -1884,6 +1884,7 @@ mod tests {
             prev_hash: "prev".to_string(),
             timestamp_ms: 1,
             miner: "miner".to_string(),
+            finalizer_rank: 0,
             reward: 100,
             vdf_rounds: 1,
             vdf_output: "vdf".to_string(),

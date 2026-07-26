@@ -735,6 +735,8 @@ pub struct Block {
     pub prev_hash: String,
     pub timestamp_ms: u64,
     pub miner: String,
+    #[serde(default)]
+    pub finalizer_rank: u32,
     pub reward: Amount,
     pub vdf_rounds: u32,
     pub vdf_output: String,
@@ -750,6 +752,7 @@ impl Block {
             prev_hash: draft.prev_hash,
             timestamp_ms: draft.timestamp_ms,
             miner: draft.miner,
+            finalizer_rank: draft.finalizer_rank,
             reward: draft.reward,
             vdf_rounds: draft.vdf_rounds,
             vdf_output: draft.vdf_output,
@@ -792,25 +795,48 @@ impl Block {
             })
             .unwrap_or_default();
         hex_hash(format!(
-            "block-content:{}:{}:{}:{}:{}:{}:{}:{}",
-            self.height,
-            self.prev_hash,
-            self.timestamp_ms,
-            self.miner,
-            self.reward,
-            self.vdf_rounds,
-            leader_proof,
+            "{}:{}",
+            self.legacy_content_hash_prefix(&leader_proof),
             txs
         ))
     }
 
+    fn legacy_content_hash_prefix(&self, leader_proof: &str) -> String {
+        if self.finalizer_rank == 0 {
+            format!(
+                "block-content:{}:{}:{}:{}:{}:{}:{}",
+                self.height,
+                self.prev_hash,
+                self.timestamp_ms,
+                self.miner,
+                self.reward,
+                self.vdf_rounds,
+                leader_proof
+            )
+        } else {
+            format!(
+                "block-content-v2:{}:{}:{}:{}:{}:{}:{}:{}",
+                self.height,
+                self.prev_hash,
+                self.timestamp_ms,
+                self.miner,
+                self.finalizer_rank,
+                self.reward,
+                self.vdf_rounds,
+                leader_proof
+            )
+        }
+    }
+
     fn leader_score(&self) -> LeaderScore {
-        LeaderScore(
-            self.leader_proof
+        LeaderScore {
+            finalizer_rank: self.finalizer_rank,
+            proof_rank: self
+                .leader_proof
                 .as_ref()
                 .map(LeaderProof::rank)
                 .unwrap_or_else(|| self.hash.clone()),
-        )
+        }
     }
 
     pub fn serialized_size_bytes(&self) -> Result<usize> {
@@ -840,6 +866,7 @@ impl LeaderProof {
 struct LeaderProofPayload {
     height: u64,
     prev_hash: String,
+    finalizer_rank: u32,
     vdf_output: String,
     ticket_id: String,
     ticket_amount: Amount,
@@ -848,15 +875,28 @@ struct LeaderProofPayload {
 
 impl LeaderProofPayload {
     fn canonical(&self) -> String {
-        format!(
-            "luun-leader-proof:{}:{}:{}:{}:{}:{}",
-            self.height,
-            self.prev_hash,
-            self.vdf_output,
-            self.ticket_id,
-            self.ticket_amount,
-            self.ticket_owner
-        )
+        if self.finalizer_rank == 0 {
+            format!(
+                "luun-leader-proof:{}:{}:{}:{}:{}:{}",
+                self.height,
+                self.prev_hash,
+                self.vdf_output,
+                self.ticket_id,
+                self.ticket_amount,
+                self.ticket_owner
+            )
+        } else {
+            format!(
+                "luun-leader-proof-v2:{}:{}:{}:{}:{}:{}:{}",
+                self.height,
+                self.prev_hash,
+                self.finalizer_rank,
+                self.vdf_output,
+                self.ticket_id,
+                self.ticket_amount,
+                self.ticket_owner
+            )
+        }
     }
 }
 
@@ -875,6 +915,7 @@ pub struct PreparedBlock {
     prev_hash: String,
     timestamp_ms: u64,
     miner: String,
+    finalizer_rank: u32,
     reward: Amount,
     vdf_rounds: u32,
     vdf_seed: String,
@@ -899,6 +940,7 @@ impl PreparedBlock {
         let proof_payload = LeaderProofPayload {
             height: self.height,
             prev_hash: self.prev_hash.clone(),
+            finalizer_rank: self.finalizer_rank,
             vdf_output: vdf_output.clone(),
             ticket_id: self.leader_ticket.id.clone(),
             ticket_amount: self.leader_ticket.amount,
@@ -909,6 +951,7 @@ impl PreparedBlock {
             prev_hash: self.prev_hash,
             timestamp_ms: self.timestamp_ms,
             miner: self.miner,
+            finalizer_rank: self.finalizer_rank,
             reward: self.reward,
             vdf_rounds: self.vdf_rounds,
             vdf_output,
@@ -924,6 +967,7 @@ struct BlockDraft {
     prev_hash: String,
     timestamp_ms: u64,
     miner: String,
+    finalizer_rank: u32,
     reward: Amount,
     vdf_rounds: u32,
     vdf_output: String,
@@ -1033,11 +1077,16 @@ impl ForkPoint {
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
-struct LeaderScore(String);
+struct LeaderScore {
+    finalizer_rank: u32,
+    proof_rank: String,
+}
 
 impl Ord for LeaderScore {
     fn cmp(&self, other: &Self) -> std::cmp::Ordering {
-        self.0.cmp(&other.0)
+        self.finalizer_rank
+            .cmp(&other.finalizer_rank)
+            .then_with(|| self.proof_rank.cmp(&other.proof_rank))
     }
 }
 
@@ -1721,14 +1770,11 @@ impl Ledger {
 
     pub fn prepare_next_block(&self, miner: &str, timestamp_ms: u64) -> Result<PreparedBlock> {
         let height = self.tip().height + 1;
-        let Some(leader_ticket) = self.selected_ticket_for_height(height) else {
+        let Some((finalizer_rank, leader_ticket)) = self.finalizer_ticket_for_miner(height, miner)
+        else {
             bail!("cannot mine block without a mature burn ticket");
         };
-        if let Some(leader) = self.expected_leader_for_next_block() {
-            if leader != miner {
-                bail!("wallet {miner} is not the selected leader; expected {leader}");
-            }
-        } else {
+        if self.expected_leader_for_next_block().is_none() {
             bail!("no selected leader for block {height}");
         }
 
@@ -1745,8 +1791,9 @@ impl Ledger {
             timestamp_ms,
             miner: miner.to_string(),
             reward: fee_reward(&transactions)?,
-            vdf_rounds: self.vdf_rounds,
+            vdf_rounds: self.vdf_rounds_for_finalizer_rank(finalizer_rank)?,
             vdf_seed,
+            finalizer_rank,
             leader_ticket,
             transactions,
         })
@@ -1843,7 +1890,8 @@ impl Ledger {
         if block.reward != fee_reward(&block.transactions)? {
             bail!("block reward is invalid");
         }
-        if block.vdf_rounds != self.vdf_rounds {
+        let expected_vdf_rounds = self.vdf_rounds_for_finalizer_rank(block.finalizer_rank)?;
+        if block.vdf_rounds != expected_vdf_rounds {
             bail!("block VDF rounds are invalid");
         }
         if block.timestamp_ms <= self.tip().timestamp_ms {
@@ -1856,18 +1904,16 @@ impl Ledger {
             bail!("block exceeds max block size");
         }
         ensure_block_has_burn(&block.transactions)?;
-        let Some(leader) = self.expected_leader_for_next_block() else {
-            bail!("no selected leader for block {}", block.height);
-        };
-        if leader != block.miner {
+        let selected_ticket = self
+            .ticket_for_finalizer_rank(block.height, block.finalizer_rank)
+            .context("no selected ticket for block finalizer rank")?;
+        if selected_ticket.owner != block.miner {
             bail!(
-                "block finalizer {} is not selected leader {leader}",
-                block.miner
+                "block finalizer {} is not selected for rank {}",
+                block.miner,
+                block.finalizer_rank
             );
         }
-        let selected_ticket = self
-            .selected_ticket_for_height(block.height)
-            .context("no selected ticket for leader block")?;
         if block
             .leader_proof
             .as_ref()
@@ -1899,12 +1945,18 @@ impl Ledger {
         }
 
         let average_observed_ms = (total_observed_ms / observed_blocks) as u64;
-        retarget_vdf_rounds(tip.vdf_rounds, average_observed_ms)
+        let base_rounds = base_vdf_rounds_for_finalizer_rank(tip.vdf_rounds, tip.finalizer_rank);
+        retarget_vdf_rounds(base_rounds, average_observed_ms)
     }
 
     pub fn expected_leader_for_next_block(&self) -> Option<String> {
         self.selected_ticket_for_height(self.tip().height + 1)
             .map(|ticket| ticket.owner)
+    }
+
+    pub fn finalizer_rank_for_next_block(&self, miner: &str) -> Option<u32> {
+        self.finalizer_ticket_for_miner(self.tip().height + 1, miner)
+            .map(|(rank, _)| rank)
     }
 
     fn valid_pending_transactions(&self) -> Vec<Transaction> {
@@ -2082,7 +2134,28 @@ impl Ledger {
     }
 
     fn selected_ticket_for_height(&self, height: u64) -> Option<BurnTicket> {
-        select_weighted_ticket(self.tip(), height, &self.tickets)
+        self.ticket_for_finalizer_rank(height, 0)
+    }
+
+    fn ticket_for_finalizer_rank(&self, height: u64, rank: u32) -> Option<BurnTicket> {
+        ranked_tickets_for_height(self.tip(), height, &self.tickets)
+            .get(rank as usize)
+            .cloned()
+    }
+
+    fn finalizer_ticket_for_miner(&self, height: u64, miner: &str) -> Option<(u32, BurnTicket)> {
+        ranked_tickets_for_height(self.tip(), height, &self.tickets)
+            .into_iter()
+            .enumerate()
+            .find(|(_, ticket)| ticket.owner == miner)
+            .and_then(|(rank, ticket)| {
+                let rank = u32::try_from(rank).ok()?;
+                Some((rank, ticket))
+            })
+    }
+
+    fn vdf_rounds_for_finalizer_rank(&self, rank: u32) -> Result<u32> {
+        vdf_rounds_for_finalizer_rank(self.vdf_rounds, rank)
     }
 
     fn mine_difficulty_bits_for_anchor_height(&self, anchor_height: u64) -> u32 {
@@ -2109,44 +2182,80 @@ impl Ledger {
     }
 }
 
-fn select_weighted_ticket(
+fn ranked_tickets_for_height(
     parent: &Block,
     target_height: u64,
     tickets: &[BurnTicket],
-) -> Option<BurnTicket> {
-    let eligible = tickets
+) -> Vec<BurnTicket> {
+    let mut remaining = tickets
         .iter()
         .filter(|ticket| ticket_is_eligible_for_height(ticket, target_height))
+        .cloned()
         .collect::<Vec<_>>();
-    let total_weight = eligible.iter().try_fold(0_u128, |total, ticket| {
+    let mut ranked = Vec::with_capacity(remaining.len());
+
+    for rank in 0.. {
+        let Some(selected_index) =
+            select_weighted_ticket_index(parent, target_height, rank, &remaining)
+        else {
+            break;
+        };
+        ranked.push(remaining.remove(selected_index));
+    }
+
+    ranked
+}
+
+fn select_weighted_ticket_index(
+    parent: &Block,
+    target_height: u64,
+    rank: u32,
+    tickets: &[BurnTicket],
+) -> Option<usize> {
+    let total_weight = tickets.iter().try_fold(0_u128, |total, ticket| {
         total.checked_add(u128::from(ticket.amount))
     })?;
     if total_weight == 0 {
         return None;
     }
 
-    let draw = weighted_ticket_draw(parent, target_height, total_weight);
+    let draw = weighted_ticket_draw(parent, target_height, rank, total_weight);
     let mut cumulative = 0_u128;
-    for ticket in eligible {
+    for (index, ticket) in tickets.iter().enumerate() {
         cumulative = cumulative.checked_add(u128::from(ticket.amount))?;
         if draw < cumulative {
-            return Some(ticket.clone());
+            return Some(index);
         }
     }
     None
 }
 
-fn weighted_ticket_draw(parent: &Block, target_height: u64, total_weight: u128) -> u128 {
-    let digest = Sha256::digest(
+fn weighted_ticket_draw(parent: &Block, target_height: u64, rank: u32, total_weight: u128) -> u128 {
+    let seed = if rank == 0 {
         format!(
             "luun-ticket-draw:{}:{}:{}",
             target_height, parent.hash, parent.vdf_output
         )
-        .as_bytes(),
-    );
+    } else {
+        format!(
+            "luun-ticket-draw-rank:{}:{}:{}:{}",
+            target_height, rank, parent.hash, parent.vdf_output
+        )
+    };
+    let digest = Sha256::digest(seed.as_bytes());
     let mut bytes = [0_u8; 16];
     bytes.copy_from_slice(&digest[..16]);
     u128::from_be_bytes(bytes) % total_weight
+}
+
+fn vdf_rounds_for_finalizer_rank(base_rounds: u32, rank: u32) -> Result<u32> {
+    base_rounds
+        .checked_mul(rank.checked_add(1).context("finalizer rank overflows")?)
+        .context("finalizer rank VDF rounds overflow")
+}
+
+fn base_vdf_rounds_for_finalizer_rank(vdf_rounds: u32, rank: u32) -> u32 {
+    vdf_rounds / rank.saturating_add(1).max(1)
 }
 
 fn tickets_created_by_block(block: &Block, profile: &LaunchProfile) -> Result<Vec<BurnTicket>> {
@@ -2383,6 +2492,7 @@ fn estimated_block_size_bytes(transactions: &[Transaction]) -> Result<usize> {
         prev_hash: "f".repeat(64),
         timestamp_ms: u64::MAX,
         miner: "f".repeat(64),
+        finalizer_rank: 0,
         reward: u64::MAX,
         vdf_rounds: u32::MAX,
         vdf_output: "f".repeat(64),
@@ -2420,6 +2530,7 @@ fn verify_leader_proof(block: &Block, tickets: &[BurnTicket]) -> Result<()> {
     let payload = LeaderProofPayload {
         height: block.height,
         prev_hash: block.prev_hash.clone(),
+        finalizer_rank: block.finalizer_rank,
         vdf_output: block.vdf_output.clone(),
         ticket_id: ticket.id.clone(),
         ticket_amount: ticket.amount,
@@ -2602,6 +2713,7 @@ fn build_genesis_block(
         prev_hash: "0".repeat(64),
         timestamp_ms: 0,
         miner,
+        finalizer_rank: 0,
         reward,
         vdf_rounds: 0,
         vdf_output,
@@ -3237,6 +3349,7 @@ mod tests {
             prev_hash: "0".repeat(64),
             timestamp_ms: 1,
             miner: "alice".to_string(),
+            finalizer_rank: 0,
             reward: BLOCK_REWARD,
             vdf_rounds: 1,
             vdf_output: "vdf".to_string(),

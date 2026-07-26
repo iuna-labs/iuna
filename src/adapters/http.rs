@@ -177,6 +177,7 @@ struct UiBlock {
     prev_hash: String,
     timestamp_ms: u64,
     miner: String,
+    finalizer_rank: u32,
     reward: Amount,
     total_fees: Amount,
     vdf_rounds: u32,
@@ -829,6 +830,7 @@ fn ui_block(block: Block, outputs: &BTreeMap<OutPoint, TxOutput>) -> UiBlock {
         prev_hash: block.prev_hash,
         timestamp_ms: block.timestamp_ms,
         miner: block.miner,
+        finalizer_rank: block.finalizer_rank,
         reward: block.reward,
         total_fees: block.reward,
         vdf_rounds: block.vdf_rounds,
@@ -2010,6 +2012,7 @@ const INDEX_HTML: &str = r#"<!doctype html>
                 <div class="detail-kv"><div class="key">Hash</div><code x-text="selectedBlock.hash"></code></div>
                 <div class="detail-kv"><div class="key">Previous</div><code x-text="short(selectedBlock.prev_hash)"></code></div>
                 <div class="detail-kv"><div class="key">Finalizer</div><code x-text="short(selectedBlock.miner)"></code></div>
+                <div class="detail-kv"><div class="key">Rank</div><div x-text="selectedBlock.finalizer_rank ?? 0"></div></div>
                 <div class="detail-kv"><div class="key">Reward</div><div>LUUN <span x-text="amountLabel(selectedBlock.reward)"></span></div></div>
                 <div class="detail-kv"><div class="key">Burns</div><div x-text="blockBurnCount(selectedBlock)"></div></div>
                 <div class="detail-kv"><div class="key">Transfers</div><div x-text="blockTransferCount(selectedBlock)"></div></div>
@@ -2510,6 +2513,7 @@ mod tests {
             prev_hash: format!("prev-{height}"),
             timestamp_ms: height,
             miner: "miner".to_string(),
+            finalizer_rank: 0,
             reward: 100,
             vdf_rounds: 0,
             vdf_output: "vdf".to_string(),
