@@ -1,0 +1,285 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="color-scheme" content="dark">
+  <meta name="description" content="Luun is a small devnet currency prototype with burn-based block finalization and proof-of-work issuance.">
+  <title>Luun Devnet</title>
+  <style>
+    :root {
+      color-scheme: dark;
+      font-family: Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+      background: #0d0f10;
+      color: #edf2f5;
+      --bg: #0d0f10;
+      --panel: #15191b;
+      --panel-2: #101315;
+      --line: #273036;
+      --muted: #98a6ad;
+      --text: #edf2f5;
+      --green: #d5f55f;
+      --cyan: #8de9cd;
+      --blue: #8bdcff;
+      --amber: #ffd070;
+    }
+    * { box-sizing: border-box; }
+    body {
+      margin: 0;
+      background: var(--bg);
+      color: var(--text);
+    }
+    a { color: var(--green); text-decoration-thickness: 1px; text-underline-offset: 3px; }
+    code {
+      color: #c7f5ea;
+      overflow-wrap: anywhere;
+      font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+    }
+    pre {
+      margin: 0;
+      overflow-x: auto;
+      border: 1px solid var(--line);
+      border-radius: 8px;
+      padding: 14px;
+      background: #0b0d0e;
+      box-shadow: inset 0 1px 0 rgba(255, 255, 255, .03);
+    }
+    .wrap { width: min(1060px, calc(100% - 44px)); margin: 0 auto; }
+    .topbar {
+      position: sticky;
+      top: 0;
+      z-index: 2;
+      border-bottom: 1px solid rgba(39, 48, 54, .9);
+      background: rgba(13, 15, 16, .82);
+      backdrop-filter: blur(12px);
+    }
+    .topbar .wrap {
+      display: flex;
+      justify-content: space-between;
+      gap: 18px;
+      align-items: center;
+      min-height: 58px;
+    }
+    .brand { display: flex; gap: 10px; align-items: center; font-weight: 900; }
+    .mark {
+      width: 32px;
+      height: 32px;
+      display: grid;
+      place-items: center;
+      border-radius: 8px;
+      background: var(--green);
+      color: #12170b;
+      font-weight: 950;
+    }
+    nav { display: flex; gap: 16px; flex-wrap: wrap; color: var(--muted); font-size: 13px; font-weight: 750; }
+    nav a { color: var(--muted); text-decoration: none; }
+    nav a:hover { color: var(--green); }
+    .hero { padding: 92px 0 48px; }
+    .hero-grid {
+      display: grid;
+      grid-template-columns: minmax(0, 1.05fr) minmax(320px, .72fr);
+      gap: 32px;
+      align-items: end;
+    }
+    .eyebrow {
+      display: inline-flex;
+      gap: 8px;
+      align-items: center;
+      margin-bottom: 18px;
+      color: var(--green);
+      font-size: 12px;
+      font-weight: 900;
+      text-transform: uppercase;
+    }
+    .dot { width: 8px; height: 8px; border-radius: 999px; background: var(--green); box-shadow: 0 0 18px rgba(213, 245, 95, .75); }
+    h1 {
+      max-width: 760px;
+      margin: 0 0 18px;
+      font-size: clamp(48px, 9vw, 104px);
+      line-height: .92;
+      letter-spacing: 0;
+    }
+    h2 { margin: 0 0 12px; font-size: 28px; line-height: 1.1; letter-spacing: 0; }
+    h3 { margin: 0 0 8px; font-size: 16px; letter-spacing: 0; }
+    p { max-width: 720px; color: #b7c3c9; font-size: 17px; line-height: 1.6; }
+    .lead { color: #eef4f6; font-size: 21px; }
+    .actions { display: flex; flex-wrap: wrap; gap: 10px; margin-top: 26px; }
+    .button {
+      display: inline-flex;
+      align-items: center;
+      min-height: 42px;
+      border: 1px solid var(--line);
+      border-radius: 8px;
+      padding: 0 14px;
+      background: var(--panel);
+      color: var(--text);
+      font-size: 14px;
+      font-weight: 850;
+      text-decoration: none;
+    }
+    .button.primary { border-color: var(--green); background: var(--green); color: #11140c; }
+    .button:hover { border-color: var(--green); }
+    .status-panel {
+      border: 1px solid var(--line);
+      border-radius: 8px;
+      overflow: hidden;
+      background: rgba(21, 25, 27, .82);
+      box-shadow: 0 24px 80px rgba(0, 0, 0, .24);
+    }
+    .status-head {
+      display: flex;
+      justify-content: space-between;
+      gap: 10px;
+      align-items: center;
+      padding: 12px 14px;
+      border-bottom: 1px solid var(--line);
+      color: var(--muted);
+      font-size: 12px;
+      font-weight: 850;
+      text-transform: uppercase;
+    }
+    .status-body { display: grid; gap: 1px; background: var(--line); }
+    .stat {
+      display: grid;
+      grid-template-columns: 126px minmax(0, 1fr);
+      gap: 12px;
+      padding: 12px 14px;
+      background: var(--panel-2);
+    }
+    .label { color: #87949b; font-size: 11px; font-weight: 850; text-transform: uppercase; }
+    .value { color: var(--text); font-weight: 850; }
+    .value.green { color: var(--green); }
+    section { padding: 38px 0; border-top: 1px solid rgba(39, 48, 54, .9); }
+    .section-head { display: flex; justify-content: space-between; gap: 18px; align-items: end; margin-bottom: 18px; }
+    .section-head p { margin: 0; max-width: 560px; font-size: 15px; }
+    .grid { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 12px; }
+    .card {
+      min-width: 0;
+      border: 1px solid var(--line);
+      border-radius: 8px;
+      padding: 16px;
+      background: rgba(21, 25, 27, .88);
+    }
+    .card p { margin: 0; font-size: 15px; }
+    .tag {
+      display: inline-flex;
+      margin-bottom: 12px;
+      border: 1px solid #3b464d;
+      border-radius: 999px;
+      padding: 3px 8px;
+      color: var(--muted);
+      font-size: 11px;
+      font-weight: 850;
+      text-transform: uppercase;
+    }
+    .tag.green { border-color: rgba(213, 245, 95, .42); color: var(--green); }
+    .tag.cyan { border-color: rgba(141, 233, 205, .4); color: var(--cyan); }
+    .tag.blue { border-color: rgba(139, 220, 255, .4); color: var(--blue); }
+    .split {
+      display: grid;
+      grid-template-columns: minmax(0, 1fr) minmax(260px, .54fr);
+      gap: 18px;
+      align-items: start;
+    }
+    .note {
+      border-left: 3px solid var(--green);
+      padding-left: 14px;
+      color: #cbd3d7;
+      font-size: 15px;
+    }
+    .footer { padding-bottom: 60px; color: #87949b; font-size: 14px; }
+    @media (max-width: 820px) {
+      .hero { padding-top: 58px; }
+      .hero-grid, .split, .grid { grid-template-columns: 1fr; }
+      .section-head { display: grid; }
+      nav { display: none; }
+      .wrap { width: min(100% - 32px, 1060px); }
+      .stat { grid-template-columns: 1fr; gap: 4px; }
+    }
+  </style>
+</head>
+<body>
+  <div class="topbar">
+    <div class="wrap">
+      <div class="brand"><span class="mark">L</span><span>Luun</span></div>
+      <nav aria-label="Page sections">
+        <a href="#what">What is Luun</a>
+        <a href="#join">Join</a>
+      </nav>
+    </div>
+  </div>
+
+  <header class="hero">
+    <div class="wrap hero-grid">
+      <div>
+        <div class="eyebrow"><span class="dot"></span> Devnet prototype</div>
+        <h1>Luun</h1>
+        <p class="lead">An experimental currency where blocks are finalized by burning LUUN, while new coins are introduced by proof-of-work mine actions.</p>
+        <p>Luun is not a mainnet and not money yet. It is a small L1 lab for learning how a wallet, node, finalizer, miner, mempool, and peer network behave when real people run it on real machines.</p>
+        <div class="actions">
+          <a class="button primary" href="#what">What is Luun</a>
+          <a class="button" href="#join">How to join</a>
+        </div>
+      </div>
+      <aside class="status-panel" aria-label="Protocol snapshot">
+        <div class="status-head"><span>Protocol Snapshot</span><span>devnet</span></div>
+        <div class="status-body">
+          <div class="stat"><span class="label">Finalize</span><span class="value green">Burn lottery + VDF</span></div>
+          <div class="stat"><span class="label">Issue</span><span class="value">PoW mine actions</span></div>
+          <div class="stat"><span class="label">Wallet</span><span class="value">Encrypted local seed</span></div>
+          <div class="stat"><span class="label">Network</span><span class="value">One P2P TCP port</span></div>
+        </div>
+      </aside>
+    </div>
+  </header>
+
+  <main>
+    <section id="what">
+      <div class="wrap">
+        <div class="section-head">
+          <h2>What Is Luun?</h2>
+          <p>Luun combines proof-of-burn finalization, a VDF clock, and proof-of-work issuance.</p>
+        </div>
+        <div class="grid">
+          <div class="card">
+            <span class="tag green">PoB</span>
+            <h3>Proof Of Burn</h3>
+            <p>Nodes burn LUUN to enter the block lottery. The top-ranked burner finalizes first; lower ranks can take over with extra VDF delay if the first one disappears.</p>
+          </div>
+          <div class="card">
+            <span class="tag cyan">VDF</span>
+            <h3>Verifiable Delay</h3>
+            <p>The selected finalizer must run sequential VDF work before publishing a block. That delay is the chain's clock and gives fallback finalizers a clean way to take over.</p>
+          </div>
+          <div class="card">
+            <span class="tag blue">PoW</span>
+            <h3>Proof Of Work Issuance</h3>
+            <p>PoW mine actions introduce new LUUN. Miners create 1 LUUN at a time and choose the fee paid to the block finalizer that includes the action.</p>
+          </div>
+        </div>
+      </div>
+    </section>
+
+    <section id="join">
+      <div class="wrap split">
+        <div>
+          <h2>How To Join</h2>
+          <p>Ask for a public seed node address, then start Luun with a local data directory and that peer as your join target.</p>
+          <pre><code>cargo run -- --data-dir .luun --p2p 0.0.0.0:9445 --http 127.0.0.1:18661 --join seed.example:9444</code></pre>
+          <p>Open <code>http://127.0.0.1:18661</code>, set a password, back up your recovery phrase, and let the node sync. After you receive LUUN, you can send transactions, burn for block finalization, or enable PoW mine actions.</p>
+          <p class="note">Keep the management UI local. The P2P port is for node traffic; the wallet UI should stay on <code>127.0.0.1</code>.</p>
+        </div>
+        <aside class="card">
+          <span class="tag cyan">No Public Port?</span>
+          <h3>Outbound Nodes Work</h3>
+          <p>You can still join by connecting outbound to a public peer. Your actions can gossip through that upstream connection, and the node catches up again after reconnects.</p>
+        </aside>
+      </div>
+    </section>
+  </main>
+
+  <section class="footer">
+    <div class="wrap">Luun devnet prototype.</div>
+  </section>
+</body>
+</html>
