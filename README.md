@@ -1,128 +1,62 @@
 # iuna
 
-iuna is a tiny L1 prototype built from the node first, then explained as it grows.
+iuna is a low-energy currency devnet where blocks are finalized by burning IUNA, while new supply is earned through open proof-of-work.
 
-The current devnet assumes friendly nodes. It has one binary that acts as wallet, node, block finalizer, PoW miner, HTTP management UI, and P2P TCP listener. The core ledger is separated from the adapters so a whole network can be tested in memory without opening sockets.
+It is not a mainnet and not money yet. The goal right now is simple: run a small real network, learn where the protocol and software bend, and make it pleasant enough that friends can help test it.
 
-## Run
+## Run A Node
 
-To start a fresh chain, run genesis mode from an empty wallet path:
-
-```sh
-cargo run -- --genesis --http 127.0.0.1:18661 --p2p 127.0.0.1:9444
-```
-
-Open `http://127.0.0.1:18661` and complete the initial setup modal. The setup flow verifies the generated 24-word recovery phrase with a 4-word check, stores the wallet in `.iuna/wallet.json`, and stores runtime config in `.iuna/config.json`.
-
-`--genesis` only works when the wallet file does not already exist and `.iuna/chain.sqlite3` does not already contain a blockchain. It creates a fresh setup wallet, opens the setup modal so the recovery phrase can be recorded, creates the starter chain, adaptively measures VDF throughput locally, extrapolates that measurement to a 60-second initial round count, and persists the validated chain. The same data directory resumes automatically on later runs without `--genesis`.
-
-For setup-only local development without creating a chain yet:
+You need Rust installed. Then start a node:
 
 ```sh
-cargo run -- --http 127.0.0.1:18661 --p2p 127.0.0.1:9444
+cargo run -- --http 127.0.0.1:18661 --p2p 0.0.0.0:9445
 ```
 
-For fast local development, set `IUNA_DEV_SKIP_SEED_VERIFY=1` before starting the node to show a setup-only skip button for the recovery phrase check.
+Open `http://127.0.0.1:18661`, set a local password, and back up the recovery phrase. The wallet seed is encrypted on disk. Keep the management UI on `127.0.0.1`; only the P2P port should be reachable by other nodes.
 
-Block finalization is automatic. There is no "mine block" button and no exact sleep. Each node can burn its configured amount once per chain height. Those burns become one-shot leader tickets after the launch profile's maturity delay. The current devnet uses a 3-block maturity delay and a 3-block eligibility window: a burn included at height `h` can win heights `h + 3` through `h + 5`, then expires if it was not selected. Eligible tickets are ranked deterministically for each height. Rank 0 gets the normal VDF delay; rank 1 may finalize with double VDF rounds, rank 2 with triple rounds, and so on. That lets the chain continue if the first selected finalizer is offline, while the VDF remains the clock.
-
-Genesis leaves the starter wallet with 100 spendable IUNA after the 1-IUNA bootstrap burn creates launch tickets for blocks 1, 2, and 3, and the genesis block pays its 100-IUNA reward. `--genesis` starts the automatic burn rate at 100 IUNA per block, so the starter can create the block 1 burn that becomes eligible at block 4.
-
-The management UI is a small AlpineJS app served from local vendored assets. It polls JSON endpoints every few seconds and includes:
-
-- wallet and transaction controls,
-- runtime mining settings in the Mining screen,
-- peer setup and status in the P2P screen,
-- P2P peer status with gossip send/receive counters and last error,
-- a blockchain explorer and mempool view.
-
-For a second local node joining Alice's chain:
+To join an existing devnet, ask for a seed node address and start with `--join`:
 
 ```sh
-cargo run -- --data-dir .iuna-bob --http 127.0.0.1:18662 --p2p 127.0.0.1:9445 --join 127.0.0.1:9444
+cargo run -- --data-dir .iuna --http 127.0.0.1:18661 --p2p 0.0.0.0:9445 --join seed.example:9444
 ```
 
-`--join` fetches a chain snapshot from the peer before finalization starts and announces this node's P2P listener back to that peer, so newly finalized blocks can flow back without restarting the first node. If the peer cannot provide a snapshot, the node exits instead of silently starting a separate chain. Additional peers can be added from the P2P screen.
+After the node syncs, you can receive IUNA, send transactions, burn for block finalization, or enable PoW mine actions from the Mining screen.
 
-If `<data-dir>/chain.sqlite3` already exists, the node resumes that chain first. That makes restarts boring in the good way: `--genesis` will not create a new genesis over an existing local chain, and `--join` remains useful for reconnecting to peers without replacing local state. Pass `--chain-db path/to/chain.sqlite3` to override the database path.
+## Start A Fresh Devnet
 
-Nodes also run a self-healing sync loop. They periodically compare known peer heights and tip hashes, request missing block ranges when a peer is ahead, and validate those blocks before importing them. Full snapshots are kept for initial join and fallback cases, not as the normal catch-up path. The mempool tolerates future-nonce transactions from peers and mines them once the missing nonce gap is filled.
-
-The UI separates local height from shared height. Local height is the node's own validated tip. Shared height is the lowest recently reported peer height plus the local height, which is a better view of how far the connected network has actually converged.
-
-## Friend Net
-
-To start a small friendly network:
-
-1. Start setup with a public P2P bind and complete the initial setup screen:
+Only the first operator of a devnet needs genesis mode:
 
 ```sh
-cargo run -- --p2p 0.0.0.0:9444 --http 127.0.0.1:18661
+cargo run -- --genesis --http 127.0.0.1:18661 --p2p 0.0.0.0:9444
 ```
 
-2. Restart with genesis mode:
+Genesis requires a fresh wallet and an empty chain database. It creates the starter chain, measures an initial VDF delay, and leaves the starter wallet with spendable IUNA for early testing.
 
-```sh
-cargo run -- --genesis --p2p 0.0.0.0:9444 --http 127.0.0.1:18661
-```
+## Optional: Stratum Mining
 
-3. Give friends your public `host:9444`.
-4. Friends join your chain:
-
-```sh
-cargo run -- --data-dir .iuna-friend --p2p 0.0.0.0:9445 --http 127.0.0.1:18661 --join your-host:9444
-```
-
-Friends who join after you start will adopt your genesis and current chain. The starter wallet begins with 100 spendable IUNA after the bootstrap burn and genesis reward, and `--genesis` starts it with a 100-IUNA automatic burn rate. After the starter finalizes additional blocks, send friends IUNA from the UI; then they can choose a burn amount and compete for future blocks. Every joining node starts with a 0-IUNA automatic burn unless it is configured otherwise.
-
-## Bitaxe / Stratum
-
-Run a Stratum V1 listener when you want SHA-256 ASIC miners such as a Bitaxe to create iuna PoW mine actions:
+iuna can expose a Stratum V1 endpoint for SHA-256 ASIC miners such as a Bitaxe:
 
 ```sh
 cargo run -- --data-dir .iuna --stratum 0.0.0.0:3333
 ```
 
-Point the miner at the node's Stratum host and port, and use your iuna wallet address as the worker username. The usual `address.worker` format is also accepted; iuna pays the address before the dot. Accepted ASIC shares become iuna mine actions in the node mempool and are gossiped to peers. The Stratum job commits to the current chain tip, recipient address, mine reward, finalizer fee, and iuna mine difficulty.
+Use your iuna wallet address as the worker username. Accepted shares become PoW mine actions in the node mempool and are gossiped to peers.
 
-The genesis block bootstraps the chain with a 1-IUNA burn from the starter wallet. Genesis turns that burn into launch tickets for blocks 1 through 3 so the chain can move until normal burn tickets mature. Burns included after genesis create one-shot tickets through a deterministic weighted lottery: a burn of `X` among total eligible burn weight `Y` has `X / Y` chance for that block. The selected leader creates the next block content, signs a proof for the selected ticket, and runs a hash-chain VDF before gossiping the block.
+## How It Works
 
-Every non-genesis block must consume the selected eligible ticket, include at least one burn transaction, and fit under the 100kB serialized block limit. The VDF seed is bound to the parent hash and child height; the block hash separately commits to the finalizer, timestamp, finalizer payout, rounds, previous hash, leader proof, VDF output, and transactions.
+iuna combines three mechanisms:
 
-The protocol targets 60-second blocks by retargeting the expected VDF rounds after each block. It uses a rolling average of recent block intervals and only moves the next round count by about 10% per block, so short bursts do not make the delay swing wildly. Every node derives the same next-round count from the validated chain.
+- **Proof of Burn:** nodes burn IUNA to enter the block-finalization lottery.
+- **VDF clock:** the selected finalizer must run sequential delay work before publishing a block.
+- **PoW issuance:** miners create new IUNA through mine actions and choose the fee paid to the finalizer that includes them.
 
-The base block finalizer reward is the block's total transaction fees. Transfers, burns, and PoW mine actions all set fees as IUNA per serialized byte; the node calculates the total fee from the final transaction size before submitting it. The automatic burn setting has a burn amount and a fee rate; the burn amount is the ticket weight, while the resulting fee is paid to the finalizer that includes it. The finalizer includes the best valid burn for liveness, then fills the remaining block space by fee-rate while respecting nonce and balance validity. PoW mine actions introduce new IUNA separately. The default burn is 0 IUNA per block with a 0.000001-IUNA-per-byte fee rate, so new nodes can join before they own IUNA. Genesis starters begin at 100 IUNA per block; after another wallet has IUNA, raise its burn from the Mining screen.
+The current devnet targets 60-second blocks, uses local wallet encryption, stores chain state in SQLite, and includes an in-memory network test harness for protocol testing.
 
-The measured VDF round count is only the initial delay. After the first blocks, the protocol steers rounds toward the 60-second target.
+## Contributing
 
-## Wallet Storage
+Contributions are welcome. Useful help includes running nodes, testing joins/restarts, improving P2P behavior, reviewing protocol incentives, cleaning up UI flows, and adding focused tests.
 
-iuna creates a new wallet file the first time a node starts or joins a chain. By default it lives at `.iuna/wallet.json`, or at `<data-dir>/wallet.json` when `--data-dir` is set. Pass `--wallet path/to/wallet.json` to choose a specific wallet file.
-
-During setup, the UI password encrypts the wallet seed at rest with PBKDF2-SHA256 and ChaCha20-Poly1305. On restart the node can read the wallet address from metadata, but the wallet remains locked until the password is entered in the management UI. Locked nodes can sync and show chain state, but cannot sign burns, transfers, or finalized blocks.
-
-There is no default wallet seed in the binary. Keep the wallet file and recovery phrase private.
-
-## Node Config
-
-iuna stores UI setup state, configured peers, the configured automatic burn amount, and the burn/mine fee rates in `<data-dir>/config.json`. If `setup_complete` is false, the management UI opens the initial setup screen for wallet and peer setup. Completing setup and later runtime changes write the file through the HTTP API, so the choices follow the node data directory instead of a browser session.
-
-## Chain Storage
-
-iuna stores the latest validated `ChainSnapshot` in SQLite at `<data-dir>/chain.sqlite3`. The database is updated by a small background persistence task when the tip changes, so web requests, P2P sessions, and VDF work do not perform chain database writes on their main async paths.
-
-## Architecture
-
-- `src/domain.rs`: wallet, fee-paying transactions, balances, genesis burn bootstrap, 100-IUNA base rewards, 100kB blocks, rolling-window leader tickets, leader proofs, fork choice, launch profile, and VDF checks.
-- `src/app.rs`: node use cases, automatic VDF-paced finalization, peer bookkeeping, and an in-memory network harness.
-- `src/adapters/http.rs`: HTTP management UI and status endpoint.
-- `src/adapters/p2p.rs`: line-delimited JSON gossip, block-range catch-up, and chain snapshots over one TCP port.
-- `src/adapters/chain_store.rs`: SQLite chain snapshot persistence.
-- `src/adapters/config_store.rs`: node-local UI setup config persistence.
-- `src/adapters/wallet_store.rs`: local wallet file creation and loading.
-- `assets/`: vendored browser assets for the management UI.
-
-## Checks
+Before sending changes, run:
 
 ```sh
 cargo fmt -- --check
@@ -130,14 +64,19 @@ cargo clippy --all-targets --all-features -- -D warnings
 cargo test
 ```
 
-The property-style chain tests live in a separate integration target and can be
-run directly with `cargo test --test properties`.
+The property-style chain tests can also be run directly:
 
-To install the included pre-commit hook:
+```sh
+cargo test --test properties
+```
+
+To use the included pre-commit hook:
 
 ```sh
 git config core.hooksPath .githooks
 chmod +x .githooks/pre-commit
 ```
 
-The hook runs formatting, clippy, and tests before each commit.
+## License
+
+iuna is licensed under the Apache License 2.0. See `LICENSE`.

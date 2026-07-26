@@ -24,6 +24,7 @@
       --amber: #ffd070;
     }
     * { box-sizing: border-box; }
+    html { scroll-padding-top: 76px; }
     body {
       margin: 0;
       background: var(--bg);
@@ -149,7 +150,7 @@
     .label { color: #87949b; font-size: 11px; font-weight: 850; text-transform: uppercase; }
     .value { color: var(--text); font-weight: 850; }
     .value.green { color: var(--green); }
-    section { padding: 38px 0; border-top: 1px solid rgba(39, 48, 54, .9); }
+    section { padding: 38px 0; border-top: 1px solid rgba(39, 48, 54, .9); scroll-margin-top: 76px; }
     .section-head { display: flex; justify-content: space-between; gap: 18px; align-items: end; margin-bottom: 18px; }
     .section-head p { margin: 0; max-width: 560px; font-size: 15px; }
     .grid { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 12px; }
@@ -203,8 +204,8 @@
     <div class="wrap">
       <div class="brand"><span class="mark">i</span><span>iuna</span></div>
       <nav aria-label="Page sections">
-        <a href="#what">What is iuna</a>
-        <a href="#join">Join</a>
+        <a href="#whatisiuna">What is iuna</a>
+        <a href="#howtojoin">Join</a>
       </nav>
     </div>
   </div>
@@ -217,8 +218,8 @@
         <p class="lead">A low-energy currency where block finalization requires sacrificing coins, while new supply is earned through open proof-of-work.</p>
         <p>iuna is not a mainnet and not money yet. It is a small L1 lab for learning how a wallet, node, finalizer, miner, mempool, and peer network behave when real people run it on real machines.</p>
         <div class="actions">
-          <a class="button primary" href="#what">What is iuna</a>
-          <a class="button" href="#join">How to join</a>
+          <a class="button primary" href="#whatisiuna">What is iuna</a>
+          <a class="button" href="#howtojoin">How to join</a>
         </div>
       </div>
       <aside class="status-panel" aria-label="Protocol snapshot">
@@ -234,7 +235,7 @@
   </header>
 
   <main>
-    <section id="what">
+    <section id="whatisiuna">
       <div class="wrap">
         <div class="section-head">
           <h2>What Is iuna?</h2>
@@ -260,7 +261,7 @@
       </div>
     </section>
 
-    <section id="join">
+    <section id="howtojoin">
       <div class="wrap split">
         <div>
           <h2>How To Join</h2>

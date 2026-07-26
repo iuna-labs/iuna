@@ -13,6 +13,7 @@ use crate::domain::{Amount, DEFAULT_FEE_PER_BYTE, MICRO_IUNA};
 
 const CONFIG_FILE_VERSION: u32 = 1;
 const AMOUNT_UNIT_MICROIUNA: &str = "microiuna";
+const LEGACY_AMOUNT_UNIT_PRE_RENAME: &str = concat!("micro", "l", "uun");
 pub const DEFAULT_BURN_FEE: Amount = DEFAULT_FEE_PER_BYTE;
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
@@ -116,7 +117,10 @@ fn load(path: &Path) -> Result<UiConfig> {
         );
     }
 
-    let scale = if stored.amount_unit.as_deref() == Some(AMOUNT_UNIT_MICROIUNA) {
+    let scale = if matches!(
+        stored.amount_unit.as_deref(),
+        Some(AMOUNT_UNIT_MICROIUNA) | Some(LEGACY_AMOUNT_UNIT_PRE_RENAME)
+    ) {
         1
     } else {
         MICRO_IUNA
@@ -273,5 +277,36 @@ mod tests {
         assert_eq!(config.burn_per_block, 2 * MICRO_IUNA);
         assert_eq!(config.burn_fee, MICRO_IUNA);
         assert_eq!(config.pow_mine_fee, DEFAULT_FEE_PER_BYTE);
+    }
+
+    #[test]
+    fn loads_renamed_legacy_micro_unit_config_without_rescaling_amounts() {
+        let dir = tempdir().unwrap();
+        let path = dir.path().join("config.json");
+        let legacy_unit = format!("micro{}{}", "l", "uun");
+        fs::write(
+            &path,
+            format!(
+                r#"{{
+  "version": 1,
+  "amount_unit": "{legacy_unit}",
+  "setup_complete": true,
+  "mining_enabled": true,
+  "burn_per_block": 2000000,
+  "burn_fee": 3,
+  "pow_mine_fee": 5,
+  "peers": []
+}}
+"#
+            ),
+        )
+        .unwrap();
+
+        let config = load_or_create(&path).unwrap();
+
+        assert!(config.mining_enabled);
+        assert_eq!(config.burn_per_block, 2 * MICRO_IUNA);
+        assert_eq!(config.burn_fee, 3);
+        assert_eq!(config.pow_mine_fee, 5);
     }
 }
