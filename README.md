@@ -130,6 +130,9 @@ cargo clippy --all-targets --all-features -- -D warnings
 cargo test
 ```
 
+The property-style chain tests live in a separate integration target and can be
+run directly with `cargo test --test properties`.
+
 To install the included pre-commit hook:
 
 ```sh
