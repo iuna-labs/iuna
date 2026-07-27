@@ -1832,6 +1832,9 @@ fn peer_book_tracks_multiple_peers_without_networking() {
     assert_eq!(sent_peer.last_known_height, Some(12));
     assert_eq!(sent_peer.last_known_tip_hash.as_deref(), Some("tip-hash"));
     assert_eq!(sent_peer.last_error, None);
+    assert!(sent_peer.last_contact_ms.is_some());
+    assert!(sent_peer.last_success_ms.is_some());
+    assert_eq!(sent_peer.last_error_ms, None);
 
     let failed_peer = list
         .iter()
@@ -1841,6 +1844,8 @@ fn peer_book_tracks_multiple_peers_without_networking() {
         failed_peer.last_error.as_deref(),
         Some("connection refused")
     );
+    assert!(failed_peer.last_contact_ms.is_some());
+    assert!(failed_peer.last_error_ms.is_some());
 
     let inbound_peer = list
         .iter()
@@ -1848,6 +1853,8 @@ fn peer_book_tracks_multiple_peers_without_networking() {
         .unwrap();
     assert_eq!(inbound_peer.direction, PeerDirection::Inbound);
     assert_eq!(inbound_peer.messages_received, 1);
+    assert!(inbound_peer.last_contact_ms.is_some());
+    assert!(inbound_peer.last_success_ms.is_some());
 
     let inbound_error = list
         .iter()

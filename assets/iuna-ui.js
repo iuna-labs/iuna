@@ -1066,6 +1066,7 @@ window.iunaApp = function iunaApp() {
       if (this.networkHealth.ok) return "healthy";
       if (this.networkHealth.state === "syncing") return "syncing";
       if (this.networkHealth.state === "isolated") return "isolated";
+      if (this.networkHealth.state === "stale") return "stale";
       return "error";
     },
 
@@ -1092,8 +1093,15 @@ window.iunaApp = function iunaApp() {
       return this.peers.filter((peer) => peer.last_error);
     },
 
+    stalePeer(peer) {
+      const lastSuccess = peer.last_success_ms;
+      if (typeof lastSuccess !== "number") return false;
+      return Date.now() - lastSuccess > 20 * 60 * 1000;
+    },
+
     peerStatus(peer) {
       if (peer.last_error) return "error";
+      if (this.stalePeer(peer)) return "stale";
       if (typeof peer.last_known_height === "number") return "synced";
       if ((peer.messages_sent ?? 0) > 0 || (peer.messages_received ?? 0) > 0) return "active";
       return "pending";
@@ -1102,10 +1110,27 @@ window.iunaApp = function iunaApp() {
     peerStatusLabel(peer) {
       return {
         error: "Error",
+        stale: "Stale",
         synced: "Synced",
         active: "Active",
         pending: "Pending",
       }[this.peerStatus(peer)];
+    },
+
+    relativeTimeLabel(timestampMs) {
+      if (typeof timestampMs !== "number") return "-";
+      const ageSeconds = Math.max(0, Math.round((Date.now() - timestampMs) / 1000));
+      if (ageSeconds < 5) return "now";
+      if (ageSeconds < 60) return `${ageSeconds}s ago`;
+      const ageMinutes = Math.round(ageSeconds / 60);
+      if (ageMinutes < 60) return `${ageMinutes}m ago`;
+      const ageHours = Math.round(ageMinutes / 60);
+      if (ageHours < 48) return `${ageHours}h ago`;
+      return `${Math.round(ageHours / 24)}d ago`;
+    },
+
+    peerLastContactLabel(peer) {
+      return this.relativeTimeLabel(peer.last_contact_ms);
     },
 
     peerHeightDelta(peer) {

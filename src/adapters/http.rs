@@ -40,6 +40,7 @@ const AUTH_COOKIE_NAME: &str = "iuna_session";
 const AUTH_SESSION_TTL_MS: u64 = 12 * 60 * 60 * 1_000;
 const PASSWORD_KDF_ALGORITHM: &str = "pbkdf2-sha256";
 const PASSWORD_KDF_ITERATIONS: u32 = 120_000;
+const PEER_STALE_AFTER_MS: u64 = 20 * 60 * 1_000;
 
 #[derive(Clone)]
 struct HttpState {
@@ -89,6 +90,7 @@ struct NetworkHealthResponse {
     inbound_peers: usize,
     healthy_peers: usize,
     failed_peers: usize,
+    stale_peers: usize,
     pending_transactions: usize,
     last_error: Option<String>,
 }
@@ -755,6 +757,14 @@ fn validate_peer_address(peer: String) -> Result<String> {
 }
 
 fn network_health(status: &NodeStatus, peers: &[PeerInfo]) -> NetworkHealthResponse {
+    network_health_at(status, peers, now_ms())
+}
+
+fn network_health_at(
+    status: &NodeStatus,
+    peers: &[PeerInfo],
+    now_ms: u64,
+) -> NetworkHealthResponse {
     let local_height = status.chain.height;
     let remote_best_height = peers.iter().filter_map(|peer| peer.last_known_height).max();
     let best_known_height = remote_best_height.unwrap_or(local_height).max(local_height);
@@ -785,6 +795,14 @@ fn network_health(status: &NodeStatus, peers: &[PeerInfo]) -> NetworkHealthRespo
         .iter()
         .filter(|peer| peer.last_error.is_some())
         .count();
+    let stale_peers = peers
+        .iter()
+        .filter(|peer| {
+            peer.last_success_ms.is_some_and(|last_success| {
+                now_ms.saturating_sub(last_success) > PEER_STALE_AFTER_MS
+            })
+        })
+        .count();
     let lag_blocks = best_known_height.saturating_sub(local_height);
     let last_error = peers.iter().rev().find_map(|peer| {
         peer.last_error
@@ -798,6 +816,8 @@ fn network_health(status: &NodeStatus, peers: &[PeerInfo]) -> NetworkHealthRespo
         "syncing"
     } else if failed_peers > 0 && healthy_peers == 0 {
         "peer errors"
+    } else if stale_peers > 0 && healthy_peers == stale_peers {
+        "stale"
     } else if remote_best_height.is_some_and(|height| local_height > height) {
         "ahead of peers"
     } else {
@@ -806,7 +826,7 @@ fn network_health(status: &NodeStatus, peers: &[PeerInfo]) -> NetworkHealthRespo
     .to_string();
 
     NetworkHealthResponse {
-        ok: !peers.is_empty() && lag_blocks == 0 && healthy_peers > 0,
+        ok: !peers.is_empty() && lag_blocks == 0 && healthy_peers > stale_peers,
         state,
         local_height,
         best_known_height,
@@ -816,6 +836,7 @@ fn network_health(status: &NodeStatus, peers: &[PeerInfo]) -> NetworkHealthRespo
         inbound_peers,
         healthy_peers,
         failed_peers,
+        stale_peers,
         pending_transactions: status.chain.pending_transactions,
         last_error,
     }
@@ -1764,6 +1785,7 @@ const INDEX_HTML: &str = r#"<!doctype html>
     .peer-form input { width: 100%; }
     .peer-status { display: inline-flex; align-items: center; border: 1px solid #3a4248; border-radius: 999px; padding: 3px 8px; color: #a8b2b8; font-size: 11px; font-weight: 850; }
     .peer-status.synced, .peer-status.active { border-color: #566d25; color: #d5f55f; background: #1c2516; }
+    .peer-status.stale { border-color: #5f5125; color: #ffe08a; background: #211d12; }
     .peer-status.error { border-color: #713434; color: #ffb1a8; background: #2a1717; }
     .peer-actions { display: flex; gap: 6px; align-items: center; }
     .peer-remove { padding: 4px 7px; border-color: #4f3737; background: #221717; color: #ffb1a8; font-size: 12px; }
@@ -1771,7 +1793,7 @@ const INDEX_HTML: &str = r#"<!doctype html>
     .network-health { display: grid; grid-template-columns: minmax(180px, .8fr) minmax(0, 1.2fr); gap: 12px; align-items: stretch; margin-bottom: 12px; }
     .network-health-state { display: grid; align-content: center; gap: 5px; border: 1px solid #3a4248; border-radius: 8px; padding: 12px; background: #111316; }
     .network-health-state.healthy { border-color: #566d25; background: #182112; }
-    .network-health-state.syncing { border-color: #5f5125; background: #211d12; }
+    .network-health-state.syncing, .network-health-state.stale { border-color: #5f5125; background: #211d12; }
     .network-health-state.isolated, .network-health-state.error { border-color: #713434; background: #241716; }
     .network-health-label { color: #879198; font-size: 10px; font-weight: 850; text-transform: uppercase; }
     .network-health-value { color: #e8edf0; font-size: 20px; font-weight: 900; text-transform: capitalize; }
@@ -1845,7 +1867,7 @@ const INDEX_HTML: &str = r#"<!doctype html>
       .block-card { flex-basis: 108px; }
     }
   </style>
-  <script defer src="/assets/iuna-ui.js?v=54"></script>
+  <script defer src="/assets/iuna-ui.js?v=55"></script>
   <script defer src="/assets/alpine.min.js"></script>
 </head>
 <body x-data="iunaApp()" x-init="init()" @keydown.window.escape="closeModals()" x-cloak>
@@ -2093,6 +2115,7 @@ const INDEX_HTML: &str = r#"<!doctype html>
             <div class="peer-summary-item"><div class="peer-summary-label">Local Height</div><div class="peer-summary-value" x-text="networkHealth.local_height ?? '-'"></div></div>
             <div class="peer-summary-item"><div class="peer-summary-label">Best Known</div><div class="peer-summary-value" x-text="networkHealth.best_known_height ?? '-'"></div></div>
             <div class="peer-summary-item"><div class="peer-summary-label">Lag</div><div class="peer-summary-value" x-text="networkLagLabel()"></div></div>
+            <div class="peer-summary-item"><div class="peer-summary-label">Stale</div><div class="peer-summary-value" x-text="networkHealth.stale_peers ?? '-'"></div></div>
             <div class="peer-summary-item"><div class="peer-summary-label">Mempool</div><div class="peer-summary-value" x-text="networkHealth.pending_transactions ?? '-'"></div></div>
           </div>
         </div>
@@ -2105,13 +2128,14 @@ const INDEX_HTML: &str = r#"<!doctype html>
         </div>
         <div class="table-wrap">
           <table>
-            <thead><tr><th>Status</th><th>Address</th><th>Direction</th><th>Height</th><th>Delta</th><th>Tip</th><th>Sent</th><th>Received</th><th>Last Error</th><th>Actions</th></tr></thead>
+            <thead><tr><th>Status</th><th>Address</th><th>Direction</th><th>Last Contact</th><th>Height</th><th>Delta</th><th>Tip</th><th>Sent</th><th>Received</th><th>Last Error</th><th>Actions</th></tr></thead>
             <tbody>
               <template x-for="peer in peers" :key="peer.address">
                 <tr>
                   <td><span class="peer-status" :class="peerStatus(peer)" x-text="peerStatusLabel(peer)"></span></td>
                   <td><code x-text="peer.address"></code></td>
                   <td x-text="peer.direction"></td>
+                  <td x-text="peerLastContactLabel(peer)"></td>
                   <td x-text="peer.last_known_height ?? '-'"></td>
                   <td x-text="peerHeightDelta(peer)"></td>
                   <td><code x-text="short(peer.last_known_tip_hash)"></code></td>
@@ -2121,7 +2145,7 @@ const INDEX_HTML: &str = r#"<!doctype html>
                   <td><div class="peer-actions"><button class="peer-remove" type="button" x-show="canRemovePeer(peer)" @click="removePeer(peer)">Remove</button><span class="muted" x-show="!canRemovePeer(peer)">Observed</span></div></td>
                 </tr>
               </template>
-              <tr x-show="peers.length === 0"><td colspan="10">No peers</td></tr>
+              <tr x-show="peers.length === 0"><td colspan="11">No peers</td></tr>
             </tbody>
           </table>
         </div>
@@ -2489,11 +2513,11 @@ mod tests {
     };
 
     use super::{
-        AUTH_COOKIE_NAME, HttpState, TransferForm, api_auth_login_form, api_auth_setup_form,
-        api_auth_status, dev_seed_verify_bypass_allowed, hash_password, hex_encode, pbkdf2_sha256,
-        persist_burn_settings_config, persist_pow_mining_config, require_auth_middleware,
-        required_fee_per_byte_burn, required_fee_per_byte_mine, validate_password,
-        validate_transfer_form, verify_password, wallet_transaction_rows,
+        AUTH_COOKIE_NAME, HttpState, PEER_STALE_AFTER_MS, TransferForm, api_auth_login_form,
+        api_auth_setup_form, api_auth_status, dev_seed_verify_bypass_allowed, hash_password,
+        hex_encode, pbkdf2_sha256, persist_burn_settings_config, persist_pow_mining_config,
+        require_auth_middleware, required_fee_per_byte_burn, required_fee_per_byte_mine,
+        validate_password, validate_transfer_form, verify_password, wallet_transaction_rows,
     };
 
     #[test]
@@ -2701,6 +2725,9 @@ mod tests {
                 last_known_height: Some(3),
                 last_known_tip_hash: Some("remote-tip".to_string()),
                 last_error: None,
+                last_contact_ms: Some(10_000),
+                last_success_ms: Some(10_000),
+                last_error_ms: None,
             }],
         );
         assert!(!syncing.ok);
@@ -2718,6 +2745,9 @@ mod tests {
                 last_known_height: None,
                 last_known_tip_hash: None,
                 last_error: Some("connection refused".to_string()),
+                last_contact_ms: Some(10_000),
+                last_success_ms: None,
+                last_error_ms: Some(10_000),
             }],
         );
         assert!(!peer_errors.ok);
@@ -2726,6 +2756,26 @@ mod tests {
             peer_errors.last_error.as_deref(),
             Some("127.0.0.1:9446: connection refused")
         );
+
+        let stale = super::network_health_at(
+            &status,
+            &[PeerInfo {
+                address: "127.0.0.1:9447".to_string(),
+                direction: PeerDirection::Outbound,
+                messages_sent: 1,
+                messages_received: 1,
+                last_known_height: Some(0),
+                last_known_tip_hash: Some("tip".to_string()),
+                last_error: None,
+                last_contact_ms: Some(1),
+                last_success_ms: Some(1),
+                last_error_ms: None,
+            }],
+            PEER_STALE_AFTER_MS + 2,
+        );
+        assert!(!stale.ok);
+        assert_eq!(stale.state, "stale");
+        assert_eq!(stale.stale_peers, 1);
     }
 
     #[test]

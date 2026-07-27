@@ -1116,30 +1116,47 @@ impl PeerBook {
     }
 
     pub fn record_sent(&mut self, address: &str, count: u64) {
+        let now = now_ms();
         let peer = self.ensure(address, PeerDirection::Outbound);
         peer.messages_sent += count;
+        peer.last_contact_ms = Some(now);
+        peer.last_success_ms = Some(now);
         peer.last_error = None;
     }
 
     pub fn record_status(&mut self, address: &str, height: u64, tip_hash: String) {
+        let now = now_ms();
         let peer = self.ensure(address, PeerDirection::Outbound);
         peer.last_known_height = Some(height);
         peer.last_known_tip_hash = Some(tip_hash);
+        peer.last_contact_ms = Some(now);
+        peer.last_success_ms = Some(now);
+        peer.last_error = None;
     }
 
     pub fn record_error(&mut self, address: &str, error: impl Into<String>) {
+        let now = now_ms();
         let peer = self.ensure(address, PeerDirection::Outbound);
+        peer.last_contact_ms = Some(now);
+        peer.last_error_ms = Some(now);
         peer.last_error = Some(error.into());
     }
 
     pub fn record_inbound_error(&mut self, address: &str, error: impl Into<String>) {
+        let now = now_ms();
         let peer = self.ensure(address, PeerDirection::Inbound);
+        peer.last_contact_ms = Some(now);
+        peer.last_error_ms = Some(now);
         peer.last_error = Some(error.into());
     }
 
     pub fn record_received(&mut self, address: &str, count: u64) {
+        let now = now_ms();
         let peer = self.ensure(address, PeerDirection::Inbound);
         peer.messages_received += count;
+        peer.last_contact_ms = Some(now);
+        peer.last_success_ms = Some(now);
+        peer.last_error = None;
     }
 
     fn ensure(&mut self, address: &str, direction: PeerDirection) -> &mut PeerInfo {
@@ -1158,6 +1175,9 @@ pub struct PeerInfo {
     pub last_known_height: Option<u64>,
     pub last_known_tip_hash: Option<String>,
     pub last_error: Option<String>,
+    pub last_contact_ms: Option<u64>,
+    pub last_success_ms: Option<u64>,
+    pub last_error_ms: Option<u64>,
 }
 
 impl PeerInfo {
@@ -1170,6 +1190,9 @@ impl PeerInfo {
             last_known_height: None,
             last_known_tip_hash: None,
             last_error: None,
+            last_contact_ms: None,
+            last_success_ms: None,
+            last_error_ms: None,
         }
     }
 }
