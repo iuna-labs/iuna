@@ -120,6 +120,11 @@
     }
     .button.primary { border-color: var(--green); background: var(--green); color: #11140c; }
     .button:hover { border-color: var(--green); }
+    .repo-link {
+      color: var(--text);
+      text-decoration: none;
+    }
+    .repo-link:hover { color: var(--green); }
     .status-panel {
       border: 1px solid var(--line);
       border-radius: 8px;
@@ -182,6 +187,16 @@
       gap: 18px;
       align-items: start;
     }
+    .steps {
+      display: grid;
+      gap: 18px;
+      margin: 18px 0;
+    }
+    .step {
+      display: grid;
+      gap: 10px;
+    }
+    .step p { margin: 0; }
     .note {
       border-left: 3px solid var(--green);
       padding-left: 14px;
@@ -189,6 +204,12 @@
       font-size: 15px;
     }
     .footer { padding-bottom: 60px; color: #87949b; font-size: 14px; }
+    .footer .wrap {
+      display: flex;
+      justify-content: space-between;
+      gap: 14px;
+      flex-wrap: wrap;
+    }
     @media (max-width: 820px) {
       .hero { padding-top: 58px; }
       .hero-grid, .split, .grid { grid-template-columns: 1fr; }
@@ -202,10 +223,11 @@
 <body>
   <div class="topbar">
     <div class="wrap">
-      <div class="brand"><span class="mark">i</span><span>iuna</span></div>
+      <a class="brand repo-link" href="https://github.com/iuna-labs/iuna"><span class="mark">i</span><span>iuna</span></a>
       <nav aria-label="Page sections">
         <a href="#whatisiuna">What is iuna</a>
         <a href="#howtojoin">Join</a>
+        <a href="https://github.com/iuna-labs/iuna">GitHub</a>
       </nav>
     </div>
   </div>
@@ -265,8 +287,20 @@
       <div class="wrap split">
         <div>
           <h2>How To Join</h2>
-          <p>Ask for a public seed node address, then start iuna with a local data directory and that peer as your join target.</p>
-          <pre><code>cargo run -- --data-dir .iuna --p2p 0.0.0.0:9445 --http 127.0.0.1:18661 --join seed.example:9444</code></pre>
+          <div class="steps">
+            <div class="step">
+              <p>Download the latest binary for your platform from <a href="https://github.com/iuna-labs/iuna/releases">GitHub Releases</a>, unpack it, and start it once to set up your wallet.</p>
+              <pre><code>./iuna</code></pre>
+            </div>
+            <div class="step">
+              <p>Ask for a public seed node address, then restart iuna with a local data directory and that peer as your join target.</p>
+              <pre><code>./iuna \
+  --data-dir .iuna \
+  --p2p 0.0.0.0:9445 \
+  --http 127.0.0.1:18661 \
+  --join seed.example:9444</code></pre>
+            </div>
+          </div>
           <p>Open <code>http://127.0.0.1:18661</code>, set a password, back up your recovery phrase, and let the node sync. After you receive IUNA, you can send transactions, burn for block finalization, or enable PoW mine actions.</p>
           <p class="note">Keep the management UI local. The P2P port is for node traffic; the wallet UI should stay on <code>127.0.0.1</code>.</p>
         </div>
@@ -280,7 +314,10 @@
   </main>
 
   <section class="footer">
-    <div class="wrap">iuna devnet prototype.</div>
+    <div class="wrap">
+      <span>iuna devnet prototype.</span>
+      <a href="https://github.com/iuna-labs/iuna">github.com/iuna-labs/iuna</a>
+    </div>
   </section>
 </body>
 </html>

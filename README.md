@@ -11,6 +11,7 @@ Download the latest build for your platform from the [GitHub Releases](https://g
 Release archives are published for:
 
 - Linux x86_64
+- Linux aarch64
 - macOS x86_64
 - macOS Apple Silicon
 - Windows x86_64

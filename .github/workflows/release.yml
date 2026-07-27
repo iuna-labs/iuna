@@ -21,6 +21,10 @@ jobs:
             platform: linux-x86_64
             exe: ""
             archive: tar.gz
+          - os: ubuntu-24.04-arm
+            platform: linux-aarch64
+            exe: ""
+            archive: tar.gz
           - os: macos-13
             platform: macos-x86_64
             exe: ""
