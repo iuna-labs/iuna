@@ -126,6 +126,8 @@ struct PeerForm {
 #[derive(Debug, Deserialize)]
 struct ConfigForm {
     setup_complete: bool,
+    #[serde(default)]
+    peer: String,
 }
 
 #[derive(Debug, Deserialize)]
@@ -543,9 +545,17 @@ async fn api_config_form(
     State(state): State<HttpState>,
     Form(form): Form<ConfigForm>,
 ) -> Json<ActionResponse> {
+    action_json(apply_config_form(&state, form).await)
+}
+
+async fn apply_config_form(state: &HttpState, form: ConfigForm) -> Result<()> {
+    let peer = form.peer.trim();
+    if !peer.is_empty() {
+        add_peer(state, peer.to_string()).await?;
+    }
     let mut config = state.ui_config.lock().await;
     config.setup_complete = form.setup_complete;
-    action_json(config_store::save(&state.config_path, &config))
+    config_store::save(&state.config_path, &config)
 }
 
 async fn api_wallet_generate_form(
@@ -1695,14 +1705,17 @@ const INDEX_HTML: &str = r#"<!doctype html>
     .setup-feedback.error { color: #ffb1a8; background: #2a1717; border-color: #713434; }
     .setup-grid { width: 100%; display: grid; grid-template-columns: minmax(0, .9fr) minmax(320px, .7fr); gap: 12px; align-items: start; }
     .setup-section { border: 1px solid #2f363c; border-radius: 8px; padding: 13px; background: #111316; }
+    .setup-network, .setup-wallet-section { grid-column: 1 / -1; }
+    .setup-network-row { display: grid; grid-template-columns: minmax(0, 1fr); gap: 10px; align-items: end; }
+    .setup-network-copy { margin-top: 8px; color: #a8b2b8; line-height: 1.45; }
+    .setup-network-link { color: #d5f55f; font-size: 12px; font-weight: 900; text-decoration: none; }
+    .setup-network-link:hover { text-decoration: underline; }
     .setup-field { display: grid; gap: 6px; }
     .setup-field-label { color: #8d989f; font-size: 11px; font-weight: 800; text-transform: uppercase; letter-spacing: 0; }
     .setup-address-box { display: flex; justify-content: space-between; gap: 10px; align-items: center; }
     .setup-address-box code { min-width: 0; }
     .setup-address-box button { flex: 0 0 auto; }
     .setup-actions { display: flex; justify-content: flex-end; gap: 10px; margin-top: 14px; }
-    .setup-peer-list { margin-top: 14px; display: grid; gap: 8px; }
-    .setup-peer-row { display: flex; justify-content: space-between; gap: 12px; align-items: center; border: 1px solid #2f363c; border-radius: 8px; padding: 10px; background: #181b1f; }
     .segmented { display: inline-flex; gap: 4px; padding: 4px; border: 1px solid #2f363c; border-radius: 8px; background: #181b1f; }
     .segmented button { border-color: transparent; background: transparent; color: #9fa8ad; }
     .segmented button.active { background: #d5f55f; color: #15171a; }
@@ -2418,11 +2431,21 @@ const INDEX_HTML: &str = r#"<!doctype html>
       <div class="setup-modal-head">
         <div class="setup-welcome">Welcome to iuna</div>
         <h2 id="setup-title">Initial Setup</h2>
-        <div class="setup-copy">Confirm the local wallet address and add any peers before this node starts from a saved configuration.</div>
+        <div class="setup-copy">Choose how this node finds the network, then set up the local wallet.</div>
       </div>
       <div class="setup-feedback" :class="setupFeedback?.kind" x-show="setupFeedback" x-transition x-text="setupFeedback?.message"></div>
       <div class="setup-grid">
-        <div class="setup-section seed-panel">
+        <div class="setup-section setup-network">
+          <div class="panel-head">
+            <h3>Network</h3>
+            <a class="setup-network-link" href="https://github.com/iuna-labs/iuna/blob/main/KNOWN_NODES.txt" target="_blank" rel="noreferrer">Known nodes</a>
+          </div>
+          <div class="setup-network-row">
+            <label>Bootstrap peer<input x-model="setupPeerAddress" placeholder="iuna.jhx.app:9444"></label>
+          </div>
+          <div class="setup-network-copy">Known nodes are bootstrap peers, not authorities. They help this node find the network; they do not control your wallet or decide valid blocks.</div>
+        </div>
+        <div class="setup-section setup-wallet-section seed-panel">
           <div class="panel-head">
             <h3>Wallet</h3>
           </div>
@@ -2492,22 +2515,6 @@ const INDEX_HTML: &str = r#"<!doctype html>
             <template x-if="walletVerified">
               <div class="setup-status">Recovery phrase imported</div>
             </template>
-          </div>
-        </div>
-        <div class="setup-section">
-          <h3>Peers</h3>
-          <form @submit.prevent="addPeer">
-            <label>Peer address<input x-model="peerAddress" placeholder="127.0.0.1:9445"></label>
-            <button class="primary" type="submit">Add</button>
-          </form>
-          <div class="setup-peer-list">
-            <template x-for="peer in peers" :key="peer.address">
-              <div class="setup-peer-row">
-                <code x-text="peer.address"></code>
-                <span class="muted" x-text="peer.direction"></span>
-              </div>
-            </template>
-            <div class="muted" x-show="peers.length === 0">No peers</div>
           </div>
         </div>
       </div>
@@ -2711,6 +2718,31 @@ mod tests {
         let config = config_store::load_or_create(&config_path).unwrap();
         assert!(config.peers.is_empty());
         assert!(state.peers.lock().await.addresses().is_empty());
+    }
+
+    #[tokio::test]
+    async fn setup_config_form_can_add_bootstrap_peer() {
+        let dir = tempfile::tempdir().unwrap();
+        let config_path = dir.path().join("config.json");
+        let state = auth_test_state(config_path.clone(), UiConfig::default()).await;
+
+        super::apply_config_form(
+            &state,
+            super::ConfigForm {
+                setup_complete: true,
+                peer: " iuna.jhx.app:9444 ".to_string(),
+            },
+        )
+        .await
+        .unwrap();
+
+        let config = config_store::load_or_create(&config_path).unwrap();
+        assert!(config.setup_complete);
+        assert_eq!(config.peers, vec!["iuna.jhx.app:9444"]);
+        assert_eq!(
+            state.peers.lock().await.addresses(),
+            vec!["iuna.jhx.app:9444"]
+        );
     }
 
     #[tokio::test]

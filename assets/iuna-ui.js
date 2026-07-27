@@ -49,6 +49,7 @@ window.iunaApp = function iunaApp() {
     feeEstimateTimer: null,
     showSendAdvanced: false,
     selectedTransferUtxos: [],
+    setupPeerAddress: "",
     peerAddress: "",
     flash: null,
     flashTimer: null,
@@ -361,16 +362,21 @@ window.iunaApp = function iunaApp() {
             Accept: "application/json",
             "Content-Type": "application/x-www-form-urlencoded",
           },
-          body: new URLSearchParams({ setup_complete: "true" }),
+          body: new URLSearchParams({
+            setup_complete: "true",
+            peer: this.setupPeerAddress.trim(),
+          }),
         });
         const payload = await response.json();
         if (!response.ok || !payload.ok) {
           throw new Error(payload.error || `/api/config returned ${response.status}`);
         }
         await this.refreshConfig();
+        this.peers = await this.fetchJson("/api/peers");
         this.setupFeedback = null;
         this.generatedSeedPhrase = "";
         this.importSeedPhrase = "";
+        this.setupPeerAddress = "";
         this.verifyChallenges = [];
         this.verifyAnswers = {};
         this.showFlash("Setup complete", "success");

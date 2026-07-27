@@ -1,0 +1,11 @@
+# Known iuna devnet nodes
+#
+# These are bootstrap peers, not authorities. You may run without them or use
+# your own trusted peer. A bootstrap peer helps your node find the network; it
+# does not control your wallet or decide valid blocks.
+#
+# Format: host:port
+#
+# Use the P2P listener port here, not the management UI port.
+
+iuna.jhx.app:9444
