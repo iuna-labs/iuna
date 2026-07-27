@@ -289,19 +289,12 @@
           <h2>How To Join</h2>
           <div class="steps">
             <div class="step">
-              <p>Download the latest binary for your platform from <a href="https://github.com/iuna-labs/iuna/releases">GitHub Releases</a>, unpack it, and start iuna. You can add peers from the UI after setup.</p>
+              <p>Download the latest binary for your platform from <a href="https://github.com/iuna-labs/iuna/releases">GitHub Releases</a>, unpack it, and start iuna. If you have a bootstrap peer, add it during setup.</p>
               <pre><code>./iuna</code></pre>
             </div>
-            <div class="step">
-              <p>Or, if you already have a public seed node address, start iuna with that peer as your join target.</p>
-              <pre><code>./iuna \
-  --p2p 0.0.0.0:9445 \
-  --http 127.0.0.1:18661 \
-  --join seed.example:9444</code></pre>
-            </div>
           </div>
-          <p>Open <code>http://127.0.0.1:18661</code>, set a password, back up your recovery phrase, and let the node sync. After you receive IUNA, you can send transactions, burn for block finalization, or enable PoW mine actions.</p>
-          <p class="note">Keep the management UI local. The P2P port is for node traffic; the wallet UI should stay on <code>127.0.0.1</code>.</p>
+          <p>Open the local management URL printed by iuna, set a password, back up your recovery phrase, and let the node sync. After you receive IUNA, you can send transactions, burn for block finalization, or enable PoW mine actions.</p>
+          <p class="note">Keep the management UI local. The P2P listener is for node traffic; the wallet UI should not be exposed directly to the public internet.</p>
         </div>
         <aside class="card">
           <span class="tag cyan">No Public Port?</span>

@@ -22,25 +22,25 @@ On macOS or Linux:
 
 ```sh
 chmod +x ./iuna
-./iuna --http 127.0.0.1:18661 --p2p 0.0.0.0:9445
+./iuna
 ```
 
 On Windows PowerShell:
 
 ```powershell
-.\iuna.exe --http 127.0.0.1:18661 --p2p 0.0.0.0:9445
+.\iuna.exe
 ```
 
 For the commands below, use `.\iuna.exe` instead of `./iuna` on Windows.
 
-Open `http://127.0.0.1:18661`, set a local password, and back up the recovery phrase. The wallet seed is encrypted on disk. Keep the management UI on `127.0.0.1`; only the P2P port should be reachable by other nodes.
+Open the local management URL printed by iuna, set a local password, and back up the recovery phrase. The wallet seed is encrypted on disk. Keep the management UI local; only the P2P listener should be reachable by other nodes.
 
 ## Join A Devnet
 
 Ask for a seed node address and start iuna with `--join`:
 
 ```sh
-./iuna --http 127.0.0.1:18661 --p2p 0.0.0.0:9445 --join seed.example:9444
+./iuna --join <peer-host>:<peer-port>
 ```
 
 After the node syncs, you can receive IUNA, send transactions, burn for block finalization, or enable PoW mine actions from the Mining screen.
@@ -50,7 +50,7 @@ After the node syncs, you can receive IUNA, send transactions, burn for block fi
 Only the first operator of a devnet needs genesis mode:
 
 ```sh
-./iuna --genesis --http 127.0.0.1:18661 --p2p 0.0.0.0:9444
+./iuna --genesis
 ```
 
 Genesis requires a fresh wallet and an empty chain database. It creates the starter chain, measures an initial VDF delay, and leaves the starter wallet with spendable IUNA for early testing.
@@ -60,7 +60,7 @@ Genesis requires a fresh wallet and an empty chain database. It creates the star
 iuna can expose a Stratum V1 endpoint for SHA-256 ASIC miners such as a Bitaxe:
 
 ```sh
-./iuna --stratum 0.0.0.0:3333
+./iuna --stratum <bind-address>:<port>
 ```
 
 Use your iuna wallet address as the worker username. Accepted shares become PoW mine actions in the node mempool and are gossiped to peers.
