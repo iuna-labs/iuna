@@ -49,7 +49,8 @@ const MAX_RECONNECT_DELAY: Duration = Duration::from_secs(30);
 struct PeerStatus {
     height: u64,
     tip_hash: String,
-    force_snapshot: bool,
+    request_snapshot: bool,
+    push_snapshot: bool,
 }
 
 impl PeerStatus {
@@ -57,15 +58,26 @@ impl PeerStatus {
         Self {
             height,
             tip_hash,
-            force_snapshot: false,
+            request_snapshot: false,
+            push_snapshot: false,
         }
     }
 
-    fn with_forced_snapshot(height: u64, tip_hash: String) -> Self {
+    fn with_snapshot_request(height: u64, tip_hash: String) -> Self {
         Self {
             height,
             tip_hash,
-            force_snapshot: true,
+            request_snapshot: true,
+            push_snapshot: false,
+        }
+    }
+
+    fn with_snapshot_push(height: u64, tip_hash: String) -> Self {
+        Self {
+            height,
+            tip_hash,
+            request_snapshot: false,
+            push_snapshot: true,
         }
     }
 }
@@ -836,11 +848,20 @@ async fn process_envelope(
         }
         GossipEnvelope::PeerAnnouncement { address } => {
             let peer = normalize_advertised_peer(&address, remote_addr)?;
-            *known_peer = Some(peer.clone());
+            if is_self_peer_address(&peer, network.inner.listen_addr) {
+                P2pMetricsCounters::inc(&network.inner.metrics.self_peer_rejections);
+            } else if remember_discoverable_advertised_peer(
+                network,
+                remote_addr,
+                known_peer,
+                peer.clone(),
+            )
+            .await?
             {
-                let mut peers = network.inner.peers.lock().await;
-                peers.add_peer(peer.clone());
-                peers.record_received(&peer, 1);
+                if let Some(peer) = known_peer {
+                    let mut peers = network.inner.peers.lock().await;
+                    peers.record_received(peer, 1);
+                }
             }
             let snapshot = network.inner.node.lock().await.chain_snapshot();
             write_envelope(writer, &GossipEnvelope::ChainSnapshot(snapshot)).await?;
@@ -993,7 +1014,7 @@ async fn maybe_request_catchup(
         let status = node.ledger().status();
         (status.height, status.tip_hash)
     };
-    if peer_status.force_snapshot {
+    if peer_status.request_snapshot {
         write_envelope(writer, &GossipEnvelope::ChainSnapshotRequest).await?;
     } else if peer_status.height > local_height {
         write_envelope(
@@ -1042,6 +1063,9 @@ async fn catchup_payload_for_peer(
     let local_status = node.ledger().status();
     if node.ledger().is_setup_placeholder() {
         return Vec::new();
+    }
+    if peer_status.push_snapshot {
+        return vec![GossipEnvelope::ChainSnapshot(node.chain_snapshot())];
     }
     if peer_status.height < local_status.height {
         let blocks = node.blocks_from(peer_status.height + 1, MAX_BLOCK_BATCH);
@@ -1664,23 +1688,19 @@ async fn process_hello(
             NETWORK_ID
         );
     }
-    let local_genesis = network
-        .inner
-        .node
-        .lock()
-        .await
-        .ledger()
-        .genesis_hash()
-        .to_string();
-    let local_accepts_remote_genesis = network
-        .inner
-        .node
-        .lock()
-        .await
-        .ledger()
-        .is_setup_placeholder();
-    let force_snapshot = hello.genesis_hash != local_genesis && local_accepts_remote_genesis;
-    if hello.genesis_hash != local_genesis && !local_accepts_remote_genesis {
+    let (local_genesis, local_accepts_remote_genesis) = {
+        let node = network.inner.node.lock().await;
+        (
+            node.ledger().genesis_hash().to_string(),
+            node.ledger().is_setup_placeholder(),
+        )
+    };
+    let genesis_mismatch = hello.genesis_hash != local_genesis;
+    let remote_is_setup_placeholder =
+        hello.height == 0 && hello.genesis_hash == setup_placeholder_genesis_hash();
+    let request_snapshot = genesis_mismatch && local_accepts_remote_genesis;
+    let push_snapshot = genesis_mismatch && remote_is_setup_placeholder;
+    if genesis_mismatch && !local_accepts_remote_genesis && !remote_is_setup_placeholder {
         anyhow::bail!(
             "wrong genesis {}; expected {local_genesis}",
             hello.genesis_hash
@@ -1700,17 +1720,7 @@ async fn process_hello(
             .await;
             anyhow::bail!("peer announced our own p2p address {peer}");
         }
-        if let Some(previous_peer) = known_peer.as_deref() {
-            network
-                .inner
-                .peers
-                .lock()
-                .await
-                .replace_peer_address(previous_peer, peer.clone());
-        } else {
-            network.inner.peers.lock().await.add_peer(peer.clone());
-        }
-        *known_peer = Some(peer.clone());
+        remember_discoverable_advertised_peer(network, remote_addr, known_peer, peer).await?;
     }
     record_peer_status(
         network,
@@ -1720,14 +1730,43 @@ async fn process_hello(
         hello.tip_hash.clone(),
     )
     .await;
-    if force_snapshot {
-        Ok(PeerStatus::with_forced_snapshot(
+    if request_snapshot {
+        Ok(PeerStatus::with_snapshot_request(
             hello.height,
             hello.tip_hash,
         ))
+    } else if push_snapshot {
+        Ok(PeerStatus::with_snapshot_push(hello.height, hello.tip_hash))
     } else {
         Ok(PeerStatus::new(hello.height, hello.tip_hash))
     }
+}
+
+fn setup_placeholder_genesis_hash() -> String {
+    Ledger::new(BTreeMap::new(), 1).genesis_hash().to_string()
+}
+
+async fn remember_discoverable_advertised_peer(
+    network: &GossipNetwork,
+    remote_addr: SocketAddr,
+    known_peer: &mut Option<String>,
+    peer: String,
+) -> Result<bool> {
+    if !advertised_peer_is_discoverable(&peer, remote_addr)? {
+        return Ok(false);
+    }
+    if let Some(previous_peer) = known_peer.as_deref() {
+        network
+            .inner
+            .peers
+            .lock()
+            .await
+            .replace_peer_address(previous_peer, peer.clone());
+    } else {
+        network.inner.peers.lock().await.add_peer(peer.clone());
+    }
+    *known_peer = Some(peer);
+    Ok(true)
 }
 
 async fn record_inbound_result(
@@ -1805,10 +1844,21 @@ fn peer_list_address_is_discoverable(address: &str, remote_addr: SocketAddr) -> 
     let candidate = address
         .parse::<SocketAddr>()
         .with_context(|| format!("invalid peer-list address {address}"))?;
+    Ok(socket_addr_is_discoverable(candidate, remote_addr))
+}
+
+fn advertised_peer_is_discoverable(address: &str, remote_addr: SocketAddr) -> Result<bool> {
+    let candidate = address
+        .parse::<SocketAddr>()
+        .with_context(|| format!("invalid announced peer address {address}"))?;
+    Ok(socket_addr_is_discoverable(candidate, remote_addr))
+}
+
+fn socket_addr_is_discoverable(candidate: SocketAddr, remote_addr: SocketAddr) -> bool {
     if candidate.ip().is_loopback() {
-        return Ok(remote_addr.ip().is_loopback());
+        return remote_addr.ip().is_loopback();
     }
-    Ok(ip_is_publicly_discoverable(candidate.ip()))
+    ip_is_publicly_discoverable(candidate.ip())
 }
 
 fn ip_is_publicly_discoverable(ip: IpAddr) -> bool {
@@ -2560,7 +2610,8 @@ mod tests {
         .await
         .unwrap();
 
-        assert!(peer_status.force_snapshot);
+        assert!(peer_status.request_snapshot);
+        assert!(!peer_status.push_snapshot);
         assert_eq!(known_peer.as_deref(), Some("142.132.164.59:9444"));
         let listed = network.inner.peers.lock().await.list();
         assert_eq!(listed.len(), 1);
@@ -2588,6 +2639,92 @@ mod tests {
             network.inner.node.lock().await.ledger().genesis_hash(),
             remote_genesis
         );
+    }
+
+    #[tokio::test]
+    async fn real_node_accepts_setup_placeholder_peer_and_pushes_snapshot() {
+        let wallet = Wallet::from_seed("setup-placeholder-peer-real-node");
+        let node = Arc::new(tokio::sync::Mutex::new(node(
+            "real",
+            wallet.clone(),
+            allocations(std::slice::from_ref(&wallet), 1_000),
+        )));
+        let network = super::GossipNetwork {
+            inner: Arc::new(super::GossipNetworkInner {
+                node: Arc::clone(&node),
+                peers: Arc::new(tokio::sync::Mutex::new(PeerBook::default())),
+                listen_addr: "127.0.0.1:9544".parse().unwrap(),
+                sessions: tokio::sync::Mutex::new(BTreeMap::new()),
+                tx_delivery: tokio::sync::Mutex::new(BTreeMap::new()),
+                metrics: super::P2pMetricsCounters::default(),
+            }),
+        };
+        let setup_ledger = Ledger::new(BTreeMap::new(), 1);
+        let hello = ProtocolHello {
+            protocol_version: PROTOCOL_VERSION,
+            network_id: NETWORK_ID.to_string(),
+            genesis_hash: setup_ledger.genesis_hash().to_string(),
+            listen_addr: Some("127.0.0.1:9545".to_string()),
+            height: 0,
+            tip_hash: setup_ledger.status().tip_hash,
+        };
+
+        let peer_status = super::process_hello(
+            &network,
+            "127.0.0.1:51234".parse().unwrap(),
+            &mut None,
+            hello,
+        )
+        .await
+        .unwrap();
+
+        assert!(!peer_status.request_snapshot);
+        assert!(peer_status.push_snapshot);
+        let payload = super::catchup_payload_for_peer(&node, &peer_status).await;
+        assert!(matches!(
+            payload.as_slice(),
+            [GossipEnvelope::ChainSnapshot(_)]
+        ));
+    }
+
+    #[tokio::test]
+    async fn hello_ignores_private_advertised_listen_address() {
+        let alice = Wallet::from_seed("hello-private-listen-alice");
+        let allocations = allocations(std::slice::from_ref(&alice), 1_000);
+        let node = Arc::new(tokio::sync::Mutex::new(node("alice", alice, allocations)));
+        let peers = Arc::new(tokio::sync::Mutex::new(PeerBook::default()));
+        let network = super::GossipNetwork {
+            inner: Arc::new(super::GossipNetworkInner {
+                node: Arc::clone(&node),
+                peers: Arc::clone(&peers),
+                listen_addr: "0.0.0.0:9444".parse().unwrap(),
+                sessions: tokio::sync::Mutex::new(BTreeMap::new()),
+                tx_delivery: tokio::sync::Mutex::new(BTreeMap::new()),
+                metrics: super::P2pMetricsCounters::default(),
+            }),
+        };
+        let status = node.lock().await.ledger().status();
+        let hello = ProtocolHello {
+            protocol_version: PROTOCOL_VERSION,
+            network_id: NETWORK_ID.to_string(),
+            genesis_hash: node.lock().await.ledger().genesis_hash().to_string(),
+            listen_addr: Some("10.42.1.1:12138".to_string()),
+            height: status.height,
+            tip_hash: status.tip_hash,
+        };
+
+        let mut known_peer = None;
+        super::process_hello(
+            &network,
+            "142.132.164.59:51234".parse().unwrap(),
+            &mut known_peer,
+            hello,
+        )
+        .await
+        .unwrap();
+
+        assert!(known_peer.is_none());
+        assert!(peers.lock().await.addresses().is_empty());
     }
 
     #[tokio::test]
@@ -2742,6 +2879,38 @@ mod tests {
         let addresses = peers.lock().await.addresses();
         assert!(!addresses.contains(&"10.42.1.1:10091".to_string()));
         assert!(addresses.contains(&"142.132.164.59:9444".to_string()));
+    }
+
+    #[tokio::test]
+    async fn peer_announcement_ignores_private_ephemeral_address() {
+        let alice = Wallet::from_seed("px-private-announcement-alice");
+        let allocations = allocations(std::slice::from_ref(&alice), 1_000);
+        let node = Arc::new(tokio::sync::Mutex::new(node("alice", alice, allocations)));
+        let peers = Arc::new(tokio::sync::Mutex::new(PeerBook::default()));
+        let network = super::GossipNetwork {
+            inner: Arc::new(super::GossipNetworkInner {
+                node,
+                peers: Arc::clone(&peers),
+                listen_addr: "0.0.0.0:9444".parse().unwrap(),
+                sessions: tokio::sync::Mutex::new(BTreeMap::new()),
+                tx_delivery: tokio::sync::Mutex::new(BTreeMap::new()),
+                metrics: super::P2pMetricsCounters::default(),
+            }),
+        };
+        let mut known_peer = None;
+
+        let remembered = super::remember_discoverable_advertised_peer(
+            &network,
+            "142.132.164.59:51234".parse().unwrap(),
+            &mut known_peer,
+            "10.42.1.1:10091".to_string(),
+        )
+        .await
+        .unwrap();
+
+        assert!(!remembered);
+        assert!(known_peer.is_none());
+        assert!(peers.lock().await.addresses().is_empty());
     }
 
     #[tokio::test]
