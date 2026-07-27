@@ -1438,6 +1438,13 @@ impl Ledger {
         &self.chain[0].hash
     }
 
+    pub fn is_setup_placeholder(&self) -> bool {
+        self.height() == 0
+            && self.genesis_allocations.is_empty()
+            && self.chain[0].transactions.is_empty()
+            && self.pending.is_empty()
+    }
+
     pub fn height(&self) -> u64 {
         self.tip().height
     }

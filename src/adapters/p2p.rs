@@ -45,7 +45,31 @@ const MAX_JOIN_RESPONSE_ENVELOPES: usize = 16;
 const INITIAL_RECONNECT_DELAY: Duration = Duration::from_secs(1);
 const MAX_RECONNECT_DELAY: Duration = Duration::from_secs(30);
 
-type PeerStatus = (u64, String);
+#[derive(Clone, Debug, Eq, PartialEq)]
+struct PeerStatus {
+    height: u64,
+    tip_hash: String,
+    force_snapshot: bool,
+}
+
+impl PeerStatus {
+    fn new(height: u64, tip_hash: String) -> Self {
+        Self {
+            height,
+            tip_hash,
+            force_snapshot: false,
+        }
+    }
+
+    fn with_forced_snapshot(height: u64, tip_hash: String) -> Self {
+        Self {
+            height,
+            tip_hash,
+            force_snapshot: true,
+        }
+    }
+}
+
 type OutboundBatch = Vec<GossipEnvelope>;
 
 #[derive(Clone)]
@@ -464,9 +488,11 @@ impl GossipNetwork {
             .lock()
             .await
             .connectable_addresses_at(crate::app::now_ms());
+        let address_set = addresses.iter().cloned().collect::<BTreeSet<_>>();
         let mut sessions = self.inner.sessions.lock().await;
         sessions.retain(|peer, _| {
-            let keep = !is_self_peer_address(peer, self.inner.listen_addr);
+            let keep =
+                address_set.contains(peer) && !is_self_peer_address(peer, self.inner.listen_addr);
             if !keep {
                 P2pMetricsCounters::inc(&self.inner.metrics.self_peer_skips);
             }
@@ -677,7 +703,7 @@ async fn session_loop(
                     Some(process_hello(&network, remote_addr, &mut known_peer, hello).await?);
                 maybe_request_catchup(&network, &mut writer, peer_status.as_ref().unwrap()).await?;
             } else if let GossipEnvelope::PeerStatus { height, tip_hash } = envelope {
-                peer_status = Some((height, tip_hash.clone()));
+                peer_status = Some(PeerStatus::new(height, tip_hash.clone()));
                 record_peer_status(&network, &known_peer, remote_addr, height, tip_hash).await;
                 maybe_request_catchup(&network, &mut writer, peer_status.as_ref().unwrap()).await?;
             } else {
@@ -740,7 +766,7 @@ async fn session_loop(
                     continue;
                 }
                 if let GossipEnvelope::PeerStatus { height, tip_hash } = &envelope {
-                    peer_status = Some((*height, tip_hash.clone()));
+                    peer_status = Some(PeerStatus::new(*height, tip_hash.clone()));
                     record_peer_status(&network, &known_peer, remote_addr, *height, tip_hash.clone()).await;
                     maybe_request_catchup(&network, &mut writer, peer_status.as_ref().unwrap()).await?;
                     continue;
@@ -967,8 +993,9 @@ async fn maybe_request_catchup(
         let status = node.ledger().status();
         (status.height, status.tip_hash)
     };
-    let (peer_height, peer_tip_hash) = peer_status;
-    if *peer_height > local_height {
+    if peer_status.force_snapshot {
+        write_envelope(writer, &GossipEnvelope::ChainSnapshotRequest).await?;
+    } else if peer_status.height > local_height {
         write_envelope(
             writer,
             &GossipEnvelope::BlockRangeRequest {
@@ -977,7 +1004,7 @@ async fn maybe_request_catchup(
             },
         )
         .await?;
-    } else if *peer_height == local_height && peer_tip_hash != &local_tip_hash {
+    } else if peer_status.height == local_height && peer_status.tip_hash != local_tip_hash {
         write_envelope(writer, &GossipEnvelope::ChainSnapshotRequest).await?;
     }
     Ok(())
@@ -996,11 +1023,11 @@ async fn push_catchup_to_peer(
     let updated_status = payload.iter().find_map(|envelope| match envelope {
         GossipEnvelope::Blocks { blocks } => blocks
             .last()
-            .map(|block| (block.height, block.hash.clone())),
+            .map(|block| PeerStatus::new(block.height, block.hash.clone())),
         GossipEnvelope::ChainSnapshot(snapshot) => snapshot
             .blocks
             .last()
-            .map(|block| (block.height, block.hash.clone())),
+            .map(|block| PeerStatus::new(block.height, block.hash.clone())),
         _ => None,
     });
     write_payload(writer, &payload).await?;
@@ -1011,17 +1038,21 @@ async fn catchup_payload_for_peer(
     node: &SharedNode,
     peer_status: &PeerStatus,
 ) -> Vec<GossipEnvelope> {
-    let (peer_height, peer_tip_hash) = peer_status;
     let node = node.lock().await;
     let local_status = node.ledger().status();
-    if *peer_height < local_status.height {
-        let blocks = node.blocks_from(peer_height + 1, MAX_BLOCK_BATCH);
+    if node.ledger().is_setup_placeholder() {
+        return Vec::new();
+    }
+    if peer_status.height < local_status.height {
+        let blocks = node.blocks_from(peer_status.height + 1, MAX_BLOCK_BATCH);
         if blocks.is_empty() {
             Vec::new()
         } else {
             vec![GossipEnvelope::Blocks { blocks }]
         }
-    } else if *peer_height == local_status.height && peer_tip_hash != &local_status.tip_hash {
+    } else if peer_status.height == local_status.height
+        && peer_status.tip_hash != local_status.tip_hash
+    {
         vec![GossipEnvelope::ChainSnapshot(node.chain_snapshot())]
     } else {
         Vec::new()
@@ -1314,15 +1345,22 @@ async fn envelopes_for_peer(
     let Some(node) = node else {
         return envelopes.to_vec();
     };
-    let Some((peer_height, peer_tip_hash)) = peer_status else {
+    let Some(peer_status) = peer_status else {
         return envelopes.to_vec();
     };
 
     let node = node.lock().await;
     let local_status = node.ledger().status();
-    if peer_height < local_status.height {
+    if node.ledger().is_setup_placeholder() {
+        return envelopes
+            .iter()
+            .filter(|envelope| !matches!(envelope, GossipEnvelope::Block(_)))
+            .cloned()
+            .collect();
+    }
+    if peer_status.height < local_status.height {
         let mut payload = vec![GossipEnvelope::Blocks {
-            blocks: node.blocks_from(peer_height + 1, MAX_BLOCK_BATCH),
+            blocks: node.blocks_from(peer_status.height + 1, MAX_BLOCK_BATCH),
         }];
         payload.extend(
             envelopes
@@ -1333,20 +1371,20 @@ async fn envelopes_for_peer(
         return payload;
     }
 
-    if peer_height == local_status.height && peer_tip_hash != local_status.tip_hash {
+    if peer_status.height == local_status.height && peer_status.tip_hash != local_status.tip_hash {
         return vec![GossipEnvelope::ChainSnapshot(node.chain_snapshot())];
     }
 
-    if peer_needs_snapshot(peer_height, envelopes) {
+    if peer_needs_snapshot(peer_status.height, envelopes) {
         return vec![GossipEnvelope::ChainSnapshot(node.chain_snapshot())];
     }
 
     envelopes
         .iter()
         .filter(|envelope| match envelope {
-            GossipEnvelope::Block(block) => block.height > peer_height,
+            GossipEnvelope::Block(block) => block.height > peer_status.height,
             GossipEnvelope::Inventory { blocks, .. } => {
-                blocks.iter().any(|block| block.height > peer_height)
+                blocks.iter().any(|block| block.height > peer_status.height)
             }
             _ => true,
         })
@@ -1355,7 +1393,7 @@ async fn envelopes_for_peer(
                 txs: txs.clone(),
                 blocks: blocks
                     .iter()
-                    .filter(|block| block.height > peer_height)
+                    .filter(|block| block.height > peer_status.height)
                     .cloned()
                     .collect(),
             },
@@ -1373,7 +1411,7 @@ pub async fn fetch_snapshot(peer: &str) -> Result<ChainSnapshot> {
 }
 
 pub async fn fetch_peer_height(peer: &str) -> Result<u64> {
-    fetch_peer_status(peer).await.map(|(height, _)| height)
+    fetch_peer_status(peer).await.map(|status| status.height)
 }
 
 async fn fetch_peer_status(peer: &str) -> Result<PeerStatus> {
@@ -1402,9 +1440,9 @@ async fn fetch_peer_status(peer: &str) -> Result<PeerStatus> {
                     NETWORK_ID
                 );
             }
-            Ok((hello.height, hello.tip_hash))
+            Ok(PeerStatus::new(hello.height, hello.tip_hash))
         }
-        GossipEnvelope::PeerStatus { height, tip_hash } => Ok((height, tip_hash)),
+        GossipEnvelope::PeerStatus { height, tip_hash } => Ok(PeerStatus::new(height, tip_hash)),
         other => anyhow::bail!("peer {peer} sent {other:?} instead of peer status"),
     }
 }
@@ -1499,6 +1537,11 @@ async fn validate_snapshot_extension(
     mut ledger: Ledger,
     snapshot: ChainSnapshot,
 ) -> Result<Ledger> {
+    if ledger.is_setup_placeholder() {
+        return tokio::task::spawn_blocking(move || Ledger::from_snapshot(snapshot))
+            .await
+            .context("chain snapshot adoption worker failed")?;
+    }
     let missing_blocks = ledger.missing_snapshot_blocks(&snapshot)?;
     verify_blocks_vdf(missing_blocks).await?;
 
@@ -1613,16 +1656,6 @@ async fn process_hello(
         );
     }
     if hello.network_id != NETWORK_ID {
-        record_peer_misbehavior(
-            network,
-            known_peer,
-            remote_addr,
-            format!(
-                "wrong network {}; expected {}",
-                hello.network_id, NETWORK_ID
-            ),
-        )
-        .await;
         anyhow::bail!(
             "wrong network {}; expected {}",
             hello.network_id,
@@ -1637,17 +1670,15 @@ async fn process_hello(
         .ledger()
         .genesis_hash()
         .to_string();
-    if hello.genesis_hash != local_genesis {
-        record_peer_misbehavior(
-            network,
-            known_peer,
-            remote_addr,
-            format!(
-                "wrong genesis {}; expected {local_genesis}",
-                hello.genesis_hash
-            ),
-        )
-        .await;
+    let local_accepts_remote_genesis = network
+        .inner
+        .node
+        .lock()
+        .await
+        .ledger()
+        .is_setup_placeholder();
+    let force_snapshot = hello.genesis_hash != local_genesis && local_accepts_remote_genesis;
+    if hello.genesis_hash != local_genesis && !local_accepts_remote_genesis {
         anyhow::bail!(
             "wrong genesis {}; expected {local_genesis}",
             hello.genesis_hash
@@ -1667,8 +1698,17 @@ async fn process_hello(
             .await;
             anyhow::bail!("peer announced our own p2p address {peer}");
         }
+        if let Some(previous_peer) = known_peer.as_deref() {
+            network
+                .inner
+                .peers
+                .lock()
+                .await
+                .replace_peer_address(previous_peer, peer.clone());
+        } else {
+            network.inner.peers.lock().await.add_peer(peer.clone());
+        }
         *known_peer = Some(peer.clone());
-        network.inner.peers.lock().await.add_peer(peer);
     }
     record_peer_status(
         network,
@@ -1678,7 +1718,14 @@ async fn process_hello(
         hello.tip_hash.clone(),
     )
     .await;
-    Ok((hello.height, hello.tip_hash))
+    if force_snapshot {
+        Ok(PeerStatus::with_forced_snapshot(
+            hello.height,
+            hello.tip_hash,
+        ))
+    } else {
+        Ok(PeerStatus::new(hello.height, hello.tip_hash))
+    }
 }
 
 async fn record_inbound_result(
@@ -2037,7 +2084,7 @@ mod tests {
 
         let payload = super::envelopes_for_peer(
             Some(&node),
-            Some((0, "genesis".to_string())),
+            Some(super::PeerStatus::new(0, "genesis".to_string())),
             &[GossipEnvelope::Block(block)],
         )
         .await;
@@ -2311,7 +2358,11 @@ mod tests {
             }
         }
 
-        let payload = super::catchup_payload_for_peer(&node, &(1, "old-tip".to_string())).await;
+        let payload = super::catchup_payload_for_peer(
+            &node,
+            &super::PeerStatus::new(1, "old-tip".to_string()),
+        )
+        .await;
 
         assert_eq!(payload.len(), 1);
         match &payload[0] {
@@ -2326,7 +2377,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn hello_rejects_wrong_network_or_genesis() {
+    async fn hello_rejects_wrong_network_or_genesis_without_banning() {
         let alice = Wallet::from_seed("hello-alice");
         let allocations = allocations(std::slice::from_ref(&alice), 1_000);
         let node = Arc::new(tokio::sync::Mutex::new(node("alice", alice, allocations)));
@@ -2418,50 +2469,85 @@ mod tests {
             .contains("unsupported protocol version")
         );
 
-        let peer_after_protocol_mismatch = network
-            .inner
-            .peers
-            .lock()
-            .await
-            .list()
-            .into_iter()
-            .find(|peer| peer.address == "127.0.0.1:9545")
-            .unwrap();
-        assert_eq!(peer_after_protocol_mismatch.misbehavior_score, 2);
-        assert!(!peer_after_protocol_mismatch.is_banned_at(crate::app::now_ms()));
+        assert!(network.inner.peers.lock().await.list().is_empty());
+    }
 
-        let repeated_wrong_genesis = ProtocolHello {
+    #[tokio::test]
+    async fn setup_placeholder_accepts_remote_genesis_and_adopts_snapshot() {
+        let local_wallet = Wallet::from_seed("setup-placeholder-local");
+        let local_ledger = Ledger::new(BTreeMap::new(), 1);
+        let local_node = Arc::new(tokio::sync::Mutex::new(NodeCore::from_ledger(
+            local_wallet,
+            local_ledger.clone(),
+            0,
+        )));
+        let network = super::GossipNetwork {
+            inner: Arc::new(super::GossipNetworkInner {
+                node: local_node,
+                peers: Arc::new(tokio::sync::Mutex::new(PeerBook::from_addresses(vec![
+                    "iuna.jhx.app:9444".to_string(),
+                ]))),
+                listen_addr: "127.0.0.1:9544".parse().unwrap(),
+                sessions: tokio::sync::Mutex::new(BTreeMap::new()),
+                tx_delivery: tokio::sync::Mutex::new(BTreeMap::new()),
+                metrics: super::P2pMetricsCounters::default(),
+            }),
+        };
+
+        let remote_wallet = Wallet::from_seed("setup-placeholder-remote");
+        let remote_snapshot = node(
+            "remote",
+            remote_wallet.clone(),
+            allocations(std::slice::from_ref(&remote_wallet), 1_000),
+        )
+        .chain_snapshot();
+        let remote_genesis = remote_snapshot.blocks[0].hash.clone();
+        let hello = ProtocolHello {
             protocol_version: PROTOCOL_VERSION,
             network_id: NETWORK_ID.to_string(),
-            genesis_hash: "still-not-local-genesis".to_string(),
-            listen_addr: Some("127.0.0.1:9545".to_string()),
-            height: 0,
-            tip_hash: "tip".to_string(),
+            genesis_hash: remote_genesis.clone(),
+            listen_addr: Some("142.132.164.59:9444".to_string()),
+            height: 5,
+            tip_hash: "remote-tip".to_string(),
         };
-        assert!(
-            super::process_hello(
-                &network,
-                "127.0.0.1:9545".parse().unwrap(),
-                &mut None,
-                repeated_wrong_genesis,
-            )
-            .await
-            .unwrap_err()
-            .to_string()
-            .contains("wrong genesis")
-        );
+        let mut known_peer = Some("iuna.jhx.app:9444".to_string());
+        let peer_status = super::process_hello(
+            &network,
+            "142.132.164.59:51234".parse().unwrap(),
+            &mut known_peer,
+            hello,
+        )
+        .await
+        .unwrap();
 
-        let banned_peer = network
-            .inner
-            .peers
-            .lock()
-            .await
-            .list()
+        assert!(peer_status.force_snapshot);
+        assert_eq!(known_peer.as_deref(), Some("142.132.164.59:9444"));
+        let listed = network.inner.peers.lock().await.list();
+        assert_eq!(listed.len(), 1);
+        let peer = listed
             .into_iter()
-            .find(|peer| peer.address == "127.0.0.1:9545")
+            .find(|peer| peer.address == "142.132.164.59:9444")
             .unwrap();
-        assert_eq!(banned_peer.misbehavior_score, 3);
-        assert!(banned_peer.is_banned_at(crate::app::now_ms()));
+        assert_eq!(peer.misbehavior_score, 0);
+        assert!(!peer.is_banned_at(crate::app::now_ms()));
+
+        let adopted = super::validate_snapshot_extension(local_ledger, remote_snapshot)
+            .await
+            .unwrap();
+        assert_eq!(adopted.genesis_hash(), remote_genesis);
+        assert!(
+            network
+                .inner
+                .node
+                .lock()
+                .await
+                .import_verified_ledger(adopted)
+                .unwrap()
+        );
+        assert_eq!(
+            network.inner.node.lock().await.ledger().genesis_hash(),
+            remote_genesis
+        );
     }
 
     #[tokio::test]

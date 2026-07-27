@@ -1030,11 +1030,13 @@ impl NodeCore {
     }
 
     pub(crate) fn import_verified_ledger(&mut self, ledger: Ledger) -> Result<bool> {
-        if ledger.genesis_hash() != self.ledger.genesis_hash() {
+        let replaces_setup_placeholder = self.ledger.is_setup_placeholder()
+            && ledger.genesis_hash() != self.ledger.genesis_hash();
+        if ledger.genesis_hash() != self.ledger.genesis_hash() && !replaces_setup_placeholder {
             anyhow::bail!("chain snapshot genesis does not match local chain");
         }
         let previous_height = self.ledger.height();
-        if ledger.height() <= previous_height {
+        if !replaces_setup_placeholder && ledger.height() <= previous_height {
             return Ok(false);
         }
 
@@ -1084,6 +1086,51 @@ impl PeerBook {
             .or_insert_with(|| PeerInfo::new(address, PeerDirection::Outbound));
         if peer.direction == PeerDirection::Inbound {
             peer.direction = PeerDirection::Outbound;
+        }
+    }
+
+    pub fn replace_peer_address(&mut self, from: &str, to: impl Into<String>) {
+        let to = to.into();
+        if from == to {
+            self.add_peer(to);
+            return;
+        }
+
+        let Some(from_peer) = self.peers.remove(from) else {
+            self.add_peer(to);
+            return;
+        };
+
+        let to_peer = self
+            .peers
+            .entry(to.clone())
+            .or_insert_with(|| PeerInfo::new(to, from_peer.direction.clone()));
+        if from_peer.direction == PeerDirection::Outbound {
+            to_peer.direction = PeerDirection::Outbound;
+        }
+        to_peer.messages_sent = to_peer
+            .messages_sent
+            .saturating_add(from_peer.messages_sent);
+        to_peer.messages_received = to_peer
+            .messages_received
+            .saturating_add(from_peer.messages_received);
+        to_peer.last_known_height = to_peer.last_known_height.or(from_peer.last_known_height);
+        to_peer.last_known_tip_hash = to_peer
+            .last_known_tip_hash
+            .clone()
+            .or(from_peer.last_known_tip_hash);
+        to_peer.last_contact_ms = to_peer.last_contact_ms.max(from_peer.last_contact_ms);
+        to_peer.last_success_ms = to_peer.last_success_ms.max(from_peer.last_success_ms);
+        to_peer.last_error_ms = to_peer.last_error_ms.max(from_peer.last_error_ms);
+        if to_peer.last_error.is_none() {
+            to_peer.last_error = from_peer.last_error;
+        }
+        to_peer.misbehavior_score = to_peer
+            .misbehavior_score
+            .saturating_add(from_peer.misbehavior_score);
+        to_peer.banned_until_ms = to_peer.banned_until_ms.max(from_peer.banned_until_ms);
+        if to_peer.ban_reason.is_none() {
+            to_peer.ban_reason = from_peer.ban_reason;
         }
     }
 
