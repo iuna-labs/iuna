@@ -1,7 +1,7 @@
 use std::{
     collections::{BTreeMap, BTreeSet},
     io::ErrorKind,
-    net::SocketAddr,
+    net::{IpAddr, SocketAddr},
     sync::{
         Arc, Mutex as StdMutex,
         atomic::{AtomicU64, Ordering},
@@ -1067,7 +1067,9 @@ async fn apply_peer_list(
     let mut peerbook = network.inner.peers.lock().await;
     for address in peers {
         let peer = normalize_advertised_peer(&address, remote_addr)?;
-        if !is_self_peer_address(&peer, network.inner.listen_addr) {
+        if is_self_peer_address(&peer, network.inner.listen_addr) {
+            P2pMetricsCounters::inc(&network.inner.metrics.self_peer_skips);
+        } else if peer_list_address_is_discoverable(&peer, remote_addr)? {
             peerbook.add_peer(peer);
         } else {
             P2pMetricsCounters::inc(&network.inner.metrics.self_peer_skips);
@@ -1797,6 +1799,44 @@ fn normalize_advertised_peer(address: &str, remote_addr: SocketAddr) -> Result<S
         .parse::<SocketAddr>()
         .with_context(|| format!("invalid announced peer address {address}"))?;
     Ok(reachable_advertised_addr(advertised_addr, remote_addr).to_string())
+}
+
+fn peer_list_address_is_discoverable(address: &str, remote_addr: SocketAddr) -> Result<bool> {
+    let candidate = address
+        .parse::<SocketAddr>()
+        .with_context(|| format!("invalid peer-list address {address}"))?;
+    if candidate.ip().is_loopback() {
+        return Ok(remote_addr.ip().is_loopback());
+    }
+    Ok(ip_is_publicly_discoverable(candidate.ip()))
+}
+
+fn ip_is_publicly_discoverable(ip: IpAddr) -> bool {
+    match ip {
+        IpAddr::V4(ip) => {
+            let [a, b, c, d] = ip.octets();
+            !(a == 0
+                || a == 10
+                || a == 127
+                || (a == 100 && (64..=127).contains(&b))
+                || (a == 169 && b == 254)
+                || (a == 172 && (16..=31).contains(&b))
+                || (a == 192 && b == 168)
+                || (a == 192 && b == 0 && c == 2)
+                || (a == 198 && b == 51 && c == 100)
+                || (a == 203 && b == 0 && c == 113)
+                || a >= 224
+                || [a, b, c, d] == [255, 255, 255, 255])
+        }
+        IpAddr::V6(ip) => {
+            let segments = ip.segments();
+            !(ip.is_unspecified()
+                || ip.is_loopback()
+                || (segments[0] & 0xfe00) == 0xfc00
+                || (segments[0] & 0xffc0) == 0xfe80
+                || (segments[0] & 0xff00) == 0xff00)
+        }
+    }
 }
 
 fn is_self_peer_address(address: &str, listen_addr: SocketAddr) -> bool {
@@ -2669,6 +2709,39 @@ mod tests {
         let addresses = peers.lock().await.addresses();
         assert!(!addresses.contains(&"127.0.0.1:9544".to_string()));
         assert!(addresses.contains(&"127.0.0.1:9546".to_string()));
+    }
+
+    #[tokio::test]
+    async fn peer_list_ignores_private_ephemeral_addresses() {
+        let alice = Wallet::from_seed("px-private-ephemeral-alice");
+        let allocations = allocations(std::slice::from_ref(&alice), 1_000);
+        let node = Arc::new(tokio::sync::Mutex::new(node("alice", alice, allocations)));
+        let peers = Arc::new(tokio::sync::Mutex::new(PeerBook::default()));
+        let network = super::GossipNetwork {
+            inner: Arc::new(super::GossipNetworkInner {
+                node,
+                peers: Arc::clone(&peers),
+                listen_addr: "0.0.0.0:9444".parse().unwrap(),
+                sessions: tokio::sync::Mutex::new(BTreeMap::new()),
+                tx_delivery: tokio::sync::Mutex::new(BTreeMap::new()),
+                metrics: super::P2pMetricsCounters::default(),
+            }),
+        };
+
+        super::apply_peer_list(
+            &network,
+            "142.132.164.59:9444".parse().unwrap(),
+            vec![
+                "10.42.1.1:10091".to_string(),
+                "142.132.164.59:9444".to_string(),
+            ],
+        )
+        .await
+        .unwrap();
+
+        let addresses = peers.lock().await.addresses();
+        assert!(!addresses.contains(&"10.42.1.1:10091".to_string()));
+        assert!(addresses.contains(&"142.132.164.59:9444".to_string()));
     }
 
     #[tokio::test]
