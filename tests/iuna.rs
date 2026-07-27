@@ -955,6 +955,65 @@ fn fallback_finalizer_with_primary_vdf_rounds_is_rejected() {
 }
 
 #[test]
+fn fallback_finalizer_unblocks_network_when_primary_does_not_publish() {
+    let alice = Wallet::from_seed("fallback-network-alice");
+    let bob = Wallet::from_seed("fallback-network-bob");
+    let wallets = [&alice, &bob];
+    let mut genesis = BTreeMap::new();
+    genesis.insert(alice.address().to_string(), iuna(10));
+    genesis.insert(bob.address().to_string(), iuna(10));
+    let ledger = Ledger::new_with_genesis_burns(
+        genesis,
+        vec![
+            GenesisBurn::new(alice.address(), 1),
+            GenesisBurn::new(bob.address(), 1),
+        ],
+        25,
+    )
+    .unwrap();
+    let primary = ledger.expected_leader_for_next_block().unwrap();
+    let fallback = wallets
+        .into_iter()
+        .find(|wallet| wallet.address() != primary)
+        .unwrap();
+    let primary_wallet = wallets
+        .into_iter()
+        .find(|wallet| wallet.address() == primary)
+        .unwrap();
+
+    let mut network = InMemoryNetwork::default();
+    network.insert(
+        "primary",
+        NodeCore::from_ledger(
+            primary_wallet.clone(),
+            ledger.clone(),
+            DEFAULT_BURN_PER_BLOCK,
+        ),
+    );
+    network.insert(
+        "fallback",
+        NodeCore::from_ledger(fallback.clone(), ledger, DEFAULT_BURN_PER_BLOCK),
+    );
+
+    network.node_mut("fallback").unwrap().burn(1).unwrap();
+    let block = network
+        .node_mut("fallback")
+        .unwrap()
+        .mine_one_at(1)
+        .unwrap();
+    assert_eq!(block.finalizer_rank, 1);
+    assert_eq!(block.miner, fallback.address());
+    network.deliver_until_idle().unwrap();
+
+    let tip = network.node("fallback").unwrap().ledger().status().tip_hash;
+    for id in ["primary", "fallback"] {
+        let status = network.node(id).unwrap().ledger().status();
+        assert_eq!(status.height, 1, "{id} did not accept fallback block");
+        assert_eq!(status.tip_hash, tip, "{id} has a different tip");
+    }
+}
+
+#[test]
 fn fork_choice_prefers_primary_finalizer_over_fallback_rank() {
     let alice = Wallet::from_seed("fallback-fork-alice");
     let bob = Wallet::from_seed("fallback-fork-bob");
@@ -1172,6 +1231,21 @@ fn in_memory_network_range_syncs_node_that_missed_multiple_blocks() {
     let alice_tip = network.node("alice").unwrap().ledger().status().tip_hash;
     let bob_status = network.node("bob").unwrap().ledger().status();
     assert_eq!(bob_status.height, 5);
+    assert_eq!(bob_status.tip_hash, alice_tip);
+
+    network.deliver_until_idle().unwrap();
+    network.node_mut("alice").unwrap().burn(1).unwrap();
+    network.deliver_until_idle().unwrap();
+    network
+        .node_mut("alice")
+        .unwrap()
+        .mine_one_at(6 * VDF_TARGET_BLOCK_MS)
+        .unwrap();
+    network.deliver_until_idle().unwrap();
+
+    let alice_tip = network.node("alice").unwrap().ledger().status().tip_hash;
+    let bob_status = network.node("bob").unwrap().ledger().status();
+    assert_eq!(bob_status.height, 6);
     assert_eq!(bob_status.tip_hash, alice_tip);
 }
 

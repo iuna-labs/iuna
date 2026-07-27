@@ -12,6 +12,7 @@ window.iunaApp = function iunaApp() {
     mempool: [],
     peers: [],
     p2pMetrics: {},
+    networkHealth: {},
     config: { setup_complete: false },
     auth: { configured: false, authenticated: false },
     authLoaded: false,
@@ -350,7 +351,7 @@ window.iunaApp = function iunaApp() {
 
     async refresh() {
       try {
-        const [config, status, blocks, walletTxs, walletUtxos, mempool, peers, p2pMetrics] = await Promise.all([
+        const [config, status, blocks, walletTxs, walletUtxos, mempool, peers, p2pMetrics, networkHealth] = await Promise.all([
           this.fetchJson("/api/config"),
           this.fetchJson("/api/status"),
           this.fetchJson("/api/blocks?limit=30"),
@@ -359,6 +360,7 @@ window.iunaApp = function iunaApp() {
           this.fetchJson("/api/mempool"),
           this.fetchJson("/api/peers"),
           this.fetchJson("/api/p2p/metrics"),
+          this.fetchJson("/api/network/health"),
         ]);
         this.config = config;
         if (!this.config.setup_complete) {
@@ -371,6 +373,7 @@ window.iunaApp = function iunaApp() {
         this.mempool = mempool;
         this.peers = peers;
         this.p2pMetrics = p2pMetrics;
+        this.networkHealth = networkHealth;
         this.burnAmount = status.mining?.burn_per_block ?? this.burnAmount;
         this.burnFee = status.mining?.automatic_burn_fee ?? this.burnFee;
         this.miningEnabled = status.mining?.automatic ?? this.miningEnabled;
@@ -1057,6 +1060,20 @@ window.iunaApp = function iunaApp() {
         .filter((height) => typeof height === "number");
       if (peerHeights.length === 0) return local;
       return Math.min(local, ...peerHeights);
+    },
+
+    networkHealthClass() {
+      if (this.networkHealth.ok) return "healthy";
+      if (this.networkHealth.state === "syncing") return "syncing";
+      if (this.networkHealth.state === "isolated") return "isolated";
+      return "error";
+    },
+
+    networkLagLabel() {
+      const lag = this.networkHealth.lag_blocks;
+      if (typeof lag !== "number") return "-";
+      if (lag === 0) return "even";
+      return `${lag} behind`;
     },
 
     outboundPeers() {

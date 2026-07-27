@@ -28,7 +28,9 @@ use crate::{
         p2p::{GossipNetwork, P2pMetrics},
         wallet_store,
     },
-    app::{FeeEstimate, NodeStatus, PeerInfo, SharedNode, SharedPeerBook, StratumStatus},
+    app::{
+        FeeEstimate, NodeStatus, PeerDirection, PeerInfo, SharedNode, SharedPeerBook, StratumStatus,
+    },
     domain::{Amount, Block, OutPoint, Transaction, TxInput, TxOutput, hex_hash},
 };
 
@@ -73,6 +75,22 @@ struct AuthForm {
 struct AuthStatusResponse {
     configured: bool,
     authenticated: bool,
+}
+
+#[derive(Debug, Serialize)]
+struct NetworkHealthResponse {
+    ok: bool,
+    state: String,
+    local_height: u64,
+    best_known_height: u64,
+    shared_height: u64,
+    lag_blocks: u64,
+    outbound_peers: usize,
+    inbound_peers: usize,
+    healthy_peers: usize,
+    failed_peers: usize,
+    pending_transactions: usize,
+    last_error: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -253,6 +271,7 @@ pub async fn serve(
         .route("/api/fee-estimate/burn", post(api_burn_fee_estimate_form))
         .route("/api/fee-estimate/mine", post(api_mine_fee_estimate_form))
         .route("/api/mempool", get(api_mempool))
+        .route("/api/network/health", get(api_network_health))
         .route(
             "/api/peers",
             get(api_peers)
@@ -511,6 +530,12 @@ async fn api_p2p_metrics(State(state): State<HttpState>) -> Json<P2pMetrics> {
     Json(state.gossip.metrics())
 }
 
+async fn api_network_health(State(state): State<HttpState>) -> Json<NetworkHealthResponse> {
+    let status = state.node.lock().await.status();
+    let peers = state.peers.lock().await.list();
+    Json(network_health(&status, &peers))
+}
+
 async fn api_config_form(
     State(state): State<HttpState>,
     Form(form): Form<ConfigForm>,
@@ -727,6 +752,73 @@ fn validate_peer_address(peer: String) -> Result<String> {
         bail!("peer address is required");
     }
     Ok(peer)
+}
+
+fn network_health(status: &NodeStatus, peers: &[PeerInfo]) -> NetworkHealthResponse {
+    let local_height = status.chain.height;
+    let remote_best_height = peers.iter().filter_map(|peer| peer.last_known_height).max();
+    let best_known_height = remote_best_height.unwrap_or(local_height).max(local_height);
+    let healthy_heights = peers
+        .iter()
+        .filter(|peer| peer.last_error.is_none())
+        .filter_map(|peer| peer.last_known_height)
+        .collect::<Vec<_>>();
+    let shared_height = healthy_heights
+        .iter()
+        .copied()
+        .min()
+        .unwrap_or(local_height)
+        .min(local_height);
+    let outbound_peers = peers
+        .iter()
+        .filter(|peer| peer.direction != PeerDirection::Inbound)
+        .count();
+    let inbound_peers = peers
+        .iter()
+        .filter(|peer| peer.direction == PeerDirection::Inbound)
+        .count();
+    let healthy_peers = peers
+        .iter()
+        .filter(|peer| peer.last_error.is_none() && peer.last_known_height.is_some())
+        .count();
+    let failed_peers = peers
+        .iter()
+        .filter(|peer| peer.last_error.is_some())
+        .count();
+    let lag_blocks = best_known_height.saturating_sub(local_height);
+    let last_error = peers.iter().rev().find_map(|peer| {
+        peer.last_error
+            .as_ref()
+            .map(|error| format!("{}: {error}", peer.address))
+    });
+
+    let state = if peers.is_empty() {
+        "isolated"
+    } else if lag_blocks > 0 {
+        "syncing"
+    } else if failed_peers > 0 && healthy_peers == 0 {
+        "peer errors"
+    } else if remote_best_height.is_some_and(|height| local_height > height) {
+        "ahead of peers"
+    } else {
+        "healthy"
+    }
+    .to_string();
+
+    NetworkHealthResponse {
+        ok: !peers.is_empty() && lag_blocks == 0 && healthy_peers > 0,
+        state,
+        local_height,
+        best_known_height,
+        shared_height,
+        lag_blocks,
+        outbound_peers,
+        inbound_peers,
+        healthy_peers,
+        failed_peers,
+        pending_transactions: status.chain.pending_transactions,
+        last_error,
+    }
 }
 
 async fn wallet_setup_response(
@@ -1676,6 +1768,15 @@ const INDEX_HTML: &str = r#"<!doctype html>
     .peer-actions { display: flex; gap: 6px; align-items: center; }
     .peer-remove { padding: 4px 7px; border-color: #4f3737; background: #221717; color: #ffb1a8; font-size: 12px; }
     .peer-remove:hover { border-color: #ffb1a8; color: #ffd4cf; }
+    .network-health { display: grid; grid-template-columns: minmax(180px, .8fr) minmax(0, 1.2fr); gap: 12px; align-items: stretch; margin-bottom: 12px; }
+    .network-health-state { display: grid; align-content: center; gap: 5px; border: 1px solid #3a4248; border-radius: 8px; padding: 12px; background: #111316; }
+    .network-health-state.healthy { border-color: #566d25; background: #182112; }
+    .network-health-state.syncing { border-color: #5f5125; background: #211d12; }
+    .network-health-state.isolated, .network-health-state.error { border-color: #713434; background: #241716; }
+    .network-health-label { color: #879198; font-size: 10px; font-weight: 850; text-transform: uppercase; }
+    .network-health-value { color: #e8edf0; font-size: 20px; font-weight: 900; text-transform: capitalize; }
+    .network-health-detail { color: #a8b2b8; font-size: 12px; }
+    .network-health-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(116px, 1fr)); gap: 8px; }
     .panel .grid + form { margin-top: 12px; }
     .explorer-shell { width: 100%; display: grid; gap: 12px; }
     .block-rail-wrap { background: #181b1f; border: 1px solid #2a3035; border-radius: 8px; padding: 12px; overflow: hidden; }
@@ -1727,7 +1828,7 @@ const INDEX_HTML: &str = r#"<!doctype html>
     .utxo-list { display: grid; gap: 8px; }
     .wallet-utxo-row { display: grid; gap: 6px; border: 1px solid #2f363c; border-radius: 8px; padding: 10px; background: #111316; }
     @media (max-width: 760px) { .utxo-flow, .mine-action-row, .mine-stats { grid-template-columns: 1fr; } .utxo-arrow { min-height: 28px; transform: rotate(90deg); } .tx-modal-head { align-items: stretch; } }
-    @media (max-width: 920px) { .setup-grid, .wallet-grid, .mining-grid, .detail-grid { grid-template-columns: 1fr; } }
+    @media (max-width: 920px) { .setup-grid, .wallet-grid, .mining-grid, .detail-grid, .network-health { grid-template-columns: 1fr; } }
     @media (max-width: 760px) {
       .app-shell { grid-template-columns: 1fr; }
       .sidebar { position: sticky; z-index: 5; bottom: 0; top: auto; height: auto; flex-direction: row; justify-content: space-between; padding: 8px; border-right: 0; border-bottom: 1px solid #262b2f; }
@@ -1744,7 +1845,7 @@ const INDEX_HTML: &str = r#"<!doctype html>
       .block-card { flex-basis: 108px; }
     }
   </style>
-  <script defer src="/assets/iuna-ui.js?v=53"></script>
+  <script defer src="/assets/iuna-ui.js?v=54"></script>
   <script defer src="/assets/alpine.min.js"></script>
 </head>
 <body x-data="iunaApp()" x-init="init()" @keydown.window.escape="closeModals()" x-cloak>
@@ -1981,6 +2082,19 @@ const INDEX_HTML: &str = r#"<!doctype html>
             <label>Peer address<input x-model="peerAddress" placeholder="seed.example:9444"></label>
             <button class="primary" type="submit">Add</button>
           </form>
+        </div>
+        <div class="network-health">
+          <div class="network-health-state" :class="networkHealthClass()">
+            <div class="network-health-label">Network Health</div>
+            <div class="network-health-value" x-text="networkHealth.state || '-'"></div>
+            <div class="network-health-detail" x-text="networkHealth.last_error || 'No peer errors reported'"></div>
+          </div>
+          <div class="network-health-grid">
+            <div class="peer-summary-item"><div class="peer-summary-label">Local Height</div><div class="peer-summary-value" x-text="networkHealth.local_height ?? '-'"></div></div>
+            <div class="peer-summary-item"><div class="peer-summary-label">Best Known</div><div class="peer-summary-value" x-text="networkHealth.best_known_height ?? '-'"></div></div>
+            <div class="peer-summary-item"><div class="peer-summary-label">Lag</div><div class="peer-summary-value" x-text="networkLagLabel()"></div></div>
+            <div class="peer-summary-item"><div class="peer-summary-label">Mempool</div><div class="peer-summary-value" x-text="networkHealth.pending_transactions ?? '-'"></div></div>
+          </div>
         </div>
         <div class="peer-summary">
           <div class="peer-summary-item"><div class="peer-summary-label">Outbound</div><div class="peer-summary-value" x-text="outboundPeers().length"></div></div>
@@ -2370,7 +2484,7 @@ mod tests {
 
     use crate::{
         adapters::{config_store, config_store::UiConfig, p2p::GossipNetwork, wallet_store},
-        app::{NodeCore, PeerBook, StratumStatus},
+        app::{NodeCore, PeerBook, PeerDirection, PeerInfo, StratumStatus},
         domain::{Block, Ledger, MICRO_IUNA, MINE_REWARD, OutPoint, Transaction, Wallet},
     };
 
@@ -2563,6 +2677,55 @@ mod tests {
         let result = super::remove_peer(&state, "127.0.0.1:9555".to_string()).await;
         assert!(result.is_err());
         assert_eq!(state.peers.lock().await.addresses(), Vec::<String>::new());
+    }
+
+    #[tokio::test]
+    async fn network_health_summarizes_sync_and_peer_errors() {
+        let dir = tempfile::tempdir().unwrap();
+        let state = auth_test_state(dir.path().join("config.json"), UiConfig::default()).await;
+        let status = state.node.lock().await.status();
+
+        let isolated = super::network_health(&status, &[]);
+        assert!(!isolated.ok);
+        assert_eq!(isolated.state, "isolated");
+        assert_eq!(isolated.local_height, 0);
+        assert_eq!(isolated.best_known_height, 0);
+
+        let syncing = super::network_health(
+            &status,
+            &[PeerInfo {
+                address: "127.0.0.1:9445".to_string(),
+                direction: PeerDirection::Outbound,
+                messages_sent: 1,
+                messages_received: 1,
+                last_known_height: Some(3),
+                last_known_tip_hash: Some("remote-tip".to_string()),
+                last_error: None,
+            }],
+        );
+        assert!(!syncing.ok);
+        assert_eq!(syncing.state, "syncing");
+        assert_eq!(syncing.best_known_height, 3);
+        assert_eq!(syncing.lag_blocks, 3);
+
+        let peer_errors = super::network_health(
+            &status,
+            &[PeerInfo {
+                address: "127.0.0.1:9446".to_string(),
+                direction: PeerDirection::Outbound,
+                messages_sent: 0,
+                messages_received: 0,
+                last_known_height: None,
+                last_known_tip_hash: None,
+                last_error: Some("connection refused".to_string()),
+            }],
+        );
+        assert!(!peer_errors.ok);
+        assert_eq!(peer_errors.state, "peer errors");
+        assert_eq!(
+            peer_errors.last_error.as_deref(),
+            Some("127.0.0.1:9446: connection refused")
+        );
     }
 
     #[test]
