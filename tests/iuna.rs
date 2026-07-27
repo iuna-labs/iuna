@@ -1781,6 +1781,16 @@ fn peer_book_tracks_multiple_peers_without_networking() {
         .unwrap();
     assert_eq!(inbound_error.direction, PeerDirection::Inbound);
     assert_eq!(inbound_error.last_error.as_deref(), Some("invalid nonce"));
+
+    assert!(peers.remove_peer("127.0.0.1:9445"));
+    assert!(!peers.addresses().contains(&"127.0.0.1:9445".to_string()));
+    assert!(!peers.remove_peer("127.0.0.1:9555"));
+    assert!(
+        peers
+            .list()
+            .iter()
+            .any(|peer| peer.address == "127.0.0.1:9555")
+    );
 }
 
 #[test]

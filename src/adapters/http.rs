@@ -253,7 +253,12 @@ pub async fn serve(
         .route("/api/fee-estimate/burn", post(api_burn_fee_estimate_form))
         .route("/api/fee-estimate/mine", post(api_mine_fee_estimate_form))
         .route("/api/mempool", get(api_mempool))
-        .route("/api/peers", get(api_peers).post(api_peer_form))
+        .route(
+            "/api/peers",
+            get(api_peers)
+                .post(api_peer_form)
+                .delete(api_peer_delete_form),
+        )
         .route("/api/p2p/metrics", get(api_p2p_metrics))
         .route(
             "/api/settings/burn-per-block",
@@ -612,6 +617,14 @@ async fn api_peer_form(
     action_json(result)
 }
 
+async fn api_peer_delete_form(
+    State(state): State<HttpState>,
+    Form(form): Form<PeerForm>,
+) -> Json<ActionResponse> {
+    let result = remove_peer(&state, form.peer).await;
+    action_json(result)
+}
+
 async fn peer_form(State(state): State<HttpState>, Form(form): Form<PeerForm>) -> Response {
     match add_peer(&state, form.peer).await {
         Ok(()) => Redirect::to("/").into_response(),
@@ -683,6 +696,7 @@ async fn persist_pow_mining_config(
 }
 
 async fn add_peer(state: &HttpState, peer: String) -> Result<()> {
+    let peer = validate_peer_address(peer)?;
     let addresses = {
         let mut peers = state.peers.lock().await;
         peers.add_peer(peer);
@@ -691,6 +705,28 @@ async fn add_peer(state: &HttpState, peer: String) -> Result<()> {
     let mut config = state.ui_config.lock().await;
     config.peers = addresses;
     config_store::save(&state.config_path, &config)
+}
+
+async fn remove_peer(state: &HttpState, peer: String) -> Result<()> {
+    let peer = validate_peer_address(peer)?;
+    let addresses = {
+        let mut peers = state.peers.lock().await;
+        if !peers.remove_peer(&peer) {
+            bail!("peer is not configured as an outbound peer");
+        }
+        peers.addresses()
+    };
+    let mut config = state.ui_config.lock().await;
+    config.peers = addresses;
+    config_store::save(&state.config_path, &config)
+}
+
+fn validate_peer_address(peer: String) -> Result<String> {
+    let peer = peer.trim().to_string();
+    if peer.is_empty() {
+        bail!("peer address is required");
+    }
+    Ok(peer)
 }
 
 async fn wallet_setup_response(
@@ -1626,6 +1662,20 @@ const INDEX_HTML: &str = r#"<!doctype html>
     .tx-value.number { color: #c7d0d5; font-variant-numeric: tabular-nums; }
     .tx-value.text { color: #e8edf0; }
     .metric-context { display: grid; gap: 5px; margin-top: 12px; }
+    .peer-toolbar { display: flex; justify-content: space-between; gap: 12px; align-items: start; flex-wrap: wrap; margin-bottom: 12px; }
+    .peer-summary { display: grid; grid-template-columns: repeat(auto-fit, minmax(132px, 1fr)); gap: 8px; margin-bottom: 12px; }
+    .peer-summary-item { min-width: 0; border: 1px solid #2f363c; border-radius: 8px; padding: 10px; background: #111316; }
+    .peer-summary-label { color: #879198; font-size: 10px; font-weight: 850; text-transform: uppercase; }
+    .peer-summary-value { margin-top: 5px; color: #dce4e7; font-size: 15px; font-weight: 850; }
+    .peer-form { display: flex; flex-wrap: wrap; gap: 10px; align-items: end; }
+    .peer-form label { min-width: min(320px, 100%); }
+    .peer-form input { width: 100%; }
+    .peer-status { display: inline-flex; align-items: center; border: 1px solid #3a4248; border-radius: 999px; padding: 3px 8px; color: #a8b2b8; font-size: 11px; font-weight: 850; }
+    .peer-status.synced, .peer-status.active { border-color: #566d25; color: #d5f55f; background: #1c2516; }
+    .peer-status.error { border-color: #713434; color: #ffb1a8; background: #2a1717; }
+    .peer-actions { display: flex; gap: 6px; align-items: center; }
+    .peer-remove { padding: 4px 7px; border-color: #4f3737; background: #221717; color: #ffb1a8; font-size: 12px; }
+    .peer-remove:hover { border-color: #ffb1a8; color: #ffd4cf; }
     .panel .grid + form { margin-top: 12px; }
     .explorer-shell { width: 100%; display: grid; gap: 12px; }
     .block-rail-wrap { background: #181b1f; border: 1px solid #2a3035; border-radius: 8px; padding: 12px; overflow: hidden; }
@@ -1922,6 +1972,47 @@ const INDEX_HTML: &str = r#"<!doctype html>
 
     <section x-show="tab === 'p2p'">
       <div class="panel">
+        <div class="peer-toolbar">
+          <div>
+            <h2>Peers</h2>
+            <div class="panel-description">Manage outbound peers and inspect which nodes are healthy, lagging, or failing. Inbound rows are observed sessions and are not persisted in config.</div>
+          </div>
+          <form class="peer-form" @submit.prevent="addPeer">
+            <label>Peer address<input x-model="peerAddress" placeholder="seed.example:9444"></label>
+            <button class="primary" type="submit">Add</button>
+          </form>
+        </div>
+        <div class="peer-summary">
+          <div class="peer-summary-item"><div class="peer-summary-label">Outbound</div><div class="peer-summary-value" x-text="outboundPeers().length"></div></div>
+          <div class="peer-summary-item"><div class="peer-summary-label">Inbound</div><div class="peer-summary-value" x-text="inboundPeers().length"></div></div>
+          <div class="peer-summary-item"><div class="peer-summary-label">Healthy</div><div class="peer-summary-value" x-text="healthyPeers().length"></div></div>
+          <div class="peer-summary-item"><div class="peer-summary-label">Errors</div><div class="peer-summary-value" x-text="failedPeers().length"></div></div>
+          <div class="peer-summary-item"><div class="peer-summary-label">Shared Height</div><div class="peer-summary-value" x-text="sharedHeightLabel()"></div></div>
+        </div>
+        <div class="table-wrap">
+          <table>
+            <thead><tr><th>Status</th><th>Address</th><th>Direction</th><th>Height</th><th>Delta</th><th>Tip</th><th>Sent</th><th>Received</th><th>Last Error</th><th>Actions</th></tr></thead>
+            <tbody>
+              <template x-for="peer in peers" :key="peer.address">
+                <tr>
+                  <td><span class="peer-status" :class="peerStatus(peer)" x-text="peerStatusLabel(peer)"></span></td>
+                  <td><code x-text="peer.address"></code></td>
+                  <td x-text="peer.direction"></td>
+                  <td x-text="peer.last_known_height ?? '-'"></td>
+                  <td x-text="peerHeightDelta(peer)"></td>
+                  <td><code x-text="short(peer.last_known_tip_hash)"></code></td>
+                  <td x-text="peer.messages_sent"></td>
+                  <td x-text="peer.messages_received"></td>
+                  <td x-text="peer.last_error || ''"></td>
+                  <td><div class="peer-actions"><button class="peer-remove" type="button" x-show="canRemovePeer(peer)" @click="removePeer(peer)">Remove</button><span class="muted" x-show="!canRemovePeer(peer)">Observed</span></div></td>
+                </tr>
+              </template>
+              <tr x-show="peers.length === 0"><td colspan="10">No peers</td></tr>
+            </tbody>
+          </table>
+        </div>
+      </div>
+      <div class="panel">
         <h2>Metrics</h2>
         <div class="grid">
           <div class="metric"><div class="label">Inbound Sessions</div><div class="value" x-text="p2pMetrics.inbound_sessions_started ?? 0"></div></div>
@@ -1953,24 +2044,6 @@ const INDEX_HTML: &str = r#"<!doctype html>
           <div class="tx-field"><span class="tx-label">Last Empty</span><span class="tx-value text" x-text="p2pMetrics.last_empty_frame_remote || '-'"></span></div>
           <div class="tx-field"><span class="tx-label">Last Parse</span><span class="tx-value text" x-text="p2pMetrics.last_parse_error || '-'"></span></div>
         </div>
-      </div>
-      <div class="panel">
-        <h2>Add Peer</h2>
-        <form @submit.prevent="addPeer">
-          <label>Peer address<input x-model="peerAddress" placeholder="127.0.0.1:9445"></label>
-          <button class="primary" type="submit">Add</button>
-        </form>
-      </div>
-      <div class="panel table-wrap">
-        <table>
-          <thead><tr><th>Address</th><th>Direction</th><th>Height</th><th>Tip</th><th>Sent</th><th>Received</th><th>Last Error</th></tr></thead>
-          <tbody>
-            <template x-for="peer in peers" :key="peer.address">
-              <tr><td><code x-text="peer.address"></code></td><td x-text="peer.direction"></td><td x-text="peer.last_known_height ?? '-'"></td><td><code x-text="short(peer.last_known_tip_hash)"></code></td><td x-text="peer.messages_sent"></td><td x-text="peer.messages_received"></td><td x-text="peer.last_error || ''"></td></tr>
-            </template>
-            <tr x-show="peers.length === 0"><td colspan="7">No peers</td></tr>
-          </tbody>
-        </table>
       </div>
     </section>
 
@@ -2445,6 +2518,51 @@ mod tests {
         let protected = http_request(app, Method::GET, "/api/protected", Some(&cookie), "").await;
         assert_eq!(protected.status, StatusCode::OK);
         assert_eq!(protected.body, "protected");
+    }
+
+    #[tokio::test]
+    async fn peer_management_updates_config_file() {
+        let dir = tempfile::tempdir().unwrap();
+        let config_path = dir.path().join("config.json");
+        let state = auth_test_state(
+            config_path.clone(),
+            UiConfig {
+                setup_complete: true,
+                ..UiConfig::default()
+            },
+        )
+        .await;
+
+        super::add_peer(&state, " 127.0.0.1:9445 ".to_string())
+            .await
+            .unwrap();
+        let config = config_store::load_or_create(&config_path).unwrap();
+        assert_eq!(config.peers, vec!["127.0.0.1:9445"]);
+        assert_eq!(state.peers.lock().await.addresses(), vec!["127.0.0.1:9445"]);
+
+        super::remove_peer(&state, "127.0.0.1:9445".to_string())
+            .await
+            .unwrap();
+        let config = config_store::load_or_create(&config_path).unwrap();
+        assert!(config.peers.is_empty());
+        assert!(state.peers.lock().await.addresses().is_empty());
+    }
+
+    #[tokio::test]
+    async fn peer_management_rejects_empty_and_inbound_removal() {
+        let dir = tempfile::tempdir().unwrap();
+        let state = auth_test_state(dir.path().join("config.json"), UiConfig::default()).await;
+
+        assert!(super::add_peer(&state, "   ".to_string()).await.is_err());
+        state
+            .peers
+            .lock()
+            .await
+            .record_received("127.0.0.1:9555", 1);
+
+        let result = super::remove_peer(&state, "127.0.0.1:9555".to_string()).await;
+        assert!(result.is_err());
+        assert_eq!(state.peers.lock().await.addresses(), Vec::<String>::new());
     }
 
     #[test]

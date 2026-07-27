@@ -1083,6 +1083,19 @@ impl PeerBook {
         }
     }
 
+    pub fn remove_peer(&mut self, address: &str) -> bool {
+        if self
+            .peers
+            .get(address)
+            .is_some_and(|peer| peer.direction != PeerDirection::Inbound)
+        {
+            self.peers.remove(address);
+            true
+        } else {
+            false
+        }
+    }
+
     pub fn addresses(&self) -> Vec<String> {
         self.peers
             .values()

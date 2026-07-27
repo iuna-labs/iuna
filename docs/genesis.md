@@ -33,7 +33,7 @@ your-host.example:9444
 They can join with:
 
 ```sh
-cargo run -- --data-dir .iuna --p2p 0.0.0.0:9445 --http 127.0.0.1:18661 --join your-host.example:9444
+cargo run -- --p2p 0.0.0.0:9445 --http 127.0.0.1:18661 --join your-host.example:9444
 ```
 
 Keep the management UI bound to `127.0.0.1`.

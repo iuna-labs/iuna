@@ -40,7 +40,7 @@ Open `http://127.0.0.1:18661`, set a local password, and back up the recovery ph
 Ask for a seed node address and start iuna with `--join`:
 
 ```sh
-./iuna --data-dir .iuna --http 127.0.0.1:18661 --p2p 0.0.0.0:9445 --join seed.example:9444
+./iuna --http 127.0.0.1:18661 --p2p 0.0.0.0:9445 --join seed.example:9444
 ```
 
 After the node syncs, you can receive IUNA, send transactions, burn for block finalization, or enable PoW mine actions from the Mining screen.
@@ -60,7 +60,7 @@ Genesis requires a fresh wallet and an empty chain database. It creates the star
 iuna can expose a Stratum V1 endpoint for SHA-256 ASIC miners such as a Bitaxe:
 
 ```sh
-./iuna --data-dir .iuna --stratum 0.0.0.0:3333
+./iuna --stratum 0.0.0.0:3333
 ```
 
 Use your iuna wallet address as the worker username. Accepted shares become PoW mine actions in the node mempool and are gossiped to peers.

@@ -266,7 +266,7 @@ impl CliOptions {
             peers: Vec::new(),
             join_peers: Vec::new(),
             chain_mode: ChainMode::Setup,
-            data_dir: PathBuf::from(".iuna"),
+            data_dir: default_data_dir(),
         };
 
         let raw_args = args.into_iter().collect::<Vec<_>>();
@@ -287,7 +287,7 @@ impl CliOptions {
                 }
                 "--wallet-seed" => {
                     bail!(
-                        "--wallet-seed was removed; wallets are stored in --wallet <path> or .iuna/wallet.json"
+                        "--wallet-seed was removed; wallets are stored in --wallet <path> or ~/.iuna/wallet.json"
                     )
                 }
                 "--http" => {
@@ -404,9 +404,18 @@ fn help_text() -> &'static str {
            --p2p <addr:port>             P2P TCP listener address (default 127.0.0.1:9444)\n\
            --stratum <addr:port>         Stratum V1 listener for SHA-256 ASIC miners\n\
            --join <addr:port>            Fetch chain snapshot from this peer before finalization\n\
-           --data-dir <path>             Local wallet directory\n\n\
+           --data-dir <path>             Local wallet directory (default ~/.iuna)\n\n\
          Environment:\n\
            IUNA_DEV_SKIP_SEED_VERIFY=1 Show a setup button to skip seed verification\n"
+}
+
+fn default_data_dir() -> PathBuf {
+    std::env::var_os("HOME")
+        .filter(|home| !home.is_empty())
+        .or_else(|| std::env::var_os("USERPROFILE").filter(|home| !home.is_empty()))
+        .map(PathBuf::from)
+        .map(|home| home.join(".iuna"))
+        .unwrap_or_else(|| PathBuf::from(".iuna"))
 }
 
 fn snapshot_height(snapshot: &ChainSnapshot) -> u64 {
@@ -855,6 +864,13 @@ mod tests {
     fn http_management_port_defaults_to_iuna_port() {
         let opts = parse(&[]).unwrap().unwrap();
         assert_eq!(opts.http_addr.to_string(), "127.0.0.1:18661");
+    }
+
+    #[test]
+    fn data_dir_defaults_under_home() {
+        let opts = parse(&[]).unwrap().unwrap();
+        assert_eq!(opts.data_dir, super::default_data_dir());
+        assert!(opts.data_dir.ends_with(".iuna"));
     }
 
     #[test]

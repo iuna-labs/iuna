@@ -536,7 +536,7 @@ window.iunaApp = function iunaApp() {
       }
     },
 
-    async postForm(path, fields, successMessage) {
+    async postForm(path, fields, successMessage, method = "POST") {
       const body = new URLSearchParams();
       for (const [key, value] of Object.entries(fields)) {
         if (Array.isArray(value)) {
@@ -546,7 +546,7 @@ window.iunaApp = function iunaApp() {
         }
       }
       const response = await fetch(path, {
-        method: "POST",
+        method,
         headers: { Accept: "application/json", "Content-Type": "application/x-www-form-urlencoded" },
         body,
       });
@@ -798,9 +798,17 @@ window.iunaApp = function iunaApp() {
 
     async addPeer() {
       try {
-        const peer = this.peerAddress;
+        const peer = this.peerAddress.trim();
         await this.postForm("/api/peers", { peer }, `Added peer ${peer}`);
         this.peerAddress = "";
+      } catch (error) {
+        this.showFlash(error.message, "error");
+      }
+    },
+
+    async removePeer(peer) {
+      try {
+        await this.postForm("/api/peers", { peer: peer.address }, `Removed peer ${peer.address}`, "DELETE");
       } catch (error) {
         this.showFlash(error.message, "error");
       }
@@ -1049,6 +1057,51 @@ window.iunaApp = function iunaApp() {
         .filter((height) => typeof height === "number");
       if (peerHeights.length === 0) return local;
       return Math.min(local, ...peerHeights);
+    },
+
+    outboundPeers() {
+      return this.peers.filter((peer) => peer.direction !== "inbound");
+    },
+
+    inboundPeers() {
+      return this.peers.filter((peer) => peer.direction === "inbound");
+    },
+
+    healthyPeers() {
+      return this.peers.filter((peer) => !peer.last_error && typeof peer.last_known_height === "number");
+    },
+
+    failedPeers() {
+      return this.peers.filter((peer) => peer.last_error);
+    },
+
+    peerStatus(peer) {
+      if (peer.last_error) return "error";
+      if (typeof peer.last_known_height === "number") return "synced";
+      if ((peer.messages_sent ?? 0) > 0 || (peer.messages_received ?? 0) > 0) return "active";
+      return "pending";
+    },
+
+    peerStatusLabel(peer) {
+      return {
+        error: "Error",
+        synced: "Synced",
+        active: "Active",
+        pending: "Pending",
+      }[this.peerStatus(peer)];
+    },
+
+    peerHeightDelta(peer) {
+      const local = this.status.chain?.height;
+      const remote = peer.last_known_height;
+      if (typeof local !== "number" || typeof remote !== "number") return "-";
+      if (remote === local) return "even";
+      if (remote > local) return `+${remote - local}`;
+      return `-${local - remote}`;
+    },
+
+    canRemovePeer(peer) {
+      return peer.direction !== "inbound";
     },
 
     targetSecondsLabel() {
