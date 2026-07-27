@@ -275,6 +275,9 @@ impl GossipNetwork {
 
         let sessions = self.inner.sessions.lock().await.clone();
         for (peer, sender) in sessions {
+            if self.inner.peers.lock().await.is_banned(&peer) {
+                continue;
+            }
             match sender.try_send(envelopes.clone()) {
                 Ok(()) => {}
                 Err(mpsc::error::TrySendError::Full(_)) => {
@@ -455,7 +458,12 @@ impl GossipNetwork {
     }
 
     async fn ensure_outbound_sessions(&self) {
-        let addresses = self.inner.peers.lock().await.addresses();
+        let addresses = self
+            .inner
+            .peers
+            .lock()
+            .await
+            .connectable_addresses_at(crate::app::now_ms());
         let mut sessions = self.inner.sessions.lock().await;
         sessions.retain(|peer, _| {
             let keep = !is_self_peer_address(peer, self.inner.listen_addr);
@@ -542,6 +550,10 @@ async fn outbound_session(
 ) {
     let mut reconnect_delay = INITIAL_RECONNECT_DELAY;
     loop {
+        if network.inner.peers.lock().await.is_banned(&peer) {
+            sleep(MAX_RECONNECT_DELAY).await;
+            continue;
+        }
         P2pMetricsCounters::inc(&network.inner.metrics.outbound_connect_attempts);
         let stream = match timeout(CONNECT_TIMEOUT, TcpStream::connect(&peer)).await {
             Ok(Ok(stream)) => {
@@ -933,12 +945,12 @@ async fn process_transactions(
         let peer = known_peer
             .clone()
             .unwrap_or_else(|| remote_addr.to_string());
-        network
-            .inner
-            .peers
-            .lock()
-            .await
-            .record_inbound_error(&peer, rejection.reason);
+        let mut peers = network.inner.peers.lock().await;
+        if transaction_rejection_counts_as_misbehavior(&rejection.reason) {
+            peers.record_misbehavior(&peer, rejection.reason);
+        } else {
+            peers.record_inbound_error(&peer, rejection.reason);
+        }
     }
     network.forward_outbox().await;
     record_inbound_result(network, known_peer, remote_addr, Ok(())).await;
@@ -1057,6 +1069,49 @@ fn transactions_in_envelopes(envelopes: &[GossipEnvelope]) -> Vec<(String, Trans
         }
     }
     transactions
+}
+
+fn transaction_rejection_counts_as_misbehavior(reason: &str) -> bool {
+    let reason = reason.to_ascii_lowercase();
+    if transaction_rejection_is_state_dependent(&reason) {
+        return false;
+    }
+    transaction_rejection_is_structurally_invalid(&reason)
+}
+
+fn transaction_rejection_is_state_dependent(reason: &str) -> bool {
+    [
+        "mempool is full",
+        "anchor is not on this chain",
+        "anchor is too old",
+        "missing output",
+        "not spendable",
+        "insufficient funds",
+        "does not cover",
+    ]
+    .iter()
+    .any(|needle| reason.contains(needle))
+}
+
+fn transaction_rejection_is_structurally_invalid(reason: &str) -> bool {
+    [
+        "signature",
+        "proof header is invalid",
+        "proof hash is invalid",
+        "proof does not meet difficulty",
+        "reward is invalid",
+        "difficulty is invalid",
+        "inputs do not balance",
+        "duplicate input",
+        "input owner does not match",
+        "has no inputs",
+        "inputs must have one owner",
+        "overflow",
+        "invalid public key",
+        "invalid transaction public key",
+    ]
+    .iter()
+    .any(|needle| reason.contains(needle))
 }
 
 async fn write_envelope(writer: &mut OwnedWriteHalf, envelope: &GossipEnvelope) -> Result<()> {
@@ -1527,6 +1582,23 @@ async fn record_peer_status(
     }
 }
 
+async fn record_peer_misbehavior(
+    network: &GossipNetwork,
+    known_peer: &Option<String>,
+    remote_addr: SocketAddr,
+    reason: impl Into<String>,
+) {
+    let peer = known_peer
+        .clone()
+        .unwrap_or_else(|| remote_addr.to_string());
+    network
+        .inner
+        .peers
+        .lock()
+        .await
+        .record_misbehavior(&peer, reason);
+}
+
 async fn process_hello(
     network: &GossipNetwork,
     remote_addr: SocketAddr,
@@ -1541,6 +1613,16 @@ async fn process_hello(
         );
     }
     if hello.network_id != NETWORK_ID {
+        record_peer_misbehavior(
+            network,
+            known_peer,
+            remote_addr,
+            format!(
+                "wrong network {}; expected {}",
+                hello.network_id, NETWORK_ID
+            ),
+        )
+        .await;
         anyhow::bail!(
             "wrong network {}; expected {}",
             hello.network_id,
@@ -1556,6 +1638,16 @@ async fn process_hello(
         .genesis_hash()
         .to_string();
     if hello.genesis_hash != local_genesis {
+        record_peer_misbehavior(
+            network,
+            known_peer,
+            remote_addr,
+            format!(
+                "wrong genesis {}; expected {local_genesis}",
+                hello.genesis_hash
+            ),
+        )
+        .await;
         anyhow::bail!(
             "wrong genesis {}; expected {local_genesis}",
             hello.genesis_hash
@@ -1566,6 +1658,13 @@ async fn process_hello(
         let peer = normalize_advertised_peer(listen_addr, remote_addr)?;
         if is_self_peer_address(&peer, network.inner.listen_addr) {
             P2pMetricsCounters::inc(&network.inner.metrics.self_peer_rejections);
+            record_peer_misbehavior(
+                network,
+                known_peer,
+                remote_addr,
+                format!("peer announced our own p2p address {peer}"),
+            )
+            .await;
             anyhow::bail!("peer announced our own p2p address {peer}");
         }
         *known_peer = Some(peer.clone());
@@ -1605,7 +1704,7 @@ async fn record_inbound_result(
                     .peers
                     .lock()
                     .await
-                    .record_inbound_error(&peer, message.clone());
+                    .record_misbehavior(&peer, message.clone());
             }
             eprintln!("p2p envelope from {peer} ignored: {message}");
         }
@@ -2093,6 +2192,41 @@ mod tests {
         assert_eq!(metrics.transactions_accepted_received, 1);
     }
 
+    #[test]
+    fn transaction_rejection_classifier_only_scores_structural_invalidity() {
+        for reason in [
+            "transaction signature is invalid",
+            "mine transaction proof hash is invalid",
+            "mine transaction proof does not meet difficulty",
+            "mine transaction reward is invalid",
+            "mine transaction difficulty is invalid",
+            "transaction inputs do not balance outputs, burn, and fee",
+            "duplicate input in transaction",
+            "transaction input owner does not match spent output",
+            "transaction has no inputs",
+            "transaction inputs must have one owner",
+        ] {
+            assert!(
+                super::transaction_rejection_counts_as_misbehavior(reason),
+                "{reason} should count as misbehavior"
+            );
+        }
+
+        for reason in [
+            "mempool is full",
+            "mine transaction anchor is not on this chain",
+            "mine transaction anchor is too old",
+            "transaction spends missing output abc:0",
+            "selected UTXOs do not cover transfer amount plus fee",
+            "insufficient funds for address",
+        ] {
+            assert!(
+                !super::transaction_rejection_counts_as_misbehavior(reason),
+                "{reason} should be treated as state-dependent"
+            );
+        }
+    }
+
     #[tokio::test]
     async fn inventory_requests_only_missing_objects() {
         let alice = Wallet::from_seed("missing-inv-alice");
@@ -2255,6 +2389,79 @@ mod tests {
             .to_string()
             .contains("wrong genesis")
         );
+
+        let wrong_protocol = ProtocolHello {
+            protocol_version: PROTOCOL_VERSION + 1,
+            network_id: NETWORK_ID.to_string(),
+            genesis_hash: network
+                .inner
+                .node
+                .lock()
+                .await
+                .ledger()
+                .genesis_hash()
+                .to_string(),
+            listen_addr: Some("127.0.0.1:9545".to_string()),
+            height: 0,
+            tip_hash: "tip".to_string(),
+        };
+        assert!(
+            super::process_hello(
+                &network,
+                "127.0.0.1:9545".parse().unwrap(),
+                &mut None,
+                wrong_protocol,
+            )
+            .await
+            .unwrap_err()
+            .to_string()
+            .contains("unsupported protocol version")
+        );
+
+        let peer_after_protocol_mismatch = network
+            .inner
+            .peers
+            .lock()
+            .await
+            .list()
+            .into_iter()
+            .find(|peer| peer.address == "127.0.0.1:9545")
+            .unwrap();
+        assert_eq!(peer_after_protocol_mismatch.misbehavior_score, 2);
+        assert!(!peer_after_protocol_mismatch.is_banned_at(crate::app::now_ms()));
+
+        let repeated_wrong_genesis = ProtocolHello {
+            protocol_version: PROTOCOL_VERSION,
+            network_id: NETWORK_ID.to_string(),
+            genesis_hash: "still-not-local-genesis".to_string(),
+            listen_addr: Some("127.0.0.1:9545".to_string()),
+            height: 0,
+            tip_hash: "tip".to_string(),
+        };
+        assert!(
+            super::process_hello(
+                &network,
+                "127.0.0.1:9545".parse().unwrap(),
+                &mut None,
+                repeated_wrong_genesis,
+            )
+            .await
+            .unwrap_err()
+            .to_string()
+            .contains("wrong genesis")
+        );
+
+        let banned_peer = network
+            .inner
+            .peers
+            .lock()
+            .await
+            .list()
+            .into_iter()
+            .find(|peer| peer.address == "127.0.0.1:9545")
+            .unwrap();
+        assert_eq!(banned_peer.misbehavior_score, 3);
+        assert!(banned_peer.is_banned_at(crate::app::now_ms()));
     }
 
     #[tokio::test]

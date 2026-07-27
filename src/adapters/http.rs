@@ -91,6 +91,7 @@ struct NetworkHealthResponse {
     healthy_peers: usize,
     failed_peers: usize,
     stale_peers: usize,
+    banned_peers: usize,
     pending_transactions: usize,
     last_error: Option<String>,
 }
@@ -803,6 +804,10 @@ fn network_health_at(
             })
         })
         .count();
+    let banned_peers = peers
+        .iter()
+        .filter(|peer| peer.is_banned_at(now_ms))
+        .count();
     let lag_blocks = best_known_height.saturating_sub(local_height);
     let last_error = peers.iter().rev().find_map(|peer| {
         peer.last_error
@@ -812,6 +817,8 @@ fn network_health_at(
 
     let state = if peers.is_empty() {
         "isolated"
+    } else if banned_peers > 0 && healthy_peers == 0 {
+        "banned"
     } else if lag_blocks > 0 {
         "syncing"
     } else if failed_peers > 0 && healthy_peers == 0 {
@@ -837,6 +844,7 @@ fn network_health_at(
         healthy_peers,
         failed_peers,
         stale_peers,
+        banned_peers,
         pending_transactions: status.chain.pending_transactions,
         last_error,
     }
@@ -1628,6 +1636,15 @@ const INDEX_HTML: &str = r#"<!doctype html>
     .nav-button svg.chain-icon { stroke-width: 1.35; }
     .nav-button span { font-size: 11px; font-weight: 800; }
     .nav-button:hover, .nav-button.active { background: #202328; border-color: #3b4448; color: #d5f55f; }
+    .version-panel { margin-top: auto; width: 64px; display: grid; gap: 4px; justify-items: center; border: 1px solid transparent; border-radius: 8px; padding: 7px 4px; color: #7f888e; background: transparent; font-size: 10px; font-weight: 850; text-align: center; }
+    .version-panel.update { border-color: #566d25; color: #d5f55f; background: #1c2516; cursor: pointer; }
+    .version-panel.checking { color: #a8b2b8; }
+    .version-panel.failed { color: #ffb1a8; }
+    .version-dot { width: 6px; height: 6px; border-radius: 999px; background: #3a4248; }
+    .version-panel.update .version-dot { background: #d5f55f; box-shadow: 0 0 0 3px rgba(213, 245, 95, .12); }
+    .version-panel.failed .version-dot { background: #ff8f82; }
+    .version-label { line-height: 1; }
+    .version-update { color: #d5f55f; font-size: 9px; line-height: 1; text-transform: uppercase; }
     .content { width: 100%; min-width: 0; padding: 22px 24px 48px; }
     main { width: 100%; }
     main > section { width: 100%; }
@@ -1786,6 +1803,7 @@ const INDEX_HTML: &str = r#"<!doctype html>
     .peer-status { display: inline-flex; align-items: center; border: 1px solid #3a4248; border-radius: 999px; padding: 3px 8px; color: #a8b2b8; font-size: 11px; font-weight: 850; }
     .peer-status.synced, .peer-status.active { border-color: #566d25; color: #d5f55f; background: #1c2516; }
     .peer-status.stale { border-color: #5f5125; color: #ffe08a; background: #211d12; }
+    .peer-status.banned { border-color: #713434; color: #ffb1a8; background: #2a1717; }
     .peer-status.error { border-color: #713434; color: #ffb1a8; background: #2a1717; }
     .peer-actions { display: flex; gap: 6px; align-items: center; }
     .peer-remove { padding: 4px 7px; border-color: #4f3737; background: #221717; color: #ffb1a8; font-size: 12px; }
@@ -1794,7 +1812,7 @@ const INDEX_HTML: &str = r#"<!doctype html>
     .network-health-state { display: grid; align-content: center; gap: 5px; border: 1px solid #3a4248; border-radius: 8px; padding: 12px; background: #111316; }
     .network-health-state.healthy { border-color: #566d25; background: #182112; }
     .network-health-state.syncing, .network-health-state.stale { border-color: #5f5125; background: #211d12; }
-    .network-health-state.isolated, .network-health-state.error { border-color: #713434; background: #241716; }
+    .network-health-state.isolated, .network-health-state.error, .network-health-state.banned { border-color: #713434; background: #241716; }
     .network-health-label { color: #879198; font-size: 10px; font-weight: 850; text-transform: uppercase; }
     .network-health-value { color: #e8edf0; font-size: 20px; font-weight: 900; text-transform: capitalize; }
     .network-health-detail { color: #a8b2b8; font-size: 12px; }
@@ -1858,6 +1876,7 @@ const INDEX_HTML: &str = r#"<!doctype html>
       .side-nav { display: flex; width: auto; gap: 8px; }
       .nav-button { width: 52px; min-height: 48px; }
       .nav-button span { font-size: 10px; }
+      .version-panel { margin-top: 0; width: 48px; padding: 6px 3px; font-size: 9px; }
       .content { padding: 16px 12px 36px; }
       header, .split, .setup-grid, .wallet-grid, .mining-grid, .detail-grid, .wallet-tx-row { grid-template-columns: 1fr; }
       header { display: grid; }
@@ -1867,7 +1886,7 @@ const INDEX_HTML: &str = r#"<!doctype html>
       .block-card { flex-basis: 108px; }
     }
   </style>
-  <script defer src="/assets/iuna-ui.js?v=55"></script>
+  <script defer src="/assets/iuna-ui.js?v=57"></script>
   <script defer src="/assets/alpine.min.js"></script>
 </head>
 <body x-data="iunaApp()" x-init="init()" @keydown.window.escape="closeModals()" x-cloak>
@@ -1892,6 +1911,11 @@ const INDEX_HTML: &str = r#"<!doctype html>
           <span>Chain</span>
         </button>
       </nav>
+      <button class="version-panel" type="button" :class="{ update: updateAvailable(), checking: releaseCheckState === 'checking', failed: releaseCheckState === 'failed' }" :title="versionPanelTitle()" @click="openLatestRelease">
+        <span class="version-dot" aria-hidden="true"></span>
+        <span class="version-label" x-text="appVersionLabel()"></span>
+        <span class="version-update" x-show="updateAvailable()">Update</span>
+      </button>
     </aside>
 
     <main class="content">
@@ -2116,6 +2140,7 @@ const INDEX_HTML: &str = r#"<!doctype html>
             <div class="peer-summary-item"><div class="peer-summary-label">Best Known</div><div class="peer-summary-value" x-text="networkHealth.best_known_height ?? '-'"></div></div>
             <div class="peer-summary-item"><div class="peer-summary-label">Lag</div><div class="peer-summary-value" x-text="networkLagLabel()"></div></div>
             <div class="peer-summary-item"><div class="peer-summary-label">Stale</div><div class="peer-summary-value" x-text="networkHealth.stale_peers ?? '-'"></div></div>
+            <div class="peer-summary-item"><div class="peer-summary-label">Banned</div><div class="peer-summary-value" x-text="networkHealth.banned_peers ?? '-'"></div></div>
             <div class="peer-summary-item"><div class="peer-summary-label">Mempool</div><div class="peer-summary-value" x-text="networkHealth.pending_transactions ?? '-'"></div></div>
           </div>
         </div>
@@ -2128,7 +2153,7 @@ const INDEX_HTML: &str = r#"<!doctype html>
         </div>
         <div class="table-wrap">
           <table>
-            <thead><tr><th>Status</th><th>Address</th><th>Direction</th><th>Last Contact</th><th>Height</th><th>Delta</th><th>Tip</th><th>Sent</th><th>Received</th><th>Last Error</th><th>Actions</th></tr></thead>
+            <thead><tr><th>Status</th><th>Address</th><th>Direction</th><th>Last Contact</th><th>Ban</th><th>Score</th><th>Height</th><th>Delta</th><th>Tip</th><th>Sent</th><th>Received</th><th>Last Error</th><th>Actions</th></tr></thead>
             <tbody>
               <template x-for="peer in peers" :key="peer.address">
                 <tr>
@@ -2136,6 +2161,8 @@ const INDEX_HTML: &str = r#"<!doctype html>
                   <td><code x-text="peer.address"></code></td>
                   <td x-text="peer.direction"></td>
                   <td x-text="peerLastContactLabel(peer)"></td>
+                  <td x-text="peerBanLabel(peer)"></td>
+                  <td x-text="peer.misbehavior_score ?? 0"></td>
                   <td x-text="peer.last_known_height ?? '-'"></td>
                   <td x-text="peerHeightDelta(peer)"></td>
                   <td><code x-text="short(peer.last_known_tip_hash)"></code></td>
@@ -2145,7 +2172,7 @@ const INDEX_HTML: &str = r#"<!doctype html>
                   <td><div class="peer-actions"><button class="peer-remove" type="button" x-show="canRemovePeer(peer)" @click="removePeer(peer)">Remove</button><span class="muted" x-show="!canRemovePeer(peer)">Observed</span></div></td>
                 </tr>
               </template>
-              <tr x-show="peers.length === 0"><td colspan="11">No peers</td></tr>
+              <tr x-show="peers.length === 0"><td colspan="13">No peers</td></tr>
             </tbody>
           </table>
         </div>
@@ -2728,6 +2755,9 @@ mod tests {
                 last_contact_ms: Some(10_000),
                 last_success_ms: Some(10_000),
                 last_error_ms: None,
+                misbehavior_score: 0,
+                banned_until_ms: None,
+                ban_reason: None,
             }],
         );
         assert!(!syncing.ok);
@@ -2748,6 +2778,9 @@ mod tests {
                 last_contact_ms: Some(10_000),
                 last_success_ms: None,
                 last_error_ms: Some(10_000),
+                misbehavior_score: 1,
+                banned_until_ms: None,
+                ban_reason: Some("connection refused".to_string()),
             }],
         );
         assert!(!peer_errors.ok);
@@ -2770,12 +2803,38 @@ mod tests {
                 last_contact_ms: Some(1),
                 last_success_ms: Some(1),
                 last_error_ms: None,
+                misbehavior_score: 0,
+                banned_until_ms: None,
+                ban_reason: None,
             }],
             PEER_STALE_AFTER_MS + 2,
         );
         assert!(!stale.ok);
         assert_eq!(stale.state, "stale");
         assert_eq!(stale.stale_peers, 1);
+
+        let banned = super::network_health_at(
+            &status,
+            &[PeerInfo {
+                address: "127.0.0.1:9448".to_string(),
+                direction: PeerDirection::Outbound,
+                messages_sent: 0,
+                messages_received: 0,
+                last_known_height: None,
+                last_known_tip_hash: None,
+                last_error: Some("invalid block".to_string()),
+                last_contact_ms: Some(10),
+                last_success_ms: None,
+                last_error_ms: Some(10),
+                misbehavior_score: 3,
+                banned_until_ms: Some(1_000),
+                ban_reason: Some("invalid block".to_string()),
+            }],
+            20,
+        );
+        assert!(!banned.ok);
+        assert_eq!(banned.state, "banned");
+        assert_eq!(banned.banned_peers, 1);
     }
 
     #[test]

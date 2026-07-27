@@ -13,6 +13,9 @@ window.iunaApp = function iunaApp() {
     peers: [],
     p2pMetrics: {},
     networkHealth: {},
+    latestRelease: null,
+    releaseCheckState: "idle",
+    releaseCheckError: null,
     config: { setup_complete: false },
     auth: { configured: false, authenticated: false },
     authLoaded: false,
@@ -81,6 +84,7 @@ window.iunaApp = function iunaApp() {
         this.hashListenerInstalled = true;
       }
       await this.refresh();
+      this.checkLatestRelease();
       if (!this.pollHandle) {
         this.pollHandle = setInterval(() => this.refresh(), 5000);
       }
@@ -106,6 +110,33 @@ window.iunaApp = function iunaApp() {
         p2p: "P2P",
         chain: "Chain",
       }[this.tab] || "iuna";
+    },
+
+    appVersionLabel() {
+      return `v${this.normalizeVersion(this.status.app_version || "0.0.0")}`;
+    },
+
+    latestReleaseLabel() {
+      return this.latestRelease?.tag || "";
+    },
+
+    updateAvailable() {
+      const current = this.status.app_version;
+      const latest = this.latestRelease?.tag;
+      if (!current || !latest) return false;
+      return this.compareVersions(latest, current) > 0;
+    },
+
+    versionPanelTitle() {
+      if (this.updateAvailable()) return `Update available: ${this.latestReleaseLabel()}`;
+      if (this.releaseCheckState === "failed") return this.releaseCheckError || "Could not check latest release";
+      if (this.releaseCheckState === "checking") return "Checking latest release";
+      return "iuna is up to date";
+    },
+
+    openLatestRelease() {
+      const url = this.latestRelease?.url || "https://github.com/iuna-labs/iuna/releases";
+      window.open(url, "_blank", "noopener,noreferrer");
     },
 
     showingSetup() {
@@ -403,6 +434,27 @@ window.iunaApp = function iunaApp() {
         throw new Error(`${path} returned ${response.status}`);
       }
       return response.json();
+    },
+
+    async checkLatestRelease() {
+      if (this.releaseCheckState === "checking") return;
+      this.releaseCheckState = "checking";
+      this.releaseCheckError = null;
+      try {
+        const response = await fetch("https://api.github.com/repos/iuna-labs/iuna/releases/latest", {
+          headers: { Accept: "application/vnd.github+json" },
+        });
+        if (!response.ok) throw new Error(`release check returned ${response.status}`);
+        const release = await response.json();
+        this.latestRelease = {
+          tag: release.tag_name || "",
+          url: release.html_url || "https://github.com/iuna-labs/iuna/releases",
+        };
+        this.releaseCheckState = "done";
+      } catch (error) {
+        this.releaseCheckError = error.message || "Release check failed";
+        this.releaseCheckState = "failed";
+      }
     },
 
     mergeFreshBlocks(freshBlocks, options = {}) {
@@ -1067,6 +1119,7 @@ window.iunaApp = function iunaApp() {
       if (this.networkHealth.state === "syncing") return "syncing";
       if (this.networkHealth.state === "isolated") return "isolated";
       if (this.networkHealth.state === "stale") return "stale";
+      if (this.networkHealth.state === "banned") return "banned";
       return "error";
     },
 
@@ -1099,7 +1152,13 @@ window.iunaApp = function iunaApp() {
       return Date.now() - lastSuccess > 20 * 60 * 1000;
     },
 
+    bannedPeer(peer) {
+      const bannedUntil = peer.banned_until_ms;
+      return typeof bannedUntil === "number" && bannedUntil > Date.now();
+    },
+
     peerStatus(peer) {
+      if (this.bannedPeer(peer)) return "banned";
       if (peer.last_error) return "error";
       if (this.stalePeer(peer)) return "stale";
       if (typeof peer.last_known_height === "number") return "synced";
@@ -1110,6 +1169,7 @@ window.iunaApp = function iunaApp() {
     peerStatusLabel(peer) {
       return {
         error: "Error",
+        banned: "Banned",
         stale: "Stale",
         synced: "Synced",
         active: "Active",
@@ -1131,6 +1191,35 @@ window.iunaApp = function iunaApp() {
 
     peerLastContactLabel(peer) {
       return this.relativeTimeLabel(peer.last_contact_ms);
+    },
+
+    peerBanLabel(peer) {
+      if (!this.bannedPeer(peer)) return "-";
+      const remainingSeconds = Math.max(0, Math.round((peer.banned_until_ms - Date.now()) / 1000));
+      if (remainingSeconds < 60) return `${remainingSeconds}s`;
+      const remainingMinutes = Math.round(remainingSeconds / 60);
+      if (remainingMinutes < 60) return `${remainingMinutes}m`;
+      return `${Math.round(remainingMinutes / 60)}h`;
+    },
+
+    normalizeVersion(version) {
+      return String(version || "").trim().replace(/^v/i, "");
+    },
+
+    versionParts(version) {
+      const [core] = this.normalizeVersion(version).split("-");
+      return core.split(".").map((part) => Number.parseInt(part, 10) || 0);
+    },
+
+    compareVersions(left, right) {
+      const leftParts = this.versionParts(left);
+      const rightParts = this.versionParts(right);
+      const length = Math.max(leftParts.length, rightParts.length, 3);
+      for (let index = 0; index < length; index += 1) {
+        const diff = (leftParts[index] || 0) - (rightParts[index] || 0);
+        if (diff !== 0) return diff;
+      }
+      return 0;
     },
 
     peerHeightDelta(peer) {

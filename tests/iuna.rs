@@ -1875,6 +1875,30 @@ fn peer_book_tracks_multiple_peers_without_networking() {
 }
 
 #[test]
+fn peer_book_bans_misbehaving_peer_temporarily_and_recovers_on_success() {
+    let mut peers = PeerBook::from_addresses(vec!["127.0.0.1:9444".to_string()]);
+
+    peers.record_misbehavior_at("127.0.0.1:9444", "invalid transaction", 100);
+    peers.record_misbehavior_at("127.0.0.1:9444", "invalid block", 200);
+    assert!(!peers.is_banned_at("127.0.0.1:9444", 200));
+    assert_eq!(peers.connectable_addresses_at(200), vec!["127.0.0.1:9444"]);
+
+    peers.record_misbehavior_at("127.0.0.1:9444", "wrong genesis", 300);
+    assert!(peers.is_banned_at("127.0.0.1:9444", 300));
+    assert!(peers.connectable_addresses_at(300).is_empty());
+    assert_eq!(peers.addresses(), vec!["127.0.0.1:9444"]);
+    let banned = peers.list().pop().unwrap();
+    assert_eq!(banned.misbehavior_score, 3);
+    assert_eq!(banned.ban_reason.as_deref(), Some("wrong genesis"));
+
+    assert!(!peers.is_banned_at("127.0.0.1:9444", 11 * 60 * 1_000));
+    peers.record_status("127.0.0.1:9444", 1, "tip".to_string());
+    let recovered = peers.list().pop().unwrap();
+    assert_eq!(recovered.misbehavior_score, 0);
+    assert_eq!(recovered.banned_until_ms, None);
+}
+
+#[test]
 fn chain_snapshot_round_trips_ledger_state() {
     let alice = Wallet::from_seed("alice");
     let mut allocations = BTreeMap::new();

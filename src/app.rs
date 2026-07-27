@@ -23,6 +23,8 @@ pub const PROTOCOL_VERSION: u32 = 1;
 pub const NETWORK_ID: &str = "iuna-devnet-v2";
 pub const BLOCK_REQUEST_LIMIT: usize = 128;
 const IMPORT_REBROADCAST_LIMIT: usize = 128;
+pub const PEER_MISBEHAVIOR_BAN_SCORE: u32 = 3;
+pub const PEER_MISBEHAVIOR_BAN_MS: u64 = 10 * 60 * 1_000;
 
 #[derive(Clone, Debug)]
 pub struct NodeConfig {
@@ -138,6 +140,7 @@ pub struct TransactionRejection {
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 pub struct NodeStatus {
+    pub app_version: String,
     pub wallet_address: String,
     pub wallet_balance: Amount,
     pub wallet_locked: bool,
@@ -437,6 +440,7 @@ impl NodeCore {
             .is_none_or(|leader| leader == self.wallet.address());
 
         NodeStatus {
+            app_version: env!("CARGO_PKG_VERSION").to_string(),
             wallet_address: self.wallet.address().to_string(),
             wallet_balance: self.ledger.balance_of(self.wallet.address()),
             wallet_locked: self.wallet.is_locked(),
@@ -1104,8 +1108,17 @@ impl PeerBook {
             .collect()
     }
 
+    pub fn connectable_addresses_at(&self, now_ms: u64) -> Vec<String> {
+        self.peers
+            .values()
+            .filter(|peer| peer.direction != PeerDirection::Inbound)
+            .filter(|peer| !peer.is_banned_at(now_ms))
+            .map(|peer| peer.address.clone())
+            .collect()
+    }
+
     pub fn addresses_except(&self, excluded: &str) -> Vec<String> {
-        self.addresses()
+        self.connectable_addresses_at(now_ms())
             .into_iter()
             .filter(|address| address != excluded)
             .collect()
@@ -1121,7 +1134,10 @@ impl PeerBook {
         peer.messages_sent += count;
         peer.last_contact_ms = Some(now);
         peer.last_success_ms = Some(now);
-        peer.last_error = None;
+        if !peer.is_banned_at(now) {
+            peer.last_error = None;
+            peer.clear_misbehavior();
+        }
     }
 
     pub fn record_status(&mut self, address: &str, height: u64, tip_hash: String) {
@@ -1131,7 +1147,10 @@ impl PeerBook {
         peer.last_known_tip_hash = Some(tip_hash);
         peer.last_contact_ms = Some(now);
         peer.last_success_ms = Some(now);
-        peer.last_error = None;
+        if !peer.is_banned_at(now) {
+            peer.last_error = None;
+            peer.clear_misbehavior();
+        }
     }
 
     pub fn record_error(&mut self, address: &str, error: impl Into<String>) {
@@ -1156,7 +1175,37 @@ impl PeerBook {
         peer.messages_received += count;
         peer.last_contact_ms = Some(now);
         peer.last_success_ms = Some(now);
-        peer.last_error = None;
+        if !peer.is_banned_at(now) {
+            peer.last_error = None;
+            peer.clear_misbehavior();
+        }
+    }
+
+    pub fn record_misbehavior(&mut self, address: &str, reason: impl Into<String>) {
+        self.record_misbehavior_at(address, reason, now_ms());
+    }
+
+    pub fn record_misbehavior_at(&mut self, address: &str, reason: impl Into<String>, now_ms: u64) {
+        let reason = reason.into();
+        let peer = self.ensure(address, PeerDirection::Outbound);
+        peer.last_contact_ms = Some(now_ms);
+        peer.last_error_ms = Some(now_ms);
+        peer.last_error = Some(reason.clone());
+        peer.misbehavior_score = peer.misbehavior_score.saturating_add(1);
+        peer.ban_reason = Some(reason);
+        if peer.misbehavior_score >= PEER_MISBEHAVIOR_BAN_SCORE {
+            peer.banned_until_ms = Some(now_ms.saturating_add(PEER_MISBEHAVIOR_BAN_MS));
+        }
+    }
+
+    pub fn is_banned(&self, address: &str) -> bool {
+        self.is_banned_at(address, now_ms())
+    }
+
+    pub fn is_banned_at(&self, address: &str, now_ms: u64) -> bool {
+        self.peers
+            .get(address)
+            .is_some_and(|peer| peer.is_banned_at(now_ms))
     }
 
     fn ensure(&mut self, address: &str, direction: PeerDirection) -> &mut PeerInfo {
@@ -1178,6 +1227,9 @@ pub struct PeerInfo {
     pub last_contact_ms: Option<u64>,
     pub last_success_ms: Option<u64>,
     pub last_error_ms: Option<u64>,
+    pub misbehavior_score: u32,
+    pub banned_until_ms: Option<u64>,
+    pub ban_reason: Option<String>,
 }
 
 impl PeerInfo {
@@ -1193,7 +1245,21 @@ impl PeerInfo {
             last_contact_ms: None,
             last_success_ms: None,
             last_error_ms: None,
+            misbehavior_score: 0,
+            banned_until_ms: None,
+            ban_reason: None,
         }
+    }
+
+    pub fn is_banned_at(&self, now_ms: u64) -> bool {
+        self.banned_until_ms
+            .is_some_and(|banned_until| banned_until > now_ms)
+    }
+
+    fn clear_misbehavior(&mut self) {
+        self.misbehavior_score = 0;
+        self.banned_until_ms = None;
+        self.ban_reason = None;
     }
 }
 
@@ -1383,6 +1449,20 @@ mod tests {
             node.status().mining.automatic_pow_mine_fee,
             configured_fee_per_byte
         );
+    }
+
+    #[test]
+    fn status_reports_package_version() {
+        let wallet = Wallet::from_seed("status-version-wallet");
+        let node = NodeCore::new(NodeConfig {
+            wallet,
+            genesis_allocations: BTreeMap::new(),
+            vdf_rounds: 1,
+            burn_per_block: 0,
+            burn_fee: 0,
+        });
+
+        assert_eq!(node.status().app_version, env!("CARGO_PKG_VERSION"));
     }
 
     #[test]
