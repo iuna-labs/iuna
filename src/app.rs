@@ -122,6 +122,8 @@ pub struct ProtocolHello {
     pub network_id: String,
     pub genesis_hash: String,
     pub listen_addr: Option<String>,
+    #[serde(default)]
+    pub node_id: Option<String>,
     pub height: u64,
     pub tip_hash: String,
 }
@@ -358,13 +360,14 @@ impl NodeCore {
         self.ledger.snapshot()
     }
 
-    pub fn hello(&self, listen_addr: Option<String>) -> GossipEnvelope {
+    pub fn hello(&self, listen_addr: Option<String>, node_id: Option<String>) -> GossipEnvelope {
         let status = self.ledger.status();
         GossipEnvelope::Hello(ProtocolHello {
             protocol_version: PROTOCOL_VERSION,
             network_id: NETWORK_ID.to_string(),
             genesis_hash: self.ledger.genesis_hash().to_string(),
             listen_addr,
+            node_id,
             height: status.height,
             tip_hash: status.tip_hash,
         })
@@ -1168,6 +1171,12 @@ impl PeerBook {
         if to_peer.last_error.is_none() {
             to_peer.last_error = from_peer.last_error;
         }
+        if to_peer.last_transaction_rejection.is_none() {
+            to_peer.last_transaction_rejection = from_peer.last_transaction_rejection;
+        }
+        to_peer.last_transaction_rejection_ms = to_peer
+            .last_transaction_rejection_ms
+            .max(from_peer.last_transaction_rejection_ms);
         to_peer.misbehavior_score = to_peer
             .misbehavior_score
             .saturating_add(from_peer.misbehavior_score);
@@ -1265,6 +1274,26 @@ impl PeerBook {
         peer.last_error = Some(error.into());
     }
 
+    pub fn record_transaction_rejection(&mut self, address: &str, reason: impl Into<String>) {
+        let now = now_ms();
+        let peer = self.ensure(address, PeerDirection::Outbound);
+        peer.last_contact_ms = Some(now);
+        peer.last_transaction_rejection_ms = Some(now);
+        peer.last_transaction_rejection = Some(reason.into());
+    }
+
+    pub fn record_inbound_transaction_rejection(
+        &mut self,
+        address: &str,
+        reason: impl Into<String>,
+    ) {
+        let now = now_ms();
+        let peer = self.ensure(address, PeerDirection::Inbound);
+        peer.last_contact_ms = Some(now);
+        peer.last_transaction_rejection_ms = Some(now);
+        peer.last_transaction_rejection = Some(reason.into());
+    }
+
     pub fn record_received(&mut self, address: &str, count: u64) {
         let now = now_ms();
         let peer = self.ensure(address, PeerDirection::Inbound);
@@ -1334,9 +1363,11 @@ pub struct PeerInfo {
     pub last_known_height: Option<u64>,
     pub last_known_tip_hash: Option<String>,
     pub last_error: Option<String>,
+    pub last_transaction_rejection: Option<String>,
     pub last_contact_ms: Option<u64>,
     pub last_success_ms: Option<u64>,
     pub last_error_ms: Option<u64>,
+    pub last_transaction_rejection_ms: Option<u64>,
     pub misbehavior_score: u32,
     pub banned_until_ms: Option<u64>,
     pub ban_reason: Option<String>,
@@ -1352,9 +1383,11 @@ impl PeerInfo {
             last_known_height: None,
             last_known_tip_hash: None,
             last_error: None,
+            last_transaction_rejection: None,
             last_contact_ms: None,
             last_success_ms: None,
             last_error_ms: None,
+            last_transaction_rejection_ms: None,
             misbehavior_score: 0,
             banned_until_ms: None,
             ban_reason: None,

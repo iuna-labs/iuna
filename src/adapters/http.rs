@@ -822,6 +822,7 @@ fn network_health_at(
     let last_error = peers.iter().rev().find_map(|peer| {
         peer.last_error
             .as_ref()
+            .or(peer.last_transaction_rejection.as_ref())
             .map(|error| format!("{}: {error}", peer.address))
     });
 
@@ -2182,7 +2183,7 @@ const INDEX_HTML: &str = r#"<!doctype html>
                   <td><code x-text="short(peer.last_known_tip_hash)"></code></td>
                   <td x-text="peer.messages_sent"></td>
                   <td x-text="peer.messages_received"></td>
-                  <td x-text="peer.last_error || ''"></td>
+                  <td x-text="peer.last_error || peer.last_transaction_rejection || ''"></td>
                   <td><div class="peer-actions"><button class="peer-remove" type="button" x-show="canRemovePeer(peer)" @click="removePeer(peer)">Remove</button><span class="muted" x-show="!canRemovePeer(peer)">Observed</span></div></td>
                 </tr>
               </template>
@@ -2785,9 +2786,11 @@ mod tests {
                 last_known_height: Some(3),
                 last_known_tip_hash: Some("remote-tip".to_string()),
                 last_error: None,
+                last_transaction_rejection: None,
                 last_contact_ms: Some(10_000),
                 last_success_ms: Some(10_000),
                 last_error_ms: None,
+                last_transaction_rejection_ms: None,
                 misbehavior_score: 0,
                 banned_until_ms: None,
                 ban_reason: None,
@@ -2808,9 +2811,11 @@ mod tests {
                 last_known_height: None,
                 last_known_tip_hash: None,
                 last_error: Some("connection refused".to_string()),
+                last_transaction_rejection: None,
                 last_contact_ms: Some(10_000),
                 last_success_ms: None,
                 last_error_ms: Some(10_000),
+                last_transaction_rejection_ms: None,
                 misbehavior_score: 1,
                 banned_until_ms: None,
                 ban_reason: Some("connection refused".to_string()),
@@ -2823,6 +2828,33 @@ mod tests {
             Some("127.0.0.1:9446: connection refused")
         );
 
+        let tx_rejection = super::network_health(
+            &status,
+            &[PeerInfo {
+                address: "127.0.0.1:9449".to_string(),
+                direction: PeerDirection::Outbound,
+                messages_sent: 1,
+                messages_received: 1,
+                last_known_height: Some(0),
+                last_known_tip_hash: Some("tip".to_string()),
+                last_error: None,
+                last_transaction_rejection: Some(
+                    "peer rejected transaction abc: conflict".to_string(),
+                ),
+                last_contact_ms: Some(10_000),
+                last_success_ms: Some(10_000),
+                last_error_ms: None,
+                last_transaction_rejection_ms: Some(10_000),
+                misbehavior_score: 0,
+                banned_until_ms: None,
+                ban_reason: None,
+            }],
+        );
+        assert_eq!(
+            tx_rejection.last_error.as_deref(),
+            Some("127.0.0.1:9449: peer rejected transaction abc: conflict")
+        );
+
         let stale = super::network_health_at(
             &status,
             &[PeerInfo {
@@ -2833,9 +2865,11 @@ mod tests {
                 last_known_height: Some(0),
                 last_known_tip_hash: Some("tip".to_string()),
                 last_error: None,
+                last_transaction_rejection: None,
                 last_contact_ms: Some(1),
                 last_success_ms: Some(1),
                 last_error_ms: None,
+                last_transaction_rejection_ms: None,
                 misbehavior_score: 0,
                 banned_until_ms: None,
                 ban_reason: None,
@@ -2856,9 +2890,11 @@ mod tests {
                 last_known_height: None,
                 last_known_tip_hash: None,
                 last_error: Some("invalid block".to_string()),
+                last_transaction_rejection: None,
                 last_contact_ms: Some(10),
                 last_success_ms: None,
                 last_error_ms: Some(10),
+                last_transaction_rejection_ms: None,
                 misbehavior_score: 3,
                 banned_until_ms: Some(1_000),
                 ban_reason: Some("invalid block".to_string()),
