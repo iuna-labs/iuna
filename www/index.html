@@ -166,8 +166,8 @@
     .value { color: var(--text); font-weight: 850; }
     .value.green { color: var(--green); }
     section { padding: 38px 0; border-top: 1px solid rgba(39, 48, 54, .9); scroll-margin-top: 76px; }
-    .section-head { display: flex; justify-content: space-between; gap: 18px; align-items: end; margin-bottom: 18px; }
-    .section-head p { margin: 0; max-width: 560px; font-size: 15px; }
+    .section-head { display: grid; gap: 8px; margin-bottom: 18px; }
+    .section-head p { margin: 0; max-width: 680px; font-size: 15px; }
     .grid { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 12px; }
     .card {
       min-width: 0;
@@ -223,7 +223,6 @@
     @media (max-width: 820px) {
       .hero { padding-top: 58px; }
       .hero-grid, .split, .grid { grid-template-columns: 1fr; }
-      .section-head { display: grid; }
       nav { display: none; }
       .wrap { width: min(100% - 32px, 1060px); }
       .stat { grid-template-columns: 1fr; gap: 4px; }
@@ -271,7 +270,7 @@
       <div class="wrap">
         <div class="section-head">
           <h2>What Is iuna?</h2>
-          <p>iuna combines proof-of-burn finalization, a VDF clock, and open proof-of-work issuance.</p>
+          <p>iuna is a new devnet experiment that combines proof-of-burn finalization, a VDF clock, and open proof-of-work issuance. Compared with pure proof-of-work chains, it aims to keep finalization lightweight while keeping new supply open to anyone willing to do PoW.</p>
         </div>
         <div class="grid">
           <div class="card">
