@@ -23,8 +23,8 @@ use tokio::{
 
 use crate::{
     app::{
-        BlockInventory, GossipEnvelope, NETWORK_ID, NodeCore, PROTOCOL_VERSION, ProtocolHello,
-        SharedNode, SharedPeerBook, TransactionRejection,
+        BlockInventory, GossipEnvelope, MEMPOOL_STATUS_LIMIT, NETWORK_ID, NodeCore,
+        PROTOCOL_VERSION, ProtocolHello, SharedNode, SharedPeerBook, TransactionRejection,
     },
     domain::{Block, ChainSnapshot, Ledger, Transaction, TransactionSubmitOutcome, verify_vdf},
 };
@@ -50,6 +50,9 @@ static NEXT_NODE_ID: AtomicU64 = AtomicU64::new(1);
 struct PeerStatus {
     height: u64,
     tip_hash: String,
+    mempool_count: usize,
+    mempool_root: String,
+    mempool_txs: Vec<String>,
     request_snapshot: bool,
     push_snapshot: bool,
 }
@@ -59,6 +62,27 @@ impl PeerStatus {
         Self {
             height,
             tip_hash,
+            mempool_count: 0,
+            mempool_root: String::new(),
+            mempool_txs: Vec::new(),
+            request_snapshot: false,
+            push_snapshot: false,
+        }
+    }
+
+    fn from_envelope(
+        height: u64,
+        tip_hash: String,
+        mempool_count: usize,
+        mempool_root: String,
+        mempool_txs: Vec<String>,
+    ) -> Self {
+        Self {
+            height,
+            tip_hash,
+            mempool_count,
+            mempool_root,
+            mempool_txs,
             request_snapshot: false,
             push_snapshot: false,
         }
@@ -68,6 +92,9 @@ impl PeerStatus {
         Self {
             height,
             tip_hash,
+            mempool_count: 0,
+            mempool_root: String::new(),
+            mempool_txs: Vec::new(),
             request_snapshot: true,
             push_snapshot: false,
         }
@@ -77,6 +104,9 @@ impl PeerStatus {
         Self {
             height,
             tip_hash,
+            mempool_count: 0,
+            mempool_root: String::new(),
+            mempool_txs: Vec::new(),
             request_snapshot: false,
             push_snapshot: true,
         }
@@ -137,6 +167,11 @@ struct P2pMetricsCounters {
     transactions_rejected_sent: AtomicU64,
     transactions_rejected_received: AtomicU64,
     transaction_retries_sent: AtomicU64,
+    mempool_statuses_received: AtomicU64,
+    mempool_status_transactions_received: AtomicU64,
+    mempool_status_mismatches: AtomicU64,
+    mempool_transaction_requests_sent: AtomicU64,
+    mempool_transaction_request_signatures_sent: AtomicU64,
     last_session_failure: StdMutex<Option<String>>,
     last_empty_frame_remote: StdMutex<Option<String>>,
     last_parse_error: StdMutex<Option<String>>,
@@ -172,6 +207,11 @@ pub struct P2pMetrics {
     pub transactions_rejected_sent: u64,
     pub transactions_rejected_received: u64,
     pub transaction_retries_sent: u64,
+    pub mempool_statuses_received: u64,
+    pub mempool_status_transactions_received: u64,
+    pub mempool_status_mismatches: u64,
+    pub mempool_transaction_requests_sent: u64,
+    pub mempool_transaction_request_signatures_sent: u64,
     pub transaction_ack_pending: u64,
     pub last_session_failure: Option<String>,
     pub last_empty_frame_remote: Option<String>,
@@ -233,6 +273,17 @@ impl P2pMetricsCounters {
                 .transactions_rejected_received
                 .load(Ordering::Relaxed),
             transaction_retries_sent: self.transaction_retries_sent.load(Ordering::Relaxed),
+            mempool_statuses_received: self.mempool_statuses_received.load(Ordering::Relaxed),
+            mempool_status_transactions_received: self
+                .mempool_status_transactions_received
+                .load(Ordering::Relaxed),
+            mempool_status_mismatches: self.mempool_status_mismatches.load(Ordering::Relaxed),
+            mempool_transaction_requests_sent: self
+                .mempool_transaction_requests_sent
+                .load(Ordering::Relaxed),
+            mempool_transaction_request_signatures_sent: self
+                .mempool_transaction_request_signatures_sent
+                .load(Ordering::Relaxed),
             transaction_ack_pending: 0,
             last_session_failure: self
                 .last_session_failure
@@ -745,9 +796,31 @@ async fn session_loop(
                     return Ok(());
                 }
                 maybe_request_catchup(&network, &mut writer, peer_status.as_ref().unwrap()).await?;
-            } else if let GossipEnvelope::PeerStatus { height, tip_hash } = envelope {
-                peer_status = Some(PeerStatus::new(height, tip_hash.clone()));
-                record_peer_status(&network, &known_peer, remote_addr, height, tip_hash).await;
+            } else if let GossipEnvelope::PeerStatus {
+                height,
+                tip_hash,
+                mempool_count,
+                mempool_root,
+                mempool_txs,
+            } = envelope
+            {
+                let status = PeerStatus::from_envelope(
+                    height,
+                    tip_hash,
+                    mempool_count,
+                    mempool_root,
+                    mempool_txs,
+                );
+                record_peer_status(&network, &known_peer, remote_addr, &status).await;
+                maybe_request_mempool_catchup(
+                    &network,
+                    &mut writer,
+                    &known_peer,
+                    remote_addr,
+                    &status,
+                )
+                .await?;
+                peer_status = Some(status);
                 maybe_request_catchup(&network, &mut writer, peer_status.as_ref().unwrap()).await?;
             } else {
                 process_envelope(
@@ -814,9 +887,25 @@ async fn session_loop(
                     maybe_request_catchup(&network, &mut writer, peer_status.as_ref().unwrap()).await?;
                     continue;
                 }
-                if let GossipEnvelope::PeerStatus { height, tip_hash } = &envelope {
-                    peer_status = Some(PeerStatus::new(*height, tip_hash.clone()));
-                    record_peer_status(&network, &known_peer, remote_addr, *height, tip_hash.clone()).await;
+                if let GossipEnvelope::PeerStatus {
+                    height,
+                    tip_hash,
+                    mempool_count,
+                    mempool_root,
+                    mempool_txs,
+                } = &envelope
+                {
+                    let status = PeerStatus::from_envelope(
+                        *height,
+                        tip_hash.clone(),
+                        *mempool_count,
+                        mempool_root.clone(),
+                        mempool_txs.clone(),
+                    );
+                    record_peer_status(&network, &known_peer, remote_addr, &status).await;
+                    maybe_request_mempool_catchup(&network, &mut writer, &known_peer, remote_addr, &status)
+                        .await?;
+                    peer_status = Some(status);
                     maybe_request_catchup(&network, &mut writer, peer_status.as_ref().unwrap()).await?;
                     continue;
                 }
@@ -1105,6 +1194,77 @@ async fn maybe_request_catchup(
         .await?;
     } else if peer_status.height == local_height && peer_status.tip_hash != local_tip_hash {
         write_envelope(writer, &GossipEnvelope::ChainSnapshotRequest).await?;
+    }
+    Ok(())
+}
+
+async fn maybe_request_mempool_catchup(
+    network: &GossipNetwork,
+    writer: &mut OwnedWriteHalf,
+    known_peer: &Option<String>,
+    remote_addr: SocketAddr,
+    peer_status: &PeerStatus,
+) -> Result<()> {
+    P2pMetricsCounters::inc(&network.inner.metrics.mempool_statuses_received);
+    P2pMetricsCounters::add(
+        &network.inner.metrics.mempool_status_transactions_received,
+        peer_status.mempool_txs.len() as u64,
+    );
+
+    let (local_root, local_inventory, requests) = {
+        let node = network.inner.node.lock().await;
+        (
+            node.mempool_root(),
+            node.mempool_inventory(MEMPOOL_STATUS_LIMIT),
+            node.missing_inventory_requests(&peer_status.mempool_txs, &[]),
+        )
+    };
+    let local_txs = local_inventory.into_iter().collect::<BTreeSet<_>>();
+    let shared = peer_status
+        .mempool_txs
+        .iter()
+        .filter(|signature| local_txs.contains(*signature))
+        .count();
+    let missing = peer_status.mempool_txs.len().saturating_sub(shared);
+
+    if peer_status.mempool_root != local_root {
+        P2pMetricsCounters::inc(&network.inner.metrics.mempool_status_mismatches);
+    }
+    record_peer_mempool_status(
+        network,
+        known_peer,
+        remote_addr,
+        peer_status,
+        shared,
+        missing,
+    )
+    .await;
+
+    let requested_signatures = requests
+        .iter()
+        .map(|envelope| match envelope {
+            GossipEnvelope::TransactionRequest { signatures } => signatures.len(),
+            _ => 0,
+        })
+        .sum::<usize>();
+    if requested_signatures > 0 {
+        write_payload(writer, &requests).await?;
+        P2pMetricsCounters::inc(&network.inner.metrics.mempool_transaction_requests_sent);
+        P2pMetricsCounters::add(
+            &network
+                .inner
+                .metrics
+                .mempool_transaction_request_signatures_sent,
+            requested_signatures as u64,
+        );
+        if let Some(peer) = known_peer {
+            network
+                .inner
+                .peers
+                .lock()
+                .await
+                .record_sent(peer, requests.len() as u64);
+        }
     }
     Ok(())
 }
@@ -1429,8 +1589,10 @@ fn validate_envelope_limits(envelope: &GossipEnvelope) -> Result<()> {
         GossipEnvelope::PeerList { peers } => {
             ensure_len("peer list", peers.len(), MAX_PEER_LIST)?;
         }
+        GossipEnvelope::PeerStatus { mempool_txs, .. } => {
+            ensure_len("mempool status", mempool_txs.len(), MAX_INVENTORY_ITEMS)?;
+        }
         GossipEnvelope::Hello(_)
-        | GossipEnvelope::PeerStatus { .. }
         | GossipEnvelope::ChainSnapshotRequest
         | GossipEnvelope::Transaction(_)
         | GossipEnvelope::Block(_)
@@ -1551,7 +1713,19 @@ async fn fetch_peer_status(peer: &str) -> Result<PeerStatus> {
             }
             Ok(PeerStatus::new(hello.height, hello.tip_hash))
         }
-        GossipEnvelope::PeerStatus { height, tip_hash } => Ok(PeerStatus::new(height, tip_hash)),
+        GossipEnvelope::PeerStatus {
+            height,
+            tip_hash,
+            mempool_count,
+            mempool_root,
+            mempool_txs,
+        } => Ok(PeerStatus::from_envelope(
+            height,
+            tip_hash,
+            mempool_count,
+            mempool_root,
+            mempool_txs,
+        )),
         other => anyhow::bail!("peer {peer} sent {other:?} instead of peer status"),
     }
 }
@@ -1714,16 +1888,14 @@ async fn record_peer_status(
     network: &GossipNetwork,
     known_peer: &Option<String>,
     remote_addr: SocketAddr,
-    height: u64,
-    tip_hash: String,
+    peer_status: &PeerStatus,
 ) {
     if let Some(peer) = known_peer {
-        network
-            .inner
-            .peers
-            .lock()
-            .await
-            .record_status(peer, height, tip_hash);
+        network.inner.peers.lock().await.record_status(
+            peer,
+            peer_status.height,
+            peer_status.tip_hash.clone(),
+        );
     } else {
         network
             .inner
@@ -1731,6 +1903,34 @@ async fn record_peer_status(
             .lock()
             .await
             .record_received(&remote_addr.to_string(), 1);
+    }
+}
+
+async fn record_peer_mempool_status(
+    network: &GossipNetwork,
+    known_peer: &Option<String>,
+    remote_addr: SocketAddr,
+    peer_status: &PeerStatus,
+    shared: usize,
+    missing: usize,
+) {
+    let mut peers = network.inner.peers.lock().await;
+    if let Some(peer) = known_peer {
+        peers.record_mempool_status(
+            peer,
+            peer_status.mempool_count,
+            peer_status.mempool_root.clone(),
+            shared,
+            missing,
+        );
+    } else {
+        peers.record_inbound_mempool_status(
+            &remote_addr.to_string(),
+            peer_status.mempool_count,
+            peer_status.mempool_root.clone(),
+            shared,
+            missing,
+        );
     }
 }
 
@@ -1795,8 +1995,7 @@ async fn process_hello(
         network,
         known_peer,
         remote_addr,
-        hello.height,
-        hello.tip_hash.clone(),
+        &PeerStatus::new(hello.height, hello.tip_hash.clone()),
     )
     .await;
     if request_snapshot {
@@ -2132,6 +2331,38 @@ mod tests {
     }
 
     #[test]
+    fn parser_accepts_legacy_peer_status_without_mempool_fields() {
+        let envelope =
+            parse_envelope(r#"{"type":"peer_status","height":7,"tip_hash":"tip"}"#).unwrap();
+
+        assert_eq!(
+            envelope,
+            GossipEnvelope::PeerStatus {
+                height: 7,
+                tip_hash: "tip".to_string(),
+                mempool_count: 0,
+                mempool_root: String::new(),
+                mempool_txs: Vec::new(),
+            }
+        );
+    }
+
+    #[test]
+    fn oversized_mempool_status_is_rejected_before_processing() {
+        let envelope = GossipEnvelope::PeerStatus {
+            height: 7,
+            tip_hash: "tip".to_string(),
+            mempool_count: MAX_INVENTORY_ITEMS + 1,
+            mempool_root: "root".to_string(),
+            mempool_txs: vec!["sig".to_string(); MAX_INVENTORY_ITEMS + 1],
+        };
+
+        let error = validate_envelope_limits(&envelope).unwrap_err();
+
+        assert!(error.to_string().contains("mempool status"));
+    }
+
+    #[test]
     fn received_envelope_metrics_are_categorized() {
         let metrics = super::P2pMetricsCounters::default();
 
@@ -2140,6 +2371,9 @@ mod tests {
             &GossipEnvelope::PeerStatus {
                 height: 7,
                 tip_hash: "tip".to_string(),
+                mempool_count: 0,
+                mempool_root: String::new(),
+                mempool_txs: Vec::new(),
             },
         );
         super::record_received_envelope_kind(
@@ -2176,6 +2410,9 @@ mod tests {
         let line = serde_json::to_string(&GossipEnvelope::PeerStatus {
             height: 7,
             tip_hash: "tip".to_string(),
+            mempool_count: 0,
+            mempool_root: String::new(),
+            mempool_txs: Vec::new(),
         })
         .unwrap();
         let split_at = line.len() / 2;
@@ -2883,8 +3120,7 @@ mod tests {
             &network,
             &None,
             "127.0.0.1:51729".parse().unwrap(),
-            4,
-            "tip".to_string(),
+            &super::PeerStatus::new(4, "tip".to_string()),
         )
         .await;
 
@@ -2902,7 +3138,10 @@ mod tests {
                 "127.0.0.1:9544",
                 GossipEnvelope::PeerStatus {
                     height: 0,
-                    tip_hash: "tip".to_string()
+                    tip_hash: "tip".to_string(),
+                    mempool_count: 0,
+                    mempool_root: String::new(),
+                    mempool_txs: Vec::new(),
                 }
             )
             .unwrap()

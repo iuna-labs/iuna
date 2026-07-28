@@ -1,5 +1,5 @@
 use std::{
-    collections::BTreeMap,
+    collections::{BTreeMap, BTreeSet},
     sync::Arc,
     time::{SystemTime, UNIX_EPOCH},
 };
@@ -12,7 +12,7 @@ use tokio::sync::Mutex;
 use crate::domain::{
     Amount, Block, ChainSnapshot, ChainStatus, DEFAULT_FEE_PER_BYTE, DEFAULT_TRANSACTION_FEE,
     Ledger, MINE_FINALIZER_FEE, OutPoint, PreparedBlock, StratumMineShare, StratumMineTemplate,
-    Transaction, TransactionSubmitOutcome, VDF_TARGET_BLOCK_MS, Wallet, run_vdf,
+    Transaction, TransactionSubmitOutcome, VDF_TARGET_BLOCK_MS, Wallet, hex_hash, run_vdf,
 };
 
 pub type SharedNode = Arc<Mutex<NodeCore>>;
@@ -23,6 +23,7 @@ pub const DEFAULT_VDF_ROUNDS: u32 = 67_000_000;
 pub const PROTOCOL_VERSION: u32 = 1;
 pub const NETWORK_ID: &str = "iuna-devnet-v2";
 pub const BLOCK_REQUEST_LIMIT: usize = 128;
+pub const MEMPOOL_STATUS_LIMIT: usize = 512;
 const IMPORT_REBROADCAST_LIMIT: usize = 128;
 pub const PEER_MISBEHAVIOR_BAN_SCORE: u32 = 3;
 pub const PEER_MISBEHAVIOR_BAN_MS: u64 = 10 * 60 * 1_000;
@@ -81,6 +82,12 @@ pub enum GossipEnvelope {
     PeerStatus {
         height: u64,
         tip_hash: String,
+        #[serde(default)]
+        mempool_count: usize,
+        #[serde(default)]
+        mempool_root: String,
+        #[serde(default)]
+        mempool_txs: Vec<String>,
     },
     ChainSnapshotRequest,
     BlockRangeRequest {
@@ -360,6 +367,36 @@ impl NodeCore {
         self.ledger.pending().to_vec()
     }
 
+    pub fn mempool_inventory(&self, limit: usize) -> Vec<String> {
+        let mut signatures = self
+            .ledger
+            .pending()
+            .iter()
+            .map(|tx| tx.signature().to_string())
+            .collect::<BTreeSet<_>>()
+            .into_iter()
+            .collect::<Vec<_>>();
+        signatures.truncate(limit);
+        signatures
+    }
+
+    pub fn mempool_count(&self) -> usize {
+        self.ledger.pending().len()
+    }
+
+    pub fn mempool_root(&self) -> String {
+        mempool_root_for_signatures(
+            &self
+                .ledger
+                .pending()
+                .iter()
+                .map(|tx| tx.signature().to_string())
+                .collect::<BTreeSet<_>>()
+                .into_iter()
+                .collect::<Vec<_>>(),
+        )
+    }
+
     pub fn mempool_gossip(&self) -> Vec<GossipEnvelope> {
         let transactions = self.ledger.pending().to_vec();
         if transactions.is_empty() {
@@ -388,9 +425,13 @@ impl NodeCore {
 
     pub fn peer_status(&self) -> GossipEnvelope {
         let status = self.ledger.status();
+        let mempool_txs = self.mempool_inventory(MEMPOOL_STATUS_LIMIT);
         GossipEnvelope::PeerStatus {
             height: status.height,
             tip_hash: status.tip_hash,
+            mempool_count: self.mempool_count(),
+            mempool_root: self.mempool_root(),
+            mempool_txs,
         }
     }
 
@@ -1198,6 +1239,22 @@ impl PeerBook {
             .last_known_tip_hash
             .clone()
             .or(from_peer.last_known_tip_hash);
+        to_peer.last_known_mempool_count = to_peer
+            .last_known_mempool_count
+            .or(from_peer.last_known_mempool_count);
+        to_peer.last_known_mempool_root = to_peer
+            .last_known_mempool_root
+            .clone()
+            .or(from_peer.last_known_mempool_root);
+        to_peer.last_known_mempool_shared = to_peer
+            .last_known_mempool_shared
+            .or(from_peer.last_known_mempool_shared);
+        to_peer.last_known_mempool_missing = to_peer
+            .last_known_mempool_missing
+            .or(from_peer.last_known_mempool_missing);
+        to_peer.last_mempool_status_ms = to_peer
+            .last_mempool_status_ms
+            .max(from_peer.last_mempool_status_ms);
         to_peer.last_contact_ms = to_peer.last_contact_ms.max(from_peer.last_contact_ms);
         to_peer.last_success_ms = to_peer.last_success_ms.max(from_peer.last_success_ms);
         to_peer.last_error_ms = to_peer.last_error_ms.max(from_peer.last_error_ms);
@@ -1283,6 +1340,66 @@ impl PeerBook {
         let peer = self.ensure(address, PeerDirection::Outbound);
         peer.last_known_height = Some(height);
         peer.last_known_tip_hash = Some(tip_hash);
+        peer.last_contact_ms = Some(now);
+        peer.last_success_ms = Some(now);
+        if !peer.is_banned_at(now) {
+            peer.last_error = None;
+            peer.clear_misbehavior();
+        }
+    }
+
+    pub fn record_mempool_status(
+        &mut self,
+        address: &str,
+        mempool_count: usize,
+        mempool_root: String,
+        mempool_shared: usize,
+        mempool_missing: usize,
+    ) {
+        self.record_mempool_status_with_direction(
+            address,
+            PeerDirection::Outbound,
+            mempool_count,
+            mempool_root,
+            mempool_shared,
+            mempool_missing,
+        );
+    }
+
+    pub fn record_inbound_mempool_status(
+        &mut self,
+        address: &str,
+        mempool_count: usize,
+        mempool_root: String,
+        mempool_shared: usize,
+        mempool_missing: usize,
+    ) {
+        self.record_mempool_status_with_direction(
+            address,
+            PeerDirection::Inbound,
+            mempool_count,
+            mempool_root,
+            mempool_shared,
+            mempool_missing,
+        );
+    }
+
+    fn record_mempool_status_with_direction(
+        &mut self,
+        address: &str,
+        direction: PeerDirection,
+        mempool_count: usize,
+        mempool_root: String,
+        mempool_shared: usize,
+        mempool_missing: usize,
+    ) {
+        let now = now_ms();
+        let peer = self.ensure(address, direction);
+        peer.last_known_mempool_count = Some(mempool_count);
+        peer.last_known_mempool_root = Some(mempool_root);
+        peer.last_known_mempool_shared = Some(mempool_shared);
+        peer.last_known_mempool_missing = Some(mempool_missing);
+        peer.last_mempool_status_ms = Some(now);
         peer.last_contact_ms = Some(now);
         peer.last_success_ms = Some(now);
         if !peer.is_banned_at(now) {
@@ -1395,6 +1512,16 @@ pub struct PeerInfo {
     pub messages_received: u64,
     pub last_known_height: Option<u64>,
     pub last_known_tip_hash: Option<String>,
+    #[serde(default)]
+    pub last_known_mempool_count: Option<usize>,
+    #[serde(default)]
+    pub last_known_mempool_root: Option<String>,
+    #[serde(default)]
+    pub last_known_mempool_shared: Option<usize>,
+    #[serde(default)]
+    pub last_known_mempool_missing: Option<usize>,
+    #[serde(default)]
+    pub last_mempool_status_ms: Option<u64>,
     pub last_error: Option<String>,
     pub last_transaction_rejection: Option<String>,
     pub last_contact_ms: Option<u64>,
@@ -1415,6 +1542,11 @@ impl PeerInfo {
             messages_received: 0,
             last_known_height: None,
             last_known_tip_hash: None,
+            last_known_mempool_count: None,
+            last_known_mempool_root: None,
+            last_known_mempool_shared: None,
+            last_known_mempool_missing: None,
+            last_mempool_status_ms: None,
             last_error: None,
             last_transaction_rejection: None,
             last_contact_ms: None,
@@ -1451,6 +1583,14 @@ pub fn now_ms() -> u64 {
         .duration_since(UNIX_EPOCH)
         .expect("system time is before unix epoch")
         .as_millis() as u64
+}
+
+pub fn mempool_root_for_signatures(signatures: &[String]) -> String {
+    if signatures.is_empty() {
+        String::new()
+    } else {
+        hex_hash(format!("iuna-mempool-root:{}", signatures.join("|")))
+    }
 }
 
 fn auto_pow_salt(wallet_address: &str, anchor: &str) -> u64 {

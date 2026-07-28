@@ -2,7 +2,10 @@ use std::collections::BTreeMap;
 
 use iuna::{
     adapters::chain_store::SqliteChainStore,
-    app::{DEFAULT_BURN_PER_BLOCK, InMemoryNetwork, NodeConfig, NodeCore, PeerBook, PeerDirection},
+    app::{
+        DEFAULT_BURN_PER_BLOCK, GossipEnvelope, InMemoryNetwork, NodeConfig, NodeCore, PeerBook,
+        PeerDirection,
+    },
     domain::{
         Amount, BLOCK_REWARD, DEFAULT_FEE_PER_BYTE, GenesisBurn, Ledger, MAX_BLOCK_BYTES,
         MICRO_IUNA, TransactionSubmitOutcome, VDF_TARGET_BLOCK_MS, Wallet, run_vdf, verify_vdf,
@@ -1663,6 +1666,41 @@ fn mempool_gossip_repairs_future_nonce_gap_without_networking() {
 }
 
 #[test]
+fn peer_status_advertises_mempool_and_drives_missing_transaction_request() {
+    let alice = Wallet::from_seed("mempool-status-alice");
+    let bob = Wallet::from_seed("mempool-status-bob");
+    let wallets = vec![alice.clone(), bob.clone()];
+    let allocations = allocations(&wallets, 1_000);
+    let mut alice_node = node("alice", alice, allocations.clone());
+    let bob_node = node("bob", bob, allocations);
+
+    let tx = alice_node.burn(1).unwrap();
+    let signature = tx.signature().to_string();
+
+    let GossipEnvelope::PeerStatus {
+        mempool_count,
+        mempool_root,
+        mempool_txs,
+        ..
+    } = alice_node.peer_status()
+    else {
+        panic!("expected peer status");
+    };
+
+    assert_eq!(mempool_count, 1);
+    assert!(!mempool_root.is_empty());
+    assert_eq!(mempool_txs, vec![signature.clone()]);
+
+    let requests = bob_node.missing_inventory_requests(&mempool_txs, &[]);
+    assert_eq!(
+        requests,
+        vec![GossipEnvelope::TransactionRequest {
+            signatures: vec![signature]
+        }]
+    );
+}
+
+#[test]
 fn received_block_is_rebroadcast_to_other_peers_without_networking() {
     let names = ["alice", "bob", "carol"];
     let wallets = wallets(&names);
@@ -1776,6 +1814,7 @@ fn peer_book_tracks_multiple_peers_without_networking() {
 
     peers.record_sent("127.0.0.1:9444", 2);
     peers.record_status("127.0.0.1:9444", 12, "tip-hash".to_string());
+    peers.record_mempool_status("127.0.0.1:9444", 3, "mempool-root".to_string(), 2, 1);
     peers.record_error("127.0.0.1:9445", "connection refused");
     peers.record_received("127.0.0.1:9555", 1);
     peers.record_inbound_error("127.0.0.1:56666", "invalid nonce");
@@ -1797,6 +1836,14 @@ fn peer_book_tracks_multiple_peers_without_networking() {
     assert_eq!(sent_peer.messages_sent, 2);
     assert_eq!(sent_peer.last_known_height, Some(12));
     assert_eq!(sent_peer.last_known_tip_hash.as_deref(), Some("tip-hash"));
+    assert_eq!(sent_peer.last_known_mempool_count, Some(3));
+    assert_eq!(
+        sent_peer.last_known_mempool_root.as_deref(),
+        Some("mempool-root")
+    );
+    assert_eq!(sent_peer.last_known_mempool_shared, Some(2));
+    assert_eq!(sent_peer.last_known_mempool_missing, Some(1));
+    assert!(sent_peer.last_mempool_status_ms.is_some());
     assert_eq!(sent_peer.last_error, None);
     assert!(sent_peer.last_contact_ms.is_some());
     assert!(sent_peer.last_success_ms.is_some());
