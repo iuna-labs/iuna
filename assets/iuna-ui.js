@@ -801,6 +801,11 @@ window.iunaApp = function iunaApp() {
       return Math.max(0, reward - (this.feeEstimates.mine?.fee ?? this.powMineFeeValue()));
     },
 
+    autoPowStatusLabel() {
+      if (!this.powMiningEnabled) return "PoW mining is off";
+      return this.status.mining?.last_auto_pow_mine_status || "Waiting for next automatic PoW mining tick";
+    },
+
     amountLabel(value) {
       const microiuna = Math.max(0, Math.trunc(Number(value) || 0));
       const whole = Math.floor(microiuna / 1000000);

@@ -1899,7 +1899,7 @@ const INDEX_HTML: &str = r#"<!doctype html>
       .block-card { flex-basis: 108px; }
     }
   </style>
-  <script defer src="/assets/iuna-ui.js?v=57"></script>
+  <script defer src="/assets/iuna-ui.js?v=58"></script>
   <script defer src="/assets/alpine.min.js"></script>
 </head>
 <body x-data="iunaApp()" x-init="init()" @keydown.window.escape="closeModals()" x-cloak>
@@ -2107,6 +2107,7 @@ const INDEX_HTML: &str = r#"<!doctype html>
               <button class="primary" type="submit">Save</button>
             </div>
             <div class="fee-preview" x-text="feeEstimateLabel('mine')"></div>
+            <div class="fee-preview" x-text="autoPowStatusLabel()"></div>
           </form>
           <div class="panel-separator"></div>
           <div class="stratum-config">

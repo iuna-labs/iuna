@@ -115,26 +115,26 @@ async fn main() -> Result<()> {
         };
     }
 
-    if has_chain {
-        let persistence_node = Arc::clone(&node);
-        let persistence_store = chain_store.clone();
-        tokio::spawn(async move {
-            run_chain_persistence(persistence_node, persistence_store).await;
-        });
+    let persistence_node = Arc::clone(&node);
+    let persistence_store = chain_store.clone();
+    tokio::spawn(async move {
+        run_chain_persistence(persistence_node, persistence_store).await;
+    });
 
-        let finalizer_node = Arc::clone(&node);
-        let finalizer_gossip = gossip.clone();
-        tokio::spawn(async move {
-            run_automatic_finalizer(finalizer_node, finalizer_gossip).await;
-        });
+    let finalizer_node = Arc::clone(&node);
+    let finalizer_gossip = gossip.clone();
+    tokio::spawn(async move {
+        run_automatic_finalizer(finalizer_node, finalizer_gossip).await;
+    });
 
-        let sync_node = Arc::clone(&node);
-        let sync_gossip = gossip.clone();
-        tokio::spawn(async move {
-            run_peer_sync(sync_node, sync_gossip).await;
-        });
-    } else {
-        println!("setup mode: no chain selected; skipping finalization and chain persistence");
+    let sync_node = Arc::clone(&node);
+    let sync_gossip = gossip.clone();
+    tokio::spawn(async move {
+        run_peer_sync(sync_node, sync_gossip).await;
+    });
+
+    if !has_chain {
+        println!("setup mode: waiting to join or create a chain");
     }
 
     http::serve(
@@ -525,6 +525,10 @@ async fn join_chain_ledger(join_peers: &[String], advertised_addr: SocketAddr) -
 async fn run_automatic_finalizer(node: SharedNode, gossip: p2p::GossipNetwork) {
     let mut last_logged_skip: Option<(u64, String)> = None;
     loop {
+        if !node.lock().await.has_real_chain() {
+            tokio::time::sleep(std::time::Duration::from_secs(1)).await;
+            continue;
+        }
         let (height, plan, outbox) = {
             let mut node = node.lock().await;
             let height = node.chain_height();
@@ -535,6 +539,14 @@ async fn run_automatic_finalizer(node: SharedNode, gossip: p2p::GossipNetwork) {
 
         if let Err(error) = gossip.broadcast(outbox).await {
             eprintln!("p2p broadcast failed after automatic burn: {error:#}");
+        }
+
+        if let Some(tx) = &plan.pow_mined {
+            println!(
+                "auto-pow queued mine action for height {} ({})",
+                height,
+                tx.signature()
+            );
         }
 
         let Some(work) = plan.work else {
@@ -618,7 +630,13 @@ async fn run_chain_persistence_with_interval(
     let mut last_saved_tip: Option<String> = None;
     loop {
         tokio::time::sleep(interval).await;
-        let snapshot = { node.lock().await.chain_snapshot() };
+        let snapshot = {
+            let node = node.lock().await;
+            if !node.has_real_chain() {
+                continue;
+            }
+            node.chain_snapshot()
+        };
         let Some(tip_hash) = snapshot.blocks.last().map(|block| block.hash.clone()) else {
             continue;
         };
@@ -1116,5 +1134,24 @@ VALUES (1, 4, 'bad-tip', '{"not":"a chain snapshot"}', 0)
         persistence_task.abort();
 
         assert_eq!(restored_tip.as_deref(), Some(expected_tip.as_str()));
+    }
+
+    #[tokio::test]
+    async fn persistence_loop_skips_setup_placeholder_chain() {
+        let dir = tempdir().unwrap();
+        let store = SqliteChainStore::open(dir.path().join("chain.sqlite3")).unwrap();
+        let wallet = Wallet::from_seed("background-persistence-setup");
+        let ledger = Ledger::new(BTreeMap::new(), 1);
+        let node = Arc::new(Mutex::new(NodeCore::from_ledger(wallet, ledger, 0)));
+
+        let persistence_task = tokio::spawn(run_chain_persistence_with_interval(
+            Arc::clone(&node),
+            store.clone(),
+            Duration::from_millis(10),
+        ));
+        tokio::time::sleep(Duration::from_millis(50)).await;
+        persistence_task.abort();
+
+        assert!(store.load().unwrap().is_none());
     }
 }
