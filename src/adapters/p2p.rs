@@ -588,6 +588,12 @@ async fn outbound_session(
 ) {
     let mut reconnect_delay = INITIAL_RECONNECT_DELAY;
     loop {
+        if !peer_is_configured_outbound(&network, &peer).await
+            || is_self_peer_address(&peer, network.inner.listen_addr)
+        {
+            network.inner.sessions.lock().await.remove(&peer);
+            return;
+        }
         if network.inner.peers.lock().await.is_banned(&peer) {
             sleep(MAX_RECONNECT_DELAY).await;
             continue;
@@ -664,6 +670,10 @@ async fn outbound_session(
 
         let (sender, next_receiver) = mpsc::channel(PEER_QUEUE_SIZE);
         receiver = next_receiver;
+        if !peer_is_configured_outbound(&network, &peer).await {
+            network.inner.sessions.lock().await.remove(&peer);
+            return;
+        }
         network
             .inner
             .sessions
@@ -701,6 +711,7 @@ async fn session_loop(
     );
     let mut outbound_closed = false;
     let mut peer_status: Option<PeerStatus> = None;
+    let is_outbound_session = stable_peer.is_some();
     let mut known_peer = stable_peer;
 
     if known_peer.is_some() {
@@ -713,6 +724,9 @@ async fn session_loop(
             if let GossipEnvelope::Hello(hello) = envelope {
                 peer_status =
                     Some(process_hello(&network, remote_addr, &mut known_peer, hello).await?);
+                if is_outbound_session && known_peer.is_none() {
+                    return Ok(());
+                }
                 maybe_request_catchup(&network, &mut writer, peer_status.as_ref().unwrap()).await?;
             } else if let GossipEnvelope::PeerStatus { height, tip_hash } = envelope {
                 peer_status = Some(PeerStatus::new(height, tip_hash.clone()));
@@ -727,6 +741,9 @@ async fn session_loop(
                     envelope,
                 )
                 .await?;
+                if is_outbound_session && known_peer.is_none() {
+                    return Ok(());
+                }
             }
         }
     }
@@ -774,6 +791,9 @@ async fn session_loop(
                 };
                 if let GossipEnvelope::Hello(hello) = envelope {
                     peer_status = Some(process_hello(&network, remote_addr, &mut known_peer, hello).await?);
+                    if is_outbound_session && known_peer.is_none() {
+                        return Ok(());
+                    }
                     maybe_request_catchup(&network, &mut writer, peer_status.as_ref().unwrap()).await?;
                     continue;
                 }
@@ -791,9 +811,21 @@ async fn session_loop(
                     &mut known_peer,
                     envelope,
                 ).await?;
+                if is_outbound_session && known_peer.is_none() {
+                    return Ok(());
+                }
             }
         }
     }
+}
+
+async fn peer_is_configured_outbound(network: &GossipNetwork, peer: &str) -> bool {
+    network
+        .inner
+        .peers
+        .lock()
+        .await
+        .is_configured_outbound(peer)
 }
 
 async fn process_envelope(
@@ -850,6 +882,7 @@ async fn process_envelope(
             let peer = normalize_advertised_peer(&address, remote_addr)?;
             if is_self_peer_address(&peer, network.inner.listen_addr) {
                 P2pMetricsCounters::inc(&network.inner.metrics.self_peer_rejections);
+                forget_stale_self_peer(network, known_peer).await;
             } else if remember_discoverable_advertised_peer(
                 network,
                 remote_addr,
@@ -989,14 +1022,20 @@ async fn process_transactions(
     }
 
     for rejection in rejected {
-        let peer = known_peer
-            .clone()
-            .unwrap_or_else(|| remote_addr.to_string());
         let mut peers = network.inner.peers.lock().await;
-        if transaction_rejection_counts_as_misbehavior(&rejection.reason) {
-            peers.record_misbehavior(&peer, rejection.reason);
-        } else {
-            peers.record_inbound_error(&peer, rejection.reason);
+        match known_peer.as_deref() {
+            Some(peer) if transaction_rejection_counts_as_misbehavior(&rejection.reason) => {
+                peers.record_misbehavior(peer, rejection.reason);
+            }
+            Some(peer) => {
+                peers.record_inbound_error(peer, rejection.reason);
+            }
+            None if transaction_rejection_counts_as_misbehavior(&rejection.reason) => {
+                peers.record_inbound_misbehavior(&remote_addr.to_string(), rejection.reason);
+            }
+            None => {
+                peers.record_inbound_error(&remote_addr.to_string(), rejection.reason);
+            }
         }
     }
     network.forward_outbox().await;
@@ -1651,23 +1690,6 @@ async fn record_peer_status(
     }
 }
 
-async fn record_peer_misbehavior(
-    network: &GossipNetwork,
-    known_peer: &Option<String>,
-    remote_addr: SocketAddr,
-    reason: impl Into<String>,
-) {
-    let peer = known_peer
-        .clone()
-        .unwrap_or_else(|| remote_addr.to_string());
-    network
-        .inner
-        .peers
-        .lock()
-        .await
-        .record_misbehavior(&peer, reason);
-}
-
 async fn process_hello(
     network: &GossipNetwork,
     remote_addr: SocketAddr,
@@ -1711,16 +1733,10 @@ async fn process_hello(
         let peer = normalize_advertised_peer(listen_addr, remote_addr)?;
         if is_self_peer_address(&peer, network.inner.listen_addr) {
             P2pMetricsCounters::inc(&network.inner.metrics.self_peer_rejections);
-            record_peer_misbehavior(
-                network,
-                known_peer,
-                remote_addr,
-                format!("peer announced our own p2p address {peer}"),
-            )
-            .await;
-            anyhow::bail!("peer announced our own p2p address {peer}");
+            forget_stale_self_peer(network, known_peer).await;
+        } else {
+            remember_discoverable_advertised_peer(network, remote_addr, known_peer, peer).await?;
         }
-        remember_discoverable_advertised_peer(network, remote_addr, known_peer, peer).await?;
     }
     record_peer_status(
         network,
@@ -1767,6 +1783,12 @@ async fn remember_discoverable_advertised_peer(
     }
     *known_peer = Some(peer);
     Ok(true)
+}
+
+async fn forget_stale_self_peer(network: &GossipNetwork, known_peer: &mut Option<String>) {
+    if let Some(previous_peer) = known_peer.take() {
+        network.inner.peers.lock().await.remove_peer(&previous_peer);
+    }
 }
 
 async fn record_inbound_result(
@@ -2914,6 +2936,32 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn peer_announcement_removes_outbound_peer_that_announces_self_address() {
+        let alice = Wallet::from_seed("px-self-announcement-alice");
+        let allocations = allocations(std::slice::from_ref(&alice), 1_000);
+        let node = Arc::new(tokio::sync::Mutex::new(node("alice", alice, allocations)));
+        let peers = Arc::new(tokio::sync::Mutex::new(PeerBook::from_addresses(vec![
+            "10.42.1.1:30508".to_string(),
+        ])));
+        let network = super::GossipNetwork {
+            inner: Arc::new(super::GossipNetworkInner {
+                node,
+                peers: Arc::clone(&peers),
+                listen_addr: "0.0.0.0:9444".parse().unwrap(),
+                sessions: tokio::sync::Mutex::new(BTreeMap::new()),
+                tx_delivery: tokio::sync::Mutex::new(BTreeMap::new()),
+                metrics: super::P2pMetricsCounters::default(),
+            }),
+        };
+        let mut known_peer = Some("10.42.1.1:30508".to_string());
+
+        super::forget_stale_self_peer(&network, &mut known_peer).await;
+
+        assert_eq!(known_peer, None);
+        assert!(peers.lock().await.addresses().is_empty());
+    }
+
+    #[tokio::test]
     async fn peer_list_ignores_loopback_alias_for_unspecified_self() {
         let alice = Wallet::from_seed("px-self-alias-alice");
         let allocations = allocations(std::slice::from_ref(&alice), 1_000);
@@ -2945,14 +2993,15 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn hello_rejects_loopback_alias_for_unspecified_self() {
+    async fn hello_ignores_loopback_alias_for_unspecified_self() {
         let alice = Wallet::from_seed("hello-self-alias-alice");
         let allocations = allocations(std::slice::from_ref(&alice), 1_000);
         let node = Arc::new(tokio::sync::Mutex::new(node("alice", alice, allocations)));
+        let peers = Arc::new(tokio::sync::Mutex::new(PeerBook::default()));
         let network = super::GossipNetwork {
             inner: Arc::new(super::GossipNetworkInner {
                 node,
-                peers: Arc::new(tokio::sync::Mutex::new(PeerBook::default())),
+                peers: Arc::clone(&peers),
                 listen_addr: "0.0.0.0:9545".parse().unwrap(),
                 sessions: tokio::sync::Mutex::new(BTreeMap::new()),
                 tx_delivery: tokio::sync::Mutex::new(BTreeMap::new()),
@@ -2975,19 +3024,69 @@ mod tests {
             tip_hash: "tip".to_string(),
         };
 
-        assert!(
-            super::process_hello(
-                &network,
-                "127.0.0.1:52144".parse().unwrap(),
-                &mut None,
-                hello,
-            )
-            .await
-            .unwrap_err()
-            .to_string()
-            .contains("our own p2p address")
-        );
+        super::process_hello(
+            &network,
+            "127.0.0.1:52144".parse().unwrap(),
+            &mut None,
+            hello,
+        )
+        .await
+        .unwrap();
+
         assert_eq!(network.metrics().self_peer_rejections, 1);
+        assert!(peers.lock().await.addresses().is_empty());
+        let listed = peers.lock().await.list();
+        assert_eq!(listed.len(), 1);
+        assert_eq!(listed[0].direction, PeerDirection::Inbound);
+    }
+
+    #[tokio::test]
+    async fn hello_removes_outbound_peer_that_announces_self_address() {
+        let alice = Wallet::from_seed("hello-self-outbound-alice");
+        let allocations = allocations(std::slice::from_ref(&alice), 1_000);
+        let node = Arc::new(tokio::sync::Mutex::new(node("alice", alice, allocations)));
+        let peers = Arc::new(tokio::sync::Mutex::new(PeerBook::from_addresses(vec![
+            "10.42.1.1:16987".to_string(),
+        ])));
+        let network = super::GossipNetwork {
+            inner: Arc::new(super::GossipNetworkInner {
+                node,
+                peers: Arc::clone(&peers),
+                listen_addr: "0.0.0.0:9444".parse().unwrap(),
+                sessions: tokio::sync::Mutex::new(BTreeMap::new()),
+                tx_delivery: tokio::sync::Mutex::new(BTreeMap::new()),
+                metrics: super::P2pMetricsCounters::default(),
+            }),
+        };
+        let hello = ProtocolHello {
+            protocol_version: PROTOCOL_VERSION,
+            network_id: NETWORK_ID.to_string(),
+            genesis_hash: network
+                .inner
+                .node
+                .lock()
+                .await
+                .ledger()
+                .genesis_hash()
+                .to_string(),
+            listen_addr: Some("127.0.0.1:9444".to_string()),
+            height: 0,
+            tip_hash: "tip".to_string(),
+        };
+        let mut known_peer = Some("10.42.1.1:16987".to_string());
+
+        super::process_hello(
+            &network,
+            "10.42.1.1:16987".parse().unwrap(),
+            &mut known_peer,
+            hello,
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(network.metrics().self_peer_rejections, 1);
+        assert!(known_peer.is_none());
+        assert!(peers.lock().await.addresses().is_empty());
     }
 
     fn node(_network_key: &str, wallet: Wallet, allocations: BTreeMap<String, Amount>) -> NodeCore {

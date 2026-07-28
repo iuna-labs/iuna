@@ -1147,6 +1147,12 @@ impl PeerBook {
         }
     }
 
+    pub fn is_configured_outbound(&self, address: &str) -> bool {
+        self.peers
+            .get(address)
+            .is_some_and(|peer| peer.direction != PeerDirection::Inbound)
+    }
+
     pub fn addresses(&self) -> Vec<String> {
         self.peers
             .values()
@@ -1233,8 +1239,22 @@ impl PeerBook {
     }
 
     pub fn record_misbehavior_at(&mut self, address: &str, reason: impl Into<String>, now_ms: u64) {
+        self.record_misbehavior_with_direction(address, reason, now_ms, PeerDirection::Outbound);
+    }
+
+    pub fn record_inbound_misbehavior(&mut self, address: &str, reason: impl Into<String>) {
+        self.record_misbehavior_with_direction(address, reason, now_ms(), PeerDirection::Inbound);
+    }
+
+    fn record_misbehavior_with_direction(
+        &mut self,
+        address: &str,
+        reason: impl Into<String>,
+        now_ms: u64,
+        direction: PeerDirection,
+    ) {
         let reason = reason.into();
-        let peer = self.ensure(address, PeerDirection::Outbound);
+        let peer = self.ensure(address, direction);
         peer.last_contact_ms = Some(now_ms);
         peer.last_error_ms = Some(now_ms);
         peer.last_error = Some(reason.clone());
