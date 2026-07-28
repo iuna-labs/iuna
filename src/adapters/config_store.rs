@@ -9,7 +9,7 @@ use std::{
 use anyhow::{Context, Result, bail};
 use serde::{Deserialize, Serialize};
 
-use crate::domain::{Amount, DEFAULT_FEE_PER_BYTE, MICRO_IUNA};
+use crate::domain::{Amount, DEFAULT_FEE_PER_BYTE, MICRO_IUNA, MINE_FINALIZER_FEE};
 
 const CONFIG_FILE_VERSION: u32 = 1;
 const AMOUNT_UNIT_MICROIUNA: &str = "microiuna";
@@ -38,7 +38,7 @@ impl Default for UiConfig {
             pow_mining_enabled: false,
             burn_per_block: 0,
             burn_fee: DEFAULT_BURN_FEE,
-            pow_mine_fee: DEFAULT_FEE_PER_BYTE,
+            pow_mine_fee: MINE_FINALIZER_FEE,
             peers: Vec::new(),
         }
     }
@@ -139,7 +139,7 @@ fn load(path: &Path) -> Result<UiConfig> {
         pow_mine_fee: stored
             .pow_mine_fee
             .map(|fee| fee.saturating_mul(scale))
-            .unwrap_or(DEFAULT_FEE_PER_BYTE),
+            .unwrap_or(MINE_FINALIZER_FEE),
         peers: stored.peers,
     })
 }
@@ -160,9 +160,9 @@ mod tests {
 
     use tempfile::tempdir;
 
-    use crate::domain::MICRO_IUNA;
+    use crate::domain::{MICRO_IUNA, MINE_FINALIZER_FEE};
 
-    use super::{DEFAULT_BURN_FEE, DEFAULT_FEE_PER_BYTE, UiConfig, load_or_create, save};
+    use super::{DEFAULT_BURN_FEE, UiConfig, load_or_create, save};
 
     #[test]
     fn creates_default_config_file() {
@@ -181,7 +181,7 @@ mod tests {
         assert!(stored.contains("\"pow_mining_enabled\": false"));
         assert!(stored.contains("\"burn_per_block\": 0"));
         assert!(stored.contains("\"burn_fee\": 1"));
-        assert!(stored.contains("\"pow_mine_fee\": 1"));
+        assert!(stored.contains("\"pow_mine_fee\": 1000000"));
         assert!(stored.contains("\"peers\": []"));
     }
 
@@ -250,7 +250,7 @@ mod tests {
         assert!(!config.pow_mining_enabled);
         assert_eq!(config.burn_per_block, 0);
         assert_eq!(config.burn_fee, DEFAULT_BURN_FEE);
-        assert_eq!(config.pow_mine_fee, DEFAULT_FEE_PER_BYTE);
+        assert_eq!(config.pow_mine_fee, MINE_FINALIZER_FEE);
         assert_eq!(config.peers, vec!["127.0.0.1:9444"]);
     }
 
@@ -276,7 +276,7 @@ mod tests {
         assert!(config.mining_enabled);
         assert_eq!(config.burn_per_block, 2 * MICRO_IUNA);
         assert_eq!(config.burn_fee, MICRO_IUNA);
-        assert_eq!(config.pow_mine_fee, DEFAULT_FEE_PER_BYTE);
+        assert_eq!(config.pow_mine_fee, MINE_FINALIZER_FEE);
     }
 
     #[test]

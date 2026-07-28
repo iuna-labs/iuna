@@ -5,8 +5,7 @@ use iuna::{
     app::{DEFAULT_BURN_PER_BLOCK, InMemoryNetwork, NodeConfig, NodeCore, PeerBook, PeerDirection},
     domain::{
         Amount, BLOCK_REWARD, DEFAULT_FEE_PER_BYTE, GenesisBurn, Ledger, MAX_BLOCK_BYTES,
-        MICRO_IUNA, MINE_REWARD, TransactionSubmitOutcome, VDF_TARGET_BLOCK_MS, Wallet, run_vdf,
-        verify_vdf,
+        MICRO_IUNA, TransactionSubmitOutcome, VDF_TARGET_BLOCK_MS, Wallet, run_vdf, verify_vdf,
     },
 };
 use tempfile::tempdir;
@@ -291,48 +290,46 @@ fn block_with_forged_transaction_is_rejected() {
 }
 
 #[test]
-fn mine_action_introduces_one_iuna_and_block_author_gets_fees_only() {
+fn mine_action_introduces_two_iuna_and_splits_one_to_miner_one_to_finalizer() {
     let alice = Wallet::from_seed("alice");
     let mut allocations = BTreeMap::new();
     allocations.insert(alice.address().to_string(), 2 * MICRO_IUNA);
 
     let mut ledger = Ledger::new(allocations, 10);
     let mine = ledger.build_mine(alice.address()).unwrap();
-    assert_eq!(mine.amount(), MINE_REWARD);
+    assert_eq!(mine.amount(), MICRO_IUNA);
+    assert_eq!(mine.fee(), MICRO_IUNA);
     ledger.submit_transaction(mine.clone()).unwrap();
     submit_burn(&mut ledger, &alice, MICRO_IUNA);
     let block = ledger.mine_next_block(&alice, 1).unwrap();
-    assert_eq!(block.reward, 0);
+    assert_eq!(block.reward, MICRO_IUNA);
 
     ledger.apply_block(block).unwrap();
-    assert_eq!(ledger.balance_of(alice.address()), 2 * MICRO_IUNA);
+    assert_eq!(ledger.balance_of(alice.address()), 3 * MICRO_IUNA);
     assert!(!ledger.submit_transaction(mine).unwrap());
-    assert_eq!(ledger.balance_of(alice.address()), 2 * MICRO_IUNA);
+    assert_eq!(ledger.balance_of(alice.address()), 3 * MICRO_IUNA);
 }
 
 #[test]
-fn mine_action_fee_is_chosen_by_pow_miner_and_paid_to_block_finalizer() {
+fn mine_action_protocol_fee_is_paid_to_block_finalizer() {
     let alice = Wallet::from_seed("mine-fee-alice");
     let bob = Wallet::from_seed("mine-fee-bob");
     let mut allocations = BTreeMap::new();
     allocations.insert(bob.address().to_string(), 2 * MICRO_IUNA);
 
     let mut ledger = Ledger::new(allocations, 10);
-    let mine_fee = MICRO_IUNA / 4;
-    let mine = ledger
-        .build_mine_with_fee(alice.address(), mine_fee)
-        .unwrap();
-    assert_eq!(mine.amount(), MINE_REWARD - mine_fee);
-    assert_eq!(mine.fee(), mine_fee);
+    let mine = ledger.build_mine(alice.address()).unwrap();
+    assert_eq!(mine.amount(), MICRO_IUNA);
+    assert_eq!(mine.fee(), MICRO_IUNA);
     ledger.submit_transaction(mine).unwrap();
     submit_burn(&mut ledger, &bob, MICRO_IUNA);
 
     let block = ledger.mine_next_block(&bob, 1).unwrap();
-    assert_eq!(block.reward, mine_fee);
+    assert_eq!(block.reward, MICRO_IUNA);
     ledger.apply_block(block).unwrap();
 
-    assert_eq!(ledger.balance_of(alice.address()), MINE_REWARD - mine_fee);
-    assert_eq!(ledger.balance_of(bob.address()), MICRO_IUNA + mine_fee);
+    assert_eq!(ledger.balance_of(alice.address()), MICRO_IUNA);
+    assert_eq!(ledger.balance_of(bob.address()), 2 * MICRO_IUNA);
 }
 
 #[test]
@@ -811,7 +808,10 @@ fn pow_only_node_gossips_mine_action_to_pob_only_finalizer() {
         .set_pow_mining_settings(true, DEFAULT_FEE_PER_BYTE)
         .unwrap();
 
-    let bob_plan = bob_node.prepare_automatic_mining(1);
+    let bob_plan = (1..10_000)
+        .map(|timestamp| bob_node.prepare_automatic_mining(timestamp))
+        .find(|plan| plan.pow_mined.is_some())
+        .expect("B should eventually queue a mine action");
     let mine = bob_plan.pow_mined.expect("B should queue a mine action");
     assert_eq!(
         bob_plan.skipped_reason.as_deref(),

@@ -6,12 +6,13 @@ use std::{
 
 use anyhow::{Context, Result, bail};
 use serde::{Deserialize, Serialize};
+use sha2::{Digest, Sha256};
 use tokio::sync::Mutex;
 
 use crate::domain::{
     Amount, Block, ChainSnapshot, ChainStatus, DEFAULT_FEE_PER_BYTE, DEFAULT_TRANSACTION_FEE,
-    Ledger, OutPoint, PreparedBlock, StratumMineShare, StratumMineTemplate, Transaction,
-    TransactionSubmitOutcome, TxOutput, VDF_TARGET_BLOCK_MS, Wallet, run_vdf,
+    Ledger, MINE_FINALIZER_FEE, OutPoint, PreparedBlock, StratumMineShare, StratumMineTemplate,
+    Transaction, TransactionSubmitOutcome, VDF_TARGET_BLOCK_MS, Wallet, run_vdf,
 };
 
 pub type SharedNode = Arc<Mutex<NodeCore>>;
@@ -25,6 +26,7 @@ pub const BLOCK_REQUEST_LIMIT: usize = 128;
 const IMPORT_REBROADCAST_LIMIT: usize = 128;
 pub const PEER_MISBEHAVIOR_BAN_SCORE: u32 = 3;
 pub const PEER_MISBEHAVIOR_BAN_MS: u64 = 10 * 60 * 1_000;
+const AUTO_POW_NONCE_ATTEMPTS_PER_TICK: u64 = 8;
 
 #[derive(Clone, Debug)]
 pub struct NodeConfig {
@@ -199,6 +201,14 @@ pub struct AutoMinePlan {
     pub skipped_reason: Option<String>,
 }
 
+#[derive(Clone, Debug, Eq, PartialEq)]
+struct AutoPowMineCursor {
+    anchor: String,
+    salt: u64,
+    next_nonce: u64,
+    searched: u64,
+}
+
 #[derive(Clone, Debug)]
 pub struct NodeCore {
     wallet: NodeWallet,
@@ -211,6 +221,7 @@ pub struct NodeCore {
     last_auto_burn_height: Option<u64>,
     last_auto_pow_mine_anchor: Option<String>,
     last_auto_pow_mine_status: Option<String>,
+    auto_pow_mine_cursor: Option<AutoPowMineCursor>,
     outbox: Vec<GossipEnvelope>,
 }
 
@@ -290,12 +301,13 @@ impl NodeCore {
             ledger,
             automatic_mining_enabled,
             pow_mining_enabled: false,
-            pow_mine_fee: DEFAULT_FEE_PER_BYTE,
+            pow_mine_fee: MINE_FINALIZER_FEE,
             burn_per_block,
             burn_fee,
             last_auto_burn_height: None,
             last_auto_pow_mine_anchor: None,
             last_auto_pow_mine_status: None,
+            auto_pow_mine_cursor: None,
             outbox: Vec::new(),
         }
     }
@@ -313,6 +325,7 @@ impl NodeCore {
         self.last_auto_burn_height = None;
         self.last_auto_pow_mine_anchor = None;
         self.last_auto_pow_mine_status = None;
+        self.auto_pow_mine_cursor = None;
     }
 
     pub fn ledger(&self) -> &Ledger {
@@ -468,7 +481,7 @@ impl NodeCore {
                 pow_mining_enabled: self.pow_mining_enabled,
                 burn_per_block: self.burn_per_block,
                 automatic_burn_fee: self.burn_fee,
-                automatic_pow_mine_fee: self.pow_mine_fee,
+                automatic_pow_mine_fee: MINE_FINALIZER_FEE,
                 last_auto_pow_mine_anchor: self.last_auto_pow_mine_anchor.clone(),
                 last_auto_pow_mine_status: if self.pow_mining_enabled && !self.has_real_chain() {
                     Some("waiting for a real chain before PoW mining can start".to_string())
@@ -519,6 +532,7 @@ impl NodeCore {
 
     pub fn set_pow_mining_enabled(&mut self, enabled: bool) {
         self.pow_mining_enabled = enabled;
+        self.auto_pow_mine_cursor = None;
         if !enabled {
             self.last_auto_pow_mine_anchor = None;
             self.last_auto_pow_mine_status = None;
@@ -528,9 +542,10 @@ impl NodeCore {
         }
     }
 
-    pub fn set_pow_mining_settings(&mut self, enabled: bool, fee: Amount) -> Result<()> {
+    pub fn set_pow_mining_settings(&mut self, enabled: bool, _fee: Amount) -> Result<()> {
         self.pow_mining_enabled = enabled;
-        self.pow_mine_fee = fee;
+        self.pow_mine_fee = MINE_FINALIZER_FEE;
+        self.auto_pow_mine_cursor = None;
         if !enabled {
             self.last_auto_pow_mine_anchor = None;
             self.last_auto_pow_mine_status = None;
@@ -645,8 +660,8 @@ impl NodeCore {
         Ok(tx)
     }
 
-    pub fn estimate_mine_fee(&self, fee_per_byte: Amount) -> Result<FeeEstimate> {
-        self.build_mine_with_fee_rate(fee_per_byte)
+    pub fn estimate_mine_fee(&self, _fee_per_byte: Amount) -> Result<FeeEstimate> {
+        self.build_mine_with_fee_rate(MINE_FINALIZER_FEE)
             .map(|(_, estimate)| estimate)
     }
 
@@ -732,48 +747,40 @@ impl NodeCore {
         })
     }
 
-    fn build_mine_with_fee_rate(&self, fee_per_byte: Amount) -> Result<(Transaction, FeeEstimate)> {
-        converge_fee_by_byte(fee_per_byte, |fee| {
-            self.ledger.build_mine_with_fee(self.wallet.address(), fee)
-        })
+    fn build_mine_with_fee_rate(
+        &self,
+        _fee_per_byte: Amount,
+    ) -> Result<(Transaction, FeeEstimate)> {
+        let tx = self
+            .ledger
+            .build_mine_with_fee(self.wallet.address(), MINE_FINALIZER_FEE)?;
+        Ok((
+            tx.clone(),
+            FeeEstimate {
+                bytes: tx.economic_size_bytes(),
+                fee: tx.fee(),
+            },
+        ))
     }
 
     fn estimate_external_mine_fee(
         &self,
-        recipient: &str,
-        anchor: &str,
-        difficulty_bits: u32,
+        _recipient: &str,
+        _anchor: &str,
+        _difficulty_bits: u32,
     ) -> Result<Amount> {
-        let fee_per_byte = self.pow_mine_fee;
-        let mine_reward = self.ledger.status().mine_reward;
-        let mut fee = 0;
-        for _ in 0..16 {
-            if fee > mine_reward {
-                bail!("mine transaction fee exceeds reward");
-            }
-            let tx = Transaction::Mine {
-                output: TxOutput {
-                    address: recipient.to_string(),
-                    amount: mine_reward - fee,
-                },
-                anchor: anchor.to_string(),
-                salt: 1,
-                nonce: u64::MAX,
-                difficulty_bits,
-                fee,
-                proof_header: Some("00".repeat(80)),
-                signature: "00".repeat(32),
-            };
-            let bytes = tx.economic_size_bytes();
-            let next_fee = fee_per_byte
-                .checked_mul(bytes as Amount)
-                .context("fee per byte times transaction bytes overflows")?;
-            if fee >= next_fee {
-                return Ok(fee);
-            }
-            fee = next_fee;
-        }
-        Ok(fee.min(mine_reward))
+        Ok(MINE_FINALIZER_FEE)
+    }
+
+    fn estimate_local_mine_fee(
+        &self,
+        _recipient: &str,
+        _anchor: &str,
+        _salt: u64,
+        _difficulty_bits: u32,
+        _fee_per_byte: Amount,
+    ) -> Result<Amount> {
+        Ok(MINE_FINALIZER_FEE)
     }
 
     pub fn mine_one(&mut self) -> Result<Block> {
@@ -886,6 +893,7 @@ impl NodeCore {
     fn prepare_automatic_pow_mine(&mut self) -> Result<Option<Transaction>> {
         if !self.pow_mining_enabled {
             self.last_auto_pow_mine_status = None;
+            self.auto_pow_mine_cursor = None;
             return Ok(None);
         }
         let anchor = self
@@ -894,41 +902,64 @@ impl NodeCore {
             .last()
             .map(|block| block.hash.clone())
             .context("ledger has no anchor block")?;
-        if self.last_auto_pow_mine_anchor.as_deref() == Some(anchor.as_str()) {
-            self.last_auto_pow_mine_status =
-                Some("already queued a mine action for the current tip".to_string());
-            return Ok(None);
+        let wallet_address = self.wallet.address().to_string();
+        let difficulty_bits = self.ledger.current_mine_difficulty_bits();
+        let needs_cursor = self
+            .auto_pow_mine_cursor
+            .as_ref()
+            .is_none_or(|cursor| cursor.anchor != anchor);
+        if needs_cursor {
+            self.auto_pow_mine_cursor = Some(AutoPowMineCursor {
+                salt: auto_pow_salt(&wallet_address, &anchor),
+                anchor: anchor.clone(),
+                next_nonce: 0,
+                searched: 0,
+            });
         }
-        if self.wallet_has_mine_for_anchor(&anchor) {
-            self.last_auto_pow_mine_anchor = Some(anchor);
-            self.last_auto_pow_mine_status =
-                Some("mine action is already pending for the current tip".to_string());
-            return Ok(None);
+        let cursor = self
+            .auto_pow_mine_cursor
+            .as_ref()
+            .context("automatic PoW cursor was not initialized")?
+            .clone();
+        let fee = self.estimate_local_mine_fee(
+            &wallet_address,
+            &anchor,
+            cursor.salt,
+            difficulty_bits,
+            self.pow_mine_fee,
+        )?;
+        let outcome = self.ledger.search_mine_with_fee(
+            wallet_address,
+            fee,
+            cursor.salt,
+            cursor.next_nonce,
+            AUTO_POW_NONCE_ATTEMPTS_PER_TICK,
+        )?;
+        let mut searched = outcome.attempts;
+        if let Some(cursor) = &mut self.auto_pow_mine_cursor {
+            if cursor.anchor == anchor {
+                cursor.next_nonce = outcome.next_nonce;
+                cursor.searched = cursor.searched.saturating_add(outcome.attempts);
+                searched = cursor.searched;
+            }
         }
-        let (tx, _) = self.build_mine_with_fee_rate(self.pow_mine_fee)?;
+        let Some(tx) = outcome.transaction else {
+            self.last_auto_pow_mine_status = Some(format!(
+                "searched {searched} PoW nonces for the current tip; no proof yet"
+            ));
+            return Ok(None);
+        };
         if self.ledger.submit_transaction(tx.clone())? {
             self.last_auto_pow_mine_anchor = Some(anchor);
-            self.last_auto_pow_mine_status =
-                Some("queued mine action for the current tip".to_string());
+            self.last_auto_pow_mine_status = Some(format!(
+                "queued mine action after {searched} PoW nonce attempts for the current tip"
+            ));
             self.outbox.push(GossipEnvelope::Transaction(tx.clone()));
             return Ok(Some(tx));
         }
         self.last_auto_pow_mine_status =
             Some("mine action was already known by the mempool".to_string());
         Ok(None)
-    }
-
-    fn wallet_has_mine_for_anchor(&self, anchor: &str) -> bool {
-        self.ledger.pending().iter().any(|tx| {
-            matches!(
-                tx,
-                Transaction::Mine {
-                    output,
-                    anchor: tx_anchor,
-                    ..
-                } if tx_anchor == anchor && output.address == self.wallet.address()
-            )
-        })
     }
 
     fn prepare_automatic_burn(&mut self) -> Result<Option<Transaction>> {
@@ -1069,6 +1100,7 @@ impl NodeCore {
             self.last_auto_burn_height = None;
             self.last_auto_pow_mine_anchor = None;
             self.last_auto_pow_mine_status = None;
+            self.auto_pow_mine_cursor = None;
             self.enqueue_imported_blocks(previous_height);
         }
         Ok(())
@@ -1089,6 +1121,7 @@ impl NodeCore {
         self.last_auto_burn_height = None;
         self.last_auto_pow_mine_anchor = None;
         self.last_auto_pow_mine_status = None;
+        self.auto_pow_mine_cursor = None;
         self.enqueue_imported_blocks(previous_height);
         Ok(true)
     }
@@ -1420,6 +1453,13 @@ pub fn now_ms() -> u64 {
         .as_millis() as u64
 }
 
+fn auto_pow_salt(wallet_address: &str, anchor: &str) -> u64 {
+    let digest = Sha256::digest(format!("iuna-auto-pow:{wallet_address}:{anchor}").as_bytes());
+    let mut bytes = [0_u8; 8];
+    bytes.copy_from_slice(&digest[..8]);
+    u64::from_be_bytes(bytes)
+}
+
 fn converge_fee_by_byte(
     fee_per_byte: Amount,
     mut build: impl FnMut(Amount) -> Result<Transaction>,
@@ -1482,7 +1522,7 @@ fn converge_fee_by_byte(
 mod tests {
     use std::collections::BTreeMap;
 
-    use crate::domain::{Ledger, MICRO_IUNA, Transaction, Wallet};
+    use crate::domain::{Ledger, MICRO_IUNA, MINE_FINALIZER_FEE, Transaction, Wallet};
 
     use super::{NodeConfig, NodeCore};
 
@@ -1512,7 +1552,7 @@ mod tests {
     }
 
     #[test]
-    fn automatic_pow_mining_queues_one_mine_action_per_anchor() {
+    fn automatic_pow_mining_searches_bounded_nonce_batches_per_tip() {
         let wallet = Wallet::from_seed("automatic-pow-mining-wallet");
         let mut node = NodeCore::new(NodeConfig {
             wallet: wallet.clone(),
@@ -1531,6 +1571,11 @@ mod tests {
 
         node.set_pow_mining_enabled(true);
         let first = node.prepare_automatic_mining(2);
+        assert!(node.ledger().pending().len() <= 1);
+        let first = std::iter::once(first)
+            .chain((3..10_000).map(|timestamp| node.prepare_automatic_mining(timestamp)))
+            .find(|plan| plan.pow_mined.is_some())
+            .expect("bounded PoW search should eventually find a proof");
         let first_mine = first.pow_mined.as_ref().expect("PoW should be queued");
         let Transaction::Mine {
             anchor,
@@ -1545,32 +1590,34 @@ mod tests {
         assert_eq!(anchor, &node.chain().last().unwrap().hash);
         assert_eq!(output.address, wallet.address());
         let minimum_fee = first_mine.economic_size_bytes() as u64;
-        let (_, expected_estimate) = node
-            .build_mine_with_fee_rate(node.status().mining.automatic_pow_mine_fee)
-            .unwrap();
         assert!(*fee >= minimum_fee);
-        assert_eq!(*fee, expected_estimate.fee);
         assert_eq!(
             *difficulty_bits,
             node.ledger().current_mine_difficulty_bits()
         );
         assert_eq!(node.ledger().pending().len(), 1);
-        assert_eq!(
-            node.status().mining.last_auto_pow_mine_status.as_deref(),
-            Some("queued mine action for the current tip")
+        assert!(
+            node.status()
+                .mining
+                .last_auto_pow_mine_status
+                .as_deref()
+                .unwrap_or_default()
+                .contains("queued mine action after")
         );
 
-        let second = node.prepare_automatic_mining(3);
-        assert!(second.pow_mined.is_none());
-        assert_eq!(node.ledger().pending().len(), 1);
-        assert_eq!(
-            node.status().mining.last_auto_pow_mine_status.as_deref(),
-            Some("already queued a mine action for the current tip")
+        let second = (10_000..20_000)
+            .map(|timestamp| node.prepare_automatic_mining(timestamp))
+            .find(|plan| plan.pow_mined.is_some())
+            .expect("automatic PoW should keep searching the same tip after one proof");
+        assert_ne!(
+            second.pow_mined.as_ref().unwrap().signature(),
+            first_mine.signature()
         );
+        assert_eq!(node.ledger().pending().len(), 2);
     }
 
     #[test]
-    fn automatic_pow_mining_uses_configured_mine_fee() {
+    fn automatic_pow_mining_uses_protocol_finalizer_fee() {
         let wallet = Wallet::from_seed("automatic-pow-mining-fee-wallet");
         let mut node = NodeCore::new(NodeConfig {
             wallet,
@@ -1580,25 +1627,21 @@ mod tests {
             burn_fee: 0,
         });
 
-        let configured_fee_per_byte = 2;
-        node.set_pow_mining_settings(true, configured_fee_per_byte)
-            .unwrap();
-        let plan = node.prepare_automatic_mining(1);
+        node.set_pow_mining_settings(true, 2).unwrap();
+        let plan = (1..10_000)
+            .map(|timestamp| node.prepare_automatic_mining(timestamp))
+            .find(|plan| plan.pow_mined.is_some())
+            .expect("bounded PoW search should eventually find a proof");
         let mine = plan.pow_mined.expect("PoW should be queued");
 
-        let minimum_fee = mine.economic_size_bytes() as u64 * configured_fee_per_byte;
-        let (_, expected_estimate) = node
-            .build_mine_with_fee_rate(configured_fee_per_byte)
-            .unwrap();
-        assert!(mine.fee() >= minimum_fee);
-        assert_eq!(mine.fee(), expected_estimate.fee);
+        assert_eq!(mine.fee(), MINE_FINALIZER_FEE);
         assert_eq!(
             mine.amount(),
             node.ledger().status().mine_reward - mine.fee()
         );
         assert_eq!(
             node.status().mining.automatic_pow_mine_fee,
-            configured_fee_per_byte
+            MINE_FINALIZER_FEE
         );
     }
 
@@ -1614,47 +1657,6 @@ mod tests {
         });
 
         assert_eq!(node.status().app_version, env!("CARGO_PKG_VERSION"));
-    }
-
-    #[test]
-    fn automatic_pow_mining_reports_fee_rate_above_reward() {
-        let wallet = Wallet::from_seed("automatic-pow-mining-too-high-fee-wallet");
-        let mut node = NodeCore::new(NodeConfig {
-            wallet: wallet.clone(),
-            genesis_allocations: BTreeMap::new(),
-            vdf_rounds: 10,
-            burn_per_block: 0,
-            burn_fee: 0,
-        });
-        let mut genesis_allocations = BTreeMap::new();
-        genesis_allocations.insert(wallet.address().to_string(), 1);
-        let ledger = Ledger::new_with_genesis_burns(
-            genesis_allocations,
-            vec![crate::domain::GenesisBurn::new(wallet.address(), 1)],
-            10,
-        )
-        .unwrap();
-        node.import_verified_ledger(ledger).unwrap();
-
-        node.set_pow_mining_settings(true, MICRO_IUNA).unwrap();
-        let plan = node.prepare_automatic_mining(1);
-
-        assert!(plan.pow_mined.is_none());
-        assert!(
-            plan.skipped_reason
-                .as_deref()
-                .unwrap_or_default()
-                .contains("fee exceeds reward")
-        );
-        assert!(node.status().mining.pow_mining_enabled);
-        assert!(
-            node.status()
-                .mining
-                .last_auto_pow_mine_status
-                .as_deref()
-                .unwrap_or_default()
-                .contains("fee exceeds reward")
-        );
     }
 
     #[test]

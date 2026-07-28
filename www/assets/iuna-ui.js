@@ -38,8 +38,8 @@ window.iunaApp = function iunaApp() {
     burnFeeDraft: "0.000001",
     miningEnabled: false,
     powMiningEnabled: false,
-    powMineFee: 1,
-    powMineFeeDraft: "0.000001",
+    powMineFee: 1000000,
+    powMineFeeDraft: "1",
     powMineFeeDirty: false,
     burnAmountDirty: false,
     transferTo: "",
@@ -655,10 +655,8 @@ window.iunaApp = function iunaApp() {
     },
 
     async refreshMineFeeEstimate() {
-      const feePerByte = this.parseiunaAmount(this.powMineFeeDraft);
       this.feeEstimates.mine = await this.fetchFeeEstimate("/api/fee-estimate/mine", {
         enabled: this.powMiningEnabled,
-        fee_per_byte: feePerByte,
       });
     },
 
@@ -751,15 +749,13 @@ window.iunaApp = function iunaApp() {
     async setPowMiningEnabled(enabled) {
       const previous = this.powMiningEnabled;
       try {
-        const fee = this.parseiunaAmountRequired(this.powMineFeeDraft, "Mine fee per byte is required");
         this.powMiningEnabled = enabled;
         await this.postForm(
           "/api/settings/pow-mining",
-          { enabled, fee_per_byte: fee },
+          { enabled },
           enabled ? "PoW mining turned on" : "PoW mining turned off"
         );
         this.powMineFeeDirty = false;
-        this.powMineFee = fee;
       } catch (error) {
         this.powMiningEnabled = previous;
         this.showFlash(error.message, "error");
@@ -768,17 +764,14 @@ window.iunaApp = function iunaApp() {
 
     async savePowMining() {
       try {
-        const fee = this.parseiunaAmountRequired(this.powMineFeeDraft, "Mine fee per byte is required");
-        this.powMineFeeDraft = this.amountLabel(fee);
         await this.postForm(
           "/api/settings/pow-mining",
-          { enabled: this.powMiningEnabled, fee_per_byte: fee },
+          { enabled: this.powMiningEnabled },
           this.powMiningEnabled
-            ? `Mine fee rate set to ${this.amountLabel(fee)} IUNA per byte`
+            ? "PoW mining settings saved"
             : `Mine settings saved while off`
         );
         this.powMineFeeDirty = false;
-        this.powMineFee = fee;
       } catch (error) {
         this.showFlash(error.message, "error");
       }

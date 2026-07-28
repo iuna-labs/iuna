@@ -371,7 +371,7 @@ fn try_random_transaction(
         }
         2 if round % 4 == 0 => {
             let wallet = &wallets[rng.index(wallets.len())];
-            if let Ok(tx) = ledger.build_mine_with_fee(wallet.address(), rng.next_u64() % 3) {
+            if let Ok(tx) = ledger.build_mine(wallet.address()) {
                 let _ = ledger.submit_transaction(tx);
             }
         }

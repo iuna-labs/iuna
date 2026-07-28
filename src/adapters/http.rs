@@ -31,7 +31,9 @@ use crate::{
     app::{
         FeeEstimate, NodeStatus, PeerDirection, PeerInfo, SharedNode, SharedPeerBook, StratumStatus,
     },
-    domain::{Amount, Block, OutPoint, Transaction, TxInput, TxOutput, hex_hash},
+    domain::{
+        Amount, Block, MINE_FINALIZER_FEE, OutPoint, Transaction, TxInput, TxOutput, hex_hash,
+    },
 };
 
 const EXPLORER_LIMIT: usize = 50;
@@ -106,7 +108,6 @@ struct BurnSettingsForm {
 #[derive(Debug, Deserialize)]
 struct PowMiningForm {
     enabled: bool,
-    fee_per_byte: Option<Amount>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -610,11 +611,7 @@ async fn api_pow_mining_form(
     State(state): State<HttpState>,
     Form(form): Form<PowMiningForm>,
 ) -> Json<ActionResponse> {
-    let result = match required_fee_per_byte_mine(&form) {
-        Ok(fee_per_byte) => set_pow_mining(&state, form.enabled, fee_per_byte).await,
-        Err(error) => Err(error),
-    };
-    action_json(result)
+    action_json(set_pow_mining(&state, form.enabled, MINE_FINALIZER_FEE).await)
 }
 
 async fn burn_per_block_form(
@@ -718,18 +715,17 @@ async fn set_pow_mining(state: &HttpState, enabled: bool, fee: Amount) -> Result
         let mut node = state.node.lock().await;
         node.set_pow_mining_settings(enabled, fee)?;
     }
-    persist_pow_mining_config(&state.ui_config, &state.config_path, enabled, fee).await
+    persist_pow_mining_config(&state.ui_config, &state.config_path, enabled).await
 }
 
 async fn persist_pow_mining_config(
     ui_config: &Arc<Mutex<UiConfig>>,
     config_path: &Path,
     enabled: bool,
-    fee: Amount,
 ) -> Result<()> {
     let mut config = ui_config.lock().await;
     config.pow_mining_enabled = enabled;
-    config.pow_mine_fee = fee;
+    config.pow_mine_fee = MINE_FINALIZER_FEE;
     config_store::save(config_path, &config)
 }
 
@@ -1328,9 +1324,12 @@ async fn estimate_burn_fee(state: &HttpState, form: BurnSettingsForm) -> Result<
         .estimate_burn_fee(form.amount, fee_per_byte)
 }
 
-async fn estimate_mine_fee(state: &HttpState, form: PowMiningForm) -> Result<FeeEstimate> {
-    let fee_per_byte = required_fee_per_byte_mine(&form)?;
-    state.node.lock().await.estimate_mine_fee(fee_per_byte)
+async fn estimate_mine_fee(state: &HttpState, _form: PowMiningForm) -> Result<FeeEstimate> {
+    state
+        .node
+        .lock()
+        .await
+        .estimate_mine_fee(MINE_FINALIZER_FEE)
 }
 
 fn required_fee_per_byte_transfer(form: &TransferForm) -> Result<Amount> {
@@ -1338,10 +1337,6 @@ fn required_fee_per_byte_transfer(form: &TransferForm) -> Result<Amount> {
 }
 
 fn required_fee_per_byte_burn(form: &BurnSettingsForm) -> Result<Amount> {
-    form.fee_per_byte.context("fee per byte is required")
-}
-
-fn required_fee_per_byte_mine(form: &PowMiningForm) -> Result<Amount> {
     form.fee_per_byte.context("fee per byte is required")
 }
 
@@ -2076,7 +2071,7 @@ const INDEX_HTML: &str = r#"<!doctype html>
         </div>
         <div class="panel">
           <h3>Mine</h3>
-          <div class="panel-description">Mine with PoW to introduce new IUNA. The miner chooses the fee paid to the block finalizer; the rest of the fixed mine reward goes to this wallet.</div>
+          <div class="panel-description">Mine with PoW to introduce new IUNA. Each mine action issues 2 IUNA: 1 IUNA goes to the miner and 1 IUNA is paid to the block finalizer.</div>
           <form class="mine-settings-form" @submit.prevent="savePowMining">
             <div class="mine-action-row">
               <div class="mine-stats" aria-label="PoW issuance settings">
@@ -2097,15 +2092,11 @@ const INDEX_HTML: &str = r#"<!doctype html>
                   <div class="mine-stat-value"><span x-text="status.chain?.current_mine_difficulty_bits ?? status.launch_profile?.mine_difficulty_bits ?? '-'"></span> bits</div>
                 </div>
               </div>
-              <label class="toggle-switch" :class="{ active: powMiningEnabled }" title="Automatically queue one PoW mine action per chain tip">
+              <label class="toggle-switch" :class="{ active: powMiningEnabled }" title="Continuously search for PoW mine actions with a small local work budget">
                 <input type="checkbox" :checked="powMiningEnabled" @change="setPowMiningEnabled($event.target.checked)">
                 <span class="toggle-track"><span class="toggle-thumb"></span></span>
                 <span class="toggle-text" x-text="powMiningEnabled ? 'On' : 'Off'"></span>
               </label>
-            </div>
-            <div class="mine-fee-fields">
-              <label>Fee / byte<input x-model="powMineFeeDraft" @input="powMineFeeDirty = true; scheduleFeeEstimates()" type="number" min="0" step="0.000001" required></label>
-              <button class="primary" type="submit">Save</button>
             </div>
             <div class="fee-preview" x-text="feeEstimateLabel('mine')"></div>
             <div class="fee-preview" x-text="autoPowStatusLabel()"></div>
@@ -2545,15 +2536,18 @@ mod tests {
     use crate::{
         adapters::{config_store, config_store::UiConfig, p2p::GossipNetwork, wallet_store},
         app::{NodeCore, PeerBook, PeerDirection, PeerInfo, StratumStatus},
-        domain::{Block, Ledger, MICRO_IUNA, MINE_REWARD, OutPoint, Transaction, Wallet},
+        domain::{
+            Block, Ledger, MICRO_IUNA, MINE_FINALIZER_FEE, MINE_REWARD, OutPoint, Transaction,
+            Wallet,
+        },
     };
 
     use super::{
         AUTH_COOKIE_NAME, HttpState, PEER_STALE_AFTER_MS, TransferForm, api_auth_login_form,
         api_auth_setup_form, api_auth_status, dev_seed_verify_bypass_allowed, hash_password,
         hex_encode, pbkdf2_sha256, persist_burn_settings_config, persist_pow_mining_config,
-        require_auth_middleware, required_fee_per_byte_burn, required_fee_per_byte_mine,
-        validate_password, validate_transfer_form, verify_password, wallet_transaction_rows,
+        require_auth_middleware, required_fee_per_byte_burn, validate_password,
+        validate_transfer_form, verify_password, wallet_transaction_rows,
     };
 
     #[test]
@@ -2946,13 +2940,10 @@ mod tests {
     }
 
     #[test]
-    fn mine_transaction_views_include_miner_chosen_fee() {
+    fn mine_transaction_views_include_protocol_finalizer_fee() {
         let alice = Wallet::from_seed("wallet-mine-fee-alice");
         let ledger = Ledger::new(BTreeMap::new(), 1);
-        let mine_fee = MICRO_IUNA / 5;
-        let mine = ledger
-            .build_mine_with_fee(alice.address(), mine_fee)
-            .unwrap();
+        let mine = ledger.build_mine(alice.address()).unwrap();
         let chain = vec![fake_block(1, vec![mine.clone()])];
         let outputs = super::known_output_index(&BTreeMap::new(), &chain, &[]);
 
@@ -2960,10 +2951,10 @@ mod tests {
         let transaction = super::ui_transaction(&mine, &outputs);
 
         assert_eq!(rows.len(), 1);
-        assert_eq!(rows[0].amount, MINE_REWARD - mine_fee);
-        assert_eq!(rows[0].fee, mine_fee);
-        assert_eq!(transaction.amount, MINE_REWARD - mine_fee);
-        assert_eq!(transaction.fee, mine_fee);
+        assert_eq!(rows[0].amount, MINE_REWARD - MINE_FINALIZER_FEE);
+        assert_eq!(rows[0].fee, MINE_FINALIZER_FEE);
+        assert_eq!(transaction.amount, MINE_REWARD - MINE_FINALIZER_FEE);
+        assert_eq!(transaction.fee, MINE_FINALIZER_FEE);
     }
 
     fn fake_block(height: u64, transactions: Vec<Transaction>) -> Block {
@@ -3111,13 +3102,13 @@ mod tests {
         let initial_config = ui_config.lock().await.clone();
         config_store::save(&config_path, &initial_config).expect("initial config should save");
 
-        persist_pow_mining_config(&ui_config, &config_path, true, 2 * MICRO_IUNA)
+        persist_pow_mining_config(&ui_config, &config_path, true)
             .await
             .unwrap();
         let config = config_store::load_or_create(&config_path).unwrap();
 
         assert!(config.pow_mining_enabled);
-        assert_eq!(config.pow_mine_fee, 2 * MICRO_IUNA);
+        assert_eq!(config.pow_mine_fee, MINE_FINALIZER_FEE);
     }
 
     #[test]
@@ -3163,13 +3154,6 @@ mod tests {
         })
         .unwrap_err();
         assert!(burn.to_string().contains("fee per byte is required"));
-
-        let mine = required_fee_per_byte_mine(&super::PowMiningForm {
-            enabled: true,
-            fee_per_byte: None,
-        })
-        .unwrap_err();
-        assert!(mine.to_string().contains("fee per byte is required"));
     }
 
     #[test]

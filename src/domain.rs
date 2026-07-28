@@ -8,8 +8,9 @@ use sha2::{Digest, Sha256};
 pub type Amount = u64;
 pub const MICRO_IUNA: Amount = 1_000_000;
 pub const BLOCK_REWARD: Amount = 100 * MICRO_IUNA;
-pub const MINE_REWARD: Amount = MICRO_IUNA;
-pub const DEFAULT_MINE_FEE: Amount = MINE_REWARD / 100;
+pub const MINE_REWARD: Amount = 2 * MICRO_IUNA;
+pub const MINE_FINALIZER_FEE: Amount = MICRO_IUNA;
+pub const DEFAULT_MINE_FEE: Amount = MINE_FINALIZER_FEE;
 pub const DEFAULT_TRANSACTION_FEE: Amount = MICRO_IUNA;
 pub const DEFAULT_FEE_PER_BYTE: Amount = 1;
 pub const MAX_BLOCK_BYTES: usize = 100_000;
@@ -126,6 +127,13 @@ pub enum Transaction {
         proof_header: Option<String>,
         signature: String,
     },
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct MineSearchOutcome {
+    pub transaction: Option<Transaction>,
+    pub next_nonce: u64,
+    pub attempts: u64,
 }
 
 impl Transaction {
@@ -669,8 +677,8 @@ fn stratum_mine_template(
     let recipient = recipient.into();
     validate_address(&recipient, "mine recipient")?;
     validate_hash(anchor, "mine transaction anchor")?;
-    if fee > mine_reward {
-        bail!("mine transaction fee exceeds reward");
+    if fee != MINE_FINALIZER_FEE {
+        bail!("mine transaction fee must be exactly the protocol finalizer fee");
     }
     let output = TxOutput {
         address: recipient.clone(),
@@ -1682,7 +1690,7 @@ impl Ledger {
     }
 
     pub fn build_mine(&self, recipient: impl Into<String>) -> Result<Transaction> {
-        self.build_mine_with_fee(recipient, 0)
+        self.build_mine_with_fee(recipient, MINE_FINALIZER_FEE)
     }
 
     pub fn build_mine_with_fee(
@@ -1692,8 +1700,8 @@ impl Ledger {
     ) -> Result<Transaction> {
         let recipient = recipient.into();
         validate_address(&recipient, "mine recipient")?;
-        if fee > self.mine_reward {
-            bail!("mine transaction fee exceeds reward");
+        if fee != MINE_FINALIZER_FEE {
+            bail!("mine transaction fee must be exactly the protocol finalizer fee");
         }
         let output = TxOutput {
             address: recipient,
@@ -1724,6 +1732,60 @@ impl Ledger {
             return Ok(transaction);
         }
         bail!("could not find valid mine proof");
+    }
+
+    pub fn search_mine_with_fee(
+        &self,
+        recipient: impl Into<String>,
+        fee: Amount,
+        salt: u64,
+        start_nonce: u64,
+        max_attempts: u64,
+    ) -> Result<MineSearchOutcome> {
+        let recipient = recipient.into();
+        validate_address(&recipient, "mine recipient")?;
+        if fee != MINE_FINALIZER_FEE {
+            bail!("mine transaction fee must be exactly the protocol finalizer fee");
+        }
+        let output = TxOutput {
+            address: recipient,
+            amount: self.mine_reward - fee,
+        };
+        let anchor = self.tip().hash.clone();
+        let difficulty_bits = self.current_mine_difficulty_bits();
+        let mut attempts = 0_u64;
+        let mut nonce = start_nonce;
+        while attempts < max_attempts {
+            let signature = mine_signature(&output, &anchor, salt, nonce, difficulty_bits, fee);
+            attempts = attempts.saturating_add(1);
+            let next_nonce = nonce.checked_add(1).unwrap_or(0);
+            if hash_meets_difficulty(&signature, difficulty_bits) {
+                let transaction = Transaction::Mine {
+                    output: output.clone(),
+                    anchor: anchor.clone(),
+                    salt,
+                    nonce,
+                    difficulty_bits,
+                    fee,
+                    proof_header: None,
+                    signature,
+                };
+                if !self.has_transaction(transaction.signature()) {
+                    self.validate_new_transaction(&transaction)?;
+                    return Ok(MineSearchOutcome {
+                        transaction: Some(transaction),
+                        next_nonce,
+                        attempts,
+                    });
+                }
+            }
+            nonce = next_nonce;
+        }
+        Ok(MineSearchOutcome {
+            transaction: None,
+            next_nonce: nonce,
+            attempts,
+        })
     }
 
     pub fn stratum_mine_template(
@@ -2178,6 +2240,9 @@ impl Ledger {
                 validate_hash(signature, "mine transaction proof hash")?;
                 if let Some(proof_header) = proof_header {
                     validate_stratum_header(proof_header)?;
+                }
+                if *fee != MINE_FINALIZER_FEE {
+                    bail!("mine transaction fee must be exactly the protocol finalizer fee");
                 }
                 if output
                     .amount
@@ -3551,6 +3616,20 @@ mod tests {
     }
 
     #[test]
+    fn mine_search_respects_nonce_attempt_limit() {
+        let alice = Wallet::from_seed("bounded-mine-search-alice");
+        let ledger = Ledger::new(BTreeMap::new(), 1);
+
+        let outcome = ledger
+            .search_mine_with_fee(alice.address(), MINE_FINALIZER_FEE, 1, 0, 0)
+            .unwrap();
+
+        assert!(outcome.transaction.is_none());
+        assert_eq!(outcome.next_nonce, 0);
+        assert_eq!(outcome.attempts, 0);
+    }
+
+    #[test]
     fn mempool_rejects_invalid_input_outpoint_id() {
         let alice = Wallet::from_seed("invalid-outpoint-alice");
         let bob = Wallet::from_seed("invalid-outpoint-bob");
@@ -3778,22 +3857,23 @@ mod tests {
     }
 
     #[test]
-    fn mine_fee_cannot_exceed_reward() {
-        let alice = Wallet::from_seed("mine-fee-too-high-alice");
+    fn mine_fee_must_match_protocol_finalizer_fee() {
+        let alice = Wallet::from_seed("mine-fee-fixed-alice");
         let ledger = ledger_with_allocation(&alice, MICRO_IUNA);
 
         let error = ledger
-            .build_mine_with_fee(alice.address(), MINE_REWARD + 1)
+            .build_mine_with_fee(alice.address(), MINE_FINALIZER_FEE - 1)
             .unwrap_err();
 
-        assert!(format!("{error:#}").contains("fee exceeds reward"));
+        assert!(format!("{error:#}").contains("protocol finalizer fee"));
     }
 
     #[test]
     fn mine_output_plus_fee_must_equal_reward_even_with_valid_pow() {
         let alice = Wallet::from_seed("mine-invalid-split-alice");
         let mut ledger = ledger_with_allocation(&alice, MICRO_IUNA);
-        let forged = mine_with_output_and_fee(&ledger, alice.address(), MINE_REWARD, 1);
+        let forged =
+            mine_with_output_and_fee(&ledger, alice.address(), MINE_REWARD, MINE_FINALIZER_FEE);
 
         let error = ledger.submit_transaction(forged).unwrap_err();
 
@@ -3801,53 +3881,35 @@ mod tests {
     }
 
     #[test]
-    fn mine_fee_can_take_entire_reward_for_finalizer() {
-        let alice = Wallet::from_seed("mine-full-fee-alice");
+    fn mine_action_uses_fixed_split_between_miner_and_finalizer() {
+        let alice = Wallet::from_seed("mine-fixed-split-alice");
         let mut ledger = ledger_with_allocation(&alice, MICRO_IUNA);
 
-        let mine = ledger
-            .build_mine_with_fee(alice.address(), MINE_REWARD)
-            .unwrap();
+        let mine = ledger.build_mine(alice.address()).unwrap();
 
-        assert_eq!(mine.amount(), 0);
-        assert_eq!(mine.fee(), MINE_REWARD);
+        assert_eq!(mine.amount(), MICRO_IUNA);
+        assert_eq!(mine.fee(), MINE_FINALIZER_FEE);
         assert!(ledger.submit_transaction(mine).unwrap());
     }
 
     #[test]
-    fn block_selection_prefers_higher_fee_mine_action_when_space_is_limited() {
-        let alice = Wallet::from_seed("mine-fee-priority-alice");
+    fn block_selection_can_skip_mine_action_when_space_is_limited() {
+        let alice = Wallet::from_seed("mine-space-limit-alice");
         let mut ledger = ledger_with_allocation(&alice, 10 * MICRO_IUNA);
         ledger.launch_profile.max_block_transactions = 2;
 
-        let low_fee_mine = ledger
-            .build_mine_with_fee(alice.address(), MICRO_IUNA / 100)
-            .unwrap();
-        let high_fee_mine = ledger
-            .build_mine_with_fee(alice.address(), MICRO_IUNA / 2)
-            .unwrap();
         let burn = ledger.build_burn(&alice, MICRO_IUNA, 0).unwrap();
-        ledger.submit_transaction(low_fee_mine.clone()).unwrap();
-        ledger.submit_transaction(high_fee_mine.clone()).unwrap();
         ledger.submit_transaction(burn).unwrap();
+        let first_mine = ledger.build_mine(alice.address()).unwrap();
+        ledger.submit_transaction(first_mine).unwrap();
+        let second_mine = ledger.build_mine(alice.address()).unwrap();
+        ledger.submit_transaction(second_mine).unwrap();
 
         let block = ledger.mine_next_block(&alice, 1).unwrap();
 
         assert_eq!(block.transactions.len(), 2);
         assert!(block.transactions.iter().any(Transaction::is_burn));
-        assert!(
-            block
-                .transactions
-                .iter()
-                .any(|tx| tx.signature() == high_fee_mine.signature())
-        );
-        assert!(
-            block
-                .transactions
-                .iter()
-                .all(|tx| tx.signature() != low_fee_mine.signature())
-        );
-        assert_eq!(block.reward, high_fee_mine.fee());
+        assert_eq!(block.reward, MINE_FINALIZER_FEE);
     }
 
     #[test]
@@ -3857,13 +3919,9 @@ mod tests {
 
         let burn = ledger.build_burn(&alice, MICRO_IUNA, 0).unwrap();
         ledger.submit_transaction(burn).unwrap();
-        let first_mine = ledger
-            .build_mine_with_fee(alice.address(), MICRO_IUNA / 100)
-            .unwrap();
+        let first_mine = ledger.build_mine(alice.address()).unwrap();
         ledger.submit_transaction(first_mine.clone()).unwrap();
-        let second_mine = ledger
-            .build_mine_with_fee(alice.address(), MICRO_IUNA / 100)
-            .unwrap();
+        let second_mine = ledger.build_mine(alice.address()).unwrap();
         ledger.submit_transaction(second_mine.clone()).unwrap();
 
         assert_eq!(ledger.pending().len(), 3);
@@ -3967,7 +4025,13 @@ mod tests {
         let anchor = ledger.tip().hash.clone();
         let difficulty_bits = ledger.current_mine_difficulty_bits();
         let template = ledger
-            .stratum_mine_template(alice.address(), 0, anchor, 1, difficulty_bits)
+            .stratum_mine_template(
+                alice.address(),
+                MINE_FINALIZER_FEE,
+                anchor,
+                1,
+                difficulty_bits,
+            )
             .unwrap();
 
         let mut accepted = None;
@@ -4007,7 +4071,13 @@ mod tests {
 
         for salt in [1, 2] {
             let template = ledger
-                .stratum_mine_template(alice.address(), 0, anchor.clone(), salt, difficulty_bits)
+                .stratum_mine_template(
+                    alice.address(),
+                    MINE_FINALIZER_FEE,
+                    anchor.clone(),
+                    salt,
+                    difficulty_bits,
+                )
                 .unwrap();
             let mut accepted = None;
             for nonce in 0_u32..50_000 {
