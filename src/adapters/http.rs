@@ -317,7 +317,7 @@ async fn alpine_js() -> impl IntoResponse {
             header::CONTENT_TYPE,
             "application/javascript; charset=utf-8",
         )],
-        include_str!("../../assets/alpine.min.js"),
+        include_str!("../../www/assets/alpine.min.js"),
     )
 }
 
@@ -327,7 +327,7 @@ async fn app_js() -> impl IntoResponse {
             header::CONTENT_TYPE,
             "application/javascript; charset=utf-8",
         )],
-        include_str!("../../assets/iuna-ui.js"),
+        include_str!("../../www/assets/iuna-ui.js"),
     )
 }
 
@@ -1637,7 +1637,7 @@ const INDEX_HTML: &str = r#"<!doctype html>
     body { margin: 0; min-height: 100vh; background: #0f1012; color: #e8edf0; }
     .app-shell { min-height: 100vh; display: grid; grid-template-columns: 84px minmax(0, 1fr); }
     .sidebar { position: sticky; top: 0; height: 100vh; display: flex; flex-direction: column; align-items: center; gap: 20px; padding: 16px 10px; background: #15171a; border-right: 1px solid #262b2f; }
-    .brand-mark { width: 44px; height: 44px; display: grid; place-items: center; border-radius: 8px; background: #d5f55f; color: #11140c; font-size: 22px; font-weight: 900; user-select: none; cursor: default; }
+    .brand-mark { width: 44px; height: 44px; display: grid; grid-template-columns: repeat(3, 8px); grid-template-rows: repeat(2, 12px); justify-content: center; align-content: center; justify-items: center; align-items: center; gap: 2px 2px; border-radius: 8px; background: #d5f55f; color: #11140c; font-size: 13px; line-height: 1; letter-spacing: 0; text-transform: lowercase; font-weight: 900; user-select: none; cursor: default; }
     .brand-mark:hover { animation: brand-wink .7s ease both; }
     @keyframes brand-wink { 0%, 100% { transform: translateY(0) rotate(0deg); box-shadow: none; } 35% { transform: translateY(-2px) rotate(-3deg); box-shadow: 0 8px 20px rgba(213, 245, 95, .18); } 70% { transform: translateY(0) rotate(2deg); } }
     .side-nav { display: grid; gap: 10px; width: 100%; }
@@ -1885,7 +1885,7 @@ const INDEX_HTML: &str = r#"<!doctype html>
     @media (max-width: 760px) {
       .app-shell { grid-template-columns: 1fr; }
       .sidebar { position: sticky; z-index: 5; bottom: 0; top: auto; height: auto; flex-direction: row; justify-content: space-between; padding: 8px; border-right: 0; border-bottom: 1px solid #262b2f; }
-      .brand-mark { width: 38px; height: 38px; font-size: 19px; }
+      .brand-mark { width: 38px; height: 38px; font-size: 11px; }
       .side-nav { display: flex; width: auto; gap: 8px; }
       .nav-button { width: 52px; min-height: 48px; }
       .nav-button span { font-size: 10px; }
@@ -1905,7 +1905,7 @@ const INDEX_HTML: &str = r#"<!doctype html>
 <body x-data="iunaApp()" x-init="init()" @keydown.window.escape="closeModals()" x-cloak>
   <div class="app-shell">
     <aside class="sidebar" aria-label="iuna navigation">
-      <div class="brand-mark" title="iuna">i</div>
+      <div class="brand-mark" title="iuna" aria-label="iuna"><span>i</span><span>u</span><span aria-hidden="true"></span><span aria-hidden="true"></span><span>n</span><span>a</span></div>
       <nav class="side-nav">
         <button class="nav-button" :class="{ active: tab === 'wallet' }" @click="setTab('wallet')" type="button" title="Wallet" aria-label="Wallet">
           <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M3 7h16a2 2 0 0 1 2 2v8a2 2 0 0 1-2 2H3z"></path><path d="M3 7V5a2 2 0 0 1 2-2h12"></path><path d="M16 13h3"></path></svg>

@@ -66,11 +66,21 @@
       width: 32px;
       height: 32px;
       display: grid;
-      place-items: center;
+      grid-template-columns: repeat(3, 7px);
+      grid-template-rows: repeat(2, 10px);
+      justify-content: center;
+      align-content: center;
+      justify-items: center;
+      align-items: center;
+      gap: 1px 2px;
       border-radius: 8px;
       background: var(--green);
       color: #12170b;
       font-weight: 950;
+      font-size: 11px;
+      line-height: 1;
+      letter-spacing: 0;
+      text-transform: lowercase;
     }
     nav { display: flex; gap: 16px; flex-wrap: wrap; color: var(--muted); font-size: 13px; font-weight: 750; }
     nav a { color: var(--muted); text-decoration: none; }
@@ -223,7 +233,7 @@
 <body>
   <div class="topbar">
     <div class="wrap">
-      <a class="brand repo-link" href="https://github.com/iuna-labs/iuna"><span class="mark">i</span><span>iuna</span></a>
+      <a class="brand repo-link" href="https://github.com/iuna-labs/iuna"><span class="mark" aria-label="iuna"><span>i</span><span>u</span><span aria-hidden="true"></span><span aria-hidden="true"></span><span>n</span><span>a</span></span><span>iuna</span></a>
       <nav aria-label="Page sections">
         <a href="#whatisiuna">What is iuna</a>
         <a href="#howtojoin">Join</a>
