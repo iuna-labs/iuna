@@ -764,7 +764,7 @@ impl NodeCore {
                 proof_header: Some("00".repeat(80)),
                 signature: "00".repeat(32),
             };
-            let bytes = tx.serialized_size_bytes()?;
+            let bytes = tx.economic_size_bytes();
             let next_fee = fee_per_byte
                 .checked_mul(bytes as Amount)
                 .context("fee per byte times transaction bytes overflows")?;
@@ -1428,7 +1428,7 @@ fn converge_fee_by_byte(
     let mut best = None;
     for _ in 0..64 {
         let tx = build(fee)?;
-        let bytes = tx.serialized_size_bytes()?;
+        let bytes = tx.economic_size_bytes();
         let required_fee = fee_per_byte
             .checked_mul(bytes as Amount)
             .context("fee per byte times transaction bytes overflows")?;
@@ -1446,7 +1446,7 @@ fn converge_fee_by_byte(
     }
 
     let tx = build(fee)?;
-    let bytes = tx.serialized_size_bytes()?;
+    let bytes = tx.economic_size_bytes();
     let required_fee = fee_per_byte
         .checked_mul(bytes as Amount)
         .context("fee per byte times transaction bytes overflows")?;
@@ -1462,7 +1462,7 @@ fn converge_fee_by_byte(
         }
     }
     let tx = build(required_fee)?;
-    let bytes = tx.serialized_size_bytes()?;
+    let bytes = tx.economic_size_bytes();
     let final_required_fee = fee_per_byte
         .checked_mul(bytes as Amount)
         .context("fee per byte times transaction bytes overflows")?;
@@ -1544,7 +1544,7 @@ mod tests {
         };
         assert_eq!(anchor, &node.chain().last().unwrap().hash);
         assert_eq!(output.address, wallet.address());
-        let minimum_fee = first_mine.serialized_size_bytes().unwrap() as u64;
+        let minimum_fee = first_mine.economic_size_bytes() as u64;
         let (_, expected_estimate) = node
             .build_mine_with_fee_rate(node.status().mining.automatic_pow_mine_fee)
             .unwrap();
@@ -1586,7 +1586,7 @@ mod tests {
         let plan = node.prepare_automatic_mining(1);
         let mine = plan.pow_mined.expect("PoW should be queued");
 
-        let minimum_fee = mine.serialized_size_bytes().unwrap() as u64 * configured_fee_per_byte;
+        let minimum_fee = mine.economic_size_bytes() as u64 * configured_fee_per_byte;
         let (_, expected_estimate) = node
             .build_mine_with_fee_rate(configured_fee_per_byte)
             .unwrap();
@@ -1683,11 +1683,11 @@ mod tests {
         let (transfer, _) = node
             .transfer_with_fee_rate(bob.address(), MICRO_IUNA, 2, &[])
             .unwrap();
-        let minimum_transfer_fee = transfer.serialized_size_bytes().unwrap() as u64 * 2;
+        let minimum_transfer_fee = transfer.economic_size_bytes() as u64 * 2;
         assert!(transfer.fee() >= minimum_transfer_fee);
 
         let (burn, _) = node.burn_with_fee_rate(MICRO_IUNA, 3).unwrap();
-        let minimum_burn_fee = burn.serialized_size_bytes().unwrap() as u64 * 3;
+        let minimum_burn_fee = burn.economic_size_bytes() as u64 * 3;
         assert!(burn.fee() >= minimum_burn_fee);
     }
 }

@@ -32,6 +32,10 @@ const FORK_FINALITY_DEPTH: u64 = 6;
 const VDF_MODULUS: u128 = 4_611_685_975_477_714_963;
 const VDF_CHALLENGE_MIN: u64 = 1_073_741_827;
 const WALLET_SEED_DOMAIN: &str = "iuna-wallet-seed";
+const PUBLIC_KEY_BYTES: usize = 32;
+const HASH_BYTES: usize = 32;
+const SIGNATURE_BYTES: usize = 64;
+const STRATUM_MINE_HEADER_BYTES: usize = 80;
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct Wallet {
@@ -55,7 +59,8 @@ impl Wallet {
     }
 
     fn sign_payload(&self, payload: &str) -> String {
-        let seed = decode_hex_array::<32>(&self.secret).expect("wallet secret is valid hex");
+        let seed =
+            decode_hex_array::<PUBLIC_KEY_BYTES>(&self.secret).expect("wallet secret is valid hex");
         let signing_key = SigningKey::from_bytes(&seed);
         let signature: Signature = signing_key.sign(payload.as_bytes());
         hex_encode(signature.to_bytes())
@@ -231,8 +236,14 @@ impl Transaction {
         format!("{}:{}", self.signing_payload(), self.signature())
     }
 
+    pub fn economic_size_bytes(&self) -> usize {
+        canonical_transaction_size_bytes(self)
+    }
+
     pub fn serialized_size_bytes(&self) -> Result<usize> {
-        serialized_transaction_size_bytes(self)
+        serde_json::to_vec(self)
+            .map(|bytes| bytes.len())
+            .context("failed to serialize transaction for size check")
     }
 
     fn signing_payload(&self) -> String {
@@ -321,10 +332,10 @@ impl Transaction {
             bail!("transaction input signature does not match transaction signature");
         }
         let sender = self.sender();
-        let public_key = decode_hex_array::<32>(sender)
+        let public_key = decode_hex_array::<PUBLIC_KEY_BYTES>(sender)
             .with_context(|| format!("invalid public key for {sender}"))?;
-        let signature =
-            decode_hex_array::<64>(self.signature()).context("invalid signature hex")?;
+        let signature = decode_hex_array::<SIGNATURE_BYTES>(self.signature())
+            .context("invalid signature hex")?;
         let verifying_key =
             VerifyingKey::from_bytes(&public_key).context("invalid transaction public key")?;
         let signature = Signature::from_bytes(&signature);
@@ -623,7 +634,7 @@ fn stratum_mine_header_bytes(
     let mut header = [0_u8; 80];
     header[0..4].copy_from_slice(&STRATUM_MINE_VERSION);
     let anchor_bytes =
-        decode_hex_array::<32>(anchor).context("mine transaction anchor is not hex")?;
+        decode_hex_array::<HASH_BYTES>(anchor).context("mine transaction anchor is not hex")?;
     header[4..36].copy_from_slice(&anchor_bytes);
     let merkle_root = double_sha256(&stratum_coinbase_bytes(
         output,
@@ -656,6 +667,8 @@ fn stratum_mine_template(
     difficulty_bits: u32,
 ) -> Result<StratumMineTemplate> {
     let recipient = recipient.into();
+    validate_address(&recipient, "mine recipient")?;
+    validate_hash(anchor, "mine transaction anchor")?;
     if fee > mine_reward {
         bail!("mine transaction fee exceeds reward");
     }
@@ -664,7 +677,7 @@ fn stratum_mine_template(
         amount: mine_reward - fee,
     };
     let anchor_bytes =
-        decode_hex_array::<32>(anchor).context("mine transaction anchor is not hex")?;
+        decode_hex_array::<HASH_BYTES>(anchor).context("mine transaction anchor is not hex")?;
     Ok(StratumMineTemplate {
         recipient,
         output_amount: output.amount,
@@ -1179,6 +1192,7 @@ impl Ledger {
         genesis_transactions: Vec<Transaction>,
         vdf_rounds: u32,
     ) -> Result<Self> {
+        validate_genesis_allocations(&genesis_allocations)?;
         let launch_profile = LaunchProfile::default();
         let genesis = build_genesis_block(&genesis_allocations, genesis_transactions);
         let utxos = utxos_after_genesis(&genesis_allocations, &genesis)?;
@@ -1212,6 +1226,7 @@ impl Ledger {
             bail!("chain snapshot is empty");
         }
 
+        validate_genesis_allocations(&genesis_allocations)?;
         let genesis = blocks[0].clone();
         validate_genesis_block(&genesis)?;
         let expected_genesis =
@@ -1572,12 +1587,14 @@ impl Ledger {
         amount: Amount,
         fee: Amount,
     ) -> Result<Transaction> {
+        let to = to.into();
+        validate_address(&to, "transfer recipient")?;
         let required = amount
             .checked_add(fee)
             .context("transfer amount plus fee overflows")?;
         let (inputs, input_total) = self.select_inputs(wallet.address(), required)?;
         let mut outputs = vec![TxOutput {
-            address: to.into(),
+            address: to,
             amount,
         }];
         let change = input_total
@@ -1607,13 +1624,15 @@ impl Ledger {
         fee: Amount,
         outpoints: &[OutPoint],
     ) -> Result<Transaction> {
+        let to = to.into();
+        validate_address(&to, "transfer recipient")?;
         let required = amount
             .checked_add(fee)
             .context("transfer amount plus fee overflows")?;
         let (inputs, input_total) =
             self.select_inputs_by_outpoint(wallet.address(), required, outpoints)?;
         let mut outputs = vec![TxOutput {
-            address: to.into(),
+            address: to,
             amount,
         }];
         let change = input_total
@@ -1672,6 +1691,7 @@ impl Ledger {
         fee: Amount,
     ) -> Result<Transaction> {
         let recipient = recipient.into();
+        validate_address(&recipient, "mine recipient")?;
         if fee > self.mine_reward {
             bail!("mine transaction fee exceeds reward");
         }
@@ -2123,35 +2143,64 @@ impl Ledger {
     }
 
     fn validate_transaction_terms(&self, transaction: &Transaction) -> Result<()> {
-        if let Transaction::Mine {
-            output,
-            anchor,
-            difficulty_bits,
-            fee,
-            ..
-        } = transaction
-        {
-            if output
-                .amount
-                .checked_add(*fee)
-                .context("mine transaction output plus fee overflows")?
-                != self.mine_reward
-            {
-                bail!("mine transaction reward is invalid");
+        match transaction {
+            Transaction::Transfer {
+                inputs,
+                outputs,
+                signature,
+                ..
+            } => {
+                validate_transaction_inputs(inputs)?;
+                validate_transaction_outputs(outputs)?;
+                validate_signature(signature, "transaction signature")?;
             }
-            let anchor_block = self
-                .chain
-                .iter()
-                .find(|block| block.hash == *anchor)
-                .context("mine transaction anchor is not on this chain")?;
-            let anchor_age = self.tip().height.saturating_sub(anchor_block.height);
-            if anchor_age > MINE_MAX_ANCHOR_AGE_BLOCKS {
-                bail!("mine transaction anchor is too old");
+            Transaction::Burn {
+                inputs,
+                change,
+                signature,
+                ..
+            } => {
+                validate_transaction_inputs(inputs)?;
+                validate_transaction_outputs(change)?;
+                validate_signature(signature, "transaction signature")?;
             }
-            let required_difficulty =
-                self.mine_difficulty_bits_for_anchor_height(anchor_block.height);
-            if *difficulty_bits != required_difficulty {
-                bail!("mine transaction difficulty is invalid");
+            Transaction::Mine {
+                output,
+                anchor,
+                difficulty_bits,
+                fee,
+                proof_header,
+                signature,
+                ..
+            } => {
+                validate_transaction_outputs(std::slice::from_ref(output))?;
+                validate_hash(anchor, "mine transaction anchor")?;
+                validate_hash(signature, "mine transaction proof hash")?;
+                if let Some(proof_header) = proof_header {
+                    validate_stratum_header(proof_header)?;
+                }
+                if output
+                    .amount
+                    .checked_add(*fee)
+                    .context("mine transaction output plus fee overflows")?
+                    != self.mine_reward
+                {
+                    bail!("mine transaction reward is invalid");
+                }
+                let anchor_block = self
+                    .chain
+                    .iter()
+                    .find(|block| block.hash == *anchor)
+                    .context("mine transaction anchor is not on this chain")?;
+                let anchor_age = self.tip().height.saturating_sub(anchor_block.height);
+                if anchor_age > MINE_MAX_ANCHOR_AGE_BLOCKS {
+                    bail!("mine transaction anchor is too old");
+                }
+                let required_difficulty =
+                    self.mine_difficulty_bits_for_anchor_height(anchor_block.height);
+                if *difficulty_bits != required_difficulty {
+                    bail!("mine transaction difficulty is invalid");
+                }
             }
         }
         Ok(())
@@ -2479,8 +2528,8 @@ fn ensure_block_has_burn(transactions: &[Transaction]) -> Result<()> {
 }
 
 fn fee_rate_key(transaction: &Transaction) -> u128 {
-    let size = serialized_transaction_size_bytes(transaction).unwrap_or(usize::MAX);
-    if size == 0 || size == usize::MAX {
+    let size = transaction.economic_size_bytes();
+    if size == 0 {
         return 0;
     }
     u128::from(transaction.fee()) * 1_000_000 / size as u128
@@ -2512,10 +2561,195 @@ fn best_selectable_transaction_index(
         .map(|(index, _)| index)
 }
 
-fn serialized_transaction_size_bytes(transaction: &Transaction) -> Result<usize> {
-    serde_json::to_vec(transaction)
-        .map(|bytes| bytes.len())
-        .context("failed to serialize transaction for size check")
+fn validate_genesis_allocations(genesis_allocations: &BTreeMap<String, Amount>) -> Result<()> {
+    for address in genesis_allocations.keys() {
+        validate_address(address, "genesis allocation")?;
+    }
+    Ok(())
+}
+
+fn validate_transaction_inputs(inputs: &[TxInput]) -> Result<()> {
+    for input in inputs {
+        validate_protocol_id(&input.outpoint.txid, "input outpoint txid")?;
+        validate_address(&input.owner, "input owner")?;
+        validate_signature(&input.signature, "input signature")?;
+    }
+    Ok(())
+}
+
+fn validate_transaction_outputs(outputs: &[TxOutput]) -> Result<()> {
+    for output in outputs {
+        validate_address(&output.address, "output recipient")?;
+    }
+    Ok(())
+}
+
+fn validate_genesis_burn_transaction(transaction: &Transaction) -> Result<()> {
+    let Transaction::Burn {
+        inputs,
+        change,
+        fee,
+        signature,
+        ..
+    } = transaction
+    else {
+        bail!("genesis only supports burn transactions");
+    };
+    if *fee != 0 {
+        bail!("genesis burn fee must be zero");
+    }
+    validate_hash(signature, "genesis burn signature")?;
+    validate_transaction_outputs(change)?;
+    for input in inputs {
+        validate_hash(&input.outpoint.txid, "genesis burn input outpoint txid")?;
+        validate_address(&input.owner, "genesis burn input owner")?;
+        if input.signature != "genesis" {
+            bail!("genesis burn input signature is invalid");
+        }
+    }
+    Ok(())
+}
+
+fn validate_address(address: &str, label: &str) -> Result<()> {
+    decode_hex_array::<PUBLIC_KEY_BYTES>(address)
+        .with_context(|| format!("invalid {label} address"))?;
+    Ok(())
+}
+
+fn validate_hash(hash: &str, label: &str) -> Result<()> {
+    decode_hex_array::<HASH_BYTES>(hash).with_context(|| format!("invalid {label}"))?;
+    Ok(())
+}
+
+fn validate_signature(signature: &str, label: &str) -> Result<()> {
+    decode_hex_array::<SIGNATURE_BYTES>(signature).with_context(|| format!("invalid {label}"))?;
+    Ok(())
+}
+
+fn validate_stratum_header(header: &str) -> Result<()> {
+    decode_hex_array::<STRATUM_MINE_HEADER_BYTES>(header)
+        .context("invalid mine transaction proof header")?;
+    Ok(())
+}
+
+fn validate_protocol_id(value: &str, label: &str) -> Result<()> {
+    let bytes = decode_hex(value).with_context(|| format!("invalid {label}"))?;
+    match bytes.len() {
+        HASH_BYTES | SIGNATURE_BYTES => Ok(()),
+        length => bail!("invalid {label}: expected 32 or 64 bytes, got {length}"),
+    }
+}
+
+fn canonical_transaction_size_bytes(transaction: &Transaction) -> usize {
+    match transaction {
+        Transaction::Transfer {
+            inputs,
+            outputs,
+            fee,
+            signature,
+        } => {
+            1 + compact_len(inputs.len() as u128)
+                + compact_inputs_size_bytes(inputs)
+                + compact_len(outputs.len() as u128)
+                + compact_outputs_size_bytes(outputs)
+                + compact_len(u128::from(*fee))
+                + signature_size_bytes(signature)
+        }
+        Transaction::Burn {
+            inputs,
+            change,
+            amount,
+            fee,
+            signature,
+        } => {
+            1 + compact_len(inputs.len() as u128)
+                + compact_inputs_size_bytes(inputs)
+                + compact_len(change.len() as u128)
+                + compact_outputs_size_bytes(change)
+                + compact_len(u128::from(*amount))
+                + compact_len(u128::from(*fee))
+                + signature_size_bytes(signature)
+        }
+        Transaction::Mine {
+            output,
+            anchor,
+            salt,
+            nonce,
+            difficulty_bits,
+            fee,
+            proof_header,
+            signature,
+        } => {
+            1 + compact_output_size_bytes(output)
+                + hash_size_bytes(anchor)
+                + compact_len(u128::from(*salt))
+                + compact_len(u128::from(*nonce))
+                + compact_len(u128::from(*difficulty_bits))
+                + compact_len(u128::from(*fee))
+                + 1
+                + proof_header
+                    .as_ref()
+                    .map(|header| stratum_header_size_bytes(header))
+                    .unwrap_or(0)
+                + hash_size_bytes(signature)
+        }
+    }
+}
+
+fn compact_inputs_size_bytes(inputs: &[TxInput]) -> usize {
+    inputs
+        .iter()
+        .map(|input| {
+            protocol_id_size_bytes(&input.outpoint.txid)
+                + compact_len(u128::from(input.outpoint.index))
+                + address_size_bytes(&input.owner)
+        })
+        .sum()
+}
+
+fn compact_outputs_size_bytes(outputs: &[TxOutput]) -> usize {
+    outputs.iter().map(compact_output_size_bytes).sum()
+}
+
+fn compact_output_size_bytes(output: &TxOutput) -> usize {
+    address_size_bytes(&output.address) + compact_len(u128::from(output.amount))
+}
+
+fn address_size_bytes(address: &str) -> usize {
+    debug_assert!(validate_address(address, "debug address").is_ok());
+    PUBLIC_KEY_BYTES
+}
+
+fn hash_size_bytes(hash: &str) -> usize {
+    debug_assert!(validate_hash(hash, "debug hash").is_ok());
+    HASH_BYTES
+}
+
+fn signature_size_bytes(signature: &str) -> usize {
+    debug_assert!(validate_signature(signature, "debug signature").is_ok());
+    SIGNATURE_BYTES
+}
+
+fn stratum_header_size_bytes(header: &str) -> usize {
+    debug_assert!(validate_stratum_header(header).is_ok());
+    STRATUM_MINE_HEADER_BYTES
+}
+
+fn protocol_id_size_bytes(value: &str) -> usize {
+    match decode_hex(value).map(|bytes| bytes.len()) {
+        Ok(HASH_BYTES) => HASH_BYTES,
+        Ok(SIGNATURE_BYTES) => SIGNATURE_BYTES,
+        _ => SIGNATURE_BYTES,
+    }
+}
+
+fn compact_len(mut value: u128) -> usize {
+    let mut bytes = 1;
+    while value >= 0x80 {
+        value >>= 7;
+        bytes += 1;
+    }
+    bytes
 }
 
 fn estimated_block_size_bytes(transactions: &[Transaction]) -> Result<usize> {
@@ -2573,10 +2807,10 @@ fn verify_leader_proof(block: &Block, tickets: &[BurnTicket]) -> Result<()> {
 }
 
 fn verify_leader_signature(proof: &LeaderProof, payload: &LeaderProofPayload) -> Result<()> {
-    let public_key = decode_hex_array::<32>(&proof.public_key)
+    let public_key = decode_hex_array::<PUBLIC_KEY_BYTES>(&proof.public_key)
         .with_context(|| format!("invalid leader public key {}", proof.public_key))?;
-    let signature =
-        decode_hex_array::<64>(&proof.signature).context("invalid leader signature hex")?;
+    let signature = decode_hex_array::<SIGNATURE_BYTES>(&proof.signature)
+        .context("invalid leader signature hex")?;
     let verifying_key =
         VerifyingKey::from_bytes(&public_key).context("invalid leader public key")?;
     let signature = Signature::from_bytes(&signature);
@@ -2764,7 +2998,10 @@ fn utxos_after_genesis(
     let mut utxos = genesis_allocation_utxos(genesis_allocations);
     for transaction in &genesis.transactions {
         match transaction {
-            Transaction::Burn { .. } => apply_transaction(transaction, &mut utxos)?,
+            Transaction::Burn { .. } => {
+                validate_genesis_burn_transaction(transaction)?;
+                apply_transaction(transaction, &mut utxos)?;
+            }
             Transaction::Transfer { .. } | Transaction::Mine { .. } => {
                 bail!("genesis only supports burn transactions")
             }
@@ -3056,6 +3293,20 @@ fn hex_encode(bytes: impl AsRef<[u8]>) -> String {
 mod tests {
     use super::*;
 
+    fn test_utxo_outpoint(index: usize) -> OutPoint {
+        OutPoint {
+            txid: format!("{index:064x}"),
+            index: 0,
+        }
+    }
+
+    fn named_test_outpoint(name: &str) -> OutPoint {
+        OutPoint {
+            txid: hex_hash(format!("test-utxo:{name}")),
+            index: 0,
+        }
+    }
+
     fn ledger_with_wallet_utxos(wallet: &Wallet, amounts: &[Amount]) -> Ledger {
         let mut ledger = Ledger::new(BTreeMap::new(), 1);
         ledger.utxos = amounts
@@ -3063,10 +3314,7 @@ mod tests {
             .enumerate()
             .map(|(index, amount)| {
                 (
-                    OutPoint {
-                        txid: format!("test-utxo-{index}"),
-                        index: 0,
-                    },
+                    test_utxo_outpoint(index),
                     TxOutput {
                         address: wallet.address().to_string(),
                         amount: *amount,
@@ -3129,16 +3377,46 @@ mod tests {
         panic!("expected to find mine proof");
     }
 
+    fn transfer_with_extra_zero_outputs(
+        ledger: &Ledger,
+        wallet: &Wallet,
+        to: &str,
+        amount: Amount,
+        fee: Amount,
+        extra_outputs: usize,
+    ) -> Transaction {
+        let required = amount.checked_add(fee).unwrap();
+        let (inputs, input_total) = ledger.select_inputs(wallet.address(), required).unwrap();
+        let mut outputs = vec![TxOutput {
+            address: to.to_string(),
+            amount,
+        }];
+        outputs.extend((0..extra_outputs).map(|_| TxOutput {
+            address: to.to_string(),
+            amount: 0,
+        }));
+        let change = input_total - required;
+        if change > 0 {
+            outputs.push(TxOutput {
+                address: wallet.address().to_string(),
+                amount: change,
+            });
+        }
+        UnsignedUtxoTransaction::Transfer {
+            inputs,
+            outputs,
+            fee,
+        }
+        .sign(wallet)
+    }
+
     #[test]
     fn wallet_utxos_only_include_outputs_owned_by_address() {
         let alice = Wallet::from_seed("wallet-utxos-alice");
         let bob = Wallet::from_seed("wallet-utxos-bob");
         let mut ledger = ledger_with_wallet_utxos(&alice, &[2, 3]);
         ledger.utxos.insert(
-            OutPoint {
-                txid: "bob-utxo".to_string(),
-                index: 0,
-            },
+            named_test_outpoint("bob"),
             TxOutput {
                 address: bob.address().to_string(),
                 amount: 5,
@@ -3232,14 +3510,117 @@ mod tests {
     }
 
     #[test]
+    fn transaction_economic_size_uses_compact_canonical_fields() {
+        let alice = Wallet::from_seed("economic-size-alice");
+        let bob = Wallet::from_seed("economic-size-bob");
+        let ledger = ledger_with_wallet_utxos(&alice, &[1, 1, 2]);
+        let selected = vec![
+            test_utxo_outpoint(0),
+            test_utxo_outpoint(1),
+            test_utxo_outpoint(2),
+        ];
+
+        let tx = ledger
+            .build_transfer_with_inputs(&alice, bob.address(), 3, 0, &selected)
+            .unwrap();
+
+        assert!(tx.economic_size_bytes() < tx.serialized_size_bytes().unwrap());
+        assert_eq!(
+            tx.economic_size_bytes(),
+            1 + 1 + (3 * (32 + 1 + 32)) + 1 + (2 * (32 + 1)) + 1 + 64
+        );
+    }
+
+    #[test]
+    fn transfer_rejects_invalid_recipient_address() {
+        let alice = Wallet::from_seed("invalid-transfer-recipient-alice");
+        let ledger = ledger_with_wallet_utxos(&alice, &[10]);
+
+        let error = ledger.build_transfer(&alice, "aa", 1, 0).unwrap_err();
+
+        assert!(format!("{error:#}").contains("invalid transfer recipient address"));
+    }
+
+    #[test]
+    fn mine_rejects_invalid_recipient_address_before_pow() {
+        let ledger = Ledger::new(BTreeMap::new(), 1);
+
+        let error = ledger.build_mine("aa").unwrap_err();
+
+        assert!(format!("{error:#}").contains("invalid mine recipient address"));
+    }
+
+    #[test]
+    fn mempool_rejects_invalid_input_outpoint_id() {
+        let alice = Wallet::from_seed("invalid-outpoint-alice");
+        let bob = Wallet::from_seed("invalid-outpoint-bob");
+        let mut ledger = ledger_with_wallet_utxos(&alice, &[10]);
+        let unsigned = UnsignedUtxoTransaction::Transfer {
+            inputs: vec![UnsignedTxInput {
+                outpoint: OutPoint {
+                    txid: "aa".to_string(),
+                    index: 0,
+                },
+                owner: alice.address().to_string(),
+            }],
+            outputs: vec![TxOutput {
+                address: bob.address().to_string(),
+                amount: 1,
+            }],
+            fee: 0,
+        };
+        let transaction = unsigned.sign(&alice);
+
+        let error = ledger.submit_transaction(transaction).unwrap_err();
+
+        assert!(format!("{error:#}").contains("invalid input outpoint txid"));
+        assert!(ledger.pending().is_empty());
+    }
+
+    #[test]
+    fn miner_skips_oversized_pending_transaction_and_keeps_fitting_fee_transaction() {
+        let alice = Wallet::from_seed("oversized-select-alice");
+        let bob = Wallet::from_seed("oversized-select-bob");
+        let carol = Wallet::from_seed("oversized-select-carol");
+        let mut allocations = BTreeMap::new();
+        allocations.insert(alice.address().to_string(), 1);
+        allocations.insert(bob.address().to_string(), 300_000);
+        allocations.insert(carol.address().to_string(), 300_000);
+        let mut ledger = Ledger::new_with_genesis_burns(
+            allocations,
+            vec![GenesisBurn::new(alice.address(), 1)],
+            10,
+        )
+        .unwrap();
+        let burn = ledger.build_burn(&alice, 1, 0).unwrap();
+        ledger.submit_transaction(burn).unwrap();
+        let oversized =
+            transfer_with_extra_zero_outputs(&ledger, &bob, alice.address(), 1, 100_000, 4_000);
+        let fitting = ledger
+            .build_transfer(&carol, alice.address(), 1, 5)
+            .unwrap();
+        assert!(oversized.serialized_size_bytes().unwrap() > MAX_BLOCK_BYTES);
+        ledger.submit_transaction(oversized.clone()).unwrap();
+        ledger.submit_transaction(fitting.clone()).unwrap();
+
+        let block = ledger.mine_next_block(&alice, 1).unwrap();
+        let signatures = block
+            .transactions
+            .iter()
+            .map(|tx| tx.signature().to_string())
+            .collect::<Vec<_>>();
+
+        assert!(!signatures.contains(&oversized.signature().to_string()));
+        assert!(signatures.contains(&fitting.signature().to_string()));
+        assert!(block.serialized_size_bytes().unwrap() <= MAX_BLOCK_BYTES);
+    }
+
+    #[test]
     fn transfer_can_spend_selected_utxos_when_they_cover_amount_and_fee() {
         let alice = Wallet::from_seed("selected-utxos-alice");
         let bob = Wallet::from_seed("selected-utxos-bob");
         let mut ledger = ledger_with_wallet_utxos(&alice, &[2, 3, 5]);
-        let selected = vec![OutPoint {
-            txid: "test-utxo-2".to_string(),
-            index: 0,
-        }];
+        let selected = vec![test_utxo_outpoint(2)];
 
         let tx = ledger
             .build_transfer_with_inputs(&alice, bob.address(), 2, 1, &selected)
@@ -3278,10 +3659,7 @@ mod tests {
         let alice = Wallet::from_seed("selected-utxos-insufficient-alice");
         let bob = Wallet::from_seed("selected-utxos-insufficient-bob");
         let ledger = ledger_with_wallet_utxos(&alice, &[2, 3, 5]);
-        let selected = vec![OutPoint {
-            txid: "test-utxo-0".to_string(),
-            index: 0,
-        }];
+        let selected = vec![test_utxo_outpoint(0)];
 
         let error = ledger
             .build_transfer_with_inputs(&alice, bob.address(), 2, 1, &selected)
@@ -3297,19 +3675,13 @@ mod tests {
         let carol = Wallet::from_seed("selected-utxos-owner-carol");
         let mut ledger = ledger_with_wallet_utxos(&alice, &[5]);
         ledger.utxos.insert(
-            OutPoint {
-                txid: "carol-utxo".to_string(),
-                index: 0,
-            },
+            named_test_outpoint("carol"),
             TxOutput {
                 address: carol.address().to_string(),
                 amount: 5,
             },
         );
-        let selected = vec![OutPoint {
-            txid: "carol-utxo".to_string(),
-            index: 0,
-        }];
+        let selected = vec![named_test_outpoint("carol")];
 
         let error = ledger
             .build_transfer_with_inputs(&alice, bob.address(), 2, 1, &selected)

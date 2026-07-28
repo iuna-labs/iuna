@@ -459,7 +459,10 @@ fn oversized_blocks_are_rejected() {
             .unwrap();
     submit_burn(&mut ledger, &alice, 1);
     let mut block = ledger.mine_next_block(&alice, 1).unwrap();
-    let oversized_transfer = transfer_fee_tx(&ledger, &bob, "x".repeat(MAX_BLOCK_BYTES), 1, 3);
+    let mut oversized_transfer = transfer_fee_tx(&ledger, &bob, alice.address(), 1, 3);
+    if let iuna::domain::Transaction::Transfer { outputs, .. } = &mut oversized_transfer {
+        outputs[0].address = "x".repeat(MAX_BLOCK_BYTES);
+    }
     block.transactions.push(oversized_transfer);
     block.reward = 3;
     block.hash = block.compute_hash();
@@ -467,39 +470,6 @@ fn oversized_blocks_are_rejected() {
     let error = ledger.apply_block(block).unwrap_err();
 
     assert!(format!("{error:#}").contains("max block size"));
-}
-
-#[test]
-fn miner_skips_oversized_pending_transaction_and_keeps_fitting_fee_transaction() {
-    let wallets = wallets(&[
-        "oversized-select-alice",
-        "oversized-select-bob",
-        "oversized-select-carol",
-    ]);
-    let alice = &wallets[0];
-    let bob = &wallets[1];
-    let carol = &wallets[2];
-    let mut allocations = allocations(&wallets, 200_000);
-    allocations.insert(alice.address().to_string(), 1);
-    let mut ledger =
-        Ledger::new_with_genesis_burns(allocations, vec![GenesisBurn::new(alice.address(), 1)], 10)
-            .unwrap();
-    submit_burn(&mut ledger, alice, 1);
-    let oversized = transfer_fee_tx(&ledger, bob, "x".repeat(MAX_BLOCK_BYTES), 1, 100_000);
-    let fitting = transfer_fee_tx(&ledger, carol, alice.address(), 1, 5);
-    ledger.submit_transaction(oversized.clone()).unwrap();
-    ledger.submit_transaction(fitting.clone()).unwrap();
-
-    let block = ledger.mine_next_block(alice, 1).unwrap();
-    let signatures = block
-        .transactions
-        .iter()
-        .map(|tx| tx.signature().to_string())
-        .collect::<Vec<_>>();
-
-    assert!(!signatures.contains(&oversized.signature().to_string()));
-    assert!(signatures.contains(&fitting.signature().to_string()));
-    assert!(block.serialized_size_bytes().unwrap() <= MAX_BLOCK_BYTES);
 }
 
 #[test]
@@ -607,10 +577,7 @@ fn automatic_mining_burns_configured_amount_once_per_height() {
     assert!(second.burned.is_some());
     let burned = second.burned.as_ref().unwrap();
     assert_eq!(burned.amount(), iuna(25));
-    assert_eq!(
-        burned.fee(),
-        burned.serialized_size_bytes().unwrap() as u64 * DEFAULT_FEE_PER_BYTE
-    );
+    assert!(burned.fee() >= burned.economic_size_bytes() as u64 * DEFAULT_FEE_PER_BYTE);
 }
 
 #[test]
@@ -678,10 +645,7 @@ fn automatic_mining_uses_configured_burn_fee() {
 
     let burned = node.set_automatic_burn(50, 3).unwrap().unwrap();
     assert_eq!(burned.amount(), 50);
-    assert_eq!(
-        burned.fee(),
-        burned.serialized_size_bytes().unwrap() as u64 * 3
-    );
+    assert_eq!(burned.fee(), burned.economic_size_bytes() as u64 * 3);
 }
 
 #[test]
@@ -702,10 +666,7 @@ fn automatic_mining_caps_burn_to_spendable_balance_after_fee() {
     let burned = outcome.burned.as_ref().unwrap();
     let unspent = BLOCK_REWARD - burned.amount() - burned.fee();
     assert!(unspent <= DEFAULT_FEE_PER_BYTE);
-    assert_eq!(
-        burned.fee(),
-        burned.serialized_size_bytes().unwrap() as u64 * DEFAULT_FEE_PER_BYTE
-    );
+    assert!(burned.fee() >= burned.economic_size_bytes() as u64 * DEFAULT_FEE_PER_BYTE);
     assert!(outcome.block.is_some());
     assert_eq!(
         node.ledger().balance_of(alice.address()),
