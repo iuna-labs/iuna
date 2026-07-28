@@ -23,10 +23,10 @@ use tokio::{
 
 use crate::{
     app::{
-        BlockInventory, GossipEnvelope, NETWORK_ID, PROTOCOL_VERSION, ProtocolHello, SharedNode,
-        SharedPeerBook, TransactionRejection,
+        BlockInventory, GossipEnvelope, NETWORK_ID, NodeCore, PROTOCOL_VERSION, ProtocolHello,
+        SharedNode, SharedPeerBook, TransactionRejection,
     },
-    domain::{Block, ChainSnapshot, Ledger, Transaction, verify_vdf},
+    domain::{Block, ChainSnapshot, Ledger, Transaction, TransactionSubmitOutcome, verify_vdf},
 };
 
 const MAX_BLOCK_BATCH: usize = 128;
@@ -988,21 +988,10 @@ async fn process_transactions(
     known_peer: &Option<String>,
     transactions: Vec<Transaction>,
 ) -> Result<()> {
-    let mut accepted = Vec::new();
-    let mut rejected = Vec::new();
-    {
+    let (accepted, rejected) = {
         let mut node = network.inner.node.lock().await;
-        for tx in transactions {
-            let signature = tx.signature().to_string();
-            match node.receive_transaction(tx) {
-                Ok(_) => accepted.push(signature),
-                Err(error) => rejected.push(TransactionRejection {
-                    signature,
-                    reason: format!("{error:#}"),
-                }),
-            }
-        }
-    }
+        receive_transactions_for_ack(&mut node, transactions)
+    };
 
     if !accepted.is_empty() || !rejected.is_empty() {
         let ack = GossipEnvelope::TransactionAck {
@@ -1041,6 +1030,33 @@ async fn process_transactions(
     network.forward_outbox().await;
     record_inbound_result(network, known_peer, remote_addr, Ok(())).await;
     Ok(())
+}
+
+fn receive_transactions_for_ack(
+    node: &mut NodeCore,
+    transactions: Vec<Transaction>,
+) -> (Vec<String>, Vec<TransactionRejection>) {
+    let mut accepted = Vec::new();
+    let mut rejected = Vec::new();
+    for tx in transactions {
+        let signature = tx.signature().to_string();
+        match node.receive_transaction(tx) {
+            Ok(TransactionSubmitOutcome::Added | TransactionSubmitOutcome::AlreadyKnown) => {
+                accepted.push(signature);
+            }
+            Ok(TransactionSubmitOutcome::ConflictsWithPending) => {
+                rejected.push(TransactionRejection {
+                    signature,
+                    reason: "transaction conflicts with pending mempool inputs".to_string(),
+                });
+            }
+            Err(error) => rejected.push(TransactionRejection {
+                signature,
+                reason: format!("{error:#}"),
+            }),
+        }
+    }
+    (accepted, rejected)
 }
 
 async fn maybe_request_catchup(
@@ -1180,6 +1196,7 @@ fn transaction_rejection_is_state_dependent(reason: &str) -> bool {
         "mempool is full",
         "anchor is not on this chain",
         "anchor is too old",
+        "conflict",
         "missing output",
         "not spendable",
         "insufficient funds",
@@ -2352,6 +2369,38 @@ mod tests {
     }
 
     #[test]
+    fn conflicting_input_transaction_is_rejected_not_acked_as_accepted() {
+        let alice = Wallet::from_seed("tx-ack-conflict-alice");
+        let bob = Wallet::from_seed("tx-ack-conflict-bob");
+        let allocations = allocations(std::slice::from_ref(&alice), 1_000);
+        let ledger = Ledger::new(allocations, 25);
+        let first = ledger
+            .build_transfer(&alice, bob.address(), 100, 0)
+            .unwrap();
+        let conflicting = ledger.build_burn(&alice, 100, 0).unwrap();
+        let mut receiver = NodeCore::from_ledger(bob, ledger, 0);
+
+        let (accepted, rejected) = super::receive_transactions_for_ack(
+            &mut receiver,
+            vec![first.clone(), conflicting.clone()],
+        );
+
+        assert_eq!(accepted, vec![first.signature().to_string()]);
+        assert_eq!(rejected.len(), 1);
+        assert_eq!(rejected[0].signature, conflicting.signature());
+        assert!(
+            rejected[0].reason.contains("conflicts with pending"),
+            "{}",
+            rejected[0].reason
+        );
+        assert_eq!(receiver.ledger().pending().len(), 1);
+        assert_eq!(
+            receiver.ledger().pending()[0].signature(),
+            first.signature()
+        );
+    }
+
+    #[test]
     fn transaction_rejection_classifier_only_scores_structural_invalidity() {
         for reason in [
             "transaction signature is invalid",
@@ -2375,6 +2424,7 @@ mod tests {
             "mempool is full",
             "mine transaction anchor is not on this chain",
             "mine transaction anchor is too old",
+            "transaction conflicts with pending mempool inputs",
             "transaction spends missing output abc:0",
             "selected UTXOs do not cover transfer amount plus fee",
             "insufficient funds for address",

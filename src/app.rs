@@ -10,8 +10,8 @@ use tokio::sync::Mutex;
 
 use crate::domain::{
     Amount, Block, ChainSnapshot, ChainStatus, DEFAULT_FEE_PER_BYTE, DEFAULT_TRANSACTION_FEE,
-    Ledger, OutPoint, PreparedBlock, StratumMineShare, StratumMineTemplate, Transaction, TxOutput,
-    VDF_TARGET_BLOCK_MS, Wallet, run_vdf,
+    Ledger, OutPoint, PreparedBlock, StratumMineShare, StratumMineTemplate, Transaction,
+    TransactionSubmitOutcome, TxOutput, VDF_TARGET_BLOCK_MS, Wallet, run_vdf,
 };
 
 pub type SharedNode = Arc<Mutex<NodeCore>>;
@@ -687,12 +687,12 @@ impl NodeCore {
         Ok(tx)
     }
 
-    pub fn receive_transaction(&mut self, tx: Transaction) -> Result<bool> {
-        let accepted = self.ledger.submit_transaction(tx.clone())?;
-        if accepted {
+    pub fn receive_transaction(&mut self, tx: Transaction) -> Result<TransactionSubmitOutcome> {
+        let outcome = self.ledger.submit_transaction_with_outcome(tx.clone())?;
+        if outcome.added() {
             self.outbox.push(GossipEnvelope::Transaction(tx));
         }
-        Ok(accepted)
+        Ok(outcome)
     }
 
     fn build_burn_with_fee_rate(

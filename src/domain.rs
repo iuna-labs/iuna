@@ -1124,6 +1124,19 @@ enum TransactionKind {
     Burn,
 }
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum TransactionSubmitOutcome {
+    Added,
+    AlreadyKnown,
+    ConflictsWithPending,
+}
+
+impl TransactionSubmitOutcome {
+    pub fn added(self) -> bool {
+        matches!(self, Self::Added)
+    }
+}
+
 #[derive(Clone, Debug)]
 pub struct Ledger {
     chain: Vec<Block>,
@@ -1744,15 +1757,22 @@ impl Ledger {
     }
 
     pub fn submit_transaction(&mut self, transaction: Transaction) -> Result<bool> {
+        Ok(self.submit_transaction_with_outcome(transaction)?.added())
+    }
+
+    pub fn submit_transaction_with_outcome(
+        &mut self,
+        transaction: Transaction,
+    ) -> Result<TransactionSubmitOutcome> {
         if self.has_transaction(transaction.signature()) {
-            return Ok(false);
+            return Ok(TransactionSubmitOutcome::AlreadyKnown);
         }
 
         transaction.verify_signature()?;
         self.validate_transaction_terms(&transaction)?;
 
         if transaction_inputs_spent_by(&transaction, &self.pending) {
-            return Ok(false);
+            return Ok(TransactionSubmitOutcome::ConflictsWithPending);
         }
 
         if self.pending.len() >= MAX_PENDING_TRANSACTIONS {
@@ -1762,11 +1782,11 @@ impl Ledger {
         let mut utxos = self.utxos_after_valid_pending()?;
         if transaction_has_missing_inputs(&transaction, &utxos) {
             self.pending.push(transaction);
-            return Ok(true);
+            return Ok(TransactionSubmitOutcome::Added);
         }
         apply_transaction(&transaction, &mut utxos)?;
         self.pending.push(transaction);
-        Ok(true)
+        Ok(TransactionSubmitOutcome::Added)
     }
 
     pub fn mine_next_block(&self, wallet: &Wallet, timestamp_ms: u64) -> Result<Block> {

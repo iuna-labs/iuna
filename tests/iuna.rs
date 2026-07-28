@@ -5,7 +5,8 @@ use iuna::{
     app::{DEFAULT_BURN_PER_BLOCK, InMemoryNetwork, NodeConfig, NodeCore, PeerBook, PeerDirection},
     domain::{
         Amount, BLOCK_REWARD, DEFAULT_FEE_PER_BYTE, GenesisBurn, Ledger, MAX_BLOCK_BYTES,
-        MICRO_IUNA, MINE_REWARD, VDF_TARGET_BLOCK_MS, Wallet, run_vdf, verify_vdf,
+        MICRO_IUNA, MINE_REWARD, TransactionSubmitOutcome, VDF_TARGET_BLOCK_MS, Wallet, run_vdf,
+        verify_vdf,
     },
 };
 use tempfile::tempdir;
@@ -1113,6 +1114,10 @@ fn conflicting_utxo_spends_are_not_accepted_together() {
     let first = burn_tx(&ledger, &wallet, 3);
     let conflicting = burn_tx(&ledger, &wallet, 4);
     ledger.submit_transaction(first.clone()).unwrap();
+    let outcome = ledger
+        .submit_transaction_with_outcome(conflicting.clone())
+        .unwrap();
+    assert_eq!(outcome, TransactionSubmitOutcome::ConflictsWithPending);
     assert!(!ledger.submit_transaction(conflicting).unwrap());
     assert_eq!(ledger.pending().len(), 1);
 
