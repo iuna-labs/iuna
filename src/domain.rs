@@ -1856,12 +1856,17 @@ impl Ledger {
             .collect::<BTreeSet<_>>();
         self.utxos = utxos;
         self.tickets = tickets;
-        let available = self.utxos.clone();
-        self.pending.retain(|tx| {
-            !mined_signatures.contains(tx.signature())
-                && transaction_inputs_available(tx, &available)
-        });
         self.chain.push(block);
+        let available = self.utxos.clone();
+        let pending = std::mem::take(&mut self.pending);
+        self.pending = pending
+            .into_iter()
+            .filter(|tx| {
+                !mined_signatures.contains(tx.signature())
+                    && transaction_inputs_available(tx, &available)
+                    && self.validate_transaction_terms(tx).is_ok()
+            })
+            .collect();
         self.vdf_rounds = self.next_vdf_rounds_after_tip();
         Ok(())
     }
@@ -3454,6 +3459,43 @@ mod tests {
     }
 
     #[test]
+    fn block_selection_can_include_multiple_mine_actions() {
+        let alice = Wallet::from_seed("mine-multiple-actions-alice");
+        let mut ledger = ledger_with_allocation(&alice, 10 * MICRO_IUNA);
+
+        let burn = ledger.build_burn(&alice, MICRO_IUNA, 0).unwrap();
+        ledger.submit_transaction(burn).unwrap();
+        let first_mine = ledger
+            .build_mine_with_fee(alice.address(), MICRO_IUNA / 100)
+            .unwrap();
+        ledger.submit_transaction(first_mine.clone()).unwrap();
+        let second_mine = ledger
+            .build_mine_with_fee(alice.address(), MICRO_IUNA / 100)
+            .unwrap();
+        ledger.submit_transaction(second_mine.clone()).unwrap();
+
+        assert_eq!(ledger.pending().len(), 3);
+        let block = ledger.mine_next_block(&alice, 1).unwrap();
+
+        assert_eq!(block.transactions.len(), 3);
+        assert!(block.transactions.iter().any(Transaction::is_burn));
+        assert!(
+            block
+                .transactions
+                .iter()
+                .any(|tx| tx.signature() == first_mine.signature())
+        );
+        assert!(
+            block
+                .transactions
+                .iter()
+                .any(|tx| tx.signature() == second_mine.signature())
+        );
+        assert_ne!(first_mine.signature(), second_mine.signature());
+        assert_eq!(block.reward, first_mine.fee() + second_mine.fee());
+    }
+
+    #[test]
     fn mine_difficulty_increases_when_issuance_exceeds_target_window() {
         let alice = Wallet::from_seed("mine-difficulty-up-alice");
         let mut ledger = ledger_with_allocation(&alice, 100 * MICRO_IUNA);
@@ -3503,6 +3545,27 @@ mod tests {
 
         let error = ledger.submit_transaction(stale_mine).unwrap_err();
         assert!(format!("{error:#}").contains("mine transaction anchor is too old"));
+    }
+
+    #[test]
+    fn pending_mine_actions_are_removed_when_anchor_expires() {
+        let alice = Wallet::from_seed("pending-mine-anchor-expiry-alice");
+        let bob = Wallet::from_seed("pending-mine-anchor-expiry-bob");
+        let mut ledger = ledger_with_allocation(&alice, 100 * MICRO_IUNA);
+        ledger.launch_profile.max_block_transactions = 1;
+        let stale_mine = ledger.build_mine(bob.address()).unwrap();
+        ledger.submit_transaction(stale_mine.clone()).unwrap();
+
+        for _ in 0..=MINE_MAX_ANCHOR_AGE_BLOCKS {
+            mine_burn_block_with_mines(&mut ledger, &alice, 0);
+        }
+
+        assert!(
+            ledger
+                .pending()
+                .iter()
+                .all(|tx| tx.signature() != stale_mine.signature())
+        );
     }
 
     #[test]
