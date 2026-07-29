@@ -1,5 +1,5 @@
 use std::{
-    collections::{BTreeMap, BTreeSet},
+    collections::{BTreeMap, BTreeSet, VecDeque},
     io::ErrorKind,
     net::{IpAddr, SocketAddr},
     sync::{
@@ -36,6 +36,10 @@ const MAX_INVENTORY_ITEMS: usize = 512;
 const MAX_PEER_LIST: usize = 128;
 const MAX_SNAPSHOT_BLOCKS: usize = 10_000;
 const MAX_GOSSIP_LINE_BYTES: usize = 8 * 1024 * 1024;
+const MAX_INBOUND_SESSIONS: usize = 64;
+const MAX_INBOUND_SESSIONS_PER_IP: usize = 8;
+const MAX_INBOUND_ACCEPTS_PER_IP_PER_WINDOW: usize = 24;
+const INBOUND_ACCEPT_RATE_WINDOW_MS: u64 = 10_000;
 const PEER_QUEUE_SIZE: usize = 256;
 const CONNECT_TIMEOUT: Duration = Duration::from_secs(5);
 const HANDSHAKE_TIMEOUT: Duration = Duration::from_secs(5);
@@ -138,6 +142,7 @@ struct GossipNetworkInner {
     node_id: String,
     sessions: Mutex<BTreeMap<String, mpsc::Sender<OutboundBatch>>>,
     tx_delivery: Mutex<BTreeMap<String, PeerTransactionDelivery>>,
+    inbound_limiter: Arc<StdMutex<InboundConnectionLimiter>>,
     metrics: P2pMetricsCounters,
 }
 
@@ -149,8 +154,104 @@ struct PeerTransactionDelivery {
 }
 
 #[derive(Default)]
+struct InboundConnectionLimiter {
+    active: usize,
+    peers: BTreeMap<IpAddr, InboundPeerLimit>,
+}
+
+#[derive(Default)]
+struct InboundPeerLimit {
+    active: usize,
+    accepted_at_ms: VecDeque<u64>,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum InboundSessionRejection {
+    GlobalActive,
+    PeerActive,
+    PeerRate,
+}
+
+impl InboundSessionRejection {
+    fn label(self) -> &'static str {
+        match self {
+            Self::GlobalActive => "global active inbound session limit",
+            Self::PeerActive => "per-IP active inbound session limit",
+            Self::PeerRate => "per-IP inbound accept rate limit",
+        }
+    }
+}
+
+struct InboundSessionPermit {
+    limiter: Arc<StdMutex<InboundConnectionLimiter>>,
+    ip: IpAddr,
+}
+
+impl Drop for InboundSessionPermit {
+    fn drop(&mut self) {
+        if let Ok(mut limiter) = self.limiter.lock() {
+            limiter.release(self.ip);
+        }
+    }
+}
+
+impl InboundConnectionLimiter {
+    fn try_acquire(
+        &mut self,
+        ip: IpAddr,
+        now_ms: u64,
+    ) -> std::result::Result<(), InboundSessionRejection> {
+        self.prune_stale_accepts(now_ms);
+        if self.active >= MAX_INBOUND_SESSIONS {
+            return Err(InboundSessionRejection::GlobalActive);
+        }
+
+        let peer = self.peers.entry(ip).or_default();
+        prune_peer_accepts(peer, now_ms);
+        if peer.active >= MAX_INBOUND_SESSIONS_PER_IP {
+            return Err(InboundSessionRejection::PeerActive);
+        }
+        if peer.accepted_at_ms.len() >= MAX_INBOUND_ACCEPTS_PER_IP_PER_WINDOW {
+            return Err(InboundSessionRejection::PeerRate);
+        }
+
+        peer.active += 1;
+        peer.accepted_at_ms.push_back(now_ms);
+        self.active += 1;
+        Ok(())
+    }
+
+    fn release(&mut self, ip: IpAddr) {
+        if self.active > 0 {
+            self.active -= 1;
+        }
+        if let Some(peer) = self.peers.get_mut(&ip) {
+            if peer.active > 0 {
+                peer.active -= 1;
+            }
+        }
+    }
+
+    fn prune_stale_accepts(&mut self, now_ms: u64) {
+        self.peers.retain(|_, peer| {
+            prune_peer_accepts(peer, now_ms);
+            peer.active > 0 || !peer.accepted_at_ms.is_empty()
+        });
+    }
+}
+
+fn prune_peer_accepts(peer: &mut InboundPeerLimit, now_ms: u64) {
+    while peer.accepted_at_ms.front().is_some_and(|accepted_ms| {
+        now_ms.saturating_sub(*accepted_ms) >= INBOUND_ACCEPT_RATE_WINDOW_MS
+    }) {
+        peer.accepted_at_ms.pop_front();
+    }
+}
+
+#[derive(Default)]
 struct P2pMetricsCounters {
     inbound_sessions_started: AtomicU64,
+    inbound_sessions_rejected: AtomicU64,
     outbound_connect_attempts: AtomicU64,
     outbound_connect_successes: AtomicU64,
     outbound_connect_failures: AtomicU64,
@@ -191,6 +292,7 @@ struct P2pMetricsCounters {
 #[derive(Clone, Debug, Default, Eq, PartialEq, Serialize)]
 pub struct P2pMetrics {
     pub inbound_sessions_started: u64,
+    pub inbound_sessions_rejected: u64,
     pub outbound_connect_attempts: u64,
     pub outbound_connect_successes: u64,
     pub outbound_connect_failures: u64,
@@ -247,6 +349,7 @@ impl P2pMetricsCounters {
     fn snapshot(&self) -> P2pMetrics {
         P2pMetrics {
             inbound_sessions_started: self.inbound_sessions_started.load(Ordering::Relaxed),
+            inbound_sessions_rejected: self.inbound_sessions_rejected.load(Ordering::Relaxed),
             outbound_connect_attempts: self.outbound_connect_attempts.load(Ordering::Relaxed),
             outbound_connect_successes: self.outbound_connect_successes.load(Ordering::Relaxed),
             outbound_connect_failures: self.outbound_connect_failures.load(Ordering::Relaxed),
@@ -326,6 +429,7 @@ impl GossipNetwork {
                 node_id: new_node_id(),
                 sessions: Mutex::new(BTreeMap::new()),
                 tx_delivery: Mutex::new(BTreeMap::new()),
+                inbound_limiter: Arc::new(StdMutex::new(InboundConnectionLimiter::default())),
                 metrics: P2pMetricsCounters::default(),
             }),
         }
@@ -343,6 +447,7 @@ impl GossipNetwork {
                 node_id: new_node_id(),
                 sessions: Mutex::new(BTreeMap::new()),
                 tx_delivery: Mutex::new(BTreeMap::new()),
+                inbound_limiter: Arc::new(StdMutex::new(InboundConnectionLimiter::default())),
                 metrics: P2pMetricsCounters::default(),
             }),
         };
@@ -367,6 +472,21 @@ impl GossipNetwork {
             })
             .unwrap_or(0);
         metrics
+    }
+
+    fn try_acquire_inbound_session(
+        &self,
+        ip: IpAddr,
+    ) -> std::result::Result<InboundSessionPermit, InboundSessionRejection> {
+        self.inner
+            .inbound_limiter
+            .lock()
+            .expect("inbound limiter mutex poisoned")
+            .try_acquire(ip, now_ms())?;
+        Ok(InboundSessionPermit {
+            limiter: Arc::clone(&self.inner.inbound_limiter),
+            ip,
+        })
     }
 
     pub async fn broadcast(&self, envelopes: Vec<GossipEnvelope>) -> Result<()> {
@@ -621,8 +741,27 @@ async fn accept_loop(network: GossipNetwork, listener: TcpListener) {
         match listener.accept().await {
             Ok((stream, remote_addr)) => {
                 let network = network.clone();
+                let permit = match network.try_acquire_inbound_session(remote_addr.ip()) {
+                    Ok(permit) => permit,
+                    Err(rejection) => {
+                        P2pMetricsCounters::inc(&network.inner.metrics.inbound_sessions_rejected);
+                        P2pMetricsCounters::set_last(
+                            &network.inner.metrics.last_session_failure,
+                            format!("{remote_addr}: {}", rejection.label()),
+                        );
+                        if debug_logging_enabled() {
+                            eprintln!(
+                                "p2p inbound connection from {remote_addr} rejected: {}",
+                                rejection.label()
+                            );
+                        }
+                        drop(stream);
+                        continue;
+                    }
+                };
                 P2pMetricsCounters::inc(&network.inner.metrics.inbound_sessions_started);
                 tokio::spawn(async move {
+                    let _permit = permit;
                     let result = session_loop(
                         network.clone(),
                         stream,
@@ -2294,7 +2433,11 @@ fn is_possible_fork_error(error: &anyhow::Error) -> bool {
 
 #[cfg(test)]
 mod tests {
-    use std::{collections::BTreeMap, net::SocketAddr, sync::Arc};
+    use std::{
+        collections::BTreeMap,
+        net::SocketAddr,
+        sync::{Arc, Mutex as StdMutex},
+    };
 
     use crate::{
         app::{
@@ -2306,6 +2449,8 @@ mod tests {
     use tokio::io::AsyncWriteExt;
 
     use super::{
+        INBOUND_ACCEPT_RATE_WINDOW_MS, InboundConnectionLimiter, InboundSessionRejection,
+        MAX_INBOUND_ACCEPTS_PER_IP_PER_WINDOW, MAX_INBOUND_SESSIONS, MAX_INBOUND_SESSIONS_PER_IP,
         MAX_INVENTORY_ITEMS, MAX_OBJECT_REQUESTS, next_reconnect_delay, parse_envelope,
         reachable_advertised_addr, validate_envelope_limits,
     };
@@ -2559,6 +2704,57 @@ mod tests {
     }
 
     #[test]
+    fn inbound_limiter_enforces_per_ip_active_limit() {
+        let ip = "203.0.113.10".parse().unwrap();
+        let mut limiter = InboundConnectionLimiter::default();
+        for _ in 0..MAX_INBOUND_SESSIONS_PER_IP {
+            limiter.try_acquire(ip, 1_000).unwrap();
+        }
+
+        assert_eq!(
+            limiter.try_acquire(ip, 1_000).unwrap_err(),
+            InboundSessionRejection::PeerActive
+        );
+
+        limiter.release(ip);
+        limiter.try_acquire(ip, 1_000).unwrap();
+    }
+
+    #[test]
+    fn inbound_limiter_enforces_global_active_limit() {
+        let mut limiter = InboundConnectionLimiter::default();
+        for index in 0..MAX_INBOUND_SESSIONS {
+            let ip = format!("198.51.100.{index}").parse().unwrap();
+            limiter.try_acquire(ip, 1_000).unwrap();
+        }
+
+        assert_eq!(
+            limiter
+                .try_acquire("203.0.113.200".parse().unwrap(), 1_000)
+                .unwrap_err(),
+            InboundSessionRejection::GlobalActive
+        );
+    }
+
+    #[test]
+    fn inbound_limiter_enforces_per_ip_accept_rate() {
+        let ip = "203.0.113.20".parse().unwrap();
+        let mut limiter = InboundConnectionLimiter::default();
+        for _ in 0..MAX_INBOUND_ACCEPTS_PER_IP_PER_WINDOW {
+            limiter.try_acquire(ip, 1_000).unwrap();
+            limiter.release(ip);
+        }
+
+        assert_eq!(
+            limiter.try_acquire(ip, 1_000).unwrap_err(),
+            InboundSessionRejection::PeerRate
+        );
+        limiter
+            .try_acquire(ip, 1_000 + INBOUND_ACCEPT_RATE_WINDOW_MS)
+            .unwrap();
+    }
+
+    #[test]
     fn reconnect_backoff_is_capped() {
         assert_eq!(
             next_reconnect_delay(super::INITIAL_RECONNECT_DELAY),
@@ -2615,6 +2811,9 @@ mod tests {
                 node_id: super::new_node_id(),
                 sessions: tokio::sync::Mutex::new(BTreeMap::new()),
                 tx_delivery: tokio::sync::Mutex::new(BTreeMap::new()),
+                inbound_limiter: Arc::new(
+                    StdMutex::new(super::InboundConnectionLimiter::default()),
+                ),
                 metrics: super::P2pMetricsCounters::default(),
             }),
         };
@@ -2674,6 +2873,9 @@ mod tests {
                 node_id: super::new_node_id(),
                 sessions: tokio::sync::Mutex::new(BTreeMap::new()),
                 tx_delivery: tokio::sync::Mutex::new(BTreeMap::new()),
+                inbound_limiter: Arc::new(
+                    StdMutex::new(super::InboundConnectionLimiter::default()),
+                ),
                 metrics: super::P2pMetricsCounters::default(),
             }),
         };
@@ -2717,6 +2919,9 @@ mod tests {
                 node_id: super::new_node_id(),
                 sessions: tokio::sync::Mutex::new(BTreeMap::new()),
                 tx_delivery: tokio::sync::Mutex::new(BTreeMap::new()),
+                inbound_limiter: Arc::new(
+                    StdMutex::new(super::InboundConnectionLimiter::default()),
+                ),
                 metrics: super::P2pMetricsCounters::default(),
             }),
         };
@@ -2928,6 +3133,9 @@ mod tests {
                 node_id: super::new_node_id(),
                 sessions: tokio::sync::Mutex::new(BTreeMap::new()),
                 tx_delivery: tokio::sync::Mutex::new(BTreeMap::new()),
+                inbound_limiter: Arc::new(
+                    StdMutex::new(super::InboundConnectionLimiter::default()),
+                ),
                 metrics: super::P2pMetricsCounters::default(),
             }),
         };
@@ -3031,6 +3239,9 @@ mod tests {
                 node_id: super::new_node_id(),
                 sessions: tokio::sync::Mutex::new(BTreeMap::new()),
                 tx_delivery: tokio::sync::Mutex::new(BTreeMap::new()),
+                inbound_limiter: Arc::new(
+                    StdMutex::new(super::InboundConnectionLimiter::default()),
+                ),
                 metrics: super::P2pMetricsCounters::default(),
             }),
         };
@@ -3091,6 +3302,9 @@ mod tests {
                 node_id: super::new_node_id(),
                 sessions: tokio::sync::Mutex::new(BTreeMap::new()),
                 tx_delivery: tokio::sync::Mutex::new(BTreeMap::new()),
+                inbound_limiter: Arc::new(
+                    StdMutex::new(super::InboundConnectionLimiter::default()),
+                ),
                 metrics: super::P2pMetricsCounters::default(),
             }),
         };
@@ -3171,6 +3385,9 @@ mod tests {
                 node_id: super::new_node_id(),
                 sessions: tokio::sync::Mutex::new(BTreeMap::new()),
                 tx_delivery: tokio::sync::Mutex::new(BTreeMap::new()),
+                inbound_limiter: Arc::new(
+                    StdMutex::new(super::InboundConnectionLimiter::default()),
+                ),
                 metrics: super::P2pMetricsCounters::default(),
             }),
         };
@@ -3218,6 +3435,9 @@ mod tests {
                 node_id: super::new_node_id(),
                 sessions: tokio::sync::Mutex::new(BTreeMap::new()),
                 tx_delivery: tokio::sync::Mutex::new(BTreeMap::new()),
+                inbound_limiter: Arc::new(
+                    StdMutex::new(super::InboundConnectionLimiter::default()),
+                ),
                 metrics: super::P2pMetricsCounters::default(),
             }),
         };
@@ -3261,6 +3481,9 @@ mod tests {
                 node_id: super::new_node_id(),
                 sessions: tokio::sync::Mutex::new(BTreeMap::new()),
                 tx_delivery: tokio::sync::Mutex::new(BTreeMap::new()),
+                inbound_limiter: Arc::new(
+                    StdMutex::new(super::InboundConnectionLimiter::default()),
+                ),
                 metrics: super::P2pMetricsCounters::default(),
             }),
         };
@@ -3330,6 +3553,9 @@ mod tests {
                 node_id: super::new_node_id(),
                 sessions: tokio::sync::Mutex::new(BTreeMap::new()),
                 tx_delivery: tokio::sync::Mutex::new(BTreeMap::new()),
+                inbound_limiter: Arc::new(
+                    StdMutex::new(super::InboundConnectionLimiter::default()),
+                ),
                 metrics: super::P2pMetricsCounters::default(),
             }),
         };
@@ -3357,6 +3583,9 @@ mod tests {
                 node_id: super::new_node_id(),
                 sessions: tokio::sync::Mutex::new(BTreeMap::new()),
                 tx_delivery: tokio::sync::Mutex::new(BTreeMap::new()),
+                inbound_limiter: Arc::new(
+                    StdMutex::new(super::InboundConnectionLimiter::default()),
+                ),
                 metrics: super::P2pMetricsCounters::default(),
             }),
         };
@@ -3388,6 +3617,9 @@ mod tests {
                 node_id: super::new_node_id(),
                 sessions: tokio::sync::Mutex::new(BTreeMap::new()),
                 tx_delivery: tokio::sync::Mutex::new(BTreeMap::new()),
+                inbound_limiter: Arc::new(
+                    StdMutex::new(super::InboundConnectionLimiter::default()),
+                ),
                 metrics: super::P2pMetricsCounters::default(),
             }),
         };
@@ -3422,6 +3654,9 @@ mod tests {
                 node_id: super::new_node_id(),
                 sessions: tokio::sync::Mutex::new(BTreeMap::new()),
                 tx_delivery: tokio::sync::Mutex::new(BTreeMap::new()),
+                inbound_limiter: Arc::new(
+                    StdMutex::new(super::InboundConnectionLimiter::default()),
+                ),
                 metrics: super::P2pMetricsCounters::default(),
             }),
         };
@@ -3457,6 +3692,9 @@ mod tests {
                 node_id: super::new_node_id(),
                 sessions: tokio::sync::Mutex::new(BTreeMap::new()),
                 tx_delivery: tokio::sync::Mutex::new(BTreeMap::new()),
+                inbound_limiter: Arc::new(
+                    StdMutex::new(super::InboundConnectionLimiter::default()),
+                ),
                 metrics: super::P2pMetricsCounters::default(),
             }),
         };
@@ -3482,6 +3720,9 @@ mod tests {
                 node_id: super::new_node_id(),
                 sessions: tokio::sync::Mutex::new(BTreeMap::new()),
                 tx_delivery: tokio::sync::Mutex::new(BTreeMap::new()),
+                inbound_limiter: Arc::new(
+                    StdMutex::new(super::InboundConnectionLimiter::default()),
+                ),
                 metrics: super::P2pMetricsCounters::default(),
             }),
         };
@@ -3514,6 +3755,9 @@ mod tests {
                 node_id: super::new_node_id(),
                 sessions: tokio::sync::Mutex::new(BTreeMap::new()),
                 tx_delivery: tokio::sync::Mutex::new(BTreeMap::new()),
+                inbound_limiter: Arc::new(
+                    StdMutex::new(super::InboundConnectionLimiter::default()),
+                ),
                 metrics: super::P2pMetricsCounters::default(),
             }),
         };
@@ -3567,6 +3811,9 @@ mod tests {
                 node_id: super::new_node_id(),
                 sessions: tokio::sync::Mutex::new(BTreeMap::new()),
                 tx_delivery: tokio::sync::Mutex::new(BTreeMap::new()),
+                inbound_limiter: Arc::new(
+                    StdMutex::new(super::InboundConnectionLimiter::default()),
+                ),
                 metrics: super::P2pMetricsCounters::default(),
             }),
         };
@@ -3619,6 +3866,9 @@ mod tests {
                 node_id: super::new_node_id(),
                 sessions: tokio::sync::Mutex::new(BTreeMap::new()),
                 tx_delivery: tokio::sync::Mutex::new(BTreeMap::new()),
+                inbound_limiter: Arc::new(
+                    StdMutex::new(super::InboundConnectionLimiter::default()),
+                ),
                 metrics: super::P2pMetricsCounters::default(),
             }),
         };

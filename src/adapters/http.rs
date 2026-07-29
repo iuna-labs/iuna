@@ -2611,6 +2611,7 @@ const INDEX_HTML: &str = r#"<!doctype html>
         <h2>Metrics</h2>
         <div class="grid">
           <div class="metric"><div class="label">Inbound Sessions</div><div class="value" x-text="p2pMetrics.inbound_sessions_started ?? 0"></div></div>
+          <div class="metric"><div class="label">Inbound Rejects</div><div class="value" x-text="p2pMetrics.inbound_sessions_rejected ?? 0"></div></div>
           <div class="metric"><div class="label">Outbound Attempts</div><div class="value" x-text="p2pMetrics.outbound_connect_attempts ?? 0"></div></div>
           <div class="metric"><div class="label">Connect Failures</div><div class="value" x-text="p2pMetrics.outbound_connect_failures ?? 0"></div></div>
           <div class="metric"><div class="label">Session Failures</div><div class="value" x-text="p2pMetrics.session_failures ?? 0"></div></div>
