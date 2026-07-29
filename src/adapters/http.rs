@@ -1906,9 +1906,13 @@ const INDEX_HTML: &str = r#"<!doctype html>
     body { margin: 0; min-height: 100vh; background: #0f1012; color: #e8edf0; }
     .app-shell { min-height: 100vh; display: grid; grid-template-columns: 84px minmax(0, 1fr); }
     .sidebar { position: sticky; top: 0; height: 100vh; display: flex; flex-direction: column; align-items: center; gap: 20px; padding: 16px 10px; background: #15171a; border-right: 1px solid #262b2f; }
-    .brand-mark { width: 44px; height: 44px; display: grid; grid-template-columns: repeat(3, 8px); grid-template-rows: repeat(2, 12px); justify-content: center; align-content: center; justify-items: center; align-items: center; gap: 2px 2px; border-radius: 8px; background: #d5f55f; color: #11140c; font-size: 13px; line-height: 1; letter-spacing: 0; text-transform: lowercase; font-weight: 900; user-select: none; cursor: default; }
-    .brand-mark:hover { animation: brand-wink .7s ease both; }
-    @keyframes brand-wink { 0%, 100% { transform: translateY(0) rotate(0deg); box-shadow: none; } 35% { transform: translateY(-2px) rotate(-3deg); box-shadow: 0 8px 20px rgba(213, 245, 95, .18); } 70% { transform: translateY(0) rotate(2deg); } }
+    .brand-mark { position: relative; width: 44px; height: 44px; display: grid; place-items: center; overflow: hidden; border: 1px solid #e8ff8d; border-radius: 8px; background: linear-gradient(145deg, #ecff8a 0%, #d5f55f 54%, #8de9cd 100%); box-shadow: inset 0 1px 0 rgba(255, 255, 255, .42), 0 10px 24px rgba(213, 245, 95, .16); user-select: none; cursor: default; }
+    .brand-mark::after { content: ""; position: absolute; inset: -40% -70%; background: linear-gradient(100deg, transparent 42%, rgba(255, 255, 255, .34) 50%, transparent 58%); transform: translateX(-58%) rotate(8deg); opacity: 0; pointer-events: none; }
+    .brand-mark svg { position: relative; z-index: 1; width: 28px; height: 28px; display: block; }
+    .brand-mark .mark-loop { fill: none; stroke: #101315; stroke-width: 4.2; stroke-linecap: round; stroke-linejoin: round; }
+    .brand-mark .mark-dot { fill: #101315; }
+    .brand-mark:hover::after { animation: mark-sheen .72s ease both; }
+    @keyframes mark-sheen { from { opacity: 0; transform: translateX(-58%) rotate(8deg); } 32% { opacity: 1; } to { opacity: 0; transform: translateX(58%) rotate(8deg); } }
     .side-nav { display: grid; gap: 10px; width: 100%; }
     .nav-button { width: 64px; min-height: 58px; display: grid; place-items: center; gap: 4px; border: 1px solid transparent; border-radius: 8px; padding: 7px 4px; background: transparent; color: #9fa8ad; }
     .nav-button svg { width: 21px; height: 21px; stroke: currentColor; stroke-width: 2; fill: none; }
@@ -2160,7 +2164,8 @@ const INDEX_HTML: &str = r#"<!doctype html>
     @media (max-width: 760px) {
       .app-shell { grid-template-columns: 1fr; }
       .sidebar { position: sticky; z-index: 5; bottom: 0; top: auto; height: auto; flex-direction: row; justify-content: space-between; padding: 8px; border-right: 0; border-bottom: 1px solid #262b2f; }
-      .brand-mark { width: 38px; height: 38px; font-size: 11px; }
+      .brand-mark { width: 38px; height: 38px; }
+      .brand-mark svg { width: 28px; height: 28px; }
       .side-nav { display: flex; width: auto; gap: 8px; }
       .nav-button { width: 52px; min-height: 48px; }
       .nav-button span { font-size: 10px; }
@@ -2180,7 +2185,7 @@ const INDEX_HTML: &str = r#"<!doctype html>
 <body x-data="iunaApp()" x-init="init()" @keydown.window.escape="closeModals()" x-cloak>
   <div class="app-shell">
     <aside class="sidebar" aria-label="iuna navigation">
-      <div class="brand-mark" title="iuna" aria-label="iuna"><span>i</span><span>u</span><span aria-hidden="true"></span><span aria-hidden="true"></span><span>n</span><span>a</span></div>
+      <div class="brand-mark" title="iuna" aria-label="iuna"><svg viewBox="0 0 32 32" aria-hidden="true" focusable="false"><circle class="mark-dot" cx="9.4" cy="7.6" r="2.8"></circle><path class="mark-loop" d="M9.4 13v7.1c0 3.7 2.9 6.4 6.6 6.4s6.6-2.7 6.6-6.4V13"></path></svg></div>
       <nav class="side-nav">
         <button class="nav-button" :class="{ active: tab === 'wallet' }" @click="setTab('wallet')" type="button" title="Wallet" aria-label="Wallet">
           <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M3 7h16a2 2 0 0 1 2 2v8a2 2 0 0 1-2 2H3z"></path><path d="M3 7V5a2 2 0 0 1 2-2h12"></path><path d="M16 13h3"></path></svg>
