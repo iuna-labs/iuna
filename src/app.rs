@@ -11,8 +11,9 @@ use tokio::sync::Mutex;
 
 use crate::domain::{
     Amount, Block, ChainSnapshot, ChainStatus, DEFAULT_FEE_PER_BYTE, DEFAULT_TRANSACTION_FEE,
-    Ledger, MINE_FINALIZER_FEE, OutPoint, PreparedBlock, StratumMineShare, StratumMineTemplate,
-    Transaction, TransactionSubmitOutcome, VDF_TARGET_BLOCK_MS, Wallet, hex_hash, run_vdf,
+    Ledger, MAX_PENDING_TRANSACTIONS, MINE_FINALIZER_FEE, OutPoint, PreparedBlock,
+    StratumMineShare, StratumMineTemplate, Transaction, TransactionSubmitOutcome,
+    VDF_TARGET_BLOCK_MS, Wallet, hex_hash, run_vdf,
 };
 
 pub type SharedNode = Arc<Mutex<NodeCore>>;
@@ -23,7 +24,7 @@ pub const DEFAULT_VDF_ROUNDS: u32 = 67_000_000;
 pub const PROTOCOL_VERSION: u32 = 1;
 pub const NETWORK_ID: &str = "iuna-devnet-v2";
 pub const BLOCK_REQUEST_LIMIT: usize = 128;
-pub const MEMPOOL_STATUS_LIMIT: usize = 512;
+pub const MEMPOOL_STATUS_LIMIT: usize = MAX_PENDING_TRANSACTIONS;
 const IMPORT_REBROADCAST_LIMIT: usize = 128;
 pub const PEER_MISBEHAVIOR_BAN_SCORE: u32 = 3;
 pub const PEER_MISBEHAVIOR_BAN_MS: u64 = 10 * 60 * 1_000;

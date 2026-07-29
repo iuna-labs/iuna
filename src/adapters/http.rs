@@ -40,6 +40,8 @@ const EXPLORER_LIMIT: usize = 50;
 const EXPLORER_PAGE_LIMIT: usize = 20;
 const AUTH_COOKIE_NAME: &str = "iuna_session";
 const AUTH_SESSION_TTL_MS: u64 = 12 * 60 * 60 * 1_000;
+const AUTH_MAX_FAILED_ATTEMPTS: u32 = 5;
+const AUTH_LOCKOUT_MS: u64 = 60 * 1_000;
 const PASSWORD_KDF_ALGORITHM: &str = "pbkdf2-sha256";
 const PASSWORD_KDF_ITERATIONS: u32 = 120_000;
 const PEER_STALE_AFTER_MS: u64 = 20 * 60 * 1_000;
@@ -54,12 +56,19 @@ struct HttpState {
     wallet_path: PathBuf,
     stratum: StratumStatus,
     auth_sessions: Arc<Mutex<BTreeMap<String, AuthSession>>>,
+    auth_backoff: Arc<Mutex<AuthBackoff>>,
 }
 
 #[derive(Clone)]
 struct AuthSession {
     expires_at: u64,
     wallet_password: String,
+}
+
+#[derive(Clone, Debug, Default)]
+struct AuthBackoff {
+    failed_attempts: u32,
+    locked_until_ms: Option<u64>,
 }
 
 pub struct ServeOptions {
@@ -256,6 +265,7 @@ pub async fn serve(
         wallet_path: options.wallet_path,
         stratum: options.stratum,
         auth_sessions: Arc::new(Mutex::new(BTreeMap::new())),
+        auth_backoff: Arc::new(Mutex::new(AuthBackoff::default())),
     };
     let app = Router::new()
         .route("/", get(index))
@@ -1441,6 +1451,7 @@ async fn setup_auth_password(state: &HttpState, password: &str) -> Result<String
 }
 
 async fn login_auth_password(state: &HttpState, password: &str) -> Result<String> {
+    check_auth_backoff(state).await?;
     let hash = state
         .ui_config
         .lock()
@@ -1449,12 +1460,44 @@ async fn login_auth_password(state: &HttpState, password: &str) -> Result<String
         .clone()
         .context("authentication setup is required")?;
     if !verify_password(password, &hash)? {
+        record_auth_failure(state).await;
         bail!("invalid password");
     }
     wallet_store::encrypt_existing_with_password(&state.wallet_path, password)?;
     let wallet = wallet_store::load_with_password(&state.wallet_path, password)?;
     state.node.lock().await.replace_wallet(wallet);
+    clear_auth_backoff(state).await;
     create_session_cookie(state, password).await
+}
+
+async fn check_auth_backoff(state: &HttpState) -> Result<()> {
+    let now = now_ms();
+    let mut backoff = state.auth_backoff.lock().await;
+    if backoff
+        .locked_until_ms
+        .is_some_and(|locked_until| locked_until > now)
+    {
+        bail!("too many failed login attempts; try again later");
+    }
+    if backoff.locked_until_ms.is_some() {
+        backoff.locked_until_ms = None;
+        backoff.failed_attempts = 0;
+    }
+    Ok(())
+}
+
+async fn record_auth_failure(state: &HttpState) {
+    let mut backoff = state.auth_backoff.lock().await;
+    backoff.failed_attempts = backoff.failed_attempts.saturating_add(1);
+    if backoff.failed_attempts >= AUTH_MAX_FAILED_ATTEMPTS {
+        backoff.locked_until_ms = Some(now_ms().saturating_add(AUTH_LOCKOUT_MS));
+    }
+}
+
+async fn clear_auth_backoff(state: &HttpState) {
+    let mut backoff = state.auth_backoff.lock().await;
+    backoff.failed_attempts = 0;
+    backoff.locked_until_ms = None;
 }
 
 fn validate_password(password: &str) -> Result<()> {
@@ -2698,6 +2741,38 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn login_authentication_locks_out_after_repeated_failures() {
+        let dir = tempfile::tempdir().unwrap();
+        let password = "correct horse battery staple";
+        let state = auth_test_state(
+            dir.path().join("config.json"),
+            UiConfig {
+                auth_password_hash: Some(hash_password(password).unwrap()),
+                ..UiConfig::default()
+            },
+        )
+        .await;
+
+        for _ in 0..super::AUTH_MAX_FAILED_ATTEMPTS {
+            let error = super::login_auth_password(&state, "wrong horse battery staple")
+                .await
+                .unwrap_err();
+            assert!(format!("{error:#}").contains("invalid password"));
+        }
+
+        let locked = super::login_auth_password(&state, password)
+            .await
+            .unwrap_err();
+        assert!(format!("{locked:#}").contains("too many failed login attempts"));
+
+        state.auth_backoff.lock().await.locked_until_ms =
+            Some(crate::app::now_ms().saturating_sub(1));
+        let cookie = super::login_auth_password(&state, password).await.unwrap();
+        assert!(cookie.starts_with(AUTH_COOKIE_NAME));
+        assert_eq!(state.auth_backoff.lock().await.failed_attempts, 0);
+    }
+
+    #[tokio::test]
     async fn password_setup_creates_session_for_protected_endpoints() {
         let dir = tempfile::tempdir().unwrap();
         let config_path = dir.path().join("config.json");
@@ -3065,6 +3140,7 @@ mod tests {
                 listen_addr: None,
             },
             auth_sessions: Arc::new(Mutex::new(BTreeMap::new())),
+            auth_backoff: Arc::new(Mutex::new(super::AuthBackoff::default())),
         }
     }
 

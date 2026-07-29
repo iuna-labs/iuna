@@ -1590,7 +1590,7 @@ fn validate_envelope_limits(envelope: &GossipEnvelope) -> Result<()> {
             ensure_len("peer list", peers.len(), MAX_PEER_LIST)?;
         }
         GossipEnvelope::PeerStatus { mempool_txs, .. } => {
-            ensure_len("mempool status", mempool_txs.len(), MAX_INVENTORY_ITEMS)?;
+            ensure_len("mempool status", mempool_txs.len(), MEMPOOL_STATUS_LIMIT)?;
         }
         GossipEnvelope::Hello(_)
         | GossipEnvelope::ChainSnapshotRequest
@@ -2352,14 +2352,27 @@ mod tests {
         let envelope = GossipEnvelope::PeerStatus {
             height: 7,
             tip_hash: "tip".to_string(),
-            mempool_count: MAX_INVENTORY_ITEMS + 1,
+            mempool_count: super::MEMPOOL_STATUS_LIMIT + 1,
             mempool_root: "root".to_string(),
-            mempool_txs: vec!["sig".to_string(); MAX_INVENTORY_ITEMS + 1],
+            mempool_txs: vec!["sig".to_string(); super::MEMPOOL_STATUS_LIMIT + 1],
         };
 
         let error = validate_envelope_limits(&envelope).unwrap_err();
 
         assert!(error.to_string().contains("mempool status"));
+    }
+
+    #[test]
+    fn mempool_status_can_advertise_full_pending_pool_beyond_inventory_batch_size() {
+        let envelope = GossipEnvelope::PeerStatus {
+            height: 7,
+            tip_hash: "tip".to_string(),
+            mempool_count: MAX_INVENTORY_ITEMS + 1,
+            mempool_root: "root".to_string(),
+            mempool_txs: vec!["sig".to_string(); MAX_INVENTORY_ITEMS + 1],
+        };
+
+        validate_envelope_limits(&envelope).unwrap();
     }
 
     #[test]

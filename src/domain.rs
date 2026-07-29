@@ -22,7 +22,8 @@ const MINE_MAX_RETARGET_STEP_BITS: u32 = 2;
 const MINE_MIN_DIFFICULTY_BITS: u32 = 1;
 const MINE_MAX_DIFFICULTY_BITS: u32 = 32;
 const MINE_MAX_ANCHOR_AGE_BLOCKS: u64 = MINE_RETARGET_WINDOW_BLOCKS;
-const MAX_PENDING_TRANSACTIONS: usize = 10_000;
+pub const MAX_PENDING_TRANSACTIONS: usize = 10_000;
+const MAX_ORPHAN_TRANSACTIONS: usize = 1_024;
 const MAX_BLOCK_TRANSACTIONS: usize = 1_000;
 const DEFAULT_TICKET_MATURITY_DELAY: u64 = 3;
 const DEFAULT_TICKET_EXPIRY_WINDOW: u64 = 3;
@@ -1165,6 +1166,7 @@ pub struct Ledger {
     utxos: BTreeMap<OutPoint, TxOutput>,
     tickets: Vec<BurnTicket>,
     pending: Vec<Transaction>,
+    orphans: Vec<Transaction>,
     mine_reward: Amount,
     initial_vdf_rounds: u32,
     vdf_rounds: u32,
@@ -1211,6 +1213,7 @@ impl Ledger {
             utxos,
             tickets,
             pending: Vec::new(),
+            orphans: Vec::new(),
             mine_reward: MINE_REWARD,
             initial_vdf_rounds: vdf_rounds,
             vdf_rounds,
@@ -1250,6 +1253,7 @@ impl Ledger {
             utxos,
             tickets: Vec::new(),
             pending: Vec::new(),
+            orphans: Vec::new(),
             mine_reward: MINE_REWARD,
             initial_vdf_rounds: vdf_rounds,
             vdf_rounds,
@@ -1420,6 +1424,7 @@ impl Ledger {
 
     fn replace_with_better_chain(&mut self, mut candidate: Ledger, fork_point: ForkPoint) {
         let mut carry_forward = self.pending.clone();
+        carry_forward.extend(self.orphans.clone());
         for block in self
             .chain
             .iter()
@@ -1523,9 +1528,14 @@ impl Ledger {
         &self.pending
     }
 
+    pub fn orphan_transactions(&self) -> &[Transaction] {
+        &self.orphans
+    }
+
     pub fn transaction_by_signature(&self, signature: &str) -> Option<Transaction> {
         self.pending
             .iter()
+            .chain(self.orphans.iter())
             .chain(
                 self.chain
                     .iter()
@@ -1856,6 +1866,9 @@ impl Ledger {
         if transaction_inputs_spent_by(&transaction, &self.pending) {
             return Ok(TransactionSubmitOutcome::ConflictsWithPending);
         }
+        if transaction_inputs_spent_by(&transaction, &self.orphans) {
+            return Ok(TransactionSubmitOutcome::ConflictsWithPending);
+        }
 
         if self.pending.len() >= MAX_PENDING_TRANSACTIONS {
             bail!("mempool is full");
@@ -1863,11 +1876,15 @@ impl Ledger {
 
         let mut utxos = self.utxos_after_valid_pending()?;
         if transaction_has_missing_inputs(&transaction, &utxos) {
-            self.pending.push(transaction);
+            if self.orphans.len() >= MAX_ORPHAN_TRANSACTIONS {
+                bail!("orphan transaction pool is full");
+            }
+            self.orphans.push(transaction);
             return Ok(TransactionSubmitOutcome::Added);
         }
         apply_transaction(&transaction, &mut utxos)?;
         self.pending.push(transaction);
+        self.promote_orphan_transactions()?;
         Ok(TransactionSubmitOutcome::Added)
     }
 
@@ -1969,6 +1986,15 @@ impl Ledger {
                     && self.validate_transaction_terms(tx).is_ok()
             })
             .collect();
+        let orphans = std::mem::take(&mut self.orphans);
+        self.orphans = orphans
+            .into_iter()
+            .filter(|tx| {
+                !mined_signatures.contains(tx.signature())
+                    && self.validate_transaction_terms(tx).is_ok()
+            })
+            .collect();
+        self.promote_orphan_transactions()?;
         self.vdf_rounds = self.next_vdf_rounds_after_tip();
         Ok(())
     }
@@ -2202,6 +2228,35 @@ impl Ledger {
         self.validate_transaction_terms(transaction)?;
         let mut utxos = self.utxos_after_valid_pending()?;
         apply_transaction(transaction, &mut utxos)
+    }
+
+    fn promote_orphan_transactions(&mut self) -> Result<()> {
+        loop {
+            if self.pending.len() >= MAX_PENDING_TRANSACTIONS {
+                return Ok(());
+            }
+            let mut promoted_index = None;
+            let mut utxos = self.utxos_after_valid_pending()?;
+            for (index, transaction) in self.orphans.iter().enumerate() {
+                if transaction_inputs_spent_by(transaction, &self.pending) {
+                    continue;
+                }
+                if transaction_has_missing_inputs(transaction, &utxos) {
+                    continue;
+                }
+                if self.validate_transaction_terms(transaction).is_ok()
+                    && apply_transaction(transaction, &mut utxos).is_ok()
+                {
+                    promoted_index = Some(index);
+                    break;
+                }
+            }
+
+            let Some(index) = promoted_index else {
+                return Ok(());
+            };
+            self.pending.push(self.orphans.remove(index));
+        }
     }
 
     fn validate_transaction_terms(&self, transaction: &Transaction) -> Result<()> {
@@ -3654,6 +3709,34 @@ mod tests {
 
         assert!(format!("{error:#}").contains("invalid input outpoint txid"));
         assert!(ledger.pending().is_empty());
+    }
+
+    #[test]
+    fn missing_input_transaction_goes_to_orphan_pool_not_pending_mempool() {
+        let alice = Wallet::from_seed("missing-input-orphan-alice");
+        let bob = Wallet::from_seed("missing-input-orphan-bob");
+        let mut ledger = ledger_with_wallet_utxos(&alice, &[10]);
+        let transaction = UnsignedUtxoTransaction::Transfer {
+            inputs: vec![UnsignedTxInput {
+                outpoint: OutPoint {
+                    txid: hex_hash("missing-input-orphan"),
+                    index: 0,
+                },
+                owner: alice.address().to_string(),
+            }],
+            outputs: vec![TxOutput {
+                address: bob.address().to_string(),
+                amount: 1,
+            }],
+            fee: 0,
+        }
+        .sign(&alice);
+
+        let outcome = ledger.submit_transaction_with_outcome(transaction).unwrap();
+
+        assert_eq!(outcome, TransactionSubmitOutcome::Added);
+        assert!(ledger.pending().is_empty());
+        assert_eq!(ledger.orphan_transactions().len(), 1);
     }
 
     #[test]

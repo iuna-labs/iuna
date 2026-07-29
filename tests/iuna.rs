@@ -1631,7 +1631,8 @@ fn mempool_gossip_repairs_future_nonce_gap_without_networking() {
     bob_node
         .receive(iuna::app::GossipEnvelope::Transaction(second.clone()))
         .unwrap();
-    assert_eq!(bob_node.ledger().pending().len(), 1);
+    assert_eq!(bob_node.ledger().pending().len(), 0);
+    assert_eq!(bob_node.ledger().orphan_transactions().len(), 1);
 
     let mut requests = Vec::new();
     for envelope in alice_node.mempool_gossip() {
@@ -1654,6 +1655,8 @@ fn mempool_gossip_repairs_future_nonce_gap_without_networking() {
             other => bob_node.receive(other).unwrap(),
         }
     }
+    assert_eq!(bob_node.ledger().pending().len(), 2);
+    assert!(bob_node.ledger().orphan_transactions().is_empty());
     let block = alice_node.mine_one_at(1).unwrap();
     let signatures = block
         .transactions
