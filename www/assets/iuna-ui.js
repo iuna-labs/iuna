@@ -13,6 +13,13 @@ window.iunaApp = function iunaApp() {
     peers: [],
     p2pMetrics: {},
     networkHealth: {},
+    uiMode: (() => {
+      try {
+        return localStorage.getItem("iunaUiMode") === "advanced" ? "advanced" : "basic";
+      } catch {
+        return "basic";
+      }
+    })(),
     latestRelease: null,
     releaseCheckState: "idle",
     releaseCheckError: null,
@@ -23,7 +30,7 @@ window.iunaApp = function iunaApp() {
     authPasswordConfirm: "",
     loginPassword: "",
     authFeedback: null,
-    setupWallet: { address: null, seed_phrase: null, dev_verify_bypass: false },
+    setupWallet: { address: null, seed_phrase: null, dev_verify_bypass: false, requires_peer: false },
     setupWalletMode: "create",
     setupSeedStep: "write",
     generatedSeedPhrase: "",
@@ -93,15 +100,41 @@ window.iunaApp = function iunaApp() {
 
     tabFromHash() {
       const hash = window.location.hash.replace(/^#\/?/, "");
-      return ["wallet", "mining", "p2p", "chain"].includes(hash) ? hash : "wallet";
+      return this.allowedTabs().includes(hash) ? hash : "wallet";
     },
 
     setTab(tab) {
-      if (!["wallet", "mining", "p2p", "chain"].includes(tab)) return;
+      if (!this.allowedTabs().includes(tab)) return;
       this.tab = tab;
       if (window.location.hash !== `#${tab}`) {
         window.location.hash = tab;
       }
+    },
+
+    allowedTabs() {
+      return this.advancedMode() ? ["wallet", "mining", "p2p", "chain"] : ["wallet", "chain"];
+    },
+
+    basicMode() {
+      return this.uiMode !== "advanced";
+    },
+
+    advancedMode() {
+      return this.uiMode === "advanced";
+    },
+
+    setUiMode(mode) {
+      this.uiMode = mode === "advanced" ? "advanced" : "basic";
+      try {
+        localStorage.setItem("iunaUiMode", this.uiMode);
+      } catch {}
+      if (!this.allowedTabs().includes(this.tab)) {
+        this.setTab("wallet");
+      }
+    },
+
+    toggleUiMode() {
+      this.setUiMode(this.advancedMode() ? "basic" : "advanced");
     },
 
     pageTitle() {
@@ -146,6 +179,18 @@ window.iunaApp = function iunaApp() {
 
     showingAuth() {
       return this.authLoaded && (!this.auth.configured || !this.auth.authenticated);
+    },
+
+    setupRequiresPeer() {
+      return this.setupWallet.requires_peer === true;
+    },
+
+    setupHasPeer() {
+      return this.setupPeerAddress.trim().length > 0 || this.outboundPeers().length > 0;
+    },
+
+    setupCanContinue() {
+      return this.walletVerified && (!this.setupRequiresPeer() || this.setupHasPeer());
     },
 
     async refreshAuth() {
@@ -355,6 +400,9 @@ window.iunaApp = function iunaApp() {
       try {
         if (!this.walletVerified) {
           throw new Error("Verify or import a recovery phrase first");
+        }
+        if (this.setupRequiresPeer() && !this.setupHasPeer()) {
+          throw new Error("Add a bootstrap peer before continuing");
         }
         const response = await fetch("/api/config", {
           method: "POST",
@@ -1132,6 +1180,20 @@ window.iunaApp = function iunaApp() {
       if (typeof lag !== "number") return "-";
       if (lag === 0) return "even";
       return `${lag} behind`;
+    },
+
+    basicNetworkStatusLabel() {
+      const state = this.networkHealth.state;
+      if (!state) return "Network starting";
+      if (state === "healthy" || state === "ahead of peers") return "Connected";
+      if (state === "syncing" || state === "mempool syncing") return "Syncing";
+      if (state === "isolated") return "Offline";
+      return state.charAt(0).toUpperCase() + state.slice(1);
+    },
+
+    basicNetworkNeedsAttention() {
+      if (!this.networkHealth.state) return false;
+      return !this.networkHealth.ok && this.networkHealth.state !== "syncing";
     },
 
     networkTimeOffsetLabel() {

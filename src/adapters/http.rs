@@ -182,6 +182,7 @@ struct WalletSetupResponse {
     address: Option<String>,
     seed_phrase: Option<String>,
     dev_verify_bypass: bool,
+    requires_peer: bool,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq, Serialize)]
@@ -641,6 +642,12 @@ async fn apply_config_form(state: &HttpState, form: ConfigForm) -> Result<()> {
     if !peer.is_empty() {
         add_peer(state, peer.to_string()).await?;
     }
+    if form.setup_complete && setup_requires_peer(state).await {
+        let has_peer = !state.peers.lock().await.addresses().is_empty();
+        if !has_peer {
+            bail!("add a bootstrap peer before completing setup");
+        }
+    }
     let mut config = state.ui_config.lock().await;
     config.setup_complete = form.setup_complete;
     config_store::save(&state.config_path, &config)
@@ -1014,7 +1021,12 @@ async fn wallet_setup_response(
         address: Some(address),
         seed_phrase,
         dev_verify_bypass: dev_seed_verify_bypass_enabled(),
+        requires_peer: setup_requires_peer(state).await,
     })
+}
+
+async fn setup_requires_peer(state: &HttpState) -> bool {
+    !state.node.lock().await.has_real_chain()
 }
 
 fn wallet_transaction_rows(
@@ -1349,6 +1361,7 @@ async fn replace_setup_wallet_with_generated_seed(
         address: Some(address),
         seed_phrase: Some(seed_phrase),
         dev_verify_bypass: dev_seed_verify_bypass_enabled(),
+        requires_peer: setup_requires_peer(state).await,
     })
 }
 
@@ -1374,6 +1387,7 @@ async fn import_setup_wallet_seed(
         address: Some(address),
         seed_phrase: None,
         dev_verify_bypass: dev_seed_verify_bypass_enabled(),
+        requires_peer: setup_requires_peer(state).await,
     })
 }
 
@@ -1394,6 +1408,7 @@ fn wallet_setup_json(result: Result<WalletSetupResponse>) -> Json<WalletSetupRes
             address: None,
             seed_phrase: None,
             dev_verify_bypass: dev_seed_verify_bypass_enabled(),
+            requires_peer: false,
         }),
     }
 }
@@ -1900,7 +1915,10 @@ const INDEX_HTML: &str = r#"<!doctype html>
     .nav-button svg.chain-icon { stroke-width: 1.35; }
     .nav-button span { font-size: 11px; font-weight: 800; }
     .nav-button:hover, .nav-button.active { background: #202328; border-color: #3b4448; color: #d5f55f; }
-    .version-panel { margin-top: auto; width: 64px; display: grid; gap: 4px; justify-items: center; border: 1px solid transparent; border-radius: 8px; padding: 7px 4px; color: #7f888e; background: transparent; font-size: 10px; font-weight: 850; text-align: center; }
+    .mode-toggle { margin-top: auto; width: 64px; display: grid; justify-items: center; border: 1px solid #2f363c; border-radius: 8px; padding: 7px 4px; color: #9fa8ad; background: #111316; font-size: 10px; font-weight: 850; text-align: center; }
+    .mode-toggle:hover { border-color: #d5f55f; color: #d5f55f; }
+    .mode-toggle-label { line-height: 1; text-transform: uppercase; }
+    .version-panel { width: 64px; display: grid; gap: 4px; justify-items: center; border: 1px solid transparent; border-radius: 8px; padding: 7px 4px; color: #7f888e; background: transparent; font-size: 10px; font-weight: 850; text-align: center; }
     .version-panel.update { border-color: #566d25; color: #d5f55f; background: #1c2516; cursor: pointer; }
     .version-panel.checking { color: #a8b2b8; }
     .version-panel.failed { color: #ffb1a8; }
@@ -1914,6 +1932,9 @@ const INDEX_HTML: &str = r#"<!doctype html>
     main > section { width: 100%; }
     header { display: flex; justify-content: space-between; gap: 18px; align-items: flex-start; padding: 0 0 18px; }
     .header-actions { display: flex; gap: 10px; align-items: center; }
+    .basic-status { display: inline-flex; gap: 8px; align-items: center; margin-top: 5px; color: #9eb3bc; font-size: 12px; font-weight: 750; }
+    .basic-status button { padding: 3px 7px; border-color: #3a4248; background: #202328; color: #9fa8ad; font-size: 11px; }
+    .basic-status button:hover { border-color: #d5f55f; color: #d5f55f; }
     .lock-button { padding: 5px 8px; border-color: #3a4248; background: #202328; color: #9fa8ad; font-size: 12px; }
     .lock-button:hover { border-color: #d5f55f; color: #d5f55f; }
     h1 { margin: 0 0 4px; font-size: 28px; }
@@ -2143,7 +2164,7 @@ const INDEX_HTML: &str = r#"<!doctype html>
       .side-nav { display: flex; width: auto; gap: 8px; }
       .nav-button { width: 52px; min-height: 48px; }
       .nav-button span { font-size: 10px; }
-      .version-panel { margin-top: 0; width: 48px; padding: 6px 3px; font-size: 9px; }
+      .mode-toggle, .version-panel { margin-top: 0; width: 48px; padding: 6px 3px; font-size: 9px; }
       .content { padding: 16px 12px 36px; }
       header, .split, .setup-grid, .wallet-grid, .mining-grid, .detail-grid, .wallet-tx-row { grid-template-columns: 1fr; }
       header { display: grid; }
@@ -2153,7 +2174,7 @@ const INDEX_HTML: &str = r#"<!doctype html>
       .block-card { flex-basis: 108px; }
     }
   </style>
-  <script defer src="/assets/iuna-ui.js?v=58"></script>
+  <script defer src="/assets/iuna-ui.js?v=59"></script>
   <script defer src="/assets/alpine.min.js"></script>
 </head>
 <body x-data="iunaApp()" x-init="init()" @keydown.window.escape="closeModals()" x-cloak>
@@ -2165,11 +2186,11 @@ const INDEX_HTML: &str = r#"<!doctype html>
           <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M3 7h16a2 2 0 0 1 2 2v8a2 2 0 0 1-2 2H3z"></path><path d="M3 7V5a2 2 0 0 1 2-2h12"></path><path d="M16 13h3"></path></svg>
           <span>Wallet</span>
         </button>
-        <button class="nav-button" :class="{ active: tab === 'mining' }" @click="setTab('mining')" type="button" title="Mining" aria-label="Mining">
+        <button class="nav-button" x-show="advancedMode()" :class="{ active: tab === 'mining' }" @click="setTab('mining')" type="button" title="Mining" aria-label="Mining">
           <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M4 19V5"></path><path d="M4 19h16"></path><path d="M7 15l4-4 3 3 5-7"></path></svg>
           <span>Mining</span>
         </button>
-        <button class="nav-button" :class="{ active: tab === 'p2p' }" @click="setTab('p2p')" type="button" title="P2P" aria-label="P2P">
+        <button class="nav-button" x-show="advancedMode()" :class="{ active: tab === 'p2p' }" @click="setTab('p2p')" type="button" title="P2P" aria-label="P2P">
           <svg viewBox="0 0 24 24" aria-hidden="true"><circle cx="6" cy="12" r="3"></circle><circle cx="18" cy="6" r="3"></circle><circle cx="18" cy="18" r="3"></circle><path d="M8.5 10.5 15.5 7.5"></path><path d="M8.5 13.5 15.5 16.5"></path></svg>
           <span>P2P</span>
         </button>
@@ -2178,6 +2199,9 @@ const INDEX_HTML: &str = r#"<!doctype html>
           <span>Chain</span>
         </button>
       </nav>
+      <button class="mode-toggle" type="button" @click="toggleUiMode" :title="advancedMode() ? 'Switch to basic mode' : 'Switch to full mode'">
+        <span class="mode-toggle-label" x-text="advancedMode() ? 'Full' : 'Basic'"></span>
+      </button>
       <button class="version-panel" type="button" :class="{ update: updateAvailable(), checking: releaseCheckState === 'checking', failed: releaseCheckState === 'failed' }" :title="versionPanelTitle()" @click="openLatestRelease">
         <span class="version-dot" aria-hidden="true"></span>
         <span class="version-label" x-text="appVersionLabel()"></span>
@@ -2189,6 +2213,10 @@ const INDEX_HTML: &str = r#"<!doctype html>
     <header>
       <div>
         <h1 x-text="pageTitle()">iuna</h1>
+        <div class="basic-status" x-show="basicMode()">
+          <span x-text="basicNetworkStatusLabel()"></span>
+          <button type="button" x-show="basicNetworkNeedsAttention()" @click="setUiMode('advanced'); setTab('p2p')">Details</button>
+        </div>
       </div>
       <div class="header-actions">
         <div class="muted" x-text="lastUpdatedLabel()"></div>
@@ -2214,7 +2242,7 @@ const INDEX_HTML: &str = r#"<!doctype html>
               <label>Amount<input x-model="transferAmount" @input="scheduleFeeEstimates" type="number" min="0.000001" step="0.000001" required></label>
               <label>Fee / byte<input x-model="transferFee" @input="scheduleFeeEstimates" type="number" min="0" step="0.000001" required></label>
               <div class="fee-preview" x-text="feeEstimateLabel('transfer')"></div>
-              <button class="advanced-toggle" type="button" @click="toggleSendAdvanced" x-text="showSendAdvanced ? 'Hide advanced' : 'Advanced'"></button>
+              <button class="advanced-toggle" type="button" @click="toggleSendAdvanced" x-text="showSendAdvanced ? 'Hide UTXOs' : 'UTXOs'"></button>
               <div class="send-utxo-summary" x-show="showSendAdvanced">
                 <div>Selected UTXOs: <span x-text="selectedTransferUtxos.length"></span></div>
                 <div>Selected total: IUNA <span x-text="amountLabel(selectedTransferUtxoTotal())"></span></div>
@@ -2697,7 +2725,7 @@ const INDEX_HTML: &str = r#"<!doctype html>
       <div class="setup-modal-head">
         <div class="setup-welcome">Welcome to iuna</div>
         <h2 id="setup-title">Initial Setup</h2>
-        <div class="setup-copy">Choose how this node finds the network, then set up the local wallet.</div>
+        <div class="setup-copy">Connect this node to the network, then set up the local wallet.</div>
       </div>
       <div class="setup-feedback" :class="setupFeedback?.kind" x-show="setupFeedback" x-transition x-text="setupFeedback?.message"></div>
       <div class="setup-grid">
@@ -2707,9 +2735,9 @@ const INDEX_HTML: &str = r#"<!doctype html>
             <a class="setup-network-link" href="https://github.com/iuna-labs/iuna/blob/main/KNOWN_NODES.txt" target="_blank" rel="noreferrer">Known nodes</a>
           </div>
           <div class="setup-network-row">
-            <label>Bootstrap peer<input x-model="setupPeerAddress" placeholder="iuna.jhx.app:9444"></label>
+            <label><span x-text="setupRequiresPeer() ? 'Bootstrap peer (required)' : 'Bootstrap peer'"></span><input x-model="setupPeerAddress" placeholder="iuna.jhx.app:9444"></label>
           </div>
-          <div class="setup-network-copy">Known nodes are bootstrap peers, not authorities. They help this node find the network; they do not control your wallet or decide valid blocks.</div>
+          <div class="setup-network-copy" x-text="setupRequiresPeer() ? 'A bootstrap peer is required before this node can join the network. Known nodes help discovery; they do not control your wallet or decide valid blocks.' : 'You can add a bootstrap peer now or later from the P2P screen. Known nodes help discovery; they do not control your wallet or decide valid blocks.'"></div>
         </div>
         <div class="setup-section setup-wallet-section seed-panel">
           <div class="panel-head">
@@ -2785,7 +2813,7 @@ const INDEX_HTML: &str = r#"<!doctype html>
         </div>
       </div>
       <div class="setup-actions">
-        <button class="primary" type="button" :disabled="!walletVerified" @click="completeSetup">Continue</button>
+        <button class="primary" type="button" :disabled="!setupCanContinue()" @click="completeSetup">Continue</button>
       </div>
     </section>
   </div>
@@ -3130,6 +3158,27 @@ mod tests {
             state.peers.lock().await.addresses(),
             vec!["iuna.jhx.app:9444"]
         );
+    }
+
+    #[tokio::test]
+    async fn setup_config_form_requires_peer_for_placeholder_chain() {
+        let dir = tempfile::tempdir().unwrap();
+        let config_path = dir.path().join("config.json");
+        let state = auth_test_state(config_path.clone(), UiConfig::default()).await;
+
+        let error = super::apply_config_form(
+            &state,
+            super::ConfigForm {
+                setup_complete: true,
+                peer: " ".to_string(),
+            },
+        )
+        .await
+        .unwrap_err();
+
+        assert!(format!("{error:#}").contains("add a bootstrap peer"));
+        let config = config_store::load_or_create(&config_path).unwrap();
+        assert!(!config.setup_complete);
     }
 
     #[tokio::test]
