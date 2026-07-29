@@ -2078,7 +2078,8 @@ const INDEX_HTML: &str = r#"<!doctype html>
     .panel-head h2, .panel-head h3 { margin-bottom: 0; }
     .switch { display: inline-flex; grid-template-columns: none; align-items: center; gap: 8px; color: #d6dee2; font-weight: 700; }
     .switch input { width: auto; min-width: 0; accent-color: #d5f55f; }
-    .wallet-tx-list { display: grid; gap: 8px; }
+    .wallet-tx-panel { min-width: 0; overflow: hidden; }
+    .wallet-tx-list { max-height: min(620px, calc(100vh - 220px)); min-width: 0; display: grid; gap: 8px; overflow-y: auto; overscroll-behavior-y: contain; padding-right: 4px; }
     .wallet-tx-row { position: relative; display: grid; grid-template-columns: minmax(0, 1fr); gap: 8px; align-items: start; border: 1px solid #2f363c; border-radius: 8px; padding: 12px; background: #111316; cursor: pointer; text-align: left; }
     .wallet-tx-row:hover, .wallet-tx-row:focus-visible, .tx-card:hover, .tx-card:focus-visible, .mempool-item:hover, .mempool-item:focus-visible { border-color: #d5f55f; box-shadow: 0 0 0 1px rgba(213, 245, 95, .22); outline: none; }
     .wallet-tx-row.pending { border-color: #3a4147; background: #191c20; box-shadow: inset 3px 0 0 #6f7880; }
@@ -2147,8 +2148,9 @@ const INDEX_HTML: &str = r#"<!doctype html>
     .pill.burn { background: #332918; color: #ffd070; }
     .pill.transfer { background: #17312a; color: #8de9cd; }
     .pill.mine { background: #172a34; color: #8bdcff; }
-    .mempool-strip { display: flex; gap: 8px; overflow-x: auto; padding-bottom: 4px; }
-    .mempool-item { flex: 0 0 220px; }
+    .mempool-panel { min-width: 0; overflow: hidden; }
+    .mempool-strip { width: 100%; min-width: 0; display: flex; gap: 8px; overflow-x: auto; overscroll-behavior-x: contain; padding: 1px 0 10px; scroll-snap-type: x proximity; }
+    .mempool-item { flex: 0 0 220px; scroll-snap-align: start; }
     .tx-modal { width: min(940px, 100%); max-height: calc(100vh - 44px); overflow: auto; border: 1px solid #3b4448; border-radius: 8px; padding: 16px; background: #181b1f; box-shadow: 0 24px 80px rgba(0, 0, 0, .46); }
     .tx-modal-head { display: flex; justify-content: space-between; gap: 16px; align-items: flex-start; margin-bottom: 14px; }
     .tx-modal-title { display: grid; justify-items: start; gap: 6px; min-width: 0; }
@@ -2295,7 +2297,7 @@ const INDEX_HTML: &str = r#"<!doctype html>
             </div>
           </div>
         </div>
-        <div class="panel">
+        <div class="panel wallet-tx-panel">
           <div class="panel-head">
             <h3>Transactions</h3>
           </div>
@@ -2598,7 +2600,7 @@ const INDEX_HTML: &str = r#"<!doctype html>
           <div class="muted" x-show="!selectedBlock">Select a block</div>
         </section>
 
-        <section class="panel" x-show="mempool.length > 0">
+        <section class="panel mempool-panel" x-show="mempool.length > 0">
           <h2>Mempool</h2>
           <div class="mempool-strip">
             <template x-for="tx in mempool" :key="tx.signature">
