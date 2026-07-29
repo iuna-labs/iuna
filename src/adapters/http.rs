@@ -10,8 +10,8 @@ use anyhow::{Context, Result, bail};
 use axum::{
     Form, Json, Router,
     body::Body,
-    extract::{Query, State},
-    http::{HeaderMap, Request, StatusCode, header},
+    extract::{ConnectInfo, Extension, Query, State},
+    http::{HeaderMap, Method, Request, StatusCode, header},
     middleware::{self, Next},
     response::{Html, IntoResponse, Redirect, Response},
     routing::{get, post},
@@ -42,6 +42,7 @@ const AUTH_COOKIE_NAME: &str = "iuna_session";
 const AUTH_SESSION_TTL_MS: u64 = 12 * 60 * 60 * 1_000;
 const AUTH_MAX_FAILED_ATTEMPTS: u32 = 5;
 const AUTH_LOCKOUT_MS: u64 = 60 * 1_000;
+const UNKNOWN_CLIENT_KEY: &str = "unknown";
 const PASSWORD_KDF_ALGORITHM: &str = "pbkdf2-sha256";
 const PASSWORD_KDF_ITERATIONS: u32 = 120_000;
 const PEER_STALE_AFTER_MS: u64 = 20 * 60 * 1_000;
@@ -56,7 +57,7 @@ struct HttpState {
     wallet_path: PathBuf,
     stratum: StratumStatus,
     auth_sessions: Arc<Mutex<BTreeMap<String, AuthSession>>>,
-    auth_backoff: Arc<Mutex<AuthBackoff>>,
+    auth_backoff: Arc<Mutex<BTreeMap<String, AuthBackoff>>>,
 }
 
 #[derive(Clone)]
@@ -64,6 +65,9 @@ struct AuthSession {
     expires_at: u64,
     wallet_password: String,
 }
+
+#[derive(Clone, Debug)]
+struct AuthClientKey(String);
 
 #[derive(Clone, Debug, Default)]
 struct AuthBackoff {
@@ -267,7 +271,7 @@ pub async fn serve(
         wallet_path: options.wallet_path,
         stratum: options.stratum,
         auth_sessions: Arc::new(Mutex::new(BTreeMap::new())),
-        auth_backoff: Arc::new(Mutex::new(AuthBackoff::default())),
+        auth_backoff: Arc::new(Mutex::new(BTreeMap::new())),
     };
     let app = Router::new()
         .route("/", get(index))
@@ -318,9 +322,12 @@ pub async fn serve(
     let listener = TcpListener::bind(addr)
         .await
         .with_context(|| format!("binding HTTP management UI on {addr}"))?;
-    axum::serve(listener, app.into_make_service())
-        .await
-        .context("serving HTTP management UI")
+    axum::serve(
+        listener,
+        app.into_make_service_with_connect_info::<SocketAddr>(),
+    )
+    .await
+    .context("serving HTTP management UI")
 }
 
 async fn index() -> Html<&'static str> {
@@ -350,11 +357,22 @@ async fn app_js() -> impl IntoResponse {
 async fn require_auth_middleware(
     State(state): State<HttpState>,
     headers: HeaderMap,
-    request: Request<Body>,
+    mut request: Request<Body>,
     next: Next,
 ) -> Response {
-    let path = request.uri().path();
-    if auth_exempt_path(path) {
+    let path = request.uri().path().to_string();
+    if csrf_required(request.method()) && !same_origin_request(&headers) {
+        return csrf_error().into_response();
+    }
+    let client_key = auth_client_key(
+        &headers,
+        request
+            .extensions()
+            .get::<ConnectInfo<SocketAddr>>()
+            .map(|info| info.0),
+    );
+    request.extensions_mut().insert(AuthClientKey(client_key));
+    if auth_exempt_path(&path) {
         return next.run(request).await;
     }
     let configured = state.ui_config.lock().await.auth_password_hash.is_some();
@@ -374,6 +392,58 @@ fn auth_exempt_path(path: &str) -> bool {
         || path == "/api/auth/status"
         || path == "/api/auth/setup"
         || path == "/api/auth/login"
+}
+
+fn csrf_required(method: &Method) -> bool {
+    !matches!(method, &Method::GET | &Method::HEAD | &Method::OPTIONS)
+}
+
+fn same_origin_request(headers: &HeaderMap) -> bool {
+    let Some(request_host) = request_host(headers) else {
+        return false;
+    };
+    let Some(origin_host) = origin_or_referer_host(headers) else {
+        return false;
+    };
+    normalize_host(&origin_host) == normalize_host(&request_host)
+}
+
+fn request_host(headers: &HeaderMap) -> Option<String> {
+    header_string(headers, "x-forwarded-host").or_else(|| header_string(headers, "host"))
+}
+
+fn origin_or_referer_host(headers: &HeaderMap) -> Option<String> {
+    header_string(headers, "origin")
+        .and_then(|origin| url_host(&origin))
+        .or_else(|| header_string(headers, "referer").and_then(|referer| url_host(&referer)))
+}
+
+fn header_string(headers: &HeaderMap, name: &'static str) -> Option<String> {
+    headers
+        .get(name)
+        .and_then(|value| value.to_str().ok())
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(ToOwned::to_owned)
+}
+
+fn url_host(value: &str) -> Option<String> {
+    let (_, rest) = value.split_once("://")?;
+    rest.split(['/', '?', '#'])
+        .next()
+        .map(str::trim)
+        .filter(|authority| !authority.is_empty() && *authority != "null")
+        .map(|authority| {
+            authority
+                .rsplit('@')
+                .next()
+                .unwrap_or(authority)
+                .to_string()
+        })
+}
+
+fn normalize_host(host: &str) -> String {
+    host.trim().trim_end_matches('.').to_ascii_lowercase()
 }
 
 async fn request_is_authenticated(state: &HttpState, headers: &HeaderMap) -> bool {
@@ -415,9 +485,10 @@ async fn api_auth_status(
 
 async fn api_auth_setup_form(
     State(state): State<HttpState>,
+    Extension(client_key): Extension<AuthClientKey>,
     Form(form): Form<AuthForm>,
 ) -> Response {
-    match setup_auth_password(&state, &form.password).await {
+    match setup_auth_password(&state, &form.password, &client_key.0).await {
         Ok(cookie) => ([(header::SET_COOKIE, cookie)], action_json(Ok(()))).into_response(),
         Err(error) => action_json(Err(error)).into_response(),
     }
@@ -425,9 +496,10 @@ async fn api_auth_setup_form(
 
 async fn api_auth_login_form(
     State(state): State<HttpState>,
+    Extension(client_key): Extension<AuthClientKey>,
     Form(form): Form<AuthForm>,
 ) -> Response {
-    match login_auth_password(&state, &form.password).await {
+    match login_auth_password(&state, &form.password, &client_key.0).await {
         Ok(cookie) => ([(header::SET_COOKIE, cookie)], action_json(Ok(()))).into_response(),
         Err(error) => action_json(Err(error)).into_response(),
     }
@@ -1462,6 +1534,16 @@ fn auth_error(message: &str) -> (StatusCode, Json<ActionResponse>) {
     )
 }
 
+fn csrf_error() -> (StatusCode, Json<ActionResponse>) {
+    (
+        StatusCode::FORBIDDEN,
+        Json(ActionResponse {
+            ok: false,
+            error: Some("same-origin request required".to_string()),
+        }),
+    )
+}
+
 fn api_error(error: anyhow::Error) -> Json<ActionResponse> {
     Json(ActionResponse {
         ok: false,
@@ -1469,10 +1551,81 @@ fn api_error(error: anyhow::Error) -> Json<ActionResponse> {
     })
 }
 
-async fn setup_auth_password(state: &HttpState, password: &str) -> Result<String> {
-    validate_password(password)?;
+fn auth_client_key(headers: &HeaderMap, socket_addr: Option<SocketAddr>) -> String {
+    if let Some(addr) = socket_addr {
+        if !trusted_forwarding_peer(addr.ip()) {
+            return addr.ip().to_string();
+        }
+    }
+    forwarded_for_client(headers)
+        .or_else(|| header_string(headers, "x-real-ip"))
+        .or_else(|| forwarded_header_client(headers))
+        .or_else(|| socket_addr.map(|addr| addr.ip().to_string()))
+        .unwrap_or_else(|| UNKNOWN_CLIENT_KEY.to_string())
+}
+
+fn trusted_forwarding_peer(ip: std::net::IpAddr) -> bool {
+    match ip {
+        std::net::IpAddr::V4(ip) => ip.is_loopback() || ip.is_private() || ip.is_link_local(),
+        std::net::IpAddr::V6(ip) => {
+            ip.is_loopback() || ipv6_is_unique_local(ip) || ipv6_is_unicast_link_local(ip)
+        }
+    }
+}
+
+fn ipv6_is_unique_local(ip: std::net::Ipv6Addr) -> bool {
+    (ip.segments()[0] & 0xfe00) == 0xfc00
+}
+
+fn ipv6_is_unicast_link_local(ip: std::net::Ipv6Addr) -> bool {
+    (ip.segments()[0] & 0xffc0) == 0xfe80
+}
+
+fn forwarded_for_client(headers: &HeaderMap) -> Option<String> {
+    header_string(headers, "x-forwarded-for").and_then(|value| {
+        value
+            .split(',')
+            .next()
+            .map(str::trim)
+            .filter(|client| !client.is_empty())
+            .map(ToOwned::to_owned)
+    })
+}
+
+fn forwarded_header_client(headers: &HeaderMap) -> Option<String> {
+    let value = header_string(headers, "forwarded")?;
+    for item in value.split(';') {
+        let Some((name, value)) = item.split_once('=') else {
+            continue;
+        };
+        if name.trim().eq_ignore_ascii_case("for") {
+            return Some(
+                value
+                    .trim()
+                    .trim_matches('"')
+                    .trim_matches('[')
+                    .trim_matches(']')
+                    .to_string(),
+            )
+            .filter(|client| !client.is_empty());
+        }
+    }
+    None
+}
+
+async fn setup_auth_password(
+    state: &HttpState,
+    password: &str,
+    client_key: &str,
+) -> Result<String> {
+    check_auth_backoff(state, client_key).await?;
+    if let Err(error) = validate_password(password) {
+        record_auth_failure(state, client_key).await;
+        return Err(error);
+    }
     let mut config = state.ui_config.lock().await;
     if config.auth_password_hash.is_some() {
+        record_auth_failure(state, client_key).await;
         bail!("authentication is already configured");
     }
     config.auth_password_hash = Some(hash_password(password)?);
@@ -1481,11 +1634,16 @@ async fn setup_auth_password(state: &HttpState, password: &str) -> Result<String
     wallet_store::encrypt_existing_with_password(&state.wallet_path, password)?;
     let wallet = wallet_store::load_with_password(&state.wallet_path, password)?;
     state.node.lock().await.replace_wallet(wallet);
+    clear_auth_backoff(state, client_key).await;
     create_session_cookie(state, password).await
 }
 
-async fn login_auth_password(state: &HttpState, password: &str) -> Result<String> {
-    check_auth_backoff(state).await?;
+async fn login_auth_password(
+    state: &HttpState,
+    password: &str,
+    client_key: &str,
+) -> Result<String> {
+    check_auth_backoff(state, client_key).await?;
     let hash = state
         .ui_config
         .lock()
@@ -1494,19 +1652,20 @@ async fn login_auth_password(state: &HttpState, password: &str) -> Result<String
         .clone()
         .context("authentication setup is required")?;
     if !verify_password(password, &hash)? {
-        record_auth_failure(state).await;
+        record_auth_failure(state, client_key).await;
         bail!("invalid password");
     }
     wallet_store::encrypt_existing_with_password(&state.wallet_path, password)?;
     let wallet = wallet_store::load_with_password(&state.wallet_path, password)?;
     state.node.lock().await.replace_wallet(wallet);
-    clear_auth_backoff(state).await;
+    clear_auth_backoff(state, client_key).await;
     create_session_cookie(state, password).await
 }
 
-async fn check_auth_backoff(state: &HttpState) -> Result<()> {
+async fn check_auth_backoff(state: &HttpState, client_key: &str) -> Result<()> {
     let now = now_ms();
-    let mut backoff = state.auth_backoff.lock().await;
+    let mut backoffs = state.auth_backoff.lock().await;
+    let backoff = backoffs.entry(client_key.to_string()).or_default();
     if backoff
         .locked_until_ms
         .is_some_and(|locked_until| locked_until > now)
@@ -1520,18 +1679,17 @@ async fn check_auth_backoff(state: &HttpState) -> Result<()> {
     Ok(())
 }
 
-async fn record_auth_failure(state: &HttpState) {
-    let mut backoff = state.auth_backoff.lock().await;
+async fn record_auth_failure(state: &HttpState, client_key: &str) {
+    let mut backoffs = state.auth_backoff.lock().await;
+    let backoff = backoffs.entry(client_key.to_string()).or_default();
     backoff.failed_attempts = backoff.failed_attempts.saturating_add(1);
     if backoff.failed_attempts >= AUTH_MAX_FAILED_ATTEMPTS {
         backoff.locked_until_ms = Some(now_ms().saturating_add(AUTH_LOCKOUT_MS));
     }
 }
 
-async fn clear_auth_backoff(state: &HttpState) {
-    let mut backoff = state.auth_backoff.lock().await;
-    backoff.failed_attempts = 0;
-    backoff.locked_until_ms = None;
+async fn clear_auth_backoff(state: &HttpState, client_key: &str) {
+    state.auth_backoff.lock().await.remove(client_key);
 }
 
 fn validate_password(password: &str) -> Result<()> {
@@ -2659,10 +2817,11 @@ mod tests {
 
     use super::{
         AUTH_COOKIE_NAME, HttpState, PEER_STALE_AFTER_MS, TransferForm, api_auth_login_form,
-        api_auth_setup_form, api_auth_status, dev_seed_verify_bypass_allowed, hash_password,
-        hex_encode, pbkdf2_sha256, persist_burn_settings_config, persist_pow_mining_config,
-        require_auth_middleware, required_fee_per_byte_burn, validate_password,
-        validate_transfer_form, verify_password, wallet_transaction_rows,
+        api_auth_setup_form, api_auth_status, auth_client_key, dev_seed_verify_bypass_allowed,
+        hash_password, hex_encode, pbkdf2_sha256, persist_burn_settings_config,
+        persist_pow_mining_config, require_auth_middleware, required_fee_per_byte_burn,
+        same_origin_request, validate_password, validate_transfer_form, verify_password,
+        wallet_transaction_rows,
     };
 
     #[test]
@@ -2706,6 +2865,40 @@ mod tests {
             hex_encode(two_iterations),
             "ae4d0c95af6b46d32d0adff928f06dd02a303f8ef3c251dfd6e2d85a95474c43"
         );
+    }
+
+    #[test]
+    fn same_origin_check_accepts_forwarded_host_and_rejects_cross_site_origin() {
+        let mut headers = HeaderMap::new();
+        headers.insert(header::HOST, "127.0.0.1:18661".parse().unwrap());
+        headers.insert("x-forwarded-host", "iuna.example".parse().unwrap());
+        headers.insert(header::ORIGIN, "https://iuna.example".parse().unwrap());
+        assert!(same_origin_request(&headers));
+
+        headers.insert(header::ORIGIN, "https://evil.example".parse().unwrap());
+        assert!(!same_origin_request(&headers));
+    }
+
+    #[test]
+    fn auth_client_key_trusts_forwarded_headers_only_from_private_or_local_peers() {
+        let mut headers = HeaderMap::new();
+        headers.insert("x-forwarded-for", "198.51.100.99".parse().unwrap());
+        let socket = Some("203.0.113.10:51234".parse().unwrap());
+
+        assert_eq!(auth_client_key(&headers, socket), "203.0.113.10");
+        assert_eq!(
+            auth_client_key(&headers, Some("127.0.0.1:51234".parse().unwrap())),
+            "198.51.100.99"
+        );
+        assert_eq!(
+            auth_client_key(&headers, Some("10.42.1.12:51234".parse().unwrap())),
+            "198.51.100.99"
+        );
+        assert_eq!(
+            auth_client_key(&headers, Some("172.20.4.8:51234".parse().unwrap())),
+            "198.51.100.99"
+        );
+        assert_eq!(auth_client_key(&headers, None), "198.51.100.99");
     }
 
     #[tokio::test]
@@ -2778,6 +2971,43 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn auth_posts_require_same_origin_headers() {
+        let dir = tempfile::tempdir().unwrap();
+        let password = "correct horse battery staple";
+        let state = auth_test_state(
+            dir.path().join("config.json"),
+            UiConfig {
+                auth_password_hash: Some(hash_password(password).unwrap()),
+                ..UiConfig::default()
+            },
+        )
+        .await;
+        let app = auth_test_app(state);
+
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .method(Method::POST)
+                    .uri("/api/auth/login")
+                    .header(header::HOST, "127.0.0.1:18661")
+                    .header(header::CONTENT_TYPE, "application/x-www-form-urlencoded")
+                    .body(Body::from("password=correct+horse+battery+staple"))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::FORBIDDEN);
+        let body = String::from_utf8(
+            to_bytes(response.into_body(), usize::MAX)
+                .await
+                .unwrap()
+                .to_vec(),
+        )
+        .unwrap();
+        assert!(body.contains("same-origin request required"));
+    }
+
+    #[tokio::test]
     async fn login_authentication_locks_out_after_repeated_failures() {
         let dir = tempfile::tempdir().unwrap();
         let password = "correct horse battery staple";
@@ -2789,24 +3019,38 @@ mod tests {
             },
         )
         .await;
+        let client_a = "198.51.100.10";
+        let client_b = "198.51.100.11";
 
         for _ in 0..super::AUTH_MAX_FAILED_ATTEMPTS {
-            let error = super::login_auth_password(&state, "wrong horse battery staple")
+            let error = super::login_auth_password(&state, "wrong horse battery staple", client_a)
                 .await
                 .unwrap_err();
             assert!(format!("{error:#}").contains("invalid password"));
         }
 
-        let locked = super::login_auth_password(&state, password)
+        let locked = super::login_auth_password(&state, password, client_a)
             .await
             .unwrap_err();
         assert!(format!("{locked:#}").contains("too many failed login attempts"));
 
-        state.auth_backoff.lock().await.locked_until_ms =
-            Some(crate::app::now_ms().saturating_sub(1));
-        let cookie = super::login_auth_password(&state, password).await.unwrap();
+        let other_client_cookie = super::login_auth_password(&state, password, client_b)
+            .await
+            .unwrap();
+        assert!(other_client_cookie.starts_with(AUTH_COOKIE_NAME));
+
+        state
+            .auth_backoff
+            .lock()
+            .await
+            .get_mut(client_a)
+            .unwrap()
+            .locked_until_ms = Some(crate::app::now_ms().saturating_sub(1));
+        let cookie = super::login_auth_password(&state, password, client_a)
+            .await
+            .unwrap();
         assert!(cookie.starts_with(AUTH_COOKIE_NAME));
-        assert_eq!(state.auth_backoff.lock().await.failed_attempts, 0);
+        assert!(!state.auth_backoff.lock().await.contains_key(client_a));
     }
 
     #[tokio::test]
@@ -3214,7 +3458,7 @@ mod tests {
                 listen_addr: None,
             },
             auth_sessions: Arc::new(Mutex::new(BTreeMap::new())),
-            auth_backoff: Arc::new(Mutex::new(super::AuthBackoff::default())),
+            auth_backoff: Arc::new(Mutex::new(BTreeMap::new())),
         }
     }
 
@@ -3249,10 +3493,14 @@ mod tests {
         body: &str,
     ) -> TestHttpResponse {
         let mut builder = Request::builder()
-            .method(method)
+            .method(method.clone())
             .uri(path)
             .header(header::ACCEPT, "application/json")
+            .header(header::HOST, "127.0.0.1:18661")
             .header(header::CONTENT_TYPE, "application/x-www-form-urlencoded");
+        if matches!(method, Method::POST | Method::DELETE) {
+            builder = builder.header(header::ORIGIN, "http://127.0.0.1:18661");
+        }
         if let Some(cookie) = cookie {
             builder = builder.header(header::COOKIE, cookie);
         }
