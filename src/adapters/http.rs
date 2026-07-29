@@ -1906,9 +1906,9 @@ const INDEX_HTML: &str = r#"<!doctype html>
     body { margin: 0; min-height: 100vh; background: #0f1012; color: #e8edf0; }
     .app-shell { min-height: 100vh; display: grid; grid-template-columns: 84px minmax(0, 1fr); }
     .sidebar { position: sticky; top: 0; height: 100vh; display: flex; flex-direction: column; align-items: center; gap: 20px; padding: 16px 10px; background: #15171a; border-right: 1px solid #262b2f; }
-    .brand-mark { position: relative; width: 44px; height: 44px; display: grid; place-items: center; overflow: hidden; border: 1px solid #e8ff8d; border-radius: 8px; background: linear-gradient(145deg, #ecff8a 0%, #d5f55f 54%, #8de9cd 100%); box-shadow: inset 0 1px 0 rgba(255, 255, 255, .42), 0 10px 24px rgba(213, 245, 95, .16); user-select: none; cursor: default; }
+    .brand-mark { position: relative; width: 38px; height: 38px; display: grid; place-items: center; overflow: hidden; border: 1px solid #e8ff8d; border-radius: 8px; background: linear-gradient(145deg, #ecff8a 0%, #d5f55f 54%, #8de9cd 100%); box-shadow: inset 0 1px 0 rgba(255, 255, 255, .42), 0 10px 24px rgba(213, 245, 95, .16); user-select: none; cursor: default; }
     .brand-mark::after { content: ""; position: absolute; inset: -40% -70%; background: linear-gradient(100deg, transparent 42%, rgba(255, 255, 255, .34) 50%, transparent 58%); transform: translateX(-58%) rotate(8deg); opacity: 0; pointer-events: none; }
-    .brand-mark svg { position: relative; z-index: 1; width: 28px; height: 28px; display: block; }
+    .brand-mark svg { position: relative; z-index: 1; width: 24px; height: 24px; display: block; }
     .brand-mark .mark-loop { fill: none; stroke: #101315; stroke-width: 4.2; stroke-linecap: round; stroke-linejoin: round; }
     .brand-mark .mark-dot { fill: #101315; }
     .brand-mark:hover::after { animation: mark-sheen .72s ease both; }
@@ -2164,8 +2164,8 @@ const INDEX_HTML: &str = r#"<!doctype html>
     @media (max-width: 760px) {
       .app-shell { grid-template-columns: 1fr; }
       .sidebar { position: sticky; z-index: 5; bottom: 0; top: auto; height: auto; flex-direction: row; justify-content: space-between; padding: 8px; border-right: 0; border-bottom: 1px solid #262b2f; }
-      .brand-mark { width: 38px; height: 38px; }
-      .brand-mark svg { width: 28px; height: 28px; }
+      .brand-mark { width: 34px; height: 34px; }
+      .brand-mark svg { width: 22px; height: 22px; }
       .side-nav { display: flex; width: auto; gap: 8px; }
       .nav-button { width: 52px; min-height: 48px; }
       .nav-button span { font-size: 10px; }
