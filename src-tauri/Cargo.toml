@@ -1,0 +1,12 @@
+[package]
+name = "iuna-desktop"
+version = "0.1.14"
+edition = "2024"
+publish = false
+
+[build-dependencies]
+tauri-build = { version = "2", features = [] }
+
+[dependencies]
+tauri = { version = "2", features = [] }
+tauri-plugin-shell = "2"

@@ -8,13 +8,20 @@ It is not a mainnet and not money yet. The goal right now is simple: run a small
 
 Download the latest build for your platform from the [GitHub Releases](https://github.com/iuna-labs/iuna/releases) page. You do not need Rust or Cargo to run a node.
 
-Release archives are published for:
+CLI release archives are published for:
 
 - Linux x86_64
 - Linux aarch64
 - macOS x86_64
 - macOS Apple Silicon
 - Windows x86_64
+
+Desktop artifacts are also published for:
+
+- macOS Apple Silicon app bundle
+- Windows x86_64 installer
+
+The desktop app starts the bundled iuna node locally and opens the same management UI in an app window.
 
 Unpack the archive and run the `iuna` binary from a terminal.
 
@@ -109,7 +116,7 @@ git tag v0.1.0
 git push origin v0.1.0
 ```
 
-The release workflow builds platform archives, writes `SHA256SUMS`, and attaches everything to the GitHub Release for that tag.
+The release workflow builds platform archives plus macOS and Windows desktop artifacts, writes `SHA256SUMS`, and attaches everything to the GitHub Release for that tag.
 
 ## License
 

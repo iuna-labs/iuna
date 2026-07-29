@@ -80,9 +80,86 @@ jobs:
           path: dist/iuna-${{ github.ref_name }}-${{ matrix.platform }}.*
           if-no-files-found: error
 
+  desktop:
+    name: Build ${{ matrix.platform }}
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: macos-14
+            platform: macos-aarch64-desktop
+            sidecar: iuna-sidecar-aarch64-apple-darwin
+            bundle: app
+          - os: windows-latest
+            platform: windows-x86_64-desktop
+            sidecar: iuna-sidecar-x86_64-pc-windows-msvc.exe
+            bundle: nsis
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v7
+
+      - name: Install Rust
+        shell: bash
+        run: |
+          rustup toolchain install stable --profile minimal
+          rustup default stable
+
+      - name: Build iuna sidecar
+        run: cargo build --release --locked
+
+      - name: Prepare macOS sidecar
+        if: runner.os == 'macOS'
+        shell: bash
+        run: |
+          mkdir -p src-tauri/binaries
+          cp target/release/iuna "src-tauri/binaries/${{ matrix.sidecar }}"
+          chmod +x "src-tauri/binaries/${{ matrix.sidecar }}"
+
+      - name: Prepare Windows sidecar
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          New-Item -ItemType Directory -Force -Path "src-tauri/binaries" | Out-Null
+          Copy-Item "target/release/iuna.exe" "src-tauri/binaries/${{ matrix.sidecar }}"
+
+      - name: Install Tauri CLI
+        run: cargo +stable install tauri-cli --locked --version "^2"
+
+      - name: Build desktop app
+        working-directory: src-tauri
+        run: cargo +stable tauri build --bundles ${{ matrix.bundle }}
+
+      - name: Package macOS app
+        if: runner.os == 'macOS'
+        shell: bash
+        run: |
+          tag="${GITHUB_REF_NAME:-manual}"
+          mkdir -p dist
+          ditto -c -k --keepParent "src-tauri/target/release/bundle/macos/iuna.app" "dist/iuna-${tag}-${{ matrix.platform }}.app.zip"
+
+      - name: Package Windows installer
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          $tag = if ($env:GITHUB_REF_NAME) { $env:GITHUB_REF_NAME } else { "manual" }
+          New-Item -ItemType Directory -Force -Path "dist" | Out-Null
+          $installer = Get-ChildItem "src-tauri/target/release/bundle/nsis" -Filter "*.exe" | Select-Object -First 1
+          Copy-Item $installer.FullName "dist/iuna-$tag-${{ matrix.platform }}-setup.exe"
+
+      - name: Upload desktop artifact
+        uses: actions/upload-artifact@v7
+        with:
+          name: iuna-${{ github.ref_name }}-${{ matrix.platform }}
+          path: dist/iuna-${{ github.ref_name }}-${{ matrix.platform }}.*
+          if-no-files-found: error
+
   release:
     name: Publish GitHub Release
-    needs: build
+    needs:
+      - build
+      - desktop
     runs-on: ubuntu-latest
     if: startsWith(github.ref, 'refs/tags/')
     steps:

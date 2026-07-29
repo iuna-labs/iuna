@@ -24,9 +24,15 @@
       --amber: #ffd070;
     }
     * { box-sizing: border-box; }
-    html { scroll-padding-top: 76px; }
+    html {
+      max-width: 100%;
+      overflow-x: hidden;
+      scroll-padding-top: 76px;
+    }
     body {
       margin: 0;
+      max-width: 100%;
+      overflow-x: hidden;
       background: var(--bg);
       color: var(--text);
     }
