@@ -2047,7 +2047,7 @@ async fn process_hello(
         network,
         known_peer,
         remote_addr,
-        &PeerStatus::new(hello.height, hello.tip_hash.clone()),
+        &PeerStatus::with_time(hello.height, hello.tip_hash.clone(), hello.time_ms),
     )
     .await;
     if request_snapshot {
@@ -3007,6 +3007,60 @@ mod tests {
         );
 
         assert!(network.inner.peers.lock().await.list().is_empty());
+    }
+
+    #[tokio::test]
+    async fn hello_records_remote_clock_observation() {
+        let alice = Wallet::from_seed("hello-clock-alice");
+        let allocations = allocations(std::slice::from_ref(&alice), 1_000);
+        let node = Arc::new(tokio::sync::Mutex::new(node("alice", alice, allocations)));
+        let network = super::GossipNetwork {
+            inner: Arc::new(super::GossipNetworkInner {
+                node,
+                peers: Arc::new(tokio::sync::Mutex::new(PeerBook::default())),
+                listen_addr: "127.0.0.1:9544".parse().unwrap(),
+                node_id: super::new_node_id(),
+                sessions: tokio::sync::Mutex::new(BTreeMap::new()),
+                tx_delivery: tokio::sync::Mutex::new(BTreeMap::new()),
+                metrics: super::P2pMetricsCounters::default(),
+            }),
+        };
+        let remote_time_ms = crate::app::now_ms().saturating_add(60_000);
+        let hello = ProtocolHello {
+            protocol_version: PROTOCOL_VERSION,
+            network_id: NETWORK_ID.to_string(),
+            genesis_hash: network
+                .inner
+                .node
+                .lock()
+                .await
+                .ledger()
+                .genesis_hash()
+                .to_string(),
+            listen_addr: Some("127.0.0.1:9545".to_string()),
+            node_id: None,
+            height: 0,
+            tip_hash: "tip".to_string(),
+            time_ms: remote_time_ms,
+        };
+
+        let mut known_peer = None;
+        super::process_hello(
+            &network,
+            "127.0.0.1:9545".parse().unwrap(),
+            &mut known_peer,
+            hello,
+        )
+        .await
+        .unwrap();
+
+        let peers = network.inner.peers.lock().await.list();
+        let peer = peers
+            .iter()
+            .find(|peer| peer.address == "127.0.0.1:9545")
+            .unwrap();
+        assert!(peer.last_clock_offset_ms.unwrap() > 30_000);
+        assert_eq!(peer.last_clock_offset_accepted, Some(true));
     }
 
     #[tokio::test]

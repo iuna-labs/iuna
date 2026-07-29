@@ -211,7 +211,7 @@ async fn initialize_ledger(
             );
         }
         let height = snapshot_height(&snapshot);
-        let ledger = Ledger::from_snapshot(snapshot).with_context(|| {
+        let ledger = Ledger::from_persisted_snapshot(snapshot).with_context(|| {
             format!(
                 "failed to load chain database {}",
                 chain_store.path().display()
@@ -1035,6 +1035,44 @@ mod tests {
         assert_eq!(resumed.status().tip_hash, persisted.status().tip_hash);
         assert_eq!(resumed.genesis_hash(), persisted.genesis_hash());
         assert_eq!(resumed.balance_of(fresh_wallet.address()), 0);
+    }
+
+    #[tokio::test]
+    async fn startup_resumes_persisted_chain_with_network_accepted_future_tip() {
+        let dir = tempdir().unwrap();
+        let chain_path = dir.path().join("chain.sqlite3");
+        let store = SqliteChainStore::open(&chain_path).unwrap();
+        let persisted_wallet = Wallet::from_seed("persisted-future-chain-owner");
+        let mut persisted = ledger_with_one_spendable_iuna(&persisted_wallet);
+        let burn = persisted.build_burn(&persisted_wallet, 1, 0).unwrap();
+        persisted.submit_transaction(burn).unwrap();
+        let future_tip_ms = iuna::app::now_ms().saturating_add(VDF_TARGET_BLOCK_MS);
+        let future_block = persisted
+            .mine_next_block(&persisted_wallet, future_tip_ms)
+            .unwrap();
+        let mut snapshot = persisted.snapshot();
+        snapshot.blocks.push(future_block);
+        assert!(
+            Ledger::from_snapshot(snapshot.clone())
+                .unwrap_err()
+                .to_string()
+                .contains("too far in the future")
+        );
+        store.save(&snapshot).unwrap();
+        let fresh_wallet = Wallet::from_seed("fresh-start-wallet");
+        let opts = parse(&["--chain-db", chain_path.to_str().unwrap()])
+            .unwrap()
+            .unwrap();
+
+        let resumed = initialize_ledger(&opts, fresh_wallet.address(), &store)
+            .await
+            .unwrap();
+
+        assert_eq!(resumed.status().height, 1);
+        assert_eq!(
+            resumed.status().tip_hash,
+            snapshot.blocks.last().unwrap().hash
+        );
     }
 
     #[tokio::test]
