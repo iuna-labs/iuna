@@ -1134,6 +1134,10 @@ window.iunaApp = function iunaApp() {
       return `${lag} behind`;
     },
 
+    networkTimeOffsetLabel() {
+      return this.clockOffsetLabel(this.networkHealth.network_time_offset_ms, true);
+    },
+
     outboundPeers() {
       return this.peers.filter((peer) => peer.direction !== "inbound");
     },
@@ -1195,6 +1199,23 @@ window.iunaApp = function iunaApp() {
 
     peerLastContactLabel(peer) {
       return this.relativeTimeLabel(peer.last_contact_ms);
+    },
+
+    peerClockLabel(peer) {
+      const label = this.clockOffsetLabel(peer.last_clock_offset_ms, false);
+      if (label === "-") return "-";
+      return peer.last_clock_offset_accepted === false ? `${label} ignored` : label;
+    },
+
+    clockOffsetLabel(offsetMs, zeroAsSynced) {
+      if (typeof offsetMs !== "number") return "-";
+      const sign = offsetMs > 0 ? "+" : offsetMs < 0 ? "-" : "";
+      const absoluteSeconds = Math.round(Math.abs(offsetMs) / 1000);
+      if (absoluteSeconds === 0) return zeroAsSynced ? "even" : "0s";
+      if (absoluteSeconds < 60) return `${sign}${absoluteSeconds}s`;
+      const minutes = Math.round(absoluteSeconds / 60);
+      if (minutes < 60) return `${sign}${minutes}m`;
+      return `${sign}${Math.round(minutes / 60)}h`;
     },
 
     peerBanLabel(peer) {

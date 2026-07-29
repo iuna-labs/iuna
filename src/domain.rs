@@ -1,4 +1,7 @@
-use std::collections::{BTreeMap, BTreeSet};
+use std::{
+    collections::{BTreeMap, BTreeSet},
+    time::{SystemTime, UNIX_EPOCH},
+};
 
 use anyhow::{Context, Result, anyhow, bail};
 use ed25519_dalek::{Signature, Signer, SigningKey, Verifier, VerifyingKey};
@@ -30,6 +33,10 @@ const DEFAULT_TICKET_EXPIRY_WINDOW: u64 = 3;
 const MIN_VDF_ROUNDS: u32 = 1;
 const VDF_RETARGET_WINDOW_BLOCKS: usize = 10;
 const MAX_VDF_RETARGET_STEP_PERCENT: u128 = 10;
+const MIN_VDF_RETARGET_OBSERVED_BLOCK_MS: u64 = VDF_TARGET_BLOCK_MS / 4;
+const MAX_VDF_RETARGET_OBSERVED_BLOCK_MS: u64 = VDF_TARGET_BLOCK_MS * 4;
+const MAX_BLOCK_TIMESTAMP_FUTURE_DRIFT_MS: u64 = 2 * 60 * 1_000;
+const BLOCK_MEDIAN_TIME_PAST_WINDOW: usize = 11;
 const FORK_FINALITY_DEPTH: u64 = 6;
 const VDF_MODULUS: u128 = 4_611_685_975_477_714_963;
 const VDF_CHALLENGE_MIN: u64 = 1_073_741_827;
@@ -1222,10 +1229,18 @@ impl Ledger {
     }
 
     pub fn from_snapshot(snapshot: ChainSnapshot) -> Result<Self> {
-        Self::from_snapshot_with_vdf_policy(snapshot, true)
+        Self::from_snapshot_at(snapshot, unix_now_ms())
     }
 
-    fn from_snapshot_with_vdf_policy(snapshot: ChainSnapshot, verify_vdf: bool) -> Result<Self> {
+    pub(crate) fn from_snapshot_at(snapshot: ChainSnapshot, now_ms: u64) -> Result<Self> {
+        Self::from_snapshot_with_vdf_policy(snapshot, true, now_ms)
+    }
+
+    fn from_snapshot_with_vdf_policy(
+        snapshot: ChainSnapshot,
+        verify_vdf: bool,
+        now_ms: u64,
+    ) -> Result<Self> {
         let ChainSnapshot {
             genesis_allocations,
             vdf_rounds,
@@ -1267,23 +1282,24 @@ impl Ledger {
 
         for block in blocks.into_iter().skip(1) {
             if verify_vdf {
-                ledger.apply_block(block)?;
+                ledger.apply_block_at(block, now_ms)?;
             } else {
-                ledger.apply_preverified_block(block)?;
+                ledger.apply_preverified_block_at(block, now_ms)?;
             }
         }
         Ok(ledger)
     }
 
     pub fn extend_from_snapshot(&mut self, snapshot: ChainSnapshot) -> Result<bool> {
-        self.extend_from_snapshot_with_vdf_policy(snapshot, true)
+        self.extend_from_snapshot_with_vdf_policy(snapshot, true, unix_now_ms())
     }
 
-    pub(crate) fn extend_from_preverified_snapshot(
+    pub(crate) fn extend_from_preverified_snapshot_at(
         &mut self,
         snapshot: ChainSnapshot,
+        now_ms: u64,
     ) -> Result<bool> {
-        self.extend_from_snapshot_with_vdf_policy(snapshot, false)
+        self.extend_from_snapshot_with_vdf_policy(snapshot, false, now_ms)
     }
 
     pub(crate) fn missing_snapshot_blocks(&self, snapshot: &ChainSnapshot) -> Result<Vec<Block>> {
@@ -1305,9 +1321,10 @@ impl Ledger {
         &mut self,
         snapshot: ChainSnapshot,
         verify_vdf: bool,
+        now_ms: u64,
     ) -> Result<bool> {
         self.validate_snapshot_identity(&snapshot)?;
-        let candidate = Self::from_snapshot_with_vdf_policy(snapshot, verify_vdf)?;
+        let candidate = Self::from_snapshot_with_vdf_policy(snapshot, verify_vdf, now_ms)?;
         let fork_point = self.fork_point_with_candidate(&candidate)?;
 
         if self.choose_fork(&candidate, fork_point) == ForkChoice::KeepLocal {
@@ -1926,11 +1943,19 @@ impl Ledger {
     }
 
     pub fn apply_block(&mut self, block: Block) -> Result<()> {
-        self.apply_block_with_vdf_policy(block, true)
+        self.apply_block_at(block, unix_now_ms())
     }
 
-    pub(crate) fn block_requires_vdf_verification(&self, block: &Block) -> Result<bool> {
-        self.precheck_block_without_vdf(block)
+    pub(crate) fn apply_block_at(&mut self, block: Block, now_ms: u64) -> Result<()> {
+        self.apply_block_with_vdf_policy(block, true, now_ms)
+    }
+
+    pub(crate) fn block_requires_vdf_verification_at(
+        &self,
+        block: &Block,
+        now_ms: u64,
+    ) -> Result<bool> {
+        self.precheck_block_without_vdf_at(block, now_ms)
     }
 
     pub fn apply_locally_mined_block(&mut self, block: Block) -> Result<()> {
@@ -1938,11 +1963,20 @@ impl Ledger {
     }
 
     pub(crate) fn apply_preverified_block(&mut self, block: Block) -> Result<()> {
-        self.apply_block_with_vdf_policy(block, false)
+        self.apply_preverified_block_at(block, unix_now_ms())
     }
 
-    fn apply_block_with_vdf_policy(&mut self, block: Block, should_verify_vdf: bool) -> Result<()> {
-        if !self.precheck_block_without_vdf(&block)? {
+    pub(crate) fn apply_preverified_block_at(&mut self, block: Block, now_ms: u64) -> Result<()> {
+        self.apply_block_with_vdf_policy(block, false, now_ms)
+    }
+
+    fn apply_block_with_vdf_policy(
+        &mut self,
+        block: Block,
+        should_verify_vdf: bool,
+        now_ms: u64,
+    ) -> Result<()> {
+        if !self.precheck_block_without_vdf_at(&block, now_ms)? {
             return Ok(());
         }
 
@@ -1999,7 +2033,7 @@ impl Ledger {
         Ok(())
     }
 
-    fn precheck_block_without_vdf(&self, block: &Block) -> Result<bool> {
+    fn precheck_block_without_vdf_at(&self, block: &Block, now_ms: u64) -> Result<bool> {
         if block.height <= self.tip().height {
             let existing = self
                 .chain
@@ -2037,6 +2071,14 @@ impl Ledger {
         if block.timestamp_ms <= self.tip().timestamp_ms {
             bail!("block timestamp must increase");
         }
+        let median_time_past = self.median_time_past();
+        if block.timestamp_ms <= median_time_past {
+            bail!("block timestamp must exceed median time past");
+        }
+        let max_future_timestamp = now_ms.saturating_add(MAX_BLOCK_TIMESTAMP_FUTURE_DRIFT_MS);
+        if block.timestamp_ms > max_future_timestamp {
+            bail!("block timestamp is too far in the future");
+        }
         if block.transactions.len() > self.launch_profile.max_block_transactions {
             bail!("block has too many transactions");
         }
@@ -2066,6 +2108,18 @@ impl Ledger {
         Ok(true)
     }
 
+    fn median_time_past(&self) -> u64 {
+        let mut timestamps = self
+            .chain
+            .iter()
+            .rev()
+            .take(BLOCK_MEDIAN_TIME_PAST_WINDOW)
+            .map(|block| block.timestamp_ms)
+            .collect::<Vec<_>>();
+        timestamps.sort_unstable();
+        timestamps[timestamps.len() / 2]
+    }
+
     fn next_vdf_rounds_after_tip(&self) -> u32 {
         let Some(tip) = self.chain.last() else {
             return self.vdf_rounds;
@@ -2076,8 +2130,16 @@ impl Ledger {
 
         let mut total_observed_ms = 0_u128;
         let mut observed_blocks = 0_u128;
-        for pair in self.chain.windows(2).rev().take(VDF_RETARGET_WINDOW_BLOCKS) {
-            total_observed_ms += u128::from(pair[1].timestamp_ms - pair[0].timestamp_ms);
+        for pair in self
+            .chain
+            .windows(2)
+            .rev()
+            .filter(|pair| pair[0].height > 0)
+            .take(VDF_RETARGET_WINDOW_BLOCKS)
+        {
+            total_observed_ms += u128::from(clamped_vdf_retarget_observed_block_ms(
+                pair[1].timestamp_ms - pair[0].timestamp_ms,
+            ));
             observed_blocks += 1;
         }
         if observed_blocks == 0 {
@@ -3363,6 +3425,22 @@ fn retarget_vdf_rounds(current_rounds: u32, observed_block_ms: u64) -> u32 {
     raw_adjusted.clamp(min_next, max_next) as u32
 }
 
+fn clamped_vdf_retarget_observed_block_ms(observed_block_ms: u64) -> u64 {
+    observed_block_ms.clamp(
+        MIN_VDF_RETARGET_OBSERVED_BLOCK_MS,
+        MAX_VDF_RETARGET_OBSERVED_BLOCK_MS,
+    )
+}
+
+fn unix_now_ms() -> u64 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_millis()
+        .try_into()
+        .unwrap_or(u64::MAX)
+}
+
 pub fn hex_hash(input: impl AsRef<[u8]>) -> String {
     hex_encode(Sha256::digest(input.as_ref()))
 }
@@ -3737,6 +3815,38 @@ mod tests {
         assert_eq!(outcome, TransactionSubmitOutcome::Added);
         assert!(ledger.pending().is_empty());
         assert_eq!(ledger.orphan_transactions().len(), 1);
+    }
+
+    #[test]
+    fn vdf_retarget_observed_block_time_is_clamped() {
+        assert_eq!(
+            clamped_vdf_retarget_observed_block_ms(1),
+            MIN_VDF_RETARGET_OBSERVED_BLOCK_MS
+        );
+        assert_eq!(
+            clamped_vdf_retarget_observed_block_ms(VDF_TARGET_BLOCK_MS),
+            VDF_TARGET_BLOCK_MS
+        );
+        assert_eq!(
+            clamped_vdf_retarget_observed_block_ms(u64::MAX),
+            MAX_VDF_RETARGET_OBSERVED_BLOCK_MS
+        );
+    }
+
+    #[test]
+    fn block_timestamp_future_check_uses_supplied_network_time() {
+        let wallet = Wallet::from_seed("adjusted-time-domain");
+        let mut allocations = BTreeMap::new();
+        allocations.insert(wallet.address().to_string(), 1_000);
+        let mut ledger = Ledger::new(allocations, 1);
+
+        let burn = ledger.build_burn(&wallet, 1, 0).unwrap();
+        assert!(ledger.submit_transaction(burn).unwrap());
+        let block = ledger.mine_next_block(&wallet, 10 * 60 * 1_000).unwrap();
+
+        let error = ledger.apply_block_at(block, 1_000).unwrap_err();
+
+        assert!(format!("{error:#}").contains("too far in the future"));
     }
 
     #[test]

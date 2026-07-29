@@ -107,6 +107,8 @@ struct NetworkHealthResponse {
     mempool_known_peers: usize,
     mempool_divergent_peers: usize,
     mempool_missing_transactions: usize,
+    network_time_offset_ms: Option<i64>,
+    bad_clock_peers: usize,
     last_error: Option<String>,
 }
 
@@ -839,6 +841,16 @@ fn network_health_at(
         .iter()
         .map(|peer| peer.last_known_mempool_missing.unwrap_or(0))
         .sum();
+    let network_time_offset_ms = median_peer_clock_offset(peers, now_ms);
+    let bad_clock_peers = peers
+        .iter()
+        .filter(|peer| {
+            peer.last_clock_observed_ms.is_some_and(|observed_ms| {
+                now_ms.saturating_sub(observed_ms) <= PEER_STALE_AFTER_MS
+            })
+        })
+        .filter(|peer| peer.last_clock_offset_accepted == Some(false))
+        .count();
     let lag_blocks = best_known_height.saturating_sub(local_height);
     let last_error = peers.iter().rev().find_map(|peer| {
         peer.last_error
@@ -886,8 +898,30 @@ fn network_health_at(
         mempool_known_peers,
         mempool_divergent_peers,
         mempool_missing_transactions,
+        network_time_offset_ms,
+        bad_clock_peers,
         last_error,
     }
+}
+
+fn median_peer_clock_offset(peers: &[PeerInfo], now_ms: u64) -> Option<i64> {
+    let mut offsets = peers
+        .iter()
+        .filter(|peer| peer.last_error.is_none())
+        .filter(|peer| !peer.is_banned_at(now_ms))
+        .filter(|peer| peer.last_clock_offset_accepted == Some(true))
+        .filter(|peer| {
+            peer.last_clock_observed_ms.is_some_and(|observed_ms| {
+                now_ms.saturating_sub(observed_ms) <= PEER_STALE_AFTER_MS
+            })
+        })
+        .filter_map(|peer| peer.last_clock_offset_ms)
+        .collect::<Vec<_>>();
+    if offsets.is_empty() {
+        return None;
+    }
+    offsets.sort_unstable();
+    Some(offsets[offsets.len() / 2])
 }
 
 async fn wallet_setup_response(
@@ -2217,6 +2251,8 @@ const INDEX_HTML: &str = r#"<!doctype html>
             <div class="peer-summary-item"><div class="peer-summary-label">Peer Mempools</div><div class="peer-summary-value" x-text="networkHealth.mempool_known_peers ?? '-'"></div></div>
             <div class="peer-summary-item"><div class="peer-summary-label">Divergent</div><div class="peer-summary-value" x-text="networkHealth.mempool_divergent_peers ?? '-'"></div></div>
             <div class="peer-summary-item"><div class="peer-summary-label">Missing Tx</div><div class="peer-summary-value" x-text="networkHealth.mempool_missing_transactions ?? '-'"></div></div>
+            <div class="peer-summary-item"><div class="peer-summary-label">Time Offset</div><div class="peer-summary-value" x-text="networkTimeOffsetLabel()"></div></div>
+            <div class="peer-summary-item"><div class="peer-summary-label">Clock Warnings</div><div class="peer-summary-value" x-text="networkHealth.bad_clock_peers ?? '-'"></div></div>
           </div>
         </div>
         <div class="peer-summary">
@@ -2228,7 +2264,7 @@ const INDEX_HTML: &str = r#"<!doctype html>
         </div>
         <div class="table-wrap">
           <table>
-            <thead><tr><th>Status</th><th>Address</th><th>Direction</th><th>Last Contact</th><th>Ban</th><th>Score</th><th>Height</th><th>Delta</th><th>Tip</th><th>Mempool</th><th>Shared</th><th>Missing</th><th>Root</th><th>Sent</th><th>Received</th><th>Last Error</th><th>Actions</th></tr></thead>
+            <thead><tr><th>Status</th><th>Address</th><th>Direction</th><th>Last Contact</th><th>Clock</th><th>Ban</th><th>Score</th><th>Height</th><th>Delta</th><th>Tip</th><th>Mempool</th><th>Shared</th><th>Missing</th><th>Root</th><th>Sent</th><th>Received</th><th>Last Error</th><th>Actions</th></tr></thead>
             <tbody>
               <template x-for="peer in peers" :key="peer.address">
                 <tr>
@@ -2236,6 +2272,7 @@ const INDEX_HTML: &str = r#"<!doctype html>
                   <td><code x-text="peer.address"></code></td>
                   <td x-text="peer.direction"></td>
                   <td x-text="peerLastContactLabel(peer)"></td>
+                  <td x-text="peerClockLabel(peer)"></td>
                   <td x-text="peerBanLabel(peer)"></td>
                   <td x-text="peer.misbehavior_score ?? 0"></td>
                   <td x-text="peer.last_known_height ?? '-'"></td>
@@ -2251,7 +2288,7 @@ const INDEX_HTML: &str = r#"<!doctype html>
                   <td><div class="peer-actions"><button class="peer-remove" type="button" x-show="canRemovePeer(peer)" @click="removePeer(peer)">Remove</button><span class="muted" x-show="!canRemovePeer(peer)">Observed</span></div></td>
                 </tr>
               </template>
-              <tr x-show="peers.length === 0"><td colspan="17">No peers</td></tr>
+              <tr x-show="peers.length === 0"><td colspan="18">No peers</td></tr>
             </tbody>
           </table>
         </div>
@@ -2890,6 +2927,28 @@ mod tests {
         assert_eq!(mempool_syncing.mempool_divergent_peers, 1);
         assert_eq!(mempool_syncing.mempool_missing_transactions, 1);
 
+        let mut clock_peers = PeerBook::from_addresses(vec![
+            "127.0.0.1:9450".to_string(),
+            "127.0.0.1:9451".to_string(),
+        ]);
+        clock_peers.record_status("127.0.0.1:9450", 0, "tip".to_string());
+        clock_peers.record_status("127.0.0.1:9451", 0, "tip".to_string());
+        clock_peers.record_clock_observation(
+            "127.0.0.1:9450",
+            PeerDirection::Outbound,
+            10_500,
+            10_000,
+        );
+        clock_peers.record_clock_observation(
+            "127.0.0.1:9451",
+            PeerDirection::Outbound,
+            11 * 60 * 1_000,
+            10_000,
+        );
+        let clock_health = super::network_health_at(&status, &clock_peers.list(), 10_000);
+        assert_eq!(clock_health.network_time_offset_ms, Some(500));
+        assert_eq!(clock_health.bad_clock_peers, 1);
+
         let syncing = super::network_health(
             &status,
             &[PeerInfo {
@@ -2904,6 +2963,9 @@ mod tests {
                 last_known_mempool_shared: None,
                 last_known_mempool_missing: None,
                 last_mempool_status_ms: None,
+                last_clock_offset_ms: None,
+                last_clock_offset_accepted: None,
+                last_clock_observed_ms: None,
                 last_error: None,
                 last_transaction_rejection: None,
                 last_contact_ms: Some(10_000),
@@ -2934,6 +2996,9 @@ mod tests {
                 last_known_mempool_shared: None,
                 last_known_mempool_missing: None,
                 last_mempool_status_ms: None,
+                last_clock_offset_ms: None,
+                last_clock_offset_accepted: None,
+                last_clock_observed_ms: None,
                 last_error: Some("connection refused".to_string()),
                 last_transaction_rejection: None,
                 last_contact_ms: Some(10_000),
@@ -2966,6 +3031,9 @@ mod tests {
                 last_known_mempool_shared: None,
                 last_known_mempool_missing: None,
                 last_mempool_status_ms: None,
+                last_clock_offset_ms: None,
+                last_clock_offset_accepted: None,
+                last_clock_observed_ms: None,
                 last_error: None,
                 last_transaction_rejection: Some(
                     "peer rejected transaction abc: conflict".to_string(),
@@ -2998,6 +3066,9 @@ mod tests {
                 last_known_mempool_shared: None,
                 last_known_mempool_missing: None,
                 last_mempool_status_ms: None,
+                last_clock_offset_ms: None,
+                last_clock_offset_accepted: None,
+                last_clock_observed_ms: None,
                 last_error: None,
                 last_transaction_rejection: None,
                 last_contact_ms: Some(1),
@@ -3028,6 +3099,9 @@ mod tests {
                 last_known_mempool_shared: None,
                 last_known_mempool_missing: None,
                 last_mempool_status_ms: None,
+                last_clock_offset_ms: None,
+                last_clock_offset_accepted: None,
+                last_clock_observed_ms: None,
                 last_error: Some("invalid block".to_string()),
                 last_transaction_rejection: None,
                 last_contact_ms: Some(10),

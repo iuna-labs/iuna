@@ -1,4 +1,7 @@
-use std::collections::BTreeMap;
+use std::{
+    collections::BTreeMap,
+    time::{SystemTime, UNIX_EPOCH},
+};
 
 use iuna::{
     adapters::chain_store::SqliteChainStore,
@@ -36,6 +39,15 @@ fn allocations(wallets: &[Wallet], amount: Amount) -> BTreeMap<String, Amount> {
         .iter()
         .map(|wallet| (wallet.address().to_string(), amount))
         .collect()
+}
+
+fn unix_now_ms() -> u64 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_millis()
+        .try_into()
+        .unwrap_or(u64::MAX)
 }
 
 fn mine_wallet_burn_block(ledger: &mut Ledger, wallet: &Wallet, timestamp_ms: u64) -> String {
@@ -1069,6 +1081,45 @@ fn vdf_rounds_retarget_toward_target_block_time() {
 }
 
 #[test]
+fn block_timestamp_too_far_in_future_is_rejected() {
+    let wallet = Wallet::from_seed("future-timestamp-alice");
+    let mut genesis = BTreeMap::new();
+    genesis.insert(wallet.address().to_string(), 1_000);
+    let mut ledger = Ledger::new(genesis, 25);
+    submit_burn(&mut ledger, &wallet, 1);
+
+    let far_future = unix_now_ms()
+        .saturating_add(VDF_TARGET_BLOCK_MS)
+        .saturating_add(1);
+    let block = ledger.mine_next_block(&wallet, far_future).unwrap();
+
+    let error = ledger.apply_block(block).unwrap_err();
+
+    assert!(format!("{error:#}").contains("too far in the future"));
+}
+
+#[test]
+fn genesis_wall_clock_gap_does_not_lower_vdf_rounds() {
+    let wallet = Wallet::from_seed("genesis-gap-vdf-alice");
+    let mut genesis = BTreeMap::new();
+    genesis.insert(wallet.address().to_string(), 1_000);
+    let mut ledger = Ledger::new(genesis, 100);
+    let now = unix_now_ms();
+    let first_timestamp = now.saturating_sub(VDF_TARGET_BLOCK_MS);
+
+    submit_burn(&mut ledger, &wallet, 1);
+    let block1 = ledger.mine_next_block(&wallet, first_timestamp).unwrap();
+    ledger.apply_block(block1).unwrap();
+    assert_eq!(ledger.vdf_rounds(), 100);
+
+    submit_burn(&mut ledger, &wallet, 1);
+    let block2 = ledger.mine_next_block(&wallet, now).unwrap();
+    ledger.apply_block(block2).unwrap();
+
+    assert_eq!(ledger.vdf_rounds(), 100);
+}
+
+#[test]
 fn conflicting_utxo_spends_are_not_accepted_together() {
     let wallet = Wallet::from_seed("alice");
     let mut genesis = BTreeMap::new();
@@ -1926,6 +1977,58 @@ fn peer_book_bans_misbehaving_peer_temporarily_and_recovers_on_success() {
     let recovered = peers.list().pop().unwrap();
     assert_eq!(recovered.misbehavior_score, 0);
     assert_eq!(recovered.banned_until_ms, None);
+}
+
+#[test]
+fn peer_book_uses_median_accepted_clock_offset() {
+    let mut peers = PeerBook::from_addresses(vec![
+        "127.0.0.1:9444".to_string(),
+        "127.0.0.1:9445".to_string(),
+        "127.0.0.1:9446".to_string(),
+    ]);
+    let now = 1_000_000;
+    peers.record_status("127.0.0.1:9444", 1, "tip-a".to_string());
+    peers.record_status("127.0.0.1:9445", 1, "tip-b".to_string());
+    peers.record_status("127.0.0.1:9446", 1, "tip-c".to_string());
+    peers.record_clock_observation("127.0.0.1:9444", PeerDirection::Outbound, now + 1_000, now);
+    peers.record_clock_observation("127.0.0.1:9445", PeerDirection::Outbound, now + 2_000, now);
+    peers.record_clock_observation(
+        "127.0.0.1:9446",
+        PeerDirection::Outbound,
+        now + 20 * 60 * 1_000,
+        now,
+    );
+
+    assert_eq!(peers.network_time_offset_ms_at(now), Some(2_000));
+    assert_eq!(peers.adjusted_time_ms_at(now), now + 2_000);
+    assert_eq!(peers.bad_clock_peer_count_at(now), 1);
+    assert!(!peers.is_banned_at("127.0.0.1:9446", now));
+}
+
+#[test]
+fn peer_book_address_replacement_keeps_newest_clock_observation() {
+    let mut peers = PeerBook::from_addresses(vec![
+        "seed.example:9444".to_string(),
+        "142.132.164.59:9444".to_string(),
+    ]);
+    peers.record_clock_observation(
+        "seed.example:9444",
+        PeerDirection::Outbound,
+        1_001_000,
+        1_000_000,
+    );
+    peers.record_clock_observation(
+        "142.132.164.59:9444",
+        PeerDirection::Outbound,
+        2_002_000,
+        2_000_000,
+    );
+
+    peers.replace_peer_address("seed.example:9444", "142.132.164.59:9444");
+
+    let peer = peers.list().pop().unwrap();
+    assert_eq!(peer.last_clock_offset_ms, Some(2_000));
+    assert_eq!(peer.last_clock_observed_ms, Some(2_000_000));
 }
 
 #[test]

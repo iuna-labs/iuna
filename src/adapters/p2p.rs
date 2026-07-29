@@ -24,7 +24,8 @@ use tokio::{
 use crate::{
     app::{
         BlockInventory, GossipEnvelope, MEMPOOL_STATUS_LIMIT, NETWORK_ID, NodeCore,
-        PROTOCOL_VERSION, ProtocolHello, SharedNode, SharedPeerBook, TransactionRejection,
+        PROTOCOL_VERSION, PeerDirection, ProtocolHello, SharedNode, SharedPeerBook,
+        TransactionRejection, now_ms,
     },
     domain::{Block, ChainSnapshot, Ledger, Transaction, TransactionSubmitOutcome, verify_vdf},
 };
@@ -50,6 +51,7 @@ static NEXT_NODE_ID: AtomicU64 = AtomicU64::new(1);
 struct PeerStatus {
     height: u64,
     tip_hash: String,
+    time_ms: u64,
     mempool_count: usize,
     mempool_root: String,
     mempool_txs: Vec<String>,
@@ -59,9 +61,14 @@ struct PeerStatus {
 
 impl PeerStatus {
     fn new(height: u64, tip_hash: String) -> Self {
+        Self::with_time(height, tip_hash, now_ms())
+    }
+
+    fn with_time(height: u64, tip_hash: String, time_ms: u64) -> Self {
         Self {
             height,
             tip_hash,
+            time_ms,
             mempool_count: 0,
             mempool_root: String::new(),
             mempool_txs: Vec::new(),
@@ -76,10 +83,12 @@ impl PeerStatus {
         mempool_count: usize,
         mempool_root: String,
         mempool_txs: Vec<String>,
+        time_ms: u64,
     ) -> Self {
         Self {
             height,
             tip_hash,
+            time_ms,
             mempool_count,
             mempool_root,
             mempool_txs,
@@ -88,10 +97,11 @@ impl PeerStatus {
         }
     }
 
-    fn with_snapshot_request(height: u64, tip_hash: String) -> Self {
+    fn with_snapshot_request(height: u64, tip_hash: String, time_ms: u64) -> Self {
         Self {
             height,
             tip_hash,
+            time_ms,
             mempool_count: 0,
             mempool_root: String::new(),
             mempool_txs: Vec::new(),
@@ -100,10 +110,11 @@ impl PeerStatus {
         }
     }
 
-    fn with_snapshot_push(height: u64, tip_hash: String) -> Self {
+    fn with_snapshot_push(height: u64, tip_hash: String, time_ms: u64) -> Self {
         Self {
             height,
             tip_hash,
+            time_ms,
             mempool_count: 0,
             mempool_root: String::new(),
             mempool_txs: Vec::new(),
@@ -799,6 +810,7 @@ async fn session_loop(
             } else if let GossipEnvelope::PeerStatus {
                 height,
                 tip_hash,
+                time_ms,
                 mempool_count,
                 mempool_root,
                 mempool_txs,
@@ -810,6 +822,7 @@ async fn session_loop(
                     mempool_count,
                     mempool_root,
                     mempool_txs,
+                    time_ms,
                 );
                 record_peer_status(&network, &known_peer, remote_addr, &status).await;
                 maybe_request_mempool_catchup(
@@ -890,6 +903,7 @@ async fn session_loop(
                 if let GossipEnvelope::PeerStatus {
                     height,
                     tip_hash,
+                    time_ms,
                     mempool_count,
                     mempool_root,
                     mempool_txs,
@@ -901,6 +915,7 @@ async fn session_loop(
                         *mempool_count,
                         mempool_root.clone(),
                         mempool_txs.clone(),
+                        *time_ms,
                     );
                     record_peer_status(&network, &known_peer, remote_addr, &status).await;
                     maybe_request_mempool_catchup(&network, &mut writer, &known_peer, remote_addr, &status)
@@ -1024,9 +1039,10 @@ async fn process_envelope(
             record_inbound_result(network, known_peer, remote_addr, Ok(())).await;
         }
         GossipEnvelope::Block(block) => {
+            let adjusted_time_ms = network_adjusted_time_ms(network).await;
             let needs_vdf = {
                 let node = network.inner.node.lock().await;
-                node.block_requires_vdf_verification(&block)
+                node.block_requires_vdf_verification_at(&block, adjusted_time_ms)
             };
             let result = match needs_vdf {
                 Ok(false) => Ok(()),
@@ -1036,7 +1052,7 @@ async fn process_envelope(
                         .node
                         .lock()
                         .await
-                        .receive_preverified_block(block),
+                        .receive_preverified_block_at(block, adjusted_time_ms),
                     Err(error) => Err(error),
                 },
                 Err(error) => Err(error),
@@ -1045,17 +1061,19 @@ async fn process_envelope(
             network.forward_outbox().await;
         }
         GossipEnvelope::Blocks { blocks } => {
+            let adjusted_time_ms = network_adjusted_time_ms(network).await;
             let local_ledger = network.inner.node.lock().await.clone_ledger();
-            let result = match validate_blocks_extension(local_ledger, blocks).await {
-                Ok(ledger) => network
-                    .inner
-                    .node
-                    .lock()
-                    .await
-                    .import_verified_ledger(ledger)
-                    .map(|_| ()),
-                Err(error) => Err(error),
-            };
+            let result =
+                match validate_blocks_extension(local_ledger, blocks, adjusted_time_ms).await {
+                    Ok(ledger) => network
+                        .inner
+                        .node
+                        .lock()
+                        .await
+                        .import_verified_ledger(ledger)
+                        .map(|_| ()),
+                    Err(error) => Err(error),
+                };
             let request_snapshot = result.as_ref().err().is_some_and(is_possible_fork_error);
             record_inbound_result(network, known_peer, remote_addr, result).await;
             if request_snapshot {
@@ -1064,17 +1082,19 @@ async fn process_envelope(
             network.forward_outbox().await;
         }
         GossipEnvelope::ChainSnapshot(snapshot) => {
+            let adjusted_time_ms = network_adjusted_time_ms(network).await;
             let local_ledger = network.inner.node.lock().await.clone_ledger();
-            let result = match validate_snapshot_extension(local_ledger, snapshot).await {
-                Ok(ledger) => network
-                    .inner
-                    .node
-                    .lock()
-                    .await
-                    .import_verified_ledger(ledger)
-                    .map(|_| ()),
-                Err(error) => Err(error),
-            };
+            let result =
+                match validate_snapshot_extension(local_ledger, snapshot, adjusted_time_ms).await {
+                    Ok(ledger) => network
+                        .inner
+                        .node
+                        .lock()
+                        .await
+                        .import_verified_ledger(ledger)
+                        .map(|_| ()),
+                    Err(error) => Err(error),
+                };
             record_inbound_result(network, known_peer, remote_addr, result).await;
             network.forward_outbox().await;
         }
@@ -1711,11 +1731,16 @@ async fn fetch_peer_status(peer: &str) -> Result<PeerStatus> {
                     NETWORK_ID
                 );
             }
-            Ok(PeerStatus::new(hello.height, hello.tip_hash))
+            Ok(PeerStatus::with_time(
+                hello.height,
+                hello.tip_hash,
+                hello.time_ms,
+            ))
         }
         GossipEnvelope::PeerStatus {
             height,
             tip_hash,
+            time_ms,
             mempool_count,
             mempool_root,
             mempool_txs,
@@ -1725,6 +1750,7 @@ async fn fetch_peer_status(peer: &str) -> Result<PeerStatus> {
             mempool_count,
             mempool_root,
             mempool_txs,
+            time_ms,
         )),
         other => anyhow::bail!("peer {peer} sent {other:?} instead of peer status"),
     }
@@ -1819,9 +1845,10 @@ fn join_snapshot_response(peer: &str, envelope: GossipEnvelope) -> Result<Option
 async fn validate_snapshot_extension(
     mut ledger: Ledger,
     snapshot: ChainSnapshot,
+    now_ms: u64,
 ) -> Result<Ledger> {
     if ledger.is_setup_placeholder() {
-        return tokio::task::spawn_blocking(move || Ledger::from_snapshot(snapshot))
+        return tokio::task::spawn_blocking(move || Ledger::from_snapshot_at(snapshot, now_ms))
             .await
             .context("chain snapshot adoption worker failed")?;
     }
@@ -1829,14 +1856,18 @@ async fn validate_snapshot_extension(
     verify_blocks_vdf(missing_blocks).await?;
 
     tokio::task::spawn_blocking(move || {
-        ledger.extend_from_preverified_snapshot(snapshot)?;
+        ledger.extend_from_preverified_snapshot_at(snapshot, now_ms)?;
         Ok(ledger)
     })
     .await
     .context("chain snapshot extension worker failed")?
 }
 
-async fn validate_blocks_extension(mut ledger: Ledger, blocks: Vec<Block>) -> Result<Ledger> {
+async fn validate_blocks_extension(
+    mut ledger: Ledger,
+    blocks: Vec<Block>,
+    now_ms: u64,
+) -> Result<Ledger> {
     if blocks.is_empty() {
         return Ok(ledger);
     }
@@ -1844,12 +1875,22 @@ async fn validate_blocks_extension(mut ledger: Ledger, blocks: Vec<Block>) -> Re
 
     tokio::task::spawn_blocking(move || {
         for block in blocks {
-            ledger.apply_preverified_block(block)?;
+            ledger.apply_preverified_block_at(block, now_ms)?;
         }
         Ok(ledger)
     })
     .await
     .context("block batch extension worker failed")?
+}
+
+async fn network_adjusted_time_ms(network: &GossipNetwork) -> u64 {
+    let local_time_ms = now_ms();
+    network
+        .inner
+        .peers
+        .lock()
+        .await
+        .adjusted_time_ms_at(local_time_ms)
 }
 
 async fn verify_block_vdf(block: Block) -> Result<Block> {
@@ -1890,19 +1931,26 @@ async fn record_peer_status(
     remote_addr: SocketAddr,
     peer_status: &PeerStatus,
 ) {
+    let local_receive_time_ms = now_ms();
     if let Some(peer) = known_peer {
-        network.inner.peers.lock().await.record_status(
+        let mut peers = network.inner.peers.lock().await;
+        peers.record_status(peer, peer_status.height, peer_status.tip_hash.clone());
+        peers.record_clock_observation(
             peer,
-            peer_status.height,
-            peer_status.tip_hash.clone(),
+            PeerDirection::Outbound,
+            peer_status.time_ms,
+            local_receive_time_ms,
         );
     } else {
-        network
-            .inner
-            .peers
-            .lock()
-            .await
-            .record_received(&remote_addr.to_string(), 1);
+        let peer = remote_addr.to_string();
+        let mut peers = network.inner.peers.lock().await;
+        peers.record_clock_observation(
+            &peer,
+            PeerDirection::Inbound,
+            peer_status.time_ms,
+            local_receive_time_ms,
+        );
+        peers.record_received(&peer, 1);
     }
 }
 
@@ -1961,7 +2009,11 @@ async fn process_hello(
     {
         P2pMetricsCounters::inc(&network.inner.metrics.self_peer_rejections);
         forget_stale_self_peer(network, known_peer).await;
-        return Ok(PeerStatus::new(hello.height, hello.tip_hash));
+        return Ok(PeerStatus::with_time(
+            hello.height,
+            hello.tip_hash,
+            hello.time_ms,
+        ));
     }
     let (local_genesis, local_accepts_remote_genesis) = {
         let node = network.inner.node.lock().await;
@@ -2002,11 +2054,20 @@ async fn process_hello(
         Ok(PeerStatus::with_snapshot_request(
             hello.height,
             hello.tip_hash,
+            hello.time_ms,
         ))
     } else if push_snapshot {
-        Ok(PeerStatus::with_snapshot_push(hello.height, hello.tip_hash))
+        Ok(PeerStatus::with_snapshot_push(
+            hello.height,
+            hello.tip_hash,
+            hello.time_ms,
+        ))
     } else {
-        Ok(PeerStatus::new(hello.height, hello.tip_hash))
+        Ok(PeerStatus::with_time(
+            hello.height,
+            hello.tip_hash,
+            hello.time_ms,
+        ))
     }
 }
 
@@ -2340,6 +2401,7 @@ mod tests {
             GossipEnvelope::PeerStatus {
                 height: 7,
                 tip_hash: "tip".to_string(),
+                time_ms: 0,
                 mempool_count: 0,
                 mempool_root: String::new(),
                 mempool_txs: Vec::new(),
@@ -2352,6 +2414,7 @@ mod tests {
         let envelope = GossipEnvelope::PeerStatus {
             height: 7,
             tip_hash: "tip".to_string(),
+            time_ms: 1_000,
             mempool_count: super::MEMPOOL_STATUS_LIMIT + 1,
             mempool_root: "root".to_string(),
             mempool_txs: vec!["sig".to_string(); super::MEMPOOL_STATUS_LIMIT + 1],
@@ -2367,6 +2430,7 @@ mod tests {
         let envelope = GossipEnvelope::PeerStatus {
             height: 7,
             tip_hash: "tip".to_string(),
+            time_ms: 1_000,
             mempool_count: MAX_INVENTORY_ITEMS + 1,
             mempool_root: "root".to_string(),
             mempool_txs: vec!["sig".to_string(); MAX_INVENTORY_ITEMS + 1],
@@ -2384,6 +2448,7 @@ mod tests {
             &GossipEnvelope::PeerStatus {
                 height: 7,
                 tip_hash: "tip".to_string(),
+                time_ms: 1_000,
                 mempool_count: 0,
                 mempool_root: String::new(),
                 mempool_txs: Vec::new(),
@@ -2423,6 +2488,7 @@ mod tests {
         let line = serde_json::to_string(&GossipEnvelope::PeerStatus {
             height: 7,
             tip_hash: "tip".to_string(),
+            time_ms: 1_000,
             mempool_count: 0,
             mempool_root: String::new(),
             mempool_txs: Vec::new(),
@@ -2872,6 +2938,7 @@ mod tests {
             node_id: None,
             height: 0,
             tip_hash: "tip".to_string(),
+            time_ms: 1_000,
         };
         assert!(
             super::process_hello(
@@ -2894,6 +2961,7 @@ mod tests {
             node_id: None,
             height: 0,
             tip_hash: "tip".to_string(),
+            time_ms: 1_000,
         };
         assert!(
             super::process_hello(
@@ -2923,6 +2991,7 @@ mod tests {
             node_id: None,
             height: 0,
             tip_hash: "tip".to_string(),
+            time_ms: 1_000,
         };
         assert!(
             super::process_hello(
@@ -2979,6 +3048,7 @@ mod tests {
             node_id: None,
             height: 5,
             tip_hash: "remote-tip".to_string(),
+            time_ms: 1_000,
         };
         let mut known_peer = Some("iuna.jhx.app:9444".to_string());
         let peer_status = super::process_hello(
@@ -3002,9 +3072,10 @@ mod tests {
         assert_eq!(peer.misbehavior_score, 0);
         assert!(!peer.is_banned_at(crate::app::now_ms()));
 
-        let adopted = super::validate_snapshot_extension(local_ledger, remote_snapshot)
-            .await
-            .unwrap();
+        let adopted =
+            super::validate_snapshot_extension(local_ledger, remote_snapshot, crate::app::now_ms())
+                .await
+                .unwrap();
         assert_eq!(adopted.genesis_hash(), remote_genesis);
         assert!(
             network
@@ -3049,6 +3120,7 @@ mod tests {
             node_id: None,
             height: 0,
             tip_hash: setup_ledger.status().tip_hash,
+            time_ms: 1_000,
         };
 
         let peer_status = super::process_hello(
@@ -3095,6 +3167,7 @@ mod tests {
             node_id: None,
             height: status.height,
             tip_hash: status.tip_hash,
+            time_ms: 1_000,
         };
 
         let mut known_peer = None;
@@ -3152,6 +3225,7 @@ mod tests {
                 GossipEnvelope::PeerStatus {
                     height: 0,
                     tip_hash: "tip".to_string(),
+                    time_ms: 1_000,
                     mempool_count: 0,
                     mempool_root: String::new(),
                     mempool_txs: Vec::new(),
@@ -3395,6 +3469,7 @@ mod tests {
             node_id: None,
             height: 0,
             tip_hash: "tip".to_string(),
+            time_ms: 1_000,
         };
 
         super::process_hello(
@@ -3447,6 +3522,7 @@ mod tests {
             node_id: None,
             height: 0,
             tip_hash: "tip".to_string(),
+            time_ms: 1_000,
         };
         let mut known_peer = Some("10.42.1.1:16987".to_string());
 
@@ -3498,6 +3574,7 @@ mod tests {
             node_id: Some(network.inner.node_id.clone()),
             height: 0,
             tip_hash: "tip".to_string(),
+            time_ms: 1_000,
         };
         let mut known_peer = Some("142.132.164.59:9444".to_string());
 

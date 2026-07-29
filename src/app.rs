@@ -28,6 +28,8 @@ pub const MEMPOOL_STATUS_LIMIT: usize = MAX_PENDING_TRANSACTIONS;
 const IMPORT_REBROADCAST_LIMIT: usize = 128;
 pub const PEER_MISBEHAVIOR_BAN_SCORE: u32 = 3;
 pub const PEER_MISBEHAVIOR_BAN_MS: u64 = 10 * 60 * 1_000;
+pub const PEER_CLOCK_OFFSET_ACCEPTANCE_MS: i64 = 10 * 60 * 1_000;
+const PEER_CLOCK_OFFSET_STALE_MS: u64 = 20 * 60 * 1_000;
 const AUTO_POW_NONCE_ATTEMPTS_PER_TICK: u64 = 8;
 
 #[derive(Clone, Debug)]
@@ -84,6 +86,8 @@ pub enum GossipEnvelope {
         height: u64,
         tip_hash: String,
         #[serde(default)]
+        time_ms: u64,
+        #[serde(default)]
         mempool_count: usize,
         #[serde(default)]
         mempool_root: String,
@@ -136,6 +140,8 @@ pub struct ProtocolHello {
     pub node_id: Option<String>,
     pub height: u64,
     pub tip_hash: String,
+    #[serde(default)]
+    pub time_ms: u64,
 }
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
@@ -421,6 +427,7 @@ impl NodeCore {
             node_id,
             height: status.height,
             tip_hash: status.tip_hash,
+            time_ms: now_ms(),
         })
     }
 
@@ -430,6 +437,7 @@ impl NodeCore {
         GossipEnvelope::PeerStatus {
             height: status.height,
             tip_hash: status.tip_hash,
+            time_ms: now_ms(),
             mempool_count: self.mempool_count(),
             mempool_root: self.mempool_root(),
             mempool_txs,
@@ -1122,17 +1130,23 @@ impl NodeCore {
         }
     }
 
-    pub(crate) fn receive_preverified_block(&mut self, block: Block) -> Result<()> {
+    pub(crate) fn receive_preverified_block_at(&mut self, block: Block, now_ms: u64) -> Result<()> {
         let previous_height = self.ledger.height();
-        self.ledger.apply_preverified_block(block.clone())?;
+        self.ledger
+            .apply_preverified_block_at(block.clone(), now_ms)?;
         if self.ledger.height() > previous_height {
             self.outbox.push(GossipEnvelope::Block(block));
         }
         Ok(())
     }
 
-    pub(crate) fn block_requires_vdf_verification(&self, block: &Block) -> Result<bool> {
-        self.ledger.block_requires_vdf_verification(block)
+    pub(crate) fn block_requires_vdf_verification_at(
+        &self,
+        block: &Block,
+        now_ms: u64,
+    ) -> Result<bool> {
+        self.ledger
+            .block_requires_vdf_verification_at(block, now_ms)
     }
 
     pub fn import_chain_snapshot(&mut self, snapshot: ChainSnapshot) -> Result<()> {
@@ -1256,6 +1270,11 @@ impl PeerBook {
         to_peer.last_mempool_status_ms = to_peer
             .last_mempool_status_ms
             .max(from_peer.last_mempool_status_ms);
+        if from_peer.last_clock_observed_ms > to_peer.last_clock_observed_ms {
+            to_peer.last_clock_offset_ms = from_peer.last_clock_offset_ms;
+            to_peer.last_clock_offset_accepted = from_peer.last_clock_offset_accepted;
+            to_peer.last_clock_observed_ms = from_peer.last_clock_observed_ms;
+        }
         to_peer.last_contact_ms = to_peer.last_contact_ms.max(from_peer.last_contact_ms);
         to_peer.last_success_ms = to_peer.last_success_ms.max(from_peer.last_success_ms);
         to_peer.last_error_ms = to_peer.last_error_ms.max(from_peer.last_error_ms);
@@ -1347,6 +1366,63 @@ impl PeerBook {
             peer.last_error = None;
             peer.clear_misbehavior();
         }
+    }
+
+    pub fn record_clock_observation(
+        &mut self,
+        address: &str,
+        direction: PeerDirection,
+        remote_time_ms: u64,
+        local_receive_time_ms: u64,
+    ) {
+        if remote_time_ms == 0 {
+            return;
+        }
+        let offset = remote_time_ms as i128 - local_receive_time_ms as i128;
+        let offset = offset.clamp(i64::MIN as i128, i64::MAX as i128) as i64;
+        let accepted = offset.abs() <= PEER_CLOCK_OFFSET_ACCEPTANCE_MS;
+        let peer = self.ensure(address, direction);
+        peer.last_clock_offset_ms = Some(offset);
+        peer.last_clock_offset_accepted = Some(accepted);
+        peer.last_clock_observed_ms = Some(local_receive_time_ms);
+    }
+
+    pub fn network_time_offset_ms_at(&self, now_ms: u64) -> Option<i64> {
+        median_i64(
+            self.peers
+                .values()
+                .filter(|peer| !peer.is_banned_at(now_ms))
+                .filter(|peer| peer.last_error.is_none())
+                .filter(|peer| peer.last_clock_offset_accepted == Some(true))
+                .filter(|peer| {
+                    peer.last_clock_observed_ms.is_some_and(|observed_ms| {
+                        now_ms.saturating_sub(observed_ms) <= PEER_CLOCK_OFFSET_STALE_MS
+                    })
+                })
+                .filter_map(|peer| peer.last_clock_offset_ms)
+                .collect(),
+        )
+    }
+
+    pub fn adjusted_time_ms_at(&self, now_ms: u64) -> u64 {
+        match self.network_time_offset_ms_at(now_ms) {
+            Some(offset) if offset >= 0 => now_ms.saturating_add(offset as u64),
+            Some(offset) => now_ms.saturating_sub(offset.unsigned_abs()),
+            None => now_ms,
+        }
+    }
+
+    pub fn bad_clock_peer_count_at(&self, now_ms: u64) -> usize {
+        self.peers
+            .values()
+            .filter(|peer| !peer.is_banned_at(now_ms))
+            .filter(|peer| {
+                peer.last_clock_observed_ms.is_some_and(|observed_ms| {
+                    now_ms.saturating_sub(observed_ms) <= PEER_CLOCK_OFFSET_STALE_MS
+                })
+            })
+            .filter(|peer| peer.last_clock_offset_accepted == Some(false))
+            .count()
     }
 
     pub fn record_mempool_status(
@@ -1523,6 +1599,12 @@ pub struct PeerInfo {
     pub last_known_mempool_missing: Option<usize>,
     #[serde(default)]
     pub last_mempool_status_ms: Option<u64>,
+    #[serde(default)]
+    pub last_clock_offset_ms: Option<i64>,
+    #[serde(default)]
+    pub last_clock_offset_accepted: Option<bool>,
+    #[serde(default)]
+    pub last_clock_observed_ms: Option<u64>,
     pub last_error: Option<String>,
     pub last_transaction_rejection: Option<String>,
     pub last_contact_ms: Option<u64>,
@@ -1548,6 +1630,9 @@ impl PeerInfo {
             last_known_mempool_shared: None,
             last_known_mempool_missing: None,
             last_mempool_status_ms: None,
+            last_clock_offset_ms: None,
+            last_clock_offset_accepted: None,
+            last_clock_observed_ms: None,
             last_error: None,
             last_transaction_rejection: None,
             last_contact_ms: None,
@@ -1570,6 +1655,14 @@ impl PeerInfo {
         self.banned_until_ms = None;
         self.ban_reason = None;
     }
+}
+
+fn median_i64(mut values: Vec<i64>) -> Option<i64> {
+    if values.is_empty() {
+        return None;
+    }
+    values.sort_unstable();
+    Some(values[values.len() / 2])
 }
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
