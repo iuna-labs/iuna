@@ -1,5 +1,5 @@
 use std::{
-    collections::BTreeMap,
+    collections::{BTreeMap, BTreeSet},
     net::SocketAddr,
     path::{Path, PathBuf},
     sync::Arc,
@@ -32,7 +32,8 @@ use crate::{
         FeeEstimate, NodeStatus, PeerDirection, PeerInfo, SharedNode, SharedPeerBook, StratumStatus,
     },
     domain::{
-        Amount, Block, MINE_FINALIZER_FEE, OutPoint, Transaction, TxInput, TxOutput, hex_hash,
+        Amount, Block, Ledger, MINE_FINALIZER_FEE, OutPoint, Transaction, TxInput, TxOutput,
+        hex_hash,
     },
 };
 
@@ -212,6 +213,7 @@ struct WalletUtxoRow {
     outpoint: OutPoint,
     address: String,
     amount: Amount,
+    spendable: bool,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq, Serialize)]
@@ -594,16 +596,27 @@ async fn api_wallet_transactions(
 
 async fn api_wallet_utxos(State(state): State<HttpState>) -> Json<Vec<WalletUtxoRow>> {
     let node = state.node.lock().await;
-    let wallet = node.wallet_address().to_string();
-    let mut utxos = node
-        .ledger()
-        .available_utxos_for_address(&wallet)
+    Json(wallet_utxo_rows(node.ledger(), node.wallet_address()))
+}
+
+fn wallet_utxo_rows(ledger: &Ledger, wallet: &str) -> Vec<WalletUtxoRow> {
+    let spendable_outpoints = ledger
+        .available_utxos_for_address(wallet)
         .unwrap_or_default()
         .into_iter()
-        .map(|(outpoint, output)| WalletUtxoRow {
-            outpoint,
-            address: output.address,
-            amount: output.amount,
+        .map(|(outpoint, _)| outpoint)
+        .collect::<BTreeSet<_>>();
+    let mut utxos = ledger
+        .utxos_for_address(wallet)
+        .into_iter()
+        .map(|(outpoint, output)| {
+            let spendable = spendable_outpoints.contains(&outpoint);
+            WalletUtxoRow {
+                outpoint,
+                address: output.address,
+                amount: output.amount,
+                spendable,
+            }
         })
         .collect::<Vec<_>>();
     utxos.sort_by(|left, right| {
@@ -613,7 +626,7 @@ async fn api_wallet_utxos(State(state): State<HttpState>) -> Json<Vec<WalletUtxo
             .then_with(|| left.outpoint.txid.cmp(&right.outpoint.txid))
             .then_with(|| left.outpoint.index.cmp(&right.outpoint.index))
     });
-    Json(utxos)
+    utxos
 }
 
 async fn api_peers(State(state): State<HttpState>) -> Json<Vec<PeerInfo>> {
@@ -2026,7 +2039,10 @@ const INDEX_HTML: &str = r#"<!doctype html>
     .utxo-select-button { padding: 3px 7px; border-color: #3a4248; background: #202328; color: #9fa8ad; font-size: 12px; }
     .utxo-select-button:hover { border-color: #5a646b; color: #d6dee2; }
     .send-utxo-option { display: grid; grid-template-columns: auto minmax(0, 1fr); gap: 8px; align-items: start; border: 1px solid #2f363c; border-radius: 8px; padding: 8px; background: #181b1f; }
+    .send-utxo-option.disabled { border-color: #262c31; background: #14171a; color: #687178; }
+    .send-utxo-option.disabled code, .send-utxo-option.disabled .utxo-node-amount { color: #687178; }
     .send-utxo-option input { min-width: auto; margin-top: 3px; }
+    .utxo-status { color: #8d989f; font-size: 10px; font-weight: 850; text-transform: uppercase; }
     .send-utxo-summary { flex-basis: 100%; width: 100%; display: grid; gap: 5px; color: #9eb3bc; font-size: 13px; }
     .wallet-balance-line { display: inline-grid; grid-template-columns: auto auto; gap: 10px; align-items: baseline; padding: 8px 10px; border: 1px solid #2f363c; border-radius: 8px; background: #111316; color: inherit; cursor: pointer; }
     .wallet-balance-line:hover, .wallet-balance-line:focus-visible { border-color: #d5f55f; outline: none; }
@@ -2265,22 +2281,23 @@ const INDEX_HTML: &str = r#"<!doctype html>
                 <div class="setup-feedback error" x-show="!selectedTransferUtxosCoverTransfer()">Selected UTXOs do not cover amount plus fee</div>
                 <div class="send-utxo-list">
                   <div class="send-utxo-list-head">
-                    <span>Spendable UTXOs</span>
+                    <span>UTXOs</span>
                     <span class="send-utxo-actions">
-                      <button class="utxo-select-button" type="button" @click="selectAllTransferUtxos" :disabled="walletUtxos.length === 0">Select all</button>
+                      <button class="utxo-select-button" type="button" @click="selectAllTransferUtxos" :disabled="spendableWalletUtxos().length === 0">Select all</button>
                       <button class="utxo-select-button" type="button" @click="clearTransferUtxos" :disabled="selectedTransferUtxos.length === 0">None</button>
                     </span>
                   </div>
                   <template x-for="utxo in walletUtxos" :key="utxoOutpoint(utxo)">
-                    <label class="send-utxo-option">
-                      <input type="checkbox" :value="utxoOutpoint(utxo)" x-model="selectedTransferUtxos" @change="scheduleFeeEstimates">
+                    <label class="send-utxo-option" :class="{ disabled: !utxo.spendable }">
+                      <input type="checkbox" :value="utxoOutpoint(utxo)" x-model="selectedTransferUtxos" @change="scheduleFeeEstimates" :disabled="!utxo.spendable">
                       <span>
                         <span class="utxo-node-label"><span>UTXO</span><span class="utxo-node-amount">IUNA <span x-text="amountLabel(utxo.amount)"></span></span></span>
+                        <span class="utxo-status" x-show="!utxo.spendable">Pending</span>
                         <code class="tx-value hash" x-text="utxoOutpoint(utxo)"></code>
                       </span>
                     </label>
                   </template>
-                  <div class="tx-modal-empty" x-show="walletUtxos.length === 0">No spendable UTXOs</div>
+                  <div class="tx-modal-empty" x-show="walletUtxos.length === 0">No UTXOs</div>
                 </div>
               </div>
               <button class="primary" type="submit">Send</button>
@@ -2864,7 +2881,7 @@ mod tests {
         hash_password, hex_encode, pbkdf2_sha256, persist_burn_settings_config,
         persist_pow_mining_config, require_auth_middleware, required_fee_per_byte_burn,
         same_origin_request, validate_password, validate_transfer_form, verify_password,
-        wallet_transaction_rows,
+        wallet_transaction_rows, wallet_utxo_rows,
     };
 
     #[test]
@@ -3482,6 +3499,29 @@ mod tests {
         assert_eq!(rows[0].fee, MINE_FINALIZER_FEE);
         assert_eq!(transaction.amount, MINE_REWARD - MINE_FINALIZER_FEE);
         assert_eq!(transaction.fee, MINE_FINALIZER_FEE);
+    }
+
+    #[test]
+    fn wallet_utxo_rows_include_pending_spent_outputs_as_disabled() {
+        let alice = Wallet::from_seed("wallet-utxo-pending-alice");
+        let bob = Wallet::from_seed("wallet-utxo-pending-bob");
+        let mut allocations = BTreeMap::new();
+        allocations.insert(alice.address().to_string(), 10);
+        let mut ledger = Ledger::new(allocations, 1);
+        let pending = ledger.build_transfer(&alice, bob.address(), 3, 0).unwrap();
+        let Transaction::Transfer { inputs, .. } = &pending else {
+            panic!("expected transfer");
+        };
+        let spent_outpoint = inputs[0].outpoint.clone();
+
+        ledger.submit_transaction(pending).unwrap();
+        let rows = wallet_utxo_rows(&ledger, alice.address());
+
+        assert!(rows.iter().any(|row| row.outpoint == spent_outpoint));
+        assert!(
+            rows.iter()
+                .any(|row| row.outpoint == spent_outpoint && !row.spendable)
+        );
     }
 
     fn fake_block(height: u64, transactions: Vec<Transaction>) -> Block {

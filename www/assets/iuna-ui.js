@@ -455,6 +455,7 @@ window.iunaApp = function iunaApp() {
         this.mergeFreshBlocks(blocks, { animateHead: true });
         this.walletTxs = walletTxs;
         this.walletUtxos = walletUtxos;
+        this.pruneSelectedTransferUtxos();
         this.mempool = mempool;
         this.peers = peers;
         this.p2pMetrics = p2pMetrics;
@@ -1046,8 +1047,17 @@ window.iunaApp = function iunaApp() {
       return this.txInputOutpoint({ outpoint: utxo.outpoint });
     },
 
+    spendableWalletUtxos() {
+      return this.walletUtxos.filter((utxo) => utxo.spendable !== false);
+    },
+
+    pruneSelectedTransferUtxos() {
+      const spendable = new Set(this.spendableWalletUtxos().map((utxo) => this.utxoOutpoint(utxo)));
+      this.selectedTransferUtxos = this.selectedTransferUtxos.filter((outpoint) => spendable.has(outpoint));
+    },
+
     selectAllTransferUtxos() {
-      this.selectedTransferUtxos = this.walletUtxos.map((utxo) => this.utxoOutpoint(utxo));
+      this.selectedTransferUtxos = this.spendableWalletUtxos().map((utxo) => this.utxoOutpoint(utxo));
       this.scheduleFeeEstimates();
     },
 
@@ -1059,7 +1069,7 @@ window.iunaApp = function iunaApp() {
     selectedTransferUtxoTotal() {
       const selected = new Set(this.selectedTransferUtxos);
       return this.walletUtxos
-        .filter((utxo) => selected.has(this.utxoOutpoint(utxo)))
+        .filter((utxo) => utxo.spendable !== false && selected.has(this.utxoOutpoint(utxo)))
         .reduce((sum, utxo) => sum + Number(utxo.amount || 0), 0);
     },
 
