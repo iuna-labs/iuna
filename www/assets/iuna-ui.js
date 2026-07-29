@@ -56,6 +56,7 @@ window.iunaApp = function iunaApp() {
     feeEstimateTimer: null,
     showSendAdvanced: false,
     selectedTransferUtxos: [],
+    walletTxFilters: { transfer: true, mine: false, burn: false },
     setupPeerAddress: "",
     peerAddress: "",
     flash: null,
@@ -440,7 +441,7 @@ window.iunaApp = function iunaApp() {
           this.fetchJson("/api/config"),
           this.fetchJson("/api/status"),
           this.fetchJson("/api/blocks?limit=30"),
-          this.fetchJson("/api/wallet/transactions"),
+          this.fetchJson(this.walletTransactionsPath()),
           this.fetchJson("/api/wallet/utxos"),
           this.fetchJson("/api/mempool"),
           this.fetchJson("/api/peers"),
@@ -489,6 +490,23 @@ window.iunaApp = function iunaApp() {
         throw new Error(`${path} returned ${response.status}`);
       }
       return response.json();
+    },
+
+    walletTransactionsPath() {
+      const params = new URLSearchParams({
+        tx: String(this.walletTxFilters.transfer),
+        mine: String(this.walletTxFilters.mine),
+        burn: String(this.walletTxFilters.burn),
+      });
+      return `/api/wallet/transactions?${params.toString()}`;
+    },
+
+    async refreshWalletTransactions() {
+      try {
+        this.walletTxs = await this.fetchJson(this.walletTransactionsPath());
+      } catch (error) {
+        this.showFlash(error.message, "error");
+      }
     },
 
     async checkLatestRelease() {

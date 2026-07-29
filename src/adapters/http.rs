@@ -161,6 +161,48 @@ struct BlocksQuery {
     limit: Option<usize>,
 }
 
+#[derive(Debug, Default, Deserialize)]
+struct WalletTransactionsQuery {
+    tx: Option<bool>,
+    mine: Option<bool>,
+    burn: Option<bool>,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+struct WalletTransactionFilters {
+    transfer: bool,
+    mine: bool,
+    burn: bool,
+}
+
+impl Default for WalletTransactionFilters {
+    fn default() -> Self {
+        Self {
+            transfer: true,
+            mine: false,
+            burn: false,
+        }
+    }
+}
+
+impl WalletTransactionFilters {
+    fn from_query(query: WalletTransactionsQuery) -> Self {
+        Self {
+            transfer: query.tx.unwrap_or(true),
+            mine: query.mine.unwrap_or(false),
+            burn: query.burn.unwrap_or(false),
+        }
+    }
+
+    fn allows(self, transaction: &Transaction) -> bool {
+        match transaction {
+            Transaction::Transfer { .. } => self.transfer,
+            Transaction::Mine { .. } => self.mine,
+            Transaction::Burn { .. } => self.burn,
+        }
+    }
+}
+
 #[derive(Debug, Serialize)]
 struct ActionResponse {
     ok: bool,
@@ -581,16 +623,19 @@ async fn api_mempool(State(state): State<HttpState>) -> Json<Vec<UiTransaction>>
 
 async fn api_wallet_transactions(
     State(state): State<HttpState>,
+    Query(query): Query<WalletTransactionsQuery>,
 ) -> Json<Vec<WalletTransactionRow>> {
     let node = state.node.lock().await;
     let snapshot = node.chain_snapshot();
     let pending = node.pending_transactions();
     let outputs = known_output_index(&snapshot.genesis_allocations, &snapshot.blocks, &pending);
+    let filters = WalletTransactionFilters::from_query(query);
     Json(wallet_transaction_rows(
         node.wallet_address(),
         pending,
         &snapshot.blocks,
         &outputs,
+        filters,
     ))
 }
 
@@ -1047,10 +1092,14 @@ fn wallet_transaction_rows(
     pending: Vec<Transaction>,
     chain: &[Block],
     outputs: &BTreeMap<OutPoint, TxOutput>,
+    filters: WalletTransactionFilters,
 ) -> Vec<WalletTransactionRow> {
     let mut rows = Vec::new();
 
     for (index, tx) in pending.iter().enumerate() {
+        if !filters.allows(tx) {
+            continue;
+        }
         if let Some(row) = wallet_transaction_row(wallet, tx, outputs, "pending", None, None) {
             rows.push((u128::MAX - index as u128, row));
         }
@@ -1058,6 +1107,9 @@ fn wallet_transaction_rows(
 
     for block in chain {
         for (index, tx) in block.transactions.iter().rev().enumerate() {
+            if !filters.allows(tx) {
+                continue;
+            }
             if let Some(row) = wallet_transaction_row(
                 wallet,
                 tx,
@@ -1107,6 +1159,30 @@ fn wallet_transaction_row(
             } else {
                 "sent"
             },
+            difficulty_bits: None,
+            proof_bits: None,
+            proof_hash: None,
+        }),
+        Transaction::Burn {
+            inputs,
+            change,
+            amount,
+            fee,
+            signature,
+        } if tx.sender() == wallet => Some(WalletTransactionRow {
+            kind: "burn",
+            from: tx.sender().to_string(),
+            to: None,
+            amount: *amount,
+            fee: *fee,
+            inputs: ui_inputs(inputs, outputs_by_outpoint),
+            outputs: Vec::new(),
+            change: change.clone(),
+            signature: signature.clone(),
+            status,
+            block_height,
+            block_finalizer,
+            direction: "burned",
             difficulty_bits: None,
             proof_bits: None,
             proof_hash: None,
@@ -2095,6 +2171,12 @@ const INDEX_HTML: &str = r#"<!doctype html>
     .switch { display: inline-flex; grid-template-columns: none; align-items: center; gap: 8px; color: #d6dee2; font-weight: 700; }
     .switch input { width: auto; min-width: 0; accent-color: #d5f55f; }
     .wallet-tx-panel { min-width: 0; overflow: hidden; }
+    .wallet-tx-panel .panel-head { flex-wrap: wrap; }
+    .wallet-tx-filters { display: flex; flex-wrap: wrap; gap: 6px; justify-content: flex-end; align-items: center; }
+    .tx-filter { display: inline-flex; align-items: center; gap: 6px; border: 1px solid #3a4248; border-radius: 999px; padding: 4px 8px; color: #9fa8ad; background: #111316; font-size: 12px; font-weight: 850; cursor: pointer; user-select: none; }
+    .tx-filter input { position: absolute; opacity: 0; pointer-events: none; }
+    .tx-filter.active { border-color: #d5f55f; background: #202616; color: #d5f55f; }
+    .tx-filter:focus-within { outline: 2px solid #d5f55f; outline-offset: 2px; }
     .wallet-tx-list { max-height: min(620px, calc(100vh - 220px)); min-width: 0; display: grid; gap: 8px; overflow-y: auto; overscroll-behavior-y: contain; padding-right: 4px; }
     .wallet-tx-row { position: relative; display: grid; grid-template-columns: minmax(0, 1fr); gap: 8px; align-items: start; border: 1px solid #2f363c; border-radius: 8px; padding: 12px; background: #111316; cursor: pointer; text-align: left; }
     .wallet-tx-row:hover, .wallet-tx-row:focus-visible, .tx-card:hover, .tx-card:focus-visible, .mempool-item:hover, .mempool-item:focus-visible { border-color: #d5f55f; box-shadow: 0 0 0 1px rgba(213, 245, 95, .22); outline: none; }
@@ -2205,7 +2287,7 @@ const INDEX_HTML: &str = r#"<!doctype html>
       .block-card { flex-basis: 108px; }
     }
   </style>
-  <script defer src="/assets/iuna-ui.js?v=59"></script>
+  <script defer src="/assets/iuna-ui.js?v=60"></script>
   <script defer src="/assets/alpine.min.js"></script>
 </head>
 <body x-data="iunaApp()" x-init="init()" @keydown.window.escape="closeModals()" x-cloak>
@@ -2317,6 +2399,20 @@ const INDEX_HTML: &str = r#"<!doctype html>
         <div class="panel wallet-tx-panel">
           <div class="panel-head">
             <h3>Transactions</h3>
+            <div class="wallet-tx-filters" aria-label="Transaction filters">
+              <label class="tx-filter" :class="{ active: walletTxFilters.transfer }">
+                <input type="checkbox" x-model="walletTxFilters.transfer" @change="refreshWalletTransactions()">
+                <span>Tx</span>
+              </label>
+              <label class="tx-filter" :class="{ active: walletTxFilters.mine }">
+                <input type="checkbox" x-model="walletTxFilters.mine" @change="refreshWalletTransactions()">
+                <span>Mine</span>
+              </label>
+              <label class="tx-filter" :class="{ active: walletTxFilters.burn }">
+                <input type="checkbox" x-model="walletTxFilters.burn" @change="refreshWalletTransactions()">
+                <span>Burn</span>
+              </label>
+            </div>
           </div>
           <div class="wallet-tx-list">
             <template x-for="tx in walletTransactions()" :key="tx.status + '-' + tx.signature">
@@ -2876,12 +2972,12 @@ mod tests {
     };
 
     use super::{
-        AUTH_COOKIE_NAME, HttpState, PEER_STALE_AFTER_MS, TransferForm, api_auth_login_form,
-        api_auth_setup_form, api_auth_status, auth_client_key, dev_seed_verify_bypass_allowed,
-        hash_password, hex_encode, pbkdf2_sha256, persist_burn_settings_config,
-        persist_pow_mining_config, require_auth_middleware, required_fee_per_byte_burn,
-        same_origin_request, validate_password, validate_transfer_form, verify_password,
-        wallet_transaction_rows, wallet_utxo_rows,
+        AUTH_COOKIE_NAME, HttpState, PEER_STALE_AFTER_MS, TransferForm, WalletTransactionFilters,
+        WalletTransactionsQuery, api_auth_login_form, api_auth_setup_form, api_auth_status,
+        auth_client_key, dev_seed_verify_bypass_allowed, hash_password, hex_encode, pbkdf2_sha256,
+        persist_burn_settings_config, persist_pow_mining_config, require_auth_middleware,
+        required_fee_per_byte_burn, same_origin_request, validate_password, validate_transfer_form,
+        verify_password, wallet_transaction_rows, wallet_utxo_rows,
     };
 
     #[test]
@@ -3471,6 +3567,7 @@ mod tests {
             vec![pending_burn.clone()],
             &chain,
             &outputs,
+            WalletTransactionFilters::default(),
         );
 
         assert_eq!(rows.len(), 1);
@@ -3484,6 +3581,26 @@ mod tests {
     }
 
     #[test]
+    fn wallet_transaction_query_defaults_to_tx_only() {
+        assert_eq!(
+            WalletTransactionFilters::from_query(WalletTransactionsQuery::default()),
+            WalletTransactionFilters::default()
+        );
+        assert_eq!(
+            WalletTransactionFilters::from_query(WalletTransactionsQuery {
+                tx: Some(false),
+                mine: Some(true),
+                burn: Some(true),
+            }),
+            WalletTransactionFilters {
+                transfer: false,
+                mine: true,
+                burn: true,
+            }
+        );
+    }
+
+    #[test]
     fn mine_transaction_views_include_protocol_finalizer_fee() {
         let alice = Wallet::from_seed("wallet-mine-fee-alice");
         let ledger = Ledger::new(BTreeMap::new(), 1);
@@ -3491,7 +3608,17 @@ mod tests {
         let chain = vec![fake_block(1, vec![mine.clone()])];
         let outputs = super::known_output_index(&BTreeMap::new(), &chain, &[]);
 
-        let rows = wallet_transaction_rows(alice.address(), Vec::new(), &chain, &outputs);
+        let rows = wallet_transaction_rows(
+            alice.address(),
+            Vec::new(),
+            &chain,
+            &outputs,
+            WalletTransactionFilters {
+                transfer: false,
+                mine: true,
+                burn: false,
+            },
+        );
         let transaction = super::ui_transaction(&mine, &outputs);
 
         assert_eq!(rows.len(), 1);
@@ -3499,6 +3626,42 @@ mod tests {
         assert_eq!(rows[0].fee, MINE_FINALIZER_FEE);
         assert_eq!(transaction.amount, MINE_REWARD - MINE_FINALIZER_FEE);
         assert_eq!(transaction.fee, MINE_FINALIZER_FEE);
+    }
+
+    #[test]
+    fn burn_wallet_transactions_require_burn_filter() {
+        let alice = Wallet::from_seed("wallet-burn-filter-alice");
+        let mut allocations = BTreeMap::new();
+        allocations.insert(alice.address().to_string(), 10);
+        let ledger = Ledger::new(allocations.clone(), 1);
+        let burn = ledger.build_burn(&alice, 3, 1).unwrap();
+        let outputs = super::known_output_index(&allocations, &[], std::slice::from_ref(&burn));
+
+        let default_rows = wallet_transaction_rows(
+            alice.address(),
+            vec![burn.clone()],
+            &[],
+            &outputs,
+            WalletTransactionFilters::default(),
+        );
+        let burn_rows = wallet_transaction_rows(
+            alice.address(),
+            vec![burn.clone()],
+            &[],
+            &outputs,
+            WalletTransactionFilters {
+                transfer: false,
+                mine: false,
+                burn: true,
+            },
+        );
+
+        assert!(default_rows.is_empty());
+        assert_eq!(burn_rows.len(), 1);
+        assert_eq!(burn_rows[0].kind, "burn");
+        assert_eq!(burn_rows[0].direction, "burned");
+        assert_eq!(burn_rows[0].amount, 3);
+        assert_eq!(burn_rows[0].fee, 1);
     }
 
     #[test]
