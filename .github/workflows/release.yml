@@ -131,6 +131,14 @@ jobs:
         working-directory: src-tauri
         run: cargo +stable tauri build --bundles ${{ matrix.bundle }}
 
+      - name: Sign macOS app
+        if: runner.os == 'macOS'
+        shell: bash
+        run: |
+          app="src-tauri/target/release/bundle/macos/iuna.app"
+          codesign --force --deep --sign - --options runtime "${app}"
+          codesign --verify --deep --strict --verbose=4 "${app}"
+
       - name: Package macOS app
         if: runner.os == 'macOS'
         shell: bash
