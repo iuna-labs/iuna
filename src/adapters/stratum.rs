@@ -17,7 +17,7 @@ use tokio::{
 
 use crate::{
     adapters::p2p::GossipNetwork,
-    app::{ExternalMineJob, SharedNode},
+    app::{ExternalMineJob, SharedNode, debug_logging_enabled},
     domain::{STRATUM_EXTRANONCE1_HEX, STRATUM_EXTRANONCE2_SIZE, StratumMineShare},
 };
 
@@ -66,13 +66,16 @@ async fn run_listener(server: StratumServer, listener: TcpListener) {
                 let server = server.clone();
                 tokio::spawn(async move {
                     if let Err(error) = handle_connection(server, stream).await {
-                        eprintln!("stratum session with {remote} failed: {error:#}");
+                        if debug_logging_enabled() {
+                            eprintln!("stratum session with {remote} failed: {error:#}");
+                        }
                     }
                 });
             }
-            Err(error) => {
+            Err(error) if debug_logging_enabled() => {
                 eprintln!("stratum accept failed: {error:#}");
             }
+            Err(_) => {}
         }
     }
 }

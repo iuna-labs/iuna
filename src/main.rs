@@ -10,7 +10,10 @@ use std::{
 use anyhow::{Context, Result, bail};
 use iuna::{
     adapters::{chain_store::SqliteChainStore, config_store, http, p2p, stratum, wallet_store},
-    app::{NodeCore, PeerBook, SharedNode, SharedPeerBook, StratumStatus, now_ms},
+    app::{
+        NodeCore, PeerBook, SharedNode, SharedPeerBook, StratumStatus, debug_logging_enabled,
+        now_ms, set_debug_logging,
+    },
     domain::{
         Amount, ChainSnapshot, GenesisBurn, Ledger, MICRO_IUNA, VDF_TARGET_BLOCK_MS, run_vdf,
     },
@@ -29,6 +32,8 @@ async fn main() -> Result<()> {
     let Some(opts) = CliOptions::parse()? else {
         return Ok(());
     };
+    set_debug_logging(opts.debug);
+    let debug_logging = opts.debug;
     let wallet_path = opts.wallet_path();
     let config_path = opts.config_path();
     let wallet_file_exists = wallet_path.exists();
@@ -124,13 +129,13 @@ async fn main() -> Result<()> {
     let finalizer_node = Arc::clone(&node);
     let finalizer_gossip = gossip.clone();
     tokio::spawn(async move {
-        run_automatic_finalizer(finalizer_node, finalizer_gossip).await;
+        run_automatic_finalizer(finalizer_node, finalizer_gossip, debug_logging).await;
     });
 
     let sync_node = Arc::clone(&node);
     let sync_gossip = gossip.clone();
     tokio::spawn(async move {
-        run_peer_sync(sync_node, sync_gossip).await;
+        run_peer_sync(sync_node, sync_gossip, debug_logging).await;
     });
 
     if !has_chain {
@@ -249,6 +254,7 @@ struct CliOptions {
     join_peers: Vec<String>,
     chain_mode: ChainMode,
     data_dir: PathBuf,
+    debug: bool,
 }
 
 impl CliOptions {
@@ -267,6 +273,7 @@ impl CliOptions {
             join_peers: Vec::new(),
             chain_mode: ChainMode::Setup,
             data_dir: default_data_dir(),
+            debug: false,
         };
 
         let raw_args = args.into_iter().collect::<Vec<_>>();
@@ -317,6 +324,7 @@ impl CliOptions {
                     opts.join_peers.push(peer);
                 }
                 "--data-dir" => opts.data_dir = PathBuf::from(next_value(&mut args, "--data-dir")?),
+                "--debug" => opts.debug = true,
                 "--help" | "-h" => {
                     print_help();
                     std::process::exit(0);
@@ -404,7 +412,8 @@ fn help_text() -> &'static str {
            --p2p <addr:port>             P2P TCP listener address (default 127.0.0.1:9444)\n\
            --stratum <addr:port>         Stratum V1 listener for SHA-256 ASIC miners\n\
            --join <addr:port>            Fetch chain snapshot from this peer before finalization\n\
-           --data-dir <path>             Local wallet directory (default ~/.iuna)\n\n\
+           --data-dir <path>             Local wallet directory (default ~/.iuna)\n\
+           --debug                       Print verbose runtime logs\n\n\
          Environment:\n\
            IUNA_DEV_SKIP_SEED_VERIFY=1 Show a setup button to skip seed verification\n"
 }
@@ -522,7 +531,7 @@ async fn join_chain_ledger(join_peers: &[String], advertised_addr: SocketAddr) -
     )
 }
 
-async fn run_automatic_finalizer(node: SharedNode, gossip: p2p::GossipNetwork) {
+async fn run_automatic_finalizer(node: SharedNode, gossip: p2p::GossipNetwork, debug: bool) {
     let mut last_logged_skip: Option<(u64, String)> = None;
     loop {
         if !node.lock().await.has_real_chain() {
@@ -538,21 +547,25 @@ async fn run_automatic_finalizer(node: SharedNode, gossip: p2p::GossipNetwork) {
         };
 
         if let Err(error) = gossip.broadcast(outbox).await {
-            eprintln!("p2p broadcast failed after automatic burn: {error:#}");
+            if debug {
+                eprintln!("p2p broadcast failed after automatic burn: {error:#}");
+            }
         }
 
-        if let Some(tx) = &plan.pow_mined {
-            println!(
-                "auto-pow queued mine action for height {} ({})",
-                height,
-                tx.signature()
-            );
+        if debug {
+            if let Some(tx) = &plan.pow_mined {
+                println!(
+                    "auto-pow queued mine action for height {} ({})",
+                    height,
+                    tx.signature()
+                );
+            }
         }
 
         let Some(work) = plan.work else {
             if let Some(reason) = &plan.skipped_reason {
                 let skip = (height, reason.clone());
-                if last_logged_skip.as_ref() != Some(&skip) {
+                if debug && last_logged_skip.as_ref() != Some(&skip) {
                     println!("auto-finalization skipped at height {height}: {reason}");
                     last_logged_skip = Some(skip);
                 }
@@ -562,18 +575,22 @@ async fn run_automatic_finalizer(node: SharedNode, gossip: p2p::GossipNetwork) {
         };
 
         last_logged_skip = None;
-        println!(
-            "leader selected locally for candidate block {}; running VDF for {} rounds",
-            work.height(),
-            work.vdf_rounds()
-        );
+        if debug {
+            println!(
+                "leader selected locally for candidate block {}; running VDF for {} rounds",
+                work.height(),
+                work.vdf_rounds()
+            );
+        }
 
         let seed = work.vdf_seed().to_string();
         let rounds = work.vdf_rounds();
         let vdf_output = match tokio::task::spawn_blocking(move || run_vdf(&seed, rounds)).await {
             Ok(output) => output,
             Err(error) => {
-                eprintln!("VDF worker failed: {error:#}");
+                if debug {
+                    eprintln!("VDF worker failed: {error:#}");
+                }
                 continue;
             }
         };
@@ -586,21 +603,25 @@ async fn run_automatic_finalizer(node: SharedNode, gossip: p2p::GossipNetwork) {
         };
 
         match finalized {
-            Ok(block) => {
+            Ok(block) if debug => {
                 println!("auto-finalized block {} ({})", block.height, block.hash);
             }
-            Err(error) => println!("auto-finalization skipped after VDF: {error:#}"),
+            Ok(_) => {}
+            Err(error) if debug => println!("auto-finalization skipped after VDF: {error:#}"),
+            Err(_) => {}
         }
 
         if let Err(error) = gossip.broadcast(outbox).await {
-            eprintln!("p2p broadcast failed after automatic block: {error:#}");
+            if debug {
+                eprintln!("p2p broadcast failed after automatic block: {error:#}");
+            }
         }
 
         tokio::task::yield_now().await;
     }
 }
 
-async fn run_peer_sync(node: SharedNode, gossip: p2p::GossipNetwork) {
+async fn run_peer_sync(node: SharedNode, gossip: p2p::GossipNetwork, debug: bool) {
     loop {
         tokio::time::sleep(std::time::Duration::from_secs(5)).await;
         let envelopes = {
@@ -613,7 +634,9 @@ async fn run_peer_sync(node: SharedNode, gossip: p2p::GossipNetwork) {
         let mut envelopes = envelopes;
         envelopes.push(gossip.peer_exchange().await);
         if let Err(error) = gossip.broadcast(envelopes).await {
-            eprintln!("p2p sync gossip failed: {error:#}");
+            if debug {
+                eprintln!("p2p sync gossip failed: {error:#}");
+            }
         }
     }
 }
@@ -646,7 +669,10 @@ async fn run_chain_persistence_with_interval(
 
         match persist_chain_snapshot(&store, snapshot).await {
             Ok(()) => last_saved_tip = Some(tip_hash),
-            Err(error) => eprintln!("chain persistence failed: {error:#}"),
+            Err(error) if debug_logging_enabled() => {
+                eprintln!("chain persistence failed: {error:#}")
+            }
+            Err(_) => {}
         }
     }
 }
@@ -688,6 +714,7 @@ mod tests {
         assert!(help_text().contains("IUNA_DEV_SKIP_SEED_VERIFY=1"));
         assert!(help_text().contains("skip seed verification"));
         assert!(help_text().contains("--stratum <addr:port>"));
+        assert!(help_text().contains("--debug"));
     }
 
     fn ledger_with_one_spendable_iuna(wallet: &Wallet) -> Ledger {
@@ -733,6 +760,12 @@ mod tests {
     fn stratum_port_can_be_configured() {
         let opts = parse(&["--stratum", "127.0.0.1:3333"]).unwrap().unwrap();
         assert_eq!(opts.stratum_addr, Some("127.0.0.1:3333".parse().unwrap()));
+    }
+
+    #[test]
+    fn debug_logging_can_be_enabled() {
+        assert!(!parse(&[]).unwrap().unwrap().debug);
+        assert!(parse(&["--debug"]).unwrap().unwrap().debug);
     }
 
     #[test]

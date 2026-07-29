@@ -1,6 +1,9 @@
 use std::{
     collections::{BTreeMap, BTreeSet},
-    sync::Arc,
+    sync::{
+        Arc,
+        atomic::{AtomicBool, Ordering},
+    },
     time::{SystemTime, UNIX_EPOCH},
 };
 
@@ -31,6 +34,15 @@ pub const PEER_MISBEHAVIOR_BAN_MS: u64 = 10 * 60 * 1_000;
 pub const PEER_CLOCK_OFFSET_ACCEPTANCE_MS: i64 = 10 * 60 * 1_000;
 const PEER_CLOCK_OFFSET_STALE_MS: u64 = 20 * 60 * 1_000;
 const AUTO_POW_NONCE_ATTEMPTS_PER_TICK: u64 = 8;
+static DEBUG_LOGGING: AtomicBool = AtomicBool::new(false);
+
+pub fn set_debug_logging(enabled: bool) {
+    DEBUG_LOGGING.store(enabled, Ordering::Relaxed);
+}
+
+pub fn debug_logging_enabled() -> bool {
+    DEBUG_LOGGING.load(Ordering::Relaxed)
+}
 
 #[derive(Clone, Debug)]
 pub struct NodeConfig {

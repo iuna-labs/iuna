@@ -25,7 +25,7 @@ use crate::{
     app::{
         BlockInventory, GossipEnvelope, MEMPOOL_STATUS_LIMIT, NETWORK_ID, NodeCore,
         PROTOCOL_VERSION, PeerDirection, ProtocolHello, SharedNode, SharedPeerBook,
-        TransactionRejection, now_ms,
+        TransactionRejection, debug_logging_enabled, now_ms,
     },
     domain::{Block, ChainSnapshot, Ledger, Transaction, TransactionSubmitOutcome, verify_vdf},
 };
@@ -609,7 +609,9 @@ impl GossipNetwork {
     async fn forward_outbox(&self) {
         let outbox = self.inner.node.lock().await.drain_outbox();
         if let Err(error) = self.broadcast(outbox).await {
-            eprintln!("p2p rebroadcast failed: {error:#}");
+            if debug_logging_enabled() {
+                eprintln!("p2p rebroadcast failed: {error:#}");
+            }
         }
     }
 }
@@ -642,14 +644,17 @@ async fn accept_loop(network: GossipNetwork, listener: TcpListener) {
                                 &network.inner.metrics.last_session_failure,
                                 format!("{remote_addr}: {error:#}"),
                             );
-                            eprintln!(
-                                "p2p inbound connection from {remote_addr} failed: {error:#}"
-                            );
+                            if debug_logging_enabled() {
+                                eprintln!(
+                                    "p2p inbound connection from {remote_addr} failed: {error:#}"
+                                );
+                            }
                         }
                     }
                 });
             }
-            Err(error) => eprintln!("p2p accept failed: {error:#}"),
+            Err(error) if debug_logging_enabled() => eprintln!("p2p accept failed: {error:#}"),
+            Err(_) => {}
         }
     }
 }
@@ -745,7 +750,9 @@ async fn outbound_session(
                     .lock()
                     .await
                     .record_error(&peer, message.clone());
-                eprintln!("p2p session with {peer} failed: {message}");
+                if debug_logging_enabled() {
+                    eprintln!("p2p session with {peer} failed: {message}");
+                }
             }
         }
 
@@ -2142,7 +2149,9 @@ async fn record_inbound_result(
                     .await
                     .record_misbehavior(&peer, message.clone());
             }
-            eprintln!("p2p envelope from {peer} ignored: {message}");
+            if debug_logging_enabled() {
+                eprintln!("p2p envelope from {peer} ignored: {message}");
+            }
         }
     }
 }
