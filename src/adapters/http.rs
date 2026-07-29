@@ -1936,9 +1936,17 @@ const INDEX_HTML: &str = r#"<!doctype html>
     main > section { width: 100%; }
     header { display: flex; justify-content: space-between; gap: 18px; align-items: flex-start; padding: 0 0 18px; }
     .header-actions { display: flex; gap: 10px; align-items: center; }
-    .basic-status { display: inline-flex; gap: 8px; align-items: center; margin-top: 5px; color: #9eb3bc; font-size: 12px; font-weight: 750; }
-    .basic-status button { padding: 3px 7px; border-color: #3a4248; background: #202328; color: #9fa8ad; font-size: 11px; }
-    .basic-status button:hover { border-color: #d5f55f; color: #d5f55f; }
+    .basic-status-row { display: inline-flex; gap: 8px; align-items: center; margin-top: 5px; }
+    .basic-status { display: inline-flex; gap: 7px; align-items: center; border: 1px solid transparent; border-radius: 999px; padding: 3px 7px; color: #9eb3bc; font-size: 12px; font-weight: 800; }
+    .basic-status::before { content: ""; width: 6px; height: 6px; flex: 0 0 auto; border-radius: 999px; background: #7f888e; }
+    .basic-status.healthy { color: #d5f55f; }
+    .basic-status.healthy::before { background: #d5f55f; box-shadow: 0 0 12px rgba(213, 245, 95, .45); }
+    .basic-status.syncing { color: #ffd070; }
+    .basic-status.syncing::before { background: #ffd070; }
+    .basic-status.isolated, .basic-status.stale, .basic-status.banned, .basic-status.error { border-color: #6a332c; background: #261817; color: #ffb8ad; font-weight: 900; }
+    .basic-status.isolated::before, .basic-status.stale::before, .basic-status.banned::before, .basic-status.error::before { background: #ff7668; box-shadow: 0 0 12px rgba(255, 118, 104, .38); }
+    .basic-status-detail { padding: 3px 7px; border-color: #3a4248; background: #202328; color: #9fa8ad; font-size: 11px; }
+    .basic-status-detail:hover { border-color: #d5f55f; color: #d5f55f; }
     .lock-button { padding: 5px 8px; border-color: #3a4248; background: #202328; color: #9fa8ad; font-size: 12px; }
     .lock-button:hover { border-color: #d5f55f; color: #d5f55f; }
     h1 { margin: 0 0 4px; font-size: 28px; }
@@ -2218,9 +2226,9 @@ const INDEX_HTML: &str = r#"<!doctype html>
     <header>
       <div>
         <h1 x-text="pageTitle()">iuna</h1>
-        <div class="basic-status" x-show="basicMode()">
-          <span x-text="basicNetworkStatusLabel()"></span>
-          <button type="button" x-show="basicNetworkNeedsAttention()" @click="setUiMode('advanced'); setTab('p2p')">Details</button>
+        <div class="basic-status-row" x-show="basicMode()">
+          <span class="basic-status" :class="networkHealthClass()" x-text="basicNetworkStatusLabel()"></span>
+          <button class="basic-status-detail" type="button" x-show="basicNetworkNeedsAttention()" @click="setUiMode('advanced'); setTab('p2p')">Details</button>
         </div>
       </div>
       <div class="header-actions">
