@@ -15,7 +15,8 @@ use iuna::{
         now_ms, set_debug_logging,
     },
     domain::{
-        Amount, ChainSnapshot, GenesisBurn, Ledger, MICRO_IUNA, VDF_TARGET_BLOCK_MS, run_vdf,
+        Amount, ChainSnapshot, GenesisBurn, Ledger, MAX_VDF_ROUNDS, MICRO_IUNA,
+        VDF_TARGET_BLOCK_MS, run_vdf,
     },
 };
 use tokio::sync::Mutex;
@@ -23,8 +24,8 @@ use tokio::sync::Mutex;
 const GENESIS_BOOTSTRAP_BURN_AMOUNT: Amount = MICRO_IUNA;
 const GENESIS_INITIAL_BURN_PER_BLOCK: Amount = GENESIS_BOOTSTRAP_BURN_AMOUNT;
 const GENESIS_INITIAL_BURN_FEE: Amount = 0;
-const VDF_MEASUREMENT_INITIAL_ROUNDS: u32 = 1_000_000;
-const VDF_MEASUREMENT_MAX_ROUNDS: u32 = 100_000_000;
+const VDF_MEASUREMENT_INITIAL_ROUNDS: u64 = 1_000_000;
+const VDF_MEASUREMENT_MAX_ROUNDS: u64 = 100_000_000;
 const VDF_MEASUREMENT_MIN_ELAPSED: Duration = Duration::from_millis(150);
 
 #[tokio::main]
@@ -460,7 +461,7 @@ fn start_genesis_ledger(wallet_address: &str) -> Result<Ledger> {
     )
 }
 
-fn measure_initial_vdf_rounds() -> u32 {
+fn measure_initial_vdf_rounds() -> u64 {
     let seed = "iuna-vdf-calibration";
     let (measured_rounds, elapsed) = measure_vdf_rounds(
         seed,
@@ -482,12 +483,12 @@ fn measure_initial_vdf_rounds() -> u32 {
 
 fn measure_vdf_rounds(
     seed: &str,
-    initial_rounds: u32,
+    initial_rounds: u64,
     min_elapsed: Duration,
-    max_rounds_per_attempt: u32,
-) -> (u32, Duration) {
+    max_rounds_per_attempt: u64,
+) -> (u64, Duration) {
     let mut rounds = initial_rounds.max(1).min(max_rounds_per_attempt.max(1));
-    let mut measured_rounds = 0_u32;
+    let mut measured_rounds = 0_u64;
     let mut measured_elapsed = Duration::ZERO;
 
     loop {
@@ -503,14 +504,14 @@ fn measure_vdf_rounds(
     }
 }
 
-fn extrapolate_vdf_rounds(measured_rounds: u32, elapsed: Duration, target: Duration) -> u32 {
+fn extrapolate_vdf_rounds(measured_rounds: u64, elapsed: Duration, target: Duration) -> u64 {
     let elapsed_ns = elapsed.as_nanos().max(1);
     let target_ns = target.as_nanos().max(1);
     let rounds = u128::from(measured_rounds)
         .saturating_mul(target_ns)
         .saturating_div(elapsed_ns)
         .max(1);
-    rounds.min(u128::from(u32::MAX)) as u32
+    rounds.min(u128::from(MAX_VDF_ROUNDS)) as u64
 }
 
 async fn join_chain_ledger(join_peers: &[String], advertised_addr: SocketAddr) -> Result<Ledger> {
@@ -1025,7 +1026,7 @@ mod tests {
                 Duration::from_secs(0),
                 Duration::from_millis(VDF_TARGET_BLOCK_MS),
             ),
-            u32::MAX
+            6_000_000_000_000_000
         );
     }
 

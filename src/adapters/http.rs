@@ -314,7 +314,7 @@ struct UiBlock {
     finalizer_rank: u32,
     reward: Amount,
     total_fees: Amount,
-    vdf_rounds: u32,
+    vdf_rounds: u64,
     vdf_output: String,
     leader_proof: Option<crate::domain::LeaderProof>,
     transactions: Vec<UiTransaction>,
@@ -4237,7 +4237,7 @@ mod tests {
     fn metric_row(
         height: u64,
         block_time_ms: Option<u64>,
-        vdf_rounds: u32,
+        vdf_rounds: u64,
     ) -> crate::adapters::chain_store::BlockMetricRow {
         crate::adapters::chain_store::BlockMetricRow {
             height,

@@ -18,6 +18,7 @@ pub const DEFAULT_TRANSACTION_FEE: Amount = MICRO_IUNA;
 pub const DEFAULT_FEE_PER_BYTE: Amount = 1;
 pub const MAX_BLOCK_BYTES: usize = 100_000;
 pub const VDF_TARGET_BLOCK_MS: u64 = 10 * 60 * 1_000;
+pub const MAX_VDF_ROUNDS: u64 = i64::MAX as u64;
 pub const MINE_DIFFICULTY_BITS: u32 = 12;
 const MINE_RETARGET_WINDOW_BLOCKS: u64 = 10;
 const MINE_TARGET_ACTIONS_PER_BLOCK: u64 = 1;
@@ -30,7 +31,7 @@ const MAX_ORPHAN_TRANSACTIONS: usize = 1_024;
 const MAX_BLOCK_TRANSACTIONS: usize = 1_000;
 const DEFAULT_TICKET_MATURITY_DELAY: u64 = 3;
 const DEFAULT_TICKET_EXPIRY_WINDOW: u64 = 3;
-const MIN_VDF_ROUNDS: u32 = 1;
+const MIN_VDF_ROUNDS: u64 = 1;
 const VDF_RETARGET_WINDOW_BLOCKS: usize = 10;
 const MAX_VDF_RETARGET_STEP_PERCENT: u128 = 10;
 const MIN_VDF_RETARGET_OBSERVED_BLOCK_MS: u64 = VDF_TARGET_BLOCK_MS / 4;
@@ -767,7 +768,7 @@ pub struct Block {
     #[serde(default)]
     pub finalizer_rank: u32,
     pub reward: Amount,
-    pub vdf_rounds: u32,
+    pub vdf_rounds: u64,
     pub vdf_output: String,
     pub leader_proof: Option<LeaderProof>,
     pub transactions: Vec<Transaction>,
@@ -946,7 +947,7 @@ pub struct PreparedBlock {
     miner: String,
     finalizer_rank: u32,
     reward: Amount,
-    vdf_rounds: u32,
+    vdf_rounds: u64,
     vdf_seed: String,
     leader_ticket: BurnTicket,
     transactions: Vec<Transaction>,
@@ -957,7 +958,7 @@ impl PreparedBlock {
         &self.vdf_seed
     }
 
-    pub fn vdf_rounds(&self) -> u32 {
+    pub fn vdf_rounds(&self) -> u64 {
         self.vdf_rounds
     }
 
@@ -998,7 +999,7 @@ struct BlockDraft {
     miner: String,
     finalizer_rank: u32,
     reward: Amount,
-    vdf_rounds: u32,
+    vdf_rounds: u64,
     vdf_output: String,
     leader_proof: Option<LeaderProof>,
     transactions: Vec<Transaction>,
@@ -1019,7 +1020,7 @@ pub struct ChainStatus {
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 pub struct ChainSnapshot {
     pub genesis_allocations: BTreeMap<String, Amount>,
-    pub vdf_rounds: u32,
+    pub vdf_rounds: u64,
     pub launch_profile: LaunchProfile,
     pub blocks: Vec<Block>,
 }
@@ -1175,13 +1176,13 @@ pub struct Ledger {
     pending: Vec<Transaction>,
     orphans: Vec<Transaction>,
     mine_reward: Amount,
-    initial_vdf_rounds: u32,
-    vdf_rounds: u32,
+    initial_vdf_rounds: u64,
+    vdf_rounds: u64,
     launch_profile: LaunchProfile,
 }
 
 impl Ledger {
-    pub fn new(genesis_allocations: BTreeMap<String, Amount>, vdf_rounds: u32) -> Self {
+    pub fn new(genesis_allocations: BTreeMap<String, Amount>, vdf_rounds: u64) -> Self {
         Self::new_with_genesis_transactions(genesis_allocations, Vec::new(), vdf_rounds)
             .expect("empty genesis transactions are valid")
     }
@@ -1189,7 +1190,7 @@ impl Ledger {
     pub fn new_with_genesis_burns(
         genesis_allocations: BTreeMap<String, Amount>,
         genesis_burns: Vec<GenesisBurn>,
-        vdf_rounds: u32,
+        vdf_rounds: u64,
     ) -> Result<Self> {
         let transactions = genesis_burns
             .into_iter()
@@ -1207,7 +1208,7 @@ impl Ledger {
     fn new_with_genesis_transactions(
         genesis_allocations: BTreeMap<String, Amount>,
         genesis_transactions: Vec<Transaction>,
-        vdf_rounds: u32,
+        vdf_rounds: u64,
     ) -> Result<Self> {
         validate_genesis_allocations(&genesis_allocations)?;
         let launch_profile = LaunchProfile::default();
@@ -1570,7 +1571,7 @@ impl Ledger {
         self.transaction_by_signature(signature).is_some()
     }
 
-    pub fn vdf_rounds(&self) -> u32 {
+    pub fn vdf_rounds(&self) -> u64 {
         self.vdf_rounds
     }
 
@@ -2128,7 +2129,7 @@ impl Ledger {
         timestamps[timestamps.len() / 2]
     }
 
-    fn next_vdf_rounds_after_tip(&self) -> u32 {
+    fn next_vdf_rounds_after_tip(&self) -> u64 {
         let Some(tip) = self.chain.last() else {
             return self.vdf_rounds;
         };
@@ -2425,7 +2426,7 @@ impl Ledger {
             })
     }
 
-    fn vdf_rounds_for_finalizer_rank(&self, rank: u32) -> Result<u32> {
+    fn vdf_rounds_for_finalizer_rank(&self, rank: u32) -> Result<u64> {
         vdf_rounds_for_finalizer_rank(self.vdf_rounds, rank)
     }
 
@@ -2519,14 +2520,20 @@ fn weighted_ticket_draw(parent: &Block, target_height: u64, rank: u32, total_wei
     u128::from_be_bytes(bytes) % total_weight
 }
 
-fn vdf_rounds_for_finalizer_rank(base_rounds: u32, rank: u32) -> Result<u32> {
-    base_rounds
-        .checked_mul(rank.checked_add(1).context("finalizer rank overflows")?)
-        .context("finalizer rank VDF rounds overflow")
+fn vdf_rounds_for_finalizer_rank(base_rounds: u64, rank: u32) -> Result<u64> {
+    let rounds = base_rounds
+        .checked_mul(u64::from(
+            rank.checked_add(1).context("finalizer rank overflows")?,
+        ))
+        .context("finalizer rank VDF rounds overflow")?;
+    if rounds > MAX_VDF_ROUNDS {
+        bail!("finalizer rank VDF rounds exceed maximum");
+    }
+    Ok(rounds)
 }
 
-fn base_vdf_rounds_for_finalizer_rank(vdf_rounds: u32, rank: u32) -> u32 {
-    vdf_rounds / rank.saturating_add(1).max(1)
+fn base_vdf_rounds_for_finalizer_rank(vdf_rounds: u64, rank: u32) -> u64 {
+    vdf_rounds / u64::from(rank.saturating_add(1).max(1))
 }
 
 fn tickets_created_by_block(block: &Block, profile: &LaunchProfile) -> Result<Vec<BurnTicket>> {
@@ -2950,7 +2957,7 @@ fn estimated_block_size_bytes(transactions: &[Transaction]) -> Result<usize> {
         miner: "f".repeat(64),
         finalizer_rank: 0,
         reward: u64::MAX,
-        vdf_rounds: u32::MAX,
+        vdf_rounds: u64::MAX,
         vdf_output: "f".repeat(64),
         leader_proof: Some(LeaderProof {
             ticket_id: "f".repeat(64),
@@ -3297,7 +3304,7 @@ fn genesis_reward(
     }
 }
 
-pub fn run_vdf(seed: &str, rounds: u32) -> String {
+pub fn run_vdf(seed: &str, rounds: u64) -> String {
     let x = vdf_seed_element(seed);
     let mut y = x;
     for _ in 0..rounds {
@@ -3309,7 +3316,7 @@ pub fn run_vdf(seed: &str, rounds: u32) -> String {
     encode_vdf_solution(y, proof)
 }
 
-pub fn verify_vdf(seed: &str, rounds: u32, solution: &str) -> bool {
+pub fn verify_vdf(seed: &str, rounds: u64, solution: &str) -> bool {
     let Some((y, proof)) = decode_vdf_solution(solution) else {
         return false;
     };
@@ -3331,7 +3338,7 @@ fn vdf_seed_element(seed: &str) -> u128 {
     2 + (u128::from_be_bytes(bytes) % (VDF_MODULUS - 3))
 }
 
-fn vdf_challenge_prime(seed: &str, rounds: u32, output: u128) -> u64 {
+fn vdf_challenge_prime(seed: &str, rounds: u64, output: u128) -> u64 {
     let digest = Sha256::digest(format!("iuna-vdf-challenge:{seed}:{rounds}:{output:x}"));
     let mut bytes = [0_u8; 8];
     bytes.copy_from_slice(&digest[..8]);
@@ -3339,7 +3346,7 @@ fn vdf_challenge_prime(seed: &str, rounds: u32, output: u128) -> u64 {
     next_odd_prime(candidate | 1)
 }
 
-fn vdf_proof(x: u128, rounds: u32, challenge: u64) -> u128 {
+fn vdf_proof(x: u128, rounds: u64, challenge: u64) -> u128 {
     let mut proof = 1_u128;
     let mut remainder = 1_u64 % challenge;
     for _ in 0..rounds {
@@ -3385,7 +3392,7 @@ fn mod_pow(mut base: u128, mut exponent: u128) -> u128 {
     result
 }
 
-fn pow_mod_small(base: u64, exponent: u32, modulus: u64) -> u64 {
+fn pow_mod_small(base: u64, exponent: u64, modulus: u64) -> u64 {
     let mut result = 1_u128;
     let mut base = u128::from(base % modulus);
     let mut exponent = exponent;
@@ -3421,7 +3428,7 @@ fn is_odd_prime(candidate: u64) -> bool {
     true
 }
 
-fn retarget_vdf_rounds(current_rounds: u32, observed_block_ms: u64) -> u32 {
+fn retarget_vdf_rounds(current_rounds: u64, observed_block_ms: u64) -> u64 {
     let current = u128::from(current_rounds);
     let observed = u128::from(observed_block_ms.max(1));
     let raw_adjusted = current * u128::from(VDF_TARGET_BLOCK_MS) / observed;
@@ -3429,8 +3436,10 @@ fn retarget_vdf_rounds(current_rounds: u32, observed_block_ms: u64) -> u32 {
     let min_next = current
         .saturating_sub(max_step)
         .max(u128::from(MIN_VDF_ROUNDS));
-    let max_next = current.saturating_add(max_step).min(u128::from(u32::MAX));
-    raw_adjusted.clamp(min_next, max_next) as u32
+    let max_next = current
+        .saturating_add(max_step)
+        .min(u128::from(MAX_VDF_ROUNDS));
+    raw_adjusted.clamp(min_next, max_next) as u64
 }
 
 fn clamped_vdf_retarget_observed_block_ms(observed_block_ms: u64) -> u64 {
@@ -3550,6 +3559,23 @@ mod tests {
         }
         let block = ledger.mine_next_block(wallet, ledger.height() + 1).unwrap();
         ledger.apply_block(block).unwrap();
+    }
+
+    fn apply_preverified_burn_block_at(
+        ledger: &mut Ledger,
+        wallet: &Wallet,
+        timestamp_ms: u64,
+    ) -> Block {
+        let burn = ledger.build_burn(wallet, 1, 0).unwrap();
+        ledger.submit_transaction(burn).unwrap();
+        let work = ledger
+            .prepare_next_block(wallet.address(), timestamp_ms)
+            .unwrap();
+        let block = work.finish(wallet, "preverified-vdf".to_string());
+        ledger
+            .apply_preverified_block_at(block.clone(), u64::MAX)
+            .unwrap();
+        block
     }
 
     fn mine_with_output_and_fee(
@@ -3839,6 +3865,79 @@ mod tests {
             clamped_vdf_retarget_observed_block_ms(u64::MAX),
             MAX_VDF_RETARGET_OBSERVED_BLOCK_MS
         );
+    }
+
+    #[test]
+    fn vdf_rounds_retarget_above_legacy_u32_limit_after_fast_blocks() {
+        let wallet = Wallet::from_seed("vdf-rounds-above-u32");
+        let initial_rounds = u64::from(u32::MAX);
+        let mut allocations = BTreeMap::new();
+        allocations.insert(wallet.address().to_string(), 1_000);
+        let mut ledger = Ledger::new_with_genesis_burns(
+            allocations,
+            vec![GenesisBurn::new(wallet.address(), 1)],
+            initial_rounds,
+        )
+        .unwrap();
+
+        let block1 = apply_preverified_burn_block_at(&mut ledger, &wallet, VDF_TARGET_BLOCK_MS);
+        assert_eq!(block1.vdf_rounds, initial_rounds);
+        assert_eq!(ledger.vdf_rounds(), initial_rounds);
+
+        let block2 =
+            apply_preverified_burn_block_at(&mut ledger, &wallet, VDF_TARGET_BLOCK_MS + 415_000);
+        assert_eq!(block2.vdf_rounds, initial_rounds);
+
+        assert!(
+            ledger.vdf_rounds() > initial_rounds,
+            "fast blocks should retarget above the legacy u32 VDF rounds ceiling"
+        );
+    }
+
+    #[test]
+    fn generated_vdf_retarget_increases_after_fast_blocks_above_legacy_limit() {
+        let legacy_limit = u64::from(u32::MAX);
+        let fast_observed_ms = [
+            MIN_VDF_RETARGET_OBSERVED_BLOCK_MS,
+            300_000,
+            415_000,
+            VDF_TARGET_BLOCK_MS - 1,
+        ];
+
+        for seed in 0..16_u64 {
+            let wallet = Wallet::from_seed(&format!("generated-vdf-retarget-{seed}"));
+            let initial_rounds = legacy_limit + 1 + seed * 1_000_003;
+            let mut allocations = BTreeMap::new();
+            allocations.insert(wallet.address().to_string(), 1_000);
+            let mut ledger = Ledger::new_with_genesis_burns(
+                allocations,
+                vec![GenesisBurn::new(wallet.address(), 1)],
+                initial_rounds,
+            )
+            .unwrap();
+            let observed_ms = fast_observed_ms[seed as usize % fast_observed_ms.len()];
+
+            apply_preverified_burn_block_at(&mut ledger, &wallet, VDF_TARGET_BLOCK_MS);
+            let second = apply_preverified_burn_block_at(
+                &mut ledger,
+                &wallet,
+                VDF_TARGET_BLOCK_MS + observed_ms,
+            );
+
+            assert_eq!(second.vdf_rounds, initial_rounds);
+            assert!(
+                ledger.vdf_rounds() > initial_rounds,
+                "seed {seed} with observed {observed_ms}ms should raise VDF rounds from {initial_rounds}, got {}",
+                ledger.vdf_rounds()
+            );
+
+            let burn = ledger.build_burn(&wallet, 1, 0).unwrap();
+            ledger.submit_transaction(burn).unwrap();
+            let next_work = ledger
+                .prepare_next_block(wallet.address(), VDF_TARGET_BLOCK_MS + observed_ms * 2)
+                .unwrap();
+            assert_eq!(next_work.vdf_rounds(), ledger.vdf_rounds());
+        }
     }
 
     #[test]

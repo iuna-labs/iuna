@@ -57,7 +57,7 @@ pub struct BlockMetricRow {
     pub total_burned_amount: Amount,
     pub fees_amount: Amount,
     pub reward_amount: Amount,
-    pub vdf_rounds: u32,
+    pub vdf_rounds: u64,
     pub finalizer_rank: u32,
 }
 
@@ -421,7 +421,7 @@ mod tests {
 
     use crate::domain::{BLOCK_REWARD, GenesisBurn, Ledger, Wallet};
 
-    use super::SqliteChainStore;
+    use super::{BlockMetricRow, SqliteChainStore, replace_metrics};
 
     #[test]
     fn sqlite_chain_store_roundtrips_snapshot() {
@@ -488,6 +488,46 @@ mod tests {
 
         store.clear_metrics().unwrap();
         assert!(store.load_metrics().unwrap().is_empty());
+    }
+
+    #[test]
+    fn sqlite_chain_store_roundtrips_vdf_round_metrics_above_legacy_u32_limit() {
+        let dir = tempdir().unwrap();
+        let store = SqliteChainStore::open(dir.path().join("chain.sqlite3")).unwrap();
+        let vdf_rounds = u64::from(u32::MAX) + 42;
+
+        store
+            .with_connection_mut(|connection| {
+                let transaction = connection.transaction().unwrap();
+                replace_metrics(
+                    &transaction,
+                    &[BlockMetricRow {
+                        height: 1,
+                        block_hash: "hash".to_string(),
+                        timestamp_ms: 1_000,
+                        block_time_ms: Some(415_000),
+                        mine_difficulty_bits: 12,
+                        circulating_supply: 100,
+                        transaction_count: 0,
+                        transfer_count: 0,
+                        burn_count: 0,
+                        mine_count: 0,
+                        burned_amount: 0,
+                        total_burned_amount: 0,
+                        fees_amount: 0,
+                        reward_amount: 0,
+                        vdf_rounds,
+                        finalizer_rank: 0,
+                    }],
+                )?;
+                transaction.commit().unwrap();
+                Ok(())
+            })
+            .unwrap();
+
+        let metrics = store.load_metrics().unwrap();
+        assert_eq!(metrics.len(), 1);
+        assert_eq!(metrics[0].vdf_rounds, vdf_rounds);
     }
 
     #[test]

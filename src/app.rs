@@ -48,7 +48,7 @@ pub fn debug_logging_enabled() -> bool {
 pub struct NodeConfig {
     pub wallet: Wallet,
     pub genesis_allocations: BTreeMap<String, Amount>,
-    pub vdf_rounds: u32,
+    pub vdf_rounds: u64,
     pub burn_per_block: Amount,
     pub burn_fee: Amount,
 }
@@ -198,7 +198,7 @@ pub struct MiningStatus {
     pub automatic_pow_mine_fee: Amount,
     pub last_auto_pow_mine_anchor: Option<String>,
     pub last_auto_pow_mine_status: Option<String>,
-    pub vdf_rounds: u32,
+    pub vdf_rounds: u64,
     pub vdf_target_block_ms: u64,
     pub current_leader: Option<String>,
     pub wallet_is_current_leader: bool,
