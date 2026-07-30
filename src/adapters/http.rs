@@ -88,6 +88,12 @@ struct AuthForm {
     password: String,
 }
 
+#[derive(Debug, Deserialize)]
+struct ChangePasswordForm {
+    old_password: String,
+    new_password: String,
+}
+
 #[derive(Debug, Serialize)]
 struct AuthStatusResponse {
     configured: bool,
@@ -326,6 +332,10 @@ pub async fn serve(
         .route("/api/auth/setup", post(api_auth_setup_form))
         .route("/api/auth/login", post(api_auth_login_form))
         .route("/api/auth/logout", post(api_auth_logout_form))
+        .route(
+            "/api/auth/change-password",
+            post(api_auth_change_password_form),
+        )
         .route("/api/status", get(api_status))
         .route("/api/blocks", get(api_blocks))
         .route("/api/config", get(api_config).post(api_config_form))
@@ -566,6 +576,24 @@ async fn api_auth_logout_form(State(state): State<HttpState>, headers: HeaderMap
         action_json(Ok(())),
     )
         .into_response()
+}
+
+async fn api_auth_change_password_form(
+    State(state): State<HttpState>,
+    Extension(client_key): Extension<AuthClientKey>,
+    Form(form): Form<ChangePasswordForm>,
+) -> Response {
+    match change_auth_password(
+        &state,
+        &form.old_password,
+        &form.new_password,
+        &client_key.0,
+    )
+    .await
+    {
+        Ok(cookie) => ([(header::SET_COOKIE, cookie)], action_json(Ok(()))).into_response(),
+        Err(error) => action_json(Err(error)).into_response(),
+    }
 }
 
 async fn api_status(State(state): State<HttpState>) -> Json<NodeStatus> {
@@ -1766,6 +1794,38 @@ async fn login_auth_password(
     create_session_cookie(state, password).await
 }
 
+async fn change_auth_password(
+    state: &HttpState,
+    old_password: &str,
+    new_password: &str,
+    client_key: &str,
+) -> Result<String> {
+    check_auth_backoff(state, client_key).await?;
+    validate_password(new_password)?;
+    let current_hash = state
+        .ui_config
+        .lock()
+        .await
+        .auth_password_hash
+        .clone()
+        .context("authentication setup is required")?;
+    if !verify_password(old_password, &current_hash)? {
+        record_auth_failure(state, client_key).await;
+        bail!("invalid current password");
+    }
+    let wallet =
+        wallet_store::reencrypt_with_password(&state.wallet_path, old_password, new_password)?;
+    {
+        let mut config = state.ui_config.lock().await;
+        config.auth_password_hash = Some(hash_password(new_password)?);
+        config_store::save(&state.config_path, &config)?;
+    }
+    state.node.lock().await.replace_wallet(wallet);
+    state.auth_sessions.lock().await.clear();
+    clear_auth_backoff(state, client_key).await;
+    create_session_cookie(state, new_password).await
+}
+
 async fn check_auth_backoff(state: &HttpState, client_key: &str) -> Result<()> {
     let now = now_ms();
     let mut backoffs = state.auth_backoff.lock().await;
@@ -2009,9 +2069,9 @@ const INDEX_HTML: &str = r#"<!doctype html>
     .nav-button svg.chain-icon { stroke-width: 1.35; }
     .nav-button span { font-size: 11px; font-weight: 800; }
     .nav-button:hover, .nav-button.active { background: #202328; border-color: #3b4448; color: #d5f55f; }
-    .mode-toggle { margin-top: auto; width: 64px; display: grid; justify-items: center; border: 1px solid #2f363c; border-radius: 8px; padding: 7px 4px; color: #9fa8ad; background: #111316; font-size: 10px; font-weight: 850; text-align: center; }
-    .mode-toggle:hover { border-color: #d5f55f; color: #d5f55f; }
-    .mode-toggle-label { line-height: 1; text-transform: uppercase; }
+    .settings-button { margin-top: auto; width: 64px; min-height: 54px; display: grid; place-items: center; border: 1px solid transparent; border-radius: 8px; padding: 7px 4px; color: #9fa8ad; background: transparent; text-align: center; }
+    .settings-button svg { width: 23px; height: 23px; stroke: currentColor; stroke-width: 1.9; fill: none; }
+    .settings-button:hover, .settings-button.active { background: #202328; border-color: #3b4448; color: #d5f55f; }
     .version-panel { width: 64px; display: grid; gap: 4px; justify-items: center; border: 1px solid transparent; border-radius: 8px; padding: 7px 4px; color: #7f888e; background: transparent; font-size: 10px; font-weight: 850; text-align: center; }
     .version-panel.update { border-color: #566d25; color: #d5f55f; background: #1c2516; cursor: pointer; }
     .version-panel.checking { color: #a8b2b8; }
@@ -2106,6 +2166,12 @@ const INDEX_HTML: &str = r#"<!doctype html>
     .auth-form { width: min(420px, 100%); display: grid; gap: 10px; }
     .auth-form form { display: grid; gap: 10px; align-items: stretch; }
     .auth-form input { width: 100%; }
+    .settings-grid { width: min(760px, 100%); display: grid; gap: 12px; }
+    .settings-mode-row { display: flex; justify-content: space-between; gap: 14px; align-items: center; }
+    .settings-mode-copy { min-width: 0; display: grid; gap: 4px; }
+    .settings-mode-title { color: #e8edf0; font-size: 15px; font-weight: 850; }
+    .settings-form { display: grid; gap: 10px; align-items: stretch; }
+    .settings-form label, .settings-form input { width: 100%; }
     .wallet-grid { width: 100%; display: grid; grid-template-columns: minmax(0, 1fr) minmax(300px, .8fr); gap: 12px; align-items: start; }
     .wallet-actions { display: grid; gap: 12px; }
     .advanced-toggle { flex-basis: 100%; width: max-content; align-self: flex-start; border-color: #3a4248; padding: 4px 7px; background: #202328; color: #9fa8ad; font-size: 12px; }
@@ -2278,17 +2344,19 @@ const INDEX_HTML: &str = r#"<!doctype html>
       .side-nav { display: flex; width: auto; gap: 8px; }
       .nav-button { width: 52px; min-height: 48px; }
       .nav-button span { font-size: 10px; }
-      .mode-toggle, .version-panel { margin-top: 0; width: 48px; padding: 6px 3px; font-size: 9px; }
+      .settings-button, .version-panel { margin-top: 0; width: 48px; min-height: 48px; padding: 6px 3px; }
+      .settings-button svg { width: 21px; height: 21px; }
       .content { padding: 16px 12px 36px; }
       header, .split, .setup-grid, .wallet-grid, .mining-grid, .detail-grid, .wallet-tx-row { grid-template-columns: 1fr; }
       header { display: grid; }
+      .settings-mode-row { align-items: flex-start; }
       input { min-width: 0; width: 100%; }
       .switch input { width: auto; }
       .seed-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); }
       .block-card { flex-basis: 108px; }
     }
   </style>
-  <script defer src="/assets/iuna-ui.js?v=60"></script>
+  <script defer src="/assets/iuna-ui.js?v=61"></script>
   <script defer src="/assets/alpine.min.js"></script>
 </head>
 <body x-data="iunaApp()" x-init="init()" @keydown.window.escape="closeModals()" x-cloak>
@@ -2313,8 +2381,8 @@ const INDEX_HTML: &str = r#"<!doctype html>
           <span>Chain</span>
         </button>
       </nav>
-      <button class="mode-toggle" type="button" @click="toggleUiMode" :title="advancedMode() ? 'Switch to basic mode' : 'Switch to full mode'">
-        <span class="mode-toggle-label" x-text="advancedMode() ? 'Full' : 'Basic'"></span>
+      <button class="settings-button" :class="{ active: tab === 'settings' }" type="button" @click="setTab('settings')" title="Settings" aria-label="Settings">
+        <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M9.7 3.2 9.2 5.5a7.2 7.2 0 0 0-1.4.8L5.6 5.6 3.2 9.8l1.7 1.6a7.8 7.8 0 0 0 0 1.6l-1.7 1.6 2.4 4.2 2.2-.7a7.2 7.2 0 0 0 1.4.8l.5 2.3h4.8l.5-2.3a7.2 7.2 0 0 0 1.4-.8l2.2.7 2.4-4.2-1.7-1.6a7.8 7.8 0 0 0 0-1.6L21 9.8l-2.4-4.2-2.2.7a7.2 7.2 0 0 0-1.4-.8l-.5-2.3H9.7Z"></path><circle cx="12" cy="12.2" r="3.1"></circle></svg>
       </button>
       <button class="version-panel" type="button" :class="{ update: updateAvailable(), checking: releaseCheckState === 'checking', failed: releaseCheckState === 'failed' }" :title="versionPanelTitle()" @click="openLatestRelease">
         <span class="version-dot" aria-hidden="true"></span>
@@ -2734,6 +2802,37 @@ const INDEX_HTML: &str = r#"<!doctype html>
         </section>
       </div>
     </section>
+    <section x-show="tab === 'settings'">
+      <div class="settings-grid">
+        <div class="panel">
+          <div class="panel-head">
+            <h2>Settings</h2>
+            <span class="pill" x-text="advancedMode() ? 'Node mode' : 'Wallet mode'"></span>
+          </div>
+          <div class="settings-mode-row">
+            <div class="settings-mode-copy">
+              <div class="settings-mode-title">Mode</div>
+              <div class="muted" x-text="advancedMode() ? 'Node mode shows mining and peer controls.' : 'Wallet mode keeps the interface focused on wallet and chain views.'"></div>
+            </div>
+            <label class="toggle-switch" :class="{ active: advancedMode() }">
+              <input type="checkbox" :checked="advancedMode()" @change="setUiMode($event.target.checked ? 'advanced' : 'basic')">
+              <span class="toggle-track" aria-hidden="true"><span class="toggle-thumb"></span></span>
+              <span class="toggle-text" x-text="advancedMode() ? 'Node' : 'Wallet'"></span>
+            </label>
+          </div>
+        </div>
+        <div class="panel">
+          <h3>Change Password</h3>
+          <div class="setup-feedback" :class="settingsFeedback?.kind" x-show="settingsFeedback" x-transition x-text="settingsFeedback?.message"></div>
+          <form class="settings-form" @submit.prevent="changePassword">
+            <label>Current password<input x-model="settingsOldPassword" type="password" autocomplete="current-password" required></label>
+            <label>New password<input x-model="settingsNewPassword" type="password" autocomplete="new-password" minlength="12" required></label>
+            <label>Confirm new password<input x-model="settingsPasswordConfirm" type="password" autocomplete="new-password" minlength="12" required></label>
+            <div class="setup-actions"><button class="primary" type="submit">Change password</button></div>
+          </form>
+        </div>
+      </div>
+    </section>
     </main>
   </div>
   <div class="setup-overlay" x-show="showingAuth()" x-transition.opacity role="dialog" aria-modal="true" aria-labelledby="auth-title">
@@ -2975,11 +3074,12 @@ mod tests {
 
     use super::{
         AUTH_COOKIE_NAME, HttpState, PEER_STALE_AFTER_MS, TransferForm, WalletTransactionFilters,
-        WalletTransactionsQuery, api_auth_login_form, api_auth_setup_form, api_auth_status,
-        auth_client_key, dev_seed_verify_bypass_allowed, hash_password, hex_encode, pbkdf2_sha256,
-        persist_burn_settings_config, persist_pow_mining_config, require_auth_middleware,
-        required_fee_per_byte_burn, same_origin_request, validate_password, validate_transfer_form,
-        verify_password, wallet_transaction_rows, wallet_utxo_rows,
+        WalletTransactionsQuery, api_auth_change_password_form, api_auth_login_form,
+        api_auth_setup_form, api_auth_status, auth_client_key, dev_seed_verify_bypass_allowed,
+        hash_password, hex_encode, pbkdf2_sha256, persist_burn_settings_config,
+        persist_pow_mining_config, require_auth_middleware, required_fee_per_byte_burn,
+        same_origin_request, validate_password, validate_transfer_form, verify_password,
+        wallet_transaction_rows, wallet_utxo_rows,
     };
 
     #[test]
@@ -3235,6 +3335,75 @@ mod tests {
         let protected = http_request(app, Method::GET, "/api/protected", Some(&cookie), "").await;
         assert_eq!(protected.status, StatusCode::OK);
         assert_eq!(protected.body, "protected");
+    }
+
+    #[tokio::test]
+    async fn password_change_reencrypts_wallet_and_replaces_login_password() {
+        let dir = tempfile::tempdir().unwrap();
+        let config_path = dir.path().join("config.json");
+        let wallet_path = config_path.with_file_name("wallet.json");
+        let old_password = "correct horse battery staple";
+        let new_password = "new correct battery staple";
+        let state = auth_test_state(
+            config_path.clone(),
+            UiConfig {
+                auth_password_hash: Some(hash_password(old_password).unwrap()),
+                setup_complete: true,
+                ..UiConfig::default()
+            },
+        )
+        .await;
+        wallet_store::encrypt_existing_with_password(&wallet_path, old_password).unwrap();
+        let app = auth_test_app(state);
+
+        let login = http_request(
+            app.clone(),
+            Method::POST,
+            "/api/auth/login",
+            None,
+            "password=correct+horse+battery+staple",
+        )
+        .await;
+        assert_eq!(login.status, StatusCode::OK);
+        let cookie = set_cookie_pair(&login.headers);
+
+        let change = http_request(
+            app.clone(),
+            Method::POST,
+            "/api/auth/change-password",
+            Some(&cookie),
+            "old_password=correct+horse+battery+staple&new_password=new+correct+battery+staple",
+        )
+        .await;
+        assert_eq!(change.status, StatusCode::OK);
+        assert!(change.body.contains("\"ok\":true"));
+
+        let stored = config_store::load_or_create(&config_path).unwrap();
+        let stored_hash = stored.auth_password_hash.unwrap();
+        assert!(!verify_password(old_password, &stored_hash).unwrap());
+        assert!(verify_password(new_password, &stored_hash).unwrap());
+        assert!(wallet_store::load_with_password(&wallet_path, old_password).is_err());
+        assert!(wallet_store::load_with_password(&wallet_path, new_password).is_ok());
+
+        let old_login = http_request(
+            app.clone(),
+            Method::POST,
+            "/api/auth/login",
+            None,
+            "password=correct+horse+battery+staple",
+        )
+        .await;
+        assert!(old_login.body.contains("invalid password"));
+
+        let new_login = http_request(
+            app,
+            Method::POST,
+            "/api/auth/login",
+            None,
+            "password=new+correct+battery+staple",
+        )
+        .await;
+        assert_eq!(new_login.status, StatusCode::OK);
     }
 
     #[tokio::test]
@@ -3736,6 +3905,10 @@ mod tests {
             .route("/api/auth/status", get(api_auth_status))
             .route("/api/auth/setup", post(api_auth_setup_form))
             .route("/api/auth/login", post(api_auth_login_form))
+            .route(
+                "/api/auth/change-password",
+                post(api_auth_change_password_form),
+            )
             .route("/api/protected", get(protected_auth_test_endpoint))
             .layer(middleware::from_fn_with_state(
                 state.clone(),

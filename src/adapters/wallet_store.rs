@@ -184,6 +184,28 @@ pub fn encrypt_existing_with_password(path: &Path, password: &str) -> Result<()>
         .with_context(|| format!("failed to encrypt wallet file {}", path.display()))
 }
 
+pub fn reencrypt_with_password(
+    path: &Path,
+    current_password: &str,
+    new_password: &str,
+) -> Result<Wallet> {
+    let stored = read_wallet_file(path)?;
+    let seed = wallet_seed(&stored, Some(current_password))?;
+    let seed = normalize_seed_phrase(&seed).unwrap_or(seed);
+    let wallet = Wallet::from_seed(&seed);
+    if wallet.address() != stored.address {
+        bail!(
+            "wallet file has address {}, but its seed derives {}",
+            stored.address,
+            wallet.address()
+        );
+    }
+    let mut file = open_wallet_file(path, WalletFileMode::Replace)?;
+    write_encrypted_wallet_file(&mut file, seed, wallet.address(), new_password)
+        .with_context(|| format!("failed to re-encrypt wallet file {}", path.display()))?;
+    Ok(wallet)
+}
+
 fn load(path: &Path) -> Result<Wallet> {
     load_encrypted_or_plaintext(path, None)
 }

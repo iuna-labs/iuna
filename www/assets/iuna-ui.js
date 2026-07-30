@@ -30,6 +30,10 @@ window.iunaApp = function iunaApp() {
     authPasswordConfirm: "",
     loginPassword: "",
     authFeedback: null,
+    settingsOldPassword: "",
+    settingsNewPassword: "",
+    settingsPasswordConfirm: "",
+    settingsFeedback: null,
     setupWallet: { address: null, seed_phrase: null, dev_verify_bypass: false, requires_peer: false },
     setupWalletMode: "create",
     setupSeedStep: "write",
@@ -113,7 +117,9 @@ window.iunaApp = function iunaApp() {
     },
 
     allowedTabs() {
-      return this.advancedMode() ? ["wallet", "mining", "p2p", "chain"] : ["wallet", "chain"];
+      return this.advancedMode()
+        ? ["wallet", "mining", "p2p", "chain", "settings"]
+        : ["wallet", "chain", "settings"];
     },
 
     basicMode() {
@@ -144,6 +150,7 @@ window.iunaApp = function iunaApp() {
         mining: "Mining",
         p2p: "P2P",
         chain: "Chain",
+        settings: "Settings",
       }[this.tab] || "iuna";
     },
 
@@ -257,6 +264,39 @@ window.iunaApp = function iunaApp() {
         this.showFlash("Locked", "success");
       } catch (error) {
         this.showFlash(error.message, "error");
+      }
+    },
+
+    async changePassword() {
+      try {
+        this.settingsFeedback = null;
+        if (this.settingsNewPassword !== this.settingsPasswordConfirm) {
+          throw new Error("New passwords do not match");
+        }
+        const body = new URLSearchParams({
+          old_password: this.settingsOldPassword,
+          new_password: this.settingsNewPassword,
+        });
+        const response = await fetch("/api/auth/change-password", {
+          method: "POST",
+          headers: {
+            Accept: "application/json",
+            "Content-Type": "application/x-www-form-urlencoded",
+          },
+          body,
+        });
+        const payload = await response.json();
+        if (!response.ok || !payload.ok) {
+          throw new Error(payload.error || `/api/auth/change-password returned ${response.status}`);
+        }
+        this.settingsOldPassword = "";
+        this.settingsNewPassword = "";
+        this.settingsPasswordConfirm = "";
+        await this.refreshAuth();
+        this.showSettingsFeedback("Password changed", "success");
+        this.showFlash("Password changed", "success");
+      } catch (error) {
+        this.showSettingsFeedback(error.message, "error");
       }
     },
 
@@ -966,6 +1006,10 @@ window.iunaApp = function iunaApp() {
 
     showAuthFeedback(message, kind) {
       this.authFeedback = { message, kind };
+    },
+
+    showSettingsFeedback(message, kind) {
+      this.settingsFeedback = { message, kind };
     },
 
     short(value) {
