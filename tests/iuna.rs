@@ -7,7 +7,7 @@ use iuna::{
     adapters::chain_store::SqliteChainStore,
     app::{
         DEFAULT_BURN_PER_BLOCK, GossipEnvelope, InMemoryNetwork, NodeConfig, NodeCore, PeerBook,
-        PeerDirection,
+        PeerDirection, TRANSACTION_BATCH_LIMIT,
     },
     domain::{
         Amount, BLOCK_REWARD, DEFAULT_FEE_PER_BYTE, GenesisBurn, Ledger, MAX_BLOCK_BYTES,
@@ -1717,6 +1717,43 @@ fn mempool_gossip_repairs_future_nonce_gap_without_networking() {
 
     assert!(signatures.contains(&first.signature()));
     assert!(signatures.contains(&second.signature()));
+}
+
+#[test]
+fn mempool_gossip_splits_transaction_batches_at_receiver_limit() {
+    let alice = Wallet::from_seed("mempool-batch-alice");
+    let bob = Wallet::from_seed("mempool-batch-bob");
+    let wallets = vec![alice.clone(), bob.clone()];
+    let allocations = allocations(&wallets, 10_000);
+    let mut alice_node = node("alice", alice, allocations.clone());
+    let mut bob_node = node("bob", bob, allocations);
+
+    for _ in 0..(TRANSACTION_BATCH_LIMIT + 1) {
+        alice_node.burn(1).unwrap();
+    }
+    alice_node.drain_outbox();
+
+    let gossip = alice_node.mempool_gossip();
+    assert_eq!(gossip.len(), 2);
+    let total_transactions = gossip
+        .iter()
+        .map(|envelope| match envelope {
+            GossipEnvelope::Transactions { transactions } => {
+                assert!(transactions.len() <= TRANSACTION_BATCH_LIMIT);
+                transactions.len()
+            }
+            other => panic!("expected transaction batch, got {other:?}"),
+        })
+        .sum::<usize>();
+    assert_eq!(total_transactions, TRANSACTION_BATCH_LIMIT + 1);
+
+    for envelope in gossip {
+        bob_node.receive(envelope).unwrap();
+    }
+    assert_eq!(
+        bob_node.ledger().pending().len(),
+        TRANSACTION_BATCH_LIMIT + 1
+    );
 }
 
 #[test]

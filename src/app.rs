@@ -27,6 +27,7 @@ pub const DEFAULT_VDF_ROUNDS: u32 = 67_000_000;
 pub const PROTOCOL_VERSION: u32 = 1;
 pub const NETWORK_ID: &str = "iuna-devnet-v2";
 pub const BLOCK_REQUEST_LIMIT: usize = 128;
+pub const TRANSACTION_BATCH_LIMIT: usize = 128;
 pub const MEMPOOL_STATUS_LIMIT: usize = MAX_PENDING_TRANSACTIONS;
 const IMPORT_REBROADCAST_LIMIT: usize = 128;
 pub const PEER_MISBEHAVIOR_BAN_SCORE: u32 = 3;
@@ -418,11 +419,12 @@ impl NodeCore {
 
     pub fn mempool_gossip(&self) -> Vec<GossipEnvelope> {
         let transactions = self.ledger.pending().to_vec();
-        if transactions.is_empty() {
-            Vec::new()
-        } else {
-            vec![GossipEnvelope::Transactions { transactions }]
-        }
+        transactions
+            .chunks(TRANSACTION_BATCH_LIMIT)
+            .map(|chunk| GossipEnvelope::Transactions {
+                transactions: chunk.to_vec(),
+            })
+            .collect()
     }
 
     pub fn chain_snapshot(&self) -> ChainSnapshot {

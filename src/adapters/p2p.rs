@@ -25,7 +25,7 @@ use crate::{
     app::{
         BlockInventory, GossipEnvelope, MEMPOOL_STATUS_LIMIT, NETWORK_ID, NodeCore,
         PROTOCOL_VERSION, PeerDirection, ProtocolHello, SharedNode, SharedPeerBook,
-        TransactionRejection, debug_logging_enabled, now_ms,
+        TRANSACTION_BATCH_LIMIT, TransactionRejection, debug_logging_enabled, now_ms,
     },
     domain::{Block, ChainSnapshot, Ledger, Transaction, TransactionSubmitOutcome, verify_vdf},
 };
@@ -632,7 +632,7 @@ impl GossipNetwork {
                             .map(|tx| tx.signature().to_string())
                             .collect::<Vec<_>>(),
                     );
-                    passthrough.push(GossipEnvelope::Transactions { transactions });
+                    passthrough.extend(transaction_batch_envelopes(transactions));
                 }
                 GossipEnvelope::Block(block) => blocks.push(BlockInventory {
                     height: block.height,
@@ -656,9 +656,7 @@ impl GossipNetwork {
         }
 
         if !full_transactions.is_empty() {
-            passthrough.push(GossipEnvelope::Transactions {
-                transactions: full_transactions,
-            });
+            passthrough.extend(transaction_batch_envelopes(full_transactions));
         }
 
         txs.sort();
@@ -1027,10 +1025,17 @@ async fn session_loop(
                 if let Some(peer) = &known_peer {
                     let transactions = network.pending_transactions_for_retry(peer).await;
                     if !transactions.is_empty() {
-                        let retry = GossipEnvelope::Transactions { transactions };
-                        write_envelope(&mut writer, &retry).await?;
+                        let retry_envelopes = transaction_batch_envelopes(transactions);
+                        for retry in &retry_envelopes {
+                            write_envelope(&mut writer, retry).await?;
+                        }
                         P2pMetricsCounters::inc(&network.inner.metrics.transaction_retries_sent);
-                        network.inner.peers.lock().await.record_sent(peer, 1);
+                        network
+                            .inner
+                            .peers
+                            .lock()
+                            .await
+                            .record_sent(peer, retry_envelopes.len() as u64);
                     }
                 }
             }
@@ -1126,8 +1131,8 @@ async fn process_envelope(
                 .lock()
                 .await
                 .transactions_by_signature(&signatures);
-            if !transactions.is_empty() {
-                write_envelope(writer, &GossipEnvelope::Transactions { transactions }).await?;
+            for envelope in transaction_batch_envelopes(transactions) {
+                write_envelope(writer, &envelope).await?;
             }
         }
         GossipEnvelope::BlockRequest { hashes } => {
@@ -1744,7 +1749,11 @@ fn validate_envelope_limits(envelope: &GossipEnvelope) -> Result<()> {
             )?;
         }
         GossipEnvelope::Transactions { transactions } => {
-            ensure_len("transaction batch", transactions.len(), MAX_OBJECT_REQUESTS)?;
+            ensure_len(
+                "transaction batch",
+                transactions.len(),
+                TRANSACTION_BATCH_LIMIT,
+            )?;
         }
         GossipEnvelope::Blocks { blocks } => {
             ensure_len("block batch", blocks.len(), MAX_BLOCK_BATCH)?;
@@ -1765,6 +1774,15 @@ fn validate_envelope_limits(envelope: &GossipEnvelope) -> Result<()> {
         | GossipEnvelope::PeerAnnouncement { .. } => {}
     }
     Ok(())
+}
+
+fn transaction_batch_envelopes(transactions: Vec<Transaction>) -> Vec<GossipEnvelope> {
+    transactions
+        .chunks(TRANSACTION_BATCH_LIMIT)
+        .map(|chunk| GossipEnvelope::Transactions {
+            transactions: chunk.to_vec(),
+        })
+        .collect()
 }
 
 fn ensure_len(label: &str, len: usize, max: usize) -> Result<()> {
@@ -2442,7 +2460,7 @@ mod tests {
     use crate::{
         app::{
             BlockInventory, GossipEnvelope, NETWORK_ID, NodeCore, PROTOCOL_VERSION, PeerBook,
-            PeerDirection, ProtocolHello,
+            PeerDirection, ProtocolHello, TRANSACTION_BATCH_LIMIT,
         },
         domain::{Amount, GenesisBurn, Ledger, Wallet},
     };
@@ -2904,6 +2922,101 @@ mod tests {
             }
             other => panic!("expected inventory, got {other:?}"),
         }
+    }
+
+    #[tokio::test]
+    async fn prepare_gossip_splits_transaction_batches_at_receiver_limit() {
+        let alice = Wallet::from_seed("mempool-repair-batch-alice");
+        let allocations = allocations(std::slice::from_ref(&alice), 1_000);
+        let node = Arc::new(tokio::sync::Mutex::new(node("alice", alice, allocations)));
+        let network = super::GossipNetwork {
+            inner: Arc::new(super::GossipNetworkInner {
+                node: Arc::clone(&node),
+                peers: Arc::new(tokio::sync::Mutex::new(PeerBook::default())),
+                listen_addr: "127.0.0.1:9544".parse().unwrap(),
+                node_id: super::new_node_id(),
+                sessions: tokio::sync::Mutex::new(BTreeMap::new()),
+                tx_delivery: tokio::sync::Mutex::new(BTreeMap::new()),
+                inbound_limiter: Arc::new(
+                    StdMutex::new(super::InboundConnectionLimiter::default()),
+                ),
+                metrics: super::P2pMetricsCounters::default(),
+            }),
+        };
+
+        let transactions = {
+            let mut node = node.lock().await;
+            (0..(TRANSACTION_BATCH_LIMIT + 1))
+                .map(|_| node.burn(1).unwrap())
+                .collect::<Vec<_>>()
+        };
+
+        let prepared = network
+            .prepare_gossip(vec![GossipEnvelope::Transactions { transactions }])
+            .await;
+
+        let batch_sizes = prepared
+            .iter()
+            .filter_map(|envelope| match envelope {
+                GossipEnvelope::Transactions { transactions } => Some(transactions.len()),
+                _ => None,
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(batch_sizes, vec![TRANSACTION_BATCH_LIMIT, 1]);
+        assert!(prepared.iter().all(|envelope| match envelope {
+            GossipEnvelope::Transactions { transactions } =>
+                transactions.len() <= TRANSACTION_BATCH_LIMIT,
+            _ => true,
+        }));
+        assert!(matches!(
+            prepared.last(),
+            Some(GossipEnvelope::Inventory { txs, blocks })
+                if txs.len() == TRANSACTION_BATCH_LIMIT + 1 && blocks.is_empty()
+        ));
+    }
+
+    #[tokio::test]
+    async fn retry_transaction_batches_are_split_at_receiver_limit() {
+        let alice = Wallet::from_seed("tx-ack-retry-batch-alice");
+        let allocations = allocations(std::slice::from_ref(&alice), 1_000);
+        let node = Arc::new(tokio::sync::Mutex::new(node("alice", alice, allocations)));
+        let network = super::GossipNetwork {
+            inner: Arc::new(super::GossipNetworkInner {
+                node: Arc::clone(&node),
+                peers: Arc::new(tokio::sync::Mutex::new(PeerBook::default())),
+                listen_addr: "127.0.0.1:9544".parse().unwrap(),
+                node_id: super::new_node_id(),
+                sessions: tokio::sync::Mutex::new(BTreeMap::new()),
+                tx_delivery: tokio::sync::Mutex::new(BTreeMap::new()),
+                inbound_limiter: Arc::new(
+                    StdMutex::new(super::InboundConnectionLimiter::default()),
+                ),
+                metrics: super::P2pMetricsCounters::default(),
+            }),
+        };
+        let peer = "127.0.0.1:9545";
+        {
+            let mut node = node.lock().await;
+            for _ in 0..(TRANSACTION_BATCH_LIMIT + 1) {
+                node.burn(1).unwrap();
+            }
+        }
+
+        let retry = network.pending_transactions_for_retry(peer).await;
+        assert_eq!(retry.len(), TRANSACTION_BATCH_LIMIT + 1);
+
+        let retry_batches = super::transaction_batch_envelopes(retry);
+        let batch_sizes = retry_batches
+            .iter()
+            .map(|envelope| match envelope {
+                GossipEnvelope::Transactions { transactions } => {
+                    assert!(transactions.len() <= TRANSACTION_BATCH_LIMIT);
+                    transactions.len()
+                }
+                other => panic!("expected transaction batch, got {other:?}"),
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(batch_sizes, vec![TRANSACTION_BATCH_LIMIT, 1]);
     }
 
     #[tokio::test]
