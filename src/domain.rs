@@ -1582,6 +1582,10 @@ impl Ledger {
         self.mine_difficulty_bits_for_anchor_height(self.tip().height)
     }
 
+    pub fn mine_difficulty_bits_at_height(&self, height: u64) -> u32 {
+        self.mine_difficulty_bits_for_anchor_height(height.min(self.tip().height))
+    }
+
     pub fn balance_of(&self, address: &str) -> Amount {
         self.utxos
             .values()

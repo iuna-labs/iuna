@@ -86,7 +86,12 @@ async fn main() -> Result<()> {
     let peers: SharedPeerBook = Arc::new(Mutex::new(PeerBook::from_addresses(peers)));
     if has_chain {
         let initial_snapshot = { node.lock().await.chain_snapshot() };
-        persist_chain_snapshot(&chain_store, initial_snapshot).await?;
+        persist_chain_snapshot(
+            &chain_store,
+            initial_snapshot,
+            ui_config.lock().await.keep_track_of_metrics,
+        )
+        .await?;
     }
 
     println!("iuna wallet: {}", node.lock().await.wallet_address());
@@ -122,8 +127,9 @@ async fn main() -> Result<()> {
 
     let persistence_node = Arc::clone(&node);
     let persistence_store = chain_store.clone();
+    let persistence_config = Arc::clone(&ui_config);
     tokio::spawn(async move {
-        run_chain_persistence(persistence_node, persistence_store).await;
+        run_chain_persistence(persistence_node, persistence_store, persistence_config).await;
     });
 
     let finalizer_node = Arc::clone(&node);
@@ -149,6 +155,7 @@ async fn main() -> Result<()> {
         ui_config,
         http::ServeOptions {
             config_path,
+            chain_store,
             wallet_path,
             stratum: stratum_status,
             addr: opts.http_addr,
@@ -641,13 +648,18 @@ async fn run_peer_sync(node: SharedNode, gossip: p2p::GossipNetwork, debug: bool
     }
 }
 
-async fn run_chain_persistence(node: SharedNode, store: SqliteChainStore) {
-    run_chain_persistence_with_interval(node, store, Duration::from_secs(2)).await;
+async fn run_chain_persistence(
+    node: SharedNode,
+    store: SqliteChainStore,
+    ui_config: Arc<Mutex<config_store::UiConfig>>,
+) {
+    run_chain_persistence_with_interval(node, store, ui_config, Duration::from_secs(2)).await;
 }
 
 async fn run_chain_persistence_with_interval(
     node: SharedNode,
     store: SqliteChainStore,
+    ui_config: Arc<Mutex<config_store::UiConfig>>,
     interval: Duration,
 ) {
     let mut last_saved_tip: Option<String> = None;
@@ -667,7 +679,8 @@ async fn run_chain_persistence_with_interval(
             continue;
         }
 
-        match persist_chain_snapshot(&store, snapshot).await {
+        let keep_metrics = ui_config.lock().await.keep_track_of_metrics;
+        match persist_chain_snapshot(&store, snapshot, keep_metrics).await {
             Ok(()) => last_saved_tip = Some(tip_hash),
             Err(error) if debug_logging_enabled() => {
                 eprintln!("chain persistence failed: {error:#}")
@@ -677,9 +690,13 @@ async fn run_chain_persistence_with_interval(
     }
 }
 
-async fn persist_chain_snapshot(store: &SqliteChainStore, snapshot: ChainSnapshot) -> Result<()> {
+async fn persist_chain_snapshot(
+    store: &SqliteChainStore,
+    snapshot: ChainSnapshot,
+    keep_metrics: bool,
+) -> Result<()> {
     let store = store.clone();
-    tokio::task::spawn_blocking(move || store.save(&snapshot))
+    tokio::task::spawn_blocking(move || store.save_with_metrics(&snapshot, keep_metrics))
         .await
         .context("chain persistence worker failed")??;
     Ok(())
@@ -1176,13 +1193,15 @@ VALUES (1, 4, 'bad-tip', '{"not":"a chain snapshot"}', 0)
             DEFAULT_BURN_PER_BLOCK,
         )));
         let initial_snapshot = { node.lock().await.chain_snapshot() };
-        persist_chain_snapshot(&store, initial_snapshot)
+        persist_chain_snapshot(&store, initial_snapshot, false)
             .await
             .unwrap();
+        let ui_config = Arc::new(Mutex::new(UiConfig::default()));
 
         let persistence_task = tokio::spawn(run_chain_persistence_with_interval(
             Arc::clone(&node),
             store.clone(),
+            ui_config,
             Duration::from_millis(10),
         ));
         {
@@ -1214,10 +1233,12 @@ VALUES (1, 4, 'bad-tip', '{"not":"a chain snapshot"}', 0)
         let wallet = Wallet::from_seed("background-persistence-setup");
         let ledger = Ledger::new(BTreeMap::new(), 1);
         let node = Arc::new(Mutex::new(NodeCore::from_ledger(wallet, ledger, 0)));
+        let ui_config = Arc::new(Mutex::new(UiConfig::default()));
 
         let persistence_task = tokio::spawn(run_chain_persistence_with_interval(
             Arc::clone(&node),
             store.clone(),
+            ui_config,
             Duration::from_millis(10),
         ));
         tokio::time::sleep(Duration::from_millis(50)).await;

@@ -12,6 +12,8 @@ window.iunaApp = function iunaApp() {
     mempool: [],
     peers: [],
     p2pMetrics: {},
+    blockchainMetrics: { enabled: false, latest: null, charts: [] },
+    metricHover: null,
     networkHealth: {},
     uiMode: (() => {
       try {
@@ -34,6 +36,7 @@ window.iunaApp = function iunaApp() {
     settingsNewPassword: "",
     settingsPasswordConfirm: "",
     settingsFeedback: null,
+    keepTrackOfMetrics: false,
     setupWallet: { address: null, seed_phrase: null, dev_verify_bypass: false, requires_peer: false },
     setupWalletMode: "create",
     setupSeedStep: "write",
@@ -117,9 +120,13 @@ window.iunaApp = function iunaApp() {
     },
 
     allowedTabs() {
-      return this.advancedMode()
+      const tabs = this.advancedMode()
         ? ["wallet", "mining", "p2p", "chain", "settings"]
         : ["wallet", "chain", "settings"];
+      if (this.config.keep_track_of_metrics) {
+        tabs.splice(tabs.indexOf("chain") + 1, 0, "metrics");
+      }
+      return tabs;
     },
 
     basicMode() {
@@ -150,6 +157,7 @@ window.iunaApp = function iunaApp() {
         mining: "Mining",
         p2p: "P2P",
         chain: "Chain",
+        metrics: "Metrics",
         settings: "Settings",
       }[this.tab] || "iuna";
     },
@@ -477,7 +485,7 @@ window.iunaApp = function iunaApp() {
 
     async refresh() {
       try {
-        const [config, status, blocks, walletTxs, walletUtxos, mempool, peers, p2pMetrics, networkHealth] = await Promise.all([
+        const [config, status, blocks, walletTxs, walletUtxos, mempool, peers, p2pMetrics, blockchainMetrics, networkHealth] = await Promise.all([
           this.fetchJson("/api/config"),
           this.fetchJson("/api/status"),
           this.fetchJson("/api/blocks?limit=30"),
@@ -486,9 +494,14 @@ window.iunaApp = function iunaApp() {
           this.fetchJson("/api/mempool"),
           this.fetchJson("/api/peers"),
           this.fetchJson("/api/p2p/metrics"),
+          this.fetchJson("/api/metrics"),
           this.fetchJson("/api/network/health"),
         ]);
         this.config = config;
+        this.keepTrackOfMetrics = config.keep_track_of_metrics === true;
+        if (!this.allowedTabs().includes(this.tab)) {
+          this.setTab("wallet");
+        }
         if (!this.config.setup_complete) {
           await this.refreshWalletSetup();
         }
@@ -500,6 +513,7 @@ window.iunaApp = function iunaApp() {
         this.mempool = mempool;
         this.peers = peers;
         this.p2pMetrics = p2pMetrics;
+        this.blockchainMetrics = blockchainMetrics;
         this.networkHealth = networkHealth;
         this.burnAmount = status.mining?.burn_per_block ?? this.burnAmount;
         this.burnFee = status.mining?.automatic_burn_fee ?? this.burnFee;
@@ -887,6 +901,25 @@ window.iunaApp = function iunaApp() {
       }
     },
 
+    async setKeepTrackOfMetrics(enabled) {
+      const previous = this.keepTrackOfMetrics;
+      try {
+        this.keepTrackOfMetrics = enabled;
+        await this.postForm(
+          "/api/settings/metrics",
+          { enabled },
+          enabled ? "Metrics tracking turned on" : "Metrics tracking turned off"
+        );
+        await this.refreshConfig();
+        if (!enabled && this.tab === "metrics") {
+          this.setTab("settings");
+        }
+      } catch (error) {
+        this.keepTrackOfMetrics = previous;
+        this.showFlash(error.message, "error");
+      }
+    },
+
     automaticBurnFeeDraft() {
       return this.parseiunaAmount(this.burnFeeDraft);
     },
@@ -909,11 +942,247 @@ window.iunaApp = function iunaApp() {
       return this.status.mining?.last_auto_pow_mine_status || "Waiting for next automatic PoW mining tick";
     },
 
+    metricsCharts() {
+      return Array.isArray(this.blockchainMetrics?.charts) ? this.blockchainMetrics.charts : [];
+    },
+
+    metricsLatest() {
+      return this.blockchainMetrics?.latest || {};
+    },
+
+    metricChartPoints(chart) {
+      const points = this.metricVisiblePoints(chart);
+      if (points.length === 0) return "";
+      const bounds = this.metricChartBounds(chart);
+      return points
+        .map((point) => {
+          const x = this.metricXAxisPositionFromBounds(bounds, Number(point.height));
+          const y = this.metricYAxisPositionFromBounds(bounds, Number(point.value));
+          return `${x.toFixed(1)},${y.toFixed(1)}`;
+        })
+        .join(" ");
+    },
+
+    metricChartPointMarkers(chart) {
+      const points = this.metricVisiblePoints(chart);
+      if (points.length === 0) return [];
+      const bounds = this.metricChartBounds(chart);
+      return points.map((point) => {
+        const height = Number(point.height);
+        const value = Number(point.value);
+        return {
+          height,
+          value,
+          x: this.metricXAxisPositionFromBounds(bounds, height),
+          y: this.metricYAxisPositionFromBounds(bounds, value),
+          label: this.metricPointLabel(chart, point),
+        };
+      });
+    },
+
+    metricGridPath(chart) {
+      const yLines = this.metricYAxisTicks(chart).map((tick) => {
+        const y = this.metricYAxisPositionFromBounds(this.metricChartBounds(chart), Number(tick)).toFixed(1);
+        return `M4 ${y} H296`;
+      });
+      const xLines = this.metricXAxisTicks(chart).map((tick) => {
+        const x = this.metricXAxisPositionFromBounds(this.metricChartBounds(chart), Number(tick)).toFixed(1);
+        return `M${x} 8 V132`;
+      });
+      return [...yLines, ...xLines].join(" ");
+    },
+
+    metricVisiblePoints(chart) {
+      const points = Array.isArray(chart?.points) ? chart.points : [];
+      return points.filter((point) => Number.isFinite(Number(point.value)));
+    },
+
+    metricLatestValueLabel(chart) {
+      const points = this.metricVisiblePoints(chart);
+      if (points.length === 0) return "-";
+      return this.metricValueLabel(chart, points[points.length - 1].value);
+    },
+
+    metricChartBounds(chart) {
+      const points = this.metricVisiblePoints(chart);
+      const heights = points.map((point) => Number(point.height));
+      const values = points.map((point) => Number(point.value));
+      const valueTicks = this.niceTicks(Math.min(...values), Math.max(...values), 5);
+      return {
+        minHeight: Math.min(...heights),
+        maxHeight: Math.max(...heights),
+        minValue: Math.min(...valueTicks),
+        maxValue: Math.max(...valueTicks),
+      };
+    },
+
+    metricYAxisTicks(chart) {
+      const points = this.metricVisiblePoints(chart);
+      if (points.length === 0) return [];
+      const values = points.map((point) => Number(point.value));
+      return this.niceTicks(Math.min(...values), Math.max(...values), 5).reverse();
+    },
+
+    metricXAxisTicks(chart) {
+      const points = this.metricVisiblePoints(chart);
+      if (points.length === 0) return [];
+      const heights = points.map((point) => Number(point.height));
+      const minHeight = Math.min(...heights);
+      const maxHeight = Math.max(...heights);
+      if (minHeight === maxHeight) return [minHeight];
+      return this.niceTicks(minHeight, maxHeight, 5)
+        .map((tick) => Math.round(tick))
+        .filter((tick) => tick >= minHeight && tick <= maxHeight)
+        .filter((tick, index, ticks) => ticks.indexOf(tick) === index);
+    },
+
+    niceTicks(minValue, maxValue, maxTicks = 5) {
+      const min = Number(minValue);
+      const max = Number(maxValue);
+      if (!Number.isFinite(min) || !Number.isFinite(max)) return [];
+      if (min === max) {
+        if (min === 0) return [0];
+        const step = this.niceTickStep(Math.abs(min) / Math.max(1, maxTicks - 1));
+        const tickMin = Math.floor(Math.min(0, min) / step) * step;
+        const tickMax = Math.ceil(max / step) * step;
+        return this.tickRange(tickMin, tickMax, step);
+      }
+      const range = this.niceTickStep((max - min) / Math.max(1, maxTicks - 1));
+      const tickMin = Math.floor(min / range) * range;
+      const tickMax = Math.ceil(max / range) * range;
+      return this.tickRange(tickMin, tickMax, range);
+    },
+
+    niceTickStep(value) {
+      if (!Number.isFinite(value) || value <= 0) return 1;
+      const exponent = Math.floor(Math.log10(value));
+      const fraction = value / Math.pow(10, exponent);
+      const niceFraction = fraction <= 1 ? 1 : fraction <= 2 ? 2 : fraction <= 5 ? 5 : 10;
+      return niceFraction * Math.pow(10, exponent);
+    },
+
+    tickRange(min, max, step) {
+      if (!Number.isFinite(step) || step <= 0) return [];
+      const precision = Math.max(0, Math.ceil(-Math.log10(step)) + 2);
+      const ticks = [];
+      for (let tick = min; tick <= max + step / 2; tick += step) {
+        ticks.push(Number(tick.toFixed(precision)));
+        if (ticks.length > 8) break;
+      }
+      return ticks;
+    },
+
+    metricYAxisPositionFromBounds(bounds, value) {
+      const valueRange = Math.max(1, bounds.maxValue - bounds.minValue);
+      return 132 - ((value - bounds.minValue) / valueRange) * 124;
+    },
+
+    metricXAxisPositionFromBounds(bounds, height) {
+      const heightRange = Math.max(1, bounds.maxHeight - bounds.minHeight);
+      return 4 + ((height - bounds.minHeight) / heightRange) * 292;
+    },
+
+    metricYAxisLabelStyle(chart, value) {
+      const y = this.metricYAxisPositionFromBounds(this.metricChartBounds(chart), Number(value));
+      return `top: ${(y / 148) * 100}%`;
+    },
+
+    metricXAxisLabelStyle(chart, height) {
+      const x = this.metricXAxisPositionFromBounds(this.metricChartBounds(chart), Number(height));
+      return `left: ${(x / 300) * 100}%`;
+    },
+
+    metricPointStyle(marker) {
+      return `left: ${(marker.x / 300) * 100}%; top: ${(marker.y / 148) * 100}%;`;
+    },
+
+    setMetricHover(chart, marker) {
+      this.metricHover = {
+        chartId: chart.id,
+        height: marker.height,
+        value: marker.value,
+        x: marker.x,
+        y: marker.y,
+        label: marker.label,
+      };
+    },
+
+    setMetricHoverFromPlot(chart, event) {
+      const markers = this.metricChartPointMarkers(chart);
+      if (markers.length === 0) {
+        this.clearMetricHover(chart);
+        return;
+      }
+      const rect = event.currentTarget.getBoundingClientRect();
+      const relativeX = Math.min(Math.max(event.clientX - rect.left, 0), rect.width);
+      const chartX = (relativeX / Math.max(1, rect.width)) * 300;
+      const nearest = markers.reduce((best, marker) => {
+        const distance = Math.abs(marker.x - chartX);
+        return !best || distance < best.distance ? { marker, distance } : best;
+      }, null)?.marker;
+      if (nearest) {
+        this.setMetricHover(chart, nearest);
+      }
+    },
+
+    clearMetricHover(chart) {
+      if (this.metricHover?.chartId === chart.id) {
+        this.metricHover = null;
+      }
+    },
+
+    metricTooltipLabel(chart) {
+      return this.metricHover?.chartId === chart.id ? this.metricHover.label : "";
+    },
+
+    metricTooltipStyle(chart) {
+      const hover = this.metricHover;
+      if (!hover || hover.chartId !== chart.id) return "";
+      const left = (hover.x / 300) * 100;
+      const top = (hover.y / 148) * 100;
+      const xShift = hover.x > 238 ? "-100%" : hover.x < 62 ? "0" : "-50%";
+      const yShift = hover.y < 34 ? "12px" : "-115%";
+      return `left: ${left}%; top: ${top}%; transform: translate(${xShift}, ${yShift});`;
+    },
+
+    metricPointLabel(chart, point) {
+      return `#${point.height}: ${this.metricValueLabel(chart, point.value)}`;
+    },
+
+    metricAxisValueLabel(chart, value) {
+      const number = Number(value);
+      if (!Number.isFinite(number)) return "-";
+      if (chart?.valueKind === "seconds") return `${this.compactNumber(number)}s`;
+      return this.compactNumber(number);
+    },
+
+    metricValueLabel(chart, value) {
+      const number = Number(value);
+      if (!Number.isFinite(number)) return "-";
+      if (chart?.valueKind === "iuna") return `IUNA ${this.compactNumber(number)}`;
+      if (chart?.valueKind === "seconds") return `${this.compactNumber(number)} s`;
+      return `${this.compactNumber(number)}${chart?.unit ? ` ${chart.unit}` : ""}`;
+    },
+
+    compactNumber(value) {
+      const number = Number(value);
+      if (!Number.isFinite(number)) return "-";
+      if (Math.abs(number) >= 1000) {
+        return new Intl.NumberFormat(undefined, { maximumFractionDigits: 2 }).format(number);
+      }
+      if (Number.isInteger(number)) return String(number);
+      return number.toFixed(6).replace(/0+$/, "").replace(/\.$/, "");
+    },
+
     amountLabel(value) {
       const microiuna = Math.max(0, Math.trunc(Number(value) || 0));
       const whole = Math.floor(microiuna / 1000000);
       const fractional = String(microiuna % 1000000).padStart(6, "0").replace(/0+$/, "");
       return fractional ? `${whole}.${fractional}` : `${whole}`;
+    },
+
+    metricAmountLabel(value) {
+      return value === null || value === undefined ? "-" : `IUNA ${this.amountLabel(value)}`;
     },
 
     amountNumber(value) {

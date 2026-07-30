@@ -23,6 +23,7 @@ use tokio::{net::TcpListener, sync::Mutex};
 
 use crate::{
     adapters::{
+        chain_store::{BlockMetricRow, SqliteChainStore},
         config_store,
         config_store::UiConfig,
         p2p::{GossipNetwork, P2pMetrics},
@@ -55,6 +56,7 @@ struct HttpState {
     gossip: GossipNetwork,
     ui_config: Arc<Mutex<UiConfig>>,
     config_path: PathBuf,
+    chain_store: SqliteChainStore,
     wallet_path: PathBuf,
     stratum: StratumStatus,
     auth_sessions: Arc<Mutex<BTreeMap<String, AuthSession>>>,
@@ -78,6 +80,7 @@ struct AuthBackoff {
 
 pub struct ServeOptions {
     pub config_path: PathBuf,
+    pub chain_store: SqliteChainStore,
     pub wallet_path: PathBuf,
     pub stratum: StratumStatus,
     pub addr: SocketAddr,
@@ -132,6 +135,11 @@ struct BurnSettingsForm {
 
 #[derive(Debug, Deserialize)]
 struct PowMiningForm {
+    enabled: bool,
+}
+
+#[derive(Debug, Deserialize)]
+struct MetricsSettingsForm {
     enabled: bool,
 }
 
@@ -213,6 +221,39 @@ impl WalletTransactionFilters {
 struct ActionResponse {
     ok: bool,
     error: Option<String>,
+}
+
+#[derive(Clone, Debug, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct MetricsResponse {
+    enabled: bool,
+    latest: Option<BlockMetricRow>,
+    charts: Vec<MetricsChart>,
+}
+
+#[derive(Clone, Debug, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct MetricsChart {
+    id: &'static str,
+    title: &'static str,
+    unit: &'static str,
+    value_kind: MetricsValueKind,
+    points: Vec<MetricsPoint>,
+}
+
+#[derive(Clone, Debug, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct MetricsPoint {
+    height: u64,
+    value: f64,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+enum MetricsValueKind {
+    Number,
+    Seconds,
+    Iuna,
 }
 
 #[derive(Debug, Serialize)]
@@ -319,6 +360,7 @@ pub async fn serve(
         gossip,
         ui_config,
         config_path: options.config_path,
+        chain_store: options.chain_store,
         wallet_path: options.wallet_path,
         stratum: options.stratum,
         auth_sessions: Arc::new(Mutex::new(BTreeMap::new())),
@@ -326,6 +368,7 @@ pub async fn serve(
     };
     let app = Router::new()
         .route("/", get(index))
+        .route("/favicon.ico", get(favicon))
         .route("/assets/alpine.min.js", get(alpine_js))
         .route("/assets/iuna-ui.js", get(app_js))
         .route("/api/auth/status", get(api_auth_status))
@@ -351,6 +394,7 @@ pub async fn serve(
         .route("/api/fee-estimate/burn", post(api_burn_fee_estimate_form))
         .route("/api/fee-estimate/mine", post(api_mine_fee_estimate_form))
         .route("/api/mempool", get(api_mempool))
+        .route("/api/metrics", get(api_metrics))
         .route("/api/network/health", get(api_network_health))
         .route(
             "/api/peers",
@@ -364,6 +408,7 @@ pub async fn serve(
             post(api_burn_per_block_form),
         )
         .route("/api/settings/pow-mining", post(api_pow_mining_form))
+        .route("/api/settings/metrics", post(api_metrics_settings_form))
         .route("/api/transfer", post(api_transfer_form))
         .route("/settings/burn-per-block", post(burn_per_block_form))
         .route("/transfer", post(transfer_form))
@@ -387,6 +432,13 @@ pub async fn serve(
 
 async fn index() -> Html<&'static str> {
     Html(INDEX_HTML)
+}
+
+async fn favicon() -> impl IntoResponse {
+    (
+        StatusCode::NO_CONTENT,
+        [(header::CACHE_CONTROL, "public, max-age=86400")],
+    )
 }
 
 async fn alpine_js() -> impl IntoResponse {
@@ -442,6 +494,7 @@ async fn require_auth_middleware(
 
 fn auth_exempt_path(path: &str) -> bool {
     path == "/"
+        || path == "/favicon.ico"
         || path == "/assets/alpine.min.js"
         || path == "/assets/iuna-ui.js"
         || path == "/api/auth/status"
@@ -710,6 +763,24 @@ async fn api_p2p_metrics(State(state): State<HttpState>) -> Json<P2pMetrics> {
     Json(state.gossip.metrics())
 }
 
+async fn api_metrics(State(state): State<HttpState>) -> Json<MetricsResponse> {
+    let enabled = state.ui_config.lock().await.keep_track_of_metrics;
+    if !enabled {
+        return Json(MetricsResponse {
+            enabled,
+            latest: None,
+            charts: Vec::new(),
+        });
+    }
+    let store = state.chain_store.clone();
+    let rows = tokio::task::spawn_blocking(move || store.load_metrics())
+        .await
+        .ok()
+        .and_then(Result::ok)
+        .unwrap_or_default();
+    Json(metrics_response(enabled, rows))
+}
+
 async fn api_network_health(State(state): State<HttpState>) -> Json<NetworkHealthResponse> {
     let status = state.node.lock().await.status();
     let peers = state.peers.lock().await.list();
@@ -792,6 +863,13 @@ async fn api_pow_mining_form(
     Form(form): Form<PowMiningForm>,
 ) -> Json<ActionResponse> {
     action_json(set_pow_mining(&state, form.enabled, MINE_FINALIZER_FEE).await)
+}
+
+async fn api_metrics_settings_form(
+    State(state): State<HttpState>,
+    Form(form): Form<MetricsSettingsForm>,
+) -> Json<ActionResponse> {
+    action_json(set_keep_track_of_metrics(&state, form.enabled).await)
 }
 
 async fn burn_per_block_form(
@@ -912,6 +990,45 @@ async fn persist_pow_mining_config(
     config_store::save(config_path, &config)
 }
 
+async fn set_keep_track_of_metrics(state: &HttpState, enabled: bool) -> Result<()> {
+    if enabled {
+        let snapshot = {
+            let node = state.node.lock().await;
+            node.has_real_chain().then(|| node.chain_snapshot())
+        };
+        if let Some(snapshot) = snapshot {
+            replace_metrics_for_snapshot(&state.chain_store, snapshot).await?;
+        } else {
+            clear_metrics(&state.chain_store).await?;
+        }
+    } else {
+        clear_metrics(&state.chain_store).await?;
+    }
+
+    let mut config = state.ui_config.lock().await;
+    config.keep_track_of_metrics = enabled;
+    config_store::save(&state.config_path, &config)
+}
+
+async fn replace_metrics_for_snapshot(
+    store: &SqliteChainStore,
+    snapshot: crate::domain::ChainSnapshot,
+) -> Result<()> {
+    let store = store.clone();
+    tokio::task::spawn_blocking(move || store.replace_metrics_for_snapshot(&snapshot))
+        .await
+        .context("metrics worker failed")??;
+    Ok(())
+}
+
+async fn clear_metrics(store: &SqliteChainStore) -> Result<()> {
+    let store = store.clone();
+    tokio::task::spawn_blocking(move || store.clear_metrics())
+        .await
+        .context("metrics cleanup worker failed")??;
+    Ok(())
+}
+
 async fn add_peer(state: &HttpState, peer: String) -> Result<()> {
     let peer = validate_peer_address(peer)?;
     let addresses = {
@@ -948,6 +1065,125 @@ fn validate_peer_address(peer: String) -> Result<String> {
 
 fn network_health(status: &NodeStatus, peers: &[PeerInfo]) -> NetworkHealthResponse {
     network_health_at(status, peers, now_ms())
+}
+
+fn metrics_response(enabled: bool, rows: Vec<BlockMetricRow>) -> MetricsResponse {
+    let latest = rows.last().cloned();
+    MetricsResponse {
+        enabled,
+        latest,
+        charts: vec![
+            metrics_chart(
+                "block-time",
+                "Time per block",
+                "s",
+                MetricsValueKind::Seconds,
+                &rows,
+                |row| row.block_time_ms.map(|ms| ms as f64 / 1_000.0),
+            ),
+            metrics_chart(
+                "difficulty",
+                "Difficulty",
+                "bits",
+                MetricsValueKind::Number,
+                &rows,
+                |row| Some(row.mine_difficulty_bits as f64),
+            ),
+            metrics_chart(
+                "supply",
+                "IUNA in circulation",
+                "IUNA",
+                MetricsValueKind::Iuna,
+                &rows,
+                |row| Some(micro_iuna_as_iuna(row.circulating_supply)),
+            ),
+            metrics_chart(
+                "transactions",
+                "Transactions",
+                "tx",
+                MetricsValueKind::Number,
+                &rows,
+                |row| Some(row.transaction_count as f64),
+            ),
+            metrics_chart(
+                "burn-count",
+                "Burn transactions",
+                "burns",
+                MetricsValueKind::Number,
+                &rows,
+                |row| Some(row.burn_count as f64),
+            ),
+            metrics_chart(
+                "burn-amount",
+                "Burn amount",
+                "IUNA",
+                MetricsValueKind::Iuna,
+                &rows,
+                |row| Some(micro_iuna_as_iuna(row.burned_amount)),
+            ),
+            metrics_chart(
+                "total-burn",
+                "Total burn",
+                "IUNA",
+                MetricsValueKind::Iuna,
+                &rows,
+                |row| Some(micro_iuna_as_iuna(row.total_burned_amount)),
+            ),
+            metrics_chart(
+                "fees",
+                "Fees",
+                "IUNA",
+                MetricsValueKind::Iuna,
+                &rows,
+                |row| Some(micro_iuna_as_iuna(row.fees_amount)),
+            ),
+            metrics_chart(
+                "mine-actions",
+                "Mine actions",
+                "mine",
+                MetricsValueKind::Number,
+                &rows,
+                |row| Some(row.mine_count as f64),
+            ),
+            metrics_chart(
+                "vdf-rounds",
+                "VDF rounds",
+                "rounds",
+                MetricsValueKind::Number,
+                &rows,
+                |row| Some(row.vdf_rounds as f64),
+            ),
+        ],
+    }
+}
+
+fn metrics_chart(
+    id: &'static str,
+    title: &'static str,
+    unit: &'static str,
+    value_kind: MetricsValueKind,
+    rows: &[BlockMetricRow],
+    value: impl Fn(&BlockMetricRow) -> Option<f64>,
+) -> MetricsChart {
+    MetricsChart {
+        id,
+        title,
+        unit,
+        value_kind,
+        points: rows
+            .iter()
+            .filter_map(|row| {
+                value(row).map(|value| MetricsPoint {
+                    height: row.height,
+                    value,
+                })
+            })
+            .collect(),
+    }
+}
+
+fn micro_iuna_as_iuna(amount: Amount) -> f64 {
+    amount as f64 / 1_000_000.0
 }
 
 fn network_health_at(
@@ -2045,9 +2281,11 @@ const INDEX_HTML: &str = r#"<!doctype html>
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
+  <link rel="icon" href="data:,">
   <title>iuna</title>
   <style>
     [x-cloak] { display: none !important; }
+    .visually-hidden { position: absolute !important; width: 1px !important; height: 1px !important; overflow: hidden !important; clip: rect(0 0 0 0) !important; clip-path: inset(50%) !important; white-space: nowrap !important; }
     :root {
       color-scheme: dark;
       font-family: Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
@@ -2175,6 +2413,30 @@ const INDEX_HTML: &str = r#"<!doctype html>
     .settings-mode-title { color: #e8edf0; font-size: 15px; font-weight: 850; }
     .settings-form { display: grid; gap: 10px; align-items: stretch; }
     .settings-form label, .settings-form input { width: 100%; }
+    .metrics-shell { display: grid; gap: 12px; }
+    .metrics-summary { display: grid; grid-template-columns: repeat(auto-fit, minmax(150px, 1fr)); gap: 10px; }
+    .metrics-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(min(100%, 430px), 1fr)); gap: 12px; }
+    .metric-chart-card { display: grid; gap: 10px; min-width: 0; border: 1px solid #2a3035; border-radius: 8px; padding: 12px; background: #181b1f; }
+    .metric-chart-head { display: flex; justify-content: space-between; gap: 10px; align-items: baseline; }
+    .metric-chart-title { margin: 0; color: #e8edf0; font-size: 14px; font-weight: 850; }
+    .metric-chart-value { color: #d5f55f; font-size: 13px; font-weight: 850; font-variant-numeric: tabular-nums; }
+    .metric-chart-frame { display: grid; grid-template-columns: 50px minmax(0, 1fr); grid-template-rows: 156px 18px; column-gap: 6px; row-gap: 4px; min-width: 0; }
+    .metric-chart-plot { position: relative; min-width: 0; }
+    .metric-chart-svg { width: 100%; height: 156px; display: block; border: 1px solid #2f363c; border-radius: 8px; background: #111316; }
+    .metric-chart-gridline { stroke: #3a4248; stroke-width: .8; stroke-dasharray: 3 7; opacity: .58; }
+    .metric-chart-axis { stroke: #3a4248; stroke-width: 1.2; }
+    .metric-chart-axis-label { color: #8d989f; font-size: 10px; font-weight: 750; font-variant-numeric: tabular-nums; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+    .metric-chart-y-axis { position: relative; min-width: 0; }
+    .metric-chart-y-axis .metric-chart-axis-label { position: absolute; right: 0; transform: translateY(-50%); max-width: 100%; }
+    .metric-chart-x-axis { position: relative; grid-column: 2; min-width: 0; overflow: visible; }
+    .metric-chart-x-axis .metric-chart-axis-label { position: absolute; top: 0; transform: translateX(-50%); }
+    .metric-chart-line { fill: none; stroke: #d5f55f; stroke-width: 2.2; stroke-linejoin: round; stroke-linecap: round; }
+    .metric-chart-points { position: absolute; inset: 0; }
+    .metric-chart-point-hit { position: absolute; width: 18px; height: 18px; border: 0; border-radius: 50%; padding: 0; background: transparent; cursor: crosshair; transform: translate(-50%, -50%); }
+    .metric-chart-point-hit::after { content: ""; position: absolute; left: 50%; top: 50%; width: 5px; height: 5px; border-radius: 50%; background: #d5f55f; opacity: .2; transform: translate(-50%, -50%); transition: opacity .12s ease, width .12s ease, height .12s ease; }
+    .metric-chart-point-hit:hover::after, .metric-chart-point-hit:focus-visible::after { width: 8px; height: 8px; opacity: 1; }
+    .metric-chart-tooltip { position: absolute; z-index: 1; max-width: min(180px, 80%); border: 1px solid #566d25; border-radius: 6px; padding: 5px 7px; background: #202615; color: #e8edf0; font-size: 11px; font-weight: 850; font-variant-numeric: tabular-nums; line-height: 1.25; pointer-events: none; box-shadow: 0 8px 20px rgba(0, 0, 0, .28); white-space: nowrap; }
+    .metrics-empty { border: 1px dashed #3a4248; border-radius: 8px; padding: 14px; color: #8d989f; background: #111316; }
     .wallet-grid { width: 100%; display: grid; grid-template-columns: minmax(0, 1fr) minmax(300px, .8fr); gap: 12px; align-items: start; }
     .wallet-actions { display: grid; gap: 12px; }
     .advanced-toggle { flex-basis: 100%; width: max-content; align-self: flex-start; border-color: #3a4248; padding: 4px 7px; background: #202328; color: #9fa8ad; font-size: 12px; }
@@ -2353,13 +2615,14 @@ const INDEX_HTML: &str = r#"<!doctype html>
       header, .split, .setup-grid, .wallet-grid, .mining-grid, .detail-grid, .wallet-tx-row { grid-template-columns: 1fr; }
       header { display: grid; }
       .settings-mode-row { align-items: flex-start; }
+      .metrics-grid { grid-template-columns: 1fr; }
       input { min-width: 0; width: 100%; }
       .switch input { width: auto; }
       .seed-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); }
       .block-card { flex-basis: 108px; }
     }
   </style>
-  <script defer src="/assets/iuna-ui.js?v=61"></script>
+  <script defer src="/assets/iuna-ui.js?v=64"></script>
   <script defer src="/assets/alpine.min.js"></script>
 </head>
 <body x-data="iunaApp()" x-init="init()" @keydown.window.escape="closeModals()" x-cloak>
@@ -2382,6 +2645,10 @@ const INDEX_HTML: &str = r#"<!doctype html>
         <button class="nav-button" :class="{ active: tab === 'chain' }" @click="setTab('chain')" type="button" title="Explorer" aria-label="Explorer">
           <svg class="chain-icon" viewBox="0 0 24 24" aria-hidden="true"><rect x="1.5" y="9" width="5.5" height="5.5"></rect><rect x="9.25" y="9" width="5.5" height="5.5"></rect><rect x="17" y="9" width="5.5" height="5.5"></rect></svg>
           <span>Chain</span>
+        </button>
+        <button class="nav-button" x-show="config.keep_track_of_metrics" :class="{ active: tab === 'metrics' }" @click="setTab('metrics')" type="button" title="Metrics" aria-label="Metrics">
+          <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M4 19V5"></path><path d="M4 19h16"></path><path d="M7 15l3-4 3 2 4-7"></path><path d="M7 17h10"></path></svg>
+          <span>Metrics</span>
         </button>
       </nav>
       <button class="settings-button" :class="{ active: tab === 'settings' }" type="button" @click="setTab('settings')" title="Settings" aria-label="Settings">
@@ -2805,6 +3072,53 @@ const INDEX_HTML: &str = r#"<!doctype html>
         </section>
       </div>
     </section>
+    <section x-show="tab === 'metrics'">
+      <div class="metrics-shell">
+        <div class="metrics-summary">
+          <div class="metric"><div class="label">Latest block</div><div class="value" x-text="metricsLatest().height ?? '-'"></div></div>
+          <div class="metric"><div class="label">Supply</div><div class="value" x-text="metricAmountLabel(metricsLatest().circulatingSupply)"></div></div>
+          <div class="metric"><div class="label">Total burned</div><div class="value" x-text="metricAmountLabel(metricsLatest().totalBurnedAmount)"></div></div>
+          <div class="metric"><div class="label">Difficulty</div><div class="value" x-text="metricsLatest().mineDifficultyBits ?? '-'"></div></div>
+        </div>
+        <div class="metrics-empty" x-show="metricsCharts().length === 0">No metrics collected yet</div>
+        <div class="metrics-grid">
+          <template x-for="chart in metricsCharts()" :key="chart.id">
+            <article class="metric-chart-card">
+              <div class="metric-chart-head">
+                <h3 class="metric-chart-title" x-text="chart.title"></h3>
+                <div class="metric-chart-value" x-text="metricLatestValueLabel(chart)"></div>
+              </div>
+              <div class="metric-chart-frame">
+                <div class="metric-chart-y-axis">
+                  <template x-for="tick in metricYAxisTicks(chart)" :key="`${chart.id}-y-${tick}`">
+                    <span class="metric-chart-axis-label" :style="metricYAxisLabelStyle(chart, tick)" x-text="metricAxisValueLabel(chart, tick)"></span>
+                  </template>
+                </div>
+                <div class="metric-chart-plot" @mousemove="setMetricHoverFromPlot(chart, $event)" @mouseleave="clearMetricHover(chart)">
+                  <svg class="metric-chart-svg" viewBox="0 0 300 148" preserveAspectRatio="none" role="img" :aria-label="chart.title">
+                    <path class="metric-chart-gridline" :d="metricGridPath(chart)"></path>
+                    <line class="metric-chart-axis" x1="4" y1="8" x2="4" y2="132"></line>
+                    <line class="metric-chart-axis" x1="4" y1="132" x2="296" y2="132"></line>
+                    <polyline class="metric-chart-line" :points="metricChartPoints(chart)"></polyline>
+                  </svg>
+                  <div class="metric-chart-points">
+                    <template x-for="marker in metricChartPointMarkers(chart)" :key="`${chart.id}-point-${marker.height}`">
+                      <button class="metric-chart-point-hit" type="button" :style="metricPointStyle(marker)" :title="marker.label" @focus="setMetricHover(chart, marker)" @blur="clearMetricHover(chart)" :aria-label="marker.label"></button>
+                    </template>
+                  </div>
+                  <div class="metric-chart-tooltip" x-cloak x-show="metricHover?.chartId === chart.id" :style="metricTooltipStyle(chart)" x-text="metricTooltipLabel(chart)"></div>
+                </div>
+                <div class="metric-chart-x-axis">
+                  <template x-for="tick in metricXAxisTicks(chart)" :key="`${chart.id}-x-${tick}`">
+                    <span class="metric-chart-axis-label" :style="metricXAxisLabelStyle(chart, tick)" x-text="`#${tick}`"></span>
+                  </template>
+                </div>
+              </div>
+            </article>
+          </template>
+        </div>
+      </div>
+    </section>
     <section x-show="tab === 'settings'">
       <div class="settings-grid">
         <div class="panel">
@@ -2825,9 +3139,23 @@ const INDEX_HTML: &str = r#"<!doctype html>
           </div>
         </div>
         <div class="panel">
+          <div class="settings-mode-row">
+            <div class="settings-mode-copy">
+              <div class="settings-mode-title">Keep track of metrics</div>
+              <div class="muted" x-text="keepTrackOfMetrics ? 'Metrics are stored per block.' : 'Metrics storage is off.'"></div>
+            </div>
+            <label class="toggle-switch" :class="{ active: keepTrackOfMetrics }">
+              <input type="checkbox" :checked="keepTrackOfMetrics" @change="setKeepTrackOfMetrics($event.target.checked)">
+              <span class="toggle-track" aria-hidden="true"><span class="toggle-thumb"></span></span>
+              <span class="toggle-text" x-text="keepTrackOfMetrics ? 'On' : 'Off'"></span>
+            </label>
+          </div>
+        </div>
+        <div class="panel">
           <h3>Change Password</h3>
           <div class="setup-feedback" :class="settingsFeedback?.kind" x-show="settingsFeedback" x-transition x-text="settingsFeedback?.message"></div>
           <form class="settings-form" @submit.prevent="changePassword">
+            <input class="visually-hidden" type="text" name="username" value="iuna" autocomplete="username" tabindex="-1" aria-hidden="true">
             <label>Current password<input x-model="settingsOldPassword" type="password" autocomplete="current-password" required></label>
             <label>New password<input x-model="settingsNewPassword" type="password" autocomplete="new-password" minlength="12" required></label>
             <label>Confirm new password<input x-model="settingsPasswordConfirm" type="password" autocomplete="new-password" minlength="12" required></label>
@@ -2848,11 +3176,13 @@ const INDEX_HTML: &str = r#"<!doctype html>
       </div>
       <div class="setup-feedback" :class="authFeedback?.kind" x-show="authFeedback" x-transition x-text="authFeedback?.message"></div>
       <form x-show="!auth.configured" @submit.prevent="setupPassword">
+        <input class="visually-hidden" type="text" name="username" value="iuna" autocomplete="username" tabindex="-1" aria-hidden="true">
         <label>Password<input x-model="authPassword" type="password" autocomplete="new-password" minlength="12" required></label>
         <label>Confirm password<input x-model="authPasswordConfirm" type="password" autocomplete="new-password" minlength="12" required></label>
         <div class="setup-actions"><button class="primary" type="submit">Set password</button></div>
       </form>
       <form x-show="auth.configured && !auth.authenticated" @submit.prevent="login">
+        <input class="visually-hidden" type="text" name="username" value="iuna" autocomplete="username" tabindex="-1" aria-hidden="true">
         <label>Password<input x-model="loginPassword" type="password" autocomplete="current-password" required></label>
         <div class="setup-actions"><button class="primary" type="submit">Unlock</button></div>
       </form>
@@ -3067,7 +3397,10 @@ mod tests {
     use tower::ServiceExt;
 
     use crate::{
-        adapters::{config_store, config_store::UiConfig, p2p::GossipNetwork, wallet_store},
+        adapters::{
+            chain_store::SqliteChainStore, config_store, config_store::UiConfig,
+            p2p::GossipNetwork, wallet_store,
+        },
         app::{NodeCore, PeerBook, PeerDirection, PeerInfo, StratumStatus},
         domain::{
             Block, Ledger, MICRO_IUNA, MINE_FINALIZER_FEE, MINE_REWARD, OutPoint, Transaction,
@@ -3182,6 +3515,24 @@ mod tests {
         let status = http_request(app, Method::GET, "/api/auth/status", None, "").await;
         assert_eq!(status.status, StatusCode::OK);
         assert!(status.body.contains("\"configured\":false"));
+    }
+
+    #[tokio::test]
+    async fn favicon_is_public_before_authentication_setup() {
+        let dir = tempfile::tempdir().unwrap();
+        let state = auth_test_state(
+            dir.path().join("config.json"),
+            UiConfig {
+                auth_password_hash: None,
+                ..UiConfig::default()
+            },
+        )
+        .await;
+        let app = auth_test_app(state);
+
+        let response = http_request(app, Method::GET, "/favicon.ico", None, "").await;
+
+        assert_eq!(response.status, StatusCode::NO_CONTENT);
     }
 
     #[tokio::test]
@@ -3885,6 +4236,8 @@ mod tests {
         let node = Arc::new(Mutex::new(NodeCore::from_ledger(wallet, ledger, 0)));
         let peers = Arc::new(Mutex::new(PeerBook::default()));
         let gossip = GossipNetwork::new_for_tests(node.clone(), peers.clone());
+        let chain_store = SqliteChainStore::open(config_path.with_file_name("chain.sqlite3"))
+            .expect("test chain store should open");
         HttpState {
             node,
             peers,
@@ -3893,6 +4246,7 @@ mod tests {
                 config_store::load_or_create(&config_path).unwrap(),
             )),
             config_path,
+            chain_store,
             wallet_path,
             stratum: StratumStatus {
                 enabled: false,
@@ -3912,6 +4266,7 @@ mod tests {
                 "/api/auth/change-password",
                 post(api_auth_change_password_form),
             )
+            .route("/favicon.ico", get(super::favicon))
             .route("/api/protected", get(protected_auth_test_endpoint))
             .layer(middleware::from_fn_with_state(
                 state.clone(),
@@ -4021,6 +4376,44 @@ mod tests {
             .unwrap_err();
 
         assert!(format!("{error:#}").contains("greater than zero"));
+    }
+
+    #[tokio::test]
+    async fn metrics_setting_persists_config_and_clears_rows_when_disabled() {
+        let dir = tempfile::tempdir().unwrap();
+        let config_path = dir.path().join("config.json");
+        let state = auth_test_state(
+            config_path.clone(),
+            UiConfig {
+                setup_complete: true,
+                ..UiConfig::default()
+            },
+        )
+        .await;
+        let wallet = Wallet::from_seed("metrics-setting-wallet");
+        let mut genesis = BTreeMap::new();
+        genesis.insert(wallet.address().to_string(), 10);
+        let ledger = Ledger::new_with_genesis_burns(
+            genesis,
+            vec![crate::domain::GenesisBurn::new(wallet.address(), 1)],
+            1,
+        )
+        .unwrap();
+        *state.node.lock().await = NodeCore::from_ledger(wallet, ledger, 0);
+
+        super::set_keep_track_of_metrics(&state, true)
+            .await
+            .unwrap();
+        let config = config_store::load_or_create(&config_path).unwrap();
+        assert!(config.keep_track_of_metrics);
+        assert!(!state.chain_store.load_metrics().unwrap().is_empty());
+
+        super::set_keep_track_of_metrics(&state, false)
+            .await
+            .unwrap();
+        let config = config_store::load_or_create(&config_path).unwrap();
+        assert!(!config.keep_track_of_metrics);
+        assert!(state.chain_store.load_metrics().unwrap().is_empty());
     }
 
     #[tokio::test]
