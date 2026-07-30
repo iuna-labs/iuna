@@ -1079,7 +1079,11 @@ fn metrics_response(enabled: bool, rows: Vec<BlockMetricRow>) -> MetricsResponse
                 "s",
                 MetricsValueKind::Seconds,
                 &rows,
-                |row| row.block_time_ms.map(|ms| ms as f64 / 1_000.0),
+                |row| {
+                    row.block_time_ms
+                        .filter(|_| row.height > 1)
+                        .map(|ms| ms as f64 / 1_000.0)
+                },
             ),
             metrics_chart(
                 "difficulty",
@@ -1151,7 +1155,7 @@ fn metrics_response(enabled: bool, rows: Vec<BlockMetricRow>) -> MetricsResponse
                 "rounds",
                 MetricsValueKind::Number,
                 &rows,
-                |row| Some(row.vdf_rounds as f64),
+                |row| (row.vdf_rounds > 0).then_some(row.vdf_rounds as f64),
             ),
         ],
     }
@@ -2433,8 +2437,8 @@ const INDEX_HTML: &str = r#"<!doctype html>
     .metric-chart-line { fill: none; stroke: #d5f55f; stroke-width: 2.2; stroke-linejoin: round; stroke-linecap: round; }
     .metric-chart-points { position: absolute; inset: 0; }
     .metric-chart-point-hit { position: absolute; width: 18px; height: 18px; border: 0; border-radius: 50%; padding: 0; background: transparent; cursor: crosshair; transform: translate(-50%, -50%); }
-    .metric-chart-point-hit::after { content: ""; position: absolute; left: 50%; top: 50%; width: 5px; height: 5px; border-radius: 50%; background: #d5f55f; opacity: .2; transform: translate(-50%, -50%); transition: opacity .12s ease, width .12s ease, height .12s ease; }
-    .metric-chart-point-hit:hover::after, .metric-chart-point-hit:focus-visible::after { width: 8px; height: 8px; opacity: 1; }
+    .metric-chart-point-hit::after { content: ""; position: absolute; left: 50%; top: 50%; width: 5px; height: 5px; border-radius: 50%; background: #d5f55f; opacity: .2; transform: translate(-50%, -50%); }
+    .metric-chart-point-hit:hover::after, .metric-chart-point-hit:focus-visible::after, .metric-chart-point-hit.is-active::after { width: 8px; height: 8px; opacity: 1; }
     .metric-chart-tooltip { position: absolute; z-index: 1; max-width: min(180px, 80%); border: 1px solid #566d25; border-radius: 6px; padding: 5px 7px; background: #202615; color: #e8edf0; font-size: 11px; font-weight: 850; font-variant-numeric: tabular-nums; line-height: 1.25; pointer-events: none; box-shadow: 0 8px 20px rgba(0, 0, 0, .28); white-space: nowrap; }
     .metrics-empty { border: 1px dashed #3a4248; border-radius: 8px; padding: 14px; color: #8d989f; background: #111316; }
     .wallet-grid { width: 100%; display: grid; grid-template-columns: minmax(0, 1fr) minmax(300px, .8fr); gap: 12px; align-items: start; }
@@ -3103,10 +3107,12 @@ const INDEX_HTML: &str = r#"<!doctype html>
                   </svg>
                   <div class="metric-chart-points">
                     <template x-for="marker in metricChartPointMarkers(chart)" :key="`${chart.id}-point-${marker.height}`">
-                      <button class="metric-chart-point-hit" type="button" :style="metricPointStyle(marker)" :title="marker.label" @focus="setMetricHover(chart, marker)" @blur="clearMetricHover(chart)" :aria-label="marker.label"></button>
+                      <button class="metric-chart-point-hit" type="button" :class="{ 'is-active': metricHover?.chartId === chart.id && metricHover?.height === marker.height }" :style="metricPointStyle(marker)" :title="marker.label" @focus="setMetricHover(chart, marker)" @blur="clearMetricHover(chart)" :aria-label="marker.label"></button>
                     </template>
                   </div>
-                  <div class="metric-chart-tooltip" x-cloak x-show="metricHover?.chartId === chart.id" :style="metricTooltipStyle(chart)" x-text="metricTooltipLabel(chart)"></div>
+                  <template x-if="metricHover?.chartId === chart.id">
+                    <div class="metric-chart-tooltip" :style="metricTooltipStyle(chart)" x-text="metricTooltipLabel(chart)"></div>
+                  </template>
                 </div>
                 <div class="metric-chart-x-axis">
                   <template x-for="tick in metricXAxisTicks(chart)" :key="`${chart.id}-x-${tick}`">
@@ -4226,6 +4232,72 @@ mod tests {
             transactions,
             hash: format!("hash-{height}"),
         }
+    }
+
+    fn metric_row(
+        height: u64,
+        block_time_ms: Option<u64>,
+        vdf_rounds: u32,
+    ) -> crate::adapters::chain_store::BlockMetricRow {
+        crate::adapters::chain_store::BlockMetricRow {
+            height,
+            block_hash: format!("hash-{height}"),
+            timestamp_ms: height,
+            block_time_ms,
+            mine_difficulty_bits: 12,
+            circulating_supply: 100,
+            transaction_count: 0,
+            transfer_count: 0,
+            burn_count: 0,
+            mine_count: 0,
+            burned_amount: 0,
+            total_burned_amount: 0,
+            fees_amount: 0,
+            reward_amount: 0,
+            vdf_rounds,
+            finalizer_rank: 0,
+        }
+    }
+
+    #[test]
+    fn metrics_response_skips_bootstrap_points_for_block_time_and_vdf_rounds() {
+        let response = super::metrics_response(
+            true,
+            vec![
+                metric_row(0, None, 0),
+                metric_row(1, Some(1_764_000_000_000), 0),
+                metric_row(2, Some(600_000), 120),
+                metric_row(3, Some(610_000), 130),
+            ],
+        );
+
+        let block_time = response
+            .charts
+            .iter()
+            .find(|chart| chart.id == "block-time")
+            .expect("block time chart should exist");
+        assert_eq!(
+            block_time
+                .points
+                .iter()
+                .map(|point| (point.height, point.value))
+                .collect::<Vec<_>>(),
+            vec![(2, 600.0), (3, 610.0)]
+        );
+
+        let vdf_rounds = response
+            .charts
+            .iter()
+            .find(|chart| chart.id == "vdf-rounds")
+            .expect("VDF rounds chart should exist");
+        assert_eq!(
+            vdf_rounds
+                .points
+                .iter()
+                .map(|point| (point.height, point.value))
+                .collect::<Vec<_>>(),
+            vec![(2, 120.0), (3, 130.0)]
+        );
     }
 
     async fn auth_test_state(config_path: std::path::PathBuf, config: UiConfig) -> HttpState {
