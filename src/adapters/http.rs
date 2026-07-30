@@ -853,6 +853,9 @@ async fn set_burn_settings(
     amount: Amount,
     fee: Amount,
 ) -> Result<()> {
+    if enabled && amount == 0 {
+        bail!("IUNA per block must be greater than zero when finalization burns are on");
+    }
     let result = {
         let mut node = state.node.lock().await;
         let result = node.set_automatic_burn_settings(enabled, amount, fee);
@@ -2531,7 +2534,7 @@ const INDEX_HTML: &str = r#"<!doctype html>
           <div class="panel-description">Burn IUNA to compete for block finalization. Winning burns finalize PoB/VDF blocks and earn the transaction fees in those blocks.</div>
           <form class="mining-form" @submit.prevent="saveBurn">
             <div class="burn-fields">
-              <label>IUNA per block<input x-model="burnAmountDraft" @input="burnAmountDirty = true; scheduleFeeEstimates()" type="number" min="0" step="0.000001"></label>
+              <label>IUNA per block<input x-model="burnAmountDraft" @input="burnAmountDirty = true; scheduleFeeEstimates()" type="number" min="0.000001" step="0.000001"></label>
               <label>Fee / byte<input x-model="burnFeeDraft" @input="burnAmountDirty = true; scheduleFeeEstimates()" type="number" min="0" step="0.000001" required></label>
               <button class="primary" type="submit">Save</button>
             </div>
@@ -3999,6 +4002,25 @@ mod tests {
         assert!(config.mining_enabled);
         assert_eq!(config.burn_per_block, 50 * MICRO_IUNA);
         assert_eq!(config.burn_fee, 3 * MICRO_IUNA);
+    }
+
+    #[tokio::test]
+    async fn enabled_burn_settings_reject_zero_amount() {
+        let dir = tempfile::tempdir().unwrap();
+        let state = auth_test_state(
+            dir.path().join("config.json"),
+            UiConfig {
+                setup_complete: true,
+                ..UiConfig::default()
+            },
+        )
+        .await;
+
+        let error = super::set_burn_settings(&state, true, 0, MICRO_IUNA)
+            .await
+            .unwrap_err();
+
+        assert!(format!("{error:#}").contains("greater than zero"));
     }
 
     #[tokio::test]

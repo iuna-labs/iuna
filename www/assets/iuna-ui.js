@@ -812,6 +812,9 @@ window.iunaApp = function iunaApp() {
       try {
         const amount = this.parseiunaAmount(this.burnAmountDraft);
         const fee = this.parseiunaAmountRequired(this.burnFeeDraft, "Burn fee per byte is required");
+        if (amount === 0) {
+          throw new Error("IUNA per block must be greater than zero");
+        }
         this.burnAmountDraft = this.amountLabel(amount);
         this.burnFeeDraft = this.amountLabel(fee);
         await this.postForm(
