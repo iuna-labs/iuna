@@ -5,6 +5,7 @@ use std::{
 };
 
 use anyhow::{Context, Result, anyhow, bail};
+use bip39::{Language, Mnemonic};
 use chacha20poly1305::{
     ChaCha20Poly1305, KeyInit, Nonce,
     aead::{Aead, Payload},
@@ -21,33 +22,7 @@ const WALLET_ENCRYPTION_ALGORITHM: &str = "chacha20poly1305";
 const WALLET_ENCRYPTION_KDF: &str = "pbkdf2-sha256";
 const WALLET_ENCRYPTION_ITERATIONS: u32 = 210_000;
 const GENERATED_SEED_WORDS: usize = 24;
-const SEED_WORDS: &[&str] = &[
-    "able", "acid", "acorn", "adapt", "agent", "anchor", "angle", "apple", "asset", "atlas",
-    "badge", "balance", "beacon", "benefit", "binary", "bitter", "blanket", "border", "brave",
-    "bright", "broker", "budget", "cactus", "canvas", "carbon", "castle", "census", "circle",
-    "citizen", "clerk", "climate", "coffee", "copper", "corner", "cotton", "cradle", "credit",
-    "crisp", "custom", "damage", "decade", "degree", "delight", "delta", "device", "dinner",
-    "direct", "domain", "donor", "driver", "dynamic", "eager", "early", "earth", "echo", "economy",
-    "edge", "effort", "elder", "ember", "enable", "engine", "equal", "estate", "fabric", "factor",
-    "famous", "father", "feature", "federal", "fiction", "filter", "finger", "finish", "flame",
-    "forest", "forum", "frost", "future", "galaxy", "garden", "gentle", "giant", "glass", "globe",
-    "golden", "grain", "gravity", "green", "harbor", "hazard", "honest", "human", "humble",
-    "iceberg", "impact", "income", "index", "infant", "island", "jacket", "jewel", "journal",
-    "junior", "kernel", "ladder", "language", "laser", "leader", "legend", "lemon", "level",
-    "liberty", "linear", "local", "lottery", "lunar", "magnet", "market", "matrix", "member",
-    "memory", "merit", "method", "middle", "minute", "mirror", "model", "moment", "native",
-    "network", "neutral", "noble", "normal", "notice", "novel", "object", "ocean", "offer",
-    "olive", "orbit", "origin", "oxygen", "packet", "panel", "parent", "pattern", "people",
-    "pepper", "permit", "planet", "plastic", "policy", "postal", "prefer", "profit", "public",
-    "puzzle", "quality", "quantum", "quiet", "random", "rapid", "radius", "reason", "record",
-    "region", "repair", "reward", "ribbon", "rocket", "sample", "scale", "scheme", "secret",
-    "sector", "select", "senior", "shadow", "signal", "silver", "simple", "sister", "sketch",
-    "social", "solar", "source", "spare", "spirit", "stable", "station", "stone", "street",
-    "summer", "supply", "system", "talent", "target", "temple", "tenant", "theory", "ticket",
-    "timber", "token", "travel", "treat", "trust", "tunnel", "twelve", "unique", "update",
-    "useful", "valid", "valley", "vendor", "verify", "victory", "village", "virtual", "volume",
-    "wallet", "window", "winter", "wonder", "yellow", "zero",
-];
+const BIP39_SEED_ENTROPY_BYTES: usize = 32;
 
 #[derive(Debug, Serialize, Deserialize)]
 struct WalletFile {
@@ -391,14 +366,12 @@ fn random_bytes<const N: usize>() -> Result<[u8; N]> {
 }
 
 fn generate_seed_phrase() -> Result<String> {
-    let mut bytes = [0_u8; GENERATED_SEED_WORDS];
-    getrandom::getrandom(&mut bytes)
+    let mut entropy = [0_u8; BIP39_SEED_ENTROPY_BYTES];
+    getrandom::getrandom(&mut entropy)
         .map_err(|error| anyhow!("failed to read system randomness: {error:?}"))?;
-    let words = bytes
-        .iter()
-        .map(|byte| SEED_WORDS[usize::from(*byte) % SEED_WORDS.len()])
-        .collect::<Vec<_>>();
-    Ok(words.join(" "))
+    let mnemonic = Mnemonic::from_entropy_in(Language::English, &entropy)
+        .context("failed to generate BIP-39 seed phrase")?;
+    Ok(mnemonic.to_string())
 }
 
 fn hex_encode(bytes: impl AsRef<[u8]>) -> String {
@@ -434,20 +407,23 @@ fn decode_hex_nibble(byte: u8) -> Result<u8> {
 }
 
 fn normalize_seed_phrase(seed_phrase: &str) -> Result<String> {
-    let words = seed_phrase
+    let normalized = seed_phrase
         .split_whitespace()
         .map(|word| word.trim().to_ascii_lowercase())
         .filter(|word| !word.is_empty())
-        .collect::<Vec<_>>();
-    if words.len() != GENERATED_SEED_WORDS {
+        .collect::<Vec<_>>()
+        .join(" ");
+    if normalized.split_whitespace().count() != GENERATED_SEED_WORDS {
         bail!("seed phrase must contain 24 words");
     }
-    for word in &words {
+    for word in normalized.split_whitespace() {
         if !word.chars().all(|ch| ch.is_ascii_lowercase()) {
             bail!("seed phrase words must contain only letters");
         }
     }
-    Ok(words.join(" "))
+    let mnemonic = Mnemonic::parse_in_normalized(Language::English, &normalized)
+        .context("invalid BIP-39 seed phrase")?;
+    Ok(mnemonic.to_string())
 }
 
 fn create_wallet_file(path: &Path) -> Result<File> {
@@ -486,6 +462,7 @@ fn open_wallet_file(path: &Path, mode: WalletFileMode) -> Result<File> {
 mod tests {
     use std::fs;
 
+    use bip39::{Language, Mnemonic};
     use tempfile::tempdir;
 
     use super::{
@@ -522,6 +499,7 @@ mod tests {
         let words = seed_phrase.split_whitespace().collect::<Vec<_>>();
 
         assert_eq!(words.len(), 24);
+        assert!(Mnemonic::parse_in_normalized(Language::English, &seed_phrase).is_ok());
         assert_eq!(
             setup_seed_phrase(&path).unwrap().as_deref(),
             Some(seed_phrase.as_str())
@@ -620,7 +598,7 @@ mod tests {
 
         let wallet = replace_with_imported_seed_phrase(
             &path,
-            " Able  ACID acorn adapt agent anchor angle apple asset atlas badge balance beacon benefit binary bitter blanket border brave bright broker budget cactus canvas ",
+            " ABANDON  abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon art ",
         )
         .unwrap();
         let loaded = load_or_create(&path).unwrap();
@@ -629,7 +607,7 @@ mod tests {
         assert_eq!(
             setup_seed_phrase(&path).unwrap().as_deref(),
             Some(
-                "able acid acorn adapt agent anchor angle apple asset atlas badge balance beacon benefit binary bitter blanket border brave bright broker budget cactus canvas"
+                "abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon art"
             )
         );
     }
@@ -642,6 +620,17 @@ mod tests {
         let error = replace_with_imported_seed_phrase(&path, "too few words").unwrap_err();
 
         assert!(error.to_string().contains("24 words"));
+    }
+
+    #[test]
+    fn rejects_imported_seed_phrase_with_invalid_checksum() {
+        let dir = tempdir().unwrap();
+        let path = dir.path().join("wallet.json");
+        let invalid_checksum = "abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon";
+
+        let error = replace_with_imported_seed_phrase(&path, invalid_checksum).unwrap_err();
+
+        assert!(error.to_string().contains("BIP-39"));
     }
 
     fn assert_recovery_words_verify(seed_phrase: &str, indexes: &[usize]) {
