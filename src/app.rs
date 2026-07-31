@@ -966,6 +966,79 @@ impl NodeCore {
         plan
     }
 
+    pub fn prepare_automatic_pow_mining(&mut self) -> Result<Option<Transaction>> {
+        if self.wallet.is_locked() {
+            if self.pow_mining_enabled {
+                self.last_auto_pow_mine_status = Some("wallet is locked".to_string());
+            }
+            return Ok(None);
+        }
+        if self.pow_mining_enabled && !self.has_real_chain() {
+            self.last_auto_pow_mine_status =
+                Some("waiting for a real chain before PoW mining can start".to_string());
+            self.auto_pow_mine_cursor = None;
+            return Ok(None);
+        }
+
+        self.prepare_automatic_pow_mine()
+    }
+
+    pub fn prepare_automatic_finalization(&mut self, timestamp_ms: u64) -> AutoMinePlan {
+        let mut plan = AutoMinePlan {
+            pow_mined: None,
+            burned: None,
+            work: None,
+            skipped_reason: None,
+        };
+
+        if self.wallet.is_locked() {
+            plan.skipped_reason = Some("wallet is locked".to_string());
+            return plan;
+        }
+
+        if !self.automatic_mining_enabled {
+            plan.skipped_reason = Some("automatic mining is off".to_string());
+            return plan;
+        }
+
+        match self.prepare_automatic_burn() {
+            Ok(tx) => plan.burned = tx,
+            Err(error) => {
+                plan.skipped_reason = Some(format!("automatic burn failed: {error:#}"));
+                return plan;
+            }
+        }
+
+        let wallet_rank = self
+            .ledger
+            .finalizer_rank_for_next_block(self.wallet.address());
+        if wallet_rank.is_none() {
+            let selected_leader = self.ledger.expected_leader_for_next_block();
+            plan.skipped_reason = selected_leader.map(|leader| {
+                format!("wallet is waiting for selected finalizer {leader} to finish the VDF")
+            });
+            return plan;
+        }
+
+        match self
+            .ledger
+            .prepare_next_block(self.wallet.address(), timestamp_ms)
+        {
+            Ok(work) => {
+                plan.work = Some(work);
+            }
+            Err(error) => {
+                plan.skipped_reason = Some(format!("{error:#}"));
+            }
+        }
+
+        plan
+    }
+
+    pub fn record_automatic_pow_mining_error(&mut self, message: String) {
+        self.last_auto_pow_mine_status = Some(message);
+    }
+
     fn prepare_automatic_pow_mine(&mut self) -> Result<Option<Transaction>> {
         if !self.pow_mining_enabled {
             self.last_auto_pow_mine_status = None;
@@ -1886,6 +1959,54 @@ mod tests {
             first_mine.signature()
         );
         assert_eq!(node.ledger().pending().len(), 2);
+    }
+
+    #[test]
+    fn automatic_pow_mining_can_tick_without_finalization() {
+        let wallet = Wallet::from_seed("automatic-pow-independent-wallet");
+        let mut allocations = BTreeMap::new();
+        allocations.insert(wallet.address().to_string(), 1);
+        let mut node = NodeCore::new(NodeConfig {
+            wallet,
+            genesis_allocations: allocations,
+            vdf_rounds: 10,
+            burn_per_block: 0,
+            burn_fee: 0,
+        });
+
+        node.set_pow_mining_enabled(true);
+        node.prepare_automatic_pow_mining().unwrap();
+        let first_searched = node
+            .auto_pow_mine_cursor
+            .as_ref()
+            .expect("PoW cursor should be initialized")
+            .searched;
+
+        node.prepare_automatic_pow_mining().unwrap();
+        let second_searched = node
+            .auto_pow_mine_cursor
+            .as_ref()
+            .expect("PoW cursor should keep tracking the current tip")
+            .searched;
+
+        assert!(second_searched > first_searched);
+    }
+
+    #[test]
+    fn automatic_finalization_does_not_tick_pow_mining() {
+        let wallet = Wallet::from_seed("automatic-pow-separated-finalizer-wallet");
+        let mut node = NodeCore::new(NodeConfig {
+            wallet,
+            genesis_allocations: BTreeMap::new(),
+            vdf_rounds: 10,
+            burn_per_block: 0,
+            burn_fee: 0,
+        });
+
+        node.set_pow_mining_enabled(true);
+        let _ = node.prepare_automatic_finalization(1);
+
+        assert!(node.auto_pow_mine_cursor.is_none());
     }
 
     #[test]

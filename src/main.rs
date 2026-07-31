@@ -162,6 +162,12 @@ async fn main() -> Result<()> {
         run_automatic_finalizer(finalizer_node, finalizer_gossip, debug_logging).await;
     });
 
+    let pow_miner_node = Arc::clone(&node);
+    let pow_miner_gossip = gossip.clone();
+    tokio::spawn(async move {
+        run_automatic_pow_miner(pow_miner_node, pow_miner_gossip, debug_logging).await;
+    });
+
     let sync_node = Arc::clone(&node);
     let sync_gossip = gossip.clone();
     tokio::spawn(async move {
@@ -600,7 +606,7 @@ async fn run_automatic_finalizer(node: SharedNode, gossip: p2p::GossipNetwork, d
         let (height, plan, outbox) = {
             let mut node = node.lock().await;
             let height = node.chain_height();
-            let plan = node.prepare_automatic_mining(now_ms());
+            let plan = node.prepare_automatic_finalization(now_ms());
             let outbox = node.drain_outbox();
             (height, plan, outbox)
         };
@@ -608,16 +614,6 @@ async fn run_automatic_finalizer(node: SharedNode, gossip: p2p::GossipNetwork, d
         if let Err(error) = gossip.broadcast(outbox).await {
             if debug {
                 eprintln!("p2p broadcast failed after automatic burn: {error:#}");
-            }
-        }
-
-        if debug {
-            if let Some(tx) = &plan.pow_mined {
-                println!(
-                    "auto-pow queued mine action for height {} ({})",
-                    height,
-                    tx.signature()
-                );
             }
         }
 
@@ -677,6 +673,46 @@ async fn run_automatic_finalizer(node: SharedNode, gossip: p2p::GossipNetwork, d
         }
 
         tokio::task::yield_now().await;
+    }
+}
+
+async fn run_automatic_pow_miner(node: SharedNode, gossip: p2p::GossipNetwork, debug: bool) {
+    loop {
+        tokio::time::sleep(std::time::Duration::from_secs(1)).await;
+        let (height, pow_mined, outbox) = {
+            let mut node = node.lock().await;
+            if !node.has_real_chain() {
+                continue;
+            }
+            let height = node.chain_height();
+            let pow_mined = match node.prepare_automatic_pow_mining() {
+                Ok(tx) => tx,
+                Err(error) => {
+                    node.record_automatic_pow_mining_error(format!(
+                        "automatic PoW mining failed: {error:#}"
+                    ));
+                    None
+                }
+            };
+            let outbox = node.drain_outbox();
+            (height, pow_mined, outbox)
+        };
+
+        if let Err(error) = gossip.broadcast(outbox).await {
+            if debug {
+                eprintln!("p2p broadcast failed after automatic PoW mining: {error:#}");
+            }
+        }
+
+        if debug {
+            if let Some(tx) = &pow_mined {
+                println!(
+                    "auto-pow queued mine action for height {} ({})",
+                    height,
+                    tx.signature()
+                );
+            }
+        }
     }
 }
 
