@@ -1253,10 +1253,19 @@ impl PeerBook {
         }
     }
 
+    pub fn observe_inbound_peer(&mut self, address: impl Into<String>) {
+        let address = address.into();
+        self.peers
+            .entry(address.clone())
+            .or_insert_with(|| PeerInfo::new(address, PeerDirection::Inbound));
+    }
+
     pub fn replace_peer_address(&mut self, from: &str, to: impl Into<String>) {
         let to = to.into();
         if from == to {
-            self.add_peer(to);
+            if !self.peers.contains_key(from) {
+                self.add_peer(to);
+            }
             return;
         }
 

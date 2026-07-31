@@ -2728,7 +2728,12 @@ async fn remember_discoverable_advertised_peer(
             .await
             .replace_peer_address(previous_peer, peer.clone());
     } else {
-        network.inner.peers.lock().await.add_peer(peer.clone());
+        network
+            .inner
+            .peers
+            .lock()
+            .await
+            .observe_inbound_peer(peer.clone());
     }
     *known_peer = Some(peer);
     Ok(true)
@@ -3944,13 +3949,12 @@ mod tests {
         .unwrap();
 
         assert_eq!(known_peer, Some(remote_addr.to_string()));
-        assert!(
-            peers
-                .lock()
-                .await
-                .addresses()
-                .contains(&remote_addr.to_string())
-        );
+        let listed = peers.lock().await.list();
+        let peer = listed
+            .iter()
+            .find(|peer| peer.address == remote_addr.to_string())
+            .unwrap();
+        assert_eq!(peer.direction, PeerDirection::Inbound);
     }
 
     #[tokio::test]
@@ -4069,6 +4073,72 @@ mod tests {
                 &claimed_node_id
             )
             .await
+        );
+    }
+
+    #[tokio::test]
+    async fn inbound_announced_address_replaces_gateway_address_for_ui() {
+        let alice = Wallet::from_seed("hello-public-announced-inbound-alice");
+        let allocations = allocations(std::slice::from_ref(&alice), 1_000);
+        let node = Arc::new(tokio::sync::Mutex::new(node("alice", alice, allocations)));
+        let peers = Arc::new(tokio::sync::Mutex::new(PeerBook::default()));
+        let network = super::GossipNetwork {
+            inner: Arc::new(super::GossipNetworkInner {
+                node,
+                peers: Arc::clone(&peers),
+                listen_addr: "0.0.0.0:9444".parse().unwrap(),
+                p2p_announce_addr: tokio::sync::Mutex::new(None),
+                node_id: super::new_node_id(),
+                accept_task: tokio::sync::Mutex::new(None),
+                sessions: tokio::sync::Mutex::new(BTreeMap::new()),
+                tx_delivery: tokio::sync::Mutex::new(BTreeMap::new()),
+                inbound_limiter: Arc::new(
+                    StdMutex::new(super::InboundConnectionLimiter::default()),
+                ),
+                metrics: super::P2pMetricsCounters::default(),
+            }),
+        };
+        let mut known_peer = None;
+
+        let remembered = super::remember_discoverable_advertised_peer(
+            &network,
+            "10.42.0.1:51234".parse().unwrap(),
+            &mut known_peer,
+            "142.132.164.59:9444".to_string(),
+        )
+        .await
+        .unwrap();
+        super::record_peer_status(
+            &network,
+            &known_peer,
+            "10.42.0.1:51234".parse().unwrap(),
+            &super::PeerStatus::with_time(7, "tip".to_string(), 1_000),
+        )
+        .await;
+
+        assert!(remembered);
+        assert_eq!(known_peer.as_deref(), Some("142.132.164.59:9444"));
+        let listed = peers.lock().await.list();
+        assert_eq!(listed.len(), 1);
+        let peer = &listed[0];
+        assert_eq!(peer.address, "142.132.164.59:9444");
+        assert_eq!(peer.direction, PeerDirection::Inbound);
+        assert_eq!(peer.last_known_height, Some(7));
+        assert_eq!(peer.messages_received, 0);
+
+        let repeated = super::remember_discoverable_advertised_peer(
+            &network,
+            "10.42.0.1:51234".parse().unwrap(),
+            &mut known_peer,
+            "142.132.164.59:9444".to_string(),
+        )
+        .await
+        .unwrap();
+
+        assert!(repeated);
+        assert_eq!(
+            peers.lock().await.list()[0].direction,
+            PeerDirection::Inbound
         );
     }
 
