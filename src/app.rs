@@ -137,6 +137,18 @@ pub enum GossipEnvelope {
     ChainSnapshot(ChainSnapshot),
     PeerAnnouncement {
         address: String,
+        #[serde(default)]
+        node_id: Option<String>,
+    },
+    PeerVerificationChallenge {
+        address: String,
+        nonce: String,
+    },
+    PeerVerificationResponse {
+        address: String,
+        nonce: String,
+        node_id: String,
+        signature: String,
     },
     PeerList {
         peers: Vec<String>,
@@ -1140,7 +1152,10 @@ impl NodeCore {
                 Ok(())
             }
             GossipEnvelope::ChainSnapshot(snapshot) => self.import_chain_snapshot(snapshot),
-            GossipEnvelope::PeerAnnouncement { .. } | GossipEnvelope::PeerList { .. } => Ok(()),
+            GossipEnvelope::PeerAnnouncement { .. }
+            | GossipEnvelope::PeerVerificationChallenge { .. }
+            | GossipEnvelope::PeerVerificationResponse { .. }
+            | GossipEnvelope::PeerList { .. } => Ok(()),
         }
     }
 

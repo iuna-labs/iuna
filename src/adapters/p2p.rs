@@ -3,13 +3,14 @@ use std::{
     io::ErrorKind,
     net::{IpAddr, SocketAddr},
     sync::{
-        Arc, Mutex as StdMutex,
+        Arc, Mutex as StdMutex, OnceLock,
         atomic::{AtomicU64, Ordering},
     },
     time::Duration,
 };
 
 use anyhow::{Context, Result};
+use ed25519_dalek::{Signature, Signer, SigningKey, Verifier, VerifyingKey};
 use serde::Serialize;
 use tokio::{
     io::{AsyncBufReadExt, AsyncRead, AsyncWriteExt, BufReader},
@@ -47,9 +48,10 @@ const SESSION_SYNC_INTERVAL: Duration = Duration::from_secs(2);
 const TRANSACTION_ACK_RETRY_INTERVAL: Duration = Duration::from_secs(3);
 const JOIN_RESPONSE_TIMEOUT: Duration = Duration::from_secs(5);
 const MAX_JOIN_RESPONSE_ENVELOPES: usize = 16;
+const MAX_PEER_VERIFICATION_ENVELOPES: usize = 8;
 const INITIAL_RECONNECT_DELAY: Duration = Duration::from_secs(1);
 const MAX_RECONNECT_DELAY: Duration = Duration::from_secs(30);
-static NEXT_NODE_ID: AtomicU64 = AtomicU64::new(1);
+static NODE_SIGNING_KEYS: OnceLock<StdMutex<BTreeMap<String, SigningKey>>> = OnceLock::new();
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 struct PeerStatus {
@@ -186,6 +188,12 @@ impl InboundSessionRejection {
 struct InboundSessionPermit {
     limiter: Arc<StdMutex<InboundConnectionLimiter>>,
     ip: IpAddr,
+}
+
+struct PeerVerificationSession<'a> {
+    writer: &'a mut OwnedWriteHalf,
+    reader: &'a mut LimitedLineReader<OwnedReadHalf>,
+    connection_label: &'a str,
 }
 
 impl Drop for InboundSessionPermit {
@@ -973,8 +981,18 @@ async fn session_loop(
         .await
         {
             if let GossipEnvelope::Hello(hello) = envelope {
-                peer_status =
-                    Some(process_hello(&network, remote_addr, &mut known_peer, hello).await?);
+                peer_status = Some(
+                    process_hello_with_verification(
+                        &network,
+                        &mut writer,
+                        &mut reader,
+                        &connection_label,
+                        remote_addr,
+                        &mut known_peer,
+                        hello,
+                    )
+                    .await?,
+                );
                 if is_outbound_session && known_peer.is_none() {
                     return Ok(());
                 }
@@ -1072,7 +1090,18 @@ async fn session_loop(
                     return Ok(());
                 };
                 if let GossipEnvelope::Hello(hello) = envelope {
-                    peer_status = Some(process_hello(&network, remote_addr, &mut known_peer, hello).await?);
+                    peer_status = Some(
+                        process_hello_with_verification(
+                            &network,
+                            &mut writer,
+                            &mut reader,
+                            &connection_label,
+                            remote_addr,
+                            &mut known_peer,
+                            hello,
+                        )
+                        .await?,
+                    );
                     if is_outbound_session && known_peer.is_none() {
                         return Ok(());
                     }
@@ -1178,27 +1207,23 @@ async fn process_envelope(
                 .missing_inventory_requests(&txs, &blocks);
             write_payload(writer, &requests).await?;
         }
-        GossipEnvelope::PeerAnnouncement { address } => {
+        GossipEnvelope::PeerAnnouncement { address, node_id } => {
             let peer = normalize_advertised_peer(&address, remote_addr)?;
             if network.is_self_peer(&peer).await {
                 P2pMetricsCounters::inc(&network.inner.metrics.self_peer_rejections);
                 forget_stale_self_peer(network, known_peer).await;
-            } else if remember_discoverable_advertised_peer(
-                network,
-                remote_addr,
-                known_peer,
-                peer.clone(),
-            )
-            .await?
-            {
-                if let Some(peer) = known_peer {
-                    let mut peers = network.inner.peers.lock().await;
-                    peers.record_received(peer, 1);
-                }
+            } else if node_id.is_some() && debug_logging_enabled() {
+                eprintln!("p2p peer announcement for {peer} ignored until hello verification");
             }
             let snapshot = network.inner.node.lock().await.chain_snapshot();
             write_envelope(writer, &GossipEnvelope::ChainSnapshot(snapshot)).await?;
         }
+        GossipEnvelope::PeerVerificationChallenge { address, nonce } => {
+            if let Some(response) = peer_verification_response(network, &address, &nonce) {
+                write_envelope(writer, &response).await?;
+            }
+        }
+        GossipEnvelope::PeerVerificationResponse { .. } => {}
         GossipEnvelope::PeerList { peers } => {
             apply_peer_list(network, remote_addr, peers).await?;
         }
@@ -1735,6 +1760,8 @@ fn record_received_envelope_kind(metrics: &P2pMetricsCounters, envelope: &Gossip
         | GossipEnvelope::BlockRequest { .. }
         | GossipEnvelope::TransactionAck { .. }
         | GossipEnvelope::PeerAnnouncement { .. }
+        | GossipEnvelope::PeerVerificationChallenge { .. }
+        | GossipEnvelope::PeerVerificationResponse { .. }
         | GossipEnvelope::PeerList { .. } => {
             P2pMetricsCounters::inc(&metrics.control_envelopes_received);
         }
@@ -1800,7 +1827,9 @@ fn validate_envelope_limits(envelope: &GossipEnvelope) -> Result<()> {
         | GossipEnvelope::ChainSnapshotRequest
         | GossipEnvelope::Transaction(_)
         | GossipEnvelope::Block(_)
-        | GossipEnvelope::PeerAnnouncement { .. } => {}
+        | GossipEnvelope::PeerAnnouncement { .. }
+        | GossipEnvelope::PeerVerificationChallenge { .. }
+        | GossipEnvelope::PeerVerificationResponse { .. } => {}
     }
     Ok(())
 }
@@ -1951,7 +1980,7 @@ async fn fetch_peer_status(peer: &str) -> Result<PeerStatus> {
 
 pub async fn fetch_snapshot_with_announcement(
     peer: &str,
-    advertised_addr: Option<SocketAddr>,
+    _advertised_addr: Option<SocketAddr>,
 ) -> Result<ChainSnapshot> {
     let stream = TcpStream::connect(peer)
         .await
@@ -1988,21 +2017,6 @@ pub async fn fetch_snapshot_with_announcement(
     writer.write_all(b"\n").await?;
     let snapshot = read_join_snapshot_response(peer, &mut reader).await?;
 
-    if let Some(address) = advertised_addr {
-        let line = serde_json::to_string(&GossipEnvelope::PeerAnnouncement {
-            address: address.to_string(),
-        })?;
-        writer.write_all(line.as_bytes()).await?;
-        writer.write_all(b"\n").await?;
-        if let Ok(Ok(Some(line))) = timeout(Duration::from_secs(2), reader.read_line()).await {
-            if let GossipEnvelope::ChainSnapshot(fresh_snapshot) = parse_envelope(&line)? {
-                if snapshot_height(&fresh_snapshot) >= snapshot_height(&snapshot) {
-                    return Ok(fresh_snapshot);
-                }
-            }
-        }
-    }
-
     Ok(snapshot)
 }
 
@@ -2030,6 +2044,8 @@ fn join_snapshot_response(peer: &str, envelope: GossipEnvelope) -> Result<Option
         GossipEnvelope::Hello(_)
         | GossipEnvelope::PeerStatus { .. }
         | GossipEnvelope::PeerList { .. }
+        | GossipEnvelope::PeerVerificationChallenge { .. }
+        | GossipEnvelope::PeerVerificationResponse { .. }
         | GossipEnvelope::Inventory { .. } => Ok(None),
         other => anyhow::bail!("join peer {peer} sent {other:?} instead of a chain snapshot"),
     }
@@ -2181,6 +2197,40 @@ async fn process_hello(
     known_peer: &mut Option<String>,
     hello: ProtocolHello,
 ) -> Result<PeerStatus> {
+    process_hello_inner(network, None, remote_addr, known_peer, hello).await
+}
+
+async fn process_hello_with_verification(
+    network: &GossipNetwork,
+    writer: &mut OwnedWriteHalf,
+    reader: &mut LimitedLineReader<OwnedReadHalf>,
+    connection_label: &str,
+    remote_addr: SocketAddr,
+    known_peer: &mut Option<String>,
+    hello: ProtocolHello,
+) -> Result<PeerStatus> {
+    let mut verification_session = PeerVerificationSession {
+        writer,
+        reader,
+        connection_label,
+    };
+    process_hello_inner(
+        network,
+        Some(&mut verification_session),
+        remote_addr,
+        known_peer,
+        hello,
+    )
+    .await
+}
+
+async fn process_hello_inner(
+    network: &GossipNetwork,
+    mut verification_session: Option<&mut PeerVerificationSession<'_>>,
+    remote_addr: SocketAddr,
+    known_peer: &mut Option<String>,
+    hello: ProtocolHello,
+) -> Result<PeerStatus> {
     if hello.protocol_version != PROTOCOL_VERSION {
         anyhow::bail!(
             "unsupported protocol version {}; expected {}",
@@ -2227,13 +2277,32 @@ async fn process_hello(
         );
     }
 
+    let remote_node_id = hello.node_id.clone();
     if let Some(listen_addr) = &hello.listen_addr {
         let peer = normalize_advertised_peer(listen_addr, remote_addr)?;
         if network.is_self_peer(&peer).await {
             P2pMetricsCounters::inc(&network.inner.metrics.self_peer_rejections);
             forget_stale_self_peer(network, known_peer).await;
         } else {
-            remember_discoverable_advertised_peer(network, remote_addr, known_peer, peer).await?;
+            let verified = match verification_session.as_mut() {
+                Some(session) => {
+                    remember_verified_advertised_peer(
+                        network,
+                        session,
+                        remote_addr,
+                        known_peer,
+                        peer.clone(),
+                        remote_node_id.as_deref(),
+                    )
+                    .await?
+                }
+                None => false,
+            };
+            if !verified && debug_logging_enabled() {
+                eprintln!(
+                    "p2p advertised address {peer} ignored because ownership was not verified"
+                );
+            }
         }
     }
     record_peer_status(
@@ -2269,16 +2338,315 @@ fn setup_placeholder_genesis_hash() -> String {
 }
 
 fn new_node_id() -> String {
-    let now_nanos = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .map(|duration| duration.as_nanos())
-        .unwrap_or_default();
-    format!(
-        "{}-{}-{}",
-        std::process::id(),
-        now_nanos,
-        NEXT_NODE_ID.fetch_add(1, Ordering::Relaxed)
+    let mut bytes = [0_u8; 32];
+    getrandom::getrandom(&mut bytes).expect("secure randomness unavailable for p2p node id");
+    let signing_key = SigningKey::from_bytes(&bytes);
+    let node_id = hex_encode(&signing_key.verifying_key().to_bytes());
+    node_signing_keys()
+        .lock()
+        .expect("node signing key registry mutex poisoned")
+        .insert(node_id.clone(), signing_key);
+    node_id
+}
+
+fn node_signing_keys() -> &'static StdMutex<BTreeMap<String, SigningKey>> {
+    NODE_SIGNING_KEYS.get_or_init(|| StdMutex::new(BTreeMap::new()))
+}
+
+fn hex_encode(bytes: &[u8]) -> String {
+    const HEX: &[u8; 16] = b"0123456789abcdef";
+    let mut encoded = String::with_capacity(bytes.len() * 2);
+    for byte in bytes {
+        encoded.push(HEX[(byte >> 4) as usize] as char);
+        encoded.push(HEX[(byte & 0x0f) as usize] as char);
+    }
+    encoded
+}
+
+fn decode_hex_array<const N: usize>(value: &str) -> Result<[u8; N]> {
+    if value.len() != N * 2 {
+        anyhow::bail!("hex value has {} chars, expected {}", value.len(), N * 2);
+    }
+    let mut bytes = [0_u8; N];
+    for (index, chunk) in value.as_bytes().chunks_exact(2).enumerate() {
+        let high = hex_nibble(chunk[0])?;
+        let low = hex_nibble(chunk[1])?;
+        bytes[index] = (high << 4) | low;
+    }
+    Ok(bytes)
+}
+
+fn hex_nibble(byte: u8) -> Result<u8> {
+    match byte {
+        b'0'..=b'9' => Ok(byte - b'0'),
+        b'a'..=b'f' => Ok(byte - b'a' + 10),
+        b'A'..=b'F' => Ok(byte - b'A' + 10),
+        _ => anyhow::bail!("invalid hex digit"),
+    }
+}
+
+fn new_verification_nonce() -> String {
+    let mut bytes = [0_u8; 32];
+    getrandom::getrandom(&mut bytes)
+        .expect("secure randomness unavailable for p2p verification nonce");
+    hex_encode(&bytes)
+}
+
+fn peer_verification_payload(address: &str, nonce: &str, node_id: &str) -> String {
+    format!("iuna-peer-verification:v1:{NETWORK_ID}:{node_id}:{address}:{nonce}")
+}
+
+fn peer_verification_response(
+    network: &GossipNetwork,
+    address: &str,
+    nonce: &str,
+) -> Option<GossipEnvelope> {
+    peer_verification_response_for_node_id(&network.inner.node_id, address, nonce)
+}
+
+fn peer_verification_response_for_node_id(
+    node_id: &str,
+    address: &str,
+    nonce: &str,
+) -> Option<GossipEnvelope> {
+    let keys = node_signing_keys()
+        .lock()
+        .expect("node signing key registry mutex poisoned");
+    let signing_key = keys.get(node_id)?;
+    let payload = peer_verification_payload(address, nonce, node_id);
+    let signature: Signature = signing_key.sign(payload.as_bytes());
+    Some(GossipEnvelope::PeerVerificationResponse {
+        address: address.to_string(),
+        nonce: nonce.to_string(),
+        node_id: node_id.to_string(),
+        signature: hex_encode(&signature.to_bytes()),
+    })
+}
+
+fn peer_verification_response_is_valid(
+    response_address: &str,
+    response_nonce: &str,
+    response_node_id: &str,
+    signature: &str,
+    expected_address: &str,
+    expected_nonce: &str,
+    expected_node_id: &str,
+) -> bool {
+    if response_address != expected_address
+        || response_nonce != expected_nonce
+        || response_node_id != expected_node_id
+    {
+        return false;
+    }
+    let public_key = match decode_hex_array::<32>(response_node_id) {
+        Ok(public_key) => public_key,
+        Err(_) => return false,
+    };
+    let signature = match decode_hex_array::<64>(signature) {
+        Ok(signature) => Signature::from_bytes(&signature),
+        Err(_) => return false,
+    };
+    let verifying_key = match VerifyingKey::from_bytes(&public_key) {
+        Ok(verifying_key) => verifying_key,
+        Err(_) => return false,
+    };
+    verifying_key
+        .verify(
+            peer_verification_payload(expected_address, expected_nonce, expected_node_id)
+                .as_bytes(),
+            &signature,
+        )
+        .is_ok()
+}
+
+async fn remember_verified_advertised_peer(
+    network: &GossipNetwork,
+    session: &mut PeerVerificationSession<'_>,
+    remote_addr: SocketAddr,
+    known_peer: &mut Option<String>,
+    peer: String,
+    expected_node_id: Option<&str>,
+) -> Result<bool> {
+    if !advertised_peer_is_discoverable(&peer, remote_addr)? {
+        return Ok(false);
+    }
+    if known_peer.as_deref() != Some(peer.as_str()) {
+        let Some(expected_node_id) = expected_node_id else {
+            return Ok(false);
+        };
+        if !verify_connected_peer_node_id(network, session, &peer, expected_node_id).await? {
+            return Ok(false);
+        }
+        if !verify_advertised_peer_node_id(network, &peer, expected_node_id).await {
+            return Ok(false);
+        }
+    }
+    remember_discoverable_advertised_peer(network, remote_addr, known_peer, peer).await
+}
+
+async fn verify_connected_peer_node_id(
+    network: &GossipNetwork,
+    session: &mut PeerVerificationSession<'_>,
+    peer: &str,
+    expected_node_id: &str,
+) -> Result<bool> {
+    let nonce = new_verification_nonce();
+    write_envelope(
+        session.writer,
+        &GossipEnvelope::PeerVerificationChallenge {
+            address: peer.to_string(),
+            nonce: nonce.clone(),
+        },
     )
+    .await?;
+
+    for _ in 0..MAX_PEER_VERIFICATION_ENVELOPES {
+        let envelope = match timeout(
+            HANDSHAKE_TIMEOUT,
+            read_session_envelope(network, session.connection_label, session.reader),
+        )
+        .await
+        {
+            Ok(Ok(Some(envelope))) => envelope,
+            Ok(Ok(None)) | Err(_) => return Ok(false),
+            Ok(Err(error)) => return Err(error),
+        };
+        match envelope {
+            GossipEnvelope::PeerVerificationResponse {
+                address,
+                nonce: response_nonce,
+                node_id,
+                signature,
+            } => {
+                return Ok(peer_verification_response_is_valid(
+                    &address,
+                    &response_nonce,
+                    &node_id,
+                    &signature,
+                    peer,
+                    &nonce,
+                    expected_node_id,
+                ));
+            }
+            GossipEnvelope::PeerVerificationChallenge { address, nonce } => {
+                if let Some(response) = peer_verification_response(network, &address, &nonce) {
+                    write_envelope(session.writer, &response).await?;
+                }
+            }
+            _ => {}
+        }
+    }
+    Ok(false)
+}
+
+async fn verify_advertised_peer_node_id(
+    network: &GossipNetwork,
+    peer: &str,
+    expected_node_id: &str,
+) -> bool {
+    let stream = match timeout(CONNECT_TIMEOUT, TcpStream::connect(peer)).await {
+        Ok(Ok(stream)) => stream,
+        Ok(Err(error)) => {
+            if debug_logging_enabled() {
+                eprintln!("p2p announced address {peer} failed verification: {error}");
+            }
+            return false;
+        }
+        Err(_) => {
+            if debug_logging_enabled() {
+                eprintln!("p2p announced address {peer} failed verification: timeout");
+            }
+            return false;
+        }
+    };
+    let (reader, mut writer) = stream.into_split();
+    let mut reader = LimitedLineReader::new(reader);
+    let line = match timeout(HANDSHAKE_TIMEOUT, reader.read_line()).await {
+        Ok(Ok(Some(line))) => line,
+        Ok(Ok(None)) => return false,
+        Ok(Err(error)) => {
+            if debug_logging_enabled() {
+                eprintln!(
+                    "p2p announced address {peer} sent invalid verification hello: {error:#}"
+                );
+            }
+            return false;
+        }
+        Err(_) => return false,
+    };
+    let hello = match parse_envelope(&line) {
+        Ok(GossipEnvelope::Hello(hello)) => hello,
+        Ok(_) | Err(_) => return false,
+    };
+
+    if !advertised_peer_hello_is_compatible(network, &hello).await
+        || hello.node_id.as_deref() != Some(expected_node_id)
+    {
+        return false;
+    }
+
+    let nonce = new_verification_nonce();
+    if write_envelope(
+        &mut writer,
+        &GossipEnvelope::PeerVerificationChallenge {
+            address: peer.to_string(),
+            nonce: nonce.clone(),
+        },
+    )
+    .await
+    .is_err()
+    {
+        return false;
+    }
+    for _ in 0..MAX_PEER_VERIFICATION_ENVELOPES {
+        let line = match timeout(HANDSHAKE_TIMEOUT, reader.read_line()).await {
+            Ok(Ok(Some(line))) => line,
+            Ok(Ok(None)) | Ok(Err(_)) | Err(_) => return false,
+        };
+        let envelope = match parse_envelope(&line) {
+            Ok(envelope) => envelope,
+            Err(_) => return false,
+        };
+        if let GossipEnvelope::PeerVerificationResponse {
+            address,
+            nonce: response_nonce,
+            node_id,
+            signature,
+        } = envelope
+        {
+            return peer_verification_response_is_valid(
+                &address,
+                &response_nonce,
+                &node_id,
+                &signature,
+                peer,
+                &nonce,
+                expected_node_id,
+            );
+        }
+    }
+    false
+}
+
+async fn advertised_peer_hello_is_compatible(
+    network: &GossipNetwork,
+    hello: &ProtocolHello,
+) -> bool {
+    if hello.protocol_version != PROTOCOL_VERSION || hello.network_id != NETWORK_ID {
+        return false;
+    }
+    let (local_genesis, local_accepts_remote_genesis) = {
+        let node = network.inner.node.lock().await;
+        (
+            node.ledger().genesis_hash().to_string(),
+            node.ledger().is_setup_placeholder(),
+        )
+    };
+    let remote_is_setup_placeholder =
+        hello.height == 0 && hello.genesis_hash == setup_placeholder_genesis_hash();
+    hello.genesis_hash == local_genesis
+        || local_accepts_remote_genesis
+        || remote_is_setup_placeholder
 }
 
 async fn remember_discoverable_advertised_peer(
@@ -2344,14 +2712,6 @@ async fn record_inbound_result(
 
 fn next_reconnect_delay(current: Duration) -> Duration {
     (current * 2).min(MAX_RECONNECT_DELAY)
-}
-
-fn snapshot_height(snapshot: &ChainSnapshot) -> u64 {
-    snapshot
-        .blocks
-        .last()
-        .map(|block| block.height)
-        .unwrap_or(0)
 }
 
 fn peer_needs_snapshot(peer_height: u64, envelopes: &[GossipEnvelope]) -> bool {
@@ -2763,7 +3123,8 @@ mod tests {
         assert!(!super::peer_needs_snapshot(
             8,
             &[GossipEnvelope::PeerAnnouncement {
-                address: "127.0.0.1:9444".to_string()
+                address: "127.0.0.1:9444".to_string(),
+                node_id: Some("peer-node".to_string()),
             }]
         ));
     }
@@ -3317,7 +3678,7 @@ mod tests {
                 .ledger()
                 .genesis_hash()
                 .to_string(),
-            listen_addr: Some("127.0.0.1:9545".to_string()),
+            listen_addr: None,
             node_id: None,
             height: 0,
             tip_hash: "tip".to_string(),
@@ -3451,6 +3812,195 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn hello_remembers_advertised_address_after_signed_session_and_dialback() {
+        let alice = Wallet::from_seed("hello-dialback-alice");
+        let allocations = allocations(std::slice::from_ref(&alice), 1_000);
+        let node = Arc::new(tokio::sync::Mutex::new(node("alice", alice, allocations)));
+        let peers = Arc::new(tokio::sync::Mutex::new(PeerBook::default()));
+        let network = super::GossipNetwork {
+            inner: Arc::new(super::GossipNetworkInner {
+                node: Arc::clone(&node),
+                peers: Arc::clone(&peers),
+                listen_addr: "127.0.0.1:9544".parse().unwrap(),
+                p2p_announce_addr: tokio::sync::Mutex::new(None),
+                node_id: super::new_node_id(),
+                sessions: tokio::sync::Mutex::new(BTreeMap::new()),
+                tx_delivery: tokio::sync::Mutex::new(BTreeMap::new()),
+                inbound_limiter: Arc::new(
+                    StdMutex::new(super::InboundConnectionLimiter::default()),
+                ),
+                metrics: super::P2pMetricsCounters::default(),
+            }),
+        };
+        let remote_node_id = super::new_node_id();
+        let remote_addr = spawn_hello_server(ProtocolHello {
+            protocol_version: PROTOCOL_VERSION,
+            network_id: NETWORK_ID.to_string(),
+            genesis_hash: node.lock().await.ledger().genesis_hash().to_string(),
+            listen_addr: None,
+            node_id: Some(remote_node_id.clone()),
+            height: 0,
+            tip_hash: "tip".to_string(),
+            time_ms: 1_000,
+        })
+        .await;
+        let original_addr = spawn_verification_responder(remote_node_id.clone()).await;
+        let stream = tokio::net::TcpStream::connect(original_addr).await.unwrap();
+        let remote_socket = stream.peer_addr().unwrap();
+        let (reader, mut writer) = stream.into_split();
+        let mut reader = super::LimitedLineReader::new(reader);
+        let hello = ProtocolHello {
+            protocol_version: PROTOCOL_VERSION,
+            network_id: NETWORK_ID.to_string(),
+            genesis_hash: node.lock().await.ledger().genesis_hash().to_string(),
+            listen_addr: Some(remote_addr.to_string()),
+            node_id: Some(remote_node_id),
+            height: 0,
+            tip_hash: "tip".to_string(),
+            time_ms: 1_000,
+        };
+        let mut known_peer = None;
+
+        super::process_hello_with_verification(
+            &network,
+            &mut writer,
+            &mut reader,
+            "test-original-peer",
+            remote_socket,
+            &mut known_peer,
+            hello,
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(known_peer, Some(remote_addr.to_string()));
+        assert!(
+            peers
+                .lock()
+                .await
+                .addresses()
+                .contains(&remote_addr.to_string())
+        );
+    }
+
+    #[tokio::test]
+    async fn hello_ignores_advertised_address_when_connected_peer_cannot_sign_claimed_node_id() {
+        let alice = Wallet::from_seed("hello-dialback-spoof-alice");
+        let allocations = allocations(std::slice::from_ref(&alice), 1_000);
+        let node = Arc::new(tokio::sync::Mutex::new(node("alice", alice, allocations)));
+        let peers = Arc::new(tokio::sync::Mutex::new(PeerBook::default()));
+        let network = super::GossipNetwork {
+            inner: Arc::new(super::GossipNetworkInner {
+                node: Arc::clone(&node),
+                peers: Arc::clone(&peers),
+                listen_addr: "127.0.0.1:9544".parse().unwrap(),
+                p2p_announce_addr: tokio::sync::Mutex::new(None),
+                node_id: super::new_node_id(),
+                sessions: tokio::sync::Mutex::new(BTreeMap::new()),
+                tx_delivery: tokio::sync::Mutex::new(BTreeMap::new()),
+                inbound_limiter: Arc::new(
+                    StdMutex::new(super::InboundConnectionLimiter::default()),
+                ),
+                metrics: super::P2pMetricsCounters::default(),
+            }),
+        };
+        let victim_node_id = super::new_node_id();
+        let attacker_node_id = super::new_node_id();
+        let remote_addr = spawn_hello_server(ProtocolHello {
+            protocol_version: PROTOCOL_VERSION,
+            network_id: NETWORK_ID.to_string(),
+            genesis_hash: node.lock().await.ledger().genesis_hash().to_string(),
+            listen_addr: None,
+            node_id: Some(victim_node_id.clone()),
+            height: 0,
+            tip_hash: "tip".to_string(),
+            time_ms: 1_000,
+        })
+        .await;
+        let original_addr = spawn_verification_responder(attacker_node_id).await;
+        let stream = tokio::net::TcpStream::connect(original_addr).await.unwrap();
+        let remote_socket = stream.peer_addr().unwrap();
+        let (reader, mut writer) = stream.into_split();
+        let mut reader = super::LimitedLineReader::new(reader);
+        let hello = ProtocolHello {
+            protocol_version: PROTOCOL_VERSION,
+            network_id: NETWORK_ID.to_string(),
+            genesis_hash: node.lock().await.ledger().genesis_hash().to_string(),
+            listen_addr: Some(remote_addr.to_string()),
+            node_id: Some(victim_node_id),
+            height: 0,
+            tip_hash: "tip".to_string(),
+            time_ms: 1_000,
+        };
+        let mut known_peer = None;
+
+        super::process_hello_with_verification(
+            &network,
+            &mut writer,
+            &mut reader,
+            "test-attacker-peer",
+            remote_socket,
+            &mut known_peer,
+            hello,
+        )
+        .await
+        .unwrap();
+
+        assert!(known_peer.is_none());
+        assert!(
+            !peers
+                .lock()
+                .await
+                .addresses()
+                .contains(&remote_addr.to_string())
+        );
+    }
+
+    #[tokio::test]
+    async fn dialback_rejects_address_that_signs_with_different_node_id() {
+        let alice = Wallet::from_seed("hello-dialback-mismatch-alice");
+        let allocations = allocations(std::slice::from_ref(&alice), 1_000);
+        let node = Arc::new(tokio::sync::Mutex::new(node("alice", alice, allocations)));
+        let network = super::GossipNetwork {
+            inner: Arc::new(super::GossipNetworkInner {
+                node: Arc::clone(&node),
+                peers: Arc::new(tokio::sync::Mutex::new(PeerBook::default())),
+                listen_addr: "127.0.0.1:9544".parse().unwrap(),
+                p2p_announce_addr: tokio::sync::Mutex::new(None),
+                node_id: super::new_node_id(),
+                sessions: tokio::sync::Mutex::new(BTreeMap::new()),
+                tx_delivery: tokio::sync::Mutex::new(BTreeMap::new()),
+                inbound_limiter: Arc::new(
+                    StdMutex::new(super::InboundConnectionLimiter::default()),
+                ),
+                metrics: super::P2pMetricsCounters::default(),
+            }),
+        };
+        let honest_node_id = super::new_node_id();
+        let claimed_node_id = super::new_node_id();
+        let remote_addr = spawn_hello_server(ProtocolHello {
+            protocol_version: PROTOCOL_VERSION,
+            network_id: NETWORK_ID.to_string(),
+            genesis_hash: node.lock().await.ledger().genesis_hash().to_string(),
+            listen_addr: None,
+            node_id: Some(honest_node_id),
+            height: 0,
+            tip_hash: "tip".to_string(),
+            time_ms: 1_000,
+        })
+        .await;
+
+        assert!(
+            !super::verify_advertised_peer_node_id(
+                &network,
+                &remote_addr.to_string(),
+                &claimed_node_id
+            )
+            .await
+        );
+    }
+
+    #[tokio::test]
     async fn setup_placeholder_accepts_remote_genesis_and_adopts_snapshot() {
         let local_wallet = Wallet::from_seed("setup-placeholder-local");
         let local_ledger = Ledger::new(BTreeMap::new(), 1);
@@ -3507,12 +4057,12 @@ mod tests {
 
         assert!(peer_status.request_snapshot);
         assert!(!peer_status.push_snapshot);
-        assert_eq!(known_peer.as_deref(), Some("142.132.164.59:9444"));
+        assert_eq!(known_peer.as_deref(), Some("iuna.jhx.app:9444"));
         let listed = network.inner.peers.lock().await.list();
         assert_eq!(listed.len(), 1);
         let peer = listed
             .into_iter()
-            .find(|peer| peer.address == "142.132.164.59:9444")
+            .find(|peer| peer.address == "iuna.jhx.app:9444")
             .unwrap();
         assert_eq!(peer.misbehavior_score, 0);
         assert!(!peer.is_banned_at(crate::app::now_ms()));
@@ -4155,6 +4705,71 @@ mod tests {
         assert_eq!(network.metrics().self_peer_rejections, 1);
         assert!(known_peer.is_none());
         assert!(peers.lock().await.addresses().is_empty());
+    }
+
+    async fn spawn_hello_server(hello: ProtocolHello) -> SocketAddr {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        tokio::spawn(async move {
+            let Ok((stream, _)) = listener.accept().await else {
+                return;
+            };
+            let node_id = hello.node_id.clone();
+            let (reader, mut writer) = stream.into_split();
+            let line = serde_json::to_string(&GossipEnvelope::Hello(hello)).unwrap();
+            let _ = writer.write_all(line.as_bytes()).await;
+            let _ = writer.write_all(b"\n").await;
+            let Some(node_id) = node_id else {
+                return;
+            };
+            let mut reader = super::LimitedLineReader::new(reader);
+            let Ok(Some(line)) = reader.read_line().await else {
+                return;
+            };
+            let Ok(GossipEnvelope::PeerVerificationChallenge { address, nonce }) =
+                super::parse_envelope(&line)
+            else {
+                return;
+            };
+            let Some(response) =
+                super::peer_verification_response_for_node_id(&node_id, &address, &nonce)
+            else {
+                return;
+            };
+            let line = serde_json::to_string(&response).unwrap();
+            let _ = writer.write_all(line.as_bytes()).await;
+            let _ = writer.write_all(b"\n").await;
+        });
+        addr
+    }
+
+    async fn spawn_verification_responder(node_id: String) -> SocketAddr {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        tokio::spawn(async move {
+            let Ok((stream, _)) = listener.accept().await else {
+                return;
+            };
+            let (reader, mut writer) = stream.into_split();
+            let mut reader = super::LimitedLineReader::new(reader);
+            let Ok(Some(line)) = reader.read_line().await else {
+                return;
+            };
+            let Ok(GossipEnvelope::PeerVerificationChallenge { address, nonce }) =
+                super::parse_envelope(&line)
+            else {
+                return;
+            };
+            let Some(response) =
+                super::peer_verification_response_for_node_id(&node_id, &address, &nonce)
+            else {
+                return;
+            };
+            let line = serde_json::to_string(&response).unwrap();
+            let _ = writer.write_all(line.as_bytes()).await;
+            let _ = writer.write_all(b"\n").await;
+        });
+        addr
     }
 
     fn node(_network_key: &str, wallet: Wallet, allocations: BTreeMap<String, Amount>) -> NodeCore {
