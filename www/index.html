@@ -220,6 +220,59 @@
       gap: 10px;
     }
     .step p { margin: 0; }
+    .join-panel {
+      display: grid;
+      grid-template-columns: minmax(0, 1fr) minmax(280px, .7fr);
+      gap: 18px;
+      border: 1px solid var(--line);
+      border-radius: 8px;
+      padding: 18px;
+      background: rgba(21, 25, 27, .88);
+    }
+    .join-steps {
+      display: grid;
+      gap: 14px;
+      counter-reset: join-step;
+    }
+    .join-step {
+      position: relative;
+      display: grid;
+      gap: 4px;
+      padding-left: 42px;
+    }
+    .join-step::before {
+      counter-increment: join-step;
+      content: counter(join-step);
+      position: absolute;
+      left: 0;
+      top: 1px;
+      width: 28px;
+      height: 28px;
+      display: grid;
+      place-items: center;
+      border: 1px solid rgba(213, 245, 95, .42);
+      border-radius: 999px;
+      color: var(--green);
+      font-size: 12px;
+      font-weight: 900;
+    }
+    .join-step h3, .role-row h3 { margin: 0; }
+    .join-step p, .role-row p { margin: 0; font-size: 15px; }
+    .join-actions { margin-top: 18px; }
+    .role-list {
+      display: grid;
+      gap: 10px;
+      border-left: 1px solid var(--line);
+      padding-left: 18px;
+    }
+    .role-row {
+      display: grid;
+      gap: 4px;
+      border: 1px solid #2d373d;
+      border-radius: 8px;
+      padding: 12px;
+      background: #101315;
+    }
     .note {
       border-left: 3px solid var(--green);
       padding-left: 14px;
@@ -235,10 +288,11 @@
     }
     @media (max-width: 820px) {
       .hero { padding-top: 58px; }
-      .hero-grid, .split, .grid { grid-template-columns: 1fr; }
+      .hero-grid, .split, .grid, .join-panel { grid-template-columns: 1fr; }
       nav { display: none; }
       .wrap { width: min(100% - 32px, 1060px); }
       .stat { grid-template-columns: 1fr; gap: 4px; }
+      .role-list { border-left: 0; border-top: 1px solid var(--line); padding-left: 0; padding-top: 16px; }
     }
   </style>
 </head>
@@ -311,25 +365,43 @@
           <h2>How To Join</h2>
           <p>Download the latest build from <a href="https://github.com/iuna-labs/iuna/releases">GitHub Releases</a>, start it, and follow setup. Choose how much of the network you want to run.</p>
         </div>
-        <div class="grid">
-          <div class="card">
-            <span class="tag green">Wallet</span>
-            <h3>Wallet</h3>
-            <p>Use the app to create or import a wallet, back up your recovery phrase, and send or receive IUNA on the devnet.</p>
+        <div class="join-panel">
+          <div>
+            <div class="join-steps">
+              <div class="join-step">
+                <h3>Download</h3>
+                <p>Get the latest build for your platform from GitHub Releases.</p>
+              </div>
+              <div class="join-step">
+                <h3>Set Up</h3>
+                <p>Create or import a wallet, back up your recovery phrase, and connect to the devnet.</p>
+              </div>
+              <div class="join-step">
+                <h3>Choose Your Role</h3>
+                <p>Start simple as a wallet, then switch to node mode whenever you want to do more.</p>
+              </div>
+            </div>
+            <div class="actions join-actions">
+              <a class="button primary" href="https://github.com/iuna-labs/iuna/releases">Download from Releases</a>
+            </div>
           </div>
-          <div class="card">
-            <span class="tag cyan">Node</span>
-            <h3>Private Node</h3>
-            <p>Run a local node that connects out to peers. You can keep a chain copy and use node mode without opening an inbound P2P port.</p>
+          <div class="role-list" aria-label="iuna roles">
+            <div class="role-row">
+              <span class="tag green">Wallet</span>
+              <h3>Wallet</h3>
+              <p>Send, receive, and inspect activity.</p>
+            </div>
+            <div class="role-row">
+              <span class="tag cyan">Node</span>
+              <h3>Private Node</h3>
+              <p>Mine new coins with PoW actions or earn finalizer rewards by burning, without opening an inbound P2P port.</p>
+            </div>
+            <div class="role-row">
+              <span class="tag blue">Public Peer</span>
+              <h3>Public Node</h3>
+              <p>Help strengthen the network by opening TCP port <code>9444</code> and sharing your public P2P address.</p>
+            </div>
           </div>
-          <div class="card">
-            <span class="tag blue">Public Peer</span>
-            <h3>Public Node</h3>
-            <p>Run the same node, but make it reachable by other peers. Open TCP port <code>9444</code> and fill in your public P2P address during setup or in the settings.</p>
-          </div>
-        </div>
-        <div class="actions">
-          <a class="button primary" href="https://github.com/iuna-labs/iuna/releases">Download from Releases</a>
         </div>
         <p class="note">Keep the management UI local. Only the P2P listener should be reachable by other nodes.</p>
       </div>
