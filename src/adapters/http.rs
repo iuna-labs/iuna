@@ -40,6 +40,8 @@ use crate::{
 
 const EXPLORER_LIMIT: usize = 50;
 const EXPLORER_PAGE_LIMIT: usize = 20;
+const DATASET_LIMIT: usize = 1_000;
+const DATASET_PAGE_LIMIT: usize = 25;
 const AUTH_COOKIE_NAME: &str = "iuna_session";
 const AUTH_SESSION_TTL_MS: u64 = 12 * 60 * 60 * 1_000;
 const AUTH_MAX_FAILED_ATTEMPTS: u32 = 5;
@@ -186,10 +188,27 @@ struct BlocksQuery {
 }
 
 #[derive(Debug, Default, Deserialize)]
+struct PageQuery {
+    offset: Option<usize>,
+    limit: Option<usize>,
+}
+
+#[derive(Debug, Default, Deserialize)]
 struct WalletTransactionsQuery {
     tx: Option<bool>,
     mine: Option<bool>,
     burn: Option<bool>,
+    offset: Option<usize>,
+    limit: Option<usize>,
+}
+
+impl WalletTransactionsQuery {
+    fn page(&self) -> PageQuery {
+        PageQuery {
+            offset: self.offset,
+            limit: self.limit,
+        }
+    }
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -231,6 +250,17 @@ impl WalletTransactionFilters {
 struct ActionResponse {
     ok: bool,
     error: Option<String>,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct Page<T> {
+    items: Vec<T>,
+    offset: usize,
+    limit: usize,
+    total: usize,
+    has_more: bool,
+    next_offset: Option<usize>,
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize)]
@@ -396,6 +426,10 @@ pub async fn serve(
         .route("/api/wallet/generate", post(api_wallet_generate_form))
         .route("/api/wallet/import", post(api_wallet_import_form))
         .route("/api/wallet/transactions", get(api_wallet_transactions))
+        .route(
+            "/api/wallet/utxos/selectable",
+            get(api_wallet_selectable_utxos),
+        )
         .route("/api/wallet/utxos", get(api_wallet_utxos))
         .route(
             "/api/fee-estimate/transfer",
@@ -701,40 +735,85 @@ async fn api_wallet_setup(
     wallet_setup_json(wallet_setup_response(&state, &headers).await)
 }
 
-async fn api_mempool(State(state): State<HttpState>) -> Json<Vec<UiTransaction>> {
+async fn api_mempool(
+    State(state): State<HttpState>,
+    Query(query): Query<PageQuery>,
+) -> Json<Page<UiTransaction>> {
     let node = state.node.lock().await;
     let snapshot = node.chain_snapshot();
     let pending = node.pending_transactions();
     let outputs = known_output_index(&snapshot.genesis_allocations, &snapshot.blocks, &pending);
-    Json(
+    Json(page_items(
         pending
             .iter()
             .map(|tx| ui_transaction(tx, &outputs))
             .collect(),
-    )
+        query,
+    ))
 }
 
 async fn api_wallet_transactions(
     State(state): State<HttpState>,
     Query(query): Query<WalletTransactionsQuery>,
-) -> Json<Vec<WalletTransactionRow>> {
+) -> Json<Page<WalletTransactionRow>> {
     let node = state.node.lock().await;
     let snapshot = node.chain_snapshot();
     let pending = node.pending_transactions();
     let outputs = known_output_index(&snapshot.genesis_allocations, &snapshot.blocks, &pending);
+    let page_query = query.page();
     let filters = WalletTransactionFilters::from_query(query);
-    Json(wallet_transaction_rows(
-        node.wallet_address(),
-        pending,
-        &snapshot.blocks,
-        &outputs,
-        filters,
+    Json(page_items(
+        wallet_transaction_rows(
+            node.wallet_address(),
+            pending,
+            &snapshot.blocks,
+            &outputs,
+            filters,
+        ),
+        page_query,
     ))
 }
 
-async fn api_wallet_utxos(State(state): State<HttpState>) -> Json<Vec<WalletUtxoRow>> {
+async fn api_wallet_utxos(
+    State(state): State<HttpState>,
+    Query(query): Query<PageQuery>,
+) -> Json<Page<WalletUtxoRow>> {
     let node = state.node.lock().await;
-    Json(wallet_utxo_rows(node.ledger(), node.wallet_address()))
+    Json(page_items(
+        wallet_utxo_rows(node.ledger(), node.wallet_address()),
+        query,
+    ))
+}
+
+async fn api_wallet_selectable_utxos(State(state): State<HttpState>) -> Json<Vec<WalletUtxoRow>> {
+    let node = state.node.lock().await;
+    Json(selectable_wallet_utxo_rows(
+        node.ledger(),
+        node.wallet_address(),
+    ))
+}
+
+fn page_items<T>(items: Vec<T>, query: PageQuery) -> Page<T> {
+    let total = items.len();
+    let offset = query.offset.unwrap_or(0).min(total);
+    let limit = query
+        .limit
+        .unwrap_or(DATASET_PAGE_LIMIT)
+        .clamp(1, DATASET_LIMIT);
+    let page_items = items
+        .into_iter()
+        .skip(offset)
+        .take(limit)
+        .collect::<Vec<_>>();
+    let next_offset = offset + page_items.len();
+    Page {
+        items: page_items,
+        offset,
+        limit,
+        total,
+        has_more: next_offset < total,
+        next_offset: (next_offset < total).then_some(next_offset),
+    }
 }
 
 fn wallet_utxo_rows(ledger: &Ledger, wallet: &str) -> Vec<WalletUtxoRow> {
@@ -767,8 +846,18 @@ fn wallet_utxo_rows(ledger: &Ledger, wallet: &str) -> Vec<WalletUtxoRow> {
     utxos
 }
 
-async fn api_peers(State(state): State<HttpState>) -> Json<Vec<PeerInfo>> {
-    Json(state.peers.lock().await.list())
+fn selectable_wallet_utxo_rows(ledger: &Ledger, wallet: &str) -> Vec<WalletUtxoRow> {
+    wallet_utxo_rows(ledger, wallet)
+        .into_iter()
+        .filter(|utxo| utxo.spendable)
+        .collect()
+}
+
+async fn api_peers(
+    State(state): State<HttpState>,
+    Query(query): Query<PageQuery>,
+) -> Json<Page<PeerInfo>> {
+    Json(page_items(state.peers.lock().await.list(), query))
 }
 
 async fn api_p2p_metrics(State(state): State<HttpState>) -> Json<P2pMetrics> {
@@ -2648,6 +2737,11 @@ const INDEX_HTML: &str = r#"<!doctype html>
     .skeleton-line.short { width: 42%; }
     .skeleton-line.medium { width: 68%; }
     .skeleton-line.long { width: 88%; }
+    .page-sentinel { min-height: 1px; }
+    .block-page-sentinel { flex: 0 0 1px; min-height: 100px; }
+    .dataset-loader { display: grid; gap: 8px; min-width: 0; }
+    .skeleton-table-cell { height: 12px; width: 100%; border-radius: 6px; background: #2b3136; }
+    tr.skeleton-card td { padding-top: 11px; padding-bottom: 11px; }
     .detail-grid { display: grid; grid-template-columns: minmax(0, .9fr) minmax(0, 1.1fr); gap: 12px; }
     .detail-kv { display: grid; grid-template-columns: 90px minmax(0, 1fr); gap: 8px; font-size: 13px; margin: 7px 0; }
     .detail-kv .key { color: #8d989f; }
@@ -2787,7 +2881,7 @@ const INDEX_HTML: &str = r#"<!doctype html>
                   <div class="send-utxo-list-head">
                     <span>UTXOs</span>
                     <span class="send-utxo-actions">
-                      <button class="utxo-select-button" type="button" @click="selectAllTransferUtxos" :disabled="spendableWalletUtxos().length === 0">Select all</button>
+                      <button class="utxo-select-button" type="button" @click="selectAllTransferUtxos" :disabled="walletUtxoPage.loading && walletUtxos.length === 0">Select all</button>
                       <button class="utxo-select-button" type="button" @click="clearTransferUtxos" :disabled="selectedTransferUtxos.length === 0">None</button>
                     </span>
                   </div>
@@ -2801,7 +2895,12 @@ const INDEX_HTML: &str = r#"<!doctype html>
                       </span>
                     </label>
                   </template>
-                  <div class="tx-modal-empty" x-show="walletUtxos.length === 0">No UTXOs</div>
+                  <div class="dataset-loader" x-show="walletUtxoPage.loading" aria-hidden="true">
+                    <div class="send-utxo-option skeleton-card"><span><span class="skeleton-line medium"></span><span class="skeleton-line long"></span></span></div>
+                    <div class="send-utxo-option skeleton-card"><span><span class="skeleton-line short"></span><span class="skeleton-line long"></span></span></div>
+                  </div>
+                  <div class="page-sentinel" x-show="walletUtxoPage.hasMore" x-init="$nextTick(() => observePageSentinel('walletUtxo', $el))"></div>
+                  <div class="tx-modal-empty" x-show="walletUtxos.length === 0 && !walletUtxoPage.loading">No UTXOs</div>
                 </div>
               </div>
               <button class="primary" type="submit">Send</button>
@@ -2852,7 +2951,12 @@ const INDEX_HTML: &str = r#"<!doctype html>
                 </div>
               </div>
             </template>
-            <div class="muted" x-show="walletTransactions().length === 0">No wallet transactions</div>
+            <div class="dataset-loader" x-show="walletTxPage.loading" aria-hidden="true">
+              <div class="wallet-tx-row skeleton-card"><div class="wallet-tx-main"><div class="skeleton-line medium"></div><div class="skeleton-line short"></div><div class="skeleton-line long"></div></div></div>
+              <div class="wallet-tx-row skeleton-card"><div class="wallet-tx-main"><div class="skeleton-line short"></div><div class="skeleton-line medium"></div><div class="skeleton-line long"></div></div></div>
+            </div>
+            <div class="page-sentinel" x-show="walletTxPage.hasMore" x-init="$nextTick(() => observePageSentinel('walletTx', $el))"></div>
+            <div class="muted" x-show="walletTransactions().length === 0 && !walletTxPage.loading">No wallet transactions</div>
           </div>
         </div>
       </div>
@@ -3024,7 +3128,14 @@ const INDEX_HTML: &str = r#"<!doctype html>
                   <td><div class="peer-actions"><button class="peer-remove" type="button" x-show="canRemovePeer(peer)" @click="removePeer(peer)">Remove</button><span class="muted" x-show="!canRemovePeer(peer)">Observed</span></div></td>
                 </tr>
               </template>
-              <tr x-show="peers.length === 0"><td colspan="18">No peers</td></tr>
+              <tr class="skeleton-card" x-show="peerPage.loading" aria-hidden="true">
+                <td colspan="18"><div class="skeleton-table-cell"></div></td>
+              </tr>
+              <tr class="skeleton-card" x-show="peerPage.loading" aria-hidden="true">
+                <td colspan="18"><div class="skeleton-table-cell"></div></td>
+              </tr>
+              <tr x-show="peerPage.hasMore"><td colspan="18"><div class="page-sentinel" x-init="$nextTick(() => observePageSentinel('peer', $el))"></div></td></tr>
+              <tr x-show="peers.length === 0 && !peerPage.loading"><td colspan="18">No peers</td></tr>
             </tbody>
           </table>
         </div>
@@ -3096,6 +3207,7 @@ const INDEX_HTML: &str = r#"<!doctype html>
                 <div class="skeleton-line long"></div>
               </div>
             </template>
+            <div class="page-sentinel block-page-sentinel" x-show="hasMoreBlocks" x-init="$nextTick(() => observeBlockSentinel($el))"></div>
           </div>
         </div>
 
@@ -3136,7 +3248,7 @@ const INDEX_HTML: &str = r#"<!doctype html>
           <div class="muted" x-show="!selectedBlock">Select a block</div>
         </section>
 
-        <section class="panel mempool-panel" x-show="mempool.length > 0">
+        <section class="panel mempool-panel" x-show="mempool.length > 0 || mempoolPage.loading">
           <h2>Mempool</h2>
           <div class="mempool-strip">
             <template x-for="tx in mempool" :key="tx.signature">
@@ -3151,6 +3263,14 @@ const INDEX_HTML: &str = r#"<!doctype html>
                 <div class="tx-field"><span class="tx-label">Signature</span><code class="tx-value hash" x-text="short(tx.signature)"></code></div>
               </div>
             </template>
+            <template x-if="mempoolPage.loading">
+              <div class="mempool-item skeleton-card" aria-hidden="true">
+                <div class="skeleton-line short"></div>
+                <div class="skeleton-line medium"></div>
+                <div class="skeleton-line long"></div>
+              </div>
+            </template>
+            <div class="page-sentinel" x-show="mempoolPage.hasMore" x-init="$nextTick(() => observePageSentinel('mempool', $el))"></div>
           </div>
         </section>
       </div>
@@ -3317,7 +3437,12 @@ const INDEX_HTML: &str = r#"<!doctype html>
             <div class="tx-field"><span class="tx-label">Address</span><code class="tx-value hash" x-text="utxo.address"></code></div>
           </div>
         </template>
-        <div class="tx-modal-empty" x-show="walletUtxos.length === 0">No wallet UTXOs</div>
+        <div class="dataset-loader" x-show="walletUtxoPage.loading" aria-hidden="true">
+          <div class="wallet-utxo-row skeleton-card"><div class="skeleton-line medium"></div><div class="skeleton-line long"></div></div>
+          <div class="wallet-utxo-row skeleton-card"><div class="skeleton-line short"></div><div class="skeleton-line long"></div></div>
+        </div>
+        <div class="page-sentinel" x-show="walletUtxoPage.hasMore" x-init="$nextTick(() => observePageSentinel('walletUtxo', $el))"></div>
+        <div class="tx-modal-empty" x-show="walletUtxos.length === 0 && !walletUtxoPage.loading">No wallet UTXOs</div>
       </div>
     </section>
   </div>
@@ -4292,6 +4417,8 @@ mod tests {
                 tx: Some(false),
                 mine: Some(true),
                 burn: Some(true),
+                offset: None,
+                limit: None,
             }),
             WalletTransactionFilters {
                 transfer: false,
@@ -4299,6 +4426,42 @@ mod tests {
                 burn: true,
             }
         );
+    }
+
+    #[test]
+    fn page_items_returns_bounded_slices_with_next_offset() {
+        let page = super::page_items(
+            vec![1, 2, 3, 4, 5],
+            super::PageQuery {
+                offset: Some(1),
+                limit: Some(2),
+            },
+        );
+
+        assert_eq!(page.items, vec![2, 3]);
+        assert_eq!(page.offset, 1);
+        assert_eq!(page.limit, 2);
+        assert_eq!(page.total, 5);
+        assert!(page.has_more);
+        assert_eq!(page.next_offset, Some(3));
+    }
+
+    #[test]
+    fn page_items_clamps_limit_and_empty_tail() {
+        let page = super::page_items(
+            vec![1, 2],
+            super::PageQuery {
+                offset: Some(20),
+                limit: Some(0),
+            },
+        );
+
+        assert!(page.items.is_empty());
+        assert_eq!(page.offset, 2);
+        assert_eq!(page.limit, 1);
+        assert_eq!(page.total, 2);
+        assert!(!page.has_more);
+        assert_eq!(page.next_offset, None);
     }
 
     #[test]
@@ -4386,6 +4549,26 @@ mod tests {
             rows.iter()
                 .any(|row| row.outpoint == spent_outpoint && !row.spendable)
         );
+    }
+
+    #[test]
+    fn selectable_wallet_utxo_rows_include_only_spendable_outputs() {
+        let alice = Wallet::from_seed("wallet-utxo-selectable-alice");
+        let bob = Wallet::from_seed("wallet-utxo-selectable-bob");
+        let mut allocations = BTreeMap::new();
+        allocations.insert(alice.address().to_string(), 10);
+        let mut ledger = Ledger::new(allocations, 1);
+        let pending = ledger.build_transfer(&alice, bob.address(), 3, 0).unwrap();
+        let Transaction::Transfer { inputs, .. } = &pending else {
+            panic!("expected transfer");
+        };
+        let spent_outpoint = inputs[0].outpoint.clone();
+
+        ledger.submit_transaction(pending).unwrap();
+        let rows = super::selectable_wallet_utxo_rows(&ledger, alice.address());
+
+        assert!(!rows.iter().any(|row| row.outpoint == spent_outpoint));
+        assert!(rows.iter().all(|row| row.spendable));
     }
 
     fn fake_block(height: u64, transactions: Vec<Transaction>) -> Block {

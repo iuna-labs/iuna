@@ -76,6 +76,7 @@ window.iunaApp = function iunaApp() {
     feeEstimateTimer: null,
     showSendAdvanced: false,
     selectedTransferUtxos: [],
+    selectedTransferUtxoAmounts: {},
     walletTxFilters: { transfer: true, mine: false, burn: false },
     setupPeerAddress: "iuna.jhx.app:9444",
     peerAddress: "",
@@ -89,6 +90,11 @@ window.iunaApp = function iunaApp() {
     newBlockHashes: new Set(),
     newBlockTimer: null,
     blockPageSize: 20,
+    datasetPageSize: 25,
+    walletTxPage: { offset: 0, total: 0, hasMore: true, loading: false },
+    walletUtxoPage: { offset: 0, total: 0, hasMore: true, loading: false },
+    mempoolPage: { offset: 0, total: 0, hasMore: true, loading: false },
+    peerPage: { offset: 0, total: 0, hasMore: true, loading: false },
 
     init() {
       this.bootstrap();
@@ -491,7 +497,7 @@ window.iunaApp = function iunaApp() {
           throw new Error(payload.error || `/api/config returned ${response.status}`);
         }
         await this.refreshConfig();
-        this.peers = await this.fetchJson("/api/peers");
+        await this.resetPagedDataset("peer");
         this.setupFeedback = null;
         this.generatedSeedPhrase = "";
         this.importSeedPhrase = "";
@@ -507,17 +513,19 @@ window.iunaApp = function iunaApp() {
 
     async refresh() {
       try {
-        const [config, status, blocks, walletTxs, walletUtxos, mempool, peers, p2pMetrics, blockchainMetrics, networkHealth] = await Promise.all([
+        const [config, status, blocks, p2pMetrics, blockchainMetrics, networkHealth] = await Promise.all([
           this.fetchJson("/api/config"),
           this.fetchJson("/api/status"),
           this.fetchJson("/api/blocks?limit=30"),
-          this.fetchJson(this.walletTransactionsPath()),
-          this.fetchJson("/api/wallet/utxos"),
-          this.fetchJson("/api/mempool"),
-          this.fetchJson("/api/peers"),
           this.fetchJson("/api/p2p/metrics"),
           this.fetchJson("/api/metrics"),
           this.fetchJson("/api/network/health"),
+        ]);
+        await Promise.all([
+          this.refreshPagedDataset("walletTx"),
+          this.refreshPagedDataset("walletUtxo"),
+          this.refreshPagedDataset("mempool"),
+          this.refreshPagedDataset("peer"),
         ]);
         this.config = config;
         this.syncConfigState();
@@ -529,11 +537,7 @@ window.iunaApp = function iunaApp() {
         }
         this.status = status;
         this.mergeFreshBlocks(blocks, { animateHead: true });
-        this.walletTxs = walletTxs;
-        this.walletUtxos = walletUtxos;
         this.pruneSelectedTransferUtxos();
-        this.mempool = mempool;
-        this.peers = peers;
         this.p2pMetrics = p2pMetrics;
         this.blockchainMetrics = blockchainMetrics;
         this.networkHealth = networkHealth;
@@ -568,6 +572,151 @@ window.iunaApp = function iunaApp() {
       return response.json();
     },
 
+    datasetConfig(kind) {
+      return {
+        walletTx: {
+          items: "walletTxs",
+          page: "walletTxPage",
+          path: () => this.walletTransactionsPath(),
+          key: (tx) => `${tx.status || ""}:${tx.signature || ""}`,
+        },
+        walletUtxo: {
+          items: "walletUtxos",
+          page: "walletUtxoPage",
+          path: () => "/api/wallet/utxos",
+          key: (utxo) => this.utxoOutpoint(utxo),
+        },
+        mempool: {
+          items: "mempool",
+          page: "mempoolPage",
+          path: () => "/api/mempool",
+          key: (tx) => tx.signature || "",
+        },
+        peer: {
+          items: "peers",
+          page: "peerPage",
+          path: () => "/api/peers",
+          key: (peer) => peer.address || "",
+        },
+      }[kind];
+    },
+
+    async resetPagedDataset(kind) {
+      const config = this.datasetConfig(kind);
+      if (!config) return;
+      this[config.items] = [];
+      Object.assign(this[config.page], { offset: 0, total: 0, hasMore: true, loading: false });
+      await this.refreshPagedDataset(kind);
+    },
+
+    async refreshPagedDataset(kind) {
+      const config = this.datasetConfig(kind);
+      if (!config) return;
+      const page = this[config.page];
+      if (page.loading) return;
+      const currentLength = this[config.items].length;
+      const limit = Math.max(this.datasetPageSize, currentLength || 0);
+      await this.loadPagedDataset(kind, { offset: 0, limit, replace: true });
+    },
+
+    async loadNextPage(kind) {
+      const config = this.datasetConfig(kind);
+      if (!config) return;
+      const page = this[config.page];
+      if (page.loading || !page.hasMore) return;
+      await this.loadPagedDataset(kind, {
+        offset: page.offset ?? this[config.items].length,
+        limit: this.datasetPageSize,
+        replace: false,
+      });
+    },
+
+    async loadPagedDataset(kind, options) {
+      const config = this.datasetConfig(kind);
+      const page = this[config.page];
+      page.loading = true;
+      try {
+        const payload = await this.fetchJson(
+          this.paginatedPath(config.path(), options.offset, options.limit)
+        );
+        const normalized = this.normalizedPage(payload, options.offset, options.limit);
+        this[config.items] = options.replace
+          ? normalized.items
+          : this.mergeDatasetItems(this[config.items], normalized.items, config.key);
+        page.offset = normalized.nextOffset ?? this[config.items].length;
+        page.total = normalized.total;
+        page.hasMore = normalized.hasMore;
+        if (kind === "walletUtxo") {
+          this.rememberUtxoAmounts(this.walletUtxos);
+          this.pruneSelectedTransferUtxos();
+        }
+      } catch (error) {
+        this.showFlash(error.message, "error");
+      } finally {
+        page.loading = false;
+      }
+    },
+
+    paginatedPath(path, offset, limit) {
+      const url = new URL(path, window.location.origin);
+      url.searchParams.set("offset", String(offset));
+      url.searchParams.set("limit", String(limit));
+      return `${url.pathname}?${url.searchParams.toString()}`;
+    },
+
+    normalizedPage(payload, offset, limit) {
+      if (Array.isArray(payload)) {
+        const nextOffset = offset + payload.length;
+        return {
+          items: payload,
+          total: nextOffset,
+          hasMore: payload.length >= limit,
+          nextOffset,
+        };
+      }
+      const items = Array.isArray(payload?.items) ? payload.items : [];
+      return {
+        items,
+        total: Number(payload?.total ?? offset + items.length),
+        hasMore: payload?.hasMore === true,
+        nextOffset: payload?.nextOffset ?? offset + items.length,
+      };
+    },
+
+    mergeDatasetItems(existing, incoming, keyFn) {
+      const rows = [];
+      const seen = new Set();
+      for (const item of [...existing, ...incoming]) {
+        const key = keyFn(item);
+        if (!key || seen.has(key)) continue;
+        seen.add(key);
+        rows.push(item);
+      }
+      return rows;
+    },
+
+    observePageSentinel(kind, element) {
+      if (!element || element.__iunaPageObserver) return;
+      const observer = new IntersectionObserver((entries) => {
+        if (entries.some((entry) => entry.isIntersecting)) {
+          this.loadNextPage(kind);
+        }
+      }, { root: null, rootMargin: "180px 0px" });
+      observer.observe(element);
+      element.__iunaPageObserver = observer;
+    },
+
+    observeBlockSentinel(element) {
+      if (!element || element.__iunaBlockObserver) return;
+      const observer = new IntersectionObserver((entries) => {
+        if (entries.some((entry) => entry.isIntersecting)) {
+          this.loadOlderBlocks();
+        }
+      }, { root: null, rootMargin: "180px 0px" });
+      observer.observe(element);
+      element.__iunaBlockObserver = observer;
+    },
+
     walletTransactionsPath() {
       const params = new URLSearchParams({
         tx: String(this.walletTxFilters.transfer),
@@ -578,11 +727,7 @@ window.iunaApp = function iunaApp() {
     },
 
     async refreshWalletTransactions() {
-      try {
-        this.walletTxs = await this.fetchJson(this.walletTransactionsPath());
-      } catch (error) {
-        this.showFlash(error.message, "error");
-      }
+      await this.resetPagedDataset("walletTx");
     },
 
     async checkLatestRelease() {
@@ -1293,6 +1438,7 @@ window.iunaApp = function iunaApp() {
         this.transferTo = "";
         this.transferAmount = null;
         this.selectedTransferUtxos = [];
+        this.selectedTransferUtxoAmounts = {};
         this.showSendAdvanced = false;
         this.feeEstimates.transfer = null;
       } catch (error) {
@@ -1458,26 +1604,44 @@ window.iunaApp = function iunaApp() {
       return this.walletUtxos.filter((utxo) => utxo.spendable !== false);
     },
 
-    pruneSelectedTransferUtxos() {
-      const spendable = new Set(this.spendableWalletUtxos().map((utxo) => this.utxoOutpoint(utxo)));
-      this.selectedTransferUtxos = this.selectedTransferUtxos.filter((outpoint) => spendable.has(outpoint));
+    rememberUtxoAmounts(utxos) {
+      for (const utxo of utxos || []) {
+        this.selectedTransferUtxoAmounts[this.utxoOutpoint(utxo)] = Number(utxo.amount || 0);
+      }
     },
 
-    selectAllTransferUtxos() {
-      this.selectedTransferUtxos = this.spendableWalletUtxos().map((utxo) => this.utxoOutpoint(utxo));
-      this.scheduleFeeEstimates();
+    pruneSelectedTransferUtxos() {
+      const visible = new Map(this.walletUtxos.map((utxo) => [this.utxoOutpoint(utxo), utxo]));
+      this.selectedTransferUtxos = this.selectedTransferUtxos.filter((outpoint) => {
+        const utxo = visible.get(outpoint);
+        return !utxo || utxo.spendable !== false;
+      });
+    },
+
+    async selectAllTransferUtxos() {
+      try {
+        const utxos = await this.fetchJson("/api/wallet/utxos/selectable");
+        this.rememberUtxoAmounts(utxos);
+        this.selectedTransferUtxos = utxos.map((utxo) => this.utxoOutpoint(utxo));
+        this.scheduleFeeEstimates();
+        if (this.selectedTransferUtxos.length === 0) {
+          this.showFlash("No spendable UTXOs", "error");
+        }
+      } catch (error) {
+        this.showFlash(error.message, "error");
+      }
     },
 
     clearTransferUtxos() {
       this.selectedTransferUtxos = [];
+      this.selectedTransferUtxoAmounts = {};
       this.scheduleFeeEstimates();
     },
 
     selectedTransferUtxoTotal() {
-      const selected = new Set(this.selectedTransferUtxos);
-      return this.walletUtxos
-        .filter((utxo) => utxo.spendable !== false && selected.has(this.utxoOutpoint(utxo)))
-        .reduce((sum, utxo) => sum + Number(utxo.amount || 0), 0);
+      return this.selectedTransferUtxos.reduce((sum, outpoint) => {
+        return sum + Number(this.selectedTransferUtxoAmounts[outpoint] || 0);
+      }, 0);
     },
 
     transferRequiredTotal() {
