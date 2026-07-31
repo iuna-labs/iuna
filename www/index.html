@@ -189,6 +189,7 @@
       background: rgba(21, 25, 27, .88);
     }
     .card p { margin: 0; font-size: 15px; }
+    .card .button { margin-top: 16px; }
     .tag {
       display: inline-flex;
       margin-bottom: 12px;
@@ -305,23 +306,32 @@
     </section>
 
     <section id="howtojoin">
-      <div class="wrap split">
-        <div>
+      <div class="wrap">
+        <div class="section-head">
           <h2>How To Join</h2>
-          <div class="steps">
-            <div class="step">
-              <p>Download the latest binary for your platform from <a href="https://github.com/iuna-labs/iuna/releases">GitHub Releases</a>, unpack it, and start iuna. If you have a bootstrap peer, add it during setup.</p>
-              <pre><code>./iuna</code></pre>
-            </div>
-          </div>
-          <p>Open the local management URL printed by iuna, set a password, back up your recovery phrase, and let the node sync. After you receive IUNA, you can send transactions, burn for block finalization, or enable PoW mine actions.</p>
-          <p class="note">Keep the management UI local. The P2P listener is for node traffic; the wallet UI should not be exposed directly to the public internet.</p>
+          <p>Choose how much of the network you want to run. A wallet is enough to start using iuna; a node can also earn through PoW and proof-of-burn finalization.</p>
         </div>
-        <aside class="card">
-          <span class="tag cyan">No Public Port?</span>
-          <h3>Outbound Nodes Work</h3>
-          <p>You can still join by connecting outbound to a public peer. Your actions can gossip through that upstream connection, and the node catches up again after reconnects.</p>
-        </aside>
+        <div class="grid">
+          <div class="card">
+            <span class="tag green">Wallet</span>
+            <h3>Install And Go</h3>
+            <p>Install the desktop app from <a href="https://github.com/iuna-labs/iuna/releases">GitHub Releases</a>. It starts a local wallet, encrypts your seed on disk, and is ready once setup is complete.</p>
+            <a class="button primary" href="https://github.com/iuna-labs/iuna/releases">Releases</a>
+          </div>
+          <div class="card">
+            <span class="tag cyan">Node</span>
+            <h3>Non-Listening Node</h3>
+            <p>Install the desktop app or CLI from Releases, connect to a public peer, and set the app to node mode in settings. You can earn with PoW mine actions and/or PoB finalization without opening an inbound port.</p>
+            <a class="button" href="https://github.com/iuna-labs/iuna/blob/main/KNOWN_NODES.txt">Known Nodes</a>
+          </div>
+          <div class="card">
+            <span class="tag blue">Public Peer</span>
+            <h3>Listening Node</h3>
+            <p>Do the same node setup, then expose the P2P listener to the world. Open TCP port <code>9444</code> on your router or firewall and run the listener on a public interface.</p>
+            <pre><code>./iuna --p2p 0.0.0.0:9444</code></pre>
+          </div>
+        </div>
+        <p class="note">Keep the management UI local. Only the P2P listener should be reachable by other nodes.</p>
       </div>
     </section>
   </main>
