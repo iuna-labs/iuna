@@ -37,6 +37,8 @@ window.iunaApp = function iunaApp() {
     settingsPasswordConfirm: "",
     settingsFeedback: null,
     keepTrackOfMetrics: false,
+    p2pAnnounceAddr: "",
+    p2pAnnounceDirty: false,
     setupWallet: { address: null, seed_phrase: null, dev_verify_bypass: false, requires_peer: false },
     setupWalletMode: "create",
     setupSeedStep: "write",
@@ -499,6 +501,9 @@ window.iunaApp = function iunaApp() {
         ]);
         this.config = config;
         this.keepTrackOfMetrics = config.keep_track_of_metrics === true;
+        if (!this.p2pAnnounceDirty) {
+          this.p2pAnnounceAddr = config.p2p_announce_addr || "";
+        }
         if (!this.allowedTabs().includes(this.tab)) {
           this.setTab("wallet");
         }
@@ -916,6 +921,21 @@ window.iunaApp = function iunaApp() {
         }
       } catch (error) {
         this.keepTrackOfMetrics = previous;
+        this.showFlash(error.message, "error");
+      }
+    },
+
+    async saveP2pAnnounce() {
+      const addr = this.p2pAnnounceAddr.trim();
+      try {
+        await this.postForm(
+          "/api/settings/p2p-announce",
+          { addr },
+          addr ? "P2P announce address saved" : "P2P announce address cleared"
+        );
+        this.p2pAnnounceAddr = addr;
+        this.p2pAnnounceDirty = false;
+      } catch (error) {
         this.showFlash(error.message, "error");
       }
     },

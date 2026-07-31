@@ -27,6 +27,7 @@ pub struct UiConfig {
     pub burn_fee: Amount,
     pub pow_mine_fee: Amount,
     pub keep_track_of_metrics: bool,
+    pub p2p_announce_addr: Option<String>,
     pub peers: Vec<String>,
 }
 
@@ -41,6 +42,7 @@ impl Default for UiConfig {
             burn_fee: DEFAULT_BURN_FEE,
             pow_mine_fee: MINE_FINALIZER_FEE,
             keep_track_of_metrics: false,
+            p2p_announce_addr: None,
             peers: Vec::new(),
         }
     }
@@ -66,6 +68,8 @@ struct ConfigFile {
     pow_mine_fee: Option<Amount>,
     #[serde(default)]
     keep_track_of_metrics: bool,
+    #[serde(default)]
+    p2p_announce_addr: Option<String>,
     #[serde(default)]
     peers: Vec<String>,
 }
@@ -97,6 +101,7 @@ pub fn save(path: &Path, config: &UiConfig) -> Result<()> {
         burn_fee: Some(config.burn_fee),
         pow_mine_fee: Some(config.pow_mine_fee),
         keep_track_of_metrics: config.keep_track_of_metrics,
+        p2p_announce_addr: config.p2p_announce_addr.clone(),
         peers: config.peers.clone(),
     };
     let bytes = serde_json::to_vec_pretty(&stored).context("failed to serialize config file")?;
@@ -146,6 +151,7 @@ fn load(path: &Path) -> Result<UiConfig> {
             .map(|fee| fee.saturating_mul(scale))
             .unwrap_or(MINE_FINALIZER_FEE),
         keep_track_of_metrics: stored.keep_track_of_metrics,
+        p2p_announce_addr: stored.p2p_announce_addr,
         peers: stored.peers,
     })
 }
@@ -189,6 +195,7 @@ mod tests {
         assert!(stored.contains("\"burn_fee\": 1"));
         assert!(stored.contains("\"pow_mine_fee\": 1000000"));
         assert!(stored.contains("\"keep_track_of_metrics\": false"));
+        assert!(stored.contains("\"p2p_announce_addr\": null"));
         assert!(stored.contains("\"peers\": []"));
     }
 
@@ -208,6 +215,7 @@ mod tests {
                 burn_fee: 3 * MICRO_IUNA,
                 pow_mine_fee: 2 * MICRO_IUNA,
                 keep_track_of_metrics: true,
+                p2p_announce_addr: Some("203.0.113.10:9444".to_string()),
                 peers: vec!["127.0.0.1:9444".to_string()],
             },
         )
@@ -222,6 +230,10 @@ mod tests {
         assert_eq!(config.burn_fee, 3 * MICRO_IUNA);
         assert_eq!(config.pow_mine_fee, 2 * MICRO_IUNA);
         assert!(config.keep_track_of_metrics);
+        assert_eq!(
+            config.p2p_announce_addr.as_deref(),
+            Some("203.0.113.10:9444")
+        );
         assert_eq!(config.peers, vec!["127.0.0.1:9444"]);
     }
 

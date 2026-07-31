@@ -144,6 +144,11 @@ struct MetricsSettingsForm {
 }
 
 #[derive(Debug, Deserialize)]
+struct P2pAnnounceForm {
+    addr: String,
+}
+
+#[derive(Debug, Deserialize)]
 struct TransferForm {
     to: String,
     amount: Amount,
@@ -409,6 +414,7 @@ pub async fn serve(
         )
         .route("/api/settings/pow-mining", post(api_pow_mining_form))
         .route("/api/settings/metrics", post(api_metrics_settings_form))
+        .route("/api/settings/p2p-announce", post(api_p2p_announce_form))
         .route("/api/transfer", post(api_transfer_form))
         .route("/settings/burn-per-block", post(burn_per_block_form))
         .route("/transfer", post(transfer_form))
@@ -872,6 +878,13 @@ async fn api_metrics_settings_form(
     action_json(set_keep_track_of_metrics(&state, form.enabled).await)
 }
 
+async fn api_p2p_announce_form(
+    State(state): State<HttpState>,
+    Form(form): Form<P2pAnnounceForm>,
+) -> Json<ActionResponse> {
+    action_json(set_p2p_announce_addr(&state, form.addr).await)
+}
+
 async fn burn_per_block_form(
     State(state): State<HttpState>,
     Form(form): Form<BurnSettingsForm>,
@@ -1008,6 +1021,28 @@ async fn set_keep_track_of_metrics(state: &HttpState, enabled: bool) -> Result<(
     let mut config = state.ui_config.lock().await;
     config.keep_track_of_metrics = enabled;
     config_store::save(&state.config_path, &config)
+}
+
+async fn set_p2p_announce_addr(state: &HttpState, addr: String) -> Result<()> {
+    let trimmed = addr.trim();
+    let parsed = if trimmed.is_empty() {
+        None
+    } else {
+        Some(
+            trimmed
+                .parse::<SocketAddr>()
+                .with_context(|| format!("invalid P2P announce address {trimmed}"))?,
+        )
+    };
+
+    let mut config = state.ui_config.lock().await;
+    let mut next_config = config.clone();
+    next_config.p2p_announce_addr = parsed.map(|addr| addr.to_string());
+    config_store::save(&state.config_path, &next_config)?;
+    *config = next_config;
+    drop(config);
+    state.gossip.set_p2p_announce_addr(parsed).await;
+    Ok(())
 }
 
 async fn replace_metrics_for_snapshot(
@@ -3157,6 +3192,13 @@ const INDEX_HTML: &str = r#"<!doctype html>
             </label>
           </div>
         </div>
+        <div class="panel" x-show="advancedMode()">
+          <h3>Node Networking</h3>
+          <form class="settings-form" @submit.prevent="saveP2pAnnounce">
+            <label>Public P2P address<input x-model="p2pAnnounceAddr" @input="p2pAnnounceDirty = true" placeholder="203.0.113.10:9444"></label>
+            <div class="setup-actions"><button class="primary" type="submit">Save</button></div>
+          </form>
+        </div>
         <div class="panel">
           <h3>Change Password</h3>
           <div class="setup-feedback" :class="settingsFeedback?.kind" x-show="settingsFeedback" x-transition x-text="settingsFeedback?.message"></div>
@@ -3407,7 +3449,7 @@ mod tests {
             chain_store::SqliteChainStore, config_store, config_store::UiConfig,
             p2p::GossipNetwork, wallet_store,
         },
-        app::{NodeCore, PeerBook, PeerDirection, PeerInfo, StratumStatus},
+        app::{GossipEnvelope, NodeCore, PeerBook, PeerDirection, PeerInfo, StratumStatus},
         domain::{
             Block, Ledger, MICRO_IUNA, MINE_FINALIZER_FEE, MINE_REWARD, OutPoint, Transaction,
             Wallet,
@@ -3792,6 +3834,54 @@ mod tests {
         let config = config_store::load_or_create(&config_path).unwrap();
         assert!(config.peers.is_empty());
         assert!(state.peers.lock().await.addresses().is_empty());
+    }
+
+    #[tokio::test]
+    async fn p2p_announce_setting_persists_config_and_updates_gossip() {
+        let dir = tempfile::tempdir().unwrap();
+        let config_path = dir.path().join("config.json");
+        let state = auth_test_state(
+            config_path.clone(),
+            UiConfig {
+                setup_complete: true,
+                ..UiConfig::default()
+            },
+        )
+        .await;
+
+        super::set_p2p_announce_addr(&state, " 203.0.113.10:9444 ".to_string())
+            .await
+            .unwrap();
+
+        let config = config_store::load_or_create(&config_path).unwrap();
+        assert_eq!(
+            config.p2p_announce_addr.as_deref(),
+            Some("203.0.113.10:9444")
+        );
+        match state.gossip.peer_exchange().await {
+            GossipEnvelope::PeerList { peers } => {
+                assert!(peers.contains(&"203.0.113.10:9444".to_string()));
+            }
+            other => panic!("expected peer list, got {other:?}"),
+        }
+
+        super::set_p2p_announce_addr(&state, " ".to_string())
+            .await
+            .unwrap();
+        let config = config_store::load_or_create(&config_path).unwrap();
+        assert!(config.p2p_announce_addr.is_none());
+    }
+
+    #[tokio::test]
+    async fn p2p_announce_setting_rejects_invalid_address() {
+        let dir = tempfile::tempdir().unwrap();
+        let state = auth_test_state(dir.path().join("config.json"), UiConfig::default()).await;
+
+        let error = super::set_p2p_announce_addr(&state, "not-an-address".to_string())
+            .await
+            .unwrap_err();
+
+        assert!(format!("{error:#}").contains("invalid P2P announce address"));
     }
 
     #[tokio::test]

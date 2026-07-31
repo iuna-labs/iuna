@@ -48,6 +48,8 @@ async fn main() -> Result<()> {
         );
     }
     let mut ui_config = config_store::load_or_create(&config_path)?;
+    let p2p_announce_addr = configured_p2p_announce_addr(&opts, &ui_config)?;
+    let advertised_p2p_addr = p2p_announce_addr.unwrap_or(opts.p2p_addr);
     let wallet_load = load_startup_wallet(&wallet_path)?;
     let wallet_address = wallet_load.address().to_string();
     if opts.chain_mode == ChainMode::Genesis {
@@ -58,7 +60,8 @@ async fn main() -> Result<()> {
         ui_config.burn_fee = GENESIS_INITIAL_BURN_FEE;
         config_store::save(&config_path, &ui_config)?;
     }
-    let ledger = initialize_ledger(&opts, &wallet_address, &chain_store).await?;
+    let ledger =
+        initialize_ledger(&opts, &wallet_address, &chain_store, advertised_p2p_addr).await?;
     let has_chain = opts.has_chain() || persisted_chain_exists;
     let initial_burn_per_block = initial_burn_per_block(&opts, &ui_config);
     let initial_burn_fee = initial_burn_fee(&opts, &ui_config);
@@ -104,14 +107,22 @@ async fn main() -> Result<()> {
     println!("chain database: {}", chain_store.path().display());
     println!("management UI: http://{}", opts.http_addr);
     println!("p2p listener: {}", opts.p2p_addr);
+    if let Some(addr) = p2p_announce_addr {
+        println!("p2p announce address: {addr}");
+    }
     println!(
         "automatic finalization: VDF-driven, burning {} IUNA per block with {} IUNA per byte fee rate",
         format_iuna(initial_burn_per_block),
         format_iuna(initial_burn_fee)
     );
 
-    let gossip =
-        p2p::GossipNetwork::start(Arc::clone(&node), Arc::clone(&peers), opts.p2p_addr).await?;
+    let gossip = p2p::GossipNetwork::start(
+        Arc::clone(&node),
+        Arc::clone(&peers),
+        opts.p2p_addr,
+        p2p_announce_addr,
+    )
+    .await?;
     let mut stratum_status = StratumStatus {
         enabled: false,
         listen_addr: None,
@@ -215,6 +226,7 @@ async fn initialize_ledger(
     opts: &CliOptions,
     wallet_address: &str,
     chain_store: &SqliteChainStore,
+    advertised_p2p_addr: SocketAddr,
 ) -> Result<Ledger> {
     if let Some(snapshot) = chain_store.load()? {
         if opts.chain_mode == ChainMode::Genesis {
@@ -239,9 +251,26 @@ async fn initialize_ledger(
         match opts.chain_mode {
             ChainMode::Setup => Ok(setup_ledger()),
             ChainMode::Genesis => start_genesis_ledger(wallet_address),
-            ChainMode::Join => join_chain_ledger(&opts.join_peers, opts.p2p_addr).await,
+            ChainMode::Join => join_chain_ledger(&opts.join_peers, advertised_p2p_addr).await,
         }
     }
+}
+
+fn configured_p2p_announce_addr(
+    opts: &CliOptions,
+    ui_config: &config_store::UiConfig,
+) -> Result<Option<SocketAddr>> {
+    if let Some(addr) = opts.p2p_announce_addr {
+        return Ok(Some(addr));
+    }
+    ui_config
+        .p2p_announce_addr
+        .as_deref()
+        .map(|addr| {
+            addr.parse()
+                .with_context(|| format!("invalid configured P2P announce address {addr}"))
+        })
+        .transpose()
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -257,6 +286,7 @@ struct CliOptions {
     chain_db_path: Option<PathBuf>,
     http_addr: SocketAddr,
     p2p_addr: SocketAddr,
+    p2p_announce_addr: Option<SocketAddr>,
     stratum_addr: Option<SocketAddr>,
     peers: Vec<String>,
     join_peers: Vec<String>,
@@ -276,6 +306,7 @@ impl CliOptions {
             chain_db_path: None,
             http_addr: SocketAddr::from_str("127.0.0.1:18661")?,
             p2p_addr: SocketAddr::from_str("127.0.0.1:9444")?,
+            p2p_announce_addr: None,
             stratum_addr: None,
             peers: Vec::new(),
             join_peers: Vec::new(),
@@ -314,6 +345,13 @@ impl CliOptions {
                     opts.p2p_addr = next_value(&mut args, "--p2p")?
                         .parse()
                         .context("invalid --p2p address")?;
+                }
+                "--p2p-announce" => {
+                    opts.p2p_announce_addr = Some(
+                        next_value(&mut args, "--p2p-announce")?
+                            .parse()
+                            .context("invalid --p2p-announce address")?,
+                    );
                 }
                 "--stratum" => {
                     opts.stratum_addr = Some(
@@ -418,6 +456,7 @@ fn help_text() -> &'static str {
            --chain-db <path>             Chain SQLite database (default <data-dir>/chain.sqlite3)\n\
            --http <addr:port>            HTTP management UI address (default 127.0.0.1:18661)\n\
            --p2p <addr:port>             P2P TCP listener address (default 127.0.0.1:9444)\n\
+           --p2p-announce <addr:port>    Public P2P address to gossip instead of --p2p\n\
            --stratum <addr:port>         Stratum V1 listener for SHA-256 ASIC miners\n\
            --join <addr:port>            Fetch chain snapshot from this peer before finalization\n\
            --data-dir <path>             Local wallet directory (default ~/.iuna)\n\
@@ -718,9 +757,10 @@ mod tests {
 
     use super::{
         ChainMode, CliOptions, GENESIS_INITIAL_BURN_FEE, GENESIS_INITIAL_BURN_PER_BLOCK,
-        StartupWallet, extrapolate_vdf_rounds, help_text, initial_burn_fee, initial_burn_per_block,
-        initialize_ledger, load_startup_wallet, measure_vdf_rounds, persist_chain_snapshot,
-        run_chain_persistence_with_interval, validate_wallet_for_mode,
+        StartupWallet, configured_p2p_announce_addr, extrapolate_vdf_rounds, help_text,
+        initial_burn_fee, initial_burn_per_block, initialize_ledger, load_startup_wallet,
+        measure_vdf_rounds, persist_chain_snapshot, run_chain_persistence_with_interval,
+        validate_wallet_for_mode,
     };
 
     fn parse(args: &[&str]) -> anyhow::Result<Option<CliOptions>> {
@@ -930,6 +970,64 @@ mod tests {
     }
 
     #[test]
+    fn p2p_announce_port_can_be_configured() {
+        let opts = parse(&["--p2p-announce", "203.0.113.10:9444"])
+            .unwrap()
+            .unwrap();
+
+        assert_eq!(
+            opts.p2p_announce_addr,
+            Some("203.0.113.10:9444".parse().unwrap())
+        );
+    }
+
+    #[test]
+    fn configured_p2p_announce_addr_uses_cli_before_config() {
+        let opts = parse(&["--p2p-announce", "203.0.113.20:9444"])
+            .unwrap()
+            .unwrap();
+        let config = UiConfig {
+            p2p_announce_addr: Some("203.0.113.10:9444".to_string()),
+            ..UiConfig::default()
+        };
+
+        assert_eq!(
+            configured_p2p_announce_addr(&opts, &config).unwrap(),
+            Some("203.0.113.20:9444".parse().unwrap())
+        );
+    }
+
+    #[test]
+    fn configured_p2p_announce_addr_reads_config_without_cli() {
+        let opts = parse(&[]).unwrap().unwrap();
+        let config = UiConfig {
+            p2p_announce_addr: Some("203.0.113.10:9444".to_string()),
+            ..UiConfig::default()
+        };
+
+        assert_eq!(
+            configured_p2p_announce_addr(&opts, &config).unwrap(),
+            Some("203.0.113.10:9444".parse().unwrap())
+        );
+    }
+
+    #[test]
+    fn configured_p2p_announce_addr_rejects_invalid_config() {
+        let opts = parse(&[]).unwrap().unwrap();
+        let config = UiConfig {
+            p2p_announce_addr: Some("not-an-address".to_string()),
+            ..UiConfig::default()
+        };
+
+        let error = configured_p2p_announce_addr(&opts, &config).unwrap_err();
+        assert!(
+            error
+                .to_string()
+                .contains("invalid configured P2P announce address")
+        );
+    }
+
+    #[test]
     fn http_management_port_defaults_to_iuna_port() {
         let opts = parse(&[]).unwrap().unwrap();
         assert_eq!(opts.http_addr.to_string(), "127.0.0.1:18661");
@@ -1055,7 +1153,7 @@ mod tests {
             .unwrap()
             .unwrap();
 
-        let error = initialize_ledger(&opts, fresh_wallet.address(), &store)
+        let error = initialize_ledger(&opts, fresh_wallet.address(), &store, opts.p2p_addr)
             .await
             .unwrap_err();
 
@@ -1078,7 +1176,7 @@ mod tests {
             .unwrap()
             .unwrap();
 
-        let resumed = initialize_ledger(&opts, fresh_wallet.address(), &store)
+        let resumed = initialize_ledger(&opts, fresh_wallet.address(), &store, opts.p2p_addr)
             .await
             .unwrap();
 
@@ -1115,7 +1213,7 @@ mod tests {
             .unwrap()
             .unwrap();
 
-        let resumed = initialize_ledger(&opts, fresh_wallet.address(), &store)
+        let resumed = initialize_ledger(&opts, fresh_wallet.address(), &store, opts.p2p_addr)
             .await
             .unwrap();
 
@@ -1144,7 +1242,7 @@ mod tests {
         .unwrap()
         .unwrap();
 
-        let resumed = initialize_ledger(&opts, bob.address(), &store)
+        let resumed = initialize_ledger(&opts, bob.address(), &store, opts.p2p_addr)
             .await
             .unwrap();
 
@@ -1172,7 +1270,7 @@ VALUES (1, 4, 'bad-tip', '{"not":"a chain snapshot"}', 0)
             .unwrap()
             .unwrap();
 
-        let error = initialize_ledger(&opts, wallet.address(), &store)
+        let error = initialize_ledger(&opts, wallet.address(), &store, opts.p2p_addr)
             .await
             .unwrap_err();
 

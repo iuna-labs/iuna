@@ -139,6 +139,7 @@ struct GossipNetworkInner {
     node: SharedNode,
     peers: SharedPeerBook,
     listen_addr: SocketAddr,
+    p2p_announce_addr: Mutex<Option<SocketAddr>>,
     node_id: String,
     sessions: Mutex<BTreeMap<String, mpsc::Sender<OutboundBatch>>>,
     tx_delivery: Mutex<BTreeMap<String, PeerTransactionDelivery>>,
@@ -426,6 +427,7 @@ impl GossipNetwork {
                 node,
                 peers,
                 listen_addr: "127.0.0.1:0".parse().unwrap(),
+                p2p_announce_addr: Mutex::new(None),
                 node_id: new_node_id(),
                 sessions: Mutex::new(BTreeMap::new()),
                 tx_delivery: Mutex::new(BTreeMap::new()),
@@ -435,7 +437,12 @@ impl GossipNetwork {
         }
     }
 
-    pub async fn start(node: SharedNode, peers: SharedPeerBook, addr: SocketAddr) -> Result<Self> {
+    pub async fn start(
+        node: SharedNode,
+        peers: SharedPeerBook,
+        addr: SocketAddr,
+        p2p_announce_addr: Option<SocketAddr>,
+    ) -> Result<Self> {
         let listener = TcpListener::bind(addr)
             .await
             .with_context(|| format!("binding p2p listener on {addr}"))?;
@@ -444,6 +451,7 @@ impl GossipNetwork {
                 node,
                 peers,
                 listen_addr: addr,
+                p2p_announce_addr: Mutex::new(p2p_announce_addr),
                 node_id: new_node_id(),
                 sessions: Mutex::new(BTreeMap::new()),
                 tx_delivery: Mutex::new(BTreeMap::new()),
@@ -456,6 +464,22 @@ impl GossipNetwork {
         tokio::spawn(outbound_supervisor(network.clone()));
         network.ensure_outbound_sessions().await;
         Ok(network)
+    }
+
+    pub async fn set_p2p_announce_addr(&self, addr: Option<SocketAddr>) {
+        *self.inner.p2p_announce_addr.lock().await = addr;
+    }
+
+    async fn advertised_addr(&self) -> SocketAddr {
+        (*self.inner.p2p_announce_addr.lock().await).unwrap_or(self.inner.listen_addr)
+    }
+
+    async fn is_self_peer(&self, address: &str) -> bool {
+        is_self_peer_address_for(
+            address,
+            self.inner.listen_addr,
+            self.advertised_addr().await,
+        )
     }
 
     pub fn metrics(&self) -> P2pMetrics {
@@ -675,7 +699,8 @@ impl GossipNetwork {
     }
 
     pub async fn peer_exchange(&self) -> GossipEnvelope {
-        let self_addr = self.inner.listen_addr.to_string();
+        let advertised_addr = self.advertised_addr().await;
+        let self_addr = advertised_addr.to_string();
         let peers = self
             .inner
             .peers
@@ -683,7 +708,7 @@ impl GossipNetwork {
             .await
             .addresses_except(&self_addr)
             .into_iter()
-            .filter(|peer| !is_self_peer_address(peer, self.inner.listen_addr))
+            .filter(|peer| !is_self_peer_address_for(peer, self.inner.listen_addr, advertised_addr))
             .collect::<Vec<_>>();
         GossipEnvelope::PeerList {
             peers: std::iter::once(self_addr)
@@ -700,17 +725,18 @@ impl GossipNetwork {
             .await
             .connectable_addresses_at(crate::app::now_ms());
         let address_set = addresses.iter().cloned().collect::<BTreeSet<_>>();
+        let advertised_addr = self.advertised_addr().await;
         let mut sessions = self.inner.sessions.lock().await;
         sessions.retain(|peer, _| {
-            let keep =
-                address_set.contains(peer) && !is_self_peer_address(peer, self.inner.listen_addr);
+            let keep = address_set.contains(peer)
+                && !is_self_peer_address_for(peer, self.inner.listen_addr, advertised_addr);
             if !keep {
                 P2pMetricsCounters::inc(&self.inner.metrics.self_peer_skips);
             }
             keep
         });
         for peer in addresses {
-            if is_self_peer_address(&peer, self.inner.listen_addr) {
+            if is_self_peer_address_for(&peer, self.inner.listen_addr, advertised_addr) {
                 P2pMetricsCounters::inc(&self.inner.metrics.self_peer_skips);
                 continue;
             }
@@ -811,8 +837,9 @@ async fn outbound_session(
 ) {
     let mut reconnect_delay = INITIAL_RECONNECT_DELAY;
     loop {
+        let advertised_addr = network.advertised_addr().await;
         if !peer_is_configured_outbound(&network, &peer).await
-            || is_self_peer_address(&peer, network.inner.listen_addr)
+            || is_self_peer_address_for(&peer, network.inner.listen_addr, advertised_addr)
         {
             network.inner.sessions.lock().await.remove(&peer);
             return;
@@ -922,8 +949,9 @@ async fn session_loop(
         .as_ref()
         .map(|peer| format!("outbound {peer}"))
         .unwrap_or_else(|| format!("inbound {remote_addr}"));
+    let advertised_addr = network.advertised_addr().await;
     let hello = network.inner.node.lock().await.hello(
-        Some(network.inner.listen_addr.to_string()),
+        Some(advertised_addr.to_string()),
         Some(network.inner.node_id.clone()),
     );
     write_envelope(&mut writer, &hello).await?;
@@ -1152,7 +1180,7 @@ async fn process_envelope(
         }
         GossipEnvelope::PeerAnnouncement { address } => {
             let peer = normalize_advertised_peer(&address, remote_addr)?;
-            if is_self_peer_address(&peer, network.inner.listen_addr) {
+            if network.is_self_peer(&peer).await {
                 P2pMetricsCounters::inc(&network.inner.metrics.self_peer_rejections);
                 forget_stale_self_peer(network, known_peer).await;
             } else if remember_discoverable_advertised_peer(
@@ -1497,10 +1525,11 @@ async fn apply_peer_list(
     remote_addr: SocketAddr,
     peers: Vec<String>,
 ) -> Result<()> {
+    let advertised_addr = network.advertised_addr().await;
     let mut peerbook = network.inner.peers.lock().await;
     for address in peers {
         let peer = normalize_advertised_peer(&address, remote_addr)?;
-        if is_self_peer_address(&peer, network.inner.listen_addr) {
+        if is_self_peer_address_for(&peer, network.inner.listen_addr, advertised_addr) {
             P2pMetricsCounters::inc(&network.inner.metrics.self_peer_skips);
         } else if peer_list_address_is_discoverable(&peer, remote_addr)? {
             peerbook.add_peer(peer);
@@ -2200,7 +2229,7 @@ async fn process_hello(
 
     if let Some(listen_addr) = &hello.listen_addr {
         let peer = normalize_advertised_peer(listen_addr, remote_addr)?;
-        if is_self_peer_address(&peer, network.inner.listen_addr) {
+        if network.is_self_peer(&peer).await {
             P2pMetricsCounters::inc(&network.inner.metrics.self_peer_rejections);
             forget_stale_self_peer(network, known_peer).await;
         } else {
@@ -2403,10 +2432,15 @@ fn ip_is_publicly_discoverable(ip: IpAddr) -> bool {
     }
 }
 
-fn is_self_peer_address(address: &str, listen_addr: SocketAddr) -> bool {
-    address
-        .parse::<SocketAddr>()
-        .is_ok_and(|candidate| is_self_socket_addr(candidate, listen_addr))
+fn is_self_peer_address_for(
+    address: &str,
+    listen_addr: SocketAddr,
+    advertised_addr: SocketAddr,
+) -> bool {
+    address.parse::<SocketAddr>().is_ok_and(|candidate| {
+        is_self_socket_addr(candidate, listen_addr)
+            || is_self_socket_addr(candidate, advertised_addr)
+    })
 }
 
 fn is_self_socket_addr(candidate: SocketAddr, listen_addr: SocketAddr) -> bool {
@@ -2499,11 +2533,24 @@ mod tests {
     fn loopback_peer_on_unspecified_listen_port_is_self() {
         let listen_addr: SocketAddr = "0.0.0.0:9545".parse().unwrap();
 
-        assert!(super::is_self_peer_address("127.0.0.1:9545", listen_addr));
-        assert!(super::is_self_peer_address("0.0.0.0:9545", listen_addr));
-        assert!(!super::is_self_peer_address("127.0.0.1:9546", listen_addr));
-        assert!(!super::is_self_peer_address(
+        assert!(super::is_self_peer_address_for(
+            "127.0.0.1:9545",
+            listen_addr,
+            listen_addr
+        ));
+        assert!(super::is_self_peer_address_for(
+            "0.0.0.0:9545",
+            listen_addr,
+            listen_addr
+        ));
+        assert!(!super::is_self_peer_address_for(
+            "127.0.0.1:9546",
+            listen_addr,
+            listen_addr
+        ));
+        assert!(!super::is_self_peer_address_for(
             "203.0.113.10:9545",
+            listen_addr,
             listen_addr
         ));
     }
@@ -2826,6 +2873,7 @@ mod tests {
                 node: Arc::clone(&node),
                 peers: Arc::new(tokio::sync::Mutex::new(PeerBook::default())),
                 listen_addr: "127.0.0.1:9544".parse().unwrap(),
+                p2p_announce_addr: tokio::sync::Mutex::new(None),
                 node_id: super::new_node_id(),
                 sessions: tokio::sync::Mutex::new(BTreeMap::new()),
                 tx_delivery: tokio::sync::Mutex::new(BTreeMap::new()),
@@ -2888,6 +2936,7 @@ mod tests {
                 node: Arc::clone(&node),
                 peers: Arc::new(tokio::sync::Mutex::new(PeerBook::default())),
                 listen_addr: "127.0.0.1:9544".parse().unwrap(),
+                p2p_announce_addr: tokio::sync::Mutex::new(None),
                 node_id: super::new_node_id(),
                 sessions: tokio::sync::Mutex::new(BTreeMap::new()),
                 tx_delivery: tokio::sync::Mutex::new(BTreeMap::new()),
@@ -2934,6 +2983,7 @@ mod tests {
                 node: Arc::clone(&node),
                 peers: Arc::new(tokio::sync::Mutex::new(PeerBook::default())),
                 listen_addr: "127.0.0.1:9544".parse().unwrap(),
+                p2p_announce_addr: tokio::sync::Mutex::new(None),
                 node_id: super::new_node_id(),
                 sessions: tokio::sync::Mutex::new(BTreeMap::new()),
                 tx_delivery: tokio::sync::Mutex::new(BTreeMap::new()),
@@ -2985,6 +3035,7 @@ mod tests {
                 node: Arc::clone(&node),
                 peers: Arc::new(tokio::sync::Mutex::new(PeerBook::default())),
                 listen_addr: "127.0.0.1:9544".parse().unwrap(),
+                p2p_announce_addr: tokio::sync::Mutex::new(None),
                 node_id: super::new_node_id(),
                 sessions: tokio::sync::Mutex::new(BTreeMap::new()),
                 tx_delivery: tokio::sync::Mutex::new(BTreeMap::new()),
@@ -3029,6 +3080,7 @@ mod tests {
                 node: Arc::clone(&node),
                 peers: Arc::new(tokio::sync::Mutex::new(PeerBook::default())),
                 listen_addr: "127.0.0.1:9544".parse().unwrap(),
+                p2p_announce_addr: tokio::sync::Mutex::new(None),
                 node_id: super::new_node_id(),
                 sessions: tokio::sync::Mutex::new(BTreeMap::new()),
                 tx_delivery: tokio::sync::Mutex::new(BTreeMap::new()),
@@ -3243,6 +3295,7 @@ mod tests {
                 node,
                 peers: Arc::new(tokio::sync::Mutex::new(PeerBook::default())),
                 listen_addr: "127.0.0.1:9544".parse().unwrap(),
+                p2p_announce_addr: tokio::sync::Mutex::new(None),
                 node_id: super::new_node_id(),
                 sessions: tokio::sync::Mutex::new(BTreeMap::new()),
                 tx_delivery: tokio::sync::Mutex::new(BTreeMap::new()),
@@ -3349,6 +3402,7 @@ mod tests {
                 node,
                 peers: Arc::new(tokio::sync::Mutex::new(PeerBook::default())),
                 listen_addr: "127.0.0.1:9544".parse().unwrap(),
+                p2p_announce_addr: tokio::sync::Mutex::new(None),
                 node_id: super::new_node_id(),
                 sessions: tokio::sync::Mutex::new(BTreeMap::new()),
                 tx_delivery: tokio::sync::Mutex::new(BTreeMap::new()),
@@ -3412,6 +3466,7 @@ mod tests {
                     "iuna.jhx.app:9444".to_string(),
                 ]))),
                 listen_addr: "127.0.0.1:9544".parse().unwrap(),
+                p2p_announce_addr: tokio::sync::Mutex::new(None),
                 node_id: super::new_node_id(),
                 sessions: tokio::sync::Mutex::new(BTreeMap::new()),
                 tx_delivery: tokio::sync::Mutex::new(BTreeMap::new()),
@@ -3495,6 +3550,7 @@ mod tests {
                 node: Arc::clone(&node),
                 peers: Arc::new(tokio::sync::Mutex::new(PeerBook::default())),
                 listen_addr: "127.0.0.1:9544".parse().unwrap(),
+                p2p_announce_addr: tokio::sync::Mutex::new(None),
                 node_id: super::new_node_id(),
                 sessions: tokio::sync::Mutex::new(BTreeMap::new()),
                 tx_delivery: tokio::sync::Mutex::new(BTreeMap::new()),
@@ -3545,6 +3601,7 @@ mod tests {
                 node: Arc::clone(&node),
                 peers: Arc::clone(&peers),
                 listen_addr: "0.0.0.0:9444".parse().unwrap(),
+                p2p_announce_addr: tokio::sync::Mutex::new(None),
                 node_id: super::new_node_id(),
                 sessions: tokio::sync::Mutex::new(BTreeMap::new()),
                 tx_delivery: tokio::sync::Mutex::new(BTreeMap::new()),
@@ -3591,6 +3648,7 @@ mod tests {
                 node,
                 peers: Arc::clone(&peers),
                 listen_addr: "127.0.0.1:9544".parse().unwrap(),
+                p2p_announce_addr: tokio::sync::Mutex::new(None),
                 node_id: super::new_node_id(),
                 sessions: tokio::sync::Mutex::new(BTreeMap::new()),
                 tx_delivery: tokio::sync::Mutex::new(BTreeMap::new()),
@@ -3663,6 +3721,7 @@ mod tests {
                 node,
                 peers,
                 listen_addr: "127.0.0.1:9544".parse().unwrap(),
+                p2p_announce_addr: tokio::sync::Mutex::new(None),
                 node_id: super::new_node_id(),
                 sessions: tokio::sync::Mutex::new(BTreeMap::new()),
                 tx_delivery: tokio::sync::Mutex::new(BTreeMap::new()),
@@ -3683,6 +3742,43 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn peer_exchange_filters_announced_self_from_known_peers() {
+        let alice = Wallet::from_seed("px-announced-self-alice");
+        let allocations = allocations(std::slice::from_ref(&alice), 1_000);
+        let node = Arc::new(tokio::sync::Mutex::new(node("alice", alice, allocations)));
+        let peers = Arc::new(tokio::sync::Mutex::new(PeerBook::from_addresses(vec![
+            "8.8.8.8:9444".to_string(),
+            "8.8.4.4:9444".to_string(),
+        ])));
+        let network = super::GossipNetwork {
+            inner: Arc::new(super::GossipNetworkInner {
+                node,
+                peers,
+                listen_addr: "0.0.0.0:9444".parse().unwrap(),
+                p2p_announce_addr: tokio::sync::Mutex::new(Some("8.8.8.8:9444".parse().unwrap())),
+                node_id: super::new_node_id(),
+                sessions: tokio::sync::Mutex::new(BTreeMap::new()),
+                tx_delivery: tokio::sync::Mutex::new(BTreeMap::new()),
+                inbound_limiter: Arc::new(
+                    StdMutex::new(super::InboundConnectionLimiter::default()),
+                ),
+                metrics: super::P2pMetricsCounters::default(),
+            }),
+        };
+
+        match network.peer_exchange().await {
+            GossipEnvelope::PeerList { peers } => {
+                assert_eq!(
+                    peers.iter().filter(|peer| *peer == "8.8.8.8:9444").count(),
+                    1
+                );
+                assert!(peers.contains(&"8.8.4.4:9444".to_string()));
+            }
+            other => panic!("expected peer list, got {other:?}"),
+        }
+    }
+
+    #[tokio::test]
     async fn peer_list_adds_stable_outbound_peers() {
         let alice = Wallet::from_seed("px-recv-alice");
         let allocations = allocations(std::slice::from_ref(&alice), 1_000);
@@ -3693,6 +3789,7 @@ mod tests {
                 node,
                 peers: Arc::clone(&peers),
                 listen_addr: "127.0.0.1:9544".parse().unwrap(),
+                p2p_announce_addr: tokio::sync::Mutex::new(None),
                 node_id: super::new_node_id(),
                 sessions: tokio::sync::Mutex::new(BTreeMap::new()),
                 tx_delivery: tokio::sync::Mutex::new(BTreeMap::new()),
@@ -3717,6 +3814,41 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn peer_list_ignores_announced_self_address() {
+        let alice = Wallet::from_seed("px-list-announced-self-alice");
+        let allocations = allocations(std::slice::from_ref(&alice), 1_000);
+        let node = Arc::new(tokio::sync::Mutex::new(node("alice", alice, allocations)));
+        let peers = Arc::new(tokio::sync::Mutex::new(PeerBook::default()));
+        let network = super::GossipNetwork {
+            inner: Arc::new(super::GossipNetworkInner {
+                node,
+                peers: Arc::clone(&peers),
+                listen_addr: "0.0.0.0:9444".parse().unwrap(),
+                p2p_announce_addr: tokio::sync::Mutex::new(Some("8.8.8.8:9444".parse().unwrap())),
+                node_id: super::new_node_id(),
+                sessions: tokio::sync::Mutex::new(BTreeMap::new()),
+                tx_delivery: tokio::sync::Mutex::new(BTreeMap::new()),
+                inbound_limiter: Arc::new(
+                    StdMutex::new(super::InboundConnectionLimiter::default()),
+                ),
+                metrics: super::P2pMetricsCounters::default(),
+            }),
+        };
+
+        super::apply_peer_list(
+            &network,
+            "8.8.4.4:9444".parse().unwrap(),
+            vec!["8.8.8.8:9444".to_string(), "8.8.4.4:9445".to_string()],
+        )
+        .await
+        .unwrap();
+
+        let addresses = peers.lock().await.addresses();
+        assert!(!addresses.contains(&"8.8.8.8:9444".to_string()));
+        assert!(addresses.contains(&"8.8.4.4:9445".to_string()));
+    }
+
+    #[tokio::test]
     async fn peer_list_ignores_private_ephemeral_addresses() {
         let alice = Wallet::from_seed("px-private-ephemeral-alice");
         let allocations = allocations(std::slice::from_ref(&alice), 1_000);
@@ -3727,6 +3859,7 @@ mod tests {
                 node,
                 peers: Arc::clone(&peers),
                 listen_addr: "0.0.0.0:9444".parse().unwrap(),
+                p2p_announce_addr: tokio::sync::Mutex::new(None),
                 node_id: super::new_node_id(),
                 sessions: tokio::sync::Mutex::new(BTreeMap::new()),
                 tx_delivery: tokio::sync::Mutex::new(BTreeMap::new()),
@@ -3764,6 +3897,7 @@ mod tests {
                 node,
                 peers: Arc::clone(&peers),
                 listen_addr: "0.0.0.0:9444".parse().unwrap(),
+                p2p_announce_addr: tokio::sync::Mutex::new(None),
                 node_id: super::new_node_id(),
                 sessions: tokio::sync::Mutex::new(BTreeMap::new()),
                 tx_delivery: tokio::sync::Mutex::new(BTreeMap::new()),
@@ -3802,6 +3936,7 @@ mod tests {
                 node,
                 peers: Arc::clone(&peers),
                 listen_addr: "0.0.0.0:9444".parse().unwrap(),
+                p2p_announce_addr: tokio::sync::Mutex::new(None),
                 node_id: super::new_node_id(),
                 sessions: tokio::sync::Mutex::new(BTreeMap::new()),
                 tx_delivery: tokio::sync::Mutex::new(BTreeMap::new()),
@@ -3830,6 +3965,7 @@ mod tests {
                 node,
                 peers: Arc::clone(&peers),
                 listen_addr: "0.0.0.0:9545".parse().unwrap(),
+                p2p_announce_addr: tokio::sync::Mutex::new(None),
                 node_id: super::new_node_id(),
                 sessions: tokio::sync::Mutex::new(BTreeMap::new()),
                 tx_delivery: tokio::sync::Mutex::new(BTreeMap::new()),
@@ -3865,6 +4001,7 @@ mod tests {
                 node,
                 peers: Arc::clone(&peers),
                 listen_addr: "0.0.0.0:9545".parse().unwrap(),
+                p2p_announce_addr: tokio::sync::Mutex::new(None),
                 node_id: super::new_node_id(),
                 sessions: tokio::sync::Mutex::new(BTreeMap::new()),
                 tx_delivery: tokio::sync::Mutex::new(BTreeMap::new()),
@@ -3921,6 +4058,7 @@ mod tests {
                 node,
                 peers: Arc::clone(&peers),
                 listen_addr: "0.0.0.0:9444".parse().unwrap(),
+                p2p_announce_addr: tokio::sync::Mutex::new(None),
                 node_id: super::new_node_id(),
                 sessions: tokio::sync::Mutex::new(BTreeMap::new()),
                 tx_delivery: tokio::sync::Mutex::new(BTreeMap::new()),
@@ -3976,6 +4114,7 @@ mod tests {
                 node,
                 peers: Arc::clone(&peers),
                 listen_addr: "0.0.0.0:9444".parse().unwrap(),
+                p2p_announce_addr: tokio::sync::Mutex::new(None),
                 node_id: super::new_node_id(),
                 sessions: tokio::sync::Mutex::new(BTreeMap::new()),
                 tx_delivery: tokio::sync::Mutex::new(BTreeMap::new()),
