@@ -752,6 +752,7 @@ impl GossipNetwork {
             .await
             .addresses_except(self_addr.as_deref().unwrap_or(""))
             .into_iter()
+            .filter(|peer| peer.parse::<SocketAddr>().is_ok())
             .filter(|peer| {
                 !is_self_peer_address_for(peer, self.inner.listen_addr, self_filter_addr)
             })
@@ -1615,7 +1616,15 @@ async fn apply_peer_list(
     let self_filter_addr = network.self_filter_addr().await;
     let mut peerbook = network.inner.peers.lock().await;
     for address in peers {
-        let peer = normalize_advertised_peer(&address, remote_addr)?;
+        let peer = match normalize_advertised_peer(&address, remote_addr) {
+            Ok(peer) => peer,
+            Err(error) => {
+                if debug_logging_enabled() {
+                    eprintln!("p2p peer-list address {address} ignored: {error:#}");
+                }
+                continue;
+            }
+        };
         if is_self_peer_address_for(&peer, network.inner.listen_addr, self_filter_addr) {
             P2pMetricsCounters::inc(&network.inner.metrics.self_peer_skips);
         } else if peer_list_address_is_discoverable(&peer, remote_addr)? {
@@ -4502,6 +4511,40 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn peer_exchange_omits_hostname_bootstrap_peers() {
+        let alice = Wallet::from_seed("px-hostname-alice");
+        let allocations = allocations(std::slice::from_ref(&alice), 1_000);
+        let node = Arc::new(tokio::sync::Mutex::new(node("alice", alice, allocations)));
+        let peers = Arc::new(tokio::sync::Mutex::new(PeerBook::from_addresses(vec![
+            "iuna.jhx.app:9444".to_string(),
+            "127.0.0.1:9545".to_string(),
+        ])));
+        let network = super::GossipNetwork {
+            inner: Arc::new(super::GossipNetworkInner {
+                node,
+                peers,
+                listen_addr: "127.0.0.1:9544".parse().unwrap(),
+                p2p_announce_addr: tokio::sync::Mutex::new(None),
+                node_id: super::new_node_id(),
+                accept_task: tokio::sync::Mutex::new(None),
+                sessions: tokio::sync::Mutex::new(BTreeMap::new()),
+                tx_delivery: tokio::sync::Mutex::new(BTreeMap::new()),
+                inbound_limiter: Arc::new(
+                    StdMutex::new(super::InboundConnectionLimiter::default()),
+                ),
+                metrics: super::P2pMetricsCounters::default(),
+            }),
+        };
+        match network.peer_exchange().await {
+            GossipEnvelope::PeerList { peers } => {
+                assert!(!peers.contains(&"iuna.jhx.app:9444".to_string()));
+                assert!(peers.contains(&"127.0.0.1:9545".to_string()));
+            }
+            other => panic!("expected peer list, got {other:?}"),
+        }
+    }
+
+    #[tokio::test]
     async fn peer_exchange_advertises_stable_listen_and_known_peers() {
         let alice = Wallet::from_seed("px-alice");
         let allocations = allocations(std::slice::from_ref(&alice), 1_000);
@@ -4609,6 +4652,44 @@ mod tests {
 
         let addresses = peers.lock().await.addresses();
         assert!(!addresses.contains(&"127.0.0.1:9544".to_string()));
+        assert!(addresses.contains(&"127.0.0.1:9546".to_string()));
+    }
+
+    #[tokio::test]
+    async fn peer_list_ignores_invalid_peer_addresses() {
+        let alice = Wallet::from_seed("px-list-invalid-alice");
+        let allocations = allocations(std::slice::from_ref(&alice), 1_000);
+        let node = Arc::new(tokio::sync::Mutex::new(node("alice", alice, allocations)));
+        let peers = Arc::new(tokio::sync::Mutex::new(PeerBook::default()));
+        let network = super::GossipNetwork {
+            inner: Arc::new(super::GossipNetworkInner {
+                node,
+                peers: Arc::clone(&peers),
+                listen_addr: "127.0.0.1:9544".parse().unwrap(),
+                p2p_announce_addr: tokio::sync::Mutex::new(None),
+                node_id: super::new_node_id(),
+                accept_task: tokio::sync::Mutex::new(None),
+                sessions: tokio::sync::Mutex::new(BTreeMap::new()),
+                tx_delivery: tokio::sync::Mutex::new(BTreeMap::new()),
+                inbound_limiter: Arc::new(
+                    StdMutex::new(super::InboundConnectionLimiter::default()),
+                ),
+                metrics: super::P2pMetricsCounters::default(),
+            }),
+        };
+        super::apply_peer_list(
+            &network,
+            "127.0.0.1:9545".parse().unwrap(),
+            vec![
+                "iuna.jhx.app:9444".to_string(),
+                "127.0.0.1:9546".to_string(),
+            ],
+        )
+        .await
+        .unwrap();
+
+        let addresses = peers.lock().await.addresses();
+        assert!(!addresses.contains(&"iuna.jhx.app:9444".to_string()));
         assert!(addresses.contains(&"127.0.0.1:9546".to_string()));
     }
 
