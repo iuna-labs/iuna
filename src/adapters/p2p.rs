@@ -580,7 +580,6 @@ impl GossipNetwork {
                 }
                 Err(mpsc::error::TrySendError::Closed(_)) => {
                     P2pMetricsCounters::inc(&self.inner.metrics.outbound_queue_closed);
-                    self.inner.sessions.lock().await.remove(&peer);
                 }
             }
         }
@@ -1062,6 +1061,12 @@ async fn session_loop(
                 .await?;
                 peer_status = Some(status);
                 maybe_request_catchup(&network, &mut writer, peer_status.as_ref().unwrap()).await?;
+            } else if respond_to_peer_verification_challenge(&network, &mut writer, &envelope)
+                .await?
+            {
+                if known_peer.is_none() {
+                    return Ok(());
+                }
             } else {
                 process_envelope(
                     &network,
@@ -1170,6 +1175,12 @@ async fn session_loop(
                     continue;
                 }
 
+                if respond_to_peer_verification_challenge(&network, &mut writer, &envelope).await? {
+                    if known_peer.is_none() {
+                        return Ok(());
+                    }
+                    continue;
+                }
                 process_envelope(
                     &network,
                     &mut writer,
@@ -1183,6 +1194,20 @@ async fn session_loop(
             }
         }
     }
+}
+
+async fn respond_to_peer_verification_challenge(
+    network: &GossipNetwork,
+    writer: &mut OwnedWriteHalf,
+    envelope: &GossipEnvelope,
+) -> Result<bool> {
+    let GossipEnvelope::PeerVerificationChallenge { address, nonce } = envelope else {
+        return Ok(false);
+    };
+    if let Some(response) = peer_verification_response(network, address, nonce) {
+        write_envelope(writer, &response).await?;
+    }
+    Ok(true)
 }
 
 async fn peer_is_configured_outbound(network: &GossipNetwork, peer: &str) -> bool {
@@ -4045,6 +4070,70 @@ mod tests {
             )
             .await
         );
+    }
+
+    #[tokio::test]
+    async fn inbound_verification_only_session_closes_after_response() {
+        let alice = Wallet::from_seed("verification-only-close-alice");
+        let allocations = allocations(std::slice::from_ref(&alice), 1_000);
+        let node = Arc::new(tokio::sync::Mutex::new(node("alice", alice, allocations)));
+        let peers = Arc::new(tokio::sync::Mutex::new(PeerBook::default()));
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let listen_addr = listener.local_addr().unwrap();
+        drop(listener);
+        let network = super::GossipNetwork::start(node, peers, listen_addr, None, true)
+            .await
+            .unwrap();
+
+        let stream = tokio::net::TcpStream::connect(listen_addr).await.unwrap();
+        let (reader, mut writer) = stream.into_split();
+        let mut reader = super::LimitedLineReader::new(reader);
+        let hello_line = reader.read_line().await.unwrap().unwrap();
+        let node_id = match super::parse_envelope(&hello_line).unwrap() {
+            GossipEnvelope::Hello(hello) => hello.node_id.unwrap(),
+            other => panic!("expected hello, got {other:?}"),
+        };
+        let nonce = super::new_verification_nonce();
+        super::write_envelope(
+            &mut writer,
+            &GossipEnvelope::PeerVerificationChallenge {
+                address: listen_addr.to_string(),
+                nonce: nonce.clone(),
+            },
+        )
+        .await
+        .unwrap();
+
+        let response_line =
+            tokio::time::timeout(std::time::Duration::from_secs(1), reader.read_line())
+                .await
+                .unwrap()
+                .unwrap()
+                .unwrap();
+        match super::parse_envelope(&response_line).unwrap() {
+            GossipEnvelope::PeerVerificationResponse {
+                address,
+                nonce: response_nonce,
+                node_id: response_node_id,
+                signature,
+            } => assert!(super::peer_verification_response_is_valid(
+                &address,
+                &response_nonce,
+                &response_node_id,
+                &signature,
+                &listen_addr.to_string(),
+                &nonce,
+                &node_id,
+            )),
+            other => panic!("expected verification response, got {other:?}"),
+        }
+
+        let closed = tokio::time::timeout(std::time::Duration::from_secs(1), reader.read_line())
+            .await
+            .unwrap()
+            .unwrap();
+        assert!(closed.is_none());
+        network.set_accept_inbound(false).await.unwrap();
     }
 
     #[tokio::test]
