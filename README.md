@@ -1,29 +1,56 @@
 # iuna
 
-iuna is a low-energy currency devnet where blocks are finalized by burning IUNA, while new supply is earned through open proof-of-work.
+iuna is an experimental cryptocurrency devnet.
 
-It is not a mainnet and not money yet. The goal right now is simple: run a small real network, learn where the protocol and software bend, and make it pleasant enough that friends can help test it.
+It combines three ideas:
 
-## Download
+- **VDF finalization:** each block waits on verifiable sequential delay work.
+- **Burn lottery:** nodes burn IUNA to enter the lottery for who may finalize the next block.
+- **Proof-of-work issuance:** new IUNA is created through open PoW mine actions.
 
-Download the latest build for your platform from the [GitHub Releases](https://github.com/iuna-labs/iuna/releases) page. You do not need Rust or Cargo to run a node.
+## Status
 
-CLI release archives are published for:
+iuna is still in development. It is not a mainnet, not money, and not something to treat as financially valuable yet.
 
-- Linux x86_64
-- Linux aarch64
-- macOS x86_64
-- macOS Apple Silicon
-- Windows x86_64
+The goal right now is to run a real test network, improve the wallet and node software, and learn how the protocol behaves with real users.
 
-Desktop artifacts are also published for:
+## Why Another Crypto?
 
-- macOS Apple Silicon app bundle
-- Windows x86_64 installer
+Most chains lean heavily on one scarce resource:
 
-The desktop app starts the bundled iuna node locally and opens the same management UI in an app window.
+- Proof-of-work chains rely on hashpower.
+- Proof-of-stake chains rely on existing stake.
 
-Unpack the archive and run the `iuna` binary from a terminal.
+iuna tries a different split. Finalization is lightweight and based on a burn lottery plus VDF timing, while new supply stays open to proof-of-work. The intended benefit is better decentralization pressure than pure PoW or pure PoS: finalizing blocks should not require owning specialized mining scale, and issuing new coins should not require already being a large holder.
+
+This is still an experiment. The design needs real-world testing before those goals can be treated as proven.
+
+## Install
+
+The simplest way to run iuna is:
+
+1. Go to [GitHub Releases](https://github.com/iuna-labs/iuna/releases).
+2. Download the latest build for your platform.
+3. Start the app or binary.
+4. Follow the setup screen.
+
+The setup flow helps you create or import a wallet, back up your recovery phrase, and connect to the devnet.
+
+You do not need Rust or Cargo unless you want to work on the code.
+
+## What You Can Run
+
+You can use iuna as a wallet, a node, or a public peer.
+
+- **Wallet:** send, receive, and inspect activity.
+- **Node:** keep a local chain copy and participate in mining/finalization settings.
+- **Public peer:** same as a node, but reachable by other nodes through a public P2P address.
+
+Keep the management UI local. Only the P2P listener should be reachable by other nodes.
+
+## Optional: CLI
+
+Release archives also include a command-line binary.
 
 On macOS or Linux:
 
@@ -38,29 +65,7 @@ On Windows PowerShell:
 .\iuna.exe
 ```
 
-For the commands below, use `.\iuna.exe` instead of `./iuna` on Windows.
-
-Open the local management URL printed by iuna, set a local password, and back up the recovery phrase. The wallet seed is encrypted on disk. Keep the management UI local; only the P2P listener should be reachable by other nodes.
-
-## Join A Devnet
-
-Ask for a seed node address and start iuna with `--join`:
-
-```sh
-./iuna --join <peer-host>:<peer-port>
-```
-
-After the node syncs, you can receive IUNA, send transactions, burn for block finalization, or enable PoW mine actions from the Mining screen.
-
-## Start A Fresh Devnet
-
-Only the first operator of a devnet needs genesis mode:
-
-```sh
-./iuna --genesis
-```
-
-Genesis requires a fresh wallet and an empty chain database. It creates the starter chain, measures an initial VDF delay, and leaves the starter wallet with spendable IUNA for early testing.
+The binary prints a local management URL. Open it and follow setup.
 
 ## Optional: Stratum Mining
 
@@ -72,51 +77,9 @@ iuna can expose a Stratum V1 endpoint for SHA-256 ASIC miners such as a Bitaxe:
 
 Use your iuna wallet address as the worker username. Accepted shares become PoW mine actions in the node mempool and are gossiped to peers.
 
-## How It Works
-
-iuna combines three mechanisms:
-
-- **Proof of Burn:** nodes burn IUNA to enter the block-finalization lottery.
-- **VDF clock:** the selected finalizer must run sequential delay work before publishing a block.
-- **PoW issuance:** mine actions issue 2 IUNA: 1 IUNA to the PoW miner and 1 IUNA as a fixed fee to the finalizer that includes them.
-
-The current devnet targets 10-minute blocks, uses local wallet encryption, stores chain state in SQLite, and includes an in-memory network test harness for protocol testing.
-
 ## Contributing
 
-Contributions are welcome. Useful help includes running nodes, testing joins/restarts, improving P2P behavior, reviewing protocol incentives, cleaning up UI flows, and adding focused tests.
-
-Contributors need Rust and Cargo. Before sending changes, run:
-
-```sh
-cargo fmt -- --check
-cargo clippy --all-targets --all-features -- -D warnings
-cargo test
-```
-
-The property-style chain tests can also be run directly:
-
-```sh
-cargo test --test properties
-```
-
-To use the included pre-commit hook:
-
-```sh
-git config core.hooksPath .githooks
-chmod +x .githooks/pre-commit
-```
-
-## Release Builds
-
-Maintainers publish binaries by pushing a version tag:
-
-```sh
-git tag v0.1.0
-git push origin v0.1.0
-```
-
-The release workflow builds platform archives plus macOS and Windows desktop artifacts, writes `SHA256SUMS`, and attaches everything to the GitHub Release for that tag.
+We are open to PRs and help running, testing, and improving the devnet.
 
 ## License
 
