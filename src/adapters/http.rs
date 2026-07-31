@@ -2668,7 +2668,7 @@ const INDEX_HTML: &str = r#"<!doctype html>
       .block-card { flex-basis: 108px; }
     }
   </style>
-  <script defer src="/assets/iuna-ui.js?v=65"></script>
+  <script defer src="/assets/iuna-ui.js?v=66"></script>
   <script defer src="/assets/alpine.min.js"></script>
 </head>
 <body x-data="iunaApp()" x-init="init()" @keydown.window.escape="closeModals()" x-cloak>
@@ -4407,7 +4407,7 @@ mod tests {
 
     #[test]
     fn metrics_screen_includes_block_range_filter() {
-        assert!(super::INDEX_HTML.contains("iuna-ui.js?v=65"));
+        assert!(super::INDEX_HTML.contains("iuna-ui.js?v=66"));
         assert!(super::INDEX_HTML.contains("aria-label=\"Metrics block range\""));
         assert!(super::INDEX_HTML.contains("setMetricsRange(100)"));
         assert!(super::INDEX_HTML.contains("setMetricsRange(1000)"));

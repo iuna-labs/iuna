@@ -76,7 +76,7 @@ window.iunaApp = function iunaApp() {
     showSendAdvanced: false,
     selectedTransferUtxos: [],
     walletTxFilters: { transfer: true, mine: false, burn: false },
-    setupPeerAddress: "",
+    setupPeerAddress: "iuna.jhx.app:9444",
     peerAddress: "",
     flash: null,
     flashTimer: null,
