@@ -4,7 +4,7 @@ use iuna::{
     app::{InMemoryNetwork, NodeCore},
     domain::{
         Amount, ChainSnapshot, GenesisBurn, Ledger, MICRO_IUNA, MINE_REWARD, OutPoint, Transaction,
-        TxInput, TxOutput, Wallet, hex_hash, verify_vdf,
+        TxInput, TxOutput, VDF_TARGET_BLOCK_MS, Wallet, hex_hash, verify_vdf,
     },
 };
 
@@ -16,6 +16,9 @@ const TAMPER_PROPERTY_SEEDS: std::ops::Range<u64> = 200..208;
 const FORK_PROPERTY_SEEDS: std::ops::Range<u64> = 300..306;
 const NETWORK_CHAOS_SEEDS: std::ops::Range<u64> = 400..405;
 const NETWORK_CHAOS_ROUNDS: usize = 10;
+const VDF_STABILITY_SEEDS: std::ops::Range<u64> = 500..516;
+const VDF_STABILITY_BLOCKS: usize = 128;
+const VDF_STABILITY_INITIAL_ROUNDS: u64 = 1_000_000;
 
 #[derive(Clone, Debug)]
 struct TestRng {
@@ -87,6 +90,19 @@ fn single_finalizer_ledger(seed: u64, wallet_count: usize) -> (Vec<Wallet>, Ledg
     )
     .expect("single-finalizer property genesis is valid");
     (wallets, ledger)
+}
+
+fn vdf_stability_ledger(seed: u64) -> (Wallet, Ledger) {
+    let wallet = Wallet::from_seed(&format!("vdf-stability-{seed}"));
+    let mut allocations = BTreeMap::new();
+    allocations.insert(wallet.address().to_string(), 250 * MICRO_IUNA);
+    let ledger = Ledger::new_with_genesis_burns(
+        allocations,
+        vec![GenesisBurn::new(wallet.address(), MICRO_IUNA)],
+        VDF_STABILITY_INITIAL_ROUNDS,
+    )
+    .expect("vdf stability genesis is valid");
+    (wallet, ledger)
 }
 
 fn assert_chain_properties(snapshot: ChainSnapshot) {
@@ -416,9 +432,71 @@ fn finalize_with_wallet(ledger: &mut Ledger, wallet: &Wallet, timestamp_ms: u64)
     ledger.apply_block(block).expect("finalizer block applies");
 }
 
+fn finalize_preverified_with_wallet(ledger: &mut Ledger, wallet: &Wallet, timestamp_ms: u64) {
+    let burn = ledger
+        .build_burn(wallet, MICRO_IUNA, 0)
+        .expect("finalizer can build burn");
+    ledger
+        .submit_transaction(burn)
+        .expect("finalizer burn enters mempool");
+    let work = ledger
+        .prepare_next_block(wallet.address(), timestamp_ms)
+        .expect("finalizer can prepare next block");
+    let block = work.finish(wallet, "property-vdf".to_string());
+    ledger
+        .apply_locally_mined_block(block)
+        .expect("locally mined block applies");
+}
+
 fn finalize_many(ledger: &mut Ledger, wallet: &Wallet, count: usize, start_timestamp_ms: u64) {
     for offset in 0..count {
         finalize_with_wallet(ledger, wallet, start_timestamp_ms + offset as u64);
+    }
+}
+
+#[test]
+fn generated_vdf_retarget_stays_stable_under_noisy_block_times() {
+    for seed in VDF_STABILITY_SEEDS {
+        let (wallet, mut ledger) = vdf_stability_ledger(seed);
+        let mut rng = TestRng::new(seed);
+        let mut timestamp_ms = 0_u64;
+        let mut min_rounds = ledger.vdf_rounds();
+        let mut max_rounds = ledger.vdf_rounds();
+        let mut previous_rounds = ledger.vdf_rounds();
+        let mut pair_jitter_ms = 0_u64;
+
+        for block_index in 0..VDF_STABILITY_BLOCKS {
+            let interval_ms = if block_index == 0 {
+                VDF_TARGET_BLOCK_MS
+            } else if block_index % 2 == 1 {
+                pair_jitter_ms = rng.next_u64() % (VDF_TARGET_BLOCK_MS / 4 + 1);
+                VDF_TARGET_BLOCK_MS.saturating_sub(pair_jitter_ms)
+            } else {
+                VDF_TARGET_BLOCK_MS + pair_jitter_ms
+            };
+            timestamp_ms = timestamp_ms
+                .checked_add(interval_ms)
+                .expect("property timestamp does not overflow");
+
+            finalize_preverified_with_wallet(&mut ledger, &wallet, timestamp_ms);
+
+            let rounds = ledger.vdf_rounds();
+            let max_step = (previous_rounds * 2 / 100).max(1);
+            assert!(
+                rounds.abs_diff(previous_rounds) <= max_step,
+                "seed {seed} block {block_index}: VDF rounds changed from {previous_rounds} to {rounds}, above max step {max_step}"
+            );
+            min_rounds = min_rounds.min(rounds);
+            max_rounds = max_rounds.max(rounds);
+            previous_rounds = rounds;
+        }
+
+        let lower_bound = VDF_STABILITY_INITIAL_ROUNDS * 95 / 100;
+        let upper_bound = VDF_STABILITY_INITIAL_ROUNDS * 105 / 100;
+        assert!(
+            min_rounds >= lower_bound && max_rounds <= upper_bound,
+            "seed {seed}: VDF rounds drifted outside stability band: min {min_rounds}, max {max_rounds}"
+        );
     }
 }
 

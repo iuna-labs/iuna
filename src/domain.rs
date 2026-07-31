@@ -32,8 +32,9 @@ const MAX_BLOCK_TRANSACTIONS: usize = 1_000;
 const DEFAULT_TICKET_MATURITY_DELAY: u64 = 3;
 const DEFAULT_TICKET_EXPIRY_WINDOW: u64 = 3;
 const MIN_VDF_ROUNDS: u64 = 1;
-const VDF_RETARGET_WINDOW_BLOCKS: usize = 10;
-const MAX_VDF_RETARGET_STEP_PERCENT: u128 = 10;
+const VDF_RETARGET_WINDOW_BLOCKS: usize = 20;
+const MAX_VDF_RETARGET_STEP_PERCENT: u128 = 2;
+const VDF_RETARGET_DEADBAND_PERCENT: u128 = 10;
 const MIN_VDF_RETARGET_OBSERVED_BLOCK_MS: u64 = VDF_TARGET_BLOCK_MS / 4;
 const MAX_VDF_RETARGET_OBSERVED_BLOCK_MS: u64 = VDF_TARGET_BLOCK_MS * 4;
 const MAX_BLOCK_TIMESTAMP_FUTURE_DRIFT_MS: u64 = 2 * 60 * 1_000;
@@ -3431,7 +3432,13 @@ fn is_odd_prime(candidate: u64) -> bool {
 fn retarget_vdf_rounds(current_rounds: u64, observed_block_ms: u64) -> u64 {
     let current = u128::from(current_rounds);
     let observed = u128::from(observed_block_ms.max(1));
-    let raw_adjusted = current * u128::from(VDF_TARGET_BLOCK_MS) / observed;
+    let target = u128::from(VDF_TARGET_BLOCK_MS);
+    let deadband = target * VDF_RETARGET_DEADBAND_PERCENT / 100;
+    if observed >= target.saturating_sub(deadband) && observed <= target.saturating_add(deadband) {
+        return current_rounds;
+    }
+
+    let raw_adjusted = current * target / observed;
     let max_step = (current * MAX_VDF_RETARGET_STEP_PERCENT / 100).max(1);
     let min_next = current
         .saturating_sub(max_step)
@@ -3868,6 +3875,33 @@ mod tests {
     }
 
     #[test]
+    fn vdf_retarget_keeps_rounds_inside_deadband() {
+        let current = 1_000;
+        let low_deadband_edge =
+            VDF_TARGET_BLOCK_MS - VDF_TARGET_BLOCK_MS * VDF_RETARGET_DEADBAND_PERCENT as u64 / 100;
+        let high_deadband_edge =
+            VDF_TARGET_BLOCK_MS + VDF_TARGET_BLOCK_MS * VDF_RETARGET_DEADBAND_PERCENT as u64 / 100;
+
+        assert_eq!(retarget_vdf_rounds(current, low_deadband_edge), current);
+        assert_eq!(retarget_vdf_rounds(current, VDF_TARGET_BLOCK_MS), current);
+        assert_eq!(retarget_vdf_rounds(current, high_deadband_edge), current);
+    }
+
+    #[test]
+    fn vdf_retarget_limits_each_step_to_two_percent() {
+        let current = 1_000;
+
+        assert_eq!(
+            retarget_vdf_rounds(current, MIN_VDF_RETARGET_OBSERVED_BLOCK_MS),
+            1_020
+        );
+        assert_eq!(
+            retarget_vdf_rounds(current, MAX_VDF_RETARGET_OBSERVED_BLOCK_MS),
+            980
+        );
+    }
+
+    #[test]
     fn vdf_rounds_retarget_above_legacy_u32_limit_after_fast_blocks() {
         let wallet = Wallet::from_seed("vdf-rounds-above-u32");
         let initial_rounds = u64::from(u32::MAX);
@@ -3901,7 +3935,7 @@ mod tests {
             MIN_VDF_RETARGET_OBSERVED_BLOCK_MS,
             300_000,
             415_000,
-            VDF_TARGET_BLOCK_MS - 1,
+            VDF_TARGET_BLOCK_MS * 4 / 5,
         ];
 
         for seed in 0..16_u64 {

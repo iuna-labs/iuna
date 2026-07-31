@@ -1066,7 +1066,7 @@ fn vdf_rounds_retarget_toward_target_block_time() {
         .unwrap();
     assert_eq!(block2.vdf_rounds, 100);
     ledger.apply_block(block2).unwrap();
-    assert_eq!(ledger.vdf_rounds(), 110);
+    assert_eq!(ledger.vdf_rounds(), 102);
 
     submit_burn(&mut ledger, &wallet, 1);
     let block3 = ledger
@@ -1075,9 +1075,9 @@ fn vdf_rounds_retarget_toward_target_block_time() {
             VDF_TARGET_BLOCK_MS + VDF_TARGET_BLOCK_MS / 2 + VDF_TARGET_BLOCK_MS * 2,
         )
         .unwrap();
-    assert_eq!(block3.vdf_rounds, 110);
+    assert_eq!(block3.vdf_rounds, 102);
     ledger.apply_block(block3).unwrap();
-    assert_eq!(ledger.vdf_rounds(), 99);
+    assert_eq!(ledger.vdf_rounds(), 100);
 }
 
 #[test]
