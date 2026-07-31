@@ -149,6 +149,11 @@ struct P2pAnnounceForm {
 }
 
 #[derive(Debug, Deserialize)]
+struct P2pInboundForm {
+    enabled: bool,
+}
+
+#[derive(Debug, Deserialize)]
 struct TransferForm {
     to: String,
     amount: Amount,
@@ -414,6 +419,7 @@ pub async fn serve(
         )
         .route("/api/settings/pow-mining", post(api_pow_mining_form))
         .route("/api/settings/metrics", post(api_metrics_settings_form))
+        .route("/api/settings/p2p-inbound", post(api_p2p_inbound_form))
         .route("/api/settings/p2p-announce", post(api_p2p_announce_form))
         .route("/api/transfer", post(api_transfer_form))
         .route("/settings/burn-per-block", post(burn_per_block_form))
@@ -885,6 +891,13 @@ async fn api_p2p_announce_form(
     action_json(set_p2p_announce_addr(&state, form.addr).await)
 }
 
+async fn api_p2p_inbound_form(
+    State(state): State<HttpState>,
+    Form(form): Form<P2pInboundForm>,
+) -> Json<ActionResponse> {
+    action_json(set_p2p_accept_inbound(&state, form.enabled).await)
+}
+
 async fn burn_per_block_form(
     State(state): State<HttpState>,
     Form(form): Form<BurnSettingsForm>,
@@ -1042,6 +1055,29 @@ async fn set_p2p_announce_addr(state: &HttpState, addr: String) -> Result<()> {
     *config = next_config;
     drop(config);
     state.gossip.set_p2p_announce_addr(parsed).await;
+    Ok(())
+}
+
+async fn set_p2p_accept_inbound(state: &HttpState, enabled: bool) -> Result<()> {
+    let previous = state.gossip.accepts_inbound().await;
+    if enabled {
+        state.gossip.set_accept_inbound(true).await?;
+    }
+
+    let mut config = state.ui_config.lock().await;
+    let mut next_config = config.clone();
+    next_config.p2p_accept_inbound = enabled;
+    if let Err(error) = config_store::save(&state.config_path, &next_config) {
+        let _ = state.gossip.set_accept_inbound(previous).await;
+        return Err(error);
+    }
+    *config = next_config;
+    drop(config);
+
+    if !enabled {
+        state.gossip.set_accept_inbound(false).await?;
+    }
+
     Ok(())
 }
 
@@ -2451,6 +2487,7 @@ const INDEX_HTML: &str = r#"<!doctype html>
     .settings-mode-copy { min-width: 0; display: grid; gap: 4px; }
     .settings-mode-title { color: #e8edf0; font-size: 15px; font-weight: 850; }
     .settings-form { display: grid; gap: 10px; align-items: stretch; }
+    .public-p2p-form { margin-top: 14px; }
     .settings-form label, .settings-form input { width: 100%; }
     .metrics-shell { display: grid; gap: 12px; }
     .metrics-head { display: flex; justify-content: space-between; gap: 12px; align-items: center; }
@@ -2927,7 +2964,7 @@ const INDEX_HTML: &str = r#"<!doctype html>
         <div class="peer-toolbar">
           <div>
             <h2>Peers</h2>
-            <div class="panel-description">Manage outbound peers and inspect which nodes are healthy, lagging, or failing. Inbound rows are observed sessions and are not persisted in config.</div>
+            <div class="panel-description" x-text="p2pAcceptInbound ? 'Manage outbound peers and inspect inbound or outbound sessions. Public node is accepting inbound P2P connections.' : 'Manage outbound peers and inspect sync health. This node is outbound-only and does not open an inbound P2P port.'"></div>
           </div>
           <form class="peer-form" @submit.prevent="addPeer">
             <label>Peer address<input x-model="peerAddress" placeholder="seed.example:9444"></label>
@@ -3209,8 +3246,20 @@ const INDEX_HTML: &str = r#"<!doctype html>
         </div>
         <div class="panel" x-show="advancedMode()">
           <h3>Node Networking</h3>
-          <form class="settings-form" @submit.prevent="saveP2pAnnounce">
+          <div class="settings-mode-row">
+            <div class="settings-mode-copy">
+              <div class="settings-mode-title">Public node</div>
+              <div class="muted" x-text="p2pAcceptInbound ? 'Accepting inbound P2P connections.' : 'Outbound-only P2P; no inbound port is open.'"></div>
+            </div>
+            <label class="toggle-switch" :class="{ active: p2pAcceptInbound }">
+              <input type="checkbox" :checked="p2pAcceptInbound" @change="setP2pAcceptInbound($event.target.checked)">
+              <span class="toggle-track" aria-hidden="true"><span class="toggle-thumb"></span></span>
+              <span class="toggle-text" x-text="p2pAcceptInbound ? 'Public' : 'Private'"></span>
+            </label>
+          </div>
+          <form class="settings-form public-p2p-form" x-show="p2pAcceptInbound" x-transition @submit.prevent="saveP2pAnnounce">
             <label>Public P2P address<input x-model="p2pAnnounceAddr" @input="p2pAnnounceDirty = true" placeholder="203.0.113.10:9444"></label>
+            <div class="muted">Use this only when TCP port 9444 is reachable from the internet.</div>
             <div class="setup-actions"><button class="primary" type="submit">Save</button></div>
           </form>
         </div>
@@ -3852,7 +3901,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn p2p_announce_setting_persists_config_and_updates_gossip() {
+    async fn p2p_announce_setting_persists_config_and_waits_for_public_node() {
         let dir = tempfile::tempdir().unwrap();
         let config_path = dir.path().join("config.json");
         let state = auth_test_state(
@@ -3875,10 +3924,26 @@ mod tests {
         );
         match state.gossip.peer_exchange().await {
             GossipEnvelope::PeerList { peers } => {
+                assert!(!peers.contains(&"203.0.113.10:9444".to_string()));
+            }
+            other => panic!("expected peer list, got {other:?}"),
+        }
+
+        super::set_p2p_accept_inbound(&state, true).await.unwrap();
+        let config = config_store::load_or_create(&config_path).unwrap();
+        assert!(config.p2p_accept_inbound);
+        assert!(state.gossip.accepts_inbound().await);
+        match state.gossip.peer_exchange().await {
+            GossipEnvelope::PeerList { peers } => {
                 assert!(peers.contains(&"203.0.113.10:9444".to_string()));
             }
             other => panic!("expected peer list, got {other:?}"),
         }
+
+        super::set_p2p_accept_inbound(&state, false).await.unwrap();
+        let config = config_store::load_or_create(&config_path).unwrap();
+        assert!(!config.p2p_accept_inbound);
+        assert!(!state.gossip.accepts_inbound().await);
 
         super::set_p2p_announce_addr(&state, " ".to_string())
             .await

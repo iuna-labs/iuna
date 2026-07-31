@@ -49,6 +49,11 @@ async fn main() -> Result<()> {
     }
     let mut ui_config = config_store::load_or_create(&config_path)?;
     let p2p_announce_addr = configured_p2p_announce_addr(&opts, &ui_config)?;
+    let p2p_accept_inbound = opts.p2p_announce_addr.is_some() || ui_config.p2p_accept_inbound;
+    if let Some(addr) = opts.p2p_announce_addr {
+        ui_config.p2p_accept_inbound = true;
+        ui_config.p2p_announce_addr = Some(addr.to_string());
+    }
     let advertised_p2p_addr = p2p_announce_addr.unwrap_or(opts.p2p_addr);
     let wallet_load = load_startup_wallet(&wallet_path)?;
     let wallet_address = wallet_load.address().to_string();
@@ -106,9 +111,15 @@ async fn main() -> Result<()> {
     println!("config file: {}", config_path.display());
     println!("chain database: {}", chain_store.path().display());
     println!("management UI: http://{}", opts.http_addr);
-    println!("p2p listener: {}", opts.p2p_addr);
-    if let Some(addr) = p2p_announce_addr {
-        println!("p2p announce address: {addr}");
+    if p2p_accept_inbound {
+        println!("p2p listener: {}", opts.p2p_addr);
+    } else {
+        println!("p2p listener: disabled (outbound-only)");
+    }
+    if p2p_accept_inbound {
+        if let Some(addr) = p2p_announce_addr {
+            println!("p2p announce address: {addr}");
+        }
     }
     println!(
         "automatic finalization: VDF-driven, burning {} IUNA per block with {} IUNA per byte fee rate",
@@ -121,6 +132,7 @@ async fn main() -> Result<()> {
         Arc::clone(&peers),
         opts.p2p_addr,
         p2p_announce_addr,
+        p2p_accept_inbound,
     )
     .await?;
     let mut stratum_status = StratumStatus {
@@ -455,8 +467,8 @@ fn help_text() -> &'static str {
            --wallet <path>               Wallet file (default <data-dir>/wallet.json)\n\
            --chain-db <path>             Chain SQLite database (default <data-dir>/chain.sqlite3)\n\
            --http <addr:port>            HTTP management UI address (default 127.0.0.1:18661)\n\
-           --p2p <addr:port>             P2P TCP listener address (default 127.0.0.1:9444)\n\
-           --p2p-announce <addr:port>    Public P2P address to gossip instead of --p2p\n\
+           --p2p <addr:port>             Inbound P2P listener address when public node is enabled\n\
+           --p2p-announce <addr:port>    Public P2P address to gossip; enables inbound P2P\n\
            --stratum <addr:port>         Stratum V1 listener for SHA-256 ASIC miners\n\
            --join <addr:port>            Fetch chain snapshot from this peer before finalization\n\
            --data-dir <path>             Local wallet directory (default ~/.iuna)\n\

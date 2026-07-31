@@ -47,6 +47,7 @@ window.iunaApp = function iunaApp() {
     settingsPasswordConfirm: "",
     settingsFeedback: null,
     keepTrackOfMetrics: false,
+    p2pAcceptInbound: false,
     p2pAnnounceAddr: "",
     p2pAnnounceDirty: false,
     setupWallet: { address: null, seed_phrase: null, dev_verify_bypass: false, requires_peer: false },
@@ -322,6 +323,15 @@ window.iunaApp = function iunaApp() {
 
     async refreshConfig() {
       this.config = await this.fetchJson("/api/config");
+      this.syncConfigState();
+    },
+
+    syncConfigState() {
+      this.keepTrackOfMetrics = this.config.keep_track_of_metrics === true;
+      this.p2pAcceptInbound = this.config.p2p_accept_inbound === true;
+      if (!this.p2pAnnounceDirty) {
+        this.p2pAnnounceAddr = this.config.p2p_announce_addr || "";
+      }
     },
 
     async refreshWalletSetup() {
@@ -510,10 +520,7 @@ window.iunaApp = function iunaApp() {
           this.fetchJson("/api/network/health"),
         ]);
         this.config = config;
-        this.keepTrackOfMetrics = config.keep_track_of_metrics === true;
-        if (!this.p2pAnnounceDirty) {
-          this.p2pAnnounceAddr = config.p2p_announce_addr || "";
-        }
+        this.syncConfigState();
         if (!this.allowedTabs().includes(this.tab)) {
           this.setTab("wallet");
         }
@@ -935,7 +942,27 @@ window.iunaApp = function iunaApp() {
       }
     },
 
+    async setP2pAcceptInbound(enabled) {
+      const previous = this.p2pAcceptInbound;
+      try {
+        this.p2pAcceptInbound = enabled;
+        await this.postForm(
+          "/api/settings/p2p-inbound",
+          { enabled },
+          enabled ? "Public node enabled" : "Switched to outbound-only P2P"
+        );
+        await this.refreshConfig();
+      } catch (error) {
+        this.p2pAcceptInbound = previous;
+        this.showFlash(error.message, "error");
+      }
+    },
+
     async saveP2pAnnounce() {
+      if (!this.p2pAcceptInbound) {
+        this.showFlash("Enable public node before setting a public P2P address", "error");
+        return;
+      }
       const addr = this.p2pAnnounceAddr.trim();
       try {
         await this.postForm(

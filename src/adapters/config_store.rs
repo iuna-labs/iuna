@@ -27,6 +27,7 @@ pub struct UiConfig {
     pub burn_fee: Amount,
     pub pow_mine_fee: Amount,
     pub keep_track_of_metrics: bool,
+    pub p2p_accept_inbound: bool,
     pub p2p_announce_addr: Option<String>,
     pub peers: Vec<String>,
 }
@@ -42,6 +43,7 @@ impl Default for UiConfig {
             burn_fee: DEFAULT_BURN_FEE,
             pow_mine_fee: MINE_FINALIZER_FEE,
             keep_track_of_metrics: false,
+            p2p_accept_inbound: false,
             p2p_announce_addr: None,
             peers: Vec::new(),
         }
@@ -68,6 +70,8 @@ struct ConfigFile {
     pow_mine_fee: Option<Amount>,
     #[serde(default)]
     keep_track_of_metrics: bool,
+    #[serde(default)]
+    p2p_accept_inbound: Option<bool>,
     #[serde(default)]
     p2p_announce_addr: Option<String>,
     #[serde(default)]
@@ -101,6 +105,7 @@ pub fn save(path: &Path, config: &UiConfig) -> Result<()> {
         burn_fee: Some(config.burn_fee),
         pow_mine_fee: Some(config.pow_mine_fee),
         keep_track_of_metrics: config.keep_track_of_metrics,
+        p2p_accept_inbound: Some(config.p2p_accept_inbound),
         p2p_announce_addr: config.p2p_announce_addr.clone(),
         peers: config.peers.clone(),
     };
@@ -136,6 +141,10 @@ fn load(path: &Path) -> Result<UiConfig> {
         MICRO_IUNA
     };
 
+    let p2p_accept_inbound = stored
+        .p2p_accept_inbound
+        .unwrap_or_else(|| stored.p2p_announce_addr.is_some());
+
     Ok(UiConfig {
         setup_complete: stored.setup_complete,
         auth_password_hash: stored.auth_password_hash,
@@ -151,6 +160,7 @@ fn load(path: &Path) -> Result<UiConfig> {
             .map(|fee| fee.saturating_mul(scale))
             .unwrap_or(MINE_FINALIZER_FEE),
         keep_track_of_metrics: stored.keep_track_of_metrics,
+        p2p_accept_inbound,
         p2p_announce_addr: stored.p2p_announce_addr,
         peers: stored.peers,
     })
@@ -195,6 +205,7 @@ mod tests {
         assert!(stored.contains("\"burn_fee\": 1"));
         assert!(stored.contains("\"pow_mine_fee\": 1000000"));
         assert!(stored.contains("\"keep_track_of_metrics\": false"));
+        assert!(stored.contains("\"p2p_accept_inbound\": false"));
         assert!(stored.contains("\"p2p_announce_addr\": null"));
         assert!(stored.contains("\"peers\": []"));
     }
@@ -215,6 +226,7 @@ mod tests {
                 burn_fee: 3 * MICRO_IUNA,
                 pow_mine_fee: 2 * MICRO_IUNA,
                 keep_track_of_metrics: true,
+                p2p_accept_inbound: true,
                 p2p_announce_addr: Some("203.0.113.10:9444".to_string()),
                 peers: vec!["127.0.0.1:9444".to_string()],
             },
@@ -230,6 +242,7 @@ mod tests {
         assert_eq!(config.burn_fee, 3 * MICRO_IUNA);
         assert_eq!(config.pow_mine_fee, 2 * MICRO_IUNA);
         assert!(config.keep_track_of_metrics);
+        assert!(config.p2p_accept_inbound);
         assert_eq!(
             config.p2p_announce_addr.as_deref(),
             Some("203.0.113.10:9444")
@@ -273,7 +286,33 @@ mod tests {
         assert_eq!(config.burn_fee, DEFAULT_BURN_FEE);
         assert_eq!(config.pow_mine_fee, MINE_FINALIZER_FEE);
         assert!(!config.keep_track_of_metrics);
+        assert!(!config.p2p_accept_inbound);
         assert_eq!(config.peers, vec!["127.0.0.1:9444"]);
+    }
+
+    #[test]
+    fn legacy_config_with_announce_address_keeps_public_node_enabled() {
+        let dir = tempdir().unwrap();
+        let path = dir.path().join("config.json");
+        fs::write(
+            &path,
+            r#"{
+  "version": 1,
+  "setup_complete": true,
+  "p2p_announce_addr": "203.0.113.10:9444",
+  "peers": []
+}
+"#,
+        )
+        .unwrap();
+
+        let config = load_or_create(&path).unwrap();
+
+        assert!(config.p2p_accept_inbound);
+        assert_eq!(
+            config.p2p_announce_addr.as_deref(),
+            Some("203.0.113.10:9444")
+        );
     }
 
     #[test]
