@@ -14,6 +14,16 @@ window.iunaApp = function iunaApp() {
     p2pMetrics: {},
     blockchainMetrics: { enabled: false, latest: null, charts: [] },
     metricHover: null,
+    metricsRange: (() => {
+      try {
+        const stored = localStorage.getItem("iunaMetricsRange");
+        if (stored === "1000") return 1000;
+        if (stored === "all") return "all";
+      } catch {
+        // Ignore storage failures; the in-memory default is enough.
+      }
+      return 100;
+    })(),
     networkHealth: {},
     uiMode: (() => {
       try {
@@ -970,6 +980,16 @@ window.iunaApp = function iunaApp() {
       return this.blockchainMetrics?.latest || {};
     },
 
+    setMetricsRange(range) {
+      this.metricsRange = range === 1000 || range === "all" ? range : 100;
+      this.metricHover = null;
+      try {
+        localStorage.setItem("iunaMetricsRange", String(this.metricsRange));
+      } catch {
+        // Non-persistent filtering is fine when storage is unavailable.
+      }
+    },
+
     metricChartPoints(chart) {
       const points = this.metricVisiblePoints(chart);
       if (points.length === 0) return "";
@@ -1014,7 +1034,13 @@ window.iunaApp = function iunaApp() {
 
     metricVisiblePoints(chart) {
       const points = Array.isArray(chart?.points) ? chart.points : [];
-      return points.filter((point) => Number.isFinite(Number(point.value)));
+      const validPoints = points.filter((point) => Number.isFinite(Number(point.value)));
+      const limit = this.metricsRange;
+      if (limit === "all") return validPoints;
+      const latestHeight = Number(this.metricsLatest().height);
+      if (!Number.isFinite(latestHeight)) return validPoints.slice(-limit);
+      const minHeight = Math.max(0, latestHeight - limit + 1);
+      return validPoints.filter((point) => Number(point.height) >= minHeight);
     },
 
     metricLatestValueLabel(chart) {

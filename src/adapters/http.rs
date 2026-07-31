@@ -2453,6 +2453,10 @@ const INDEX_HTML: &str = r#"<!doctype html>
     .settings-form { display: grid; gap: 10px; align-items: stretch; }
     .settings-form label, .settings-form input { width: 100%; }
     .metrics-shell { display: grid; gap: 12px; }
+    .metrics-head { display: flex; justify-content: space-between; gap: 12px; align-items: center; }
+    .metrics-head h2 { margin: 0; }
+    .metrics-range { flex: 0 0 auto; }
+    .metrics-range button { padding: 5px 9px; font-size: 12px; white-space: nowrap; }
     .metrics-summary { display: grid; grid-template-columns: repeat(auto-fit, minmax(150px, 1fr)); gap: 10px; }
     .metrics-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(min(100%, 430px), 1fr)); gap: 12px; }
     .metric-chart-card { display: grid; gap: 10px; min-width: 0; border: 1px solid #2a3035; border-radius: 8px; padding: 12px; background: #181b1f; }
@@ -2654,6 +2658,9 @@ const INDEX_HTML: &str = r#"<!doctype html>
       header, .split, .setup-grid, .wallet-grid, .mining-grid, .detail-grid, .wallet-tx-row { grid-template-columns: 1fr; }
       header { display: grid; }
       .settings-mode-row { align-items: flex-start; }
+      .metrics-head { align-items: flex-start; flex-direction: column; }
+      .metrics-range { width: 100%; }
+      .metrics-range button { flex: 1 1 0; }
       .metrics-grid { grid-template-columns: 1fr; }
       input { min-width: 0; width: 100%; }
       .switch input { width: auto; }
@@ -2661,7 +2668,7 @@ const INDEX_HTML: &str = r#"<!doctype html>
       .block-card { flex-basis: 108px; }
     }
   </style>
-  <script defer src="/assets/iuna-ui.js?v=64"></script>
+  <script defer src="/assets/iuna-ui.js?v=65"></script>
   <script defer src="/assets/alpine.min.js"></script>
 </head>
 <body x-data="iunaApp()" x-init="init()" @keydown.window.escape="closeModals()" x-cloak>
@@ -3113,6 +3120,14 @@ const INDEX_HTML: &str = r#"<!doctype html>
     </section>
     <section x-show="tab === 'metrics'">
       <div class="metrics-shell">
+        <div class="metrics-head">
+          <h2>Metrics</h2>
+          <div class="segmented metrics-range" role="group" aria-label="Metrics block range">
+            <button type="button" :class="{ active: metricsRange === 100 }" @click="setMetricsRange(100)">Last 100</button>
+            <button type="button" :class="{ active: metricsRange === 1000 }" @click="setMetricsRange(1000)">Last 1000</button>
+            <button type="button" :class="{ active: metricsRange === 'all' }" @click="setMetricsRange('all')">All</button>
+          </div>
+        </div>
         <div class="metrics-summary">
           <div class="metric"><div class="label">Latest block</div><div class="value" x-text="metricsLatest().height ?? '-'"></div></div>
           <div class="metric"><div class="label">Supply</div><div class="value" x-text="metricAmountLabel(metricsLatest().circulatingSupply)"></div></div>
@@ -4388,6 +4403,15 @@ mod tests {
                 .collect::<Vec<_>>(),
             vec![(2, 120.0), (3, 130.0)]
         );
+    }
+
+    #[test]
+    fn metrics_screen_includes_block_range_filter() {
+        assert!(super::INDEX_HTML.contains("iuna-ui.js?v=65"));
+        assert!(super::INDEX_HTML.contains("aria-label=\"Metrics block range\""));
+        assert!(super::INDEX_HTML.contains("setMetricsRange(100)"));
+        assert!(super::INDEX_HTML.contains("setMetricsRange(1000)"));
+        assert!(super::INDEX_HTML.contains("setMetricsRange('all')"));
     }
 
     async fn auth_test_state(config_path: std::path::PathBuf, config: UiConfig) -> HttpState {
