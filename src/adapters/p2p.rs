@@ -1821,6 +1821,7 @@ fn record_received_envelope_kind(metrics: &P2pMetricsCounters, envelope: &Gossip
         }
         GossipEnvelope::Transaction(_)
         | GossipEnvelope::Transactions { .. }
+        | GossipEnvelope::BurnSeen(_)
         | GossipEnvelope::Block(_)
         | GossipEnvelope::Blocks { .. }
         | GossipEnvelope::ChainSnapshot(_) => {
@@ -1898,6 +1899,7 @@ fn validate_envelope_limits(envelope: &GossipEnvelope) -> Result<()> {
         GossipEnvelope::Hello(_)
         | GossipEnvelope::ChainSnapshotRequest
         | GossipEnvelope::Transaction(_)
+        | GossipEnvelope::BurnSeen(_)
         | GossipEnvelope::Block(_)
         | GossipEnvelope::PeerAnnouncement { .. }
         | GossipEnvelope::PeerVerificationChallenge { .. }

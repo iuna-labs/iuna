@@ -243,6 +243,7 @@ impl WalletTransactionFilters {
             Transaction::Transfer { .. } => self.transfer,
             Transaction::Mine { .. } => self.mine,
             Transaction::Burn { .. } => self.burn,
+            Transaction::BurnClaim { .. } => self.burn,
         }
     }
 }
@@ -1768,6 +1769,22 @@ fn ui_transaction(
             proof_bits: Some(proof_bits(signature)),
             proof_hash: Some(signature.clone()),
         },
+        Transaction::BurnClaim {
+            burn, signature, ..
+        } => UiTransaction {
+            kind: "burn_claim",
+            from: transaction.sender().to_string(),
+            to: None,
+            amount: burn.amount(),
+            fee: 0,
+            inputs: Vec::new(),
+            outputs: Vec::new(),
+            change: Vec::new(),
+            signature: signature.clone(),
+            difficulty_bits: None,
+            proof_bits: None,
+            proof_hash: None,
+        },
     }
 }
 
@@ -1868,6 +1885,7 @@ fn index_transaction_outputs(
             address: recipient.clone(),
             amount: *required_burn_amount,
         }],
+        Transaction::BurnClaim { .. } => Vec::new(),
     };
     for (index, output) in created_outputs.iter().enumerate() {
         outputs.insert(

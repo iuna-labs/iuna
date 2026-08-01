@@ -174,6 +174,7 @@ fn expected_confirmed_supply(snapshot: &ChainSnapshot) -> Amount {
                         .checked_add(*required_burn_amount)
                         .expect("mine output does not overflow supply");
                 }
+                Transaction::BurnClaim { .. } => {}
             }
         }
         supply = supply
@@ -302,7 +303,9 @@ fn apply_reference_transaction(
     });
     let burn_amount = match transaction {
         Transaction::Burn { amount, .. } => *amount,
-        Transaction::Transfer { .. } | Transaction::Mine { .. } => 0,
+        Transaction::Transfer { .. } | Transaction::Mine { .. } | Transaction::BurnClaim { .. } => {
+            0
+        }
     };
     let required = output_total
         .checked_add(transaction.fee())
@@ -334,7 +337,7 @@ fn insert_reference_outputs(
 fn reference_inputs(transaction: &Transaction) -> &[TxInput] {
     match transaction {
         Transaction::Transfer { inputs, .. } | Transaction::Burn { inputs, .. } => inputs,
-        Transaction::Mine { .. } => &[],
+        Transaction::Mine { .. } | Transaction::BurnClaim { .. } => &[],
     }
 }
 
@@ -350,6 +353,7 @@ fn reference_outputs(transaction: &Transaction) -> Vec<TxOutput> {
             address: recipient.clone(),
             amount: *required_burn_amount,
         }],
+        Transaction::BurnClaim { .. } => Vec::new(),
     }
 }
 
@@ -878,7 +882,8 @@ fn generated_snapshot_tampering_is_rejected() {
             match transaction {
                 Transaction::Transfer { signature, .. }
                 | Transaction::Burn { signature, .. }
-                | Transaction::Mine { signature, .. } => signature.push_str("00"),
+                | Transaction::Mine { signature, .. }
+                | Transaction::BurnClaim { signature, .. } => signature.push_str("00"),
             }
         }
         assert!(Ledger::from_snapshot(mutated_transaction).is_err());

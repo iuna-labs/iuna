@@ -341,6 +341,7 @@ fn metrics_from_snapshot(snapshot: &ChainSnapshot) -> Result<Vec<BlockMetricRow>
                         .and_then(|amount| amount.checked_add(transaction.fee()))
                         .context("block metric mine issuance overflow")?;
                 }
+                Transaction::BurnClaim { .. } => {}
             }
         }
 

@@ -23,6 +23,9 @@ pub const VDF_TARGET_BLOCK_MS: u64 = 10 * 60 * 1_000;
 pub const RECOVERY_BLOCK_DELAY_MS: u64 = VDF_TARGET_BLOCK_MS * 6;
 pub const MAX_VDF_ROUNDS: u64 = i64::MAX as u64;
 pub const MINE_DIFFICULTY_BITS: u32 = 12;
+pub const BURN_CLAIM_SEEN_QUORUM: usize = 3;
+pub const BURN_CLAIM_SEEN_WINDOW_BLOCKS: u64 = 10;
+pub const BURN_CLAIM_INCLUDE_WITHIN_BLOCKS: u64 = 3;
 const MINE_RETARGET_WINDOW_BLOCKS: u64 = 10;
 const MINE_TARGET_ACTIONS_PER_BLOCK: u64 = 1;
 const MINE_MAX_RETARGET_STEP_BITS: u32 = 2;
@@ -90,6 +93,29 @@ impl Wallet {
             signature,
         }
     }
+
+    pub fn burn_seen(
+        &self,
+        burn_signature: impl Into<String>,
+        seen_height: u64,
+        seen_block_hash: impl Into<String>,
+    ) -> BurnSeen {
+        let burn_signature = burn_signature.into();
+        let seen_block_hash = seen_block_hash.into();
+        let payload = burn_seen_payload(
+            &burn_signature,
+            seen_height,
+            &seen_block_hash,
+            self.address(),
+        );
+        BurnSeen {
+            burn_signature,
+            seen_height,
+            seen_block_hash,
+            signer: self.address.clone(),
+            signature: self.sign_payload(&payload),
+        }
+    }
 }
 
 #[derive(Clone, Debug, Deserialize, Eq, Ord, PartialEq, PartialOrd, Serialize)]
@@ -141,6 +167,35 @@ pub enum Transaction {
         proof_header: Option<String>,
         signature: String,
     },
+    BurnClaim {
+        burn: Box<Transaction>,
+        seen: Vec<BurnSeen>,
+        signature: String,
+    },
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+pub struct BurnSeen {
+    pub burn_signature: String,
+    pub seen_height: u64,
+    pub seen_block_hash: String,
+    pub signer: String,
+    pub signature: String,
+}
+
+impl BurnSeen {
+    pub fn verify_signature(&self) -> Result<()> {
+        verify_burn_seen_signature(self)
+    }
+
+    fn signing_payload(&self) -> String {
+        burn_seen_payload(
+            &self.burn_signature,
+            self.seen_height,
+            &self.seen_block_hash,
+            &self.signer,
+        )
+    }
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -154,6 +209,18 @@ impl Transaction {
     pub fn genesis_burn(from: impl Into<String>, amount: Amount) -> Self {
         let from = from.into();
         Self::genesis_burn_with_change(from, amount, Vec::new())
+    }
+
+    pub fn burn_claim(burn: Transaction, seen: Vec<BurnSeen>) -> Result<Self> {
+        if !burn.is_burn() {
+            bail!("burn claim must reference a burn transaction");
+        }
+        let signature = burn_claim_signature(&burn, &seen);
+        Ok(Self::BurnClaim {
+            burn: Box::new(burn),
+            seen,
+            signature,
+        })
     }
 
     fn genesis_burn_with_allocation(
@@ -206,6 +273,9 @@ impl Transaction {
                 .map(|input| input.owner.as_str())
                 .unwrap_or(""),
             Self::Mine { recipient, .. } => recipient.as_str(),
+            Self::BurnClaim { seen, .. } => {
+                seen.first().map(|seen| seen.signer.as_str()).unwrap_or("")
+            }
         }
     }
 
@@ -214,6 +284,7 @@ impl Transaction {
             Self::Transfer { outputs, .. } => outputs.first().map(|output| output.address.as_str()),
             Self::Burn { .. } => None,
             Self::Mine { recipient, .. } => Some(recipient.as_str()),
+            Self::BurnClaim { .. } => None,
         }
     }
 
@@ -227,6 +298,7 @@ impl Transaction {
                 required_burn_amount,
                 ..
             } => *required_burn_amount,
+            Self::BurnClaim { .. } => 0,
         }
     }
 
@@ -234,11 +306,12 @@ impl Transaction {
         match self {
             Self::Transfer { fee, .. } | Self::Burn { fee, .. } => *fee,
             Self::Mine { .. } => MINE_FINALIZER_FEE,
+            Self::BurnClaim { .. } => 0,
         }
     }
 
     pub fn total_debit(&self) -> Result<Amount> {
-        if matches!(self, Self::Mine { .. }) {
+        if matches!(self, Self::Mine { .. } | Self::BurnClaim { .. }) {
             return Ok(0);
         }
         self.amount()
@@ -250,6 +323,7 @@ impl Transaction {
         match self {
             Self::Transfer { signature, .. } | Self::Burn { signature, .. } => signature,
             Self::Mine { signature, .. } => signature,
+            Self::BurnClaim { signature, .. } => signature,
         }
     }
 
@@ -260,7 +334,7 @@ impl Transaction {
     fn burn_amount(&self) -> Amount {
         match self {
             Self::Burn { amount, .. } => *amount,
-            Self::Transfer { .. } | Self::Mine { .. } => 0,
+            Self::Transfer { .. } | Self::Mine { .. } | Self::BurnClaim { .. } => 0,
         }
     }
 
@@ -320,6 +394,7 @@ impl Transaction {
                 *nonce,
                 *difficulty_bits,
             ),
+            Self::BurnClaim { burn, seen, .. } => burn_claim_payload(burn, seen),
         }
     }
 
@@ -367,6 +442,22 @@ impl Transaction {
             }
             return Ok(());
         }
+        if let Self::BurnClaim {
+            burn,
+            seen,
+            signature,
+        } = self
+        {
+            burn.verify_signature()?;
+            for seen in seen {
+                verify_burn_seen_signature(seen)?;
+            }
+            let expected = burn_claim_signature(burn, seen);
+            if *signature != expected {
+                bail!("burn claim signature is invalid");
+            }
+            return Ok(());
+        }
         if self.signature().starts_with("iuna-genesis-burn:") || self.inputs_are_genesis_signed() {
             return Ok(());
         }
@@ -393,7 +484,7 @@ impl Transaction {
     fn inputs(&self) -> &[TxInput] {
         match self {
             Self::Transfer { inputs, .. } | Self::Burn { inputs, .. } => inputs,
-            Self::Mine { .. } => &[],
+            Self::Mine { .. } | Self::BurnClaim { .. } => &[],
         }
     }
 
@@ -409,6 +500,7 @@ impl Transaction {
                 address: recipient.clone(),
                 amount: *required_burn_amount,
             }],
+            Self::BurnClaim { .. } => Vec::new(),
         }
     }
 
@@ -574,6 +666,49 @@ fn mine_signature(
         nonce,
         difficulty_bits,
     ))
+}
+
+fn burn_seen_payload(
+    burn_signature: &str,
+    seen_height: u64,
+    seen_block_hash: &str,
+    signer: &str,
+) -> String {
+    format!("iuna-burn-seen:{burn_signature}:{seen_height}:{seen_block_hash}:{signer}")
+}
+
+fn canonical_burn_seen(seen: &BurnSeen) -> String {
+    format!(
+        "{}:{}:{}:{}:{}",
+        seen.burn_signature, seen.seen_height, seen.seen_block_hash, seen.signer, seen.signature
+    )
+}
+
+fn burn_claim_payload(burn: &Transaction, seen: &[BurnSeen]) -> String {
+    let mut seen = seen.iter().map(canonical_burn_seen).collect::<Vec<_>>();
+    seen.sort_unstable();
+    format!("iuna-burn-claim:{}:{}", burn.canonical(), seen.join("|"))
+}
+
+fn burn_claim_signature(burn: &Transaction, seen: &[BurnSeen]) -> String {
+    hex_hash(burn_claim_payload(burn, seen))
+}
+
+fn verify_burn_seen_signature(seen: &BurnSeen) -> Result<()> {
+    validate_protocol_id(&seen.burn_signature, "burn seen transaction signature")?;
+    validate_hash(&seen.seen_block_hash, "burn seen block hash")?;
+    validate_address(&seen.signer, "burn seen signer")?;
+    validate_signature(&seen.signature, "burn seen signature")?;
+    let public_key = decode_hex_array::<PUBLIC_KEY_BYTES>(&seen.signer)
+        .with_context(|| format!("invalid burn seen signer {}", seen.signer))?;
+    let signature = decode_hex_array::<SIGNATURE_BYTES>(&seen.signature)
+        .context("invalid burn seen signature")?;
+    let verifying_key =
+        VerifyingKey::from_bytes(&public_key).context("invalid burn seen public key")?;
+    let signature = Signature::from_bytes(&signature);
+    verifying_key
+        .verify(seen.signing_payload().as_bytes(), &signature)
+        .context("burn seen signature is invalid")
 }
 
 pub const STRATUM_EXTRANONCE1_HEX: &str = "00000000";
@@ -994,6 +1129,15 @@ struct BurnTicket {
     eligible_until_height: u64,
 }
 
+#[derive(Clone, Debug, Eq, PartialEq)]
+struct BurnClaimState {
+    burn: Transaction,
+    claim_signature: String,
+    claim_height: u64,
+    due_height: u64,
+    expires_at_height: u64,
+}
+
 #[derive(Clone, Debug)]
 pub struct PreparedBlock {
     height: u64,
@@ -1236,6 +1380,7 @@ pub struct Ledger {
     genesis_allocations: BTreeMap<String, Amount>,
     utxos: BTreeMap<OutPoint, TxOutput>,
     tickets: Vec<BurnTicket>,
+    burn_claims: Vec<BurnClaimState>,
     pending: Vec<Transaction>,
     orphans: Vec<Transaction>,
     mine_reward: Amount,
@@ -1283,6 +1428,7 @@ impl Ledger {
             genesis_allocations: genesis_allocations.clone(),
             utxos,
             tickets,
+            burn_claims: Vec::new(),
             pending: Vec::new(),
             orphans: Vec::new(),
             mine_reward: MINE_REWARD,
@@ -1335,6 +1481,7 @@ impl Ledger {
             genesis_allocations,
             utxos,
             tickets: Vec::new(),
+            burn_claims: Vec::new(),
             pending: Vec::new(),
             orphans: Vec::new(),
             mine_reward: MINE_REWARD,
@@ -1816,6 +1963,12 @@ impl Ledger {
         Ok(transaction)
     }
 
+    pub fn build_burn_claim(&self, burn: Transaction, seen: Vec<BurnSeen>) -> Result<Transaction> {
+        let transaction = Transaction::burn_claim(burn, seen)?;
+        self.validate_new_transaction(&transaction)?;
+        Ok(transaction)
+    }
+
     pub fn build_mine(&self, recipient: impl Into<String>) -> Result<Transaction> {
         self.build_mine_with_required_burn(recipient, self.recommended_mine_required_burn_amount())
     }
@@ -2155,6 +2308,7 @@ impl Ledger {
             .collect::<BTreeSet<_>>();
         self.utxos = utxos;
         self.tickets = tickets;
+        self.update_burn_claims_after_block(&block)?;
         self.chain.push(block);
         let available = self.utxos.clone();
         let pending = std::mem::take(&mut self.pending);
@@ -2233,6 +2387,7 @@ impl Ledger {
         }
         ensure_block_has_burn(&block.transactions)?;
         ensure_mine_actions_have_required_burns(&block.transactions)?;
+        self.ensure_due_burn_claims_are_included(block.height, &block.transactions)?;
         match block.finalizer_mode {
             FinalizerMode::Ticket => {
                 let selected_ticket = self
@@ -2362,21 +2517,43 @@ impl Ledger {
         let mut selected = Vec::new();
         let mut selected_burn_amount = 0_u64;
 
-        let first_burn_index = if let Some(owner) = required_burn_owner {
-            best_selectable_burn_from_index(&remaining, &utxos, owner)
-        } else {
-            best_selectable_transaction_index(&remaining, &utxos, Some(TransactionKind::Burn))
-        };
-        if let Some(index) = first_burn_index {
-            let tx = remaining.remove(index);
+        for tx in self.due_required_claimed_burns(self.tip().height + 1)? {
+            remaining.retain(|pending| pending.signature() != tx.signature());
             let mut candidate = selected.clone();
             candidate.push(tx.clone());
-            if estimated_block_size_bytes(&candidate)? <= self.launch_profile.max_block_bytes {
-                apply_transaction(&tx, &mut utxos)?;
-                selected_burn_amount = selected_burn_amount
-                    .checked_add(tx.burn_amount())
-                    .context("selected block burns overflow")?;
-                selected.push(tx);
+            if estimated_block_size_bytes(&candidate)? > self.launch_profile.max_block_bytes {
+                bail!("due claimed burns exceed max block size");
+            }
+            apply_transaction(&tx, &mut utxos)?;
+            selected_burn_amount = selected_burn_amount
+                .checked_add(tx.burn_amount())
+                .context("selected block burns overflow")?;
+            selected.push(tx);
+        }
+
+        let needs_first_burn = !selected.iter().any(Transaction::is_burn);
+        let needs_owner_burn = required_burn_owner.is_some_and(|owner| {
+            !selected
+                .iter()
+                .any(|transaction| transaction.is_burn() && transaction.sender() == owner)
+        });
+        if needs_first_burn || needs_owner_burn {
+            let first_burn_index = if let Some(owner) = required_burn_owner {
+                best_selectable_burn_from_index(&remaining, &utxos, owner)
+            } else {
+                best_selectable_transaction_index(&remaining, &utxos, Some(TransactionKind::Burn))
+            };
+            if let Some(index) = first_burn_index {
+                let tx = remaining.remove(index);
+                let mut candidate = selected.clone();
+                candidate.push(tx.clone());
+                if estimated_block_size_bytes(&candidate)? <= self.launch_profile.max_block_bytes {
+                    apply_transaction(&tx, &mut utxos)?;
+                    selected_burn_amount = selected_burn_amount
+                        .checked_add(tx.burn_amount())
+                        .context("selected block burns overflow")?;
+                    selected.push(tx);
+                }
             }
         }
 
@@ -2401,6 +2578,56 @@ impl Ledger {
             }
         }
         Ok(selected)
+    }
+
+    fn ensure_due_burn_claims_are_included(
+        &self,
+        block_height: u64,
+        transactions: &[Transaction],
+    ) -> Result<()> {
+        let included_burns = transactions
+            .iter()
+            .filter(|transaction| transaction.is_burn())
+            .map(|transaction| transaction.signature().to_string())
+            .collect::<BTreeSet<_>>();
+        for burn in self.due_required_claimed_burns(block_height)? {
+            if !included_burns.contains(burn.signature()) {
+                bail!(
+                    "block omits due claimed burn transaction {}",
+                    burn.signature()
+                );
+            }
+        }
+        Ok(())
+    }
+
+    fn due_required_claimed_burns(&self, block_height: u64) -> Result<Vec<Transaction>> {
+        let mut claims = self
+            .burn_claims
+            .iter()
+            .filter(|claim| claim.due_height <= block_height)
+            .collect::<Vec<_>>();
+        claims.sort_by(|left, right| {
+            left.due_height
+                .cmp(&right.due_height)
+                .then_with(|| left.claim_height.cmp(&right.claim_height))
+                .then_with(|| left.claim_signature.cmp(&right.claim_signature))
+        });
+
+        let mut utxos = self.utxos.clone();
+        let mut required = Vec::new();
+        let mut seen_burns = BTreeSet::new();
+        for claim in claims {
+            if !seen_burns.insert(claim.burn.signature().to_string()) {
+                continue;
+            }
+            let mut candidate = utxos.clone();
+            if apply_transaction(&claim.burn, &mut candidate).is_ok() {
+                utxos = candidate;
+                required.push(claim.burn.clone());
+            }
+        }
+        Ok(required)
     }
 
     fn select_inputs(
@@ -2554,6 +2781,125 @@ impl Ledger {
                     bail!("mine transaction difficulty is invalid");
                 }
             }
+            Transaction::BurnClaim {
+                burn,
+                seen,
+                signature,
+            } => {
+                validate_hash(signature, "burn claim signature")?;
+                self.validate_burn_claim(burn, seen)?;
+            }
+        }
+        Ok(())
+    }
+
+    fn validate_burn_claim(&self, burn: &Transaction, seen: &[BurnSeen]) -> Result<()> {
+        if !burn.is_burn() {
+            bail!("burn claim must reference a burn transaction");
+        }
+        burn.verify_signature()?;
+        self.validate_transaction_terms(burn)?;
+        let mut burn_utxos = self.utxos.clone();
+        apply_transaction(burn, &mut burn_utxos)?;
+        if self
+            .chain
+            .iter()
+            .flat_map(|block| block.transactions.iter())
+            .any(|transaction| transaction.signature() == burn.signature())
+        {
+            bail!("burn claim references an already confirmed burn");
+        }
+        if burn.serialized_size_bytes()? > self.launch_profile.max_block_bytes {
+            bail!("burn claim references a burn larger than max block size");
+        }
+
+        let recent_finalizers = self.recent_finalizers_for_burn_claim();
+        let required_quorum = BURN_CLAIM_SEEN_QUORUM.min(recent_finalizers.len()).max(1);
+        let mut unique_seen_signers = BTreeSet::new();
+        for attestation in seen {
+            if attestation.burn_signature != burn.signature() {
+                bail!("burn seen attestation references a different burn");
+            }
+            let Some(block) = recent_finalizers.get(&attestation.signer) else {
+                bail!("burn seen signer is not a recent finalizer");
+            };
+            if attestation.seen_height != block.height || attestation.seen_block_hash != block.hash
+            {
+                bail!("burn seen attestation does not match recent finalizer block");
+            }
+            if !unique_seen_signers.insert(attestation.signer.as_str()) {
+                bail!("burn claim contains duplicate finalizer attestation");
+            }
+        }
+        if unique_seen_signers.len() < required_quorum {
+            bail!(
+                "burn claim has {} finalizer attestations but requires {}",
+                unique_seen_signers.len(),
+                required_quorum
+            );
+        }
+        Ok(())
+    }
+
+    fn recent_finalizers_for_burn_claim(&self) -> BTreeMap<String, Block> {
+        let min_height = self
+            .tip()
+            .height
+            .saturating_sub(BURN_CLAIM_SEEN_WINDOW_BLOCKS)
+            .saturating_add(1);
+        let mut finalizers = BTreeMap::new();
+        for block in self.chain.iter().rev() {
+            if block.height == 0 || block.height < min_height {
+                break;
+            }
+            finalizers
+                .entry(block.miner.clone())
+                .or_insert_with(|| block.clone());
+        }
+        finalizers
+    }
+
+    fn update_burn_claims_after_block(&mut self, block: &Block) -> Result<()> {
+        let included_burns = block
+            .transactions
+            .iter()
+            .filter(|transaction| transaction.is_burn())
+            .map(|transaction| transaction.signature().to_string())
+            .collect::<BTreeSet<_>>();
+        self.burn_claims.retain(|claim| {
+            !included_burns.contains(claim.burn.signature())
+                && claim.expires_at_height > block.height
+                && claim.due_height > block.height
+        });
+
+        let mut active_burns = self
+            .burn_claims
+            .iter()
+            .map(|claim| claim.burn.signature().to_string())
+            .collect::<BTreeSet<_>>();
+        for transaction in &block.transactions {
+            let Transaction::BurnClaim {
+                burn, signature, ..
+            } = transaction
+            else {
+                continue;
+            };
+            if included_burns.contains(burn.signature()) || active_burns.contains(burn.signature())
+            {
+                continue;
+            }
+            active_burns.insert(burn.signature().to_string());
+            let due_height = block
+                .height
+                .checked_add(BURN_CLAIM_INCLUDE_WITHIN_BLOCKS)
+                .context("burn claim due height overflows")?;
+            self.burn_claims.push(BurnClaimState {
+                burn: burn.as_ref().clone(),
+                claim_signature: signature.clone(),
+                claim_height: block.height,
+                due_height,
+                expires_at_height: due_height,
+            });
         }
         Ok(())
     }
@@ -3201,7 +3547,25 @@ fn canonical_transaction_size_bytes(transaction: &Transaction) -> usize {
                     .unwrap_or(0)
                 + hash_size_bytes(signature)
         }
+        Transaction::BurnClaim {
+            burn,
+            seen,
+            signature,
+        } => {
+            1 + canonical_transaction_size_bytes(burn)
+                + compact_len(seen.len() as u128)
+                + seen.iter().map(burn_seen_size_bytes).sum::<usize>()
+                + hash_size_bytes(signature)
+        }
     }
+}
+
+fn burn_seen_size_bytes(seen: &BurnSeen) -> usize {
+    hash_size_bytes(&seen.burn_signature)
+        + compact_len(u128::from(seen.seen_height))
+        + hash_size_bytes(&seen.seen_block_hash)
+        + address_size_bytes(&seen.signer)
+        + signature_size_bytes(&seen.signature)
 }
 
 fn compact_inputs_size_bytes(inputs: &[TxInput]) -> usize {
@@ -3343,25 +3707,28 @@ fn apply_transaction(
     utxos: &mut BTreeMap<OutPoint, TxOutput>,
 ) -> Result<()> {
     transaction.verify_signature()?;
-    if let Transaction::Mine {
-        recipient,
-        required_burn_amount,
-        ..
-    } = transaction
-    {
-        let output = TxOutput {
-            address: recipient.clone(),
-            amount: *required_burn_amount,
-        };
-        ensure_outputs_do_not_overflow(utxos, std::slice::from_ref(&output))?;
-        utxos.insert(
-            OutPoint {
-                txid: transaction.signature().to_string(),
-                index: 0,
-            },
-            output,
-        );
-        return Ok(());
+    match transaction {
+        Transaction::Mine {
+            recipient,
+            required_burn_amount,
+            ..
+        } => {
+            let output = TxOutput {
+                address: recipient.clone(),
+                amount: *required_burn_amount,
+            };
+            ensure_outputs_do_not_overflow(utxos, std::slice::from_ref(&output))?;
+            utxos.insert(
+                OutPoint {
+                    txid: transaction.signature().to_string(),
+                    index: 0,
+                },
+                output,
+            );
+            return Ok(());
+        }
+        Transaction::BurnClaim { .. } => return Ok(()),
+        Transaction::Transfer { .. } | Transaction::Burn { .. } => {}
     }
     ensure_single_input_owner(transaction)?;
     let input_total = spend_inputs(transaction, utxos)?;
@@ -3376,7 +3743,9 @@ fn apply_transaction(
         .context("transaction outputs plus fee overflow")?
         .checked_add(match transaction {
             Transaction::Burn { amount, .. } => *amount,
-            Transaction::Transfer { .. } | Transaction::Mine { .. } => 0,
+            Transaction::Transfer { .. }
+            | Transaction::Mine { .. }
+            | Transaction::BurnClaim { .. } => 0,
         })
         .context("transaction outputs plus burn overflow")?;
     if input_total != required {
@@ -3435,7 +3804,10 @@ fn transaction_has_missing_inputs(
 }
 
 fn ensure_single_input_owner(transaction: &Transaction) -> Result<()> {
-    if matches!(transaction, Transaction::Mine { .. }) {
+    if matches!(
+        transaction,
+        Transaction::Mine { .. } | Transaction::BurnClaim { .. }
+    ) {
         return Ok(());
     }
     let Some(first) = transaction.inputs().first() else {
@@ -3525,7 +3897,9 @@ fn utxos_after_genesis(
                 validate_genesis_burn_transaction(transaction)?;
                 apply_transaction(transaction, &mut utxos)?;
             }
-            Transaction::Transfer { .. } | Transaction::Mine { .. } => {
+            Transaction::Transfer { .. }
+            | Transaction::Mine { .. }
+            | Transaction::BurnClaim { .. } => {
                 bail!("genesis only supports burn transactions")
             }
         }
@@ -3611,7 +3985,9 @@ fn genesis_miner(
         .iter()
         .filter_map(|transaction| match transaction {
             Transaction::Burn { inputs, .. } => inputs.first().map(|input| input.owner.as_str()),
-            Transaction::Transfer { .. } | Transaction::Mine { .. } => None,
+            Transaction::Transfer { .. }
+            | Transaction::Mine { .. }
+            | Transaction::BurnClaim { .. } => None,
         })
         .find(|from| genesis_allocations.contains_key(*from))
         .or_else(|| genesis_allocations.keys().next().map(String::as_str))
@@ -3941,6 +4317,113 @@ mod tests {
             }
         }
         panic!("expected to find mine proof");
+    }
+
+    fn ledger_with_finalizers_and_burner(finalizers: &[Wallet], burner: &Wallet) -> Ledger {
+        let mut allocations = BTreeMap::new();
+        for wallet in finalizers {
+            allocations.insert(wallet.address().to_string(), 100 * MICRO_IUNA);
+        }
+        allocations.insert(burner.address().to_string(), 100 * MICRO_IUNA);
+        let genesis_burns = finalizers
+            .iter()
+            .map(|wallet| GenesisBurn {
+                from: wallet.address().to_string(),
+                amount: MICRO_IUNA,
+            })
+            .collect::<Vec<_>>();
+        Ledger::new_with_genesis_burns(allocations, genesis_burns, 1).unwrap()
+    }
+
+    fn wallet_for_address<'a>(wallets: &'a [Wallet], address: &str) -> &'a Wallet {
+        wallets
+            .iter()
+            .find(|wallet| wallet.address() == address)
+            .unwrap_or_else(|| panic!("missing wallet for address {address}"))
+    }
+
+    fn recent_unique_finalizer_count(ledger: &Ledger) -> usize {
+        ledger.recent_finalizers_for_burn_claim().len()
+    }
+
+    fn mine_next_preverified_burn_block(ledger: &mut Ledger, wallets: &[Wallet]) -> Block {
+        let recent_finalizers = ledger.recent_finalizers_for_burn_claim();
+        let wallet = wallets
+            .iter()
+            .find(|wallet| {
+                !recent_finalizers.contains_key(wallet.address())
+                    && ledger
+                        .finalizer_rank_for_next_block(wallet.address())
+                        .is_some()
+            })
+            .or_else(|| {
+                wallets.iter().find(|wallet| {
+                    ledger
+                        .finalizer_rank_for_next_block(wallet.address())
+                        .is_some()
+                })
+            })
+            .expect("expected an eligible finalizer wallet");
+        let burn = ledger
+            .build_burn(wallet, MIN_MINE_REQUIRED_BURN, 0)
+            .unwrap();
+        ledger.submit_transaction(burn).unwrap();
+        let prepared = ledger
+            .prepare_next_block(wallet.address(), ledger.tip().timestamp_ms + 1)
+            .unwrap();
+        let block = prepared.finish(wallet, "preverified-vdf".to_string());
+        ledger
+            .apply_preverified_block_at(block.clone(), u64::MAX)
+            .unwrap();
+        block
+    }
+
+    fn mine_until_recent_finalizers(
+        ledger: &mut Ledger,
+        wallets: &[Wallet],
+        required_unique: usize,
+    ) {
+        for _ in 0..30 {
+            if recent_unique_finalizer_count(ledger) >= required_unique {
+                return;
+            }
+            mine_next_preverified_burn_block(ledger, wallets);
+        }
+        panic!("could not mine {required_unique} recent unique finalizers");
+    }
+
+    fn recent_burn_seen_attestations(
+        ledger: &Ledger,
+        wallets: &[Wallet],
+        burn: &Transaction,
+        count: usize,
+    ) -> Vec<BurnSeen> {
+        let mut seen = Vec::new();
+        let mut signers = BTreeSet::new();
+        for block in ledger.chain().iter().rev().filter(|block| block.height > 0) {
+            if !signers.insert(block.miner.clone()) {
+                continue;
+            }
+            let wallet = wallet_for_address(wallets, &block.miner);
+            seen.push(wallet.burn_seen(burn.signature(), block.height, block.hash.clone()));
+            if seen.len() == count {
+                break;
+            }
+        }
+        assert_eq!(seen.len(), count);
+        seen
+    }
+
+    fn confirm_burn_claim(
+        ledger: &mut Ledger,
+        wallets: &[Wallet],
+        burn: Transaction,
+    ) -> Transaction {
+        let seen = recent_burn_seen_attestations(ledger, wallets, &burn, BURN_CLAIM_SEEN_QUORUM);
+        let claim = ledger.build_burn_claim(burn, seen).unwrap();
+        ledger.submit_transaction(claim.clone()).unwrap();
+        mine_next_preverified_burn_block(ledger, wallets);
+        claim
     }
 
     fn transfer_with_extra_zero_outputs(
@@ -4613,6 +5096,181 @@ mod tests {
             ledger.recommended_mine_required_burn_amount_with_multiplier(10_000),
             MICRO_IUNA
         );
+    }
+
+    #[test]
+    fn burn_claim_requires_recent_finalizer_quorum() {
+        let finalizers = (0..5)
+            .map(|index| Wallet::from_seed(&format!("burn-claim-quorum-finalizer-{index}")))
+            .collect::<Vec<_>>();
+        let burner = Wallet::from_seed("burn-claim-quorum-burner");
+        let mut ledger = ledger_with_finalizers_and_burner(&finalizers, &burner);
+        mine_until_recent_finalizers(&mut ledger, &finalizers, BURN_CLAIM_SEEN_QUORUM);
+        assert!(recent_unique_finalizer_count(&ledger) >= BURN_CLAIM_SEEN_QUORUM);
+
+        let burn = ledger
+            .build_burn(&burner, MIN_MINE_REQUIRED_BURN, 0)
+            .unwrap();
+        let seen =
+            recent_burn_seen_attestations(&ledger, &finalizers, &burn, BURN_CLAIM_SEEN_QUORUM - 1);
+
+        let error = ledger.build_burn_claim(burn, seen).unwrap_err();
+
+        assert!(format!("{error:#}").contains("finalizer attestations"));
+    }
+
+    #[test]
+    fn burn_claim_rejects_invalid_seen_signature() {
+        let finalizers = (0..5)
+            .map(|index| Wallet::from_seed(&format!("burn-claim-signature-finalizer-{index}")))
+            .collect::<Vec<_>>();
+        let burner = Wallet::from_seed("burn-claim-signature-burner");
+        let mut ledger = ledger_with_finalizers_and_burner(&finalizers, &burner);
+        mine_until_recent_finalizers(&mut ledger, &finalizers, BURN_CLAIM_SEEN_QUORUM);
+
+        let burn = ledger
+            .build_burn(&burner, MIN_MINE_REQUIRED_BURN, 0)
+            .unwrap();
+        let mut seen =
+            recent_burn_seen_attestations(&ledger, &finalizers, &burn, BURN_CLAIM_SEEN_QUORUM);
+        seen[0].signature = "00".repeat(SIGNATURE_BYTES);
+        let claim = Transaction::burn_claim(burn, seen).unwrap();
+
+        let error = ledger.submit_transaction(claim).unwrap_err();
+
+        assert!(format!("{error:#}").contains("burn seen signature"));
+    }
+
+    #[test]
+    fn due_burn_claim_makes_block_omitting_burn_invalid() {
+        let finalizers = (0..5)
+            .map(|index| Wallet::from_seed(&format!("burn-claim-due-finalizer-{index}")))
+            .collect::<Vec<_>>();
+        let burner = Wallet::from_seed("burn-claim-due-burner");
+        let mut ledger = ledger_with_finalizers_and_burner(&finalizers, &burner);
+        mine_until_recent_finalizers(&mut ledger, &finalizers, BURN_CLAIM_SEEN_QUORUM);
+        let burn = ledger
+            .build_burn(&burner, MIN_MINE_REQUIRED_BURN, 0)
+            .unwrap();
+        let burn_signature = burn.signature().to_string();
+
+        confirm_burn_claim(&mut ledger, &finalizers, burn);
+        let claim_height = ledger.height();
+        while ledger.height() + 1 < claim_height + BURN_CLAIM_INCLUDE_WITHIN_BLOCKS {
+            mine_next_preverified_burn_block(&mut ledger, &finalizers);
+        }
+
+        let leader = ledger.expected_leader_for_next_block().unwrap();
+        let wallet = wallet_for_address(&finalizers, &leader);
+        let filler_burn = ledger
+            .build_burn(wallet, MIN_MINE_REQUIRED_BURN, 0)
+            .unwrap();
+        ledger.submit_transaction(filler_burn.clone()).unwrap();
+        let mut prepared = ledger
+            .prepare_next_block(wallet.address(), ledger.tip().timestamp_ms + 1)
+            .unwrap();
+        assert!(
+            prepared
+                .transactions
+                .iter()
+                .any(|transaction| transaction.signature() == burn_signature)
+        );
+        prepared
+            .transactions
+            .retain(|transaction| transaction.signature() != burn_signature);
+        assert!(
+            prepared
+                .transactions
+                .iter()
+                .any(|transaction| transaction.signature() == filler_burn.signature())
+        );
+        prepared.reward = fee_reward(&prepared.transactions).unwrap();
+        let block = prepared.finish(wallet, "preverified-vdf".to_string());
+
+        let error = ledger
+            .apply_preverified_block_at(block, u64::MAX)
+            .unwrap_err();
+
+        assert!(format!("{error:#}").contains("omits due claimed burn"));
+    }
+
+    #[test]
+    fn block_selection_includes_due_claimed_burn() {
+        let finalizers = (0..5)
+            .map(|index| Wallet::from_seed(&format!("burn-claim-select-finalizer-{index}")))
+            .collect::<Vec<_>>();
+        let burner = Wallet::from_seed("burn-claim-select-burner");
+        let mut ledger = ledger_with_finalizers_and_burner(&finalizers, &burner);
+        mine_until_recent_finalizers(&mut ledger, &finalizers, BURN_CLAIM_SEEN_QUORUM);
+        let burn = ledger
+            .build_burn(&burner, MIN_MINE_REQUIRED_BURN, 0)
+            .unwrap();
+        let burn_signature = burn.signature().to_string();
+
+        confirm_burn_claim(&mut ledger, &finalizers, burn);
+        let claim_height = ledger.height();
+        while ledger.height() + 1 < claim_height + BURN_CLAIM_INCLUDE_WITHIN_BLOCKS {
+            mine_next_preverified_burn_block(&mut ledger, &finalizers);
+        }
+
+        let leader = ledger.expected_leader_for_next_block().unwrap();
+        let wallet = wallet_for_address(&finalizers, &leader);
+        let prepared = ledger
+            .prepare_next_block(wallet.address(), ledger.tip().timestamp_ms + 1)
+            .unwrap();
+
+        assert!(
+            prepared
+                .transactions
+                .iter()
+                .any(|transaction| transaction.signature() == burn_signature)
+        );
+    }
+
+    #[test]
+    fn claimed_burn_is_not_required_after_it_becomes_invalid() {
+        let finalizers = (0..5)
+            .map(|index| Wallet::from_seed(&format!("burn-claim-invalid-finalizer-{index}")))
+            .collect::<Vec<_>>();
+        let burner = Wallet::from_seed("burn-claim-invalid-burner");
+        let recipient = Wallet::from_seed("burn-claim-invalid-recipient");
+        let mut ledger = ledger_with_finalizers_and_burner(&finalizers, &burner);
+        mine_until_recent_finalizers(&mut ledger, &finalizers, BURN_CLAIM_SEEN_QUORUM);
+        let burn = ledger
+            .build_burn(&burner, MIN_MINE_REQUIRED_BURN, 0)
+            .unwrap();
+        let burn_signature = burn.signature().to_string();
+        let burn_input = burn.inputs().first().unwrap().outpoint.clone();
+
+        confirm_burn_claim(&mut ledger, &finalizers, burn);
+        let claim_height = ledger.height();
+        let spend = ledger
+            .build_transfer_with_inputs(&burner, recipient.address(), 1, 0, &[burn_input])
+            .unwrap();
+        ledger.submit_transaction(spend).unwrap();
+        mine_next_preverified_burn_block(&mut ledger, &finalizers);
+        while ledger.height() + 1 < claim_height + BURN_CLAIM_INCLUDE_WITHIN_BLOCKS {
+            mine_next_preverified_burn_block(&mut ledger, &finalizers);
+        }
+
+        let leader = ledger.expected_leader_for_next_block().unwrap();
+        let wallet = wallet_for_address(&finalizers, &leader);
+        let filler_burn = ledger
+            .build_burn(wallet, MIN_MINE_REQUIRED_BURN, 0)
+            .unwrap();
+        ledger.submit_transaction(filler_burn).unwrap();
+        let block = ledger
+            .prepare_next_block(wallet.address(), ledger.tip().timestamp_ms + 1)
+            .unwrap()
+            .finish(wallet, "preverified-vdf".to_string());
+
+        assert!(
+            !block
+                .transactions
+                .iter()
+                .any(|transaction| transaction.signature() == burn_signature)
+        );
+        ledger.apply_preverified_block_at(block, u64::MAX).unwrap();
     }
 
     #[test]

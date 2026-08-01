@@ -2377,7 +2377,8 @@ fn fork_choice_preflight_rejects_invalid_fork_before_vrf_scoring() {
         match transaction {
             iuna::domain::Transaction::Burn { signature, .. }
             | iuna::domain::Transaction::Transfer { signature, .. }
-            | iuna::domain::Transaction::Mine { signature, .. } => signature.push_str("00"),
+            | iuna::domain::Transaction::Mine { signature, .. }
+            | iuna::domain::Transaction::BurnClaim { signature, .. } => signature.push_str("00"),
         }
     }
 
