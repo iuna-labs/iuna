@@ -20,6 +20,7 @@ pub const DEFAULT_TRANSACTION_FEE: Amount = MICRO_IUNA;
 pub const DEFAULT_FEE_PER_BYTE: Amount = 1;
 pub const MAX_BLOCK_BYTES: usize = 100_000;
 pub const VDF_TARGET_BLOCK_MS: u64 = 10 * 60 * 1_000;
+pub const RECOVERY_BLOCK_DELAY_MS: u64 = VDF_TARGET_BLOCK_MS * 6;
 pub const MAX_VDF_ROUNDS: u64 = i64::MAX as u64;
 pub const MINE_DIFFICULTY_BITS: u32 = 12;
 const MINE_RETARGET_WINDOW_BLOCKS: u64 = 10;
@@ -783,6 +784,8 @@ pub struct Block {
     pub timestamp_ms: u64,
     pub miner: String,
     #[serde(default)]
+    pub finalizer_mode: FinalizerMode,
+    #[serde(default)]
     pub finalizer_rank: u32,
     pub reward: Amount,
     pub vdf_rounds: u64,
@@ -792,6 +795,14 @@ pub struct Block {
     pub hash: String,
 }
 
+#[derive(Clone, Copy, Debug, Default, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum FinalizerMode {
+    #[default]
+    Ticket,
+    Recovery,
+}
+
 impl Block {
     fn new(draft: BlockDraft) -> Self {
         let mut block = Self {
@@ -799,6 +810,7 @@ impl Block {
             prev_hash: draft.prev_hash,
             timestamp_ms: draft.timestamp_ms,
             miner: draft.miner,
+            finalizer_mode: draft.finalizer_mode,
             finalizer_rank: draft.finalizer_rank,
             reward: draft.reward,
             vdf_rounds: draft.vdf_rounds,
@@ -821,7 +833,12 @@ impl Block {
     }
 
     pub fn vdf_seed(&self) -> String {
-        vdf_seed_for_child(&self.prev_hash, self.height)
+        match self.finalizer_mode {
+            FinalizerMode::Ticket => vdf_seed_for_child(&self.prev_hash, self.height),
+            FinalizerMode::Recovery => {
+                recovery_vdf_seed_for_child(&self.prev_hash, self.height, self.timestamp_ms)
+            }
+        }
     }
 
     fn content_hash(&self) -> String {
@@ -849,7 +866,18 @@ impl Block {
     }
 
     fn legacy_content_hash_prefix(&self, leader_proof: &str) -> String {
-        if self.finalizer_rank == 0 {
+        if self.finalizer_mode == FinalizerMode::Recovery {
+            format!(
+                "block-content-recovery-v1:{}:{}:{}:{}:{}:{}:{}",
+                self.height,
+                self.prev_hash,
+                self.timestamp_ms,
+                self.miner,
+                self.reward,
+                self.vdf_rounds,
+                leader_proof
+            )
+        } else if self.finalizer_rank == 0 {
             format!(
                 "block-content:{}:{}:{}:{}:{}:{}:{}",
                 self.height,
@@ -877,6 +905,7 @@ impl Block {
 
     fn leader_score(&self) -> LeaderScore {
         LeaderScore {
+            finalizer_mode_rank: self.finalizer_mode.fork_choice_rank(),
             finalizer_rank: self.finalizer_rank,
             proof_rank: self
                 .leader_proof
@@ -890,6 +919,15 @@ impl Block {
         serde_json::to_vec(self)
             .map(|bytes| bytes.len())
             .context("failed to serialize block for size check")
+    }
+}
+
+impl FinalizerMode {
+    fn fork_choice_rank(self) -> u8 {
+        match self {
+            Self::Ticket => 0,
+            Self::Recovery => 1,
+        }
     }
 }
 
@@ -962,11 +1000,12 @@ pub struct PreparedBlock {
     prev_hash: String,
     timestamp_ms: u64,
     miner: String,
+    finalizer_mode: FinalizerMode,
     finalizer_rank: u32,
     reward: Amount,
     vdf_rounds: u64,
     vdf_seed: String,
-    leader_ticket: BurnTicket,
+    leader_ticket: Option<BurnTicket>,
     transactions: Vec<Transaction>,
 }
 
@@ -984,25 +1023,29 @@ impl PreparedBlock {
     }
 
     pub fn finish(self, wallet: &Wallet, vdf_output: String) -> Block {
-        let proof_payload = LeaderProofPayload {
-            height: self.height,
-            prev_hash: self.prev_hash.clone(),
-            finalizer_rank: self.finalizer_rank,
-            vdf_output: vdf_output.clone(),
-            ticket_id: self.leader_ticket.id.clone(),
-            ticket_amount: self.leader_ticket.amount,
-            ticket_owner: self.leader_ticket.owner.clone(),
-        };
+        let leader_proof = self.leader_ticket.as_ref().map(|leader_ticket| {
+            let proof_payload = LeaderProofPayload {
+                height: self.height,
+                prev_hash: self.prev_hash.clone(),
+                finalizer_rank: self.finalizer_rank,
+                vdf_output: vdf_output.clone(),
+                ticket_id: leader_ticket.id.clone(),
+                ticket_amount: leader_ticket.amount,
+                ticket_owner: leader_ticket.owner.clone(),
+            };
+            wallet.leader_proof(&proof_payload)
+        });
         Block::new(BlockDraft {
             height: self.height,
             prev_hash: self.prev_hash,
             timestamp_ms: self.timestamp_ms,
             miner: self.miner,
+            finalizer_mode: self.finalizer_mode,
             finalizer_rank: self.finalizer_rank,
             reward: self.reward,
             vdf_rounds: self.vdf_rounds,
             vdf_output,
-            leader_proof: Some(wallet.leader_proof(&proof_payload)),
+            leader_proof,
             transactions: self.transactions,
         })
     }
@@ -1014,6 +1057,7 @@ struct BlockDraft {
     prev_hash: String,
     timestamp_ms: u64,
     miner: String,
+    finalizer_mode: FinalizerMode,
     finalizer_rank: u32,
     reward: Amount,
     vdf_rounds: u64,
@@ -1125,14 +1169,16 @@ impl ForkPoint {
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 struct LeaderScore {
+    finalizer_mode_rank: u8,
     finalizer_rank: u32,
     proof_rank: String,
 }
 
 impl Ord for LeaderScore {
     fn cmp(&self, other: &Self) -> std::cmp::Ordering {
-        self.finalizer_rank
-            .cmp(&other.finalizer_rank)
+        self.finalizer_mode_rank
+            .cmp(&other.finalizer_mode_rank)
+            .then_with(|| self.finalizer_rank.cmp(&other.finalizer_rank))
             .then_with(|| self.proof_rank.cmp(&other.proof_rank))
     }
 }
@@ -1962,6 +2008,12 @@ impl Ledger {
         Ok(prepared.finish(wallet, vdf_output))
     }
 
+    pub fn mine_recovery_block(&self, wallet: &Wallet, timestamp_ms: u64) -> Result<Block> {
+        let prepared = self.prepare_recovery_block(wallet.address(), timestamp_ms)?;
+        let vdf_output = run_vdf(prepared.vdf_seed(), prepared.vdf_rounds());
+        Ok(prepared.finish(wallet, vdf_output))
+    }
+
     pub fn prepare_next_block(&self, miner: &str, timestamp_ms: u64) -> Result<PreparedBlock> {
         let height = self.tip().height + 1;
         let Some((finalizer_rank, leader_ticket)) = self.finalizer_ticket_for_miner(height, miner)
@@ -1985,11 +2037,53 @@ impl Ledger {
             prev_hash,
             timestamp_ms,
             miner: miner.to_string(),
+            finalizer_mode: FinalizerMode::Ticket,
             reward: fee_reward(&transactions)?,
             vdf_rounds: self.vdf_rounds_for_finalizer_rank(finalizer_rank)?,
             vdf_seed,
             finalizer_rank,
-            leader_ticket,
+            leader_ticket: Some(leader_ticket),
+            transactions,
+        })
+    }
+
+    pub fn recovery_block_available_at(&self, timestamp_ms: u64) -> bool {
+        timestamp_ms >= self.recovery_block_min_timestamp()
+    }
+
+    pub fn recovery_block_min_timestamp(&self) -> u64 {
+        self.tip()
+            .timestamp_ms
+            .saturating_add(RECOVERY_BLOCK_DELAY_MS)
+    }
+
+    pub fn prepare_recovery_block(&self, miner: &str, timestamp_ms: u64) -> Result<PreparedBlock> {
+        let height = self.tip().height + 1;
+        let min_timestamp = self.recovery_block_min_timestamp();
+        if timestamp_ms < min_timestamp {
+            bail!("recovery block is not available before timestamp {min_timestamp}");
+        }
+
+        let transactions = self.select_recovery_block_transactions(miner)?;
+        ensure_block_has_burn(&transactions)?;
+        ensure_block_has_burn_from(&transactions, miner)?;
+        ensure_mine_actions_have_required_burns(&transactions)?;
+
+        let tip = self.tip();
+        let prev_hash = tip.hash.clone();
+        let timestamp_ms = timestamp_ms.max(tip.timestamp_ms + 1);
+        let vdf_seed = recovery_vdf_seed_for_child(&prev_hash, height, timestamp_ms);
+        Ok(PreparedBlock {
+            height,
+            prev_hash,
+            timestamp_ms,
+            miner: miner.to_string(),
+            finalizer_mode: FinalizerMode::Recovery,
+            finalizer_rank: 0,
+            reward: fee_reward(&transactions)?,
+            vdf_rounds: self.recovery_vdf_rounds()?,
+            vdf_seed,
+            leader_ticket: None,
             transactions,
         })
     }
@@ -2050,7 +2144,7 @@ impl Ledger {
             bail!("block reward is invalid");
         }
         let mut tickets = self.tickets.clone();
-        consume_leader_ticket(&block, &mut tickets)?;
+        apply_finalizer_ticket_effects(&block, &mut tickets)?;
         credit_reward_output(&mut utxos, &block)?;
         tickets.extend(tickets_created_by_block(&block, &self.launch_profile)?);
 
@@ -2116,7 +2210,7 @@ impl Ledger {
         if block.reward != fee_reward(&block.transactions)? {
             bail!("block reward is invalid");
         }
-        let expected_vdf_rounds = self.vdf_rounds_for_finalizer_rank(block.finalizer_rank)?;
+        let expected_vdf_rounds = self.expected_vdf_rounds_for_block(block)?;
         if block.vdf_rounds != expected_vdf_rounds {
             bail!("block VDF rounds are invalid");
         }
@@ -2139,24 +2233,31 @@ impl Ledger {
         }
         ensure_block_has_burn(&block.transactions)?;
         ensure_mine_actions_have_required_burns(&block.transactions)?;
-        let selected_ticket = self
-            .ticket_for_finalizer_rank(block.height, block.finalizer_rank)
-            .context("no selected ticket for block finalizer rank")?;
-        if selected_ticket.owner != block.miner {
-            bail!(
-                "block finalizer {} is not selected for rank {}",
-                block.miner,
-                block.finalizer_rank
-            );
+        match block.finalizer_mode {
+            FinalizerMode::Ticket => {
+                let selected_ticket = self
+                    .ticket_for_finalizer_rank(block.height, block.finalizer_rank)
+                    .context("no selected ticket for block finalizer rank")?;
+                if selected_ticket.owner != block.miner {
+                    bail!(
+                        "block finalizer {} is not selected for rank {}",
+                        block.miner,
+                        block.finalizer_rank
+                    );
+                }
+                if block
+                    .leader_proof
+                    .as_ref()
+                    .is_none_or(|proof| proof.ticket_id != selected_ticket.id)
+                {
+                    bail!("block does not prove the selected leader ticket");
+                }
+                verify_leader_proof(block, &self.tickets)?;
+            }
+            FinalizerMode::Recovery => {
+                ensure_valid_recovery_block(block, self.tip())?;
+            }
         }
-        if block
-            .leader_proof
-            .as_ref()
-            .is_none_or(|proof| proof.ticket_id != selected_ticket.id)
-        {
-            bail!("block does not prove the selected leader ticket");
-        }
-        verify_leader_proof(block, &self.tickets)?;
 
         Ok(true)
     }
@@ -2245,14 +2346,28 @@ impl Ledger {
     }
 
     fn select_block_transactions(&self) -> Result<Vec<Transaction>> {
+        self.select_block_transactions_with_required_burn_owner(None)
+    }
+
+    fn select_recovery_block_transactions(&self, miner: &str) -> Result<Vec<Transaction>> {
+        self.select_block_transactions_with_required_burn_owner(Some(miner))
+    }
+
+    fn select_block_transactions_with_required_burn_owner(
+        &self,
+        required_burn_owner: Option<&str>,
+    ) -> Result<Vec<Transaction>> {
         let mut utxos = self.utxos.clone();
         let mut remaining = self.valid_pending_transactions();
         let mut selected = Vec::new();
         let mut selected_burn_amount = 0_u64;
 
-        if let Some(index) =
+        let first_burn_index = if let Some(owner) = required_burn_owner {
+            best_selectable_burn_from_index(&remaining, &utxos, owner)
+        } else {
             best_selectable_transaction_index(&remaining, &utxos, Some(TransactionKind::Burn))
-        {
+        };
+        if let Some(index) = first_burn_index {
             let tx = remaining.remove(index);
             let mut candidate = selected.clone();
             candidate.push(tx.clone());
@@ -2490,6 +2605,17 @@ impl Ledger {
         vdf_rounds_for_finalizer_rank(self.vdf_rounds, rank)
     }
 
+    fn recovery_vdf_rounds(&self) -> Result<u64> {
+        vdf_rounds_for_finalizer_rank(self.vdf_rounds, 0)
+    }
+
+    fn expected_vdf_rounds_for_block(&self, block: &Block) -> Result<u64> {
+        match block.finalizer_mode {
+            FinalizerMode::Ticket => self.vdf_rounds_for_finalizer_rank(block.finalizer_rank),
+            FinalizerMode::Recovery => self.recovery_vdf_rounds(),
+        }
+    }
+
     fn mine_difficulty_bits_for_anchor_height(&self, anchor_height: u64) -> u32 {
         let mut difficulty = self.launch_profile.mine_difficulty_bits;
         let mut window_end = MINE_RETARGET_WINDOW_BLOCKS;
@@ -2710,6 +2836,19 @@ fn genesis_bootstrap_tickets(
     Ok(tickets)
 }
 
+fn apply_finalizer_ticket_effects(block: &Block, tickets: &mut Vec<BurnTicket>) -> Result<()> {
+    match block.finalizer_mode {
+        FinalizerMode::Ticket => consume_leader_ticket(block, tickets),
+        FinalizerMode::Recovery => {
+            tickets.retain(|ticket| {
+                !ticket_is_eligible_for_height(ticket, block.height)
+                    && ticket.eligible_until_height > block.height
+            });
+            Ok(())
+        }
+    }
+}
+
 fn consume_leader_ticket(block: &Block, tickets: &mut Vec<BurnTicket>) -> Result<()> {
     let Some(proof) = &block.leader_proof else {
         bail!("block is missing leader proof");
@@ -2784,6 +2923,16 @@ fn ensure_block_has_burn(transactions: &[Transaction]) -> Result<()> {
     Ok(())
 }
 
+fn ensure_block_has_burn_from(transactions: &[Transaction], miner: &str) -> Result<()> {
+    if !transactions
+        .iter()
+        .any(|transaction| transaction.is_burn() && transaction.sender() == miner)
+    {
+        bail!("recovery block must include a burn from the finalizer");
+    }
+    Ok(())
+}
+
 fn block_burn_amount(block: &Block) -> Amount {
     transactions_burn_amount(&block.transactions).unwrap_or(Amount::MAX)
 }
@@ -2816,6 +2965,20 @@ fn ensure_mine_actions_have_required_burns(transactions: &[Transaction]) -> Resu
     Ok(())
 }
 
+fn ensure_valid_recovery_block(block: &Block, parent: &Block) -> Result<()> {
+    if block.finalizer_rank != 0 {
+        bail!("recovery block finalizer rank must be 0");
+    }
+    if block.leader_proof.is_some() {
+        bail!("recovery block must not carry a leader proof");
+    }
+    let min_timestamp = parent.timestamp_ms.saturating_add(RECOVERY_BLOCK_DELAY_MS);
+    if block.timestamp_ms < min_timestamp {
+        bail!("recovery block is not available before timestamp {min_timestamp}");
+    }
+    ensure_block_has_burn_from(&block.transactions, &block.miner)
+}
+
 fn fee_rate_key(transaction: &Transaction) -> u128 {
     let size = transaction.economic_size_bytes();
     if size == 0 {
@@ -2835,6 +2998,28 @@ fn best_selectable_transaction_index(
         required_kind,
         Amount::MAX,
     )
+}
+
+fn best_selectable_burn_from_index(
+    transactions: &[Transaction],
+    utxos: &BTreeMap<OutPoint, TxOutput>,
+    owner: &str,
+) -> Option<usize> {
+    transactions
+        .iter()
+        .enumerate()
+        .filter(|(_, tx)| tx.is_burn() && tx.sender() == owner)
+        .filter(|(_, tx)| {
+            let mut utxos = utxos.clone();
+            apply_transaction(tx, &mut utxos).is_ok()
+        })
+        .max_by(|(_, left), (_, right)| {
+            fee_rate_key(left)
+                .cmp(&fee_rate_key(right))
+                .then_with(|| left.fee().cmp(&right.fee()))
+                .then_with(|| right.signature().cmp(left.signature()))
+        })
+        .map(|(index, _)| index)
 }
 
 fn best_selectable_transaction_index_for_burn_amount(
@@ -3081,6 +3266,7 @@ fn estimated_block_size_bytes(transactions: &[Transaction]) -> Result<usize> {
         prev_hash: "f".repeat(64),
         timestamp_ms: u64::MAX,
         miner: "f".repeat(64),
+        finalizer_mode: FinalizerMode::Ticket,
         finalizer_rank: 0,
         reward: u64::MAX,
         vdf_rounds: u64::MAX,
@@ -3144,6 +3330,12 @@ fn verify_leader_signature(proof: &LeaderProof, payload: &LeaderProofPayload) ->
 
 fn vdf_seed_for_child(prev_hash: &str, height: u64) -> String {
     hex_hash(format!("iuna-vdf-child:{prev_hash}:{height}"))
+}
+
+fn recovery_vdf_seed_for_child(prev_hash: &str, height: u64, timestamp_ms: u64) -> String {
+    hex_hash(format!(
+        "iuna-recovery-vdf-child:{prev_hash}:{height}:{timestamp_ms}"
+    ))
 }
 
 fn apply_transaction(
@@ -3309,6 +3501,7 @@ fn build_genesis_block(
         prev_hash: "0".repeat(64),
         timestamp_ms: 0,
         miner,
+        finalizer_mode: FinalizerMode::Ticket,
         finalizer_rank: 0,
         reward,
         vdf_rounds: 0,
@@ -4300,6 +4493,7 @@ mod tests {
             prev_hash: "0".repeat(64),
             timestamp_ms: 1,
             miner: "alice".to_string(),
+            finalizer_mode: FinalizerMode::Ticket,
             finalizer_rank: 0,
             reward: BLOCK_REWARD,
             vdf_rounds: 1,

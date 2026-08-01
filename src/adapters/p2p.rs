@@ -3180,6 +3180,7 @@ mod tests {
             prev_hash: "prev".to_string(),
             timestamp_ms: 1,
             miner: "miner".to_string(),
+            finalizer_mode: crate::domain::FinalizerMode::Ticket,
             finalizer_rank: 0,
             reward: 100,
             vdf_rounds: 1,

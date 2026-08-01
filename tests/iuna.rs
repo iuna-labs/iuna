@@ -11,8 +11,9 @@ use iuna::{
     },
     domain::{
         Amount, BLOCK_REWARD, DEFAULT_FEE_PER_BYTE, DEFAULT_MINE_REQUIRED_BURN_MULTIPLIER_BPS,
-        GenesisBurn, Ledger, MAX_BLOCK_BYTES, MICRO_IUNA, MIN_MINE_REQUIRED_BURN,
-        TransactionSubmitOutcome, VDF_TARGET_BLOCK_MS, Wallet, run_vdf, verify_vdf,
+        FinalizerMode, GenesisBurn, Ledger, MAX_BLOCK_BYTES, MICRO_IUNA, MIN_MINE_REQUIRED_BURN,
+        RECOVERY_BLOCK_DELAY_MS, TransactionSubmitOutcome, VDF_TARGET_BLOCK_MS, Wallet, run_vdf,
+        verify_vdf,
     },
 };
 use tempfile::tempdir;
@@ -995,6 +996,173 @@ fn fallback_finalizer_unblocks_network_when_primary_does_not_publish() {
         assert_eq!(status.height, 1, "{id} did not accept fallback block");
         assert_eq!(status.tip_hash, tip, "{id} has a different tip");
     }
+}
+
+#[test]
+fn recovery_block_is_rejected_before_timeout() {
+    let alice = Wallet::from_seed("recovery-before-timeout-alice");
+    let bob = Wallet::from_seed("recovery-before-timeout-bob");
+    let mut genesis = BTreeMap::new();
+    genesis.insert(alice.address().to_string(), iuna(10));
+    genesis.insert(bob.address().to_string(), iuna(10));
+    let mut ledger =
+        Ledger::new_with_genesis_burns(genesis, vec![GenesisBurn::new(alice.address(), 1)], 25)
+            .unwrap();
+
+    submit_burn(&mut ledger, &bob, 1);
+    let error = ledger
+        .mine_recovery_block(&bob, RECOVERY_BLOCK_DELAY_MS - 1)
+        .unwrap_err();
+
+    assert!(format!("{error:#}").contains("recovery block is not available"));
+}
+
+#[test]
+fn recovery_block_unblocks_chain_when_only_ticket_holder_stops() {
+    let alice = Wallet::from_seed("recovery-unblocks-alice");
+    let bob = Wallet::from_seed("recovery-unblocks-bob");
+    let mut genesis = BTreeMap::new();
+    genesis.insert(alice.address().to_string(), iuna(10));
+    genesis.insert(bob.address().to_string(), iuna(10));
+    let mut ledger =
+        Ledger::new_with_genesis_burns(genesis, vec![GenesisBurn::new(alice.address(), 1)], 25)
+            .unwrap();
+
+    assert_eq!(
+        ledger.expected_leader_for_next_block().as_deref(),
+        Some(alice.address())
+    );
+    submit_burn(&mut ledger, &bob, 1);
+    assert!(ledger.mine_next_block(&bob, 1).is_err());
+
+    let block = ledger
+        .mine_recovery_block(&bob, RECOVERY_BLOCK_DELAY_MS)
+        .unwrap();
+
+    assert_eq!(block.miner, bob.address());
+    assert_eq!(block.finalizer_mode, FinalizerMode::Recovery);
+    assert_eq!(block.finalizer_rank, 0);
+    assert_eq!(block.vdf_rounds, 25);
+    assert!(block.leader_proof.is_none());
+    ledger.apply_block(block).unwrap();
+    assert_eq!(ledger.status().height, 1);
+}
+
+#[test]
+fn recovery_block_requires_finalizer_own_burn() {
+    let alice = Wallet::from_seed("recovery-own-burn-alice");
+    let bob = Wallet::from_seed("recovery-own-burn-bob");
+    let mut genesis = BTreeMap::new();
+    genesis.insert(alice.address().to_string(), iuna(10));
+    genesis.insert(bob.address().to_string(), iuna(10));
+    let mut ledger =
+        Ledger::new_with_genesis_burns(genesis, vec![GenesisBurn::new(alice.address(), 1)], 25)
+            .unwrap();
+
+    submit_burn(&mut ledger, &alice, 1);
+    let error = ledger
+        .mine_recovery_block(&bob, RECOVERY_BLOCK_DELAY_MS)
+        .unwrap_err();
+
+    assert!(format!("{error:#}").contains("burn from the finalizer"));
+}
+
+#[test]
+fn recovery_block_prioritizes_finalizer_own_burn() {
+    let alice = Wallet::from_seed("recovery-prioritizes-alice");
+    let bob = Wallet::from_seed("recovery-prioritizes-bob");
+    let mut genesis = BTreeMap::new();
+    genesis.insert(alice.address().to_string(), iuna(10));
+    genesis.insert(bob.address().to_string(), iuna(10));
+    let mut ledger =
+        Ledger::new_with_genesis_burns(genesis, vec![GenesisBurn::new(alice.address(), 1)], 25)
+            .unwrap();
+
+    let alice_burn = ledger.build_burn(&alice, 1, 1).unwrap();
+    ledger.submit_transaction(alice_burn).unwrap();
+    let bob_burn = ledger.build_burn(&bob, 1, 0).unwrap();
+    let bob_burn_signature = bob_burn.signature().to_string();
+    ledger.submit_transaction(bob_burn).unwrap();
+
+    let block = ledger
+        .mine_recovery_block(&bob, RECOVERY_BLOCK_DELAY_MS)
+        .unwrap();
+
+    assert!(
+        block
+            .transactions
+            .iter()
+            .any(|tx| tx.signature() == bob_burn_signature)
+    );
+}
+
+#[test]
+fn recovery_vdf_seed_is_bound_to_timestamp() {
+    let alice = Wallet::from_seed("recovery-vdf-seed-alice");
+    let bob = Wallet::from_seed("recovery-vdf-seed-bob");
+    let mut genesis = BTreeMap::new();
+    genesis.insert(alice.address().to_string(), iuna(10));
+    genesis.insert(bob.address().to_string(), iuna(10));
+    let mut ledger =
+        Ledger::new_with_genesis_burns(genesis, vec![GenesisBurn::new(alice.address(), 1)], 25)
+            .unwrap();
+
+    submit_burn(&mut ledger, &bob, 1);
+    let mut block = ledger
+        .mine_recovery_block(&bob, RECOVERY_BLOCK_DELAY_MS)
+        .unwrap();
+    block.timestamp_ms += 1;
+    block.hash = block.compute_hash();
+
+    let error = ledger.apply_block(block).unwrap_err();
+    assert!(format!("{error:#}").contains("block VDF output is invalid"));
+}
+
+#[test]
+fn fork_choice_prefers_ticket_block_over_recovery_block_at_same_height() {
+    let alice = Wallet::from_seed("recovery-fork-alice");
+    let bob = Wallet::from_seed("recovery-fork-bob");
+    let wallets = [&alice, &bob];
+    let mut genesis = BTreeMap::new();
+    genesis.insert(alice.address().to_string(), iuna(10));
+    genesis.insert(bob.address().to_string(), iuna(10));
+    let common = Ledger::new_with_genesis_burns(
+        genesis,
+        vec![
+            GenesisBurn::new(alice.address(), 1),
+            GenesisBurn::new(bob.address(), 1),
+        ],
+        25,
+    )
+    .unwrap();
+    let leader_address = common.expected_leader_for_next_block().unwrap();
+    let leader = wallets
+        .iter()
+        .copied()
+        .find(|wallet| wallet.address() == leader_address)
+        .unwrap();
+    let recovery = wallets
+        .into_iter()
+        .find(|wallet| wallet.address() != leader_address)
+        .unwrap();
+
+    let mut local = common.clone();
+    submit_burn(&mut local, recovery, 1);
+    let recovery_block = local
+        .mine_recovery_block(recovery, RECOVERY_BLOCK_DELAY_MS)
+        .unwrap();
+    assert_eq!(recovery_block.finalizer_mode, FinalizerMode::Recovery);
+    local.apply_block(recovery_block).unwrap();
+
+    let mut remote = common;
+    submit_burn(&mut remote, leader, 1);
+    let leader_block = remote.mine_next_block(leader, 1).unwrap();
+    assert_eq!(leader_block.finalizer_mode, FinalizerMode::Ticket);
+    let leader_hash = leader_block.hash.clone();
+    remote.apply_block(leader_block).unwrap();
+
+    assert!(local.extend_from_snapshot(remote.snapshot()).unwrap());
+    assert_eq!(local.status().tip_hash, leader_hash);
 }
 
 #[test]

@@ -958,10 +958,24 @@ impl NodeCore {
             .ledger
             .finalizer_rank_for_next_block(self.wallet.address());
         if wallet_rank.is_none() {
-            let selected_leader = self.ledger.expected_leader_for_next_block();
-            plan.skipped_reason = selected_leader.map(|leader| {
-                format!("wallet is waiting for selected finalizer {leader} to finish the VDF")
-            });
+            if self.ledger.recovery_block_available_at(timestamp_ms) {
+                match self
+                    .ledger
+                    .prepare_recovery_block(self.wallet.address(), timestamp_ms)
+                {
+                    Ok(work) => {
+                        plan.work = Some(work);
+                    }
+                    Err(error) => {
+                        plan.skipped_reason = Some(format!("{error:#}"));
+                    }
+                }
+            } else {
+                let selected_leader = self.ledger.expected_leader_for_next_block();
+                plan.skipped_reason = selected_leader.map(|leader| {
+                    format!("wallet is waiting for selected finalizer {leader} to finish the VDF")
+                });
+            }
             return plan;
         }
 
@@ -1027,10 +1041,24 @@ impl NodeCore {
             .ledger
             .finalizer_rank_for_next_block(self.wallet.address());
         if wallet_rank.is_none() {
-            let selected_leader = self.ledger.expected_leader_for_next_block();
-            plan.skipped_reason = selected_leader.map(|leader| {
-                format!("wallet is waiting for selected finalizer {leader} to finish the VDF")
-            });
+            if self.ledger.recovery_block_available_at(timestamp_ms) {
+                match self
+                    .ledger
+                    .prepare_recovery_block(self.wallet.address(), timestamp_ms)
+                {
+                    Ok(work) => {
+                        plan.work = Some(work);
+                    }
+                    Err(error) => {
+                        plan.skipped_reason = Some(format!("{error:#}"));
+                    }
+                }
+            } else {
+                let selected_leader = self.ledger.expected_leader_for_next_block();
+                plan.skipped_reason = selected_leader.map(|leader| {
+                    format!("wallet is waiting for selected finalizer {leader} to finish the VDF")
+                });
+            }
             return plan;
         }
 
@@ -1891,8 +1919,8 @@ mod tests {
     use std::collections::BTreeMap;
 
     use crate::domain::{
-        DEFAULT_MINE_REQUIRED_BURN_MULTIPLIER_BPS, Ledger, MICRO_IUNA, MINE_FINALIZER_FEE,
-        Transaction, Wallet,
+        DEFAULT_MINE_REQUIRED_BURN_MULTIPLIER_BPS, FinalizerMode, GenesisBurn, Ledger, MICRO_IUNA,
+        MINE_FINALIZER_FEE, RECOVERY_BLOCK_DELAY_MS, Transaction, Wallet,
     };
 
     use super::{NodeConfig, NodeCore};
@@ -2032,6 +2060,42 @@ mod tests {
         let _ = node.prepare_automatic_finalization(1);
 
         assert!(node.auto_pow_mine_cursor.is_none());
+    }
+
+    #[test]
+    fn automatic_finalization_prepares_recovery_after_ticket_timeout() {
+        let alice = Wallet::from_seed("automatic-recovery-alice");
+        let bob = Wallet::from_seed("automatic-recovery-bob");
+        let mut allocations = BTreeMap::new();
+        allocations.insert(alice.address().to_string(), 10 * MICRO_IUNA);
+        allocations.insert(bob.address().to_string(), 10 * MICRO_IUNA);
+        let ledger = Ledger::new_with_genesis_burns(
+            allocations,
+            vec![GenesisBurn::new(alice.address(), 1)],
+            10,
+        )
+        .unwrap();
+        let mut node = NodeCore::from_ledger(bob, ledger, 1);
+
+        let early = node.prepare_automatic_finalization(RECOVERY_BLOCK_DELAY_MS - 1);
+        assert!(early.work.is_none());
+        assert!(
+            early
+                .skipped_reason
+                .as_deref()
+                .unwrap_or_default()
+                .contains("waiting for selected finalizer")
+        );
+
+        let recovery = node.prepare_automatic_finalization(RECOVERY_BLOCK_DELAY_MS);
+        let work = recovery.work.expect("recovery work should be prepared");
+        let block = work.finish(
+            node.wallet.unlocked().unwrap(),
+            "preverified-vdf".to_string(),
+        );
+
+        assert_eq!(block.finalizer_mode, FinalizerMode::Recovery);
+        assert!(block.leader_proof.is_none());
     }
 
     #[test]

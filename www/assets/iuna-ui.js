@@ -1773,7 +1773,8 @@ window.iunaApp = function iunaApp() {
 
     blockFinalizerLabel(block) {
       const finalizer = this.short(block.miner);
-      return block.miner === this.status.wallet_address ? `${finalizer} (me)` : finalizer;
+      const owner = block.miner === this.status.wallet_address ? `${finalizer} (me)` : finalizer;
+      return block.finalizer_mode === "recovery" ? `${owner} · Recovery` : owner;
     },
 
     walletTransactions() {
