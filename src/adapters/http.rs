@@ -2667,6 +2667,16 @@ const INDEX_HTML: &str = r#"<!doctype html>
     .mine-stat-label { display: flex; gap: 5px; align-items: center; color: #879198; font-size: 10px; font-weight: 850; text-transform: uppercase; }
     .mine-stat-value { margin-top: 5px; color: #dce4e7; font-size: 14px; font-weight: 850; font-variant-numeric: tabular-nums; overflow-wrap: anywhere; }
     .mine-stat-value.money { color: #d5f55f; }
+    .mine-reward-control { display: grid; gap: 7px; border: 1px solid #2f363c; border-radius: 8px; padding: 10px; background: #111316; }
+    .mine-reward-head { display: flex; justify-content: space-between; gap: 10px; align-items: baseline; color: #a8b2b8; font-size: 13px; font-weight: 800; }
+    .mine-reward-head strong { color: #d5f55f; font-size: 14px; font-variant-numeric: tabular-nums; }
+    .mine-reward-control input[type="range"] { width: 100%; min-width: 0; padding: 0; accent-color: #d5f55f; }
+    .mine-slider-hints { display: flex; justify-content: space-between; gap: 10px; color: #879198; font-size: 11px; font-weight: 750; }
+    .mine-include-status { display: flex; flex-wrap: wrap; justify-content: space-between; gap: 7px; color: #9eb3bc; font-size: 12px; font-weight: 800; }
+    .mine-include-status.waiting { color: #ffd280; }
+    .mine-include-status.ready { color: #d5f55f; }
+    .mine-include-status.muted { color: #879198; }
+    .mine-save-row { display: flex; justify-content: flex-start; }
     .panel-separator { border-top: 1px solid #2f363c; margin: 14px 0 12px; }
     .stratum-config { display: grid; gap: 10px; }
     .stratum-note { max-width: 760px; color: #9eb3bc; font-size: 12px; line-height: 1.45; }
@@ -2828,7 +2838,7 @@ const INDEX_HTML: &str = r#"<!doctype html>
       .block-card { flex-basis: 108px; }
     }
   </style>
-  <script defer src="/assets/iuna-ui.js?v=66"></script>
+  <script defer src="/assets/iuna-ui.js?v=69"></script>
   <script defer src="/assets/alpine.min.js"></script>
 </head>
 <body x-data="iunaApp()" x-init="init()" @keydown.window.escape="closeModals()" x-cloak>
@@ -3040,21 +3050,21 @@ const INDEX_HTML: &str = r#"<!doctype html>
         </div>
         <div class="panel">
           <h3>Mine</h3>
-          <div class="panel-description">Mine with PoW to introduce new IUNA. Your mine action sets a minimum burn amount; the block finalizer must include that much burn to use it.</div>
+          <div class="panel-description">Search for PoW actions that mint IUNA when blocks have enough burns.</div>
           <form class="mine-settings-form" @submit.prevent="savePowMining">
             <div class="mine-action-row">
               <div class="mine-stats" aria-label="PoW issuance settings">
                 <div class="mine-stat">
-                  <div class="mine-stat-label">Miner cap</div>
-                  <div class="mine-stat-value money">IUNA <span x-text="amountLabel(status.chain?.mine_reward ?? 0)"></span></div>
-                </div>
-                <div class="mine-stat">
-                  <div class="mine-stat-label">Finalizer fee</div>
-                  <div class="mine-stat-value">IUNA <span x-text="amountLabel(feeEstimates.mine?.fee ?? 0)"></span></div>
-                </div>
-                <div class="mine-stat">
-                  <div class="mine-stat-label">Miner receives</div>
+                  <div class="mine-stat-label">You receive</div>
                   <div class="mine-stat-value money">IUNA <span x-text="amountLabel(powMineNetReward())"></span></div>
+                </div>
+                <div class="mine-stat">
+                  <div class="mine-stat-label">Needs burns</div>
+                  <div class="mine-stat-value">IUNA <span x-text="amountLabel(powMineRequiredBurn())"></span></div>
+                </div>
+                <div class="mine-stat">
+                  <div class="mine-stat-label">Finalizer earns</div>
+                  <div class="mine-stat-value">IUNA <span x-text="amountLabel(feeEstimates.mine?.fee ?? 0)"></span></div>
                 </div>
                 <div class="mine-stat">
                   <div class="mine-stat-label">Difficulty <button class="info-button" type="button" @click="openPowDifficultyInfo" title="How difficulty is adjusted" aria-label="How PoW difficulty is adjusted">i</button></div>
@@ -3067,9 +3077,18 @@ const INDEX_HTML: &str = r#"<!doctype html>
                 <span class="toggle-text" x-text="powMiningEnabled ? 'On' : 'Off'"></span>
               </label>
             </div>
-            <label>Burn requirement multiplier<input x-model="powRequiredBurnMultiplierDraft" @input="powRequiredBurnMultiplierDirty = true" type="number" min="0.1" max="1" step="0.05"></label>
-            <div class="muted">Required burn is this multiplier times the minimum total burn amount from the last 10 non-genesis blocks, clamped between 0.1 and 1 IUNA.</div>
-            <div class="fee-preview" x-text="feeEstimateLabel('mine')"></div>
+            <div class="mine-reward-control">
+              <div class="mine-reward-head"><span>Reward setting</span><strong>IUNA <span x-text="amountLabel(powMineNetReward())"></span></strong></div>
+              <input x-model="powRequiredBurnMultiplierDraft" @input="powRequiredBurnMultiplierDirty = true" type="range" min="0.1" max="1" step="0.05" aria-label="PoW reward setting">
+              <div class="mine-slider-hints"><span>Easier to include</span><span>Higher reward</span></div>
+              <div class="mine-include-status" :class="powMineIncludeStatus().kind">
+                <span x-text="powMineIncludeStatus().label"></span>
+                <span x-text="powMineIncludeStatus().recent"></span>
+              </div>
+            </div>
+            <div class="mine-save-row" x-show="powRequiredBurnMultiplierDirty">
+              <button class="primary" type="submit">Save</button>
+            </div>
             <div class="fee-preview" x-text="autoPowStatusLabel()"></div>
           </form>
           <div class="panel-separator"></div>
@@ -4683,11 +4702,20 @@ mod tests {
 
     #[test]
     fn metrics_screen_includes_block_range_filter() {
-        assert!(super::INDEX_HTML.contains("iuna-ui.js?v=66"));
+        assert!(super::INDEX_HTML.contains("iuna-ui.js?v=69"));
         assert!(super::INDEX_HTML.contains("aria-label=\"Metrics block range\""));
         assert!(super::INDEX_HTML.contains("setMetricsRange(100)"));
         assert!(super::INDEX_HTML.contains("setMetricsRange(1000)"));
         assert!(super::INDEX_HTML.contains("setMetricsRange('all')"));
+    }
+
+    #[test]
+    fn mine_screen_shows_recent_burn_fit_status() {
+        let app_js = include_str!("../../www/assets/iuna-ui.js");
+        assert!(app_js.contains("Recent high:"));
+        assert!(app_js.contains("May wait for bigger burn blocks"));
+        assert!(super::INDEX_HTML.contains("Easier to include"));
+        assert!(super::INDEX_HTML.contains("Higher reward"));
     }
 
     async fn auth_test_state(config_path: std::path::PathBuf, config: UiConfig) -> HttpState {

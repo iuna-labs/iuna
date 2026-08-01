@@ -991,7 +991,11 @@ mod tests {
 
         assert_eq!(
             initial_burn_per_block(&setup, &UiConfig::default()),
-            DEFAULT_BURN_PER_BLOCK
+            UiConfig::default().burn_per_block
+        );
+        assert_eq!(
+            initial_burn_fee(&setup, &UiConfig::default()),
+            UiConfig::default().burn_fee
         );
     }
 

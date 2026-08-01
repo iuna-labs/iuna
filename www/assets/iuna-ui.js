@@ -59,10 +59,10 @@ window.iunaApp = function iunaApp() {
     importSeedPhrase: "",
     walletVerified: false,
     setupFeedback: null,
-    burnAmount: 0,
-    burnAmountDraft: 0,
-    burnFee: 1,
-    burnFeeDraft: "0.000001",
+    burnAmount: 100,
+    burnAmountDraft: "0.0001",
+    burnFee: 100,
+    burnFeeDraft: "0.0001",
     miningEnabled: false,
     powMiningEnabled: false,
     powRequiredBurnMultiplier: 0.8,
@@ -1143,8 +1143,54 @@ window.iunaApp = function iunaApp() {
       return Math.round(this.powRequiredBurnMultiplierValue() * 10000);
     },
 
+    powMineRewardLimit() {
+      return Math.max(100000, Math.trunc(Number(this.status.chain?.mine_reward ?? 1000000)));
+    },
+
+    powMineRecentBurnTotals() {
+      return this.blocks
+        .filter((block) => block.height > 0)
+        .slice(0, 10)
+        .map((block) => this.blockBurnAmount(block));
+    },
+
+    powMineRecentBurnMin() {
+      const totals = this.powMineRecentBurnTotals();
+      if (totals.length === 0) return null;
+      return Math.min(...totals);
+    },
+
+    powMineRequiredBurn() {
+      const current = Math.max(0, Math.trunc(Number(this.status.mining?.automatic_pow_required_burn_amount ?? 0)));
+      if (!this.powRequiredBurnMultiplierDirty) return current;
+      const minimum = 100000;
+      const maximum = this.powMineRewardLimit();
+      const recentMin = this.powMineRecentBurnMin();
+      const base = recentMin === null ? maximum : recentMin;
+      return Math.min(maximum, Math.max(minimum, Math.round(base * this.powRequiredBurnMultiplierValue())));
+    },
+
     powMineNetReward() {
-      return Math.max(0, Math.trunc(Number(this.status.mining?.automatic_pow_required_burn_amount ?? 0)));
+      return this.powMineRequiredBurn();
+    },
+
+    powMineRecentBurnMax() {
+      const totals = this.powMineRecentBurnTotals();
+      if (totals.length === 0) return null;
+      return Math.max(...totals);
+    },
+
+    powMineIncludeStatus() {
+      const required = this.powMineRequiredBurn();
+      const recentMax = this.powMineRecentBurnMax();
+      if (recentMax === null) {
+        return { kind: "muted", label: "Waiting for burn history", recent: "" };
+      }
+      const recent = `Recent high: IUNA ${this.amountLabel(recentMax)}`;
+      if (recentMax >= required) {
+        return { kind: "ready", label: "Recent blocks can include this", recent };
+      }
+      return { kind: "waiting", label: "May wait for bigger burn blocks", recent };
     },
 
     autoPowStatusLabel() {

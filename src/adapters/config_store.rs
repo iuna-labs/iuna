@@ -9,14 +9,13 @@ use std::{
 use anyhow::{Context, Result, bail};
 use serde::{Deserialize, Serialize};
 
-use crate::domain::{
-    Amount, DEFAULT_FEE_PER_BYTE, DEFAULT_MINE_REQUIRED_BURN_MULTIPLIER_BPS, MICRO_IUNA,
-};
+use crate::domain::{Amount, DEFAULT_MINE_REQUIRED_BURN_MULTIPLIER_BPS, MICRO_IUNA};
 
 const CONFIG_FILE_VERSION: u32 = 1;
 const AMOUNT_UNIT_MICROIUNA: &str = "microiuna";
 const LEGACY_AMOUNT_UNIT_PRE_RENAME: &str = concat!("micro", "l", "uun");
-pub const DEFAULT_BURN_FEE: Amount = DEFAULT_FEE_PER_BYTE;
+pub const DEFAULT_BURN_AMOUNT: Amount = MICRO_IUNA / 10_000;
+pub const DEFAULT_BURN_FEE: Amount = DEFAULT_BURN_AMOUNT;
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 pub struct UiConfig {
@@ -41,7 +40,7 @@ impl Default for UiConfig {
             auth_password_hash: None,
             mining_enabled: false,
             pow_mining_enabled: false,
-            burn_per_block: 0,
+            burn_per_block: DEFAULT_BURN_AMOUNT,
             burn_fee: DEFAULT_BURN_FEE,
             mine_required_burn_multiplier_bps: DEFAULT_MINE_REQUIRED_BURN_MULTIPLIER_BPS,
             keep_track_of_metrics: false,
@@ -185,7 +184,7 @@ mod tests {
 
     use crate::domain::MICRO_IUNA;
 
-    use super::{DEFAULT_BURN_FEE, UiConfig, load_or_create, save};
+    use super::{DEFAULT_BURN_AMOUNT, DEFAULT_BURN_FEE, UiConfig, load_or_create, save};
 
     #[test]
     fn creates_default_config_file() {
@@ -202,8 +201,8 @@ mod tests {
         assert!(stored.contains("\"auth_password_hash\": null"));
         assert!(stored.contains("\"mining_enabled\": false"));
         assert!(stored.contains("\"pow_mining_enabled\": false"));
-        assert!(stored.contains("\"burn_per_block\": 0"));
-        assert!(stored.contains("\"burn_fee\": 1"));
+        assert!(stored.contains("\"burn_per_block\": 100"));
+        assert!(stored.contains("\"burn_fee\": 100"));
         assert!(!stored.contains("\"pow_mine_fee\""));
         assert!(stored.contains("\"mine_required_burn_multiplier_bps\": 8000"));
         assert!(stored.contains("\"keep_track_of_metrics\": false"));
@@ -290,6 +289,15 @@ mod tests {
         assert!(!config.keep_track_of_metrics);
         assert!(!config.p2p_accept_inbound);
         assert_eq!(config.peers, vec!["127.0.0.1:9444"]);
+    }
+
+    #[test]
+    fn default_burn_settings_are_prefilled_while_disabled() {
+        let config = UiConfig::default();
+
+        assert!(!config.mining_enabled);
+        assert_eq!(config.burn_per_block, DEFAULT_BURN_AMOUNT);
+        assert_eq!(config.burn_fee, DEFAULT_BURN_FEE);
     }
 
     #[test]
