@@ -65,9 +65,9 @@ window.iunaApp = function iunaApp() {
     burnFeeDraft: "0.000001",
     miningEnabled: false,
     powMiningEnabled: false,
-    powMineFee: 1000000,
-    powMineFeeDraft: "1",
-    powMineFeeDirty: false,
+    powRequiredBurnMultiplier: 0.8,
+    powRequiredBurnMultiplierDraft: "0.8",
+    powRequiredBurnMultiplierDirty: false,
     burnAmountDirty: false,
     transferTo: "",
     transferAmount: null,
@@ -545,13 +545,14 @@ window.iunaApp = function iunaApp() {
         this.burnFee = status.mining?.automatic_burn_fee ?? this.burnFee;
         this.miningEnabled = status.mining?.automatic ?? this.miningEnabled;
         this.powMiningEnabled = status.mining?.pow_mining_enabled ?? this.powMiningEnabled;
-        this.powMineFee = status.mining?.automatic_pow_mine_fee ?? this.powMineFee;
+        this.powRequiredBurnMultiplier =
+          (status.mining?.mine_required_burn_multiplier_bps ?? Math.round(this.powRequiredBurnMultiplier * 10000)) / 10000;
         if (!this.burnAmountDirty) {
           this.burnAmountDraft = this.amountLabel(this.burnAmount);
           this.burnFeeDraft = this.amountLabel(this.burnFee);
         }
-        if (!this.powMineFeeDirty) {
-          this.powMineFeeDraft = this.amountLabel(this.powMineFee);
+        if (!this.powRequiredBurnMultiplierDirty) {
+          this.powRequiredBurnMultiplierDraft = this.powRequiredBurnMultiplier.toString();
         }
         this.lastUpdated = new Date();
         this.scheduleFeeEstimates();
@@ -1039,14 +1040,17 @@ window.iunaApp = function iunaApp() {
 
     async setPowMiningEnabled(enabled) {
       const previous = this.powMiningEnabled;
+      const multiplier = this.powRequiredBurnMultiplierValue();
       try {
         this.powMiningEnabled = enabled;
         await this.postForm(
           "/api/settings/pow-mining",
-          { enabled },
+          { enabled, multiplier_bps: Math.round(multiplier * 10000) },
           enabled ? "PoW mining turned on" : "PoW mining turned off"
         );
-        this.powMineFeeDirty = false;
+        this.powRequiredBurnMultiplier = multiplier;
+        this.powRequiredBurnMultiplierDraft = multiplier.toString();
+        this.powRequiredBurnMultiplierDirty = false;
       } catch (error) {
         this.powMiningEnabled = previous;
         this.showFlash(error.message, "error");
@@ -1054,15 +1058,18 @@ window.iunaApp = function iunaApp() {
     },
 
     async savePowMining() {
+      const multiplier = this.powRequiredBurnMultiplierValue();
       try {
         await this.postForm(
           "/api/settings/pow-mining",
-          { enabled: this.powMiningEnabled },
+          { enabled: this.powMiningEnabled, multiplier_bps: Math.round(multiplier * 10000) },
           this.powMiningEnabled
             ? "PoW mining settings saved"
             : `Mine settings saved while off`
         );
-        this.powMineFeeDirty = false;
+        this.powRequiredBurnMultiplier = multiplier;
+        this.powRequiredBurnMultiplierDraft = multiplier.toString();
+        this.powRequiredBurnMultiplierDirty = false;
       } catch (error) {
         this.showFlash(error.message, "error");
       }
@@ -1126,17 +1133,18 @@ window.iunaApp = function iunaApp() {
       return this.parseiunaAmount(this.burnFeeDraft);
     },
 
-    powMineFeeValue() {
-      try {
-        return this.parseiunaAmount(this.powMineFeeDraft);
-      } catch {
-        return this.powMineFee;
-      }
+    powRequiredBurnMultiplierValue() {
+      const value = Number(this.powRequiredBurnMultiplierDraft);
+      if (!Number.isFinite(value)) return this.powRequiredBurnMultiplier;
+      return Math.min(1, Math.max(0.1, value));
+    },
+
+    powRequiredBurnMultiplierBps() {
+      return Math.round(this.powRequiredBurnMultiplierValue() * 10000);
     },
 
     powMineNetReward() {
-      const reward = Math.max(0, Math.trunc(Number(this.status.chain?.mine_reward ?? 0)));
-      return Math.max(0, reward - (this.feeEstimates.mine?.fee ?? this.powMineFeeValue()));
+      return Math.max(0, Math.trunc(Number(this.status.mining?.automatic_pow_required_burn_amount ?? 0)));
     },
 
     autoPowStatusLabel() {

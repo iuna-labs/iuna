@@ -33,8 +33,8 @@ use crate::{
         FeeEstimate, NodeStatus, PeerDirection, PeerInfo, SharedNode, SharedPeerBook, StratumStatus,
     },
     domain::{
-        Amount, Block, Ledger, MINE_FINALIZER_FEE, OutPoint, Transaction, TxInput, TxOutput,
-        hex_hash,
+        Amount, Block, DEFAULT_MINE_REQUIRED_BURN_MULTIPLIER_BPS, Ledger, MINE_FINALIZER_FEE,
+        OutPoint, Transaction, TxInput, TxOutput, hex_hash,
     },
 };
 
@@ -138,6 +138,7 @@ struct BurnSettingsForm {
 #[derive(Debug, Deserialize)]
 struct PowMiningForm {
     enabled: bool,
+    multiplier_bps: Option<u16>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -963,7 +964,15 @@ async fn api_pow_mining_form(
     State(state): State<HttpState>,
     Form(form): Form<PowMiningForm>,
 ) -> Json<ActionResponse> {
-    action_json(set_pow_mining(&state, form.enabled, MINE_FINALIZER_FEE).await)
+    action_json(
+        set_pow_mining(
+            &state,
+            form.enabled,
+            form.multiplier_bps
+                .unwrap_or(DEFAULT_MINE_REQUIRED_BURN_MULTIPLIER_BPS),
+        )
+        .await,
+    )
 }
 
 async fn api_metrics_settings_form(
@@ -1086,22 +1095,29 @@ async fn persist_burn_settings_config(
     config_store::save(config_path, &config)
 }
 
-async fn set_pow_mining(state: &HttpState, enabled: bool, fee: Amount) -> Result<()> {
+async fn set_pow_mining(state: &HttpState, enabled: bool, multiplier_bps: u16) -> Result<()> {
     {
         let mut node = state.node.lock().await;
-        node.set_pow_mining_settings(enabled, fee)?;
+        node.set_pow_mining_settings(enabled, multiplier_bps)?;
     }
-    persist_pow_mining_config(&state.ui_config, &state.config_path, enabled).await
+    persist_pow_mining_config(
+        &state.ui_config,
+        &state.config_path,
+        enabled,
+        multiplier_bps,
+    )
+    .await
 }
 
 async fn persist_pow_mining_config(
     ui_config: &Arc<Mutex<UiConfig>>,
     config_path: &Path,
     enabled: bool,
+    multiplier_bps: u16,
 ) -> Result<()> {
     let mut config = ui_config.lock().await;
     config.pow_mining_enabled = enabled;
-    config.pow_mine_fee = MINE_FINALIZER_FEE;
+    config.mine_required_burn_multiplier_bps = multiplier_bps;
     config_store::save(config_path, &config)
 }
 
@@ -1619,19 +1635,22 @@ fn wallet_transaction_row(
             proof_hash: None,
         }),
         Transaction::Mine {
-            output,
+            recipient,
+            required_burn_amount,
             difficulty_bits,
-            fee,
             signature,
             ..
-        } if output.address == wallet => Some(WalletTransactionRow {
+        } if recipient == wallet => Some(WalletTransactionRow {
             kind: "mine",
             from: "pow".to_string(),
-            to: Some(output.address.clone()),
-            amount: output.amount,
-            fee: *fee,
+            to: Some(recipient.clone()),
+            amount: *required_burn_amount,
+            fee: tx.fee(),
             inputs: Vec::new(),
-            outputs: vec![output.clone()],
+            outputs: vec![TxOutput {
+                address: recipient.clone(),
+                amount: *required_burn_amount,
+            }],
             change: Vec::new(),
             signature: signature.clone(),
             status,
@@ -1725,19 +1744,22 @@ fn ui_transaction(
             proof_hash: None,
         },
         Transaction::Mine {
-            output,
+            recipient,
+            required_burn_amount,
             difficulty_bits,
-            fee,
             signature,
             ..
         } => UiTransaction {
             kind: "mine",
             from: "pow".to_string(),
-            to: Some(output.address.clone()),
-            amount: output.amount,
-            fee: *fee,
+            to: Some(recipient.clone()),
+            amount: *required_burn_amount,
+            fee: transaction.fee(),
             inputs: Vec::new(),
-            outputs: vec![output.clone()],
+            outputs: vec![TxOutput {
+                address: recipient.clone(),
+                amount: *required_burn_amount,
+            }],
             change: Vec::new(),
             signature: signature.clone(),
             difficulty_bits: Some(*difficulty_bits),
@@ -1834,9 +1856,16 @@ fn index_transaction_outputs(
     transaction: &Transaction,
 ) {
     let created_outputs = match transaction {
-        Transaction::Transfer { outputs, .. } => outputs,
-        Transaction::Burn { change, .. } => change,
-        Transaction::Mine { output, .. } => std::slice::from_ref(output),
+        Transaction::Transfer { outputs, .. } => outputs.clone(),
+        Transaction::Burn { change, .. } => change.clone(),
+        Transaction::Mine {
+            recipient,
+            required_burn_amount,
+            ..
+        } => vec![TxOutput {
+            address: recipient.clone(),
+            amount: *required_burn_amount,
+        }],
     };
     for (index, output) in created_outputs.iter().enumerate() {
         outputs.insert(
@@ -3011,12 +3040,12 @@ const INDEX_HTML: &str = r#"<!doctype html>
         </div>
         <div class="panel">
           <h3>Mine</h3>
-          <div class="panel-description">Mine with PoW to introduce new IUNA. Each mine action issues 2 IUNA: 1 IUNA goes to the miner and 1 IUNA is paid to the block finalizer.</div>
+          <div class="panel-description">Mine with PoW to introduce new IUNA. Your mine action sets a minimum burn amount; the block finalizer must include that much burn to use it.</div>
           <form class="mine-settings-form" @submit.prevent="savePowMining">
             <div class="mine-action-row">
               <div class="mine-stats" aria-label="PoW issuance settings">
                 <div class="mine-stat">
-                  <div class="mine-stat-label">Total reward</div>
+                  <div class="mine-stat-label">Miner cap</div>
                   <div class="mine-stat-value money">IUNA <span x-text="amountLabel(status.chain?.mine_reward ?? 0)"></span></div>
                 </div>
                 <div class="mine-stat">
@@ -3038,6 +3067,8 @@ const INDEX_HTML: &str = r#"<!doctype html>
                 <span class="toggle-text" x-text="powMiningEnabled ? 'On' : 'Off'"></span>
               </label>
             </div>
+            <label>Burn requirement multiplier<input x-model="powRequiredBurnMultiplierDraft" @input="powRequiredBurnMultiplierDirty = true" type="number" min="0.1" max="1" step="0.05"></label>
+            <div class="muted">Required burn is this multiplier times the minimum total burn amount from the last 10 non-genesis blocks, clamped between 0.1 and 1 IUNA.</div>
             <div class="fee-preview" x-text="feeEstimateLabel('mine')"></div>
             <div class="fee-preview" x-text="autoPowStatusLabel()"></div>
           </form>
@@ -3639,10 +3670,7 @@ mod tests {
             p2p::GossipNetwork, wallet_store,
         },
         app::{GossipEnvelope, NodeCore, PeerBook, PeerDirection, PeerInfo, StratumStatus},
-        domain::{
-            Block, Ledger, MICRO_IUNA, MINE_FINALIZER_FEE, MINE_REWARD, OutPoint, Transaction,
-            Wallet,
-        },
+        domain::{Block, Ledger, MICRO_IUNA, MINE_FINALIZER_FEE, OutPoint, Transaction, Wallet},
     };
 
     use super::{
@@ -4486,9 +4514,9 @@ mod tests {
         let transaction = super::ui_transaction(&mine, &outputs);
 
         assert_eq!(rows.len(), 1);
-        assert_eq!(rows[0].amount, MINE_REWARD - MINE_FINALIZER_FEE);
+        assert_eq!(rows[0].amount, mine.amount());
         assert_eq!(rows[0].fee, MINE_FINALIZER_FEE);
-        assert_eq!(transaction.amount, MINE_REWARD - MINE_FINALIZER_FEE);
+        assert_eq!(transaction.amount, mine.amount());
         assert_eq!(transaction.fee, MINE_FINALIZER_FEE);
     }
 
@@ -4861,13 +4889,13 @@ mod tests {
         let initial_config = ui_config.lock().await.clone();
         config_store::save(&config_path, &initial_config).expect("initial config should save");
 
-        persist_pow_mining_config(&ui_config, &config_path, true)
+        persist_pow_mining_config(&ui_config, &config_path, true, 7_500)
             .await
             .unwrap();
         let config = config_store::load_or_create(&config_path).unwrap();
 
         assert!(config.pow_mining_enabled);
-        assert_eq!(config.pow_mine_fee, MINE_FINALIZER_FEE);
+        assert_eq!(config.mine_required_burn_multiplier_bps, 7_500);
     }
 
     #[test]

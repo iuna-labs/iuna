@@ -13,10 +13,11 @@ use sha2::{Digest, Sha256};
 use tokio::sync::Mutex;
 
 use crate::domain::{
-    Amount, Block, ChainSnapshot, ChainStatus, DEFAULT_FEE_PER_BYTE, DEFAULT_TRANSACTION_FEE,
-    Ledger, MAX_PENDING_TRANSACTIONS, MINE_FINALIZER_FEE, OutPoint, PreparedBlock,
-    StratumMineShare, StratumMineTemplate, Transaction, TransactionSubmitOutcome,
-    VDF_TARGET_BLOCK_MS, Wallet, hex_hash, run_vdf,
+    Amount, Block, ChainSnapshot, ChainStatus, DEFAULT_FEE_PER_BYTE,
+    DEFAULT_MINE_REQUIRED_BURN_MULTIPLIER_BPS, DEFAULT_TRANSACTION_FEE, Ledger,
+    MAX_PENDING_TRANSACTIONS, MINE_FINALIZER_FEE, OutPoint, PreparedBlock, StratumMineShare,
+    StratumMineTemplate, Transaction, TransactionSubmitOutcome, VDF_TARGET_BLOCK_MS, Wallet,
+    hex_hash, run_vdf,
 };
 
 pub type SharedNode = Arc<Mutex<NodeCore>>;
@@ -34,6 +35,8 @@ pub const PEER_MISBEHAVIOR_BAN_SCORE: u32 = 3;
 pub const PEER_MISBEHAVIOR_BAN_MS: u64 = 10 * 60 * 1_000;
 pub const PEER_CLOCK_OFFSET_ACCEPTANCE_MS: i64 = 10 * 60 * 1_000;
 const PEER_CLOCK_OFFSET_STALE_MS: u64 = 20 * 60 * 1_000;
+const MIN_MINE_REQUIRED_BURN_MULTIPLIER_BPS: u16 = 1_000;
+const MAX_MINE_REQUIRED_BURN_MULTIPLIER_BPS: u16 = 10_000;
 const AUTO_POW_NONCE_ATTEMPTS_PER_TICK: u64 = 8;
 static DEBUG_LOGGING: AtomicBool = AtomicBool::new(false);
 
@@ -209,6 +212,8 @@ pub struct MiningStatus {
     pub burn_per_block: Amount,
     pub automatic_burn_fee: Amount,
     pub automatic_pow_mine_fee: Amount,
+    pub automatic_pow_required_burn_amount: Amount,
+    pub mine_required_burn_multiplier_bps: u16,
     pub last_auto_pow_mine_anchor: Option<String>,
     pub last_auto_pow_mine_status: Option<String>,
     pub vdf_rounds: u64,
@@ -254,7 +259,7 @@ pub struct NodeCore {
     ledger: Ledger,
     automatic_mining_enabled: bool,
     pow_mining_enabled: bool,
-    pow_mine_fee: Amount,
+    mine_required_burn_multiplier_bps: u16,
     burn_per_block: Amount,
     burn_fee: Amount,
     last_auto_burn_height: Option<u64>,
@@ -340,7 +345,7 @@ impl NodeCore {
             ledger,
             automatic_mining_enabled,
             pow_mining_enabled: false,
-            pow_mine_fee: MINE_FINALIZER_FEE,
+            mine_required_burn_multiplier_bps: DEFAULT_MINE_REQUIRED_BURN_MULTIPLIER_BPS,
             burn_per_block,
             burn_fee,
             last_auto_burn_height: None,
@@ -558,6 +563,8 @@ impl NodeCore {
                 burn_per_block: self.burn_per_block,
                 automatic_burn_fee: self.burn_fee,
                 automatic_pow_mine_fee: MINE_FINALIZER_FEE,
+                automatic_pow_required_burn_amount: self.pow_required_burn_amount(),
+                mine_required_burn_multiplier_bps: self.mine_required_burn_multiplier_bps,
                 last_auto_pow_mine_anchor: self.last_auto_pow_mine_anchor.clone(),
                 last_auto_pow_mine_status: if self.pow_mining_enabled && !self.has_real_chain() {
                     Some("waiting for a real chain before PoW mining can start".to_string())
@@ -618,9 +625,10 @@ impl NodeCore {
         }
     }
 
-    pub fn set_pow_mining_settings(&mut self, enabled: bool, _fee: Amount) -> Result<()> {
+    pub fn set_pow_mining_settings(&mut self, enabled: bool, multiplier_bps: u16) -> Result<()> {
+        validate_mine_required_burn_multiplier(multiplier_bps)?;
         self.pow_mining_enabled = enabled;
-        self.pow_mine_fee = MINE_FINALIZER_FEE;
+        self.mine_required_burn_multiplier_bps = multiplier_bps;
         self.auto_pow_mine_cursor = None;
         if !enabled {
             self.last_auto_pow_mine_anchor = None;
@@ -729,7 +737,7 @@ impl NodeCore {
     }
 
     pub fn mine_pow_reward(&mut self) -> Result<Transaction> {
-        let (tx, _) = self.build_mine_with_fee_rate(self.pow_mine_fee)?;
+        let (tx, _) = self.build_mine_with_required_burn_estimate()?;
         if self.ledger.submit_transaction(tx.clone())? {
             self.outbox.push(GossipEnvelope::Transaction(tx.clone()));
         }
@@ -737,7 +745,7 @@ impl NodeCore {
     }
 
     pub fn estimate_mine_fee(&self, _fee_per_byte: Amount) -> Result<FeeEstimate> {
-        self.build_mine_with_fee_rate(MINE_FINALIZER_FEE)
+        self.build_mine_with_required_burn_estimate()
             .map(|(_, estimate)| estimate)
     }
 
@@ -752,11 +760,12 @@ impl NodeCore {
             .last()
             .context("cannot build mine job without a chain tip")?;
         let difficulty_bits = self.ledger.current_mine_difficulty_bits();
-        let fee = self.estimate_external_mine_fee(&recipient, &tip.hash, difficulty_bits)?;
+        let required_burn_amount =
+            self.external_mine_required_burn_amount(&recipient, &tip.hash, difficulty_bits)?;
         Ok(ExternalMineJob {
             template: self.ledger.stratum_mine_template(
                 recipient,
-                fee,
+                required_burn_amount,
                 &tip.hash,
                 salt,
                 difficulty_bits,
@@ -823,13 +832,11 @@ impl NodeCore {
         })
     }
 
-    fn build_mine_with_fee_rate(
-        &self,
-        _fee_per_byte: Amount,
-    ) -> Result<(Transaction, FeeEstimate)> {
-        let tx = self
-            .ledger
-            .build_mine_with_fee(self.wallet.address(), MINE_FINALIZER_FEE)?;
+    fn build_mine_with_required_burn_estimate(&self) -> Result<(Transaction, FeeEstimate)> {
+        let tx = self.ledger.build_mine_with_required_burn(
+            self.wallet.address(),
+            self.pow_required_burn_amount(),
+        )?;
         Ok((
             tx.clone(),
             FeeEstimate {
@@ -839,16 +846,16 @@ impl NodeCore {
         ))
     }
 
-    fn estimate_external_mine_fee(
+    fn external_mine_required_burn_amount(
         &self,
         _recipient: &str,
         _anchor: &str,
         _difficulty_bits: u32,
     ) -> Result<Amount> {
-        Ok(MINE_FINALIZER_FEE)
+        Ok(self.pow_required_burn_amount())
     }
 
-    fn estimate_local_mine_fee(
+    fn local_mine_required_burn_amount(
         &self,
         _recipient: &str,
         _anchor: &str,
@@ -856,7 +863,14 @@ impl NodeCore {
         _difficulty_bits: u32,
         _fee_per_byte: Amount,
     ) -> Result<Amount> {
-        Ok(MINE_FINALIZER_FEE)
+        Ok(self.pow_required_burn_amount())
+    }
+
+    fn pow_required_burn_amount(&self) -> Amount {
+        self.ledger
+            .recommended_mine_required_burn_amount_with_multiplier(
+                self.mine_required_burn_multiplier_bps,
+            )
     }
 
     pub fn mine_one(&mut self) -> Result<Block> {
@@ -1070,16 +1084,16 @@ impl NodeCore {
             .as_ref()
             .context("automatic PoW cursor was not initialized")?
             .clone();
-        let fee = self.estimate_local_mine_fee(
+        let required_burn_amount = self.local_mine_required_burn_amount(
             &wallet_address,
             &anchor,
             cursor.salt,
             difficulty_bits,
-            self.pow_mine_fee,
+            MINE_FINALIZER_FEE,
         )?;
-        let outcome = self.ledger.search_mine_with_fee(
+        let outcome = self.ledger.search_mine_with_required_burn(
             wallet_address,
-            fee,
+            required_burn_amount,
             cursor.salt,
             cursor.next_nonce,
             AUTO_POW_NONCE_ATTEMPTS_PER_TICK,
@@ -1805,6 +1819,15 @@ fn auto_pow_salt(wallet_address: &str, anchor: &str) -> u64 {
     u64::from_be_bytes(bytes)
 }
 
+fn validate_mine_required_burn_multiplier(multiplier_bps: u16) -> Result<()> {
+    if !(MIN_MINE_REQUIRED_BURN_MULTIPLIER_BPS..=MAX_MINE_REQUIRED_BURN_MULTIPLIER_BPS)
+        .contains(&multiplier_bps)
+    {
+        bail!("mine required burn multiplier must be between 0.1 and 1.0");
+    }
+    Ok(())
+}
+
 fn converge_fee_by_byte(
     fee_per_byte: Amount,
     mut build: impl FnMut(Amount) -> Result<Transaction>,
@@ -1867,7 +1890,10 @@ fn converge_fee_by_byte(
 mod tests {
     use std::collections::BTreeMap;
 
-    use crate::domain::{Ledger, MICRO_IUNA, MINE_FINALIZER_FEE, Transaction, Wallet};
+    use crate::domain::{
+        DEFAULT_MINE_REQUIRED_BURN_MULTIPLIER_BPS, Ledger, MICRO_IUNA, MINE_FINALIZER_FEE,
+        Transaction, Wallet,
+    };
 
     use super::{NodeConfig, NodeCore};
 
@@ -1924,18 +1950,17 @@ mod tests {
         let first_mine = first.pow_mined.as_ref().expect("PoW should be queued");
         let Transaction::Mine {
             anchor,
-            output,
+            recipient,
+            required_burn_amount,
             difficulty_bits,
-            fee,
             ..
         } = first_mine
         else {
             panic!("expected mine transaction");
         };
         assert_eq!(anchor, &node.chain().last().unwrap().hash);
-        assert_eq!(output.address, wallet.address());
-        let minimum_fee = first_mine.economic_size_bytes() as u64;
-        assert!(*fee >= minimum_fee);
+        assert_eq!(recipient, wallet.address());
+        assert!(*required_burn_amount >= crate::domain::MIN_MINE_REQUIRED_BURN);
         assert_eq!(
             *difficulty_bits,
             node.ledger().current_mine_difficulty_bits()
@@ -2020,7 +2045,8 @@ mod tests {
             burn_fee: 0,
         });
 
-        node.set_pow_mining_settings(true, 2).unwrap();
+        node.set_pow_mining_settings(true, DEFAULT_MINE_REQUIRED_BURN_MULTIPLIER_BPS)
+            .unwrap();
         let plan = (1..10_000)
             .map(|timestamp| node.prepare_automatic_mining(timestamp))
             .find(|plan| plan.pow_mined.is_some())
@@ -2030,12 +2056,37 @@ mod tests {
         assert_eq!(mine.fee(), MINE_FINALIZER_FEE);
         assert_eq!(
             mine.amount(),
-            node.ledger().status().mine_reward - mine.fee()
+            node.status().mining.automatic_pow_required_burn_amount
         );
         assert_eq!(
             node.status().mining.automatic_pow_mine_fee,
             MINE_FINALIZER_FEE
         );
+    }
+
+    #[test]
+    fn pow_required_burn_multiplier_must_stay_in_configured_range() {
+        let wallet = Wallet::from_seed("pow-required-burn-multiplier-wallet");
+        let mut node = NodeCore::new(NodeConfig {
+            wallet,
+            genesis_allocations: BTreeMap::new(),
+            vdf_rounds: 10,
+            burn_per_block: 0,
+            burn_fee: 0,
+        });
+
+        assert!(node.set_pow_mining_settings(true, 999).is_err());
+        node.set_pow_mining_settings(true, 1_000).unwrap();
+        assert_eq!(
+            node.status().mining.mine_required_burn_multiplier_bps,
+            1_000
+        );
+        node.set_pow_mining_settings(true, 10_000).unwrap();
+        assert_eq!(
+            node.status().mining.mine_required_burn_multiplier_bps,
+            10_000
+        );
+        assert!(node.set_pow_mining_settings(true, 10_001).is_err());
     }
 
     #[test]

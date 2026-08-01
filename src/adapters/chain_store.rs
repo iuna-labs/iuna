@@ -331,11 +331,14 @@ fn metrics_from_snapshot(snapshot: &ChainSnapshot) -> Result<Vec<BlockMetricRow>
                         .checked_add(*amount)
                         .context("block metric burns overflow")?;
                 }
-                Transaction::Mine { output, fee, .. } => {
+                Transaction::Mine {
+                    required_burn_amount,
+                    ..
+                } => {
                     mine_count += 1;
                     mine_issued_amount = mine_issued_amount
-                        .checked_add(output.amount)
-                        .and_then(|amount| amount.checked_add(*fee))
+                        .checked_add(*required_burn_amount)
+                        .and_then(|amount| amount.checked_add(transaction.fee()))
                         .context("block metric mine issuance overflow")?;
                 }
             }

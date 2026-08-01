@@ -3,8 +3,8 @@ use std::collections::{BTreeMap, BTreeSet};
 use iuna::{
     app::{InMemoryNetwork, NodeCore},
     domain::{
-        Amount, ChainSnapshot, GenesisBurn, Ledger, MICRO_IUNA, MINE_REWARD, OutPoint, Transaction,
-        TxInput, TxOutput, VDF_TARGET_BLOCK_MS, Wallet, hex_hash, verify_vdf,
+        Amount, ChainSnapshot, GenesisBurn, Ledger, MICRO_IUNA, MINE_FINALIZER_FEE, OutPoint,
+        Transaction, TxInput, TxOutput, VDF_TARGET_BLOCK_MS, Wallet, hex_hash, verify_vdf,
     },
 };
 
@@ -166,9 +166,12 @@ fn expected_confirmed_supply(snapshot: &ChainSnapshot) -> Amount {
                     supply = supply.checked_sub(*amount).expect("burn is funded");
                     supply = supply.checked_sub(*fee).expect("burn fee is funded");
                 }
-                Transaction::Mine { output, .. } => {
+                Transaction::Mine {
+                    required_burn_amount,
+                    ..
+                } => {
                     supply = supply
-                        .checked_add(output.amount)
+                        .checked_add(*required_burn_amount)
                         .expect("mine output does not overflow supply");
                 }
             }
@@ -260,15 +263,18 @@ fn apply_reference_transaction(
     transaction: &Transaction,
     utxos: &mut BTreeMap<OutPoint, TxOutput>,
 ) {
-    if let Transaction::Mine { output, fee, .. } = transaction {
-        assert_eq!(
-            output
-                .amount
-                .checked_add(*fee)
-                .expect("mine output plus fee does not overflow"),
-            MINE_REWARD
-        );
-        insert_reference_outputs(transaction, std::slice::from_ref(output), utxos);
+    if let Transaction::Mine {
+        recipient,
+        required_burn_amount,
+        ..
+    } = transaction
+    {
+        let output = TxOutput {
+            address: recipient.clone(),
+            amount: *required_burn_amount,
+        };
+        assert_eq!(transaction.fee(), MINE_FINALIZER_FEE);
+        insert_reference_outputs(transaction, &[output], utxos);
         return;
     }
 
@@ -288,13 +294,12 @@ fn apply_reference_transaction(
             .expect("reference input total does not overflow");
     }
 
-    let output_total = reference_outputs(transaction)
-        .iter()
-        .fold(0_u64, |total, output| {
-            total
-                .checked_add(output.amount)
-                .expect("reference output total does not overflow")
-        });
+    let outputs = reference_outputs(transaction);
+    let output_total = outputs.iter().fold(0_u64, |total, output| {
+        total
+            .checked_add(output.amount)
+            .expect("reference output total does not overflow")
+    });
     let burn_amount = match transaction {
         Transaction::Burn { amount, .. } => *amount,
         Transaction::Transfer { .. } | Transaction::Mine { .. } => 0,
@@ -306,7 +311,7 @@ fn apply_reference_transaction(
         .expect("reference outputs plus burn do not overflow");
     assert_eq!(input_total, required);
 
-    insert_reference_outputs(transaction, reference_outputs(transaction), utxos);
+    insert_reference_outputs(transaction, &outputs, utxos);
 }
 
 fn insert_reference_outputs(
@@ -333,11 +338,18 @@ fn reference_inputs(transaction: &Transaction) -> &[TxInput] {
     }
 }
 
-fn reference_outputs(transaction: &Transaction) -> &[TxOutput] {
+fn reference_outputs(transaction: &Transaction) -> Vec<TxOutput> {
     match transaction {
-        Transaction::Transfer { outputs, .. } => outputs,
-        Transaction::Burn { change, .. } => change,
-        Transaction::Mine { output, .. } => std::slice::from_ref(output),
+        Transaction::Transfer { outputs, .. } => outputs.clone(),
+        Transaction::Burn { change, .. } => change.clone(),
+        Transaction::Mine {
+            recipient,
+            required_burn_amount,
+            ..
+        } => vec![TxOutput {
+            address: recipient.clone(),
+            amount: *required_burn_amount,
+        }],
     }
 }
 
