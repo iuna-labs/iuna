@@ -2863,7 +2863,7 @@ const INDEX_HTML: &str = r#"<!doctype html>
       .block-card { flex-basis: 108px; }
     }
   </style>
-  <script defer src="/assets/iuna-ui.js?v=73"></script>
+  <script defer src="/assets/iuna-ui.js?v=74"></script>
   <script defer src="/assets/alpine.min.js"></script>
 </head>
 <body x-data="iunaApp()" x-init="init()" @keydown.window.escape="closeModals()" x-cloak>
@@ -4742,11 +4742,20 @@ mod tests {
 
     #[test]
     fn metrics_screen_includes_block_range_filter() {
-        assert!(super::INDEX_HTML.contains("iuna-ui.js?v=73"));
+        assert!(super::INDEX_HTML.contains("iuna-ui.js?v=74"));
         assert!(super::INDEX_HTML.contains("aria-label=\"Metrics block range\""));
         assert!(super::INDEX_HTML.contains("setMetricsRange(100)"));
         assert!(super::INDEX_HTML.contains("setMetricsRange(1000)"));
         assert!(super::INDEX_HTML.contains("setMetricsRange('all')"));
+    }
+
+    #[test]
+    fn setup_completion_refreshes_chain_data() {
+        let app_js = include_str!("../../www/assets/iuna-ui.js");
+        assert!(app_js.contains("await this.refresh();\n        this.setupFeedback = null;"));
+        assert!(!app_js.contains(
+            "await this.refreshConfig();\n        await this.resetPagedDataset(\"peer\");"
+        ));
     }
 
     #[test]

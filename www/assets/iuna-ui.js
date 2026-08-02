@@ -494,8 +494,7 @@ window.iunaApp = function iunaApp() {
         if (!response.ok || !payload.ok) {
           throw new Error(payload.error || `/api/config returned ${response.status}`);
         }
-        await this.refreshConfig();
-        await this.resetPagedDataset("peer");
+        await this.refresh();
         this.setupFeedback = null;
         this.generatedSeedPhrase = "";
         this.importSeedPhrase = "";
