@@ -2358,9 +2358,10 @@ impl Ledger {
             .filter(|pair| pair[0].height > 0)
             .take(VDF_RETARGET_WINDOW_BLOCKS)
         {
-            total_observed_ms += u128::from(clamped_vdf_retarget_observed_block_ms(
-                pair[1].timestamp_ms - pair[0].timestamp_ms,
-            ));
+            let Some(observed_ms) = vdf_retarget_observed_block_ms(&pair[0], &pair[1]) else {
+                continue;
+            };
+            total_observed_ms += u128::from(observed_ms);
             observed_blocks += 1;
         }
         if observed_blocks == 0 {
@@ -3980,6 +3981,16 @@ fn clamped_vdf_retarget_observed_block_ms(observed_block_ms: u64) -> u64 {
     )
 }
 
+fn vdf_retarget_observed_block_ms(parent: &Block, child: &Block) -> Option<u64> {
+    if child.finalizer_mode == FinalizerMode::Recovery {
+        return None;
+    }
+
+    let rank_multiplier = u64::from(child.finalizer_rank) + 1;
+    let rank_adjusted_ms = (child.timestamp_ms - parent.timestamp_ms) / rank_multiplier;
+    Some(clamped_vdf_retarget_observed_block_ms(rank_adjusted_ms))
+}
+
 fn unix_now_ms() -> u64 {
     SystemTime::now()
         .duration_since(UNIX_EPOCH)
@@ -4107,6 +4118,27 @@ mod tests {
             .apply_preverified_block_at(block.clone(), u64::MAX)
             .unwrap();
         block
+    }
+
+    fn vdf_retarget_sample_block(
+        timestamp_ms: u64,
+        finalizer_mode: FinalizerMode,
+        finalizer_rank: u32,
+    ) -> Block {
+        Block {
+            height: 1,
+            prev_hash: String::new(),
+            timestamp_ms,
+            miner: String::new(),
+            finalizer_mode,
+            finalizer_rank,
+            reward: 0,
+            vdf_rounds: 1,
+            vdf_output: String::new(),
+            leader_proof: None,
+            transactions: Vec::new(),
+            hash: String::new(),
+        }
     }
 
     const TEST_BURN_AMOUNT: Amount = MICRO_IUNA / 10;
@@ -4494,6 +4526,36 @@ mod tests {
     }
 
     #[test]
+    fn vdf_retarget_observed_block_time_scales_ticket_fallback_rank() {
+        let parent = vdf_retarget_sample_block(0, FinalizerMode::Ticket, 0);
+        let rank_one_child =
+            vdf_retarget_sample_block(VDF_TARGET_BLOCK_MS * 2, FinalizerMode::Ticket, 1);
+        let rank_two_child =
+            vdf_retarget_sample_block(VDF_TARGET_BLOCK_MS * 3, FinalizerMode::Ticket, 2);
+
+        assert_eq!(
+            vdf_retarget_observed_block_ms(&parent, &rank_one_child),
+            Some(VDF_TARGET_BLOCK_MS)
+        );
+        assert_eq!(
+            vdf_retarget_observed_block_ms(&parent, &rank_two_child),
+            Some(VDF_TARGET_BLOCK_MS)
+        );
+    }
+
+    #[test]
+    fn vdf_retarget_observed_block_time_ignores_recovery_blocks() {
+        let parent = vdf_retarget_sample_block(0, FinalizerMode::Ticket, 0);
+        let recovery_child =
+            vdf_retarget_sample_block(RECOVERY_BLOCK_DELAY_MS, FinalizerMode::Recovery, 0);
+
+        assert_eq!(
+            vdf_retarget_observed_block_ms(&parent, &recovery_child),
+            None
+        );
+    }
+
+    #[test]
     fn vdf_retarget_keeps_rounds_inside_deadband() {
         let current = 1_000;
         let low_deadband_edge =
@@ -4545,6 +4607,76 @@ mod tests {
             ledger.vdf_rounds() > initial_rounds,
             "fast blocks should retarget above the legacy u32 VDF rounds ceiling"
         );
+    }
+
+    #[test]
+    fn fallback_block_retarget_uses_rank_adjusted_observed_time() {
+        let alice = Wallet::from_seed("fallback-retarget-alice");
+        let bob = Wallet::from_seed("fallback-retarget-bob");
+        let wallets = [&alice, &bob];
+        let mut genesis = BTreeMap::new();
+        genesis.insert(alice.address().to_string(), 1_000);
+        genesis.insert(bob.address().to_string(), 1_000);
+        let mut ledger = Ledger::new_with_genesis_burns(
+            genesis,
+            vec![
+                GenesisBurn::new(alice.address(), 1),
+                GenesisBurn::new(bob.address(), 1),
+            ],
+            100,
+        )
+        .unwrap();
+
+        let primary = ledger.expected_leader_for_next_block().unwrap();
+        let primary_wallet = wallets
+            .into_iter()
+            .find(|wallet| wallet.address() == primary)
+            .unwrap();
+        apply_preverified_burn_block_at(&mut ledger, primary_wallet, VDF_TARGET_BLOCK_MS);
+        assert_eq!(ledger.vdf_rounds(), 100);
+
+        let primary = ledger.expected_leader_for_next_block().unwrap();
+        let fallback = wallets
+            .into_iter()
+            .find(|wallet| wallet.address() != primary)
+            .unwrap();
+        let block = apply_preverified_burn_block_at(
+            &mut ledger,
+            fallback,
+            VDF_TARGET_BLOCK_MS + VDF_TARGET_BLOCK_MS * 2,
+        );
+
+        assert_eq!(block.finalizer_rank, 1);
+        assert_eq!(block.vdf_rounds, 200);
+        assert_eq!(ledger.vdf_rounds(), 100);
+    }
+
+    #[test]
+    fn recovery_block_is_excluded_from_vdf_retarget_observations() {
+        let alice = Wallet::from_seed("recovery-retarget-alice");
+        let bob = Wallet::from_seed("recovery-retarget-bob");
+        let mut genesis = BTreeMap::new();
+        genesis.insert(alice.address().to_string(), 1_000);
+        genesis.insert(bob.address().to_string(), 1_000);
+        let mut ledger = Ledger::new_with_genesis_burns(
+            genesis,
+            vec![GenesisBurn::new(alice.address(), 1)],
+            100,
+        )
+        .unwrap();
+
+        apply_preverified_burn_block_at(&mut ledger, &alice, VDF_TARGET_BLOCK_MS);
+        assert_eq!(ledger.vdf_rounds(), 100);
+
+        let burn = ledger.build_burn(&bob, 1, 0).unwrap();
+        ledger.submit_transaction(burn).unwrap();
+        let block = ledger
+            .mine_recovery_block(&bob, VDF_TARGET_BLOCK_MS + RECOVERY_BLOCK_DELAY_MS)
+            .unwrap();
+        assert_eq!(block.finalizer_mode, FinalizerMode::Recovery);
+        ledger.apply_block(block).unwrap();
+
+        assert_eq!(ledger.vdf_rounds(), 100);
     }
 
     #[test]
