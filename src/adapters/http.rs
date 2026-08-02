@@ -2595,7 +2595,9 @@ const INDEX_HTML: &str = r#"<!doctype html>
     .setup-feedback.error { color: #ffb1a8; background: #2a1717; border-color: #713434; }
     .setup-grid { width: 100%; display: grid; grid-template-columns: minmax(0, .9fr) minmax(320px, .7fr); gap: 12px; align-items: start; }
     .setup-section { border: 1px solid #2f363c; border-radius: 8px; padding: 13px; background: #111316; }
-    .setup-network, .setup-wallet-section { grid-column: 1 / -1; }
+    .setup-node-mode, .setup-network, .setup-wallet-section { grid-column: 1 / -1; }
+    .segmented.setup-mode-picker { width: 100%; display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); }
+    .setup-mode-picker button { min-width: 0; min-height: 38px; white-space: normal; }
     .setup-network-row { display: grid; grid-template-columns: minmax(0, 1fr); gap: 10px; align-items: end; }
     .setup-network-copy { margin-top: 8px; color: #a8b2b8; line-height: 1.45; }
     .setup-network-link { color: #d5f55f; font-size: 12px; font-weight: 900; text-decoration: none; }
@@ -2856,6 +2858,7 @@ const INDEX_HTML: &str = r#"<!doctype html>
       .metrics-head { align-items: flex-start; flex-direction: column; }
       .metrics-range { width: 100%; }
       .metrics-range button { flex: 1 1 0; }
+      .segmented.setup-mode-picker { grid-template-columns: 1fr; }
       .metrics-grid { grid-template-columns: 1fr; }
       input { min-width: 0; width: 100%; }
       .switch input { width: auto; }
@@ -2863,7 +2866,7 @@ const INDEX_HTML: &str = r#"<!doctype html>
       .block-card { flex-basis: 108px; }
     }
   </style>
-  <script defer src="/assets/iuna-ui.js?v=74"></script>
+  <script defer src="/assets/iuna-ui.js?v=75"></script>
   <script defer src="/assets/alpine.min.js"></script>
 </head>
 <body x-data="iunaApp()" x-init="init()" @keydown.window.escape="closeModals()" x-cloak>
@@ -3617,6 +3620,18 @@ const INDEX_HTML: &str = r#"<!doctype html>
       </div>
       <div class="setup-feedback" :class="setupFeedback?.kind" x-show="setupFeedback" x-transition x-text="setupFeedback?.message"></div>
       <div class="setup-grid">
+        <div class="setup-section setup-node-mode">
+          <div class="panel-head">
+            <h3>Mode</h3>
+            <span class="pill">Change later in Settings</span>
+          </div>
+          <div class="segmented setup-mode-picker" role="tablist" aria-label="Initial node mode">
+            <button type="button" :class="{ active: setupNodeMode === 'wallet' }" @click="selectSetupNodeMode('wallet')">Wallet</button>
+            <button type="button" :class="{ active: setupNodeMode === 'non-listening' }" @click="selectSetupNodeMode('non-listening')">Non-listening node</button>
+            <button type="button" :class="{ active: setupNodeMode === 'listening' }" @click="selectSetupNodeMode('listening')">Listening node</button>
+          </div>
+          <div class="setup-network-copy" x-text="setupNodeModeCopy()"></div>
+        </div>
         <div class="setup-section setup-network">
           <div class="panel-head">
             <h3>Network</h3>
@@ -4742,11 +4757,20 @@ mod tests {
 
     #[test]
     fn metrics_screen_includes_block_range_filter() {
-        assert!(super::INDEX_HTML.contains("iuna-ui.js?v=74"));
+        assert!(super::INDEX_HTML.contains("iuna-ui.js?v=75"));
         assert!(super::INDEX_HTML.contains("aria-label=\"Metrics block range\""));
         assert!(super::INDEX_HTML.contains("setMetricsRange(100)"));
         assert!(super::INDEX_HTML.contains("setMetricsRange(1000)"));
         assert!(super::INDEX_HTML.contains("setMetricsRange('all')"));
+    }
+
+    #[test]
+    fn initial_setup_includes_node_mode_choices() {
+        assert!(super::INDEX_HTML.contains("aria-label=\"Initial node mode\""));
+        assert!(super::INDEX_HTML.contains("selectSetupNodeMode('wallet')"));
+        assert!(super::INDEX_HTML.contains("selectSetupNodeMode('non-listening')"));
+        assert!(super::INDEX_HTML.contains("selectSetupNodeMode('listening')"));
+        assert!(super::INDEX_HTML.contains("Change later in Settings"));
     }
 
     #[test]
@@ -4756,6 +4780,16 @@ mod tests {
         assert!(!app_js.contains(
             "await this.refreshConfig();\n        await this.resetPagedDataset(\"peer\");"
         ));
+    }
+
+    #[test]
+    fn setup_completion_applies_selected_node_mode() {
+        let app_js = include_str!("../../www/assets/iuna-ui.js");
+        assert!(app_js.contains("setupNodeMode: \"wallet\""));
+        assert!(app_js.contains("async applySetupNodeMode()"));
+        assert!(app_js.contains("await this.applySetupNodeMode();"));
+        assert!(app_js.contains("\"/api/settings/p2p-inbound\""));
+        assert!(app_js.contains("this.setUiMode(mode === \"wallet\" ? \"basic\" : \"advanced\")"));
     }
 
     #[test]
