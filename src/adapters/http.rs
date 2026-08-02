@@ -33,8 +33,8 @@ use crate::{
         FeeEstimate, NodeStatus, PeerDirection, PeerInfo, SharedNode, SharedPeerBook, StratumStatus,
     },
     domain::{
-        Amount, Block, Ledger, MINE_FINALIZER_FEE, MINE_REWARD, OutPoint, Transaction, TxInput,
-        TxOutput, hex_hash,
+        Amount, Block, BurnLeaderRank, Ledger, MINE_FINALIZER_FEE, MINE_REWARD, OutPoint,
+        Transaction, TxInput, TxOutput, hex_hash,
     },
 };
 
@@ -359,6 +359,7 @@ struct UiBlock {
     vdf_rounds: u64,
     vdf_output: String,
     leader_proof: Option<crate::domain::LeaderProof>,
+    burn_leader_ranks: Vec<BurnLeaderRank>,
     transactions: Vec<UiTransaction>,
     hash: String,
 }
@@ -718,11 +719,22 @@ async fn api_blocks(
         Some(before_height) => node.blocks_before(before_height, limit),
         None => node.recent_blocks(limit),
     };
+    let burn_leader_ranks = blocks
+        .iter()
+        .map(|block| {
+            (
+                block.hash.clone(),
+                node.burn_leader_ranks_for_block(block.height)
+                    .unwrap_or_default(),
+            )
+        })
+        .collect::<BTreeMap<_, _>>();
     Json(ui_blocks(
         blocks,
         &snapshot.genesis_allocations,
         &snapshot.blocks,
         &pending,
+        &burn_leader_ranks,
     ))
 }
 
@@ -1654,15 +1666,24 @@ fn ui_blocks(
     genesis_allocations: &BTreeMap<String, Amount>,
     chain: &[Block],
     pending: &[Transaction],
+    burn_leader_ranks: &BTreeMap<String, Vec<BurnLeaderRank>>,
 ) -> Vec<UiBlock> {
     let outputs = known_output_index(genesis_allocations, chain, pending);
     blocks
         .into_iter()
-        .map(|block| ui_block(block, &outputs))
+        .map(|block| ui_block(block, &outputs, burn_leader_ranks))
         .collect()
 }
 
-fn ui_block(block: Block, outputs: &BTreeMap<OutPoint, TxOutput>) -> UiBlock {
+fn ui_block(
+    block: Block,
+    outputs: &BTreeMap<OutPoint, TxOutput>,
+    burn_leader_ranks: &BTreeMap<String, Vec<BurnLeaderRank>>,
+) -> UiBlock {
+    let ranks = burn_leader_ranks
+        .get(&block.hash)
+        .cloned()
+        .unwrap_or_default();
     UiBlock {
         height: block.height,
         prev_hash: block.prev_hash,
@@ -1675,6 +1696,7 @@ fn ui_block(block: Block, outputs: &BTreeMap<OutPoint, TxOutput>) -> UiBlock {
         vdf_rounds: block.vdf_rounds,
         vdf_output: block.vdf_output,
         leader_proof: block.leader_proof,
+        burn_leader_ranks: ranks,
         transactions: block
             .transactions
             .iter()
@@ -2781,6 +2803,12 @@ const INDEX_HTML: &str = r#"<!doctype html>
     .detail-grid { display: grid; grid-template-columns: minmax(0, .9fr) minmax(0, 1.1fr); gap: 12px; }
     .detail-kv { display: grid; grid-template-columns: 90px minmax(0, 1fr); gap: 8px; font-size: 13px; margin: 7px 0; }
     .detail-kv .key { color: #8d989f; }
+    .detail-link { width: fit-content; max-width: 100%; padding: 0; border: 0; background: transparent; color: #d7f2ff; font: inherit; text-align: left; cursor: pointer; }
+    .detail-link code { color: inherit; text-decoration: underline; text-underline-offset: 3px; }
+    .rank-list { display: grid; gap: 8px; }
+    .rank-row { display: grid; grid-template-columns: 52px minmax(0, 1fr); gap: 10px; align-items: start; border: 1px solid #30383d; border-radius: 8px; padding: 10px; background: #15191d; }
+    .rank-number { color: #d7f2ff; font-weight: 700; }
+    .rank-details { display: grid; gap: 6px; min-width: 0; }
     .tx-list { display: grid; gap: 8px; }
     .tx-card, .mempool-item { position: relative; display: grid; gap: 6px; border: 1px solid #2f363c; border-radius: 8px; padding: 12px; background: #111316; cursor: pointer; text-align: left; }
     .tx-card .pill, .mempool-item .pill { position: absolute; top: 10px; right: 10px; }
@@ -2835,7 +2863,7 @@ const INDEX_HTML: &str = r#"<!doctype html>
       .block-card { flex-basis: 108px; }
     }
   </style>
-  <script defer src="/assets/iuna-ui.js?v=71"></script>
+  <script defer src="/assets/iuna-ui.js?v=72"></script>
   <script defer src="/assets/alpine.min.js"></script>
 </head>
 <body x-data="iunaApp()" x-init="init()" @keydown.window.escape="closeModals()" x-cloak>
@@ -3250,7 +3278,12 @@ const INDEX_HTML: &str = r#"<!doctype html>
                 <div class="detail-kv"><div class="key">Height</div><div x-text="selectedBlock.height"></div></div>
                 <div class="detail-kv"><div class="key">Hash</div><code x-text="selectedBlock.hash"></code></div>
                 <div class="detail-kv"><div class="key">Previous</div><code x-text="short(selectedBlock.prev_hash)"></code></div>
-                <div class="detail-kv"><div class="key">Finalizer</div><code x-text="short(selectedBlock.miner)"></code></div>
+                <div class="detail-kv">
+                  <div class="key">Finalizer</div>
+                  <button class="detail-link" type="button" @click="openBurnLeaderRanksModal(selectedBlock)" title="Burn leader ranks">
+                    <code x-text="short(selectedBlock.miner)"></code>
+                  </button>
+                </div>
                 <div class="detail-kv"><div class="key">Mode</div><div x-text="selectedBlock.finalizer_mode === 'recovery' ? 'Recovery' : `Rank ${selectedBlock.finalizer_rank ?? 0}`"></div></div>
                 <div class="detail-kv"><div class="key">Reward</div><div>IUNA <span x-text="amountLabel(selectedBlock.reward)"></span></div></div>
                 <div class="detail-kv"><div class="key">Burns</div><div x-text="blockBurnCount(selectedBlock)"></div></div>
@@ -3493,6 +3526,31 @@ const INDEX_HTML: &str = r#"<!doctype html>
           <div class="info-fact"><div class="label">Max step</div><div class="value">2 bits</div></div>
         </div>
         <p>If a window includes more mine actions than the target, difficulty rises. If it includes fewer, difficulty falls. The initial difficulty is 12 bits.</p>
+      </div>
+    </section>
+  </div>
+  <div class="setup-overlay transaction-overlay" x-show="selectedBurnLeaderBlock" x-transition.opacity @click.self="closeBurnLeaderRanksModal()" role="dialog" aria-modal="true" aria-labelledby="burn-ranks-title">
+    <section class="tx-modal">
+      <div class="tx-modal-head">
+        <div class="tx-modal-title">
+          <h2 id="burn-ranks-title" x-text="burnLeaderRanksTitle(selectedBurnLeaderBlock)"></h2>
+          <div class="tx-field"><span class="tx-label">Finalizer</span><code class="tx-value hash" x-text="selectedBurnLeaderBlock ? selectedBurnLeaderBlock.miner : '-'"></code></div>
+        </div>
+        <button type="button" @click="closeBurnLeaderRanksModal">Close</button>
+      </div>
+      <div class="rank-list">
+        <template x-for="rank in burnLeaderRanks(selectedBurnLeaderBlock)" :key="`${selectedBurnLeaderBlock.hash}-${rank.rank}-${rank.ticketId}`">
+          <div class="rank-row">
+            <div class="rank-number" x-text="burnLeaderRankLabel(rank)"></div>
+            <div class="rank-details">
+              <div class="tx-field"><span class="tx-label">Owner</span><code class="tx-value hash" x-text="rank.owner"></code></div>
+              <div class="tx-field"><span class="tx-label">Burn</span><span class="tx-value money">IUNA <span x-text="amountLabel(rank.amount)"></span></span></div>
+              <div class="tx-field"><span class="tx-label">Ticket</span><code class="tx-value hash" x-text="short(rank.ticketId)"></code></div>
+              <div class="tx-field"><span class="tx-label">Eligible</span><span class="tx-value number" x-text="burnLeaderEligibilityLabel(rank)"></span></div>
+            </div>
+          </div>
+        </template>
+        <div class="tx-modal-empty" x-show="burnLeaderRanks(selectedBurnLeaderBlock).length === 0">No burn leader ranks</div>
       </div>
     </section>
   </div>
@@ -4684,7 +4742,7 @@ mod tests {
 
     #[test]
     fn metrics_screen_includes_block_range_filter() {
-        assert!(super::INDEX_HTML.contains("iuna-ui.js?v=71"));
+        assert!(super::INDEX_HTML.contains("iuna-ui.js?v=72"));
         assert!(super::INDEX_HTML.contains("aria-label=\"Metrics block range\""));
         assert!(super::INDEX_HTML.contains("setMetricsRange(100)"));
         assert!(super::INDEX_HTML.contains("setMetricsRange(1000)"));
@@ -4700,6 +4758,16 @@ mod tests {
         );
         assert!(super::INDEX_HTML.contains("amountLabel(powMineReward())"));
         assert!(!super::INDEX_HTML.contains("Needs burns"));
+    }
+
+    #[test]
+    fn block_detail_finalizer_opens_burn_leader_ranks_modal() {
+        let app_js = include_str!("../../www/assets/iuna-ui.js");
+        assert!(super::INDEX_HTML.contains("openBurnLeaderRanksModal(selectedBlock)"));
+        assert!(super::INDEX_HTML.contains("id=\"burn-ranks-title\""));
+        assert!(super::INDEX_HTML.contains("burnLeaderRanks(selectedBurnLeaderBlock)"));
+        assert!(app_js.contains("selectedBurnLeaderBlock"));
+        assert!(app_js.contains("burnLeaderRankLabel(rank)"));
     }
 
     async fn auth_test_state(config_path: std::path::PathBuf, config: UiConfig) -> HttpState {

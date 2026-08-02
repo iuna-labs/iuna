@@ -13,8 +13,8 @@ use sha2::{Digest, Sha256};
 use tokio::sync::Mutex;
 
 use crate::domain::{
-    Amount, BURN_CLAIM_SEEN_WINDOW_BLOCKS, Block, BurnSeen, ChainSnapshot, ChainStatus,
-    DEFAULT_FEE_PER_BYTE, DEFAULT_TRANSACTION_FEE, Ledger, MAX_PENDING_TRANSACTIONS,
+    Amount, BURN_CLAIM_SEEN_WINDOW_BLOCKS, Block, BurnLeaderRank, BurnSeen, ChainSnapshot,
+    ChainStatus, DEFAULT_FEE_PER_BYTE, DEFAULT_TRANSACTION_FEE, Ledger, MAX_PENDING_TRANSACTIONS,
     MINE_FINALIZER_FEE, OutPoint, PreparedBlock, StratumMineShare, StratumMineTemplate,
     Transaction, TransactionSubmitOutcome, VDF_TARGET_BLOCK_MS, Wallet, hex_hash, run_vdf,
 };
@@ -394,6 +394,10 @@ impl NodeCore {
 
     pub fn blocks_before(&self, before_height: u64, limit: usize) -> Vec<Block> {
         self.ledger.blocks_before(before_height, limit)
+    }
+
+    pub fn burn_leader_ranks_for_block(&self, height: u64) -> Result<Vec<BurnLeaderRank>> {
+        self.ledger.burn_leader_ranks_for_block(height)
     }
 
     pub fn pending_transactions(&self) -> Vec<Transaction> {

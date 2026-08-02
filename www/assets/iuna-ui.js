@@ -5,6 +5,7 @@ window.iunaApp = function iunaApp() {
     blocks: [],
     selectedBlock: null,
     selectedTransaction: null,
+    selectedBurnLeaderBlock: null,
     loadingOlder: false,
     hasMoreBlocks: true,
     walletTxs: [],
@@ -809,6 +810,14 @@ window.iunaApp = function iunaApp() {
       this.selectedBlock = block;
     },
 
+    openBurnLeaderRanksModal(block) {
+      this.selectedBurnLeaderBlock = block;
+    },
+
+    closeBurnLeaderRanksModal() {
+      this.selectedBurnLeaderBlock = null;
+    },
+
     openTransactionModal(tx, context = {}) {
       this.selectedTransaction = { tx, context };
     },
@@ -837,6 +846,7 @@ window.iunaApp = function iunaApp() {
       this.closeTransactionModal();
       this.closeWalletUtxosModal();
       this.closePowDifficultyInfo();
+      this.closeBurnLeaderRanksModal();
     },
 
     async loadOlderBlocks() {
@@ -1687,6 +1697,26 @@ window.iunaApp = function iunaApp() {
       const finalizer = this.short(block.miner);
       const owner = block.miner === this.status.wallet_address ? `${finalizer} (me)` : finalizer;
       return block.finalizer_mode === "recovery" ? `${owner} · Recovery` : owner;
+    },
+
+    burnLeaderRanks(block) {
+      return Array.isArray(block?.burnLeaderRanks) ? block.burnLeaderRanks : [];
+    },
+
+    burnLeaderRanksTitle(block) {
+      if (!block) return "Burn Leader Ranks";
+      return `Block ${block.height} Burn Leader Ranks`;
+    },
+
+    burnLeaderRankLabel(rank) {
+      const value = Number(rank?.rank ?? 0);
+      return `#${value + 1}`;
+    },
+
+    burnLeaderEligibilityLabel(rank) {
+      const from = rank?.eligibleFromHeight ?? "-";
+      const until = rank?.eligibleUntilHeight ?? "-";
+      return `${from}-${until}`;
     },
 
     walletTransactions() {

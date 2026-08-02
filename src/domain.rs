@@ -1060,6 +1060,17 @@ struct BurnTicket {
     eligible_until_height: u64,
 }
 
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct BurnLeaderRank {
+    pub rank: u32,
+    pub ticket_id: String,
+    pub owner: String,
+    pub amount: Amount,
+    pub eligible_from_height: u64,
+    pub eligible_until_height: u64,
+}
+
 #[derive(Clone, Debug, Eq, PartialEq)]
 struct BurnClaimState {
     burn: Transaction,
@@ -1636,6 +1647,43 @@ impl Ledger {
 
     pub fn chain(&self) -> &[Block] {
         &self.chain
+    }
+
+    pub fn burn_leader_ranks_for_block(&self, height: u64) -> Result<Vec<BurnLeaderRank>> {
+        if height == 0 {
+            return Ok(Vec::new());
+        }
+        let parent_index = height.checked_sub(1).context("block height underflows")? as usize;
+        let parent = self
+            .chain
+            .get(parent_index)
+            .with_context(|| format!("missing parent block for height {height}"))?;
+        let mut tickets = genesis_tickets(
+            &self.genesis_allocations,
+            &self.chain[0],
+            &self.launch_profile,
+        )?;
+        for block in self
+            .chain
+            .iter()
+            .skip(1)
+            .take_while(|block| block.height < height)
+        {
+            apply_finalizer_ticket_effects(block, &mut tickets)?;
+            tickets.extend(tickets_created_by_block(block, &self.launch_profile)?);
+        }
+        Ok(ranked_tickets_for_height(parent, height, &tickets)
+            .into_iter()
+            .enumerate()
+            .map(|(rank, ticket)| BurnLeaderRank {
+                rank: rank as u32,
+                ticket_id: ticket.id,
+                owner: ticket.owner,
+                amount: ticket.amount,
+                eligible_from_height: ticket.eligible_from_height,
+                eligible_until_height: ticket.eligible_until_height,
+            })
+            .collect())
     }
 
     pub fn genesis_hash(&self) -> &str {
@@ -4760,6 +4808,33 @@ mod tests {
             tickets.iter().any(|ticket| ticket.id == "small-burn"),
             "unselected future tickets should remain pending"
         );
+    }
+
+    #[test]
+    fn burn_leader_ranks_for_block_reconstructs_historical_ticket_order() {
+        let alice = Wallet::from_seed("burn-rank-alice");
+        let bob = Wallet::from_seed("burn-rank-bob");
+        let mut allocations = BTreeMap::new();
+        allocations.insert(alice.address().to_string(), 10 * MICRO_IUNA);
+        allocations.insert(bob.address().to_string(), 10 * MICRO_IUNA);
+        let ledger = Ledger::new_with_genesis_burns(
+            allocations,
+            vec![
+                GenesisBurn::new(alice.address(), MICRO_IUNA),
+                GenesisBurn::new(bob.address(), MICRO_IUNA),
+            ],
+            1,
+        )
+        .unwrap();
+
+        let ranks = ledger.burn_leader_ranks_for_block(1).unwrap();
+        let leader = ledger.expected_leader_for_next_block().unwrap();
+
+        assert_eq!(ranks.len(), 2);
+        assert_eq!(ranks[0].rank, 0);
+        assert_eq!(ranks[0].owner, leader);
+        assert!(ranks.iter().all(|rank| rank.amount == MICRO_IUNA));
+        assert_eq!(ledger.burn_leader_ranks_for_block(0).unwrap(), Vec::new());
     }
 
     #[test]
