@@ -65,9 +65,6 @@ window.iunaApp = function iunaApp() {
     burnFeeDraft: "0.0001",
     miningEnabled: false,
     powMiningEnabled: false,
-    powRequiredBurnMultiplier: 0.8,
-    powRequiredBurnMultiplierDraft: "0.8",
-    powRequiredBurnMultiplierDirty: false,
     burnAmountDirty: false,
     transferTo: "",
     transferAmount: null,
@@ -545,14 +542,9 @@ window.iunaApp = function iunaApp() {
         this.burnFee = status.mining?.automatic_burn_fee ?? this.burnFee;
         this.miningEnabled = status.mining?.automatic ?? this.miningEnabled;
         this.powMiningEnabled = status.mining?.pow_mining_enabled ?? this.powMiningEnabled;
-        this.powRequiredBurnMultiplier =
-          (status.mining?.mine_required_burn_multiplier_bps ?? Math.round(this.powRequiredBurnMultiplier * 10000)) / 10000;
         if (!this.burnAmountDirty) {
           this.burnAmountDraft = this.amountLabel(this.burnAmount);
           this.burnFeeDraft = this.amountLabel(this.burnFee);
-        }
-        if (!this.powRequiredBurnMultiplierDirty) {
-          this.powRequiredBurnMultiplierDraft = this.powRequiredBurnMultiplier.toString();
         }
         this.lastUpdated = new Date();
         this.scheduleFeeEstimates();
@@ -944,9 +936,7 @@ window.iunaApp = function iunaApp() {
     },
 
     async refreshMineFeeEstimate() {
-      this.feeEstimates.mine = await this.fetchFeeEstimate("/api/fee-estimate/mine", {
-        enabled: this.powMiningEnabled,
-      });
+      this.feeEstimates.mine = await this.fetchFeeEstimate("/api/fee-estimate/mine", {});
     },
 
     async refreshTransferFeeEstimate() {
@@ -1040,37 +1030,15 @@ window.iunaApp = function iunaApp() {
 
     async setPowMiningEnabled(enabled) {
       const previous = this.powMiningEnabled;
-      const multiplier = this.powRequiredBurnMultiplierValue();
       try {
         this.powMiningEnabled = enabled;
         await this.postForm(
           "/api/settings/pow-mining",
-          { enabled, multiplier_bps: Math.round(multiplier * 10000) },
+          { enabled },
           enabled ? "PoW mining turned on" : "PoW mining turned off"
         );
-        this.powRequiredBurnMultiplier = multiplier;
-        this.powRequiredBurnMultiplierDraft = multiplier.toString();
-        this.powRequiredBurnMultiplierDirty = false;
       } catch (error) {
         this.powMiningEnabled = previous;
-        this.showFlash(error.message, "error");
-      }
-    },
-
-    async savePowMining() {
-      const multiplier = this.powRequiredBurnMultiplierValue();
-      try {
-        await this.postForm(
-          "/api/settings/pow-mining",
-          { enabled: this.powMiningEnabled, multiplier_bps: Math.round(multiplier * 10000) },
-          this.powMiningEnabled
-            ? "PoW mining settings saved"
-            : `Mine settings saved while off`
-        );
-        this.powRequiredBurnMultiplier = multiplier;
-        this.powRequiredBurnMultiplierDraft = multiplier.toString();
-        this.powRequiredBurnMultiplierDirty = false;
-      } catch (error) {
         this.showFlash(error.message, "error");
       }
     },
@@ -1133,64 +1101,8 @@ window.iunaApp = function iunaApp() {
       return this.parseiunaAmount(this.burnFeeDraft);
     },
 
-    powRequiredBurnMultiplierValue() {
-      const value = Number(this.powRequiredBurnMultiplierDraft);
-      if (!Number.isFinite(value)) return this.powRequiredBurnMultiplier;
-      return Math.min(1, Math.max(0.1, value));
-    },
-
-    powRequiredBurnMultiplierBps() {
-      return Math.round(this.powRequiredBurnMultiplierValue() * 10000);
-    },
-
-    powMineRewardLimit() {
-      return Math.max(100000, Math.trunc(Number(this.status.chain?.mine_reward ?? 1000000)));
-    },
-
-    powMineRecentBurnTotals() {
-      return this.blocks
-        .filter((block) => block.height > 0)
-        .slice(0, 10)
-        .map((block) => this.blockBurnAmount(block));
-    },
-
-    powMineRecentBurnMin() {
-      const totals = this.powMineRecentBurnTotals();
-      if (totals.length === 0) return null;
-      return Math.min(...totals);
-    },
-
-    powMineRequiredBurn() {
-      const current = Math.max(0, Math.trunc(Number(this.status.mining?.automatic_pow_required_burn_amount ?? 0)));
-      if (!this.powRequiredBurnMultiplierDirty) return current;
-      const minimum = 100000;
-      const maximum = this.powMineRewardLimit();
-      const recentMin = this.powMineRecentBurnMin();
-      const base = recentMin === null ? maximum : recentMin;
-      return Math.min(maximum, Math.max(minimum, Math.round(base * this.powRequiredBurnMultiplierValue())));
-    },
-
-    powMineNetReward() {
-      return this.powMineRequiredBurn();
-    },
-
-    powMineRecentBurnMax() {
-      const totals = this.powMineRecentBurnTotals();
-      if (totals.length === 0) return null;
-      return Math.max(...totals);
-    },
-
-    powMineIncludeStatus() {
-      const required = this.powMineRequiredBurn();
-      const recentMax = this.powMineRecentBurnMax();
-      if (recentMax === null) {
-        return { kind: "muted", label: "Waiting for burn history", recent: "" };
-      }
-      const recent = `Recent high: IUNA ${this.amountLabel(recentMax)}`;
-      if (recentMax >= required) {
-        return { kind: "ready", label: "Recent blocks can include this", recent };
-      }
-      return { kind: "waiting", label: "May wait for bigger burn blocks", recent };
+    powMineReward() {
+      return Math.max(0, Math.trunc(Number(this.status.chain?.mine_reward ?? 1000000)));
     },
 
     autoPowStatusLabel() {

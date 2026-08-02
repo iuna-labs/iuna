@@ -3,8 +3,9 @@ use std::collections::{BTreeMap, BTreeSet};
 use iuna::{
     app::{InMemoryNetwork, NodeCore},
     domain::{
-        Amount, ChainSnapshot, GenesisBurn, Ledger, MICRO_IUNA, MINE_FINALIZER_FEE, OutPoint,
-        Transaction, TxInput, TxOutput, VDF_TARGET_BLOCK_MS, Wallet, hex_hash, verify_vdf,
+        Amount, ChainSnapshot, GenesisBurn, Ledger, MICRO_IUNA, MINE_FINALIZER_FEE, MINE_REWARD,
+        OutPoint, Transaction, TxInput, TxOutput, VDF_TARGET_BLOCK_MS, Wallet, hex_hash,
+        verify_vdf,
     },
 };
 
@@ -166,12 +167,9 @@ fn expected_confirmed_supply(snapshot: &ChainSnapshot) -> Amount {
                     supply = supply.checked_sub(*amount).expect("burn is funded");
                     supply = supply.checked_sub(*fee).expect("burn fee is funded");
                 }
-                Transaction::Mine {
-                    required_burn_amount,
-                    ..
-                } => {
+                Transaction::Mine { .. } => {
                     supply = supply
-                        .checked_add(*required_burn_amount)
+                        .checked_add(MINE_REWARD)
                         .expect("mine output does not overflow supply");
                 }
                 Transaction::BurnClaim { .. } => {}
@@ -264,15 +262,10 @@ fn apply_reference_transaction(
     transaction: &Transaction,
     utxos: &mut BTreeMap<OutPoint, TxOutput>,
 ) {
-    if let Transaction::Mine {
-        recipient,
-        required_burn_amount,
-        ..
-    } = transaction
-    {
+    if let Transaction::Mine { recipient, .. } = transaction {
         let output = TxOutput {
             address: recipient.clone(),
-            amount: *required_burn_amount,
+            amount: MINE_REWARD,
         };
         assert_eq!(transaction.fee(), MINE_FINALIZER_FEE);
         insert_reference_outputs(transaction, &[output], utxos);
@@ -345,13 +338,9 @@ fn reference_outputs(transaction: &Transaction) -> Vec<TxOutput> {
     match transaction {
         Transaction::Transfer { outputs, .. } => outputs.clone(),
         Transaction::Burn { change, .. } => change.clone(),
-        Transaction::Mine {
-            recipient,
-            required_burn_amount,
-            ..
-        } => vec![TxOutput {
+        Transaction::Mine { recipient, .. } => vec![TxOutput {
             address: recipient.clone(),
-            amount: *required_burn_amount,
+            amount: MINE_REWARD,
         }],
         Transaction::BurnClaim { .. } => Vec::new(),
     }

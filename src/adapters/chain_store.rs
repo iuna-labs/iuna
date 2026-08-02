@@ -9,7 +9,7 @@ use rusqlite::{Connection, OptionalExtension, params};
 
 use serde::Serialize;
 
-use crate::domain::{Amount, ChainSnapshot, Ledger, Transaction};
+use crate::domain::{Amount, ChainSnapshot, Ledger, MINE_REWARD, Transaction};
 
 const SCHEMA: &str = r#"
 CREATE TABLE IF NOT EXISTS chain_snapshots (
@@ -331,13 +331,10 @@ fn metrics_from_snapshot(snapshot: &ChainSnapshot) -> Result<Vec<BlockMetricRow>
                         .checked_add(*amount)
                         .context("block metric burns overflow")?;
                 }
-                Transaction::Mine {
-                    required_burn_amount,
-                    ..
-                } => {
+                Transaction::Mine { .. } => {
                     mine_count += 1;
                     mine_issued_amount = mine_issued_amount
-                        .checked_add(*required_burn_amount)
+                        .checked_add(MINE_REWARD)
                         .and_then(|amount| amount.checked_add(transaction.fee()))
                         .context("block metric mine issuance overflow")?;
                 }

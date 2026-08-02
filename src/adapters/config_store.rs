@@ -9,7 +9,7 @@ use std::{
 use anyhow::{Context, Result, bail};
 use serde::{Deserialize, Serialize};
 
-use crate::domain::{Amount, DEFAULT_MINE_REQUIRED_BURN_MULTIPLIER_BPS, MICRO_IUNA};
+use crate::domain::{Amount, MICRO_IUNA};
 
 const CONFIG_FILE_VERSION: u32 = 1;
 const AMOUNT_UNIT_MICROIUNA: &str = "microiuna";
@@ -26,7 +26,6 @@ pub struct UiConfig {
     pub pow_mining_enabled: bool,
     pub burn_per_block: Amount,
     pub burn_fee: Amount,
-    pub mine_required_burn_multiplier_bps: u16,
     pub keep_track_of_metrics: bool,
     pub p2p_accept_inbound: bool,
     pub p2p_announce_addr: Option<String>,
@@ -42,7 +41,6 @@ impl Default for UiConfig {
             pow_mining_enabled: false,
             burn_per_block: DEFAULT_BURN_AMOUNT,
             burn_fee: DEFAULT_BURN_FEE,
-            mine_required_burn_multiplier_bps: DEFAULT_MINE_REQUIRED_BURN_MULTIPLIER_BPS,
             keep_track_of_metrics: false,
             p2p_accept_inbound: false,
             p2p_announce_addr: None,
@@ -67,8 +65,6 @@ struct ConfigFile {
     burn_per_block: Amount,
     #[serde(default)]
     burn_fee: Option<Amount>,
-    #[serde(default)]
-    mine_required_burn_multiplier_bps: Option<u16>,
     #[serde(default)]
     keep_track_of_metrics: bool,
     #[serde(default)]
@@ -104,7 +100,6 @@ pub fn save(path: &Path, config: &UiConfig) -> Result<()> {
         pow_mining_enabled: config.pow_mining_enabled,
         burn_per_block: config.burn_per_block,
         burn_fee: Some(config.burn_fee),
-        mine_required_burn_multiplier_bps: Some(config.mine_required_burn_multiplier_bps),
         keep_track_of_metrics: config.keep_track_of_metrics,
         p2p_accept_inbound: Some(config.p2p_accept_inbound),
         p2p_announce_addr: config.p2p_announce_addr.clone(),
@@ -156,9 +151,6 @@ fn load(path: &Path) -> Result<UiConfig> {
             .burn_fee
             .map(|fee| fee.saturating_mul(scale))
             .unwrap_or(DEFAULT_BURN_FEE),
-        mine_required_burn_multiplier_bps: stored
-            .mine_required_burn_multiplier_bps
-            .unwrap_or(DEFAULT_MINE_REQUIRED_BURN_MULTIPLIER_BPS),
         keep_track_of_metrics: stored.keep_track_of_metrics,
         p2p_accept_inbound,
         p2p_announce_addr: stored.p2p_announce_addr,
@@ -204,7 +196,7 @@ mod tests {
         assert!(stored.contains("\"burn_per_block\": 100"));
         assert!(stored.contains("\"burn_fee\": 100"));
         assert!(!stored.contains("\"pow_mine_fee\""));
-        assert!(stored.contains("\"mine_required_burn_multiplier_bps\": 8000"));
+        assert!(!stored.contains("required_burn"));
         assert!(stored.contains("\"keep_track_of_metrics\": false"));
         assert!(stored.contains("\"p2p_accept_inbound\": false"));
         assert!(stored.contains("\"p2p_announce_addr\": null"));
@@ -225,7 +217,6 @@ mod tests {
                 pow_mining_enabled: true,
                 burn_per_block: 50 * MICRO_IUNA,
                 burn_fee: 3 * MICRO_IUNA,
-                mine_required_burn_multiplier_bps: 9_000,
                 keep_track_of_metrics: true,
                 p2p_accept_inbound: true,
                 p2p_announce_addr: Some("203.0.113.10:9444".to_string()),
@@ -241,7 +232,6 @@ mod tests {
         assert!(config.pow_mining_enabled);
         assert_eq!(config.burn_per_block, 50 * MICRO_IUNA);
         assert_eq!(config.burn_fee, 3 * MICRO_IUNA);
-        assert_eq!(config.mine_required_burn_multiplier_bps, 9_000);
         assert!(config.keep_track_of_metrics);
         assert!(config.p2p_accept_inbound);
         assert_eq!(
@@ -285,7 +275,6 @@ mod tests {
         assert!(!config.pow_mining_enabled);
         assert_eq!(config.burn_per_block, 0);
         assert_eq!(config.burn_fee, DEFAULT_BURN_FEE);
-        assert_eq!(config.mine_required_burn_multiplier_bps, 8_000);
         assert!(!config.keep_track_of_metrics);
         assert!(!config.p2p_accept_inbound);
         assert_eq!(config.peers, vec!["127.0.0.1:9444"]);
@@ -347,7 +336,6 @@ mod tests {
         assert!(config.mining_enabled);
         assert_eq!(config.burn_per_block, 2 * MICRO_IUNA);
         assert_eq!(config.burn_fee, MICRO_IUNA);
-        assert_eq!(config.mine_required_burn_multiplier_bps, 8_000);
     }
 
     #[test]
@@ -366,7 +354,6 @@ mod tests {
   "burn_per_block": 2000000,
   "burn_fee": 3,
   "pow_mine_fee": 5,
-  "mine_required_burn_multiplier_bps": 7500,
   "peers": []
 }}
 "#
@@ -379,6 +366,5 @@ mod tests {
         assert!(config.mining_enabled);
         assert_eq!(config.burn_per_block, 2 * MICRO_IUNA);
         assert_eq!(config.burn_fee, 3);
-        assert_eq!(config.mine_required_burn_multiplier_bps, 7_500);
     }
 }

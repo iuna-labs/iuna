@@ -10,10 +10,9 @@ use iuna::{
         PeerDirection, TRANSACTION_BATCH_LIMIT,
     },
     domain::{
-        Amount, BLOCK_REWARD, DEFAULT_FEE_PER_BYTE, DEFAULT_MINE_REQUIRED_BURN_MULTIPLIER_BPS,
-        FinalizerMode, GenesisBurn, Ledger, MAX_BLOCK_BYTES, MICRO_IUNA, MIN_MINE_REQUIRED_BURN,
-        RECOVERY_BLOCK_DELAY_MS, TransactionSubmitOutcome, VDF_TARGET_BLOCK_MS, Wallet, run_vdf,
-        verify_vdf,
+        Amount, BLOCK_REWARD, DEFAULT_FEE_PER_BYTE, FinalizerMode, GenesisBurn, Ledger,
+        MAX_BLOCK_BYTES, MICRO_IUNA, MINE_REWARD, RECOVERY_BLOCK_DELAY_MS,
+        TransactionSubmitOutcome, VDF_TARGET_BLOCK_MS, Wallet, run_vdf, verify_vdf,
     },
 };
 use tempfile::tempdir;
@@ -307,7 +306,7 @@ fn block_with_forged_transaction_is_rejected() {
 }
 
 #[test]
-fn mine_action_uses_required_burn_reward_and_finalizer_fee() {
+fn mine_action_uses_fixed_reward_and_finalizer_fee() {
     let alice = Wallet::from_seed("alice");
     let mut allocations = BTreeMap::new();
     allocations.insert(alice.address().to_string(), 2 * MICRO_IUNA);
@@ -315,7 +314,7 @@ fn mine_action_uses_required_burn_reward_and_finalizer_fee() {
     let mut ledger = Ledger::new(allocations, 10);
     submit_burn(&mut ledger, &alice, MICRO_IUNA);
     let mine = ledger.build_mine(alice.address()).unwrap();
-    assert_eq!(mine.amount(), MIN_MINE_REQUIRED_BURN);
+    assert_eq!(mine.amount(), MINE_REWARD);
     assert_eq!(mine.fee(), MICRO_IUNA);
     ledger.submit_transaction(mine.clone()).unwrap();
     let block = ledger.mine_next_block(&alice, 1).unwrap();
@@ -324,12 +323,12 @@ fn mine_action_uses_required_burn_reward_and_finalizer_fee() {
     ledger.apply_block(block).unwrap();
     assert_eq!(
         ledger.balance_of(alice.address()),
-        2 * MICRO_IUNA + MIN_MINE_REQUIRED_BURN
+        2 * MICRO_IUNA + MINE_REWARD
     );
     assert!(!ledger.submit_transaction(mine).unwrap());
     assert_eq!(
         ledger.balance_of(alice.address()),
-        2 * MICRO_IUNA + MIN_MINE_REQUIRED_BURN
+        2 * MICRO_IUNA + MINE_REWARD
     );
 }
 
@@ -342,7 +341,7 @@ fn mine_action_protocol_fee_is_paid_to_block_finalizer() {
 
     let mut ledger = Ledger::new(allocations, 10);
     let mine = ledger.build_mine(alice.address()).unwrap();
-    assert_eq!(mine.amount(), MIN_MINE_REQUIRED_BURN);
+    assert_eq!(mine.amount(), MINE_REWARD);
     assert_eq!(mine.fee(), MICRO_IUNA);
     ledger.submit_transaction(mine).unwrap();
     submit_burn(&mut ledger, &bob, MICRO_IUNA);
@@ -351,7 +350,7 @@ fn mine_action_protocol_fee_is_paid_to_block_finalizer() {
     assert_eq!(block.reward, MICRO_IUNA);
     ledger.apply_block(block).unwrap();
 
-    assert_eq!(ledger.balance_of(alice.address()), MIN_MINE_REQUIRED_BURN);
+    assert_eq!(ledger.balance_of(alice.address()), MINE_REWARD);
     assert_eq!(ledger.balance_of(bob.address()), 2 * MICRO_IUNA);
 }
 
@@ -827,9 +826,7 @@ fn pow_only_node_gossips_mine_action_to_pob_only_finalizer() {
         DEFAULT_BURN_PER_BLOCK,
         DEFAULT_FEE_PER_BYTE,
     );
-    bob_node
-        .set_pow_mining_settings(true, DEFAULT_MINE_REQUIRED_BURN_MULTIPLIER_BPS)
-        .unwrap();
+    bob_node.set_pow_mining_enabled(true);
 
     let bob_plan = (1..10_000)
         .map(|timestamp| bob_node.prepare_automatic_mining(timestamp))

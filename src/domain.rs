@@ -13,8 +13,6 @@ pub const MICRO_IUNA: Amount = 1_000_000;
 pub const BLOCK_REWARD: Amount = 100 * MICRO_IUNA;
 pub const MINE_REWARD: Amount = MICRO_IUNA;
 pub const MINE_FINALIZER_FEE: Amount = MICRO_IUNA;
-pub const MIN_MINE_REQUIRED_BURN: Amount = MICRO_IUNA / 10;
-pub const MAX_MINE_REQUIRED_BURN: Amount = MINE_REWARD;
 pub const DEFAULT_MINE_FEE: Amount = MINE_FINALIZER_FEE;
 pub const DEFAULT_TRANSACTION_FEE: Amount = MICRO_IUNA;
 pub const DEFAULT_FEE_PER_BYTE: Amount = 1;
@@ -32,8 +30,6 @@ const MINE_MAX_RETARGET_STEP_BITS: u32 = 2;
 const MINE_MIN_DIFFICULTY_BITS: u32 = 1;
 const MINE_MAX_DIFFICULTY_BITS: u32 = 32;
 const MINE_MAX_ANCHOR_AGE_BLOCKS: u64 = MINE_RETARGET_WINDOW_BLOCKS;
-pub const DEFAULT_MINE_REQUIRED_BURN_MULTIPLIER_BPS: u16 = 8_000;
-pub const MINE_REQUIRED_BURN_WINDOW_BLOCKS: usize = 10;
 pub const MAX_PENDING_TRANSACTIONS: usize = 10_000;
 const MAX_ORPHAN_TRANSACTIONS: usize = 1_024;
 const MAX_BLOCK_TRANSACTIONS: usize = 1_000;
@@ -157,7 +153,6 @@ pub enum Transaction {
     },
     Mine {
         recipient: String,
-        required_burn_amount: Amount,
         anchor: String,
         #[serde(default)]
         salt: u64,
@@ -294,10 +289,7 @@ impl Transaction {
                 outputs.first().map(|output| output.amount).unwrap_or(0)
             }
             Self::Burn { amount, .. } => *amount,
-            Self::Mine {
-                required_burn_amount,
-                ..
-            } => *required_burn_amount,
+            Self::Mine { .. } => MINE_REWARD,
             Self::BurnClaim { .. } => 0,
         }
     }
@@ -329,13 +321,6 @@ impl Transaction {
 
     pub fn is_burn(&self) -> bool {
         matches!(self, Self::Burn { .. })
-    }
-
-    fn burn_amount(&self) -> Amount {
-        match self {
-            Self::Burn { amount, .. } => *amount,
-            Self::Transfer { .. } | Self::Mine { .. } | Self::BurnClaim { .. } => 0,
-        }
     }
 
     pub fn canonical(&self) -> String {
@@ -380,20 +365,12 @@ impl Transaction {
             .canonical(),
             Self::Mine {
                 recipient,
-                required_burn_amount,
                 anchor,
                 salt,
                 nonce,
                 difficulty_bits,
                 ..
-            } => mine_payload(
-                recipient,
-                *required_burn_amount,
-                anchor,
-                *salt,
-                *nonce,
-                *difficulty_bits,
-            ),
+            } => mine_payload(recipient, anchor, *salt, *nonce, *difficulty_bits),
             Self::BurnClaim { burn, seen, .. } => burn_claim_payload(burn, seen),
         }
     }
@@ -401,7 +378,6 @@ impl Transaction {
     fn verify_signature(&self) -> Result<()> {
         if let Self::Mine {
             recipient,
-            required_burn_amount,
             anchor,
             salt,
             nonce,
@@ -411,28 +387,15 @@ impl Transaction {
         } = self
         {
             let expected = if let Some(proof_header) = proof_header {
-                let header = stratum_mine_header_bytes(
-                    recipient,
-                    *required_burn_amount,
-                    anchor,
-                    *salt,
-                    *nonce,
-                    *difficulty_bits,
-                )?;
+                let header =
+                    stratum_mine_header_bytes(recipient, anchor, *salt, *nonce, *difficulty_bits)?;
                 let expected_header = hex_encode(header);
                 if *proof_header != expected_header {
                     bail!("mine transaction proof header is invalid");
                 }
                 stratum_mine_signature(&header)
             } else {
-                mine_signature(
-                    recipient,
-                    *required_burn_amount,
-                    anchor,
-                    *salt,
-                    *nonce,
-                    *difficulty_bits,
-                )
+                mine_signature(recipient, anchor, *salt, *nonce, *difficulty_bits)
             };
             if *signature != expected {
                 bail!("mine transaction proof hash is invalid");
@@ -492,13 +455,9 @@ impl Transaction {
         match self {
             Self::Transfer { outputs, .. } => outputs.clone(),
             Self::Burn { change, .. } => change.clone(),
-            Self::Mine {
-                recipient,
-                required_burn_amount,
-                ..
-            } => vec![TxOutput {
+            Self::Mine { recipient, .. } => vec![TxOutput {
                 address: recipient.clone(),
-                amount: *required_burn_amount,
+                amount: MINE_REWARD,
             }],
             Self::BurnClaim { .. } => Vec::new(),
         }
@@ -639,20 +598,16 @@ fn canonical_outputs(outputs: &[TxOutput]) -> String {
 
 fn mine_payload(
     recipient: &str,
-    required_burn_amount: Amount,
     anchor: &str,
     salt: u64,
     nonce: u64,
     difficulty_bits: u32,
 ) -> String {
-    format!(
-        "iuna-mine:{recipient}:{required_burn_amount}:{anchor}:{salt}:{nonce}:{difficulty_bits}"
-    )
+    format!("iuna-mine:{recipient}:{anchor}:{salt}:{nonce}:{difficulty_bits}")
 }
 
 fn mine_signature(
     recipient: &str,
-    required_burn_amount: Amount,
     anchor: &str,
     salt: u64,
     nonce: u64,
@@ -660,7 +615,6 @@ fn mine_signature(
 ) -> String {
     hex_hash(mine_payload(
         recipient,
-        required_burn_amount,
         anchor,
         salt,
         nonce,
@@ -719,7 +673,6 @@ const STRATUM_MINE_NTIME: [u8; 4] = [0, 0, 0, 0];
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct StratumMineTemplate {
     pub recipient: String,
-    pub required_burn_amount: Amount,
     pub anchor: String,
     pub salt: u64,
     pub difficulty_bits: u32,
@@ -757,33 +710,22 @@ fn unpack_stratum_nonce(nonce: u64) -> ([u8; 4], [u8; 4]) {
 
 fn stratum_coinbase_prefix(
     recipient: &str,
-    required_burn_amount: Amount,
     anchor: &str,
     salt: u64,
     difficulty_bits: u32,
 ) -> Vec<u8> {
-    format!(
-        "iuna-stratum-mine:{recipient}:{required_burn_amount}:{anchor}:{salt}:{difficulty_bits}:"
-    )
-    .into_bytes()
+    format!("iuna-stratum-mine:{recipient}:{anchor}:{salt}:{difficulty_bits}:").into_bytes()
 }
 
 fn stratum_coinbase_bytes(
     recipient: &str,
-    required_burn_amount: Amount,
     anchor: &str,
     salt: u64,
     nonce: u64,
     difficulty_bits: u32,
 ) -> Vec<u8> {
     let (extranonce2, _) = unpack_stratum_nonce(nonce);
-    let mut coinbase = stratum_coinbase_prefix(
-        recipient,
-        required_burn_amount,
-        anchor,
-        salt,
-        difficulty_bits,
-    );
+    let mut coinbase = stratum_coinbase_prefix(recipient, anchor, salt, difficulty_bits);
     coinbase.extend_from_slice(&[0, 0, 0, 0]);
     coinbase.extend_from_slice(&extranonce2);
     coinbase
@@ -797,7 +739,6 @@ fn double_sha256(bytes: &[u8]) -> [u8; 32] {
 
 fn stratum_mine_header_bytes(
     recipient: &str,
-    required_burn_amount: Amount,
     anchor: &str,
     salt: u64,
     nonce: u64,
@@ -810,7 +751,6 @@ fn stratum_mine_header_bytes(
     header[4..36].copy_from_slice(&anchor_bytes);
     let merkle_root = double_sha256(&stratum_coinbase_bytes(
         recipient,
-        required_burn_amount,
         anchor,
         salt,
         nonce,
@@ -832,7 +772,6 @@ fn stratum_mine_signature(header: &[u8; 80]) -> String {
 
 fn stratum_mine_template(
     recipient: impl Into<String>,
-    required_burn_amount: Amount,
     anchor: &str,
     salt: u64,
     difficulty_bits: u32,
@@ -840,22 +779,14 @@ fn stratum_mine_template(
     let recipient = recipient.into();
     validate_address(&recipient, "mine recipient")?;
     validate_hash(anchor, "mine transaction anchor")?;
-    validate_mine_required_burn_amount(required_burn_amount)?;
     let anchor_bytes =
         decode_hex_array::<HASH_BYTES>(anchor).context("mine transaction anchor is not hex")?;
     Ok(StratumMineTemplate {
         recipient: recipient.clone(),
-        required_burn_amount,
         anchor: anchor.to_string(),
         salt,
         difficulty_bits,
-        coinbase_prefix: stratum_coinbase_prefix(
-            &recipient,
-            required_burn_amount,
-            anchor,
-            salt,
-            difficulty_bits,
-        ),
+        coinbase_prefix: stratum_coinbase_prefix(&recipient, anchor, salt, difficulty_bits),
         version_hex: hex_encode(STRATUM_MINE_VERSION),
         prev_hash_hex: hex_encode(anchor_bytes),
         nbits_hex: hex_encode(difficulty_bits.to_le_bytes()),
@@ -1793,34 +1724,6 @@ impl Ledger {
         self.mine_difficulty_bits_for_anchor_height(self.tip().height)
     }
 
-    pub fn recommended_mine_required_burn_amount(&self) -> Amount {
-        self.recommended_mine_required_burn_amount_with_multiplier(
-            DEFAULT_MINE_REQUIRED_BURN_MULTIPLIER_BPS,
-        )
-    }
-
-    pub fn recommended_mine_required_burn_amount_with_multiplier(
-        &self,
-        multiplier_bps: u16,
-    ) -> Amount {
-        let Some(min_burn) = self
-            .chain
-            .iter()
-            .rev()
-            .filter(|block| block.height > 0)
-            .take(MINE_REQUIRED_BURN_WINDOW_BLOCKS)
-            .map(block_burn_amount)
-            .min()
-        else {
-            return MIN_MINE_REQUIRED_BURN;
-        };
-        let scaled = u128::from(min_burn)
-            .saturating_mul(u128::from(multiplier_bps))
-            .saturating_div(10_000)
-            .min(u128::from(Amount::MAX)) as Amount;
-        scaled.clamp(MIN_MINE_REQUIRED_BURN, MAX_MINE_REQUIRED_BURN)
-    }
-
     pub fn mine_difficulty_bits_at_height(&self, height: u64) -> u32 {
         self.mine_difficulty_bits_for_anchor_height(height.min(self.tip().height))
     }
@@ -1970,35 +1873,18 @@ impl Ledger {
     }
 
     pub fn build_mine(&self, recipient: impl Into<String>) -> Result<Transaction> {
-        self.build_mine_with_required_burn(recipient, self.recommended_mine_required_burn_amount())
-    }
-
-    pub fn build_mine_with_required_burn(
-        &self,
-        recipient: impl Into<String>,
-        required_burn_amount: Amount,
-    ) -> Result<Transaction> {
         let recipient = recipient.into();
         validate_address(&recipient, "mine recipient")?;
-        validate_mine_required_burn_amount(required_burn_amount)?;
         let anchor = self.tip().hash.clone();
         let salt = 1;
         let difficulty_bits = self.current_mine_difficulty_bits();
         for nonce in 0..u64::MAX {
-            let signature = mine_signature(
-                &recipient,
-                required_burn_amount,
-                &anchor,
-                salt,
-                nonce,
-                difficulty_bits,
-            );
+            let signature = mine_signature(&recipient, &anchor, salt, nonce, difficulty_bits);
             if !hash_meets_difficulty(&signature, difficulty_bits) {
                 continue;
             }
             let transaction = Transaction::Mine {
                 recipient: recipient.clone(),
-                required_burn_amount,
                 anchor: anchor.clone(),
                 salt,
                 nonce,
@@ -2015,36 +1901,26 @@ impl Ledger {
         bail!("could not find valid mine proof");
     }
 
-    pub fn search_mine_with_required_burn(
+    pub fn search_mine(
         &self,
         recipient: impl Into<String>,
-        required_burn_amount: Amount,
         salt: u64,
         start_nonce: u64,
         max_attempts: u64,
     ) -> Result<MineSearchOutcome> {
         let recipient = recipient.into();
         validate_address(&recipient, "mine recipient")?;
-        validate_mine_required_burn_amount(required_burn_amount)?;
         let anchor = self.tip().hash.clone();
         let difficulty_bits = self.current_mine_difficulty_bits();
         let mut attempts = 0_u64;
         let mut nonce = start_nonce;
         while attempts < max_attempts {
-            let signature = mine_signature(
-                &recipient,
-                required_burn_amount,
-                &anchor,
-                salt,
-                nonce,
-                difficulty_bits,
-            );
+            let signature = mine_signature(&recipient, &anchor, salt, nonce, difficulty_bits);
             attempts = attempts.saturating_add(1);
             let next_nonce = nonce.checked_add(1).unwrap_or(0);
             if hash_meets_difficulty(&signature, difficulty_bits) {
                 let transaction = Transaction::Mine {
                     recipient: recipient.clone(),
-                    required_burn_amount,
                     anchor: anchor.clone(),
                     salt,
                     nonce,
@@ -2073,18 +1949,11 @@ impl Ledger {
     pub fn stratum_mine_template(
         &self,
         recipient: impl Into<String>,
-        required_burn_amount: Amount,
         anchor: impl AsRef<str>,
         salt: u64,
         difficulty_bits: u32,
     ) -> Result<StratumMineTemplate> {
-        stratum_mine_template(
-            recipient,
-            required_burn_amount,
-            anchor.as_ref(),
-            salt,
-            difficulty_bits,
-        )
+        stratum_mine_template(recipient, anchor.as_ref(), salt, difficulty_bits)
     }
 
     pub fn build_stratum_mine(
@@ -2095,7 +1964,6 @@ impl Ledger {
         let nonce = pack_stratum_nonce(share.extranonce2, share.header_nonce);
         let header = stratum_mine_header_bytes(
             &template.recipient,
-            template.required_burn_amount,
             &template.anchor,
             template.salt,
             nonce,
@@ -2103,7 +1971,6 @@ impl Ledger {
         )?;
         let transaction = Transaction::Mine {
             recipient: template.recipient,
-            required_burn_amount: template.required_burn_amount,
             anchor: template.anchor,
             salt: template.salt,
             nonce,
@@ -2179,7 +2046,6 @@ impl Ledger {
 
         let transactions = self.select_block_transactions()?;
         ensure_block_has_burn(&transactions)?;
-        ensure_mine_actions_have_required_burns(&transactions)?;
 
         let tip = self.tip();
         let prev_hash = tip.hash.clone();
@@ -2220,7 +2086,6 @@ impl Ledger {
         let transactions = self.select_recovery_block_transactions(miner)?;
         ensure_block_has_burn(&transactions)?;
         ensure_block_has_burn_from(&transactions, miner)?;
-        ensure_mine_actions_have_required_burns(&transactions)?;
 
         let tip = self.tip();
         let prev_hash = tip.hash.clone();
@@ -2386,7 +2251,6 @@ impl Ledger {
             bail!("block exceeds max block size");
         }
         ensure_block_has_burn(&block.transactions)?;
-        ensure_mine_actions_have_required_burns(&block.transactions)?;
         self.ensure_due_burn_claims_are_included(block.height, &block.transactions)?;
         match block.finalizer_mode {
             FinalizerMode::Ticket => {
@@ -2515,7 +2379,6 @@ impl Ledger {
         let mut utxos = self.utxos.clone();
         let mut remaining = self.valid_pending_transactions();
         let mut selected = Vec::new();
-        let mut selected_burn_amount = 0_u64;
 
         for tx in self.due_required_claimed_burns(self.tip().height + 1)? {
             remaining.retain(|pending| pending.signature() != tx.signature());
@@ -2525,9 +2388,6 @@ impl Ledger {
                 bail!("due claimed burns exceed max block size");
             }
             apply_transaction(&tx, &mut utxos)?;
-            selected_burn_amount = selected_burn_amount
-                .checked_add(tx.burn_amount())
-                .context("selected block burns overflow")?;
             selected.push(tx);
         }
 
@@ -2549,21 +2409,13 @@ impl Ledger {
                 candidate.push(tx.clone());
                 if estimated_block_size_bytes(&candidate)? <= self.launch_profile.max_block_bytes {
                     apply_transaction(&tx, &mut utxos)?;
-                    selected_burn_amount = selected_burn_amount
-                        .checked_add(tx.burn_amount())
-                        .context("selected block burns overflow")?;
                     selected.push(tx);
                 }
             }
         }
 
         while selected.len() < self.launch_profile.max_block_transactions {
-            let Some(index) = best_selectable_transaction_index_for_burn_amount(
-                &remaining,
-                &utxos,
-                None,
-                selected_burn_amount,
-            ) else {
+            let Some(index) = best_selectable_transaction_index(&remaining, &utxos, None) else {
                 break;
             };
             let tx = remaining.remove(index);
@@ -2571,9 +2423,6 @@ impl Ledger {
             candidate.push(tx.clone());
             if estimated_block_size_bytes(&candidate)? <= self.launch_profile.max_block_bytes {
                 apply_transaction(&tx, &mut utxos)?;
-                selected_burn_amount = selected_burn_amount
-                    .checked_add(tx.burn_amount())
-                    .context("selected block burns overflow")?;
                 selected.push(tx);
             }
         }
@@ -2752,7 +2601,6 @@ impl Ledger {
             }
             Transaction::Mine {
                 recipient,
-                required_burn_amount,
                 anchor,
                 difficulty_bits,
                 proof_header,
@@ -2760,7 +2608,6 @@ impl Ledger {
                 ..
             } => {
                 validate_address(recipient, "mine recipient")?;
-                validate_mine_required_burn_amount(*required_burn_amount)?;
                 validate_hash(anchor, "mine transaction anchor")?;
                 validate_hash(signature, "mine transaction proof hash")?;
                 if let Some(proof_header) = proof_header {
@@ -3279,38 +3126,6 @@ fn ensure_block_has_burn_from(transactions: &[Transaction], miner: &str) -> Resu
     Ok(())
 }
 
-fn block_burn_amount(block: &Block) -> Amount {
-    transactions_burn_amount(&block.transactions).unwrap_or(Amount::MAX)
-}
-
-fn transactions_burn_amount(transactions: &[Transaction]) -> Result<Amount> {
-    transactions.iter().try_fold(0_u64, |total, tx| {
-        total
-            .checked_add(tx.burn_amount())
-            .context("burns overflow")
-    })
-}
-
-fn ensure_mine_actions_have_required_burns(transactions: &[Transaction]) -> Result<()> {
-    let burn_amount = transactions_burn_amount(transactions)?;
-    for transaction in transactions {
-        if let Transaction::Mine {
-            required_burn_amount,
-            ..
-        } = transaction
-        {
-            if burn_amount < *required_burn_amount {
-                bail!(
-                    "mine transaction requires {} burn but block only includes {}",
-                    required_burn_amount,
-                    burn_amount
-                );
-            }
-        }
-    }
-    Ok(())
-}
-
 fn ensure_valid_recovery_block(block: &Block, parent: &Block) -> Result<()> {
     if block.finalizer_rank != 0 {
         bail!("recovery block finalizer rank must be 0");
@@ -3338,12 +3153,25 @@ fn best_selectable_transaction_index(
     utxos: &BTreeMap<OutPoint, TxOutput>,
     required_kind: Option<TransactionKind>,
 ) -> Option<usize> {
-    best_selectable_transaction_index_for_burn_amount(
-        transactions,
-        utxos,
-        required_kind,
-        Amount::MAX,
-    )
+    transactions
+        .iter()
+        .enumerate()
+        .filter(|(_, tx)| match required_kind {
+            Some(TransactionKind::Burn) => tx.is_burn(),
+            None => true,
+        })
+        .filter(|(_, tx)| {
+            let mut utxos = utxos.clone();
+            apply_transaction(tx, &mut utxos).is_ok()
+        })
+        .max_by(|(_, left), (_, right)| {
+            fee_rate_key(left)
+                .cmp(&fee_rate_key(right))
+                .then_with(|| left.fee().cmp(&right.fee()))
+                .then_with(|| left.is_burn().cmp(&right.is_burn()))
+                .then_with(|| right.signature().cmp(left.signature()))
+        })
+        .map(|(index, _)| index)
 }
 
 fn best_selectable_burn_from_index(
@@ -3363,42 +3191,6 @@ fn best_selectable_burn_from_index(
             fee_rate_key(left)
                 .cmp(&fee_rate_key(right))
                 .then_with(|| left.fee().cmp(&right.fee()))
-                .then_with(|| right.signature().cmp(left.signature()))
-        })
-        .map(|(index, _)| index)
-}
-
-fn best_selectable_transaction_index_for_burn_amount(
-    transactions: &[Transaction],
-    utxos: &BTreeMap<OutPoint, TxOutput>,
-    required_kind: Option<TransactionKind>,
-    selected_burn_amount: Amount,
-) -> Option<usize> {
-    transactions
-        .iter()
-        .enumerate()
-        .filter(|(_, tx)| match required_kind {
-            Some(TransactionKind::Burn) => tx.is_burn(),
-            None => true,
-        })
-        .filter(|(_, tx)| {
-            !matches!(
-                tx,
-                Transaction::Mine {
-                    required_burn_amount,
-                    ..
-                } if *required_burn_amount > selected_burn_amount
-            )
-        })
-        .filter(|(_, tx)| {
-            let mut utxos = utxos.clone();
-            apply_transaction(tx, &mut utxos).is_ok()
-        })
-        .max_by(|(_, left), (_, right)| {
-            fee_rate_key(left)
-                .cmp(&fee_rate_key(right))
-                .then_with(|| left.fee().cmp(&right.fee()))
-                .then_with(|| left.is_burn().cmp(&right.is_burn()))
                 .then_with(|| right.signature().cmp(left.signature()))
         })
         .map(|(index, _)| index)
@@ -3464,17 +3256,6 @@ fn validate_hash(hash: &str, label: &str) -> Result<()> {
     Ok(())
 }
 
-fn validate_mine_required_burn_amount(amount: Amount) -> Result<()> {
-    if !(MIN_MINE_REQUIRED_BURN..=MAX_MINE_REQUIRED_BURN).contains(&amount) {
-        bail!(
-            "mine required burn amount must be between {} and {}",
-            MIN_MINE_REQUIRED_BURN,
-            MAX_MINE_REQUIRED_BURN
-        );
-    }
-    Ok(())
-}
-
 fn validate_signature(signature: &str, label: &str) -> Result<()> {
     decode_hex_array::<SIGNATURE_BYTES>(signature).with_context(|| format!("invalid {label}"))?;
     Ok(())
@@ -3526,7 +3307,6 @@ fn canonical_transaction_size_bytes(transaction: &Transaction) -> usize {
         }
         Transaction::Mine {
             recipient,
-            required_burn_amount,
             anchor,
             salt,
             nonce,
@@ -3535,7 +3315,6 @@ fn canonical_transaction_size_bytes(transaction: &Transaction) -> usize {
             signature,
         } => {
             1 + address_size_bytes(recipient)
-                + compact_len(u128::from(*required_burn_amount))
                 + hash_size_bytes(anchor)
                 + compact_len(u128::from(*salt))
                 + compact_len(u128::from(*nonce))
@@ -3708,14 +3487,10 @@ fn apply_transaction(
 ) -> Result<()> {
     transaction.verify_signature()?;
     match transaction {
-        Transaction::Mine {
-            recipient,
-            required_burn_amount,
-            ..
-        } => {
+        Transaction::Mine { recipient, .. } => {
             let output = TxOutput {
                 address: recipient.clone(),
-                amount: *required_burn_amount,
+                amount: MINE_REWARD,
             };
             ensure_outputs_do_not_overflow(utxos, std::slice::from_ref(&output))?;
             utxos.insert(
@@ -4286,27 +4061,17 @@ mod tests {
         block
     }
 
-    fn mine_with_required_burn(
-        ledger: &Ledger,
-        recipient: &str,
-        required_burn_amount: Amount,
-    ) -> Transaction {
+    const TEST_BURN_AMOUNT: Amount = MICRO_IUNA / 10;
+
+    fn unsigned_mine(ledger: &Ledger, recipient: &str) -> Transaction {
         let anchor = ledger.tip().hash.clone();
         let difficulty_bits = ledger.current_mine_difficulty_bits();
         for nonce in 0..u64::MAX {
             let salt = 1;
-            let signature = mine_signature(
-                recipient,
-                required_burn_amount,
-                &anchor,
-                salt,
-                nonce,
-                difficulty_bits,
-            );
+            let signature = mine_signature(recipient, &anchor, salt, nonce, difficulty_bits);
             if hash_meets_difficulty(&signature, difficulty_bits) {
                 return Transaction::Mine {
                     recipient: recipient.to_string(),
-                    required_burn_amount,
                     anchor,
                     salt,
                     nonce,
@@ -4364,9 +4129,7 @@ mod tests {
                 })
             })
             .expect("expected an eligible finalizer wallet");
-        let burn = ledger
-            .build_burn(wallet, MIN_MINE_REQUIRED_BURN, 0)
-            .unwrap();
+        let burn = ledger.build_burn(wallet, TEST_BURN_AMOUNT, 0).unwrap();
         ledger.submit_transaction(burn).unwrap();
         let prepared = ledger
             .prepare_next_block(wallet.address(), ledger.tip().timestamp_ms + 1)
@@ -4604,9 +4367,7 @@ mod tests {
         let alice = Wallet::from_seed("bounded-mine-search-alice");
         let ledger = Ledger::new(BTreeMap::new(), 1);
 
-        let outcome = ledger
-            .search_mine_with_required_burn(alice.address(), MIN_MINE_REQUIRED_BURN, 1, 0, 0)
-            .unwrap();
+        let outcome = ledger.search_mine(alice.address(), 1, 0, 0).unwrap();
 
         assert!(outcome.transaction.is_none());
         assert_eq!(outcome.next_nonce, 0);
@@ -5002,32 +4763,13 @@ mod tests {
     }
 
     #[test]
-    fn mine_required_burn_amount_must_be_in_protocol_range() {
-        let alice = Wallet::from_seed("mine-required-burn-range-alice");
-        let ledger = ledger_with_allocation(&alice, MICRO_IUNA);
-
-        let low = ledger
-            .build_mine_with_required_burn(alice.address(), MIN_MINE_REQUIRED_BURN - 1)
-            .unwrap_err();
-        let high = ledger
-            .build_mine_with_required_burn(alice.address(), MAX_MINE_REQUIRED_BURN + 1)
-            .unwrap_err();
-
-        assert!(format!("{low:#}").contains("required burn amount"));
-        assert!(format!("{high:#}").contains("required burn amount"));
-    }
-
-    #[test]
-    fn mine_required_burn_amount_is_bound_to_proof_hash() {
-        let alice = Wallet::from_seed("mine-required-burn-proof-alice");
+    fn mine_recipient_is_bound_to_proof_hash() {
+        let alice = Wallet::from_seed("mine-proof-alice");
+        let bob = Wallet::from_seed("mine-proof-bob");
         let mut ledger = ledger_with_allocation(&alice, MICRO_IUNA);
-        let mut forged = mine_with_required_burn(&ledger, alice.address(), MIN_MINE_REQUIRED_BURN);
-        if let Transaction::Mine {
-            required_burn_amount,
-            ..
-        } = &mut forged
-        {
-            *required_burn_amount = required_burn_amount.saturating_add(1);
+        let mut forged = unsigned_mine(&ledger, alice.address());
+        if let Transaction::Mine { recipient, .. } = &mut forged {
+            *recipient = bob.address().to_string();
         }
 
         let error = ledger.submit_transaction(forged).unwrap_err();
@@ -5036,66 +4778,15 @@ mod tests {
     }
 
     #[test]
-    fn mine_action_uses_required_burn_reward_and_fixed_finalizer_fee() {
-        let alice = Wallet::from_seed("mine-required-burn-reward-alice");
+    fn mine_action_uses_fixed_reward_and_fixed_finalizer_fee() {
+        let alice = Wallet::from_seed("mine-fixed-reward-alice");
         let mut ledger = ledger_with_allocation(&alice, MICRO_IUNA);
 
-        let mine = ledger
-            .build_mine_with_required_burn(alice.address(), MIN_MINE_REQUIRED_BURN)
-            .unwrap();
+        let mine = ledger.build_mine(alice.address()).unwrap();
 
-        assert_eq!(mine.amount(), MIN_MINE_REQUIRED_BURN);
+        assert_eq!(mine.amount(), MINE_REWARD);
         assert_eq!(mine.fee(), MINE_FINALIZER_FEE);
         assert!(ledger.submit_transaction(mine).unwrap());
-    }
-
-    #[test]
-    fn recommended_mine_required_burn_uses_multiplier_times_recent_minimum() {
-        let alice = Wallet::from_seed("mine-required-burn-policy-alice");
-        let mut ledger = ledger_with_allocation(&alice, 10 * MICRO_IUNA);
-
-        assert_eq!(
-            ledger.recommended_mine_required_burn_amount_with_multiplier(8_000),
-            MIN_MINE_REQUIRED_BURN
-        );
-
-        for amount in [MICRO_IUNA, MICRO_IUNA / 2, 3 * MICRO_IUNA / 2] {
-            let burn = ledger.build_burn(&alice, amount, 0).unwrap();
-            ledger.submit_transaction(burn).unwrap();
-            let block = ledger.mine_next_block(&alice, ledger.height() + 1).unwrap();
-            ledger.apply_locally_mined_block(block).unwrap();
-        }
-
-        assert_eq!(
-            ledger.recommended_mine_required_burn_amount_with_multiplier(8_000),
-            400_000
-        );
-        assert_eq!(
-            ledger.recommended_mine_required_burn_amount_with_multiplier(100),
-            MIN_MINE_REQUIRED_BURN
-        );
-        assert_eq!(
-            ledger.recommended_mine_required_burn_amount_with_multiplier(10_000),
-            MICRO_IUNA / 2
-        );
-    }
-
-    #[test]
-    fn recommended_mine_required_burn_uses_last_ten_non_genesis_blocks() {
-        let alice = Wallet::from_seed("mine-required-burn-window-alice");
-        let mut ledger = ledger_with_allocation(&alice, 20 * MICRO_IUNA);
-
-        for amount in std::iter::once(MIN_MINE_REQUIRED_BURN).chain([MICRO_IUNA; 10]) {
-            let burn = ledger.build_burn(&alice, amount, 0).unwrap();
-            ledger.submit_transaction(burn).unwrap();
-            let block = ledger.mine_next_block(&alice, ledger.height() + 1).unwrap();
-            ledger.apply_locally_mined_block(block).unwrap();
-        }
-
-        assert_eq!(
-            ledger.recommended_mine_required_burn_amount_with_multiplier(10_000),
-            MICRO_IUNA
-        );
     }
 
     #[test]
@@ -5108,9 +4799,7 @@ mod tests {
         mine_until_recent_finalizers(&mut ledger, &finalizers, BURN_CLAIM_SEEN_QUORUM);
         assert!(recent_unique_finalizer_count(&ledger) >= BURN_CLAIM_SEEN_QUORUM);
 
-        let burn = ledger
-            .build_burn(&burner, MIN_MINE_REQUIRED_BURN, 0)
-            .unwrap();
+        let burn = ledger.build_burn(&burner, TEST_BURN_AMOUNT, 0).unwrap();
         let seen =
             recent_burn_seen_attestations(&ledger, &finalizers, &burn, BURN_CLAIM_SEEN_QUORUM - 1);
 
@@ -5128,9 +4817,7 @@ mod tests {
         let mut ledger = ledger_with_finalizers_and_burner(&finalizers, &burner);
         mine_until_recent_finalizers(&mut ledger, &finalizers, BURN_CLAIM_SEEN_QUORUM);
 
-        let burn = ledger
-            .build_burn(&burner, MIN_MINE_REQUIRED_BURN, 0)
-            .unwrap();
+        let burn = ledger.build_burn(&burner, TEST_BURN_AMOUNT, 0).unwrap();
         let mut seen =
             recent_burn_seen_attestations(&ledger, &finalizers, &burn, BURN_CLAIM_SEEN_QUORUM);
         seen[0].signature = "00".repeat(SIGNATURE_BYTES);
@@ -5149,9 +4836,7 @@ mod tests {
         let burner = Wallet::from_seed("burn-claim-due-burner");
         let mut ledger = ledger_with_finalizers_and_burner(&finalizers, &burner);
         mine_until_recent_finalizers(&mut ledger, &finalizers, BURN_CLAIM_SEEN_QUORUM);
-        let burn = ledger
-            .build_burn(&burner, MIN_MINE_REQUIRED_BURN, 0)
-            .unwrap();
+        let burn = ledger.build_burn(&burner, TEST_BURN_AMOUNT, 0).unwrap();
         let burn_signature = burn.signature().to_string();
 
         confirm_burn_claim(&mut ledger, &finalizers, burn);
@@ -5162,9 +4847,7 @@ mod tests {
 
         let leader = ledger.expected_leader_for_next_block().unwrap();
         let wallet = wallet_for_address(&finalizers, &leader);
-        let filler_burn = ledger
-            .build_burn(wallet, MIN_MINE_REQUIRED_BURN, 0)
-            .unwrap();
+        let filler_burn = ledger.build_burn(wallet, TEST_BURN_AMOUNT, 0).unwrap();
         ledger.submit_transaction(filler_burn.clone()).unwrap();
         let mut prepared = ledger
             .prepare_next_block(wallet.address(), ledger.tip().timestamp_ms + 1)
@@ -5202,9 +4885,7 @@ mod tests {
         let burner = Wallet::from_seed("burn-claim-select-burner");
         let mut ledger = ledger_with_finalizers_and_burner(&finalizers, &burner);
         mine_until_recent_finalizers(&mut ledger, &finalizers, BURN_CLAIM_SEEN_QUORUM);
-        let burn = ledger
-            .build_burn(&burner, MIN_MINE_REQUIRED_BURN, 0)
-            .unwrap();
+        let burn = ledger.build_burn(&burner, TEST_BURN_AMOUNT, 0).unwrap();
         let burn_signature = burn.signature().to_string();
 
         confirm_burn_claim(&mut ledger, &finalizers, burn);
@@ -5236,9 +4917,7 @@ mod tests {
         let recipient = Wallet::from_seed("burn-claim-invalid-recipient");
         let mut ledger = ledger_with_finalizers_and_burner(&finalizers, &burner);
         mine_until_recent_finalizers(&mut ledger, &finalizers, BURN_CLAIM_SEEN_QUORUM);
-        let burn = ledger
-            .build_burn(&burner, MIN_MINE_REQUIRED_BURN, 0)
-            .unwrap();
+        let burn = ledger.build_burn(&burner, TEST_BURN_AMOUNT, 0).unwrap();
         let burn_signature = burn.signature().to_string();
         let burn_input = burn.inputs().first().unwrap().outpoint.clone();
 
@@ -5255,9 +4934,7 @@ mod tests {
 
         let leader = ledger.expected_leader_for_next_block().unwrap();
         let wallet = wallet_for_address(&finalizers, &leader);
-        let filler_burn = ledger
-            .build_burn(wallet, MIN_MINE_REQUIRED_BURN, 0)
-            .unwrap();
+        let filler_burn = ledger.build_burn(wallet, TEST_BURN_AMOUNT, 0).unwrap();
         ledger.submit_transaction(filler_burn).unwrap();
         let block = ledger
             .prepare_next_block(wallet.address(), ledger.tip().timestamp_ms + 1)
@@ -5274,47 +4951,20 @@ mod tests {
     }
 
     #[test]
-    fn block_with_mine_action_requires_enough_burn_amount() {
-        let alice = Wallet::from_seed("mine-required-burn-block-alice");
+    fn block_selection_includes_mine_action_after_required_block_burn() {
+        let alice = Wallet::from_seed("mine-fixed-reward-select-alice");
         let mut ledger = ledger_with_allocation(&alice, 10 * MICRO_IUNA);
 
-        let burn = ledger
-            .build_burn(&alice, MIN_MINE_REQUIRED_BURN, 0)
-            .unwrap();
-        ledger.submit_transaction(burn.clone()).unwrap();
-        let mine = ledger
-            .build_mine_with_required_burn(alice.address(), MAX_MINE_REQUIRED_BURN)
-            .unwrap();
-        let mut prepared = ledger.prepare_next_block(alice.address(), 1).unwrap();
-        prepared.reward = prepared.reward.checked_add(mine.fee()).unwrap();
-        prepared.transactions.push(mine);
-        let vdf_output = run_vdf(prepared.vdf_seed(), prepared.vdf_rounds());
-        let block = prepared.finish(&alice, vdf_output);
-
-        let error = ledger.apply_block(block).unwrap_err();
-
-        assert!(format!("{error:#}").contains("requires"));
-    }
-
-    #[test]
-    fn block_selection_includes_mine_action_when_cumulative_burns_meet_requirement() {
-        let alice = Wallet::from_seed("mine-cumulative-burn-alice");
-        let mut ledger = ledger_with_allocation(&alice, 10 * MICRO_IUNA);
-
-        for _ in 0..2 {
-            let burn = ledger.build_burn(&alice, MICRO_IUNA / 2, 0).unwrap();
-            ledger.submit_transaction(burn).unwrap();
-        }
-        let mine = ledger
-            .build_mine_with_required_burn(alice.address(), MICRO_IUNA)
-            .unwrap();
+        let burn = ledger.build_burn(&alice, TEST_BURN_AMOUNT, 0).unwrap();
+        ledger.submit_transaction(burn).unwrap();
+        let mine = ledger.build_mine(alice.address()).unwrap();
         ledger.submit_transaction(mine.clone()).unwrap();
 
         let block = ledger.mine_next_block(&alice, 1).unwrap();
 
         assert_eq!(
             block.transactions.iter().filter(|tx| tx.is_burn()).count(),
-            2
+            1
         );
         assert!(
             block
@@ -5346,45 +4996,12 @@ mod tests {
     }
 
     #[test]
-    fn block_selection_keeps_mine_action_pending_when_required_burn_is_not_met() {
-        let alice = Wallet::from_seed("mine-required-burn-pending-alice");
-        let mut ledger = ledger_with_allocation(&alice, 10 * MICRO_IUNA);
-
-        let burn = ledger
-            .build_burn(&alice, MIN_MINE_REQUIRED_BURN, 0)
-            .unwrap();
-        ledger.submit_transaction(burn).unwrap();
-        let mine = ledger
-            .build_mine_with_required_burn(alice.address(), MAX_MINE_REQUIRED_BURN)
-            .unwrap();
-        ledger.submit_transaction(mine.clone()).unwrap();
-
-        let block = ledger.mine_next_block(&alice, 1).unwrap();
-
-        assert!(block.transactions.iter().any(Transaction::is_burn));
-        assert!(
-            !block
-                .transactions
-                .iter()
-                .any(|tx| tx.signature() == mine.signature())
-        );
-        assert!(
-            ledger
-                .pending()
-                .iter()
-                .any(|tx| tx.signature() == mine.signature())
-        );
-    }
-
-    #[test]
     fn pending_mine_outputs_are_not_spendable_until_confirmed() {
         let alice = Wallet::from_seed("pending-mine-spend-alice");
         let bob = Wallet::from_seed("pending-mine-spend-bob");
         let mut ledger = ledger_with_allocation(&alice, 10 * MICRO_IUNA);
 
-        let mine = ledger
-            .build_mine_with_required_burn(alice.address(), MIN_MINE_REQUIRED_BURN)
-            .unwrap();
+        let mine = ledger.build_mine(alice.address()).unwrap();
         let mine_outpoint = OutPoint {
             txid: mine.signature().to_string(),
             index: 0,
@@ -5402,16 +5019,14 @@ mod tests {
             .build_transfer_with_inputs(
                 &alice,
                 bob.address(),
-                MIN_MINE_REQUIRED_BURN,
+                TEST_BURN_AMOUNT,
                 0,
                 std::slice::from_ref(&mine_outpoint),
             )
             .unwrap_err();
         assert!(format!("{pending_error:#}").contains("not spendable"));
 
-        let burn = ledger
-            .build_burn(&alice, MIN_MINE_REQUIRED_BURN, 0)
-            .unwrap();
+        let burn = ledger.build_burn(&alice, TEST_BURN_AMOUNT, 0).unwrap();
         ledger.submit_transaction(burn).unwrap();
         let block = ledger.mine_next_block(&alice, 1).unwrap();
         assert!(
@@ -5433,7 +5048,7 @@ mod tests {
             .build_transfer_with_inputs(
                 &alice,
                 bob.address(),
-                MIN_MINE_REQUIRED_BURN,
+                TEST_BURN_AMOUNT,
                 0,
                 std::slice::from_ref(&mine_outpoint),
             )
@@ -5445,18 +5060,14 @@ mod tests {
         let alice = Wallet::from_seed("pending-mine-burn-alice");
         let mut ledger = ledger_with_allocation(&alice, 10 * MICRO_IUNA);
 
-        let mine = ledger
-            .build_mine_with_required_burn(alice.address(), MIN_MINE_REQUIRED_BURN)
-            .unwrap();
+        let mine = ledger.build_mine(alice.address()).unwrap();
         let mine_outpoint = OutPoint {
             txid: mine.signature().to_string(),
             index: 0,
         };
         ledger.submit_transaction(mine).unwrap();
 
-        let burn = ledger
-            .build_burn(&alice, MIN_MINE_REQUIRED_BURN, 0)
-            .unwrap();
+        let burn = ledger.build_burn(&alice, TEST_BURN_AMOUNT, 0).unwrap();
 
         let Transaction::Burn { inputs, .. } = &burn else {
             panic!("expected burn transaction");
@@ -5577,13 +5188,7 @@ mod tests {
         let anchor = ledger.tip().hash.clone();
         let difficulty_bits = ledger.current_mine_difficulty_bits();
         let template = ledger
-            .stratum_mine_template(
-                alice.address(),
-                MINE_FINALIZER_FEE,
-                anchor,
-                1,
-                difficulty_bits,
-            )
+            .stratum_mine_template(alice.address(), anchor, 1, difficulty_bits)
             .unwrap();
 
         let mut accepted = None;
@@ -5623,13 +5228,7 @@ mod tests {
 
         for salt in [1, 2] {
             let template = ledger
-                .stratum_mine_template(
-                    alice.address(),
-                    MINE_FINALIZER_FEE,
-                    anchor.clone(),
-                    salt,
-                    difficulty_bits,
-                )
+                .stratum_mine_template(alice.address(), anchor.clone(), salt, difficulty_bits)
                 .unwrap();
             let mut accepted = None;
             for nonce in 0_u32..50_000 {
