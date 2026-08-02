@@ -89,10 +89,10 @@ window.iunaApp = function iunaApp() {
     newBlockTimer: null,
     blockPageSize: 20,
     datasetPageSize: 25,
-    walletTxPage: { offset: 0, total: 0, hasMore: true, loading: false },
-    walletUtxoPage: { offset: 0, total: 0, hasMore: true, loading: false },
-    mempoolPage: { offset: 0, total: 0, hasMore: true, loading: false },
-    peerPage: { offset: 0, total: 0, hasMore: true, loading: false },
+    walletTxPage: { offset: 0, total: 0, hasMore: true, loading: false, backgroundLoading: false },
+    walletUtxoPage: { offset: 0, total: 0, hasMore: true, loading: false, backgroundLoading: false },
+    mempoolPage: { offset: 0, total: 0, hasMore: true, loading: false, backgroundLoading: false },
+    peerPage: { offset: 0, total: 0, hasMore: true, loading: false, backgroundLoading: false },
 
     init() {
       this.bootstrap();
@@ -119,7 +119,7 @@ window.iunaApp = function iunaApp() {
       await this.refresh();
       this.checkLatestRelease();
       if (!this.pollHandle) {
-        this.pollHandle = setInterval(() => this.refresh(), 5000);
+        this.pollHandle = setInterval(() => this.refresh({ silent: true }), 5000);
       }
     },
 
@@ -509,7 +509,7 @@ window.iunaApp = function iunaApp() {
       }
     },
 
-    async refresh() {
+    async refresh(options = {}) {
       try {
         const [config, status, blocks, p2pMetrics, blockchainMetrics, networkHealth] = await Promise.all([
           this.fetchJson("/api/config"),
@@ -520,10 +520,10 @@ window.iunaApp = function iunaApp() {
           this.fetchJson("/api/network/health"),
         ]);
         await Promise.all([
-          this.refreshPagedDataset("walletTx"),
-          this.refreshPagedDataset("walletUtxo"),
-          this.refreshPagedDataset("mempool"),
-          this.refreshPagedDataset("peer"),
+          this.refreshPagedDataset("walletTx", { silent: options.silent === true }),
+          this.refreshPagedDataset("walletUtxo", { silent: options.silent === true }),
+          this.refreshPagedDataset("mempool", { silent: options.silent === true }),
+          this.refreshPagedDataset("peer", { silent: options.silent === true }),
         ]);
         this.config = config;
         this.syncConfigState();
@@ -599,25 +599,36 @@ window.iunaApp = function iunaApp() {
       const config = this.datasetConfig(kind);
       if (!config) return;
       this[config.items] = [];
-      Object.assign(this[config.page], { offset: 0, total: 0, hasMore: true, loading: false });
+      Object.assign(this[config.page], {
+        offset: 0,
+        total: 0,
+        hasMore: true,
+        loading: false,
+        backgroundLoading: false,
+      });
       await this.refreshPagedDataset(kind);
     },
 
-    async refreshPagedDataset(kind) {
+    async refreshPagedDataset(kind, options = {}) {
       const config = this.datasetConfig(kind);
       if (!config) return;
       const page = this[config.page];
-      if (page.loading) return;
+      if (page.loading || page.backgroundLoading) return;
       const currentLength = this[config.items].length;
       const limit = Math.max(this.datasetPageSize, currentLength || 0);
-      await this.loadPagedDataset(kind, { offset: 0, limit, replace: true });
+      await this.loadPagedDataset(kind, {
+        offset: 0,
+        limit,
+        replace: true,
+        silent: options.silent === true,
+      });
     },
 
     async loadNextPage(kind) {
       const config = this.datasetConfig(kind);
       if (!config) return;
       const page = this[config.page];
-      if (page.loading || !page.hasMore) return;
+      if (page.loading || page.backgroundLoading || !page.hasMore) return;
       await this.loadPagedDataset(kind, {
         offset: page.offset ?? this[config.items].length,
         limit: this.datasetPageSize,
@@ -628,7 +639,8 @@ window.iunaApp = function iunaApp() {
     async loadPagedDataset(kind, options) {
       const config = this.datasetConfig(kind);
       const page = this[config.page];
-      page.loading = true;
+      const loadingKey = options.silent === true ? "backgroundLoading" : "loading";
+      page[loadingKey] = true;
       try {
         const payload = await this.fetchJson(
           this.paginatedPath(config.path(), options.offset, options.limit)
@@ -647,7 +659,7 @@ window.iunaApp = function iunaApp() {
       } catch (error) {
         this.showFlash(error.message, "error");
       } finally {
-        page.loading = false;
+        page[loadingKey] = false;
       }
     },
 
