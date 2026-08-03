@@ -43,7 +43,7 @@ For each block height, eligible tickets are ranked:
 
 The selected finalizer must prove ownership of the selected ticket, respect its rank time slot, and run the required VDF work. A block is valid only if the finalizer matches its ranked ticket, carries the correct leader proof, has a valid timestamp for its rank, includes a valid VDF output, and follows the transaction selection rules.
 
-Every normal block must include at least one burn transaction. Transaction fees normally go to the block finalizer, except claimed burn fees can be split between the finalizer and claim attesters.
+Every normal block must include at least one burn transaction. Transaction fees go to the block finalizer.
 
 ## VDF Timing
 
@@ -112,40 +112,17 @@ This keeps issuance separate from finalization. PoW miners compete to create min
 
 The central censorship risk is simple: what if a finalizer only includes its own burns and ignores everyone else's burns?
 
-iuna handles this with burn claims.
+The current devnet protocol does not yet have a consensus-level burn inclusion fairness mechanism. Nodes gossip burn transactions through the normal mempool, blocks must include at least one burn, and finalizers earn the fees of the transactions they include. That gives finalizers a direct economic reason to include third-party burns, but it does not make censorship impossible.
 
-When recent finalizers see a valid burn in the mempool, they can sign a `BurnSeen` attestation. A burner can package the burn plus enough recent-finalizer attestations into a `BurnClaim`.
-
-A burn claim is valid only when:
-
-- it references a valid burn transaction;
-- the burn is still unconfirmed;
-- the burn can be applied to the current UTXO set;
-- the attestations are from recent finalizers;
-- the attestations match the finalizer's recent block height and hash;
-- enough unique recent finalizers signed it.
-
-The current quorum target is `3` recent finalizers, capped by however many unique recent finalizers exist. Attestations are taken from the last `10` blocks.
-
-Once a valid burn claim is included, the claimed burn becomes consensus-required. Blocks after the claim must include that burn within the inclusion window. On the current devnet, that window is `3` blocks. A block that omits a due claimed burn is invalid.
-
-Burn fees also become the incentive for escalation:
-
-- If a burn is included without an active claim and without a valid claim for it in the same block, its fee goes to the block finalizer.
-- A `BurnClaim` does not carry its own fee; it turns the original burn fee into the bounty.
-- If a burn is included while a claim for it is active, or in the same block as a valid claim for it, `50%` of its fee goes to the block finalizer and `50%` is split evenly across the unique recent finalizers that signed the claim's `BurnSeen` attestations.
-- Remainders from integer division stay deterministic: the finalizer keeps the remainder from the 50/50 split, and any attester-share remainder is assigned by sorted attester address.
-
-This does not make censorship impossible. A fully partitioned network or a cartel that controls enough recent finalizers can still cause trouble. But it changes the normal case: if independent finalizers have seen a burn, later finalizers cannot simply ignore it without producing invalid blocks.
+This is an active protocol-design area. A production-grade solution likely needs stronger mempool or transaction ordering rules, for example a blinded mempool or commit-reveal style mechanism where finalizers cannot cheaply distinguish burns from other fee-paying transactions before committing to inclusion.
 
 ## Block Selection
 
 When a node builds a block, it selects transactions in this order:
 
-1. Include due claimed burns first.
-2. Ensure the block has at least one burn.
-3. For recovery blocks, ensure at least one burn is from the recovery finalizer.
-4. Fill remaining space with valid transactions ordered by fee rate.
+1. Ensure the block has at least one burn.
+2. For recovery blocks, ensure at least one burn is from the recovery finalizer.
+3. Fill remaining space with valid transactions ordered by fee rate.
 
 Blocks are bounded by transaction count and serialized byte size. The current devnet maximum block size is `100,000` bytes.
 

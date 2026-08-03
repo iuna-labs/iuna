@@ -172,17 +172,11 @@ fn expected_confirmed_supply(snapshot: &ChainSnapshot) -> Amount {
                         .checked_add(MINE_REWARD)
                         .expect("mine output does not overflow supply");
                 }
-                Transaction::BurnClaim { .. } => {}
             }
         }
         supply = supply
             .checked_add(block.reward)
             .expect("block reward does not overflow supply");
-        for share in &block.fee_shares {
-            supply = supply
-                .checked_add(share.amount)
-                .expect("fee share does not overflow supply");
-        }
     }
 
     supply
@@ -221,19 +215,8 @@ fn reference_balances(snapshot: &ChainSnapshot) -> BTreeMap<String, Amount> {
                 .expect("reference block fees do not overflow");
         }
 
-        let fee_shares = block.fee_shares.iter().fold(0_u64, |total, share| {
-            total
-                .checked_add(share.amount)
-                .expect("reference fee shares do not overflow")
-        });
         if block.height > 0 {
-            assert_eq!(
-                block
-                    .reward
-                    .checked_add(fee_shares)
-                    .expect("reference reward and fee shares do not overflow"),
-                block_fees
-            );
+            assert_eq!(block.reward, block_fees);
         }
         if block.reward > 0 {
             let replaced = utxos.insert(
@@ -247,19 +230,6 @@ fn reference_balances(snapshot: &ChainSnapshot) -> BTreeMap<String, Amount> {
                 },
             );
             assert!(replaced.is_none(), "duplicate reference reward output");
-        }
-        for (index, share) in block.fee_shares.iter().enumerate() {
-            let replaced = utxos.insert(
-                OutPoint {
-                    txid: block.hash.clone(),
-                    index: u32::MAX - 1 - index as u32,
-                },
-                TxOutput {
-                    address: share.address.clone(),
-                    amount: share.amount,
-                },
-            );
-            assert!(replaced.is_none(), "duplicate reference fee share output");
         }
     }
 
@@ -325,9 +295,7 @@ fn apply_reference_transaction(
     });
     let burn_amount = match transaction {
         Transaction::Burn { amount, .. } => *amount,
-        Transaction::Transfer { .. } | Transaction::Mine { .. } | Transaction::BurnClaim { .. } => {
-            0
-        }
+        Transaction::Transfer { .. } | Transaction::Mine { .. } => 0,
     };
     let required = output_total
         .checked_add(transaction.fee())
@@ -359,7 +327,7 @@ fn insert_reference_outputs(
 fn reference_inputs(transaction: &Transaction) -> &[TxInput] {
     match transaction {
         Transaction::Transfer { inputs, .. } | Transaction::Burn { inputs, .. } => inputs,
-        Transaction::Mine { .. } | Transaction::BurnClaim { .. } => &[],
+        Transaction::Mine { .. } => &[],
     }
 }
 
@@ -371,7 +339,6 @@ fn reference_outputs(transaction: &Transaction) -> Vec<TxOutput> {
             address: recipient.clone(),
             amount: MINE_REWARD,
         }],
-        Transaction::BurnClaim { .. } => Vec::new(),
     }
 }
 
@@ -911,8 +878,7 @@ fn generated_snapshot_tampering_is_rejected() {
             match transaction {
                 Transaction::Transfer { signature, .. }
                 | Transaction::Burn { signature, .. }
-                | Transaction::Mine { signature, .. }
-                | Transaction::BurnClaim { signature, .. } => signature.push_str("00"),
+                | Transaction::Mine { signature, .. } => signature.push_str("00"),
             }
         }
         assert!(Ledger::from_snapshot(mutated_transaction).is_err());

@@ -33,7 +33,7 @@ use crate::{
         FeeEstimate, NodeStatus, PeerDirection, PeerInfo, SharedNode, SharedPeerBook, StratumStatus,
     },
     domain::{
-        Amount, Block, BurnLeaderRank, FeeShare, Ledger, MINE_FINALIZER_FEE, MINE_REWARD, OutPoint,
+        Amount, Block, BurnLeaderRank, Ledger, MINE_FINALIZER_FEE, MINE_REWARD, OutPoint,
         Transaction, TxInput, TxOutput, hex_hash,
     },
 };
@@ -242,7 +242,6 @@ impl WalletTransactionFilters {
             Transaction::Transfer { .. } => self.transfer,
             Transaction::Mine { .. } => self.mine,
             Transaction::Burn { .. } => self.burn,
-            Transaction::BurnClaim { .. } => self.burn,
         }
     }
 }
@@ -276,7 +275,6 @@ struct MetricsResponse {
 #[serde(rename_all = "camelCase")]
 struct MetricsChart {
     id: &'static str,
-    section: &'static str,
     title: &'static str,
     unit: &'static str,
     value_kind: MetricsValueKind,
@@ -356,7 +354,6 @@ struct UiBlock {
     finalizer_mode: crate::domain::FinalizerMode,
     finalizer_rank: u32,
     reward: Amount,
-    fee_shares: Vec<FeeShare>,
     total_fees: Amount,
     vdf_rounds: u64,
     vdf_output: String,
@@ -1250,7 +1247,6 @@ fn metrics_response(enabled: bool, rows: Vec<BlockMetricRow>) -> MetricsResponse
         charts: vec![
             metrics_chart(
                 "block-time",
-                "chain",
                 "Time per block",
                 "s",
                 MetricsValueKind::Seconds,
@@ -1263,7 +1259,6 @@ fn metrics_response(enabled: bool, rows: Vec<BlockMetricRow>) -> MetricsResponse
             ),
             metrics_chart(
                 "difficulty",
-                "chain",
                 "Difficulty",
                 "bits",
                 MetricsValueKind::Number,
@@ -1272,7 +1267,6 @@ fn metrics_response(enabled: bool, rows: Vec<BlockMetricRow>) -> MetricsResponse
             ),
             metrics_chart(
                 "supply",
-                "chain",
                 "IUNA in circulation",
                 "IUNA",
                 MetricsValueKind::Iuna,
@@ -1281,7 +1275,6 @@ fn metrics_response(enabled: bool, rows: Vec<BlockMetricRow>) -> MetricsResponse
             ),
             metrics_chart(
                 "transactions",
-                "chain",
                 "Transactions",
                 "tx",
                 MetricsValueKind::Number,
@@ -1290,7 +1283,6 @@ fn metrics_response(enabled: bool, rows: Vec<BlockMetricRow>) -> MetricsResponse
             ),
             metrics_chart(
                 "burn-count",
-                "chain",
                 "Burn transactions",
                 "burns",
                 MetricsValueKind::Number,
@@ -1299,7 +1291,6 @@ fn metrics_response(enabled: bool, rows: Vec<BlockMetricRow>) -> MetricsResponse
             ),
             metrics_chart(
                 "burn-amount",
-                "chain",
                 "Burn amount",
                 "IUNA",
                 MetricsValueKind::Iuna,
@@ -1308,7 +1299,6 @@ fn metrics_response(enabled: bool, rows: Vec<BlockMetricRow>) -> MetricsResponse
             ),
             metrics_chart(
                 "total-burn",
-                "chain",
                 "Total burn",
                 "IUNA",
                 MetricsValueKind::Iuna,
@@ -1317,7 +1307,6 @@ fn metrics_response(enabled: bool, rows: Vec<BlockMetricRow>) -> MetricsResponse
             ),
             metrics_chart(
                 "fees",
-                "chain",
                 "Fees",
                 "IUNA",
                 MetricsValueKind::Iuna,
@@ -1326,7 +1315,6 @@ fn metrics_response(enabled: bool, rows: Vec<BlockMetricRow>) -> MetricsResponse
             ),
             metrics_chart(
                 "mine-actions",
-                "chain",
                 "Mine actions",
                 "mine",
                 MetricsValueKind::Number,
@@ -1335,39 +1323,11 @@ fn metrics_response(enabled: bool, rows: Vec<BlockMetricRow>) -> MetricsResponse
             ),
             metrics_chart(
                 "vdf-rounds",
-                "chain",
                 "VDF rounds",
                 "rounds",
                 MetricsValueKind::Number,
                 &rows,
                 |row| (row.vdf_rounds > 0).then_some(row.vdf_rounds as f64),
-            ),
-            metrics_chart(
-                "burn-claims",
-                "burnClaims",
-                "Burn claims",
-                "claims",
-                MetricsValueKind::Number,
-                &rows,
-                |row| Some(row.burn_claim_count as f64),
-            ),
-            metrics_chart(
-                "burn-claim-payouts",
-                "burnClaims",
-                "Claim payouts",
-                "outputs",
-                MetricsValueKind::Number,
-                &rows,
-                |row| Some(row.burn_claim_fee_share_count as f64),
-            ),
-            metrics_chart(
-                "burn-claim-payout-amount",
-                "burnClaims",
-                "Claim payout amount",
-                "IUNA",
-                MetricsValueKind::Iuna,
-                &rows,
-                |row| Some(micro_iuna_as_iuna(row.burn_claim_fee_share_amount)),
             ),
         ],
     }
@@ -1375,7 +1335,6 @@ fn metrics_response(enabled: bool, rows: Vec<BlockMetricRow>) -> MetricsResponse
 
 fn metrics_chart(
     id: &'static str,
-    section: &'static str,
     title: &'static str,
     unit: &'static str,
     value_kind: MetricsValueKind,
@@ -1384,7 +1343,6 @@ fn metrics_chart(
 ) -> MetricsChart {
     MetricsChart {
         id,
-        section,
         title,
         unit,
         value_kind,
@@ -1725,11 +1683,6 @@ fn ui_block(
         .get(&block.hash)
         .cloned()
         .unwrap_or_default();
-    let total_fees = block
-        .fee_shares
-        .iter()
-        .try_fold(block.reward, |total, share| total.checked_add(share.amount))
-        .unwrap_or(u64::MAX);
     UiBlock {
         height: block.height,
         prev_hash: block.prev_hash,
@@ -1738,8 +1691,7 @@ fn ui_block(
         finalizer_mode: block.finalizer_mode,
         finalizer_rank: block.finalizer_rank,
         reward: block.reward,
-        fee_shares: block.fee_shares.clone(),
-        total_fees,
+        total_fees: block.reward,
         vdf_rounds: block.vdf_rounds,
         vdf_output: block.vdf_output,
         leader_proof: block.leader_proof,
@@ -1819,22 +1771,6 @@ fn ui_transaction(
             proof_bits: Some(proof_bits(signature)),
             proof_hash: Some(signature.clone()),
         },
-        Transaction::BurnClaim {
-            burn, signature, ..
-        } => UiTransaction {
-            kind: "burn_claim",
-            from: transaction.sender().to_string(),
-            to: None,
-            amount: burn.amount(),
-            fee: 0,
-            inputs: Vec::new(),
-            outputs: Vec::new(),
-            change: Vec::new(),
-            signature: signature.clone(),
-            difficulty_bits: None,
-            proof_bits: None,
-            proof_hash: None,
-        },
     }
 }
 
@@ -1913,15 +1849,6 @@ fn known_output_index(
                 },
             );
         }
-        for (index, share) in block.fee_shares.iter().enumerate() {
-            outputs.insert(
-                fee_share_outpoint(&block.hash, index),
-                TxOutput {
-                    address: share.address.clone(),
-                    amount: share.amount,
-                },
-            );
-        }
     }
     for transaction in pending {
         index_transaction_outputs(&mut outputs, transaction);
@@ -1940,7 +1867,6 @@ fn index_transaction_outputs(
             address: recipient.clone(),
             amount: MINE_REWARD,
         }],
-        Transaction::BurnClaim { .. } => Vec::new(),
     };
     for (index, output) in created_outputs.iter().enumerate() {
         outputs.insert(
@@ -1964,13 +1890,6 @@ fn reward_outpoint(block_hash: &str) -> OutPoint {
     OutPoint {
         txid: block_hash.to_string(),
         index: u32::MAX,
-    }
-}
-
-fn fee_share_outpoint(block_hash: &str, index: usize) -> OutPoint {
-    OutPoint {
-        txid: block_hash.to_string(),
-        index: u32::MAX - 1 - index as u32,
     }
 }
 
@@ -2696,8 +2615,6 @@ const INDEX_HTML: &str = r#"<!doctype html>
     .metrics-head h2 { margin: 0; }
     .metrics-range { flex: 0 0 auto; }
     .metrics-range button { padding: 5px 9px; font-size: 12px; white-space: nowrap; }
-    .metrics-section-head { display: flex; align-items: center; justify-content: space-between; gap: 10px; padding-top: 4px; border-top: 1px solid #2a3035; }
-    .metrics-section-head h3 { margin: 0; color: #e8edf0; font-size: 15px; font-weight: 850; }
     .metrics-summary { display: grid; grid-template-columns: repeat(auto-fit, minmax(150px, 1fr)); gap: 10px; }
     .metrics-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(min(100%, 430px), 1fr)); gap: 12px; }
     .metric-chart-card { display: grid; gap: 10px; min-width: 0; border: 1px solid #2a3035; border-radius: 8px; padding: 12px; background: #181b1f; }
@@ -2931,7 +2848,7 @@ const INDEX_HTML: &str = r#"<!doctype html>
       .block-card { flex-basis: 108px; }
     }
   </style>
-  <script defer src="/assets/iuna-ui.js?v=77"></script>
+  <script defer src="/assets/iuna-ui.js?v=78"></script>
   <script defer src="/assets/alpine.min.js"></script>
 </head>
 <body x-data="iunaApp()" x-init="init()" @keydown.window.escape="closeModals()" x-cloak>
@@ -3425,53 +3342,7 @@ const INDEX_HTML: &str = r#"<!doctype html>
         </div>
         <div class="metrics-empty" x-show="metricsCharts().length === 0">No metrics collected yet</div>
         <div class="metrics-grid">
-          <template x-for="chart in metricsChainCharts()" :key="chart.id">
-            <article class="metric-chart-card">
-              <div class="metric-chart-head">
-                <h3 class="metric-chart-title" x-text="chart.title"></h3>
-                <div class="metric-chart-value" x-text="metricLatestValueLabel(chart)"></div>
-              </div>
-              <div class="metric-chart-frame">
-                <div class="metric-chart-y-axis">
-                  <template x-for="tick in metricYAxisTicks(chart)" :key="`${chart.id}-y-${tick}`">
-                    <span class="metric-chart-axis-label" :style="metricYAxisLabelStyle(chart, tick)" x-text="metricAxisValueLabel(chart, tick)"></span>
-                  </template>
-                </div>
-                <div class="metric-chart-plot" @mousemove="setMetricHoverFromPlot(chart, $event)" @mouseleave="clearMetricHover(chart)">
-                  <svg class="metric-chart-svg" viewBox="0 0 300 148" preserveAspectRatio="none" role="img" :aria-label="chart.title">
-                    <path class="metric-chart-gridline" :d="metricGridPath(chart)"></path>
-                    <line class="metric-chart-axis" x1="4" y1="8" x2="4" y2="132"></line>
-                    <line class="metric-chart-axis" x1="4" y1="132" x2="296" y2="132"></line>
-                    <polyline class="metric-chart-line" :points="metricChartPoints(chart)"></polyline>
-                  </svg>
-                  <div class="metric-chart-points">
-                    <template x-for="marker in metricChartPointMarkers(chart)" :key="`${chart.id}-point-${marker.height}`">
-                      <button class="metric-chart-point-hit" type="button" :class="{ 'is-active': metricHover?.chartId === chart.id && metricHover?.height === marker.height }" :style="metricPointStyle(marker)" :title="marker.label" @focus="setMetricHover(chart, marker)" @blur="clearMetricHover(chart)" :aria-label="marker.label"></button>
-                    </template>
-                  </div>
-                  <template x-if="metricHover?.chartId === chart.id">
-                    <div class="metric-chart-tooltip" :style="metricTooltipStyle(chart)" x-text="metricTooltipLabel(chart)"></div>
-                  </template>
-                </div>
-                <div class="metric-chart-x-axis">
-                  <template x-for="tick in metricXAxisTicks(chart)" :key="`${chart.id}-x-${tick}`">
-                    <span class="metric-chart-axis-label" :style="metricXAxisLabelStyle(chart, tick)" x-text="`#${tick}`"></span>
-                  </template>
-                </div>
-              </div>
-            </article>
-          </template>
-        </div>
-        <div class="metrics-section-head">
-          <h3>Burn claims</h3>
-        </div>
-        <div class="metrics-summary">
-          <div class="metric"><div class="label">Claims</div><div class="value" x-text="metricsLatest().burnClaimCount ?? '-'"></div></div>
-          <div class="metric"><div class="label">Payouts</div><div class="value" x-text="metricsLatest().burnClaimFeeShareCount ?? '-'"></div></div>
-          <div class="metric"><div class="label">Payout amount</div><div class="value" x-text="metricAmountLabel(metricsLatest().burnClaimFeeShareAmount)"></div></div>
-        </div>
-        <div class="metrics-grid">
-          <template x-for="chart in metricsBurnClaimCharts()" :key="chart.id">
+          <template x-for="chart in metricsCharts()" :key="chart.id">
             <article class="metric-chart-card">
               <div class="metric-chart-head">
                 <h3 class="metric-chart-title" x-text="chart.title"></h3>
@@ -4795,7 +4666,6 @@ mod tests {
             vdf_rounds: 0,
             vdf_output: "vdf".to_string(),
             leader_proof: None,
-            fee_shares: Vec::new(),
             transactions,
             hash: format!("hash-{height}"),
         }
@@ -4816,13 +4686,10 @@ mod tests {
             transaction_count: 0,
             transfer_count: 0,
             burn_count: 0,
-            burn_claim_count: 0,
             mine_count: 0,
             burned_amount: 0,
             total_burned_amount: 0,
             fees_amount: 0,
-            burn_claim_fee_share_count: 0,
-            burn_claim_fee_share_amount: 0,
             reward_amount: 0,
             vdf_rounds,
             finalizer_rank: 0,
@@ -4871,53 +4738,12 @@ mod tests {
     }
 
     #[test]
-    fn metrics_response_includes_burn_claim_charts() {
-        let mut row = metric_row(7, Some(600_000), 120);
-        row.burn_claim_count = 2;
-        row.burn_claim_fee_share_count = 3;
-        row.burn_claim_fee_share_amount = 4_500_000;
-        let response = super::metrics_response(true, vec![row]);
-
-        let burn_claims = response
-            .charts
-            .iter()
-            .find(|chart| chart.id == "burn-claims")
-            .expect("burn claim count chart should exist");
-        assert_eq!(burn_claims.section, "burnClaims");
-        assert_eq!(burn_claims.points[0].value, 2.0);
-
-        let payouts = response
-            .charts
-            .iter()
-            .find(|chart| chart.id == "burn-claim-payouts")
-            .expect("burn claim payout count chart should exist");
-        assert_eq!(payouts.section, "burnClaims");
-        assert_eq!(payouts.points[0].value, 3.0);
-
-        let payout_amount = response
-            .charts
-            .iter()
-            .find(|chart| chart.id == "burn-claim-payout-amount")
-            .expect("burn claim payout amount chart should exist");
-        assert_eq!(payout_amount.section, "burnClaims");
-        assert_eq!(payout_amount.points[0].value, 4.5);
-    }
-
-    #[test]
     fn metrics_screen_includes_block_range_filter() {
-        assert!(super::INDEX_HTML.contains("iuna-ui.js?v=77"));
+        assert!(super::INDEX_HTML.contains("iuna-ui.js?v=78"));
         assert!(super::INDEX_HTML.contains("aria-label=\"Metrics block range\""));
         assert!(super::INDEX_HTML.contains("setMetricsRange(100)"));
         assert!(super::INDEX_HTML.contains("setMetricsRange(1000)"));
         assert!(super::INDEX_HTML.contains("setMetricsRange('all')"));
-    }
-
-    #[test]
-    fn metrics_screen_includes_burn_claim_section() {
-        assert!(super::INDEX_HTML.contains("metricsBurnClaimCharts()"));
-        assert!(super::INDEX_HTML.contains("Burn claims</h3>"));
-        assert!(super::INDEX_HTML.contains("burnClaimCount"));
-        assert!(super::INDEX_HTML.contains("burnClaimFeeShareAmount"));
     }
 
     #[test]

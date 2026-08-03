@@ -13,10 +13,10 @@ use sha2::{Digest, Sha256};
 use tokio::sync::Mutex;
 
 use crate::domain::{
-    Amount, BURN_CLAIM_SEEN_WINDOW_BLOCKS, Block, BurnLeaderRank, BurnSeen, ChainSnapshot,
-    ChainStatus, DEFAULT_FEE_PER_BYTE, DEFAULT_TRANSACTION_FEE, Ledger, MAX_PENDING_TRANSACTIONS,
-    MINE_FINALIZER_FEE, OutPoint, PreparedBlock, StratumMineShare, StratumMineTemplate,
-    Transaction, TransactionSubmitOutcome, VDF_TARGET_BLOCK_MS, Wallet, hex_hash, run_vdf,
+    Amount, Block, BurnLeaderRank, ChainSnapshot, ChainStatus, DEFAULT_FEE_PER_BYTE,
+    DEFAULT_TRANSACTION_FEE, Ledger, MAX_PENDING_TRANSACTIONS, MINE_FINALIZER_FEE, OutPoint,
+    PreparedBlock, StratumMineShare, StratumMineTemplate, Transaction, TransactionSubmitOutcome,
+    VDF_TARGET_BLOCK_MS, Wallet, hex_hash, run_vdf,
 };
 
 pub type SharedNode = Arc<Mutex<NodeCore>>;
@@ -130,7 +130,6 @@ pub enum GossipEnvelope {
     Transactions {
         transactions: Vec<Transaction>,
     },
-    BurnSeen(BurnSeen),
     Block(Block),
     Blocks {
         blocks: Vec<Block>,
@@ -261,7 +260,6 @@ pub struct NodeCore {
     last_auto_pow_mine_anchor: Option<String>,
     last_auto_pow_mine_status: Option<String>,
     auto_pow_mine_cursor: Option<AutoPowMineCursor>,
-    burn_seen_pool: BTreeMap<String, BTreeMap<String, BurnSeen>>,
     outbox: Vec<GossipEnvelope>,
 }
 
@@ -347,7 +345,6 @@ impl NodeCore {
             last_auto_pow_mine_anchor: None,
             last_auto_pow_mine_status: None,
             auto_pow_mine_cursor: None,
-            burn_seen_pool: BTreeMap::new(),
             outbox: Vec::new(),
         }
     }
@@ -773,113 +770,8 @@ impl NodeCore {
         let outcome = self.ledger.submit_transaction_with_outcome(tx.clone())?;
         if outcome.added() {
             self.outbox.push(GossipEnvelope::Transaction(tx.clone()));
-            self.maybe_attest_burn(&tx)?;
-            self.try_submit_burn_claim(tx.signature())?;
         }
         Ok(outcome)
-    }
-
-    pub fn receive_burn_seen(&mut self, seen: BurnSeen) -> Result<()> {
-        seen.verify_signature()?;
-        let burn_signature = seen.burn_signature.clone();
-        if self.remember_burn_seen(seen.clone()) {
-            self.outbox.push(GossipEnvelope::BurnSeen(seen));
-        }
-        self.try_submit_burn_claim(&burn_signature)
-    }
-
-    fn maybe_attest_burn(&mut self, tx: &Transaction) -> Result<()> {
-        if !tx.is_burn() {
-            return Ok(());
-        }
-        let Ok(wallet) = self.wallet.unlocked() else {
-            return Ok(());
-        };
-        let Some((seen_height, seen_block_hash)) = self.recent_finalizer_block_for_wallet() else {
-            return Ok(());
-        };
-        let seen = wallet.burn_seen(tx.signature(), seen_height, seen_block_hash);
-        if !self.remember_burn_seen(seen.clone()) {
-            return Ok(());
-        }
-        self.outbox.push(GossipEnvelope::BurnSeen(seen));
-        Ok(())
-    }
-
-    fn remember_burn_seen(&mut self, seen: BurnSeen) -> bool {
-        let entry = self
-            .burn_seen_pool
-            .entry(seen.burn_signature.clone())
-            .or_default();
-        let should_store = entry
-            .get(&seen.signer)
-            .is_none_or(|existing| seen.seen_height > existing.seen_height);
-        if should_store {
-            entry.insert(seen.signer.clone(), seen);
-        }
-        should_store
-    }
-
-    fn attest_pending_burns(&mut self) -> Result<()> {
-        let burns = self
-            .ledger
-            .pending()
-            .iter()
-            .filter(|transaction| transaction.is_burn())
-            .cloned()
-            .collect::<Vec<_>>();
-        for burn in burns {
-            self.maybe_attest_burn(&burn)?;
-            self.try_submit_burn_claim(burn.signature())?;
-        }
-        Ok(())
-    }
-
-    fn recent_finalizer_block_for_wallet(&self) -> Option<(u64, String)> {
-        let address = self.wallet.address();
-        let tip_height = self.ledger.height();
-        self.ledger
-            .chain()
-            .iter()
-            .rev()
-            .find(|block| {
-                block.height > 0
-                    && block.miner == address
-                    && block.height.saturating_add(BURN_CLAIM_SEEN_WINDOW_BLOCKS) > tip_height
-            })
-            .map(|block| (block.height, block.hash.clone()))
-    }
-
-    fn try_submit_burn_claim(&mut self, burn_signature: &str) -> Result<()> {
-        let Some(burn) = self.ledger.transaction_by_signature(burn_signature) else {
-            return Ok(());
-        };
-        if !burn.is_burn() {
-            return Ok(());
-        }
-        let tip_height = self.ledger.height();
-        let Some(seen_by_signer) = self.burn_seen_pool.get_mut(burn_signature) else {
-            return Ok(());
-        };
-        seen_by_signer.retain(|_, seen| {
-            seen.seen_height > 0
-                && seen.seen_height <= tip_height
-                && seen
-                    .seen_height
-                    .saturating_add(BURN_CLAIM_SEEN_WINDOW_BLOCKS)
-                    > tip_height
-        });
-        if seen_by_signer.is_empty() {
-            return Ok(());
-        }
-        let seen = seen_by_signer.values().cloned().collect::<Vec<_>>();
-        let Ok(claim) = self.ledger.build_burn_claim(burn, seen) else {
-            return Ok(());
-        };
-        if self.ledger.submit_transaction(claim.clone())? {
-            self.outbox.push(GossipEnvelope::Transaction(claim));
-        }
-        Ok(())
     }
 
     fn build_burn_with_fee_rate(
@@ -1255,7 +1147,6 @@ impl NodeCore {
             .mine_next_block(self.wallet.unlocked()?, timestamp_ms)?;
         self.ledger.apply_locally_mined_block(block.clone())?;
         self.outbox.push(GossipEnvelope::Block(block.clone()));
-        self.attest_pending_burns()?;
         Ok(block)
     }
 
@@ -1276,7 +1167,6 @@ impl NodeCore {
         let block = work.finish_at(self.wallet.unlocked()?, vdf_output, timestamp_ms);
         self.ledger.apply_locally_mined_block(block.clone())?;
         self.outbox.push(GossipEnvelope::Block(block.clone()));
-        self.attest_pending_burns()?;
         Ok(block)
     }
 
@@ -1300,13 +1190,11 @@ impl NodeCore {
                 }
                 Ok(())
             }
-            GossipEnvelope::BurnSeen(seen) => self.receive_burn_seen(seen),
             GossipEnvelope::Block(block) => {
                 let previous_height = self.ledger.height();
                 self.ledger.apply_block(block.clone())?;
                 if self.ledger.height() > previous_height {
                     self.outbox.push(GossipEnvelope::Block(block));
-                    self.attest_pending_burns()?;
                 }
                 Ok(())
             }
@@ -1322,7 +1210,6 @@ impl NodeCore {
                 for block in imported {
                     self.outbox.push(GossipEnvelope::Block(block));
                 }
-                self.attest_pending_burns()?;
                 Ok(())
             }
             GossipEnvelope::ChainSnapshot(snapshot) => self.import_chain_snapshot(snapshot),
@@ -1339,7 +1226,6 @@ impl NodeCore {
             .apply_preverified_block_at(block.clone(), now_ms)?;
         if self.ledger.height() > previous_height {
             self.outbox.push(GossipEnvelope::Block(block));
-            self.attest_pending_burns()?;
         }
         Ok(())
     }
@@ -1361,9 +1247,7 @@ impl NodeCore {
             self.last_auto_pow_mine_anchor = None;
             self.last_auto_pow_mine_status = None;
             self.auto_pow_mine_cursor = None;
-            self.burn_seen_pool.clear();
             self.enqueue_imported_blocks(previous_height);
-            self.attest_pending_burns()?;
         }
         Ok(())
     }
@@ -1384,9 +1268,7 @@ impl NodeCore {
         self.last_auto_pow_mine_anchor = None;
         self.last_auto_pow_mine_status = None;
         self.auto_pow_mine_cursor = None;
-        self.burn_seen_pool.clear();
         self.enqueue_imported_blocks(previous_height);
-        self.attest_pending_burns()?;
         Ok(true)
     }
 
@@ -1978,7 +1860,7 @@ mod tests {
         RECOVERY_BLOCK_DELAY_MS, Transaction, Wallet,
     };
 
-    use super::{GossipEnvelope, NodeConfig, NodeCore};
+    use super::{NodeConfig, NodeCore};
 
     #[test]
     fn same_height_verified_import_does_not_reset_auto_burn_guard() {
@@ -2224,41 +2106,6 @@ mod tests {
         let minimum_burn_fee = burn.economic_size_bytes() as u64 * 3;
         assert!(burn.fee() >= minimum_burn_fee);
     }
-
-    #[test]
-    fn recent_finalizer_gossips_burn_seen_and_claim_for_received_burn() {
-        let finalizer = Wallet::from_seed("burn-seen-node-finalizer");
-        let burner = Wallet::from_seed("burn-seen-node-burner");
-        let mut allocations = BTreeMap::new();
-        allocations.insert(finalizer.address().to_string(), 10 * MICRO_IUNA);
-        allocations.insert(burner.address().to_string(), 10 * MICRO_IUNA);
-        let mut ledger = Ledger::new_with_genesis_burns(
-            allocations,
-            vec![GenesisBurn::new(finalizer.address(), MICRO_IUNA)],
-            1,
-        )
-        .unwrap();
-        let finalizer_burn = ledger.build_burn(&finalizer, 1, 0).unwrap();
-        ledger.submit_transaction(finalizer_burn).unwrap();
-        let block = ledger.mine_next_block(&finalizer, 1).unwrap();
-        ledger.apply_locally_mined_block(block).unwrap();
-        let burn = ledger.build_burn(&burner, 1, 0).unwrap();
-        let burn_signature = burn.signature().to_string();
-        let mut node = NodeCore::from_ledger(finalizer, ledger, 0);
-
-        node.receive_transaction(burn).unwrap();
-        let outbox = node.drain_outbox();
-
-        assert!(outbox.iter().any(|envelope| matches!(
-            envelope,
-            GossipEnvelope::BurnSeen(seen) if seen.burn_signature == burn_signature
-        )));
-        assert!(outbox.iter().any(|envelope| matches!(
-            envelope,
-            GossipEnvelope::Transaction(Transaction::BurnClaim { burn, .. })
-                if burn.signature() == burn_signature
-        )));
-    }
 }
 
 #[derive(Debug, Default)]
@@ -2328,9 +2175,7 @@ impl InMemoryNetwork {
 fn receive_in_memory_envelope(node: &mut NodeCore, envelope: GossipEnvelope) -> Result<()> {
     let transaction_like = matches!(
         envelope,
-        GossipEnvelope::Transaction(_)
-            | GossipEnvelope::Transactions { .. }
-            | GossipEnvelope::BurnSeen(_)
+        GossipEnvelope::Transaction(_) | GossipEnvelope::Transactions { .. }
     );
     match node.receive(envelope) {
         Ok(()) => Ok(()),

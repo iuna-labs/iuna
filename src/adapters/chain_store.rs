@@ -30,13 +30,10 @@ CREATE TABLE IF NOT EXISTS block_metrics (
     transaction_count INTEGER NOT NULL,
     transfer_count INTEGER NOT NULL,
     burn_count INTEGER NOT NULL,
-    burn_claim_count INTEGER NOT NULL DEFAULT 0,
     mine_count INTEGER NOT NULL,
     burned_amount INTEGER NOT NULL,
     total_burned_amount INTEGER NOT NULL,
     fees_amount INTEGER NOT NULL,
-    burn_claim_fee_share_count INTEGER NOT NULL DEFAULT 0,
-    burn_claim_fee_share_amount INTEGER NOT NULL DEFAULT 0,
     reward_amount INTEGER NOT NULL,
     vdf_rounds INTEGER NOT NULL,
     finalizer_rank INTEGER NOT NULL
@@ -55,13 +52,10 @@ pub struct BlockMetricRow {
     pub transaction_count: u64,
     pub transfer_count: u64,
     pub burn_count: u64,
-    pub burn_claim_count: u64,
     pub mine_count: u64,
     pub burned_amount: Amount,
     pub total_burned_amount: Amount,
     pub fees_amount: Amount,
-    pub burn_claim_fee_share_count: u64,
-    pub burn_claim_fee_share_amount: Amount,
     pub reward_amount: Amount,
     pub vdf_rounds: u64,
     pub finalizer_rank: u32,
@@ -89,7 +83,6 @@ impl SqliteChainStore {
             connection
                 .execute_batch(SCHEMA)
                 .context("failed to initialize chain database schema")
-                .and_then(|_| ensure_block_metric_columns(connection))
         })?;
         Ok(store)
     }
@@ -192,9 +185,8 @@ ON CONFLICT(id) DO UPDATE SET
                     r#"
 SELECT height, block_hash, timestamp_ms, block_time_ms, mine_difficulty_bits,
        circulating_supply, transaction_count, transfer_count, burn_count,
-       burn_claim_count, mine_count, burned_amount, total_burned_amount, fees_amount,
-       burn_claim_fee_share_count, burn_claim_fee_share_amount, reward_amount, vdf_rounds,
-       finalizer_rank
+       mine_count, burned_amount, total_burned_amount, fees_amount, reward_amount,
+       vdf_rounds, finalizer_rank
 FROM block_metrics
 ORDER BY height ASC
 "#,
@@ -212,16 +204,13 @@ ORDER BY height ASC
                         transaction_count: row.get(6)?,
                         transfer_count: row.get(7)?,
                         burn_count: row.get(8)?,
-                        burn_claim_count: row.get(9)?,
-                        mine_count: row.get(10)?,
-                        burned_amount: row.get(11)?,
-                        total_burned_amount: row.get(12)?,
-                        fees_amount: row.get(13)?,
-                        burn_claim_fee_share_count: row.get(14)?,
-                        burn_claim_fee_share_amount: row.get(15)?,
-                        reward_amount: row.get(16)?,
-                        vdf_rounds: row.get(17)?,
-                        finalizer_rank: row.get(18)?,
+                        mine_count: row.get(9)?,
+                        burned_amount: row.get(10)?,
+                        total_burned_amount: row.get(11)?,
+                        fees_amount: row.get(12)?,
+                        reward_amount: row.get(13)?,
+                        vdf_rounds: row.get(14)?,
+                        finalizer_rank: row.get(15)?,
                     })
                 })
                 .context("failed to load block metrics")?;
@@ -259,32 +248,6 @@ PRAGMA synchronous = NORMAL;
     }
 }
 
-fn ensure_block_metric_columns(connection: &Connection) -> Result<()> {
-    let mut statement = connection
-        .prepare("PRAGMA table_info(block_metrics)")
-        .context("failed to inspect block metrics schema")?;
-    let columns = statement
-        .query_map([], |row| row.get::<_, String>(1))
-        .context("failed to read block metrics schema")?
-        .collect::<std::result::Result<std::collections::BTreeSet<_>, _>>()
-        .context("failed to collect block metrics columns")?;
-    for (name, definition) in [
-        ("burn_claim_count", "INTEGER NOT NULL DEFAULT 0"),
-        ("burn_claim_fee_share_count", "INTEGER NOT NULL DEFAULT 0"),
-        ("burn_claim_fee_share_amount", "INTEGER NOT NULL DEFAULT 0"),
-    ] {
-        if !columns.contains(name) {
-            connection
-                .execute(
-                    &format!("ALTER TABLE block_metrics ADD COLUMN {name} {definition}"),
-                    [],
-                )
-                .with_context(|| format!("failed to add block metrics column {name}"))?;
-        }
-    }
-    Ok(())
-}
-
 fn replace_metrics(
     transaction: &rusqlite::Transaction<'_>,
     metrics: &[BlockMetricRow],
@@ -296,10 +259,9 @@ fn replace_metrics(
                 r#"
 INSERT INTO block_metrics (
     height, block_hash, timestamp_ms, block_time_ms, mine_difficulty_bits,
-    circulating_supply, transaction_count, transfer_count, burn_count, burn_claim_count,
-    mine_count, burned_amount, total_burned_amount, fees_amount, burn_claim_fee_share_count,
-    burn_claim_fee_share_amount, reward_amount, vdf_rounds, finalizer_rank
-) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18, ?19)
+    circulating_supply, transaction_count, transfer_count, burn_count, mine_count,
+    burned_amount, total_burned_amount, fees_amount, reward_amount, vdf_rounds, finalizer_rank
+) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16)
 "#,
                 params![
                     metric.height,
@@ -311,13 +273,10 @@ INSERT INTO block_metrics (
                     metric.transaction_count,
                     metric.transfer_count,
                     metric.burn_count,
-                    metric.burn_claim_count,
                     metric.mine_count,
                     metric.burned_amount,
                     metric.total_burned_amount,
                     metric.fees_amount,
-                    metric.burn_claim_fee_share_count,
-                    metric.burn_claim_fee_share_amount,
                     metric.reward_amount,
                     metric.vdf_rounds,
                     metric.finalizer_rank,
@@ -354,18 +313,10 @@ fn metrics_from_snapshot(snapshot: &ChainSnapshot) -> Result<Vec<BlockMetricRow>
     for block in &snapshot.blocks {
         let mut transfer_count = 0_u64;
         let mut burn_count = 0_u64;
-        let mut burn_claim_count = 0_u64;
         let mut mine_count = 0_u64;
         let mut burned_amount = 0_u64;
         let mut mine_issued_amount = 0_u64;
         let mut fees_amount = 0_u64;
-        let burn_claim_fee_share_count = block.fee_shares.len() as u64;
-        let burn_claim_fee_share_amount =
-            block.fee_shares.iter().try_fold(0_u64, |total, share| {
-                total
-                    .checked_add(share.amount)
-                    .context("block metric burn claim fee shares overflow")
-            })?;
 
         for transaction in &block.transactions {
             fees_amount = fees_amount
@@ -386,7 +337,6 @@ fn metrics_from_snapshot(snapshot: &ChainSnapshot) -> Result<Vec<BlockMetricRow>
                         .and_then(|amount| amount.checked_add(transaction.fee()))
                         .context("block metric mine issuance overflow")?;
                 }
-                Transaction::BurnClaim { .. } => burn_claim_count += 1,
             }
         }
 
@@ -427,13 +377,10 @@ fn metrics_from_snapshot(snapshot: &ChainSnapshot) -> Result<Vec<BlockMetricRow>
             transaction_count: block.transactions.len() as u64,
             transfer_count,
             burn_count,
-            burn_claim_count,
             mine_count,
             burned_amount,
             total_burned_amount,
             fees_amount,
-            burn_claim_fee_share_count,
-            burn_claim_fee_share_amount,
             reward_amount: block.reward,
             vdf_rounds: block.vdf_rounds,
             finalizer_rank: block.finalizer_rank,
@@ -469,7 +416,6 @@ fn unix_ms() -> u64 {
 mod tests {
     use std::collections::BTreeMap;
 
-    use rusqlite::Connection;
     use tempfile::tempdir;
 
     use crate::domain::{BLOCK_REWARD, GenesisBurn, Ledger, Wallet};
@@ -535,67 +481,12 @@ mod tests {
 
         assert_eq!(metrics.last().unwrap().height, 1);
         assert_eq!(metrics.last().unwrap().burn_count, 1);
-        assert_eq!(metrics.last().unwrap().burn_claim_count, 0);
         assert_eq!(metrics.last().unwrap().burned_amount, 2);
         assert_eq!(metrics.last().unwrap().fees_amount, 1);
-        assert_eq!(metrics.last().unwrap().burn_claim_fee_share_count, 0);
-        assert_eq!(metrics.last().unwrap().burn_claim_fee_share_amount, 0);
         assert_eq!(metrics.last().unwrap().circulating_supply, BLOCK_REWARD + 7);
 
         store.clear_metrics().unwrap();
         assert!(store.load_metrics().unwrap().is_empty());
-    }
-
-    #[test]
-    fn sqlite_chain_store_migrates_burn_claim_metric_columns() {
-        let dir = tempdir().unwrap();
-        let path = dir.path().join("chain.sqlite3");
-        Connection::open(&path)
-            .unwrap()
-            .execute_batch(
-                r#"
-CREATE TABLE chain_snapshots (
-    id INTEGER PRIMARY KEY CHECK (id = 1),
-    height INTEGER NOT NULL,
-    tip_hash TEXT NOT NULL,
-    snapshot_json TEXT NOT NULL,
-    updated_at_ms INTEGER NOT NULL
-);
-CREATE TABLE block_metrics (
-    height INTEGER PRIMARY KEY,
-    block_hash TEXT NOT NULL,
-    timestamp_ms INTEGER NOT NULL,
-    block_time_ms INTEGER,
-    mine_difficulty_bits INTEGER NOT NULL,
-    circulating_supply INTEGER NOT NULL,
-    transaction_count INTEGER NOT NULL,
-    transfer_count INTEGER NOT NULL,
-    burn_count INTEGER NOT NULL,
-    mine_count INTEGER NOT NULL,
-    burned_amount INTEGER NOT NULL,
-    total_burned_amount INTEGER NOT NULL,
-    fees_amount INTEGER NOT NULL,
-    reward_amount INTEGER NOT NULL,
-    vdf_rounds INTEGER NOT NULL,
-    finalizer_rank INTEGER NOT NULL
-);
-INSERT INTO block_metrics (
-    height, block_hash, timestamp_ms, block_time_ms, mine_difficulty_bits,
-    circulating_supply, transaction_count, transfer_count, burn_count, mine_count,
-    burned_amount, total_burned_amount, fees_amount, reward_amount, vdf_rounds,
-    finalizer_rank
-) VALUES (1, 'hash', 1000, 500, 12, 100, 2, 0, 1, 0, 1, 1, 2, 2, 99, 0);
-"#,
-            )
-            .unwrap();
-
-        let store = SqliteChainStore::open(&path).unwrap();
-        let metrics = store.load_metrics().unwrap();
-
-        assert_eq!(metrics.len(), 1);
-        assert_eq!(metrics[0].burn_claim_count, 0);
-        assert_eq!(metrics[0].burn_claim_fee_share_count, 0);
-        assert_eq!(metrics[0].burn_claim_fee_share_amount, 0);
     }
 
     #[test]
@@ -619,13 +510,10 @@ INSERT INTO block_metrics (
                         transaction_count: 0,
                         transfer_count: 0,
                         burn_count: 0,
-                        burn_claim_count: 0,
                         mine_count: 0,
                         burned_amount: 0,
                         total_burned_amount: 0,
                         fees_amount: 0,
-                        burn_claim_fee_share_count: 0,
-                        burn_claim_fee_share_amount: 0,
                         reward_amount: 0,
                         vdf_rounds,
                         finalizer_rank: 0,
