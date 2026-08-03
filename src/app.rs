@@ -36,6 +36,8 @@ pub const PEER_MISBEHAVIOR_BAN_MS: u64 = 10 * 60 * 1_000;
 pub const PEER_CLOCK_OFFSET_ACCEPTANCE_MS: i64 = 10 * 60 * 1_000;
 const PEER_CLOCK_OFFSET_STALE_MS: u64 = 20 * 60 * 1_000;
 const AUTO_POW_NONCE_ATTEMPTS_PER_TICK: u64 = 8;
+const AUTO_BLINDED_BURN_EXPIRY_HEIGHTS: u64 = 20;
+const AUTO_PLAINTEXT_BURN_BEFORE_RECOVERY_MS: u64 = 60_000;
 static DEBUG_LOGGING: AtomicBool = AtomicBool::new(false);
 
 pub fn set_debug_logging(enabled: bool) {
@@ -413,6 +415,14 @@ impl NodeCore {
         self.ledger.pending().to_vec()
     }
 
+    pub fn pending_blinded_transactions(&self) -> Vec<BlindedTransaction> {
+        self.ledger.pending_blinded_transactions().to_vec()
+    }
+
+    pub fn pending_blinded_reveals(&self) -> Vec<BlindedReveal> {
+        self.ledger.pending_blinded_reveals().to_vec()
+    }
+
     pub fn mempool_inventory(&self, limit: usize) -> Vec<String> {
         let mut signatures = self
             .ledger
@@ -634,7 +644,7 @@ impl NodeCore {
         if was_disabled && enabled && amount > 0 {
             self.last_auto_burn_height = None;
         }
-        self.prepare_automatic_burn()
+        self.prepare_automatic_burn(now_ms())
     }
 
     pub fn set_pow_mining_enabled(&mut self, enabled: bool) {
@@ -996,7 +1006,7 @@ impl NodeCore {
             return plan;
         }
 
-        match self.prepare_automatic_burn() {
+        match self.prepare_automatic_burn(timestamp_ms) {
             Ok(tx) => plan.burned = tx,
             Err(error) => {
                 plan.skipped_reason = Some(format!("automatic burn failed: {error:#}"));
@@ -1079,7 +1089,7 @@ impl NodeCore {
             return plan;
         }
 
-        match self.prepare_automatic_burn() {
+        match self.prepare_automatic_burn(timestamp_ms) {
             Ok(tx) => plan.burned = tx,
             Err(error) => {
                 plan.skipped_reason = Some(format!("automatic burn failed: {error:#}"));
@@ -1194,7 +1204,7 @@ impl NodeCore {
         Ok(None)
     }
 
-    fn prepare_automatic_burn(&mut self) -> Result<Option<Transaction>> {
+    fn prepare_automatic_burn(&mut self, timestamp_ms: u64) -> Result<Option<Transaction>> {
         let current_height = self.ledger.status().height;
         if !self.automatic_mining_enabled {
             return Ok(None);
@@ -1238,11 +1248,30 @@ impl NodeCore {
             self.last_auto_burn_height = Some(current_height);
             return Ok(None);
         };
-        if self.ledger.submit_transaction(tx.clone())? {
-            self.outbox.push(GossipEnvelope::Transaction(tx.clone()));
+        if self.automatic_burn_needs_plaintext_anchor(timestamp_ms) {
+            if self.ledger.submit_transaction(tx.clone())? {
+                self.outbox.push(GossipEnvelope::Transaction(tx.clone()));
+            }
+        } else {
+            let built = self.ledger.build_blinded_burn(
+                self.wallet.unlocked()?,
+                tx.amount(),
+                tx.fee(),
+                current_height.saturating_add(AUTO_BLINDED_BURN_EXPIRY_HEIGHTS),
+            )?;
+            self.submit_owned_blinded_transaction(built)?;
         }
         self.last_auto_burn_height = Some(current_height);
         Ok(Some(tx))
+    }
+
+    fn automatic_burn_needs_plaintext_anchor(&self, timestamp_ms: u64) -> bool {
+        self.ledger
+            .expected_leader_for_next_block()
+            .is_none_or(|leader| leader == self.wallet.address())
+            || self.ledger.recovery_block_available_at(timestamp_ms)
+            || timestamp_ms.saturating_add(AUTO_PLAINTEXT_BURN_BEFORE_RECOVERY_MS)
+                >= self.ledger.recovery_block_min_timestamp()
     }
 
     pub fn mine_one_at(&mut self, timestamp_ms: u64) -> Result<Block> {
@@ -2309,6 +2338,93 @@ mod tests {
         assert!(outbox.iter().any(|envelope| matches!(
             envelope,
             GossipEnvelope::BlindedReveal(reveal) if reveal.commitment == blinded.commitment
+        )));
+    }
+
+    #[test]
+    fn automatic_non_leader_burn_is_queued_as_blinded() {
+        let alice = Wallet::from_seed("auto-blinded-burn-alice");
+        let bob = Wallet::from_seed("auto-blinded-burn-bob");
+        let finalizers = [alice.clone(), bob.clone()];
+        let mut allocations = BTreeMap::new();
+        allocations.insert(alice.address().to_string(), 10 * MICRO_IUNA);
+        allocations.insert(bob.address().to_string(), 10 * MICRO_IUNA);
+        let ledger = Ledger::new_with_genesis_burns(
+            allocations,
+            finalizers
+                .iter()
+                .map(|wallet| GenesisBurn::new(wallet.address(), MICRO_IUNA))
+                .collect(),
+            1,
+        )
+        .unwrap();
+        let leader = ledger.expected_leader_for_next_block().unwrap();
+        let non_leader = finalizers
+            .iter()
+            .find(|wallet| wallet.address() != leader)
+            .unwrap()
+            .clone();
+        let mut node = NodeCore::from_ledger_with_burn_fee_and_enabled(
+            non_leader,
+            ledger,
+            true,
+            MICRO_IUNA / 10,
+            1,
+        );
+
+        let plan = node.prepare_automatic_finalization(1);
+        let outbox = node.drain_outbox();
+
+        assert!(plan.burned.is_some());
+        assert!(node.ledger().pending().is_empty());
+        assert_eq!(node.ledger().pending_blinded_transactions().len(), 1);
+        assert!(
+            outbox
+                .iter()
+                .any(|envelope| matches!(envelope, GossipEnvelope::BlindedTransaction(_)))
+        );
+    }
+
+    #[test]
+    fn automatic_leader_burn_stays_plaintext_for_block_anchor() {
+        let alice = Wallet::from_seed("auto-plaintext-burn-alice");
+        let bob = Wallet::from_seed("auto-plaintext-burn-bob");
+        let finalizers = [alice.clone(), bob.clone()];
+        let mut allocations = BTreeMap::new();
+        allocations.insert(alice.address().to_string(), 10 * MICRO_IUNA);
+        allocations.insert(bob.address().to_string(), 10 * MICRO_IUNA);
+        let ledger = Ledger::new_with_genesis_burns(
+            allocations,
+            finalizers
+                .iter()
+                .map(|wallet| GenesisBurn::new(wallet.address(), MICRO_IUNA))
+                .collect(),
+            1,
+        )
+        .unwrap();
+        let leader = ledger.expected_leader_for_next_block().unwrap();
+        let leader_wallet = finalizers
+            .iter()
+            .find(|wallet| wallet.address() == leader)
+            .unwrap()
+            .clone();
+        let mut node = NodeCore::from_ledger_with_burn_fee_and_enabled(
+            leader_wallet,
+            ledger,
+            true,
+            MICRO_IUNA / 10,
+            1,
+        );
+
+        let plan = node.prepare_automatic_finalization(1);
+        let outbox = node.drain_outbox();
+
+        assert!(plan.burned.is_some());
+        assert_eq!(node.ledger().pending().len(), 1);
+        assert!(node.ledger().pending_blinded_transactions().is_empty());
+        assert!(outbox.iter().any(|envelope| matches!(
+            envelope,
+            GossipEnvelope::Transaction(transaction) if transaction.is_burn()
         )));
     }
 }

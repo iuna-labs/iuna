@@ -1548,6 +1548,10 @@ window.iunaApp = function iunaApp() {
       return tx?.kind === "mine";
     },
 
+    isBlindedMempoolItem(tx) {
+      return tx?.kind === "blinded" || tx?.kind === "reveal";
+    },
+
     txDifficultyBits(tx) {
       return tx?.difficulty_bits ?? tx?.difficultyBits ?? null;
     },

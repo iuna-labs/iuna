@@ -33,8 +33,9 @@ use crate::{
         FeeEstimate, NodeStatus, PeerDirection, PeerInfo, SharedNode, SharedPeerBook, StratumStatus,
     },
     domain::{
-        Amount, Block, BurnLeaderRank, ChainSnapshot, Ledger, MINE_FINALIZER_FEE, MINE_REWARD,
-        OutPoint, Transaction, TxInput, TxOutput, hex_hash, revealed_blinded_transactions,
+        Amount, BlindedReveal, BlindedTransaction, Block, BurnLeaderRank, ChainSnapshot, Ledger,
+        MINE_FINALIZER_FEE, MINE_REWARD, OutPoint, Transaction, TxInput, TxOutput, hex_hash,
+        revealed_blinded_transactions,
     },
 };
 
@@ -378,6 +379,9 @@ struct UiTransaction {
     difficulty_bits: Option<u32>,
     proof_bits: Option<u32>,
     proof_hash: Option<String>,
+    commitment: Option<String>,
+    encrypted_size: Option<u32>,
+    expires_at_height: Option<u64>,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq, Serialize)]
@@ -750,14 +754,16 @@ async fn api_mempool(
     let node = state.node.lock().await;
     let snapshot = node.chain_snapshot();
     let pending = node.pending_transactions();
+    let pending_blinded = node.pending_blinded_transactions();
+    let pending_reveals = node.pending_blinded_reveals();
     let outputs = known_output_index(&snapshot, &pending);
-    Json(page_items(
-        pending
-            .iter()
-            .map(|tx| ui_transaction(tx, &outputs))
-            .collect(),
-        query,
-    ))
+    let mut items = pending
+        .iter()
+        .map(|tx| ui_transaction(tx, &outputs))
+        .collect::<Vec<_>>();
+    items.extend(pending_blinded.iter().map(ui_blinded_transaction));
+    items.extend(pending_reveals.iter().map(ui_blinded_reveal));
+    Json(page_items(items, query))
 }
 
 async fn api_wallet_transactions(
@@ -1746,6 +1752,9 @@ fn ui_transaction(
             difficulty_bits: None,
             proof_bits: None,
             proof_hash: None,
+            commitment: None,
+            encrypted_size: None,
+            expires_at_height: None,
         },
         Transaction::Burn {
             inputs,
@@ -1766,6 +1775,9 @@ fn ui_transaction(
             difficulty_bits: None,
             proof_bits: None,
             proof_hash: None,
+            commitment: None,
+            encrypted_size: None,
+            expires_at_height: None,
         },
         Transaction::Mine {
             recipient,
@@ -1788,7 +1800,50 @@ fn ui_transaction(
             difficulty_bits: Some(*difficulty_bits),
             proof_bits: Some(proof_bits(signature)),
             proof_hash: Some(signature.clone()),
+            commitment: None,
+            encrypted_size: None,
+            expires_at_height: None,
         },
+    }
+}
+
+fn ui_blinded_transaction(transaction: &BlindedTransaction) -> UiTransaction {
+    UiTransaction {
+        kind: "blinded",
+        from: "encrypted".to_string(),
+        to: None,
+        amount: 0,
+        fee: transaction.fee,
+        inputs: Vec::new(),
+        outputs: Vec::new(),
+        change: Vec::new(),
+        signature: transaction.commitment.clone(),
+        difficulty_bits: None,
+        proof_bits: None,
+        proof_hash: None,
+        commitment: Some(transaction.commitment.clone()),
+        encrypted_size: Some(transaction.encrypted_size),
+        expires_at_height: Some(transaction.expires_at_height),
+    }
+}
+
+fn ui_blinded_reveal(reveal: &BlindedReveal) -> UiTransaction {
+    UiTransaction {
+        kind: "reveal",
+        from: "encrypted".to_string(),
+        to: None,
+        amount: 0,
+        fee: 0,
+        inputs: Vec::new(),
+        outputs: Vec::new(),
+        change: Vec::new(),
+        signature: reveal.commitment.clone(),
+        difficulty_bits: None,
+        proof_bits: None,
+        proof_hash: None,
+        commitment: Some(reveal.commitment.clone()),
+        encrypted_size: None,
+        expires_at_height: None,
     }
 }
 
@@ -2885,7 +2940,7 @@ const INDEX_HTML: &str = r#"<!doctype html>
       .block-card { flex-basis: 108px; }
     }
   </style>
-  <script defer src="/assets/iuna-ui.js?v=79"></script>
+  <script defer src="/assets/iuna-ui.js?v=80"></script>
   <script defer src="/assets/alpine.min.js"></script>
 </head>
 <body x-data="iunaApp()" x-init="init()" @keydown.window.escape="closeModals()" x-cloak>
@@ -3355,13 +3410,16 @@ const INDEX_HTML: &str = r#"<!doctype html>
             <template x-for="tx in mempool" :key="tx.signature">
               <div class="mempool-item" role="button" tabindex="0" @click="openTransactionModal(tx, { source: 'Mempool' })" @keydown.enter.prevent="openTransactionModal(tx, { source: 'Mempool' })" @keydown.space.prevent="openTransactionModal(tx, { source: 'Mempool' })">
                 <span class="pill" :class="tx.kind" x-text="tx.kind"></span>
-                <div class="tx-field"><span class="tx-label">Amount</span><span class="tx-value money">IUNA <span x-text="amountLabel(txAmount(tx))"></span></span></div>
+                <div class="tx-field" x-show="!isBlindedMempoolItem(tx)"><span class="tx-label">Amount</span><span class="tx-value money">IUNA <span x-text="amountLabel(txAmount(tx))"></span></span></div>
                 <div class="tx-field"><span class="tx-label">Fee</span><span class="tx-value money">IUNA <span x-text="amountLabel(tx.fee ?? 0)"></span></span></div>
-                <div class="tx-field"><span class="tx-label">From</span><code class="tx-value hash" x-text="short(txFrom(tx))"></code></div>
+                <div class="tx-field" x-show="!isBlindedMempoolItem(tx)"><span class="tx-label">From</span><code class="tx-value hash" x-text="short(txFrom(tx))"></code></div>
                 <div class="tx-field" x-show="txTo(tx)"><span class="tx-label">To</span><code class="tx-value hash" x-text="short(txTo(tx))"></code></div>
+                <div class="tx-field" x-show="isBlindedMempoolItem(tx)"><span class="tx-label">Commitment</span><code class="tx-value hash" x-text="short(tx.commitment || tx.signature)"></code></div>
+                <div class="tx-field" x-show="tx.encrypted_size || tx.encryptedSize"><span class="tx-label">Bytes</span><span class="tx-value number" x-text="tx.encrypted_size || tx.encryptedSize"></span></div>
+                <div class="tx-field" x-show="tx.expires_at_height || tx.expiresAtHeight"><span class="tx-label">Expires</span><span class="tx-value number" x-text="tx.expires_at_height || tx.expiresAtHeight"></span></div>
                 <div class="tx-field" x-show="isMineTx(tx)"><span class="tx-label">Proof Bits</span><span class="tx-value number"><span x-text="txProofBits(tx) ?? '-'"></span> / <span x-text="txDifficultyBits(tx) ?? '-'"></span></span></div>
                 <div class="tx-field" x-show="isMineTx(tx)"><span class="tx-label">Proof Hash</span><code class="tx-value hash" x-text="short(txProofHash(tx))"></code></div>
-                <div class="tx-field"><span class="tx-label">Signature</span><code class="tx-value hash" x-text="short(tx.signature)"></code></div>
+                <div class="tx-field" x-show="!isBlindedMempoolItem(tx)"><span class="tx-label">Signature</span><code class="tx-value hash" x-text="short(tx.signature)"></code></div>
               </div>
             </template>
             <template x-if="mempoolPage.loading">
@@ -3603,10 +3661,13 @@ const INDEX_HTML: &str = r#"<!doctype html>
       </div>
       <div class="tx-modal-summary">
         <div class="tx-field"><span class="tx-label">Source</span><span class="tx-value text" x-text="selectedTransactionLabel()"></span></div>
-        <div class="tx-field"><span class="tx-label">Amount</span><span class="tx-value money">IUNA <span x-text="amountLabel(txAmount(selectedTransaction?.tx || {}))"></span></span></div>
+        <div class="tx-field" x-show="!isBlindedMempoolItem(selectedTransaction?.tx)"><span class="tx-label">Amount</span><span class="tx-value money">IUNA <span x-text="amountLabel(txAmount(selectedTransaction?.tx || {}))"></span></span></div>
         <div class="tx-field"><span class="tx-label">Fee</span><span class="tx-value money">IUNA <span x-text="amountLabel(selectedTransaction?.tx?.fee ?? 0)"></span></span></div>
-        <div class="tx-field"><span class="tx-label">From</span><code class="tx-value hash" x-text="txFrom(selectedTransaction?.tx || {})"></code></div>
+        <div class="tx-field" x-show="!isBlindedMempoolItem(selectedTransaction?.tx)"><span class="tx-label">From</span><code class="tx-value hash" x-text="txFrom(selectedTransaction?.tx || {})"></code></div>
         <div class="tx-field" x-show="txTo(selectedTransaction?.tx || {})"><span class="tx-label">To</span><code class="tx-value hash" x-text="txTo(selectedTransaction?.tx || {})"></code></div>
+        <div class="tx-field" x-show="isBlindedMempoolItem(selectedTransaction?.tx)"><span class="tx-label">Commitment</span><code class="tx-value hash" x-text="selectedTransaction?.tx?.commitment || selectedTransaction?.tx?.signature || '-'"></code></div>
+        <div class="tx-field" x-show="selectedTransaction?.tx?.encrypted_size || selectedTransaction?.tx?.encryptedSize"><span class="tx-label">Encrypted Bytes</span><span class="tx-value number" x-text="selectedTransaction?.tx?.encrypted_size || selectedTransaction?.tx?.encryptedSize"></span></div>
+        <div class="tx-field" x-show="selectedTransaction?.tx?.expires_at_height || selectedTransaction?.tx?.expiresAtHeight"><span class="tx-label">Expires</span><span class="tx-value number" x-text="selectedTransaction?.tx?.expires_at_height || selectedTransaction?.tx?.expiresAtHeight"></span></div>
         <div class="tx-field" x-show="isMineTx(selectedTransaction?.tx)"><span class="tx-label">Difficulty</span><span class="tx-value number" x-text="txDifficultyBits(selectedTransaction?.tx) ?? '-'"></span></div>
         <div class="tx-field" x-show="isMineTx(selectedTransaction?.tx)"><span class="tx-label">Proof Bits</span><span class="tx-value number" x-text="txProofBits(selectedTransaction?.tx) ?? '-'"></span></div>
         <div class="tx-field" x-show="isMineTx(selectedTransaction?.tx)"><span class="tx-label">Proof Hash</span><code class="tx-value hash" x-text="txProofHash(selectedTransaction?.tx) || '-'"></code></div>
@@ -3778,8 +3839,8 @@ mod tests {
         },
         app::{GossipEnvelope, NodeCore, PeerBook, PeerDirection, PeerInfo, StratumStatus},
         domain::{
-            Amount, Block, ChainSnapshot, LaunchProfile, Ledger, MICRO_IUNA, MINE_FINALIZER_FEE,
-            OutPoint, Transaction, Wallet,
+            Amount, BlindedReveal, BlindedTransaction, Block, ChainSnapshot, LaunchProfile, Ledger,
+            MICRO_IUNA, MINE_FINALIZER_FEE, OutPoint, Transaction, Wallet,
         },
     };
 
@@ -3797,6 +3858,34 @@ mod tests {
     fn dev_seed_verify_bypass_requires_env_flag() {
         assert!(dev_seed_verify_bypass_allowed(true));
         assert!(!dev_seed_verify_bypass_allowed(false));
+    }
+
+    #[test]
+    fn mempool_ui_items_can_represent_blinded_transactions_and_reveals() {
+        let commitment = "a".repeat(64);
+        let blinded = BlindedTransaction {
+            commitment: commitment.clone(),
+            fee: 7,
+            encrypted_size: 123,
+            expires_at_height: 42,
+            nonce: "00".repeat(12),
+            ciphertext: "11".repeat(123),
+            payload_hash: "b".repeat(64),
+        };
+        let reveal = BlindedReveal {
+            commitment: commitment.clone(),
+            key: "22".repeat(32),
+        };
+
+        let blinded_row = super::ui_blinded_transaction(&blinded);
+        let reveal_row = super::ui_blinded_reveal(&reveal);
+
+        assert_eq!(blinded_row.kind, "blinded");
+        assert_eq!(blinded_row.signature, commitment);
+        assert_eq!(blinded_row.encrypted_size, Some(123));
+        assert_eq!(blinded_row.expires_at_height, Some(42));
+        assert_eq!(reveal_row.kind, "reveal");
+        assert_eq!(reveal_row.commitment, blinded_row.commitment);
     }
 
     #[test]
@@ -4810,7 +4899,7 @@ mod tests {
 
     #[test]
     fn metrics_screen_includes_block_range_filter() {
-        assert!(super::INDEX_HTML.contains("iuna-ui.js?v=79"));
+        assert!(super::INDEX_HTML.contains("iuna-ui.js?v=80"));
         assert!(super::INDEX_HTML.contains("aria-label=\"Metrics block range\""));
         assert!(super::INDEX_HTML.contains("setMetricsRange(100)"));
         assert!(super::INDEX_HTML.contains("setMetricsRange(1000)"));

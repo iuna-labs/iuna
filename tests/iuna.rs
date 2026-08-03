@@ -777,13 +777,8 @@ fn waiting_wallet_gossips_pending_burn_to_selected_leader() {
         Some(bob.address())
     );
     let mut alice_node = NodeCore::from_ledger(alice.clone(), ledger.clone(), 1);
-    let mut bob_node = NodeCore::from_ledger_with_burn_fee_and_enabled(
-        bob.clone(),
-        ledger,
-        true,
-        DEFAULT_BURN_PER_BLOCK,
-        MICRO_IUNA,
-    );
+    let mut bob_node =
+        NodeCore::from_ledger_with_burn_fee_and_enabled(bob.clone(), ledger, true, 1, MICRO_IUNA);
 
     let alice_outcome = alice_node.automatic_mine_once(1);
     assert!(alice_outcome.burned.is_some());
@@ -800,8 +795,8 @@ fn waiting_wallet_gossips_pending_burn_to_selected_leader() {
         bob_node.receive(envelope).unwrap();
     }
 
-    assert_eq!(bob_node.ledger().pending().len(), 1);
-    assert_eq!(bob_node.ledger().pending()[0].sender(), alice.address());
+    assert!(bob_node.ledger().pending().is_empty());
+    assert_eq!(bob_node.ledger().pending_blinded_transactions().len(), 1);
     let bob_outcome = bob_node.automatic_mine_once(1);
     assert!(bob_outcome.skipped_reason.is_none());
     assert!(bob_outcome.block.is_some());
