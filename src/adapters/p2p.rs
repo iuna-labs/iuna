@@ -3193,6 +3193,7 @@ mod tests {
             vdf_rounds: 1,
             vdf_output: "vdf".to_string(),
             leader_proof: None,
+            fee_shares: Vec::new(),
             transactions: Vec::new(),
             hash: "hash".to_string(),
         };

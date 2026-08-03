@@ -178,6 +178,11 @@ fn expected_confirmed_supply(snapshot: &ChainSnapshot) -> Amount {
         supply = supply
             .checked_add(block.reward)
             .expect("block reward does not overflow supply");
+        for share in &block.fee_shares {
+            supply = supply
+                .checked_add(share.amount)
+                .expect("fee share does not overflow supply");
+        }
     }
 
     supply
@@ -216,8 +221,19 @@ fn reference_balances(snapshot: &ChainSnapshot) -> BTreeMap<String, Amount> {
                 .expect("reference block fees do not overflow");
         }
 
+        let fee_shares = block.fee_shares.iter().fold(0_u64, |total, share| {
+            total
+                .checked_add(share.amount)
+                .expect("reference fee shares do not overflow")
+        });
         if block.height > 0 {
-            assert_eq!(block.reward, block_fees);
+            assert_eq!(
+                block
+                    .reward
+                    .checked_add(fee_shares)
+                    .expect("reference reward and fee shares do not overflow"),
+                block_fees
+            );
         }
         if block.reward > 0 {
             let replaced = utxos.insert(
@@ -231,6 +247,19 @@ fn reference_balances(snapshot: &ChainSnapshot) -> BTreeMap<String, Amount> {
                 },
             );
             assert!(replaced.is_none(), "duplicate reference reward output");
+        }
+        for (index, share) in block.fee_shares.iter().enumerate() {
+            let replaced = utxos.insert(
+                OutPoint {
+                    txid: block.hash.clone(),
+                    index: u32::MAX - 1 - index as u32,
+                },
+                TxOutput {
+                    address: share.address.clone(),
+                    amount: share.amount,
+                },
+            );
+            assert!(replaced.is_none(), "duplicate reference fee share output");
         }
     }
 

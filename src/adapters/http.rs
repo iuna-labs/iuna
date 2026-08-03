@@ -33,7 +33,7 @@ use crate::{
         FeeEstimate, NodeStatus, PeerDirection, PeerInfo, SharedNode, SharedPeerBook, StratumStatus,
     },
     domain::{
-        Amount, Block, BurnLeaderRank, Ledger, MINE_FINALIZER_FEE, MINE_REWARD, OutPoint,
+        Amount, Block, BurnLeaderRank, FeeShare, Ledger, MINE_FINALIZER_FEE, MINE_REWARD, OutPoint,
         Transaction, TxInput, TxOutput, hex_hash,
     },
 };
@@ -355,6 +355,7 @@ struct UiBlock {
     finalizer_mode: crate::domain::FinalizerMode,
     finalizer_rank: u32,
     reward: Amount,
+    fee_shares: Vec<FeeShare>,
     total_fees: Amount,
     vdf_rounds: u64,
     vdf_output: String,
@@ -1684,6 +1685,11 @@ fn ui_block(
         .get(&block.hash)
         .cloned()
         .unwrap_or_default();
+    let total_fees = block
+        .fee_shares
+        .iter()
+        .try_fold(block.reward, |total, share| total.checked_add(share.amount))
+        .unwrap_or(u64::MAX);
     UiBlock {
         height: block.height,
         prev_hash: block.prev_hash,
@@ -1692,7 +1698,8 @@ fn ui_block(
         finalizer_mode: block.finalizer_mode,
         finalizer_rank: block.finalizer_rank,
         reward: block.reward,
-        total_fees: block.reward,
+        fee_shares: block.fee_shares.clone(),
+        total_fees,
         vdf_rounds: block.vdf_rounds,
         vdf_output: block.vdf_output,
         leader_proof: block.leader_proof,
@@ -1866,6 +1873,15 @@ fn known_output_index(
                 },
             );
         }
+        for (index, share) in block.fee_shares.iter().enumerate() {
+            outputs.insert(
+                fee_share_outpoint(&block.hash, index),
+                TxOutput {
+                    address: share.address.clone(),
+                    amount: share.amount,
+                },
+            );
+        }
     }
     for transaction in pending {
         index_transaction_outputs(&mut outputs, transaction);
@@ -1908,6 +1924,13 @@ fn reward_outpoint(block_hash: &str) -> OutPoint {
     OutPoint {
         txid: block_hash.to_string(),
         index: u32::MAX,
+    }
+}
+
+fn fee_share_outpoint(block_hash: &str, index: usize) -> OutPoint {
+    OutPoint {
+        txid: block_hash.to_string(),
+        index: u32::MAX - 1 - index as u32,
     }
 }
 
@@ -4684,6 +4707,7 @@ mod tests {
             vdf_rounds: 0,
             vdf_output: "vdf".to_string(),
             leader_proof: None,
+            fee_shares: Vec::new(),
             transactions,
             hash: format!("hash-{height}"),
         }
