@@ -453,9 +453,20 @@ fn finalize_preverified_with_wallet(ledger: &mut Ledger, wallet: &Wallet, timest
         .expect("locally mined block applies");
 }
 
+fn next_ticket_slot_timestamp(ledger: &Ledger, offset_ms: u64) -> u64 {
+    ledger
+        .chain()
+        .last()
+        .expect("ledger has genesis")
+        .timestamp_ms
+        .saturating_add(VDF_TARGET_BLOCK_MS)
+        .saturating_add(offset_ms)
+}
+
 fn finalize_many(ledger: &mut Ledger, wallet: &Wallet, count: usize, start_timestamp_ms: u64) {
     for offset in 0..count {
-        finalize_with_wallet(ledger, wallet, start_timestamp_ms + offset as u64);
+        let timestamp_ms = next_ticket_slot_timestamp(ledger, start_timestamp_ms + offset as u64);
+        finalize_with_wallet(ledger, wallet, timestamp_ms);
     }
 }
 

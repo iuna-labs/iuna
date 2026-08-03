@@ -1108,7 +1108,29 @@ impl PreparedBlock {
         self.height
     }
 
+    pub fn timestamp_ms(&self) -> u64 {
+        self.timestamp_ms
+    }
+
     pub fn finish(self, wallet: &Wallet, vdf_output: String) -> Block {
+        let timestamp_ms = self.timestamp_ms;
+        self.finish_with_timestamp(wallet, vdf_output, timestamp_ms)
+    }
+
+    pub fn finish_at(self, wallet: &Wallet, vdf_output: String, timestamp_ms: u64) -> Block {
+        let timestamp_ms = match self.finalizer_mode {
+            FinalizerMode::Ticket => timestamp_ms.max(self.timestamp_ms),
+            FinalizerMode::Recovery => self.timestamp_ms,
+        };
+        self.finish_with_timestamp(wallet, vdf_output, timestamp_ms)
+    }
+
+    fn finish_with_timestamp(
+        self,
+        wallet: &Wallet,
+        vdf_output: String,
+        timestamp_ms: u64,
+    ) -> Block {
         let leader_proof = self.leader_ticket.as_ref().map(|leader_ticket| {
             let proof_payload = LeaderProofPayload {
                 height: self.height,
@@ -1124,7 +1146,7 @@ impl PreparedBlock {
         Block::new(BlockDraft {
             height: self.height,
             prev_hash: self.prev_hash,
-            timestamp_ms: self.timestamp_ms,
+            timestamp_ms,
             miner: self.miner,
             finalizer_mode: self.finalizer_mode,
             finalizer_rank: self.finalizer_rank,
@@ -2097,7 +2119,7 @@ impl Ledger {
 
         let tip = self.tip();
         let prev_hash = tip.hash.clone();
-        let timestamp_ms = timestamp_ms.max(tip.timestamp_ms + 1);
+        let timestamp_ms = timestamp_ms.max(ticket_block_min_timestamp(tip, finalizer_rank)?);
         let vdf_seed = vdf_seed_for_child(&prev_hash, height);
         Ok(PreparedBlock {
             height,
@@ -2283,6 +2305,15 @@ impl Ledger {
         }
         if block.timestamp_ms <= self.tip().timestamp_ms {
             bail!("block timestamp must increase");
+        }
+        if block.finalizer_mode == FinalizerMode::Ticket {
+            let min_timestamp = ticket_block_min_timestamp(self.tip(), block.finalizer_rank)?;
+            if block.timestamp_ms < min_timestamp {
+                bail!(
+                    "block timestamp is before finalizer rank {} time slot {min_timestamp}",
+                    block.finalizer_rank
+                );
+            }
         }
         let median_time_past = self.median_time_past();
         if block.timestamp_ms <= median_time_past {
@@ -2958,6 +2989,26 @@ fn vdf_rounds_for_finalizer_rank(base_rounds: u64, rank: u32) -> Result<u64> {
         bail!("finalizer rank VDF rounds exceed maximum");
     }
     Ok(rounds)
+}
+
+fn finalizer_rank_slot_delay_ms(rank: u32) -> Result<u64> {
+    VDF_TARGET_BLOCK_MS
+        .checked_mul(u64::from(rank))
+        .context("finalizer rank time slot overflow")
+}
+
+fn ticket_block_min_timestamp(parent: &Block, rank: u32) -> Result<u64> {
+    if rank == 0 {
+        return parent
+            .timestamp_ms
+            .checked_add(1)
+            .context("finalizer rank minimum timestamp overflow");
+    }
+
+    parent
+        .timestamp_ms
+        .checked_add(finalizer_rank_slot_delay_ms(rank)?)
+        .context("finalizer rank minimum timestamp overflow")
 }
 
 fn base_vdf_rounds_for_finalizer_rank(vdf_rounds: u64, rank: u32) -> u64 {
@@ -3982,13 +4033,13 @@ fn clamped_vdf_retarget_observed_block_ms(observed_block_ms: u64) -> u64 {
 }
 
 fn vdf_retarget_observed_block_ms(parent: &Block, child: &Block) -> Option<u64> {
-    if child.finalizer_mode == FinalizerMode::Recovery {
+    if child.finalizer_mode != FinalizerMode::Ticket || child.finalizer_rank != 0 {
         return None;
     }
 
-    let rank_multiplier = u64::from(child.finalizer_rank) + 1;
-    let rank_adjusted_ms = (child.timestamp_ms - parent.timestamp_ms) / rank_multiplier;
-    Some(clamped_vdf_retarget_observed_block_ms(rank_adjusted_ms))
+    Some(clamped_vdf_retarget_observed_block_ms(
+        child.timestamp_ms - parent.timestamp_ms,
+    ))
 }
 
 fn unix_now_ms() -> u64 {
@@ -4526,20 +4577,26 @@ mod tests {
     }
 
     #[test]
-    fn vdf_retarget_observed_block_time_scales_ticket_fallback_rank() {
+    fn vdf_retarget_observed_block_time_ignores_ticket_fallback_ranks() {
         let parent = vdf_retarget_sample_block(0, FinalizerMode::Ticket, 0);
+        let primary_child =
+            vdf_retarget_sample_block(VDF_TARGET_BLOCK_MS, FinalizerMode::Ticket, 0);
         let rank_one_child =
-            vdf_retarget_sample_block(VDF_TARGET_BLOCK_MS * 2, FinalizerMode::Ticket, 1);
+            vdf_retarget_sample_block(VDF_TARGET_BLOCK_MS, FinalizerMode::Ticket, 1);
         let rank_two_child =
-            vdf_retarget_sample_block(VDF_TARGET_BLOCK_MS * 3, FinalizerMode::Ticket, 2);
+            vdf_retarget_sample_block(VDF_TARGET_BLOCK_MS * 2, FinalizerMode::Ticket, 2);
 
         assert_eq!(
-            vdf_retarget_observed_block_ms(&parent, &rank_one_child),
+            vdf_retarget_observed_block_ms(&parent, &primary_child),
             Some(VDF_TARGET_BLOCK_MS)
         );
         assert_eq!(
+            vdf_retarget_observed_block_ms(&parent, &rank_one_child),
+            None
+        );
+        assert_eq!(
             vdf_retarget_observed_block_ms(&parent, &rank_two_child),
-            Some(VDF_TARGET_BLOCK_MS)
+            None
         );
     }
 
@@ -4583,8 +4640,8 @@ mod tests {
     }
 
     #[test]
-    fn vdf_rounds_retarget_above_legacy_u32_limit_after_fast_blocks() {
-        let wallet = Wallet::from_seed("vdf-rounds-above-u32");
+    fn vdf_rounds_retarget_below_legacy_u32_limit_after_slow_blocks() {
+        let wallet = Wallet::from_seed("vdf-rounds-slow-above-u32");
         let initial_rounds = u64::from(u32::MAX);
         let mut allocations = BTreeMap::new();
         allocations.insert(wallet.address().to_string(), 1_000);
@@ -4599,18 +4656,21 @@ mod tests {
         assert_eq!(block1.vdf_rounds, initial_rounds);
         assert_eq!(ledger.vdf_rounds(), initial_rounds);
 
-        let block2 =
-            apply_preverified_burn_block_at(&mut ledger, &wallet, VDF_TARGET_BLOCK_MS + 415_000);
+        let block2 = apply_preverified_burn_block_at(
+            &mut ledger,
+            &wallet,
+            VDF_TARGET_BLOCK_MS + VDF_TARGET_BLOCK_MS * 2,
+        );
         assert_eq!(block2.vdf_rounds, initial_rounds);
 
         assert!(
-            ledger.vdf_rounds() > initial_rounds,
-            "fast blocks should retarget above the legacy u32 VDF rounds ceiling"
+            ledger.vdf_rounds() < initial_rounds,
+            "slow blocks should retarget below the legacy u32 VDF rounds ceiling"
         );
     }
 
     #[test]
-    fn fallback_block_retarget_uses_rank_adjusted_observed_time() {
+    fn fallback_block_is_excluded_from_vdf_retarget_observations() {
         let alice = Wallet::from_seed("fallback-retarget-alice");
         let bob = Wallet::from_seed("fallback-retarget-bob");
         let wallets = [&alice, &bob];
@@ -4640,11 +4700,8 @@ mod tests {
             .into_iter()
             .find(|wallet| wallet.address() != primary)
             .unwrap();
-        let block = apply_preverified_burn_block_at(
-            &mut ledger,
-            fallback,
-            VDF_TARGET_BLOCK_MS + VDF_TARGET_BLOCK_MS * 2,
-        );
+        let timestamp_ms = ledger.tip().timestamp_ms + 1;
+        let block = apply_preverified_burn_block_at(&mut ledger, fallback, timestamp_ms);
 
         assert_eq!(block.finalizer_rank, 1);
         assert_eq!(block.vdf_rounds, 200);
@@ -4680,13 +4737,13 @@ mod tests {
     }
 
     #[test]
-    fn generated_vdf_retarget_increases_after_fast_blocks_above_legacy_limit() {
+    fn generated_vdf_retarget_decreases_after_slow_blocks_above_legacy_limit() {
         let legacy_limit = u64::from(u32::MAX);
-        let fast_observed_ms = [
-            MIN_VDF_RETARGET_OBSERVED_BLOCK_MS,
-            300_000,
-            415_000,
-            VDF_TARGET_BLOCK_MS * 4 / 5,
+        let slow_observed_ms = [
+            VDF_TARGET_BLOCK_MS * 6 / 5,
+            VDF_TARGET_BLOCK_MS * 2,
+            VDF_TARGET_BLOCK_MS * 3,
+            MAX_VDF_RETARGET_OBSERVED_BLOCK_MS,
         ];
 
         for seed in 0..16_u64 {
@@ -4700,7 +4757,7 @@ mod tests {
                 initial_rounds,
             )
             .unwrap();
-            let observed_ms = fast_observed_ms[seed as usize % fast_observed_ms.len()];
+            let observed_ms = slow_observed_ms[seed as usize % slow_observed_ms.len()];
 
             apply_preverified_burn_block_at(&mut ledger, &wallet, VDF_TARGET_BLOCK_MS);
             let second = apply_preverified_burn_block_at(
@@ -4711,15 +4768,15 @@ mod tests {
 
             assert_eq!(second.vdf_rounds, initial_rounds);
             assert!(
-                ledger.vdf_rounds() > initial_rounds,
-                "seed {seed} with observed {observed_ms}ms should raise VDF rounds from {initial_rounds}, got {}",
+                ledger.vdf_rounds() < initial_rounds,
+                "seed {seed} with observed {observed_ms}ms should lower VDF rounds from {initial_rounds}, got {}",
                 ledger.vdf_rounds()
             );
 
             let burn = ledger.build_burn(&wallet, 1, 0).unwrap();
             ledger.submit_transaction(burn).unwrap();
             let next_work = ledger
-                .prepare_next_block(wallet.address(), VDF_TARGET_BLOCK_MS + observed_ms * 2)
+                .prepare_next_block(wallet.address(), second.timestamp_ms + VDF_TARGET_BLOCK_MS)
                 .unwrap();
             assert_eq!(next_work.vdf_rounds(), ledger.vdf_rounds());
         }
@@ -4739,6 +4796,129 @@ mod tests {
         let error = ledger.apply_block_at(block, 1_000).unwrap_err();
 
         assert!(format!("{error:#}").contains("too far in the future"));
+    }
+
+    #[test]
+    fn ticket_block_timestamp_uses_finalizer_rank_time_slot() {
+        let alice = Wallet::from_seed("rank-slot-alice");
+        let bob = Wallet::from_seed("rank-slot-bob");
+        let wallets = [alice.clone(), bob.clone()];
+        let mut allocations = BTreeMap::new();
+        allocations.insert(alice.address().to_string(), 1_000);
+        allocations.insert(bob.address().to_string(), 1_000);
+        let mut ledger = Ledger::new_with_genesis_burns(
+            allocations,
+            vec![
+                GenesisBurn::new(alice.address(), 1),
+                GenesisBurn::new(bob.address(), 1),
+            ],
+            100,
+        )
+        .unwrap();
+
+        let primary =
+            wallet_for_address(&wallets, &ledger.expected_leader_for_next_block().unwrap());
+        let burn = ledger.build_burn(primary, 1, 0).unwrap();
+        ledger.submit_transaction(burn).unwrap();
+        let work = ledger.prepare_next_block(primary.address(), 1).unwrap();
+        assert_eq!(work.timestamp_ms(), 1);
+        let block = work.finish(primary, "preverified-vdf".to_string());
+        ledger.apply_preverified_block_at(block, u64::MAX).unwrap();
+
+        let fallback = wallets
+            .iter()
+            .find(|wallet| ledger.finalizer_rank_for_next_block(wallet.address()) == Some(1))
+            .expect("expected rank 1 fallback");
+        let burn = ledger.build_burn(fallback, 1, 0).unwrap();
+        ledger.submit_transaction(burn).unwrap();
+        let parent_timestamp = ledger.tip().timestamp_ms;
+        let work = ledger
+            .prepare_next_block(fallback.address(), parent_timestamp + 1)
+            .unwrap();
+
+        assert_eq!(work.timestamp_ms(), parent_timestamp + VDF_TARGET_BLOCK_MS);
+        assert_eq!(work.vdf_rounds(), ledger.vdf_rounds() * 2);
+    }
+
+    #[test]
+    fn late_ticket_vdf_completion_is_visible_to_retarget() {
+        let wallet = Wallet::from_seed("late-ticket-vdf-wallet");
+        let mut allocations = BTreeMap::new();
+        allocations.insert(wallet.address().to_string(), 1_000);
+        let mut ledger = Ledger::new_with_genesis_burns(
+            allocations,
+            vec![GenesisBurn::new(wallet.address(), 1)],
+            100,
+        )
+        .unwrap();
+
+        apply_preverified_burn_block_at(&mut ledger, &wallet, VDF_TARGET_BLOCK_MS);
+        assert_eq!(ledger.vdf_rounds(), 100);
+
+        let burn = ledger.build_burn(&wallet, 1, 0).unwrap();
+        ledger.submit_transaction(burn).unwrap();
+        let work = ledger
+            .prepare_next_block(wallet.address(), ledger.tip().timestamp_ms + 1)
+            .unwrap();
+        let scheduled_timestamp = work.timestamp_ms();
+        let late_timestamp = ledger.tip().timestamp_ms + VDF_TARGET_BLOCK_MS * 3;
+        assert!(late_timestamp > scheduled_timestamp);
+
+        let block = work.finish_at(&wallet, "preverified-vdf".to_string(), late_timestamp);
+        assert_eq!(block.timestamp_ms, late_timestamp);
+        ledger.apply_preverified_block_at(block, u64::MAX).unwrap();
+
+        assert!(
+            ledger.vdf_rounds() < 100,
+            "late VDF completion should lower future VDF rounds"
+        );
+    }
+
+    #[test]
+    fn block_before_finalizer_rank_time_slot_is_rejected() {
+        let alice = Wallet::from_seed("rank-slot-reject-alice");
+        let bob = Wallet::from_seed("rank-slot-reject-bob");
+        let wallets = [alice.clone(), bob.clone()];
+        let mut allocations = BTreeMap::new();
+        allocations.insert(alice.address().to_string(), 1_000);
+        allocations.insert(bob.address().to_string(), 1_000);
+        let mut ledger = Ledger::new_with_genesis_burns(
+            allocations,
+            vec![
+                GenesisBurn::new(alice.address(), 1),
+                GenesisBurn::new(bob.address(), 1),
+            ],
+            100,
+        )
+        .unwrap();
+
+        let primary =
+            wallet_for_address(&wallets, &ledger.expected_leader_for_next_block().unwrap());
+        let burn = ledger.build_burn(primary, 1, 0).unwrap();
+        ledger.submit_transaction(burn).unwrap();
+        let work = ledger.prepare_next_block(primary.address(), 1).unwrap();
+        let block = work.finish(primary, "preverified-vdf".to_string());
+        ledger.apply_preverified_block_at(block, u64::MAX).unwrap();
+
+        let fallback = wallets
+            .iter()
+            .find(|wallet| ledger.finalizer_rank_for_next_block(wallet.address()) == Some(1))
+            .expect("expected rank 1 fallback");
+        let burn = ledger.build_burn(fallback, 1, 0).unwrap();
+        ledger.submit_transaction(burn).unwrap();
+        let parent_timestamp = ledger.tip().timestamp_ms;
+        let work = ledger
+            .prepare_next_block(fallback.address(), parent_timestamp + 1)
+            .unwrap();
+        let mut block = work.finish(fallback, "preverified-vdf".to_string());
+        block.timestamp_ms = parent_timestamp + VDF_TARGET_BLOCK_MS - 1;
+        block.hash = block.compute_hash();
+
+        let error = ledger
+            .apply_preverified_block_at(block, u64::MAX)
+            .unwrap_err();
+
+        assert!(format!("{error:#}").contains("before finalizer rank 1 time slot"));
     }
 
     #[test]

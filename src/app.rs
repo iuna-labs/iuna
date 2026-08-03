@@ -944,7 +944,7 @@ impl NodeCore {
             return outcome;
         };
         let vdf_output = run_vdf(work.vdf_seed(), work.vdf_rounds());
-        match self.complete_prepared_block(work, vdf_output) {
+        match self.complete_prepared_block_at(work, vdf_output, timestamp_ms) {
             Ok(block) => {
                 outcome.block = Some(block);
                 outcome.skipped_reason = None;
@@ -1264,7 +1264,16 @@ impl NodeCore {
         work: PreparedBlock,
         vdf_output: String,
     ) -> Result<Block> {
-        let block = work.finish(self.wallet.unlocked()?, vdf_output);
+        self.complete_prepared_block_at(work, vdf_output, now_ms())
+    }
+
+    pub fn complete_prepared_block_at(
+        &mut self,
+        work: PreparedBlock,
+        vdf_output: String,
+        timestamp_ms: u64,
+    ) -> Result<Block> {
+        let block = work.finish_at(self.wallet.unlocked()?, vdf_output, timestamp_ms);
         self.ledger.apply_locally_mined_block(block.clone())?;
         self.outbox.push(GossipEnvelope::Block(block.clone()));
         self.attest_pending_burns()?;

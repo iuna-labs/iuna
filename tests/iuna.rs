@@ -51,6 +51,16 @@ fn unix_now_ms() -> u64 {
         .unwrap_or(u64::MAX)
 }
 
+fn next_ticket_slot_timestamp(ledger: &Ledger, offset_ms: u64) -> u64 {
+    ledger
+        .chain()
+        .last()
+        .expect("ledger has genesis")
+        .timestamp_ms
+        .saturating_add(VDF_TARGET_BLOCK_MS)
+        .saturating_add(offset_ms)
+}
+
 fn mine_wallet_burn_block(ledger: &mut Ledger, wallet: &Wallet, timestamp_ms: u64) -> String {
     let burn = ledger.build_burn(wallet, 1, 0).unwrap();
     ledger.submit_transaction(burn).unwrap();
@@ -96,7 +106,8 @@ fn fork_with_better_vrf_block(
 ) -> Option<Ledger> {
     for offset in 0..10_000 {
         let mut candidate = base.clone();
-        let hash = mine_wallet_burn_block(&mut candidate, wallet, first_timestamp_ms + offset);
+        let timestamp_ms = next_ticket_slot_timestamp(&candidate, first_timestamp_ms + offset);
+        let hash = mine_wallet_burn_block(&mut candidate, wallet, timestamp_ms);
         if hash.as_str() < local_fork_block_hash {
             return Some(candidate);
         }
@@ -112,7 +123,8 @@ fn fork_with_worse_vrf_block(
 ) -> Option<Ledger> {
     for offset in 0..10_000 {
         let mut candidate = base.clone();
-        let hash = mine_wallet_burn_block(&mut candidate, wallet, first_timestamp_ms + offset);
+        let timestamp_ms = next_ticket_slot_timestamp(&candidate, first_timestamp_ms + offset);
+        let hash = mine_wallet_burn_block(&mut candidate, wallet, timestamp_ms);
         if hash.as_str() > local_fork_block_hash {
             return Some(candidate);
         }
@@ -2396,12 +2408,14 @@ fn fork_conflict_before_last_six_blocks_is_finalized_even_if_remote_is_longer() 
 
     let mut local = common.clone();
     for timestamp in 2..=8 {
-        mine_wallet_burn_block(&mut local, &alice, timestamp);
+        let timestamp_ms = next_ticket_slot_timestamp(&local, timestamp);
+        mine_wallet_burn_block(&mut local, &alice, timestamp_ms);
     }
 
     let mut remote = common;
     for timestamp in 20..=29 {
-        mine_wallet_burn_block(&mut remote, &alice, timestamp);
+        let timestamp_ms = next_ticket_slot_timestamp(&remote, timestamp);
+        mine_wallet_burn_block(&mut remote, &alice, timestamp_ms);
     }
 
     assert_eq!(local.status().height, 8);

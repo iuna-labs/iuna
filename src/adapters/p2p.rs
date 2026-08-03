@@ -2775,12 +2775,12 @@ async fn record_inbound_result(
         Err(error) => {
             let message = format!("{error:#}");
             if known_peer.is_some() {
-                network
-                    .inner
-                    .peers
-                    .lock()
-                    .await
-                    .record_misbehavior(&peer, message.clone());
+                let mut peers = network.inner.peers.lock().await;
+                if inbound_error_counts_as_misbehavior(&message) {
+                    peers.record_misbehavior(&peer, message.clone());
+                } else {
+                    peers.record_inbound_error(&peer, message.clone());
+                }
             }
             if debug_logging_enabled() {
                 eprintln!("p2p envelope from {peer} ignored: {message}");
@@ -2920,6 +2920,11 @@ fn is_possible_fork_error(error: &anyhow::Error) -> bool {
     message.contains("does not extend local tip")
         || message.contains("conflicts with local chain")
         || message.contains("expected block height")
+}
+
+fn inbound_error_counts_as_misbehavior(message: &str) -> bool {
+    !message.contains("block timestamp is too far in the future")
+        && !message.contains("block timestamp is before finalizer rank")
 }
 
 #[cfg(test)]
@@ -3627,6 +3632,60 @@ mod tests {
                 "{reason} should be treated as state-dependent"
             );
         }
+    }
+
+    #[test]
+    fn temporal_block_rejections_do_not_score_peer_misbehavior() {
+        for reason in [
+            "block timestamp is too far in the future",
+            "block timestamp is before finalizer rank 1 time slot 1200000",
+        ] {
+            assert!(
+                !super::inbound_error_counts_as_misbehavior(reason),
+                "{reason} should be treated as temporal"
+            );
+        }
+
+        assert!(super::inbound_error_counts_as_misbehavior(
+            "block VDF output is invalid"
+        ));
+    }
+
+    #[tokio::test]
+    async fn temporal_block_rejection_records_error_without_banning_peer() {
+        let wallet = Wallet::from_seed("temporal-block-peer-wallet");
+        let mut allocations = BTreeMap::new();
+        allocations.insert(wallet.address().to_string(), 1_000);
+        let ledger = Ledger::new(allocations, 100);
+        let node = Arc::new(tokio::sync::Mutex::new(NodeCore::from_ledger(
+            wallet, ledger, 0,
+        )));
+        let peers = Arc::new(tokio::sync::Mutex::new(PeerBook::from_addresses(vec![
+            "127.0.0.1:9444".to_string(),
+        ])));
+        let network = super::GossipNetwork::new_for_tests(node, Arc::clone(&peers));
+        let known_peer = Some("127.0.0.1:9444".to_string());
+        let remote_addr: SocketAddr = "127.0.0.1:50000".parse().unwrap();
+
+        super::record_inbound_result(
+            &network,
+            &known_peer,
+            remote_addr,
+            Err(anyhow::anyhow!("block timestamp is too far in the future")),
+        )
+        .await;
+
+        let peers = peers.lock().await;
+        let peer = peers
+            .list()
+            .into_iter()
+            .find(|peer| peer.address == "127.0.0.1:9444")
+            .unwrap();
+        assert_eq!(peer.misbehavior_score, 0);
+        assert_eq!(
+            peer.last_error.as_deref(),
+            Some("block timestamp is too far in the future")
+        );
     }
 
     #[tokio::test]

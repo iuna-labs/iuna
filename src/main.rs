@@ -640,6 +640,7 @@ async fn run_automatic_finalizer(node: SharedNode, gossip: p2p::GossipNetwork, d
 
         let seed = work.vdf_seed().to_string();
         let rounds = work.vdf_rounds();
+        let publish_at_ms = work.timestamp_ms();
         let vdf_output = match tokio::task::spawn_blocking(move || run_vdf(&seed, rounds)).await {
             Ok(output) => output,
             Err(error) => {
@@ -650,9 +651,23 @@ async fn run_automatic_finalizer(node: SharedNode, gossip: p2p::GossipNetwork, d
             }
         };
 
+        let completed_at_ms = now_ms();
+        let publish_timestamp_ms = completed_at_ms.max(publish_at_ms);
+        if completed_at_ms < publish_at_ms {
+            let wait_ms = publish_at_ms - completed_at_ms;
+            if debug {
+                println!(
+                    "VDF completed early for candidate block {}; waiting {:.3}s for rank time slot",
+                    work.height(),
+                    wait_ms as f64 / 1000.0
+                );
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(wait_ms)).await;
+        }
+
         let (finalized, outbox) = {
             let mut node = node.lock().await;
-            let finalized = node.complete_prepared_block(work, vdf_output);
+            let finalized = node.complete_prepared_block_at(work, vdf_output, publish_timestamp_ms);
             let outbox = node.drain_outbox();
             (finalized, outbox)
         };
