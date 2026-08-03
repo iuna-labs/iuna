@@ -117,10 +117,16 @@
     .dot { width: 8px; height: 8px; border-radius: 999px; background: var(--green); box-shadow: 0 0 18px rgba(213, 245, 95, .75); }
     h1 {
       max-width: 760px;
-      margin: 0 0 18px;
+      margin: 0 0 8px;
       font-size: clamp(48px, 9vw, 104px);
       line-height: .92;
       letter-spacing: 0;
+    }
+    .pronunciation {
+      margin: 0 0 20px;
+      color: var(--muted);
+      font-size: 15px;
+      font-weight: 700;
     }
     h2 { margin: 0 0 12px; font-size: 28px; line-height: 1.1; letter-spacing: 0; }
     h3 { margin: 0 0 8px; font-size: 16px; letter-spacing: 0; }
@@ -314,6 +320,7 @@
       <div>
         <div class="eyebrow"><span class="dot"></span> Devnet prototype</div>
         <h1>iuna</h1>
+        <p class="pronunciation" aria-label="Pronounced yoo-nuh">/ˈjuː.nə/</p>
         <p class="lead">An experimental cryptocurrency devnet that combines VDF finalization, a burn lottery, and open proof-of-work issuance.</p>
         <p>iuna is not a mainnet and not money yet. It is a small L1 lab for learning how a wallet, node, finalizer, miner, mempool, and peer network behave when real people run it on real machines.</p>
         <div class="actions">
