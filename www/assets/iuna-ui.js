@@ -1747,6 +1747,7 @@ window.iunaApp = function iunaApp() {
     },
 
     burnLeaderRanks(block) {
+      if (Array.isArray(block?.burn_leader_ranks)) return block.burn_leader_ranks;
       return Array.isArray(block?.burnLeaderRanks) ? block.burnLeaderRanks : [];
     },
 
@@ -1761,8 +1762,8 @@ window.iunaApp = function iunaApp() {
     },
 
     burnLeaderEligibilityLabel(rank) {
-      const from = rank?.eligibleFromHeight ?? "-";
-      const until = rank?.eligibleUntilHeight ?? "-";
+      const from = rank?.eligible_from_height ?? rank?.eligibleFromHeight ?? "-";
+      const until = rank?.eligible_until_height ?? rank?.eligibleUntilHeight ?? "-";
       return `${from}-${until}`;
     },
 

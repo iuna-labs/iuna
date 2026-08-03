@@ -2866,7 +2866,7 @@ const INDEX_HTML: &str = r#"<!doctype html>
       .block-card { flex-basis: 108px; }
     }
   </style>
-  <script defer src="/assets/iuna-ui.js?v=75"></script>
+  <script defer src="/assets/iuna-ui.js?v=76"></script>
   <script defer src="/assets/alpine.min.js"></script>
 </head>
 <body x-data="iunaApp()" x-init="init()" @keydown.window.escape="closeModals()" x-cloak>
@@ -3542,13 +3542,13 @@ const INDEX_HTML: &str = r#"<!doctype html>
         <button type="button" @click="closeBurnLeaderRanksModal">Close</button>
       </div>
       <div class="rank-list">
-        <template x-for="rank in burnLeaderRanks(selectedBurnLeaderBlock)" :key="`${selectedBurnLeaderBlock.hash}-${rank.rank}-${rank.ticketId}`">
+        <template x-for="rank in burnLeaderRanks(selectedBurnLeaderBlock)" :key="`${selectedBurnLeaderBlock.hash}-${rank.rank}-${rank.ticket_id ?? rank.ticketId}`">
           <div class="rank-row">
             <div class="rank-number" x-text="burnLeaderRankLabel(rank)"></div>
             <div class="rank-details">
               <div class="tx-field"><span class="tx-label">Owner</span><code class="tx-value hash" x-text="rank.owner"></code></div>
               <div class="tx-field"><span class="tx-label">Burn</span><span class="tx-value money">IUNA <span x-text="amountLabel(rank.amount)"></span></span></div>
-              <div class="tx-field"><span class="tx-label">Ticket</span><code class="tx-value hash" x-text="short(rank.ticketId)"></code></div>
+              <div class="tx-field"><span class="tx-label">Ticket</span><code class="tx-value hash" x-text="short(rank.ticket_id ?? rank.ticketId)"></code></div>
               <div class="tx-field"><span class="tx-label">Eligible</span><span class="tx-value number" x-text="burnLeaderEligibilityLabel(rank)"></span></div>
             </div>
           </div>
@@ -4757,7 +4757,7 @@ mod tests {
 
     #[test]
     fn metrics_screen_includes_block_range_filter() {
-        assert!(super::INDEX_HTML.contains("iuna-ui.js?v=75"));
+        assert!(super::INDEX_HTML.contains("iuna-ui.js?v=76"));
         assert!(super::INDEX_HTML.contains("aria-label=\"Metrics block range\""));
         assert!(super::INDEX_HTML.contains("setMetricsRange(100)"));
         assert!(super::INDEX_HTML.contains("setMetricsRange(1000)"));
@@ -4819,6 +4819,8 @@ mod tests {
         assert!(super::INDEX_HTML.contains("burnLeaderRanks(selectedBurnLeaderBlock)"));
         assert!(app_js.contains("selectedBurnLeaderBlock"));
         assert!(app_js.contains("burnLeaderRankLabel(rank)"));
+        assert!(app_js.contains("block?.burn_leader_ranks"));
+        assert!(super::INDEX_HTML.contains("rank.ticket_id ?? rank.ticketId"));
     }
 
     async fn auth_test_state(config_path: std::path::PathBuf, config: UiConfig) -> HttpState {
