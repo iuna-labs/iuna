@@ -33,8 +33,8 @@ use crate::{
         FeeEstimate, NodeStatus, PeerDirection, PeerInfo, SharedNode, SharedPeerBook, StratumStatus,
     },
     domain::{
-        Amount, Block, BurnLeaderRank, Ledger, MINE_FINALIZER_FEE, MINE_REWARD, OutPoint,
-        Transaction, TxInput, TxOutput, hex_hash,
+        Amount, Block, BurnLeaderRank, ChainSnapshot, Ledger, MINE_FINALIZER_FEE, MINE_REWARD,
+        OutPoint, Transaction, TxInput, TxOutput, hex_hash, revealed_blinded_transactions,
     },
 };
 
@@ -360,6 +360,7 @@ struct UiBlock {
     leader_proof: Option<crate::domain::LeaderProof>,
     burn_leader_ranks: Vec<BurnLeaderRank>,
     transactions: Vec<UiTransaction>,
+    revealed_transactions: Vec<UiTransaction>,
     hash: String,
 }
 
@@ -728,13 +729,7 @@ async fn api_blocks(
             )
         })
         .collect::<BTreeMap<_, _>>();
-    Json(ui_blocks(
-        blocks,
-        &snapshot.genesis_allocations,
-        &snapshot.blocks,
-        &pending,
-        &burn_leader_ranks,
-    ))
+    Json(ui_blocks(blocks, &snapshot, &pending, &burn_leader_ranks))
 }
 
 async fn api_config(State(state): State<HttpState>) -> Json<UiConfig> {
@@ -755,7 +750,7 @@ async fn api_mempool(
     let node = state.node.lock().await;
     let snapshot = node.chain_snapshot();
     let pending = node.pending_transactions();
-    let outputs = known_output_index(&snapshot.genesis_allocations, &snapshot.blocks, &pending);
+    let outputs = known_output_index(&snapshot, &pending);
     Json(page_items(
         pending
             .iter()
@@ -772,7 +767,7 @@ async fn api_wallet_transactions(
     let node = state.node.lock().await;
     let snapshot = node.chain_snapshot();
     let pending = node.pending_transactions();
-    let outputs = known_output_index(&snapshot.genesis_allocations, &snapshot.blocks, &pending);
+    let outputs = known_output_index(&snapshot, &pending);
     let page_query = query.page();
     let filters = WalletTransactionFilters::from_query(query);
     Json(page_items(
@@ -1662,15 +1657,30 @@ fn wallet_transaction_row(
 
 fn ui_blocks(
     blocks: Vec<Block>,
-    genesis_allocations: &BTreeMap<String, Amount>,
-    chain: &[Block],
+    snapshot: &ChainSnapshot,
     pending: &[Transaction],
     burn_leader_ranks: &BTreeMap<String, Vec<BurnLeaderRank>>,
 ) -> Vec<UiBlock> {
-    let outputs = known_output_index(genesis_allocations, chain, pending);
+    let outputs = known_output_index(snapshot, pending);
+    let revealed = revealed_blinded_transactions(snapshot)
+        .unwrap_or_default()
+        .into_iter()
+        .fold(
+            BTreeMap::<u64, Vec<Transaction>>::new(),
+            |mut by_height, revealed| {
+                by_height
+                    .entry(revealed.height)
+                    .or_default()
+                    .push(revealed.transaction);
+                by_height
+            },
+        );
     blocks
         .into_iter()
-        .map(|block| ui_block(block, &outputs, burn_leader_ranks))
+        .map(|block| {
+            let revealed_transactions = revealed.get(&block.height).cloned().unwrap_or_default();
+            ui_block(block, &outputs, burn_leader_ranks, &revealed_transactions)
+        })
         .collect()
 }
 
@@ -1678,11 +1688,15 @@ fn ui_block(
     block: Block,
     outputs: &BTreeMap<OutPoint, TxOutput>,
     burn_leader_ranks: &BTreeMap<String, Vec<BurnLeaderRank>>,
+    revealed_transactions: &[Transaction],
 ) -> UiBlock {
     let ranks = burn_leader_ranks
         .get(&block.hash)
         .cloned()
         .unwrap_or_default();
+    let revealed_fees = revealed_transactions
+        .iter()
+        .fold(0_u64, |total, tx| total.saturating_add(tx.fee()));
     UiBlock {
         height: block.height,
         prev_hash: block.prev_hash,
@@ -1691,13 +1705,17 @@ fn ui_block(
         finalizer_mode: block.finalizer_mode,
         finalizer_rank: block.finalizer_rank,
         reward: block.reward,
-        total_fees: block.reward,
+        total_fees: block.reward.saturating_add(revealed_fees),
         vdf_rounds: block.vdf_rounds,
         vdf_output: block.vdf_output,
         leader_proof: block.leader_proof,
         burn_leader_ranks: ranks,
         transactions: block
             .transactions
+            .iter()
+            .map(|tx| ui_transaction(tx, outputs))
+            .collect(),
+        revealed_transactions: revealed_transactions
             .iter()
             .map(|tx| ui_transaction(tx, outputs))
             .collect(),
@@ -1819,12 +1837,11 @@ fn hex_nibble(byte: u8) -> Option<u8> {
 }
 
 fn known_output_index(
-    genesis_allocations: &BTreeMap<String, Amount>,
-    chain: &[Block],
+    snapshot: &ChainSnapshot,
     pending: &[Transaction],
 ) -> BTreeMap<OutPoint, TxOutput> {
     let mut outputs = BTreeMap::new();
-    for (address, amount) in genesis_allocations {
+    for (address, amount) in &snapshot.genesis_allocations {
         if *amount == 0 {
             continue;
         }
@@ -1836,7 +1853,8 @@ fn known_output_index(
             },
         );
     }
-    for block in chain {
+    let revealed = revealed_blinded_transactions(snapshot).unwrap_or_default();
+    for block in &snapshot.blocks {
         for transaction in &block.transactions {
             index_transaction_outputs(&mut outputs, transaction);
         }
@@ -1846,6 +1864,18 @@ fn known_output_index(
                 TxOutput {
                     address: block.miner.clone(),
                     amount: block.reward,
+                },
+            );
+        }
+    }
+    for revealed in revealed {
+        index_transaction_outputs(&mut outputs, &revealed.transaction);
+        if revealed.transaction.fee() > 0 {
+            outputs.insert(
+                blinded_fee_outpoint(&revealed.commitment),
+                TxOutput {
+                    address: revealed.included_by,
+                    amount: revealed.transaction.fee(),
                 },
             );
         }
@@ -1890,6 +1920,13 @@ fn reward_outpoint(block_hash: &str) -> OutPoint {
     OutPoint {
         txid: block_hash.to_string(),
         index: u32::MAX,
+    }
+}
+
+fn blinded_fee_outpoint(commitment: &str) -> OutPoint {
+    OutPoint {
+        txid: commitment.to_string(),
+        index: u32::MAX - 1,
     }
 }
 
@@ -2848,7 +2885,7 @@ const INDEX_HTML: &str = r#"<!doctype html>
       .block-card { flex-basis: 108px; }
     }
   </style>
-  <script defer src="/assets/iuna-ui.js?v=78"></script>
+  <script defer src="/assets/iuna-ui.js?v=79"></script>
   <script defer src="/assets/alpine.min.js"></script>
 </head>
 <body x-data="iunaApp()" x-init="init()" @keydown.window.escape="closeModals()" x-cloak>
@@ -3291,6 +3328,21 @@ const INDEX_HTML: &str = r#"<!doctype html>
                   </div>
                 </template>
                 <div class="muted" x-show="selectedBlock.transactions.length === 0">No transactions</div>
+                <template x-if="selectedBlock.revealed_transactions?.length">
+                  <div class="tx-list">
+                    <h3>Revealed</h3>
+                    <template x-for="tx in selectedBlock.revealed_transactions" :key="tx.signature">
+                      <div class="tx-card" role="button" tabindex="0" @click="openTransactionModal(tx, { source: 'Revealed', blockHeight: selectedBlock.height, blockFinalizer: selectedBlock.miner })" @keydown.enter.prevent="openTransactionModal(tx, { source: 'Revealed', blockHeight: selectedBlock.height, blockFinalizer: selectedBlock.miner })" @keydown.space.prevent="openTransactionModal(tx, { source: 'Revealed', blockHeight: selectedBlock.height, blockFinalizer: selectedBlock.miner })">
+                        <span class="pill" :class="tx.kind" x-text="tx.kind"></span>
+                        <div class="tx-field"><span class="tx-label">Amount</span><span class="tx-value money">IUNA <span x-text="amountLabel(txAmount(tx))"></span></span></div>
+                        <div class="tx-field"><span class="tx-label">Fee</span><span class="tx-value money">IUNA <span x-text="amountLabel(tx.fee ?? 0)"></span></span></div>
+                        <div class="tx-field"><span class="tx-label">From</span><code class="tx-value hash" x-text="short(txFrom(tx))"></code></div>
+                        <div class="tx-field" x-show="txTo(tx)"><span class="tx-label">To</span><code class="tx-value hash" x-text="short(txTo(tx))"></code></div>
+                        <div class="tx-field"><span class="tx-label">Signature</span><code class="tx-value hash" x-text="short(tx.signature)"></code></div>
+                      </div>
+                    </template>
+                  </div>
+                </template>
               </div>
             </div>
           </template>
@@ -3725,7 +3777,10 @@ mod tests {
             p2p::GossipNetwork, wallet_store,
         },
         app::{GossipEnvelope, NodeCore, PeerBook, PeerDirection, PeerInfo, StratumStatus},
-        domain::{Block, Ledger, MICRO_IUNA, MINE_FINALIZER_FEE, OutPoint, Transaction, Wallet},
+        domain::{
+            Amount, Block, ChainSnapshot, LaunchProfile, Ledger, MICRO_IUNA, MINE_FINALIZER_FEE,
+            OutPoint, Transaction, Wallet,
+        },
     };
 
     use super::{
@@ -4469,8 +4524,8 @@ mod tests {
             fake_block(32, vec![carol_burn]),
         ];
 
-        let outputs =
-            super::known_output_index(&allocations, &chain, std::slice::from_ref(&pending_burn));
+        let snapshot = fake_snapshot(allocations, chain.clone());
+        let outputs = super::known_output_index(&snapshot, std::slice::from_ref(&pending_burn));
         let rows = wallet_transaction_rows(
             alice.address(),
             vec![pending_burn.clone()],
@@ -4553,7 +4608,8 @@ mod tests {
         let ledger = Ledger::new(BTreeMap::new(), 1);
         let mine = ledger.build_mine(alice.address()).unwrap();
         let chain = vec![fake_block(1, vec![mine.clone()])];
-        let outputs = super::known_output_index(&BTreeMap::new(), &chain, &[]);
+        let snapshot = fake_snapshot(BTreeMap::new(), chain.clone());
+        let outputs = super::known_output_index(&snapshot, &[]);
 
         let rows = wallet_transaction_rows(
             alice.address(),
@@ -4582,7 +4638,8 @@ mod tests {
         allocations.insert(alice.address().to_string(), 10);
         let ledger = Ledger::new(allocations.clone(), 1);
         let burn = ledger.build_burn(&alice, 3, 1).unwrap();
-        let outputs = super::known_output_index(&allocations, &[], std::slice::from_ref(&burn));
+        let snapshot = fake_snapshot(allocations, Vec::new());
+        let outputs = super::known_output_index(&snapshot, std::slice::from_ref(&burn));
 
         let default_rows = wallet_transaction_rows(
             alice.address(),
@@ -4666,8 +4723,22 @@ mod tests {
             vdf_rounds: 0,
             vdf_output: "vdf".to_string(),
             leader_proof: None,
+            blinded_transactions: Vec::new(),
+            blinded_reveals: Vec::new(),
             transactions,
             hash: format!("hash-{height}"),
+        }
+    }
+
+    fn fake_snapshot(
+        genesis_allocations: BTreeMap<String, Amount>,
+        blocks: Vec<Block>,
+    ) -> ChainSnapshot {
+        ChainSnapshot {
+            genesis_allocations,
+            vdf_rounds: 1,
+            launch_profile: LaunchProfile::default(),
+            blocks,
         }
     }
 
@@ -4739,7 +4810,7 @@ mod tests {
 
     #[test]
     fn metrics_screen_includes_block_range_filter() {
-        assert!(super::INDEX_HTML.contains("iuna-ui.js?v=78"));
+        assert!(super::INDEX_HTML.contains("iuna-ui.js?v=79"));
         assert!(super::INDEX_HTML.contains("aria-label=\"Metrics block range\""));
         assert!(super::INDEX_HTML.contains("setMetricsRange(100)"));
         assert!(super::INDEX_HTML.contains("setMetricsRange(1000)"));

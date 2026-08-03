@@ -9,7 +9,7 @@ use std::{
     time::Duration,
 };
 
-use anyhow::{Context, Result};
+use anyhow::{Context, Result, anyhow};
 use ed25519_dalek::{Signature, Signer, SigningKey, Verifier, VerifyingKey};
 use serde::Serialize;
 use tokio::{
@@ -1296,6 +1296,18 @@ async fn process_envelope(
         GossipEnvelope::Transactions { transactions } => {
             process_transactions(network, writer, remote_addr, known_peer, transactions).await?;
         }
+        GossipEnvelope::BlindedTransaction(tx) => {
+            process_blinded_transactions(network, remote_addr, known_peer, vec![tx]).await;
+        }
+        GossipEnvelope::BlindedTransactions { transactions } => {
+            process_blinded_transactions(network, remote_addr, known_peer, transactions).await;
+        }
+        GossipEnvelope::BlindedReveal(reveal) => {
+            process_blinded_reveals(network, remote_addr, known_peer, vec![reveal]).await;
+        }
+        GossipEnvelope::BlindedReveals { reveals } => {
+            process_blinded_reveals(network, remote_addr, known_peer, reveals).await;
+        }
         GossipEnvelope::TransactionAck { accepted, rejected } => {
             let peer = known_peer
                 .clone()
@@ -1456,6 +1468,62 @@ fn receive_transactions_for_ack(
         }
     }
     (accepted, rejected)
+}
+
+async fn process_blinded_transactions(
+    network: &GossipNetwork,
+    remote_addr: SocketAddr,
+    known_peer: &Option<String>,
+    transactions: Vec<crate::domain::BlindedTransaction>,
+) {
+    let first_error = {
+        let mut node = network.inner.node.lock().await;
+        let mut first_error = None;
+        for tx in transactions {
+            if let Err(error) = node.receive_blinded_transaction(tx) {
+                first_error.get_or_insert(error);
+            }
+        }
+        first_error
+    };
+    record_inbound_result(
+        network,
+        known_peer,
+        remote_addr,
+        first_error
+            .map(|error| Err(anyhow!(format!("{error:#}"))))
+            .unwrap_or(Ok(())),
+    )
+    .await;
+    network.forward_outbox().await;
+}
+
+async fn process_blinded_reveals(
+    network: &GossipNetwork,
+    remote_addr: SocketAddr,
+    known_peer: &Option<String>,
+    reveals: Vec<crate::domain::BlindedReveal>,
+) {
+    let first_error = {
+        let mut node = network.inner.node.lock().await;
+        let mut first_error = None;
+        for reveal in reveals {
+            if let Err(error) = node.receive_blinded_reveal(reveal) {
+                first_error.get_or_insert(error);
+            }
+        }
+        first_error
+    };
+    record_inbound_result(
+        network,
+        known_peer,
+        remote_addr,
+        first_error
+            .map(|error| Err(anyhow!(format!("{error:#}"))))
+            .unwrap_or(Ok(())),
+    )
+    .await;
+    network.forward_outbox().await;
 }
 
 async fn maybe_request_catchup(
@@ -1821,6 +1889,10 @@ fn record_received_envelope_kind(metrics: &P2pMetricsCounters, envelope: &Gossip
         }
         GossipEnvelope::Transaction(_)
         | GossipEnvelope::Transactions { .. }
+        | GossipEnvelope::BlindedTransaction(_)
+        | GossipEnvelope::BlindedTransactions { .. }
+        | GossipEnvelope::BlindedReveal(_)
+        | GossipEnvelope::BlindedReveals { .. }
         | GossipEnvelope::Block(_)
         | GossipEnvelope::Blocks { .. }
         | GossipEnvelope::ChainSnapshot(_) => {
@@ -1883,6 +1955,20 @@ fn validate_envelope_limits(envelope: &GossipEnvelope) -> Result<()> {
                 TRANSACTION_BATCH_LIMIT,
             )?;
         }
+        GossipEnvelope::BlindedTransactions { transactions } => {
+            ensure_len(
+                "blinded transaction batch",
+                transactions.len(),
+                TRANSACTION_BATCH_LIMIT,
+            )?;
+        }
+        GossipEnvelope::BlindedReveals { reveals } => {
+            ensure_len(
+                "blinded reveal batch",
+                reveals.len(),
+                TRANSACTION_BATCH_LIMIT,
+            )?;
+        }
         GossipEnvelope::Blocks { blocks } => {
             ensure_len("block batch", blocks.len(), MAX_BLOCK_BATCH)?;
         }
@@ -1898,6 +1984,8 @@ fn validate_envelope_limits(envelope: &GossipEnvelope) -> Result<()> {
         GossipEnvelope::Hello(_)
         | GossipEnvelope::ChainSnapshotRequest
         | GossipEnvelope::Transaction(_)
+        | GossipEnvelope::BlindedTransaction(_)
+        | GossipEnvelope::BlindedReveal(_)
         | GossipEnvelope::Block(_)
         | GossipEnvelope::PeerAnnouncement { .. }
         | GossipEnvelope::PeerVerificationChallenge { .. }
@@ -3191,6 +3279,8 @@ mod tests {
             vdf_rounds: 1,
             vdf_output: "vdf".to_string(),
             leader_proof: None,
+            blinded_transactions: Vec::new(),
+            blinded_reveals: Vec::new(),
             transactions: Vec::new(),
             hash: "hash".to_string(),
         };

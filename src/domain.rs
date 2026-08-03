@@ -4,7 +4,12 @@ use std::{
 };
 
 use anyhow::{Context, Result, anyhow, bail};
+use chacha20poly1305::{
+    ChaCha20Poly1305, Nonce,
+    aead::{Aead, KeyInit},
+};
 use ed25519_dalek::{Signature, Signer, SigningKey, Verifier, VerifyingKey};
+use getrandom::getrandom;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 
@@ -47,6 +52,8 @@ const WALLET_SEED_DOMAIN: &str = "iuna-wallet-seed";
 const PUBLIC_KEY_BYTES: usize = 32;
 const HASH_BYTES: usize = 32;
 const SIGNATURE_BYTES: usize = 64;
+const BLINDED_KEY_BYTES: usize = 32;
+const BLINDED_NONCE_BYTES: usize = 12;
 const STRATUM_MINE_HEADER_BYTES: usize = 80;
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -136,6 +143,46 @@ pub enum Transaction {
         proof_header: Option<String>,
         signature: String,
     },
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct BlindedTransaction {
+    pub commitment: String,
+    pub fee: Amount,
+    pub encrypted_size: u32,
+    pub expires_at_height: u64,
+    pub nonce: String,
+    pub ciphertext: String,
+    pub payload_hash: String,
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct BlindedReveal {
+    pub commitment: String,
+    pub key: String,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct BuiltBlindedTransaction {
+    pub transaction: BlindedTransaction,
+    pub reveal: BlindedReveal,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct RevealedBlindedTransaction {
+    pub height: u64,
+    pub commitment: String,
+    pub included_by: String,
+    pub transaction: Transaction,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+struct ActiveBlindedTransaction {
+    transaction: BlindedTransaction,
+    included_height: u64,
+    included_by: String,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -376,6 +423,44 @@ impl Transaction {
             .iter()
             .all(|input| input.signature == "genesis")
     }
+}
+
+impl BlindedTransaction {
+    pub fn id(&self) -> &str {
+        &self.commitment
+    }
+
+    pub fn canonical(&self) -> String {
+        format!(
+            "blinded-tx:{}:{}:{}:{}:{}:{}",
+            self.fee,
+            self.encrypted_size,
+            self.expires_at_height,
+            self.nonce,
+            self.ciphertext,
+            self.payload_hash
+        )
+    }
+
+    pub fn fee_rate_size_bytes(&self) -> usize {
+        self.encrypted_size as usize
+    }
+
+    pub fn serialized_size_bytes(&self) -> Result<usize> {
+        serde_json::to_vec(self)
+            .map(|bytes| bytes.len())
+            .context("failed to serialize blinded transaction for size check")
+    }
+}
+
+impl BlindedReveal {
+    pub fn canonical(&self) -> String {
+        format!("blinded-reveal:{}:{}", self.commitment, self.key)
+    }
+}
+
+fn canonical_blinded_block_items(blinded: &str, reveals: &str) -> String {
+    format!("blinded:{blinded}:reveals:{reveals}")
 }
 
 impl TxInput {
@@ -722,6 +807,10 @@ pub struct Block {
     pub vdf_rounds: u64,
     pub vdf_output: String,
     pub leader_proof: Option<LeaderProof>,
+    #[serde(default)]
+    pub blinded_transactions: Vec<BlindedTransaction>,
+    #[serde(default)]
+    pub blinded_reveals: Vec<BlindedReveal>,
     pub transactions: Vec<Transaction>,
     pub hash: String,
 }
@@ -747,6 +836,8 @@ impl Block {
             vdf_rounds: draft.vdf_rounds,
             vdf_output: draft.vdf_output,
             leader_proof: draft.leader_proof,
+            blinded_transactions: draft.blinded_transactions,
+            blinded_reveals: draft.blinded_reveals,
             transactions: draft.transactions,
             hash: String::new(),
         };
@@ -779,6 +870,18 @@ impl Block {
             .map(Transaction::canonical)
             .collect::<Vec<_>>()
             .join("|");
+        let blinded = self
+            .blinded_transactions
+            .iter()
+            .map(BlindedTransaction::canonical)
+            .collect::<Vec<_>>()
+            .join("|");
+        let reveals = self
+            .blinded_reveals
+            .iter()
+            .map(BlindedReveal::canonical)
+            .collect::<Vec<_>>()
+            .join("|");
         let leader_proof = self
             .leader_proof
             .as_ref()
@@ -789,6 +892,21 @@ impl Block {
                 )
             })
             .unwrap_or_default();
+        if !self.blinded_transactions.is_empty() || !self.blinded_reveals.is_empty() {
+            return hex_hash(format!(
+                "block-content-v3:{}:{}:{}:{}:{}:{}:{}:{}:{}:{}",
+                self.height,
+                self.prev_hash,
+                self.timestamp_ms,
+                self.miner,
+                self.finalizer_rank,
+                self.reward,
+                self.vdf_rounds,
+                leader_proof,
+                txs,
+                canonical_blinded_block_items(&blinded, &reveals)
+            ));
+        }
         hex_hash(format!(
             "{}:{}",
             self.legacy_content_hash_prefix(&leader_proof),
@@ -948,6 +1066,8 @@ pub struct PreparedBlock {
     vdf_rounds: u64,
     vdf_seed: String,
     leader_ticket: Option<BurnTicket>,
+    blinded_transactions: Vec<BlindedTransaction>,
+    blinded_reveals: Vec<BlindedReveal>,
     transactions: Vec<Transaction>,
 }
 
@@ -1010,6 +1130,8 @@ impl PreparedBlock {
             vdf_rounds: self.vdf_rounds,
             vdf_output,
             leader_proof,
+            blinded_transactions: self.blinded_transactions,
+            blinded_reveals: self.blinded_reveals,
             transactions: self.transactions,
         })
     }
@@ -1027,6 +1149,8 @@ struct BlockDraft {
     vdf_rounds: u64,
     vdf_output: String,
     leader_proof: Option<LeaderProof>,
+    blinded_transactions: Vec<BlindedTransaction>,
+    blinded_reveals: Vec<BlindedReveal>,
     transactions: Vec<Transaction>,
 }
 
@@ -1181,6 +1305,13 @@ enum TransactionKind {
     Burn,
 }
 
+#[derive(Clone, Debug, Default, Eq, PartialEq)]
+struct BlockSelection {
+    transactions: Vec<Transaction>,
+    blinded_transactions: Vec<BlindedTransaction>,
+    blinded_reveals: Vec<BlindedReveal>,
+}
+
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum TransactionSubmitOutcome {
     Added,
@@ -1202,6 +1333,9 @@ pub struct Ledger {
     tickets: Vec<BurnTicket>,
     pending: Vec<Transaction>,
     orphans: Vec<Transaction>,
+    pending_blinded: Vec<BlindedTransaction>,
+    pending_reveals: Vec<BlindedReveal>,
+    active_blinded: BTreeMap<String, ActiveBlindedTransaction>,
     mine_reward: Amount,
     initial_vdf_rounds: u64,
     vdf_rounds: u64,
@@ -1249,6 +1383,9 @@ impl Ledger {
             tickets,
             pending: Vec::new(),
             orphans: Vec::new(),
+            pending_blinded: Vec::new(),
+            pending_reveals: Vec::new(),
+            active_blinded: BTreeMap::new(),
             mine_reward: MINE_REWARD,
             initial_vdf_rounds: vdf_rounds,
             vdf_rounds,
@@ -1301,6 +1438,9 @@ impl Ledger {
             tickets: Vec::new(),
             pending: Vec::new(),
             orphans: Vec::new(),
+            pending_blinded: Vec::new(),
+            pending_reveals: Vec::new(),
+            active_blinded: BTreeMap::new(),
             mine_reward: MINE_REWARD,
             initial_vdf_rounds: vdf_rounds,
             vdf_rounds,
@@ -1474,12 +1614,16 @@ impl Ledger {
     fn replace_with_better_chain(&mut self, mut candidate: Ledger, fork_point: ForkPoint) {
         let mut carry_forward = self.pending.clone();
         carry_forward.extend(self.orphans.clone());
+        let mut carry_forward_blinded = self.pending_blinded.clone();
+        let mut carry_forward_reveals = self.pending_reveals.clone();
         for block in self
             .chain
             .iter()
             .skip(fork_point.first_diverging_height() as usize)
         {
             carry_forward.extend(block.transactions.clone());
+            carry_forward_blinded.extend(block.blinded_transactions.clone());
+            carry_forward_reveals.extend(block.blinded_reveals.clone());
         }
 
         let mined_signatures = candidate
@@ -1488,10 +1632,32 @@ impl Ledger {
             .flat_map(|block| block.transactions.iter())
             .map(|tx| tx.signature().to_string())
             .collect::<BTreeSet<_>>();
+        let mined_blinded_commitments = candidate
+            .chain
+            .iter()
+            .flat_map(|block| block.blinded_transactions.iter())
+            .map(|transaction| transaction.commitment.clone())
+            .collect::<BTreeSet<_>>();
+        let mined_reveal_commitments = candidate
+            .chain
+            .iter()
+            .flat_map(|block| block.blinded_reveals.iter())
+            .map(|reveal| reveal.commitment.clone())
+            .collect::<BTreeSet<_>>();
 
         for transaction in carry_forward {
             if !mined_signatures.contains(transaction.signature()) {
                 let _ = candidate.submit_transaction(transaction);
+            }
+        }
+        for transaction in carry_forward_blinded {
+            if !mined_blinded_commitments.contains(&transaction.commitment) {
+                let _ = candidate.submit_blinded_transaction(transaction);
+            }
+        }
+        for reveal in carry_forward_reveals {
+            if !mined_reveal_commitments.contains(&reveal.commitment) {
+                let _ = candidate.submit_blinded_reveal(reveal);
             }
         }
 
@@ -1516,7 +1682,9 @@ impl Ledger {
             mine_reward: self.mine_reward,
             current_mine_difficulty_bits: self.current_mine_difficulty_bits(),
             balances: balances_from_utxos(&self.utxos),
-            pending_transactions: self.pending.len(),
+            pending_transactions: self.pending.len()
+                + self.pending_blinded.len()
+                + self.pending_reveals.len(),
         }
     }
 
@@ -1614,6 +1782,14 @@ impl Ledger {
         &self.pending
     }
 
+    pub fn pending_blinded_transactions(&self) -> &[BlindedTransaction] {
+        &self.pending_blinded
+    }
+
+    pub fn pending_blinded_reveals(&self) -> &[BlindedReveal] {
+        &self.pending_reveals
+    }
+
     pub fn orphan_transactions(&self) -> &[Transaction] {
         &self.orphans
     }
@@ -1633,6 +1809,31 @@ impl Ledger {
 
     pub fn has_transaction(&self, signature: &str) -> bool {
         self.transaction_by_signature(signature).is_some()
+    }
+
+    pub fn has_blinded_transaction(&self, commitment: &str) -> bool {
+        self.pending_blinded
+            .iter()
+            .any(|transaction| transaction.commitment == commitment)
+            || self.active_blinded.contains_key(commitment)
+            || self.chain.iter().any(|block| {
+                block
+                    .blinded_transactions
+                    .iter()
+                    .any(|tx| tx.commitment == commitment)
+            })
+    }
+
+    pub fn has_blinded_reveal(&self, commitment: &str) -> bool {
+        self.pending_reveals
+            .iter()
+            .any(|reveal| reveal.commitment == commitment)
+            || self.chain.iter().any(|block| {
+                block
+                    .blinded_reveals
+                    .iter()
+                    .any(|reveal| reveal.commitment == commitment)
+            })
     }
 
     pub fn vdf_rounds(&self) -> u64 {
@@ -1789,6 +1990,77 @@ impl Ledger {
         Ok(transaction)
     }
 
+    pub fn build_blinded_burn(
+        &self,
+        wallet: &Wallet,
+        amount: Amount,
+        fee: Amount,
+        expires_at_height: u64,
+    ) -> Result<BuiltBlindedTransaction> {
+        let transaction = self.build_burn(wallet, amount, fee)?;
+        self.blind_transaction(transaction, fee, expires_at_height)
+    }
+
+    pub fn build_blinded_transfer(
+        &self,
+        wallet: &Wallet,
+        to: impl Into<String>,
+        amount: Amount,
+        fee: Amount,
+        expires_at_height: u64,
+    ) -> Result<BuiltBlindedTransaction> {
+        let transaction = self.build_transfer(wallet, to, amount, fee)?;
+        self.blind_transaction(transaction, fee, expires_at_height)
+    }
+
+    fn blind_transaction(
+        &self,
+        transaction: Transaction,
+        fee: Amount,
+        expires_at_height: u64,
+    ) -> Result<BuiltBlindedTransaction> {
+        if expires_at_height <= self.height() {
+            bail!("blinded transaction expiry must be in the future");
+        }
+        if fee != transaction.fee() {
+            bail!("blinded transaction fee must match plaintext transaction fee");
+        }
+        let plaintext = serde_json::to_vec(&transaction)
+            .context("failed to serialize transaction for blinded payload")?;
+        let payload_hash = hex_hash(&plaintext);
+        let mut key = [0_u8; BLINDED_KEY_BYTES];
+        let mut nonce = [0_u8; BLINDED_NONCE_BYTES];
+        getrandom(&mut key)
+            .map_err(|error| anyhow!("failed to generate blinded transaction key: {error}"))?;
+        getrandom(&mut nonce)
+            .map_err(|error| anyhow!("failed to generate blinded transaction nonce: {error}"))?;
+        let ciphertext = encrypt_blinded_payload(&key, &nonce, fee, expires_at_height, &plaintext)?;
+        let encrypted_size = u32::try_from(ciphertext.len())
+            .context("blinded transaction ciphertext is too large")?;
+        let transaction = BlindedTransaction {
+            commitment: String::new(),
+            fee,
+            encrypted_size,
+            expires_at_height,
+            nonce: hex_encode(nonce),
+            ciphertext: hex_encode(&ciphertext),
+            payload_hash,
+        };
+        let commitment = blinded_transaction_commitment(&transaction)?;
+        let transaction = BlindedTransaction {
+            commitment: commitment.clone(),
+            ..transaction
+        };
+        self.validate_blinded_transaction(&transaction)?;
+        Ok(BuiltBlindedTransaction {
+            transaction,
+            reveal: BlindedReveal {
+                commitment,
+                key: hex_encode(key),
+            },
+        })
+    }
+
     pub fn build_mine(&self, recipient: impl Into<String>) -> Result<Transaction> {
         let recipient = recipient.into();
         validate_address(&recipient, "mine recipient")?;
@@ -1903,6 +2175,30 @@ impl Ledger {
         Ok(self.submit_transaction_with_outcome(transaction)?.added())
     }
 
+    pub fn submit_blinded_transaction(&mut self, transaction: BlindedTransaction) -> Result<bool> {
+        if self.has_blinded_transaction(&transaction.commitment) {
+            return Ok(false);
+        }
+        self.validate_blinded_transaction(&transaction)?;
+        if self.pending_blinded.len() >= MAX_PENDING_TRANSACTIONS {
+            bail!("blinded mempool is full");
+        }
+        self.pending_blinded.push(transaction);
+        Ok(true)
+    }
+
+    pub fn submit_blinded_reveal(&mut self, reveal: BlindedReveal) -> Result<bool> {
+        if self.has_blinded_reveal(&reveal.commitment) {
+            return Ok(false);
+        }
+        self.validate_blinded_reveal_terms(&reveal)?;
+        if self.pending_reveals.len() >= MAX_PENDING_TRANSACTIONS {
+            bail!("blinded reveal pool is full");
+        }
+        self.pending_reveals.push(reveal);
+        Ok(true)
+    }
+
     pub fn submit_transaction_with_outcome(
         &mut self,
         transaction: Transaction,
@@ -1961,8 +2257,8 @@ impl Ledger {
             bail!("no selected leader for block {height}");
         }
 
-        let transactions = self.select_block_transactions()?;
-        ensure_block_has_burn(&transactions)?;
+        let selection = self.select_block_transactions()?;
+        ensure_block_has_burn_or_blinded(&selection)?;
 
         let tip = self.tip();
         let prev_hash = tip.hash.clone();
@@ -1974,12 +2270,14 @@ impl Ledger {
             timestamp_ms,
             miner: miner.to_string(),
             finalizer_mode: FinalizerMode::Ticket,
-            reward: fee_reward(&transactions)?,
+            reward: fee_reward(&selection.transactions)?,
             vdf_rounds: self.vdf_rounds_for_finalizer_rank(finalizer_rank)?,
             vdf_seed,
             finalizer_rank,
             leader_ticket: Some(leader_ticket),
-            transactions,
+            blinded_transactions: selection.blinded_transactions,
+            blinded_reveals: selection.blinded_reveals,
+            transactions: selection.transactions,
         })
     }
 
@@ -2000,9 +2298,9 @@ impl Ledger {
             bail!("recovery block is not available before timestamp {min_timestamp}");
         }
 
-        let transactions = self.select_recovery_block_transactions(miner)?;
-        ensure_block_has_burn(&transactions)?;
-        ensure_block_has_burn_from(&transactions, miner)?;
+        let selection = self.select_recovery_block_transactions(miner)?;
+        ensure_block_has_burn(&selection.transactions)?;
+        ensure_block_has_burn_from(&selection.transactions, miner)?;
 
         let tip = self.tip();
         let prev_hash = tip.hash.clone();
@@ -2015,11 +2313,13 @@ impl Ledger {
             miner: miner.to_string(),
             finalizer_mode: FinalizerMode::Recovery,
             finalizer_rank: 0,
-            reward: fee_reward(&transactions)?,
+            reward: fee_reward(&selection.transactions)?,
             vdf_rounds: self.recovery_vdf_rounds()?,
             vdf_seed,
             leader_ticket: None,
-            transactions,
+            blinded_transactions: selection.blinded_transactions,
+            blinded_reveals: selection.blinded_reveals,
+            transactions: selection.transactions,
         })
     }
 
@@ -2068,12 +2368,27 @@ impl Ledger {
 
         let mut utxos = self.utxos.clone();
         let mut signatures = BTreeSet::new();
+        let mut revealed_transactions = Vec::new();
         for tx in &block.transactions {
             if !signatures.insert(tx.signature()) {
                 bail!("duplicate transaction in block");
             }
             self.validate_transaction_terms(tx)?;
             apply_transaction(tx, &mut utxos)?;
+        }
+        let mut revealed_commitments = BTreeSet::new();
+        for reveal in &block.blinded_reveals {
+            if !revealed_commitments.insert(reveal.commitment.clone()) {
+                bail!("duplicate blinded reveal in block");
+            }
+            let active = self
+                .active_blinded
+                .get(&reveal.commitment)
+                .context("blinded reveal does not reference an active blinded transaction")?;
+            let tx = self.decrypt_active_blinded(active, reveal)?;
+            apply_transaction(&tx, &mut utxos)?;
+            credit_blinded_fee_output(&mut utxos, active, &tx)?;
+            revealed_transactions.push(tx);
         }
         if block.reward != fee_reward(&block.transactions)? {
             bail!("block reward is invalid");
@@ -2082,15 +2397,47 @@ impl Ledger {
         apply_finalizer_ticket_effects(&block, &mut tickets)?;
         credit_reward_output(&mut utxos, &block)?;
         tickets.extend(tickets_created_by_block(&block, &self.launch_profile)?);
+        tickets.extend(tickets_created_by_transactions(
+            block.height,
+            &revealed_transactions,
+            &self.launch_profile,
+        )?);
 
         let mined_signatures = block
             .transactions
             .iter()
             .map(|tx| tx.signature().to_string())
             .collect::<BTreeSet<_>>();
+        let included_blinded = block
+            .blinded_transactions
+            .iter()
+            .map(|transaction| transaction.commitment.clone())
+            .collect::<BTreeSet<_>>();
+        let revealed_blinded = block
+            .blinded_reveals
+            .iter()
+            .map(|reveal| reveal.commitment.clone())
+            .collect::<BTreeSet<_>>();
         self.utxos = utxos;
         self.tickets = tickets;
         self.chain.push(block);
+        let new_height = self.height();
+        let tip_miner = self.tip().miner.clone();
+        let tip_blinded_transactions = self.tip().blinded_transactions.clone();
+        self.active_blinded.retain(|commitment, active| {
+            !revealed_blinded.contains(commitment)
+                && new_height < active.transaction.expires_at_height
+        });
+        for transaction in tip_blinded_transactions {
+            self.active_blinded.insert(
+                transaction.commitment.clone(),
+                ActiveBlindedTransaction {
+                    transaction,
+                    included_height: new_height,
+                    included_by: tip_miner.clone(),
+                },
+            );
+        }
         let available = self.utxos.clone();
         let pending = std::mem::take(&mut self.pending);
         self.pending = pending
@@ -2107,6 +2454,23 @@ impl Ledger {
             .filter(|tx| {
                 !mined_signatures.contains(tx.signature())
                     && self.validate_transaction_terms(tx).is_ok()
+            })
+            .collect();
+        let pending_blinded = std::mem::take(&mut self.pending_blinded);
+        self.pending_blinded = pending_blinded
+            .into_iter()
+            .filter(|transaction| {
+                !included_blinded.contains(&transaction.commitment)
+                    && new_height < transaction.expires_at_height
+                    && self.validate_blinded_transaction(transaction).is_ok()
+            })
+            .collect();
+        let pending_reveals = std::mem::take(&mut self.pending_reveals);
+        self.pending_reveals = pending_reveals
+            .into_iter()
+            .filter(|reveal| {
+                !revealed_blinded.contains(&reveal.commitment)
+                    && self.pending_reveal_transaction(reveal).is_ok()
             })
             .collect();
         self.promote_orphan_transactions()?;
@@ -2172,10 +2536,21 @@ impl Ledger {
         if block.transactions.len() > self.launch_profile.max_block_transactions {
             bail!("block has too many transactions");
         }
+        let block_item_count = block.transactions.len()
+            + block.blinded_transactions.len()
+            + block.blinded_reveals.len();
+        if block_item_count > self.launch_profile.max_block_transactions {
+            bail!("block has too many transaction items");
+        }
         if block.serialized_size_bytes()? > self.launch_profile.max_block_bytes {
             bail!("block exceeds max block size");
         }
-        ensure_block_has_burn(&block.transactions)?;
+        ensure_block_has_burn_or_blinded(&BlockSelection {
+            transactions: block.transactions.clone(),
+            blinded_transactions: block.blinded_transactions.clone(),
+            blinded_reveals: block.blinded_reveals.clone(),
+        })?;
+        validate_block_blinded_items(block, self)?;
         match block.finalizer_mode {
             FinalizerMode::Ticket => {
                 let selected_ticket = self
@@ -2289,21 +2664,25 @@ impl Ledger {
         valid
     }
 
-    fn select_block_transactions(&self) -> Result<Vec<Transaction>> {
+    fn select_block_transactions(&self) -> Result<BlockSelection> {
         self.select_block_transactions_with_required_burn_owner(None)
     }
 
-    fn select_recovery_block_transactions(&self, miner: &str) -> Result<Vec<Transaction>> {
+    fn select_recovery_block_transactions(&self, miner: &str) -> Result<BlockSelection> {
         self.select_block_transactions_with_required_burn_owner(Some(miner))
     }
 
     fn select_block_transactions_with_required_burn_owner(
         &self,
         required_burn_owner: Option<&str>,
-    ) -> Result<Vec<Transaction>> {
+    ) -> Result<BlockSelection> {
         let mut utxos = self.utxos.clone();
         let mut remaining = self.valid_pending_transactions();
+        let mut remaining_blinded = self.valid_pending_blinded_transactions();
+        let mut remaining_reveals = self.valid_pending_blinded_reveals();
         let mut selected = Vec::new();
+        let mut selected_blinded = Vec::new();
+        let mut selected_reveals = Vec::new();
 
         let needs_first_burn = !selected.iter().any(Transaction::is_burn);
         let needs_owner_burn = required_burn_owner.is_some_and(|owner| {
@@ -2319,9 +2698,15 @@ impl Ledger {
             };
             if let Some(index) = first_burn_index {
                 let tx = remaining.remove(index);
-                let mut candidate = selected.clone();
-                candidate.push(tx.clone());
-                if estimated_block_size_bytes(&candidate)? <= self.launch_profile.max_block_bytes {
+                let mut candidate = BlockSelection {
+                    transactions: selected.clone(),
+                    blinded_transactions: selected_blinded.clone(),
+                    blinded_reveals: selected_reveals.clone(),
+                };
+                candidate.transactions.push(tx.clone());
+                if estimated_block_selection_size_bytes(&candidate)?
+                    <= self.launch_profile.max_block_bytes
+                {
                     apply_transaction(&tx, &mut utxos)?;
                     selected.push(tx);
                 }
@@ -2329,18 +2714,73 @@ impl Ledger {
         }
 
         while selected.len() < self.launch_profile.max_block_transactions {
-            let Some(index) = best_selectable_transaction_index(&remaining, &utxos, None) else {
+            let selected_count = selected.len() + selected_blinded.len() + selected_reveals.len();
+            if selected_count >= self.launch_profile.max_block_transactions {
+                break;
+            }
+
+            let best_plain = best_selectable_transaction_index(&remaining, &utxos, None)
+                .map(|index| SelectableItem::Plain(index, fee_rate_key(&remaining[index])));
+            let best_blinded = best_selectable_blinded_index(&remaining_blinded).map(|index| {
+                SelectableItem::Blinded(index, blinded_fee_rate_key(&remaining_blinded[index]))
+            });
+            let best_reveal =
+                best_selectable_reveal_index(&remaining_reveals).map(SelectableItem::Reveal);
+            let Some(item) = best_selectable_item(best_plain, best_blinded, best_reveal) else {
                 break;
             };
-            let tx = remaining.remove(index);
-            let mut candidate = selected.clone();
-            candidate.push(tx.clone());
-            if estimated_block_size_bytes(&candidate)? <= self.launch_profile.max_block_bytes {
-                apply_transaction(&tx, &mut utxos)?;
-                selected.push(tx);
+
+            match item {
+                SelectableItem::Plain(index, _) => {
+                    let tx = remaining.remove(index);
+                    let mut candidate = BlockSelection {
+                        transactions: selected.clone(),
+                        blinded_transactions: selected_blinded.clone(),
+                        blinded_reveals: selected_reveals.clone(),
+                    };
+                    candidate.transactions.push(tx.clone());
+                    if estimated_block_selection_size_bytes(&candidate)?
+                        <= self.launch_profile.max_block_bytes
+                    {
+                        apply_transaction(&tx, &mut utxos)?;
+                        selected.push(tx);
+                    }
+                }
+                SelectableItem::Blinded(index, _) => {
+                    let transaction = remaining_blinded.remove(index);
+                    let mut candidate = BlockSelection {
+                        transactions: selected.clone(),
+                        blinded_transactions: selected_blinded.clone(),
+                        blinded_reveals: selected_reveals.clone(),
+                    };
+                    candidate.blinded_transactions.push(transaction.clone());
+                    if estimated_block_selection_size_bytes(&candidate)?
+                        <= self.launch_profile.max_block_bytes
+                    {
+                        selected_blinded.push(transaction);
+                    }
+                }
+                SelectableItem::Reveal(index) => {
+                    let reveal = remaining_reveals.remove(index);
+                    let mut candidate = BlockSelection {
+                        transactions: selected.clone(),
+                        blinded_transactions: selected_blinded.clone(),
+                        blinded_reveals: selected_reveals.clone(),
+                    };
+                    candidate.blinded_reveals.push(reveal.clone());
+                    if estimated_block_selection_size_bytes(&candidate)?
+                        <= self.launch_profile.max_block_bytes
+                    {
+                        selected_reveals.push(reveal);
+                    }
+                }
             }
         }
-        Ok(selected)
+        Ok(BlockSelection {
+            transactions: selected,
+            blinded_transactions: selected_blinded,
+            blinded_reveals: selected_reveals,
+        })
     }
 
     fn select_inputs(
@@ -2494,6 +2934,83 @@ impl Ledger {
             }
         }
         Ok(())
+    }
+
+    fn validate_blinded_transaction(&self, transaction: &BlindedTransaction) -> Result<()> {
+        validate_hash(&transaction.commitment, "blinded transaction commitment")?;
+        validate_hash(
+            &transaction.payload_hash,
+            "blinded transaction payload hash",
+        )?;
+        decode_hex_array::<BLINDED_NONCE_BYTES>(&transaction.nonce)
+            .context("invalid blinded transaction nonce")?;
+        let ciphertext = decode_hex(&transaction.ciphertext)
+            .context("invalid blinded transaction ciphertext")?;
+        if ciphertext.is_empty() {
+            bail!("blinded transaction ciphertext is empty");
+        }
+        if ciphertext.len() != transaction.encrypted_size as usize {
+            bail!("blinded transaction encrypted size is invalid");
+        }
+        if transaction.expires_at_height <= self.height() {
+            bail!("blinded transaction is expired");
+        }
+        let expected = blinded_transaction_commitment(transaction)?;
+        if transaction.commitment != expected {
+            bail!("blinded transaction commitment is invalid");
+        }
+        Ok(())
+    }
+
+    fn validate_blinded_reveal_terms(&self, reveal: &BlindedReveal) -> Result<()> {
+        validate_hash(&reveal.commitment, "blinded reveal commitment")?;
+        decode_hex_array::<BLINDED_KEY_BYTES>(&reveal.key).context("invalid blinded reveal key")?;
+        Ok(())
+    }
+
+    fn valid_pending_blinded_transactions(&self) -> Vec<BlindedTransaction> {
+        let next_height = self.height().saturating_add(1);
+        self.pending_blinded
+            .iter()
+            .filter(|transaction| {
+                transaction.expires_at_height > next_height
+                    && self.validate_blinded_transaction(transaction).is_ok()
+            })
+            .cloned()
+            .collect()
+    }
+
+    fn valid_pending_blinded_reveals(&self) -> Vec<BlindedReveal> {
+        self.pending_reveals
+            .iter()
+            .filter(|reveal| self.pending_reveal_transaction(reveal).is_ok())
+            .cloned()
+            .collect()
+    }
+
+    fn pending_reveal_transaction(&self, reveal: &BlindedReveal) -> Result<Transaction> {
+        self.validate_blinded_reveal_terms(reveal)?;
+        let active = self
+            .active_blinded
+            .get(&reveal.commitment)
+            .context("blinded reveal does not reference an active blinded transaction")?;
+        self.decrypt_active_blinded(active, reveal)
+    }
+
+    fn decrypt_active_blinded(
+        &self,
+        active: &ActiveBlindedTransaction,
+        reveal: &BlindedReveal,
+    ) -> Result<Transaction> {
+        if self.height() >= active.transaction.expires_at_height {
+            bail!("blinded transaction reveal is expired");
+        }
+        let transaction = decrypt_blinded_transaction(&active.transaction, reveal)?;
+        if transaction.fee() != active.transaction.fee {
+            bail!("blinded transaction reveal fee does not match envelope");
+        }
+        self.validate_transaction_terms(&transaction)?;
+        Ok(transaction)
     }
 
     fn utxos_after_valid_pending(&self) -> Result<BTreeMap<OutPoint, TxOutput>> {
@@ -2681,11 +3198,19 @@ fn base_vdf_rounds_for_finalizer_rank(vdf_rounds: u64, rank: u32) -> u64 {
 }
 
 fn tickets_created_by_block(block: &Block, profile: &LaunchProfile) -> Result<Vec<BurnTicket>> {
+    tickets_created_by_transactions(block.height, &block.transactions, profile)
+}
+
+fn tickets_created_by_transactions(
+    block_height: u64,
+    transactions: &[Transaction],
+    profile: &LaunchProfile,
+) -> Result<Vec<BurnTicket>> {
     if profile.ticket_expiry_window_heights == 0 {
         bail!("ticket expiry window must be at least one height");
     }
     let mut tickets = Vec::new();
-    for tx in &block.transactions {
+    for tx in transactions {
         let Transaction::Burn {
             inputs,
             amount,
@@ -2701,13 +3226,12 @@ fn tickets_created_by_block(block: &Block, profile: &LaunchProfile) -> Result<Ve
         if *amount == 0 {
             continue;
         }
-        let target_height = block
-            .height
+        let target_height = block_height
             .checked_add(profile.ticket_maturity_delay_heights)
-            .with_context(|| format!("ticket target height overflow at block {}", block.height))?;
+            .with_context(|| format!("ticket target height overflow at block {block_height}"))?;
         let eligible_until_height = target_height
             .checked_add(profile.ticket_expiry_window_heights - 1)
-            .with_context(|| format!("ticket expiry height overflow at block {}", block.height))?;
+            .with_context(|| format!("ticket expiry height overflow at block {block_height}"))?;
         tickets.push(BurnTicket {
             id: signature.clone(),
             owner,
@@ -2881,6 +3405,16 @@ fn ensure_block_has_burn(transactions: &[Transaction]) -> Result<()> {
     Ok(())
 }
 
+fn ensure_block_has_burn_or_blinded(selection: &BlockSelection) -> Result<()> {
+    if !selection.transactions.iter().any(Transaction::is_burn)
+        && selection.blinded_transactions.is_empty()
+        && selection.blinded_reveals.is_empty()
+    {
+        bail!("block must include at least one burn transaction or blinded transaction");
+    }
+    Ok(())
+}
+
 fn ensure_block_has_burn_from(transactions: &[Transaction], miner: &str) -> Result<()> {
     if !transactions
         .iter()
@@ -2911,6 +3445,67 @@ fn fee_rate_key(transaction: &Transaction) -> u128 {
         return 0;
     }
     u128::from(transaction.fee()) * 1_000_000 / size as u128
+}
+
+fn blinded_fee_rate_key(transaction: &BlindedTransaction) -> u128 {
+    let size = transaction.fee_rate_size_bytes();
+    if size == 0 {
+        return 0;
+    }
+    u128::from(transaction.fee) * 1_000_000 / size as u128
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum SelectableItem {
+    Plain(usize, u128),
+    Blinded(usize, u128),
+    Reveal(usize),
+}
+
+fn best_selectable_item(
+    plain: Option<SelectableItem>,
+    blinded: Option<SelectableItem>,
+    reveal: Option<SelectableItem>,
+) -> Option<SelectableItem> {
+    if reveal.is_some() {
+        return reveal;
+    }
+    match (plain, blinded) {
+        (
+            Some(SelectableItem::Plain(_, plain_rate)),
+            Some(SelectableItem::Blinded(_, blind_rate)),
+        ) => {
+            if blind_rate > plain_rate {
+                blinded
+            } else {
+                plain
+            }
+        }
+        (Some(item), None) | (None, Some(item)) => Some(item),
+        (None, None) => None,
+        _ => None,
+    }
+}
+
+fn best_selectable_blinded_index(transactions: &[BlindedTransaction]) -> Option<usize> {
+    transactions
+        .iter()
+        .enumerate()
+        .max_by(|(_, left), (_, right)| {
+            blinded_fee_rate_key(left)
+                .cmp(&blinded_fee_rate_key(right))
+                .then_with(|| left.fee.cmp(&right.fee))
+                .then_with(|| right.commitment.cmp(&left.commitment))
+        })
+        .map(|(index, _)| index)
+}
+
+fn best_selectable_reveal_index(reveals: &[BlindedReveal]) -> Option<usize> {
+    reveals
+        .iter()
+        .enumerate()
+        .min_by(|(_, left), (_, right)| left.commitment.cmp(&right.commitment))
+        .map(|(index, _)| index)
 }
 
 fn best_selectable_transaction_index(
@@ -3150,7 +3745,7 @@ fn compact_len(mut value: u128) -> usize {
     bytes
 }
 
-fn estimated_block_size_bytes(transactions: &[Transaction]) -> Result<usize> {
+fn estimated_block_selection_size_bytes(selection: &BlockSelection) -> Result<usize> {
     let block = Block {
         height: u64::MAX,
         prev_hash: "f".repeat(64),
@@ -3166,7 +3761,9 @@ fn estimated_block_size_bytes(transactions: &[Transaction]) -> Result<usize> {
             public_key: "f".repeat(64),
             signature: "f".repeat(128),
         }),
-        transactions: transactions.to_vec(),
+        blinded_transactions: selection.blinded_transactions.clone(),
+        blinded_reveals: selection.blinded_reveals.clone(),
+        transactions: selection.transactions.clone(),
         hash: "f".repeat(64),
     };
     block.serialized_size_bytes()
@@ -3283,6 +3880,139 @@ fn apply_transaction(
     Ok(())
 }
 
+fn validate_block_blinded_items(block: &Block, ledger: &Ledger) -> Result<()> {
+    let mut commitments = BTreeSet::new();
+    for transaction in &block.blinded_transactions {
+        if !commitments.insert(transaction.commitment.clone()) {
+            bail!("duplicate blinded transaction in block");
+        }
+        ledger.validate_blinded_transaction(transaction)?;
+        if transaction.expires_at_height <= block.height {
+            bail!("blinded transaction is expired for block height");
+        }
+        if ledger.active_blinded.contains_key(&transaction.commitment) {
+            bail!("blinded transaction is already active");
+        }
+        if ledger.chain.iter().any(|block| {
+            block
+                .blinded_transactions
+                .iter()
+                .any(|existing| existing.commitment == transaction.commitment)
+        }) {
+            bail!("blinded transaction is already on chain");
+        }
+    }
+
+    let mut reveals = BTreeSet::new();
+    for reveal in &block.blinded_reveals {
+        if !reveals.insert(reveal.commitment.clone()) {
+            bail!("duplicate blinded reveal in block");
+        }
+        if ledger.chain.iter().any(|block| {
+            block
+                .blinded_reveals
+                .iter()
+                .any(|existing| existing.commitment == reveal.commitment)
+        }) {
+            bail!("blinded reveal is already on chain");
+        }
+        ledger.pending_reveal_transaction(reveal)?;
+    }
+    Ok(())
+}
+
+fn decrypt_blinded_transaction(
+    transaction: &BlindedTransaction,
+    reveal: &BlindedReveal,
+) -> Result<Transaction> {
+    if reveal.commitment != transaction.commitment {
+        bail!("blinded reveal commitment does not match transaction");
+    }
+    let key =
+        decode_hex_array::<BLINDED_KEY_BYTES>(&reveal.key).context("invalid blinded reveal key")?;
+    let nonce = decode_hex_array::<BLINDED_NONCE_BYTES>(&transaction.nonce)
+        .context("invalid blinded transaction nonce")?;
+    let ciphertext =
+        decode_hex(&transaction.ciphertext).context("invalid blinded transaction ciphertext")?;
+    let plaintext = decrypt_blinded_payload(
+        &key,
+        &nonce,
+        transaction.fee,
+        transaction.expires_at_height,
+        &ciphertext,
+    )?;
+    if hex_hash(&plaintext) != transaction.payload_hash {
+        bail!("blinded transaction payload hash is invalid");
+    }
+    serde_json::from_slice(&plaintext).context("failed to decode blinded transaction payload")
+}
+
+fn encrypt_blinded_payload(
+    key: &[u8; BLINDED_KEY_BYTES],
+    nonce: &[u8; BLINDED_NONCE_BYTES],
+    fee: Amount,
+    expires_at_height: u64,
+    plaintext: &[u8],
+) -> Result<Vec<u8>> {
+    let cipher = ChaCha20Poly1305::new(key.into());
+    cipher
+        .encrypt(
+            Nonce::from_slice(nonce),
+            chacha20poly1305::aead::Payload {
+                msg: plaintext,
+                aad: blinded_payload_aad(fee, expires_at_height).as_bytes(),
+            },
+        )
+        .map_err(|_| anyhow!("failed to encrypt blinded transaction payload"))
+}
+
+fn decrypt_blinded_payload(
+    key: &[u8; BLINDED_KEY_BYTES],
+    nonce: &[u8; BLINDED_NONCE_BYTES],
+    fee: Amount,
+    expires_at_height: u64,
+    ciphertext: &[u8],
+) -> Result<Vec<u8>> {
+    let cipher = ChaCha20Poly1305::new(key.into());
+    cipher
+        .decrypt(
+            Nonce::from_slice(nonce),
+            chacha20poly1305::aead::Payload {
+                msg: ciphertext,
+                aad: blinded_payload_aad(fee, expires_at_height).as_bytes(),
+            },
+        )
+        .map_err(|_| anyhow!("failed to decrypt blinded transaction payload"))
+}
+
+fn blinded_payload_aad(fee: Amount, expires_at_height: u64) -> String {
+    format!("iuna-blinded-payload-v1:{fee}:{expires_at_height}")
+}
+
+fn blinded_transaction_commitment(transaction: &BlindedTransaction) -> Result<String> {
+    let mut without_commitment = transaction.clone();
+    without_commitment.commitment.clear();
+    Ok(hex_hash(without_commitment.canonical()))
+}
+
+fn credit_blinded_fee_output(
+    utxos: &mut BTreeMap<OutPoint, TxOutput>,
+    active: &ActiveBlindedTransaction,
+    transaction: &Transaction,
+) -> Result<()> {
+    let fee = transaction.fee();
+    if fee == 0 {
+        return Ok(());
+    }
+    let output = TxOutput {
+        address: active.included_by.clone(),
+        amount: fee,
+    };
+    ensure_outputs_do_not_overflow(utxos, std::slice::from_ref(&output))?;
+    utxos.insert(blinded_fee_outpoint(&active.transaction.commitment), output);
+    Ok(())
+}
+
 fn fee_reward(transactions: &[Transaction]) -> Result<Amount> {
     transactions.iter().try_fold(0_u64, |total, tx| {
         total.checked_add(tx.fee()).context("block fees overflow")
@@ -3395,6 +4125,8 @@ fn build_genesis_block(
         vdf_rounds: 0,
         vdf_output,
         leader_proof: None,
+        blinded_transactions: Vec::new(),
+        blinded_reveals: Vec::new(),
         transactions,
         hash: String::new(),
     };
@@ -3463,6 +4195,13 @@ fn reward_outpoint(block_hash: &str) -> OutPoint {
     }
 }
 
+fn blinded_fee_outpoint(commitment: &str) -> OutPoint {
+    OutPoint {
+        txid: commitment.to_string(),
+        index: u32::MAX - 1,
+    }
+}
+
 fn validate_genesis_block(block: &Block) -> Result<()> {
     if block.height != 0 {
         bail!("genesis block height must be 0");
@@ -3484,6 +4223,9 @@ fn validate_genesis_block(block: &Block) -> Result<()> {
     }
     if block.leader_proof.is_some() {
         bail!("genesis block must not carry a leader proof");
+    }
+    if !block.blinded_transactions.is_empty() || !block.blinded_reveals.is_empty() {
+        bail!("genesis block must not carry blinded transactions");
     }
     if block.compute_hash() != block.hash {
         bail!("genesis block hash is invalid");
@@ -3543,6 +4285,51 @@ pub fn verify_vdf(seed: &str, rounds: u64, solution: &str) -> bool {
     let remainder = pow_mod_small(2, rounds, challenge) as u128;
     let verified = mul_mod(mod_pow(proof, challenge as u128), mod_pow(x, remainder));
     verified == y
+}
+
+pub fn revealed_blinded_transactions(
+    snapshot: &ChainSnapshot,
+) -> Result<Vec<RevealedBlindedTransaction>> {
+    let mut active = BTreeMap::<String, ActiveBlindedTransaction>::new();
+    let mut revealed = Vec::new();
+    for block in &snapshot.blocks {
+        for reveal in &block.blinded_reveals {
+            let active_transaction = active.get(&reveal.commitment).with_context(|| {
+                format!(
+                    "block {} reveals unknown blinded transaction {}",
+                    block.height, reveal.commitment
+                )
+            })?;
+            let transaction = decrypt_blinded_transaction(&active_transaction.transaction, reveal)?;
+            if transaction.fee() != active_transaction.transaction.fee {
+                bail!(
+                    "block {} blinded reveal fee does not match envelope",
+                    block.height
+                );
+            }
+            revealed.push(RevealedBlindedTransaction {
+                height: block.height,
+                commitment: reveal.commitment.clone(),
+                included_by: active_transaction.included_by.clone(),
+                transaction,
+            });
+            active.remove(&reveal.commitment);
+        }
+        active.retain(|_, active_transaction| {
+            block.height < active_transaction.transaction.expires_at_height
+        });
+        for transaction in &block.blinded_transactions {
+            active.insert(
+                transaction.commitment.clone(),
+                ActiveBlindedTransaction {
+                    transaction: transaction.clone(),
+                    included_height: block.height,
+                    included_by: block.miner.clone(),
+                },
+            );
+        }
+    }
+    Ok(revealed)
 }
 
 fn vdf_seed_element(seed: &str) -> u128 {
@@ -3824,6 +4611,8 @@ mod tests {
             vdf_rounds: 1,
             vdf_output: String::new(),
             leader_proof: None,
+            blinded_transactions: Vec::new(),
+            blinded_reveals: Vec::new(),
             transactions: Vec::new(),
             hash: String::new(),
         }
@@ -3857,6 +4646,45 @@ mod tests {
             .iter()
             .find(|wallet| wallet.address() == address)
             .unwrap_or_else(|| panic!("missing wallet for address {address}"))
+    }
+
+    fn ledger_with_finalizers(
+        finalizers: &[Wallet],
+        extra_allocations: &[(&Wallet, Amount)],
+    ) -> Ledger {
+        let mut allocations = BTreeMap::new();
+        for wallet in finalizers {
+            allocations.insert(wallet.address().to_string(), 10 * MICRO_IUNA);
+        }
+        for (wallet, amount) in extra_allocations {
+            allocations.insert(wallet.address().to_string(), *amount);
+        }
+        Ledger::new_with_genesis_burns(
+            allocations,
+            finalizers
+                .iter()
+                .map(|wallet| GenesisBurn::new(wallet.address(), MICRO_IUNA))
+                .collect(),
+            1,
+        )
+        .unwrap()
+    }
+
+    fn mine_preverified_as_next_leader(
+        ledger: &mut Ledger,
+        wallets: &[Wallet],
+        timestamp_ms: u64,
+    ) -> Block {
+        let leader = ledger.expected_leader_for_next_block().unwrap();
+        let wallet = wallet_for_address(wallets, &leader);
+        let prepared = ledger
+            .prepare_next_block(wallet.address(), timestamp_ms)
+            .unwrap();
+        let block = prepared.finish(wallet, "preverified-vdf".to_string());
+        ledger
+            .apply_preverified_block_at(block.clone(), u64::MAX)
+            .unwrap();
+        block
     }
 
     fn transfer_with_extra_zero_outputs(
@@ -4646,6 +5474,8 @@ mod tests {
                 public_key: "alice".to_string(),
                 signature: "signature".to_string(),
             }),
+            blinded_transactions: Vec::new(),
+            blinded_reveals: Vec::new(),
             transactions: Vec::new(),
         });
 
@@ -4728,6 +5558,202 @@ mod tests {
         let prepared = ledger.prepare_next_block(alice.address(), 1).unwrap();
 
         assert_eq!(prepared.reward, burn_fee);
+    }
+
+    #[test]
+    fn blinded_burn_commits_ciphertext_and_reveal_executes_later() {
+        let alice = Wallet::from_seed("blinded-burn-finalizer-alice");
+        let bob = Wallet::from_seed("blinded-burn-finalizer-bob");
+        let carol = Wallet::from_seed("blinded-burn-carol");
+        let finalizers = [alice.clone(), bob.clone()];
+        let mut ledger = ledger_with_finalizers(&finalizers, &[(&carol, 10 * MICRO_IUNA)]);
+        let fee = 7;
+        let burn_amount = 3;
+        let before_carol = ledger.balance_of(carol.address());
+
+        let blinded = ledger
+            .build_blinded_burn(&carol, burn_amount, fee, ledger.height() + 4)
+            .unwrap();
+        assert!(!blinded.transaction.ciphertext.contains("burn"));
+        assert!(!blinded.transaction.ciphertext.contains(carol.address()));
+        ledger
+            .submit_blinded_transaction(blinded.transaction.clone())
+            .unwrap();
+
+        let commit_block = mine_preverified_as_next_leader(&mut ledger, &finalizers, 1);
+        let inclusion_finalizer = commit_block.miner.clone();
+        assert!(commit_block.transactions.is_empty());
+        assert_eq!(commit_block.blinded_transactions, vec![blinded.transaction]);
+        assert_eq!(commit_block.reward, 0);
+        let before_inclusion_finalizer = ledger.balance_of(&inclusion_finalizer);
+
+        ledger.submit_blinded_reveal(blinded.reveal).unwrap();
+        let reveal_block = mine_preverified_as_next_leader(&mut ledger, &finalizers, 2);
+
+        assert_eq!(reveal_block.blinded_reveals.len(), 1);
+        assert_eq!(
+            ledger.balance_of(carol.address()),
+            before_carol - burn_amount - fee
+        );
+        assert_eq!(
+            ledger.balance_of(&inclusion_finalizer),
+            before_inclusion_finalizer + fee
+        );
+    }
+
+    #[test]
+    fn blinded_reveal_with_wrong_key_is_rejected_in_block() {
+        let alice = Wallet::from_seed("blinded-wrong-key-finalizer-alice");
+        let bob = Wallet::from_seed("blinded-wrong-key-finalizer-bob");
+        let carol = Wallet::from_seed("blinded-wrong-key-carol");
+        let finalizers = [alice.clone(), bob.clone()];
+        let mut ledger = ledger_with_finalizers(&finalizers, &[(&carol, 10 * MICRO_IUNA)]);
+        let blinded = ledger
+            .build_blinded_burn(&carol, 3, 7, ledger.height() + 4)
+            .unwrap();
+        ledger
+            .submit_blinded_transaction(blinded.transaction.clone())
+            .unwrap();
+        mine_preverified_as_next_leader(&mut ledger, &finalizers, 1);
+
+        let leader = ledger.expected_leader_for_next_block().unwrap();
+        let wallet = wallet_for_address(&finalizers, &leader);
+        let filler_burn = ledger.build_burn(wallet, 1, 0).unwrap();
+        ledger.submit_transaction(filler_burn).unwrap();
+        let mut prepared = ledger
+            .prepare_next_block(wallet.address(), ledger.tip().timestamp_ms + 1)
+            .unwrap();
+        prepared.blinded_reveals.push(BlindedReveal {
+            commitment: blinded.transaction.commitment,
+            key: "00".repeat(BLINDED_KEY_BYTES),
+        });
+        let block = prepared.finish(wallet, "preverified-vdf".to_string());
+
+        let error = ledger
+            .apply_preverified_block_at(block, u64::MAX)
+            .unwrap_err();
+
+        assert!(format!("{error:#}").contains("failed to decrypt blinded transaction payload"));
+    }
+
+    #[test]
+    fn expired_blinded_reveal_is_not_selected() {
+        let alice = Wallet::from_seed("blinded-expire-finalizer-alice");
+        let bob = Wallet::from_seed("blinded-expire-finalizer-bob");
+        let carol = Wallet::from_seed("blinded-expire-carol");
+        let finalizers = [alice.clone(), bob.clone()];
+        let mut ledger = ledger_with_finalizers(&finalizers, &[(&carol, 10 * MICRO_IUNA)]);
+        let blinded = ledger
+            .build_blinded_burn(&carol, 3, 7, ledger.height() + 2)
+            .unwrap();
+        ledger
+            .submit_blinded_transaction(blinded.transaction.clone())
+            .unwrap();
+        mine_preverified_as_next_leader(&mut ledger, &finalizers, 1);
+
+        let leader = ledger.expected_leader_for_next_block().unwrap();
+        let wallet = wallet_for_address(&finalizers, &leader);
+        let filler_burn = ledger.build_burn(wallet, 1, 0).unwrap();
+        ledger.submit_transaction(filler_burn).unwrap();
+        mine_preverified_as_next_leader(&mut ledger, &finalizers, 2);
+
+        ledger.submit_blinded_reveal(blinded.reveal).unwrap();
+        assert!(ledger.valid_pending_blinded_reveals().is_empty());
+    }
+
+    #[test]
+    fn blinded_transaction_expiring_at_next_height_is_not_selected() {
+        let alice = Wallet::from_seed("blinded-next-expire-finalizer-alice");
+        let bob = Wallet::from_seed("blinded-next-expire-finalizer-bob");
+        let carol = Wallet::from_seed("blinded-next-expire-carol");
+        let finalizers = [alice.clone(), bob.clone()];
+        let mut ledger = ledger_with_finalizers(&finalizers, &[(&carol, 10 * MICRO_IUNA)]);
+        let blinded = ledger
+            .build_blinded_burn(&carol, 3, 7, ledger.height() + 1)
+            .unwrap();
+        ledger
+            .submit_blinded_transaction(blinded.transaction)
+            .unwrap();
+
+        let leader = ledger.expected_leader_for_next_block().unwrap();
+        let wallet = wallet_for_address(&finalizers, &leader);
+        let error = ledger.prepare_next_block(wallet.address(), 1).unwrap_err();
+
+        assert!(format!("{error:#}").contains("block must include at least one burn transaction"));
+    }
+
+    #[test]
+    fn revealed_blinded_transaction_cannot_be_included_again() {
+        let alice = Wallet::from_seed("blinded-duplicate-finalizer-alice");
+        let bob = Wallet::from_seed("blinded-duplicate-finalizer-bob");
+        let carol = Wallet::from_seed("blinded-duplicate-carol");
+        let finalizers = [alice.clone(), bob.clone()];
+        let mut ledger = ledger_with_finalizers(&finalizers, &[(&carol, 10 * MICRO_IUNA)]);
+        let blinded = ledger
+            .build_blinded_burn(&carol, 3, 7, ledger.height() + 6)
+            .unwrap();
+        ledger
+            .submit_blinded_transaction(blinded.transaction.clone())
+            .unwrap();
+        mine_preverified_as_next_leader(&mut ledger, &finalizers, 1);
+        ledger
+            .submit_blinded_reveal(blinded.reveal.clone())
+            .unwrap();
+        mine_preverified_as_next_leader(&mut ledger, &finalizers, 2);
+
+        let leader = ledger.expected_leader_for_next_block().unwrap();
+        let wallet = wallet_for_address(&finalizers, &leader);
+        let filler_burn = ledger.build_burn(wallet, 1, 0).unwrap();
+        ledger.submit_transaction(filler_burn).unwrap();
+        let mut prepared = ledger
+            .prepare_next_block(wallet.address(), ledger.tip().timestamp_ms + 1)
+            .unwrap();
+        prepared
+            .blinded_transactions
+            .push(blinded.transaction.clone());
+        let block = prepared.finish(wallet, "preverified-vdf".to_string());
+
+        let error = ledger
+            .apply_preverified_block_at(block, u64::MAX)
+            .unwrap_err();
+
+        assert!(format!("{error:#}").contains("blinded transaction is already on chain"));
+    }
+
+    #[test]
+    fn abandoned_fork_blinded_transactions_return_to_mempool() {
+        let alice = Wallet::from_seed("blinded-reorg-finalizer-alice");
+        let bob = Wallet::from_seed("blinded-reorg-finalizer-bob");
+        let carol = Wallet::from_seed("blinded-reorg-carol");
+        let finalizers = [alice.clone(), bob.clone()];
+        let mut local = ledger_with_finalizers(&finalizers, &[(&carol, 10 * MICRO_IUNA)]);
+        let mut remote = local.clone();
+        let blinded = local
+            .build_blinded_burn(&carol, 3, 7, local.height() + 8)
+            .unwrap();
+        local
+            .submit_blinded_transaction(blinded.transaction.clone())
+            .unwrap();
+        mine_preverified_as_next_leader(&mut local, &finalizers, 1);
+
+        for timestamp_ms in [1, 2] {
+            let leader = remote.expected_leader_for_next_block().unwrap();
+            let wallet = wallet_for_address(&finalizers, &leader);
+            let burn = remote.build_burn(wallet, 1, 0).unwrap();
+            remote.submit_transaction(burn).unwrap();
+            mine_preverified_as_next_leader(&mut remote, &finalizers, timestamp_ms);
+        }
+
+        assert!(
+            local
+                .extend_from_preverified_snapshot_at(remote.snapshot(), u64::MAX)
+                .unwrap()
+        );
+        assert!(local.has_blinded_transaction(&blinded.transaction.commitment));
+        assert_eq!(
+            local.pending_blinded_transactions(),
+            std::slice::from_ref(&blinded.transaction)
+        );
     }
 
     #[test]

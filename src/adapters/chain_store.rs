@@ -9,7 +9,9 @@ use rusqlite::{Connection, OptionalExtension, params};
 
 use serde::Serialize;
 
-use crate::domain::{Amount, ChainSnapshot, Ledger, MINE_REWARD, Transaction};
+use crate::domain::{
+    Amount, ChainSnapshot, Ledger, MINE_REWARD, Transaction, revealed_blinded_transactions,
+};
 
 const SCHEMA: &str = r#"
 CREATE TABLE IF NOT EXISTS chain_snapshots (
@@ -297,6 +299,16 @@ fn clear_metrics_in_transaction(transaction: &rusqlite::Transaction<'_>) -> Resu
 fn metrics_from_snapshot(snapshot: &ChainSnapshot) -> Result<Vec<BlockMetricRow>> {
     let ledger = Ledger::from_persisted_snapshot(snapshot.clone())
         .context("failed to rebuild ledger for metrics")?;
+    let revealed = revealed_blinded_transactions(snapshot)?.into_iter().fold(
+        std::collections::BTreeMap::<u64, Vec<Transaction>>::new(),
+        |mut by_height, revealed| {
+            by_height
+                .entry(revealed.height)
+                .or_default()
+                .push(revealed.transaction);
+            by_height
+        },
+    );
     let mut circulating_supply =
         snapshot
             .genesis_allocations
@@ -311,6 +323,7 @@ fn metrics_from_snapshot(snapshot: &ChainSnapshot) -> Result<Vec<BlockMetricRow>
     let mut previous_timestamp_ms = None;
 
     for block in &snapshot.blocks {
+        let revealed_transactions = revealed.get(&block.height).cloned().unwrap_or_default();
         let mut transfer_count = 0_u64;
         let mut burn_count = 0_u64;
         let mut mine_count = 0_u64;
@@ -318,7 +331,11 @@ fn metrics_from_snapshot(snapshot: &ChainSnapshot) -> Result<Vec<BlockMetricRow>
         let mut mine_issued_amount = 0_u64;
         let mut fees_amount = 0_u64;
 
-        for transaction in &block.transactions {
+        for transaction in block
+            .transactions
+            .iter()
+            .chain(revealed_transactions.iter())
+        {
             fees_amount = fees_amount
                 .checked_add(transaction.fee())
                 .context("block metric fees overflow")?;
@@ -339,7 +356,6 @@ fn metrics_from_snapshot(snapshot: &ChainSnapshot) -> Result<Vec<BlockMetricRow>
                 }
             }
         }
-
         total_burned_amount = total_burned_amount
             .checked_add(burned_amount)
             .context("total burned metric overflows")?;
@@ -374,7 +390,7 @@ fn metrics_from_snapshot(snapshot: &ChainSnapshot) -> Result<Vec<BlockMetricRow>
             block_time_ms,
             mine_difficulty_bits: ledger.mine_difficulty_bits_at_height(block.height),
             circulating_supply,
-            transaction_count: block.transactions.len() as u64,
+            transaction_count: (block.transactions.len() + revealed_transactions.len()) as u64,
             transfer_count,
             burn_count,
             mine_count,
@@ -487,6 +503,60 @@ mod tests {
 
         store.clear_metrics().unwrap();
         assert!(store.load_metrics().unwrap().is_empty());
+    }
+
+    #[test]
+    fn sqlite_chain_store_metrics_include_revealed_blinded_burns() {
+        let dir = tempdir().unwrap();
+        let store = SqliteChainStore::open(dir.path().join("chain.sqlite3")).unwrap();
+        let alice = Wallet::from_seed("metrics-blinded-alice");
+        let bob = Wallet::from_seed("metrics-blinded-bob");
+        let carol = Wallet::from_seed("metrics-blinded-carol");
+        let wallets = [alice.clone(), bob.clone()];
+        let mut genesis = BTreeMap::new();
+        genesis.insert(alice.address().to_string(), 10_000_000);
+        genesis.insert(bob.address().to_string(), 10_000_000);
+        genesis.insert(carol.address().to_string(), 10_000_000);
+        let mut ledger = Ledger::new_with_genesis_burns(
+            genesis,
+            vec![
+                GenesisBurn::new(alice.address(), 1_000_000),
+                GenesisBurn::new(bob.address(), 1_000_000),
+            ],
+            1,
+        )
+        .unwrap();
+        let blinded = ledger
+            .build_blinded_burn(&carol, 3, 7, ledger.height() + 4)
+            .unwrap();
+        ledger
+            .submit_blinded_transaction(blinded.transaction)
+            .unwrap();
+        let leader = ledger.expected_leader_for_next_block().unwrap();
+        let wallet = wallets
+            .iter()
+            .find(|wallet| wallet.address() == leader)
+            .unwrap();
+        let block = ledger.mine_next_block(wallet, 1).unwrap();
+        ledger.apply_locally_mined_block(block).unwrap();
+        ledger.submit_blinded_reveal(blinded.reveal).unwrap();
+        let leader = ledger.expected_leader_for_next_block().unwrap();
+        let wallet = wallets
+            .iter()
+            .find(|wallet| wallet.address() == leader)
+            .unwrap();
+        let block = ledger.mine_next_block(wallet, 2).unwrap();
+        ledger.apply_locally_mined_block(block).unwrap();
+
+        store.save_with_metrics(&ledger.snapshot(), true).unwrap();
+        let metrics = store.load_metrics().unwrap();
+        let last = metrics.last().unwrap();
+        let supply_from_balances = ledger.status().balances.values().copied().sum::<u64>();
+
+        assert_eq!(last.burn_count, 1);
+        assert_eq!(last.burned_amount, 3);
+        assert_eq!(last.fees_amount, 7);
+        assert_eq!(last.circulating_supply, supply_from_balances);
     }
 
     #[test]

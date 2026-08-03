@@ -1696,7 +1696,7 @@ window.iunaApp = function iunaApp() {
     },
 
     blockBurned(block) {
-      return block.transactions
+      return this.blockTransactions(block)
         .filter((tx) => tx.kind === "burn")
         .reduce((sum, tx) => sum + this.txAmount(tx), 0);
     },
@@ -1704,7 +1704,7 @@ window.iunaApp = function iunaApp() {
     blockTotalFees(block) {
       const explicitTotal = block?.totalFees ?? block?.total_fees ?? block?.reward;
       if (explicitTotal !== null && explicitTotal !== undefined) return Number(explicitTotal) || 0;
-      return (block?.transactions || []).reduce((sum, tx) => sum + Number(tx.fee || 0), 0);
+      return this.blockTransactions(block).reduce((sum, tx) => sum + Number(tx.fee || 0), 0);
     },
 
     recentBlockFeeAverage(count) {
@@ -1714,15 +1714,22 @@ window.iunaApp = function iunaApp() {
     },
 
     blockBurnCount(block) {
-      return block.transactions.filter((tx) => tx.kind === "burn").length;
+      return this.blockTransactions(block).filter((tx) => tx.kind === "burn").length;
     },
 
     blockTransferCount(block) {
-      return block.transactions.filter((tx) => tx.kind === "transfer").length;
+      return this.blockTransactions(block).filter((tx) => tx.kind === "transfer").length;
     },
 
     blockMineCount(block) {
-      return block.transactions.filter((tx) => tx.kind === "mine").length;
+      return this.blockTransactions(block).filter((tx) => tx.kind === "mine").length;
+    },
+
+    blockTransactions(block) {
+      return [
+        ...(block?.transactions || []),
+        ...(block?.revealedTransactions || block?.revealed_transactions || []),
+      ];
     },
 
     burnCountLabel(block) {

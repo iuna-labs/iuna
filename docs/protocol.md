@@ -17,7 +17,8 @@ iuna uses a UTXO-style ledger. The main transaction types are:
 1. **Transfer:** moves IUNA from one address to another and pays a sender-chosen fee.
 2. **Burn:** destroys an amount of IUNA, pays a sender-chosen fee, and creates a future lottery ticket.
 3. **Mine action:** proves SHA-256-style PoW against the current chain tip. A valid mine action mints a fixed `1 IUNA` reward to its recipient and pays a fixed `1 IUNA` fee to the block finalizer.
-4. **Burn claim:** proves that recent finalizers saw a burn that has not been included yet.
+4. **Blinded transaction envelope:** commits encrypted transaction content to a block before the finalizer can inspect whether it is a burn or transfer.
+5. **Blinded reveal:** publishes the decryption key for a previously committed envelope so nodes can validate and execute the hidden transaction.
 
 Burn and transfer fees are chosen by the sender. Mine action reward and mine action fee are deterministic protocol values.
 
@@ -43,7 +44,7 @@ For each block height, eligible tickets are ranked:
 
 The selected finalizer must prove ownership of the selected ticket, respect its rank time slot, and run the required VDF work. A block is valid only if the finalizer matches its ranked ticket, carries the correct leader proof, has a valid timestamp for its rank, includes a valid VDF output, and follows the transaction selection rules.
 
-Every normal block must include at least one burn transaction. Transaction fees go to the block finalizer.
+Every normal block must include at least one plaintext burn, blinded transaction envelope, or blinded reveal. Plaintext transaction fees go to the block finalizer immediately; blinded transaction fees are paid to the finalizer that committed the envelope when the payload is revealed and executed.
 
 ## VDF Timing
 
@@ -112,17 +113,32 @@ This keeps issuance separate from finalization. PoW miners compete to create min
 
 The central censorship risk is simple: what if a finalizer only includes its own burns and ignores everyone else's burns?
 
-The current devnet protocol does not yet have a consensus-level burn inclusion fairness mechanism. Nodes gossip burn transactions through the normal mempool, blocks must include at least one burn, and finalizers earn the fees of the transactions they include. That gives finalizers a direct economic reason to include third-party burns, but it does not make censorship impossible.
+iuna now supports blinded transaction content for this path. A wallet can encrypt a normal transaction payload and gossip a `BlindedTransaction` envelope instead of the plaintext transaction. The envelope exposes only:
 
-This is an active protocol-design area. A production-grade solution likely needs stronger mempool or transaction ordering rules, for example a blinded mempool or commit-reveal style mechanism where finalizers cannot cheaply distinguish burns from other fee-paying transactions before committing to inclusion.
+- a commitment hash;
+- the declared fee;
+- encrypted payload size;
+- expiry height;
+- nonce, ciphertext, and plaintext payload hash.
+
+The finalizer can rank the envelope by fee per encrypted byte, but cannot see whether the encrypted payload is a transfer or a burn before committing it to a block.
+
+Reveal is a later step. A `BlindedReveal` carries only the commitment and decryption key. When a valid reveal is included, nodes decrypt the earlier payload, check the commitment and payload hash, decode the normal transaction, validate it against the current UTXO set, and execute it. If the decrypted transaction is a burn, it creates burn tickets at the reveal height, just like a plaintext burn would.
+
+Fees are paid without inflating the reveal block reward. The decrypted transaction must pay the same fee declared by the blinded envelope. When it executes, that fee is credited to the finalizer that originally included the blinded envelope, using a deterministic fee output tied to the commitment.
+
+Expiry is exclusive: a blinded envelope with expiry height `H` can be included only in blocks below height `H`, and revealed only while the current chain height is below `H`. Expired envelopes and reveals are dropped from local selection.
+
+This does not make censorship impossible. A finalizer can still ignore all blinded traffic, or censor based on network metadata. But it removes the cheap strategy of inspecting plaintext mempool transactions and excluding third-party burns while including other fee-paying transactions.
 
 ## Block Selection
 
 When a node builds a block, it selects transactions in this order:
 
-1. Ensure the block has at least one burn.
-2. For recovery blocks, ensure at least one burn is from the recovery finalizer.
-3. Fill remaining space with valid transactions ordered by fee rate.
+1. Include valid blinded reveals first, so already committed encrypted payloads can execute.
+2. Ensure the block has at least one plaintext burn, blinded transaction, or blinded reveal.
+3. For recovery blocks, ensure at least one plaintext burn is from the recovery finalizer.
+4. Fill remaining space with valid plaintext transactions and blinded transactions ordered by fee rate.
 
 Blocks are bounded by transaction count and serialized byte size. The current devnet maximum block size is `100,000` bytes.
 
@@ -140,6 +156,6 @@ iuna is trying to make these things true at the same time:
 - New issuance should not require already owning a large stake.
 - Burns should have real opportunity cost.
 - Block timing should be hard to rush.
-- Finalizers should have a consensus-level reason to include burns they did not create.
+- Finalizers should have a consensus-level reason to include burn traffic they cannot inspect before committing.
 
 The design is intentionally small and still evolving. The devnet exists to find out where these assumptions hold and where they break.
