@@ -2290,6 +2290,8 @@ mod tests {
             .iter()
             .find(|wallet| wallet.address() == leader)
             .unwrap();
+        let burn = finalizer_ledger.build_burn(finalizer, 1, 0).unwrap();
+        finalizer_ledger.submit_transaction(burn).unwrap();
         let commit_block = finalizer_ledger.mine_next_block(finalizer, 1).unwrap();
 
         wallet_node

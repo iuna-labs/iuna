@@ -44,7 +44,7 @@ For each block height, eligible tickets are ranked:
 
 The selected finalizer must prove ownership of the selected ticket, respect its rank time slot, and run the required VDF work. A block is valid only if the finalizer matches its ranked ticket, carries the correct leader proof, has a valid timestamp for its rank, includes a valid VDF output, and follows the transaction selection rules.
 
-Every normal block must include at least one plaintext burn, blinded transaction envelope, or blinded reveal. Plaintext transaction fees go to the block finalizer immediately; blinded transaction fees are paid to the finalizer that committed the envelope when the payload is revealed and executed.
+Every normal block must include at least one plaintext burn. A blinded transaction envelope does not satisfy that rule, because the finalizer and validators cannot know whether the encrypted payload is a burn until reveal. Plaintext transaction fees go to the block finalizer immediately; blinded transaction fees are paid to the finalizer that committed the envelope when the payload is revealed and executed.
 
 ## VDF Timing
 
@@ -136,7 +136,7 @@ This does not make censorship impossible. A finalizer can still ignore all blind
 When a node builds a block, it selects transactions in this order:
 
 1. Include valid blinded reveals first, so already committed encrypted payloads can execute.
-2. Ensure the block has at least one plaintext burn, blinded transaction, or blinded reveal.
+2. Ensure the block has at least one plaintext burn.
 3. For recovery blocks, ensure at least one plaintext burn is from the recovery finalizer.
 4. Fill remaining space with valid plaintext transactions and blinded transactions ordered by fee rate.
 

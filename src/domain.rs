@@ -2258,7 +2258,7 @@ impl Ledger {
         }
 
         let selection = self.select_block_transactions()?;
-        ensure_block_has_burn_or_blinded(&selection)?;
+        ensure_block_has_burn(&selection.transactions)?;
 
         let tip = self.tip();
         let prev_hash = tip.hash.clone();
@@ -2545,11 +2545,7 @@ impl Ledger {
         if block.serialized_size_bytes()? > self.launch_profile.max_block_bytes {
             bail!("block exceeds max block size");
         }
-        ensure_block_has_burn_or_blinded(&BlockSelection {
-            transactions: block.transactions.clone(),
-            blinded_transactions: block.blinded_transactions.clone(),
-            blinded_reveals: block.blinded_reveals.clone(),
-        })?;
+        ensure_block_has_burn(&block.transactions)?;
         validate_block_blinded_items(block, self)?;
         match block.finalizer_mode {
             FinalizerMode::Ticket => {
@@ -3401,16 +3397,6 @@ fn floor_log2_ratio(numerator: u64, denominator: u64) -> u32 {
 fn ensure_block_has_burn(transactions: &[Transaction]) -> Result<()> {
     if !transactions.iter().any(Transaction::is_burn) {
         bail!("block must include at least one burn transaction");
-    }
-    Ok(())
-}
-
-fn ensure_block_has_burn_or_blinded(selection: &BlockSelection) -> Result<()> {
-    if !selection.transactions.iter().any(Transaction::is_burn)
-        && selection.blinded_transactions.is_empty()
-        && selection.blinded_reveals.is_empty()
-    {
-        bail!("block must include at least one burn transaction or blinded transaction");
     }
     Ok(())
 }
@@ -4687,6 +4673,13 @@ mod tests {
         block
     }
 
+    fn queue_next_leader_burn(ledger: &mut Ledger, wallets: &[Wallet]) {
+        let leader = ledger.expected_leader_for_next_block().unwrap();
+        let wallet = wallet_for_address(wallets, &leader);
+        let burn = ledger.build_burn(wallet, 1, 0).unwrap();
+        ledger.submit_transaction(burn).unwrap();
+    }
+
     fn transfer_with_extra_zero_outputs(
         ledger: &Ledger,
         wallet: &Wallet,
@@ -5579,15 +5572,24 @@ mod tests {
         ledger
             .submit_blinded_transaction(blinded.transaction.clone())
             .unwrap();
+        queue_next_leader_burn(&mut ledger, &finalizers);
 
         let commit_block = mine_preverified_as_next_leader(&mut ledger, &finalizers, 1);
         let inclusion_finalizer = commit_block.miner.clone();
-        assert!(commit_block.transactions.is_empty());
+        assert_eq!(
+            commit_block
+                .transactions
+                .iter()
+                .filter(|transaction| transaction.is_burn())
+                .count(),
+            1
+        );
         assert_eq!(commit_block.blinded_transactions, vec![blinded.transaction]);
         assert_eq!(commit_block.reward, 0);
         let before_inclusion_finalizer = ledger.balance_of(&inclusion_finalizer);
 
         ledger.submit_blinded_reveal(blinded.reveal).unwrap();
+        queue_next_leader_burn(&mut ledger, &finalizers);
         let reveal_block = mine_preverified_as_next_leader(&mut ledger, &finalizers, 2);
 
         assert_eq!(reveal_block.blinded_reveals.len(), 1);
@@ -5595,9 +5597,18 @@ mod tests {
             ledger.balance_of(carol.address()),
             before_carol - burn_amount - fee
         );
+        let reveal_plaintext_burn_spent_by_inclusion_finalizer = reveal_block
+            .transactions
+            .iter()
+            .filter(|transaction| {
+                transaction.is_burn() && transaction.sender() == inclusion_finalizer.as_str()
+            })
+            .fold(0_u64, |total, transaction| {
+                total + transaction.amount() + transaction.fee()
+            });
         assert_eq!(
             ledger.balance_of(&inclusion_finalizer),
-            before_inclusion_finalizer + fee
+            before_inclusion_finalizer + fee - reveal_plaintext_burn_spent_by_inclusion_finalizer
         );
     }
 
@@ -5614,6 +5625,7 @@ mod tests {
         ledger
             .submit_blinded_transaction(blinded.transaction.clone())
             .unwrap();
+        queue_next_leader_burn(&mut ledger, &finalizers);
         mine_preverified_as_next_leader(&mut ledger, &finalizers, 1);
 
         let leader = ledger.expected_leader_for_next_block().unwrap();
@@ -5649,6 +5661,7 @@ mod tests {
         ledger
             .submit_blinded_transaction(blinded.transaction.clone())
             .unwrap();
+        queue_next_leader_burn(&mut ledger, &finalizers);
         mine_preverified_as_next_leader(&mut ledger, &finalizers, 1);
 
         let leader = ledger.expected_leader_for_next_block().unwrap();
@@ -5683,6 +5696,27 @@ mod tests {
     }
 
     #[test]
+    fn blinded_transaction_does_not_satisfy_plaintext_burn_requirement() {
+        let alice = Wallet::from_seed("blinded-no-burn-finalizer-alice");
+        let bob = Wallet::from_seed("blinded-no-burn-finalizer-bob");
+        let carol = Wallet::from_seed("blinded-no-burn-carol");
+        let finalizers = [alice.clone(), bob.clone()];
+        let mut ledger = ledger_with_finalizers(&finalizers, &[(&carol, 10 * MICRO_IUNA)]);
+        let blinded = ledger
+            .build_blinded_burn(&carol, 3, 7, ledger.height() + 4)
+            .unwrap();
+        ledger
+            .submit_blinded_transaction(blinded.transaction)
+            .unwrap();
+
+        let leader = ledger.expected_leader_for_next_block().unwrap();
+        let wallet = wallet_for_address(&finalizers, &leader);
+        let error = ledger.prepare_next_block(wallet.address(), 1).unwrap_err();
+
+        assert!(format!("{error:#}").contains("block must include at least one burn transaction"));
+    }
+
+    #[test]
     fn revealed_blinded_transaction_cannot_be_included_again() {
         let alice = Wallet::from_seed("blinded-duplicate-finalizer-alice");
         let bob = Wallet::from_seed("blinded-duplicate-finalizer-bob");
@@ -5695,10 +5729,12 @@ mod tests {
         ledger
             .submit_blinded_transaction(blinded.transaction.clone())
             .unwrap();
+        queue_next_leader_burn(&mut ledger, &finalizers);
         mine_preverified_as_next_leader(&mut ledger, &finalizers, 1);
         ledger
             .submit_blinded_reveal(blinded.reveal.clone())
             .unwrap();
+        queue_next_leader_burn(&mut ledger, &finalizers);
         mine_preverified_as_next_leader(&mut ledger, &finalizers, 2);
 
         let leader = ledger.expected_leader_for_next_block().unwrap();
@@ -5734,6 +5770,7 @@ mod tests {
         local
             .submit_blinded_transaction(blinded.transaction.clone())
             .unwrap();
+        queue_next_leader_burn(&mut local, &finalizers);
         mine_preverified_as_next_leader(&mut local, &finalizers, 1);
 
         for timestamp_ms in [1, 2] {

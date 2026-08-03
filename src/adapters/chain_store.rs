@@ -537,6 +537,8 @@ mod tests {
             .iter()
             .find(|wallet| wallet.address() == leader)
             .unwrap();
+        let burn = ledger.build_burn(wallet, 1, 0).unwrap();
+        ledger.submit_transaction(burn).unwrap();
         let block = ledger.mine_next_block(wallet, 1).unwrap();
         ledger.apply_locally_mined_block(block).unwrap();
         ledger.submit_blinded_reveal(blinded.reveal).unwrap();
@@ -545,6 +547,8 @@ mod tests {
             .iter()
             .find(|wallet| wallet.address() == leader)
             .unwrap();
+        let burn = ledger.build_burn(wallet, 1, 0).unwrap();
+        ledger.submit_transaction(burn).unwrap();
         let block = ledger.mine_next_block(wallet, 2).unwrap();
         ledger.apply_locally_mined_block(block).unwrap();
 
@@ -553,8 +557,8 @@ mod tests {
         let last = metrics.last().unwrap();
         let supply_from_balances = ledger.status().balances.values().copied().sum::<u64>();
 
-        assert_eq!(last.burn_count, 1);
-        assert_eq!(last.burned_amount, 3);
+        assert_eq!(last.burn_count, 2);
+        assert_eq!(last.burned_amount, 4);
         assert_eq!(last.fees_amount, 7);
         assert_eq!(last.circulating_supply, supply_from_balances);
     }
