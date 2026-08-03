@@ -1171,6 +1171,14 @@ window.iunaApp = function iunaApp() {
       return Array.isArray(this.blockchainMetrics?.charts) ? this.blockchainMetrics.charts : [];
     },
 
+    metricsChainCharts() {
+      return this.metricsCharts().filter((chart) => chart.section !== "burnClaims");
+    },
+
+    metricsBurnClaimCharts() {
+      return this.metricsCharts().filter((chart) => chart.section === "burnClaims");
+    },
+
     metricsLatest() {
       return this.blockchainMetrics?.latest || {};
     },
