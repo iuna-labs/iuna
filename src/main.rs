@@ -1326,8 +1326,8 @@ mod tests {
         connection
             .execute(
                 r#"
-INSERT INTO chain_snapshots (id, height, tip_hash, snapshot_json, updated_at_ms)
-VALUES (1, 4, 'bad-tip', '{"not":"a chain snapshot"}', 0)
+INSERT INTO chain_snapshots (id, height, tip_hash, snapshot_blob, updated_at_ms)
+VALUES (1, 4, 'bad-tip', x'00010203', 0)
 "#,
                 [],
             )
@@ -1342,7 +1342,7 @@ VALUES (1, 4, 'bad-tip', '{"not":"a chain snapshot"}', 0)
             .unwrap_err();
 
         assert!(
-            format!("{error:#}").contains("failed to parse chain snapshot from database"),
+            format!("{error:#}").contains("failed to parse compact chain snapshot from database"),
             "{error:#}"
         );
     }
@@ -1372,7 +1372,8 @@ VALUES (1, 4, 'bad-tip', '{"not":"a chain snapshot"}', 0)
         ));
         {
             let mut node = node.lock().await;
-            node.burn(1).unwrap();
+            let burn = node.ledger().build_burn(&wallet, 1, 0).unwrap();
+            node.receive_transaction(burn).unwrap();
             node.mine_one_at(1_000).unwrap();
         }
 

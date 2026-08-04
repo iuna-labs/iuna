@@ -12,7 +12,8 @@ use iuna::{
     domain::{
         Amount, BLOCK_REWARD, DEFAULT_FEE_PER_BYTE, FinalizerMode, GenesisBurn, Ledger,
         MAX_BLOCK_BYTES, MICRO_IUNA, MINE_REWARD, RECOVERY_BLOCK_DELAY_MS,
-        TransactionSubmitOutcome, VDF_TARGET_BLOCK_MS, Wallet, run_vdf, verify_vdf,
+        TransactionSubmitOutcome, VDF_TARGET_BLOCK_MS, Wallet, revealed_blinded_transactions,
+        run_vdf, verify_vdf,
     },
 };
 use tempfile::tempdir;
@@ -73,6 +74,27 @@ fn mine_wallet_burn_block(ledger: &mut Ledger, wallet: &Wallet, timestamp_ms: u6
 fn submit_burn(ledger: &mut Ledger, wallet: &Wallet, amount: Amount) {
     let tx = ledger.build_burn(wallet, amount, 0).unwrap();
     ledger.submit_transaction(tx).unwrap();
+}
+
+fn queue_plaintext_burn(
+    node: &mut NodeCore,
+    wallet: &Wallet,
+    amount: Amount,
+) -> iuna::domain::Transaction {
+    let tx = node.ledger().build_burn(wallet, amount, 0).unwrap();
+    node.receive_transaction(tx.clone()).unwrap();
+    tx
+}
+
+fn queue_plaintext_transfer(
+    node: &mut NodeCore,
+    wallet: &Wallet,
+    to: impl Into<String>,
+    amount: Amount,
+) -> iuna::domain::Transaction {
+    let tx = node.ledger().build_transfer(wallet, to, amount, 0).unwrap();
+    node.receive_transaction(tx.clone()).unwrap();
+    tx
 }
 
 fn burn_tx(ledger: &Ledger, wallet: &Wallet, amount: Amount) -> iuna::domain::Transaction {
@@ -219,7 +241,7 @@ fn burn_in_block_creates_ticket_after_maturity_delay() {
     let alice = Wallet::from_seed("alice");
     let bob = Wallet::from_seed("bob");
     let mut allocations = BTreeMap::new();
-    allocations.insert(alice.address().to_string(), 1_000);
+    allocations.insert(alice.address().to_string(), MICRO_IUNA);
     allocations.insert(bob.address().to_string(), MICRO_IUNA);
 
     let mut ledger = Ledger::new(allocations, 10);
@@ -285,7 +307,7 @@ fn forged_transaction_is_rejected() {
     let alice = Wallet::from_seed("alice");
     let bob = Wallet::from_seed("bob");
     let mut allocations = BTreeMap::new();
-    allocations.insert(alice.address().to_string(), 1_000);
+    allocations.insert(alice.address().to_string(), MICRO_IUNA);
     allocations.insert(bob.address().to_string(), MICRO_IUNA);
     let mut ledger = Ledger::new(allocations, 10);
 
@@ -302,7 +324,7 @@ fn forged_transaction_is_rejected() {
 fn block_with_forged_transaction_is_rejected() {
     let alice = Wallet::from_seed("alice");
     let mut allocations = BTreeMap::new();
-    allocations.insert(alice.address().to_string(), 1_000);
+    allocations.insert(alice.address().to_string(), MICRO_IUNA);
     let mut ledger = Ledger::new(allocations, 10);
     submit_burn(&mut ledger, &alice, 1);
 
@@ -545,7 +567,7 @@ fn block_without_mature_ticket_cannot_be_mined() {
 fn vdf_work_requires_at_least_one_pending_burn() {
     let alice = Wallet::from_seed("alice");
     let mut allocations = BTreeMap::new();
-    allocations.insert(alice.address().to_string(), 1_000);
+    allocations.insert(alice.address().to_string(), MICRO_IUNA);
 
     let ledger = Ledger::new(allocations, 10);
     let error = ledger.prepare_next_block(alice.address(), 1).unwrap_err();
@@ -608,7 +630,7 @@ fn automatic_mining_burns_configured_amount_once_per_height() {
     assert!(second.burned.is_some());
     let burned = second.burned.as_ref().unwrap();
     assert_eq!(burned.amount(), iuna(25));
-    assert!(burned.fee() >= burned.economic_size_bytes() as u64 * DEFAULT_FEE_PER_BYTE);
+    assert!(burned.fee() > burned.economic_size_bytes() as u64 * DEFAULT_FEE_PER_BYTE);
 }
 
 #[test]
@@ -636,7 +658,7 @@ fn default_automatic_mining_does_not_burn() {
 fn burn_per_block_can_be_set_to_zero() {
     let alice = Wallet::from_seed("alice");
     let mut allocations = BTreeMap::new();
-    allocations.insert(alice.address().to_string(), 1_000);
+    allocations.insert(alice.address().to_string(), MICRO_IUNA);
     let mut node = node("alice", alice, allocations);
 
     let burned = node.set_burn_per_block(25).unwrap();
@@ -676,7 +698,7 @@ fn automatic_mining_uses_configured_burn_fee() {
 
     let burned = node.set_automatic_burn(50, 3).unwrap().unwrap();
     assert_eq!(burned.amount(), 50);
-    assert_eq!(burned.fee(), burned.economic_size_bytes() as u64 * 3);
+    assert!(burned.fee() > burned.economic_size_bytes() as u64 * 3);
 }
 
 #[test]
@@ -697,7 +719,7 @@ fn automatic_mining_caps_burn_to_spendable_balance_after_fee() {
     let burned = outcome.burned.as_ref().unwrap();
     let unspent = BLOCK_REWARD - burned.amount() - burned.fee();
     assert!(unspent <= DEFAULT_FEE_PER_BYTE);
-    assert!(burned.fee() >= burned.economic_size_bytes() as u64 * DEFAULT_FEE_PER_BYTE);
+    assert!(burned.fee() > burned.economic_size_bytes() as u64 * DEFAULT_FEE_PER_BYTE);
     assert!(outcome.block.is_some());
     assert_eq!(
         node.ledger().balance_of(alice.address()),
@@ -706,11 +728,11 @@ fn automatic_mining_caps_burn_to_spendable_balance_after_fee() {
 }
 
 #[test]
-fn setting_burn_rate_after_running_at_zero_adds_mempool_burn() {
+fn setting_burn_rate_after_running_at_zero_prepares_private_anchor_burn() {
     let alice = Wallet::from_seed("alice");
     let bob = Wallet::from_seed("bob");
     let mut allocations = BTreeMap::new();
-    allocations.insert(alice.address().to_string(), 1_000);
+    allocations.insert(alice.address().to_string(), MICRO_IUNA);
     allocations.insert(bob.address().to_string(), MICRO_IUNA);
 
     let mut ledger = Ledger::new(allocations.clone(), 25);
@@ -718,21 +740,21 @@ fn setting_burn_rate_after_running_at_zero_adds_mempool_burn() {
     let first = ledger.mine_next_block(&alice, 1).unwrap();
     ledger.apply_block(first).unwrap();
 
-    let mut bob_node = node("bob", bob.clone(), allocations);
-    bob_node
+    let mut alice_node = node("alice", alice.clone(), allocations);
+    alice_node
         .receive(iuna::app::GossipEnvelope::ChainSnapshot(ledger.snapshot()))
         .unwrap();
 
-    let skipped = bob_node.automatic_mine_once(2);
+    let skipped = alice_node.automatic_mine_once(2);
     assert!(skipped.burned.is_none());
     assert!(skipped.block.is_none());
 
-    let burned = bob_node.set_burn_per_block(1).unwrap();
+    let burned = alice_node.set_burn_per_block(1).unwrap();
 
     assert!(burned.is_some());
-    assert_eq!(bob_node.ledger().pending().len(), 1);
-    assert_eq!(bob_node.ledger().pending()[0].sender(), bob.address());
-    assert_eq!(bob_node.ledger().pending()[0].amount(), 1);
+    assert!(alice_node.ledger().pending().is_empty());
+    let outcome = alice_node.automatic_mine_once(2);
+    assert!(outcome.block.is_some());
 }
 
 #[test]
@@ -778,7 +800,7 @@ fn waiting_wallet_gossips_pending_burn_to_selected_leader() {
     );
     let mut alice_node = NodeCore::from_ledger(alice.clone(), ledger.clone(), 1);
     let mut bob_node =
-        NodeCore::from_ledger_with_burn_fee_and_enabled(bob.clone(), ledger, true, 1, MICRO_IUNA);
+        NodeCore::from_ledger_with_burn_fee_and_enabled(bob.clone(), ledger, true, 1, 1);
 
     let alice_outcome = alice_node.automatic_mine_once(1);
     assert!(alice_outcome.burned.is_some());
@@ -850,13 +872,11 @@ fn pow_only_node_gossips_mine_action_to_pob_only_finalizer() {
         alice_node.receive(envelope).unwrap();
     }
 
-    assert!(
-        alice_node
-            .ledger()
-            .pending()
-            .iter()
-            .any(|pending| pending.signature() == mine.signature()),
-        "A did not receive B's mine action"
+    assert!(alice_node.ledger().pending().is_empty());
+    assert_eq!(alice_node.ledger().pending_blinded_transactions().len(), 1);
+    assert_eq!(
+        alice_node.ledger().pending_blinded_transactions()[0].fee,
+        mine.fee()
     );
 }
 
@@ -984,7 +1004,7 @@ fn fallback_finalizer_unblocks_network_when_primary_does_not_publish() {
         NodeCore::from_ledger(fallback.clone(), ledger, DEFAULT_BURN_PER_BLOCK),
     );
 
-    network.node_mut("fallback").unwrap().burn(1).unwrap();
+    queue_plaintext_burn(network.node_mut("fallback").unwrap(), fallback, 1);
     let block = network
         .node_mut("fallback")
         .unwrap()
@@ -1335,9 +1355,9 @@ fn in_memory_network_syncs_nodes_without_tcp() {
     network.insert("alice", node("alice", alice.clone(), allocations.clone()));
     network.insert("bob", node("bob", bob.clone(), allocations));
 
-    network.node_mut("alice").unwrap().burn(10).unwrap();
+    queue_plaintext_burn(network.node_mut("alice").unwrap(), &alice, 10);
     network.deliver_until_idle().unwrap();
-    assert_eq!(network.node("bob").unwrap().ledger().pending().len(), 1);
+    assert!(network.node("bob").unwrap().ledger().pending().is_empty());
 
     network.node_mut("alice").unwrap().mine_one().unwrap();
     network.deliver_until_idle().unwrap();
@@ -1351,7 +1371,7 @@ fn in_memory_network_syncs_nodes_without_tcp() {
 #[test]
 fn in_memory_network_delivers_transaction_to_multiple_peers() {
     let wallets = wallets(&["alice", "bob", "carol", "dave"]);
-    let allocations = allocations(&wallets, 1_000);
+    let allocations = allocations(&wallets, MICRO_IUNA);
     let mut network = InMemoryNetwork::default();
 
     for (name, wallet) in ["alice", "bob", "carol", "dave"]
@@ -1365,16 +1385,23 @@ fn in_memory_network_delivers_transaction_to_multiple_peers() {
     network.deliver_until_idle().unwrap();
 
     for name in ["bob", "carol", "dave"] {
-        let pending = network.node(name).unwrap().ledger().pending();
-        assert_eq!(pending.len(), 1, "{name} did not receive alice's burn");
-        assert_eq!(pending[0].amount(), 15);
+        let ledger = network.node(name).unwrap().ledger();
+        assert!(
+            ledger.pending().is_empty(),
+            "{name} received a plaintext transaction"
+        );
+        assert_eq!(
+            ledger.pending_blinded_transactions().len(),
+            1,
+            "{name} did not receive alice's blinded burn"
+        );
     }
 }
 
 #[test]
 fn in_memory_network_syncs_mined_block_to_multiple_peers() {
     let wallets = wallets(&["alice", "bob", "carol", "dave"]);
-    let allocations = allocations(&wallets, 1_000);
+    let allocations = allocations(&wallets, MICRO_IUNA);
     let mut network = InMemoryNetwork::default();
 
     for (name, wallet) in ["alice", "bob", "carol", "dave"]
@@ -1384,7 +1411,7 @@ fn in_memory_network_syncs_mined_block_to_multiple_peers() {
         network.insert(*name, node(name, wallet, allocations.clone()));
     }
 
-    network.node_mut("alice").unwrap().burn(10).unwrap();
+    queue_plaintext_burn(network.node_mut("alice").unwrap(), &wallets[0], 10);
     network.deliver_until_idle().unwrap();
     network.node_mut("alice").unwrap().mine_one().unwrap();
     network.deliver_until_idle().unwrap();
@@ -1413,10 +1440,9 @@ fn in_memory_network_range_syncs_node_that_missed_multiple_blocks() {
     network.insert("bob", node("bob", wallets[1].clone(), allocations));
 
     for height in 1..=5 {
-        network.node_mut("alice").unwrap().burn(1).unwrap();
-        network
-            .node_mut("alice")
-            .unwrap()
+        let alice_node = network.node_mut("alice").unwrap();
+        queue_plaintext_burn(alice_node, &alice, 1);
+        alice_node
             .mine_one_at(height * VDF_TARGET_BLOCK_MS)
             .unwrap();
     }
@@ -1433,7 +1459,7 @@ fn in_memory_network_range_syncs_node_that_missed_multiple_blocks() {
     assert_eq!(bob_status.tip_hash, alice_tip);
 
     network.deliver_until_idle().unwrap();
-    network.node_mut("alice").unwrap().burn(1).unwrap();
+    queue_plaintext_burn(network.node_mut("alice").unwrap(), &alice, 1);
     network.deliver_until_idle().unwrap();
     network
         .node_mut("alice")
@@ -1449,7 +1475,7 @@ fn in_memory_network_range_syncs_node_that_missed_multiple_blocks() {
 }
 
 #[test]
-fn joined_nodes_import_transfer_block_and_every_wallet_mines() {
+fn joined_nodes_import_transfer_block_and_blinded_burn_reveal() {
     let alice = Wallet::from_seed("flow-alice");
     let bob = Wallet::from_seed("flow-bob");
     let carol = Wallet::from_seed("flow-carol");
@@ -1470,7 +1496,7 @@ fn joined_nodes_import_transfer_block_and_every_wallet_mines() {
     let mut mined_by = Vec::new();
 
     for height in 1..=2 {
-        network.node_mut("a").unwrap().burn(1).unwrap();
+        queue_plaintext_burn(network.node_mut("a").unwrap(), &alice, 1);
         network.deliver_until_idle().unwrap();
         let block = network.node_mut("a").unwrap().mine_one_at(height).unwrap();
         mined_by.push(block.miner.clone());
@@ -1484,7 +1510,7 @@ fn joined_nodes_import_transfer_block_and_every_wallet_mines() {
     );
 
     for height in 3..=4 {
-        network.node_mut("a").unwrap().burn(1).unwrap();
+        queue_plaintext_burn(network.node_mut("a").unwrap(), &alice, 1);
         network.deliver_until_idle().unwrap();
         let block = network.node_mut("a").unwrap().mine_one_at(height).unwrap();
         mined_by.push(block.miner.clone());
@@ -1497,13 +1523,13 @@ fn joined_nodes_import_transfer_block_and_every_wallet_mines() {
         NodeCore::from_ledger(carol.clone(), carol_ledger, DEFAULT_BURN_PER_BLOCK),
     );
 
-    network
-        .node_mut("a")
-        .unwrap()
-        .transfer_with_fee(bob.address(), iuna(30), 0)
-        .unwrap();
-    network.node_mut("a").unwrap().burn(1).unwrap();
-    network.deliver_until_idle().unwrap();
+    queue_plaintext_transfer(
+        network.node_mut("a").unwrap(),
+        &alice,
+        bob.address(),
+        iuna(30),
+    );
+    queue_plaintext_burn(network.node_mut("a").unwrap(), &alice, 1);
     let block5 = network.node_mut("a").unwrap().mine_one_at(5).unwrap();
     assert!(
         block5
@@ -1512,22 +1538,7 @@ fn joined_nodes_import_transfer_block_and_every_wallet_mines() {
             .any(|tx| tx.to() == Some(bob.address()) && tx.amount() == iuna(30))
     );
     mined_by.push(block5.miner.clone());
-    let block5_outbox = network.node_mut("a").unwrap().drain_outbox();
-    for envelope in &block5_outbox {
-        network
-            .node_mut("b")
-            .unwrap()
-            .receive(envelope.clone())
-            .unwrap();
-    }
-    assert_eq!(network.node("b").unwrap().ledger().status().height, 5);
-    assert_eq!(network.node("c").unwrap().ledger().status().height, 4);
-    let catchup_snapshot = network.node("a").unwrap().chain_snapshot();
-    network
-        .node_mut("c")
-        .unwrap()
-        .import_chain_snapshot(catchup_snapshot)
-        .unwrap();
+    network.deliver_until_idle().unwrap();
 
     for id in ["a", "b", "c"] {
         assert_eq!(
@@ -1542,90 +1553,77 @@ fn joined_nodes_import_transfer_block_and_every_wallet_mines() {
         );
     }
 
-    network.node_mut("b").unwrap().burn(10).unwrap();
+    let bob_burn = network.node_mut("b").unwrap().burn(10).unwrap();
     network.deliver_until_idle().unwrap();
-    let block6 = network.node_mut("a").unwrap().mine_one_at(6).unwrap();
-    mined_by.push(block6.miner.clone());
-    network.deliver_until_idle().unwrap();
+    assert_eq!(
+        network
+            .node("a")
+            .unwrap()
+            .ledger()
+            .pending_blinded_transactions()
+            .len(),
+        1
+    );
 
-    network.node_mut("a").unwrap().burn(1).unwrap();
+    queue_plaintext_burn(network.node_mut("a").unwrap(), &alice, 1);
+    let commit_block = network.node_mut("a").unwrap().mine_one_at(6).unwrap();
+    assert_eq!(commit_block.blinded_transactions.len(), 1);
+    assert_eq!(commit_block.blinded_transactions[0].fee, bob_burn.fee());
+    mined_by.push(commit_block.miner.clone());
     network.deliver_until_idle().unwrap();
-    let block7 = network.node_mut("a").unwrap().mine_one_at(7).unwrap();
-    mined_by.push(block7.miner.clone());
-    network.deliver_until_idle().unwrap();
+    assert_eq!(
+        network
+            .node("a")
+            .unwrap()
+            .ledger()
+            .pending_blinded_reveals()
+            .len(),
+        1
+    );
 
-    network.node_mut("a").unwrap().burn(1).unwrap();
+    queue_plaintext_burn(network.node_mut("a").unwrap(), &alice, 1);
+    let reveal_block = network.node_mut("a").unwrap().mine_one_at(7).unwrap();
+    assert_eq!(reveal_block.blinded_reveals.len(), 1);
+    mined_by.push(reveal_block.miner.clone());
     network.deliver_until_idle().unwrap();
-    let block8 = network.node_mut("a").unwrap().mine_one_at(8).unwrap();
-    mined_by.push(block8.miner.clone());
-    network.deliver_until_idle().unwrap();
-
-    network
-        .node_mut("b")
+    let revealed = revealed_blinded_transactions(&network.node("a").unwrap().chain_snapshot())
         .unwrap()
-        .transfer_with_fee(carol.address(), iuna(10), 0)
-        .unwrap();
-    network.node_mut("b").unwrap().burn(1).unwrap();
-    network.deliver_until_idle().unwrap();
-    assert_eq!(
-        network
-            .node("a")
-            .unwrap()
-            .ledger()
-            .expected_leader_for_next_block(),
-        Some(bob.address().to_string())
-    );
-    let block9 = network.node_mut("b").unwrap().mine_one_at(9).unwrap();
-    mined_by.push(block9.miner.clone());
-    network.deliver_until_idle().unwrap();
+        .into_iter()
+        .filter(|revealed| revealed.height == 7)
+        .collect::<Vec<_>>();
+    assert_eq!(revealed.len(), 1);
+    assert!(revealed[0].transaction.is_burn(), "{revealed:?}");
+    assert_eq!(revealed[0].transaction.amount(), 10);
 
-    network.node_mut("c").unwrap().burn(5).unwrap();
-    network.deliver_until_idle().unwrap();
-    let block10 = network.node_mut("a").unwrap().mine_one_at(10).unwrap();
-    mined_by.push(block10.miner.clone());
-    network.deliver_until_idle().unwrap();
-
-    network.node_mut("a").unwrap().burn(1).unwrap();
-    network.deliver_until_idle().unwrap();
-    let block11 = network.node_mut("a").unwrap().mine_one_at(11).unwrap();
-    mined_by.push(block11.miner.clone());
-    network.deliver_until_idle().unwrap();
-
-    network.node_mut("b").unwrap().burn(1).unwrap();
-    network.deliver_until_idle().unwrap();
-    let block12 = network.node_mut("b").unwrap().mine_one_at(12).unwrap();
-    mined_by.push(block12.miner.clone());
-    network.deliver_until_idle().unwrap();
-
-    assert_eq!(
-        network
-            .node("a")
-            .unwrap()
-            .ledger()
-            .expected_leader_for_next_block(),
-        Some(carol.address().to_string())
-    );
-    network.node_mut("c").unwrap().burn(1).unwrap();
-    network.deliver_until_idle().unwrap();
-    let block13 = network.node_mut("c").unwrap().mine_one_at(13).unwrap();
-    mined_by.push(block13.miner.clone());
-    network.deliver_until_idle().unwrap();
+    for height in 8..=9 {
+        queue_plaintext_burn(network.node_mut("a").unwrap(), &alice, 1);
+        let block = network.node_mut("a").unwrap().mine_one_at(height).unwrap();
+        mined_by.push(block.miner.clone());
+        network.deliver_until_idle().unwrap();
+    }
 
     let final_tip = network.node("a").unwrap().ledger().status().tip_hash;
     for id in ["a", "b", "c"] {
-        assert_eq!(network.node(id).unwrap().ledger().status().height, 13);
+        assert_eq!(network.node(id).unwrap().ledger().status().height, 9);
         assert_eq!(
             network.node(id).unwrap().ledger().status().tip_hash,
             final_tip
         );
     }
-    for wallet in [&alice, &bob, &carol] {
-        assert!(
-            mined_by.iter().any(|miner| miner == wallet.address()),
-            "{} never mined",
-            wallet.address()
-        );
-    }
+    let ranks = network
+        .node("a")
+        .unwrap()
+        .burn_leader_ranks_for_block(10)
+        .unwrap();
+    assert!(
+        ranks.iter().any(|rank| rank.owner == bob.address()
+            && rank.amount == 10
+            && rank.eligible_from_height == 10),
+        "alice={} bob={} ranks={ranks:?}",
+        alice.address(),
+        bob.address()
+    );
+    assert!(mined_by.iter().all(|miner| miner == alice.address()));
 }
 
 #[test]
@@ -1646,7 +1644,7 @@ fn persisted_joined_nodes_restart_and_keep_syncing_without_tcp() {
         NodeCore::from_ledger(alice.clone(), alice_ledger, DEFAULT_BURN_PER_BLOCK),
     );
 
-    network.node_mut("a").unwrap().burn(1).unwrap();
+    queue_plaintext_burn(network.node_mut("a").unwrap(), &alice, 1);
     network.node_mut("a").unwrap().mine_one_at(1).unwrap();
     network.deliver_until_idle().unwrap();
 
@@ -1664,12 +1662,8 @@ fn persisted_joined_nodes_restart_and_keep_syncing_without_tcp() {
         network.node("a").unwrap().ledger().status().tip_hash
     );
 
-    network
-        .node_mut("a")
-        .unwrap()
-        .transfer(bob.address(), 10)
-        .unwrap();
-    network.node_mut("a").unwrap().burn(1).unwrap();
+    queue_plaintext_transfer(network.node_mut("a").unwrap(), &alice, bob.address(), 10);
+    queue_plaintext_burn(network.node_mut("a").unwrap(), &alice, 1);
     network.deliver_until_idle().unwrap();
     network.node_mut("a").unwrap().mine_one_at(2).unwrap();
     network.deliver_until_idle().unwrap();
@@ -1706,36 +1700,11 @@ fn persisted_joined_nodes_restart_and_keep_syncing_without_tcp() {
         NodeCore::from_ledger(carol, carol_joined_ledger, DEFAULT_BURN_PER_BLOCK),
     );
 
-    network.node_mut("b").unwrap().burn(1).unwrap();
-    network.deliver_until_idle().unwrap();
-    network.node_mut("a").unwrap().mine_one_at(3).unwrap();
-    network.deliver_until_idle().unwrap();
-
-    network.node_mut("a").unwrap().burn(1).unwrap();
-    network.deliver_until_idle().unwrap();
-    network.node_mut("a").unwrap().mine_one_at(4).unwrap();
-    network.deliver_until_idle().unwrap();
-
-    network.node_mut("a").unwrap().burn(1).unwrap();
-    network.deliver_until_idle().unwrap();
-    network.node_mut("a").unwrap().mine_one_at(5).unwrap();
-    network.deliver_until_idle().unwrap();
-
-    assert_eq!(
-        network
-            .node("a")
-            .unwrap()
-            .ledger()
-            .expected_leader_for_next_block()
-            .as_deref(),
-        Some(bob.address())
-    );
-
-    network.node_mut("b").unwrap().burn(1).unwrap();
-    network.deliver_until_idle().unwrap();
-    let bob_block = network.node_mut("b").unwrap().mine_one_at(6).unwrap();
-    assert_eq!(bob_block.miner, bob.address());
-    network.deliver_until_idle().unwrap();
+    for height in 3..=6 {
+        queue_plaintext_burn(network.node_mut("a").unwrap(), &alice, 1);
+        network.node_mut("a").unwrap().mine_one_at(height).unwrap();
+        network.deliver_until_idle().unwrap();
+    }
 
     let final_status = network.node("a").unwrap().ledger().status();
     for id in ["b", "c"] {
@@ -1772,7 +1741,7 @@ fn mined_block_gossip_does_not_include_full_chain_snapshot() {
     let alice = Wallet::from_seed("alice");
     let bob = Wallet::from_seed("bob");
     let wallets = vec![alice.clone(), bob.clone()];
-    let allocations = allocations(&wallets, 1_000);
+    let allocations = allocations(&wallets, MICRO_IUNA);
 
     let mut alice_node = NodeCore::new(NodeConfig {
         wallet: alice,
@@ -1784,11 +1753,7 @@ fn mined_block_gossip_does_not_include_full_chain_snapshot() {
 
     let plan = alice_node.prepare_automatic_mining(1);
     let burn_outbox = alice_node.drain_outbox();
-    assert_eq!(burn_outbox.len(), 1);
-    assert!(matches!(
-        burn_outbox[0],
-        iuna::app::GossipEnvelope::Transaction(_)
-    ));
+    assert!(burn_outbox.is_empty());
 
     let work = plan.work.unwrap();
     let vdf_output = run_vdf(work.vdf_seed(), work.vdf_rounds());
@@ -1805,110 +1770,27 @@ fn mined_block_gossip_does_not_include_full_chain_snapshot() {
 }
 
 #[test]
-fn received_transaction_is_rebroadcast_to_other_peers_without_networking() {
-    let names = ["alice", "bob", "carol"];
-    let wallets = wallets(&names);
-    let allocations = allocations(&wallets, 1_000);
-    let alice = wallets[0].clone();
-    let bob = wallets[1].clone();
-    let carol = wallets[2].clone();
-
-    let mut carol_node = node("carol", carol, allocations.clone());
-    let mut hub = node("alice", alice, allocations.clone());
-    let mut bob_node = node("bob", bob, allocations);
-
-    let tx = carol_node.burn(25).unwrap();
-    carol_node.drain_outbox();
-
-    hub.receive(iuna::app::GossipEnvelope::Transaction(tx.clone()))
-        .unwrap();
-    let forwarded = hub.drain_outbox();
-    assert_eq!(forwarded.len(), 1);
-    assert!(matches!(
-        forwarded[0],
-        iuna::app::GossipEnvelope::Transaction(_)
-    ));
-
-    for envelope in forwarded {
-        bob_node.receive(envelope).unwrap();
-    }
-    assert!(
-        bob_node
-            .ledger()
-            .pending()
-            .iter()
-            .any(|pending| pending.signature() == tx.signature())
-    );
-
-    hub.receive(iuna::app::GossipEnvelope::Transaction(tx))
-        .unwrap();
-    assert!(hub.drain_outbox().is_empty());
-}
-
-#[test]
-fn mempool_gossip_repairs_future_nonce_gap_without_networking() {
-    let alice = Wallet::from_seed("alice");
-    let bob = Wallet::from_seed("bob");
-    let wallets = vec![alice.clone(), bob.clone()];
-    let allocations = allocations(&wallets, 1_000);
-    let mut alice_node = node("alice", alice, allocations.clone());
-    let mut bob_node = node("bob", bob, allocations);
-
-    let first = alice_node.burn(1).unwrap();
-    let second = alice_node.burn(1).unwrap();
-    alice_node.drain_outbox();
-
-    bob_node
-        .receive(iuna::app::GossipEnvelope::Transaction(second.clone()))
-        .unwrap();
-    assert_eq!(bob_node.ledger().pending().len(), 0);
-    assert_eq!(bob_node.ledger().orphan_transactions().len(), 1);
-
-    let mut requests = Vec::new();
-    for envelope in alice_node.mempool_gossip() {
-        match envelope {
-            iuna::app::GossipEnvelope::Inventory { txs, blocks } => {
-                requests.extend(bob_node.missing_inventory_requests(&txs, &blocks));
-            }
-            other => bob_node.receive(other).unwrap(),
-        }
-    }
-    for request in requests {
-        match request {
-            iuna::app::GossipEnvelope::TransactionRequest { signatures } => {
-                bob_node
-                    .receive(iuna::app::GossipEnvelope::Transactions {
-                        transactions: alice_node.transactions_by_signature(&signatures),
-                    })
-                    .unwrap();
-            }
-            other => bob_node.receive(other).unwrap(),
-        }
-    }
-    assert_eq!(bob_node.ledger().pending().len(), 2);
-    assert!(bob_node.ledger().orphan_transactions().is_empty());
-    let block = alice_node.mine_one_at(1).unwrap();
-    let signatures = block
-        .transactions
-        .iter()
-        .map(|tx| tx.signature())
-        .collect::<Vec<_>>();
-
-    assert!(signatures.contains(&first.signature()));
-    assert!(signatures.contains(&second.signature()));
-}
-
-#[test]
-fn mempool_gossip_splits_transaction_batches_at_receiver_limit() {
+fn mempool_gossip_splits_blinded_batches_at_receiver_limit() {
     let alice = Wallet::from_seed("mempool-batch-alice");
     let bob = Wallet::from_seed("mempool-batch-bob");
-    let wallets = vec![alice.clone(), bob.clone()];
+    let burn_wallets = (0..=TRANSACTION_BATCH_LIMIT)
+        .map(|index| Wallet::from_seed(&format!("mempool-batch-burn-{index}")))
+        .collect::<Vec<_>>();
+    let mut wallets = vec![alice.clone(), bob.clone()];
+    wallets.extend(burn_wallets.clone());
     let allocations = allocations(&wallets, 10_000);
     let mut alice_node = node("alice", alice, allocations.clone());
     let mut bob_node = node("bob", bob, allocations);
 
-    for _ in 0..(TRANSACTION_BATCH_LIMIT + 1) {
-        alice_node.burn(1).unwrap();
+    for wallet in &burn_wallets {
+        let tx = alice_node.ledger().build_burn(wallet, 1, 0).unwrap();
+        let built = alice_node
+            .ledger()
+            .build_blinded_transaction(tx, 20)
+            .unwrap();
+        alice_node
+            .receive_blinded_transaction(built.transaction)
+            .unwrap();
     }
     alice_node.drain_outbox();
 
@@ -1917,11 +1799,11 @@ fn mempool_gossip_splits_transaction_batches_at_receiver_limit() {
     let total_transactions = gossip
         .iter()
         .map(|envelope| match envelope {
-            GossipEnvelope::Transactions { transactions } => {
+            GossipEnvelope::BlindedTransactions { transactions } => {
                 assert!(transactions.len() <= TRANSACTION_BATCH_LIMIT);
                 transactions.len()
             }
-            other => panic!("expected transaction batch, got {other:?}"),
+            other => panic!("expected blinded transaction batch, got {other:?}"),
         })
         .sum::<usize>();
     assert_eq!(total_transactions, TRANSACTION_BATCH_LIMIT + 1);
@@ -1929,44 +1811,10 @@ fn mempool_gossip_splits_transaction_batches_at_receiver_limit() {
     for envelope in gossip {
         bob_node.receive(envelope).unwrap();
     }
+    assert!(bob_node.ledger().pending().is_empty());
     assert_eq!(
-        bob_node.ledger().pending().len(),
+        bob_node.ledger().pending_blinded_transactions().len(),
         TRANSACTION_BATCH_LIMIT + 1
-    );
-}
-
-#[test]
-fn peer_status_advertises_mempool_and_drives_missing_transaction_request() {
-    let alice = Wallet::from_seed("mempool-status-alice");
-    let bob = Wallet::from_seed("mempool-status-bob");
-    let wallets = vec![alice.clone(), bob.clone()];
-    let allocations = allocations(&wallets, 1_000);
-    let mut alice_node = node("alice", alice, allocations.clone());
-    let bob_node = node("bob", bob, allocations);
-
-    let tx = alice_node.burn(1).unwrap();
-    let signature = tx.signature().to_string();
-
-    let GossipEnvelope::PeerStatus {
-        mempool_count,
-        mempool_root,
-        mempool_txs,
-        ..
-    } = alice_node.peer_status()
-    else {
-        panic!("expected peer status");
-    };
-
-    assert_eq!(mempool_count, 1);
-    assert!(!mempool_root.is_empty());
-    assert_eq!(mempool_txs, vec![signature.clone()]);
-
-    let requests = bob_node.missing_inventory_requests(&mempool_txs, &[]);
-    assert_eq!(
-        requests,
-        vec![GossipEnvelope::TransactionRequest {
-            signatures: vec![signature]
-        }]
     );
 }
 
@@ -1979,11 +1827,11 @@ fn received_block_is_rebroadcast_to_other_peers_without_networking() {
     let bob = wallets[1].clone();
     let carol = wallets[2].clone();
 
-    let mut miner = node("alice", alice, allocations.clone());
+    let mut miner = node("alice", alice.clone(), allocations.clone());
     let mut hub = node("bob", bob, allocations.clone());
     let mut carol_node = node("carol", carol, allocations);
 
-    miner.burn(10).unwrap();
+    queue_plaintext_burn(&mut miner, &alice, 10);
     miner.drain_outbox();
     let block = miner.mine_one_at(1).unwrap();
     miner.drain_outbox();
@@ -2014,15 +1862,15 @@ fn imported_snapshot_blocks_are_rebroadcast_without_networking() {
     let bob = Wallet::from_seed("bob");
     let wallets = vec![alice.clone(), bob.clone()];
     let allocations = allocations(&wallets, 1_000);
-    let mut miner = node("alice", alice, allocations.clone());
+    let mut miner = node("alice", alice.clone(), allocations.clone());
     let mut hub = node("bob", bob, allocations);
 
-    miner.burn(1).unwrap();
+    queue_plaintext_burn(&mut miner, &alice, 1);
     miner.drain_outbox();
     miner.mine_one_at(1).unwrap();
     miner.drain_outbox();
 
-    miner.burn(1).unwrap();
+    queue_plaintext_burn(&mut miner, &alice, 1);
     miner.drain_outbox();
     miner.mine_one_at(2).unwrap();
     miner.drain_outbox();
@@ -2041,36 +1889,109 @@ fn imported_snapshot_blocks_are_rebroadcast_without_networking() {
 }
 
 #[test]
-fn multiple_peers_can_contribute_burns_to_the_same_lottery_block() {
+fn multiple_peers_can_contribute_blinded_burns_to_lottery_ranks() {
+    let finalizer = Wallet::from_seed("blinded-burn-ranks-finalizer");
     let names = ["alice", "bob", "carol", "dave"];
     let wallets = wallets(&names);
-    let allocations = allocations(&wallets, 1_000);
+    let mut all_wallets = vec![finalizer.clone()];
+    all_wallets.extend(wallets.clone());
+    let allocations = allocations(&all_wallets, 1_000);
+    let ledger = Ledger::new_with_genesis_burns(
+        allocations.clone(),
+        vec![GenesisBurn::new(finalizer.address(), 1)],
+        25,
+    )
+    .unwrap();
     let mut network = InMemoryNetwork::default();
 
+    network.insert(
+        "finalizer",
+        NodeCore::from_ledger(finalizer.clone(), ledger.clone(), DEFAULT_BURN_PER_BLOCK),
+    );
     for (name, wallet) in names.iter().zip(wallets.clone()) {
-        network.insert(*name, node(name, wallet, allocations.clone()));
+        network.insert(
+            *name,
+            NodeCore::from_ledger(wallet, ledger.clone(), DEFAULT_BURN_PER_BLOCK),
+        );
     }
 
-    for (name, amount) in names.iter().zip([10, 20, 30, 40]) {
-        network.node_mut(name).unwrap().burn(amount).unwrap();
+    for ((name, wallet), amount) in names.iter().zip(wallets.iter()).zip([10, 20, 30, 40]) {
+        let tx = network.node_mut(name).unwrap().burn(amount).unwrap();
+        assert!(tx.is_burn());
+        assert_eq!(tx.sender(), wallet.address());
     }
     network.deliver_until_idle().unwrap();
-    network.node_mut("alice").unwrap().mine_one().unwrap();
+    assert_eq!(
+        network
+            .node("alice")
+            .unwrap()
+            .ledger()
+            .pending_blinded_transactions()
+            .len(),
+        4
+    );
+
+    queue_plaintext_burn(network.node_mut("finalizer").unwrap(), &finalizer, 1);
+    let commit_block = network
+        .node_mut("finalizer")
+        .unwrap()
+        .mine_one_at(1)
+        .unwrap();
+    assert_eq!(commit_block.blinded_transactions.len(), 4);
     network.deliver_until_idle().unwrap();
 
+    assert_eq!(
+        network
+            .node("alice")
+            .unwrap()
+            .ledger()
+            .pending_blinded_reveals()
+            .len(),
+        4
+    );
+    queue_plaintext_burn(network.node_mut("finalizer").unwrap(), &finalizer, 1);
+    let reveal_block = network
+        .node_mut("finalizer")
+        .unwrap()
+        .mine_one_at(2)
+        .unwrap();
+    assert_eq!(reveal_block.blinded_reveals.len(), 4);
+    network.deliver_until_idle().unwrap();
+
+    for height in 3..=4 {
+        queue_plaintext_burn(network.node_mut("finalizer").unwrap(), &finalizer, 1);
+        network
+            .node_mut("finalizer")
+            .unwrap()
+            .mine_one_at(height)
+            .unwrap();
+        network.deliver_until_idle().unwrap();
+    }
+
+    let final_tip = network
+        .node("finalizer")
+        .unwrap()
+        .ledger()
+        .status()
+        .tip_hash;
     for name in names {
         let ledger = network.node(name).unwrap().ledger();
-        let block = &ledger.chain()[1];
-        let burned = block
-            .transactions
-            .iter()
-            .filter(|tx| tx.is_burn())
-            .map(|tx| tx.amount())
-            .sum::<Amount>();
-
-        assert_eq!(block.transactions.len(), 4);
-        assert_eq!(burned, 100);
-        assert!(ledger.expected_leader_for_next_block().is_some());
+        assert_eq!(ledger.status().height, 4);
+        assert_eq!(ledger.status().tip_hash, final_tip);
+        let ranks = network
+            .node(name)
+            .unwrap()
+            .burn_leader_ranks_for_block(5)
+            .unwrap();
+        for (wallet, amount) in wallets.iter().zip([10, 20, 30, 40]) {
+            assert!(
+                ranks.iter().any(|rank| rank.owner == wallet.address()
+                    && rank.amount == amount
+                    && rank.eligible_from_height == 5),
+                "{name} missing revealed burn ticket for {} in {ranks:?}",
+                wallet.address()
+            );
+        }
     }
 }
 
@@ -2084,7 +2005,6 @@ fn peer_book_tracks_multiple_peers_without_networking() {
 
     peers.record_sent("127.0.0.1:9444", 2);
     peers.record_status("127.0.0.1:9444", 12, "tip-hash".to_string());
-    peers.record_mempool_status("127.0.0.1:9444", 3, "mempool-root".to_string(), 2, 1);
     peers.record_error("127.0.0.1:9445", "connection refused");
     peers.record_received("127.0.0.1:9555", 1);
     peers.record_inbound_error("127.0.0.1:56666", "invalid nonce");
@@ -2106,14 +2026,6 @@ fn peer_book_tracks_multiple_peers_without_networking() {
     assert_eq!(sent_peer.messages_sent, 2);
     assert_eq!(sent_peer.last_known_height, Some(12));
     assert_eq!(sent_peer.last_known_tip_hash.as_deref(), Some("tip-hash"));
-    assert_eq!(sent_peer.last_known_mempool_count, Some(3));
-    assert_eq!(
-        sent_peer.last_known_mempool_root.as_deref(),
-        Some("mempool-root")
-    );
-    assert_eq!(sent_peer.last_known_mempool_shared, Some(2));
-    assert_eq!(sent_peer.last_known_mempool_missing, Some(1));
-    assert!(sent_peer.last_mempool_status_ms.is_some());
     assert_eq!(sent_peer.last_error, None);
     assert!(sent_peer.last_contact_ms.is_some());
     assert!(sent_peer.last_success_ms.is_some());
@@ -2278,7 +2190,7 @@ fn friend_node_can_join_snapshot_from_started_chain() {
     alice_node
         .set_automatic_burn_settings(true, DEFAULT_BURN_PER_BLOCK, DEFAULT_FEE_PER_BYTE)
         .unwrap();
-    alice_node.burn(1).unwrap();
+    queue_plaintext_burn(&mut alice_node, &alice, 1);
     alice_node.automatic_mine_once(1);
 
     let joined_ledger = Ledger::from_snapshot(alice_node.chain_snapshot()).unwrap();
@@ -2576,8 +2488,8 @@ fn node_receives_chain_snapshot_envelope_when_joining_without_tcp() {
 
     let wallets = vec![alice.clone(), bob.clone()];
     let shared_genesis = allocations(&wallets, 1_000);
-    let mut alice_node = node("alice", alice, shared_genesis.clone());
-    alice_node.burn(1).unwrap();
+    let mut alice_node = node("alice", alice.clone(), shared_genesis.clone());
+    queue_plaintext_burn(&mut alice_node, &alice, 1);
     alice_node.mine_one().unwrap();
 
     let mut bob_node = node("bob", bob, shared_genesis);

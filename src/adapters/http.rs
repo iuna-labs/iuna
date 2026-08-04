@@ -121,9 +121,6 @@ struct NetworkHealthResponse {
     stale_peers: usize,
     banned_peers: usize,
     pending_transactions: usize,
-    mempool_known_peers: usize,
-    mempool_divergent_peers: usize,
-    mempool_missing_transactions: usize,
     network_time_offset_ms: Option<i64>,
     bad_clock_peers: usize,
     last_error: Option<String>,
@@ -1410,18 +1407,6 @@ fn network_health_at(
         .iter()
         .filter(|peer| peer.is_banned_at(now_ms))
         .count();
-    let mempool_known_peers = peers
-        .iter()
-        .filter(|peer| peer.last_known_mempool_count.is_some())
-        .count();
-    let mempool_divergent_peers = peers
-        .iter()
-        .filter(|peer| peer.last_known_mempool_missing.unwrap_or(0) > 0)
-        .count();
-    let mempool_missing_transactions = peers
-        .iter()
-        .map(|peer| peer.last_known_mempool_missing.unwrap_or(0))
-        .sum();
     let network_time_offset_ms = median_peer_clock_offset(peers, now_ms);
     let bad_clock_peers = peers
         .iter()
@@ -1436,7 +1421,6 @@ fn network_health_at(
     let last_error = peers.iter().rev().find_map(|peer| {
         peer.last_error
             .as_ref()
-            .or(peer.last_transaction_rejection.as_ref())
             .map(|error| format!("{}: {error}", peer.address))
     });
 
@@ -1446,8 +1430,6 @@ fn network_health_at(
         "banned"
     } else if lag_blocks > 0 {
         "syncing"
-    } else if mempool_missing_transactions > 0 {
-        "mempool syncing"
     } else if failed_peers > 0 && healthy_peers == 0 {
         "peer errors"
     } else if stale_peers > 0 && healthy_peers == stale_peers {
@@ -1460,10 +1442,7 @@ fn network_health_at(
     .to_string();
 
     NetworkHealthResponse {
-        ok: !peers.is_empty()
-            && lag_blocks == 0
-            && mempool_missing_transactions == 0
-            && healthy_peers > stale_peers,
+        ok: !peers.is_empty() && lag_blocks == 0 && healthy_peers > stale_peers,
         state,
         local_height,
         best_known_height,
@@ -1476,9 +1455,6 @@ fn network_health_at(
         stale_peers,
         banned_peers,
         pending_transactions: status.chain.pending_transactions,
-        mempool_known_peers,
-        mempool_divergent_peers,
-        mempool_missing_transactions,
         network_time_offset_ms,
         bad_clock_peers,
         last_error,
@@ -3240,7 +3216,7 @@ const INDEX_HTML: &str = r#"<!doctype html>
         </div>
         <div class="table-wrap">
           <table>
-            <thead><tr><th>Status</th><th>Address</th><th>Direction</th><th>Last Contact</th><th>Clock</th><th>Ban</th><th>Score</th><th>Height</th><th>Delta</th><th>Tip</th><th>Mempool</th><th>Shared</th><th>Missing</th><th>Root</th><th>Sent</th><th>Received</th><th>Last Error</th><th>Actions</th></tr></thead>
+            <thead><tr><th>Status</th><th>Address</th><th>Direction</th><th>Last Contact</th><th>Clock</th><th>Ban</th><th>Score</th><th>Height</th><th>Delta</th><th>Tip</th><th>Sent</th><th>Received</th><th>Last Error</th><th>Actions</th></tr></thead>
             <tbody>
               <template x-for="peer in peers" :key="peer.address">
                 <tr>
@@ -3254,24 +3230,20 @@ const INDEX_HTML: &str = r#"<!doctype html>
                   <td x-text="peer.last_known_height ?? '-'"></td>
                   <td x-text="peerHeightDelta(peer)"></td>
                   <td><code x-text="short(peer.last_known_tip_hash)"></code></td>
-                  <td x-text="peer.last_known_mempool_count ?? '-'"></td>
-                  <td x-text="peer.last_known_mempool_shared ?? '-'"></td>
-                  <td x-text="peer.last_known_mempool_missing ?? '-'"></td>
-                  <td><code x-text="short(peer.last_known_mempool_root)"></code></td>
                   <td x-text="peer.messages_sent"></td>
                   <td x-text="peer.messages_received"></td>
-                  <td x-text="peer.last_error || peer.last_transaction_rejection || ''"></td>
+                  <td x-text="peer.last_error || ''"></td>
                   <td><div class="peer-actions"><button class="peer-remove" type="button" x-show="canRemovePeer(peer)" @click="removePeer(peer)">Remove</button><span class="muted" x-show="!canRemovePeer(peer)">Observed</span></div></td>
                 </tr>
               </template>
               <tr class="skeleton-card" x-show="peerPage.loading" aria-hidden="true">
-                <td colspan="18"><div class="skeleton-table-cell"></div></td>
+                <td colspan="14"><div class="skeleton-table-cell"></div></td>
               </tr>
               <tr class="skeleton-card" x-show="peerPage.loading" aria-hidden="true">
-                <td colspan="18"><div class="skeleton-table-cell"></div></td>
+                <td colspan="14"><div class="skeleton-table-cell"></div></td>
               </tr>
-              <tr x-show="peerPage.hasMore"><td colspan="18"><div class="page-sentinel" x-init="$nextTick(() => observePageSentinel('peer', $el))"></div></td></tr>
-              <tr x-show="peers.length === 0 && !peerPage.loading"><td colspan="18">No peers</td></tr>
+              <tr x-show="peerPage.hasMore"><td colspan="14"><div class="page-sentinel" x-init="$nextTick(() => observePageSentinel('peer', $el))"></div></td></tr>
+              <tr x-show="peers.length === 0 && !peerPage.loading"><td colspan="14">No peers</td></tr>
             </tbody>
           </table>
         </div>
@@ -3295,19 +3267,6 @@ const INDEX_HTML: &str = r#"<!doctype html>
           <div class="metric"><div class="label">Inventory Rx</div><div class="value" x-text="p2pMetrics.inventory_envelopes_received ?? 0"></div></div>
           <div class="metric"><div class="label">Data Rx</div><div class="value" x-text="p2pMetrics.data_envelopes_received ?? 0"></div></div>
           <div class="metric"><div class="label">Control Rx</div><div class="value" x-text="p2pMetrics.control_envelopes_received ?? 0"></div></div>
-          <div class="metric"><div class="label">Tx Ack Sent</div><div class="value" x-text="p2pMetrics.transaction_ack_envelopes_sent ?? 0"></div></div>
-          <div class="metric"><div class="label">Tx Ack Rx</div><div class="value" x-text="p2pMetrics.transaction_ack_envelopes_received ?? 0"></div></div>
-          <div class="metric"><div class="label">Tx Accepted Sent</div><div class="value" x-text="p2pMetrics.transactions_accepted_sent ?? 0"></div></div>
-          <div class="metric"><div class="label">Tx Accepted Rx</div><div class="value" x-text="p2pMetrics.transactions_accepted_received ?? 0"></div></div>
-          <div class="metric"><div class="label">Tx Rejected Sent</div><div class="value" x-text="p2pMetrics.transactions_rejected_sent ?? 0"></div></div>
-          <div class="metric"><div class="label">Tx Rejected Rx</div><div class="value" x-text="p2pMetrics.transactions_rejected_received ?? 0"></div></div>
-          <div class="metric"><div class="label">Tx Retries</div><div class="value" x-text="p2pMetrics.transaction_retries_sent ?? 0"></div></div>
-          <div class="metric"><div class="label">Tx Ack Pending</div><div class="value" x-text="p2pMetrics.transaction_ack_pending ?? 0"></div></div>
-          <div class="metric"><div class="label">Mempool Status Rx</div><div class="value" x-text="p2pMetrics.mempool_statuses_received ?? 0"></div></div>
-          <div class="metric"><div class="label">Mempool Tx Seen</div><div class="value" x-text="p2pMetrics.mempool_status_transactions_received ?? 0"></div></div>
-          <div class="metric"><div class="label">Mempool Mismatch</div><div class="value" x-text="p2pMetrics.mempool_status_mismatches ?? 0"></div></div>
-          <div class="metric"><div class="label">Mempool Requests</div><div class="value" x-text="p2pMetrics.mempool_transaction_requests_sent ?? 0"></div></div>
-          <div class="metric"><div class="label">Mempool Requested Tx</div><div class="value" x-text="p2pMetrics.mempool_transaction_request_signatures_sent ?? 0"></div></div>
         </div>
         <div class="metric-context">
           <div class="tx-field"><span class="tx-label">Last Failure</span><span class="tx-value text" x-text="p2pMetrics.last_session_failure || '-'"></span></div>
@@ -4391,16 +4350,6 @@ mod tests {
         assert_eq!(isolated.local_height, 0);
         assert_eq!(isolated.best_known_height, 0);
 
-        let mut mempool_peers = PeerBook::from_addresses(vec!["127.0.0.1:9444".to_string()]);
-        mempool_peers.record_status("127.0.0.1:9444", 0, "tip".to_string());
-        mempool_peers.record_mempool_status("127.0.0.1:9444", 2, "remote-root".to_string(), 1, 1);
-        let mempool_syncing = super::network_health(&status, &mempool_peers.list());
-        assert!(!mempool_syncing.ok);
-        assert_eq!(mempool_syncing.state, "mempool syncing");
-        assert_eq!(mempool_syncing.mempool_known_peers, 1);
-        assert_eq!(mempool_syncing.mempool_divergent_peers, 1);
-        assert_eq!(mempool_syncing.mempool_missing_transactions, 1);
-
         let mut clock_peers = PeerBook::from_addresses(vec![
             "127.0.0.1:9450".to_string(),
             "127.0.0.1:9451".to_string(),
@@ -4432,20 +4381,13 @@ mod tests {
                 messages_received: 1,
                 last_known_height: Some(3),
                 last_known_tip_hash: Some("remote-tip".to_string()),
-                last_known_mempool_count: None,
-                last_known_mempool_root: None,
-                last_known_mempool_shared: None,
-                last_known_mempool_missing: None,
-                last_mempool_status_ms: None,
                 last_clock_offset_ms: None,
                 last_clock_offset_accepted: None,
                 last_clock_observed_ms: None,
                 last_error: None,
-                last_transaction_rejection: None,
                 last_contact_ms: Some(10_000),
                 last_success_ms: Some(10_000),
                 last_error_ms: None,
-                last_transaction_rejection_ms: None,
                 misbehavior_score: 0,
                 banned_until_ms: None,
                 ban_reason: None,
@@ -4465,20 +4407,13 @@ mod tests {
                 messages_received: 0,
                 last_known_height: None,
                 last_known_tip_hash: None,
-                last_known_mempool_count: None,
-                last_known_mempool_root: None,
-                last_known_mempool_shared: None,
-                last_known_mempool_missing: None,
-                last_mempool_status_ms: None,
                 last_clock_offset_ms: None,
                 last_clock_offset_accepted: None,
                 last_clock_observed_ms: None,
                 last_error: Some("connection refused".to_string()),
-                last_transaction_rejection: None,
                 last_contact_ms: Some(10_000),
                 last_success_ms: None,
                 last_error_ms: Some(10_000),
-                last_transaction_rejection_ms: None,
                 misbehavior_score: 1,
                 banned_until_ms: None,
                 ban_reason: Some("connection refused".to_string()),
@@ -4491,41 +4426,6 @@ mod tests {
             Some("127.0.0.1:9446: connection refused")
         );
 
-        let tx_rejection = super::network_health(
-            &status,
-            &[PeerInfo {
-                address: "127.0.0.1:9449".to_string(),
-                direction: PeerDirection::Outbound,
-                messages_sent: 1,
-                messages_received: 1,
-                last_known_height: Some(0),
-                last_known_tip_hash: Some("tip".to_string()),
-                last_known_mempool_count: None,
-                last_known_mempool_root: None,
-                last_known_mempool_shared: None,
-                last_known_mempool_missing: None,
-                last_mempool_status_ms: None,
-                last_clock_offset_ms: None,
-                last_clock_offset_accepted: None,
-                last_clock_observed_ms: None,
-                last_error: None,
-                last_transaction_rejection: Some(
-                    "peer rejected transaction abc: conflict".to_string(),
-                ),
-                last_contact_ms: Some(10_000),
-                last_success_ms: Some(10_000),
-                last_error_ms: None,
-                last_transaction_rejection_ms: Some(10_000),
-                misbehavior_score: 0,
-                banned_until_ms: None,
-                ban_reason: None,
-            }],
-        );
-        assert_eq!(
-            tx_rejection.last_error.as_deref(),
-            Some("127.0.0.1:9449: peer rejected transaction abc: conflict")
-        );
-
         let stale = super::network_health_at(
             &status,
             &[PeerInfo {
@@ -4535,20 +4435,13 @@ mod tests {
                 messages_received: 1,
                 last_known_height: Some(0),
                 last_known_tip_hash: Some("tip".to_string()),
-                last_known_mempool_count: None,
-                last_known_mempool_root: None,
-                last_known_mempool_shared: None,
-                last_known_mempool_missing: None,
-                last_mempool_status_ms: None,
                 last_clock_offset_ms: None,
                 last_clock_offset_accepted: None,
                 last_clock_observed_ms: None,
                 last_error: None,
-                last_transaction_rejection: None,
                 last_contact_ms: Some(1),
                 last_success_ms: Some(1),
                 last_error_ms: None,
-                last_transaction_rejection_ms: None,
                 misbehavior_score: 0,
                 banned_until_ms: None,
                 ban_reason: None,
@@ -4568,20 +4461,13 @@ mod tests {
                 messages_received: 0,
                 last_known_height: None,
                 last_known_tip_hash: None,
-                last_known_mempool_count: None,
-                last_known_mempool_root: None,
-                last_known_mempool_shared: None,
-                last_known_mempool_missing: None,
-                last_mempool_status_ms: None,
                 last_clock_offset_ms: None,
                 last_clock_offset_accepted: None,
                 last_clock_observed_ms: None,
                 last_error: Some("invalid block".to_string()),
-                last_transaction_rejection: None,
                 last_contact_ms: Some(10),
                 last_success_ms: None,
                 last_error_ms: Some(10),
-                last_transaction_rejection_ms: None,
                 misbehavior_score: 3,
                 banned_until_ms: Some(1_000),
                 ban_reason: Some("invalid block".to_string()),

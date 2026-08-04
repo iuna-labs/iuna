@@ -31,7 +31,7 @@ A burn does not immediately select its own block. Instead:
 3. The ticket stays eligible for a short expiry window.
 4. Its lottery weight is the burned amount.
 
-On the current devnet profile, tickets mature after `3` blocks and remain eligible for `3` block heights.
+In the devnet profile, tickets mature after `3` blocks and remain eligible for `3` block heights.
 
 The lottery draw for the next height is deterministic. Nodes rank all eligible burn tickets using the parent block hash, the parent VDF output, the target height, and the ticket amounts. More burned IUNA means more weight, but the winner is still drawn by the protocol.
 
@@ -44,7 +44,9 @@ For each block height, eligible tickets are ranked:
 
 The selected finalizer must prove ownership of the selected ticket, respect its rank time slot, and run the required VDF work. A block is valid only if the finalizer matches its ranked ticket, carries the correct leader proof, has a valid timestamp for its rank, includes a valid VDF output, and follows the transaction selection rules.
 
-Every normal block must include at least one plaintext burn. A blinded transaction envelope does not satisfy that rule, because the finalizer and validators cannot know whether the encrypted payload is a burn until reveal. Plaintext transaction fees go to the block finalizer immediately; blinded transaction fees are paid to the finalizer that committed the envelope when the payload is revealed and executed.
+Every normal block must include at least one plaintext burn. A blinded transaction envelope does not satisfy that rule, because the finalizer and validators cannot know whether the encrypted payload is a burn until reveal. Block-producing nodes create this plaintext burn locally from the finalizer wallet during block construction; it is not part of the gossiped mempool.
+
+Plaintext transaction fees go to the block finalizer immediately. Blinded transaction fees are paid to the finalizer that committed the envelope when the payload is revealed and executed.
 
 ## VDF Timing
 
@@ -78,11 +80,11 @@ Rank slots depend on block timestamps, so timestamps are constrained by consensu
 - it must not be too far in the future relative to the validating node's network-adjusted clock;
 - for fallback ticket blocks, it must be at or after the finalizer rank slot.
 
-The current future drift limit is `2 minutes`. A finalizer can lie within that small margin, but cannot skip an entire `10 minute` rank slot by claiming a far-future timestamp. P2P treats too-early future/slot blocks as temporal errors rather than peer-banning evidence.
+The future drift limit is `2 minutes`. A finalizer can lie within that small margin, but cannot skip an entire `10 minute` rank slot by claiming a far-future timestamp. P2P treats too-early future/slot blocks as temporal errors rather than peer-banning evidence.
 
 ## Recovery Blocks
 
-If selected ticket finalizers do not publish for long enough, recovery finalization becomes available. The current delay is `6` target block times.
+If selected ticket finalizers do not publish for long enough, recovery finalization becomes available. The recovery delay is `6` target block times.
 
 A recovery block:
 
@@ -104,7 +106,7 @@ Difficulty targets about one mine action per block:
 - The retarget window is `10` blocks.
 - The target is `10` mine actions per window.
 - Difficulty can move by at most `2` bits per window.
-- Difficulty is clamped between `1` and `32` bits on the current devnet.
+- Difficulty is clamped between `1` and `32` bits in the devnet profile.
 - Mine actions expire when their anchor is too old.
 
 This keeps issuance separate from finalization. PoW miners compete to create mine actions; burn-ticket finalizers decide blocks.
@@ -113,7 +115,7 @@ This keeps issuance separate from finalization. PoW miners compete to create min
 
 The central censorship risk is simple: what if a finalizer only includes its own burns and ignores everyone else's burns?
 
-iuna now supports blinded transaction content for this path. A wallet can encrypt a normal transaction payload and gossip a `BlindedTransaction` envelope instead of the plaintext transaction. The envelope exposes only:
+Normal mempool traffic uses blinded transaction content. A wallet encrypts a normal transaction payload and gossips a `BlindedTransaction` envelope. The plaintext payload is not exposed before reveal. The envelope exposes only:
 
 - a commitment hash;
 - the declared fee;
@@ -123,30 +125,40 @@ iuna now supports blinded transaction content for this path. A wallet can encryp
 
 The finalizer can rank the envelope by fee per encrypted byte, but cannot see whether the encrypted payload is a transfer or a burn before committing it to a block.
 
-Reveal is a later step. A `BlindedReveal` carries only the commitment and decryption key. When a valid reveal is included, nodes decrypt the earlier payload, check the commitment and payload hash, decode the normal transaction, validate it against the current UTXO set, and execute it. If the decrypted transaction is a burn, it creates burn tickets at the reveal height, just like a plaintext burn would.
+Reveal is a later step. A `BlindedReveal` carries only the commitment and decryption key. When a valid reveal is included, nodes decrypt the earlier payload, check the commitment and payload hash, decode the normal transaction, validate it against the current UTXO set, and execute it. If the decrypted transaction is a burn, it creates burn tickets at the reveal height, not the earlier envelope-commit height.
 
 Fees are paid without inflating the reveal block reward. The decrypted transaction must pay the same fee declared by the blinded envelope. When it executes, that fee is credited to the finalizer that originally included the blinded envelope, using a deterministic fee output tied to the commitment.
 
-Expiry is exclusive: a blinded envelope with expiry height `H` can be included only in blocks below height `H`, and revealed only while the current chain height is below `H`. Expired envelopes and reveals are dropped from local selection.
+Expiry is exclusive: a blinded envelope with expiry height `H` can be included only in blocks below height `H`, and revealed only while the current chain height is below `H`. The expiry height must be within `20` blocks of the node's current chain height when the envelope is accepted or selected. Expired envelopes and reveals are dropped from local selection.
 
 This does not make censorship impossible. A finalizer can still ignore all blinded traffic, or censor based on network metadata. But it removes the cheap strategy of inspecting plaintext mempool transactions and excluding third-party burns while including other fee-paying transactions.
+
+## P2P Mempool Gossip
+
+The P2P mempool gossips only:
+
+- blinded transaction envelopes;
+- blinded reveal keys;
+- block inventory and blocks.
+
+It does not gossip plaintext transfers, burns, or mine actions. Wallet-created transfers, burns, and mine actions enter the network as blinded envelopes first, and are only decoded after a reveal. The one plaintext burn required for every normal block is produced locally by the finalizer and appears in the block itself.
 
 ## Block Selection
 
 When a node builds a block, it selects transactions in this order:
 
 1. Include valid blinded reveals first, so already committed encrypted payloads can execute.
-2. Ensure the block has at least one plaintext burn.
+2. Ensure the block has at least one plaintext burn from local block construction.
 3. For recovery blocks, ensure at least one plaintext burn is from the recovery finalizer.
-4. Fill remaining space with valid plaintext transactions and blinded transactions ordered by fee rate.
+4. Fill remaining space with valid blinded transaction envelopes ordered by fee rate.
 
-Blocks are bounded by transaction count and serialized byte size. The current devnet maximum block size is `100,000` bytes.
+Blocks are bounded by transaction count and serialized byte size. The devnet maximum block size is `100,000` bytes.
 
 ## Genesis and Joining
 
 Genesis is explicit. A normal node without a chain starts in setup mode and waits to join an existing chain from peers rather than silently creating a separate chain.
 
-The current genesis flow bootstraps the devnet with an initial burn ticket and an initial reward for the genesis wallet. New nodes fetch and validate chain snapshots from peers, then continue with normal block validation.
+The genesis flow bootstraps the devnet with an initial burn ticket and an initial reward for the genesis wallet. New nodes fetch and validate chain snapshots from peers, then continue with normal block validation.
 
 ## What This Design Is Trying to Achieve
 

@@ -71,6 +71,33 @@ fn genesis_burns(wallets: &[Wallet], amount: Amount) -> Vec<GenesisBurn> {
         .collect()
 }
 
+fn queue_plaintext_burn(node: &mut NodeCore, wallet: &Wallet, amount: Amount, fee: Amount) -> bool {
+    node.ledger()
+        .build_burn(wallet, amount, fee)
+        .and_then(|tx| node.receive_transaction(tx).map(|_| ()))
+        .is_ok()
+}
+
+fn queue_plaintext_transfer(
+    node: &mut NodeCore,
+    wallet: &Wallet,
+    recipient: impl Into<String>,
+    amount: Amount,
+    fee: Amount,
+) -> bool {
+    node.ledger()
+        .build_transfer(wallet, recipient, amount, fee)
+        .and_then(|tx| node.receive_transaction(tx).map(|_| ()))
+        .is_ok()
+}
+
+fn queue_plaintext_mine(node: &mut NodeCore, wallet: &Wallet) -> bool {
+    node.ledger()
+        .build_mine(wallet.address())
+        .and_then(|tx| node.receive_transaction(tx).map(|_| ()))
+        .is_ok()
+}
+
 fn property_ledger(seed: u64, wallet_count: usize) -> (Vec<Wallet>, Ledger) {
     let wallets = test_wallets(seed, wallet_count);
     let ledger = Ledger::new_with_genesis_burns(
@@ -624,22 +651,27 @@ fn in_memory_network_converges_under_generated_node_actions() {
 
             match rng.index(4) {
                 0 => {
-                    let _ = network
-                        .node_mut(&node_id)
-                        .expect("node exists")
-                        .transfer_with_fee(recipient, rng.amount(2 * MICRO_IUNA), 0);
+                    let _ = queue_plaintext_transfer(
+                        network.node_mut(&node_id).expect("node exists"),
+                        &wallets[node_index],
+                        recipient,
+                        rng.amount(2 * MICRO_IUNA),
+                        0,
+                    );
                 }
                 1 => {
-                    let _ = network
-                        .node_mut(&node_id)
-                        .expect("node exists")
-                        .burn_with_fee(MICRO_IUNA, 0);
+                    let _ = queue_plaintext_burn(
+                        network.node_mut(&node_id).expect("node exists"),
+                        &wallets[node_index],
+                        MICRO_IUNA,
+                        0,
+                    );
                 }
                 2 => {
-                    let _ = network
-                        .node_mut(&node_id)
-                        .expect("node exists")
-                        .mine_pow_reward();
+                    let _ = queue_plaintext_mine(
+                        network.node_mut(&node_id).expect("node exists"),
+                        &wallets[node_index],
+                    );
                 }
                 _ => {}
             }
@@ -808,22 +840,27 @@ fn in_memory_network_converges_after_generated_offline_and_reordered_delivery() 
             let recipient = wallets[rng.index(wallets.len())].address().to_string();
             match rng.index(3) {
                 0 => {
-                    let _ = network
-                        .node_mut(&actor_id)
-                        .expect("actor node exists")
-                        .transfer_with_fee(recipient, MICRO_IUNA + rng.amount(17), 0);
+                    let _ = queue_plaintext_transfer(
+                        network.node_mut(&actor_id).expect("actor node exists"),
+                        &wallets[actor_index],
+                        recipient,
+                        MICRO_IUNA + rng.amount(17),
+                        0,
+                    );
                 }
                 1 => {
-                    let _ = network
-                        .node_mut(&actor_id)
-                        .expect("actor node exists")
-                        .mine_pow_reward();
+                    let _ = queue_plaintext_mine(
+                        network.node_mut(&actor_id).expect("actor node exists"),
+                        &wallets[actor_index],
+                    );
                 }
                 _ => {
-                    let _ = network
-                        .node_mut("n0")
-                        .expect("finalizer node exists")
-                        .burn_with_fee(MICRO_IUNA, 0);
+                    let _ = queue_plaintext_burn(
+                        network.node_mut("n0").expect("finalizer node exists"),
+                        &wallets[0],
+                        MICRO_IUNA,
+                        0,
+                    );
                 }
             }
 

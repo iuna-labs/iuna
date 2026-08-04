@@ -1,5 +1,5 @@
 use std::{
-    collections::{BTreeMap, BTreeSet},
+    collections::BTreeMap,
     sync::{
         Arc,
         atomic::{AtomicBool, Ordering},
@@ -15,9 +15,9 @@ use tokio::sync::Mutex;
 use crate::domain::{
     Amount, BlindedReveal, BlindedTransaction, Block, BuiltBlindedTransaction, BurnLeaderRank,
     ChainSnapshot, ChainStatus, DEFAULT_FEE_PER_BYTE, DEFAULT_TRANSACTION_FEE, Ledger,
-    MAX_PENDING_TRANSACTIONS, MINE_FINALIZER_FEE, OutPoint, PreparedBlock, StratumMineShare,
-    StratumMineTemplate, Transaction, TransactionSubmitOutcome, VDF_TARGET_BLOCK_MS, Wallet,
-    hex_hash, run_vdf,
+    MAX_BLINDED_TRANSACTION_EXPIRY_HEIGHTS, MINE_FINALIZER_FEE, OutPoint, PreparedBlock,
+    StratumMineShare, StratumMineTemplate, Transaction, TransactionSubmitOutcome,
+    VDF_TARGET_BLOCK_MS, Wallet, run_vdf,
 };
 
 pub type SharedNode = Arc<Mutex<NodeCore>>;
@@ -29,14 +29,12 @@ pub const PROTOCOL_VERSION: u32 = 1;
 pub const NETWORK_ID: &str = "iuna-devnet-v2";
 pub const BLOCK_REQUEST_LIMIT: usize = 128;
 pub const TRANSACTION_BATCH_LIMIT: usize = 128;
-pub const MEMPOOL_STATUS_LIMIT: usize = MAX_PENDING_TRANSACTIONS;
 const IMPORT_REBROADCAST_LIMIT: usize = 128;
 pub const PEER_MISBEHAVIOR_BAN_SCORE: u32 = 3;
 pub const PEER_MISBEHAVIOR_BAN_MS: u64 = 10 * 60 * 1_000;
 pub const PEER_CLOCK_OFFSET_ACCEPTANCE_MS: i64 = 10 * 60 * 1_000;
 const PEER_CLOCK_OFFSET_STALE_MS: u64 = 20 * 60 * 1_000;
 const AUTO_POW_NONCE_ATTEMPTS_PER_TICK: u64 = 8;
-const AUTO_BLINDED_BURN_EXPIRY_HEIGHTS: u64 = 20;
 const AUTO_PLAINTEXT_BURN_BEFORE_RECOVERY_MS: u64 = 60_000;
 static DEBUG_LOGGING: AtomicBool = AtomicBool::new(false);
 
@@ -103,35 +101,17 @@ pub enum GossipEnvelope {
         tip_hash: String,
         #[serde(default)]
         time_ms: u64,
-        #[serde(default)]
-        mempool_count: usize,
-        #[serde(default)]
-        mempool_root: String,
-        #[serde(default)]
-        mempool_txs: Vec<String>,
     },
     ChainSnapshotRequest,
     BlockRangeRequest {
         from_height: u64,
         limit: usize,
     },
-    TransactionRequest {
-        signatures: Vec<String>,
-    },
     BlockRequest {
         hashes: Vec<String>,
     },
     Inventory {
-        txs: Vec<String>,
         blocks: Vec<BlockInventory>,
-    },
-    TransactionAck {
-        accepted: Vec<String>,
-        rejected: Vec<TransactionRejection>,
-    },
-    Transaction(Transaction),
-    Transactions {
-        transactions: Vec<Transaction>,
     },
     BlindedTransaction(BlindedTransaction),
     BlindedTransactions {
@@ -184,12 +164,6 @@ pub struct ProtocolHello {
 pub struct BlockInventory {
     pub height: u64,
     pub hash: String,
-}
-
-#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
-pub struct TransactionRejection {
-    pub signature: String,
-    pub reason: String,
 }
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
@@ -272,6 +246,8 @@ pub struct NodeCore {
     last_auto_pow_mine_status: Option<String>,
     auto_pow_mine_cursor: Option<AutoPowMineCursor>,
     owned_blinded_reveals: BTreeMap<String, BlindedReveal>,
+    owned_blinded_payloads: BTreeMap<String, Transaction>,
+    local_block_anchor_burn: Option<(u64, Transaction)>,
     outbox: Vec<GossipEnvelope>,
 }
 
@@ -358,6 +334,8 @@ impl NodeCore {
             last_auto_pow_mine_status: None,
             auto_pow_mine_cursor: None,
             owned_blinded_reveals: BTreeMap::new(),
+            owned_blinded_payloads: BTreeMap::new(),
+            local_block_anchor_burn: None,
             outbox: Vec::new(),
         }
     }
@@ -377,6 +355,8 @@ impl NodeCore {
         self.last_auto_pow_mine_status = None;
         self.auto_pow_mine_cursor = None;
         self.owned_blinded_reveals.clear();
+        self.owned_blinded_payloads.clear();
+        self.local_block_anchor_burn = None;
     }
 
     pub fn ledger(&self) -> &Ledger {
@@ -423,44 +403,8 @@ impl NodeCore {
         self.ledger.pending_blinded_reveals().to_vec()
     }
 
-    pub fn mempool_inventory(&self, limit: usize) -> Vec<String> {
-        let mut signatures = self
-            .ledger
-            .pending()
-            .iter()
-            .map(|tx| tx.signature().to_string())
-            .collect::<BTreeSet<_>>()
-            .into_iter()
-            .collect::<Vec<_>>();
-        signatures.truncate(limit);
-        signatures
-    }
-
-    pub fn mempool_count(&self) -> usize {
-        self.ledger.pending().len()
-    }
-
-    pub fn mempool_root(&self) -> String {
-        mempool_root_for_signatures(
-            &self
-                .ledger
-                .pending()
-                .iter()
-                .map(|tx| tx.signature().to_string())
-                .collect::<BTreeSet<_>>()
-                .into_iter()
-                .collect::<Vec<_>>(),
-        )
-    }
-
     pub fn mempool_gossip(&self) -> Vec<GossipEnvelope> {
-        let transactions = self.ledger.pending().to_vec();
-        let mut gossip = transactions
-            .chunks(TRANSACTION_BATCH_LIMIT)
-            .map(|chunk| GossipEnvelope::Transactions {
-                transactions: chunk.to_vec(),
-            })
-            .collect::<Vec<_>>();
+        let mut gossip = Vec::new();
         gossip.extend(
             self.ledger
                 .pending_blinded_transactions()
@@ -500,26 +444,15 @@ impl NodeCore {
 
     pub fn peer_status(&self) -> GossipEnvelope {
         let status = self.ledger.status();
-        let mempool_txs = self.mempool_inventory(MEMPOOL_STATUS_LIMIT);
         GossipEnvelope::PeerStatus {
             height: status.height,
             tip_hash: status.tip_hash,
             time_ms: now_ms(),
-            mempool_count: self.mempool_count(),
-            mempool_root: self.mempool_root(),
-            mempool_txs,
         }
     }
 
     pub fn blocks_from(&self, from_height: u64, limit: usize) -> Vec<Block> {
         self.ledger.blocks_from(from_height, limit)
-    }
-
-    pub fn transactions_by_signature(&self, signatures: &[String]) -> Vec<Transaction> {
-        signatures
-            .iter()
-            .filter_map(|signature| self.ledger.transaction_by_signature(signature))
-            .collect()
     }
 
     pub fn blocks_by_hash(&self, hashes: &[String]) -> Vec<Block> {
@@ -529,16 +462,7 @@ impl NodeCore {
             .collect()
     }
 
-    pub fn missing_inventory_requests(
-        &self,
-        txs: &[String],
-        blocks: &[BlockInventory],
-    ) -> Vec<GossipEnvelope> {
-        let missing_txs = txs
-            .iter()
-            .filter(|signature| !self.ledger.has_transaction(signature))
-            .cloned()
-            .collect::<Vec<_>>();
+    pub fn missing_inventory_requests(&self, blocks: &[BlockInventory]) -> Vec<GossipEnvelope> {
         let local_height = self.ledger.height();
         let first_height_gap = blocks
             .iter()
@@ -554,11 +478,6 @@ impl NodeCore {
             .collect::<Vec<_>>();
 
         let mut requests = Vec::new();
-        if !missing_txs.is_empty() {
-            requests.push(GossipEnvelope::TransactionRequest {
-                signatures: missing_txs,
-            });
-        }
         if !missing_blocks.is_empty() {
             requests.push(GossipEnvelope::BlockRequest {
                 hashes: missing_blocks,
@@ -665,12 +584,9 @@ impl NodeCore {
 
     pub fn burn_with_fee(&mut self, amount: Amount, fee: Amount) -> Result<Transaction> {
         let tx = self
-            .ledger
+            .wallet_build_ledger()?
             .build_burn(self.wallet.unlocked()?, amount, fee)?;
-        if self.ledger.submit_transaction(tx.clone())? {
-            self.outbox.push(GossipEnvelope::Transaction(tx.clone()));
-        }
-        Ok(tx)
+        self.submit_transaction_as_owned_blinded(tx)
     }
 
     pub fn burn_with_fee_rate(
@@ -678,10 +594,9 @@ impl NodeCore {
         amount: Amount,
         fee_per_byte: Amount,
     ) -> Result<(Transaction, FeeEstimate)> {
-        let (tx, estimate) = self.build_burn_with_fee_rate(amount, fee_per_byte)?;
-        if self.ledger.submit_transaction(tx.clone())? {
-            self.outbox.push(GossipEnvelope::Transaction(tx.clone()));
-        }
+        let (built, estimate) = self.build_blinded_burn_with_fee_rate(amount, fee_per_byte)?;
+        let tx = built.payload.clone();
+        self.submit_owned_blinded_transaction(built)?;
         Ok((tx, estimate))
     }
 
@@ -691,7 +606,7 @@ impl NodeCore {
         fee: Amount,
         expires_at_height: u64,
     ) -> Result<BlindedTransaction> {
-        let built = self.ledger.build_blinded_burn(
+        let built = self.wallet_build_ledger()?.build_blinded_burn(
             self.wallet.unlocked()?,
             amount,
             fee,
@@ -715,13 +630,10 @@ impl NodeCore {
         amount: Amount,
         fee: Amount,
     ) -> Result<Transaction> {
-        let tx = self
-            .ledger
-            .build_transfer(self.wallet.unlocked()?, to, amount, fee)?;
-        if self.ledger.submit_transaction(tx.clone())? {
-            self.outbox.push(GossipEnvelope::Transaction(tx.clone()));
-        }
-        Ok(tx)
+        let tx =
+            self.wallet_build_ledger()?
+                .build_transfer(self.wallet.unlocked()?, to, amount, fee)?;
+        self.submit_transaction_as_owned_blinded(tx)
     }
 
     pub fn transfer_with_fee_spending(
@@ -731,17 +643,14 @@ impl NodeCore {
         fee: Amount,
         outpoints: &[OutPoint],
     ) -> Result<Transaction> {
-        let tx = self.ledger.build_transfer_with_inputs(
+        let tx = self.wallet_build_ledger()?.build_transfer_with_inputs(
             self.wallet.unlocked()?,
             to,
             amount,
             fee,
             outpoints,
         )?;
-        if self.ledger.submit_transaction(tx.clone())? {
-            self.outbox.push(GossipEnvelope::Transaction(tx.clone()));
-        }
-        Ok(tx)
+        self.submit_transaction_as_owned_blinded(tx)
     }
 
     pub fn blinded_transfer_with_fee(
@@ -751,7 +660,7 @@ impl NodeCore {
         fee: Amount,
         expires_at_height: u64,
     ) -> Result<BlindedTransaction> {
-        let built = self.ledger.build_blinded_transfer(
+        let built = self.wallet_build_ledger()?.build_blinded_transfer(
             self.wallet.unlocked()?,
             to,
             amount,
@@ -768,11 +677,10 @@ impl NodeCore {
         fee_per_byte: Amount,
         outpoints: &[OutPoint],
     ) -> Result<(Transaction, FeeEstimate)> {
-        let (tx, estimate) =
-            self.build_transfer_with_fee_rate(to, amount, fee_per_byte, outpoints)?;
-        if self.ledger.submit_transaction(tx.clone())? {
-            self.outbox.push(GossipEnvelope::Transaction(tx.clone()));
-        }
+        let (built, estimate) =
+            self.build_blinded_transfer_with_fee_rate(to, amount, fee_per_byte, outpoints)?;
+        let tx = built.payload.clone();
+        self.submit_owned_blinded_transaction(built)?;
         Ok((tx, estimate))
     }
 
@@ -789,10 +697,7 @@ impl NodeCore {
 
     pub fn mine_pow_reward(&mut self) -> Result<Transaction> {
         let (tx, _) = self.build_mine_estimate()?;
-        if self.ledger.submit_transaction(tx.clone())? {
-            self.outbox.push(GossipEnvelope::Transaction(tx.clone()));
-        }
-        Ok(tx)
+        self.submit_transaction_as_owned_blinded(tx)
     }
 
     pub fn estimate_mine_fee(&self, _fee_per_byte: Amount) -> Result<FeeEstimate> {
@@ -831,17 +736,11 @@ impl NodeCore {
         if tx.to() != Some(recipient.as_str()) {
             bail!("submitted mine recipient does not match worker");
         }
-        if self.ledger.submit_transaction(tx.clone())? {
-            self.outbox.push(GossipEnvelope::Transaction(tx.clone()));
-        }
-        Ok(tx)
+        self.submit_transaction_as_owned_blinded(tx)
     }
 
     pub fn receive_transaction(&mut self, tx: Transaction) -> Result<TransactionSubmitOutcome> {
         let outcome = self.ledger.submit_transaction_with_outcome(tx.clone())?;
-        if outcome.added() {
-            self.outbox.push(GossipEnvelope::Transaction(tx.clone()));
-        }
         Ok(outcome)
     }
 
@@ -864,6 +763,8 @@ impl NodeCore {
         built: BuiltBlindedTransaction,
     ) -> Result<BlindedTransaction> {
         let transaction = built.transaction;
+        self.owned_blinded_payloads
+            .insert(transaction.commitment.clone(), built.payload);
         self.owned_blinded_reveals
             .insert(transaction.commitment.clone(), built.reveal);
         if self
@@ -874,6 +775,21 @@ impl NodeCore {
                 .push(GossipEnvelope::BlindedTransaction(transaction.clone()));
         }
         Ok(transaction)
+    }
+
+    fn submit_transaction_as_owned_blinded(&mut self, tx: Transaction) -> Result<Transaction> {
+        let built = self.ledger.build_blinded_transaction(
+            tx.clone(),
+            self.default_blinded_transaction_expiry_height(),
+        )?;
+        self.submit_owned_blinded_transaction(built)?;
+        Ok(tx)
+    }
+
+    fn default_blinded_transaction_expiry_height(&self) -> u64 {
+        self.ledger
+            .height()
+            .saturating_add(MAX_BLINDED_TRANSACTION_EXPIRY_HEIGHTS)
     }
 
     fn publish_owned_reveals_for_block(&mut self, block: &Block) -> Result<()> {
@@ -888,13 +804,33 @@ impl NodeCore {
         Ok(())
     }
 
+    fn prune_owned_blinded_payloads_for_block(&mut self, block: &Block) {
+        for reveal in &block.blinded_reveals {
+            self.owned_blinded_payloads.remove(&reveal.commitment);
+        }
+        self.owned_blinded_payloads
+            .retain(|commitment, _| self.ledger.has_unrevealed_blinded_transaction(commitment));
+    }
+
     fn build_burn_with_fee_rate(
         &self,
         amount: Amount,
         fee_per_byte: Amount,
     ) -> Result<(Transaction, FeeEstimate)> {
+        let (built, estimate) = self.build_blinded_burn_with_fee_rate(amount, fee_per_byte)?;
+        Ok((built.payload, estimate))
+    }
+
+    fn build_blinded_burn_with_fee_rate(
+        &self,
+        amount: Amount,
+        fee_per_byte: Amount,
+    ) -> Result<(BuiltBlindedTransaction, FeeEstimate)> {
+        let ledger = self.wallet_build_ledger()?;
+        let expires_at_height = self.default_blinded_transaction_expiry_height();
         converge_fee_by_byte(fee_per_byte, |fee| {
-            self.ledger.build_burn(self.wallet.unlocked()?, amount, fee)
+            let tx = ledger.build_burn(self.wallet.unlocked()?, amount, fee)?;
+            ledger.build_blinded_transaction(tx, expires_at_height)
         })
     }
 
@@ -905,20 +841,34 @@ impl NodeCore {
         fee_per_byte: Amount,
         outpoints: &[OutPoint],
     ) -> Result<(Transaction, FeeEstimate)> {
+        let (built, estimate) =
+            self.build_blinded_transfer_with_fee_rate(to, amount, fee_per_byte, outpoints)?;
+        Ok((built.payload, estimate))
+    }
+
+    fn build_blinded_transfer_with_fee_rate(
+        &self,
+        to: impl Into<String>,
+        amount: Amount,
+        fee_per_byte: Amount,
+        outpoints: &[OutPoint],
+    ) -> Result<(BuiltBlindedTransaction, FeeEstimate)> {
         let to = to.into();
+        let ledger = self.wallet_build_ledger()?;
+        let expires_at_height = self.default_blinded_transaction_expiry_height();
         converge_fee_by_byte(fee_per_byte, |fee| {
-            if outpoints.is_empty() {
-                self.ledger
-                    .build_transfer(self.wallet.unlocked()?, to.clone(), amount, fee)
+            let tx = if outpoints.is_empty() {
+                ledger.build_transfer(self.wallet.unlocked()?, to.clone(), amount, fee)
             } else {
-                self.ledger.build_transfer_with_inputs(
+                ledger.build_transfer_with_inputs(
                     self.wallet.unlocked()?,
                     to.clone(),
                     amount,
                     fee,
                     outpoints,
                 )
-            }
+            }?;
+            ledger.build_blinded_transaction(tx, expires_at_height)
         })
     }
 
@@ -931,6 +881,18 @@ impl NodeCore {
                 fee: tx.fee(),
             },
         ))
+    }
+
+    fn wallet_build_ledger(&self) -> Result<Ledger> {
+        let mut ledger = self.ledger.clone();
+        for (commitment, payload) in &self.owned_blinded_payloads {
+            if self.ledger.has_unrevealed_blinded_transaction(commitment)
+                && !ledger.has_transaction(payload.signature())
+            {
+                let _ = ledger.submit_transaction(payload.clone())?;
+            }
+        }
+        Ok(ledger)
     }
 
     pub fn mine_one(&mut self) -> Result<Block> {
@@ -1039,10 +1001,7 @@ impl NodeCore {
             return plan;
         }
 
-        match self
-            .ledger
-            .prepare_next_block(self.wallet.address(), timestamp_ms)
-        {
+        match self.prepare_next_block_with_local_anchor(timestamp_ms) {
             Ok(work) => {
                 plan.work = Some(work);
             }
@@ -1102,10 +1061,7 @@ impl NodeCore {
             .finalizer_rank_for_next_block(self.wallet.address());
         if wallet_rank.is_none() {
             if self.ledger.recovery_block_available_at(timestamp_ms) {
-                match self
-                    .ledger
-                    .prepare_recovery_block(self.wallet.address(), timestamp_ms)
-                {
+                match self.prepare_recovery_block_with_local_anchor(timestamp_ms) {
                     Ok(work) => {
                         plan.work = Some(work);
                     }
@@ -1122,10 +1078,7 @@ impl NodeCore {
             return plan;
         }
 
-        match self
-            .ledger
-            .prepare_next_block(self.wallet.address(), timestamp_ms)
-        {
+        match self.prepare_next_block_with_local_anchor(timestamp_ms) {
             Ok(work) => {
                 plan.work = Some(work);
             }
@@ -1171,7 +1124,7 @@ impl NodeCore {
             .as_ref()
             .context("automatic PoW cursor was not initialized")?
             .clone();
-        let outcome = self.ledger.search_mine(
+        let outcome = self.wallet_build_ledger()?.search_mine(
             wallet_address,
             cursor.salt,
             cursor.next_nonce,
@@ -1191,17 +1144,12 @@ impl NodeCore {
             ));
             return Ok(None);
         };
-        if self.ledger.submit_transaction(tx.clone())? {
-            self.last_auto_pow_mine_anchor = Some(anchor);
-            self.last_auto_pow_mine_status = Some(format!(
-                "queued mine action after {searched} PoW nonce attempts for the current tip"
-            ));
-            self.outbox.push(GossipEnvelope::Transaction(tx.clone()));
-            return Ok(Some(tx));
-        }
-        self.last_auto_pow_mine_status =
-            Some("mine action was already known by the mempool".to_string());
-        Ok(None)
+        self.submit_transaction_as_owned_blinded(tx.clone())?;
+        self.last_auto_pow_mine_anchor = Some(anchor);
+        self.last_auto_pow_mine_status = Some(format!(
+            "queued mine action after {searched} PoW nonce attempts for the current tip"
+        ));
+        Ok(Some(tx))
     }
 
     fn prepare_automatic_burn(&mut self, timestamp_ms: u64) -> Result<Option<Transaction>> {
@@ -1224,13 +1172,13 @@ impl NodeCore {
         let mut best = None;
         while low <= high {
             let amount = low + (high - low) / 2;
-            match self.build_burn_with_fee_rate(amount, fee_per_byte) {
-                Ok((tx, estimate)) => {
+            match self.build_blinded_burn_with_fee_rate(amount, fee_per_byte) {
+                Ok((built, estimate)) => {
                     let fits = amount
                         .checked_add(estimate.fee)
                         .is_some_and(|required| required <= balance);
                     if fits {
-                        best = Some(tx);
+                        best = Some(built);
                         if amount == Amount::MAX {
                             break;
                         }
@@ -1248,21 +1196,14 @@ impl NodeCore {
             self.last_auto_burn_height = Some(current_height);
             return Ok(None);
         };
+        let burn = tx.payload.clone();
         if self.automatic_burn_needs_plaintext_anchor(timestamp_ms) {
-            if self.ledger.submit_transaction(tx.clone())? {
-                self.outbox.push(GossipEnvelope::Transaction(tx.clone()));
-            }
+            self.local_block_anchor_burn = Some((current_height, burn.clone()));
         } else {
-            let built = self.ledger.build_blinded_burn(
-                self.wallet.unlocked()?,
-                tx.amount(),
-                tx.fee(),
-                current_height.saturating_add(AUTO_BLINDED_BURN_EXPIRY_HEIGHTS),
-            )?;
-            self.submit_owned_blinded_transaction(built)?;
+            self.submit_owned_blinded_transaction(tx)?;
         }
         self.last_auto_burn_height = Some(current_height);
-        Ok(Some(tx))
+        Ok(Some(burn))
     }
 
     fn automatic_burn_needs_plaintext_anchor(&self, timestamp_ms: u64) -> bool {
@@ -1274,11 +1215,44 @@ impl NodeCore {
                 >= self.ledger.recovery_block_min_timestamp()
     }
 
+    fn prepare_next_block_with_local_anchor(&self, timestamp_ms: u64) -> Result<PreparedBlock> {
+        self.ledger_with_local_block_anchor()?
+            .prepare_next_block(self.wallet.address(), timestamp_ms)
+    }
+
+    fn prepare_recovery_block_with_local_anchor(&self, timestamp_ms: u64) -> Result<PreparedBlock> {
+        self.ledger_with_local_block_anchor()?
+            .prepare_recovery_block(self.wallet.address(), timestamp_ms)
+    }
+
+    fn ledger_with_local_block_anchor(&self) -> Result<Ledger> {
+        let mut ledger = self.ledger.clone();
+        let Some((height, burn)) = &self.local_block_anchor_burn else {
+            return Ok(ledger);
+        };
+        if *height == ledger.height() && !ledger.has_transaction(burn.signature()) {
+            let _ = ledger.submit_transaction(burn.clone())?;
+        }
+        Ok(ledger)
+    }
+
+    fn clear_stale_local_block_anchor(&mut self) {
+        if self
+            .local_block_anchor_burn
+            .as_ref()
+            .is_some_and(|(height, _)| *height != self.ledger.height())
+        {
+            self.local_block_anchor_burn = None;
+        }
+    }
+
     pub fn mine_one_at(&mut self, timestamp_ms: u64) -> Result<Block> {
         let block = self
             .ledger
             .mine_next_block(self.wallet.unlocked()?, timestamp_ms)?;
         self.ledger.apply_locally_mined_block(block.clone())?;
+        self.clear_stale_local_block_anchor();
+        self.prune_owned_blinded_payloads_for_block(&block);
         self.outbox.push(GossipEnvelope::Block(block.clone()));
         self.publish_owned_reveals_for_block(&block)?;
         Ok(block)
@@ -1300,6 +1274,8 @@ impl NodeCore {
     ) -> Result<Block> {
         let block = work.finish_at(self.wallet.unlocked()?, vdf_output, timestamp_ms);
         self.ledger.apply_locally_mined_block(block.clone())?;
+        self.clear_stale_local_block_anchor();
+        self.prune_owned_blinded_payloads_for_block(&block);
         self.outbox.push(GossipEnvelope::Block(block.clone()));
         self.publish_owned_reveals_for_block(&block)?;
         Ok(block)
@@ -1311,20 +1287,8 @@ impl NodeCore {
             | GossipEnvelope::PeerStatus { .. }
             | GossipEnvelope::ChainSnapshotRequest
             | GossipEnvelope::BlockRangeRequest { .. }
-            | GossipEnvelope::TransactionRequest { .. }
             | GossipEnvelope::BlockRequest { .. }
-            | GossipEnvelope::TransactionAck { .. }
             | GossipEnvelope::Inventory { .. } => Ok(()),
-            GossipEnvelope::Transaction(tx) => {
-                self.receive_transaction(tx)?;
-                Ok(())
-            }
-            GossipEnvelope::Transactions { transactions } => {
-                for tx in transactions {
-                    self.receive_transaction(tx)?;
-                }
-                Ok(())
-            }
             GossipEnvelope::BlindedTransaction(tx) => self.receive_blinded_transaction(tx),
             GossipEnvelope::BlindedTransactions { transactions } => {
                 for tx in transactions {
@@ -1343,6 +1307,8 @@ impl NodeCore {
                 let previous_height = self.ledger.height();
                 self.ledger.apply_block(block.clone())?;
                 if self.ledger.height() > previous_height {
+                    self.clear_stale_local_block_anchor();
+                    self.prune_owned_blinded_payloads_for_block(&block);
                     self.publish_owned_reveals_for_block(&block)?;
                     self.outbox.push(GossipEnvelope::Block(block));
                 }
@@ -1354,6 +1320,8 @@ impl NodeCore {
                     let previous_height = self.ledger.height();
                     self.ledger.apply_block(block.clone())?;
                     if self.ledger.height() > previous_height {
+                        self.clear_stale_local_block_anchor();
+                        self.prune_owned_blinded_payloads_for_block(&block);
                         self.publish_owned_reveals_for_block(&block)?;
                         imported.push(block);
                     }
@@ -1376,6 +1344,9 @@ impl NodeCore {
         self.ledger
             .apply_preverified_block_at(block.clone(), now_ms)?;
         if self.ledger.height() > previous_height {
+            self.clear_stale_local_block_anchor();
+            self.prune_owned_blinded_payloads_for_block(&block);
+            self.publish_owned_reveals_for_block(&block)?;
             self.outbox.push(GossipEnvelope::Block(block));
         }
         Ok(())
@@ -1398,6 +1369,7 @@ impl NodeCore {
             self.last_auto_pow_mine_anchor = None;
             self.last_auto_pow_mine_status = None;
             self.auto_pow_mine_cursor = None;
+            self.clear_stale_local_block_anchor();
             self.enqueue_imported_blocks(previous_height)?;
         }
         Ok(())
@@ -1419,6 +1391,7 @@ impl NodeCore {
         self.last_auto_pow_mine_anchor = None;
         self.last_auto_pow_mine_status = None;
         self.auto_pow_mine_cursor = None;
+        self.clear_stale_local_block_anchor();
         self.enqueue_imported_blocks(previous_height)?;
         Ok(true)
     }
@@ -1435,6 +1408,7 @@ impl NodeCore {
             .ledger
             .blocks_from(previous_height + 1, IMPORT_REBROADCAST_LIMIT);
         for block in &blocks {
+            self.prune_owned_blinded_payloads_for_block(block);
             self.publish_owned_reveals_for_block(block)?;
         }
         if !blocks.is_empty() {
@@ -1508,22 +1482,6 @@ impl PeerBook {
             .last_known_tip_hash
             .clone()
             .or(from_peer.last_known_tip_hash);
-        to_peer.last_known_mempool_count = to_peer
-            .last_known_mempool_count
-            .or(from_peer.last_known_mempool_count);
-        to_peer.last_known_mempool_root = to_peer
-            .last_known_mempool_root
-            .clone()
-            .or(from_peer.last_known_mempool_root);
-        to_peer.last_known_mempool_shared = to_peer
-            .last_known_mempool_shared
-            .or(from_peer.last_known_mempool_shared);
-        to_peer.last_known_mempool_missing = to_peer
-            .last_known_mempool_missing
-            .or(from_peer.last_known_mempool_missing);
-        to_peer.last_mempool_status_ms = to_peer
-            .last_mempool_status_ms
-            .max(from_peer.last_mempool_status_ms);
         if from_peer.last_clock_observed_ms > to_peer.last_clock_observed_ms {
             to_peer.last_clock_offset_ms = from_peer.last_clock_offset_ms;
             to_peer.last_clock_offset_accepted = from_peer.last_clock_offset_accepted;
@@ -1535,12 +1493,6 @@ impl PeerBook {
         if to_peer.last_error.is_none() {
             to_peer.last_error = from_peer.last_error;
         }
-        if to_peer.last_transaction_rejection.is_none() {
-            to_peer.last_transaction_rejection = from_peer.last_transaction_rejection;
-        }
-        to_peer.last_transaction_rejection_ms = to_peer
-            .last_transaction_rejection_ms
-            .max(from_peer.last_transaction_rejection_ms);
         to_peer.misbehavior_score = to_peer
             .misbehavior_score
             .saturating_add(from_peer.misbehavior_score);
@@ -1679,66 +1631,6 @@ impl PeerBook {
             .count()
     }
 
-    pub fn record_mempool_status(
-        &mut self,
-        address: &str,
-        mempool_count: usize,
-        mempool_root: String,
-        mempool_shared: usize,
-        mempool_missing: usize,
-    ) {
-        self.record_mempool_status_with_direction(
-            address,
-            PeerDirection::Outbound,
-            mempool_count,
-            mempool_root,
-            mempool_shared,
-            mempool_missing,
-        );
-    }
-
-    pub fn record_inbound_mempool_status(
-        &mut self,
-        address: &str,
-        mempool_count: usize,
-        mempool_root: String,
-        mempool_shared: usize,
-        mempool_missing: usize,
-    ) {
-        self.record_mempool_status_with_direction(
-            address,
-            PeerDirection::Inbound,
-            mempool_count,
-            mempool_root,
-            mempool_shared,
-            mempool_missing,
-        );
-    }
-
-    fn record_mempool_status_with_direction(
-        &mut self,
-        address: &str,
-        direction: PeerDirection,
-        mempool_count: usize,
-        mempool_root: String,
-        mempool_shared: usize,
-        mempool_missing: usize,
-    ) {
-        let now = now_ms();
-        let peer = self.ensure(address, direction);
-        peer.last_known_mempool_count = Some(mempool_count);
-        peer.last_known_mempool_root = Some(mempool_root);
-        peer.last_known_mempool_shared = Some(mempool_shared);
-        peer.last_known_mempool_missing = Some(mempool_missing);
-        peer.last_mempool_status_ms = Some(now);
-        peer.last_contact_ms = Some(now);
-        peer.last_success_ms = Some(now);
-        if !peer.is_banned_at(now) {
-            peer.last_error = None;
-            peer.clear_misbehavior();
-        }
-    }
-
     pub fn record_error(&mut self, address: &str, error: impl Into<String>) {
         let now = now_ms();
         let peer = self.ensure(address, PeerDirection::Outbound);
@@ -1753,26 +1645,6 @@ impl PeerBook {
         peer.last_contact_ms = Some(now);
         peer.last_error_ms = Some(now);
         peer.last_error = Some(error.into());
-    }
-
-    pub fn record_transaction_rejection(&mut self, address: &str, reason: impl Into<String>) {
-        let now = now_ms();
-        let peer = self.ensure(address, PeerDirection::Outbound);
-        peer.last_contact_ms = Some(now);
-        peer.last_transaction_rejection_ms = Some(now);
-        peer.last_transaction_rejection = Some(reason.into());
-    }
-
-    pub fn record_inbound_transaction_rejection(
-        &mut self,
-        address: &str,
-        reason: impl Into<String>,
-    ) {
-        let now = now_ms();
-        let peer = self.ensure(address, PeerDirection::Inbound);
-        peer.last_contact_ms = Some(now);
-        peer.last_transaction_rejection_ms = Some(now);
-        peer.last_transaction_rejection = Some(reason.into());
     }
 
     pub fn record_received(&mut self, address: &str, count: u64) {
@@ -1844,27 +1716,15 @@ pub struct PeerInfo {
     pub last_known_height: Option<u64>,
     pub last_known_tip_hash: Option<String>,
     #[serde(default)]
-    pub last_known_mempool_count: Option<usize>,
-    #[serde(default)]
-    pub last_known_mempool_root: Option<String>,
-    #[serde(default)]
-    pub last_known_mempool_shared: Option<usize>,
-    #[serde(default)]
-    pub last_known_mempool_missing: Option<usize>,
-    #[serde(default)]
-    pub last_mempool_status_ms: Option<u64>,
-    #[serde(default)]
     pub last_clock_offset_ms: Option<i64>,
     #[serde(default)]
     pub last_clock_offset_accepted: Option<bool>,
     #[serde(default)]
     pub last_clock_observed_ms: Option<u64>,
     pub last_error: Option<String>,
-    pub last_transaction_rejection: Option<String>,
     pub last_contact_ms: Option<u64>,
     pub last_success_ms: Option<u64>,
     pub last_error_ms: Option<u64>,
-    pub last_transaction_rejection_ms: Option<u64>,
     pub misbehavior_score: u32,
     pub banned_until_ms: Option<u64>,
     pub ban_reason: Option<String>,
@@ -1879,20 +1739,13 @@ impl PeerInfo {
             messages_received: 0,
             last_known_height: None,
             last_known_tip_hash: None,
-            last_known_mempool_count: None,
-            last_known_mempool_root: None,
-            last_known_mempool_shared: None,
-            last_known_mempool_missing: None,
-            last_mempool_status_ms: None,
             last_clock_offset_ms: None,
             last_clock_offset_accepted: None,
             last_clock_observed_ms: None,
             last_error: None,
-            last_transaction_rejection: None,
             last_contact_ms: None,
             last_success_ms: None,
             last_error_ms: None,
-            last_transaction_rejection_ms: None,
             misbehavior_score: 0,
             banned_until_ms: None,
             ban_reason: None,
@@ -1933,14 +1786,6 @@ pub fn now_ms() -> u64 {
         .as_millis() as u64
 }
 
-pub fn mempool_root_for_signatures(signatures: &[String]) -> String {
-    if signatures.is_empty() {
-        String::new()
-    } else {
-        hex_hash(format!("iuna-mempool-root:{}", signatures.join("|")))
-    }
-}
-
 fn auto_pow_salt(wallet_address: &str, anchor: &str) -> u64 {
     let digest = Sha256::digest(format!("iuna-auto-pow:{wallet_address}:{anchor}").as_bytes());
     let mut bytes = [0_u8; 8];
@@ -1950,55 +1795,57 @@ fn auto_pow_salt(wallet_address: &str, anchor: &str) -> u64 {
 
 fn converge_fee_by_byte(
     fee_per_byte: Amount,
-    mut build: impl FnMut(Amount) -> Result<Transaction>,
-) -> Result<(Transaction, FeeEstimate)> {
+    mut build: impl FnMut(Amount) -> Result<BuiltBlindedTransaction>,
+) -> Result<(BuiltBlindedTransaction, FeeEstimate)> {
     let mut fee = 0;
     let mut best = None;
     for _ in 0..64 {
-        let tx = build(fee)?;
-        let bytes = tx.economic_size_bytes();
+        let built = build(fee)?;
+        let bytes = built.transaction.fee_rate_size_bytes();
         let required_fee = fee_per_byte
             .checked_mul(bytes as Amount)
-            .context("fee per byte times transaction bytes overflows")?;
+            .context("fee per byte times blinded transaction bytes overflows")?;
         if fee == required_fee {
-            return Ok((tx, FeeEstimate { bytes, fee }));
+            return Ok((built, FeeEstimate { bytes, fee }));
         }
         if fee > required_fee
             && best
                 .as_ref()
-                .is_none_or(|(_, estimate): &(Transaction, FeeEstimate)| fee < estimate.fee)
+                .is_none_or(|(_, estimate): &(BuiltBlindedTransaction, FeeEstimate)| {
+                    fee < estimate.fee
+                })
         {
-            best = Some((tx, FeeEstimate { bytes, fee }));
+            best = Some((built, FeeEstimate { bytes, fee }));
         }
         fee = required_fee;
     }
 
-    let tx = build(fee)?;
-    let bytes = tx.economic_size_bytes();
+    let built = build(fee)?;
+    let bytes = built.transaction.fee_rate_size_bytes();
     let required_fee = fee_per_byte
         .checked_mul(bytes as Amount)
-        .context("fee per byte times transaction bytes overflows")?;
+        .context("fee per byte times blinded transaction bytes overflows")?;
     if fee >= required_fee {
         if best
             .as_ref()
-            .is_none_or(|(_, estimate): &(Transaction, FeeEstimate)| fee < estimate.fee)
+            .is_none_or(|(_, estimate): &(BuiltBlindedTransaction, FeeEstimate)| fee < estimate.fee)
         {
-            best = Some((tx, FeeEstimate { bytes, fee }));
+            best = Some((built, FeeEstimate { bytes, fee }));
         }
         if let Some(best) = best {
             return Ok(best);
         }
     }
-    let tx = build(required_fee)?;
-    let bytes = tx.economic_size_bytes();
+    let built = build(required_fee)?;
+    let bytes = built.transaction.fee_rate_size_bytes();
     let final_required_fee = fee_per_byte
         .checked_mul(bytes as Amount)
-        .context("fee per byte times transaction bytes overflows")?;
+        .context("fee per byte times blinded transaction bytes overflows")?;
     if required_fee < final_required_fee {
         bail!("fee per byte did not converge");
     }
     Ok((
-        tx,
+        built,
         FeeEstimate {
             bytes,
             fee: required_fee,
@@ -2021,7 +1868,7 @@ mod tests {
     fn same_height_verified_import_does_not_reset_auto_burn_guard() {
         let alice = Wallet::from_seed("same-height-import-alice");
         let mut allocations = BTreeMap::new();
-        allocations.insert(alice.address().to_string(), 1_000);
+        allocations.insert(alice.address().to_string(), MICRO_IUNA);
         let mut node = NodeCore::new(NodeConfig {
             wallet: alice,
             genesis_allocations: allocations,
@@ -2045,13 +1892,13 @@ mod tests {
     #[test]
     fn automatic_pow_mining_searches_bounded_nonce_batches_per_tip() {
         let wallet = Wallet::from_seed("automatic-pow-mining-wallet");
-        let mut node = NodeCore::new(NodeConfig {
-            wallet: wallet.clone(),
-            genesis_allocations: BTreeMap::new(),
-            vdf_rounds: 10,
-            burn_per_block: 0,
-            burn_fee: 0,
-        });
+        let ledger = Ledger::new_with_genesis_burns(
+            BTreeMap::from([(wallet.address().to_string(), 1)]),
+            vec![GenesisBurn::new(wallet.address(), 1)],
+            10,
+        )
+        .unwrap();
+        let mut node = NodeCore::from_ledger(wallet.clone(), ledger, 0);
 
         let disabled = node.prepare_automatic_mining(1);
         assert!(disabled.pow_mined.is_none());
@@ -2062,7 +1909,8 @@ mod tests {
 
         node.set_pow_mining_enabled(true);
         let first = node.prepare_automatic_mining(2);
-        assert!(node.ledger().pending().len() <= 1);
+        assert!(node.ledger().pending().is_empty());
+        assert!(node.ledger().pending_blinded_transactions().len() <= 1);
         let first = std::iter::once(first)
             .chain((3..10_000).map(|timestamp| node.prepare_automatic_mining(timestamp)))
             .find(|plan| plan.pow_mined.is_some())
@@ -2083,7 +1931,8 @@ mod tests {
             *difficulty_bits,
             node.ledger().current_mine_difficulty_bits()
         );
-        assert_eq!(node.ledger().pending().len(), 1);
+        assert!(node.ledger().pending().is_empty());
+        assert_eq!(node.ledger().pending_blinded_transactions().len(), 1);
         assert!(
             node.status()
                 .mining
@@ -2101,7 +1950,8 @@ mod tests {
             second.pow_mined.as_ref().unwrap().signature(),
             first_mine.signature()
         );
-        assert_eq!(node.ledger().pending().len(), 2);
+        assert!(node.ledger().pending().is_empty());
+        assert_eq!(node.ledger().pending_blinded_transactions().len(), 2);
     }
 
     #[test]
@@ -2251,15 +2101,25 @@ mod tests {
         let ledger = crate::domain::Ledger::new(genesis, 1);
         let mut node = NodeCore::from_ledger(alice, ledger, 0);
 
-        let (transfer, _) = node
+        let (transfer, transfer_estimate) = node
             .transfer_with_fee_rate(bob.address(), MICRO_IUNA, 2, &[])
             .unwrap();
-        let minimum_transfer_fee = transfer.economic_size_bytes() as u64 * 2;
+        let transfer_blinded_bytes =
+            node.ledger().pending_blinded_transactions()[0].fee_rate_size_bytes();
+        assert_eq!(transfer_estimate.bytes, transfer_blinded_bytes);
+        let minimum_transfer_fee = transfer_blinded_bytes as u64 * 2;
         assert!(transfer.fee() >= minimum_transfer_fee);
+        assert!(node.ledger().pending().is_empty());
+        assert_eq!(node.ledger().pending_blinded_transactions().len(), 1);
 
-        let (burn, _) = node.burn_with_fee_rate(MICRO_IUNA, 3).unwrap();
-        let minimum_burn_fee = burn.economic_size_bytes() as u64 * 3;
+        let (burn, burn_estimate) = node.burn_with_fee_rate(MICRO_IUNA, 3).unwrap();
+        let burn_blinded_bytes =
+            node.ledger().pending_blinded_transactions()[1].fee_rate_size_bytes();
+        assert_eq!(burn_estimate.bytes, burn_blinded_bytes);
+        let minimum_burn_fee = burn_blinded_bytes as u64 * 3;
         assert!(burn.fee() >= minimum_burn_fee);
+        assert!(node.ledger().pending().is_empty());
+        assert_eq!(node.ledger().pending_blinded_transactions().len(), 2);
     }
 
     #[test]
@@ -2420,12 +2280,11 @@ mod tests {
         let outbox = node.drain_outbox();
 
         assert!(plan.burned.is_some());
-        assert_eq!(node.ledger().pending().len(), 1);
+        assert!(node.ledger().pending().is_empty());
         assert!(node.ledger().pending_blinded_transactions().is_empty());
-        assert!(outbox.iter().any(|envelope| matches!(
-            envelope,
-            GossipEnvelope::Transaction(transaction) if transaction.is_burn()
-        )));
+        assert!(node.local_block_anchor_burn.is_some());
+        assert!(outbox.is_empty());
+        assert!(node.prepare_automatic_finalization(1).work.is_some());
     }
 }
 
@@ -2496,9 +2355,7 @@ impl InMemoryNetwork {
 fn receive_in_memory_envelope(node: &mut NodeCore, envelope: GossipEnvelope) -> Result<()> {
     let transaction_like = matches!(
         envelope,
-        GossipEnvelope::Transaction(_)
-            | GossipEnvelope::Transactions { .. }
-            | GossipEnvelope::BlindedTransaction(_)
+        GossipEnvelope::BlindedTransaction(_)
             | GossipEnvelope::BlindedTransactions { .. }
             | GossipEnvelope::BlindedReveal(_)
             | GossipEnvelope::BlindedReveals { .. }

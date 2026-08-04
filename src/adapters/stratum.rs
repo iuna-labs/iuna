@@ -406,7 +406,9 @@ mod tests {
         )
         .await;
         assert_eq!(read_id(&mut lines, 3).await["result"], json!(true));
-        assert_eq!(node.lock().await.ledger().pending().len(), 1);
+        let node = node.lock().await;
+        assert!(node.ledger().pending().is_empty());
+        assert_eq!(node.ledger().pending_blinded_transactions().len(), 1);
     }
 
     #[test]

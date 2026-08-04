@@ -25,11 +25,10 @@ use tokio::{
 
 use crate::{
     app::{
-        BlockInventory, GossipEnvelope, MEMPOOL_STATUS_LIMIT, NETWORK_ID, NodeCore,
-        PROTOCOL_VERSION, PeerDirection, ProtocolHello, SharedNode, SharedPeerBook,
-        TRANSACTION_BATCH_LIMIT, TransactionRejection, debug_logging_enabled, now_ms,
+        BlockInventory, GossipEnvelope, NETWORK_ID, PROTOCOL_VERSION, PeerDirection, ProtocolHello,
+        SharedNode, SharedPeerBook, TRANSACTION_BATCH_LIMIT, debug_logging_enabled, now_ms,
     },
-    domain::{Block, ChainSnapshot, Ledger, Transaction, TransactionSubmitOutcome, verify_vdf},
+    domain::{Block, ChainSnapshot, Ledger, verify_vdf},
 };
 
 const MAX_BLOCK_BATCH: usize = 128;
@@ -46,7 +45,6 @@ const PEER_QUEUE_SIZE: usize = 256;
 const CONNECT_TIMEOUT: Duration = Duration::from_secs(5);
 const HANDSHAKE_TIMEOUT: Duration = Duration::from_secs(5);
 const SESSION_SYNC_INTERVAL: Duration = Duration::from_secs(2);
-const TRANSACTION_ACK_RETRY_INTERVAL: Duration = Duration::from_secs(3);
 const JOIN_RESPONSE_TIMEOUT: Duration = Duration::from_secs(5);
 const MAX_JOIN_RESPONSE_ENVELOPES: usize = 16;
 const MAX_PEER_VERIFICATION_ENVELOPES: usize = 8;
@@ -59,9 +57,6 @@ struct PeerStatus {
     height: u64,
     tip_hash: String,
     time_ms: u64,
-    mempool_count: usize,
-    mempool_root: String,
-    mempool_txs: Vec<String>,
     request_snapshot: bool,
     push_snapshot: bool,
 }
@@ -76,29 +71,16 @@ impl PeerStatus {
             height,
             tip_hash,
             time_ms,
-            mempool_count: 0,
-            mempool_root: String::new(),
-            mempool_txs: Vec::new(),
             request_snapshot: false,
             push_snapshot: false,
         }
     }
 
-    fn from_envelope(
-        height: u64,
-        tip_hash: String,
-        mempool_count: usize,
-        mempool_root: String,
-        mempool_txs: Vec<String>,
-        time_ms: u64,
-    ) -> Self {
+    fn from_envelope(height: u64, tip_hash: String, time_ms: u64) -> Self {
         Self {
             height,
             tip_hash,
             time_ms,
-            mempool_count,
-            mempool_root,
-            mempool_txs,
             request_snapshot: false,
             push_snapshot: false,
         }
@@ -109,9 +91,6 @@ impl PeerStatus {
             height,
             tip_hash,
             time_ms,
-            mempool_count: 0,
-            mempool_root: String::new(),
-            mempool_txs: Vec::new(),
             request_snapshot: true,
             push_snapshot: false,
         }
@@ -122,9 +101,6 @@ impl PeerStatus {
             height,
             tip_hash,
             time_ms,
-            mempool_count: 0,
-            mempool_root: String::new(),
-            mempool_txs: Vec::new(),
             request_snapshot: false,
             push_snapshot: true,
         }
@@ -146,16 +122,8 @@ struct GossipNetworkInner {
     node_id: String,
     accept_task: Mutex<Option<JoinHandle<()>>>,
     sessions: Mutex<BTreeMap<String, mpsc::Sender<OutboundBatch>>>,
-    tx_delivery: Mutex<BTreeMap<String, PeerTransactionDelivery>>,
     inbound_limiter: Arc<StdMutex<InboundConnectionLimiter>>,
     metrics: P2pMetricsCounters,
-}
-
-#[derive(Default)]
-struct PeerTransactionDelivery {
-    accepted: BTreeSet<String>,
-    rejected: BTreeSet<String>,
-    sent: BTreeMap<String, Instant>,
 }
 
 #[derive(Default)]
@@ -283,18 +251,6 @@ struct P2pMetricsCounters {
     self_peer_skips: AtomicU64,
     outbound_queue_full: AtomicU64,
     outbound_queue_closed: AtomicU64,
-    transaction_ack_envelopes_sent: AtomicU64,
-    transaction_ack_envelopes_received: AtomicU64,
-    transactions_accepted_sent: AtomicU64,
-    transactions_accepted_received: AtomicU64,
-    transactions_rejected_sent: AtomicU64,
-    transactions_rejected_received: AtomicU64,
-    transaction_retries_sent: AtomicU64,
-    mempool_statuses_received: AtomicU64,
-    mempool_status_transactions_received: AtomicU64,
-    mempool_status_mismatches: AtomicU64,
-    mempool_transaction_requests_sent: AtomicU64,
-    mempool_transaction_request_signatures_sent: AtomicU64,
     last_session_failure: StdMutex<Option<String>>,
     last_empty_frame_remote: StdMutex<Option<String>>,
     last_parse_error: StdMutex<Option<String>>,
@@ -324,19 +280,6 @@ pub struct P2pMetrics {
     pub self_peer_skips: u64,
     pub outbound_queue_full: u64,
     pub outbound_queue_closed: u64,
-    pub transaction_ack_envelopes_sent: u64,
-    pub transaction_ack_envelopes_received: u64,
-    pub transactions_accepted_sent: u64,
-    pub transactions_accepted_received: u64,
-    pub transactions_rejected_sent: u64,
-    pub transactions_rejected_received: u64,
-    pub transaction_retries_sent: u64,
-    pub mempool_statuses_received: u64,
-    pub mempool_status_transactions_received: u64,
-    pub mempool_status_mismatches: u64,
-    pub mempool_transaction_requests_sent: u64,
-    pub mempool_transaction_request_signatures_sent: u64,
-    pub transaction_ack_pending: u64,
     pub last_session_failure: Option<String>,
     pub last_empty_frame_remote: Option<String>,
     pub last_parse_error: Option<String>,
@@ -383,33 +326,6 @@ impl P2pMetricsCounters {
             self_peer_skips: self.self_peer_skips.load(Ordering::Relaxed),
             outbound_queue_full: self.outbound_queue_full.load(Ordering::Relaxed),
             outbound_queue_closed: self.outbound_queue_closed.load(Ordering::Relaxed),
-            transaction_ack_envelopes_sent: self
-                .transaction_ack_envelopes_sent
-                .load(Ordering::Relaxed),
-            transaction_ack_envelopes_received: self
-                .transaction_ack_envelopes_received
-                .load(Ordering::Relaxed),
-            transactions_accepted_sent: self.transactions_accepted_sent.load(Ordering::Relaxed),
-            transactions_accepted_received: self
-                .transactions_accepted_received
-                .load(Ordering::Relaxed),
-            transactions_rejected_sent: self.transactions_rejected_sent.load(Ordering::Relaxed),
-            transactions_rejected_received: self
-                .transactions_rejected_received
-                .load(Ordering::Relaxed),
-            transaction_retries_sent: self.transaction_retries_sent.load(Ordering::Relaxed),
-            mempool_statuses_received: self.mempool_statuses_received.load(Ordering::Relaxed),
-            mempool_status_transactions_received: self
-                .mempool_status_transactions_received
-                .load(Ordering::Relaxed),
-            mempool_status_mismatches: self.mempool_status_mismatches.load(Ordering::Relaxed),
-            mempool_transaction_requests_sent: self
-                .mempool_transaction_requests_sent
-                .load(Ordering::Relaxed),
-            mempool_transaction_request_signatures_sent: self
-                .mempool_transaction_request_signatures_sent
-                .load(Ordering::Relaxed),
-            transaction_ack_pending: 0,
             last_session_failure: self
                 .last_session_failure
                 .lock()
@@ -441,7 +357,6 @@ impl GossipNetwork {
                 node_id: new_node_id(),
                 accept_task: Mutex::new(None),
                 sessions: Mutex::new(BTreeMap::new()),
-                tx_delivery: Mutex::new(BTreeMap::new()),
                 inbound_limiter: Arc::new(StdMutex::new(InboundConnectionLimiter::default())),
                 metrics: P2pMetricsCounters::default(),
             }),
@@ -464,7 +379,6 @@ impl GossipNetwork {
                 node_id: new_node_id(),
                 accept_task: Mutex::new(None),
                 sessions: Mutex::new(BTreeMap::new()),
-                tx_delivery: Mutex::new(BTreeMap::new()),
                 inbound_limiter: Arc::new(StdMutex::new(InboundConnectionLimiter::default())),
                 metrics: P2pMetricsCounters::default(),
             }),
@@ -527,19 +441,7 @@ impl GossipNetwork {
     }
 
     pub fn metrics(&self) -> P2pMetrics {
-        let mut metrics = self.inner.metrics.snapshot();
-        metrics.transaction_ack_pending = self
-            .inner
-            .tx_delivery
-            .try_lock()
-            .map(|delivery| {
-                delivery
-                    .values()
-                    .map(|peer_delivery| peer_delivery.sent.len() as u64)
-                    .sum()
-            })
-            .unwrap_or(0);
-        metrics
+        self.inner.metrics.snapshot()
     }
 
     fn try_acquire_inbound_session(
@@ -586,121 +488,12 @@ impl GossipNetwork {
         Ok(())
     }
 
-    async fn record_sent_transactions(&self, peer: &str, envelopes: &[GossipEnvelope]) {
-        let now = Instant::now();
-        let mut delivery = self.inner.tx_delivery.lock().await;
-        let peer_delivery = delivery.entry(peer.to_string()).or_default();
-        for (signature, _) in transactions_in_envelopes(envelopes) {
-            if peer_delivery.accepted.contains(&signature)
-                || peer_delivery.rejected.contains(&signature)
-            {
-                continue;
-            }
-            peer_delivery.sent.insert(signature, now);
-        }
-    }
-
-    async fn record_transaction_ack(
-        &self,
-        peer: &str,
-        accepted: &[String],
-        rejected: &[TransactionRejection],
-    ) {
-        if !accepted.is_empty() || !rejected.is_empty() {
-            P2pMetricsCounters::inc(&self.inner.metrics.transaction_ack_envelopes_received);
-            P2pMetricsCounters::add(
-                &self.inner.metrics.transactions_accepted_received,
-                accepted.len() as u64,
-            );
-            P2pMetricsCounters::add(
-                &self.inner.metrics.transactions_rejected_received,
-                rejected.len() as u64,
-            );
-        }
-        let mut delivery = self.inner.tx_delivery.lock().await;
-        let peer_delivery = delivery.entry(peer.to_string()).or_default();
-        for signature in accepted {
-            peer_delivery.accepted.insert(signature.clone());
-            peer_delivery.rejected.remove(signature);
-            peer_delivery.sent.remove(signature);
-        }
-        for rejection in rejected {
-            peer_delivery.rejected.insert(rejection.signature.clone());
-            peer_delivery.accepted.remove(&rejection.signature);
-            peer_delivery.sent.remove(&rejection.signature);
-        }
-        let last_rejection = rejected.last().map(|rejection| {
-            format!(
-                "peer rejected transaction {}: {}",
-                short_signature(&rejection.signature),
-                rejection.reason
-            )
-        });
-        drop(delivery);
-        if let Some(reason) = last_rejection {
-            self.inner
-                .peers
-                .lock()
-                .await
-                .record_transaction_rejection(peer, reason);
-        }
-    }
-
-    async fn pending_transactions_for_retry(&self, peer: &str) -> Vec<Transaction> {
-        let pending = self.inner.node.lock().await.pending_transactions();
-        let pending_signatures = pending
-            .iter()
-            .map(|tx| tx.signature().to_string())
-            .collect::<BTreeSet<_>>();
-        let now = Instant::now();
-        let mut delivery = self.inner.tx_delivery.lock().await;
-        let peer_delivery = delivery.entry(peer.to_string()).or_default();
-        peer_delivery
-            .sent
-            .retain(|signature, _| pending_signatures.contains(signature));
-
-        let retry = pending
-            .into_iter()
-            .filter(|tx| {
-                let signature = tx.signature();
-                if peer_delivery.accepted.contains(signature)
-                    || peer_delivery.rejected.contains(signature)
-                {
-                    return false;
-                }
-                peer_delivery.sent.get(signature).is_none_or(|last_sent| {
-                    now.duration_since(*last_sent) >= TRANSACTION_ACK_RETRY_INTERVAL
-                })
-            })
-            .collect::<Vec<_>>();
-
-        for tx in &retry {
-            peer_delivery.sent.insert(tx.signature().to_string(), now);
-        }
-        retry
-    }
-
     async fn prepare_gossip(&self, envelopes: Vec<GossipEnvelope>) -> Vec<GossipEnvelope> {
-        let mut full_transactions = Vec::new();
-        let mut txs = Vec::new();
         let mut blocks = Vec::new();
         let mut passthrough = Vec::new();
 
         for envelope in envelopes {
             match envelope {
-                GossipEnvelope::Transaction(tx) => {
-                    txs.push(tx.signature().to_string());
-                    full_transactions.push(tx);
-                }
-                GossipEnvelope::Transactions { transactions } => {
-                    txs.extend(
-                        transactions
-                            .iter()
-                            .map(|tx| tx.signature().to_string())
-                            .collect::<Vec<_>>(),
-                    );
-                    passthrough.extend(transaction_batch_envelopes(transactions));
-                }
                 GossipEnvelope::Block(block) => blocks.push(BlockInventory {
                     height: block.height,
                     hash: block.hash,
@@ -711,23 +504,11 @@ impl GossipNetwork {
                         hash: block.hash,
                     }));
                 }
-                GossipEnvelope::Inventory {
-                    txs: inv_txs,
-                    blocks: inv_blocks,
-                } => {
-                    txs.extend(inv_txs);
-                    blocks.extend(inv_blocks);
-                }
+                GossipEnvelope::Inventory { blocks: inv_blocks } => blocks.extend(inv_blocks),
                 other => passthrough.push(other),
             }
         }
 
-        if !full_transactions.is_empty() {
-            passthrough.extend(transaction_batch_envelopes(full_transactions));
-        }
-
-        txs.sort();
-        txs.dedup();
         blocks.sort_by(|left, right| {
             left.height
                 .cmp(&right.height)
@@ -735,8 +516,8 @@ impl GossipNetwork {
         });
         blocks.dedup_by(|left, right| left.hash == right.hash);
 
-        if !txs.is_empty() || !blocks.is_empty() {
-            passthrough.push(GossipEnvelope::Inventory { txs, blocks });
+        if !blocks.is_empty() {
+            passthrough.push(GossipEnvelope::Inventory { blocks });
         }
         passthrough
     }
@@ -1038,28 +819,10 @@ async fn session_loop(
                 height,
                 tip_hash,
                 time_ms,
-                mempool_count,
-                mempool_root,
-                mempool_txs,
             } = envelope
             {
-                let status = PeerStatus::from_envelope(
-                    height,
-                    tip_hash,
-                    mempool_count,
-                    mempool_root,
-                    mempool_txs,
-                    time_ms,
-                );
+                let status = PeerStatus::from_envelope(height, tip_hash, time_ms);
                 record_peer_status(&network, &known_peer, remote_addr, &status).await;
-                maybe_request_mempool_catchup(
-                    &network,
-                    &mut writer,
-                    &known_peer,
-                    remote_addr,
-                    &status,
-                )
-                .await?;
                 peer_status = Some(status);
                 maybe_request_catchup(&network, &mut writer, peer_status.as_ref().unwrap()).await?;
             } else if respond_to_peer_verification_challenge(&network, &mut writer, &envelope)
@@ -1096,7 +859,6 @@ async fn session_loop(
                         ).await;
                         write_payload(&mut writer, &payload).await?;
                         if let Some(peer) = &known_peer {
-                            network.record_sent_transactions(peer, &payload).await;
                             network.inner.peers.lock().await.record_sent(peer, payload.len() as u64);
                         }
                     }
@@ -1109,22 +871,6 @@ async fn session_loop(
                 if let Some(status) = peer_status.as_mut() {
                     if let Some(updated_status) = push_catchup_to_peer(&network, &mut writer, status).await? {
                         *status = updated_status;
-                    }
-                }
-                if let Some(peer) = &known_peer {
-                    let transactions = network.pending_transactions_for_retry(peer).await;
-                    if !transactions.is_empty() {
-                        let retry_envelopes = transaction_batch_envelopes(transactions);
-                        for retry in &retry_envelopes {
-                            write_envelope(&mut writer, retry).await?;
-                        }
-                        P2pMetricsCounters::inc(&network.inner.metrics.transaction_retries_sent);
-                        network
-                            .inner
-                            .peers
-                            .lock()
-                            .await
-                            .record_sent(peer, retry_envelopes.len() as u64);
                     }
                 }
             }
@@ -1155,22 +901,10 @@ async fn session_loop(
                     height,
                     tip_hash,
                     time_ms,
-                    mempool_count,
-                    mempool_root,
-                    mempool_txs,
                 } = &envelope
                 {
-                    let status = PeerStatus::from_envelope(
-                        *height,
-                        tip_hash.clone(),
-                        *mempool_count,
-                        mempool_root.clone(),
-                        mempool_txs.clone(),
-                        *time_ms,
-                    );
+                    let status = PeerStatus::from_envelope(*height, tip_hash.clone(), *time_ms);
                     record_peer_status(&network, &known_peer, remote_addr, &status).await;
-                    maybe_request_mempool_catchup(&network, &mut writer, &known_peer, remote_addr, &status)
-                        .await?;
                     peer_status = Some(status);
                     maybe_request_catchup(&network, &mut writer, peer_status.as_ref().unwrap()).await?;
                     continue;
@@ -1244,30 +978,19 @@ async fn process_envelope(
                 .blocks_from(from_height, limit.min(MAX_BLOCK_BATCH));
             write_envelope(writer, &GossipEnvelope::Blocks { blocks }).await?;
         }
-        GossipEnvelope::TransactionRequest { signatures } => {
-            let transactions = network
-                .inner
-                .node
-                .lock()
-                .await
-                .transactions_by_signature(&signatures);
-            for envelope in transaction_batch_envelopes(transactions) {
-                write_envelope(writer, &envelope).await?;
-            }
-        }
         GossipEnvelope::BlockRequest { hashes } => {
             let blocks = network.inner.node.lock().await.blocks_by_hash(&hashes);
             if !blocks.is_empty() {
                 write_envelope(writer, &GossipEnvelope::Blocks { blocks }).await?;
             }
         }
-        GossipEnvelope::Inventory { txs, blocks } => {
+        GossipEnvelope::Inventory { blocks } => {
             let requests = network
                 .inner
                 .node
                 .lock()
                 .await
-                .missing_inventory_requests(&txs, &blocks);
+                .missing_inventory_requests(&blocks);
             write_payload(writer, &requests).await?;
         }
         GossipEnvelope::PeerAnnouncement { address, node_id } => {
@@ -1290,12 +1013,6 @@ async fn process_envelope(
         GossipEnvelope::PeerList { peers } => {
             apply_peer_list(network, remote_addr, peers).await?;
         }
-        GossipEnvelope::Transaction(tx) => {
-            process_transactions(network, writer, remote_addr, known_peer, vec![tx]).await?;
-        }
-        GossipEnvelope::Transactions { transactions } => {
-            process_transactions(network, writer, remote_addr, known_peer, transactions).await?;
-        }
         GossipEnvelope::BlindedTransaction(tx) => {
             process_blinded_transactions(network, remote_addr, known_peer, vec![tx]).await;
         }
@@ -1307,15 +1024,6 @@ async fn process_envelope(
         }
         GossipEnvelope::BlindedReveals { reveals } => {
             process_blinded_reveals(network, remote_addr, known_peer, reveals).await;
-        }
-        GossipEnvelope::TransactionAck { accepted, rejected } => {
-            let peer = known_peer
-                .clone()
-                .unwrap_or_else(|| remote_addr.to_string());
-            network
-                .record_transaction_ack(&peer, &accepted, &rejected)
-                .await;
-            record_inbound_result(network, known_peer, remote_addr, Ok(())).await;
         }
         GossipEnvelope::Block(block) => {
             let adjusted_time_ms = network_adjusted_time_ms(network).await;
@@ -1384,90 +1092,6 @@ async fn process_envelope(
         }
     }
     Ok(())
-}
-
-async fn process_transactions(
-    network: &GossipNetwork,
-    writer: &mut OwnedWriteHalf,
-    remote_addr: SocketAddr,
-    known_peer: &Option<String>,
-    transactions: Vec<Transaction>,
-) -> Result<()> {
-    let (accepted, rejected) = {
-        let mut node = network.inner.node.lock().await;
-        receive_transactions_for_ack(&mut node, transactions)
-    };
-
-    if !accepted.is_empty() || !rejected.is_empty() {
-        let ack = GossipEnvelope::TransactionAck {
-            accepted: accepted.clone(),
-            rejected: rejected.clone(),
-        };
-        write_envelope(writer, &ack).await?;
-        P2pMetricsCounters::inc(&network.inner.metrics.transaction_ack_envelopes_sent);
-        P2pMetricsCounters::add(
-            &network.inner.metrics.transactions_accepted_sent,
-            accepted.len() as u64,
-        );
-        P2pMetricsCounters::add(
-            &network.inner.metrics.transactions_rejected_sent,
-            rejected.len() as u64,
-        );
-    }
-
-    for rejection in &rejected {
-        let mut peers = network.inner.peers.lock().await;
-        match known_peer.as_deref() {
-            Some(peer) if transaction_rejection_counts_as_misbehavior(&rejection.reason) => {
-                peers.record_misbehavior(peer, rejection.reason.clone());
-            }
-            Some(peer) => {
-                peers.record_inbound_transaction_rejection(peer, rejection.reason.clone());
-            }
-            None if transaction_rejection_counts_as_misbehavior(&rejection.reason) => {
-                peers
-                    .record_inbound_misbehavior(&remote_addr.to_string(), rejection.reason.clone());
-            }
-            None => {
-                peers.record_inbound_transaction_rejection(
-                    &remote_addr.to_string(),
-                    rejection.reason.clone(),
-                );
-            }
-        }
-    }
-    network.forward_outbox().await;
-    if rejected.is_empty() {
-        record_inbound_result(network, known_peer, remote_addr, Ok(())).await;
-    }
-    Ok(())
-}
-
-fn receive_transactions_for_ack(
-    node: &mut NodeCore,
-    transactions: Vec<Transaction>,
-) -> (Vec<String>, Vec<TransactionRejection>) {
-    let mut accepted = Vec::new();
-    let mut rejected = Vec::new();
-    for tx in transactions {
-        let signature = tx.signature().to_string();
-        match node.receive_transaction(tx) {
-            Ok(TransactionSubmitOutcome::Added | TransactionSubmitOutcome::AlreadyKnown) => {
-                accepted.push(signature);
-            }
-            Ok(TransactionSubmitOutcome::ConflictsWithPending) => {
-                rejected.push(TransactionRejection {
-                    signature,
-                    reason: "transaction conflicts with pending mempool inputs".to_string(),
-                });
-            }
-            Err(error) => rejected.push(TransactionRejection {
-                signature,
-                reason: format!("{error:#}"),
-            }),
-        }
-    }
-    (accepted, rejected)
 }
 
 async fn process_blinded_transactions(
@@ -1549,77 +1173,6 @@ async fn maybe_request_catchup(
         .await?;
     } else if peer_status.height == local_height && peer_status.tip_hash != local_tip_hash {
         write_envelope(writer, &GossipEnvelope::ChainSnapshotRequest).await?;
-    }
-    Ok(())
-}
-
-async fn maybe_request_mempool_catchup(
-    network: &GossipNetwork,
-    writer: &mut OwnedWriteHalf,
-    known_peer: &Option<String>,
-    remote_addr: SocketAddr,
-    peer_status: &PeerStatus,
-) -> Result<()> {
-    P2pMetricsCounters::inc(&network.inner.metrics.mempool_statuses_received);
-    P2pMetricsCounters::add(
-        &network.inner.metrics.mempool_status_transactions_received,
-        peer_status.mempool_txs.len() as u64,
-    );
-
-    let (local_root, local_inventory, requests) = {
-        let node = network.inner.node.lock().await;
-        (
-            node.mempool_root(),
-            node.mempool_inventory(MEMPOOL_STATUS_LIMIT),
-            node.missing_inventory_requests(&peer_status.mempool_txs, &[]),
-        )
-    };
-    let local_txs = local_inventory.into_iter().collect::<BTreeSet<_>>();
-    let shared = peer_status
-        .mempool_txs
-        .iter()
-        .filter(|signature| local_txs.contains(*signature))
-        .count();
-    let missing = peer_status.mempool_txs.len().saturating_sub(shared);
-
-    if peer_status.mempool_root != local_root {
-        P2pMetricsCounters::inc(&network.inner.metrics.mempool_status_mismatches);
-    }
-    record_peer_mempool_status(
-        network,
-        known_peer,
-        remote_addr,
-        peer_status,
-        shared,
-        missing,
-    )
-    .await;
-
-    let requested_signatures = requests
-        .iter()
-        .map(|envelope| match envelope {
-            GossipEnvelope::TransactionRequest { signatures } => signatures.len(),
-            _ => 0,
-        })
-        .sum::<usize>();
-    if requested_signatures > 0 {
-        write_payload(writer, &requests).await?;
-        P2pMetricsCounters::inc(&network.inner.metrics.mempool_transaction_requests_sent);
-        P2pMetricsCounters::add(
-            &network
-                .inner
-                .metrics
-                .mempool_transaction_request_signatures_sent,
-            requested_signatures as u64,
-        );
-        if let Some(peer) = known_peer {
-            network
-                .inner
-                .peers
-                .lock()
-                .await
-                .record_sent(peer, requests.len() as u64);
-        }
     }
     Ok(())
 }
@@ -1709,74 +1262,6 @@ async fn write_payload(writer: &mut OwnedWriteHalf, payload: &[GossipEnvelope]) 
         write_envelope(writer, envelope).await?;
     }
     Ok(())
-}
-
-fn transactions_in_envelopes(envelopes: &[GossipEnvelope]) -> Vec<(String, Transaction)> {
-    let mut transactions = Vec::new();
-    for envelope in envelopes {
-        match envelope {
-            GossipEnvelope::Transaction(tx) => {
-                transactions.push((tx.signature().to_string(), tx.clone()));
-            }
-            GossipEnvelope::Transactions { transactions: txs } => {
-                transactions.extend(
-                    txs.iter()
-                        .map(|tx| (tx.signature().to_string(), tx.clone())),
-                );
-            }
-            _ => {}
-        }
-    }
-    transactions
-}
-
-fn short_signature(signature: &str) -> String {
-    signature.chars().take(12).collect()
-}
-
-fn transaction_rejection_counts_as_misbehavior(reason: &str) -> bool {
-    let reason = reason.to_ascii_lowercase();
-    if transaction_rejection_is_state_dependent(&reason) {
-        return false;
-    }
-    transaction_rejection_is_structurally_invalid(&reason)
-}
-
-fn transaction_rejection_is_state_dependent(reason: &str) -> bool {
-    [
-        "mempool is full",
-        "anchor is not on this chain",
-        "anchor is too old",
-        "conflict",
-        "missing output",
-        "not spendable",
-        "insufficient funds",
-        "does not cover",
-    ]
-    .iter()
-    .any(|needle| reason.contains(needle))
-}
-
-fn transaction_rejection_is_structurally_invalid(reason: &str) -> bool {
-    [
-        "signature",
-        "proof header is invalid",
-        "proof hash is invalid",
-        "proof does not meet difficulty",
-        "reward is invalid",
-        "required burn amount",
-        "difficulty is invalid",
-        "inputs do not balance",
-        "duplicate input",
-        "input owner does not match",
-        "has no inputs",
-        "inputs must have one owner",
-        "overflow",
-        "invalid public key",
-        "invalid transaction public key",
-    ]
-    .iter()
-    .any(|needle| reason.contains(needle))
 }
 
 async fn write_envelope(writer: &mut OwnedWriteHalf, envelope: &GossipEnvelope) -> Result<()> {
@@ -1887,9 +1372,7 @@ fn record_received_envelope_kind(metrics: &P2pMetricsCounters, envelope: &Gossip
         GossipEnvelope::Inventory { .. } => {
             P2pMetricsCounters::inc(&metrics.inventory_envelopes_received);
         }
-        GossipEnvelope::Transaction(_)
-        | GossipEnvelope::Transactions { .. }
-        | GossipEnvelope::BlindedTransaction(_)
+        GossipEnvelope::BlindedTransaction(_)
         | GossipEnvelope::BlindedTransactions { .. }
         | GossipEnvelope::BlindedReveal(_)
         | GossipEnvelope::BlindedReveals { .. }
@@ -1900,9 +1383,7 @@ fn record_received_envelope_kind(metrics: &P2pMetricsCounters, envelope: &Gossip
         }
         GossipEnvelope::ChainSnapshotRequest
         | GossipEnvelope::BlockRangeRequest { .. }
-        | GossipEnvelope::TransactionRequest { .. }
         | GossipEnvelope::BlockRequest { .. }
-        | GossipEnvelope::TransactionAck { .. }
         | GossipEnvelope::PeerAnnouncement { .. }
         | GossipEnvelope::PeerVerificationChallenge { .. }
         | GossipEnvelope::PeerVerificationResponse { .. }
@@ -1926,34 +1407,11 @@ fn validate_envelope_limits(envelope: &GossipEnvelope) -> Result<()> {
         GossipEnvelope::BlockRangeRequest { limit, .. } => {
             ensure_len("block range request", *limit, MAX_BLOCK_BATCH)?;
         }
-        GossipEnvelope::TransactionRequest { signatures } => {
-            ensure_len("transaction request", signatures.len(), MAX_OBJECT_REQUESTS)?;
-        }
         GossipEnvelope::BlockRequest { hashes } => {
             ensure_len("block request", hashes.len(), MAX_OBJECT_REQUESTS)?;
         }
-        GossipEnvelope::Inventory { txs, blocks } => {
-            ensure_len("transaction inventory", txs.len(), MAX_INVENTORY_ITEMS)?;
+        GossipEnvelope::Inventory { blocks } => {
             ensure_len("block inventory", blocks.len(), MAX_INVENTORY_ITEMS)?;
-        }
-        GossipEnvelope::TransactionAck { accepted, rejected } => {
-            ensure_len(
-                "transaction ack accepted",
-                accepted.len(),
-                MAX_OBJECT_REQUESTS,
-            )?;
-            ensure_len(
-                "transaction ack rejected",
-                rejected.len(),
-                MAX_OBJECT_REQUESTS,
-            )?;
-        }
-        GossipEnvelope::Transactions { transactions } => {
-            ensure_len(
-                "transaction batch",
-                transactions.len(),
-                TRANSACTION_BATCH_LIMIT,
-            )?;
         }
         GossipEnvelope::BlindedTransactions { transactions } => {
             ensure_len(
@@ -1978,12 +1436,9 @@ fn validate_envelope_limits(envelope: &GossipEnvelope) -> Result<()> {
         GossipEnvelope::PeerList { peers } => {
             ensure_len("peer list", peers.len(), MAX_PEER_LIST)?;
         }
-        GossipEnvelope::PeerStatus { mempool_txs, .. } => {
-            ensure_len("mempool status", mempool_txs.len(), MEMPOOL_STATUS_LIMIT)?;
-        }
         GossipEnvelope::Hello(_)
         | GossipEnvelope::ChainSnapshotRequest
-        | GossipEnvelope::Transaction(_)
+        | GossipEnvelope::PeerStatus { .. }
         | GossipEnvelope::BlindedTransaction(_)
         | GossipEnvelope::BlindedReveal(_)
         | GossipEnvelope::Block(_)
@@ -1992,15 +1447,6 @@ fn validate_envelope_limits(envelope: &GossipEnvelope) -> Result<()> {
         | GossipEnvelope::PeerVerificationResponse { .. } => {}
     }
     Ok(())
-}
-
-fn transaction_batch_envelopes(transactions: Vec<Transaction>) -> Vec<GossipEnvelope> {
-    transactions
-        .chunks(TRANSACTION_BATCH_LIMIT)
-        .map(|chunk| GossipEnvelope::Transactions {
-            transactions: chunk.to_vec(),
-        })
-        .collect()
 }
 
 fn ensure_len(label: &str, len: usize, max: usize) -> Result<()> {
@@ -2062,8 +1508,7 @@ async fn envelopes_for_peer(
             _ => true,
         })
         .map(|envelope| match envelope {
-            GossipEnvelope::Inventory { txs, blocks } => GossipEnvelope::Inventory {
-                txs: txs.clone(),
+            GossipEnvelope::Inventory { blocks } => GossipEnvelope::Inventory {
                 blocks: blocks
                     .iter()
                     .filter(|block| block.height > peer_status.height)
@@ -2073,7 +1518,7 @@ async fn envelopes_for_peer(
             other => other.clone(),
         })
         .filter(|envelope| match envelope {
-            GossipEnvelope::Inventory { txs, blocks } => !txs.is_empty() || !blocks.is_empty(),
+            GossipEnvelope::Inventory { blocks } => !blocks.is_empty(),
             _ => true,
         })
         .collect()
@@ -2123,17 +1568,7 @@ async fn fetch_peer_status(peer: &str) -> Result<PeerStatus> {
             height,
             tip_hash,
             time_ms,
-            mempool_count,
-            mempool_root,
-            mempool_txs,
-        } => Ok(PeerStatus::from_envelope(
-            height,
-            tip_hash,
-            mempool_count,
-            mempool_root,
-            mempool_txs,
-            time_ms,
-        )),
+        } => Ok(PeerStatus::from_envelope(height, tip_hash, time_ms)),
         other => anyhow::bail!("peer {peer} sent {other:?} instead of peer status"),
     }
 }
@@ -2320,34 +1755,6 @@ async fn record_peer_status(
             local_receive_time_ms,
         );
         peers.record_received(&peer, 1);
-    }
-}
-
-async fn record_peer_mempool_status(
-    network: &GossipNetwork,
-    known_peer: &Option<String>,
-    remote_addr: SocketAddr,
-    peer_status: &PeerStatus,
-    shared: usize,
-    missing: usize,
-) {
-    let mut peers = network.inner.peers.lock().await;
-    if let Some(peer) = known_peer {
-        peers.record_mempool_status(
-            peer,
-            peer_status.mempool_count,
-            peer_status.mempool_root.clone(),
-            shared,
-            missing,
-        );
-    } else {
-        peers.record_inbound_mempool_status(
-            &remote_addr.to_string(),
-            peer_status.mempool_count,
-            peer_status.mempool_root.clone(),
-            shared,
-            missing,
-        );
     }
 }
 
@@ -3024,9 +2431,9 @@ mod tests {
     use crate::{
         app::{
             BlockInventory, GossipEnvelope, NETWORK_ID, NodeCore, PROTOCOL_VERSION, PeerBook,
-            PeerDirection, ProtocolHello, TRANSACTION_BATCH_LIMIT,
+            PeerDirection, ProtocolHello,
         },
-        domain::{Amount, GenesisBurn, Ledger, Wallet},
+        domain::{Amount, GenesisBurn, Ledger, Transaction, Wallet},
     };
     use tokio::io::AsyncWriteExt;
 
@@ -3086,38 +2493,20 @@ mod tests {
     }
 
     #[test]
-    fn oversized_object_requests_are_rejected_before_processing() {
-        let envelope = GossipEnvelope::TransactionRequest {
-            signatures: vec!["sig".to_string(); MAX_OBJECT_REQUESTS + 1],
-        };
-
-        let error = validate_envelope_limits(&envelope).unwrap_err();
-
-        assert!(error.to_string().contains("transaction request"));
-    }
-
-    #[test]
     fn oversized_inventory_is_rejected_before_processing() {
         let envelope = GossipEnvelope::Inventory {
-            txs: vec!["sig".to_string(); MAX_INVENTORY_ITEMS + 1],
-            blocks: Vec::new(),
+            blocks: vec![
+                BlockInventory {
+                    height: 1,
+                    hash: "hash".to_string()
+                };
+                MAX_INVENTORY_ITEMS + 1
+            ],
         };
 
         let error = validate_envelope_limits(&envelope).unwrap_err();
 
-        assert!(error.to_string().contains("transaction inventory"));
-    }
-
-    #[test]
-    fn oversized_transaction_ack_is_rejected_before_processing() {
-        let envelope = GossipEnvelope::TransactionAck {
-            accepted: vec!["sig".to_string(); MAX_OBJECT_REQUESTS + 1],
-            rejected: Vec::new(),
-        };
-
-        let error = validate_envelope_limits(&envelope).unwrap_err();
-
-        assert!(error.to_string().contains("transaction ack accepted"));
+        assert!(error.to_string().contains("block inventory"));
     }
 
     #[test]
@@ -3151,41 +2540,8 @@ mod tests {
                 height: 7,
                 tip_hash: "tip".to_string(),
                 time_ms: 0,
-                mempool_count: 0,
-                mempool_root: String::new(),
-                mempool_txs: Vec::new(),
             }
         );
-    }
-
-    #[test]
-    fn oversized_mempool_status_is_rejected_before_processing() {
-        let envelope = GossipEnvelope::PeerStatus {
-            height: 7,
-            tip_hash: "tip".to_string(),
-            time_ms: 1_000,
-            mempool_count: super::MEMPOOL_STATUS_LIMIT + 1,
-            mempool_root: "root".to_string(),
-            mempool_txs: vec!["sig".to_string(); super::MEMPOOL_STATUS_LIMIT + 1],
-        };
-
-        let error = validate_envelope_limits(&envelope).unwrap_err();
-
-        assert!(error.to_string().contains("mempool status"));
-    }
-
-    #[test]
-    fn mempool_status_can_advertise_full_pending_pool_beyond_inventory_batch_size() {
-        let envelope = GossipEnvelope::PeerStatus {
-            height: 7,
-            tip_hash: "tip".to_string(),
-            time_ms: 1_000,
-            mempool_count: MAX_INVENTORY_ITEMS + 1,
-            mempool_root: "root".to_string(),
-            mempool_txs: vec!["sig".to_string(); MAX_INVENTORY_ITEMS + 1],
-        };
-
-        validate_envelope_limits(&envelope).unwrap();
     }
 
     #[test]
@@ -3198,28 +2554,15 @@ mod tests {
                 height: 7,
                 tip_hash: "tip".to_string(),
                 time_ms: 1_000,
-                mempool_count: 0,
-                mempool_root: String::new(),
-                mempool_txs: Vec::new(),
             },
         );
         super::record_received_envelope_kind(
             &metrics,
-            &GossipEnvelope::Inventory {
-                txs: Vec::new(),
-                blocks: Vec::new(),
-            },
+            &GossipEnvelope::Inventory { blocks: Vec::new() },
         );
         super::record_received_envelope_kind(
             &metrics,
             &GossipEnvelope::Blocks { blocks: Vec::new() },
-        );
-        super::record_received_envelope_kind(
-            &metrics,
-            &GossipEnvelope::TransactionAck {
-                accepted: Vec::new(),
-                rejected: Vec::new(),
-            },
         );
         super::record_received_envelope_kind(&metrics, &GossipEnvelope::ChainSnapshotRequest);
 
@@ -3227,7 +2570,7 @@ mod tests {
         assert_eq!(snapshot.peer_status_envelopes_received, 1);
         assert_eq!(snapshot.inventory_envelopes_received, 1);
         assert_eq!(snapshot.data_envelopes_received, 1);
-        assert_eq!(snapshot.control_envelopes_received, 2);
+        assert_eq!(snapshot.control_envelopes_received, 1);
     }
 
     #[tokio::test]
@@ -3238,9 +2581,6 @@ mod tests {
             height: 7,
             tip_hash: "tip".to_string(),
             time_ms: 1_000,
-            mempool_count: 0,
-            mempool_root: String::new(),
-            mempool_txs: Vec::new(),
         })
         .unwrap();
         let split_at = line.len() / 2;
@@ -3370,10 +2710,14 @@ mod tests {
         let alice = Wallet::from_seed("p2p-alice");
         let bob = Wallet::from_seed("p2p-bob");
         let allocations = allocations(&[alice.clone(), bob.clone()], 1_000);
-        let node = Arc::new(tokio::sync::Mutex::new(node("alice", alice, allocations)));
+        let node = Arc::new(tokio::sync::Mutex::new(node(
+            "alice",
+            alice.clone(),
+            allocations,
+        )));
         let block = {
             let mut node = node.lock().await;
-            node.burn(1).unwrap();
+            queue_plaintext_burn(&mut node, &alice, 1);
             node.drain_outbox();
             let block = node.mine_one_at(1).unwrap();
             node.drain_outbox();
@@ -3398,417 +2742,25 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn tx_and_block_gossip_sends_full_transaction_and_inventory() {
-        let alice = Wallet::from_seed("inventory-alice");
-        let allocations = allocations(std::slice::from_ref(&alice), 1_000);
-        let node = Arc::new(tokio::sync::Mutex::new(node("alice", alice, allocations)));
-        let network = super::GossipNetwork {
-            inner: Arc::new(super::GossipNetworkInner {
-                node: Arc::clone(&node),
-                peers: Arc::new(tokio::sync::Mutex::new(PeerBook::default())),
-                listen_addr: "127.0.0.1:0".parse().unwrap(),
-                p2p_announce_addr: tokio::sync::Mutex::new(Some("127.0.0.1:9544".parse().unwrap())),
-                node_id: super::new_node_id(),
-                accept_task: tokio::sync::Mutex::new(None),
-                sessions: tokio::sync::Mutex::new(BTreeMap::new()),
-                tx_delivery: tokio::sync::Mutex::new(BTreeMap::new()),
-                inbound_limiter: Arc::new(
-                    StdMutex::new(super::InboundConnectionLimiter::default()),
-                ),
-                metrics: super::P2pMetricsCounters::default(),
-            }),
-        };
-
-        let (tx_signature, block_hash) = {
-            let mut node = node.lock().await;
-            let tx = node.burn(1).unwrap();
-            node.drain_outbox();
-            let block = node.mine_one_at(1).unwrap();
-            (tx.signature().to_string(), block.hash)
-        };
-        let (tx, block) = {
-            let node = node.lock().await;
-            (
-                node.transactions_by_signature(std::slice::from_ref(&tx_signature))
-                    .remove(0),
-                node.blocks_by_hash(std::slice::from_ref(&block_hash))
-                    .remove(0),
-            )
-        };
-
-        let prepared = network
-            .prepare_gossip(vec![
-                GossipEnvelope::Transaction(tx),
-                GossipEnvelope::Block(block),
-            ])
-            .await;
-
-        assert_eq!(prepared.len(), 2);
-        match &prepared[0] {
-            GossipEnvelope::Transactions { transactions } => {
-                assert_eq!(transactions.len(), 1);
-                assert_eq!(transactions[0].signature(), tx_signature);
-            }
-            other => panic!("expected transaction batch, got {other:?}"),
-        }
-        match &prepared[1] {
-            GossipEnvelope::Inventory { txs, blocks } => {
-                assert_eq!(txs, &[tx_signature]);
-                assert_eq!(blocks.len(), 1);
-                assert_eq!(blocks[0].hash, block_hash);
-            }
-            other => panic!("expected inventory, got {other:?}"),
-        }
-    }
-
-    #[tokio::test]
-    async fn transaction_batch_gossip_keeps_full_transactions_for_mempool_repair() {
-        let alice = Wallet::from_seed("mempool-repair-alice");
-        let allocations = allocations(std::slice::from_ref(&alice), 1_000);
-        let node = Arc::new(tokio::sync::Mutex::new(node("alice", alice, allocations)));
-        let network = super::GossipNetwork {
-            inner: Arc::new(super::GossipNetworkInner {
-                node: Arc::clone(&node),
-                peers: Arc::new(tokio::sync::Mutex::new(PeerBook::default())),
-                listen_addr: "127.0.0.1:9544".parse().unwrap(),
-                p2p_announce_addr: tokio::sync::Mutex::new(None),
-                node_id: super::new_node_id(),
-                accept_task: tokio::sync::Mutex::new(None),
-                sessions: tokio::sync::Mutex::new(BTreeMap::new()),
-                tx_delivery: tokio::sync::Mutex::new(BTreeMap::new()),
-                inbound_limiter: Arc::new(
-                    StdMutex::new(super::InboundConnectionLimiter::default()),
-                ),
-                metrics: super::P2pMetricsCounters::default(),
-            }),
-        };
-
-        let (tx, signature) = {
-            let mut node = node.lock().await;
-            let tx = node.burn(1).unwrap();
-            (tx.clone(), tx.signature().to_string())
-        };
-
-        let prepared = network
-            .prepare_gossip(vec![GossipEnvelope::Transactions {
-                transactions: vec![tx],
-            }])
-            .await;
-
-        assert_eq!(prepared.len(), 2);
-        assert!(matches!(
-            &prepared[0],
-            GossipEnvelope::Transactions { transactions } if transactions.len() == 1
-        ));
-        match &prepared[1] {
-            GossipEnvelope::Inventory { txs, blocks } => {
-                assert_eq!(txs, &[signature]);
-                assert!(blocks.is_empty());
-            }
-            other => panic!("expected inventory, got {other:?}"),
-        }
-    }
-
-    #[tokio::test]
-    async fn prepare_gossip_splits_transaction_batches_at_receiver_limit() {
-        let alice = Wallet::from_seed("mempool-repair-batch-alice");
-        let allocations = allocations(std::slice::from_ref(&alice), 1_000);
-        let node = Arc::new(tokio::sync::Mutex::new(node("alice", alice, allocations)));
-        let network = super::GossipNetwork {
-            inner: Arc::new(super::GossipNetworkInner {
-                node: Arc::clone(&node),
-                peers: Arc::new(tokio::sync::Mutex::new(PeerBook::default())),
-                listen_addr: "127.0.0.1:9544".parse().unwrap(),
-                p2p_announce_addr: tokio::sync::Mutex::new(None),
-                node_id: super::new_node_id(),
-                accept_task: tokio::sync::Mutex::new(None),
-                sessions: tokio::sync::Mutex::new(BTreeMap::new()),
-                tx_delivery: tokio::sync::Mutex::new(BTreeMap::new()),
-                inbound_limiter: Arc::new(
-                    StdMutex::new(super::InboundConnectionLimiter::default()),
-                ),
-                metrics: super::P2pMetricsCounters::default(),
-            }),
-        };
-
-        let transactions = {
-            let mut node = node.lock().await;
-            (0..(TRANSACTION_BATCH_LIMIT + 1))
-                .map(|_| node.burn(1).unwrap())
-                .collect::<Vec<_>>()
-        };
-
-        let prepared = network
-            .prepare_gossip(vec![GossipEnvelope::Transactions { transactions }])
-            .await;
-
-        let batch_sizes = prepared
-            .iter()
-            .filter_map(|envelope| match envelope {
-                GossipEnvelope::Transactions { transactions } => Some(transactions.len()),
-                _ => None,
-            })
-            .collect::<Vec<_>>();
-        assert_eq!(batch_sizes, vec![TRANSACTION_BATCH_LIMIT, 1]);
-        assert!(prepared.iter().all(|envelope| match envelope {
-            GossipEnvelope::Transactions { transactions } =>
-                transactions.len() <= TRANSACTION_BATCH_LIMIT,
-            _ => true,
-        }));
-        assert!(matches!(
-            prepared.last(),
-            Some(GossipEnvelope::Inventory { txs, blocks })
-                if txs.len() == TRANSACTION_BATCH_LIMIT + 1 && blocks.is_empty()
-        ));
-    }
-
-    #[tokio::test]
-    async fn retry_transaction_batches_are_split_at_receiver_limit() {
-        let alice = Wallet::from_seed("tx-ack-retry-batch-alice");
-        let allocations = allocations(std::slice::from_ref(&alice), 1_000);
-        let node = Arc::new(tokio::sync::Mutex::new(node("alice", alice, allocations)));
-        let network = super::GossipNetwork {
-            inner: Arc::new(super::GossipNetworkInner {
-                node: Arc::clone(&node),
-                peers: Arc::new(tokio::sync::Mutex::new(PeerBook::default())),
-                listen_addr: "127.0.0.1:9544".parse().unwrap(),
-                p2p_announce_addr: tokio::sync::Mutex::new(None),
-                node_id: super::new_node_id(),
-                accept_task: tokio::sync::Mutex::new(None),
-                sessions: tokio::sync::Mutex::new(BTreeMap::new()),
-                tx_delivery: tokio::sync::Mutex::new(BTreeMap::new()),
-                inbound_limiter: Arc::new(
-                    StdMutex::new(super::InboundConnectionLimiter::default()),
-                ),
-                metrics: super::P2pMetricsCounters::default(),
-            }),
-        };
-        let peer = "127.0.0.1:9545";
-        {
-            let mut node = node.lock().await;
-            for _ in 0..(TRANSACTION_BATCH_LIMIT + 1) {
-                node.burn(1).unwrap();
-            }
-        }
-
-        let retry = network.pending_transactions_for_retry(peer).await;
-        assert_eq!(retry.len(), TRANSACTION_BATCH_LIMIT + 1);
-
-        let retry_batches = super::transaction_batch_envelopes(retry);
-        let batch_sizes = retry_batches
-            .iter()
-            .map(|envelope| match envelope {
-                GossipEnvelope::Transactions { transactions } => {
-                    assert!(transactions.len() <= TRANSACTION_BATCH_LIMIT);
-                    transactions.len()
-                }
-                other => panic!("expected transaction batch, got {other:?}"),
-            })
-            .collect::<Vec<_>>();
-        assert_eq!(batch_sizes, vec![TRANSACTION_BATCH_LIMIT, 1]);
-    }
-
-    #[tokio::test]
-    async fn unacked_pending_transactions_retry_until_peer_accepts() {
-        let alice = Wallet::from_seed("tx-ack-retry-alice");
-        let allocations = allocations(std::slice::from_ref(&alice), 1_000);
-        let node = Arc::new(tokio::sync::Mutex::new(node("alice", alice, allocations)));
-        let network = super::GossipNetwork {
-            inner: Arc::new(super::GossipNetworkInner {
-                node: Arc::clone(&node),
-                peers: Arc::new(tokio::sync::Mutex::new(PeerBook::default())),
-                listen_addr: "127.0.0.1:9544".parse().unwrap(),
-                p2p_announce_addr: tokio::sync::Mutex::new(None),
-                node_id: super::new_node_id(),
-                accept_task: tokio::sync::Mutex::new(None),
-                sessions: tokio::sync::Mutex::new(BTreeMap::new()),
-                tx_delivery: tokio::sync::Mutex::new(BTreeMap::new()),
-                inbound_limiter: Arc::new(
-                    StdMutex::new(super::InboundConnectionLimiter::default()),
-                ),
-                metrics: super::P2pMetricsCounters::default(),
-            }),
-        };
-        let peer = "127.0.0.1:9545";
-        let signature = {
-            let mut node = node.lock().await;
-            node.burn(1).unwrap().signature().to_string()
-        };
-
-        let first_retry = network.pending_transactions_for_retry(peer).await;
-        assert_eq!(first_retry.len(), 1);
-        assert_eq!(first_retry[0].signature(), signature);
-        assert_eq!(network.metrics().transaction_ack_pending, 1);
-        let immediate_retry = network.pending_transactions_for_retry(peer).await;
-        assert!(immediate_retry.is_empty());
-
-        network
-            .record_transaction_ack(peer, std::slice::from_ref(&signature), &[])
-            .await;
-        let after_ack_retry = network.pending_transactions_for_retry(peer).await;
-
-        assert!(after_ack_retry.is_empty());
-        let metrics = network.metrics();
-        assert_eq!(metrics.transaction_ack_pending, 0);
-        assert_eq!(metrics.transaction_ack_envelopes_received, 1);
-        assert_eq!(metrics.transactions_accepted_received, 1);
-    }
-
-    #[test]
-    fn conflicting_input_transaction_is_rejected_not_acked_as_accepted() {
-        let alice = Wallet::from_seed("tx-ack-conflict-alice");
-        let bob = Wallet::from_seed("tx-ack-conflict-bob");
-        let allocations = allocations(std::slice::from_ref(&alice), 1_000);
-        let ledger = Ledger::new(allocations, 25);
-        let first = ledger
-            .build_transfer(&alice, bob.address(), 100, 0)
-            .unwrap();
-        let conflicting = ledger.build_burn(&alice, 100, 0).unwrap();
-        let mut receiver = NodeCore::from_ledger(bob, ledger, 0);
-
-        let (accepted, rejected) = super::receive_transactions_for_ack(
-            &mut receiver,
-            vec![first.clone(), conflicting.clone()],
-        );
-
-        assert_eq!(accepted, vec![first.signature().to_string()]);
-        assert_eq!(rejected.len(), 1);
-        assert_eq!(rejected[0].signature, conflicting.signature());
-        assert!(
-            rejected[0].reason.contains("conflicts with pending"),
-            "{}",
-            rejected[0].reason
-        );
-        assert_eq!(receiver.ledger().pending().len(), 1);
-        assert_eq!(
-            receiver.ledger().pending()[0].signature(),
-            first.signature()
-        );
-    }
-
-    #[test]
-    fn transaction_rejection_classifier_only_scores_structural_invalidity() {
-        for reason in [
-            "transaction signature is invalid",
-            "mine transaction proof hash is invalid",
-            "mine transaction proof does not meet difficulty",
-            "mine required burn amount must be between",
-            "mine transaction difficulty is invalid",
-            "transaction inputs do not balance outputs, burn, and fee",
-            "duplicate input in transaction",
-            "transaction input owner does not match spent output",
-            "transaction has no inputs",
-            "transaction inputs must have one owner",
-        ] {
-            assert!(
-                super::transaction_rejection_counts_as_misbehavior(reason),
-                "{reason} should count as misbehavior"
-            );
-        }
-
-        for reason in [
-            "mempool is full",
-            "mine transaction anchor is not on this chain",
-            "mine transaction anchor is too old",
-            "transaction conflicts with pending mempool inputs",
-            "transaction spends missing output abc:0",
-            "selected UTXOs do not cover transfer amount plus fee",
-            "insufficient funds for address",
-        ] {
-            assert!(
-                !super::transaction_rejection_counts_as_misbehavior(reason),
-                "{reason} should be treated as state-dependent"
-            );
-        }
-    }
-
-    #[test]
-    fn temporal_block_rejections_do_not_score_peer_misbehavior() {
-        for reason in [
-            "block timestamp is too far in the future",
-            "block timestamp is before finalizer rank 1 time slot 1200000",
-        ] {
-            assert!(
-                !super::inbound_error_counts_as_misbehavior(reason),
-                "{reason} should be treated as temporal"
-            );
-        }
-
-        assert!(super::inbound_error_counts_as_misbehavior(
-            "block VDF output is invalid"
-        ));
-    }
-
-    #[tokio::test]
-    async fn temporal_block_rejection_records_error_without_banning_peer() {
-        let wallet = Wallet::from_seed("temporal-block-peer-wallet");
-        let mut allocations = BTreeMap::new();
-        allocations.insert(wallet.address().to_string(), 1_000);
-        let ledger = Ledger::new(allocations, 100);
-        let node = Arc::new(tokio::sync::Mutex::new(NodeCore::from_ledger(
-            wallet, ledger, 0,
-        )));
-        let peers = Arc::new(tokio::sync::Mutex::new(PeerBook::from_addresses(vec![
-            "127.0.0.1:9444".to_string(),
-        ])));
-        let network = super::GossipNetwork::new_for_tests(node, Arc::clone(&peers));
-        let known_peer = Some("127.0.0.1:9444".to_string());
-        let remote_addr: SocketAddr = "127.0.0.1:50000".parse().unwrap();
-
-        super::record_inbound_result(
-            &network,
-            &known_peer,
-            remote_addr,
-            Err(anyhow::anyhow!("block timestamp is too far in the future")),
-        )
-        .await;
-
-        let peers = peers.lock().await;
-        let peer = peers
-            .list()
-            .into_iter()
-            .find(|peer| peer.address == "127.0.0.1:9444")
-            .unwrap();
-        assert_eq!(peer.misbehavior_score, 0);
-        assert_eq!(
-            peer.last_error.as_deref(),
-            Some("block timestamp is too far in the future")
-        );
-    }
-
-    #[tokio::test]
     async fn inventory_requests_only_missing_objects() {
         let alice = Wallet::from_seed("missing-inv-alice");
         let bob = Wallet::from_seed("missing-inv-bob");
         let allocations = allocations(&[alice.clone(), bob], 1_000);
         let mut local = node("local", alice.clone(), allocations.clone());
-        let mut remote = node("remote", alice, allocations);
-        let tx = local.burn(1).unwrap();
+        let mut remote = node("remote", alice.clone(), allocations);
+        queue_plaintext_burn(&mut local, &alice, 1);
         let block = local.mine_one_at(1).unwrap();
+        let inventory = [BlockInventory {
+            height: block.height,
+            hash: block.hash.clone(),
+        }];
 
-        let requests = remote.missing_inventory_requests(
-            &[tx.signature().to_string()],
-            &[BlockInventory {
-                height: block.height,
-                hash: block.hash.clone(),
-            }],
-        );
-        assert!(matches!(
-            requests[0],
-            GossipEnvelope::TransactionRequest { .. }
-        ));
-        assert!(matches!(requests[1], GossipEnvelope::BlockRequest { .. }));
-
-        remote.receive(GossipEnvelope::Transaction(tx)).unwrap();
-        let requests = remote.missing_inventory_requests(
-            &[],
-            &[BlockInventory {
-                height: block.height,
-                hash: block.hash,
-            }],
-        );
+        let requests = remote.missing_inventory_requests(&inventory);
         assert_eq!(requests.len(), 1);
         assert!(matches!(requests[0], GossipEnvelope::BlockRequest { .. }));
+
+        remote.receive(GossipEnvelope::Block(block)).unwrap();
+        assert!(remote.missing_inventory_requests(&inventory).is_empty());
     }
 
     #[tokio::test]
@@ -3816,23 +2768,20 @@ mod tests {
         let alice = Wallet::from_seed("gap-inv-alice");
         let bob = Wallet::from_seed("gap-inv-bob");
         let allocations = allocations(&[alice.clone(), bob.clone()], 1_000);
-        let mut local = node("local", alice, allocations.clone());
+        let mut local = node("local", alice.clone(), allocations.clone());
         let remote = node("remote", bob, allocations);
 
         let mut latest = None;
         for height in 1..=3 {
-            local.burn(1).unwrap();
+            queue_plaintext_burn(&mut local, &alice, 1);
             latest = Some(local.mine_one_at(height).unwrap());
         }
         let latest = latest.unwrap();
 
-        let requests = remote.missing_inventory_requests(
-            &[],
-            &[BlockInventory {
-                height: latest.height,
-                hash: latest.hash,
-            }],
-        );
+        let requests = remote.missing_inventory_requests(&[BlockInventory {
+            height: latest.height,
+            hash: latest.hash,
+        }]);
 
         assert_eq!(requests.len(), 1);
         match &requests[0] {
@@ -3849,11 +2798,15 @@ mod tests {
         let alice = Wallet::from_seed("catchup-alice");
         let bob = Wallet::from_seed("catchup-bob");
         let allocations = allocations(&[alice.clone(), bob], 1_000);
-        let node = Arc::new(tokio::sync::Mutex::new(node("alice", alice, allocations)));
+        let node = Arc::new(tokio::sync::Mutex::new(node(
+            "alice",
+            alice.clone(),
+            allocations,
+        )));
         {
             let mut node = node.lock().await;
             for height in 1..=3 {
-                node.burn(1).unwrap();
+                queue_plaintext_burn(&mut node, &alice, 1);
                 node.drain_outbox();
                 node.mine_one_at(height).unwrap();
                 node.drain_outbox();
@@ -3892,7 +2845,6 @@ mod tests {
                 node_id: super::new_node_id(),
                 accept_task: tokio::sync::Mutex::new(None),
                 sessions: tokio::sync::Mutex::new(BTreeMap::new()),
-                tx_delivery: tokio::sync::Mutex::new(BTreeMap::new()),
                 inbound_limiter: Arc::new(
                     StdMutex::new(super::InboundConnectionLimiter::default()),
                 ),
@@ -4000,7 +2952,6 @@ mod tests {
                 node_id: super::new_node_id(),
                 accept_task: tokio::sync::Mutex::new(None),
                 sessions: tokio::sync::Mutex::new(BTreeMap::new()),
-                tx_delivery: tokio::sync::Mutex::new(BTreeMap::new()),
                 inbound_limiter: Arc::new(
                     StdMutex::new(super::InboundConnectionLimiter::default()),
                 ),
@@ -4060,7 +3011,6 @@ mod tests {
                 node_id: super::new_node_id(),
                 accept_task: tokio::sync::Mutex::new(None),
                 sessions: tokio::sync::Mutex::new(BTreeMap::new()),
-                tx_delivery: tokio::sync::Mutex::new(BTreeMap::new()),
                 inbound_limiter: Arc::new(
                     StdMutex::new(super::InboundConnectionLimiter::default()),
                 ),
@@ -4132,7 +3082,6 @@ mod tests {
                 node_id: super::new_node_id(),
                 accept_task: tokio::sync::Mutex::new(None),
                 sessions: tokio::sync::Mutex::new(BTreeMap::new()),
-                tx_delivery: tokio::sync::Mutex::new(BTreeMap::new()),
                 inbound_limiter: Arc::new(
                     StdMutex::new(super::InboundConnectionLimiter::default()),
                 ),
@@ -4205,7 +3154,6 @@ mod tests {
                 node_id: super::new_node_id(),
                 accept_task: tokio::sync::Mutex::new(None),
                 sessions: tokio::sync::Mutex::new(BTreeMap::new()),
-                tx_delivery: tokio::sync::Mutex::new(BTreeMap::new()),
                 inbound_limiter: Arc::new(
                     StdMutex::new(super::InboundConnectionLimiter::default()),
                 ),
@@ -4251,7 +3199,6 @@ mod tests {
                 node_id: super::new_node_id(),
                 accept_task: tokio::sync::Mutex::new(None),
                 sessions: tokio::sync::Mutex::new(BTreeMap::new()),
-                tx_delivery: tokio::sync::Mutex::new(BTreeMap::new()),
                 inbound_limiter: Arc::new(
                     StdMutex::new(super::InboundConnectionLimiter::default()),
                 ),
@@ -4386,7 +3333,6 @@ mod tests {
                 node_id: super::new_node_id(),
                 accept_task: tokio::sync::Mutex::new(None),
                 sessions: tokio::sync::Mutex::new(BTreeMap::new()),
-                tx_delivery: tokio::sync::Mutex::new(BTreeMap::new()),
                 inbound_limiter: Arc::new(
                     StdMutex::new(super::InboundConnectionLimiter::default()),
                 ),
@@ -4471,7 +3417,6 @@ mod tests {
                 node_id: super::new_node_id(),
                 accept_task: tokio::sync::Mutex::new(None),
                 sessions: tokio::sync::Mutex::new(BTreeMap::new()),
-                tx_delivery: tokio::sync::Mutex::new(BTreeMap::new()),
                 inbound_limiter: Arc::new(
                     StdMutex::new(super::InboundConnectionLimiter::default()),
                 ),
@@ -4523,7 +3468,6 @@ mod tests {
                 node_id: super::new_node_id(),
                 accept_task: tokio::sync::Mutex::new(None),
                 sessions: tokio::sync::Mutex::new(BTreeMap::new()),
-                tx_delivery: tokio::sync::Mutex::new(BTreeMap::new()),
                 inbound_limiter: Arc::new(
                     StdMutex::new(super::InboundConnectionLimiter::default()),
                 ),
@@ -4571,7 +3515,6 @@ mod tests {
                 node_id: super::new_node_id(),
                 accept_task: tokio::sync::Mutex::new(None),
                 sessions: tokio::sync::Mutex::new(BTreeMap::new()),
-                tx_delivery: tokio::sync::Mutex::new(BTreeMap::new()),
                 inbound_limiter: Arc::new(
                     StdMutex::new(super::InboundConnectionLimiter::default()),
                 ),
@@ -4603,9 +3546,6 @@ mod tests {
                     height: 0,
                     tip_hash: "tip".to_string(),
                     time_ms: 1_000,
-                    mempool_count: 0,
-                    mempool_root: String::new(),
-                    mempool_txs: Vec::new(),
                 }
             )
             .unwrap()
@@ -4645,7 +3585,6 @@ mod tests {
                 node_id: super::new_node_id(),
                 accept_task: tokio::sync::Mutex::new(None),
                 sessions: tokio::sync::Mutex::new(BTreeMap::new()),
-                tx_delivery: tokio::sync::Mutex::new(BTreeMap::new()),
                 inbound_limiter: Arc::new(
                     StdMutex::new(super::InboundConnectionLimiter::default()),
                 ),
@@ -4679,7 +3618,6 @@ mod tests {
                 node_id: super::new_node_id(),
                 accept_task: tokio::sync::Mutex::new(None),
                 sessions: tokio::sync::Mutex::new(BTreeMap::new()),
-                tx_delivery: tokio::sync::Mutex::new(BTreeMap::new()),
                 inbound_limiter: Arc::new(
                     StdMutex::new(super::InboundConnectionLimiter::default()),
                 ),
@@ -4712,7 +3650,6 @@ mod tests {
                 node_id: super::new_node_id(),
                 accept_task: tokio::sync::Mutex::new(None),
                 sessions: tokio::sync::Mutex::new(BTreeMap::new()),
-                tx_delivery: tokio::sync::Mutex::new(BTreeMap::new()),
                 inbound_limiter: Arc::new(
                     StdMutex::new(super::InboundConnectionLimiter::default()),
                 ),
@@ -4749,7 +3686,6 @@ mod tests {
                 node_id: super::new_node_id(),
                 accept_task: tokio::sync::Mutex::new(None),
                 sessions: tokio::sync::Mutex::new(BTreeMap::new()),
-                tx_delivery: tokio::sync::Mutex::new(BTreeMap::new()),
                 inbound_limiter: Arc::new(
                     StdMutex::new(super::InboundConnectionLimiter::default()),
                 ),
@@ -4786,7 +3722,6 @@ mod tests {
                 node_id: super::new_node_id(),
                 accept_task: tokio::sync::Mutex::new(None),
                 sessions: tokio::sync::Mutex::new(BTreeMap::new()),
-                tx_delivery: tokio::sync::Mutex::new(BTreeMap::new()),
                 inbound_limiter: Arc::new(
                     StdMutex::new(super::InboundConnectionLimiter::default()),
                 ),
@@ -4821,7 +3756,6 @@ mod tests {
                 node_id: super::new_node_id(),
                 accept_task: tokio::sync::Mutex::new(None),
                 sessions: tokio::sync::Mutex::new(BTreeMap::new()),
-                tx_delivery: tokio::sync::Mutex::new(BTreeMap::new()),
                 inbound_limiter: Arc::new(
                     StdMutex::new(super::InboundConnectionLimiter::default()),
                 ),
@@ -4859,7 +3793,6 @@ mod tests {
                 node_id: super::new_node_id(),
                 accept_task: tokio::sync::Mutex::new(None),
                 sessions: tokio::sync::Mutex::new(BTreeMap::new()),
-                tx_delivery: tokio::sync::Mutex::new(BTreeMap::new()),
                 inbound_limiter: Arc::new(
                     StdMutex::new(super::InboundConnectionLimiter::default()),
                 ),
@@ -4896,7 +3829,6 @@ mod tests {
                 node_id: super::new_node_id(),
                 accept_task: tokio::sync::Mutex::new(None),
                 sessions: tokio::sync::Mutex::new(BTreeMap::new()),
-                tx_delivery: tokio::sync::Mutex::new(BTreeMap::new()),
                 inbound_limiter: Arc::new(
                     StdMutex::new(super::InboundConnectionLimiter::default()),
                 ),
@@ -4935,7 +3867,6 @@ mod tests {
                 node_id: super::new_node_id(),
                 accept_task: tokio::sync::Mutex::new(None),
                 sessions: tokio::sync::Mutex::new(BTreeMap::new()),
-                tx_delivery: tokio::sync::Mutex::new(BTreeMap::new()),
                 inbound_limiter: Arc::new(
                     StdMutex::new(super::InboundConnectionLimiter::default()),
                 ),
@@ -4975,7 +3906,6 @@ mod tests {
                 node_id: super::new_node_id(),
                 accept_task: tokio::sync::Mutex::new(None),
                 sessions: tokio::sync::Mutex::new(BTreeMap::new()),
-                tx_delivery: tokio::sync::Mutex::new(BTreeMap::new()),
                 inbound_limiter: Arc::new(
                     StdMutex::new(super::InboundConnectionLimiter::default()),
                 ),
@@ -5005,7 +3935,6 @@ mod tests {
                 node_id: super::new_node_id(),
                 accept_task: tokio::sync::Mutex::new(None),
                 sessions: tokio::sync::Mutex::new(BTreeMap::new()),
-                tx_delivery: tokio::sync::Mutex::new(BTreeMap::new()),
                 inbound_limiter: Arc::new(
                     StdMutex::new(super::InboundConnectionLimiter::default()),
                 ),
@@ -5042,7 +3971,6 @@ mod tests {
                 node_id: super::new_node_id(),
                 accept_task: tokio::sync::Mutex::new(None),
                 sessions: tokio::sync::Mutex::new(BTreeMap::new()),
-                tx_delivery: tokio::sync::Mutex::new(BTreeMap::new()),
                 inbound_limiter: Arc::new(
                     StdMutex::new(super::InboundConnectionLimiter::default()),
                 ),
@@ -5100,7 +4028,6 @@ mod tests {
                 node_id: super::new_node_id(),
                 accept_task: tokio::sync::Mutex::new(None),
                 sessions: tokio::sync::Mutex::new(BTreeMap::new()),
-                tx_delivery: tokio::sync::Mutex::new(BTreeMap::new()),
                 inbound_limiter: Arc::new(
                     StdMutex::new(super::InboundConnectionLimiter::default()),
                 ),
@@ -5157,7 +4084,6 @@ mod tests {
                 node_id: super::new_node_id(),
                 accept_task: tokio::sync::Mutex::new(None),
                 sessions: tokio::sync::Mutex::new(BTreeMap::new()),
-                tx_delivery: tokio::sync::Mutex::new(BTreeMap::new()),
                 inbound_limiter: Arc::new(
                     StdMutex::new(super::InboundConnectionLimiter::default()),
                 ),
@@ -5270,6 +4196,12 @@ mod tests {
         )
         .unwrap();
         NodeCore::from_ledger(wallet, ledger, 0)
+    }
+
+    fn queue_plaintext_burn(node: &mut NodeCore, wallet: &Wallet, amount: Amount) -> Transaction {
+        let tx = node.ledger().build_burn(wallet, amount, 0).unwrap();
+        node.receive_transaction(tx.clone()).unwrap();
+        tx
     }
 
     fn allocations(wallets: &[Wallet], amount: Amount) -> BTreeMap<String, Amount> {

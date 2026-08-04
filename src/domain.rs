@@ -26,6 +26,7 @@ pub const VDF_TARGET_BLOCK_MS: u64 = 10 * 60 * 1_000;
 pub const RECOVERY_BLOCK_DELAY_MS: u64 = VDF_TARGET_BLOCK_MS * 6;
 pub const MAX_VDF_ROUNDS: u64 = i64::MAX as u64;
 pub const MINE_DIFFICULTY_BITS: u32 = 12;
+pub const MAX_BLINDED_TRANSACTION_EXPIRY_HEIGHTS: u64 = 20;
 const MINE_RETARGET_WINDOW_BLOCKS: u64 = 10;
 const MINE_TARGET_ACTIONS_PER_BLOCK: u64 = 1;
 const MINE_MAX_RETARGET_STEP_BITS: u32 = 2;
@@ -166,6 +167,7 @@ pub struct BlindedReveal {
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct BuiltBlindedTransaction {
+    pub payload: Transaction,
     pub transaction: BlindedTransaction,
     pub reveal: BlindedReveal,
 }
@@ -443,7 +445,8 @@ impl BlindedTransaction {
     }
 
     pub fn fee_rate_size_bytes(&self) -> usize {
-        self.encrypted_size as usize
+        self.serialized_size_bytes()
+            .unwrap_or(self.encrypted_size as usize)
     }
 
     pub fn serialized_size_bytes(&self) -> Result<usize> {
@@ -1706,6 +1709,7 @@ impl Ledger {
             &self.chain[0],
             &self.launch_profile,
         )?;
+        let mut active_blinded = BTreeMap::<String, ActiveBlindedTransaction>::new();
         for block in self
             .chain
             .iter()
@@ -1714,6 +1718,40 @@ impl Ledger {
         {
             apply_finalizer_ticket_effects(block, &mut tickets)?;
             tickets.extend(tickets_created_by_block(block, &self.launch_profile)?);
+            let mut revealed_transactions = Vec::new();
+            for reveal in &block.blinded_reveals {
+                let active = active_blinded.get(&reveal.commitment).with_context(|| {
+                    format!(
+                        "block {} reveals unknown blinded transaction {}",
+                        block.height, reveal.commitment
+                    )
+                })?;
+                let transaction = decrypt_blinded_transaction(&active.transaction, reveal)?;
+                if transaction.fee() != active.transaction.fee {
+                    bail!(
+                        "block {} blinded reveal fee does not match envelope",
+                        block.height
+                    );
+                }
+                revealed_transactions.push(transaction);
+                active_blinded.remove(&reveal.commitment);
+            }
+            tickets.extend(tickets_created_by_transactions(
+                block.height,
+                &revealed_transactions,
+                &self.launch_profile,
+            )?);
+            active_blinded.retain(|_, active| block.height < active.transaction.expires_at_height);
+            for transaction in &block.blinded_transactions {
+                active_blinded.insert(
+                    transaction.commitment.clone(),
+                    ActiveBlindedTransaction {
+                        transaction: transaction.clone(),
+                        included_height: block.height,
+                        included_by: block.miner.clone(),
+                    },
+                );
+            }
         }
         Ok(ranked_tickets_for_height(parent, height, &tickets)
             .into_iter()
@@ -1822,6 +1860,13 @@ impl Ledger {
                     .iter()
                     .any(|tx| tx.commitment == commitment)
             })
+    }
+
+    pub fn has_unrevealed_blinded_transaction(&self, commitment: &str) -> bool {
+        self.pending_blinded
+            .iter()
+            .any(|transaction| transaction.commitment == commitment)
+            || self.active_blinded.contains_key(commitment)
     }
 
     pub fn has_blinded_reveal(&self, commitment: &str) -> bool {
@@ -2013,6 +2058,15 @@ impl Ledger {
         self.blind_transaction(transaction, fee, expires_at_height)
     }
 
+    pub fn build_blinded_transaction(
+        &self,
+        transaction: Transaction,
+        expires_at_height: u64,
+    ) -> Result<BuiltBlindedTransaction> {
+        let fee = transaction.fee();
+        self.blind_transaction(transaction, fee, expires_at_height)
+    }
+
     fn blind_transaction(
         &self,
         transaction: Transaction,
@@ -2022,12 +2076,20 @@ impl Ledger {
         if expires_at_height <= self.height() {
             bail!("blinded transaction expiry must be in the future");
         }
+        if expires_at_height
+            > self
+                .height()
+                .saturating_add(MAX_BLINDED_TRANSACTION_EXPIRY_HEIGHTS)
+        {
+            bail!("blinded transaction expiry is too far in the future");
+        }
         if fee != transaction.fee() {
             bail!("blinded transaction fee must match plaintext transaction fee");
         }
         let plaintext = serde_json::to_vec(&transaction)
             .context("failed to serialize transaction for blinded payload")?;
         let payload_hash = hex_hash(&plaintext);
+        let payload = transaction;
         let mut key = [0_u8; BLINDED_KEY_BYTES];
         let mut nonce = [0_u8; BLINDED_NONCE_BYTES];
         getrandom(&mut key)
@@ -2053,6 +2115,7 @@ impl Ledger {
         };
         self.validate_blinded_transaction(&transaction)?;
         Ok(BuiltBlindedTransaction {
+            payload,
             transaction,
             reveal: BlindedReveal {
                 commitment,
@@ -2950,6 +3013,13 @@ impl Ledger {
         }
         if transaction.expires_at_height <= self.height() {
             bail!("blinded transaction is expired");
+        }
+        if transaction.expires_at_height
+            > self
+                .height()
+                .saturating_add(MAX_BLINDED_TRANSACTION_EXPIRY_HEIGHTS)
+        {
+            bail!("blinded transaction expiry is too far in the future");
         }
         let expected = blinded_transaction_commitment(transaction)?;
         if transaction.commitment != expected {
@@ -4835,6 +4905,23 @@ mod tests {
     }
 
     #[test]
+    fn blinded_fee_rate_size_uses_visible_envelope_bytes() {
+        let alice = Wallet::from_seed("blinded-fee-size-alice");
+        let ledger = ledger_with_wallet_utxos(&alice, &[10]);
+        let built = ledger
+            .build_blinded_burn(&alice, 1, 2, ledger.height() + 4)
+            .unwrap();
+
+        assert_eq!(
+            built.transaction.fee_rate_size_bytes(),
+            built.transaction.serialized_size_bytes().unwrap()
+        );
+        assert!(
+            built.transaction.fee_rate_size_bytes() > built.transaction.encrypted_size as usize
+        );
+    }
+
+    #[test]
     fn transfer_rejects_invalid_recipient_address() {
         let alice = Wallet::from_seed("invalid-transfer-recipient-alice");
         let ledger = ledger_with_wallet_utxos(&alice, &[10]);
@@ -5597,6 +5684,12 @@ mod tests {
             ledger.balance_of(carol.address()),
             before_carol - burn_amount - fee
         );
+        assert!(ledger.tickets.iter().any(|ticket| {
+            ticket.owner == carol.address()
+                && ticket.amount == burn_amount
+                && ticket.eligible_from_height
+                    == reveal_block.height + ledger.launch_profile.ticket_maturity_delay_heights
+        }));
         let reveal_plaintext_burn_spent_by_inclusion_finalizer = reveal_block
             .transactions
             .iter()
@@ -5693,6 +5786,34 @@ mod tests {
         let error = ledger.prepare_next_block(wallet.address(), 1).unwrap_err();
 
         assert!(format!("{error:#}").contains("block must include at least one burn transaction"));
+    }
+
+    #[test]
+    fn blinded_transaction_expiry_cannot_exceed_protocol_window() {
+        let alice = Wallet::from_seed("blinded-window-finalizer-alice");
+        let bob = Wallet::from_seed("blinded-window-finalizer-bob");
+        let carol = Wallet::from_seed("blinded-window-carol");
+        let finalizers = [alice, bob];
+        let mut ledger = ledger_with_finalizers(&finalizers, &[(&carol, 10 * MICRO_IUNA)]);
+        let max_expiry = ledger
+            .height()
+            .saturating_add(MAX_BLINDED_TRANSACTION_EXPIRY_HEIGHTS);
+
+        ledger.build_blinded_burn(&carol, 3, 7, max_expiry).unwrap();
+
+        let error = ledger
+            .build_blinded_burn(&carol, 3, 7, max_expiry + 1)
+            .unwrap_err();
+        assert!(format!("{error:#}").contains("expiry is too far in the future"));
+
+        let mut forged = ledger
+            .build_blinded_burn(&carol, 3, 7, max_expiry)
+            .unwrap()
+            .transaction;
+        forged.expires_at_height = max_expiry + 1;
+        forged.commitment = blinded_transaction_commitment(&forged).unwrap();
+        let error = ledger.submit_blinded_transaction(forged).unwrap_err();
+        assert!(format!("{error:#}").contains("expiry is too far in the future"));
     }
 
     #[test]
