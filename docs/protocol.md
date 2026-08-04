@@ -8,6 +8,8 @@ iuna is an experimental devnet protocol that combines three mechanisms:
 
 The goal is to avoid relying on only one scarce resource. Proof-of-work chains tend to centralize around hardware and cheap energy. Proof-of-stake chains tend to centralize around existing wealth and staking pools. iuna tries a split design: burns choose who finalizes blocks, VDFs pace block production, and PoW keeps new issuance open to anyone who can find valid work.
 
+Burns do not remove wealth advantage. More capital can still buy more lottery weight. The difference from stake is that burn power is paid again and again: it expires, does not unbond, and does not accumulate into a permanent stake position. The design converts wealth-bias from a growing asset into a recurring cost.
+
 This is still experimental. The rules below describe the current devnet protocol, not a proven mainnet design.
 
 ## Coins and Transactions
@@ -46,7 +48,9 @@ The selected finalizer must prove ownership of the selected ticket, respect its 
 
 Every normal block must include at least one plaintext burn. A blinded transaction envelope does not satisfy that rule, because the finalizer and validators cannot know whether the encrypted payload is a burn until reveal. Block-producing nodes create this plaintext burn locally from the finalizer wallet during block construction; it is not part of the gossiped mempool.
 
-Plaintext transaction fees go to the block finalizer immediately. Blinded transaction fees are paid to the finalizer that committed the envelope when the payload is revealed and executed.
+This mandatory burn is a liveness rule for the ticket pool, not a fairness rule for ticket distribution. It guarantees that normal block production keeps creating future tickets. Fairness against self-serving finalizers comes from blinded third-party burns.
+
+Plaintext transaction fees go to the block finalizer immediately. Blinded transaction fees are paid when the payload is revealed and executed: half goes to the finalizer that originally committed the envelope, and the rest goes to the finalizer that includes the reveal. For odd micro-unit fees, the extra micro-unit goes to the reveal executor.
 
 ## VDF Timing
 
@@ -123,11 +127,11 @@ Normal mempool traffic uses blinded transaction content. A wallet encrypts a nor
 - expiry height;
 - nonce, ciphertext, and plaintext payload hash.
 
-The finalizer can rank the envelope by fee per encrypted byte, but cannot see whether the encrypted payload is a transfer or a burn before committing it to a block.
+The finalizer can rank the envelope by fee per visible envelope byte, but cannot see whether the encrypted payload is a transfer or a burn before committing it to a block.
 
 Reveal is a later step. A `BlindedReveal` carries only the commitment and decryption key. When a valid reveal is included, nodes decrypt the earlier payload, check the commitment and payload hash, decode the normal transaction, validate it against the current UTXO set, and execute it. If the decrypted transaction is a burn, it creates burn tickets at the reveal height, not the earlier envelope-commit height.
 
-Fees are paid without inflating the reveal block reward. The decrypted transaction must pay the same fee declared by the blinded envelope. When it executes, that fee is credited to the finalizer that originally included the blinded envelope, using a deterministic fee output tied to the commitment.
+Fees are paid without inflating the reveal block reward. The decrypted transaction must pay the same fee declared by the blinded envelope. When it executes, the fee is split using deterministic fee outputs tied to the commitment: `floor(fee / 2)` to the envelope committer and `ceil(fee / 2)` to the reveal executor. If both roles are held by the same finalizer, that finalizer receives the full fee through the two deterministic outputs.
 
 Expiry is exclusive: a blinded envelope with expiry height `H` can be included only in blocks below height `H`, and revealed only while the current chain height is below `H`. The expiry height must be within `20` blocks of the node's current chain height when the envelope is accepted or selected. Expired envelopes and reveals are dropped from local selection.
 
@@ -167,6 +171,7 @@ iuna is trying to make these things true at the same time:
 - Finalization should not require specialized mining hardware.
 - New issuance should not require already owning a large stake.
 - Burns should have real opportunity cost.
+- Burn timing power should expire rather than accumulate into permanent control.
 - Block timing should be hard to rush.
 - Finalizers should have a consensus-level reason to include burn traffic they cannot inspect before committing.
 

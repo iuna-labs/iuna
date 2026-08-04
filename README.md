@@ -21,7 +21,7 @@ Most chains lean heavily on one scarce resource:
 - Proof-of-work chains rely on hashpower.
 - Proof-of-stake chains rely on existing stake.
 
-iuna tries a different split. Finalization is lightweight and based on a burn lottery plus VDF timing, while new supply stays open to proof-of-work. The intended benefit is better decentralization pressure than pure PoW or pure PoS: finalizing blocks should not require owning specialized mining scale, and issuing new coins should not require already being a large holder.
+iuna tries a different split. Finalization is lightweight and based on a burn lottery plus VDF timing, while new supply stays open to proof-of-work. Burns do not remove wealth advantage, but they make finalization power temporary and repeatedly paid for instead of a permanent stake position. The intended benefit is better decentralization pressure than pure PoW or pure PoS: finalizing blocks should not require owning specialized mining scale, and burn-based timing power should expire instead of accumulating into lasting control.
 
 This is still an experiment. The design needs real-world testing before those goals can be treated as proven.
 

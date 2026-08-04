@@ -2450,7 +2450,7 @@ impl Ledger {
                 .context("blinded reveal does not reference an active blinded transaction")?;
             let tx = self.decrypt_active_blinded(active, reveal)?;
             apply_transaction(&tx, &mut utxos)?;
-            credit_blinded_fee_output(&mut utxos, active, &tx)?;
+            credit_blinded_fee_outputs(&mut utxos, active, &block.miner, &tx)?;
             revealed_transactions.push(tx);
         }
         if block.reward != fee_reward(&block.transactions)? {
@@ -4051,21 +4051,45 @@ fn blinded_transaction_commitment(transaction: &BlindedTransaction) -> Result<St
     Ok(hex_hash(without_commitment.canonical()))
 }
 
-fn credit_blinded_fee_output(
+fn credit_blinded_fee_outputs(
     utxos: &mut BTreeMap<OutPoint, TxOutput>,
     active: &ActiveBlindedTransaction,
+    reveal_executor: &str,
     transaction: &Transaction,
 ) -> Result<()> {
     let fee = transaction.fee();
     if fee == 0 {
         return Ok(());
     }
-    let output = TxOutput {
-        address: active.included_by.clone(),
-        amount: fee,
-    };
-    ensure_outputs_do_not_overflow(utxos, std::slice::from_ref(&output))?;
-    utxos.insert(blinded_fee_outpoint(&active.transaction.commitment), output);
+    let committer_fee = fee / 2;
+    let executor_fee = fee - committer_fee;
+    let mut outputs = Vec::new();
+    if committer_fee > 0 {
+        outputs.push((
+            blinded_committer_fee_outpoint(&active.transaction.commitment),
+            TxOutput {
+                address: active.included_by.clone(),
+                amount: committer_fee,
+            },
+        ));
+    }
+    if executor_fee > 0 {
+        outputs.push((
+            blinded_executor_fee_outpoint(&active.transaction.commitment),
+            TxOutput {
+                address: reveal_executor.to_string(),
+                amount: executor_fee,
+            },
+        ));
+    }
+    let tx_outputs = outputs
+        .iter()
+        .map(|(_, output)| output.clone())
+        .collect::<Vec<_>>();
+    ensure_outputs_do_not_overflow(utxos, &tx_outputs)?;
+    for (outpoint, output) in outputs {
+        utxos.insert(outpoint, output);
+    }
     Ok(())
 }
 
@@ -4251,10 +4275,17 @@ fn reward_outpoint(block_hash: &str) -> OutPoint {
     }
 }
 
-fn blinded_fee_outpoint(commitment: &str) -> OutPoint {
+fn blinded_committer_fee_outpoint(commitment: &str) -> OutPoint {
     OutPoint {
         txid: commitment.to_string(),
         index: u32::MAX - 1,
+    }
+}
+
+fn blinded_executor_fee_outpoint(commitment: &str) -> OutPoint {
+    OutPoint {
+        txid: commitment.to_string(),
+        index: u32::MAX - 2,
     }
 }
 
@@ -4918,6 +4949,44 @@ mod tests {
         );
         assert!(
             built.transaction.fee_rate_size_bytes() > built.transaction.encrypted_size as usize
+        );
+    }
+
+    #[test]
+    fn blinded_fee_split_rounds_remainder_to_reveal_executor() {
+        let committer = Wallet::from_seed("blinded-split-committer");
+        let executor = Wallet::from_seed("blinded-split-executor");
+        let commitment = "01".repeat(32);
+        let active = ActiveBlindedTransaction {
+            transaction: BlindedTransaction {
+                commitment: commitment.clone(),
+                fee: 1,
+                encrypted_size: 1,
+                expires_at_height: 2,
+                nonce: "02".repeat(BLINDED_NONCE_BYTES),
+                ciphertext: "03".to_string(),
+                payload_hash: "04".repeat(32),
+            },
+            included_height: 1,
+            included_by: committer.address().to_string(),
+        };
+        let transaction = Transaction::Transfer {
+            inputs: Vec::new(),
+            outputs: Vec::new(),
+            fee: 1,
+            signature: String::new(),
+        };
+        let mut utxos = BTreeMap::new();
+
+        credit_blinded_fee_outputs(&mut utxos, &active, executor.address(), &transaction).unwrap();
+
+        assert!(!utxos.contains_key(&blinded_committer_fee_outpoint(&commitment)));
+        assert_eq!(
+            utxos.get(&blinded_executor_fee_outpoint(&commitment)),
+            Some(&TxOutput {
+                address: executor.address().to_string(),
+                amount: 1,
+            })
         );
     }
 
@@ -5678,6 +5747,7 @@ mod tests {
         ledger.submit_blinded_reveal(blinded.reveal).unwrap();
         queue_next_leader_burn(&mut ledger, &finalizers);
         let reveal_block = mine_preverified_as_next_leader(&mut ledger, &finalizers, 2);
+        let reveal_executor = reveal_block.miner.clone();
 
         assert_eq!(reveal_block.blinded_reveals.len(), 1);
         assert_eq!(
@@ -5699,9 +5769,41 @@ mod tests {
             .fold(0_u64, |total, transaction| {
                 total + transaction.amount() + transaction.fee()
             });
+        let committer_fee = fee / 2;
+        let executor_fee = fee - committer_fee;
+        assert_eq!(
+            ledger
+                .utxos
+                .get(&blinded_committer_fee_outpoint(
+                    &commit_block.blinded_transactions[0].commitment
+                ))
+                .unwrap(),
+            &TxOutput {
+                address: inclusion_finalizer.clone(),
+                amount: committer_fee,
+            }
+        );
+        assert_eq!(
+            ledger
+                .utxos
+                .get(&blinded_executor_fee_outpoint(
+                    &commit_block.blinded_transactions[0].commitment
+                ))
+                .unwrap(),
+            &TxOutput {
+                address: reveal_executor.clone(),
+                amount: executor_fee,
+            }
+        );
+        let inclusion_finalizer_fee = if inclusion_finalizer == reveal_executor {
+            fee
+        } else {
+            committer_fee
+        };
         assert_eq!(
             ledger.balance_of(&inclusion_finalizer),
-            before_inclusion_finalizer + fee - reveal_plaintext_burn_spent_by_inclusion_finalizer
+            before_inclusion_finalizer + inclusion_finalizer_fee
+                - reveal_plaintext_burn_spent_by_inclusion_finalizer
         );
     }
 
