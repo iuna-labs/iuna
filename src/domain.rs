@@ -172,6 +172,14 @@ pub struct BuiltBlindedTransaction {
     pub reveal: BlindedReveal,
 }
 
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct OwnedBlindedTransaction {
+    pub transaction: BlindedTransaction,
+    pub payload: Transaction,
+    pub reveal: BlindedReveal,
+}
+
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct RevealedBlindedTransaction {
     pub height: u64,
@@ -1869,6 +1877,10 @@ impl Ledger {
             || self.active_blinded.contains_key(commitment)
     }
 
+    pub fn has_active_blinded_transaction(&self, commitment: &str) -> bool {
+        self.active_blinded.contains_key(commitment)
+    }
+
     pub fn has_blinded_reveal(&self, commitment: &str) -> bool {
         self.pending_reveals
             .iter()
@@ -2763,7 +2775,7 @@ impl Ledger {
                     blinded_reveals: selected_reveals.clone(),
                 };
                 candidate.transactions.push(tx.clone());
-                if estimated_block_selection_size_bytes(&candidate)?
+                if estimated_block_selection_size_bytes(&candidate, required_burn_owner.is_some())?
                     <= self.launch_profile.max_block_bytes
                 {
                     apply_transaction(&tx, &mut utxos)?;
@@ -2798,8 +2810,10 @@ impl Ledger {
                         blinded_reveals: selected_reveals.clone(),
                     };
                     candidate.transactions.push(tx.clone());
-                    if estimated_block_selection_size_bytes(&candidate)?
-                        <= self.launch_profile.max_block_bytes
+                    if estimated_block_selection_size_bytes(
+                        &candidate,
+                        required_burn_owner.is_some(),
+                    )? <= self.launch_profile.max_block_bytes
                     {
                         apply_transaction(&tx, &mut utxos)?;
                         selected.push(tx);
@@ -2813,8 +2827,10 @@ impl Ledger {
                         blinded_reveals: selected_reveals.clone(),
                     };
                     candidate.blinded_transactions.push(transaction.clone());
-                    if estimated_block_selection_size_bytes(&candidate)?
-                        <= self.launch_profile.max_block_bytes
+                    if estimated_block_selection_size_bytes(
+                        &candidate,
+                        required_burn_owner.is_some(),
+                    )? <= self.launch_profile.max_block_bytes
                     {
                         selected_blinded.push(transaction);
                     }
@@ -2827,8 +2843,10 @@ impl Ledger {
                         blinded_reveals: selected_reveals.clone(),
                     };
                     candidate.blinded_reveals.push(reveal.clone());
-                    if estimated_block_selection_size_bytes(&candidate)?
-                        <= self.launch_profile.max_block_bytes
+                    if estimated_block_selection_size_bytes(
+                        &candidate,
+                        required_burn_owner.is_some(),
+                    )? <= self.launch_profile.max_block_bytes
                     {
                         selected_reveals.push(reveal);
                     }
@@ -3801,18 +3819,25 @@ fn compact_len(mut value: u128) -> usize {
     bytes
 }
 
-fn estimated_block_selection_size_bytes(selection: &BlockSelection) -> Result<usize> {
+fn estimated_block_selection_size_bytes(
+    selection: &BlockSelection,
+    recovery: bool,
+) -> Result<usize> {
     let block = Block {
         height: u64::MAX,
         prev_hash: "f".repeat(64),
         timestamp_ms: u64::MAX,
         miner: "f".repeat(64),
-        finalizer_mode: FinalizerMode::Ticket,
+        finalizer_mode: if recovery {
+            FinalizerMode::Recovery
+        } else {
+            FinalizerMode::Ticket
+        },
         finalizer_rank: 0,
         reward: u64::MAX,
         vdf_rounds: u64::MAX,
         vdf_output: "f".repeat(64),
-        leader_proof: Some(LeaderProof {
+        leader_proof: (!recovery).then(|| LeaderProof {
             ticket_id: "f".repeat(64),
             public_key: "f".repeat(64),
             signature: "f".repeat(128),
@@ -5872,6 +5897,113 @@ mod tests {
 
         ledger.submit_blinded_reveal(blinded.reveal).unwrap();
         assert!(ledger.valid_pending_blinded_reveals().is_empty());
+    }
+
+    #[test]
+    fn recovery_block_includes_pending_blinded_transactions_when_space_allows() {
+        let alice = Wallet::from_seed("recovery-blinded-commit-alice");
+        let bob = Wallet::from_seed("recovery-blinded-commit-bob");
+        let carol = Wallet::from_seed("recovery-blinded-commit-carol");
+        let mut ledger = ledger_with_finalizers(
+            &[alice],
+            &[(&bob, 10 * MICRO_IUNA), (&carol, 10 * MICRO_IUNA)],
+        );
+        let blinded = ledger
+            .build_blinded_burn(&carol, MICRO_IUNA, 7, ledger.height() + 4)
+            .unwrap();
+        ledger
+            .submit_blinded_transaction(blinded.transaction.clone())
+            .unwrap();
+        let recovery_burn = ledger.build_burn(&bob, MICRO_IUNA, 0).unwrap();
+        ledger.submit_transaction(recovery_burn).unwrap();
+
+        let block = ledger
+            .mine_recovery_block(&bob, RECOVERY_BLOCK_DELAY_MS)
+            .unwrap();
+
+        assert!(
+            block
+                .blinded_transactions
+                .iter()
+                .any(|transaction| transaction.commitment == blinded.transaction.commitment)
+        );
+    }
+
+    #[test]
+    fn recovery_block_size_selection_uses_recovery_skeleton() {
+        let alice = Wallet::from_seed("recovery-size-commit-alice");
+        let bob = Wallet::from_seed("recovery-size-commit-bob");
+        let carol = Wallet::from_seed("recovery-size-commit-carol");
+        let mut ledger = ledger_with_finalizers(
+            &[alice],
+            &[(&bob, 10 * MICRO_IUNA), (&carol, 10 * MICRO_IUNA)],
+        );
+        let blinded = ledger
+            .build_blinded_burn(&carol, MICRO_IUNA, 7, ledger.height() + 4)
+            .unwrap();
+        ledger
+            .submit_blinded_transaction(blinded.transaction.clone())
+            .unwrap();
+        let recovery_burn = ledger.build_burn(&bob, MICRO_IUNA, 0).unwrap();
+        ledger.submit_transaction(recovery_burn.clone()).unwrap();
+        let recovery_selection = BlockSelection {
+            transactions: vec![recovery_burn],
+            blinded_transactions: vec![blinded.transaction.clone()],
+            blinded_reveals: Vec::new(),
+        };
+        let recovery_estimate =
+            estimated_block_selection_size_bytes(&recovery_selection, true).unwrap();
+        let ticket_estimate =
+            estimated_block_selection_size_bytes(&recovery_selection, false).unwrap();
+        assert!(recovery_estimate < ticket_estimate);
+
+        ledger.launch_profile.max_block_bytes = recovery_estimate;
+        let tight_block = ledger
+            .mine_recovery_block(&bob, RECOVERY_BLOCK_DELAY_MS)
+            .unwrap();
+
+        assert!(
+            tight_block
+                .blinded_transactions
+                .iter()
+                .any(|transaction| transaction.commitment == blinded.transaction.commitment)
+        );
+    }
+
+    #[test]
+    fn recovery_block_includes_pending_blinded_reveals_when_space_allows() {
+        let alice = Wallet::from_seed("recovery-blinded-reveal-alice");
+        let bob = Wallet::from_seed("recovery-blinded-reveal-bob");
+        let carol = Wallet::from_seed("recovery-blinded-reveal-carol");
+        let finalizers = [alice.clone()];
+        let mut ledger = ledger_with_finalizers(
+            &finalizers,
+            &[(&bob, 10 * MICRO_IUNA), (&carol, 10 * MICRO_IUNA)],
+        );
+        let blinded = ledger
+            .build_blinded_burn(&carol, MICRO_IUNA, 7, ledger.height() + 4)
+            .unwrap();
+        ledger
+            .submit_blinded_transaction(blinded.transaction.clone())
+            .unwrap();
+        queue_next_leader_burn(&mut ledger, &finalizers);
+        mine_preverified_as_next_leader(&mut ledger, &finalizers, 1);
+        ledger
+            .submit_blinded_reveal(blinded.reveal.clone())
+            .unwrap();
+        let recovery_burn = ledger.build_burn(&bob, MICRO_IUNA, 0).unwrap();
+        ledger.submit_transaction(recovery_burn).unwrap();
+
+        let block = ledger
+            .mine_recovery_block(&bob, ledger.recovery_block_min_timestamp())
+            .unwrap();
+
+        assert!(
+            block
+                .blinded_reveals
+                .iter()
+                .any(|reveal| reveal.commitment == blinded.transaction.commitment)
+        );
     }
 
     #[test]

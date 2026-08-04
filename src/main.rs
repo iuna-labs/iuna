@@ -72,13 +72,20 @@ async fn main() -> Result<()> {
     let initial_burn_fee = initial_burn_fee(&opts, &ui_config);
 
     let mut node_core = match wallet_load {
-        StartupWallet::Unlocked(wallet) => NodeCore::from_ledger_with_burn_fee_and_enabled(
+        StartupWallet::Unlocked {
             wallet,
-            ledger,
-            ui_config.mining_enabled,
-            initial_burn_per_block,
-            initial_burn_fee,
-        ),
+            owned_blinded_transactions,
+        } => {
+            let mut node = NodeCore::from_ledger_with_burn_fee_and_enabled(
+                wallet,
+                ledger,
+                ui_config.mining_enabled,
+                initial_burn_per_block,
+                initial_burn_fee,
+            );
+            node.restore_owned_blinded_transactions(owned_blinded_transactions)?;
+            node
+        }
         StartupWallet::Locked { address } => NodeCore::from_locked_wallet_address(
             address,
             ledger,
@@ -195,14 +202,19 @@ async fn main() -> Result<()> {
 }
 
 enum StartupWallet {
-    Unlocked(iuna::domain::Wallet),
-    Locked { address: String },
+    Unlocked {
+        wallet: iuna::domain::Wallet,
+        owned_blinded_transactions: Vec<iuna::domain::OwnedBlindedTransaction>,
+    },
+    Locked {
+        address: String,
+    },
 }
 
 impl StartupWallet {
     fn address(&self) -> &str {
         match self {
-            Self::Unlocked(wallet) => wallet.address(),
+            Self::Unlocked { wallet, .. } => wallet.address(),
             Self::Locked { address } => address,
         }
     }
@@ -210,7 +222,14 @@ impl StartupWallet {
 
 fn load_startup_wallet(wallet_path: &Path) -> Result<StartupWallet> {
     match wallet_store::load_or_create(wallet_path) {
-        Ok(wallet) => Ok(StartupWallet::Unlocked(wallet)),
+        Ok(wallet) => {
+            let owned_blinded_transactions =
+                wallet_store::load_owned_blinded_transactions(wallet_path, None)?;
+            Ok(StartupWallet::Unlocked {
+                wallet,
+                owned_blinded_transactions,
+            })
+        }
         Err(error) => {
             let Some(metadata) = wallet_store::metadata(wallet_path)? else {
                 return Err(error);
@@ -866,7 +885,7 @@ mod tests {
 
         match startup {
             StartupWallet::Locked { address } => assert_eq!(address, wallet.address()),
-            StartupWallet::Unlocked(_) => panic!("encrypted wallet should start locked"),
+            StartupWallet::Unlocked { .. } => panic!("encrypted wallet should start locked"),
         }
     }
 

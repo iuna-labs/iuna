@@ -15,8 +15,8 @@ use tokio::sync::Mutex;
 use crate::domain::{
     Amount, BlindedReveal, BlindedTransaction, Block, BuiltBlindedTransaction, BurnLeaderRank,
     ChainSnapshot, ChainStatus, DEFAULT_FEE_PER_BYTE, DEFAULT_TRANSACTION_FEE, Ledger,
-    MAX_BLINDED_TRANSACTION_EXPIRY_HEIGHTS, MINE_FINALIZER_FEE, OutPoint, PreparedBlock,
-    StratumMineShare, StratumMineTemplate, Transaction, TransactionSubmitOutcome,
+    MAX_BLINDED_TRANSACTION_EXPIRY_HEIGHTS, MINE_FINALIZER_FEE, OutPoint, OwnedBlindedTransaction,
+    PreparedBlock, StratumMineShare, StratumMineTemplate, Transaction, TransactionSubmitOutcome,
     VDF_TARGET_BLOCK_MS, Wallet, run_vdf,
 };
 
@@ -245,8 +245,10 @@ pub struct NodeCore {
     last_auto_pow_mine_anchor: Option<String>,
     last_auto_pow_mine_status: Option<String>,
     auto_pow_mine_cursor: Option<AutoPowMineCursor>,
+    owned_blinded_transactions: BTreeMap<String, BlindedTransaction>,
     owned_blinded_reveals: BTreeMap<String, BlindedReveal>,
     owned_blinded_payloads: BTreeMap<String, Transaction>,
+    owned_blinded_outbox_version: u64,
     local_block_anchor_burn: Option<(u64, Transaction)>,
     outbox: Vec<GossipEnvelope>,
 }
@@ -333,8 +335,10 @@ impl NodeCore {
             last_auto_pow_mine_anchor: None,
             last_auto_pow_mine_status: None,
             auto_pow_mine_cursor: None,
+            owned_blinded_transactions: BTreeMap::new(),
             owned_blinded_reveals: BTreeMap::new(),
             owned_blinded_payloads: BTreeMap::new(),
+            owned_blinded_outbox_version: 0,
             local_block_anchor_burn: None,
             outbox: Vec::new(),
         }
@@ -354,8 +358,10 @@ impl NodeCore {
         self.last_auto_pow_mine_anchor = None;
         self.last_auto_pow_mine_status = None;
         self.auto_pow_mine_cursor = None;
+        self.owned_blinded_transactions.clear();
         self.owned_blinded_reveals.clear();
         self.owned_blinded_payloads.clear();
+        self.bump_owned_blinded_outbox_version();
         self.local_block_anchor_burn = None;
     }
 
@@ -409,6 +415,73 @@ impl NodeCore {
 
     pub fn owned_blinded_payloads(&self) -> Vec<Transaction> {
         self.owned_blinded_payloads.values().cloned().collect()
+    }
+
+    pub fn owned_blinded_outbox_version(&self) -> u64 {
+        self.owned_blinded_outbox_version
+    }
+
+    pub fn owned_blinded_transactions(&self) -> Vec<OwnedBlindedTransaction> {
+        self.owned_blinded_transactions
+            .iter()
+            .filter_map(|(commitment, transaction)| {
+                let payload = self.owned_blinded_payloads.get(commitment)?;
+                let reveal = self.owned_blinded_reveals.get(commitment)?;
+                Some(OwnedBlindedTransaction {
+                    transaction: transaction.clone(),
+                    payload: payload.clone(),
+                    reveal: reveal.clone(),
+                })
+            })
+            .collect()
+    }
+
+    pub fn mark_owned_blinded_outbox_persisted(&mut self, version: u64) {
+        if self.owned_blinded_outbox_version == version {
+            self.owned_blinded_outbox_version = 0;
+        }
+    }
+
+    pub fn restore_owned_blinded_transactions(
+        &mut self,
+        transactions: Vec<OwnedBlindedTransaction>,
+    ) -> Result<()> {
+        self.owned_blinded_transactions.clear();
+        self.owned_blinded_reveals.clear();
+        self.owned_blinded_payloads.clear();
+        for owned in transactions {
+            let commitment = owned.transaction.commitment.clone();
+            if owned.reveal.commitment != commitment {
+                continue;
+            }
+            if self.ledger.has_blinded_reveal(&commitment)
+                || !self.ledger.has_unrevealed_blinded_transaction(&commitment)
+                    && owned.transaction.expires_at_height <= self.ledger.height().saturating_add(1)
+            {
+                continue;
+            }
+            if !self.ledger.has_blinded_transaction(&commitment)
+                && self
+                    .ledger
+                    .submit_blinded_transaction(owned.transaction.clone())?
+            {
+                self.outbox.push(GossipEnvelope::BlindedTransaction(
+                    owned.transaction.clone(),
+                ));
+            }
+            if !self.ledger.has_unrevealed_blinded_transaction(&commitment) {
+                continue;
+            }
+            self.owned_blinded_transactions
+                .insert(commitment.clone(), owned.transaction);
+            self.owned_blinded_payloads
+                .insert(commitment.clone(), owned.payload);
+            self.owned_blinded_reveals
+                .insert(commitment.clone(), owned.reveal);
+        }
+        self.publish_owned_reveals_for_active_commits()?;
+        self.bump_owned_blinded_outbox_version();
+        Ok(())
     }
 
     pub fn mempool_gossip(&self) -> Vec<GossipEnvelope> {
@@ -771,10 +844,13 @@ impl NodeCore {
         built: BuiltBlindedTransaction,
     ) -> Result<BlindedTransaction> {
         let transaction = built.transaction;
+        self.owned_blinded_transactions
+            .insert(transaction.commitment.clone(), transaction.clone());
         self.owned_blinded_payloads
             .insert(transaction.commitment.clone(), built.payload);
         self.owned_blinded_reveals
             .insert(transaction.commitment.clone(), built.reveal);
+        self.bump_owned_blinded_outbox_version();
         if self
             .ledger
             .submit_blinded_transaction(transaction.clone())?
@@ -802,9 +878,25 @@ impl NodeCore {
 
     fn publish_owned_reveals_for_block(&mut self, block: &Block) -> Result<()> {
         for transaction in &block.blinded_transactions {
-            let Some(reveal) = self.owned_blinded_reveals.remove(&transaction.commitment) else {
+            let Some(reveal) = self.owned_blinded_reveals.get(&transaction.commitment) else {
                 continue;
             };
+            if self.ledger.submit_blinded_reveal(reveal.clone())? {
+                self.outbox
+                    .push(GossipEnvelope::BlindedReveal(reveal.clone()));
+            }
+        }
+        Ok(())
+    }
+
+    fn publish_owned_reveals_for_active_commits(&mut self) -> Result<()> {
+        let reveals = self
+            .owned_blinded_reveals
+            .iter()
+            .filter(|(commitment, _)| self.ledger.has_active_blinded_transaction(commitment))
+            .map(|(_, reveal)| reveal.clone())
+            .collect::<Vec<_>>();
+        for reveal in reveals {
             if self.ledger.submit_blinded_reveal(reveal.clone())? {
                 self.outbox.push(GossipEnvelope::BlindedReveal(reveal));
             }
@@ -813,11 +905,36 @@ impl NodeCore {
     }
 
     fn prune_owned_blinded_payloads_for_block(&mut self, block: &Block) {
+        let before = self.owned_blinded_transactions.len()
+            + self.owned_blinded_reveals.len()
+            + self.owned_blinded_payloads.len();
         for reveal in &block.blinded_reveals {
+            self.owned_blinded_transactions.remove(&reveal.commitment);
+            self.owned_blinded_reveals.remove(&reveal.commitment);
             self.owned_blinded_payloads.remove(&reveal.commitment);
         }
+        let unrevealed = self
+            .owned_blinded_transactions
+            .keys()
+            .filter(|commitment| self.ledger.has_unrevealed_blinded_transaction(commitment))
+            .cloned()
+            .collect::<Vec<_>>();
+        self.owned_blinded_transactions
+            .retain(|commitment, _| unrevealed.contains(commitment));
+        self.owned_blinded_reveals
+            .retain(|commitment, _| unrevealed.contains(commitment));
         self.owned_blinded_payloads
-            .retain(|commitment, _| self.ledger.has_unrevealed_blinded_transaction(commitment));
+            .retain(|commitment, _| unrevealed.contains(commitment));
+        let after = self.owned_blinded_transactions.len()
+            + self.owned_blinded_reveals.len()
+            + self.owned_blinded_payloads.len();
+        if before != after {
+            self.bump_owned_blinded_outbox_version();
+        }
+    }
+
+    fn bump_owned_blinded_outbox_version(&mut self) {
+        self.owned_blinded_outbox_version = self.owned_blinded_outbox_version.saturating_add(1);
     }
 
     fn build_burn_with_fee_rate(
@@ -2207,6 +2324,111 @@ mod tests {
             envelope,
             GossipEnvelope::BlindedReveal(reveal) if reveal.commitment == blinded.commitment
         )));
+    }
+
+    #[test]
+    fn owned_blinded_transaction_restore_requeues_pending_commit() {
+        let alice = Wallet::from_seed("owned-blinded-restore-pending-alice");
+        let bob = Wallet::from_seed("owned-blinded-restore-pending-bob");
+        let mut allocations = BTreeMap::new();
+        allocations.insert(alice.address().to_string(), 10 * MICRO_IUNA);
+        let ledger = Ledger::new(allocations, 1);
+        let mut node = NodeCore::from_ledger(alice.clone(), ledger.clone(), 0);
+
+        let blinded = node
+            .blinded_transfer_with_fee(bob.address(), MICRO_IUNA, 7, node.chain_height() + 4)
+            .unwrap();
+        let owned = node.owned_blinded_transactions();
+        let mut restarted = NodeCore::from_ledger(alice, ledger, 0);
+
+        restarted.restore_owned_blinded_transactions(owned).unwrap();
+
+        assert_eq!(
+            restarted.ledger().pending_blinded_transactions(),
+            std::slice::from_ref(&blinded)
+        );
+        let outbox = restarted.drain_outbox();
+        assert!(outbox.iter().any(|envelope| matches!(
+            envelope,
+            GossipEnvelope::BlindedTransaction(transaction)
+                if transaction.commitment == blinded.commitment
+        )));
+        assert!(!outbox.iter().any(|envelope| matches!(
+            envelope,
+            GossipEnvelope::BlindedReveal(reveal) if reveal.commitment == blinded.commitment
+        )));
+    }
+
+    #[test]
+    fn owned_blinded_transaction_restore_publishes_reveal_after_commit() {
+        let alice = Wallet::from_seed("owned-blinded-restore-reveal-alice");
+        let bob = Wallet::from_seed("owned-blinded-restore-reveal-bob");
+        let carol = Wallet::from_seed("owned-blinded-restore-reveal-carol");
+        let finalizers = [alice.clone(), bob.clone()];
+        let mut allocations = BTreeMap::new();
+        allocations.insert(alice.address().to_string(), 10 * MICRO_IUNA);
+        allocations.insert(bob.address().to_string(), 10 * MICRO_IUNA);
+        allocations.insert(carol.address().to_string(), 10 * MICRO_IUNA);
+        let ledger = Ledger::new_with_genesis_burns(
+            allocations,
+            finalizers
+                .iter()
+                .map(|wallet| GenesisBurn::new(wallet.address(), MICRO_IUNA))
+                .collect(),
+            1,
+        )
+        .unwrap();
+        let mut wallet_node = NodeCore::from_ledger(carol.clone(), ledger.clone(), 0);
+        let mut finalizer_ledger = ledger;
+
+        let blinded = wallet_node
+            .blinded_burn_with_fee(3, 7, wallet_node.chain_height() + 4)
+            .unwrap();
+        let owned = wallet_node.owned_blinded_transactions();
+        finalizer_ledger
+            .submit_blinded_transaction(blinded.clone())
+            .unwrap();
+        let leader = finalizer_ledger.expected_leader_for_next_block().unwrap();
+        let finalizer = finalizers
+            .iter()
+            .find(|wallet| wallet.address() == leader)
+            .unwrap();
+        let burn = finalizer_ledger.build_burn(finalizer, 1, 0).unwrap();
+        finalizer_ledger.submit_transaction(burn).unwrap();
+        let commit_block = finalizer_ledger.mine_next_block(finalizer, 1).unwrap();
+        finalizer_ledger.apply_block(commit_block.clone()).unwrap();
+        let mut restarted_ledger = NodeCore::from_ledger(
+            carol,
+            Ledger::from_snapshot(finalizer_ledger.snapshot()).unwrap(),
+            0,
+        );
+
+        restarted_ledger
+            .restore_owned_blinded_transactions(owned)
+            .unwrap();
+
+        assert!(
+            restarted_ledger
+                .ledger()
+                .pending_blinded_reveals()
+                .iter()
+                .any(|reveal| reveal.commitment == blinded.commitment)
+        );
+        assert!(
+            restarted_ledger
+                .drain_outbox()
+                .iter()
+                .any(|envelope| matches!(
+                    envelope,
+                    GossipEnvelope::BlindedReveal(reveal) if reveal.commitment == blinded.commitment
+                ))
+        );
+        assert!(
+            commit_block
+                .blinded_transactions
+                .iter()
+                .any(|transaction| transaction.commitment == blinded.commitment)
+        );
     }
 
     #[test]

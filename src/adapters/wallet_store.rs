@@ -14,7 +14,7 @@ use pbkdf2::pbkdf2_hmac;
 use serde::{Deserialize, Serialize};
 use sha2::Sha256;
 
-use crate::domain::Wallet;
+use crate::domain::{OwnedBlindedTransaction, Wallet};
 
 const WALLET_FILE_VERSION: u32 = 3;
 const PLAINTEXT_WALLET_FILE_VERSION: u32 = 2;
@@ -30,8 +30,17 @@ struct WalletFile {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     seed: Option<String>,
     address: String,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    owned_blinded_transactions: Vec<OwnedBlindedTransaction>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     encryption: Option<EncryptedWalletSeed>,
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+struct WalletData {
+    seed: String,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    owned_blinded_transactions: Vec<OwnedBlindedTransaction>,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -135,6 +144,36 @@ pub fn load_with_password(path: &Path, password: &str) -> Result<Wallet> {
     load_encrypted_or_plaintext(path, Some(password))
 }
 
+pub fn load_owned_blinded_transactions(
+    path: &Path,
+    password: Option<&str>,
+) -> Result<Vec<OwnedBlindedTransaction>> {
+    let stored = read_wallet_file(path)?;
+    Ok(wallet_data(&stored, password)?.owned_blinded_transactions)
+}
+
+pub fn replace_owned_blinded_transactions(
+    path: &Path,
+    password: Option<&str>,
+    owned_blinded_transactions: Vec<OwnedBlindedTransaction>,
+) -> Result<()> {
+    if !path.exists() {
+        return Ok(());
+    }
+    let stored = read_wallet_file(path)?;
+    let mut data = wallet_data(&stored, password)?;
+    data.owned_blinded_transactions = owned_blinded_transactions;
+    let mut file = open_wallet_file(path, WalletFileMode::Replace)?;
+    if stored.encryption.is_some() {
+        let password = password
+            .context("wallet is encrypted; unlock it before persisting blinded transactions")?;
+        write_encrypted_wallet_data_file(&mut file, data, &stored.address, password)
+    } else {
+        write_wallet_data_file(&mut file, data, &stored.address)
+    }
+    .with_context(|| format!("failed to update wallet file {}", path.display()))
+}
+
 pub fn encrypt_existing_with_password(path: &Path, password: &str) -> Result<()> {
     if !path.exists() {
         return Ok(());
@@ -144,7 +183,8 @@ pub fn encrypt_existing_with_password(path: &Path, password: &str) -> Result<()>
         let _ = wallet_from_stored(&stored, Some(password))?;
         return Ok(());
     }
-    let seed = stored.seed.context("wallet file does not contain a seed")?;
+    let data = wallet_data(&stored, None)?;
+    let seed = data.seed;
     let seed = normalize_seed_phrase(&seed).unwrap_or(seed);
     let wallet = Wallet::from_seed(&seed);
     if wallet.address() != stored.address {
@@ -155,8 +195,16 @@ pub fn encrypt_existing_with_password(path: &Path, password: &str) -> Result<()>
         );
     }
     let mut file = open_wallet_file(path, WalletFileMode::Replace)?;
-    write_encrypted_wallet_file(&mut file, seed, wallet.address(), password)
-        .with_context(|| format!("failed to encrypt wallet file {}", path.display()))
+    write_encrypted_wallet_data_file(
+        &mut file,
+        WalletData {
+            seed,
+            owned_blinded_transactions: data.owned_blinded_transactions,
+        },
+        wallet.address(),
+        password,
+    )
+    .with_context(|| format!("failed to encrypt wallet file {}", path.display()))
 }
 
 pub fn reencrypt_with_password(
@@ -165,7 +213,8 @@ pub fn reencrypt_with_password(
     new_password: &str,
 ) -> Result<Wallet> {
     let stored = read_wallet_file(path)?;
-    let seed = wallet_seed(&stored, Some(current_password))?;
+    let data = wallet_data(&stored, Some(current_password))?;
+    let seed = data.seed;
     let seed = normalize_seed_phrase(&seed).unwrap_or(seed);
     let wallet = Wallet::from_seed(&seed);
     if wallet.address() != stored.address {
@@ -176,8 +225,16 @@ pub fn reencrypt_with_password(
         );
     }
     let mut file = open_wallet_file(path, WalletFileMode::Replace)?;
-    write_encrypted_wallet_file(&mut file, seed, wallet.address(), new_password)
-        .with_context(|| format!("failed to re-encrypt wallet file {}", path.display()))?;
+    write_encrypted_wallet_data_file(
+        &mut file,
+        WalletData {
+            seed,
+            owned_blinded_transactions: data.owned_blinded_transactions,
+        },
+        wallet.address(),
+        new_password,
+    )
+    .with_context(|| format!("failed to re-encrypt wallet file {}", path.display()))?;
     Ok(wallet)
 }
 
@@ -270,10 +327,22 @@ fn write_wallet_encrypted(
 }
 
 fn write_wallet_file(file: &mut File, seed: String, address: &str) -> Result<()> {
+    write_wallet_data_file(
+        file,
+        WalletData {
+            seed,
+            owned_blinded_transactions: Vec::new(),
+        },
+        address,
+    )
+}
+
+fn write_wallet_data_file(file: &mut File, data: WalletData, address: &str) -> Result<()> {
     let stored = WalletFile {
         version: PLAINTEXT_WALLET_FILE_VERSION,
-        seed: Some(seed),
+        seed: Some(data.seed),
         address: address.to_string(),
+        owned_blinded_transactions: data.owned_blinded_transactions,
         encryption: None,
     };
     let bytes = serde_json::to_vec_pretty(&stored).context("failed to serialize wallet file")?;
@@ -288,11 +357,29 @@ fn write_encrypted_wallet_file(
     address: &str,
     password: &str,
 ) -> Result<()> {
-    let encryption = encrypt_seed(&seed, address, password)?;
+    write_encrypted_wallet_data_file(
+        file,
+        WalletData {
+            seed,
+            owned_blinded_transactions: Vec::new(),
+        },
+        address,
+        password,
+    )
+}
+
+fn write_encrypted_wallet_data_file(
+    file: &mut File,
+    data: WalletData,
+    address: &str,
+    password: &str,
+) -> Result<()> {
+    let encryption = encrypt_wallet_data(&data, address, password)?;
     let stored = WalletFile {
         version: WALLET_FILE_VERSION,
         seed: None,
         address: address.to_string(),
+        owned_blinded_transactions: Vec::new(),
         encryption: Some(encryption),
     };
     let bytes = serde_json::to_vec_pretty(&stored).context("failed to serialize wallet file")?;
@@ -301,16 +388,37 @@ fn write_encrypted_wallet_file(
     Ok(())
 }
 
-fn encrypt_seed(seed: &str, address: &str, password: &str) -> Result<EncryptedWalletSeed> {
+fn wallet_data(stored: &WalletFile, password: Option<&str>) -> Result<WalletData> {
+    if let Some(encryption) = &stored.encryption {
+        let password = password.context("wallet is encrypted; unlock it with the UI password")?;
+        return decrypt_wallet_data(encryption, &stored.address, password);
+    }
+    let seed = stored
+        .seed
+        .clone()
+        .context("wallet file does not contain a seed")?;
+    Ok(WalletData {
+        seed,
+        owned_blinded_transactions: stored.owned_blinded_transactions.clone(),
+    })
+}
+
+fn encrypt_wallet_data(
+    data: &WalletData,
+    address: &str,
+    password: &str,
+) -> Result<EncryptedWalletSeed> {
     let salt = random_bytes::<16>()?;
     let nonce = random_bytes::<12>()?;
     let key = wallet_encryption_key(password, &salt, WALLET_ENCRYPTION_ITERATIONS);
     let cipher = ChaCha20Poly1305::new((&key).into());
+    let plaintext =
+        serde_json::to_vec(data).context("failed to serialize encrypted wallet data")?;
     let ciphertext = cipher
         .encrypt(
             Nonce::from_slice(&nonce),
             Payload {
-                msg: seed.as_bytes(),
+                msg: &plaintext,
                 aad: address.as_bytes(),
             },
         )
@@ -326,6 +434,14 @@ fn encrypt_seed(seed: &str, address: &str, password: &str) -> Result<EncryptedWa
 }
 
 fn decrypt_seed(encryption: &EncryptedWalletSeed, address: &str, password: &str) -> Result<String> {
+    Ok(decrypt_wallet_data(encryption, address, password)?.seed)
+}
+
+fn decrypt_wallet_data(
+    encryption: &EncryptedWalletSeed,
+    address: &str,
+    password: &str,
+) -> Result<WalletData> {
     if encryption.algorithm != WALLET_ENCRYPTION_ALGORITHM {
         bail!("unsupported wallet encryption algorithm");
     }
@@ -349,7 +465,13 @@ fn decrypt_seed(encryption: &EncryptedWalletSeed, address: &str, password: &str)
             },
         )
         .map_err(|_| anyhow!("invalid wallet password"))?;
-    String::from_utf8(plaintext).context("wallet seed is not valid utf-8")
+    match serde_json::from_slice::<WalletData>(&plaintext) {
+        Ok(data) => Ok(data),
+        Err(_) => Ok(WalletData {
+            seed: String::from_utf8(plaintext).context("wallet seed is not valid utf-8")?,
+            owned_blinded_transactions: Vec::new(),
+        }),
+    }
 }
 
 fn wallet_encryption_key(password: &str, salt: &[u8], iterations: u32) -> [u8; 32] {
@@ -465,8 +587,13 @@ mod tests {
     use bip39::{Language, Mnemonic};
     use tempfile::tempdir;
 
+    use crate::domain::{
+        BlindedReveal, BlindedTransaction, OwnedBlindedTransaction, Transaction, TxInput, TxOutput,
+    };
+
     use super::{
-        encrypt_existing_with_password, load_or_create, load_with_password, metadata,
+        encrypt_existing_with_password, load_or_create, load_owned_blinded_transactions,
+        load_with_password, metadata, replace_owned_blinded_transactions,
         replace_with_generated_seed_phrase, replace_with_generated_seed_phrase_encrypted,
         replace_with_imported_seed_phrase, setup_seed_phrase, setup_seed_phrase_with_password,
     };
@@ -592,6 +719,46 @@ mod tests {
     }
 
     #[test]
+    fn plaintext_wallet_persists_owned_blinded_transactions() {
+        let dir = tempdir().unwrap();
+        let path = dir.path().join("wallet.json");
+        replace_with_generated_seed_phrase(&path).unwrap();
+        let owned = sample_owned_blinded_transaction();
+
+        replace_owned_blinded_transactions(&path, None, vec![owned.clone()]).unwrap();
+
+        assert_eq!(
+            load_owned_blinded_transactions(&path, None).unwrap(),
+            vec![owned]
+        );
+    }
+
+    #[test]
+    fn encrypted_wallet_persists_owned_blinded_transactions_without_plaintext() {
+        let dir = tempdir().unwrap();
+        let path = dir.path().join("wallet.json");
+        replace_with_generated_seed_phrase_encrypted(&path, "correct horse battery staple")
+            .unwrap();
+        let owned = sample_owned_blinded_transaction();
+
+        replace_owned_blinded_transactions(
+            &path,
+            Some("correct horse battery staple"),
+            vec![owned.clone()],
+        )
+        .unwrap();
+
+        let stored = fs::read_to_string(&path).unwrap();
+        assert!(!stored.contains(&owned.payload.signature().to_string()));
+        assert!(!stored.contains(&owned.reveal.key));
+        assert_eq!(
+            load_owned_blinded_transactions(&path, Some("correct horse battery staple")).unwrap(),
+            vec![owned]
+        );
+        assert!(load_owned_blinded_transactions(&path, Some("wrong password")).is_err());
+    }
+
+    #[test]
     fn imports_normalized_seed_phrase() {
         let dir = tempdir().unwrap();
         let path = dir.path().join("wallet.json");
@@ -644,6 +811,41 @@ mod tests {
                 "word {} should verify case-insensitively",
                 index + 1
             );
+        }
+    }
+
+    fn sample_owned_blinded_transaction() -> OwnedBlindedTransaction {
+        let payload = Transaction::Transfer {
+            inputs: vec![TxInput {
+                outpoint: crate::domain::OutPoint {
+                    txid: "a".repeat(64),
+                    index: 0,
+                },
+                owner: "mv_sample_owner".to_string(),
+                signature: "b".repeat(64),
+            }],
+            outputs: vec![TxOutput {
+                address: "mv_sample_recipient".to_string(),
+                amount: 1,
+            }],
+            fee: 1,
+            signature: "c".repeat(64),
+        };
+        OwnedBlindedTransaction {
+            transaction: BlindedTransaction {
+                commitment: "d".repeat(64),
+                fee: 1,
+                encrypted_size: 42,
+                expires_at_height: 10,
+                nonce: "e".repeat(24),
+                ciphertext: "f".repeat(84),
+                payload_hash: "1".repeat(64),
+            },
+            payload,
+            reveal: BlindedReveal {
+                commitment: "d".repeat(64),
+                key: "2".repeat(64),
+            },
         }
     }
 

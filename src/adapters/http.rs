@@ -3,7 +3,7 @@ use std::{
     net::SocketAddr,
     path::{Path, PathBuf},
     sync::Arc,
-    time::{SystemTime, UNIX_EPOCH},
+    time::{Duration, SystemTime, UNIX_EPOCH},
 };
 
 use anyhow::{Context, Result, bail};
@@ -19,7 +19,7 @@ use axum::{
 use getrandom::getrandom;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
-use tokio::{net::TcpListener, sync::Mutex};
+use tokio::{net::TcpListener, sync::Mutex, time::sleep};
 
 use crate::{
     adapters::{
@@ -34,8 +34,8 @@ use crate::{
     },
     domain::{
         Amount, BlindedReveal, BlindedTransaction, Block, BurnLeaderRank, ChainSnapshot, Ledger,
-        MINE_FINALIZER_FEE, MINE_REWARD, OutPoint, Transaction, TxInput, TxOutput, hex_hash,
-        revealed_blinded_transactions,
+        MINE_FINALIZER_FEE, MINE_REWARD, OutPoint, Transaction, TxInput, TxOutput, Wallet,
+        hex_hash, revealed_blinded_transactions,
     },
 };
 
@@ -422,6 +422,7 @@ pub async fn serve(
         auth_sessions: Arc::new(Mutex::new(BTreeMap::new())),
         auth_backoff: Arc::new(Mutex::new(BTreeMap::new())),
     };
+    tokio::spawn(run_owned_blinded_outbox_persistence(state.clone()));
     let app = Router::new()
         .route("/", get(index))
         .route("/favicon.ico", get(favicon))
@@ -521,6 +522,51 @@ async fn app_js() -> impl IntoResponse {
         )],
         include_str!("../../www/assets/iuna-ui.js"),
     )
+}
+
+async fn run_owned_blinded_outbox_persistence(state: HttpState) {
+    loop {
+        sleep(Duration::from_millis(500)).await;
+        let (version, entries) = {
+            let node = state.node.lock().await;
+            let version = node.owned_blinded_outbox_version();
+            if version == 0 {
+                continue;
+            }
+            (version, node.owned_blinded_transactions())
+        };
+        let password = wallet_persistence_password(&state).await;
+        match wallet_store::replace_owned_blinded_transactions(
+            &state.wallet_path,
+            password.as_deref(),
+            entries,
+        ) {
+            Ok(()) => {
+                state
+                    .node
+                    .lock()
+                    .await
+                    .mark_owned_blinded_outbox_persisted(version);
+            }
+            Err(error) if format!("{error:#}").contains("wallet is encrypted") => {}
+            Err(error) => eprintln!("failed to persist owned blinded transactions: {error:#}"),
+        }
+    }
+}
+
+async fn wallet_persistence_password(state: &HttpState) -> Option<String> {
+    let metadata = wallet_store::metadata(&state.wallet_path).ok().flatten()?;
+    if !metadata.encrypted {
+        return None;
+    }
+    let now = now_ms();
+    state
+        .auth_sessions
+        .lock()
+        .await
+        .values()
+        .find(|session| session.expires_at > now)
+        .map(|session| session.wallet_password.clone())
 }
 
 async fn require_auth_middleware(
@@ -2369,7 +2415,7 @@ async fn setup_auth_password(
     drop(config);
     wallet_store::encrypt_existing_with_password(&state.wallet_path, password)?;
     let wallet = wallet_store::load_with_password(&state.wallet_path, password)?;
-    state.node.lock().await.replace_wallet(wallet);
+    restore_node_wallet_from_store(state, wallet, Some(password)).await?;
     clear_auth_backoff(state, client_key).await;
     create_session_cookie(state, password).await
 }
@@ -2393,7 +2439,7 @@ async fn login_auth_password(
     }
     wallet_store::encrypt_existing_with_password(&state.wallet_path, password)?;
     let wallet = wallet_store::load_with_password(&state.wallet_path, password)?;
-    state.node.lock().await.replace_wallet(wallet);
+    restore_node_wallet_from_store(state, wallet, Some(password)).await?;
     clear_auth_backoff(state, client_key).await;
     create_session_cookie(state, password).await
 }
@@ -2424,10 +2470,22 @@ async fn change_auth_password(
         config.auth_password_hash = Some(hash_password(new_password)?);
         config_store::save(&state.config_path, &config)?;
     }
-    state.node.lock().await.replace_wallet(wallet);
+    restore_node_wallet_from_store(state, wallet, Some(new_password)).await?;
     state.auth_sessions.lock().await.clear();
     clear_auth_backoff(state, client_key).await;
     create_session_cookie(state, new_password).await
+}
+
+async fn restore_node_wallet_from_store(
+    state: &HttpState,
+    wallet: Wallet,
+    password: Option<&str>,
+) -> Result<()> {
+    let owned_blinded_transactions =
+        wallet_store::load_owned_blinded_transactions(&state.wallet_path, password)?;
+    let mut node = state.node.lock().await;
+    node.replace_wallet(wallet);
+    node.restore_owned_blinded_transactions(owned_blinded_transactions)
 }
 
 async fn check_auth_backoff(state: &HttpState, client_key: &str) -> Result<()> {
