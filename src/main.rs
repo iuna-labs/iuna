@@ -1183,7 +1183,7 @@ mod tests {
                 Duration::from_secs(1),
                 Duration::from_millis(VDF_TARGET_BLOCK_MS),
             ),
-            6_000_000
+            3_000_000
         );
         assert_eq!(
             extrapolate_vdf_rounds(
@@ -1191,7 +1191,7 @@ mod tests {
                 Duration::from_secs(0),
                 Duration::from_millis(VDF_TARGET_BLOCK_MS),
             ),
-            6_000_000_000_000_000
+            3_000_000_000_000_000
         );
     }
 

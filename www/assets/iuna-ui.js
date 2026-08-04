@@ -1552,6 +1552,14 @@ window.iunaApp = function iunaApp() {
       return tx?.kind === "blinded" || tx?.kind === "reveal";
     },
 
+    txPillLabel(tx) {
+      return tx?.revealed ? "revealed" : (tx?.kind || "-");
+    },
+
+    txPillClass(tx) {
+      return tx?.revealed ? "revealed" : (tx?.kind || "");
+    },
+
     txDifficultyBits(tx) {
       return tx?.difficulty_bits ?? tx?.difficultyBits ?? null;
     },
@@ -1730,8 +1738,10 @@ window.iunaApp = function iunaApp() {
     },
 
     blockTransactions(block) {
+      const transactions = block?.transactions || [];
+      if (transactions.some((tx) => tx?.revealed)) return transactions;
       return [
-        ...(block?.transactions || []),
+        ...transactions,
         ...(block?.revealedTransactions || block?.revealed_transactions || []),
       ];
     },
@@ -1783,7 +1793,7 @@ window.iunaApp = function iunaApp() {
     },
 
     txTitle(tx) {
-      if (tx.status === "pending") return "Pending";
+      if (tx.status === "pending") return tx.blinded ? "Pending blind" : "Pending";
       return tx.blockHeight === null ? "Confirmed" : `Block ${tx.blockHeight}`;
     },
 

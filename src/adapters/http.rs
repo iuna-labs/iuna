@@ -339,6 +339,7 @@ struct WalletTransactionRow {
     block_height: Option<u64>,
     block_finalizer: Option<String>,
     direction: &'static str,
+    blinded: bool,
     difficulty_bits: Option<u32>,
     proof_bits: Option<u32>,
     proof_hash: Option<String>,
@@ -389,6 +390,7 @@ struct UiTransaction {
     commitment: Option<String>,
     encrypted_size: Option<u32>,
     expires_at_height: Option<u64>,
+    revealed: bool,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq, Serialize)]
@@ -780,6 +782,7 @@ async fn api_wallet_transactions(
     let node = state.node.lock().await;
     let snapshot = node.chain_snapshot();
     let pending = node.pending_transactions();
+    let owned_blinded = node.owned_blinded_payloads();
     let outputs = known_output_index(&snapshot, &pending);
     let page_query = query.page();
     let filters = WalletTransactionFilters::from_query(query);
@@ -787,6 +790,7 @@ async fn api_wallet_transactions(
         wallet_transaction_rows(
             node.wallet_address(),
             pending,
+            owned_blinded,
             &snapshot.blocks,
             &outputs,
             filters,
@@ -1538,6 +1542,7 @@ async fn setup_requires_peer(state: &HttpState) -> bool {
 fn wallet_transaction_rows(
     wallet: &str,
     pending: Vec<Transaction>,
+    owned_blinded: Vec<Transaction>,
     chain: &[Block],
     outputs: &BTreeMap<OutPoint, TxOutput>,
     filters: WalletTransactionFilters,
@@ -1548,8 +1553,19 @@ fn wallet_transaction_rows(
         if !filters.allows(tx) {
             continue;
         }
-        if let Some(row) = wallet_transaction_row(wallet, tx, outputs, "pending", None, None) {
+        if let Some(row) = wallet_transaction_row(wallet, tx, outputs, "pending", None, None, false)
+        {
             rows.push((u128::MAX - index as u128, row));
+        }
+    }
+
+    for (index, tx) in owned_blinded.iter().enumerate() {
+        if !filters.allows(tx) {
+            continue;
+        }
+        if let Some(row) = wallet_transaction_row(wallet, tx, outputs, "pending", None, None, true)
+        {
+            rows.push((u128::MAX - 10_000 - index as u128, row));
         }
     }
 
@@ -1565,6 +1581,7 @@ fn wallet_transaction_rows(
                 "confirmed",
                 Some(block.height),
                 Some(block.miner.clone()),
+                false,
             ) {
                 rows.push((block.height as u128 * 10_000 + index as u128, row));
             }
@@ -1582,6 +1599,7 @@ fn wallet_transaction_row(
     status: &'static str,
     block_height: Option<u64>,
     block_finalizer: Option<String>,
+    blinded: bool,
 ) -> Option<WalletTransactionRow> {
     match tx {
         Transaction::Transfer {
@@ -1607,6 +1625,7 @@ fn wallet_transaction_row(
             } else {
                 "sent"
             },
+            blinded,
             difficulty_bits: None,
             proof_bits: None,
             proof_hash: None,
@@ -1631,6 +1650,7 @@ fn wallet_transaction_row(
             block_height,
             block_finalizer,
             direction: "burned",
+            blinded,
             difficulty_bits: None,
             proof_bits: None,
             proof_hash: None,
@@ -1657,6 +1677,7 @@ fn wallet_transaction_row(
             block_height,
             block_finalizer,
             direction: "received",
+            blinded,
             difficulty_bits: Some(*difficulty_bits),
             proof_bits: Some(proof_bits(signature)),
             proof_hash: Some(signature.clone()),
@@ -1707,6 +1728,22 @@ fn ui_block(
     let revealed_fees = revealed_transactions
         .iter()
         .fold(0_u64, |total, tx| total.saturating_add(tx.fee()));
+    let mut transactions = block
+        .transactions
+        .iter()
+        .map(|tx| ui_transaction(tx, outputs))
+        .collect::<Vec<_>>();
+    transactions.extend(
+        block
+            .blinded_transactions
+            .iter()
+            .map(ui_blinded_transaction),
+    );
+    transactions.extend(
+        revealed_transactions
+            .iter()
+            .map(|tx| ui_revealed_transaction(tx, outputs)),
+    );
     UiBlock {
         height: block.height,
         prev_hash: block.prev_hash,
@@ -1720,17 +1757,22 @@ fn ui_block(
         vdf_output: block.vdf_output,
         leader_proof: block.leader_proof,
         burn_leader_ranks: ranks,
-        transactions: block
-            .transactions
-            .iter()
-            .map(|tx| ui_transaction(tx, outputs))
-            .collect(),
+        transactions,
         revealed_transactions: revealed_transactions
             .iter()
-            .map(|tx| ui_transaction(tx, outputs))
+            .map(|tx| ui_revealed_transaction(tx, outputs))
             .collect(),
         hash: block.hash,
     }
+}
+
+fn ui_revealed_transaction(
+    transaction: &Transaction,
+    outputs_by_outpoint: &BTreeMap<OutPoint, TxOutput>,
+) -> UiTransaction {
+    let mut row = ui_transaction(transaction, outputs_by_outpoint);
+    row.revealed = true;
+    row
 }
 
 fn ui_transaction(
@@ -1759,6 +1801,7 @@ fn ui_transaction(
             commitment: None,
             encrypted_size: None,
             expires_at_height: None,
+            revealed: false,
         },
         Transaction::Burn {
             inputs,
@@ -1782,6 +1825,7 @@ fn ui_transaction(
             commitment: None,
             encrypted_size: None,
             expires_at_height: None,
+            revealed: false,
         },
         Transaction::Mine {
             recipient,
@@ -1807,6 +1851,7 @@ fn ui_transaction(
             commitment: None,
             encrypted_size: None,
             expires_at_height: None,
+            revealed: false,
         },
     }
 }
@@ -1828,6 +1873,7 @@ fn ui_blinded_transaction(transaction: &BlindedTransaction) -> UiTransaction {
         commitment: Some(transaction.commitment.clone()),
         encrypted_size: Some(transaction.encrypted_size),
         expires_at_height: Some(transaction.expires_at_height),
+        revealed: false,
     }
 }
 
@@ -1848,6 +1894,7 @@ fn ui_blinded_reveal(reveal: &BlindedReveal) -> UiTransaction {
         commitment: Some(reveal.commitment.clone()),
         encrypted_size: None,
         expires_at_height: None,
+        revealed: false,
     }
 }
 
@@ -2896,6 +2943,8 @@ const INDEX_HTML: &str = r#"<!doctype html>
     .pill.burn { background: #332918; color: #ffd070; }
     .pill.transfer { background: #17312a; color: #8de9cd; }
     .pill.mine { background: #172a34; color: #8bdcff; }
+    .pill.blinded { background: #272433; color: #c8b8ff; }
+    .pill.reveal, .pill.revealed { background: #2b2f20; color: #d5f55f; }
     .mempool-panel { min-width: 0; overflow: hidden; }
     .mempool-strip { width: 100%; min-width: 0; display: flex; gap: 8px; overflow-x: auto; overscroll-behavior-x: contain; padding: 1px 0 10px; scroll-snap-type: x proximity; }
     .mempool-item { flex: 0 0 220px; scroll-snap-align: start; }
@@ -2944,7 +2993,7 @@ const INDEX_HTML: &str = r#"<!doctype html>
       .block-card { flex-basis: 108px; }
     }
   </style>
-  <script defer src="/assets/iuna-ui.js?v=80"></script>
+  <script defer src="/assets/iuna-ui.js?v=82"></script>
   <script defer src="/assets/alpine.min.js"></script>
 </head>
 <body x-data="iunaApp()" x-init="init()" @keydown.window.escape="closeModals()" x-cloak>
@@ -3363,32 +3412,20 @@ const INDEX_HTML: &str = r#"<!doctype html>
                 <h3>Transactions</h3>
                 <template x-for="tx in selectedBlock.transactions" :key="tx.signature">
                   <div class="tx-card" role="button" tabindex="0" @click="openTransactionModal(tx, { source: 'Block', blockHeight: selectedBlock.height, blockFinalizer: selectedBlock.miner })" @keydown.enter.prevent="openTransactionModal(tx, { source: 'Block', blockHeight: selectedBlock.height, blockFinalizer: selectedBlock.miner })" @keydown.space.prevent="openTransactionModal(tx, { source: 'Block', blockHeight: selectedBlock.height, blockFinalizer: selectedBlock.miner })">
-                    <span class="pill" :class="tx.kind" x-text="tx.kind"></span>
-                    <div class="tx-field"><span class="tx-label">Amount</span><span class="tx-value money">IUNA <span x-text="amountLabel(txAmount(tx))"></span></span></div>
+                    <span class="pill" :class="txPillClass(tx)" x-text="txPillLabel(tx)"></span>
+                    <div class="tx-field" x-show="!isBlindedMempoolItem(tx)"><span class="tx-label">Amount</span><span class="tx-value money">IUNA <span x-text="amountLabel(txAmount(tx))"></span></span></div>
                     <div class="tx-field"><span class="tx-label">Fee</span><span class="tx-value money">IUNA <span x-text="amountLabel(tx.fee ?? 0)"></span></span></div>
-                    <div class="tx-field"><span class="tx-label">From</span><code class="tx-value hash" x-text="short(txFrom(tx))"></code></div>
+                    <div class="tx-field" x-show="!isBlindedMempoolItem(tx)"><span class="tx-label">From</span><code class="tx-value hash" x-text="short(txFrom(tx))"></code></div>
                     <div class="tx-field" x-show="txTo(tx)"><span class="tx-label">To</span><code class="tx-value hash" x-text="short(txTo(tx))"></code></div>
+                    <div class="tx-field" x-show="isBlindedMempoolItem(tx)"><span class="tx-label">Commitment</span><code class="tx-value hash" x-text="short(tx.commitment || tx.signature)"></code></div>
+                    <div class="tx-field" x-show="tx.encrypted_size || tx.encryptedSize"><span class="tx-label">Bytes</span><span class="tx-value number" x-text="tx.encrypted_size || tx.encryptedSize"></span></div>
+                    <div class="tx-field" x-show="tx.expires_at_height || tx.expiresAtHeight"><span class="tx-label">Expires</span><span class="tx-value number" x-text="tx.expires_at_height || tx.expiresAtHeight"></span></div>
                     <div class="tx-field" x-show="isMineTx(tx)"><span class="tx-label">Proof Bits</span><span class="tx-value number"><span x-text="txProofBits(tx) ?? '-'"></span> / <span x-text="txDifficultyBits(tx) ?? '-'"></span></span></div>
                     <div class="tx-field" x-show="isMineTx(tx)"><span class="tx-label">Proof Hash</span><code class="tx-value hash" x-text="short(txProofHash(tx))"></code></div>
-                    <div class="tx-field"><span class="tx-label">Signature</span><code class="tx-value hash" x-text="short(tx.signature)"></code></div>
+                    <div class="tx-field" x-show="!isBlindedMempoolItem(tx)"><span class="tx-label">Signature</span><code class="tx-value hash" x-text="short(tx.signature)"></code></div>
                   </div>
                 </template>
                 <div class="muted" x-show="selectedBlock.transactions.length === 0">No transactions</div>
-                <template x-if="selectedBlock.revealed_transactions?.length">
-                  <div class="tx-list">
-                    <h3>Revealed</h3>
-                    <template x-for="tx in selectedBlock.revealed_transactions" :key="tx.signature">
-                      <div class="tx-card" role="button" tabindex="0" @click="openTransactionModal(tx, { source: 'Revealed', blockHeight: selectedBlock.height, blockFinalizer: selectedBlock.miner })" @keydown.enter.prevent="openTransactionModal(tx, { source: 'Revealed', blockHeight: selectedBlock.height, blockFinalizer: selectedBlock.miner })" @keydown.space.prevent="openTransactionModal(tx, { source: 'Revealed', blockHeight: selectedBlock.height, blockFinalizer: selectedBlock.miner })">
-                        <span class="pill" :class="tx.kind" x-text="tx.kind"></span>
-                        <div class="tx-field"><span class="tx-label">Amount</span><span class="tx-value money">IUNA <span x-text="amountLabel(txAmount(tx))"></span></span></div>
-                        <div class="tx-field"><span class="tx-label">Fee</span><span class="tx-value money">IUNA <span x-text="amountLabel(tx.fee ?? 0)"></span></span></div>
-                        <div class="tx-field"><span class="tx-label">From</span><code class="tx-value hash" x-text="short(txFrom(tx))"></code></div>
-                        <div class="tx-field" x-show="txTo(tx)"><span class="tx-label">To</span><code class="tx-value hash" x-text="short(txTo(tx))"></code></div>
-                        <div class="tx-field"><span class="tx-label">Signature</span><code class="tx-value hash" x-text="short(tx.signature)"></code></div>
-                      </div>
-                    </template>
-                  </div>
-                </template>
               </div>
             </div>
           </template>
@@ -3644,7 +3681,7 @@ const INDEX_HTML: &str = r#"<!doctype html>
     <section class="tx-modal">
       <div class="tx-modal-head">
         <div class="tx-modal-title">
-          <span class="pill" :class="selectedTransaction?.tx?.kind" x-text="selectedTransaction?.tx?.kind"></span>
+          <span class="pill" :class="txPillClass(selectedTransaction?.tx)" x-text="txPillLabel(selectedTransaction?.tx)"></span>
           <h2 id="tx-modal-title">Transaction</h2>
           <code class="tx-value hash" x-text="selectedTransaction?.tx?.signature || '-'"></code>
         </div>
@@ -3877,6 +3914,91 @@ mod tests {
         assert_eq!(blinded_row.expires_at_height, Some(42));
         assert_eq!(reveal_row.kind, "reveal");
         assert_eq!(reveal_row.commitment, blinded_row.commitment);
+    }
+
+    #[test]
+    fn block_detail_transactions_include_blinded_and_revealed_items() {
+        let alice = Wallet::from_seed("block-detail-blind-alice");
+        let bob = Wallet::from_seed("block-detail-blind-bob");
+        let mut allocations = BTreeMap::new();
+        allocations.insert(alice.address().to_string(), 100);
+        allocations.insert(bob.address().to_string(), 100);
+        let ledger = Ledger::new(allocations.clone(), 1);
+        let transfer = ledger.build_transfer(&alice, bob.address(), 12, 3).unwrap();
+        let built = ledger
+            .build_blinded_transaction(transfer.clone(), 20)
+            .unwrap();
+        let mut block = fake_block(7, Vec::new());
+        block.blinded_transactions = vec![built.transaction.clone()];
+
+        let ui_block = super::ui_block(block, &BTreeMap::new(), &BTreeMap::new(), &[transfer]);
+
+        assert_eq!(ui_block.transactions.len(), 2);
+        assert_eq!(ui_block.transactions[0].kind, "blinded");
+        assert_eq!(
+            ui_block.transactions[0].commitment.as_deref(),
+            Some(built.transaction.commitment.as_str())
+        );
+        assert!(!ui_block.transactions[0].revealed);
+        assert_eq!(ui_block.transactions[1].kind, "transfer");
+        assert!(ui_block.transactions[1].revealed);
+        assert_eq!(ui_block.revealed_transactions.len(), 1);
+        assert!(ui_block.revealed_transactions[0].revealed);
+    }
+
+    #[test]
+    fn block_detail_reconstructs_revealed_items_from_snapshot_blocks() {
+        let alice = Wallet::from_seed("block-detail-reveal-alice");
+        let bob = Wallet::from_seed("block-detail-reveal-bob");
+        let mut allocations = BTreeMap::new();
+        allocations.insert(alice.address().to_string(), 100);
+        allocations.insert(bob.address().to_string(), 100);
+        let ledger = Ledger::new(allocations.clone(), 1);
+        let transfer = ledger.build_transfer(&alice, bob.address(), 12, 3).unwrap();
+        let built = ledger
+            .build_blinded_transaction(transfer.clone(), 20)
+            .unwrap();
+        let mut commit_block = fake_block(7, Vec::new());
+        commit_block.blinded_transactions = vec![built.transaction.clone()];
+        let mut reveal_block = fake_block(8, Vec::new());
+        reveal_block.blinded_reveals = vec![built.reveal.clone()];
+        let snapshot = fake_snapshot(
+            allocations,
+            vec![commit_block.clone(), reveal_block.clone()],
+        );
+
+        let blocks = super::ui_blocks(
+            vec![commit_block, reveal_block],
+            &snapshot,
+            &[],
+            &BTreeMap::new(),
+        );
+
+        assert_eq!(blocks[0].transactions.len(), 1);
+        assert_eq!(blocks[0].transactions[0].kind, "blinded");
+        assert_eq!(
+            blocks[0].transactions[0].commitment.as_deref(),
+            Some(built.transaction.commitment.as_str())
+        );
+        assert_eq!(blocks[1].transactions.len(), 1);
+        assert_eq!(blocks[1].transactions[0].kind, "transfer");
+        assert!(blocks[1].transactions[0].revealed);
+        assert_eq!(blocks[1].transactions[0].amount, transfer.amount());
+        assert_eq!(blocks[1].transactions[0].to.as_deref(), Some(bob.address()));
+        assert_eq!(blocks[1].revealed_transactions.len(), 1);
+    }
+
+    #[test]
+    fn block_detail_markup_uses_blinded_and_revealed_labels() {
+        let app_js = include_str!("../../www/assets/iuna-ui.js");
+
+        assert!(super::INDEX_HTML.contains("txPillLabel(tx)"));
+        assert!(super::INDEX_HTML.contains(".pill.blinded"));
+        assert!(super::INDEX_HTML.contains(".pill.reveal, .pill.revealed"));
+        assert!(super::INDEX_HTML.contains("Commitment"));
+        assert!(!super::INDEX_HTML.contains("<h3>Revealed</h3>"));
+        assert!(app_js.contains("tx?.revealed ? \"revealed\""));
+        assert!(app_js.contains("transactions.some((tx) => tx?.revealed)"));
     }
 
     #[test]
@@ -4548,6 +4670,7 @@ mod tests {
         let rows = wallet_transaction_rows(
             alice.address(),
             vec![pending_burn.clone()],
+            Vec::new(),
             &chain,
             &outputs,
             WalletTransactionFilters::default(),
@@ -4561,6 +4684,38 @@ mod tests {
         assert_eq!(rows[0].block_height, Some(31));
         assert_eq!(rows[0].block_finalizer.as_deref(), Some("miner"));
         assert_eq!(rows[0].direction, "received");
+    }
+
+    #[test]
+    fn wallet_transactions_show_owned_blinded_payloads_as_pending_blind() {
+        let alice = Wallet::from_seed("wallet-blind-pending-alice");
+        let bob = Wallet::from_seed("wallet-blind-pending-bob");
+        let mut allocations = BTreeMap::new();
+        allocations.insert(alice.address().to_string(), 100);
+        allocations.insert(bob.address().to_string(), 100);
+        let ledger = Ledger::new(allocations.clone(), 1);
+        let pending_blind = ledger.build_transfer(&alice, bob.address(), 12, 3).unwrap();
+        let snapshot = fake_snapshot(allocations, Vec::new());
+        let outputs = super::known_output_index(&snapshot, &[]);
+
+        let rows = wallet_transaction_rows(
+            alice.address(),
+            Vec::new(),
+            vec![pending_blind.clone()],
+            &[],
+            &outputs,
+            WalletTransactionFilters::default(),
+        );
+
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].kind, "transfer");
+        assert_eq!(rows[0].status, "pending");
+        assert!(rows[0].blinded);
+        assert_eq!(rows[0].direction, "sent");
+        assert_eq!(rows[0].to.as_deref(), Some(bob.address()));
+        assert_eq!(rows[0].amount, 12);
+        assert_eq!(rows[0].fee, 3);
+        assert_eq!(rows[0].signature, pending_blind.signature());
     }
 
     #[test]
@@ -4633,6 +4788,7 @@ mod tests {
         let rows = wallet_transaction_rows(
             alice.address(),
             Vec::new(),
+            Vec::new(),
             &chain,
             &outputs,
             WalletTransactionFilters {
@@ -4663,6 +4819,7 @@ mod tests {
         let default_rows = wallet_transaction_rows(
             alice.address(),
             vec![burn.clone()],
+            Vec::new(),
             &[],
             &outputs,
             WalletTransactionFilters::default(),
@@ -4670,6 +4827,7 @@ mod tests {
         let burn_rows = wallet_transaction_rows(
             alice.address(),
             vec![burn.clone()],
+            Vec::new(),
             &[],
             &outputs,
             WalletTransactionFilters {
@@ -4829,7 +4987,7 @@ mod tests {
 
     #[test]
     fn metrics_screen_includes_block_range_filter() {
-        assert!(super::INDEX_HTML.contains("iuna-ui.js?v=80"));
+        assert!(super::INDEX_HTML.contains("iuna-ui.js?v=82"));
         assert!(super::INDEX_HTML.contains("aria-label=\"Metrics block range\""));
         assert!(super::INDEX_HTML.contains("setMetricsRange(100)"));
         assert!(super::INDEX_HTML.contains("setMetricsRange(1000)"));
@@ -4870,6 +5028,13 @@ mod tests {
         assert!(app_js.contains("setInterval(() => this.refresh({ silent: true }), 5000)"));
         assert!(app_js.contains("backgroundLoading"));
         assert!(app_js.contains("options.silent === true ? \"backgroundLoading\" : \"loading\""));
+    }
+
+    #[test]
+    fn wallet_pending_blinded_transactions_are_labeled() {
+        let app_js = include_str!("../../www/assets/iuna-ui.js");
+        assert!(app_js.contains("Pending blind"));
+        assert!(app_js.contains("tx.blinded"));
     }
 
     #[test]

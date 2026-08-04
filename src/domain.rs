@@ -22,7 +22,7 @@ pub const DEFAULT_MINE_FEE: Amount = MINE_FINALIZER_FEE;
 pub const DEFAULT_TRANSACTION_FEE: Amount = MICRO_IUNA;
 pub const DEFAULT_FEE_PER_BYTE: Amount = 1;
 pub const MAX_BLOCK_BYTES: usize = 100_000;
-pub const VDF_TARGET_BLOCK_MS: u64 = 10 * 60 * 1_000;
+pub const VDF_TARGET_BLOCK_MS: u64 = 5 * 60 * 1_000;
 pub const RECOVERY_BLOCK_DELAY_MS: u64 = VDF_TARGET_BLOCK_MS * 6;
 pub const MAX_VDF_ROUNDS: u64 = i64::MAX as u64;
 pub const MINE_DIFFICULTY_BITS: u32 = 12;
@@ -4611,6 +4611,11 @@ fn hex_encode(bytes: impl AsRef<[u8]>) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn target_block_time_is_five_minutes() {
+        assert_eq!(VDF_TARGET_BLOCK_MS, 5 * 60 * 1_000);
+    }
 
     fn test_utxo_outpoint(index: usize) -> OutPoint {
         OutPoint {

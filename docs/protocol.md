@@ -56,7 +56,7 @@ Plaintext transaction fees go to the block finalizer immediately. Blinded transa
 
 The VDF is there to make block production sequential and time-based. It cannot be parallelized in the same way as normal hashing work.
 
-The target block time is `10 minutes`. The protocol retargets VDF rounds from recent observed block times:
+The target block time is `5 minutes`. The protocol retargets VDF rounds from recent observed block times:
 
 - It uses a `20` block observation window.
 - It uses rank `0` ticket blocks for retargeting.
@@ -84,7 +84,7 @@ Rank slots depend on block timestamps, so timestamps are constrained by consensu
 - it must not be too far in the future relative to the validating node's network-adjusted clock;
 - for fallback ticket blocks, it must be at or after the finalizer rank slot.
 
-The future drift limit is `2 minutes`. A finalizer can lie within that small margin, but cannot skip an entire `10 minute` rank slot by claiming a far-future timestamp. P2P treats too-early future/slot blocks as temporal errors rather than peer-banning evidence.
+The future drift limit is `2 minutes`. A finalizer can lie within that small margin, but cannot skip an entire `5 minute` rank slot by claiming a far-future timestamp. P2P treats too-early future/slot blocks as temporal errors rather than peer-banning evidence.
 
 ## Recovery Blocks
 

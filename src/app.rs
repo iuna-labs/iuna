@@ -403,6 +403,10 @@ impl NodeCore {
         self.ledger.pending_blinded_reveals().to_vec()
     }
 
+    pub fn owned_blinded_payloads(&self) -> Vec<Transaction> {
+        self.owned_blinded_payloads.values().cloned().collect()
+    }
+
     pub fn mempool_gossip(&self) -> Vec<GossipEnvelope> {
         let mut gossip = Vec::new();
         gossip.extend(
