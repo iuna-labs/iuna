@@ -243,6 +243,10 @@ struct P2pMetricsCounters {
     peer_status_envelopes_received: AtomicU64,
     inventory_envelopes_received: AtomicU64,
     data_envelopes_received: AtomicU64,
+    blinded_transaction_envelopes_received: AtomicU64,
+    blinded_transactions_received: AtomicU64,
+    blinded_reveal_envelopes_received: AtomicU64,
+    blinded_reveals_received: AtomicU64,
     control_envelopes_received: AtomicU64,
     bytes_received: AtomicU64,
     parse_errors: AtomicU64,
@@ -272,6 +276,10 @@ pub struct P2pMetrics {
     pub peer_status_envelopes_received: u64,
     pub inventory_envelopes_received: u64,
     pub data_envelopes_received: u64,
+    pub blinded_transaction_envelopes_received: u64,
+    pub blinded_transactions_received: u64,
+    pub blinded_reveal_envelopes_received: u64,
+    pub blinded_reveals_received: u64,
     pub control_envelopes_received: u64,
     pub bytes_received: u64,
     pub parse_errors: u64,
@@ -318,6 +326,16 @@ impl P2pMetricsCounters {
                 .load(Ordering::Relaxed),
             inventory_envelopes_received: self.inventory_envelopes_received.load(Ordering::Relaxed),
             data_envelopes_received: self.data_envelopes_received.load(Ordering::Relaxed),
+            blinded_transaction_envelopes_received: self
+                .blinded_transaction_envelopes_received
+                .load(Ordering::Relaxed),
+            blinded_transactions_received: self
+                .blinded_transactions_received
+                .load(Ordering::Relaxed),
+            blinded_reveal_envelopes_received: self
+                .blinded_reveal_envelopes_received
+                .load(Ordering::Relaxed),
+            blinded_reveals_received: self.blinded_reveals_received.load(Ordering::Relaxed),
             control_envelopes_received: self.control_envelopes_received.load(Ordering::Relaxed),
             bytes_received: self.bytes_received.load(Ordering::Relaxed),
             parse_errors: self.parse_errors.load(Ordering::Relaxed),
@@ -1210,22 +1228,29 @@ async fn catchup_payload_for_peer(
     if node.ledger().is_setup_placeholder() {
         return Vec::new();
     }
+    let mempool = node.mempool_gossip();
     if peer_status.push_snapshot {
-        return vec![GossipEnvelope::ChainSnapshot(node.chain_snapshot())];
+        let mut payload = vec![GossipEnvelope::ChainSnapshot(node.chain_snapshot())];
+        payload.extend(mempool);
+        return payload;
     }
     if peer_status.height < local_status.height {
         let blocks = node.blocks_from(peer_status.height + 1, MAX_BLOCK_BATCH);
         if blocks.is_empty() {
-            Vec::new()
+            mempool
         } else {
-            vec![GossipEnvelope::Blocks { blocks }]
+            let mut payload = vec![GossipEnvelope::Blocks { blocks }];
+            payload.extend(mempool);
+            payload
         }
     } else if peer_status.height == local_status.height
         && peer_status.tip_hash != local_status.tip_hash
     {
-        vec![GossipEnvelope::ChainSnapshot(node.chain_snapshot())]
+        let mut payload = vec![GossipEnvelope::ChainSnapshot(node.chain_snapshot())];
+        payload.extend(mempool);
+        payload
     } else {
-        Vec::new()
+        mempool
     }
 }
 
@@ -1372,11 +1397,30 @@ fn record_received_envelope_kind(metrics: &P2pMetricsCounters, envelope: &Gossip
         GossipEnvelope::Inventory { .. } => {
             P2pMetricsCounters::inc(&metrics.inventory_envelopes_received);
         }
-        GossipEnvelope::BlindedTransaction(_)
-        | GossipEnvelope::BlindedTransactions { .. }
-        | GossipEnvelope::BlindedReveal(_)
-        | GossipEnvelope::BlindedReveals { .. }
-        | GossipEnvelope::Block(_)
+        GossipEnvelope::BlindedTransaction(_) => {
+            P2pMetricsCounters::inc(&metrics.data_envelopes_received);
+            P2pMetricsCounters::inc(&metrics.blinded_transaction_envelopes_received);
+            P2pMetricsCounters::inc(&metrics.blinded_transactions_received);
+        }
+        GossipEnvelope::BlindedTransactions { transactions } => {
+            P2pMetricsCounters::inc(&metrics.data_envelopes_received);
+            P2pMetricsCounters::inc(&metrics.blinded_transaction_envelopes_received);
+            P2pMetricsCounters::add(
+                &metrics.blinded_transactions_received,
+                transactions.len() as u64,
+            );
+        }
+        GossipEnvelope::BlindedReveal(_) => {
+            P2pMetricsCounters::inc(&metrics.data_envelopes_received);
+            P2pMetricsCounters::inc(&metrics.blinded_reveal_envelopes_received);
+            P2pMetricsCounters::inc(&metrics.blinded_reveals_received);
+        }
+        GossipEnvelope::BlindedReveals { reveals } => {
+            P2pMetricsCounters::inc(&metrics.data_envelopes_received);
+            P2pMetricsCounters::inc(&metrics.blinded_reveal_envelopes_received);
+            P2pMetricsCounters::add(&metrics.blinded_reveals_received, reveals.len() as u64);
+        }
+        GossipEnvelope::Block(_)
         | GossipEnvelope::Blocks { .. }
         | GossipEnvelope::ChainSnapshot(_) => {
             P2pMetricsCounters::inc(&metrics.data_envelopes_received);
@@ -2433,7 +2477,9 @@ mod tests {
             BlockInventory, GossipEnvelope, NETWORK_ID, NodeCore, PROTOCOL_VERSION, PeerBook,
             PeerDirection, ProtocolHello,
         },
-        domain::{Amount, GenesisBurn, Ledger, Transaction, Wallet},
+        domain::{
+            Amount, BlindedReveal, BlindedTransaction, GenesisBurn, Ledger, Transaction, Wallet,
+        },
     };
     use tokio::io::AsyncWriteExt;
 
@@ -2547,6 +2593,19 @@ mod tests {
     #[test]
     fn received_envelope_metrics_are_categorized() {
         let metrics = super::P2pMetricsCounters::default();
+        let blinded_tx = BlindedTransaction {
+            commitment: "commitment".to_string(),
+            fee: 3,
+            encrypted_size: 128,
+            expires_at_height: 20,
+            nonce: "nonce".to_string(),
+            ciphertext: "ciphertext".to_string(),
+            payload_hash: "payload-hash".to_string(),
+        };
+        let blinded_reveal = BlindedReveal {
+            commitment: "commitment".to_string(),
+            key: "key".to_string(),
+        };
 
         super::record_received_envelope_kind(
             &metrics,
@@ -2564,12 +2623,26 @@ mod tests {
             &metrics,
             &GossipEnvelope::Blocks { blocks: Vec::new() },
         );
+        super::record_received_envelope_kind(
+            &metrics,
+            &GossipEnvelope::BlindedTransactions {
+                transactions: vec![blinded_tx.clone(), blinded_tx],
+            },
+        );
+        super::record_received_envelope_kind(
+            &metrics,
+            &GossipEnvelope::BlindedReveal(blinded_reveal),
+        );
         super::record_received_envelope_kind(&metrics, &GossipEnvelope::ChainSnapshotRequest);
 
         let snapshot = metrics.snapshot();
         assert_eq!(snapshot.peer_status_envelopes_received, 1);
         assert_eq!(snapshot.inventory_envelopes_received, 1);
-        assert_eq!(snapshot.data_envelopes_received, 1);
+        assert_eq!(snapshot.data_envelopes_received, 3);
+        assert_eq!(snapshot.blinded_transaction_envelopes_received, 1);
+        assert_eq!(snapshot.blinded_transactions_received, 2);
+        assert_eq!(snapshot.blinded_reveal_envelopes_received, 1);
+        assert_eq!(snapshot.blinded_reveals_received, 1);
         assert_eq!(snapshot.control_envelopes_received, 1);
     }
 
@@ -2828,6 +2901,43 @@ mod tests {
                 );
             }
             other => panic!("expected missing block payload, got {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn session_catchup_payload_pushes_blinded_mempool_to_synced_peer() {
+        let alice = Wallet::from_seed("catchup-mempool-alice");
+        let bob = Wallet::from_seed("catchup-mempool-bob");
+        let allocations = allocations(&[alice.clone(), bob], 1_000);
+        let node = Arc::new(tokio::sync::Mutex::new(node(
+            "alice",
+            alice.clone(),
+            allocations,
+        )));
+        let expected_commitment = {
+            let mut node = node.lock().await;
+            let tx = node.ledger().build_burn(&alice, 1, 0).unwrap();
+            let built = node.ledger().build_blinded_transaction(tx, 20).unwrap();
+            let commitment = built.transaction.commitment.clone();
+            node.receive_blinded_transaction(built.transaction).unwrap();
+            node.drain_outbox();
+            commitment
+        };
+        let peer_status = {
+            let node = node.lock().await;
+            let status = node.ledger().status();
+            super::PeerStatus::new(status.height, status.tip_hash)
+        };
+
+        let payload = super::catchup_payload_for_peer(&node, &peer_status).await;
+
+        assert_eq!(payload.len(), 1);
+        match &payload[0] {
+            GossipEnvelope::BlindedTransactions { transactions } => {
+                assert_eq!(transactions.len(), 1);
+                assert_eq!(transactions[0].commitment, expected_commitment);
+            }
+            other => panic!("expected blinded mempool payload, got {other:?}"),
         }
     }
 

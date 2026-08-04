@@ -121,9 +121,19 @@ struct NetworkHealthResponse {
     stale_peers: usize,
     banned_peers: usize,
     pending_transactions: usize,
+    pending_plain_transactions: usize,
+    pending_blinded_transactions: usize,
+    pending_blinded_reveals: usize,
     network_time_offset_ms: Option<i64>,
     bad_clock_peers: usize,
     last_error: Option<String>,
+}
+
+#[derive(Clone, Copy, Debug, Default)]
+struct MempoolCounts {
+    plain_transactions: usize,
+    blinded_transactions: usize,
+    blinded_reveals: usize,
 }
 
 #[derive(Debug, Deserialize)]
@@ -894,9 +904,19 @@ async fn api_metrics(State(state): State<HttpState>) -> Json<MetricsResponse> {
 }
 
 async fn api_network_health(State(state): State<HttpState>) -> Json<NetworkHealthResponse> {
-    let status = state.node.lock().await.status();
+    let (status, mempool) = {
+        let node = state.node.lock().await;
+        (
+            node.status(),
+            MempoolCounts {
+                plain_transactions: node.pending_transactions().len(),
+                blinded_transactions: node.pending_blinded_transactions().len(),
+                blinded_reveals: node.pending_blinded_reveals().len(),
+            },
+        )
+    };
     let peers = state.peers.lock().await.list();
-    Json(network_health(&status, &peers))
+    Json(network_health(&status, &peers, mempool))
 }
 
 async fn api_config_form(
@@ -1233,8 +1253,12 @@ fn validate_peer_address(peer: String) -> Result<String> {
     Ok(peer)
 }
 
-fn network_health(status: &NodeStatus, peers: &[PeerInfo]) -> NetworkHealthResponse {
-    network_health_at(status, peers, now_ms())
+fn network_health(
+    status: &NodeStatus,
+    peers: &[PeerInfo],
+    mempool: MempoolCounts,
+) -> NetworkHealthResponse {
+    network_health_at(status, peers, mempool, now_ms())
 }
 
 fn metrics_response(enabled: bool, rows: Vec<BlockMetricRow>) -> MetricsResponse {
@@ -1363,6 +1387,7 @@ fn micro_iuna_as_iuna(amount: Amount) -> f64 {
 fn network_health_at(
     status: &NodeStatus,
     peers: &[PeerInfo],
+    mempool: MempoolCounts,
     now_ms: u64,
 ) -> NetworkHealthResponse {
     let local_height = status.chain.height;
@@ -1455,6 +1480,9 @@ fn network_health_at(
         stale_peers,
         banned_peers,
         pending_transactions: status.chain.pending_transactions,
+        pending_plain_transactions: mempool.plain_transactions,
+        pending_blinded_transactions: mempool.blinded_transactions,
+        pending_blinded_reveals: mempool.blinded_reveals,
         network_time_offset_ms,
         bad_clock_peers,
         last_error,
@@ -3200,9 +3228,9 @@ const INDEX_HTML: &str = r#"<!doctype html>
             <div class="peer-summary-item"><div class="peer-summary-label">Stale</div><div class="peer-summary-value" x-text="networkHealth.stale_peers ?? '-'"></div></div>
             <div class="peer-summary-item"><div class="peer-summary-label">Banned</div><div class="peer-summary-value" x-text="networkHealth.banned_peers ?? '-'"></div></div>
             <div class="peer-summary-item"><div class="peer-summary-label">Mempool</div><div class="peer-summary-value" x-text="networkHealth.pending_transactions ?? '-'"></div></div>
-            <div class="peer-summary-item"><div class="peer-summary-label">Peer Mempools</div><div class="peer-summary-value" x-text="networkHealth.mempool_known_peers ?? '-'"></div></div>
-            <div class="peer-summary-item"><div class="peer-summary-label">Divergent</div><div class="peer-summary-value" x-text="networkHealth.mempool_divergent_peers ?? '-'"></div></div>
-            <div class="peer-summary-item"><div class="peer-summary-label">Missing Tx</div><div class="peer-summary-value" x-text="networkHealth.mempool_missing_transactions ?? '-'"></div></div>
+            <div class="peer-summary-item"><div class="peer-summary-label">Plain Tx</div><div class="peer-summary-value" x-text="networkHealth.pending_plain_transactions ?? '-'"></div></div>
+            <div class="peer-summary-item"><div class="peer-summary-label">Commits</div><div class="peer-summary-value" x-text="networkHealth.pending_blinded_transactions ?? '-'"></div></div>
+            <div class="peer-summary-item"><div class="peer-summary-label">Reveals</div><div class="peer-summary-value" x-text="networkHealth.pending_blinded_reveals ?? '-'"></div></div>
             <div class="peer-summary-item"><div class="peer-summary-label">Time Offset</div><div class="peer-summary-value" x-text="networkTimeOffsetLabel()"></div></div>
             <div class="peer-summary-item"><div class="peer-summary-label">Clock Warnings</div><div class="peer-summary-value" x-text="networkHealth.bad_clock_peers ?? '-'"></div></div>
           </div>
@@ -3266,6 +3294,10 @@ const INDEX_HTML: &str = r#"<!doctype html>
           <div class="metric"><div class="label">Hello Rx</div><div class="value" x-text="p2pMetrics.hello_envelopes_received ?? 0"></div></div>
           <div class="metric"><div class="label">Inventory Rx</div><div class="value" x-text="p2pMetrics.inventory_envelopes_received ?? 0"></div></div>
           <div class="metric"><div class="label">Data Rx</div><div class="value" x-text="p2pMetrics.data_envelopes_received ?? 0"></div></div>
+          <div class="metric"><div class="label">Commit Rx</div><div class="value" x-text="p2pMetrics.blinded_transactions_received ?? 0"></div></div>
+          <div class="metric"><div class="label">Commit Batches Rx</div><div class="value" x-text="p2pMetrics.blinded_transaction_envelopes_received ?? 0"></div></div>
+          <div class="metric"><div class="label">Reveal Rx</div><div class="value" x-text="p2pMetrics.blinded_reveals_received ?? 0"></div></div>
+          <div class="metric"><div class="label">Reveal Batches Rx</div><div class="value" x-text="p2pMetrics.blinded_reveal_envelopes_received ?? 0"></div></div>
           <div class="metric"><div class="label">Control Rx</div><div class="value" x-text="p2pMetrics.control_envelopes_received ?? 0"></div></div>
         </div>
         <div class="metric-context">
@@ -4343,12 +4375,20 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let state = auth_test_state(dir.path().join("config.json"), UiConfig::default()).await;
         let status = state.node.lock().await.status();
+        let mempool = super::MempoolCounts {
+            plain_transactions: 1,
+            blinded_transactions: 2,
+            blinded_reveals: 3,
+        };
 
-        let isolated = super::network_health(&status, &[]);
+        let isolated = super::network_health(&status, &[], mempool);
         assert!(!isolated.ok);
         assert_eq!(isolated.state, "isolated");
         assert_eq!(isolated.local_height, 0);
         assert_eq!(isolated.best_known_height, 0);
+        assert_eq!(isolated.pending_plain_transactions, 1);
+        assert_eq!(isolated.pending_blinded_transactions, 2);
+        assert_eq!(isolated.pending_blinded_reveals, 3);
 
         let mut clock_peers = PeerBook::from_addresses(vec![
             "127.0.0.1:9450".to_string(),
@@ -4368,7 +4408,7 @@ mod tests {
             11 * 60 * 1_000,
             10_000,
         );
-        let clock_health = super::network_health_at(&status, &clock_peers.list(), 10_000);
+        let clock_health = super::network_health_at(&status, &clock_peers.list(), mempool, 10_000);
         assert_eq!(clock_health.network_time_offset_ms, Some(500));
         assert_eq!(clock_health.bad_clock_peers, 1);
 
@@ -4392,6 +4432,7 @@ mod tests {
                 banned_until_ms: None,
                 ban_reason: None,
             }],
+            mempool,
         );
         assert!(!syncing.ok);
         assert_eq!(syncing.state, "syncing");
@@ -4418,6 +4459,7 @@ mod tests {
                 banned_until_ms: None,
                 ban_reason: Some("connection refused".to_string()),
             }],
+            mempool,
         );
         assert!(!peer_errors.ok);
         assert_eq!(peer_errors.state, "peer errors");
@@ -4446,6 +4488,7 @@ mod tests {
                 banned_until_ms: None,
                 ban_reason: None,
             }],
+            mempool,
             PEER_STALE_AFTER_MS + 2,
         );
         assert!(!stale.ok);
@@ -4472,6 +4515,7 @@ mod tests {
                 banned_until_ms: Some(1_000),
                 ban_reason: Some("invalid block".to_string()),
             }],
+            mempool,
             20,
         );
         assert!(!banned.ok);
