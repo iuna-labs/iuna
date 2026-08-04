@@ -367,6 +367,10 @@ impl NodeCore {
         self.ledger.clone()
     }
 
+    pub fn wallet_view_ledger(&self) -> Result<Ledger> {
+        self.wallet_build_ledger()
+    }
+
     pub fn chain(&self) -> &[Block] {
         self.ledger.chain()
     }

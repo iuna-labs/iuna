@@ -783,6 +783,7 @@ async fn api_wallet_transactions(
     let snapshot = node.chain_snapshot();
     let pending = node.pending_transactions();
     let owned_blinded = node.owned_blinded_payloads();
+    let revealed_by_height = revealed_transactions_by_height(&snapshot);
     let outputs = known_output_index(&snapshot, &pending);
     let page_query = query.page();
     let filters = WalletTransactionFilters::from_query(query);
@@ -792,6 +793,7 @@ async fn api_wallet_transactions(
             pending,
             owned_blinded,
             &snapshot.blocks,
+            &revealed_by_height,
             &outputs,
             filters,
         ),
@@ -804,18 +806,21 @@ async fn api_wallet_utxos(
     Query(query): Query<PageQuery>,
 ) -> Json<Page<WalletUtxoRow>> {
     let node = state.node.lock().await;
+    let ledger = node
+        .wallet_view_ledger()
+        .unwrap_or_else(|_| node.clone_ledger());
     Json(page_items(
-        wallet_utxo_rows(node.ledger(), node.wallet_address()),
+        wallet_utxo_rows(&ledger, node.wallet_address()),
         query,
     ))
 }
 
 async fn api_wallet_selectable_utxos(State(state): State<HttpState>) -> Json<Vec<WalletUtxoRow>> {
     let node = state.node.lock().await;
-    Json(selectable_wallet_utxo_rows(
-        node.ledger(),
-        node.wallet_address(),
-    ))
+    let ledger = node
+        .wallet_view_ledger()
+        .unwrap_or_else(|_| node.clone_ledger());
+    Json(selectable_wallet_utxo_rows(&ledger, node.wallet_address()))
 }
 
 fn page_items<T>(items: Vec<T>, query: PageQuery) -> Page<T> {
@@ -1544,6 +1549,7 @@ fn wallet_transaction_rows(
     pending: Vec<Transaction>,
     owned_blinded: Vec<Transaction>,
     chain: &[Block],
+    revealed_by_height: &BTreeMap<u64, Vec<Transaction>>,
     outputs: &BTreeMap<OutPoint, TxOutput>,
     filters: WalletTransactionFilters,
 ) -> Vec<WalletTransactionRow> {
@@ -1584,6 +1590,24 @@ fn wallet_transaction_rows(
                 false,
             ) {
                 rows.push((block.height as u128 * 10_000 + index as u128, row));
+            }
+        }
+        if let Some(revealed_transactions) = revealed_by_height.get(&block.height) {
+            for (index, tx) in revealed_transactions.iter().rev().enumerate() {
+                if !filters.allows(tx) {
+                    continue;
+                }
+                if let Some(row) = wallet_transaction_row(
+                    wallet,
+                    tx,
+                    outputs,
+                    "confirmed",
+                    Some(block.height),
+                    Some(block.miner.clone()),
+                    false,
+                ) {
+                    rows.push((block.height as u128 * 10_000 + 5_000 + index as u128, row));
+                }
             }
         }
     }
@@ -1686,14 +1710,8 @@ fn wallet_transaction_row(
     }
 }
 
-fn ui_blocks(
-    blocks: Vec<Block>,
-    snapshot: &ChainSnapshot,
-    pending: &[Transaction],
-    burn_leader_ranks: &BTreeMap<String, Vec<BurnLeaderRank>>,
-) -> Vec<UiBlock> {
-    let outputs = known_output_index(snapshot, pending);
-    let revealed = revealed_blinded_transactions(snapshot)
+fn revealed_transactions_by_height(snapshot: &ChainSnapshot) -> BTreeMap<u64, Vec<Transaction>> {
+    revealed_blinded_transactions(snapshot)
         .unwrap_or_default()
         .into_iter()
         .fold(
@@ -1705,7 +1723,17 @@ fn ui_blocks(
                     .push(revealed.transaction);
                 by_height
             },
-        );
+        )
+}
+
+fn ui_blocks(
+    blocks: Vec<Block>,
+    snapshot: &ChainSnapshot,
+    pending: &[Transaction],
+    burn_leader_ranks: &BTreeMap<String, Vec<BurnLeaderRank>>,
+) -> Vec<UiBlock> {
+    let outputs = known_output_index(snapshot, pending);
+    let revealed = revealed_transactions_by_height(snapshot);
     blocks
         .into_iter()
         .map(|block| {
@@ -4672,6 +4700,7 @@ mod tests {
             vec![pending_burn.clone()],
             Vec::new(),
             &chain,
+            &BTreeMap::new(),
             &outputs,
             WalletTransactionFilters::default(),
         );
@@ -4703,6 +4732,7 @@ mod tests {
             Vec::new(),
             vec![pending_blind.clone()],
             &[],
+            &BTreeMap::new(),
             &outputs,
             WalletTransactionFilters::default(),
         );
@@ -4790,6 +4820,7 @@ mod tests {
             Vec::new(),
             Vec::new(),
             &chain,
+            &BTreeMap::new(),
             &outputs,
             WalletTransactionFilters {
                 transfer: false,
@@ -4807,6 +4838,47 @@ mod tests {
     }
 
     #[test]
+    fn wallet_transactions_include_revealed_blinded_mine_actions() {
+        let alice = Wallet::from_seed("wallet-revealed-mine-alice");
+        let ledger = Ledger::new(BTreeMap::new(), 1);
+        let mine = ledger.build_mine(alice.address()).unwrap();
+        let built = ledger.build_blinded_transaction(mine.clone(), 20).unwrap();
+        let mut commit_block = fake_block(7, Vec::new());
+        commit_block.blinded_transactions = vec![built.transaction];
+        let mut reveal_block = fake_block(8, Vec::new());
+        reveal_block.blinded_reveals = vec![built.reveal];
+        let chain = vec![commit_block.clone(), reveal_block.clone()];
+        let snapshot = fake_snapshot(BTreeMap::new(), chain.clone());
+        let revealed_by_height = super::revealed_transactions_by_height(&snapshot);
+        let outputs = super::known_output_index(&snapshot, &[]);
+
+        let rows = wallet_transaction_rows(
+            alice.address(),
+            Vec::new(),
+            Vec::new(),
+            &chain,
+            &revealed_by_height,
+            &outputs,
+            WalletTransactionFilters {
+                transfer: false,
+                mine: true,
+                burn: false,
+            },
+        );
+
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].kind, "mine");
+        assert_eq!(rows[0].status, "confirmed");
+        assert_eq!(rows[0].block_height, Some(8));
+        assert_eq!(rows[0].block_finalizer.as_deref(), Some("miner"));
+        assert_eq!(rows[0].direction, "received");
+        assert_eq!(rows[0].amount, mine.amount());
+        assert_eq!(rows[0].fee, MINE_FINALIZER_FEE);
+        assert!(!rows[0].blinded);
+        assert_eq!(rows[0].signature, mine.signature());
+    }
+
+    #[test]
     fn burn_wallet_transactions_require_burn_filter() {
         let alice = Wallet::from_seed("wallet-burn-filter-alice");
         let mut allocations = BTreeMap::new();
@@ -4821,6 +4893,7 @@ mod tests {
             vec![burn.clone()],
             Vec::new(),
             &[],
+            &BTreeMap::new(),
             &outputs,
             WalletTransactionFilters::default(),
         );
@@ -4829,6 +4902,7 @@ mod tests {
             vec![burn.clone()],
             Vec::new(),
             &[],
+            &BTreeMap::new(),
             &outputs,
             WalletTransactionFilters {
                 transfer: false,
@@ -4886,6 +4960,31 @@ mod tests {
 
         assert!(!rows.iter().any(|row| row.outpoint == spent_outpoint));
         assert!(rows.iter().all(|row| row.spendable));
+    }
+
+    #[test]
+    fn wallet_utxo_rows_treat_owned_blinded_spends_as_pending() {
+        let alice = Wallet::from_seed("wallet-utxo-blind-pending-alice");
+        let bob = Wallet::from_seed("wallet-utxo-blind-pending-bob");
+        let mut allocations = BTreeMap::new();
+        allocations.insert(alice.address().to_string(), 10);
+        let ledger = Ledger::new(allocations, 1);
+        let mut node = NodeCore::from_ledger(alice.clone(), ledger, 0);
+        let pending = node.transfer_with_fee(bob.address(), 3, 0).unwrap();
+        let Transaction::Transfer { inputs, .. } = &pending else {
+            panic!("expected transfer");
+        };
+        let spent_outpoint = inputs[0].outpoint.clone();
+        let wallet_view = node.wallet_view_ledger().unwrap();
+
+        let rows = wallet_utxo_rows(&wallet_view, alice.address());
+        let selectable = super::selectable_wallet_utxo_rows(&wallet_view, alice.address());
+
+        assert!(
+            rows.iter()
+                .any(|row| row.outpoint == spent_outpoint && !row.spendable)
+        );
+        assert!(!selectable.iter().any(|row| row.outpoint == spent_outpoint));
     }
 
     fn fake_block(height: u64, transactions: Vec<Transaction>) -> Block {
