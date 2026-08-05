@@ -134,7 +134,7 @@ The visible inputs are signed for the blinded envelope itself and are not repeat
 
 Reveal is a later step. A `BlindedReveal` carries only the commitment and decryption key. Reveals are not included as loose block items. They are carried in signed reveal bundles.
 
-For each next block height, nodes compute a reveal committee from the burn leader ranking. The last three ranked eligible tickets form the three reveal-bundle slots. A committee member can sign one bundle for its slot, height, and parent hash. A bundle is at most `10,000` bytes and lists valid pending reveals ordered by visible fee rate. Empty bundles are not gossiped.
+For each next block height, nodes compute a reveal committee from the burn leader ranking. Slot `0` is assigned to the rank `0` block finalizer, so the selected finalizer can always sign a reveal list for its own block. The remaining slots are assigned to the two lowest-ranked eligible tickets. A committee member can sign one bundle for its slot, height, and parent hash. A bundle is at most `10,000` bytes and lists valid pending reveals ordered by visible fee rate. Empty bundles are not gossiped.
 
 A block has an envelope section and one compact reveal-bundle section. The envelope section contains the finalizer's plaintext burn, public mine actions, and blinded transaction envelopes.
 
@@ -156,7 +156,7 @@ If a slot has no included bundle, it contributes a fixed default hash for that s
 
 When a valid bundled reveal executes, nodes decrypt the earlier payload, check the commitment and payload hash, and decode the transfer or burn. The decrypted transaction inputs must match the visible inputs locked by the envelope, and the transaction executes against that locked value. If the reveal bitmask says multiple committee bundles contained the same reveal, the reveal is still executed only once. If the decrypted transaction is a burn, it creates burn tickets at the reveal height, not the earlier envelope-commit height.
 
-Fees are paid without inflating the reveal block reward. The decrypted transaction must pay the same fee declared by the blinded envelope. `35%` goes to the envelope committer, `35%` goes to the reveal-block finalizer, and `10%` goes to each included signed reveal-list maker. Missing reveal-list shares and rounding dust are burned instead of redistributed.
+Fees are paid without inflating the reveal block reward. The decrypted transaction must pay the same fee declared by the blinded envelope. `35%` goes to the envelope committer. Up to `35%` goes to the reveal-block finalizer, scaled by the included signed reveal lists divided by the available committee slots for that height. With three eligible slots, one included list pays one third of that share; with two eligible slots, one included list pays half; with one eligible slot, one included list pays the full share. `10%` goes to each included signed reveal-list maker. Missing reveal-list shares, the missing reveal-finalizer share, and rounding dust are burned instead of redistributed.
 
 Expiry is exclusive: a blinded envelope with expiry height `H` can be included only in blocks below height `H`, and revealed only while the current chain height is below `H`. The expiry height must be within `20` blocks of the node's current chain height when the envelope is accepted or selected. If an envelope expires unrevealed, its declared fee is burned and any remaining locked value returns as deterministic change to the owner of the first visible input. Expired local envelopes and reveals are dropped from local selection.
 

@@ -33,6 +33,26 @@ pub const BLINDED_FEE_BPS_DENOMINATOR: u64 = 10_000;
 pub const BLINDED_COMMITTER_FEE_BPS: u64 = 3_500;
 pub const BLINDED_REVEAL_FINALIZER_FEE_BPS: u64 = 3_500;
 pub const BLINDED_REVEAL_BUNDLE_SIGNER_FEE_BPS: u64 = 1_000;
+
+pub fn reveal_committee_slot_count(eligible_rank_count: usize) -> usize {
+    eligible_rank_count.min(REVEAL_COMMITTEE_SIZE)
+}
+
+pub fn blinded_reveal_finalizer_fee(
+    fee: Amount,
+    included_bundle_count: usize,
+    available_bundle_slots: usize,
+) -> Amount {
+    if included_bundle_count == 0 {
+        return 0;
+    }
+    let available_bundle_slots = available_bundle_slots.clamp(1, REVEAL_COMMITTEE_SIZE);
+    let included_bundle_count = included_bundle_count.min(available_bundle_slots);
+    let full_share = blinded_fee_share(fee, BLINDED_REVEAL_FINALIZER_FEE_BPS);
+    ((full_share as u128 * included_bundle_count as u128) / available_bundle_slots as u128)
+        as Amount
+}
+
 const MINE_RETARGET_WINDOW_BLOCKS: u64 = 10;
 const MINE_TARGET_ACTIONS_PER_BLOCK: u64 = 1;
 const MINE_MAX_RETARGET_STEP_BITS: u32 = 2;
@@ -2045,13 +2065,23 @@ impl Ledger {
 
     pub fn reveal_committee_for_height(&self, height: u64) -> Vec<RevealCommitteeMember> {
         let ranked = ranked_tickets_for_height(self.tip(), height, &self.tickets);
-        let committee_start = ranked.len().saturating_sub(REVEAL_COMMITTEE_SIZE);
-        ranked
+        let mut selected = Vec::new();
+        if !ranked.is_empty() {
+            selected.push(0);
+        }
+        for index in (0..ranked.len()).rev() {
+            if selected.len() >= reveal_committee_slot_count(ranked.len()) {
+                break;
+            }
+            if !selected.contains(&index) {
+                selected.push(index);
+            }
+        }
+        selected
             .into_iter()
             .enumerate()
-            .skip(committee_start)
-            .enumerate()
-            .filter_map(|(slot, (rank, ticket))| {
+            .filter_map(|(slot, rank)| {
+                let ticket = ranked.get(rank)?.clone();
                 Some(RevealCommitteeMember {
                     slot: u8::try_from(slot).ok()?,
                     rank: u32::try_from(rank).ok()?,
@@ -3042,6 +3072,7 @@ impl Ledger {
             bail!("block VDF output is invalid");
         }
 
+        let reveal_bundle_slot_count = self.reveal_committee_for_height(block.height).len();
         let mut utxos = self.utxos.clone();
         let mut signatures = BTreeSet::new();
         let mut revealed_transactions = Vec::new();
@@ -3070,6 +3101,7 @@ impl Ledger {
                 &block.miner,
                 &tx,
                 &block.reveal_bundle_section.signatures,
+                reveal_bundle_slot_count,
             )?;
             revealed_transactions.push(tx);
         }
@@ -4924,17 +4956,15 @@ fn credit_blinded_fee_outputs(
     reveal_executor: &str,
     transaction: &Transaction,
     reveal_bundle_signatures: &[RevealBundleSignature],
+    available_bundle_slots: usize,
 ) -> Result<()> {
     let fee = transaction.fee();
     if fee == 0 {
         return Ok(());
     }
     let committer_fee = blinded_fee_share(fee, BLINDED_COMMITTER_FEE_BPS);
-    let reveal_finalizer_fee = if reveal_bundle_signatures.is_empty() {
-        0
-    } else {
-        blinded_fee_share(fee, BLINDED_REVEAL_FINALIZER_FEE_BPS)
-    };
+    let reveal_finalizer_fee =
+        blinded_reveal_finalizer_fee(fee, reveal_bundle_signatures.len(), available_bundle_slots);
     let reveal_bundle_signer_fee = blinded_fee_share(fee, BLINDED_REVEAL_BUNDLE_SIGNER_FEE_BPS);
     let mut outputs = Vec::new();
     if committer_fee > 0 {
@@ -6026,8 +6056,15 @@ mod tests {
         };
         let mut utxos = BTreeMap::new();
 
-        credit_blinded_fee_outputs(&mut utxos, &active, executor.address(), &transaction, &[])
-            .unwrap();
+        credit_blinded_fee_outputs(
+            &mut utxos,
+            &active,
+            executor.address(),
+            &transaction,
+            &[],
+            3,
+        )
+        .unwrap();
 
         assert!(!utxos.contains_key(&blinded_committer_fee_outpoint(&commitment)));
         assert!(!utxos.contains_key(&blinded_executor_fee_outpoint(&commitment)));
@@ -6061,8 +6098,15 @@ mod tests {
         };
         let mut utxos = BTreeMap::new();
 
-        credit_blinded_fee_outputs(&mut utxos, &active, executor.address(), &transaction, &[])
-            .unwrap();
+        credit_blinded_fee_outputs(
+            &mut utxos,
+            &active,
+            executor.address(),
+            &transaction,
+            &[],
+            3,
+        )
+        .unwrap();
 
         assert_eq!(
             utxos.get(&blinded_committer_fee_outpoint(&commitment)),
@@ -6122,6 +6166,7 @@ mod tests {
             executor.address(),
             &transaction,
             &signatures,
+            3,
         )
         .unwrap();
 
@@ -6136,7 +6181,7 @@ mod tests {
             utxos.get(&blinded_executor_fee_outpoint(&commitment)),
             Some(&TxOutput {
                 address: executor.address().to_string(),
-                amount: 35,
+                amount: 23,
             })
         );
         assert_eq!(
@@ -6153,6 +6198,20 @@ mod tests {
                 amount: 10,
             })
         );
+    }
+
+    #[test]
+    fn blinded_reveal_finalizer_fee_scales_by_available_reveal_bundle_slots() {
+        let fee = 300_000;
+        let full_share = blinded_fee_share(fee, BLINDED_REVEAL_FINALIZER_FEE_BPS);
+
+        assert_eq!(blinded_reveal_finalizer_fee(fee, 0, 3), 0);
+        assert_eq!(blinded_reveal_finalizer_fee(fee, 1, 3), full_share / 3);
+        assert_eq!(blinded_reveal_finalizer_fee(fee, 1, 2), full_share / 2);
+        assert_eq!(blinded_reveal_finalizer_fee(fee, 1, 1), full_share);
+        assert_eq!(blinded_reveal_finalizer_fee(fee, 2, 3), full_share * 2 / 3);
+        assert_eq!(blinded_reveal_finalizer_fee(fee, 3, 3), full_share);
+        assert_eq!(blinded_reveal_finalizer_fee(fee, 4, 3), full_share);
     }
 
     #[test]
@@ -6936,7 +6995,14 @@ mod tests {
                 total + transaction.amount() + transaction.fee()
             });
         let committer_fee = blinded_fee_share(fee, BLINDED_COMMITTER_FEE_BPS);
-        let reveal_finalizer_fee = blinded_fee_share(fee, BLINDED_REVEAL_FINALIZER_FEE_BPS);
+        let reveal_finalizer_fee = blinded_reveal_finalizer_fee(
+            fee,
+            reveal_block.included_reveal_bundle_count(),
+            ledger
+                .burn_leader_ranks_for_block(reveal_block.height)
+                .unwrap()
+                .len(),
+        );
         let reveal_bundle_signer_fee = blinded_fee_share(fee, BLINDED_REVEAL_BUNDLE_SIGNER_FEE_BPS);
         let commitment = &commit_block.blinded_transactions[0].commitment;
         assert_eq!(
@@ -7170,6 +7236,48 @@ mod tests {
             .unwrap();
 
         assert_ne!(without_bundles.vdf_seed(), with_bundles.vdf_seed());
+    }
+
+    #[test]
+    fn reveal_committee_includes_next_block_finalizer_as_slot_zero() {
+        let alice = Wallet::from_seed("bundle-finalizer-slot-alice");
+        let bob = Wallet::from_seed("bundle-finalizer-slot-bob");
+        let carol = Wallet::from_seed("bundle-finalizer-slot-carol");
+        let dave = Wallet::from_seed("bundle-finalizer-slot-dave");
+        let erin = Wallet::from_seed("bundle-finalizer-slot-erin");
+        let finalizers = [alice.clone(), bob.clone(), carol.clone(), dave.clone()];
+        let mut ledger = ledger_with_finalizers(&finalizers, &[(&erin, 10 * MICRO_IUNA)]);
+        let blinded = ledger
+            .build_blinded_burn(&erin, 3, 7, ledger.height() + 4)
+            .unwrap();
+        let commitment = blinded.transaction.commitment.clone();
+        ledger
+            .submit_blinded_transaction(blinded.transaction)
+            .unwrap();
+        queue_next_leader_burn(&mut ledger, &finalizers);
+        mine_preverified_as_next_leader(&mut ledger, &finalizers, 1);
+        ledger.submit_blinded_reveal(blinded.reveal).unwrap();
+        queue_next_leader_burn(&mut ledger, &finalizers);
+
+        let leader = ledger.expected_leader_for_next_block().unwrap();
+        let committee = ledger.reveal_committee_for_next_block();
+        let leader_wallet = wallet_for_address(&finalizers, &leader);
+        let bundle = ledger.build_reveal_bundle(leader_wallet).unwrap().unwrap();
+
+        assert_eq!(committee.first().map(|member| member.slot), Some(0));
+        assert_eq!(committee.first().map(|member| member.rank), Some(0));
+        assert_eq!(
+            committee.first().map(|member| member.owner.as_str()),
+            Some(leader.as_str())
+        );
+        assert_eq!(bundle.slot, 0);
+        assert_eq!(bundle.member, leader);
+        assert!(
+            bundle
+                .reveals
+                .iter()
+                .any(|reveal| reveal.commitment == commitment)
+        );
     }
 
     #[test]

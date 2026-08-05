@@ -34,10 +34,10 @@ use crate::{
     },
     domain::{
         Amount, BLINDED_COMMITTER_FEE_BPS, BLINDED_FEE_BPS_DENOMINATOR,
-        BLINDED_REVEAL_BUNDLE_SIGNER_FEE_BPS, BLINDED_REVEAL_FINALIZER_FEE_BPS, BlindedReveal,
-        BlindedTransaction, Block, BurnLeaderRank, ChainSnapshot, Ledger, MINE_FINALIZER_FEE,
-        MINE_REWARD, OutPoint, RevealedBlindedTransaction, Transaction, TxInput, TxOutput, Wallet,
-        hex_hash, revealed_blinded_transactions,
+        BLINDED_REVEAL_BUNDLE_SIGNER_FEE_BPS, BlindedReveal, BlindedTransaction, Block,
+        BurnLeaderRank, ChainSnapshot, Ledger, MINE_FINALIZER_FEE, MINE_REWARD, OutPoint,
+        REVEAL_COMMITTEE_SIZE, RevealedBlindedTransaction, Transaction, TxInput, TxOutput, Wallet,
+        blinded_reveal_finalizer_fee, hex_hash, revealed_blinded_transactions,
     },
 };
 
@@ -2089,6 +2089,22 @@ fn known_output_index(
         .iter()
         .map(|block| (block.height, block))
         .collect::<BTreeMap<_, _>>();
+    let reveal_bundle_slots_by_height = Ledger::from_persisted_snapshot(snapshot.clone())
+        .ok()
+        .map(|ledger| {
+            snapshot
+                .blocks
+                .iter()
+                .map(|block| {
+                    let slots = ledger
+                        .burn_leader_ranks_for_block(block.height)
+                        .map(|ranks| ranks.len())
+                        .unwrap_or(REVEAL_COMMITTEE_SIZE);
+                    (block.height, slots)
+                })
+                .collect::<BTreeMap<_, _>>()
+        })
+        .unwrap_or_default();
     let blinded_by_commitment = snapshot
         .blocks
         .iter()
@@ -2129,11 +2145,14 @@ fn known_output_index(
                 );
             }
             if let Some(block) = blocks_by_height.get(&revealed.height) {
-                let reveal_finalizer_fee = if block.included_reveal_bundle_count() == 0 {
-                    0
-                } else {
-                    blinded_fee_share(fee, BLINDED_REVEAL_FINALIZER_FEE_BPS)
-                };
+                let reveal_finalizer_fee = blinded_reveal_finalizer_fee(
+                    fee,
+                    block.included_reveal_bundle_count(),
+                    reveal_bundle_slots_by_height
+                        .get(&revealed.height)
+                        .copied()
+                        .unwrap_or(REVEAL_COMMITTEE_SIZE),
+                );
                 if reveal_finalizer_fee > 0 {
                     outputs.insert(
                         blinded_executor_fee_outpoint(&revealed.commitment),

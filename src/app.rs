@@ -15,9 +15,9 @@ use tokio::sync::Mutex;
 use crate::domain::{
     Amount, BlindedReveal, BlindedTransaction, Block, BuiltBlindedTransaction, BurnLeaderRank,
     ChainSnapshot, ChainStatus, DEFAULT_FEE_PER_BYTE, DEFAULT_TRANSACTION_FEE, Ledger,
-    MAX_BLINDED_TRANSACTION_EXPIRY_HEIGHTS, MINE_FINALIZER_FEE, OutPoint, OwnedBlindedTransaction,
-    PreparedBlock, RevealBundle, StratumMineShare, StratumMineTemplate, Transaction,
-    TransactionSubmitOutcome, VDF_TARGET_BLOCK_MS, Wallet, run_vdf,
+    MAX_BLINDED_TRANSACTION_EXPIRY_HEIGHTS, MINE_FINALIZER_FEE, MINE_REWARD, OutPoint,
+    OwnedBlindedTransaction, PreparedBlock, RevealBundle, StratumMineShare, StratumMineTemplate,
+    Transaction, TransactionSubmitOutcome, VDF_TARGET_BLOCK_MS, Wallet, run_vdf,
 };
 
 pub type SharedNode = Arc<Mutex<NodeCore>>;
@@ -618,7 +618,7 @@ impl NodeCore {
         NodeStatus {
             app_version: env!("CARGO_PKG_VERSION").to_string(),
             wallet_address: self.wallet.address().to_string(),
-            wallet_balance: self.ledger.balance_of(self.wallet.address()),
+            wallet_balance: self.wallet_projected_balance(),
             wallet_locked: self.wallet.is_locked(),
             launch_profile: LaunchProfileStatus {
                 profile_id: launch_profile.profile_id.clone(),
@@ -651,6 +651,35 @@ impl NodeCore {
             },
             chain,
         }
+    }
+
+    fn wallet_projected_balance(&self) -> Amount {
+        let address = self.wallet.address();
+        let mut balance = self.ledger.balance_of(address);
+        let confirmed_outputs = self
+            .ledger
+            .utxos_for_address(address)
+            .into_iter()
+            .map(|(outpoint, output)| (outpoint, output.amount))
+            .collect::<BTreeMap<_, _>>();
+
+        for (commitment, payload) in &self.owned_blinded_payloads {
+            if !self.ledger.has_unrevealed_blinded_transaction(commitment) {
+                continue;
+            }
+            let output_total = transaction_output_total_for_address(payload, address);
+            if self.ledger.has_active_blinded_transaction(commitment) {
+                balance = balance.saturating_add(output_total);
+            } else {
+                let input_total =
+                    transaction_input_total_from_outputs(payload, address, &confirmed_outputs);
+                balance = balance
+                    .saturating_sub(input_total)
+                    .saturating_add(output_total);
+            }
+        }
+
+        balance
     }
 
     pub fn set_burn_per_block(&mut self, amount: Amount) -> Result<Option<Transaction>> {
@@ -2152,6 +2181,34 @@ fn converge_fee_by_byte(
     ))
 }
 
+fn transaction_output_total_for_address(transaction: &Transaction, address: &str) -> Amount {
+    match transaction {
+        Transaction::Transfer { outputs, .. } => outputs,
+        Transaction::Burn { change, .. } => change,
+        Transaction::Mine { recipient, .. } if recipient == address => return MINE_REWARD,
+        Transaction::Mine { .. } => return 0,
+    }
+    .iter()
+    .filter(|output| output.address == address)
+    .fold(0_u64, |total, output| total.saturating_add(output.amount))
+}
+
+fn transaction_input_total_from_outputs(
+    transaction: &Transaction,
+    address: &str,
+    outputs: &BTreeMap<OutPoint, Amount>,
+) -> Amount {
+    let inputs = match transaction {
+        Transaction::Transfer { inputs, .. } | Transaction::Burn { inputs, .. } => inputs,
+        Transaction::Mine { .. } => return 0,
+    };
+    inputs
+        .iter()
+        .filter(|input| input.owner == address)
+        .filter_map(|input| outputs.get(&input.outpoint))
+        .fold(0_u64, |total, amount| total.saturating_add(*amount))
+}
+
 #[cfg(test)]
 mod tests {
     use std::collections::BTreeMap;
@@ -2608,6 +2665,58 @@ mod tests {
             envelope,
             GossipEnvelope::BlindedReveal(reveal) if reveal.commitment == blinded.commitment
         )));
+    }
+
+    #[test]
+    fn status_wallet_balance_includes_owned_blinded_change_before_and_after_commit() {
+        let alice = Wallet::from_seed("owned-blinded-balance-alice");
+        let bob = Wallet::from_seed("owned-blinded-balance-bob");
+        let carol = Wallet::from_seed("owned-blinded-balance-carol");
+        let finalizers = [alice.clone(), bob.clone()];
+        let starting_balance = 2 * MICRO_IUNA;
+        let burn_amount = MICRO_IUNA / 10;
+        let fee = MICRO_IUNA / 10;
+        let expected_balance = starting_balance - burn_amount - fee;
+        let mut allocations = BTreeMap::new();
+        allocations.insert(alice.address().to_string(), 10 * MICRO_IUNA);
+        allocations.insert(bob.address().to_string(), 10 * MICRO_IUNA);
+        allocations.insert(carol.address().to_string(), starting_balance);
+        let ledger = Ledger::new_with_genesis_burns(
+            allocations,
+            finalizers
+                .iter()
+                .map(|wallet| GenesisBurn::new(wallet.address(), MICRO_IUNA))
+                .collect(),
+            1,
+        )
+        .unwrap();
+        let mut wallet_node = NodeCore::from_ledger(carol.clone(), ledger.clone(), 0);
+        let mut finalizer_ledger = ledger;
+
+        let blinded = wallet_node
+            .blinded_burn_with_fee(burn_amount, fee, wallet_node.chain_height() + 4)
+            .unwrap();
+
+        assert_eq!(wallet_node.status().wallet_balance, expected_balance);
+
+        finalizer_ledger
+            .submit_blinded_transaction(blinded.clone())
+            .unwrap();
+        let leader = finalizer_ledger.expected_leader_for_next_block().unwrap();
+        let finalizer = finalizers
+            .iter()
+            .find(|wallet| wallet.address() == leader)
+            .unwrap();
+        let burn = finalizer_ledger.build_burn(finalizer, 1, 0).unwrap();
+        finalizer_ledger.submit_transaction(burn).unwrap();
+        let commit_block = finalizer_ledger.mine_next_block(finalizer, 1).unwrap();
+
+        wallet_node
+            .receive(GossipEnvelope::Block(commit_block))
+            .unwrap();
+
+        assert_eq!(wallet_node.ledger().balance_of(carol.address()), 0);
+        assert_eq!(wallet_node.status().wallet_balance, expected_balance);
     }
 
     #[test]

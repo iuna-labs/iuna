@@ -11,10 +11,10 @@ use serde::Serialize;
 
 use crate::domain::{
     Amount, BLINDED_COMMITTER_FEE_BPS, BLINDED_FEE_BPS_DENOMINATOR,
-    BLINDED_REVEAL_BUNDLE_SIGNER_FEE_BPS, BLINDED_REVEAL_FINALIZER_FEE_BPS, BlindedReveal,
-    BlindedTransaction, Block, ChainSnapshot, FinalizerMode, LaunchProfile, LeaderProof, Ledger,
-    MINE_REWARD, MaskedBlindedReveal, OutPoint, RevealBundleSection, RevealBundleSignature,
-    Transaction, TxInput, TxOutput, revealed_blinded_transactions,
+    BLINDED_REVEAL_BUNDLE_SIGNER_FEE_BPS, BlindedReveal, BlindedTransaction, Block, ChainSnapshot,
+    FinalizerMode, LaunchProfile, LeaderProof, Ledger, MINE_REWARD, MaskedBlindedReveal, OutPoint,
+    REVEAL_COMMITTEE_SIZE, RevealBundleSection, RevealBundleSignature, Transaction, TxInput,
+    TxOutput, blinded_reveal_finalizer_fee, revealed_blinded_transactions,
 };
 
 const SCHEMA: &str = r#"
@@ -944,11 +944,15 @@ fn metrics_from_snapshot(snapshot: &ChainSnapshot) -> Result<Vec<BlockMetricRow>
                 .context("block metric fees overflow")?;
             let committer_fee = blinded_fee_share(transaction.fee(), BLINDED_COMMITTER_FEE_BPS);
             let included_reveal_bundle_count = block.included_reveal_bundle_count();
-            let reveal_finalizer_fee = if included_reveal_bundle_count == 0 {
-                0
-            } else {
-                blinded_fee_share(transaction.fee(), BLINDED_REVEAL_FINALIZER_FEE_BPS)
-            };
+            let available_reveal_bundle_slots = ledger
+                .burn_leader_ranks_for_block(block.height)
+                .map(|ranks| ranks.len())
+                .unwrap_or(REVEAL_COMMITTEE_SIZE);
+            let reveal_finalizer_fee = blinded_reveal_finalizer_fee(
+                transaction.fee(),
+                included_reveal_bundle_count,
+                available_reveal_bundle_slots,
+            );
             let reveal_bundle_signer_fees =
                 blinded_fee_share(transaction.fee(), BLINDED_REVEAL_BUNDLE_SIGNER_FEE_BPS)
                     .saturating_mul(included_reveal_bundle_count as u64);
