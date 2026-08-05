@@ -1356,6 +1356,11 @@ impl NodeCore {
             }
         }
 
+        if let Err(error) = self.publish_reveal_bundle_for_next_block() {
+            plan.skipped_reason = Some(format!("{error:#}"));
+            return plan;
+        }
+
         let wallet_rank = self
             .ledger
             .finalizer_rank_for_next_block(self.wallet.address());
@@ -2215,10 +2220,10 @@ mod tests {
 
     use crate::domain::{
         FinalizerMode, GenesisBurn, Ledger, MICRO_IUNA, MINE_FINALIZER_FEE,
-        RECOVERY_BLOCK_DELAY_MS, Transaction, Wallet,
+        RECOVERY_BLOCK_DELAY_MS, Transaction, Wallet, run_vdf,
     };
 
-    use super::{GossipEnvelope, NodeConfig, NodeCore};
+    use super::{GossipEnvelope, InMemoryNetwork, NodeConfig, NodeCore};
 
     fn wallet_for_address<'a>(wallets: &'a [Wallet], address: &str) -> &'a Wallet {
         wallets
@@ -2609,6 +2614,100 @@ mod tests {
                     && bundle.reveals.iter().any(|reveal| reveal.commitment == first.reveal.commitment)
                     && bundle.reveals.iter().any(|reveal| reveal.commitment == second.reveal.commitment)
         )));
+    }
+
+    #[test]
+    fn automatic_finalization_includes_reveals_with_two_nodes_and_one_burner() {
+        let finalizer = Wallet::from_seed("single-burner-reveal-finalizer");
+        let wallet = Wallet::from_seed("single-burner-reveal-wallet");
+        let mut allocations = BTreeMap::new();
+        allocations.insert(finalizer.address().to_string(), 10 * MICRO_IUNA);
+        allocations.insert(wallet.address().to_string(), 10 * MICRO_IUNA);
+        let ledger = Ledger::new_with_genesis_burns(
+            allocations,
+            vec![GenesisBurn::new(finalizer.address(), MICRO_IUNA)],
+            1,
+        )
+        .unwrap();
+        let mut network = InMemoryNetwork::default();
+        network.insert(
+            "finalizer",
+            NodeCore::from_ledger_with_burn_fee_and_enabled(
+                finalizer.clone(),
+                ledger.clone(),
+                true,
+                MICRO_IUNA / 10,
+                1,
+            ),
+        );
+        network.insert("wallet", NodeCore::from_ledger(wallet.clone(), ledger, 0));
+
+        let blinded = network
+            .node_mut("wallet")
+            .unwrap()
+            .blinded_burn_with_fee(MICRO_IUNA / 10, 1, 4)
+            .unwrap();
+        network.deliver_until_idle().unwrap();
+
+        let commit_plan = network
+            .node_mut("finalizer")
+            .unwrap()
+            .prepare_automatic_finalization(1);
+        let commit_work = commit_plan
+            .work
+            .expect("finalizer should prepare commit block");
+        let commit_vdf = run_vdf(commit_work.vdf_seed(), commit_work.vdf_rounds());
+        let commit_block = network
+            .node_mut("finalizer")
+            .unwrap()
+            .complete_prepared_block_at(commit_work, commit_vdf, 1)
+            .unwrap();
+        assert_eq!(
+            commit_block.blinded_transactions,
+            vec![blinded],
+            "first block should commit the wallet's blinded burn"
+        );
+        network.deliver_until_idle().unwrap();
+        assert!(
+            network
+                .node("finalizer")
+                .unwrap()
+                .ledger()
+                .pending_blinded_reveals()
+                .iter()
+                .any(|reveal| reveal.commitment == commit_block.blinded_transactions[0].commitment),
+            "finalizer should have received the reveal before building the next block"
+        );
+        assert!(
+            network
+                .node("wallet")
+                .unwrap()
+                .ledger()
+                .pending_blinded_reveals()
+                .iter()
+                .any(|reveal| reveal.commitment == commit_block.blinded_transactions[0].commitment),
+            "wallet node should also keep the reveal in its mempool"
+        );
+
+        let reveal_plan = network
+            .node_mut("finalizer")
+            .unwrap()
+            .prepare_automatic_finalization(2);
+        let reveal_work = reveal_plan
+            .work
+            .expect("finalizer should prepare reveal block");
+        let reveal_vdf = run_vdf(reveal_work.vdf_seed(), reveal_work.vdf_rounds());
+        let reveal_block = network
+            .node_mut("finalizer")
+            .unwrap()
+            .complete_prepared_block_at(reveal_work, reveal_vdf, 2)
+            .unwrap();
+
+        assert_eq!(
+            reveal_block.all_blinded_reveals().len(),
+            1,
+            "automatic finalization should include the pending reveal without requiring an extra mempool poll"
+        );
     }
 
     #[test]
