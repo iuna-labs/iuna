@@ -165,9 +165,25 @@ pub enum Transaction {
 }
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+enum BlindedTransactionPayload {
+    Transfer {
+        outputs: Vec<TxOutput>,
+        signature: String,
+    },
+    Burn {
+        change: Vec<TxOutput>,
+        amount: Amount,
+        signature: String,
+    },
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct BlindedTransaction {
     pub commitment: String,
+    #[serde(default)]
+    pub inputs: Vec<TxInput>,
     pub fee: Amount,
     pub encrypted_size: u32,
     pub expires_at_height: u64,
@@ -209,6 +225,7 @@ pub struct RevealedBlindedTransaction {
 #[derive(Clone, Debug, Eq, PartialEq)]
 struct ActiveBlindedTransaction {
     transaction: BlindedTransaction,
+    locked_outputs: Vec<TxOutput>,
     included_height: u64,
     included_by: String,
 }
@@ -460,7 +477,8 @@ impl BlindedTransaction {
 
     pub fn canonical(&self) -> String {
         format!(
-            "blinded-tx:{}:{}:{}:{}:{}:{}",
+            "blinded-tx:{}:{}:{}:{}:{}:{}:{}",
+            canonical_signed_inputs(&self.inputs),
             self.fee,
             self.encrypted_size,
             self.expires_at_height,
@@ -760,6 +778,17 @@ fn unsigned_inputs(inputs: &[TxInput]) -> Vec<UnsignedTxInput> {
     inputs.iter().map(TxInput::without_signature).collect()
 }
 
+fn signed_blinded_inputs(inputs: &[UnsignedTxInput], signature: &str) -> Vec<TxInput> {
+    inputs
+        .iter()
+        .map(|input| TxInput {
+            outpoint: input.outpoint.clone(),
+            owner: input.owner.clone(),
+            signature: signature.to_string(),
+        })
+        .collect()
+}
+
 fn canonical_inputs(inputs: &[UnsignedTxInput]) -> String {
     inputs
         .iter()
@@ -767,6 +796,19 @@ fn canonical_inputs(inputs: &[UnsignedTxInput]) -> String {
             format!(
                 "{}:{}:{}",
                 input.outpoint.txid, input.outpoint.index, input.owner
+            )
+        })
+        .collect::<Vec<_>>()
+        .join("|")
+}
+
+fn canonical_signed_inputs(inputs: &[TxInput]) -> String {
+    inputs
+        .iter()
+        .map(|input| {
+            format!(
+                "{}:{}:{}:{}",
+                input.outpoint.txid, input.outpoint.index, input.owner, input.signature
             )
         })
         .collect::<Vec<_>>()
@@ -971,6 +1013,30 @@ fn transaction_inputs_spent_by(transaction: &Transaction, pending: &[Transaction
     let spent = pending_spent_outpoints(pending);
     transaction
         .inputs()
+        .iter()
+        .any(|input| spent.contains(&input.outpoint))
+}
+
+fn transaction_inputs_spent_by_inputs(inputs: &[TxInput], pending: &[Transaction]) -> bool {
+    let spent = pending_spent_outpoints(pending);
+    inputs.iter().any(|input| spent.contains(&input.outpoint))
+}
+
+fn blinded_transaction_inputs_spent_by(
+    transaction: &BlindedTransaction,
+    pending: &[BlindedTransaction],
+) -> bool {
+    let spent = pending
+        .iter()
+        .flat_map(|transaction| {
+            transaction
+                .inputs
+                .iter()
+                .map(|input| input.outpoint.clone())
+        })
+        .collect::<BTreeSet<_>>();
+    transaction
+        .inputs
         .iter()
         .any(|input| spent.contains(&input.outpoint))
 }
@@ -1929,7 +1995,10 @@ impl Ledger {
                     )
                 })?;
                 let transaction = decrypt_blinded_transaction(&active.transaction, reveal)?;
-                if transaction.fee() != active.transaction.fee {
+                if matches!(transaction, Transaction::Mine { .. }) {
+                    bail!("mine actions are public and cannot be blinded");
+                }
+                if blinded_envelope_fee_for_transaction(&transaction) != active.transaction.fee {
                     bail!(
                         "block {} blinded reveal fee does not match envelope",
                         block.height
@@ -1949,6 +2018,7 @@ impl Ledger {
                     transaction.commitment.clone(),
                     ActiveBlindedTransaction {
                         transaction: transaction.clone(),
+                        locked_outputs: Vec::new(),
                         included_height: block.height,
                         included_by: block.miner.clone(),
                     },
@@ -2522,7 +2592,7 @@ impl Ledger {
         expires_at_height: u64,
     ) -> Result<BuiltBlindedTransaction> {
         let transaction = self.build_burn(wallet, amount, fee)?;
-        self.blind_transaction(transaction, fee, expires_at_height)
+        self.blind_transaction(wallet, transaction, fee, expires_at_height)
     }
 
     pub fn build_blinded_transfer(
@@ -2534,20 +2604,25 @@ impl Ledger {
         expires_at_height: u64,
     ) -> Result<BuiltBlindedTransaction> {
         let transaction = self.build_transfer(wallet, to, amount, fee)?;
-        self.blind_transaction(transaction, fee, expires_at_height)
+        self.blind_transaction(wallet, transaction, fee, expires_at_height)
     }
 
     pub fn build_blinded_transaction(
         &self,
+        wallet: &Wallet,
         transaction: Transaction,
         expires_at_height: u64,
     ) -> Result<BuiltBlindedTransaction> {
-        let fee = transaction.fee();
-        self.blind_transaction(transaction, fee, expires_at_height)
+        if matches!(transaction, Transaction::Mine { .. }) {
+            bail!("mine actions are public and cannot be blinded");
+        }
+        let fee = blinded_envelope_fee_for_transaction(&transaction);
+        self.blind_transaction(wallet, transaction, fee, expires_at_height)
     }
 
     fn blind_transaction(
         &self,
+        wallet: &Wallet,
         transaction: Transaction,
         fee: Amount,
         expires_at_height: u64,
@@ -2562,12 +2637,25 @@ impl Ledger {
         {
             bail!("blinded transaction expiry is too far in the future");
         }
-        if fee != transaction.fee() {
+        if fee != blinded_envelope_fee_for_transaction(&transaction) {
             bail!("blinded transaction fee must match plaintext transaction fee");
         }
-        let plaintext = serde_json::to_vec(&transaction)
+        let unsigned_inputs = if transaction.inputs().is_empty() && transaction.fee() > 0 {
+            self.select_inputs(wallet.address(), transaction.fee())?.0
+        } else {
+            unsigned_inputs(transaction.inputs())
+        };
+        if unsigned_inputs
+            .iter()
+            .any(|input| input.owner != wallet.address())
+        {
+            bail!("blinded transaction inputs must be owned by the signing wallet");
+        }
+        let blinded_payload = blinded_payload_from_transaction(&transaction)?;
+        let plaintext = serde_json::to_vec(&blinded_payload)
             .context("failed to serialize transaction for blinded payload")?;
         let payload_hash = hex_hash(&plaintext);
+        let unsigned_commit_inputs = signed_blinded_inputs(&unsigned_inputs, "");
         let payload = transaction;
         let mut key = [0_u8; BLINDED_KEY_BYTES];
         let mut nonce = [0_u8; BLINDED_NONCE_BYTES];
@@ -2575,17 +2663,30 @@ impl Ledger {
             .map_err(|error| anyhow!("failed to generate blinded transaction key: {error}"))?;
         getrandom(&mut nonce)
             .map_err(|error| anyhow!("failed to generate blinded transaction nonce: {error}"))?;
-        let ciphertext = encrypt_blinded_payload(&key, &nonce, fee, expires_at_height, &plaintext)?;
+        let ciphertext = encrypt_blinded_payload(
+            &key,
+            &nonce,
+            &unsigned_commit_inputs,
+            fee,
+            expires_at_height,
+            &plaintext,
+        )?;
         let encrypted_size = u32::try_from(ciphertext.len())
             .context("blinded transaction ciphertext is too large")?;
         let transaction = BlindedTransaction {
             commitment: String::new(),
+            inputs: unsigned_commit_inputs,
             fee,
             encrypted_size,
             expires_at_height,
             nonce: hex_encode(nonce),
             ciphertext: hex_encode(&ciphertext),
             payload_hash,
+        };
+        let signature = wallet.sign_payload(&blinded_transaction_signing_payload(&transaction));
+        let transaction = BlindedTransaction {
+            inputs: signed_blinded_inputs(&unsigned_inputs, &signature),
+            ..transaction
         };
         let commitment = blinded_transaction_commitment(&transaction)?;
         let transaction = BlindedTransaction {
@@ -2722,6 +2823,14 @@ impl Ledger {
             return Ok(false);
         }
         self.validate_blinded_transaction(&transaction)?;
+        if blinded_transaction_inputs_spent_by(&transaction, &self.pending_blinded)
+            || transaction_inputs_spent_by_inputs(&transaction.inputs, &self.pending)
+            || transaction_inputs_spent_by_inputs(&transaction.inputs, &self.orphans)
+        {
+            bail!("blinded transaction conflicts with pending inputs");
+        }
+        let mut utxos = self.utxos_after_valid_pending_and_blinded()?;
+        spend_blinded_inputs(&transaction, &mut utxos)?;
         if self.pending_blinded.len() >= MAX_PENDING_TRANSACTIONS {
             bail!("blinded mempool is full");
         }
@@ -2763,7 +2872,7 @@ impl Ledger {
             bail!("mempool is full");
         }
 
-        let mut utxos = self.utxos_after_valid_pending()?;
+        let mut utxos = self.utxos_after_valid_pending_and_blinded()?;
         if transaction_has_missing_inputs(&transaction, &utxos) {
             if self.orphans.len() >= MAX_ORPHAN_TRANSACTIONS {
                 bail!("orphan transaction pool is full");
@@ -2951,31 +3060,29 @@ impl Ledger {
             let active = self
                 .active_blinded
                 .get(&reveal.commitment)
-                .context("blinded reveal does not reference an active blinded transaction")?;
-            let tx = self.decrypt_active_blinded(active, reveal)?;
-            apply_transaction(&tx, &mut utxos)?;
+                .context("blinded reveal does not reference an active blinded transaction")?
+                .clone();
+            let tx = self.decrypt_active_blinded(&active, reveal)?;
+            self.apply_revealed_blinded_transaction(&active, &tx, &mut utxos)?;
             credit_blinded_fee_outputs(
                 &mut utxos,
-                active,
+                &active,
                 &block.miner,
                 &tx,
                 &block.reveal_bundle_section.signatures,
             )?;
             revealed_transactions.push(tx);
         }
+        for (commitment, active) in &self.active_blinded {
+            if !revealed_commitments.contains(commitment)
+                && block.height >= active.transaction.expires_at_height
+            {
+                credit_expired_blinded_outputs(&mut utxos, active)?;
+            }
+        }
         if block.reward != fee_reward(&block.transactions)? {
             bail!("block reward is invalid");
         }
-        let mut tickets = self.tickets.clone();
-        apply_finalizer_ticket_effects(&block, &mut tickets)?;
-        credit_reward_output(&mut utxos, &block)?;
-        tickets.extend(tickets_created_by_block(&block, &self.launch_profile)?);
-        tickets.extend(tickets_created_by_transactions(
-            block.height,
-            &revealed_transactions,
-            &self.launch_profile,
-        )?);
-
         let mined_signatures = block
             .transactions
             .iter()
@@ -2991,25 +3098,38 @@ impl Ledger {
             .into_iter()
             .map(|reveal| reveal.commitment.clone())
             .collect::<BTreeSet<_>>();
+        let mut new_active_blinded = Vec::new();
+        for transaction in &block.blinded_transactions {
+            let locked_outputs = spend_blinded_inputs(transaction, &mut utxos)?;
+            new_active_blinded.push((
+                transaction.commitment.clone(),
+                ActiveBlindedTransaction {
+                    transaction: transaction.clone(),
+                    locked_outputs,
+                    included_height: block.height,
+                    included_by: block.miner.clone(),
+                },
+            ));
+        }
+        let mut tickets = self.tickets.clone();
+        apply_finalizer_ticket_effects(&block, &mut tickets)?;
+        tickets.extend(tickets_created_by_block(&block, &self.launch_profile)?);
+        tickets.extend(tickets_created_by_transactions(
+            block.height,
+            &revealed_transactions,
+            &self.launch_profile,
+        )?);
+        credit_reward_output(&mut utxos, &block)?;
         self.utxos = utxos;
         self.tickets = tickets;
         self.chain.push(block);
         let new_height = self.height();
-        let tip_miner = self.tip().miner.clone();
-        let tip_blinded_transactions = self.tip().blinded_transactions.clone();
         self.active_blinded.retain(|commitment, active| {
             !revealed_blinded.contains(commitment)
                 && new_height < active.transaction.expires_at_height
         });
-        for transaction in tip_blinded_transactions {
-            self.active_blinded.insert(
-                transaction.commitment.clone(),
-                ActiveBlindedTransaction {
-                    transaction,
-                    included_height: new_height,
-                    included_by: tip_miner.clone(),
-                },
-            );
+        for (commitment, active) in new_active_blinded {
+            self.active_blinded.insert(commitment, active);
         }
         let available = self.utxos.clone();
         let pending = std::mem::take(&mut self.pending);
@@ -3292,9 +3412,10 @@ impl Ledger {
 
             let best_plain = best_selectable_transaction_index(&remaining, &utxos, None)
                 .map(|index| SelectableItem::Plain(index, fee_rate_key(&remaining[index])));
-            let best_blinded = best_selectable_blinded_index(&remaining_blinded).map(|index| {
-                SelectableItem::Blinded(index, blinded_fee_rate_key(&remaining_blinded[index]))
-            });
+            let best_blinded =
+                best_selectable_blinded_index(&remaining_blinded, &utxos).map(|index| {
+                    SelectableItem::Blinded(index, blinded_fee_rate_key(&remaining_blinded[index]))
+                });
             let Some(item) = best_selectable_item(best_plain, best_blinded) else {
                 break;
             };
@@ -3328,6 +3449,7 @@ impl Ledger {
                         required_burn_owner.is_some(),
                     )? <= self.launch_profile.max_block_bytes
                     {
+                        spend_blinded_inputs(&transaction, &mut utxos)?;
                         selected_blinded.push(transaction);
                     }
                 }
@@ -3414,7 +3536,7 @@ impl Ledger {
                 return Ok(());
             }
             let mut promoted_index = None;
-            let mut utxos = self.utxos_after_valid_pending()?;
+            let mut utxos = self.utxos_after_valid_pending_and_blinded()?;
             for (index, transaction) in self.orphans.iter().enumerate() {
                 if transaction_inputs_spent_by(transaction, &self.pending) {
                     continue;
@@ -3518,6 +3640,13 @@ impl Ledger {
         {
             bail!("blinded transaction expiry is too far in the future");
         }
+        validate_transaction_inputs(&transaction.inputs)?;
+        if transaction.inputs.is_empty() && transaction.fee > 0 {
+            bail!("blinded transaction with a fee must lock visible inputs");
+        }
+        if !transaction.inputs.is_empty() {
+            verify_blinded_input_signatures(transaction)?;
+        }
         let expected = blinded_transaction_commitment(transaction)?;
         if transaction.commitment != expected {
             bail!("blinded transaction commitment is invalid");
@@ -3582,17 +3711,73 @@ impl Ledger {
             bail!("blinded transaction reveal is expired");
         }
         let transaction = decrypt_blinded_transaction(&active.transaction, reveal)?;
-        if transaction.fee() != active.transaction.fee {
+        if matches!(transaction, Transaction::Mine { .. }) {
+            bail!("mine actions are public and cannot be blinded");
+        }
+        if blinded_envelope_fee_for_transaction(&transaction) != active.transaction.fee {
             bail!("blinded transaction reveal fee does not match envelope");
+        }
+        if !blinded_reveal_inputs_match(active, &transaction) {
+            bail!("blinded transaction reveal inputs do not match envelope");
         }
         self.validate_transaction_terms(&transaction)?;
         Ok(transaction)
+    }
+
+    fn apply_revealed_blinded_transaction(
+        &self,
+        active: &ActiveBlindedTransaction,
+        transaction: &Transaction,
+        utxos: &mut BTreeMap<OutPoint, TxOutput>,
+    ) -> Result<()> {
+        if matches!(transaction, Transaction::Mine { .. }) {
+            bail!("mine actions are public and cannot be blinded");
+        }
+        transaction.verify_signature()?;
+        ensure_single_input_owner(transaction)?;
+        let input_total = blinded_locked_output_total(active)?;
+        let outputs = transaction.outputs();
+        let output_total = outputs.iter().try_fold(0_u64, |total, output| {
+            total
+                .checked_add(output.amount)
+                .context("transaction outputs overflow")
+        })?;
+        let required = output_total
+            .checked_add(transaction.fee())
+            .context("transaction outputs plus fee overflow")?
+            .checked_add(match transaction {
+                Transaction::Burn { amount, .. } => *amount,
+                Transaction::Transfer { .. } | Transaction::Mine { .. } => 0,
+            })
+            .context("transaction outputs plus burn overflow")?;
+        if input_total != required {
+            bail!("blinded transaction inputs do not balance outputs, burn, and fee");
+        }
+        ensure_outputs_do_not_overflow(utxos, &outputs)?;
+        for (index, output) in outputs.iter().enumerate() {
+            utxos.insert(
+                OutPoint {
+                    txid: transaction.signature().to_string(),
+                    index: index as u32,
+                },
+                output.clone(),
+            );
+        }
+        Ok(())
     }
 
     fn utxos_after_valid_pending(&self) -> Result<BTreeMap<OutPoint, TxOutput>> {
         let mut utxos = self.utxos.clone();
         for pending in self.valid_pending_transactions() {
             apply_transaction(&pending, &mut utxos)?;
+        }
+        Ok(utxos)
+    }
+
+    fn utxos_after_valid_pending_and_blinded(&self) -> Result<BTreeMap<OutPoint, TxOutput>> {
+        let mut utxos = self.utxos_after_valid_pending()?;
+        for pending in self.valid_pending_blinded_transactions() {
+            spend_blinded_inputs(&pending, &mut utxos)?;
         }
         Ok(utxos)
     }
@@ -3605,6 +3790,12 @@ impl Ledger {
             }
             let mut candidate = utxos.clone();
             if apply_transaction(&pending, &mut candidate).is_ok() {
+                utxos = candidate;
+            }
+        }
+        for pending in self.valid_pending_blinded_transactions() {
+            let mut candidate = utxos.clone();
+            if spend_blinded_inputs(&pending, &mut candidate).is_ok() {
                 utxos = candidate;
             }
         }
@@ -4048,10 +4239,17 @@ fn best_selectable_item(
     }
 }
 
-fn best_selectable_blinded_index(transactions: &[BlindedTransaction]) -> Option<usize> {
+fn best_selectable_blinded_index(
+    transactions: &[BlindedTransaction],
+    utxos: &BTreeMap<OutPoint, TxOutput>,
+) -> Option<usize> {
     transactions
         .iter()
         .enumerate()
+        .filter(|(_, transaction)| {
+            let mut utxos = utxos.clone();
+            spend_blinded_inputs(transaction, &mut utxos).is_ok()
+        })
         .max_by(|(_, left), (_, right)| {
             blinded_fee_rate_key(left)
                 .cmp(&blinded_fee_rate_key(right))
@@ -4553,6 +4751,7 @@ fn decrypt_blinded_transaction(
     let plaintext = decrypt_blinded_payload(
         &key,
         &nonce,
+        &signed_blinded_inputs(&unsigned_inputs(&transaction.inputs), ""),
         transaction.fee,
         transaction.expires_at_height,
         &ciphertext,
@@ -4560,12 +4759,71 @@ fn decrypt_blinded_transaction(
     if hex_hash(&plaintext) != transaction.payload_hash {
         bail!("blinded transaction payload hash is invalid");
     }
-    serde_json::from_slice(&plaintext).context("failed to decode blinded transaction payload")
+    let payload = serde_json::from_slice(&plaintext)
+        .context("failed to decode blinded transaction payload")?;
+    transaction_from_blinded_payload(payload, &transaction.inputs, transaction.fee)
+}
+
+fn blinded_payload_from_transaction(
+    transaction: &Transaction,
+) -> Result<BlindedTransactionPayload> {
+    match transaction {
+        Transaction::Transfer {
+            outputs, signature, ..
+        } => Ok(BlindedTransactionPayload::Transfer {
+            outputs: outputs.clone(),
+            signature: signature.clone(),
+        }),
+        Transaction::Burn {
+            change,
+            amount,
+            signature,
+            ..
+        } => Ok(BlindedTransactionPayload::Burn {
+            change: change.clone(),
+            amount: *amount,
+            signature: signature.clone(),
+        }),
+        Transaction::Mine { .. } => bail!("mine actions are public and cannot be blinded"),
+    }
+}
+
+fn transaction_from_blinded_payload(
+    payload: BlindedTransactionPayload,
+    envelope_inputs: &[TxInput],
+    fee: Amount,
+) -> Result<Transaction> {
+    match payload {
+        BlindedTransactionPayload::Transfer { outputs, signature } => {
+            let inputs = signed_blinded_inputs(&unsigned_inputs(envelope_inputs), &signature);
+            Ok(Transaction::Transfer {
+                inputs,
+                outputs,
+                fee,
+                signature,
+            })
+        }
+        BlindedTransactionPayload::Burn {
+            change,
+            amount,
+            signature,
+        } => {
+            let inputs = signed_blinded_inputs(&unsigned_inputs(envelope_inputs), &signature);
+            Ok(Transaction::Burn {
+                inputs,
+                change,
+                amount,
+                fee,
+                signature,
+            })
+        }
+    }
 }
 
 fn encrypt_blinded_payload(
     key: &[u8; BLINDED_KEY_BYTES],
     nonce: &[u8; BLINDED_NONCE_BYTES],
+    inputs: &[TxInput],
     fee: Amount,
     expires_at_height: u64,
     plaintext: &[u8],
@@ -4576,7 +4834,7 @@ fn encrypt_blinded_payload(
             Nonce::from_slice(nonce),
             chacha20poly1305::aead::Payload {
                 msg: plaintext,
-                aad: blinded_payload_aad(fee, expires_at_height).as_bytes(),
+                aad: blinded_payload_aad(inputs, fee, expires_at_height).as_bytes(),
             },
         )
         .map_err(|_| anyhow!("failed to encrypt blinded transaction payload"))
@@ -4585,6 +4843,7 @@ fn encrypt_blinded_payload(
 fn decrypt_blinded_payload(
     key: &[u8; BLINDED_KEY_BYTES],
     nonce: &[u8; BLINDED_NONCE_BYTES],
+    inputs: &[TxInput],
     fee: Amount,
     expires_at_height: u64,
     ciphertext: &[u8],
@@ -4595,20 +4854,68 @@ fn decrypt_blinded_payload(
             Nonce::from_slice(nonce),
             chacha20poly1305::aead::Payload {
                 msg: ciphertext,
-                aad: blinded_payload_aad(fee, expires_at_height).as_bytes(),
+                aad: blinded_payload_aad(inputs, fee, expires_at_height).as_bytes(),
             },
         )
         .map_err(|_| anyhow!("failed to decrypt blinded transaction payload"))
 }
 
-fn blinded_payload_aad(fee: Amount, expires_at_height: u64) -> String {
-    format!("iuna-blinded-payload-v1:{fee}:{expires_at_height}")
+fn blinded_payload_aad(inputs: &[TxInput], fee: Amount, expires_at_height: u64) -> String {
+    format!(
+        "iuna-blinded-payload-v3:{}:{fee}:{expires_at_height}",
+        canonical_inputs(&unsigned_inputs(inputs))
+    )
 }
 
 fn blinded_transaction_commitment(transaction: &BlindedTransaction) -> Result<String> {
     let mut without_commitment = transaction.clone();
     without_commitment.commitment.clear();
     Ok(hex_hash(without_commitment.canonical()))
+}
+
+fn blinded_transaction_signing_payload(transaction: &BlindedTransaction) -> String {
+    format!(
+        "blinded-tx-inputs:{}:{}:{}:{}:{}:{}:{}",
+        canonical_inputs(&unsigned_inputs(&transaction.inputs)),
+        transaction.fee,
+        transaction.encrypted_size,
+        transaction.expires_at_height,
+        transaction.nonce,
+        transaction.ciphertext,
+        transaction.payload_hash
+    )
+}
+
+fn verify_blinded_input_signatures(transaction: &BlindedTransaction) -> Result<()> {
+    if transaction.inputs.is_empty() {
+        return Ok(());
+    }
+    ensure_single_input_owner_for_inputs(&transaction.inputs)?;
+    let signature = transaction.inputs[0].signature.clone();
+    if !transaction
+        .inputs
+        .iter()
+        .all(|input| input.signature == signature)
+    {
+        bail!("blinded transaction input signature mismatch");
+    }
+    let mut unsigned = transaction.clone();
+    for input in &mut unsigned.inputs {
+        input.signature.clear();
+    }
+    let public_key = decode_hex_array::<PUBLIC_KEY_BYTES>(&transaction.inputs[0].owner)
+        .context("invalid blinded transaction input owner")?;
+    let signature = decode_hex_array::<SIGNATURE_BYTES>(&signature)
+        .context("invalid blinded input signature")?;
+    let verifying_key =
+        VerifyingKey::from_bytes(&public_key).context("invalid blinded input public key")?;
+    let signature = Signature::from_bytes(&signature);
+    verifying_key
+        .verify(
+            blinded_transaction_signing_payload(&unsigned).as_bytes(),
+            &signature,
+        )
+        .context("blinded transaction input signature is invalid")
 }
 
 fn credit_blinded_fee_outputs(
@@ -4623,7 +4930,11 @@ fn credit_blinded_fee_outputs(
         return Ok(());
     }
     let committer_fee = blinded_fee_share(fee, BLINDED_COMMITTER_FEE_BPS);
-    let reveal_finalizer_fee = blinded_fee_share(fee, BLINDED_REVEAL_FINALIZER_FEE_BPS);
+    let reveal_finalizer_fee = if reveal_bundle_signatures.is_empty() {
+        0
+    } else {
+        blinded_fee_share(fee, BLINDED_REVEAL_FINALIZER_FEE_BPS)
+    };
     let reveal_bundle_signer_fee = blinded_fee_share(fee, BLINDED_REVEAL_BUNDLE_SIGNER_FEE_BPS);
     let mut outputs = Vec::new();
     if committer_fee > 0 {
@@ -4673,6 +4984,13 @@ fn blinded_fee_share(fee: Amount, bps: u64) -> Amount {
     ((fee as u128 * bps as u128) / BLINDED_FEE_BPS_DENOMINATOR as u128) as Amount
 }
 
+fn blinded_envelope_fee_for_transaction(transaction: &Transaction) -> Amount {
+    match transaction {
+        Transaction::Mine { .. } => 0,
+        Transaction::Transfer { .. } | Transaction::Burn { .. } => transaction.fee(),
+    }
+}
+
 fn fee_reward(transactions: &[Transaction]) -> Result<Amount> {
     transactions.iter().try_fold(0_u64, |total, tx| {
         total.checked_add(tx.fee()).context("block fees overflow")
@@ -4702,6 +5020,104 @@ fn spend_inputs(
     Ok(total)
 }
 
+fn spend_blinded_inputs(
+    transaction: &BlindedTransaction,
+    utxos: &mut BTreeMap<OutPoint, TxOutput>,
+) -> Result<Vec<TxOutput>> {
+    verify_blinded_input_signatures(transaction)?;
+    if transaction.inputs.is_empty() {
+        return Ok(Vec::new());
+    }
+    let mut seen = BTreeSet::new();
+    let mut locked = Vec::new();
+    for input in &transaction.inputs {
+        if !seen.insert(input.outpoint.clone()) {
+            bail!("duplicate input in blinded transaction");
+        }
+        let output = utxos.remove(&input.outpoint).with_context(|| {
+            format!(
+                "blinded transaction spends missing output {}",
+                input.outpoint.id()
+            )
+        })?;
+        if output.address != input.owner {
+            bail!("blinded transaction input owner does not match spent output");
+        }
+        locked.push(output);
+    }
+    let locked_total = locked.iter().try_fold(0_u64, |total, output| {
+        total
+            .checked_add(output.amount)
+            .context("blinded transaction locked input total overflows")
+    })?;
+    if transaction.fee > locked_total {
+        bail!("blinded transaction fee exceeds locked inputs");
+    }
+    Ok(locked)
+}
+
+fn blinded_locked_output_total(active: &ActiveBlindedTransaction) -> Result<Amount> {
+    active
+        .locked_outputs
+        .iter()
+        .try_fold(0_u64, |total, output| {
+            total
+                .checked_add(output.amount)
+                .context("blinded transaction locked input total overflows")
+        })
+}
+
+fn blinded_reveal_inputs_match(
+    active: &ActiveBlindedTransaction,
+    transaction: &Transaction,
+) -> bool {
+    let visible = active
+        .transaction
+        .inputs
+        .iter()
+        .map(TxInput::without_signature)
+        .collect::<Vec<_>>();
+    let revealed = transaction
+        .inputs()
+        .iter()
+        .map(TxInput::without_signature)
+        .collect::<Vec<_>>();
+    visible == revealed
+}
+
+fn credit_expired_blinded_outputs(
+    utxos: &mut BTreeMap<OutPoint, TxOutput>,
+    active: &ActiveBlindedTransaction,
+) -> Result<()> {
+    let Some(first_input) = active.transaction.inputs.first() else {
+        return Ok(());
+    };
+    let input_total = blinded_locked_output_total(active)?;
+    if active.transaction.fee > input_total {
+        bail!("blinded transaction fee exceeds locked inputs");
+    }
+    let change = input_total - active.transaction.fee;
+    let mut outputs = Vec::new();
+    if change > 0 {
+        outputs.push((
+            blinded_expiry_change_outpoint(&active.transaction.commitment),
+            TxOutput {
+                address: first_input.owner.clone(),
+                amount: change,
+            },
+        ));
+    }
+    let tx_outputs = outputs
+        .iter()
+        .map(|(_, output)| output.clone())
+        .collect::<Vec<_>>();
+    ensure_outputs_do_not_overflow(utxos, &tx_outputs)?;
+    for (outpoint, output) in outputs {
+        utxos.insert(outpoint, output);
+    }
+    Ok(())
+}
+
 fn transaction_has_missing_inputs(
     transaction: &Transaction,
     utxos: &BTreeMap<OutPoint, TxOutput>,
@@ -4716,14 +5132,14 @@ fn ensure_single_input_owner(transaction: &Transaction) -> Result<()> {
     if matches!(transaction, Transaction::Mine { .. }) {
         return Ok(());
     }
-    let Some(first) = transaction.inputs().first() else {
+    ensure_single_input_owner_for_inputs(transaction.inputs())
+}
+
+fn ensure_single_input_owner_for_inputs(inputs: &[TxInput]) -> Result<()> {
+    let Some(first) = inputs.first() else {
         bail!("transaction has no inputs");
     };
-    if transaction
-        .inputs()
-        .iter()
-        .any(|input| input.owner != first.owner)
-    {
+    if inputs.iter().any(|input| input.owner != first.owner) {
         bail!("transaction inputs must have one owner");
     }
     Ok(())
@@ -4876,6 +5292,13 @@ fn blinded_reveal_bundle_signer_fee_outpoint(commitment: &str, slot: u8) -> OutP
     }
 }
 
+fn blinded_expiry_change_outpoint(commitment: &str) -> OutPoint {
+    OutPoint {
+        txid: commitment.to_string(),
+        index: 0,
+    }
+}
+
 fn validate_genesis_block(block: &Block) -> Result<()> {
     if block.height != 0 {
         bail!("genesis block height must be 0");
@@ -4975,7 +5398,12 @@ pub fn revealed_blinded_transactions(
                 )
             })?;
             let transaction = decrypt_blinded_transaction(&active_transaction.transaction, reveal)?;
-            if transaction.fee() != active_transaction.transaction.fee {
+            if matches!(transaction, Transaction::Mine { .. }) {
+                bail!("block {} blinded reveal is a mine action", block.height);
+            }
+            if blinded_envelope_fee_for_transaction(&transaction)
+                != active_transaction.transaction.fee
+            {
                 bail!(
                     "block {} blinded reveal fee does not match envelope",
                     block.height
@@ -4997,6 +5425,7 @@ pub fn revealed_blinded_transactions(
                 transaction.commitment.clone(),
                 ActiveBlindedTransaction {
                     transaction: transaction.clone(),
+                    locked_outputs: Vec::new(),
                     included_height: block.height,
                     included_by: block.miner.clone(),
                 },
@@ -5577,6 +6006,7 @@ mod tests {
         let active = ActiveBlindedTransaction {
             transaction: BlindedTransaction {
                 commitment: commitment.clone(),
+                inputs: Vec::new(),
                 fee: 1,
                 encrypted_size: 1,
                 expires_at_height: 2,
@@ -5584,6 +6014,7 @@ mod tests {
                 ciphertext: "03".to_string(),
                 payload_hash: "04".repeat(32),
             },
+            locked_outputs: Vec::new(),
             included_height: 1,
             included_by: committer.address().to_string(),
         };
@@ -5603,6 +6034,47 @@ mod tests {
     }
 
     #[test]
+    fn blinded_fee_split_pays_no_reveal_finalizer_without_signed_reveal_lists() {
+        let committer = Wallet::from_seed("blinded-no-list-committer");
+        let executor = Wallet::from_seed("blinded-no-list-executor");
+        let commitment = "06".repeat(32);
+        let active = ActiveBlindedTransaction {
+            transaction: BlindedTransaction {
+                commitment: commitment.clone(),
+                inputs: Vec::new(),
+                fee: 100,
+                encrypted_size: 1,
+                expires_at_height: 2,
+                nonce: "02".repeat(BLINDED_NONCE_BYTES),
+                ciphertext: "03".to_string(),
+                payload_hash: "04".repeat(32),
+            },
+            locked_outputs: Vec::new(),
+            included_height: 1,
+            included_by: committer.address().to_string(),
+        };
+        let transaction = Transaction::Transfer {
+            inputs: Vec::new(),
+            outputs: Vec::new(),
+            fee: 100,
+            signature: String::new(),
+        };
+        let mut utxos = BTreeMap::new();
+
+        credit_blinded_fee_outputs(&mut utxos, &active, executor.address(), &transaction, &[])
+            .unwrap();
+
+        assert_eq!(
+            utxos.get(&blinded_committer_fee_outpoint(&commitment)),
+            Some(&TxOutput {
+                address: committer.address().to_string(),
+                amount: 35,
+            })
+        );
+        assert!(!utxos.contains_key(&blinded_executor_fee_outpoint(&commitment)));
+    }
+
+    #[test]
     fn blinded_fee_split_pays_committer_executor_and_reveal_bundle_signers() {
         let committer = Wallet::from_seed("blinded-scale-committer");
         let executor = Wallet::from_seed("blinded-scale-executor");
@@ -5612,6 +6084,7 @@ mod tests {
         let active = ActiveBlindedTransaction {
             transaction: BlindedTransaction {
                 commitment: commitment.clone(),
+                inputs: Vec::new(),
                 fee: 7,
                 encrypted_size: 1,
                 expires_at_height: 2,
@@ -5619,6 +6092,7 @@ mod tests {
                 ciphertext: "03".to_string(),
                 payload_hash: "04".repeat(32),
             },
+            locked_outputs: Vec::new(),
             included_height: 1,
             included_by: committer.address().to_string(),
         };
@@ -6516,6 +6990,136 @@ mod tests {
             before_inclusion_finalizer + inclusion_finalizer_fee
                 - reveal_plaintext_burn_spent_by_inclusion_finalizer
         );
+    }
+
+    #[test]
+    fn blinded_utxo_commit_exposes_and_locks_inputs_until_reveal_or_expiry() {
+        let alice = Wallet::from_seed("blinded-lock-alice");
+        let bob = Wallet::from_seed("blinded-lock-bob");
+        let mut ledger = ledger_with_wallet_utxos(&alice, &[10]);
+        let transfer = ledger.build_transfer(&alice, bob.address(), 3, 2).unwrap();
+        let visible_inputs = transfer.inputs().to_vec();
+
+        let blinded = ledger
+            .build_blinded_transaction(&alice, transfer, ledger.height() + 4)
+            .unwrap();
+
+        assert_eq!(blinded.transaction.inputs.len(), visible_inputs.len());
+        assert_eq!(
+            unsigned_inputs(&blinded.transaction.inputs),
+            unsigned_inputs(&visible_inputs)
+        );
+        ledger
+            .submit_blinded_transaction(blinded.transaction)
+            .unwrap();
+        let error = ledger
+            .build_transfer(&alice, bob.address(), 1, 0)
+            .unwrap_err();
+        assert!(format!("{error:#}").contains("insufficient funds"));
+    }
+
+    #[test]
+    fn blinded_payload_omits_visible_inputs_and_reconstructs_transaction_on_reveal() {
+        let alice = Wallet::from_seed("blinded-compact-payload-alice");
+        let bob = Wallet::from_seed("blinded-compact-payload-bob");
+        let ledger = ledger_with_wallet_utxos(&alice, &[10]);
+        let transfer = ledger.build_transfer(&alice, bob.address(), 3, 2).unwrap();
+        let full_transaction_bytes = serde_json::to_vec(&transfer).unwrap().len();
+        let blinded = ledger
+            .build_blinded_transaction(&alice, transfer.clone(), ledger.height() + 4)
+            .unwrap();
+        let key = decode_hex_array::<BLINDED_KEY_BYTES>(&blinded.reveal.key).unwrap();
+        let nonce = decode_hex_array::<BLINDED_NONCE_BYTES>(&blinded.transaction.nonce).unwrap();
+        let ciphertext = decode_hex(&blinded.transaction.ciphertext).unwrap();
+
+        let plaintext = decrypt_blinded_payload(
+            &key,
+            &nonce,
+            &signed_blinded_inputs(&unsigned_inputs(&blinded.transaction.inputs), ""),
+            blinded.transaction.fee,
+            blinded.transaction.expires_at_height,
+            &ciphertext,
+        )
+        .unwrap();
+        let payload: serde_json::Value = serde_json::from_slice(&plaintext).unwrap();
+        let revealed = decrypt_blinded_transaction(&blinded.transaction, &blinded.reveal).unwrap();
+
+        assert_eq!(
+            payload.get("kind").and_then(|kind| kind.as_str()),
+            Some("transfer")
+        );
+        assert!(payload.get("inputs").is_none());
+        assert!(plaintext.len() < full_transaction_bytes);
+        assert_eq!(revealed, transfer);
+    }
+
+    #[test]
+    fn unrevealed_blinded_utxo_commit_burns_fee_and_returns_change() {
+        let alice = Wallet::from_seed("blinded-expiry-alice");
+        let bob = Wallet::from_seed("blinded-expiry-bob");
+        let carol = Wallet::from_seed("blinded-expiry-carol");
+        let finalizers = [alice.clone(), bob.clone()];
+        let carol_balance = 10 * MICRO_IUNA;
+        let mut ledger = ledger_with_finalizers(&finalizers, &[(&carol, carol_balance)]);
+        let fee = 100;
+        let blinded = ledger
+            .build_blinded_burn(&carol, 3, fee, ledger.height() + 2)
+            .unwrap();
+        let commitment = blinded.transaction.commitment.clone();
+        ledger
+            .submit_blinded_transaction(blinded.transaction)
+            .unwrap();
+        queue_next_leader_burn(&mut ledger, &finalizers);
+        mine_preverified_as_next_leader(&mut ledger, &finalizers, 1);
+
+        assert_eq!(ledger.balance_of(carol.address()), 0);
+        queue_next_leader_burn(&mut ledger, &finalizers);
+        mine_preverified_as_next_leader(&mut ledger, &finalizers, 2);
+
+        assert_eq!(
+            ledger
+                .utxos
+                .get(&blinded_committer_fee_outpoint(&commitment)),
+            None
+        );
+        assert_eq!(
+            ledger
+                .utxos
+                .get(&blinded_expiry_change_outpoint(&commitment)),
+            Some(&TxOutput {
+                address: carol.address().to_string(),
+                amount: carol_balance - fee,
+            })
+        );
+        assert_eq!(ledger.balance_of(carol.address()), carol_balance - fee);
+    }
+
+    #[test]
+    fn fee_bearing_blinded_commit_without_inputs_is_rejected() {
+        let alice = Wallet::from_seed("blinded-no-input-fee-alice");
+        let mut ledger = ledger_with_allocation(&alice, MICRO_IUNA);
+        let mut blinded = ledger
+            .build_blinded_burn(&alice, 1, 1, ledger.height() + 4)
+            .unwrap()
+            .transaction;
+        blinded.inputs.clear();
+        blinded.commitment = blinded_transaction_commitment(&blinded).unwrap();
+
+        let error = ledger.submit_blinded_transaction(blinded).unwrap_err();
+
+        assert!(format!("{error:#}").contains("must lock visible inputs"));
+    }
+
+    #[test]
+    fn mine_actions_cannot_be_blinded() {
+        let alice = Wallet::from_seed("blinded-mine-collateral-alice");
+        let ledger = ledger_with_finalizers(&[alice.clone()], &[]);
+        let mine = ledger.build_mine(alice.address()).unwrap();
+        let error = ledger
+            .build_blinded_transaction(&alice, mine, ledger.height() + 4)
+            .unwrap_err();
+
+        assert!(format!("{error:#}").contains("mine actions are public"));
     }
 
     #[test]

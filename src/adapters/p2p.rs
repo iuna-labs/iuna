@@ -1037,6 +1037,12 @@ async fn process_envelope(
         GossipEnvelope::BlindedTransactions { transactions } => {
             process_blinded_transactions(network, remote_addr, known_peer, transactions).await;
         }
+        GossipEnvelope::MineAction(tx) => {
+            process_mine_actions(network, remote_addr, known_peer, vec![tx]).await;
+        }
+        GossipEnvelope::MineActions { transactions } => {
+            process_mine_actions(network, remote_addr, known_peer, transactions).await;
+        }
         GossipEnvelope::BlindedReveal(reveal) => {
             process_blinded_reveals(network, remote_addr, known_peer, vec![reveal]).await;
         }
@@ -1129,6 +1135,34 @@ async fn process_blinded_transactions(
         let mut first_error = None;
         for tx in transactions {
             if let Err(error) = node.receive_blinded_transaction(tx) {
+                first_error.get_or_insert(error);
+            }
+        }
+        first_error
+    };
+    record_inbound_result(
+        network,
+        known_peer,
+        remote_addr,
+        first_error
+            .map(|error| Err(anyhow!(format!("{error:#}"))))
+            .unwrap_or(Ok(())),
+    )
+    .await;
+    network.forward_outbox().await;
+}
+
+async fn process_mine_actions(
+    network: &GossipNetwork,
+    remote_addr: SocketAddr,
+    known_peer: &Option<String>,
+    transactions: Vec<crate::domain::Transaction>,
+) {
+    let first_error = {
+        let mut node = network.inner.node.lock().await;
+        let mut first_error = None;
+        for tx in transactions {
+            if let Err(error) = node.receive_mine_action(tx) {
                 first_error.get_or_insert(error);
             }
         }
@@ -1444,6 +1478,12 @@ fn record_received_envelope_kind(metrics: &P2pMetricsCounters, envelope: &Gossip
                 transactions.len() as u64,
             );
         }
+        GossipEnvelope::MineAction(_) => {
+            P2pMetricsCounters::inc(&metrics.data_envelopes_received);
+        }
+        GossipEnvelope::MineActions { .. } => {
+            P2pMetricsCounters::inc(&metrics.data_envelopes_received);
+        }
         GossipEnvelope::BlindedReveal(_) => {
             P2pMetricsCounters::inc(&metrics.data_envelopes_received);
             P2pMetricsCounters::inc(&metrics.blinded_reveal_envelopes_received);
@@ -1517,6 +1557,13 @@ fn validate_envelope_limits(envelope: &GossipEnvelope) -> Result<()> {
                 TRANSACTION_BATCH_LIMIT,
             )?;
         }
+        GossipEnvelope::MineActions { transactions } => {
+            ensure_len(
+                "mine action batch",
+                transactions.len(),
+                TRANSACTION_BATCH_LIMIT,
+            )?;
+        }
         GossipEnvelope::BlindedReveals { reveals } => {
             ensure_len(
                 "blinded reveal batch",
@@ -1544,6 +1591,7 @@ fn validate_envelope_limits(envelope: &GossipEnvelope) -> Result<()> {
         | GossipEnvelope::ChainSnapshotRequest
         | GossipEnvelope::PeerStatus { .. }
         | GossipEnvelope::BlindedTransaction(_)
+        | GossipEnvelope::MineAction(_)
         | GossipEnvelope::BlindedReveal(_)
         | GossipEnvelope::RevealBundle(_)
         | GossipEnvelope::Block(_)
@@ -2656,6 +2704,7 @@ mod tests {
         let metrics = super::P2pMetricsCounters::default();
         let blinded_tx = BlindedTransaction {
             commitment: "commitment".to_string(),
+            inputs: Vec::new(),
             fee: 3,
             encrypted_size: 128,
             expires_at_height: 20,
@@ -2978,7 +3027,10 @@ mod tests {
         let expected_commitment = {
             let mut node = node.lock().await;
             let tx = node.ledger().build_burn(&alice, 1, 0).unwrap();
-            let built = node.ledger().build_blinded_transaction(tx, 20).unwrap();
+            let built = node
+                .ledger()
+                .build_blinded_transaction(&alice, tx, 20)
+                .unwrap();
             let commitment = built.transaction.commitment.clone();
             node.receive_blinded_transaction(built.transaction).unwrap();
             node.drain_outbox();

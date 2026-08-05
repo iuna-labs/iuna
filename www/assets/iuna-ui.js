@@ -1552,6 +1552,11 @@ window.iunaApp = function iunaApp() {
       return tx?.kind === "blinded" || tx?.kind === "reveal";
     },
 
+    txFeeLabel(tx) {
+      if (tx?.kind === "reveal") return "unknown until reveal";
+      return `IUNA ${this.amountLabel(tx?.fee ?? 0)}`;
+    },
+
     txPillLabel(tx) {
       return tx?.revealed ? "revealed" : (tx?.kind || "-");
     },
@@ -1733,6 +1738,10 @@ window.iunaApp = function iunaApp() {
       return this.blockTransactions(block).filter((tx) => tx.kind === "transfer").length;
     },
 
+    blockCommitCount(block) {
+      return this.blockTransactions(block).filter((tx) => tx.kind === "blinded").length;
+    },
+
     blockMineCount(block) {
       return this.blockTransactions(block).filter((tx) => tx.kind === "mine").length;
     },
@@ -1754,6 +1763,11 @@ window.iunaApp = function iunaApp() {
     transferCountLabel(block) {
       const count = this.blockTransferCount(block);
       return `${count} transfer${count === 1 ? "" : "s"}`;
+    },
+
+    commitCountLabel(block) {
+      const count = this.blockCommitCount(block);
+      return `${count} commit${count === 1 ? "" : "s"}`;
     },
 
     mineCountLabel(block) {

@@ -834,6 +834,7 @@ mod tests {
         OwnedBlindedTransaction {
             transaction: BlindedTransaction {
                 commitment: "d".repeat(64),
+                inputs: Vec::new(),
                 fee: 1,
                 encrypted_size: 42,
                 expires_at_height: 10,

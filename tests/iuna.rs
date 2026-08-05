@@ -706,6 +706,13 @@ fn automatic_mining_caps_burn_to_spendable_balance_after_fee() {
     let alice = Wallet::from_seed("auto-burn-cap-alice");
     let mut allocations = BTreeMap::new();
     allocations.insert(alice.address().to_string(), BLOCK_REWARD);
+    let planning_node = NodeCore::new(NodeConfig {
+        wallet: alice.clone(),
+        genesis_allocations: allocations.clone(),
+        vdf_rounds: 10,
+        burn_per_block: BLOCK_REWARD + iuna(50),
+        burn_fee: DEFAULT_FEE_PER_BYTE,
+    });
     let mut node = NodeCore::new(NodeConfig {
         wallet: alice.clone(),
         genesis_allocations: allocations,
@@ -718,7 +725,10 @@ fn automatic_mining_caps_burn_to_spendable_balance_after_fee() {
 
     let burned = outcome.burned.as_ref().unwrap();
     let unspent = BLOCK_REWARD - burned.amount() - burned.fee();
-    assert!(unspent <= DEFAULT_FEE_PER_BYTE);
+    let next_amount = burned.amount() + 1;
+    if let Ok(next_estimate) = planning_node.estimate_burn_fee(next_amount, DEFAULT_FEE_PER_BYTE) {
+        assert!(next_amount + next_estimate.fee > BLOCK_REWARD);
+    }
     assert!(burned.fee() > burned.economic_size_bytes() as u64 * DEFAULT_FEE_PER_BYTE);
     assert!(outcome.block.is_some());
     assert_eq!(
@@ -872,11 +882,16 @@ fn pow_only_node_gossips_mine_action_to_pob_only_finalizer() {
         alice_node.receive(envelope).unwrap();
     }
 
-    assert!(alice_node.ledger().pending().is_empty());
-    assert_eq!(alice_node.ledger().pending_blinded_transactions().len(), 1);
+    assert_eq!(alice_node.ledger().pending().len(), 1);
+    assert!(
+        alice_node
+            .ledger()
+            .pending_blinded_transactions()
+            .is_empty()
+    );
     assert_eq!(
-        alice_node.ledger().pending_blinded_transactions()[0].fee,
-        mine.fee()
+        alice_node.ledger().pending()[0].signature(),
+        mine.signature()
     );
 }
 
@@ -1786,7 +1801,7 @@ fn mempool_gossip_splits_blinded_batches_at_receiver_limit() {
         let tx = alice_node.ledger().build_burn(wallet, 1, 0).unwrap();
         let built = alice_node
             .ledger()
-            .build_blinded_transaction(tx, 20)
+            .build_blinded_transaction(wallet, tx, 20)
             .unwrap();
         alice_node
             .receive_blinded_transaction(built.transaction)
@@ -1950,6 +1965,8 @@ fn multiple_peers_can_contribute_blinded_burns_to_lottery_ranks() {
         4
     );
     queue_plaintext_burn(network.node_mut("finalizer").unwrap(), &finalizer, 1);
+    network.gossip_mempools_once().unwrap();
+    network.deliver_until_idle().unwrap();
     let reveal_block = network
         .node_mut("finalizer")
         .unwrap()

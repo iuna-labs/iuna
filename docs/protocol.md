@@ -50,7 +50,7 @@ Every normal block must include at least one plaintext burn. A blinded transacti
 
 This mandatory burn is a liveness rule for the ticket pool, not a fairness rule for ticket distribution. It guarantees that normal block production keeps creating future tickets. Fairness against self-serving finalizers comes from blinded third-party burns.
 
-Wallet-created transactions are not gossiped as plaintext. Their fees are paid when the blinded payload is revealed and executed: `35%` goes to the finalizer that originally committed the envelope, `35%` goes to the reveal-block finalizer, and `10%` goes to each included signed reveal-list maker. Missing reveal-list shares and rounding dust are burned. The locally produced plaintext burn required for block liveness is part of the block reward like other plaintext block items.
+Wallet-created transfers and burns are not gossiped as plaintext. Their blinded envelopes expose and lock UTXO inputs before reveal, so declared fees are backed by spendable coins. Mine actions are public mempool items, because they do not reveal burn or transfer intent and must be possible without owning coins. When a blinded payload is revealed and executed, `35%` of its fee goes to the finalizer that originally committed the envelope, `35%` goes to the reveal-block finalizer, and `10%` goes to each included signed reveal-list maker. Missing reveal-list shares and rounding dust are burned. The locally produced plaintext burn required for block liveness is part of the block reward like other plaintext block items.
 
 ## VDF Timing
 
@@ -119,21 +119,24 @@ This keeps issuance separate from finalization. PoW miners compete to create min
 
 The central censorship risk is simple: what if a finalizer only includes its own burns and ignores everyone else's burns?
 
-Normal mempool traffic uses blinded transaction content. A wallet encrypts a normal transaction payload and gossips a `BlindedTransaction` envelope. The plaintext payload is not exposed before reveal. The envelope exposes only:
+The blinded mempool protects transfers and third-party burns by making them indistinguishable before inclusion. It does not try to hide mine actions. Mine actions are public because they do not reveal burn intent, do not spend existing coins, and must remain available to participants with no IUNA balance.
+
+Transfer and burn mempool traffic uses blinded transaction content. A wallet encrypts a transfer or burn payload and gossips a `BlindedTransaction` envelope. The plaintext payload is not exposed before reveal. The envelope exposes only:
 
 - a commitment hash;
+- the visible UTXO inputs that lock the fee and transaction spend;
 - the declared fee;
 - encrypted payload size;
 - expiry height;
 - nonce, ciphertext, and plaintext payload hash.
 
-The finalizer can rank the envelope by fee per visible envelope byte, but cannot see whether the encrypted payload is a transfer or a burn before committing it to a block.
+The visible inputs are signed for the blinded envelope itself and are not repeated inside the encrypted payload. The encrypted payload contains only the hidden transfer outputs or burn amount/change plus the transaction signature. When an envelope is included in a block, the visible inputs are locked immediately and cannot be spent by other pending transactions. The finalizer can rank the envelope by fee per visible envelope byte, but cannot see whether the encrypted payload is a transfer or a burn before committing it to a block. Mine actions are public and are not valid inside blinded envelopes.
 
 Reveal is a later step. A `BlindedReveal` carries only the commitment and decryption key. Reveals are not included as loose block items. They are carried in signed reveal bundles.
 
 For each next block height, nodes compute a reveal committee from the burn leader ranking. The last three ranked eligible tickets form the three reveal-bundle slots. A committee member can sign one bundle for its slot, height, and parent hash. A bundle is at most `10,000` bytes and lists valid pending reveals ordered by visible fee rate. Empty bundles are not gossiped.
 
-A block has an envelope section and one compact reveal-bundle section. The envelope section contains the finalizer's plaintext burn, other plaintext block items, and blinded transaction envelopes.
+A block has an envelope section and one compact reveal-bundle section. The envelope section contains the finalizer's plaintext burn, public mine actions, and blinded transaction envelopes.
 
 The compact reveal-bundle section stores:
 
@@ -151,11 +154,11 @@ The block VDF seed is bound to the reveal bundle hashes:
 
 If a slot has no included bundle, it contributes a fixed default hash for that slot. This means the finalizer must choose the reveal-bundle set before doing the VDF work. A finalizer can still claim that a bundle arrived too late, but it cannot secretly swap or remove a timely bundle after computing the VDF without changing the seed.
 
-When a valid bundled reveal executes, nodes decrypt the earlier payload, check the commitment and payload hash, decode the normal transaction, validate it against the current UTXO set, and execute it once. If the reveal bitmask says multiple committee bundles contained the same reveal, the reveal is still executed only once. If the decrypted transaction is a burn, it creates burn tickets at the reveal height, not the earlier envelope-commit height.
+When a valid bundled reveal executes, nodes decrypt the earlier payload, check the commitment and payload hash, and decode the transfer or burn. The decrypted transaction inputs must match the visible inputs locked by the envelope, and the transaction executes against that locked value. If the reveal bitmask says multiple committee bundles contained the same reveal, the reveal is still executed only once. If the decrypted transaction is a burn, it creates burn tickets at the reveal height, not the earlier envelope-commit height.
 
 Fees are paid without inflating the reveal block reward. The decrypted transaction must pay the same fee declared by the blinded envelope. `35%` goes to the envelope committer, `35%` goes to the reveal-block finalizer, and `10%` goes to each included signed reveal-list maker. Missing reveal-list shares and rounding dust are burned instead of redistributed.
 
-Expiry is exclusive: a blinded envelope with expiry height `H` can be included only in blocks below height `H`, and revealed only while the current chain height is below `H`. The expiry height must be within `20` blocks of the node's current chain height when the envelope is accepted or selected. Expired envelopes and reveals are dropped from local selection.
+Expiry is exclusive: a blinded envelope with expiry height `H` can be included only in blocks below height `H`, and revealed only while the current chain height is below `H`. The expiry height must be within `20` blocks of the node's current chain height when the envelope is accepted or selected. If an envelope expires unrevealed, its declared fee is burned and any remaining locked value returns as deterministic change to the owner of the first visible input. Expired local envelopes and reveals are dropped from local selection.
 
 This does not make censorship impossible. A finalizer can still ignore all blinded traffic, or censor based on network metadata. But it removes the cheap strategy of inspecting plaintext mempool transactions and excluding third-party burns while including other fee-paying transactions.
 
@@ -164,11 +167,12 @@ This does not make censorship impossible. A finalizer can still ignore all blind
 The P2P mempool gossips only:
 
 - blinded transaction envelopes;
+- public mine actions;
 - blinded reveal keys;
 - signed reveal bundles;
 - block inventory and blocks.
 
-It does not gossip plaintext transfers, burns, or mine actions. Wallet-created transfers, burns, and mine actions enter the network as blinded envelopes first, and are only decoded after a reveal. The one plaintext burn required for every normal block is produced locally by the finalizer and appears in the block itself.
+It does not gossip plaintext transfers or burns. Wallet-created transfers and burns enter the network as blinded envelopes first, and are only decoded after a reveal. Mine actions are gossiped as public transactions. The one plaintext burn required for every normal block is produced locally by the finalizer and appears in the block itself.
 
 ## Block Selection
 
@@ -177,7 +181,7 @@ When a node builds a block, it selects transactions in this order:
 1. Collect valid signed reveal bundles for the next height.
 2. Ensure the envelope has at least one plaintext burn from local block construction.
 3. For recovery blocks, ensure at least one plaintext burn is from the recovery finalizer.
-4. Fill remaining envelope space with valid blinded transaction envelopes ordered by fee rate.
+4. Fill remaining envelope space with valid public mine actions and blinded transaction envelopes ordered by fee rate.
 5. Bind the VDF seed to the three reveal-bundle slot hashes, using default hashes for missing slots.
 
 Blocks are bounded by transaction count and serialized byte size. The devnet maximum block size is `100,000` bytes.

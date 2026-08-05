@@ -473,6 +473,7 @@ fn encode_blinded_transaction(
     transaction: &BlindedTransaction,
 ) -> Result<()> {
     writer.hex(&transaction.commitment)?;
+    encode_inputs(writer, &transaction.inputs)?;
     writer.varint(transaction.fee);
     writer.varint(u64::from(transaction.encrypted_size));
     writer.varint(transaction.expires_at_height);
@@ -485,6 +486,7 @@ fn encode_blinded_transaction(
 fn decode_blinded_transaction(reader: &mut CompactReader<'_>) -> Result<BlindedTransaction> {
     Ok(BlindedTransaction {
         commitment: reader.hex()?,
+        inputs: decode_inputs(reader)?,
         fee: reader.varint()?,
         encrypted_size: reader.u32()?,
         expires_at_height: reader.varint()?,
@@ -903,6 +905,7 @@ fn metrics_from_snapshot(snapshot: &ChainSnapshot) -> Result<Vec<BlockMetricRow>
     let mut total_burned_amount = 0_u64;
     let mut rows = Vec::with_capacity(snapshot.blocks.len());
     let mut previous_timestamp_ms = None;
+    let mut active_blinded = std::collections::BTreeMap::<String, BlindedTransaction>::new();
 
     for block in &snapshot.blocks {
         let revealed_transactions = revealed.get(&block.height).cloned().unwrap_or_default();
@@ -930,7 +933,6 @@ fn metrics_from_snapshot(snapshot: &ChainSnapshot) -> Result<Vec<BlockMetricRow>
                     mine_count += 1;
                     mine_issued_amount = mine_issued_amount
                         .checked_add(MINE_REWARD)
-                        .and_then(|amount| amount.checked_add(transaction.fee()))
                         .context("block metric mine issuance overflow")?;
                 }
             }
@@ -941,11 +943,15 @@ fn metrics_from_snapshot(snapshot: &ChainSnapshot) -> Result<Vec<BlockMetricRow>
                 .checked_add(transaction.fee())
                 .context("block metric fees overflow")?;
             let committer_fee = blinded_fee_share(transaction.fee(), BLINDED_COMMITTER_FEE_BPS);
-            let reveal_finalizer_fee =
-                blinded_fee_share(transaction.fee(), BLINDED_REVEAL_FINALIZER_FEE_BPS);
+            let included_reveal_bundle_count = block.included_reveal_bundle_count();
+            let reveal_finalizer_fee = if included_reveal_bundle_count == 0 {
+                0
+            } else {
+                blinded_fee_share(transaction.fee(), BLINDED_REVEAL_FINALIZER_FEE_BPS)
+            };
             let reveal_bundle_signer_fees =
                 blinded_fee_share(transaction.fee(), BLINDED_REVEAL_BUNDLE_SIGNER_FEE_BPS)
-                    .saturating_mul(block.included_reveal_bundle_count() as u64);
+                    .saturating_mul(included_reveal_bundle_count as u64);
             let distributed_fee = committer_fee
                 .saturating_add(reveal_finalizer_fee)
                 .saturating_add(reveal_bundle_signer_fees);
@@ -968,6 +974,41 @@ fn metrics_from_snapshot(snapshot: &ChainSnapshot) -> Result<Vec<BlockMetricRow>
                         .context("block metric mine issuance overflow")?;
                 }
             }
+        }
+        let revealed_commitments = block
+            .all_blinded_reveals()
+            .into_iter()
+            .map(|reveal| reveal.commitment.clone())
+            .collect::<std::collections::BTreeSet<_>>();
+        let mut expired_blinded_fee_values = Vec::new();
+        active_blinded.retain(|commitment, transaction| {
+            if revealed_commitments.contains(commitment) {
+                return false;
+            }
+            if block.height >= transaction.expires_at_height {
+                if !transaction.inputs.is_empty() {
+                    expired_blinded_fee_values.push(transaction.fee);
+                }
+                return false;
+            }
+            true
+        });
+        let expired_blinded_fees =
+            expired_blinded_fee_values
+                .into_iter()
+                .try_fold(0_u64, |total, fee| {
+                    total
+                        .checked_add(fee)
+                        .context("block metric expiry fees overflow")
+                })?;
+        fees_amount = fees_amount
+            .checked_add(expired_blinded_fees)
+            .context("block metric expiry fees overflow")?;
+        burned_fee_amount = burned_fee_amount
+            .checked_add(expired_blinded_fees)
+            .context("block metric expired burned fees overflow")?;
+        for transaction in &block.blinded_transactions {
+            active_blinded.insert(transaction.commitment.clone(), transaction.clone());
         }
         total_burned_amount = total_burned_amount
             .checked_add(burned_amount)
