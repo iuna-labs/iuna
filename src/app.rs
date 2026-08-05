@@ -474,14 +474,17 @@ impl NodeCore {
             {
                 continue;
             }
-            if !self.ledger.has_blinded_transaction(&commitment)
-                && self
+            if !self.ledger.has_blinded_transaction(&commitment) {
+                match self
                     .ledger
-                    .submit_blinded_transaction(owned.transaction.clone())?
-            {
-                self.outbox.push(GossipEnvelope::BlindedTransaction(
-                    owned.transaction.clone(),
-                ));
+                    .submit_blinded_transaction(owned.transaction.clone())
+                {
+                    Ok(true) => self.outbox.push(GossipEnvelope::BlindedTransaction(
+                        owned.transaction.clone(),
+                    )),
+                    Ok(false) => {}
+                    Err(_) => continue,
+                }
             }
             if !self.ledger.has_unrevealed_blinded_transaction(&commitment) {
                 continue;
@@ -2849,6 +2852,47 @@ mod tests {
             envelope,
             GossipEnvelope::BlindedReveal(reveal) if reveal.commitment == blinded.commitment
         )));
+    }
+
+    #[test]
+    fn owned_blinded_transaction_restore_skips_stale_commit_with_spent_input() {
+        let alice = Wallet::from_seed("owned-blinded-restore-stale-alice");
+        let bob = Wallet::from_seed("owned-blinded-restore-stale-bob");
+        let finalizers = [bob.clone()];
+        let mut allocations = BTreeMap::new();
+        allocations.insert(alice.address().to_string(), MICRO_IUNA);
+        allocations.insert(bob.address().to_string(), MICRO_IUNA);
+        let ledger = Ledger::new_with_genesis_burns(
+            allocations,
+            finalizers
+                .iter()
+                .map(|wallet| GenesisBurn::new(wallet.address(), MICRO_IUNA))
+                .collect(),
+            1,
+        )
+        .unwrap();
+        let mut wallet_node = NodeCore::from_ledger(alice.clone(), ledger.clone(), 0);
+
+        wallet_node
+            .blinded_burn_with_fee(MICRO_IUNA / 10, 7, wallet_node.chain_height() + 4)
+            .unwrap();
+        let owned = wallet_node.owned_blinded_transactions();
+        let stale_conflict = ledger.build_burn(&alice, MICRO_IUNA / 10, 7).unwrap();
+        let mut advanced_ledger = ledger;
+        advanced_ledger.submit_transaction(stale_conflict).unwrap();
+        let leader = advanced_ledger.expected_leader_for_next_block().unwrap();
+        assert_eq!(leader, bob.address());
+        let anchor_burn = advanced_ledger.build_burn(&bob, 1, 0).unwrap();
+        advanced_ledger.submit_transaction(anchor_burn).unwrap();
+        let block = advanced_ledger.mine_next_block(&bob, 1).unwrap();
+        advanced_ledger.apply_block(block).unwrap();
+        let mut restarted = NodeCore::from_ledger(alice, advanced_ledger, 0);
+
+        restarted.restore_owned_blinded_transactions(owned).unwrap();
+
+        assert!(restarted.owned_blinded_transactions().is_empty());
+        assert!(restarted.ledger().pending_blinded_transactions().is_empty());
+        assert!(restarted.drain_outbox().is_empty());
     }
 
     #[test]

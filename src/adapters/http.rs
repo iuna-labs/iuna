@@ -3252,6 +3252,8 @@ const INDEX_HTML: &str = r#"<!doctype html>
     .tx-section { display: grid; gap: 8px; }
     .tx-section + .tx-section { margin-top: 10px; padding-top: 10px; border-top: 1px solid #2f363c; }
     .tx-section-title { display: flex; align-items: center; justify-content: space-between; gap: 8px; color: #f4f7f8; font-size: 13px; font-weight: 800; }
+    summary.tx-section-title { cursor: pointer; }
+    details.tx-section:not([open]) { gap: 0; }
     .tx-section-meta { color: #8e979e; font-size: 12px; font-weight: 600; }
     .tx-card, .mempool-item { position: relative; display: grid; gap: 6px; border: 1px solid #2f363c; border-radius: 8px; padding: 12px; background: #111316; cursor: pointer; text-align: left; }
     .tx-card .pill, .mempool-item .pill { position: absolute; top: 10px; right: 10px; }
@@ -3747,8 +3749,8 @@ const INDEX_HTML: &str = r#"<!doctype html>
                   <div class="muted" x-show="selectedBlock.transactions.length === 0">No envelope transactions</div>
                 </div>
                 <template x-for="bundle in selectedBlock.reveal_bundles || selectedBlock.revealBundles || []" :key="bundle.hash">
-                  <div class="tx-section">
-                    <div class="tx-section-title"><span x-text="`Reveal bundle ${bundle.slot}`"></span><span class="tx-section-meta"><span x-text="short(bundle.member)"></span> · <span x-text="bundle.byte_size || bundle.byteSize || 0"></span>B</span></div>
+                  <details class="tx-section">
+                    <summary class="tx-section-title"><span x-text="`Reveal bundle ${bundle.slot}`"></span><span class="tx-section-meta"><span x-text="short(bundle.member)"></span> · <span x-text="bundle.byte_size || bundle.byteSize || 0"></span>B</span></summary>
                     <template x-for="tx in bundle.reveals" :key="tx.signature">
                       <div class="tx-card" role="button" tabindex="0" @click="openTransactionModal(tx, { source: 'Reveal bundle', blockHeight: selectedBlock.height, blockFinalizer: bundle.member })" @keydown.enter.prevent="openTransactionModal(tx, { source: 'Reveal bundle', blockHeight: selectedBlock.height, blockFinalizer: bundle.member })" @keydown.space.prevent="openTransactionModal(tx, { source: 'Reveal bundle', blockHeight: selectedBlock.height, blockFinalizer: bundle.member })">
                         <span class="pill" :class="txPillClass(tx)" x-text="txPillLabel(tx)"></span>
@@ -3761,7 +3763,7 @@ const INDEX_HTML: &str = r#"<!doctype html>
                       </div>
                     </template>
                     <div class="muted" x-show="bundle.reveals.length === 0">No reveals in bundle</div>
-                  </div>
+                  </details>
                 </template>
                 <div class="muted" x-show="selectedBlock.transactions.length === 0 && !(selectedBlock.reveal_bundles || selectedBlock.revealBundles || []).length">No transactions</div>
               </div>
@@ -4371,6 +4373,8 @@ mod tests {
         assert!(super::INDEX_HTML.contains("commitCountLabel(block)"));
         assert!(super::INDEX_HTML.contains(".pill.blinded"));
         assert!(super::INDEX_HTML.contains(".pill.reveal, .pill.revealed"));
+        assert!(super::INDEX_HTML.contains("<details class=\"tx-section\">"));
+        assert!(super::INDEX_HTML.contains("<summary class=\"tx-section-title\">"));
         assert!(super::INDEX_HTML.contains("Commitment"));
         assert!(!super::INDEX_HTML.contains("<h3>Revealed</h3>"));
         assert!(app_js.contains("tx?.revealed ? \"revealed\""));
