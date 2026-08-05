@@ -50,7 +50,7 @@ Every normal block must include at least one plaintext burn. A blinded transacti
 
 This mandatory burn is a liveness rule for the ticket pool, not a fairness rule for ticket distribution. It guarantees that normal block production keeps creating future tickets. Fairness against self-serving finalizers comes from blinded third-party burns.
 
-Plaintext transaction fees go to the block finalizer immediately. Blinded transaction fees are paid when the payload is revealed and executed. Half goes to the finalizer that originally committed the envelope. The other half is the executor share and depends on reveal-bundle participation: with `0`, `1`, `2`, or `3` included reveal bundles, the reveal-block finalizer receives `0/3`, `1/3`, `2/3`, or `3/3` of that executor share. Any missing executor share is burned.
+Wallet-created transactions are not gossiped as plaintext. Their fees are paid when the blinded payload is revealed and executed: `35%` goes to the finalizer that originally committed the envelope, `35%` goes to the reveal-block finalizer, and `10%` goes to each included signed reveal-list maker. Missing reveal-list shares and rounding dust are burned. The locally produced plaintext burn required for block liveness is part of the block reward like other plaintext block items.
 
 ## VDF Timing
 
@@ -153,7 +153,7 @@ If a slot has no included bundle, it contributes a fixed default hash for that s
 
 When a valid bundled reveal executes, nodes decrypt the earlier payload, check the commitment and payload hash, decode the normal transaction, validate it against the current UTXO set, and execute it once. If the reveal bitmask says multiple committee bundles contained the same reveal, the reveal is still executed only once. If the decrypted transaction is a burn, it creates burn tickets at the reveal height, not the earlier envelope-commit height.
 
-Fees are paid without inflating the reveal block reward. The decrypted transaction must pay the same fee declared by the blinded envelope. `floor(fee / 2)` goes to the envelope committer. The reveal-block finalizer can receive up to the remaining executor share, scaled by the number of included reveal bundles. Missing executor share is burned instead of redistributed.
+Fees are paid without inflating the reveal block reward. The decrypted transaction must pay the same fee declared by the blinded envelope. `35%` goes to the envelope committer, `35%` goes to the reveal-block finalizer, and `10%` goes to each included signed reveal-list maker. Missing reveal-list shares and rounding dust are burned instead of redistributed.
 
 Expiry is exclusive: a blinded envelope with expiry height `H` can be included only in blocks below height `H`, and revealed only while the current chain height is below `H`. The expiry height must be within `20` blocks of the node's current chain height when the envelope is accepted or selected. Expired envelopes and reveals are dropped from local selection.
 

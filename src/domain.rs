@@ -29,6 +29,10 @@ pub const MINE_DIFFICULTY_BITS: u32 = 12;
 pub const MAX_BLINDED_TRANSACTION_EXPIRY_HEIGHTS: u64 = 20;
 pub const REVEAL_COMMITTEE_SIZE: usize = 3;
 pub const MAX_REVEAL_BUNDLE_BYTES: usize = 10_000;
+pub const BLINDED_FEE_BPS_DENOMINATOR: u64 = 10_000;
+pub const BLINDED_COMMITTER_FEE_BPS: u64 = 3_500;
+pub const BLINDED_REVEAL_FINALIZER_FEE_BPS: u64 = 3_500;
+pub const BLINDED_REVEAL_BUNDLE_SIGNER_FEE_BPS: u64 = 1_000;
 const MINE_RETARGET_WINDOW_BLOCKS: u64 = 10;
 const MINE_TARGET_ACTIONS_PER_BLOCK: u64 = 1;
 const MINE_MAX_RETARGET_STEP_BITS: u32 = 2;
@@ -2940,7 +2944,6 @@ impl Ledger {
             apply_transaction(tx, &mut utxos)?;
         }
         let mut revealed_commitments = BTreeSet::new();
-        let included_reveal_bundle_count = block.included_reveal_bundle_count();
         for reveal in block.all_blinded_reveals() {
             if !revealed_commitments.insert(reveal.commitment.clone()) {
                 bail!("duplicate blinded reveal in block");
@@ -2956,7 +2959,7 @@ impl Ledger {
                 active,
                 &block.miner,
                 &tx,
-                included_reveal_bundle_count,
+                &block.reveal_bundle_section.signatures,
             )?;
             revealed_transactions.push(tx);
         }
@@ -4613,16 +4616,15 @@ fn credit_blinded_fee_outputs(
     active: &ActiveBlindedTransaction,
     reveal_executor: &str,
     transaction: &Transaction,
-    included_reveal_bundle_count: usize,
+    reveal_bundle_signatures: &[RevealBundleSignature],
 ) -> Result<()> {
     let fee = transaction.fee();
     if fee == 0 {
         return Ok(());
     }
-    let committer_fee = fee / 2;
-    let executor_full_fee = fee - committer_fee;
-    let executor_fee = executor_full_fee.saturating_mul(included_reveal_bundle_count as u64)
-        / REVEAL_COMMITTEE_SIZE as u64;
+    let committer_fee = blinded_fee_share(fee, BLINDED_COMMITTER_FEE_BPS);
+    let reveal_finalizer_fee = blinded_fee_share(fee, BLINDED_REVEAL_FINALIZER_FEE_BPS);
+    let reveal_bundle_signer_fee = blinded_fee_share(fee, BLINDED_REVEAL_BUNDLE_SIGNER_FEE_BPS);
     let mut outputs = Vec::new();
     if committer_fee > 0 {
         outputs.push((
@@ -4633,14 +4635,28 @@ fn credit_blinded_fee_outputs(
             },
         ));
     }
-    if executor_fee > 0 {
+    if reveal_finalizer_fee > 0 {
         outputs.push((
             blinded_executor_fee_outpoint(&active.transaction.commitment),
             TxOutput {
                 address: reveal_executor.to_string(),
-                amount: executor_fee,
+                amount: reveal_finalizer_fee,
             },
         ));
+    }
+    for signature in reveal_bundle_signatures {
+        if reveal_bundle_signer_fee > 0 {
+            outputs.push((
+                blinded_reveal_bundle_signer_fee_outpoint(
+                    &active.transaction.commitment,
+                    signature.slot,
+                ),
+                TxOutput {
+                    address: signature.member.clone(),
+                    amount: reveal_bundle_signer_fee,
+                },
+            ));
+        }
     }
     let tx_outputs = outputs
         .iter()
@@ -4651,6 +4667,10 @@ fn credit_blinded_fee_outputs(
         utxos.insert(outpoint, output);
     }
     Ok(())
+}
+
+fn blinded_fee_share(fee: Amount, bps: u64) -> Amount {
+    ((fee as u128 * bps as u128) / BLINDED_FEE_BPS_DENOMINATOR as u128) as Amount
 }
 
 fn fee_reward(transactions: &[Transaction]) -> Result<Amount> {
@@ -4846,6 +4866,13 @@ fn blinded_executor_fee_outpoint(commitment: &str) -> OutPoint {
     OutPoint {
         txid: commitment.to_string(),
         index: u32::MAX - 2,
+    }
+}
+
+fn blinded_reveal_bundle_signer_fee_outpoint(commitment: &str, slot: u8) -> OutPoint {
+    OutPoint {
+        txid: commitment.to_string(),
+        index: u32::MAX - 3 - u32::from(slot),
     }
 }
 
@@ -5543,7 +5570,7 @@ mod tests {
     }
 
     #[test]
-    fn blinded_fee_split_rounds_remainder_to_reveal_executor() {
+    fn blinded_fee_split_burns_rounding_dust() {
         let committer = Wallet::from_seed("blinded-split-committer");
         let executor = Wallet::from_seed("blinded-split-executor");
         let commitment = "01".repeat(32);
@@ -5568,29 +5595,19 @@ mod tests {
         };
         let mut utxos = BTreeMap::new();
 
-        credit_blinded_fee_outputs(
-            &mut utxos,
-            &active,
-            executor.address(),
-            &transaction,
-            REVEAL_COMMITTEE_SIZE,
-        )
-        .unwrap();
+        credit_blinded_fee_outputs(&mut utxos, &active, executor.address(), &transaction, &[])
+            .unwrap();
 
         assert!(!utxos.contains_key(&blinded_committer_fee_outpoint(&commitment)));
-        assert_eq!(
-            utxos.get(&blinded_executor_fee_outpoint(&commitment)),
-            Some(&TxOutput {
-                address: executor.address().to_string(),
-                amount: 1,
-            })
-        );
+        assert!(!utxos.contains_key(&blinded_executor_fee_outpoint(&commitment)));
     }
 
     #[test]
-    fn blinded_executor_fee_scales_with_included_reveal_bundles() {
+    fn blinded_fee_split_pays_committer_executor_and_reveal_bundle_signers() {
         let committer = Wallet::from_seed("blinded-scale-committer");
         let executor = Wallet::from_seed("blinded-scale-executor");
+        let signer_a = Wallet::from_seed("blinded-scale-signer-a");
+        let signer_b = Wallet::from_seed("blinded-scale-signer-b");
         let commitment = "05".repeat(32);
         let active = ActiveBlindedTransaction {
             transaction: BlindedTransaction {
@@ -5608,26 +5625,58 @@ mod tests {
         let transaction = Transaction::Transfer {
             inputs: Vec::new(),
             outputs: Vec::new(),
-            fee: 7,
+            fee: 100,
             signature: String::new(),
         };
         let mut utxos = BTreeMap::new();
+        let signatures = vec![
+            RevealBundleSignature {
+                slot: 0,
+                member: signer_a.address().to_string(),
+                signature: "11".repeat(SIGNATURE_BYTES),
+            },
+            RevealBundleSignature {
+                slot: 2,
+                member: signer_b.address().to_string(),
+                signature: "22".repeat(SIGNATURE_BYTES),
+            },
+        ];
 
-        credit_blinded_fee_outputs(&mut utxos, &active, executor.address(), &transaction, 1)
-            .unwrap();
+        credit_blinded_fee_outputs(
+            &mut utxos,
+            &active,
+            executor.address(),
+            &transaction,
+            &signatures,
+        )
+        .unwrap();
 
         assert_eq!(
             utxos.get(&blinded_committer_fee_outpoint(&commitment)),
             Some(&TxOutput {
                 address: committer.address().to_string(),
-                amount: 3,
+                amount: 35,
             })
         );
         assert_eq!(
             utxos.get(&blinded_executor_fee_outpoint(&commitment)),
             Some(&TxOutput {
                 address: executor.address().to_string(),
-                amount: 1,
+                amount: 35,
+            })
+        );
+        assert_eq!(
+            utxos.get(&blinded_reveal_bundle_signer_fee_outpoint(&commitment, 0)),
+            Some(&TxOutput {
+                address: signer_a.address().to_string(),
+                amount: 10,
+            })
+        );
+        assert_eq!(
+            utxos.get(&blinded_reveal_bundle_signer_fee_outpoint(&commitment, 2)),
+            Some(&TxOutput {
+                address: signer_b.address().to_string(),
+                amount: 10,
             })
         );
     }
@@ -6358,7 +6407,7 @@ mod tests {
         let carol = Wallet::from_seed("blinded-burn-carol");
         let finalizers = [alice.clone(), bob.clone()];
         let mut ledger = ledger_with_finalizers(&finalizers, &[(&carol, 10 * MICRO_IUNA)]);
-        let fee = 7;
+        let fee = 100;
         let burn_amount = 3;
         let before_carol = ledger.balance_of(carol.address());
 
@@ -6412,16 +6461,14 @@ mod tests {
             .fold(0_u64, |total, transaction| {
                 total + transaction.amount() + transaction.fee()
             });
-        let committer_fee = fee / 2;
-        let executor_fee = (fee - committer_fee)
-            * reveal_block.included_reveal_bundle_count() as u64
-            / REVEAL_COMMITTEE_SIZE as u64;
+        let committer_fee = blinded_fee_share(fee, BLINDED_COMMITTER_FEE_BPS);
+        let reveal_finalizer_fee = blinded_fee_share(fee, BLINDED_REVEAL_FINALIZER_FEE_BPS);
+        let reveal_bundle_signer_fee = blinded_fee_share(fee, BLINDED_REVEAL_BUNDLE_SIGNER_FEE_BPS);
+        let commitment = &commit_block.blinded_transactions[0].commitment;
         assert_eq!(
             ledger
                 .utxos
-                .get(&blinded_committer_fee_outpoint(
-                    &commit_block.blinded_transactions[0].commitment
-                ))
+                .get(&blinded_committer_fee_outpoint(commitment))
                 .unwrap(),
             &TxOutput {
                 address: inclusion_finalizer.clone(),
@@ -6431,20 +6478,39 @@ mod tests {
         assert_eq!(
             ledger
                 .utxos
-                .get(&blinded_executor_fee_outpoint(
-                    &commit_block.blinded_transactions[0].commitment
-                ))
+                .get(&blinded_executor_fee_outpoint(commitment))
                 .unwrap(),
             &TxOutput {
                 address: reveal_executor.clone(),
-                amount: executor_fee,
+                amount: reveal_finalizer_fee,
             }
         );
-        let inclusion_finalizer_fee = if inclusion_finalizer == reveal_executor {
-            committer_fee + executor_fee
-        } else {
-            committer_fee
-        };
+        for signature in &reveal_block.reveal_bundle_section.signatures {
+            assert_eq!(
+                ledger
+                    .utxos
+                    .get(&blinded_reveal_bundle_signer_fee_outpoint(
+                        commitment,
+                        signature.slot
+                    ))
+                    .unwrap(),
+                &TxOutput {
+                    address: signature.member.clone(),
+                    amount: reveal_bundle_signer_fee,
+                }
+            );
+        }
+        let mut inclusion_finalizer_fee = committer_fee;
+        if inclusion_finalizer == reveal_executor {
+            inclusion_finalizer_fee += reveal_finalizer_fee;
+        }
+        inclusion_finalizer_fee += reveal_block
+            .reveal_bundle_section
+            .signatures
+            .iter()
+            .filter(|signature| signature.member == inclusion_finalizer)
+            .count() as u64
+            * reveal_bundle_signer_fee;
         assert_eq!(
             ledger.balance_of(&inclusion_finalizer),
             before_inclusion_finalizer + inclusion_finalizer_fee

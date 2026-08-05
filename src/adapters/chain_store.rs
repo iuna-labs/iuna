@@ -10,9 +10,11 @@ use rusqlite::{Connection, OptionalExtension, params};
 use serde::Serialize;
 
 use crate::domain::{
-    Amount, BlindedReveal, BlindedTransaction, Block, ChainSnapshot, FinalizerMode, LaunchProfile,
-    LeaderProof, Ledger, MINE_REWARD, MaskedBlindedReveal, OutPoint, RevealBundleSection,
-    RevealBundleSignature, Transaction, TxInput, TxOutput, revealed_blinded_transactions,
+    Amount, BLINDED_COMMITTER_FEE_BPS, BLINDED_FEE_BPS_DENOMINATOR,
+    BLINDED_REVEAL_BUNDLE_SIGNER_FEE_BPS, BLINDED_REVEAL_FINALIZER_FEE_BPS, BlindedReveal,
+    BlindedTransaction, Block, ChainSnapshot, FinalizerMode, LaunchProfile, LeaderProof, Ledger,
+    MINE_REWARD, MaskedBlindedReveal, OutPoint, RevealBundleSection, RevealBundleSignature,
+    Transaction, TxInput, TxOutput, revealed_blinded_transactions,
 };
 
 const SCHEMA: &str = r#"
@@ -505,6 +507,10 @@ fn decode_blinded_reveal(reader: &mut CompactReader<'_>) -> Result<BlindedReveal
     })
 }
 
+fn blinded_fee_share(fee: Amount, bps: u64) -> Amount {
+    ((fee as u128 * bps as u128) / BLINDED_FEE_BPS_DENOMINATOR as u128) as Amount
+}
+
 fn encode_reveal_bundle_section(
     writer: &mut CompactWriter,
     section: &RevealBundleSection,
@@ -934,13 +940,17 @@ fn metrics_from_snapshot(snapshot: &ChainSnapshot) -> Result<Vec<BlockMetricRow>
             fees_amount = fees_amount
                 .checked_add(transaction.fee())
                 .context("block metric fees overflow")?;
-            let committer_fee = transaction.fee() / 2;
-            let executor_full_fee = transaction.fee() - committer_fee;
-            let executor_fee = executor_full_fee
-                .saturating_mul(block.included_reveal_bundle_count() as u64)
-                / crate::domain::REVEAL_COMMITTEE_SIZE as u64;
+            let committer_fee = blinded_fee_share(transaction.fee(), BLINDED_COMMITTER_FEE_BPS);
+            let reveal_finalizer_fee =
+                blinded_fee_share(transaction.fee(), BLINDED_REVEAL_FINALIZER_FEE_BPS);
+            let reveal_bundle_signer_fees =
+                blinded_fee_share(transaction.fee(), BLINDED_REVEAL_BUNDLE_SIGNER_FEE_BPS)
+                    .saturating_mul(block.included_reveal_bundle_count() as u64);
+            let distributed_fee = committer_fee
+                .saturating_add(reveal_finalizer_fee)
+                .saturating_add(reveal_bundle_signer_fees);
             burned_fee_amount = burned_fee_amount
-                .checked_add(executor_full_fee.saturating_sub(executor_fee))
+                .checked_add(transaction.fee().saturating_sub(distributed_fee))
                 .context("block metric burned fees overflow")?;
             match transaction {
                 Transaction::Transfer { .. } => transfer_count += 1,

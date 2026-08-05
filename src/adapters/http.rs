@@ -33,9 +33,11 @@ use crate::{
         FeeEstimate, NodeStatus, PeerDirection, PeerInfo, SharedNode, SharedPeerBook, StratumStatus,
     },
     domain::{
-        Amount, BlindedReveal, BlindedTransaction, Block, BurnLeaderRank, ChainSnapshot, Ledger,
-        MINE_FINALIZER_FEE, MINE_REWARD, OutPoint, RevealedBlindedTransaction, Transaction,
-        TxInput, TxOutput, Wallet, hex_hash, revealed_blinded_transactions,
+        Amount, BLINDED_COMMITTER_FEE_BPS, BLINDED_FEE_BPS_DENOMINATOR,
+        BLINDED_REVEAL_BUNDLE_SIGNER_FEE_BPS, BLINDED_REVEAL_FINALIZER_FEE_BPS, BlindedReveal,
+        BlindedTransaction, Block, BurnLeaderRank, ChainSnapshot, Ledger, MINE_FINALIZER_FEE,
+        MINE_REWARD, OutPoint, RevealedBlindedTransaction, Transaction, TxInput, TxOutput, Wallet,
+        hex_hash, revealed_blinded_transactions,
     },
 };
 
@@ -2094,7 +2096,7 @@ fn known_output_index(
         index_transaction_outputs(&mut outputs, &revealed.transaction);
         let fee = revealed.transaction.fee();
         if fee > 0 {
-            let committer_fee = fee / 2;
+            let committer_fee = blinded_fee_share(fee, BLINDED_COMMITTER_FEE_BPS);
             if committer_fee > 0 {
                 outputs.insert(
                     blinded_committer_fee_outpoint(&revealed.commitment),
@@ -2105,18 +2107,31 @@ fn known_output_index(
                 );
             }
             if let Some(block) = blocks_by_height.get(&revealed.height) {
-                let executor_full_fee = fee - committer_fee;
-                let executor_fee = executor_full_fee
-                    .saturating_mul(block.included_reveal_bundle_count() as u64)
-                    / crate::domain::REVEAL_COMMITTEE_SIZE as u64;
-                if executor_fee > 0 {
+                let reveal_finalizer_fee = blinded_fee_share(fee, BLINDED_REVEAL_FINALIZER_FEE_BPS);
+                if reveal_finalizer_fee > 0 {
                     outputs.insert(
                         blinded_executor_fee_outpoint(&revealed.commitment),
                         TxOutput {
                             address: block.miner.clone(),
-                            amount: executor_fee,
+                            amount: reveal_finalizer_fee,
                         },
                     );
+                }
+                let reveal_bundle_signer_fee =
+                    blinded_fee_share(fee, BLINDED_REVEAL_BUNDLE_SIGNER_FEE_BPS);
+                if reveal_bundle_signer_fee > 0 {
+                    for signature in &block.reveal_bundle_section.signatures {
+                        outputs.insert(
+                            blinded_reveal_bundle_signer_fee_outpoint(
+                                &revealed.commitment,
+                                signature.slot,
+                            ),
+                            TxOutput {
+                                address: signature.member.clone(),
+                                amount: reveal_bundle_signer_fee,
+                            },
+                        );
+                    }
                 }
             }
         }
@@ -2176,6 +2191,17 @@ fn blinded_executor_fee_outpoint(commitment: &str) -> OutPoint {
         txid: commitment.to_string(),
         index: u32::MAX - 2,
     }
+}
+
+fn blinded_reveal_bundle_signer_fee_outpoint(commitment: &str, slot: u8) -> OutPoint {
+    OutPoint {
+        txid: commitment.to_string(),
+        index: u32::MAX - 3 - u32::from(slot),
+    }
+}
+
+fn blinded_fee_share(fee: Amount, bps: u64) -> Amount {
+    ((fee as u128 * bps as u128) / BLINDED_FEE_BPS_DENOMINATOR as u128) as Amount
 }
 
 async fn replace_setup_wallet_with_generated_seed(
