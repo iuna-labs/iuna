@@ -50,7 +50,7 @@ Every normal block must include at least one plaintext burn. A blinded transacti
 
 This mandatory burn is a liveness rule for the ticket pool, not a fairness rule for ticket distribution. It guarantees that normal block production keeps creating future tickets. Fairness against self-serving finalizers comes from blinded third-party burns.
 
-Plaintext transaction fees go to the block finalizer immediately. Blinded transaction fees are paid when the payload is revealed and executed: half goes to the finalizer that originally committed the envelope, and the rest goes to the finalizer that includes the reveal. For odd micro-unit fees, the extra micro-unit goes to the reveal executor.
+Plaintext transaction fees go to the block finalizer immediately. Blinded transaction fees are paid when the payload is revealed and executed. Half goes to the finalizer that originally committed the envelope. The other half is the executor share and depends on reveal-bundle participation: with `0`, `1`, `2`, or `3` included reveal bundles, the reveal-block finalizer receives `0/3`, `1/3`, `2/3`, or `3/3` of that executor share. Any missing executor share is burned.
 
 ## VDF Timing
 
@@ -129,9 +129,23 @@ Normal mempool traffic uses blinded transaction content. A wallet encrypts a nor
 
 The finalizer can rank the envelope by fee per visible envelope byte, but cannot see whether the encrypted payload is a transfer or a burn before committing it to a block.
 
-Reveal is a later step. A `BlindedReveal` carries only the commitment and decryption key. When a valid reveal is included, nodes decrypt the earlier payload, check the commitment and payload hash, decode the normal transaction, validate it against the current UTXO set, and execute it. If the decrypted transaction is a burn, it creates burn tickets at the reveal height, not the earlier envelope-commit height.
+Reveal is a later step. A `BlindedReveal` carries only the commitment and decryption key. Reveals are not included as loose block items. They are carried in signed reveal bundles.
 
-Fees are paid without inflating the reveal block reward. The decrypted transaction must pay the same fee declared by the blinded envelope. When it executes, the fee is split using deterministic fee outputs tied to the commitment: `floor(fee / 2)` to the envelope committer and `ceil(fee / 2)` to the reveal executor. If both roles are held by the same finalizer, that finalizer receives the full fee through the two deterministic outputs.
+For each next block height, nodes compute a reveal committee from the burn leader ranking. The last three ranked eligible tickets form the three reveal-bundle slots. A committee member can sign one bundle for its slot, height, and parent hash. A bundle is at most `10,000` bytes and lists valid pending reveals ordered by visible fee rate. Empty bundles are not gossiped.
+
+A block has an envelope section and up to three reveal-bundle sections in fixed slot order. The envelope section contains the finalizer's plaintext burn, other plaintext block items, and blinded transaction envelopes. The bundle sections contain reveals selected by the committee members.
+
+A block may contain at most one bundle per slot. If a node sees two different signed bundles for the same height and slot before block assembly, it treats that slot as locally equivocated and does not use either bundle for that round.
+
+The block VDF seed is bound to the reveal bundle hashes:
+
+`seed = hash(parent hash || height || bundle_hash[0] || bundle_hash[1] || bundle_hash[2])`
+
+If a slot has no included bundle, it contributes a fixed default hash for that slot. This means the finalizer must choose the reveal-bundle set before doing the VDF work. A finalizer can still claim that a bundle arrived too late, but it cannot secretly swap or remove a timely bundle after computing the VDF without changing the seed.
+
+When a valid bundled reveal executes, nodes decrypt the earlier payload, check the commitment and payload hash, decode the normal transaction, validate it against the current UTXO set, and execute it once. If multiple committee bundles contain the same reveal, the reveal is still executed only once. If the decrypted transaction is a burn, it creates burn tickets at the reveal height, not the earlier envelope-commit height.
+
+Fees are paid without inflating the reveal block reward. The decrypted transaction must pay the same fee declared by the blinded envelope. `floor(fee / 2)` goes to the envelope committer. The reveal-block finalizer can receive up to the remaining executor share, scaled by the number of included reveal bundles. Missing executor share is burned instead of redistributed.
 
 Expiry is exclusive: a blinded envelope with expiry height `H` can be included only in blocks below height `H`, and revealed only while the current chain height is below `H`. The expiry height must be within `20` blocks of the node's current chain height when the envelope is accepted or selected. Expired envelopes and reveals are dropped from local selection.
 
@@ -143,6 +157,7 @@ The P2P mempool gossips only:
 
 - blinded transaction envelopes;
 - blinded reveal keys;
+- signed reveal bundles;
 - block inventory and blocks.
 
 It does not gossip plaintext transfers, burns, or mine actions. Wallet-created transfers, burns, and mine actions enter the network as blinded envelopes first, and are only decoded after a reveal. The one plaintext burn required for every normal block is produced locally by the finalizer and appears in the block itself.
@@ -151,10 +166,11 @@ It does not gossip plaintext transfers, burns, or mine actions. Wallet-created t
 
 When a node builds a block, it selects transactions in this order:
 
-1. Include valid blinded reveals first, so already committed encrypted payloads can execute.
-2. Ensure the block has at least one plaintext burn from local block construction.
+1. Collect valid signed reveal bundles for the next height.
+2. Ensure the envelope has at least one plaintext burn from local block construction.
 3. For recovery blocks, ensure at least one plaintext burn is from the recovery finalizer.
-4. Fill remaining space with valid blinded transaction envelopes ordered by fee rate.
+4. Fill remaining envelope space with valid blinded transaction envelopes ordered by fee rate.
+5. Bind the VDF seed to the three reveal-bundle slot hashes, using default hashes for missing slots.
 
 Blocks are bounded by transaction count and serialized byte size. The devnet maximum block size is `100,000` bytes.
 

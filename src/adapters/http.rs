@@ -34,8 +34,8 @@ use crate::{
     },
     domain::{
         Amount, BlindedReveal, BlindedTransaction, Block, BurnLeaderRank, ChainSnapshot, Ledger,
-        MINE_FINALIZER_FEE, MINE_REWARD, OutPoint, Transaction, TxInput, TxOutput, Wallet,
-        hex_hash, revealed_blinded_transactions,
+        MINE_FINALIZER_FEE, MINE_REWARD, OutPoint, RevealedBlindedTransaction, Transaction,
+        TxInput, TxOutput, Wallet, hex_hash, revealed_blinded_transactions,
     },
 };
 
@@ -370,7 +370,18 @@ struct UiBlock {
     burn_leader_ranks: Vec<BurnLeaderRank>,
     transactions: Vec<UiTransaction>,
     revealed_transactions: Vec<UiTransaction>,
+    reveal_bundles: Vec<UiRevealBundle>,
     hash: String,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct UiRevealBundle {
+    slot: u8,
+    member: String,
+    hash: String,
+    byte_size: usize,
+    reveals: Vec<UiTransaction>,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq, Serialize)]
@@ -1595,7 +1606,7 @@ fn wallet_transaction_rows(
     pending: Vec<Transaction>,
     owned_blinded: Vec<Transaction>,
     chain: &[Block],
-    revealed_by_height: &BTreeMap<u64, Vec<Transaction>>,
+    revealed_by_height: &BTreeMap<u64, Vec<RevealedBlindedTransaction>>,
     outputs: &BTreeMap<OutPoint, TxOutput>,
     filters: WalletTransactionFilters,
 ) -> Vec<WalletTransactionRow> {
@@ -1639,7 +1650,8 @@ fn wallet_transaction_rows(
             }
         }
         if let Some(revealed_transactions) = revealed_by_height.get(&block.height) {
-            for (index, tx) in revealed_transactions.iter().rev().enumerate() {
+            for (index, revealed) in revealed_transactions.iter().rev().enumerate() {
+                let tx = &revealed.transaction;
                 if !filters.allows(tx) {
                     continue;
                 }
@@ -1756,17 +1768,16 @@ fn wallet_transaction_row(
     }
 }
 
-fn revealed_transactions_by_height(snapshot: &ChainSnapshot) -> BTreeMap<u64, Vec<Transaction>> {
+fn revealed_transactions_by_height(
+    snapshot: &ChainSnapshot,
+) -> BTreeMap<u64, Vec<RevealedBlindedTransaction>> {
     revealed_blinded_transactions(snapshot)
         .unwrap_or_default()
         .into_iter()
         .fold(
-            BTreeMap::<u64, Vec<Transaction>>::new(),
+            BTreeMap::<u64, Vec<RevealedBlindedTransaction>>::new(),
             |mut by_height, revealed| {
-                by_height
-                    .entry(revealed.height)
-                    .or_default()
-                    .push(revealed.transaction);
+                by_height.entry(revealed.height).or_default().push(revealed);
                 by_height
             },
         )
@@ -1793,15 +1804,15 @@ fn ui_block(
     block: Block,
     outputs: &BTreeMap<OutPoint, TxOutput>,
     burn_leader_ranks: &BTreeMap<String, Vec<BurnLeaderRank>>,
-    revealed_transactions: &[Transaction],
+    revealed_transactions: &[RevealedBlindedTransaction],
 ) -> UiBlock {
     let ranks = burn_leader_ranks
         .get(&block.hash)
         .cloned()
         .unwrap_or_default();
-    let revealed_fees = revealed_transactions
-        .iter()
-        .fold(0_u64, |total, tx| total.saturating_add(tx.fee()));
+    let revealed_fees = revealed_transactions.iter().fold(0_u64, |total, revealed| {
+        total.saturating_add(revealed.transaction.fee())
+    });
     let mut transactions = block
         .transactions
         .iter()
@@ -1816,8 +1827,32 @@ fn ui_block(
     transactions.extend(
         revealed_transactions
             .iter()
-            .map(|tx| ui_revealed_transaction(tx, outputs)),
+            .map(|revealed| ui_revealed_transaction(&revealed.transaction, outputs)),
     );
+    let revealed_by_commitment = revealed_transactions
+        .iter()
+        .map(|revealed| (revealed.commitment.clone(), revealed.transaction.clone()))
+        .collect::<BTreeMap<_, _>>();
+    let reveal_bundles = block
+        .reveal_bundles
+        .iter()
+        .map(|bundle| UiRevealBundle {
+            slot: bundle.slot,
+            member: bundle.member.clone(),
+            hash: bundle.bundle_hash(),
+            byte_size: bundle.serialized_size_bytes().unwrap_or_default(),
+            reveals: bundle
+                .reveals
+                .iter()
+                .map(|reveal| {
+                    revealed_by_commitment
+                        .get(&reveal.commitment)
+                        .map(|tx| ui_revealed_transaction(tx, outputs))
+                        .unwrap_or_else(|| ui_blinded_reveal(reveal))
+                })
+                .collect(),
+        })
+        .collect();
     UiBlock {
         height: block.height,
         prev_hash: block.prev_hash,
@@ -1834,8 +1869,9 @@ fn ui_block(
         transactions,
         revealed_transactions: revealed_transactions
             .iter()
-            .map(|tx| ui_revealed_transaction(tx, outputs))
+            .map(|revealed| ui_revealed_transaction(&revealed.transaction, outputs))
             .collect(),
+        reveal_bundles,
         hash: block.hash,
     }
 }
@@ -2034,6 +2070,11 @@ fn known_output_index(
         );
     }
     let revealed = revealed_blinded_transactions(snapshot).unwrap_or_default();
+    let blocks_by_height = snapshot
+        .blocks
+        .iter()
+        .map(|block| (block.height, block))
+        .collect::<BTreeMap<_, _>>();
     for block in &snapshot.blocks {
         for transaction in &block.transactions {
             index_transaction_outputs(&mut outputs, transaction);
@@ -2050,14 +2091,33 @@ fn known_output_index(
     }
     for revealed in revealed {
         index_transaction_outputs(&mut outputs, &revealed.transaction);
-        if revealed.transaction.fee() > 0 {
-            outputs.insert(
-                blinded_fee_outpoint(&revealed.commitment),
-                TxOutput {
-                    address: revealed.included_by,
-                    amount: revealed.transaction.fee(),
-                },
-            );
+        let fee = revealed.transaction.fee();
+        if fee > 0 {
+            let committer_fee = fee / 2;
+            if committer_fee > 0 {
+                outputs.insert(
+                    blinded_committer_fee_outpoint(&revealed.commitment),
+                    TxOutput {
+                        address: revealed.included_by,
+                        amount: committer_fee,
+                    },
+                );
+            }
+            if let Some(block) = blocks_by_height.get(&revealed.height) {
+                let executor_full_fee = fee - committer_fee;
+                let executor_fee = executor_full_fee
+                    .saturating_mul(block.included_reveal_bundle_count() as u64)
+                    / crate::domain::REVEAL_COMMITTEE_SIZE as u64;
+                if executor_fee > 0 {
+                    outputs.insert(
+                        blinded_executor_fee_outpoint(&revealed.commitment),
+                        TxOutput {
+                            address: block.miner.clone(),
+                            amount: executor_fee,
+                        },
+                    );
+                }
+            }
         }
     }
     for transaction in pending {
@@ -2103,10 +2163,17 @@ fn reward_outpoint(block_hash: &str) -> OutPoint {
     }
 }
 
-fn blinded_fee_outpoint(commitment: &str) -> OutPoint {
+fn blinded_committer_fee_outpoint(commitment: &str) -> OutPoint {
     OutPoint {
         txid: commitment.to_string(),
         index: u32::MAX - 1,
+    }
+}
+
+fn blinded_executor_fee_outpoint(commitment: &str) -> OutPoint {
+    OutPoint {
+        txid: commitment.to_string(),
+        index: u32::MAX - 2,
     }
 }
 
@@ -3023,6 +3090,10 @@ const INDEX_HTML: &str = r#"<!doctype html>
     .rank-number { color: #d7f2ff; font-weight: 700; }
     .rank-details { display: grid; gap: 6px; min-width: 0; }
     .tx-list { display: grid; gap: 8px; }
+    .tx-section { display: grid; gap: 8px; }
+    .tx-section + .tx-section { margin-top: 10px; padding-top: 10px; border-top: 1px solid #2f363c; }
+    .tx-section-title { display: flex; align-items: center; justify-content: space-between; gap: 8px; color: #f4f7f8; font-size: 13px; font-weight: 800; }
+    .tx-section-meta { color: #8e979e; font-size: 12px; font-weight: 600; }
     .tx-card, .mempool-item { position: relative; display: grid; gap: 6px; border: 1px solid #2f363c; border-radius: 8px; padding: 12px; background: #111316; cursor: pointer; text-align: left; }
     .tx-card .pill, .mempool-item .pill { position: absolute; top: 10px; right: 10px; }
     .pill { display: inline-flex; align-items: center; border-radius: 999px; padding: 2px 8px; font-size: 12px; font-weight: 800; background: #2b3136; color: #d6dee2; }
@@ -3496,22 +3567,43 @@ const INDEX_HTML: &str = r#"<!doctype html>
               </div>
               <div class="tx-list">
                 <h3>Transactions</h3>
-                <template x-for="tx in selectedBlock.transactions" :key="tx.signature">
-                  <div class="tx-card" role="button" tabindex="0" @click="openTransactionModal(tx, { source: 'Block', blockHeight: selectedBlock.height, blockFinalizer: selectedBlock.miner })" @keydown.enter.prevent="openTransactionModal(tx, { source: 'Block', blockHeight: selectedBlock.height, blockFinalizer: selectedBlock.miner })" @keydown.space.prevent="openTransactionModal(tx, { source: 'Block', blockHeight: selectedBlock.height, blockFinalizer: selectedBlock.miner })">
-                    <span class="pill" :class="txPillClass(tx)" x-text="txPillLabel(tx)"></span>
-                    <div class="tx-field" x-show="!isBlindedMempoolItem(tx)"><span class="tx-label">Amount</span><span class="tx-value money">IUNA <span x-text="amountLabel(txAmount(tx))"></span></span></div>
-                    <div class="tx-field"><span class="tx-label">Fee</span><span class="tx-value money">IUNA <span x-text="amountLabel(tx.fee ?? 0)"></span></span></div>
-                    <div class="tx-field" x-show="!isBlindedMempoolItem(tx)"><span class="tx-label">From</span><code class="tx-value hash" x-text="short(txFrom(tx))"></code></div>
-                    <div class="tx-field" x-show="txTo(tx)"><span class="tx-label">To</span><code class="tx-value hash" x-text="short(txTo(tx))"></code></div>
-                    <div class="tx-field" x-show="isBlindedMempoolItem(tx)"><span class="tx-label">Commitment</span><code class="tx-value hash" x-text="short(tx.commitment || tx.signature)"></code></div>
-                    <div class="tx-field" x-show="tx.encrypted_size || tx.encryptedSize"><span class="tx-label">Bytes</span><span class="tx-value number" x-text="tx.encrypted_size || tx.encryptedSize"></span></div>
-                    <div class="tx-field" x-show="tx.expires_at_height || tx.expiresAtHeight"><span class="tx-label">Expires</span><span class="tx-value number" x-text="tx.expires_at_height || tx.expiresAtHeight"></span></div>
-                    <div class="tx-field" x-show="isMineTx(tx)"><span class="tx-label">Proof Bits</span><span class="tx-value number"><span x-text="txProofBits(tx) ?? '-'"></span> / <span x-text="txDifficultyBits(tx) ?? '-'"></span></span></div>
-                    <div class="tx-field" x-show="isMineTx(tx)"><span class="tx-label">Proof Hash</span><code class="tx-value hash" x-text="short(txProofHash(tx))"></code></div>
-                    <div class="tx-field" x-show="!isBlindedMempoolItem(tx)"><span class="tx-label">Signature</span><code class="tx-value hash" x-text="short(tx.signature)"></code></div>
+                <div class="tx-section">
+                  <div class="tx-section-title"><span>Envelope</span><span class="tx-section-meta" x-text="short(selectedBlock.miner)"></span></div>
+                  <template x-for="tx in selectedBlock.transactions" :key="tx.signature">
+                    <div class="tx-card" role="button" tabindex="0" @click="openTransactionModal(tx, { source: 'Envelope', blockHeight: selectedBlock.height, blockFinalizer: selectedBlock.miner })" @keydown.enter.prevent="openTransactionModal(tx, { source: 'Envelope', blockHeight: selectedBlock.height, blockFinalizer: selectedBlock.miner })" @keydown.space.prevent="openTransactionModal(tx, { source: 'Envelope', blockHeight: selectedBlock.height, blockFinalizer: selectedBlock.miner })">
+                      <span class="pill" :class="txPillClass(tx)" x-text="txPillLabel(tx)"></span>
+                      <div class="tx-field" x-show="!isBlindedMempoolItem(tx)"><span class="tx-label">Amount</span><span class="tx-value money">IUNA <span x-text="amountLabel(txAmount(tx))"></span></span></div>
+                      <div class="tx-field"><span class="tx-label">Fee</span><span class="tx-value money">IUNA <span x-text="amountLabel(tx.fee ?? 0)"></span></span></div>
+                      <div class="tx-field" x-show="!isBlindedMempoolItem(tx)"><span class="tx-label">From</span><code class="tx-value hash" x-text="short(txFrom(tx))"></code></div>
+                      <div class="tx-field" x-show="txTo(tx)"><span class="tx-label">To</span><code class="tx-value hash" x-text="short(txTo(tx))"></code></div>
+                      <div class="tx-field" x-show="isBlindedMempoolItem(tx)"><span class="tx-label">Commitment</span><code class="tx-value hash" x-text="short(tx.commitment || tx.signature)"></code></div>
+                      <div class="tx-field" x-show="tx.encrypted_size || tx.encryptedSize"><span class="tx-label">Bytes</span><span class="tx-value number" x-text="tx.encrypted_size || tx.encryptedSize"></span></div>
+                      <div class="tx-field" x-show="tx.expires_at_height || tx.expiresAtHeight"><span class="tx-label">Expires</span><span class="tx-value number" x-text="tx.expires_at_height || tx.expiresAtHeight"></span></div>
+                      <div class="tx-field" x-show="isMineTx(tx)"><span class="tx-label">Proof Bits</span><span class="tx-value number"><span x-text="txProofBits(tx) ?? '-'"></span> / <span x-text="txDifficultyBits(tx) ?? '-'"></span></span></div>
+                      <div class="tx-field" x-show="isMineTx(tx)"><span class="tx-label">Proof Hash</span><code class="tx-value hash" x-text="short(txProofHash(tx))"></code></div>
+                      <div class="tx-field" x-show="!isBlindedMempoolItem(tx)"><span class="tx-label">Signature</span><code class="tx-value hash" x-text="short(tx.signature)"></code></div>
+                    </div>
+                  </template>
+                  <div class="muted" x-show="selectedBlock.transactions.length === 0">No envelope transactions</div>
+                </div>
+                <template x-for="bundle in selectedBlock.reveal_bundles || selectedBlock.revealBundles || []" :key="bundle.hash">
+                  <div class="tx-section">
+                    <div class="tx-section-title"><span x-text="`Reveal bundle ${bundle.slot}`"></span><span class="tx-section-meta"><span x-text="short(bundle.member)"></span> · <span x-text="bundle.byte_size || bundle.byteSize || 0"></span>B</span></div>
+                    <template x-for="tx in bundle.reveals" :key="tx.signature">
+                      <div class="tx-card" role="button" tabindex="0" @click="openTransactionModal(tx, { source: 'Reveal bundle', blockHeight: selectedBlock.height, blockFinalizer: bundle.member })" @keydown.enter.prevent="openTransactionModal(tx, { source: 'Reveal bundle', blockHeight: selectedBlock.height, blockFinalizer: bundle.member })" @keydown.space.prevent="openTransactionModal(tx, { source: 'Reveal bundle', blockHeight: selectedBlock.height, blockFinalizer: bundle.member })">
+                        <span class="pill" :class="txPillClass(tx)" x-text="txPillLabel(tx)"></span>
+                        <div class="tx-field" x-show="!isBlindedMempoolItem(tx)"><span class="tx-label">Amount</span><span class="tx-value money">IUNA <span x-text="amountLabel(txAmount(tx))"></span></span></div>
+                        <div class="tx-field"><span class="tx-label">Fee</span><span class="tx-value money">IUNA <span x-text="amountLabel(tx.fee ?? 0)"></span></span></div>
+                        <div class="tx-field" x-show="!isBlindedMempoolItem(tx)"><span class="tx-label">From</span><code class="tx-value hash" x-text="short(txFrom(tx))"></code></div>
+                        <div class="tx-field" x-show="txTo(tx)"><span class="tx-label">To</span><code class="tx-value hash" x-text="short(txTo(tx))"></code></div>
+                        <div class="tx-field" x-show="isBlindedMempoolItem(tx)"><span class="tx-label">Commitment</span><code class="tx-value hash" x-text="short(tx.commitment || tx.signature)"></code></div>
+                        <div class="tx-field" x-show="!isBlindedMempoolItem(tx)"><span class="tx-label">Signature</span><code class="tx-value hash" x-text="short(tx.signature)"></code></div>
+                      </div>
+                    </template>
+                    <div class="muted" x-show="bundle.reveals.length === 0">No reveals in bundle</div>
                   </div>
                 </template>
-                <div class="muted" x-show="selectedBlock.transactions.length === 0">No transactions</div>
+                <div class="muted" x-show="selectedBlock.transactions.length === 0 && !(selectedBlock.reveal_bundles || selectedBlock.revealBundles || []).length">No transactions</div>
               </div>
             </div>
           </template>
@@ -4017,7 +4109,13 @@ mod tests {
         let mut block = fake_block(7, Vec::new());
         block.blinded_transactions = vec![built.transaction.clone()];
 
-        let ui_block = super::ui_block(block, &BTreeMap::new(), &BTreeMap::new(), &[transfer]);
+        let revealed = crate::domain::RevealedBlindedTransaction {
+            height: 7,
+            commitment: built.transaction.commitment.clone(),
+            included_by: "miner".to_string(),
+            transaction: transfer,
+        };
+        let ui_block = super::ui_block(block, &BTreeMap::new(), &BTreeMap::new(), &[revealed]);
 
         assert_eq!(ui_block.transactions.len(), 2);
         assert_eq!(ui_block.transactions[0].kind, "blinded");
@@ -4047,7 +4145,14 @@ mod tests {
         let mut commit_block = fake_block(7, Vec::new());
         commit_block.blinded_transactions = vec![built.transaction.clone()];
         let mut reveal_block = fake_block(8, Vec::new());
-        reveal_block.blinded_reveals = vec![built.reveal.clone()];
+        reveal_block.reveal_bundles = vec![crate::domain::RevealBundle {
+            height: reveal_block.height,
+            prev_hash: reveal_block.prev_hash.clone(),
+            slot: 0,
+            member: reveal_block.miner.clone(),
+            reveals: vec![built.reveal.clone()],
+            signature: "11".repeat(64),
+        }];
         let snapshot = fake_snapshot(
             allocations,
             vec![commit_block.clone(), reveal_block.clone()],
@@ -4904,7 +5009,14 @@ mod tests {
         let mut commit_block = fake_block(7, Vec::new());
         commit_block.blinded_transactions = vec![built.transaction];
         let mut reveal_block = fake_block(8, Vec::new());
-        reveal_block.blinded_reveals = vec![built.reveal];
+        reveal_block.reveal_bundles = vec![crate::domain::RevealBundle {
+            height: reveal_block.height,
+            prev_hash: reveal_block.prev_hash.clone(),
+            slot: 0,
+            member: reveal_block.miner.clone(),
+            reveals: vec![built.reveal],
+            signature: "11".repeat(64),
+        }];
         let chain = vec![commit_block.clone(), reveal_block.clone()];
         let snapshot = fake_snapshot(BTreeMap::new(), chain.clone());
         let revealed_by_height = super::revealed_transactions_by_height(&snapshot);
@@ -5058,7 +5170,7 @@ mod tests {
             vdf_output: "vdf".to_string(),
             leader_proof: None,
             blinded_transactions: Vec::new(),
-            blinded_reveals: Vec::new(),
+            reveal_bundles: Vec::new(),
             transactions,
             hash: format!("hash-{height}"),
         }

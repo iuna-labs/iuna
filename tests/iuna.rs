@@ -1583,7 +1583,7 @@ fn joined_nodes_import_transfer_block_and_blinded_burn_reveal() {
 
     queue_plaintext_burn(network.node_mut("a").unwrap(), &alice, 1);
     let reveal_block = network.node_mut("a").unwrap().mine_one_at(7).unwrap();
-    assert_eq!(reveal_block.blinded_reveals.len(), 1);
+    assert_eq!(reveal_block.all_blinded_reveals().len(), 1);
     mined_by.push(reveal_block.miner.clone());
     network.deliver_until_idle().unwrap();
     let revealed = revealed_blinded_transactions(&network.node("a").unwrap().chain_snapshot())
@@ -1955,7 +1955,7 @@ fn multiple_peers_can_contribute_blinded_burns_to_lottery_ranks() {
         .unwrap()
         .mine_one_at(2)
         .unwrap();
-    assert_eq!(reveal_block.blinded_reveals.len(), 4);
+    assert_eq!(reveal_block.all_blinded_reveals().len(), 4);
     network.deliver_until_idle().unwrap();
 
     for height in 3..=4 {

@@ -11,7 +11,7 @@ use serde::Serialize;
 
 use crate::domain::{
     Amount, BlindedReveal, BlindedTransaction, Block, ChainSnapshot, FinalizerMode, LaunchProfile,
-    LeaderProof, Ledger, MINE_REWARD, OutPoint, Transaction, TxInput, TxOutput,
+    LeaderProof, Ledger, MINE_REWARD, OutPoint, RevealBundle, Transaction, TxInput, TxOutput,
     revealed_blinded_transactions,
 };
 
@@ -299,7 +299,7 @@ fn clear_metrics_in_transaction(transaction: &rusqlite::Transaction<'_>) -> Resu
 }
 
 const COMPACT_SNAPSHOT_MAGIC: &[u8] = b"IUNA-SNAPSHOT";
-const COMPACT_SNAPSHOT_VERSION: u8 = 1;
+const COMPACT_SNAPSHOT_VERSION: u8 = 2;
 
 fn encode_compact_snapshot(snapshot: &ChainSnapshot) -> Result<Vec<u8>> {
     let mut writer = CompactWriter::default();
@@ -410,9 +410,9 @@ fn encode_block_body(writer: &mut CompactWriter, block: &Block) -> Result<()> {
     for transaction in &block.blinded_transactions {
         encode_blinded_transaction(writer, transaction)?;
     }
-    writer.varint(block.blinded_reveals.len() as u64);
-    for reveal in &block.blinded_reveals {
-        encode_blinded_reveal(writer, reveal)?;
+    writer.varint(block.reveal_bundles.len() as u64);
+    for bundle in &block.reveal_bundles {
+        encode_reveal_bundle(writer, bundle)?;
     }
     writer.varint(block.transactions.len() as u64);
     for transaction in &block.transactions {
@@ -448,7 +448,7 @@ fn decode_block_body(
         None
     };
     let blinded_transactions = decode_vec(reader, decode_blinded_transaction)?;
-    let blinded_reveals = decode_vec(reader, decode_blinded_reveal)?;
+    let reveal_bundles = decode_vec(reader, decode_reveal_bundle)?;
     let transactions = decode_vec(reader, decode_transaction)?;
     let hash = reader.hex()?;
     Ok(Block {
@@ -463,7 +463,7 @@ fn decode_block_body(
         vdf_output,
         leader_proof,
         blinded_transactions,
-        blinded_reveals,
+        reveal_bundles,
         transactions,
         hash,
     })
@@ -505,6 +505,30 @@ fn decode_blinded_reveal(reader: &mut CompactReader<'_>) -> Result<BlindedReveal
     Ok(BlindedReveal {
         commitment: reader.hex()?,
         key: reader.hex()?,
+    })
+}
+
+fn encode_reveal_bundle(writer: &mut CompactWriter, bundle: &RevealBundle) -> Result<()> {
+    writer.varint(bundle.height);
+    writer.hex(&bundle.prev_hash)?;
+    writer.varint(u64::from(bundle.slot));
+    writer.hex(&bundle.member)?;
+    writer.varint(bundle.reveals.len() as u64);
+    for reveal in &bundle.reveals {
+        encode_blinded_reveal(writer, reveal)?;
+    }
+    writer.hex(&bundle.signature)?;
+    Ok(())
+}
+
+fn decode_reveal_bundle(reader: &mut CompactReader<'_>) -> Result<RevealBundle> {
+    Ok(RevealBundle {
+        height: reader.varint()?,
+        prev_hash: reader.hex()?,
+        slot: u8::try_from(reader.varint()?).context("reveal bundle slot does not fit u8")?,
+        member: reader.hex()?,
+        reveals: decode_vec(reader, decode_blinded_reveal)?,
+        signature: reader.hex()?,
     })
 }
 
@@ -844,12 +868,9 @@ fn metrics_from_snapshot(snapshot: &ChainSnapshot) -> Result<Vec<BlockMetricRow>
     let ledger = Ledger::from_persisted_snapshot(snapshot.clone())
         .context("failed to rebuild ledger for metrics")?;
     let revealed = revealed_blinded_transactions(snapshot)?.into_iter().fold(
-        std::collections::BTreeMap::<u64, Vec<Transaction>>::new(),
+        std::collections::BTreeMap::<u64, Vec<crate::domain::RevealedBlindedTransaction>>::new(),
         |mut by_height, revealed| {
-            by_height
-                .entry(revealed.height)
-                .or_default()
-                .push(revealed.transaction);
+            by_height.entry(revealed.height).or_default().push(revealed);
             by_height
         },
     );
@@ -872,14 +893,11 @@ fn metrics_from_snapshot(snapshot: &ChainSnapshot) -> Result<Vec<BlockMetricRow>
         let mut burn_count = 0_u64;
         let mut mine_count = 0_u64;
         let mut burned_amount = 0_u64;
+        let mut burned_fee_amount = 0_u64;
         let mut mine_issued_amount = 0_u64;
         let mut fees_amount = 0_u64;
 
-        for transaction in block
-            .transactions
-            .iter()
-            .chain(revealed_transactions.iter())
-        {
+        for transaction in &block.transactions {
             fees_amount = fees_amount
                 .checked_add(transaction.fee())
                 .context("block metric fees overflow")?;
@@ -900,8 +918,39 @@ fn metrics_from_snapshot(snapshot: &ChainSnapshot) -> Result<Vec<BlockMetricRow>
                 }
             }
         }
+        for revealed in &revealed_transactions {
+            let transaction = &revealed.transaction;
+            fees_amount = fees_amount
+                .checked_add(transaction.fee())
+                .context("block metric fees overflow")?;
+            let committer_fee = transaction.fee() / 2;
+            let executor_full_fee = transaction.fee() - committer_fee;
+            let executor_fee = executor_full_fee
+                .saturating_mul(block.included_reveal_bundle_count() as u64)
+                / crate::domain::REVEAL_COMMITTEE_SIZE as u64;
+            burned_fee_amount = burned_fee_amount
+                .checked_add(executor_full_fee.saturating_sub(executor_fee))
+                .context("block metric burned fees overflow")?;
+            match transaction {
+                Transaction::Transfer { .. } => transfer_count += 1,
+                Transaction::Burn { amount, .. } => {
+                    burn_count += 1;
+                    burned_amount = burned_amount
+                        .checked_add(*amount)
+                        .context("block metric burns overflow")?;
+                }
+                Transaction::Mine { .. } => {
+                    mine_count += 1;
+                    mine_issued_amount = mine_issued_amount
+                        .checked_add(MINE_REWARD)
+                        .and_then(|amount| amount.checked_add(transaction.fee()))
+                        .context("block metric mine issuance overflow")?;
+                }
+            }
+        }
         total_burned_amount = total_burned_amount
             .checked_add(burned_amount)
+            .and_then(|amount| amount.checked_add(burned_fee_amount))
             .context("total burned metric overflows")?;
 
         let issued_amount = block_issued_amount(block.height, block.reward, mine_issued_amount)
@@ -918,6 +967,7 @@ fn metrics_from_snapshot(snapshot: &ChainSnapshot) -> Result<Vec<BlockMetricRow>
             })?;
         circulating_supply = circulating_supply
             .checked_sub(burned_amount)
+            .and_then(|amount| amount.checked_sub(burned_fee_amount))
             .with_context(|| {
                 format!(
                     "circulating supply metric underflows while subtracting burns at block {}",
@@ -978,7 +1028,7 @@ mod tests {
 
     use tempfile::tempdir;
 
-    use crate::domain::{BLOCK_REWARD, GenesisBurn, Ledger, Wallet};
+    use crate::domain::{BLOCK_REWARD, GenesisBurn, Ledger, Wallet, run_vdf};
 
     use super::{
         BlockMetricRow, SqliteChainStore, decode_compact_snapshot, encode_compact_snapshot,
@@ -1035,7 +1085,7 @@ mod tests {
             .build_blinded_burn(&carol, 3, 7, ledger.height() + 4)
             .unwrap();
         ledger
-            .submit_blinded_transaction(blinded.transaction)
+            .submit_blinded_transaction(blinded.transaction.clone())
             .unwrap();
         let leader = ledger.expected_leader_for_next_block().unwrap();
         let wallet = wallets
@@ -1045,6 +1095,10 @@ mod tests {
         let burn = ledger.build_burn(wallet, 1, 0).unwrap();
         ledger.submit_transaction(burn).unwrap();
         let block = ledger.mine_next_block(wallet, 1).unwrap();
+        assert_eq!(
+            block.blinded_transactions,
+            vec![blinded.transaction.clone()]
+        );
         ledger.apply_locally_mined_block(block).unwrap();
         ledger.submit_blinded_reveal(blinded.reveal).unwrap();
         let leader = ledger.expected_leader_for_next_block().unwrap();
@@ -1054,7 +1108,24 @@ mod tests {
             .unwrap();
         let burn = ledger.build_burn(wallet, 1, 0).unwrap();
         ledger.submit_transaction(burn).unwrap();
-        let block = ledger.mine_next_block(wallet, 2).unwrap();
+        let bundles = ledger
+            .reveal_committee_for_next_block()
+            .into_iter()
+            .filter_map(|member| {
+                let wallet = wallets
+                    .iter()
+                    .find(|wallet| wallet.address() == member.owner)
+                    .unwrap();
+                ledger.build_reveal_bundle(wallet).unwrap()
+            })
+            .collect::<Vec<_>>();
+        assert!(!bundles.is_empty());
+        let prepared = ledger
+            .prepare_next_block_with_reveal_bundles(wallet.address(), 2, bundles)
+            .unwrap();
+        let vdf_output = run_vdf(prepared.vdf_seed(), prepared.vdf_rounds());
+        let block = prepared.finish(wallet, vdf_output);
+        assert_eq!(block.all_blinded_reveals().len(), 1);
         ledger.apply_locally_mined_block(block).unwrap();
 
         let snapshot = ledger.snapshot();
@@ -1165,7 +1236,24 @@ mod tests {
             .unwrap();
         let burn = ledger.build_burn(wallet, 1, 0).unwrap();
         ledger.submit_transaction(burn).unwrap();
-        let block = ledger.mine_next_block(wallet, 2).unwrap();
+        let bundles = ledger
+            .reveal_committee_for_next_block()
+            .into_iter()
+            .filter_map(|member| {
+                let wallet = wallets
+                    .iter()
+                    .find(|wallet| wallet.address() == member.owner)
+                    .unwrap();
+                ledger.build_reveal_bundle(wallet).unwrap()
+            })
+            .collect::<Vec<_>>();
+        assert!(!bundles.is_empty());
+        let prepared = ledger
+            .prepare_next_block_with_reveal_bundles(wallet.address(), 2, bundles)
+            .unwrap();
+        let vdf_output = run_vdf(prepared.vdf_seed(), prepared.vdf_rounds());
+        let block = prepared.finish(wallet, vdf_output);
+        assert_eq!(block.all_blinded_reveals().len(), 1);
         ledger.apply_locally_mined_block(block).unwrap();
 
         store.save_with_metrics(&ledger.snapshot(), true).unwrap();

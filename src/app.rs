@@ -1,5 +1,5 @@
 use std::{
-    collections::BTreeMap,
+    collections::{BTreeMap, BTreeSet},
     sync::{
         Arc,
         atomic::{AtomicBool, Ordering},
@@ -16,8 +16,8 @@ use crate::domain::{
     Amount, BlindedReveal, BlindedTransaction, Block, BuiltBlindedTransaction, BurnLeaderRank,
     ChainSnapshot, ChainStatus, DEFAULT_FEE_PER_BYTE, DEFAULT_TRANSACTION_FEE, Ledger,
     MAX_BLINDED_TRANSACTION_EXPIRY_HEIGHTS, MINE_FINALIZER_FEE, OutPoint, OwnedBlindedTransaction,
-    PreparedBlock, StratumMineShare, StratumMineTemplate, Transaction, TransactionSubmitOutcome,
-    VDF_TARGET_BLOCK_MS, Wallet, run_vdf,
+    PreparedBlock, RevealBundle, StratumMineShare, StratumMineTemplate, Transaction,
+    TransactionSubmitOutcome, VDF_TARGET_BLOCK_MS, Wallet, run_vdf,
 };
 
 pub type SharedNode = Arc<Mutex<NodeCore>>;
@@ -26,7 +26,7 @@ pub type SharedPeerBook = Arc<Mutex<PeerBook>>;
 pub const DEFAULT_BURN_PER_BLOCK: Amount = 0;
 pub const DEFAULT_VDF_ROUNDS: u32 = 67_000_000;
 pub const PROTOCOL_VERSION: u32 = 1;
-pub const NETWORK_ID: &str = "iuna-devnet-v2";
+pub const NETWORK_ID: &str = "iuna-devnet-v3";
 pub const BLOCK_REQUEST_LIMIT: usize = 128;
 pub const TRANSACTION_BATCH_LIMIT: usize = 128;
 const IMPORT_REBROADCAST_LIMIT: usize = 128;
@@ -120,6 +120,10 @@ pub enum GossipEnvelope {
     BlindedReveal(BlindedReveal),
     BlindedReveals {
         reveals: Vec<BlindedReveal>,
+    },
+    RevealBundle(RevealBundle),
+    RevealBundles {
+        bundles: Vec<RevealBundle>,
     },
     Block(Block),
     Blocks {
@@ -249,6 +253,8 @@ pub struct NodeCore {
     owned_blinded_reveals: BTreeMap<String, BlindedReveal>,
     owned_blinded_payloads: BTreeMap<String, Transaction>,
     owned_blinded_outbox_version: u64,
+    reveal_bundles: BTreeMap<(u64, u8), RevealBundle>,
+    equivocated_reveal_bundle_slots: BTreeSet<(u64, u8)>,
     local_block_anchor_burn: Option<(u64, Transaction)>,
     outbox: Vec<GossipEnvelope>,
 }
@@ -339,6 +345,8 @@ impl NodeCore {
             owned_blinded_reveals: BTreeMap::new(),
             owned_blinded_payloads: BTreeMap::new(),
             owned_blinded_outbox_version: 0,
+            reveal_bundles: BTreeMap::new(),
+            equivocated_reveal_bundle_slots: BTreeSet::new(),
             local_block_anchor_burn: None,
             outbox: Vec::new(),
         }
@@ -362,6 +370,8 @@ impl NodeCore {
         self.owned_blinded_reveals.clear();
         self.owned_blinded_payloads.clear();
         self.bump_owned_blinded_outbox_version();
+        self.reveal_bundles.clear();
+        self.equivocated_reveal_bundle_slots.clear();
         self.local_block_anchor_burn = None;
     }
 
@@ -484,7 +494,8 @@ impl NodeCore {
         Ok(())
     }
 
-    pub fn mempool_gossip(&self) -> Vec<GossipEnvelope> {
+    pub fn mempool_gossip(&mut self) -> Vec<GossipEnvelope> {
+        let _ = self.publish_reveal_bundle_for_next_block();
         let mut gossip = Vec::new();
         gossip.extend(
             self.ledger
@@ -500,6 +511,13 @@ impl NodeCore {
                 .chunks(TRANSACTION_BATCH_LIMIT)
                 .map(|chunk| GossipEnvelope::BlindedReveals {
                     reveals: chunk.to_vec(),
+                }),
+        );
+        gossip.extend(
+            self.usable_reveal_bundles()
+                .chunks(TRANSACTION_BATCH_LIMIT)
+                .map(|chunk| GossipEnvelope::RevealBundles {
+                    bundles: chunk.to_vec(),
                 }),
         );
         gossip
@@ -839,6 +857,78 @@ impl NodeCore {
         Ok(())
     }
 
+    pub fn receive_reveal_bundle(&mut self, bundle: RevealBundle) -> Result<()> {
+        let next_height = self.ledger.height().saturating_add(1);
+        if bundle.height <= self.ledger.height() {
+            return Ok(());
+        }
+        if bundle.height > next_height {
+            return Ok(());
+        }
+        let key = (bundle.height, bundle.slot);
+        if self.equivocated_reveal_bundle_slots.contains(&key) {
+            return Ok(());
+        }
+        if let Some(existing) = self.reveal_bundles.get(&key) {
+            if existing.canonical() != bundle.canonical() {
+                self.reveal_bundles.remove(&key);
+                self.equivocated_reveal_bundle_slots.insert(key);
+            }
+            return Ok(());
+        }
+        self.ledger
+            .validate_next_block_reveal_bundles(vec![bundle.clone()])?;
+        self.reveal_bundles.insert(key, bundle.clone());
+        self.outbox.push(GossipEnvelope::RevealBundle(bundle));
+        Ok(())
+    }
+
+    fn usable_reveal_bundles(&self) -> Vec<RevealBundle> {
+        let next_height = self.ledger.height().saturating_add(1);
+        let mut bundles = self
+            .reveal_bundles
+            .iter()
+            .filter(|((height, slot), _)| {
+                *height == next_height
+                    && !self
+                        .equivocated_reveal_bundle_slots
+                        .contains(&(*height, *slot))
+            })
+            .map(|(_, bundle)| bundle.clone())
+            .collect::<Vec<_>>();
+        bundles.sort_by_key(|bundle| bundle.slot);
+        bundles
+    }
+
+    fn prune_reveal_bundles(&mut self) {
+        let height = self.ledger.height();
+        self.reveal_bundles
+            .retain(|(bundle_height, _), _| *bundle_height > height);
+        self.equivocated_reveal_bundle_slots
+            .retain(|(bundle_height, _)| *bundle_height > height);
+    }
+
+    fn publish_reveal_bundle_for_next_block(&mut self) -> Result<()> {
+        let wallet = match &self.wallet {
+            NodeWallet::Unlocked(wallet) => wallet,
+            NodeWallet::Locked { .. } => return Ok(()),
+        };
+        let Some(bundle) = self.ledger.build_reveal_bundle(wallet)? else {
+            return Ok(());
+        };
+        let key = (bundle.height, bundle.slot);
+        if self.equivocated_reveal_bundle_slots.contains(&key)
+            || self.reveal_bundles.contains_key(&key)
+        {
+            return Ok(());
+        }
+        self.ledger
+            .validate_next_block_reveal_bundles(vec![bundle.clone()])?;
+        self.reveal_bundles.insert(key, bundle.clone());
+        self.outbox.push(GossipEnvelope::RevealBundle(bundle));
+        Ok(())
+    }
+
     fn submit_owned_blinded_transaction(
         &mut self,
         built: BuiltBlindedTransaction,
@@ -908,7 +998,7 @@ impl NodeCore {
         let before = self.owned_blinded_transactions.len()
             + self.owned_blinded_reveals.len()
             + self.owned_blinded_payloads.len();
-        for reveal in &block.blinded_reveals {
+        for reveal in block.all_blinded_reveals() {
             self.owned_blinded_transactions.remove(&reveal.commitment);
             self.owned_blinded_reveals.remove(&reveal.commitment);
             self.owned_blinded_payloads.remove(&reveal.commitment);
@@ -1101,15 +1191,17 @@ impl NodeCore {
             }
         }
 
+        if let Err(error) = self.publish_reveal_bundle_for_next_block() {
+            plan.skipped_reason = Some(format!("{error:#}"));
+            return plan;
+        }
+
         let wallet_rank = self
             .ledger
             .finalizer_rank_for_next_block(self.wallet.address());
         if wallet_rank.is_none() {
             if self.ledger.recovery_block_available_at(timestamp_ms) {
-                match self
-                    .ledger
-                    .prepare_recovery_block(self.wallet.address(), timestamp_ms)
-                {
+                match self.prepare_recovery_block_with_local_anchor(timestamp_ms) {
                     Ok(work) => {
                         plan.work = Some(work);
                     }
@@ -1342,12 +1434,20 @@ impl NodeCore {
 
     fn prepare_next_block_with_local_anchor(&self, timestamp_ms: u64) -> Result<PreparedBlock> {
         self.ledger_with_local_block_anchor()?
-            .prepare_next_block(self.wallet.address(), timestamp_ms)
+            .prepare_next_block_with_reveal_bundles(
+                self.wallet.address(),
+                timestamp_ms,
+                self.usable_reveal_bundles(),
+            )
     }
 
     fn prepare_recovery_block_with_local_anchor(&self, timestamp_ms: u64) -> Result<PreparedBlock> {
         self.ledger_with_local_block_anchor()?
-            .prepare_recovery_block(self.wallet.address(), timestamp_ms)
+            .prepare_recovery_block_with_reveal_bundles(
+                self.wallet.address(),
+                timestamp_ms,
+                self.usable_reveal_bundles(),
+            )
     }
 
     fn ledger_with_local_block_anchor(&self) -> Result<Ledger> {
@@ -1372,15 +1472,10 @@ impl NodeCore {
     }
 
     pub fn mine_one_at(&mut self, timestamp_ms: u64) -> Result<Block> {
-        let block = self
-            .ledger
-            .mine_next_block(self.wallet.unlocked()?, timestamp_ms)?;
-        self.ledger.apply_locally_mined_block(block.clone())?;
-        self.clear_stale_local_block_anchor();
-        self.prune_owned_blinded_payloads_for_block(&block);
-        self.outbox.push(GossipEnvelope::Block(block.clone()));
-        self.publish_owned_reveals_for_block(&block)?;
-        Ok(block)
+        self.publish_reveal_bundle_for_next_block()?;
+        let work = self.prepare_next_block_with_local_anchor(timestamp_ms)?;
+        let vdf_output = run_vdf(work.vdf_seed(), work.vdf_rounds());
+        self.complete_prepared_block_at(work, vdf_output, timestamp_ms)
     }
 
     pub fn complete_prepared_block(
@@ -1400,6 +1495,7 @@ impl NodeCore {
         let block = work.finish_at(self.wallet.unlocked()?, vdf_output, timestamp_ms);
         self.ledger.apply_locally_mined_block(block.clone())?;
         self.clear_stale_local_block_anchor();
+        self.prune_reveal_bundles();
         self.prune_owned_blinded_payloads_for_block(&block);
         self.outbox.push(GossipEnvelope::Block(block.clone()));
         self.publish_owned_reveals_for_block(&block)?;
@@ -1428,11 +1524,19 @@ impl NodeCore {
                 }
                 Ok(())
             }
+            GossipEnvelope::RevealBundle(bundle) => self.receive_reveal_bundle(bundle),
+            GossipEnvelope::RevealBundles { bundles } => {
+                for bundle in bundles {
+                    self.receive_reveal_bundle(bundle)?;
+                }
+                Ok(())
+            }
             GossipEnvelope::Block(block) => {
                 let previous_height = self.ledger.height();
                 self.ledger.apply_block(block.clone())?;
                 if self.ledger.height() > previous_height {
                     self.clear_stale_local_block_anchor();
+                    self.prune_reveal_bundles();
                     self.prune_owned_blinded_payloads_for_block(&block);
                     self.publish_owned_reveals_for_block(&block)?;
                     self.outbox.push(GossipEnvelope::Block(block));
@@ -1446,6 +1550,7 @@ impl NodeCore {
                     self.ledger.apply_block(block.clone())?;
                     if self.ledger.height() > previous_height {
                         self.clear_stale_local_block_anchor();
+                        self.prune_reveal_bundles();
                         self.prune_owned_blinded_payloads_for_block(&block);
                         self.publish_owned_reveals_for_block(&block)?;
                         imported.push(block);
@@ -1470,6 +1575,7 @@ impl NodeCore {
             .apply_preverified_block_at(block.clone(), now_ms)?;
         if self.ledger.height() > previous_height {
             self.clear_stale_local_block_anchor();
+            self.prune_reveal_bundles();
             self.prune_owned_blinded_payloads_for_block(&block);
             self.publish_owned_reveals_for_block(&block)?;
             self.outbox.push(GossipEnvelope::Block(block));
@@ -1495,6 +1601,7 @@ impl NodeCore {
             self.last_auto_pow_mine_status = None;
             self.auto_pow_mine_cursor = None;
             self.clear_stale_local_block_anchor();
+            self.prune_reveal_bundles();
             self.enqueue_imported_blocks(previous_height)?;
         }
         Ok(())
@@ -1517,6 +1624,7 @@ impl NodeCore {
         self.last_auto_pow_mine_status = None;
         self.auto_pow_mine_cursor = None;
         self.clear_stale_local_block_anchor();
+        self.prune_reveal_bundles();
         self.enqueue_imported_blocks(previous_height)?;
         Ok(true)
     }
@@ -1533,6 +1641,7 @@ impl NodeCore {
             .ledger
             .blocks_from(previous_height + 1, IMPORT_REBROADCAST_LIMIT);
         for block in &blocks {
+            self.prune_reveal_bundles();
             self.prune_owned_blinded_payloads_for_block(block);
             self.publish_owned_reveals_for_block(block)?;
         }

@@ -1043,6 +1043,12 @@ async fn process_envelope(
         GossipEnvelope::BlindedReveals { reveals } => {
             process_blinded_reveals(network, remote_addr, known_peer, reveals).await;
         }
+        GossipEnvelope::RevealBundle(bundle) => {
+            process_reveal_bundles(network, remote_addr, known_peer, vec![bundle]).await;
+        }
+        GossipEnvelope::RevealBundles { bundles } => {
+            process_reveal_bundles(network, remote_addr, known_peer, bundles).await;
+        }
         GossipEnvelope::Block(block) => {
             let adjusted_time_ms = network_adjusted_time_ms(network).await;
             let needs_vdf = {
@@ -1168,6 +1174,34 @@ async fn process_blinded_reveals(
     network.forward_outbox().await;
 }
 
+async fn process_reveal_bundles(
+    network: &GossipNetwork,
+    remote_addr: SocketAddr,
+    known_peer: &Option<String>,
+    bundles: Vec<crate::domain::RevealBundle>,
+) {
+    let first_error = {
+        let mut node = network.inner.node.lock().await;
+        let mut first_error = None;
+        for bundle in bundles {
+            if let Err(error) = node.receive_reveal_bundle(bundle) {
+                first_error.get_or_insert(error);
+            }
+        }
+        first_error
+    };
+    record_inbound_result(
+        network,
+        known_peer,
+        remote_addr,
+        first_error
+            .map(|error| Err(anyhow!(format!("{error:#}"))))
+            .unwrap_or(Ok(())),
+    )
+    .await;
+    network.forward_outbox().await;
+}
+
 async fn maybe_request_catchup(
     network: &GossipNetwork,
     writer: &mut OwnedWriteHalf,
@@ -1223,7 +1257,7 @@ async fn catchup_payload_for_peer(
     node: &SharedNode,
     peer_status: &PeerStatus,
 ) -> Vec<GossipEnvelope> {
-    let node = node.lock().await;
+    let mut node = node.lock().await;
     let local_status = node.ledger().status();
     if node.ledger().is_setup_placeholder() {
         return Vec::new();
@@ -1420,6 +1454,25 @@ fn record_received_envelope_kind(metrics: &P2pMetricsCounters, envelope: &Gossip
             P2pMetricsCounters::inc(&metrics.blinded_reveal_envelopes_received);
             P2pMetricsCounters::add(&metrics.blinded_reveals_received, reveals.len() as u64);
         }
+        GossipEnvelope::RevealBundle(bundle) => {
+            P2pMetricsCounters::inc(&metrics.data_envelopes_received);
+            P2pMetricsCounters::inc(&metrics.blinded_reveal_envelopes_received);
+            P2pMetricsCounters::add(
+                &metrics.blinded_reveals_received,
+                bundle.reveals.len() as u64,
+            );
+        }
+        GossipEnvelope::RevealBundles { bundles } => {
+            P2pMetricsCounters::inc(&metrics.data_envelopes_received);
+            P2pMetricsCounters::inc(&metrics.blinded_reveal_envelopes_received);
+            P2pMetricsCounters::add(
+                &metrics.blinded_reveals_received,
+                bundles
+                    .iter()
+                    .map(|bundle| bundle.reveals.len() as u64)
+                    .sum::<u64>(),
+            );
+        }
         GossipEnvelope::Block(_)
         | GossipEnvelope::Blocks { .. }
         | GossipEnvelope::ChainSnapshot(_) => {
@@ -1471,6 +1524,13 @@ fn validate_envelope_limits(envelope: &GossipEnvelope) -> Result<()> {
                 TRANSACTION_BATCH_LIMIT,
             )?;
         }
+        GossipEnvelope::RevealBundles { bundles } => {
+            ensure_len(
+                "reveal bundle batch",
+                bundles.len(),
+                TRANSACTION_BATCH_LIMIT,
+            )?;
+        }
         GossipEnvelope::Blocks { blocks } => {
             ensure_len("block batch", blocks.len(), MAX_BLOCK_BATCH)?;
         }
@@ -1485,6 +1545,7 @@ fn validate_envelope_limits(envelope: &GossipEnvelope) -> Result<()> {
         | GossipEnvelope::PeerStatus { .. }
         | GossipEnvelope::BlindedTransaction(_)
         | GossipEnvelope::BlindedReveal(_)
+        | GossipEnvelope::RevealBundle(_)
         | GossipEnvelope::Block(_)
         | GossipEnvelope::PeerAnnouncement { .. }
         | GossipEnvelope::PeerVerificationChallenge { .. }
@@ -2693,7 +2754,7 @@ mod tests {
             vdf_output: "vdf".to_string(),
             leader_proof: None,
             blinded_transactions: Vec::new(),
-            blinded_reveals: Vec::new(),
+            reveal_bundles: Vec::new(),
             transactions: Vec::new(),
             hash: "hash".to_string(),
         };
