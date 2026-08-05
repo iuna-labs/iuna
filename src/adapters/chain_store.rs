@@ -11,8 +11,8 @@ use serde::Serialize;
 
 use crate::domain::{
     Amount, BlindedReveal, BlindedTransaction, Block, ChainSnapshot, FinalizerMode, LaunchProfile,
-    LeaderProof, Ledger, MINE_REWARD, OutPoint, RevealBundle, Transaction, TxInput, TxOutput,
-    revealed_blinded_transactions,
+    LeaderProof, Ledger, MINE_REWARD, MaskedBlindedReveal, OutPoint, RevealBundleSection,
+    RevealBundleSignature, Transaction, TxInput, TxOutput, revealed_blinded_transactions,
 };
 
 const SCHEMA: &str = r#"
@@ -299,7 +299,7 @@ fn clear_metrics_in_transaction(transaction: &rusqlite::Transaction<'_>) -> Resu
 }
 
 const COMPACT_SNAPSHOT_MAGIC: &[u8] = b"IUNA-SNAPSHOT";
-const COMPACT_SNAPSHOT_VERSION: u8 = 2;
+const COMPACT_SNAPSHOT_VERSION: u8 = 3;
 
 fn encode_compact_snapshot(snapshot: &ChainSnapshot) -> Result<Vec<u8>> {
     let mut writer = CompactWriter::default();
@@ -410,10 +410,7 @@ fn encode_block_body(writer: &mut CompactWriter, block: &Block) -> Result<()> {
     for transaction in &block.blinded_transactions {
         encode_blinded_transaction(writer, transaction)?;
     }
-    writer.varint(block.reveal_bundles.len() as u64);
-    for bundle in &block.reveal_bundles {
-        encode_reveal_bundle(writer, bundle)?;
-    }
+    encode_reveal_bundle_section(writer, &block.reveal_bundle_section)?;
     writer.varint(block.transactions.len() as u64);
     for transaction in &block.transactions {
         encode_transaction(writer, transaction)?;
@@ -448,7 +445,7 @@ fn decode_block_body(
         None
     };
     let blinded_transactions = decode_vec(reader, decode_blinded_transaction)?;
-    let reveal_bundles = decode_vec(reader, decode_reveal_bundle)?;
+    let reveal_bundle_section = decode_reveal_bundle_section(reader)?;
     let transactions = decode_vec(reader, decode_transaction)?;
     let hash = reader.hex()?;
     Ok(Block {
@@ -463,7 +460,7 @@ fn decode_block_body(
         vdf_output,
         leader_proof,
         blinded_transactions,
-        reveal_bundles,
+        reveal_bundle_section,
         transactions,
         hash,
     })
@@ -508,27 +505,41 @@ fn decode_blinded_reveal(reader: &mut CompactReader<'_>) -> Result<BlindedReveal
     })
 }
 
-fn encode_reveal_bundle(writer: &mut CompactWriter, bundle: &RevealBundle) -> Result<()> {
-    writer.varint(bundle.height);
-    writer.hex(&bundle.prev_hash)?;
-    writer.varint(u64::from(bundle.slot));
-    writer.hex(&bundle.member)?;
-    writer.varint(bundle.reveals.len() as u64);
-    for reveal in &bundle.reveals {
-        encode_blinded_reveal(writer, reveal)?;
+fn encode_reveal_bundle_section(
+    writer: &mut CompactWriter,
+    section: &RevealBundleSection,
+) -> Result<()> {
+    writer.varint(section.signatures.len() as u64);
+    for signature in &section.signatures {
+        writer.varint(u64::from(signature.slot));
+        writer.hex(&signature.member)?;
+        writer.hex(&signature.signature)?;
     }
-    writer.hex(&bundle.signature)?;
+    writer.varint(section.reveals.len() as u64);
+    for masked in &section.reveals {
+        encode_blinded_reveal(writer, &masked.reveal)?;
+        writer.u8(masked.bundle_mask);
+    }
     Ok(())
 }
 
-fn decode_reveal_bundle(reader: &mut CompactReader<'_>) -> Result<RevealBundle> {
-    Ok(RevealBundle {
-        height: reader.varint()?,
-        prev_hash: reader.hex()?,
-        slot: u8::try_from(reader.varint()?).context("reveal bundle slot does not fit u8")?,
-        member: reader.hex()?,
-        reveals: decode_vec(reader, decode_blinded_reveal)?,
-        signature: reader.hex()?,
+fn decode_reveal_bundle_section(reader: &mut CompactReader<'_>) -> Result<RevealBundleSection> {
+    let signatures = decode_vec(reader, |reader| {
+        Ok(RevealBundleSignature {
+            slot: u8::try_from(reader.varint()?).context("reveal bundle slot does not fit u8")?,
+            member: reader.hex()?,
+            signature: reader.hex()?,
+        })
+    })?;
+    let reveals = decode_vec(reader, |reader| {
+        Ok(MaskedBlindedReveal {
+            reveal: decode_blinded_reveal(reader)?,
+            bundle_mask: reader.u8()?,
+        })
+    })?;
+    Ok(RevealBundleSection {
+        signatures,
+        reveals,
     })
 }
 

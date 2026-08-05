@@ -133,7 +133,15 @@ Reveal is a later step. A `BlindedReveal` carries only the commitment and decryp
 
 For each next block height, nodes compute a reveal committee from the burn leader ranking. The last three ranked eligible tickets form the three reveal-bundle slots. A committee member can sign one bundle for its slot, height, and parent hash. A bundle is at most `10,000` bytes and lists valid pending reveals ordered by visible fee rate. Empty bundles are not gossiped.
 
-A block has an envelope section and up to three reveal-bundle sections in fixed slot order. The envelope section contains the finalizer's plaintext burn, other plaintext block items, and blinded transaction envelopes. The bundle sections contain reveals selected by the committee members.
+A block has an envelope section and one compact reveal-bundle section. The envelope section contains the finalizer's plaintext burn, other plaintext block items, and blinded transaction envelopes.
+
+The compact reveal-bundle section stores:
+
+- up to three bundle signatures, one per committee slot, in slot order;
+- one deduplicated reveal list;
+- a small bitmask per reveal saying which of the included committee bundles contained that reveal.
+
+Validators reconstruct each signed committee bundle from this compact section before checking signatures, bundle size, slot assignment, and fee ordering. This keeps consensus bound to the three independent signed reveal lists without storing the same reveal payload multiple times when several committee members selected it.
 
 A block may contain at most one bundle per slot. If a node sees two different signed bundles for the same height and slot before block assembly, it treats that slot as locally equivocated and does not use either bundle for that round.
 
@@ -143,7 +151,7 @@ The block VDF seed is bound to the reveal bundle hashes:
 
 If a slot has no included bundle, it contributes a fixed default hash for that slot. This means the finalizer must choose the reveal-bundle set before doing the VDF work. A finalizer can still claim that a bundle arrived too late, but it cannot secretly swap or remove a timely bundle after computing the VDF without changing the seed.
 
-When a valid bundled reveal executes, nodes decrypt the earlier payload, check the commitment and payload hash, decode the normal transaction, validate it against the current UTXO set, and execute it once. If multiple committee bundles contain the same reveal, the reveal is still executed only once. If the decrypted transaction is a burn, it creates burn tickets at the reveal height, not the earlier envelope-commit height.
+When a valid bundled reveal executes, nodes decrypt the earlier payload, check the commitment and payload hash, decode the normal transaction, validate it against the current UTXO set, and execute it once. If the reveal bitmask says multiple committee bundles contained the same reveal, the reveal is still executed only once. If the decrypted transaction is a burn, it creates burn tickets at the reveal height, not the earlier envelope-commit height.
 
 Fees are paid without inflating the reveal block reward. The decrypted transaction must pay the same fee declared by the blinded envelope. `floor(fee / 2)` goes to the envelope committer. The reveal-block finalizer can receive up to the remaining executor share, scaled by the number of included reveal bundles. Missing executor share is burned instead of redistributed.
 

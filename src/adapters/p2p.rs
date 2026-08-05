@@ -2754,7 +2754,7 @@ mod tests {
             vdf_output: "vdf".to_string(),
             leader_proof: None,
             blinded_transactions: Vec::new(),
-            reveal_bundles: Vec::new(),
+            reveal_bundle_section: crate::domain::RevealBundleSection::default(),
             transactions: Vec::new(),
             hash: "hash".to_string(),
         };

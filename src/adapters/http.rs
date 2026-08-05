@@ -1834,8 +1834,9 @@ fn ui_block(
         .map(|revealed| (revealed.commitment.clone(), revealed.transaction.clone()))
         .collect::<BTreeMap<_, _>>();
     let reveal_bundles = block
-        .reveal_bundles
-        .iter()
+        .reveal_bundle_section
+        .expand(block.height, &block.prev_hash)
+        .into_iter()
         .map(|bundle| UiRevealBundle {
             slot: bundle.slot,
             member: bundle.member.clone(),
@@ -4046,7 +4047,8 @@ mod tests {
         app::{GossipEnvelope, NodeCore, PeerBook, PeerDirection, PeerInfo, StratumStatus},
         domain::{
             Amount, BlindedReveal, BlindedTransaction, Block, ChainSnapshot, LaunchProfile, Ledger,
-            MICRO_IUNA, MINE_FINALIZER_FEE, OutPoint, Transaction, Wallet,
+            MICRO_IUNA, MINE_FINALIZER_FEE, MaskedBlindedReveal, OutPoint, RevealBundleSection,
+            RevealBundleSignature, Transaction, Wallet,
         },
     };
 
@@ -4145,14 +4147,17 @@ mod tests {
         let mut commit_block = fake_block(7, Vec::new());
         commit_block.blinded_transactions = vec![built.transaction.clone()];
         let mut reveal_block = fake_block(8, Vec::new());
-        reveal_block.reveal_bundles = vec![crate::domain::RevealBundle {
-            height: reveal_block.height,
-            prev_hash: reveal_block.prev_hash.clone(),
-            slot: 0,
-            member: reveal_block.miner.clone(),
-            reveals: vec![built.reveal.clone()],
-            signature: "11".repeat(64),
-        }];
+        reveal_block.reveal_bundle_section = RevealBundleSection {
+            signatures: vec![RevealBundleSignature {
+                slot: 0,
+                member: reveal_block.miner.clone(),
+                signature: "11".repeat(64),
+            }],
+            reveals: vec![MaskedBlindedReveal {
+                reveal: built.reveal.clone(),
+                bundle_mask: 1,
+            }],
+        };
         let snapshot = fake_snapshot(
             allocations,
             vec![commit_block.clone(), reveal_block.clone()],
@@ -5009,14 +5014,17 @@ mod tests {
         let mut commit_block = fake_block(7, Vec::new());
         commit_block.blinded_transactions = vec![built.transaction];
         let mut reveal_block = fake_block(8, Vec::new());
-        reveal_block.reveal_bundles = vec![crate::domain::RevealBundle {
-            height: reveal_block.height,
-            prev_hash: reveal_block.prev_hash.clone(),
-            slot: 0,
-            member: reveal_block.miner.clone(),
-            reveals: vec![built.reveal],
-            signature: "11".repeat(64),
-        }];
+        reveal_block.reveal_bundle_section = RevealBundleSection {
+            signatures: vec![RevealBundleSignature {
+                slot: 0,
+                member: reveal_block.miner.clone(),
+                signature: "11".repeat(64),
+            }],
+            reveals: vec![MaskedBlindedReveal {
+                reveal: built.reveal,
+                bundle_mask: 1,
+            }],
+        };
         let chain = vec![commit_block.clone(), reveal_block.clone()];
         let snapshot = fake_snapshot(BTreeMap::new(), chain.clone());
         let revealed_by_height = super::revealed_transactions_by_height(&snapshot);
@@ -5170,7 +5178,7 @@ mod tests {
             vdf_output: "vdf".to_string(),
             leader_proof: None,
             blinded_transactions: Vec::new(),
-            reveal_bundles: Vec::new(),
+            reveal_bundle_section: RevealBundleSection::default(),
             transactions,
             hash: format!("hash-{height}"),
         }

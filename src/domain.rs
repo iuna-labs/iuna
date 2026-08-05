@@ -522,6 +522,97 @@ impl RevealBundle {
     }
 }
 
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct RevealBundleSignature {
+    pub slot: u8,
+    pub member: String,
+    pub signature: String,
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct MaskedBlindedReveal {
+    pub reveal: BlindedReveal,
+    pub bundle_mask: u8,
+}
+
+#[derive(Clone, Debug, Default, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct RevealBundleSection {
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub signatures: Vec<RevealBundleSignature>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub reveals: Vec<MaskedBlindedReveal>,
+}
+
+impl RevealBundleSection {
+    pub fn is_empty(&self) -> bool {
+        self.signatures.is_empty() && self.reveals.is_empty()
+    }
+
+    pub fn all_reveals(&self) -> Vec<&BlindedReveal> {
+        self.reveals.iter().map(|masked| &masked.reveal).collect()
+    }
+
+    pub fn included_bundle_count(&self) -> usize {
+        self.signatures.len()
+    }
+
+    pub fn expand(&self, height: u64, prev_hash: &str) -> Vec<RevealBundle> {
+        self.signatures
+            .iter()
+            .map(|signature| {
+                let slot_mask = reveal_bundle_slot_mask(signature.slot).unwrap_or(0);
+                let reveals = self
+                    .reveals
+                    .iter()
+                    .filter(|masked| masked.bundle_mask & slot_mask != 0)
+                    .map(|masked| masked.reveal.clone())
+                    .collect();
+                RevealBundle {
+                    height,
+                    prev_hash: prev_hash.to_string(),
+                    slot: signature.slot,
+                    member: signature.member.clone(),
+                    reveals,
+                    signature: signature.signature.clone(),
+                }
+            })
+            .collect()
+    }
+
+    pub fn reveal_bundle_hashes(
+        &self,
+        height: u64,
+        prev_hash: &str,
+    ) -> [String; REVEAL_COMMITTEE_SIZE] {
+        let bundles = self.expand(height, prev_hash);
+        reveal_bundle_hashes(&bundles)
+    }
+
+    fn canonical(&self) -> String {
+        let signatures = self
+            .signatures
+            .iter()
+            .map(|signature| {
+                format!(
+                    "{}:{}:{}",
+                    signature.slot, signature.member, signature.signature
+                )
+            })
+            .collect::<Vec<_>>()
+            .join("|");
+        let reveals = self
+            .reveals
+            .iter()
+            .map(|masked| format!("{}:{}", masked.bundle_mask, masked.reveal.canonical()))
+            .collect::<Vec<_>>()
+            .join("|");
+        format!("reveal-bundle-section-v1:{signatures}:reveals:{reveals}")
+    }
+}
+
 #[derive(Clone, Debug, Eq, PartialEq)]
 struct RevealBundlePayload {
     height: u64,
@@ -556,8 +647,8 @@ pub struct RevealCommitteeMember {
     pub amount: Amount,
 }
 
-fn canonical_blinded_block_items(blinded: &str, reveals: &str, bundles: &str) -> String {
-    format!("blinded-v2:{blinded}:reveals:{reveals}:bundles:{bundles}")
+fn canonical_blinded_block_items(blinded: &str, reveal_section: &str) -> String {
+    format!("blinded-v3:{blinded}:reveal-section:{reveal_section}")
 }
 
 impl TxInput {
@@ -907,7 +998,7 @@ pub struct Block {
     #[serde(default)]
     pub blinded_transactions: Vec<BlindedTransaction>,
     #[serde(default)]
-    pub reveal_bundles: Vec<RevealBundle>,
+    pub reveal_bundle_section: RevealBundleSection,
     pub transactions: Vec<Transaction>,
     pub hash: String,
 }
@@ -934,7 +1025,7 @@ impl Block {
             vdf_output: draft.vdf_output,
             leader_proof: draft.leader_proof,
             blinded_transactions: draft.blinded_transactions,
-            reveal_bundles: draft.reveal_bundles,
+            reveal_bundle_section: draft.reveal_bundle_section,
             transactions: draft.transactions,
             hash: String::new(),
         };
@@ -979,18 +1070,7 @@ impl Block {
             .map(BlindedTransaction::canonical)
             .collect::<Vec<_>>()
             .join("|");
-        let reveals = self
-            .all_blinded_reveals()
-            .iter()
-            .map(|reveal| reveal.canonical())
-            .collect::<Vec<_>>()
-            .join("|");
-        let bundles = self
-            .reveal_bundles
-            .iter()
-            .map(RevealBundle::canonical)
-            .collect::<Vec<_>>()
-            .join("|");
+        let reveal_section = self.reveal_bundle_section.canonical();
         let leader_proof = self
             .leader_proof
             .as_ref()
@@ -1001,7 +1081,7 @@ impl Block {
                 )
             })
             .unwrap_or_default();
-        if !self.blinded_transactions.is_empty() || !self.reveal_bundles.is_empty() {
+        if !self.blinded_transactions.is_empty() || !self.reveal_bundle_section.is_empty() {
             return hex_hash(format!(
                 "block-content-v3:{}:{}:{}:{}:{}:{}:{}:{}:{}:{}",
                 self.height,
@@ -1013,7 +1093,7 @@ impl Block {
                 self.vdf_rounds,
                 leader_proof,
                 txs,
-                canonical_blinded_block_items(&blinded, &reveals, &bundles)
+                canonical_blinded_block_items(&blinded, &reveal_section)
             ));
         }
         hex_hash(format!(
@@ -1080,20 +1160,16 @@ impl Block {
     }
 
     pub fn all_blinded_reveals(&self) -> Vec<&BlindedReveal> {
-        let mut seen = BTreeSet::new();
-        self.reveal_bundles
-            .iter()
-            .flat_map(|bundle| bundle.reveals.iter())
-            .filter(|reveal| seen.insert(reveal.commitment.clone()))
-            .collect()
+        self.reveal_bundle_section.all_reveals()
     }
 
     pub fn reveal_bundle_hashes(&self) -> [String; REVEAL_COMMITTEE_SIZE] {
-        reveal_bundle_hashes(&self.reveal_bundles)
+        self.reveal_bundle_section
+            .reveal_bundle_hashes(self.height, &self.prev_hash)
     }
 
     pub fn included_reveal_bundle_count(&self) -> usize {
-        self.reveal_bundles.len()
+        self.reveal_bundle_section.included_bundle_count()
     }
 }
 
@@ -1193,7 +1269,7 @@ pub struct PreparedBlock {
     vdf_seed: String,
     leader_ticket: Option<BurnTicket>,
     blinded_transactions: Vec<BlindedTransaction>,
-    reveal_bundles: Vec<RevealBundle>,
+    reveal_bundle_section: RevealBundleSection,
     transactions: Vec<Transaction>,
 }
 
@@ -1257,7 +1333,7 @@ impl PreparedBlock {
             vdf_output,
             leader_proof,
             blinded_transactions: self.blinded_transactions,
-            reveal_bundles: self.reveal_bundles,
+            reveal_bundle_section: self.reveal_bundle_section,
             transactions: self.transactions,
         })
     }
@@ -1276,7 +1352,7 @@ struct BlockDraft {
     vdf_output: String,
     leader_proof: Option<LeaderProof>,
     blinded_transactions: Vec<BlindedTransaction>,
-    reveal_bundles: Vec<RevealBundle>,
+    reveal_bundle_section: RevealBundleSection,
     transactions: Vec<Transaction>,
 }
 
@@ -2027,6 +2103,130 @@ impl Ledger {
         self.validate_reveal_bundles_for_block(expected_height, &expected_prev_hash, bundles)
     }
 
+    fn reveal_bundle_section_from_bundles(
+        &self,
+        bundles: Vec<RevealBundle>,
+    ) -> RevealBundleSection {
+        let signatures = bundles
+            .iter()
+            .map(|bundle| RevealBundleSignature {
+                slot: bundle.slot,
+                member: bundle.member.clone(),
+                signature: bundle.signature.clone(),
+            })
+            .collect::<Vec<_>>();
+        let mut by_commitment: BTreeMap<String, MaskedBlindedReveal> = BTreeMap::new();
+        for bundle in bundles {
+            let slot_mask = reveal_bundle_slot_mask(bundle.slot).unwrap_or(0);
+            for reveal in bundle.reveals {
+                by_commitment
+                    .entry(reveal.commitment.clone())
+                    .and_modify(|masked| masked.bundle_mask |= slot_mask)
+                    .or_insert(MaskedBlindedReveal {
+                        reveal,
+                        bundle_mask: slot_mask,
+                    });
+            }
+        }
+        let mut reveals = by_commitment.into_values().collect::<Vec<_>>();
+        reveals.sort_by(|left, right| {
+            self.reveal_fee_order_key(&right.reveal)
+                .cmp(&self.reveal_fee_order_key(&left.reveal))
+                .then_with(|| left.reveal.commitment.cmp(&right.reveal.commitment))
+        });
+        RevealBundleSection {
+            signatures,
+            reveals,
+        }
+    }
+
+    fn validate_reveal_bundle_section_for_block(
+        &self,
+        expected_height: u64,
+        expected_prev_hash: &str,
+        section: &RevealBundleSection,
+    ) -> Result<()> {
+        if section.signatures.len() > REVEAL_COMMITTEE_SIZE {
+            bail!("block has too many reveal bundle signatures");
+        }
+        if section
+            .signatures
+            .windows(2)
+            .any(|pair| pair[0].slot >= pair[1].slot)
+        {
+            bail!("reveal bundle signatures are not in slot order");
+        }
+        let committee = self
+            .reveal_committee_for_height(expected_height)
+            .into_iter()
+            .map(|member| (member.slot, member))
+            .collect::<BTreeMap<_, _>>();
+        let mut seen_slots = BTreeSet::new();
+        let mut seen_members = BTreeSet::new();
+        let mut included_mask = 0_u8;
+        for signature in &section.signatures {
+            if usize::from(signature.slot) >= REVEAL_COMMITTEE_SIZE {
+                bail!("reveal bundle slot is invalid");
+            }
+            if !seen_slots.insert(signature.slot) {
+                bail!("duplicate reveal bundle slot");
+            }
+            if !seen_members.insert(signature.member.clone()) {
+                bail!("duplicate reveal bundle member");
+            }
+            let member = committee
+                .get(&signature.slot)
+                .context("reveal bundle slot is not assigned")?;
+            if signature.member != member.owner {
+                bail!("reveal bundle member is not assigned to slot");
+            }
+            included_mask |= reveal_bundle_slot_mask(signature.slot)?;
+        }
+
+        let mut seen_reveals = BTreeSet::new();
+        let mut previous_key: Option<((u128, Amount), String)> = None;
+        for masked in &section.reveals {
+            if masked.bundle_mask == 0 {
+                bail!("masked blinded reveal is not assigned to a reveal bundle");
+            }
+            if masked.bundle_mask & !reveal_committee_mask() != 0 {
+                bail!("masked blinded reveal references an invalid reveal bundle slot");
+            }
+            if masked.bundle_mask & !included_mask != 0 {
+                bail!("masked blinded reveal references a missing reveal bundle signature");
+            }
+            if !seen_reveals.insert(masked.reveal.commitment.clone()) {
+                bail!("duplicate blinded reveal in reveal bundle section");
+            }
+            self.pending_reveal_transaction(&masked.reveal)?;
+            let key = (
+                self.reveal_fee_order_key(&masked.reveal),
+                masked.reveal.commitment.clone(),
+            );
+            if let Some((previous_fee_key, previous_commitment)) = &previous_key {
+                if key.0 > *previous_fee_key
+                    || key.0 == *previous_fee_key && key.1 < *previous_commitment
+                {
+                    bail!("reveal bundle section is not fee ordered");
+                }
+            }
+            previous_key = Some(key);
+        }
+
+        for bundle in section.expand(expected_height, expected_prev_hash) {
+            if bundle.serialized_size_bytes()? > MAX_REVEAL_BUNDLE_BYTES {
+                bail!("reveal bundle exceeds max size");
+            }
+            verify_address_signature(
+                &bundle.member,
+                &bundle.canonical_payload(),
+                &bundle.signature,
+                "reveal bundle",
+            )?;
+        }
+        Ok(())
+    }
+
     fn validate_reveal_bundles_for_block(
         &self,
         expected_height: u64,
@@ -2605,13 +2805,14 @@ impl Ledger {
         }
 
         let reveal_bundles = self.validate_next_block_reveal_bundles(reveal_bundles)?;
+        let reveal_bundle_section = self.reveal_bundle_section_from_bundles(reveal_bundles);
         let selection = self.select_block_transactions()?;
         ensure_block_has_burn(&selection.transactions)?;
 
         let tip = self.tip();
         let prev_hash = tip.hash.clone();
         let timestamp_ms = timestamp_ms.max(ticket_block_min_timestamp(tip, finalizer_rank)?);
-        let bundle_hashes = reveal_bundle_hashes(&reveal_bundles);
+        let bundle_hashes = reveal_bundle_section.reveal_bundle_hashes(height, &prev_hash);
         let vdf_seed = vdf_seed_for_child(&prev_hash, height, &bundle_hashes);
         Ok(PreparedBlock {
             height,
@@ -2625,7 +2826,7 @@ impl Ledger {
             finalizer_rank,
             leader_ticket: Some(leader_ticket),
             blinded_transactions: selection.blinded_transactions,
-            reveal_bundles,
+            reveal_bundle_section,
             transactions: selection.transactions,
         })
     }
@@ -2657,6 +2858,7 @@ impl Ledger {
         }
 
         let reveal_bundles = self.validate_next_block_reveal_bundles(reveal_bundles)?;
+        let reveal_bundle_section = self.reveal_bundle_section_from_bundles(reveal_bundles);
         let selection = self.select_recovery_block_transactions(miner)?;
         ensure_block_has_burn(&selection.transactions)?;
         ensure_block_has_burn_from(&selection.transactions, miner)?;
@@ -2664,7 +2866,7 @@ impl Ledger {
         let tip = self.tip();
         let prev_hash = tip.hash.clone();
         let timestamp_ms = timestamp_ms.max(tip.timestamp_ms + 1);
-        let bundle_hashes = reveal_bundle_hashes(&reveal_bundles);
+        let bundle_hashes = reveal_bundle_section.reveal_bundle_hashes(height, &prev_hash);
         let vdf_seed =
             recovery_vdf_seed_for_child(&prev_hash, height, timestamp_ms, &bundle_hashes);
         Ok(PreparedBlock {
@@ -2679,7 +2881,7 @@ impl Ledger {
             vdf_seed,
             leader_ticket: None,
             blinded_transactions: selection.blinded_transactions,
-            reveal_bundles,
+            reveal_bundle_section,
             transactions: selection.transactions,
         })
     }
@@ -2914,10 +3116,10 @@ impl Ledger {
             bail!("block exceeds max block size");
         }
         ensure_block_has_burn(&block.transactions)?;
-        self.validate_reveal_bundles_for_block(
+        self.validate_reveal_bundle_section_for_block(
             block.height,
             &block.prev_hash,
-            block.reveal_bundles.clone(),
+            &block.reveal_bundle_section,
         )?;
         validate_block_blinded_items(block, self)?;
         match block.finalizer_mode {
@@ -4117,7 +4319,7 @@ fn estimated_block_selection_size_bytes(
             signature: "f".repeat(128),
         }),
         blinded_transactions: selection.blinded_transactions.clone(),
-        reveal_bundles: Vec::new(),
+        reveal_bundle_section: RevealBundleSection::default(),
         transactions: selection.transactions.clone(),
         hash: "f".repeat(64),
     };
@@ -4186,6 +4388,17 @@ fn verify_address_signature(
 
 pub fn default_reveal_bundle_hash(slot: usize) -> String {
     hex_hash(format!("iuna-default-reveal-bundle-v1:{slot}"))
+}
+
+fn reveal_bundle_slot_mask(slot: u8) -> Result<u8> {
+    if usize::from(slot) >= REVEAL_COMMITTEE_SIZE || slot >= 8 {
+        bail!("reveal bundle slot is invalid");
+    }
+    Ok(1_u8 << slot)
+}
+
+fn reveal_committee_mask() -> u8 {
+    (0..REVEAL_COMMITTEE_SIZE).fold(0_u8, |mask, slot| mask | (1_u8 << slot))
 }
 
 fn reveal_bundle_hashes(bundles: &[RevealBundle]) -> [String; REVEAL_COMMITTEE_SIZE] {
@@ -4553,7 +4766,7 @@ fn build_genesis_block(
         vdf_output,
         leader_proof: None,
         blinded_transactions: Vec::new(),
-        reveal_bundles: Vec::new(),
+        reveal_bundle_section: RevealBundleSection::default(),
         transactions,
         hash: String::new(),
     };
@@ -4658,7 +4871,7 @@ fn validate_genesis_block(block: &Block) -> Result<()> {
     if block.leader_proof.is_some() {
         bail!("genesis block must not carry a leader proof");
     }
-    if !block.blinded_transactions.is_empty() || !block.reveal_bundles.is_empty() {
+    if !block.blinded_transactions.is_empty() || !block.reveal_bundle_section.is_empty() {
         bail!("genesis block must not carry blinded transactions");
     }
     if block.compute_hash() != block.hash {
@@ -5051,7 +5264,7 @@ mod tests {
             vdf_output: String::new(),
             leader_proof: None,
             blinded_transactions: Vec::new(),
-            reveal_bundles: Vec::new(),
+            reveal_bundle_section: RevealBundleSection::default(),
             transactions: Vec::new(),
             hash: String::new(),
         }
@@ -6053,7 +6266,7 @@ mod tests {
                 signature: "signature".to_string(),
             }),
             blinded_transactions: Vec::new(),
-            reveal_bundles: Vec::new(),
+            reveal_bundle_section: RevealBundleSection::default(),
             transactions: Vec::new(),
         });
 
@@ -6290,6 +6503,69 @@ mod tests {
     }
 
     #[test]
+    fn reveal_bundle_section_deduplicates_reveals_with_slot_mask() {
+        let alice = Wallet::from_seed("bundle-compact-alice");
+        let bob = Wallet::from_seed("bundle-compact-bob");
+        let carol = Wallet::from_seed("bundle-compact-carol");
+        let dave = Wallet::from_seed("bundle-compact-dave");
+        let finalizers = [alice.clone(), bob.clone(), carol.clone()];
+        let mut ledger = ledger_with_finalizers(&finalizers, &[(&dave, 10 * MICRO_IUNA)]);
+        let blinded = ledger
+            .build_blinded_burn(&dave, 3, 7, ledger.height() + 4)
+            .unwrap();
+        ledger
+            .submit_blinded_transaction(blinded.transaction.clone())
+            .unwrap();
+        queue_next_leader_burn(&mut ledger, &finalizers);
+        mine_preverified_as_next_leader(&mut ledger, &finalizers, 1);
+        ledger
+            .submit_blinded_reveal(blinded.reveal.clone())
+            .unwrap();
+        queue_next_leader_burn(&mut ledger, &finalizers);
+
+        let mut bundles = ledger
+            .reveal_committee_for_next_block()
+            .into_iter()
+            .filter_map(|member| {
+                let wallet = wallet_for_address(&finalizers, &member.owner);
+                ledger.build_reveal_bundle(wallet).unwrap()
+            })
+            .collect::<Vec<_>>();
+        assert!(bundles.len() >= 2);
+        bundles.truncate(2);
+        let expected_hashes = reveal_bundle_hashes(&bundles);
+        let expected_mask = bundles
+            .iter()
+            .fold(0_u8, |mask, bundle| mask | (1_u8 << bundle.slot));
+
+        let leader = ledger.expected_leader_for_next_block().unwrap();
+        let leader_wallet = wallet_for_address(&finalizers, &leader);
+        let prepared = ledger
+            .prepare_next_block_with_reveal_bundles(
+                leader_wallet.address(),
+                ledger.tip().timestamp_ms + 1,
+                bundles.clone(),
+            )
+            .unwrap();
+        let block = prepared.finish(leader_wallet, "preverified-vdf".to_string());
+
+        assert_eq!(block.reveal_bundle_section.signatures.len(), 2);
+        assert_eq!(block.reveal_bundle_section.reveals.len(), 1);
+        assert_eq!(
+            block.reveal_bundle_section.reveals[0].bundle_mask,
+            expected_mask
+        );
+        assert_eq!(block.all_blinded_reveals(), vec![&blinded.reveal]);
+        assert_eq!(block.reveal_bundle_hashes(), expected_hashes);
+        assert_eq!(
+            block
+                .reveal_bundle_section
+                .expand(block.height, &block.prev_hash),
+            bundles
+        );
+    }
+
+    #[test]
     fn reveal_bundle_validation_rejects_wrong_signature_and_slot() {
         let alice = Wallet::from_seed("bundle-invalid-alice");
         let bob = Wallet::from_seed("bundle-invalid-bob");
@@ -6356,15 +6632,15 @@ mod tests {
             commitment: blinded.transaction.commitment,
             key: "00".repeat(BLINDED_KEY_BYTES),
         };
-        prepared
-            .reveal_bundles
-            .push(committee_wallet.reveal_bundle(RevealBundlePayload {
-                height: prepared.height,
-                prev_hash: prepared.prev_hash.clone(),
-                slot: committee_member.slot,
-                member: committee_wallet.address().to_string(),
-                reveals: vec![wrong_reveal],
-            }));
+        let wrong_bundle = committee_wallet.reveal_bundle(RevealBundlePayload {
+            height: prepared.height,
+            prev_hash: prepared.prev_hash.clone(),
+            slot: committee_member.slot,
+            member: committee_wallet.address().to_string(),
+            reveals: vec![wrong_reveal],
+        });
+        prepared.reveal_bundle_section =
+            ledger.reveal_bundle_section_from_bundles(vec![wrong_bundle]);
         let block = prepared.finish(wallet, "preverified-vdf".to_string());
 
         let error = ledger
