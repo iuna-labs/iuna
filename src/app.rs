@@ -1158,6 +1158,15 @@ impl NodeCore {
         fee_per_byte: Amount,
     ) -> Result<(BuiltBlindedTransaction, FeeEstimate)> {
         let ledger = self.wallet_build_ledger()?;
+        self.build_blinded_burn_with_fee_rate_on_ledger(&ledger, amount, fee_per_byte)
+    }
+
+    fn build_blinded_burn_with_fee_rate_on_ledger(
+        &self,
+        ledger: &Ledger,
+        amount: Amount,
+        fee_per_byte: Amount,
+    ) -> Result<(BuiltBlindedTransaction, FeeEstimate)> {
         let expires_at_height = self.default_blinded_transaction_expiry_height();
         converge_fee_by_byte(fee_per_byte, |fee| {
             let tx = ledger.build_burn(self.wallet.unlocked()?, amount, fee)?;
@@ -1218,6 +1227,13 @@ impl NodeCore {
         let mut ledger = self.ledger.clone();
         self.reserve_local_block_anchor_inputs(&mut ledger)?;
         self.queue_owned_blinded_payloads(&mut ledger)?;
+        Ok(ledger)
+    }
+
+    fn wallet_anchor_build_ledger(&self) -> Result<Ledger> {
+        let mut ledger = self.ledger.clone();
+        self.reserve_local_block_anchor_inputs(&mut ledger)?;
+        ledger.clear_pending_blinded_transactions();
         Ok(ledger)
     }
 
@@ -1531,12 +1547,47 @@ impl NodeCore {
 
         let fee_per_byte = self.burn_fee;
         let balance = self.ledger.balance_of(self.wallet.address());
+        let needs_plaintext_anchor = self.automatic_burn_needs_plaintext_anchor(timestamp_ms);
+        let spendable_best = match self.wallet_build_ledger() {
+            Ok(ledger) => self.best_automatic_burn_on_ledger(&ledger, fee_per_byte, balance),
+            Err(error) if needs_plaintext_anchor => {
+                let _ = error;
+                None
+            }
+            Err(error) => return Err(error),
+        };
+        let best = if spendable_best.is_none() && needs_plaintext_anchor {
+            let anchor_ledger = self.wallet_anchor_build_ledger()?;
+            self.best_automatic_burn_on_ledger(&anchor_ledger, fee_per_byte, balance)
+        } else {
+            spendable_best
+        };
+        let Some(tx) = best else {
+            self.last_auto_burn_height = Some(current_height);
+            return Ok(None);
+        };
+        let burn = tx.payload.clone();
+        if needs_plaintext_anchor {
+            self.local_block_anchor_burn = Some((current_height, burn.clone()));
+        } else {
+            self.submit_owned_blinded_transaction(tx)?;
+        }
+        self.last_auto_burn_height = Some(current_height);
+        Ok(Some(burn))
+    }
+
+    fn best_automatic_burn_on_ledger(
+        &self,
+        ledger: &Ledger,
+        fee_per_byte: Amount,
+        balance: Amount,
+    ) -> Option<BuiltBlindedTransaction> {
         let mut low = 1;
         let mut high = self.burn_per_block.min(balance);
         let mut best = None;
         while low <= high {
             let amount = low + (high - low) / 2;
-            match self.build_blinded_burn_with_fee_rate(amount, fee_per_byte) {
+            match self.build_blinded_burn_with_fee_rate_on_ledger(ledger, amount, fee_per_byte) {
                 Ok((built, estimate)) => {
                     let fits = amount
                         .checked_add(estimate.fee)
@@ -1556,18 +1607,7 @@ impl NodeCore {
                 }
             }
         }
-        let Some(tx) = best else {
-            self.last_auto_burn_height = Some(current_height);
-            return Ok(None);
-        };
-        let burn = tx.payload.clone();
-        if self.automatic_burn_needs_plaintext_anchor(timestamp_ms) {
-            self.local_block_anchor_burn = Some((current_height, burn.clone()));
-        } else {
-            self.submit_owned_blinded_transaction(tx)?;
-        }
-        self.last_auto_burn_height = Some(current_height);
-        Ok(Some(burn))
+        best
     }
 
     fn automatic_burn_needs_plaintext_anchor(&self, timestamp_ms: u64) -> bool {
@@ -1603,6 +1643,7 @@ impl NodeCore {
             return Ok(ledger);
         };
         if *height == ledger.height() && !ledger.has_transaction(burn.signature()) {
+            ledger.drop_pending_blinded_conflicting_with_transaction(burn);
             let _ = ledger.submit_transaction(burn.clone())?;
         }
         Ok(ledger)
@@ -2301,6 +2342,24 @@ mod tests {
             .unwrap_or_else(|| panic!("missing wallet for address {address}"))
     }
 
+    fn queue_auto_pow_mine_action(node: &mut NodeCore) -> Transaction {
+        node.set_pow_mining_enabled(true);
+        (0..10_000)
+            .find_map(|timestamp| node.prepare_automatic_mining(timestamp).pow_mined)
+            .expect("test node should find a PoW mine action")
+    }
+
+    fn assert_block_has_mine_action(block: &crate::domain::Block) {
+        assert!(
+            block
+                .transactions
+                .iter()
+                .any(|transaction| matches!(transaction, Transaction::Mine { .. })),
+            "block {} should include a mine action",
+            block.height
+        );
+    }
+
     #[test]
     fn same_height_verified_import_does_not_reset_auto_burn_guard() {
         let alice = Wallet::from_seed("same-height-import-alice");
@@ -2776,6 +2835,259 @@ mod tests {
             reveal_block.all_blinded_reveals().len(),
             1,
             "automatic finalization should include the pending reveal without requiring an extra mempool poll"
+        );
+    }
+
+    #[test]
+    fn genesis_transfer_arriving_during_vdf_with_peer_mines_does_not_stall_following_blocks() {
+        let miner = Wallet::from_seed("during-vdf-miner");
+        let (_finalizer, finalizer_node, block2_work) = (0..1_000)
+            .find_map(|seed_index| {
+                let finalizer = Wallet::from_seed(&format!("during-vdf-finalizer-{seed_index}"));
+                let mut allocations = BTreeMap::new();
+                allocations.insert(finalizer.address().to_string(), MICRO_IUNA);
+                let ledger = Ledger::new_with_genesis_burns(
+                    allocations,
+                    vec![GenesisBurn::new(finalizer.address(), MICRO_IUNA)],
+                    1,
+                )
+                .unwrap();
+                let mut node = NodeCore::from_ledger_with_burn_fee_and_enabled(
+                    finalizer.clone(),
+                    ledger,
+                    true,
+                    100,
+                    100,
+                );
+                let block1 = node.automatic_mine_once(1).block?;
+                assert!(block1.blinded_transactions.is_empty());
+                assert!(
+                    !block1
+                        .transactions
+                        .iter()
+                        .any(|transaction| matches!(transaction, Transaction::Mine { .. })),
+                    "node B joins after block 1, so block 1 should not include B's mine action"
+                );
+                let block2_plan = node.prepare_automatic_finalization(2);
+                let block2_work = block2_plan.work?;
+                let (_, anchor_burn) = node.local_block_anchor_burn.clone()?;
+                let anchor_inputs = super::transaction_input_outpoints(&anchor_burn);
+                let anchor_total = node
+                    .ledger()
+                    .utxos_for_address(finalizer.address())
+                    .iter()
+                    .filter(|(outpoint, _)| anchor_inputs.contains(outpoint))
+                    .map(|(_, output)| output.amount)
+                    .sum::<u64>();
+                if anchor_total >= 200_000 {
+                    return None;
+                }
+                Some((finalizer, node, block2_work))
+            })
+            .expect("test should find a seed where block 2 anchor uses the small reward UTXO");
+        let mut network = InMemoryNetwork::default();
+        network.insert("finalizer", finalizer_node);
+
+        let miner_ledger =
+            Ledger::from_snapshot(network.node("finalizer").unwrap().chain_snapshot()).unwrap();
+        network.insert(
+            "miner",
+            NodeCore::from_ledger(miner.clone(), miner_ledger, 0),
+        );
+
+        queue_auto_pow_mine_action(network.node_mut("miner").unwrap());
+        network.deliver_until_idle().unwrap();
+        network
+            .node_mut("finalizer")
+            .unwrap()
+            .transfer_with_fee_rate(miner.address(), MICRO_IUNA / 10, 100, &[])
+            .unwrap();
+        let blinded = network
+            .node("finalizer")
+            .unwrap()
+            .ledger()
+            .pending_blinded_transactions()
+            .last()
+            .cloned()
+            .expect("A should queue the A -> B blinded transfer while block 2 VDF is running");
+        network.deliver_until_idle().unwrap();
+        assert!(
+            network
+                .node("finalizer")
+                .unwrap()
+                .ledger()
+                .pending_blinded_transactions()
+                .iter()
+                .any(|tx| tx.commitment == blinded.commitment),
+            "the finalizer should receive the blinded tx while block 2 VDF is running"
+        );
+
+        let block2_vdf = run_vdf(block2_work.vdf_seed(), block2_work.vdf_rounds());
+        let block2 = network
+            .node_mut("finalizer")
+            .unwrap()
+            .complete_prepared_block_at(block2_work, block2_vdf, 2)
+            .unwrap();
+        assert!(
+            block2.blinded_transactions.is_empty(),
+            "block 2 work was prepared before the blinded tx arrived"
+        );
+        assert!(
+            !block2
+                .transactions
+                .iter()
+                .any(|transaction| matches!(transaction, Transaction::Mine { .. })),
+            "block 2 work was prepared before B's mine action arrived"
+        );
+        network.deliver_until_idle().unwrap();
+
+        let block3_outcome = network
+            .node_mut("finalizer")
+            .unwrap()
+            .automatic_mine_once(3);
+        assert!(
+            block3_outcome.block.is_some(),
+            "finalizer should keep producing after the during-VDF blinded tx: {:?}",
+            block3_outcome.skipped_reason
+        );
+        let block3 = block3_outcome.block.unwrap();
+        assert!(
+            !block3
+                .blinded_transactions
+                .iter()
+                .any(|tx| tx.commitment == blinded.commitment),
+            "the mandatory anchor burn should win when the during-VDF blinded tx would starve it"
+        );
+        assert_block_has_mine_action(&block3);
+        network.deliver_until_idle().unwrap();
+        assert!(
+            network
+                .node("finalizer")
+                .unwrap()
+                .ledger()
+                .pending_blinded_transactions()
+                .is_empty(),
+            "the conflicting own blinded tx should be pruned after the anchor burn spends its input"
+        );
+        assert!(
+            network
+                .node("finalizer")
+                .unwrap()
+                .owned_blinded_transactions()
+                .is_empty(),
+            "owned blinded state should not keep rebroadcasting the pruned tx"
+        );
+
+        queue_auto_pow_mine_action(network.node_mut("miner").unwrap());
+        network.deliver_until_idle().unwrap();
+        let block4 = network
+            .node_mut("finalizer")
+            .unwrap()
+            .automatic_mine_once(4)
+            .block
+            .expect("finalizer should keep producing the next block");
+        assert!(
+            block4.all_blinded_reveals().is_empty(),
+            "the pruned blinded tx was never committed, so there should be no reveal"
+        );
+        assert_block_has_mine_action(&block4);
+    }
+
+    #[test]
+    fn own_blinded_transaction_arriving_during_vdf_does_not_starve_next_anchor_burn() {
+        let recipient = Wallet::from_seed("during-vdf-own-recipient");
+        let (mut node, block2_work, transfer_outpoint, transfer_amount) = (0..1_000)
+            .find_map(|seed_index| {
+                let finalizer =
+                    Wallet::from_seed(&format!("during-vdf-own-finalizer-{seed_index}"));
+                let mut allocations = BTreeMap::new();
+                allocations.insert(finalizer.address().to_string(), MICRO_IUNA);
+                let ledger = Ledger::new_with_genesis_burns(
+                    allocations,
+                    vec![GenesisBurn::new(finalizer.address(), MICRO_IUNA)],
+                    1,
+                )
+                .unwrap();
+                let mut node = NodeCore::from_ledger_with_burn_fee_and_enabled(
+                    finalizer.clone(),
+                    ledger,
+                    true,
+                    100,
+                    1_000,
+                );
+                node.set_pow_mining_enabled(true);
+                let block1 = node.automatic_mine_once(1).block?;
+                assert!(block1.blinded_transactions.is_empty());
+
+                let block2_plan = node.prepare_automatic_finalization(2);
+                let block2_work = block2_plan.work?;
+                let (_, anchor_burn) = node.local_block_anchor_burn.clone()?;
+                let anchor_inputs = super::transaction_input_outpoints(&anchor_burn);
+                let utxos = node.ledger().utxos_for_address(finalizer.address());
+                let anchor_total = utxos
+                    .iter()
+                    .filter(|(outpoint, _)| anchor_inputs.contains(outpoint))
+                    .map(|(_, output)| output.amount)
+                    .sum::<u64>();
+                let (transfer_outpoint, transfer_output) =
+                    utxos.into_iter().find(|(outpoint, output)| {
+                        !anchor_inputs.contains(outpoint) && output.amount > MICRO_IUNA
+                    })?;
+                if anchor_total >= 2_000_000 {
+                    return None;
+                }
+                Some((
+                    node,
+                    block2_work,
+                    transfer_outpoint,
+                    transfer_output.amount / 2,
+                ))
+            })
+            .expect("test should find a seed with live-like small-anchor/large-change UTXOs");
+
+        node.transfer_with_fee_spending(
+            recipient.address(),
+            transfer_amount,
+            1,
+            &[transfer_outpoint],
+        )
+        .expect("wallet tx created while block 2 VDF is running");
+        let blinded = node
+            .ledger()
+            .pending_blinded_transactions()
+            .last()
+            .cloned()
+            .expect("wallet tx should be queued as a blinded transaction");
+
+        let block2_vdf = run_vdf(block2_work.vdf_seed(), block2_work.vdf_rounds());
+        let block2 = node
+            .complete_prepared_block_at(block2_work, block2_vdf, 2)
+            .unwrap();
+        assert!(
+            block2.blinded_transactions.is_empty(),
+            "block 2 work was prepared before the blinded tx arrived"
+        );
+        assert!(
+            node.ledger()
+                .pending_blinded_transactions()
+                .iter()
+                .any(|tx| tx.commitment == blinded.commitment),
+            "the during-VDF blinded tx should remain pending for block 3"
+        );
+
+        let block3_outcome = node.automatic_mine_once(3);
+        assert!(
+            block3_outcome.block.is_some(),
+            "pending own blinded tx must not starve the next anchor burn: {:?}",
+            block3_outcome.skipped_reason
+        );
+        let block3 = block3_outcome.block.unwrap();
+        assert!(
+            block3
+                .blinded_transactions
+                .iter()
+                .any(|tx| tx.commitment == blinded.commitment),
+            "block 3 should include the blinded tx that arrived during block 2 VDF"
         );
     }
 

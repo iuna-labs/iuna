@@ -2164,6 +2164,27 @@ impl Ledger {
         &self.pending_reveals
     }
 
+    pub(crate) fn drop_pending_blinded_conflicting_with_transaction(
+        &mut self,
+        transaction: &Transaction,
+    ) {
+        let spent = transaction
+            .inputs()
+            .iter()
+            .map(|input| input.outpoint.clone())
+            .collect::<BTreeSet<_>>();
+        self.pending_blinded.retain(|blinded| {
+            !blinded
+                .inputs
+                .iter()
+                .any(|input| spent.contains(&input.outpoint))
+        });
+    }
+
+    pub(crate) fn clear_pending_blinded_transactions(&mut self) {
+        self.pending_blinded.clear();
+    }
+
     pub fn build_reveal_bundle(&self, wallet: &Wallet) -> Result<Option<RevealBundle>> {
         let height = self.tip().height + 1;
         let prev_hash = self.tip().hash.clone();
