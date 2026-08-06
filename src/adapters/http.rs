@@ -4207,9 +4207,9 @@ mod tests {
         },
         app::{GossipEnvelope, NodeCore, PeerBook, PeerDirection, PeerInfo, StratumStatus},
         domain::{
-            Amount, BlindedReveal, BlindedTransaction, Block, ChainSnapshot, LaunchProfile, Ledger,
-            MICRO_IUNA, MINE_FINALIZER_FEE, MaskedBlindedReveal, OutPoint, RevealBundleSection,
-            RevealBundleSignature, Transaction, TxInput, TxOutput, Wallet,
+            Amount, BlindedReveal, BlindedTransaction, Block, ChainSnapshot, GenesisBurn,
+            LaunchProfile, Ledger, MICRO_IUNA, MINE_FINALIZER_FEE, MaskedBlindedReveal, OutPoint,
+            RevealBundleSection, RevealBundleSignature, Transaction, TxInput, TxOutput, Wallet,
         },
     };
 
@@ -5338,6 +5338,28 @@ mod tests {
                 .any(|row| row.outpoint == spent_outpoint && !row.spendable)
         );
         assert!(!selectable.iter().any(|row| row.outpoint == spent_outpoint));
+    }
+
+    #[test]
+    fn wallet_utxo_rows_keep_local_anchor_spends_visible_as_pending() {
+        let alice = Wallet::from_seed("wallet-utxo-local-anchor-alice");
+        let mut allocations = BTreeMap::new();
+        allocations.insert(alice.address().to_string(), 10 * MICRO_IUNA);
+        let ledger = Ledger::new_with_genesis_burns(
+            allocations,
+            vec![GenesisBurn::new(alice.address(), MICRO_IUNA)],
+            1,
+        )
+        .unwrap();
+        let mut node =
+            NodeCore::from_ledger_with_burn_fee_and_enabled(alice.clone(), ledger, true, 1, 0);
+
+        let plan = node.prepare_automatic_finalization(1);
+        assert!(plan.burned.is_some());
+        let rows = wallet_utxo_rows(&node.wallet_view_ledger().unwrap(), alice.address());
+
+        assert!(!rows.is_empty());
+        assert!(rows.iter().any(|row| !row.spendable));
     }
 
     fn fake_block(height: u64, transactions: Vec<Transaction>) -> Block {

@@ -388,7 +388,10 @@ impl NodeCore {
     }
 
     pub fn wallet_view_ledger(&self) -> Result<Ledger> {
-        self.wallet_build_ledger()
+        let mut ledger = self.ledger.clone();
+        self.queue_local_block_anchor(&mut ledger)?;
+        self.queue_owned_blinded_payloads(&mut ledger)?;
+        Ok(ledger)
     }
 
     pub fn chain(&self) -> &[Block] {
@@ -682,6 +685,17 @@ impl NodeCore {
             }
         }
 
+        if let Some((height, burn)) = &self.local_block_anchor_burn {
+            if *height == self.ledger.height() && !self.ledger.has_transaction(burn.signature()) {
+                let output_total = transaction_output_total_for_address(burn, address);
+                let input_total =
+                    transaction_input_total_from_outputs(burn, address, &confirmed_outputs);
+                balance = balance
+                    .saturating_sub(input_total)
+                    .saturating_add(output_total);
+            }
+        }
+
         balance
     }
 
@@ -906,10 +920,26 @@ impl NodeCore {
     }
 
     pub fn receive_blinded_transaction(&mut self, tx: BlindedTransaction) -> Result<()> {
+        if self.blinded_transaction_conflicts_with_local_anchor(&tx) {
+            return Ok(());
+        }
         if self.ledger.submit_blinded_transaction(tx.clone())? {
             self.outbox.push(GossipEnvelope::BlindedTransaction(tx));
         }
         Ok(())
+    }
+
+    fn blinded_transaction_conflicts_with_local_anchor(&self, tx: &BlindedTransaction) -> bool {
+        let Some((height, burn)) = &self.local_block_anchor_burn else {
+            return false;
+        };
+        if *height != self.ledger.height() || self.ledger.has_transaction(burn.signature()) {
+            return false;
+        }
+        let anchor_inputs = transaction_input_outpoints(burn);
+        tx.inputs
+            .iter()
+            .any(|input| anchor_inputs.contains(&input.outpoint))
     }
 
     pub fn receive_blinded_reveal(&mut self, reveal: BlindedReveal) -> Result<()> {
@@ -1187,6 +1217,11 @@ impl NodeCore {
     fn wallet_build_ledger(&self) -> Result<Ledger> {
         let mut ledger = self.ledger.clone();
         self.reserve_local_block_anchor_inputs(&mut ledger)?;
+        self.queue_owned_blinded_payloads(&mut ledger)?;
+        Ok(ledger)
+    }
+
+    fn queue_owned_blinded_payloads(&self, ledger: &mut Ledger) -> Result<()> {
         for (commitment, payload) in &self.owned_blinded_payloads {
             if self.ledger.has_unrevealed_blinded_transaction(commitment)
                 && !ledger.has_transaction(payload.signature())
@@ -1194,7 +1229,17 @@ impl NodeCore {
                 let _ = ledger.submit_transaction(payload.clone())?;
             }
         }
-        Ok(ledger)
+        Ok(())
+    }
+
+    fn queue_local_block_anchor(&self, ledger: &mut Ledger) -> Result<()> {
+        let Some((height, burn)) = &self.local_block_anchor_burn else {
+            return Ok(());
+        };
+        if *height == ledger.height() && !ledger.has_transaction(burn.signature()) {
+            let _ = ledger.submit_transaction(burn.clone())?;
+        }
+        Ok(())
     }
 
     fn reserve_local_block_anchor_inputs(&self, ledger: &mut Ledger) -> Result<()> {
@@ -2228,6 +2273,16 @@ fn transaction_input_total_from_outputs(
         .fold(0_u64, |total, amount| total.saturating_add(*amount))
 }
 
+fn transaction_input_outpoints(transaction: &Transaction) -> BTreeSet<OutPoint> {
+    match transaction {
+        Transaction::Transfer { inputs, .. } | Transaction::Burn { inputs, .. } => inputs,
+        Transaction::Mine { .. } => return BTreeSet::new(),
+    }
+    .iter()
+    .map(|input| input.outpoint.clone())
+    .collect()
+}
+
 #[cfg(test)]
 mod tests {
     use std::collections::BTreeMap;
@@ -3148,6 +3203,7 @@ mod tests {
 
         let plan = node.prepare_automatic_finalization(1);
         assert!(plan.burned.is_some());
+        assert!(node.status().wallet_balance < node.ledger().balance_of(node.wallet_address()));
         let (_, anchor_burn) = node
             .local_block_anchor_burn
             .clone()
@@ -3190,6 +3246,63 @@ mod tests {
             node.ledger().status().tip_hash,
             peer_ledger.status().tip_hash
         );
+    }
+
+    #[test]
+    fn inbound_blinded_transaction_conflicting_with_local_anchor_is_not_queued() {
+        let alice = Wallet::from_seed("local-anchor-inbound-alice");
+        let bob = Wallet::from_seed("local-anchor-inbound-bob");
+        let finalizers = [alice.clone(), bob.clone()];
+        let mut allocations = BTreeMap::new();
+        allocations.insert(alice.address().to_string(), 10 * MICRO_IUNA);
+        allocations.insert(bob.address().to_string(), 10 * MICRO_IUNA);
+        let ledger = Ledger::new_with_genesis_burns(
+            allocations,
+            finalizers
+                .iter()
+                .map(|wallet| GenesisBurn::new(wallet.address(), MICRO_IUNA))
+                .collect(),
+            1,
+        )
+        .unwrap();
+        let leader = ledger.expected_leader_for_next_block().unwrap();
+        let leader_wallet = finalizers
+            .iter()
+            .find(|wallet| wallet.address() == leader)
+            .unwrap()
+            .clone();
+        let mut node = NodeCore::from_ledger_with_burn_fee_and_enabled(
+            leader_wallet.clone(),
+            ledger,
+            true,
+            MICRO_IUNA / 10,
+            1,
+        );
+
+        let plan = node.prepare_automatic_finalization(1);
+        assert!(plan.burned.is_some());
+        let (_, anchor_burn) = node
+            .local_block_anchor_burn
+            .clone()
+            .expect("leader burn should be held as a local block anchor");
+        let anchor_inputs = super::transaction_input_outpoints(&anchor_burn)
+            .into_iter()
+            .collect::<Vec<_>>();
+        let conflicting_payload = node
+            .ledger()
+            .build_transfer_with_inputs(&leader_wallet, bob.address(), 1, 0, &anchor_inputs)
+            .unwrap();
+        let conflicting = node
+            .ledger()
+            .build_blinded_transaction(&leader_wallet, conflicting_payload, node.chain_height() + 4)
+            .unwrap();
+
+        node.receive_blinded_transaction(conflicting.transaction)
+            .unwrap();
+
+        assert!(node.ledger().pending_blinded_transactions().is_empty());
+        assert!(node.drain_outbox().is_empty());
+        assert!(node.prepare_automatic_finalization(1).work.is_some());
     }
 
     #[test]

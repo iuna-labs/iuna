@@ -1071,6 +1071,16 @@ fn transaction_inputs_available(
         .all(|input| utxos.contains_key(&input.outpoint))
 }
 
+fn blinded_transaction_inputs_available(
+    transaction: &BlindedTransaction,
+    utxos: &BTreeMap<OutPoint, TxOutput>,
+) -> bool {
+    transaction
+        .inputs
+        .iter()
+        .all(|input| utxos.contains_key(&input.outpoint))
+}
+
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 pub struct Block {
     pub height: u64,
@@ -3202,6 +3212,7 @@ impl Ledger {
             .filter(|transaction| {
                 !included_blinded.contains(&transaction.commitment)
                     && new_height < transaction.expires_at_height
+                    && blinded_transaction_inputs_available(transaction, &available)
                     && self.validate_blinded_transaction(transaction).is_ok()
             })
             .collect();
@@ -7856,6 +7867,36 @@ mod tests {
             panic!("expected burn transaction");
         };
         assert!(!inputs.iter().any(|input| input.outpoint == mine_outpoint));
+    }
+
+    #[test]
+    fn pending_blinded_transactions_with_spent_inputs_are_pruned_after_block_apply() {
+        let alice = Wallet::from_seed("pending-blind-spent-prune-alice");
+        let mut mempool_ledger = ledger_with_allocation(&alice, 10 * MICRO_IUNA);
+        let mut block_ledger = mempool_ledger.clone();
+        let amount = mempool_ledger.balance_of(alice.address());
+        let blinded = mempool_ledger
+            .build_blinded_burn(&alice, amount, 0, mempool_ledger.height() + 4)
+            .unwrap();
+        mempool_ledger
+            .submit_blinded_transaction(blinded.transaction.clone())
+            .unwrap();
+
+        let burn = block_ledger.build_burn(&alice, amount, 0).unwrap();
+        let Transaction::Burn { inputs, .. } = &burn else {
+            panic!("expected burn transaction");
+        };
+        assert!(blinded.transaction.inputs.iter().any(|input| {
+            inputs
+                .iter()
+                .any(|burn_input| burn_input.outpoint == input.outpoint)
+        }));
+        block_ledger.submit_transaction(burn).unwrap();
+        let block = block_ledger.mine_next_block(&alice, 1).unwrap();
+
+        mempool_ledger.apply_block(block).unwrap();
+
+        assert!(mempool_ledger.pending_blinded_transactions().is_empty());
     }
 
     #[test]
