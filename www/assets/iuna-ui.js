@@ -124,6 +124,16 @@ window.iunaApp = function iunaApp() {
       }
     },
 
+    canUseProtectedApi() {
+      return this.authLoaded && this.auth.configured === true && this.auth.authenticated === true;
+    },
+
+    stopPolling() {
+      if (!this.pollHandle) return;
+      clearInterval(this.pollHandle);
+      this.pollHandle = null;
+    },
+
     tabFromHash() {
       const hash = window.location.hash.replace(/^#\/?/, "");
       return this.allowedTabs().includes(hash) ? hash : "wallet";
@@ -303,6 +313,7 @@ window.iunaApp = function iunaApp() {
     async logout() {
       try {
         await this.postAuth("/api/auth/logout", "");
+        this.stopPolling();
         await this.refreshAuth();
         this.showFlash("Locked", "success");
       } catch (error) {
@@ -540,6 +551,7 @@ window.iunaApp = function iunaApp() {
     },
 
     async refresh(options = {}) {
+      if (!this.canUseProtectedApi()) return;
       try {
         const [config, status, blocks, p2pMetrics, blockchainMetrics, networkHealth] = await Promise.all([
           this.fetchJson("/api/config"),
@@ -581,6 +593,7 @@ window.iunaApp = function iunaApp() {
         this.scheduleFeeEstimates();
       } catch (error) {
         if (String(error.message || "").includes("401")) {
+          this.stopPolling();
           await this.refreshAuth();
           return;
         }
@@ -640,6 +653,7 @@ window.iunaApp = function iunaApp() {
     },
 
     async refreshPagedDataset(kind, options = {}) {
+      if (!this.canUseProtectedApi()) return;
       const config = this.datasetConfig(kind);
       if (!config) return;
       const page = this[config.page];
@@ -655,6 +669,7 @@ window.iunaApp = function iunaApp() {
     },
 
     async loadNextPage(kind) {
+      if (!this.canUseProtectedApi()) return;
       const config = this.datasetConfig(kind);
       if (!config) return;
       const page = this[config.page];
@@ -734,7 +749,7 @@ window.iunaApp = function iunaApp() {
     observePageSentinel(kind, element) {
       if (!element || element.__iunaPageObserver) return;
       const observer = new IntersectionObserver((entries) => {
-        if (entries.some((entry) => entry.isIntersecting)) {
+        if (this.canUseProtectedApi() && entries.some((entry) => entry.isIntersecting)) {
           this.loadNextPage(kind);
         }
       }, { root: null, rootMargin: "180px 0px" });
@@ -745,7 +760,7 @@ window.iunaApp = function iunaApp() {
     observeBlockSentinel(element) {
       if (!element || element.__iunaBlockObserver) return;
       const observer = new IntersectionObserver((entries) => {
-        if (entries.some((entry) => entry.isIntersecting)) {
+        if (this.canUseProtectedApi() && entries.some((entry) => entry.isIntersecting)) {
           this.loadOlderBlocks();
         }
       }, { root: null, rootMargin: "180px 0px" });
@@ -892,6 +907,7 @@ window.iunaApp = function iunaApp() {
     },
 
     async loadOlderBlocks() {
+      if (!this.canUseProtectedApi()) return;
       if (this.loadingOlder || !this.hasMoreBlocks || this.blocks.length === 0) return;
       const oldest = Math.min(...this.blocks.map((block) => block.height));
       if (oldest <= 0) {

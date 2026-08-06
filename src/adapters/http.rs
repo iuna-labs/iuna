@@ -5488,6 +5488,26 @@ mod tests {
     fn polling_refreshes_paged_datasets_without_visible_loaders() {
         let app_js = include_str!("../../www/assets/iuna-ui.js");
         assert!(app_js.contains("setInterval(() => this.refresh({ silent: true }), 5000)"));
+        assert!(
+            app_js.contains(
+                "return this.authLoaded && this.auth.configured === true && this.auth.authenticated === true;"
+            )
+        );
+        assert!(app_js.contains(
+            "async refresh(options = {}) {\n      if (!this.canUseProtectedApi()) return;"
+        ));
+        assert!(app_js.contains("async refreshPagedDataset(kind, options = {}) {\n      if (!this.canUseProtectedApi()) return;"));
+        assert!(
+            app_js.contains(
+                "async loadNextPage(kind) {\n      if (!this.canUseProtectedApi()) return;"
+            )
+        );
+        assert!(
+            app_js.contains(
+                "async loadOlderBlocks() {\n      if (!this.canUseProtectedApi()) return;"
+            )
+        );
+        assert!(app_js.contains("this.stopPolling();\n          await this.refreshAuth();"));
         assert!(app_js.contains("backgroundLoading"));
         assert!(app_js.contains("options.silent === true ? \"backgroundLoading\" : \"loading\""));
     }

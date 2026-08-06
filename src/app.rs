@@ -1516,8 +1516,8 @@ impl NodeCore {
 
     fn automatic_burn_needs_plaintext_anchor(&self, timestamp_ms: u64) -> bool {
         self.ledger
-            .expected_leader_for_next_block()
-            .is_none_or(|leader| leader == self.wallet.address())
+            .finalizer_rank_for_next_block(self.wallet.address())
+            .is_some()
             || self.ledger.recovery_block_available_at(timestamp_ms)
             || timestamp_ms.saturating_add(AUTO_PLAINTEXT_BURN_BEFORE_RECOVERY_MS)
                 >= self.ledger.recovery_block_min_timestamp()
@@ -2223,7 +2223,7 @@ mod tests {
 
     use crate::domain::{
         FinalizerMode, GenesisBurn, Ledger, MICRO_IUNA, MINE_FINALIZER_FEE,
-        RECOVERY_BLOCK_DELAY_MS, Transaction, Wallet, run_vdf,
+        RECOVERY_BLOCK_DELAY_MS, Transaction, VDF_TARGET_BLOCK_MS, Wallet, run_vdf,
     };
 
     use super::{GossipEnvelope, InMemoryNetwork, NodeConfig, NodeCore};
@@ -2971,10 +2971,12 @@ mod tests {
     fn automatic_non_leader_burn_is_queued_as_blinded() {
         let alice = Wallet::from_seed("auto-blinded-burn-alice");
         let bob = Wallet::from_seed("auto-blinded-burn-bob");
+        let carol = Wallet::from_seed("auto-blinded-burn-carol");
         let finalizers = [alice.clone(), bob.clone()];
         let mut allocations = BTreeMap::new();
         allocations.insert(alice.address().to_string(), 10 * MICRO_IUNA);
         allocations.insert(bob.address().to_string(), 10 * MICRO_IUNA);
+        allocations.insert(carol.address().to_string(), 10 * MICRO_IUNA);
         let ledger = Ledger::new_with_genesis_burns(
             allocations,
             finalizers
@@ -2984,14 +2986,9 @@ mod tests {
             1,
         )
         .unwrap();
-        let leader = ledger.expected_leader_for_next_block().unwrap();
-        let non_leader = finalizers
-            .iter()
-            .find(|wallet| wallet.address() != leader)
-            .unwrap()
-            .clone();
+        assert_eq!(ledger.finalizer_rank_for_next_block(carol.address()), None);
         let mut node = NodeCore::from_ledger_with_burn_fee_and_enabled(
-            non_leader,
+            carol,
             ledger,
             true,
             MICRO_IUNA / 10,
@@ -3009,6 +3006,60 @@ mod tests {
                 .iter()
                 .any(|envelope| matches!(envelope, GossipEnvelope::BlindedTransaction(_)))
         );
+    }
+
+    #[test]
+    fn automatic_fallback_finalizer_burn_stays_plaintext_for_block_anchor() {
+        let alice = Wallet::from_seed("auto-fallback-burn-alice");
+        let bob = Wallet::from_seed("auto-fallback-burn-bob");
+        let finalizers = [alice.clone(), bob.clone()];
+        let mut allocations = BTreeMap::new();
+        allocations.insert(alice.address().to_string(), 10 * MICRO_IUNA);
+        allocations.insert(bob.address().to_string(), 10 * MICRO_IUNA);
+        let ledger = Ledger::new_with_genesis_burns(
+            allocations,
+            finalizers
+                .iter()
+                .map(|wallet| GenesisBurn::new(wallet.address(), MICRO_IUNA))
+                .collect(),
+            1,
+        )
+        .unwrap();
+        let fallback = finalizers
+            .iter()
+            .find(|wallet| ledger.finalizer_rank_for_next_block(wallet.address()) == Some(1))
+            .unwrap()
+            .clone();
+        let mut node = NodeCore::from_ledger_with_burn_fee_and_enabled(
+            fallback,
+            ledger,
+            true,
+            MICRO_IUNA / 10,
+            1,
+        );
+
+        let plan = node.prepare_automatic_finalization(1);
+        let outbox = node.drain_outbox();
+
+        assert!(plan.burned.is_some());
+        assert!(
+            plan.skipped_reason.is_none(),
+            "fallback should not be skipped: {:?}",
+            plan.skipped_reason
+        );
+        assert!(node.ledger().pending().is_empty());
+        assert!(node.ledger().pending_blinded_transactions().is_empty());
+        assert!(node.local_block_anchor_burn.is_some());
+        assert!(outbox.is_empty());
+        let work = plan.work.expect("fallback work should be prepared");
+        let vdf_output = run_vdf(work.vdf_seed(), work.vdf_rounds());
+        let block = node
+            .complete_prepared_block_at(work, vdf_output, VDF_TARGET_BLOCK_MS)
+            .unwrap();
+
+        assert_eq!(block.finalizer_rank, 1);
+        assert_eq!(block.finalizer_mode, FinalizerMode::Ticket);
+        assert_eq!(node.ledger().height(), 1);
     }
 
     #[test]
