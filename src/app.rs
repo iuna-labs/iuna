@@ -1186,6 +1186,7 @@ impl NodeCore {
 
     fn wallet_build_ledger(&self) -> Result<Ledger> {
         let mut ledger = self.ledger.clone();
+        self.reserve_local_block_anchor_inputs(&mut ledger)?;
         for (commitment, payload) in &self.owned_blinded_payloads {
             if self.ledger.has_unrevealed_blinded_transaction(commitment)
                 && !ledger.has_transaction(payload.signature())
@@ -1194,6 +1195,16 @@ impl NodeCore {
             }
         }
         Ok(ledger)
+    }
+
+    fn reserve_local_block_anchor_inputs(&self, ledger: &mut Ledger) -> Result<()> {
+        let Some((height, burn)) = &self.local_block_anchor_burn else {
+            return Ok(());
+        };
+        if *height == ledger.height() && !ledger.has_transaction(burn.signature()) {
+            ledger.reserve_transaction_inputs(burn)?;
+        }
+        Ok(())
     }
 
     pub fn mine_one(&mut self) -> Result<Block> {
@@ -3102,6 +3113,149 @@ mod tests {
         assert!(node.local_block_anchor_burn.is_some());
         assert!(outbox.is_empty());
         assert!(node.prepare_automatic_finalization(1).work.is_some());
+    }
+
+    #[test]
+    fn wallet_building_reserves_local_anchor_burn_inputs() {
+        let alice = Wallet::from_seed("local-anchor-reserve-alice");
+        let bob = Wallet::from_seed("local-anchor-reserve-bob");
+        let finalizers = [alice.clone(), bob.clone()];
+        let mut allocations = BTreeMap::new();
+        allocations.insert(alice.address().to_string(), 10 * MICRO_IUNA);
+        allocations.insert(bob.address().to_string(), 10 * MICRO_IUNA);
+        let ledger = Ledger::new_with_genesis_burns(
+            allocations,
+            finalizers
+                .iter()
+                .map(|wallet| GenesisBurn::new(wallet.address(), MICRO_IUNA))
+                .collect(),
+            1,
+        )
+        .unwrap();
+        let leader = ledger.expected_leader_for_next_block().unwrap();
+        let leader_wallet = finalizers
+            .iter()
+            .find(|wallet| wallet.address() == leader)
+            .unwrap()
+            .clone();
+        let mut node = NodeCore::from_ledger_with_burn_fee_and_enabled(
+            leader_wallet,
+            ledger,
+            true,
+            MICRO_IUNA / 10,
+            1,
+        );
+
+        let plan = node.prepare_automatic_finalization(1);
+        assert!(plan.burned.is_some());
+        let (_, anchor_burn) = node
+            .local_block_anchor_burn
+            .clone()
+            .expect("leader burn should be held as a local block anchor");
+        let Transaction::Burn { inputs, .. } = anchor_burn else {
+            panic!("local block anchor must be a burn");
+        };
+        let anchor_inputs = inputs
+            .iter()
+            .map(|input| input.outpoint.clone())
+            .collect::<Vec<_>>();
+
+        let blinded = node
+            .blinded_burn_with_fee(MICRO_IUNA / 10, 1, node.chain_height() + 4)
+            .unwrap();
+
+        assert!(
+            blinded
+                .inputs
+                .iter()
+                .all(|input| !anchor_inputs.contains(&input.outpoint)),
+            "blinded wallet transactions must not spend inputs reserved by the local anchor burn"
+        );
+
+        let work = node.prepare_next_block_with_local_anchor(2).unwrap();
+        let vdf_output = run_vdf(work.vdf_seed(), work.vdf_rounds());
+        let mut peer_ledger = node.clone_ledger();
+        let block = node
+            .complete_prepared_block_at(work, vdf_output, VDF_TARGET_BLOCK_MS)
+            .unwrap();
+        assert!(block.transactions.iter().any(Transaction::is_burn));
+        assert!(
+            block
+                .blinded_transactions
+                .iter()
+                .any(|transaction| transaction.commitment == blinded.commitment)
+        );
+        peer_ledger.apply_block_at(block, u64::MAX).unwrap();
+        assert_eq!(
+            node.ledger().status().tip_hash,
+            peer_ledger.status().tip_hash
+        );
+    }
+
+    #[test]
+    fn locally_produced_blocks_import_on_independent_peer_ledger() {
+        let alice = Wallet::from_seed("producer-parity-alice");
+        let bob = Wallet::from_seed("producer-parity-bob");
+        let carol = Wallet::from_seed("producer-parity-carol");
+        let wallets = [alice.clone(), bob.clone(), carol.clone()];
+        let mut allocations = BTreeMap::new();
+        for wallet in &wallets {
+            allocations.insert(wallet.address().to_string(), 20 * MICRO_IUNA);
+        }
+        let genesis_burns = wallets
+            .iter()
+            .map(|wallet| GenesisBurn::new(wallet.address(), MICRO_IUNA))
+            .collect();
+        let mut producer_ledger =
+            Ledger::new_with_genesis_burns(allocations, genesis_burns, 1).unwrap();
+        let mut peer_ledger = producer_ledger.clone();
+
+        for step in 0..8 {
+            assert_eq!(
+                producer_ledger.status().tip_hash,
+                peer_ledger.status().tip_hash
+            );
+            let leader = producer_ledger
+                .expected_leader_for_next_block()
+                .expect("test chain should have an eligible leader");
+            let leader_wallet = wallet_for_address(&wallets, &leader).clone();
+            let timestamp_ms = (step + 1) as u64 * VDF_TARGET_BLOCK_MS;
+            let mut node = NodeCore::from_ledger_with_burn_fee_and_enabled(
+                leader_wallet.clone(),
+                producer_ledger.clone(),
+                true,
+                MICRO_IUNA / 10,
+                1,
+            );
+            let plan = node.prepare_automatic_finalization(timestamp_ms);
+            assert!(plan.burned.is_some());
+
+            match step % 3 {
+                0 => {
+                    let _ = node.blinded_burn_with_fee(1, 0, node.chain_height() + 4);
+                }
+                1 => {
+                    let recipient = wallets[(step + 1) % wallets.len()].address();
+                    let _ =
+                        node.blinded_transfer_with_fee(recipient, 1, 0, node.chain_height() + 4);
+                }
+                _ => {}
+            }
+
+            let work = node
+                .prepare_next_block_with_local_anchor(timestamp_ms)
+                .unwrap();
+            let vdf_output = run_vdf(work.vdf_seed(), work.vdf_rounds());
+            let block = node
+                .complete_prepared_block_at(work, vdf_output, timestamp_ms)
+                .unwrap();
+            peer_ledger.apply_block_at(block, u64::MAX).unwrap();
+            producer_ledger = node.clone_ledger();
+            assert_eq!(
+                producer_ledger.status().tip_hash,
+                peer_ledger.status().tip_hash
+            );
+        }
     }
 }
 

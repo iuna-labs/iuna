@@ -2848,6 +2848,14 @@ impl Ledger {
         Ok(self.submit_transaction_with_outcome(transaction)?.added())
     }
 
+    pub(crate) fn reserve_transaction_inputs(&mut self, transaction: &Transaction) -> Result<()> {
+        self.validate_new_transaction(transaction)?;
+        let mut utxos = self.utxos.clone();
+        spend_inputs(transaction, &mut utxos)?;
+        self.utxos = utxos;
+        Ok(())
+    }
+
     pub fn submit_blinded_transaction(&mut self, transaction: BlindedTransaction) -> Result<bool> {
         if self.has_blinded_transaction(&transaction.commitment) {
             return Ok(false);
@@ -3046,11 +3054,18 @@ impl Ledger {
     }
 
     pub fn apply_locally_mined_block(&mut self, block: Block) -> Result<()> {
-        self.apply_preverified_block(block)
+        self.apply_self_produced_block_at(block, unix_now_ms())
     }
 
-    pub(crate) fn apply_preverified_block(&mut self, block: Block) -> Result<()> {
-        self.apply_preverified_block_at(block, unix_now_ms())
+    pub(crate) fn apply_self_produced_block_at(&mut self, block: Block, now_ms: u64) -> Result<()> {
+        self.verify_self_produced_block_at(&block, now_ms)?;
+        self.apply_preverified_block_at(block, now_ms)
+    }
+
+    pub(crate) fn verify_self_produced_block_at(&self, block: &Block, now_ms: u64) -> Result<()> {
+        let mut verifier = self.clone();
+        verifier.apply_preverified_block_at(block.clone(), now_ms)?;
+        Ok(())
     }
 
     pub(crate) fn apply_preverified_block_at(&mut self, block: Block, now_ms: u64) -> Result<()> {
