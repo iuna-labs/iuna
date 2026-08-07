@@ -2164,6 +2164,22 @@ impl Ledger {
         &self.pending_reveals
     }
 
+    pub fn pending_revealed_blinded_transactions(&self) -> Vec<RevealedBlindedTransaction> {
+        self.pending_reveals
+            .iter()
+            .filter_map(|reveal| {
+                let active = self.active_blinded.get(&reveal.commitment)?;
+                let transaction = self.pending_reveal_transaction(reveal).ok()?;
+                Some(RevealedBlindedTransaction {
+                    height: self.height().saturating_add(1),
+                    commitment: reveal.commitment.clone(),
+                    included_by: active.included_by.clone(),
+                    transaction,
+                })
+            })
+            .collect()
+    }
+
     pub(crate) fn drop_pending_blinded_conflicting_with_transaction(
         &mut self,
         transaction: &Transaction,
@@ -7731,6 +7747,34 @@ mod tests {
             .unwrap_err();
 
         assert!(format!("{error:#}").contains("blinded transaction is already on chain"));
+    }
+
+    #[test]
+    fn pending_blinded_reveals_expose_revealed_transaction_data() {
+        let alice = Wallet::from_seed("pending-reveal-data-finalizer-alice");
+        let bob = Wallet::from_seed("pending-reveal-data-finalizer-bob");
+        let carol = Wallet::from_seed("pending-reveal-data-carol");
+        let finalizers = [alice.clone(), bob.clone()];
+        let mut ledger = ledger_with_finalizers(&finalizers, &[(&carol, 10 * MICRO_IUNA)]);
+        let blinded = ledger
+            .build_blinded_burn(&carol, 3, 7, ledger.height() + 6)
+            .unwrap();
+        let commitment = blinded.transaction.commitment.clone();
+        ledger
+            .submit_blinded_transaction(blinded.transaction)
+            .unwrap();
+        queue_next_leader_burn(&mut ledger, &finalizers);
+        mine_preverified_as_next_leader(&mut ledger, &finalizers, 1);
+
+        ledger.submit_blinded_reveal(blinded.reveal).unwrap();
+
+        let revealed = ledger.pending_revealed_blinded_transactions();
+        assert_eq!(revealed.len(), 1);
+        assert_eq!(revealed[0].commitment, commitment);
+        assert_eq!(revealed[0].height, ledger.height() + 1);
+        assert_eq!(revealed[0].transaction.amount(), 3);
+        assert_eq!(revealed[0].transaction.fee(), 7);
+        assert!(revealed[0].transaction.is_burn());
     }
 
     #[test]

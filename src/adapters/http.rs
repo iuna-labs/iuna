@@ -824,6 +824,11 @@ async fn api_mempool(
     let pending = node.pending_transactions();
     let pending_blinded = node.pending_blinded_transactions();
     let pending_reveals = node.pending_blinded_reveals();
+    let pending_revealed = node
+        .pending_revealed_blinded_transactions()
+        .into_iter()
+        .map(|revealed| (revealed.commitment.clone(), revealed))
+        .collect::<BTreeMap<_, _>>();
     let outputs = known_output_index(&snapshot, &pending);
     let mut items = pending
         .iter()
@@ -834,7 +839,12 @@ async fn api_mempool(
             .iter()
             .map(|transaction| ui_blinded_transaction(transaction, &outputs)),
     );
-    items.extend(pending_reveals.iter().map(ui_blinded_reveal));
+    items.extend(pending_reveals.iter().map(|reveal| {
+        pending_revealed
+            .get(&reveal.commitment)
+            .map(|revealed| ui_pending_revealed_transaction(revealed, &outputs))
+            .unwrap_or_else(|| ui_blinded_reveal(reveal))
+    }));
     Json(page_items(items, query))
 }
 
@@ -1897,6 +1907,15 @@ fn ui_revealed_transaction(
 ) -> UiTransaction {
     let mut row = ui_transaction(transaction, outputs_by_outpoint);
     row.revealed = true;
+    row
+}
+
+fn ui_pending_revealed_transaction(
+    revealed: &RevealedBlindedTransaction,
+    outputs_by_outpoint: &BTreeMap<OutPoint, TxOutput>,
+) -> UiTransaction {
+    let mut row = ui_revealed_transaction(&revealed.transaction, outputs_by_outpoint);
+    row.commitment = Some(revealed.commitment.clone());
     row
 }
 
@@ -4046,7 +4065,7 @@ const INDEX_HTML: &str = r#"<!doctype html>
         <div class="tx-field"><span class="tx-label">Fee</span><span class="tx-value money" x-text="txFeeLabel(selectedTransaction?.tx)"></span></div>
         <div class="tx-field" x-show="!isBlindedMempoolItem(selectedTransaction?.tx)"><span class="tx-label">From</span><code class="tx-value hash" x-text="txFrom(selectedTransaction?.tx || {})"></code></div>
         <div class="tx-field" x-show="txTo(selectedTransaction?.tx || {})"><span class="tx-label">To</span><code class="tx-value hash" x-text="txTo(selectedTransaction?.tx || {})"></code></div>
-        <div class="tx-field" x-show="isBlindedMempoolItem(selectedTransaction?.tx)"><span class="tx-label">Commitment</span><code class="tx-value hash" x-text="selectedTransaction?.tx?.commitment || selectedTransaction?.tx?.signature || '-'"></code></div>
+        <div class="tx-field" x-show="isBlindedMempoolItem(selectedTransaction?.tx) || selectedTransaction?.tx?.commitment"><span class="tx-label">Commitment</span><code class="tx-value hash" x-text="selectedTransaction?.tx?.commitment || selectedTransaction?.tx?.signature || '-'"></code></div>
         <div class="tx-field" x-show="selectedTransaction?.tx?.encrypted_size || selectedTransaction?.tx?.encryptedSize"><span class="tx-label">Encrypted Bytes</span><span class="tx-value number" x-text="selectedTransaction?.tx?.encrypted_size || selectedTransaction?.tx?.encryptedSize"></span></div>
         <div class="tx-field" x-show="selectedTransaction?.tx?.expires_at_height || selectedTransaction?.tx?.expiresAtHeight"><span class="tx-label">Expires</span><span class="tx-value number" x-text="selectedTransaction?.tx?.expires_at_height || selectedTransaction?.tx?.expiresAtHeight"></span></div>
         <div class="tx-field" x-show="isMineTx(selectedTransaction?.tx)"><span class="tx-label">Difficulty</span><span class="tx-value number" x-text="txDifficultyBits(selectedTransaction?.tx) ?? '-'"></span></div>
@@ -4278,6 +4297,21 @@ mod tests {
 
         let blinded_row = super::ui_blinded_transaction(&blinded, &outputs);
         let reveal_row = super::ui_blinded_reveal(&reveal);
+        let revealed_row = super::ui_pending_revealed_transaction(
+            &crate::domain::RevealedBlindedTransaction {
+                height: 2,
+                commitment: reveal.commitment.clone(),
+                included_by: owner.clone(),
+                transaction: Transaction::Burn {
+                    inputs: blinded.inputs.clone(),
+                    change: Vec::new(),
+                    amount: 12,
+                    fee: blinded.fee,
+                    signature: "f".repeat(128),
+                },
+            },
+            &outputs,
+        );
 
         assert_eq!(blinded_row.kind, "blinded");
         assert_eq!(blinded_row.from, owner);
@@ -4288,6 +4322,12 @@ mod tests {
         assert_eq!(blinded_row.expires_at_height, Some(42));
         assert_eq!(reveal_row.kind, "reveal");
         assert_eq!(reveal_row.commitment, blinded_row.commitment);
+        assert_eq!(revealed_row.kind, "burn");
+        assert!(revealed_row.revealed);
+        assert_eq!(revealed_row.commitment, Some(reveal.commitment));
+        assert_eq!(revealed_row.amount, 12);
+        assert_eq!(revealed_row.fee, 7);
+        assert_eq!(revealed_row.inputs[0].amount, Some(99));
     }
 
     #[test]
@@ -5505,8 +5545,12 @@ mod tests {
     fn reveal_mempool_items_show_unknown_fee_label() {
         let app_js = include_str!("../../www/assets/iuna-ui.js");
         assert!(app_js.contains("txFeeLabel(tx)"));
-        assert!(app_js.contains("tx?.kind === \"reveal\""));
+        assert!(app_js.contains("!tx?.revealed && tx?.kind === \"reveal\""));
         assert!(app_js.contains("unknown until reveal"));
+        assert!(
+            app_js
+                .contains("!tx?.revealed && (tx?.kind === \"blinded\" || tx?.kind === \"reveal\")")
+        );
         assert!(app_js.contains("mempoolFirstSeenHeights"));
         assert!(app_js.contains("syncMempoolBlockMarker"));
         assert!(app_js.contains("mempoolItemClass"));

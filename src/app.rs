@@ -430,6 +430,12 @@ impl NodeCore {
         self.ledger.pending_blinded_reveals().to_vec()
     }
 
+    pub fn pending_revealed_blinded_transactions(
+        &self,
+    ) -> Vec<crate::domain::RevealedBlindedTransaction> {
+        self.ledger.pending_revealed_blinded_transactions()
+    }
+
     pub fn owned_blinded_payloads(&self) -> Vec<Transaction> {
         self.owned_blinded_payloads.values().cloned().collect()
     }

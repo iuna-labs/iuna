@@ -1618,11 +1618,11 @@ window.iunaApp = function iunaApp() {
     },
 
     isBlindedMempoolItem(tx) {
-      return tx?.kind === "blinded" || tx?.kind === "reveal";
+      return !tx?.revealed && (tx?.kind === "blinded" || tx?.kind === "reveal");
     },
 
     txFeeLabel(tx) {
-      if (tx?.kind === "reveal") return "unknown until reveal";
+      if (!tx?.revealed && tx?.kind === "reveal") return "unknown until reveal";
       return `IUNA ${this.amountLabel(tx?.fee ?? 0)}`;
     },
 
