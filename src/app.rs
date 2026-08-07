@@ -3466,7 +3466,7 @@ mod tests {
         let work = plan.work.expect("fallback work should be prepared");
         let vdf_output = run_vdf(work.vdf_seed(), work.vdf_rounds());
         let block = node
-            .complete_prepared_block_at(work, vdf_output, VDF_TARGET_BLOCK_MS)
+            .complete_prepared_block_at(work, vdf_output, VDF_TARGET_BLOCK_MS * 2)
             .unwrap();
 
         assert_eq!(block.finalizer_rank, 1);
@@ -3578,7 +3578,7 @@ mod tests {
         let vdf_output = run_vdf(work.vdf_seed(), work.vdf_rounds());
         let mut peer_ledger = node.clone_ledger();
         let block = node
-            .complete_prepared_block_at(work, vdf_output, VDF_TARGET_BLOCK_MS)
+            .complete_prepared_block_at(work, vdf_output, VDF_TARGET_BLOCK_MS * 2)
             .unwrap();
         assert!(block.transactions.iter().any(Transaction::is_burn));
         assert!(

@@ -69,8 +69,8 @@ Fallback finalizers use more VDF work: rank `0` uses the base rounds, rank `1` u
 VDF rounds alone are not the fallback gate. Faster hardware could otherwise finish a lower-ranked VDF before a slower primary finalizer. iuna therefore also uses rank time slots:
 
 - rank `0` blocks are valid as soon as their timestamp is greater than the parent timestamp;
-- rank `1` blocks are valid from `parent timestamp + 1 * target block time`;
-- rank `2` blocks are valid from `parent timestamp + 2 * target block time`;
+- rank `1` blocks are valid from `parent timestamp + 2 * target block time`;
+- rank `2` blocks are valid from `parent timestamp + 4 * target block time`;
 - and so on.
 
 If a fallback finalizer finishes the VDF early, it must wait until its slot opens before publishing. Rank `0` does not wait on a rank slot; that keeps the primary path useful as the clean VDF-speed signal for retargeting. If a rank `0` finalizer finishes late, the block timestamp should reflect that later completion/publication time so VDF retargeting can observe slow rounds. Other nodes reject fallback blocks whose timestamp is before their rank slot.
@@ -84,7 +84,7 @@ Rank slots depend on block timestamps, so timestamps are constrained by consensu
 - it must not be too far in the future relative to the validating node's network-adjusted clock;
 - for fallback ticket blocks, it must be at or after the finalizer rank slot.
 
-The future drift limit is `2 minutes`. A finalizer can lie within that small margin, but cannot skip an entire `5 minute` rank slot by claiming a far-future timestamp. P2P treats too-early future/slot blocks as temporal errors rather than peer-banning evidence.
+The future drift limit is `2 minutes`. A finalizer can lie within that small margin, but cannot skip an entire `10 minute` fallback rank slot by claiming a far-future timestamp. P2P treats too-early future/slot blocks as temporal errors rather than peer-banning evidence.
 
 ## Recovery Blocks
 

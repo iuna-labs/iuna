@@ -4021,6 +4021,8 @@ fn vdf_rounds_for_finalizer_rank(base_rounds: u64, rank: u32) -> Result<u64> {
 
 fn finalizer_rank_slot_delay_ms(rank: u32) -> Result<u64> {
     VDF_TARGET_BLOCK_MS
+        .checked_mul(2)
+        .context("finalizer rank time slot overflow")?
         .checked_mul(u64::from(rank))
         .context("finalizer rank time slot overflow")
 }
@@ -6623,7 +6625,10 @@ mod tests {
             .prepare_next_block(fallback.address(), parent_timestamp + 1)
             .unwrap();
 
-        assert_eq!(work.timestamp_ms(), parent_timestamp + VDF_TARGET_BLOCK_MS);
+        assert_eq!(
+            work.timestamp_ms(),
+            parent_timestamp + VDF_TARGET_BLOCK_MS * 2
+        );
         assert_eq!(work.vdf_rounds(), ledger.vdf_rounds() * 2);
     }
 
@@ -6698,7 +6703,7 @@ mod tests {
             .prepare_next_block(fallback.address(), parent_timestamp + 1)
             .unwrap();
         let mut block = work.finish(fallback, "preverified-vdf".to_string());
-        block.timestamp_ms = parent_timestamp + VDF_TARGET_BLOCK_MS - 1;
+        block.timestamp_ms = parent_timestamp + VDF_TARGET_BLOCK_MS * 2 - 1;
         block.hash = block.compute_hash();
 
         let error = ledger
