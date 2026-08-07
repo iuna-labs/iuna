@@ -1,4 +1,5 @@
 use std::{
+    collections::BTreeSet,
     fs,
     path::{Path, PathBuf},
     time::{SystemTime, UNIX_EPOCH},
@@ -12,7 +13,7 @@ use serde::Serialize;
 use crate::domain::{
     Amount, BLINDED_COMMITTER_FEE_BPS, BLINDED_FEE_BPS_DENOMINATOR,
     BLINDED_REVEAL_BUNDLE_SIGNER_FEE_BPS, BlindedReveal, BlindedTransaction, Block, ChainSnapshot,
-    FinalizerMode, LaunchProfile, LeaderProof, Ledger, MINE_REWARD, MaskedBlindedReveal, OutPoint,
+    FinalizerMode, LaunchProfile, LeaderProof, Ledger, MaskedBlindedReveal, OutPoint,
     REVEAL_COMMITTEE_SIZE, RevealBundleSection, RevealBundleSignature, Transaction, TxInput,
     TxOutput, blinded_reveal_finalizer_fee, revealed_blinded_transactions,
 };
@@ -33,6 +34,7 @@ CREATE TABLE IF NOT EXISTS block_metrics (
     block_time_ms INTEGER,
     mine_difficulty_bits INTEGER NOT NULL,
     circulating_supply INTEGER NOT NULL,
+    known_wallet_addresses INTEGER NOT NULL DEFAULT 0,
     transaction_count INTEGER NOT NULL,
     transfer_count INTEGER NOT NULL,
     burn_count INTEGER NOT NULL,
@@ -55,6 +57,7 @@ pub struct BlockMetricRow {
     pub block_time_ms: Option<u64>,
     pub mine_difficulty_bits: u32,
     pub circulating_supply: Amount,
+    pub known_wallet_addresses: u64,
     pub transaction_count: u64,
     pub transfer_count: u64,
     pub burn_count: u64,
@@ -88,7 +91,13 @@ impl SqliteChainStore {
         store.with_connection(|connection| {
             connection
                 .execute_batch(SCHEMA)
-                .context("failed to initialize chain database schema")
+                .context("failed to initialize chain database schema")?;
+            ensure_block_metrics_column(
+                connection,
+                "known_wallet_addresses",
+                "INTEGER NOT NULL DEFAULT 0",
+            )?;
+            Ok(())
         })?;
         Ok(store)
     }
@@ -190,7 +199,7 @@ ON CONFLICT(id) DO UPDATE SET
                 .prepare(
                     r#"
 SELECT height, block_hash, timestamp_ms, block_time_ms, mine_difficulty_bits,
-       circulating_supply, transaction_count, transfer_count, burn_count,
+       circulating_supply, known_wallet_addresses, transaction_count, transfer_count, burn_count,
        mine_count, burned_amount, total_burned_amount, fees_amount, reward_amount,
        vdf_rounds, finalizer_rank
 FROM block_metrics
@@ -207,16 +216,17 @@ ORDER BY height ASC
                         block_time_ms: row.get(3)?,
                         mine_difficulty_bits: row.get(4)?,
                         circulating_supply: row.get(5)?,
-                        transaction_count: row.get(6)?,
-                        transfer_count: row.get(7)?,
-                        burn_count: row.get(8)?,
-                        mine_count: row.get(9)?,
-                        burned_amount: row.get(10)?,
-                        total_burned_amount: row.get(11)?,
-                        fees_amount: row.get(12)?,
-                        reward_amount: row.get(13)?,
-                        vdf_rounds: row.get(14)?,
-                        finalizer_rank: row.get(15)?,
+                        known_wallet_addresses: row.get(6)?,
+                        transaction_count: row.get(7)?,
+                        transfer_count: row.get(8)?,
+                        burn_count: row.get(9)?,
+                        mine_count: row.get(10)?,
+                        burned_amount: row.get(11)?,
+                        total_burned_amount: row.get(12)?,
+                        fees_amount: row.get(13)?,
+                        reward_amount: row.get(14)?,
+                        vdf_rounds: row.get(15)?,
+                        finalizer_rank: row.get(16)?,
                     })
                 })
                 .context("failed to load block metrics")?;
@@ -265,9 +275,10 @@ fn replace_metrics(
                 r#"
 INSERT INTO block_metrics (
     height, block_hash, timestamp_ms, block_time_ms, mine_difficulty_bits,
-    circulating_supply, transaction_count, transfer_count, burn_count, mine_count,
-    burned_amount, total_burned_amount, fees_amount, reward_amount, vdf_rounds, finalizer_rank
-) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16)
+    circulating_supply, known_wallet_addresses, transaction_count, transfer_count, burn_count,
+    mine_count, burned_amount, total_burned_amount, fees_amount, reward_amount, vdf_rounds,
+    finalizer_rank
+) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17)
 "#,
                 params![
                     metric.height,
@@ -276,6 +287,7 @@ INSERT INTO block_metrics (
                     metric.block_time_ms,
                     metric.mine_difficulty_bits,
                     metric.circulating_supply,
+                    metric.known_wallet_addresses,
                     metric.transaction_count,
                     metric.transfer_count,
                     metric.burn_count,
@@ -290,6 +302,31 @@ INSERT INTO block_metrics (
             )
             .with_context(|| format!("failed to insert metrics for block {}", metric.height))?;
     }
+    Ok(())
+}
+
+fn ensure_block_metrics_column(
+    connection: &Connection,
+    name: &str,
+    definition: &str,
+) -> Result<()> {
+    let mut statement = connection
+        .prepare("PRAGMA table_info(block_metrics)")
+        .context("failed to inspect block_metrics schema")?;
+    let columns = statement
+        .query_map([], |row| row.get::<_, String>(1))
+        .context("failed to query block_metrics columns")?
+        .collect::<std::result::Result<Vec<_>, _>>()
+        .context("failed to read block_metrics columns")?;
+    if columns.iter().any(|column| column == name) {
+        return Ok(());
+    }
+    connection
+        .execute(
+            &format!("ALTER TABLE block_metrics ADD COLUMN {name} {definition}"),
+            [],
+        )
+        .with_context(|| format!("failed to add block_metrics.{name} column"))?;
     Ok(())
 }
 
@@ -886,6 +923,18 @@ fn hex_encode(bytes: impl AsRef<[u8]>) -> String {
 fn metrics_from_snapshot(snapshot: &ChainSnapshot) -> Result<Vec<BlockMetricRow>> {
     let ledger = Ledger::from_persisted_snapshot(snapshot.clone())
         .context("failed to rebuild ledger for metrics")?;
+    let genesis = snapshot
+        .blocks
+        .first()
+        .cloned()
+        .context("cannot compute metrics for empty chain snapshot")?;
+    let mut running_ledger = Ledger::from_persisted_snapshot(ChainSnapshot {
+        genesis_allocations: snapshot.genesis_allocations.clone(),
+        vdf_rounds: snapshot.vdf_rounds,
+        launch_profile: snapshot.launch_profile.clone(),
+        blocks: vec![genesis],
+    })
+    .context("failed to rebuild genesis ledger for metrics")?;
     let revealed = revealed_blinded_transactions(snapshot)?.into_iter().fold(
         std::collections::BTreeMap::<u64, Vec<crate::domain::RevealedBlindedTransaction>>::new(),
         |mut by_height, revealed| {
@@ -893,15 +942,11 @@ fn metrics_from_snapshot(snapshot: &ChainSnapshot) -> Result<Vec<BlockMetricRow>
             by_height
         },
     );
-    let mut circulating_supply =
-        snapshot
-            .genesis_allocations
-            .values()
-            .try_fold(0_u64, |total, amount| {
-                total
-                    .checked_add(*amount)
-                    .context("genesis allocation total overflows")
-            })?;
+    let mut known_wallet_addresses = snapshot
+        .genesis_allocations
+        .keys()
+        .cloned()
+        .collect::<BTreeSet<_>>();
     let mut total_burned_amount = 0_u64;
     let mut rows = Vec::with_capacity(snapshot.blocks.len());
     let mut previous_timestamp_ms = None;
@@ -914,10 +959,14 @@ fn metrics_from_snapshot(snapshot: &ChainSnapshot) -> Result<Vec<BlockMetricRow>
         let mut mine_count = 0_u64;
         let mut burned_amount = 0_u64;
         let mut burned_fee_amount = 0_u64;
-        let mut mine_issued_amount = 0_u64;
         let mut fees_amount = 0_u64;
 
+        known_wallet_addresses.insert(block.miner.clone());
+        for signature in &block.reveal_bundle_section.signatures {
+            known_wallet_addresses.insert(signature.member.clone());
+        }
         for transaction in &block.transactions {
+            collect_transaction_addresses(transaction, &mut known_wallet_addresses);
             fees_amount = fees_amount
                 .checked_add(transaction.fee())
                 .context("block metric fees overflow")?;
@@ -931,14 +980,13 @@ fn metrics_from_snapshot(snapshot: &ChainSnapshot) -> Result<Vec<BlockMetricRow>
                 }
                 Transaction::Mine { .. } => {
                     mine_count += 1;
-                    mine_issued_amount = mine_issued_amount
-                        .checked_add(MINE_REWARD)
-                        .context("block metric mine issuance overflow")?;
                 }
             }
         }
         for revealed in &revealed_transactions {
             let transaction = &revealed.transaction;
+            known_wallet_addresses.insert(revealed.included_by.clone());
+            collect_transaction_addresses(transaction, &mut known_wallet_addresses);
             fees_amount = fees_amount
                 .checked_add(transaction.fee())
                 .context("block metric fees overflow")?;
@@ -972,10 +1020,6 @@ fn metrics_from_snapshot(snapshot: &ChainSnapshot) -> Result<Vec<BlockMetricRow>
                 }
                 Transaction::Mine { .. } => {
                     mine_count += 1;
-                    mine_issued_amount = mine_issued_amount
-                        .checked_add(MINE_REWARD)
-                        .and_then(|amount| amount.checked_add(transaction.fee()))
-                        .context("block metric mine issuance overflow")?;
                 }
             }
         }
@@ -1012,6 +1056,9 @@ fn metrics_from_snapshot(snapshot: &ChainSnapshot) -> Result<Vec<BlockMetricRow>
             .checked_add(expired_blinded_fees)
             .context("block metric expired burned fees overflow")?;
         for transaction in &block.blinded_transactions {
+            for input in &transaction.inputs {
+                known_wallet_addresses.insert(input.owner.clone());
+            }
             active_blinded.insert(transaction.commitment.clone(), transaction.clone());
         }
         total_burned_amount = total_burned_amount
@@ -1019,27 +1066,12 @@ fn metrics_from_snapshot(snapshot: &ChainSnapshot) -> Result<Vec<BlockMetricRow>
             .and_then(|amount| amount.checked_add(burned_fee_amount))
             .context("total burned metric overflows")?;
 
-        let issued_amount = block_issued_amount(block.height, block.reward, mine_issued_amount)
-            .with_context(|| {
-                format!("block metric issuance overflows at block {}", block.height)
-            })?;
-        circulating_supply = circulating_supply
-            .checked_add(issued_amount)
-            .with_context(|| {
-                format!(
-                    "circulating supply metric overflows while adding issuance at block {}",
-                    block.height
-                )
-            })?;
-        circulating_supply = circulating_supply
-            .checked_sub(burned_amount)
-            .and_then(|amount| amount.checked_sub(burned_fee_amount))
-            .with_context(|| {
-                format!(
-                    "circulating supply metric underflows while subtracting burns at block {}",
-                    block.height
-                )
-            })?;
+        if block.height > 0 {
+            running_ledger
+                .apply_preverified_block_at(block.clone(), u64::MAX)
+                .with_context(|| format!("failed to replay block {} for metrics", block.height))?;
+        }
+        let circulating_supply = ledger_circulating_supply(&running_ledger)?;
         let block_time_ms =
             previous_timestamp_ms.map(|previous| block.timestamp_ms.saturating_sub(previous));
         previous_timestamp_ms = Some(block.timestamp_ms);
@@ -1050,6 +1082,7 @@ fn metrics_from_snapshot(snapshot: &ChainSnapshot) -> Result<Vec<BlockMetricRow>
             block_time_ms,
             mine_difficulty_bits: ledger.mine_difficulty_bits_at_height(block.height),
             circulating_supply,
+            known_wallet_addresses: known_wallet_addresses.len() as u64,
             transaction_count: (block.transactions.len() + revealed_transactions.len()) as u64,
             transfer_count,
             burn_count,
@@ -1065,13 +1098,46 @@ fn metrics_from_snapshot(snapshot: &ChainSnapshot) -> Result<Vec<BlockMetricRow>
     Ok(rows)
 }
 
-fn block_issued_amount(
-    height: u64,
-    reward_amount: Amount,
-    mine_issued_amount: Amount,
-) -> Option<Amount> {
-    let genesis_reward = if height == 0 { reward_amount } else { 0 };
-    mine_issued_amount.checked_add(genesis_reward)
+fn ledger_circulating_supply(ledger: &Ledger) -> Result<Amount> {
+    ledger
+        .status()
+        .balances
+        .values()
+        .try_fold(0_u64, |total, amount| {
+            total
+                .checked_add(*amount)
+                .context("circulating supply metric overflows")
+        })
+}
+
+fn collect_transaction_addresses(transaction: &Transaction, addresses: &mut BTreeSet<String>) {
+    match transaction {
+        Transaction::Transfer {
+            inputs, outputs, ..
+        } => {
+            collect_input_addresses(inputs, addresses);
+            collect_output_addresses(outputs, addresses);
+        }
+        Transaction::Burn { inputs, change, .. } => {
+            collect_input_addresses(inputs, addresses);
+            collect_output_addresses(change, addresses);
+        }
+        Transaction::Mine { recipient, .. } => {
+            addresses.insert(recipient.clone());
+        }
+    }
+}
+
+fn collect_input_addresses(inputs: &[TxInput], addresses: &mut BTreeSet<String>) {
+    for input in inputs {
+        addresses.insert(input.owner.clone());
+    }
+}
+
+fn collect_output_addresses(outputs: &[TxOutput], addresses: &mut BTreeSet<String>) {
+    for output in outputs {
+        addresses.insert(output.address.clone());
+    }
 }
 
 fn snapshot_tip(snapshot: &ChainSnapshot) -> Option<(u64, String)> {
@@ -1092,6 +1158,7 @@ fn unix_ms() -> u64 {
 mod tests {
     use std::collections::BTreeMap;
 
+    use rusqlite::Connection;
     use tempfile::tempdir;
 
     use crate::domain::{BLOCK_REWARD, GenesisBurn, Ledger, Wallet, run_vdf};
@@ -1252,10 +1319,120 @@ mod tests {
         assert_eq!(metrics.last().unwrap().burn_count, 1);
         assert_eq!(metrics.last().unwrap().burned_amount, 2);
         assert_eq!(metrics.last().unwrap().fees_amount, 1);
-        assert_eq!(metrics.last().unwrap().circulating_supply, BLOCK_REWARD + 7);
+        assert_eq!(
+            metrics.last().unwrap().circulating_supply,
+            ledger.status().balances.values().copied().sum::<u64>()
+        );
+        assert_eq!(metrics.last().unwrap().known_wallet_addresses, 1);
 
         store.clear_metrics().unwrap();
         assert!(store.load_metrics().unwrap().is_empty());
+    }
+
+    #[test]
+    fn sqlite_chain_store_migrates_known_wallet_address_metrics_column() {
+        let dir = tempdir().unwrap();
+        let path = dir.path().join("chain.sqlite3");
+        let connection = Connection::open(&path).unwrap();
+        connection
+            .execute_batch(
+                r#"
+CREATE TABLE block_metrics (
+    height INTEGER PRIMARY KEY,
+    block_hash TEXT NOT NULL,
+    timestamp_ms INTEGER NOT NULL,
+    block_time_ms INTEGER,
+    mine_difficulty_bits INTEGER NOT NULL,
+    circulating_supply INTEGER NOT NULL,
+    transaction_count INTEGER NOT NULL,
+    transfer_count INTEGER NOT NULL,
+    burn_count INTEGER NOT NULL,
+    mine_count INTEGER NOT NULL,
+    burned_amount INTEGER NOT NULL,
+    total_burned_amount INTEGER NOT NULL,
+    fees_amount INTEGER NOT NULL,
+    reward_amount INTEGER NOT NULL,
+    vdf_rounds INTEGER NOT NULL,
+    finalizer_rank INTEGER NOT NULL
+);
+"#,
+            )
+            .unwrap();
+        drop(connection);
+
+        let store = SqliteChainStore::open(&path).unwrap();
+
+        store
+            .with_connection(|connection| {
+                let count = connection
+                    .query_row(
+                        "SELECT COUNT(*) FROM pragma_table_info('block_metrics') WHERE name = 'known_wallet_addresses'",
+                        [],
+                        |row| row.get::<_, u64>(0),
+                    )
+                    .unwrap();
+                assert_eq!(count, 1);
+                Ok(())
+            })
+            .unwrap();
+    }
+
+    #[test]
+    fn sqlite_chain_store_metrics_supply_matches_wallet_balances_after_block_rewards() {
+        let dir = tempdir().unwrap();
+        let store = SqliteChainStore::open(dir.path().join("chain.sqlite3")).unwrap();
+        let alice = Wallet::from_seed("metrics-supply-alice");
+        let mut genesis = BTreeMap::new();
+        genesis.insert(alice.address().to_string(), 100);
+        let mut ledger =
+            Ledger::new_with_genesis_burns(genesis, vec![GenesisBurn::new(alice.address(), 1)], 1)
+                .unwrap();
+
+        for timestamp_ms in [1_000, 2_000, 3_000] {
+            let burn = ledger.build_burn(&alice, 1, 1).unwrap();
+            ledger.submit_transaction(burn).unwrap();
+            let block = ledger.mine_next_block(&alice, timestamp_ms).unwrap();
+            ledger.apply_locally_mined_block(block).unwrap();
+        }
+
+        store.save_with_metrics(&ledger.snapshot(), true).unwrap();
+        let metrics = store.load_metrics().unwrap();
+        let supply_from_balances = ledger.status().balances.values().copied().sum::<u64>();
+
+        assert_eq!(metrics.last().unwrap().height, 3);
+        assert_eq!(
+            metrics.last().unwrap().circulating_supply,
+            supply_from_balances
+        );
+    }
+
+    #[test]
+    fn sqlite_chain_store_metrics_count_known_wallet_addresses_seen_on_chain() {
+        let dir = tempdir().unwrap();
+        let store = SqliteChainStore::open(dir.path().join("chain.sqlite3")).unwrap();
+        let alice = Wallet::from_seed("metrics-address-alice");
+        let bob = Wallet::from_seed("metrics-address-bob");
+        let carol = Wallet::from_seed("metrics-address-carol");
+        let mut genesis = BTreeMap::new();
+        genesis.insert(alice.address().to_string(), 100);
+        let mut ledger =
+            Ledger::new_with_genesis_burns(genesis, vec![GenesisBurn::new(alice.address(), 1)], 1)
+                .unwrap();
+
+        let burn = ledger.build_burn(&alice, 1, 1).unwrap();
+        ledger.submit_transaction(burn).unwrap();
+        let transfer = ledger.build_transfer(&alice, bob.address(), 10, 1).unwrap();
+        ledger.submit_transaction(transfer).unwrap();
+        let mine = ledger.build_mine(carol.address()).unwrap();
+        ledger.submit_transaction(mine).unwrap();
+        let block = ledger.mine_next_block(&alice, 1_000).unwrap();
+        ledger.apply_locally_mined_block(block).unwrap();
+
+        store.save_with_metrics(&ledger.snapshot(), true).unwrap();
+        let metrics = store.load_metrics().unwrap();
+
+        assert_eq!(metrics[0].known_wallet_addresses, 1);
+        assert_eq!(metrics.last().unwrap().known_wallet_addresses, 3);
     }
 
     #[test]
@@ -1331,6 +1508,7 @@ mod tests {
         assert_eq!(last.burned_amount, 4);
         assert_eq!(last.fees_amount, 7);
         assert_eq!(last.circulating_supply, supply_from_balances);
+        assert_eq!(last.known_wallet_addresses, 3);
     }
 
     #[test]
@@ -1351,6 +1529,7 @@ mod tests {
                         block_time_ms: Some(415_000),
                         mine_difficulty_bits: 12,
                         circulating_supply: 100,
+                        known_wallet_addresses: 1,
                         transaction_count: 0,
                         transfer_count: 0,
                         burn_count: 0,

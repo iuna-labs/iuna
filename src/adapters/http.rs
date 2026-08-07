@@ -1368,6 +1368,14 @@ fn metrics_response(enabled: bool, rows: Vec<BlockMetricRow>) -> MetricsResponse
                 |row| Some(micro_iuna_as_iuna(row.circulating_supply)),
             ),
             metrics_chart(
+                "known-wallet-addresses",
+                "Known wallet addresses",
+                "addresses",
+                MetricsValueKind::Number,
+                &rows,
+                |row| Some(row.known_wallet_addresses as f64),
+            ),
+            metrics_chart(
                 "transactions",
                 "Transactions",
                 "tx",
@@ -3815,6 +3823,7 @@ const INDEX_HTML: &str = r#"<!doctype html>
         <div class="metrics-summary">
           <div class="metric"><div class="label">Latest block</div><div class="value" x-text="metricsLatest().height ?? '-'"></div></div>
           <div class="metric"><div class="label">Supply</div><div class="value" x-text="metricAmountLabel(metricsLatest().circulatingSupply)"></div></div>
+          <div class="metric"><div class="label">Known addresses</div><div class="value" x-text="metricsLatest().knownWalletAddresses ?? '-'"></div></div>
           <div class="metric"><div class="label">Total burned</div><div class="value" x-text="metricAmountLabel(metricsLatest().totalBurnedAmount)"></div></div>
           <div class="metric"><div class="label">Difficulty</div><div class="value" x-text="metricsLatest().mineDifficultyBits ?? '-'"></div></div>
         </div>
@@ -5405,6 +5414,7 @@ mod tests {
             block_time_ms,
             mine_difficulty_bits: 12,
             circulating_supply: 100,
+            known_wallet_addresses: 1,
             transaction_count: 0,
             transfer_count: 0,
             burn_count: 0,
@@ -5457,6 +5467,20 @@ mod tests {
                 .collect::<Vec<_>>(),
             vec![(2, 120.0), (3, 130.0)]
         );
+
+        let known_wallet_addresses = response
+            .charts
+            .iter()
+            .find(|chart| chart.id == "known-wallet-addresses")
+            .expect("known wallet addresses chart should exist");
+        assert_eq!(
+            known_wallet_addresses
+                .points
+                .iter()
+                .map(|point| (point.height, point.value))
+                .collect::<Vec<_>>(),
+            vec![(0, 1.0), (1, 1.0), (2, 1.0), (3, 1.0)]
+        );
     }
 
     #[test]
@@ -5466,6 +5490,8 @@ mod tests {
         assert!(super::INDEX_HTML.contains("setMetricsRange(100)"));
         assert!(super::INDEX_HTML.contains("setMetricsRange(1000)"));
         assert!(super::INDEX_HTML.contains("setMetricsRange('all')"));
+        assert!(super::INDEX_HTML.contains("Known addresses"));
+        assert!(super::INDEX_HTML.contains("knownWalletAddresses"));
     }
 
     #[test]
