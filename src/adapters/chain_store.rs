@@ -1,5 +1,5 @@
 use std::{
-    collections::BTreeSet,
+    collections::{BTreeMap, BTreeSet},
     fs,
     path::{Path, PathBuf},
     time::{SystemTime, UNIX_EPOCH},
@@ -13,9 +13,9 @@ use serde::Serialize;
 use crate::domain::{
     Amount, BLINDED_COMMITTER_FEE_BPS, BLINDED_FEE_BPS_DENOMINATOR,
     BLINDED_REVEAL_BUNDLE_SIGNER_FEE_BPS, BlindedReveal, BlindedTransaction, Block, ChainSnapshot,
-    FinalizerMode, LaunchProfile, LeaderProof, Ledger, MaskedBlindedReveal, OutPoint,
+    FinalizerMode, LaunchProfile, LeaderProof, Ledger, MINE_REWARD, MaskedBlindedReveal, OutPoint,
     REVEAL_COMMITTEE_SIZE, RevealBundleSection, RevealBundleSignature, Transaction, TxInput,
-    TxOutput, blinded_reveal_finalizer_fee, revealed_blinded_transactions,
+    TxOutput, blinded_reveal_finalizer_fee, hex_hash, revealed_blinded_transactions,
 };
 
 const SCHEMA: &str = r#"
@@ -936,7 +936,7 @@ fn metrics_from_snapshot(snapshot: &ChainSnapshot) -> Result<Vec<BlockMetricRow>
     })
     .context("failed to rebuild genesis ledger for metrics")?;
     let revealed = revealed_blinded_transactions(snapshot)?.into_iter().fold(
-        std::collections::BTreeMap::<u64, Vec<crate::domain::RevealedBlindedTransaction>>::new(),
+        BTreeMap::<u64, Vec<crate::domain::RevealedBlindedTransaction>>::new(),
         |mut by_height, revealed| {
             by_height.entry(revealed.height).or_default().push(revealed);
             by_height
@@ -950,7 +950,9 @@ fn metrics_from_snapshot(snapshot: &ChainSnapshot) -> Result<Vec<BlockMetricRow>
     let mut total_burned_amount = 0_u64;
     let mut rows = Vec::with_capacity(snapshot.blocks.len());
     let mut previous_timestamp_ms = None;
-    let mut active_blinded = std::collections::BTreeMap::<String, BlindedTransaction>::new();
+    let mut active_blinded = BTreeMap::<String, BlindedTransaction>::new();
+    let mut metric_utxos = metric_genesis_utxos(snapshot);
+    let mut metric_locked_blinded_inputs = BTreeMap::<String, Amount>::new();
 
     for block in &snapshot.blocks {
         let revealed_transactions = revealed.get(&block.height).cloned().unwrap_or_default();
@@ -967,6 +969,7 @@ fn metrics_from_snapshot(snapshot: &ChainSnapshot) -> Result<Vec<BlockMetricRow>
         }
         for transaction in &block.transactions {
             collect_transaction_addresses(transaction, &mut known_wallet_addresses);
+            metric_apply_public_transaction(transaction, &mut metric_utxos)?;
             fees_amount = fees_amount
                 .checked_add(transaction.fee())
                 .context("block metric fees overflow")?;
@@ -987,6 +990,18 @@ fn metrics_from_snapshot(snapshot: &ChainSnapshot) -> Result<Vec<BlockMetricRow>
             let transaction = &revealed.transaction;
             known_wallet_addresses.insert(revealed.included_by.clone());
             collect_transaction_addresses(transaction, &mut known_wallet_addresses);
+            metric_index_transaction_outputs(&mut metric_utxos, transaction);
+            metric_index_blinded_fee_outputs(
+                &mut metric_utxos,
+                &revealed.commitment,
+                &revealed.included_by,
+                block,
+                transaction.fee(),
+                ledger
+                    .burn_leader_ranks_for_block(block.height)
+                    .map(|ranks| ranks.len())
+                    .unwrap_or(REVEAL_COMMITTEE_SIZE),
+            );
             fees_amount = fees_amount
                 .checked_add(transaction.fee())
                 .context("block metric fees overflow")?;
@@ -1031,11 +1046,20 @@ fn metrics_from_snapshot(snapshot: &ChainSnapshot) -> Result<Vec<BlockMetricRow>
         let mut expired_blinded_fee_values = Vec::new();
         active_blinded.retain(|commitment, transaction| {
             if revealed_commitments.contains(commitment) {
+                metric_locked_blinded_inputs.remove(commitment);
                 return false;
             }
             if block.height >= transaction.expires_at_height {
                 if !transaction.inputs.is_empty() {
                     expired_blinded_fee_values.push(transaction.fee);
+                    metric_index_expired_blinded_change(
+                        &mut metric_utxos,
+                        commitment,
+                        transaction,
+                        metric_locked_blinded_inputs
+                            .remove(commitment)
+                            .unwrap_or_default(),
+                    );
                 }
                 return false;
             }
@@ -1059,6 +1083,8 @@ fn metrics_from_snapshot(snapshot: &ChainSnapshot) -> Result<Vec<BlockMetricRow>
             for input in &transaction.inputs {
                 known_wallet_addresses.insert(input.owner.clone());
             }
+            let locked_total = metric_spend_blinded_inputs(transaction, &mut metric_utxos)?;
+            metric_locked_blinded_inputs.insert(transaction.commitment.clone(), locked_total);
             active_blinded.insert(transaction.commitment.clone(), transaction.clone());
         }
         total_burned_amount = total_burned_amount
@@ -1071,7 +1097,10 @@ fn metrics_from_snapshot(snapshot: &ChainSnapshot) -> Result<Vec<BlockMetricRow>
                 .apply_preverified_block_at(block.clone(), u64::MAX)
                 .with_context(|| format!("failed to replay block {} for metrics", block.height))?;
         }
-        let circulating_supply = ledger_circulating_supply(&running_ledger)?;
+        metric_index_block_reward(&mut metric_utxos, block);
+        let circulating_supply = ledger_circulating_supply(&running_ledger)?
+            .checked_add(metric_locked_supply(&metric_locked_blinded_inputs)?)
+            .context("circulating supply metric overflows")?;
         let block_time_ms =
             previous_timestamp_ms.map(|previous| block.timestamp_ms.saturating_sub(previous));
         previous_timestamp_ms = Some(block.timestamp_ms);
@@ -1108,6 +1137,224 @@ fn ledger_circulating_supply(ledger: &Ledger) -> Result<Amount> {
                 .checked_add(*amount)
                 .context("circulating supply metric overflows")
         })
+}
+
+fn metric_locked_supply(locked: &BTreeMap<String, Amount>) -> Result<Amount> {
+    locked.values().try_fold(0_u64, |total, amount| {
+        total
+            .checked_add(*amount)
+            .context("circulating supply metric overflows")
+    })
+}
+
+fn metric_genesis_utxos(snapshot: &ChainSnapshot) -> BTreeMap<OutPoint, TxOutput> {
+    snapshot
+        .genesis_allocations
+        .iter()
+        .filter(|(_, amount)| **amount > 0)
+        .map(|(address, amount)| {
+            (
+                metric_genesis_allocation_outpoint(address),
+                TxOutput {
+                    address: address.clone(),
+                    amount: *amount,
+                },
+            )
+        })
+        .collect()
+}
+
+fn metric_apply_public_transaction(
+    transaction: &Transaction,
+    utxos: &mut BTreeMap<OutPoint, TxOutput>,
+) -> Result<()> {
+    metric_spend_transaction_inputs(transaction, utxos)?;
+    metric_index_transaction_outputs(utxos, transaction);
+    Ok(())
+}
+
+fn metric_spend_transaction_inputs(
+    transaction: &Transaction,
+    utxos: &mut BTreeMap<OutPoint, TxOutput>,
+) -> Result<Amount> {
+    let inputs = match transaction {
+        Transaction::Transfer { inputs, .. } | Transaction::Burn { inputs, .. } => inputs,
+        Transaction::Mine { .. } => return Ok(0),
+    };
+    metric_spend_inputs(inputs, utxos)
+}
+
+fn metric_spend_blinded_inputs(
+    transaction: &BlindedTransaction,
+    utxos: &mut BTreeMap<OutPoint, TxOutput>,
+) -> Result<Amount> {
+    metric_spend_inputs(&transaction.inputs, utxos)
+}
+
+fn metric_spend_inputs(
+    inputs: &[TxInput],
+    utxos: &mut BTreeMap<OutPoint, TxOutput>,
+) -> Result<Amount> {
+    inputs.iter().try_fold(0_u64, |total, input| {
+        let output = utxos.remove(&input.outpoint).with_context(|| {
+            format!(
+                "metric replay spends missing output {}:{}",
+                input.outpoint.txid, input.outpoint.index
+            )
+        })?;
+        total
+            .checked_add(output.amount)
+            .context("metric replay input total overflows")
+    })
+}
+
+fn metric_index_transaction_outputs(
+    utxos: &mut BTreeMap<OutPoint, TxOutput>,
+    transaction: &Transaction,
+) {
+    let outputs = match transaction {
+        Transaction::Transfer { outputs, .. } => outputs.clone(),
+        Transaction::Burn { change, .. } => change.clone(),
+        Transaction::Mine { recipient, .. } => vec![TxOutput {
+            address: recipient.clone(),
+            amount: MINE_REWARD,
+        }],
+    };
+    for (index, output) in outputs.iter().enumerate() {
+        utxos.insert(
+            OutPoint {
+                txid: transaction.signature().to_string(),
+                index: index as u32,
+            },
+            output.clone(),
+        );
+    }
+}
+
+fn metric_index_blinded_fee_outputs(
+    utxos: &mut BTreeMap<OutPoint, TxOutput>,
+    commitment: &str,
+    included_by: &str,
+    block: &Block,
+    fee: Amount,
+    available_reveal_bundle_slots: usize,
+) {
+    if fee == 0 {
+        return;
+    }
+    let committer_fee = blinded_fee_share(fee, BLINDED_COMMITTER_FEE_BPS);
+    if committer_fee > 0 {
+        utxos.insert(
+            metric_blinded_committer_fee_outpoint(commitment),
+            TxOutput {
+                address: included_by.to_string(),
+                amount: committer_fee,
+            },
+        );
+    }
+    let reveal_finalizer_fee = blinded_reveal_finalizer_fee(
+        fee,
+        block.included_reveal_bundle_count(),
+        available_reveal_bundle_slots,
+    );
+    if reveal_finalizer_fee > 0 {
+        utxos.insert(
+            metric_blinded_executor_fee_outpoint(commitment),
+            TxOutput {
+                address: block.miner.clone(),
+                amount: reveal_finalizer_fee,
+            },
+        );
+    }
+    let reveal_bundle_signer_fee = blinded_fee_share(fee, BLINDED_REVEAL_BUNDLE_SIGNER_FEE_BPS);
+    if reveal_bundle_signer_fee > 0 {
+        for signature in &block.reveal_bundle_section.signatures {
+            utxos.insert(
+                metric_blinded_reveal_bundle_signer_fee_outpoint(commitment, signature.slot),
+                TxOutput {
+                    address: signature.member.clone(),
+                    amount: reveal_bundle_signer_fee,
+                },
+            );
+        }
+    }
+}
+
+fn metric_index_expired_blinded_change(
+    utxos: &mut BTreeMap<OutPoint, TxOutput>,
+    commitment: &str,
+    transaction: &BlindedTransaction,
+    locked_total: Amount,
+) {
+    let Some(first_input) = transaction.inputs.first() else {
+        return;
+    };
+    let change = locked_total.saturating_sub(transaction.fee);
+    if change == 0 {
+        return;
+    }
+    utxos.insert(
+        metric_blinded_expiry_change_outpoint(commitment),
+        TxOutput {
+            address: first_input.owner.clone(),
+            amount: change,
+        },
+    );
+}
+
+fn metric_index_block_reward(utxos: &mut BTreeMap<OutPoint, TxOutput>, block: &Block) {
+    if block.reward == 0 {
+        return;
+    }
+    utxos.insert(
+        metric_reward_outpoint(&block.hash),
+        TxOutput {
+            address: block.miner.clone(),
+            amount: block.reward,
+        },
+    );
+}
+
+fn metric_genesis_allocation_outpoint(address: &str) -> OutPoint {
+    OutPoint {
+        txid: hex_hash(format!("iuna-genesis-allocation:{address}")),
+        index: 0,
+    }
+}
+
+fn metric_reward_outpoint(block_hash: &str) -> OutPoint {
+    OutPoint {
+        txid: block_hash.to_string(),
+        index: u32::MAX,
+    }
+}
+
+fn metric_blinded_committer_fee_outpoint(commitment: &str) -> OutPoint {
+    OutPoint {
+        txid: commitment.to_string(),
+        index: u32::MAX - 1,
+    }
+}
+
+fn metric_blinded_executor_fee_outpoint(commitment: &str) -> OutPoint {
+    OutPoint {
+        txid: commitment.to_string(),
+        index: u32::MAX - 2,
+    }
+}
+
+fn metric_blinded_reveal_bundle_signer_fee_outpoint(commitment: &str, slot: u8) -> OutPoint {
+    OutPoint {
+        txid: commitment.to_string(),
+        index: u32::MAX - 3 - u32::from(slot),
+    }
+}
+
+fn metric_blinded_expiry_change_outpoint(commitment: &str) -> OutPoint {
+    OutPoint {
+        txid: commitment.to_string(),
+        index: 0,
+    }
 }
 
 fn collect_transaction_addresses(transaction: &Transaction, addresses: &mut BTreeSet<String>) {
@@ -1471,6 +1718,7 @@ CREATE TABLE block_metrics (
         ledger.submit_transaction(burn).unwrap();
         let block = ledger.mine_next_block(wallet, 1).unwrap();
         ledger.apply_locally_mined_block(block).unwrap();
+        let supply_after_commit = ledger.status().balances.values().copied().sum::<u64>();
         ledger.submit_blinded_reveal(blinded.reveal).unwrap();
         let leader = ledger.expected_leader_for_next_block().unwrap();
         let wallet = wallets
@@ -1501,9 +1749,14 @@ CREATE TABLE block_metrics (
 
         store.save_with_metrics(&ledger.snapshot(), true).unwrap();
         let metrics = store.load_metrics().unwrap();
+        let commit = metrics
+            .iter()
+            .find(|metric| metric.height == 1)
+            .expect("commit block metrics should exist");
         let last = metrics.last().unwrap();
         let supply_from_balances = ledger.status().balances.values().copied().sum::<u64>();
 
+        assert_eq!(commit.circulating_supply, supply_after_commit + 10_000_000);
         assert_eq!(last.burn_count, 2);
         assert_eq!(last.burned_amount, 4);
         assert_eq!(last.fees_amount, 7);
