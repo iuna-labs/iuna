@@ -373,6 +373,7 @@ struct UiBlock {
     total_fees: Amount,
     total_bytes: usize,
     transaction_bytes: usize,
+    transaction_byte_breakdown: Vec<UiByteBreakdown>,
     blinded_transaction_bytes: usize,
     reveal_bundle_bytes: usize,
     vdf_rounds: u64,
@@ -383,6 +384,12 @@ struct UiBlock {
     revealed_transactions: Vec<UiTransaction>,
     reveal_bundles: Vec<UiRevealBundle>,
     hash: String,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Serialize)]
+struct UiByteBreakdown {
+    label: &'static str,
+    bytes: usize,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq, Serialize)]
@@ -1874,6 +1881,7 @@ fn ui_block(
         .iter()
         .map(|tx| tx.serialized_size_bytes().unwrap_or_default())
         .sum::<usize>();
+    let transaction_byte_breakdown = transaction_byte_breakdown(&block.transactions);
     let blinded_transaction_bytes = block
         .blinded_transactions
         .iter()
@@ -1940,6 +1948,7 @@ fn ui_block(
         total_fees: block.reward.saturating_add(revealed_fees),
         total_bytes,
         transaction_bytes,
+        transaction_byte_breakdown,
         blinded_transaction_bytes,
         reveal_bundle_bytes,
         vdf_rounds: block.vdf_rounds,
@@ -1963,6 +1972,28 @@ fn ui_revealed_transaction(
     let mut row = ui_transaction(transaction, outputs_by_outpoint);
     row.revealed = true;
     row
+}
+
+fn transaction_byte_breakdown(transactions: &[Transaction]) -> Vec<UiByteBreakdown> {
+    let mut transfer_bytes = 0_usize;
+    let mut burn_bytes = 0_usize;
+    let mut mine_bytes = 0_usize;
+    for transaction in transactions {
+        let bytes = transaction.serialized_size_bytes().unwrap_or_default();
+        match transaction {
+            Transaction::Transfer { .. } => transfer_bytes = transfer_bytes.saturating_add(bytes),
+            Transaction::Burn { .. } => burn_bytes = burn_bytes.saturating_add(bytes),
+            Transaction::Mine { .. } => mine_bytes = mine_bytes.saturating_add(bytes),
+        }
+    }
+    [
+        ("transfer", transfer_bytes),
+        ("burn", burn_bytes),
+        ("mine", mine_bytes),
+    ]
+    .into_iter()
+    .filter_map(|(label, bytes)| (bytes > 0).then_some(UiByteBreakdown { label, bytes }))
+    .collect()
 }
 
 fn ui_pending_revealed_transaction(
@@ -3402,7 +3433,7 @@ const INDEX_HTML: &str = r#"<!doctype html>
       .block-card { flex-basis: 108px; }
     }
   </style>
-  <script defer src="/assets/iuna-ui.js?v=85"></script>
+  <script defer src="/assets/iuna-ui.js?v=86"></script>
   <script defer src="/assets/alpine.min.js"></script>
 </head>
 <body x-data="iunaApp()" x-init="init()" @keydown.window.escape="closeModals()" x-cloak>
@@ -4122,7 +4153,11 @@ const INDEX_HTML: &str = r#"<!doctype html>
           <div class="rank-row">
             <div class="rank-number" x-text="`${row[1]}B`"></div>
             <div class="rank-details">
-              <div class="tx-field"><span class="tx-label">Category</span><span class="tx-value text" x-text="row[0]"></span></div>
+              <div class="tx-field">
+                <span class="tx-label">Category</span>
+                <span class="pill" x-show="row[2]" :class="row[2]" x-text="row[0]"></span>
+                <span class="tx-value text" x-show="!row[2]" x-text="row[0]"></span>
+              </div>
             </div>
           </div>
         </template>
@@ -4472,6 +4507,38 @@ mod tests {
         assert!(ui_block.total_bytes > 0);
         assert!(ui_block.blinded_transaction_bytes > 0);
         assert_eq!(ui_block.reveal_bundle_bytes, 0);
+
+        let burn = ledger.build_burn(&alice, 5, 1).unwrap();
+        let mine = Transaction::Mine {
+            recipient: bob.address().to_string(),
+            anchor: "a".repeat(64),
+            salt: 1,
+            nonce: 2,
+            difficulty_bits: 12,
+            proof_header: None,
+            signature: "b".repeat(64),
+        };
+        let typed_block = super::ui_block(
+            fake_block(
+                8,
+                vec![
+                    ledger.build_transfer(&alice, bob.address(), 7, 1).unwrap(),
+                    burn,
+                    mine,
+                ],
+            ),
+            &BTreeMap::new(),
+            &BTreeMap::new(),
+            &[],
+        );
+        let typed_bytes = typed_block
+            .transaction_byte_breakdown
+            .iter()
+            .map(|row| (row.label, row.bytes))
+            .collect::<BTreeMap<_, _>>();
+        assert!(typed_bytes["transfer"] > 0);
+        assert!(typed_bytes["burn"] > 0);
+        assert!(typed_bytes["mine"] > 0);
     }
 
     #[test]
@@ -4536,6 +4603,7 @@ mod tests {
         assert!(super::INDEX_HTML.contains(".pill.reveal, .pill.revealed"));
         assert!(super::INDEX_HTML.contains(":class=\"mempoolItemClass(tx)\""));
         assert!(super::INDEX_HTML.contains(".mempool-item.before-last-block"));
+        assert!(super::INDEX_HTML.contains(":class=\"row[2]\""));
         assert!(super::INDEX_HTML.contains("New since last block"));
         assert!(super::INDEX_HTML.contains("class=\"mempool-top\""));
         assert!(super::INDEX_HTML.contains("mempoolSeenTimeLabel(tx)"));
@@ -4546,6 +4614,8 @@ mod tests {
         assert!(app_js.contains("tx?.revealed ? \"revealed\""));
         assert!(app_js.contains("transactions.some((tx) => tx?.revealed)"));
         assert!(app_js.contains("blockCommitCount(block)"));
+        assert!(app_js.contains("blockTransactionByteBreakdown(block)"));
+        assert!(app_js.contains("[label, Number(row.bytes ?? 0), label]"));
     }
 
     #[test]
@@ -5642,7 +5712,7 @@ mod tests {
 
     #[test]
     fn metrics_screen_includes_block_range_filter() {
-        assert!(super::INDEX_HTML.contains("iuna-ui.js?v=85"));
+        assert!(super::INDEX_HTML.contains("iuna-ui.js?v=86"));
         assert!(super::INDEX_HTML.contains("aria-label=\"Metrics block range\""));
         assert!(super::INDEX_HTML.contains("setMetricsRange(100)"));
         assert!(super::INDEX_HTML.contains("setMetricsRange(1000)"));
@@ -5663,6 +5733,12 @@ mod tests {
         );
         assert!(app_js.contains("mempoolFirstSeenHeights"));
         assert!(app_js.contains("mempoolFirstSeenAt"));
+        assert!(
+            app_js.contains(
+                "this.trackMempoolFirstSeenHeights({ append: options.replace !== true })"
+            )
+        );
+        assert!(app_js.contains("return rightSeenAt - leftSeenAt"));
         assert!(app_js.contains("syncMempoolBlockMarker"));
         assert!(app_js.contains("this.status.chain?.height ?? this.lastBlockMempoolHeight"));
         assert!(app_js.contains("mempoolItemClass"));

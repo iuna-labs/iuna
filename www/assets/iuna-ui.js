@@ -715,7 +715,7 @@ window.iunaApp = function iunaApp() {
           ? normalized.items
           : this.mergeDatasetItems(this[config.items], normalized.items, config.key);
         if (kind === "mempool") {
-          this.trackMempoolFirstSeenHeights();
+          this.trackMempoolFirstSeenHeights({ append: options.replace !== true });
           this.sortMempoolNewestFirst();
         }
         page.offset = normalized.nextOffset ?? this[config.items].length;
@@ -783,20 +783,28 @@ window.iunaApp = function iunaApp() {
       }
     },
 
-    trackMempoolFirstSeenHeights() {
+    trackMempoolFirstSeenHeights(options = {}) {
       const height = Number(this.status.chain?.height);
       if (!Number.isFinite(height)) return;
       const active = new Set();
       const firstBatch = !this.mempoolSeenInitialized;
       const seenHeight = firstBatch ? height - 1 : height;
-      const seenAt = Date.now();
+      const knownSeenTimes = Object.values(this.mempoolFirstSeenAt)
+        .map((value) => Number(value))
+        .filter((value) => Number.isFinite(value));
+      const oldestSeenAt = knownSeenTimes.length ? Math.min(...knownSeenTimes) : Date.now();
+      const baseSeenAt = options.append && this.mempoolSeenInitialized
+        ? oldestSeenAt - 1
+        : Date.now();
+      let newIndex = 0;
       for (const tx of this.mempool) {
         const key = this.mempoolKey(tx);
         if (!key) continue;
         active.add(key);
         if (this.mempoolFirstSeenHeights[key] === undefined) {
           this.mempoolFirstSeenHeights[key] = seenHeight;
-          this.mempoolFirstSeenAt[key] = seenAt;
+          this.mempoolFirstSeenAt[key] = baseSeenAt - newIndex;
+          newIndex += 1;
         }
       }
       this.mempoolSeenInitialized = true;
@@ -832,6 +840,11 @@ window.iunaApp = function iunaApp() {
 
     sortMempoolNewestFirst() {
       this.mempool = [...this.mempool].sort((left, right) => {
+        const leftSeenAt = Number(this.mempoolFirstSeenAt[this.mempoolKey(left)]);
+        const rightSeenAt = Number(this.mempoolFirstSeenAt[this.mempoolKey(right)]);
+        if (Number.isFinite(leftSeenAt) && Number.isFinite(rightSeenAt) && leftSeenAt !== rightSeenAt) {
+          return rightSeenAt - leftSeenAt;
+        }
         const leftSeen = Number(this.mempoolFirstSeenHeights[this.mempoolKey(left)]);
         const rightSeen = Number(this.mempoolFirstSeenHeights[this.mempoolKey(right)]);
         if (Number.isFinite(leftSeen) && Number.isFinite(rightSeen) && leftSeen !== rightSeen) {
@@ -1879,12 +1892,26 @@ window.iunaApp = function iunaApp() {
     },
 
     blockByteBreakdown(block) {
+      const transactionRows = this.blockTransactionByteBreakdown(block);
       return [
-        ["Header and proof", Math.max(0, this.blockTotalBytes(block) - this.blockPayloadBytes(block))],
-        ["Transactions", Number(block?.transactionBytes ?? block?.transaction_bytes ?? 0)],
-        ["Blinded commits", Number(block?.blindedTransactionBytes ?? block?.blinded_transaction_bytes ?? 0)],
-        ["Reveal bundles", Number(block?.revealBundleBytes ?? block?.reveal_bundle_bytes ?? 0)],
+        ["Header and proof", Math.max(0, this.blockTotalBytes(block) - this.blockPayloadBytes(block)), ""],
+        ...(transactionRows.length
+          ? transactionRows
+          : [["Transactions", Number(block?.transactionBytes ?? block?.transaction_bytes ?? 0), ""]]),
+        ["Blinded commits", Number(block?.blindedTransactionBytes ?? block?.blinded_transaction_bytes ?? 0), "blinded"],
+        ["Reveal bundles", Number(block?.revealBundleBytes ?? block?.reveal_bundle_bytes ?? 0), "reveal"],
       ];
+    },
+
+    blockTransactionByteBreakdown(block) {
+      const rows = block?.transactionByteBreakdown ?? block?.transaction_byte_breakdown;
+      if (!Array.isArray(rows)) return [];
+      return rows
+        .map((row) => {
+          const label = row.label || row.kind || "transaction";
+          return [label, Number(row.bytes ?? 0), label];
+        })
+        .filter((row) => row[1] > 0);
     },
 
     recentBlockFeeAverage(count) {
