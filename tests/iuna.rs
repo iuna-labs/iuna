@@ -738,6 +738,27 @@ fn automatic_mining_caps_burn_to_spendable_balance_after_fee() {
 }
 
 #[test]
+fn automatic_mining_preserves_configured_burn_when_only_fee_is_short() {
+    let alice = Wallet::from_seed("auto-burn-exact-target-alice");
+    let mut allocations = BTreeMap::new();
+    allocations.insert(alice.address().to_string(), MICRO_IUNA);
+    let mut node = NodeCore::new(NodeConfig {
+        wallet: alice.clone(),
+        genesis_allocations: allocations,
+        vdf_rounds: 10,
+        burn_per_block: MICRO_IUNA,
+        burn_fee: DEFAULT_FEE_PER_BYTE,
+    });
+
+    let outcome = node.automatic_mine_once(1);
+
+    let burned = outcome.burned.as_ref().unwrap();
+    assert_eq!(burned.amount(), MICRO_IUNA);
+    assert_eq!(burned.fee(), 0);
+    assert!(outcome.block.is_some());
+}
+
+#[test]
 fn setting_burn_rate_after_running_at_zero_prepares_private_anchor_burn() {
     let alice = Wallet::from_seed("alice");
     let bob = Wallet::from_seed("bob");

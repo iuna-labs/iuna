@@ -1174,6 +1174,17 @@ impl NodeCore {
         })
     }
 
+    fn build_blinded_burn_with_fee_on_ledger(
+        &self,
+        ledger: &Ledger,
+        amount: Amount,
+        fee: Amount,
+    ) -> Result<BuiltBlindedTransaction> {
+        let expires_at_height = self.default_blinded_transaction_expiry_height();
+        let tx = ledger.build_burn(self.wallet.unlocked()?, amount, fee)?;
+        ledger.build_blinded_transaction(self.wallet.unlocked()?, tx, expires_at_height)
+    }
+
     fn build_transfer_with_fee_rate(
         &self,
         to: impl Into<String>,
@@ -1582,8 +1593,31 @@ impl NodeCore {
         fee_per_byte: Amount,
         balance: Amount,
     ) -> Option<BuiltBlindedTransaction> {
+        let target = self.burn_per_block.min(balance);
+        if target == 0 {
+            return None;
+        }
+        let exact_at_fee_rate =
+            self.build_blinded_burn_with_fee_rate_on_ledger(ledger, target, fee_per_byte);
+        if let Ok((built, estimate)) = exact_at_fee_rate {
+            if target
+                .checked_add(estimate.fee)
+                .is_some_and(|required| required <= balance)
+            {
+                return Some(built);
+            }
+        }
+        if self.burn_per_block <= balance {
+            let affordable_fee = balance.saturating_sub(target);
+            if let Ok(built) =
+                self.build_blinded_burn_with_fee_on_ledger(ledger, target, affordable_fee)
+            {
+                return Some(built);
+            }
+        }
+
         let mut low = 1;
-        let mut high = self.burn_per_block.min(balance);
+        let mut high = target;
         let mut best = None;
         while low <= high {
             let amount = low + (high - low) / 2;
