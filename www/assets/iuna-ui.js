@@ -88,6 +88,9 @@ window.iunaApp = function iunaApp() {
     hashListenerInstalled: false,
     newBlockHashes: new Set(),
     newBlockTimer: null,
+    lastBlockMempoolHeight: null,
+    mempoolFirstSeenHeights: {},
+    mempoolSeenInitialized: false,
     blockPageSize: 20,
     datasetPageSize: 25,
     walletTxPage: { offset: 0, total: 0, hasMore: true, loading: false, backgroundLoading: false },
@@ -561,6 +564,8 @@ window.iunaApp = function iunaApp() {
           this.fetchJson("/api/metrics"),
           this.fetchJson("/api/network/health"),
         ]);
+        const previousChainHeight = this.status.chain?.height;
+        this.status = status;
         await Promise.all([
           this.refreshPagedDataset("walletTx", { silent: options.silent === true }),
           this.refreshPagedDataset("walletUtxo", { silent: options.silent === true }),
@@ -575,7 +580,7 @@ window.iunaApp = function iunaApp() {
         if (!this.config.setup_complete) {
           await this.refreshWalletSetup();
         }
-        this.status = status;
+        this.syncMempoolBlockMarker(previousChainHeight, status.chain?.height);
         this.mergeFreshBlocks(blocks, { animateHead: true });
         this.pruneSelectedTransferUtxos();
         this.p2pMetrics = p2pMetrics;
@@ -694,6 +699,9 @@ window.iunaApp = function iunaApp() {
         this[config.items] = options.replace
           ? normalized.items
           : this.mergeDatasetItems(this[config.items], normalized.items, config.key);
+        if (kind === "mempool") {
+          this.trackMempoolFirstSeenHeights();
+        }
         page.offset = normalized.nextOffset ?? this[config.items].length;
         page.total = normalized.total;
         page.hasMore = normalized.hasMore;
@@ -744,6 +752,51 @@ window.iunaApp = function iunaApp() {
         rows.push(item);
       }
       return rows;
+    },
+
+    syncMempoolBlockMarker(previousHeight, currentHeight) {
+      const normalizedCurrent = Number(currentHeight);
+      if (!Number.isFinite(normalizedCurrent)) return;
+      const normalizedPrevious = Number(previousHeight);
+      if (this.lastBlockMempoolHeight === null) {
+        this.lastBlockMempoolHeight = normalizedCurrent;
+        return;
+      }
+      if (!Number.isFinite(normalizedPrevious) || normalizedCurrent > normalizedPrevious) {
+        this.lastBlockMempoolHeight = normalizedCurrent;
+      }
+    },
+
+    trackMempoolFirstSeenHeights() {
+      const height = Number(this.status.chain?.height);
+      if (!Number.isFinite(height)) return;
+      const active = new Set();
+      const firstBatch = !this.mempoolSeenInitialized;
+      const seenHeight = firstBatch ? height - 1 : height;
+      for (const tx of this.mempool) {
+        const key = this.mempoolKey(tx);
+        if (!key) continue;
+        active.add(key);
+        if (this.mempoolFirstSeenHeights[key] === undefined) {
+          this.mempoolFirstSeenHeights[key] = seenHeight;
+        }
+      }
+      this.mempoolSeenInitialized = true;
+      for (const key of Object.keys(this.mempoolFirstSeenHeights)) {
+        if (!active.has(key)) delete this.mempoolFirstSeenHeights[key];
+      }
+    },
+
+    mempoolKey(tx) {
+      return tx?.signature || tx?.commitment || "";
+    },
+
+    mempoolItemClass(tx) {
+      const key = this.mempoolKey(tx);
+      const firstSeenHeight = Number(this.mempoolFirstSeenHeights[key]);
+      const markerHeight = Number(this.lastBlockMempoolHeight);
+      if (!key || !Number.isFinite(firstSeenHeight) || !Number.isFinite(markerHeight)) return "";
+      return firstSeenHeight >= markerHeight ? "new-since-block" : "before-last-block";
     },
 
     observePageSentinel(kind, element) {

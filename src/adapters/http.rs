@@ -3264,6 +3264,9 @@ const INDEX_HTML: &str = r#"<!doctype html>
     details.tx-section:not([open]) { gap: 0; }
     .tx-section-meta { color: #8e979e; font-size: 12px; font-weight: 600; }
     .tx-card, .mempool-item { position: relative; display: grid; gap: 6px; border: 1px solid #2f363c; border-radius: 8px; padding: 12px; background: #111316; cursor: pointer; text-align: left; }
+    .mempool-item.before-last-block { opacity: .56; }
+    .mempool-item.new-since-block { border-color: #49543b; background: #151a12; opacity: 1; }
+    .mempool-item.new-since-block::before { content: ""; position: absolute; inset: 0 auto 0 0; width: 3px; border-radius: 8px 0 0 8px; background: #d5f55f; }
     .tx-card .pill, .mempool-item .pill { position: absolute; top: 10px; right: 10px; }
     .pill { display: inline-flex; align-items: center; border-radius: 999px; padding: 2px 8px; font-size: 12px; font-weight: 800; background: #2b3136; color: #d6dee2; }
     .pill.burn { background: #332918; color: #ffd070; }
@@ -3319,7 +3322,7 @@ const INDEX_HTML: &str = r#"<!doctype html>
       .block-card { flex-basis: 108px; }
     }
   </style>
-  <script defer src="/assets/iuna-ui.js?v=84"></script>
+  <script defer src="/assets/iuna-ui.js?v=85"></script>
   <script defer src="/assets/alpine.min.js"></script>
 </head>
 <body x-data="iunaApp()" x-init="init()" @keydown.window.escape="closeModals()" x-cloak>
@@ -3784,8 +3787,9 @@ const INDEX_HTML: &str = r#"<!doctype html>
           <h2>Mempool</h2>
           <div class="mempool-strip">
             <template x-for="tx in mempool" :key="tx.signature">
-              <div class="mempool-item" role="button" tabindex="0" @click="openTransactionModal(tx, { source: 'Mempool' })" @keydown.enter.prevent="openTransactionModal(tx, { source: 'Mempool' })" @keydown.space.prevent="openTransactionModal(tx, { source: 'Mempool' })">
+              <div class="mempool-item" :class="mempoolItemClass(tx)" role="button" tabindex="0" @click="openTransactionModal(tx, { source: 'Mempool' })" @keydown.enter.prevent="openTransactionModal(tx, { source: 'Mempool' })" @keydown.space.prevent="openTransactionModal(tx, { source: 'Mempool' })">
                 <span class="pill" :class="tx.kind" x-text="tx.kind"></span>
+                <div class="tx-field" x-show="mempoolItemClass(tx) === 'new-since-block'"><span class="tx-label">Seen</span><span class="tx-value text">after last block</span></div>
                 <div class="tx-field" x-show="!isBlindedMempoolItem(tx)"><span class="tx-label">Amount</span><span class="tx-value money">IUNA <span x-text="amountLabel(txAmount(tx))"></span></span></div>
                 <div class="tx-field"><span class="tx-label">Fee</span><span class="tx-value money" x-text="txFeeLabel(tx)"></span></div>
                 <div class="tx-field" x-show="!isBlindedMempoolItem(tx)"><span class="tx-label">From</span><code class="tx-value hash" x-text="short(txFrom(tx))"></code></div>
@@ -4382,6 +4386,9 @@ mod tests {
         assert!(super::INDEX_HTML.contains("commitCountLabel(block)"));
         assert!(super::INDEX_HTML.contains(".pill.blinded"));
         assert!(super::INDEX_HTML.contains(".pill.reveal, .pill.revealed"));
+        assert!(super::INDEX_HTML.contains(":class=\"mempoolItemClass(tx)\""));
+        assert!(super::INDEX_HTML.contains(".mempool-item.before-last-block"));
+        assert!(super::INDEX_HTML.contains("after last block"));
         assert!(super::INDEX_HTML.contains("<details class=\"tx-section\">"));
         assert!(super::INDEX_HTML.contains("<summary class=\"tx-section-title\">"));
         assert!(super::INDEX_HTML.contains("Commitment"));
@@ -5485,7 +5492,7 @@ mod tests {
 
     #[test]
     fn metrics_screen_includes_block_range_filter() {
-        assert!(super::INDEX_HTML.contains("iuna-ui.js?v=84"));
+        assert!(super::INDEX_HTML.contains("iuna-ui.js?v=85"));
         assert!(super::INDEX_HTML.contains("aria-label=\"Metrics block range\""));
         assert!(super::INDEX_HTML.contains("setMetricsRange(100)"));
         assert!(super::INDEX_HTML.contains("setMetricsRange(1000)"));
@@ -5500,6 +5507,9 @@ mod tests {
         assert!(app_js.contains("txFeeLabel(tx)"));
         assert!(app_js.contains("tx?.kind === \"reveal\""));
         assert!(app_js.contains("unknown until reveal"));
+        assert!(app_js.contains("mempoolFirstSeenHeights"));
+        assert!(app_js.contains("syncMempoolBlockMarker"));
+        assert!(app_js.contains("mempoolItemClass"));
         assert!(super::INDEX_HTML.contains("x-text=\"txFeeLabel(tx)\""));
         assert!(super::INDEX_HTML.contains("x-text=\"txFeeLabel(selectedTransaction?.tx)\""));
     }
