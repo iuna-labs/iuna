@@ -4,6 +4,7 @@ window.iunaApp = function iunaApp() {
     status: {},
     blocks: [],
     selectedBlock: null,
+    selectedByteBlock: null,
     selectedTransaction: null,
     selectedBurnLeaderBlock: null,
     loadingOlder: false,
@@ -67,6 +68,7 @@ window.iunaApp = function iunaApp() {
     burnFeeDraft: "0.0001",
     miningEnabled: false,
     powMiningEnabled: false,
+    recoveryVdfTopRankPercent: 50,
     burnAmountDirty: false,
     transferTo: "",
     transferAmount: null,
@@ -90,6 +92,7 @@ window.iunaApp = function iunaApp() {
     newBlockTimer: null,
     lastBlockMempoolHeight: null,
     mempoolFirstSeenHeights: {},
+    mempoolFirstSeenAt: {},
     mempoolSeenInitialized: false,
     blockPageSize: 20,
     datasetPageSize: 25,
@@ -215,8 +218,15 @@ window.iunaApp = function iunaApp() {
       return "iuna is up to date";
     },
 
-    openLatestRelease() {
+    async openLatestRelease() {
       const url = this.latestRelease?.url || "https://github.com/iuna-labs/iuna/releases";
+      try {
+        const tauriOpen = window.__TAURI__?.shell?.open;
+        if (typeof tauriOpen === "function") {
+          await tauriOpen(url);
+          return;
+        }
+      } catch {}
       window.open(url, "_blank", "noopener,noreferrer");
     },
 
@@ -364,6 +374,11 @@ window.iunaApp = function iunaApp() {
 
     syncConfigState() {
       this.keepTrackOfMetrics = this.config.keep_track_of_metrics === true;
+      this.recoveryVdfTopRankPercent = Number(
+        this.config.recovery_vdf_top_rank_percent ??
+          this.config.recoveryVdfTopRankPercent ??
+          this.recoveryVdfTopRankPercent
+      );
       this.p2pAcceptInbound = this.config.p2p_accept_inbound === true;
       if (!this.p2pAnnounceDirty) {
         this.p2pAnnounceAddr = this.config.p2p_announce_addr || "";
@@ -701,6 +716,7 @@ window.iunaApp = function iunaApp() {
           : this.mergeDatasetItems(this[config.items], normalized.items, config.key);
         if (kind === "mempool") {
           this.trackMempoolFirstSeenHeights();
+          this.sortMempoolNewestFirst();
         }
         page.offset = normalized.nextOffset ?? this[config.items].length;
         page.total = normalized.total;
@@ -773,17 +789,22 @@ window.iunaApp = function iunaApp() {
       const active = new Set();
       const firstBatch = !this.mempoolSeenInitialized;
       const seenHeight = firstBatch ? height - 1 : height;
+      const seenAt = Date.now();
       for (const tx of this.mempool) {
         const key = this.mempoolKey(tx);
         if (!key) continue;
         active.add(key);
         if (this.mempoolFirstSeenHeights[key] === undefined) {
           this.mempoolFirstSeenHeights[key] = seenHeight;
+          this.mempoolFirstSeenAt[key] = seenAt;
         }
       }
       this.mempoolSeenInitialized = true;
       for (const key of Object.keys(this.mempoolFirstSeenHeights)) {
-        if (!active.has(key)) delete this.mempoolFirstSeenHeights[key];
+        if (!active.has(key)) {
+          delete this.mempoolFirstSeenHeights[key];
+          delete this.mempoolFirstSeenAt[key];
+        }
       }
     },
 
@@ -794,9 +815,30 @@ window.iunaApp = function iunaApp() {
     mempoolItemClass(tx) {
       const key = this.mempoolKey(tx);
       const firstSeenHeight = Number(this.mempoolFirstSeenHeights[key]);
-      const markerHeight = Number(this.lastBlockMempoolHeight);
-      if (!key || !Number.isFinite(firstSeenHeight) || !Number.isFinite(markerHeight)) return "";
-      return firstSeenHeight >= markerHeight ? "new-since-block" : "before-last-block";
+      const markerHeight = Number(this.status.chain?.height ?? this.lastBlockMempoolHeight);
+      const classes = [];
+      if (isBlindedMempoolItem(tx)) classes.push("blinded-hidden");
+      if (key && Number.isFinite(firstSeenHeight) && Number.isFinite(markerHeight)) {
+        classes.push(firstSeenHeight >= markerHeight ? "new-since-block" : "before-last-block");
+      }
+      return classes.join(" ");
+    },
+
+    mempoolSeenTimeLabel(tx) {
+      const seenAt = Number(this.mempoolFirstSeenAt[this.mempoolKey(tx)]);
+      if (!Number.isFinite(seenAt)) return "";
+      return `Seen ${new Date(seenAt).toLocaleTimeString()}`;
+    },
+
+    sortMempoolNewestFirst() {
+      this.mempool = [...this.mempool].sort((left, right) => {
+        const leftSeen = Number(this.mempoolFirstSeenHeights[this.mempoolKey(left)]);
+        const rightSeen = Number(this.mempoolFirstSeenHeights[this.mempoolKey(right)]);
+        if (Number.isFinite(leftSeen) && Number.isFinite(rightSeen) && leftSeen !== rightSeen) {
+          return rightSeen - leftSeen;
+        }
+        return this.mempoolKey(right).localeCompare(this.mempoolKey(left));
+      });
     },
 
     observePageSentinel(kind, element) {
@@ -926,6 +968,14 @@ window.iunaApp = function iunaApp() {
 
     closeBurnLeaderRanksModal() {
       this.selectedBurnLeaderBlock = null;
+    },
+
+    openBlockBytesModal(block) {
+      this.selectedByteBlock = block;
+    },
+
+    closeBlockBytesModal() {
+      this.selectedByteBlock = null;
     },
 
     openTransactionModal(tx, context = {}) {
@@ -1184,6 +1234,23 @@ window.iunaApp = function iunaApp() {
         }
       } catch (error) {
         this.keepTrackOfMetrics = previous;
+        this.showFlash(error.message, "error");
+      }
+    },
+
+    async setRecoveryVdfTopRankPercent(percent) {
+      const previous = this.recoveryVdfTopRankPercent;
+      const normalized = Math.max(0, Math.min(100, Math.round(Number(percent) || 0)));
+      try {
+        this.recoveryVdfTopRankPercent = normalized;
+        await this.postForm(
+          "/api/settings/recovery-vdf",
+          { top_rank_percent: String(normalized) },
+          `Recovery VDF threshold set to top ${normalized}%`
+        );
+        await this.refreshConfig();
+      } catch (error) {
+        this.recoveryVdfTopRankPercent = previous;
         this.showFlash(error.message, "error");
       }
     },
@@ -1791,6 +1858,33 @@ window.iunaApp = function iunaApp() {
       const explicitTotal = block?.totalFees ?? block?.total_fees ?? block?.reward;
       if (explicitTotal !== null && explicitTotal !== undefined) return Number(explicitTotal) || 0;
       return this.blockTransactions(block).reduce((sum, tx) => sum + Number(tx.fee || 0), 0);
+    },
+
+    blockTimestampLabel(block) {
+      const timestamp = Number(block?.timestamp_ms ?? block?.timestampMs);
+      if (!Number.isFinite(timestamp)) return "-";
+      return new Date(timestamp).toLocaleString();
+    },
+
+    blockTotalBytes(block) {
+      return Number(block?.totalBytes ?? block?.total_bytes ?? 0);
+    },
+
+    blockPayloadBytes(block) {
+      return (
+        Number(block?.transactionBytes ?? block?.transaction_bytes ?? 0) +
+        Number(block?.blindedTransactionBytes ?? block?.blinded_transaction_bytes ?? 0) +
+        Number(block?.revealBundleBytes ?? block?.reveal_bundle_bytes ?? 0)
+      );
+    },
+
+    blockByteBreakdown(block) {
+      return [
+        ["Header and proof", Math.max(0, this.blockTotalBytes(block) - this.blockPayloadBytes(block))],
+        ["Transactions", Number(block?.transactionBytes ?? block?.transaction_bytes ?? 0)],
+        ["Blinded commits", Number(block?.blindedTransactionBytes ?? block?.blinded_transaction_bytes ?? 0)],
+        ["Reveal bundles", Number(block?.revealBundleBytes ?? block?.reveal_bundle_bytes ?? 0)],
+      ];
     },
 
     recentBlockFeeAverage(count) {

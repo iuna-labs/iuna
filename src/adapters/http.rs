@@ -146,6 +146,11 @@ struct BurnSettingsForm {
 }
 
 #[derive(Debug, Deserialize)]
+struct RecoveryVdfSettingsForm {
+    top_rank_percent: u8,
+}
+
+#[derive(Debug, Deserialize)]
 struct PowMiningForm {
     enabled: bool,
 }
@@ -366,6 +371,10 @@ struct UiBlock {
     finalizer_rank: u32,
     reward: Amount,
     total_fees: Amount,
+    total_bytes: usize,
+    transaction_bytes: usize,
+    blinded_transaction_bytes: usize,
+    reveal_bundle_bytes: usize,
     vdf_rounds: u64,
     vdf_output: String,
     leader_proof: Option<crate::domain::LeaderProof>,
@@ -483,6 +492,10 @@ pub async fn serve(
         )
         .route("/api/settings/pow-mining", post(api_pow_mining_form))
         .route("/api/settings/metrics", post(api_metrics_settings_form))
+        .route(
+            "/api/settings/recovery-vdf",
+            post(api_recovery_vdf_settings_form),
+        )
         .route("/api/settings/p2p-inbound", post(api_p2p_inbound_form))
         .route("/api/settings/p2p-announce", post(api_p2p_announce_form))
         .route("/api/transfer", post(api_transfer_form))
@@ -845,6 +858,7 @@ async fn api_mempool(
             .map(|revealed| ui_pending_revealed_transaction(revealed, &outputs))
             .unwrap_or_else(|| ui_blinded_reveal(reveal))
     }));
+    items.reverse();
     Json(page_items(items, query))
 }
 
@@ -1086,6 +1100,13 @@ async fn api_metrics_settings_form(
     action_json(set_keep_track_of_metrics(&state, form.enabled).await)
 }
 
+async fn api_recovery_vdf_settings_form(
+    State(state): State<HttpState>,
+    Form(form): Form<RecoveryVdfSettingsForm>,
+) -> Json<ActionResponse> {
+    action_json(set_recovery_vdf_top_rank_percent(&state, form.top_rank_percent).await)
+}
+
 async fn api_p2p_announce_form(
     State(state): State<HttpState>,
     Form(form): Form<P2pAnnounceForm>,
@@ -1215,6 +1236,17 @@ async fn persist_pow_mining_config(
     let mut config = ui_config.lock().await;
     config.pow_mining_enabled = enabled;
     config_store::save(config_path, &config)
+}
+
+async fn set_recovery_vdf_top_rank_percent(state: &HttpState, percent: u8) -> Result<()> {
+    let percent = percent.min(100);
+    {
+        let mut node = state.node.lock().await;
+        node.set_recovery_vdf_top_rank_percent(percent);
+    }
+    let mut config = state.ui_config.lock().await;
+    config.recovery_vdf_top_rank_percent = percent;
+    config_store::save(&state.config_path, &config)
 }
 
 async fn set_keep_track_of_metrics(state: &HttpState, enabled: bool) -> Result<()> {
@@ -1837,6 +1869,16 @@ fn ui_block(
     let revealed_fees = revealed_transactions.iter().fold(0_u64, |total, revealed| {
         total.saturating_add(revealed.transaction.fee())
     });
+    let transaction_bytes = block
+        .transactions
+        .iter()
+        .map(|tx| tx.serialized_size_bytes().unwrap_or_default())
+        .sum::<usize>();
+    let blinded_transaction_bytes = block
+        .blinded_transactions
+        .iter()
+        .map(|tx| tx.serialized_size_bytes().unwrap_or_default())
+        .sum::<usize>();
     let mut transactions = block
         .transactions
         .iter()
@@ -1857,7 +1899,7 @@ fn ui_block(
         .iter()
         .map(|revealed| (revealed.commitment.clone(), revealed.transaction.clone()))
         .collect::<BTreeMap<_, _>>();
-    let reveal_bundles = block
+    let reveal_bundles: Vec<UiRevealBundle> = block
         .reveal_bundle_section
         .expand(block.height, &block.prev_hash)
         .into_iter()
@@ -1878,6 +1920,15 @@ fn ui_block(
                 .collect(),
         })
         .collect();
+    let reveal_bundle_bytes = reveal_bundles
+        .iter()
+        .map(|bundle: &UiRevealBundle| bundle.byte_size)
+        .sum::<usize>();
+    let total_bytes = block.serialized_size_bytes().unwrap_or_else(|_| {
+        transaction_bytes
+            .saturating_add(blinded_transaction_bytes)
+            .saturating_add(reveal_bundle_bytes)
+    });
     UiBlock {
         height: block.height,
         prev_hash: block.prev_hash,
@@ -1887,6 +1938,10 @@ fn ui_block(
         finalizer_rank: block.finalizer_rank,
         reward: block.reward,
         total_fees: block.reward.saturating_add(revealed_fees),
+        total_bytes,
+        transaction_bytes,
+        blinded_transaction_bytes,
+        reveal_bundle_bytes,
         vdf_rounds: block.vdf_rounds,
         vdf_output: block.vdf_output,
         leader_proof: block.leader_proof,
@@ -3282,11 +3337,17 @@ const INDEX_HTML: &str = r#"<!doctype html>
     summary.tx-section-title { cursor: pointer; }
     details.tx-section:not([open]) { gap: 0; }
     .tx-section-meta { color: #8e979e; font-size: 12px; font-weight: 600; }
-    .tx-card, .mempool-item { position: relative; display: grid; gap: 6px; border: 1px solid #2f363c; border-radius: 8px; padding: 12px; background: #111316; cursor: pointer; text-align: left; }
+    .tx-card, .mempool-item { position: relative; display: grid; align-content: start; grid-auto-rows: min-content; gap: 6px; border: 1px solid #2f363c; border-radius: 8px; padding: 12px; background: #111316; cursor: pointer; text-align: left; }
     .mempool-item.before-last-block { opacity: .56; }
-    .mempool-item.new-since-block { border-color: #49543b; background: #151a12; opacity: 1; }
+    .mempool-item.new-since-block { background: #151a12; opacity: 1; }
     .mempool-item.new-since-block::before { content: ""; position: absolute; inset: 0 auto 0 0; width: 3px; border-radius: 8px 0 0 8px; background: #d5f55f; }
+    .mempool-item.blinded-hidden { background: linear-gradient(135deg, #141218, #101316); border-color: #353040; }
+    .mempool-state { color: #d5f55f; font-size: 10px; font-weight: 850; text-transform: uppercase; }
+    .mempool-time { color: #8d989f; font-size: 11px; font-weight: 700; }
+    .mempool-top { display: flex; justify-content: space-between; gap: 8px; align-items: flex-start; min-width: 0; }
+    .mempool-top-meta { display: grid; gap: 3px; min-width: 0; }
     .tx-card .pill, .mempool-item .pill { position: absolute; top: 10px; right: 10px; }
+    .mempool-item .pill { position: static; flex: 0 0 auto; }
     .pill { display: inline-flex; align-items: center; border-radius: 999px; padding: 2px 8px; font-size: 12px; font-weight: 800; background: #2b3136; color: #d6dee2; }
     .pill.burn { background: #332918; color: #ffd070; }
     .pill.transfer { background: #17312a; color: #8de9cd; }
@@ -3295,7 +3356,7 @@ const INDEX_HTML: &str = r#"<!doctype html>
     .pill.reveal, .pill.revealed { background: #2b2f20; color: #d5f55f; }
     .mempool-panel { min-width: 0; overflow: hidden; }
     .mempool-strip { width: 100%; min-width: 0; display: flex; gap: 8px; overflow-x: auto; overscroll-behavior-x: contain; padding: 1px 0 10px; scroll-snap-type: x proximity; }
-    .mempool-item { flex: 0 0 220px; scroll-snap-align: start; }
+    .mempool-item { flex: 0 0 220px; scroll-snap-align: start; align-self: stretch; }
     .tx-modal { width: min(940px, 100%); max-height: calc(100vh - 44px); overflow: auto; border: 1px solid #3b4448; border-radius: 8px; padding: 16px; background: #181b1f; box-shadow: 0 24px 80px rgba(0, 0, 0, .46); }
     .tx-modal-head { display: flex; justify-content: space-between; gap: 16px; align-items: flex-start; margin-bottom: 14px; }
     .tx-modal-title { display: grid; justify-items: start; gap: 6px; min-width: 0; }
@@ -3742,6 +3803,7 @@ const INDEX_HTML: &str = r#"<!doctype html>
             <div class="detail-grid">
               <div>
                 <div class="detail-kv"><div class="key">Height</div><div x-text="selectedBlock.height"></div></div>
+                <div class="detail-kv"><div class="key">Time</div><div x-text="blockTimestampLabel(selectedBlock)"></div></div>
                 <div class="detail-kv"><div class="key">Hash</div><code x-text="selectedBlock.hash"></code></div>
                 <div class="detail-kv"><div class="key">Previous</div><code x-text="short(selectedBlock.prev_hash)"></code></div>
                 <div class="detail-kv">
@@ -3755,6 +3817,12 @@ const INDEX_HTML: &str = r#"<!doctype html>
                 <div class="detail-kv"><div class="key">Burns</div><div x-text="blockBurnCount(selectedBlock)"></div></div>
                 <div class="detail-kv"><div class="key">Transfers</div><div x-text="blockTransferCount(selectedBlock)"></div></div>
                 <div class="detail-kv"><div class="key">Total Burned</div><div>IUNA <span x-text="amountLabel(blockBurned(selectedBlock))"></span></div></div>
+                <div class="detail-kv">
+                  <div class="key">Bytes</div>
+                  <button class="detail-link" type="button" @click="openBlockBytesModal(selectedBlock)" title="Block byte breakdown">
+                    <span x-text="blockTotalBytes(selectedBlock)"></span>B
+                  </button>
+                </div>
                 <div class="detail-kv"><div class="key">VDF</div><div><span x-text="selectedBlock.vdf_rounds"></span> rounds</div></div>
               </div>
               <div class="tx-list">
@@ -3807,8 +3875,13 @@ const INDEX_HTML: &str = r#"<!doctype html>
           <div class="mempool-strip">
             <template x-for="tx in mempool" :key="tx.signature">
               <div class="mempool-item" :class="mempoolItemClass(tx)" role="button" tabindex="0" @click="openTransactionModal(tx, { source: 'Mempool' })" @keydown.enter.prevent="openTransactionModal(tx, { source: 'Mempool' })" @keydown.space.prevent="openTransactionModal(tx, { source: 'Mempool' })">
-                <span class="pill" :class="tx.kind" x-text="tx.kind"></span>
-                <div class="tx-field" x-show="mempoolItemClass(tx) === 'new-since-block'"><span class="tx-label">Seen</span><span class="tx-value text">after last block</span></div>
+                <div class="mempool-top">
+                  <div class="mempool-top-meta">
+                    <div class="mempool-state" x-show="mempoolItemClass(tx).includes('new-since-block')">New since last block</div>
+                    <div class="mempool-time" x-show="mempoolSeenTimeLabel(tx)" x-text="mempoolSeenTimeLabel(tx)"></div>
+                  </div>
+                  <span class="pill" :class="tx.kind" x-text="tx.kind"></span>
+                </div>
                 <div class="tx-field" x-show="!isBlindedMempoolItem(tx)"><span class="tx-label">Amount</span><span class="tx-value money">IUNA <span x-text="amountLabel(txAmount(tx))"></span></span></div>
                 <div class="tx-field"><span class="tx-label">Fee</span><span class="tx-value money" x-text="txFeeLabel(tx)"></span></div>
                 <div class="tx-field" x-show="!isBlindedMempoolItem(tx)"><span class="tx-label">From</span><code class="tx-value hash" x-text="short(txFrom(tx))"></code></div>
@@ -3924,6 +3997,17 @@ const INDEX_HTML: &str = r#"<!doctype html>
           </div>
         </div>
         <div class="panel" x-show="advancedMode()">
+          <div class="settings-mode-row">
+            <div class="settings-mode-copy">
+              <div class="settings-mode-title">Recovery VDF</div>
+              <div class="muted">Top <span x-text="recoveryVdfTopRankPercent"></span>% threshold for fallback/recovery work.</div>
+            </div>
+            <label>Top ranks
+              <input type="range" min="0" max="100" step="5" :value="recoveryVdfTopRankPercent" @change="setRecoveryVdfTopRankPercent($event.target.value)">
+            </label>
+          </div>
+        </div>
+        <div class="panel" x-show="advancedMode()">
           <h3>Node Networking</h3>
           <div class="settings-mode-row">
             <div class="settings-mode-copy">
@@ -4021,6 +4105,27 @@ const INDEX_HTML: &str = r#"<!doctype html>
           <div class="info-fact"><div class="label">Max step</div><div class="value">2 bits</div></div>
         </div>
         <p>If a window includes more mine actions than the target, difficulty rises. If it includes fewer, difficulty falls. The initial difficulty is 12 bits.</p>
+      </div>
+    </section>
+  </div>
+  <div class="setup-overlay transaction-overlay" x-show="selectedByteBlock" x-transition.opacity @click.self="closeBlockBytesModal()" role="dialog" aria-modal="true" aria-labelledby="block-bytes-title">
+    <section class="tx-modal">
+      <div class="tx-modal-head">
+        <div class="tx-modal-title">
+          <h2 id="block-bytes-title" x-text="selectedByteBlock ? `Block ${selectedByteBlock.height} Bytes` : 'Block Bytes'"></h2>
+          <div class="tx-field"><span class="tx-label">Total</span><span class="tx-value number"><span x-text="blockTotalBytes(selectedByteBlock)"></span>B</span></div>
+        </div>
+        <button type="button" @click="closeBlockBytesModal">Close</button>
+      </div>
+      <div class="rank-list">
+        <template x-for="row in blockByteBreakdown(selectedByteBlock)" :key="row[0]">
+          <div class="rank-row">
+            <div class="rank-number" x-text="`${row[1]}B`"></div>
+            <div class="rank-details">
+              <div class="tx-field"><span class="tx-label">Category</span><span class="tx-value text" x-text="row[0]"></span></div>
+            </div>
+          </div>
+        </template>
       </div>
     </section>
   </div>
@@ -4364,6 +4469,9 @@ mod tests {
         assert!(ui_block.transactions[1].revealed);
         assert_eq!(ui_block.revealed_transactions.len(), 1);
         assert!(ui_block.revealed_transactions[0].revealed);
+        assert!(ui_block.total_bytes > 0);
+        assert!(ui_block.blinded_transaction_bytes > 0);
+        assert_eq!(ui_block.reveal_bundle_bytes, 0);
     }
 
     #[test]
@@ -4428,7 +4536,9 @@ mod tests {
         assert!(super::INDEX_HTML.contains(".pill.reveal, .pill.revealed"));
         assert!(super::INDEX_HTML.contains(":class=\"mempoolItemClass(tx)\""));
         assert!(super::INDEX_HTML.contains(".mempool-item.before-last-block"));
-        assert!(super::INDEX_HTML.contains("after last block"));
+        assert!(super::INDEX_HTML.contains("New since last block"));
+        assert!(super::INDEX_HTML.contains("class=\"mempool-top\""));
+        assert!(super::INDEX_HTML.contains("mempoolSeenTimeLabel(tx)"));
         assert!(super::INDEX_HTML.contains("<details class=\"tx-section\">"));
         assert!(super::INDEX_HTML.contains("<summary class=\"tx-section-title\">"));
         assert!(super::INDEX_HTML.contains("Commitment"));
@@ -5552,7 +5662,9 @@ mod tests {
                 .contains("!tx?.revealed && (tx?.kind === \"blinded\" || tx?.kind === \"reveal\")")
         );
         assert!(app_js.contains("mempoolFirstSeenHeights"));
+        assert!(app_js.contains("mempoolFirstSeenAt"));
         assert!(app_js.contains("syncMempoolBlockMarker"));
+        assert!(app_js.contains("this.status.chain?.height ?? this.lastBlockMempoolHeight"));
         assert!(app_js.contains("mempoolItemClass"));
         assert!(super::INDEX_HTML.contains("x-text=\"txFeeLabel(tx)\""));
         assert!(super::INDEX_HTML.contains("x-text=\"txFeeLabel(selectedTransaction?.tx)\""));

@@ -53,6 +53,7 @@ pub struct NodeConfig {
     pub vdf_rounds: u64,
     pub burn_per_block: Amount,
     pub burn_fee: Amount,
+    pub recovery_vdf_top_rank_percent: u8,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -209,6 +210,7 @@ pub struct MiningStatus {
     pub current_leader: Option<String>,
     pub wallet_is_current_leader: bool,
     pub last_auto_burn_height: Option<u64>,
+    pub recovery_vdf_top_rank_percent: u8,
 }
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
@@ -249,6 +251,7 @@ pub struct NodeCore {
     pow_mining_enabled: bool,
     burn_per_block: Amount,
     burn_fee: Amount,
+    recovery_vdf_top_rank_percent: u8,
     last_auto_burn_height: Option<u64>,
     last_auto_pow_mine_anchor: Option<String>,
     last_auto_pow_mine_status: Option<String>,
@@ -266,12 +269,14 @@ pub struct NodeCore {
 impl NodeCore {
     pub fn new(config: NodeConfig) -> Self {
         let ledger = Ledger::new(config.genesis_allocations, config.vdf_rounds);
-        Self::from_ledger_with_burn_fee(
+        let mut node = Self::from_ledger_with_burn_fee(
             config.wallet,
             ledger,
             config.burn_per_block,
             config.burn_fee,
-        )
+        );
+        node.set_recovery_vdf_top_rank_percent(config.recovery_vdf_top_rank_percent);
+        node
     }
 
     pub fn from_ledger(wallet: Wallet, ledger: Ledger, burn_per_block: Amount) -> Self {
@@ -293,6 +298,7 @@ impl NodeCore {
             automatic_mining_enabled,
             burn_per_block,
             burn_fee,
+            100,
         )
     }
 
@@ -324,6 +330,7 @@ impl NodeCore {
             automatic_mining_enabled,
             burn_per_block,
             burn_fee,
+            100,
         )
     }
 
@@ -333,6 +340,7 @@ impl NodeCore {
         automatic_mining_enabled: bool,
         burn_per_block: Amount,
         burn_fee: Amount,
+        recovery_vdf_top_rank_percent: u8,
     ) -> Self {
         Self {
             wallet,
@@ -341,6 +349,7 @@ impl NodeCore {
             pow_mining_enabled: false,
             burn_per_block,
             burn_fee,
+            recovery_vdf_top_rank_percent: recovery_vdf_top_rank_percent.min(100),
             last_auto_burn_height: None,
             last_auto_pow_mine_anchor: None,
             last_auto_pow_mine_status: None,
@@ -656,6 +665,7 @@ impl NodeCore {
                 current_leader,
                 wallet_is_current_leader,
                 last_auto_burn_height: self.last_auto_burn_height,
+                recovery_vdf_top_rank_percent: self.recovery_vdf_top_rank_percent,
             },
             stratum: StratumStatus {
                 enabled: false,
@@ -743,6 +753,10 @@ impl NodeCore {
             self.last_auto_pow_mine_status =
                 Some("waiting for next automatic PoW mining tick".to_string());
         }
+    }
+
+    pub fn set_recovery_vdf_top_rank_percent(&mut self, percent: u8) {
+        self.recovery_vdf_top_rank_percent = percent.min(100);
     }
 
     pub fn burn(&mut self, amount: Amount) -> Result<Transaction> {
@@ -1374,8 +1388,16 @@ impl NodeCore {
         let wallet_rank = self
             .ledger
             .finalizer_rank_for_next_block(self.wallet.address());
-        if wallet_rank.is_none() {
-            if self.ledger.recovery_block_available_at(timestamp_ms) {
+        if let Some(rank) = wallet_rank {
+            if !self.wallet_rank_runs_vdf(rank) {
+                plan.skipped_reason = Some(format!(
+                    "wallet finalizer rank {rank} is outside the top {}% VDF threshold",
+                    self.recovery_vdf_top_rank_percent
+                ));
+                return plan;
+            }
+        } else {
+            if self.should_prepare_recovery_vdf(timestamp_ms) {
                 match self.prepare_recovery_block_with_local_anchor(timestamp_ms) {
                     Ok(work) => {
                         plan.work = Some(work);
@@ -1456,8 +1478,16 @@ impl NodeCore {
         let wallet_rank = self
             .ledger
             .finalizer_rank_for_next_block(self.wallet.address());
-        if wallet_rank.is_none() {
-            if self.ledger.recovery_block_available_at(timestamp_ms) {
+        if let Some(rank) = wallet_rank {
+            if !self.wallet_rank_runs_vdf(rank) {
+                plan.skipped_reason = Some(format!(
+                    "wallet finalizer rank {rank} is outside the top {}% VDF threshold",
+                    self.recovery_vdf_top_rank_percent
+                ));
+                return plan;
+            }
+        } else {
+            if self.should_prepare_recovery_vdf(timestamp_ms) {
                 match self.prepare_recovery_block_with_local_anchor(timestamp_ms) {
                     Ok(work) => {
                         plan.work = Some(work);
@@ -1653,10 +1683,35 @@ impl NodeCore {
     fn automatic_burn_needs_plaintext_anchor(&self, timestamp_ms: u64) -> bool {
         self.ledger
             .finalizer_rank_for_next_block(self.wallet.address())
-            .is_some()
-            || self.ledger.recovery_block_available_at(timestamp_ms)
+            .is_some_and(|rank| self.wallet_rank_runs_vdf(rank))
+            || self.should_prepare_recovery_vdf(timestamp_ms)
             || timestamp_ms.saturating_add(AUTO_PLAINTEXT_BURN_BEFORE_RECOVERY_MS)
                 >= self.ledger.recovery_block_min_timestamp()
+    }
+
+    fn wallet_rank_runs_vdf(&self, rank: u32) -> bool {
+        let rank_count = self.ledger.finalizer_rank_count_for_next_block();
+        let allowed =
+            allowed_recovery_vdf_rank_count(rank_count, self.recovery_vdf_top_rank_percent);
+        usize::try_from(rank).is_ok_and(|rank| rank < allowed)
+    }
+
+    fn should_prepare_recovery_vdf(&self, timestamp_ms: u64) -> bool {
+        if !self.ledger.recovery_block_available_at(timestamp_ms) {
+            return false;
+        }
+        if self.recovery_vdf_top_rank_percent == 100 {
+            return true;
+        }
+        if self.recovery_vdf_top_rank_percent == 0 {
+            return false;
+        }
+        if self.ledger.finalizer_rank_count_for_next_block() > 0 {
+            return false;
+        }
+        let tip_hash = self.ledger.status().tip_hash;
+        recovery_vdf_sample_percent(self.wallet.address(), tip_hash.as_str())
+            < self.recovery_vdf_top_rank_percent
     }
 
     fn prepare_next_block_with_local_anchor(&self, timestamp_ms: u64) -> Result<PreparedBlock> {
@@ -2364,6 +2419,21 @@ fn transaction_input_outpoints(transaction: &Transaction) -> BTreeSet<OutPoint> 
     .collect()
 }
 
+fn allowed_recovery_vdf_rank_count(rank_count: usize, percent: u8) -> usize {
+    if rank_count == 0 || percent == 0 {
+        return 0;
+    }
+    rank_count
+        .saturating_mul(usize::from(percent.min(100)))
+        .saturating_add(99)
+        / 100
+}
+
+fn recovery_vdf_sample_percent(address: &str, tip_hash: &str) -> u8 {
+    let digest = Sha256::digest(format!("iuna-recovery-vdf-sample:{tip_hash}:{address}"));
+    digest[0] % 100
+}
+
 #[cfg(test)]
 mod tests {
     use std::collections::BTreeMap;
@@ -2411,6 +2481,7 @@ mod tests {
             vdf_rounds: 10,
             burn_per_block: 1,
             burn_fee: 1,
+            recovery_vdf_top_rank_percent: 100,
         });
 
         let first = node.prepare_automatic_mining(1);
@@ -2505,6 +2576,7 @@ mod tests {
             vdf_rounds: 10,
             burn_per_block: 0,
             burn_fee: 0,
+            recovery_vdf_top_rank_percent: 100,
         });
 
         node.set_pow_mining_enabled(true);
@@ -2534,6 +2606,7 @@ mod tests {
             vdf_rounds: 10,
             burn_per_block: 0,
             burn_fee: 0,
+            recovery_vdf_top_rank_percent: 100,
         });
 
         node.set_pow_mining_enabled(true);
@@ -2579,6 +2652,27 @@ mod tests {
     }
 
     #[test]
+    fn automatic_finalization_respects_zero_recovery_vdf_threshold() {
+        let alice = Wallet::from_seed("automatic-recovery-zero-alice");
+        let bob = Wallet::from_seed("automatic-recovery-zero-bob");
+        let mut allocations = BTreeMap::new();
+        allocations.insert(alice.address().to_string(), 10 * MICRO_IUNA);
+        allocations.insert(bob.address().to_string(), 10 * MICRO_IUNA);
+        let ledger = Ledger::new_with_genesis_burns(
+            allocations,
+            vec![GenesisBurn::new(alice.address(), 1)],
+            10,
+        )
+        .unwrap();
+        let mut node = NodeCore::from_ledger(bob, ledger, 1);
+        node.set_recovery_vdf_top_rank_percent(0);
+
+        let recovery = node.prepare_automatic_finalization(RECOVERY_BLOCK_DELAY_MS);
+
+        assert!(recovery.work.is_none());
+    }
+
+    #[test]
     fn automatic_pow_mining_uses_protocol_finalizer_fee() {
         let wallet = Wallet::from_seed("automatic-pow-mining-fee-wallet");
         let mut node = NodeCore::new(NodeConfig {
@@ -2587,6 +2681,7 @@ mod tests {
             vdf_rounds: 10,
             burn_per_block: 0,
             burn_fee: 0,
+            recovery_vdf_top_rank_percent: 100,
         });
 
         node.set_pow_mining_enabled(true);
@@ -2613,6 +2708,7 @@ mod tests {
             vdf_rounds: 1,
             burn_per_block: 0,
             burn_fee: 0,
+            recovery_vdf_top_rank_percent: 100,
         });
 
         assert_eq!(node.status().app_version, env!("CARGO_PKG_VERSION"));

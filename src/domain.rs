@@ -3423,6 +3423,10 @@ impl Ledger {
             .map(|(rank, _)| rank)
     }
 
+    pub fn finalizer_rank_count_for_next_block(&self) -> usize {
+        ranked_tickets_for_height(self.tip(), self.tip().height + 1, &self.tickets).len()
+    }
+
     fn valid_pending_transactions(&self) -> Vec<Transaction> {
         let mut utxos = self.utxos.clone();
         let mut valid = Vec::new();

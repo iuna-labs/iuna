@@ -95,6 +95,7 @@ async fn main() -> Result<()> {
         ),
     };
     node_core.set_pow_mining_enabled(ui_config.pow_mining_enabled);
+    node_core.set_recovery_vdf_top_rank_percent(ui_config.recovery_vdf_top_rank_percent);
     let node: SharedNode = Arc::new(Mutex::new(node_core));
     let ui_config = Arc::new(Mutex::new(ui_config));
     let mut peers = ui_config.lock().await.peers.clone();

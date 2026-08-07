@@ -16,6 +16,7 @@ const AMOUNT_UNIT_MICROIUNA: &str = "microiuna";
 const LEGACY_AMOUNT_UNIT_PRE_RENAME: &str = concat!("micro", "l", "uun");
 pub const DEFAULT_BURN_AMOUNT: Amount = MICRO_IUNA / 10_000;
 pub const DEFAULT_BURN_FEE: Amount = DEFAULT_BURN_AMOUNT;
+pub const DEFAULT_RECOVERY_VDF_TOP_RANK_PERCENT: u8 = 50;
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 pub struct UiConfig {
@@ -26,6 +27,7 @@ pub struct UiConfig {
     pub pow_mining_enabled: bool,
     pub burn_per_block: Amount,
     pub burn_fee: Amount,
+    pub recovery_vdf_top_rank_percent: u8,
     pub keep_track_of_metrics: bool,
     pub p2p_accept_inbound: bool,
     pub p2p_announce_addr: Option<String>,
@@ -41,6 +43,7 @@ impl Default for UiConfig {
             pow_mining_enabled: false,
             burn_per_block: DEFAULT_BURN_AMOUNT,
             burn_fee: DEFAULT_BURN_FEE,
+            recovery_vdf_top_rank_percent: DEFAULT_RECOVERY_VDF_TOP_RANK_PERCENT,
             keep_track_of_metrics: false,
             p2p_accept_inbound: false,
             p2p_announce_addr: None,
@@ -65,6 +68,8 @@ struct ConfigFile {
     burn_per_block: Amount,
     #[serde(default)]
     burn_fee: Option<Amount>,
+    #[serde(default)]
+    recovery_vdf_top_rank_percent: Option<u8>,
     #[serde(default)]
     keep_track_of_metrics: bool,
     #[serde(default)]
@@ -100,6 +105,7 @@ pub fn save(path: &Path, config: &UiConfig) -> Result<()> {
         pow_mining_enabled: config.pow_mining_enabled,
         burn_per_block: config.burn_per_block,
         burn_fee: Some(config.burn_fee),
+        recovery_vdf_top_rank_percent: Some(config.recovery_vdf_top_rank_percent),
         keep_track_of_metrics: config.keep_track_of_metrics,
         p2p_accept_inbound: Some(config.p2p_accept_inbound),
         p2p_announce_addr: config.p2p_announce_addr.clone(),
@@ -151,6 +157,10 @@ fn load(path: &Path) -> Result<UiConfig> {
             .burn_fee
             .map(|fee| fee.saturating_mul(scale))
             .unwrap_or(DEFAULT_BURN_FEE),
+        recovery_vdf_top_rank_percent: stored
+            .recovery_vdf_top_rank_percent
+            .unwrap_or(DEFAULT_RECOVERY_VDF_TOP_RANK_PERCENT)
+            .min(100),
         keep_track_of_metrics: stored.keep_track_of_metrics,
         p2p_accept_inbound,
         p2p_announce_addr: stored.p2p_announce_addr,
@@ -221,6 +231,7 @@ mod tests {
                 p2p_accept_inbound: true,
                 p2p_announce_addr: Some("203.0.113.10:9444".to_string()),
                 peers: vec!["127.0.0.1:9444".to_string()],
+                ..UiConfig::default()
             },
         )
         .unwrap();

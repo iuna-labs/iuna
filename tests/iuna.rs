@@ -29,6 +29,7 @@ fn node(_network_key: &str, wallet: Wallet, allocations: BTreeMap<String, Amount
         vdf_rounds: 25,
         burn_per_block: DEFAULT_BURN_PER_BLOCK,
         burn_fee: 1,
+        recovery_vdf_top_rank_percent: 100,
     })
 }
 
@@ -618,6 +619,7 @@ fn automatic_mining_burns_configured_amount_once_per_height() {
         vdf_rounds: 10,
         burn_per_block: iuna(25),
         burn_fee: DEFAULT_FEE_PER_BYTE,
+        recovery_vdf_top_rank_percent: 100,
     });
 
     let first = node.automatic_mine_once(1);
@@ -712,6 +714,7 @@ fn automatic_mining_caps_burn_to_spendable_balance_after_fee() {
         vdf_rounds: 10,
         burn_per_block: BLOCK_REWARD + iuna(50),
         burn_fee: DEFAULT_FEE_PER_BYTE,
+        recovery_vdf_top_rank_percent: 100,
     });
     let mut node = NodeCore::new(NodeConfig {
         wallet: alice.clone(),
@@ -719,6 +722,7 @@ fn automatic_mining_caps_burn_to_spendable_balance_after_fee() {
         vdf_rounds: 10,
         burn_per_block: BLOCK_REWARD + iuna(50),
         burn_fee: DEFAULT_FEE_PER_BYTE,
+        recovery_vdf_top_rank_percent: 100,
     });
 
     let outcome = node.automatic_mine_once(1);
@@ -748,6 +752,7 @@ fn automatic_mining_preserves_configured_burn_when_only_fee_is_short() {
         vdf_rounds: 10,
         burn_per_block: MICRO_IUNA,
         burn_fee: DEFAULT_FEE_PER_BYTE,
+        recovery_vdf_top_rank_percent: 100,
     });
 
     let outcome = node.automatic_mine_once(1);
@@ -1785,6 +1790,7 @@ fn mined_block_gossip_does_not_include_full_chain_snapshot() {
         vdf_rounds: 10,
         burn_per_block: 1,
         burn_fee: 1,
+        recovery_vdf_top_rank_percent: 100,
     });
 
     let plan = alice_node.prepare_automatic_mining(1);
