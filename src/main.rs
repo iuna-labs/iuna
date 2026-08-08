@@ -22,8 +22,8 @@ use iuna::{
 use tokio::sync::Mutex;
 
 const GENESIS_BOOTSTRAP_BURN_AMOUNT: Amount = MICRO_IUNA;
-const GENESIS_INITIAL_BURN_PER_BLOCK: Amount = GENESIS_BOOTSTRAP_BURN_AMOUNT;
-const GENESIS_INITIAL_BURN_FEE: Amount = 0;
+const GENESIS_INITIAL_BURN_PER_BLOCK: Amount = config_store::DEFAULT_BURN_AMOUNT;
+const GENESIS_INITIAL_BURN_FEE: Amount = config_store::DEFAULT_BURN_FEE;
 const VDF_MEASUREMENT_INITIAL_ROUNDS: u64 = 1_000_000;
 const VDF_MEASUREMENT_MAX_ROUNDS: u64 = 100_000_000;
 const VDF_MEASUREMENT_MIN_ELAPSED: Duration = Duration::from_millis(150);
@@ -948,7 +948,7 @@ mod tests {
     }
 
     #[test]
-    fn genesis_mode_starts_with_bootstrap_burn_rate_and_zero_fee() {
+    fn genesis_mode_starts_with_default_burn_rate_and_fee() {
         let genesis = parse(&["--genesis"]).unwrap().unwrap();
         let configured = UiConfig {
             burn_per_block: 50,
@@ -957,11 +957,11 @@ mod tests {
         };
         assert_eq!(
             initial_burn_per_block(&genesis, &configured),
-            GENESIS_INITIAL_BURN_PER_BLOCK
+            UiConfig::default().burn_per_block
         );
         assert_eq!(
             initial_burn_fee(&genesis, &configured),
-            GENESIS_INITIAL_BURN_FEE
+            UiConfig::default().burn_fee
         );
     }
 
@@ -988,12 +988,12 @@ mod tests {
 
         assert_eq!(
             first.burned.as_ref().map(|tx| tx.amount()),
-            Some(MICRO_IUNA)
+            Some(GENESIS_INITIAL_BURN_PER_BLOCK)
         );
         assert!(first.block.is_some(), "{first:?}");
         assert_eq!(
             second.burned.as_ref().map(|tx| tx.amount()),
-            Some(MICRO_IUNA)
+            Some(GENESIS_INITIAL_BURN_PER_BLOCK)
         );
         assert!(second.block.is_some(), "{second:?}");
         assert!(
@@ -1002,7 +1002,10 @@ mod tests {
             }),
             "{second:?}"
         );
-        assert!(node.ledger().balance_of(wallet.address()) >= BLOCK_REWARD - 2 * MICRO_IUNA);
+        assert!(
+            node.ledger().balance_of(wallet.address())
+                >= BLOCK_REWARD - 2 * (GENESIS_INITIAL_BURN_PER_BLOCK + GENESIS_INITIAL_BURN_FEE)
+        );
     }
 
     #[test]

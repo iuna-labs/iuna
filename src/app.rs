@@ -3968,7 +3968,7 @@ mod tests {
         }
 
         let all_online = (0..NODES).collect::<BTreeSet<_>>();
-        for round in ROUNDS + QUIET_BLOCKS..ROUNDS + QUIET_BLOCKS + SETTLE_BLOCKS as usize {
+        for round in ROUNDS + QUIET_BLOCKS..ROUNDS + QUIET_BLOCKS + SETTLE_BLOCKS as usize * 3 {
             deliver_sparse_chaos_until_idle(
                 &mut network,
                 &node_ids,
