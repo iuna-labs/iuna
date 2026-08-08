@@ -26,7 +26,8 @@ pub const VDF_TARGET_BLOCK_MS: u64 = 5 * 60 * 1_000;
 pub const RECOVERY_BLOCK_DELAY_MS: u64 = VDF_TARGET_BLOCK_MS * 6;
 pub const MAX_VDF_ROUNDS: u64 = i64::MAX as u64;
 pub const MINE_DIFFICULTY_BITS: u32 = 12;
-pub const SINGLE_MINE_PER_ANCHOR_ACTIVATION_HEIGHT: u64 = 500;
+pub const MINE_ACTIONS_PER_ANCHOR_LIMIT: usize = 2;
+pub const MINE_ACTIONS_PER_ANCHOR_LIMIT_ACTIVATION_HEIGHT: u64 = 200;
 pub const MAX_BLINDED_TRANSACTION_EXPIRY_HEIGHTS: u64 = 20;
 pub const REVEAL_COMMITTEE_SIZE: usize = 3;
 pub const MAX_REVEAL_BUNDLE_BYTES: usize = 10_000;
@@ -2476,10 +2477,11 @@ impl Ledger {
         self.transaction_by_signature(signature).is_some()
     }
 
-    pub fn has_pending_mine_for_anchor(&self, anchor: &str) -> bool {
+    pub fn pending_mine_count_for_anchor(&self, anchor: &str) -> usize {
         self.pending
             .iter()
-            .any(|tx| mine_anchor(tx) == Some(anchor))
+            .filter(|tx| mine_anchor(tx) == Some(anchor))
+            .count()
     }
 
     pub fn has_blinded_transaction(&self, commitment: &str) -> bool {
@@ -3503,27 +3505,32 @@ impl Ledger {
         let mut utxos = self.utxos.clone();
         let mut valid = Vec::new();
         let mut remaining = self.pending.iter().collect::<Vec<_>>();
-        let mut selected_mine_anchors = BTreeSet::new();
-        let enforce_single_mine_per_anchor = true;
+        let mut selected_mine_anchor_counts = BTreeMap::new();
 
         while !remaining.is_empty() {
             let mut progressed = false;
             let mut still_pending = Vec::new();
 
             for tx in remaining {
-                if enforce_single_mine_per_anchor
-                    && mine_anchor(tx).is_some_and(|anchor| {
-                        mine_anchor_was_used_before_height(&self.chain, anchor, self.height())
-                            || selected_mine_anchors.contains(anchor)
-                    })
-                {
-                    continue;
+                if let Some(anchor) = mine_anchor(tx) {
+                    let selected = selected_mine_anchor_counts
+                        .get(anchor)
+                        .copied()
+                        .unwrap_or_default();
+                    if mine_anchor_count_before_height(&self.chain, anchor, self.height())
+                        .saturating_add(selected)
+                        >= MINE_ACTIONS_PER_ANCHOR_LIMIT
+                    {
+                        continue;
+                    }
                 }
                 if self.validate_transaction_terms(tx).is_ok()
                     && apply_transaction(tx, &mut utxos).is_ok()
                 {
                     if let Some(anchor) = mine_anchor(tx) {
-                        selected_mine_anchors.insert(anchor.to_string());
+                        *selected_mine_anchor_counts
+                            .entry(anchor.to_string())
+                            .or_insert(0) += 1;
                     }
                     valid.push(tx.clone());
                     progressed = true;
@@ -3755,24 +3762,27 @@ impl Ledger {
     }
 
     fn validate_mine_anchor_available(&self, transaction: &Transaction) -> Result<()> {
-        if single_mine_per_anchor_active(self.height().saturating_add(1)) {
+        if mine_actions_per_anchor_limit_active(self.height().saturating_add(1)) {
             if let Some(anchor) = mine_anchor(transaction) {
-                if mine_anchor_was_used_before_height(&self.chain, anchor, self.height()) {
-                    bail!("mine transaction anchor already has a mined action");
-                }
-                if self
-                    .pending
-                    .iter()
-                    .any(|tx| mine_anchor(tx) == Some(anchor))
-                {
-                    bail!("pending mine transaction anchor already exists");
-                }
-                if self
-                    .orphans
-                    .iter()
-                    .any(|tx| mine_anchor(tx) == Some(anchor))
-                {
-                    bail!("orphan mine transaction anchor already exists");
+                let known_count =
+                    mine_anchor_count_before_height(&self.chain, anchor, self.height())
+                        .saturating_add(
+                            self.pending
+                                .iter()
+                                .filter(|tx| mine_anchor(tx) == Some(anchor))
+                                .count(),
+                        )
+                        .saturating_add(
+                            self.orphans
+                                .iter()
+                                .filter(|tx| {
+                                    mine_anchor(tx) == Some(anchor)
+                                        && tx.signature() != transaction.signature()
+                                })
+                                .count(),
+                        );
+                if known_count >= MINE_ACTIONS_PER_ANCHOR_LIMIT {
+                    bail!("mine transaction anchor limit reached");
                 }
             }
         }
@@ -4424,23 +4434,25 @@ fn ensure_block_has_burn(transactions: &[Transaction]) -> Result<()> {
 }
 
 fn ensure_mine_anchor_limit(height: u64, transactions: &[Transaction]) -> Result<()> {
-    if !single_mine_per_anchor_active(height) {
+    if !mine_actions_per_anchor_limit_active(height) {
         return Ok(());
     }
-    let mut anchors = BTreeSet::new();
+    let mut anchor_counts = BTreeMap::new();
     for transaction in transactions {
         let Some(anchor) = mine_anchor(transaction) else {
             continue;
         };
-        if !anchors.insert(anchor) {
-            bail!("block contains multiple mine actions for one anchor");
+        let count = anchor_counts.entry(anchor).or_insert(0usize);
+        *count += 1;
+        if *count > MINE_ACTIONS_PER_ANCHOR_LIMIT {
+            bail!("block exceeds mine actions per anchor limit");
         }
     }
     Ok(())
 }
 
-fn single_mine_per_anchor_active(height: u64) -> bool {
-    height >= SINGLE_MINE_PER_ANCHOR_ACTIVATION_HEIGHT
+fn mine_actions_per_anchor_limit_active(height: u64) -> bool {
+    height >= MINE_ACTIONS_PER_ANCHOR_LIMIT_ACTIVATION_HEIGHT
 }
 
 fn mine_anchor(transaction: &Transaction) -> Option<&str> {
@@ -4450,16 +4462,18 @@ fn mine_anchor(transaction: &Transaction) -> Option<&str> {
     }
 }
 
-fn mine_anchor_was_used_before_height(chain: &[Block], anchor: &str, height: u64) -> bool {
+fn mine_anchor_count_before_height(chain: &[Block], anchor: &str, height: u64) -> usize {
     chain
         .iter()
         .take_while(|block| block.height <= height)
-        .any(|block| {
+        .map(|block| {
             block
                 .transactions
                 .iter()
-                .any(|transaction| mine_anchor(transaction) == Some(anchor))
+                .filter(|transaction| mine_anchor(transaction) == Some(anchor))
+                .count()
         })
+        .sum()
 }
 
 fn ensure_block_has_burn_from(transactions: &[Transaction], miner: &str) -> Result<()> {
@@ -5994,8 +6008,8 @@ mod tests {
         panic!("test should find a valid mine action");
     }
 
-    fn advance_to_single_mine_activation_parent(ledger: &mut Ledger, wallet: &Wallet) {
-        while ledger.height().saturating_add(1) < SINGLE_MINE_PER_ANCHOR_ACTIVATION_HEIGHT {
+    fn advance_to_mine_anchor_limit_activation_parent(ledger: &mut Ledger, wallet: &Wallet) {
+        while ledger.height().saturating_add(1) < MINE_ACTIONS_PER_ANCHOR_LIMIT_ACTIVATION_HEIGHT {
             let timestamp_ms = ledger
                 .tip()
                 .timestamp_ms
@@ -6004,7 +6018,7 @@ mod tests {
         }
         assert_eq!(
             ledger.height().saturating_add(1),
-            SINGLE_MINE_PER_ANCHOR_ACTIVATION_HEIGHT
+            MINE_ACTIONS_PER_ANCHOR_LIMIT_ACTIVATION_HEIGHT
         );
     }
 
@@ -8312,8 +8326,8 @@ mod tests {
     }
 
     #[test]
-    fn block_selection_limits_mine_actions_to_one_per_anchor() {
-        let alice = Wallet::from_seed("mine-single-anchor-selection-alice");
+    fn block_selection_limits_mine_actions_per_anchor() {
+        let alice = Wallet::from_seed("mine-anchor-limit-selection-alice");
         let mut ledger = ledger_with_allocation(&alice, 10 * MICRO_IUNA);
 
         let burn = ledger.build_burn(&alice, MICRO_IUNA, 0).unwrap();
@@ -8322,18 +8336,20 @@ mod tests {
         ledger.submit_transaction(first_mine.clone()).unwrap();
         let second_mine = ledger.build_mine(alice.address()).unwrap();
         ledger.submit_transaction(second_mine.clone()).unwrap();
+        let third_mine = ledger.build_mine(alice.address()).unwrap();
+        ledger.submit_transaction(third_mine.clone()).unwrap();
 
-        assert_eq!(ledger.pending().len(), 3);
+        assert_eq!(ledger.pending().len(), 4);
         let block = ledger.mine_next_block(&alice, 1).unwrap();
 
-        assert_eq!(block.transactions.len(), 2);
+        assert_eq!(block.transactions.len(), 3);
         assert!(block.transactions.iter().any(Transaction::is_burn));
         let included_mines = block
             .transactions
             .iter()
             .filter(|transaction| matches!(transaction, Transaction::Mine { .. }))
             .count();
-        assert_eq!(included_mines, 1);
+        assert_eq!(included_mines, MINE_ACTIONS_PER_ANCHOR_LIMIT);
         assert!(
             block
                 .transactions
@@ -8341,20 +8357,29 @@ mod tests {
                 .any(|tx| tx.signature() == first_mine.signature())
         );
         assert!(
-            !block
+            block
                 .transactions
                 .iter()
                 .any(|tx| tx.signature() == second_mine.signature())
         );
+        assert!(
+            !block
+                .transactions
+                .iter()
+                .any(|tx| tx.signature() == third_mine.signature())
+        );
         assert_ne!(first_mine.signature(), second_mine.signature());
-        assert_eq!(block.reward, first_mine.fee());
+        assert_ne!(second_mine.signature(), third_mine.signature());
+        assert_eq!(block.reward, first_mine.fee() + second_mine.fee());
     }
 
     #[test]
     fn pre_activation_block_may_keep_multiple_mine_actions_for_one_anchor() {
         let alice = Wallet::from_seed("mine-anchor-limit-pre-activation-alice");
         let mut ledger = ledger_with_allocation(&alice, 10 * MICRO_IUNA);
-        assert!(ledger.height().saturating_add(1) < SINGLE_MINE_PER_ANCHOR_ACTIVATION_HEIGHT);
+        assert!(
+            ledger.height().saturating_add(1) < MINE_ACTIONS_PER_ANCHOR_LIMIT_ACTIVATION_HEIGHT
+        );
 
         let first_mine = test_mine_with_salt(&ledger, alice.address(), 1);
         let second_mine = test_mine_with_salt(&ledger, alice.address(), 2);
@@ -8373,13 +8398,14 @@ mod tests {
     }
 
     #[test]
-    fn activated_blocks_reject_multiple_mine_actions_for_one_anchor() {
+    fn activated_blocks_reject_too_many_mine_actions_for_one_anchor() {
         let alice = Wallet::from_seed("mine-anchor-limit-active-block-alice");
         let mut ledger = ledger_with_allocation(&alice, 10 * MICRO_IUNA);
-        advance_to_single_mine_activation_parent(&mut ledger, &alice);
+        advance_to_mine_anchor_limit_activation_parent(&mut ledger, &alice);
 
         let first_mine = test_mine_with_salt(&ledger, alice.address(), 1);
         let second_mine = test_mine_with_salt(&ledger, alice.address(), 2);
+        let third_mine = test_mine_with_salt(&ledger, alice.address(), 3);
         let burn = ledger.build_burn(&alice, MICRO_IUNA, 0).unwrap();
         ledger.submit_transaction(burn).unwrap();
         let mut block = ledger
@@ -8394,6 +8420,7 @@ mod tests {
             .finish(&alice, "preverified-vdf".to_string());
         block.transactions.push(first_mine);
         block.transactions.push(second_mine);
+        block.transactions.push(third_mine);
         block.reward = fee_reward(&block.transactions).unwrap();
         block.hash = block.compute_hash();
 
@@ -8401,21 +8428,23 @@ mod tests {
             .apply_preverified_block_at(block, u64::MAX)
             .unwrap_err();
 
-        assert!(format!("{error:#}").contains("multiple mine actions for one anchor"));
+        assert!(format!("{error:#}").contains("mine actions per anchor limit"));
     }
 
     #[test]
-    fn activated_mempool_rejects_second_mine_action_for_one_anchor() {
+    fn activated_mempool_rejects_mine_actions_above_anchor_limit() {
         let alice = Wallet::from_seed("mine-anchor-limit-active-mempool-alice");
         let mut ledger = ledger_with_allocation(&alice, 10 * MICRO_IUNA);
-        advance_to_single_mine_activation_parent(&mut ledger, &alice);
+        advance_to_mine_anchor_limit_activation_parent(&mut ledger, &alice);
 
         let first_mine = test_mine_with_salt(&ledger, alice.address(), 1);
         let second_mine = test_mine_with_salt(&ledger, alice.address(), 2);
+        let third_mine = test_mine_with_salt(&ledger, alice.address(), 3);
         ledger.submit_transaction(first_mine).unwrap();
-        let error = ledger.submit_transaction(second_mine).unwrap_err();
+        ledger.submit_transaction(second_mine).unwrap();
+        let error = ledger.submit_transaction(third_mine).unwrap_err();
 
-        assert!(format!("{error:#}").contains("pending mine transaction anchor already exists"));
+        assert!(format!("{error:#}").contains("mine transaction anchor limit reached"));
     }
 
     #[test]

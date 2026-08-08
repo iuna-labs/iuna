@@ -18,9 +18,10 @@ use crate::adapters::config_store::{
 use crate::domain::{
     Amount, BlindedReveal, BlindedTransaction, Block, BuiltBlindedTransaction, BurnLeaderRank,
     ChainSnapshot, ChainStatus, DEFAULT_FEE_PER_BYTE, DEFAULT_TRANSACTION_FEE, Ledger,
-    MAX_BLINDED_TRANSACTION_EXPIRY_HEIGHTS, MINE_FINALIZER_FEE, MINE_REWARD, OutPoint,
-    OwnedBlindedTransaction, PreparedBlock, RevealBundle, StratumMineShare, StratumMineTemplate,
-    Transaction, TransactionSubmitOutcome, VDF_TARGET_BLOCK_MS, Wallet, run_vdf,
+    MAX_BLINDED_TRANSACTION_EXPIRY_HEIGHTS, MINE_ACTIONS_PER_ANCHOR_LIMIT, MINE_FINALIZER_FEE,
+    MINE_REWARD, OutPoint, OwnedBlindedTransaction, PreparedBlock, RevealBundle, StratumMineShare,
+    StratumMineTemplate, Transaction, TransactionSubmitOutcome, VDF_TARGET_BLOCK_MS, Wallet,
+    run_vdf,
 };
 
 pub type SharedNode = Arc<Mutex<NodeCore>>;
@@ -1574,10 +1575,10 @@ impl NodeCore {
             .last()
             .map(|block| block.hash.clone())
             .context("ledger has no anchor block")?;
-        if self.ledger.has_pending_mine_for_anchor(&anchor) {
+        if self.ledger.pending_mine_count_for_anchor(&anchor) >= MINE_ACTIONS_PER_ANCHOR_LIMIT {
             self.last_auto_pow_mine_anchor = Some(anchor);
             self.last_auto_pow_mine_status =
-                Some("waiting for next chain tip after queued mine action".to_string());
+                Some("waiting for next chain tip after queued mine actions".to_string());
             self.auto_pow_mine_cursor = None;
             return Ok(None);
         }
@@ -2530,8 +2531,9 @@ mod tests {
     use std::collections::{BTreeMap, BTreeSet};
 
     use crate::domain::{
-        FinalizerMode, GenesisBurn, Ledger, MICRO_IUNA, MINE_FINALIZER_FEE, OutPoint,
-        RECOVERY_BLOCK_DELAY_MS, Transaction, VDF_TARGET_BLOCK_MS, Wallet, run_vdf,
+        FinalizerMode, GenesisBurn, Ledger, MICRO_IUNA, MINE_ACTIONS_PER_ANCHOR_LIMIT,
+        MINE_FINALIZER_FEE, OutPoint, RECOVERY_BLOCK_DELAY_MS, Transaction, VDF_TARGET_BLOCK_MS,
+        Wallet, run_vdf,
     };
 
     use super::{
@@ -2648,19 +2650,27 @@ mod tests {
                 .contains("queued")
         );
 
-        for timestamp in 10_000..10_010 {
+        let second = (10_000..20_000)
+            .map(|timestamp| node.prepare_automatic_mining(timestamp))
+            .find(|plan| plan.pow_mined.is_some())
+            .expect("automatic PoW should allow a second proof for the same tip");
+        let second_mine = second.pow_mined.as_ref().expect("PoW should be queued");
+        assert_ne!(second_mine.signature(), first_mine.signature());
+        assert_eq!(node.ledger().pending().len(), first_pending + 1);
+
+        for timestamp in 20_000..20_010 {
             assert!(node.prepare_automatic_mining(timestamp).pow_mined.is_none());
         }
-        assert_eq!(node.ledger().pending().len(), first_pending);
+        assert_eq!(node.ledger().pending().len(), first_pending + 1);
         assert_eq!(
             node.status().mining.last_auto_pow_mine_status.as_deref(),
-            Some("waiting for next chain tip after queued mine action")
+            Some("waiting for next chain tip after queued mine actions")
         );
         assert!(node.ledger().pending_blinded_transactions().is_empty());
     }
 
     #[test]
-    fn automatic_pow_mining_waits_after_queueing_for_tip() {
+    fn automatic_pow_mining_waits_after_queueing_anchor_limit_for_tip() {
         let wallet = Wallet::from_seed("automatic-pow-independent-wallet");
         let mut allocations = BTreeMap::new();
         allocations.insert(wallet.address().to_string(), 1);
@@ -2675,14 +2685,22 @@ mod tests {
         });
 
         node.set_pow_mining_enabled(true);
-        let mined = (1..10_000)
+        let first_mined = (1..10_000)
             .find_map(|_| node.prepare_automatic_pow_mining().unwrap())
             .expect("PoW should eventually queue a mine action");
-
-        assert!(node.ledger().has_pending_mine_for_anchor(match mined {
-            Transaction::Mine { ref anchor, .. } => anchor,
+        let anchor = match first_mined {
+            Transaction::Mine { ref anchor, .. } => anchor.clone(),
             _ => panic!("expected mine action"),
-        }));
+        };
+        assert_eq!(node.ledger().pending_mine_count_for_anchor(&anchor), 1);
+
+        (1..10_000)
+            .find_map(|_| node.prepare_automatic_pow_mining().unwrap())
+            .expect("PoW should allow a second mine action for the same tip");
+        assert_eq!(
+            node.ledger().pending_mine_count_for_anchor(&anchor),
+            MINE_ACTIONS_PER_ANCHOR_LIMIT
+        );
         assert!(node.prepare_automatic_pow_mining().unwrap().is_none());
         assert!(node.auto_pow_mine_cursor.is_none());
     }
