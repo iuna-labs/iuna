@@ -1311,9 +1311,53 @@ window.iunaApp = function iunaApp() {
       return Math.max(0, Math.trunc(Number(this.status.chain?.mine_reward ?? 1000000)));
     },
 
+    pobStatusLabel() {
+      const mining = this.status.mining;
+      if (!mining) return "-";
+      if (this.status.wallet_locked) return "Wallet locked";
+      if (!mining.automatic) return "Off";
+      if ((mining.burn_per_block ?? 0) <= 0) return "Anchor only";
+      if (mining.wallet_is_current_leader) return "Selected";
+      if (mining.current_leader) return "Waiting";
+      return "Recovery standby";
+    },
+
+    powStatusShortLabel() {
+      if (this.status.wallet_locked) return "Wallet locked";
+      if (!this.powMiningEnabled) return "Off";
+      const status = this.status.mining?.last_auto_pow_mine_status || "";
+      if (status.includes("queued mine action")) return "Queued";
+      if (status.includes("searched")) return "Searching";
+      if (status.includes("waiting")) return "Waiting";
+      if (status.includes("failed")) return "Error";
+      return "On";
+    },
+
     autoPowStatusLabel() {
       if (!this.powMiningEnabled) return "PoW mining is off";
       return this.status.mining?.last_auto_pow_mine_status || "Waiting for next automatic PoW mining tick";
+    },
+
+    currentFinalizerLabel() {
+      const leader = this.status.mining?.current_leader ?? this.status.chain?.next_leader;
+      if (!leader) return "-";
+      if (leader === this.status.wallet_address) return "you";
+      return this.short(leader);
+    },
+
+    localMiningMempoolLabel() {
+      const pending = this.status.chain?.pending_transactions;
+      if (typeof pending !== "number") return "-";
+      const visibleMines = this.localMineActionCount();
+      return `${pending} pending / ${visibleMines} visible mines`;
+    },
+
+    powDifficultyLabel() {
+      return this.status.chain?.current_mine_difficulty_bits ?? this.status.launch_profile?.mine_difficulty_bits ?? "-";
+    },
+
+    localMineActionCount() {
+      return this.mempool.filter((tx) => tx?.kind === "mine").length;
     },
 
     metricsCharts() {

@@ -3233,6 +3233,7 @@ const INDEX_HTML: &str = r#"<!doctype html>
     .mine-fee-fields { display: flex; flex-wrap: wrap; gap: 10px; align-items: end; }
     .fee-preview { flex-basis: 100%; color: #9eb3bc; font-size: 12px; font-weight: 700; }
     .mine-stats { display: grid; grid-template-columns: repeat(4, minmax(112px, 1fr)); gap: 8px; min-width: 0; }
+    .local-mining-stats { grid-template-columns: repeat(auto-fit, minmax(150px, 1fr)); }
     .fee-history { grid-template-columns: repeat(3, minmax(112px, 1fr)); margin-top: 12px; }
     .mine-stat { min-width: 0; border: 1px solid #2f363c; border-radius: 8px; padding: 9px 10px; background: #111316; }
     .mine-stat-label { display: flex; gap: 5px; align-items: center; color: #879198; font-size: 10px; font-weight: 850; text-transform: uppercase; }
@@ -3603,11 +3604,23 @@ const INDEX_HTML: &str = r#"<!doctype html>
       <div class="mining-grid">
         <div class="panel">
           <h3>Status</h3>
-          <div class="grid">
-            <div class="metric"><div class="label">Current Leader</div><div class="value" x-text="isLeaderLabel()"></div></div>
-            <div class="metric"><div class="label">Last Burn Height</div><div class="value" x-text="status.mining?.last_auto_burn_height ?? '-'"></div></div>
-            <div class="metric"><div class="label">VDF Rounds</div><div class="value" x-text="status.mining?.vdf_rounds ?? '-'"></div></div>
-            <div class="metric"><div class="label">Target</div><div class="value" x-text="targetSecondsLabel()"></div></div>
+          <div class="mine-stats local-mining-stats" aria-label="Local mining status">
+            <div class="mine-stat">
+              <div class="mine-stat-label">PoB State</div>
+              <div class="mine-stat-value" x-text="pobStatusLabel()"></div>
+            </div>
+            <div class="mine-stat">
+              <div class="mine-stat-label">PoW State</div>
+              <div class="mine-stat-value" x-text="powStatusShortLabel()"></div>
+            </div>
+            <div class="mine-stat">
+              <div class="mine-stat-label">Selected Finalizer</div>
+              <code class="mine-stat-value" x-text="currentFinalizerLabel()"></code>
+            </div>
+            <div class="mine-stat">
+              <div class="mine-stat-label">Mempool</div>
+              <div class="mine-stat-value" x-text="localMiningMempoolLabel()"></div>
+            </div>
           </div>
         </div>
         <div class="panel">
@@ -3659,7 +3672,7 @@ const INDEX_HTML: &str = r#"<!doctype html>
                 </div>
                 <div class="mine-stat">
                   <div class="mine-stat-label">Difficulty <button class="info-button" type="button" @click="openPowDifficultyInfo" title="How difficulty is adjusted" aria-label="How PoW difficulty is adjusted">i</button></div>
-                  <div class="mine-stat-value"><span x-text="status.chain?.current_mine_difficulty_bits ?? status.launch_profile?.mine_difficulty_bits ?? '-'"></span> bits</div>
+                  <div class="mine-stat-value"><span x-text="powDifficultyLabel()"></span> bits</div>
                 </div>
               </div>
               <label class="toggle-switch" :class="{ active: powMiningEnabled }" title="Continuously search for PoW mine actions with a small local work budget">
@@ -5817,6 +5830,13 @@ mod tests {
             super::INDEX_HTML.contains("Search for PoW actions that mint a fixed IUNA reward.")
         );
         assert!(super::INDEX_HTML.contains("amountLabel(powMineReward())"));
+        assert!(super::INDEX_HTML.contains("aria-label=\"Local mining status\""));
+        assert!(super::INDEX_HTML.contains("PoB State"));
+        assert!(super::INDEX_HTML.contains("PoW State"));
+        assert!(super::INDEX_HTML.contains("Selected Finalizer"));
+        assert!(app_js.contains("pobStatusLabel()"));
+        assert!(app_js.contains("powStatusShortLabel()"));
+        assert!(app_js.contains("localMiningMempoolLabel()"));
         assert!(!super::INDEX_HTML.contains("Needs burns"));
     }
 

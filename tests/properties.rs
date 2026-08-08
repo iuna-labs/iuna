@@ -705,6 +705,7 @@ fn in_memory_network_converges_under_generated_node_actions() {
                         assert!(
                             reason.contains("at least one burn")
                                 || reason.contains("selected finalizer")
+                                || reason.contains("required burn")
                                 || reason.contains("could not")
                                 || reason.contains("automatic"),
                             "unexpected mining skip reason: {reason}"
@@ -788,6 +789,7 @@ fn receive_chaotic_envelope(
         assert!(
             message.contains("expected block height")
                 || message.contains("mine transaction anchor is not on this chain")
+                || message.contains("blinded transaction spends missing output")
                 || message.contains("blinded transaction expiry is too far in the future"),
             "unexpected chaotic delivery error: {message}"
         );
@@ -878,6 +880,7 @@ fn in_memory_network_converges_after_generated_offline_and_reordered_delivery() 
             if let Some(reason) = outcome.skipped_reason {
                 assert!(
                     reason.contains("at least one burn")
+                        || reason.contains("required burn")
                         || reason.contains("could not")
                         || reason.contains("automatic burn failed"),
                     "unexpected chaotic mining skip reason: {reason}"

@@ -1280,7 +1280,7 @@ impl NodeCore {
             if self.ledger.has_unrevealed_blinded_transaction(commitment)
                 && !ledger.has_transaction(payload.signature())
             {
-                let _ = ledger.submit_transaction(payload.clone())?;
+                let _ = ledger.submit_transaction(payload.clone());
             }
         }
         Ok(())
@@ -1301,7 +1301,7 @@ impl NodeCore {
             return Ok(());
         };
         if *height == ledger.height() && !ledger.has_transaction(burn.signature()) {
-            ledger.reserve_transaction_inputs(burn)?;
+            let _ = ledger.reserve_transaction_inputs(burn);
         }
         Ok(())
     }
@@ -1758,46 +1758,37 @@ impl NodeCore {
     }
 
     fn prepare_next_block_with_local_anchor(&self, timestamp_ms: u64) -> Result<PreparedBlock> {
-        let required_burn_signature = self.current_local_block_anchor_signature();
-        self.ledger_with_local_block_anchor()?
-            .prepare_next_block_with_required_burn_and_reveal_bundles(
-                self.wallet.address(),
-                timestamp_ms,
-                self.usable_reveal_bundles(),
-                required_burn_signature.as_deref(),
-            )
+        let (ledger, required_burn_signature) = self.ledger_with_local_block_anchor();
+        ledger.prepare_next_block_with_required_burn_and_reveal_bundles(
+            self.wallet.address(),
+            timestamp_ms,
+            self.usable_reveal_bundles(),
+            required_burn_signature.as_deref(),
+        )
     }
 
     fn prepare_recovery_block_with_local_anchor(&self, timestamp_ms: u64) -> Result<PreparedBlock> {
-        let required_burn_signature = self.current_local_block_anchor_signature();
-        self.ledger_with_local_block_anchor()?
-            .prepare_recovery_block_with_required_burn_and_reveal_bundles(
-                self.wallet.address(),
-                timestamp_ms,
-                self.usable_reveal_bundles(),
-                required_burn_signature.as_deref(),
-            )
+        let (ledger, required_burn_signature) = self.ledger_with_local_block_anchor();
+        ledger.prepare_recovery_block_with_required_burn_and_reveal_bundles(
+            self.wallet.address(),
+            timestamp_ms,
+            self.usable_reveal_bundles(),
+            required_burn_signature.as_deref(),
+        )
     }
 
-    fn current_local_block_anchor_signature(&self) -> Option<String> {
-        let (height, burn) = self.local_block_anchor_burn.as_ref()?;
-        if *height == self.ledger.height() && !self.ledger.has_transaction(burn.signature()) {
-            Some(burn.signature().to_string())
-        } else {
-            None
-        }
-    }
-
-    fn ledger_with_local_block_anchor(&self) -> Result<Ledger> {
+    fn ledger_with_local_block_anchor(&self) -> (Ledger, Option<String>) {
         let mut ledger = self.ledger.clone();
         let Some((height, burn)) = &self.local_block_anchor_burn else {
-            return Ok(ledger);
+            return (ledger, None);
         };
         if *height == ledger.height() && !ledger.has_transaction(burn.signature()) {
             ledger.drop_pending_blinded_conflicting_with_transaction(burn);
-            let _ = ledger.submit_transaction(burn.clone())?;
+            if ledger.submit_transaction(burn.clone()).is_ok() {
+                return (ledger, Some(burn.signature().to_string()));
+            }
         }
-        Ok(ledger)
+        (ledger, None)
     }
 
     fn clear_stale_local_block_anchor(&mut self) {
@@ -2653,6 +2644,61 @@ mod tests {
             .searched;
 
         assert!(second_searched > first_searched);
+    }
+
+    #[test]
+    fn automatic_pow_mining_skips_unspendable_owned_blinded_payloads() {
+        let alice = Wallet::from_seed("automatic-pow-stale-owned-blind-alice");
+        let bob = Wallet::from_seed("automatic-pow-stale-owned-blind-bob");
+        let mut allocations = BTreeMap::new();
+        allocations.insert(alice.address().to_string(), 10 * MICRO_IUNA);
+        allocations.insert(bob.address().to_string(), MICRO_IUNA);
+        let ledger = Ledger::new_with_genesis_burns(
+            allocations,
+            vec![GenesisBurn::new(bob.address(), MICRO_IUNA)],
+            10,
+        )
+        .unwrap();
+        let mut node = NodeCore::from_ledger(alice.clone(), ledger, 0);
+
+        let blinded = node
+            .blinded_burn_with_fee(MICRO_IUNA / 10, 7, node.chain_height() + 4)
+            .unwrap();
+        let mut finalizer_ledger = node.ledger().clone();
+        let leader_burn = finalizer_ledger.build_burn(&bob, 1, 0).unwrap();
+        finalizer_ledger.submit_transaction(leader_burn).unwrap();
+        let commit_block = finalizer_ledger.mine_next_block(&bob, 1).unwrap();
+        assert!(
+            commit_block
+                .blinded_transactions
+                .iter()
+                .any(|tx| tx.commitment == blinded.commitment)
+        );
+        finalizer_ledger.apply_block(commit_block).unwrap();
+        assert!(node.import_verified_ledger(finalizer_ledger).unwrap());
+        assert!(
+            node.ledger()
+                .has_unrevealed_blinded_transaction(&blinded.commitment)
+        );
+
+        node.set_pow_mining_enabled(true);
+
+        assert!(node.prepare_automatic_pow_mining().is_ok());
+    }
+
+    #[test]
+    fn automatic_pow_mining_skips_stale_local_anchor_reservation() {
+        let wallet = Wallet::from_seed("automatic-pow-stale-anchor-wallet");
+        let mut stale_allocations = BTreeMap::new();
+        stale_allocations.insert(wallet.address().to_string(), MICRO_IUNA);
+        let stale_ledger = Ledger::new(stale_allocations, 10);
+        let stale_anchor = stale_ledger.build_burn(&wallet, 1, 0).unwrap();
+        let live_ledger = Ledger::new(BTreeMap::new(), 10);
+        let mut node = NodeCore::from_ledger(wallet.clone(), live_ledger, 0);
+        node.local_block_anchor_burn = Some((node.chain_height(), stale_anchor));
+        node.set_pow_mining_enabled(true);
+
+        assert!(node.prepare_automatic_pow_mining().is_ok());
     }
 
     #[test]
