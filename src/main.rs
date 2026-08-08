@@ -716,6 +716,9 @@ async fn run_automatic_pow_miner(node: SharedNode, gossip: p2p::GossipNetwork, d
         tokio::time::sleep(std::time::Duration::from_secs(1)).await;
         let (height, pow_mined, outbox) = {
             let mut node = node.lock().await;
+            if !node.pow_mining_enabled() {
+                continue;
+            }
             if !node.has_real_chain() {
                 continue;
             }

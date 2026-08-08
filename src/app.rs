@@ -761,6 +761,10 @@ impl NodeCore {
         }
     }
 
+    pub fn pow_mining_enabled(&self) -> bool {
+        self.pow_mining_enabled
+    }
+
     pub fn set_recovery_vdf_top_rank_percent(&mut self, percent: u8) {
         self.recovery_vdf_top_rank_percent = percent.min(100);
     }
@@ -2644,6 +2648,33 @@ mod tests {
             .searched;
 
         assert!(second_searched > first_searched);
+    }
+
+    #[test]
+    fn disabling_automatic_pow_mining_clears_local_work() {
+        let wallet = Wallet::from_seed("automatic-pow-disable-wallet");
+        let mut allocations = BTreeMap::new();
+        allocations.insert(wallet.address().to_string(), 1);
+        let mut node = NodeCore::new(NodeConfig {
+            wallet,
+            genesis_allocations: allocations,
+            vdf_rounds: 10,
+            burn_per_block: 0,
+            burn_fee: 0,
+            recovery_vdf_top_rank_percent: 100,
+        });
+
+        node.set_pow_mining_enabled(true);
+        assert!(node.pow_mining_enabled());
+        node.prepare_automatic_pow_mining().unwrap();
+        assert!(node.auto_pow_mine_cursor.is_some());
+        assert!(node.status().mining.last_auto_pow_mine_status.is_some());
+
+        node.set_pow_mining_enabled(false);
+
+        assert!(!node.pow_mining_enabled());
+        assert!(node.auto_pow_mine_cursor.is_none());
+        assert!(node.status().mining.last_auto_pow_mine_status.is_none());
     }
 
     #[test]
