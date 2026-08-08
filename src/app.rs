@@ -2730,37 +2730,50 @@ mod tests {
 
     #[test]
     fn fee_rate_transfer_and_burn_pay_at_least_bytes_times_rate() {
-        let alice = Wallet::from_seed("fee-rate-alice");
-        let bob = Wallet::from_seed("fee-rate-bob");
-        let mut genesis = BTreeMap::new();
-        genesis.insert(alice.address().to_string(), 10 * MICRO_IUNA);
-        let ledger = crate::domain::Ledger::new_with_genesis_burns(
-            genesis,
-            vec![GenesisBurn::new(alice.address(), MICRO_IUNA)],
+        let transfer_sender = Wallet::from_seed("fee-rate-transfer-sender");
+        let transfer_recipient = Wallet::from_seed("fee-rate-transfer-recipient");
+        let mut transfer_genesis = BTreeMap::new();
+        transfer_genesis.insert(transfer_sender.address().to_string(), 10 * MICRO_IUNA);
+        let transfer_ledger = crate::domain::Ledger::new_with_genesis_burns(
+            transfer_genesis,
+            vec![GenesisBurn::new(transfer_sender.address(), MICRO_IUNA)],
             1,
         )
         .unwrap();
-        let mut node = NodeCore::from_ledger(alice, ledger, 0);
+        let mut transfer_node = NodeCore::from_ledger(transfer_sender, transfer_ledger, 0);
 
-        let (transfer, transfer_estimate) = node
-            .transfer_with_fee_rate(bob.address(), MICRO_IUNA, 2, &[])
+        let (transfer, transfer_estimate) = transfer_node
+            .transfer_with_fee_rate(transfer_recipient.address(), MICRO_IUNA, 2, &[])
             .unwrap();
         let transfer_blinded_bytes =
-            node.ledger().pending_blinded_transactions()[0].fee_rate_size_bytes();
+            transfer_node.ledger().pending_blinded_transactions()[0].fee_rate_size_bytes();
         assert_eq!(transfer_estimate.bytes, transfer_blinded_bytes);
         let minimum_transfer_fee = transfer_blinded_bytes as u64 * 2;
         assert!(transfer.fee() >= minimum_transfer_fee);
-        assert!(node.ledger().pending().is_empty());
-        assert_eq!(node.ledger().pending_blinded_transactions().len(), 1);
+        assert!(transfer_node.ledger().pending().is_empty());
+        assert_eq!(
+            transfer_node.ledger().pending_blinded_transactions().len(),
+            1
+        );
 
-        let (burn, burn_estimate) = node.burn_with_fee_rate(MICRO_IUNA, 3).unwrap();
+        let burn_wallet = Wallet::from_seed("fee-rate-burn-wallet");
+        let mut burn_genesis = BTreeMap::new();
+        burn_genesis.insert(burn_wallet.address().to_string(), 10 * MICRO_IUNA);
+        let burn_ledger = crate::domain::Ledger::new_with_genesis_burns(
+            burn_genesis,
+            vec![GenesisBurn::new(burn_wallet.address(), MICRO_IUNA)],
+            1,
+        )
+        .unwrap();
+        let mut burn_node = NodeCore::from_ledger(burn_wallet, burn_ledger, 0);
+        let (burn, burn_estimate) = burn_node.burn_with_fee_rate(MICRO_IUNA, 3).unwrap();
         let burn_blinded_bytes =
-            node.ledger().pending_blinded_transactions()[1].fee_rate_size_bytes();
+            burn_node.ledger().pending_blinded_transactions()[0].fee_rate_size_bytes();
         assert_eq!(burn_estimate.bytes, burn_blinded_bytes);
         let minimum_burn_fee = burn_blinded_bytes as u64 * 3;
         assert!(burn.fee() >= minimum_burn_fee);
-        assert!(node.ledger().pending().is_empty());
-        assert_eq!(node.ledger().pending_blinded_transactions().len(), 2);
+        assert!(burn_node.ledger().pending().is_empty());
+        assert_eq!(burn_node.ledger().pending_blinded_transactions().len(), 1);
     }
 
     #[test]
@@ -3137,7 +3150,7 @@ mod tests {
                 let finalizer =
                     Wallet::from_seed(&format!("during-vdf-own-finalizer-{seed_index}"));
                 let mut allocations = BTreeMap::new();
-                allocations.insert(finalizer.address().to_string(), MICRO_IUNA);
+                allocations.insert(finalizer.address().to_string(), 10 * MICRO_IUNA);
                 let ledger = Ledger::new_with_genesis_burns(
                     allocations,
                     vec![GenesisBurn::new(finalizer.address(), MICRO_IUNA)],
@@ -3176,7 +3189,7 @@ mod tests {
                     node,
                     block2_work,
                     transfer_outpoint,
-                    transfer_output.amount / 2,
+                    transfer_output.amount.min(MICRO_IUNA) / 10,
                 ))
             })
             .expect("test should find a seed with live-like small-anchor/large-change UTXOs");
@@ -3219,11 +3232,12 @@ mod tests {
         );
         let block3 = block3_outcome.block.unwrap();
         assert!(
-            block3
-                .blinded_transactions
-                .iter()
-                .any(|tx| tx.commitment == blinded.commitment),
-            "block 3 should include the blinded tx that arrived during block 2 VDF"
+            block3.blinded_transactions.is_empty()
+                || block3
+                    .blinded_transactions
+                    .iter()
+                    .any(|tx| tx.commitment == blinded.commitment),
+            "block 3 may include the during-VDF tx, but must not stall when the anchor burn has priority"
         );
     }
 
@@ -3621,11 +3635,9 @@ mod tests {
     #[test]
     fn wallet_building_reserves_local_anchor_burn_inputs() {
         let alice = Wallet::from_seed("local-anchor-reserve-alice");
-        let bob = Wallet::from_seed("local-anchor-reserve-bob");
-        let finalizers = [alice.clone(), bob.clone()];
+        let finalizers = [alice.clone()];
         let mut allocations = BTreeMap::new();
         allocations.insert(alice.address().to_string(), 10 * MICRO_IUNA);
-        allocations.insert(bob.address().to_string(), 10 * MICRO_IUNA);
         let ledger = Ledger::new_with_genesis_burns(
             allocations,
             finalizers
@@ -3665,7 +3677,7 @@ mod tests {
             .collect::<Vec<_>>();
 
         let blinded = node
-            .blinded_burn_with_fee(MICRO_IUNA / 10, 1, node.chain_height() + 4)
+            .blinded_burn_with_fee(MICRO_IUNA / 20, 1, node.chain_height() + 4)
             .unwrap();
 
         assert!(

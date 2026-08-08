@@ -15,7 +15,7 @@ use sha2::{Digest, Sha256};
 
 pub type Amount = u64;
 pub const MICRO_IUNA: Amount = 1_000_000;
-pub const BLOCK_REWARD: Amount = 100 * MICRO_IUNA;
+pub const BLOCK_REWARD: Amount = MICRO_IUNA;
 pub const MINE_REWARD: Amount = MICRO_IUNA;
 pub const MINE_FINALIZER_FEE: Amount = MICRO_IUNA;
 pub const DEFAULT_MINE_FEE: Amount = MINE_FINALIZER_FEE;
@@ -56,7 +56,7 @@ pub fn blinded_reveal_finalizer_fee(
 const MINE_RETARGET_WINDOW_BLOCKS: u64 = 10;
 const MINE_TARGET_ACTIONS_PER_BLOCK: u64 = 1;
 const MINE_MAX_RETARGET_STEP_BITS: u32 = 2;
-const MINE_MIN_DIFFICULTY_BITS: u32 = 1;
+const MINE_MIN_DIFFICULTY_BITS: u32 = 10;
 const MINE_MAX_DIFFICULTY_BITS: u32 = 32;
 const MINE_MAX_ANCHOR_AGE_BLOCKS: u64 = MINE_RETARGET_WINDOW_BLOCKS;
 pub const MAX_PENDING_TRANSACTIONS: usize = 10_000;
@@ -8041,6 +8041,24 @@ mod tests {
         assert_eq!(
             ledger.current_mine_difficulty_bits(),
             MINE_DIFFICULTY_BITS - MINE_MAX_RETARGET_STEP_BITS
+        );
+
+        for _ in 0..MINE_RETARGET_WINDOW_BLOCKS {
+            mine_burn_block_with_mines(&mut ledger, &alice, 0);
+        }
+
+        assert_eq!(
+            ledger.current_mine_difficulty_bits(),
+            MINE_MIN_DIFFICULTY_BITS
+        );
+
+        for _ in 0..MINE_RETARGET_WINDOW_BLOCKS {
+            mine_burn_block_with_mines(&mut ledger, &alice, 0);
+        }
+
+        assert_eq!(
+            ledger.current_mine_difficulty_bits(),
+            MINE_MIN_DIFFICULTY_BITS
         );
     }
 

@@ -461,7 +461,7 @@ fn transaction_fees_are_paid_to_the_block_finalizer() {
     assert_eq!(block.reward, iuna(7));
     ledger.apply_block(block).unwrap();
 
-    assert_eq!(ledger.balance_of(alice.address()), iuna(116));
+    assert_eq!(ledger.balance_of(alice.address()), BLOCK_REWARD + iuna(16));
     assert_eq!(ledger.balance_of(bob.address()), iuna(183));
 }
 

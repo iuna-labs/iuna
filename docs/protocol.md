@@ -190,7 +190,7 @@ Blocks are bounded by transaction count and serialized byte size. The devnet max
 
 Genesis is explicit. A normal node without a chain starts in setup mode and waits to join an existing chain from peers rather than silently creating a separate chain.
 
-The genesis flow bootstraps the devnet with an initial burn ticket and an initial reward for the genesis wallet. New nodes fetch and validate chain snapshots from peers, then continue with normal block validation.
+The genesis flow bootstraps the devnet with an initial burn ticket and a fixed `1 IUNA` initial reward for the genesis wallet. New nodes fetch and validate chain snapshots from peers, then continue with normal block validation.
 
 ## What This Design Is Trying to Achieve
 
