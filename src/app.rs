@@ -1574,6 +1574,13 @@ impl NodeCore {
             .last()
             .map(|block| block.hash.clone())
             .context("ledger has no anchor block")?;
+        if self.ledger.has_pending_mine_for_anchor(&anchor) {
+            self.last_auto_pow_mine_anchor = Some(anchor);
+            self.last_auto_pow_mine_status =
+                Some("waiting for next chain tip after queued mine action".to_string());
+            self.auto_pow_mine_cursor = None;
+            return Ok(None);
+        }
         let wallet_address = self.wallet.address().to_string();
         let needs_cursor = self
             .auto_pow_mine_cursor
@@ -1592,49 +1599,31 @@ impl NodeCore {
             .as_ref()
             .context("automatic PoW cursor was not initialized")?
             .clone();
-        let budget = AUTO_POW_NONCE_ATTEMPTS_PER_WORKER_TICK
-            .saturating_mul(u64::from(self.pow_mining_workers));
-        let mut remaining = budget;
-        let mut next_nonce = cursor.next_nonce;
-        let mut tick_attempts = 0_u64;
-        let mut queued = 0_u64;
-        let mut first_tx = None;
-        while remaining > 0 {
-            let outcome = self.wallet_build_ledger()?.search_mine(
-                wallet_address.clone(),
-                cursor.salt,
-                next_nonce,
-                remaining,
-            )?;
-            remaining = remaining.saturating_sub(outcome.attempts);
-            tick_attempts = tick_attempts.saturating_add(outcome.attempts);
-            next_nonce = outcome.next_nonce;
-            let Some(tx) = outcome.transaction else {
-                break;
-            };
-            self.submit_public_mine_action(tx.clone())?;
-            queued = queued.saturating_add(1);
-            first_tx.get_or_insert(tx);
-        }
-
-        let mut searched = tick_attempts;
+        let outcome = self.wallet_build_ledger()?.search_mine(
+            wallet_address,
+            cursor.salt,
+            cursor.next_nonce,
+            AUTO_POW_NONCE_ATTEMPTS_PER_WORKER_TICK
+                .saturating_mul(u64::from(self.pow_mining_workers)),
+        )?;
+        let mut searched = outcome.attempts;
         if let Some(cursor) = &mut self.auto_pow_mine_cursor {
             if cursor.anchor == anchor {
-                cursor.next_nonce = next_nonce;
-                cursor.searched = cursor.searched.saturating_add(tick_attempts);
+                cursor.next_nonce = outcome.next_nonce;
+                cursor.searched = cursor.searched.saturating_add(outcome.attempts);
                 searched = cursor.searched;
             }
         }
-        let Some(tx) = first_tx else {
+        let Some(tx) = outcome.transaction else {
             self.last_auto_pow_mine_status = Some(format!(
                 "searched {searched} PoW nonces for the current tip; no proof yet"
             ));
             return Ok(None);
         };
+        self.submit_public_mine_action(tx.clone())?;
         self.last_auto_pow_mine_anchor = Some(anchor);
         self.last_auto_pow_mine_status = Some(format!(
-            "queued {queued} mine action{} after {searched} PoW nonce attempts for the current tip",
-            if queued == 1 { "" } else { "s" }
+            "queued mine action after {searched} PoW nonce attempts for the current tip"
         ));
         Ok(Some(tx))
     }
@@ -2659,20 +2648,19 @@ mod tests {
                 .contains("queued")
         );
 
-        let second = (10_000..20_000)
-            .map(|timestamp| node.prepare_automatic_mining(timestamp))
-            .find(|plan| plan.pow_mined.is_some())
-            .expect("automatic PoW should keep searching the same tip after one proof");
-        assert_ne!(
-            second.pow_mined.as_ref().unwrap().signature(),
-            first_mine.signature()
+        for timestamp in 10_000..10_010 {
+            assert!(node.prepare_automatic_mining(timestamp).pow_mined.is_none());
+        }
+        assert_eq!(node.ledger().pending().len(), first_pending);
+        assert_eq!(
+            node.status().mining.last_auto_pow_mine_status.as_deref(),
+            Some("waiting for next chain tip after queued mine action")
         );
-        assert!(node.ledger().pending().len() > first_pending);
         assert!(node.ledger().pending_blinded_transactions().is_empty());
     }
 
     #[test]
-    fn automatic_pow_mining_can_tick_without_finalization() {
+    fn automatic_pow_mining_waits_after_queueing_for_tip() {
         let wallet = Wallet::from_seed("automatic-pow-independent-wallet");
         let mut allocations = BTreeMap::new();
         allocations.insert(wallet.address().to_string(), 1);
@@ -2687,21 +2675,16 @@ mod tests {
         });
 
         node.set_pow_mining_enabled(true);
-        node.prepare_automatic_pow_mining().unwrap();
-        let first_searched = node
-            .auto_pow_mine_cursor
-            .as_ref()
-            .expect("PoW cursor should be initialized")
-            .searched;
+        let mined = (1..10_000)
+            .find_map(|_| node.prepare_automatic_pow_mining().unwrap())
+            .expect("PoW should eventually queue a mine action");
 
-        node.prepare_automatic_pow_mining().unwrap();
-        let second_searched = node
-            .auto_pow_mine_cursor
-            .as_ref()
-            .expect("PoW cursor should keep tracking the current tip")
-            .searched;
-
-        assert!(second_searched > first_searched);
+        assert!(node.ledger().has_pending_mine_for_anchor(match mined {
+            Transaction::Mine { ref anchor, .. } => anchor,
+            _ => panic!("expected mine action"),
+        }));
+        assert!(node.prepare_automatic_pow_mining().unwrap().is_none());
+        assert!(node.auto_pow_mine_cursor.is_none());
     }
 
     #[test]

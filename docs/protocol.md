@@ -110,10 +110,12 @@ Difficulty targets about one mine action per block:
 - The retarget window is `10` blocks.
 - The target is `10` mine actions per window.
 - Difficulty can move by at most `2` bits per window.
-- Difficulty is clamped between `1` and `32` bits in the devnet profile.
+- Difficulty is clamped between `10` and `32` bits in the devnet profile.
 - Mine actions expire when their anchor is too old.
 
 This keeps issuance separate from finalization. PoW miners compete to create mine actions; burn-ticket finalizers decide blocks.
+
+Starting at height `500`, a block may contain at most one mine action for the same anchor. Upgraded nodes already produce and select at most one pending mine action per anchor before that activation height, so duplicate-anchor floods drain without invalidating older blocks during rollout.
 
 ## Fair Burn Inclusion
 
@@ -181,7 +183,7 @@ When a node builds a block, it selects transactions in this order:
 1. Collect valid signed reveal bundles for the next height.
 2. Reserve the local plaintext anchor burn as the first plaintext block item.
 3. For recovery blocks, ensure at least one plaintext anchor burn is from the recovery finalizer.
-4. Fill remaining envelope space with valid public mine actions and blinded transaction envelopes ordered by fee rate.
+4. Fill remaining envelope space with valid public mine actions and blinded transaction envelopes ordered by fee rate. Public mine actions are limited to one action per anchor.
 5. Bind the VDF seed to the three reveal-bundle slot hashes, using default hashes for missing slots.
 
 Blocks are bounded by transaction count and serialized byte size. The devnet maximum block size is `100,000` bytes.
