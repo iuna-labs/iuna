@@ -94,6 +94,7 @@ async fn main() -> Result<()> {
             initial_burn_fee,
         ),
     };
+    node_core.set_pow_mining_workers(ui_config.pow_mining_workers);
     node_core.set_pow_mining_enabled(ui_config.pow_mining_enabled);
     node_core.set_recovery_vdf_top_rank_percent(ui_config.recovery_vdf_top_rank_percent);
     let node: SharedNode = Arc::new(Mutex::new(node_core));

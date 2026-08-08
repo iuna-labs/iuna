@@ -153,6 +153,7 @@ struct RecoveryVdfSettingsForm {
 #[derive(Debug, Deserialize)]
 struct PowMiningForm {
     enabled: bool,
+    workers: Option<u8>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -1097,7 +1098,7 @@ async fn api_pow_mining_form(
     State(state): State<HttpState>,
     Form(form): Form<PowMiningForm>,
 ) -> Json<ActionResponse> {
-    action_json(set_pow_mining(&state, form.enabled).await)
+    action_json(set_pow_mining(&state, form.enabled, form.workers).await)
 }
 
 async fn api_metrics_settings_form(
@@ -1227,21 +1228,28 @@ async fn persist_burn_settings_config(
     config_store::save(config_path, &config)
 }
 
-async fn set_pow_mining(state: &HttpState, enabled: bool) -> Result<()> {
+async fn set_pow_mining(state: &HttpState, enabled: bool, workers: Option<u8>) -> Result<()> {
+    let workers = match workers {
+        Some(workers) => workers,
+        None => state.ui_config.lock().await.pow_mining_workers,
+    };
     {
         let mut node = state.node.lock().await;
+        node.set_pow_mining_workers(workers);
         node.set_pow_mining_enabled(enabled);
     }
-    persist_pow_mining_config(&state.ui_config, &state.config_path, enabled).await
+    persist_pow_mining_config(&state.ui_config, &state.config_path, enabled, workers).await
 }
 
 async fn persist_pow_mining_config(
     ui_config: &Arc<Mutex<UiConfig>>,
     config_path: &Path,
     enabled: bool,
+    workers: u8,
 ) -> Result<()> {
     let mut config = ui_config.lock().await;
     config.pow_mining_enabled = enabled;
+    config.pow_mining_workers = config_store::clamp_pow_mining_workers(workers);
     config_store::save(config_path, &config)
 }
 
@@ -3228,7 +3236,7 @@ const INDEX_HTML: &str = r#"<!doctype html>
     .panel-description { max-width: 760px; margin: -4px 0 12px; color: #9eb3bc; font-size: 13px; line-height: 1.45; }
     .mining-form { width: 100%; display: flex; flex-wrap: wrap; gap: 10px; align-items: end; }
     .burn-fields { display: flex; flex-wrap: wrap; gap: 10px; align-items: end; }
-    .mine-action-row { display: grid; grid-template-columns: minmax(0, 1fr) auto; gap: 12px; align-items: center; }
+    .mine-action-row { display: grid; grid-template-columns: minmax(0, 1fr) auto auto; gap: 12px; align-items: center; }
     .mine-settings-form { display: grid; gap: 10px; }
     .mine-fee-fields { display: flex; flex-wrap: wrap; gap: 10px; align-items: end; }
     .fee-preview { flex-basis: 100%; color: #9eb3bc; font-size: 12px; font-weight: 700; }
@@ -3276,6 +3284,9 @@ const INDEX_HTML: &str = r#"<!doctype html>
     .toggle-switch.active .toggle-thumb { transform: translateX(20px); background: #d5f55f; }
     .toggle-switch:focus-within .toggle-track { outline: 2px solid #d5f55f; outline-offset: 2px; }
     .toggle-text { min-width: 22px; text-align: right; }
+    .compact-number-field { display: inline-flex; align-items: center; gap: 8px; color: #9fa8ad; font-size: 12px; font-weight: 850; }
+    .compact-number-field input { width: 58px; min-width: 0; border: 1px solid #3a4248; border-radius: 8px; padding: 7px 8px; background: #101215; color: #dce4e7; font: inherit; font-variant-numeric: tabular-nums; }
+    .compact-number-field input:focus { border-color: #d5f55f; outline: 2px solid rgba(213,245,95,.2); outline-offset: 2px; }
     .receive-address { display: grid; gap: 8px; }
     .address-box { border: 1px solid #2f363c; border-radius: 8px; padding: 11px; background: #111316; }
     .panel-head { display: flex; justify-content: space-between; gap: 12px; align-items: center; margin-bottom: 12px; }
@@ -3679,6 +3690,10 @@ const INDEX_HTML: &str = r#"<!doctype html>
                 <input type="checkbox" :checked="powMiningEnabled" @change="setPowMiningEnabled($event.target.checked)">
                 <span class="toggle-track"><span class="toggle-thumb"></span></span>
                 <span class="toggle-text" x-text="powMiningEnabled ? 'On' : 'Off'"></span>
+              </label>
+              <label class="compact-number-field" title="Local PoW worker count">
+                <span>Workers</span>
+                <input type="number" min="1" :max="maxPowMiningWorkers" :value="powMiningWorkers" @change="setPowMiningWorkers($event.target.value)">
               </label>
             </div>
             <div class="fee-preview" x-text="autoPowStatusLabel()"></div>
@@ -5833,9 +5848,11 @@ mod tests {
         assert!(super::INDEX_HTML.contains("aria-label=\"Local mining status\""));
         assert!(super::INDEX_HTML.contains("PoB State"));
         assert!(super::INDEX_HTML.contains("PoW State"));
+        assert!(super::INDEX_HTML.contains("Workers"));
         assert!(super::INDEX_HTML.contains("Selected Finalizer"));
         assert!(app_js.contains("pobStatusLabel()"));
         assert!(app_js.contains("powStatusShortLabel()"));
+        assert!(app_js.contains("setPowMiningWorkers(workers)"));
         assert!(app_js.contains("localMiningMempoolLabel()"));
         assert!(!super::INDEX_HTML.contains("Needs burns"));
     }
@@ -6051,12 +6068,13 @@ mod tests {
         let initial_config = ui_config.lock().await.clone();
         config_store::save(&config_path, &initial_config).expect("initial config should save");
 
-        persist_pow_mining_config(&ui_config, &config_path, true)
+        persist_pow_mining_config(&ui_config, &config_path, true, 4)
             .await
             .unwrap();
         let config = config_store::load_or_create(&config_path).unwrap();
 
         assert!(config.pow_mining_enabled);
+        assert_eq!(config.pow_mining_workers, 4);
     }
 
     #[test]

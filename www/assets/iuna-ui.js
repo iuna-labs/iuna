@@ -68,6 +68,8 @@ window.iunaApp = function iunaApp() {
     burnFeeDraft: "0.0001",
     miningEnabled: false,
     powMiningEnabled: false,
+    powMiningWorkers: 1,
+    maxPowMiningWorkers: 32,
     recoveryVdfTopRankPercent: 50,
     burnAmountDirty: false,
     transferTo: "",
@@ -605,6 +607,9 @@ window.iunaApp = function iunaApp() {
         this.burnFee = status.mining?.automatic_burn_fee ?? this.burnFee;
         this.miningEnabled = status.mining?.automatic ?? this.miningEnabled;
         this.powMiningEnabled = status.mining?.pow_mining_enabled ?? this.powMiningEnabled;
+        this.powMiningWorkers = status.mining?.pow_mining_workers ?? this.powMiningWorkers;
+        this.maxPowMiningWorkers =
+          status.mining?.max_pow_mining_workers ?? this.maxPowMiningWorkers;
         if (!this.burnAmountDirty) {
           this.burnAmountDraft = this.amountLabel(this.burnAmount);
           this.burnFeeDraft = this.amountLabel(this.burnFee);
@@ -1223,11 +1228,31 @@ window.iunaApp = function iunaApp() {
         this.powMiningEnabled = enabled;
         await this.postForm(
           "/api/settings/pow-mining",
-          { enabled },
+          { enabled, workers: this.powMiningWorkers },
           enabled ? "PoW mining turned on" : "PoW mining turned off"
         );
       } catch (error) {
         this.powMiningEnabled = previous;
+        this.showFlash(error.message, "error");
+      }
+    },
+
+    async setPowMiningWorkers(workers) {
+      const previous = this.powMiningWorkers;
+      const parsed = Number.parseInt(workers, 10);
+      const clamped = Math.min(
+        this.maxPowMiningWorkers,
+        Math.max(1, Number.isFinite(parsed) ? parsed : 1)
+      );
+      try {
+        this.powMiningWorkers = clamped;
+        await this.postForm(
+          "/api/settings/pow-mining",
+          { enabled: this.powMiningEnabled, workers: clamped },
+          `PoW workers set to ${clamped}`
+        );
+      } catch (error) {
+        this.powMiningWorkers = previous;
         this.showFlash(error.message, "error");
       }
     },
@@ -1326,16 +1351,18 @@ window.iunaApp = function iunaApp() {
       if (this.status.wallet_locked) return "Wallet locked";
       if (!this.powMiningEnabled) return "Off";
       const status = this.status.mining?.last_auto_pow_mine_status || "";
-      if (status.includes("queued mine action")) return "Queued";
+      if (status.includes("queued")) return "Queued";
       if (status.includes("searched")) return "Searching";
       if (status.includes("waiting")) return "Waiting";
       if (status.includes("failed")) return "Error";
-      return "On";
+      return `${this.powMiningWorkers} worker${this.powMiningWorkers === 1 ? "" : "s"}`;
     },
 
     autoPowStatusLabel() {
       if (!this.powMiningEnabled) return "PoW mining is off";
-      return this.status.mining?.last_auto_pow_mine_status || "Waiting for next automatic PoW mining tick";
+      const status =
+        this.status.mining?.last_auto_pow_mine_status || "Waiting for next automatic PoW mining tick";
+      return `${status} (${this.powMiningWorkers} worker${this.powMiningWorkers === 1 ? "" : "s"})`;
     },
 
     currentFinalizerLabel() {

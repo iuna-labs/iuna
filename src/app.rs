@@ -12,6 +12,9 @@ use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use tokio::sync::Mutex;
 
+use crate::adapters::config_store::{
+    DEFAULT_POW_MINING_WORKERS, MAX_POW_MINING_WORKERS, clamp_pow_mining_workers,
+};
 use crate::domain::{
     Amount, BlindedReveal, BlindedTransaction, Block, BuiltBlindedTransaction, BurnLeaderRank,
     ChainSnapshot, ChainStatus, DEFAULT_FEE_PER_BYTE, DEFAULT_TRANSACTION_FEE, Ledger,
@@ -34,7 +37,7 @@ pub const PEER_MISBEHAVIOR_BAN_SCORE: u32 = 3;
 pub const PEER_MISBEHAVIOR_BAN_MS: u64 = 10 * 60 * 1_000;
 pub const PEER_CLOCK_OFFSET_ACCEPTANCE_MS: i64 = 10 * 60 * 1_000;
 const PEER_CLOCK_OFFSET_STALE_MS: u64 = 20 * 60 * 1_000;
-const AUTO_POW_NONCE_ATTEMPTS_PER_TICK: u64 = 8;
+const AUTO_POW_NONCE_ATTEMPTS_PER_WORKER_TICK: u64 = 100_000;
 const AUTO_PLAINTEXT_BURN_BEFORE_RECOVERY_MS: u64 = 60_000;
 const AUTO_BLOCK_ANCHOR_BURN_AMOUNT: Amount = 1;
 const AUTO_BLOCK_ANCHOR_BURN_FEE: Amount = 0;
@@ -55,6 +58,7 @@ pub struct NodeConfig {
     pub vdf_rounds: u64,
     pub burn_per_block: Amount,
     pub burn_fee: Amount,
+    pub pow_mining_workers: u8,
     pub recovery_vdf_top_rank_percent: u8,
 }
 
@@ -202,6 +206,8 @@ pub struct LaunchProfileStatus {
 pub struct MiningStatus {
     pub automatic: bool,
     pub pow_mining_enabled: bool,
+    pub pow_mining_workers: u8,
+    pub max_pow_mining_workers: u8,
     pub burn_per_block: Amount,
     pub automatic_burn_fee: Amount,
     pub automatic_pow_mine_fee: Amount,
@@ -251,6 +257,7 @@ pub struct NodeCore {
     ledger: Ledger,
     automatic_mining_enabled: bool,
     pow_mining_enabled: bool,
+    pow_mining_workers: u8,
     burn_per_block: Amount,
     burn_fee: Amount,
     recovery_vdf_top_rank_percent: u8,
@@ -278,6 +285,7 @@ impl NodeCore {
             config.burn_per_block,
             config.burn_fee,
         );
+        node.set_pow_mining_workers(config.pow_mining_workers);
         node.set_recovery_vdf_top_rank_percent(config.recovery_vdf_top_rank_percent);
         node
     }
@@ -301,6 +309,7 @@ impl NodeCore {
             automatic_mining_enabled,
             burn_per_block,
             burn_fee,
+            DEFAULT_POW_MINING_WORKERS,
             100,
         )
     }
@@ -333,6 +342,7 @@ impl NodeCore {
             automatic_mining_enabled,
             burn_per_block,
             burn_fee,
+            DEFAULT_POW_MINING_WORKERS,
             100,
         )
     }
@@ -343,6 +353,7 @@ impl NodeCore {
         automatic_mining_enabled: bool,
         burn_per_block: Amount,
         burn_fee: Amount,
+        pow_mining_workers: u8,
         recovery_vdf_top_rank_percent: u8,
     ) -> Self {
         Self {
@@ -350,6 +361,7 @@ impl NodeCore {
             ledger,
             automatic_mining_enabled,
             pow_mining_enabled: false,
+            pow_mining_workers: clamp_pow_mining_workers(pow_mining_workers),
             burn_per_block,
             burn_fee,
             recovery_vdf_top_rank_percent: recovery_vdf_top_rank_percent.min(100),
@@ -656,6 +668,8 @@ impl NodeCore {
             mining: MiningStatus {
                 automatic: self.automatic_mining_enabled,
                 pow_mining_enabled: self.pow_mining_enabled,
+                pow_mining_workers: self.pow_mining_workers,
+                max_pow_mining_workers: MAX_POW_MINING_WORKERS,
                 burn_per_block: self.burn_per_block,
                 automatic_burn_fee: self.burn_fee,
                 automatic_pow_mine_fee: MINE_FINALIZER_FEE,
@@ -763,6 +777,22 @@ impl NodeCore {
 
     pub fn pow_mining_enabled(&self) -> bool {
         self.pow_mining_enabled
+    }
+
+    pub fn set_pow_mining_workers(&mut self, workers: u8) {
+        let workers = clamp_pow_mining_workers(workers);
+        if self.pow_mining_workers != workers {
+            self.pow_mining_workers = workers;
+            self.auto_pow_mine_cursor = None;
+            if self.pow_mining_enabled {
+                self.last_auto_pow_mine_status =
+                    Some("waiting for next automatic PoW mining tick".to_string());
+            }
+        }
+    }
+
+    pub fn pow_mining_workers(&self) -> u8 {
+        self.pow_mining_workers
     }
 
     pub fn set_recovery_vdf_top_rank_percent(&mut self, percent: u8) {
@@ -1562,30 +1592,49 @@ impl NodeCore {
             .as_ref()
             .context("automatic PoW cursor was not initialized")?
             .clone();
-        let outcome = self.wallet_build_ledger()?.search_mine(
-            wallet_address,
-            cursor.salt,
-            cursor.next_nonce,
-            AUTO_POW_NONCE_ATTEMPTS_PER_TICK,
-        )?;
-        let mut searched = outcome.attempts;
+        let budget = AUTO_POW_NONCE_ATTEMPTS_PER_WORKER_TICK
+            .saturating_mul(u64::from(self.pow_mining_workers));
+        let mut remaining = budget;
+        let mut next_nonce = cursor.next_nonce;
+        let mut tick_attempts = 0_u64;
+        let mut queued = 0_u64;
+        let mut first_tx = None;
+        while remaining > 0 {
+            let outcome = self.wallet_build_ledger()?.search_mine(
+                wallet_address.clone(),
+                cursor.salt,
+                next_nonce,
+                remaining,
+            )?;
+            remaining = remaining.saturating_sub(outcome.attempts);
+            tick_attempts = tick_attempts.saturating_add(outcome.attempts);
+            next_nonce = outcome.next_nonce;
+            let Some(tx) = outcome.transaction else {
+                break;
+            };
+            self.submit_public_mine_action(tx.clone())?;
+            queued = queued.saturating_add(1);
+            first_tx.get_or_insert(tx);
+        }
+
+        let mut searched = tick_attempts;
         if let Some(cursor) = &mut self.auto_pow_mine_cursor {
             if cursor.anchor == anchor {
-                cursor.next_nonce = outcome.next_nonce;
-                cursor.searched = cursor.searched.saturating_add(outcome.attempts);
+                cursor.next_nonce = next_nonce;
+                cursor.searched = cursor.searched.saturating_add(tick_attempts);
                 searched = cursor.searched;
             }
         }
-        let Some(tx) = outcome.transaction else {
+        let Some(tx) = first_tx else {
             self.last_auto_pow_mine_status = Some(format!(
                 "searched {searched} PoW nonces for the current tip; no proof yet"
             ));
             return Ok(None);
         };
-        self.submit_public_mine_action(tx.clone())?;
         self.last_auto_pow_mine_anchor = Some(anchor);
         self.last_auto_pow_mine_status = Some(format!(
-            "queued mine action after {searched} PoW nonce attempts for the current tip"
+            "queued {queued} mine action{} after {searched} PoW nonce attempts for the current tip",
+            if queued == 1 { "" } else { "s" }
         ));
         Ok(Some(tx))
     }
@@ -2496,7 +2545,10 @@ mod tests {
         RECOVERY_BLOCK_DELAY_MS, Transaction, VDF_TARGET_BLOCK_MS, Wallet, run_vdf,
     };
 
-    use super::{GossipEnvelope, InMemoryNetwork, NodeConfig, NodeCore};
+    use super::{
+        DEFAULT_POW_MINING_WORKERS, GossipEnvelope, InMemoryNetwork, MAX_POW_MINING_WORKERS,
+        NodeConfig, NodeCore,
+    };
 
     fn wallet_for_address<'a>(wallets: &'a [Wallet], address: &str) -> &'a Wallet {
         wallets
@@ -2534,6 +2586,7 @@ mod tests {
             vdf_rounds: 10,
             burn_per_block: 1,
             burn_fee: 1,
+            pow_mining_workers: 1,
             recovery_vdf_top_rank_percent: 100,
         });
 
@@ -2569,7 +2622,6 @@ mod tests {
 
         node.set_pow_mining_enabled(true);
         let first = node.prepare_automatic_mining(2);
-        assert!(node.ledger().pending().is_empty());
         assert!(node.ledger().pending_blinded_transactions().len() <= 1);
         let first = std::iter::once(first)
             .chain((3..10_000).map(|timestamp| node.prepare_automatic_mining(timestamp)))
@@ -2591,7 +2643,8 @@ mod tests {
             *difficulty_bits,
             node.ledger().current_mine_difficulty_bits()
         );
-        assert_eq!(node.ledger().pending().len(), 1);
+        let first_pending = node.ledger().pending().len();
+        assert!(first_pending >= 1);
         assert!(node.ledger().pending_blinded_transactions().is_empty());
         assert!(node
             .drain_outbox()
@@ -2603,7 +2656,7 @@ mod tests {
                 .last_auto_pow_mine_status
                 .as_deref()
                 .unwrap_or_default()
-                .contains("queued mine action after")
+                .contains("queued")
         );
 
         let second = (10_000..20_000)
@@ -2614,7 +2667,7 @@ mod tests {
             second.pow_mined.as_ref().unwrap().signature(),
             first_mine.signature()
         );
-        assert_eq!(node.ledger().pending().len(), 2);
+        assert!(node.ledger().pending().len() > first_pending);
         assert!(node.ledger().pending_blinded_transactions().is_empty());
     }
 
@@ -2629,6 +2682,7 @@ mod tests {
             vdf_rounds: 10,
             burn_per_block: 0,
             burn_fee: 0,
+            pow_mining_workers: 1,
             recovery_vdf_top_rank_percent: 100,
         });
 
@@ -2661,6 +2715,7 @@ mod tests {
             vdf_rounds: 10,
             burn_per_block: 0,
             burn_fee: 0,
+            pow_mining_workers: 1,
             recovery_vdf_top_rank_percent: 100,
         });
 
@@ -2675,6 +2730,34 @@ mod tests {
         assert!(!node.pow_mining_enabled());
         assert!(node.auto_pow_mine_cursor.is_none());
         assert!(node.status().mining.last_auto_pow_mine_status.is_none());
+    }
+
+    #[test]
+    fn automatic_pow_mining_workers_are_clamped_and_reported() {
+        let wallet = Wallet::from_seed("automatic-pow-workers-wallet");
+        let mut node = NodeCore::new(NodeConfig {
+            wallet,
+            genesis_allocations: BTreeMap::new(),
+            vdf_rounds: 10,
+            burn_per_block: 0,
+            burn_fee: 0,
+            pow_mining_workers: 99,
+            recovery_vdf_top_rank_percent: 100,
+        });
+
+        assert_eq!(node.pow_mining_workers(), MAX_POW_MINING_WORKERS);
+        assert_eq!(
+            node.status().mining.max_pow_mining_workers,
+            MAX_POW_MINING_WORKERS
+        );
+
+        node.set_pow_mining_workers(0);
+
+        assert_eq!(node.pow_mining_workers(), DEFAULT_POW_MINING_WORKERS);
+        assert_eq!(
+            node.status().mining.pow_mining_workers,
+            DEFAULT_POW_MINING_WORKERS
+        );
     }
 
     #[test]
@@ -2741,6 +2824,7 @@ mod tests {
             vdf_rounds: 10,
             burn_per_block: 0,
             burn_fee: 0,
+            pow_mining_workers: 1,
             recovery_vdf_top_rank_percent: 100,
         });
 
@@ -2816,6 +2900,7 @@ mod tests {
             vdf_rounds: 10,
             burn_per_block: 0,
             burn_fee: 0,
+            pow_mining_workers: 1,
             recovery_vdf_top_rank_percent: 100,
         });
 
@@ -2843,6 +2928,7 @@ mod tests {
             vdf_rounds: 1,
             burn_per_block: 0,
             burn_fee: 0,
+            pow_mining_workers: 1,
             recovery_vdf_top_rank_percent: 100,
         });
 

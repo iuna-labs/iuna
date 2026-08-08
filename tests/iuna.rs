@@ -29,6 +29,7 @@ fn node(_network_key: &str, wallet: Wallet, allocations: BTreeMap<String, Amount
         vdf_rounds: 25,
         burn_per_block: DEFAULT_BURN_PER_BLOCK,
         burn_fee: 1,
+        pow_mining_workers: 1,
         recovery_vdf_top_rank_percent: 100,
     })
 }
@@ -946,16 +947,19 @@ fn pow_only_node_gossips_mine_action_to_pob_only_finalizer() {
         alice_node.receive(envelope).unwrap();
     }
 
-    assert_eq!(alice_node.ledger().pending().len(), 1);
+    assert!(!alice_node.ledger().pending().is_empty());
     assert!(
         alice_node
             .ledger()
             .pending_blinded_transactions()
             .is_empty()
     );
-    assert_eq!(
-        alice_node.ledger().pending()[0].signature(),
-        mine.signature()
+    assert!(
+        alice_node
+            .ledger()
+            .pending()
+            .iter()
+            .any(|tx| tx.signature() == mine.signature())
     );
 }
 
@@ -1828,6 +1832,7 @@ fn mined_block_gossip_does_not_include_full_chain_snapshot() {
         vdf_rounds: 10,
         burn_per_block: 1,
         burn_fee: 1,
+        pow_mining_workers: 1,
         recovery_vdf_top_rank_percent: 100,
     });
 

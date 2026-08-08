@@ -17,6 +17,8 @@ const LEGACY_AMOUNT_UNIT_PRE_RENAME: &str = concat!("micro", "l", "uun");
 pub const DEFAULT_BURN_AMOUNT: Amount = MICRO_IUNA / 10_000;
 pub const DEFAULT_BURN_FEE: Amount = DEFAULT_BURN_AMOUNT;
 pub const DEFAULT_RECOVERY_VDF_TOP_RANK_PERCENT: u8 = 50;
+pub const DEFAULT_POW_MINING_WORKERS: u8 = 1;
+pub const MAX_POW_MINING_WORKERS: u8 = 32;
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 pub struct UiConfig {
@@ -25,6 +27,7 @@ pub struct UiConfig {
     pub auth_password_hash: Option<String>,
     pub mining_enabled: bool,
     pub pow_mining_enabled: bool,
+    pub pow_mining_workers: u8,
     pub burn_per_block: Amount,
     pub burn_fee: Amount,
     pub recovery_vdf_top_rank_percent: u8,
@@ -41,6 +44,7 @@ impl Default for UiConfig {
             auth_password_hash: None,
             mining_enabled: false,
             pow_mining_enabled: false,
+            pow_mining_workers: DEFAULT_POW_MINING_WORKERS,
             burn_per_block: DEFAULT_BURN_AMOUNT,
             burn_fee: DEFAULT_BURN_FEE,
             recovery_vdf_top_rank_percent: DEFAULT_RECOVERY_VDF_TOP_RANK_PERCENT,
@@ -64,6 +68,8 @@ struct ConfigFile {
     mining_enabled: Option<bool>,
     #[serde(default)]
     pow_mining_enabled: bool,
+    #[serde(default = "default_pow_mining_workers")]
+    pow_mining_workers: u8,
     #[serde(default)]
     burn_per_block: Amount,
     #[serde(default)]
@@ -103,6 +109,7 @@ pub fn save(path: &Path, config: &UiConfig) -> Result<()> {
         auth_password_hash: config.auth_password_hash.clone(),
         mining_enabled: Some(config.mining_enabled),
         pow_mining_enabled: config.pow_mining_enabled,
+        pow_mining_workers: clamp_pow_mining_workers(config.pow_mining_workers),
         burn_per_block: config.burn_per_block,
         burn_fee: Some(config.burn_fee),
         recovery_vdf_top_rank_percent: Some(config.recovery_vdf_top_rank_percent),
@@ -152,6 +159,7 @@ fn load(path: &Path) -> Result<UiConfig> {
         auth_password_hash: stored.auth_password_hash,
         mining_enabled: stored.mining_enabled.unwrap_or(stored.burn_per_block > 0),
         pow_mining_enabled: stored.pow_mining_enabled,
+        pow_mining_workers: clamp_pow_mining_workers(stored.pow_mining_workers),
         burn_per_block: stored.burn_per_block.saturating_mul(scale),
         burn_fee: stored
             .burn_fee
@@ -166,6 +174,14 @@ fn load(path: &Path) -> Result<UiConfig> {
         p2p_announce_addr: stored.p2p_announce_addr,
         peers: stored.peers,
     })
+}
+
+pub fn clamp_pow_mining_workers(workers: u8) -> u8 {
+    workers.clamp(1, MAX_POW_MINING_WORKERS)
+}
+
+fn default_pow_mining_workers() -> u8 {
+    DEFAULT_POW_MINING_WORKERS
 }
 
 fn create_config_file(path: &Path) -> Result<File> {
@@ -203,6 +219,7 @@ mod tests {
         assert!(stored.contains("\"auth_password_hash\": null"));
         assert!(stored.contains("\"mining_enabled\": false"));
         assert!(stored.contains("\"pow_mining_enabled\": false"));
+        assert!(stored.contains("\"pow_mining_workers\": 1"));
         assert!(stored.contains("\"burn_per_block\": 100"));
         assert!(stored.contains("\"burn_fee\": 100"));
         assert!(!stored.contains("\"pow_mine_fee\""));
@@ -225,6 +242,7 @@ mod tests {
                 auth_password_hash: Some("auth-hash".to_string()),
                 mining_enabled: true,
                 pow_mining_enabled: true,
+                pow_mining_workers: 4,
                 burn_per_block: 50 * MICRO_IUNA,
                 burn_fee: 3 * MICRO_IUNA,
                 keep_track_of_metrics: true,
@@ -241,6 +259,7 @@ mod tests {
         assert_eq!(config.auth_password_hash.as_deref(), Some("auth-hash"));
         assert!(config.mining_enabled);
         assert!(config.pow_mining_enabled);
+        assert_eq!(config.pow_mining_workers, 4);
         assert_eq!(config.burn_per_block, 50 * MICRO_IUNA);
         assert_eq!(config.burn_fee, 3 * MICRO_IUNA);
         assert!(config.keep_track_of_metrics);
@@ -284,6 +303,7 @@ mod tests {
         assert!(config.setup_complete);
         assert!(!config.mining_enabled);
         assert!(!config.pow_mining_enabled);
+        assert_eq!(config.pow_mining_workers, 1);
         assert_eq!(config.burn_per_block, 0);
         assert_eq!(config.burn_fee, DEFAULT_BURN_FEE);
         assert!(!config.keep_track_of_metrics);
