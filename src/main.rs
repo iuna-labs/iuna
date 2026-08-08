@@ -985,17 +985,14 @@ mod tests {
 
         let first = node.automatic_mine_once(1_000);
         let second = node.automatic_mine_once(2_000);
+        let third = node.automatic_mine_once(3_000);
 
-        assert_eq!(
-            first.burned.as_ref().map(|tx| tx.amount()),
-            Some(GENESIS_INITIAL_BURN_PER_BLOCK)
-        );
+        assert_eq!(first.burned.as_ref().map(|tx| tx.amount()), Some(1));
         assert!(first.block.is_some(), "{first:?}");
-        assert_eq!(
-            second.burned.as_ref().map(|tx| tx.amount()),
-            Some(GENESIS_INITIAL_BURN_PER_BLOCK)
-        );
+        assert_eq!(second.burned.as_ref().map(|tx| tx.amount()), Some(1));
         assert!(second.block.is_some(), "{second:?}");
+        assert_eq!(third.burned.as_ref().map(|tx| tx.amount()), Some(1));
+        assert!(third.block.is_some(), "{third:?}");
         assert!(
             second.skipped_reason.as_deref().is_none_or(|reason| {
                 !reason.contains("block must include at least one burn transaction")
@@ -1004,7 +1001,7 @@ mod tests {
         );
         assert!(
             node.ledger().balance_of(wallet.address())
-                >= BLOCK_REWARD - 2 * (GENESIS_INITIAL_BURN_PER_BLOCK + GENESIS_INITIAL_BURN_FEE)
+                >= BLOCK_REWARD - 3 * (GENESIS_INITIAL_BURN_PER_BLOCK + GENESIS_INITIAL_BURN_FEE)
         );
     }
 

@@ -2201,6 +2201,10 @@ impl Ledger {
         self.pending_blinded.clear();
     }
 
+    pub(crate) fn clear_pending_transactions(&mut self) {
+        self.pending.clear();
+    }
+
     pub fn build_reveal_bundle(&self, wallet: &Wallet) -> Result<Option<RevealBundle>> {
         let height = self.tip().height + 1;
         let prev_hash = self.tip().hash.clone();
@@ -2639,6 +2643,35 @@ impl Ledger {
             .checked_add(fee)
             .context("burn amount plus fee overflows")?;
         let (inputs, input_total) = self.select_inputs(wallet.address(), required)?;
+        self.build_burn_from_inputs(wallet, amount, fee, inputs, input_total)
+    }
+
+    pub fn build_burn_with_inputs(
+        &self,
+        wallet: &Wallet,
+        amount: Amount,
+        fee: Amount,
+        outpoints: &[OutPoint],
+    ) -> Result<Transaction> {
+        let required = amount
+            .checked_add(fee)
+            .context("burn amount plus fee overflows")?;
+        let (inputs, input_total) =
+            self.select_inputs_by_outpoint(wallet.address(), required, outpoints)?;
+        self.build_burn_from_inputs(wallet, amount, fee, inputs, input_total)
+    }
+
+    fn build_burn_from_inputs(
+        &self,
+        wallet: &Wallet,
+        amount: Amount,
+        fee: Amount,
+        inputs: Vec<UnsignedTxInput>,
+        input_total: Amount,
+    ) -> Result<Transaction> {
+        let required = amount
+            .checked_add(fee)
+            .context("burn amount plus fee overflows")?;
         let change_amount = input_total
             .checked_sub(required)
             .context("selected inputs do not cover burn")?;
@@ -2993,6 +3026,21 @@ impl Ledger {
         timestamp_ms: u64,
         reveal_bundles: Vec<RevealBundle>,
     ) -> Result<PreparedBlock> {
+        self.prepare_next_block_with_required_burn_and_reveal_bundles(
+            miner,
+            timestamp_ms,
+            reveal_bundles,
+            None,
+        )
+    }
+
+    pub(crate) fn prepare_next_block_with_required_burn_and_reveal_bundles(
+        &self,
+        miner: &str,
+        timestamp_ms: u64,
+        reveal_bundles: Vec<RevealBundle>,
+        required_burn_signature: Option<&str>,
+    ) -> Result<PreparedBlock> {
         let height = self.tip().height + 1;
         let Some((finalizer_rank, leader_ticket)) = self.finalizer_ticket_for_miner(height, miner)
         else {
@@ -3004,7 +3052,7 @@ impl Ledger {
 
         let reveal_bundles = self.validate_next_block_reveal_bundles(reveal_bundles)?;
         let reveal_bundle_section = self.reveal_bundle_section_from_bundles(reveal_bundles);
-        let selection = self.select_block_transactions()?;
+        let selection = self.select_block_transactions(required_burn_signature)?;
         ensure_block_has_burn(&selection.transactions)?;
 
         let tip = self.tip();
@@ -3049,6 +3097,21 @@ impl Ledger {
         timestamp_ms: u64,
         reveal_bundles: Vec<RevealBundle>,
     ) -> Result<PreparedBlock> {
+        self.prepare_recovery_block_with_required_burn_and_reveal_bundles(
+            miner,
+            timestamp_ms,
+            reveal_bundles,
+            None,
+        )
+    }
+
+    pub(crate) fn prepare_recovery_block_with_required_burn_and_reveal_bundles(
+        &self,
+        miner: &str,
+        timestamp_ms: u64,
+        reveal_bundles: Vec<RevealBundle>,
+        required_burn_signature: Option<&str>,
+    ) -> Result<PreparedBlock> {
         let height = self.tip().height + 1;
         let min_timestamp = self.recovery_block_min_timestamp();
         if timestamp_ms < min_timestamp {
@@ -3057,7 +3120,7 @@ impl Ledger {
 
         let reveal_bundles = self.validate_next_block_reveal_bundles(reveal_bundles)?;
         let reveal_bundle_section = self.reveal_bundle_section_from_bundles(reveal_bundles);
-        let selection = self.select_recovery_block_transactions(miner)?;
+        let selection = self.select_recovery_block_transactions(miner, required_burn_signature)?;
         ensure_block_has_burn(&selection.transactions)?;
         ensure_block_has_burn_from(&selection.transactions, miner)?;
 
@@ -3457,23 +3520,62 @@ impl Ledger {
         valid
     }
 
-    fn select_block_transactions(&self) -> Result<BlockSelection> {
-        self.select_block_transactions_with_required_burn_owner(None)
+    fn select_block_transactions(
+        &self,
+        required_burn_signature: Option<&str>,
+    ) -> Result<BlockSelection> {
+        self.select_block_transactions_with_required_burn_owner(None, required_burn_signature)
     }
 
-    fn select_recovery_block_transactions(&self, miner: &str) -> Result<BlockSelection> {
-        self.select_block_transactions_with_required_burn_owner(Some(miner))
+    fn select_recovery_block_transactions(
+        &self,
+        miner: &str,
+        required_burn_signature: Option<&str>,
+    ) -> Result<BlockSelection> {
+        self.select_block_transactions_with_required_burn_owner(
+            Some(miner),
+            required_burn_signature,
+        )
     }
 
     fn select_block_transactions_with_required_burn_owner(
         &self,
         required_burn_owner: Option<&str>,
+        required_burn_signature: Option<&str>,
     ) -> Result<BlockSelection> {
         let mut utxos = self.utxos.clone();
         let mut remaining = self.valid_pending_transactions();
         let mut remaining_blinded = self.valid_pending_blinded_transactions();
         let mut selected = Vec::new();
         let mut selected_blinded = Vec::new();
+
+        if let Some(signature) = required_burn_signature {
+            let index = remaining
+                .iter()
+                .position(|transaction| transaction.signature() == signature)
+                .with_context(|| format!("required burn {signature} is not pending"))?;
+            let tx = remaining.remove(index);
+            if !tx.is_burn() {
+                bail!("required block anchor must be a burn transaction");
+            }
+            if let Some(owner) = required_burn_owner {
+                if tx.sender() != owner {
+                    bail!("required block anchor burn must be from the recovery finalizer");
+                }
+            }
+            let candidate = BlockSelection {
+                transactions: vec![tx.clone()],
+                blinded_transactions: selected_blinded.clone(),
+            };
+            if estimated_block_selection_size_bytes(&candidate, required_burn_owner.is_some())?
+                > self.launch_profile.max_block_bytes
+            {
+                bail!("required block anchor burn does not fit in the block");
+            }
+            apply_transaction(&tx, &mut utxos)
+                .context("required block anchor burn is not spendable")?;
+            selected.push(tx);
+        }
 
         let needs_first_burn = !selected.iter().any(Transaction::is_burn);
         let needs_owner_burn = required_burn_owner.is_some_and(|owner| {
@@ -3618,7 +3720,7 @@ impl Ledger {
                 .context("selected input total overflows")?;
         }
         if total < amount {
-            bail!("selected UTXOs do not cover transfer amount plus fee");
+            bail!("selected UTXOs do not cover amount plus fee");
         }
         Ok((selected, total))
     }
@@ -6653,6 +6755,57 @@ mod tests {
     }
 
     #[test]
+    fn required_anchor_burn_is_selected_before_higher_fee_burns_when_block_is_full() {
+        let wallet = Wallet::from_seed("required-anchor-priority-wallet");
+        let mut allocations = BTreeMap::new();
+        allocations.insert(wallet.address().to_string(), 10 * MICRO_IUNA);
+        let mut ledger = Ledger::new_with_genesis_burns(
+            allocations,
+            vec![GenesisBurn::new(wallet.address(), MICRO_IUNA)],
+            1,
+        )
+        .unwrap();
+        let high_fee_outpoint = named_test_outpoint("required-anchor-priority-high-fee");
+        let anchor_outpoint = named_test_outpoint("required-anchor-priority-anchor");
+        ledger.utxos.insert(
+            high_fee_outpoint.clone(),
+            TxOutput {
+                address: wallet.address().to_string(),
+                amount: 3,
+            },
+        );
+        ledger.utxos.insert(
+            anchor_outpoint.clone(),
+            TxOutput {
+                address: wallet.address().to_string(),
+                amount: 2,
+            },
+        );
+        let high_fee_burn = ledger
+            .build_burn_with_inputs(&wallet, 1, 1, &[high_fee_outpoint])
+            .unwrap();
+        let anchor_burn = ledger
+            .build_burn_with_inputs(&wallet, 1, 0, &[anchor_outpoint])
+            .unwrap();
+        ledger.submit_transaction(high_fee_burn).unwrap();
+        ledger.submit_transaction(anchor_burn.clone()).unwrap();
+        ledger.launch_profile.max_block_transactions = 1;
+
+        let work = ledger
+            .prepare_next_block_with_required_burn_and_reveal_bundles(
+                wallet.address(),
+                1,
+                Vec::new(),
+                Some(anchor_burn.signature()),
+            )
+            .unwrap();
+        let block = work.finish(&wallet, "preverified-vdf".to_string());
+
+        assert_eq!(block.transactions.len(), 1);
+        assert_eq!(block.transactions[0].signature(), anchor_burn.signature());
+    }
+
+    #[test]
     fn late_ticket_vdf_completion_is_visible_to_retarget() {
         let wallet = Wallet::from_seed("late-ticket-vdf-wallet");
         let mut allocations = BTreeMap::new();
@@ -6808,6 +6961,43 @@ mod tests {
         let balances = pending_balances(&ledger);
         assert_eq!(balances.get(bob.address()).copied(), Some(2));
         assert_eq!(balances.get(alice.address()).copied(), Some(7));
+    }
+
+    #[test]
+    fn burn_can_spend_selected_utxos_when_they_cover_amount_and_fee() {
+        let alice = Wallet::from_seed("selected-burn-utxos-alice");
+        let mut ledger = ledger_with_wallet_utxos(&alice, &[2, 3, 5]);
+        let selected = vec![test_utxo_outpoint(1)];
+
+        let tx = ledger
+            .build_burn_with_inputs(&alice, 1, 1, &selected)
+            .unwrap();
+
+        let Transaction::Burn {
+            inputs,
+            change,
+            amount,
+            fee,
+            ..
+        } = &tx
+        else {
+            panic!("expected burn");
+        };
+        assert_eq!(*amount, 1);
+        assert_eq!(*fee, 1);
+        assert_eq!(inputs.len(), 1);
+        assert_eq!(inputs[0].outpoint, selected[0]);
+        assert_eq!(
+            change,
+            &[TxOutput {
+                address: alice.address().to_string(),
+                amount: 1
+            }]
+        );
+
+        ledger.submit_transaction(tx).unwrap();
+        let balances = pending_balances(&ledger);
+        assert_eq!(balances.get(alice.address()).copied(), Some(8));
     }
 
     #[test]

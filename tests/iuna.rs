@@ -225,16 +225,10 @@ fn starter_node_waits_for_a_burn_before_vdf_work() {
     let mut node = starter_node(alice.clone());
 
     let outcome = node.automatic_mine_once(1);
-    assert!(outcome.burned.is_none());
-    assert!(outcome.block.is_none());
-    assert!(
-        outcome
-            .skipped_reason
-            .as_deref()
-            .is_some_and(|reason| reason.contains("at least one burn"))
-    );
-    assert_eq!(node.ledger().status().height, 0);
-    assert_eq!(node.ledger().balance_of(alice.address()), BLOCK_REWARD);
+    assert_eq!(outcome.burned.as_ref().map(|tx| tx.amount()), Some(1));
+    assert!(outcome.block.is_some(), "{outcome:?}");
+    assert_eq!(node.ledger().status().height, 1);
+    assert!(node.ledger().balance_of(alice.address()) < BLOCK_REWARD);
 }
 
 #[test]
@@ -610,29 +604,40 @@ fn block_hash_is_bound_to_block_contents() {
 #[test]
 fn automatic_mining_burns_configured_amount_once_per_height() {
     let alice = Wallet::from_seed("alice");
+    let bob = Wallet::from_seed("auto-once-leader");
     let mut allocations = BTreeMap::new();
     allocations.insert(alice.address().to_string(), iuna(1_000));
-
-    let mut node = NodeCore::new(NodeConfig {
-        wallet: alice.clone(),
-        genesis_allocations: allocations,
-        vdf_rounds: 10,
-        burn_per_block: iuna(25),
-        burn_fee: DEFAULT_FEE_PER_BYTE,
-        recovery_vdf_top_rank_percent: 100,
-    });
+    allocations.insert(bob.address().to_string(), MICRO_IUNA);
+    let ledger = Ledger::new_with_genesis_burns(
+        allocations,
+        vec![GenesisBurn::new(bob.address(), MICRO_IUNA)],
+        10,
+    )
+    .unwrap();
+    assert_eq!(
+        ledger.expected_leader_for_next_block().as_deref(),
+        Some(bob.address())
+    );
+    let mut node = NodeCore::from_ledger_with_burn_fee_and_enabled(
+        alice.clone(),
+        ledger,
+        true,
+        iuna(25),
+        DEFAULT_FEE_PER_BYTE,
+    );
 
     let first = node.automatic_mine_once(1);
     assert!(first.burned.is_some());
-    assert!(first.block.is_some());
-    assert_eq!(node.ledger().chain().len(), 2);
-    assert_eq!(node.ledger().balance_of(alice.address()), iuna(975));
-
-    let second = node.automatic_mine_once(2);
-    assert!(second.burned.is_some());
-    let burned = second.burned.as_ref().unwrap();
+    let burned = first.burned.as_ref().unwrap();
     assert_eq!(burned.amount(), iuna(25));
     assert!(burned.fee() > burned.economic_size_bytes() as u64 * DEFAULT_FEE_PER_BYTE);
+    assert!(first.block.is_none());
+    assert_eq!(node.ledger().pending_blinded_transactions().len(), 1);
+
+    let second = node.automatic_mine_once(2);
+    assert!(second.burned.is_none());
+    assert!(second.block.is_none());
+    assert_eq!(node.ledger().pending_blinded_transactions().len(), 1);
 }
 
 #[test]
@@ -694,73 +699,106 @@ fn automatic_burn_status_shows_configured_fee() {
 #[test]
 fn automatic_mining_uses_configured_burn_fee() {
     let alice = Wallet::from_seed("auto-fee-burn-alice");
+    let bob = Wallet::from_seed("auto-fee-burn-leader");
     let mut allocations = BTreeMap::new();
     allocations.insert(alice.address().to_string(), MICRO_IUNA);
-    let mut node = node("alice", alice, allocations);
+    allocations.insert(bob.address().to_string(), MICRO_IUNA);
+    let ledger = Ledger::new_with_genesis_burns(
+        allocations,
+        vec![GenesisBurn::new(bob.address(), MICRO_IUNA)],
+        25,
+    )
+    .unwrap();
+    assert_eq!(
+        ledger.expected_leader_for_next_block().as_deref(),
+        Some(bob.address())
+    );
+    let mut node = NodeCore::from_ledger_with_burn_fee_and_enabled(alice, ledger, true, 50, 3);
 
-    let burned = node.set_automatic_burn(50, 3).unwrap().unwrap();
+    let outcome = node.automatic_mine_once(1);
+    let burned = outcome.burned.as_ref().unwrap();
     assert_eq!(burned.amount(), 50);
     assert!(burned.fee() > burned.economic_size_bytes() as u64 * 3);
+    assert!(outcome.block.is_none());
+    assert_eq!(node.ledger().pending_blinded_transactions().len(), 1);
 }
 
 #[test]
 fn automatic_mining_caps_burn_to_spendable_balance_after_fee() {
     let alice = Wallet::from_seed("auto-burn-cap-alice");
+    let bob = Wallet::from_seed("auto-burn-cap-leader");
     let mut allocations = BTreeMap::new();
     allocations.insert(alice.address().to_string(), BLOCK_REWARD);
-    let planning_node = NodeCore::new(NodeConfig {
-        wallet: alice.clone(),
-        genesis_allocations: allocations.clone(),
-        vdf_rounds: 10,
-        burn_per_block: BLOCK_REWARD + iuna(50),
-        burn_fee: DEFAULT_FEE_PER_BYTE,
-        recovery_vdf_top_rank_percent: 100,
-    });
-    let mut node = NodeCore::new(NodeConfig {
-        wallet: alice.clone(),
-        genesis_allocations: allocations,
-        vdf_rounds: 10,
-        burn_per_block: BLOCK_REWARD + iuna(50),
-        burn_fee: DEFAULT_FEE_PER_BYTE,
-        recovery_vdf_top_rank_percent: 100,
-    });
+    allocations.insert(bob.address().to_string(), MICRO_IUNA);
+    let ledger = Ledger::new_with_genesis_burns(
+        allocations,
+        vec![GenesisBurn::new(bob.address(), MICRO_IUNA)],
+        10,
+    )
+    .unwrap();
+    assert_eq!(
+        ledger.expected_leader_for_next_block().as_deref(),
+        Some(bob.address())
+    );
+    let planning_node = NodeCore::from_ledger_with_burn_fee_and_enabled(
+        alice.clone(),
+        ledger.clone(),
+        true,
+        BLOCK_REWARD + iuna(50),
+        DEFAULT_FEE_PER_BYTE,
+    );
+    let mut node = NodeCore::from_ledger_with_burn_fee_and_enabled(
+        alice.clone(),
+        ledger,
+        true,
+        BLOCK_REWARD + iuna(50),
+        DEFAULT_FEE_PER_BYTE,
+    );
 
     let outcome = node.automatic_mine_once(1);
 
     let burned = outcome.burned.as_ref().unwrap();
-    let unspent = BLOCK_REWARD - burned.amount() - burned.fee();
     let next_amount = burned.amount() + 1;
     if let Ok(next_estimate) = planning_node.estimate_burn_fee(next_amount, DEFAULT_FEE_PER_BYTE) {
         assert!(next_amount + next_estimate.fee > BLOCK_REWARD);
     }
     assert!(burned.fee() > burned.economic_size_bytes() as u64 * DEFAULT_FEE_PER_BYTE);
-    assert!(outcome.block.is_some());
-    assert_eq!(
-        node.ledger().balance_of(alice.address()),
-        burned.fee() + unspent
-    );
+    assert!(outcome.block.is_none());
+    assert_eq!(node.ledger().pending_blinded_transactions().len(), 1);
 }
 
 #[test]
 fn automatic_mining_preserves_configured_burn_when_only_fee_is_short() {
     let alice = Wallet::from_seed("auto-burn-exact-target-alice");
+    let bob = Wallet::from_seed("auto-burn-exact-target-leader");
     let mut allocations = BTreeMap::new();
     allocations.insert(alice.address().to_string(), MICRO_IUNA);
-    let mut node = NodeCore::new(NodeConfig {
-        wallet: alice.clone(),
-        genesis_allocations: allocations,
-        vdf_rounds: 10,
-        burn_per_block: MICRO_IUNA,
-        burn_fee: DEFAULT_FEE_PER_BYTE,
-        recovery_vdf_top_rank_percent: 100,
-    });
+    allocations.insert(bob.address().to_string(), MICRO_IUNA);
+    let ledger = Ledger::new_with_genesis_burns(
+        allocations,
+        vec![GenesisBurn::new(bob.address(), MICRO_IUNA)],
+        10,
+    )
+    .unwrap();
+    assert_eq!(
+        ledger.expected_leader_for_next_block().as_deref(),
+        Some(bob.address())
+    );
+    let mut node = NodeCore::from_ledger_with_burn_fee_and_enabled(
+        alice.clone(),
+        ledger,
+        true,
+        MICRO_IUNA,
+        DEFAULT_FEE_PER_BYTE,
+    );
 
     let outcome = node.automatic_mine_once(1);
 
     let burned = outcome.burned.as_ref().unwrap();
     assert_eq!(burned.amount(), MICRO_IUNA);
     assert_eq!(burned.fee(), 0);
-    assert!(outcome.block.is_some());
+    assert!(outcome.block.is_none());
+    assert_eq!(node.ledger().pending_blinded_transactions().len(), 1);
 }
 
 #[test]

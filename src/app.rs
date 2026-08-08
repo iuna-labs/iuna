@@ -36,6 +36,8 @@ pub const PEER_CLOCK_OFFSET_ACCEPTANCE_MS: i64 = 10 * 60 * 1_000;
 const PEER_CLOCK_OFFSET_STALE_MS: u64 = 20 * 60 * 1_000;
 const AUTO_POW_NONCE_ATTEMPTS_PER_TICK: u64 = 8;
 const AUTO_PLAINTEXT_BURN_BEFORE_RECOVERY_MS: u64 = 60_000;
+const AUTO_BLOCK_ANCHOR_BURN_AMOUNT: Amount = 1;
+const AUTO_BLOCK_ANCHOR_BURN_FEE: Amount = 0;
 static DEBUG_LOGGING: AtomicBool = AtomicBool::new(false);
 
 pub fn set_debug_logging(enabled: bool) {
@@ -253,6 +255,7 @@ pub struct NodeCore {
     burn_fee: Amount,
     recovery_vdf_top_rank_percent: u8,
     last_auto_burn_height: Option<u64>,
+    last_auto_anchor_burn_height: Option<u64>,
     last_auto_pow_mine_anchor: Option<String>,
     last_auto_pow_mine_status: Option<String>,
     auto_pow_mine_cursor: Option<AutoPowMineCursor>,
@@ -351,6 +354,7 @@ impl NodeCore {
             burn_fee,
             recovery_vdf_top_rank_percent: recovery_vdf_top_rank_percent.min(100),
             last_auto_burn_height: None,
+            last_auto_anchor_burn_height: None,
             last_auto_pow_mine_anchor: None,
             last_auto_pow_mine_status: None,
             auto_pow_mine_cursor: None,
@@ -376,6 +380,7 @@ impl NodeCore {
     pub fn replace_wallet(&mut self, wallet: Wallet) {
         self.wallet = NodeWallet::Unlocked(wallet);
         self.last_auto_burn_height = None;
+        self.last_auto_anchor_burn_height = None;
         self.last_auto_pow_mine_anchor = None;
         self.last_auto_pow_mine_status = None;
         self.auto_pow_mine_cursor = None;
@@ -739,6 +744,7 @@ impl NodeCore {
         self.burn_fee = fee;
         if was_disabled && enabled && amount > 0 {
             self.last_auto_burn_height = None;
+            self.last_auto_anchor_burn_height = None;
         }
         self.prepare_automatic_burn(now_ms())
     }
@@ -1264,6 +1270,7 @@ impl NodeCore {
     fn wallet_anchor_build_ledger(&self) -> Result<Ledger> {
         let mut ledger = self.ledger.clone();
         self.reserve_local_block_anchor_inputs(&mut ledger)?;
+        ledger.clear_pending_transactions();
         ledger.clear_pending_blinded_transactions();
         Ok(ledger)
     }
@@ -1584,42 +1591,78 @@ impl NodeCore {
         if !self.automatic_mining_enabled {
             return Ok(None);
         }
+        let anchor_burn = self.prepare_automatic_anchor_burn(timestamp_ms)?;
         if self.burn_per_block == 0 {
             self.last_auto_burn_height = Some(current_height);
-            return Ok(None);
+            return Ok(anchor_burn);
         }
         if self.last_auto_burn_height == Some(current_height) {
-            return Ok(None);
+            return Ok(anchor_burn);
         }
 
         let fee_per_byte = self.burn_fee;
         let balance = self.ledger.balance_of(self.wallet.address());
-        let needs_plaintext_anchor = self.automatic_burn_needs_plaintext_anchor(timestamp_ms);
-        let spendable_best = match self.wallet_build_ledger() {
-            Ok(ledger) => self.best_automatic_burn_on_ledger(&ledger, fee_per_byte, balance),
-            Err(error) if needs_plaintext_anchor => {
-                let _ = error;
-                None
-            }
-            Err(error) => return Err(error),
-        };
-        let best = if spendable_best.is_none() && needs_plaintext_anchor {
-            let anchor_ledger = self.wallet_anchor_build_ledger()?;
-            self.best_automatic_burn_on_ledger(&anchor_ledger, fee_per_byte, balance)
-        } else {
-            spendable_best
-        };
+        let ledger = self.wallet_build_ledger()?;
+        let best = self.best_automatic_burn_on_ledger(&ledger, fee_per_byte, balance);
         let Some(tx) = best else {
             self.last_auto_burn_height = Some(current_height);
-            return Ok(None);
+            return Ok(anchor_burn);
         };
         let burn = tx.payload.clone();
-        if needs_plaintext_anchor {
-            self.local_block_anchor_burn = Some((current_height, burn.clone()));
-        } else {
-            self.submit_owned_blinded_transaction(tx)?;
-        }
+        self.submit_owned_blinded_transaction(tx)?;
         self.last_auto_burn_height = Some(current_height);
+        Ok(Some(burn))
+    }
+
+    fn prepare_automatic_anchor_burn(&mut self, timestamp_ms: u64) -> Result<Option<Transaction>> {
+        let current_height = self.ledger.status().height;
+        if !self.automatic_burn_needs_plaintext_anchor(timestamp_ms) {
+            return Ok(None);
+        }
+        if self
+            .local_block_anchor_burn
+            .as_ref()
+            .is_some_and(|(height, _)| *height == current_height)
+        {
+            return Ok(None);
+        }
+        if self.last_auto_anchor_burn_height == Some(current_height) {
+            return Ok(None);
+        }
+
+        let ledger = self.wallet_anchor_build_ledger()?;
+        let wallet = self.wallet.unlocked()?;
+        let required = AUTO_BLOCK_ANCHOR_BURN_AMOUNT
+            .checked_add(AUTO_BLOCK_ANCHOR_BURN_FEE)
+            .context("automatic finalizer anchor burn amount plus fee overflows")?;
+        let outpoint = ledger
+            .available_utxos_for_address(wallet.address())?
+            .into_iter()
+            .filter(|(_, output)| output.amount >= required)
+            .min_by_key(|(_, output)| output.amount)
+            .map(|(outpoint, _)| outpoint);
+        let burn = match outpoint {
+            Some(outpoint) => ledger.build_burn_with_inputs(
+                wallet,
+                AUTO_BLOCK_ANCHOR_BURN_AMOUNT,
+                AUTO_BLOCK_ANCHOR_BURN_FEE,
+                &[outpoint],
+            ),
+            None => ledger.build_burn(
+                wallet,
+                AUTO_BLOCK_ANCHOR_BURN_AMOUNT,
+                AUTO_BLOCK_ANCHOR_BURN_FEE,
+            ),
+        };
+        let burn = match burn {
+            Ok(burn) => burn,
+            Err(error) => {
+                self.last_auto_anchor_burn_height = Some(current_height);
+                return Err(error).context("automatic finalizer anchor burn failed");
+            }
+        };
+        self.local_block_anchor_burn = Some((current_height, burn.clone()));
+        self.last_auto_anchor_burn_height = Some(current_height);
         Ok(Some(burn))
     }
 
@@ -1715,21 +1758,34 @@ impl NodeCore {
     }
 
     fn prepare_next_block_with_local_anchor(&self, timestamp_ms: u64) -> Result<PreparedBlock> {
+        let required_burn_signature = self.current_local_block_anchor_signature();
         self.ledger_with_local_block_anchor()?
-            .prepare_next_block_with_reveal_bundles(
+            .prepare_next_block_with_required_burn_and_reveal_bundles(
                 self.wallet.address(),
                 timestamp_ms,
                 self.usable_reveal_bundles(),
+                required_burn_signature.as_deref(),
             )
     }
 
     fn prepare_recovery_block_with_local_anchor(&self, timestamp_ms: u64) -> Result<PreparedBlock> {
+        let required_burn_signature = self.current_local_block_anchor_signature();
         self.ledger_with_local_block_anchor()?
-            .prepare_recovery_block_with_reveal_bundles(
+            .prepare_recovery_block_with_required_burn_and_reveal_bundles(
                 self.wallet.address(),
                 timestamp_ms,
                 self.usable_reveal_bundles(),
+                required_burn_signature.as_deref(),
             )
+    }
+
+    fn current_local_block_anchor_signature(&self) -> Option<String> {
+        let (height, burn) = self.local_block_anchor_burn.as_ref()?;
+        if *height == self.ledger.height() && !self.ledger.has_transaction(burn.signature()) {
+            Some(burn.signature().to_string())
+        } else {
+            None
+        }
     }
 
     fn ledger_with_local_block_anchor(&self) -> Result<Ledger> {
@@ -1891,6 +1947,7 @@ impl NodeCore {
         let imported = self.ledger.extend_from_snapshot(snapshot)?;
         if imported {
             self.last_auto_burn_height = None;
+            self.last_auto_anchor_burn_height = None;
             self.last_auto_pow_mine_anchor = None;
             self.last_auto_pow_mine_status = None;
             self.auto_pow_mine_cursor = None;
@@ -1914,6 +1971,7 @@ impl NodeCore {
 
         self.ledger = ledger;
         self.last_auto_burn_height = None;
+        self.last_auto_anchor_burn_height = None;
         self.last_auto_pow_mine_anchor = None;
         self.last_auto_pow_mine_status = None;
         self.auto_pow_mine_cursor = None;
@@ -2439,7 +2497,7 @@ mod tests {
     use std::collections::{BTreeMap, BTreeSet};
 
     use crate::domain::{
-        FinalizerMode, GenesisBurn, Ledger, MICRO_IUNA, MINE_FINALIZER_FEE,
+        FinalizerMode, GenesisBurn, Ledger, MICRO_IUNA, MINE_FINALIZER_FEE, OutPoint,
         RECOVERY_BLOCK_DELAY_MS, Transaction, VDF_TARGET_BLOCK_MS, Wallet, run_vdf,
     };
 
@@ -2939,9 +2997,12 @@ mod tests {
             .unwrap()
             .complete_prepared_block_at(commit_work, commit_vdf, 1)
             .unwrap();
-        assert_eq!(
-            commit_block.blinded_transactions,
-            vec![blinded],
+        let wallet_commitment = blinded.commitment.clone();
+        assert!(
+            commit_block
+                .blinded_transactions
+                .iter()
+                .any(|transaction| transaction.commitment == wallet_commitment),
             "first block should commit the wallet's blinded burn"
         );
         network.deliver_until_idle().unwrap();
@@ -2952,7 +3013,7 @@ mod tests {
                 .ledger()
                 .pending_blinded_reveals()
                 .iter()
-                .any(|reveal| reveal.commitment == commit_block.blinded_transactions[0].commitment),
+                .any(|reveal| reveal.commitment == wallet_commitment),
             "finalizer should have received the reveal before building the next block"
         );
         assert!(
@@ -2962,7 +3023,7 @@ mod tests {
                 .ledger()
                 .pending_blinded_reveals()
                 .iter()
-                .any(|reveal| reveal.commitment == commit_block.blinded_transactions[0].commitment),
+                .any(|reveal| reveal.commitment == wallet_commitment),
             "wallet node should also keep the reveal in its mempool"
         );
 
@@ -2980,9 +3041,11 @@ mod tests {
             .complete_prepared_block_at(reveal_work, reveal_vdf, 2)
             .unwrap();
 
-        assert_eq!(
-            reveal_block.all_blinded_reveals().len(),
-            1,
+        assert!(
+            reveal_block
+                .all_blinded_reveals()
+                .iter()
+                .any(|reveal| reveal.commitment == wallet_commitment),
             "automatic finalization should include the pending reveal without requiring an extra mempool poll"
         );
     }
@@ -2994,21 +3057,26 @@ mod tests {
             .find_map(|seed_index| {
                 let finalizer = Wallet::from_seed(&format!("during-vdf-finalizer-{seed_index}"));
                 let mut allocations = BTreeMap::new();
-                allocations.insert(finalizer.address().to_string(), MICRO_IUNA);
-                let ledger = Ledger::new_with_genesis_burns(
+                allocations.insert(finalizer.address().to_string(), 10 * MICRO_IUNA);
+                let mut ledger = Ledger::new_with_genesis_burns(
                     allocations,
                     vec![GenesisBurn::new(finalizer.address(), MICRO_IUNA)],
                     1,
                 )
                 .unwrap();
-                let mut node = NodeCore::from_ledger_with_burn_fee_and_enabled(
-                    finalizer.clone(),
-                    ledger,
-                    true,
-                    100,
-                    100,
-                );
-                let block1 = node.automatic_mine_once(1).block?;
+                let split = ledger
+                    .build_transfer(&finalizer, finalizer.address(), MICRO_IUNA / 10, 0)
+                    .ok()?;
+                let split_change = OutPoint {
+                    txid: split.signature().to_string(),
+                    index: 1,
+                };
+                ledger.submit_transaction(split).ok()?;
+                let burn = ledger
+                    .build_burn_with_inputs(&finalizer, 1, 0, &[split_change])
+                    .ok()?;
+                ledger.submit_transaction(burn).ok()?;
+                let block1 = ledger.mine_next_block(&finalizer, 1).ok()?;
                 assert!(block1.blinded_transactions.is_empty());
                 assert!(
                     !block1
@@ -3016,6 +3084,14 @@ mod tests {
                         .iter()
                         .any(|transaction| matches!(transaction, Transaction::Mine { .. })),
                     "node B joins after block 1, so block 1 should not include B's mine action"
+                );
+                ledger.apply_block(block1).ok()?;
+                let mut node = NodeCore::from_ledger_with_burn_fee_and_enabled(
+                    finalizer.clone(),
+                    ledger,
+                    true,
+                    0,
+                    100,
                 );
                 let block2_plan = node.prepare_automatic_finalization(2);
                 let block2_work = block2_plan.work?;
@@ -3101,31 +3177,18 @@ mod tests {
         );
         let block3 = block3_outcome.block.unwrap();
         assert!(
-            !block3
-                .blinded_transactions
-                .iter()
-                .any(|tx| tx.commitment == blinded.commitment),
-            "the mandatory anchor burn should win when the during-VDF blinded tx would starve it"
+            block3
+                .transactions
+                .first()
+                .is_some_and(Transaction::is_burn),
+            "the mandatory anchor burn must be selected before during-VDF mempool items"
         );
+        let committed_blinded = block3
+            .blinded_transactions
+            .iter()
+            .any(|tx| tx.commitment == blinded.commitment);
         assert_block_has_mine_action(&block3);
         network.deliver_until_idle().unwrap();
-        assert!(
-            network
-                .node("finalizer")
-                .unwrap()
-                .ledger()
-                .pending_blinded_transactions()
-                .is_empty(),
-            "the conflicting own blinded tx should be pruned after the anchor burn spends its input"
-        );
-        assert!(
-            network
-                .node("finalizer")
-                .unwrap()
-                .owned_blinded_transactions()
-                .is_empty(),
-            "owned blinded state should not keep rebroadcasting the pruned tx"
-        );
 
         queue_auto_pow_mine_action(network.node_mut("miner").unwrap());
         network.deliver_until_idle().unwrap();
@@ -3135,10 +3198,37 @@ mod tests {
             .automatic_mine_once(4)
             .block
             .expect("finalizer should keep producing the next block");
-        assert!(
-            block4.all_blinded_reveals().is_empty(),
-            "the pruned blinded tx was never committed, so there should be no reveal"
-        );
+        if committed_blinded {
+            assert!(
+                block4
+                    .all_blinded_reveals()
+                    .iter()
+                    .any(|reveal| reveal.commitment == blinded.commitment),
+                "the committed during-VDF blinded tx should reveal in a later block"
+            );
+        } else {
+            assert!(
+                network
+                    .node("finalizer")
+                    .unwrap()
+                    .ledger()
+                    .pending_blinded_transactions()
+                    .is_empty(),
+                "a conflicting during-VDF blinded tx should be pruned after the anchor burn spends its input"
+            );
+            assert!(
+                network
+                    .node("finalizer")
+                    .unwrap()
+                    .owned_blinded_transactions()
+                    .is_empty(),
+                "owned blinded state should not keep rebroadcasting a pruned tx"
+            );
+            assert!(
+                block4.all_blinded_reveals().is_empty(),
+                "a pruned blinded tx was never committed, so there should be no reveal"
+            );
+        }
         assert_block_has_mine_action(&block4);
     }
 
@@ -3161,7 +3251,7 @@ mod tests {
                     finalizer.clone(),
                     ledger,
                     true,
-                    100,
+                    0,
                     1_000,
                 );
                 node.set_pow_mining_enabled(true);
@@ -3537,7 +3627,7 @@ mod tests {
     }
 
     #[test]
-    fn automatic_fallback_finalizer_burn_stays_plaintext_for_block_anchor() {
+    fn automatic_fallback_finalizer_prepares_anchor_and_blinded_burn() {
         let alice = Wallet::from_seed("auto-fallback-burn-alice");
         let bob = Wallet::from_seed("auto-fallback-burn-bob");
         let finalizers = [alice.clone(), bob.clone()];
@@ -3576,9 +3666,18 @@ mod tests {
             plan.skipped_reason
         );
         assert!(node.ledger().pending().is_empty());
-        assert!(node.ledger().pending_blinded_transactions().is_empty());
-        assert!(node.local_block_anchor_burn.is_some());
-        assert!(outbox.is_empty());
+        assert_eq!(node.ledger().pending_blinded_transactions().len(), 1);
+        let (_, anchor_burn) = node
+            .local_block_anchor_burn
+            .as_ref()
+            .expect("fallback anchor burn should be held locally");
+        let anchor_signature = anchor_burn.signature().to_string();
+        assert_eq!(anchor_burn.amount(), super::AUTO_BLOCK_ANCHOR_BURN_AMOUNT);
+        assert!(
+            outbox
+                .iter()
+                .any(|envelope| matches!(envelope, GossipEnvelope::BlindedTransaction(_)))
+        );
         let work = plan.work.expect("fallback work should be prepared");
         let vdf_output = run_vdf(work.vdf_seed(), work.vdf_rounds());
         let block = node
@@ -3587,18 +3686,29 @@ mod tests {
 
         assert_eq!(block.finalizer_rank, 1);
         assert_eq!(block.finalizer_mode, FinalizerMode::Ticket);
+        assert!(block.transactions.iter().any(|transaction| {
+            transaction.is_burn() && transaction.amount() == super::AUTO_BLOCK_ANCHOR_BURN_AMOUNT
+        }));
+        assert_eq!(
+            block
+                .transactions
+                .first()
+                .map(|transaction| transaction.signature()),
+            Some(anchor_signature.as_str())
+        );
+        assert!(!block.blinded_transactions.is_empty());
         assert_eq!(node.ledger().height(), 1);
     }
 
     #[test]
-    fn automatic_leader_burn_stays_plaintext_for_block_anchor() {
+    fn automatic_leader_prepares_anchor_and_blinded_burn() {
         let alice = Wallet::from_seed("auto-plaintext-burn-alice");
         let bob = Wallet::from_seed("auto-plaintext-burn-bob");
         let finalizers = [alice.clone(), bob.clone()];
         let mut allocations = BTreeMap::new();
         allocations.insert(alice.address().to_string(), 10 * MICRO_IUNA);
         allocations.insert(bob.address().to_string(), 10 * MICRO_IUNA);
-        let ledger = Ledger::new_with_genesis_burns(
+        let mut ledger = Ledger::new_with_genesis_burns(
             allocations,
             finalizers
                 .iter()
@@ -3607,6 +3717,22 @@ mod tests {
             1,
         )
         .unwrap();
+        let leader = ledger.expected_leader_for_next_block().unwrap();
+        let leader_wallet = finalizers
+            .iter()
+            .find(|wallet| wallet.address() == leader)
+            .unwrap()
+            .clone();
+        for wallet in &finalizers {
+            let split = ledger
+                .build_transfer(wallet, wallet.address(), MICRO_IUNA, 0)
+                .unwrap();
+            ledger.submit_transaction(split).unwrap();
+        }
+        let anchor = ledger.build_burn(&leader_wallet, 1, 0).unwrap();
+        ledger.submit_transaction(anchor).unwrap();
+        let split_block = ledger.mine_next_block(&leader_wallet, 1).unwrap();
+        ledger.apply_block(split_block).unwrap();
         let leader = ledger.expected_leader_for_next_block().unwrap();
         let leader_wallet = finalizers
             .iter()
@@ -3626,9 +3752,17 @@ mod tests {
 
         assert!(plan.burned.is_some());
         assert!(node.ledger().pending().is_empty());
-        assert!(node.ledger().pending_blinded_transactions().is_empty());
-        assert!(node.local_block_anchor_burn.is_some());
-        assert!(outbox.is_empty());
+        assert_eq!(node.ledger().pending_blinded_transactions().len(), 1);
+        let (_, anchor_burn) = node
+            .local_block_anchor_burn
+            .as_ref()
+            .expect("leader anchor burn should be held locally");
+        assert_eq!(anchor_burn.amount(), super::AUTO_BLOCK_ANCHOR_BURN_AMOUNT);
+        assert!(
+            outbox
+                .iter()
+                .any(|envelope| matches!(envelope, GossipEnvelope::BlindedTransaction(_)))
+        );
         assert!(node.prepare_automatic_finalization(1).work.is_some());
     }
 
@@ -3638,7 +3772,7 @@ mod tests {
         let finalizers = [alice.clone()];
         let mut allocations = BTreeMap::new();
         allocations.insert(alice.address().to_string(), 10 * MICRO_IUNA);
-        let ledger = Ledger::new_with_genesis_burns(
+        let mut ledger = Ledger::new_with_genesis_burns(
             allocations,
             finalizers
                 .iter()
@@ -3653,13 +3787,16 @@ mod tests {
             .find(|wallet| wallet.address() == leader)
             .unwrap()
             .clone();
-        let mut node = NodeCore::from_ledger_with_burn_fee_and_enabled(
-            leader_wallet,
-            ledger,
-            true,
-            MICRO_IUNA / 10,
-            1,
-        );
+        let split = ledger
+            .build_transfer(&leader_wallet, leader_wallet.address(), MICRO_IUNA, 0)
+            .unwrap();
+        ledger.submit_transaction(split).unwrap();
+        let anchor = ledger.build_burn(&leader_wallet, 1, 0).unwrap();
+        ledger.submit_transaction(anchor).unwrap();
+        let split_block = ledger.mine_next_block(&leader_wallet, 1).unwrap();
+        ledger.apply_block(split_block).unwrap();
+        let mut node =
+            NodeCore::from_ledger_with_burn_fee_and_enabled(leader_wallet, ledger, true, 0, 1);
 
         let plan = node.prepare_automatic_finalization(1);
         assert!(plan.burned.is_some());
@@ -3861,7 +3998,7 @@ mod tests {
     fn sparse_network_stays_bounded_under_generated_actions() {
         const NODES: usize = 10;
         const ROUNDS: usize = 36;
-        const SETTLE_BLOCKS: u64 = 14;
+        const SETTLE_BLOCKS: u64 = super::MAX_BLINDED_TRANSACTION_EXPIRY_HEIGHTS + 10;
         const QUIET_BLOCKS: usize = SETTLE_BLOCKS as usize + 4;
 
         let mut rng = ChaosRng::new(0x1aba_0100);
@@ -3905,10 +4042,15 @@ mod tests {
                 match rng.index(32) {
                     0 => {
                         let recipient = wallets[rng.index(wallets.len())].address().to_string();
+                        let expiry_height = network
+                            .node(&node_ids[index])
+                            .expect("actor node exists")
+                            .chain_height()
+                            + 16;
                         let _ = network
                             .node_mut(&node_ids[index])
                             .expect("actor node exists")
-                            .blinded_transfer_with_fee(recipient, 1, 0, chaos_expiry_height(round));
+                            .blinded_transfer_with_fee(recipient, 1, 0, expiry_height);
                     }
                     1 => {
                         attempt_bounded_mine_action(
@@ -3980,7 +4122,7 @@ mod tests {
         }
 
         let all_online = (0..NODES).collect::<BTreeSet<_>>();
-        for round in ROUNDS + QUIET_BLOCKS..ROUNDS + QUIET_BLOCKS + SETTLE_BLOCKS as usize * 3 {
+        for round in ROUNDS + QUIET_BLOCKS..ROUNDS + QUIET_BLOCKS + SETTLE_BLOCKS as usize * 4 {
             deliver_sparse_chaos_until_idle(
                 &mut network,
                 &node_ids,
@@ -4048,10 +4190,6 @@ mod tests {
         (round as u64 + 1) * (RECOVERY_BLOCK_DELAY_MS + VDF_TARGET_BLOCK_MS)
     }
 
-    fn chaos_expiry_height(round: usize) -> u64 {
-        round as u64 + 16
-    }
-
     fn attempt_bounded_mine_action(
         network: &mut InMemoryNetwork,
         node_id: &str,
@@ -4087,7 +4225,8 @@ mod tests {
             .node(&node_ids[reference_index])
             .expect("reference node exists");
         let leader = reference.ledger().expected_leader_for_next_block();
-        let producer_index = leader
+        let mut candidates = Vec::new();
+        if let Some(index) = leader
             .as_deref()
             .and_then(|leader| {
                 wallets
@@ -4098,26 +4237,38 @@ mod tests {
             .filter(|index| {
                 network.node(&node_ids[*index]).unwrap().chain_height() == reference.chain_height()
             })
-            .unwrap_or(reference_index);
-
-        let mut producer = network
-            .node(&node_ids[producer_index])
-            .expect("producer node exists")
-            .clone();
-        let plan = producer.prepare_automatic_finalization(timestamp_ms);
-        let Some(work) = plan.work else {
+        {
+            candidates.push(index);
+        }
+        candidates.push(reference_index);
+        candidates.extend(online.iter().copied().filter(|index| {
+            network.node(&node_ids[*index]).unwrap().chain_height() == reference.chain_height()
+        }));
+        let mut seen = BTreeSet::new();
+        for producer_index in candidates {
+            if !seen.insert(producer_index) {
+                continue;
+            }
+            let mut producer = network
+                .node(&node_ids[producer_index])
+                .expect("producer node exists")
+                .clone();
+            let plan = producer.prepare_automatic_finalization(timestamp_ms);
+            let Some(work) = plan.work else {
+                continue;
+            };
+            let block = work.finish_at(
+                &wallets[producer_index],
+                "preverified-chaos-vdf".to_string(),
+                timestamp_ms,
+            );
+            network
+                .node_mut(&node_ids[producer_index])
+                .expect("producer node exists")
+                .receive_preverified_block_at(block, timestamp_ms)
+                .expect("mock-VDF block applies locally");
             return;
-        };
-        let block = work.finish_at(
-            &wallets[producer_index],
-            "preverified-chaos-vdf".to_string(),
-            timestamp_ms,
-        );
-        network
-            .node_mut(&node_ids[producer_index])
-            .expect("producer node exists")
-            .receive_preverified_block_at(block, timestamp_ms)
-            .expect("mock-VDF block applies locally");
+        }
     }
 
     fn highest_online_node(
@@ -4318,7 +4469,7 @@ mod tests {
         ids.extend(
             node.pending_blinded_transactions()
                 .into_iter()
-                .map(|tx| format!("commit:{}", tx.commitment)),
+                .map(|tx| format!("commit:{}@{}", tx.commitment, tx.expires_at_height)),
         );
         ids.extend(
             node.pending_blinded_reveals()
@@ -4358,7 +4509,8 @@ mod tests {
             let pending = pending_item_ids(node);
             assert!(
                 pending.is_empty(),
-                "{node_id} still has pending mempool items: {pending:?}"
+                "{node_id} at height {} still has pending mempool items: {pending:?}",
+                node.chain_height()
             );
         }
     }
