@@ -3360,6 +3360,16 @@ const INDEX_HTML: &str = r#"<!doctype html>
     .mine-include-status.ready { color: #d5f55f; }
     .mine-include-status.muted { color: #879198; }
     .mine-save-row { display: flex; justify-content: flex-start; }
+    .mining-event-log { display: grid; gap: 8px; max-height: 360px; overflow: auto; margin-top: 12px; border: 1px solid #2f363c; border-radius: 8px; padding: 8px; background: #0f1114; }
+    .mining-event-log-head { display: flex; justify-content: space-between; gap: 10px; align-items: baseline; color: #879198; font-size: 10px; font-weight: 850; text-transform: uppercase; }
+    .mining-event { display: grid; grid-template-columns: auto minmax(0, 1fr) auto; gap: 10px; align-items: start; border: 1px solid #30383d; border-radius: 8px; padding: 10px; background: #111316; }
+    .mining-event-dot { width: 8px; height: 8px; margin-top: 5px; border-radius: 999px; background: #7f888e; }
+    .mining-event.active .mining-event-dot { background: #d5f55f; box-shadow: 0 0 12px rgba(213, 245, 95, .45); }
+    .mining-event.warning .mining-event-dot { background: #ffd070; }
+    .mining-event.info .mining-event-dot { background: #8de9cd; }
+    .mining-event-title { color: #eef6f8; font-weight: 850; overflow-wrap: anywhere; }
+    .mining-event-detail { margin-top: 3px; color: #9fa8ad; font-size: 12px; line-height: 1.35; overflow-wrap: anywhere; }
+    .mining-event-time { color: #7f888e; font-size: 11px; font-weight: 800; white-space: nowrap; }
     .panel-separator { border-top: 1px solid #2f363c; margin: 14px 0 12px; }
     .stratum-config { display: grid; gap: 10px; }
     .stratum-note { max-width: 760px; color: #9eb3bc; font-size: 12px; line-height: 1.45; }
@@ -3566,7 +3576,7 @@ const INDEX_HTML: &str = r#"<!doctype html>
       .block-card { flex-basis: 108px; }
     }
   </style>
-  <script defer src="/assets/iuna-ui.js?v=86"></script>
+  <script defer src="/assets/iuna-ui.js?v=97"></script>
   <script defer src="/assets/alpine.min.js"></script>
 </head>
 <body x-data="iunaApp()" x-init="init()" @keydown.window.escape="closeModals()" x-cloak>
@@ -3781,6 +3791,39 @@ const INDEX_HTML: &str = r#"<!doctype html>
               <div class="mine-stat-label">Mempool</div>
               <div class="mine-stat-value" x-text="localMiningMempoolLabel()"></div>
             </div>
+          </div>
+          <div class="mining-event-log" aria-label="Mining event log">
+            <div class="mining-event-log-head"><span>Event log</span><span x-text="`${miningEventLog().length} lines`"></span></div>
+            <template x-if="miningEventLog().length === 0">
+              <div class="mining-event skeleton-card" aria-hidden="true">
+                <span class="mining-event-dot"></span>
+                <div>
+                  <div class="skeleton-line medium"></div>
+                  <div class="skeleton-line long"></div>
+                </div>
+                <div class="skeleton-line short"></div>
+              </div>
+            </template>
+            <template x-if="miningEventLog().length === 0">
+              <div class="mining-event skeleton-card" aria-hidden="true">
+                <span class="mining-event-dot"></span>
+                <div>
+                  <div class="skeleton-line short"></div>
+                  <div class="skeleton-line medium"></div>
+                </div>
+                <div class="skeleton-line short"></div>
+              </div>
+            </template>
+            <template x-for="event in miningEventLog()" :key="event.key">
+              <div class="mining-event" :class="event.kind">
+                <span class="mining-event-dot" aria-hidden="true"></span>
+                <div>
+                  <div class="mining-event-title" x-text="event.title"></div>
+                  <div class="mining-event-detail" x-text="event.detail"></div>
+                </div>
+                <div class="mining-event-time" x-text="event.time"></div>
+              </div>
+            </template>
           </div>
         </div>
         <div class="panel">
@@ -6047,7 +6090,7 @@ mod tests {
 
     #[test]
     fn metrics_screen_includes_block_range_filter() {
-        assert!(super::INDEX_HTML.contains("iuna-ui.js?v=86"));
+        assert!(super::INDEX_HTML.contains("iuna-ui.js?v=97"));
         assert!(super::INDEX_HTML.contains("aria-label=\"Metrics block range\""));
         assert!(super::INDEX_HTML.contains("setMetricsRange(100)"));
         assert!(super::INDEX_HTML.contains("setMetricsRange(1000)"));
@@ -6224,6 +6267,24 @@ mod tests {
         assert!(app_js.contains("powStatusShortLabel()"));
         assert!(app_js.contains("setPowMiningWorkers(workers)"));
         assert!(app_js.contains("localMiningMempoolLabel()"));
+        assert!(app_js.contains("miningEventLog()"));
+        assert!(app_js.contains("miningEventLimit: 1000"));
+        assert!(app_js.contains("slice(0, this.miningEventLimit)"));
+        assert!(super::INDEX_HTML.contains("aria-label=\"Mining event log\""));
+        assert!(super::INDEX_HTML.contains("miningEventLog().length === 0"));
+        assert!(app_js.contains("Resource budget:"));
+        assert!(app_js.contains("isPowMineSuccessStatus"));
+        assert!(app_js.contains("You mined a PoW action"));
+        assert!(app_js.contains("Waiting for a finalizer to include it in a block."));
+        assert!(app_js.contains("Observed block"));
+        assert!(app_js.contains("Finalized by"));
+        assert!(app_js.contains("You finalized block"));
+        assert!(app_js.contains("if (!locallyFinalized)"));
+        assert!(app_js.contains("last?.title === title"));
+        assert!(app_js.contains("this.miningEventState.pob = enabled ? \"on\" : \"off\";"));
+        assert!(app_js.contains("Automatic burn prepared at height"));
+        assert!(app_js.contains("Eligible for the next block opportunity."));
+        assert!(app_js.contains("!Number.isFinite(timestampMs)"));
         assert!(!super::INDEX_HTML.contains("Needs burns"));
     }
 

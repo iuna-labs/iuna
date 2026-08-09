@@ -79,6 +79,10 @@ window.iunaApp = function iunaApp() {
     maxPowMiningWorkers: 32,
     recoveryVdfTopRankPercent: 50,
     burnAmountDirty: false,
+    miningEvents: [],
+    miningEventLimit: 1000,
+    miningEventState: {},
+    miningEventCounter: 0,
     transferTo: "",
     transferAmount: null,
     transferFee: "0.000001",
@@ -657,6 +661,7 @@ window.iunaApp = function iunaApp() {
           this.burnFeeDraft = this.amountLabel(this.burnFee);
         }
         this.lastUpdated = new Date();
+        this.syncMiningEvents({ status, blocks });
         this.scheduleFeeEstimates();
       } catch (error) {
         if (String(error.message || "").includes("401")) {
@@ -1250,6 +1255,7 @@ window.iunaApp = function iunaApp() {
             ? `Finalization burns on: ${this.amountLabel(amount)} IUNA per block with ${this.amountLabel(fee)} per byte`
             : `Burn settings saved while off`
         );
+        this.appendMiningEvent("Burn settings saved", `Configured ${this.amountLabel(amount)} IUNA per block with ${this.amountLabel(fee)} IUNA fee/byte.`, "info");
         this.burnAmountDirty = false;
         this.burnAmount = amount;
         this.burnFee = fee;
@@ -1273,6 +1279,14 @@ window.iunaApp = function iunaApp() {
           { enabled, amount, fee_per_byte: fee },
           enabled ? "Finalization burns turned on" : "Finalization burns turned off"
         );
+        this.appendMiningEvent(
+          enabled ? "Finalization burns turned on" : "Finalization burns turned off",
+          enabled
+            ? `Burning ${this.amountLabel(amount)} IUNA per block with ${this.amountLabel(fee)} IUNA fee/byte.`
+            : "Automatic burn preparation paused.",
+          enabled ? "active" : "warning"
+        );
+        this.miningEventState.pob = enabled ? "on" : "off";
         this.burnAmountDirty = false;
         this.burnAmount = amount;
         this.burnFee = fee;
@@ -1291,6 +1305,14 @@ window.iunaApp = function iunaApp() {
           { enabled, workers: this.powMiningWorkers },
           enabled ? "PoW mining turned on" : "PoW mining turned off"
         );
+        this.appendMiningEvent(
+          enabled ? "PoW mining turned on" : "PoW mining turned off",
+          enabled
+            ? `Resource budget: ${this.powMiningWorkers} worker${this.powMiningWorkers === 1 ? "" : "s"}.`
+            : "PoW worker search paused.",
+          enabled ? "active" : "warning"
+        );
+        this.miningEventState["pow-workers"] = String(this.powMiningWorkers);
       } catch (error) {
         this.powMiningEnabled = previous;
         this.showFlash(error.message, "error");
@@ -1311,6 +1333,12 @@ window.iunaApp = function iunaApp() {
           { enabled: this.powMiningEnabled, workers: clamped },
           `PoW workers set to ${clamped}`
         );
+        this.appendMiningEvent(
+          "PoW worker budget changed",
+          `Resource budget: ${clamped} worker${clamped === 1 ? "" : "s"}.`,
+          "info"
+        );
+        this.miningEventState["pow-workers"] = String(clamped);
       } catch (error) {
         this.powMiningWorkers = previous;
         this.showFlash(error.message, "error");
@@ -1445,6 +1473,130 @@ window.iunaApp = function iunaApp() {
 
     localMineActionCount() {
       return this.mempool.filter((tx) => tx?.kind === "mine").length;
+    },
+
+    appendMiningEvent(title, detail, kind = "info", timestamp = new Date()) {
+      const last = this.miningEvents[0];
+      if (last?.title === title && last?.detail === detail && last?.kind === kind) return;
+      this.miningEventCounter += 1;
+      const entry = {
+        key: `${timestamp.getTime()}-${this.miningEventCounter}`,
+        timestamp,
+        time: timestamp.toLocaleTimeString(),
+        kind,
+        title,
+        detail,
+      };
+      this.miningEvents = [entry, ...this.miningEvents].slice(0, this.miningEventLimit);
+    },
+
+    isPowMineSuccessStatus(status) {
+      return /queued mine action/i.test(status || "");
+    },
+
+    syncMiningEvents({ status, blocks }) {
+      const mining = status?.mining || {};
+      const chain = status?.chain || {};
+      if (!this.miningEventState.started) {
+        this.appendMiningEvent(
+          "Mining log started",
+          `Height ${chain.height ?? "-"}, PoB ${mining.automatic ? "on" : "off"}, PoW ${mining.pow_mining_enabled ? "on" : "off"}.`,
+          "info"
+        );
+        this.miningEventState.started = true;
+      }
+
+      this.noteMiningStateChange(
+        "pob",
+        mining.automatic ? "on" : "off",
+        mining.automatic ? "Finalization burns active" : "Finalization burns inactive",
+        mining.automatic
+          ? `Burning ${this.amountLabel(mining.burn_per_block || 0)} IUNA per block with ${this.amountLabel(mining.automatic_burn_fee || 0)} IUNA fee/byte.`
+          : "Automatic burn preparation is off.",
+        mining.automatic ? "active" : "warning"
+      );
+      this.noteMiningStateChange(
+        "pow-workers",
+        String(mining.pow_mining_workers ?? this.powMiningWorkers),
+        "PoW worker budget",
+        `Resource budget: ${mining.pow_mining_workers ?? this.powMiningWorkers} worker${(mining.pow_mining_workers ?? this.powMiningWorkers) === 1 ? "" : "s"}.`,
+        "info"
+      );
+      const powMineStatus = mining.last_auto_pow_mine_status || "";
+      if (this.isPowMineSuccessStatus(powMineStatus)) {
+        this.noteMiningStateChange(
+          "pow-mine-success",
+          powMineStatus,
+          "You mined a PoW action",
+          `${powMineStatus}. Waiting for a finalizer to include it in a block.`,
+          "active"
+        );
+      } else {
+        this.noteMiningStateChange(
+          "pow-status",
+          powMineStatus,
+          "PoW status",
+          powMineStatus || "Waiting for next automatic PoW mining tick.",
+          mining.pow_mining_enabled ? "active" : "info"
+        );
+      }
+      this.noteMiningStateChange(
+        "leader",
+        mining.current_leader || "",
+        mining.wallet_is_current_leader ? "This wallet is selected" : "Selected finalizer changed",
+        mining.current_leader
+          ? `Current finalizer: ${this.currentFinalizerLabel()} at height ${chain.height ?? "-"}.`
+          : `No current finalizer reported at height ${chain.height ?? "-"}.`,
+        mining.wallet_is_current_leader ? "active" : "info"
+      );
+      if (typeof mining.last_auto_burn_height === "number") {
+        this.noteMiningStateChange(
+          "last-burn-height",
+          String(mining.last_auto_burn_height),
+          `Automatic burn prepared at height ${mining.last_auto_burn_height}`,
+          "Eligible for the next block opportunity.",
+          "active"
+        );
+      }
+
+      const latestBlock = Array.isArray(blocks)
+        ? blocks.find((block) => Number(block?.height) > 0)
+        : this.blocks.find((block) => Number(block?.height) > 0);
+      if (latestBlock) {
+        const finalizer = this.addressLabel(latestBlock.miner);
+        const locallyFinalized = latestBlock.miner === status.wallet_address;
+        if (locallyFinalized) {
+          this.noteMiningStateChange(
+            "latest-local-block",
+            latestBlock.hash || String(latestBlock.height),
+            `You finalized block ${latestBlock.height}`,
+            `Success. ${this.burnCountLabel(latestBlock)} burned, fees IUNA ${this.amountLabel(latestBlock.total_fees ?? latestBlock.totalFees ?? 0)}.`,
+            "active",
+            new Date(Number(latestBlock.timestamp_ms ?? latestBlock.timestampMs) || Date.now())
+          );
+        }
+        if (!locallyFinalized) {
+          this.noteMiningStateChange(
+            "latest-block",
+            latestBlock.hash || String(latestBlock.height),
+            `Observed block ${latestBlock.height}`,
+            `Finalized by ${finalizer}. ${this.burnCountLabel(latestBlock)} burned, fees IUNA ${this.amountLabel(latestBlock.total_fees ?? latestBlock.totalFees ?? 0)}.`,
+            "active",
+            new Date(Number(latestBlock.timestamp_ms ?? latestBlock.timestampMs) || Date.now())
+          );
+        }
+      }
+    },
+
+    noteMiningStateChange(key, value, title, detail, kind = "info", timestamp = new Date()) {
+      if (this.miningEventState[key] === value) return;
+      this.miningEventState[key] = value;
+      if (value === "" && key !== "pow-status" && key !== "leader") return;
+      this.appendMiningEvent(title, detail, kind, timestamp);
+    },
+
+    miningEventLog() {
+      return this.miningEvents;
     },
 
     metricsCharts() {
@@ -2347,7 +2499,7 @@ window.iunaApp = function iunaApp() {
     },
 
     relativeTimeLabel(timestampMs) {
-      if (typeof timestampMs !== "number") return "-";
+      if (typeof timestampMs !== "number" || !Number.isFinite(timestampMs)) return "-";
       const ageSeconds = Math.max(0, Math.round((Date.now() - timestampMs) / 1000));
       if (ageSeconds < 5) return "now";
       if (ageSeconds < 60) return `${ageSeconds}s ago`;
