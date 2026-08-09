@@ -345,6 +345,7 @@ struct WalletTransactionRow {
     signature: String,
     status: &'static str,
     block_height: Option<u64>,
+    timestamp_ms: Option<u64>,
     block_finalizer: Option<String>,
     direction: &'static str,
     blinded: bool,
@@ -360,6 +361,15 @@ struct WalletUtxoRow {
     address: String,
     amount: Amount,
     spendable: bool,
+}
+
+#[derive(Clone, Debug)]
+struct WalletTransactionContext {
+    status: &'static str,
+    block_height: Option<u64>,
+    timestamp_ms: Option<u64>,
+    block_finalizer: Option<String>,
+    blinded: bool,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq, Serialize)]
@@ -1682,23 +1692,32 @@ fn wallet_transaction_rows(
     filters: WalletTransactionFilters,
 ) -> Vec<WalletTransactionRow> {
     let mut rows = Vec::new();
+    let pending_context = WalletTransactionContext {
+        status: "pending",
+        block_height: None,
+        timestamp_ms: None,
+        block_finalizer: None,
+        blinded: false,
+    };
 
     for (index, tx) in pending.iter().enumerate() {
         if !filters.allows(tx) {
             continue;
         }
-        if let Some(row) = wallet_transaction_row(wallet, tx, outputs, "pending", None, None, false)
-        {
+        if let Some(row) = wallet_transaction_row(wallet, tx, outputs, &pending_context) {
             rows.push((u128::MAX - index as u128, row));
         }
     }
 
+    let pending_blind_context = WalletTransactionContext {
+        blinded: true,
+        ..pending_context
+    };
     for (index, tx) in owned_blinded.iter().enumerate() {
         if !filters.allows(tx) {
             continue;
         }
-        if let Some(row) = wallet_transaction_row(wallet, tx, outputs, "pending", None, None, true)
-        {
+        if let Some(row) = wallet_transaction_row(wallet, tx, outputs, &pending_blind_context) {
             rows.push((u128::MAX - 10_000 - index as u128, row));
         }
     }
@@ -1712,10 +1731,13 @@ fn wallet_transaction_rows(
                 wallet,
                 tx,
                 outputs,
-                "confirmed",
-                Some(block.height),
-                Some(block.miner.clone()),
-                false,
+                &WalletTransactionContext {
+                    status: "confirmed",
+                    block_height: Some(block.height),
+                    timestamp_ms: Some(block.timestamp_ms),
+                    block_finalizer: Some(block.miner.clone()),
+                    blinded: false,
+                },
             ) {
                 rows.push((block.height as u128 * 10_000 + index as u128, row));
             }
@@ -1730,10 +1752,13 @@ fn wallet_transaction_rows(
                     wallet,
                     tx,
                     outputs,
-                    "confirmed",
-                    Some(block.height),
-                    Some(block.miner.clone()),
-                    false,
+                    &WalletTransactionContext {
+                        status: "confirmed",
+                        block_height: Some(block.height),
+                        timestamp_ms: Some(block.timestamp_ms),
+                        block_finalizer: Some(block.miner.clone()),
+                        blinded: false,
+                    },
                 ) {
                     rows.push((block.height as u128 * 10_000 + 5_000 + index as u128, row));
                 }
@@ -1749,10 +1774,7 @@ fn wallet_transaction_row(
     wallet: &str,
     tx: &Transaction,
     outputs_by_outpoint: &BTreeMap<OutPoint, TxOutput>,
-    status: &'static str,
-    block_height: Option<u64>,
-    block_finalizer: Option<String>,
-    blinded: bool,
+    context: &WalletTransactionContext,
 ) -> Option<WalletTransactionRow> {
     match tx {
         Transaction::Transfer {
@@ -1770,15 +1792,16 @@ fn wallet_transaction_row(
             outputs: outputs.clone(),
             change: Vec::new(),
             signature: signature.clone(),
-            status,
-            block_height,
-            block_finalizer,
+            status: context.status,
+            block_height: context.block_height,
+            timestamp_ms: context.timestamp_ms,
+            block_finalizer: context.block_finalizer.clone(),
             direction: if tx.to() == Some(wallet) {
                 "received"
             } else {
                 "sent"
             },
-            blinded,
+            blinded: context.blinded,
             difficulty_bits: None,
             proof_bits: None,
             proof_hash: None,
@@ -1799,11 +1822,12 @@ fn wallet_transaction_row(
             outputs: Vec::new(),
             change: change.clone(),
             signature: signature.clone(),
-            status,
-            block_height,
-            block_finalizer,
+            status: context.status,
+            block_height: context.block_height,
+            timestamp_ms: context.timestamp_ms,
+            block_finalizer: context.block_finalizer.clone(),
             direction: "burned",
-            blinded,
+            blinded: context.blinded,
             difficulty_bits: None,
             proof_bits: None,
             proof_hash: None,
@@ -1826,11 +1850,12 @@ fn wallet_transaction_row(
             }],
             change: Vec::new(),
             signature: signature.clone(),
-            status,
-            block_height,
-            block_finalizer,
+            status: context.status,
+            block_height: context.block_height,
+            timestamp_ms: context.timestamp_ms,
+            block_finalizer: context.block_finalizer.clone(),
             direction: "received",
-            blinded,
+            blinded: context.blinded,
             difficulty_bits: Some(*difficulty_bits),
             proof_bits: Some(proof_bits(signature)),
             proof_hash: Some(signature.clone()),
@@ -3589,6 +3614,7 @@ const INDEX_HTML: &str = r#"<!doctype html>
                   <div class="tx-field"><span class="tx-label">Amount</span><span class="tx-value money">IUNA <span x-text="amountLabel(tx.amount)"></span></span></div>
                   <div class="tx-field"><span class="tx-label">Fee</span><span class="tx-value money" x-text="txFeeLabel(tx)"></span></div>
                   <div class="tx-field"><span class="tx-label">Status</span><span class="tx-value text" x-text="txTitle(tx)"></span></div>
+                  <div class="tx-field"><span class="tx-label">Time</span><span class="tx-value text" x-text="walletTxTimeLabel(tx)"></span></div>
                   <div class="tx-field"><span class="tx-label">From</span><code class="tx-value hash" x-text="short(tx.from)"></code></div>
                   <div class="tx-field" x-show="tx.to"><span class="tx-label">To</span><code class="tx-value hash" x-text="short(tx.to)"></code></div>
                   <div class="tx-field" x-show="isMineTx(tx)"><span class="tx-label">Proof Bits</span><span class="tx-value number"><span x-text="txProofBits(tx) ?? '-'"></span> / <span x-text="txDifficultyBits(tx) ?? '-'"></span></span></div>
@@ -5328,6 +5354,7 @@ mod tests {
         assert_eq!(rows[0].inputs[0].amount, Some(100));
         assert_eq!(rows[0].status, "confirmed");
         assert_eq!(rows[0].block_height, Some(31));
+        assert_eq!(rows[0].timestamp_ms, Some(31));
         assert_eq!(rows[0].block_finalizer.as_deref(), Some("miner"));
         assert_eq!(rows[0].direction, "received");
     }
@@ -5357,6 +5384,7 @@ mod tests {
         assert_eq!(rows.len(), 1);
         assert_eq!(rows[0].kind, "transfer");
         assert_eq!(rows[0].status, "pending");
+        assert_eq!(rows[0].timestamp_ms, None);
         assert!(rows[0].blinded);
         assert_eq!(rows[0].direction, "sent");
         assert_eq!(rows[0].to.as_deref(), Some(bob.address()));
@@ -5487,6 +5515,7 @@ mod tests {
         assert_eq!(rows[0].kind, "mine");
         assert_eq!(rows[0].status, "confirmed");
         assert_eq!(rows[0].block_height, Some(8));
+        assert_eq!(rows[0].timestamp_ms, Some(8));
         assert_eq!(rows[0].block_finalizer.as_deref(), Some("miner"));
         assert_eq!(rows[0].direction, "received");
         assert_eq!(rows[0].amount, mine.amount());
@@ -5770,8 +5799,12 @@ mod tests {
         assert!(app_js.contains("syncMempoolBlockMarker"));
         assert!(app_js.contains("this.status.chain?.height ?? this.lastBlockMempoolHeight"));
         assert!(app_js.contains("mempoolItemClass"));
+        assert!(app_js.contains("walletTxTimeLabel(tx)"));
+        assert!(app_js.contains("timestampMs ?? tx?.timestamp_ms"));
         assert!(super::INDEX_HTML.contains("x-text=\"txFeeLabel(tx)\""));
         assert!(super::INDEX_HTML.contains("x-text=\"txFeeLabel(selectedTransaction?.tx)\""));
+        assert!(super::INDEX_HTML.contains("<span class=\"tx-label\">Time</span>"));
+        assert!(super::INDEX_HTML.contains("x-text=\"walletTxTimeLabel(tx)\""));
     }
 
     #[test]

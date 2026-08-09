@@ -2110,6 +2110,14 @@ window.iunaApp = function iunaApp() {
       return tx.blockHeight === null ? "Confirmed" : `Block ${tx.blockHeight}`;
     },
 
+    walletTxTimeLabel(tx) {
+      const timestamp = Number(tx?.timestampMs ?? tx?.timestamp_ms);
+      if (!Number.isFinite(timestamp) || timestamp <= 0) {
+        return tx?.status === "pending" ? "Pending" : "-";
+      }
+      return new Date(timestamp).toLocaleString();
+    },
+
     isLeaderLabel() {
       if (!this.status.mining) return "-";
       return this.status.mining.wallet_is_current_leader ? "yes" : "no";
