@@ -49,6 +49,13 @@ window.iunaApp = function iunaApp() {
     settingsPasswordConfirm: "",
     settingsFeedback: null,
     keepTrackOfMetrics: false,
+    addressBook: {},
+    addressBookVersion: 0,
+    addressBookModalOpen: false,
+    addressBookPickerOpen: false,
+    addressBookEditingAddress: null,
+    addressBookDraftAddress: "",
+    addressBookDraftName: "",
     p2pAcceptInbound: false,
     p2pAnnounceAddr: "",
     p2pAnnounceDirty: false,
@@ -373,10 +380,10 @@ window.iunaApp = function iunaApp() {
 
     async refreshConfig() {
       this.config = await this.fetchJson("/api/config");
-      this.syncConfigState();
+      this.syncConfigState({ addressBookVersion: this.addressBookVersion });
     },
 
-    syncConfigState() {
+    syncConfigState(options = {}) {
       this.keepTrackOfMetrics = this.config.keep_track_of_metrics === true;
       this.recoveryVdfTopRankPercent = Number(
         this.config.recovery_vdf_top_rank_percent ??
@@ -384,6 +391,12 @@ window.iunaApp = function iunaApp() {
           this.recoveryVdfTopRankPercent
       );
       this.p2pAcceptInbound = this.config.p2p_accept_inbound === true;
+      if (
+        options.addressBookVersion === undefined ||
+        options.addressBookVersion >= this.addressBookVersion
+      ) {
+        this.addressBook = this.config.address_book || this.config.addressBook || {};
+      }
       if (!this.p2pAnnounceDirty) {
         this.p2pAnnounceAddr = this.config.p2p_announce_addr || "";
       }
@@ -592,6 +605,7 @@ window.iunaApp = function iunaApp() {
 
     async refreshNow(options = {}) {
       if (!this.canUseProtectedApi()) return;
+      const addressBookVersion = this.addressBookVersion;
       try {
         const [config, status, blocks, p2pMetrics, blockchainMetrics, networkHealth] = await Promise.all([
           this.fetchJson("/api/config"),
@@ -610,7 +624,7 @@ window.iunaApp = function iunaApp() {
           this.refreshPagedDataset("peer", { silent: options.silent === true }),
         ]);
         this.config = config;
-        this.syncConfigState();
+        this.syncConfigState({ addressBookVersion });
         if (!this.allowedTabs().includes(this.tab)) {
           this.setTab("wallet");
         }
@@ -1407,7 +1421,7 @@ window.iunaApp = function iunaApp() {
       const leader = this.status.mining?.current_leader ?? this.status.chain?.next_leader;
       if (!leader) return "-";
       if (leader === this.status.wallet_address) return "you";
-      return this.short(leader);
+      return this.shortAddressLabel(leader);
     },
 
     localMiningMempoolLabel() {
@@ -1752,6 +1766,101 @@ window.iunaApp = function iunaApp() {
       }
     },
 
+    addressBookEntries() {
+      return Object.entries(this.addressBook || {})
+        .map(([address, name]) => ({ address, name }))
+        .sort((left, right) => left.name.localeCompare(right.name) || left.address.localeCompare(right.address));
+    },
+
+    validAddressBookAddress(address) {
+      return /^[0-9a-fA-F]{64}$/.test(String(address ?? "").trim());
+    },
+
+    selectTransferContact(address) {
+      if (!address) return;
+      this.transferTo = address;
+      this.scheduleFeeEstimates();
+      this.closeAddressBookPicker();
+    },
+
+    openAddressBookModal(entry = null) {
+      this.addressBookEditingAddress = entry?.address || null;
+      this.addressBookDraftAddress = entry?.address || "";
+      this.addressBookDraftName = entry?.name || "";
+      this.addressBookModalOpen = true;
+    },
+
+    closeAddressBookModal() {
+      this.addressBookModalOpen = false;
+      this.addressBookEditingAddress = null;
+      this.addressBookDraftAddress = "";
+      this.addressBookDraftName = "";
+    },
+
+    openAddressBookPicker() {
+      if (this.addressBookEntries().length === 0) {
+        this.showFlash("No contacts saved yet", "error");
+        return;
+      }
+      this.addressBookPickerOpen = true;
+    },
+
+    closeAddressBookPicker() {
+      this.addressBookPickerOpen = false;
+    },
+
+    async saveAddressBookEntry() {
+      const address = this.addressBookDraftAddress.trim().toLowerCase();
+      const name = this.addressBookDraftName.trim();
+      if (!address || !name) {
+        this.showFlash("Address and name are required", "error");
+        return;
+      }
+      if (!this.validAddressBookAddress(address)) {
+        this.showFlash("Address must be a 64 character hex public key", "error");
+        return;
+      }
+      const oldAddress = this.addressBookEditingAddress;
+      if (this.addressBook?.[address] && address !== oldAddress) {
+        this.showFlash("Address is already saved", "error");
+        return;
+      }
+      try {
+        const fields = oldAddress ? { address, name, old_address: oldAddress } : { address, name };
+        await this.submitForm("/api/address-book", fields);
+        this.addressBookVersion += 1;
+        const nextBook = { ...(this.addressBook || {}) };
+        if (oldAddress && oldAddress !== address) delete nextBook[oldAddress];
+        nextBook[address] = name;
+        this.addressBook = nextBook;
+        this.config = { ...this.config, address_book: this.addressBook };
+        this.closeAddressBookModal();
+        this.showFlash(`Saved ${name}`, "success");
+      } catch (error) {
+        this.showFlash(error.message, "error");
+      }
+    },
+
+    editAddressBookEntry(entry) {
+      this.openAddressBookModal(entry);
+    },
+
+    async removeAddressBookEntry(entry) {
+      try {
+        await this.submitForm("/api/address-book", { address: entry.address }, "DELETE");
+        this.addressBookVersion += 1;
+        const nextBook = { ...(this.addressBook || {}) };
+        delete nextBook[entry.address];
+        this.addressBook = nextBook;
+        this.config = { ...this.config, address_book: nextBook };
+        if (this.addressBookEditingAddress === entry.address) this.closeAddressBookModal();
+        if (this.addressBookEntries().length === 0) this.closeAddressBookPicker();
+        this.showFlash(`Removed ${entry.name}`, "success");
+      } catch (error) {
+        this.showFlash(error.message, "error");
+      }
+    },
+
     async copyAddress() {
       try {
         await navigator.clipboard.writeText(this.setupAddress());
@@ -1788,6 +1897,19 @@ window.iunaApp = function iunaApp() {
       if (!value) return "-";
       if (value.length <= 16) return value;
       return `${value.slice(0, 8)}...${value.slice(-8)}`;
+    },
+
+    addressName(address) {
+      if (!address) return null;
+      return this.addressBook?.[address] || null;
+    },
+
+    addressLabel(address) {
+      return this.addressName(address) || address || "-";
+    },
+
+    shortAddressLabel(address) {
+      return this.addressName(address) || this.short(address);
     },
 
     txFrom(tx) {
@@ -1956,7 +2078,8 @@ window.iunaApp = function iunaApp() {
 
     txFeeRecipient(tx) {
       const context = this.selectedTransaction?.context || {};
-      return tx.blockFinalizer ?? tx.blockMiner ?? context.blockFinalizer ?? context.blockMiner ?? "future block finalizer";
+      const address = tx.blockFinalizer ?? tx.blockMiner ?? context.blockFinalizer ?? context.blockMiner;
+      return address ? this.addressLabel(address) : "future block finalizer";
     },
 
     selectedTransactionLabel() {
@@ -2075,7 +2198,7 @@ window.iunaApp = function iunaApp() {
     },
 
     blockFinalizerLabel(block) {
-      const finalizer = this.short(block.miner);
+      const finalizer = this.shortAddressLabel(block.miner);
       const owner = block.miner === this.status.wallet_address ? `${finalizer} (me)` : finalizer;
       return block.finalizer_mode === "recovery" ? `${owner} · Recovery` : owner;
     },

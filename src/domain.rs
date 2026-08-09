@@ -4660,7 +4660,7 @@ fn validate_genesis_burn_transaction(transaction: &Transaction) -> Result<()> {
     Ok(())
 }
 
-fn validate_address(address: &str, label: &str) -> Result<()> {
+pub fn validate_address(address: &str, label: &str) -> Result<()> {
     decode_hex_array::<PUBLIC_KEY_BYTES>(address)
         .with_context(|| format!("invalid {label} address"))?;
     Ok(())

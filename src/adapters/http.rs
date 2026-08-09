@@ -37,7 +37,7 @@ use crate::{
         BLINDED_REVEAL_BUNDLE_SIGNER_FEE_BPS, BlindedReveal, BlindedTransaction, Block,
         BurnLeaderRank, ChainSnapshot, Ledger, MINE_FINALIZER_FEE, MINE_REWARD, OutPoint,
         REVEAL_COMMITTEE_SIZE, RevealedBlindedTransaction, Transaction, TxInput, TxOutput, Wallet,
-        blinded_reveal_finalizer_fee, hex_hash, revealed_blinded_transactions,
+        blinded_reveal_finalizer_fee, hex_hash, revealed_blinded_transactions, validate_address,
     },
 };
 
@@ -183,6 +183,18 @@ struct TransferForm {
 #[derive(Debug, Deserialize)]
 struct PeerForm {
     peer: String,
+}
+
+#[derive(Debug, Deserialize)]
+struct AddressBookForm {
+    address: String,
+    name: String,
+    old_address: Option<String>,
+}
+
+#[derive(Debug, Deserialize)]
+struct AddressBookDeleteForm {
+    address: String,
 }
 
 #[derive(Debug, Deserialize)]
@@ -479,6 +491,10 @@ pub async fn serve(
         .route("/api/status", get(api_status))
         .route("/api/blocks", get(api_blocks))
         .route("/api/config", get(api_config).post(api_config_form))
+        .route(
+            "/api/address-book",
+            post(api_address_book_form).delete(api_address_book_delete_form),
+        )
         .route("/api/wallet/setup", get(api_wallet_setup))
         .route("/api/wallet/generate", post(api_wallet_generate_form))
         .route("/api/wallet/import", post(api_wallet_import_form))
@@ -1185,6 +1201,20 @@ async fn api_peer_delete_form(
     action_json(result)
 }
 
+async fn api_address_book_form(
+    State(state): State<HttpState>,
+    Form(form): Form<AddressBookForm>,
+) -> Json<ActionResponse> {
+    action_json(upsert_address_book_entry(&state, form.address, form.name, form.old_address).await)
+}
+
+async fn api_address_book_delete_form(
+    State(state): State<HttpState>,
+    Form(form): Form<AddressBookDeleteForm>,
+) -> Json<ActionResponse> {
+    action_json(remove_address_book_entry(&state, form.address).await)
+}
+
 async fn peer_form(State(state): State<HttpState>, Form(form): Form<PeerForm>) -> Response {
     match add_peer(&state, form.peer).await {
         Ok(()) => Redirect::to("/").into_response(),
@@ -1384,12 +1414,60 @@ async fn remove_peer(state: &HttpState, peer: String) -> Result<()> {
     config_store::save(&state.config_path, &config)
 }
 
+async fn upsert_address_book_entry(
+    state: &HttpState,
+    address: String,
+    name: String,
+    old_address: Option<String>,
+) -> Result<()> {
+    let address = validate_address_book_address(address)?;
+    let name = validate_address_book_name(name)?;
+    let old_address = old_address.map(validate_address_book_address).transpose()?;
+    let mut config = state.ui_config.lock().await;
+    if let Some(old_address) = old_address.as_deref() {
+        if old_address != address {
+            if config.address_book.contains_key(&address) {
+                bail!("address is already saved");
+            }
+            config.address_book.remove(old_address);
+        }
+    } else if config.address_book.contains_key(&address) {
+        bail!("address is already saved");
+    }
+    config.address_book.insert(address, name);
+    config_store::save(&state.config_path, &config)
+}
+
+async fn remove_address_book_entry(state: &HttpState, address: String) -> Result<()> {
+    let address = validate_address_book_address(address)?;
+    let mut config = state.ui_config.lock().await;
+    config.address_book.remove(&address);
+    config_store::save(&state.config_path, &config)
+}
+
 fn validate_peer_address(peer: String) -> Result<String> {
     let peer = peer.trim().to_string();
     if peer.is_empty() {
         bail!("peer address is required");
     }
     Ok(peer)
+}
+
+fn validate_address_book_address(address: String) -> Result<String> {
+    let address = address.trim().to_string();
+    if address.is_empty() {
+        bail!("address is required");
+    }
+    validate_address(&address, "address book")?;
+    Ok(address.to_ascii_lowercase())
+}
+
+fn validate_address_book_name(name: String) -> Result<String> {
+    let name = name.trim().to_string();
+    if name.is_empty() {
+        bail!("name is required");
+    }
+    Ok(name)
 }
 
 fn network_health(
@@ -3314,6 +3392,24 @@ const INDEX_HTML: &str = r#"<!doctype html>
     .compact-number-field input:focus { border-color: #d5f55f; outline: 2px solid rgba(213,245,95,.2); outline-offset: 2px; }
     .receive-address { display: grid; gap: 8px; }
     .address-box { border: 1px solid #2f363c; border-radius: 8px; padding: 11px; background: #111316; }
+    .address-book-list { display: grid; gap: 8px; margin-top: 12px; }
+    .address-book-row { width: 100%; display: grid; grid-template-columns: minmax(0, 1fr) auto; gap: 8px; align-items: center; text-align: left; border: 1px solid #2f363c; border-radius: 8px; padding: 9px; background: #111316; color: inherit; }
+    .address-book-row:hover { border-color: #4c565c; background: #15181b; }
+    .address-book-row > svg { width: 18px; height: 18px; stroke: currentColor; stroke-width: 2; fill: none; stroke-linecap: round; stroke-linejoin: round; color: #9fa8ad; }
+    .address-book-name { font-weight: 800; color: #eef6f8; overflow-wrap: anywhere; }
+    .address-book-actions { display: flex; gap: 6px; align-items: center; }
+    .address-book-modal { width: min(560px, 100%); }
+    .address-book-modal form { width: 100%; }
+    .address-book-modal form label { flex: 1 0 100%; }
+    .address-book-modal-actions { flex: 1 0 100%; width: 100%; display: flex; justify-content: flex-end; gap: 8px; margin-top: 12px; }
+    .address-book-picker-list { display: grid; gap: 8px; }
+    .address-book-picker-row { width: 100%; display: grid; gap: 3px; text-align: left; border: 1px solid #2f363c; border-radius: 8px; padding: 10px; background: #111316; color: inherit; }
+    .address-book-picker-row:hover { border-color: #4c565c; background: #15181b; }
+    .recipient-field { display: grid; grid-template-columns: minmax(0, 1fr) auto; gap: 8px; align-items: end; }
+    .icon-button { display: inline-grid; place-items: center; width: 38px; height: 38px; padding: 0; line-height: 0; border-radius: 8px; }
+    .icon-button svg { width: 19px; height: 19px; stroke: currentColor; stroke-width: 2; fill: none; stroke-linecap: round; stroke-linejoin: round; }
+    .modal-delete-button { color: #ffb4b4; }
+    input.invalid { border-color: #e36a6a; outline: 2px solid rgba(227,106,106,.16); outline-offset: 2px; }
     .panel-head { display: flex; justify-content: space-between; gap: 12px; align-items: center; margin-bottom: 12px; }
     .panel-head h2, .panel-head h3 { margin-bottom: 0; }
     .switch { display: inline-flex; grid-template-columns: none; align-items: center; gap: 8px; color: #d6dee2; font-weight: 700; }
@@ -3538,7 +3634,12 @@ const INDEX_HTML: &str = r#"<!doctype html>
           <div class="panel">
             <h3>Send</h3>
             <form @submit.prevent="sendTransfer">
-              <label>Recipient<input x-model="transferTo" @input="scheduleFeeEstimates" autocomplete="off" required></label>
+              <div class="recipient-field">
+                <label>Recipient<input x-model="transferTo" @input="scheduleFeeEstimates" autocomplete="off" required></label>
+                <button class="icon-button" type="button" @click="openAddressBookPicker()" title="Choose contact" aria-label="Choose contact">
+                  <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M4 5.5A2.5 2.5 0 0 1 6.5 3H20v18H6.5A2.5 2.5 0 0 1 4 18.5z"></path><path d="M8 7h8"></path><path d="M8 11h6"></path><path d="M8 15h4"></path></svg>
+                </button>
+              </div>
               <label>Amount<input x-model="transferAmount" @input="scheduleFeeEstimates" type="number" min="0.000001" step="0.000001" required></label>
               <label>Fee / byte<input x-model="transferFee" @input="scheduleFeeEstimates" type="number" min="0" step="0.000001" required></label>
               <div class="fee-preview" x-text="feeEstimateLabel('transfer')"></div>
@@ -3587,6 +3688,28 @@ const INDEX_HTML: &str = r#"<!doctype html>
               <div class="address-box"><code x-text="status.wallet_address || '-'"></code></div>
             </div>
           </div>
+          <div class="panel">
+            <div class="panel-head">
+              <h3>Address Book</h3>
+              <div class="address-book-actions">
+                <button class="icon-button" type="button" @click="openAddressBookModal()" title="Add contact" aria-label="Add contact">
+                  <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 5v14"></path><path d="M5 12h14"></path></svg>
+                </button>
+              </div>
+            </div>
+            <div class="address-book-list">
+              <template x-for="entry in addressBookEntries()" :key="entry.address">
+                <button class="address-book-row" type="button" @click="editAddressBookEntry(entry)" :title="`Edit ${entry.name}`">
+                  <div>
+                    <div class="address-book-name" x-text="entry.name"></div>
+                    <code class="tx-value hash" x-text="short(entry.address)"></code>
+                  </div>
+                  <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M9 18l6-6-6-6"></path></svg>
+                </button>
+              </template>
+              <div class="muted" x-show="addressBookEntries().length === 0">No saved addresses</div>
+            </div>
+          </div>
         </div>
         <div class="panel wallet-tx-panel">
           <div class="panel-head">
@@ -3615,8 +3738,8 @@ const INDEX_HTML: &str = r#"<!doctype html>
                   <div class="tx-field"><span class="tx-label">Fee</span><span class="tx-value money" x-text="txFeeLabel(tx)"></span></div>
                   <div class="tx-field"><span class="tx-label">Status</span><span class="tx-value text" x-text="txTitle(tx)"></span></div>
                   <div class="tx-field"><span class="tx-label">Time</span><span class="tx-value text" x-text="walletTxTimeLabel(tx)"></span></div>
-                  <div class="tx-field"><span class="tx-label">From</span><code class="tx-value hash" x-text="short(tx.from)"></code></div>
-                  <div class="tx-field" x-show="tx.to"><span class="tx-label">To</span><code class="tx-value hash" x-text="short(tx.to)"></code></div>
+                  <div class="tx-field"><span class="tx-label">From</span><code class="tx-value hash" x-text="shortAddressLabel(tx.from)"></code></div>
+                  <div class="tx-field" x-show="tx.to"><span class="tx-label">To</span><code class="tx-value hash" x-text="shortAddressLabel(tx.to)"></code></div>
                   <div class="tx-field" x-show="isMineTx(tx)"><span class="tx-label">Proof Bits</span><span class="tx-value number"><span x-text="txProofBits(tx) ?? '-'"></span> / <span x-text="txDifficultyBits(tx) ?? '-'"></span></span></div>
                   <div class="tx-field" x-show="isMineTx(tx)"><span class="tx-label">Proof Hash</span><code class="tx-value hash" x-text="short(txProofHash(tx))"></code></div>
                   <div class="tx-field"><span class="tx-label">Signature</span><code class="tx-value hash" x-text="short(tx.signature)"></code></div>
@@ -3894,7 +4017,7 @@ const INDEX_HTML: &str = r#"<!doctype html>
                 <div class="detail-kv">
                   <div class="key">Finalizer</div>
                   <button class="detail-link" type="button" @click="openBurnLeaderRanksModal(selectedBlock)" title="Burn leader ranks">
-                    <code x-text="short(selectedBlock.miner)"></code>
+                    <code x-text="shortAddressLabel(selectedBlock.miner)"></code>
                   </button>
                 </div>
                 <div class="detail-kv"><div class="key">Mode</div><div x-text="selectedBlock.finalizer_mode === 'recovery' ? 'Recovery' : `Rank ${selectedBlock.finalizer_rank ?? 0}`"></div></div>
@@ -3913,14 +4036,14 @@ const INDEX_HTML: &str = r#"<!doctype html>
               <div class="tx-list">
                 <h3>Transactions</h3>
                 <div class="tx-section">
-                  <div class="tx-section-title"><span>Envelope</span><span class="tx-section-meta" x-text="short(selectedBlock.miner)"></span></div>
+                  <div class="tx-section-title"><span>Envelope</span><span class="tx-section-meta" x-text="shortAddressLabel(selectedBlock.miner)"></span></div>
                   <template x-for="tx in selectedBlock.transactions" :key="tx.signature">
                     <div class="tx-card" role="button" tabindex="0" @click="openTransactionModal(tx, { source: 'Envelope', blockHeight: selectedBlock.height, blockFinalizer: selectedBlock.miner })" @keydown.enter.prevent="openTransactionModal(tx, { source: 'Envelope', blockHeight: selectedBlock.height, blockFinalizer: selectedBlock.miner })" @keydown.space.prevent="openTransactionModal(tx, { source: 'Envelope', blockHeight: selectedBlock.height, blockFinalizer: selectedBlock.miner })">
                       <span class="pill" :class="txPillClass(tx)" x-text="txPillLabel(tx)"></span>
                       <div class="tx-field" x-show="!isBlindedMempoolItem(tx)"><span class="tx-label">Amount</span><span class="tx-value money">IUNA <span x-text="amountLabel(txAmount(tx))"></span></span></div>
                       <div class="tx-field"><span class="tx-label">Fee</span><span class="tx-value money" x-text="txFeeLabel(tx)"></span></div>
-                      <div class="tx-field" x-show="!isBlindedMempoolItem(tx)"><span class="tx-label">From</span><code class="tx-value hash" x-text="short(txFrom(tx))"></code></div>
-                      <div class="tx-field" x-show="txTo(tx)"><span class="tx-label">To</span><code class="tx-value hash" x-text="short(txTo(tx))"></code></div>
+                      <div class="tx-field" x-show="!isBlindedMempoolItem(tx)"><span class="tx-label">From</span><code class="tx-value hash" x-text="shortAddressLabel(txFrom(tx))"></code></div>
+                      <div class="tx-field" x-show="txTo(tx)"><span class="tx-label">To</span><code class="tx-value hash" x-text="shortAddressLabel(txTo(tx))"></code></div>
                       <div class="tx-field" x-show="isBlindedMempoolItem(tx)"><span class="tx-label">Commitment</span><code class="tx-value hash" x-text="short(tx.commitment || tx.signature)"></code></div>
                       <div class="tx-field" x-show="tx.encrypted_size || tx.encryptedSize"><span class="tx-label">Bytes</span><span class="tx-value number" x-text="tx.encrypted_size || tx.encryptedSize"></span></div>
                       <div class="tx-field" x-show="tx.expires_at_height || tx.expiresAtHeight"><span class="tx-label">Expires</span><span class="tx-value number" x-text="tx.expires_at_height || tx.expiresAtHeight"></span></div>
@@ -3933,14 +4056,14 @@ const INDEX_HTML: &str = r#"<!doctype html>
                 </div>
                 <template x-for="bundle in selectedBlock.reveal_bundles || selectedBlock.revealBundles || []" :key="bundle.hash">
                   <details class="tx-section">
-                    <summary class="tx-section-title"><span x-text="`Reveal bundle ${bundle.slot}`"></span><span class="tx-section-meta"><span x-text="short(bundle.member)"></span> · <span x-text="bundle.byte_size || bundle.byteSize || 0"></span>B</span></summary>
+                    <summary class="tx-section-title"><span x-text="`Reveal bundle ${bundle.slot}`"></span><span class="tx-section-meta"><span x-text="shortAddressLabel(bundle.member)"></span> · <span x-text="bundle.byte_size || bundle.byteSize || 0"></span>B</span></summary>
                     <template x-for="tx in bundle.reveals" :key="tx.signature">
                       <div class="tx-card" role="button" tabindex="0" @click="openTransactionModal(tx, { source: 'Reveal bundle', blockHeight: selectedBlock.height, blockFinalizer: bundle.member })" @keydown.enter.prevent="openTransactionModal(tx, { source: 'Reveal bundle', blockHeight: selectedBlock.height, blockFinalizer: bundle.member })" @keydown.space.prevent="openTransactionModal(tx, { source: 'Reveal bundle', blockHeight: selectedBlock.height, blockFinalizer: bundle.member })">
                         <span class="pill" :class="txPillClass(tx)" x-text="txPillLabel(tx)"></span>
                         <div class="tx-field" x-show="!isBlindedMempoolItem(tx)"><span class="tx-label">Amount</span><span class="tx-value money">IUNA <span x-text="amountLabel(txAmount(tx))"></span></span></div>
                         <div class="tx-field"><span class="tx-label">Fee</span><span class="tx-value money" x-text="txFeeLabel(tx)"></span></div>
-                        <div class="tx-field" x-show="!isBlindedMempoolItem(tx)"><span class="tx-label">From</span><code class="tx-value hash" x-text="short(txFrom(tx))"></code></div>
-                        <div class="tx-field" x-show="txTo(tx)"><span class="tx-label">To</span><code class="tx-value hash" x-text="short(txTo(tx))"></code></div>
+                        <div class="tx-field" x-show="!isBlindedMempoolItem(tx)"><span class="tx-label">From</span><code class="tx-value hash" x-text="shortAddressLabel(txFrom(tx))"></code></div>
+                        <div class="tx-field" x-show="txTo(tx)"><span class="tx-label">To</span><code class="tx-value hash" x-text="shortAddressLabel(txTo(tx))"></code></div>
                         <div class="tx-field" x-show="isBlindedMempoolItem(tx)"><span class="tx-label">Commitment</span><code class="tx-value hash" x-text="short(tx.commitment || tx.signature)"></code></div>
                         <div class="tx-field" x-show="!isBlindedMempoolItem(tx)"><span class="tx-label">Signature</span><code class="tx-value hash" x-text="short(tx.signature)"></code></div>
                       </div>
@@ -3969,8 +4092,8 @@ const INDEX_HTML: &str = r#"<!doctype html>
                 </div>
                 <div class="tx-field" x-show="!isBlindedMempoolItem(tx)"><span class="tx-label">Amount</span><span class="tx-value money">IUNA <span x-text="amountLabel(txAmount(tx))"></span></span></div>
                 <div class="tx-field"><span class="tx-label">Fee</span><span class="tx-value money" x-text="txFeeLabel(tx)"></span></div>
-                <div class="tx-field" x-show="!isBlindedMempoolItem(tx)"><span class="tx-label">From</span><code class="tx-value hash" x-text="short(txFrom(tx))"></code></div>
-                <div class="tx-field" x-show="txTo(tx)"><span class="tx-label">To</span><code class="tx-value hash" x-text="short(txTo(tx))"></code></div>
+                <div class="tx-field" x-show="!isBlindedMempoolItem(tx)"><span class="tx-label">From</span><code class="tx-value hash" x-text="shortAddressLabel(txFrom(tx))"></code></div>
+                <div class="tx-field" x-show="txTo(tx)"><span class="tx-label">To</span><code class="tx-value hash" x-text="shortAddressLabel(txTo(tx))"></code></div>
                 <div class="tx-field" x-show="isBlindedMempoolItem(tx)"><span class="tx-label">Commitment</span><code class="tx-value hash" x-text="short(tx.commitment || tx.signature)"></code></div>
                 <div class="tx-field" x-show="tx.encrypted_size || tx.encryptedSize"><span class="tx-label">Bytes</span><span class="tx-value number" x-text="tx.encrypted_size || tx.encryptedSize"></span></div>
                 <div class="tx-field" x-show="tx.expires_at_height || tx.expiresAtHeight"><span class="tx-label">Expires</span><span class="tx-value number" x-text="tx.expires_at_height || tx.expiresAtHeight"></span></div>
@@ -4162,7 +4285,7 @@ const INDEX_HTML: &str = r#"<!doctype html>
           <div class="wallet-utxo-row">
             <div class="utxo-node-label"><span>UTXO</span><span class="utxo-node-amount">IUNA <span x-text="amountLabel(utxo.amount)"></span></span></div>
             <div class="tx-field"><span class="tx-label">Outpoint</span><code class="tx-value hash" x-text="txInputOutpoint({ outpoint: utxo.outpoint })"></code></div>
-            <div class="tx-field"><span class="tx-label">Address</span><code class="tx-value hash" x-text="utxo.address"></code></div>
+            <div class="tx-field"><span class="tx-label">Address</span><code class="tx-value hash" x-text="addressLabel(utxo.address)"></code></div>
           </div>
         </template>
         <div class="dataset-loader" x-show="walletUtxoPage.loading" aria-hidden="true">
@@ -4223,7 +4346,7 @@ const INDEX_HTML: &str = r#"<!doctype html>
       <div class="tx-modal-head">
         <div class="tx-modal-title">
           <h2 id="burn-ranks-title" x-text="burnLeaderRanksTitle(selectedBurnLeaderBlock)"></h2>
-          <div class="tx-field"><span class="tx-label">Finalizer</span><code class="tx-value hash" x-text="selectedBurnLeaderBlock ? selectedBurnLeaderBlock.miner : '-'"></code></div>
+          <div class="tx-field"><span class="tx-label">Finalizer</span><code class="tx-value hash" x-text="selectedBurnLeaderBlock ? addressLabel(selectedBurnLeaderBlock.miner) : '-'"></code></div>
         </div>
         <button type="button" @click="closeBurnLeaderRanksModal">Close</button>
       </div>
@@ -4232,7 +4355,7 @@ const INDEX_HTML: &str = r#"<!doctype html>
           <div class="rank-row">
             <div class="rank-number" x-text="burnLeaderRankLabel(rank)"></div>
             <div class="rank-details">
-              <div class="tx-field"><span class="tx-label">Owner</span><code class="tx-value hash" x-text="rank.owner"></code></div>
+              <div class="tx-field"><span class="tx-label">Owner</span><code class="tx-value hash" x-text="addressLabel(rank.owner)"></code></div>
               <div class="tx-field"><span class="tx-label">Burn</span><span class="tx-value money">IUNA <span x-text="amountLabel(rank.amount)"></span></span></div>
               <div class="tx-field"><span class="tx-label">Ticket</span><code class="tx-value hash" x-text="short(rank.ticket_id ?? rank.ticketId)"></code></div>
               <div class="tx-field"><span class="tx-label">Eligible</span><span class="tx-value number" x-text="burnLeaderEligibilityLabel(rank)"></span></div>
@@ -4257,8 +4380,8 @@ const INDEX_HTML: &str = r#"<!doctype html>
         <div class="tx-field"><span class="tx-label">Source</span><span class="tx-value text" x-text="selectedTransactionLabel()"></span></div>
         <div class="tx-field" x-show="!isBlindedMempoolItem(selectedTransaction?.tx)"><span class="tx-label">Amount</span><span class="tx-value money">IUNA <span x-text="amountLabel(txAmount(selectedTransaction?.tx || {}))"></span></span></div>
         <div class="tx-field"><span class="tx-label">Fee</span><span class="tx-value money" x-text="txFeeLabel(selectedTransaction?.tx)"></span></div>
-        <div class="tx-field" x-show="!isBlindedMempoolItem(selectedTransaction?.tx)"><span class="tx-label">From</span><code class="tx-value hash" x-text="txFrom(selectedTransaction?.tx || {})"></code></div>
-        <div class="tx-field" x-show="txTo(selectedTransaction?.tx || {})"><span class="tx-label">To</span><code class="tx-value hash" x-text="txTo(selectedTransaction?.tx || {})"></code></div>
+        <div class="tx-field" x-show="!isBlindedMempoolItem(selectedTransaction?.tx)"><span class="tx-label">From</span><code class="tx-value hash" x-text="addressLabel(txFrom(selectedTransaction?.tx || {}))"></code></div>
+        <div class="tx-field" x-show="txTo(selectedTransaction?.tx || {})"><span class="tx-label">To</span><code class="tx-value hash" x-text="addressLabel(txTo(selectedTransaction?.tx || {}))"></code></div>
         <div class="tx-field" x-show="isBlindedMempoolItem(selectedTransaction?.tx) || selectedTransaction?.tx?.commitment"><span class="tx-label">Commitment</span><code class="tx-value hash" x-text="selectedTransaction?.tx?.commitment || selectedTransaction?.tx?.signature || '-'"></code></div>
         <div class="tx-field" x-show="selectedTransaction?.tx?.encrypted_size || selectedTransaction?.tx?.encryptedSize"><span class="tx-label">Encrypted Bytes</span><span class="tx-value number" x-text="selectedTransaction?.tx?.encrypted_size || selectedTransaction?.tx?.encryptedSize"></span></div>
         <div class="tx-field" x-show="selectedTransaction?.tx?.expires_at_height || selectedTransaction?.tx?.expiresAtHeight"><span class="tx-label">Expires</span><span class="tx-value number" x-text="selectedTransaction?.tx?.expires_at_height || selectedTransaction?.tx?.expiresAtHeight"></span></div>
@@ -4274,7 +4397,7 @@ const INDEX_HTML: &str = r#"<!doctype html>
               <div class="utxo-node-label"><span>Input <span x-text="index + 1"></span></span><span>spent</span></div>
               <div class="utxo-node-ref" x-text="txInputOutpoint(input)"></div>
               <div class="tx-field"><span class="tx-label">Value</span><span class="tx-value money" x-text="txInputAmountLabel(input)"></span></div>
-              <div class="tx-field"><span class="tx-label">Owner</span><code class="tx-value hash" x-text="input.owner"></code></div>
+              <div class="tx-field"><span class="tx-label">Owner</span><code class="tx-value hash" x-text="addressLabel(input.owner)"></code></div>
               <div class="tx-field"><span class="tx-label">Sig</span><code class="tx-value hash" x-text="short(input.signature)"></code></div>
             </div>
           </template>
@@ -4288,7 +4411,7 @@ const INDEX_HTML: &str = r#"<!doctype html>
               <div class="utxo-node-label"><span x-text="output.label"></span><span x-text="output.kind"></span></div>
               <div class="utxo-node-amount">IUNA <span x-text="amountLabel(output.amount)"></span></div>
               <template x-if="output.address">
-                <div class="tx-field"><span class="tx-label">To</span><code class="tx-value hash" x-text="output.address"></code></div>
+                <div class="tx-field"><span class="tx-label">To</span><code class="tx-value hash" x-text="addressLabel(output.address)"></code></div>
               </template>
               <template x-if="output.detail">
                 <div class="tx-field"><span class="tx-label" x-text="output.detailLabel"></span><code class="tx-value hash" x-text="output.detail"></code></div>
@@ -4297,6 +4420,52 @@ const INDEX_HTML: &str = r#"<!doctype html>
           </template>
           <div class="tx-modal-empty" x-show="txVisualOutputs(selectedTransaction?.tx || {}).length === 0">No outputs</div>
         </div>
+      </div>
+    </section>
+  </div>
+  <div class="setup-overlay transaction-overlay" x-show="addressBookModalOpen" x-transition.opacity @click.self="closeAddressBookModal()" role="dialog" aria-modal="true" aria-label="Address Book">
+    <section class="tx-modal address-book-modal">
+      <div class="tx-modal-head">
+        <div class="tx-modal-title">
+          <span class="pill">Address Book</span>
+        </div>
+        <button class="icon-button" type="button" @click="closeAddressBookModal()" title="Close" aria-label="Close">
+          <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M18 6 6 18"></path><path d="m6 6 12 12"></path></svg>
+        </button>
+      </div>
+      <form @submit.prevent="saveAddressBookEntry">
+        <label>Name<input x-model="addressBookDraftName" autocomplete="off" required></label>
+        <label>Address<input x-model="addressBookDraftAddress" autocomplete="off" required :class="{ invalid: addressBookDraftAddress && !validAddressBookAddress(addressBookDraftAddress) }"></label>
+        <div class="setup-feedback error" x-show="addressBookDraftAddress && !validAddressBookAddress(addressBookDraftAddress)">Address must be a 64 character hex public key</div>
+        <div class="address-book-modal-actions">
+          <button class="icon-button modal-delete-button" type="button" x-show="addressBookEditingAddress" @click="removeAddressBookEntry({ address: addressBookEditingAddress, name: addressBookDraftName || addressBookEditingAddress })" title="Delete contact" aria-label="Delete contact">
+            <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M4 7h16"></path><path d="M10 11v6"></path><path d="M14 11v6"></path><path d="M6 7l1 14h10l1-14"></path><path d="M9 7V4h6v3"></path></svg>
+          </button>
+          <button class="primary icon-button" type="submit" title="Save contact" aria-label="Save contact">
+            <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M19 21H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h11l5 5v11a2 2 0 0 1-2 2Z"></path><path d="M7 3v6h8"></path><path d="M7 21v-8h10v8"></path></svg>
+          </button>
+        </div>
+      </form>
+    </section>
+  </div>
+  <div class="setup-overlay transaction-overlay" x-show="addressBookPickerOpen" x-transition.opacity @click.self="closeAddressBookPicker()" role="dialog" aria-modal="true" aria-labelledby="address-book-picker-title">
+    <section class="tx-modal address-book-modal">
+      <div class="tx-modal-head">
+        <div class="tx-modal-title">
+          <span class="pill">Send</span>
+          <h2 id="address-book-picker-title">Choose Contact</h2>
+        </div>
+        <button class="icon-button" type="button" @click="closeAddressBookPicker()" title="Close" aria-label="Close">
+          <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M18 6 6 18"></path><path d="m6 6 12 12"></path></svg>
+        </button>
+      </div>
+      <div class="address-book-picker-list">
+        <template x-for="entry in addressBookEntries()" :key="entry.address">
+          <button class="address-book-picker-row" type="button" @click="selectTransferContact(entry.address)" :title="`Send to ${entry.name}`">
+            <span class="address-book-name" x-text="entry.name"></span>
+            <code class="tx-value hash" x-text="short(entry.address)"></code>
+          </button>
+        </template>
       </div>
     </section>
   </div>
@@ -5034,6 +5203,115 @@ mod tests {
         let config = config_store::load_or_create(&config_path).unwrap();
         assert!(config.peers.is_empty());
         assert!(state.peers.lock().await.addresses().is_empty());
+    }
+
+    #[tokio::test]
+    async fn address_book_updates_config_file() {
+        let dir = tempfile::tempdir().unwrap();
+        let config_path = dir.path().join("config.json");
+        let state = auth_test_state(
+            config_path.clone(),
+            UiConfig {
+                setup_complete: true,
+                ..UiConfig::default()
+            },
+        )
+        .await;
+        let alice = Wallet::from_seed("address-book-alice");
+        let bob = Wallet::from_seed("address-book-bob");
+
+        super::upsert_address_book_entry(
+            &state,
+            format!(" {} ", alice.address().to_ascii_uppercase()),
+            " Alice ".to_string(),
+            None,
+        )
+        .await
+        .unwrap();
+        let config = config_store::load_or_create(&config_path).unwrap();
+        assert_eq!(
+            config.address_book.get(alice.address()),
+            Some(&"Alice".to_string())
+        );
+
+        super::upsert_address_book_entry(
+            &state,
+            alice.address().to_string(),
+            "Alice Prime".to_string(),
+            Some(alice.address().to_string()),
+        )
+        .await
+        .unwrap();
+        let config = config_store::load_or_create(&config_path).unwrap();
+        assert_eq!(
+            config.address_book.get(alice.address()),
+            Some(&"Alice Prime".to_string())
+        );
+
+        let error = super::upsert_address_book_entry(
+            &state,
+            alice.address().to_string(),
+            "Alice Duplicate".to_string(),
+            None,
+        )
+        .await
+        .unwrap_err();
+        assert!(format!("{error:#}").contains("address is already saved"));
+
+        let carol = Wallet::from_seed("address-book-carol");
+        super::upsert_address_book_entry(
+            &state,
+            carol.address().to_string(),
+            "Carol".to_string(),
+            None,
+        )
+        .await
+        .unwrap();
+        let error = super::upsert_address_book_entry(
+            &state,
+            carol.address().to_string(),
+            "Bob As Carol".to_string(),
+            Some(alice.address().to_string()),
+        )
+        .await
+        .unwrap_err();
+        assert!(format!("{error:#}").contains("address is already saved"));
+
+        super::upsert_address_book_entry(
+            &state,
+            bob.address().to_string(),
+            "Bob".to_string(),
+            Some(alice.address().to_string()),
+        )
+        .await
+        .unwrap();
+        let config = config_store::load_or_create(&config_path).unwrap();
+        assert!(!config.address_book.contains_key(alice.address()));
+        assert_eq!(
+            config.address_book.get(bob.address()),
+            Some(&"Bob".to_string())
+        );
+        assert_eq!(
+            config.address_book.get(carol.address()),
+            Some(&"Carol".to_string())
+        );
+
+        let error = super::upsert_address_book_entry(
+            &state,
+            "iuna-address".to_string(),
+            "Not Alice".to_string(),
+            None,
+        )
+        .await
+        .unwrap_err();
+        assert!(format!("{error:#}").contains("invalid address book address"));
+
+        super::remove_address_book_entry(&state, bob.address().to_string())
+            .await
+            .unwrap();
+        let config = config_store::load_or_create(&config_path).unwrap();
+        assert!(!config.address_book.contains_key(bob.address()));
+        assert!(config.address_book.contains_key(carol.address()));
     }
 
     #[tokio::test]
@@ -5805,6 +6083,41 @@ mod tests {
         assert!(super::INDEX_HTML.contains("x-text=\"txFeeLabel(selectedTransaction?.tx)\""));
         assert!(super::INDEX_HTML.contains("<span class=\"tx-label\">Time</span>"));
         assert!(super::INDEX_HTML.contains("x-text=\"walletTxTimeLabel(tx)\""));
+    }
+
+    #[test]
+    fn wallet_screen_includes_address_book_alias_controls() {
+        let app_js = include_str!("../../www/assets/iuna-ui.js");
+        assert!(super::INDEX_HTML.contains("<h3>Address Book</h3>"));
+        assert!(super::INDEX_HTML.contains("saveAddressBookEntry"));
+        assert!(super::INDEX_HTML.contains("addressBookEntries()"));
+        assert!(super::INDEX_HTML.contains("openAddressBookModal()"));
+        assert!(super::INDEX_HTML.contains("addressBookModalOpen"));
+        assert!(super::INDEX_HTML.contains("openAddressBookPicker()"));
+        assert!(super::INDEX_HTML.contains("addressBookPickerOpen"));
+        assert!(super::INDEX_HTML.contains("selectTransferContact(entry.address)"));
+        assert!(super::INDEX_HTML.contains("editAddressBookEntry(entry)"));
+        assert!(
+            super::INDEX_HTML
+                .contains("removeAddressBookEntry({ address: addressBookEditingAddress")
+        );
+        assert!(super::INDEX_HTML.contains("aria-label=\"Choose contact\""));
+        assert!(super::INDEX_HTML.contains("aria-label=\"Delete contact\""));
+        assert!(super::INDEX_HTML.contains("shortAddressLabel(tx.from)"));
+        assert!(super::INDEX_HTML.contains("addressLabel(input.owner)"));
+        assert!(app_js.contains("addressBook: {}"));
+        assert!(app_js.contains("addressBookVersion: 0"));
+        assert!(app_js.contains("addressBookPickerOpen: false"));
+        assert!(app_js.contains("this.config.address_book || this.config.addressBook"));
+        assert!(app_js.contains("options.addressBookVersion >= this.addressBookVersion"));
+        assert!(app_js.contains("async saveAddressBookEntry()"));
+        assert!(app_js.contains("Address is already saved"));
+        assert!(app_js.contains("validAddressBookAddress(address)"));
+        assert!(app_js.contains("openAddressBookPicker()"));
+        assert!(app_js.contains("await this.submitForm(\"/api/address-book\""));
+        assert!(app_js.contains("\"/api/address-book\""));
+        assert!(app_js.contains("addressLabel(address)"));
+        assert!(app_js.contains("shortAddressLabel(address)"));
     }
 
     #[test]

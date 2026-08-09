@@ -1,6 +1,7 @@
 #[cfg(unix)]
 use std::os::unix::fs::OpenOptionsExt;
 use std::{
+    collections::BTreeMap,
     fs::{self, File, OpenOptions},
     io::Write,
     path::Path,
@@ -35,6 +36,7 @@ pub struct UiConfig {
     pub p2p_accept_inbound: bool,
     pub p2p_announce_addr: Option<String>,
     pub peers: Vec<String>,
+    pub address_book: BTreeMap<String, String>,
 }
 
 impl Default for UiConfig {
@@ -52,6 +54,7 @@ impl Default for UiConfig {
             p2p_accept_inbound: false,
             p2p_announce_addr: None,
             peers: Vec::new(),
+            address_book: BTreeMap::new(),
         }
     }
 }
@@ -84,6 +87,8 @@ struct ConfigFile {
     p2p_announce_addr: Option<String>,
     #[serde(default)]
     peers: Vec<String>,
+    #[serde(default)]
+    address_book: BTreeMap<String, String>,
 }
 
 pub fn load_or_create(path: &Path) -> Result<UiConfig> {
@@ -117,6 +122,7 @@ pub fn save(path: &Path, config: &UiConfig) -> Result<()> {
         p2p_accept_inbound: Some(config.p2p_accept_inbound),
         p2p_announce_addr: config.p2p_announce_addr.clone(),
         peers: config.peers.clone(),
+        address_book: config.address_book.clone(),
     };
     let bytes = serde_json::to_vec_pretty(&stored).context("failed to serialize config file")?;
     let mut file = create_config_file(path)?;
@@ -173,6 +179,7 @@ fn load(path: &Path) -> Result<UiConfig> {
         p2p_accept_inbound,
         p2p_announce_addr: stored.p2p_announce_addr,
         peers: stored.peers,
+        address_book: stored.address_book,
     })
 }
 
@@ -228,6 +235,7 @@ mod tests {
         assert!(stored.contains("\"p2p_accept_inbound\": false"));
         assert!(stored.contains("\"p2p_announce_addr\": null"));
         assert!(stored.contains("\"peers\": []"));
+        assert!(stored.contains("\"address_book\": {}"));
     }
 
     #[test]
@@ -249,6 +257,7 @@ mod tests {
                 p2p_accept_inbound: true,
                 p2p_announce_addr: Some("203.0.113.10:9444".to_string()),
                 peers: vec!["127.0.0.1:9444".to_string()],
+                address_book: [("iuna-address".to_string(), "Alice".to_string())].into(),
                 ..UiConfig::default()
             },
         )
@@ -269,6 +278,10 @@ mod tests {
             Some("203.0.113.10:9444")
         );
         assert_eq!(config.peers, vec!["127.0.0.1:9444"]);
+        assert_eq!(
+            config.address_book.get("iuna-address"),
+            Some(&"Alice".to_string())
+        );
     }
 
     #[test]
@@ -309,6 +322,7 @@ mod tests {
         assert!(!config.keep_track_of_metrics);
         assert!(!config.p2p_accept_inbound);
         assert_eq!(config.peers, vec!["127.0.0.1:9444"]);
+        assert!(config.address_book.is_empty());
     }
 
     #[test]
