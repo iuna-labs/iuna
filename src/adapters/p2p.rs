@@ -42,6 +42,7 @@ const MAX_INBOUND_SESSIONS_PER_IP: usize = 8;
 const MAX_INBOUND_ACCEPTS_PER_IP_PER_WINDOW: usize = 24;
 const INBOUND_ACCEPT_RATE_WINDOW_MS: u64 = 10_000;
 const PEER_QUEUE_SIZE: usize = 256;
+const STALE_INBOUND_PEER_RETENTION_MS: u64 = 60 * 60 * 1_000;
 const CONNECT_TIMEOUT: Duration = Duration::from_secs(5);
 const HANDSHAKE_TIMEOUT: Duration = Duration::from_secs(5);
 const SESSION_SYNC_INTERVAL: Duration = Duration::from_secs(2);
@@ -492,11 +493,6 @@ impl GossipNetwork {
                 Ok(()) => {}
                 Err(mpsc::error::TrySendError::Full(_)) => {
                     P2pMetricsCounters::inc(&self.inner.metrics.outbound_queue_full);
-                    self.inner
-                        .peers
-                        .lock()
-                        .await
-                        .record_error(&peer, "outbound gossip queue is full");
                 }
                 Err(mpsc::error::TrySendError::Closed(_)) => {
                     P2pMetricsCounters::inc(&self.inner.metrics.outbound_queue_closed);
@@ -562,6 +558,11 @@ impl GossipNetwork {
     }
 
     async fn ensure_outbound_sessions(&self) {
+        self.inner
+            .peers
+            .lock()
+            .await
+            .prune_stale_inbound_peers_at(crate::app::now_ms(), STALE_INBOUND_PEER_RETENTION_MS);
         let addresses = self
             .inner
             .peers
@@ -2754,6 +2755,62 @@ mod tests {
         assert_eq!(snapshot.blinded_reveal_envelopes_received, 1);
         assert_eq!(snapshot.blinded_reveals_received, 1);
         assert_eq!(snapshot.control_envelopes_received, 1);
+    }
+
+    #[tokio::test]
+    async fn full_outbound_queue_is_metric_not_peer_error() {
+        let wallet = Wallet::from_seed("full-outbound-queue");
+        let node = Arc::new(tokio::sync::Mutex::new(node(
+            "full-outbound-queue",
+            wallet.clone(),
+            allocations(&[wallet], 1_000),
+        )));
+        let peers = Arc::new(tokio::sync::Mutex::new(PeerBook::from_addresses(vec![
+            "127.0.0.1:9444".to_string(),
+        ])));
+        let network = super::GossipNetwork {
+            inner: Arc::new(super::GossipNetworkInner {
+                node,
+                peers: Arc::clone(&peers),
+                listen_addr: "127.0.0.1:9544".parse().unwrap(),
+                p2p_announce_addr: tokio::sync::Mutex::new(None),
+                node_id: super::new_node_id(),
+                accept_task: tokio::sync::Mutex::new(None),
+                sessions: tokio::sync::Mutex::new(BTreeMap::new()),
+                inbound_limiter: Arc::new(
+                    StdMutex::new(super::InboundConnectionLimiter::default()),
+                ),
+                metrics: super::P2pMetricsCounters::default(),
+            }),
+        };
+        let (sender, _receiver) = tokio::sync::mpsc::channel(1);
+        sender
+            .try_send(vec![GossipEnvelope::PeerStatus {
+                height: 1,
+                tip_hash: "queued".to_string(),
+                time_ms: 1_000,
+            }])
+            .unwrap();
+        network
+            .inner
+            .sessions
+            .lock()
+            .await
+            .insert("127.0.0.1:9444".to_string(), sender);
+
+        network
+            .broadcast(vec![GossipEnvelope::PeerStatus {
+                height: 2,
+                tip_hash: "new".to_string(),
+                time_ms: 2_000,
+            }])
+            .await
+            .unwrap();
+
+        assert_eq!(network.metrics().outbound_queue_full, 1);
+        let peer = peers.lock().await.list().pop().unwrap();
+        assert_eq!(peer.last_error, None);
+        assert_eq!(peer.last_error_ms, None);
     }
 
     #[tokio::test]

@@ -2169,6 +2169,18 @@ impl PeerBook {
         self.peers.values().cloned().collect()
     }
 
+    pub fn prune_stale_inbound_peers_at(&mut self, now_ms: u64, max_age_ms: u64) -> usize {
+        let before = self.peers.len();
+        self.peers.retain(|_, peer| {
+            if peer.direction != PeerDirection::Inbound || peer.is_banned_at(now_ms) {
+                return true;
+            }
+            peer.last_contact_ms
+                .is_some_and(|last_contact| now_ms.saturating_sub(last_contact) <= max_age_ms)
+        });
+        before.saturating_sub(self.peers.len())
+    }
+
     pub fn record_sent(&mut self, address: &str, count: u64) {
         let now = now_ms();
         let peer = self.ensure(address, PeerDirection::Outbound);

@@ -2171,6 +2171,24 @@ fn peer_book_reports_only_configured_outbound_peers_as_outbound() {
 }
 
 #[test]
+fn peer_book_prunes_stale_inbound_observations() {
+    let mut peers = PeerBook::from_addresses(vec!["127.0.0.1:9444".to_string()]);
+    peers.record_status("127.0.0.1:9444", 1, "tip".to_string());
+    peers.observe_inbound_peer("127.0.0.1:56666");
+    peers.record_received("127.0.0.1:57777", 1);
+
+    assert_eq!(
+        peers.prune_stale_inbound_peers_at(iuna::app::now_ms(), 60_000),
+        1
+    );
+    let listed = peers.list();
+
+    assert!(listed.iter().any(|peer| peer.address == "127.0.0.1:9444"));
+    assert!(listed.iter().any(|peer| peer.address == "127.0.0.1:57777"));
+    assert!(!listed.iter().any(|peer| peer.address == "127.0.0.1:56666"));
+}
+
+#[test]
 fn peer_book_bans_misbehaving_peer_temporarily_and_recovers_on_success() {
     let mut peers = PeerBook::from_addresses(vec!["127.0.0.1:9444".to_string()]);
 
