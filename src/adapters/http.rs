@@ -6168,6 +6168,19 @@ mod tests {
         assert!(app_js.contains("if (this.refreshPromise)"));
         assert!(app_js.contains("return this.refreshPromise;"));
         assert!(app_js.contains("options.force === true"));
+        assert!(app_js.contains("this.setTab(this.tabFromHash());"));
+        assert!(
+            app_js.contains("const shouldLoadBlocks = tab === \"chain\" || tab === \"mining\";")
+        );
+        assert!(app_js.contains("const shouldLoadP2pMetrics = tab === \"p2p\";"));
+        assert!(app_js.contains("const shouldLoadMetrics = tab === \"metrics\";"));
+        assert!(
+            app_js.contains(
+                "if (tab === \"wallet\") pagedDatasets.push(\"walletTx\", \"walletUtxo\");"
+            )
+        );
+        assert!(app_js.contains("if (tab === \"chain\") pagedDatasets.push(\"mempool\");"));
+        assert!(app_js.contains("if (tab === \"p2p\") pagedDatasets.push(\"peer\");"));
         assert!(app_js.contains("cache: \"no-store\""));
         assert!(app_js.contains("async fetchWithTimeout(path, options = {})"));
         assert!(app_js.contains("controller.abort()"));

@@ -130,7 +130,7 @@ window.iunaApp = function iunaApp() {
       this.tab = this.tabFromHash();
       if (!this.hashListenerInstalled) {
         window.addEventListener("hashchange", () => {
-          this.tab = this.tabFromHash();
+          this.setTab(this.tabFromHash());
         });
         this.hashListenerInstalled = true;
       }
@@ -162,6 +162,7 @@ window.iunaApp = function iunaApp() {
       if (window.location.hash !== `#${tab}`) {
         window.location.hash = tab;
       }
+      this.refresh({ silent: true });
     },
 
     allowedTabs() {
@@ -606,23 +607,30 @@ window.iunaApp = function iunaApp() {
     async refreshNow(options = {}) {
       if (!this.canUseProtectedApi()) return;
       const addressBookVersion = this.addressBookVersion;
+      const tab = this.tab;
+      const shouldLoadBlocks = tab === "chain" || tab === "mining";
+      const shouldLoadP2pMetrics = tab === "p2p";
+      const shouldLoadMetrics = tab === "metrics";
+      const pagedDatasets = [];
+      if (tab === "wallet") pagedDatasets.push("walletTx", "walletUtxo");
+      if (tab === "chain") pagedDatasets.push("mempool");
+      if (tab === "p2p") pagedDatasets.push("peer");
       try {
         const [config, status, blocks, p2pMetrics, blockchainMetrics, networkHealth] = await Promise.all([
           this.fetchJson("/api/config"),
           this.fetchJson("/api/status"),
-          this.fetchJson("/api/blocks?limit=30"),
-          this.fetchJson("/api/p2p/metrics"),
-          this.fetchJson("/api/metrics"),
+          shouldLoadBlocks ? this.fetchJson("/api/blocks?limit=30") : Promise.resolve(null),
+          shouldLoadP2pMetrics ? this.fetchJson("/api/p2p/metrics") : Promise.resolve(this.p2pMetrics),
+          shouldLoadMetrics ? this.fetchJson("/api/metrics") : Promise.resolve(this.blockchainMetrics),
           this.fetchJson("/api/network/health"),
         ]);
         const previousChainHeight = this.status.chain?.height;
         this.status = status;
-        await Promise.all([
-          this.refreshPagedDataset("walletTx", { silent: options.silent === true }),
-          this.refreshPagedDataset("walletUtxo", { silent: options.silent === true }),
-          this.refreshPagedDataset("mempool", { silent: options.silent === true }),
-          this.refreshPagedDataset("peer", { silent: options.silent === true }),
-        ]);
+        await Promise.all(
+          pagedDatasets.map((kind) =>
+            this.refreshPagedDataset(kind, { silent: options.silent === true })
+          )
+        );
         this.config = config;
         this.syncConfigState({ addressBookVersion });
         if (!this.allowedTabs().includes(this.tab)) {
@@ -632,7 +640,7 @@ window.iunaApp = function iunaApp() {
           await this.refreshWalletSetup();
         }
         this.syncMempoolBlockMarker(previousChainHeight, status.chain?.height);
-        this.mergeFreshBlocks(blocks, { animateHead: true });
+        if (blocks) this.mergeFreshBlocks(blocks, { animateHead: true });
         this.pruneSelectedTransferUtxos();
         this.p2pMetrics = p2pMetrics;
         this.blockchainMetrics = blockchainMetrics;
