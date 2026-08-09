@@ -89,6 +89,8 @@ window.iunaApp = function iunaApp() {
     showPowDifficultyInfo: false,
     lastUpdated: null,
     pollHandle: null,
+    refreshPromise: null,
+    requestTimeoutMs: 12000,
     hashListenerInstalled: false,
     newBlockHashes: new Set(),
     newBlockTimer: null,
@@ -305,7 +307,7 @@ window.iunaApp = function iunaApp() {
     },
 
     async postAuth(path, password) {
-      const response = await fetch(path, {
+      const response = await this.fetchWithTimeout(path, {
         method: "POST",
         headers: { Accept: "application/json", "Content-Type": "application/x-www-form-urlencoded" },
         body: new URLSearchParams({ password }),
@@ -346,7 +348,7 @@ window.iunaApp = function iunaApp() {
           old_password: this.settingsOldPassword,
           new_password: this.settingsNewPassword,
         });
-        const response = await fetch("/api/auth/change-password", {
+        const response = await this.fetchWithTimeout("/api/auth/change-password", {
           method: "POST",
           headers: {
             Accept: "application/json",
@@ -432,7 +434,7 @@ window.iunaApp = function iunaApp() {
         this.walletVerified = false;
         this.verifyChallenges = [];
         this.verifyAnswers = {};
-        await this.refresh();
+        await this.refresh({ force: true });
       } catch (error) {
         this.showSetupFeedback(error.message, "error");
       }
@@ -496,7 +498,7 @@ window.iunaApp = function iunaApp() {
         this.verifyAnswers = {};
         this.walletVerified = true;
         this.setupSeedStep = "verified";
-        await this.refresh();
+        await this.refresh({ force: true });
         this.showSetupFeedback("Recovery phrase imported", "success");
       } catch (error) {
         this.showSetupFeedback(error.message, "error");
@@ -508,7 +510,7 @@ window.iunaApp = function iunaApp() {
       for (const [key, value] of Object.entries(fields)) {
         body.set(key, value);
       }
-      const response = await fetch(path, {
+      const response = await this.fetchWithTimeout(path, {
         method: "POST",
         headers: { Accept: "application/json", "Content-Type": "application/x-www-form-urlencoded" },
         body,
@@ -529,7 +531,7 @@ window.iunaApp = function iunaApp() {
           throw new Error("Add a bootstrap peer before continuing");
         }
         await this.applySetupNodeMode();
-        const response = await fetch("/api/config", {
+        const response = await this.fetchWithTimeout("/api/config", {
           method: "POST",
           headers: {
             Accept: "application/json",
@@ -544,7 +546,7 @@ window.iunaApp = function iunaApp() {
         if (!response.ok || !payload.ok) {
           throw new Error(payload.error || `/api/config returned ${response.status}`);
         }
-        await this.refresh();
+        await this.refresh({ force: true });
         this.setupFeedback = null;
         this.generatedSeedPhrase = "";
         this.importSeedPhrase = "";
@@ -571,6 +573,24 @@ window.iunaApp = function iunaApp() {
     },
 
     async refresh(options = {}) {
+      if (this.refreshPromise) {
+        if (options.force === true) {
+          try {
+            await this.refreshPromise;
+          } catch {
+            // The forced refresh below should report the current state.
+          }
+        } else {
+          return this.refreshPromise;
+        }
+      }
+      this.refreshPromise = this.refreshNow(options).finally(() => {
+        this.refreshPromise = null;
+      });
+      return this.refreshPromise;
+    },
+
+    async refreshNow(options = {}) {
       if (!this.canUseProtectedApi()) return;
       try {
         const [config, status, blocks, p2pMetrics, blockchainMetrics, networkHealth] = await Promise.all([
@@ -627,11 +647,29 @@ window.iunaApp = function iunaApp() {
     },
 
     async fetchJson(path) {
-      const response = await fetch(path, { headers: { Accept: "application/json" } });
+      const response = await this.fetchWithTimeout(path, {
+        headers: { Accept: "application/json" },
+        cache: "no-store",
+      });
       if (!response.ok) {
         throw new Error(`${path} returned ${response.status}`);
       }
       return response.json();
+    },
+
+    async fetchWithTimeout(path, options = {}) {
+      const controller = new AbortController();
+      const timeout = setTimeout(() => controller.abort(), this.requestTimeoutMs);
+      try {
+        return await fetch(path, { ...options, signal: controller.signal });
+      } catch (error) {
+        if (error?.name === "AbortError") {
+          throw new Error(`${path} timed out`);
+        }
+        throw error;
+      } finally {
+        clearTimeout(timeout);
+      }
     },
 
     datasetConfig(kind) {
@@ -1069,7 +1107,7 @@ window.iunaApp = function iunaApp() {
 
     async postForm(path, fields, successMessage, method = "POST") {
       await this.submitForm(path, fields, method);
-      await this.refresh();
+      await this.refresh({ force: true });
       this.showFlash(successMessage, "success");
     },
 
@@ -1082,7 +1120,7 @@ window.iunaApp = function iunaApp() {
           body.set(key, value);
         }
       }
-      const response = await fetch(path, {
+      const response = await this.fetchWithTimeout(path, {
         method,
         headers: { Accept: "application/json", "Content-Type": "application/x-www-form-urlencoded" },
         body,
@@ -1152,7 +1190,7 @@ window.iunaApp = function iunaApp() {
       try {
         const body = new URLSearchParams();
         for (const [key, value] of Object.entries(fields)) body.set(key, value);
-        const response = await fetch(path, {
+        const response = await this.fetchWithTimeout(path, {
           method: "POST",
           headers: { Accept: "application/json", "Content-Type": "application/x-www-form-urlencoded" },
           body,

@@ -5786,7 +5786,11 @@ mod tests {
     #[test]
     fn setup_completion_refreshes_chain_data() {
         let app_js = include_str!("../../www/assets/iuna-ui.js");
-        assert!(app_js.contains("await this.refresh();\n        this.setupFeedback = null;"));
+        assert!(
+            app_js.contains(
+                "await this.refresh({ force: true });\n        this.setupFeedback = null;"
+            )
+        );
         assert!(!app_js.contains(
             "await this.refreshConfig();\n        await this.resetPagedDataset(\"peer\");"
         ));
@@ -5812,8 +5816,15 @@ mod tests {
             )
         );
         assert!(app_js.contains(
-            "async refresh(options = {}) {\n      if (!this.canUseProtectedApi()) return;"
+            "async refreshNow(options = {}) {\n      if (!this.canUseProtectedApi()) return;"
         ));
+        assert!(app_js.contains("refreshPromise: null"));
+        assert!(app_js.contains("if (this.refreshPromise)"));
+        assert!(app_js.contains("return this.refreshPromise;"));
+        assert!(app_js.contains("options.force === true"));
+        assert!(app_js.contains("cache: \"no-store\""));
+        assert!(app_js.contains("async fetchWithTimeout(path, options = {})"));
+        assert!(app_js.contains("controller.abort()"));
         assert!(app_js.contains("async refreshPagedDataset(kind, options = {}) {\n      if (!this.canUseProtectedApi()) return;"));
         assert!(
             app_js.contains(
