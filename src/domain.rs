@@ -28,6 +28,7 @@ pub const MAX_VDF_ROUNDS: u64 = i64::MAX as u64;
 pub const MINE_DIFFICULTY_BITS: u32 = 12;
 pub const MINE_ACTIONS_PER_ANCHOR_LIMIT: usize = 2;
 pub const MINE_ACTIONS_PER_ANCHOR_LIMIT_ACTIVATION_HEIGHT: u64 = 200;
+pub const FALLBACK_VDF_RETARGET_ACTIVATION_HEIGHT: u64 = 380;
 pub const MAX_BLINDED_TRANSACTION_EXPIRY_HEIGHTS: u64 = 20;
 pub const REVEAL_COMMITTEE_SIZE: usize = 3;
 pub const MAX_REVEAL_BUNDLE_BYTES: usize = 10_000;
@@ -5862,7 +5863,10 @@ fn clamped_vdf_retarget_observed_block_ms(observed_block_ms: u64) -> u64 {
 }
 
 fn vdf_retarget_observed_block_ms(parent: &Block, child: &Block) -> Option<u64> {
-    if child.finalizer_mode != FinalizerMode::Ticket || child.finalizer_rank != 0 {
+    if child.finalizer_mode != FinalizerMode::Ticket {
+        return None;
+    }
+    if child.finalizer_rank != 0 && child.height < FALLBACK_VDF_RETARGET_ACTIVATION_HEIGHT {
         return None;
     }
 
@@ -6650,14 +6654,16 @@ mod tests {
     }
 
     #[test]
-    fn vdf_retarget_observed_block_time_ignores_ticket_fallback_ranks() {
+    fn vdf_retarget_observed_block_time_includes_ticket_fallback_ranks_after_activation() {
         let parent = vdf_retarget_sample_block(0, FinalizerMode::Ticket, 0);
         let primary_child =
             vdf_retarget_sample_block(VDF_TARGET_BLOCK_MS, FinalizerMode::Ticket, 0);
-        let rank_one_child =
-            vdf_retarget_sample_block(VDF_TARGET_BLOCK_MS, FinalizerMode::Ticket, 1);
-        let rank_two_child =
-            vdf_retarget_sample_block(VDF_TARGET_BLOCK_MS * 2, FinalizerMode::Ticket, 2);
+        let mut rank_one_child =
+            vdf_retarget_sample_block(VDF_TARGET_BLOCK_MS * 2, FinalizerMode::Ticket, 1);
+        rank_one_child.height = FALLBACK_VDF_RETARGET_ACTIVATION_HEIGHT;
+        let mut rank_two_child =
+            vdf_retarget_sample_block(VDF_TARGET_BLOCK_MS * 4, FinalizerMode::Ticket, 2);
+        rank_two_child.height = FALLBACK_VDF_RETARGET_ACTIVATION_HEIGHT + 1;
 
         assert_eq!(
             vdf_retarget_observed_block_ms(&parent, &primary_child),
@@ -6665,10 +6671,23 @@ mod tests {
         );
         assert_eq!(
             vdf_retarget_observed_block_ms(&parent, &rank_one_child),
-            None
+            Some(VDF_TARGET_BLOCK_MS * 2)
         );
         assert_eq!(
             vdf_retarget_observed_block_ms(&parent, &rank_two_child),
+            Some(VDF_TARGET_BLOCK_MS * 4)
+        );
+    }
+
+    #[test]
+    fn vdf_retarget_observed_block_time_ignores_ticket_fallback_ranks_before_activation() {
+        let parent = vdf_retarget_sample_block(0, FinalizerMode::Ticket, 0);
+        let mut fallback_child =
+            vdf_retarget_sample_block(VDF_TARGET_BLOCK_MS * 2, FinalizerMode::Ticket, 1);
+        fallback_child.height = FALLBACK_VDF_RETARGET_ACTIVATION_HEIGHT - 1;
+
+        assert_eq!(
+            vdf_retarget_observed_block_ms(&parent, &fallback_child),
             None
         );
     }
@@ -6743,7 +6762,7 @@ mod tests {
     }
 
     #[test]
-    fn fallback_block_is_excluded_from_vdf_retarget_observations() {
+    fn fallback_block_before_activation_is_excluded_from_vdf_retarget_observations() {
         let alice = Wallet::from_seed("fallback-retarget-alice");
         let bob = Wallet::from_seed("fallback-retarget-bob");
         let wallets = [&alice, &bob];

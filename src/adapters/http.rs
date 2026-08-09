@@ -3370,6 +3370,8 @@ const INDEX_HTML: &str = r#"<!doctype html>
     .mining-event-title { color: #eef6f8; font-weight: 850; overflow-wrap: anywhere; }
     .mining-event-detail { margin-top: 3px; color: #9fa8ad; font-size: 12px; line-height: 1.35; overflow-wrap: anywhere; }
     .mining-event-time { color: #7f888e; font-size: 11px; font-weight: 800; white-space: nowrap; }
+    .mining-event-empty { height: 42px; border: 1px solid #30383d; border-radius: 8px; background: #111316; }
+    .mining-event-empty .skeleton-line { width: 100%; height: 100%; border-radius: 8px; opacity: .55; }
     .panel-separator { border-top: 1px solid #2f363c; margin: 14px 0 12px; }
     .stratum-config { display: grid; gap: 10px; }
     .stratum-note { max-width: 760px; color: #9eb3bc; font-size: 12px; line-height: 1.45; }
@@ -3795,24 +3797,7 @@ const INDEX_HTML: &str = r#"<!doctype html>
           <div class="mining-event-log" aria-label="Mining event log">
             <div class="mining-event-log-head"><span>Event log</span><span x-text="`${miningEventLog().length} lines`"></span></div>
             <template x-if="miningEventLog().length === 0">
-              <div class="mining-event skeleton-card" aria-hidden="true">
-                <span class="mining-event-dot"></span>
-                <div>
-                  <div class="skeleton-line medium"></div>
-                  <div class="skeleton-line long"></div>
-                </div>
-                <div class="skeleton-line short"></div>
-              </div>
-            </template>
-            <template x-if="miningEventLog().length === 0">
-              <div class="mining-event skeleton-card" aria-hidden="true">
-                <span class="mining-event-dot"></span>
-                <div>
-                  <div class="skeleton-line short"></div>
-                  <div class="skeleton-line medium"></div>
-                </div>
-                <div class="skeleton-line short"></div>
-              </div>
+              <div class="mining-event-empty skeleton-card" aria-hidden="true"><div class="skeleton-line"></div></div>
             </template>
             <template x-for="event in miningEventLog()" :key="event.key">
               <div class="mining-event" :class="event.kind">
@@ -6272,6 +6257,7 @@ mod tests {
         assert!(app_js.contains("slice(0, this.miningEventLimit)"));
         assert!(super::INDEX_HTML.contains("aria-label=\"Mining event log\""));
         assert!(super::INDEX_HTML.contains("miningEventLog().length === 0"));
+        assert!(super::INDEX_HTML.contains("mining-event-empty"));
         assert!(app_js.contains("Resource budget:"));
         assert!(app_js.contains("isPowMineSuccessStatus"));
         assert!(app_js.contains("You mined a PoW action"));
