@@ -2157,17 +2157,20 @@ fn peer_book_tracks_multiple_peers_without_networking() {
 }
 
 #[test]
-fn peer_book_reports_only_configured_outbound_peers_as_outbound() {
+fn peer_book_reports_only_connectable_peers_as_outbound() {
     let mut peers = PeerBook::from_addresses(vec!["127.0.0.1:9444".to_string()]);
     peers.record_received("127.0.0.1:56666", 1);
+    peers.add_discovered_peer("127.0.0.1:9445");
     peers.record_inbound_misbehavior("127.0.0.1:57777", "invalid transaction");
 
-    assert!(peers.is_configured_outbound("127.0.0.1:9444"));
-    assert!(!peers.is_configured_outbound("127.0.0.1:56666"));
-    assert!(!peers.is_configured_outbound("127.0.0.1:57777"));
+    assert!(peers.is_connectable_peer("127.0.0.1:9444"));
+    assert!(peers.is_connectable_peer("127.0.0.1:9445"));
+    assert!(!peers.is_connectable_peer("127.0.0.1:56666"));
+    assert!(!peers.is_connectable_peer("127.0.0.1:57777"));
+    assert!(peers.addresses().contains(&"127.0.0.1:9445".to_string()));
 
     assert!(peers.remove_peer("127.0.0.1:9444"));
-    assert!(!peers.is_configured_outbound("127.0.0.1:9444"));
+    assert!(!peers.is_connectable_peer("127.0.0.1:9444"));
 }
 
 #[test]

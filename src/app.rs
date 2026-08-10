@@ -2058,8 +2058,19 @@ impl PeerBook {
             .peers
             .entry(address.clone())
             .or_insert_with(|| PeerInfo::new(address, PeerDirection::Outbound));
-        if peer.direction == PeerDirection::Inbound {
+        if peer.direction != PeerDirection::Outbound {
             peer.direction = PeerDirection::Outbound;
+        }
+    }
+
+    pub fn add_discovered_peer(&mut self, address: impl Into<String>) {
+        let address = address.into();
+        let peer = self
+            .peers
+            .entry(address.clone())
+            .or_insert_with(|| PeerInfo::new(address, PeerDirection::Discovered));
+        if peer.direction == PeerDirection::Inbound {
+            peer.direction = PeerDirection::Discovered;
         }
     }
 
@@ -2090,6 +2101,10 @@ impl PeerBook {
             .or_insert_with(|| PeerInfo::new(to, from_peer.direction.clone()));
         if from_peer.direction == PeerDirection::Outbound {
             to_peer.direction = PeerDirection::Outbound;
+        } else if from_peer.direction == PeerDirection::Discovered
+            && to_peer.direction == PeerDirection::Inbound
+        {
+            to_peer.direction = PeerDirection::Discovered;
         }
         to_peer.messages_sent = to_peer
             .messages_sent
@@ -2135,7 +2150,7 @@ impl PeerBook {
         }
     }
 
-    pub fn is_configured_outbound(&self, address: &str) -> bool {
+    pub fn is_connectable_peer(&self, address: &str) -> bool {
         self.peers
             .get(address)
             .is_some_and(|peer| peer.direction != PeerDirection::Inbound)
@@ -2408,6 +2423,7 @@ fn median_i64(mut values: Vec<i64>) -> Option<i64> {
 #[serde(rename_all = "snake_case")]
 pub enum PeerDirection {
     Outbound,
+    Discovered,
     Inbound,
 }
 
