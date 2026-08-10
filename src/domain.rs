@@ -29,6 +29,7 @@ pub const MINE_DIFFICULTY_BITS: u32 = 12;
 pub const MINE_ACTIONS_PER_ANCHOR_LIMIT: usize = 2;
 pub const MINE_ACTIONS_PER_ANCHOR_LIMIT_ACTIVATION_HEIGHT: u64 = 200;
 pub const FALLBACK_VDF_RETARGET_ACTIVATION_HEIGHT: u64 = 380;
+pub const AGGREGATE_FINALIZER_FEE_ACTIVATION_HEIGHT: u64 = 795;
 pub const MAX_BLINDED_TRANSACTION_EXPIRY_HEIGHTS: u64 = 20;
 pub const REVEAL_COMMITTEE_SIZE: usize = 3;
 pub const MAX_REVEAL_BUNDLE_BYTES: usize = 10_000;
@@ -3077,7 +3078,8 @@ impl Ledger {
             timestamp_ms,
             miner: miner.to_string(),
             finalizer_mode: FinalizerMode::Ticket,
-            reward: fee_reward(&selection.transactions)?,
+            reward: self
+                .expected_reward_for_next_block(&selection.transactions, &reveal_bundle_section)?,
             vdf_rounds: self.vdf_rounds_for_finalizer_rank(finalizer_rank)?,
             vdf_seed,
             finalizer_rank,
@@ -3148,7 +3150,8 @@ impl Ledger {
             miner: miner.to_string(),
             finalizer_mode: FinalizerMode::Recovery,
             finalizer_rank: 0,
-            reward: fee_reward(&selection.transactions)?,
+            reward: self
+                .expected_reward_for_next_block(&selection.transactions, &reveal_bundle_section)?,
             vdf_rounds: self.recovery_vdf_rounds()?,
             vdf_seed,
             leader_ticket: None,
@@ -3212,6 +3215,7 @@ impl Ledger {
         let mut utxos = self.utxos.clone();
         let mut signatures = BTreeSet::new();
         let mut revealed_transactions = Vec::new();
+        let mut aggregated_reveal_finalizer_fees = 0_u64;
         for tx in &block.transactions {
             if !signatures.insert(tx.signature()) {
                 bail!("duplicate transaction in block");
@@ -3238,7 +3242,17 @@ impl Ledger {
                 &tx,
                 &block.reveal_bundle_section.signatures,
                 reveal_bundle_slot_count,
+                aggregate_finalizer_fees_active(block.height),
             )?;
+            if aggregate_finalizer_fees_active(block.height) {
+                aggregated_reveal_finalizer_fees = aggregated_reveal_finalizer_fees
+                    .checked_add(blinded_reveal_finalizer_fee(
+                        tx.fee(),
+                        block.included_reveal_bundle_count(),
+                        reveal_bundle_slot_count,
+                    ))
+                    .context("aggregated reveal finalizer fees overflow")?;
+            }
             revealed_transactions.push(tx);
         }
         for (commitment, active) in &self.active_blinded {
@@ -3248,7 +3262,8 @@ impl Ledger {
                 credit_expired_blinded_outputs(&mut utxos, active)?;
             }
         }
-        if block.reward != fee_reward(&block.transactions)? {
+        let expected_reward = block_reward(&block.transactions, aggregated_reveal_finalizer_fees)?;
+        if block.reward != expected_reward {
             bail!("block reward is invalid");
         }
         let mined_signatures = block
@@ -3368,7 +3383,8 @@ impl Ledger {
         if block.compute_hash() != block.hash {
             bail!("block hash is invalid");
         }
-        if block.reward != fee_reward(&block.transactions)? {
+        let reveal_bundle_slot_count = self.reveal_committee_for_height(block.height).len();
+        if block.reward != self.expected_reward_for_block(block, reveal_bundle_slot_count)? {
             bail!("block reward is invalid");
         }
         let expected_vdf_rounds = self.expected_vdf_rounds_for_block(block)?;
@@ -3454,6 +3470,67 @@ impl Ledger {
             .collect::<Vec<_>>();
         timestamps.sort_unstable();
         timestamps[timestamps.len() / 2]
+    }
+
+    fn expected_reward_for_next_block(
+        &self,
+        transactions: &[Transaction],
+        reveal_bundle_section: &RevealBundleSection,
+    ) -> Result<Amount> {
+        let height = self.tip().height + 1;
+        if !aggregate_finalizer_fees_active(height) {
+            return fee_reward(transactions);
+        }
+        let reveal_bundle_slot_count = self.reveal_committee_for_height(height).len();
+        let aggregate = self.aggregate_reveal_finalizer_fees(
+            height,
+            reveal_bundle_section,
+            reveal_bundle_slot_count,
+        )?;
+        block_reward(transactions, aggregate)
+    }
+
+    fn expected_reward_for_block(
+        &self,
+        block: &Block,
+        reveal_bundle_slot_count: usize,
+    ) -> Result<Amount> {
+        if !aggregate_finalizer_fees_active(block.height) {
+            return fee_reward(&block.transactions);
+        }
+        let aggregate = self.aggregate_reveal_finalizer_fees(
+            block.height,
+            &block.reveal_bundle_section,
+            reveal_bundle_slot_count,
+        )?;
+        block_reward(&block.transactions, aggregate)
+    }
+
+    fn aggregate_reveal_finalizer_fees(
+        &self,
+        height: u64,
+        reveal_bundle_section: &RevealBundleSection,
+        reveal_bundle_slot_count: usize,
+    ) -> Result<Amount> {
+        if !aggregate_finalizer_fees_active(height) {
+            return Ok(0);
+        }
+        reveal_bundle_section
+            .all_reveals()
+            .into_iter()
+            .try_fold(0_u64, |total, reveal| {
+                let active = self
+                    .active_blinded
+                    .get(&reveal.commitment)
+                    .context("blinded reveal does not reference an active blinded transaction")?;
+                total
+                    .checked_add(blinded_reveal_finalizer_fee(
+                        active.transaction.fee,
+                        reveal_bundle_section.included_bundle_count(),
+                        reveal_bundle_slot_count,
+                    ))
+                    .context("aggregated reveal finalizer fees overflow")
+            })
     }
 
     fn next_vdf_rounds_after_tip(&self) -> u64 {
@@ -5230,6 +5307,7 @@ fn credit_blinded_fee_outputs(
     transaction: &Transaction,
     reveal_bundle_signatures: &[RevealBundleSignature],
     available_bundle_slots: usize,
+    aggregate_finalizer_fee: bool,
 ) -> Result<()> {
     let fee = transaction.fee();
     if fee == 0 {
@@ -5249,7 +5327,7 @@ fn credit_blinded_fee_outputs(
             },
         ));
     }
-    if reveal_finalizer_fee > 0 {
+    if reveal_finalizer_fee > 0 && !aggregate_finalizer_fee {
         outputs.push((
             blinded_executor_fee_outpoint(&active.transaction.commitment),
             TxOutput {
@@ -5298,6 +5376,19 @@ fn fee_reward(transactions: &[Transaction]) -> Result<Amount> {
     transactions.iter().try_fold(0_u64, |total, tx| {
         total.checked_add(tx.fee()).context("block fees overflow")
     })
+}
+
+fn block_reward(
+    transactions: &[Transaction],
+    aggregated_reveal_finalizer_fees: Amount,
+) -> Result<Amount> {
+    fee_reward(transactions)?
+        .checked_add(aggregated_reveal_finalizer_fees)
+        .context("block reward overflow")
+}
+
+fn aggregate_finalizer_fees_active(height: u64) -> bool {
+    height >= AGGREGATE_FINALIZER_FEE_ACTIVATION_HEIGHT
 }
 
 fn spend_inputs(
@@ -6167,6 +6258,19 @@ mod tests {
         wallets: &[Wallet],
         timestamp_ms: u64,
     ) -> Block {
+        let block =
+            prepare_preverified_as_next_leader_with_reveal_bundles(ledger, wallets, timestamp_ms);
+        ledger
+            .apply_preverified_block_at(block.clone(), u64::MAX)
+            .unwrap();
+        block
+    }
+
+    fn prepare_preverified_as_next_leader_with_reveal_bundles(
+        ledger: &Ledger,
+        wallets: &[Wallet],
+        timestamp_ms: u64,
+    ) -> Block {
         let bundles = ledger
             .reveal_committee_for_next_block()
             .into_iter()
@@ -6180,11 +6284,18 @@ mod tests {
         let prepared = ledger
             .prepare_next_block_with_reveal_bundles(wallet.address(), timestamp_ms, bundles)
             .unwrap();
-        let block = prepared.finish(wallet, "preverified-vdf".to_string());
-        ledger
-            .apply_preverified_block_at(block.clone(), u64::MAX)
-            .unwrap();
-        block
+        prepared.finish(wallet, "preverified-vdf".to_string())
+    }
+
+    fn advance_preverified_to_height(ledger: &mut Ledger, wallets: &[Wallet], target_height: u64) {
+        while ledger.height() < target_height {
+            queue_next_leader_burn(ledger, wallets);
+            let timestamp_ms = ledger
+                .tip()
+                .timestamp_ms
+                .saturating_add(VDF_TARGET_BLOCK_MS);
+            mine_preverified_as_next_leader(ledger, wallets, timestamp_ms);
+        }
     }
 
     fn queue_next_leader_burn(ledger: &mut Ledger, wallets: &[Wallet]) {
@@ -6400,6 +6511,7 @@ mod tests {
             &transaction,
             &[],
             3,
+            false,
         )
         .unwrap();
 
@@ -6442,6 +6554,7 @@ mod tests {
             &transaction,
             &[],
             3,
+            false,
         )
         .unwrap();
 
@@ -6504,6 +6617,7 @@ mod tests {
             &transaction,
             &signatures,
             3,
+            false,
         )
         .unwrap();
 
@@ -7498,6 +7612,191 @@ mod tests {
             ledger.balance_of(&inclusion_finalizer),
             before_inclusion_finalizer + inclusion_finalizer_fee
                 - reveal_plaintext_burn_spent_by_inclusion_finalizer
+        );
+    }
+
+    #[test]
+    fn activated_blinded_reveal_finalizer_fees_are_aggregated_into_block_reward() {
+        let alice = Wallet::from_seed("activated-finalizer-fee-alice");
+        let bob = Wallet::from_seed("activated-finalizer-fee-bob");
+        let carol = Wallet::from_seed("activated-finalizer-fee-carol");
+        let dave = Wallet::from_seed("activated-finalizer-fee-dave");
+        let finalizers = [alice.clone(), bob.clone()];
+        let mut ledger = ledger_with_finalizers(
+            &finalizers,
+            &[(&carol, 10 * MICRO_IUNA), (&dave, 10 * MICRO_IUNA)],
+        );
+        advance_preverified_to_height(
+            &mut ledger,
+            &finalizers,
+            AGGREGATE_FINALIZER_FEE_ACTIVATION_HEIGHT - 2,
+        );
+        let first_fee = 100;
+        let second_fee = 200;
+        let first_blinded = ledger
+            .build_blinded_burn(&carol, 3, first_fee, ledger.height() + 4)
+            .unwrap();
+        let second_blinded = ledger
+            .build_blinded_burn(&dave, 4, second_fee, ledger.height() + 4)
+            .unwrap();
+        let first_commitment = first_blinded.transaction.commitment.clone();
+        let second_commitment = second_blinded.transaction.commitment.clone();
+        ledger
+            .submit_blinded_transaction(first_blinded.transaction)
+            .unwrap();
+        ledger
+            .submit_blinded_transaction(second_blinded.transaction)
+            .unwrap();
+        queue_next_leader_burn(&mut ledger, &finalizers);
+        let commit_timestamp_ms = ledger
+            .tip()
+            .timestamp_ms
+            .saturating_add(VDF_TARGET_BLOCK_MS);
+        let commit_block =
+            mine_preverified_as_next_leader(&mut ledger, &finalizers, commit_timestamp_ms);
+        assert_eq!(
+            commit_block.height,
+            AGGREGATE_FINALIZER_FEE_ACTIVATION_HEIGHT - 1
+        );
+
+        ledger.submit_blinded_reveal(first_blinded.reveal).unwrap();
+        ledger.submit_blinded_reveal(second_blinded.reveal).unwrap();
+        queue_next_leader_burn(&mut ledger, &finalizers);
+        let reveal_timestamp_ms = ledger
+            .tip()
+            .timestamp_ms
+            .saturating_add(VDF_TARGET_BLOCK_MS);
+        let reveal_block = prepare_preverified_as_next_leader_with_reveal_bundles(
+            &ledger,
+            &finalizers,
+            reveal_timestamp_ms,
+        );
+        let first_reveal_finalizer_fee = blinded_reveal_finalizer_fee(
+            first_fee,
+            reveal_block.included_reveal_bundle_count(),
+            ledger
+                .burn_leader_ranks_for_block(reveal_block.height)
+                .unwrap()
+                .len(),
+        );
+        let second_reveal_finalizer_fee = blinded_reveal_finalizer_fee(
+            second_fee,
+            reveal_block.included_reveal_bundle_count(),
+            ledger
+                .burn_leader_ranks_for_block(reveal_block.height)
+                .unwrap()
+                .len(),
+        );
+        let aggregate_reveal_finalizer_fee = first_reveal_finalizer_fee
+            .checked_add(second_reveal_finalizer_fee)
+            .unwrap();
+
+        assert_eq!(
+            reveal_block.height,
+            AGGREGATE_FINALIZER_FEE_ACTIVATION_HEIGHT
+        );
+        assert_eq!(reveal_block.reward, aggregate_reveal_finalizer_fee);
+        let mut legacy_reward_block = reveal_block.clone();
+        legacy_reward_block.reward = fee_reward(&legacy_reward_block.transactions).unwrap();
+        legacy_reward_block.hash = legacy_reward_block.compute_hash();
+        let error = ledger
+            .clone()
+            .apply_preverified_block_at(legacy_reward_block, u64::MAX)
+            .unwrap_err();
+        assert!(format!("{error:#}").contains("block reward is invalid"));
+
+        ledger
+            .apply_preverified_block_at(reveal_block.clone(), u64::MAX)
+            .unwrap();
+        assert!(
+            !ledger
+                .utxos
+                .contains_key(&blinded_executor_fee_outpoint(&first_commitment))
+        );
+        assert!(
+            !ledger
+                .utxos
+                .contains_key(&blinded_executor_fee_outpoint(&second_commitment))
+        );
+        assert_eq!(
+            ledger.utxos.get(&reward_outpoint(&reveal_block.hash)),
+            Some(&TxOutput {
+                address: reveal_block.miner.clone(),
+                amount: aggregate_reveal_finalizer_fee,
+            })
+        );
+    }
+
+    #[test]
+    fn pre_activation_blinded_reveal_finalizer_fee_stays_as_executor_utxo_at_boundary() {
+        let alice = Wallet::from_seed("pre-activated-finalizer-fee-alice");
+        let bob = Wallet::from_seed("pre-activated-finalizer-fee-bob");
+        let carol = Wallet::from_seed("pre-activated-finalizer-fee-carol");
+        let finalizers = [alice.clone(), bob.clone()];
+        let mut ledger = ledger_with_finalizers(&finalizers, &[(&carol, 10 * MICRO_IUNA)]);
+        advance_preverified_to_height(
+            &mut ledger,
+            &finalizers,
+            AGGREGATE_FINALIZER_FEE_ACTIVATION_HEIGHT - 3,
+        );
+        let fee = 100;
+        let blinded = ledger
+            .build_blinded_burn(&carol, 3, fee, ledger.height() + 4)
+            .unwrap();
+        let commitment = blinded.transaction.commitment.clone();
+        ledger
+            .submit_blinded_transaction(blinded.transaction)
+            .unwrap();
+        queue_next_leader_burn(&mut ledger, &finalizers);
+        let commit_timestamp_ms = ledger
+            .tip()
+            .timestamp_ms
+            .saturating_add(VDF_TARGET_BLOCK_MS);
+        let commit_block =
+            mine_preverified_as_next_leader(&mut ledger, &finalizers, commit_timestamp_ms);
+        assert_eq!(
+            commit_block.height,
+            AGGREGATE_FINALIZER_FEE_ACTIVATION_HEIGHT - 2
+        );
+
+        ledger.submit_blinded_reveal(blinded.reveal).unwrap();
+        queue_next_leader_burn(&mut ledger, &finalizers);
+        let reveal_timestamp_ms = ledger
+            .tip()
+            .timestamp_ms
+            .saturating_add(VDF_TARGET_BLOCK_MS);
+        let reveal_block = mine_preverified_as_next_leader_with_reveal_bundles(
+            &mut ledger,
+            &finalizers,
+            reveal_timestamp_ms,
+        );
+        let reveal_finalizer_fee = blinded_reveal_finalizer_fee(
+            fee,
+            reveal_block.included_reveal_bundle_count(),
+            ledger
+                .burn_leader_ranks_for_block(reveal_block.height)
+                .unwrap()
+                .len(),
+        );
+
+        assert_eq!(
+            reveal_block.height,
+            AGGREGATE_FINALIZER_FEE_ACTIVATION_HEIGHT - 1
+        );
+        assert_eq!(reveal_block.reward, 0);
+        assert_eq!(
+            ledger
+                .utxos
+                .get(&blinded_executor_fee_outpoint(&commitment)),
+            Some(&TxOutput {
+                address: reveal_block.miner,
+                amount: reveal_finalizer_fee,
+            })
+        );
+        assert!(
+            !ledger
+                .utxos
+                .contains_key(&reward_outpoint(&reveal_block.hash))
         );
     }
 

@@ -11,11 +11,12 @@ use rusqlite::{Connection, OptionalExtension, params};
 use serde::Serialize;
 
 use crate::domain::{
-    Amount, BLINDED_COMMITTER_FEE_BPS, BLINDED_FEE_BPS_DENOMINATOR,
-    BLINDED_REVEAL_BUNDLE_SIGNER_FEE_BPS, BlindedReveal, BlindedTransaction, Block, ChainSnapshot,
-    FinalizerMode, LaunchProfile, LeaderProof, Ledger, MINE_REWARD, MaskedBlindedReveal, OutPoint,
-    REVEAL_COMMITTEE_SIZE, RevealBundleSection, RevealBundleSignature, Transaction, TxInput,
-    TxOutput, blinded_reveal_finalizer_fee, hex_hash, revealed_blinded_transactions,
+    AGGREGATE_FINALIZER_FEE_ACTIVATION_HEIGHT, Amount, BLINDED_COMMITTER_FEE_BPS,
+    BLINDED_FEE_BPS_DENOMINATOR, BLINDED_REVEAL_BUNDLE_SIGNER_FEE_BPS, BlindedReveal,
+    BlindedTransaction, Block, ChainSnapshot, FinalizerMode, LaunchProfile, LeaderProof, Ledger,
+    MINE_REWARD, MaskedBlindedReveal, OutPoint, REVEAL_COMMITTEE_SIZE, RevealBundleSection,
+    RevealBundleSignature, Transaction, TxInput, TxOutput, blinded_reveal_finalizer_fee, hex_hash,
+    revealed_blinded_transactions,
 };
 
 const SCHEMA: &str = r#"
@@ -1257,7 +1258,7 @@ fn metric_index_blinded_fee_outputs(
         block.included_reveal_bundle_count(),
         available_reveal_bundle_slots,
     );
-    if reveal_finalizer_fee > 0 {
+    if reveal_finalizer_fee > 0 && block.height < AGGREGATE_FINALIZER_FEE_ACTIVATION_HEIGHT {
         utxos.insert(
             metric_blinded_executor_fee_outpoint(commitment),
             TxOutput {
