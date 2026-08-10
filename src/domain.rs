@@ -4125,15 +4125,13 @@ impl Ledger {
             if matches!(pending, Transaction::Mine { .. }) {
                 continue;
             }
-            let mut candidate = utxos.clone();
-            if apply_transaction(&pending, &mut candidate).is_ok() {
-                utxos = candidate;
+            if apply_spendable_pending_transaction(&pending, &mut utxos).is_err() {
+                continue;
             }
         }
         for pending in self.valid_pending_blinded_transactions() {
-            let mut candidate = utxos.clone();
-            if spend_blinded_inputs(&pending, &mut candidate).is_ok() {
-                utxos = candidate;
+            if spend_spendable_blinded_inputs(&pending, &mut utxos).is_err() {
+                continue;
             }
         }
         Ok(utxos)
@@ -5414,6 +5412,72 @@ fn spend_inputs(
     Ok(total)
 }
 
+fn apply_spendable_pending_transaction(
+    transaction: &Transaction,
+    utxos: &mut BTreeMap<OutPoint, TxOutput>,
+) -> Result<()> {
+    if matches!(transaction, Transaction::Mine { .. }) {
+        bail!("pending mine outputs are not spendable");
+    }
+    transaction.verify_signature()?;
+    ensure_single_input_owner(transaction)?;
+    let input_total = transaction_input_total(transaction, utxos)?;
+    let outputs = transaction.outputs();
+    let output_total = outputs.iter().try_fold(0_u64, |total, output| {
+        total
+            .checked_add(output.amount)
+            .context("transaction outputs overflow")
+    })?;
+    let required = output_total
+        .checked_add(transaction.fee())
+        .context("transaction outputs plus fee overflow")?
+        .checked_add(match transaction {
+            Transaction::Burn { amount, .. } => *amount,
+            Transaction::Transfer { .. } | Transaction::Mine { .. } => 0,
+        })
+        .context("transaction outputs plus burn overflow")?;
+    if input_total != required {
+        bail!("transaction inputs do not balance outputs, burn, and fee");
+    }
+    ensure_outputs_do_not_overflow(utxos, &outputs)?;
+    for input in transaction.inputs() {
+        utxos.remove(&input.outpoint);
+    }
+    for (index, output) in outputs.iter().enumerate() {
+        utxos.insert(
+            OutPoint {
+                txid: transaction.signature().to_string(),
+                index: index as u32,
+            },
+            output.clone(),
+        );
+    }
+    Ok(())
+}
+
+fn transaction_input_total(
+    transaction: &Transaction,
+    utxos: &BTreeMap<OutPoint, TxOutput>,
+) -> Result<Amount> {
+    let mut seen = BTreeSet::new();
+    let mut total = 0_u64;
+    for input in transaction.inputs() {
+        if !seen.insert(input.outpoint.clone()) {
+            bail!("duplicate input in transaction");
+        }
+        let output = utxos.get(&input.outpoint).with_context(|| {
+            format!("transaction spends missing output {}", input.outpoint.id())
+        })?;
+        if output.address != input.owner {
+            bail!("transaction input owner does not match spent output");
+        }
+        total = total
+            .checked_add(output.amount)
+            .context("transaction input total overflows")?;
+    }
+    Ok(total)
+}
+
 fn spend_blinded_inputs(
     transaction: &BlindedTransaction,
     utxos: &mut BTreeMap<OutPoint, TxOutput>,
@@ -5438,6 +5502,53 @@ fn spend_blinded_inputs(
             bail!("blinded transaction input owner does not match spent output");
         }
         locked.push(output);
+    }
+    let locked_total = locked.iter().try_fold(0_u64, |total, output| {
+        total
+            .checked_add(output.amount)
+            .context("blinded transaction locked input total overflows")
+    })?;
+    if transaction.fee > locked_total {
+        bail!("blinded transaction fee exceeds locked inputs");
+    }
+    Ok(locked)
+}
+
+fn spend_spendable_blinded_inputs(
+    transaction: &BlindedTransaction,
+    utxos: &mut BTreeMap<OutPoint, TxOutput>,
+) -> Result<Vec<TxOutput>> {
+    let locked = blinded_input_outputs(transaction, utxos)?;
+    for input in &transaction.inputs {
+        utxos.remove(&input.outpoint);
+    }
+    Ok(locked)
+}
+
+fn blinded_input_outputs(
+    transaction: &BlindedTransaction,
+    utxos: &BTreeMap<OutPoint, TxOutput>,
+) -> Result<Vec<TxOutput>> {
+    verify_blinded_input_signatures(transaction)?;
+    if transaction.inputs.is_empty() {
+        return Ok(Vec::new());
+    }
+    let mut seen = BTreeSet::new();
+    let mut locked = Vec::new();
+    for input in &transaction.inputs {
+        if !seen.insert(input.outpoint.clone()) {
+            bail!("duplicate input in blinded transaction");
+        }
+        let output = utxos.get(&input.outpoint).with_context(|| {
+            format!(
+                "blinded transaction spends missing output {}",
+                input.outpoint.id()
+            )
+        })?;
+        if output.address != input.owner {
+            bail!("blinded transaction input owner does not match spent output");
+        }
+        locked.push(output.clone());
     }
     let locked_total = locked.iter().try_fold(0_u64, |total, output| {
         total

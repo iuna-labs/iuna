@@ -66,6 +66,7 @@ struct HttpState {
     stratum: StratumStatus,
     auth_sessions: Arc<Mutex<BTreeMap<String, AuthSession>>>,
     auth_backoff: Arc<Mutex<BTreeMap<String, AuthBackoff>>>,
+    ui_cache: Arc<Mutex<UiChainCache>>,
 }
 
 #[derive(Clone)]
@@ -81,6 +82,19 @@ struct AuthClientKey(String);
 struct AuthBackoff {
     failed_attempts: u32,
     locked_until_ms: Option<u64>,
+}
+
+#[derive(Clone, Debug, Default)]
+struct UiChainCache {
+    tip_hash: Option<String>,
+    outputs: BTreeMap<OutPoint, TxOutput>,
+    revealed_by_height: BTreeMap<u64, Vec<RevealedBlindedTransaction>>,
+}
+
+#[derive(Clone, Debug)]
+struct UiChainView {
+    outputs: BTreeMap<OutPoint, TxOutput>,
+    revealed_by_height: BTreeMap<u64, Vec<RevealedBlindedTransaction>>,
 }
 
 pub struct ServeOptions {
@@ -482,6 +496,7 @@ pub async fn serve(
         stratum: options.stratum,
         auth_sessions: Arc::new(Mutex::new(BTreeMap::new())),
         auth_backoff: Arc::new(Mutex::new(BTreeMap::new())),
+        ui_cache: Arc::new(Mutex::new(UiChainCache::default())),
     };
     tokio::spawn(run_owned_blinded_outbox_persistence(state.clone()));
     let app = Router::new()
@@ -840,24 +855,35 @@ async fn api_blocks(
         .limit
         .unwrap_or(EXPLORER_PAGE_LIMIT)
         .min(EXPLORER_LIMIT);
-    let node = state.node.lock().await;
-    let snapshot = node.chain_snapshot();
-    let pending = node.pending_transactions();
-    let blocks = match query.before_height {
-        Some(before_height) => node.blocks_before(before_height, limit),
-        None => node.recent_blocks(limit),
+    let (snapshot, pending, blocks, burn_leader_ranks) = {
+        let node = state.node.lock().await;
+        let snapshot = node.chain_snapshot();
+        let pending = node.pending_transactions();
+        let blocks = match query.before_height {
+            Some(before_height) => node.blocks_before(before_height, limit),
+            None => node.recent_blocks(limit),
+        };
+        let burn_leader_ranks = blocks
+            .iter()
+            .map(|block| {
+                (
+                    block.hash.clone(),
+                    node.burn_leader_ranks_for_block(block.height)
+                        .unwrap_or_default(),
+                )
+            })
+            .collect::<BTreeMap<_, _>>();
+        (snapshot, pending, blocks, burn_leader_ranks)
     };
-    let burn_leader_ranks = blocks
-        .iter()
-        .map(|block| {
-            (
-                block.hash.clone(),
-                node.burn_leader_ranks_for_block(block.height)
-                    .unwrap_or_default(),
-            )
-        })
-        .collect::<BTreeMap<_, _>>();
-    Json(ui_blocks(blocks, &snapshot, &pending, &burn_leader_ranks))
+    let view = cached_chain_view(&state, &snapshot).await;
+    let mut outputs = view.outputs;
+    add_pending_outputs(&mut outputs, &pending);
+    Json(ui_blocks_from_indexes(
+        blocks,
+        &outputs,
+        &view.revealed_by_height,
+        &burn_leader_ranks,
+    ))
 }
 
 async fn api_config(State(state): State<HttpState>) -> Json<ConfigResponse> {
@@ -879,17 +905,28 @@ async fn api_mempool(
     State(state): State<HttpState>,
     Query(query): Query<PageQuery>,
 ) -> Json<Page<UiTransaction>> {
-    let node = state.node.lock().await;
-    let snapshot = node.chain_snapshot();
-    let pending = node.pending_transactions();
-    let pending_blinded = node.pending_blinded_transactions();
-    let pending_reveals = node.pending_blinded_reveals();
-    let pending_revealed = node
-        .pending_revealed_blinded_transactions()
-        .into_iter()
-        .map(|revealed| (revealed.commitment.clone(), revealed))
-        .collect::<BTreeMap<_, _>>();
-    let outputs = known_output_index(&snapshot, &pending);
+    let (snapshot, pending, pending_blinded, pending_reveals, pending_revealed) = {
+        let node = state.node.lock().await;
+        let snapshot = node.chain_snapshot();
+        let pending = node.pending_transactions();
+        let pending_blinded = node.pending_blinded_transactions();
+        let pending_reveals = node.pending_blinded_reveals();
+        let pending_revealed = node
+            .pending_revealed_blinded_transactions()
+            .into_iter()
+            .map(|revealed| (revealed.commitment.clone(), revealed))
+            .collect::<BTreeMap<_, _>>();
+        (
+            snapshot,
+            pending,
+            pending_blinded,
+            pending_reveals,
+            pending_revealed,
+        )
+    };
+    let view = cached_chain_view(&state, &snapshot).await;
+    let mut outputs = view.outputs;
+    add_pending_outputs(&mut outputs, &pending);
     let mut items = pending
         .iter()
         .map(|tx| ui_transaction(tx, &outputs))
@@ -913,21 +950,27 @@ async fn api_wallet_transactions(
     State(state): State<HttpState>,
     Query(query): Query<WalletTransactionsQuery>,
 ) -> Json<Page<WalletTransactionRow>> {
-    let node = state.node.lock().await;
-    let snapshot = node.chain_snapshot();
-    let pending = node.pending_transactions();
-    let owned_blinded = node.owned_blinded_payloads();
-    let revealed_by_height = revealed_transactions_by_height(&snapshot);
-    let outputs = known_output_index(&snapshot, &pending);
+    let (wallet, snapshot, pending, owned_blinded) = {
+        let node = state.node.lock().await;
+        (
+            node.wallet_address().to_string(),
+            node.chain_snapshot(),
+            node.pending_transactions(),
+            node.owned_blinded_payloads(),
+        )
+    };
+    let view = cached_chain_view(&state, &snapshot).await;
+    let mut outputs = view.outputs;
+    add_pending_outputs(&mut outputs, &pending);
     let page_query = query.page();
     let filters = WalletTransactionFilters::from_query(query);
     Json(page_items(
         wallet_transaction_rows(
-            node.wallet_address(),
+            &wallet,
             pending,
             owned_blinded,
             &snapshot.blocks,
-            &revealed_by_height,
+            &view.revealed_by_height,
             &outputs,
             filters,
         ),
@@ -939,22 +982,27 @@ async fn api_wallet_utxos(
     State(state): State<HttpState>,
     Query(query): Query<PageQuery>,
 ) -> Json<Page<WalletUtxoRow>> {
-    let node = state.node.lock().await;
-    let ledger = node
-        .wallet_view_ledger()
-        .unwrap_or_else(|_| node.clone_ledger());
-    Json(page_items(
-        wallet_utxo_rows(&ledger, node.wallet_address()),
-        query,
-    ))
+    let (ledger, wallet) = {
+        let node = state.node.lock().await;
+        (
+            node.wallet_view_ledger()
+                .unwrap_or_else(|_| node.clone_ledger()),
+            node.wallet_address().to_string(),
+        )
+    };
+    Json(page_items(wallet_utxo_rows(&ledger, &wallet), query))
 }
 
 async fn api_wallet_selectable_utxos(State(state): State<HttpState>) -> Json<Vec<WalletUtxoRow>> {
-    let node = state.node.lock().await;
-    let ledger = node
-        .wallet_view_ledger()
-        .unwrap_or_else(|_| node.clone_ledger());
-    Json(selectable_wallet_utxo_rows(&ledger, node.wallet_address()))
+    let (ledger, wallet) = {
+        let node = state.node.lock().await;
+        (
+            node.wallet_view_ledger()
+                .unwrap_or_else(|_| node.clone_ledger()),
+            node.wallet_address().to_string(),
+        )
+    };
+    Json(selectable_wallet_utxo_rows(&ledger, &wallet))
 }
 
 fn page_items<T>(items: Vec<T>, query: PageQuery) -> Page<T> {
@@ -1979,6 +2027,7 @@ fn revealed_transactions_by_height(
         )
 }
 
+#[cfg(test)]
 fn ui_blocks(
     blocks: Vec<Block>,
     snapshot: &ChainSnapshot,
@@ -1987,11 +2036,20 @@ fn ui_blocks(
 ) -> Vec<UiBlock> {
     let outputs = known_output_index(snapshot, pending);
     let revealed = revealed_transactions_by_height(snapshot);
+    ui_blocks_from_indexes(blocks, &outputs, &revealed, burn_leader_ranks)
+}
+
+fn ui_blocks_from_indexes(
+    blocks: Vec<Block>,
+    outputs: &BTreeMap<OutPoint, TxOutput>,
+    revealed: &BTreeMap<u64, Vec<RevealedBlindedTransaction>>,
+    burn_leader_ranks: &BTreeMap<String, Vec<BurnLeaderRank>>,
+) -> Vec<UiBlock> {
     blocks
         .into_iter()
         .map(|block| {
             let revealed_transactions = revealed.get(&block.height).cloned().unwrap_or_default();
-            ui_block(block, &outputs, burn_leader_ranks, &revealed_transactions)
+            ui_block(block, outputs, burn_leader_ranks, &revealed_transactions)
         })
         .collect()
 }
@@ -2312,10 +2370,53 @@ fn hex_nibble(byte: u8) -> Option<u8> {
     }
 }
 
+#[cfg(test)]
 fn known_output_index(
     snapshot: &ChainSnapshot,
     pending: &[Transaction],
 ) -> BTreeMap<OutPoint, TxOutput> {
+    let mut outputs = known_chain_output_index(snapshot);
+    add_pending_outputs(&mut outputs, pending);
+    outputs
+}
+
+async fn cached_chain_view(state: &HttpState, snapshot: &ChainSnapshot) -> UiChainView {
+    let tip_hash = snapshot.blocks.last().map(|block| block.hash.clone());
+    {
+        let cache = state.ui_cache.lock().await;
+        if cache.tip_hash == tip_hash {
+            return UiChainView {
+                outputs: cache.outputs.clone(),
+                revealed_by_height: cache.revealed_by_height.clone(),
+            };
+        }
+    }
+
+    let outputs = known_chain_output_index(snapshot);
+    let revealed_by_height = revealed_transactions_by_height(snapshot);
+
+    let mut cache = state.ui_cache.lock().await;
+    if cache.tip_hash == tip_hash {
+        return UiChainView {
+            outputs: cache.outputs.clone(),
+            revealed_by_height: cache.revealed_by_height.clone(),
+        };
+    }
+
+    let view = UiChainView {
+        outputs,
+        revealed_by_height,
+    };
+    cache.tip_hash = tip_hash;
+    cache.outputs = view.outputs.clone();
+    cache.revealed_by_height = view.revealed_by_height.clone();
+    UiChainView {
+        outputs: view.outputs,
+        revealed_by_height: view.revealed_by_height,
+    }
+}
+
+fn known_chain_output_index(snapshot: &ChainSnapshot) -> BTreeMap<OutPoint, TxOutput> {
     let mut outputs = BTreeMap::new();
     for (address, amount) in &snapshot.genesis_allocations {
         if *amount == 0 {
@@ -2428,10 +2529,13 @@ fn known_output_index(
         }
     }
     index_expired_blinded_outputs(&mut outputs, snapshot);
-    for transaction in pending {
-        index_transaction_outputs(&mut outputs, transaction);
-    }
     outputs
+}
+
+fn add_pending_outputs(outputs: &mut BTreeMap<OutPoint, TxOutput>, pending: &[Transaction]) {
+    for transaction in pending {
+        index_transaction_outputs(outputs, transaction);
+    }
 }
 
 fn index_blinded_collateral_change(
@@ -6359,6 +6463,7 @@ mod tests {
             },
             auth_sessions: Arc::new(Mutex::new(BTreeMap::new())),
             auth_backoff: Arc::new(Mutex::new(BTreeMap::new())),
+            ui_cache: Arc::new(Mutex::new(super::UiChainCache::default())),
         }
     }
 
