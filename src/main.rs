@@ -1,6 +1,6 @@
 use std::{
     collections::BTreeMap,
-    net::SocketAddr,
+    net::{Ipv4Addr, SocketAddr},
     path::{Path, PathBuf},
     str::FromStr,
     sync::Arc,
@@ -48,13 +48,11 @@ async fn main() -> Result<()> {
         );
     }
     let mut ui_config = config_store::load_or_create(&config_path)?;
+    let ui_config_dirty = apply_cli_p2p_config_overrides(&opts, &mut ui_config);
     let p2p_announce_addr = configured_p2p_announce_addr(&opts, &ui_config)?;
-    let p2p_accept_inbound = opts.p2p_announce_addr.is_some() || ui_config.p2p_accept_inbound;
-    if let Some(addr) = opts.p2p_announce_addr {
-        ui_config.p2p_accept_inbound = true;
-        ui_config.p2p_announce_addr = Some(addr.to_string());
-    }
-    let advertised_p2p_addr = p2p_announce_addr.unwrap_or(opts.p2p_addr);
+    let configured_p2p_addr = configured_p2p_bind_addr(&opts, &ui_config);
+    let p2p_accept_inbound = ui_config.p2p_accept_inbound;
+    let advertised_p2p_addr = p2p_announce_addr.unwrap_or(configured_p2p_addr);
     let wallet_load = load_startup_wallet(&wallet_path)?;
     let wallet_address = wallet_load.address().to_string();
     if opts.chain_mode == ChainMode::Genesis {
@@ -63,6 +61,8 @@ async fn main() -> Result<()> {
         ui_config.pow_mining_enabled = false;
         ui_config.burn_per_block = GENESIS_INITIAL_BURN_PER_BLOCK;
         ui_config.burn_fee = GENESIS_INITIAL_BURN_FEE;
+        config_store::save(&config_path, &ui_config)?;
+    } else if ui_config_dirty {
         config_store::save(&config_path, &ui_config)?;
     }
     let ledger =
@@ -121,7 +121,7 @@ async fn main() -> Result<()> {
     println!("chain database: {}", chain_store.path().display());
     println!("management UI: http://{}", opts.http_addr);
     if p2p_accept_inbound {
-        println!("p2p listener: {}", opts.p2p_addr);
+        println!("p2p listener: {}", configured_p2p_addr);
     } else {
         println!("p2p listener: disabled (outbound-only)");
     }
@@ -139,7 +139,7 @@ async fn main() -> Result<()> {
     let gossip = p2p::GossipNetwork::start(
         Arc::clone(&node),
         Arc::clone(&peers),
-        opts.p2p_addr,
+        configured_p2p_addr,
         p2p_announce_addr,
         p2p_accept_inbound,
     )
@@ -312,6 +312,38 @@ fn configured_p2p_announce_addr(
         .transpose()
 }
 
+fn configured_p2p_bind_addr(opts: &CliOptions, ui_config: &config_store::UiConfig) -> SocketAddr {
+    if opts.p2p_addr_configured || ui_config.p2p_accept_inbound {
+        return SocketAddr::from((Ipv4Addr::UNSPECIFIED, ui_config.p2p_bind_port));
+    }
+    opts.p2p_addr
+}
+
+fn apply_cli_p2p_config_overrides(
+    opts: &CliOptions,
+    ui_config: &mut config_store::UiConfig,
+) -> bool {
+    let mut dirty = false;
+    if opts.p2p_addr_configured {
+        let bind_port = opts.p2p_addr.port();
+        if ui_config.p2p_bind_port != bind_port {
+            ui_config.p2p_bind_port = bind_port;
+            dirty = true;
+        }
+    }
+    if let Some(addr) = opts.p2p_announce_addr {
+        let announce_addr = addr.to_string();
+        if !ui_config.p2p_accept_inbound
+            || ui_config.p2p_announce_addr.as_deref() != Some(&announce_addr)
+        {
+            ui_config.p2p_accept_inbound = true;
+            ui_config.p2p_announce_addr = Some(announce_addr);
+            dirty = true;
+        }
+    }
+    dirty
+}
+
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 enum ChainMode {
     Setup,
@@ -325,6 +357,7 @@ struct CliOptions {
     chain_db_path: Option<PathBuf>,
     http_addr: SocketAddr,
     p2p_addr: SocketAddr,
+    p2p_addr_configured: bool,
     p2p_announce_addr: Option<SocketAddr>,
     stratum_addr: Option<SocketAddr>,
     peers: Vec<String>,
@@ -345,6 +378,7 @@ impl CliOptions {
             chain_db_path: None,
             http_addr: SocketAddr::from_str("127.0.0.1:18661")?,
             p2p_addr: SocketAddr::from_str("127.0.0.1:9444")?,
+            p2p_addr_configured: false,
             p2p_announce_addr: None,
             stratum_addr: None,
             peers: Vec::new(),
@@ -384,6 +418,7 @@ impl CliOptions {
                     opts.p2p_addr = next_value(&mut args, "--p2p")?
                         .parse()
                         .context("invalid --p2p address")?;
+                    opts.p2p_addr_configured = true;
                 }
                 "--p2p-announce" => {
                     opts.p2p_announce_addr = Some(
@@ -844,10 +879,10 @@ mod tests {
 
     use super::{
         ChainMode, CliOptions, GENESIS_INITIAL_BURN_FEE, GENESIS_INITIAL_BURN_PER_BLOCK,
-        StartupWallet, configured_p2p_announce_addr, extrapolate_vdf_rounds, help_text,
-        initial_burn_fee, initial_burn_per_block, initialize_ledger, load_startup_wallet,
-        measure_vdf_rounds, persist_chain_snapshot, run_chain_persistence_with_interval,
-        validate_wallet_for_mode,
+        StartupWallet, apply_cli_p2p_config_overrides, configured_p2p_announce_addr,
+        configured_p2p_bind_addr, extrapolate_vdf_rounds, help_text, initial_burn_fee,
+        initial_burn_per_block, initialize_ledger, load_startup_wallet, measure_vdf_rounds,
+        persist_chain_snapshot, run_chain_persistence_with_interval, validate_wallet_for_mode,
     };
 
     fn parse(args: &[&str]) -> anyhow::Result<Option<CliOptions>> {
@@ -1116,6 +1151,49 @@ mod tests {
                 .to_string()
                 .contains("invalid configured P2P announce address")
         );
+    }
+
+    #[test]
+    fn configured_p2p_bind_addr_uses_configured_public_port() {
+        let opts = parse(&[]).unwrap().unwrap();
+        let config = UiConfig {
+            p2p_accept_inbound: true,
+            p2p_bind_port: 9555,
+            ..UiConfig::default()
+        };
+
+        assert_eq!(
+            configured_p2p_bind_addr(&opts, &config).to_string(),
+            "0.0.0.0:9555"
+        );
+    }
+
+    #[test]
+    fn configured_p2p_bind_addr_uses_cli_port_after_config_override() {
+        let opts = parse(&["--p2p", "127.0.0.1:9555"]).unwrap().unwrap();
+        let config = UiConfig {
+            p2p_accept_inbound: true,
+            p2p_bind_port: 9555,
+            ..UiConfig::default()
+        };
+
+        assert_eq!(
+            configured_p2p_bind_addr(&opts, &config).to_string(),
+            "0.0.0.0:9555"
+        );
+    }
+
+    #[test]
+    fn cli_p2p_port_overrides_config_bind_port() {
+        let opts = parse(&["--p2p", "127.0.0.1:9555"]).unwrap().unwrap();
+        let mut config = UiConfig {
+            p2p_accept_inbound: true,
+            p2p_bind_port: 9444,
+            ..UiConfig::default()
+        };
+
+        assert!(apply_cli_p2p_config_overrides(&opts, &mut config));
+        assert_eq!(config.p2p_bind_port, 9555);
     }
 
     #[test]

@@ -169,6 +169,15 @@ struct P2pAnnounceForm {
 #[derive(Debug, Deserialize)]
 struct P2pInboundForm {
     enabled: bool,
+    bind_port: Option<u16>,
+}
+
+#[derive(Debug, Serialize)]
+struct ConfigResponse {
+    #[serde(flatten)]
+    config: UiConfig,
+    p2p_inbound_runtime_active: bool,
+    p2p_runtime_bind_addr: String,
 }
 
 #[derive(Debug, Deserialize)]
@@ -851,8 +860,12 @@ async fn api_blocks(
     Json(ui_blocks(blocks, &snapshot, &pending, &burn_leader_ranks))
 }
 
-async fn api_config(State(state): State<HttpState>) -> Json<UiConfig> {
-    Json(state.ui_config.lock().await.clone())
+async fn api_config(State(state): State<HttpState>) -> Json<ConfigResponse> {
+    Json(ConfigResponse {
+        config: state.ui_config.lock().await.clone(),
+        p2p_inbound_runtime_active: state.gossip.accepts_inbound().await,
+        p2p_runtime_bind_addr: state.gossip.listen_addr().to_string(),
+    })
 }
 
 async fn api_wallet_setup(
@@ -1152,7 +1165,7 @@ async fn api_p2p_inbound_form(
     State(state): State<HttpState>,
     Form(form): Form<P2pInboundForm>,
 ) -> Json<ActionResponse> {
-    action_json(set_p2p_accept_inbound(&state, form.enabled).await)
+    action_json(set_p2p_accept_inbound(&state, form.enabled, form.bind_port).await)
 }
 
 async fn burn_per_block_form(
@@ -1346,15 +1359,24 @@ async fn set_p2p_announce_addr(state: &HttpState, addr: String) -> Result<()> {
     Ok(())
 }
 
-async fn set_p2p_accept_inbound(state: &HttpState, enabled: bool) -> Result<()> {
+async fn set_p2p_accept_inbound(
+    state: &HttpState,
+    enabled: bool,
+    bind_port: Option<u16>,
+) -> Result<()> {
+    let bind_port = bind_port.unwrap_or(config_store::DEFAULT_P2P_BIND_PORT);
+    if bind_port == 0 {
+        bail!("P2P bind port must be between 1 and 65535");
+    }
     let previous = state.gossip.accepts_inbound().await;
-    if enabled {
+    if enabled && previous {
         state.gossip.set_accept_inbound(true).await?;
     }
 
     let mut config = state.ui_config.lock().await;
     let mut next_config = config.clone();
     next_config.p2p_accept_inbound = enabled;
+    next_config.p2p_bind_port = bind_port;
     if let Err(error) = config_store::save(&state.config_path, &next_config) {
         let _ = state.gossip.set_accept_inbound(previous).await;
         return Err(error);
@@ -3242,6 +3264,7 @@ const INDEX_HTML: &str = r#"<!doctype html>
     .flash { position: fixed; top: 18px; right: 18px; z-index: 80; width: min(420px, calc(100vw - 36px)); border-radius: 6px; padding: 10px 12px; border: 1px solid; font-weight: 700; box-shadow: 0 18px 48px rgba(0, 0, 0, .38); }
     .flash.success { color: #d5f55f; background: #1c2516; border-color: #566d25; }
     .flash.error { color: #ffb1a8; background: #2a1717; border-color: #713434; }
+    .persistent-banner { border: 1px solid #566d25; border-radius: 8px; padding: 10px 12px; margin: -4px 0 16px; color: #d5f55f; background: #1c2516; font-weight: 800; }
     .ok { color: #d5f55f; }
     .page-title { margin-bottom: 16px; }
     .setup-overlay { position: fixed; inset: 0; z-index: 30; display: grid; place-items: center; padding: 22px; background: rgba(8, 9, 10, .72); backdrop-filter: blur(8px); }
@@ -3633,6 +3656,7 @@ const INDEX_HTML: &str = r#"<!doctype html>
     </header>
 
     <div class="flash" :class="flash?.kind" x-show="flash" x-transition x-text="flash?.message"></div>
+    <div class="persistent-banner" x-show="p2pRestartRequired()" x-transition x-text="p2pRestartMessage()"></div>
 
     <section x-show="tab === 'wallet'">
       <div class="page-title">
@@ -4257,8 +4281,9 @@ const INDEX_HTML: &str = r#"<!doctype html>
             </label>
           </div>
           <form class="settings-form public-p2p-form" x-show="p2pAcceptInbound" x-transition @submit.prevent="saveP2pAnnounce">
+            <label>Bind port<input x-model.number="p2pBindPort" @input="p2pBindPortDirty = true" type="number" min="1" max="65535" step="1" required></label>
             <label>Public P2P address<input x-model="p2pAnnounceAddr" @input="p2pAnnounceDirty = true" placeholder="203.0.113.10:9444"></label>
-            <div class="muted">Use this only when TCP port 9444 is reachable from the internet.</div>
+            <div class="muted">Use this only when TCP port <span x-text="p2pBindPort"></span> is reachable from the internet.</div>
             <div class="setup-actions"><button class="primary" type="submit">Save</button></div>
           </form>
         </div>
@@ -4525,6 +4550,7 @@ const INDEX_HTML: &str = r#"<!doctype html>
           </div>
           <div class="setup-network-row">
             <label><span x-text="setupRequiresPeer() ? 'Bootstrap peer (required)' : 'Bootstrap peer'"></span><input x-model="setupPeerAddress" placeholder="iuna.jhx.app:9444"></label>
+            <label x-show="setupNodeMode === 'listening'" x-transition>Bind port<input x-model.number="p2pBindPort" @input="p2pBindPortDirty = true" type="number" min="1" max="65535" step="1" required></label>
           </div>
           <div class="setup-network-copy" x-text="setupRequiresPeer() ? 'A bootstrap peer is required before this node can join the network. Known nodes help discovery; they do not control your wallet or decide valid blocks.' : 'You can add a bootstrap peer now or later from the P2P screen. Known nodes help discovery; they do not control your wallet or decide valid blocks.'"></div>
         </div>
@@ -5371,18 +5397,23 @@ mod tests {
             other => panic!("expected peer list, got {other:?}"),
         }
 
-        super::set_p2p_accept_inbound(&state, true).await.unwrap();
+        super::set_p2p_accept_inbound(&state, true, Some(9555))
+            .await
+            .unwrap();
         let config = config_store::load_or_create(&config_path).unwrap();
         assert!(config.p2p_accept_inbound);
-        assert!(state.gossip.accepts_inbound().await);
+        assert_eq!(config.p2p_bind_port, 9555);
+        assert!(!state.gossip.accepts_inbound().await);
         match state.gossip.peer_exchange().await {
             GossipEnvelope::PeerList { peers } => {
-                assert!(peers.contains(&"203.0.113.10:9444".to_string()));
+                assert!(!peers.contains(&"203.0.113.10:9444".to_string()));
             }
             other => panic!("expected peer list, got {other:?}"),
         }
 
-        super::set_p2p_accept_inbound(&state, false).await.unwrap();
+        super::set_p2p_accept_inbound(&state, false, None)
+            .await
+            .unwrap();
         let config = config_store::load_or_create(&config_path).unwrap();
         assert!(!config.p2p_accept_inbound);
         assert!(!state.gossip.accepts_inbound().await);
@@ -6154,6 +6185,8 @@ mod tests {
         assert!(super::INDEX_HTML.contains("selectSetupNodeMode('wallet')"));
         assert!(super::INDEX_HTML.contains("selectSetupNodeMode('non-listening')"));
         assert!(super::INDEX_HTML.contains("selectSetupNodeMode('listening')"));
+        assert!(super::INDEX_HTML.contains("setupNodeMode === 'listening'"));
+        assert!(super::INDEX_HTML.contains("x-model.number=\"p2pBindPort\""));
         assert!(super::INDEX_HTML.contains("Change later in Settings"));
     }
 
@@ -6177,7 +6210,21 @@ mod tests {
         assert!(app_js.contains("async applySetupNodeMode()"));
         assert!(app_js.contains("await this.applySetupNodeMode();"));
         assert!(app_js.contains("\"/api/settings/p2p-inbound\""));
+        assert!(app_js.contains("bind_port: this.p2pBindPortValue()"));
         assert!(app_js.contains("this.setUiMode(mode === \"wallet\" ? \"basic\" : \"advanced\")"));
+    }
+
+    #[test]
+    fn p2p_bind_port_changes_show_global_restart_notice() {
+        let app_js = include_str!("../../www/assets/iuna-ui.js");
+        assert!(super::INDEX_HTML.contains("Bind port"));
+        assert!(super::INDEX_HTML.contains("persistent-banner"));
+        assert!(super::INDEX_HTML.contains("p2pRestartRequired()"));
+        assert!(app_js.contains("p2pBindPort: 9444"));
+        assert!(app_js.contains("p2pConfiguredBindAddr()"));
+        assert!(app_js.contains("p2pRestartMessage()"));
+        assert!(app_js.contains("Restart iuna to close the public P2P listener."));
+        assert!(app_js.contains("0.0.0.0:${port}"));
     }
 
     #[test]

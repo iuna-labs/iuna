@@ -20,6 +20,7 @@ pub const DEFAULT_BURN_FEE: Amount = DEFAULT_BURN_AMOUNT;
 pub const DEFAULT_RECOVERY_VDF_TOP_RANK_PERCENT: u8 = 50;
 pub const DEFAULT_POW_MINING_WORKERS: u8 = 1;
 pub const MAX_POW_MINING_WORKERS: u8 = 32;
+pub const DEFAULT_P2P_BIND_PORT: u16 = 9444;
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 pub struct UiConfig {
@@ -34,6 +35,7 @@ pub struct UiConfig {
     pub recovery_vdf_top_rank_percent: u8,
     pub keep_track_of_metrics: bool,
     pub p2p_accept_inbound: bool,
+    pub p2p_bind_port: u16,
     pub p2p_announce_addr: Option<String>,
     pub peers: Vec<String>,
     pub address_book: BTreeMap<String, String>,
@@ -52,6 +54,7 @@ impl Default for UiConfig {
             recovery_vdf_top_rank_percent: DEFAULT_RECOVERY_VDF_TOP_RANK_PERCENT,
             keep_track_of_metrics: false,
             p2p_accept_inbound: false,
+            p2p_bind_port: DEFAULT_P2P_BIND_PORT,
             p2p_announce_addr: None,
             peers: Vec::new(),
             address_book: BTreeMap::new(),
@@ -83,6 +86,8 @@ struct ConfigFile {
     keep_track_of_metrics: bool,
     #[serde(default)]
     p2p_accept_inbound: Option<bool>,
+    #[serde(default = "default_p2p_bind_port")]
+    p2p_bind_port: u16,
     #[serde(default)]
     p2p_announce_addr: Option<String>,
     #[serde(default)]
@@ -120,6 +125,7 @@ pub fn save(path: &Path, config: &UiConfig) -> Result<()> {
         recovery_vdf_top_rank_percent: Some(config.recovery_vdf_top_rank_percent),
         keep_track_of_metrics: config.keep_track_of_metrics,
         p2p_accept_inbound: Some(config.p2p_accept_inbound),
+        p2p_bind_port: config.p2p_bind_port,
         p2p_announce_addr: config.p2p_announce_addr.clone(),
         peers: config.peers.clone(),
         address_book: config.address_book.clone(),
@@ -177,6 +183,7 @@ fn load(path: &Path) -> Result<UiConfig> {
             .min(100),
         keep_track_of_metrics: stored.keep_track_of_metrics,
         p2p_accept_inbound,
+        p2p_bind_port: stored.p2p_bind_port,
         p2p_announce_addr: stored.p2p_announce_addr,
         peers: stored.peers,
         address_book: stored.address_book,
@@ -189,6 +196,10 @@ pub fn clamp_pow_mining_workers(workers: u8) -> u8 {
 
 fn default_pow_mining_workers() -> u8 {
     DEFAULT_POW_MINING_WORKERS
+}
+
+fn default_p2p_bind_port() -> u16 {
+    DEFAULT_P2P_BIND_PORT
 }
 
 fn create_config_file(path: &Path) -> Result<File> {
@@ -233,6 +244,7 @@ mod tests {
         assert!(!stored.contains("required_burn"));
         assert!(stored.contains("\"keep_track_of_metrics\": false"));
         assert!(stored.contains("\"p2p_accept_inbound\": false"));
+        assert!(stored.contains("\"p2p_bind_port\": 9444"));
         assert!(stored.contains("\"p2p_announce_addr\": null"));
         assert!(stored.contains("\"peers\": []"));
         assert!(stored.contains("\"address_book\": {}"));
@@ -255,6 +267,7 @@ mod tests {
                 burn_fee: 3 * MICRO_IUNA,
                 keep_track_of_metrics: true,
                 p2p_accept_inbound: true,
+                p2p_bind_port: 9555,
                 p2p_announce_addr: Some("203.0.113.10:9444".to_string()),
                 peers: vec!["127.0.0.1:9444".to_string()],
                 address_book: [("iuna-address".to_string(), "Alice".to_string())].into(),
@@ -273,6 +286,7 @@ mod tests {
         assert_eq!(config.burn_fee, 3 * MICRO_IUNA);
         assert!(config.keep_track_of_metrics);
         assert!(config.p2p_accept_inbound);
+        assert_eq!(config.p2p_bind_port, 9555);
         assert_eq!(
             config.p2p_announce_addr.as_deref(),
             Some("203.0.113.10:9444")
@@ -321,6 +335,7 @@ mod tests {
         assert_eq!(config.burn_fee, DEFAULT_BURN_FEE);
         assert!(!config.keep_track_of_metrics);
         assert!(!config.p2p_accept_inbound);
+        assert_eq!(config.p2p_bind_port, 9444);
         assert_eq!(config.peers, vec!["127.0.0.1:9444"]);
         assert!(config.address_book.is_empty());
     }

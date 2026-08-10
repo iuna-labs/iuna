@@ -57,6 +57,8 @@ window.iunaApp = function iunaApp() {
     addressBookDraftAddress: "",
     addressBookDraftName: "",
     p2pAcceptInbound: false,
+    p2pBindPort: 9444,
+    p2pBindPortDirty: false,
     p2pAnnounceAddr: "",
     p2pAnnounceDirty: false,
     setupWallet: { address: null, seed_phrase: null, dev_verify_bypass: false, requires_peer: false },
@@ -396,6 +398,9 @@ window.iunaApp = function iunaApp() {
           this.recoveryVdfTopRankPercent
       );
       this.p2pAcceptInbound = this.config.p2p_accept_inbound === true;
+      if (!this.p2pBindPortDirty) {
+        this.p2pBindPort = Number(this.config.p2p_bind_port || 9444);
+      }
       if (
         options.addressBookVersion === undefined ||
         options.addressBookVersion >= this.addressBookVersion
@@ -584,7 +589,10 @@ window.iunaApp = function iunaApp() {
         : "wallet";
       const acceptInbound = mode === "listening";
       if (this.p2pAcceptInbound !== acceptInbound) {
-        await this.submitForm("/api/settings/p2p-inbound", { enabled: acceptInbound });
+        await this.submitForm("/api/settings/p2p-inbound", {
+          enabled: acceptInbound,
+          bind_port: this.p2pBindPortValue(),
+        });
         this.p2pAcceptInbound = acceptInbound;
       }
       this.setUiMode(mode === "wallet" ? "basic" : "advanced");
@@ -1387,14 +1395,46 @@ window.iunaApp = function iunaApp() {
         this.p2pAcceptInbound = enabled;
         await this.postForm(
           "/api/settings/p2p-inbound",
-          { enabled },
-          enabled ? "Public node enabled" : "Switched to outbound-only P2P"
+          { enabled, bind_port: this.p2pBindPortValue() },
+          enabled ? "Public node setting saved" : "Switched to outbound-only P2P"
         );
+        this.p2pBindPortDirty = false;
         await this.refreshConfig();
       } catch (error) {
         this.p2pAcceptInbound = previous;
         this.showFlash(error.message, "error");
       }
+    },
+
+    p2pBindPortValue() {
+      const port = Number(this.p2pBindPort);
+      if (!Number.isInteger(port) || port < 1 || port > 65535) {
+        throw new Error("P2P bind port must be between 1 and 65535");
+      }
+      return port;
+    },
+
+    p2pConfiguredBindAddr() {
+      const port = Number(this.config.p2p_bind_port || 9444);
+      if (!Number.isInteger(port) || port < 1 || port > 65535) return null;
+      return `0.0.0.0:${port}`;
+    },
+
+    p2pRestartRequired() {
+      const runtimeActive = this.config.p2p_inbound_runtime_active === true;
+      if (this.p2pAcceptInbound !== runtimeActive) return true;
+      if (!this.p2pAcceptInbound) return false;
+      const configured = this.p2pConfiguredBindAddr();
+      return configured ? this.config.p2p_runtime_bind_addr !== configured : false;
+    },
+
+    p2pRestartMessage() {
+      if (!this.p2pRestartRequired()) return "";
+      if (!this.p2pAcceptInbound && this.config.p2p_inbound_runtime_active === true) {
+        return "Restart iuna to close the public P2P listener.";
+      }
+      const configured = this.p2pConfiguredBindAddr();
+      return `Restart iuna to open public P2P on ${configured || "the configured bind port"}.`;
     },
 
     async saveP2pAnnounce() {
@@ -1404,6 +1444,13 @@ window.iunaApp = function iunaApp() {
       }
       const addr = this.p2pAnnounceAddr.trim();
       try {
+        if (this.p2pBindPortDirty) {
+          await this.submitForm("/api/settings/p2p-inbound", {
+            enabled: true,
+            bind_port: this.p2pBindPortValue(),
+          });
+          this.p2pBindPortDirty = false;
+        }
         await this.postForm(
           "/api/settings/p2p-announce",
           { addr },
@@ -1411,6 +1458,7 @@ window.iunaApp = function iunaApp() {
         );
         this.p2pAnnounceAddr = addr;
         this.p2pAnnounceDirty = false;
+        await this.refreshConfig();
       } catch (error) {
         this.showFlash(error.message, "error");
       }

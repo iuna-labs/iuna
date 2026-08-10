@@ -431,6 +431,10 @@ impl GossipNetwork {
         self.inner.accept_task.lock().await.is_some()
     }
 
+    pub fn listen_addr(&self) -> SocketAddr {
+        self.inner.listen_addr
+    }
+
     pub async fn set_p2p_announce_addr(&self, addr: Option<SocketAddr>) {
         *self.inner.p2p_announce_addr.lock().await = addr;
     }
