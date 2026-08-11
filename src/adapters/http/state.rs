@@ -45,7 +45,7 @@ pub(super) struct UiChainCache {
     pub(super) revealed_by_height: BTreeMap<u64, Vec<RevealedBlindedTransaction>>,
 }
 
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, Default)]
 pub(super) struct UiChainView {
     pub(super) outputs: BTreeMap<OutPoint, TxOutput>,
     pub(super) revealed_by_height: BTreeMap<u64, Vec<RevealedBlindedTransaction>>,

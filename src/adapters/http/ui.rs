@@ -5,7 +5,7 @@ use crate::domain::{
     BLINDED_REVEAL_BUNDLE_SIGNER_FEE_BPS, BlindedReveal, BlindedTransaction, Block, BurnLeaderRank,
     ChainSnapshot, Ledger, MINE_REWARD, OutPoint, REVEAL_COMMITTEE_SIZE,
     RevealedBlindedTransaction, Transaction, TxInput, TxOutput, blinded_reveal_finalizer_fee,
-    hex_hash, revealed_blinded_transactions,
+    hex_hash, reveal_committee_slot_count, revealed_blinded_transactions,
 };
 
 use super::{
@@ -236,6 +236,32 @@ pub(super) fn ui_blocks_from_indexes(
         .map(|block| {
             let revealed_transactions = revealed.get(&block.height).cloned().unwrap_or_default();
             ui_block(block, outputs, burn_leader_ranks, &revealed_transactions)
+        })
+        .collect()
+}
+
+pub(super) fn burn_leader_ranks_for_blocks(
+    snapshot: &ChainSnapshot,
+    blocks: &[Block],
+) -> BTreeMap<String, Vec<BurnLeaderRank>> {
+    let Some(ranks_by_height) = Ledger::from_persisted_snapshot(snapshot.clone())
+        .ok()
+        .and_then(|ledger| {
+            ledger
+                .burn_leader_ranks_for_blocks(blocks.iter().map(|block| block.height))
+                .ok()
+        })
+    else {
+        return BTreeMap::new();
+    };
+
+    blocks
+        .iter()
+        .filter_map(|block| {
+            ranks_by_height
+                .get(&block.height)
+                .cloned()
+                .map(|ranks| (block.hash.clone(), ranks))
         })
         .collect()
 }
@@ -566,40 +592,52 @@ pub(super) fn known_output_index(
     outputs
 }
 
-pub(super) async fn cached_chain_view(state: &HttpState, snapshot: &ChainSnapshot) -> UiChainView {
+pub(super) async fn cached_chain_view(
+    state: &HttpState,
+    snapshot: &ChainSnapshot,
+) -> anyhow::Result<UiChainView> {
     let tip_hash = snapshot.blocks.last().map(|block| block.hash.clone());
     {
         let cache = state.ui_cache.lock().await;
         if cache.tip_hash == tip_hash {
-            return UiChainView {
+            return Ok(UiChainView {
                 outputs: cache.outputs.clone(),
                 revealed_by_height: cache.revealed_by_height.clone(),
-            };
+            });
         }
     }
 
-    let outputs = known_chain_output_index(snapshot);
-    let revealed_by_height = revealed_transactions_by_height(snapshot);
+    let (computed_tip_hash, view) = tokio::task::spawn_blocking({
+        let snapshot = snapshot.clone();
+        move || build_chain_view(&snapshot)
+    })
+    .await?;
 
     let mut cache = state.ui_cache.lock().await;
     if cache.tip_hash == tip_hash {
-        return UiChainView {
+        return Ok(UiChainView {
             outputs: cache.outputs.clone(),
             revealed_by_height: cache.revealed_by_height.clone(),
-        };
+        });
     }
 
-    let view = UiChainView {
-        outputs,
-        revealed_by_height,
-    };
-    cache.tip_hash = tip_hash;
+    cache.tip_hash = computed_tip_hash;
     cache.outputs = view.outputs.clone();
     cache.revealed_by_height = view.revealed_by_height.clone();
-    UiChainView {
+    Ok(UiChainView {
         outputs: view.outputs,
         revealed_by_height: view.revealed_by_height,
-    }
+    })
+}
+
+fn build_chain_view(snapshot: &ChainSnapshot) -> (Option<String>, UiChainView) {
+    (
+        snapshot.blocks.last().map(|block| block.hash.clone()),
+        UiChainView {
+            outputs: known_chain_output_index(snapshot),
+            revealed_by_height: revealed_transactions_by_height(snapshot),
+        },
+    )
 }
 
 fn known_chain_output_index(snapshot: &ChainSnapshot) -> BTreeMap<OutPoint, TxOutput> {
@@ -622,22 +660,7 @@ fn known_chain_output_index(snapshot: &ChainSnapshot) -> BTreeMap<OutPoint, TxOu
         .iter()
         .map(|block| (block.height, block))
         .collect::<BTreeMap<_, _>>();
-    let reveal_bundle_slots_by_height = Ledger::from_persisted_snapshot(snapshot.clone())
-        .ok()
-        .map(|ledger| {
-            snapshot
-                .blocks
-                .iter()
-                .map(|block| {
-                    let slots = ledger
-                        .burn_leader_ranks_for_block(block.height)
-                        .map(|ranks| ranks.len())
-                        .unwrap_or(REVEAL_COMMITTEE_SIZE);
-                    (block.height, slots)
-                })
-                .collect::<BTreeMap<_, _>>()
-        })
-        .unwrap_or_default();
+    let reveal_bundle_slots_by_height = reveal_bundle_slots_by_height(snapshot);
     let blinded_by_commitment = snapshot
         .blocks
         .iter()
@@ -716,6 +739,23 @@ fn known_chain_output_index(snapshot: &ChainSnapshot) -> BTreeMap<OutPoint, TxOu
     }
     index_expired_blinded_outputs(&mut outputs, snapshot);
     outputs
+}
+
+fn reveal_bundle_slots_by_height(snapshot: &ChainSnapshot) -> BTreeMap<u64, usize> {
+    Ledger::from_persisted_snapshot(snapshot.clone())
+        .ok()
+        .and_then(|ledger| {
+            ledger
+                .burn_leader_ranks_for_blocks(snapshot.blocks.iter().map(|block| block.height))
+                .ok()
+        })
+        .map(|ranks_by_height| {
+            ranks_by_height
+                .into_iter()
+                .map(|(height, ranks)| (height, reveal_committee_slot_count(ranks.len())))
+                .collect()
+        })
+        .unwrap_or_default()
 }
 
 pub(super) fn add_pending_outputs(

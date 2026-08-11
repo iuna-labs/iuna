@@ -14,14 +14,14 @@ use crate::{
 
 use super::{
     BlocksQuery, ConfigResponse, MempoolCounts, MetricsQuery, MetricsResponse,
-    NetworkHealthResponse, Page, PageQuery, UiBlock, UiTransaction, WalletTransactionFilters,
-    WalletTransactionRow, WalletTransactionsQuery, WalletUtxoRow,
+    NetworkHealthLocalState, NetworkHealthResponse, Page, PageQuery, UiBlock, UiTransaction,
+    WalletTransactionFilters, WalletTransactionRow, WalletTransactionsQuery, WalletUtxoRow,
 };
 use super::{
     DATASET_LIMIT, DATASET_PAGE_LIMIT, EXPLORER_LIMIT, EXPLORER_PAGE_LIMIT, HttpState,
-    add_pending_outputs, cached_chain_view, metrics_response, network_health, ui_blinded_reveal,
-    ui_blinded_transaction, ui_blocks_from_indexes, ui_pending_revealed_transaction,
-    ui_transaction, wallet_transaction_rows,
+    add_pending_outputs, burn_leader_ranks_for_blocks, cached_chain_view, metrics_response,
+    network_health, ui_blinded_reveal, ui_blinded_transaction, ui_blocks_from_indexes,
+    ui_pending_revealed_transaction, ui_transaction, wallet_transaction_rows,
 };
 
 pub(super) async fn api_status(State(state): State<HttpState>) -> Json<NodeStatus> {
@@ -38,7 +38,7 @@ pub(super) async fn api_blocks(
         .limit
         .unwrap_or(EXPLORER_PAGE_LIMIT)
         .min(EXPLORER_LIMIT);
-    let (snapshot, pending, blocks, burn_leader_ranks) = {
+    let (snapshot, pending, blocks) = {
         let node = state.node.lock().await;
         let snapshot = node.chain_snapshot();
         let pending = node.pending_transactions();
@@ -46,19 +46,12 @@ pub(super) async fn api_blocks(
             Some(before_height) => node.blocks_before(before_height, limit),
             None => node.recent_blocks(limit),
         };
-        let burn_leader_ranks = blocks
-            .iter()
-            .map(|block| {
-                (
-                    block.hash.clone(),
-                    node.burn_leader_ranks_for_block(block.height)
-                        .unwrap_or_default(),
-                )
-            })
-            .collect::<BTreeMap<_, _>>();
-        (snapshot, pending, blocks, burn_leader_ranks)
+        (snapshot, pending, blocks)
     };
-    let view = cached_chain_view(&state, &snapshot).await;
+    let view = cached_chain_view(&state, &snapshot)
+        .await
+        .unwrap_or_default();
+    let burn_leader_ranks = burn_leader_ranks_for_blocks(&snapshot, &blocks);
     let mut outputs = view.outputs;
     add_pending_outputs(&mut outputs, &pending);
     Json(ui_blocks_from_indexes(
@@ -100,7 +93,9 @@ pub(super) async fn api_mempool(
             pending_revealed,
         )
     };
-    let view = cached_chain_view(&state, &snapshot).await;
+    let view = cached_chain_view(&state, &snapshot)
+        .await
+        .unwrap_or_default();
     let mut outputs = view.outputs;
     add_pending_outputs(&mut outputs, &pending);
     let mut items = pending
@@ -135,7 +130,9 @@ pub(super) async fn api_wallet_transactions(
             node.owned_blinded_payloads(),
         )
     };
-    let view = cached_chain_view(&state, &snapshot).await;
+    let view = cached_chain_view(&state, &snapshot)
+        .await
+        .unwrap_or_default();
     let mut outputs = view.outputs;
     add_pending_outputs(&mut outputs, &pending);
     let page_query = query.page();
@@ -281,17 +278,21 @@ pub(super) async fn api_metrics(
 pub(super) async fn api_network_health(
     State(state): State<HttpState>,
 ) -> Json<NetworkHealthResponse> {
-    let (status, mempool) = {
+    let (local, mempool) = {
         let node = state.node.lock().await;
+        let mempool = MempoolCounts {
+            plain_transactions: node.pending_transactions().len(),
+            blinded_transactions: node.pending_blinded_transactions().len(),
+            blinded_reveals: node.pending_blinded_reveals().len(),
+        };
         (
-            node.status(),
-            MempoolCounts {
-                plain_transactions: node.pending_transactions().len(),
-                blinded_transactions: node.pending_blinded_transactions().len(),
-                blinded_reveals: node.pending_blinded_reveals().len(),
+            NetworkHealthLocalState {
+                height: node.chain_height(),
+                pending_transactions: mempool.total(),
             },
+            mempool,
         )
     };
     let peers = state.peers.lock().await.list();
-    Json(network_health(&status, &peers, mempool))
+    Json(network_health(local, &peers, mempool))
 }

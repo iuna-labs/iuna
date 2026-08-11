@@ -212,7 +212,7 @@ impl NodeCore {
         &mut self,
         timestamp_ms: u64,
     ) -> Result<Option<Transaction>> {
-        let current_height = self.ledger.status().height;
+        let current_height = self.ledger.height();
         if !self.automatic_mining_enabled {
             return Ok(None);
         }
@@ -240,7 +240,7 @@ impl NodeCore {
     }
 
     fn prepare_automatic_anchor_burn(&mut self, timestamp_ms: u64) -> Result<Option<Transaction>> {
-        let current_height = self.ledger.status().height;
+        let current_height = self.ledger.height();
         if !self.automatic_burn_needs_plaintext_anchor(timestamp_ms) {
             return Ok(None);
         }
@@ -377,8 +377,7 @@ impl NodeCore {
         if self.ledger.finalizer_rank_count_for_next_block() > 0 {
             return false;
         }
-        let tip_hash = self.ledger.status().tip_hash;
-        recovery_vdf_sample_percent(self.wallet.address(), tip_hash.as_str())
+        recovery_vdf_sample_percent(self.wallet.address(), self.ledger.tip_hash())
             < self.recovery_vdf_top_rank_percent
     }
 

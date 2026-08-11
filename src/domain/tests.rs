@@ -1412,6 +1412,10 @@ fn burn_leader_ranks_for_block_reconstructs_historical_ticket_order() {
     assert_eq!(ranks[0].owner, leader);
     assert!(ranks.iter().all(|rank| rank.amount == MICRO_IUNA));
     assert_eq!(ledger.burn_leader_ranks_for_block(0).unwrap(), Vec::new());
+
+    let batch = ledger.burn_leader_ranks_for_blocks([0, 1]).unwrap();
+    assert!(batch.get(&0).unwrap().is_empty());
+    assert_eq!(batch.get(&1), Some(&ranks));
 }
 
 #[test]

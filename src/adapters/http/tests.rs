@@ -865,13 +865,17 @@ async fn network_health_summarizes_sync_and_peer_errors() {
     let dir = tempfile::tempdir().unwrap();
     let state = auth_test_state(dir.path().join("config.json"), UiConfig::default()).await;
     let status = state.node.lock().await.status();
+    let local = super::NetworkHealthLocalState {
+        height: status.chain.height,
+        pending_transactions: status.chain.pending_transactions,
+    };
     let mempool = super::MempoolCounts {
         plain_transactions: 1,
         blinded_transactions: 2,
         blinded_reveals: 3,
     };
 
-    let isolated = super::network_health(&status, &[], mempool);
+    let isolated = super::network_health(local, &[], mempool);
     assert!(!isolated.ok);
     assert_eq!(isolated.state, "isolated");
     assert_eq!(isolated.local_height, 0);
@@ -893,12 +897,12 @@ async fn network_health_summarizes_sync_and_peer_errors() {
         11 * 60 * 1_000,
         10_000,
     );
-    let clock_health = super::network_health_at(&status, &clock_peers.list(), mempool, 10_000);
+    let clock_health = super::network_health_at(local, &clock_peers.list(), mempool, 10_000);
     assert_eq!(clock_health.network_time_offset_ms, Some(500));
     assert_eq!(clock_health.bad_clock_peers, 1);
 
     let syncing = super::network_health(
-        &status,
+        local,
         &[PeerInfo {
             address: "127.0.0.1:9445".to_string(),
             direction: PeerDirection::Outbound,
@@ -925,7 +929,7 @@ async fn network_health_summarizes_sync_and_peer_errors() {
     assert_eq!(syncing.lag_blocks, 3);
 
     let peer_errors = super::network_health(
-        &status,
+        local,
         &[PeerInfo {
             address: "127.0.0.1:9446".to_string(),
             direction: PeerDirection::Outbound,
@@ -954,7 +958,7 @@ async fn network_health_summarizes_sync_and_peer_errors() {
     );
 
     let stale = super::network_health_at(
-        &status,
+        local,
         &[PeerInfo {
             address: "127.0.0.1:9447".to_string(),
             direction: PeerDirection::Outbound,
@@ -981,7 +985,7 @@ async fn network_health_summarizes_sync_and_peer_errors() {
     assert_eq!(stale.stale_peers, 1);
 
     let banned = super::network_health_at(
-        &status,
+        local,
         &[PeerInfo {
             address: "127.0.0.1:9448".to_string(),
             direction: PeerDirection::Outbound,
@@ -1674,6 +1678,26 @@ fn block_detail_finalizer_opens_burn_leader_ranks_modal() {
     assert!(app_js.contains("burnLeaderRankLabel(rank)"));
     assert!(app_js.contains("block?.burn_leader_ranks"));
     assert!(super::INDEX_HTML.contains("rank.ticket_id ?? rank.ticketId"));
+}
+
+#[tokio::test]
+async fn startup_prewarm_populates_chain_view_cache_before_first_request() {
+    let dir = tempfile::tempdir().unwrap();
+    let state = auth_test_state(dir.path().join("config.json"), UiConfig::default()).await;
+    let expected_tip = {
+        let node = state.node.lock().await;
+        node.chain_snapshot()
+            .blocks
+            .last()
+            .map(|block| block.hash.clone())
+    };
+    assert!(state.ui_cache.lock().await.tip_hash.is_none());
+
+    super::prewarm_chain_view_cache(state.clone())
+        .await
+        .unwrap();
+
+    assert_eq!(state.ui_cache.lock().await.tip_hash, expected_tip);
 }
 
 async fn auth_test_state(config_path: std::path::PathBuf, config: UiConfig) -> HttpState {

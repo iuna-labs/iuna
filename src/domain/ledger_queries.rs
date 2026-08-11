@@ -8,7 +8,7 @@ use super::blinded::{
 use super::genesis::balances_from_utxos;
 use super::mine_policy::mine_anchor;
 use super::ticket::{
-    apply_finalizer_ticket_effects, genesis_tickets, ranked_tickets_for_height,
+    BurnTicket, apply_finalizer_ticket_effects, genesis_tickets, ranked_tickets_for_height,
     tickets_created_by_block, tickets_created_by_transactions,
 };
 use super::{
@@ -16,6 +16,55 @@ use super::{
     LaunchProfile, Ledger, OutPoint, RevealCommitteeMember, RevealedBlindedTransaction,
     Transaction, TxOutput, reveal_committee_slot_count,
 };
+
+fn apply_historical_ticket_block(
+    block: &Block,
+    launch_profile: &LaunchProfile,
+    tickets: &mut Vec<BurnTicket>,
+    active_blinded: &mut BTreeMap<String, ActiveBlindedTransaction>,
+) -> Result<()> {
+    apply_finalizer_ticket_effects(block, tickets)?;
+    tickets.extend(tickets_created_by_block(block, launch_profile)?);
+    let mut revealed_transactions = Vec::new();
+    for reveal in block.all_blinded_reveals() {
+        let active = active_blinded.get(&reveal.commitment).with_context(|| {
+            format!(
+                "block {} reveals unknown blinded transaction {}",
+                block.height, reveal.commitment
+            )
+        })?;
+        let transaction = decrypt_blinded_transaction(&active.transaction, reveal)?;
+        if matches!(transaction, Transaction::Mine { .. }) {
+            bail!("mine actions are public and cannot be blinded");
+        }
+        if blinded_envelope_fee_for_transaction(&transaction) != active.transaction.fee {
+            bail!(
+                "block {} blinded reveal fee does not match envelope",
+                block.height
+            );
+        }
+        revealed_transactions.push(transaction);
+        active_blinded.remove(&reveal.commitment);
+    }
+    tickets.extend(tickets_created_by_transactions(
+        block.height,
+        &revealed_transactions,
+        launch_profile,
+    )?);
+    active_blinded.retain(|_, active| block.height < active.transaction.expires_at_height);
+    for transaction in &block.blinded_transactions {
+        active_blinded.insert(
+            transaction.commitment.clone(),
+            ActiveBlindedTransaction {
+                transaction: transaction.clone(),
+                locked_outputs: Vec::new(),
+                included_height: block.height,
+                included_by: block.miner.clone(),
+            },
+        );
+    }
+    Ok(())
+}
 
 impl Ledger {
     pub fn snapshot(&self) -> ChainSnapshot {
@@ -28,6 +77,14 @@ impl Ledger {
     }
 
     pub fn status(&self) -> ChainStatus {
+        self.status_with_balances(true)
+    }
+
+    pub fn light_status(&self) -> ChainStatus {
+        self.status_with_balances(false)
+    }
+
+    fn status_with_balances(&self, include_balances: bool) -> ChainStatus {
         ChainStatus {
             height: self.tip().height,
             tip_hash: self.tip().hash.clone(),
@@ -35,11 +92,17 @@ impl Ledger {
             launch_profile_hash: self.launch_profile.hash(),
             mine_reward: self.mine_reward,
             current_mine_difficulty_bits: self.current_mine_difficulty_bits(),
-            balances: balances_from_utxos(&self.utxos),
+            balances: include_balances
+                .then(|| balances_from_utxos(&self.utxos))
+                .unwrap_or_default(),
             pending_transactions: self.pending.len()
                 + self.pending_blinded.len()
                 + self.pending_reveals.len(),
         }
+    }
+
+    pub fn tip_hash(&self) -> &str {
+        &self.tip().hash
     }
 
     pub fn chain(&self) -> &[Block] {
@@ -47,79 +110,73 @@ impl Ledger {
     }
 
     pub fn burn_leader_ranks_for_block(&self, height: u64) -> Result<Vec<BurnLeaderRank>> {
-        if height == 0 {
-            return Ok(Vec::new());
+        Ok(self
+            .burn_leader_ranks_for_blocks([height])?
+            .remove(&height)
+            .unwrap_or_default())
+    }
+
+    pub fn burn_leader_ranks_for_blocks<I>(
+        &self,
+        heights: I,
+    ) -> Result<BTreeMap<u64, Vec<BurnLeaderRank>>>
+    where
+        I: IntoIterator<Item = u64>,
+    {
+        let mut requested = heights.into_iter().collect::<BTreeSet<_>>();
+        let mut ranks_by_height = BTreeMap::new();
+        if requested.remove(&0) {
+            ranks_by_height.insert(0, Vec::new());
         }
-        let parent_index = height.checked_sub(1).context("block height underflows")? as usize;
-        let parent = self
-            .chain
-            .get(parent_index)
-            .with_context(|| format!("missing parent block for height {height}"))?;
+        if requested.is_empty() {
+            return Ok(ranks_by_height);
+        }
+
         let mut tickets = genesis_tickets(
             &self.genesis_allocations,
             &self.chain[0],
             &self.launch_profile,
         )?;
         let mut active_blinded = BTreeMap::<String, ActiveBlindedTransaction>::new();
-        for block in self
-            .chain
-            .iter()
-            .skip(1)
-            .take_while(|block| block.height < height)
-        {
-            apply_finalizer_ticket_effects(block, &mut tickets)?;
-            tickets.extend(tickets_created_by_block(block, &self.launch_profile)?);
-            let mut revealed_transactions = Vec::new();
-            for reveal in block.all_blinded_reveals() {
-                let active = active_blinded.get(&reveal.commitment).with_context(|| {
-                    format!(
-                        "block {} reveals unknown blinded transaction {}",
-                        block.height, reveal.commitment
-                    )
-                })?;
-                let transaction = decrypt_blinded_transaction(&active.transaction, reveal)?;
-                if matches!(transaction, Transaction::Mine { .. }) {
-                    bail!("mine actions are public and cannot be blinded");
+        let mut next_block_index = 1;
+
+        for height in requested {
+            let parent_index = height.checked_sub(1).context("block height underflows")? as usize;
+            let parent = self
+                .chain
+                .get(parent_index)
+                .with_context(|| format!("missing parent block for height {height}"))?;
+            while let Some(block) = self.chain.get(next_block_index) {
+                if block.height >= height {
+                    break;
                 }
-                if blinded_envelope_fee_for_transaction(&transaction) != active.transaction.fee {
-                    bail!(
-                        "block {} blinded reveal fee does not match envelope",
-                        block.height
-                    );
-                }
-                revealed_transactions.push(transaction);
-                active_blinded.remove(&reveal.commitment);
+                apply_historical_ticket_block(
+                    block,
+                    &self.launch_profile,
+                    &mut tickets,
+                    &mut active_blinded,
+                )?;
+                next_block_index += 1;
             }
-            tickets.extend(tickets_created_by_transactions(
-                block.height,
-                &revealed_transactions,
-                &self.launch_profile,
-            )?);
-            active_blinded.retain(|_, active| block.height < active.transaction.expires_at_height);
-            for transaction in &block.blinded_transactions {
-                active_blinded.insert(
-                    transaction.commitment.clone(),
-                    ActiveBlindedTransaction {
-                        transaction: transaction.clone(),
-                        locked_outputs: Vec::new(),
-                        included_height: block.height,
-                        included_by: block.miner.clone(),
-                    },
-                );
-            }
+
+            ranks_by_height.insert(
+                height,
+                ranked_tickets_for_height(parent, height, &tickets)
+                    .into_iter()
+                    .enumerate()
+                    .map(|(rank, ticket)| BurnLeaderRank {
+                        rank: rank as u32,
+                        ticket_id: ticket.id,
+                        owner: ticket.owner,
+                        amount: ticket.amount,
+                        eligible_from_height: ticket.eligible_from_height,
+                        eligible_until_height: ticket.eligible_until_height,
+                    })
+                    .collect(),
+            );
         }
-        Ok(ranked_tickets_for_height(parent, height, &tickets)
-            .into_iter()
-            .enumerate()
-            .map(|(rank, ticket)| BurnLeaderRank {
-                rank: rank as u32,
-                ticket_id: ticket.id,
-                owner: ticket.owner,
-                amount: ticket.amount,
-                eligible_from_height: ticket.eligible_from_height,
-                eligible_until_height: ticket.eligible_until_height,
-            })
-            .collect())
+
+        Ok(ranks_by_height)
     }
 
     pub fn reveal_committee_for_next_block(&self) -> Vec<RevealCommitteeMember> {

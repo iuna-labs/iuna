@@ -52,24 +52,22 @@ impl NodeCore {
     }
 
     pub fn hello(&self, listen_addr: Option<String>, node_id: Option<String>) -> GossipEnvelope {
-        let status = self.ledger.status();
         GossipEnvelope::Hello(ProtocolHello {
             protocol_version: PROTOCOL_VERSION,
             network_id: NETWORK_ID.to_string(),
             genesis_hash: self.ledger.genesis_hash().to_string(),
             listen_addr,
             node_id,
-            height: status.height,
-            tip_hash: status.tip_hash,
+            height: self.ledger.height(),
+            tip_hash: self.ledger.tip_hash().to_string(),
             time_ms: now_ms(),
         })
     }
 
     pub fn peer_status(&self) -> GossipEnvelope {
-        let status = self.ledger.status();
         GossipEnvelope::PeerStatus {
-            height: status.height,
-            tip_hash: status.tip_hash,
+            height: self.ledger.height(),
+            tip_hash: self.ledger.tip_hash().to_string(),
             time_ms: now_ms(),
         }
     }

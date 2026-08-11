@@ -52,6 +52,20 @@ pub(super) struct MempoolCounts {
     pub(super) blinded_reveals: usize,
 }
 
+impl MempoolCounts {
+    pub(super) fn total(&self) -> usize {
+        self.plain_transactions
+            .saturating_add(self.blinded_transactions)
+            .saturating_add(self.blinded_reveals)
+    }
+}
+
+#[derive(Clone, Copy, Debug)]
+pub(super) struct NetworkHealthLocalState {
+    pub(super) height: u64,
+    pub(super) pending_transactions: usize,
+}
+
 #[derive(Debug, Deserialize)]
 pub(super) struct BurnSettingsForm {
     pub(super) enabled: Option<bool>,

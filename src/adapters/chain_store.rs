@@ -14,7 +14,8 @@ use crate::domain::{
     AGGREGATE_FINALIZER_FEE_ACTIVATION_HEIGHT, Amount, BLINDED_COMMITTER_FEE_BPS,
     BLINDED_REVEAL_BUNDLE_SIGNER_FEE_BPS, BlindedTransaction, Block, ChainSnapshot, Ledger,
     MINE_REWARD, OutPoint, REVEAL_COMMITTEE_SIZE, Transaction, TxInput, TxOutput,
-    blinded_reveal_finalizer_fee, hex_hash, revealed_blinded_transactions,
+    blinded_reveal_finalizer_fee, hex_hash, reveal_committee_slot_count,
+    revealed_blinded_transactions,
 };
 
 mod compact;
@@ -418,6 +419,15 @@ fn metrics_from_snapshot(snapshot: &ChainSnapshot) -> Result<Vec<BlockMetricRow>
     let mut active_blinded = BTreeMap::<String, BlindedTransaction>::new();
     let mut metric_utxos = metric_genesis_utxos(snapshot);
     let mut metric_locked_blinded_inputs = BTreeMap::<String, Amount>::new();
+    let reveal_bundle_slots_by_height = ledger
+        .burn_leader_ranks_for_blocks(snapshot.blocks.iter().map(|block| block.height))
+        .map(|ranks_by_height| {
+            ranks_by_height
+                .into_iter()
+                .map(|(height, ranks)| (height, reveal_committee_slot_count(ranks.len())))
+                .collect::<BTreeMap<_, _>>()
+        })
+        .unwrap_or_default();
 
     for block in &snapshot.blocks {
         let revealed_transactions = revealed.get(&block.height).cloned().unwrap_or_default();
@@ -462,9 +472,9 @@ fn metrics_from_snapshot(snapshot: &ChainSnapshot) -> Result<Vec<BlockMetricRow>
                 &revealed.included_by,
                 block,
                 transaction.fee(),
-                ledger
-                    .burn_leader_ranks_for_block(block.height)
-                    .map(|ranks| ranks.len())
+                reveal_bundle_slots_by_height
+                    .get(&block.height)
+                    .copied()
                     .unwrap_or(REVEAL_COMMITTEE_SIZE),
             );
             fees_amount = fees_amount
@@ -472,9 +482,9 @@ fn metrics_from_snapshot(snapshot: &ChainSnapshot) -> Result<Vec<BlockMetricRow>
                 .context("block metric fees overflow")?;
             let committer_fee = blinded_fee_share(transaction.fee(), BLINDED_COMMITTER_FEE_BPS);
             let included_reveal_bundle_count = block.included_reveal_bundle_count();
-            let available_reveal_bundle_slots = ledger
-                .burn_leader_ranks_for_block(block.height)
-                .map(|ranks| ranks.len())
+            let available_reveal_bundle_slots = reveal_bundle_slots_by_height
+                .get(&block.height)
+                .copied()
                 .unwrap_or(REVEAL_COMMITTEE_SIZE);
             let reveal_finalizer_fee = blinded_reveal_finalizer_fee(
                 transaction.fee(),

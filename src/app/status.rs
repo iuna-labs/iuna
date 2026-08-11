@@ -15,7 +15,7 @@ use super::{
 
 impl NodeCore {
     pub fn status(&self) -> NodeStatus {
-        let chain = self.ledger.status();
+        let chain = self.ledger.light_status();
         let launch_profile = self.ledger.launch_profile();
         let current_leader = self.ledger.expected_leader_for_next_block();
         let wallet_is_current_leader = current_leader
@@ -192,6 +192,24 @@ mod tests {
         });
 
         assert_eq!(node.status().app_version, env!("CARGO_PKG_VERSION"));
+    }
+
+    #[test]
+    fn status_omits_full_balance_map_for_ui_polling() {
+        let wallet = Wallet::from_seed("status-light-wallet");
+        let mut allocations = BTreeMap::new();
+        allocations.insert(wallet.address().to_string(), 10);
+        allocations.insert(
+            Wallet::from_seed("status-light-peer").address().to_string(),
+            5,
+        );
+        let ledger = Ledger::new(allocations, 1);
+        let node = NodeCore::from_ledger(wallet, ledger, 0);
+
+        let status = node.status();
+
+        assert_eq!(status.wallet_balance, 10);
+        assert!(status.chain.balances.is_empty());
     }
 
     #[test]

@@ -1,6 +1,6 @@
 use crate::{
     adapters::chain_store::BlockMetricRow,
-    app::{NodeStatus, PeerDirection, PeerInfo},
+    app::{PeerDirection, PeerInfo},
     domain::Amount,
 };
 
@@ -8,16 +8,16 @@ use super::{
     PEER_STALE_AFTER_MS, now_ms,
     types::{
         MempoolCounts, MetricsChart, MetricsPoint, MetricsResponse, MetricsValueKind,
-        NetworkHealthResponse,
+        NetworkHealthLocalState, NetworkHealthResponse,
     },
 };
 
 pub(super) fn network_health(
-    status: &NodeStatus,
+    local: NetworkHealthLocalState,
     peers: &[PeerInfo],
     mempool: MempoolCounts,
 ) -> NetworkHealthResponse {
-    network_health_at(status, peers, mempool, now_ms())
+    network_health_at(local, peers, mempool, now_ms())
 }
 
 pub(super) fn metrics_response(enabled: bool, rows: Vec<BlockMetricRow>) -> MetricsResponse {
@@ -152,12 +152,12 @@ fn micro_iuna_as_iuna(amount: Amount) -> f64 {
 }
 
 pub(super) fn network_health_at(
-    status: &NodeStatus,
+    local: NetworkHealthLocalState,
     peers: &[PeerInfo],
     mempool: MempoolCounts,
     now_ms: u64,
 ) -> NetworkHealthResponse {
-    let local_height = status.chain.height;
+    let local_height = local.height;
     let remote_best_height = peers.iter().filter_map(|peer| peer.last_known_height).max();
     let best_known_height = remote_best_height.unwrap_or(local_height).max(local_height);
     let healthy_heights = peers
@@ -246,7 +246,7 @@ pub(super) fn network_health_at(
         failed_peers,
         stale_peers,
         banned_peers,
-        pending_transactions: status.chain.pending_transactions,
+        pending_transactions: local.pending_transactions,
         pending_plain_transactions: mempool.plain_transactions,
         pending_blinded_transactions: mempool.blinded_transactions,
         pending_blinded_reveals: mempool.blinded_reveals,

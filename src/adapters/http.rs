@@ -69,9 +69,9 @@ pub use state::ServeOptions;
 use state::{AuthClientKey, AuthSession, HttpState, UiChainCache, UiChainView};
 use static_assets::{alpine_js, app_js, favicon, index};
 use ui::{
-    add_pending_outputs, cached_chain_view, ui_blinded_reveal, ui_blinded_transaction,
-    ui_blocks_from_indexes, ui_pending_revealed_transaction, ui_transaction,
-    wallet_transaction_rows,
+    add_pending_outputs, burn_leader_ranks_for_blocks, cached_chain_view, ui_blinded_reveal,
+    ui_blinded_transaction, ui_blocks_from_indexes, ui_pending_revealed_transaction,
+    ui_transaction, wallet_transaction_rows,
 };
 #[cfg(test)]
 use ui::{known_output_index, revealed_transactions_by_height, ui_block, ui_blocks};
@@ -98,9 +98,9 @@ const PEER_STALE_AFTER_MS: u64 = 20 * 60 * 1_000;
 mod types;
 use types::{
     ActionResponse, AuthForm, AuthStatusResponse, BlocksQuery, ChangePasswordForm, ConfigForm,
-    ConfigResponse, MempoolCounts, MetricsQuery, MetricsResponse, NetworkHealthResponse, Page,
-    PageQuery, UiBlock, UiTransaction, WalletTransactionFilters, WalletTransactionRow,
-    WalletTransactionsQuery, WalletUtxoRow,
+    ConfigResponse, MempoolCounts, MetricsQuery, MetricsResponse, NetworkHealthLocalState,
+    NetworkHealthResponse, Page, PageQuery, UiBlock, UiTransaction, WalletTransactionFilters,
+    WalletTransactionRow, WalletTransactionsQuery, WalletUtxoRow,
 };
 #[cfg(test)]
 use types::{BurnSettingsForm, TransferForm};
@@ -126,7 +126,7 @@ pub async fn serve(
         auth_backoff: Arc::new(Mutex::new(BTreeMap::new())),
         ui_cache: Arc::new(Mutex::new(UiChainCache::default())),
     };
-    tokio::spawn(prewarm_chain_view_cache(state.clone()));
+    prewarm_chain_view_cache(state.clone()).await?;
     tokio::spawn(run_owned_blinded_outbox_persistence(state.clone()));
     let app = Router::new()
         .route("/", get(index))
@@ -206,12 +206,13 @@ pub async fn serve(
     .context("serving HTTP management UI")
 }
 
-async fn prewarm_chain_view_cache(state: HttpState) {
+async fn prewarm_chain_view_cache(state: HttpState) -> Result<()> {
     let snapshot = {
         let node = state.node.lock().await;
         node.chain_snapshot()
     };
-    let _ = cached_chain_view(&state, &snapshot).await;
+    let _ = cached_chain_view(&state, &snapshot).await?;
+    Ok(())
 }
 
 async fn api_config_form(
