@@ -1,0 +1,397 @@
+use std::collections::BTreeMap;
+
+use serde::{Deserialize, Serialize};
+
+use super::{
+    PEER_CLOCK_OFFSET_ACCEPTANCE_MS, PEER_CLOCK_OFFSET_STALE_MS, PEER_MISBEHAVIOR_BAN_MS,
+    PEER_MISBEHAVIOR_BAN_SCORE, now_ms,
+};
+
+#[derive(Clone, Debug, Default, Deserialize, Eq, PartialEq, Serialize)]
+pub struct PeerBook {
+    peers: BTreeMap<String, PeerInfo>,
+}
+
+impl PeerBook {
+    pub fn from_addresses(addresses: Vec<String>) -> Self {
+        let mut book = Self::default();
+        for address in addresses {
+            book.add_peer(address);
+        }
+        book
+    }
+
+    pub fn add_peer(&mut self, address: impl Into<String>) {
+        let address = address.into();
+        let peer = self
+            .peers
+            .entry(address.clone())
+            .or_insert_with(|| PeerInfo::new(address, PeerDirection::Outbound));
+        if peer.direction != PeerDirection::Outbound {
+            peer.direction = PeerDirection::Outbound;
+        }
+    }
+
+    pub fn add_discovered_peer(&mut self, address: impl Into<String>) {
+        let address = address.into();
+        let peer = self
+            .peers
+            .entry(address.clone())
+            .or_insert_with(|| PeerInfo::new(address, PeerDirection::Discovered));
+        if peer.direction == PeerDirection::Inbound {
+            peer.direction = PeerDirection::Discovered;
+        }
+    }
+
+    pub fn observe_inbound_peer(&mut self, address: impl Into<String>) {
+        let address = address.into();
+        self.peers
+            .entry(address.clone())
+            .or_insert_with(|| PeerInfo::new(address, PeerDirection::Inbound));
+    }
+
+    pub fn replace_peer_address(&mut self, from: &str, to: impl Into<String>) {
+        let to = to.into();
+        if from == to {
+            if !self.peers.contains_key(from) {
+                self.add_peer(to);
+            }
+            return;
+        }
+
+        let Some(from_peer) = self.peers.remove(from) else {
+            self.add_peer(to);
+            return;
+        };
+
+        let to_peer = self
+            .peers
+            .entry(to.clone())
+            .or_insert_with(|| PeerInfo::new(to, from_peer.direction.clone()));
+        if from_peer.direction == PeerDirection::Outbound {
+            to_peer.direction = PeerDirection::Outbound;
+        } else if from_peer.direction == PeerDirection::Discovered
+            && to_peer.direction == PeerDirection::Inbound
+        {
+            to_peer.direction = PeerDirection::Discovered;
+        }
+        to_peer.messages_sent = to_peer
+            .messages_sent
+            .saturating_add(from_peer.messages_sent);
+        to_peer.messages_received = to_peer
+            .messages_received
+            .saturating_add(from_peer.messages_received);
+        to_peer.last_known_height = to_peer.last_known_height.or(from_peer.last_known_height);
+        to_peer.last_known_tip_hash = to_peer
+            .last_known_tip_hash
+            .clone()
+            .or(from_peer.last_known_tip_hash);
+        if from_peer.last_clock_observed_ms > to_peer.last_clock_observed_ms {
+            to_peer.last_clock_offset_ms = from_peer.last_clock_offset_ms;
+            to_peer.last_clock_offset_accepted = from_peer.last_clock_offset_accepted;
+            to_peer.last_clock_observed_ms = from_peer.last_clock_observed_ms;
+        }
+        to_peer.last_contact_ms = to_peer.last_contact_ms.max(from_peer.last_contact_ms);
+        to_peer.last_success_ms = to_peer.last_success_ms.max(from_peer.last_success_ms);
+        to_peer.last_error_ms = to_peer.last_error_ms.max(from_peer.last_error_ms);
+        if to_peer.last_error.is_none() {
+            to_peer.last_error = from_peer.last_error;
+        }
+        to_peer.misbehavior_score = to_peer
+            .misbehavior_score
+            .saturating_add(from_peer.misbehavior_score);
+        to_peer.banned_until_ms = to_peer.banned_until_ms.max(from_peer.banned_until_ms);
+        if to_peer.ban_reason.is_none() {
+            to_peer.ban_reason = from_peer.ban_reason;
+        }
+    }
+
+    pub fn remove_peer(&mut self, address: &str) -> bool {
+        if self
+            .peers
+            .get(address)
+            .is_some_and(|peer| peer.direction != PeerDirection::Inbound)
+        {
+            self.peers.remove(address);
+            true
+        } else {
+            false
+        }
+    }
+
+    pub fn is_connectable_peer(&self, address: &str) -> bool {
+        self.peers
+            .get(address)
+            .is_some_and(|peer| peer.direction != PeerDirection::Inbound)
+    }
+
+    pub fn addresses(&self) -> Vec<String> {
+        self.peers
+            .values()
+            .filter(|peer| peer.direction != PeerDirection::Inbound)
+            .map(|peer| peer.address.clone())
+            .collect()
+    }
+
+    pub fn connectable_addresses_at(&self, now_ms: u64) -> Vec<String> {
+        self.peers
+            .values()
+            .filter(|peer| peer.direction != PeerDirection::Inbound)
+            .filter(|peer| !peer.is_banned_at(now_ms))
+            .map(|peer| peer.address.clone())
+            .collect()
+    }
+
+    pub fn addresses_except(&self, excluded: &str) -> Vec<String> {
+        self.connectable_addresses_at(now_ms())
+            .into_iter()
+            .filter(|address| address != excluded)
+            .collect()
+    }
+
+    pub fn list(&self) -> Vec<PeerInfo> {
+        self.peers.values().cloned().collect()
+    }
+
+    pub fn prune_stale_inbound_peers_at(&mut self, now_ms: u64, max_age_ms: u64) -> usize {
+        let before = self.peers.len();
+        self.peers.retain(|_, peer| {
+            if peer.direction != PeerDirection::Inbound || peer.is_banned_at(now_ms) {
+                return true;
+            }
+            peer.last_contact_ms
+                .is_some_and(|last_contact| now_ms.saturating_sub(last_contact) <= max_age_ms)
+        });
+        before.saturating_sub(self.peers.len())
+    }
+
+    pub fn record_sent(&mut self, address: &str, count: u64) {
+        let now = now_ms();
+        let peer = self.ensure(address, PeerDirection::Outbound);
+        peer.messages_sent += count;
+        peer.last_contact_ms = Some(now);
+        peer.last_success_ms = Some(now);
+        if !peer.is_banned_at(now) {
+            peer.last_error = None;
+            peer.clear_misbehavior();
+        }
+    }
+
+    pub fn record_status(&mut self, address: &str, height: u64, tip_hash: String) {
+        let now = now_ms();
+        let peer = self.ensure(address, PeerDirection::Outbound);
+        peer.last_known_height = Some(height);
+        peer.last_known_tip_hash = Some(tip_hash);
+        peer.last_contact_ms = Some(now);
+        peer.last_success_ms = Some(now);
+        if !peer.is_banned_at(now) {
+            peer.last_error = None;
+            peer.clear_misbehavior();
+        }
+    }
+
+    pub fn record_clock_observation(
+        &mut self,
+        address: &str,
+        direction: PeerDirection,
+        remote_time_ms: u64,
+        local_receive_time_ms: u64,
+    ) {
+        if remote_time_ms == 0 {
+            return;
+        }
+        let offset = remote_time_ms as i128 - local_receive_time_ms as i128;
+        let offset = offset.clamp(i64::MIN as i128, i64::MAX as i128) as i64;
+        let accepted = offset.abs() <= PEER_CLOCK_OFFSET_ACCEPTANCE_MS;
+        let peer = self.ensure(address, direction);
+        peer.last_clock_offset_ms = Some(offset);
+        peer.last_clock_offset_accepted = Some(accepted);
+        peer.last_clock_observed_ms = Some(local_receive_time_ms);
+    }
+
+    pub fn network_time_offset_ms_at(&self, now_ms: u64) -> Option<i64> {
+        median_i64(
+            self.peers
+                .values()
+                .filter(|peer| !peer.is_banned_at(now_ms))
+                .filter(|peer| peer.last_error.is_none())
+                .filter(|peer| peer.last_clock_offset_accepted == Some(true))
+                .filter(|peer| {
+                    peer.last_clock_observed_ms.is_some_and(|observed_ms| {
+                        now_ms.saturating_sub(observed_ms) <= PEER_CLOCK_OFFSET_STALE_MS
+                    })
+                })
+                .filter_map(|peer| peer.last_clock_offset_ms)
+                .collect(),
+        )
+    }
+
+    pub fn adjusted_time_ms_at(&self, now_ms: u64) -> u64 {
+        match self.network_time_offset_ms_at(now_ms) {
+            Some(offset) if offset >= 0 => now_ms.saturating_add(offset as u64),
+            Some(offset) => now_ms.saturating_sub(offset.unsigned_abs()),
+            None => now_ms,
+        }
+    }
+
+    pub fn bad_clock_peer_count_at(&self, now_ms: u64) -> usize {
+        self.peers
+            .values()
+            .filter(|peer| !peer.is_banned_at(now_ms))
+            .filter(|peer| {
+                peer.last_clock_observed_ms.is_some_and(|observed_ms| {
+                    now_ms.saturating_sub(observed_ms) <= PEER_CLOCK_OFFSET_STALE_MS
+                })
+            })
+            .filter(|peer| peer.last_clock_offset_accepted == Some(false))
+            .count()
+    }
+
+    pub fn record_error(&mut self, address: &str, error: impl Into<String>) {
+        let now = now_ms();
+        let peer = self.ensure(address, PeerDirection::Outbound);
+        peer.last_contact_ms = Some(now);
+        peer.last_error_ms = Some(now);
+        peer.last_error = Some(error.into());
+    }
+
+    pub fn record_inbound_error(&mut self, address: &str, error: impl Into<String>) {
+        let now = now_ms();
+        let peer = self.ensure(address, PeerDirection::Inbound);
+        peer.last_contact_ms = Some(now);
+        peer.last_error_ms = Some(now);
+        peer.last_error = Some(error.into());
+    }
+
+    pub fn record_received(&mut self, address: &str, count: u64) {
+        let now = now_ms();
+        let peer = self.ensure(address, PeerDirection::Inbound);
+        peer.messages_received += count;
+        peer.last_contact_ms = Some(now);
+        peer.last_success_ms = Some(now);
+        if !peer.is_banned_at(now) {
+            peer.last_error = None;
+            peer.clear_misbehavior();
+        }
+    }
+
+    pub fn record_misbehavior(&mut self, address: &str, reason: impl Into<String>) {
+        self.record_misbehavior_at(address, reason, now_ms());
+    }
+
+    pub fn record_misbehavior_at(&mut self, address: &str, reason: impl Into<String>, now_ms: u64) {
+        self.record_misbehavior_with_direction(address, reason, now_ms, PeerDirection::Outbound);
+    }
+
+    pub fn record_inbound_misbehavior(&mut self, address: &str, reason: impl Into<String>) {
+        self.record_misbehavior_with_direction(address, reason, now_ms(), PeerDirection::Inbound);
+    }
+
+    fn record_misbehavior_with_direction(
+        &mut self,
+        address: &str,
+        reason: impl Into<String>,
+        now_ms: u64,
+        direction: PeerDirection,
+    ) {
+        let reason = reason.into();
+        let peer = self.ensure(address, direction);
+        peer.last_contact_ms = Some(now_ms);
+        peer.last_error_ms = Some(now_ms);
+        peer.last_error = Some(reason.clone());
+        peer.misbehavior_score = peer.misbehavior_score.saturating_add(1);
+        peer.ban_reason = Some(reason);
+        if peer.misbehavior_score >= PEER_MISBEHAVIOR_BAN_SCORE {
+            peer.banned_until_ms = Some(now_ms.saturating_add(PEER_MISBEHAVIOR_BAN_MS));
+        }
+    }
+
+    pub fn is_banned(&self, address: &str) -> bool {
+        self.is_banned_at(address, now_ms())
+    }
+
+    pub fn is_banned_at(&self, address: &str, now_ms: u64) -> bool {
+        self.peers
+            .get(address)
+            .is_some_and(|peer| peer.is_banned_at(now_ms))
+    }
+
+    fn ensure(&mut self, address: &str, direction: PeerDirection) -> &mut PeerInfo {
+        self.peers
+            .entry(address.to_string())
+            .or_insert_with(|| PeerInfo::new(address.to_string(), direction))
+    }
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+pub struct PeerInfo {
+    pub address: String,
+    pub direction: PeerDirection,
+    pub messages_sent: u64,
+    pub messages_received: u64,
+    pub last_known_height: Option<u64>,
+    pub last_known_tip_hash: Option<String>,
+    #[serde(default)]
+    pub last_clock_offset_ms: Option<i64>,
+    #[serde(default)]
+    pub last_clock_offset_accepted: Option<bool>,
+    #[serde(default)]
+    pub last_clock_observed_ms: Option<u64>,
+    pub last_error: Option<String>,
+    pub last_contact_ms: Option<u64>,
+    pub last_success_ms: Option<u64>,
+    pub last_error_ms: Option<u64>,
+    pub misbehavior_score: u32,
+    pub banned_until_ms: Option<u64>,
+    pub ban_reason: Option<String>,
+}
+
+impl PeerInfo {
+    fn new(address: String, direction: PeerDirection) -> Self {
+        Self {
+            address,
+            direction,
+            messages_sent: 0,
+            messages_received: 0,
+            last_known_height: None,
+            last_known_tip_hash: None,
+            last_clock_offset_ms: None,
+            last_clock_offset_accepted: None,
+            last_clock_observed_ms: None,
+            last_error: None,
+            last_contact_ms: None,
+            last_success_ms: None,
+            last_error_ms: None,
+            misbehavior_score: 0,
+            banned_until_ms: None,
+            ban_reason: None,
+        }
+    }
+
+    pub fn is_banned_at(&self, now_ms: u64) -> bool {
+        self.banned_until_ms
+            .is_some_and(|banned_until| banned_until > now_ms)
+    }
+
+    fn clear_misbehavior(&mut self) {
+        self.misbehavior_score = 0;
+        self.banned_until_ms = None;
+        self.ban_reason = None;
+    }
+}
+
+fn median_i64(mut values: Vec<i64>) -> Option<i64> {
+    if values.is_empty() {
+        return None;
+    }
+    values.sort_unstable();
+    Some(values[values.len() / 2])
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum PeerDirection {
+    Outbound,
+    Discovered,
+    Inbound,
+}

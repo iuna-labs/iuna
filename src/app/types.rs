@@ -1,0 +1,174 @@
+use std::collections::BTreeMap;
+
+use serde::{Deserialize, Serialize};
+
+use crate::domain::{
+    Amount, BlindedReveal, BlindedTransaction, Block, ChainSnapshot, ChainStatus, PreparedBlock,
+    RevealBundle, StratumMineTemplate, Transaction, Wallet,
+};
+
+#[derive(Clone, Debug)]
+pub struct NodeConfig {
+    pub wallet: Wallet,
+    pub genesis_allocations: BTreeMap<String, Amount>,
+    pub vdf_rounds: u64,
+    pub burn_per_block: Amount,
+    pub burn_fee: Amount,
+    pub pow_mining_workers: u8,
+    pub recovery_vdf_top_rank_percent: u8,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct FeeEstimate {
+    pub bytes: usize,
+    pub fee: Amount,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct ExternalMineJob {
+    pub template: StratumMineTemplate,
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(tag = "type", rename_all = "snake_case")]
+pub enum GossipEnvelope {
+    Hello(ProtocolHello),
+    PeerStatus {
+        height: u64,
+        tip_hash: String,
+        #[serde(default)]
+        time_ms: u64,
+    },
+    ChainSnapshotRequest,
+    BlockRangeRequest {
+        from_height: u64,
+        limit: usize,
+    },
+    BlockRequest {
+        hashes: Vec<String>,
+    },
+    Inventory {
+        blocks: Vec<BlockInventory>,
+    },
+    BlindedTransaction(BlindedTransaction),
+    BlindedTransactions {
+        transactions: Vec<BlindedTransaction>,
+    },
+    MineAction(Transaction),
+    MineActions {
+        transactions: Vec<Transaction>,
+    },
+    BlindedReveal(BlindedReveal),
+    BlindedReveals {
+        reveals: Vec<BlindedReveal>,
+    },
+    RevealBundle(RevealBundle),
+    RevealBundles {
+        bundles: Vec<RevealBundle>,
+    },
+    Block(Block),
+    Blocks {
+        blocks: Vec<Block>,
+    },
+    ChainSnapshot(ChainSnapshot),
+    PeerAnnouncement {
+        address: String,
+        #[serde(default)]
+        node_id: Option<String>,
+    },
+    PeerVerificationChallenge {
+        address: String,
+        nonce: String,
+    },
+    PeerVerificationResponse {
+        address: String,
+        nonce: String,
+        node_id: String,
+        signature: String,
+    },
+    PeerList {
+        peers: Vec<String>,
+    },
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+pub struct ProtocolHello {
+    pub protocol_version: u32,
+    pub network_id: String,
+    pub genesis_hash: String,
+    pub listen_addr: Option<String>,
+    #[serde(default)]
+    pub node_id: Option<String>,
+    pub height: u64,
+    pub tip_hash: String,
+    #[serde(default)]
+    pub time_ms: u64,
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+pub struct BlockInventory {
+    pub height: u64,
+    pub hash: String,
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+pub struct NodeStatus {
+    pub app_version: String,
+    pub wallet_address: String,
+    pub wallet_balance: Amount,
+    pub wallet_locked: bool,
+    pub launch_profile: LaunchProfileStatus,
+    pub mining: MiningStatus,
+    pub stratum: StratumStatus,
+    pub chain: ChainStatus,
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+pub struct LaunchProfileStatus {
+    pub profile_id: String,
+    pub profile_hash: String,
+    pub ticket_maturity_delay_heights: u64,
+    pub ticket_expiry_window_heights: u64,
+    pub mine_difficulty_bits: u32,
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+pub struct MiningStatus {
+    pub automatic: bool,
+    pub pow_mining_enabled: bool,
+    pub pow_mining_workers: u8,
+    pub max_pow_mining_workers: u8,
+    pub burn_per_block: Amount,
+    pub automatic_burn_fee: Amount,
+    pub automatic_pow_mine_fee: Amount,
+    pub last_auto_pow_mine_anchor: Option<String>,
+    pub last_auto_pow_mine_status: Option<String>,
+    pub vdf_rounds: u64,
+    pub vdf_target_block_ms: u64,
+    pub current_leader: Option<String>,
+    pub wallet_is_current_leader: bool,
+    pub last_auto_burn_height: Option<u64>,
+    pub recovery_vdf_top_rank_percent: u8,
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+pub struct StratumStatus {
+    pub enabled: bool,
+    pub listen_addr: Option<String>,
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+pub struct AutoMineOutcome {
+    pub pow_mined: Option<Transaction>,
+    pub burned: Option<Transaction>,
+    pub block: Option<Block>,
+    pub skipped_reason: Option<String>,
+}
+
+#[derive(Clone, Debug)]
+pub struct AutoMinePlan {
+    pub pow_mined: Option<Transaction>,
+    pub burned: Option<Transaction>,
+    pub work: Option<PreparedBlock>,
+    pub skipped_reason: Option<String>,
+}
