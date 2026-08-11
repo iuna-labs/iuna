@@ -182,10 +182,10 @@ pub(super) const INDEX_HTML: &str = r#"<!doctype html>
     .send-utxo-actions { display: flex; gap: 6px; align-items: center; }
     .utxo-select-button { padding: 3px 7px; border-color: #3a4248; background: #202328; color: #9fa8ad; font-size: 12px; }
     .utxo-select-button:hover { border-color: #5a646b; color: #d6dee2; }
-    .send-utxo-option { display: grid; grid-template-columns: auto minmax(0, 1fr); gap: 8px; align-items: start; border: 1px solid #2f363c; border-radius: 8px; padding: 8px; background: #181b1f; }
+    .send-utxo-option { display: grid; grid-template-columns: auto minmax(0, 1fr); gap: 8px; align-items: start; border: 1px solid #2f363c; border-radius: 8px; padding: 8px; background: #181b1f; user-select: none; }
     .send-utxo-option.disabled { border-color: #262c31; background: #14171a; color: #687178; }
     .send-utxo-option.disabled code, .send-utxo-option.disabled .utxo-node-amount { color: #687178; }
-    .send-utxo-option input { min-width: auto; margin-top: 3px; }
+    .send-utxo-option input { min-width: auto; margin-top: 3px; pointer-events: none; }
     .utxo-status { color: #8d989f; font-size: 10px; font-weight: 850; text-transform: uppercase; }
     .send-utxo-summary { flex-basis: 100%; width: 100%; display: grid; gap: 5px; color: #9eb3bc; font-size: 13px; }
     .wallet-balance-line { display: inline-grid; grid-template-columns: auto auto; gap: 10px; align-items: baseline; padding: 8px 10px; border: 1px solid #2f363c; border-radius: 8px; background: #111316; color: inherit; cursor: pointer; }

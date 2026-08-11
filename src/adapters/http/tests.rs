@@ -1481,6 +1481,10 @@ fn transfer_utxo_selection_supports_shift_click_ranges() {
         super::INDEX_HTML
             .contains(":checked=\"selectedTransferUtxos.includes(utxoOutpoint(utxo))\"")
     );
+    assert!(super::INDEX_HTML.contains(".send-utxo-option {"));
+    assert!(super::INDEX_HTML.contains("user-select: none;"));
+    assert!(super::INDEX_HTML.contains(".send-utxo-option input {"));
+    assert!(super::INDEX_HTML.contains("pointer-events: none;"));
     assert!(
         !super::INDEX_HTML
             .contains("x-model=\"selectedTransferUtxos\" @click=\"toggleTransferUtxoSelection")
