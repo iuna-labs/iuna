@@ -1,5 +1,10 @@
 # iuna
 
+[![Discord](https://img.shields.io/badge/Discord-Join-5865F2?logo=discord&logoColor=white)](https://discord.gg/JcXRSSDhS)
+[![Docs](https://img.shields.io/badge/docs-protocol-0f766e)](https://github.com/iuna-labs/iuna/blob/main/docs/protocol.md)
+[![Website](https://img.shields.io/badge/www-iuna--labs.github.io%2Fiuna-2563eb)](https://iuna-labs.github.io/iuna/)
+[![Build Release](https://github.com/iuna-labs/iuna/actions/workflows/release.yml/badge.svg)](https://github.com/iuna-labs/iuna/actions/workflows/release.yml)
+
 iuna is an experimental cryptocurrency devnet.
 
 It combines three ideas:
