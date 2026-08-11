@@ -160,7 +160,19 @@ impl NodeCore {
     }
 
     pub fn estimate_mine_fee(&self, _fee_per_byte: Amount) -> Result<FeeEstimate> {
-        self.build_mine_estimate().map(|(_, estimate)| estimate)
+        let tx = Transaction::Mine {
+            recipient: self.wallet.address().to_string(),
+            anchor: self.ledger.tip_hash().to_string(),
+            salt: 0,
+            nonce: 0,
+            difficulty_bits: self.ledger.current_mine_difficulty_bits(),
+            proof_header: None,
+            signature: "0".repeat(64),
+        };
+        Ok(FeeEstimate {
+            bytes: tx.economic_size_bytes(),
+            fee: tx.fee(),
+        })
     }
 
     pub fn external_mine_job(
@@ -425,9 +437,10 @@ mod tests {
     use std::collections::BTreeMap;
 
     use crate::{
-        app::NodeCore,
+        app::{FeeEstimate, NodeCore},
         domain::{
-            GenesisBurn, Ledger, MICRO_IUNA, Transaction, VDF_TARGET_BLOCK_MS, Wallet, run_vdf,
+            GenesisBurn, Ledger, MICRO_IUNA, MINE_FINALIZER_FEE, Transaction, VDF_TARGET_BLOCK_MS,
+            Wallet, run_vdf,
         },
     };
 
@@ -477,6 +490,39 @@ mod tests {
         assert!(burn.fee() >= minimum_burn_fee);
         assert!(burn_node.ledger().pending().is_empty());
         assert_eq!(burn_node.ledger().pending_blinded_transactions().len(), 1);
+    }
+
+    #[test]
+    fn mine_fee_estimate_uses_template_without_searching_pow() {
+        let wallet = Wallet::from_seed("mine-fee-template-wallet");
+        let mut genesis = BTreeMap::new();
+        genesis.insert(wallet.address().to_string(), MICRO_IUNA);
+        let ledger = Ledger::new_with_genesis_burns(
+            genesis,
+            vec![GenesisBurn::new(wallet.address(), MICRO_IUNA)],
+            1,
+        )
+        .unwrap();
+        let node = NodeCore::from_ledger(wallet, ledger, 0);
+
+        let estimate = node.estimate_mine_fee(MINE_FINALIZER_FEE).unwrap();
+
+        assert_eq!(
+            estimate,
+            FeeEstimate {
+                bytes: Transaction::Mine {
+                    recipient: node.wallet_address().to_string(),
+                    anchor: node.ledger().tip_hash().to_string(),
+                    salt: 0,
+                    nonce: 0,
+                    difficulty_bits: node.ledger().current_mine_difficulty_bits(),
+                    proof_header: None,
+                    signature: "0".repeat(64),
+                }
+                .economic_size_bytes(),
+                fee: MINE_FINALIZER_FEE,
+            }
+        );
     }
 
     #[test]

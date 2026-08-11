@@ -1,9 +1,9 @@
 use anyhow::{Context, Result, bail};
 
 use crate::domain::{
-    Amount, BLINDED_FEE_BPS_DENOMINATOR, BlindedReveal, BlindedTransaction, Block, ChainSnapshot,
-    FinalizerMode, LaunchProfile, LeaderProof, MaskedBlindedReveal, OutPoint, RevealBundleSection,
-    RevealBundleSignature, Transaction, TxInput, TxOutput,
+    BlindedReveal, BlindedTransaction, Block, ChainSnapshot, FinalizerMode, LaunchProfile,
+    LeaderProof, MaskedBlindedReveal, OutPoint, RevealBundleSection, RevealBundleSignature,
+    Transaction, TxInput, TxOutput,
 };
 
 const COMPACT_SNAPSHOT_MAGIC: &[u8] = b"IUNA-SNAPSHOT";
@@ -213,10 +213,6 @@ fn decode_blinded_reveal(reader: &mut CompactReader<'_>) -> Result<BlindedReveal
         commitment: reader.hex()?,
         key: reader.hex()?,
     })
-}
-
-pub(super) fn blinded_fee_share(fee: Amount, bps: u64) -> Amount {
-    ((fee as u128 * bps as u128) / BLINDED_FEE_BPS_DENOMINATOR as u128) as Amount
 }
 
 fn encode_reveal_bundle_section(

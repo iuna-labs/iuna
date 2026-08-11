@@ -7,6 +7,7 @@ use std::{
     time::{SystemTime, UNIX_EPOCH},
 };
 
+use anyhow::Result;
 use tokio::sync::Mutex;
 
 use crate::domain::{
@@ -69,6 +70,32 @@ struct AutoPowMineCursor {
     salt: u64,
     next_nonce: u64,
     searched: u64,
+}
+
+#[derive(Clone, Debug)]
+pub struct AutoPowMineJob {
+    ledger: Ledger,
+    recipient: String,
+    anchor: String,
+    salt: u64,
+    start_nonce: u64,
+    max_attempts: u64,
+}
+
+impl AutoPowMineJob {
+    pub fn anchor(&self) -> &str {
+        &self.anchor
+    }
+
+    pub fn search(self) -> Result<(Self, crate::domain::MineSearchOutcome)> {
+        let outcome = self.ledger.search_mine(
+            self.recipient.clone(),
+            self.salt,
+            self.start_nonce,
+            self.max_attempts,
+        )?;
+        Ok((self, outcome))
+    }
 }
 
 #[derive(Clone, Debug)]

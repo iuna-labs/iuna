@@ -1,27 +1,31 @@
 use std::collections::{BTreeMap, BTreeSet};
 
-use anyhow::Result;
+use anyhow::{Context, Result};
 use axum::{
     Json,
     extract::{Query, State},
 };
 
+#[cfg(test)]
+use crate::domain::Ledger;
 use crate::{
     adapters::p2p::P2pMetrics,
     app::{NodeStatus, PeerInfo},
-    domain::Ledger,
+    domain::{BlindedTransaction, OutPoint, Transaction, TxOutput},
 };
 
 use super::{
     BlocksQuery, ConfigResponse, MempoolCounts, MetricsQuery, MetricsResponse,
     NetworkHealthLocalState, NetworkHealthResponse, Page, PageQuery, UiBlock, UiTransaction,
-    WalletTransactionFilters, WalletTransactionRow, WalletTransactionsQuery, WalletUtxoRow,
+    WalletTransactionContext, WalletTransactionFilters, WalletTransactionRow,
+    WalletTransactionsQuery, WalletUtxoRow,
 };
 use super::{
     DATASET_LIMIT, DATASET_PAGE_LIMIT, EXPLORER_LIMIT, EXPLORER_PAGE_LIMIT, HttpState,
-    add_pending_outputs, cached_chain_view, cached_chain_view_for_tip, metrics_response,
+    add_pending_outputs, cached_chain_view, cached_ui_blocks_for_tip, metrics_response,
     network_health, ui_blinded_reveal, ui_blinded_transaction, ui_blocks_from_indexes,
-    ui_pending_revealed_transaction, ui_transaction, wallet_transaction_rows,
+    ui_pending_revealed_transaction, ui_transaction, wallet_transaction_row,
+    wallet_transaction_rows,
 };
 
 pub(super) async fn api_status(State(state): State<HttpState>) -> Json<NodeStatus> {
@@ -38,40 +42,33 @@ pub(super) async fn api_blocks(
         .limit
         .unwrap_or(EXPLORER_PAGE_LIMIT)
         .min(EXPLORER_LIMIT);
-    let (tip_hash, pending, blocks) = {
+    let (tip_hash, blocks) = {
         let node = state.node.lock().await;
-        let pending = node.pending_transactions();
         let blocks = match query.before_height {
             Some(before_height) => node.blocks_before(before_height, limit),
             None => node.recent_blocks(limit),
         };
-        (node.chain_tip_hash(), pending, blocks)
+        (node.chain_tip_hash(), blocks)
     };
-    let (view, pending, blocks) =
-        match cached_chain_view_for_tip(&state, Some(tip_hash.as_str())).await {
-            Some(view) => (view, pending, blocks),
-            None => {
-                let (snapshot, pending, blocks) = {
-                    let node = state.node.lock().await;
-                    let snapshot = node.chain_snapshot();
-                    let pending = node.pending_transactions();
-                    let blocks = match query.before_height {
-                        Some(before_height) => node.blocks_before(before_height, limit),
-                        None => node.recent_blocks(limit),
-                    };
-                    (snapshot, pending, blocks)
-                };
-                let view = cached_chain_view(&state, &snapshot)
-                    .await
-                    .unwrap_or_default();
-                (view, pending, blocks)
-            }
+    if let Some(blocks) = cached_ui_blocks_for_tip(&state, Some(tip_hash.as_str()), blocks).await {
+        return Json(blocks);
+    }
+
+    let (snapshot, blocks) = {
+        let node = state.node.lock().await;
+        let snapshot = node.chain_snapshot();
+        let blocks = match query.before_height {
+            Some(before_height) => node.blocks_before(before_height, limit),
+            None => node.recent_blocks(limit),
         };
-    let mut outputs = view.outputs;
-    add_pending_outputs(&mut outputs, &pending);
+        (snapshot, blocks)
+    };
+    let view = cached_chain_view(&state, &snapshot)
+        .await
+        .unwrap_or_default();
     Json(ui_blocks_from_indexes(
         blocks,
-        &outputs,
+        &view.outputs,
         &view.revealed_by_height,
         &view.burn_leader_ranks_by_hash,
     ))
@@ -89,7 +86,8 @@ pub(super) async fn api_mempool(
     State(state): State<HttpState>,
     Query(query): Query<PageQuery>,
 ) -> Json<Page<UiTransaction>> {
-    let (tip_hash, pending, pending_blinded, pending_reveals, pending_revealed) = {
+    let ui_data_ready = ensure_ui_data_current(&state).await.is_ok();
+    let (pending, pending_blinded, pending_reveals, pending_revealed) = {
         let node = state.node.lock().await;
         let pending = node.pending_transactions();
         let pending_blinded = node.pending_blinded_transactions();
@@ -99,56 +97,24 @@ pub(super) async fn api_mempool(
             .into_iter()
             .map(|revealed| (revealed.commitment.clone(), revealed))
             .collect::<BTreeMap<_, _>>();
-        (
-            node.chain_tip_hash(),
-            pending,
-            pending_blinded,
-            pending_reveals,
-            pending_revealed,
-        )
+        (pending, pending_blinded, pending_reveals, pending_revealed)
     };
-    let (view, pending, pending_blinded, pending_reveals, pending_revealed) =
-        match cached_chain_view_for_tip(&state, Some(tip_hash.as_str())).await {
-            Some(view) => (
-                view,
-                pending,
-                pending_blinded,
-                pending_reveals,
-                pending_revealed,
-            ),
-            None => {
-                let (snapshot, pending, pending_blinded, pending_reveals, pending_revealed) = {
-                    let node = state.node.lock().await;
-                    let snapshot = node.chain_snapshot();
-                    let pending = node.pending_transactions();
-                    let pending_blinded = node.pending_blinded_transactions();
-                    let pending_reveals = node.pending_blinded_reveals();
-                    let pending_revealed = node
-                        .pending_revealed_blinded_transactions()
-                        .into_iter()
-                        .map(|revealed| (revealed.commitment.clone(), revealed))
-                        .collect::<BTreeMap<_, _>>();
-                    (
-                        snapshot,
-                        pending,
-                        pending_blinded,
-                        pending_reveals,
-                        pending_revealed,
-                    )
-                };
-                let view = cached_chain_view(&state, &snapshot)
-                    .await
-                    .unwrap_or_default();
-                (
-                    view,
-                    pending,
-                    pending_blinded,
-                    pending_reveals,
-                    pending_revealed,
-                )
-            }
-        };
-    let mut outputs = view.outputs;
+    let mut required_outputs = BTreeSet::new();
+    collect_transaction_input_outpoints(pending.iter(), &mut required_outputs);
+    collect_blinded_input_outpoints(pending_blinded.iter(), &mut required_outputs);
+    collect_transaction_input_outpoints(
+        pending_revealed
+            .values()
+            .map(|revealed| &revealed.transaction),
+        &mut required_outputs,
+    );
+    let mut outputs = if ui_data_ready {
+        load_outputs_for_outpoints(&state, required_outputs)
+            .await
+            .unwrap_or_default()
+    } else {
+        BTreeMap::new()
+    };
     add_pending_outputs(&mut outputs, &pending);
     let mut items = pending
         .iter()
@@ -173,63 +139,257 @@ pub(super) async fn api_wallet_transactions(
     State(state): State<HttpState>,
     Query(query): Query<WalletTransactionsQuery>,
 ) -> Json<Page<WalletTransactionRow>> {
-    let (wallet, snapshot, pending, owned_blinded) = {
+    let page_query = query.page();
+    let offset = page_query.offset.unwrap_or(0);
+    let limit = page_query
+        .limit
+        .unwrap_or(DATASET_PAGE_LIMIT)
+        .clamp(1, DATASET_LIMIT);
+    let filters = WalletTransactionFilters::from_query(query);
+    if ensure_ui_data_current(&state).await.is_err() {
+        return Json(Page {
+            items: Vec::new(),
+            offset,
+            limit,
+            total: 0,
+            has_more: false,
+            next_offset: None,
+        });
+    }
+    let (wallet, pending, owned_blinded) = {
         let node = state.node.lock().await;
         (
             node.wallet_address().to_string(),
-            node.chain_snapshot(),
             node.pending_transactions(),
             node.owned_blinded_payloads(),
         )
     };
-    let view = cached_chain_view(&state, &snapshot)
+    let mut pending_required_outputs = BTreeSet::new();
+    collect_transaction_input_outpoints(pending.iter(), &mut pending_required_outputs);
+    collect_transaction_input_outpoints(owned_blinded.iter(), &mut pending_required_outputs);
+    let mut pending_outputs = load_outputs_for_outpoints(&state, pending_required_outputs)
         .await
         .unwrap_or_default();
-    let mut outputs = view.outputs;
-    add_pending_outputs(&mut outputs, &pending);
-    let page_query = query.page();
-    let filters = WalletTransactionFilters::from_query(query);
-    Json(page_items(
-        wallet_transaction_rows(
+    add_pending_outputs(&mut pending_outputs, &pending);
+    let pending_rows = wallet_transaction_rows(
+        &wallet,
+        pending.clone(),
+        owned_blinded.clone(),
+        &[],
+        &BTreeMap::new(),
+        &pending_outputs,
+        filters,
+    );
+    let pending_total = pending_rows.len();
+    let mut items = pending_rows
+        .into_iter()
+        .skip(offset.min(pending_total))
+        .take(limit)
+        .collect::<Vec<_>>();
+
+    let confirmed_offset = offset.saturating_sub(pending_total);
+    let remaining_limit = limit.saturating_sub(items.len());
+    let kinds = wallet_transaction_filter_kinds(filters);
+    let store = state.ui_data_store.clone();
+    let wallet_for_query = wallet.clone();
+    let (confirmed_rows, confirmed_total) = if remaining_limit == 0 {
+        (Vec::new(), 0)
+    } else {
+        tokio::task::spawn_blocking(move || {
+            store.load_wallet_transactions(
+                &wallet_for_query,
+                &kinds,
+                confirmed_offset,
+                remaining_limit,
+            )
+        })
+        .await
+        .ok()
+        .and_then(Result::ok)
+        .unwrap_or_default()
+    };
+    let mut confirmed_required_outputs = BTreeSet::new();
+    collect_transaction_input_outpoints(
+        confirmed_rows.iter().map(|row| &row.transaction),
+        &mut confirmed_required_outputs,
+    );
+    let confirmed_outputs = load_outputs_for_outpoints(&state, confirmed_required_outputs)
+        .await
+        .unwrap_or_default();
+    items.extend(confirmed_rows.into_iter().filter_map(|row| {
+        wallet_transaction_row(
             &wallet,
-            pending,
-            owned_blinded,
-            &snapshot.blocks,
-            &view.revealed_by_height,
-            &outputs,
-            filters,
-        ),
-        page_query,
-    ))
+            &row.transaction,
+            &confirmed_outputs,
+            &WalletTransactionContext {
+                status: "confirmed",
+                block_height: Some(row.block_height),
+                timestamp_ms: Some(row.timestamp_ms),
+                block_finalizer: Some(row.block_finalizer),
+                blinded: row.blinded,
+            },
+        )
+    }));
+    let total = pending_total + confirmed_total;
+    let next_offset = offset + items.len();
+    Json(Page {
+        items,
+        offset: offset.min(total),
+        limit,
+        total,
+        has_more: next_offset < total,
+        next_offset: (next_offset < total).then_some(next_offset),
+    })
+}
+
+async fn load_outputs_for_outpoints(
+    state: &HttpState,
+    outpoints: BTreeSet<OutPoint>,
+) -> Result<BTreeMap<OutPoint, TxOutput>> {
+    if outpoints.is_empty() {
+        return Ok(BTreeMap::new());
+    }
+    let store = state.ui_data_store.clone();
+    tokio::task::spawn_blocking(move || store.load_outputs(&outpoints))
+        .await
+        .unwrap_or_else(|_| Ok(BTreeMap::new()))
+}
+
+async fn ensure_ui_data_current(state: &HttpState) -> Result<()> {
+    let Some(tip_hash) = current_real_chain_tip(state).await else {
+        return Ok(());
+    };
+    if ui_data_matches_tip(state, tip_hash).await? {
+        return Ok(());
+    }
+
+    let _refresh_guard = state.ui_data_refresh.lock().await;
+    let Some(tip_hash) = current_real_chain_tip(state).await else {
+        return Ok(());
+    };
+    if ui_data_matches_tip(state, tip_hash).await? {
+        return Ok(());
+    }
+
+    let (snapshot, tip_hash) = {
+        let node = state.node.lock().await;
+        if !node.has_real_chain() {
+            return Ok(());
+        }
+        (node.chain_snapshot(), node.chain_tip_hash())
+    };
+    let keep_metrics = state.ui_config.lock().await.keep_track_of_metrics;
+    let chain_store = state.chain_store.clone();
+    let ui_data_store = state.ui_data_store.clone();
+    tokio::task::spawn_blocking(move || {
+        chain_store
+            .save(&snapshot)
+            .context("failed to persist chain before UI data catch-up")?;
+        ui_data_store
+            .project_snapshot(&snapshot, keep_metrics)
+            .context("failed to project UI data catch-up")?;
+        Ok::<(), anyhow::Error>(())
+    })
+    .await
+    .context("UI data catch-up worker failed")??;
+
+    ui_data_matches_tip(state, tip_hash)
+        .await?
+        .then_some(())
+        .context("UI data catch-up completed but projection tip does not match the chain tip")
+}
+
+async fn current_real_chain_tip(state: &HttpState) -> Option<String> {
+    let node = state.node.lock().await;
+    node.has_real_chain().then(|| node.chain_tip_hash())
+}
+
+async fn ui_data_matches_tip(state: &HttpState, tip_hash: String) -> Result<bool> {
+    let store = state.ui_data_store.clone();
+    tokio::task::spawn_blocking(move || store.is_projected_to(&tip_hash))
+        .await
+        .context("UI data projection metadata worker failed")?
+}
+
+fn collect_transaction_input_outpoints<'a>(
+    transactions: impl IntoIterator<Item = &'a Transaction>,
+    outpoints: &mut BTreeSet<OutPoint>,
+) {
+    for transaction in transactions {
+        match transaction {
+            Transaction::Transfer { inputs, .. } | Transaction::Burn { inputs, .. } => {
+                outpoints.extend(inputs.iter().map(|input| input.outpoint.clone()));
+            }
+            Transaction::Mine { .. } => {}
+        }
+    }
+}
+
+fn collect_blinded_input_outpoints<'a>(
+    transactions: impl IntoIterator<Item = &'a BlindedTransaction>,
+    outpoints: &mut BTreeSet<OutPoint>,
+) {
+    for transaction in transactions {
+        outpoints.extend(
+            transaction
+                .inputs
+                .iter()
+                .map(|input| input.outpoint.clone()),
+        );
+    }
 }
 
 pub(super) async fn api_wallet_utxos(
     State(state): State<HttpState>,
     Query(query): Query<PageQuery>,
 ) -> Json<Page<WalletUtxoRow>> {
-    let (ledger, wallet) = {
+    if ensure_ui_data_current(&state).await.is_err() {
+        return Json(page_items(Vec::new(), query));
+    }
+    let (wallet, pending_spent) = {
         let node = state.node.lock().await;
         (
-            node.wallet_view_ledger()
-                .unwrap_or_else(|_| node.clone_ledger()),
             node.wallet_address().to_string(),
+            node.wallet_pending_spent_outpoints(),
         )
     };
-    Json(page_items(wallet_utxo_rows(&ledger, &wallet), query))
+    let store = state.ui_data_store.clone();
+    let utxos = tokio::task::spawn_blocking(move || store.load_wallet_utxos(&wallet))
+        .await
+        .ok()
+        .and_then(Result::ok)
+        .unwrap_or_default();
+    Json(page_items(
+        wallet_utxo_rows_from_ui_data(utxos, &pending_spent),
+        query,
+    ))
 }
 
 pub(super) async fn api_wallet_selectable_utxos(
     State(state): State<HttpState>,
 ) -> Json<Vec<WalletUtxoRow>> {
-    let (ledger, wallet) = {
+    if ensure_ui_data_current(&state).await.is_err() {
+        return Json(Vec::new());
+    }
+    let (wallet, pending_spent) = {
         let node = state.node.lock().await;
         (
-            node.wallet_view_ledger()
-                .unwrap_or_else(|_| node.clone_ledger()),
             node.wallet_address().to_string(),
+            node.wallet_pending_spent_outpoints(),
         )
     };
-    Json(selectable_wallet_utxo_rows(&ledger, &wallet))
+    let store = state.ui_data_store.clone();
+    let utxos = tokio::task::spawn_blocking(move || store.load_wallet_utxos(&wallet))
+        .await
+        .ok()
+        .and_then(Result::ok)
+        .unwrap_or_default();
+    Json(
+        wallet_utxo_rows_from_ui_data(utxos, &pending_spent)
+            .into_iter()
+            .filter(|utxo| utxo.spendable)
+            .collect(),
+    )
 }
 
 pub(super) fn page_items<T>(items: Vec<T>, query: PageQuery) -> Page<T> {
@@ -255,6 +415,21 @@ pub(super) fn page_items<T>(items: Vec<T>, query: PageQuery) -> Page<T> {
     }
 }
 
+fn wallet_transaction_filter_kinds(filters: WalletTransactionFilters) -> Vec<&'static str> {
+    let mut kinds = Vec::new();
+    if filters.transfer {
+        kinds.push("transfer");
+    }
+    if filters.mine {
+        kinds.push("mine");
+    }
+    if filters.burn {
+        kinds.push("burn");
+    }
+    kinds
+}
+
+#[cfg(test)]
 pub(super) fn wallet_utxo_rows(ledger: &Ledger, wallet: &str) -> Vec<WalletUtxoRow> {
     let spendable_outpoints = ledger
         .available_utxos_for_address(wallet)
@@ -285,6 +460,25 @@ pub(super) fn wallet_utxo_rows(ledger: &Ledger, wallet: &str) -> Vec<WalletUtxoR
     utxos
 }
 
+fn wallet_utxo_rows_from_ui_data(
+    utxos: Vec<(crate::domain::OutPoint, crate::domain::TxOutput)>,
+    pending_spent: &BTreeSet<crate::domain::OutPoint>,
+) -> Vec<WalletUtxoRow> {
+    utxos
+        .into_iter()
+        .map(|(outpoint, output)| {
+            let spendable = !pending_spent.contains(&outpoint);
+            WalletUtxoRow {
+                outpoint,
+                address: output.address,
+                amount: output.amount,
+                spendable,
+            }
+        })
+        .collect()
+}
+
+#[cfg(test)]
 pub(super) fn selectable_wallet_utxo_rows(ledger: &Ledger, wallet: &str) -> Vec<WalletUtxoRow> {
     wallet_utxo_rows(ledger, wallet)
         .into_iter()
@@ -315,7 +509,14 @@ pub(super) async fn api_metrics(
             charts: Vec::new(),
         });
     }
-    let store = state.chain_store.clone();
+    if ensure_ui_data_current(&state).await.is_err() {
+        return Json(MetricsResponse {
+            enabled,
+            latest: None,
+            charts: Vec::new(),
+        });
+    }
+    let store = state.ui_data_store.clone();
     let rows = tokio::task::spawn_blocking(move || match query.limit {
         Some(limit) => store.load_recent_metrics(limit.clamp(1, DATASET_LIMIT)),
         None => store.load_metrics(),

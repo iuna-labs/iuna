@@ -57,7 +57,7 @@ impl NodeCore {
             };
         }
 
-        let pow_error = match self.prepare_automatic_pow_mine() {
+        let pow_error = match self.prepare_automatic_pow_mining() {
             Ok(tx) => {
                 plan.pow_mined = tx;
                 None

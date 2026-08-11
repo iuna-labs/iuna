@@ -503,15 +503,13 @@ fn automatic_leader_prepares_anchor_and_blinded_burn() {
 #[test]
 fn automatic_pow_mining_uses_protocol_finalizer_fee() {
     let wallet = Wallet::from_seed("automatic-pow-mining-fee-wallet");
-    let mut node = NodeCore::new(NodeConfig {
-        wallet,
-        genesis_allocations: BTreeMap::new(),
-        vdf_rounds: 10,
-        burn_per_block: 0,
-        burn_fee: 0,
-        pow_mining_workers: 1,
-        recovery_vdf_top_rank_percent: 100,
-    });
+    let ledger = Ledger::new_with_genesis_burns(
+        BTreeMap::from([(wallet.address().to_string(), MICRO_IUNA)]),
+        vec![GenesisBurn::new(wallet.address(), 1)],
+        10,
+    )
+    .unwrap();
+    let mut node = NodeCore::from_ledger(wallet, ledger, 0);
 
     node.set_pow_mining_enabled(true);
     let plan = (1..10_000)

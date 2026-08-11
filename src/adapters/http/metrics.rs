@@ -1,5 +1,5 @@
 use crate::{
-    adapters::chain_store::BlockMetricRow,
+    adapters::ui_data_store::BlockMetricRow,
     app::{PeerDirection, PeerInfo},
     domain::Amount,
 };

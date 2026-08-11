@@ -1,7 +1,7 @@
 use serde::{Deserialize, Serialize};
 
 use crate::{
-    adapters::{chain_store::BlockMetricRow, config_store::UiConfig},
+    adapters::{config_store::UiConfig, ui_data_store::BlockMetricRow},
     domain::{Amount, BurnLeaderRank, OutPoint, Transaction, TxOutput},
 };
 

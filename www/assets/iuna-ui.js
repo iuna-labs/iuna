@@ -17,6 +17,7 @@ window.iunaApp = function iunaApp() {
     p2pMetrics: {},
     blockchainMetrics: { enabled: false, latest: null, charts: [] },
     loadingMetrics: false,
+    metricsRequestSeq: 0,
     metricHover: null,
     metricsRange: (() => {
       try {
@@ -109,6 +110,8 @@ window.iunaApp = function iunaApp() {
     lastUpdated: null,
     pollHandle: null,
     refreshPromise: null,
+    shellRefreshPromise: null,
+    networkHealthPromise: null,
     requestTimeoutMs: 12000,
     hashListenerInstalled: false,
     newBlockHashes: new Set(),
@@ -170,10 +173,12 @@ window.iunaApp = function iunaApp() {
 
     setTab(tab) {
       if (!this.allowedTabs().includes(tab)) return;
+      const alreadyActive = this.tab === tab;
       this.tab = tab;
       if (window.location.hash !== `#${tab}`) {
         window.location.hash = tab;
       }
+      if (alreadyActive) return;
       this.refresh({ silent: true });
     },
 
@@ -629,28 +634,26 @@ window.iunaApp = function iunaApp() {
       const shouldLoadBlocks = tab === "chain" || tab === "mining";
       const shouldLoadP2pMetrics = tab === "p2p";
       const shouldLoadMetrics = tab === "metrics";
+      if (shouldLoadMetrics) {
+        await this.refreshMetrics(options);
+        this.refreshShellState({ addressBookVersion, silent: true });
+        return;
+      }
       if (shouldLoadBlocks && this.blocks.length === 0) this.loadingInitialBlocks = true;
-      if (shouldLoadMetrics && this.metricsCharts().length === 0) this.loadingMetrics = true;
       const pagedDatasets = [];
       if (tab === "wallet") pagedDatasets.push("walletTx", "walletUtxo");
       if (tab === "chain") pagedDatasets.push("mempool");
       if (tab === "p2p") pagedDatasets.push("peer");
       try {
-        const [config, status, blocks, p2pMetrics, blockchainMetrics, networkHealth] = await Promise.all([
+        const [config, status, blocks, p2pMetrics, blockchainMetrics] = await Promise.all([
           this.fetchJson("/api/config"),
           this.fetchJson("/api/status"),
           shouldLoadBlocks ? this.fetchJson("/api/blocks?limit=30") : Promise.resolve(null),
           shouldLoadP2pMetrics ? this.fetchJson("/api/p2p/metrics") : Promise.resolve(this.p2pMetrics),
-          shouldLoadMetrics ? this.fetchJson(this.metricsPath()) : Promise.resolve(this.blockchainMetrics),
-          this.fetchJson("/api/network/health"),
+          Promise.resolve(this.blockchainMetrics),
         ]);
         const previousChainHeight = this.status.chain?.height;
         this.status = status;
-        await Promise.all(
-          pagedDatasets.map((kind) =>
-            this.refreshPagedDataset(kind, { silent: options.silent === true })
-          )
-        );
         this.config = config;
         this.syncConfigState({ addressBookVersion });
         if (!this.allowedTabs().includes(this.tab)) {
@@ -664,7 +667,6 @@ window.iunaApp = function iunaApp() {
         this.pruneSelectedTransferUtxos();
         this.p2pMetrics = p2pMetrics;
         this.blockchainMetrics = blockchainMetrics;
-        this.networkHealth = networkHealth;
         this.burnAmount = status.mining?.burn_per_block ?? this.burnAmount;
         this.burnFee = status.mining?.automatic_burn_fee ?? this.burnFee;
         this.miningEnabled = status.mining?.automatic ?? this.miningEnabled;
@@ -679,6 +681,12 @@ window.iunaApp = function iunaApp() {
         this.lastUpdated = new Date();
         this.syncMiningEvents({ status, blocks });
         this.scheduleFeeEstimates();
+        this.refreshNetworkHealth({ silent: options.silent === true });
+        await Promise.all(
+          pagedDatasets.map((kind) =>
+            this.refreshPagedDataset(kind, { silent: options.silent === true })
+          )
+        );
       } catch (error) {
         if (String(error.message || "").includes("401")) {
           this.stopPolling();
@@ -688,8 +696,70 @@ window.iunaApp = function iunaApp() {
         this.showFlash(error.message, "error");
       } finally {
         if (shouldLoadBlocks) this.loadingInitialBlocks = false;
-        if (shouldLoadMetrics) this.loadingMetrics = false;
       }
+    },
+
+    async refreshShellState(options = {}) {
+      if (!this.canUseProtectedApi()) return;
+      if (this.shellRefreshPromise) return this.shellRefreshPromise;
+      const addressBookVersion = options.addressBookVersion ?? this.addressBookVersion;
+      this.shellRefreshPromise = Promise.all([
+        this.fetchJson("/api/config"),
+        this.fetchJson("/api/status"),
+      ])
+        .then(async ([config, status]) => {
+          const previousChainHeight = this.status.chain?.height;
+          this.status = status;
+          this.config = config;
+          this.syncConfigState({ addressBookVersion });
+          if (!this.allowedTabs().includes(this.tab)) {
+            this.setTab("wallet");
+          }
+          if (!this.config.setup_complete) {
+            await this.refreshWalletSetup();
+          }
+          this.syncMempoolBlockMarker(previousChainHeight, status.chain?.height);
+          this.burnAmount = status.mining?.burn_per_block ?? this.burnAmount;
+          this.burnFee = status.mining?.automatic_burn_fee ?? this.burnFee;
+          this.miningEnabled = status.mining?.automatic ?? this.miningEnabled;
+          this.powMiningEnabled = status.mining?.pow_mining_enabled ?? this.powMiningEnabled;
+          this.powMiningWorkers = status.mining?.pow_mining_workers ?? this.powMiningWorkers;
+          this.maxPowMiningWorkers =
+            status.mining?.max_pow_mining_workers ?? this.maxPowMiningWorkers;
+          if (!this.burnAmountDirty) {
+            this.burnAmountDraft = this.amountLabel(this.burnAmount);
+            this.burnFeeDraft = this.amountLabel(this.burnFee);
+          }
+          this.lastUpdated = new Date();
+          this.syncMiningEvents({ status, blocks: null });
+          this.scheduleFeeEstimates();
+          this.refreshNetworkHealth({ silent: true });
+        })
+        .catch((error) => {
+          if (options.silent !== true) this.showFlash(error.message, "error");
+        })
+        .finally(() => {
+          this.shellRefreshPromise = null;
+        });
+      return this.shellRefreshPromise;
+    },
+
+    async refreshNetworkHealth(options = {}) {
+      if (!this.canUseProtectedApi()) return;
+      if (this.networkHealthPromise) return this.networkHealthPromise;
+      this.networkHealthPromise = this.fetchJson("/api/network/health")
+        .then((networkHealth) => {
+          this.networkHealth = networkHealth;
+          return networkHealth;
+        })
+        .catch((error) => {
+          if (options.silent !== true) this.showFlash(error.message, "error");
+          return null;
+        })
+        .finally(() => {
+          this.networkHealthPromise = null;
+        });
+      return this.networkHealthPromise;
     },
 
     async fetchJson(path) {
@@ -1257,11 +1327,16 @@ window.iunaApp = function iunaApp() {
 
     async refreshFeeEstimates() {
       if (this.showingAuth()) return;
-      await Promise.all([
-        this.refreshBurnFeeEstimate(),
-        this.refreshMineFeeEstimate(),
-        this.refreshTransferFeeEstimate(),
-      ]);
+      if (this.tab === "wallet") {
+        await this.refreshTransferFeeEstimate();
+        return;
+      }
+      if (this.tab === "mining") {
+        await Promise.all([
+          this.refreshBurnFeeEstimate(),
+          this.refreshMineFeeEstimate(),
+        ]);
+      }
     },
 
     async refreshBurnFeeEstimate() {
@@ -1730,8 +1805,8 @@ window.iunaApp = function iunaApp() {
       return this.blockchainMetrics?.latest || {};
     },
 
-    metricsPath() {
-      return this.metricsRange === "all" ? "/api/metrics" : `/api/metrics?limit=${this.metricsRange}`;
+    metricsPath(range = this.metricsRange) {
+      return range === "all" ? "/api/metrics" : `/api/metrics?limit=${range}`;
     },
 
     setMetricsRange(range) {
@@ -1743,29 +1818,57 @@ window.iunaApp = function iunaApp() {
         // Non-persistent filtering is fine when storage is unavailable.
       }
       if (this.tab === "metrics") {
-        this.blockchainMetrics = { enabled: this.blockchainMetrics?.enabled ?? true, latest: this.blockchainMetrics?.latest ?? null, charts: [] };
-        this.refresh({ force: true });
+        this.refreshMetrics();
       }
     },
 
-    metricChartPoints(chart) {
-      const points = this.metricVisiblePoints(chart);
-      if (points.length === 0) return "";
-      const bounds = this.metricChartBounds(chart);
-      return points
+    async fetchMetricsResponse(range = this.metricsRange) {
+      return this.prepareMetricsResponse(await this.fetchJson(this.metricsPath(range)));
+    },
+
+    async refreshMetrics(options = {}) {
+      if (!this.canUseProtectedApi()) return this.blockchainMetrics;
+      const requestId = ++this.metricsRequestSeq;
+      const range = this.metricsRange;
+      if (this.metricsCharts().length === 0 && options.silent !== true) {
+        this.loadingMetrics = true;
+      }
+      try {
+        const metrics = await this.fetchMetricsResponse(range);
+        if (requestId === this.metricsRequestSeq && this.metricsRange === range) {
+          this.blockchainMetrics = metrics;
+        }
+        return metrics;
+      } catch (error) {
+        if (options.silent !== true) this.showFlash(error.message, "error");
+        return this.blockchainMetrics;
+      } finally {
+        if (requestId === this.metricsRequestSeq) {
+          this.loadingMetrics = false;
+        }
+      }
+    },
+
+    prepareMetricsResponse(metrics) {
+      const charts = Array.isArray(metrics?.charts)
+        ? metrics.charts.map((chart) => this.prepareMetricChart(chart))
+        : [];
+      return { ...(metrics || {}), charts };
+    },
+
+    prepareMetricChart(chart) {
+      const points = this.metricValidPoints(chart);
+      const bounds = this.metricChartBoundsForPoints(points);
+      const yTicks = this.metricYAxisTicksForPoints(points);
+      const xTicks = this.metricXAxisTicksForPoints(points);
+      const linePoints = points
         .map((point) => {
           const x = this.metricXAxisPositionFromBounds(bounds, Number(point.height));
           const y = this.metricYAxisPositionFromBounds(bounds, Number(point.value));
           return `${x.toFixed(1)},${y.toFixed(1)}`;
         })
         .join(" ");
-    },
-
-    metricChartPointMarkers(chart) {
-      const points = this.metricVisiblePoints(chart);
-      if (points.length === 0) return [];
-      const bounds = this.metricChartBounds(chart);
-      return points.map((point) => {
+      const markers = points.map((point) => {
         const height = Number(point.height);
         const value = Number(point.value);
         return {
@@ -1773,32 +1876,49 @@ window.iunaApp = function iunaApp() {
           value,
           x: this.metricXAxisPositionFromBounds(bounds, height),
           y: this.metricYAxisPositionFromBounds(bounds, value),
-          label: this.metricPointLabel(chart, point),
         };
       });
+      const gridPath = [
+        ...yTicks.map((tick) => {
+          const y = this.metricYAxisPositionFromBounds(bounds, Number(tick)).toFixed(1);
+          return `M4 ${y} H296`;
+        }),
+        ...xTicks.map((tick) => {
+          const x = this.metricXAxisPositionFromBounds(bounds, Number(tick)).toFixed(1);
+          return `M${x} 8 V132`;
+        }),
+      ].join(" ");
+      return {
+        ...chart,
+        _visiblePoints: points,
+        _bounds: bounds,
+        _yTicks: yTicks,
+        _xTicks: xTicks,
+        _linePoints: linePoints,
+        _markers: markers,
+        _gridPath: gridPath,
+      };
+    },
+
+    metricChartPoints(chart) {
+      return chart?._linePoints || "";
+    },
+
+    metricChartPointMarkers(chart) {
+      return chart?._markers || [];
     },
 
     metricGridPath(chart) {
-      const yLines = this.metricYAxisTicks(chart).map((tick) => {
-        const y = this.metricYAxisPositionFromBounds(this.metricChartBounds(chart), Number(tick)).toFixed(1);
-        return `M4 ${y} H296`;
-      });
-      const xLines = this.metricXAxisTicks(chart).map((tick) => {
-        const x = this.metricXAxisPositionFromBounds(this.metricChartBounds(chart), Number(tick)).toFixed(1);
-        return `M${x} 8 V132`;
-      });
-      return [...yLines, ...xLines].join(" ");
+      return chart?._gridPath || "";
+    },
+
+    metricValidPoints(chart) {
+      const points = Array.isArray(chart?.points) ? chart.points : [];
+      return points.filter((point) => Number.isFinite(Number(point.value)));
     },
 
     metricVisiblePoints(chart) {
-      const points = Array.isArray(chart?.points) ? chart.points : [];
-      const validPoints = points.filter((point) => Number.isFinite(Number(point.value)));
-      const limit = this.metricsRange;
-      if (limit === "all") return validPoints;
-      const latestHeight = Number(this.metricsLatest().height);
-      if (!Number.isFinite(latestHeight)) return validPoints.slice(-limit);
-      const minHeight = Math.max(0, latestHeight - limit + 1);
-      return validPoints.filter((point) => Number(point.height) >= minHeight);
+      return chart?._visiblePoints || this.metricValidPoints(chart);
     },
 
     metricLatestValueLabel(chart) {
@@ -1808,7 +1928,13 @@ window.iunaApp = function iunaApp() {
     },
 
     metricChartBounds(chart) {
-      const points = this.metricVisiblePoints(chart);
+      return chart?._bounds || this.metricChartBoundsForPoints(this.metricVisiblePoints(chart));
+    },
+
+    metricChartBoundsForPoints(points) {
+      if (points.length === 0) {
+        return { minHeight: 0, maxHeight: 1, minValue: 0, maxValue: 1 };
+      }
       const heights = points.map((point) => Number(point.height));
       const values = points.map((point) => Number(point.value));
       const valueTicks = this.niceTicks(Math.min(...values), Math.max(...values), 5);
@@ -1821,14 +1947,20 @@ window.iunaApp = function iunaApp() {
     },
 
     metricYAxisTicks(chart) {
-      const points = this.metricVisiblePoints(chart);
+      return chart?._yTicks || this.metricYAxisTicksForPoints(this.metricVisiblePoints(chart));
+    },
+
+    metricYAxisTicksForPoints(points) {
       if (points.length === 0) return [];
       const values = points.map((point) => Number(point.value));
       return this.niceTicks(Math.min(...values), Math.max(...values), 5).reverse();
     },
 
     metricXAxisTicks(chart) {
-      const points = this.metricVisiblePoints(chart);
+      return chart?._xTicks || this.metricXAxisTicksForPoints(this.metricVisiblePoints(chart));
+    },
+
+    metricXAxisTicksForPoints(points) {
       if (points.length === 0) return [];
       const heights = points.map((point) => Number(point.height));
       const minHeight = Math.min(...heights);
@@ -1896,8 +2028,10 @@ window.iunaApp = function iunaApp() {
       return `left: ${(x / 300) * 100}%`;
     },
 
-    metricPointStyle(marker) {
-      return `left: ${(marker.x / 300) * 100}%; top: ${(marker.y / 148) * 100}%;`;
+    metricHoverPointStyle(chart) {
+      const hover = this.metricHover;
+      if (!hover || hover.chartId !== chart.id) return "";
+      return `left: ${(hover.x / 300) * 100}%; top: ${(hover.y / 148) * 100}%;`;
     },
 
     setMetricHover(chart, marker) {
@@ -1907,7 +2041,7 @@ window.iunaApp = function iunaApp() {
         value: marker.value,
         x: marker.x,
         y: marker.y,
-        label: marker.label,
+        label: this.metricPointLabel(chart, marker),
       };
     },
 

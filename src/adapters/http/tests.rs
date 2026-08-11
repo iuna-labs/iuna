@@ -1,8 +1,9 @@
 use std::{collections::BTreeMap, sync::Arc};
 
 use axum::{
-    Router,
+    Json, Router,
     body::{Body, to_bytes},
+    extract::{Query, State},
     http::{HeaderMap, Method, Request, StatusCode, header},
     middleware,
     routing::{get, post},
@@ -13,7 +14,7 @@ use tower::ServiceExt;
 use crate::{
     adapters::{
         chain_store::SqliteChainStore, config_store, config_store::UiConfig, p2p::GossipNetwork,
-        wallet_store,
+        ui_data_store::SqliteUiDataStore, wallet_store,
     },
     app::{GossipEnvelope, NodeCore, PeerBook, PeerDirection, PeerInfo, StratumStatus},
     domain::{
@@ -1386,8 +1387,8 @@ fn metric_row(
     height: u64,
     block_time_ms: Option<u64>,
     vdf_rounds: u64,
-) -> crate::adapters::chain_store::BlockMetricRow {
-    crate::adapters::chain_store::BlockMetricRow {
+) -> crate::adapters::ui_data_store::BlockMetricRow {
+    crate::adapters::ui_data_store::BlockMetricRow {
         height,
         block_hash: format!("hash-{height}"),
         timestamp_ms: height,
@@ -1472,6 +1473,67 @@ fn metrics_screen_includes_block_range_filter() {
     assert!(super::INDEX_HTML.contains("setMetricsRange('all')"));
     assert!(super::INDEX_HTML.contains("Known addresses"));
     assert!(super::INDEX_HTML.contains("knownWalletAddresses"));
+    assert!(super::INDEX_HTML.contains("metric-chart-hover-point"));
+    assert!(!super::INDEX_HTML.contains("metric-chart-point-hit"));
+    assert!(!super::INDEX_HTML.contains("metric-chart-hover-point\" x-show"));
+    assert!(super::INDEX_HTML.contains("<template x-if=\"metricHover?.chartId === chart.id\">"));
+    let app_js = include_str!("../../../www/assets/iuna-ui.js");
+    assert!(app_js.contains("shellRefreshPromise: null"));
+    assert!(app_js.contains("metricsRequestSeq: 0"));
+    assert!(app_js.contains("await this.refreshMetrics(options);"));
+    assert!(app_js.contains("this.refreshShellState({ addressBookVersion, silent: true });"));
+    assert!(app_js.contains("async refreshShellState(options = {})"));
+    assert!(app_js.contains("this.refreshMetrics();"));
+    assert!(!app_js.contains("this.blockchainMetrics = { enabled: this.blockchainMetrics?.enabled ?? true, latest: this.blockchainMetrics?.latest ?? null, charts: [] };\n        this.refresh({ force: true });"));
+    assert!(app_js.contains("async fetchMetricsResponse(range = this.metricsRange)"));
+    assert!(app_js.contains("prepareMetricsResponse(metrics)"));
+    assert!(app_js.contains("_linePoints: linePoints"));
+    assert!(app_js.contains("_gridPath: gridPath"));
+    assert!(!app_js.contains("label: this.metricPointLabel(chart, point)"));
+    assert!(app_js.contains("label: this.metricPointLabel(chart, marker)"));
+    assert!(app_js.contains("metricHoverPointStyle(chart)"));
+}
+
+#[test]
+fn blocks_endpoint_uses_cached_block_projection_without_cloning_full_ui_index() {
+    let api_rs = include_str!("api.rs");
+    assert!(api_rs.contains("cached_ui_blocks_for_tip(&state, Some(tip_hash.as_str()), blocks)"));
+    assert!(!api_rs.contains("let mut outputs = view.outputs;\n    add_pending_outputs(&mut outputs, &pending);\n    Json(ui_blocks_from_indexes(\n        blocks,\n        &outputs,"));
+}
+
+#[test]
+fn mempool_and_wallet_transaction_endpoints_use_narrow_output_lookups() {
+    let api_rs = include_str!("api.rs");
+    assert!(api_rs.contains("load_outputs_for_outpoints(&state, required_outputs)"));
+    assert!(api_rs.contains("load_outputs_for_outpoints(&state, pending_required_outputs)"));
+    assert!(api_rs.contains("load_outputs_for_outpoints(&state, confirmed_required_outputs)"));
+    assert!(!api_rs.contains("let mut outputs = view.outputs;"));
+}
+
+#[test]
+fn http_server_logs_slow_api_requests() {
+    let http_rs = include_str!("../http.rs");
+    assert!(http_rs.contains("const SLOW_UI_REQUEST_LOG_MS: u128 = 250;"));
+    assert!(http_rs.contains("async fn log_slow_api_request"));
+    assert!(http_rs.contains("slow UI API request: {method} {path}"));
+}
+
+#[test]
+fn fee_estimate_polling_is_tab_scoped() {
+    let app_js = include_str!("../../../www/assets/iuna-ui.js");
+    let refresh = app_js
+        .split("async refreshFeeEstimates()")
+        .nth(1)
+        .expect("refreshFeeEstimates should exist")
+        .split("async refreshBurnFeeEstimate()")
+        .next()
+        .expect("refreshFeeEstimates body should precede burn fee estimate");
+
+    assert!(refresh.contains("if (this.tab === \"wallet\")"));
+    assert!(refresh.contains("await this.refreshTransferFeeEstimate();"));
+    assert!(refresh.contains("if (this.tab === \"mining\")"));
+    assert!(refresh.contains("this.refreshBurnFeeEstimate()"));
+    assert!(refresh.contains("this.refreshMineFeeEstimate()"));
 }
 
 #[test]
@@ -1641,9 +1703,10 @@ async fn chain_reset_deletes_local_chain_and_returns_to_placeholder() {
     let ledger =
         Ledger::new_with_genesis_burns(genesis, vec![GenesisBurn::new(wallet.address(), 1)], 1)
             .unwrap();
+    state.chain_store.save(&ledger.snapshot()).unwrap();
     state
-        .chain_store
-        .save_with_metrics(&ledger.snapshot(), true)
+        .ui_data_store
+        .project_snapshot(&ledger.snapshot(), true)
         .unwrap();
     {
         let mut node = state.node.lock().await;
@@ -1666,7 +1729,7 @@ async fn chain_reset_deletes_local_chain_and_returns_to_placeholder() {
     assert_eq!(node.status().wallet_address, wallet.address());
     drop(node);
     assert!(state.chain_store.load().unwrap().is_none());
-    assert!(state.chain_store.load_metrics().unwrap().is_empty());
+    assert!(state.ui_data_store.load_metrics().unwrap().is_empty());
     assert!(state.ui_cache.lock().await.tip_hash.is_none());
 }
 
@@ -1683,6 +1746,7 @@ fn polling_refreshes_paged_datasets_without_visible_loaders() {
         "async refreshNow(options = {}) {\n      if (!this.canUseProtectedApi()) return;"
     ));
     assert!(app_js.contains("refreshPromise: null"));
+    assert!(app_js.contains("networkHealthPromise: null"));
     assert!(app_js.contains("if (this.refreshPromise)"));
     assert!(app_js.contains("return this.refreshPromise;"));
     assert!(app_js.contains("options.force === true"));
@@ -1696,6 +1760,16 @@ fn polling_refreshes_paged_datasets_without_visible_loaders() {
     );
     assert!(app_js.contains("if (tab === \"chain\") pagedDatasets.push(\"mempool\");"));
     assert!(app_js.contains("if (tab === \"p2p\") pagedDatasets.push(\"peer\");"));
+    let merge_blocks_index = app_js
+        .find("if (blocks) this.mergeFreshBlocks(blocks, { animateHead: true });")
+        .expect("fresh blocks should be merged during refresh");
+    let paged_dataset_index = app_js
+        .find("this.refreshPagedDataset(kind, { silent: options.silent === true })")
+        .expect("paged datasets should refresh during refresh");
+    assert!(merge_blocks_index < paged_dataset_index);
+    assert!(app_js.contains("this.refreshNetworkHealth({ silent: options.silent === true });"));
+    assert!(app_js.contains("async refreshNetworkHealth(options = {})"));
+    assert!(app_js.contains("if (this.networkHealthPromise) return this.networkHealthPromise;"));
     assert!(app_js.contains("cache: \"no-store\""));
     assert!(app_js.contains("async fetchWithTimeout(path, options = {})"));
     assert!(app_js.contains("controller.abort()"));
@@ -1798,7 +1872,7 @@ async fn startup_prewarm_populates_chain_view_cache_before_first_request() {
         txid: "persisted-ui-index-sentinel".to_string(),
         index: 7,
     };
-    let connection = rusqlite::Connection::open(state.chain_store.path()).unwrap();
+    let connection = rusqlite::Connection::open(state.ui_data_store.path()).unwrap();
     connection
         .execute(
             r#"
@@ -1846,6 +1920,46 @@ VALUES (?1, ?2, ?3, ?4)
     );
 }
 
+#[tokio::test]
+async fn ui_data_endpoint_catches_up_stale_projection_before_reading() {
+    let dir = tempfile::tempdir().unwrap();
+    let state = auth_test_state(dir.path().join("config.json"), UiConfig::default()).await;
+    let wallet = Wallet::from_seed("http-ui-data-catch-up-wallet");
+    let mut genesis = BTreeMap::new();
+    genesis.insert(wallet.address().to_string(), 10);
+    let mut ledger =
+        Ledger::new_with_genesis_burns(genesis, vec![GenesisBurn::new(wallet.address(), 1)], 1)
+            .unwrap();
+    let burn = ledger.build_burn(&wallet, 1, 0).unwrap();
+    ledger.submit_transaction(burn).unwrap();
+    let block = ledger.mine_next_block(&wallet, 1_000).unwrap();
+    ledger.apply_locally_mined_block(block).unwrap();
+    let expected_tip = ledger.status().tip_hash;
+    {
+        let mut node = state.node.lock().await;
+        *node = NodeCore::from_ledger(wallet.clone(), ledger, 0);
+    }
+
+    assert!(state.chain_store.load().unwrap().is_none());
+    assert!(!state.ui_data_store.is_projected_to(&expected_tip).unwrap());
+
+    let Json(page) =
+        super::api_wallet_utxos(State(state.clone()), Query(super::PageQuery::default())).await;
+
+    assert!(
+        page.items
+            .iter()
+            .any(|utxo| utxo.address == wallet.address())
+    );
+    let persisted_tip = state
+        .chain_store
+        .load()
+        .unwrap()
+        .and_then(|snapshot| snapshot.blocks.last().map(|block| block.hash.clone()));
+    assert_eq!(persisted_tip.as_deref(), Some(expected_tip.as_str()));
+    assert!(state.ui_data_store.is_projected_to(&expected_tip).unwrap());
+}
+
 async fn auth_test_state(config_path: std::path::PathBuf, config: UiConfig) -> HttpState {
     config_store::save(&config_path, &config).unwrap();
     let wallet_path = config_path.with_file_name("wallet.json");
@@ -1856,6 +1970,8 @@ async fn auth_test_state(config_path: std::path::PathBuf, config: UiConfig) -> H
     let gossip = GossipNetwork::new_for_tests(node.clone(), peers.clone());
     let chain_store = SqliteChainStore::open(config_path.with_file_name("chain.sqlite3"))
         .expect("test chain store should open");
+    let ui_data_store = SqliteUiDataStore::open(config_path.with_file_name("ui_data.sqlite3"))
+        .expect("test UI data store should open");
     HttpState {
         node,
         peers,
@@ -1865,6 +1981,7 @@ async fn auth_test_state(config_path: std::path::PathBuf, config: UiConfig) -> H
         )),
         config_path,
         chain_store,
+        ui_data_store,
         wallet_path,
         stratum: StratumStatus {
             enabled: false,
@@ -1873,6 +1990,7 @@ async fn auth_test_state(config_path: std::path::PathBuf, config: UiConfig) -> H
         auth_sessions: Arc::new(Mutex::new(BTreeMap::new())),
         auth_backoff: Arc::new(Mutex::new(BTreeMap::new())),
         ui_cache: Arc::new(Mutex::new(super::UiChainCache::default())),
+        ui_data_refresh: Arc::new(Mutex::new(())),
     }
 }
 
@@ -2025,14 +2143,14 @@ async fn metrics_setting_persists_config_and_clears_rows_when_disabled() {
         .unwrap();
     let config = config_store::load_or_create(&config_path).unwrap();
     assert!(config.keep_track_of_metrics);
-    assert!(!state.chain_store.load_metrics().unwrap().is_empty());
+    assert!(!state.ui_data_store.load_metrics().unwrap().is_empty());
 
     super::set_keep_track_of_metrics(&state, false)
         .await
         .unwrap();
     let config = config_store::load_or_create(&config_path).unwrap();
     assert!(!config.keep_track_of_metrics);
-    assert!(state.chain_store.load_metrics().unwrap().is_empty());
+    assert!(state.ui_data_store.load_metrics().unwrap().is_empty());
 }
 
 #[tokio::test]

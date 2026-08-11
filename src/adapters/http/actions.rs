@@ -21,7 +21,9 @@ use super::{
     validate_address, wallet_setup_json,
 };
 use crate::{
-    adapters::{chain_store::SqliteChainStore, config_store::UiConfig},
+    adapters::{
+        chain_store::SqliteChainStore, config_store::UiConfig, ui_data_store::SqliteUiDataStore,
+    },
     app::GossipEnvelope,
     domain::Amount,
 };
@@ -303,12 +305,12 @@ pub(super) async fn set_keep_track_of_metrics(state: &HttpState, enabled: bool) 
             node.has_real_chain().then(|| node.chain_snapshot())
         };
         if let Some(snapshot) = snapshot {
-            replace_metrics_for_snapshot(&state.chain_store, snapshot).await?;
+            replace_metrics_for_snapshot(&state.ui_data_store, snapshot).await?;
         } else {
-            clear_metrics(&state.chain_store).await?;
+            clear_metrics(&state.ui_data_store).await?;
         }
     } else {
-        clear_metrics(&state.chain_store).await?;
+        clear_metrics(&state.ui_data_store).await?;
     }
 
     let mut config = state.ui_config.lock().await;
@@ -330,6 +332,7 @@ pub(super) async fn reset_local_chain(state: &HttpState, confirmation: &str) -> 
         *cache = super::UiChainCache::default();
     }
     clear_chain(&state.chain_store).await?;
+    clear_ui_data(&state.ui_data_store).await?;
     state
         .gossip
         .broadcast(vec![GossipEnvelope::ChainSnapshotRequest])
@@ -392,7 +395,7 @@ pub(super) async fn set_p2p_accept_inbound(
 }
 
 async fn replace_metrics_for_snapshot(
-    store: &SqliteChainStore,
+    store: &SqliteUiDataStore,
     snapshot: crate::domain::ChainSnapshot,
 ) -> Result<()> {
     let store = store.clone();
@@ -402,11 +405,19 @@ async fn replace_metrics_for_snapshot(
     Ok(())
 }
 
-async fn clear_metrics(store: &SqliteChainStore) -> Result<()> {
+async fn clear_metrics(store: &SqliteUiDataStore) -> Result<()> {
     let store = store.clone();
     tokio::task::spawn_blocking(move || store.clear_metrics())
         .await
         .context("metrics cleanup worker failed")??;
+    Ok(())
+}
+
+async fn clear_ui_data(store: &SqliteUiDataStore) -> Result<()> {
+    let store = store.clone();
+    tokio::task::spawn_blocking(move || store.clear_all())
+        .await
+        .context("UI data cleanup worker failed")??;
     Ok(())
 }
 

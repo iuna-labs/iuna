@@ -103,7 +103,7 @@ pub(super) fn wallet_transaction_rows(
     rows.into_iter().map(|(_, row)| row).collect()
 }
 
-fn wallet_transaction_row(
+pub(super) fn wallet_transaction_row(
     wallet: &str,
     tx: &Transaction,
     outputs_by_outpoint: &BTreeMap<OutPoint, TxOutput>,
@@ -591,12 +591,20 @@ pub(super) async fn cached_chain_view(
     })
 }
 
-pub(super) async fn cached_chain_view_for_tip(
+pub(super) async fn cached_ui_blocks_for_tip(
     state: &HttpState,
     tip_hash: Option<&str>,
-) -> Option<UiChainView> {
+    blocks: Vec<Block>,
+) -> Option<Vec<UiBlock>> {
     let cache = state.ui_cache.lock().await;
-    (cache.tip_hash.as_deref() == tip_hash).then(|| ui_chain_view_from_cache(&cache))
+    (cache.tip_hash.as_deref() == tip_hash).then(|| {
+        ui_blocks_from_indexes(
+            blocks,
+            &cache.outputs,
+            &cache.revealed_by_height,
+            &cache.burn_leader_ranks_by_hash,
+        )
+    })
 }
 
 fn ui_chain_view_from_cache(cache: &super::UiChainCache) -> UiChainView {

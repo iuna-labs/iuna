@@ -2,14 +2,18 @@ use std::{
     collections::BTreeMap,
     net::SocketAddr,
     sync::Arc,
-    time::{SystemTime, UNIX_EPOCH},
+    time::{Instant, SystemTime, UNIX_EPOCH},
 };
 
 use anyhow::{Context, Result};
 use axum::{
     Form, Json, Router,
+    body::Body,
     extract::State,
+    http::Request,
     middleware,
+    middleware::Next,
+    response::Response,
     routing::{get, post},
 };
 use tokio::{net::TcpListener, sync::Mutex};
@@ -69,9 +73,9 @@ pub use state::ServeOptions;
 use state::{AuthClientKey, AuthSession, HttpState, UiChainCache, UiChainView};
 use static_assets::{alpine_js, app_js, favicon, index};
 use ui::{
-    add_pending_outputs, cached_chain_view, cached_chain_view_for_tip, ui_blinded_reveal,
+    add_pending_outputs, cached_chain_view, cached_ui_blocks_for_tip, ui_blinded_reveal,
     ui_blinded_transaction, ui_blocks_from_indexes, ui_pending_revealed_transaction,
-    ui_transaction, wallet_transaction_rows,
+    ui_transaction, wallet_transaction_row, wallet_transaction_rows,
 };
 #[cfg(test)]
 use ui::{known_output_index, revealed_transactions_by_height, ui_block, ui_blocks};
@@ -94,13 +98,14 @@ const AUTH_MAX_FAILED_ATTEMPTS: u32 = 5;
 const AUTH_LOCKOUT_MS: u64 = 60 * 1_000;
 const UNKNOWN_CLIENT_KEY: &str = "unknown";
 const PEER_STALE_AFTER_MS: u64 = 20 * 60 * 1_000;
+const SLOW_UI_REQUEST_LOG_MS: u128 = 250;
 
 mod types;
 use types::{
     ActionResponse, AuthForm, AuthStatusResponse, BlocksQuery, ChangePasswordForm, ConfigForm,
     ConfigResponse, MempoolCounts, MetricsQuery, MetricsResponse, NetworkHealthLocalState,
-    NetworkHealthResponse, Page, PageQuery, UiBlock, UiTransaction, WalletTransactionFilters,
-    WalletTransactionRow, WalletTransactionsQuery, WalletUtxoRow,
+    NetworkHealthResponse, Page, PageQuery, UiBlock, UiTransaction, WalletTransactionContext,
+    WalletTransactionFilters, WalletTransactionRow, WalletTransactionsQuery, WalletUtxoRow,
 };
 #[cfg(test)]
 use types::{BurnSettingsForm, TransferForm};
@@ -120,13 +125,30 @@ pub async fn serve(
         ui_config,
         config_path: options.config_path,
         chain_store: options.chain_store,
+        ui_data_store: options.ui_data_store,
         wallet_path: options.wallet_path,
         stratum: options.stratum,
         auth_sessions: Arc::new(Mutex::new(BTreeMap::new())),
         auth_backoff: Arc::new(Mutex::new(BTreeMap::new())),
         ui_cache: Arc::new(Mutex::new(UiChainCache::default())),
+        ui_data_refresh: Arc::new(Mutex::new(())),
     };
+    println!(
+        "warming UI data cache from {}...",
+        state.ui_data_store.path().display()
+    );
+    let ui_data_started = Instant::now();
     prewarm_chain_view_cache(state.clone()).await?;
+    {
+        let cache = state.ui_cache.lock().await;
+        println!(
+            "UI data cache ready in {:.2}s (outputs: {}, revealed heights: {}, burn-rank blocks: {})",
+            ui_data_started.elapsed().as_secs_f64(),
+            cache.outputs.len(),
+            cache.revealed_by_height.len(),
+            cache.burn_leader_ranks_by_hash.len()
+        );
+    }
     tokio::spawn(run_owned_blinded_outbox_persistence(state.clone()));
     let app = Router::new()
         .route("/", get(index))
@@ -194,6 +216,7 @@ pub async fn serve(
             state.clone(),
             require_auth_middleware,
         ))
+        .layer(middleware::from_fn(log_slow_api_request))
         .with_state(state);
 
     let listener = TcpListener::bind(addr)
@@ -205,6 +228,22 @@ pub async fn serve(
     )
     .await
     .context("serving HTTP management UI")
+}
+
+async fn log_slow_api_request(request: Request<Body>, next: Next) -> Response {
+    let method = request.method().clone();
+    let path = request.uri().path().to_string();
+    let started = Instant::now();
+    let response = next.run(request).await;
+    let elapsed = started.elapsed();
+    if path.starts_with("/api/") && elapsed.as_millis() >= SLOW_UI_REQUEST_LOG_MS {
+        println!(
+            "slow UI API request: {method} {path} -> {} in {:.2}s",
+            response.status().as_u16(),
+            elapsed.as_secs_f64()
+        );
+    }
+    response
 }
 
 async fn prewarm_chain_view_cache(state: HttpState) -> Result<()> {
@@ -233,7 +272,7 @@ async fn load_persisted_ui_chain_index(
     state: &HttpState,
     tip_hash: String,
 ) -> Result<Option<UiChainIndex>> {
-    let store = state.chain_store.clone();
+    let store = state.ui_data_store.clone();
     tokio::task::spawn_blocking(move || store.load_ui_chain_index(&tip_hash))
         .await
         .context("UI chain index loader failed")?

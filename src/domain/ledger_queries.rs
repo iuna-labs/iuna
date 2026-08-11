@@ -411,6 +411,13 @@ impl Ledger {
             .collect()
     }
 
+    pub fn all_utxos(&self) -> Vec<(OutPoint, TxOutput)> {
+        self.utxos
+            .iter()
+            .map(|(outpoint, output)| (outpoint.clone(), output.clone()))
+            .collect()
+    }
+
     pub fn available_utxos_for_address(&self, address: &str) -> Result<Vec<(OutPoint, TxOutput)>> {
         Ok(self
             .utxos_after_spendable_pending()?

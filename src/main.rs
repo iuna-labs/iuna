@@ -1,14 +1,17 @@
 use std::{
     collections::BTreeMap,
     net::SocketAddr,
-    path::Path,
+    path::{Path, PathBuf},
     sync::Arc,
     time::{Duration, Instant},
 };
 
 use anyhow::{Context, Result, bail};
 use iuna::{
-    adapters::{chain_store::SqliteChainStore, config_store, http, p2p, stratum, wallet_store},
+    adapters::{
+        chain_store::SqliteChainStore, config_store, http, p2p, stratum,
+        ui_data_store::SqliteUiDataStore, wallet_store,
+    },
     app::{
         NodeCore, PeerBook, SharedNode, SharedPeerBook, StratumStatus, debug_logging_enabled,
         now_ms, set_debug_logging,
@@ -46,7 +49,10 @@ async fn main() -> Result<()> {
     let config_path = opts.config_path();
     let wallet_file_exists = wallet_path.exists();
     validate_wallet_for_mode(&opts, &wallet_path, wallet_file_exists)?;
-    let chain_store = SqliteChainStore::open(opts.chain_db_path())?;
+    let chain_db_path = opts.chain_db_path();
+    let ui_data_db_path = ui_data_db_path(&chain_db_path);
+    let chain_store = SqliteChainStore::open(&chain_db_path)?;
+    let ui_data_store = SqliteUiDataStore::open(&ui_data_db_path)?;
     let persisted_chain_exists = chain_store.load()?.is_some();
     if opts.chain_mode == ChainMode::Genesis && persisted_chain_exists {
         bail!(
@@ -111,12 +117,11 @@ async fn main() -> Result<()> {
     let peers: SharedPeerBook = Arc::new(Mutex::new(PeerBook::from_addresses(peers)));
     if has_chain {
         let initial_snapshot = { node.lock().await.chain_snapshot() };
-        persist_chain_snapshot(
-            &chain_store,
-            initial_snapshot,
-            ui_config.lock().await.keep_track_of_metrics,
-        )
-        .await?;
+        let keep_metrics = ui_config.lock().await.keep_track_of_metrics;
+        persist_chain_snapshot(&chain_store, initial_snapshot.clone()).await?;
+        warm_ui_data_store(&ui_data_store, initial_snapshot, keep_metrics).await?;
+    } else {
+        clear_ui_data_store(&ui_data_store).await?;
     }
 
     println!("iuna wallet: {}", node.lock().await.wallet_address());
@@ -126,6 +131,7 @@ async fn main() -> Result<()> {
     println!("wallet file: {}", wallet_path.display());
     println!("config file: {}", config_path.display());
     println!("chain database: {}", chain_store.path().display());
+    println!("UI data database: {}", ui_data_store.path().display());
     println!("management UI: http://{}", opts.http_addr);
     if p2p_accept_inbound {
         println!("p2p listener: {}", configured_p2p_addr);
@@ -167,9 +173,25 @@ async fn main() -> Result<()> {
 
     let persistence_node = Arc::clone(&node);
     let persistence_store = chain_store.clone();
+    let persistence_ui_data_store = ui_data_store.clone();
     let persistence_config = Arc::clone(&ui_config);
+    let persistence_initial_tip = {
+        let node = node.lock().await;
+        if node.has_real_chain() {
+            Some(node.chain_tip_hash())
+        } else {
+            None
+        }
+    };
     tokio::spawn(async move {
-        run_chain_persistence(persistence_node, persistence_store, persistence_config).await;
+        run_chain_persistence(
+            persistence_node,
+            persistence_store,
+            persistence_ui_data_store,
+            persistence_config,
+            persistence_initial_tip,
+        )
+        .await;
     });
 
     let finalizer_node = Arc::clone(&node);
@@ -202,6 +224,7 @@ async fn main() -> Result<()> {
         http::ServeOptions {
             config_path,
             chain_store,
+            ui_data_store,
             wallet_path,
             stratum: stratum_status,
             addr: opts.http_addr,
@@ -266,6 +289,10 @@ fn format_iuna(amount: Amount) -> String {
         }
         format!("{whole}.{fractional}")
     }
+}
+
+fn ui_data_db_path(chain_db_path: &Path) -> PathBuf {
+    chain_db_path.with_file_name("ui_data.sqlite3")
 }
 
 async fn initialize_ledger(
@@ -504,7 +531,7 @@ async fn run_automatic_finalizer(node: SharedNode, gossip: p2p::GossipNetwork, d
 async fn run_automatic_pow_miner(node: SharedNode, gossip: p2p::GossipNetwork, debug: bool) {
     loop {
         tokio::time::sleep(std::time::Duration::from_secs(1)).await;
-        let (height, pow_mined, outbox) = {
+        let (height, job) = {
             let mut node = node.lock().await;
             if !node.pow_mining_enabled() {
                 continue;
@@ -513,8 +540,8 @@ async fn run_automatic_pow_miner(node: SharedNode, gossip: p2p::GossipNetwork, d
                 continue;
             }
             let height = node.chain_height();
-            let pow_mined = match node.prepare_automatic_pow_mining() {
-                Ok(tx) => tx,
+            let job = match node.prepare_automatic_pow_mining_job() {
+                Ok(job) => job,
                 Err(error) => {
                     node.record_automatic_pow_mining_error(format!(
                         "automatic PoW mining failed: {error:#}"
@@ -522,8 +549,42 @@ async fn run_automatic_pow_miner(node: SharedNode, gossip: p2p::GossipNetwork, d
                     None
                 }
             };
+            (height, job)
+        };
+        let Some(job) = job else {
+            continue;
+        };
+
+        let search = tokio::task::spawn_blocking(move || job.search()).await;
+        let (pow_mined, outbox) = {
+            let mut node = node.lock().await;
+            let pow_mined = match search {
+                Ok(Ok((job, outcome))) => {
+                    match node.finish_automatic_pow_mining_job(job, outcome) {
+                        Ok(tx) => tx,
+                        Err(error) => {
+                            node.record_automatic_pow_mining_error(format!(
+                                "automatic PoW mining failed: {error:#}"
+                            ));
+                            None
+                        }
+                    }
+                }
+                Ok(Err(error)) => {
+                    node.record_automatic_pow_mining_error(format!(
+                        "automatic PoW mining failed: {error:#}"
+                    ));
+                    None
+                }
+                Err(error) => {
+                    node.record_automatic_pow_mining_error(format!(
+                        "automatic PoW mining task failed: {error:#}"
+                    ));
+                    None
+                }
+            };
             let outbox = node.drain_outbox();
-            (height, pow_mined, outbox)
+            (pow_mined, outbox)
         };
 
         if let Err(error) = gossip.broadcast(outbox).await {
@@ -567,18 +628,30 @@ async fn run_peer_sync(node: SharedNode, gossip: p2p::GossipNetwork, debug: bool
 async fn run_chain_persistence(
     node: SharedNode,
     store: SqliteChainStore,
+    ui_data_store: SqliteUiDataStore,
     ui_config: Arc<Mutex<config_store::UiConfig>>,
+    initial_saved_tip: Option<String>,
 ) {
-    run_chain_persistence_with_interval(node, store, ui_config, Duration::from_secs(2)).await;
+    run_chain_persistence_with_interval(
+        node,
+        store,
+        ui_data_store,
+        ui_config,
+        Duration::from_secs(2),
+        initial_saved_tip,
+    )
+    .await;
 }
 
 async fn run_chain_persistence_with_interval(
     node: SharedNode,
     store: SqliteChainStore,
+    ui_data_store: SqliteUiDataStore,
     ui_config: Arc<Mutex<config_store::UiConfig>>,
     interval: Duration,
+    initial_saved_tip: Option<String>,
 ) {
-    let mut last_saved_tip: Option<String> = None;
+    let mut last_saved_tip = initial_saved_tip;
     loop {
         tokio::time::sleep(interval).await;
         let snapshot = {
@@ -596,7 +669,9 @@ async fn run_chain_persistence_with_interval(
         }
 
         let keep_metrics = ui_config.lock().await.keep_track_of_metrics;
-        match persist_chain_snapshot(&store, snapshot, keep_metrics).await {
+        match persist_chain_and_project_ui_data(&store, &ui_data_store, snapshot, keep_metrics)
+            .await
+        {
             Ok(()) => last_saved_tip = Some(tip_hash),
             Err(error) if debug_logging_enabled() => {
                 eprintln!("chain persistence failed: {error:#}")
@@ -606,15 +681,62 @@ async fn run_chain_persistence_with_interval(
     }
 }
 
-async fn persist_chain_snapshot(
+async fn persist_chain_and_project_ui_data(
     store: &SqliteChainStore,
+    ui_data_store: &SqliteUiDataStore,
+    snapshot: ChainSnapshot,
+    keep_metrics: bool,
+) -> Result<()> {
+    persist_chain_snapshot(store, snapshot.clone()).await?;
+    project_ui_data_store(ui_data_store, snapshot, keep_metrics).await
+}
+
+async fn persist_chain_snapshot(store: &SqliteChainStore, snapshot: ChainSnapshot) -> Result<()> {
+    let store = store.clone();
+    tokio::task::spawn_blocking(move || store.save(&snapshot))
+        .await
+        .context("chain persistence worker failed")??;
+    Ok(())
+}
+
+async fn warm_ui_data_store(
+    store: &SqliteUiDataStore,
+    snapshot: ChainSnapshot,
+    keep_metrics: bool,
+) -> Result<()> {
+    println!("warming UI data database...");
+    let started = Instant::now();
+    project_ui_data_store(store, snapshot, keep_metrics).await?;
+    println!(
+        "UI data database ready in {:.2}s",
+        started.elapsed().as_secs_f64()
+    );
+    Ok(())
+}
+
+async fn project_ui_data_store(
+    store: &SqliteUiDataStore,
     snapshot: ChainSnapshot,
     keep_metrics: bool,
 ) -> Result<()> {
     let store = store.clone();
-    tokio::task::spawn_blocking(move || store.save_with_metrics(&snapshot, keep_metrics))
+    tokio::task::spawn_blocking(move || store.project_snapshot(&snapshot, keep_metrics))
         .await
-        .context("chain persistence worker failed")??;
+        .context("UI data projection worker failed")??;
+    Ok(())
+}
+
+async fn clear_ui_data_store(store: &SqliteUiDataStore) -> Result<()> {
+    println!("clearing UI data database...");
+    let started = Instant::now();
+    let store = store.clone();
+    tokio::task::spawn_blocking(move || store.clear_all())
+        .await
+        .context("UI data cleanup worker failed")??;
+    println!(
+        "UI data database ready in {:.2}s",
+        started.elapsed().as_secs_f64()
+    );
     Ok(())
 }
 

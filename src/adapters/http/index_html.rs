@@ -167,10 +167,7 @@ pub(super) const INDEX_HTML: &str = r#"<!doctype html>
     .metric-chart-x-axis { position: relative; grid-column: 2; min-width: 0; overflow: visible; }
     .metric-chart-x-axis .metric-chart-axis-label { position: absolute; top: 0; transform: translateX(-50%); }
     .metric-chart-line { fill: none; stroke: #d5f55f; stroke-width: 2.2; stroke-linejoin: round; stroke-linecap: round; }
-    .metric-chart-points { position: absolute; inset: 0; }
-    .metric-chart-point-hit { position: absolute; width: 18px; height: 18px; border: 0; border-radius: 50%; padding: 0; background: transparent; cursor: crosshair; transform: translate(-50%, -50%); }
-    .metric-chart-point-hit::after { content: ""; position: absolute; left: 50%; top: 50%; width: 5px; height: 5px; border-radius: 50%; background: #d5f55f; opacity: .2; transform: translate(-50%, -50%); }
-    .metric-chart-point-hit:hover::after, .metric-chart-point-hit:focus-visible::after, .metric-chart-point-hit.is-active::after { width: 8px; height: 8px; opacity: 1; }
+    .metric-chart-hover-point { position: absolute; width: 8px; height: 8px; border-radius: 50%; background: #d5f55f; pointer-events: none; transform: translate(-50%, -50%); box-shadow: 0 0 0 4px rgba(213, 245, 95, .18); }
     .metric-chart-tooltip { position: absolute; z-index: 1; max-width: min(180px, 80%); border: 1px solid #566d25; border-radius: 6px; padding: 5px 7px; background: #202615; color: #e8edf0; font-size: 11px; font-weight: 850; font-variant-numeric: tabular-nums; line-height: 1.25; pointer-events: none; box-shadow: 0 8px 20px rgba(0, 0, 0, .28); white-space: nowrap; }
     .metrics-empty { border: 1px dashed #3a4248; border-radius: 8px; padding: 14px; color: #8d989f; background: #111316; }
     .wallet-grid { width: 100%; display: grid; grid-template-columns: minmax(0, 1fr) minmax(300px, .8fr); gap: 12px; align-items: start; }
@@ -1079,11 +1076,9 @@ pub(super) const INDEX_HTML: &str = r#"<!doctype html>
                     <line class="metric-chart-axis" x1="4" y1="132" x2="296" y2="132"></line>
                     <polyline class="metric-chart-line" :points="metricChartPoints(chart)"></polyline>
                   </svg>
-                  <div class="metric-chart-points">
-                    <template x-for="marker in metricChartPointMarkers(chart)" :key="`${chart.id}-point-${marker.height}`">
-                      <button class="metric-chart-point-hit" type="button" :class="{ 'is-active': metricHover?.chartId === chart.id && metricHover?.height === marker.height }" :style="metricPointStyle(marker)" :title="marker.label" @focus="setMetricHover(chart, marker)" @blur="clearMetricHover(chart)" :aria-label="marker.label"></button>
-                    </template>
-                  </div>
+                  <template x-if="metricHover?.chartId === chart.id">
+                    <div class="metric-chart-hover-point" :style="metricHoverPointStyle(chart)" :title="metricTooltipLabel(chart)"></div>
+                  </template>
                   <template x-if="metricHover?.chartId === chart.id">
                     <div class="metric-chart-tooltip" :style="metricTooltipStyle(chart)" x-text="metricTooltipLabel(chart)"></div>
                   </template>

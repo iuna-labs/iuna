@@ -1,7 +1,10 @@
 use std::{collections::BTreeMap, sync::Arc, time::Duration};
 
 use iuna::{
-    adapters::{chain_store::SqliteChainStore, config_store::UiConfig, wallet_store},
+    adapters::{
+        chain_store::SqliteChainStore, config_store::UiConfig, ui_data_store::SqliteUiDataStore,
+        wallet_store,
+    },
     app::{DEFAULT_BURN_PER_BLOCK, NodeCore},
     domain::{BLOCK_REWARD, GenesisBurn, Ledger, MICRO_IUNA, VDF_TARGET_BLOCK_MS, Wallet},
 };
@@ -13,7 +16,7 @@ use super::{
     ChainMode, CliOptions, GENESIS_INITIAL_BURN_FEE, GENESIS_INITIAL_BURN_PER_BLOCK, StartupWallet,
     apply_cli_p2p_config_overrides, configured_p2p_announce_addr, configured_p2p_bind_addr,
     extrapolate_vdf_rounds, help_text, initial_burn_fee, initial_burn_per_block, initialize_ledger,
-    load_startup_wallet, measure_vdf_rounds, persist_chain_snapshot,
+    load_startup_wallet, measure_vdf_rounds, persist_chain_snapshot, project_ui_data_store,
     run_chain_persistence_with_interval, validate_wallet_for_mode,
 };
 
@@ -77,6 +80,20 @@ fn stratum_port_can_be_configured() {
 fn debug_logging_can_be_enabled() {
     assert!(!parse(&[]).unwrap().unwrap().debug);
     assert!(parse(&["--debug"]).unwrap().unwrap().debug);
+}
+
+#[test]
+fn automatic_pow_worker_searches_outside_node_lock() {
+    let main_rs = include_str!("main.rs");
+    let worker = main_rs
+        .split("async fn run_automatic_pow_miner")
+        .nth(1)
+        .expect("automatic PoW worker should exist");
+
+    assert!(worker.contains("prepare_automatic_pow_mining_job"));
+    assert!(worker.contains("tokio::task::spawn_blocking"));
+    assert!(worker.contains("finish_automatic_pow_mining_job"));
+    assert!(!worker.contains("prepare_automatic_pow_mining()"));
 }
 
 #[test]
@@ -592,16 +609,23 @@ async fn persistence_loop_saves_new_tip_after_node_changes() {
         DEFAULT_BURN_PER_BLOCK,
     )));
     let initial_snapshot = { node.lock().await.chain_snapshot() };
-    persist_chain_snapshot(&store, initial_snapshot, false)
+    let initial_tip = initial_snapshot
+        .blocks
+        .last()
+        .map(|block| block.hash.clone());
+    persist_chain_snapshot(&store, initial_snapshot)
         .await
         .unwrap();
     let ui_config = Arc::new(Mutex::new(UiConfig::default()));
+    let ui_data_store = SqliteUiDataStore::open(dir.path().join("ui_data.sqlite3")).unwrap();
 
     let persistence_task = tokio::spawn(run_chain_persistence_with_interval(
         Arc::clone(&node),
         store.clone(),
+        ui_data_store.clone(),
         ui_config,
         Duration::from_millis(10),
+        initial_tip,
     ));
     {
         let mut node = node.lock().await;
@@ -624,12 +648,78 @@ async fn persistence_loop_saves_new_tip_after_node_changes() {
     persistence_task.abort();
 
     assert_eq!(restored_tip.as_deref(), Some(expected_tip.as_str()));
+    assert!(ui_data_store.load_metrics().unwrap().is_empty());
+    let ui_data_connection = Connection::open(ui_data_store.path()).unwrap();
+    let projected_tip: String = ui_data_connection
+        .query_row(
+            "SELECT tip_hash FROM ui_cache_meta WHERE id = 1",
+            [],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert_eq!(projected_tip, expected_tip);
+}
+
+#[tokio::test]
+async fn persistence_loop_skips_tip_already_projected_at_startup() {
+    let dir = tempdir().unwrap();
+    let store = SqliteChainStore::open(dir.path().join("chain.sqlite3")).unwrap();
+    let ui_data_store = SqliteUiDataStore::open(dir.path().join("ui_data.sqlite3")).unwrap();
+    let wallet = Wallet::from_seed("background-persistence-warmed");
+    let ledger = ledger_with_one_spendable_iuna(&wallet);
+    let node = Arc::new(Mutex::new(NodeCore::from_ledger(
+        wallet,
+        ledger,
+        DEFAULT_BURN_PER_BLOCK,
+    )));
+    let initial_snapshot = { node.lock().await.chain_snapshot() };
+    let initial_tip = initial_snapshot
+        .blocks
+        .last()
+        .map(|block| block.hash.clone());
+    persist_chain_snapshot(&store, initial_snapshot.clone())
+        .await
+        .unwrap();
+    project_ui_data_store(&ui_data_store, initial_snapshot, false)
+        .await
+        .unwrap();
+    let ui_data_connection = Connection::open(ui_data_store.path()).unwrap();
+    ui_data_connection
+        .execute(
+            "UPDATE ui_cache_meta SET updated_at_ms = 123 WHERE id = 1",
+            [],
+        )
+        .unwrap();
+    drop(ui_data_connection);
+    let ui_config = Arc::new(Mutex::new(UiConfig::default()));
+
+    let persistence_task = tokio::spawn(run_chain_persistence_with_interval(
+        Arc::clone(&node),
+        store,
+        ui_data_store.clone(),
+        ui_config,
+        Duration::from_millis(10),
+        initial_tip,
+    ));
+    tokio::time::sleep(Duration::from_millis(50)).await;
+    persistence_task.abort();
+
+    let ui_data_connection = Connection::open(ui_data_store.path()).unwrap();
+    let updated_at_ms: u64 = ui_data_connection
+        .query_row(
+            "SELECT updated_at_ms FROM ui_cache_meta WHERE id = 1",
+            [],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert_eq!(updated_at_ms, 123);
 }
 
 #[tokio::test]
 async fn persistence_loop_skips_setup_placeholder_chain() {
     let dir = tempdir().unwrap();
     let store = SqliteChainStore::open(dir.path().join("chain.sqlite3")).unwrap();
+    let ui_data_store = SqliteUiDataStore::open(dir.path().join("ui_data.sqlite3")).unwrap();
     let wallet = Wallet::from_seed("background-persistence-setup");
     let ledger = Ledger::new(BTreeMap::new(), 1);
     let node = Arc::new(Mutex::new(NodeCore::from_ledger(wallet, ledger, 0)));
@@ -638,11 +728,14 @@ async fn persistence_loop_skips_setup_placeholder_chain() {
     let persistence_task = tokio::spawn(run_chain_persistence_with_interval(
         Arc::clone(&node),
         store.clone(),
+        ui_data_store.clone(),
         ui_config,
         Duration::from_millis(10),
+        None,
     ));
     tokio::time::sleep(Duration::from_millis(50)).await;
     persistence_task.abort();
 
     assert!(store.load().unwrap().is_none());
+    assert!(ui_data_store.load_metrics().unwrap().is_empty());
 }

@@ -3,7 +3,10 @@ use std::{collections::BTreeMap, net::SocketAddr, path::PathBuf, sync::Arc};
 use tokio::sync::Mutex;
 
 use crate::{
-    adapters::{chain_store::SqliteChainStore, config_store::UiConfig, p2p::GossipNetwork},
+    adapters::{
+        chain_store::SqliteChainStore, config_store::UiConfig, p2p::GossipNetwork,
+        ui_data_store::SqliteUiDataStore,
+    },
     app::{SharedNode, SharedPeerBook, StratumStatus},
     domain::{BurnLeaderRank, OutPoint, RevealedBlindedTransaction, TxOutput},
 };
@@ -16,11 +19,13 @@ pub(super) struct HttpState {
     pub(super) ui_config: Arc<Mutex<UiConfig>>,
     pub(super) config_path: PathBuf,
     pub(super) chain_store: SqliteChainStore,
+    pub(super) ui_data_store: SqliteUiDataStore,
     pub(super) wallet_path: PathBuf,
     pub(super) stratum: StratumStatus,
     pub(super) auth_sessions: Arc<Mutex<BTreeMap<String, AuthSession>>>,
     pub(super) auth_backoff: Arc<Mutex<BTreeMap<String, AuthBackoff>>>,
     pub(super) ui_cache: Arc<Mutex<UiChainCache>>,
+    pub(super) ui_data_refresh: Arc<Mutex<()>>,
 }
 
 #[derive(Clone)]
@@ -56,6 +61,7 @@ pub(super) struct UiChainView {
 pub struct ServeOptions {
     pub config_path: PathBuf,
     pub chain_store: SqliteChainStore,
+    pub ui_data_store: SqliteUiDataStore,
     pub wallet_path: PathBuf,
     pub stratum: StratumStatus,
     pub addr: SocketAddr,

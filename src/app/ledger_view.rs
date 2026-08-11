@@ -1,10 +1,12 @@
 use anyhow::Result;
 
+use std::collections::BTreeSet;
+
 use crate::domain::{
-    BlindedReveal, BlindedTransaction, Block, BurnLeaderRank, Ledger, Transaction,
+    BlindedReveal, BlindedTransaction, Block, BurnLeaderRank, Ledger, OutPoint, Transaction,
 };
 
-use super::NodeCore;
+use super::{NodeCore, helpers::transaction_input_outpoints};
 
 impl NodeCore {
     pub fn ledger(&self) -> &Ledger {
@@ -20,6 +22,32 @@ impl NodeCore {
         self.queue_local_block_anchor(&mut ledger)?;
         self.queue_owned_blinded_payloads(&mut ledger)?;
         Ok(ledger)
+    }
+
+    pub fn wallet_pending_spent_outpoints(&self) -> BTreeSet<OutPoint> {
+        let mut spent = self
+            .ledger
+            .pending()
+            .iter()
+            .flat_map(transaction_input_outpoints)
+            .chain(
+                self.ledger
+                    .pending_blinded_transactions()
+                    .iter()
+                    .flat_map(|transaction| {
+                        transaction
+                            .inputs
+                            .iter()
+                            .map(|input| input.outpoint.clone())
+                    }),
+            )
+            .collect::<BTreeSet<_>>();
+        if let Some((height, burn)) = &self.local_block_anchor_burn {
+            if *height == self.ledger.height() && !self.ledger.has_transaction(burn.signature()) {
+                spent.extend(transaction_input_outpoints(burn));
+            }
+        }
+        spent
     }
 
     pub fn chain(&self) -> &[Block] {
