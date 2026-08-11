@@ -1,9 +1,10 @@
 use anyhow::{Context, Result, bail};
 use getrandom::getrandom;
+use pbkdf2::pbkdf2_hmac;
 use sha2::{Digest, Sha256};
 
 const PASSWORD_KDF_ALGORITHM: &str = "pbkdf2-sha256";
-const PASSWORD_KDF_ITERATIONS: u32 = 120_000;
+const PASSWORD_KDF_ITERATIONS: u32 = 210_000;
 
 pub(super) fn validate_password(password: &str) -> Result<()> {
     if password.len() < 12 {
@@ -51,58 +52,9 @@ pub(super) fn random_hex(bytes: usize) -> Result<String> {
 }
 
 pub(super) fn pbkdf2_sha256(password: &[u8], salt: &[u8], iterations: u32) -> [u8; 32] {
-    let mut block_salt = Vec::with_capacity(salt.len() + 4);
-    block_salt.extend_from_slice(salt);
-    block_salt.extend_from_slice(&1_u32.to_be_bytes());
-    let hmac = HmacSha256Key::new(password);
-    let mut u = hmac.digest(&block_salt);
-    let mut output = u;
-    for _ in 1..iterations {
-        u = hmac.digest(&u);
-        for (left, right) in output.iter_mut().zip(u) {
-            *left ^= right;
-        }
-    }
+    let mut output = [0_u8; 32];
+    pbkdf2_hmac::<Sha256>(password, salt, iterations, &mut output);
     output
-}
-
-struct HmacSha256Key {
-    outer_key_pad: [u8; 64],
-    inner_key_pad: [u8; 64],
-}
-
-impl HmacSha256Key {
-    fn new(key: &[u8]) -> Self {
-        let mut key_block = [0_u8; 64];
-        if key.len() > 64 {
-            key_block[..32].copy_from_slice(&Sha256::digest(key));
-        } else {
-            key_block[..key.len()].copy_from_slice(key);
-        }
-
-        let mut outer_key_pad = [0x5c_u8; 64];
-        let mut inner_key_pad = [0x36_u8; 64];
-        for index in 0..64 {
-            outer_key_pad[index] ^= key_block[index];
-            inner_key_pad[index] ^= key_block[index];
-        }
-        Self {
-            outer_key_pad,
-            inner_key_pad,
-        }
-    }
-
-    fn digest(&self, message: &[u8]) -> [u8; 32] {
-        let mut inner = Sha256::new();
-        inner.update(self.inner_key_pad);
-        inner.update(message);
-        let inner_hash = inner.finalize();
-
-        let mut outer = Sha256::new();
-        outer.update(self.outer_key_pad);
-        outer.update(inner_hash);
-        outer.finalize().into()
-    }
 }
 
 fn constant_time_eq(left: &[u8], right: &[u8]) -> bool {
