@@ -4,7 +4,7 @@ use super::helpers::{allowed_recovery_vdf_rank_count, recovery_vdf_sample_percen
 use super::{
     AUTO_BLOCK_ANCHOR_BURN_AMOUNT, AUTO_BLOCK_ANCHOR_BURN_FEE,
     AUTO_PLAINTEXT_BURN_BEFORE_RECOVERY_MS, AutoMineOutcome, AutoMinePlan, BuiltBlindedTransaction,
-    Ledger, NodeCore, PreparedBlock, Transaction, run_vdf,
+    Ledger, NodeCore, PreparedBlock, REVEAL_BUNDLE_COLLECTION_MS, Transaction, run_vdf,
 };
 use crate::domain::Amount;
 
@@ -88,14 +88,27 @@ impl NodeCore {
             }
         }
 
+        let wallet_rank = self
+            .ledger
+            .finalizer_rank_for_next_block(self.wallet.address());
+        let will_run_ticket_vdf = wallet_rank.is_some_and(|rank| self.wallet_rank_runs_vdf(rank));
+        let will_run_recovery_vdf =
+            wallet_rank.is_none() && self.should_prepare_recovery_vdf(timestamp_ms);
+        if let Some(wait_ms) = self.reveal_bundle_collection_wait_ms(
+            timestamp_ms,
+            will_run_ticket_vdf || will_run_recovery_vdf,
+        ) {
+            plan.skipped_reason = Some(format!(
+                "collecting blinded reveals for next block ({:.1}s remaining)",
+                wait_ms as f64 / 1000.0
+            ));
+            return plan;
+        }
         if let Err(error) = self.publish_reveal_bundle_for_next_block() {
             plan.skipped_reason = Some(format!("{error:#}"));
             return plan;
         }
 
-        let wallet_rank = self
-            .ledger
-            .finalizer_rank_for_next_block(self.wallet.address());
         if let Some(rank) = wallet_rank {
             if !self.wallet_rank_runs_vdf(rank) {
                 plan.skipped_reason = Some(format!(
@@ -161,14 +174,27 @@ impl NodeCore {
             }
         }
 
+        let wallet_rank = self
+            .ledger
+            .finalizer_rank_for_next_block(self.wallet.address());
+        let will_run_ticket_vdf = wallet_rank.is_some_and(|rank| self.wallet_rank_runs_vdf(rank));
+        let will_run_recovery_vdf =
+            wallet_rank.is_none() && self.should_prepare_recovery_vdf(timestamp_ms);
+        if let Some(wait_ms) = self.reveal_bundle_collection_wait_ms(
+            timestamp_ms,
+            will_run_ticket_vdf || will_run_recovery_vdf,
+        ) {
+            plan.skipped_reason = Some(format!(
+                "collecting blinded reveals for next block ({:.1}s remaining)",
+                wait_ms as f64 / 1000.0
+            ));
+            return plan;
+        }
         if let Err(error) = self.publish_reveal_bundle_for_next_block() {
             plan.skipped_reason = Some(format!("{error:#}"));
             return plan;
         }
 
-        let wallet_rank = self
-            .ledger
-            .finalizer_rank_for_next_block(self.wallet.address());
         if let Some(rank) = wallet_rank {
             if !self.wallet_rank_runs_vdf(rank) {
                 plan.skipped_reason = Some(format!(
@@ -381,6 +407,37 @@ impl NodeCore {
             < self.recovery_vdf_top_rank_percent
     }
 
+    fn reveal_bundle_collection_wait_ms(
+        &mut self,
+        timestamp_ms: u64,
+        will_run_vdf: bool,
+    ) -> Option<u64> {
+        let next_height = self.ledger.height().saturating_add(1);
+        let has_pending_reveals = !self.ledger.pending_blinded_reveals().is_empty();
+        let wallet_is_committee_member = self
+            .ledger
+            .reveal_committee_for_next_block()
+            .iter()
+            .any(|member| member.owner == self.wallet.address());
+        if !has_pending_reveals || (!wallet_is_committee_member && !will_run_vdf) {
+            if !has_pending_reveals {
+                self.reveal_bundle_collection_started = None;
+            }
+            return None;
+        }
+
+        let started_at = match self.reveal_bundle_collection_started {
+            Some((height, started_at)) if height == next_height => started_at,
+            _ => {
+                self.reveal_bundle_collection_started = Some((next_height, timestamp_ms));
+                timestamp_ms
+            }
+        };
+        let elapsed = timestamp_ms.saturating_sub(started_at);
+        (elapsed < REVEAL_BUNDLE_COLLECTION_MS)
+            .then(|| REVEAL_BUNDLE_COLLECTION_MS.saturating_sub(elapsed))
+    }
+
     pub(super) fn prepare_next_block_with_local_anchor(
         &self,
         timestamp_ms: u64,
@@ -425,6 +482,19 @@ impl NodeCore {
             .is_some_and(|(height, _)| *height != self.ledger.height())
         {
             self.local_block_anchor_burn = None;
+        }
+    }
+
+    pub(super) fn clear_stale_reveal_bundle_collection(&mut self) {
+        let current_next_height = self.ledger.height().saturating_add(1);
+        if self
+            .reveal_bundle_collection_started
+            .is_some_and(|(height, _)| height != current_next_height)
+        {
+            self.reveal_bundle_collection_started = None;
+        }
+        if self.ledger.pending_blinded_reveals().is_empty() {
+            self.reveal_bundle_collection_started = None;
         }
     }
 }

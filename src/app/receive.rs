@@ -118,12 +118,8 @@ impl NodeCore {
             }
             GossipEnvelope::BlindedReveal(reveal) => self.receive_blinded_reveal(reveal),
             GossipEnvelope::BlindedReveals { reveals } => {
-                let mut added = false;
                 for reveal in reveals {
-                    added |= self.receive_blinded_reveal_without_bundle_publish(reveal)?;
-                }
-                if added {
-                    self.publish_reveal_bundle_for_next_block()?;
+                    self.receive_blinded_reveal_without_bundle_publish(reveal)?;
                 }
                 Ok(())
             }
@@ -139,6 +135,7 @@ impl NodeCore {
                 self.ledger.apply_block(block.clone())?;
                 if self.ledger.height() > previous_height {
                     self.clear_stale_local_block_anchor();
+                    self.clear_stale_reveal_bundle_collection();
                     self.prune_reveal_bundles();
                     self.prune_owned_blinded_payloads_for_block(&block);
                     self.publish_owned_reveals_for_block(&block)?;
@@ -153,6 +150,7 @@ impl NodeCore {
                     self.ledger.apply_block(block.clone())?;
                     if self.ledger.height() > previous_height {
                         self.clear_stale_local_block_anchor();
+                        self.clear_stale_reveal_bundle_collection();
                         self.prune_reveal_bundles();
                         self.prune_owned_blinded_payloads_for_block(&block);
                         self.publish_owned_reveals_for_block(&block)?;
@@ -178,6 +176,7 @@ impl NodeCore {
             .apply_preverified_block_at(block.clone(), now_ms)?;
         if self.ledger.height() > previous_height {
             self.clear_stale_local_block_anchor();
+            self.clear_stale_reveal_bundle_collection();
             self.prune_reveal_bundles();
             self.prune_owned_blinded_payloads_for_block(&block);
             self.publish_owned_reveals_for_block(&block)?;
@@ -201,6 +200,7 @@ impl NodeCore {
         if imported {
             self.reset_automatic_mining_progress();
             self.clear_stale_local_block_anchor();
+            self.clear_stale_reveal_bundle_collection();
             self.prune_reveal_bundles();
             self.enqueue_imported_blocks(previous_height)?;
         }
@@ -221,6 +221,7 @@ impl NodeCore {
         self.ledger = ledger;
         self.reset_automatic_mining_progress();
         self.clear_stale_local_block_anchor();
+        self.clear_stale_reveal_bundle_collection();
         self.prune_reveal_bundles();
         self.enqueue_imported_blocks(previous_height)?;
         Ok(true)
@@ -239,6 +240,7 @@ impl NodeCore {
             .blocks_from(previous_height + 1, IMPORT_REBROADCAST_LIMIT);
         for block in &blocks {
             self.prune_reveal_bundles();
+            self.clear_stale_reveal_bundle_collection();
             self.prune_owned_blinded_payloads_for_block(block);
             self.publish_owned_reveals_for_block(block)?;
         }
@@ -254,7 +256,10 @@ mod tests {
     use std::collections::BTreeMap;
 
     use crate::{
-        app::{GossipEnvelope, NodeCore, helpers::transaction_input_outpoints},
+        app::{
+            GossipEnvelope, NodeCore, REVEAL_BUNDLE_COLLECTION_MS,
+            helpers::transaction_input_outpoints,
+        },
         domain::{GenesisBurn, Ledger, MICRO_IUNA, Wallet},
     };
 
@@ -266,7 +271,7 @@ mod tests {
     }
 
     #[test]
-    fn receiving_blinded_reveal_batch_publishes_complete_committee_bundle() {
+    fn receiving_blinded_reveal_batch_waits_before_signing_committee_bundle() {
         let alice = Wallet::from_seed("immediate-bundle-alice");
         let bob = Wallet::from_seed("immediate-bundle-bob");
         let carol = Wallet::from_seed("immediate-bundle-carol");
@@ -315,11 +320,17 @@ mod tests {
             })
             .next()
             .expect("test finalizer should be in reveal committee");
-        let mut committee_node = NodeCore::from_ledger(committee_wallet.clone(), ledger, 0);
+        let mut committee_node = NodeCore::from_ledger_with_burn_fee_and_enabled(
+            committee_wallet.clone(),
+            ledger,
+            true,
+            0,
+            0,
+        );
 
         committee_node
             .receive(GossipEnvelope::BlindedReveals {
-                reveals: vec![first.reveal.clone(), second.reveal.clone()],
+                reveals: vec![first.reveal.clone()],
             })
             .unwrap();
         let outbox = committee_node.drain_outbox();
@@ -328,10 +339,47 @@ mod tests {
             envelope,
             GossipEnvelope::BlindedReveal(reveal) if reveal.commitment == first.reveal.commitment
         )));
+        assert!(
+            !outbox
+                .iter()
+                .any(|envelope| matches!(envelope, GossipEnvelope::RevealBundle(_)))
+        );
+
+        let early = committee_node.prepare_automatic_finalization(2);
+        assert!(early.work.is_none());
+        assert!(
+            early
+                .skipped_reason
+                .as_deref()
+                .unwrap_or_default()
+                .contains("collecting blinded reveals")
+        );
+        assert!(
+            !committee_node
+                .drain_outbox()
+                .iter()
+                .any(|envelope| matches!(envelope, GossipEnvelope::RevealBundle(_)))
+        );
+
+        committee_node
+            .receive(GossipEnvelope::BlindedReveals {
+                reveals: vec![second.reveal.clone()],
+            })
+            .unwrap();
+        let outbox = committee_node.drain_outbox();
         assert!(outbox.iter().any(|envelope| matches!(
             envelope,
             GossipEnvelope::BlindedReveal(reveal) if reveal.commitment == second.reveal.commitment
         )));
+        assert!(
+            !outbox
+                .iter()
+                .any(|envelope| matches!(envelope, GossipEnvelope::RevealBundle(_)))
+        );
+
+        let ready = committee_node.prepare_automatic_finalization(REVEAL_BUNDLE_COLLECTION_MS + 3);
+        let _ = ready;
+        let outbox = committee_node.drain_outbox();
         assert!(outbox.iter().any(|envelope| matches!(
             envelope,
             GossipEnvelope::RevealBundle(bundle)

@@ -7,7 +7,6 @@ use super::{
 
 impl NodeCore {
     pub fn mempool_gossip(&mut self) -> Vec<GossipEnvelope> {
-        let _ = self.publish_reveal_bundle_for_next_block();
         let mut gossip = Vec::new();
         let mine_actions = self
             .ledger

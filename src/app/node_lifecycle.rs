@@ -107,6 +107,7 @@ impl NodeCore {
             owned_blinded_outbox_version: 0,
             reveal_bundles: BTreeMap::<(u64, u8), RevealBundle>::new(),
             equivocated_reveal_bundle_slots: BTreeSet::new(),
+            reveal_bundle_collection_started: None,
             local_block_anchor_burn: None,
             outbox: Vec::<GossipEnvelope>::new(),
         }
@@ -129,6 +130,7 @@ impl NodeCore {
         self.bump_owned_blinded_outbox_version();
         self.reveal_bundles.clear();
         self.equivocated_reveal_bundle_slots.clear();
+        self.reveal_bundle_collection_started = None;
         self.local_block_anchor_burn = None;
     }
 
@@ -141,6 +143,7 @@ impl NodeCore {
         self.bump_owned_blinded_outbox_version();
         self.reveal_bundles.clear();
         self.equivocated_reveal_bundle_slots.clear();
+        self.reveal_bundle_collection_started = None;
         self.local_block_anchor_burn = None;
         self.outbox.clear();
     }
@@ -151,5 +154,6 @@ impl NodeCore {
         self.last_auto_pow_mine_anchor = None;
         self.last_auto_pow_mine_status = None;
         self.auto_pow_mine_cursor = None;
+        self.reveal_bundle_collection_started = None;
     }
 }

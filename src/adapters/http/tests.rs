@@ -1465,13 +1465,39 @@ fn metrics_response_skips_bootstrap_points_for_block_time_and_vdf_rounds() {
 
 #[test]
 fn metrics_screen_includes_block_range_filter() {
-    assert!(super::INDEX_HTML.contains("iuna-ui.js?v=100"));
+    assert!(super::INDEX_HTML.contains("iuna-ui.js?v=101"));
     assert!(super::INDEX_HTML.contains("aria-label=\"Metrics block range\""));
     assert!(super::INDEX_HTML.contains("setMetricsRange(100)"));
     assert!(super::INDEX_HTML.contains("setMetricsRange(1000)"));
     assert!(super::INDEX_HTML.contains("setMetricsRange('all')"));
     assert!(super::INDEX_HTML.contains("Known addresses"));
     assert!(super::INDEX_HTML.contains("knownWalletAddresses"));
+}
+
+#[test]
+fn transfer_utxo_selection_supports_shift_click_ranges() {
+    let app_js = include_str!("../../../www/assets/iuna-ui.js");
+    assert!(
+        super::INDEX_HTML
+            .contains(":checked=\"selectedTransferUtxos.includes(utxoOutpoint(utxo))\"")
+    );
+    assert!(
+        !super::INDEX_HTML
+            .contains("x-model=\"selectedTransferUtxos\" @click=\"toggleTransferUtxoSelection")
+    );
+    assert!(!super::INDEX_HTML.contains("@change=\"toggleTransferUtxoSelection($event, utxo)\""));
+    assert!(
+        super::INDEX_HTML.contains("@click.prevent=\"toggleTransferUtxoSelection($event, utxo)\"")
+    );
+    assert!(
+        !super::INDEX_HTML
+            .contains(":checked=\"selectedTransferUtxos.includes(utxoOutpoint(utxo))\" @click=")
+    );
+    assert!(app_js.contains("lastSelectedTransferUtxo: null"));
+    assert!(app_js.contains("toggleTransferUtxoSelection(event, utxo)"));
+    assert!(app_js.contains("const checked = !selected.has(outpoint);"));
+    assert!(app_js.contains("event?.shiftKey && anchorIndex >= 0 && currentIndex >= 0"));
+    assert!(app_js.contains("const [from, to] = [anchorIndex, currentIndex].sort"));
 }
 
 #[test]

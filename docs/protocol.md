@@ -138,6 +138,8 @@ Reveal is a later step. A `BlindedReveal` carries only the commitment and decryp
 
 For each next block height, nodes compute a reveal committee from the burn leader ranking. Slot `0` is assigned to the rank `0` block finalizer, so the selected finalizer can always sign a reveal list for its own block. The remaining slots are assigned to the two lowest-ranked eligible tickets. A committee member can sign one bundle for its slot, height, and parent hash. A bundle is at most `10,000` bytes and lists valid pending reveals ordered by visible fee rate. Empty bundles are not gossiped.
 
+Automatic nodes wait about `30 seconds` after seeing pending reveals for the next height before signing a reveal bundle or starting the reveal-bound VDF. This gives reveal gossip time to settle and avoids locking in an underfilled bundle from the first partial batch a node received.
+
 A block has an envelope section and one compact reveal-bundle section. The envelope section contains the finalizer's plaintext anchor burn, public mine actions, and blinded transaction envelopes.
 
 The compact reveal-bundle section stores:

@@ -95,6 +95,7 @@ window.iunaApp = function iunaApp() {
     showSendAdvanced: false,
     selectedTransferUtxos: [],
     selectedTransferUtxoAmounts: {},
+    lastSelectedTransferUtxo: null,
     walletTxFilters: { transfer: true, mine: false, burn: false },
     setupPeerAddress: "iuna.jhx.app:9444",
     peerAddress: "",
@@ -2326,6 +2327,49 @@ window.iunaApp = function iunaApp() {
         const utxo = visible.get(outpoint);
         return !utxo || utxo.spendable !== false;
       });
+      if (this.lastSelectedTransferUtxo && !this.selectedTransferUtxos.includes(this.lastSelectedTransferUtxo)) {
+        this.lastSelectedTransferUtxo = null;
+      }
+    },
+
+    toggleTransferUtxoSelection(event, utxo) {
+      const outpoint = this.utxoOutpoint(utxo);
+      if (!utxo || utxo.spendable === false || !outpoint) {
+        this.scheduleFeeEstimates();
+        return;
+      }
+
+      this.rememberUtxoAmounts([utxo]);
+      const spendable = this.spendableWalletUtxos();
+      const outpoints = spendable.map((item) => this.utxoOutpoint(item));
+      const currentIndex = outpoints.indexOf(outpoint);
+      const anchorIndex = this.lastSelectedTransferUtxo
+        ? outpoints.indexOf(this.lastSelectedTransferUtxo)
+        : -1;
+
+      const selected = new Set(this.selectedTransferUtxos);
+      const checked = !selected.has(outpoint);
+      if (event?.shiftKey && anchorIndex >= 0 && currentIndex >= 0) {
+        const [from, to] = [anchorIndex, currentIndex].sort((left, right) => left - right);
+        const range = spendable.slice(from, to + 1);
+        this.rememberUtxoAmounts(range);
+        for (const item of range) {
+          const itemOutpoint = this.utxoOutpoint(item);
+          if (checked) {
+            selected.add(itemOutpoint);
+          } else {
+            selected.delete(itemOutpoint);
+          }
+        }
+      } else if (checked) {
+        selected.add(outpoint);
+      } else {
+        selected.delete(outpoint);
+      }
+      this.selectedTransferUtxos = Array.from(selected);
+
+      this.lastSelectedTransferUtxo = outpoint;
+      this.scheduleFeeEstimates();
     },
 
     async selectAllTransferUtxos() {
@@ -2333,6 +2377,8 @@ window.iunaApp = function iunaApp() {
         const utxos = await this.fetchJson("/api/wallet/utxos/selectable");
         this.rememberUtxoAmounts(utxos);
         this.selectedTransferUtxos = utxos.map((utxo) => this.utxoOutpoint(utxo));
+        this.lastSelectedTransferUtxo =
+          this.selectedTransferUtxos[this.selectedTransferUtxos.length - 1] || null;
         this.scheduleFeeEstimates();
         if (this.selectedTransferUtxos.length === 0) {
           this.showFlash("No spendable UTXOs", "error");
@@ -2345,6 +2391,7 @@ window.iunaApp = function iunaApp() {
     clearTransferUtxos() {
       this.selectedTransferUtxos = [];
       this.selectedTransferUtxoAmounts = {};
+      this.lastSelectedTransferUtxo = null;
       this.scheduleFeeEstimates();
     },
 

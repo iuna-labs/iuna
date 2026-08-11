@@ -50,6 +50,7 @@ pub const PEER_CLOCK_OFFSET_ACCEPTANCE_MS: i64 = 10 * 60 * 1_000;
 const PEER_CLOCK_OFFSET_STALE_MS: u64 = 20 * 60 * 1_000;
 const AUTO_POW_NONCE_ATTEMPTS_PER_WORKER_TICK: u64 = 100_000;
 const AUTO_PLAINTEXT_BURN_BEFORE_RECOVERY_MS: u64 = 60_000;
+const REVEAL_BUNDLE_COLLECTION_MS: u64 = 30_000;
 const AUTO_BLOCK_ANCHOR_BURN_AMOUNT: Amount = 1;
 const AUTO_BLOCK_ANCHOR_BURN_FEE: Amount = 0;
 static DEBUG_LOGGING: AtomicBool = AtomicBool::new(false);
@@ -91,6 +92,7 @@ pub struct NodeCore {
     owned_blinded_outbox_version: u64,
     reveal_bundles: BTreeMap<(u64, u8), RevealBundle>,
     equivocated_reveal_bundle_slots: BTreeSet<(u64, u8)>,
+    reveal_bundle_collection_started: Option<(u64, u64)>,
     local_block_anchor_burn: Option<(u64, Transaction)>,
     outbox: Vec<GossipEnvelope>,
 }
@@ -111,7 +113,10 @@ mod tests {
         run_vdf,
     };
 
-    use super::{InMemoryNetwork, NodeCore, helpers::transaction_input_outpoints};
+    use super::{
+        InMemoryNetwork, NodeCore, REVEAL_BUNDLE_COLLECTION_MS,
+        helpers::transaction_input_outpoints,
+    };
 
     fn wallet_for_address<'a>(wallets: &'a [Wallet], address: &str) -> &'a Wallet {
         wallets
@@ -218,6 +223,18 @@ mod tests {
             .node_mut("finalizer")
             .unwrap()
             .prepare_automatic_finalization(2);
+        assert!(reveal_plan.work.is_none());
+        assert!(
+            reveal_plan
+                .skipped_reason
+                .as_deref()
+                .unwrap_or_default()
+                .contains("collecting blinded reveals")
+        );
+        let reveal_plan = network
+            .node_mut("finalizer")
+            .unwrap()
+            .prepare_automatic_finalization(REVEAL_BUNDLE_COLLECTION_MS + 2);
         let reveal_work = reveal_plan
             .work
             .expect("finalizer should prepare reveal block");
@@ -379,10 +396,21 @@ mod tests {
 
         queue_auto_pow_mine_action(network.node_mut("miner").unwrap());
         network.deliver_until_idle().unwrap();
-        let block4 = network
+        let block4_started_at = block3.timestamp_ms.saturating_add(1);
+        let mut block4_outcome = network
             .node_mut("finalizer")
             .unwrap()
-            .automatic_mine_once(4)
+            .automatic_mine_once(block4_started_at);
+        if block4_outcome
+            .skipped_reason
+            .as_deref()
+            .is_some_and(|reason| reason.contains("collecting blinded reveals"))
+        {
+            block4_outcome = network.node_mut("finalizer").unwrap().automatic_mine_once(
+                block4_started_at.saturating_add(REVEAL_BUNDLE_COLLECTION_MS + 1),
+            );
+        }
+        let block4 = block4_outcome
             .block
             .expect("finalizer should keep producing the next block");
         if committed_blinded {

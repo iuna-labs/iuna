@@ -20,6 +20,7 @@ const NETWORK_CHAOS_ROUNDS: usize = 10;
 const VDF_STABILITY_SEEDS: std::ops::Range<u64> = 500..516;
 const VDF_STABILITY_BLOCKS: usize = 128;
 const VDF_STABILITY_INITIAL_ROUNDS: u64 = 1_000_000;
+const TEST_REVEAL_BUNDLE_COLLECTION_MS: u64 = 30_000;
 
 #[derive(Clone, Debug)]
 struct TestRng {
@@ -697,10 +698,23 @@ fn in_memory_network_converges_under_generated_node_actions() {
                     .enumerate()
                     .find(|(_, wallet)| wallet.address() == leader)
                 {
-                    let outcome = network
+                    let timestamp_ms = (round + 1) as u64;
+                    let mut outcome = network
                         .node_mut(&format!("n{leader_index}"))
                         .expect("leader node exists")
-                        .automatic_mine_once((round + 1) as u64);
+                        .automatic_mine_once(timestamp_ms);
+                    if outcome
+                        .skipped_reason
+                        .as_deref()
+                        .is_some_and(|reason| reason.contains("collecting blinded reveals"))
+                    {
+                        outcome = network
+                            .node_mut(&format!("n{leader_index}"))
+                            .expect("leader node exists")
+                            .automatic_mine_once(
+                                timestamp_ms.saturating_add(TEST_REVEAL_BUNDLE_COLLECTION_MS + 1),
+                            );
+                    }
                     if let Some(reason) = outcome.skipped_reason {
                         assert!(
                             reason.contains("at least one burn")
@@ -873,10 +887,23 @@ fn in_memory_network_converges_after_generated_offline_and_reordered_delivery() 
                 }
             }
 
-            let outcome = network
+            let timestamp_ms = (round + 1) as u64;
+            let mut outcome = network
                 .node_mut("n0")
                 .expect("finalizer node exists")
-                .automatic_mine_once((round + 1) as u64);
+                .automatic_mine_once(timestamp_ms);
+            if outcome
+                .skipped_reason
+                .as_deref()
+                .is_some_and(|reason| reason.contains("collecting blinded reveals"))
+            {
+                outcome = network
+                    .node_mut("n0")
+                    .expect("finalizer node exists")
+                    .automatic_mine_once(
+                        timestamp_ms.saturating_add(TEST_REVEAL_BUNDLE_COLLECTION_MS + 1),
+                    );
+            }
             if let Some(reason) = outcome.skipped_reason {
                 assert!(
                     reason.contains("at least one burn")

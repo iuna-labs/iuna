@@ -442,7 +442,7 @@ pub(super) const INDEX_HTML: &str = r#"<!doctype html>
       .block-card { flex-basis: 108px; }
     }
   </style>
-  <script defer src="/assets/iuna-ui.js?v=100"></script>
+  <script defer src="/assets/iuna-ui.js?v=101"></script>
   <script defer src="/assets/alpine.min.js"></script>
 </head>
 <body x-data="iunaApp()" x-init="init()" @keydown.window.escape="closeModals()" x-cloak>
@@ -535,8 +535,8 @@ pub(super) const INDEX_HTML: &str = r#"<!doctype html>
                     </span>
                   </div>
                   <template x-for="utxo in walletUtxos" :key="utxoOutpoint(utxo)">
-                    <label class="send-utxo-option" :class="{ disabled: !utxo.spendable }">
-                      <input type="checkbox" :value="utxoOutpoint(utxo)" x-model="selectedTransferUtxos" @change="scheduleFeeEstimates" :disabled="!utxo.spendable">
+                    <label class="send-utxo-option" :class="{ disabled: !utxo.spendable }" @click.prevent="toggleTransferUtxoSelection($event, utxo)">
+                      <input type="checkbox" :value="utxoOutpoint(utxo)" :checked="selectedTransferUtxos.includes(utxoOutpoint(utxo))" :disabled="!utxo.spendable">
                       <span>
                         <span class="utxo-node-label"><span>UTXO</span><span class="utxo-node-amount">IUNA <span x-text="amountLabel(utxo.amount)"></span></span></span>
                         <span class="utxo-status" x-show="!utxo.spendable">Pending</span>

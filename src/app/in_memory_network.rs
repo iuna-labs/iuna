@@ -108,7 +108,7 @@ mod tests {
     use std::collections::{BTreeMap, BTreeSet};
 
     use crate::{
-        app::{GossipEnvelope, InMemoryNetwork, NodeCore},
+        app::{GossipEnvelope, InMemoryNetwork, NodeCore, REVEAL_BUNDLE_COLLECTION_MS},
         domain::{
             Block, GenesisBurn, Ledger, MAX_BLINDED_TRANSACTION_EXPIRY_HEIGHTS, MICRO_IUNA,
             RECOVERY_BLOCK_DELAY_MS, VDF_TARGET_BLOCK_MS, Wallet,
@@ -400,19 +400,29 @@ mod tests {
                 .node(&node_ids[producer_index])
                 .expect("producer node exists")
                 .clone();
-            let plan = producer.prepare_automatic_finalization(timestamp_ms);
+            let mut publish_timestamp_ms = timestamp_ms;
+            let mut plan = producer.prepare_automatic_finalization(timestamp_ms);
+            if plan.work.is_none()
+                && plan
+                    .skipped_reason
+                    .as_deref()
+                    .is_some_and(|reason| reason.contains("collecting blinded reveals"))
+            {
+                publish_timestamp_ms = timestamp_ms.saturating_add(REVEAL_BUNDLE_COLLECTION_MS + 1);
+                plan = producer.prepare_automatic_finalization(publish_timestamp_ms);
+            }
             let Some(work) = plan.work else {
                 continue;
             };
             let block = work.finish_at(
                 &wallets[producer_index],
                 "preverified-chaos-vdf".to_string(),
-                timestamp_ms,
+                publish_timestamp_ms,
             );
             network
                 .node_mut(&node_ids[producer_index])
                 .expect("producer node exists")
-                .receive_preverified_block_at(block, timestamp_ms)
+                .receive_preverified_block_at(block, publish_timestamp_ms)
                 .expect("mock-VDF block applies locally");
             return;
         }
