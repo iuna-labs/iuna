@@ -237,6 +237,52 @@ ORDER BY height ASC
         })
     }
 
+    pub fn load_recent_metrics(&self, limit: usize) -> Result<Vec<BlockMetricRow>> {
+        self.with_connection(|connection| {
+            let mut statement = connection
+                .prepare(
+                    r#"
+SELECT height, block_hash, timestamp_ms, block_time_ms, mine_difficulty_bits,
+       circulating_supply, known_wallet_addresses, transaction_count, transfer_count, burn_count,
+       mine_count, burned_amount, total_burned_amount, fees_amount, reward_amount,
+       vdf_rounds, finalizer_rank
+FROM block_metrics
+ORDER BY height DESC
+LIMIT ?1
+"#,
+                )
+                .context("failed to prepare recent block metrics query")?;
+            let rows = statement
+                .query_map([limit as u64], |row| {
+                    Ok(BlockMetricRow {
+                        height: row.get(0)?,
+                        block_hash: row.get(1)?,
+                        timestamp_ms: row.get(2)?,
+                        block_time_ms: row.get(3)?,
+                        mine_difficulty_bits: row.get(4)?,
+                        circulating_supply: row.get(5)?,
+                        known_wallet_addresses: row.get(6)?,
+                        transaction_count: row.get(7)?,
+                        transfer_count: row.get(8)?,
+                        burn_count: row.get(9)?,
+                        mine_count: row.get(10)?,
+                        burned_amount: row.get(11)?,
+                        total_burned_amount: row.get(12)?,
+                        fees_amount: row.get(13)?,
+                        reward_amount: row.get(14)?,
+                        vdf_rounds: row.get(15)?,
+                        finalizer_rank: row.get(16)?,
+                    })
+                })
+                .context("failed to load recent block metrics")?;
+            let mut rows = rows
+                .collect::<std::result::Result<Vec<_>, _>>()
+                .context("failed to read recent block metrics rows")?;
+            rows.reverse();
+            Ok(rows)
+        })
+    }
+
     fn with_connection<T>(&self, work: impl FnOnce(&Connection) -> Result<T>) -> Result<T> {
         let connection = Connection::open(&self.path)
             .with_context(|| format!("failed to open chain database {}", self.path.display()))?;

@@ -98,8 +98,8 @@ const PEER_STALE_AFTER_MS: u64 = 20 * 60 * 1_000;
 mod types;
 use types::{
     ActionResponse, AuthForm, AuthStatusResponse, BlocksQuery, ChangePasswordForm, ConfigForm,
-    ConfigResponse, MempoolCounts, MetricsResponse, NetworkHealthResponse, Page, PageQuery,
-    UiBlock, UiTransaction, WalletTransactionFilters, WalletTransactionRow,
+    ConfigResponse, MempoolCounts, MetricsQuery, MetricsResponse, NetworkHealthResponse, Page,
+    PageQuery, UiBlock, UiTransaction, WalletTransactionFilters, WalletTransactionRow,
     WalletTransactionsQuery, WalletUtxoRow,
 };
 #[cfg(test)]
@@ -126,6 +126,7 @@ pub async fn serve(
         auth_backoff: Arc::new(Mutex::new(BTreeMap::new())),
         ui_cache: Arc::new(Mutex::new(UiChainCache::default())),
     };
+    tokio::spawn(prewarm_chain_view_cache(state.clone()));
     tokio::spawn(run_owned_blinded_outbox_persistence(state.clone()));
     let app = Router::new()
         .route("/", get(index))
@@ -203,6 +204,14 @@ pub async fn serve(
     )
     .await
     .context("serving HTTP management UI")
+}
+
+async fn prewarm_chain_view_cache(state: HttpState) {
+    let snapshot = {
+        let node = state.node.lock().await;
+        node.chain_snapshot()
+    };
+    let _ = cached_chain_view(&state, &snapshot).await;
 }
 
 async fn api_config_form(

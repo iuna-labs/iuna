@@ -138,6 +138,11 @@ pub(super) struct BlocksQuery {
     pub(super) limit: Option<usize>,
 }
 
+#[derive(Debug, Deserialize)]
+pub(super) struct MetricsQuery {
+    pub(super) limit: Option<usize>,
+}
+
 #[derive(Debug, Default, Deserialize)]
 pub(super) struct PageQuery {
     pub(super) offset: Option<usize>,

@@ -7,6 +7,7 @@ window.iunaApp = function iunaApp() {
     selectedByteBlock: null,
     selectedTransaction: null,
     selectedBurnLeaderBlock: null,
+    loadingInitialBlocks: false,
     loadingOlder: false,
     hasMoreBlocks: true,
     walletTxs: [],
@@ -15,6 +16,7 @@ window.iunaApp = function iunaApp() {
     peers: [],
     p2pMetrics: {},
     blockchainMetrics: { enabled: false, latest: null, charts: [] },
+    loadingMetrics: false,
     metricHover: null,
     metricsRange: (() => {
       try {
@@ -623,6 +625,8 @@ window.iunaApp = function iunaApp() {
       const shouldLoadBlocks = tab === "chain" || tab === "mining";
       const shouldLoadP2pMetrics = tab === "p2p";
       const shouldLoadMetrics = tab === "metrics";
+      if (shouldLoadBlocks && this.blocks.length === 0) this.loadingInitialBlocks = true;
+      if (shouldLoadMetrics && this.metricsCharts().length === 0) this.loadingMetrics = true;
       const pagedDatasets = [];
       if (tab === "wallet") pagedDatasets.push("walletTx", "walletUtxo");
       if (tab === "chain") pagedDatasets.push("mempool");
@@ -633,7 +637,7 @@ window.iunaApp = function iunaApp() {
           this.fetchJson("/api/status"),
           shouldLoadBlocks ? this.fetchJson("/api/blocks?limit=30") : Promise.resolve(null),
           shouldLoadP2pMetrics ? this.fetchJson("/api/p2p/metrics") : Promise.resolve(this.p2pMetrics),
-          shouldLoadMetrics ? this.fetchJson("/api/metrics") : Promise.resolve(this.blockchainMetrics),
+          shouldLoadMetrics ? this.fetchJson(this.metricsPath()) : Promise.resolve(this.blockchainMetrics),
           this.fetchJson("/api/network/health"),
         ]);
         const previousChainHeight = this.status.chain?.height;
@@ -678,6 +682,9 @@ window.iunaApp = function iunaApp() {
           return;
         }
         this.showFlash(error.message, "error");
+      } finally {
+        if (shouldLoadBlocks) this.loadingInitialBlocks = false;
+        if (shouldLoadMetrics) this.loadingMetrics = false;
       }
     },
 
@@ -1655,6 +1662,10 @@ window.iunaApp = function iunaApp() {
       return this.blockchainMetrics?.latest || {};
     },
 
+    metricsPath() {
+      return this.metricsRange === "all" ? "/api/metrics" : `/api/metrics?limit=${this.metricsRange}`;
+    },
+
     setMetricsRange(range) {
       this.metricsRange = range === 1000 || range === "all" ? range : 100;
       this.metricHover = null;
@@ -1662,6 +1673,10 @@ window.iunaApp = function iunaApp() {
         localStorage.setItem("iunaMetricsRange", String(this.metricsRange));
       } catch {
         // Non-persistent filtering is fine when storage is unavailable.
+      }
+      if (this.tab === "metrics") {
+        this.blockchainMetrics = { enabled: this.blockchainMetrics?.enabled ?? true, latest: this.blockchainMetrics?.latest ?? null, charts: [] };
+        this.refresh({ force: true });
       }
     },
 

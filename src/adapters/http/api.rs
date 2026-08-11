@@ -13,9 +13,9 @@ use crate::{
 };
 
 use super::{
-    BlocksQuery, ConfigResponse, MempoolCounts, MetricsResponse, NetworkHealthResponse, Page,
-    PageQuery, UiBlock, UiTransaction, WalletTransactionFilters, WalletTransactionRow,
-    WalletTransactionsQuery, WalletUtxoRow,
+    BlocksQuery, ConfigResponse, MempoolCounts, MetricsQuery, MetricsResponse,
+    NetworkHealthResponse, Page, PageQuery, UiBlock, UiTransaction, WalletTransactionFilters,
+    WalletTransactionRow, WalletTransactionsQuery, WalletUtxoRow,
 };
 use super::{
     DATASET_LIMIT, DATASET_PAGE_LIMIT, EXPLORER_LIMIT, EXPLORER_PAGE_LIMIT, HttpState,
@@ -254,7 +254,10 @@ pub(super) async fn api_p2p_metrics(State(state): State<HttpState>) -> Json<P2pM
     Json(state.gossip.metrics())
 }
 
-pub(super) async fn api_metrics(State(state): State<HttpState>) -> Json<MetricsResponse> {
+pub(super) async fn api_metrics(
+    State(state): State<HttpState>,
+    Query(query): Query<MetricsQuery>,
+) -> Json<MetricsResponse> {
     let enabled = state.ui_config.lock().await.keep_track_of_metrics;
     if !enabled {
         return Json(MetricsResponse {
@@ -264,11 +267,14 @@ pub(super) async fn api_metrics(State(state): State<HttpState>) -> Json<MetricsR
         });
     }
     let store = state.chain_store.clone();
-    let rows = tokio::task::spawn_blocking(move || store.load_metrics())
-        .await
-        .ok()
-        .and_then(Result::ok)
-        .unwrap_or_default();
+    let rows = tokio::task::spawn_blocking(move || match query.limit {
+        Some(limit) => store.load_recent_metrics(limit.clamp(1, DATASET_LIMIT)),
+        None => store.load_metrics(),
+    })
+    .await
+    .ok()
+    .and_then(Result::ok)
+    .unwrap_or_default();
     Json(metrics_response(enabled, rows))
 }
 

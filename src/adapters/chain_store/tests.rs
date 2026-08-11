@@ -172,6 +172,33 @@ fn sqlite_chain_store_saves_and_clears_block_metrics() {
 }
 
 #[test]
+fn sqlite_chain_store_loads_recent_metrics_in_height_order() {
+    let dir = tempdir().unwrap();
+    let store = SqliteChainStore::open(dir.path().join("chain.sqlite3")).unwrap();
+    let wallet = Wallet::from_seed("recent-metrics-alice");
+    let mut genesis = BTreeMap::new();
+    genesis.insert(wallet.address().to_string(), 10);
+    let mut ledger =
+        Ledger::new_with_genesis_burns(genesis, vec![GenesisBurn::new(wallet.address(), 1)], 1)
+            .unwrap();
+
+    for timestamp_ms in [1_000, 2_000, 3_000] {
+        let burn = ledger.build_burn(&wallet, 1, 0).unwrap();
+        ledger.submit_transaction(burn).unwrap();
+        let block = ledger.mine_next_block(&wallet, timestamp_ms).unwrap();
+        ledger.apply_locally_mined_block(block).unwrap();
+    }
+    store.save_with_metrics(&ledger.snapshot(), true).unwrap();
+
+    let metrics = store.load_recent_metrics(2).unwrap();
+
+    assert_eq!(
+        metrics.iter().map(|row| row.height).collect::<Vec<_>>(),
+        vec![2, 3]
+    );
+}
+
+#[test]
 fn sqlite_chain_store_migrates_known_wallet_address_metrics_column() {
     let dir = tempdir().unwrap();
     let path = dir.path().join("chain.sqlite3");
