@@ -10,11 +10,10 @@ use super::selection::{TransactionKind, blinded_fee_rate_key, fee_rate_key};
 use super::ticket::ticket_is_eligible_for_height;
 use super::transaction::{BlindedTransaction, Transaction};
 use super::{
-    AGGREGATE_FINALIZER_FEE_ACTIVATION_HEIGHT, Amount, Block, BlockSelection, BurnTicket,
-    FinalizerMode, LeaderProof, LeaderProofPayload, Ledger, MINE_REWARD, OutPoint,
-    PUBLIC_KEY_BYTES, RECOVERY_BLOCK_DELAY_MS, REVEAL_COMMITTEE_SIZE, SIGNATURE_BYTES, TxInput,
-    TxOutput, decode_hex_array, validate_address, validate_hash, validate_protocol_id,
-    validate_signature,
+    Amount, Block, BlockSelection, BurnTicket, FinalizerMode, LeaderProof, LeaderProofPayload,
+    Ledger, MINE_REWARD, OutPoint, PUBLIC_KEY_BYTES, RECOVERY_BLOCK_DELAY_MS,
+    REVEAL_COMMITTEE_SIZE, SIGNATURE_BYTES, TxInput, TxOutput, decode_hex_array, validate_address,
+    validate_hash, validate_protocol_id, validate_signature,
 };
 
 pub(super) fn validate_genesis_allocations(
@@ -294,10 +293,6 @@ pub(super) fn block_reward(
     fee_reward(transactions)?
         .checked_add(aggregated_reveal_finalizer_fees)
         .context("block reward overflow")
-}
-
-pub(super) fn aggregate_finalizer_fees_active(height: u64) -> bool {
-    height >= AGGREGATE_FINALIZER_FEE_ACTIVATION_HEIGHT
 }
 
 pub(super) fn spend_inputs(

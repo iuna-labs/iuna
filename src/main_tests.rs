@@ -636,28 +636,31 @@ async fn persistence_loop_saves_new_tip_after_node_changes() {
 
     let expected_tip = node.lock().await.ledger().status().tip_hash;
     let mut restored_tip = None;
-    for _ in 0..50 {
+    let mut projected_tip = None;
+    for _ in 0..100 {
         if let Some(snapshot) = store.load().unwrap() {
             restored_tip = snapshot.blocks.last().map(|block| block.hash.clone());
-            if restored_tip.as_deref() == Some(expected_tip.as_str()) {
-                break;
-            }
+        }
+        projected_tip = Connection::open(ui_data_store.path())
+            .unwrap()
+            .query_row(
+                "SELECT tip_hash FROM ui_cache_meta WHERE id = 1",
+                [],
+                |row| row.get::<_, String>(0),
+            )
+            .ok();
+        if restored_tip.as_deref() == Some(expected_tip.as_str())
+            && projected_tip.as_deref() == Some(expected_tip.as_str())
+        {
+            break;
         }
         tokio::time::sleep(Duration::from_millis(10)).await;
     }
     persistence_task.abort();
 
     assert_eq!(restored_tip.as_deref(), Some(expected_tip.as_str()));
+    assert_eq!(projected_tip.as_deref(), Some(expected_tip.as_str()));
     assert!(ui_data_store.load_metrics().unwrap().is_empty());
-    let ui_data_connection = Connection::open(ui_data_store.path()).unwrap();
-    let projected_tip: String = ui_data_connection
-        .query_row(
-            "SELECT tip_hash FROM ui_cache_meta WHERE id = 1",
-            [],
-            |row| row.get(0),
-        )
-        .unwrap();
-    assert_eq!(projected_tip, expected_tip);
 }
 
 #[tokio::test]

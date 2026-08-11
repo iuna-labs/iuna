@@ -54,7 +54,9 @@ Wallet-created transfers and burns are not gossiped as plaintext. Their blinded 
 
 ## VDF Timing
 
-The VDF is there to make block production sequential and time-based. It cannot be parallelized in the same way as normal hashing work.
+The VDF is there to make block production sequential and time-based. It uses repeated squaring in an unknown-order RSA group: validators know the public modulus, but not its factorization. That unknown order is essential. If the factorization were known, a finalizer could skip the delay with normal modular exponentiation.
+
+The devnet uses the public RSA-2048 challenge modulus. A production mainnet should use a purpose-specific trusted setup ceremony with destroyed factors, or a class-group VDF that avoids trusted setup.
 
 The target block time is `5 minutes`. The protocol retargets VDF rounds from recent observed block times:
 
@@ -115,7 +117,7 @@ Difficulty targets about one mine action per block:
 
 This keeps issuance separate from finalization. PoW miners compete to create mine actions; burn-ticket finalizers decide blocks.
 
-Starting at height `200`, a block may contain at most `2` mine actions for the same anchor. Upgraded nodes already produce and select at most `2` pending mine actions per anchor before that activation height, so duplicate-anchor floods drain without invalidating older blocks during rollout. This leaves room for the difficulty retarget to move upward when PoW regularly fills both slots, while still bounding issuance from any single anchor.
+A block may contain at most `2` mine actions for the same anchor. This leaves room for the difficulty retarget to move upward when PoW regularly fills both slots, while still bounding issuance from any single anchor.
 
 ## Fair Burn Inclusion
 

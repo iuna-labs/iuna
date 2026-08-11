@@ -423,6 +423,15 @@ mod tests {
 
         let plan = node.prepare_automatic_finalization(1);
         assert!(plan.burned.is_some());
+        assert_eq!(node.ledger().pending_blinded_transactions().len(), 1);
+        let automatic_burn_commitment = node.ledger().pending_blinded_transactions()[0]
+            .commitment
+            .clone();
+        assert_eq!(
+            node.ledger().pending_blinded_transactions()[0].commitment,
+            automatic_burn_commitment
+        );
+        node.drain_outbox();
         let (_, anchor_burn) = node
             .local_block_anchor_burn
             .clone()
@@ -442,7 +451,11 @@ mod tests {
         node.receive_blinded_transaction(conflicting.transaction)
             .unwrap();
 
-        assert!(node.ledger().pending_blinded_transactions().is_empty());
+        assert_eq!(node.ledger().pending_blinded_transactions().len(), 1);
+        assert_eq!(
+            node.ledger().pending_blinded_transactions()[0].commitment,
+            automatic_burn_commitment
+        );
         assert!(node.drain_outbox().is_empty());
         assert!(node.prepare_automatic_finalization(1).work.is_some());
     }

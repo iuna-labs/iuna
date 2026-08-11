@@ -34,8 +34,8 @@ use cli::{default_data_dir, help_text};
 const GENESIS_BOOTSTRAP_BURN_AMOUNT: Amount = MICRO_IUNA;
 const GENESIS_INITIAL_BURN_PER_BLOCK: Amount = config_store::DEFAULT_BURN_AMOUNT;
 const GENESIS_INITIAL_BURN_FEE: Amount = config_store::DEFAULT_BURN_FEE;
-const VDF_MEASUREMENT_INITIAL_ROUNDS: u64 = 1_000_000;
-const VDF_MEASUREMENT_MAX_ROUNDS: u64 = 100_000_000;
+const VDF_MEASUREMENT_INITIAL_ROUNDS: u64 = 1_000;
+const VDF_MEASUREMENT_MAX_ROUNDS: u64 = 10_000_000;
 const VDF_MEASUREMENT_MIN_ELAPSED: Duration = Duration::from_millis(150);
 
 #[tokio::main]

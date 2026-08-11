@@ -2,10 +2,7 @@ use std::collections::BTreeMap;
 
 use anyhow::{Result, bail};
 
-use super::{
-    Block, MINE_ACTIONS_PER_ANCHOR_LIMIT, MINE_ACTIONS_PER_ANCHOR_LIMIT_ACTIVATION_HEIGHT,
-    Transaction,
-};
+use super::{Block, MINE_ACTIONS_PER_ANCHOR_LIMIT, Transaction};
 
 pub(super) const MINE_RETARGET_WINDOW_BLOCKS: u64 = 10;
 pub(super) const MINE_MAX_RETARGET_STEP_BITS: u32 = 2;
@@ -56,10 +53,7 @@ fn floor_log2_ratio(numerator: u64, denominator: u64) -> u32 {
     step
 }
 
-pub(super) fn ensure_mine_anchor_limit(height: u64, transactions: &[Transaction]) -> Result<()> {
-    if !mine_actions_per_anchor_limit_active(height) {
-        return Ok(());
-    }
+pub(super) fn ensure_mine_anchor_limit(_height: u64, transactions: &[Transaction]) -> Result<()> {
     let mut anchor_counts = BTreeMap::new();
     for transaction in transactions {
         let Some(anchor) = mine_anchor(transaction) else {
@@ -72,10 +66,6 @@ pub(super) fn ensure_mine_anchor_limit(height: u64, transactions: &[Transaction]
         }
     }
     Ok(())
-}
-
-pub(super) fn mine_actions_per_anchor_limit_active(height: u64) -> bool {
-    height >= MINE_ACTIONS_PER_ANCHOR_LIMIT_ACTIVATION_HEIGHT
 }
 
 pub(super) fn mine_anchor(transaction: &Transaction) -> Option<&str> {

@@ -15,8 +15,7 @@ use super::ledger_ops::{
     transaction_has_missing_inputs, validate_transaction_inputs, validate_transaction_outputs,
 };
 use super::mine_policy::{
-    MINE_MAX_ANCHOR_AGE_BLOCKS, mine_actions_per_anchor_limit_active, mine_anchor,
-    mine_anchor_count_before_height,
+    MINE_MAX_ANCHOR_AGE_BLOCKS, mine_anchor, mine_anchor_count_before_height,
 };
 use super::selection::{
     BlockSelection, SelectableItem, TransactionKind, best_selectable_item, blinded_fee_rate_key,
@@ -298,28 +297,25 @@ impl Ledger {
     }
 
     pub(super) fn validate_mine_anchor_available(&self, transaction: &Transaction) -> Result<()> {
-        if mine_actions_per_anchor_limit_active(self.height().saturating_add(1)) {
-            if let Some(anchor) = mine_anchor(transaction) {
-                let known_count =
-                    mine_anchor_count_before_height(&self.chain, anchor, self.height())
-                        .saturating_add(
-                            self.pending
-                                .iter()
-                                .filter(|tx| mine_anchor(tx) == Some(anchor))
-                                .count(),
-                        )
-                        .saturating_add(
-                            self.orphans
-                                .iter()
-                                .filter(|tx| {
-                                    mine_anchor(tx) == Some(anchor)
-                                        && tx.signature() != transaction.signature()
-                                })
-                                .count(),
-                        );
-                if known_count >= MINE_ACTIONS_PER_ANCHOR_LIMIT {
-                    bail!("mine transaction anchor limit reached");
-                }
+        if let Some(anchor) = mine_anchor(transaction) {
+            let known_count = mine_anchor_count_before_height(&self.chain, anchor, self.height())
+                .saturating_add(
+                    self.pending
+                        .iter()
+                        .filter(|tx| mine_anchor(tx) == Some(anchor))
+                        .count(),
+                )
+                .saturating_add(
+                    self.orphans
+                        .iter()
+                        .filter(|tx| {
+                            mine_anchor(tx) == Some(anchor)
+                                && tx.signature() != transaction.signature()
+                        })
+                        .count(),
+                );
+            if known_count >= MINE_ACTIONS_PER_ANCHOR_LIMIT {
+                bail!("mine transaction anchor limit reached");
             }
         }
         Ok(())

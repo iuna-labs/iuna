@@ -6,9 +6,9 @@ use super::blinded::{
     ActiveBlindedTransaction, credit_blinded_fee_outputs, credit_expired_blinded_outputs,
 };
 use super::ledger_ops::{
-    aggregate_finalizer_fees_active, apply_transaction, block_reward, credit_reward_output,
-    ensure_block_has_burn, ensure_valid_recovery_block, fee_reward, spend_blinded_inputs,
-    validate_block_blinded_items, verify_leader_proof,
+    apply_transaction, block_reward, credit_reward_output, ensure_block_has_burn,
+    ensure_valid_recovery_block, spend_blinded_inputs, validate_block_blinded_items,
+    verify_leader_proof,
 };
 use super::mine_policy::ensure_mine_anchor_limit;
 use super::ticket::{
@@ -104,17 +104,15 @@ impl Ledger {
                 &tx,
                 &block.reveal_bundle_section.signatures,
                 reveal_bundle_slot_count,
-                aggregate_finalizer_fees_active(block.height),
+                true,
             )?;
-            if aggregate_finalizer_fees_active(block.height) {
-                aggregated_reveal_finalizer_fees = aggregated_reveal_finalizer_fees
-                    .checked_add(blinded_reveal_finalizer_fee(
-                        tx.fee(),
-                        block.included_reveal_bundle_count(),
-                        reveal_bundle_slot_count,
-                    ))
-                    .context("aggregated reveal finalizer fees overflow")?;
-            }
+            aggregated_reveal_finalizer_fees = aggregated_reveal_finalizer_fees
+                .checked_add(blinded_reveal_finalizer_fee(
+                    tx.fee(),
+                    block.included_reveal_bundle_count(),
+                    reveal_bundle_slot_count,
+                ))
+                .context("aggregated reveal finalizer fees overflow")?;
             revealed_transactions.push(tx);
         }
         for (commitment, active) in &self.active_blinded {
@@ -340,15 +338,9 @@ impl Ledger {
         reveal_bundle_section: &RevealBundleSection,
     ) -> Result<Amount> {
         let height = self.tip().height + 1;
-        if !aggregate_finalizer_fees_active(height) {
-            return fee_reward(transactions);
-        }
         let reveal_bundle_slot_count = self.reveal_committee_for_height(height).len();
-        let aggregate = self.aggregate_reveal_finalizer_fees(
-            height,
-            reveal_bundle_section,
-            reveal_bundle_slot_count,
-        )?;
+        let aggregate =
+            self.aggregate_reveal_finalizer_fees(reveal_bundle_section, reveal_bundle_slot_count)?;
         block_reward(transactions, aggregate)
     }
 
@@ -357,11 +349,7 @@ impl Ledger {
         block: &Block,
         reveal_bundle_slot_count: usize,
     ) -> Result<Amount> {
-        if !aggregate_finalizer_fees_active(block.height) {
-            return fee_reward(&block.transactions);
-        }
         let aggregate = self.aggregate_reveal_finalizer_fees(
-            block.height,
             &block.reveal_bundle_section,
             reveal_bundle_slot_count,
         )?;
@@ -370,13 +358,9 @@ impl Ledger {
 
     fn aggregate_reveal_finalizer_fees(
         &self,
-        height: u64,
         reveal_bundle_section: &RevealBundleSection,
         reveal_bundle_slot_count: usize,
     ) -> Result<Amount> {
-        if !aggregate_finalizer_fees_active(height) {
-            return Ok(0);
-        }
         reveal_bundle_section
             .all_reveals()
             .into_iter()

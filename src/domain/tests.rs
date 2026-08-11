@@ -78,20 +78,6 @@ fn test_mine_with_salt(ledger: &Ledger, recipient: &str, salt: u64) -> Transacti
     panic!("test should find a valid mine action");
 }
 
-fn advance_to_mine_anchor_limit_activation_parent(ledger: &mut Ledger, wallet: &Wallet) {
-    while ledger.height().saturating_add(1) < MINE_ACTIONS_PER_ANCHOR_LIMIT_ACTIVATION_HEIGHT {
-        let timestamp_ms = ledger
-            .tip()
-            .timestamp_ms
-            .saturating_add(VDF_TARGET_BLOCK_MS);
-        apply_preverified_burn_block_at(ledger, wallet, timestamp_ms);
-    }
-    assert_eq!(
-        ledger.height().saturating_add(1),
-        MINE_ACTIONS_PER_ANCHOR_LIMIT_ACTIVATION_HEIGHT
-    );
-}
-
 fn apply_preverified_burn_block_at(
     ledger: &mut Ledger,
     wallet: &Wallet,
@@ -260,17 +246,6 @@ fn prepare_preverified_as_next_leader_with_reveal_bundles(
         .prepare_next_block_with_reveal_bundles(wallet.address(), timestamp_ms, bundles)
         .unwrap();
     prepared.finish(wallet, "preverified-vdf".to_string())
-}
-
-fn advance_preverified_to_height(ledger: &mut Ledger, wallets: &[Wallet], target_height: u64) {
-    while ledger.height() < target_height {
-        queue_next_leader_burn(ledger, wallets);
-        let timestamp_ms = ledger
-            .tip()
-            .timestamp_ms
-            .saturating_add(VDF_TARGET_BLOCK_MS);
-        mine_preverified_as_next_leader(ledger, wallets, timestamp_ms);
-    }
 }
 
 fn queue_next_leader_burn(ledger: &mut Ledger, wallets: &[Wallet]) {
@@ -741,36 +716,10 @@ fn vdf_retarget_observed_block_time_is_clamped() {
 }
 
 #[test]
-fn vdf_retarget_observed_block_time_includes_historical_ticket_fallback_ranks() {
+fn vdf_retarget_observed_block_time_ignores_ticket_fallback_ranks() {
     let parent = vdf_retarget_sample_block(0, FinalizerMode::Ticket, 0);
-    let primary_child = vdf_retarget_sample_block(VDF_TARGET_BLOCK_MS, FinalizerMode::Ticket, 0);
-    let mut rank_one_child =
+    let fallback_child =
         vdf_retarget_sample_block(VDF_TARGET_BLOCK_MS * 2, FinalizerMode::Ticket, 1);
-    rank_one_child.height = FALLBACK_VDF_RETARGET_ACTIVATION_HEIGHT;
-    let mut rank_two_child =
-        vdf_retarget_sample_block(VDF_TARGET_BLOCK_MS * 4, FinalizerMode::Ticket, 2);
-    rank_two_child.height = FALLBACK_VDF_RETARGET_DEACTIVATION_HEIGHT - 1;
-
-    assert_eq!(
-        vdf_retarget_observed_block_ms(&parent, &primary_child),
-        Some(VDF_TARGET_BLOCK_MS)
-    );
-    assert_eq!(
-        vdf_retarget_observed_block_ms(&parent, &rank_one_child),
-        Some(VDF_TARGET_BLOCK_MS * 2)
-    );
-    assert_eq!(
-        vdf_retarget_observed_block_ms(&parent, &rank_two_child),
-        Some(VDF_TARGET_BLOCK_MS * 4)
-    );
-}
-
-#[test]
-fn vdf_retarget_observed_block_time_ignores_new_ticket_fallback_ranks() {
-    let parent = vdf_retarget_sample_block(0, FinalizerMode::Ticket, 0);
-    let mut fallback_child =
-        vdf_retarget_sample_block(VDF_TARGET_BLOCK_MS * 2, FinalizerMode::Ticket, 1);
-    fallback_child.height = FALLBACK_VDF_RETARGET_DEACTIVATION_HEIGHT;
 
     assert_eq!(
         vdf_retarget_observed_block_ms(&parent, &fallback_child),
@@ -848,7 +797,7 @@ fn vdf_rounds_retarget_below_legacy_u32_limit_after_slow_blocks() {
 }
 
 #[test]
-fn fallback_block_before_activation_is_excluded_from_vdf_retarget_observations() {
+fn fallback_block_is_excluded_from_vdf_retarget_observations() {
     let alice = Wallet::from_seed("fallback-retarget-alice");
     let bob = Wallet::from_seed("fallback-retarget-bob");
     let wallets = [&alice, &bob];
@@ -1542,10 +1491,16 @@ fn blinded_burn_commits_ciphertext_and_reveal_executes_later() {
             amount: committer_fee,
         }
     );
+    assert!(
+        !ledger
+            .utxos
+            .contains_key(&blinded_executor_fee_outpoint(commitment))
+    );
+    assert_eq!(reveal_block.reward, reveal_finalizer_fee);
     assert_eq!(
         ledger
             .utxos
-            .get(&blinded_executor_fee_outpoint(commitment))
+            .get(&reward_outpoint(&reveal_block.hash))
             .unwrap(),
         &TxOutput {
             address: reveal_executor.clone(),
@@ -1586,20 +1541,15 @@ fn blinded_burn_commits_ciphertext_and_reveal_executes_later() {
 }
 
 #[test]
-fn activated_blinded_reveal_finalizer_fees_are_aggregated_into_block_reward() {
-    let alice = Wallet::from_seed("activated-finalizer-fee-alice");
-    let bob = Wallet::from_seed("activated-finalizer-fee-bob");
-    let carol = Wallet::from_seed("activated-finalizer-fee-carol");
-    let dave = Wallet::from_seed("activated-finalizer-fee-dave");
+fn blinded_reveal_finalizer_fees_are_aggregated_into_block_reward() {
+    let alice = Wallet::from_seed("aggregated-finalizer-fee-alice");
+    let bob = Wallet::from_seed("aggregated-finalizer-fee-bob");
+    let carol = Wallet::from_seed("aggregated-finalizer-fee-carol");
+    let dave = Wallet::from_seed("aggregated-finalizer-fee-dave");
     let finalizers = [alice.clone(), bob.clone()];
     let mut ledger = ledger_with_finalizers(
         &finalizers,
         &[(&carol, 10 * MICRO_IUNA), (&dave, 10 * MICRO_IUNA)],
-    );
-    advance_preverified_to_height(
-        &mut ledger,
-        &finalizers,
-        AGGREGATE_FINALIZER_FEE_ACTIVATION_HEIGHT - 2,
     );
     let first_fee = 100;
     let second_fee = 200;
@@ -1624,10 +1574,7 @@ fn activated_blinded_reveal_finalizer_fees_are_aggregated_into_block_reward() {
         .saturating_add(VDF_TARGET_BLOCK_MS);
     let commit_block =
         mine_preverified_as_next_leader(&mut ledger, &finalizers, commit_timestamp_ms);
-    assert_eq!(
-        commit_block.height,
-        AGGREGATE_FINALIZER_FEE_ACTIVATION_HEIGHT - 1
-    );
+    assert_eq!(commit_block.height, 1);
 
     ledger.submit_blinded_reveal(first_blinded.reveal).unwrap();
     ledger.submit_blinded_reveal(second_blinded.reveal).unwrap();
@@ -1661,17 +1608,14 @@ fn activated_blinded_reveal_finalizer_fees_are_aggregated_into_block_reward() {
         .checked_add(second_reveal_finalizer_fee)
         .unwrap();
 
-    assert_eq!(
-        reveal_block.height,
-        AGGREGATE_FINALIZER_FEE_ACTIVATION_HEIGHT
-    );
+    assert_eq!(reveal_block.height, 2);
     assert_eq!(reveal_block.reward, aggregate_reveal_finalizer_fee);
-    let mut legacy_reward_block = reveal_block.clone();
-    legacy_reward_block.reward = fee_reward(&legacy_reward_block.transactions).unwrap();
-    legacy_reward_block.hash = legacy_reward_block.compute_hash();
+    let mut plain_fee_reward_block = reveal_block.clone();
+    plain_fee_reward_block.reward = fee_reward(&plain_fee_reward_block.transactions).unwrap();
+    plain_fee_reward_block.hash = plain_fee_reward_block.compute_hash();
     let error = ledger
         .clone()
-        .apply_preverified_block_at(legacy_reward_block, u64::MAX)
+        .apply_preverified_block_at(plain_fee_reward_block, u64::MAX)
         .unwrap_err();
     assert!(format!("{error:#}").contains("block reward is invalid"));
 
@@ -1694,79 +1638,6 @@ fn activated_blinded_reveal_finalizer_fees_are_aggregated_into_block_reward() {
             address: reveal_block.miner.clone(),
             amount: aggregate_reveal_finalizer_fee,
         })
-    );
-}
-
-#[test]
-fn pre_activation_blinded_reveal_finalizer_fee_stays_as_executor_utxo_at_boundary() {
-    let alice = Wallet::from_seed("pre-activated-finalizer-fee-alice");
-    let bob = Wallet::from_seed("pre-activated-finalizer-fee-bob");
-    let carol = Wallet::from_seed("pre-activated-finalizer-fee-carol");
-    let finalizers = [alice.clone(), bob.clone()];
-    let mut ledger = ledger_with_finalizers(&finalizers, &[(&carol, 10 * MICRO_IUNA)]);
-    advance_preverified_to_height(
-        &mut ledger,
-        &finalizers,
-        AGGREGATE_FINALIZER_FEE_ACTIVATION_HEIGHT - 3,
-    );
-    let fee = 100;
-    let blinded = ledger
-        .build_blinded_burn(&carol, 3, fee, ledger.height() + 4)
-        .unwrap();
-    let commitment = blinded.transaction.commitment.clone();
-    ledger
-        .submit_blinded_transaction(blinded.transaction)
-        .unwrap();
-    queue_next_leader_burn(&mut ledger, &finalizers);
-    let commit_timestamp_ms = ledger
-        .tip()
-        .timestamp_ms
-        .saturating_add(VDF_TARGET_BLOCK_MS);
-    let commit_block =
-        mine_preverified_as_next_leader(&mut ledger, &finalizers, commit_timestamp_ms);
-    assert_eq!(
-        commit_block.height,
-        AGGREGATE_FINALIZER_FEE_ACTIVATION_HEIGHT - 2
-    );
-
-    ledger.submit_blinded_reveal(blinded.reveal).unwrap();
-    queue_next_leader_burn(&mut ledger, &finalizers);
-    let reveal_timestamp_ms = ledger
-        .tip()
-        .timestamp_ms
-        .saturating_add(VDF_TARGET_BLOCK_MS);
-    let reveal_block = mine_preverified_as_next_leader_with_reveal_bundles(
-        &mut ledger,
-        &finalizers,
-        reveal_timestamp_ms,
-    );
-    let reveal_finalizer_fee = blinded_reveal_finalizer_fee(
-        fee,
-        reveal_block.included_reveal_bundle_count(),
-        ledger
-            .burn_leader_ranks_for_block(reveal_block.height)
-            .unwrap()
-            .len(),
-    );
-
-    assert_eq!(
-        reveal_block.height,
-        AGGREGATE_FINALIZER_FEE_ACTIVATION_HEIGHT - 1
-    );
-    assert_eq!(reveal_block.reward, 0);
-    assert_eq!(
-        ledger
-            .utxos
-            .get(&blinded_executor_fee_outpoint(&commitment)),
-        Some(&TxOutput {
-            address: reveal_block.miner,
-            amount: reveal_finalizer_fee,
-        })
-    );
-    assert!(
-        !ledger
-            .utxos
-            .contains_key(&reward_outpoint(&reveal_block.hash))
     );
 }
 
@@ -2130,13 +2001,21 @@ fn blinded_reveal_with_wrong_key_is_rejected_in_block() {
         reveals: vec![wrong_reveal],
     });
     prepared.reveal_bundle_section = ledger.reveal_bundle_section_from_bundles(vec![wrong_bundle]);
+    prepared.reward = blinded_reveal_finalizer_fee(
+        blinded.transaction.fee,
+        prepared.reveal_bundle_section.signatures.len(),
+        ledger.reveal_committee_for_next_block().len(),
+    );
     let block = prepared.finish(wallet, "preverified-vdf".to_string());
 
     let error = ledger
         .apply_preverified_block_at(block, u64::MAX)
         .unwrap_err();
 
-    assert!(format!("{error:#}").contains("failed to decrypt blinded transaction payload"));
+    assert!(
+        format!("{error:#}").contains("decrypt blinded transaction"),
+        "{error:#}"
+    );
 }
 
 #[test]
@@ -2622,10 +2501,7 @@ fn block_selection_limits_mine_actions_per_anchor() {
     ledger.submit_transaction(first_mine.clone()).unwrap();
     let second_mine = ledger.build_mine(alice.address()).unwrap();
     ledger.submit_transaction(second_mine.clone()).unwrap();
-    let third_mine = ledger.build_mine(alice.address()).unwrap();
-    ledger.submit_transaction(third_mine.clone()).unwrap();
-
-    assert_eq!(ledger.pending().len(), 4);
+    assert_eq!(ledger.pending().len(), 3);
     let block = ledger.mine_next_block(&alice, 1).unwrap();
 
     assert_eq!(block.transactions.len(), 3);
@@ -2648,44 +2524,14 @@ fn block_selection_limits_mine_actions_per_anchor() {
             .iter()
             .any(|tx| tx.signature() == second_mine.signature())
     );
-    assert!(
-        !block
-            .transactions
-            .iter()
-            .any(|tx| tx.signature() == third_mine.signature())
-    );
     assert_ne!(first_mine.signature(), second_mine.signature());
-    assert_ne!(second_mine.signature(), third_mine.signature());
     assert_eq!(block.reward, first_mine.fee() + second_mine.fee());
 }
 
 #[test]
-fn pre_activation_block_may_keep_multiple_mine_actions_for_one_anchor() {
-    let alice = Wallet::from_seed("mine-anchor-limit-pre-activation-alice");
+fn blocks_reject_too_many_mine_actions_for_one_anchor() {
+    let alice = Wallet::from_seed("mine-anchor-limit-block-alice");
     let mut ledger = ledger_with_allocation(&alice, 10 * MICRO_IUNA);
-    assert!(ledger.height().saturating_add(1) < MINE_ACTIONS_PER_ANCHOR_LIMIT_ACTIVATION_HEIGHT);
-
-    let first_mine = test_mine_with_salt(&ledger, alice.address(), 1);
-    let second_mine = test_mine_with_salt(&ledger, alice.address(), 2);
-    let burn = ledger.build_burn(&alice, MICRO_IUNA, 0).unwrap();
-    ledger.submit_transaction(burn).unwrap();
-    let mut block = ledger
-        .prepare_next_block(alice.address(), 1)
-        .unwrap()
-        .finish(&alice, "preverified-vdf".to_string());
-    block.transactions.push(first_mine);
-    block.transactions.push(second_mine);
-    block.reward = fee_reward(&block.transactions).unwrap();
-    block.hash = block.compute_hash();
-
-    ledger.apply_preverified_block_at(block, u64::MAX).unwrap();
-}
-
-#[test]
-fn activated_blocks_reject_too_many_mine_actions_for_one_anchor() {
-    let alice = Wallet::from_seed("mine-anchor-limit-active-block-alice");
-    let mut ledger = ledger_with_allocation(&alice, 10 * MICRO_IUNA);
-    advance_to_mine_anchor_limit_activation_parent(&mut ledger, &alice);
 
     let first_mine = test_mine_with_salt(&ledger, alice.address(), 1);
     let second_mine = test_mine_with_salt(&ledger, alice.address(), 2);
@@ -2716,10 +2562,9 @@ fn activated_blocks_reject_too_many_mine_actions_for_one_anchor() {
 }
 
 #[test]
-fn activated_mempool_rejects_mine_actions_above_anchor_limit() {
-    let alice = Wallet::from_seed("mine-anchor-limit-active-mempool-alice");
+fn mempool_rejects_mine_actions_above_anchor_limit() {
+    let alice = Wallet::from_seed("mine-anchor-limit-mempool-alice");
     let mut ledger = ledger_with_allocation(&alice, 10 * MICRO_IUNA);
-    advance_to_mine_anchor_limit_activation_parent(&mut ledger, &alice);
 
     let first_mine = test_mine_with_salt(&ledger, alice.address(), 1);
     let second_mine = test_mine_with_salt(&ledger, alice.address(), 2);

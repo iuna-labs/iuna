@@ -13,9 +13,9 @@ use serde::Serialize;
 use crate::{
     adapters::ui_index::{UiChainIndex, build_ui_chain_index},
     domain::{
-        AGGREGATE_FINALIZER_FEE_ACTIVATION_HEIGHT, Amount, BLINDED_COMMITTER_FEE_BPS,
-        BLINDED_FEE_BPS_DENOMINATOR, BLINDED_REVEAL_BUNDLE_SIGNER_FEE_BPS, BlindedTransaction,
-        Block, BurnLeaderRank, ChainSnapshot, Ledger, MINE_REWARD, OutPoint, REVEAL_COMMITTEE_SIZE,
+        Amount, BLINDED_COMMITTER_FEE_BPS, BLINDED_FEE_BPS_DENOMINATOR,
+        BLINDED_REVEAL_BUNDLE_SIGNER_FEE_BPS, BlindedTransaction, Block, BurnLeaderRank,
+        ChainSnapshot, Ledger, MINE_REWARD, OutPoint, REVEAL_COMMITTEE_SIZE,
         RevealedBlindedTransaction, Transaction, TxInput, TxOutput, blinded_reveal_finalizer_fee,
         hex_hash, reveal_committee_slot_count, revealed_blinded_transactions,
     },
@@ -1174,10 +1174,6 @@ fn metrics_from_snapshot(snapshot: &ChainSnapshot) -> Result<Vec<BlockMetricRow>
                 &revealed.included_by,
                 block,
                 transaction.fee(),
-                reveal_bundle_slots_by_height
-                    .get(&block.height)
-                    .copied()
-                    .unwrap_or(REVEAL_COMMITTEE_SIZE),
             );
             fees_amount = fees_amount
                 .checked_add(transaction.fee())
@@ -1418,7 +1414,6 @@ fn metric_index_blinded_fee_outputs(
     included_by: &str,
     block: &Block,
     fee: Amount,
-    available_reveal_bundle_slots: usize,
 ) {
     if fee == 0 {
         return;
@@ -1430,20 +1425,6 @@ fn metric_index_blinded_fee_outputs(
             TxOutput {
                 address: included_by.to_string(),
                 amount: committer_fee,
-            },
-        );
-    }
-    let reveal_finalizer_fee = blinded_reveal_finalizer_fee(
-        fee,
-        block.included_reveal_bundle_count(),
-        available_reveal_bundle_slots,
-    );
-    if reveal_finalizer_fee > 0 && block.height < AGGREGATE_FINALIZER_FEE_ACTIVATION_HEIGHT {
-        utxos.insert(
-            metric_blinded_executor_fee_outpoint(commitment),
-            TxOutput {
-                address: block.miner.clone(),
-                amount: reveal_finalizer_fee,
             },
         );
     }
@@ -1514,13 +1495,6 @@ fn metric_blinded_committer_fee_outpoint(commitment: &str) -> OutPoint {
     OutPoint {
         txid: commitment.to_string(),
         index: u32::MAX - 1,
-    }
-}
-
-fn metric_blinded_executor_fee_outpoint(commitment: &str) -> OutPoint {
-    OutPoint {
-        txid: commitment.to_string(),
-        index: u32::MAX - 2,
     }
 }
 

@@ -88,64 +88,19 @@ impl Block {
                 )
             })
             .unwrap_or_default();
-        if !self.blinded_transactions.is_empty() || !self.reveal_bundle_section.is_empty() {
-            return hex_hash(format!(
-                "block-content-v3:{}:{}:{}:{}:{}:{}:{}:{}:{}:{}",
-                self.height,
-                self.prev_hash,
-                self.timestamp_ms,
-                self.miner,
-                self.finalizer_rank,
-                self.reward,
-                self.vdf_rounds,
-                leader_proof,
-                txs,
-                canonical_blinded_block_items(&blinded, &reveal_section)
-            ));
-        }
         hex_hash(format!(
-            "{}:{}",
-            self.legacy_content_hash_prefix(&leader_proof),
-            txs
+            "block-content-v3:{}:{}:{}:{}:{}:{}:{}:{}:{}:{}",
+            self.height,
+            self.prev_hash,
+            self.timestamp_ms,
+            self.miner,
+            self.finalizer_rank,
+            self.reward,
+            self.vdf_rounds,
+            leader_proof,
+            txs,
+            canonical_blinded_block_items(&blinded, &reveal_section)
         ))
-    }
-
-    fn legacy_content_hash_prefix(&self, leader_proof: &str) -> String {
-        if self.finalizer_mode == FinalizerMode::Recovery {
-            format!(
-                "block-content-recovery-v1:{}:{}:{}:{}:{}:{}:{}",
-                self.height,
-                self.prev_hash,
-                self.timestamp_ms,
-                self.miner,
-                self.reward,
-                self.vdf_rounds,
-                leader_proof
-            )
-        } else if self.finalizer_rank == 0 {
-            format!(
-                "block-content:{}:{}:{}:{}:{}:{}:{}",
-                self.height,
-                self.prev_hash,
-                self.timestamp_ms,
-                self.miner,
-                self.reward,
-                self.vdf_rounds,
-                leader_proof
-            )
-        } else {
-            format!(
-                "block-content-v2:{}:{}:{}:{}:{}:{}:{}:{}",
-                self.height,
-                self.prev_hash,
-                self.timestamp_ms,
-                self.miner,
-                self.finalizer_rank,
-                self.reward,
-                self.vdf_rounds,
-                leader_proof
-            )
-        }
     }
 
     pub(super) fn leader_score(&self) -> LeaderScore {
@@ -370,7 +325,7 @@ mod tests {
     use crate::domain::{RevealBundleSection, Transaction};
 
     #[test]
-    fn leader_proof_payload_keeps_legacy_primary_canonical_form() {
+    fn primary_leader_proof_payload_omits_rank_from_canonical_form() {
         let primary = LeaderProofPayload {
             height: 1,
             prev_hash: "prev".to_string(),
