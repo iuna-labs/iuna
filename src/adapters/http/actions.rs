@@ -10,9 +10,10 @@ use axum::{
 use tokio::sync::Mutex;
 
 use super::types::{
-    ActionResponse, AddressBookDeleteForm, AddressBookForm, BurnSettingsForm, ConfigForm,
-    FeeEstimateResponse, MetricsSettingsForm, P2pAnnounceForm, P2pInboundForm, PeerForm,
-    PowMiningForm, RecoveryVdfSettingsForm, SeedPhraseForm, TransferForm, WalletSetupResponse,
+    ActionResponse, AddressBookDeleteForm, AddressBookForm, BurnSettingsForm, ChainResetForm,
+    ConfigForm, FeeEstimateResponse, MetricsSettingsForm, P2pAnnounceForm, P2pInboundForm,
+    PeerForm, PowMiningForm, RecoveryVdfSettingsForm, SeedPhraseForm, TransferForm,
+    WalletSetupResponse,
 };
 use super::{
     HttpState, action_json, api_error, config_store, estimate_burn_fee, estimate_mine_fee,
@@ -21,8 +22,11 @@ use super::{
 };
 use crate::{
     adapters::{chain_store::SqliteChainStore, config_store::UiConfig},
+    app::GossipEnvelope,
     domain::Amount,
 };
+
+const CHAIN_RESET_CONFIRMATION: &str = "RESET";
 
 pub(super) async fn apply_config_form(state: &HttpState, form: ConfigForm) -> Result<()> {
     let peer = form.peer.trim();
@@ -107,6 +111,13 @@ pub(super) async fn api_recovery_vdf_settings_form(
     Form(form): Form<RecoveryVdfSettingsForm>,
 ) -> Json<ActionResponse> {
     action_json(set_recovery_vdf_top_rank_percent(&state, form.top_rank_percent).await)
+}
+
+pub(super) async fn api_chain_reset_form(
+    State(state): State<HttpState>,
+    Form(form): Form<ChainResetForm>,
+) -> Json<ActionResponse> {
+    action_json(reset_local_chain(&state, &form.confirm).await)
 }
 
 pub(super) async fn api_p2p_announce_form(
@@ -305,6 +316,27 @@ pub(super) async fn set_keep_track_of_metrics(state: &HttpState, enabled: bool) 
     config_store::save(&state.config_path, &config)
 }
 
+pub(super) async fn reset_local_chain(state: &HttpState, confirmation: &str) -> Result<()> {
+    if confirmation.trim() != CHAIN_RESET_CONFIRMATION {
+        bail!("type RESET to confirm deleting the local chain");
+    }
+
+    {
+        let mut node = state.node.lock().await;
+        node.reset_chain_to_setup_placeholder();
+    }
+    {
+        let mut cache = state.ui_cache.lock().await;
+        *cache = super::UiChainCache::default();
+    }
+    clear_chain(&state.chain_store).await?;
+    state
+        .gossip
+        .broadcast(vec![GossipEnvelope::ChainSnapshotRequest])
+        .await?;
+    Ok(())
+}
+
 pub(super) async fn set_p2p_announce_addr(state: &HttpState, addr: String) -> Result<()> {
     let trimmed = addr.trim();
     let parsed = if trimmed.is_empty() {
@@ -375,6 +407,14 @@ async fn clear_metrics(store: &SqliteChainStore) -> Result<()> {
     tokio::task::spawn_blocking(move || store.clear_metrics())
         .await
         .context("metrics cleanup worker failed")??;
+    Ok(())
+}
+
+async fn clear_chain(store: &SqliteChainStore) -> Result<()> {
+    let store = store.clone();
+    tokio::task::spawn_blocking(move || store.clear_chain())
+        .await
+        .context("chain reset worker failed")??;
     Ok(())
 }
 

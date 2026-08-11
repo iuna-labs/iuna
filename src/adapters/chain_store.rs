@@ -269,6 +269,23 @@ ON CONFLICT(id) DO UPDATE SET
         })
     }
 
+    pub fn clear_chain(&self) -> Result<()> {
+        self.with_connection_mut(|connection| {
+            let transaction = connection
+                .transaction()
+                .context("failed to start chain reset transaction")?;
+            transaction
+                .execute("DELETE FROM chain_snapshots", [])
+                .context("failed to delete chain snapshot")?;
+            clear_metrics_in_transaction(&transaction)?;
+            clear_ui_chain_index_in_transaction(&transaction)?;
+            transaction
+                .commit()
+                .context("failed to commit chain reset transaction")?;
+            Ok(())
+        })
+    }
+
     pub fn load_metrics(&self) -> Result<Vec<BlockMetricRow>> {
         self.with_connection(|connection| {
             let mut statement = connection

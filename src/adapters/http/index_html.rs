@@ -70,6 +70,8 @@ pub(super) const INDEX_HTML: &str = r#"<!doctype html>
     button.primary { background: #d5f55f; border-color: #d5f55f; color: #15171a; }
     button.primary:hover { background: #e4ff83; color: #15171a; }
     button.subtle { background: transparent; }
+    button.danger { border-color: #8f3730; background: #341918; color: #ffb1a8; }
+    button.danger:hover { border-color: #ff7668; background: #451c1a; color: #ffd8d3; }
     button:disabled { cursor: default; opacity: .5; }
     .grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(150px, 1fr)); gap: 10px; }
     .metric, .panel { background: #181b1f; border: 1px solid #2a3035; border-radius: 8px; padding: 13px; }
@@ -139,6 +141,10 @@ pub(super) const INDEX_HTML: &str = r#"<!doctype html>
     .settings-form { display: grid; gap: 10px; align-items: stretch; }
     .public-p2p-form { margin-top: 14px; }
     .settings-form label, .settings-form input { width: 100%; }
+    .danger-panel { border-color: #6a332c; background: #201313; }
+    .danger-panel h3, .danger-title { color: #ffb1a8; }
+    .danger-copy { color: #d69a92; line-height: 1.45; }
+    .danger-actions { display: flex; justify-content: flex-end; gap: 10px; margin-top: 12px; }
     .metrics-shell { display: grid; gap: 12px; }
     .metrics-head { display: flex; justify-content: space-between; gap: 12px; align-items: center; }
     .metrics-head h2 { margin: 0; }
@@ -387,6 +393,7 @@ pub(super) const INDEX_HTML: &str = r#"<!doctype html>
     .pill.mine { background: #172a34; color: #8bdcff; }
     .pill.blinded { background: #272433; color: #c8b8ff; }
     .pill.reveal, .pill.revealed { background: #2b2f20; color: #d5f55f; }
+    .pill.error { background: #341918; color: #ffb1a8; }
     .mempool-panel { min-width: 0; overflow: hidden; }
     .mempool-strip { width: 100%; min-width: 0; display: flex; gap: 8px; overflow-x: auto; overscroll-behavior-x: contain; padding: 1px 0 10px; scroll-snap-type: x proximity; }
     .mempool-item { flex: 0 0 220px; scroll-snap-align: start; align-self: stretch; }
@@ -435,7 +442,7 @@ pub(super) const INDEX_HTML: &str = r#"<!doctype html>
       .block-card { flex-basis: 108px; }
     }
   </style>
-  <script defer src="/assets/iuna-ui.js?v=97"></script>
+  <script defer src="/assets/iuna-ui.js?v=98"></script>
   <script defer src="/assets/alpine.min.js"></script>
 </head>
 <body x-data="iunaApp()" x-init="init()" @keydown.window.escape="closeModals()" x-cloak>
@@ -1166,9 +1173,41 @@ pub(super) const INDEX_HTML: &str = r#"<!doctype html>
             <div class="setup-actions"><button class="primary" type="submit">Change password</button></div>
           </form>
         </div>
+        <div class="panel danger-panel">
+          <h3>Danger Zone</h3>
+          <div class="settings-mode-row">
+            <div class="settings-mode-copy">
+              <div class="settings-mode-title danger-title">Delete local chain</div>
+              <div class="danger-copy">Remove the local blockchain database and request a fresh sync from connected peers. Wallet and settings stay on this device.</div>
+            </div>
+            <button class="danger" type="button" @click="openChainResetModal">Delete chain</button>
+          </div>
+        </div>
       </div>
     </section>
     </main>
+  </div>
+  <div class="setup-overlay transaction-overlay" x-show="chainResetModalOpen" x-transition.opacity @click.self="closeChainResetModal()" role="dialog" aria-modal="true" aria-labelledby="chain-reset-title">
+    <section class="tx-modal">
+      <div class="tx-modal-head">
+        <div class="tx-modal-title">
+          <span class="pill error">Danger</span>
+          <h2 id="chain-reset-title">Delete local chain</h2>
+        </div>
+        <button type="button" @click="closeChainResetModal" :disabled="chainResetBusy">Close</button>
+      </div>
+      <div class="info-copy">
+        <p>This deletes the local chain database and clears local chain views. Your wallet and settings stay intact.</p>
+        <p>Type <strong>RESET</strong> to confirm.</p>
+      </div>
+      <form class="settings-form" @submit.prevent="resetLocalChain">
+        <label>Confirmation<input x-model="chainResetConfirm" autocomplete="off" spellcheck="false" placeholder="RESET"></label>
+        <div class="danger-actions">
+          <button class="subtle" type="button" @click="closeChainResetModal" :disabled="chainResetBusy">Cancel</button>
+          <button class="danger" type="submit" :disabled="chainResetConfirm.trim() !== 'RESET' || chainResetBusy" x-text="chainResetBusy ? 'Deleting...' : 'Delete and resync'"></button>
+        </div>
+      </form>
+    </section>
   </div>
   <div class="setup-overlay" x-show="showingAuth()" x-transition.opacity role="dialog" aria-modal="true" aria-labelledby="auth-title">
     <section class="setup-modal auth-form">

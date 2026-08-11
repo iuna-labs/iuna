@@ -132,6 +132,19 @@ impl NodeCore {
         self.local_block_anchor_burn = None;
     }
 
+    pub fn reset_chain_to_setup_placeholder(&mut self) {
+        self.ledger = Ledger::new(BTreeMap::new(), 1);
+        self.reset_automatic_mining_progress();
+        self.owned_blinded_transactions.clear();
+        self.owned_blinded_reveals.clear();
+        self.owned_blinded_payloads.clear();
+        self.bump_owned_blinded_outbox_version();
+        self.reveal_bundles.clear();
+        self.equivocated_reveal_bundle_slots.clear();
+        self.local_block_anchor_burn = None;
+        self.outbox.clear();
+    }
+
     pub(super) fn reset_automatic_mining_progress(&mut self) {
         self.last_auto_burn_height = None;
         self.last_auto_anchor_burn_height = None;

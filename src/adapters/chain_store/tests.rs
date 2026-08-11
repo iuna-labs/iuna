@@ -67,6 +67,31 @@ fn sqlite_chain_store_persists_ui_chain_index_for_latest_tip() {
 }
 
 #[test]
+fn sqlite_chain_store_clear_chain_removes_snapshot_metrics_and_ui_indexes() {
+    let dir = tempdir().unwrap();
+    let store = SqliteChainStore::open(dir.path().join("chain.sqlite3")).unwrap();
+    let wallet = Wallet::from_seed("clear-chain-alice");
+    let mut genesis = BTreeMap::new();
+    genesis.insert(wallet.address().to_string(), 10);
+    let ledger =
+        Ledger::new_with_genesis_burns(genesis, vec![GenesisBurn::new(wallet.address(), 1)], 1)
+            .unwrap();
+    let expected = build_ui_chain_index(&ledger.snapshot());
+    let tip_hash = expected.tip_hash.as_deref().unwrap();
+
+    store.save_with_metrics(&ledger.snapshot(), true).unwrap();
+    assert!(store.load().unwrap().is_some());
+    assert!(!store.load_metrics().unwrap().is_empty());
+    assert!(store.load_ui_chain_index(tip_hash).unwrap().is_some());
+
+    store.clear_chain().unwrap();
+
+    assert!(store.load().unwrap().is_none());
+    assert!(store.load_metrics().unwrap().is_empty());
+    assert!(store.load_ui_chain_index(tip_hash).unwrap().is_none());
+}
+
+#[test]
 fn compact_snapshot_roundtrips_and_is_smaller_than_json() {
     let alice = Wallet::from_seed("compact-alice");
     let bob = Wallet::from_seed("compact-bob");

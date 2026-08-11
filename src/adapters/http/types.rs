@@ -90,6 +90,11 @@ pub(super) struct MetricsSettingsForm {
 }
 
 #[derive(Debug, Deserialize)]
+pub(super) struct ChainResetForm {
+    pub(super) confirm: String,
+}
+
+#[derive(Debug, Deserialize)]
 pub(super) struct P2pAnnounceForm {
     pub(super) addr: String,
 }

@@ -35,16 +35,16 @@ mod wallet_persistence;
 #[cfg(test)]
 use actions::{
     add_peer, persist_burn_settings_config, persist_pow_mining_config, remove_address_book_entry,
-    remove_peer, set_burn_settings, set_keep_track_of_metrics, set_p2p_accept_inbound,
-    set_p2p_announce_addr, upsert_address_book_entry,
+    remove_peer, reset_local_chain, set_burn_settings, set_keep_track_of_metrics,
+    set_p2p_accept_inbound, set_p2p_announce_addr, upsert_address_book_entry,
 };
 use actions::{
     api_address_book_delete_form, api_address_book_form, api_burn_fee_estimate_form,
-    api_burn_per_block_form, api_metrics_settings_form, api_mine_fee_estimate_form,
-    api_p2p_announce_form, api_p2p_inbound_form, api_peer_delete_form, api_peer_form,
-    api_pow_mining_form, api_recovery_vdf_settings_form, api_transfer_fee_estimate_form,
-    api_transfer_form, api_wallet_generate_form, api_wallet_import_form, apply_config_form,
-    burn_per_block_form, peer_form, transfer_form,
+    api_burn_per_block_form, api_chain_reset_form, api_metrics_settings_form,
+    api_mine_fee_estimate_form, api_p2p_announce_form, api_p2p_inbound_form, api_peer_delete_form,
+    api_peer_form, api_pow_mining_form, api_recovery_vdf_settings_form,
+    api_transfer_fee_estimate_form, api_transfer_form, api_wallet_generate_form,
+    api_wallet_import_form, apply_config_form, burn_per_block_form, peer_form, transfer_form,
 };
 use api::{
     api_blocks, api_config, api_mempool, api_metrics, api_network_health, api_p2p_metrics,
@@ -183,6 +183,7 @@ pub async fn serve(
             "/api/settings/recovery-vdf",
             post(api_recovery_vdf_settings_form),
         )
+        .route("/api/settings/chain-reset", post(api_chain_reset_form))
         .route("/api/settings/p2p-inbound", post(api_p2p_inbound_form))
         .route("/api/settings/p2p-announce", post(api_p2p_announce_form))
         .route("/api/transfer", post(api_transfer_form))

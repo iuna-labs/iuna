@@ -100,6 +100,9 @@ window.iunaApp = function iunaApp() {
     peerAddress: "",
     flash: null,
     flashTimer: null,
+    chainResetModalOpen: false,
+    chainResetConfirm: "",
+    chainResetBusy: false,
     showWalletUtxos: false,
     showPowDifficultyInfo: false,
     lastUpdated: null,
@@ -747,6 +750,13 @@ window.iunaApp = function iunaApp() {
       const config = this.datasetConfig(kind);
       if (!config) return;
       this[config.items] = [];
+      this.resetPageState(kind);
+      await this.refreshPagedDataset(kind);
+    },
+
+    resetPageState(kind) {
+      const config = this.datasetConfig(kind);
+      if (!config) return;
       Object.assign(this[config.page], {
         offset: 0,
         total: 0,
@@ -754,7 +764,6 @@ window.iunaApp = function iunaApp() {
         loading: false,
         backgroundLoading: false,
       });
-      await this.refreshPagedDataset(kind);
     },
 
     async refreshPagedDataset(kind, options = {}) {
@@ -1100,11 +1109,61 @@ window.iunaApp = function iunaApp() {
       this.showPowDifficultyInfo = false;
     },
 
+    openChainResetModal() {
+      this.settingsFeedback = null;
+      this.chainResetConfirm = "";
+      this.chainResetModalOpen = true;
+    },
+
+    closeChainResetModal() {
+      if (this.chainResetBusy) return;
+      this.chainResetModalOpen = false;
+      this.chainResetConfirm = "";
+    },
+
+    async resetLocalChain() {
+      if (this.chainResetConfirm.trim() !== "RESET") {
+        this.showSettingsFeedback("Type RESET to confirm deleting the local chain", "error");
+        return;
+      }
+      this.chainResetBusy = true;
+      try {
+        await this.submitForm("/api/settings/chain-reset", {
+          confirm: this.chainResetConfirm,
+        });
+        this.blocks = [];
+        this.selectedBlock = null;
+        this.selectedByteBlock = null;
+        this.selectedBurnLeaderBlock = null;
+        this.selectedTransaction = null;
+        this.mempool = [];
+        this.walletTxs = [];
+        this.walletUtxos = [];
+        this.mempoolFirstSeenHeights = {};
+        this.mempoolFirstSeenAt = {};
+        this.mempoolSeenInitialized = false;
+        this.lastBlockMempoolHeight = null;
+        this.resetPageState("walletTx");
+        this.resetPageState("walletUtxo");
+        this.resetPageState("mempool");
+        this.chainResetModalOpen = false;
+        this.chainResetConfirm = "";
+        await this.refresh({ force: true });
+        this.showSettingsFeedback("Local chain deleted. Sync requested from peers.", "success");
+        this.showFlash("Local chain deleted. Syncing from peers.", "success");
+      } catch (error) {
+        this.showSettingsFeedback(error.message, "error");
+      } finally {
+        this.chainResetBusy = false;
+      }
+    },
+
     closeModals() {
       this.closeTransactionModal();
       this.closeWalletUtxosModal();
       this.closePowDifficultyInfo();
       this.closeBurnLeaderRanksModal();
+      this.closeChainResetModal();
     },
 
     async loadOlderBlocks() {

@@ -1465,7 +1465,7 @@ fn metrics_response_skips_bootstrap_points_for_block_time_and_vdf_rounds() {
 
 #[test]
 fn metrics_screen_includes_block_range_filter() {
-    assert!(super::INDEX_HTML.contains("iuna-ui.js?v=97"));
+    assert!(super::INDEX_HTML.contains("iuna-ui.js?v=98"));
     assert!(super::INDEX_HTML.contains("aria-label=\"Metrics block range\""));
     assert!(super::INDEX_HTML.contains("setMetricsRange(100)"));
     assert!(super::INDEX_HTML.contains("setMetricsRange(1000)"));
@@ -1580,6 +1580,59 @@ fn p2p_bind_port_changes_show_global_restart_notice() {
     assert!(app_js.contains("p2pRestartMessage()"));
     assert!(app_js.contains("Restart iuna to close the public P2P listener."));
     assert!(app_js.contains("0.0.0.0:${port}"));
+}
+
+#[test]
+fn settings_includes_dangerous_chain_reset_flow() {
+    let app_js = include_str!("../../../www/assets/iuna-ui.js");
+    assert!(super::INDEX_HTML.contains("Danger Zone"));
+    assert!(super::INDEX_HTML.contains("Delete local chain"));
+    assert!(super::INDEX_HTML.contains("Type <strong>RESET</strong> to confirm."));
+    assert!(super::INDEX_HTML.contains("class=\"danger\""));
+    assert!(super::INDEX_HTML.contains("chainResetModalOpen"));
+    assert!(app_js.contains("chainResetModalOpen: false"));
+    assert!(app_js.contains("async resetLocalChain()"));
+    assert!(app_js.contains("\"/api/settings/chain-reset\""));
+    assert!(app_js.contains("confirm: this.chainResetConfirm"));
+}
+
+#[tokio::test]
+async fn chain_reset_deletes_local_chain_and_returns_to_placeholder() {
+    let dir = tempfile::tempdir().unwrap();
+    let state = auth_test_state(dir.path().join("config.json"), UiConfig::default()).await;
+    let wallet = Wallet::from_seed("http-chain-reset-alice");
+    let mut genesis = BTreeMap::new();
+    genesis.insert(wallet.address().to_string(), 10);
+    let ledger =
+        Ledger::new_with_genesis_burns(genesis, vec![GenesisBurn::new(wallet.address(), 1)], 1)
+            .unwrap();
+    state
+        .chain_store
+        .save_with_metrics(&ledger.snapshot(), true)
+        .unwrap();
+    {
+        let mut node = state.node.lock().await;
+        *node = NodeCore::from_ledger(wallet.clone(), ledger, 1);
+    }
+    {
+        let mut cache = state.ui_cache.lock().await;
+        cache.tip_hash = Some("stale-tip".to_string());
+    }
+
+    let error = super::reset_local_chain(&state, "nope").await.unwrap_err();
+    assert!(error.to_string().contains("type RESET"));
+    assert!(state.chain_store.load().unwrap().is_some());
+    assert!(state.node.lock().await.has_real_chain());
+
+    super::reset_local_chain(&state, "RESET").await.unwrap();
+
+    let node = state.node.lock().await;
+    assert!(node.ledger().is_setup_placeholder());
+    assert_eq!(node.status().wallet_address, wallet.address());
+    drop(node);
+    assert!(state.chain_store.load().unwrap().is_none());
+    assert!(state.chain_store.load_metrics().unwrap().is_empty());
+    assert!(state.ui_cache.lock().await.tip_hash.is_none());
 }
 
 #[test]
