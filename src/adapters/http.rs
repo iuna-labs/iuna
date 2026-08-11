@@ -15,7 +15,7 @@ use axum::{
 use tokio::{net::TcpListener, sync::Mutex};
 
 use crate::{
-    adapters::{config_store, config_store::UiConfig, p2p::GossipNetwork},
+    adapters::{config_store, config_store::UiConfig, p2p::GossipNetwork, ui_index::UiChainIndex},
     app::{SharedNode, SharedPeerBook},
     domain::validate_address,
 };
@@ -207,12 +207,35 @@ pub async fn serve(
 }
 
 async fn prewarm_chain_view_cache(state: HttpState) -> Result<()> {
+    let tip_hash = {
+        let node = state.node.lock().await;
+        node.chain_tip_hash()
+    };
+    if let Some(index) = load_persisted_ui_chain_index(&state, tip_hash.clone()).await? {
+        let mut cache = state.ui_cache.lock().await;
+        cache.tip_hash = index.tip_hash;
+        cache.outputs = index.outputs;
+        cache.revealed_by_height = index.revealed_by_height;
+        cache.burn_leader_ranks_by_hash = index.burn_leader_ranks_by_hash;
+        return Ok(());
+    }
+
     let snapshot = {
         let node = state.node.lock().await;
         node.chain_snapshot()
     };
     let _ = cached_chain_view(&state, &snapshot).await?;
     Ok(())
+}
+
+async fn load_persisted_ui_chain_index(
+    state: &HttpState,
+    tip_hash: String,
+) -> Result<Option<UiChainIndex>> {
+    let store = state.chain_store.clone();
+    tokio::task::spawn_blocking(move || store.load_ui_chain_index(&tip_hash))
+        .await
+        .context("UI chain index loader failed")?
 }
 
 async fn api_config_form(

@@ -10,12 +10,15 @@ use rusqlite::{Connection, OptionalExtension, params};
 
 use serde::Serialize;
 
-use crate::domain::{
-    AGGREGATE_FINALIZER_FEE_ACTIVATION_HEIGHT, Amount, BLINDED_COMMITTER_FEE_BPS,
-    BLINDED_REVEAL_BUNDLE_SIGNER_FEE_BPS, BlindedTransaction, Block, ChainSnapshot, Ledger,
-    MINE_REWARD, OutPoint, REVEAL_COMMITTEE_SIZE, Transaction, TxInput, TxOutput,
-    blinded_reveal_finalizer_fee, hex_hash, reveal_committee_slot_count,
-    revealed_blinded_transactions,
+use crate::{
+    adapters::ui_index::{UiChainIndex, build_ui_chain_index},
+    domain::{
+        AGGREGATE_FINALIZER_FEE_ACTIVATION_HEIGHT, Amount, BLINDED_COMMITTER_FEE_BPS,
+        BLINDED_REVEAL_BUNDLE_SIGNER_FEE_BPS, BlindedTransaction, Block, BurnLeaderRank,
+        ChainSnapshot, Ledger, MINE_REWARD, OutPoint, REVEAL_COMMITTEE_SIZE,
+        RevealedBlindedTransaction, Transaction, TxInput, TxOutput, blinded_reveal_finalizer_fee,
+        hex_hash, reveal_committee_slot_count, revealed_blinded_transactions,
+    },
 };
 
 mod compact;
@@ -49,7 +52,49 @@ CREATE TABLE IF NOT EXISTS block_metrics (
     vdf_rounds INTEGER NOT NULL,
     finalizer_rank INTEGER NOT NULL
 );
+
+CREATE TABLE IF NOT EXISTS ui_cache_meta (
+    id INTEGER PRIMARY KEY CHECK (id = 1),
+    schema_version INTEGER NOT NULL,
+    tip_hash TEXT NOT NULL,
+    updated_at_ms INTEGER NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS ui_output_index (
+    txid TEXT NOT NULL,
+    output_index INTEGER NOT NULL,
+    address TEXT NOT NULL,
+    amount INTEGER NOT NULL,
+    PRIMARY KEY (txid, output_index)
+);
+
+CREATE TABLE IF NOT EXISTS ui_revealed_transactions (
+    height INTEGER NOT NULL,
+    commitment TEXT PRIMARY KEY,
+    included_by TEXT NOT NULL,
+    transaction_json BLOB NOT NULL
+);
+
+CREATE INDEX IF NOT EXISTS idx_ui_revealed_transactions_height
+ON ui_revealed_transactions(height);
+
+CREATE TABLE IF NOT EXISTS ui_burn_leader_ranks (
+    block_hash TEXT NOT NULL,
+    rank INTEGER NOT NULL,
+    ticket_id TEXT NOT NULL,
+    owner TEXT NOT NULL,
+    amount INTEGER NOT NULL,
+    eligible_from_height INTEGER NOT NULL,
+    eligible_until_height INTEGER NOT NULL,
+    PRIMARY KEY (block_hash, rank)
+);
+
+CREATE TABLE IF NOT EXISTS ui_burn_leader_rank_blocks (
+    block_hash TEXT PRIMARY KEY
+);
 "#;
+
+const UI_CACHE_SCHEMA_VERSION: u32 = 1;
 
 #[derive(Clone, Debug, Eq, PartialEq, Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -129,6 +174,32 @@ impl SqliteChainStore {
         })
     }
 
+    pub(crate) fn load_ui_chain_index(&self, tip_hash: &str) -> Result<Option<UiChainIndex>> {
+        self.with_connection(|connection| {
+            let meta = connection
+                .query_row(
+                    "SELECT schema_version, tip_hash FROM ui_cache_meta WHERE id = 1",
+                    [],
+                    |row| Ok((row.get::<_, u32>(0)?, row.get::<_, String>(1)?)),
+                )
+                .optional()
+                .context("failed to load UI chain index metadata")?;
+            let Some((schema_version, stored_tip_hash)) = meta else {
+                return Ok(None);
+            };
+            if schema_version != UI_CACHE_SCHEMA_VERSION || stored_tip_hash != tip_hash {
+                return Ok(None);
+            }
+
+            Ok(Some(UiChainIndex {
+                tip_hash: Some(stored_tip_hash),
+                outputs: load_ui_output_index(connection)?,
+                revealed_by_height: load_ui_revealed_transactions(connection)?,
+                burn_leader_ranks_by_hash: load_ui_burn_leader_ranks(connection)?,
+            }))
+        })
+    }
+
     pub fn save(&self, snapshot: &ChainSnapshot) -> Result<()> {
         self.save_with_metrics(snapshot, false)
     }
@@ -138,6 +209,7 @@ impl SqliteChainStore {
         let snapshot_blob =
             encode_compact_snapshot(snapshot).context("failed to encode compact chain snapshot")?;
         let updated_at_ms = unix_ms();
+        let ui_index = build_ui_chain_index(snapshot);
         let metrics = if keep_metrics {
             Some(metrics_from_snapshot(snapshot)?)
         } else {
@@ -166,6 +238,7 @@ ON CONFLICT(id) DO UPDATE SET
                 Some(metrics) => replace_metrics(&transaction, &metrics)?,
                 None => clear_metrics_in_transaction(&transaction)?,
             }
+            replace_ui_chain_index(&transaction, &ui_index, updated_at_ms)?;
             transaction
                 .commit()
                 .context("failed to commit chain persistence transaction")?;
@@ -384,6 +457,235 @@ fn clear_metrics_in_transaction(transaction: &rusqlite::Transaction<'_>) -> Resu
         .execute("DELETE FROM block_metrics", [])
         .context("failed to clear old block metrics")?;
     Ok(())
+}
+
+fn replace_ui_chain_index(
+    transaction: &rusqlite::Transaction<'_>,
+    index: &UiChainIndex,
+    updated_at_ms: u64,
+) -> Result<()> {
+    clear_ui_chain_index_in_transaction(transaction)?;
+    let Some(tip_hash) = &index.tip_hash else {
+        return Ok(());
+    };
+    transaction
+        .execute(
+            r#"
+INSERT INTO ui_cache_meta (id, schema_version, tip_hash, updated_at_ms)
+VALUES (1, ?1, ?2, ?3)
+"#,
+            params![UI_CACHE_SCHEMA_VERSION, tip_hash, updated_at_ms],
+        )
+        .context("failed to persist UI chain index metadata")?;
+    for (outpoint, output) in &index.outputs {
+        transaction
+            .execute(
+                r#"
+INSERT INTO ui_output_index (txid, output_index, address, amount)
+VALUES (?1, ?2, ?3, ?4)
+"#,
+                params![outpoint.txid, outpoint.index, output.address, output.amount],
+            )
+            .with_context(|| {
+                format!(
+                    "failed to persist UI output index row {}:{}",
+                    outpoint.txid, outpoint.index
+                )
+            })?;
+    }
+    for (height, revealed_transactions) in &index.revealed_by_height {
+        for revealed in revealed_transactions {
+            let transaction_json = serde_json::to_vec(&revealed.transaction)
+                .context("failed to serialize UI revealed transaction")?;
+            transaction
+                .execute(
+                    r#"
+INSERT INTO ui_revealed_transactions (height, commitment, included_by, transaction_json)
+VALUES (?1, ?2, ?3, ?4)
+"#,
+                    params![
+                        height,
+                        revealed.commitment,
+                        revealed.included_by,
+                        transaction_json
+                    ],
+                )
+                .with_context(|| {
+                    format!(
+                        "failed to persist UI revealed transaction {}",
+                        revealed.commitment
+                    )
+                })?;
+        }
+    }
+    for (block_hash, ranks) in &index.burn_leader_ranks_by_hash {
+        transaction
+            .execute(
+                "INSERT INTO ui_burn_leader_rank_blocks (block_hash) VALUES (?1)",
+                params![block_hash],
+            )
+            .with_context(|| format!("failed to persist UI burn leader rank block {block_hash}"))?;
+        for rank in ranks {
+            transaction
+                .execute(
+                    r#"
+INSERT INTO ui_burn_leader_ranks (
+    block_hash, rank, ticket_id, owner, amount, eligible_from_height, eligible_until_height
+) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)
+"#,
+                    params![
+                        block_hash,
+                        rank.rank,
+                        rank.ticket_id,
+                        rank.owner,
+                        rank.amount,
+                        rank.eligible_from_height,
+                        rank.eligible_until_height,
+                    ],
+                )
+                .with_context(|| {
+                    format!(
+                        "failed to persist UI burn leader rank {} for block {}",
+                        rank.rank, block_hash
+                    )
+                })?;
+        }
+    }
+    Ok(())
+}
+
+fn clear_ui_chain_index_in_transaction(transaction: &rusqlite::Transaction<'_>) -> Result<()> {
+    transaction
+        .execute("DELETE FROM ui_cache_meta", [])
+        .context("failed to clear old UI cache metadata")?;
+    transaction
+        .execute("DELETE FROM ui_output_index", [])
+        .context("failed to clear old UI output index")?;
+    transaction
+        .execute("DELETE FROM ui_revealed_transactions", [])
+        .context("failed to clear old UI revealed transaction index")?;
+    transaction
+        .execute("DELETE FROM ui_burn_leader_ranks", [])
+        .context("failed to clear old UI burn leader rank index")?;
+    transaction
+        .execute("DELETE FROM ui_burn_leader_rank_blocks", [])
+        .context("failed to clear old UI burn leader rank block index")?;
+    Ok(())
+}
+
+fn load_ui_output_index(connection: &Connection) -> Result<BTreeMap<OutPoint, TxOutput>> {
+    let mut statement = connection
+        .prepare(
+            r#"
+SELECT txid, output_index, address, amount
+FROM ui_output_index
+ORDER BY txid, output_index
+"#,
+        )
+        .context("failed to prepare UI output index query")?;
+    let rows = statement
+        .query_map([], |row| {
+            Ok((
+                OutPoint {
+                    txid: row.get(0)?,
+                    index: row.get(1)?,
+                },
+                TxOutput {
+                    address: row.get(2)?,
+                    amount: row.get(3)?,
+                },
+            ))
+        })
+        .context("failed to load UI output index")?;
+    rows.collect::<std::result::Result<BTreeMap<_, _>, _>>()
+        .context("failed to read UI output index rows")
+}
+
+fn load_ui_revealed_transactions(
+    connection: &Connection,
+) -> Result<BTreeMap<u64, Vec<RevealedBlindedTransaction>>> {
+    let mut statement = connection
+        .prepare(
+            r#"
+SELECT height, commitment, included_by, transaction_json
+FROM ui_revealed_transactions
+ORDER BY height, commitment
+"#,
+        )
+        .context("failed to prepare UI revealed transaction query")?;
+    let rows = statement
+        .query_map([], |row| {
+            let transaction_json = row.get::<_, Vec<u8>>(3)?;
+            let transaction =
+                serde_json::from_slice::<Transaction>(&transaction_json).map_err(|error| {
+                    rusqlite::Error::FromSqlConversionFailure(
+                        transaction_json.len(),
+                        rusqlite::types::Type::Blob,
+                        Box::new(error),
+                    )
+                })?;
+            Ok(RevealedBlindedTransaction {
+                height: row.get(0)?,
+                commitment: row.get(1)?,
+                included_by: row.get(2)?,
+                transaction,
+            })
+        })
+        .context("failed to load UI revealed transactions")?;
+    let mut by_height = BTreeMap::<u64, Vec<RevealedBlindedTransaction>>::new();
+    for revealed in rows {
+        let revealed = revealed.context("failed to read UI revealed transaction row")?;
+        by_height.entry(revealed.height).or_default().push(revealed);
+    }
+    Ok(by_height)
+}
+
+fn load_ui_burn_leader_ranks(
+    connection: &Connection,
+) -> Result<BTreeMap<String, Vec<BurnLeaderRank>>> {
+    let mut blocks_statement = connection
+        .prepare("SELECT block_hash FROM ui_burn_leader_rank_blocks ORDER BY block_hash")
+        .context("failed to prepare UI burn leader rank block query")?;
+    let blocks = blocks_statement
+        .query_map([], |row| row.get::<_, String>(0))
+        .context("failed to load UI burn leader rank blocks")?;
+    let mut by_block_hash = BTreeMap::<String, Vec<BurnLeaderRank>>::new();
+    for block_hash in blocks {
+        by_block_hash.insert(
+            block_hash.context("failed to read UI burn leader rank block row")?,
+            Vec::new(),
+        );
+    }
+
+    let mut statement = connection
+        .prepare(
+            r#"
+SELECT block_hash, rank, ticket_id, owner, amount, eligible_from_height, eligible_until_height
+FROM ui_burn_leader_ranks
+ORDER BY block_hash, rank
+"#,
+        )
+        .context("failed to prepare UI burn leader rank query")?;
+    let rows = statement
+        .query_map([], |row| {
+            Ok((
+                row.get::<_, String>(0)?,
+                BurnLeaderRank {
+                    rank: row.get(1)?,
+                    ticket_id: row.get(2)?,
+                    owner: row.get(3)?,
+                    amount: row.get(4)?,
+                    eligible_from_height: row.get(5)?,
+                    eligible_until_height: row.get(6)?,
+                },
+            ))
+        })
+        .context("failed to load UI burn leader ranks")?;
+    for row in rows {
+        let (block_hash, rank) = row.context("failed to read UI burn leader rank row")?;
+        by_block_hash.entry(block_hash).or_default().push(rank);
+    }
+    Ok(by_block_hash)
 }
 
 fn metrics_from_snapshot(snapshot: &ChainSnapshot) -> Result<Vec<BlockMetricRow>> {

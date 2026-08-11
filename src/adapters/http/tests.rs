@@ -1700,6 +1700,35 @@ async fn startup_prewarm_populates_chain_view_cache_before_first_request() {
             .last()
             .map(|block| block.hash.clone())
     };
+    let sentinel = OutPoint {
+        txid: "persisted-ui-index-sentinel".to_string(),
+        index: 7,
+    };
+    let connection = rusqlite::Connection::open(state.chain_store.path()).unwrap();
+    connection
+        .execute(
+            r#"
+INSERT INTO ui_cache_meta (id, schema_version, tip_hash, updated_at_ms)
+VALUES (1, 1, ?1, 0)
+"#,
+            rusqlite::params![expected_tip.as_ref().unwrap()],
+        )
+        .unwrap();
+    connection
+        .execute(
+            "INSERT INTO ui_burn_leader_rank_blocks (block_hash) VALUES (?1)",
+            rusqlite::params![expected_tip.as_ref().unwrap()],
+        )
+        .unwrap();
+    connection
+        .execute(
+            r#"
+INSERT INTO ui_output_index (txid, output_index, address, amount)
+VALUES (?1, ?2, ?3, ?4)
+"#,
+            rusqlite::params![&sentinel.txid, sentinel.index, "cached-address", 123_u64],
+        )
+        .unwrap();
     assert!(state.ui_cache.lock().await.tip_hash.is_none());
 
     super::prewarm_chain_view_cache(state.clone())
@@ -1713,6 +1742,13 @@ async fn startup_prewarm_populates_chain_view_cache_before_first_request() {
             .tip_hash
             .as_ref()
             .is_some_and(|tip_hash| cache.burn_leader_ranks_by_hash.contains_key(tip_hash))
+    );
+    assert_eq!(
+        cache.outputs.get(&sentinel),
+        Some(&TxOutput {
+            address: "cached-address".to_string(),
+            amount: 123,
+        })
     );
 }
 

@@ -111,7 +111,8 @@ pub struct OwnedBlindedTransaction {
     pub reveal: BlindedReveal,
 }
 
-#[derive(Clone, Debug, Eq, PartialEq)]
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
 pub struct RevealedBlindedTransaction {
     pub height: u64,
     pub commitment: String,

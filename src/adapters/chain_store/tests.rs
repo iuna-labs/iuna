@@ -3,7 +3,10 @@ use std::collections::BTreeMap;
 use rusqlite::Connection;
 use tempfile::tempdir;
 
-use crate::domain::{BLOCK_REWARD, GenesisBurn, Ledger, Wallet, run_vdf};
+use crate::{
+    adapters::ui_index::build_ui_chain_index,
+    domain::{BLOCK_REWARD, GenesisBurn, Ledger, Wallet, run_vdf},
+};
 
 use super::{
     BlockMetricRow, SqliteChainStore, decode_compact_snapshot, encode_compact_snapshot,
@@ -35,6 +38,32 @@ fn sqlite_chain_store_roundtrips_snapshot() {
             Ok(())
         })
         .unwrap();
+}
+
+#[test]
+fn sqlite_chain_store_persists_ui_chain_index_for_latest_tip() {
+    let dir = tempdir().unwrap();
+    let store = SqliteChainStore::open(dir.path().join("chain.sqlite3")).unwrap();
+    let wallet = Wallet::from_seed("ui-index-alice");
+    let mut genesis = BTreeMap::new();
+    genesis.insert(wallet.address().to_string(), 10);
+    let ledger =
+        Ledger::new_with_genesis_burns(genesis, vec![GenesisBurn::new(wallet.address(), 1)], 1)
+            .unwrap();
+    let snapshot = ledger.snapshot();
+    let expected = build_ui_chain_index(&snapshot);
+    let tip_hash = expected.tip_hash.as_deref().unwrap();
+
+    store.save(&snapshot).unwrap();
+
+    let loaded = store.load_ui_chain_index(tip_hash).unwrap().unwrap();
+    assert_eq!(loaded, expected);
+    assert!(
+        store
+            .load_ui_chain_index("different-tip")
+            .unwrap()
+            .is_none()
+    );
 }
 
 #[test]
