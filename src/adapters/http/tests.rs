@@ -1706,7 +1706,14 @@ async fn startup_prewarm_populates_chain_view_cache_before_first_request() {
         .await
         .unwrap();
 
-    assert_eq!(state.ui_cache.lock().await.tip_hash, expected_tip);
+    let cache = state.ui_cache.lock().await;
+    assert_eq!(cache.tip_hash, expected_tip);
+    assert!(
+        cache
+            .tip_hash
+            .as_ref()
+            .is_some_and(|tip_hash| cache.burn_leader_ranks_by_hash.contains_key(tip_hash))
+    );
 }
 
 async fn auth_test_state(config_path: std::path::PathBuf, config: UiConfig) -> HttpState {

@@ -600,10 +600,7 @@ pub(super) async fn cached_chain_view(
     {
         let cache = state.ui_cache.lock().await;
         if cache.tip_hash == tip_hash {
-            return Ok(UiChainView {
-                outputs: cache.outputs.clone(),
-                revealed_by_height: cache.revealed_by_height.clone(),
-            });
+            return Ok(ui_chain_view_from_cache(&cache));
         }
     }
 
@@ -615,19 +612,34 @@ pub(super) async fn cached_chain_view(
 
     let mut cache = state.ui_cache.lock().await;
     if cache.tip_hash == tip_hash {
-        return Ok(UiChainView {
-            outputs: cache.outputs.clone(),
-            revealed_by_height: cache.revealed_by_height.clone(),
-        });
+        return Ok(ui_chain_view_from_cache(&cache));
     }
 
     cache.tip_hash = computed_tip_hash;
     cache.outputs = view.outputs.clone();
     cache.revealed_by_height = view.revealed_by_height.clone();
+    cache.burn_leader_ranks_by_hash = view.burn_leader_ranks_by_hash.clone();
     Ok(UiChainView {
         outputs: view.outputs,
         revealed_by_height: view.revealed_by_height,
+        burn_leader_ranks_by_hash: view.burn_leader_ranks_by_hash,
     })
+}
+
+pub(super) async fn cached_chain_view_for_tip(
+    state: &HttpState,
+    tip_hash: Option<&str>,
+) -> Option<UiChainView> {
+    let cache = state.ui_cache.lock().await;
+    (cache.tip_hash.as_deref() == tip_hash).then(|| ui_chain_view_from_cache(&cache))
+}
+
+fn ui_chain_view_from_cache(cache: &super::UiChainCache) -> UiChainView {
+    UiChainView {
+        outputs: cache.outputs.clone(),
+        revealed_by_height: cache.revealed_by_height.clone(),
+        burn_leader_ranks_by_hash: cache.burn_leader_ranks_by_hash.clone(),
+    }
 }
 
 fn build_chain_view(snapshot: &ChainSnapshot) -> (Option<String>, UiChainView) {
@@ -636,6 +648,7 @@ fn build_chain_view(snapshot: &ChainSnapshot) -> (Option<String>, UiChainView) {
         UiChainView {
             outputs: known_chain_output_index(snapshot),
             revealed_by_height: revealed_transactions_by_height(snapshot),
+            burn_leader_ranks_by_hash: burn_leader_ranks_for_blocks(snapshot, &snapshot.blocks),
         },
     )
 }

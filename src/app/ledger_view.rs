@@ -30,6 +30,10 @@ impl NodeCore {
         self.ledger.height()
     }
 
+    pub fn chain_tip_hash(&self) -> String {
+        self.ledger.tip_hash().to_string()
+    }
+
     pub fn has_real_chain(&self) -> bool {
         !self.ledger.is_setup_placeholder()
     }

@@ -5,7 +5,7 @@ use tokio::sync::Mutex;
 use crate::{
     adapters::{chain_store::SqliteChainStore, config_store::UiConfig, p2p::GossipNetwork},
     app::{SharedNode, SharedPeerBook, StratumStatus},
-    domain::{OutPoint, RevealedBlindedTransaction, TxOutput},
+    domain::{BurnLeaderRank, OutPoint, RevealedBlindedTransaction, TxOutput},
 };
 
 #[derive(Clone)]
@@ -43,12 +43,14 @@ pub(super) struct UiChainCache {
     pub(super) tip_hash: Option<String>,
     pub(super) outputs: BTreeMap<OutPoint, TxOutput>,
     pub(super) revealed_by_height: BTreeMap<u64, Vec<RevealedBlindedTransaction>>,
+    pub(super) burn_leader_ranks_by_hash: BTreeMap<String, Vec<BurnLeaderRank>>,
 }
 
 #[derive(Clone, Debug, Default)]
 pub(super) struct UiChainView {
     pub(super) outputs: BTreeMap<OutPoint, TxOutput>,
     pub(super) revealed_by_height: BTreeMap<u64, Vec<RevealedBlindedTransaction>>,
+    pub(super) burn_leader_ranks_by_hash: BTreeMap<String, Vec<BurnLeaderRank>>,
 }
 
 pub struct ServeOptions {

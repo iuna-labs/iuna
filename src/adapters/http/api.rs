@@ -19,7 +19,7 @@ use super::{
 };
 use super::{
     DATASET_LIMIT, DATASET_PAGE_LIMIT, EXPLORER_LIMIT, EXPLORER_PAGE_LIMIT, HttpState,
-    add_pending_outputs, burn_leader_ranks_for_blocks, cached_chain_view, metrics_response,
+    add_pending_outputs, cached_chain_view, cached_chain_view_for_tip, metrics_response,
     network_health, ui_blinded_reveal, ui_blinded_transaction, ui_blocks_from_indexes,
     ui_pending_revealed_transaction, ui_transaction, wallet_transaction_rows,
 };
@@ -38,27 +38,42 @@ pub(super) async fn api_blocks(
         .limit
         .unwrap_or(EXPLORER_PAGE_LIMIT)
         .min(EXPLORER_LIMIT);
-    let (snapshot, pending, blocks) = {
+    let (tip_hash, pending, blocks) = {
         let node = state.node.lock().await;
-        let snapshot = node.chain_snapshot();
         let pending = node.pending_transactions();
         let blocks = match query.before_height {
             Some(before_height) => node.blocks_before(before_height, limit),
             None => node.recent_blocks(limit),
         };
-        (snapshot, pending, blocks)
+        (node.chain_tip_hash(), pending, blocks)
     };
-    let view = cached_chain_view(&state, &snapshot)
-        .await
-        .unwrap_or_default();
-    let burn_leader_ranks = burn_leader_ranks_for_blocks(&snapshot, &blocks);
+    let (view, pending, blocks) =
+        match cached_chain_view_for_tip(&state, Some(tip_hash.as_str())).await {
+            Some(view) => (view, pending, blocks),
+            None => {
+                let (snapshot, pending, blocks) = {
+                    let node = state.node.lock().await;
+                    let snapshot = node.chain_snapshot();
+                    let pending = node.pending_transactions();
+                    let blocks = match query.before_height {
+                        Some(before_height) => node.blocks_before(before_height, limit),
+                        None => node.recent_blocks(limit),
+                    };
+                    (snapshot, pending, blocks)
+                };
+                let view = cached_chain_view(&state, &snapshot)
+                    .await
+                    .unwrap_or_default();
+                (view, pending, blocks)
+            }
+        };
     let mut outputs = view.outputs;
     add_pending_outputs(&mut outputs, &pending);
     Json(ui_blocks_from_indexes(
         blocks,
         &outputs,
         &view.revealed_by_height,
-        &burn_leader_ranks,
+        &view.burn_leader_ranks_by_hash,
     ))
 }
 
@@ -74,9 +89,8 @@ pub(super) async fn api_mempool(
     State(state): State<HttpState>,
     Query(query): Query<PageQuery>,
 ) -> Json<Page<UiTransaction>> {
-    let (snapshot, pending, pending_blinded, pending_reveals, pending_revealed) = {
+    let (tip_hash, pending, pending_blinded, pending_reveals, pending_revealed) = {
         let node = state.node.lock().await;
-        let snapshot = node.chain_snapshot();
         let pending = node.pending_transactions();
         let pending_blinded = node.pending_blinded_transactions();
         let pending_reveals = node.pending_blinded_reveals();
@@ -86,16 +100,54 @@ pub(super) async fn api_mempool(
             .map(|revealed| (revealed.commitment.clone(), revealed))
             .collect::<BTreeMap<_, _>>();
         (
-            snapshot,
+            node.chain_tip_hash(),
             pending,
             pending_blinded,
             pending_reveals,
             pending_revealed,
         )
     };
-    let view = cached_chain_view(&state, &snapshot)
-        .await
-        .unwrap_or_default();
+    let (view, pending, pending_blinded, pending_reveals, pending_revealed) =
+        match cached_chain_view_for_tip(&state, Some(tip_hash.as_str())).await {
+            Some(view) => (
+                view,
+                pending,
+                pending_blinded,
+                pending_reveals,
+                pending_revealed,
+            ),
+            None => {
+                let (snapshot, pending, pending_blinded, pending_reveals, pending_revealed) = {
+                    let node = state.node.lock().await;
+                    let snapshot = node.chain_snapshot();
+                    let pending = node.pending_transactions();
+                    let pending_blinded = node.pending_blinded_transactions();
+                    let pending_reveals = node.pending_blinded_reveals();
+                    let pending_revealed = node
+                        .pending_revealed_blinded_transactions()
+                        .into_iter()
+                        .map(|revealed| (revealed.commitment.clone(), revealed))
+                        .collect::<BTreeMap<_, _>>();
+                    (
+                        snapshot,
+                        pending,
+                        pending_blinded,
+                        pending_reveals,
+                        pending_revealed,
+                    )
+                };
+                let view = cached_chain_view(&state, &snapshot)
+                    .await
+                    .unwrap_or_default();
+                (
+                    view,
+                    pending,
+                    pending_blinded,
+                    pending_reveals,
+                    pending_revealed,
+                )
+            }
+        };
     let mut outputs = view.outputs;
     add_pending_outputs(&mut outputs, &pending);
     let mut items = pending

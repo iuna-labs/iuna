@@ -69,7 +69,7 @@ pub use state::ServeOptions;
 use state::{AuthClientKey, AuthSession, HttpState, UiChainCache, UiChainView};
 use static_assets::{alpine_js, app_js, favicon, index};
 use ui::{
-    add_pending_outputs, burn_leader_ranks_for_blocks, cached_chain_view, ui_blinded_reveal,
+    add_pending_outputs, cached_chain_view, cached_chain_view_for_tip, ui_blinded_reveal,
     ui_blinded_transaction, ui_blocks_from_indexes, ui_pending_revealed_transaction,
     ui_transaction, wallet_transaction_rows,
 };
