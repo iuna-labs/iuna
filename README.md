@@ -81,6 +81,8 @@ Use your iuna wallet address as the worker username. Accepted shares become PoW 
 
 We are open to PRs and help running, testing, and improving the devnet.
 
+See [THANKS.md](THANKS.md) for people who have helped test and improve iuna.
+
 ## License
 
 iuna is licensed under the Apache License 2.0. See `LICENSE`.
