@@ -1680,6 +1680,15 @@ fn block_detail_finalizer_opens_burn_leader_ranks_modal() {
     assert!(super::INDEX_HTML.contains("rank.ticket_id ?? rank.ticketId"));
 }
 
+#[test]
+fn block_loading_skeleton_matches_block_card_layout() {
+    assert!(super::INDEX_HTML.contains("block-skeleton-group"));
+    assert!(super::INDEX_HTML.contains("block-card block-card-skeleton skeleton-card"));
+    assert!(super::INDEX_HTML.contains("skeleton-block-height"));
+    assert!(super::INDEX_HTML.contains("skeleton-block-meta"));
+    assert!(super::INDEX_HTML.contains("skeleton-block-miner"));
+}
+
 #[tokio::test]
 async fn startup_prewarm_populates_chain_view_cache_before_first_request() {
     let dir = tempfile::tempdir().unwrap();

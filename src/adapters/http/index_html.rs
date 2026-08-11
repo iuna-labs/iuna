@@ -335,6 +335,13 @@ pub(super) const INDEX_HTML: &str = r#"<!doctype html>
     .block-height { font-size: 18px; font-weight: 900; }
     .block-meta { display: flex; gap: 8px; color: #8d989f; font-size: 12px; }
     .block-miner { font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; font-size: 11px; overflow-wrap: anywhere; color: #9eb3bc; }
+    .block-skeleton-group { flex: 0 0 auto; display: flex; gap: 8px; }
+    .block-card-skeleton { grid-template-rows: 22px 18px minmax(28px, 1fr); align-items: start; cursor: default; }
+    .skeleton-block-height { width: 46px; height: 22px; border-radius: 6px; background: #30383d; }
+    .skeleton-block-meta { display: flex; gap: 6px; min-width: 0; }
+    .skeleton-pill { flex: 0 0 auto; width: 18px; height: 14px; border-radius: 999px; background: #2b3136; }
+    .skeleton-pill.wide { width: 28px; }
+    .skeleton-block-miner { align-self: stretch; min-height: 28px; border-radius: 6px; background: #242a2f; }
     .skeleton-card { pointer-events: none; position: relative; overflow: hidden; }
     .skeleton-card::after { content: ""; position: absolute; inset: 0; background: linear-gradient(90deg, transparent, rgba(213, 245, 95, .12), transparent); animation: skeleton-sweep 1.15s ease-in-out infinite; }
     @keyframes skeleton-sweep { from { transform: translateX(-100%); } to { transform: translateX(100%); } }
@@ -874,24 +881,34 @@ pub(super) const INDEX_HTML: &str = r#"<!doctype html>
               </button>
             </template>
             <template x-if="loadingInitialBlocks && blocks.length === 0">
-              <div>
-                <div class="block-card skeleton-card" aria-hidden="true">
-                  <div class="skeleton-line short"></div>
-                  <div class="skeleton-line medium"></div>
-                  <div class="skeleton-line long"></div>
+              <div class="block-skeleton-group" aria-hidden="true">
+                <div class="block-card block-card-skeleton skeleton-card">
+                  <div class="skeleton-block-height"></div>
+                  <div class="skeleton-block-meta"><span class="skeleton-pill wide"></span><span class="skeleton-pill"></span><span class="skeleton-pill wide"></span></div>
+                  <div class="skeleton-block-miner"></div>
                 </div>
-                <div class="block-card skeleton-card" aria-hidden="true">
-                  <div class="skeleton-line medium"></div>
-                  <div class="skeleton-line short"></div>
-                  <div class="skeleton-line long"></div>
+                <div class="block-card block-card-skeleton skeleton-card">
+                  <div class="skeleton-block-height"></div>
+                  <div class="skeleton-block-meta"><span class="skeleton-pill"></span><span class="skeleton-pill wide"></span><span class="skeleton-pill"></span></div>
+                  <div class="skeleton-block-miner"></div>
+                </div>
+                <div class="block-card block-card-skeleton skeleton-card">
+                  <div class="skeleton-block-height"></div>
+                  <div class="skeleton-block-meta"><span class="skeleton-pill wide"></span><span class="skeleton-pill wide"></span><span class="skeleton-pill"></span></div>
+                  <div class="skeleton-block-miner"></div>
+                </div>
+                <div class="block-card block-card-skeleton skeleton-card">
+                  <div class="skeleton-block-height"></div>
+                  <div class="skeleton-block-meta"><span class="skeleton-pill"></span><span class="skeleton-pill"></span><span class="skeleton-pill wide"></span></div>
+                  <div class="skeleton-block-miner"></div>
                 </div>
               </div>
             </template>
             <template x-if="loadingOlder">
-              <div class="block-card skeleton-card" aria-hidden="true">
-                <div class="skeleton-line short"></div>
-                <div class="skeleton-line medium"></div>
-                <div class="skeleton-line long"></div>
+              <div class="block-card block-card-skeleton skeleton-card" aria-hidden="true">
+                <div class="skeleton-block-height"></div>
+                <div class="skeleton-block-meta"><span class="skeleton-pill wide"></span><span class="skeleton-pill"></span><span class="skeleton-pill wide"></span></div>
+                <div class="skeleton-block-miner"></div>
               </div>
             </template>
             <div class="page-sentinel block-page-sentinel" x-show="hasMoreBlocks" x-init="$nextTick(() => observeBlockSentinel($el))"></div>
