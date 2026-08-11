@@ -131,7 +131,11 @@ pub(super) async fn process_envelope(
                 },
                 Err(error) => Err(error),
             };
+            let request_snapshot = result.as_ref().err().is_some_and(is_possible_fork_error);
             record_inbound_result(network, known_peer, remote_addr, result).await;
+            if request_snapshot {
+                write_envelope(writer, &GossipEnvelope::ChainSnapshotRequest).await?;
+            }
             network.forward_outbox().await;
         }
         GossipEnvelope::Blocks { blocks } => {

@@ -13,7 +13,7 @@ use crate::{
 };
 use tokio::io::AsyncWriteExt;
 
-use super::test_support::{allocations, node};
+use super::test_support::{allocations, gossip_network, node, queue_plaintext_burn};
 
 #[tokio::test]
 async fn full_outbound_queue_is_metric_not_peer_error() {
@@ -67,6 +67,72 @@ async fn full_outbound_queue_is_metric_not_peer_error() {
     let peer = peers.lock().await.list().pop().unwrap();
     assert_eq!(peer.last_error, None);
     assert_eq!(peer.last_error_ms, None);
+}
+
+#[tokio::test]
+async fn single_block_fork_error_requests_chain_snapshot() {
+    let alice = Wallet::from_seed("single-block-fork-alice");
+    let allocations = allocations(std::slice::from_ref(&alice), 1_000);
+    let mut local_node = node(
+        "local-single-block-fork",
+        alice.clone(),
+        allocations.clone(),
+    );
+    let mut remote_node = node("remote-single-block-fork", alice.clone(), allocations);
+
+    queue_plaintext_burn(&mut local_node, &alice, 1);
+    local_node.drain_outbox();
+    local_node.mine_one_at(1).unwrap();
+    local_node.drain_outbox();
+
+    queue_plaintext_burn(&mut remote_node, &alice, 1);
+    remote_node.drain_outbox();
+    remote_node.mine_one_at(2).unwrap();
+    remote_node.drain_outbox();
+    queue_plaintext_burn(&mut remote_node, &alice, 1);
+    remote_node.drain_outbox();
+    let remote_block = remote_node.mine_one_at(3).unwrap();
+    assert_eq!(remote_block.height, 2);
+    assert_ne!(
+        remote_block.prev_hash,
+        local_node.ledger().tip_hash().to_string()
+    );
+
+    let network = gossip_network(
+        Arc::new(tokio::sync::Mutex::new(local_node)),
+        Arc::new(tokio::sync::Mutex::new(PeerBook::default())),
+        "127.0.0.1:9544".parse().unwrap(),
+        None,
+    );
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let client = tokio::net::TcpStream::connect(listener.local_addr().unwrap())
+        .await
+        .unwrap();
+    let (server, remote_addr) = listener.accept().await.unwrap();
+    let (_server_reader, mut server_writer) = server.into_split();
+    let (client_reader, _client_writer) = client.into_split();
+    let mut client_reader = super::LimitedLineReader::new(client_reader);
+    let mut known_peer = None;
+
+    super::process_envelope(
+        &network,
+        &mut server_writer,
+        remote_addr,
+        &mut known_peer,
+        GossipEnvelope::Block(remote_block),
+    )
+    .await
+    .unwrap();
+
+    let line = tokio::time::timeout(std::time::Duration::from_secs(1), client_reader.read_line())
+        .await
+        .unwrap()
+        .unwrap()
+        .unwrap();
+    assert!(matches!(
+        super::parse_envelope(&line).unwrap(),
+        GossipEnvelope::ChainSnapshotRequest
+    ));
 }
 
 #[tokio::test]
