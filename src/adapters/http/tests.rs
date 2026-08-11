@@ -1465,7 +1465,7 @@ fn metrics_response_skips_bootstrap_points_for_block_time_and_vdf_rounds() {
 
 #[test]
 fn metrics_screen_includes_block_range_filter() {
-    assert!(super::INDEX_HTML.contains("iuna-ui.js?v=98"));
+    assert!(super::INDEX_HTML.contains("iuna-ui.js?v=99"));
     assert!(super::INDEX_HTML.contains("aria-label=\"Metrics block range\""));
     assert!(super::INDEX_HTML.contains("setMetricsRange(100)"));
     assert!(super::INDEX_HTML.contains("setMetricsRange(1000)"));
@@ -1735,11 +1735,17 @@ fn block_detail_finalizer_opens_burn_leader_ranks_modal() {
 
 #[test]
 fn block_loading_skeleton_matches_block_card_layout() {
+    let app_js = include_str!("../../../www/assets/iuna-ui.js");
     assert!(super::INDEX_HTML.contains("block-skeleton-group"));
     assert!(super::INDEX_HTML.contains("block-card block-card-skeleton skeleton-card"));
     assert!(super::INDEX_HTML.contains("skeleton-block-height"));
     assert!(super::INDEX_HTML.contains("skeleton-block-meta"));
     assert!(super::INDEX_HTML.contains("skeleton-block-miner"));
+    assert!(app_js.contains("const hadBlocks = this.blocks.length > 0;"));
+    assert!(app_js.contains("const previousScrollWidth = hadBlocks ? rail?.scrollWidth ?? 0 : 0;"));
+    assert!(app_js.contains("&& hadBlocks"));
+    assert!(app_js.contains("this.$nextTick(() => this.resetBlockRailPosition());"));
+    assert!(app_js.contains("resetBlockRailPosition()"));
 }
 
 #[tokio::test]

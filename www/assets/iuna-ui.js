@@ -1005,13 +1005,14 @@ window.iunaApp = function iunaApp() {
     },
 
     mergeFreshBlocks(freshBlocks, options = {}) {
+      const hadBlocks = this.blocks.length > 0;
       const previousHeights = new Set(this.blocks.map((block) => block.height));
       const previousHead = this.blocks[0]?.height;
       const previousHeadHash = this.blocks[0]?.hash;
       const wasFollowingHead =
         !this.selectedBlock || (previousHeadHash && this.selectedBlock.hash === previousHeadHash);
       const rail = this.$refs.blockRail;
-      const previousScrollWidth = rail?.scrollWidth ?? 0;
+      const previousScrollWidth = hadBlocks ? rail?.scrollWidth ?? 0 : 0;
       const known = new Map(this.blocks.map((block) => [block.hash, block]));
       for (const block of freshBlocks) {
         known.set(block.hash, block);
@@ -1030,6 +1031,7 @@ window.iunaApp = function iunaApp() {
         !this.blocks.some((block) => block.height === 0);
 
       const newHeadBlocks = options.animateHead
+        && hadBlocks
         ? this.blocks.filter(
             (block) =>
               !previousHeights.has(block.height) &&
@@ -1041,6 +1043,8 @@ window.iunaApp = function iunaApp() {
         this.$nextTick(() =>
           this.slideNewHeadBlocks(previousScrollWidth, { force: wasFollowingHead })
         );
+      } else if (!hadBlocks) {
+        this.$nextTick(() => this.resetBlockRailPosition());
       }
       this.$nextTick(() => this.maybeLoadOlderBlocksFromRail());
     },
@@ -1063,6 +1067,12 @@ window.iunaApp = function iunaApp() {
       if (addedWidth <= 0) return;
       rail.scrollLeft = addedWidth;
       rail.scrollTo({ left: 0, behavior: "smooth" });
+    },
+
+    resetBlockRailPosition() {
+      const rail = this.$refs.blockRail;
+      if (!rail) return;
+      rail.scrollLeft = 0;
     },
 
     selectBlock(block) {
