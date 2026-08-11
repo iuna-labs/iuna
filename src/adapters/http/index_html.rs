@@ -442,7 +442,7 @@ pub(super) const INDEX_HTML: &str = r#"<!doctype html>
       .block-card { flex-basis: 108px; }
     }
   </style>
-  <script defer src="/assets/iuna-ui.js?v=99"></script>
+  <script defer src="/assets/iuna-ui.js?v=100"></script>
   <script defer src="/assets/alpine.min.js"></script>
 </head>
 <body x-data="iunaApp()" x-init="init()" @keydown.window.escape="closeModals()" x-cloak>

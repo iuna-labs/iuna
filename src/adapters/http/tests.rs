@@ -1465,7 +1465,7 @@ fn metrics_response_skips_bootstrap_points_for_block_time_and_vdf_rounds() {
 
 #[test]
 fn metrics_screen_includes_block_range_filter() {
-    assert!(super::INDEX_HTML.contains("iuna-ui.js?v=99"));
+    assert!(super::INDEX_HTML.contains("iuna-ui.js?v=100"));
     assert!(super::INDEX_HTML.contains("aria-label=\"Metrics block range\""));
     assert!(super::INDEX_HTML.contains("setMetricsRange(100)"));
     assert!(super::INDEX_HTML.contains("setMetricsRange(1000)"));
@@ -1594,6 +1594,11 @@ fn settings_includes_dangerous_chain_reset_flow() {
     assert!(app_js.contains("async resetLocalChain()"));
     assert!(app_js.contains("\"/api/settings/chain-reset\""));
     assert!(app_js.contains("confirm: this.chainResetConfirm"));
+    assert!(app_js.contains(
+        "this.showFlash(\"Local chain deleted. Sync requested from peers.\", \"success\")"
+    ));
+    assert!(!app_js.contains("this.showSettingsFeedback(\"Local chain deleted."));
+    assert!(!app_js.contains("this.showSettingsFeedback(error.message, \"error\");\n      } finally {\n        this.chainResetBusy = false;"));
 }
 
 #[tokio::test]

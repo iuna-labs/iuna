@@ -1120,7 +1120,6 @@ window.iunaApp = function iunaApp() {
     },
 
     openChainResetModal() {
-      this.settingsFeedback = null;
       this.chainResetConfirm = "";
       this.chainResetModalOpen = true;
     },
@@ -1133,7 +1132,7 @@ window.iunaApp = function iunaApp() {
 
     async resetLocalChain() {
       if (this.chainResetConfirm.trim() !== "RESET") {
-        this.showSettingsFeedback("Type RESET to confirm deleting the local chain", "error");
+        this.showFlash("Type RESET to confirm deleting the local chain", "error");
         return;
       }
       this.chainResetBusy = true;
@@ -1159,10 +1158,9 @@ window.iunaApp = function iunaApp() {
         this.chainResetModalOpen = false;
         this.chainResetConfirm = "";
         await this.refresh({ force: true });
-        this.showSettingsFeedback("Local chain deleted. Sync requested from peers.", "success");
-        this.showFlash("Local chain deleted. Syncing from peers.", "success");
+        this.showFlash("Local chain deleted. Sync requested from peers.", "success");
       } catch (error) {
-        this.showSettingsFeedback(error.message, "error");
+        this.showFlash(error.message, "error");
       } finally {
         this.chainResetBusy = false;
       }
