@@ -15,7 +15,7 @@ replace_in_file() {
   local file="$1"
   local pattern="$2"
   local replacement="$3"
-  PATTERN="$pattern" REPLACEMENT="$replacement" perl -0pi -e 's/$ENV{PATTERN}/$ENV{REPLACEMENT}/g' "$file"
+  perl -0pi -e "s|${pattern}|${replacement}|g" "$file"
 }
 
 ensure_clean_worktree() {
