@@ -1,3 +1,6 @@
+const IUNA_DOWNLOADS_URL = "https://iuna.jhx.app/downloads/";
+const IUNA_RELEASE_METADATA_URL = "https://iuna.jhx.app/downloads/latest.json";
+
 window.iunaApp = function iunaApp() {
   return {
     tab: "wallet",
@@ -248,7 +251,7 @@ window.iunaApp = function iunaApp() {
     },
 
     async openLatestRelease() {
-      const url = this.latestRelease?.url || "https://github.com/iuna-labs/iuna/releases";
+      const url = this.latestRelease?.url || IUNA_DOWNLOADS_URL;
       try {
         const tauriOpen = window.__TAURI__?.shell?.open;
         if (typeof tauriOpen === "function") {
@@ -1059,14 +1062,21 @@ window.iunaApp = function iunaApp() {
       this.releaseCheckState = "checking";
       this.releaseCheckError = null;
       try {
-        const response = await fetch("https://api.github.com/repos/iuna-labs/iuna/releases/latest", {
-          headers: { Accept: "application/vnd.github+json" },
+        const response = await fetch(IUNA_RELEASE_METADATA_URL, {
+          cache: "no-store",
+          headers: { Accept: "application/json" },
         });
-        if (!response.ok) throw new Error(`release check returned ${response.status}`);
+        if (!response.ok) {
+          throw new Error(`Release check failed (${response.status})`);
+        }
         const release = await response.json();
+        const version = this.normalizeVersion(release.tag || release.version);
+        if (!version) {
+          throw new Error("Release metadata is missing a version");
+        }
         this.latestRelease = {
-          tag: release.tag_name || "",
-          url: release.html_url || "https://github.com/iuna-labs/iuna/releases",
+          tag: `v${version}`,
+          url: release.url || IUNA_DOWNLOADS_URL,
         };
         this.releaseCheckState = "done";
       } catch (error) {

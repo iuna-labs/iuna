@@ -1,0 +1,10 @@
+target
+src-tauri/target
+src-tauri/binaries
+.agents
+.codex
+.DS_Store
+
+# Keep git history in the build context. The static git browser and the
+# clonable dumb-HTTP repo are generated from this metadata.
+!.git

@@ -1,0 +1,66 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="color-scheme" content="dark">
+  <title>iuna Downloads</title>
+  <link rel="stylesheet" href="/assets/static-listing.css">
+</head>
+<body>
+  <div class="topbar">
+    <div class="wrap">
+      <a class="brand repo-link" href="/">
+        <span class="mark" aria-label="iuna">
+          <svg viewBox="0 0 32 32" aria-hidden="true" focusable="false">
+            <circle class="mark-dot" cx="9.4" cy="7.6" r="2.8"></circle>
+            <path class="mark-loop" d="M9.4 13v7.1c0 3.7 2.9 6.4 6.6 6.4s6.6-2.7 6.6-6.4V13"></path>
+          </svg>
+        </span>
+        <span>iuna</span>
+      </a>
+      <nav aria-label="Page sections">
+        <a href="/">Home</a>
+        <a href="/git/iuna/file/docs/protocol.md.html">Protocol</a>
+        <a href="/git/iuna/">Source</a>
+        <a href="/downloads/">Downloads</a>
+      </nav>
+    </div>
+  </div>
+
+  <main class="wrap">
+    <section class="hero">
+      <h1>iuna Downloads</h1>
+      <p>Release artifacts for iuna <span data-download-version>${IUNA_VERSION}</span>.</p>
+    </section>
+
+    <div class="grid" data-download-cards>
+      <article class="card">
+        <span class="tag pending">Checking</span>
+        <h2>Downloads</h2>
+        <p class="muted">Looking for release artifacts.</p>
+      </article>
+    </div>
+
+    <h2>Files</h2>
+    <table>
+      <thead>
+        <tr>
+          <th>File</th>
+          <th>Size</th>
+        </tr>
+      </thead>
+      <tbody data-download-files>
+        <tr><td colspan="2" class="muted">Checking files.</td></tr>
+      </tbody>
+    </table>
+
+    <pre><code>curl -fsSLO https://iuna.jhx.app/downloads/<span data-linux-x86-file>iuna-v${IUNA_VERSION}-linux-x86_64.tar.gz</span>
+sha256sum -c SHA256SUMS</code></pre>
+  </main>
+  <script>
+    window.IUNA_DOWNLOADS_VERSION = "${IUNA_VERSION}";
+  </script>
+  <script src="/assets/iuna-downloads.js"></script>
+</body>
+</html>

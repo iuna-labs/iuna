@@ -1466,7 +1466,7 @@ fn metrics_response_skips_bootstrap_points_for_block_time_and_vdf_rounds() {
 
 #[test]
 fn metrics_screen_includes_block_range_filter() {
-    assert!(super::INDEX_HTML.contains("iuna-ui.js?v=101"));
+    assert!(super::INDEX_HTML.contains("iuna-ui.js?v=102"));
     assert!(super::INDEX_HTML.contains("aria-label=\"Metrics block range\""));
     assert!(super::INDEX_HTML.contains("setMetricsRange(100)"));
     assert!(super::INDEX_HTML.contains("setMetricsRange(1000)"));

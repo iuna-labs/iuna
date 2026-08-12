@@ -439,7 +439,7 @@ pub(super) const INDEX_HTML: &str = r#"<!doctype html>
       .block-card { flex-basis: 108px; }
     }
   </style>
-  <script defer src="/assets/iuna-ui.js?v=101"></script>
+  <script defer src="/assets/iuna-ui.js?v=102"></script>
   <script defer src="/assets/alpine.min.js"></script>
 </head>
 <body x-data="iunaApp()" x-init="init()" @keydown.window.escape="closeModals()" x-cloak>
@@ -1448,7 +1448,7 @@ pub(super) const INDEX_HTML: &str = r#"<!doctype html>
         <div class="setup-section setup-network">
           <div class="panel-head">
             <h3>Network</h3>
-            <a class="setup-network-link" href="https://github.com/iuna-labs/iuna/blob/main/KNOWN_NODES.txt" target="_blank" rel="noreferrer">Known nodes</a>
+            <a class="setup-network-link" href="https://iuna.jhx.app/git/iuna/file/KNOWN_NODES.txt.html" target="_blank" rel="noreferrer">Known nodes</a>
           </div>
           <div class="setup-network-row">
             <label><span x-text="setupRequiresPeer() ? 'Bootstrap peer (required)' : 'Bootstrap peer'"></span><input x-model="setupPeerAddress" placeholder="iuna.jhx.app:9444"></label>

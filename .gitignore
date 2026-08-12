@@ -3,3 +3,5 @@
 /src-tauri/target
 /src-tauri/gen
 /src-tauri/binaries/iuna-sidecar-*
+/downloads/*
+!/downloads/.gitkeep

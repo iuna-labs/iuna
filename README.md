@@ -1,10 +1,5 @@
 # iuna
 
-[![Discord](https://img.shields.io/badge/Discord-Join-5865F2?logo=discord&logoColor=white)](https://discord.gg/JcXRSSDhS)
-[![Docs](https://img.shields.io/badge/docs-protocol-0f766e)](https://github.com/iuna-labs/iuna/blob/main/docs/protocol.md)
-[![Website](https://img.shields.io/badge/www-iuna--labs.github.io%2Fiuna-2563eb)](https://iuna-labs.github.io/iuna/)
-[![Build Release](https://github.com/iuna-labs/iuna/actions/workflows/release.yml/badge.svg)](https://github.com/iuna-labs/iuna/actions/workflows/release.yml)
-
 iuna is an experimental cryptocurrency devnet.
 
 It combines three ideas:
@@ -34,14 +29,56 @@ This is still an experiment. The design needs real-world testing before those go
 
 The simplest way to run iuna is:
 
-1. Go to [GitHub Releases](https://github.com/iuna-labs/iuna/releases).
-2. Download the latest build for your platform.
+1. Go to [iuna.jhx.app/downloads/](https://iuna.jhx.app/downloads/).
+2. Download the latest available build.
 3. Start the app or binary.
 4. Follow the setup screen.
 
 The setup flow helps you create or import a wallet, back up your recovery phrase, and connect to the devnet.
 
 You do not need Rust or Cargo unless you want to work on the code.
+
+## Source
+
+The public source browser is published at [iuna.jhx.app/git/iuna/](https://iuna.jhx.app/git/iuna/).
+
+Clone the static HTTP repo with:
+
+```sh
+git clone https://iuna.jhx.app/git/iuna.git
+```
+
+## Static Site Image
+
+The Docker image publishes the website, a static git browser, a clonable HTTP repo, and release downloads.
+
+```sh
+docker build -t iuna-static-site:test .
+docker run --rm -p 8080:80 iuna-static-site:test
+```
+
+The Linux CLI archives are built inside the image for x86_64 and aarch64. Prebuilt desktop artifacts must be added before the image build:
+
+- `downloads/iuna-v0.2.47-macos-aarch64-desktop.app.zip`
+- `downloads/iuna-v0.2.47-windows-x86_64-desktop-setup.exe`
+
+Release and deploy with:
+
+```sh
+./deployment.sh 0.2.48
+```
+
+Deployment publishes two images to the `jhx-app` k3s cluster:
+
+- `https://iuna.jhx.app/` routes to the static website image.
+- `iuna.jhx.app:18661` routes to the node management UI.
+- `iuna.jhx.app:9444` routes to the node P2P listener.
+
+Useful overrides:
+
+```sh
+IUNA_DEPLOY_HOST=root@jhx.app IUNA_KUBECTL_CONTEXT=jhx-app ./deployment.sh 0.2.48
+```
 
 ## What You Can Run
 
