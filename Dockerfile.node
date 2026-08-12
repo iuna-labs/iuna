@@ -22,4 +22,4 @@ WORKDIR /data
 EXPOSE 18661 9444
 
 ENTRYPOINT ["iuna"]
-CMD ["--data-dir", "/data", "--http", "0.0.0.0:18661", "--p2p", "0.0.0.0:9444", "--p2p-announce", "iuna.jhx.app:9444"]
+CMD ["--data-dir", "/data", "--http", "0.0.0.0:18661", "--p2p", "0.0.0.0:9444", "--p2p-announce", "142.132.164.59:9444"]
