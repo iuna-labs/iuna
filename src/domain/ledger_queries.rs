@@ -18,12 +18,13 @@ use super::{
 };
 
 fn apply_historical_ticket_block(
+    parent: &Block,
     block: &Block,
     launch_profile: &LaunchProfile,
     tickets: &mut Vec<BurnTicket>,
     active_blinded: &mut BTreeMap<String, ActiveBlindedTransaction>,
 ) -> Result<()> {
-    apply_finalizer_ticket_effects(block, tickets)?;
+    apply_finalizer_ticket_effects(parent, block, tickets)?;
     tickets.extend(tickets_created_by_block(block, launch_profile)?);
     let mut revealed_transactions = Vec::new();
     for reveal in block.all_blinded_reveals() {
@@ -150,7 +151,12 @@ impl Ledger {
                 if block.height >= height {
                     break;
                 }
+                let block_parent = self
+                    .chain
+                    .get(next_block_index - 1)
+                    .with_context(|| format!("missing parent block for height {}", block.height))?;
                 apply_historical_ticket_block(
+                    block_parent,
                     block,
                     &self.launch_profile,
                     &mut tickets,

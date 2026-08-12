@@ -155,7 +155,7 @@ impl Ledger {
             ));
         }
         let mut tickets = self.tickets.clone();
-        apply_finalizer_ticket_effects(&block, &mut tickets)?;
+        apply_finalizer_ticket_effects(self.tip(), &block, &mut tickets)?;
         tickets.extend(tickets_created_by_block(&block, &self.launch_profile)?);
         tickets.extend(tickets_created_by_transactions(
             block.height,

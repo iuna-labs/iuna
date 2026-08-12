@@ -97,9 +97,12 @@ pub use stratum::{
     pack_stratum_nonce,
 };
 use stratum::{hash_meets_difficulty, stratum_mine_header_bytes, stratum_mine_signature};
-#[cfg(test)]
-use ticket::consume_leader_ticket;
 use ticket::{BurnTicket, ticket_block_min_timestamp};
+#[cfg(test)]
+use ticket::{
+    MISSED_FALLBACK_TICKET_INVALIDATION_HEIGHT, consume_leader_ticket, ranked_tickets_for_height,
+    ticket_is_eligible_for_height,
+};
 pub use transaction::{
     BlindedReveal, BlindedTransaction, BuiltBlindedTransaction, MineSearchOutcome, OutPoint,
     OwnedBlindedTransaction, RevealedBlindedTransaction, Transaction, TxInput, TxOutput,

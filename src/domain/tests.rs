@@ -1286,6 +1286,7 @@ fn pending_change_from_combined_utxos_can_fund_next_transaction() {
 
 #[test]
 fn winning_burn_ticket_is_consumed_even_when_window_remains() {
+    let parent = ticket_test_block(3, FinalizerMode::Ticket, 0, "parent");
     let mut tickets = vec![
         BurnTicket {
             id: "high-burn".to_string(),
@@ -1302,29 +1303,9 @@ fn winning_burn_ticket_is_consumed_even_when_window_remains() {
             eligible_until_height: 7,
         },
     ];
-    let mut block = Block {
-        height: 4,
-        prev_hash: "0".repeat(64),
-        timestamp_ms: 1,
-        miner: "alice".to_string(),
-        finalizer_mode: FinalizerMode::Ticket,
-        finalizer_rank: 0,
-        reward: BLOCK_REWARD,
-        vdf_rounds: 1,
-        vdf_output: "vdf".to_string(),
-        leader_proof: Some(LeaderProof {
-            ticket_id: "high-burn".to_string(),
-            public_key: "alice".to_string(),
-            signature: "signature".to_string(),
-        }),
-        blinded_transactions: Vec::new(),
-        reveal_bundle_section: RevealBundleSection::default(),
-        transactions: Vec::new(),
-        hash: String::new(),
-    };
-    block.hash = block.compute_hash();
+    let block = ticket_test_child(&parent, 4, "alice", 0, "high-burn");
 
-    consume_leader_ticket(&block, &mut tickets).unwrap();
+    consume_leader_ticket(&parent, &block, &mut tickets).unwrap();
 
     assert!(
         tickets.iter().all(|ticket| ticket.id != "high-burn"),
@@ -1333,6 +1314,182 @@ fn winning_burn_ticket_is_consumed_even_when_window_remains() {
     assert!(
         tickets.iter().any(|ticket| ticket.id == "small-burn"),
         "unselected future tickets should remain pending"
+    );
+}
+
+fn ticket_test_block(
+    height: u64,
+    finalizer_mode: FinalizerMode,
+    finalizer_rank: u32,
+    seed: &str,
+) -> Block {
+    let mut block = Block {
+        height,
+        prev_hash: hex_hash(format!("ticket-test-prev:{seed}:{height}")),
+        timestamp_ms: height,
+        miner: seed.to_string(),
+        finalizer_mode,
+        finalizer_rank,
+        reward: BLOCK_REWARD,
+        vdf_rounds: 1,
+        vdf_output: hex_hash(format!("ticket-test-vdf:{seed}:{height}")),
+        leader_proof: None,
+        blinded_transactions: Vec::new(),
+        reveal_bundle_section: RevealBundleSection::default(),
+        transactions: Vec::new(),
+        hash: String::new(),
+    };
+    block.hash = block.compute_hash();
+    block
+}
+
+fn ticket_test_child(
+    parent: &Block,
+    height: u64,
+    miner: &str,
+    finalizer_rank: u32,
+    ticket_id: &str,
+) -> Block {
+    let mut block = ticket_test_block(height, FinalizerMode::Ticket, finalizer_rank, miner);
+    block.prev_hash = parent.hash.clone();
+    block.leader_proof = Some(LeaderProof {
+        ticket_id: ticket_id.to_string(),
+        public_key: miner.to_string(),
+        signature: "signature".to_string(),
+    });
+    block.hash = block.compute_hash();
+    block
+}
+
+fn fallback_invalidation_tickets(height: u64) -> Vec<BurnTicket> {
+    vec![
+        BurnTicket {
+            id: "alice-main".to_string(),
+            owner: "alice".to_string(),
+            amount: 10,
+            eligible_from_height: height,
+            eligible_until_height: height + 2,
+        },
+        BurnTicket {
+            id: "alice-other-eligible".to_string(),
+            owner: "alice".to_string(),
+            amount: 7,
+            eligible_from_height: height,
+            eligible_until_height: height + 2,
+        },
+        BurnTicket {
+            id: "bob-main".to_string(),
+            owner: "bob".to_string(),
+            amount: 9,
+            eligible_from_height: height,
+            eligible_until_height: height + 2,
+        },
+        BurnTicket {
+            id: "bob-other-eligible".to_string(),
+            owner: "bob".to_string(),
+            amount: 6,
+            eligible_from_height: height,
+            eligible_until_height: height + 2,
+        },
+        BurnTicket {
+            id: "carol-main".to_string(),
+            owner: "carol".to_string(),
+            amount: 8,
+            eligible_from_height: height,
+            eligible_until_height: height + 2,
+        },
+        BurnTicket {
+            id: "future-same-owner".to_string(),
+            owner: "alice".to_string(),
+            amount: 5,
+            eligible_from_height: height + 1,
+            eligible_until_height: height + 3,
+        },
+    ]
+}
+
+#[test]
+fn primary_ticket_at_activation_height_only_consumes_winning_ticket() {
+    let height = MISSED_FALLBACK_TICKET_INVALIDATION_HEIGHT;
+    let parent = ticket_test_block(height - 1, FinalizerMode::Ticket, 0, "primary-parent");
+    let mut tickets = fallback_invalidation_tickets(height);
+    let ranked = ranked_tickets_for_height(&parent, height, &tickets);
+    let leader = &ranked[0];
+    let leader_id = leader.id.clone();
+    let leader_owner = leader.owner.clone();
+    let eligible_before = tickets
+        .iter()
+        .filter(|ticket| ticket_is_eligible_for_height(ticket, height))
+        .count();
+    let block = ticket_test_child(&parent, height, &leader_owner, 0, &leader_id);
+
+    consume_leader_ticket(&parent, &block, &mut tickets).unwrap();
+
+    assert!(tickets.iter().all(|ticket| ticket.id != leader_id));
+    let eligible_after = tickets
+        .iter()
+        .filter(|ticket| ticket_is_eligible_for_height(ticket, height))
+        .count();
+    assert_eq!(eligible_after, eligible_before - 1);
+}
+
+#[test]
+fn fallback_ticket_before_activation_height_only_consumes_winning_ticket() {
+    let height = MISSED_FALLBACK_TICKET_INVALIDATION_HEIGHT - 1;
+    let parent = ticket_test_block(
+        height - 1,
+        FinalizerMode::Ticket,
+        0,
+        "legacy-fallback-parent",
+    );
+    let mut tickets = fallback_invalidation_tickets(height);
+    let ranked = ranked_tickets_for_height(&parent, height, &tickets);
+    let fallback = &ranked[1];
+    let fallback_id = fallback.id.clone();
+    let fallback_owner = fallback.owner.clone();
+    let eligible_before = tickets
+        .iter()
+        .filter(|ticket| ticket_is_eligible_for_height(ticket, height))
+        .count();
+    let block = ticket_test_child(&parent, height, &fallback_owner, 1, &fallback_id);
+
+    consume_leader_ticket(&parent, &block, &mut tickets).unwrap();
+
+    assert!(tickets.iter().all(|ticket| ticket.id != fallback_id));
+    let eligible_after = tickets
+        .iter()
+        .filter(|ticket| ticket_is_eligible_for_height(ticket, height))
+        .count();
+    assert_eq!(eligible_after, eligible_before - 1);
+}
+
+#[test]
+fn fallback_ticket_invalidates_missed_ranks_and_current_sibling_tickets_from_height_300() {
+    let height = MISSED_FALLBACK_TICKET_INVALIDATION_HEIGHT;
+    let parent = ticket_test_block(height - 1, FinalizerMode::Ticket, 0, "fallback-parent");
+    let mut tickets = fallback_invalidation_tickets(height);
+    let ranked = ranked_tickets_for_height(&parent, height, &tickets);
+    let prefix_owners = ranked
+        .iter()
+        .take(2)
+        .map(|ticket| ticket.owner.clone())
+        .collect::<BTreeSet<_>>();
+    let fallback = &ranked[1];
+    let block = ticket_test_child(&parent, height, &fallback.owner, 1, &fallback.id);
+
+    consume_leader_ticket(&parent, &block, &mut tickets).unwrap();
+
+    assert!(
+        tickets.iter().all(|ticket| {
+            !ticket_is_eligible_for_height(ticket, height) || !prefix_owners.contains(&ticket.owner)
+        }),
+        "eligible tickets from missed ranks and the fallback finalizer should be invalidated"
+    );
+    assert!(
+        tickets
+            .iter()
+            .any(|ticket| ticket.id == "future-same-owner"),
+        "future tickets from invalidated owners should stay pending"
     );
 }
 

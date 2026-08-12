@@ -8,6 +8,8 @@ use super::{
     hex_hash,
 };
 
+pub(super) const MISSED_FALLBACK_TICKET_INVALIDATION_HEIGHT: u64 = 300;
+
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub(super) struct BurnTicket {
     pub(super) id: String,
@@ -246,11 +248,12 @@ fn genesis_bootstrap_tickets(
 }
 
 pub(super) fn apply_finalizer_ticket_effects(
+    parent: &Block,
     block: &Block,
     tickets: &mut Vec<BurnTicket>,
 ) -> Result<()> {
     match block.finalizer_mode {
-        FinalizerMode::Ticket => consume_leader_ticket(block, tickets),
+        FinalizerMode::Ticket => consume_leader_ticket(parent, block, tickets),
         FinalizerMode::Recovery => {
             tickets.retain(|ticket| {
                 !ticket_is_eligible_for_height(ticket, block.height)
@@ -261,18 +264,57 @@ pub(super) fn apply_finalizer_ticket_effects(
     }
 }
 
-pub(super) fn consume_leader_ticket(block: &Block, tickets: &mut Vec<BurnTicket>) -> Result<()> {
+pub(super) fn consume_leader_ticket(
+    parent: &Block,
+    block: &Block,
+    tickets: &mut Vec<BurnTicket>,
+) -> Result<()> {
     let Some(proof) = &block.leader_proof else {
         bail!("block is missing leader proof");
     };
-    let Some(index) = tickets.iter().position(|ticket| {
+    if !tickets.iter().any(|ticket| {
         ticket.id == proof.ticket_id && ticket_is_eligible_for_height(ticket, block.height)
-    }) else {
+    }) {
         bail!("leader ticket is not pending for block {}", block.height);
     };
-    tickets.remove(index);
-    tickets.retain(|ticket| ticket.eligible_until_height > block.height);
+    let invalidated = invalidated_ticket_ids(parent, block, tickets, &proof.ticket_id);
+    tickets.retain(|ticket| {
+        !invalidated.contains(&ticket.id) && ticket.eligible_until_height > block.height
+    });
     Ok(())
+}
+
+fn invalidated_ticket_ids(
+    parent: &Block,
+    block: &Block,
+    tickets: &[BurnTicket],
+    leader_ticket_id: &str,
+) -> std::collections::BTreeSet<String> {
+    let ranked_tickets = ranked_tickets_for_height(parent, block.height, tickets);
+    let Some(finalizer_index) = ranked_tickets
+        .iter()
+        .position(|ticket| ticket.id == leader_ticket_id)
+    else {
+        return [leader_ticket_id.to_string()].into();
+    };
+    if block.height < MISSED_FALLBACK_TICKET_INVALIDATION_HEIGHT || finalizer_index == 0 {
+        return [leader_ticket_id.to_string()].into();
+    }
+
+    let missed_and_finalizer_owners = ranked_tickets
+        .iter()
+        .take(finalizer_index + 1)
+        .map(|ticket| ticket.owner.clone())
+        .collect::<std::collections::BTreeSet<_>>();
+
+    tickets
+        .iter()
+        .filter(|ticket| {
+            ticket_is_eligible_for_height(ticket, block.height)
+                && missed_and_finalizer_owners.contains(&ticket.owner)
+        })
+        .map(|ticket| ticket.id.clone())
+        .collect()
 }
 
 pub(super) fn ticket_is_eligible_for_height(ticket: &BurnTicket, height: u64) -> bool {

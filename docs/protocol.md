@@ -46,6 +46,8 @@ For each block height, eligible tickets are ranked:
 
 The selected finalizer must prove ownership of the selected ticket, respect its rank time slot, and run the required VDF work. A block is valid only if the finalizer matches its ranked ticket, carries the correct leader proof, has a valid timestamp for its rank, includes a valid VDF output, and follows the transaction selection rules.
 
+Starting at height `300`, fallback finalization invalidates missed ticket opportunities. If a ticket block is finalized by rank `1` or higher, nodes invalidate all tickets ranked from `0` through the finalizing rank for that height. They also invalidate any other currently eligible tickets owned by those same addresses. Future tickets from those addresses that are not yet eligible remain pending. Rank `0` ticket blocks continue to consume only the winning ticket.
+
 Every normal block must include at least one plaintext burn. A blinded transaction envelope does not satisfy that rule, because the finalizer and validators cannot know whether the encrypted payload is a burn until reveal. A node that may finalize prepares a local plaintext anchor burn for the next block from the finalizer wallet. This anchor burn is not gossiped as normal wallet traffic.
 
 This mandatory anchor burn is a liveness rule for the ticket pool, not a fairness rule for ticket distribution. It guarantees that normal block production keeps creating future tickets. Fairness against self-serving finalizers comes from blinded third-party burns.
