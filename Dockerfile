@@ -37,6 +37,13 @@ RUN set -eux; \
     echo "iuna-labs" > /src/iuna.git/owner; \
     echo "https://iuna.jhx.app/git/iuna.git" > /src/iuna.git/url; \
     cd /src/iuna.git; \
+    mkdir -p /tmp/iuna-packs; \
+    mv objects/pack/* /tmp/iuna-packs/; \
+    for pack in /tmp/iuna-packs/*.pack; do \
+        [ -e "$pack" ] || continue; \
+        git unpack-objects < "$pack"; \
+    done; \
+    rm -rf /tmp/iuna-packs; \
     git update-server-info; \
     cd /site/git/iuna; \
     stagit -c /var/cache/stagit-iuna/cache /src/iuna.git; \
