@@ -59,8 +59,8 @@ docker run --rm -p 8080:80 iuna-static-site:test
 
 The Linux CLI archives are built inside the image for x86_64 and aarch64. Prebuilt desktop artifacts must be added before the image build:
 
-- `downloads/iuna-v0.2.47-macos-aarch64-desktop.app.zip`
-- `downloads/iuna-v0.2.47-windows-x86_64-desktop-setup.exe`
+- `downloads/iuna-v0.3.0-macos-aarch64-desktop.app.zip`
+- `downloads/iuna-v0.3.0-windows-x86_64-desktop-setup.exe`
 
 Release and deploy with:
 

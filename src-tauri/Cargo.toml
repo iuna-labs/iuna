@@ -1,6 +1,6 @@
 [package]
 name = "iuna-desktop"
-version = "0.2.47"
+version = "0.3.0"
 edition = "2024"
 publish = false
 
