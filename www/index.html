@@ -136,6 +136,7 @@
     .button {
       display: inline-flex;
       align-items: center;
+      gap: 8px;
       min-height: 42px;
       border: 1px solid var(--line);
       border-radius: 8px;
@@ -148,6 +149,23 @@
     }
     .button.primary { border-color: var(--green); background: var(--green); color: #11140c; }
     .button:hover { border-color: var(--green); }
+    .button.discord {
+      border-color: rgba(88, 101, 242, .72);
+      background: linear-gradient(180deg, rgba(88, 101, 242, .24), rgba(88, 101, 242, .14));
+      color: #eef1ff;
+      box-shadow: 0 10px 28px rgba(88, 101, 242, .16), inset 0 1px 0 rgba(255, 255, 255, .08);
+    }
+    .button.discord:hover {
+      border-color: #8e99ff;
+      background: linear-gradient(180deg, rgba(88, 101, 242, .34), rgba(88, 101, 242, .2));
+      box-shadow: 0 12px 34px rgba(88, 101, 242, .22), inset 0 1px 0 rgba(255, 255, 255, .1);
+    }
+    .button-icon {
+      width: 18px;
+      height: 18px;
+      flex: 0 0 auto;
+      fill: currentColor;
+    }
     .repo-link {
       color: var(--text);
       text-decoration: none;
@@ -303,6 +321,11 @@
   </style>
 </head>
 <body>
+  <svg width="0" height="0" aria-hidden="true" focusable="false" style="position:absolute">
+    <symbol id="discord-icon" viewBox="0 0 24 24">
+      <path d="M19.54 5.34A16.9 16.9 0 0 0 15.35 4a11.7 11.7 0 0 0-.54 1.1 15.8 15.8 0 0 0-4.62 0A11.7 11.7 0 0 0 9.65 4a16.9 16.9 0 0 0-4.19 1.34C2.81 9.28 2.09 13.12 2.45 16.9A16.8 16.8 0 0 0 7.59 19.5a12.8 12.8 0 0 0 1.1-1.79 10.9 10.9 0 0 1-1.73-.83c.14-.1.28-.21.42-.32a12.1 12.1 0 0 0 9.24 0c.14.11.28.22.42.32-.55.32-1.13.6-1.74.83.32.63.69 1.23 1.1 1.79a16.8 16.8 0 0 0 5.15-2.6c.42-4.38-.72-8.18-2.01-11.56ZM9.32 14.57c-1 0-1.82-.92-1.82-2.04 0-1.13.8-2.05 1.82-2.05 1.02 0 1.84.92 1.82 2.05 0 1.12-.8 2.04-1.82 2.04Zm5.36 0c-1 0-1.82-.92-1.82-2.04 0-1.13.8-2.05 1.82-2.05 1.02 0 1.84.92 1.82 2.05 0 1.12-.8 2.04-1.82 2.04Z"></path>
+    </symbol>
+  </svg>
   <div class="topbar">
     <div class="wrap">
       <a class="brand repo-link" href="/"><span class="mark" aria-label="iuna"><svg viewBox="0 0 32 32" aria-hidden="true" focusable="false"><circle class="mark-dot" cx="9.4" cy="7.6" r="2.8"></circle><path class="mark-loop" d="M9.4 13v7.1c0 3.7 2.9 6.4 6.6 6.4s6.6-2.7 6.6-6.4V13"></path></svg></span><span>iuna</span></a>
@@ -328,7 +351,7 @@
         <div class="actions">
           <a class="button primary" href="/downloads/">Download builds</a>
           <a class="button" href="/git/iuna/file/docs/protocol.md.html">Read protocol</a>
-          <a class="button" href="https://discord.gg/JcXRSSDhS" target="_blank" rel="noopener noreferrer">Join Discord</a>
+          <a class="button discord" href="https://discord.gg/JcXRSSDhS" target="_blank" rel="noopener noreferrer"><svg class="button-icon" aria-hidden="true" focusable="false"><use href="#discord-icon"></use></svg><span>Join Discord</span></a>
         </div>
       </div>
       <aside class="status-panel" aria-label="Protocol snapshot">
@@ -395,7 +418,7 @@
             <div class="actions join-actions">
               <a class="button primary" href="/downloads/">Download builds</a>
               <a class="button" href="/git/iuna/">Browse source</a>
-              <a class="button" href="https://discord.gg/JcXRSSDhS" target="_blank" rel="noopener noreferrer">Join Discord</a>
+              <a class="button discord" href="https://discord.gg/JcXRSSDhS" target="_blank" rel="noopener noreferrer"><svg class="button-icon" aria-hidden="true" focusable="false"><use href="#discord-icon"></use></svg><span>Join Discord</span></a>
             </div>
           </div>
           <div class="role-list" aria-label="iuna roles">
