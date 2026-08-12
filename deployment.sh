@@ -122,7 +122,7 @@ build_linux_cli_archives() {
     -v "$(pwd):/src/iuna:ro" \
     -v "$(pwd)/downloads:/out" \
     rust:1.86-bookworm \
-    bash -lc '
+    bash -c '
       set -euo pipefail
 
       apt-get update
