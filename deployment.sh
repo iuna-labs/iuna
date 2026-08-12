@@ -109,6 +109,11 @@ build_windows_desktop_in_docker_if_possible() {
     -e "IUNA_VERSION=${version}" \
     -e "HOST_UID=$(id -u)" \
     -e "HOST_GID=$(id -g)" \
+    -v iuna-windows-cargo-registry:/usr/local/cargo/registry \
+    -v iuna-windows-cargo-git:/usr/local/cargo/git \
+    -v iuna-windows-root-cache:/root/.cache \
+    -v iuna-windows-target:/work/iuna/target \
+    -v iuna-windows-tauri-target:/work/iuna/src-tauri/target \
     -v "$(pwd):/src/iuna:ro" \
     -v "$(pwd)/downloads:/out" \
     rust:1.86-bookworm \
@@ -121,6 +126,15 @@ build_windows_desktop_in_docker_if_possible() {
       rustup target add x86_64-pc-windows-msvc
       cargo install --locked cargo-xwin --version 0.19.2
       cargo install --locked tauri-cli --version "^2"
+
+      nsis_utils_path=/root/.cache/tauri/NSIS/Plugins/x86-unicode/additional/nsis_tauri_utils.dll
+      mkdir -p "$(dirname "$nsis_utils_path")"
+      if [ ! -f "$nsis_utils_path" ]; then
+        curl --fail --location --retry 8 --retry-all-errors --retry-delay 3 \
+          --output "$nsis_utils_path" \
+          https://github.com/tauri-apps/nsis-tauri-utils/releases/download/nsis_tauri_utils-v0.5.3/nsis_tauri_utils.dll
+        echo "75197fee3c6a814fe035788d1c34ead39349b860  $nsis_utils_path" | sha1sum -c -
+      fi
 
       mkdir -p /work/iuna
       tar -C /src/iuna \
