@@ -78,6 +78,32 @@ spec:
       hosts:
         - iuna.jhx.app
 ---
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: iuna-admin-tls-ingress
+  namespace: iuna
+  annotations:
+    cert-manager.io/cluster-issuer: letsencrypt-prod
+    traefik.ingress.kubernetes.io/router.middlewares: default-redirect-https@kubernetescrd
+spec:
+  ingressClassName: traefik
+  rules:
+    - host: admin.iuna.jhx.app
+      http:
+        paths:
+          - path: /
+            pathType: Prefix
+            backend:
+              service:
+                name: iuna
+                port:
+                  number: 18661
+  tls:
+    - secretName: iuna-admin-tls
+      hosts:
+        - admin.iuna.jhx.app
+---
 apiVersion: apps/v1
 kind: Deployment
 metadata:

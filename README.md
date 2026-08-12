@@ -71,7 +71,7 @@ Release and deploy with:
 Deployment publishes two images to the `jhx-app` k3s cluster:
 
 - `https://iuna.jhx.app/` routes to the static website image.
-- `iuna.jhx.app:18661` routes to the node management UI.
+- `https://admin.iuna.jhx.app/` routes to the node management UI.
 - `iuna.jhx.app:9444` routes to the node P2P listener.
 
 Useful overrides:
