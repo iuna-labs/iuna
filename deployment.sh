@@ -97,6 +97,55 @@ build_windows_desktop_if_possible() {
   cp "$installer" "$artifact"
 }
 
+build_windows_desktop_in_docker_if_possible() {
+  local version="$1"
+  local artifact="downloads/iuna-v${version}-windows-x86_64-desktop-setup.exe"
+
+  [ -f "$artifact" ] && return 0
+  command -v docker >/dev/null 2>&1 || return 0
+
+  mkdir -p downloads
+  docker run --rm --platform=linux/amd64 \
+    -e "IUNA_VERSION=${version}" \
+    -e "HOST_UID=$(id -u)" \
+    -e "HOST_GID=$(id -g)" \
+    -v "$(pwd):/src/iuna:ro" \
+    -v "$(pwd)/downloads:/out" \
+    rust:1.86-bookworm \
+    bash -c '
+      set -euo pipefail
+
+      apt-get update
+      apt-get install -y --no-install-recommends clang lld llvm nsis
+      rm -rf /var/lib/apt/lists/*
+      rustup target add x86_64-pc-windows-msvc
+      cargo install --locked cargo-xwin --version 0.19.2
+      cargo install --locked tauri-cli --version "^2"
+
+      mkdir -p /work/iuna
+      tar -C /src/iuna \
+        --exclude=./target \
+        --exclude=./src-tauri/target \
+        --exclude=./src-tauri/binaries \
+        --exclude=./.agents \
+        --exclude=./.codex \
+        -cf - . | tar -C /work/iuna -xf -
+
+      cd /work/iuna
+      cargo xwin build --release --locked --target x86_64-pc-windows-msvc
+      mkdir -p src-tauri/binaries
+      cp target/x86_64-pc-windows-msvc/release/iuna.exe src-tauri/binaries/iuna-sidecar-x86_64-pc-windows-msvc.exe
+
+      cd src-tauri
+      cargo tauri build --runner cargo-xwin --target x86_64-pc-windows-msvc --bundles nsis
+
+      installer="$(find target/x86_64-pc-windows-msvc/release/bundle/nsis -maxdepth 1 -type f -name "*setup.exe" | head -n 1)"
+      [ -n "$installer" ] || { echo "Windows installer was not produced" >&2; exit 1; }
+      cp "$installer" "/out/iuna-v${IUNA_VERSION}-windows-x86_64-desktop-setup.exe"
+      chown "${HOST_UID}:${HOST_GID}" "/out/iuna-v${IUNA_VERSION}-windows-x86_64-desktop-setup.exe"
+    '
+}
+
 require_desktop_artifacts() {
   local version="$1"
   local macos_artifact="downloads/iuna-v${version}-macos-aarch64-desktop.app.zip"
@@ -193,6 +242,7 @@ build_versions() {
   build_linux_cli_archives "$version"
   build_macos_desktop_if_possible "$version"
   build_windows_desktop_if_possible "$version"
+  build_windows_desktop_in_docker_if_possible "$version"
   require_desktop_artifacts "$version"
   write_download_checksums
 }

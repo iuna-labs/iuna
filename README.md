@@ -57,7 +57,7 @@ docker build -t iuna-static-site:test .
 docker run --rm -p 8080:80 iuna-static-site:test
 ```
 
-The Linux CLI archives are built inside the image for x86_64 and aarch64. Prebuilt desktop artifacts must be added before the image build:
+The deployment script builds Linux CLI archives for x86_64 and aarch64, builds the macOS desktop artifact on Apple silicon, and tries to cross-build the Windows NSIS installer in Docker. Prebuilt desktop artifacts can still be added before the image build:
 
 - `downloads/iuna-v0.3.0-macos-aarch64-desktop.app.zip`
 - `downloads/iuna-v0.3.0-windows-x86_64-desktop-setup.exe`
