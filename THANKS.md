@@ -6,4 +6,5 @@ Special thanks to:
 
 - [IkkeMcwood](https://github.com/IkkeMcwood) - thorough UI testing, good feedback, and thoughtful protocol/product input.
 - [radbnl](https://github.com/radbnl) - running a public testnet node, good feedback, and thoughtful protocol/product input.
-- Robin and Pim - valuable testing.
+- Robin - Valuable UX/UI and protocol testing
+- Pim - Windows testing
