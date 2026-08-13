@@ -43,6 +43,7 @@
       font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
     }
     pre {
+      max-width: 100%;
       margin: 0;
       overflow-x: auto;
       border: 1px solid var(--line);
@@ -100,10 +101,11 @@
     .hero { padding: 92px 0 48px; }
     .hero-grid {
       display: grid;
-      grid-template-columns: minmax(0, 1.05fr) minmax(320px, .72fr);
+      grid-template-columns: minmax(0, 760px);
       gap: 32px;
       align-items: end;
     }
+    .hero-grid > * { min-width: 0; }
     .eyebrow {
       display: inline-flex;
       gap: 8px;
@@ -171,36 +173,6 @@
       text-decoration: none;
     }
     .repo-link:hover { color: var(--green); }
-    .status-panel {
-      border: 1px solid var(--line);
-      border-radius: 8px;
-      overflow: hidden;
-      background: rgba(21, 25, 27, .82);
-      box-shadow: 0 24px 80px rgba(0, 0, 0, .24);
-    }
-    .status-head {
-      display: flex;
-      justify-content: space-between;
-      gap: 10px;
-      align-items: center;
-      padding: 12px 14px;
-      border-bottom: 1px solid var(--line);
-      color: var(--muted);
-      font-size: 12px;
-      font-weight: 850;
-      text-transform: uppercase;
-    }
-    .status-body { display: grid; gap: 1px; background: var(--line); }
-    .stat {
-      display: grid;
-      grid-template-columns: 126px minmax(0, 1fr);
-      gap: 12px;
-      padding: 12px 14px;
-      background: var(--panel-2);
-    }
-    .label { color: #87949b; font-size: 11px; font-weight: 850; text-transform: uppercase; }
-    .value { color: var(--text); font-weight: 850; }
-    .value.green { color: var(--green); }
     section { padding: 38px 0; border-top: 1px solid rgba(39, 48, 54, .9); scroll-margin-top: 76px; }
     .section-head { display: grid; gap: 8px; margin-bottom: 18px; }
     .section-head p { margin: 0; max-width: 680px; font-size: 15px; }
@@ -315,7 +287,9 @@
       .hero-grid, .split, .grid, .join-panel { grid-template-columns: 1fr; }
       nav { display: none; }
       .wrap { width: min(100% - 32px, 1060px); }
-      .stat { grid-template-columns: 1fr; gap: 4px; }
+      h1 { font-size: clamp(44px, 18vw, 78px); }
+      .lead { font-size: 19px; }
+      .button { max-width: 100%; justify-content: center; }
       .role-list { border-left: 0; border-top: 1px solid var(--line); padding-left: 0; padding-top: 16px; }
     }
   </style>
@@ -347,22 +321,12 @@
         <p class="pronunciation" aria-label="Pronounced yoo-nuh">/ˈjuː.nə/</p>
         <p class="lead">An experimental cryptocurrency devnet that combines VDF finalization, a burn lottery, and open proof-of-work issuance.</p>
         <p>iuna is not a mainnet and not money yet. It is a small L1 lab for learning how a wallet, node, finalizer, miner, mempool, and peer network behave when real people run it on real machines.</p>
-        <pre><code>git clone https://getiuna.org/git/iuna.git</code></pre>
         <div class="actions">
           <a class="button primary" href="/downloads/">Download builds</a>
           <a class="button" href="/git/iuna/file/docs/protocol.md.html">Read protocol</a>
           <a class="button discord" href="https://discord.gg/JcXRSSDhS" target="_blank" rel="noopener noreferrer"><svg class="button-icon" aria-hidden="true" focusable="false"><use href="#discord-icon"></use></svg><span>Join Discord</span></a>
         </div>
       </div>
-      <aside class="status-panel" aria-label="Protocol snapshot">
-        <div class="status-head"><span>Protocol Snapshot</span><span>devnet</span></div>
-        <div class="status-body">
-          <div class="stat"><span class="label">Finalize</span><span class="value green">Burn lottery + VDF</span></div>
-          <div class="stat"><span class="label">Issue</span><span class="value">PoW mine actions</span></div>
-          <div class="stat"><span class="label">Wallet</span><span class="value">Encrypted local seed</span></div>
-          <div class="stat"><span class="label">Network</span><span class="value">One P2P TCP port</span></div>
-        </div>
-      </aside>
     </div>
   </header>
 
