@@ -78,6 +78,38 @@ spec:
       hosts:
         - getiuna.org
 ---
+apiVersion: traefik.containo.us/v1alpha1
+kind: Middleware
+metadata:
+  name: iuna-redirect-to-getiuna
+  namespace: iuna
+spec:
+  redirectRegex:
+    regex: "^https?://iuna\\.jhx\\.app(?:/(.*))?$"
+    replacement: "https://getiuna.org/$1"
+    permanent: true
+
+---
+apiVersion: traefik.containo.us/v1alpha1
+kind: IngressRoute
+metadata:
+  name: iuna-redirect
+  namespace: iuna
+spec:
+  entryPoints:
+    - web
+    - websecure
+  routes:
+    - match: Host(`iuna.jhx.app`)
+      kind: Rule
+      middlewares:
+        - name: iuna-redirect-to-getiuna
+      services:
+        - name: iuna-www
+          port: 80
+  tls:
+    secretName: iuna-redirect-tls
+---
 apiVersion: networking.k8s.io/v1
 kind: Ingress
 metadata:
