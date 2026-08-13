@@ -327,7 +327,17 @@ main() {
   [[ "$version" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]] || die "version must look like 0.2.48"
 
   ensure_clean_worktree
-  git rev-parse --verify "v${version}" >/dev/null 2>&1 && die "tag v${version} already exists"
+
+  # Check if the tag already exists; if it does, only deploy
+  if git rev-parse --verify "v${version}" >/dev/null 2>&1; then
+    echo "Tag v${version} already exists; skipping build and deploying only"
+    if ! read -p "Are you sure you want to deploy v${version}? (y/N) " answer || [[ ! "$answer" =~ ^[Yy]$ ]]; then
+      echo "Aborting deployment"
+      exit 1
+    fi
+    deploy_docker_image "$version"
+    exit 0
+  fi
 
   update_versions "$version"
   commit_and_tag "$version"
