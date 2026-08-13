@@ -217,8 +217,11 @@ build_linux_cli_archives() {
   local linux_x86_64_package="iuna-${tag}-linux-x86_64"
   local linux_aarch64_package="iuna-${tag}-linux-aarch64"
 
-  mkdir -p downloads
-  [ -f "downloads/${linux_x86_64_package}.tar.gz" ] && [ -f "downloads/${linux_aarch64_package}.tar.gz" ] && return 0
+  mkdir -p .docker-build downloads
+  [ -f "downloads/${linux_x86_64_package}.tar.gz" ] \
+    && [ -f "downloads/${linux_aarch64_package}.tar.gz" ] \
+    && [ -f .docker-build/iuna-node-linux-x86_64 ] \
+    && return 0
 
   require_command docker
 
@@ -228,6 +231,7 @@ build_linux_cli_archives() {
     -e "HOST_GID=$(id -g)" \
     -v "$(pwd):/src/iuna:ro" \
     -v "$(pwd)/downloads:/out" \
+    -v "$(pwd)/.docker-build:/node-out" \
     rust:1.86-bookworm \
     bash -c '
       set -euo pipefail
@@ -244,6 +248,7 @@ build_linux_cli_archives() {
         --exclude=./src-tauri/binaries \
         --exclude=./.agents \
         --exclude=./.codex \
+        --exclude=./.docker-build \
         -cf - . | tar -C /work/iuna -xf -
 
       cd /work/iuna
@@ -259,11 +264,12 @@ build_linux_cli_archives() {
       mkdir -p "/tmp/site/${linux_x86_64_package}" "/tmp/site/${linux_aarch64_package}"
       cp target/release/iuna "/tmp/site/${linux_x86_64_package}/"
       cp target/aarch64-unknown-linux-gnu/release/iuna "/tmp/site/${linux_aarch64_package}/"
+      cp target/release/iuna /node-out/iuna-node-linux-x86_64
       cp README.md LICENSE "/tmp/site/${linux_x86_64_package}/"
       cp README.md LICENSE "/tmp/site/${linux_aarch64_package}/"
       tar -C /tmp/site -czf "/out/${linux_x86_64_package}.tar.gz" "${linux_x86_64_package}"
       tar -C /tmp/site -czf "/out/${linux_aarch64_package}.tar.gz" "${linux_aarch64_package}"
-      chown "${HOST_UID}:${HOST_GID}" "/out/${linux_x86_64_package}.tar.gz" "/out/${linux_aarch64_package}.tar.gz"
+      chown "${HOST_UID}:${HOST_GID}" "/out/${linux_x86_64_package}.tar.gz" "/out/${linux_aarch64_package}.tar.gz" /node-out/iuna-node-linux-x86_64
     '
 }
 
@@ -311,6 +317,8 @@ build_docker_image() {
   local node_image="${IUNA_NODE_IMAGE:-iuna-node:v${version}}"
 
   require_command docker
+
+  [ -f .docker-build/iuna-node-linux-x86_64 ] || die "missing .docker-build/iuna-node-linux-x86_64; run build_versions first"
 
   docker build --platform=linux/amd64 --progress=plain -t "$www_image" .
   docker build --platform=linux/amd64 --progress=plain -t "$node_image" -f Dockerfile.node .
@@ -393,6 +401,7 @@ main() {
       echo "Aborting deployment"
       exit 1
     fi
+    build_linux_cli_archives "$version"
     build_docker_image "$version"
     deploy_docker_image "$version"
     exit 0

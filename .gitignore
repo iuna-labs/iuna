@@ -1,4 +1,5 @@
 /target
+/.docker-build
 /.iuna
 /src-tauri/target
 /src-tauri/gen

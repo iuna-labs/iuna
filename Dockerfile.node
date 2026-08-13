@@ -1,11 +1,5 @@
 # syntax=docker/dockerfile:1
 
-FROM rust:1.86-bookworm AS builder
-
-WORKDIR /src/iuna
-COPY . .
-RUN cargo build --release --locked
-
 FROM debian:bookworm-slim
 
 RUN apt-get update \
@@ -13,7 +7,8 @@ RUN apt-get update \
     && apt-get clean \
     && rm -rf /var/lib/apt/lists/*
 
-COPY --from=builder /src/iuna/target/release/iuna /usr/local/bin/iuna
+COPY .docker-build/iuna-node-linux-x86_64 /usr/local/bin/iuna
+RUN chmod +x /usr/local/bin/iuna
 COPY README.md /usr/share/doc/iuna/README.md
 COPY LICENSE /usr/share/doc/iuna/LICENSE
 
