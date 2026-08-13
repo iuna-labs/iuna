@@ -19,6 +19,12 @@ require_command() {
   command -v "$command_name" >/dev/null 2>&1 || die "missing required command: ${command_name}"
 }
 
+is_apple_silicon_macos() {
+  [ "$(uname -s)" = "Darwin" ] || return 1
+  [ "$(uname -m)" = "arm64" ] && return 0
+  [ "$(sysctl -n hw.optional.arm64 2>/dev/null || true)" = "1" ]
+}
+
 confirm() {
   local prompt="$1"
   local answer
@@ -100,18 +106,20 @@ build_macos_desktop_if_possible() {
 
   [ -f "$artifact" ] && return 0
   [ "$(uname -s)" = "Darwin" ] || return 0
-  [ "$(uname -m)" = "arm64" ] || die "macOS desktop artifact requires Apple silicon; expected ${artifact}"
+  is_apple_silicon_macos || die "macOS desktop artifact requires Apple silicon; expected ${artifact}"
 
   require_command codesign
   require_command ditto
+  require_command rustup
   ensure_tauri_cli
-  cargo build --release --locked
+  rustup target add aarch64-apple-darwin
+  cargo build --release --locked --target aarch64-apple-darwin
   mkdir -p src-tauri/binaries downloads
-  cp target/release/iuna src-tauri/binaries/iuna-sidecar-aarch64-apple-darwin
+  cp target/aarch64-apple-darwin/release/iuna src-tauri/binaries/iuna-sidecar-aarch64-apple-darwin
   chmod +x src-tauri/binaries/iuna-sidecar-aarch64-apple-darwin
-  (cd src-tauri && cargo tauri build --bundles app)
+  (cd src-tauri && cargo tauri build --target aarch64-apple-darwin --bundles app)
 
-  local app="src-tauri/target/release/bundle/macos/iuna.app"
+  local app="src-tauri/target/aarch64-apple-darwin/release/bundle/macos/iuna.app"
   codesign --force --deep --sign - --options runtime "$app"
   codesign --verify --deep --strict --verbose=4 "$app"
   ditto -c -k --keepParent "$app" "$artifact"
