@@ -34,7 +34,7 @@
       <p>Release artifacts for iuna <span data-download-version>${IUNA_VERSION}</span>.</p>
     </section>
 
-    <div class="grid" data-download-cards>
+    <div class="grid download-grid" data-download-cards>
       <article class="card">
         <span class="tag pending">Checking</span>
         <h2>Downloads</h2>
@@ -42,22 +42,15 @@
       </article>
     </div>
 
-    <h2>Files</h2>
-    <table>
-      <thead>
-        <tr>
-          <th>File</th>
-          <th>Size</th>
-        </tr>
-      </thead>
-      <tbody data-download-files>
-        <tr><td colspan="2" class="muted">Checking files.</td></tr>
-      </tbody>
-    </table>
+    <p class="checksum-link"><a href="/downloads/SHA256SUMS">SHA256 checksums</a></p>
 
-    <pre><code>git clone https://getiuna.org/git/iuna.git
+    <section class="source-build">
+      <h2>Build from source</h2>
+      <p class="muted">Clone the repository and run a local release build.</p>
+      <pre><code>git clone https://getiuna.org/git/iuna.git
 cd iuna
 cargo run --release</code></pre>
+    </section>
   </main>
   <script>
     window.IUNA_DOWNLOADS_VERSION = "${IUNA_VERSION}";

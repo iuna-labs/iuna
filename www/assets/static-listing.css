@@ -268,6 +268,11 @@ body > h3 {
   margin: 18px 0 28px;
 }
 
+.download-grid {
+  grid-template-columns: repeat(4, minmax(0, 1fr));
+  margin-bottom: 10px;
+}
+
 .card {
   min-width: 0;
   border: 1px solid var(--line);
@@ -320,6 +325,23 @@ body > h3 {
 
 .muted { color: var(--muted); }
 
+.checksum-link {
+  margin: 0 0 28px;
+  font-size: 13px;
+}
+
+.source-build {
+  margin-top: 28px;
+}
+
+.source-build h2 {
+  margin-bottom: 8px;
+}
+
+.source-build p {
+  margin-top: 0;
+}
+
 #content, #files, #branches, #tags {
   border: 1px solid var(--line);
   border-radius: 8px;
@@ -338,5 +360,10 @@ hr {
   nav { display: none; }
   h1 { font-size: 34px; }
   .grid { grid-template-columns: 1fr; }
+  .download-grid { grid-template-columns: 1fr; }
   table { display: block; overflow-x: auto; }
+}
+
+@media (min-width: 781px) and (max-width: 1020px) {
+  .download-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); }
 }
