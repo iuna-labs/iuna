@@ -1495,6 +1495,27 @@ fn metrics_screen_includes_block_range_filter() {
 }
 
 #[test]
+fn version_update_check_normalizes_tags_before_comparing() {
+    let app_js = include_str!("../../../www/assets/iuna-ui.js");
+    let update_available = app_js
+        .split("updateAvailable()")
+        .nth(1)
+        .expect("updateAvailable should exist")
+        .split("versionPanelTitle()")
+        .next()
+        .expect("updateAvailable should precede versionPanelTitle");
+
+    assert!(
+        update_available
+            .contains("const current = this.normalizeVersion(this.status.app_version);")
+    );
+    assert!(
+        update_available.contains("const latest = this.normalizeVersion(this.latestRelease?.tag);")
+    );
+    assert!(update_available.contains("if (current === latest) return false;"));
+}
+
+#[test]
 fn blocks_endpoint_uses_cached_block_projection_without_cloning_full_ui_index() {
     let api_rs = include_str!("api.rs");
     assert!(api_rs.contains("cached_ui_blocks_for_tip(&state, Some(tip_hash.as_str()), blocks)"));

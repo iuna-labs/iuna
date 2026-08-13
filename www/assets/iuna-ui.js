@@ -237,9 +237,10 @@ window.iunaApp = function iunaApp() {
     },
 
     updateAvailable() {
-      const current = this.status.app_version;
-      const latest = this.latestRelease?.tag;
+      const current = this.normalizeVersion(this.status.app_version);
+      const latest = this.normalizeVersion(this.latestRelease?.tag);
       if (!current || !latest) return false;
+      if (current === latest) return false;
       return this.compareVersions(latest, current) > 0;
     },
 
