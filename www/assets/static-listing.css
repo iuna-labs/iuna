@@ -39,12 +39,8 @@ a.line:target {
   background: rgba(255, 255, 255, .04);
 }
 
-img.logo, #logo img {
-  width: 32px;
-  height: 32px;
-  border-radius: 8px;
-  vertical-align: middle;
-  margin-right: 10px;
+img.logo, #logo {
+  display: none;
 }
 
 h1, h2, h3 { letter-spacing: 0; }
@@ -143,11 +139,44 @@ pre, code {
 }
 
 pre {
-  overflow-x: auto;
+  white-space: pre-wrap;
+  overflow-x: visible;
+  overflow-wrap: anywhere;
   border: 1px solid var(--line);
   border-radius: 8px;
   padding: 14px;
   background: #0b0d0e;
+}
+
+pre#blob,
+#blob {
+  overflow-x: visible;
+  table-layout: fixed;
+}
+
+#blob td:first-child {
+  width: 1%;
+  white-space: nowrap;
+}
+
+#blob td:last-child {
+  width: 99%;
+  min-width: 0;
+}
+
+#blob pre,
+#blob code {
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+  word-break: break-word;
+}
+
+#blob pre {
+  margin: 0;
+  border: 0;
+  border-radius: 0;
+  padding: 0;
+  background: transparent;
 }
 
 table {
@@ -197,6 +226,29 @@ tr:last-child td { border-bottom: 0; }
 #desc {
   color: #b7c3c9;
   font-size: 15px;
+}
+
+#content > p:first-child {
+  margin: 18px 0;
+  padding: 10px 14px;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: var(--panel-2);
+  color: var(--text);
+  font-weight: 850;
+}
+
+#content > h1,
+#content > h2,
+#content > h3,
+body > h1,
+body > h2,
+body > h3 {
+  margin: 18px auto;
+  padding: 10px 14px;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: var(--panel-2);
 }
 
 #navbar a {

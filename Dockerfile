@@ -12,6 +12,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
         pkg-config \
         libgit2-dev \
         git \
+        python3 \
         ca-certificates \
     && rm -rf /var/lib/apt/lists/*
 
@@ -55,7 +56,8 @@ RUN set -eux; \
     cp /src/iuna-work/src-tauri/icons/32x32.png /site/git/logo.png; \
     cp /src/iuna-work/src-tauri/icons/32x32.png /site/git/iuna/logo.png; \
     cp -a /src/iuna.git /site/git/iuna.git; \
-    find /site/git -type f -name '*.html' -exec sed -i -E 's|<a href="(\.\./)+"><img |<a href="/"><img |g' {} +
+    find /site/git -type f -name '*.html' -exec sed -i -E 's|<a href="(\.\./)+"><img |<a href="/"><img |g' {} +; \
+    python3 /src/iuna-work/scripts/postprocess_stagit_site.py /site/git
 
 COPY www /site
 COPY downloads /site/downloads
