@@ -1655,6 +1655,10 @@ window.iunaApp = function iunaApp() {
       return `${this.powMiningWorkers} worker${this.powMiningWorkers === 1 ? "" : "s"}`;
     },
 
+    pobDetailLabel() {
+      return this.status.mining?.last_auto_finalization_status || "Waiting for next automatic finalization tick";
+    },
+
     autoPowStatusLabel() {
       if (!this.powMiningEnabled) return "PoW mining is off";
       const status =
@@ -1723,6 +1727,14 @@ window.iunaApp = function iunaApp() {
           ? `Burning ${this.amountLabel(mining.burn_per_block || 0)} IUNA per block with ${this.amountLabel(mining.automatic_burn_fee || 0)} IUNA fee/byte.`
           : "Automatic burn preparation is off.",
         mining.automatic ? "active" : "warning"
+      );
+      const finalizationStatus = mining.last_auto_finalization_status || "";
+      this.noteMiningStateChange(
+        "pob-status",
+        finalizationStatus,
+        "PoB status",
+        finalizationStatus || "Waiting for next automatic finalization tick.",
+        mining.automatic ? "active" : "info"
       );
       this.noteMiningStateChange(
         "pow-workers",
@@ -2600,6 +2612,22 @@ window.iunaApp = function iunaApp() {
         Number(block?.blindedTransactionBytes ?? block?.blinded_transaction_bytes ?? 0) +
         Number(block?.revealBundleBytes ?? block?.reveal_bundle_bytes ?? 0)
       );
+    },
+
+    blockRevealFeePenalty(block) {
+      return block?.revealFeePenalty ?? block?.reveal_fee_penalty ?? {};
+    },
+
+    blockRevealListRatio(block) {
+      const penalty = this.blockRevealFeePenalty(block);
+      const included = Number(penalty.revealListsIncluded ?? penalty.reveal_lists_included ?? 0);
+      const committeeSize = Number(penalty.committeeSize ?? penalty.committee_size ?? 0);
+      return `${included}/${committeeSize}`;
+    },
+
+    blockRevealFeePenaltyAmount(block) {
+      const penalty = this.blockRevealFeePenalty(block);
+      return Number(penalty.feePenalty ?? penalty.fee_penalty ?? 0);
     },
 
     blockByteBreakdown(block) {

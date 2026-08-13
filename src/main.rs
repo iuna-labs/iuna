@@ -505,6 +505,14 @@ async fn run_automatic_finalizer(node: SharedNode, gossip: p2p::GossipNetwork, d
         let (finalized, outbox) = {
             let mut node = node.lock().await;
             let finalized = node.complete_prepared_block_at(work, vdf_output, publish_timestamp_ms);
+            match &finalized {
+                Ok(block) => node.record_automatic_finalization_status(format!(
+                    "finalized block {} ({})",
+                    block.height, block.hash
+                )),
+                Err(error) => node
+                    .record_automatic_finalization_status(format!("skipped after VDF: {error:#}")),
+            }
             let outbox = node.drain_outbox();
             (finalized, outbox)
         };

@@ -330,6 +330,27 @@ fn automatic_finalization_respects_zero_recovery_vdf_threshold() {
 }
 
 #[test]
+fn selected_finalizer_runs_vdf_with_zero_recovery_vdf_threshold() {
+    let alice = Wallet::from_seed("automatic-selected-zero-alice");
+    let mut allocations = BTreeMap::new();
+    allocations.insert(alice.address().to_string(), 10 * MICRO_IUNA);
+    let ledger =
+        Ledger::new_with_genesis_burns(allocations, vec![GenesisBurn::new(alice.address(), 1)], 10)
+            .unwrap();
+    assert_eq!(
+        ledger.expected_leader_for_next_block().as_deref(),
+        Some(alice.address())
+    );
+    let mut node = NodeCore::from_ledger(alice.clone(), ledger, 1);
+    node.set_recovery_vdf_top_rank_percent(0);
+
+    let plan = node.prepare_automatic_finalization(1);
+
+    assert!(plan.work.is_some());
+    assert!(plan.skipped_reason.is_none());
+}
+
+#[test]
 fn automatic_non_leader_burn_is_queued_as_blinded() {
     let alice = Wallet::from_seed("auto-blinded-burn-alice");
     let bob = Wallet::from_seed("auto-blinded-burn-bob");

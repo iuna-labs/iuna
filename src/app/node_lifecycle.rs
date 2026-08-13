@@ -98,6 +98,7 @@ impl NodeCore {
             recovery_vdf_top_rank_percent: recovery_vdf_top_rank_percent.min(100),
             last_auto_burn_height: None,
             last_auto_anchor_burn_height: None,
+            last_auto_finalization_status: None,
             last_auto_pow_mine_anchor: None,
             last_auto_pow_mine_status: None,
             auto_pow_mine_cursor: None,
@@ -151,6 +152,7 @@ impl NodeCore {
     pub(super) fn reset_automatic_mining_progress(&mut self) {
         self.last_auto_burn_height = None;
         self.last_auto_anchor_burn_height = None;
+        self.last_auto_finalization_status = None;
         self.last_auto_pow_mine_anchor = None;
         self.last_auto_pow_mine_status = None;
         self.auto_pow_mine_cursor = None;

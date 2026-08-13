@@ -1,8 +1,10 @@
 use std::collections::BTreeMap;
 
 use crate::domain::{
-    BlindedReveal, BlindedTransaction, Block, BurnLeaderRank, ChainSnapshot, MINE_REWARD, OutPoint,
-    RevealedBlindedTransaction, Transaction, TxInput, TxOutput,
+    BLINDED_FEE_BPS_DENOMINATOR, BLINDED_REVEAL_FINALIZER_FEE_BPS, BlindedReveal,
+    BlindedTransaction, Block, BurnLeaderRank, ChainSnapshot, MINE_REWARD, OutPoint,
+    REVEAL_COMMITTEE_SIZE, RevealedBlindedTransaction, Transaction, TxInput, TxOutput,
+    blinded_reveal_finalizer_fee, reveal_committee_slot_count,
 };
 
 use crate::adapters::ui_index::build_ui_chain_index;
@@ -10,7 +12,7 @@ use crate::adapters::ui_index::build_ui_chain_index;
 use super::{
     HttpState, UiChainView,
     types::{
-        UiBlock, UiByteBreakdown, UiRevealBundle, UiTransaction, UiTxInput,
+        UiBlock, UiByteBreakdown, UiRevealBundle, UiRevealFeePenalty, UiTransaction, UiTxInput,
         WalletTransactionContext, WalletTransactionFilters, WalletTransactionRow,
     },
 };
@@ -241,9 +243,17 @@ pub(super) fn ui_block(
         .get(&block.hash)
         .cloned()
         .unwrap_or_default();
+    let reveal_lists_included = block.included_reveal_bundle_count();
+    let committee_size = if ranks.is_empty() {
+        REVEAL_COMMITTEE_SIZE
+    } else {
+        reveal_committee_slot_count(ranks.len())
+    };
     let revealed_fees = revealed_transactions.iter().fold(0_u64, |total, revealed| {
         total.saturating_add(revealed.transaction.fee())
     });
+    let reveal_fee_penalty =
+        reveal_fee_penalty(revealed_transactions, reveal_lists_included, committee_size);
     let transaction_bytes = block
         .transactions
         .iter()
@@ -319,6 +329,7 @@ pub(super) fn ui_block(
         transaction_byte_breakdown,
         blinded_transaction_bytes,
         reveal_bundle_bytes,
+        reveal_fee_penalty,
         vdf_rounds: block.vdf_rounds,
         vdf_output: block.vdf_output,
         leader_proof: block.leader_proof,
@@ -330,6 +341,26 @@ pub(super) fn ui_block(
             .collect(),
         reveal_bundles,
         hash: block.hash,
+    }
+}
+
+fn reveal_fee_penalty(
+    revealed_transactions: &[RevealedBlindedTransaction],
+    reveal_lists_included: usize,
+    committee_size: usize,
+) -> UiRevealFeePenalty {
+    let fee_penalty = revealed_transactions.iter().fold(0_u64, |total, revealed| {
+        let fee = revealed.transaction.fee();
+        let full_finalizer_share = ((fee as u128 * BLINDED_REVEAL_FINALIZER_FEE_BPS as u128)
+            / BLINDED_FEE_BPS_DENOMINATOR as u128) as u64;
+        let paid_finalizer_share =
+            blinded_reveal_finalizer_fee(fee, reveal_lists_included, committee_size);
+        total.saturating_add(full_finalizer_share.saturating_sub(paid_finalizer_share))
+    });
+    UiRevealFeePenalty {
+        reveal_lists_included,
+        committee_size,
+        fee_penalty,
     }
 }
 

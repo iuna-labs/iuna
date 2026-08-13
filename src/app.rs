@@ -110,6 +110,7 @@ pub struct NodeCore {
     recovery_vdf_top_rank_percent: u8,
     last_auto_burn_height: Option<u64>,
     last_auto_anchor_burn_height: Option<u64>,
+    last_auto_finalization_status: Option<String>,
     last_auto_pow_mine_anchor: Option<String>,
     last_auto_pow_mine_status: Option<String>,
     auto_pow_mine_cursor: Option<AutoPowMineCursor>,

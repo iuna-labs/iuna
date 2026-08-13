@@ -346,6 +346,7 @@ pub(super) struct UiBlock {
     pub(super) transaction_byte_breakdown: Vec<UiByteBreakdown>,
     pub(super) blinded_transaction_bytes: usize,
     pub(super) reveal_bundle_bytes: usize,
+    pub(super) reveal_fee_penalty: UiRevealFeePenalty,
     pub(super) vdf_rounds: u64,
     pub(super) vdf_output: String,
     pub(super) leader_proof: Option<crate::domain::LeaderProof>,
@@ -354,6 +355,13 @@ pub(super) struct UiBlock {
     pub(super) revealed_transactions: Vec<UiTransaction>,
     pub(super) reveal_bundles: Vec<UiRevealBundle>,
     pub(super) hash: String,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Serialize)]
+pub(super) struct UiRevealFeePenalty {
+    pub(super) reveal_lists_included: usize,
+    pub(super) committee_size: usize,
+    pub(super) fee_penalty: Amount,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq, Serialize)]

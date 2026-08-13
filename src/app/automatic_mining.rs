@@ -158,11 +158,13 @@ impl NodeCore {
 
         if self.wallet.is_locked() {
             plan.skipped_reason = Some("wallet is locked".to_string());
+            self.last_auto_finalization_status = plan.skipped_reason.clone();
             return plan;
         }
 
         if !self.automatic_mining_enabled {
             plan.skipped_reason = Some("automatic mining is off".to_string());
+            self.last_auto_finalization_status = plan.skipped_reason.clone();
             return plan;
         }
 
@@ -170,6 +172,7 @@ impl NodeCore {
             Ok(tx) => plan.burned = tx,
             Err(error) => {
                 plan.skipped_reason = Some(format!("automatic burn failed: {error:#}"));
+                self.last_auto_finalization_status = plan.skipped_reason.clone();
                 return plan;
             }
         }
@@ -188,10 +191,12 @@ impl NodeCore {
                 "collecting blinded reveals for next block ({:.1}s remaining)",
                 wait_ms as f64 / 1000.0
             ));
+            self.last_auto_finalization_status = plan.skipped_reason.clone();
             return plan;
         }
         if let Err(error) = self.publish_reveal_bundle_for_next_block() {
             plan.skipped_reason = Some(format!("{error:#}"));
+            self.last_auto_finalization_status = plan.skipped_reason.clone();
             return plan;
         }
 
@@ -201,16 +206,23 @@ impl NodeCore {
                     "wallet finalizer rank {rank} is outside the top {}% VDF threshold",
                     self.recovery_vdf_top_rank_percent
                 ));
+                self.last_auto_finalization_status = plan.skipped_reason.clone();
                 return plan;
             }
         } else {
             if self.should_prepare_recovery_vdf(timestamp_ms) {
                 match self.prepare_recovery_block_with_local_anchor(timestamp_ms) {
                     Ok(work) => {
+                        self.last_auto_finalization_status = Some(format!(
+                            "running recovery VDF for candidate block {} ({} rounds)",
+                            work.height(),
+                            work.vdf_rounds()
+                        ));
                         plan.work = Some(work);
                     }
                     Err(error) => {
                         plan.skipped_reason = Some(format!("{error:#}"));
+                        self.last_auto_finalization_status = plan.skipped_reason.clone();
                     }
                 }
             } else {
@@ -218,16 +230,23 @@ impl NodeCore {
                 plan.skipped_reason = selected_leader.map(|leader| {
                     format!("wallet is waiting for selected finalizer {leader} to finish the VDF")
                 });
+                self.last_auto_finalization_status = plan.skipped_reason.clone();
             }
             return plan;
         }
 
         match self.prepare_next_block_with_local_anchor(timestamp_ms) {
             Ok(work) => {
+                self.last_auto_finalization_status = Some(format!(
+                    "running VDF for candidate block {} ({} rounds)",
+                    work.height(),
+                    work.vdf_rounds()
+                ));
                 plan.work = Some(work);
             }
             Err(error) => {
                 plan.skipped_reason = Some(format!("{error:#}"));
+                self.last_auto_finalization_status = plan.skipped_reason.clone();
             }
         }
 
@@ -384,6 +403,9 @@ impl NodeCore {
     }
 
     fn wallet_rank_runs_vdf(&self, rank: u32) -> bool {
+        if rank == 0 {
+            return true;
+        }
         let rank_count = self.ledger.finalizer_rank_count_for_next_block();
         let allowed =
             allowed_recovery_vdf_rank_count(rank_count, self.recovery_vdf_top_rank_percent);

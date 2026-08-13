@@ -644,6 +644,10 @@ pub(super) const INDEX_HTML: &str = r#"<!doctype html>
               <div class="mine-stat-value" x-text="pobStatusLabel()"></div>
             </div>
             <div class="mine-stat">
+              <div class="mine-stat-label">PoB Detail</div>
+              <div class="mine-stat-value" x-text="pobDetailLabel()" :title="pobDetailLabel()"></div>
+            </div>
+            <div class="mine-stat">
               <div class="mine-stat-label">PoW State</div>
               <div class="mine-stat-value" x-text="powStatusShortLabel()"></div>
             </div>
@@ -936,6 +940,8 @@ pub(super) const INDEX_HTML: &str = r#"<!doctype html>
                 </div>
                 <div class="detail-kv"><div class="key">Mode</div><div x-text="selectedBlock.finalizer_mode === 'recovery' ? 'Recovery' : `Rank ${selectedBlock.finalizer_rank ?? 0}`"></div></div>
                 <div class="detail-kv"><div class="key">Reward</div><div>IUNA <span x-text="amountLabel(selectedBlock.reward)"></span></div></div>
+                <div class="detail-kv"><div class="key">Reveal Lists</div><div x-text="blockRevealListRatio(selectedBlock)"></div></div>
+                <div class="detail-kv"><div class="key">Fee Penalty</div><div>IUNA <span x-text="amountLabel(blockRevealFeePenaltyAmount(selectedBlock))"></span></div></div>
                 <div class="detail-kv"><div class="key">Burns</div><div x-text="blockBurnCount(selectedBlock)"></div></div>
                 <div class="detail-kv"><div class="key">Transfers</div><div x-text="blockTransferCount(selectedBlock)"></div></div>
                 <div class="detail-kv"><div class="key">Total Burned</div><div>IUNA <span x-text="amountLabel(blockBurned(selectedBlock))"></span></div></div>

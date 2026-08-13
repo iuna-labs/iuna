@@ -230,6 +230,9 @@ fn block_detail_reconstructs_revealed_items_from_snapshot_blocks() {
     assert_eq!(blocks[1].transactions[0].amount, transfer.amount());
     assert_eq!(blocks[1].transactions[0].to.as_deref(), Some(bob.address()));
     assert_eq!(blocks[1].revealed_transactions.len(), 1);
+    assert_eq!(blocks[1].reveal_fee_penalty.reveal_lists_included, 1);
+    assert_eq!(blocks[1].reveal_fee_penalty.committee_size, 3);
+    assert_eq!(blocks[1].reveal_fee_penalty.fee_penalty, 1);
 }
 
 #[test]

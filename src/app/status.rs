@@ -42,6 +42,7 @@ impl NodeCore {
                 burn_per_block: self.burn_per_block,
                 automatic_burn_fee: self.burn_fee,
                 automatic_pow_mine_fee: MINE_FINALIZER_FEE,
+                last_auto_finalization_status: self.last_auto_finalization_status.clone(),
                 last_auto_pow_mine_anchor: self.last_auto_pow_mine_anchor.clone(),
                 last_auto_pow_mine_status: if self.pow_mining_enabled && !self.has_real_chain() {
                     Some("waiting for a real chain before PoW mining can start".to_string())
@@ -162,6 +163,10 @@ impl NodeCore {
 
     pub fn pow_mining_workers(&self) -> u8 {
         self.pow_mining_workers
+    }
+
+    pub fn record_automatic_finalization_status(&mut self, message: impl Into<String>) {
+        self.last_auto_finalization_status = Some(message.into());
     }
 
     pub fn set_recovery_vdf_top_rank_percent(&mut self, percent: u8) {
