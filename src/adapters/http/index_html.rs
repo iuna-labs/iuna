@@ -362,6 +362,7 @@ pub(super) const INDEX_HTML: &str = r#"<!doctype html>
     .detail-kv .key { color: #8d989f; }
     .detail-link { width: fit-content; max-width: 100%; padding: 0; border: 0; background: transparent; color: #d7f2ff; font: inherit; text-align: left; cursor: pointer; }
     .detail-link code { color: inherit; text-decoration: underline; text-underline-offset: 3px; }
+    .fee-penalty-value.penalty { color: #ffb1a8; font-weight: 900; }
     .rank-list { display: grid; gap: 8px; }
     .rank-row { display: grid; grid-template-columns: 52px minmax(0, 1fr); gap: 10px; align-items: start; border: 1px solid #30383d; border-radius: 8px; padding: 10px; background: #15191d; }
     .rank-number { color: #d7f2ff; font-weight: 700; }
@@ -941,7 +942,7 @@ pub(super) const INDEX_HTML: &str = r#"<!doctype html>
                 <div class="detail-kv"><div class="key">Mode</div><div x-text="selectedBlock.finalizer_mode === 'recovery' ? 'Recovery' : `Rank ${selectedBlock.finalizer_rank ?? 0}`"></div></div>
                 <div class="detail-kv"><div class="key">Reward</div><div>IUNA <span x-text="amountLabel(selectedBlock.reward)"></span></div></div>
                 <div class="detail-kv"><div class="key">Reveal Lists</div><div x-text="blockRevealListRatio(selectedBlock)"></div></div>
-                <div class="detail-kv"><div class="key">Fee Penalty</div><div>IUNA <span x-text="amountLabel(blockRevealFeePenaltyAmount(selectedBlock))"></span></div></div>
+                <div class="detail-kv"><div class="key">Fee Penalty</div><div class="fee-penalty-value" :class="{ penalty: blockRevealFeePenaltyAmount(selectedBlock) > 0 }">IUNA <span x-text="amountLabel(blockRevealFeePenaltyAmount(selectedBlock))"></span></div></div>
                 <div class="detail-kv"><div class="key">Burns</div><div x-text="blockBurnCount(selectedBlock)"></div></div>
                 <div class="detail-kv"><div class="key">Transfers</div><div x-text="blockTransferCount(selectedBlock)"></div></div>
                 <div class="detail-kv"><div class="key">Total Burned</div><div>IUNA <span x-text="amountLabel(blockBurned(selectedBlock))"></span></div></div>

@@ -4,7 +4,7 @@ use crate::domain::{
     Amount, BLINDED_COMMITTER_FEE_BPS, BLINDED_FEE_BPS_DENOMINATOR,
     BLINDED_REVEAL_BUNDLE_SIGNER_FEE_BPS, BlindedTransaction, Block, BurnLeaderRank, ChainSnapshot,
     Ledger, MINE_REWARD, OutPoint, REVEAL_COMMITTEE_SIZE, RevealedBlindedTransaction, Transaction,
-    TxOutput, blinded_reveal_finalizer_fee, hex_hash, reveal_committee_slot_count,
+    TxOutput, blinded_reveal_finalizer_fee, hex_hash, reveal_committee_slot_count_for_height,
     revealed_blinded_transactions,
 };
 
@@ -178,7 +178,16 @@ fn reveal_bundle_slots_by_height(snapshot: &ChainSnapshot) -> BTreeMap<u64, usiz
         .map(|ranks_by_height| {
             ranks_by_height
                 .into_iter()
-                .map(|(height, ranks)| (height, reveal_committee_slot_count(ranks.len())))
+                .map(|(height, ranks)| {
+                    (
+                        height,
+                        reveal_committee_slot_count_for_height(
+                            height,
+                            ranks.len(),
+                            ranks.iter().map(|rank| rank.owner.as_str()),
+                        ),
+                    )
+                })
                 .collect()
         })
         .unwrap_or_default()

@@ -1,5 +1,6 @@
 #[cfg(test)]
-use std::collections::{BTreeMap, BTreeSet};
+use std::collections::BTreeMap;
+use std::collections::BTreeSet;
 
 mod blinded;
 mod block;
@@ -76,7 +77,8 @@ pub use protocol::{
     MAX_BLINDED_TRANSACTION_EXPIRY_HEIGHTS, MAX_BLOCK_BYTES, MAX_PENDING_TRANSACTIONS,
     MAX_REVEAL_BUNDLE_BYTES, MAX_VDF_ROUNDS, MICRO_IUNA, MINE_ACTIONS_PER_ANCHOR_LIMIT,
     MINE_DIFFICULTY_BITS, MINE_FINALIZER_FEE, MINE_REWARD, RECOVERY_BLOCK_DELAY_MS,
-    REVEAL_COMMITTEE_SIZE, TransactionSubmitOutcome, VDF_TARGET_BLOCK_MS,
+    REVEAL_COMMITTEE_SIZE, TransactionSubmitOutcome, UNIQUE_OWNER_REVEAL_COMMITTEE_HEIGHT,
+    VDF_TARGET_BLOCK_MS,
 };
 use protocol::{
     BLINDED_KEY_BYTES, BLINDED_NONCE_BYTES, BLOCK_MEDIAN_TIME_PAST_WINDOW,
@@ -126,6 +128,23 @@ pub use wallet::Wallet;
 
 pub fn reveal_committee_slot_count(eligible_rank_count: usize) -> usize {
     eligible_rank_count.min(REVEAL_COMMITTEE_SIZE)
+}
+
+pub fn reveal_committee_slot_count_for_owners<'a>(
+    owners: impl IntoIterator<Item = &'a str>,
+) -> usize {
+    reveal_committee_slot_count(owners.into_iter().collect::<BTreeSet<_>>().len())
+}
+
+pub fn reveal_committee_slot_count_for_height<'a>(
+    height: u64,
+    eligible_rank_count: usize,
+    owners: impl IntoIterator<Item = &'a str>,
+) -> usize {
+    if height < UNIQUE_OWNER_REVEAL_COMMITTEE_HEIGHT {
+        return reveal_committee_slot_count(eligible_rank_count);
+    }
+    reveal_committee_slot_count_for_owners(owners)
 }
 
 pub fn blinded_reveal_finalizer_fee(

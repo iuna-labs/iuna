@@ -140,7 +140,7 @@ The visible inputs are signed for the blinded envelope itself and are not repeat
 
 Reveal is a later step. A `BlindedReveal` carries only the commitment and decryption key. Reveals are not included as loose block items. They are carried in signed reveal bundles.
 
-For each next block height, nodes compute a reveal committee from the burn leader ranking. Slot `0` is assigned to the rank `0` block finalizer, so the selected finalizer can always sign a reveal list for its own block. The remaining slots are assigned to the two lowest-ranked eligible tickets. A committee member can sign one bundle for its slot, height, and parent hash. A bundle is at most `10,000` bytes and lists valid pending reveals ordered by visible fee rate. Empty bundles are not gossiped.
+For each next block height, nodes compute a reveal committee from the burn leader ranking. Slot `0` is assigned to the rank `0` block finalizer, so the selected finalizer can always sign a reveal list for its own block. Before height `500`, the remaining slots are assigned to the two lowest-ranked eligible tickets. Starting at height `500`, the remaining slots are assigned to the next highest-ranked eligible tickets with owners that are not already in the committee, up to three unique owners total. A committee member can sign one bundle for its slot, height, and parent hash. A bundle is at most `10,000` bytes and lists valid pending reveals ordered by visible fee rate. Empty bundles are not gossiped.
 
 Automatic nodes wait about `30 seconds` after seeing pending reveals for the next height before signing a reveal bundle or starting the reveal-bound VDF. This gives reveal gossip time to settle and avoids locking in an underfilled bundle from the first partial batch a node received.
 

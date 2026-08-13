@@ -17,7 +17,7 @@ use crate::{
         BLINDED_REVEAL_BUNDLE_SIGNER_FEE_BPS, BlindedTransaction, Block, BurnLeaderRank,
         ChainSnapshot, Ledger, MINE_REWARD, OutPoint, REVEAL_COMMITTEE_SIZE,
         RevealedBlindedTransaction, Transaction, TxInput, TxOutput, blinded_reveal_finalizer_fee,
-        hex_hash, reveal_committee_slot_count, revealed_blinded_transactions,
+        hex_hash, reveal_committee_slot_count_for_height, revealed_blinded_transactions,
     },
 };
 
@@ -1126,7 +1126,16 @@ fn metrics_from_snapshot(snapshot: &ChainSnapshot) -> Result<Vec<BlockMetricRow>
         .map(|ranks_by_height| {
             ranks_by_height
                 .into_iter()
-                .map(|(height, ranks)| (height, reveal_committee_slot_count(ranks.len())))
+                .map(|(height, ranks)| {
+                    (
+                        height,
+                        reveal_committee_slot_count_for_height(
+                            height,
+                            ranks.len(),
+                            ranks.iter().map(|rank| rank.owner.as_str()),
+                        ),
+                    )
+                })
                 .collect::<BTreeMap<_, _>>()
         })
         .unwrap_or_default();

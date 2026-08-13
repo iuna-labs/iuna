@@ -14,7 +14,8 @@ use super::ticket::{
 use super::{
     Amount, BlindedReveal, BlindedTransaction, Block, BurnLeaderRank, ChainSnapshot, ChainStatus,
     LaunchProfile, Ledger, OutPoint, RevealCommitteeMember, RevealedBlindedTransaction,
-    Transaction, TxOutput, reveal_committee_slot_count,
+    Transaction, TxOutput, UNIQUE_OWNER_REVEAL_COMMITTEE_HEIGHT, reveal_committee_slot_count,
+    reveal_committee_slot_count_for_height,
 };
 
 fn apply_historical_ticket_block(
@@ -191,18 +192,38 @@ impl Ledger {
 
     pub fn reveal_committee_for_height(&self, height: u64) -> Vec<RevealCommitteeMember> {
         let ranked = ranked_tickets_for_height(self.tip(), height, &self.tickets);
-        let mut selected = Vec::new();
-        if !ranked.is_empty() {
-            selected.push(0);
-        }
-        for index in (0..ranked.len()).rev() {
-            if selected.len() >= reveal_committee_slot_count(ranked.len()) {
-                break;
+        let selected = if height < UNIQUE_OWNER_REVEAL_COMMITTEE_HEIGHT {
+            let mut selected = Vec::new();
+            if !ranked.is_empty() {
+                selected.push(0);
             }
-            if !selected.contains(&index) {
-                selected.push(index);
+            for index in (0..ranked.len()).rev() {
+                if selected.len() >= reveal_committee_slot_count(ranked.len()) {
+                    break;
+                }
+                if !selected.contains(&index) {
+                    selected.push(index);
+                }
             }
-        }
+            selected
+        } else {
+            let target_slots = reveal_committee_slot_count_for_height(
+                height,
+                ranked.len(),
+                ranked.iter().map(|ticket| ticket.owner.as_str()),
+            );
+            let mut seen_owners = BTreeSet::new();
+            let mut selected = Vec::new();
+            for (index, ticket) in ranked.iter().enumerate() {
+                if selected.len() >= target_slots {
+                    break;
+                }
+                if seen_owners.insert(ticket.owner.clone()) {
+                    selected.push(index);
+                }
+            }
+            selected
+        };
         selected
             .into_iter()
             .enumerate()

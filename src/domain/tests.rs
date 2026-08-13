@@ -2086,6 +2086,65 @@ fn reveal_bundle_section_deduplicates_reveals_with_slot_mask() {
     );
 }
 
+fn ledger_with_duplicate_owner_reveal_tickets() -> Ledger {
+    let alice = Wallet::from_seed("bundle-unique-owner-alice");
+    let bob = Wallet::from_seed("bundle-unique-owner-bob");
+    let mut ledger = Ledger::new(BTreeMap::new(), 1);
+    ledger.tickets = vec![
+        BurnTicket {
+            id: "alice-0".to_string(),
+            owner: alice.address().to_string(),
+            amount: MICRO_IUNA,
+            eligible_from_height: 499,
+            eligible_until_height: 500,
+        },
+        BurnTicket {
+            id: "alice-1".to_string(),
+            owner: alice.address().to_string(),
+            amount: MICRO_IUNA,
+            eligible_from_height: 499,
+            eligible_until_height: 500,
+        },
+        BurnTicket {
+            id: "bob-0".to_string(),
+            owner: bob.address().to_string(),
+            amount: MICRO_IUNA,
+            eligible_from_height: 499,
+            eligible_until_height: 500,
+        },
+    ];
+    ledger
+}
+
+#[test]
+fn reveal_committee_allows_duplicate_owners_before_height_500() {
+    let ledger = ledger_with_duplicate_owner_reveal_tickets();
+
+    let committee = ledger.reveal_committee_for_height(499);
+    let owners = committee
+        .iter()
+        .map(|member| member.owner.as_str())
+        .collect::<BTreeSet<_>>();
+
+    assert_eq!(committee.len(), 3);
+    assert_eq!(owners.len(), 2);
+}
+
+#[test]
+fn reveal_committee_uses_unique_ticket_owners_from_height_500() {
+    let ledger = ledger_with_duplicate_owner_reveal_tickets();
+
+    let committee = ledger.reveal_committee_for_height(500);
+    let owners = committee
+        .iter()
+        .map(|member| member.owner.as_str())
+        .collect::<BTreeSet<_>>();
+
+    assert_eq!(committee.len(), 2);
+    assert_eq!(owners.len(), 2);
+    assert_eq!(committee.first().map(|member| member.rank), Some(0));
+}
+
 #[test]
 fn reveal_bundle_validation_rejects_wrong_signature_and_slot() {
     let alice = Wallet::from_seed("bundle-invalid-alice");

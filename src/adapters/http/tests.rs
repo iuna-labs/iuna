@@ -18,9 +18,10 @@ use crate::{
     },
     app::{GossipEnvelope, NodeCore, PeerBook, PeerDirection, PeerInfo, StratumStatus},
     domain::{
-        Amount, BlindedReveal, BlindedTransaction, Block, ChainSnapshot, GenesisBurn,
-        LaunchProfile, Ledger, MICRO_IUNA, MINE_FINALIZER_FEE, MaskedBlindedReveal, OutPoint,
-        RevealBundleSection, RevealBundleSignature, Transaction, TxInput, TxOutput, Wallet,
+        Amount, BlindedReveal, BlindedTransaction, Block, BurnLeaderRank, ChainSnapshot,
+        GenesisBurn, LaunchProfile, Ledger, MICRO_IUNA, MINE_FINALIZER_FEE, MaskedBlindedReveal,
+        OutPoint, RevealBundleSection, RevealBundleSignature, Transaction, TxInput, TxOutput,
+        Wallet,
     },
 };
 
@@ -195,6 +196,15 @@ fn block_detail_reconstructs_revealed_items_from_snapshot_blocks() {
     let mut commit_block = fake_block(7, Vec::new());
     commit_block.blinded_transactions = vec![built.transaction.clone()];
     let mut reveal_block = fake_block(8, Vec::new());
+    reveal_block.transactions = vec![Transaction::Mine {
+        recipient: bob.address().to_string(),
+        anchor: "a".repeat(64),
+        salt: 1,
+        nonce: 2,
+        difficulty_bits: 12,
+        proof_header: None,
+        signature: "b".repeat(64),
+    }];
     reveal_block.reveal_bundle_section = RevealBundleSection {
         signatures: vec![RevealBundleSignature {
             slot: 0,
@@ -210,12 +220,42 @@ fn block_detail_reconstructs_revealed_items_from_snapshot_blocks() {
         allocations,
         vec![commit_block.clone(), reveal_block.clone()],
     );
+    let mut burn_leader_ranks = BTreeMap::new();
+    burn_leader_ranks.insert(
+        reveal_block.hash.clone(),
+        vec![
+            BurnLeaderRank {
+                rank: 0,
+                ticket_id: "ticket-0".to_string(),
+                owner: alice.address().to_string(),
+                amount: 1,
+                eligible_from_height: 8,
+                eligible_until_height: 8,
+            },
+            BurnLeaderRank {
+                rank: 1,
+                ticket_id: "ticket-1".to_string(),
+                owner: bob.address().to_string(),
+                amount: 1,
+                eligible_from_height: 8,
+                eligible_until_height: 8,
+            },
+            BurnLeaderRank {
+                rank: 2,
+                ticket_id: "ticket-2".to_string(),
+                owner: "carol".to_string(),
+                amount: 1,
+                eligible_from_height: 8,
+                eligible_until_height: 8,
+            },
+        ],
+    );
 
     let blocks = super::ui_blocks(
         vec![commit_block, reveal_block],
         &snapshot,
         &[],
-        &BTreeMap::new(),
+        &burn_leader_ranks,
     );
 
     assert_eq!(blocks[0].transactions.len(), 1);
@@ -224,15 +264,20 @@ fn block_detail_reconstructs_revealed_items_from_snapshot_blocks() {
         blocks[0].transactions[0].commitment.as_deref(),
         Some(built.transaction.commitment.as_str())
     );
-    assert_eq!(blocks[1].transactions.len(), 1);
-    assert_eq!(blocks[1].transactions[0].kind, "transfer");
-    assert!(blocks[1].transactions[0].revealed);
-    assert_eq!(blocks[1].transactions[0].amount, transfer.amount());
-    assert_eq!(blocks[1].transactions[0].to.as_deref(), Some(bob.address()));
+    assert_eq!(blocks[1].transactions.len(), 2);
+    assert_eq!(blocks[1].transactions[0].kind, "mine");
+    assert_eq!(blocks[1].transactions[1].kind, "transfer");
+    assert!(blocks[1].transactions[1].revealed);
+    assert_eq!(blocks[1].transactions[1].amount, transfer.amount());
+    assert_eq!(blocks[1].transactions[1].to.as_deref(), Some(bob.address()));
     assert_eq!(blocks[1].revealed_transactions.len(), 1);
     assert_eq!(blocks[1].reveal_fee_penalty.reveal_lists_included, 1);
     assert_eq!(blocks[1].reveal_fee_penalty.committee_size, 3);
-    assert_eq!(blocks[1].reveal_fee_penalty.fee_penalty, 1);
+    assert_eq!(blocks[1].total_fees, transfer.fee() + MINE_FINALIZER_FEE);
+    assert_eq!(
+        blocks[1].reveal_fee_penalty.fee_penalty,
+        ((transfer.fee() + MINE_FINALIZER_FEE) as u128 * 2 / 3) as u64
+    );
 }
 
 #[test]
@@ -251,6 +296,11 @@ fn block_detail_markup_uses_blinded_and_revealed_labels() {
     assert!(super::INDEX_HTML.contains("mempoolSeenTimeLabel(tx)"));
     assert!(super::INDEX_HTML.contains("<details class=\"tx-section\">"));
     assert!(super::INDEX_HTML.contains("<summary class=\"tx-section-title\">"));
+    assert!(super::INDEX_HTML.contains("fee-penalty-value"));
+    assert!(
+        super::INDEX_HTML
+            .contains(":class=\"{ penalty: blockRevealFeePenaltyAmount(selectedBlock) > 0 }\"")
+    );
     assert!(super::INDEX_HTML.contains("Commitment"));
     assert!(!super::INDEX_HTML.contains("<h3>Revealed</h3>"));
     assert!(app_js.contains("tx?.revealed ? \"revealed\""));
