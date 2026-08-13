@@ -2223,6 +2223,7 @@ window.iunaApp = function iunaApp() {
       this.addressBookEditingAddress = entry?.address || null;
       this.addressBookDraftAddress = entry?.address || "";
       this.addressBookDraftName = entry?.name || "";
+      this.addressBookPickerOpen = true;
       this.addressBookModalOpen = true;
     },
 
@@ -2234,15 +2235,12 @@ window.iunaApp = function iunaApp() {
     },
 
     openAddressBookPicker() {
-      if (this.addressBookEntries().length === 0) {
-        this.showFlash("No contacts saved yet", "error");
-        return;
-      }
       this.addressBookPickerOpen = true;
     },
 
     closeAddressBookPicker() {
       this.addressBookPickerOpen = false;
+      this.closeAddressBookModal();
     },
 
     async saveAddressBookEntry() {
@@ -2290,7 +2288,6 @@ window.iunaApp = function iunaApp() {
         this.addressBook = nextBook;
         this.config = { ...this.config, address_book: nextBook };
         if (this.addressBookEditingAddress === entry.address) this.closeAddressBookModal();
-        if (this.addressBookEntries().length === 0) this.closeAddressBookPicker();
         this.showFlash(`Removed ${entry.name}`, "success");
       } catch (error) {
         this.showFlash(error.message, "error");

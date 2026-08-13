@@ -1626,6 +1626,13 @@ fn wallet_screen_includes_address_book_alias_controls() {
     assert!(super::INDEX_HTML.contains("selectTransferContact(entry.address)"));
     assert!(super::INDEX_HTML.contains("editAddressBookEntry(entry)"));
     assert!(
+        super::INDEX_HTML
+            .contains("x-show=\"!addressBookModalOpen\" @click=\"openAddressBookModal()\"")
+    );
+    assert!(
+        super::INDEX_HTML.contains("class=\"address-book-form\" x-show=\"addressBookModalOpen\"")
+    );
+    assert!(
         super::INDEX_HTML.contains("removeAddressBookEntry({ address: addressBookEditingAddress")
     );
     assert!(super::INDEX_HTML.contains("aria-label=\"Choose contact\""));
@@ -1641,6 +1648,8 @@ fn wallet_screen_includes_address_book_alias_controls() {
     assert!(app_js.contains("Address is already saved"));
     assert!(app_js.contains("validAddressBookAddress(address)"));
     assert!(app_js.contains("openAddressBookPicker()"));
+    assert!(app_js.contains("this.addressBookPickerOpen = true;"));
+    assert!(!app_js.contains("No contacts saved yet"));
     assert!(app_js.contains("await this.submitForm(\"/api/address-book\""));
     assert!(app_js.contains("\"/api/address-book\""));
     assert!(app_js.contains("addressLabel(address)"));

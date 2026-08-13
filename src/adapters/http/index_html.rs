@@ -264,8 +264,8 @@ pub(super) const INDEX_HTML: &str = r#"<!doctype html>
     .address-book-name { font-weight: 800; color: #eef6f8; overflow-wrap: anywhere; }
     .address-book-actions { display: flex; gap: 6px; align-items: center; }
     .address-book-modal { width: min(560px, 100%); }
-    .address-book-modal form { width: 100%; }
-    .address-book-modal form label { flex: 1 0 100%; }
+    .address-book-modal form { width: 100%; display: grid; gap: 10px; }
+    .address-book-form { display: grid; gap: 10px; margin-top: 14px; padding-top: 14px; border-top: 1px solid #2f363c; }
     .address-book-modal-actions { flex: 1 0 100%; width: 100%; display: flex; justify-content: flex-end; gap: 8px; margin-top: 12px; }
     .address-book-picker-list { display: grid; gap: 8px; }
     .address-book-picker-row { width: 100%; display: grid; gap: 3px; text-align: left; border: 1px solid #2f363c; border-radius: 8px; padding: 10px; background: #111316; color: inherit; }
@@ -1378,31 +1378,6 @@ pub(super) const INDEX_HTML: &str = r#"<!doctype html>
       </div>
     </section>
   </div>
-  <div class="setup-overlay transaction-overlay" x-show="addressBookModalOpen" x-transition.opacity @click.self="closeAddressBookModal()" role="dialog" aria-modal="true" aria-label="Address Book">
-    <section class="tx-modal address-book-modal">
-      <div class="tx-modal-head">
-        <div class="tx-modal-title">
-          <span class="pill">Address Book</span>
-        </div>
-        <button class="icon-button" type="button" @click="closeAddressBookModal()" title="Close" aria-label="Close">
-          <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M18 6 6 18"></path><path d="m6 6 12 12"></path></svg>
-        </button>
-      </div>
-      <form @submit.prevent="saveAddressBookEntry">
-        <label>Name<input x-model="addressBookDraftName" autocomplete="off" required></label>
-        <label>Address<input x-model="addressBookDraftAddress" autocomplete="off" required :class="{ invalid: addressBookDraftAddress && !validAddressBookAddress(addressBookDraftAddress) }"></label>
-        <div class="setup-feedback error" x-show="addressBookDraftAddress && !validAddressBookAddress(addressBookDraftAddress)">Address must be a 64 character hex public key</div>
-        <div class="address-book-modal-actions">
-          <button class="icon-button modal-delete-button" type="button" x-show="addressBookEditingAddress" @click="removeAddressBookEntry({ address: addressBookEditingAddress, name: addressBookDraftName || addressBookEditingAddress })" title="Delete contact" aria-label="Delete contact">
-            <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M4 7h16"></path><path d="M10 11v6"></path><path d="M14 11v6"></path><path d="M6 7l1 14h10l1-14"></path><path d="M9 7V4h6v3"></path></svg>
-          </button>
-          <button class="primary icon-button" type="submit" title="Save contact" aria-label="Save contact">
-            <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M19 21H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h11l5 5v11a2 2 0 0 1-2 2Z"></path><path d="M7 3v6h8"></path><path d="M7 21v-8h10v8"></path></svg>
-          </button>
-        </div>
-      </form>
-    </section>
-  </div>
   <div class="setup-overlay transaction-overlay" x-show="addressBookPickerOpen" x-transition.opacity @click.self="closeAddressBookPicker()" role="dialog" aria-modal="true" aria-labelledby="address-book-picker-title">
     <section class="tx-modal address-book-modal">
       <div class="tx-modal-head">
@@ -1410,18 +1385,40 @@ pub(super) const INDEX_HTML: &str = r#"<!doctype html>
           <span class="pill">Send</span>
           <h2 id="address-book-picker-title">Choose Contact</h2>
         </div>
-        <button class="icon-button" type="button" @click="closeAddressBookPicker()" title="Close" aria-label="Close">
-          <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M18 6 6 18"></path><path d="m6 6 12 12"></path></svg>
-        </button>
+        <div class="address-book-actions">
+          <button class="icon-button" type="button" x-show="!addressBookModalOpen" @click="openAddressBookModal()" title="Add contact" aria-label="Add contact">
+            <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 5v14"></path><path d="M5 12h14"></path></svg>
+          </button>
+          <button class="icon-button" type="button" @click="closeAddressBookPicker()" title="Close" aria-label="Close">
+            <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M18 6 6 18"></path><path d="m6 6 12 12"></path></svg>
+          </button>
+        </div>
       </div>
-      <div class="address-book-picker-list">
+      <div class="address-book-picker-list" x-show="!addressBookModalOpen">
         <template x-for="entry in addressBookEntries()" :key="entry.address">
           <button class="address-book-picker-row" type="button" @click="selectTransferContact(entry.address)" :title="`Send to ${entry.name}`">
             <span class="address-book-name" x-text="entry.name"></span>
             <code class="tx-value hash" x-text="short(entry.address)"></code>
           </button>
         </template>
+        <div class="tx-modal-empty" x-show="addressBookEntries().length === 0">No saved addresses</div>
       </div>
+      <form class="address-book-form" x-show="addressBookModalOpen" @submit.prevent="saveAddressBookEntry">
+        <label>Name<input x-model="addressBookDraftName" autocomplete="off" required></label>
+        <label>Address<input x-model="addressBookDraftAddress" autocomplete="off" required :class="{ invalid: addressBookDraftAddress && !validAddressBookAddress(addressBookDraftAddress) }"></label>
+        <div class="setup-feedback error" x-show="addressBookDraftAddress && !validAddressBookAddress(addressBookDraftAddress)">Address must be a 64 character hex public key</div>
+        <div class="address-book-modal-actions">
+          <button class="icon-button modal-delete-button" type="button" x-show="addressBookEditingAddress" @click="removeAddressBookEntry({ address: addressBookEditingAddress, name: addressBookDraftName || addressBookEditingAddress })" title="Delete contact" aria-label="Delete contact">
+            <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M4 7h16"></path><path d="M10 11v6"></path><path d="M14 11v6"></path><path d="M6 7l1 14h10l1-14"></path><path d="M9 7V4h6v3"></path></svg>
+          </button>
+          <button class="icon-button" type="button" @click="closeAddressBookModal()" title="Back to contacts" aria-label="Back to contacts">
+            <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M15 18l-6-6 6-6"></path></svg>
+          </button>
+          <button class="primary icon-button" type="submit" title="Save contact" aria-label="Save contact">
+            <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M19 21H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h11l5 5v11a2 2 0 0 1-2 2Z"></path><path d="M7 3v6h8"></path><path d="M7 21v-8h10v8"></path></svg>
+          </button>
+        </div>
+      </form>
     </section>
   </div>
   <div class="setup-overlay" x-show="showingSetup()" x-transition.opacity role="dialog" aria-modal="true" aria-labelledby="setup-title">
