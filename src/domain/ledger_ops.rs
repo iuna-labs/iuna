@@ -98,6 +98,34 @@ pub(super) fn estimated_block_selection_size_bytes(
     block.serialized_size_bytes()
 }
 
+pub(super) fn ensure_transaction_fits_empty_block(
+    transaction: &Transaction,
+    max_block_bytes: usize,
+) -> Result<()> {
+    let selection = BlockSelection {
+        transactions: vec![transaction.clone()],
+        blinded_transactions: Vec::new(),
+    };
+    if estimated_block_selection_size_bytes(&selection, false)? > max_block_bytes {
+        bail!("transaction exceeds max block size");
+    }
+    Ok(())
+}
+
+pub(super) fn ensure_blinded_transaction_fits_empty_block(
+    transaction: &BlindedTransaction,
+    max_block_bytes: usize,
+) -> Result<()> {
+    let selection = BlockSelection {
+        transactions: Vec::new(),
+        blinded_transactions: vec![transaction.clone()],
+    };
+    if estimated_block_selection_size_bytes(&selection, false)? > max_block_bytes {
+        bail!("blinded transaction exceeds max block size");
+    }
+    Ok(())
+}
+
 pub(super) fn verify_leader_proof(block: &Block, tickets: &[BurnTicket]) -> Result<()> {
     let Some(proof) = &block.leader_proof else {
         bail!("block is missing leader proof");

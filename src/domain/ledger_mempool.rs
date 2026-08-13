@@ -1,7 +1,9 @@
 use anyhow::{Result, bail};
 
 use super::ledger_ops::{
-    apply_transaction, spend_blinded_inputs, spend_inputs, transaction_has_missing_inputs,
+    apply_transaction, ensure_blinded_transaction_fits_empty_block,
+    ensure_transaction_fits_empty_block, spend_blinded_inputs, spend_inputs,
+    transaction_has_missing_inputs,
 };
 use super::transaction::{
     BlindedReveal, BlindedTransaction, Transaction, blinded_transaction_inputs_spent_by,
@@ -27,6 +29,10 @@ impl Ledger {
             return Ok(false);
         }
         self.validate_blinded_transaction(&transaction)?;
+        ensure_blinded_transaction_fits_empty_block(
+            &transaction,
+            self.launch_profile.max_block_bytes,
+        )?;
         if blinded_transaction_inputs_spent_by(&transaction, &self.pending_blinded)
             || transaction_inputs_spent_by_inputs(&transaction.inputs, &self.pending)
             || transaction_inputs_spent_by_inputs(&transaction.inputs, &self.orphans)
@@ -64,6 +70,7 @@ impl Ledger {
 
         transaction.verify_signature()?;
         self.validate_transaction_terms(&transaction)?;
+        ensure_transaction_fits_empty_block(&transaction, self.launch_profile.max_block_bytes)?;
         self.validate_mine_anchor_available(&transaction)?;
 
         if transaction_inputs_spent_by(&transaction, &self.pending) {

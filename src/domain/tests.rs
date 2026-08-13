@@ -1098,14 +1098,12 @@ fn block_before_finalizer_rank_time_slot_is_rejected() {
 }
 
 #[test]
-fn miner_skips_oversized_pending_transaction_and_keeps_fitting_fee_transaction() {
+fn mempool_rejects_transaction_that_cannot_fit_in_a_block() {
     let alice = Wallet::from_seed("oversized-select-alice");
     let bob = Wallet::from_seed("oversized-select-bob");
-    let carol = Wallet::from_seed("oversized-select-carol");
     let mut allocations = BTreeMap::new();
     allocations.insert(alice.address().to_string(), 1);
     allocations.insert(bob.address().to_string(), 300_000);
-    allocations.insert(carol.address().to_string(), 300_000);
     let mut ledger =
         Ledger::new_with_genesis_burns(allocations, vec![GenesisBurn::new(alice.address(), 1)], 10)
             .unwrap();
@@ -1113,23 +1111,28 @@ fn miner_skips_oversized_pending_transaction_and_keeps_fitting_fee_transaction()
     ledger.submit_transaction(burn).unwrap();
     let oversized =
         transfer_with_extra_zero_outputs(&ledger, &bob, alice.address(), 1, 100_000, 4_000);
-    let fitting = ledger
-        .build_transfer(&carol, alice.address(), 1, 5)
-        .unwrap();
     assert!(oversized.serialized_size_bytes().unwrap() > MAX_BLOCK_BYTES);
-    ledger.submit_transaction(oversized.clone()).unwrap();
-    ledger.submit_transaction(fitting.clone()).unwrap();
 
-    let block = ledger.mine_next_block(&alice, 1).unwrap();
-    let signatures = block
-        .transactions
-        .iter()
-        .map(|tx| tx.signature().to_string())
+    let error = ledger.submit_transaction(oversized).unwrap_err();
+
+    assert!(format!("{error:#}").contains("transaction exceeds max block size"));
+}
+
+#[test]
+fn transfer_builder_rejects_selected_utxos_that_make_transaction_too_large() {
+    let alice = Wallet::from_seed("oversized-selected-utxos-alice");
+    let bob = Wallet::from_seed("oversized-selected-utxos-bob");
+    let amounts = vec![1; 2_000];
+    let ledger = ledger_with_wallet_utxos(&alice, &amounts);
+    let selected = (0..amounts.len())
+        .map(test_utxo_outpoint)
         .collect::<Vec<_>>();
 
-    assert!(!signatures.contains(&oversized.signature().to_string()));
-    assert!(signatures.contains(&fitting.signature().to_string()));
-    assert!(block.serialized_size_bytes().unwrap() <= MAX_BLOCK_BYTES);
+    let error = ledger
+        .build_transfer_with_inputs(&alice, bob.address(), 1, 0, &selected)
+        .unwrap_err();
+
+    assert!(format!("{error:#}").contains("transaction exceeds max block size"));
 }
 
 #[test]

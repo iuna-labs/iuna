@@ -10,7 +10,8 @@ use super::blinded::{
 use super::ledger_ops::{
     apply_spendable_pending_transaction, apply_transaction, best_selectable_blinded_index,
     best_selectable_burn_from_index, best_selectable_transaction_index,
-    ensure_outputs_do_not_overflow, ensure_single_input_owner,
+    ensure_blinded_transaction_fits_empty_block, ensure_outputs_do_not_overflow,
+    ensure_single_input_owner, ensure_transaction_fits_empty_block,
     estimated_block_selection_size_bytes, spend_blinded_inputs, spend_spendable_blinded_inputs,
     transaction_has_missing_inputs, validate_transaction_inputs, validate_transaction_outputs,
 };
@@ -291,6 +292,7 @@ impl Ledger {
 
     pub(super) fn validate_new_transaction(&self, transaction: &Transaction) -> Result<()> {
         self.validate_transaction_terms(transaction)?;
+        ensure_transaction_fits_empty_block(transaction, self.launch_profile.max_block_bytes)?;
         self.validate_mine_anchor_available(transaction)?;
         let mut utxos = self.utxos_after_spendable_pending()?;
         apply_transaction(transaction, &mut utxos)
@@ -445,6 +447,10 @@ impl Ledger {
         if transaction.commitment != expected {
             bail!("blinded transaction commitment is invalid");
         }
+        ensure_blinded_transaction_fits_empty_block(
+            transaction,
+            self.launch_profile.max_block_bytes,
+        )?;
         Ok(())
     }
 
