@@ -1,5 +1,5 @@
-const IUNA_DOWNLOADS_URL = "https://iuna.jhx.app/downloads/";
-const IUNA_RELEASE_METADATA_URL = "https://iuna.jhx.app/downloads/latest.json";
+const IUNA_DOWNLOADS_URL = "https://getiuna.org/downloads/";
+const IUNA_RELEASE_METADATA_URL = "https://getiuna.org/downloads/latest.json";
 
 window.iunaApp = function iunaApp() {
   return {

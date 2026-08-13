@@ -63,7 +63,7 @@ metadata:
 spec:
   ingressClassName: traefik
   rules:
-    - host: iuna.jhx.app
+    - host: getiuna.org
       http:
         paths:
           - path: /
@@ -76,7 +76,7 @@ spec:
   tls:
     - secretName: iuna-tls
       hosts:
-        - iuna.jhx.app
+        - getiuna.org
 ---
 apiVersion: networking.k8s.io/v1
 kind: Ingress

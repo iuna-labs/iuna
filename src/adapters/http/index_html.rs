@@ -1448,7 +1448,7 @@ pub(super) const INDEX_HTML: &str = r#"<!doctype html>
         <div class="setup-section setup-network">
           <div class="panel-head">
             <h3>Network</h3>
-            <a class="setup-network-link" href="https://iuna.jhx.app/git/iuna/file/KNOWN_NODES.txt.html" target="_blank" rel="noreferrer">Known nodes</a>
+            <a class="setup-network-link" href="https://getiuna.org/git/iuna/file/KNOWN_NODES.txt.html" target="_blank" rel="noreferrer">Known nodes</a>
           </div>
           <div class="setup-network-row">
             <label><span x-text="setupRequiresPeer() ? 'Bootstrap peer (required)' : 'Bootstrap peer'"></span><input x-model="setupPeerAddress" placeholder="iuna.jhx.app:9444"></label>

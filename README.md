@@ -29,7 +29,7 @@ This is still an experiment. The design needs real-world testing before those go
 
 The simplest way to run iuna is:
 
-1. Go to [iuna.jhx.app/downloads/](https://iuna.jhx.app/downloads/).
+1. Go to [getiuna.org/downloads/](https://getiuna.org/downloads/).
 2. Download the latest available build.
 3. Start the app or binary.
 4. Follow the setup screen.
@@ -40,12 +40,12 @@ You do not need Rust or Cargo unless you want to work on the code.
 
 ## Source
 
-The public source browser is published at [iuna.jhx.app/git/iuna/](https://iuna.jhx.app/git/iuna/).
+The public source browser is published at [getiuna.org/git/iuna/](https://getiuna.org/git/iuna/).
 
 Clone the static HTTP repo with:
 
 ```sh
-git clone https://iuna.jhx.app/git/iuna.git
+git clone https://getiuna.org/git/iuna.git
 ```
 
 ## Static Site Image
@@ -70,7 +70,7 @@ Release and deploy with:
 
 Deployment publishes two images to the `jhx-app` k3s cluster:
 
-- `https://iuna.jhx.app/` routes to the static website image.
+- `https://getiuna.org/` routes to the static website image.
 - `https://admin.iuna.jhx.app/` routes to the node management UI.
 - `iuna.jhx.app:9444` routes to the node P2P listener.
 

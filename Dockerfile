@@ -35,7 +35,7 @@ RUN set -eux; \
     mkdir -p /site/git/iuna /var/cache/stagit-iuna; \
     echo "iuna - experimental devnet protocol" > /src/iuna.git/description; \
     echo "iuna-labs" > /src/iuna.git/owner; \
-    echo "https://iuna.jhx.app/git/iuna.git" > /src/iuna.git/url; \
+    echo "https://getiuna.org/git/iuna.git" > /src/iuna.git/url; \
     cd /src/iuna.git; \
     mkdir -p /tmp/iuna-packs; \
     mv objects/pack/* /tmp/iuna-packs/; \
@@ -64,7 +64,7 @@ RUN set -eux; \
     mkdir -p /site/downloads; \
     cp /site/downloads.html /site/downloads/index.html; \
     sed -i "s|\${IUNA_VERSION}|${version}|g" /site/downloads/index.html; \
-    printf '{"tag":"v%s","version":"%s","url":"https://iuna.jhx.app/downloads/"}\n' "$version" "$version" > /site/downloads/latest.json; \
+    printf '{"tag":"v%s","version":"%s","url":"https://getiuna.org/downloads/"}\n' "$version" "$version" > /site/downloads/latest.json; \
     rm -f /site/downloads.html
 
 ########################################################################
