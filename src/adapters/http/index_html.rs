@@ -185,6 +185,11 @@ pub(super) const INDEX_HTML: &str = r#"<!doctype html>
     .leaderboard-amount { color: #d5f55f; font-size: 13px; font-weight: 900; font-variant-numeric: tabular-nums; white-space: nowrap; }
     .wallet-grid { width: 100%; display: grid; grid-template-columns: minmax(0, 1fr) minmax(300px, .8fr); gap: 12px; align-items: start; }
     .wallet-actions { display: grid; gap: 12px; }
+    .amount-field { display: grid; grid-template-columns: minmax(0, 1fr) auto; gap: 8px; align-items: end; }
+    .amount-field label { min-width: 0; }
+    .amount-field input { width: 100%; }
+    .amount-max-button { padding: 9px 10px; border-color: #3a4248; background: #202328; color: #9fa8ad; font-size: 12px; text-transform: uppercase; }
+    .amount-max-button:hover { border-color: #d5f55f; color: #d5f55f; }
     .advanced-toggle { flex-basis: 100%; width: max-content; align-self: flex-start; border-color: #3a4248; padding: 4px 7px; background: #202328; color: #9fa8ad; font-size: 12px; }
     .advanced-toggle:hover { border-color: #5a646b; color: #d6dee2; }
     .send-utxo-list { display: grid; gap: 8px; max-height: 260px; overflow: auto; border: 1px solid #2f363c; border-radius: 8px; padding: 8px; background: #111316; }
@@ -453,7 +458,7 @@ pub(super) const INDEX_HTML: &str = r#"<!doctype html>
       .block-card { flex-basis: 108px; }
     }
   </style>
-  <script defer src="/assets/iuna-ui.js?v=103"></script>
+  <script defer src="/assets/iuna-ui.js?v=109"></script>
   <script defer src="/assets/alpine.min.js"></script>
 </head>
 <body x-data="iunaApp()" x-init="init()" @keydown.window.escape="closeModals()" x-cloak>
@@ -528,7 +533,10 @@ pub(super) const INDEX_HTML: &str = r#"<!doctype html>
                   <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M4 5.5A2.5 2.5 0 0 1 6.5 3H20v18H6.5A2.5 2.5 0 0 1 4 18.5z"></path><path d="M8 7h8"></path><path d="M8 11h6"></path><path d="M8 15h4"></path></svg>
                 </button>
               </div>
-              <label>Amount<input x-model="transferAmount" @input="scheduleFeeEstimates" type="number" min="0.000001" step="0.000001" required></label>
+              <div class="amount-field">
+                <label>Amount<input x-model="transferAmount" @input="scheduleFeeEstimates" type="number" min="0.000001" step="0.000001" required></label>
+                <button class="amount-max-button" type="button" @click="setMaxTransferAmount" :disabled="transferMaxDisabled()" title="Use maximum spendable amount">Max</button>
+              </div>
               <label>Fee / byte<input x-model="transferFee" @input="scheduleFeeEstimates" type="number" min="0" step="0.000001" required></label>
               <div class="fee-preview" x-text="feeEstimateLabel('transfer')"></div>
               <button class="advanced-toggle" type="button" @click="toggleSendAdvanced" x-text="showSendAdvanced ? 'Hide UTXOs' : 'UTXOs'"></button>
@@ -536,7 +544,7 @@ pub(super) const INDEX_HTML: &str = r#"<!doctype html>
                 <div>Selected UTXOs: <span x-text="selectedTransferUtxos.length"></span></div>
                 <div>Selected total: IUNA <span x-text="amountLabel(selectedTransferUtxoTotal())"></span></div>
                 <div>Required: IUNA <span x-text="amountLabel(transferRequiredTotal())"></span></div>
-                <div class="setup-feedback error" x-show="!selectedTransferUtxosCoverTransfer()">Selected UTXOs do not cover amount plus fee</div>
+                <div class="setup-feedback error" x-show="selectedTransferUtxoShortfall() > 0">Selected UTXOs do not cover amount plus fee</div>
                 <div class="send-utxo-list">
                   <div class="send-utxo-list-head">
                     <span>UTXOs</span>

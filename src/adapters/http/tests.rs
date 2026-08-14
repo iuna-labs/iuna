@@ -1520,7 +1520,7 @@ fn metrics_response_skips_bootstrap_points_for_block_time_and_vdf_rounds() {
 
 #[test]
 fn metrics_screen_includes_block_range_filter() {
-    assert!(super::INDEX_HTML.contains("iuna-ui.js?v=103"));
+    assert!(super::INDEX_HTML.contains("iuna-ui.js?v=109"));
     assert!(super::INDEX_HTML.contains("aria-label=\"Metrics block range\""));
     assert!(super::INDEX_HTML.contains("setMetricsRange(100)"));
     assert!(super::INDEX_HTML.contains("setMetricsRange(1000)"));
@@ -1630,6 +1630,9 @@ fn transfer_utxo_selection_supports_shift_click_ranges() {
     assert!(
         super::INDEX_HTML.contains("@click.prevent=\"toggleTransferUtxoSelection($event, utxo)\"")
     );
+    assert!(super::INDEX_HTML.contains("class=\"amount-max-button\""));
+    assert!(super::INDEX_HTML.contains("@click=\"setMaxTransferAmount\""));
+    assert!(super::INDEX_HTML.contains(":disabled=\"transferMaxDisabled()\""));
     assert!(
         !super::INDEX_HTML
             .contains(":checked=\"selectedTransferUtxos.includes(utxoOutpoint(utxo))\" @click=")
@@ -1639,6 +1642,17 @@ fn transfer_utxo_selection_supports_shift_click_ranges() {
     assert!(app_js.contains("const checked = !selected.has(outpoint);"));
     assert!(app_js.contains("event?.shiftKey && anchorIndex >= 0 && currentIndex >= 0"));
     assert!(app_js.contains("const [from, to] = [anchorIndex, currentIndex].sort"));
+    assert!(app_js.contains("transferMaxDisabled()"));
+    assert!(app_js.contains("async setMaxTransferAmount()"));
+    assert!(app_js.contains("async maxTransferAmountForSelectedUtxos(selectedTotal)"));
+    assert!(app_js.contains("let low = 1;"));
+    assert!(app_js.contains("let high = total;"));
+    assert!(app_js.contains("while (low <= high)"));
+    assert!(app_js.contains("const required = amount + this.microiunaAmount(estimate.fee);"));
+    assert!(app_js.contains("selectedTransferUtxoShortfall()"));
+    assert!(app_js.contains("microiunaAmount(value)"));
+    assert!(app_js.contains("Math.round(Number(value) || 0)"));
+    assert!(app_js.contains("trim().replace(\",\", \".\")"));
 }
 
 #[test]

@@ -2168,10 +2168,14 @@ window.iunaApp = function iunaApp() {
     },
 
     amountLabel(value) {
-      const microiuna = Math.max(0, Math.trunc(Number(value) || 0));
+      const microiuna = this.microiunaAmount(value);
       const whole = Math.floor(microiuna / 1000000);
       const fractional = String(microiuna % 1000000).padStart(6, "0").replace(/0+$/, "");
       return fractional ? `${whole}.${fractional}` : `${whole}`;
+    },
+
+    microiunaAmount(value) {
+      return Math.max(0, Math.round(Number(value) || 0));
     },
 
     metricAmountLabel(value) {
@@ -2183,7 +2187,7 @@ window.iunaApp = function iunaApp() {
     },
 
     parseiunaAmount(value) {
-      const text = String(value ?? "").trim();
+      const text = String(value ?? "").trim().replace(",", ".");
       if (!text) return 0;
       const match = text.match(/^(\d+)(?:\.(\d{0,6})\d*)?$/);
       if (!match) return 0;
@@ -2193,7 +2197,7 @@ window.iunaApp = function iunaApp() {
     },
 
     parseiunaAmountRequired(value, message) {
-      const text = String(value ?? "").trim();
+      const text = String(value ?? "").trim().replace(",", ".");
       if (!text) throw new Error(message);
       const parsed = this.parseiunaAmount(text);
       if (parsed === 0 && !/^0(?:\.0*)?$/.test(text)) throw new Error(message);
@@ -2219,6 +2223,83 @@ window.iunaApp = function iunaApp() {
       } catch (error) {
         this.showFlash(error.message, "error");
       }
+    },
+
+    transferMaxDisabled() {
+      return this.selectedTransferUtxoTotal() <= 0 && Number(this.status.wallet_balance || 0) <= 0;
+    },
+
+    async setMaxTransferAmount() {
+      try {
+        let selectedTotal = this.selectedTransferUtxoTotal();
+        if (this.selectedTransferUtxos.length === 0) {
+          const utxos = await this.fetchJson("/api/wallet/utxos/selectable");
+          this.rememberUtxoAmounts(utxos);
+          this.selectedTransferUtxos = utxos.map((utxo) => this.utxoOutpoint(utxo));
+          this.lastSelectedTransferUtxo =
+            this.selectedTransferUtxos[this.selectedTransferUtxos.length - 1] || null;
+          selectedTotal = utxos.reduce((sum, utxo) => sum + Number(utxo.amount || 0), 0);
+        }
+
+        if (selectedTotal <= 0) {
+          this.showFlash("No spendable UTXOs", "error");
+          return;
+        }
+
+        const amount = await this.maxTransferAmountForSelectedUtxos(selectedTotal);
+        this.transferAmount = this.amountLabel(amount);
+        this.scheduleFeeEstimates();
+      } catch (error) {
+        this.showFlash(error.message, "error");
+      }
+    },
+
+    async maxTransferAmountForSelectedUtxos(selectedTotal) {
+      const total = this.microiunaAmount(selectedTotal);
+      let low = 1;
+      let high = total;
+      let bestAmount = 0;
+      let bestEstimate = null;
+
+      while (low <= high) {
+        const amount = Math.floor((low + high) / 2);
+        try {
+          const estimate = await this.transferFeeEstimateForAmount(amount);
+          const required = amount + this.microiunaAmount(estimate.fee);
+          if (required <= total) {
+            bestAmount = amount;
+            bestEstimate = estimate;
+            low = amount + 1;
+          } else {
+            high = amount - 1;
+          }
+        } catch {
+          high = amount - 1;
+        }
+      }
+
+      if (bestAmount <= 0 || !bestEstimate) {
+        throw new Error("Selected UTXOs do not cover amount plus fee");
+      }
+      this.feeEstimates.transfer = bestEstimate;
+      return bestAmount;
+    },
+
+    async transferFeeEstimateForAmount(amount) {
+      const recipient = this.transferTo.trim() || this.status.wallet_address;
+      if (!recipient) {
+        throw new Error("Recipient is required before max can estimate fees");
+      }
+      const estimate = await this.fetchFeeEstimate("/api/fee-estimate/transfer", {
+        to: recipient,
+        amount,
+        fee_per_byte: this.parseiunaAmount(this.transferFee),
+        utxos: this.selectedTransferUtxos.join("\n"),
+      });
+      if (estimate?.error || !Number.isFinite(Number(estimate?.fee))) {
+        throw new Error(estimate?.error || "Could not estimate transfer fee");
+      }
+      return estimate;
     },
 
     toggleSendAdvanced() {
@@ -2583,16 +2664,21 @@ window.iunaApp = function iunaApp() {
 
     selectedTransferUtxoTotal() {
       return this.selectedTransferUtxos.reduce((sum, outpoint) => {
-        return sum + Number(this.selectedTransferUtxoAmounts[outpoint] || 0);
+        return sum + this.microiunaAmount(this.selectedTransferUtxoAmounts[outpoint]);
       }, 0);
     },
 
     transferRequiredTotal() {
-      return this.parseiunaAmount(this.transferAmount) + Number(this.feeEstimates.transfer?.fee || 0);
+      return this.parseiunaAmount(this.transferAmount) + this.microiunaAmount(this.feeEstimates.transfer?.fee);
     },
 
     selectedTransferUtxosCoverTransfer() {
-      return this.selectedTransferUtxos.length === 0 || this.selectedTransferUtxoTotal() >= this.transferRequiredTotal();
+      return this.selectedTransferUtxoShortfall() === 0;
+    },
+
+    selectedTransferUtxoShortfall() {
+      if (this.selectedTransferUtxos.length === 0) return 0;
+      return Math.max(0, this.microiunaAmount(this.transferRequiredTotal()) - this.microiunaAmount(this.selectedTransferUtxoTotal()));
     },
 
     txInputAmountLabel(input) {
