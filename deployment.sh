@@ -71,6 +71,13 @@ ensure_tauri_cli() {
   fi
 }
 
+run_release_tests() {
+  require_command cargo
+
+  cargo test --locked
+  cargo test --locked --test properties -- --ignored
+}
+
 update_versions() {
   local version="$1"
 
@@ -96,7 +103,7 @@ commit_and_tag() {
   require_command git
 
   git add Cargo.toml Cargo.lock src-tauri/Cargo.toml src-tauri/Cargo.lock src-tauri/tauri.conf.json README.md
-  git commit -m "Release ${tag}"
+  git commit -m "Release ${tag}" --no-verify
   git tag -a "$tag" -m "Release ${tag}"
 }
 
@@ -409,6 +416,7 @@ main() {
       echo "Aborting deployment"
       exit 1
     fi
+    run_release_tests
     build_linux_cli_archives "$version"
     build_docker_image "$version"
     deploy_docker_image "$version"
@@ -416,6 +424,7 @@ main() {
   fi
 
   update_versions "$version"
+  run_release_tests
   build_versions "$version"
   commit_and_tag "$version"
   build_docker_image "$version"

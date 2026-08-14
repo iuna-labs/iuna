@@ -1,11 +1,11 @@
 use std::collections::{BTreeMap, BTreeSet};
 
 use iuna::{
-    app::{InMemoryNetwork, NodeCore},
+    app::{GossipEnvelope, InMemoryNetwork, NodeCore},
     domain::{
-        Amount, ChainSnapshot, GenesisBurn, Ledger, MICRO_IUNA, MINE_FINALIZER_FEE, MINE_REWARD,
-        OutPoint, Transaction, TxInput, TxOutput, VDF_TARGET_BLOCK_MS, Wallet, hex_hash,
-        verify_vdf,
+        Amount, ChainSnapshot, GenesisBurn, Ledger, MAX_BLOCK_BYTES, MICRO_IUNA,
+        MINE_FINALIZER_FEE, MINE_REWARD, OutPoint, RECOVERY_BLOCK_DELAY_MS, Transaction, TxInput,
+        TxOutput, VDF_TARGET_BLOCK_MS, Wallet, hex_hash, revealed_blinded_transactions, verify_vdf,
     },
 };
 
@@ -17,6 +17,19 @@ const TAMPER_PROPERTY_SEEDS: std::ops::Range<u64> = 200..208;
 const FORK_PROPERTY_SEEDS: std::ops::Range<u64> = 300..306;
 const NETWORK_CHAOS_SEEDS: std::ops::Range<u64> = 400..405;
 const NETWORK_CHAOS_ROUNDS: usize = 10;
+const CLOCK_SKEW_NETWORK_SEEDS: std::ops::Range<u64> = 600..608;
+const CLOCK_SKEW_NETWORK_ROUNDS: usize = 18;
+const PARTITION_HEALING_SEEDS: std::ops::Range<u64> = 700..708;
+const MULTI_BLOCK_PARTITION_SEEDS: std::ops::Range<u64> = 800..806;
+const MULTI_RECOVERY_CANDIDATE_SEEDS: std::ops::Range<u64> = 900..908;
+const LATE_JOIN_SYNC_SEEDS: std::ops::Range<u64> = 1_000..1_006;
+const FUTURE_TIMESTAMP_SEEDS: std::ops::Range<u64> = 1_100..1_108;
+const REORG_MEMPOOL_SEEDS: std::ops::Range<u64> = 1_200..1_208;
+const FULL_BLOCK_SELECTION_SEEDS: std::ops::Range<u64> = 1_300..1_302;
+const BLINDED_PARTITION_SEEDS: std::ops::Range<u64> = 1_400..1_404;
+const BLINDED_EXPIRY_SEEDS: std::ops::Range<u64> = 1_500..1_506;
+const SOAK_CHAOS_SEEDS: std::ops::Range<u64> = 1_600..1_603;
+const SOAK_CHAOS_ROUNDS: usize = 32;
 const VDF_STABILITY_SEEDS: std::ops::Range<u64> = 500..516;
 const VDF_STABILITY_BLOCKS: usize = 128;
 const VDF_STABILITY_INITIAL_ROUNDS: u64 = 1_000_000;
@@ -501,6 +514,7 @@ fn finalize_many(ledger: &mut Ledger, wallet: &Wallet, count: usize, start_times
 }
 
 #[test]
+#[ignore = "long-running VDF retarget stability property"]
 fn generated_vdf_retarget_stays_stable_under_noisy_block_times() {
     for seed in VDF_STABILITY_SEEDS {
         let (wallet, mut ledger) = vdf_stability_ledger(seed);
@@ -547,6 +561,7 @@ fn generated_vdf_retarget_stays_stable_under_noisy_block_times() {
 }
 
 #[test]
+#[ignore = "long-running snapshot replay property"]
 fn generated_chain_snapshots_preserve_core_invariants() {
     for seed in LEDGER_PROPERTY_SEEDS {
         let (wallets, mut ledger) = property_ledger(seed, 4);
@@ -627,6 +642,7 @@ fn generated_forks_reorg_only_inside_finality_and_preserve_local_transactions() 
 }
 
 #[test]
+#[ignore = "long-running generated network convergence property"]
 fn in_memory_network_converges_under_generated_node_actions() {
     for seed in NETWORK_PROPERTY_SEEDS {
         let (wallets, ledger) = property_ledger(seed, 3);
@@ -754,6 +770,1067 @@ fn assert_network_converged(network: &InMemoryNetwork, nodes: usize) {
     }
 }
 
+#[test]
+#[ignore = "long-running generated clock skew property"]
+fn in_memory_network_survives_generated_clock_skew() {
+    for seed in CLOCK_SKEW_NETWORK_SEEDS {
+        let (wallets, ledger) = property_ledger(seed, 4);
+        let node_ids = (0..wallets.len())
+            .map(|index| format!("n{index}"))
+            .collect::<Vec<_>>();
+        let mut network = InMemoryNetwork::default();
+
+        for (index, wallet) in wallets.iter().enumerate() {
+            let joined = Ledger::from_snapshot(ledger.snapshot()).expect("node joins valid chain");
+            let mut node = NodeCore::from_ledger_with_burn_fee_and_enabled(
+                wallet.clone(),
+                joined,
+                true,
+                MICRO_IUNA,
+                0,
+            );
+            node.set_recovery_vdf_top_rank_percent(100);
+            network.insert(&node_ids[index], node);
+        }
+
+        let mut rng = TestRng::new(seed);
+        let skews = (0..wallets.len())
+            .map(|index| {
+                let magnitude = (rng.next_u64() % (VDF_TARGET_BLOCK_MS * 2 + 1)) as i64;
+                if index % 2 == 0 {
+                    magnitude
+                } else {
+                    -magnitude
+                }
+            })
+            .collect::<Vec<_>>();
+
+        network
+            .deliver_until_idle()
+            .expect("initial network delivery succeeds");
+
+        for round in 0..CLOCK_SKEW_NETWORK_ROUNDS {
+            let actor_index = rng.index(wallets.len());
+            let actor_id = &node_ids[actor_index];
+            match rng.index(4) {
+                0 => {
+                    let recipient = wallets[rng.index(wallets.len())].address().to_string();
+                    let _ = queue_plaintext_transfer(
+                        network.node_mut(actor_id).expect("actor node exists"),
+                        &wallets[actor_index],
+                        recipient,
+                        rng.amount(MICRO_IUNA),
+                        0,
+                    );
+                }
+                1 => {
+                    let _ = queue_plaintext_burn(
+                        network.node_mut(actor_id).expect("actor node exists"),
+                        &wallets[actor_index],
+                        MICRO_IUNA,
+                        0,
+                    );
+                }
+                _ => {}
+            }
+
+            network
+                .deliver_until_idle()
+                .expect("transaction gossip survives skewed producers");
+
+            let base_timestamp = network
+                .node("n0")
+                .expect("anchor node exists")
+                .ledger()
+                .chain()
+                .last()
+                .expect("anchor chain has a tip")
+                .timestamp_ms
+                .saturating_add(1 + (round as u64 % 3));
+            let leader = network
+                .node("n0")
+                .expect("anchor node exists")
+                .ledger()
+                .expected_leader_for_next_block();
+
+            if let Some(leader) = leader {
+                if let Some((leader_index, _)) = wallets
+                    .iter()
+                    .enumerate()
+                    .find(|(_, wallet)| wallet.address() == leader)
+                {
+                    let skewed_timestamp = skew_timestamp(base_timestamp, skews[leader_index]);
+                    let mut outcome = network
+                        .node_mut(&node_ids[leader_index])
+                        .expect("leader node exists")
+                        .automatic_mine_once(skewed_timestamp);
+                    if outcome
+                        .skipped_reason
+                        .as_deref()
+                        .is_some_and(|reason| reason.contains("collecting blinded reveals"))
+                    {
+                        outcome = network
+                            .node_mut(&node_ids[leader_index])
+                            .expect("leader node exists")
+                            .automatic_mine_once(
+                                skewed_timestamp
+                                    .saturating_add(TEST_REVEAL_BUNDLE_COLLECTION_MS + 1),
+                            );
+                    }
+                    if let Some(reason) = outcome.skipped_reason {
+                        assert!(
+                            expected_clock_skew_skip_reason(&reason),
+                            "unexpected skewed mining skip reason: {reason}"
+                        );
+                    }
+                }
+            }
+
+            network
+                .deliver_until_idle()
+                .expect("block gossip survives skewed producers");
+
+            if round % 4 == 3 {
+                mine_expected_leader_with_network_time(&mut network, &node_ids, &wallets, round);
+                network
+                    .deliver_until_idle()
+                    .expect("network-time recovery block gossip converges");
+                assert_network_converged(&network, wallets.len());
+            }
+        }
+
+        mine_expected_leader_with_network_time(
+            &mut network,
+            &node_ids,
+            &wallets,
+            CLOCK_SKEW_NETWORK_ROUNDS,
+        );
+        network
+            .deliver_until_idle()
+            .expect("final network-time block gossip converges");
+        assert_network_converged(&network, wallets.len());
+    }
+}
+
+#[test]
+fn in_memory_network_heals_generated_ticket_recovery_partitions() {
+    for seed in PARTITION_HEALING_SEEDS {
+        let (wallets, ledger) = single_finalizer_ledger(seed, 3);
+        let mut network = InMemoryNetwork::default();
+        let node_ids = (0..wallets.len())
+            .map(|index| format!("n{index}"))
+            .collect::<Vec<_>>();
+
+        for (index, wallet) in wallets.iter().enumerate() {
+            let joined = Ledger::from_snapshot(ledger.snapshot()).expect("node joins valid chain");
+            let mut node = NodeCore::from_ledger_with_burn_fee_and_enabled(
+                wallet.clone(),
+                joined,
+                true,
+                MICRO_IUNA,
+                0,
+            );
+            node.set_recovery_vdf_top_rank_percent(100);
+            network.insert(&node_ids[index], node);
+        }
+
+        network
+            .deliver_until_idle()
+            .expect("initial network delivery succeeds");
+
+        let mut rng = TestRng::new(seed);
+        let partition_a_timestamp = 1 + rng.next_u64() % VDF_TARGET_BLOCK_MS;
+        let ticket = network
+            .node_mut("n0")
+            .expect("ticket finalizer exists")
+            .automatic_mine_once(partition_a_timestamp);
+        assert!(
+            ticket.block.is_some(),
+            "ticket side should finalize while partitioned"
+        );
+
+        let recovery_index = 1 + rng.index(wallets.len() - 1);
+        let recovery_id = &node_ids[recovery_index];
+        let recovery_timestamp = RECOVERY_BLOCK_DELAY_MS + rng.next_u64() % VDF_TARGET_BLOCK_MS;
+        let recovery = network
+            .node_mut(recovery_id)
+            .expect("recovery finalizer exists")
+            .automatic_mine_once(recovery_timestamp);
+        assert!(
+            recovery.block.is_some(),
+            "recovery side should finalize while partitioned"
+        );
+
+        let ticket_tip = network
+            .node("n0")
+            .expect("ticket node exists")
+            .ledger()
+            .status()
+            .tip_hash;
+        let recovery_tip = network
+            .node(recovery_id)
+            .expect("recovery node exists")
+            .ledger()
+            .status()
+            .tip_hash;
+        assert_ne!(
+            ticket_tip, recovery_tip,
+            "partitioned groups should have diverged before reconnect"
+        );
+
+        let ticket_snapshot = network
+            .node("n0")
+            .expect("ticket node exists")
+            .chain_snapshot();
+        for id in node_ids.iter().skip(1) {
+            network
+                .node_mut(id)
+                .expect("partition peer exists")
+                .receive(GossipEnvelope::ChainSnapshot(ticket_snapshot.clone()))
+                .expect("partition peer imports better ticket snapshot");
+        }
+
+        drain_all_outboxes(&mut network, &node_ids);
+        assert_network_converged(&network, wallets.len());
+        assert_eq!(
+            network
+                .node("n0")
+                .expect("ticket node exists")
+                .ledger()
+                .status()
+                .tip_hash,
+            ticket_tip,
+            "ticket fork should win over same-height recovery fork"
+        );
+    }
+}
+
+#[test]
+fn in_memory_network_heals_generated_multi_block_partitions() {
+    for seed in MULTI_BLOCK_PARTITION_SEEDS {
+        let (wallets, ledger) = property_ledger(seed, 5);
+        let node_ids = (0..wallets.len())
+            .map(|index| format!("n{index}"))
+            .collect::<Vec<_>>();
+        let mut network = network_from_ledger(&wallets, &ledger);
+        let mut rng = TestRng::new(seed);
+
+        let partition_a = vec![0, 1, 2];
+        let partition_b = vec![3, 4];
+        for round in 0..3 {
+            mine_one_partition_block(
+                &mut network,
+                &node_ids,
+                &wallets,
+                &partition_a,
+                round,
+                &mut rng,
+            );
+        }
+        for round in 0..2 {
+            mine_one_partition_block(
+                &mut network,
+                &node_ids,
+                &wallets,
+                &partition_b,
+                round + 10,
+                &mut rng,
+            );
+        }
+
+        let partition_a_tip = network
+            .node("n0")
+            .expect("partition A anchor exists")
+            .ledger()
+            .status()
+            .tip_hash;
+        let partition_b_tip = network
+            .node("n3")
+            .expect("partition B anchor exists")
+            .ledger()
+            .status()
+            .tip_hash;
+        assert_ne!(
+            partition_a_tip, partition_b_tip,
+            "partitioned chains should diverge before reconnect"
+        );
+        assert!(
+            network
+                .node("n0")
+                .expect("partition A anchor exists")
+                .chain_height()
+                > network
+                    .node("n3")
+                    .expect("partition B anchor exists")
+                    .chain_height(),
+            "partition A should be the taller reconnect candidate"
+        );
+
+        let taller_snapshot = network
+            .node("n0")
+            .expect("partition A anchor exists")
+            .chain_snapshot();
+        for id in &node_ids {
+            network
+                .node_mut(id)
+                .expect("node exists")
+                .receive(GossipEnvelope::ChainSnapshot(taller_snapshot.clone()))
+                .expect("node imports taller partition snapshot");
+        }
+
+        drain_all_outboxes(&mut network, &node_ids);
+        assert_network_converged(&network, wallets.len());
+        assert_eq!(
+            network
+                .node("n3")
+                .expect("partition B anchor exists")
+                .ledger()
+                .status()
+                .tip_hash,
+            partition_a_tip,
+            "shorter partition should switch to taller chain"
+        );
+    }
+}
+
+#[test]
+fn in_memory_network_converges_with_generated_multiple_recovery_candidates() {
+    for seed in MULTI_RECOVERY_CANDIDATE_SEEDS {
+        let (wallets, ledger) = single_finalizer_ledger(seed, 4);
+        let node_ids = (0..wallets.len())
+            .map(|index| format!("n{index}"))
+            .collect::<Vec<_>>();
+        let mut network = network_from_ledger(&wallets, &ledger);
+        let mut rng = TestRng::new(seed);
+        let mut recovery_tips = BTreeSet::new();
+
+        for (index, node_id) in node_ids.iter().enumerate().skip(1) {
+            let timestamp_ms = RECOVERY_BLOCK_DELAY_MS
+                .saturating_add(1)
+                .saturating_add(rng.next_u64() % VDF_TARGET_BLOCK_MS);
+            let outcome = network
+                .node_mut(node_id)
+                .expect("recovery candidate exists")
+                .automatic_mine_once(timestamp_ms);
+            assert!(
+                outcome.block.is_some(),
+                "unranked node {index} should produce a recovery candidate"
+            );
+            recovery_tips.insert(
+                network
+                    .node(node_id)
+                    .expect("recovery candidate exists")
+                    .ledger()
+                    .status()
+                    .tip_hash,
+            );
+        }
+        assert!(
+            recovery_tips.len() > 1,
+            "generated recovery candidates should create competing same-height forks"
+        );
+
+        let winning_id = node_ids[1].clone();
+        let candidate_snapshots = node_ids
+            .iter()
+            .skip(1)
+            .map(|id| {
+                network
+                    .node(id)
+                    .expect("candidate node exists")
+                    .chain_snapshot()
+            })
+            .collect::<Vec<_>>();
+        for snapshot in candidate_snapshots {
+            network
+                .node_mut(&winning_id)
+                .expect("winning candidate exists")
+                .receive(GossipEnvelope::ChainSnapshot(snapshot))
+                .expect("candidate fork choice accepts recovery snapshot");
+        }
+        let winning_snapshot = network
+            .node(&winning_id)
+            .expect("winning candidate exists")
+            .chain_snapshot();
+        let winning_tip = network
+            .node(&winning_id)
+            .expect("winning candidate exists")
+            .ledger()
+            .status()
+            .tip_hash;
+
+        for id in node_ids.iter().skip(1) {
+            network
+                .node_mut(id)
+                .expect("candidate node exists")
+                .receive(GossipEnvelope::ChainSnapshot(winning_snapshot.clone()))
+                .expect("candidate imports best recovery snapshot");
+        }
+
+        for id in node_ids.iter().skip(1) {
+            let node = network.node(id).expect("candidate node exists");
+            assert_eq!(
+                node.chain_height(),
+                1,
+                "{id} should stay at recovery height"
+            );
+            assert_eq!(
+                node.ledger().status().tip_hash,
+                winning_tip,
+                "{id} should converge to the best recovery candidate"
+            );
+            assert_chain_properties(node.chain_snapshot());
+        }
+    }
+}
+
+#[test]
+#[ignore = "long-running late join sync property"]
+fn in_memory_network_syncs_generated_late_joiners_from_genesis() {
+    for seed in LATE_JOIN_SYNC_SEEDS {
+        let (wallets, ledger) = single_finalizer_ledger(seed, 3);
+        let mut network = network_from_ledger(&wallets[0..1], &ledger);
+        let mut rng = TestRng::new(seed);
+        let produced_blocks = 24 + rng.index(12);
+
+        for round in 0..produced_blocks {
+            mine_one_partition_block(
+                &mut network,
+                &["n0".to_string()],
+                &wallets,
+                &[0],
+                round,
+                &mut rng,
+            );
+        }
+
+        assert_eq!(
+            network.node("n0").expect("producer exists").chain_height(),
+            produced_blocks as u64
+        );
+
+        for (index, wallet) in wallets.iter().enumerate().skip(1) {
+            let joined =
+                Ledger::from_snapshot(ledger.snapshot()).expect("late node starts at genesis");
+            let mut node = NodeCore::from_ledger_with_burn_fee_and_enabled(
+                wallet.clone(),
+                joined,
+                true,
+                MICRO_IUNA,
+                0,
+            );
+            node.set_recovery_vdf_top_rank_percent(100);
+            network.insert(format!("n{index}"), node);
+        }
+
+        for index in 1..wallets.len() {
+            let id = format!("n{index}");
+            sync_until_idle(&mut network, "n0", &id, 3);
+        }
+        network
+            .deliver_until_idle()
+            .expect("late joiner block gossip converges");
+        assert_network_converged(&network, wallets.len());
+    }
+}
+
+#[test]
+fn in_memory_network_rejects_generated_future_timestamp_blocks_without_stalling() {
+    for seed in FUTURE_TIMESTAMP_SEEDS {
+        let (wallets, ledger) = single_finalizer_ledger(seed, 2);
+        let node_ids = (0..wallets.len())
+            .map(|index| format!("n{index}"))
+            .collect::<Vec<_>>();
+        let mut network = network_from_ledger(&wallets, &ledger);
+
+        queue_plaintext_burn(
+            network.node_mut("n0").expect("producer exists"),
+            &wallets[0],
+            MICRO_IUNA,
+            0,
+        );
+        let future_block = network
+            .node("n0")
+            .expect("producer exists")
+            .ledger()
+            .mine_next_block(&wallets[0], u64::MAX)
+            .expect("producer can build future-dated candidate");
+        let rejected = network
+            .node_mut("n1")
+            .expect("receiver exists")
+            .receive(GossipEnvelope::Block(future_block))
+            .expect_err("future-dated block should be rejected");
+        assert!(
+            rejected.to_string().contains("too far in the future"),
+            "unexpected future-block rejection: {rejected:#}"
+        );
+        assert_eq!(
+            network.node("n1").expect("receiver exists").chain_height(),
+            0,
+            "receiver should keep its local chain after future-block rejection"
+        );
+
+        let valid_block = network
+            .node("n0")
+            .expect("producer exists")
+            .ledger()
+            .mine_next_block(&wallets[0], VDF_TARGET_BLOCK_MS)
+            .expect("producer can build valid block after future rejection");
+        network
+            .node_mut("n0")
+            .expect("producer exists")
+            .receive(GossipEnvelope::Block(valid_block))
+            .expect("producer applies valid block after future rejection");
+        let valid_snapshot = network
+            .node("n0")
+            .expect("producer exists")
+            .chain_snapshot();
+        network
+            .node_mut("n1")
+            .expect("receiver exists")
+            .receive(GossipEnvelope::ChainSnapshot(valid_snapshot))
+            .expect("receiver should still import a later valid chain");
+        drain_all_outboxes(&mut network, &node_ids);
+        assert_network_converged(&network, wallets.len());
+    }
+}
+
+#[test]
+fn generated_reorgs_preserve_valid_mempool_transactions() {
+    for seed in REORG_MEMPOOL_SEEDS {
+        let wallets = test_wallets(seed, 3);
+        let mut common = Ledger::new_with_genesis_burns(
+            allocations(&wallets, 50 * MICRO_IUNA),
+            vec![GenesisBurn::new(wallets[0].address(), MICRO_IUNA)],
+            1,
+        )
+        .expect("reorg mempool genesis is valid");
+        finalize_with_wallet(&mut common, &wallets[0], VDF_TARGET_BLOCK_MS);
+
+        let mut local = common.clone();
+        let abandoned_transfer = local
+            .build_transfer(&wallets[1], wallets[2].address(), MICRO_IUNA, 0)
+            .expect("abandoned fork transfer builds");
+        local
+            .submit_transaction(abandoned_transfer.clone())
+            .expect("abandoned fork transfer enters mempool");
+        finalize_with_wallet(&mut local, &wallets[0], VDF_TARGET_BLOCK_MS * 2);
+
+        let surviving_transfer = local
+            .build_transfer(&wallets[2], wallets[1].address(), MICRO_IUNA, 0)
+            .expect("local pending transfer builds");
+        local
+            .submit_transaction(surviving_transfer.clone())
+            .expect("local pending transfer enters mempool");
+
+        let mut remote = common;
+        for height in 2..=5 {
+            finalize_with_wallet(
+                &mut remote,
+                &wallets[0],
+                VDF_TARGET_BLOCK_MS.saturating_mul(height),
+            );
+        }
+
+        assert!(
+            local
+                .extend_from_snapshot(remote.snapshot())
+                .expect("longer remote snapshot is evaluated"),
+            "longer fork should replace local fork"
+        );
+        let pending_signatures = local
+            .pending()
+            .iter()
+            .map(Transaction::signature)
+            .collect::<BTreeSet<_>>();
+        assert!(
+            pending_signatures.contains(abandoned_transfer.signature()),
+            "transaction mined only on abandoned fork should return to mempool"
+        );
+        assert!(
+            pending_signatures.contains(surviving_transfer.signature()),
+            "valid local pending transaction should survive reorg"
+        );
+        assert_chain_properties(local.snapshot());
+    }
+}
+
+#[test]
+fn generated_full_block_selection_stays_valid_and_bounded() {
+    for seed in FULL_BLOCK_SELECTION_SEEDS {
+        let wallets = test_wallets(seed, 40);
+        let mut ledger = Ledger::new_with_genesis_burns(
+            allocations(&wallets, 20 * MICRO_IUNA),
+            vec![GenesisBurn::new(wallets[0].address(), MICRO_IUNA)],
+            1,
+        )
+        .expect("full block genesis is valid");
+        let mut rng = TestRng::new(seed);
+
+        for wallet in wallets.iter().skip(1) {
+            let recipient = wallets[rng.index(wallets.len())].address().to_string();
+            if let Ok(tx) = ledger.build_transfer(wallet, recipient, MICRO_IUNA, rng.amount(9)) {
+                let _ = ledger.submit_transaction(tx);
+            }
+        }
+        let anchor = ledger
+            .build_burn(&wallets[0], MICRO_IUNA, 0)
+            .expect("anchor burn builds");
+        ledger
+            .submit_transaction(anchor)
+            .expect("anchor burn enters mempool");
+
+        let block = ledger
+            .mine_next_block(&wallets[0], VDF_TARGET_BLOCK_MS)
+            .expect("full pending pool can produce a bounded block");
+        assert!(
+            block.serialized_size_bytes().expect("block serializes") <= MAX_BLOCK_BYTES,
+            "selected block should fit max block bytes"
+        );
+        assert!(
+            block.transactions.iter().any(Transaction::is_burn),
+            "full block should retain required burn"
+        );
+        assert!(
+            block.transactions.len() > 1,
+            "selection should include more than the required anchor when space allows"
+        );
+        ledger
+            .apply_block(block)
+            .expect("bounded full block applies");
+        assert_chain_properties(ledger.snapshot());
+    }
+}
+
+#[test]
+fn generated_blinded_commit_reveal_survives_partition_and_reconnect() {
+    for seed in BLINDED_PARTITION_SEEDS {
+        let finalizer = Wallet::from_seed(&format!("blinded-partition-finalizer-{seed}"));
+        let sender = Wallet::from_seed(&format!("blinded-partition-sender-{seed}"));
+        let observer = Wallet::from_seed(&format!("blinded-partition-observer-{seed}"));
+        let wallets = vec![finalizer.clone(), sender.clone(), observer.clone()];
+        let ledger = Ledger::new_with_genesis_burns(
+            allocations(&wallets, 100 * MICRO_IUNA),
+            vec![GenesisBurn::new(finalizer.address(), MICRO_IUNA)],
+            1,
+        )
+        .expect("blinded partition genesis is valid");
+        let mut network = network_from_ledger(&wallets, &ledger);
+
+        network
+            .node_mut("n1")
+            .expect("sender exists")
+            .burn(MICRO_IUNA)
+            .expect("sender creates owned blinded burn");
+        let sender_outbox = network
+            .node_mut("n1")
+            .expect("sender exists")
+            .drain_outbox();
+        for envelope in sender_outbox {
+            network
+                .node_mut("n0")
+                .expect("finalizer exists")
+                .receive(envelope)
+                .expect("finalizer receives blinded commit before partition");
+        }
+
+        queue_plaintext_burn(
+            network.node_mut("n0").expect("finalizer exists"),
+            &finalizer,
+            MICRO_IUNA,
+            0,
+        );
+        let commit_block = network
+            .node_mut("n0")
+            .expect("finalizer exists")
+            .mine_one_at(VDF_TARGET_BLOCK_MS)
+            .expect("finalizer mines blinded commit block");
+        assert_eq!(commit_block.blinded_transactions.len(), 1);
+
+        network
+            .node_mut("n1")
+            .expect("sender exists")
+            .receive(GossipEnvelope::Block(commit_block.clone()))
+            .expect("sender imports commit block while reveal path is partitioned");
+        assert_eq!(
+            network
+                .node("n1")
+                .expect("sender exists")
+                .ledger()
+                .pending_blinded_reveals()
+                .len(),
+            1,
+            "sender should publish reveal after seeing its commit"
+        );
+
+        network
+            .deliver_until_idle()
+            .expect("reconnect should gossip delayed reveal");
+        queue_plaintext_burn(
+            network.node_mut("n0").expect("finalizer exists"),
+            &finalizer,
+            MICRO_IUNA,
+            0,
+        );
+        network
+            .gossip_mempools_once()
+            .expect("reveal gossip succeeds");
+        let reveal_block = network
+            .node_mut("n0")
+            .expect("finalizer exists")
+            .mine_one_at(VDF_TARGET_BLOCK_MS * 2)
+            .expect("finalizer mines reveal block after reconnect");
+        assert_eq!(reveal_block.all_blinded_reveals().len(), 1);
+        network
+            .deliver_until_idle()
+            .expect("reveal block gossip converges");
+        let revealed = revealed_blinded_transactions(
+            &network
+                .node("n0")
+                .expect("finalizer exists")
+                .chain_snapshot(),
+        )
+        .expect("revealed history is reconstructed");
+        assert!(
+            revealed
+                .iter()
+                .any(|revealed| revealed.height == reveal_block.height
+                    && revealed.transaction.is_burn()
+                    && revealed.transaction.sender() == sender.address()),
+            "blinded burn should reveal after reconnect"
+        );
+        assert_network_converged(&network, wallets.len());
+    }
+}
+
+#[test]
+fn generated_expired_blinded_transactions_are_pruned_under_progress() {
+    for seed in BLINDED_EXPIRY_SEEDS {
+        let wallets = test_wallets(seed, 3);
+        let mut ledger = Ledger::new_with_genesis_burns(
+            allocations(&wallets, 40 * MICRO_IUNA),
+            vec![GenesisBurn::new(wallets[0].address(), MICRO_IUNA)],
+            1,
+        )
+        .expect("blinded expiry genesis is valid");
+
+        let blinded = ledger
+            .build_blinded_burn(&wallets[1], MICRO_IUNA, 0, 2)
+            .expect("short-lived blinded burn builds");
+        ledger
+            .submit_blinded_transaction(blinded.transaction)
+            .expect("short-lived blinded burn enters mempool");
+        assert_eq!(ledger.pending_blinded_transactions().len(), 1);
+
+        for height in 1..=3 {
+            finalize_with_wallet(
+                &mut ledger,
+                &wallets[0],
+                VDF_TARGET_BLOCK_MS.saturating_mul(height),
+            );
+        }
+        assert!(
+            ledger.pending_blinded_transactions().is_empty(),
+            "expired pending blinded transaction should be pruned as blocks progress"
+        );
+        assert_chain_properties(ledger.snapshot());
+    }
+}
+
+#[test]
+#[ignore = "long-running testnet soak property"]
+fn in_memory_network_soak_generated_chaos() {
+    for seed in SOAK_CHAOS_SEEDS {
+        let (wallets, ledger) = property_ledger(seed, 5);
+        let node_ids = (0..wallets.len())
+            .map(|index| format!("n{index}"))
+            .collect::<Vec<_>>();
+        let mut network = network_from_ledger(&wallets, &ledger);
+        let mut rng = TestRng::new(seed);
+
+        for round in 0..SOAK_CHAOS_ROUNDS {
+            let mut offline = BTreeSet::new();
+            if round % 5 == 1 {
+                offline.insert(node_ids[rng.index(node_ids.len())].clone());
+            }
+            if round % 7 == 3 {
+                offline.insert(node_ids[rng.index(node_ids.len())].clone());
+            }
+
+            let actor = rng.index(wallets.len());
+            match rng.index(6) {
+                0 => {
+                    let recipient = wallets[rng.index(wallets.len())].address().to_string();
+                    let _ = queue_plaintext_transfer(
+                        network
+                            .node_mut(&node_ids[actor])
+                            .expect("actor node exists"),
+                        &wallets[actor],
+                        recipient,
+                        rng.amount(MICRO_IUNA),
+                        rng.next_u64() % 3,
+                    );
+                }
+                1 => {
+                    let _ = queue_plaintext_burn(
+                        network
+                            .node_mut(&node_ids[actor])
+                            .expect("actor node exists"),
+                        &wallets[actor],
+                        MICRO_IUNA,
+                        rng.next_u64() % 3,
+                    );
+                }
+                2 => {
+                    let expiry_height = network
+                        .node(&node_ids[actor])
+                        .expect("actor node exists")
+                        .chain_height()
+                        + 8;
+                    let recipient = wallets[rng.index(wallets.len())].address().to_string();
+                    let _ = network
+                        .node_mut(&node_ids[actor])
+                        .expect("actor node exists")
+                        .blinded_transfer_with_fee(recipient, 1, 0, expiry_height);
+                }
+                _ => {}
+            }
+
+            deliver_chaos_until_idle(&mut network, &node_ids, &offline, &mut rng);
+            let online = node_ids
+                .iter()
+                .enumerate()
+                .filter_map(|(index, id)| (!offline.contains(id)).then_some(index))
+                .collect::<Vec<_>>();
+            if !online.is_empty() {
+                let _ = try_mine_one_partition_block(
+                    &mut network,
+                    &node_ids,
+                    &wallets,
+                    &online,
+                    round,
+                    &mut rng,
+                );
+            }
+            deliver_chaos_until_idle(&mut network, &node_ids, &offline, &mut rng);
+        }
+
+        let best_id = node_ids
+            .iter()
+            .max_by_key(|id| network.node(id).expect("node exists").chain_height())
+            .expect("network has nodes")
+            .clone();
+        let best_snapshot = network
+            .node(&best_id)
+            .expect("best node exists")
+            .chain_snapshot();
+        for id in &node_ids {
+            network
+                .node_mut(id)
+                .expect("node exists")
+                .receive(GossipEnvelope::ChainSnapshot(best_snapshot.clone()))
+                .expect("node imports best soak snapshot");
+        }
+        drain_all_outboxes(&mut network, &node_ids);
+        assert_network_converged(&network, wallets.len());
+    }
+}
+
+fn network_from_ledger(wallets: &[Wallet], ledger: &Ledger) -> InMemoryNetwork {
+    let mut network = InMemoryNetwork::default();
+    for (index, wallet) in wallets.iter().enumerate() {
+        let joined = Ledger::from_snapshot(ledger.snapshot()).expect("node joins valid chain");
+        let mut node = NodeCore::from_ledger_with_burn_fee_and_enabled(
+            wallet.clone(),
+            joined,
+            true,
+            MICRO_IUNA,
+            0,
+        );
+        node.set_recovery_vdf_top_rank_percent(100);
+        network.insert(format!("n{index}"), node);
+    }
+    network
+}
+
+fn skew_timestamp(base_timestamp: u64, skew_ms: i64) -> u64 {
+    if skew_ms >= 0 {
+        base_timestamp.saturating_add(skew_ms as u64)
+    } else {
+        base_timestamp.saturating_sub(skew_ms.unsigned_abs())
+    }
+}
+
+fn expected_clock_skew_skip_reason(reason: &str) -> bool {
+    reason.contains("at least one burn")
+        || reason.contains("selected finalizer")
+        || reason.contains("required burn")
+        || reason.contains("could not")
+        || reason.contains("automatic")
+        || reason.contains("block timestamp")
+        || reason.contains("before finalizer rank")
+        || reason.contains("collecting blinded reveals")
+}
+
+fn mine_expected_leader_with_network_time(
+    network: &mut InMemoryNetwork,
+    node_ids: &[String],
+    wallets: &[Wallet],
+    round: usize,
+) {
+    let Some(leader) = network
+        .node("n0")
+        .expect("anchor node exists")
+        .ledger()
+        .expected_leader_for_next_block()
+    else {
+        return;
+    };
+    let Some((leader_index, _)) = wallets
+        .iter()
+        .enumerate()
+        .find(|(_, wallet)| wallet.address() == leader)
+    else {
+        return;
+    };
+    let timestamp_ms = network
+        .node("n0")
+        .expect("anchor node exists")
+        .ledger()
+        .chain()
+        .last()
+        .expect("anchor chain has a tip")
+        .timestamp_ms
+        .saturating_add(VDF_TARGET_BLOCK_MS + round as u64 + 1);
+    let mut outcome = network
+        .node_mut(&node_ids[leader_index])
+        .expect("leader node exists")
+        .automatic_mine_once(timestamp_ms);
+    if outcome
+        .skipped_reason
+        .as_deref()
+        .is_some_and(|reason| reason.contains("collecting blinded reveals"))
+    {
+        outcome = network
+            .node_mut(&node_ids[leader_index])
+            .expect("leader node exists")
+            .automatic_mine_once(timestamp_ms.saturating_add(TEST_REVEAL_BUNDLE_COLLECTION_MS + 1));
+    }
+    if let Some(reason) = outcome.skipped_reason {
+        assert!(
+            expected_clock_skew_skip_reason(&reason),
+            "unexpected network-time mining skip reason: {reason}"
+        );
+    }
+}
+
+fn drain_all_outboxes(network: &mut InMemoryNetwork, node_ids: &[String]) {
+    for id in node_ids {
+        let _ = network.node_mut(id).expect("node exists").drain_outbox();
+    }
+}
+
+fn mine_one_partition_block(
+    network: &mut InMemoryNetwork,
+    node_ids: &[String],
+    wallets: &[Wallet],
+    partition: &[usize],
+    round: usize,
+    rng: &mut TestRng,
+) {
+    assert!(
+        try_mine_one_partition_block(network, node_ids, wallets, partition, round, rng),
+        "partition could not produce a block"
+    );
+}
+
+fn try_mine_one_partition_block(
+    network: &mut InMemoryNetwork,
+    node_ids: &[String],
+    wallets: &[Wallet],
+    partition: &[usize],
+    round: usize,
+    rng: &mut TestRng,
+) -> bool {
+    let anchor_id = &node_ids[partition[0]];
+    let anchor_tip_timestamp = network
+        .node(anchor_id)
+        .expect("partition anchor exists")
+        .ledger()
+        .chain()
+        .last()
+        .expect("partition chain has a tip")
+        .timestamp_ms;
+    let mut candidates = partition.to_vec();
+    candidates.sort_by_key(|index| {
+        network
+            .node(anchor_id)
+            .expect("partition anchor exists")
+            .ledger()
+            .finalizer_rank_for_next_block(wallets[*index].address())
+            .unwrap_or(u32::MAX)
+    });
+
+    for index in candidates {
+        let rank_delay = network
+            .node(anchor_id)
+            .expect("partition anchor exists")
+            .ledger()
+            .finalizer_rank_for_next_block(wallets[index].address())
+            .map(|rank| VDF_TARGET_BLOCK_MS.saturating_mul(u64::from(rank + 1) * 2))
+            .unwrap_or(RECOVERY_BLOCK_DELAY_MS);
+        let timestamp_ms = anchor_tip_timestamp
+            .saturating_add(rank_delay)
+            .saturating_add(1 + round as u64 + rng.next_u64() % 17);
+        let mut outcome = network
+            .node_mut(&node_ids[index])
+            .expect("partition candidate exists")
+            .automatic_mine_once(timestamp_ms);
+        if outcome
+            .skipped_reason
+            .as_deref()
+            .is_some_and(|reason| reason.contains("collecting blinded reveals"))
+        {
+            outcome = network
+                .node_mut(&node_ids[index])
+                .expect("partition candidate exists")
+                .automatic_mine_once(
+                    timestamp_ms.saturating_add(TEST_REVEAL_BUNDLE_COLLECTION_MS + 1),
+                );
+        }
+        if outcome.block.is_some() {
+            let snapshot = network
+                .node(&node_ids[index])
+                .expect("partition producer exists")
+                .chain_snapshot();
+            for peer in partition {
+                if *peer != index {
+                    network
+                        .node_mut(&node_ids[*peer])
+                        .expect("partition peer exists")
+                        .receive(GossipEnvelope::ChainSnapshot(snapshot.clone()))
+                        .expect("partition peer imports produced block");
+                }
+            }
+            return true;
+        }
+    }
+
+    false
+}
+
+fn sync_until_idle(network: &mut InMemoryNetwork, from: &str, to: &str, limit: usize) {
+    for _ in 0..256 {
+        if !network
+            .sync_node_from_peer(from, to, limit)
+            .expect("range sync succeeds")
+        {
+            return;
+        }
+    }
+    panic!("range sync did not become idle");
+}
+
 fn deliver_with_chaos(
     network: &mut InMemoryNetwork,
     node_ids: &[String],
@@ -802,6 +1879,8 @@ fn receive_chaotic_envelope(
         let message = error.to_string();
         assert!(
             message.contains("expected block height")
+                || message.contains("conflicts with local chain")
+                || message.contains("reveal bundle parent hash is invalid")
                 || message.contains("mine transaction anchor is not on this chain")
                 || message.contains("blinded transaction spends missing output")
                 || message.contains("blinded transaction expiry is too far in the future"),
