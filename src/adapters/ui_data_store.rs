@@ -138,6 +138,13 @@ pub struct BlockMetricRow {
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
+pub struct UiLeaderboardEntry {
+    pub address: String,
+    pub amount: Amount,
+    pub count: u64,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
 pub struct WalletTransactionProjection {
     pub sort_key: u64,
     pub kind: String,
@@ -383,6 +390,16 @@ LIMIT ?1
         })
     }
 
+    pub fn load_leaderboards(&self, limit: usize) -> Result<UiLeaderboards> {
+        self.with_connection(|connection| {
+            Ok(UiLeaderboards {
+                balances: load_balance_leaderboard(connection, limit)?,
+                miners: load_transaction_leaderboard(connection, "mine", limit)?,
+                burners: load_transaction_leaderboard(connection, "burn", limit)?,
+            })
+        })
+    }
+
     pub fn load_wallet_utxos(&self, address: &str) -> Result<Vec<(OutPoint, TxOutput)>> {
         self.with_connection(|connection| load_wallet_utxos(connection, address))
     }
@@ -437,6 +454,105 @@ PRAGMA synchronous = NORMAL;
         Connection::open(&self.path)
             .with_context(|| format!("failed to open UI data database {}", self.path.display()))
     }
+}
+
+#[derive(Clone, Debug, Default, Eq, PartialEq)]
+pub struct UiLeaderboards {
+    pub balances: Vec<UiLeaderboardEntry>,
+    pub miners: Vec<UiLeaderboardEntry>,
+    pub burners: Vec<UiLeaderboardEntry>,
+}
+
+fn load_balance_leaderboard(
+    connection: &Connection,
+    limit: usize,
+) -> Result<Vec<UiLeaderboardEntry>> {
+    let mut statement = connection
+        .prepare(
+            r#"
+SELECT address, SUM(amount) AS total_amount, COUNT(*) AS output_count
+FROM ui_utxos
+GROUP BY address
+HAVING total_amount > 0
+ORDER BY total_amount DESC, address ASC
+LIMIT ?1
+"#,
+        )
+        .context("failed to prepare balance leaderboard query")?;
+    let rows = statement
+        .query_map([limit as u64], |row| {
+            Ok(UiLeaderboardEntry {
+                address: row.get(0)?,
+                amount: row.get(1)?,
+                count: row.get(2)?,
+            })
+        })
+        .context("failed to load balance leaderboard")?;
+    rows.collect::<std::result::Result<Vec<_>, _>>()
+        .context("failed to read balance leaderboard rows")
+}
+
+fn load_transaction_leaderboard(
+    connection: &Connection,
+    kind: &str,
+    limit: usize,
+) -> Result<Vec<UiLeaderboardEntry>> {
+    let mut statement = connection
+        .prepare(
+            r#"
+SELECT address, transaction_json
+FROM ui_wallet_transactions
+WHERE kind = ?1
+"#,
+        )
+        .with_context(|| format!("failed to prepare {kind} leaderboard query"))?;
+    let rows = statement
+        .query_map([kind], |row| {
+            Ok((row.get::<_, String>(0)?, row.get::<_, Vec<u8>>(1)?))
+        })
+        .with_context(|| format!("failed to load {kind} leaderboard"))?;
+    let mut entries = BTreeMap::<String, UiLeaderboardEntry>::new();
+    for row in rows {
+        let (address, transaction_json) =
+            row.with_context(|| format!("failed to read {kind} leaderboard row"))?;
+        let transaction =
+            serde_json::from_slice::<Transaction>(&transaction_json).with_context(|| {
+                format!(
+                    "failed to parse {kind} leaderboard transaction JSON with {} bytes",
+                    transaction_json.len()
+                )
+            })?;
+        let amount = match transaction {
+            Transaction::Mine { .. } => MINE_REWARD,
+            Transaction::Burn { amount, .. } => amount,
+            Transaction::Transfer { .. } => 0,
+        };
+        let entry = entries
+            .entry(address.clone())
+            .or_insert_with(|| UiLeaderboardEntry {
+                address,
+                amount: 0,
+                count: 0,
+            });
+        entry.amount = entry
+            .amount
+            .checked_add(amount)
+            .with_context(|| format!("{kind} leaderboard amount overflow"))?;
+        entry.count = entry
+            .count
+            .checked_add(1)
+            .with_context(|| format!("{kind} leaderboard count overflow"))?;
+    }
+    let mut entries = entries.into_values().collect::<Vec<_>>();
+    entries.sort_by(|left, right| {
+        right
+            .amount
+            .cmp(&left.amount)
+            .then_with(|| right.count.cmp(&left.count))
+            .then_with(|| left.address.cmp(&right.address))
+    });
+    entries.truncate(limit);
+    Ok(entries)
 }
 
 fn replace_metrics(

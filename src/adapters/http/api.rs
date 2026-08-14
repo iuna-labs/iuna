@@ -14,6 +14,7 @@ use crate::{
     domain::{BlindedTransaction, OutPoint, Transaction, TxOutput},
 };
 
+use super::types::{LeaderboardEntry, MetricsLeaderboards};
 use super::{
     BlocksQuery, ConfigResponse, MempoolCounts, MetricsQuery, MetricsResponse,
     NetworkHealthLocalState, NetworkHealthResponse, Page, PageQuery, UiBlock, UiTransaction,
@@ -503,18 +504,10 @@ pub(super) async fn api_metrics(
 ) -> Json<MetricsResponse> {
     let enabled = state.ui_config.lock().await.keep_track_of_metrics;
     if !enabled {
-        return Json(MetricsResponse {
-            enabled,
-            latest: None,
-            charts: Vec::new(),
-        });
+        return Json(empty_metrics_response(enabled));
     }
     if ensure_ui_data_current(&state).await.is_err() {
-        return Json(MetricsResponse {
-            enabled,
-            latest: None,
-            charts: Vec::new(),
-        });
+        return Json(empty_metrics_response(enabled));
     }
     let store = state.ui_data_store.clone();
     let rows = tokio::task::spawn_blocking(move || match query.limit {
@@ -525,7 +518,55 @@ pub(super) async fn api_metrics(
     .ok()
     .and_then(Result::ok)
     .unwrap_or_default();
-    Json(metrics_response(enabled, rows))
+    let store = state.ui_data_store.clone();
+    let leaderboards = tokio::task::spawn_blocking(move || store.load_leaderboards(10))
+        .await
+        .ok()
+        .and_then(Result::ok)
+        .map(metrics_leaderboards)
+        .unwrap_or_default();
+    Json(metrics_response(enabled, rows, leaderboards))
+}
+
+fn empty_metrics_response(enabled: bool) -> MetricsResponse {
+    MetricsResponse {
+        enabled,
+        latest: None,
+        charts: Vec::new(),
+        leaderboards: MetricsLeaderboards::default(),
+    }
+}
+
+fn metrics_leaderboards(
+    leaderboards: crate::adapters::ui_data_store::UiLeaderboards,
+) -> MetricsLeaderboards {
+    MetricsLeaderboards {
+        balances: leaderboards
+            .balances
+            .into_iter()
+            .map(metrics_leaderboard_entry)
+            .collect(),
+        miners: leaderboards
+            .miners
+            .into_iter()
+            .map(metrics_leaderboard_entry)
+            .collect(),
+        burners: leaderboards
+            .burners
+            .into_iter()
+            .map(metrics_leaderboard_entry)
+            .collect(),
+    }
+}
+
+fn metrics_leaderboard_entry(
+    entry: crate::adapters::ui_data_store::UiLeaderboardEntry,
+) -> LeaderboardEntry {
+    LeaderboardEntry {
+        address: entry.address,
+        amount: entry.amount,
+        count: entry.count,
+    }
 }
 
 pub(super) async fn api_network_health(

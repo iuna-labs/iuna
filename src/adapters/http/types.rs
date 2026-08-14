@@ -244,6 +244,23 @@ pub(super) struct MetricsResponse {
     pub(super) enabled: bool,
     pub(super) latest: Option<BlockMetricRow>,
     pub(super) charts: Vec<MetricsChart>,
+    pub(super) leaderboards: MetricsLeaderboards,
+}
+
+#[derive(Clone, Debug, Default, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub(super) struct MetricsLeaderboards {
+    pub(super) balances: Vec<LeaderboardEntry>,
+    pub(super) miners: Vec<LeaderboardEntry>,
+    pub(super) burners: Vec<LeaderboardEntry>,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub(super) struct LeaderboardEntry {
+    pub(super) address: String,
+    pub(super) amount: Amount,
+    pub(super) count: u64,
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize)]

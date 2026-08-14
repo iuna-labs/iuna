@@ -188,11 +188,15 @@ window.iunaApp = function iunaApp() {
     allowedTabs() {
       const tabs = this.advancedMode()
         ? ["wallet", "mining", "p2p", "chain", "settings"]
-        : ["wallet", "chain", "settings"];
-      if (this.config.keep_track_of_metrics) {
+        : ["wallet", "p2p", "chain", "settings"];
+      if (this.developmentMode()) {
         tabs.splice(tabs.indexOf("chain") + 1, 0, "metrics");
       }
       return tabs;
+    },
+
+    developmentMode() {
+      return this.keepTrackOfMetrics === true || this.config.keep_track_of_metrics === true;
     },
 
     basicMode() {
@@ -636,7 +640,7 @@ window.iunaApp = function iunaApp() {
       const addressBookVersion = this.addressBookVersion;
       const tab = this.tab;
       const shouldLoadBlocks = tab === "chain" || tab === "mining";
-      const shouldLoadP2pMetrics = tab === "p2p";
+      const shouldLoadP2pMetrics = tab === "p2p" && this.developmentMode();
       const shouldLoadMetrics = tab === "metrics";
       if (shouldLoadMetrics) {
         await this.refreshMetrics(options);
@@ -1521,7 +1525,7 @@ window.iunaApp = function iunaApp() {
         await this.postForm(
           "/api/settings/metrics",
           { enabled },
-          enabled ? "Metrics tracking turned on" : "Metrics tracking turned off"
+          enabled ? "Development mode turned on" : "Development mode turned off"
         );
         await this.refreshConfig();
         if (!enabled && this.tab === "metrics") {
@@ -1826,6 +1830,34 @@ window.iunaApp = function iunaApp() {
 
     metricsLatest() {
       return this.blockchainMetrics?.latest || {};
+    },
+
+    metricsLeaderboards() {
+      return this.blockchainMetrics?.leaderboards || {};
+    },
+
+    leaderboardRows(kind) {
+      const rows = this.metricsLeaderboards()?.[kind];
+      return Array.isArray(rows) ? rows : [];
+    },
+
+    leaderboardRankLabel(index) {
+      return ["Gold", "Silver", "Bronze"][index] || `#${index + 1}`;
+    },
+
+    leaderboardRankClass(index) {
+      return index < 3 ? `medal-${index + 1}` : "";
+    },
+
+    leaderboardAmountLabel(row) {
+      return `IUNA ${this.amountLabel(row?.amount || 0)}`;
+    },
+
+    leaderboardCountLabel(kind, row) {
+      const count = Number(row?.count || 0);
+      if (kind === "miners") return `${count} mine${count === 1 ? "" : "s"}`;
+      if (kind === "burners") return `${count} burn${count === 1 ? "" : "s"}`;
+      return `${count} UTXO${count === 1 ? "" : "s"}`;
     },
 
     metricsPath(range = this.metricsRange) {

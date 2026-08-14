@@ -150,6 +150,8 @@ pub(super) const INDEX_HTML: &str = r#"<!doctype html>
     .metrics-head h2 { margin: 0; }
     .metrics-range { flex: 0 0 auto; }
     .metrics-range button { padding: 5px 9px; font-size: 12px; white-space: nowrap; }
+    .metrics-subhead { display: flex; justify-content: space-between; gap: 12px; align-items: baseline; margin-top: 8px; }
+    .metrics-subhead h2 { margin: 0; }
     .metrics-summary { display: grid; grid-template-columns: repeat(auto-fit, minmax(150px, 1fr)); gap: 10px; }
     .metrics-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(min(100%, 430px), 1fr)); gap: 12px; }
     .metric-chart-card { display: grid; gap: 10px; min-width: 0; border: 1px solid #2a3035; border-radius: 8px; padding: 12px; background: #181b1f; }
@@ -170,6 +172,17 @@ pub(super) const INDEX_HTML: &str = r#"<!doctype html>
     .metric-chart-hover-point { position: absolute; width: 8px; height: 8px; border-radius: 50%; background: #d5f55f; pointer-events: none; transform: translate(-50%, -50%); box-shadow: 0 0 0 4px rgba(213, 245, 95, .18); }
     .metric-chart-tooltip { position: absolute; z-index: 1; max-width: min(180px, 80%); border: 1px solid #566d25; border-radius: 6px; padding: 5px 7px; background: #202615; color: #e8edf0; font-size: 11px; font-weight: 850; font-variant-numeric: tabular-nums; line-height: 1.25; pointer-events: none; box-shadow: 0 8px 20px rgba(0, 0, 0, .28); white-space: nowrap; }
     .metrics-empty { border: 1px dashed #3a4248; border-radius: 8px; padding: 14px; color: #8d989f; background: #111316; }
+    .leaderboard-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(min(100%, 300px), 1fr)); gap: 12px; }
+    .leaderboard-card { min-width: 0; border: 1px solid #2a3035; border-radius: 8px; padding: 12px; background: #181b1f; }
+    .leaderboard-card h3 { margin: 0 0 10px; }
+    .leaderboard-list { display: grid; gap: 8px; }
+    .leaderboard-row { display: grid; grid-template-columns: 54px minmax(0, 1fr) auto; gap: 10px; align-items: center; border: 1px solid #2f363c; border-radius: 8px; padding: 9px; background: #111316; }
+    .leaderboard-rank { display: grid; place-items: center; min-height: 30px; border: 1px solid #3a4248; border-radius: 999px; color: #a8b2b8; font-size: 11px; font-weight: 900; }
+    .leaderboard-rank.medal-1 { border-color: #ffd070; background: #2d2513; color: #ffd070; }
+    .leaderboard-rank.medal-2 { border-color: #c7d0d5; background: #20252a; color: #e8edf0; }
+    .leaderboard-rank.medal-3 { border-color: #c69262; background: #2a1f17; color: #ffc18a; }
+    .leaderboard-main { min-width: 0; display: grid; gap: 3px; }
+    .leaderboard-amount { color: #d5f55f; font-size: 13px; font-weight: 900; font-variant-numeric: tabular-nums; white-space: nowrap; }
     .wallet-grid { width: 100%; display: grid; grid-template-columns: minmax(0, 1fr) minmax(300px, .8fr); gap: 12px; align-items: start; }
     .wallet-actions { display: grid; gap: 12px; }
     .advanced-toggle { flex-basis: 100%; width: max-content; align-self: flex-start; border-color: #3a4248; padding: 4px 7px; background: #202328; color: #9fa8ad; font-size: 12px; }
@@ -440,7 +453,7 @@ pub(super) const INDEX_HTML: &str = r#"<!doctype html>
       .block-card { flex-basis: 108px; }
     }
   </style>
-  <script defer src="/assets/iuna-ui.js?v=102"></script>
+  <script defer src="/assets/iuna-ui.js?v=103"></script>
   <script defer src="/assets/alpine.min.js"></script>
 </head>
 <body x-data="iunaApp()" x-init="init()" @keydown.window.escape="closeModals()" x-cloak>
@@ -456,7 +469,7 @@ pub(super) const INDEX_HTML: &str = r#"<!doctype html>
           <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M4 19V5"></path><path d="M4 19h16"></path><path d="M7 15l4-4 3 3 5-7"></path></svg>
           <span>Mining</span>
         </button>
-        <button class="nav-button" x-show="advancedMode()" :class="{ active: tab === 'p2p' }" @click="setTab('p2p')" type="button" title="P2P" aria-label="P2P">
+        <button class="nav-button" :class="{ active: tab === 'p2p' }" @click="setTab('p2p')" type="button" title="P2P" aria-label="P2P">
           <svg viewBox="0 0 24 24" aria-hidden="true"><circle cx="6" cy="12" r="3"></circle><circle cx="18" cy="6" r="3"></circle><circle cx="18" cy="18" r="3"></circle><path d="M8.5 10.5 15.5 7.5"></path><path d="M8.5 13.5 15.5 16.5"></path></svg>
           <span>P2P</span>
         </button>
@@ -464,7 +477,7 @@ pub(super) const INDEX_HTML: &str = r#"<!doctype html>
           <svg class="chain-icon" viewBox="0 0 24 24" aria-hidden="true"><rect x="1.5" y="9" width="5.5" height="5.5"></rect><rect x="9.25" y="9" width="5.5" height="5.5"></rect><rect x="17" y="9" width="5.5" height="5.5"></rect></svg>
           <span>Chain</span>
         </button>
-        <button class="nav-button" x-show="config.keep_track_of_metrics" :class="{ active: tab === 'metrics' }" @click="setTab('metrics')" type="button" title="Metrics" aria-label="Metrics">
+        <button class="nav-button" x-show="developmentMode()" :class="{ active: tab === 'metrics' }" @click="setTab('metrics')" type="button" title="Metrics" aria-label="Metrics">
           <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M4 19V5"></path><path d="M4 19h16"></path><path d="M7 15l3-4 3 2 4-7"></path><path d="M7 17h10"></path></svg>
           <span>Metrics</span>
         </button>
@@ -485,7 +498,7 @@ pub(super) const INDEX_HTML: &str = r#"<!doctype html>
         <h1 x-text="pageTitle()">iuna</h1>
         <div class="basic-status-row" x-show="basicMode()">
           <span class="basic-status" :class="networkHealthClass()" x-text="basicNetworkStatusLabel()"></span>
-          <button class="basic-status-detail" type="button" x-show="basicNetworkNeedsAttention()" @click="setUiMode('advanced'); setTab('p2p')">Details</button>
+          <button class="basic-status-detail" type="button" x-show="basicNetworkNeedsAttention()" @click="setTab('p2p')">Details</button>
         </div>
       </div>
       <div class="header-actions">
@@ -661,7 +674,7 @@ pub(super) const INDEX_HTML: &str = r#"<!doctype html>
               <div class="mine-stat-value" x-text="localMiningMempoolLabel()"></div>
             </div>
           </div>
-          <div class="mining-event-log" aria-label="Mining event log">
+          <div class="mining-event-log" x-show="developmentMode()" aria-label="Mining event log">
             <div class="mining-event-log-head"><span>Event log</span><span x-text="`${miningEventLog().length} lines`"></span></div>
             <template x-if="miningEventLog().length === 0">
               <div class="mining-event-empty skeleton-card" aria-hidden="true"><div class="skeleton-line"></div></div>
@@ -776,7 +789,7 @@ pub(super) const INDEX_HTML: &str = r#"<!doctype html>
             <button class="primary" type="submit">Add</button>
           </form>
         </div>
-        <div class="network-health">
+        <div class="network-health" x-show="developmentMode()">
           <div class="network-health-state" :class="networkHealthClass()">
             <div class="network-health-label">Network Health</div>
             <div class="network-health-value" x-text="networkHealth.state || '-'"></div>
@@ -796,7 +809,7 @@ pub(super) const INDEX_HTML: &str = r#"<!doctype html>
             <div class="peer-summary-item"><div class="peer-summary-label">Clock Warnings</div><div class="peer-summary-value" x-text="networkHealth.bad_clock_peers ?? '-'"></div></div>
           </div>
         </div>
-        <div class="peer-summary">
+        <div class="peer-summary" x-show="developmentMode()">
           <div class="peer-summary-item"><div class="peer-summary-label">Outbound</div><div class="peer-summary-value" x-text="outboundPeers().length"></div></div>
           <div class="peer-summary-item"><div class="peer-summary-label">Inbound</div><div class="peer-summary-value" x-text="inboundPeers().length"></div></div>
           <div class="peer-summary-item"><div class="peer-summary-label">Healthy</div><div class="peer-summary-value" x-text="healthyPeers().length"></div></div>
@@ -805,7 +818,7 @@ pub(super) const INDEX_HTML: &str = r#"<!doctype html>
         </div>
         <div class="table-wrap">
           <table>
-            <thead><tr><th>Status</th><th>Address</th><th>Direction</th><th>Last Contact</th><th>Clock</th><th>Ban</th><th>Score</th><th>Height</th><th>Delta</th><th>Tip</th><th>Sent</th><th>Received</th><th>Last Error</th><th>Actions</th></tr></thead>
+            <thead><tr><th>Status</th><th>Address</th><th>Direction</th><th>Last Contact</th><th x-show="developmentMode()">Clock</th><th x-show="developmentMode()">Ban</th><th x-show="developmentMode()">Score</th><th>Height</th><th x-show="developmentMode()">Delta</th><th x-show="developmentMode()">Tip</th><th x-show="developmentMode()">Sent</th><th x-show="developmentMode()">Received</th><th x-show="developmentMode()">Last Error</th><th>Actions</th></tr></thead>
             <tbody>
               <template x-for="peer in peers" :key="peer.address">
                 <tr>
@@ -813,15 +826,15 @@ pub(super) const INDEX_HTML: &str = r#"<!doctype html>
                   <td><code x-text="peer.address"></code></td>
                   <td x-text="peer.direction"></td>
                   <td x-text="peerLastContactLabel(peer)"></td>
-                  <td x-text="peerClockLabel(peer)"></td>
-                  <td x-text="peerBanLabel(peer)"></td>
-                  <td x-text="peer.misbehavior_score ?? 0"></td>
+                  <td x-show="developmentMode()" x-text="peerClockLabel(peer)"></td>
+                  <td x-show="developmentMode()" x-text="peerBanLabel(peer)"></td>
+                  <td x-show="developmentMode()" x-text="peer.misbehavior_score ?? 0"></td>
                   <td x-text="peer.last_known_height ?? '-'"></td>
-                  <td x-text="peerHeightDelta(peer)"></td>
-                  <td><code x-text="short(peer.last_known_tip_hash)"></code></td>
-                  <td x-text="peer.messages_sent"></td>
-                  <td x-text="peer.messages_received"></td>
-                  <td x-text="peer.last_error || ''"></td>
+                  <td x-show="developmentMode()" x-text="peerHeightDelta(peer)"></td>
+                  <td x-show="developmentMode()"><code x-text="short(peer.last_known_tip_hash)"></code></td>
+                  <td x-show="developmentMode()" x-text="peer.messages_sent"></td>
+                  <td x-show="developmentMode()" x-text="peer.messages_received"></td>
+                  <td x-show="developmentMode()" x-text="peer.last_error || ''"></td>
                   <td><div class="peer-actions"><button class="peer-remove" type="button" x-show="canRemovePeer(peer)" @click="removePeer(peer)">Remove</button><span class="muted" x-show="!canRemovePeer(peer)">Observed</span></div></td>
                 </tr>
               </template>
@@ -837,7 +850,7 @@ pub(super) const INDEX_HTML: &str = r#"<!doctype html>
           </table>
         </div>
       </div>
-      <div class="panel">
+      <div class="panel" x-show="developmentMode()">
         <h2>Metrics</h2>
         <div class="grid">
           <div class="metric"><div class="label">Inbound Sessions</div><div class="value" x-text="p2pMetrics.inbound_sessions_started ?? 0"></div></div>
@@ -1099,6 +1112,29 @@ pub(super) const INDEX_HTML: &str = r#"<!doctype html>
             </article>
           </template>
         </div>
+        <div class="metrics-subhead">
+          <h2>Leaderboards</h2>
+        </div>
+        <div class="leaderboard-grid">
+          <template x-for="board in [{ key: 'balances', title: 'Top 10 Balance' }, { key: 'miners', title: 'Top 10 Miners' }, { key: 'burners', title: 'Top 10 Burners' }]" :key="board.key">
+            <article class="leaderboard-card">
+              <h3 x-text="board.title"></h3>
+              <div class="leaderboard-list">
+                <template x-for="(row, index) in leaderboardRows(board.key)" :key="`${board.key}-${row.address}`">
+                  <div class="leaderboard-row">
+                    <div class="leaderboard-rank" :class="leaderboardRankClass(index)" x-text="leaderboardRankLabel(index)"></div>
+                    <div class="leaderboard-main">
+                      <code class="tx-value hash" x-text="shortAddressLabel(row.address)"></code>
+                      <div class="muted" x-text="leaderboardCountLabel(board.key, row)"></div>
+                    </div>
+                    <div class="leaderboard-amount" x-text="leaderboardAmountLabel(row)"></div>
+                  </div>
+                </template>
+                <div class="metrics-empty" x-show="leaderboardRows(board.key).length === 0">No entries</div>
+              </div>
+            </article>
+          </template>
+        </div>
       </div>
     </section>
     <section x-show="tab === 'settings'">
@@ -1123,13 +1159,13 @@ pub(super) const INDEX_HTML: &str = r#"<!doctype html>
         <div class="panel">
           <div class="settings-mode-row">
             <div class="settings-mode-copy">
-              <div class="settings-mode-title">Keep track of metrics</div>
-              <div class="muted" x-text="keepTrackOfMetrics ? 'Metrics are stored per block.' : 'Metrics storage is off.'"></div>
+              <div class="settings-mode-title">Development mode</div>
+              <div class="muted" x-text="developmentMode() ? 'Detailed P2P data and the metrics screen are available.' : 'P2P stays focused on a simple peer list.'"></div>
             </div>
             <label class="toggle-switch" :class="{ active: keepTrackOfMetrics }">
               <input type="checkbox" :checked="keepTrackOfMetrics" @change="setKeepTrackOfMetrics($event.target.checked)">
               <span class="toggle-track" aria-hidden="true"><span class="toggle-thumb"></span></span>
-              <span class="toggle-text" x-text="keepTrackOfMetrics ? 'On' : 'Off'"></span>
+              <span class="toggle-text" x-text="developmentMode() ? 'On' : 'Off'"></span>
             </label>
           </div>
         </div>

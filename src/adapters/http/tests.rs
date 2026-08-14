@@ -1472,6 +1472,7 @@ fn metrics_response_skips_bootstrap_points_for_block_time_and_vdf_rounds() {
             metric_row(2, Some(600_000), 120),
             metric_row(3, Some(610_000), 130),
         ],
+        super::types::MetricsLeaderboards::default(),
     );
 
     let block_time = response
@@ -1519,7 +1520,7 @@ fn metrics_response_skips_bootstrap_points_for_block_time_and_vdf_rounds() {
 
 #[test]
 fn metrics_screen_includes_block_range_filter() {
-    assert!(super::INDEX_HTML.contains("iuna-ui.js?v=102"));
+    assert!(super::INDEX_HTML.contains("iuna-ui.js?v=103"));
     assert!(super::INDEX_HTML.contains("aria-label=\"Metrics block range\""));
     assert!(super::INDEX_HTML.contains("setMetricsRange(100)"));
     assert!(super::INDEX_HTML.contains("setMetricsRange(1000)"));
@@ -1835,7 +1836,9 @@ fn polling_refreshes_paged_datasets_without_visible_loaders() {
     assert!(app_js.contains("options.force === true"));
     assert!(app_js.contains("this.setTab(this.tabFromHash());"));
     assert!(app_js.contains("const shouldLoadBlocks = tab === \"chain\" || tab === \"mining\";"));
-    assert!(app_js.contains("const shouldLoadP2pMetrics = tab === \"p2p\";"));
+    assert!(
+        app_js.contains("const shouldLoadP2pMetrics = tab === \"p2p\" && this.developmentMode();")
+    );
     assert!(app_js.contains("const shouldLoadMetrics = tab === \"metrics\";"));
     assert!(
         app_js

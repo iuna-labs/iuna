@@ -7,8 +7,8 @@ use crate::{
 use super::{
     PEER_STALE_AFTER_MS, now_ms,
     types::{
-        MempoolCounts, MetricsChart, MetricsPoint, MetricsResponse, MetricsValueKind,
-        NetworkHealthLocalState, NetworkHealthResponse,
+        MempoolCounts, MetricsChart, MetricsLeaderboards, MetricsPoint, MetricsResponse,
+        MetricsValueKind, NetworkHealthLocalState, NetworkHealthResponse,
     },
 };
 
@@ -20,11 +20,16 @@ pub(super) fn network_health(
     network_health_at(local, peers, mempool, now_ms())
 }
 
-pub(super) fn metrics_response(enabled: bool, rows: Vec<BlockMetricRow>) -> MetricsResponse {
+pub(super) fn metrics_response(
+    enabled: bool,
+    rows: Vec<BlockMetricRow>,
+    leaderboards: MetricsLeaderboards,
+) -> MetricsResponse {
     let latest = rows.last().cloned();
     MetricsResponse {
         enabled,
         latest,
+        leaderboards,
         charts: vec![
             metrics_chart(
                 "block-time",
