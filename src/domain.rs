@@ -50,6 +50,8 @@ pub use hex::hex_hash;
 use hex::{decode_hex, decode_hex_array, hex_encode};
 pub use history::revealed_blinded_transactions;
 #[cfg(test)]
+use ledger_apply::{reveal_fee_bundle_count_for_height, reveal_fee_signatures_for_height};
+#[cfg(test)]
 use ledger_ops::estimated_block_selection_size_bytes;
 #[cfg(test)]
 use ledger_ops::fee_reward;
@@ -77,8 +79,8 @@ pub use protocol::{
     MAX_BLINDED_TRANSACTION_EXPIRY_HEIGHTS, MAX_BLOCK_BYTES, MAX_PENDING_TRANSACTIONS,
     MAX_REVEAL_BUNDLE_BYTES, MAX_VDF_ROUNDS, MICRO_IUNA, MINE_ACTIONS_PER_ANCHOR_LIMIT,
     MINE_DIFFICULTY_BITS, MINE_FINALIZER_FEE, MINE_REWARD, RECOVERY_BLOCK_DELAY_MS,
-    REVEAL_COMMITTEE_SIZE, TransactionSubmitOutcome, UNIQUE_OWNER_REVEAL_COMMITTEE_HEIGHT,
-    VDF_TARGET_BLOCK_MS,
+    REVEAL_COMMITTEE_SIZE, REVEAL_FEE_MASK_ATTRIBUTION_HEIGHT, TransactionSubmitOutcome,
+    UNIQUE_OWNER_REVEAL_COMMITTEE_HEIGHT, VDF_TARGET_BLOCK_MS,
 };
 use protocol::{
     BLINDED_KEY_BYTES, BLINDED_NONCE_BYTES, BLOCK_MEDIAN_TIME_PAST_WINDOW,

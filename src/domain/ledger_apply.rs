@@ -18,8 +18,9 @@ use super::ticket::{
 use super::transaction::{blinded_transaction_inputs_available, transaction_inputs_available};
 use super::{
     Amount, BLOCK_MEDIAN_TIME_PAST_WINDOW, Block, FinalizerMode, Ledger,
-    MAX_BLOCK_TIMESTAMP_FUTURE_DRIFT_MS, RevealBundleSection, Transaction,
-    blinded_reveal_finalizer_fee, unix_now_ms, verify_vdf,
+    MAX_BLOCK_TIMESTAMP_FUTURE_DRIFT_MS, MaskedBlindedReveal, REVEAL_FEE_MASK_ATTRIBUTION_HEIGHT,
+    RevealBundleSection, RevealBundleSignature, Transaction, blinded_reveal_finalizer_fee,
+    unix_now_ms, verify_vdf,
 };
 
 impl Ledger {
@@ -86,7 +87,8 @@ impl Ledger {
             apply_transaction(tx, &mut utxos)?;
         }
         let mut revealed_commitments = BTreeSet::new();
-        for reveal in block.all_blinded_reveals() {
+        for masked in &block.reveal_bundle_section.reveals {
+            let reveal = &masked.reveal;
             if !revealed_commitments.insert(reveal.commitment.clone()) {
                 bail!("duplicate blinded reveal in block");
             }
@@ -97,19 +99,28 @@ impl Ledger {
                 .clone();
             let tx = self.decrypt_active_blinded(&active, reveal)?;
             self.apply_revealed_blinded_transaction(&active, &tx, &mut utxos)?;
+            let reveal_bundle_signatures = reveal_fee_signatures_for_height(
+                block.height,
+                &block.reveal_bundle_section,
+                masked,
+            );
             credit_blinded_fee_outputs(
                 &mut utxos,
                 &active,
                 &block.miner,
                 &tx,
-                &block.reveal_bundle_section.signatures,
+                &reveal_bundle_signatures,
                 reveal_bundle_slot_count,
                 true,
             )?;
             aggregated_reveal_finalizer_fees = aggregated_reveal_finalizer_fees
                 .checked_add(blinded_reveal_finalizer_fee(
                     tx.fee(),
-                    block.included_reveal_bundle_count(),
+                    reveal_fee_bundle_count_for_height(
+                        block.height,
+                        &block.reveal_bundle_section,
+                        masked,
+                    ),
                     reveal_bundle_slot_count,
                 ))
                 .context("aggregated reveal finalizer fees overflow")?;
@@ -362,20 +373,51 @@ impl Ledger {
         reveal_bundle_slot_count: usize,
     ) -> Result<Amount> {
         reveal_bundle_section
-            .all_reveals()
-            .into_iter()
-            .try_fold(0_u64, |total, reveal| {
+            .reveals
+            .iter()
+            .try_fold(0_u64, |total, masked| {
                 let active = self
                     .active_blinded
-                    .get(&reveal.commitment)
+                    .get(&masked.reveal.commitment)
                     .context("blinded reveal does not reference an active blinded transaction")?;
                 total
                     .checked_add(blinded_reveal_finalizer_fee(
                         active.transaction.fee,
-                        reveal_bundle_section.included_bundle_count(),
+                        reveal_fee_bundle_count_for_height(
+                            self.tip().height + 1,
+                            reveal_bundle_section,
+                            masked,
+                        ),
                         reveal_bundle_slot_count,
                     ))
                     .context("aggregated reveal finalizer fees overflow")
             })
     }
+}
+
+pub(super) fn reveal_fee_bundle_count_for_height(
+    height: u64,
+    section: &RevealBundleSection,
+    masked: &MaskedBlindedReveal,
+) -> usize {
+    reveal_fee_signatures_for_height(height, section, masked).len()
+}
+
+pub(super) fn reveal_fee_signatures_for_height(
+    height: u64,
+    section: &RevealBundleSection,
+    masked: &MaskedBlindedReveal,
+) -> Vec<RevealBundleSignature> {
+    if height < REVEAL_FEE_MASK_ATTRIBUTION_HEIGHT {
+        return section.signatures.clone();
+    }
+    section
+        .signatures
+        .iter()
+        .filter(|signature| {
+            1_u8.checked_shl(u32::from(signature.slot))
+                .is_some_and(|slot_mask| masked.bundle_mask & slot_mask != 0)
+        })
+        .cloned()
+        .collect()
 }

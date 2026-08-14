@@ -614,6 +614,66 @@ fn blinded_reveal_finalizer_fee_scales_by_available_reveal_bundle_slots() {
 }
 
 #[test]
+fn reveal_fee_attribution_uses_reveal_mask_from_height_750() {
+    let alice = Wallet::from_seed("mask-fee-alice");
+    let bob = Wallet::from_seed("mask-fee-bob");
+    let carol = Wallet::from_seed("mask-fee-carol");
+    let reveal = MaskedBlindedReveal {
+        reveal: BlindedReveal {
+            commitment: hex_hash("mask-fee-reveal"),
+            key: "00".repeat(BLINDED_KEY_BYTES),
+        },
+        bundle_mask: 0b0000_0101,
+    };
+    let section = RevealBundleSection {
+        signatures: vec![
+            RevealBundleSignature {
+                slot: 0,
+                member: alice.address().to_string(),
+                signature: "11".repeat(SIGNATURE_BYTES),
+            },
+            RevealBundleSignature {
+                slot: 1,
+                member: bob.address().to_string(),
+                signature: "22".repeat(SIGNATURE_BYTES),
+            },
+            RevealBundleSignature {
+                slot: 2,
+                member: carol.address().to_string(),
+                signature: "33".repeat(SIGNATURE_BYTES),
+            },
+        ],
+        reveals: vec![reveal.clone()],
+    };
+
+    let legacy_signers =
+        reveal_fee_signatures_for_height(REVEAL_FEE_MASK_ATTRIBUTION_HEIGHT - 1, &section, &reveal);
+    assert_eq!(legacy_signers.len(), 3);
+    assert_eq!(
+        reveal_fee_bundle_count_for_height(
+            REVEAL_FEE_MASK_ATTRIBUTION_HEIGHT - 1,
+            &section,
+            &reveal
+        ),
+        3
+    );
+
+    let masked_signers =
+        reveal_fee_signatures_for_height(REVEAL_FEE_MASK_ATTRIBUTION_HEIGHT, &section, &reveal);
+    assert_eq!(
+        masked_signers
+            .iter()
+            .map(|signature| signature.member.as_str())
+            .collect::<Vec<_>>(),
+        vec![alice.address(), carol.address()]
+    );
+    assert_eq!(
+        reveal_fee_bundle_count_for_height(REVEAL_FEE_MASK_ATTRIBUTION_HEIGHT, &section, &reveal),
+        2
+    );
+}
+
+#[test]
 fn transfer_rejects_invalid_recipient_address() {
     let alice = Wallet::from_seed("invalid-transfer-recipient-alice");
     let ledger = ledger_with_wallet_utxos(&alice, &[10]);

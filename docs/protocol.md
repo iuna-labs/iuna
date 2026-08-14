@@ -156,15 +156,21 @@ Validators reconstruct each signed committee bundle from this compact section be
 
 A block may contain at most one bundle per slot. If a node sees two different signed bundles for the same height and slot before block assembly, it treats that slot as locally equivocated and does not use either bundle for that round.
 
-The block VDF seed is bound to the reveal bundle hashes:
+The ticket-block VDF seed is bound to the reveal bundle hashes:
 
 `seed = hash(parent hash || height || bundle_hash[0] || bundle_hash[1] || bundle_hash[2])`
+
+Recovery blocks additionally bind the block timestamp into the VDF seed:
+
+`seed = hash(parent hash || height || timestamp_ms || bundle_hash[0] || bundle_hash[1] || bundle_hash[2])`
 
 If a slot has no included bundle, it contributes a fixed default hash for that slot. This means the finalizer must choose the reveal-bundle set before doing the VDF work. A finalizer can still claim that a bundle arrived too late, but it cannot secretly swap or remove a timely bundle after computing the VDF without changing the seed.
 
 When a valid bundled reveal executes, nodes decrypt the earlier payload, check the commitment and payload hash, and decode the transfer or burn. The decrypted transaction inputs must match the visible inputs locked by the envelope, and the transaction executes against that locked value. If the reveal bitmask says multiple committee bundles contained the same reveal, the reveal is still executed only once. If the decrypted transaction is a burn, it creates burn tickets at the reveal height, not the earlier envelope-commit height.
 
 Fees are paid without inflating the reveal block reward. The decrypted transaction must pay the same fee declared by the blinded envelope. `35%` goes to the envelope committer. Up to `35%` goes to the reveal-block finalizer, scaled by the included signed reveal lists divided by the available committee slots for that height. With three eligible slots, one included list pays one third of that share; with two eligible slots, one included list pays half; with one eligible slot, one included list pays the full share. `10%` goes to each included signed reveal-list maker. Missing reveal-list shares, the missing reveal-finalizer share, and rounding dust are burned instead of redistributed.
+
+Starting at height `750`, reveal fee attribution is per reveal mask. A signed reveal-list maker earns the `10%` share for a revealed payload only if that maker's signed bundle actually contained that reveal. The reveal-block finalizer's scaled share is also based on the number of signed bundles that contained that reveal, not merely the number of bundle signatures included somewhere in the block. Before height `750`, all included signed reveal-list makers are treated as participating in every revealed payload in that block.
 
 Expiry is exclusive: a blinded envelope with expiry height `H` can be included only in blocks below height `H`, and revealed only while the current chain height is below `H`. The expiry height must be within `20` blocks of the node's current chain height when the envelope is accepted or selected. If an envelope expires unrevealed, its declared fee is burned and any remaining locked value returns as deterministic change to the owner of the first visible input. Expired local envelopes and reveals are dropped from local selection.
 
@@ -193,6 +199,12 @@ When a node builds a block, it selects transactions in this order:
 5. Bind the VDF seed to the three reveal-bundle slot hashes, using default hashes for missing slots.
 
 Blocks are bounded by transaction count and serialized byte size. The devnet maximum block size is `100,000` bytes.
+
+## Fork Choice
+
+Nodes fully validate candidate blocks or snapshots before considering a reorg. A candidate chain must share the same genesis and cannot rewrite history deeper than the finality depth. In the devnet profile, forks whose common ancestor is below `local height - 6` are rejected.
+
+Within that finality window, a taller valid candidate chain wins over the local chain. If the candidate and local chains have the same height but different tips, nodes compare the first divergent blocks by leader score: ticket blocks beat recovery blocks, lower finalizer rank beats higher rank, and the leader proof rank breaks remaining ties. Equal quality keeps the local chain.
 
 ## Genesis and Joining
 
