@@ -257,7 +257,10 @@ mod tests {
     use tokio::io::AsyncWriteExt;
 
     use crate::{
-        adapters::p2p::{MAX_INVENTORY_ITEMS, MAX_OBJECT_REQUESTS, metrics::P2pMetricsCounters},
+        adapters::p2p::{
+            MAX_GOSSIP_LINE_BYTES, MAX_INVENTORY_ITEMS, MAX_OBJECT_REQUESTS,
+            metrics::P2pMetricsCounters,
+        },
         app::{BlockInventory, GossipEnvelope},
         domain::{BlindedReveal, BlindedTransaction},
     };
@@ -397,5 +400,15 @@ mod tests {
             reader.read_line().await.unwrap().as_deref(),
             Some(line.as_str())
         );
+    }
+
+    #[tokio::test]
+    async fn limited_line_reader_rejects_oversized_partial_frame_without_newline() {
+        let bytes = vec![b'a'; MAX_GOSSIP_LINE_BYTES + 1];
+        let mut reader = LimitedLineReader::new(bytes.as_slice());
+
+        let error = reader.read_line().await.unwrap_err();
+
+        assert!(error.to_string().contains("p2p message exceeds"));
     }
 }

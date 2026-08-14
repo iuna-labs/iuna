@@ -136,6 +136,58 @@ async fn single_block_fork_error_requests_chain_snapshot() {
 }
 
 #[tokio::test]
+async fn chain_snapshot_request_only_writes_snapshot_without_mutating_local_state() {
+    let alice = Wallet::from_seed("snapshot-request-spam-alice");
+    let allocations = allocations(std::slice::from_ref(&alice), 1_000);
+    let mut local_node = node("snapshot-request-spam", alice.clone(), allocations);
+    queue_plaintext_burn(&mut local_node, &alice, 1);
+    local_node.drain_outbox();
+    local_node.mine_one_at(1).unwrap();
+    local_node.drain_outbox();
+    let before = local_node.chain_snapshot();
+
+    let peers = Arc::new(tokio::sync::Mutex::new(PeerBook::default()));
+    let network = gossip_network(
+        Arc::new(tokio::sync::Mutex::new(local_node)),
+        Arc::clone(&peers),
+        "127.0.0.1:9544".parse().unwrap(),
+        None,
+    );
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let client = tokio::net::TcpStream::connect(listener.local_addr().unwrap())
+        .await
+        .unwrap();
+    let (server, remote_addr) = listener.accept().await.unwrap();
+    let (_server_reader, mut server_writer) = server.into_split();
+    let (client_reader, _client_writer) = client.into_split();
+    let mut client_reader = super::LimitedLineReader::new(client_reader);
+    let mut known_peer = None;
+
+    super::process_envelope(
+        &network,
+        &mut server_writer,
+        remote_addr,
+        &mut known_peer,
+        GossipEnvelope::ChainSnapshotRequest,
+    )
+    .await
+    .unwrap();
+
+    let line = tokio::time::timeout(std::time::Duration::from_secs(1), client_reader.read_line())
+        .await
+        .unwrap()
+        .unwrap()
+        .unwrap();
+    assert_eq!(
+        super::parse_envelope(&line).unwrap(),
+        GossipEnvelope::ChainSnapshot(before.clone())
+    );
+    assert_eq!(network.inner.node.lock().await.chain_snapshot(), before);
+    assert!(peers.lock().await.list().is_empty());
+    assert!(known_peer.is_none());
+}
+
+#[tokio::test]
 async fn hello_rejects_wrong_network_or_genesis_without_banning() {
     let alice = Wallet::from_seed("hello-alice");
     let allocations = allocations(std::slice::from_ref(&alice), 1_000);

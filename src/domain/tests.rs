@@ -2264,6 +2264,49 @@ fn expired_blinded_reveal_is_not_selected() {
 }
 
 #[test]
+fn active_blinded_reveal_displaces_invalid_reveal_spam_when_pool_is_full() {
+    let alice = Wallet::from_seed("blinded-spam-finalizer-alice");
+    let bob = Wallet::from_seed("blinded-spam-finalizer-bob");
+    let carol = Wallet::from_seed("blinded-spam-carol");
+    let finalizers = [alice.clone(), bob.clone()];
+    let mut ledger = ledger_with_finalizers(&finalizers, &[(&carol, 10 * MICRO_IUNA)]);
+    let blinded = ledger
+        .build_blinded_burn(&carol, 3, 7, ledger.height() + 4)
+        .unwrap();
+    ledger
+        .submit_blinded_transaction(blinded.transaction.clone())
+        .unwrap();
+    queue_next_leader_burn(&mut ledger, &finalizers);
+    mine_preverified_as_next_leader(&mut ledger, &finalizers, 1);
+
+    for index in 0..MAX_PENDING_TRANSACTIONS {
+        ledger
+            .submit_blinded_reveal(BlindedReveal {
+                commitment: hex_hash(format!("unknown-blinded-reveal-spam:{index}")),
+                key: "00".repeat(BLINDED_KEY_BYTES),
+            })
+            .unwrap();
+    }
+    assert_eq!(
+        ledger.pending_blinded_reveals().len(),
+        MAX_PENDING_TRANSACTIONS
+    );
+    assert!(ledger.valid_pending_blinded_reveals().is_empty());
+
+    assert!(
+        ledger
+            .submit_blinded_reveal(blinded.reveal.clone())
+            .unwrap()
+    );
+
+    assert_eq!(
+        ledger.pending_blinded_reveals().len(),
+        MAX_PENDING_TRANSACTIONS
+    );
+    assert_eq!(ledger.valid_pending_blinded_reveals(), vec![blinded.reveal]);
+}
+
+#[test]
 fn recovery_block_includes_pending_blinded_transactions_when_space_allows() {
     let alice = Wallet::from_seed("recovery-blinded-commit-alice");
     let bob = Wallet::from_seed("recovery-blinded-commit-bob");

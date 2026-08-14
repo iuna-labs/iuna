@@ -53,11 +53,26 @@ impl Ledger {
             return Ok(false);
         }
         self.validate_blinded_reveal_terms(&reveal)?;
-        if self.pending_reveals.len() >= MAX_PENDING_TRANSACTIONS {
+        if self.pending_reveals.len() >= MAX_PENDING_TRANSACTIONS
+            && (!self.has_active_blinded_transaction(&reveal.commitment)
+                || !self.drop_one_invalid_pending_blinded_reveal())
+        {
             bail!("blinded reveal pool is full");
         }
         self.pending_reveals.push(reveal);
         Ok(true)
+    }
+
+    fn drop_one_invalid_pending_blinded_reveal(&mut self) -> bool {
+        let Some(index) = self
+            .pending_reveals
+            .iter()
+            .position(|reveal| self.pending_reveal_transaction(reveal).is_err())
+        else {
+            return false;
+        };
+        self.pending_reveals.remove(index);
+        true
     }
 
     pub fn submit_transaction_with_outcome(
