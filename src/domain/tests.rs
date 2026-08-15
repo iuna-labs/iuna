@@ -2019,6 +2019,19 @@ fn inputless_zero_fee_blinded_commit_is_rejected_from_height_750() {
     assert!(format!("{error:#}").contains("must lock visible inputs from height 750"));
 }
 
+#[test]
+fn zero_fee_blinded_transaction_creation_is_rejected_from_height_750() {
+    let alice = Wallet::from_seed("blinded-zero-fee-builder-after-activation-alice");
+    let mut ledger = ledger_with_allocation(&alice, MICRO_IUNA);
+    set_tip_height_for_validation(&mut ledger, BLOCK_ITEM_FEES_REQUIRED_HEIGHT - 1);
+
+    let error = ledger
+        .build_blinded_burn(&alice, 1, 0, ledger.height() + 4)
+        .unwrap_err();
+
+    assert!(format!("{error:#}").contains("must pay a fee from height 750"));
+}
+
 fn block_for_fee_policy(miner: &Wallet, height: u64, transactions: Vec<Transaction>) -> Block {
     Block {
         height,
