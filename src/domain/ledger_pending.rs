@@ -29,7 +29,8 @@ use super::validation::{
     validate_address, validate_hash, validate_signature, validate_stratum_header,
 };
 use super::{
-    Amount, BLINDED_KEY_BYTES, BLINDED_NONCE_BYTES, BlindedReveal, BlindedTransaction, Ledger,
+    Amount, BLINDED_KEY_BYTES, BLINDED_NONCE_BYTES, BLINDED_VISIBLE_INPUTS_REQUIRED_HEIGHT,
+    BLOCK_ITEM_FEES_REQUIRED_HEIGHT, BlindedReveal, BlindedTransaction, Ledger,
     MAX_BLINDED_TRANSACTION_EXPIRY_HEIGHTS, MAX_PENDING_TRANSACTIONS,
     MINE_ACTIONS_PER_ANCHOR_LIMIT, OutPoint, Transaction, TxOutput, decode_hex, decode_hex_array,
 };
@@ -87,9 +88,13 @@ impl Ledger {
 
     pub(super) fn select_block_transactions(
         &self,
+        miner: &str,
         required_burn_signature: Option<&str>,
     ) -> Result<BlockSelection> {
-        self.select_block_transactions_with_required_burn_owner(None, required_burn_signature)
+        self.select_block_transactions_with_required_burn_owner(
+            Some(miner),
+            required_burn_signature,
+        )
     }
 
     pub(super) fn select_recovery_block_transactions(
@@ -113,6 +118,7 @@ impl Ledger {
         let mut remaining_blinded = self.valid_pending_blinded_transactions();
         let mut selected = Vec::new();
         let mut selected_blinded = Vec::new();
+        let next_height = self.height().saturating_add(1);
 
         if let Some(signature) = required_burn_signature {
             let index = remaining
@@ -140,6 +146,11 @@ impl Ledger {
             apply_transaction(&tx, &mut utxos)
                 .context("required block anchor burn is not spendable")?;
             selected.push(tx);
+            remove_extra_zero_fee_transactions_after_anchor(
+                &mut remaining,
+                required_burn_owner,
+                next_height,
+            );
         }
 
         let needs_first_burn = !selected.iter().any(Transaction::is_burn);
@@ -166,6 +177,11 @@ impl Ledger {
                 {
                     apply_transaction(&tx, &mut utxos)?;
                     selected.push(tx);
+                    remove_extra_zero_fee_transactions_after_anchor(
+                        &mut remaining,
+                        required_burn_owner,
+                        next_height,
+                    );
                 }
             }
         }
@@ -189,6 +205,14 @@ impl Ledger {
             match item {
                 SelectableItem::Plain(index, _) => {
                     let tx = remaining.remove(index);
+                    if !zero_fee_transaction_is_selectable(
+                        &tx,
+                        required_burn_owner,
+                        selected.iter().filter(|tx| tx.fee() == 0).count(),
+                        next_height,
+                    ) {
+                        continue;
+                    }
                     let mut candidate = BlockSelection {
                         transactions: selected.clone(),
                         blinded_transactions: selected_blinded.clone(),
@@ -205,6 +229,9 @@ impl Ledger {
                 }
                 SelectableItem::Blinded(index, _) => {
                     let transaction = remaining_blinded.remove(index);
+                    if next_height >= BLOCK_ITEM_FEES_REQUIRED_HEIGHT && transaction.fee == 0 {
+                        continue;
+                    }
                     let mut candidate = BlockSelection {
                         transactions: selected.clone(),
                         blinded_transactions: selected_blinded.clone(),
@@ -437,6 +464,19 @@ impl Ledger {
             bail!("blinded transaction expiry is too far in the future");
         }
         validate_transaction_inputs(&transaction.inputs)?;
+        let next_height = self.height().saturating_add(1);
+        if transaction.inputs.is_empty() && next_height >= BLINDED_VISIBLE_INPUTS_REQUIRED_HEIGHT {
+            bail!(
+                "blinded transaction must lock visible inputs from height {}",
+                BLINDED_VISIBLE_INPUTS_REQUIRED_HEIGHT
+            );
+        }
+        if next_height >= BLOCK_ITEM_FEES_REQUIRED_HEIGHT && transaction.fee == 0 {
+            bail!(
+                "blinded transaction must pay a fee from height {}",
+                BLOCK_ITEM_FEES_REQUIRED_HEIGHT
+            );
+        }
         if transaction.inputs.is_empty() && transaction.fee > 0 {
             bail!("blinded transaction with a fee must lock visible inputs");
         }
@@ -601,4 +641,33 @@ impl Ledger {
         }
         Ok(utxos)
     }
+}
+
+fn zero_fee_transaction_is_selectable(
+    transaction: &Transaction,
+    finalizer: Option<&str>,
+    selected_zero_fee_transactions: usize,
+    height: u64,
+) -> bool {
+    if height < BLOCK_ITEM_FEES_REQUIRED_HEIGHT || transaction.fee() > 0 {
+        return true;
+    }
+    selected_zero_fee_transactions == 0
+        && transaction.is_burn()
+        && finalizer.is_some_and(|owner| transaction.sender() == owner)
+}
+
+fn remove_extra_zero_fee_transactions_after_anchor(
+    remaining: &mut Vec<Transaction>,
+    finalizer: Option<&str>,
+    height: u64,
+) {
+    if height < BLOCK_ITEM_FEES_REQUIRED_HEIGHT {
+        return;
+    }
+    remaining.retain(|transaction| {
+        transaction.fee() > 0
+            || !(transaction.is_burn()
+                && finalizer.is_some_and(|owner| transaction.sender() == owner))
+    });
 }

@@ -1883,7 +1883,9 @@ fn receive_chaotic_envelope(
                 || message.contains("reveal bundle parent hash is invalid")
                 || message.contains("mine transaction anchor is not on this chain")
                 || message.contains("blinded transaction spends missing output")
-                || message.contains("blinded transaction expiry is too far in the future"),
+                || message.contains("blinded transaction expiry is too far in the future")
+                || message
+                    .contains("blinded reveal does not reference an active blinded transaction",),
             "unexpected chaotic delivery error: {message}"
         );
     }

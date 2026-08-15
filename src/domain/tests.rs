@@ -1979,6 +1979,144 @@ fn fee_bearing_blinded_commit_without_inputs_is_rejected() {
     assert!(format!("{error:#}").contains("must lock visible inputs"));
 }
 
+fn set_tip_height_for_validation(ledger: &mut Ledger, height: u64) {
+    ledger.chain.last_mut().unwrap().height = height;
+}
+
+fn inputless_zero_fee_blinded_burn(ledger: &Ledger, wallet: &Wallet) -> BlindedTransaction {
+    let mut builder = ledger.clone();
+    if builder.height().saturating_add(1) >= BLOCK_ITEM_FEES_REQUIRED_HEIGHT {
+        set_tip_height_for_validation(&mut builder, BLOCK_ITEM_FEES_REQUIRED_HEIGHT - 2);
+    }
+    let mut blinded = builder
+        .build_blinded_burn(wallet, 1, 0, ledger.height() + 4)
+        .unwrap()
+        .transaction;
+    blinded.inputs.clear();
+    blinded.commitment = blinded_transaction_commitment(&blinded).unwrap();
+    blinded
+}
+
+#[test]
+fn inputless_zero_fee_blinded_commit_is_allowed_before_height_750() {
+    let alice = Wallet::from_seed("blinded-no-input-before-activation-alice");
+    let mut ledger = ledger_with_allocation(&alice, MICRO_IUNA);
+    set_tip_height_for_validation(&mut ledger, BLINDED_VISIBLE_INPUTS_REQUIRED_HEIGHT - 2);
+    let blinded = inputless_zero_fee_blinded_burn(&ledger, &alice);
+
+    assert!(ledger.submit_blinded_transaction(blinded).unwrap());
+}
+
+#[test]
+fn inputless_zero_fee_blinded_commit_is_rejected_from_height_750() {
+    let alice = Wallet::from_seed("blinded-no-input-after-activation-alice");
+    let mut ledger = ledger_with_allocation(&alice, MICRO_IUNA);
+    set_tip_height_for_validation(&mut ledger, BLINDED_VISIBLE_INPUTS_REQUIRED_HEIGHT - 1);
+    let blinded = inputless_zero_fee_blinded_burn(&ledger, &alice);
+
+    let error = ledger.submit_blinded_transaction(blinded).unwrap_err();
+
+    assert!(format!("{error:#}").contains("must lock visible inputs from height 750"));
+}
+
+fn block_for_fee_policy(miner: &Wallet, height: u64, transactions: Vec<Transaction>) -> Block {
+    Block {
+        height,
+        prev_hash: "0".repeat(64),
+        timestamp_ms: height,
+        miner: miner.address().to_string(),
+        finalizer_mode: FinalizerMode::Ticket,
+        finalizer_rank: 0,
+        reward: fee_reward(&transactions).unwrap(),
+        vdf_rounds: 1,
+        vdf_output: "vdf".to_string(),
+        leader_proof: None,
+        blinded_transactions: Vec::new(),
+        reveal_bundle_section: RevealBundleSection::default(),
+        transactions,
+        hash: String::new(),
+    }
+}
+
+#[test]
+fn block_fee_policy_allows_one_zero_fee_finalizer_anchor_from_height_750() {
+    let alice = Wallet::from_seed("fee-policy-finalizer-anchor-alice");
+    let ledger = ledger_with_allocation(&alice, 3 * MICRO_IUNA);
+    let anchor = ledger.build_burn(&alice, MICRO_IUNA, 0).unwrap();
+    let paid = ledger.build_burn(&alice, MICRO_IUNA, 1).unwrap();
+    let block = block_for_fee_policy(&alice, BLOCK_ITEM_FEES_REQUIRED_HEIGHT, vec![anchor, paid]);
+
+    validate_block_fee_policy(&block).unwrap();
+}
+
+#[test]
+fn block_fee_policy_rejects_zero_fee_non_finalizer_burn_from_height_750() {
+    let alice = Wallet::from_seed("fee-policy-finalizer-alice");
+    let bob = Wallet::from_seed("fee-policy-non-finalizer-bob");
+    let ledger = ledger_with_allocation(&bob, MICRO_IUNA);
+    let burn = ledger.build_burn(&bob, MICRO_IUNA, 0).unwrap();
+    let block = block_for_fee_policy(&alice, BLOCK_ITEM_FEES_REQUIRED_HEIGHT, vec![burn]);
+
+    let error = validate_block_fee_policy(&block).unwrap_err();
+
+    assert!(format!("{error:#}").contains("must pay a fee from height 750"));
+}
+
+#[test]
+fn block_fee_policy_rejects_second_zero_fee_finalizer_burn_from_height_750() {
+    let alice = Wallet::from_seed("fee-policy-second-anchor-alice");
+    let ledger = ledger_with_wallet_utxos(&alice, &[MICRO_IUNA, MICRO_IUNA]);
+    let first = ledger
+        .build_burn_with_inputs(&alice, MICRO_IUNA, 0, &[test_utxo_outpoint(0)])
+        .unwrap();
+    let second = ledger
+        .build_burn_with_inputs(&alice, MICRO_IUNA, 0, &[test_utxo_outpoint(1)])
+        .unwrap();
+    let block = block_for_fee_policy(&alice, BLOCK_ITEM_FEES_REQUIRED_HEIGHT, vec![first, second]);
+
+    let error = validate_block_fee_policy(&block).unwrap_err();
+
+    assert!(format!("{error:#}").contains("only one zero-fee finalizer anchor burn"));
+}
+
+fn large_inputless_zero_fee_blinded_spam(index: usize) -> BlindedTransaction {
+    let ciphertext = format!("{index:08x}{}", "ab".repeat(40_000));
+    let mut transaction = BlindedTransaction {
+        commitment: String::new(),
+        inputs: Vec::new(),
+        fee: 0,
+        encrypted_size: 40_004,
+        expires_at_height: BLINDED_VISIBLE_INPUTS_REQUIRED_HEIGHT - 1,
+        nonce: format!("{index:024x}"),
+        ciphertext,
+        payload_hash: hex_hash(format!("large-blinded-spam:{index}")),
+    };
+    transaction.commitment = blinded_transaction_commitment(&transaction).unwrap();
+    transaction
+}
+
+#[test]
+fn blinded_mempool_rejects_byte_limit_even_before_height_750() {
+    let alice = Wallet::from_seed("blinded-byte-limit-alice");
+    let mut ledger = ledger_with_allocation(&alice, MICRO_IUNA);
+    set_tip_height_for_validation(&mut ledger, BLINDED_VISIBLE_INPUTS_REQUIRED_HEIGHT - 3);
+
+    let sample = large_inputless_zero_fee_blinded_spam(0);
+    let sample_bytes = serde_json::to_vec(&sample).unwrap().len();
+    let existing_count = MAX_PENDING_POOL_BYTES / sample_bytes;
+    ledger.pending_blinded = (0..existing_count)
+        .map(large_inputless_zero_fee_blinded_spam)
+        .collect();
+
+    let error = ledger
+        .submit_blinded_transaction(large_inputless_zero_fee_blinded_spam(existing_count))
+        .unwrap_err();
+
+    assert!(existing_count > 1);
+    assert!(existing_count < MAX_PENDING_TRANSACTIONS);
+    assert!(format!("{error:#}").contains("blinded mempool byte limit exceeded"));
+}
+
 #[test]
 fn mine_actions_cannot_be_blinded() {
     let alice = Wallet::from_seed("blinded-mine-collateral-alice");
@@ -2319,12 +2457,32 @@ fn expired_blinded_reveal_is_not_selected() {
     ledger.submit_transaction(filler_burn).unwrap();
     mine_preverified_as_next_leader(&mut ledger, &finalizers, 2);
 
-    ledger.submit_blinded_reveal(blinded.reveal).unwrap();
-    assert!(ledger.valid_pending_blinded_reveals().is_empty());
+    let error = ledger.submit_blinded_reveal(blinded.reveal).unwrap_err();
+
+    assert!(
+        format!("{error:#}").contains("does not reference an active blinded transaction"),
+        "{error:#}"
+    );
 }
 
 #[test]
-fn active_blinded_reveal_displaces_invalid_reveal_spam_when_pool_is_full() {
+fn unknown_blinded_reveal_spam_is_rejected() {
+    let alice = Wallet::from_seed("blinded-unknown-reveal-spam-alice");
+    let mut ledger = ledger_with_allocation(&alice, MICRO_IUNA);
+
+    let error = ledger
+        .submit_blinded_reveal(BlindedReveal {
+            commitment: hex_hash("unknown-blinded-reveal-spam"),
+            key: "00".repeat(BLINDED_KEY_BYTES),
+        })
+        .unwrap_err();
+
+    assert!(format!("{error:#}").contains("does not reference an active blinded transaction"));
+    assert!(ledger.pending_blinded_reveals().is_empty());
+}
+
+#[test]
+fn active_blinded_reveal_displaces_invalid_legacy_reveal_when_pool_is_full() {
     let alice = Wallet::from_seed("blinded-spam-finalizer-alice");
     let bob = Wallet::from_seed("blinded-spam-finalizer-bob");
     let carol = Wallet::from_seed("blinded-spam-carol");
@@ -2339,14 +2497,12 @@ fn active_blinded_reveal_displaces_invalid_reveal_spam_when_pool_is_full() {
     queue_next_leader_burn(&mut ledger, &finalizers);
     mine_preverified_as_next_leader(&mut ledger, &finalizers, 1);
 
-    for index in 0..MAX_PENDING_TRANSACTIONS {
-        ledger
-            .submit_blinded_reveal(BlindedReveal {
-                commitment: hex_hash(format!("unknown-blinded-reveal-spam:{index}")),
-                key: "00".repeat(BLINDED_KEY_BYTES),
-            })
-            .unwrap();
-    }
+    ledger.pending_reveals = (0..MAX_PENDING_TRANSACTIONS)
+        .map(|index| BlindedReveal {
+            commitment: hex_hash(format!("unknown-blinded-reveal-spam:{index}")),
+            key: "00".repeat(BLINDED_KEY_BYTES),
+        })
+        .collect();
     assert_eq!(
         ledger.pending_blinded_reveals().len(),
         MAX_PENDING_TRANSACTIONS

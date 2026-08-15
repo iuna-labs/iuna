@@ -1,4 +1,5 @@
-use anyhow::{Result, bail};
+use anyhow::{Context, Result, bail};
+use serde::Serialize;
 
 use super::ledger_ops::{
     apply_transaction, ensure_blinded_transaction_fits_empty_block,
@@ -9,7 +10,10 @@ use super::transaction::{
     BlindedReveal, BlindedTransaction, Transaction, blinded_transaction_inputs_spent_by,
     transaction_inputs_spent_by, transaction_inputs_spent_by_inputs,
 };
-use super::{Ledger, MAX_ORPHAN_TRANSACTIONS, MAX_PENDING_TRANSACTIONS, TransactionSubmitOutcome};
+use super::{
+    Ledger, MAX_ORPHAN_TRANSACTIONS, MAX_PENDING_POOL_BYTES, MAX_PENDING_TRANSACTIONS,
+    TransactionSubmitOutcome,
+};
 
 impl Ledger {
     pub fn submit_transaction(&mut self, transaction: Transaction) -> Result<bool> {
@@ -44,6 +48,12 @@ impl Ledger {
         if self.pending_blinded.len() >= MAX_PENDING_TRANSACTIONS {
             bail!("blinded mempool is full");
         }
+        ensure_pending_pool_bytes(
+            "blinded mempool",
+            &self.pending_blinded,
+            &transaction,
+            MAX_PENDING_POOL_BYTES,
+        )?;
         self.pending_blinded.push(transaction);
         Ok(true)
     }
@@ -53,12 +63,18 @@ impl Ledger {
             return Ok(false);
         }
         self.validate_blinded_reveal_terms(&reveal)?;
+        self.pending_reveal_transaction(&reveal)?;
         if self.pending_reveals.len() >= MAX_PENDING_TRANSACTIONS
-            && (!self.has_active_blinded_transaction(&reveal.commitment)
-                || !self.drop_one_invalid_pending_blinded_reveal())
+            && !self.drop_one_invalid_pending_blinded_reveal()
         {
             bail!("blinded reveal pool is full");
         }
+        ensure_pending_pool_bytes(
+            "blinded reveal pool",
+            &self.pending_reveals,
+            &reveal,
+            MAX_PENDING_POOL_BYTES,
+        )?;
         self.pending_reveals.push(reveal);
         Ok(true)
     }
@@ -104,12 +120,50 @@ impl Ledger {
             if self.orphans.len() >= MAX_ORPHAN_TRANSACTIONS {
                 bail!("orphan transaction pool is full");
             }
+            ensure_pending_pool_bytes(
+                "orphan transaction pool",
+                &self.orphans,
+                &transaction,
+                MAX_PENDING_POOL_BYTES,
+            )?;
             self.orphans.push(transaction);
             return Ok(TransactionSubmitOutcome::Added);
         }
         apply_transaction(&transaction, &mut utxos)?;
+        ensure_pending_pool_bytes(
+            "mempool",
+            &self.pending,
+            &transaction,
+            MAX_PENDING_POOL_BYTES,
+        )?;
         self.pending.push(transaction);
         self.promote_orphan_transactions()?;
         Ok(TransactionSubmitOutcome::Added)
     }
+}
+
+fn ensure_pending_pool_bytes<T: Serialize>(
+    label: &str,
+    existing: &[T],
+    candidate: &T,
+    max_bytes: usize,
+) -> Result<()> {
+    let existing_bytes = existing.iter().try_fold(0usize, |total, item| {
+        let bytes = serde_json::to_vec(item)
+            .context("failed to serialize pending item for size check")?
+            .len();
+        total
+            .checked_add(bytes)
+            .context("pending pool byte size overflow")
+    })?;
+    let candidate_bytes = serde_json::to_vec(candidate)
+        .context("failed to serialize pending item for size check")?
+        .len();
+    let total_bytes = existing_bytes
+        .checked_add(candidate_bytes)
+        .context("pending pool byte size overflow")?;
+    if total_bytes > max_bytes {
+        bail!("{label} byte limit exceeded");
+    }
+    Ok(())
 }

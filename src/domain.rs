@@ -57,6 +57,8 @@ use ledger_ops::estimated_block_selection_size_bytes;
 use ledger_ops::fee_reward;
 #[cfg(test)]
 use ledger_ops::reward_outpoint;
+#[cfg(test)]
+use ledger_ops::validate_block_fee_policy;
 use ledger_ops::{
     apply_transaction, credit_reward_output, ensure_block_has_burn, ensure_block_has_burn_from,
     ensure_outputs_do_not_overflow, ensure_single_input_owner_for_inputs,
@@ -74,7 +76,8 @@ use mining::{mine_payload, mine_signature};
 pub use profile::{GenesisBurn, LaunchProfile};
 pub use protocol::{
     Amount, BLINDED_COMMITTER_FEE_BPS, BLINDED_FEE_BPS_DENOMINATOR,
-    BLINDED_REVEAL_BUNDLE_SIGNER_FEE_BPS, BLINDED_REVEAL_FINALIZER_FEE_BPS, BLOCK_REWARD,
+    BLINDED_REVEAL_BUNDLE_SIGNER_FEE_BPS, BLINDED_REVEAL_FINALIZER_FEE_BPS,
+    BLINDED_VISIBLE_INPUTS_REQUIRED_HEIGHT, BLOCK_ITEM_FEES_REQUIRED_HEIGHT, BLOCK_REWARD,
     DEFAULT_FEE_PER_BYTE, DEFAULT_MINE_FEE, DEFAULT_TRANSACTION_FEE,
     MAX_BLINDED_TRANSACTION_EXPIRY_HEIGHTS, MAX_BLOCK_BYTES, MAX_PENDING_TRANSACTIONS,
     MAX_REVEAL_BUNDLE_BYTES, MAX_VDF_ROUNDS, MICRO_IUNA, MINE_ACTIONS_PER_ANCHOR_LIMIT,
@@ -86,7 +89,7 @@ use protocol::{
     BLINDED_KEY_BYTES, BLINDED_NONCE_BYTES, BLOCK_MEDIAN_TIME_PAST_WINDOW,
     DEFAULT_TICKET_EXPIRY_WINDOW, DEFAULT_TICKET_MATURITY_DELAY, FORK_FINALITY_DEPTH, HASH_BYTES,
     MAX_BLOCK_TIMESTAMP_FUTURE_DRIFT_MS, MAX_BLOCK_TRANSACTIONS, MAX_ORPHAN_TRANSACTIONS,
-    PUBLIC_KEY_BYTES, SIGNATURE_BYTES,
+    MAX_PENDING_POOL_BYTES, PUBLIC_KEY_BYTES, SIGNATURE_BYTES,
 };
 use reveal::RevealBundlePayload;
 #[cfg(test)]

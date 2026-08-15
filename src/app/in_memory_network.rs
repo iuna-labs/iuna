@@ -557,7 +557,10 @@ mod tests {
                     assert!(
                         message.contains("mine transaction anchor is not on this chain")
                             || message.contains("conflicts with an existing pending transaction")
-                            || message.contains("blinded transaction expired"),
+                            || message.contains("blinded transaction expired")
+                            || message.contains(
+                                "blinded reveal does not reference an active blinded transaction",
+                            ),
                         "unexpected sparse chaos delivery error: {message}"
                     );
                 }

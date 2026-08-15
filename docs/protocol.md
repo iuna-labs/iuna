@@ -174,6 +174,10 @@ Starting at height `750`, reveal fee attribution is per reveal mask. A signed re
 
 Expiry is exclusive: a blinded envelope with expiry height `H` can be included only in blocks below height `H`, and revealed only while the current chain height is below `H`. The expiry height must be within `20` blocks of the node's current chain height when the envelope is accepted or selected. If an envelope expires unrevealed, its declared fee is burned and any remaining locked value returns as deterministic change to the owner of the first visible input. Expired local envelopes and reveals are dropped from local selection.
 
+Starting at height `750`, blinded envelopes must lock at least one visible input. This rejects free, unauthenticated zero-input envelopes while preserving compatibility with historical devnet blocks before the activation height.
+
+Starting at height `750`, every item that consumes block space must pay a fee, with one exception: a block may include one zero-fee plaintext burn from the block finalizer as its local anchor burn. Other plaintext transactions, additional finalizer burns, blinded envelopes, and revealed blinded payloads must carry a non-zero fee. This keeps historical devnet blocks valid while removing free blockspace spam after activation.
+
 This does not make censorship impossible. A finalizer can still ignore all blinded traffic, or censor based on network metadata. But it removes the cheap strategy of inspecting plaintext mempool transactions and excluding third-party burns while including other fee-paying transactions.
 
 ## P2P Mempool Gossip
@@ -188,6 +192,8 @@ The P2P mempool gossips only:
 
 It does not gossip plaintext transfers or burns. Wallet-created transfers and burns enter the network as blinded envelopes first, and are only decoded after a reveal. Mine actions are gossiped as public transactions. The one plaintext anchor burn required for every normal block is prepared locally by the finalizer and appears in the block itself.
 
+Nodes only keep blinded reveal keys in their local mempool when the reveal references an active blinded envelope and decrypts successfully. Unknown, stale, or wrong-key reveals are rejected before they consume pending reveal capacity. Pending transaction, blinded-envelope, reveal, and orphan pools are bounded by both item count and serialized byte size.
+
 ## Block Selection
 
 When a node builds a block, it selects transactions in this order:
@@ -195,7 +201,7 @@ When a node builds a block, it selects transactions in this order:
 1. Collect valid signed reveal bundles for the next height.
 2. Reserve the local plaintext anchor burn as the first plaintext block item.
 3. For recovery blocks, ensure at least one plaintext anchor burn is from the recovery finalizer.
-4. Fill remaining envelope space with valid public mine actions and blinded transaction envelopes ordered by fee rate. Public mine actions are limited to `2` actions per anchor.
+4. Fill remaining envelope space with valid fee-paying public mine actions and blinded transaction envelopes ordered by fee rate. Public mine actions are limited to `2` actions per anchor.
 5. Bind the VDF seed to the three reveal-bundle slot hashes, using default hashes for missing slots.
 
 Blocks are bounded by transaction count and serialized byte size. The devnet maximum block size is `100,000` bytes.

@@ -8,7 +8,7 @@ use super::blinded::{
 use super::ledger_ops::{
     apply_transaction, block_reward, credit_reward_output, ensure_block_has_burn,
     ensure_valid_recovery_block, spend_blinded_inputs, validate_block_blinded_items,
-    verify_leader_proof,
+    validate_block_fee_policy, verify_leader_proof,
 };
 use super::mine_policy::ensure_mine_anchor_limit;
 use super::ticket::{
@@ -17,10 +17,10 @@ use super::ticket::{
 };
 use super::transaction::{blinded_transaction_inputs_available, transaction_inputs_available};
 use super::{
-    Amount, BLOCK_MEDIAN_TIME_PAST_WINDOW, Block, FinalizerMode, Ledger,
-    MAX_BLOCK_TIMESTAMP_FUTURE_DRIFT_MS, MaskedBlindedReveal, REVEAL_FEE_MASK_ATTRIBUTION_HEIGHT,
-    RevealBundleSection, RevealBundleSignature, Transaction, blinded_reveal_finalizer_fee,
-    unix_now_ms, verify_vdf,
+    Amount, BLOCK_ITEM_FEES_REQUIRED_HEIGHT, BLOCK_MEDIAN_TIME_PAST_WINDOW, Block, FinalizerMode,
+    Ledger, MAX_BLOCK_TIMESTAMP_FUTURE_DRIFT_MS, MaskedBlindedReveal,
+    REVEAL_FEE_MASK_ATTRIBUTION_HEIGHT, RevealBundleSection, RevealBundleSignature, Transaction,
+    blinded_reveal_finalizer_fee, unix_now_ms, verify_vdf,
 };
 
 impl Ledger {
@@ -98,6 +98,12 @@ impl Ledger {
                 .context("blinded reveal does not reference an active blinded transaction")?
                 .clone();
             let tx = self.decrypt_active_blinded(&active, reveal)?;
+            if block.height >= BLOCK_ITEM_FEES_REQUIRED_HEIGHT && tx.fee() == 0 {
+                bail!(
+                    "revealed blinded transaction must pay a fee from height {}",
+                    BLOCK_ITEM_FEES_REQUIRED_HEIGHT
+                );
+            }
             self.apply_revealed_blinded_transaction(&active, &tx, &mut utxos)?;
             let reveal_bundle_signatures = reveal_fee_signatures_for_height(
                 block.height,
@@ -296,6 +302,7 @@ impl Ledger {
         }
         ensure_mine_anchor_limit(block.height, &block.transactions)?;
         ensure_block_has_burn(&block.transactions)?;
+        validate_block_fee_policy(block)?;
         self.validate_reveal_bundle_section_for_block(
             block.height,
             &block.prev_hash,

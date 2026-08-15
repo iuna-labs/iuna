@@ -267,6 +267,43 @@ pub(super) fn apply_transaction(
     Ok(())
 }
 
+pub(super) fn validate_block_fee_policy(block: &Block) -> Result<()> {
+    if block.height < super::BLOCK_ITEM_FEES_REQUIRED_HEIGHT {
+        return Ok(());
+    }
+
+    let mut free_finalizer_anchor_burns = 0usize;
+    for transaction in &block.transactions {
+        if transaction.fee() > 0 {
+            continue;
+        }
+        if transaction.is_burn() && transaction.sender() == block.miner {
+            free_finalizer_anchor_burns += 1;
+            if free_finalizer_anchor_burns > 1 {
+                bail!(
+                    "block may include only one zero-fee finalizer anchor burn from height {}",
+                    super::BLOCK_ITEM_FEES_REQUIRED_HEIGHT
+                );
+            }
+            continue;
+        }
+        bail!(
+            "block transaction must pay a fee from height {} unless it is the finalizer anchor burn",
+            super::BLOCK_ITEM_FEES_REQUIRED_HEIGHT
+        );
+    }
+
+    for transaction in &block.blinded_transactions {
+        if transaction.fee == 0 {
+            bail!(
+                "blinded transaction must pay a fee from height {}",
+                super::BLOCK_ITEM_FEES_REQUIRED_HEIGHT
+            );
+        }
+    }
+    Ok(())
+}
+
 pub(super) fn validate_block_blinded_items(block: &Block, ledger: &Ledger) -> Result<()> {
     let mut commitments = BTreeSet::new();
     for transaction in &block.blinded_transactions {
