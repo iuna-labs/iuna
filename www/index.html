@@ -27,7 +27,6 @@
     html {
       max-width: 100%;
       overflow-x: hidden;
-      scroll-padding-top: 76px;
     }
     body {
       margin: 0;
@@ -101,7 +100,7 @@
     .hero { padding: 92px 0 48px; }
     .hero-grid {
       display: grid;
-      grid-template-columns: minmax(0, 760px);
+      grid-template-columns: minmax(0, 690px) minmax(280px, 1fr);
       gap: 32px;
       align-items: end;
     }
@@ -135,6 +134,52 @@
     p { max-width: 720px; color: #b7c3c9; font-size: 17px; line-height: 1.6; }
     .lead { color: #eef4f6; font-size: 21px; }
     .actions { display: flex; flex-wrap: wrap; gap: 10px; margin-top: 26px; }
+    .devnet-callout {
+      position: relative;
+      display: grid;
+      gap: 14px;
+      max-width: 360px;
+      justify-self: end;
+      border: 1px solid rgba(213, 245, 95, .44);
+      border-radius: 8px;
+      padding: 18px;
+      background: linear-gradient(180deg, rgba(213, 245, 95, .12), rgba(21, 25, 27, .92));
+      box-shadow: 0 20px 50px rgba(0, 0, 0, .24), inset 0 1px 0 rgba(255, 255, 255, .08);
+    }
+    .devnet-callout::before {
+      content: "";
+      position: absolute;
+      inset: 0;
+      border-radius: inherit;
+      border-top: 3px solid var(--green);
+      pointer-events: none;
+    }
+    .callout-kicker {
+      display: inline-flex;
+      width: fit-content;
+      border: 1px solid rgba(141, 233, 205, .45);
+      border-radius: 999px;
+      padding: 4px 8px;
+      color: var(--cyan);
+      font-size: 11px;
+      font-weight: 900;
+      text-transform: uppercase;
+    }
+    .devnet-callout h2 {
+      margin: 0;
+      font-size: 30px;
+      line-height: 1;
+    }
+    .devnet-callout p {
+      margin: 0;
+      color: #d8e2e6;
+      font-size: 15px;
+      line-height: 1.45;
+    }
+    .devnet-callout .button {
+      width: fit-content;
+      margin-top: 2px;
+    }
     .button {
       display: inline-flex;
       align-items: center;
@@ -173,7 +218,7 @@
       text-decoration: none;
     }
     .repo-link:hover { color: var(--green); }
-    section { padding: 38px 0; border-top: 1px solid rgba(39, 48, 54, .9); scroll-margin-top: 76px; }
+    section { padding: 38px 0; border-top: 1px solid rgba(39, 48, 54, .9); }
     .section-head { display: grid; gap: 8px; margin-bottom: 18px; }
     .section-head p { margin: 0; max-width: 680px; font-size: 15px; }
     .grid { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 12px; }
@@ -285,6 +330,7 @@
     @media (max-width: 820px) {
       .hero { padding-top: 58px; }
       .hero-grid, .split, .grid, .join-panel { grid-template-columns: 1fr; }
+      .devnet-callout { max-width: none; justify-self: stretch; }
       nav { display: none; }
       .wrap { width: min(100% - 32px, 1060px); }
       h1 { font-size: clamp(44px, 18vw, 78px); }
@@ -327,6 +373,12 @@
           <a class="button discord" href="https://discord.gg/JcXRSSDhS" target="_blank" rel="noopener noreferrer"><svg class="button-icon" aria-hidden="true" focusable="false"><use href="#discord-icon"></use></svg><span>Join Discord</span></a>
         </div>
       </div>
+      <aside class="devnet-callout" aria-label="Help run the devnet">
+        <span class="callout-kicker">Node runners wanted</span>
+        <h2>Help Run The Devnet</h2>
+        <p>We are looking for people willing to keep an iuna node online, test real peer behavior, and report what breaks.</p>
+        <a class="button primary" href="#howtojoin">Run a node</a>
+      </aside>
     </div>
   </header>
 
