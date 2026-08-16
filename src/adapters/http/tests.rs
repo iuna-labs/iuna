@@ -296,6 +296,9 @@ fn block_detail_markup_uses_blinded_and_revealed_labels() {
     assert!(super::INDEX_HTML.contains("mempoolSeenTimeLabel(tx)"));
     assert!(super::INDEX_HTML.contains("<details class=\"tx-section\">"));
     assert!(super::INDEX_HTML.contains("<summary class=\"tx-section-title\">"));
+    assert!(super::INDEX_HTML.contains("class=\"tx-scroll-list\""));
+    assert!(super::INDEX_HTML.contains(".tx-scroll-list"));
+    assert!(super::INDEX_HTML.contains("overscroll-behavior-y: contain"));
     assert!(super::INDEX_HTML.contains("fee-penalty-value"));
     assert!(
         super::INDEX_HTML

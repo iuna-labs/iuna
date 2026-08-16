@@ -392,6 +392,7 @@ pub(super) const INDEX_HTML: &str = r#"<!doctype html>
     summary.tx-section-title { cursor: pointer; }
     details.tx-section:not([open]) { gap: 0; }
     .tx-section-meta { color: #8e979e; font-size: 12px; font-weight: 600; }
+    .tx-scroll-list { display: grid; gap: 8px; max-height: min(430px, calc(100vh - 300px)); min-height: 0; overflow-y: auto; overscroll-behavior-y: contain; padding-right: 4px; }
     .tx-card, .mempool-item { position: relative; display: grid; align-content: start; grid-auto-rows: min-content; gap: 6px; border: 1px solid #2f363c; border-radius: 8px; padding: 12px; background: #111316; cursor: pointer; text-align: left; }
     .mempool-item.before-last-block { opacity: .56; }
     .mempool-item.new-since-block { background: #151a12; opacity: 1; }
@@ -979,21 +980,23 @@ pub(super) const INDEX_HTML: &str = r#"<!doctype html>
                 <h3>Transactions</h3>
                 <div class="tx-section">
                   <div class="tx-section-title"><span>Envelope</span><span class="tx-section-meta" x-text="shortAddressLabel(selectedBlock.miner)"></span></div>
-                  <template x-for="tx in selectedBlock.transactions" :key="tx.signature">
-                    <div class="tx-card" role="button" tabindex="0" @click="openTransactionModal(tx, { source: 'Envelope', blockHeight: selectedBlock.height, blockFinalizer: selectedBlock.miner })" @keydown.enter.prevent="openTransactionModal(tx, { source: 'Envelope', blockHeight: selectedBlock.height, blockFinalizer: selectedBlock.miner })" @keydown.space.prevent="openTransactionModal(tx, { source: 'Envelope', blockHeight: selectedBlock.height, blockFinalizer: selectedBlock.miner })">
-                      <span class="pill" :class="txPillClass(tx)" x-text="txPillLabel(tx)"></span>
-                      <div class="tx-field" x-show="!isBlindedMempoolItem(tx)"><span class="tx-label">Amount</span><span class="tx-value money">IUNA <span x-text="amountLabel(txAmount(tx))"></span></span></div>
-                      <div class="tx-field"><span class="tx-label">Fee</span><span class="tx-value money" x-text="txFeeLabel(tx)"></span></div>
-                      <div class="tx-field" x-show="!isBlindedMempoolItem(tx)"><span class="tx-label">From</span><code class="tx-value hash" x-text="shortAddressLabel(txFrom(tx))"></code></div>
-                      <div class="tx-field" x-show="txTo(tx)"><span class="tx-label">To</span><code class="tx-value hash" x-text="shortAddressLabel(txTo(tx))"></code></div>
-                      <div class="tx-field" x-show="isBlindedMempoolItem(tx)"><span class="tx-label">Commitment</span><code class="tx-value hash" x-text="short(tx.commitment || tx.signature)"></code></div>
-                      <div class="tx-field" x-show="tx.encrypted_size || tx.encryptedSize"><span class="tx-label">Bytes</span><span class="tx-value number" x-text="tx.encrypted_size || tx.encryptedSize"></span></div>
-                      <div class="tx-field" x-show="tx.expires_at_height || tx.expiresAtHeight"><span class="tx-label">Expires</span><span class="tx-value number" x-text="tx.expires_at_height || tx.expiresAtHeight"></span></div>
-                      <div class="tx-field" x-show="isMineTx(tx)"><span class="tx-label">Proof Bits</span><span class="tx-value number"><span x-text="txProofBits(tx) ?? '-'"></span> / <span x-text="txDifficultyBits(tx) ?? '-'"></span></span></div>
-                      <div class="tx-field" x-show="isMineTx(tx)"><span class="tx-label">Proof Hash</span><code class="tx-value hash" x-text="short(txProofHash(tx))"></code></div>
-                      <div class="tx-field" x-show="!isBlindedMempoolItem(tx)"><span class="tx-label">Signature</span><code class="tx-value hash" x-text="short(tx.signature)"></code></div>
-                    </div>
-                  </template>
+                  <div class="tx-scroll-list">
+                    <template x-for="tx in selectedBlock.transactions" :key="tx.signature">
+                      <div class="tx-card" role="button" tabindex="0" @click="openTransactionModal(tx, { source: 'Envelope', blockHeight: selectedBlock.height, blockFinalizer: selectedBlock.miner })" @keydown.enter.prevent="openTransactionModal(tx, { source: 'Envelope', blockHeight: selectedBlock.height, blockFinalizer: selectedBlock.miner })" @keydown.space.prevent="openTransactionModal(tx, { source: 'Envelope', blockHeight: selectedBlock.height, blockFinalizer: selectedBlock.miner })">
+                        <span class="pill" :class="txPillClass(tx)" x-text="txPillLabel(tx)"></span>
+                        <div class="tx-field" x-show="!isBlindedMempoolItem(tx)"><span class="tx-label">Amount</span><span class="tx-value money">IUNA <span x-text="amountLabel(txAmount(tx))"></span></span></div>
+                        <div class="tx-field"><span class="tx-label">Fee</span><span class="tx-value money" x-text="txFeeLabel(tx)"></span></div>
+                        <div class="tx-field" x-show="!isBlindedMempoolItem(tx)"><span class="tx-label">From</span><code class="tx-value hash" x-text="shortAddressLabel(txFrom(tx))"></code></div>
+                        <div class="tx-field" x-show="txTo(tx)"><span class="tx-label">To</span><code class="tx-value hash" x-text="shortAddressLabel(txTo(tx))"></code></div>
+                        <div class="tx-field" x-show="isBlindedMempoolItem(tx)"><span class="tx-label">Commitment</span><code class="tx-value hash" x-text="short(tx.commitment || tx.signature)"></code></div>
+                        <div class="tx-field" x-show="tx.encrypted_size || tx.encryptedSize"><span class="tx-label">Bytes</span><span class="tx-value number" x-text="tx.encrypted_size || tx.encryptedSize"></span></div>
+                        <div class="tx-field" x-show="tx.expires_at_height || tx.expiresAtHeight"><span class="tx-label">Expires</span><span class="tx-value number" x-text="tx.expires_at_height || tx.expiresAtHeight"></span></div>
+                        <div class="tx-field" x-show="isMineTx(tx)"><span class="tx-label">Proof Bits</span><span class="tx-value number"><span x-text="txProofBits(tx) ?? '-'"></span> / <span x-text="txDifficultyBits(tx) ?? '-'"></span></span></div>
+                        <div class="tx-field" x-show="isMineTx(tx)"><span class="tx-label">Proof Hash</span><code class="tx-value hash" x-text="short(txProofHash(tx))"></code></div>
+                        <div class="tx-field" x-show="!isBlindedMempoolItem(tx)"><span class="tx-label">Signature</span><code class="tx-value hash" x-text="short(tx.signature)"></code></div>
+                      </div>
+                    </template>
+                  </div>
                   <div class="muted" x-show="selectedBlock.transactions.length === 0">No envelope transactions</div>
                 </div>
                 <template x-for="bundle in selectedBlock.reveal_bundles || selectedBlock.revealBundles || []" :key="bundle.hash">
