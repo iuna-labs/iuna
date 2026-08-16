@@ -485,7 +485,7 @@ mod tests {
         assert_eq!(listed.len(), 1);
         let peer = &listed[0];
         assert_eq!(peer.address, "142.132.164.59:9444");
-        assert_eq!(peer.direction, PeerDirection::Discovered);
+        assert_eq!(peer.direction, PeerDirection::Outbound);
         assert_eq!(peer.last_known_height, Some(7));
         assert_eq!(peer.messages_received, 0);
 
@@ -501,7 +501,7 @@ mod tests {
         assert!(repeated);
         assert_eq!(
             peers.lock().await.list()[0].direction,
-            PeerDirection::Discovered
+            PeerDirection::Outbound
         );
     }
 

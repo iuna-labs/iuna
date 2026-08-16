@@ -13,7 +13,8 @@ use crate::app::{
 
 use super::{
     GossipNetwork, GossipNetworkInner, InboundConnectionLimiter, InboundSessionPermit,
-    InboundSessionRejection, OutboundBatch, P2pMetrics, P2pMetricsCounters, PEER_QUEUE_SIZE,
+    InboundSessionRejection, MAX_DISCOVERED_OUTBOUND_DIALS_PER_CYCLE, OutboundBatch, P2pMetrics,
+    P2pMetricsCounters, PEER_QUEUE_SIZE, STALE_DISCOVERED_PEER_RETENTION_MS,
     STALE_INBOUND_PEER_RETENTION_MS, accept_loop, is_self_peer_address_for, new_node_id,
     outbound_session, outbound_supervisor,
 };
@@ -220,17 +221,20 @@ impl GossipNetwork {
     }
 
     pub(super) async fn ensure_outbound_sessions(&self) {
-        self.inner
-            .peers
-            .lock()
-            .await
-            .prune_stale_inbound_peers_at(crate::app::now_ms(), STALE_INBOUND_PEER_RETENTION_MS);
+        self.inner.peers.lock().await.prune_stale_peers_at(
+            crate::app::now_ms(),
+            STALE_INBOUND_PEER_RETENTION_MS,
+            STALE_DISCOVERED_PEER_RETENTION_MS,
+        );
         let addresses = self
             .inner
             .peers
             .lock()
             .await
-            .connectable_addresses_at(crate::app::now_ms());
+            .outbound_session_candidates_at(
+                crate::app::now_ms(),
+                MAX_DISCOVERED_OUTBOUND_DIALS_PER_CYCLE,
+            );
         let address_set = addresses.iter().cloned().collect::<BTreeSet<_>>();
         let self_filter_addr = self.self_filter_addr().await;
         let mut sessions = self.inner.sessions.lock().await;
@@ -316,7 +320,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn peer_exchange_advertises_discovered_listening_peers() {
+    async fn peer_exchange_does_not_advertise_discovered_listening_peers() {
         let alice = Wallet::from_seed("px-discovered-alice");
         let allocations = allocations(std::slice::from_ref(&alice), 1_000);
         let node = Arc::new(tokio::sync::Mutex::new(node("alice", alice, allocations)));
@@ -329,7 +333,7 @@ mod tests {
 
         match network.peer_exchange().await {
             GossipEnvelope::PeerList { peers } => {
-                assert!(peers.contains(&"127.0.0.1:9546".to_string()));
+                assert!(!peers.contains(&"127.0.0.1:9546".to_string()));
             }
             other => panic!("expected peer list, got {other:?}"),
         }

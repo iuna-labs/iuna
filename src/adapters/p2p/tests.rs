@@ -414,7 +414,7 @@ async fn hello_remembers_advertised_address_after_signed_session_and_dialback() 
         .iter()
         .find(|peer| peer.address == remote_addr.to_string())
         .unwrap();
-    assert_eq!(peer.direction, PeerDirection::Discovered);
+    assert_eq!(peer.direction, PeerDirection::Outbound);
     assert!(
         peers
             .lock()

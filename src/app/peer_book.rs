@@ -1,4 +1,4 @@
-use std::collections::BTreeMap;
+use std::{collections::BTreeMap, net::SocketAddr};
 
 use serde::{Deserialize, Serialize};
 
@@ -6,6 +6,11 @@ use super::{
     PEER_CLOCK_OFFSET_ACCEPTANCE_MS, PEER_CLOCK_OFFSET_STALE_MS, PEER_MISBEHAVIOR_BAN_MS,
     PEER_MISBEHAVIOR_BAN_SCORE, now_ms,
 };
+
+pub const MAX_DISCOVERED_PEERS: usize = 256;
+pub const MAX_DISCOVERED_PEERS_PER_IP: usize = 4;
+pub const MAX_DISCOVERED_PEERS_PER_IPV4_PREFIX: usize = 16;
+pub const MAX_DISCOVERED_PEERS_PER_IPV6_PREFIX: usize = 16;
 
 #[derive(Clone, Debug, Default, Deserialize, Eq, PartialEq, Serialize)]
 pub struct PeerBook {
@@ -32,15 +37,136 @@ impl PeerBook {
         }
     }
 
-    pub fn add_discovered_peer(&mut self, address: impl Into<String>) {
+    pub fn add_discovered_peer(&mut self, address: impl Into<String>) -> bool {
         let address = address.into();
-        let peer = self
-            .peers
-            .entry(address.clone())
-            .or_insert_with(|| PeerInfo::new(address, PeerDirection::Discovered));
-        if peer.direction == PeerDirection::Inbound {
-            peer.direction = PeerDirection::Discovered;
+        if let Some(direction) = self.peers.get(&address).map(|peer| peer.direction.clone()) {
+            if direction == PeerDirection::Inbound && !self.discovered_peer_has_room(&address) {
+                return false;
+            }
+            if let Some(peer) = self.peers.get_mut(&address) {
+                if peer.direction == PeerDirection::Inbound {
+                    peer.direction = PeerDirection::Discovered;
+                }
+                peer.last_contact_ms = peer.last_contact_ms.or_else(|| Some(now_ms()));
+            }
+            return true;
         }
+        if !self.discovered_peer_has_room(&address) {
+            return false;
+        }
+        let mut peer = PeerInfo::new(address.clone(), PeerDirection::Discovered);
+        peer.last_contact_ms = Some(now_ms());
+        self.peers.insert(address, peer);
+        true
+    }
+
+    fn discovered_peer_has_room(&self, address: &str) -> bool {
+        if self.discovered_peer_count() >= MAX_DISCOVERED_PEERS {
+            return false;
+        }
+        let Ok(candidate) = address.parse::<SocketAddr>() else {
+            return false;
+        };
+        let candidate_ip = candidate.ip();
+        let mut same_ip = 0usize;
+        let mut same_group = 0usize;
+        for peer in self
+            .peers
+            .values()
+            .filter(|peer| peer.direction == PeerDirection::Discovered)
+        {
+            let Ok(existing) = peer.address.parse::<SocketAddr>() else {
+                continue;
+            };
+            let existing_ip = existing.ip();
+            if existing_ip == candidate_ip {
+                same_ip += 1;
+            }
+            if same_discovery_group(existing, candidate) {
+                same_group += 1;
+            }
+        }
+        if same_ip >= MAX_DISCOVERED_PEERS_PER_IP {
+            return false;
+        }
+        match candidate {
+            SocketAddr::V4(_) => same_group < MAX_DISCOVERED_PEERS_PER_IPV4_PREFIX,
+            SocketAddr::V6(_) => same_group < MAX_DISCOVERED_PEERS_PER_IPV6_PREFIX,
+        }
+    }
+
+    fn discovered_peer_count(&self) -> usize {
+        self.peers
+            .values()
+            .filter(|peer| peer.direction == PeerDirection::Discovered)
+            .count()
+    }
+
+    pub fn promote_discovered_peer(&mut self, address: &str) {
+        if let Some(peer) = self.peers.get_mut(address) {
+            if peer.direction == PeerDirection::Discovered {
+                peer.direction = PeerDirection::Outbound;
+            }
+        }
+    }
+
+    pub fn discovered_peer_count_for_tests(&self) -> usize {
+        self.discovered_peer_count()
+    }
+
+    pub fn discovered_peer_capacity_for_tests(&self) -> usize {
+        MAX_DISCOVERED_PEERS
+    }
+
+    pub fn direction_for_tests(&self, address: &str) -> Option<PeerDirection> {
+        self.peers.get(address).map(|peer| peer.direction.clone())
+    }
+
+    pub fn peer_count_for_tests(&self) -> usize {
+        self.peers.len()
+    }
+
+    pub fn add_discovered_peer_at(&mut self, address: impl Into<String>, now_ms: u64) -> bool {
+        let address = address.into();
+        let added = self.add_discovered_peer(address.clone());
+        if added {
+            if let Some(peer) = self.peers.get_mut(&address) {
+                peer.last_contact_ms = Some(now_ms);
+            }
+        }
+        added
+    }
+
+    fn prune_stale_discovered_peer(peer: &PeerInfo, now_ms: u64, max_age_ms: u64) -> bool {
+        if peer.direction != PeerDirection::Discovered || peer.is_banned_at(now_ms) {
+            return true;
+        }
+        let Some(last_contact) = peer.last_success_ms.or(peer.last_contact_ms) else {
+            return false;
+        };
+        now_ms.saturating_sub(last_contact) <= max_age_ms
+    }
+
+    fn prune_stale_inbound_peer(peer: &PeerInfo, now_ms: u64, max_age_ms: u64) -> bool {
+        if peer.direction != PeerDirection::Inbound || peer.is_banned_at(now_ms) {
+            return true;
+        }
+        peer.last_contact_ms
+            .is_some_and(|last_contact| now_ms.saturating_sub(last_contact) <= max_age_ms)
+    }
+
+    pub fn prune_stale_peers_at(
+        &mut self,
+        now_ms: u64,
+        inbound_max_age_ms: u64,
+        discovered_max_age_ms: u64,
+    ) -> usize {
+        let before = self.peers.len();
+        self.peers.retain(|_, peer| {
+            Self::prune_stale_inbound_peer(peer, now_ms, inbound_max_age_ms)
+                && Self::prune_stale_discovered_peer(peer, now_ms, discovered_max_age_ms)
+        });
+        before.saturating_sub(self.peers.len())
     }
 
     pub fn observe_inbound_peer(&mut self, address: impl Into<String>) {
@@ -126,11 +252,7 @@ impl PeerBook {
     }
 
     pub fn addresses(&self) -> Vec<String> {
-        self.peers
-            .values()
-            .filter(|peer| peer.direction != PeerDirection::Inbound)
-            .map(|peer| peer.address.clone())
-            .collect()
+        self.outbound_addresses_at(now_ms())
     }
 
     pub fn connectable_addresses_at(&self, now_ms: u64) -> Vec<String> {
@@ -142,8 +264,55 @@ impl PeerBook {
             .collect()
     }
 
+    pub fn outbound_addresses_at(&self, now_ms: u64) -> Vec<String> {
+        self.peers
+            .values()
+            .filter(|peer| peer.direction == PeerDirection::Outbound)
+            .filter(|peer| !peer.is_banned_at(now_ms))
+            .map(|peer| peer.address.clone())
+            .collect()
+    }
+
+    pub fn outbound_session_candidates_at(
+        &self,
+        now_ms: u64,
+        max_discovered: usize,
+    ) -> Vec<String> {
+        let mut outbound = Vec::new();
+        let mut discovered = self
+            .peers
+            .values()
+            .filter(|peer| peer.direction == PeerDirection::Discovered)
+            .filter(|peer| !peer.is_banned_at(now_ms))
+            .cloned()
+            .collect::<Vec<_>>();
+        discovered.sort_by(|left, right| {
+            right
+                .last_success_ms
+                .cmp(&left.last_success_ms)
+                .then_with(|| left.last_error_ms.cmp(&right.last_error_ms))
+                .then_with(|| left.address.cmp(&right.address))
+        });
+
+        for peer in self
+            .peers
+            .values()
+            .filter(|peer| peer.direction == PeerDirection::Outbound)
+            .filter(|peer| !peer.is_banned_at(now_ms))
+        {
+            outbound.push(peer.address.clone());
+        }
+        outbound.extend(
+            discovered
+                .into_iter()
+                .take(max_discovered)
+                .map(|peer| peer.address),
+        );
+        outbound
+    }
+
     pub fn addresses_except(&self, excluded: &str) -> Vec<String> {
-        self.connectable_addresses_at(now_ms())
+        self.outbound_addresses_at(now_ms())
             .into_iter()
             .filter(|address| address != excluded)
             .collect()
@@ -154,20 +323,15 @@ impl PeerBook {
     }
 
     pub fn prune_stale_inbound_peers_at(&mut self, now_ms: u64, max_age_ms: u64) -> usize {
-        let before = self.peers.len();
-        self.peers.retain(|_, peer| {
-            if peer.direction != PeerDirection::Inbound || peer.is_banned_at(now_ms) {
-                return true;
-            }
-            peer.last_contact_ms
-                .is_some_and(|last_contact| now_ms.saturating_sub(last_contact) <= max_age_ms)
-        });
-        before.saturating_sub(self.peers.len())
+        self.prune_stale_peers_at(now_ms, max_age_ms, u64::MAX)
     }
 
     pub fn record_sent(&mut self, address: &str, count: u64) {
         let now = now_ms();
         let peer = self.ensure(address, PeerDirection::Outbound);
+        if peer.direction == PeerDirection::Discovered {
+            peer.direction = PeerDirection::Outbound;
+        }
         peer.messages_sent += count;
         peer.last_contact_ms = Some(now);
         peer.last_success_ms = Some(now);
@@ -180,6 +344,9 @@ impl PeerBook {
     pub fn record_status(&mut self, address: &str, height: u64, tip_hash: String) {
         let now = now_ms();
         let peer = self.ensure(address, PeerDirection::Outbound);
+        if peer.direction == PeerDirection::Discovered {
+            peer.direction = PeerDirection::Outbound;
+        }
         peer.last_known_height = Some(height);
         peer.last_known_tip_hash = Some(tip_hash);
         peer.last_contact_ms = Some(now);
@@ -386,6 +553,22 @@ fn median_i64(mut values: Vec<i64>) -> Option<i64> {
     }
     values.sort_unstable();
     Some(values[values.len() / 2])
+}
+
+fn same_discovery_group(left: SocketAddr, right: SocketAddr) -> bool {
+    match (left, right) {
+        (SocketAddr::V4(left), SocketAddr::V4(right)) => {
+            let left = left.ip().octets();
+            let right = right.ip().octets();
+            left[0] == right[0] && left[1] == right[1]
+        }
+        (SocketAddr::V6(left), SocketAddr::V6(right)) => {
+            let left = left.ip().segments();
+            let right = right.ip().segments();
+            left[0] == right[0] && left[1] == right[1]
+        }
+        _ => false,
+    }
 }
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]

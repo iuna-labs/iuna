@@ -117,7 +117,7 @@ pub(super) async fn apply_peer_list(
         if is_self_peer_address_for(&peer, network.inner.listen_addr, self_filter_addr) {
             P2pMetricsCounters::inc(&network.inner.metrics.self_peer_skips);
         } else if peer_list_address_is_discoverable(&peer, remote_addr)? {
-            peerbook.add_peer(peer);
+            peerbook.add_discovered_peer(peer);
         } else {
             P2pMetricsCounters::inc(&network.inner.metrics.self_peer_skips);
         }
@@ -339,7 +339,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn peer_list_adds_stable_outbound_peers() {
+    async fn peer_list_adds_discovered_peers() {
         let alice = Wallet::from_seed("px-recv-alice");
         let allocations = allocations(std::slice::from_ref(&alice), 1_000);
         let node = Arc::new(tokio::sync::Mutex::new(node("alice", alice, allocations)));
@@ -358,9 +358,19 @@ mod tests {
         .await
         .unwrap();
 
-        let addresses = peers.lock().await.addresses();
+        let addresses = peers
+            .lock()
+            .await
+            .list()
+            .into_iter()
+            .map(|peer| peer.address)
+            .collect::<Vec<_>>();
         assert!(!addresses.contains(&"127.0.0.1:9544".to_string()));
         assert!(addresses.contains(&"127.0.0.1:9546".to_string()));
+        assert_eq!(
+            peers.lock().await.direction_for_tests("127.0.0.1:9546"),
+            Some(crate::app::PeerDirection::Discovered)
+        );
     }
 
     #[tokio::test]
@@ -386,7 +396,13 @@ mod tests {
         .await
         .unwrap();
 
-        let addresses = peers.lock().await.addresses();
+        let addresses = peers
+            .lock()
+            .await
+            .list()
+            .into_iter()
+            .map(|peer| peer.address)
+            .collect::<Vec<_>>();
         assert!(!addresses.contains(&"iuna.jhx.app:9444".to_string()));
         assert!(addresses.contains(&"127.0.0.1:9546".to_string()));
     }
@@ -412,7 +428,13 @@ mod tests {
         .await
         .unwrap();
 
-        let addresses = peers.lock().await.addresses();
+        let addresses = peers
+            .lock()
+            .await
+            .list()
+            .into_iter()
+            .map(|peer| peer.address)
+            .collect::<Vec<_>>();
         assert!(!addresses.contains(&"8.8.8.8:9444".to_string()));
         assert!(addresses.contains(&"8.8.4.4:9445".to_string()));
         network.set_accept_inbound(false).await.unwrap();
@@ -442,7 +464,13 @@ mod tests {
         .await
         .unwrap();
 
-        let addresses = peers.lock().await.addresses();
+        let addresses = peers
+            .lock()
+            .await
+            .list()
+            .into_iter()
+            .map(|peer| peer.address)
+            .collect::<Vec<_>>();
         assert!(!addresses.contains(&"10.42.1.1:10091".to_string()));
         assert!(addresses.contains(&"142.132.164.59:9444".to_string()));
     }
@@ -468,7 +496,13 @@ mod tests {
         .await
         .unwrap();
 
-        let addresses = peers.lock().await.addresses();
+        let addresses = peers
+            .lock()
+            .await
+            .list()
+            .into_iter()
+            .map(|peer| peer.address)
+            .collect::<Vec<_>>();
         assert!(!addresses.contains(&"127.0.0.1:9545".to_string()));
         assert!(addresses.contains(&"127.0.0.1:9546".to_string()));
         assert_eq!(network.metrics().self_peer_skips, 1);

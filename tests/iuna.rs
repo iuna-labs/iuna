@@ -2157,7 +2157,7 @@ fn peer_book_tracks_multiple_peers_without_networking() {
 }
 
 #[test]
-fn peer_book_reports_only_connectable_peers_as_outbound() {
+fn peer_book_reports_only_outbound_peers_as_addresses() {
     let mut peers = PeerBook::from_addresses(vec!["127.0.0.1:9444".to_string()]);
     peers.record_received("127.0.0.1:56666", 1);
     peers.add_discovered_peer("127.0.0.1:9445");
@@ -2167,10 +2167,97 @@ fn peer_book_reports_only_connectable_peers_as_outbound() {
     assert!(peers.is_connectable_peer("127.0.0.1:9445"));
     assert!(!peers.is_connectable_peer("127.0.0.1:56666"));
     assert!(!peers.is_connectable_peer("127.0.0.1:57777"));
-    assert!(peers.addresses().contains(&"127.0.0.1:9445".to_string()));
+    assert_eq!(peers.addresses(), vec!["127.0.0.1:9444"]);
 
     assert!(peers.remove_peer("127.0.0.1:9444"));
     assert!(!peers.is_connectable_peer("127.0.0.1:9444"));
+}
+
+#[test]
+fn peer_book_caps_discovered_peer_hints() {
+    let mut peers = PeerBook::default();
+    for index in 0..600 {
+        let octet2 = (index / 16) % 256;
+        let octet3 = index % 16;
+        peers.add_discovered_peer(format!("8.{octet2}.{octet3}.1:9444"));
+    }
+
+    assert_eq!(
+        peers.discovered_peer_count_for_tests(),
+        peers.discovered_peer_capacity_for_tests()
+    );
+}
+
+#[test]
+fn peer_book_caps_inbound_to_discovered_conversions() {
+    let mut peers = PeerBook::default();
+    for index in 0..600 {
+        let octet2 = (index / 16) % 256;
+        let octet3 = index % 16;
+        peers.add_discovered_peer(format!("8.{octet2}.{octet3}.1:9444"));
+    }
+    peers.observe_inbound_peer("9.9.9.9:9444");
+
+    assert!(!peers.add_discovered_peer("9.9.9.9:9444"));
+    assert_eq!(
+        peers.discovered_peer_count_for_tests(),
+        peers.discovered_peer_capacity_for_tests()
+    );
+    assert_eq!(
+        peers.direction_for_tests("9.9.9.9:9444"),
+        Some(PeerDirection::Inbound)
+    );
+}
+
+#[test]
+fn peer_book_limits_discovered_peers_per_ip() {
+    let mut peers = PeerBook::default();
+    for port in 20_000..20_010 {
+        peers.add_discovered_peer(format!("8.8.8.8:{port}"));
+    }
+
+    assert_eq!(peers.discovered_peer_count_for_tests(), 4);
+}
+
+#[test]
+fn peer_book_prunes_stale_discovered_peer_hints() {
+    let mut peers = PeerBook::from_addresses(vec!["127.0.0.1:9444".to_string()]);
+    peers.add_discovered_peer_at("8.8.8.8:9444", 1_000);
+    peers.add_discovered_peer_at("8.8.4.4:9444", 10_000);
+    peers.record_status("8.8.4.4:9444", 1, "tip".to_string());
+
+    assert_eq!(peers.prune_stale_peers_at(3_700_000, 60_000, 3_600_000), 1);
+    assert!(peers.addresses().contains(&"127.0.0.1:9444".to_string()));
+    assert!(peers.addresses().contains(&"8.8.4.4:9444".to_string()));
+    assert!(!peers.addresses().contains(&"8.8.8.8:9444".to_string()));
+}
+
+#[test]
+fn peer_book_limits_discovered_outbound_session_candidates() {
+    let mut peers = PeerBook::from_addresses(vec![
+        "127.0.0.1:9444".to_string(),
+        "127.0.0.1:9445".to_string(),
+    ]);
+    for index in 0..50 {
+        peers.add_discovered_peer(format!("8.{}.{}.1:9444", index / 16, index % 16));
+    }
+
+    let candidates = peers.outbound_session_candidates_at(iuna::app::now_ms(), 8);
+
+    assert_eq!(candidates.len(), 10);
+    assert!(candidates.contains(&"127.0.0.1:9444".to_string()));
+    assert!(candidates.contains(&"127.0.0.1:9445".to_string()));
+}
+
+#[test]
+fn peer_book_advertises_only_outbound_peers() {
+    let mut peers = PeerBook::from_addresses(vec!["127.0.0.1:9444".to_string()]);
+    peers.add_discovered_peer("8.8.8.8:9444");
+
+    assert_eq!(
+        peers.addresses_except("127.0.0.1:9445"),
+        vec!["127.0.0.1:9444"]
+    );
 }
 
 #[test]
