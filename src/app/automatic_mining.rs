@@ -91,9 +91,9 @@ impl NodeCore {
         let wallet_rank = self
             .ledger
             .finalizer_rank_for_next_block(self.wallet.address());
-        let will_run_ticket_vdf = wallet_rank.is_some_and(|rank| self.wallet_rank_runs_vdf(rank));
-        let will_run_recovery_vdf =
-            wallet_rank.is_none() && self.should_prepare_recovery_vdf(timestamp_ms);
+        let will_run_recovery_vdf = self.should_prepare_recovery_vdf(timestamp_ms);
+        let will_run_ticket_vdf = !will_run_recovery_vdf
+            && wallet_rank.is_some_and(|rank| self.wallet_rank_runs_vdf(rank));
         if let Some(wait_ms) = self.reveal_bundle_collection_wait_ms(
             timestamp_ms,
             will_run_ticket_vdf || will_run_recovery_vdf,
@@ -109,6 +109,18 @@ impl NodeCore {
             return plan;
         }
 
+        if will_run_recovery_vdf {
+            match self.prepare_recovery_block_with_local_anchor(timestamp_ms) {
+                Ok(work) => {
+                    plan.work = Some(work);
+                }
+                Err(error) => {
+                    plan.skipped_reason = Some(format!("{error:#}"));
+                }
+            }
+            return plan;
+        }
+
         if let Some(rank) = wallet_rank {
             if !self.wallet_rank_runs_vdf(rank) {
                 plan.skipped_reason = Some(format!(
@@ -118,21 +130,10 @@ impl NodeCore {
                 return plan;
             }
         } else {
-            if self.should_prepare_recovery_vdf(timestamp_ms) {
-                match self.prepare_recovery_block_with_local_anchor(timestamp_ms) {
-                    Ok(work) => {
-                        plan.work = Some(work);
-                    }
-                    Err(error) => {
-                        plan.skipped_reason = Some(format!("{error:#}"));
-                    }
-                }
-            } else {
-                let selected_leader = self.ledger.expected_leader_for_next_block();
-                plan.skipped_reason = selected_leader.map(|leader| {
-                    format!("wallet is waiting for selected finalizer {leader} to finish the VDF")
-                });
-            }
+            let selected_leader = self.ledger.expected_leader_for_next_block();
+            plan.skipped_reason = selected_leader.map(|leader| {
+                format!("wallet is waiting for selected finalizer {leader} to finish the VDF")
+            });
             return plan;
         }
 
@@ -180,9 +181,9 @@ impl NodeCore {
         let wallet_rank = self
             .ledger
             .finalizer_rank_for_next_block(self.wallet.address());
-        let will_run_ticket_vdf = wallet_rank.is_some_and(|rank| self.wallet_rank_runs_vdf(rank));
-        let will_run_recovery_vdf =
-            wallet_rank.is_none() && self.should_prepare_recovery_vdf(timestamp_ms);
+        let will_run_recovery_vdf = self.should_prepare_recovery_vdf(timestamp_ms);
+        let will_run_ticket_vdf = !will_run_recovery_vdf
+            && wallet_rank.is_some_and(|rank| self.wallet_rank_runs_vdf(rank));
         if let Some(wait_ms) = self.reveal_bundle_collection_wait_ms(
             timestamp_ms,
             will_run_ticket_vdf || will_run_recovery_vdf,
@@ -200,6 +201,24 @@ impl NodeCore {
             return plan;
         }
 
+        if will_run_recovery_vdf {
+            match self.prepare_recovery_block_with_local_anchor(timestamp_ms) {
+                Ok(work) => {
+                    self.last_auto_finalization_status = Some(format!(
+                        "running recovery VDF for candidate block {} ({} rounds)",
+                        work.height(),
+                        work.vdf_rounds()
+                    ));
+                    plan.work = Some(work);
+                }
+                Err(error) => {
+                    plan.skipped_reason = Some(format!("{error:#}"));
+                    self.last_auto_finalization_status = plan.skipped_reason.clone();
+                }
+            }
+            return plan;
+        }
+
         if let Some(rank) = wallet_rank {
             if !self.wallet_rank_runs_vdf(rank) {
                 plan.skipped_reason = Some(format!(
@@ -210,28 +229,11 @@ impl NodeCore {
                 return plan;
             }
         } else {
-            if self.should_prepare_recovery_vdf(timestamp_ms) {
-                match self.prepare_recovery_block_with_local_anchor(timestamp_ms) {
-                    Ok(work) => {
-                        self.last_auto_finalization_status = Some(format!(
-                            "running recovery VDF for candidate block {} ({} rounds)",
-                            work.height(),
-                            work.vdf_rounds()
-                        ));
-                        plan.work = Some(work);
-                    }
-                    Err(error) => {
-                        plan.skipped_reason = Some(format!("{error:#}"));
-                        self.last_auto_finalization_status = plan.skipped_reason.clone();
-                    }
-                }
-            } else {
-                let selected_leader = self.ledger.expected_leader_for_next_block();
-                plan.skipped_reason = selected_leader.map(|leader| {
-                    format!("wallet is waiting for selected finalizer {leader} to finish the VDF")
-                });
-                self.last_auto_finalization_status = plan.skipped_reason.clone();
-            }
+            let selected_leader = self.ledger.expected_leader_for_next_block();
+            plan.skipped_reason = selected_leader.map(|leader| {
+                format!("wallet is waiting for selected finalizer {leader} to finish the VDF")
+            });
+            self.last_auto_finalization_status = plan.skipped_reason.clone();
             return plan;
         }
 
@@ -420,9 +422,6 @@ impl NodeCore {
             return true;
         }
         if self.recovery_vdf_top_rank_percent == 0 {
-            return false;
-        }
-        if self.ledger.finalizer_rank_count_for_next_block() > 0 {
             return false;
         }
         recovery_vdf_sample_percent(self.wallet.address(), self.ledger.tip_hash())

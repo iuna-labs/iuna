@@ -32,7 +32,8 @@ use super::{
     Amount, BLINDED_KEY_BYTES, BLINDED_NONCE_BYTES, BLINDED_VISIBLE_INPUTS_REQUIRED_HEIGHT,
     BLOCK_ITEM_FEES_REQUIRED_HEIGHT, BlindedReveal, BlindedTransaction, Ledger,
     MAX_BLINDED_TRANSACTION_EXPIRY_HEIGHTS, MAX_PENDING_TRANSACTIONS,
-    MINE_ACTIONS_PER_ANCHOR_LIMIT, OutPoint, Transaction, TxOutput, decode_hex, decode_hex_array,
+    MINE_ACTIONS_PER_ANCHOR_LIMIT, OutPoint, RevealBundleSection, Transaction, TxOutput,
+    decode_hex, decode_hex_array,
 };
 
 impl Ledger {
@@ -86,25 +87,29 @@ impl Ledger {
         valid
     }
 
-    pub(super) fn select_block_transactions(
+    pub(super) fn select_block_transactions_with_reveal_section(
         &self,
         miner: &str,
         required_burn_signature: Option<&str>,
+        reveal_bundle_section: &RevealBundleSection,
     ) -> Result<BlockSelection> {
         self.select_block_transactions_with_required_burn_owner(
             Some(miner),
             required_burn_signature,
+            reveal_bundle_section,
         )
     }
 
-    pub(super) fn select_recovery_block_transactions(
+    pub(super) fn select_recovery_block_transactions_with_reveal_section(
         &self,
         miner: &str,
         required_burn_signature: Option<&str>,
+        reveal_bundle_section: &RevealBundleSection,
     ) -> Result<BlockSelection> {
         self.select_block_transactions_with_required_burn_owner(
             Some(miner),
             required_burn_signature,
+            reveal_bundle_section,
         )
     }
 
@@ -112,6 +117,7 @@ impl Ledger {
         &self,
         required_burn_owner: Option<&str>,
         required_burn_signature: Option<&str>,
+        reveal_bundle_section: &RevealBundleSection,
     ) -> Result<BlockSelection> {
         let mut utxos = self.utxos.clone();
         let mut remaining = self.valid_pending_transactions();
@@ -138,8 +144,11 @@ impl Ledger {
                 transactions: vec![tx.clone()],
                 blinded_transactions: selected_blinded.clone(),
             };
-            if estimated_block_selection_size_bytes(&candidate, required_burn_owner.is_some())?
-                > self.launch_profile.max_block_bytes
+            if estimated_block_selection_size_bytes(
+                &candidate,
+                required_burn_owner.is_some(),
+                reveal_bundle_section,
+            )? > self.launch_profile.max_block_bytes
             {
                 bail!("required block anchor burn does not fit in the block");
             }
@@ -172,8 +181,11 @@ impl Ledger {
                     blinded_transactions: selected_blinded.clone(),
                 };
                 candidate.transactions.push(tx.clone());
-                if estimated_block_selection_size_bytes(&candidate, required_burn_owner.is_some())?
-                    <= self.launch_profile.max_block_bytes
+                if estimated_block_selection_size_bytes(
+                    &candidate,
+                    required_burn_owner.is_some(),
+                    reveal_bundle_section,
+                )? <= self.launch_profile.max_block_bytes
                 {
                     apply_transaction(&tx, &mut utxos)?;
                     selected.push(tx);
@@ -221,6 +233,7 @@ impl Ledger {
                     if estimated_block_selection_size_bytes(
                         &candidate,
                         required_burn_owner.is_some(),
+                        reveal_bundle_section,
                     )? <= self.launch_profile.max_block_bytes
                     {
                         apply_transaction(&tx, &mut utxos)?;
@@ -240,6 +253,7 @@ impl Ledger {
                     if estimated_block_selection_size_bytes(
                         &candidate,
                         required_burn_owner.is_some(),
+                        reveal_bundle_section,
                     )? <= self.launch_profile.max_block_bytes
                     {
                         spend_blinded_inputs(&transaction, &mut utxos)?;

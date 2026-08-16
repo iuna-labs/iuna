@@ -430,6 +430,21 @@ impl NodeCore {
         self.publish_owned_reveals_for_block(&block)?;
         Ok(block)
     }
+
+    pub fn precheck_prepared_block_without_vdf_at(
+        &self,
+        work: &PreparedBlock,
+        timestamp_ms: u64,
+    ) -> Result<()> {
+        let block = work.clone().finish_at(
+            self.wallet.unlocked()?,
+            "precheck-vdf-output".to_string(),
+            timestamp_ms,
+        );
+        self.ledger
+            .block_requires_vdf_verification_at(&block, timestamp_ms)?;
+        Ok(())
+    }
 }
 
 #[cfg(test)]

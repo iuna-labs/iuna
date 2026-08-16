@@ -70,6 +70,7 @@ pub(super) fn validate_genesis_burn_transaction(transaction: &Transaction) -> Re
 pub(super) fn estimated_block_selection_size_bytes(
     selection: &BlockSelection,
     recovery: bool,
+    reveal_bundle_section: &RevealBundleSection,
 ) -> Result<usize> {
     let block = Block {
         height: u64::MAX,
@@ -84,14 +85,14 @@ pub(super) fn estimated_block_selection_size_bytes(
         finalizer_rank: 0,
         reward: u64::MAX,
         vdf_rounds: u64::MAX,
-        vdf_output: "f".repeat(64),
+        vdf_output: format!("{}:{}", "f".repeat(512), "f".repeat(512)),
         leader_proof: (!recovery).then(|| LeaderProof {
             ticket_id: "f".repeat(64),
             public_key: "f".repeat(64),
             signature: "f".repeat(128),
         }),
         blinded_transactions: selection.blinded_transactions.clone(),
-        reveal_bundle_section: RevealBundleSection::default(),
+        reveal_bundle_section: reveal_bundle_section.clone(),
         transactions: selection.transactions.clone(),
         hash: "f".repeat(64),
     };
@@ -106,7 +107,9 @@ pub(super) fn ensure_transaction_fits_empty_block(
         transactions: vec![transaction.clone()],
         blinded_transactions: Vec::new(),
     };
-    if estimated_block_selection_size_bytes(&selection, false)? > max_block_bytes {
+    if estimated_block_selection_size_bytes(&selection, false, &RevealBundleSection::default())?
+        > max_block_bytes
+    {
         bail!("transaction exceeds max block size");
     }
     Ok(())
@@ -120,7 +123,9 @@ pub(super) fn ensure_blinded_transaction_fits_empty_block(
         transactions: Vec::new(),
         blinded_transactions: vec![transaction.clone()],
     };
-    if estimated_block_selection_size_bytes(&selection, false)? > max_block_bytes {
+    if estimated_block_selection_size_bytes(&selection, false, &RevealBundleSection::default())?
+        > max_block_bytes
+    {
         bail!("blinded transaction exceeds max block size");
     }
     Ok(())

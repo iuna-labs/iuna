@@ -128,7 +128,7 @@ use vdf::{
     VDF_RETARGET_DEADBAND_PERCENT, clamped_vdf_retarget_observed_block_ms, retarget_vdf_rounds,
     vdf_retarget_observed_block_ms,
 };
-pub use vdf::{run_vdf, verify_vdf};
+pub use vdf::{VdfProgress, VdfProgressPhase, run_vdf, run_vdf_with_progress, verify_vdf};
 pub use wallet::Wallet;
 
 pub fn reveal_committee_slot_count(eligible_rank_count: usize) -> usize {

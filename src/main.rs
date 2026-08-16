@@ -18,7 +18,7 @@ use iuna::{
     },
     domain::{
         Amount, ChainSnapshot, GenesisBurn, Ledger, MAX_VDF_ROUNDS, MICRO_IUNA,
-        VDF_TARGET_BLOCK_MS, run_vdf,
+        VDF_TARGET_BLOCK_MS, VdfProgress, VdfProgressPhase, run_vdf, run_vdf_with_progress,
     },
 };
 use tokio::sync::Mutex;
@@ -37,6 +37,7 @@ const GENESIS_INITIAL_BURN_FEE: Amount = config_store::DEFAULT_BURN_FEE;
 const VDF_MEASUREMENT_INITIAL_ROUNDS: u64 = 1_000;
 const VDF_MEASUREMENT_MAX_ROUNDS: u64 = 10_000_000;
 const VDF_MEASUREMENT_MIN_ELAPSED: Duration = Duration::from_millis(150);
+const VDF_PROGRESS_LOG_INTERVAL: Duration = Duration::from_secs(10);
 
 #[tokio::main]
 async fn main() -> Result<()> {
@@ -475,16 +476,53 @@ async fn run_automatic_finalizer(node: SharedNode, gossip: p2p::GossipNetwork, d
             );
         }
 
+        let candidate_height = work.height();
         let seed = work.vdf_seed().to_string();
         let rounds = work.vdf_rounds();
         let publish_at_ms = work.timestamp_ms();
-        let vdf_output = match tokio::task::spawn_blocking(move || run_vdf(&seed, rounds)).await {
-            Ok(output) => output,
-            Err(error) => {
-                if debug {
-                    eprintln!("VDF worker failed: {error:#}");
+        let precheck = {
+            let node = node.lock().await;
+            node.precheck_prepared_block_without_vdf_at(&work, now_ms())
+        };
+        if let Err(error) = precheck {
+            let message = format!("skipped before VDF: {error:#}");
+            if debug {
+                println!("auto-finalization {message}");
+            }
+            node.lock()
+                .await
+                .record_automatic_finalization_status(message);
+            tokio::time::sleep(std::time::Duration::from_secs(1)).await;
+            continue;
+        }
+        let (progress_tx, progress_rx) = std::sync::mpsc::channel();
+        let mut vdf_worker = tokio::task::spawn_blocking(move || {
+            run_vdf_with_progress(&seed, rounds, VDF_PROGRESS_LOG_INTERVAL, |progress| {
+                let _ = progress_tx.send(progress);
+            })
+        });
+        let vdf_output = loop {
+            tokio::select! {
+                result = &mut vdf_worker => {
+                    break match result {
+                        Ok(output) => output,
+                        Err(error) => {
+                            if debug {
+                                eprintln!("VDF worker failed: {error:#}");
+                            }
+                            continue;
+                        }
+                    };
                 }
-                continue;
+                _ = tokio::time::sleep(std::time::Duration::from_millis(500)) => {
+                    while let Ok(progress) = progress_rx.try_recv() {
+                        let message = format_vdf_progress(candidate_height, progress);
+                        if debug {
+                            println!("{message}");
+                        }
+                        node.lock().await.record_automatic_finalization_status(message);
+                    }
+                }
             }
         };
 
@@ -517,6 +555,7 @@ async fn run_automatic_finalizer(node: SharedNode, gossip: p2p::GossipNetwork, d
             (finalized, outbox)
         };
 
+        let failed_after_vdf = finalized.is_err();
         match finalized {
             Ok(block) if debug => {
                 println!("auto-finalized block {} ({})", block.height, block.hash);
@@ -532,8 +571,31 @@ async fn run_automatic_finalizer(node: SharedNode, gossip: p2p::GossipNetwork, d
             }
         }
 
+        if failed_after_vdf {
+            tokio::time::sleep(std::time::Duration::from_secs(10)).await;
+        }
+
         tokio::task::yield_now().await;
     }
+}
+
+fn format_vdf_progress(candidate_height: u64, progress: VdfProgress) -> String {
+    let phase = match progress.phase {
+        VdfProgressPhase::Output => "output",
+        VdfProgressPhase::Proof => "proof",
+    };
+    let percent = if progress.total_steps == 0 {
+        100.0
+    } else {
+        progress.completed_steps as f64 * 100.0 / progress.total_steps as f64
+    };
+    format!(
+        "running VDF for candidate block {candidate_height}: {phase} {}/{} rounds, total {}/{} steps ({percent:.1}%)",
+        progress.completed_phase_rounds,
+        progress.phase_rounds,
+        progress.completed_steps,
+        progress.total_steps
+    )
 }
 
 async fn run_automatic_pow_miner(node: SharedNode, gossip: p2p::GossipNetwork, debug: bool) {

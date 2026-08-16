@@ -55,7 +55,11 @@ impl Ledger {
 
         let reveal_bundles = self.validate_next_block_reveal_bundles(reveal_bundles)?;
         let reveal_bundle_section = self.reveal_bundle_section_from_bundles(reveal_bundles);
-        let selection = self.select_block_transactions(miner, required_burn_signature)?;
+        let selection = self.select_block_transactions_with_reveal_section(
+            miner,
+            required_burn_signature,
+            &reveal_bundle_section,
+        )?;
         ensure_block_has_burn(&selection.transactions)?;
 
         let tip = self.tip();
@@ -124,7 +128,11 @@ impl Ledger {
 
         let reveal_bundles = self.validate_next_block_reveal_bundles(reveal_bundles)?;
         let reveal_bundle_section = self.reveal_bundle_section_from_bundles(reveal_bundles);
-        let selection = self.select_recovery_block_transactions(miner, required_burn_signature)?;
+        let selection = self.select_recovery_block_transactions_with_reveal_section(
+            miner,
+            required_burn_signature,
+            &reveal_bundle_section,
+        )?;
         ensure_block_has_burn(&selection.transactions)?;
         ensure_block_has_burn_from(&selection.transactions, miner)?;
 

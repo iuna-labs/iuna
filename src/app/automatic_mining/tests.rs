@@ -312,6 +312,39 @@ fn automatic_finalization_prepares_recovery_after_ticket_timeout() {
 }
 
 #[test]
+fn automatic_finalization_prepares_recovery_even_when_ticket_ranks_remain() {
+    let alice = Wallet::from_seed("automatic-recovery-with-ranks-alice");
+    let bob = Wallet::from_seed("automatic-recovery-with-ranks-bob");
+    let carol = Wallet::from_seed("automatic-recovery-with-ranks-carol");
+    let mut allocations = BTreeMap::new();
+    allocations.insert(alice.address().to_string(), 10 * MICRO_IUNA);
+    allocations.insert(bob.address().to_string(), 10 * MICRO_IUNA);
+    allocations.insert(carol.address().to_string(), 10 * MICRO_IUNA);
+    let ledger = Ledger::new_with_genesis_burns(
+        allocations,
+        vec![
+            GenesisBurn::new(alice.address(), 1),
+            GenesisBurn::new(bob.address(), 1),
+        ],
+        10,
+    )
+    .unwrap();
+    assert!(ledger.finalizer_rank_count_for_next_block() > 0);
+    assert_eq!(ledger.finalizer_rank_for_next_block(carol.address()), None);
+    let mut node = NodeCore::from_ledger(carol, ledger, 1);
+
+    let recovery = node.prepare_automatic_finalization(RECOVERY_BLOCK_DELAY_MS);
+    let work = recovery.work.expect("recovery work should be prepared");
+    let block = work.finish(
+        node.wallet.unlocked().unwrap(),
+        "preverified-vdf".to_string(),
+    );
+
+    assert_eq!(block.finalizer_mode, FinalizerMode::Recovery);
+    assert!(block.leader_proof.is_none());
+}
+
+#[test]
 fn automatic_finalization_respects_zero_recovery_vdf_threshold() {
     let alice = Wallet::from_seed("automatic-recovery-zero-alice");
     let bob = Wallet::from_seed("automatic-recovery-zero-bob");
@@ -453,6 +486,43 @@ fn automatic_fallback_finalizer_prepares_anchor_and_blinded_burn() {
     );
     assert!(!block.blinded_transactions.is_empty());
     assert_eq!(node.ledger().height(), 1);
+}
+
+#[test]
+fn automatic_ranked_finalizer_prefers_recovery_after_timeout() {
+    let alice = Wallet::from_seed("auto-ranked-recovery-alice");
+    let bob = Wallet::from_seed("auto-ranked-recovery-bob");
+    let finalizers = [alice.clone(), bob.clone()];
+    let mut allocations = BTreeMap::new();
+    allocations.insert(alice.address().to_string(), 10 * MICRO_IUNA);
+    allocations.insert(bob.address().to_string(), 10 * MICRO_IUNA);
+    let ledger = Ledger::new_with_genesis_burns(
+        allocations,
+        finalizers
+            .iter()
+            .map(|wallet| GenesisBurn::new(wallet.address(), MICRO_IUNA))
+            .collect(),
+        10,
+    )
+    .unwrap();
+    let fallback = finalizers
+        .iter()
+        .find(|wallet| ledger.finalizer_rank_for_next_block(wallet.address()) == Some(1))
+        .unwrap()
+        .clone();
+    let mut node = NodeCore::from_ledger(fallback, ledger, 1);
+
+    let recovery = node.prepare_automatic_finalization(RECOVERY_BLOCK_DELAY_MS);
+    let work = recovery.work.expect("recovery work should be prepared");
+    let block = work.finish(
+        node.wallet.unlocked().unwrap(),
+        "preverified-vdf".to_string(),
+    );
+
+    assert_eq!(block.finalizer_mode, FinalizerMode::Recovery);
+    assert_eq!(block.finalizer_rank, 0);
+    assert_eq!(block.vdf_rounds, 10);
+    assert!(block.leader_proof.is_none());
 }
 
 #[test]

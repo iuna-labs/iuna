@@ -1,4 +1,7 @@
-use std::sync::OnceLock;
+use std::{
+    sync::OnceLock,
+    time::{Duration, Instant},
+};
 
 use num_bigint::BigUint;
 use num_traits::{One, Zero};
@@ -26,15 +29,61 @@ pub(super) const VDF_RETARGET_DEADBAND_PERCENT: u128 = 10;
 pub(super) const MIN_VDF_RETARGET_OBSERVED_BLOCK_MS: u64 = VDF_TARGET_BLOCK_MS / 4;
 pub(super) const MAX_VDF_RETARGET_OBSERVED_BLOCK_MS: u64 = VDF_TARGET_BLOCK_MS * 4;
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct VdfProgress {
+    pub completed_steps: u64,
+    pub total_steps: u64,
+    pub completed_phase_rounds: u64,
+    pub phase_rounds: u64,
+    pub phase: VdfProgressPhase,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum VdfProgressPhase {
+    Output,
+    Proof,
+}
+
 pub fn run_vdf(seed: &str, rounds: u64) -> String {
+    run_vdf_with_progress(seed, rounds, Duration::MAX, |_| {})
+}
+
+pub fn run_vdf_with_progress(
+    seed: &str,
+    rounds: u64,
+    progress_interval: Duration,
+    mut progress: impl FnMut(VdfProgress),
+) -> String {
     let x = vdf_seed_element(seed);
     let mut y = x.clone();
-    for _ in 0..rounds {
+    let total_steps = rounds.saturating_mul(2);
+    let mut last_progress = Instant::now();
+    for completed_rounds in 0..rounds {
         y = square_mod(&y);
+        maybe_report_vdf_progress(
+            &mut last_progress,
+            progress_interval,
+            VdfProgress {
+                completed_steps: completed_rounds + 1,
+                total_steps,
+                completed_phase_rounds: completed_rounds + 1,
+                phase_rounds: rounds,
+                phase: VdfProgressPhase::Output,
+            },
+            &mut progress,
+        );
     }
 
     let challenge = vdf_challenge_prime(seed, rounds, &y);
-    let proof = vdf_proof(&x, rounds, challenge);
+    let proof = vdf_proof_with_progress(
+        &x,
+        rounds,
+        challenge,
+        total_steps,
+        &mut last_progress,
+        progress_interval,
+        &mut progress,
+    );
     encode_vdf_solution(y, proof)
 }
 
@@ -141,10 +190,18 @@ fn vdf_challenge_prime(seed: &str, rounds: u64, output: &BigUint) -> u64 {
     next_odd_prime(candidate | 1)
 }
 
-fn vdf_proof(x: &BigUint, rounds: u64, challenge: u64) -> BigUint {
+fn vdf_proof_with_progress(
+    x: &BigUint,
+    rounds: u64,
+    challenge: u64,
+    total_steps: u64,
+    last_progress: &mut Instant,
+    progress_interval: Duration,
+    progress: &mut impl FnMut(VdfProgress),
+) -> BigUint {
     let mut proof = BigUint::one();
     let mut remainder = 1_u64 % challenge;
-    for _ in 0..rounds {
+    for completed_rounds in 0..rounds {
         let doubled = remainder * 2;
         let carry = doubled >= challenge;
         proof = square_mod(&proof);
@@ -152,8 +209,34 @@ fn vdf_proof(x: &BigUint, rounds: u64, challenge: u64) -> BigUint {
             proof = mul_mod(&proof, x);
         }
         remainder = doubled % challenge;
+        maybe_report_vdf_progress(
+            last_progress,
+            progress_interval,
+            VdfProgress {
+                completed_steps: rounds.saturating_add(completed_rounds + 1),
+                total_steps,
+                completed_phase_rounds: completed_rounds + 1,
+                phase_rounds: rounds,
+                phase: VdfProgressPhase::Proof,
+            },
+            progress,
+        );
     }
     proof
+}
+
+fn maybe_report_vdf_progress(
+    last_progress: &mut Instant,
+    progress_interval: Duration,
+    snapshot: VdfProgress,
+    progress: &mut impl FnMut(VdfProgress),
+) {
+    if snapshot.completed_steps == snapshot.total_steps
+        || last_progress.elapsed() >= progress_interval
+    {
+        progress(snapshot);
+        *last_progress = Instant::now();
+    }
 }
 
 fn encode_vdf_solution(output: BigUint, proof: BigUint) -> String {
@@ -220,7 +303,12 @@ fn is_odd_prime(candidate: u64) -> bool {
 
 #[cfg(test)]
 mod tests {
-    use super::{VDF_ELEMENT_HEX_LEN, pow_mod_small, run_vdf, vdf_modulus, verify_vdf};
+    use std::time::Duration;
+
+    use super::{
+        VDF_ELEMENT_HEX_LEN, VdfProgressPhase, pow_mod_small, run_vdf, run_vdf_with_progress,
+        vdf_modulus, verify_vdf,
+    };
 
     #[test]
     fn vdf_solution_verifies_and_is_bound_to_seed_and_rounds() {
@@ -230,6 +318,34 @@ mod tests {
         assert!(!verify_vdf("other-seed", 128, &solution));
         assert!(!verify_vdf("test-seed", 129, &solution));
         assert!(!verify_vdf("test-seed", 128, "not-a-vdf-solution"));
+    }
+
+    #[test]
+    fn vdf_progress_reports_output_and_proof_steps() {
+        let mut progress = Vec::new();
+        let solution = run_vdf_with_progress("progress-seed", 4, Duration::ZERO, |snapshot| {
+            progress.push(snapshot);
+        });
+
+        assert!(verify_vdf("progress-seed", 4, &solution));
+        assert!(
+            progress
+                .iter()
+                .any(|snapshot| snapshot.phase == VdfProgressPhase::Output)
+        );
+        assert!(
+            progress
+                .iter()
+                .any(|snapshot| snapshot.phase == VdfProgressPhase::Proof)
+        );
+        assert_eq!(
+            progress.last().map(|snapshot| snapshot.completed_steps),
+            Some(8)
+        );
+        assert_eq!(
+            progress.last().map(|snapshot| snapshot.total_steps),
+            Some(8)
+        );
     }
 
     #[test]

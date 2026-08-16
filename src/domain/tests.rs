@@ -2586,9 +2586,18 @@ fn recovery_block_size_selection_uses_recovery_skeleton() {
         transactions: vec![recovery_burn],
         blinded_transactions: vec![blinded.transaction.clone()],
     };
-    let recovery_estimate =
-        estimated_block_selection_size_bytes(&recovery_selection, true).unwrap();
-    let ticket_estimate = estimated_block_selection_size_bytes(&recovery_selection, false).unwrap();
+    let recovery_estimate = estimated_block_selection_size_bytes(
+        &recovery_selection,
+        true,
+        &RevealBundleSection::default(),
+    )
+    .unwrap();
+    let ticket_estimate = estimated_block_selection_size_bytes(
+        &recovery_selection,
+        false,
+        &RevealBundleSection::default(),
+    )
+    .unwrap();
     assert!(recovery_estimate < ticket_estimate);
 
     ledger.launch_profile.max_block_bytes = recovery_estimate;
@@ -2649,6 +2658,45 @@ fn recovery_block_includes_pending_blinded_reveals_when_space_allows() {
             .iter()
             .any(|reveal| reveal.commitment == blinded.transaction.commitment)
     );
+}
+
+#[test]
+fn block_size_estimate_includes_reveal_bundle_section() {
+    let alice = Wallet::from_seed("size-estimate-reveal-alice");
+    let bob = Wallet::from_seed("size-estimate-reveal-bob");
+    let carol = Wallet::from_seed("size-estimate-reveal-carol");
+    let finalizers = [alice.clone(), bob.clone()];
+    let mut ledger = ledger_with_finalizers(&finalizers, &[(&carol, 10 * MICRO_IUNA)]);
+    let blinded = ledger
+        .build_blinded_burn(&carol, MICRO_IUNA, 7, ledger.height() + 4)
+        .unwrap();
+    ledger
+        .submit_blinded_transaction(blinded.transaction.clone())
+        .unwrap();
+    queue_next_leader_burn(&mut ledger, &finalizers);
+    mine_preverified_as_next_leader(&mut ledger, &finalizers, 1);
+    ledger
+        .submit_blinded_reveal(blinded.reveal.clone())
+        .unwrap();
+
+    let bundles = ledger
+        .reveal_committee_for_next_block()
+        .into_iter()
+        .filter_map(|member| {
+            let wallet = wallet_for_address(&finalizers, &member.owner);
+            ledger.build_reveal_bundle(wallet).unwrap()
+        })
+        .collect::<Vec<_>>();
+    let reveal_bundle_section = ledger.reveal_bundle_section_from_bundles(bundles);
+    let selection = BlockSelection::default();
+
+    let empty_estimate =
+        estimated_block_selection_size_bytes(&selection, true, &RevealBundleSection::default())
+            .unwrap();
+    let reveal_estimate =
+        estimated_block_selection_size_bytes(&selection, true, &reveal_bundle_section).unwrap();
+
+    assert!(reveal_estimate > empty_estimate);
 }
 
 #[test]
