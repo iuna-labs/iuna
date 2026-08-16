@@ -332,14 +332,17 @@ impl Ledger {
                 .iter()
                 .any(|input| spent.contains(&input.outpoint))
         });
+        let _ = self.refresh_pending_pool_byte_counters();
     }
 
     pub(crate) fn clear_pending_blinded_transactions(&mut self) {
         self.pending_blinded.clear();
+        self.pending_blinded_bytes = 0;
     }
 
     pub(crate) fn clear_pending_transactions(&mut self) {
         self.pending.clear();
+        self.pending_bytes = 0;
     }
 
     pub fn orphan_transactions(&self) -> &[Transaction] {

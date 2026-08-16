@@ -152,11 +152,9 @@ pub(super) async fn validate_snapshot_extension(
             .await
             .context("chain snapshot adoption worker failed")?;
     }
-    let missing_blocks = ledger.missing_snapshot_blocks(&snapshot)?;
-    verify_blocks_vdf(missing_blocks).await?;
 
     tokio::task::spawn_blocking(move || {
-        ledger.extend_from_preverified_snapshot_at(snapshot, now_ms)?;
+        ledger.extend_from_snapshot_at(snapshot, now_ms)?;
         Ok(ledger)
     })
     .await
@@ -171,11 +169,10 @@ pub(super) async fn validate_blocks_extension(
     if blocks.is_empty() {
         return Ok(ledger);
     }
-    verify_blocks_vdf(blocks.clone()).await?;
 
     tokio::task::spawn_blocking(move || {
         for block in blocks {
-            ledger.apply_preverified_block_at(block, now_ms)?;
+            ledger.apply_block_at(block, now_ms)?;
         }
         Ok(ledger)
     })
@@ -207,30 +204,15 @@ pub(super) async fn verify_block_vdf(block: Block) -> Result<Block> {
     Ok(block)
 }
 
-async fn verify_blocks_vdf(blocks: Vec<Block>) -> Result<()> {
-    let mut tasks = tokio::task::JoinSet::new();
-    for block in blocks {
-        tasks.spawn_blocking(move || {
-            if !verify_vdf(&block.vdf_seed(), block.vdf_rounds, &block.vdf_output) {
-                anyhow::bail!("block {} VDF output is invalid", block.height);
-            }
-            Ok::<(), anyhow::Error>(())
-        });
-    }
-
-    while let Some(result) = tasks.join_next().await {
-        result.context("VDF verification worker failed")??;
-    }
-
-    Ok(())
-}
-
 #[cfg(test)]
 mod tests {
-    use crate::{app::GossipEnvelope, domain::Wallet};
+    use crate::{
+        app::GossipEnvelope,
+        domain::{Block, FinalizerMode, RevealBundleSection, Wallet},
+    };
 
     use super::super::test_support::{allocations, node};
-    use super::join_snapshot_response;
+    use super::{join_snapshot_response, validate_blocks_extension};
 
     #[test]
     fn join_snapshot_response_ignores_status_noise_before_snapshot() {
@@ -261,5 +243,41 @@ mod tests {
         .unwrap();
 
         assert_eq!(parsed, Some(snapshot));
+    }
+
+    #[tokio::test]
+    async fn block_batch_prechecks_before_vdf_verification() {
+        let alice = Wallet::from_seed("batch-precheck-alice");
+        let test_node = node(
+            "alice",
+            alice.clone(),
+            allocations(std::slice::from_ref(&alice), 1_000),
+        );
+        let tip = test_node.chain_snapshot().blocks.last().unwrap().clone();
+        let ledger = test_node.clone_ledger();
+        let invalid_height_block = Block {
+            height: ledger.height() + 2,
+            prev_hash: tip.hash,
+            timestamp_ms: tip.timestamp_ms + 1,
+            miner: alice.address().to_string(),
+            finalizer_mode: FinalizerMode::Ticket,
+            finalizer_rank: 0,
+            reward: 0,
+            vdf_rounds: ledger.vdf_rounds(),
+            vdf_output: "not-a-vdf-solution".to_string(),
+            leader_proof: None,
+            blinded_transactions: Vec::new(),
+            reveal_bundle_section: RevealBundleSection::default(),
+            transactions: Vec::new(),
+            hash: "invalid-hash".to_string(),
+        };
+
+        let error = validate_blocks_extension(ledger, vec![invalid_height_block], u64::MAX)
+            .await
+            .unwrap_err();
+        let message = format!("{error:#}");
+
+        assert!(message.contains("expected block height"));
+        assert!(!message.contains("VDF output is invalid"));
     }
 }

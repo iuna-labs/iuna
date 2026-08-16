@@ -214,6 +214,14 @@ fn mine_preverified_as_next_leader(
     block
 }
 
+fn mine_valid_as_next_leader(ledger: &mut Ledger, wallets: &[Wallet], timestamp_ms: u64) -> Block {
+    let leader = ledger.expected_leader_for_next_block().unwrap();
+    let wallet = wallet_for_address(wallets, &leader);
+    let block = ledger.mine_next_block(wallet, timestamp_ms).unwrap();
+    ledger.apply_block_at(block.clone(), u64::MAX).unwrap();
+    block
+}
+
 fn mine_preverified_as_next_leader_with_reveal_bundles(
     ledger: &mut Ledger,
     wallets: &[Wallet],
@@ -2120,6 +2128,7 @@ fn blinded_mempool_rejects_byte_limit_even_before_height_750() {
     ledger.pending_blinded = (0..existing_count)
         .map(large_inputless_zero_fee_blinded_spam)
         .collect();
+    ledger.refresh_pending_pool_byte_counters().unwrap();
 
     let error = ledger
         .submit_blinded_transaction(large_inputless_zero_fee_blinded_spam(existing_count))
@@ -2516,6 +2525,7 @@ fn active_blinded_reveal_displaces_invalid_legacy_reveal_when_pool_is_full() {
             key: "00".repeat(BLINDED_KEY_BYTES),
         })
         .collect();
+    ledger.refresh_pending_pool_byte_counters().unwrap();
     assert_eq!(
         ledger.pending_blinded_reveals().len(),
         MAX_PENDING_TRANSACTIONS
@@ -2852,19 +2862,19 @@ fn abandoned_fork_blinded_transactions_return_to_mempool() {
         .submit_blinded_transaction(blinded.transaction.clone())
         .unwrap();
     queue_next_leader_burn(&mut local, &finalizers);
-    mine_preverified_as_next_leader(&mut local, &finalizers, 1);
+    mine_valid_as_next_leader(&mut local, &finalizers, 1);
 
     for timestamp_ms in [1, 2] {
         let leader = remote.expected_leader_for_next_block().unwrap();
         let wallet = wallet_for_address(&finalizers, &leader);
         let burn = remote.build_burn(wallet, 1, 0).unwrap();
         remote.submit_transaction(burn).unwrap();
-        mine_preverified_as_next_leader(&mut remote, &finalizers, timestamp_ms);
+        mine_valid_as_next_leader(&mut remote, &finalizers, timestamp_ms);
     }
 
     assert!(
         local
-            .extend_from_preverified_snapshot_at(remote.snapshot(), u64::MAX)
+            .extend_from_snapshot_at(remote.snapshot(), u64::MAX)
             .unwrap()
     );
     assert!(local.has_blinded_transaction(&blinded.transaction.commitment));

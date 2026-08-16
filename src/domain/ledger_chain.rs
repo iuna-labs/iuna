@@ -7,7 +7,7 @@ use super::genesis::{build_genesis_block, utxos_after_genesis, validate_genesis_
 use super::ledger_ops::validate_genesis_allocations;
 use super::ticket::genesis_tickets;
 use super::{
-    Amount, Block, ChainSnapshot, GenesisBurn, LaunchProfile, Ledger, MINE_REWARD, Transaction,
+    Amount, ChainSnapshot, GenesisBurn, LaunchProfile, Ledger, MINE_REWARD, Transaction,
     unix_now_ms,
 };
 
@@ -54,6 +54,10 @@ impl Ledger {
             orphans: Vec::new(),
             pending_blinded: Vec::new(),
             pending_reveals: Vec::new(),
+            pending_bytes: 0,
+            orphan_bytes: 0,
+            pending_blinded_bytes: 0,
+            pending_reveal_bytes: 0,
             active_blinded: BTreeMap::new(),
             mine_reward: MINE_REWARD,
             initial_vdf_rounds: vdf_rounds,
@@ -109,6 +113,10 @@ impl Ledger {
             orphans: Vec::new(),
             pending_blinded: Vec::new(),
             pending_reveals: Vec::new(),
+            pending_bytes: 0,
+            orphan_bytes: 0,
+            pending_blinded_bytes: 0,
+            pending_reveal_bytes: 0,
             active_blinded: BTreeMap::new(),
             mine_reward: MINE_REWARD,
             initial_vdf_rounds: vdf_rounds,
@@ -135,27 +143,12 @@ impl Ledger {
         self.extend_from_snapshot_with_vdf_policy(snapshot, true, unix_now_ms())
     }
 
-    pub(crate) fn extend_from_preverified_snapshot_at(
+    pub(crate) fn extend_from_snapshot_at(
         &mut self,
         snapshot: ChainSnapshot,
         now_ms: u64,
     ) -> Result<bool> {
-        self.extend_from_snapshot_with_vdf_policy(snapshot, false, now_ms)
-    }
-
-    pub(crate) fn missing_snapshot_blocks(&self, snapshot: &ChainSnapshot) -> Result<Vec<Block>> {
-        let remote_height = self.validate_snapshot_identity(snapshot)?;
-        if remote_height <= self.height() {
-            return Ok(Vec::new());
-        }
-        let common_ancestor_height = self.common_ancestor_height(snapshot)?;
-
-        Ok(snapshot
-            .blocks
-            .iter()
-            .skip(common_ancestor_height as usize + 1)
-            .cloned()
-            .collect())
+        self.extend_from_snapshot_with_vdf_policy(snapshot, true, now_ms)
     }
 
     fn extend_from_snapshot_with_vdf_policy(
@@ -201,20 +194,6 @@ impl Ledger {
             .unwrap_or(0);
 
         Ok(remote_height)
-    }
-
-    fn common_ancestor_height(&self, snapshot: &ChainSnapshot) -> Result<u64> {
-        self.validate_snapshot_identity(snapshot)?;
-        let max_common_index = self.chain.len().min(snapshot.blocks.len()) - 1;
-        for index in 0..=max_common_index {
-            if self.chain[index] != snapshot.blocks[index] {
-                if index == 0 {
-                    bail!("chain snapshot has no common genesis block");
-                }
-                return Ok(index as u64 - 1);
-            }
-        }
-        Ok(max_common_index as u64)
     }
 
     fn fork_point_with_candidate(&self, candidate: &Ledger) -> Result<ForkPoint> {

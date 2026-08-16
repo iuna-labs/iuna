@@ -7,6 +7,7 @@ use super::blinded::{
     blinded_reveal_inputs_match, blinded_transaction_commitment, decrypt_blinded_transaction,
     verify_blinded_input_signatures,
 };
+use super::ledger_mempool::pending_pool_item_bytes;
 use super::ledger_ops::{
     apply_spendable_pending_transaction, apply_transaction, best_selectable_blinded_index,
     best_selectable_burn_from_index, best_selectable_transaction_index,
@@ -31,7 +32,7 @@ use super::validation::{
 use super::{
     Amount, BLINDED_KEY_BYTES, BLINDED_NONCE_BYTES, BLINDED_VISIBLE_INPUTS_REQUIRED_HEIGHT,
     BLOCK_ITEM_FEES_REQUIRED_HEIGHT, BlindedReveal, BlindedTransaction, Ledger,
-    MAX_BLINDED_TRANSACTION_EXPIRY_HEIGHTS, MAX_PENDING_TRANSACTIONS,
+    MAX_BLINDED_TRANSACTION_EXPIRY_HEIGHTS, MAX_PENDING_POOL_BYTES, MAX_PENDING_TRANSACTIONS,
     MINE_ACTIONS_PER_ANCHOR_LIMIT, OutPoint, RevealBundleSection, Transaction, TxOutput,
     decode_hex, decode_hex_array,
 };
@@ -369,7 +370,7 @@ impl Ledger {
             if self.pending.len() >= MAX_PENDING_TRANSACTIONS {
                 return Ok(());
             }
-            let mut promoted_index = None;
+            let mut promoted = None;
             let mut utxos = self.utxos_after_valid_pending_and_blinded()?;
             for (index, transaction) in self.orphans.iter().enumerate() {
                 if transaction_inputs_spent_by(transaction, &self.pending) {
@@ -381,15 +382,26 @@ impl Ledger {
                 if self.validate_new_transaction(transaction).is_ok()
                     && apply_transaction(transaction, &mut utxos).is_ok()
                 {
-                    promoted_index = Some(index);
+                    let transaction_bytes = pending_pool_item_bytes(transaction)?;
+                    let promoted_bytes = self
+                        .pending_bytes
+                        .checked_add(transaction_bytes)
+                        .context("pending pool byte size overflow")?;
+                    if promoted_bytes > MAX_PENDING_POOL_BYTES {
+                        continue;
+                    }
+                    promoted = Some((index, transaction_bytes));
                     break;
                 }
             }
 
-            let Some(index) = promoted_index else {
+            let Some((index, transaction_bytes)) = promoted else {
                 return Ok(());
             };
-            self.pending.push(self.orphans.remove(index));
+            let transaction = self.orphans.remove(index);
+            self.orphan_bytes = self.orphan_bytes.saturating_sub(transaction_bytes);
+            self.pending.push(transaction);
+            self.pending_bytes = self.pending_bytes.saturating_add(transaction_bytes);
         }
     }
 

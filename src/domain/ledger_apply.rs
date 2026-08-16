@@ -227,6 +227,7 @@ impl Ledger {
                     && self.pending_reveal_transaction(reveal).is_ok()
             })
             .collect();
+        self.refresh_pending_pool_byte_counters()?;
         self.promote_orphan_transactions()?;
         self.vdf_rounds = self.next_vdf_rounds_after_tip();
         Ok(())
