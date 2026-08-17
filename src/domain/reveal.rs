@@ -1,7 +1,10 @@
 use anyhow::{Context, Result, bail};
 use serde::{Deserialize, Serialize};
 
-use super::{Amount, BlindedReveal, REVEAL_COMMITTEE_SIZE, hex_hash};
+use super::{
+    Amount, BlindedReveal, REVEAL_BUNDLE_SIGNATURE_THRESHOLDS_HEIGHT, REVEAL_COMMITTEE_SIZE,
+    hex_hash,
+};
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -105,9 +108,14 @@ impl RevealBundleSection {
         &self,
         height: u64,
         prev_hash: &str,
+        finalizer: &str,
     ) -> [String; REVEAL_COMMITTEE_SIZE] {
         let bundles = self.expand(height, prev_hash);
-        reveal_bundle_hashes(&bundles)
+        let mut hashes = reveal_bundle_hashes(&bundles);
+        if height >= REVEAL_BUNDLE_SIGNATURE_THRESHOLDS_HEIGHT {
+            hashes[0] = finalizer_attestation_hash(height, prev_hash, finalizer, &self.reveals);
+        }
+        hashes
     }
 
     pub(super) fn canonical(&self) -> String {
@@ -189,6 +197,22 @@ pub(super) fn reveal_bundle_hashes(bundles: &[RevealBundle]) -> [String; REVEAL_
             .map(RevealBundle::bundle_hash)
             .unwrap_or_else(|| default_reveal_bundle_hash(slot))
     })
+}
+
+pub(super) fn finalizer_attestation_hash(
+    height: u64,
+    prev_hash: &str,
+    finalizer: &str,
+    reveals: &[MaskedBlindedReveal],
+) -> String {
+    let canonical_reveals = reveals
+        .iter()
+        .map(|masked| masked.reveal.canonical())
+        .collect::<Vec<_>>()
+        .join("|");
+    hex_hash(format!(
+        "iuna-finalizer-reveal-attestation-v1:{height}:{prev_hash}:{finalizer}:{canonical_reveals}"
+    ))
 }
 
 pub(super) fn canonical_reveal_bundle_hashes(

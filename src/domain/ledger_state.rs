@@ -5,7 +5,7 @@ use std::{
 
 use super::{
     ActiveBlindedTransaction, Amount, BlindedReveal, BlindedTransaction, Block, BurnTicket,
-    LaunchProfile, OutPoint, Transaction, TxOutput,
+    LaunchProfile, LineageOwnerValues, OutPoint, Transaction, TxOutput, UtxoLineageRoot,
 };
 
 #[derive(Clone, Debug)]
@@ -13,6 +13,9 @@ pub struct Ledger {
     pub(super) chain: Vec<Block>,
     pub(super) genesis_allocations: BTreeMap<String, Amount>,
     pub(super) utxos: BTreeMap<OutPoint, TxOutput>,
+    pub(super) utxo_lineage: BTreeMap<OutPoint, UtxoLineageRoot>,
+    pub(super) lineage_values: BTreeMap<UtxoLineageRoot, Amount>,
+    pub(super) lineage_owners: LineageOwnerValues,
     pub(super) tickets: Vec<BurnTicket>,
     pub(super) pending: Vec<Transaction>,
     pub(super) orphans: Vec<Transaction>,

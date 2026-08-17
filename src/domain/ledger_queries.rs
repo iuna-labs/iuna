@@ -1,6 +1,7 @@
 use std::collections::{BTreeMap, BTreeSet};
 
 use anyhow::{Context, Result, bail};
+use sha2::{Digest, Sha256};
 
 use super::blinded::{
     ActiveBlindedTransaction, blinded_envelope_fee_for_transaction, decrypt_blinded_transaction,
@@ -13,8 +14,9 @@ use super::ticket::{
 };
 use super::{
     Amount, BlindedReveal, BlindedTransaction, Block, BurnLeaderRank, ChainSnapshot, ChainStatus,
-    LaunchProfile, Ledger, OutPoint, RevealCommitteeMember, RevealedBlindedTransaction,
-    Transaction, TxOutput, UNIQUE_OWNER_REVEAL_COMMITTEE_HEIGHT, reveal_committee_slot_count,
+    LaunchProfile, Ledger, OutPoint, REVEAL_BUNDLE_SIGNATURE_THRESHOLDS_HEIGHT,
+    RevealCommitteeMember, RevealedBlindedTransaction, Transaction, TxOutput,
+    UNIQUE_OWNER_REVEAL_COMMITTEE_HEIGHT, UtxoLineageRoot, reveal_committee_slot_count,
     reveal_committee_slot_count_for_height,
 };
 
@@ -60,12 +62,55 @@ fn apply_historical_ticket_block(
             ActiveBlindedTransaction {
                 transaction: transaction.clone(),
                 locked_outputs: Vec::new(),
+                locked_lineage_root: None,
                 included_height: block.height,
                 included_by: block.miner.clone(),
             },
         );
     }
     Ok(())
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub(super) struct LineageCommitteeCandidate {
+    pub(super) root: UtxoLineageRoot,
+    pub(super) value: Amount,
+    pub(super) weight: u64,
+    pub(super) owner: String,
+}
+
+pub(super) fn lineage_committee_weight(value: Amount) -> u64 {
+    u64::BITS as u64 - value.saturating_add(1).leading_zeros() as u64 - 1
+}
+
+pub(super) fn select_weighted_lineage_index(
+    parent: &Block,
+    target_height: u64,
+    slot: u8,
+    candidates: &[LineageCommitteeCandidate],
+) -> Option<usize> {
+    let total_weight = candidates.iter().try_fold(0_u128, |total, candidate| {
+        total.checked_add(u128::from(candidate.weight))
+    })?;
+    if total_weight == 0 {
+        return None;
+    }
+    let seed = format!(
+        "iuna-reveal-lineage-draw-v1:{target_height}:{}:{}:{slot}",
+        parent.hash, parent.vdf_output
+    );
+    let digest = Sha256::digest(seed.as_bytes());
+    let mut bytes = [0_u8; 16];
+    bytes.copy_from_slice(&digest[..16]);
+    let draw = u128::from_be_bytes(bytes) % total_weight;
+    let mut cumulative = 0_u128;
+    for (index, candidate) in candidates.iter().enumerate() {
+        cumulative = cumulative.checked_add(u128::from(candidate.weight))?;
+        if draw < cumulative {
+            return Some(index);
+        }
+    }
+    None
 }
 
 impl Ledger {
@@ -192,6 +237,9 @@ impl Ledger {
 
     pub fn reveal_committee_for_height(&self, height: u64) -> Vec<RevealCommitteeMember> {
         let ranked = ranked_tickets_for_height(self.tip(), height, &self.tickets);
+        if height >= REVEAL_BUNDLE_SIGNATURE_THRESHOLDS_HEIGHT {
+            return self.lineage_reveal_committee_for_height(height, ranked);
+        }
         let selected = if height < UNIQUE_OWNER_REVEAL_COMMITTEE_HEIGHT {
             let mut selected = Vec::new();
             if !ranked.is_empty() {
@@ -238,6 +286,124 @@ impl Ledger {
                 })
             })
             .collect()
+    }
+
+    fn lineage_reveal_committee_for_height(
+        &self,
+        height: u64,
+        ranked: Vec<BurnTicket>,
+    ) -> Vec<RevealCommitteeMember> {
+        let Some(finalizer) = ranked.first() else {
+            return Vec::new();
+        };
+        let mut committee = vec![RevealCommitteeMember {
+            slot: 0,
+            rank: 0,
+            ticket_id: finalizer.id.clone(),
+            owner: finalizer.owner.clone(),
+            amount: finalizer.amount,
+        }];
+        let mut skipped_owners = BTreeSet::from([finalizer.owner.clone()]);
+        let mut remaining = self
+            .eligible_lineage_candidates(finalizer.owner.as_str())
+            .into_iter()
+            .filter_map(|candidate| {
+                let owner =
+                    self.representative_owner_for_lineage_root(&candidate.root, &skipped_owners)?;
+                Some(LineageCommitteeCandidate {
+                    root: candidate.root,
+                    value: candidate.value,
+                    weight: candidate.weight,
+                    owner,
+                })
+            })
+            .collect::<Vec<_>>();
+
+        for slot in 1..super::REVEAL_COMMITTEE_SIZE {
+            let Some(index) =
+                select_weighted_lineage_index(self.tip(), height, slot as u8, &remaining)
+            else {
+                break;
+            };
+            let selected = remaining.remove(index);
+            skipped_owners.insert(selected.owner.clone());
+            committee.push(RevealCommitteeMember {
+                slot: slot as u8,
+                rank: slot as u32,
+                ticket_id: selected.root.outpoint.id(),
+                owner: selected.owner,
+                amount: selected.value,
+            });
+            remaining.retain(|candidate| {
+                candidate.root != selected.root
+                    && self
+                        .representative_owner_for_lineage_root(&candidate.root, &skipped_owners)
+                        .is_some()
+            });
+            for candidate in &mut remaining {
+                candidate.owner = self
+                    .representative_owner_for_lineage_root(&candidate.root, &skipped_owners)
+                    .expect("retained lineage candidate has representative owner");
+            }
+        }
+
+        committee
+    }
+
+    fn eligible_lineage_candidates(&self, finalizer: &str) -> Vec<LineageCommitteeCandidate> {
+        let parent_height = self.tip().height;
+        self.lineage_values
+            .iter()
+            .filter(|(root, value)| {
+                **value > 0
+                    && root
+                        .height
+                        .saturating_add(super::REVEAL_LINEAGE_MATURITY_HEIGHTS)
+                        <= parent_height
+                    && !self.lineage_root_has_owner(root, finalizer)
+            })
+            .filter_map(|(root, value)| {
+                let weight = lineage_committee_weight(*value);
+                (weight > 0).then(|| LineageCommitteeCandidate {
+                    root: root.clone(),
+                    value: *value,
+                    weight,
+                    owner: String::new(),
+                })
+            })
+            .collect()
+    }
+
+    fn lineage_root_has_owner(&self, root: &UtxoLineageRoot, owner: &str) -> bool {
+        self.lineage_owners
+            .get(root)
+            .and_then(|owners| owners.get(owner))
+            .is_some_and(|outputs| !outputs.is_empty())
+    }
+
+    fn representative_owner_for_lineage_root(
+        &self,
+        root: &UtxoLineageRoot,
+        skipped_owners: &BTreeSet<String>,
+    ) -> Option<String> {
+        self.lineage_owners.get(root).and_then(|owners| {
+            owners
+                .iter()
+                .filter(|(owner, outputs)| !skipped_owners.contains(*owner) && !outputs.is_empty())
+                .filter_map(|(owner, outputs)| {
+                    let (outpoint, amount) = outputs.iter().max_by(|left, right| {
+                        left.1.cmp(right.1).then_with(|| right.0.cmp(left.0))
+                    })?;
+                    Some((owner.clone(), *amount, outpoint.clone()))
+                })
+                .max_by(|left, right| {
+                    left.1
+                        .cmp(&right.1)
+                        .then_with(|| right.2.cmp(&left.2))
+                        .then_with(|| right.0.cmp(&left.0))
+                })
+                .map(|(owner, _, _)| owner)
+        })
     }
 
     pub fn genesis_hash(&self) -> &str {

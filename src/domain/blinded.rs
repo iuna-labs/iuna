@@ -14,7 +14,7 @@ use super::{
     Amount, BLINDED_COMMITTER_FEE_BPS, BLINDED_FEE_BPS_DENOMINATOR, BLINDED_KEY_BYTES,
     BLINDED_NONCE_BYTES, BLINDED_REVEAL_BUNDLE_SIGNER_FEE_BPS, BlindedReveal, BlindedTransaction,
     OutPoint, PUBLIC_KEY_BYTES, RevealBundleSignature, SIGNATURE_BYTES, Transaction, TxInput,
-    TxOutput, blinded_reveal_finalizer_fee, decode_hex, decode_hex_array,
+    TxOutput, UtxoLineageRoot, blinded_reveal_finalizer_fee, decode_hex, decode_hex_array,
     ensure_outputs_do_not_overflow, ensure_single_input_owner_for_inputs, hex_hash,
 };
 
@@ -22,6 +22,7 @@ use super::{
 pub(super) struct ActiveBlindedTransaction {
     pub(super) transaction: BlindedTransaction,
     pub(super) locked_outputs: Vec<TxOutput>,
+    pub(super) locked_lineage_root: Option<UtxoLineageRoot>,
     pub(super) included_height: u64,
     pub(super) included_by: String,
 }

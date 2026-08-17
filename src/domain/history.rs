@@ -49,6 +49,7 @@ pub fn revealed_blinded_transactions(
                 ActiveBlindedTransaction {
                     transaction: transaction.clone(),
                     locked_outputs: Vec::new(),
+                    locked_lineage_root: None,
                     included_height: block.height,
                     included_by: block.miner.clone(),
                 },

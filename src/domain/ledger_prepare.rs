@@ -65,7 +65,7 @@ impl Ledger {
         let tip = self.tip();
         let prev_hash = tip.hash.clone();
         let timestamp_ms = timestamp_ms.max(ticket_block_min_timestamp(tip, finalizer_rank)?);
-        let bundle_hashes = reveal_bundle_section.reveal_bundle_hashes(height, &prev_hash);
+        let bundle_hashes = reveal_bundle_section.reveal_bundle_hashes(height, &prev_hash, miner);
         let vdf_seed = vdf_seed_for_child(&prev_hash, height, &bundle_hashes);
         Ok(PreparedBlock {
             height,
@@ -139,7 +139,7 @@ impl Ledger {
         let tip = self.tip();
         let prev_hash = tip.hash.clone();
         let timestamp_ms = timestamp_ms.max(tip.timestamp_ms + 1);
-        let bundle_hashes = reveal_bundle_section.reveal_bundle_hashes(height, &prev_hash);
+        let bundle_hashes = reveal_bundle_section.reveal_bundle_hashes(height, &prev_hash, miner);
         let vdf_seed =
             recovery_vdf_seed_for_child(&prev_hash, height, timestamp_ms, &bundle_hashes);
         Ok(PreparedBlock {

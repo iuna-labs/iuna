@@ -3,11 +3,12 @@ use std::collections::BTreeSet;
 use anyhow::{Context, Result, bail};
 
 use super::blinded::{
-    ActiveBlindedTransaction, credit_blinded_fee_outputs, credit_expired_blinded_outputs,
+    ActiveBlindedTransaction, blinded_expiry_change_outpoint, blinded_locked_output_total,
+    credit_blinded_fee_outputs, credit_expired_blinded_outputs,
 };
 use super::ledger_ops::{
-    apply_transaction, block_reward, credit_reward_output, ensure_block_has_burn,
-    ensure_valid_recovery_block, spend_blinded_inputs, validate_block_blinded_items,
+    block_reward, credit_reward_output, ensure_block_has_burn, ensure_outputs_do_not_overflow,
+    ensure_single_input_owner, ensure_valid_recovery_block, validate_block_blinded_items,
     validate_block_fee_policy, verify_leader_proof,
 };
 use super::mine_policy::ensure_mine_anchor_limit;
@@ -20,7 +21,8 @@ use super::{
     Amount, BLOCK_ITEM_FEES_REQUIRED_HEIGHT, BLOCK_MEDIAN_TIME_PAST_WINDOW, Block, FinalizerMode,
     Ledger, MAX_BLOCK_TIMESTAMP_FUTURE_DRIFT_MS, MaskedBlindedReveal,
     REVEAL_FEE_MASK_ATTRIBUTION_HEIGHT, RevealBundleSection, RevealBundleSignature, Transaction,
-    blinded_reveal_finalizer_fee, unix_now_ms, verify_vdf,
+    blinded_reveal_finalizer_fee, insert_output_with_lineage, output_lineage_root_for_transaction,
+    spend_blinded_inputs_with_lineage, spend_inputs_with_lineage, unix_now_ms, verify_vdf,
 };
 
 impl Ledger {
@@ -76,6 +78,9 @@ impl Ledger {
 
         let reveal_bundle_slot_count = self.reveal_committee_for_height(block.height).len();
         let mut utxos = self.utxos.clone();
+        let mut utxo_lineage = self.utxo_lineage.clone();
+        let mut lineage_values = self.lineage_values.clone();
+        let mut lineage_owners = self.lineage_owners.clone();
         let mut signatures = BTreeSet::new();
         let mut revealed_transactions = Vec::new();
         let mut aggregated_reveal_finalizer_fees = 0_u64;
@@ -84,7 +89,14 @@ impl Ledger {
                 bail!("duplicate transaction in block");
             }
             self.validate_transaction_terms(tx)?;
-            apply_transaction(tx, &mut utxos)?;
+            apply_transaction_with_lineage(
+                tx,
+                block.height,
+                &mut utxos,
+                &mut utxo_lineage,
+                &mut lineage_values,
+                &mut lineage_owners,
+            )?;
         }
         let mut revealed_commitments = BTreeSet::new();
         for masked in &block.reveal_bundle_section.reveals {
@@ -104,7 +116,14 @@ impl Ledger {
                     BLOCK_ITEM_FEES_REQUIRED_HEIGHT
                 );
             }
-            self.apply_revealed_blinded_transaction(&active, &tx, &mut utxos)?;
+            apply_revealed_blinded_transaction_with_lineage(
+                &active,
+                &tx,
+                &mut utxos,
+                &mut utxo_lineage,
+                &mut lineage_values,
+                &mut lineage_owners,
+            )?;
             let reveal_bundle_signatures = reveal_fee_signatures_for_height(
                 block.height,
                 &block.reveal_bundle_section,
@@ -137,6 +156,23 @@ impl Ledger {
                 && block.height >= active.transaction.expires_at_height
             {
                 credit_expired_blinded_outputs(&mut utxos, active)?;
+                if let Some((outpoint, output)) = utxos
+                    .get_key_value(&blinded_expiry_change_outpoint(commitment))
+                    .map(|(outpoint, output)| (outpoint.clone(), output.clone()))
+                {
+                    if let Some(root) = active.locked_lineage_root.clone() {
+                        utxos.remove(&outpoint);
+                        insert_output_with_lineage(
+                            outpoint,
+                            output,
+                            Some(root),
+                            &mut utxos,
+                            &mut utxo_lineage,
+                            &mut lineage_values,
+                            &mut lineage_owners,
+                        )?;
+                    }
+                }
             }
         }
         let expected_reward = block_reward(&block.transactions, aggregated_reveal_finalizer_fees)?;
@@ -160,12 +196,19 @@ impl Ledger {
             .collect::<BTreeSet<_>>();
         let mut new_active_blinded = Vec::new();
         for transaction in &block.blinded_transactions {
-            let locked_outputs = spend_blinded_inputs(transaction, &mut utxos)?;
+            let (locked_outputs, locked_lineage_root) = spend_blinded_inputs_with_lineage(
+                transaction,
+                &mut utxos,
+                &mut utxo_lineage,
+                &mut lineage_values,
+                &mut lineage_owners,
+            )?;
             new_active_blinded.push((
                 transaction.commitment.clone(),
                 ActiveBlindedTransaction {
                     transaction: transaction.clone(),
                     locked_outputs,
+                    locked_lineage_root,
                     included_height: block.height,
                     included_by: block.miner.clone(),
                 },
@@ -181,6 +224,9 @@ impl Ledger {
         )?);
         credit_reward_output(&mut utxos, &block)?;
         self.utxos = utxos;
+        self.utxo_lineage = utxo_lineage;
+        self.lineage_values = lineage_values;
+        self.lineage_owners = lineage_owners;
         self.tickets = tickets;
         self.chain.push(block);
         let new_height = self.height();
@@ -410,7 +456,12 @@ pub(super) fn reveal_fee_bundle_count_for_height(
     section: &RevealBundleSection,
     masked: &MaskedBlindedReveal,
 ) -> usize {
-    reveal_fee_signatures_for_height(height, section, masked).len()
+    let explicit = reveal_fee_signatures_for_height(height, section, masked).len();
+    if height >= super::REVEAL_BUNDLE_SIGNATURE_THRESHOLDS_HEIGHT {
+        explicit.saturating_add(1)
+    } else {
+        explicit
+    }
 }
 
 pub(super) fn reveal_fee_signatures_for_height(
@@ -430,4 +481,123 @@ pub(super) fn reveal_fee_signatures_for_height(
         })
         .cloned()
         .collect()
+}
+
+fn apply_transaction_with_lineage(
+    transaction: &Transaction,
+    block_height: u64,
+    utxos: &mut std::collections::BTreeMap<super::OutPoint, super::TxOutput>,
+    utxo_lineage: &mut std::collections::BTreeMap<super::OutPoint, super::UtxoLineageRoot>,
+    lineage_values: &mut std::collections::BTreeMap<super::UtxoLineageRoot, Amount>,
+    lineage_owners: &mut super::LineageOwnerValues,
+) -> Result<()> {
+    transaction.verify_signature()?;
+    if matches!(transaction, Transaction::Mine { .. }) {
+        let output = transaction.outputs().remove(0);
+        ensure_outputs_do_not_overflow(utxos, std::slice::from_ref(&output))?;
+        insert_output_with_lineage(
+            super::OutPoint {
+                txid: transaction.signature().to_string(),
+                index: 0,
+            },
+            output,
+            output_lineage_root_for_transaction(transaction, block_height, None),
+            utxos,
+            utxo_lineage,
+            lineage_values,
+            lineage_owners,
+        )?;
+        return Ok(());
+    }
+
+    ensure_single_input_owner(transaction)?;
+    let (input_total, inherited_root) = spend_inputs_with_lineage(
+        transaction,
+        utxos,
+        utxo_lineage,
+        lineage_values,
+        lineage_owners,
+    )?;
+    let outputs = transaction.outputs();
+    let output_total = outputs.iter().try_fold(0_u64, |total, output| {
+        total
+            .checked_add(output.amount)
+            .context("transaction outputs overflow")
+    })?;
+    let required = output_total
+        .checked_add(transaction.fee())
+        .context("transaction outputs plus fee overflow")?
+        .checked_add(match transaction {
+            Transaction::Burn { amount, .. } => *amount,
+            Transaction::Transfer { .. } | Transaction::Mine { .. } => 0,
+        })
+        .context("transaction outputs plus burn overflow")?;
+    if input_total != required {
+        bail!("transaction inputs do not balance outputs, burn, and fee");
+    }
+    ensure_outputs_do_not_overflow(utxos, &outputs)?;
+    for (index, output) in outputs.into_iter().enumerate() {
+        insert_output_with_lineage(
+            super::OutPoint {
+                txid: transaction.signature().to_string(),
+                index: index as u32,
+            },
+            output,
+            inherited_root.clone(),
+            utxos,
+            utxo_lineage,
+            lineage_values,
+            lineage_owners,
+        )?;
+    }
+    Ok(())
+}
+
+fn apply_revealed_blinded_transaction_with_lineage(
+    active: &ActiveBlindedTransaction,
+    transaction: &Transaction,
+    utxos: &mut std::collections::BTreeMap<super::OutPoint, super::TxOutput>,
+    utxo_lineage: &mut std::collections::BTreeMap<super::OutPoint, super::UtxoLineageRoot>,
+    lineage_values: &mut std::collections::BTreeMap<super::UtxoLineageRoot, Amount>,
+    lineage_owners: &mut super::LineageOwnerValues,
+) -> Result<()> {
+    if matches!(transaction, Transaction::Mine { .. }) {
+        bail!("mine actions are public and cannot be blinded");
+    }
+    transaction.verify_signature()?;
+    ensure_single_input_owner(transaction)?;
+    let input_total = blinded_locked_output_total(active)?;
+    let outputs = transaction.outputs();
+    let output_total = outputs.iter().try_fold(0_u64, |total, output| {
+        total
+            .checked_add(output.amount)
+            .context("transaction outputs overflow")
+    })?;
+    let required = output_total
+        .checked_add(transaction.fee())
+        .context("transaction outputs plus fee overflow")?
+        .checked_add(match transaction {
+            Transaction::Burn { amount, .. } => *amount,
+            Transaction::Transfer { .. } | Transaction::Mine { .. } => 0,
+        })
+        .context("transaction outputs plus burn overflow")?;
+    if input_total != required {
+        bail!("blinded transaction inputs do not balance outputs, burn, and fee");
+    }
+    ensure_outputs_do_not_overflow(utxos, &outputs)?;
+    for (index, output) in outputs.into_iter().enumerate() {
+        insert_output_with_lineage(
+            super::OutPoint {
+                txid: transaction.signature().to_string(),
+                index: index as u32,
+            },
+            output,
+            active.locked_lineage_root.clone(),
+            utxos,
+            utxo_lineage,
+            lineage_values,
+            lineage_owners,
+        )?;
+    }
+    Ok(())
 }

@@ -49,6 +49,9 @@ impl Ledger {
             chain: vec![genesis],
             genesis_allocations: genesis_allocations.clone(),
             utxos,
+            utxo_lineage: BTreeMap::new(),
+            lineage_values: BTreeMap::new(),
+            lineage_owners: BTreeMap::new(),
             tickets,
             pending: Vec::new(),
             orphans: Vec::new(),
@@ -78,7 +81,7 @@ impl Ledger {
         Self::from_snapshot_with_vdf_policy(snapshot, true, now_ms)
     }
 
-    fn from_snapshot_with_vdf_policy(
+    pub(crate) fn from_snapshot_with_vdf_policy(
         snapshot: ChainSnapshot,
         verify_vdf: bool,
         now_ms: u64,
@@ -108,6 +111,9 @@ impl Ledger {
             chain: vec![genesis],
             genesis_allocations,
             utxos,
+            utxo_lineage: BTreeMap::new(),
+            lineage_values: BTreeMap::new(),
+            lineage_owners: BTreeMap::new(),
             tickets: Vec::new(),
             pending: Vec::new(),
             orphans: Vec::new(),
@@ -151,7 +157,7 @@ impl Ledger {
         self.extend_from_snapshot_with_vdf_policy(snapshot, true, now_ms)
     }
 
-    fn extend_from_snapshot_with_vdf_policy(
+    pub(crate) fn extend_from_snapshot_with_vdf_policy(
         &mut self,
         snapshot: ChainSnapshot,
         verify_vdf: bool,

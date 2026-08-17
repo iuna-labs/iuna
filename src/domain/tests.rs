@@ -1,4 +1,7 @@
 use super::*;
+use crate::domain::ledger_queries::{
+    LineageCommitteeCandidate, lineage_committee_weight, select_weighted_lineage_index,
+};
 
 #[test]
 fn target_block_time_is_five_minutes() {
@@ -17,6 +20,39 @@ fn named_test_outpoint(name: &str) -> OutPoint {
         txid: hex_hash(format!("test-utxo:{name}")),
         index: 0,
     }
+}
+
+fn test_lineage_root(name: &str, height: u64) -> UtxoLineageRoot {
+    UtxoLineageRoot {
+        outpoint: named_test_outpoint(name),
+        height,
+    }
+}
+
+fn insert_lineage_utxo(
+    ledger: &mut Ledger,
+    outpoint: OutPoint,
+    wallet: &Wallet,
+    amount: Amount,
+    root: UtxoLineageRoot,
+) {
+    ledger.utxos.insert(
+        outpoint.clone(),
+        TxOutput {
+            address: wallet.address().to_string(),
+            amount,
+        },
+    );
+    ledger.utxo_lineage.insert(outpoint.clone(), root.clone());
+    let value = ledger.lineage_values.entry(root.clone()).or_insert(0);
+    *value = value.checked_add(amount).unwrap();
+    ledger
+        .lineage_owners
+        .entry(root)
+        .or_default()
+        .entry(wallet.address().to_string())
+        .or_default()
+        .insert(outpoint, amount);
 }
 
 fn ledger_with_wallet_utxos(wallet: &Wallet, amounts: &[Amount]) -> Ledger {
@@ -283,7 +319,8 @@ fn prepare_active_blinded_burn_for_reveal_thresholds_at_next_height(
     let bob = Wallet::from_seed(seeds[1]);
     let carol = Wallet::from_seed(seeds[2]);
     let victim = Wallet::from_seed(seeds[3]);
-    let finalizers = vec![attacker.clone(), bob, carol];
+    let finalizers = vec![attacker.clone(), bob.clone(), carol.clone()];
+    let wallets = vec![attacker.clone(), bob, carol, victim.clone()];
     let mut ledger = ledger_with_finalizers(
         &finalizers,
         &[(&attacker, 100 * MICRO_IUNA), (&victim, 20 * MICRO_IUNA)],
@@ -305,9 +342,28 @@ fn prepare_active_blinded_burn_for_reveal_thresholds_at_next_height(
     ledger
         .submit_blinded_reveal(blinded.reveal.clone())
         .unwrap();
+    if next_height >= REVEAL_BUNDLE_SIGNATURE_THRESHOLDS_HEIGHT {
+        let mature_root_height = next_height.saturating_sub(REVEAL_LINEAGE_MATURITY_HEIGHTS + 1);
+        for (index, wallet) in finalizers.iter().enumerate().skip(1) {
+            insert_lineage_utxo(
+                &mut ledger,
+                named_test_outpoint(&format!("threshold-lineage-{index}")),
+                wallet,
+                MICRO_IUNA,
+                test_lineage_root(&format!("threshold-root-{index}"), mature_root_height),
+            );
+        }
+        insert_lineage_utxo(
+            &mut ledger,
+            named_test_outpoint("threshold-lineage-victim"),
+            &victim,
+            MICRO_IUNA,
+            test_lineage_root("threshold-root-victim", mature_root_height),
+        );
+    }
     assert_eq!(ledger.height() + 1, next_height);
     assert_eq!(ledger.reveal_committee_for_next_block().len(), 3);
-    (ledger, finalizers, blinded)
+    (ledger, wallets, blinded)
 }
 
 fn install_finalizer_tickets_for_height(ledger: &mut Ledger, finalizers: &[Wallet], height: u64) {
@@ -571,6 +627,7 @@ fn blinded_fee_split_burns_rounding_dust() {
             payload_hash: "04".repeat(32),
         },
         locked_outputs: Vec::new(),
+        locked_lineage_root: None,
         included_height: 1,
         included_by: committer.address().to_string(),
     };
@@ -614,6 +671,7 @@ fn blinded_fee_split_pays_no_reveal_finalizer_without_signed_reveal_lists() {
             payload_hash: "04".repeat(32),
         },
         locked_outputs: Vec::new(),
+        locked_lineage_root: None,
         included_height: 1,
         included_by: committer.address().to_string(),
     };
@@ -665,6 +723,7 @@ fn blinded_fee_split_pays_committer_executor_and_reveal_bundle_signers() {
             payload_hash: "04".repeat(32),
         },
         locked_outputs: Vec::new(),
+        locked_lineage_root: None,
         included_height: 1,
         included_by: committer.address().to_string(),
     };
@@ -1930,14 +1989,14 @@ fn rank0_finalizer_needs_all_reveal_bundle_signatures_when_blinded_is_active() {
 
     let mut missing_one = ledger.clone();
     let error =
-        try_mine_rank_with_reveal_bundles(&mut missing_one, &rank0, 1, 2, bundles[..2].to_vec())
+        try_mine_rank_with_reveal_bundles(&mut missing_one, &rank0, 1, 2, bundles[..1].to_vec())
             .unwrap_err();
-    assert!(format!("{error:#}").contains("got 2, need 3"));
+    assert!(format!("{error:#}").contains("got 0, need 2"));
 
     let mut complete = ledger;
     let block = try_mine_rank_with_reveal_bundles(&mut complete, &rank0, 1, 2, bundles).unwrap();
     assert_eq!(block.finalizer_rank, 0);
-    assert_eq!(block.included_reveal_bundle_count(), 3);
+    assert_eq!(block.included_reveal_bundle_count(), 2);
     assert_eq!(block.all_blinded_reveals().len(), 1);
 }
 
@@ -1959,10 +2018,10 @@ fn rank1_finalizer_needs_two_reveal_bundle_signatures_when_blinded_is_active() {
         &rank1,
         1,
         VDF_TARGET_BLOCK_MS * 2,
-        bundles[..1].to_vec(),
+        Vec::new(),
     )
     .unwrap_err();
-    assert!(format!("{error:#}").contains("got 1, need 2"));
+    assert!(format!("{error:#}").contains("got 0, need 1"));
 
     let mut enough = ledger;
     let block = try_mine_rank_with_reveal_bundles(
@@ -1970,15 +2029,15 @@ fn rank1_finalizer_needs_two_reveal_bundle_signatures_when_blinded_is_active() {
         &rank1,
         1,
         VDF_TARGET_BLOCK_MS * 2,
-        bundles[..2].to_vec(),
+        bundles[1..2].to_vec(),
     )
     .unwrap();
     assert_eq!(block.finalizer_rank, 1);
-    assert_eq!(block.included_reveal_bundle_count(), 2);
+    assert_eq!(block.included_reveal_bundle_count(), 1);
 }
 
 #[test]
-fn rank2_finalizer_can_publish_one_reveal_bundle_signature_when_blinded_is_active() {
+fn rank2_finalizer_can_publish_without_explicit_reveal_bundle_signature_when_blinded_is_active() {
     let (ledger, finalizers, _) = prepare_active_blinded_burn_for_reveal_thresholds([
         "reveal-threshold-r2-attacker",
         "reveal-threshold-r2-bob",
@@ -1995,11 +2054,11 @@ fn rank2_finalizer_can_publish_one_reveal_bundle_signature_when_blinded_is_activ
         &rank2,
         1,
         VDF_TARGET_BLOCK_MS * 4,
-        bundles[..1].to_vec(),
+        Vec::new(),
     )
     .unwrap();
     assert_eq!(block.finalizer_rank, 2);
-    assert_eq!(block.included_reveal_bundle_count(), 1);
+    assert_eq!(block.included_reveal_bundle_count(), 0);
 }
 
 #[test]
@@ -2015,7 +2074,119 @@ fn active_blinded_envelope_rejects_own_burn_only_block_without_reveal_list_thres
     let error =
         mine_own_burn_only_without_reveal_bundles(&mut ledger, &rank1, 1, VDF_TARGET_BLOCK_MS * 2)
             .unwrap_err();
-    assert!(format!("{error:#}").contains("got 0, need 2"));
+    assert!(format!("{error:#}").contains("got 0, need 1"));
+}
+
+#[test]
+fn explicit_slot_zero_reveal_signature_is_rejected_from_height_1500() {
+    let (mut ledger, finalizers, _) = prepare_active_blinded_burn_for_reveal_thresholds([
+        "reveal-slot0-reject-attacker",
+        "reveal-slot0-reject-bob",
+        "reveal-slot0-reject-carol",
+        "reveal-slot0-reject-victim",
+    ]);
+    let rank0 = next_rank_wallet(&ledger, &finalizers, 0).clone();
+    let bundles = reveal_bundles_for_next_block(&ledger, &finalizers);
+    let burn = ledger.build_burn(&rank0, 1, 0).unwrap();
+    ledger.submit_transaction(burn).unwrap();
+    let prepared = ledger
+        .prepare_next_block_with_reveal_bundles(rank0.address(), 1, bundles.clone())
+        .unwrap();
+    let mut block = prepared.finish(&rank0, "preverified-vdf".to_string());
+    block.reveal_bundle_section.signatures.insert(
+        0,
+        RevealBundleSignature {
+            slot: bundles[0].slot,
+            member: bundles[0].member.clone(),
+            signature: bundles[0].signature.clone(),
+        },
+    );
+    block.reveal_bundle_section.signatures.pop();
+    let error = ledger
+        .validate_reveal_bundle_section_for_block(
+            block.height,
+            &block.prev_hash,
+            block.finalizer_mode,
+            block.finalizer_rank,
+            &block.reveal_bundle_section,
+        )
+        .unwrap_err();
+
+    assert!(
+        format!("{error:#}").contains("finalizer reveal attestation must be implicit"),
+        "{error:#}"
+    );
+}
+
+#[test]
+fn finalizer_reveal_attestation_changes_vdf_seed_without_explicit_signature() {
+    let (mut ledger, finalizers, _) = prepare_active_blinded_burn_for_reveal_thresholds([
+        "reveal-synthetic-seed-attacker",
+        "reveal-synthetic-seed-bob",
+        "reveal-synthetic-seed-carol",
+        "reveal-synthetic-seed-victim",
+    ]);
+    let rank0 = next_rank_wallet(&ledger, &finalizers, 0).clone();
+    let bundles = reveal_bundles_for_next_block(&ledger, &finalizers);
+    let burn = ledger.build_burn(&rank0, 1, 0).unwrap();
+    ledger.submit_transaction(burn).unwrap();
+    let prepared = ledger
+        .prepare_next_block_with_reveal_bundles(rank0.address(), 1, bundles)
+        .unwrap();
+    let block = prepared.finish(&rank0, "preverified-vdf".to_string());
+    let mut other_finalizer = block.clone();
+    other_finalizer.miner = Wallet::from_seed("reveal-synthetic-other")
+        .address()
+        .to_string();
+
+    assert!(
+        block
+            .reveal_bundle_section
+            .signatures
+            .iter()
+            .all(|signature| signature.slot != 0)
+    );
+    assert_ne!(
+        block.reveal_bundle_hashes()[0],
+        default_reveal_bundle_hash(0)
+    );
+    assert_ne!(
+        block.reveal_bundle_hashes()[0],
+        other_finalizer.reveal_bundle_hashes()[0]
+    );
+    assert_ne!(block.vdf_seed(), other_finalizer.vdf_seed());
+}
+
+#[test]
+fn reveal_fee_count_includes_implicit_finalizer_attestation_from_height_1500() {
+    let reveal = BlindedReveal {
+        commitment: "implicit-fee-count".to_string(),
+        key: "key".to_string(),
+    };
+    let section = RevealBundleSection {
+        signatures: Vec::new(),
+        reveals: vec![MaskedBlindedReveal {
+            reveal,
+            bundle_mask: 0,
+        }],
+    };
+
+    assert_eq!(
+        reveal_fee_bundle_count_for_height(
+            REVEAL_BUNDLE_SIGNATURE_THRESHOLDS_HEIGHT,
+            &section,
+            &section.reveals[0],
+        ),
+        1
+    );
+    assert!(
+        reveal_fee_signatures_for_height(
+            REVEAL_BUNDLE_SIGNATURE_THRESHOLDS_HEIGHT,
+            &section,
+            &section.reveals[0],
+        )
+        .is_empty()
+    );
 }
 
 #[test]
@@ -2636,6 +2807,445 @@ fn reveal_committee_uses_unique_ticket_owners_from_height_500() {
     assert_eq!(committee.len(), 2);
     assert_eq!(owners.len(), 2);
     assert_eq!(committee.first().map(|member| member.rank), Some(0));
+}
+
+fn lineage_committee_test_ledger(finalizer: &Wallet) -> Ledger {
+    let mut ledger = Ledger::new(BTreeMap::new(), 1);
+    set_tip_height_for_validation(&mut ledger, REVEAL_BUNDLE_SIGNATURE_THRESHOLDS_HEIGHT - 1);
+    ledger.tickets = vec![BurnTicket {
+        id: "finalizer-ticket".to_string(),
+        owner: finalizer.address().to_string(),
+        amount: MICRO_IUNA,
+        eligible_from_height: REVEAL_BUNDLE_SIGNATURE_THRESHOLDS_HEIGHT,
+        eligible_until_height: REVEAL_BUNDLE_SIGNATURE_THRESHOLDS_HEIGHT,
+    }];
+    ledger
+}
+
+#[test]
+fn reveal_committee_uses_lineage_roots_from_height_1500_without_split_multiplier() {
+    let finalizer = Wallet::from_seed("lineage-split-finalizer");
+    let bob = Wallet::from_seed("lineage-split-bob");
+    let carol = Wallet::from_seed("lineage-split-carol");
+    let dave = Wallet::from_seed("lineage-split-dave");
+    let mut ledger = lineage_committee_test_ledger(&finalizer);
+    let root_a = test_lineage_root("split-root-a", 1_470);
+    let root_b = test_lineage_root("split-root-b", 1_470);
+    insert_lineage_utxo(
+        &mut ledger,
+        named_test_outpoint("split-a-0"),
+        &bob,
+        5 * MICRO_IUNA,
+        root_a.clone(),
+    );
+    insert_lineage_utxo(
+        &mut ledger,
+        named_test_outpoint("split-a-1"),
+        &carol,
+        5 * MICRO_IUNA,
+        root_a.clone(),
+    );
+    insert_lineage_utxo(
+        &mut ledger,
+        named_test_outpoint("split-b-0"),
+        &dave,
+        5 * MICRO_IUNA,
+        root_b,
+    );
+
+    let committee = ledger.reveal_committee_for_height(REVEAL_BUNDLE_SIGNATURE_THRESHOLDS_HEIGHT);
+    let roots = committee
+        .iter()
+        .skip(1)
+        .map(|member| member.ticket_id.as_str())
+        .collect::<BTreeSet<_>>();
+
+    assert_eq!(committee.len(), 3);
+    assert_eq!(roots.len(), committee.len() - 1);
+    assert!(roots.contains(root_a.outpoint.id().as_str()));
+}
+
+#[test]
+fn reveal_committee_excludes_finalizer_owned_lineage_roots_from_extra_slots() {
+    let finalizer = Wallet::from_seed("lineage-finalizer-root-finalizer");
+    let bob = Wallet::from_seed("lineage-finalizer-root-bob");
+    let mut ledger = lineage_committee_test_ledger(&finalizer);
+    let finalizer_root = test_lineage_root("finalizer-root", 1_470);
+    let bob_root = test_lineage_root("bob-root", 1_470);
+    insert_lineage_utxo(
+        &mut ledger,
+        named_test_outpoint("finalizer-root-utxo"),
+        &finalizer,
+        100 * MICRO_IUNA,
+        finalizer_root.clone(),
+    );
+    insert_lineage_utxo(
+        &mut ledger,
+        named_test_outpoint("bob-root-utxo"),
+        &bob,
+        MICRO_IUNA,
+        bob_root.clone(),
+    );
+
+    let committee = ledger.reveal_committee_for_height(REVEAL_BUNDLE_SIGNATURE_THRESHOLDS_HEIGHT);
+
+    assert_eq!(committee.len(), 2);
+    assert_eq!(committee[0].owner, finalizer.address());
+    assert_eq!(committee[1].owner, bob.address());
+    assert_eq!(committee[1].ticket_id, bob_root.outpoint.id());
+    assert_ne!(committee[1].ticket_id, finalizer_root.outpoint.id());
+}
+
+#[test]
+fn reveal_committee_excludes_root_even_when_finalizer_split_to_another_owner() {
+    let finalizer = Wallet::from_seed("lineage-finalizer-split-finalizer");
+    let bob = Wallet::from_seed("lineage-finalizer-split-bob");
+    let carol = Wallet::from_seed("lineage-finalizer-split-carol");
+    let mut ledger = lineage_committee_test_ledger(&finalizer);
+    let finalizer_root = test_lineage_root("finalizer-split-root", 1_470);
+    let carol_root = test_lineage_root("carol-root", 1_470);
+    insert_lineage_utxo(
+        &mut ledger,
+        named_test_outpoint("finalizer-owned-root-piece"),
+        &finalizer,
+        MICRO_IUNA,
+        finalizer_root.clone(),
+    );
+    insert_lineage_utxo(
+        &mut ledger,
+        named_test_outpoint("bob-owned-root-piece"),
+        &bob,
+        100 * MICRO_IUNA,
+        finalizer_root.clone(),
+    );
+    insert_lineage_utxo(
+        &mut ledger,
+        named_test_outpoint("carol-root-utxo"),
+        &carol,
+        MICRO_IUNA,
+        carol_root.clone(),
+    );
+
+    let committee = ledger.reveal_committee_for_height(REVEAL_BUNDLE_SIGNATURE_THRESHOLDS_HEIGHT);
+
+    assert_eq!(committee.len(), 2);
+    assert_eq!(committee[1].ticket_id, carol_root.outpoint.id());
+    assert_ne!(committee[1].ticket_id, finalizer_root.outpoint.id());
+}
+
+#[test]
+fn lineage_merge_inherits_newest_root_and_tie_breaks_by_outpoint() {
+    let alice = Wallet::from_seed("lineage-merge-alice");
+    let old_root = test_lineage_root("merge-old-root", 1_460);
+    let new_root = test_lineage_root("merge-new-root", 1_470);
+    let tie_left = test_lineage_root("merge-tie-left", 1_470);
+    let tie_right = test_lineage_root("merge-tie-right", 1_470);
+
+    assert_eq!(
+        newest_lineage_root(Some(old_root.clone()), Some(new_root.clone())),
+        Some(new_root)
+    );
+    assert_eq!(
+        newest_lineage_root(Some(tie_left.clone()), Some(tie_right.clone())),
+        Some(tie_left.max(tie_right))
+    );
+
+    let mut ledger = Ledger::new(BTreeMap::new(), 1);
+    insert_lineage_utxo(
+        &mut ledger,
+        named_test_outpoint("merge-old-input"),
+        &alice,
+        3,
+        old_root,
+    );
+    insert_lineage_utxo(
+        &mut ledger,
+        named_test_outpoint("merge-new-input"),
+        &alice,
+        4,
+        test_lineage_root("merge-applied-new-root", 1_480),
+    );
+    let transaction = Transaction::Transfer {
+        inputs: vec![
+            TxInput {
+                outpoint: named_test_outpoint("merge-old-input"),
+                owner: alice.address().to_string(),
+                signature: "genesis".to_string(),
+            },
+            TxInput {
+                outpoint: named_test_outpoint("merge-new-input"),
+                owner: alice.address().to_string(),
+                signature: "genesis".to_string(),
+            },
+        ],
+        outputs: vec![TxOutput {
+            address: alice.address().to_string(),
+            amount: 7,
+        }],
+        fee: 0,
+        signature: "lineage-merge-transfer".to_string(),
+    };
+    let (_, inherited) = spend_inputs_with_lineage(
+        &transaction,
+        &mut ledger.utxos,
+        &mut ledger.utxo_lineage,
+        &mut ledger.lineage_values,
+        &mut ledger.lineage_owners,
+    )
+    .unwrap();
+
+    assert_eq!(inherited.unwrap().height, 1_480);
+}
+
+#[test]
+fn lineage_representative_owner_uses_largest_unspent_output_for_root() {
+    let finalizer = Wallet::from_seed("lineage-representative-finalizer");
+    let bob = Wallet::from_seed("lineage-representative-bob");
+    let carol = Wallet::from_seed("lineage-representative-carol");
+    let mut ledger = lineage_committee_test_ledger(&finalizer);
+    let root = test_lineage_root("representative-root", 1_470);
+    insert_lineage_utxo(
+        &mut ledger,
+        named_test_outpoint("representative-small"),
+        &bob,
+        MICRO_IUNA,
+        root.clone(),
+    );
+    insert_lineage_utxo(
+        &mut ledger,
+        named_test_outpoint("representative-large"),
+        &carol,
+        2 * MICRO_IUNA,
+        root,
+    );
+
+    let committee = ledger.reveal_committee_for_height(REVEAL_BUNDLE_SIGNATURE_THRESHOLDS_HEIGHT);
+
+    assert_eq!(committee.len(), 2);
+    assert_eq!(committee[1].owner, carol.address());
+}
+
+#[test]
+fn lineage_committee_reassigns_root_representative_after_owner_is_selected() {
+    let finalizer = Wallet::from_seed("lineage-reassign-finalizer");
+    let bob = Wallet::from_seed("lineage-reassign-bob");
+    let carol = Wallet::from_seed("lineage-reassign-carol");
+    let mut ledger = lineage_committee_test_ledger(&finalizer);
+    let mut roots = [
+        test_lineage_root("reassign-root-a", 1_470),
+        test_lineage_root("reassign-root-b", 1_470),
+    ];
+    roots.sort();
+    let first_index = select_weighted_lineage_index(
+        ledger.tip(),
+        REVEAL_BUNDLE_SIGNATURE_THRESHOLDS_HEIGHT,
+        1,
+        &roots
+            .iter()
+            .cloned()
+            .map(|root| LineageCommitteeCandidate {
+                root,
+                value: 10 * MICRO_IUNA,
+                weight: lineage_committee_weight(10 * MICRO_IUNA),
+                owner: bob.address().to_string(),
+            })
+            .collect::<Vec<_>>(),
+    )
+    .unwrap();
+    let selected_first_root = roots[first_index].clone();
+    let fallback_root = roots[1 - first_index].clone();
+    insert_lineage_utxo(
+        &mut ledger,
+        named_test_outpoint("reassign-selected-first"),
+        &bob,
+        10 * MICRO_IUNA,
+        selected_first_root,
+    );
+    insert_lineage_utxo(
+        &mut ledger,
+        named_test_outpoint("reassign-fallback-bob"),
+        &bob,
+        9 * MICRO_IUNA,
+        fallback_root.clone(),
+    );
+    insert_lineage_utxo(
+        &mut ledger,
+        named_test_outpoint("reassign-fallback-carol"),
+        &carol,
+        MICRO_IUNA,
+        fallback_root.clone(),
+    );
+
+    let committee = ledger.reveal_committee_for_height(REVEAL_BUNDLE_SIGNATURE_THRESHOLDS_HEIGHT);
+
+    assert_eq!(committee.len(), 3);
+    assert_eq!(committee[1].owner, bob.address());
+    assert_eq!(committee[2].owner, carol.address());
+    assert_eq!(committee[2].ticket_id, fallback_root.outpoint.id());
+}
+
+#[test]
+fn reserved_transaction_inputs_update_lineage_indexes() {
+    let alice = Wallet::from_seed("lineage-reserve-alice");
+    let mut ledger = Ledger::new(BTreeMap::new(), 1);
+    let outpoint = named_test_outpoint("lineage-reserve-input");
+    let root = test_lineage_root("lineage-reserve-root", 1);
+    insert_lineage_utxo(
+        &mut ledger,
+        outpoint.clone(),
+        &alice,
+        MICRO_IUNA,
+        root.clone(),
+    );
+    let burn = ledger
+        .build_burn_with_inputs(&alice, MICRO_IUNA, 0, &[outpoint.clone()])
+        .unwrap();
+
+    ledger.reserve_transaction_inputs(&burn).unwrap();
+
+    assert!(!ledger.utxos.contains_key(&outpoint));
+    assert!(!ledger.utxo_lineage.contains_key(&outpoint));
+    assert!(!ledger.lineage_values.contains_key(&root));
+    assert!(!ledger.lineage_owners.contains_key(&root));
+}
+
+#[test]
+fn lineage_cache_roundtrips_through_snapshot_replay() {
+    let alice = Wallet::from_seed("lineage-snapshot-alice");
+    let mut ledger = ledger_with_allocation(&alice, 10 * MICRO_IUNA);
+
+    apply_preverified_burn_block_with_mines(&mut ledger, &alice, 1);
+    let restored =
+        Ledger::from_snapshot_with_vdf_policy(ledger.snapshot(), false, u64::MAX).unwrap();
+
+    assert!(!ledger.utxo_lineage.is_empty());
+    assert_eq!(restored.utxo_lineage, ledger.utxo_lineage);
+    assert_eq!(restored.lineage_values, ledger.lineage_values);
+    assert_eq!(restored.lineage_owners, ledger.lineage_owners);
+}
+
+#[test]
+fn lineage_cache_is_replaced_on_snapshot_reorg() {
+    let alice = Wallet::from_seed("lineage-reorg-alice");
+    let common = ledger_with_allocation(&alice, 20 * MICRO_IUNA);
+    let mut local = common.clone();
+    let mut remote = common;
+
+    apply_preverified_burn_block_with_mines(&mut local, &alice, 1);
+    apply_preverified_burn_block_with_mines(&mut remote, &alice, 2);
+    apply_preverified_burn_block_with_mines(&mut remote, &alice, 1);
+
+    assert!(
+        local
+            .extend_from_snapshot_with_vdf_policy(remote.snapshot(), false, u64::MAX)
+            .unwrap()
+    );
+    assert_eq!(local.utxo_lineage, remote.utxo_lineage);
+    assert_eq!(local.lineage_values, remote.lineage_values);
+    assert_eq!(local.lineage_owners, remote.lineage_owners);
+}
+
+#[test]
+fn transfer_output_inherits_mine_lineage_through_block_apply() {
+    let alice = Wallet::from_seed("lineage-transfer-apply-alice");
+    let bob = Wallet::from_seed("lineage-transfer-apply-bob");
+    let finalizers = [alice.clone()];
+    let mut ledger = ledger_with_finalizers(&finalizers, &[(&bob, 10 * MICRO_IUNA)]);
+    let mine = ledger.build_mine(bob.address()).unwrap();
+    let mine_outpoint = OutPoint {
+        txid: mine.signature().to_string(),
+        index: 0,
+    };
+    ledger.submit_transaction(mine).unwrap();
+    queue_next_leader_burn(&mut ledger, &finalizers);
+    mine_preverified_as_next_leader(&mut ledger, &finalizers, 1);
+
+    let transfer = ledger
+        .build_transfer_with_inputs(
+            &bob,
+            alice.address(),
+            MINE_REWARD,
+            0,
+            &[mine_outpoint.clone()],
+        )
+        .unwrap();
+    let transfer_outpoint = OutPoint {
+        txid: transfer.signature().to_string(),
+        index: 0,
+    };
+    ledger.submit_transaction(transfer).unwrap();
+    queue_next_leader_burn(&mut ledger, &finalizers);
+    mine_preverified_as_next_leader(&mut ledger, &finalizers, 2);
+
+    assert_eq!(
+        ledger.utxo_lineage.get(&transfer_outpoint),
+        Some(&UtxoLineageRoot {
+            outpoint: mine_outpoint,
+            height: 1,
+        })
+    );
+}
+
+#[test]
+fn blinded_reveal_output_inherits_locked_input_lineage_through_block_apply() {
+    let alice = Wallet::from_seed("lineage-blinded-apply-alice");
+    let bob = Wallet::from_seed("lineage-blinded-apply-bob");
+    let carol = Wallet::from_seed("lineage-blinded-apply-carol");
+    let finalizers = [alice.clone(), bob.clone()];
+    let mut ledger = ledger_with_finalizers(&finalizers, &[(&carol, 10 * MICRO_IUNA)]);
+    let mine = ledger.build_mine(carol.address()).unwrap();
+    let mine_outpoint = OutPoint {
+        txid: mine.signature().to_string(),
+        index: 0,
+    };
+    ledger.submit_transaction(mine).unwrap();
+    queue_next_leader_burn(&mut ledger, &finalizers);
+    mine_preverified_as_next_leader(&mut ledger, &finalizers, 1);
+
+    let transfer = ledger
+        .build_transfer_with_inputs(
+            &carol,
+            bob.address(),
+            MINE_REWARD,
+            0,
+            &[mine_outpoint.clone()],
+        )
+        .unwrap();
+    let transfer_outpoint = OutPoint {
+        txid: transfer.signature().to_string(),
+        index: 0,
+    };
+    let blinded = ledger
+        .build_blinded_transaction(&carol, transfer, ledger.height() + 4)
+        .unwrap();
+    ledger
+        .submit_blinded_transaction(blinded.transaction.clone())
+        .unwrap();
+    queue_next_leader_burn(&mut ledger, &finalizers);
+    mine_preverified_as_next_leader(&mut ledger, &finalizers, 2);
+
+    assert_eq!(
+        ledger
+            .active_blinded
+            .get(&blinded.transaction.commitment)
+            .and_then(|active| active.locked_lineage_root.as_ref()),
+        Some(&UtxoLineageRoot {
+            outpoint: mine_outpoint.clone(),
+            height: 1,
+        })
+    );
+
+    ledger.submit_blinded_reveal(blinded.reveal).unwrap();
+    queue_next_leader_burn(&mut ledger, &finalizers);
+    mine_preverified_as_next_leader_with_reveal_bundles(&mut ledger, &finalizers, 3);
+
+    assert_eq!(
+        ledger.utxo_lineage.get(&transfer_outpoint),
+        Some(&UtxoLineageRoot {
+            outpoint: mine_outpoint,
+            height: 1,
+        })
+    );
 }
 
 #[test]

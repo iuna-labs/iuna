@@ -127,7 +127,7 @@ impl Block {
 
     pub fn reveal_bundle_hashes(&self) -> [String; REVEAL_COMMITTEE_SIZE] {
         self.reveal_bundle_section
-            .reveal_bundle_hashes(self.height, &self.prev_hash)
+            .reveal_bundle_hashes(self.height, &self.prev_hash, &self.miner)
     }
 
     pub fn included_reveal_bundle_count(&self) -> usize {

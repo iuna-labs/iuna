@@ -52,7 +52,7 @@ Every normal block must include at least one plaintext burn. A blinded transacti
 
 This mandatory anchor burn is a liveness rule for the ticket pool, not a fairness rule for ticket distribution. It guarantees that normal block production keeps creating future tickets. Fairness against self-serving finalizers comes from blinded third-party burns.
 
-Wallet-created transfers and burns are not gossiped as plaintext. Their blinded envelopes expose and lock UTXO inputs before reveal, so declared fees are backed by spendable coins. Mine actions are public mempool items, because they do not reveal burn or transfer intent and must be possible without owning coins. The local plaintext anchor burn for finalization is separate from the configured automatic blinded burn per block. When automatic burning is enabled, the configured burn amount enters the network as a blinded envelope like other wallet-created burns. When a blinded payload is revealed and executed, `35%` of its fee goes to the finalizer that originally committed the envelope, `35%` goes to the reveal-block finalizer, and `10%` goes to each included signed reveal-list maker. Missing reveal-list shares and rounding dust are burned. The local plaintext anchor burn required for block liveness is part of the block reward like other plaintext block items.
+Wallet-created transfers and burns are not gossiped as plaintext. Their blinded envelopes expose and lock UTXO inputs before reveal, so declared fees are backed by spendable coins. Mine actions are public mempool items, because they do not reveal burn or transfer intent and must be possible without owning coins. The local plaintext anchor burn for finalization is separate from the configured automatic blinded burn per block. When automatic burning is enabled, the configured burn amount enters the network as a blinded envelope like other wallet-created burns. When a blinded payload is revealed and executed, `35%` of its fee goes to the finalizer that originally committed the envelope, up to `35%` goes to the reveal-block finalizer, and `10%` goes to each included explicit signed reveal-list maker. Missing reveal-list shares, missing reveal-finalizer shares, and rounding dust are burned. The local plaintext anchor burn required for block liveness is part of the block reward like other plaintext block items.
 
 ## VDF Timing
 
@@ -140,7 +140,27 @@ The visible inputs are signed for the blinded envelope itself and are not repeat
 
 Reveal is a later step. A `BlindedReveal` carries only the commitment and decryption key. Reveals are not included as loose block items. They are carried in signed reveal bundles.
 
-For each next block height, nodes compute a reveal committee from the burn leader ranking. Slot `0` is assigned to the rank `0` block finalizer, so the selected finalizer can always sign a reveal list for its own block. Before height `500`, the remaining slots are assigned to the two lowest-ranked eligible tickets. Starting at height `500`, the remaining slots are assigned to the next highest-ranked eligible tickets with owners that are not already in the committee, up to three unique owners total. A committee member can sign one bundle for its slot, height, and parent hash. A bundle is at most `10,000` bytes and lists valid pending reveals ordered by visible fee rate. Starting at height `1500`, once a blinded envelope is active, committee members also gossip empty bundles when they know no valid reveal for the next height; the empty signature is an attestation that keeps the reveal layer explicit without forcing a reveal to exist.
+Before height `1500`, nodes compute a reveal committee from the burn leader ranking. Slot `0` is assigned to the rank `0` block finalizer, so the selected finalizer can sign a reveal list for its own block. Before height `500`, the remaining slots are assigned to the two lowest-ranked eligible tickets. Starting at height `500`, the remaining slots are assigned to the next highest-ranked eligible tickets with owners that are not already in the committee, up to three unique owners total.
+
+Starting at height `1500`, each block has one burn-selected finalizer and up to two additional independent reveal committee members. The finalizer remains reveal committee slot `0`, but does not need to include a separate reveal bundle signature: the finalizer already signs the block header, and that block signature commits to the selected reveal-bundle section. The additional reveal committee slots are selected from mature UTXO lineages, not from burn tickets, so block production remains proportional to burn while reveal witnessing is Sybil-resistant.
+
+A UTXO lineage root is the newest mine action output in an output's ancestry. Transfer and change outputs carry that single root tag forward, even before the root is mature, so early transfers do not lose their ancestry. When outputs from multiple roots are merged and spent, descendants inherit the newest root among the spent inputs; ties are broken deterministically by root outpoint. If none of the spent inputs has a mine root, the new output has no reveal-committee lineage weight. A lineage root is eligible for reveal committee selection only when its mine action is at least `20` blocks old at the parent tip.
+
+Nodes cache this root tag on every UTXO and maintain an incremental index from root to total unspent value. Normal block validation updates that cache only for the inputs spent and outputs created by the block. A broad ancestry search is only a rebuild or migration tool, not part of the consensus hot path.
+
+Committee selection is root-first. For each eligible lineage root, validators sum the unspent value currently tagged with that root:
+
+`root_value = sum(unspent_value_micro_iuna_tagged_with_root)`
+
+The root's committee weight is:
+
+`root_weight = floor(log2(1 + root_value))`
+
+Splitting one large root across many addresses does not multiply committee influence, because the root is weighted once and can win at most one additional reveal slot. Merging roots deliberately collapses future descendant lineage to the newest root; lineage is a Sybil-resistance tag, not full coin-provenance accounting.
+
+For a target height, validators derive a deterministic committee seed from the parent hash and height. Slot `0` is assigned to the block finalizer. Slots `1` and `2` are assigned without replacement by weighted deterministic draws over eligible lineage roots using `root_weight`. Lineage roots currently owned by the block finalizer are excluded from these additional draws, and after any other root wins a slot, that root is removed from the next slot draw. After a root is selected, validators choose one representative owner for that root from the unspent outputs tagged with it. The block finalizer's address and any address already selected for an earlier additional reveal slot are also skipped for additional slots. If fewer than two eligible non-finalizer lineages exist, the committee has the finalizer plus one or zero additional members. If no eligible non-finalizer lineage exists, reveal quorum falls back to `1-of-1` through the finalizer's implicit slot `0` attestation.
+
+A committee member can sign one bundle for its slot, height, and parent hash. A bundle is at most `10,000` bytes and lists valid pending reveals ordered by visible fee rate. Starting at height `1500`, once a blinded envelope is active, committee members also gossip empty bundles when they know no valid reveal for the next height; the empty signature is an attestation that keeps the reveal layer explicit without forcing a reveal to exist.
 
 Automatic nodes wait about `30 seconds` after seeing pending reveals for the next height before signing a reveal bundle or starting the reveal-bound VDF. Starting at height `1500`, active blinded envelopes also trigger this wait so empty attestations can be collected. This gives reveal gossip time to settle and avoids locking in an underfilled bundle from the first partial batch a node received.
 
@@ -148,37 +168,37 @@ A block has an envelope section and one compact reveal-bundle section. The envel
 
 The compact reveal-bundle section stores:
 
-- up to three bundle signatures, one per committee slot, in slot order;
+- up to two explicit reveal committee bundle signatures for non-finalizer slots, in slot order;
 - one deduplicated reveal list;
 - a small bitmask per reveal saying which of the included committee bundles contained that reveal.
 
-Validators reconstruct each signed committee bundle from this compact section before checking signatures, bundle size, slot assignment, and fee ordering. This keeps consensus bound to the three independent signed reveal lists without storing the same reveal payload multiple times when several committee members selected it.
+Validators reconstruct each signed committee bundle from this compact section before checking signatures, bundle size, slot assignment, lineage-based slot assignment, and fee ordering. The finalizer's block signature is treated as its committee attestation for slot `0`. Slot `0` does not have a separate reveal bundle payload or reveal-list-maker fee after height `1500`; it attests to the block's deduplicated reveal list as included by the finalizer. This keeps consensus bound to the independent reveal attestations without storing the same reveal payload multiple times when multiple committee members selected it.
 
 A block may contain at most one bundle per slot. If a node sees two different signed bundles for the same height and slot before block assembly, it treats that slot as locally equivocated and does not use either bundle for that round.
 
 Before height `1500`, reveal-list signatures are optional for chain compatibility. Starting at height `1500`, if there are no active blinded envelopes before a block, no reveal-list threshold is required. If active blinded envelopes exist, ticket blocks must carry enough reveal-list signatures for their finalizer rank:
 
-- rank `0` needs all available reveal committee signatures (`3-of-3`, `2-of-2`, or `1-of-1`);
-- rank `1` needs two signatures when possible (`2-of-3`, `2-of-2`, or `1-of-1`);
-- rank `2` and later ticket finalizers need one signature.
+- rank `0` needs all available reveal committee attestations (`3-of-3`, `2-of-2`, or `1-of-1`), where the finalizer's block signature counts as the slot `0` attestation;
+- rank `1` needs two reveal committee attestations when possible (`2-of-3`, `2-of-2`, or `1-of-1`), where the finalizer's block signature counts as the slot `0` attestation;
+- rank `2` and later ticket finalizers may publish without reveal committee signatures, but must include any valid signatures already bound into their VDF seed.
 
-Recovery blocks do not require reveal-list signatures; their job is chain liveness after the ticket path has failed. A valid signed bundle may be empty. Honest committee policy is to sign an empty bundle only when the signer knows no valid reveal for that height, and to include every valid reveal it selects by the canonical fee ordering. The consensus rule checks committee membership, signature validity, ordering, and threshold; it does not depend on a validator's local mempool contents.
+Recovery blocks do not require reveal-list signatures; their job is chain liveness after the ticket path has failed. A valid signed bundle may be empty. Honest committee policy is to sign an empty bundle only when the signer knows no valid reveal for that height, and to include every valid reveal it selects by the canonical fee ordering. The consensus rule checks committee membership, signature validity, lineage assignment, ordering, and threshold; it does not depend on a validator's local mempool contents.
 
-The ticket-block VDF seed is bound to the reveal bundle hashes:
+The ticket-block VDF seed is bound to the reveal attestation hashes:
 
-`seed = hash(parent hash || height || bundle_hash[0] || bundle_hash[1] || bundle_hash[2])`
+`seed = hash(parent hash || height || attestation_hash[0] || attestation_hash[1] || attestation_hash[2])`
 
 Recovery blocks additionally bind the block timestamp into the VDF seed:
 
-`seed = hash(parent hash || height || timestamp_ms || bundle_hash[0] || bundle_hash[1] || bundle_hash[2])`
+`seed = hash(parent hash || height || timestamp_ms || attestation_hash[0] || attestation_hash[1] || attestation_hash[2])`
 
-If a slot has no included bundle, it contributes a fixed default hash for that slot. This means the finalizer must choose the reveal-bundle set before doing the VDF work. A finalizer can still claim that a bundle arrived too late, but it cannot secretly swap or remove a timely bundle after computing the VDF without changing the seed.
+Before height `1500`, each attestation hash is the signed reveal-bundle hash for that slot, or a fixed default hash when the slot has no included bundle. Starting at height `1500`, slot `0` uses a synthetic finalizer attestation hash derived from the parent, height, finalizer address, and the block's canonical deduplicated reveal list. Slot `0` therefore attests to every reveal executed by the block, independent of which explicit bundles also contained it. Slots `1` and `2` use the signed reveal-bundle hash or the fixed default hash when absent. This means the finalizer must choose the reveal-attestation set before doing the VDF work. A finalizer can still claim that a bundle arrived too late, but it cannot secretly swap or remove a timely bundle after computing the VDF without changing the seed.
 
 When a valid bundled reveal executes, nodes decrypt the earlier payload, check the commitment and payload hash, and decode the transfer or burn. The decrypted transaction inputs must match the visible inputs locked by the envelope, and the transaction executes against that locked value. If the reveal bitmask says multiple committee bundles contained the same reveal, the reveal is still executed only once. If the decrypted transaction is a burn, it creates burn tickets at the reveal height, not the earlier envelope-commit height.
 
-Fees are paid without inflating the reveal block reward. The decrypted transaction must pay the same fee declared by the blinded envelope. `35%` goes to the envelope committer. Up to `35%` goes to the reveal-block finalizer, scaled by the included signed reveal lists divided by the available committee slots for that height. With three eligible slots, one included list pays one third of that share; with two eligible slots, one included list pays half; with one eligible slot, one included list pays the full share. `10%` goes to each included signed reveal-list maker. Missing reveal-list shares, the missing reveal-finalizer share, and rounding dust are burned instead of redistributed.
+Fees are paid without inflating the reveal block reward. The decrypted transaction must pay the same fee declared by the blinded envelope. `35%` goes to the envelope committer. Up to `35%` goes to the reveal-block finalizer, scaled by included reveal attestations divided by the available committee slots for that height. Before height `1500`, signed reveal bundles define those attestations. Starting at height `1500`, the denominator is the total available committee size including implicit slot `0` (`3`, `2`, or `1`). The finalizer's implicit slot `0` attestation counts for the scaled reveal-finalizer share for every reveal in the block, so the reveal-block finalizer always receives at least one slot's share when it includes a valid reveal. Slot `0` does not earn the separate reveal-list-maker share. `10%` goes to each included explicit signed reveal-list maker for non-finalizer slots. Missing reveal-list shares, the missing reveal-finalizer share, and rounding dust are burned instead of redistributed.
 
-Starting at height `750`, reveal fee attribution is per reveal mask. A signed reveal-list maker earns the `10%` share for a revealed payload only if that maker's signed bundle actually contained that reveal. The reveal-block finalizer's scaled share is also based on the number of signed bundles that contained that reveal, not merely the number of bundle signatures included somewhere in the block. Before height `750`, all included signed reveal-list makers are treated as participating in every revealed payload in that block.
+Starting at height `750`, reveal fee attribution is per reveal mask. A signed reveal-list maker earns the `10%` share for a revealed payload only if that maker's signed bundle actually contained that reveal. The reveal-block finalizer's scaled share is also based on the number of attestations for that reveal, not merely the number of bundle signatures included somewhere in the block. Before height `1500`, those attestations are signed bundles. Starting at height `1500`, slot `0` is counted as attesting to every reveal in the block through the finalizer's block signature, while slots `1` and `2` count only when their signed bundle contained the reveal. Before height `750`, all included signed reveal-list makers are treated as participating in every revealed payload in that block.
 
 Expiry is exclusive: a blinded envelope with expiry height `H` can be included only in blocks below height `H`, and revealed only while the current chain height is below `H`. The expiry height must be within `20` blocks of the node's current chain height when the envelope is accepted or selected. If an envelope expires unrevealed, its declared fee is burned and any remaining locked value returns as deterministic change to the owner of the first visible input. Expired local envelopes and reveals are dropped from local selection.
 
@@ -210,7 +230,7 @@ When a node builds a block, it selects transactions in this order:
 2. Reserve the local plaintext anchor burn as the first plaintext block item.
 3. For recovery blocks, ensure at least one plaintext anchor burn is from the recovery finalizer.
 4. Fill remaining envelope space with valid fee-paying public mine actions and blinded transaction envelopes ordered by fee rate. Public mine actions are limited to `2` actions per anchor.
-5. Bind the VDF seed to the three reveal-bundle slot hashes, using default hashes for missing slots.
+5. Bind the VDF seed to the three reveal-attestation slot hashes, using default hashes for missing slots. Starting at height `1500`, slot `0` uses the synthetic finalizer attestation hash instead of a separate reveal-bundle hash.
 
 Blocks are bounded by transaction count and serialized byte size. The devnet maximum block size is `100,000` bytes.
 

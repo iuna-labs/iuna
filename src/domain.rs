@@ -12,6 +12,7 @@ mod ledger_apply;
 mod ledger_builders;
 mod ledger_chain;
 mod ledger_consensus;
+mod ledger_lineage;
 mod ledger_mempool;
 mod ledger_ops;
 mod ledger_pending;
@@ -52,6 +53,13 @@ pub use history::revealed_blinded_transactions;
 #[cfg(test)]
 use ledger_apply::{reveal_fee_bundle_count_for_height, reveal_fee_signatures_for_height};
 #[cfg(test)]
+use ledger_lineage::newest_lineage_root;
+use ledger_lineage::{
+    LineageOwnerValues, UtxoLineageRoot, insert_output_with_lineage,
+    output_lineage_root_for_transaction, spend_blinded_inputs_with_lineage,
+    spend_inputs_with_lineage,
+};
+#[cfg(test)]
 use ledger_ops::estimated_block_selection_size_bytes;
 #[cfg(test)]
 use ledger_ops::fee_reward;
@@ -83,7 +91,7 @@ pub use protocol::{
     MAX_REVEAL_BUNDLE_BYTES, MAX_VDF_ROUNDS, MICRO_IUNA, MINE_ACTIONS_PER_ANCHOR_LIMIT,
     MINE_DIFFICULTY_BITS, MINE_FINALIZER_FEE, MINE_REWARD, RECOVERY_BLOCK_DELAY_MS,
     REVEAL_BUNDLE_SIGNATURE_THRESHOLDS_HEIGHT, REVEAL_COMMITTEE_SIZE,
-    REVEAL_FEE_MASK_ATTRIBUTION_HEIGHT, TransactionSubmitOutcome,
+    REVEAL_FEE_MASK_ATTRIBUTION_HEIGHT, REVEAL_LINEAGE_MATURITY_HEIGHTS, TransactionSubmitOutcome,
     UNIQUE_OWNER_REVEAL_COMMITTEE_HEIGHT, VDF_TARGET_BLOCK_MS,
 };
 use protocol::{

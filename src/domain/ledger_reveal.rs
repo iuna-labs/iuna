@@ -73,8 +73,10 @@ impl Ledger {
         &self,
         bundles: Vec<RevealBundle>,
     ) -> RevealBundleSection {
+        let height = self.tip().height + 1;
         let signatures = bundles
             .iter()
+            .filter(|bundle| height < REVEAL_BUNDLE_SIGNATURE_THRESHOLDS_HEIGHT || bundle.slot != 0)
             .map(|bundle| RevealBundleSignature {
                 slot: bundle.slot,
                 member: bundle.member.clone(),
@@ -83,7 +85,12 @@ impl Ledger {
             .collect::<Vec<_>>();
         let mut by_commitment: BTreeMap<String, MaskedBlindedReveal> = BTreeMap::new();
         for bundle in bundles {
-            let slot_mask = reveal_bundle_slot_mask(bundle.slot).unwrap_or(0);
+            let slot_mask =
+                if height >= REVEAL_BUNDLE_SIGNATURE_THRESHOLDS_HEIGHT && bundle.slot == 0 {
+                    0
+                } else {
+                    reveal_bundle_slot_mask(bundle.slot).unwrap_or(0)
+                };
             for reveal in bundle.reveals {
                 by_commitment
                     .entry(reveal.commitment.clone())
@@ -114,7 +121,13 @@ impl Ledger {
         finalizer_rank: u32,
         section: &RevealBundleSection,
     ) -> Result<()> {
-        if section.signatures.len() > REVEAL_COMMITTEE_SIZE {
+        let explicit_signature_limit =
+            if expected_height >= REVEAL_BUNDLE_SIGNATURE_THRESHOLDS_HEIGHT {
+                REVEAL_COMMITTEE_SIZE.saturating_sub(1)
+            } else {
+                REVEAL_COMMITTEE_SIZE
+            };
+        if section.signatures.len() > explicit_signature_limit {
             bail!("block has too many reveal bundle signatures");
         }
         if section
@@ -135,6 +148,9 @@ impl Ledger {
         for signature in &section.signatures {
             if usize::from(signature.slot) >= REVEAL_COMMITTEE_SIZE {
                 bail!("reveal bundle slot is invalid");
+            }
+            if expected_height >= REVEAL_BUNDLE_SIGNATURE_THRESHOLDS_HEIGHT && signature.slot == 0 {
+                bail!("finalizer reveal attestation must be implicit from height 1500");
             }
             if !seen_slots.insert(signature.slot) {
                 bail!("duplicate reveal bundle slot");
@@ -166,7 +182,9 @@ impl Ledger {
         let mut seen_reveals = BTreeSet::new();
         let mut previous_key: Option<((u128, Amount), String)> = None;
         for masked in &section.reveals {
-            if masked.bundle_mask == 0 {
+            if masked.bundle_mask == 0
+                && expected_height < REVEAL_BUNDLE_SIGNATURE_THRESHOLDS_HEIGHT
+            {
                 bail!("masked blinded reveal is not assigned to a reveal bundle");
             }
             if masked.bundle_mask & !reveal_committee_mask() != 0 {
@@ -221,9 +239,13 @@ impl Ledger {
             return 0;
         }
         match finalizer_mode {
-            FinalizerMode::Ticket if finalizer_rank == 0 => committee_size,
-            FinalizerMode::Ticket if finalizer_rank == 1 => committee_size.min(2),
-            FinalizerMode::Ticket => 1,
+            FinalizerMode::Ticket if finalizer_rank == 0 => {
+                required_explicit_reveal_signatures(height, committee_size)
+            }
+            FinalizerMode::Ticket if finalizer_rank == 1 => {
+                required_explicit_reveal_signatures(height, committee_size.min(2))
+            }
+            FinalizerMode::Ticket => required_explicit_reveal_signatures(height, 1),
             FinalizerMode::Recovery => 0,
         }
     }
@@ -298,5 +320,13 @@ impl Ledger {
             }
         }
         Ok(bundles)
+    }
+}
+
+fn required_explicit_reveal_signatures(height: u64, attestations: usize) -> usize {
+    if height >= REVEAL_BUNDLE_SIGNATURE_THRESHOLDS_HEIGHT {
+        attestations.saturating_sub(1)
+    } else {
+        attestations
     }
 }

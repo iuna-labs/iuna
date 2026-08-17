@@ -3,8 +3,7 @@ use serde::Serialize;
 
 use super::ledger_ops::{
     apply_transaction, ensure_blinded_transaction_fits_empty_block,
-    ensure_transaction_fits_empty_block, spend_blinded_inputs, spend_inputs,
-    transaction_has_missing_inputs,
+    ensure_transaction_fits_empty_block, spend_blinded_inputs, transaction_has_missing_inputs,
 };
 use super::transaction::{
     BlindedReveal, BlindedTransaction, Transaction, blinded_transaction_inputs_spent_by,
@@ -12,7 +11,7 @@ use super::transaction::{
 };
 use super::{
     Ledger, MAX_ORPHAN_TRANSACTIONS, MAX_PENDING_POOL_BYTES, MAX_PENDING_TRANSACTIONS,
-    TransactionSubmitOutcome,
+    TransactionSubmitOutcome, spend_inputs_with_lineage,
 };
 
 impl Ledger {
@@ -23,8 +22,20 @@ impl Ledger {
     pub(crate) fn reserve_transaction_inputs(&mut self, transaction: &Transaction) -> Result<()> {
         self.validate_new_transaction(transaction)?;
         let mut utxos = self.utxos.clone();
-        spend_inputs(transaction, &mut utxos)?;
+        let mut utxo_lineage = self.utxo_lineage.clone();
+        let mut lineage_values = self.lineage_values.clone();
+        let mut lineage_owners = self.lineage_owners.clone();
+        spend_inputs_with_lineage(
+            transaction,
+            &mut utxos,
+            &mut utxo_lineage,
+            &mut lineage_values,
+            &mut lineage_owners,
+        )?;
         self.utxos = utxos;
+        self.utxo_lineage = utxo_lineage;
+        self.lineage_values = lineage_values;
+        self.lineage_owners = lineage_owners;
         Ok(())
     }
 
