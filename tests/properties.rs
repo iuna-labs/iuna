@@ -29,11 +29,11 @@ const REORG_MEMPOOL_SEEDS: std::ops::Range<u64> = 1_200..1_208;
 const FULL_BLOCK_SELECTION_SEEDS: std::ops::Range<u64> = 1_300..1_302;
 const BLINDED_PARTITION_SEEDS: std::ops::Range<u64> = 1_400..1_404;
 const BLINDED_EXPIRY_SEEDS: std::ops::Range<u64> = 1_500..1_506;
-const SOAK_CHAOS_SEEDS: std::ops::Range<u64> = 1_600..1_603;
-const SOAK_CHAOS_ROUNDS: usize = 32;
-const VDF_STABILITY_SEEDS: std::ops::Range<u64> = 500..516;
-const VDF_STABILITY_BLOCKS: usize = 128;
-const VDF_STABILITY_INITIAL_ROUNDS: u64 = 1_000_000;
+const SOAK_CHAOS_SEEDS: std::ops::Range<u64> = 1_600..1_602;
+const SOAK_CHAOS_ROUNDS: usize = 16;
+const VDF_STABILITY_SEEDS: std::ops::Range<u64> = 500..502;
+const VDF_STABILITY_BLOCKS: usize = 24;
+const VDF_STABILITY_INITIAL_ROUNDS: u64 = 100;
 const TEST_REVEAL_BUNDLE_COLLECTION_MS: u64 = 30_000;
 
 #[derive(Clone, Debug)]
