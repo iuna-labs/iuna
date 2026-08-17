@@ -18,7 +18,7 @@ pub(super) fn converge_fee_by_byte(
     fee_per_byte: Amount,
     mut build: impl FnMut(Amount) -> Result<BuiltBlindedTransaction>,
 ) -> Result<(BuiltBlindedTransaction, FeeEstimate)> {
-    let mut fee = 0;
+    let mut fee = if fee_per_byte == 0 { 0 } else { 1 };
     let mut best = None;
     for _ in 0..64 {
         let built = build(fee)?;
@@ -128,4 +128,62 @@ pub(super) fn allowed_recovery_vdf_rank_count(rank_count: usize, percent: u8) ->
 pub(super) fn recovery_vdf_sample_percent(address: &str, tip_hash: &str) -> u8 {
     let digest = Sha256::digest(format!("iuna-recovery-vdf-sample:{tip_hash}:{address}"));
     digest[0] % 100
+}
+
+#[cfg(test)]
+mod tests {
+    use anyhow::bail;
+
+    use crate::domain::{BlindedReveal, BlindedTransaction, BuiltBlindedTransaction, Transaction};
+
+    use super::converge_fee_by_byte;
+
+    fn built_with_fee(fee: u64) -> BuiltBlindedTransaction {
+        BuiltBlindedTransaction {
+            payload: Transaction::Burn {
+                inputs: Vec::new(),
+                change: Vec::new(),
+                amount: 1,
+                fee,
+                signature: "payload".to_string(),
+            },
+            transaction: BlindedTransaction {
+                commitment: "0".repeat(64),
+                inputs: Vec::new(),
+                fee,
+                encrypted_size: 1,
+                expires_at_height: 1,
+                nonce: "0".repeat(24),
+                ciphertext: "00".to_string(),
+                payload_hash: "1".repeat(64),
+            },
+            reveal: BlindedReveal {
+                commitment: "0".repeat(64),
+                key: "2".repeat(64),
+            },
+        }
+    }
+
+    #[test]
+    fn fee_convergence_does_not_probe_zero_when_fee_rate_is_positive() {
+        let (built, estimate) = converge_fee_by_byte(1, |fee| {
+            if fee == 0 {
+                bail!("zero fee rejected after activation");
+            }
+            Ok(built_with_fee(fee))
+        })
+        .expect("positive fee-rate convergence should skip invalid zero fee");
+
+        assert!(estimate.fee > 0);
+        assert_eq!(built.transaction.fee, estimate.fee);
+    }
+
+    #[test]
+    fn fee_convergence_allows_zero_when_fee_rate_is_zero() {
+        let (built, estimate) =
+            converge_fee_by_byte(0, |fee| Ok(built_with_fee(fee))).expect("zero fee rate works");
+
+        assert_eq!(estimate.fee, 0);
+        assert_eq!(built.transaction.fee, 0);
+    }
 }

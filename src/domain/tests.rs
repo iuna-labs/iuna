@@ -2290,6 +2290,29 @@ fn zero_fee_blinded_transaction_creation_is_rejected_from_height_750() {
     assert!(format!("{error:#}").contains("must pay a fee from height 750"));
 }
 
+#[test]
+fn automatic_burn_builds_paid_blinded_transaction_from_height_750() {
+    let alice = Wallet::from_seed("auto-burn-after-fee-activation-alice");
+    let mut ledger = ledger_with_allocation(&alice, 10 * MICRO_IUNA);
+    set_tip_height_for_validation(&mut ledger, BLOCK_ITEM_FEES_REQUIRED_HEIGHT - 1);
+    let mut node =
+        crate::app::NodeCore::from_ledger_with_burn_fee_and_enabled(alice, ledger, true, 50, 1);
+
+    let plan = node.prepare_automatic_mining(1);
+
+    let burned = plan
+        .burned
+        .as_ref()
+        .expect("automatic burn should be built at fee activation");
+    assert_eq!(burned.amount(), 50);
+    assert!(burned.fee() > 0);
+    assert_eq!(node.ledger().pending_blinded_transactions().len(), 1);
+    assert_eq!(
+        node.ledger().pending_blinded_transactions()[0].fee,
+        burned.fee()
+    );
+}
+
 fn block_for_fee_policy(miner: &Wallet, height: u64, transactions: Vec<Transaction>) -> Block {
     Block {
         height,
