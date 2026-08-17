@@ -434,14 +434,18 @@ impl NodeCore {
         will_run_vdf: bool,
     ) -> Option<u64> {
         let next_height = self.ledger.height().saturating_add(1);
+        let needs_reveal_attestations = self
+            .ledger
+            .reveal_bundle_attestations_required_for_next_block();
         let has_pending_reveals = !self.ledger.pending_blinded_reveals().is_empty();
+        let needs_reveal_collection = has_pending_reveals || needs_reveal_attestations;
         let wallet_is_committee_member = self
             .ledger
             .reveal_committee_for_next_block()
             .iter()
             .any(|member| member.owner == self.wallet.address());
-        if !has_pending_reveals || (!wallet_is_committee_member && !will_run_vdf) {
-            if !has_pending_reveals {
+        if !needs_reveal_collection || (!wallet_is_committee_member && !will_run_vdf) {
+            if !needs_reveal_collection {
                 self.reveal_bundle_collection_started = None;
             }
             return None;

@@ -4,8 +4,9 @@ use iuna::{
     app::{GossipEnvelope, InMemoryNetwork, NodeCore},
     domain::{
         Amount, ChainSnapshot, GenesisBurn, Ledger, MAX_BLOCK_BYTES, MICRO_IUNA,
-        MINE_FINALIZER_FEE, MINE_REWARD, OutPoint, RECOVERY_BLOCK_DELAY_MS, Transaction, TxInput,
-        TxOutput, VDF_TARGET_BLOCK_MS, Wallet, hex_hash, revealed_blinded_transactions, verify_vdf,
+        MINE_FINALIZER_FEE, MINE_REWARD, OutPoint, RECOVERY_BLOCK_DELAY_MS, RevealBundle,
+        Transaction, TxInput, TxOutput, VDF_TARGET_BLOCK_MS, Wallet, hex_hash,
+        revealed_blinded_transactions, run_vdf, verify_vdf,
     },
 };
 
@@ -460,7 +461,14 @@ fn try_finalize_next_block(round: usize, wallets: &[Wallet], ledger: &mut Ledger
         let _ = ledger.submit_transaction(tx);
     }
 
-    if let Ok(block) = ledger.mine_next_block(wallet, (round + 1) as u64) {
+    let reveal_bundles = reveal_bundles_for_next_block(ledger, wallets);
+    if let Ok(work) = ledger.prepare_next_block_with_reveal_bundles(
+        wallet.address(),
+        (round + 1) as u64,
+        reveal_bundles,
+    ) {
+        let vdf_output = run_vdf(work.vdf_seed(), work.vdf_rounds());
+        let block = work.finish(wallet, vdf_output);
         ledger
             .apply_block(block)
             .expect("locally mined block applies");
@@ -474,9 +482,12 @@ fn finalize_with_wallet(ledger: &mut Ledger, wallet: &Wallet, timestamp_ms: u64)
     let _ = ledger
         .submit_transaction(burn)
         .expect("finalizer burn enters mempool");
-    let block = ledger
-        .mine_next_block(wallet, timestamp_ms)
-        .expect("finalizer can mine next block");
+    let reveal_bundles = reveal_bundles_for_next_block(ledger, std::slice::from_ref(wallet));
+    let work = ledger
+        .prepare_next_block_with_reveal_bundles(wallet.address(), timestamp_ms, reveal_bundles)
+        .expect("finalizer can prepare next block");
+    let vdf_output = run_vdf(work.vdf_seed(), work.vdf_rounds());
+    let block = work.finish(wallet, vdf_output);
     ledger.apply_block(block).expect("finalizer block applies");
 }
 
@@ -487,13 +498,30 @@ fn finalize_preverified_with_wallet(ledger: &mut Ledger, wallet: &Wallet, timest
     ledger
         .submit_transaction(burn)
         .expect("finalizer burn enters mempool");
+    let reveal_bundles = reveal_bundles_for_next_block(ledger, std::slice::from_ref(wallet));
     let work = ledger
-        .prepare_next_block(wallet.address(), timestamp_ms)
+        .prepare_next_block_with_reveal_bundles(wallet.address(), timestamp_ms, reveal_bundles)
         .expect("finalizer can prepare next block");
-    let block = work.finish(wallet, "property-vdf".to_string());
+    let vdf_output = run_vdf(work.vdf_seed(), work.vdf_rounds());
+    let block = work.finish(wallet, vdf_output);
     ledger
-        .apply_locally_mined_block(block)
+        .apply_block(block)
         .expect("locally mined block applies");
+}
+
+fn reveal_bundles_for_next_block(ledger: &Ledger, wallets: &[Wallet]) -> Vec<RevealBundle> {
+    let mut bundles = ledger
+        .reveal_committee_for_next_block()
+        .into_iter()
+        .filter_map(|member| {
+            wallets
+                .iter()
+                .find(|wallet| wallet.address() == member.owner)
+                .and_then(|wallet| ledger.build_reveal_bundle(wallet).ok().flatten())
+        })
+        .collect::<Vec<_>>();
+    bundles.sort_by_key(|bundle| bundle.slot);
+    bundles
 }
 
 fn next_ticket_slot_timestamp(ledger: &Ledger, offset_ms: u64) -> u64 {
@@ -1711,6 +1739,13 @@ fn mine_expected_leader_with_network_time(
         .as_deref()
         .is_some_and(|reason| reason.contains("collecting blinded reveals"))
     {
+        collect_reveal_bundles_for_next_block(
+            network,
+            node_ids,
+            wallets,
+            &node_ids[leader_index],
+            timestamp_ms,
+        );
         outcome = network
             .node_mut(&node_ids[leader_index])
             .expect("leader node exists")
@@ -1730,6 +1765,61 @@ fn drain_all_outboxes(network: &mut InMemoryNetwork, node_ids: &[String]) {
     }
 }
 
+fn collect_reveal_bundles_for_next_block(
+    network: &mut InMemoryNetwork,
+    node_ids: &[String],
+    wallets: &[Wallet],
+    anchor_id: &str,
+    _timestamp_ms: u64,
+) {
+    let committee = network
+        .node(anchor_id)
+        .expect("anchor node exists")
+        .ledger()
+        .reveal_committee_for_next_block();
+    let committee_node_ids = committee
+        .into_iter()
+        .filter_map(|member| {
+            wallets
+                .iter()
+                .position(|wallet| wallet.address() == member.owner)
+                .map(|index| node_ids[index].clone())
+        })
+        .collect::<Vec<_>>();
+
+    let mut bundles = Vec::new();
+    for id in &committee_node_ids {
+        let Some(index) = node_ids.iter().position(|node_id| node_id == id) else {
+            continue;
+        };
+        if let Some(bundle) = network
+            .node(id)
+            .expect("committee node exists")
+            .ledger()
+            .build_reveal_bundle(&wallets[index])
+            .expect("committee node builds reveal bundle")
+        {
+            bundles.push((id.clone(), bundle));
+        }
+    }
+
+    for (from, bundle) in bundles {
+        for id in node_ids {
+            if *id == from {
+                continue;
+            }
+            network
+                .node_mut(id)
+                .expect("node exists")
+                .receive(GossipEnvelope::RevealBundle(bundle.clone()))
+                .expect("node receives reveal bundle");
+        }
+    }
+    network
+        .deliver_until_idle()
+        .expect("reveal bundle gossip succeeds");
+}
+
 fn mine_one_partition_block(
     network: &mut InMemoryNetwork,
     node_ids: &[String],
@@ -1738,10 +1828,11 @@ fn mine_one_partition_block(
     round: usize,
     rng: &mut TestRng,
 ) {
-    assert!(
-        try_mine_one_partition_block(network, node_ids, wallets, partition, round, rng),
-        "partition could not produce a block"
-    );
+    if let Err(reasons) =
+        try_mine_one_partition_block(network, node_ids, wallets, partition, round, rng)
+    {
+        panic!("partition {partition:?} could not produce a block in round {round}: {reasons:?}");
+    }
 }
 
 fn try_mine_one_partition_block(
@@ -1751,7 +1842,7 @@ fn try_mine_one_partition_block(
     partition: &[usize],
     round: usize,
     rng: &mut TestRng,
-) -> bool {
+) -> Result<(), Vec<String>> {
     let anchor_id = &node_ids[partition[0]];
     let anchor_tip_timestamp = network
         .node(anchor_id)
@@ -1771,6 +1862,7 @@ fn try_mine_one_partition_block(
             .unwrap_or(u32::MAX)
     });
 
+    let mut reasons = Vec::new();
     for index in candidates {
         let rank_delay = network
             .node(anchor_id)
@@ -1791,6 +1883,22 @@ fn try_mine_one_partition_block(
             .as_deref()
             .is_some_and(|reason| reason.contains("collecting blinded reveals"))
         {
+            let partition_offline = node_ids
+                .iter()
+                .enumerate()
+                .filter_map(|(node_index, id)| {
+                    (!partition.contains(&node_index)).then_some(id.clone())
+                })
+                .collect::<BTreeSet<_>>();
+            collect_reveal_bundles_for_next_block_with_chaos(
+                network,
+                node_ids,
+                wallets,
+                anchor_id,
+                timestamp_ms,
+                &partition_offline,
+                rng,
+            );
             outcome = network
                 .node_mut(&node_ids[index])
                 .expect("partition candidate exists")
@@ -1812,11 +1920,18 @@ fn try_mine_one_partition_block(
                         .expect("partition peer imports produced block");
                 }
             }
-            return true;
+            return Ok(());
         }
+        reasons.push(format!(
+            "{}: {}",
+            node_ids[index],
+            outcome
+                .skipped_reason
+                .unwrap_or_else(|| "no block and no skip reason".to_string())
+        ));
     }
 
-    false
+    Err(reasons)
 }
 
 fn sync_until_idle(network: &mut InMemoryNetwork, from: &str, to: &str, limit: usize) {
@@ -1829,6 +1944,60 @@ fn sync_until_idle(network: &mut InMemoryNetwork, from: &str, to: &str, limit: u
         }
     }
     panic!("range sync did not become idle");
+}
+
+fn collect_reveal_bundles_for_next_block_with_chaos(
+    network: &mut InMemoryNetwork,
+    node_ids: &[String],
+    wallets: &[Wallet],
+    anchor_id: &str,
+    _timestamp_ms: u64,
+    offline: &BTreeSet<String>,
+    rng: &mut TestRng,
+) {
+    let committee = network
+        .node(anchor_id)
+        .expect("anchor node exists")
+        .ledger()
+        .reveal_committee_for_next_block();
+    let committee_node_ids = committee
+        .into_iter()
+        .filter_map(|member| {
+            wallets
+                .iter()
+                .position(|wallet| wallet.address() == member.owner)
+                .map(|index| node_ids[index].clone())
+        })
+        .collect::<Vec<_>>();
+
+    let mut bundles = Vec::new();
+    for id in &committee_node_ids {
+        if offline.contains(id) {
+            continue;
+        }
+        let Some(index) = node_ids.iter().position(|node_id| node_id == id) else {
+            continue;
+        };
+        if let Some(bundle) = network
+            .node(id)
+            .expect("committee node exists")
+            .ledger()
+            .build_reveal_bundle(&wallets[index])
+            .expect("committee node builds reveal bundle")
+        {
+            bundles.push((id.clone(), bundle));
+        }
+    }
+
+    for (from, bundle) in bundles {
+        for id in node_ids {
+            if *id == from || offline.contains(id) {
+                continue;
+            }
+            receive_chaotic_envelope(network, id, GossipEnvelope::RevealBundle(bundle.clone()));
+        }
+    }
+    deliver_chaos_until_idle(network, node_ids, offline, rng);
 }
 
 fn deliver_with_chaos(
@@ -1978,6 +2147,15 @@ fn in_memory_network_converges_after_generated_offline_and_reordered_delivery() 
                 .as_deref()
                 .is_some_and(|reason| reason.contains("collecting blinded reveals"))
             {
+                collect_reveal_bundles_for_next_block_with_chaos(
+                    &mut network,
+                    &node_ids,
+                    &wallets,
+                    "n0",
+                    timestamp_ms,
+                    &offline,
+                    &mut rng,
+                );
                 outcome = network
                     .node_mut("n0")
                     .expect("finalizer node exists")
@@ -1990,7 +2168,8 @@ fn in_memory_network_converges_after_generated_offline_and_reordered_delivery() 
                     reason.contains("at least one burn")
                         || reason.contains("required burn")
                         || reason.contains("could not")
-                        || reason.contains("automatic burn failed"),
+                        || reason.contains("automatic burn failed")
+                        || reason.contains("too few reveal bundle signatures"),
                     "unexpected chaotic mining skip reason: {reason}"
                 );
             }

@@ -204,8 +204,13 @@ fn mine_preverified_as_next_leader(
 ) -> Block {
     let leader = ledger.expected_leader_for_next_block().unwrap();
     let wallet = wallet_for_address(wallets, &leader);
+    let reveal_bundles = if ledger.reveal_bundle_attestations_required_for_next_block() {
+        reveal_bundles_for_next_block(ledger, wallets)
+    } else {
+        Vec::new()
+    };
     let prepared = ledger
-        .prepare_next_block(wallet.address(), timestamp_ms)
+        .prepare_next_block_with_reveal_bundles(wallet.address(), timestamp_ms, reveal_bundles)
         .unwrap();
     let block = prepared.finish(wallet, "preverified-vdf".to_string());
     ledger
@@ -220,6 +225,123 @@ fn mine_valid_as_next_leader(ledger: &mut Ledger, wallets: &[Wallet], timestamp_
     let block = ledger.mine_next_block(wallet, timestamp_ms).unwrap();
     ledger.apply_block_at(block.clone(), u64::MAX).unwrap();
     block
+}
+
+fn mine_own_burn_only_without_reveal_bundles(
+    ledger: &mut Ledger,
+    wallet: &Wallet,
+    burn_amount: Amount,
+    timestamp_ms: u64,
+) -> anyhow::Result<Block> {
+    let burn = ledger.build_burn(wallet, burn_amount, 0).unwrap();
+    ledger.submit_transaction(burn).unwrap();
+    let prepared = ledger.prepare_next_block_with_reveal_bundles(
+        wallet.address(),
+        timestamp_ms,
+        Vec::new(),
+    )?;
+    assert!(prepared.reveal_bundle_section.is_empty());
+    assert_eq!(prepared.blinded_transactions.len(), 0);
+    assert_eq!(prepared.transactions.len(), 1);
+    assert!(prepared.transactions[0].is_burn());
+    assert_eq!(prepared.transactions[0].sender(), wallet.address());
+    let block = prepared.finish(wallet, "preverified-vdf".to_string());
+    ledger.apply_preverified_block_at(block.clone(), u64::MAX)?;
+    Ok(block)
+}
+
+fn next_rank_wallet<'a>(ledger: &Ledger, wallets: &'a [Wallet], rank: u32) -> &'a Wallet {
+    wallets
+        .iter()
+        .find(|wallet| ledger.finalizer_rank_for_next_block(wallet.address()) == Some(rank))
+        .unwrap_or_else(|| panic!("missing wallet for next finalizer rank {rank}"))
+}
+
+fn reveal_bundles_for_next_block(ledger: &Ledger, wallets: &[Wallet]) -> Vec<RevealBundle> {
+    let mut bundles = wallets
+        .iter()
+        .filter_map(|wallet| ledger.build_reveal_bundle(wallet).unwrap())
+        .collect::<Vec<_>>();
+    bundles.sort_by_key(|bundle| bundle.slot);
+    bundles
+}
+
+fn prepare_active_blinded_burn_for_reveal_thresholds(
+    seeds: [&str; 4],
+) -> (Ledger, Vec<Wallet>, BuiltBlindedTransaction) {
+    prepare_active_blinded_burn_for_reveal_thresholds_at_next_height(
+        seeds,
+        REVEAL_BUNDLE_SIGNATURE_THRESHOLDS_HEIGHT,
+    )
+}
+
+fn prepare_active_blinded_burn_for_reveal_thresholds_at_next_height(
+    seeds: [&str; 4],
+    next_height: u64,
+) -> (Ledger, Vec<Wallet>, BuiltBlindedTransaction) {
+    let attacker = Wallet::from_seed(seeds[0]);
+    let bob = Wallet::from_seed(seeds[1]);
+    let carol = Wallet::from_seed(seeds[2]);
+    let victim = Wallet::from_seed(seeds[3]);
+    let finalizers = vec![attacker.clone(), bob, carol];
+    let mut ledger = ledger_with_finalizers(
+        &finalizers,
+        &[(&attacker, 100 * MICRO_IUNA), (&victim, 20 * MICRO_IUNA)],
+    );
+    set_tip_height_for_validation(&mut ledger, next_height.saturating_sub(2));
+    install_finalizer_tickets_for_height(&mut ledger, &finalizers, next_height.saturating_sub(1));
+    let blinded = ledger
+        .build_blinded_burn(&victim, 3, MICRO_IUNA, ledger.height() + 4)
+        .unwrap();
+    ledger
+        .submit_blinded_transaction(blinded.transaction.clone())
+        .unwrap();
+    let leader = next_rank_wallet(&ledger, &finalizers, 0);
+    let burn = ledger.build_burn(leader, 1, 0).unwrap();
+    ledger.submit_transaction(burn).unwrap();
+    let commit_block = ledger.mine_next_block(leader, 1).unwrap();
+    ledger.apply_block_at(commit_block, u64::MAX).unwrap();
+    install_finalizer_tickets_for_height(&mut ledger, &finalizers, next_height);
+    ledger
+        .submit_blinded_reveal(blinded.reveal.clone())
+        .unwrap();
+    assert_eq!(ledger.height() + 1, next_height);
+    assert_eq!(ledger.reveal_committee_for_next_block().len(), 3);
+    (ledger, finalizers, blinded)
+}
+
+fn install_finalizer_tickets_for_height(ledger: &mut Ledger, finalizers: &[Wallet], height: u64) {
+    ledger.tickets = finalizers
+        .iter()
+        .enumerate()
+        .map(|(index, wallet)| BurnTicket {
+            id: hex_hash(format!(
+                "test-reveal-threshold-ticket:{}:{}",
+                wallet.address(),
+                height
+            )),
+            owner: wallet.address().to_string(),
+            amount: MICRO_IUNA.saturating_sub(index as u64),
+            eligible_from_height: height,
+            eligible_until_height: height,
+        })
+        .collect();
+}
+
+fn try_mine_rank_with_reveal_bundles(
+    ledger: &mut Ledger,
+    wallet: &Wallet,
+    burn_amount: Amount,
+    timestamp_ms: u64,
+    bundles: Vec<RevealBundle>,
+) -> anyhow::Result<Block> {
+    let burn = ledger.build_burn(wallet, burn_amount, 0).unwrap();
+    ledger.submit_transaction(burn).unwrap();
+    let prepared =
+        ledger.prepare_next_block_with_reveal_bundles(wallet.address(), timestamp_ms, bundles)?;
+    let block = prepared.finish(wallet, "preverified-vdf".to_string());
+    ledger.apply_preverified_block_at(block.clone(), u64::MAX)?;
+    Ok(block)
 }
 
 fn mine_preverified_as_next_leader_with_reveal_bundles(
@@ -1769,6 +1891,134 @@ fn blinded_burn_commits_ciphertext_and_reveal_executes_later() {
 }
 
 #[test]
+fn reveal_bundle_signature_thresholds_are_inactive_before_activation_height() {
+    let (mut ledger, finalizers, _) =
+        prepare_active_blinded_burn_for_reveal_thresholds_at_next_height(
+            [
+                "reveal-threshold-preactivation-attacker",
+                "reveal-threshold-preactivation-bob",
+                "reveal-threshold-preactivation-carol",
+                "reveal-threshold-preactivation-victim",
+            ],
+            REVEAL_BUNDLE_SIGNATURE_THRESHOLDS_HEIGHT - 1,
+        );
+    let rank0 = next_rank_wallet(&ledger, &finalizers, 0).clone();
+
+    let block = mine_own_burn_only_without_reveal_bundles(&mut ledger, &rank0, 1, 2).unwrap();
+
+    assert_eq!(block.height, REVEAL_BUNDLE_SIGNATURE_THRESHOLDS_HEIGHT - 1);
+    assert_eq!(block.included_reveal_bundle_count(), 0);
+}
+
+#[test]
+fn rank0_finalizer_needs_all_reveal_bundle_signatures_when_blinded_is_active() {
+    let (ledger, finalizers, blinded) = prepare_active_blinded_burn_for_reveal_thresholds([
+        "reveal-threshold-r0-attacker",
+        "reveal-threshold-r0-bob",
+        "reveal-threshold-r0-carol",
+        "reveal-threshold-r0-victim",
+    ]);
+    let rank0 = next_rank_wallet(&ledger, &finalizers, 0).clone();
+    let bundles = reveal_bundles_for_next_block(&ledger, &finalizers);
+    assert_eq!(bundles.len(), 3);
+    assert!(bundles.iter().all(|bundle| {
+        bundle
+            .reveals
+            .iter()
+            .any(|reveal| reveal.commitment == blinded.transaction.commitment)
+    }));
+
+    let mut missing_one = ledger.clone();
+    let error =
+        try_mine_rank_with_reveal_bundles(&mut missing_one, &rank0, 1, 2, bundles[..2].to_vec())
+            .unwrap_err();
+    assert!(format!("{error:#}").contains("got 2, need 3"));
+
+    let mut complete = ledger;
+    let block = try_mine_rank_with_reveal_bundles(&mut complete, &rank0, 1, 2, bundles).unwrap();
+    assert_eq!(block.finalizer_rank, 0);
+    assert_eq!(block.included_reveal_bundle_count(), 3);
+    assert_eq!(block.all_blinded_reveals().len(), 1);
+}
+
+#[test]
+fn rank1_finalizer_needs_two_reveal_bundle_signatures_when_blinded_is_active() {
+    let (ledger, finalizers, _) = prepare_active_blinded_burn_for_reveal_thresholds([
+        "reveal-threshold-r1-attacker",
+        "reveal-threshold-r1-bob",
+        "reveal-threshold-r1-carol",
+        "reveal-threshold-r1-victim",
+    ]);
+    let rank1 = next_rank_wallet(&ledger, &finalizers, 1).clone();
+    let bundles = reveal_bundles_for_next_block(&ledger, &finalizers);
+    assert_eq!(bundles.len(), 3);
+
+    let mut missing_one = ledger.clone();
+    let error = try_mine_rank_with_reveal_bundles(
+        &mut missing_one,
+        &rank1,
+        1,
+        VDF_TARGET_BLOCK_MS * 2,
+        bundles[..1].to_vec(),
+    )
+    .unwrap_err();
+    assert!(format!("{error:#}").contains("got 1, need 2"));
+
+    let mut enough = ledger;
+    let block = try_mine_rank_with_reveal_bundles(
+        &mut enough,
+        &rank1,
+        1,
+        VDF_TARGET_BLOCK_MS * 2,
+        bundles[..2].to_vec(),
+    )
+    .unwrap();
+    assert_eq!(block.finalizer_rank, 1);
+    assert_eq!(block.included_reveal_bundle_count(), 2);
+}
+
+#[test]
+fn rank2_finalizer_can_publish_one_reveal_bundle_signature_when_blinded_is_active() {
+    let (ledger, finalizers, _) = prepare_active_blinded_burn_for_reveal_thresholds([
+        "reveal-threshold-r2-attacker",
+        "reveal-threshold-r2-bob",
+        "reveal-threshold-r2-carol",
+        "reveal-threshold-r2-victim",
+    ]);
+    let rank2 = next_rank_wallet(&ledger, &finalizers, 2).clone();
+    let bundles = reveal_bundles_for_next_block(&ledger, &finalizers);
+    assert_eq!(bundles.len(), 3);
+
+    let mut solo = ledger;
+    let block = try_mine_rank_with_reveal_bundles(
+        &mut solo,
+        &rank2,
+        1,
+        VDF_TARGET_BLOCK_MS * 4,
+        bundles[..1].to_vec(),
+    )
+    .unwrap();
+    assert_eq!(block.finalizer_rank, 2);
+    assert_eq!(block.included_reveal_bundle_count(), 1);
+}
+
+#[test]
+fn active_blinded_envelope_rejects_own_burn_only_block_without_reveal_list_threshold() {
+    let (mut ledger, finalizers, _) = prepare_active_blinded_burn_for_reveal_thresholds([
+        "reveal-threshold-empty-attacker",
+        "reveal-threshold-empty-bob",
+        "reveal-threshold-empty-carol",
+        "reveal-threshold-empty-victim",
+    ]);
+    let rank1 = next_rank_wallet(&ledger, &finalizers, 1).clone();
+
+    let error =
+        mine_own_burn_only_without_reveal_bundles(&mut ledger, &rank1, 1, VDF_TARGET_BLOCK_MS * 2)
+            .unwrap_err();
+    assert!(format!("{error:#}").contains("got 0, need 2"));
+}
+
+#[test]
 fn blinded_reveal_finalizer_fees_are_aggregated_into_block_reward() {
     let alice = Wallet::from_seed("aggregated-finalizer-fee-alice");
     let bob = Wallet::from_seed("aggregated-finalizer-fee-bob");
@@ -2426,7 +2676,8 @@ fn blinded_reveal_with_wrong_key_is_rejected_in_block() {
     let mut prepared = ledger
         .prepare_next_block(wallet.address(), ledger.tip().timestamp_ms + 1)
         .unwrap();
-    let committee_member = ledger.reveal_committee_for_next_block()[0].clone();
+    let committee = ledger.reveal_committee_for_next_block();
+    let committee_member = committee[0].clone();
     let committee_wallet = wallet_for_address(&finalizers, &committee_member.owner);
     let wrong_reveal = BlindedReveal {
         commitment: blinded.transaction.commitment,
@@ -2439,7 +2690,17 @@ fn blinded_reveal_with_wrong_key_is_rejected_in_block() {
         member: committee_wallet.address().to_string(),
         reveals: vec![wrong_reveal],
     });
-    prepared.reveal_bundle_section = ledger.reveal_bundle_section_from_bundles(vec![wrong_bundle]);
+    let empty_member = committee[1].clone();
+    let empty_wallet = wallet_for_address(&finalizers, &empty_member.owner);
+    let empty_bundle = empty_wallet.reveal_bundle(RevealBundlePayload {
+        height: prepared.height,
+        prev_hash: prepared.prev_hash.clone(),
+        slot: empty_member.slot,
+        member: empty_wallet.address().to_string(),
+        reveals: Vec::new(),
+    });
+    prepared.reveal_bundle_section =
+        ledger.reveal_bundle_section_from_bundles(vec![wrong_bundle, empty_bundle]);
     prepared.reward = blinded_reveal_finalizer_fee(
         blinded.transaction.fee,
         prepared.reveal_bundle_section.signatures.len(),

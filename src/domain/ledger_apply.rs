@@ -307,6 +307,8 @@ impl Ledger {
         self.validate_reveal_bundle_section_for_block(
             block.height,
             &block.prev_hash,
+            block.finalizer_mode,
+            block.finalizer_rank,
             &block.reveal_bundle_section,
         )?;
         validate_block_blinded_items(block, self)?;
