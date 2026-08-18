@@ -77,6 +77,8 @@ impl NodeCore {
             return Ok(());
         }
         let key = (bundle.height, bundle.slot);
+        self.ledger
+            .validate_next_block_reveal_bundles(vec![bundle.clone()])?;
         if self.equivocated_reveal_bundle_slots.contains(&key) {
             return Ok(());
         }
@@ -87,8 +89,6 @@ impl NodeCore {
             }
             return Ok(());
         }
-        self.ledger
-            .validate_next_block_reveal_bundles(vec![bundle.clone()])?;
         self.reveal_bundles.insert(key, bundle.clone());
         self.outbox.push(GossipEnvelope::RevealBundle(bundle));
         Ok(())
@@ -388,6 +388,70 @@ mod tests {
                     && bundle.reveals.iter().any(|reveal| reveal.commitment == first.reveal.commitment)
                     && bundle.reveals.iter().any(|reveal| reveal.commitment == second.reveal.commitment)
         )));
+    }
+
+    #[test]
+    fn invalid_conflicting_reveal_bundle_does_not_poison_stored_slot() {
+        const TEST_SIGNATURE_BYTES: usize = 64;
+
+        let alice = Wallet::from_seed("invalid-conflict-bundle-alice");
+        let bob = Wallet::from_seed("invalid-conflict-bundle-bob");
+        let carol = Wallet::from_seed("invalid-conflict-bundle-carol");
+        let finalizers = [alice.clone(), bob.clone()];
+        let mut allocations = BTreeMap::new();
+        allocations.insert(alice.address().to_string(), 10 * MICRO_IUNA);
+        allocations.insert(bob.address().to_string(), 10 * MICRO_IUNA);
+        allocations.insert(carol.address().to_string(), 10 * MICRO_IUNA);
+        let mut ledger = Ledger::new_with_genesis_burns(
+            allocations,
+            finalizers
+                .iter()
+                .map(|wallet| GenesisBurn::new(wallet.address(), MICRO_IUNA))
+                .collect(),
+            1,
+        )
+        .unwrap();
+        let blinded = ledger
+            .build_blinded_burn(&carol, 3, 100, ledger.height() + 4)
+            .unwrap();
+        ledger
+            .submit_blinded_transaction(blinded.transaction.clone())
+            .unwrap();
+        let leader = ledger.expected_leader_for_next_block().unwrap();
+        let leader_wallet = wallet_for_address(&finalizers, &leader);
+        let burn = ledger.build_burn(leader_wallet, 1, 0).unwrap();
+        ledger.submit_transaction(burn).unwrap();
+        let commit_block = ledger.mine_next_block(leader_wallet, 1).unwrap();
+        ledger.apply_locally_mined_block(commit_block).unwrap();
+        ledger.submit_blinded_reveal(blinded.reveal).unwrap();
+
+        let committee_member = ledger.reveal_committee_for_next_block()[0].clone();
+        let committee_wallet = wallet_for_address(&finalizers, &committee_member.owner);
+        let valid_bundle = ledger
+            .build_reveal_bundle(committee_wallet)
+            .unwrap()
+            .unwrap();
+        let mut node = NodeCore::from_ledger_with_burn_fee_and_enabled(
+            committee_wallet.clone(),
+            ledger,
+            true,
+            0,
+            0,
+        );
+
+        node.receive_reveal_bundle(valid_bundle.clone()).unwrap();
+        node.drain_outbox();
+
+        let mut invalid_conflict = valid_bundle.clone();
+        invalid_conflict.signature = "00".repeat(TEST_SIGNATURE_BYTES);
+        let error = node.receive_reveal_bundle(invalid_conflict).unwrap_err();
+
+        assert!(format!("{error:#}").contains("reveal bundle signature is invalid"));
+        let key = (valid_bundle.height, valid_bundle.slot);
+        assert_eq!(node.reveal_bundles.get(&key), Some(&valid_bundle));
+        assert!(!node.equivocated_reveal_bundle_slots.contains(&key));
+        assert_eq!(node.usable_reveal_bundles(), vec![valid_bundle]);
+        assert!(node.drain_outbox().is_empty());
     }
 
     #[test]
