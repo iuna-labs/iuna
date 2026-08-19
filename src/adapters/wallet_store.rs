@@ -1,7 +1,8 @@
 use std::{
     fs::{self, File, OpenOptions},
     io::Write,
-    path::Path,
+    path::{Path, PathBuf},
+    time::{SystemTime, UNIX_EPOCH},
 };
 
 use anyhow::{Context, Result, anyhow, bail};
@@ -62,9 +63,7 @@ pub fn load_or_create(path: &Path) -> Result<Wallet> {
 
     let seed = generate_seed_phrase()?;
     let wallet = Wallet::from_seed(&seed);
-    let mut file = create_wallet_file(path)?;
-    write_wallet_file(&mut file, seed, wallet.address())
-        .with_context(|| format!("failed to write wallet file {}", path.display()))?;
+    write_wallet_file(path, seed, wallet.address(), WalletFileMode::CreateNew)?;
 
     Ok(wallet)
 }
@@ -160,9 +159,14 @@ pub fn encrypt_existing_with_password(path: &Path, password: &str) -> Result<()>
             wallet.address()
         );
     }
-    let mut file = open_wallet_file(path, WalletFileMode::Replace)?;
-    write_encrypted_wallet_data_file(&mut file, WalletData { seed }, wallet.address(), password)
-        .with_context(|| format!("failed to encrypt wallet file {}", path.display()))
+    write_encrypted_wallet_data_file(
+        path,
+        WalletData { seed },
+        wallet.address(),
+        password,
+        WalletFileMode::Replace,
+    )
+    .with_context(|| format!("failed to encrypt wallet file {}", path.display()))
 }
 
 pub fn reencrypt_with_password(
@@ -182,12 +186,12 @@ pub fn reencrypt_with_password(
             wallet.address()
         );
     }
-    let mut file = open_wallet_file(path, WalletFileMode::Replace)?;
     write_encrypted_wallet_data_file(
-        &mut file,
+        path,
         WalletData { seed },
         wallet.address(),
         new_password,
+        WalletFileMode::Replace,
     )
     .with_context(|| format!("failed to re-encrypt wallet file {}", path.display()))?;
     Ok(wallet)
@@ -201,15 +205,10 @@ fn load_encrypted_or_plaintext(path: &Path, password: Option<&str>) -> Result<Wa
     let stored = read_wallet_file(path)?;
     let wallet = wallet_from_stored(&stored, password)?;
     if stored.version == 1 {
-        let mut file = OpenOptions::new()
-            .write(true)
-            .truncate(true)
-            .open(path)
-            .with_context(|| format!("failed to migrate wallet file {}", path.display()))?;
         let seed = stored
             .seed
             .context("legacy wallet file does not contain a seed")?;
-        write_wallet_file(&mut file, seed, wallet.address())
+        write_wallet_file(path, seed, wallet.address(), WalletFileMode::Replace)
             .with_context(|| format!("failed to migrate wallet file {}", path.display()))?;
         return Ok(wallet);
     }
@@ -262,9 +261,7 @@ enum WalletFileMode {
 
 fn write_wallet(path: &Path, seed: String, mode: WalletFileMode) -> Result<Wallet> {
     let wallet = Wallet::from_seed(&seed);
-    let mut file = open_wallet_file(path, mode)?;
-    write_wallet_file(&mut file, seed, wallet.address())
-        .with_context(|| format!("failed to write wallet file {}", path.display()))?;
+    write_wallet_file(path, seed, wallet.address(), mode)?;
     Ok(wallet)
 }
 
@@ -275,43 +272,48 @@ fn write_wallet_encrypted(
     mode: WalletFileMode,
 ) -> Result<Wallet> {
     let wallet = Wallet::from_seed(&seed);
-    let mut file = open_wallet_file(path, mode)?;
-    write_encrypted_wallet_file(&mut file, seed, wallet.address(), password)
-        .with_context(|| format!("failed to write wallet file {}", path.display()))?;
+    write_encrypted_wallet_file(path, seed, wallet.address(), password, mode)?;
     Ok(wallet)
 }
 
-fn write_wallet_file(file: &mut File, seed: String, address: &str) -> Result<()> {
-    write_wallet_data_file(file, WalletData { seed }, address)
+fn write_wallet_file(path: &Path, seed: String, address: &str, mode: WalletFileMode) -> Result<()> {
+    write_wallet_data_file(path, WalletData { seed }, address, mode)
 }
 
-fn write_wallet_data_file(file: &mut File, data: WalletData, address: &str) -> Result<()> {
+fn write_wallet_data_file(
+    path: &Path,
+    data: WalletData,
+    address: &str,
+    mode: WalletFileMode,
+) -> Result<()> {
     let stored = WalletFile {
         version: PLAINTEXT_WALLET_FILE_VERSION,
         seed: Some(data.seed),
         address: address.to_string(),
         encryption: None,
     };
-    let bytes = serde_json::to_vec_pretty(&stored).context("failed to serialize wallet file")?;
-    file.write_all(&bytes)?;
-    file.write_all(b"\n")?;
-    Ok(())
+    let mut bytes =
+        serde_json::to_vec_pretty(&stored).context("failed to serialize wallet file")?;
+    bytes.push(b'\n');
+    atomic_write_wallet_file(path, &bytes, mode)
 }
 
 fn write_encrypted_wallet_file(
-    file: &mut File,
+    path: &Path,
     seed: String,
     address: &str,
     password: &str,
+    mode: WalletFileMode,
 ) -> Result<()> {
-    write_encrypted_wallet_data_file(file, WalletData { seed }, address, password)
+    write_encrypted_wallet_data_file(path, WalletData { seed }, address, password, mode)
 }
 
 fn write_encrypted_wallet_data_file(
-    file: &mut File,
+    path: &Path,
     data: WalletData,
     address: &str,
     password: &str,
+    mode: WalletFileMode,
 ) -> Result<()> {
     let encryption = encrypt_wallet_data(&data, address, password)?;
     let stored = WalletFile {
@@ -320,10 +322,10 @@ fn write_encrypted_wallet_data_file(
         address: address.to_string(),
         encryption: Some(encryption),
     };
-    let bytes = serde_json::to_vec_pretty(&stored).context("failed to serialize wallet file")?;
-    file.write_all(&bytes)?;
-    file.write_all(b"\n")?;
-    Ok(())
+    let mut bytes =
+        serde_json::to_vec_pretty(&stored).context("failed to serialize wallet file")?;
+    bytes.push(b'\n');
+    atomic_write_wallet_file(path, &bytes, mode)
 }
 
 fn wallet_data(stored: &WalletFile, password: Option<&str>) -> Result<WalletData> {
@@ -482,26 +484,65 @@ fn normalize_seed_phrase(seed_phrase: &str) -> Result<String> {
     Ok(mnemonic.to_string())
 }
 
-fn create_wallet_file(path: &Path) -> Result<File> {
-    open_wallet_file(path, WalletFileMode::CreateNew)
-}
-
-fn open_wallet_file(path: &Path, mode: WalletFileMode) -> Result<File> {
+fn atomic_write_wallet_file(path: &Path, bytes: &[u8], mode: WalletFileMode) -> Result<()> {
     if let Some(parent) = path.parent() {
         fs::create_dir_all(parent)
             .with_context(|| format!("failed to create wallet directory {}", parent.display()))?;
     }
 
-    let mut options = OpenOptions::new();
-    options.write(true);
-    match mode {
-        WalletFileMode::CreateNew => {
-            options.create_new(true);
-        }
-        WalletFileMode::Replace => {
-            options.create(true).truncate(true);
+    for attempt in 0..16 {
+        let temp_path = temp_file_path(path, attempt);
+        match open_wallet_temp_file(&temp_path) {
+            Ok(mut file) => {
+                if let Err(error) = write_and_sync(&mut file, bytes) {
+                    let _ = fs::remove_file(&temp_path);
+                    return Err(error).with_context(|| {
+                        format!("failed to write wallet file {}", path.display())
+                    });
+                }
+                drop(file);
+                match mode {
+                    WalletFileMode::CreateNew => {
+                        if let Err(error) = fs::hard_link(&temp_path, path) {
+                            let _ = fs::remove_file(&temp_path);
+                            return Err(error).with_context(|| {
+                                format!("failed to create wallet file {}", path.display())
+                            });
+                        }
+                        let _ = fs::remove_file(&temp_path);
+                    }
+                    WalletFileMode::Replace => {
+                        if let Err(error) = fs::rename(&temp_path, path) {
+                            let _ = fs::remove_file(&temp_path);
+                            return Err(error).with_context(|| {
+                                format!("failed to replace wallet file {}", path.display())
+                            });
+                        }
+                    }
+                }
+                sync_parent_dir(path);
+                return Ok(());
+            }
+            Err(error)
+                if error
+                    .downcast_ref::<std::io::Error>()
+                    .is_some_and(|error| error.kind() == std::io::ErrorKind::AlreadyExists) =>
+            {
+                continue;
+            }
+            Err(error) => return Err(error),
         }
     }
+
+    bail!(
+        "failed to create temporary wallet file for {}",
+        path.display()
+    )
+}
+
+fn open_wallet_temp_file(path: &Path) -> Result<File> {
+    let mut options = OpenOptions::new();
+    options.write(true).create_new(true);
 
     #[cfg(unix)]
     {
@@ -512,4 +553,59 @@ fn open_wallet_file(path: &Path, mode: WalletFileMode) -> Result<File> {
     options
         .open(path)
         .with_context(|| format!("failed to create wallet file {}", path.display()))
+}
+
+fn write_and_sync(file: &mut File, bytes: &[u8]) -> Result<()> {
+    file.write_all(bytes)?;
+    file.sync_all()?;
+    Ok(())
+}
+
+fn temp_file_path(path: &Path, attempt: u64) -> PathBuf {
+    let file_name = path
+        .file_name()
+        .and_then(|name| name.to_str())
+        .unwrap_or("wallet");
+    let nanos = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_nanos();
+    path.with_file_name(format!(
+        ".{file_name}.{}.{}.tmp",
+        std::process::id(),
+        nanos.saturating_add(u128::from(attempt))
+    ))
+}
+
+fn sync_parent_dir(path: &Path) {
+    if let Some(parent) = path.parent() {
+        if let Ok(dir) = File::open(parent) {
+            let _ = dir.sync_all();
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::fs;
+
+    use tempfile::tempdir;
+
+    use super::{load_or_create, replace_with_imported_seed_phrase};
+
+    const TEST_SEED: &str = "abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon art";
+
+    #[test]
+    fn stale_atomic_temp_file_does_not_replace_saved_wallet() {
+        let dir = tempdir().unwrap();
+        let path = dir.path().join("wallet.json");
+        let stale_temp = dir.path().join(".wallet.json.crash.tmp");
+        let wallet = replace_with_imported_seed_phrase(&path, TEST_SEED).unwrap();
+        fs::write(&stale_temp, b"{\"version\": 2,").unwrap();
+
+        let loaded = load_or_create(&path).unwrap();
+
+        assert_eq!(loaded.address(), wallet.address());
+        assert!(stale_temp.exists());
+    }
 }

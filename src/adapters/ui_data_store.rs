@@ -1341,3 +1341,45 @@ fn unix_ms() -> u64 {
         .unwrap_or_default()
         .as_millis() as u64
 }
+
+#[cfg(test)]
+mod tests {
+    use std::collections::BTreeMap;
+
+    use tempfile::tempdir;
+
+    use crate::domain::{ChainSnapshot, GenesisBurn, Ledger, Wallet};
+
+    use super::SqliteUiDataStore;
+
+    fn test_snapshot(seed: &str) -> ChainSnapshot {
+        let wallet = Wallet::from_seed(seed);
+        let mut allocations = BTreeMap::new();
+        allocations.insert(wallet.address().to_string(), 1);
+        Ledger::new_with_genesis_burns(allocations, vec![GenesisBurn::new(wallet.address(), 1)], 1)
+            .unwrap()
+            .snapshot()
+    }
+
+    #[test]
+    fn failed_ui_projection_keeps_last_committed_projection() {
+        let dir = tempdir().unwrap();
+        let store = SqliteUiDataStore::open(dir.path().join("ui_data.sqlite3")).unwrap();
+        let snapshot = test_snapshot("ui-data-rollback");
+        let tip = snapshot.blocks.last().unwrap().hash.clone();
+        store.project_snapshot(&snapshot, true).unwrap();
+        assert!(store.is_projected_to(&tip).unwrap());
+        assert!(!store.load_metrics().unwrap().is_empty());
+
+        let mut invalid = snapshot.clone();
+        invalid.blocks.clear();
+        let error = store.project_snapshot(&invalid, true).unwrap_err();
+
+        assert!(
+            format!("{error:#}").contains("chain snapshot is empty"),
+            "{error:#}"
+        );
+        assert!(store.is_projected_to(&tip).unwrap());
+        assert!(!store.load_metrics().unwrap().is_empty());
+    }
+}

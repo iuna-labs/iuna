@@ -4,7 +4,8 @@ use std::{
     collections::BTreeMap,
     fs::{self, File, OpenOptions},
     io::Write,
-    path::Path,
+    path::{Path, PathBuf},
+    time::{SystemTime, UNIX_EPOCH},
 };
 
 use anyhow::{Context, Result, bail};
@@ -141,13 +142,10 @@ pub fn save(path: &Path, config: &UiConfig) -> Result<()> {
         peers: config.peers.clone(),
         address_book: config.address_book.clone(),
     };
-    let bytes = serde_json::to_vec_pretty(&stored).context("failed to serialize config file")?;
-    let mut file = create_config_file(path)?;
-    file.write_all(&bytes)
-        .with_context(|| format!("failed to write config file {}", path.display()))?;
-    file.write_all(b"\n")
-        .with_context(|| format!("failed to write config file {}", path.display()))?;
-    Ok(())
+    let mut bytes =
+        serde_json::to_vec_pretty(&stored).context("failed to serialize config file")?;
+    bytes.push(b'\n');
+    atomic_write_config_file(path, &bytes)
 }
 
 fn load(path: &Path) -> Result<UiConfig> {
@@ -219,14 +217,87 @@ fn default_stratum_bind_port() -> u16 {
     DEFAULT_STRATUM_BIND_PORT
 }
 
+fn atomic_write_config_file(path: &Path, bytes: &[u8]) -> Result<()> {
+    if let Some(parent) = path.parent() {
+        fs::create_dir_all(parent)
+            .with_context(|| format!("failed to create config directory {}", parent.display()))?;
+    }
+
+    for attempt in 0..16 {
+        let temp_path = temp_file_path(path, attempt);
+        match create_config_file(&temp_path) {
+            Ok(mut file) => {
+                if let Err(error) = write_and_sync(&mut file, bytes) {
+                    let _ = fs::remove_file(&temp_path);
+                    return Err(error).with_context(|| {
+                        format!("failed to write config file {}", path.display())
+                    });
+                }
+                drop(file);
+                if let Err(error) = fs::rename(&temp_path, path) {
+                    let _ = fs::remove_file(&temp_path);
+                    return Err(error).with_context(|| {
+                        format!("failed to replace config file {}", path.display())
+                    });
+                }
+                sync_parent_dir(path);
+                return Ok(());
+            }
+            Err(error)
+                if error
+                    .downcast_ref::<std::io::Error>()
+                    .is_some_and(|error| error.kind() == std::io::ErrorKind::AlreadyExists) =>
+            {
+                continue;
+            }
+            Err(error) => return Err(error),
+        }
+    }
+
+    bail!(
+        "failed to create temporary config file for {}",
+        path.display()
+    )
+}
+
 fn create_config_file(path: &Path) -> Result<File> {
     let mut options = OpenOptions::new();
-    options.write(true).create(true).truncate(true);
+    options.write(true).create_new(true);
     #[cfg(unix)]
     options.mode(0o600);
     options
         .open(path)
         .with_context(|| format!("failed to create config file {}", path.display()))
+}
+
+fn write_and_sync(file: &mut File, bytes: &[u8]) -> Result<()> {
+    file.write_all(bytes)?;
+    file.sync_all()?;
+    Ok(())
+}
+
+fn temp_file_path(path: &Path, attempt: u64) -> PathBuf {
+    let file_name = path
+        .file_name()
+        .and_then(|name| name.to_str())
+        .unwrap_or("config");
+    let nanos = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_nanos();
+    path.with_file_name(format!(
+        ".{file_name}.{}.{}.tmp",
+        std::process::id(),
+        nanos.saturating_add(u128::from(attempt))
+    ))
+}
+
+fn sync_parent_dir(path: &Path) {
+    if let Some(parent) = path.parent() {
+        if let Ok(dir) = File::open(parent) {
+            let _ = dir.sync_all();
+        }
+    }
 }
 
 #[cfg(test)]
@@ -319,6 +390,32 @@ mod tests {
             config.address_book.get("iuna-address"),
             Some(&"Alice".to_string())
         );
+    }
+
+    #[test]
+    fn stale_atomic_temp_file_does_not_replace_saved_config() {
+        let dir = tempdir().unwrap();
+        let path = dir.path().join("config.json");
+        let stale_temp = dir.path().join(".config.json.crash.tmp");
+
+        save(
+            &path,
+            &UiConfig {
+                setup_complete: true,
+                mining_enabled: true,
+                peers: vec!["127.0.0.1:9444".to_string()],
+                ..UiConfig::default()
+            },
+        )
+        .unwrap();
+        fs::write(&stale_temp, b"{\"version\": 1,").unwrap();
+
+        let config = load_or_create(&path).unwrap();
+
+        assert!(config.setup_complete);
+        assert!(config.mining_enabled);
+        assert_eq!(config.peers, vec!["127.0.0.1:9444"]);
+        assert!(stale_temp.exists());
     }
 
     #[test]

@@ -170,3 +170,40 @@ fn unix_ms() -> u64 {
         .unwrap_or_default()
         .as_millis() as u64
 }
+
+#[cfg(test)]
+mod tests {
+    use std::collections::BTreeMap;
+
+    use tempfile::tempdir;
+
+    use crate::domain::{ChainSnapshot, GenesisBurn, Ledger, Wallet};
+
+    use super::SqliteChainStore;
+
+    fn test_snapshot(seed: &str) -> ChainSnapshot {
+        let wallet = Wallet::from_seed(seed);
+        let mut allocations = BTreeMap::new();
+        allocations.insert(wallet.address().to_string(), 1);
+        Ledger::new_with_genesis_burns(allocations, vec![GenesisBurn::new(wallet.address(), 1)], 1)
+            .unwrap()
+            .snapshot()
+    }
+
+    #[test]
+    fn failed_snapshot_save_keeps_last_committed_chain() {
+        let dir = tempdir().unwrap();
+        let store = SqliteChainStore::open(dir.path().join("chain.sqlite3")).unwrap();
+        let snapshot = test_snapshot("chain-store-rollback");
+        let tip = snapshot.blocks.last().unwrap().hash.clone();
+        store.save(&snapshot).unwrap();
+
+        let mut invalid = snapshot.clone();
+        invalid.blocks.clear();
+        let error = store.save(&invalid).unwrap_err();
+
+        assert!(error.to_string().contains("cannot persist empty chain"));
+        let restored = store.load().unwrap().unwrap();
+        assert_eq!(restored.blocks.last().unwrap().hash, tip);
+    }
+}
