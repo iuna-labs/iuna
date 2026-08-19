@@ -46,6 +46,8 @@ The current mainnet-candidate parameter set is intentionally close to Bitcoin wh
 
 Changing any value in this section requires a conscious mainnet-candidate reset or later hard-fork process.
 
+If the mainnet-candidate network is promoted to mainnet, the candidate genesis, chain history, UTXOs, tickets, and launch profile remain intact. A later P2P network ID change to `iuna-mainnet-v1` is only a peer-network cutover unless it is accompanied by an explicitly announced hard fork or reset.
+
 Block size is checked from the node's canonical serialized block representation after parsing, so alternate JSON whitespace or key order cannot make a block count smaller. Transaction selection and fee-rate policy use compact economic transaction size: addresses, hashes, signatures, and Stratum headers count as their decoded byte lengths, and numeric fields count as compact base-128 varint widths. That keeps hex text and JSON decimal formatting from making transactions look larger or smaller economically than their protocol data.
 
 ## Coins and Transactions

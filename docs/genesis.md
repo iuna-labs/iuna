@@ -2,11 +2,13 @@
 
 This is operator documentation for bootstrapping a iuna devnet or mainnet-candidate network. Most users should join an existing bootnode instead of creating genesis.
 
+The mainnet-candidate genesis is not disposable by default. It is the genesis that can become mainnet if the candidate passes the agreed stability window and release gates. In that case, mined coins, UTXOs, tickets, and chain history remain on the same ledger; promotion is a coordinated release and network-identity cutover, not a second genesis.
+
 Keep the management UI bound to `127.0.0.1`. Only the P2P listener should be internet-facing.
 
 ## Candidate Manifest
 
-Before a mainnet-candidate reset, publish one manifest in the release notes or operator coordination channel:
+Before creating the mainnet-candidate genesis, publish one manifest in the release notes or operator coordination channel:
 
 ```text
 version:
@@ -16,6 +18,7 @@ genesis operator:
 genesis start time:
 genesis hash:
 stability window:
+promotion policy:
 bootnodes:
 checksums:
 ```
@@ -27,6 +30,7 @@ Fill it with:
 - the genesis operator and UTC start time;
 - the genesis hash after the first node starts;
 - the agreed no-reset stability window, for example one week;
+- whether a healthy candidate will be promoted to mainnet without a second genesis;
 - every public bootnode as `<host>:<p2p-port>`;
 - a link or pasted copy of `downloads/SHA256SUMS`.
 
@@ -56,7 +60,7 @@ Publish the checksums with the release artifacts. A node operator should be able
 
 ## Create Genesis
 
-Genesis requires a fresh wallet path and a fresh chain database. Use a new data directory for the reset candidate:
+Genesis requires a fresh wallet path and a fresh chain database. Use a new data directory for the candidate genesis:
 
 ```sh
 iuna --genesis --data-dir ~/.iuna-candidate-genesis --p2p 0.0.0.0:9444 --http 127.0.0.1:18661
@@ -145,7 +149,7 @@ Never use `--genesis` to recover a node. `--genesis` is only for creating a fres
 
 ## No-Reset Stability Window
 
-For the mainnet-candidate rehearsal, treat unplanned resets as launch-blocking incidents unless they were explicitly scheduled before the window started.
+For the mainnet-candidate network, treat unplanned resets as launch-blocking incidents unless they were explicitly scheduled before the window started. Operators may mine and transact during this window with the expectation that the ledger can become mainnet if the candidate passes.
 
 Start the window only after:
 
@@ -173,3 +177,16 @@ Exit criteria:
 - release artifact checksums are independently verified;
 - backup/restore rehearsal has passed;
 - all launch-blocking incidents are fixed or explicitly deferred before mainnet.
+
+## Promotion To Mainnet
+
+If the candidate passes the stability window, publish a promotion notice instead of a new genesis plan. The notice should include:
+
+- candidate genesis hash;
+- promoted tip height and tip hash;
+- final candidate release tag and mainnet release tag;
+- bootnodes that will remain online through the cutover;
+- whether the P2P network ID changes from `iuna-mainnet-candidate-v1` to `iuna-mainnet-v1`;
+- the exact upgrade window for operators.
+
+Do not delete chain data when promoting. Nodes should keep `chain.sqlite3`, wallet files, and UI data, then upgrade or restart with the promoted release. A P2P network ID change fences upgraded mainnet nodes away from old candidate binaries, but it must not change genesis, launch profile rules, or any existing ledger state.

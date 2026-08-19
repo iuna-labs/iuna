@@ -1,6 +1,6 @@
 # Roadmap
 
-iuna is currently an experimental cryptocurrency devnet. This roadmap is the canonical planning document for moving from devnet/testnet hardening toward a mainnet candidate and, eventually, a mainnet launch.
+iuna is currently an experimental cryptocurrency devnet. This roadmap is the canonical planning document for moving from devnet/testnet hardening toward a mainnet candidate and, if the candidate stays healthy, promoting that same chain to mainnet.
 
 ## Current Phase
 
@@ -13,7 +13,7 @@ The current goal is to keep a small real testnet stable while increasing confide
 - [x] Protocol rules are frozen for mainnet candidate.
 - [x] Block, transaction, ticket, VDF, recovery, fork-choice, and peer compatibility rules are documented.
 - [ ] Long-running testnet has stayed stable with independent nodes for an agreed window.
-- [ ] Mainnet-candidate testnet has launched from a fresh genesis using release artifacts.
+- [ ] Mainnet-candidate network has launched from a fresh genesis using release artifacts.
 - [ ] New nodes can sync from genesis without manual intervention.
 - [ ] Stale nodes can reconnect and catch up from old snapshots/range sync.
 - [ ] Network partitions heal according to fork choice.
@@ -25,16 +25,16 @@ The current goal is to keep a small real testnet stable while increasing confide
 - [ ] Block selection stays bounded by transaction count and size limits.
 - [ ] Long-running chaos/property tests pass in release deployment.
 - [ ] Release artifacts are tagged, checksummed, and reproducible enough for testers to verify.
-- [ ] Genesis allocation plan is published and reviewed.
+- [ ] Candidate genesis allocation plan, genesis hash, and promotion policy are published and reviewed.
 - [ ] Security review is complete for consensus validation, transaction validation, P2P input handling, and wallet/key storage.
 - [ ] Upgrade and rollback instructions exist.
 - [x] Basic operational monitoring is available for height, tip hash, peers, last block age, finalizer mode, VDF rounds, mempool, and rejected blocks.
 
-## Pre-Reset Mainnet-Candidate Test Backlog
+## Pre-Candidate Launch Test Backlog
 
-These items are not protocol rules. They are the attack and reliability checks to finish or consciously defer before the planned devnet reset that should become the mainnet-candidate network.
+These items are not protocol rules. They are the attack and reliability checks to finish or consciously defer before the planned devnet reset that creates the mainnet-candidate network. If that candidate stays healthy through the agreed window, the same genesis, chain history, UTXOs, and mined coins should be promoted to mainnet instead of being reset again.
 
-### Must Before Reset
+### Must Before Candidate Genesis
 
 - [x] Burn bundle relay cannot import embedded burns before bundle metadata, membership, signature, fee ordering, and size are prechecked.
 - [x] Block validation with burn attestations remains independent of local mempool contents, including empty and conflicting mempools.
@@ -76,7 +76,7 @@ Focus: make failure modes boring and observable.
 
 ### M2: Mainnet Candidate
 
-Focus: rehearse mainnet with mainnet-like process, but without mainnet permanence.
+Focus: launch the candidate with mainnet-like process and treat it as the chain that can become mainnet if it stays healthy.
 
 - [x] Freeze protocol parameters for the candidate.
 - [ ] Create a fresh mainnet-candidate genesis.
@@ -85,15 +85,17 @@ Focus: rehearse mainnet with mainnet-like process, but without mainnet permanenc
 - [ ] Document node setup, backup, restore, and upgrade steps.
 - [ ] Run a candidate network for an agreed stability window.
 - [ ] Treat resets as launch-blocking incidents unless explicitly planned.
+- [ ] Decide and publish whether the candidate ledger is promoted to mainnet without a second genesis.
 
 ### M3: Mainnet Launch
 
-Focus: launch only after the candidate process has already made launch boring.
+Focus: promote the stable candidate ledger. Mainnet launch should not create a second genesis unless the candidate failed and the reset is explicitly announced.
 
-- [ ] Publish final genesis plan and genesis hash.
-- [ ] Tag the mainnet release.
+- [ ] Publish the promotion decision, candidate genesis hash, promoted tip height, and promoted tip hash.
+- [ ] Tag the mainnet release from the promoted candidate code line.
 - [ ] Publish release artifacts and checksums.
-- [ ] Start bootnodes.
+- [ ] Upgrade or restart bootnodes on the mainnet release while preserving chain data.
+- [ ] If the P2P network ID changes from `iuna-mainnet-candidate-v1` to `iuna-mainnet-v1`, coordinate the cutover without changing genesis or launch profile rules.
 - [ ] Monitor first blocks and first recovery/fallback events.
 - [ ] Keep feature changes frozen during the launch window.
 - [ ] Document any required hard-fork or emergency procedure before launch.
@@ -122,3 +124,4 @@ Normal local development may skip ignored long-running property tests, but deplo
 
 - 2026-08-14: Keep `ROADMAP.md` in the repo as the source of truth.
 - 2026-08-14: Long-running property/soak tests are marked `#[ignore]` for normal local runs and are required in `deployment.sh`.
+- 2026-08-19: The mainnet-candidate chain is intended to be promotable to mainnet without a second genesis if it satisfies the stability window and release gates.
