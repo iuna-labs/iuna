@@ -28,6 +28,14 @@ const STRATUM_MAX_JOBS_PER_SESSION: usize = 128;
 const STRATUM_MAX_SESSIONS: usize = 64;
 const STRATUM_IDLE_TIMEOUT: Duration = Duration::from_secs(120);
 
+#[cfg(feature = "fuzzing")]
+pub fn fuzz_parse_stratum_request(line: &str) -> Result<Value> {
+    if line.len() > STRATUM_MAX_LINE_BYTES {
+        bail!("Stratum request exceeds {STRATUM_MAX_LINE_BYTES} byte limit");
+    }
+    serde_json::from_str(line).context("invalid Stratum JSON")
+}
+
 #[derive(Clone)]
 pub struct StratumServer {
     node: SharedNode,

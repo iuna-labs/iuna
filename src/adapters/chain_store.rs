@@ -12,6 +12,11 @@ use crate::domain::ChainSnapshot;
 mod compact;
 use compact::{decode_compact_snapshot, encode_compact_snapshot};
 
+#[cfg(feature = "fuzzing")]
+pub fn fuzz_decode_compact_snapshot(bytes: &[u8]) -> Result<ChainSnapshot> {
+    decode_compact_snapshot(bytes)
+}
+
 const SCHEMA: &str = r#"
 CREATE TABLE IF NOT EXISTS chain_snapshots (
     id INTEGER PRIMARY KEY CHECK (id = 1),

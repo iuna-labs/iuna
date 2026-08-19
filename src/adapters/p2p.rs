@@ -87,6 +87,11 @@ const INITIAL_RECONNECT_DELAY: Duration = Duration::from_secs(1);
 const MAX_RECONNECT_DELAY: Duration = Duration::from_secs(30);
 type OutboundBatch = Vec<GossipEnvelope>;
 
+#[cfg(feature = "fuzzing")]
+pub fn fuzz_parse_envelope(line: &str) -> anyhow::Result<GossipEnvelope> {
+    parse_envelope(line)
+}
+
 #[derive(Clone)]
 pub struct GossipNetwork {
     inner: Arc<GossipNetworkInner>,

@@ -1,0 +1,37 @@
+[package]
+name = "iuna-fuzz"
+version = "0.0.0"
+edition = "2024"
+publish = false
+
+[package.metadata]
+cargo-fuzz = true
+
+[dependencies]
+iuna = { path = "..", features = ["fuzzing"] }
+libfuzzer-sys = "0.4"
+serde_json = "1"
+
+[[bin]]
+name = "p2p_envelope"
+path = "fuzz_targets/p2p_envelope.rs"
+test = false
+doc = false
+
+[[bin]]
+name = "compact_snapshot"
+path = "fuzz_targets/compact_snapshot.rs"
+test = false
+doc = false
+
+[[bin]]
+name = "domain_json"
+path = "fuzz_targets/domain_json.rs"
+test = false
+doc = false
+
+[[bin]]
+name = "stratum_request"
+path = "fuzz_targets/stratum_request.rs"
+test = false
+doc = false

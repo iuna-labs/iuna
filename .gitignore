@@ -1,4 +1,6 @@
 /target
+/fuzz/target
+/fuzz/artifacts
 /.docker-build
 /.iuna
 /src-tauri/target
