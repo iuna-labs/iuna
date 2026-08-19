@@ -183,6 +183,38 @@ Exit criteria:
 - backup/restore rehearsal has passed;
 - all launch-blocking incidents are fixed or explicitly deferred before mainnet.
 
+## Upgrade And Rollback
+
+For routine candidate upgrades, preserve local state and replace only the
+software artifact:
+
+1. Stop the node.
+2. Back up `wallet.json`, `config.json`, `chain.sqlite3`, and `ui_data.sqlite3`.
+3. Verify the new release artifact against the published `SHA256SUMS`.
+4. Start the new binary with the same `--data-dir`, `--wallet`, `--chain-db`,
+   P2P, HTTP, and Stratum settings.
+5. Confirm the wallet address, genesis hash, local height, tip hash, launch
+   profile, peer count, and last block age.
+
+Do not start upgrades with `--genesis`. Do not delete `chain.sqlite3` during a
+candidate-to-mainnet promotion. The promoted release must load the existing
+candidate chain database and continue from the current tip.
+
+If the upgraded node fails before it mines or accepts blocks under new rules,
+rollback is a software rollback:
+
+1. Stop the upgraded node.
+2. Restart the previous verified binary with the same data directory.
+3. Confirm the node resumes the same height and tip it had before the upgrade.
+4. Keep peers connected and let normal sync catch up if the network advanced
+   while the node was offline.
+
+If the upgraded node has already accepted blocks that older binaries reject, do
+not silently roll back. Treat that as a possible hard-fork or release incident:
+preserve chain/UI databases, stop public bootnode churn, compare tips across
+operators, and publish a decision before asking operators to delete or replace
+chain data.
+
 ## Promotion To Mainnet
 
 If the candidate passes the stability window, publish a promotion notice instead of a new genesis plan. The notice should include:

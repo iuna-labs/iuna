@@ -27,7 +27,7 @@ The current goal is to keep a small real testnet stable while increasing confide
 - [ ] Release artifacts are tagged, checksummed, and reproducible enough for testers to verify.
 - [ ] Candidate genesis allocation plan, genesis hash, and promotion policy are published and reviewed.
 - [ ] Security review is complete for consensus validation, transaction validation, P2P input handling, and wallet/key storage.
-- [ ] Upgrade and rollback instructions exist.
+- [x] Upgrade and rollback instructions exist.
 - [x] Basic operational monitoring is available for height, tip hash, peers, last block age, finalizer mode, VDF rounds, mempool, and rejected blocks.
 
 ## Pre-Candidate Launch Test Backlog
@@ -82,9 +82,9 @@ Focus: launch the candidate with mainnet-like process and treat it as the chain 
 - [ ] Create a fresh mainnet-candidate genesis.
 - [ ] Publish bootnodes and release artifacts.
 - [ ] Publish checksums for every release artifact.
-- [ ] Document node setup, backup, restore, and upgrade steps.
+- [x] Document node setup, backup, restore, and upgrade steps.
 - [ ] Run a candidate network for an agreed stability window.
-- [ ] Treat resets as launch-blocking incidents unless explicitly planned.
+- [x] Treat resets as launch-blocking incidents unless explicitly planned.
 - [ ] Decide and publish whether the candidate ledger is promoted to mainnet without a second genesis.
 
 ### M3: Mainnet Launch
