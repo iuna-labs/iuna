@@ -16,6 +16,8 @@ use serde::{Deserialize, Serialize};
 use sha2::Sha256;
 
 use crate::domain::Wallet;
+#[cfg(feature = "fuzzing")]
+use crate::domain::validate_address;
 
 const WALLET_FILE_VERSION: u32 = 3;
 const PLAINTEXT_WALLET_FILE_VERSION: u32 = 2;
@@ -250,8 +252,11 @@ fn wallet_seed(stored: &WalletFile, password: Option<&str>) -> Result<String> {
 fn read_wallet_file(path: &Path) -> Result<WalletFile> {
     let bytes =
         fs::read(path).with_context(|| format!("failed to read wallet file {}", path.display()))?;
-    serde_json::from_slice(&bytes)
-        .with_context(|| format!("failed to parse wallet file {}", path.display()))
+    parse_wallet_file_bytes(&bytes, &path.display().to_string())
+}
+
+fn parse_wallet_file_bytes(bytes: &[u8], source: &str) -> Result<WalletFile> {
+    serde_json::from_slice(bytes).with_context(|| format!("failed to parse wallet file {source}"))
 }
 
 enum WalletFileMode {
@@ -462,6 +467,48 @@ fn decode_hex_nibble(byte: u8) -> Result<u8> {
         b'A'..=b'F' => Ok(byte - b'A' + 10),
         _ => bail!("invalid hex character"),
     }
+}
+
+#[cfg(feature = "fuzzing")]
+pub fn fuzz_parse_wallet_metadata(bytes: &[u8]) -> Result<WalletMetadata> {
+    let stored = parse_wallet_file_bytes(bytes, "<fuzz>")?;
+    validate_wallet_file_metadata(&stored)?;
+    Ok(WalletMetadata {
+        address: stored.address,
+        encrypted: stored.encryption.is_some(),
+    })
+}
+
+#[cfg(feature = "fuzzing")]
+fn validate_wallet_file_metadata(stored: &WalletFile) -> Result<()> {
+    if stored.version != WALLET_FILE_VERSION
+        && stored.version != PLAINTEXT_WALLET_FILE_VERSION
+        && stored.version != 1
+    {
+        bail!("unsupported wallet file version {}", stored.version);
+    }
+    validate_address(&stored.address, "wallet address")?;
+    if let Some(encryption) = &stored.encryption {
+        if encryption.algorithm != WALLET_ENCRYPTION_ALGORITHM {
+            bail!("unsupported wallet encryption algorithm");
+        }
+        if encryption.kdf != WALLET_ENCRYPTION_KDF {
+            bail!("unsupported wallet encryption kdf");
+        }
+        let _ = decode_hex(&encryption.salt).context("invalid wallet encryption salt")?;
+        let nonce = decode_hex(&encryption.nonce).context("invalid wallet encryption nonce")?;
+        if nonce.len() != 12 {
+            bail!("invalid wallet encryption nonce length");
+        }
+        let _ = decode_hex(&encryption.ciphertext).context("invalid wallet encrypted seed")?;
+    } else {
+        let seed = stored
+            .seed
+            .as_deref()
+            .context("wallet file does not contain a seed")?;
+        let _ = normalize_seed_phrase(seed)?;
+    }
+    Ok(())
 }
 
 fn normalize_seed_phrase(seed_phrase: &str) -> Result<String> {

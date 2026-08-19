@@ -80,6 +80,7 @@ run_release_tests() {
   cargo run --locked --manifest-path fuzz/Cargo.toml --bin compact_snapshot -- -runs=1 fuzz/corpus/compact_snapshot
   cargo run --locked --manifest-path fuzz/Cargo.toml --bin domain_json -- -runs=1 fuzz/corpus/domain_json
   cargo run --locked --manifest-path fuzz/Cargo.toml --bin stratum_request -- -runs=1 fuzz/corpus/stratum_request
+  cargo run --locked --manifest-path fuzz/Cargo.toml --bin wallet_config -- -runs=1 fuzz/corpus/wallet_config
   cargo test --locked --release --test properties -- --ignored
 }
 

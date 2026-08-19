@@ -5,7 +5,9 @@ candidate chain is treated as promotable to mainnet.
 
 ## 1. Fuzzing Harnesses
 
-Status: initial repository harnesses and deployment smoke runs are in place.
+Status: initial repository harnesses and deployment smoke runs are in place for
+P2P gossip, compact snapshots, domain JSON, Stratum requests, and wallet/config
+persistence metadata.
 
 Goal: continuously throw malformed and semi-valid input at every external data
 boundary and every compact persistence format.

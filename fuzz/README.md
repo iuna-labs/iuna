@@ -15,6 +15,7 @@ cargo fuzz run p2p_envelope
 cargo fuzz run compact_snapshot
 cargo fuzz run domain_json
 cargo fuzz run stratum_request
+cargo fuzz run wallet_config
 ```
 
 Short smoke run without installing `cargo-fuzz`:
@@ -24,6 +25,7 @@ cargo run --manifest-path fuzz/Cargo.toml --bin p2p_envelope -- -runs=1 fuzz/cor
 cargo run --manifest-path fuzz/Cargo.toml --bin compact_snapshot -- -runs=1 fuzz/corpus/compact_snapshot
 cargo run --manifest-path fuzz/Cargo.toml --bin domain_json -- -runs=1 fuzz/corpus/domain_json
 cargo run --manifest-path fuzz/Cargo.toml --bin stratum_request -- -runs=1 fuzz/corpus/stratum_request
+cargo run --manifest-path fuzz/Cargo.toml --bin wallet_config -- -runs=1 fuzz/corpus/wallet_config
 ```
 
 Targets intentionally accept malformed input. A parse error is fine; panics,

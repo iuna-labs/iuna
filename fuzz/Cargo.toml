@@ -35,3 +35,9 @@ name = "stratum_request"
 path = "fuzz_targets/stratum_request.rs"
 test = false
 doc = false
+
+[[bin]]
+name = "wallet_config"
+path = "fuzz_targets/wallet_config.rs"
+test = false
+doc = false

@@ -1,0 +1,12 @@
+{
+  "version": 3,
+  "address": "0000000000000000000000000000000000000000000000000000000000000000",
+  "encryption": {
+    "algorithm": "chacha20poly1305",
+    "kdf": "pbkdf2-sha256",
+    "kdf_iterations": 210000,
+    "salt": "000102030405060708090a0b0c0d0e0f",
+    "nonce": "000102030405060708090a0b",
+    "ciphertext": "000102030405060708090a0b0c0d0e0f"
+  }
+}

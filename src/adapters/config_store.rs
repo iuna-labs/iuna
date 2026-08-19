@@ -151,14 +151,17 @@ pub fn save(path: &Path, config: &UiConfig) -> Result<()> {
 fn load(path: &Path) -> Result<UiConfig> {
     let bytes =
         fs::read(path).with_context(|| format!("failed to read config file {}", path.display()))?;
-    let stored: ConfigFile = serde_json::from_slice(&bytes)
-        .with_context(|| format!("failed to parse config file {}", path.display()))?;
+    parse_config_bytes(&bytes, &path.display().to_string())
+}
+
+fn parse_config_bytes(bytes: &[u8], source: &str) -> Result<UiConfig> {
+    let stored: ConfigFile = serde_json::from_slice(bytes)
+        .with_context(|| format!("failed to parse config file {source}"))?;
 
     if stored.version != CONFIG_FILE_VERSION {
         bail!(
-            "unsupported config file version {} in {}",
-            stored.version,
-            path.display()
+            "unsupported config file version {} in {source}",
+            stored.version
         );
     }
 
@@ -199,6 +202,11 @@ fn load(path: &Path) -> Result<UiConfig> {
         peers: stored.peers,
         address_book: stored.address_book,
     })
+}
+
+#[cfg(feature = "fuzzing")]
+pub fn fuzz_parse_config(bytes: &[u8]) -> Result<UiConfig> {
+    parse_config_bytes(bytes, "<fuzz>")
 }
 
 pub fn clamp_pow_mining_workers(workers: u8) -> u8 {

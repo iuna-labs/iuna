@@ -111,6 +111,7 @@ Evidence already in the tree:
 - HTTP/auth abuse tests for CSRF, lockout/backoff, session expiry, and
   forwarded-header spoofing;
 - wallet/config/chain crash-consistency tests;
+- wallet/config persistence metadata fuzz target;
 - local-only UI guidance in `README.md`.
 
 ### Stratum
@@ -148,6 +149,7 @@ cargo fuzz run p2p_envelope -- -runs=256
 cargo fuzz run compact_snapshot -- -runs=256
 cargo fuzz run domain_json -- -runs=256
 cargo fuzz run stratum_request -- -runs=256
+cargo fuzz run wallet_config -- -runs=256
 cargo test --locked --release --test properties -- --ignored
 ```
 

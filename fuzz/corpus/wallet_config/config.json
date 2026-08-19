@@ -1,0 +1,22 @@
+{
+  "version": 1,
+  "amount_unit": "microiuna",
+  "setup_complete": true,
+  "auth_password_hash": "argon2id:test",
+  "mining_enabled": true,
+  "pow_mining_enabled": true,
+  "pow_mining_workers": 4,
+  "burn_per_block": 100,
+  "burn_fee": 100,
+  "recovery_vdf_top_rank_percent": 50,
+  "keep_track_of_metrics": true,
+  "p2p_accept_inbound": true,
+  "p2p_bind_port": 9444,
+  "p2p_announce_addr": "203.0.113.10:9444",
+  "stratum_enabled": false,
+  "stratum_bind_port": 3333,
+  "peers": ["iuna.jhx.app:9444"],
+  "address_book": {
+    "0000000000000000000000000000000000000000000000000000000000000000": "Test"
+  }
+}
