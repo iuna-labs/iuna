@@ -76,6 +76,8 @@ pub(super) async fn api_config(State(state): State<HttpState>) -> Json<ConfigRes
         config: state.ui_config.lock().await.clone(),
         p2p_inbound_runtime_active: state.gossip.accepts_inbound().await,
         p2p_runtime_bind_addr: state.gossip.listen_addr().to_string(),
+        stratum_runtime_enabled: state.stratum.enabled,
+        stratum_runtime_listen_addr: state.stratum.listen_addr.clone(),
     })
 }
 

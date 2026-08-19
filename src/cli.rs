@@ -36,6 +36,17 @@ pub(crate) fn configured_p2p_bind_addr(
     opts.p2p_addr
 }
 
+pub(crate) fn configured_stratum_addr(
+    opts: &CliOptions,
+    ui_config: &config_store::UiConfig,
+) -> Option<SocketAddr> {
+    opts.stratum_addr.or_else(|| {
+        ui_config
+            .stratum_enabled
+            .then(|| SocketAddr::from((Ipv4Addr::UNSPECIFIED, ui_config.stratum_bind_port)))
+    })
+}
+
 pub(crate) fn apply_cli_p2p_config_overrides(
     opts: &CliOptions,
     ui_config: &mut config_store::UiConfig,
@@ -57,6 +68,25 @@ pub(crate) fn apply_cli_p2p_config_overrides(
             ui_config.p2p_announce_addr = Some(announce_addr);
             dirty = true;
         }
+    }
+    dirty
+}
+
+pub(crate) fn apply_cli_stratum_config_overrides(
+    opts: &CliOptions,
+    ui_config: &mut config_store::UiConfig,
+) -> bool {
+    let Some(addr) = opts.stratum_addr else {
+        return false;
+    };
+    let mut dirty = false;
+    if !ui_config.stratum_enabled {
+        ui_config.stratum_enabled = true;
+        dirty = true;
+    }
+    if ui_config.stratum_bind_port != addr.port() {
+        ui_config.stratum_bind_port = addr.port();
+        dirty = true;
     }
     dirty
 }

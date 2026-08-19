@@ -761,9 +761,9 @@ pub(super) const INDEX_HTML: &str = r#"<!doctype html>
             </div>
             <div class="fee-preview" x-text="autoPowStatusLabel()"></div>
           </div>
-          <div class="panel-separator"></div>
-          <div class="stratum-config">
-            <div class="stratum-note">Start the node with <code>--stratum 0.0.0.0:3333</code> to expose a Stratum V1 endpoint for ASIC miners. Use the pool URL below in the miner configuration.</div>
+          <div class="panel-separator" x-show="stratumRuntimeEnabled()"></div>
+          <div class="stratum-config" x-show="stratumRuntimeEnabled()">
+            <div class="stratum-note">Use the pool URL below in the miner configuration.</div>
             <div class="stratum-fields" aria-label="Stratum settings">
               <div class="stratum-field">
                 <div class="stratum-label">Status</div>
@@ -1196,6 +1196,25 @@ pub(super) const INDEX_HTML: &str = r#"<!doctype html>
             <div class="muted">Use this only when TCP port <span x-text="p2pBindPort"></span> is reachable from the internet.</div>
             <div class="setup-actions"><button class="primary" type="submit">Save</button></div>
           </form>
+        </div>
+        <div class="panel" x-show="advancedMode()">
+          <div class="settings-mode-row">
+            <div class="settings-mode-copy">
+              <div class="settings-mode-title">Stratum endpoint</div>
+              <div class="muted" x-text="stratumEnabled ? 'ASIC miners can connect after the listener is active.' : 'Stratum listener is disabled.'"></div>
+            </div>
+            <label class="toggle-switch" :class="{ active: stratumEnabled }">
+              <input type="checkbox" :checked="stratumEnabled" @change="setStratumEnabled($event.target.checked)">
+              <span class="toggle-track" aria-hidden="true"><span class="toggle-thumb"></span></span>
+              <span class="toggle-text" x-text="stratumEnabled ? 'On' : 'Off'"></span>
+            </label>
+          </div>
+          <form class="settings-form" x-show="stratumEnabled" x-transition @submit.prevent="saveStratumSettings">
+            <label>Bind port<input x-model.number="stratumBindPort" @input="stratumBindPortDirty = true" type="number" min="1" max="65535" step="1" required></label>
+            <div class="muted" x-text="stratumRestartMessage() || 'Stratum is using the configured runtime setting.'"></div>
+            <div class="setup-actions"><button class="primary" type="submit">Save</button></div>
+          </form>
+          <div class="muted" x-show="!stratumEnabled && stratumRestartRequired()" x-text="stratumRestartMessage()"></div>
         </div>
         <div class="panel">
           <h3>Change Password</h3>

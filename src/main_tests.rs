@@ -14,7 +14,8 @@ use tokio::sync::Mutex;
 
 use super::{
     ChainMode, CliOptions, GENESIS_INITIAL_BURN_FEE, GENESIS_INITIAL_BURN_PER_BLOCK, StartupWallet,
-    apply_cli_p2p_config_overrides, configured_p2p_announce_addr, configured_p2p_bind_addr,
+    apply_cli_p2p_config_overrides, apply_cli_stratum_config_overrides,
+    configured_p2p_announce_addr, configured_p2p_bind_addr, configured_stratum_addr,
     extrapolate_vdf_rounds, help_text, initial_burn_fee, initial_burn_per_block, initialize_ledger,
     load_startup_wallet, measure_vdf_rounds, persist_chain_snapshot, project_ui_data_store,
     run_chain_persistence_with_interval, validate_wallet_for_mode,
@@ -74,6 +75,36 @@ fn no_args_starts_setup_mode() {
 fn stratum_port_can_be_configured() {
     let opts = parse(&["--stratum", "127.0.0.1:3333"]).unwrap().unwrap();
     assert_eq!(opts.stratum_addr, Some("127.0.0.1:3333".parse().unwrap()));
+}
+
+#[test]
+fn configured_stratum_addr_uses_settings_when_enabled() {
+    let opts = parse(&[]).unwrap().unwrap();
+    let config = UiConfig {
+        stratum_enabled: true,
+        stratum_bind_port: 3334,
+        ..UiConfig::default()
+    };
+
+    assert_eq!(
+        configured_stratum_addr(&opts, &config).unwrap().to_string(),
+        "0.0.0.0:3334"
+    );
+}
+
+#[test]
+fn configured_stratum_addr_prefers_cli_addr() {
+    let opts = parse(&["--stratum", "127.0.0.1:3335"]).unwrap().unwrap();
+    let config = UiConfig {
+        stratum_enabled: true,
+        stratum_bind_port: 3334,
+        ..UiConfig::default()
+    };
+
+    assert_eq!(
+        configured_stratum_addr(&opts, &config).unwrap().to_string(),
+        "127.0.0.1:3335"
+    );
 }
 
 #[test]
@@ -342,6 +373,16 @@ fn cli_p2p_port_overrides_config_bind_port() {
 
     assert!(apply_cli_p2p_config_overrides(&opts, &mut config));
     assert_eq!(config.p2p_bind_port, 9555);
+}
+
+#[test]
+fn cli_stratum_addr_enables_and_persists_config_port() {
+    let opts = parse(&["--stratum", "127.0.0.1:3335"]).unwrap().unwrap();
+    let mut config = UiConfig::default();
+
+    assert!(apply_cli_stratum_config_overrides(&opts, &mut config));
+    assert!(config.stratum_enabled);
+    assert_eq!(config.stratum_bind_port, 3335);
 }
 
 #[test]

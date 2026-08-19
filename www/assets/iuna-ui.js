@@ -67,6 +67,9 @@ window.iunaApp = function iunaApp() {
     p2pBindPortDirty: false,
     p2pAnnounceAddr: "",
     p2pAnnounceDirty: false,
+    stratumEnabled: false,
+    stratumBindPort: 3333,
+    stratumBindPortDirty: false,
     setupWallet: { address: null, seed_phrase: null, dev_verify_bypass: false, requires_peer: false },
     setupNodeMode: "wallet",
     setupWalletMode: "create",
@@ -419,6 +422,10 @@ window.iunaApp = function iunaApp() {
       this.p2pAcceptInbound = this.config.p2p_accept_inbound === true;
       if (!this.p2pBindPortDirty) {
         this.p2pBindPort = Number(this.config.p2p_bind_port || 9444);
+      }
+      this.stratumEnabled = this.config.stratum_enabled === true;
+      if (!this.stratumBindPortDirty) {
+        this.stratumBindPort = Number(this.config.stratum_bind_port || 3333);
       }
       if (
         options.addressBookVersion === undefined ||
@@ -1599,6 +1606,68 @@ window.iunaApp = function iunaApp() {
       }
       const configured = this.p2pConfiguredBindAddr();
       return `Restart iuna to open public P2P on ${configured || "the configured bind port"}.`;
+    },
+
+    async setStratumEnabled(enabled) {
+      const previous = this.stratumEnabled;
+      try {
+        this.stratumEnabled = enabled;
+        await this.postForm(
+          "/api/settings/stratum",
+          { enabled, bind_port: this.stratumBindPortValue() },
+          enabled ? "Stratum endpoint setting saved" : "Stratum endpoint disabled"
+        );
+        this.stratumBindPortDirty = false;
+        await this.refreshConfig();
+      } catch (error) {
+        this.stratumEnabled = previous;
+        this.showFlash(error.message, "error");
+      }
+    },
+
+    stratumBindPortValue() {
+      const port = Number(this.stratumBindPort);
+      if (!Number.isInteger(port) || port < 1 || port > 65535) {
+        throw new Error("Stratum bind port must be between 1 and 65535");
+      }
+      return port;
+    },
+
+    stratumConfiguredBindAddr() {
+      const port = Number(this.config.stratum_bind_port || 3333);
+      if (!Number.isInteger(port) || port < 1 || port > 65535) return null;
+      return `0.0.0.0:${port}`;
+    },
+
+    stratumRestartRequired() {
+      const runtimeActive = this.config.stratum_runtime_enabled === true;
+      if (this.stratumEnabled !== runtimeActive) return true;
+      if (!this.stratumEnabled) return false;
+      const configured = this.stratumConfiguredBindAddr();
+      return configured ? this.config.stratum_runtime_listen_addr !== configured : false;
+    },
+
+    stratumRestartMessage() {
+      if (!this.stratumRestartRequired()) return "";
+      if (!this.stratumEnabled && this.config.stratum_runtime_enabled === true) {
+        return "Restart iuna to close the Stratum listener.";
+      }
+      const configured = this.stratumConfiguredBindAddr();
+      return `Restart iuna to open Stratum on ${configured || "the configured bind port"}.`;
+    },
+
+    async saveStratumSettings() {
+      try {
+        await this.postForm(
+          "/api/settings/stratum",
+          { enabled: this.stratumEnabled, bind_port: this.stratumBindPortValue() },
+          "Stratum endpoint setting saved"
+        );
+        this.stratumBindPortDirty = false;
+        await this.refreshConfig();
+      } catch (error) {
+        this.showFlash(error.message, "error");
+      }
     },
 
     async saveP2pAnnounce() {
@@ -3021,6 +3090,10 @@ window.iunaApp = function iunaApp() {
 
     stratumListenAddr() {
       return this.status.stratum?.listen_addr || "-";
+    },
+
+    stratumRuntimeEnabled() {
+      return this.status.stratum?.enabled === true;
     },
 
     stratumPoolUrl() {

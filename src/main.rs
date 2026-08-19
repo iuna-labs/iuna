@@ -25,8 +25,9 @@ use tokio::sync::Mutex;
 
 mod cli;
 use cli::{
-    ChainMode, CliOptions, apply_cli_p2p_config_overrides, configured_p2p_announce_addr,
-    configured_p2p_bind_addr, initial_burn_fee, initial_burn_per_block, validate_wallet_for_mode,
+    ChainMode, CliOptions, apply_cli_p2p_config_overrides, apply_cli_stratum_config_overrides,
+    configured_p2p_announce_addr, configured_p2p_bind_addr, configured_stratum_addr,
+    initial_burn_fee, initial_burn_per_block, validate_wallet_for_mode,
 };
 #[cfg(test)]
 use cli::{default_data_dir, help_text};
@@ -62,9 +63,12 @@ async fn main() -> Result<()> {
         );
     }
     let mut ui_config = config_store::load_or_create(&config_path)?;
-    let ui_config_dirty = apply_cli_p2p_config_overrides(&opts, &mut ui_config);
+    let p2p_config_dirty = apply_cli_p2p_config_overrides(&opts, &mut ui_config);
+    let stratum_config_dirty = apply_cli_stratum_config_overrides(&opts, &mut ui_config);
+    let ui_config_dirty = p2p_config_dirty || stratum_config_dirty;
     let p2p_announce_addr = configured_p2p_announce_addr(&opts, &ui_config)?;
     let configured_p2p_addr = configured_p2p_bind_addr(&opts, &ui_config);
+    let configured_stratum_addr = configured_stratum_addr(&opts, &ui_config);
     let p2p_accept_inbound = ui_config.p2p_accept_inbound;
     let advertised_p2p_addr = p2p_announce_addr.unwrap_or(configured_p2p_addr);
     let wallet_load = load_startup_wallet(&wallet_path)?;
@@ -155,7 +159,7 @@ async fn main() -> Result<()> {
         enabled: false,
         listen_addr: None,
     };
-    if let Some(stratum_addr) = opts.stratum_addr {
+    if let Some(stratum_addr) = configured_stratum_addr {
         let stratum =
             stratum::StratumServer::start(Arc::clone(&node), gossip.clone(), stratum_addr).await?;
         println!("stratum listener: {}", stratum.listen_addr());

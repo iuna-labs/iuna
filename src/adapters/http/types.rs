@@ -99,12 +99,20 @@ pub(super) struct P2pInboundForm {
     pub(super) bind_port: Option<u16>,
 }
 
+#[derive(Debug, Deserialize)]
+pub(super) struct StratumSettingsForm {
+    pub(super) enabled: bool,
+    pub(super) bind_port: Option<u16>,
+}
+
 #[derive(Debug, Serialize)]
 pub(super) struct ConfigResponse {
     #[serde(flatten)]
     pub(super) config: UiConfig,
     pub(super) p2p_inbound_runtime_active: bool,
     pub(super) p2p_runtime_bind_addr: String,
+    pub(super) stratum_runtime_enabled: bool,
+    pub(super) stratum_runtime_listen_addr: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]

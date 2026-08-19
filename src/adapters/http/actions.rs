@@ -12,8 +12,8 @@ use tokio::sync::Mutex;
 use super::types::{
     ActionResponse, AddressBookDeleteForm, AddressBookForm, BurnSettingsForm, ChainResetForm,
     ConfigForm, FeeEstimateResponse, MetricsSettingsForm, P2pAnnounceForm, P2pInboundForm,
-    PeerForm, PowMiningForm, RecoveryVdfSettingsForm, SeedPhraseForm, TransferForm,
-    WalletSetupResponse,
+    PeerForm, PowMiningForm, RecoveryVdfSettingsForm, SeedPhraseForm, StratumSettingsForm,
+    TransferForm, WalletSetupResponse,
 };
 use super::{
     HttpState, action_json, api_error, config_store, estimate_burn_fee, estimate_mine_fee,
@@ -134,6 +134,13 @@ pub(super) async fn api_p2p_inbound_form(
     Form(form): Form<P2pInboundForm>,
 ) -> Json<ActionResponse> {
     action_json(set_p2p_accept_inbound(&state, form.enabled, form.bind_port).await)
+}
+
+pub(super) async fn api_stratum_settings_form(
+    State(state): State<HttpState>,
+    Form(form): Form<StratumSettingsForm>,
+) -> Json<ActionResponse> {
+    action_json(set_stratum_settings(&state, form.enabled, form.bind_port).await)
 }
 
 pub(super) async fn burn_per_block_form(
@@ -391,6 +398,25 @@ pub(super) async fn set_p2p_accept_inbound(
         state.gossip.set_accept_inbound(false).await?;
     }
 
+    Ok(())
+}
+
+pub(super) async fn set_stratum_settings(
+    state: &HttpState,
+    enabled: bool,
+    bind_port: Option<u16>,
+) -> Result<()> {
+    let bind_port = bind_port.unwrap_or(config_store::DEFAULT_STRATUM_BIND_PORT);
+    if bind_port == 0 {
+        bail!("Stratum bind port must be between 1 and 65535");
+    }
+
+    let mut config = state.ui_config.lock().await;
+    let mut next_config = config.clone();
+    next_config.stratum_enabled = enabled;
+    next_config.stratum_bind_port = bind_port;
+    config_store::save(&state.config_path, &next_config)?;
+    *config = next_config;
     Ok(())
 }
 
