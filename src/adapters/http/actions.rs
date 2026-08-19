@@ -536,3 +536,99 @@ fn validate_address_book_name(name: String) -> Result<String> {
     }
     Ok(name)
 }
+
+#[cfg(test)]
+mod tests {
+    use std::{
+        collections::BTreeMap,
+        net::{IpAddr, Ipv4Addr, SocketAddr},
+        sync::Arc,
+    };
+
+    use tempfile::tempdir;
+    use tokio::sync::Mutex;
+
+    use crate::{
+        adapters::{
+            chain_store::SqliteChainStore, config_store, config_store::UiConfig,
+            p2p::GossipNetwork, ui_data_store::SqliteUiDataStore, wallet_store,
+        },
+        app::{NodeCore, PeerBook, StratumStatus},
+        domain::{GenesisBurn, Ledger, MICRO_IUNA},
+    };
+
+    use super::super::{AuthSession, HttpState, UiChainCache, state::AuthBackoff};
+    use super::{CHAIN_RESET_CONFIRMATION, reset_local_chain};
+
+    fn socket() -> SocketAddr {
+        SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 9444)
+    }
+
+    #[tokio::test]
+    async fn local_chain_reset_clears_chain_and_ui_without_touching_wallet_or_config() {
+        let dir = tempdir().unwrap();
+        let wallet_path = dir.path().join("wallet.json");
+        let config_path = dir.path().join("config.json");
+        let chain_store = SqliteChainStore::open(dir.path().join("chain.sqlite3")).unwrap();
+        let ui_data_store = SqliteUiDataStore::open(dir.path().join("ui.sqlite3")).unwrap();
+        let wallet = wallet_store::replace_with_imported_seed_phrase(
+            &wallet_path,
+            "abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon art",
+        )
+        .unwrap();
+        let config = UiConfig {
+            setup_complete: true,
+            peers: vec!["127.0.0.1:9445".to_string()],
+            ..UiConfig::default()
+        };
+        config_store::save(&config_path, &config).unwrap();
+        let wallet_before = std::fs::read(&wallet_path).unwrap();
+        let config_before = std::fs::read(&config_path).unwrap();
+
+        let mut allocations = BTreeMap::new();
+        allocations.insert(wallet.address().to_string(), 10 * MICRO_IUNA);
+        let ledger = Ledger::new_with_genesis_burns(
+            allocations,
+            vec![GenesisBurn::new(wallet.address(), MICRO_IUNA)],
+            1,
+        )
+        .unwrap();
+        let snapshot = ledger.snapshot();
+        chain_store.save(&snapshot).unwrap();
+        ui_data_store.project_snapshot(&snapshot, true).unwrap();
+
+        let node = Arc::new(Mutex::new(NodeCore::from_ledger(wallet, ledger, 0)));
+        let peers = Arc::new(Mutex::new(PeerBook::default()));
+        let gossip = GossipNetwork::start(node.clone(), peers.clone(), socket(), None, false)
+            .await
+            .unwrap();
+        let state = HttpState {
+            node,
+            peers,
+            gossip,
+            ui_config: Arc::new(Mutex::new(config)),
+            config_path: config_path.clone(),
+            chain_store: chain_store.clone(),
+            ui_data_store: ui_data_store.clone(),
+            wallet_path: wallet_path.clone(),
+            stratum: StratumStatus {
+                enabled: false,
+                listen_addr: None,
+            },
+            auth_sessions: Arc::new(Mutex::new(BTreeMap::<String, AuthSession>::new())),
+            auth_backoff: Arc::new(Mutex::new(BTreeMap::<String, AuthBackoff>::new())),
+            ui_cache: Arc::new(Mutex::new(UiChainCache::default())),
+            ui_data_refresh: Arc::new(Mutex::new(())),
+        };
+
+        reset_local_chain(&state, CHAIN_RESET_CONFIRMATION)
+            .await
+            .unwrap();
+
+        assert!(!state.node.lock().await.has_real_chain());
+        assert!(chain_store.load().unwrap().is_none());
+        assert!(ui_data_store.load_metrics().unwrap().is_empty());
+        assert_eq!(std::fs::read(&wallet_path).unwrap(), wallet_before);
+        assert_eq!(std::fs::read(&config_path).unwrap(), config_before);
+    }
+}

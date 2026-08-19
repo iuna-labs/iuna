@@ -132,7 +132,9 @@ Acceptance:
 
 Status: started with atomic JSON writes for config and wallet files, stale
 temp-file regression coverage, and rollback tests that keep the last committed
-chain snapshot/UI projection after failed persistence work.
+chain snapshot/UI projection after failed persistence work. Local chain reset now
+has regression coverage that clears chain/UI persistence while preserving wallet
+and config files.
 
 Goal: prove local persistence survives process death at bad moments.
 
