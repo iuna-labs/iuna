@@ -32,6 +32,7 @@ impl NodeCore {
             return Ok(());
         }
         let key = (bundle.height, bundle.slot);
+        self.ledger.precheck_next_block_burn_bundle(&bundle)?;
         for burn in &bundle.burns {
             self.receive_gossiped_transaction(burn.clone())?;
         }
@@ -240,5 +241,49 @@ mod tests {
                 .iter()
                 .any(|transaction| transaction.signature() == burn.signature())
         );
+    }
+
+    #[test]
+    fn oversized_burn_bundle_does_not_import_embedded_burns() {
+        let alice = Wallet::from_seed("oversized-bundle-alice");
+        let bob = Wallet::from_seed("oversized-bundle-bob");
+        let wallets = [alice.clone(), bob.clone()];
+        let ledger = funded_ledger(&wallets);
+        let finalizer = ledger.expected_leader_for_next_block().unwrap();
+        let signer = wallets
+            .iter()
+            .find(|wallet| wallet.address() == finalizer)
+            .expect("test ledger should include selected finalizer")
+            .clone();
+        let burner = wallets
+            .iter()
+            .find(|wallet| wallet.address() != signer.address())
+            .expect("test ledger should include a non-finalizer")
+            .clone();
+        let mut signer_ledger = ledger.clone();
+        let mut burns = Vec::new();
+        let oversized_bundle = loop {
+            let burn = signer_ledger.build_burn(&burner, 1, 1).unwrap();
+            signer_ledger.submit_transaction(burn.clone()).unwrap();
+            burns.push(burn);
+            let bundle = signer_ledger.test_burn_bundle(&signer, burns.clone());
+            if bundle.serialized_size_bytes().unwrap() > 10_000 {
+                break bundle;
+            }
+        };
+        let first_burn_signature = oversized_bundle.burns[0].signature().to_string();
+        let mut receiver = NodeCore::from_ledger(signer, ledger, 0);
+
+        let error = receiver.receive_burn_bundle(oversized_bundle).unwrap_err();
+
+        assert!(error.to_string().contains("burn bundle exceeds max size"));
+        assert!(
+            receiver
+                .ledger()
+                .pending()
+                .iter()
+                .all(|transaction| transaction.signature() != first_burn_signature)
+        );
+        assert!(receiver.drain_outbox().is_empty());
     }
 }

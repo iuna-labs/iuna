@@ -6,8 +6,8 @@ use super::ledger_ops::verify_address_signature;
 use super::reveal::{burn_bundle_slot_mask, burn_committee_mask};
 use super::{
     Amount, BURN_COMMITTEE_SIZE, Block, BurnBundle, BurnBundlePayload, BurnBundleSection,
-    BurnBundleSignature, FinalizerMode, Ledger, MAX_BURN_BUNDLE_BYTES, MaskedBurn, Transaction,
-    Wallet,
+    BurnBundleSignature, BurnCommitteeMember, FinalizerMode, Ledger, MAX_BURN_BUNDLE_BYTES,
+    MaskedBurn, Transaction, Wallet,
 };
 
 impl Ledger {
@@ -85,6 +85,40 @@ impl Ledger {
         let expected_height = self.tip().height + 1;
         let expected_prev_hash = self.tip().hash.clone();
         self.validate_burn_bundles_for_block(expected_height, &expected_prev_hash, bundles)
+    }
+
+    pub(crate) fn precheck_next_block_burn_bundle(&self, bundle: &BurnBundle) -> Result<()> {
+        let expected_height = self.tip().height + 1;
+        let expected_prev_hash = self.tip().hash.clone();
+        let committee = self
+            .burn_committee_for_height(expected_height)
+            .into_iter()
+            .map(|member| (member.slot, member))
+            .collect::<BTreeMap<_, _>>();
+        self.precheck_burn_bundle_for_block(
+            expected_height,
+            &expected_prev_hash,
+            &committee,
+            bundle,
+        )
+    }
+
+    #[cfg(test)]
+    pub fn test_burn_bundle(&self, wallet: &Wallet, burns: Vec<Transaction>) -> BurnBundle {
+        let height = self.tip().height + 1;
+        let prev_hash = self.tip().hash.clone();
+        let member = self
+            .burn_committee_for_next_block()
+            .into_iter()
+            .find(|member| member.owner == wallet.address())
+            .expect("test wallet must be a burn committee member");
+        wallet.burn_bundle(BurnBundlePayload {
+            height,
+            prev_hash,
+            slot: member.slot,
+            member: wallet.address().to_string(),
+            burns,
+        })
     }
 
     pub(super) fn burn_bundle_section_from_bundles(
@@ -262,58 +296,74 @@ impl Ledger {
             .collect::<BTreeMap<_, _>>();
         let mut seen_members = BTreeSet::new();
         for bundle in &bundles {
-            if bundle.height != expected_height {
-                bail!("burn bundle height is invalid");
-            }
-            if bundle.prev_hash != expected_prev_hash {
-                bail!("burn bundle parent hash is invalid");
-            }
-            if usize::from(bundle.slot) >= BURN_COMMITTEE_SIZE {
-                bail!("burn bundle slot is invalid");
-            }
             if !seen_members.insert(bundle.member.clone()) {
                 bail!("duplicate burn bundle member");
             }
-            let member = committee
-                .get(&bundle.slot)
-                .context("burn bundle slot is not assigned")?;
-            if bundle.member != member.owner {
-                bail!("burn bundle member is not assigned to slot");
-            }
-            if bundle.serialized_size_bytes()? > MAX_BURN_BUNDLE_BYTES {
-                bail!("burn bundle exceeds max size");
-            }
-            verify_address_signature(
-                &bundle.member,
-                &bundle.canonical_payload(),
-                &bundle.signature,
-                "burn bundle",
+            self.precheck_burn_bundle_for_block(
+                expected_height,
+                expected_prev_hash,
+                &committee,
+                bundle,
             )?;
-            let mut seen_bundle_burns = BTreeSet::new();
-            let mut previous_key: Option<(Amount, String)> = None;
             for burn in &bundle.burns {
-                if !seen_bundle_burns.insert(burn.signature().to_string()) {
-                    bail!("duplicate burn in burn bundle");
-                }
-                if !burn.is_burn() {
-                    bail!("burn bundle contains a non-burn transaction");
-                }
                 if matching_burn_by_signature(burn, &self.pending).is_none() {
                     bail!("burn bundle references a burn that is not in the mempool");
                 }
-                self.validate_transaction_terms(burn)?;
-                let key = (burn.fee(), burn.signature().to_string());
-                if let Some((previous_fee, previous_signature)) = &previous_key {
-                    if key.0 > *previous_fee
-                        || key.0 == *previous_fee && key.1 < *previous_signature
-                    {
-                        bail!("burn bundle is not fee ordered");
-                    }
-                }
-                previous_key = Some(key);
             }
         }
         Ok(bundles)
+    }
+
+    fn precheck_burn_bundle_for_block(
+        &self,
+        expected_height: u64,
+        expected_prev_hash: &str,
+        committee: &BTreeMap<u8, BurnCommitteeMember>,
+        bundle: &BurnBundle,
+    ) -> Result<()> {
+        if bundle.height != expected_height {
+            bail!("burn bundle height is invalid");
+        }
+        if bundle.prev_hash != expected_prev_hash {
+            bail!("burn bundle parent hash is invalid");
+        }
+        if usize::from(bundle.slot) >= BURN_COMMITTEE_SIZE {
+            bail!("burn bundle slot is invalid");
+        }
+        let member = committee
+            .get(&bundle.slot)
+            .context("burn bundle slot is not assigned")?;
+        if bundle.member != member.owner {
+            bail!("burn bundle member is not assigned to slot");
+        }
+        if bundle.serialized_size_bytes()? > MAX_BURN_BUNDLE_BYTES {
+            bail!("burn bundle exceeds max size");
+        }
+        verify_address_signature(
+            &bundle.member,
+            &bundle.canonical_payload(),
+            &bundle.signature,
+            "burn bundle",
+        )?;
+        let mut seen_bundle_burns = BTreeSet::new();
+        let mut previous_key: Option<(Amount, String)> = None;
+        for burn in &bundle.burns {
+            if !seen_bundle_burns.insert(burn.signature().to_string()) {
+                bail!("duplicate burn in burn bundle");
+            }
+            if !burn.is_burn() {
+                bail!("burn bundle contains a non-burn transaction");
+            }
+            self.validate_transaction_terms(burn)?;
+            let key = (burn.fee(), burn.signature().to_string());
+            if let Some((previous_fee, previous_signature)) = &previous_key {
+                if key.0 > *previous_fee || key.0 == *previous_fee && key.1 < *previous_signature {
+                    bail!("burn bundle is not fee ordered");
+                }
+            }
+            previous_key = Some(key);
+        }
+        Ok(())
     }
 }
 

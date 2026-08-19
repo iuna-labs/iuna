@@ -30,6 +30,29 @@ The current goal is to keep a small real testnet stable while increasing confide
 - [ ] Upgrade and rollback instructions exist.
 - [ ] Basic operational monitoring is available for height, tip hash, peers, last block age, finalizer mode, VDF rounds, mempool, and rejected blocks.
 
+## Pre-Reset Mainnet-Candidate Test Backlog
+
+These items are not protocol rules. They are the attack and reliability checks to finish or consciously defer before the planned devnet reset that should become the mainnet-candidate network.
+
+### Must Before Reset
+
+- [x] Burn bundle relay cannot import embedded burns before bundle metadata, membership, signature, fee ordering, and size are prechecked.
+- [x] Block validation with burn attestations remains independent of local mempool contents, including empty and conflicting mempools.
+- [x] Post-genesis transactions cannot spend with `genesis` input signatures.
+- [x] P2P envelope item limits reject batches only above their configured boundaries.
+- [ ] Stratum endpoint has explicit DoS limits: maximum line size, maximum jobs per session, idle timeout, and connection/session caps.
+- [ ] Fork and snapshot adversarial tests cover same-height leader-quality choice, taller valid forks inside finality, invalid late snapshot blocks, and pending transaction carry-forward after reorg.
+- [ ] Compact snapshot decoder has malformed-input tests for huge lengths, oversized varints, trailing bytes, truncated payloads, invalid tags, and random byte inputs without panics or excessive allocation.
+- [ ] Supply invariant tests cover mixed burns, fees, PoW mine actions, reorgs, no replay, and no double spend.
+
+### Should Before Mainnet
+
+- [ ] HTTP/auth abuse tests cover CSRF same-origin behavior, lockout/backoff behavior, forwarded-header spoofing from untrusted peers, and session expiry.
+- [ ] Multi-node in-memory simulation covers delayed gossip, withheld burn bundles, bundle equivocation, partitions, restarts, persistence reload, and convergence.
+- [ ] Long-running release-mode soak test runs with automatic burn/finalization, P2P sync, Stratum-disabled and Stratum-enabled nodes, and periodic node restarts.
+- [ ] Operator failure playbooks exist for stalled height, divergent tips, old snapshots, no burn committee signatures, recovery blocks, and corrupted local persistence.
+- [ ] Mainnet-candidate release rehearsal includes fresh genesis, published bootnodes, checksums, backup/restore instructions, and a no-reset stability window.
+
 ## Milestones
 
 ### M1: Testnet Hardening

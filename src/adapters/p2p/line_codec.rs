@@ -208,11 +208,18 @@ fn ensure_len(label: &str, len: usize, max: usize) -> Result<()> {
 mod tests {
     use crate::{
         adapters::p2p::metrics::P2pMetricsCounters,
-        app::GossipEnvelope,
-        domain::{BurnBundle, OutPoint, Transaction, TxInput, TxOutput},
+        app::{BlockInventory, GossipEnvelope, TRANSACTION_BATCH_LIMIT},
+        domain::{
+            Block, BurnBundle, BurnBundleSection, ChainSnapshot, FinalizerMode, LaunchProfile,
+            OutPoint, Transaction, TxInput, TxOutput,
+        },
     };
 
-    use super::{parse_envelope, record_received_envelope_kind};
+    use super::{
+        MAX_BLOCK_BATCH, MAX_INVENTORY_ITEMS, MAX_OBJECT_REQUESTS, MAX_PEER_LIST,
+        MAX_SNAPSHOT_BLOCKS, parse_envelope, record_received_envelope_kind,
+        validate_envelope_limits,
+    };
 
     fn burn(signature: &str) -> Transaction {
         Transaction::Burn {
@@ -242,6 +249,35 @@ mod tests {
             member: format!("member-{slot}"),
             burns: vec![burn(signature)],
             signature: format!("bundle-{signature}"),
+        }
+    }
+
+    fn dummy_block(height: u64) -> Block {
+        Block {
+            height,
+            prev_hash: "0".repeat(64),
+            timestamp_ms: height,
+            miner: "0".repeat(64),
+            finalizer_mode: FinalizerMode::Ticket,
+            finalizer_rank: 0,
+            reward: 0,
+            vdf_rounds: 0,
+            vdf_output: "0:0".to_string(),
+            leader_proof: None,
+            burn_bundle_section: BurnBundleSection::default(),
+            transactions: Vec::new(),
+            hash: format!("{height:064x}"),
+        }
+    }
+
+    fn dummy_snapshot(blocks: usize) -> ChainSnapshot {
+        ChainSnapshot {
+            genesis_allocations: Default::default(),
+            vdf_rounds: 1,
+            launch_profile: LaunchProfile::default(),
+            blocks: (0..blocks)
+                .map(|height| dummy_block(height as u64))
+                .collect(),
         }
     }
 
@@ -280,5 +316,119 @@ mod tests {
         let line = serde_json::to_string(&envelope).unwrap();
 
         assert_eq!(parse_envelope(&line).unwrap(), envelope);
+    }
+
+    #[test]
+    fn envelope_item_limits_reject_only_above_the_boundary() {
+        assert!(
+            validate_envelope_limits(&GossipEnvelope::BlockRangeRequest {
+                from_height: 1,
+                limit: MAX_BLOCK_BATCH
+            })
+            .is_ok()
+        );
+        assert!(
+            validate_envelope_limits(&GossipEnvelope::BlockRangeRequest {
+                from_height: 1,
+                limit: MAX_BLOCK_BATCH + 1
+            })
+            .is_err()
+        );
+        assert!(
+            validate_envelope_limits(&GossipEnvelope::BlockRequest {
+                hashes: vec!["0".repeat(64); MAX_OBJECT_REQUESTS]
+            })
+            .is_ok()
+        );
+        assert!(
+            validate_envelope_limits(&GossipEnvelope::BlockRequest {
+                hashes: vec!["0".repeat(64); MAX_OBJECT_REQUESTS + 1]
+            })
+            .is_err()
+        );
+        assert!(
+            validate_envelope_limits(&GossipEnvelope::Inventory {
+                blocks: vec![
+                    BlockInventory {
+                        height: 1,
+                        hash: "0".repeat(64)
+                    };
+                    MAX_INVENTORY_ITEMS
+                ]
+            })
+            .is_ok()
+        );
+        assert!(
+            validate_envelope_limits(&GossipEnvelope::Inventory {
+                blocks: vec![
+                    BlockInventory {
+                        height: 1,
+                        hash: "0".repeat(64)
+                    };
+                    MAX_INVENTORY_ITEMS + 1
+                ]
+            })
+            .is_err()
+        );
+        assert!(
+            validate_envelope_limits(&GossipEnvelope::Transactions {
+                transactions: vec![burn("a"); TRANSACTION_BATCH_LIMIT]
+            })
+            .is_ok()
+        );
+        assert!(
+            validate_envelope_limits(&GossipEnvelope::Transactions {
+                transactions: vec![burn("a"); TRANSACTION_BATCH_LIMIT + 1]
+            })
+            .is_err()
+        );
+        assert!(
+            validate_envelope_limits(&GossipEnvelope::BurnBundles {
+                bundles: vec![burn_bundle(1, "a"); TRANSACTION_BATCH_LIMIT]
+            })
+            .is_ok()
+        );
+        assert!(
+            validate_envelope_limits(&GossipEnvelope::BurnBundles {
+                bundles: vec![burn_bundle(1, "a"); TRANSACTION_BATCH_LIMIT + 1]
+            })
+            .is_err()
+        );
+        assert!(
+            validate_envelope_limits(&GossipEnvelope::Blocks {
+                blocks: vec![dummy_block(1); MAX_BLOCK_BATCH]
+            })
+            .is_ok()
+        );
+        assert!(
+            validate_envelope_limits(&GossipEnvelope::Blocks {
+                blocks: vec![dummy_block(1); MAX_BLOCK_BATCH + 1]
+            })
+            .is_err()
+        );
+        assert!(
+            validate_envelope_limits(&GossipEnvelope::ChainSnapshot(dummy_snapshot(
+                MAX_SNAPSHOT_BLOCKS
+            )))
+            .is_ok()
+        );
+        assert!(
+            validate_envelope_limits(&GossipEnvelope::ChainSnapshot(dummy_snapshot(
+                MAX_SNAPSHOT_BLOCKS + 1
+            )))
+            .is_err()
+        );
+        assert!(
+            validate_envelope_limits(&GossipEnvelope::PeerList {
+                peers: vec!["127.0.0.1:9444".to_string(); MAX_PEER_LIST]
+            })
+            .is_ok()
+        );
+        assert!(
+            validate_envelope_limits(&GossipEnvelope::PeerList {
+                peers: vec!["127.0.0.1:9444".to_string(); MAX_PEER_LIST + 1]
+            })
+            .is_err()
+        );
     }
 }

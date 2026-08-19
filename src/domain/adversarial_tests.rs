@@ -648,6 +648,52 @@ fn attested_burn_is_not_selected_again_as_normal_transaction() {
 }
 
 #[test]
+fn attested_burn_block_validates_independent_of_local_mempool() {
+    let mut harness = harness_for_percent(22, 25);
+    let leader = harness.next_rank(0);
+    let finalizer = harness.wallet(&leader.owner).clone();
+    harness.submit_anchor_burn(&finalizer);
+    let victim = harness
+        .honest
+        .iter()
+        .find(|wallet| wallet.address() != finalizer.address())
+        .unwrap()
+        .clone();
+    let attested_burn = harness.submit_fee_burn(&victim, 1, 1);
+    let bundle = finalizer.burn_bundle(BurnBundlePayload {
+        height: harness.ledger.height() + 1,
+        prev_hash: harness.ledger.tip_hash().to_string(),
+        slot: 0,
+        member: finalizer.address().to_string(),
+        burns: vec![attested_burn.clone()],
+    });
+    let block = harness.finish_ticket_block_from_pending(0, vec![bundle]);
+    let parent_snapshot = harness.ledger.snapshot();
+
+    let mut empty_mempool = Ledger::from_snapshot_at(parent_snapshot.clone(), NOW_MS).unwrap();
+    empty_mempool
+        .apply_block_at(block.clone(), NOW_MS.saturating_add(block.timestamp_ms))
+        .unwrap();
+
+    let mut conflicting_mempool = Ledger::from_snapshot_at(parent_snapshot, NOW_MS).unwrap();
+    let conflict = conflicting_mempool
+        .build_transfer(&victim, finalizer.address(), 1, 1)
+        .unwrap();
+    conflicting_mempool
+        .submit_transaction(conflict.clone())
+        .unwrap();
+    conflicting_mempool
+        .apply_block_at(block, NOW_MS.saturating_add(1))
+        .unwrap();
+    assert!(
+        conflicting_mempool
+            .pending()
+            .iter()
+            .all(|tx| tx.signature() != conflict.signature())
+    );
+}
+
+#[test]
 fn required_burn_cannot_be_executed_twice_in_one_block() {
     let mut harness = harness_for_percent(11, 25);
     let leader = harness.next_rank(0);
@@ -770,6 +816,41 @@ fn zero_fee_public_burn_is_rejected() {
         error
             .to_string()
             .contains("burn transaction fee must be greater than zero")
+    );
+}
+
+#[test]
+fn post_genesis_transactions_cannot_spend_with_genesis_input_signatures() {
+    let alice = Wallet::from_seed("post-genesis-signature-alice");
+    let bob = Wallet::from_seed("post-genesis-signature-bob");
+    let mut allocations = BTreeMap::new();
+    allocations.insert(alice.address().to_string(), 10 * MICRO_IUNA);
+    allocations.insert(bob.address().to_string(), 10 * MICRO_IUNA);
+    let mut ledger = Ledger::new_with_genesis_burns(
+        allocations,
+        vec![GenesisBurn::new(alice.address(), MICRO_IUNA)],
+        1,
+    )
+    .unwrap();
+    let mut transaction = ledger.build_transfer(&alice, bob.address(), 1, 1).unwrap();
+    let Transaction::Transfer {
+        inputs, signature, ..
+    } = &mut transaction
+    else {
+        panic!("test builds a transfer");
+    };
+    for input in inputs {
+        input.signature = "genesis".to_string();
+    }
+    *signature = "0".repeat(128);
+
+    let error = ledger.submit_transaction(transaction).unwrap_err();
+
+    assert!(
+        error.to_string().contains("invalid input signature")
+            || error
+                .to_string()
+                .contains("transaction signature is invalid")
     );
 }
 
