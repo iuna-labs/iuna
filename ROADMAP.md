@@ -10,8 +10,8 @@ The current goal is to keep a small real testnet stable while increasing confide
 
 ## Mainnet Readiness Checklist
 
-- [ ] Protocol rules are frozen for mainnet candidate.
-- [ ] Block, transaction, ticket, VDF, recovery, fork-choice, and peer compatibility rules are documented.
+- [x] Protocol rules are frozen for mainnet candidate.
+- [x] Block, transaction, ticket, VDF, recovery, fork-choice, and peer compatibility rules are documented.
 - [ ] Long-running testnet has stayed stable with independent nodes for an agreed window.
 - [ ] Mainnet-candidate testnet has launched from a fresh genesis using release artifacts.
 - [ ] New nodes can sync from genesis without manual intervention.
@@ -78,7 +78,7 @@ Focus: make failure modes boring and observable.
 
 Focus: rehearse mainnet with mainnet-like process, but without mainnet permanence.
 
-- [ ] Freeze protocol parameters for the candidate.
+- [x] Freeze protocol parameters for the candidate.
 - [ ] Create a fresh mainnet-candidate genesis.
 - [ ] Publish bootnodes and release artifacts.
 - [ ] Publish checksums for every release artifact.

@@ -474,7 +474,7 @@ fn vdf_measurement_extrapolates_to_target() {
             Duration::from_secs(1),
             Duration::from_millis(VDF_TARGET_BLOCK_MS),
         ),
-        3_000_000
+        6_000_000
     );
     assert_eq!(
         extrapolate_vdf_rounds(
@@ -482,7 +482,7 @@ fn vdf_measurement_extrapolates_to_target() {
             Duration::from_secs(0),
             Duration::from_millis(VDF_TARGET_BLOCK_MS),
         ),
-        3_000_000_000_000_000
+        6_000_000_000_000_000
     );
 }
 

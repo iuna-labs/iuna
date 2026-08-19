@@ -39,7 +39,7 @@ pub type SharedPeerBook = Arc<Mutex<PeerBook>>;
 pub const DEFAULT_BURN_PER_BLOCK: Amount = 0;
 pub const DEFAULT_VDF_ROUNDS: u32 = 67_000_000;
 pub const PROTOCOL_VERSION: u32 = 1;
-pub const NETWORK_ID: &str = "iuna-devnet-v3";
+pub const NETWORK_ID: &str = "iuna-mainnet-candidate-v1";
 pub const BLOCK_REQUEST_LIMIT: usize = 128;
 pub const TRANSACTION_BATCH_LIMIT: usize = 128;
 const IMPORT_REBROADCAST_LIMIT: usize = 128;
@@ -53,6 +53,23 @@ const BURN_BUNDLE_COLLECTION_MS: u64 = 30_000;
 const AUTO_BLOCK_ANCHOR_BURN_AMOUNT: Amount = 1;
 const AUTO_BLOCK_ANCHOR_BURN_FEE: Amount = 1;
 static DEBUG_LOGGING: AtomicBool = AtomicBool::new(false);
+
+#[cfg(test)]
+mod tests {
+    use super::{
+        BLOCK_REQUEST_LIMIT, DEFAULT_VDF_ROUNDS, NETWORK_ID, PROTOCOL_VERSION,
+        TRANSACTION_BATCH_LIMIT,
+    };
+
+    #[test]
+    fn mainnet_candidate_network_parameters_are_frozen() {
+        assert_eq!(DEFAULT_VDF_ROUNDS, 67_000_000);
+        assert_eq!(PROTOCOL_VERSION, 1);
+        assert_eq!(NETWORK_ID, "iuna-mainnet-candidate-v1");
+        assert_eq!(BLOCK_REQUEST_LIMIT, 128);
+        assert_eq!(TRANSACTION_BATCH_LIMIT, 128);
+    }
+}
 
 pub fn set_debug_logging(enabled: bool) {
     DEBUG_LOGGING.store(enabled, Ordering::Relaxed);

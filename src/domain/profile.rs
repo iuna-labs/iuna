@@ -22,7 +22,7 @@ pub struct LaunchProfile {
 impl Default for LaunchProfile {
     fn default() -> Self {
         Self {
-            profile_id: "iuna-devnet-v5".to_string(),
+            profile_id: "iuna-mainnet-candidate-v1".to_string(),
             ticket_maturity_delay_heights: DEFAULT_TICKET_MATURITY_DELAY,
             ticket_expiry_window_heights: DEFAULT_TICKET_EXPIRY_WINDOW,
             mine_difficulty_bits: MINE_DIFFICULTY_BITS,
@@ -87,7 +87,7 @@ mod tests {
     fn default_launch_profile_matches_protocol_defaults() {
         let profile = LaunchProfile::default();
 
-        assert_eq!(profile.profile_id, "iuna-devnet-v5");
+        assert_eq!(profile.profile_id, "iuna-mainnet-candidate-v1");
         assert_eq!(
             profile.ticket_maturity_delay_heights,
             DEFAULT_TICKET_MATURITY_DELAY
@@ -100,6 +100,10 @@ mod tests {
         assert_eq!(profile.max_pending_transactions, MAX_PENDING_TRANSACTIONS);
         assert_eq!(profile.max_block_transactions, MAX_BLOCK_TRANSACTIONS);
         assert_eq!(profile.max_block_bytes, MAX_BLOCK_BYTES);
+        assert_eq!(
+            profile.hash(),
+            "aef51531eaa3a5c5d3ea8a2524ffba029dcb106e4b0a432b57d5ac1f4f8963de"
+        );
     }
 
     #[test]

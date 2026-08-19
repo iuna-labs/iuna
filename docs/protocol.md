@@ -10,7 +10,43 @@ The goal is to avoid relying on only one scarce resource. Proof-of-work chains t
 
 Burns do not remove wealth advantage. More capital can still buy more lottery weight. The difference from stake is that burn power is paid again and again: it expires, does not unbond, and does not accumulate into a permanent stake position. The design converts wealth-bias from a growing asset into a recurring cost.
 
-This is still experimental. The rules below describe the current devnet protocol, not a proven mainnet design.
+This is still experimental. The rules below describe the current devnet and mainnet-candidate protocol, not a proven mainnet design.
+
+## Mainnet-Candidate Frozen Parameters
+
+The current mainnet-candidate parameter set is intentionally close to Bitcoin where that is useful for operator expectations:
+
+- P2P network ID: `iuna-mainnet-candidate-v1`;
+- protocol version: `1`;
+- launch profile ID: `iuna-mainnet-candidate-v1`;
+- launch profile hash: `aef51531eaa3a5c5d3ea8a2524ffba029dcb106e4b0a432b57d5ac1f4f8963de`;
+- target block time: `10 minutes`;
+- maximum serialized block size: `1,000,000` bytes;
+- maximum transaction items per block: `1,000`;
+- maximum pending transactions per node: `10,000`;
+- maximum pending transaction pool bytes per node: `8 MiB`;
+- maximum orphan transactions per node: `1,024`;
+- ticket maturity delay: `3` blocks;
+- ticket expiry window: `3` block heights;
+- finality depth: `6` blocks;
+- recovery delay: `6` target block times;
+- future timestamp drift limit: `2 minutes`;
+- VDF retarget window: `20` rank `0` ticket blocks;
+- VDF retarget deadband: `10%`;
+- VDF maximum retarget step: `2%`;
+- PoW mine difficulty start: `12` bits;
+- PoW retarget window: `10` blocks;
+- PoW target mine actions: `10` per retarget window;
+- PoW maximum retarget step: `2` bits;
+- PoW minimum difficulty: `10` bits;
+- maximum mine actions per anchor: `2`;
+- burn committee size: `3` slots;
+- maximum signed burn bundle size: `10,000` bytes;
+- burn committee lineage maturity: `20` blocks.
+
+Changing any value in this section requires a conscious mainnet-candidate reset or later hard-fork process.
+
+Block size is checked from the node's canonical serialized block representation after parsing, so alternate JSON whitespace or key order cannot make a block count smaller. Transaction selection and fee-rate policy use compact economic transaction size: addresses, hashes, signatures, and Stratum headers count as their decoded byte lengths, and numeric fields count as compact base-128 varint widths. That keeps hex text and JSON decimal formatting from making transactions look larger or smaller economically than their protocol data.
 
 ## Coins and Transactions
 
@@ -31,7 +67,7 @@ A burn does not immediately select its own block. Instead:
 3. The ticket stays eligible for a short expiry window.
 4. Its lottery weight is the burned amount.
 
-In the devnet profile, tickets mature after `3` blocks and remain eligible for `3` block heights.
+In the mainnet-candidate profile, tickets mature after `3` blocks and remain eligible for `3` block heights.
 
 The lottery draw for the next height is deterministic. Nodes rank all eligible burn tickets using the parent block hash, the parent VDF output, the target height, and the ticket amounts. More burned IUNA means more weight, but the winner is still drawn by the protocol.
 
@@ -56,7 +92,7 @@ The VDF is there to make block production sequential and time-based. It uses rep
 
 The devnet uses the public RSA-2048 challenge modulus. A production mainnet should use a purpose-specific trusted setup ceremony with destroyed factors, or a class-group VDF that avoids trusted setup.
 
-The target block time is `5 minutes`. The protocol retargets VDF rounds from recent observed block times:
+The target block time is `10 minutes`. The protocol retargets VDF rounds from recent observed block times:
 
 - It uses a `20` block observation window.
 - It uses rank `0` ticket blocks for retargeting.
@@ -110,7 +146,7 @@ Difficulty targets about one mine action per block:
 - The retarget window is `10` blocks.
 - The target is `10` mine actions per window.
 - Difficulty can move by at most `2` bits per window.
-- Difficulty has a minimum of `10` bits in the devnet profile.
+- Difficulty has a minimum of `10` bits in the mainnet-candidate profile.
 - Mine actions expire when their anchor is too old.
 
 This keeps issuance separate from finalization. PoW miners compete to create mine actions; burn-ticket finalizers decide blocks.
@@ -248,11 +284,11 @@ When a node builds a block, the flow is:
 5. Fill remaining block space with valid fee-paying transfers, additional burns, and mine actions ordered by fee rate. Mine actions are limited to `2` actions per anchor.
 6. Bind the VDF seed to the three burn-attestation slot hashes, using default hashes for missing slots. Slot `0` uses the synthetic finalizer attestation hash instead of a separate burn-bundle signature.
 
-Blocks are bounded by transaction count and serialized byte size. The devnet maximum block size is `100,000` bytes.
+Blocks are bounded by transaction count and serialized byte size. The mainnet-candidate maximum block size is `1,000,000` bytes.
 
 ## Fork Choice
 
-Nodes fully validate candidate blocks or snapshots before considering a reorg. A candidate chain must share the same genesis and cannot rewrite history deeper than the finality depth. In the devnet profile, forks whose common ancestor is below `local height - 6` are rejected.
+Nodes fully validate candidate blocks or snapshots before considering a reorg. A candidate chain must share the same genesis and cannot rewrite history deeper than the finality depth. In the mainnet-candidate profile, forks whose common ancestor is below `local height - 6` are rejected.
 
 Burn inclusion is part of block validity. If a ticket block carries burn-list attestations but omits a burn required by those attestations, nodes reject the block before fork choice. The fork choice rule only compares chains made of valid blocks.
 

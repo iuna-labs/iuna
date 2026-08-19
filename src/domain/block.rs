@@ -310,8 +310,10 @@ pub struct ChainSnapshot {
 
 #[cfg(test)]
 mod tests {
-    use super::{Block, FinalizerMode, LeaderProofPayload, canonical_burn_block_items};
-    use crate::domain::{BurnBundleSection, Transaction};
+    use super::{
+        Block, BurnBundleSection, FinalizerMode, LeaderProofPayload, canonical_burn_block_items,
+    };
+    use crate::domain::Transaction;
 
     #[test]
     fn primary_leader_proof_payload_omits_rank_from_canonical_form() {
@@ -368,5 +370,24 @@ mod tests {
         block.hash = block.compute_hash();
 
         assert_eq!(block.compute_hash(), block.hash);
+    }
+
+    #[test]
+    fn serialized_block_size_uses_canonical_node_representation() {
+        let compact_wire_json = format!(
+            r#"{{"height":1,"prev_hash":"{}","timestamp_ms":1,"miner":"{}","reward":0,"vdf_rounds":1,"vdf_output":"out","leader_proof":null,"transactions":[],"hash":"{}"}}"#,
+            "0".repeat(64),
+            "1".repeat(64),
+            "2".repeat(64)
+        );
+
+        let block: Block = serde_json::from_str(&compact_wire_json).unwrap();
+        let canonical_json_len = serde_json::to_vec(&block).unwrap().len();
+
+        assert_eq!(block.finalizer_mode, FinalizerMode::Ticket);
+        assert_eq!(block.finalizer_rank, 0);
+        assert_eq!(block.burn_bundle_section, BurnBundleSection::default());
+        assert_eq!(block.serialized_size_bytes().unwrap(), canonical_json_len);
+        assert!(canonical_json_len > compact_wire_json.len());
     }
 }

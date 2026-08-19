@@ -148,9 +148,10 @@ pub(super) fn compact_len(mut value: u128) -> usize {
 #[cfg(test)]
 mod tests {
     use super::{
-        compact_len, validate_address, validate_hash, validate_protocol_id, validate_signature,
-        validate_stratum_header,
+        canonical_transaction_size_bytes, compact_len, validate_address, validate_hash,
+        validate_protocol_id, validate_signature, validate_stratum_header,
     };
+    use crate::domain::{OutPoint, Transaction, TxInput, TxOutput};
 
     #[test]
     fn validators_accept_expected_protocol_lengths() {
@@ -178,5 +179,42 @@ mod tests {
         assert_eq!(compact_len(128), 2);
         assert_eq!(compact_len(16_383), 2);
         assert_eq!(compact_len(16_384), 3);
+    }
+
+    #[test]
+    fn transaction_economic_size_uses_binary_ids_and_compact_integers() {
+        let input = TxInput {
+            outpoint: OutPoint {
+                txid: "a".repeat(64),
+                index: 128,
+            },
+            owner: "b".repeat(64),
+            signature: "c".repeat(128),
+        };
+        let output = TxOutput {
+            address: "d".repeat(64),
+            amount: 128,
+        };
+        let tx = Transaction::Transfer {
+            inputs: vec![input],
+            outputs: vec![output],
+            fee: 16_384,
+            signature: "e".repeat(128),
+        };
+
+        assert_eq!(
+            canonical_transaction_size_bytes(&tx),
+            1  // transaction kind
+                + 1 // input count
+                + 32 // txid, counted as bytes rather than hex chars
+                + 2 // output index varint
+                + 32 // owner public key bytes
+                + 1 // output count
+                + 32 // recipient public key bytes
+                + 2 // amount varint
+                + 3 // fee varint
+                + 64 // signature bytes
+        );
+        assert!(tx.serialized_size_bytes().unwrap() > canonical_transaction_size_bytes(&tx));
     }
 }
