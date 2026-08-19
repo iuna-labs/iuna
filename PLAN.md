@@ -148,6 +148,10 @@ Acceptance:
 
 ## 7. Candidate Promotion Rehearsal
 
+Status: started with explicit candidate/mainnet peer-network IDs and a restart
+rehearsal that preserves the candidate genesis, tip, launch profile, UTXOs,
+ticket ranks, and transfer history before mining the next promoted block.
+
 Goal: prove candidate-to-mainnet promotion preserves coins.
 
 Scenario:

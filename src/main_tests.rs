@@ -5,7 +5,7 @@ use iuna::{
         chain_store::SqliteChainStore, config_store::UiConfig, ui_data_store::SqliteUiDataStore,
         wallet_store,
     },
-    app::{DEFAULT_BURN_PER_BLOCK, NodeCore},
+    app::{DEFAULT_BURN_PER_BLOCK, MAINNET_CANDIDATE_NETWORK_ID, MAINNET_NETWORK_ID, NodeCore},
     domain::{BLOCK_REWARD, GenesisBurn, Ledger, MICRO_IUNA, VDF_TARGET_BLOCK_MS, Wallet},
 };
 use rusqlite::Connection;
@@ -46,6 +46,67 @@ fn ledger_with_one_mined_block(wallet: &Wallet) -> Ledger {
     let block = ledger.mine_next_block(wallet, 1_000).unwrap();
     ledger.apply_locally_mined_block(block).unwrap();
     ledger
+}
+
+fn promoted_candidate_ledger() -> (Ledger, Vec<Wallet>, String) {
+    let wallets = [
+        Wallet::from_seed("promotion-candidate-alice"),
+        Wallet::from_seed("promotion-candidate-bob"),
+        Wallet::from_seed("promotion-candidate-carol"),
+    ];
+    let mut allocations = BTreeMap::new();
+    for wallet in &wallets {
+        allocations.insert(wallet.address().to_string(), 20 * MICRO_IUNA);
+    }
+    let mut ledger = Ledger::new_with_genesis_burns(
+        allocations,
+        wallets
+            .iter()
+            .map(|wallet| GenesisBurn::new(wallet.address(), MICRO_IUNA))
+            .collect(),
+        1,
+    )
+    .unwrap();
+    let finalizer_owner = ledger
+        .burn_leader_ranks_for_block(ledger.height() + 1)
+        .unwrap()
+        .first()
+        .unwrap()
+        .owner
+        .clone();
+    let finalizer = wallets
+        .iter()
+        .find(|wallet| wallet.address() == finalizer_owner)
+        .unwrap();
+    let sender = wallets
+        .iter()
+        .find(|wallet| wallet.address() != finalizer.address())
+        .unwrap();
+    let recipient = wallets
+        .iter()
+        .find(|wallet| {
+            wallet.address() != finalizer.address() && wallet.address() != sender.address()
+        })
+        .unwrap();
+    let transfer = ledger
+        .build_transfer(sender, recipient.address(), MICRO_IUNA, MICRO_IUNA)
+        .unwrap();
+    let transfer_signature = transfer.signature().to_string();
+    ledger.submit_transaction(transfer).unwrap();
+    let anchor = ledger
+        .build_burn(finalizer, MICRO_IUNA, MICRO_IUNA)
+        .unwrap();
+    ledger.submit_transaction(anchor).unwrap();
+    let block = ledger
+        .mine_next_block(finalizer, VDF_TARGET_BLOCK_MS)
+        .unwrap();
+    ledger.apply_locally_mined_block(block).unwrap();
+    assert!(
+        ledger.has_transaction(&transfer_signature),
+        "candidate rehearsal chain should contain a transfer before promotion"
+    );
+
+    (ledger, wallets.to_vec(), transfer_signature)
 }
 
 #[test]
@@ -542,6 +603,76 @@ async fn startup_resumes_persisted_chain_without_genesis_flag() {
     assert_eq!(resumed.status().tip_hash, persisted.status().tip_hash);
     assert_eq!(resumed.genesis_hash(), persisted.genesis_hash());
     assert_eq!(resumed.balance_of(fresh_wallet.address()), 0);
+}
+
+#[tokio::test]
+async fn candidate_promotion_reuses_chain_data_and_can_continue_mining() {
+    assert_eq!(MAINNET_CANDIDATE_NETWORK_ID, "iuna-mainnet-candidate-v1");
+    assert_eq!(MAINNET_NETWORK_ID, "iuna-mainnet-v1");
+    assert_ne!(MAINNET_CANDIDATE_NETWORK_ID, MAINNET_NETWORK_ID);
+    let dir = tempdir().unwrap();
+    let chain_path = dir.path().join("chain.sqlite3");
+    let store = SqliteChainStore::open(&chain_path).unwrap();
+    let (candidate, wallets, transfer_signature) = promoted_candidate_ledger();
+    let candidate_genesis = candidate.genesis_hash().to_string();
+    let candidate_tip = candidate.tip_hash().to_string();
+    let candidate_profile = candidate.launch_profile().clone();
+    let candidate_utxos = candidate.all_utxos();
+    let candidate_next_ranks = candidate
+        .burn_leader_ranks_for_block(candidate.height() + 1)
+        .unwrap();
+    store.save(&candidate.snapshot()).unwrap();
+    let opts = parse(&["--chain-db", chain_path.to_str().unwrap()])
+        .unwrap()
+        .unwrap();
+
+    let mut promoted = initialize_ledger(&opts, wallets[0].address(), &store, opts.p2p_addr)
+        .await
+        .unwrap();
+
+    assert_eq!(promoted.genesis_hash(), candidate_genesis);
+    assert_eq!(promoted.tip_hash(), candidate_tip);
+    assert_eq!(promoted.launch_profile(), &candidate_profile);
+    assert_eq!(promoted.all_utxos(), candidate_utxos);
+    assert_eq!(
+        promoted
+            .burn_leader_ranks_for_block(promoted.height() + 1)
+            .unwrap(),
+        candidate_next_ranks
+    );
+    assert!(promoted.has_transaction(&transfer_signature));
+
+    let next_owner = promoted
+        .burn_leader_ranks_for_block(promoted.height() + 1)
+        .unwrap()
+        .first()
+        .unwrap()
+        .owner
+        .clone();
+    let next_finalizer = wallets
+        .iter()
+        .find(|wallet| wallet.address() == next_owner)
+        .unwrap();
+    let anchor = promoted
+        .build_burn(next_finalizer, MICRO_IUNA, MICRO_IUNA)
+        .unwrap();
+    promoted.submit_transaction(anchor).unwrap();
+    let next_block = promoted
+        .mine_next_block(
+            next_finalizer,
+            promoted
+                .chain()
+                .last()
+                .unwrap()
+                .timestamp_ms
+                .saturating_add(VDF_TARGET_BLOCK_MS),
+        )
+        .unwrap();
+    promoted.apply_locally_mined_block(next_block).unwrap();
+
+    assert_eq!(promoted.genesis_hash(), candidate_genesis);
+    assert_eq!(promoted.height(), candidate.height() + 1);
+    assert_ne!(promoted.tip_hash(), candidate_tip);
 }
 
 #[tokio::test]
