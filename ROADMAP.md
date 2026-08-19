@@ -51,7 +51,7 @@ These items are not protocol rules. They are the attack and reliability checks t
 - [x] Multi-node in-memory simulation covers delayed gossip, withheld burn bundles, bundle equivocation, partitions, restarts, persistence reload, and convergence.
 - [x] Long-running release-mode soak test runs with automatic burn/finalization, P2P sync, Stratum-disabled and Stratum-enabled nodes, and periodic node restarts.
 - [x] Operator failure playbooks exist for stalled height, divergent tips, old snapshots, no burn committee signatures, recovery blocks, and corrupted local persistence.
-- [ ] Mainnet-candidate release rehearsal includes fresh genesis, published bootnodes, checksums, backup/restore instructions, and a no-reset stability window.
+- [x] Mainnet-candidate release rehearsal includes fresh genesis, published bootnodes, checksums, backup/restore instructions, and a no-reset stability window.
 
 ## Milestones
 

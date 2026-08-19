@@ -121,7 +121,7 @@ Use your iuna wallet address as the worker username. Accepted shares become PoW 
 
 ## Operator Docs
 
-- [Starting the genesis node](docs/genesis.md)
+- [Genesis and candidate rehearsal](docs/genesis.md)
 - [Operator failure playbooks](docs/operator-playbooks.md)
 
 ## Contributing
