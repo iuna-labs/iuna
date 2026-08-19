@@ -800,6 +800,7 @@ enum MiniBlockVerdict {
     FeePolicy,
     BurnBundleSection,
     FinalizerTicket,
+    RecoveryRules,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -978,6 +979,24 @@ fn mini_block_verdict(ledger: &Ledger, block: &Block, now_ms: u64) -> MiniBlockV
         {
             return MiniBlockVerdict::FinalizerTicket;
         }
+    } else {
+        if block.finalizer_rank != 0 || block.leader_proof.is_some() {
+            return MiniBlockVerdict::RecoveryRules;
+        }
+        if block.timestamp_ms
+            < parent
+                .timestamp_ms
+                .saturating_add(super::RECOVERY_BLOCK_DELAY_MS)
+        {
+            return MiniBlockVerdict::RecoveryRules;
+        }
+        if !block
+            .transactions
+            .iter()
+            .any(|transaction| transaction.is_burn() && transaction.sender() == block.miner)
+        {
+            return MiniBlockVerdict::RecoveryRules;
+        }
     }
 
     MiniBlockVerdict::Accept
@@ -1013,6 +1032,8 @@ fn consensus_block_verdict(mut ledger: Ledger, block: Block, now_ms: u64) -> Min
         MiniBlockVerdict::FeePolicy
     } else if error.contains("burn bundle") || error.contains("attested burn") {
         MiniBlockVerdict::BurnBundleSection
+    } else if error.contains("recovery block") {
+        MiniBlockVerdict::RecoveryRules
     } else if error.contains("selected for rank")
         || error.contains("selected ticket")
         || error.contains("leader proof")
@@ -2843,6 +2864,87 @@ fn recovery_cannot_bypass_ticket_rules_before_threshold_and_requires_own_burn() 
     let parent_ledger = Ledger::from_snapshot_at(parent_snapshot, NOW_MS).unwrap();
 
     assert_rejects(parent_ledger, recovery, "recovery without finalizer burn");
+}
+
+#[test]
+fn mini_validator_matches_consensus_for_recovery_rules() {
+    let mut harness = harness_for_percent(39, 25);
+    let miner = harness.attacker.wallet.clone();
+    let victim = harness
+        .honest
+        .iter()
+        .find(|wallet| wallet.address() != miner.address())
+        .unwrap()
+        .clone();
+    let anchor = harness.submit_anchor_burn(&miner);
+    let victim_burn = harness.submit_fee_burn(&victim, 1, 1);
+    let timestamp = harness.ledger.recovery_block_min_timestamp();
+    let prepared = harness
+        .ledger
+        .prepare_recovery_block(miner.address(), timestamp)
+        .unwrap();
+    let recovery = finish_prepared_block(&miner, prepared);
+    let now_ms = NOW_MS.saturating_add(recovery.timestamp_ms);
+    assert!(
+        recovery
+            .transactions
+            .iter()
+            .any(|transaction| transaction.signature() == victim_burn.signature()),
+        "test setup needs a non-finalizer burn to isolate the recovery finalizer-burn rule"
+    );
+
+    assert_mini_validator_agrees(
+        &harness.ledger,
+        recovery.clone(),
+        now_ms,
+        MiniBlockVerdict::Accept,
+    );
+
+    let mut wrong_rank = recovery.clone();
+    wrong_rank.finalizer_rank = 1;
+    rehash(&mut wrong_rank);
+    assert_mini_validator_agrees(
+        &harness.ledger,
+        wrong_rank,
+        now_ms,
+        MiniBlockVerdict::RecoveryRules,
+    );
+
+    let mut with_leader_proof = recovery.clone();
+    with_leader_proof.leader_proof = Some(super::LeaderProof {
+        ticket_id: "0".repeat(64),
+        public_key: miner.address().to_string(),
+        signature: "0".repeat(128),
+    });
+    rehash(&mut with_leader_proof);
+    assert_mini_validator_agrees(
+        &harness.ledger,
+        with_leader_proof,
+        now_ms,
+        MiniBlockVerdict::RecoveryRules,
+    );
+
+    let mut too_early = recovery.clone();
+    too_early.timestamp_ms = timestamp.saturating_sub(1);
+    rehash(&mut too_early);
+    assert_mini_validator_agrees(
+        &harness.ledger,
+        too_early,
+        now_ms,
+        MiniBlockVerdict::RecoveryRules,
+    );
+
+    let mut missing_finalizer_burn = recovery;
+    missing_finalizer_burn
+        .transactions
+        .retain(|transaction| transaction.signature() != anchor.signature());
+    rehash(&mut missing_finalizer_burn);
+    assert_mini_validator_agrees(
+        &harness.ledger,
+        missing_finalizer_burn,
+        now_ms,
+        MiniBlockVerdict::RecoveryRules,
+    );
 }
 
 #[test]
