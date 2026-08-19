@@ -60,7 +60,8 @@ dimensions to adversarial strategies and classifies observed censorship as
 unavailable, network-isolation dependent, fee-pressure dependent, or
 finalizer-disruption dependent. Fee pressure, gossip latency, peer isolation, and
 offline finalizer schedules are now modeled as runner inputs instead of only as
-strategy labels.
+strategy labels. Combined network-isolation plus offline-finalizer pressure is
+covered as a separate matrix regression.
 
 Goal: quantify whether attacks are impossible, only possible under network
 isolation, or possible but expensive.

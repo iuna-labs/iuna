@@ -3628,6 +3628,15 @@ fn economic_sweep_runner_classifies_attack_costs_across_dimensions() {
             offline_finalizer_percent: 0,
             fee_pressure_burns_per_block: 4,
         },
+        EconomicSweepCase {
+            seed: 1_305,
+            burn_percent: 50,
+            lineage_percent: 50,
+            peer_isolation_percent: 50,
+            gossip_latency_blocks: 0,
+            offline_finalizer_percent: 100,
+            fee_pressure_burns_per_block: 0,
+        },
     ];
 
     let results = run_economic_sweep(&cases, 4);
@@ -3676,6 +3685,21 @@ fn economic_sweep_runner_classifies_attack_costs_across_dimensions() {
     assert_eq!(results[4].class, EconomicAttackClass::RequiresFeePressure);
     assert!(results[4].metrics.fee_pressure_burns > 0);
     assert!(results[4].metrics.fee_pressure_displaced_burns > 0);
+
+    assert_eq!(results[5].strategy, AdversaryStrategy::CombinedStrategy);
+    assert_eq!(
+        results[5].class,
+        EconomicAttackClass::RequiresNetworkIsolation
+    );
+    assert!(results[5].metrics.unseen_third_party_burns > 0);
+    assert_eq!(results[5].metrics.censored_third_party_burns, 0);
+    assert!(results[5].metrics.fallback_opportunities > 0);
+    assert!(results[5].metrics.fallback_blocks > 0);
+    assert!(results[5].metrics.recovery_rate > 0.0);
+    assert_eq!(
+        results[5].metrics.successful_censorship_cost_per_burn(),
+        None
+    );
 }
 
 #[test]
