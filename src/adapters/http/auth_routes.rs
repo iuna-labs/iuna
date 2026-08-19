@@ -26,16 +26,14 @@ pub(super) async fn require_auth_middleware(
     next: Next,
 ) -> Response {
     let path = request.uri().path().to_string();
-    if csrf_required(request.method()) && !same_origin_request(&headers) {
+    let socket_addr = request
+        .extensions()
+        .get::<ConnectInfo<SocketAddr>>()
+        .map(|info| info.0);
+    if csrf_required(request.method()) && !same_origin_request(&headers, socket_addr) {
         return csrf_error().into_response();
     }
-    let client_key = auth_client_key(
-        &headers,
-        request
-            .extensions()
-            .get::<ConnectInfo<SocketAddr>>()
-            .map(|info| info.0),
-    );
+    let client_key = auth_client_key(&headers, socket_addr);
     request.extensions_mut().insert(AuthClientKey(client_key));
     if auth_exempt_path(&path) {
         return next.run(request).await;

@@ -29,8 +29,8 @@ pub(super) fn csrf_required(method: &Method) -> bool {
     !matches!(method, &Method::GET | &Method::HEAD | &Method::OPTIONS)
 }
 
-pub(super) fn same_origin_request(headers: &HeaderMap) -> bool {
-    let Some(request_host) = request_host(headers) else {
+pub(super) fn same_origin_request(headers: &HeaderMap, socket_addr: Option<SocketAddr>) -> bool {
+    let Some(request_host) = request_host(headers, socket_addr) else {
         return false;
     };
     let Some(origin_host) = origin_or_referer_host(headers) else {
@@ -39,8 +39,11 @@ pub(super) fn same_origin_request(headers: &HeaderMap) -> bool {
     normalize_host(&origin_host) == normalize_host(&request_host)
 }
 
-fn request_host(headers: &HeaderMap) -> Option<String> {
-    header_string(headers, "x-forwarded-host").or_else(|| header_string(headers, "host"))
+fn request_host(headers: &HeaderMap, socket_addr: Option<SocketAddr>) -> Option<String> {
+    let forwarded_host = socket_addr
+        .filter(|addr| trusted_forwarding_peer(addr.ip()))
+        .and_then(|_| header_string(headers, "x-forwarded-host"));
+    forwarded_host.or_else(|| header_string(headers, "host"))
 }
 
 fn origin_or_referer_host(headers: &HeaderMap) -> Option<String> {
@@ -119,20 +122,7 @@ pub(super) fn auth_client_key(headers: &HeaderMap, socket_addr: Option<SocketAdd
 }
 
 fn trusted_forwarding_peer(ip: std::net::IpAddr) -> bool {
-    match ip {
-        std::net::IpAddr::V4(ip) => ip.is_loopback() || ip.is_private() || ip.is_link_local(),
-        std::net::IpAddr::V6(ip) => {
-            ip.is_loopback() || ipv6_is_unique_local(ip) || ipv6_is_unicast_link_local(ip)
-        }
-    }
-}
-
-fn ipv6_is_unique_local(ip: std::net::Ipv6Addr) -> bool {
-    (ip.segments()[0] & 0xfe00) == 0xfc00
-}
-
-fn ipv6_is_unicast_link_local(ip: std::net::Ipv6Addr) -> bool {
-    (ip.segments()[0] & 0xffc0) == 0xfe80
+    ip.is_loopback()
 }
 
 fn forwarded_for_client(headers: &HeaderMap) -> Option<String> {
@@ -311,4 +301,226 @@ pub(super) fn auth_cookie(headers: &HeaderMap) -> Option<&str> {
         let (name, value) = part.trim().split_once('=')?;
         (name == AUTH_COOKIE_NAME).then_some(value)
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use std::{
+        collections::BTreeMap,
+        net::{IpAddr, Ipv4Addr, SocketAddr},
+        sync::Arc,
+    };
+
+    use axum::http::{HeaderMap, HeaderValue, header};
+    use tokio::sync::Mutex;
+
+    use crate::{
+        adapters::{
+            chain_store::SqliteChainStore, config_store::UiConfig, p2p::GossipNetwork,
+            ui_data_store::SqliteUiDataStore,
+        },
+        app::{NodeCore, PeerBook, StratumStatus},
+        domain::{GenesisBurn, Ledger, MICRO_IUNA, Wallet},
+    };
+
+    use super::super::state::{AuthSession, HttpState, UiChainCache};
+    use super::{AUTH_COOKIE_NAME, now_ms};
+    use super::{
+        auth_client_key, check_auth_backoff, record_auth_failure, request_is_authenticated,
+        same_origin_request, session_token_hash,
+    };
+
+    fn headers(values: &[(&'static str, &'static str)]) -> HeaderMap {
+        let mut headers = HeaderMap::new();
+        for (name, value) in values {
+            headers.insert(*name, HeaderValue::from_static(value));
+        }
+        headers
+    }
+
+    fn socket(ip: [u8; 4]) -> SocketAddr {
+        SocketAddr::new(IpAddr::V4(Ipv4Addr::from(ip)), 9444)
+    }
+
+    async fn test_state() -> HttpState {
+        let dir = tempfile::tempdir().unwrap().keep();
+        let wallet = Wallet::from_seed("http-auth-abuse-tests");
+        let mut allocations = BTreeMap::new();
+        allocations.insert(wallet.address().to_string(), 10 * MICRO_IUNA);
+        let ledger = Ledger::new_with_genesis_burns(
+            allocations,
+            vec![GenesisBurn::new(wallet.address(), 1)],
+            1,
+        )
+        .unwrap();
+        let node = Arc::new(Mutex::new(NodeCore::from_ledger(wallet, ledger, 0)));
+        let peers = Arc::new(Mutex::new(PeerBook::default()));
+        let gossip = GossipNetwork::start(
+            node.clone(),
+            peers.clone(),
+            socket([127, 0, 0, 1]),
+            None,
+            false,
+        )
+        .await
+        .unwrap();
+
+        HttpState {
+            node,
+            peers,
+            gossip,
+            ui_config: Arc::new(Mutex::new(UiConfig::default())),
+            config_path: dir.join("config.json"),
+            chain_store: SqliteChainStore::open(dir.join("chain.sqlite")).unwrap(),
+            ui_data_store: SqliteUiDataStore::open(dir.join("ui.sqlite")).unwrap(),
+            wallet_path: dir.join("wallet.json"),
+            stratum: StratumStatus {
+                enabled: false,
+                listen_addr: None,
+            },
+            auth_sessions: Arc::new(Mutex::new(BTreeMap::new())),
+            auth_backoff: Arc::new(Mutex::new(BTreeMap::new())),
+            ui_cache: Arc::new(Mutex::new(UiChainCache::default())),
+            ui_data_refresh: Arc::new(Mutex::new(())),
+        }
+    }
+
+    #[test]
+    fn csrf_same_origin_requires_matching_origin_or_referer_host() {
+        assert!(same_origin_request(
+            &headers(&[
+                ("host", "127.0.0.1:9444"),
+                ("origin", "http://127.0.0.1:9444")
+            ]),
+            None
+        ));
+        assert!(same_origin_request(
+            &headers(&[
+                ("host", "iuna.local:9444"),
+                ("referer", "http://iuna.local:9444/settings")
+            ]),
+            None
+        ));
+        assert!(!same_origin_request(
+            &headers(&[
+                ("host", "127.0.0.1:9444"),
+                ("origin", "https://evil.example")
+            ]),
+            None
+        ));
+        assert!(!same_origin_request(
+            &headers(&[("host", "127.0.0.1:9444")]),
+            None
+        ));
+    }
+
+    #[test]
+    fn csrf_ignores_forwarded_host_from_untrusted_peer() {
+        let headers = headers(&[
+            ("host", "127.0.0.1:9444"),
+            ("x-forwarded-host", "evil.example"),
+            ("origin", "https://evil.example"),
+        ]);
+
+        assert!(!same_origin_request(
+            &headers,
+            Some(socket([203, 0, 113, 10]))
+        ));
+        assert!(!same_origin_request(
+            &headers,
+            Some(socket([192, 168, 1, 10]))
+        ));
+    }
+
+    #[test]
+    fn csrf_accepts_forwarded_host_from_trusted_proxy() {
+        let headers = headers(&[
+            ("host", "127.0.0.1:9444"),
+            ("x-forwarded-host", "iuna.example"),
+            ("origin", "https://iuna.example"),
+        ]);
+
+        assert!(same_origin_request(&headers, Some(socket([127, 0, 0, 1]))));
+    }
+
+    #[test]
+    fn auth_client_key_ignores_forwarded_client_from_untrusted_peer() {
+        let headers = headers(&[
+            ("x-forwarded-for", "198.51.100.50"),
+            ("x-real-ip", "198.51.100.51"),
+            ("forwarded", "for=198.51.100.52"),
+        ]);
+
+        assert_eq!(
+            auth_client_key(&headers, Some(socket([203, 0, 113, 10]))),
+            "203.0.113.10"
+        );
+        assert_eq!(
+            auth_client_key(&headers, Some(socket([192, 168, 1, 10]))),
+            "192.168.1.10"
+        );
+        assert_eq!(
+            auth_client_key(&headers, Some(socket([127, 0, 0, 1]))),
+            "198.51.100.50"
+        );
+    }
+
+    #[tokio::test]
+    async fn auth_backoff_locks_out_and_resets_after_expiry() {
+        let state = test_state().await;
+        let client_key = "client-a";
+        for _ in 0..super::AUTH_MAX_FAILED_ATTEMPTS {
+            record_auth_failure(&state, client_key).await;
+        }
+
+        assert!(check_auth_backoff(&state, client_key).await.is_err());
+
+        {
+            let mut backoffs = state.auth_backoff.lock().await;
+            let backoff = backoffs.get_mut(client_key).unwrap();
+            backoff.locked_until_ms = Some(now_ms().saturating_sub(1));
+        }
+
+        assert!(check_auth_backoff(&state, client_key).await.is_ok());
+        let backoffs = state.auth_backoff.lock().await;
+        let backoff = backoffs.get(client_key).unwrap();
+        assert_eq!(backoff.failed_attempts, 0);
+        assert_eq!(backoff.locked_until_ms, None);
+    }
+
+    #[tokio::test]
+    async fn expired_sessions_are_rejected_and_pruned() {
+        let state = test_state().await;
+        let expired_token = "expired";
+        let live_token = "live";
+        state.auth_sessions.lock().await.insert(
+            session_token_hash(expired_token),
+            AuthSession {
+                expires_at: now_ms().saturating_sub(1),
+                wallet_password: "expired-password".to_string(),
+            },
+        );
+        state.auth_sessions.lock().await.insert(
+            session_token_hash(live_token),
+            AuthSession {
+                expires_at: now_ms().saturating_add(60_000),
+                wallet_password: "live-password".to_string(),
+            },
+        );
+
+        let expired_headers = headers(&[(header::COOKIE.as_str(), "iuna_session=expired")]);
+        assert!(!request_is_authenticated(&state, &expired_headers).await);
+        assert!(
+            !state
+                .auth_sessions
+                .lock()
+                .await
+                .contains_key(&session_token_hash(expired_token))
+        );
+
+        let live_cookie = format!("{AUTH_COOKIE_NAME}={live_token}");
+        let mut live_headers = HeaderMap::new();
+        live_headers.insert(header::COOKIE, HeaderValue::from_str(&live_cookie).unwrap());
+        assert!(request_is_authenticated(&state, &live_headers).await);
+    }
 }
