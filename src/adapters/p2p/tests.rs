@@ -9,7 +9,7 @@ use crate::{
         GossipEnvelope, NETWORK_ID, NodeCore, PROTOCOL_VERSION, PeerBook, PeerDirection,
         ProtocolHello,
     },
-    domain::{Ledger, Wallet},
+    domain::{Ledger, Wallet, run_vdf},
 };
 use tokio::io::AsyncWriteExt;
 
@@ -133,6 +133,85 @@ async fn single_block_fork_error_requests_chain_snapshot() {
         super::parse_envelope(&line).unwrap(),
         GossipEnvelope::ChainSnapshotRequest
     ));
+}
+
+#[tokio::test]
+async fn future_block_rejection_does_not_poison_peer_or_later_acceptance() {
+    let alice = Wallet::from_seed("future-block-p2p-alice");
+    let allocations = allocations(std::slice::from_ref(&alice), 1_000);
+    let mut producer = node("future-block-producer", alice.clone(), allocations.clone());
+    queue_plaintext_burn(&mut producer, &alice, 1);
+    producer.drain_outbox();
+    let future_timestamp = crate::app::now_ms().saturating_add(10 * 60 * 1_000);
+    let prepared = producer
+        .ledger()
+        .prepare_next_block(alice.address(), future_timestamp)
+        .unwrap();
+    let vdf_output = run_vdf(prepared.vdf_seed(), prepared.vdf_rounds());
+    let future_block = prepared.finish(&alice, vdf_output);
+
+    let local_node = node("future-block-local", alice.clone(), allocations);
+    let original_tip = local_node.ledger().tip_hash().to_string();
+    let peers = Arc::new(tokio::sync::Mutex::new(PeerBook::default()));
+    let network = gossip_network(
+        Arc::new(tokio::sync::Mutex::new(local_node)),
+        Arc::clone(&peers),
+        "127.0.0.1:9544".parse().unwrap(),
+        None,
+    );
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let client = tokio::net::TcpStream::connect(listener.local_addr().unwrap())
+        .await
+        .unwrap();
+    let (server, remote_addr) = listener.accept().await.unwrap();
+    let (_server_reader, mut server_writer) = server.into_split();
+    let (_client_reader, _client_writer) = client.into_split();
+    let peer = remote_addr.to_string();
+    let mut known_peer = Some(peer.clone());
+
+    super::process_envelope(
+        &network,
+        &mut server_writer,
+        remote_addr,
+        &mut known_peer,
+        GossipEnvelope::Block(future_block.clone()),
+    )
+    .await
+    .unwrap();
+
+    assert_eq!(
+        network.inner.node.lock().await.ledger().tip_hash(),
+        original_tip
+    );
+    assert_eq!(network.metrics().rejected_blocks, 1);
+    let recorded_peer = peers
+        .lock()
+        .await
+        .list()
+        .into_iter()
+        .find(|entry| entry.address == peer)
+        .expect("future block sender should be recorded");
+    assert_eq!(recorded_peer.misbehavior_score, 0);
+    assert!(recorded_peer.banned_until_ms.is_none());
+    assert!(
+        recorded_peer
+            .last_error
+            .as_deref()
+            .is_some_and(|error| error.contains("too far in the future"))
+    );
+
+    let verified_block = super::verify_block_vdf(future_block.clone()).await.unwrap();
+    network
+        .inner
+        .node
+        .lock()
+        .await
+        .receive_preverified_block_at(verified_block, future_block.timestamp_ms)
+        .unwrap();
+    assert_eq!(
+        network.inner.node.lock().await.ledger().tip_hash(),
+        future_block.hash
+    );
 }
 
 #[tokio::test]
