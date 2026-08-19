@@ -22,7 +22,7 @@ const LEVELS: [u8; 6] = [1, 5, 10, 25, 33, 50];
 const COMBINED_LEVELS: [(u8, u8); 5] = [(10, 1), (10, 10), (25, 5), (25, 25), (50, 10)];
 const LINEAGE_RESOURCE_ROOTS: usize = 10;
 
-#[derive(Clone, Copy, Debug)]
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
 enum AdversaryStrategy {
     Honest,
     CensorBurns,
@@ -67,6 +67,32 @@ struct ResourceLevel {
     lineage_percent: u8,
 }
 
+#[derive(Clone, Copy, Debug)]
+struct EconomicSweepCase {
+    seed: u64,
+    burn_percent: u8,
+    lineage_percent: u8,
+    peer_isolation_percent: u8,
+    gossip_latency_blocks: u8,
+    offline_finalizer_percent: u8,
+    fee_pressure_burns_per_block: u8,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum EconomicAttackClass {
+    NoCensorship,
+    RequiresNetworkIsolation,
+    RequiresFinalizerDisruption,
+}
+
+#[derive(Clone, Debug)]
+struct EconomicSweepResult {
+    case: EconomicSweepCase,
+    strategy: AdversaryStrategy,
+    metrics: AdversarialMetrics,
+    class: EconomicAttackClass,
+}
+
 #[derive(Clone, Debug, Default)]
 struct AdversarialMetrics {
     attacker_finalizations: usize,
@@ -90,6 +116,22 @@ impl AdversarialMetrics {
     fn successful_censorship_cost_per_burn(&self) -> Option<f64> {
         (self.censored_third_party_burns > 0)
             .then(|| self.attacker_burn_cost as f64 / self.censored_third_party_burns as f64)
+    }
+}
+
+impl EconomicSweepCase {
+    fn strategy(self) -> AdversaryStrategy {
+        if self.peer_isolation_percent > 0 && self.offline_finalizer_percent > 0 {
+            AdversaryStrategy::CombinedStrategy
+        } else if self.peer_isolation_percent > 0 || self.gossip_latency_blocks > 0 {
+            AdversaryStrategy::WithholdBurnFromCommittee
+        } else if self.offline_finalizer_percent > 0 {
+            AdversaryStrategy::ForceFallback
+        } else if self.fee_pressure_burns_per_block > 0 {
+            AdversaryStrategy::MaximizeBurnWeight
+        } else {
+            AdversaryStrategy::CensorBurns
+        }
     }
 }
 
@@ -470,6 +512,46 @@ fn share(numerator: usize, denominator: usize) -> f64 {
     } else {
         numerator as f64 / denominator as f64
     }
+}
+
+fn run_economic_sweep(cases: &[EconomicSweepCase], blocks: usize) -> Vec<EconomicSweepResult> {
+    cases
+        .iter()
+        .map(|case| {
+            let strategy = case.strategy();
+            let mut harness =
+                Harness::new(case.seed, case.burn_percent, case.lineage_percent, strategy);
+            let run_blocks = if matches!(
+                strategy,
+                AdversaryStrategy::AttemptRecovery | AdversaryStrategy::CombinedStrategy
+            ) {
+                blocks.max(7)
+            } else {
+                blocks
+            };
+            let metrics = harness.run_strategy(run_blocks);
+            let class = classify_economic_attack(*case, &metrics);
+            EconomicSweepResult {
+                case: *case,
+                strategy,
+                metrics,
+                class,
+            }
+        })
+        .collect()
+}
+
+fn classify_economic_attack(
+    case: EconomicSweepCase,
+    metrics: &AdversarialMetrics,
+) -> EconomicAttackClass {
+    if metrics.censored_third_party_burns == 0 {
+        return EconomicAttackClass::NoCensorship;
+    }
+    if case.peer_isolation_percent > 0 || case.gossip_latency_blocks > 0 {
+        return EconomicAttackClass::RequiresNetworkIsolation;
+    }
+    EconomicAttackClass::RequiresFinalizerDisruption
 }
 
 fn lineage_resource_roots(lineage_percent: u8) -> (usize, usize) {
@@ -3159,6 +3241,100 @@ fn attack_economics_visible_burns_have_no_finite_censorship_price() {
             "case={case} burn={burn}% lineage={lineage}% needed recovery to keep censoring: {metrics:?}"
         );
     }
+}
+
+#[test]
+fn economic_sweep_runner_classifies_attack_costs_across_dimensions() {
+    let cases = [
+        EconomicSweepCase {
+            seed: 1_300,
+            burn_percent: 25,
+            lineage_percent: 25,
+            peer_isolation_percent: 0,
+            gossip_latency_blocks: 0,
+            offline_finalizer_percent: 0,
+            fee_pressure_burns_per_block: 0,
+        },
+        EconomicSweepCase {
+            seed: 1_301,
+            burn_percent: 25,
+            lineage_percent: 25,
+            peer_isolation_percent: 100,
+            gossip_latency_blocks: 0,
+            offline_finalizer_percent: 0,
+            fee_pressure_burns_per_block: 0,
+        },
+        EconomicSweepCase {
+            seed: 1_302,
+            burn_percent: 25,
+            lineage_percent: 25,
+            peer_isolation_percent: 0,
+            gossip_latency_blocks: 2,
+            offline_finalizer_percent: 0,
+            fee_pressure_burns_per_block: 0,
+        },
+        EconomicSweepCase {
+            seed: 1_303,
+            burn_percent: 50,
+            lineage_percent: 25,
+            peer_isolation_percent: 0,
+            gossip_latency_blocks: 0,
+            offline_finalizer_percent: 100,
+            fee_pressure_burns_per_block: 0,
+        },
+        EconomicSweepCase {
+            seed: 1_304,
+            burn_percent: 50,
+            lineage_percent: 50,
+            peer_isolation_percent: 0,
+            gossip_latency_blocks: 0,
+            offline_finalizer_percent: 0,
+            fee_pressure_burns_per_block: 4,
+        },
+    ];
+
+    let results = run_economic_sweep(&cases, 4);
+    assert_eq!(results.len(), cases.len());
+    for (index, result) in results.iter().enumerate() {
+        assert_eq!(result.case.seed, cases[index].seed);
+        assert!(
+            result.metrics.attacker_finalization_share.is_finite()
+                && result.metrics.attacker_committee_share.is_finite()
+                && result.metrics.third_party_burn_censorship_rate.is_finite()
+                && result.metrics.fallback_rate.is_finite()
+                && result.metrics.recovery_rate.is_finite(),
+            "economic sweep produced non-finite metrics: {result:?}"
+        );
+    }
+
+    assert_eq!(results[0].strategy, AdversaryStrategy::CensorBurns);
+    assert_eq!(results[0].class, EconomicAttackClass::NoCensorship);
+    assert_eq!(results[0].metrics.censored_third_party_burns, 0);
+    assert_eq!(
+        results[0].metrics.successful_censorship_cost_per_burn(),
+        None
+    );
+
+    assert_eq!(
+        results[1].class,
+        EconomicAttackClass::RequiresNetworkIsolation
+    );
+    assert!(results[1].metrics.censored_third_party_burns > 0);
+    assert_eq!(
+        results[2].class,
+        EconomicAttackClass::RequiresNetworkIsolation
+    );
+    assert!(results[2].metrics.censored_third_party_burns > 0);
+
+    assert_eq!(results[3].class, EconomicAttackClass::NoCensorship);
+    assert_eq!(
+        results[3].metrics.fallback_blocks, results[3].metrics.fallback_opportunities,
+        "offline-finalizer sweep did not use available fallback pressure: {:?}",
+        results[3]
+    );
+
+    assert_eq!(results[4].strategy, AdversaryStrategy::MaximizeBurnWeight);
+    assert_eq!(results[4].class, EconomicAttackClass::NoCensorship);
 }
 
 #[test]
