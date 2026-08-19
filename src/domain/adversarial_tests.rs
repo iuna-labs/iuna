@@ -456,6 +456,17 @@ fn harness_for_percent(seed: u64, burn_percent: u8) -> Harness {
     Harness::new(seed, burn_percent, 10, AdversaryStrategy::Honest)
 }
 
+fn fork_harness_from(source: &Harness, snapshot: ChainSnapshot) -> Harness {
+    Harness {
+        ledger: Ledger::from_snapshot_at(snapshot, NOW_MS).unwrap(),
+        attacker: source.attacker.clone(),
+        honest: source.honest.clone(),
+        wallets: source.wallets.clone(),
+        seed: source.seed,
+        resource: source.resource,
+    }
+}
+
 fn mutate_signature(signature: &mut String) {
     let replacement = if signature.starts_with('0') { "1" } else { "0" };
     signature.replace_range(0..1, replacement);
@@ -1012,6 +1023,132 @@ fn recovery_and_fork_choice_cannot_cross_finality_depth() {
         .extend_from_snapshot_at(remote.ledger.snapshot(), NOW_MS)
         .unwrap();
     assert!(!switched, "fork deeper than finality depth was accepted");
+}
+
+#[test]
+fn same_height_fork_switches_to_better_leader_quality() {
+    let base = harness_for_percent(23, 25);
+    let snapshot = base.ledger.snapshot();
+    let mut local = fork_harness_from(&base, snapshot.clone());
+    let mut remote = fork_harness_from(&base, snapshot);
+
+    let local_block = local.mine_ticket_block(1);
+    let remote_block = remote.mine_ticket_block(0);
+    assert_eq!(local.ledger.height(), remote.ledger.height());
+    assert!(remote_block.leader_score() < local_block.leader_score());
+
+    let switched = local
+        .ledger
+        .extend_from_snapshot_at(remote.ledger.snapshot(), NOW_MS)
+        .unwrap();
+
+    assert!(switched, "same-height better fork was not selected");
+    assert_eq!(local.ledger.tip_hash(), remote.ledger.tip_hash());
+}
+
+#[test]
+fn taller_valid_fork_inside_finality_window_is_adopted() {
+    let mut local = harness_for_percent(24, 25);
+    for _ in 0..3 {
+        local.mine_ticket_block(0);
+    }
+    let fork_base = local.ledger.snapshot();
+    local.mine_ticket_block(0);
+
+    let mut remote = fork_harness_from(&local, fork_base);
+    remote.mine_ticket_block(0);
+    remote.mine_ticket_block(0);
+
+    let switched = local
+        .ledger
+        .extend_from_snapshot_at(remote.ledger.snapshot(), NOW_MS)
+        .unwrap();
+
+    assert!(
+        switched,
+        "taller valid fork inside finality was not adopted"
+    );
+    assert_eq!(local.ledger.tip_hash(), remote.ledger.tip_hash());
+}
+
+#[test]
+fn snapshot_with_invalid_late_block_is_rejected_without_replacing_local_chain() {
+    let mut local = harness_for_percent(25, 25);
+    let fork_base = local.ledger.snapshot();
+    local.mine_ticket_block(0);
+    let local_tip = local.ledger.tip_hash().to_string();
+
+    let mut remote = fork_harness_from(&local, fork_base);
+    remote.mine_ticket_block(0);
+    remote.mine_ticket_block(0);
+    let mut snapshot = remote.ledger.snapshot();
+    let last = snapshot.blocks.last_mut().expect("snapshot has a tip");
+    last.reward = last.reward.saturating_add(1);
+    last.hash = last.compute_hash();
+
+    let error = local
+        .ledger
+        .extend_from_snapshot_at(snapshot, NOW_MS)
+        .unwrap_err();
+
+    assert!(error.to_string().contains("block reward is invalid"));
+    assert_eq!(local.ledger.tip_hash(), local_tip);
+}
+
+#[test]
+fn pending_transactions_from_stale_fork_are_carried_forward_after_reorg() {
+    let base = harness_for_percent(26, 25);
+    let snapshot = base.ledger.snapshot();
+    let mut remote = fork_harness_from(&base, snapshot.clone());
+    remote.mine_ticket_block(0);
+    remote.mine_ticket_block(0);
+    let remote_miners = remote
+        .ledger
+        .chain
+        .iter()
+        .skip(snapshot.blocks.len())
+        .map(|block| block.miner.clone())
+        .collect::<BTreeSet<_>>();
+    let sender = base
+        .honest
+        .iter()
+        .find(|wallet| !remote_miners.contains(wallet.address()))
+        .expect("test fixture should have a non-finalizer sender")
+        .clone();
+    let recipient = base
+        .honest
+        .iter()
+        .find(|wallet| {
+            wallet.address() != sender.address() && !remote_miners.contains(wallet.address())
+        })
+        .expect("test fixture should have a recipient")
+        .clone();
+
+    let mut local = fork_harness_from(&base, snapshot);
+    let stale_fork_tx = local
+        .ledger
+        .build_transfer(&sender, recipient.address(), 1, 1)
+        .unwrap();
+    local
+        .ledger
+        .submit_transaction(stale_fork_tx.clone())
+        .unwrap();
+    local.mine_ticket_block(0);
+
+    let switched = local
+        .ledger
+        .extend_from_snapshot_at(remote.ledger.snapshot(), NOW_MS)
+        .unwrap();
+
+    assert!(switched, "taller fork should trigger a reorg");
+    assert!(
+        local
+            .ledger
+            .pending()
+            .iter()
+            .any(|tx| tx.signature() == stale_fork_tx.signature()),
+        "stale fork transaction was not carried forward"
+    );
 }
 
 #[test]
