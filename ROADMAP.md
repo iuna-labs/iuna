@@ -116,9 +116,11 @@ Focus: improve usability, tooling, and governance after the base network is stab
 A release intended for deployment must pass:
 
 - `cargo test --locked`
+- `cargo check --locked --manifest-path fuzz/Cargo.toml`
+- fuzz smoke runs for `p2p_envelope`, `compact_snapshot`, `domain_json`, and `stratum_request`
 - `cargo test --locked --release --test properties -- --ignored`
 
-Normal local development may skip ignored long-running property tests, but deployment must not.
+Normal local development may skip ignored long-running property tests and long fuzzing sessions, but deployment must run the release gate smoke checks.
 
 ## Decisions
 

@@ -75,6 +75,11 @@ run_release_tests() {
   require_command cargo
 
   cargo test --locked
+  cargo check --locked --manifest-path fuzz/Cargo.toml
+  cargo run --locked --manifest-path fuzz/Cargo.toml --bin p2p_envelope -- -runs=1 fuzz/corpus/p2p_envelope
+  cargo run --locked --manifest-path fuzz/Cargo.toml --bin compact_snapshot -- -runs=1 fuzz/corpus/compact_snapshot
+  cargo run --locked --manifest-path fuzz/Cargo.toml --bin domain_json -- -runs=1 fuzz/corpus/domain_json
+  cargo run --locked --manifest-path fuzz/Cargo.toml --bin stratum_request -- -runs=1 fuzz/corpus/stratum_request
   cargo test --locked --release --test properties -- --ignored
 }
 
