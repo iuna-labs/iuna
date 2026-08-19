@@ -49,7 +49,7 @@ These items are not protocol rules. They are the attack and reliability checks t
 
 - [x] HTTP/auth abuse tests cover CSRF same-origin behavior, lockout/backoff behavior, forwarded-header spoofing from untrusted peers, and session expiry.
 - [x] Multi-node in-memory simulation covers delayed gossip, withheld burn bundles, bundle equivocation, partitions, restarts, persistence reload, and convergence.
-- [ ] Long-running release-mode soak test runs with automatic burn/finalization, P2P sync, Stratum-disabled and Stratum-enabled nodes, and periodic node restarts.
+- [x] Long-running release-mode soak test runs with automatic burn/finalization, P2P sync, Stratum-disabled and Stratum-enabled nodes, and periodic node restarts.
 - [ ] Operator failure playbooks exist for stalled height, divergent tips, old snapshots, no burn committee signatures, recovery blocks, and corrupted local persistence.
 - [ ] Mainnet-candidate release rehearsal includes fresh genesis, published bootnodes, checksums, backup/restore instructions, and a no-reset stability window.
 
@@ -114,7 +114,7 @@ Focus: improve usability, tooling, and governance after the base network is stab
 A release intended for deployment must pass:
 
 - `cargo test --locked`
-- `cargo test --locked --test properties -- --ignored`
+- `cargo test --locked --release --test properties -- --ignored`
 
 Normal local development may skip ignored long-running property tests, but deployment must not.
 

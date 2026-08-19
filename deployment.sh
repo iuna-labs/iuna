@@ -75,7 +75,7 @@ run_release_tests() {
   require_command cargo
 
   cargo test --locked
-  cargo test --locked --test properties -- --ignored
+  cargo test --locked --release --test properties -- --ignored
 }
 
 update_versions() {
