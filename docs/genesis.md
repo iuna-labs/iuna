@@ -43,15 +43,18 @@ Build and deploy from the candidate commit:
 ```sh
 cargo test --locked
 cargo check --locked --manifest-path fuzz/Cargo.toml
-cargo run --locked --manifest-path fuzz/Cargo.toml --bin p2p_envelope -- -runs=1 fuzz/corpus/p2p_envelope
-cargo run --locked --manifest-path fuzz/Cargo.toml --bin compact_snapshot -- -runs=1 fuzz/corpus/compact_snapshot
-cargo run --locked --manifest-path fuzz/Cargo.toml --bin domain_json -- -runs=1 fuzz/corpus/domain_json
-cargo run --locked --manifest-path fuzz/Cargo.toml --bin stratum_request -- -runs=1 fuzz/corpus/stratum_request
+cargo run --locked --manifest-path fuzz/Cargo.toml --bin p2p_envelope -- -runs=256 fuzz/corpus/p2p_envelope
+cargo run --locked --manifest-path fuzz/Cargo.toml --bin compact_snapshot -- -runs=256 fuzz/corpus/compact_snapshot
+cargo run --locked --manifest-path fuzz/Cargo.toml --bin domain_json -- -runs=256 fuzz/corpus/domain_json
+cargo run --locked --manifest-path fuzz/Cargo.toml --bin stratum_request -- -runs=256 fuzz/corpus/stratum_request
+cargo run --locked --manifest-path fuzz/Cargo.toml --bin wallet_config -- -runs=256 fuzz/corpus/wallet_config
 cargo test --locked --release --test properties -- --ignored
 ./deployment.sh <version>
 ```
 
 The deployment script writes release packages to `downloads/` and creates `downloads/SHA256SUMS`.
+It runs `256` iterations per fuzz target by default; set `IUNA_FUZZ_RUNS`
+only for an explicitly documented emergency redeploy.
 
 Verify the files before publishing them:
 

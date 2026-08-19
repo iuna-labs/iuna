@@ -120,8 +120,8 @@ A release intended for deployment must pass:
 
 - `cargo test --locked`
 - `cargo check --locked --manifest-path fuzz/Cargo.toml`
-- fuzz smoke runs for `p2p_envelope`, `compact_snapshot`, `domain_json`,
-  `stratum_request`, and `wallet_config`
+- fuzz gate runs with `256` iterations each for `p2p_envelope`,
+  `compact_snapshot`, `domain_json`, `stratum_request`, and `wallet_config`
 - `cargo test --locked --release --test properties -- --ignored`
 
 Normal local development may skip ignored long-running property tests and long fuzzing sessions, but deployment must run the release gate smoke checks.

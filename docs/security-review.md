@@ -145,11 +145,11 @@ Before the mainnet-candidate launch, attach or publish logs for:
 ```sh
 cargo test --locked
 cargo check --locked --manifest-path fuzz/Cargo.toml
-cargo fuzz run p2p_envelope -- -runs=256
-cargo fuzz run compact_snapshot -- -runs=256
-cargo fuzz run domain_json -- -runs=256
-cargo fuzz run stratum_request -- -runs=256
-cargo fuzz run wallet_config -- -runs=256
+cargo run --locked --manifest-path fuzz/Cargo.toml --bin p2p_envelope -- -runs=256 fuzz/corpus/p2p_envelope
+cargo run --locked --manifest-path fuzz/Cargo.toml --bin compact_snapshot -- -runs=256 fuzz/corpus/compact_snapshot
+cargo run --locked --manifest-path fuzz/Cargo.toml --bin domain_json -- -runs=256 fuzz/corpus/domain_json
+cargo run --locked --manifest-path fuzz/Cargo.toml --bin stratum_request -- -runs=256 fuzz/corpus/stratum_request
+cargo run --locked --manifest-path fuzz/Cargo.toml --bin wallet_config -- -runs=256 fuzz/corpus/wallet_config
 cargo test --locked --release --test properties -- --ignored
 ```
 
