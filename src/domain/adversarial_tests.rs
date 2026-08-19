@@ -3,14 +3,14 @@ use std::collections::{BTreeMap, BTreeSet};
 use proptest::prelude::*;
 use proptest::test_runner::Config;
 
-use super::ledger_ops::block_reward;
+use super::ledger_ops::{block_reward, verify_address_signature};
 use super::reveal::{BurnBundlePayload, burn_bundle_slot_mask};
 use super::ticket::ticket_block_min_timestamp;
 use super::{
     Amount, BURN_LINEAGE_MATURITY_HEIGHTS, Block, BurnBundle, BurnBundleSignature,
-    BurnCommitteeMember, BurnLeaderRank, ChainSnapshot, GenesisBurn, Ledger, MAX_BLOCK_BYTES,
-    MICRO_IUNA, MaskedBurn, Transaction, TransactionSubmitOutcome, VDF_TARGET_BLOCK_MS, Wallet,
-    run_vdf,
+    BurnCommitteeMember, BurnLeaderRank, ChainSnapshot, FinalizerMode, GenesisBurn,
+    LeaderProofPayload, Ledger, MAX_BLOCK_BYTES, MICRO_IUNA, MaskedBurn, Transaction,
+    TransactionSubmitOutcome, VDF_TARGET_BLOCK_MS, Wallet, run_vdf,
 };
 
 const NOW_MS: u64 = 10_000_000_000;
@@ -478,6 +478,203 @@ fn assert_rejects(mut ledger: Ledger, block: Block, label: &str) {
     );
 }
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum MiniBlockVerdict {
+    Accept,
+    Height,
+    Parent,
+    Hash,
+    Reward,
+    VdfRounds,
+    Timestamp,
+    FutureTimestamp,
+    TooManyTransactions,
+    TooLarge,
+    MissingBurn,
+    FeePolicy,
+    FinalizerTicket,
+}
+
+fn mini_block_verdict(ledger: &Ledger, block: &Block, now_ms: u64) -> MiniBlockVerdict {
+    let parent = ledger.tip();
+    if block.height != parent.height.saturating_add(1) {
+        return MiniBlockVerdict::Height;
+    }
+    if block.prev_hash != parent.hash {
+        return MiniBlockVerdict::Parent;
+    }
+    if block.compute_hash() != block.hash {
+        return MiniBlockVerdict::Hash;
+    }
+
+    let expected_reward = block
+        .transactions
+        .iter()
+        .try_fold(0_u64, |total, transaction| {
+            total.checked_add(transaction.fee())
+        });
+    if expected_reward != Some(block.reward) {
+        return MiniBlockVerdict::Reward;
+    }
+
+    let expected_vdf_rounds = match block.finalizer_mode {
+        FinalizerMode::Ticket => {
+            super::ticket::vdf_rounds_for_finalizer_rank(ledger.vdf_rounds, block.finalizer_rank)
+        }
+        FinalizerMode::Recovery => {
+            super::ticket::vdf_rounds_for_finalizer_rank(ledger.vdf_rounds, 0)
+        }
+    };
+    if expected_vdf_rounds.ok() != Some(block.vdf_rounds) {
+        return MiniBlockVerdict::VdfRounds;
+    }
+
+    if block.timestamp_ms <= parent.timestamp_ms {
+        return MiniBlockVerdict::Timestamp;
+    }
+    if block.finalizer_mode == FinalizerMode::Ticket {
+        let Ok(min_timestamp) = ticket_block_min_timestamp(parent, block.finalizer_rank) else {
+            return MiniBlockVerdict::Timestamp;
+        };
+        if block.timestamp_ms < min_timestamp {
+            return MiniBlockVerdict::Timestamp;
+        }
+    }
+    let mut timestamps = ledger
+        .chain
+        .iter()
+        .rev()
+        .take(super::BLOCK_MEDIAN_TIME_PAST_WINDOW)
+        .map(|block| block.timestamp_ms)
+        .collect::<Vec<_>>();
+    timestamps.sort_unstable();
+    if block.timestamp_ms <= timestamps[timestamps.len() / 2] {
+        return MiniBlockVerdict::Timestamp;
+    }
+    if block.timestamp_ms > now_ms.saturating_add(super::MAX_BLOCK_TIMESTAMP_FUTURE_DRIFT_MS) {
+        return MiniBlockVerdict::FutureTimestamp;
+    }
+
+    if block.transactions.len() > ledger.launch_profile.max_block_transactions {
+        return MiniBlockVerdict::TooManyTransactions;
+    }
+    if block
+        .serialized_size_bytes()
+        .ok()
+        .is_none_or(|bytes| bytes > ledger.launch_profile.max_block_bytes)
+    {
+        return MiniBlockVerdict::TooLarge;
+    }
+    if !block.transactions.iter().any(Transaction::is_burn) {
+        return MiniBlockVerdict::MissingBurn;
+    }
+    if block
+        .transactions
+        .iter()
+        .any(|transaction| transaction.fee() == 0)
+    {
+        return MiniBlockVerdict::FeePolicy;
+    }
+
+    if block.finalizer_mode == FinalizerMode::Ticket {
+        let Ok(ranks) = ledger.burn_leader_ranks_for_block(block.height) else {
+            return MiniBlockVerdict::FinalizerTicket;
+        };
+        let Some(selected) = ranks.get(block.finalizer_rank as usize) else {
+            return MiniBlockVerdict::FinalizerTicket;
+        };
+        let Some(proof) = block.leader_proof.as_ref() else {
+            return MiniBlockVerdict::FinalizerTicket;
+        };
+        if selected.rank != block.finalizer_rank
+            || selected.owner != block.miner
+            || proof.ticket_id != selected.ticket_id
+            || proof.public_key != block.miner
+            || selected.eligible_from_height > block.height
+            || selected.eligible_until_height < block.height
+        {
+            return MiniBlockVerdict::FinalizerTicket;
+        }
+        let payload = LeaderProofPayload {
+            height: block.height,
+            prev_hash: block.prev_hash.clone(),
+            finalizer_rank: block.finalizer_rank,
+            vdf_output: block.vdf_output.clone(),
+            ticket_id: selected.ticket_id.clone(),
+            ticket_amount: selected.amount,
+            ticket_owner: selected.owner.clone(),
+        };
+        if verify_address_signature(
+            &proof.public_key,
+            &payload.canonical(),
+            &proof.signature,
+            "mini-validator leader",
+        )
+        .is_err()
+        {
+            return MiniBlockVerdict::FinalizerTicket;
+        }
+    }
+
+    MiniBlockVerdict::Accept
+}
+
+fn consensus_block_verdict(mut ledger: Ledger, block: Block, now_ms: u64) -> MiniBlockVerdict {
+    let error = match ledger.apply_block_at(block, now_ms) {
+        Ok(()) => return MiniBlockVerdict::Accept,
+        Err(error) => error.to_string(),
+    };
+
+    if error.contains("expected block height") || error.contains("conflicts with local chain") {
+        MiniBlockVerdict::Height
+    } else if error.contains("does not extend local tip") {
+        MiniBlockVerdict::Parent
+    } else if error.contains("block hash is invalid") {
+        MiniBlockVerdict::Hash
+    } else if error.contains("block reward is invalid") {
+        MiniBlockVerdict::Reward
+    } else if error.contains("block VDF rounds are invalid") {
+        MiniBlockVerdict::VdfRounds
+    } else if error.contains("timestamp must") || error.contains("before finalizer rank") {
+        MiniBlockVerdict::Timestamp
+    } else if error.contains("too far in the future") {
+        MiniBlockVerdict::FutureTimestamp
+    } else if error.contains("too many transaction") {
+        MiniBlockVerdict::TooManyTransactions
+    } else if error.contains("max block size") {
+        MiniBlockVerdict::TooLarge
+    } else if error.contains("at least one burn transaction") {
+        MiniBlockVerdict::MissingBurn
+    } else if error.contains("fee must be greater than zero") {
+        MiniBlockVerdict::FeePolicy
+    } else if error.contains("selected for rank")
+        || error.contains("selected ticket")
+        || error.contains("leader proof")
+        || error.contains("leader ticket")
+        || error.contains("leader signature")
+    {
+        MiniBlockVerdict::FinalizerTicket
+    } else {
+        panic!("unclassified consensus error: {error}");
+    }
+}
+
+fn assert_mini_validator_agrees(
+    ledger: &Ledger,
+    block: Block,
+    now_ms: u64,
+    expected: MiniBlockVerdict,
+) {
+    let mini = mini_block_verdict(ledger, &block, now_ms);
+    assert_eq!(mini, expected, "mini-validator disagreed with test setup");
+
+    let consensus = consensus_block_verdict(ledger.clone(), block, now_ms);
+    assert_eq!(
+        consensus, mini,
+        "production validator and mini-validator diverged"
+    );
+}
+
 fn harness_for_percent(seed: u64, burn_percent: u8) -> Harness {
     Harness::new(seed, burn_percent, 10, AdversaryStrategy::Honest)
 }
@@ -737,6 +934,159 @@ fn attested_burn_is_not_selected_again_as_normal_transaction() {
             .transactions
             .iter()
             .any(|tx| tx.signature() == extra_burn.signature())
+    );
+}
+
+#[test]
+fn independent_mini_validator_matches_consensus_for_block_prechecks() {
+    let mut harness = harness_for_percent(30, 25);
+    let block = harness.prepared_ticket_block(0, Vec::new());
+    let ledger = harness.ledger.clone();
+    let now_ms = NOW_MS.saturating_add(block.timestamp_ms);
+
+    assert_mini_validator_agrees(&ledger, block.clone(), now_ms, MiniBlockVerdict::Accept);
+
+    let mut wrong_height = block.clone();
+    wrong_height.height += 1;
+    rehash(&mut wrong_height);
+    assert_mini_validator_agrees(&ledger, wrong_height, now_ms, MiniBlockVerdict::Height);
+
+    let mut wrong_parent = block.clone();
+    wrong_parent.prev_hash = if ledger.tip_hash() == "0".repeat(64) {
+        "1".repeat(64)
+    } else {
+        "0".repeat(64)
+    };
+    rehash(&mut wrong_parent);
+    assert_mini_validator_agrees(&ledger, wrong_parent, now_ms, MiniBlockVerdict::Parent);
+
+    let mut wrong_hash = block.clone();
+    mutate_signature(&mut wrong_hash.hash);
+    assert_mini_validator_agrees(&ledger, wrong_hash, now_ms, MiniBlockVerdict::Hash);
+
+    let mut wrong_reward = block.clone();
+    wrong_reward.reward += 1;
+    wrong_reward.hash = wrong_reward.compute_hash();
+    assert_mini_validator_agrees(&ledger, wrong_reward, now_ms, MiniBlockVerdict::Reward);
+
+    let mut wrong_vdf_rounds = block.clone();
+    wrong_vdf_rounds.vdf_rounds += 1;
+    wrong_vdf_rounds.hash = wrong_vdf_rounds.compute_hash();
+    assert_mini_validator_agrees(
+        &ledger,
+        wrong_vdf_rounds,
+        now_ms,
+        MiniBlockVerdict::VdfRounds,
+    );
+
+    let mut early_timestamp = block.clone();
+    early_timestamp.timestamp_ms = ledger.tip().timestamp_ms;
+    rehash(&mut early_timestamp);
+    assert_mini_validator_agrees(
+        &ledger,
+        early_timestamp,
+        now_ms,
+        MiniBlockVerdict::Timestamp,
+    );
+
+    let mut future_timestamp = block.clone();
+    future_timestamp.timestamp_ms = NOW_MS + super::MAX_BLOCK_TIMESTAMP_FUTURE_DRIFT_MS + 1;
+    rehash(&mut future_timestamp);
+    assert_mini_validator_agrees(
+        &ledger,
+        future_timestamp,
+        NOW_MS,
+        MiniBlockVerdict::FutureTimestamp,
+    );
+
+    let mut count_limited_ledger = ledger.clone();
+    count_limited_ledger.launch_profile.max_block_transactions =
+        block.transactions.len().saturating_sub(1);
+    assert_mini_validator_agrees(
+        &count_limited_ledger,
+        block.clone(),
+        now_ms,
+        MiniBlockVerdict::TooManyTransactions,
+    );
+
+    let mut size_limited_ledger = ledger.clone();
+    size_limited_ledger.launch_profile.max_block_bytes =
+        block.serialized_size_bytes().unwrap().saturating_sub(1);
+    assert_mini_validator_agrees(
+        &size_limited_ledger,
+        block.clone(),
+        now_ms,
+        MiniBlockVerdict::TooLarge,
+    );
+
+    let mut missing_burn = block.clone();
+    missing_burn
+        .transactions
+        .retain(|transaction| !transaction.is_burn());
+    rehash(&mut missing_burn);
+    assert_mini_validator_agrees(&ledger, missing_burn, now_ms, MiniBlockVerdict::MissingBurn);
+
+    let mut zero_fee = block.clone();
+    match zero_fee
+        .transactions
+        .iter_mut()
+        .find(|transaction| !matches!(transaction, Transaction::Mine { .. }))
+        .expect("prepared block includes a burn anchor")
+    {
+        Transaction::Transfer { fee, .. } | Transaction::Burn { fee, .. } => *fee = 0,
+        Transaction::Mine { .. } => unreachable!("mine transactions are filtered out"),
+    }
+    rehash(&mut zero_fee);
+    assert_mini_validator_agrees(&ledger, zero_fee, now_ms, MiniBlockVerdict::FeePolicy);
+
+    let mut wrong_finalizer = block.clone();
+    wrong_finalizer.miner = harness.honest[0].address().to_string();
+    rehash(&mut wrong_finalizer);
+    assert_mini_validator_agrees(
+        &ledger,
+        wrong_finalizer,
+        now_ms,
+        MiniBlockVerdict::FinalizerTicket,
+    );
+
+    let mut missing_proof = block.clone();
+    missing_proof.leader_proof = None;
+    rehash(&mut missing_proof);
+    assert_mini_validator_agrees(
+        &ledger,
+        missing_proof,
+        now_ms,
+        MiniBlockVerdict::FinalizerTicket,
+    );
+
+    let mut wrong_proof_signature = block.clone();
+    mutate_signature(
+        &mut wrong_proof_signature
+            .leader_proof
+            .as_mut()
+            .expect("ticket block carries a leader proof")
+            .signature,
+    );
+    rehash(&mut wrong_proof_signature);
+    assert_mini_validator_agrees(
+        &ledger,
+        wrong_proof_signature,
+        now_ms,
+        MiniBlockVerdict::FinalizerTicket,
+    );
+
+    let mut wrong_ticket_id = block;
+    wrong_ticket_id
+        .leader_proof
+        .as_mut()
+        .expect("ticket block carries a leader proof")
+        .ticket_id = "0".repeat(64);
+    rehash(&mut wrong_ticket_id);
+    assert_mini_validator_agrees(
+        &ledger,
+        wrong_ticket_id,
+        now_ms,
+        MiniBlockVerdict::FinalizerTicket,
     );
 }
 

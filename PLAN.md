@@ -5,6 +5,8 @@ candidate chain is treated as promotable to mainnet.
 
 ## 1. Fuzzing Harnesses
 
+Status: initial repository harnesses and deployment smoke runs are in place.
+
 Goal: continuously throw malformed and semi-valid input at every external data
 boundary and every compact persistence format.
 
@@ -25,6 +27,10 @@ Acceptance:
   on a dedicated machine.
 
 ## 2. Independent Mini-Validator
+
+Status: started with a test-only block precheck oracle for height, parent hash,
+block hash, reward, VDF rounds, timestamps, block limits, burn presence, fee
+policy, and ticket finalizer proof selection.
 
 Goal: compare the production validator against a small, deliberately separate
 oracle for consensus-critical facts.
