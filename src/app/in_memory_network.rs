@@ -23,6 +23,13 @@ impl InMemoryNetwork {
     }
 
     pub fn deliver_until_idle(&mut self) -> Result<()> {
+        self.deliver_until_idle_filtered(|_, _, _| true)
+    }
+
+    pub fn deliver_until_idle_filtered(
+        &mut self,
+        mut allow: impl FnMut(&str, &str, &GossipEnvelope) -> bool,
+    ) -> Result<()> {
         loop {
             let mut outbound = Vec::new();
             for (id, node) in &mut self.nodes {
@@ -37,7 +44,7 @@ impl InMemoryNetwork {
 
             for (from, envelope) in outbound {
                 for (id, node) in &mut self.nodes {
-                    if *id != from {
+                    if *id != from && allow(&from, id, &envelope) {
                         receive_in_memory_envelope(node, envelope.clone())?;
                     }
                 }
@@ -46,6 +53,13 @@ impl InMemoryNetwork {
     }
 
     pub fn gossip_mempools_once(&mut self) -> Result<()> {
+        self.gossip_mempools_once_filtered(|_, _, _| true)
+    }
+
+    pub fn gossip_mempools_once_filtered(
+        &mut self,
+        mut allow: impl FnMut(&str, &str, &GossipEnvelope) -> bool,
+    ) -> Result<()> {
         let mut outbound = Vec::new();
         for (id, node) in &mut self.nodes {
             for envelope in node.mempool_gossip() {
@@ -55,7 +69,7 @@ impl InMemoryNetwork {
 
         for (from, envelope) in outbound {
             for (id, node) in &mut self.nodes {
-                if *id != from {
+                if *id != from && allow(&from, id, &envelope) {
                     receive_in_memory_envelope(node, envelope.clone())?;
                 }
             }

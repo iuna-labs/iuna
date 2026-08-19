@@ -543,9 +543,11 @@ mod tests {
     use std::collections::BTreeMap;
 
     use crate::{
-        app::InMemoryNetwork,
+        adapters::chain_store::SqliteChainStore,
+        app::{GossipEnvelope, InMemoryNetwork},
         domain::{GenesisBurn, Ledger, MICRO_IUNA, Wallet, run_vdf},
     };
+    use tempfile::tempdir;
 
     use super::NodeCore;
 
@@ -577,6 +579,180 @@ mod tests {
             .iter()
             .find(|wallet| wallet.address() != finalizer.address())
             .expect("test fixture should include a non-finalizer wallet")
+    }
+
+    #[test]
+    fn in_memory_network_survives_adversarial_gossip_restart_and_converges() {
+        let alice = Wallet::from_seed("network-adversarial-alice");
+        let bob = Wallet::from_seed("network-adversarial-bob");
+        let carol = Wallet::from_seed("network-adversarial-carol");
+        let wallets = [alice.clone(), bob.clone(), carol.clone()];
+        let ledger = funded_ledger(&wallets);
+        let finalizer = selected_finalizer(&ledger, &wallets);
+        let mut burners = wallets
+            .iter()
+            .filter(|wallet| wallet.address() != finalizer.address());
+        let burn_a = ledger.build_burn(burners.next().unwrap(), 1, 1).unwrap();
+        let burn_b = ledger.build_burn(burners.next().unwrap(), 2, 1).unwrap();
+
+        let mut alpha = NodeCore::from_ledger_with_burn_fee_and_enabled(
+            finalizer.clone(),
+            ledger.clone(),
+            true,
+            0,
+            1,
+        );
+        let beta = NodeCore::from_ledger_with_burn_fee_and_enabled(
+            finalizer.clone(),
+            ledger.clone(),
+            true,
+            0,
+            1,
+        );
+        let gamma = NodeCore::from_ledger(finalizer.clone(), ledger.clone(), 0);
+        alpha.receive_transaction(burn_a.clone()).unwrap();
+        alpha.receive_transaction(burn_b.clone()).unwrap();
+
+        let mut network = InMemoryNetwork::default();
+        network.insert("alpha", alpha);
+        network.insert("beta", beta);
+        network.insert("gamma", gamma);
+
+        network
+            .gossip_mempools_once_filtered(|_, to, envelope| {
+                !(to == "gamma" && matches!(envelope, GossipEnvelope::Transactions { .. }))
+            })
+            .unwrap();
+        assert!(
+            network
+                .node("beta")
+                .unwrap()
+                .pending_transactions()
+                .iter()
+                .any(|tx| tx.signature() == burn_a.signature())
+        );
+        assert!(
+            !network
+                .node("gamma")
+                .unwrap()
+                .pending_transactions()
+                .iter()
+                .any(|tx| tx.signature() == burn_a.signature())
+        );
+
+        network.gossip_mempools_once().unwrap();
+        assert!(
+            network
+                .node("gamma")
+                .unwrap()
+                .pending_transactions()
+                .iter()
+                .any(|tx| tx.signature() == burn_b.signature())
+        );
+
+        network
+            .node_mut("alpha")
+            .unwrap()
+            .publish_burn_bundle_for_next_block()
+            .unwrap();
+        network
+            .deliver_until_idle_filtered(|_, to, envelope| {
+                !(to == "gamma" && matches!(envelope, GossipEnvelope::BurnBundle(_)))
+            })
+            .unwrap();
+        let bundle = network
+            .node("beta")
+            .unwrap()
+            .usable_burn_bundles()
+            .into_iter()
+            .find(|bundle| bundle.member == finalizer.address())
+            .expect("beta should receive alpha's burn bundle");
+        assert!(
+            network
+                .node("gamma")
+                .unwrap()
+                .usable_burn_bundles()
+                .is_empty()
+        );
+
+        let conflicting_bundle = ledger.test_burn_bundle(&finalizer, vec![burn_b.clone()]);
+        assert_ne!(bundle.canonical(), conflicting_bundle.canonical());
+        network
+            .node_mut("beta")
+            .unwrap()
+            .receive(GossipEnvelope::BurnBundle(conflicting_bundle))
+            .unwrap();
+        assert!(
+            network
+                .node("beta")
+                .unwrap()
+                .usable_burn_bundles()
+                .into_iter()
+                .all(|candidate| candidate.slot != bundle.slot)
+        );
+
+        let block = {
+            let alpha = network.node_mut("alpha").unwrap();
+            alpha.prepare_automatic_burn(2).unwrap();
+            let work = alpha.prepare_next_block_with_local_anchor(2).unwrap();
+            alpha
+                .complete_prepared_block_at(
+                    work.clone(),
+                    run_vdf(work.vdf_seed(), work.vdf_rounds()),
+                    2,
+                )
+                .unwrap()
+        };
+        assert!(
+            block
+                .burn_bundle_section
+                .burns
+                .iter()
+                .any(|masked| masked.burn.signature() == burn_a.signature())
+        );
+        let stale_gamma_height = network.node("gamma").unwrap().chain_height();
+
+        network
+            .deliver_until_idle_filtered(|_, to, envelope| {
+                !(to == "gamma"
+                    && matches!(
+                        envelope,
+                        GossipEnvelope::Block(_)
+                            | GossipEnvelope::Blocks { .. }
+                            | GossipEnvelope::ChainSnapshot(_)
+                    ))
+            })
+            .unwrap();
+        assert_eq!(
+            network.node("alpha").unwrap().chain_tip_hash(),
+            network.node("beta").unwrap().chain_tip_hash()
+        );
+        assert_eq!(
+            network.node("gamma").unwrap().chain_height(),
+            stale_gamma_height
+        );
+
+        let dir = tempdir().unwrap();
+        let store = SqliteChainStore::open(dir.path().join("gamma.sqlite3")).unwrap();
+        store
+            .save(&network.node("gamma").unwrap().chain_snapshot())
+            .unwrap();
+        let restored_ledger =
+            Ledger::from_persisted_snapshot(store.load().unwrap().unwrap()).unwrap();
+        network.insert(
+            "gamma",
+            NodeCore::from_ledger(finalizer.clone(), restored_ledger, 0),
+        );
+        assert_eq!(
+            network.node("gamma").unwrap().chain_height(),
+            stale_gamma_height
+        );
+
+        assert!(network.sync_node_from_peer("alpha", "gamma", 128).unwrap());
+        network.deliver_until_idle().unwrap();
+        let tip = network.node("alpha").unwrap().chain_tip_hash();
+        assert_eq!(network.node("beta").unwrap().chain_tip_hash(), tip);
+        assert_eq!(network.node("gamma").unwrap().chain_tip_hash(), tip);
     }
 
     #[test]
