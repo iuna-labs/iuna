@@ -8,8 +8,9 @@ use super::reveal::{BurnBundlePayload, burn_bundle_slot_mask};
 use super::ticket::ticket_block_min_timestamp;
 use super::{
     Amount, BURN_LINEAGE_MATURITY_HEIGHTS, Block, BurnBundle, BurnBundleSignature,
-    BurnCommitteeMember, BurnLeaderRank, ChainSnapshot, GenesisBurn, Ledger, MICRO_IUNA,
-    MaskedBurn, Transaction, TransactionSubmitOutcome, VDF_TARGET_BLOCK_MS, Wallet, run_vdf,
+    BurnCommitteeMember, BurnLeaderRank, ChainSnapshot, GenesisBurn, Ledger, MAX_BLOCK_BYTES,
+    MICRO_IUNA, MaskedBurn, Transaction, TransactionSubmitOutcome, VDF_TARGET_BLOCK_MS, Wallet,
+    run_vdf,
 };
 
 const NOW_MS: u64 = 10_000_000_000;
@@ -64,14 +65,26 @@ struct ResourceLevel {
 
 #[derive(Clone, Debug, Default)]
 struct AdversarialMetrics {
+    attacker_finalizations: usize,
     attacker_finalization_share: f64,
+    attacker_committee_slots: usize,
+    committee_slots: usize,
     attacker_committee_share: f64,
+    third_party_burns: usize,
+    censored_third_party_burns: usize,
     third_party_burn_censorship_rate: f64,
     fallback_rate: f64,
     recovery_rate: f64,
     average_blocks_until_recovery: f64,
     attacker_burn_cost: Amount,
     attacker_net_reward: i128,
+}
+
+impl AdversarialMetrics {
+    fn successful_censorship_cost_per_burn(&self) -> Option<f64> {
+        (self.censored_third_party_burns > 0)
+            .then(|| self.attacker_burn_cost as f64 / self.censored_third_party_burns as f64)
+    }
 }
 
 struct Harness {
@@ -339,7 +352,23 @@ impl Harness {
         let mut blocks_until_recovery = Vec::new();
 
         for step in 0..blocks {
-            let victim = self.honest[step % self.honest.len()].clone();
+            let rank = match self.attacker.strategy {
+                AdversaryStrategy::MissRank0
+                | AdversaryStrategy::ForceFallback
+                | AdversaryStrategy::CombinedStrategy => {
+                    usize::from(self.ledger.finalizer_rank_count_for_next_block() > 1)
+                }
+                _ => 0,
+            };
+            let planned_finalizer = self.next_rank(rank).owner;
+            let victim = self
+                .honest
+                .iter()
+                .cycle()
+                .skip(step)
+                .find(|wallet| wallet.address() != planned_finalizer)
+                .expect("test fixture should have a non-finalizer victim")
+                .clone();
             let third_party_burn = if matches!(
                 self.attacker.strategy,
                 AdversaryStrategy::CensorBurns
@@ -367,14 +396,6 @@ impl Harness {
                 .filter(|member| attacker_addresses.contains(&member.owner))
                 .count();
 
-            let rank = match self.attacker.strategy {
-                AdversaryStrategy::MissRank0
-                | AdversaryStrategy::ForceFallback
-                | AdversaryStrategy::CombinedStrategy => {
-                    usize::from(self.ledger.finalizer_rank_count_for_next_block() > 1)
-                }
-                _ => 0,
-            };
             let block = if matches!(
                 self.attacker.strategy,
                 AdversaryStrategy::AttemptRecovery | AdversaryStrategy::CombinedStrategy
@@ -410,8 +431,13 @@ impl Harness {
             }
         }
 
+        metrics.attacker_finalizations = attacker_finalizations;
         metrics.attacker_finalization_share = share(attacker_finalizations, finalizations);
+        metrics.attacker_committee_slots = attacker_committee_slots;
+        metrics.committee_slots = committee_slots;
         metrics.attacker_committee_share = share(attacker_committee_slots, committee_slots);
+        metrics.third_party_burns = third_party_burns;
+        metrics.censored_third_party_burns = censored_third_party_burns;
         metrics.third_party_burn_censorship_rate =
             share(censored_third_party_burns, third_party_burns);
         metrics.fallback_rate = share(fallback_blocks, blocks);
@@ -1537,4 +1563,161 @@ fn adversarial_scenarios_cover_resource_matrix() {
             );
         }
     }
+}
+
+#[test]
+fn attack_economics_visible_burns_have_no_finite_censorship_price() {
+    let cases = [(1, 1), (10, 1), (10, 25), (25, 10), (50, 50)];
+
+    for (case, (burn, lineage)) in cases.into_iter().enumerate() {
+        let mut harness = Harness::new(
+            1_000 + case as u64,
+            burn,
+            lineage,
+            AdversaryStrategy::CensorBurns,
+        );
+        let metrics = harness.run_strategy(4);
+
+        assert_eq!(
+            metrics.third_party_burns, 4,
+            "case={case} burn={burn}% lineage={lineage}% did not create visible victim burns: {metrics:?}"
+        );
+        assert_eq!(
+            metrics.censored_third_party_burns, 0,
+            "case={case} burn={burn}% lineage={lineage}% censored visible burns: {metrics:?}"
+        );
+        assert_eq!(
+            metrics.successful_censorship_cost_per_burn(),
+            None,
+            "case={case} burn={burn}% lineage={lineage}% found a finite price for visible burn censorship: {metrics:?}"
+        );
+        assert_eq!(
+            metrics.fallback_rate, 0.0,
+            "case={case} burn={burn}% lineage={lineage}% needed fallback to keep censoring: {metrics:?}"
+        );
+        assert_eq!(
+            metrics.recovery_rate, 0.0,
+            "case={case} burn={burn}% lineage={lineage}% needed recovery to keep censoring: {metrics:?}"
+        );
+    }
+}
+
+#[test]
+fn attack_economics_withheld_burns_require_gossip_isolation() {
+    let mut visible = Harness::new(1_100, 25, 25, AdversaryStrategy::CensorBurns);
+    let visible_metrics = visible.run_strategy(4);
+    assert_eq!(
+        visible_metrics.censored_third_party_burns, 0,
+        "visible victim burns should not be censored: {visible_metrics:?}"
+    );
+
+    let mut withheld = Harness::new(1_100, 25, 25, AdversaryStrategy::WithholdBurnFromCommittee);
+    let withheld_metrics = withheld.run_strategy(4);
+    assert_eq!(
+        withheld_metrics.third_party_burns, 4,
+        "withheld scenario did not create victim burns: {withheld_metrics:?}"
+    );
+    assert_eq!(
+        withheld_metrics.censored_third_party_burns, 4,
+        "burns kept out of local relay should be absent from produced blocks: {withheld_metrics:?}"
+    );
+    assert_eq!(
+        withheld_metrics.fallback_rate, 0.0,
+        "gossip isolation should not require fallback blocks in this model: {withheld_metrics:?}"
+    );
+    assert_eq!(
+        withheld_metrics.recovery_rate, 0.0,
+        "gossip isolation should not require recovery blocks in this model: {withheld_metrics:?}"
+    );
+}
+
+#[test]
+fn attack_economics_committee_capture_requires_matured_lineage_weight() {
+    let mut low_lineage = Harness::new(1_200, 10, 1, AdversaryStrategy::MaximizeCommitteeWeight);
+    let low_metrics = low_lineage.run_strategy(8);
+    let mut high_lineage = Harness::new(1_200, 10, 50, AdversaryStrategy::MaximizeCommitteeWeight);
+    let high_metrics = high_lineage.run_strategy(8);
+
+    assert!(
+        high_metrics.attacker_committee_slots >= low_metrics.attacker_committee_slots,
+        "more matured attacker lineage roots should not reduce committee capture in this deterministic sweep; low={low_metrics:?} high={high_metrics:?}"
+    );
+    assert!(
+        high_metrics.committee_slots >= low_metrics.committee_slots,
+        "matured lineage sweep should keep committee slots available; low={low_metrics:?} high={high_metrics:?}"
+    );
+    assert_eq!(
+        low_metrics.third_party_burn_censorship_rate, 0.0,
+        "low-lineage committee strategy should not censor by itself: {low_metrics:?}"
+    );
+    assert_eq!(
+        high_metrics.third_party_burn_censorship_rate, 0.0,
+        "high-lineage committee strategy should not censor by itself: {high_metrics:?}"
+    );
+}
+
+#[test]
+fn blockspace_flood_stays_bounded_by_transaction_count_and_bytes() {
+    let finalizer = Wallet::from_seed("blockspace-flood-finalizer");
+    let recipient = Wallet::from_seed("blockspace-flood-recipient");
+    let max_test_transactions = 64;
+    let senders = (0..(max_test_transactions + 32))
+        .map(|index| Wallet::from_seed(&format!("blockspace-flood-sender-{index}")))
+        .collect::<Vec<_>>();
+    let mut allocations = BTreeMap::new();
+    allocations.insert(finalizer.address().to_string(), 10 * MICRO_IUNA);
+    allocations.insert(recipient.address().to_string(), 10 * MICRO_IUNA);
+    for sender in &senders {
+        allocations.insert(sender.address().to_string(), 10 * MICRO_IUNA);
+    }
+    let mut ledger = Ledger::new_with_genesis_burns(
+        allocations,
+        vec![GenesisBurn::new(finalizer.address(), MICRO_IUNA)],
+        1,
+    )
+    .unwrap();
+    ledger.launch_profile.max_block_transactions = max_test_transactions;
+
+    for sender in &senders {
+        let tx = ledger
+            .build_transfer(sender, recipient.address(), 1, 1)
+            .unwrap();
+        ledger.submit_transaction(tx).unwrap();
+    }
+    let anchor = ledger.build_burn(&finalizer, 1, 1).unwrap();
+    ledger.submit_transaction(anchor.clone()).unwrap();
+
+    let prepared = ledger
+        .prepare_next_block_with_burn_bundles(finalizer.address(), 1, Vec::new())
+        .unwrap();
+    let vdf_output = run_vdf(prepared.vdf_seed(), prepared.vdf_rounds());
+    let block = prepared.finish(&finalizer, vdf_output);
+
+    assert!(
+        block
+            .transactions
+            .iter()
+            .any(|tx| tx.signature() == anchor.signature()),
+        "flooded block did not preserve the required finalizer anchor burn"
+    );
+    assert!(
+        block.transactions.len() <= max_test_transactions,
+        "block selected too many transactions: {} > {}",
+        block.transactions.len(),
+        max_test_transactions
+    );
+    assert!(
+        block.serialized_size_bytes().unwrap() <= MAX_BLOCK_BYTES,
+        "block exceeded byte limit under flood: {} > {}",
+        block.serialized_size_bytes().unwrap(),
+        MAX_BLOCK_BYTES
+    );
+
+    ledger
+        .apply_block_at(block, NOW_MS.saturating_add(VDF_TARGET_BLOCK_MS))
+        .unwrap();
+    assert!(
+        !ledger.pending().is_empty(),
+        "blockspace flood should leave excess paid transactions pending instead of exceeding limits"
+    );
 }
