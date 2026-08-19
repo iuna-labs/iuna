@@ -54,7 +54,7 @@ cargo test --locked --release --test properties -- --ignored
 
 The deployment script writes release packages to `downloads/` and creates `downloads/SHA256SUMS`.
 It runs `256` iterations per fuzz target by default; set `IUNA_FUZZ_RUNS`
-only for an explicitly documented emergency redeploy.
+to a positive integer only for an explicitly documented emergency redeploy.
 
 Verify the files before publishing them:
 

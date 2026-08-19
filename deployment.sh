@@ -45,6 +45,13 @@ replace_in_file() {
   perl -0pi -e "s|${pattern}|${replacement}|g" "$file"
 }
 
+validate_positive_integer() {
+  local name="$1"
+  local value="$2"
+
+  [[ "$value" =~ ^[1-9][0-9]*$ ]] || die "${name} must be a positive integer"
+}
+
 ensure_clean_worktree() {
   require_command git
 
@@ -75,6 +82,7 @@ run_release_tests() {
   require_command cargo
 
   local fuzz_runs="${IUNA_FUZZ_RUNS:-256}"
+  validate_positive_integer IUNA_FUZZ_RUNS "$fuzz_runs"
 
   cargo test --locked
   cargo check --locked --manifest-path fuzz/Cargo.toml
@@ -439,4 +447,6 @@ main() {
   deploy_docker_image "$version"
 }
 
-main "$@"
+if [[ "${BASH_SOURCE[0]}" == "$0" ]]; then
+  main "$@"
+fi
