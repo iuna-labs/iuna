@@ -215,6 +215,85 @@ async fn future_block_rejection_does_not_poison_peer_or_later_acceptance() {
 }
 
 #[tokio::test]
+async fn invalid_block_batch_is_rejected_atomically_without_partial_import() {
+    let alice = Wallet::from_seed("invalid-batch-p2p-alice");
+    let allocations = allocations(std::slice::from_ref(&alice), 1_000);
+    let mut remote_node = node("invalid-batch-remote", alice.clone(), allocations.clone());
+    queue_plaintext_burn(&mut remote_node, &alice, 1);
+    remote_node.drain_outbox();
+    let first_block = remote_node.mine_one_at(1).unwrap();
+    remote_node.drain_outbox();
+    queue_plaintext_burn(&mut remote_node, &alice, 1);
+    remote_node.drain_outbox();
+    let second_block = remote_node.mine_one_at(2).unwrap();
+
+    let mut invalid_second_block = second_block.clone();
+    invalid_second_block.reward = invalid_second_block.reward.saturating_add(1);
+    invalid_second_block.hash = invalid_second_block.compute_hash();
+
+    let local_node = node("invalid-batch-local", alice, allocations);
+    let original_tip = local_node.ledger().tip_hash().to_string();
+    let original_height = local_node.ledger().height();
+    let peers = Arc::new(tokio::sync::Mutex::new(PeerBook::default()));
+    let network = gossip_network(
+        Arc::new(tokio::sync::Mutex::new(local_node)),
+        Arc::clone(&peers),
+        "127.0.0.1:9544".parse().unwrap(),
+        None,
+    );
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let client = tokio::net::TcpStream::connect(listener.local_addr().unwrap())
+        .await
+        .unwrap();
+    let (server, remote_addr) = listener.accept().await.unwrap();
+    let (_server_reader, mut server_writer) = server.into_split();
+    let (_client_reader, _client_writer) = client.into_split();
+    let peer = remote_addr.to_string();
+    let mut known_peer = Some(peer.clone());
+
+    super::process_envelope(
+        &network,
+        &mut server_writer,
+        remote_addr,
+        &mut known_peer,
+        GossipEnvelope::Blocks {
+            blocks: vec![first_block.clone(), invalid_second_block],
+        },
+    )
+    .await
+    .unwrap();
+
+    let node = network.inner.node.lock().await;
+    assert_eq!(node.ledger().height(), original_height);
+    assert_eq!(node.ledger().tip_hash(), original_tip);
+    assert!(!node.ledger().has_block(&first_block.hash));
+    drop(node);
+
+    assert_eq!(network.metrics().rejected_block_batches, 1);
+    assert!(
+        network
+            .metrics()
+            .last_chain_payload_error
+            .as_deref()
+            .is_some_and(|error| error.contains("block batch: block reward is invalid"))
+    );
+    let recorded_peer = peers
+        .lock()
+        .await
+        .list()
+        .into_iter()
+        .find(|entry| entry.address == peer)
+        .expect("invalid batch sender should be recorded");
+    assert_eq!(recorded_peer.misbehavior_score, 1);
+    assert!(
+        recorded_peer
+            .last_error
+            .as_deref()
+            .is_some_and(|error| error.contains("block reward is invalid"))
+    );
+}
+
+#[tokio::test]
 async fn chain_snapshot_request_only_writes_snapshot_without_mutating_local_state() {
     let alice = Wallet::from_seed("snapshot-request-spam-alice");
     let allocations = allocations(std::slice::from_ref(&alice), 1_000);

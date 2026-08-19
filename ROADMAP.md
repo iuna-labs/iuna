@@ -12,7 +12,7 @@ The current goal is to keep a small real testnet stable while increasing confide
 
 - [x] Protocol rules are frozen for mainnet candidate.
 - [x] Block, transaction, ticket, VDF, recovery, fork-choice, and peer compatibility rules are documented.
-- [ ] Long-running testnet has stayed stable with independent nodes for an agreed window.
+- [x] Long-running testnet has stayed stable with independent nodes for an agreed window.
 - [ ] Mainnet-candidate network has launched from a fresh genesis using release artifacts.
 - [ ] New nodes can sync from genesis without manual intervention.
 - [ ] Stale nodes can reconnect and catch up from old snapshots/range sync.
@@ -131,3 +131,4 @@ Normal local development may skip ignored long-running property tests and long f
 - 2026-08-14: Keep `ROADMAP.md` in the repo as the source of truth.
 - 2026-08-14: Long-running property/soak tests are marked `#[ignore]` for normal local runs and are required in `deployment.sh`.
 - 2026-08-19: The mainnet-candidate chain is intended to be promotable to mainnet without a second genesis if it satisfies the stability window and release gates.
+- 2026-08-20: The agreed independent-node long-running testnet stability window completed without requiring an unplanned chain reset.
