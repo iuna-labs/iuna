@@ -42,7 +42,7 @@ These items are not protocol rules. They are the attack and reliability checks t
 - [x] P2P envelope item limits reject batches only above their configured boundaries.
 - [x] Stratum endpoint has explicit DoS limits: maximum line size, maximum jobs per session, idle timeout, and connection/session caps.
 - [x] Fork and snapshot adversarial tests cover same-height leader-quality choice, taller valid forks inside finality, invalid late snapshot blocks, and pending transaction carry-forward after reorg.
-- [ ] Compact snapshot decoder has malformed-input tests for huge lengths, oversized varints, trailing bytes, truncated payloads, invalid tags, and random byte inputs without panics or excessive allocation.
+- [x] Compact snapshot decoder has malformed-input tests for huge lengths, oversized varints, trailing bytes, truncated payloads, invalid tags, and random byte inputs without panics or excessive allocation.
 - [ ] Supply invariant tests cover mixed burns, fees, PoW mine actions, reorgs, no replay, and no double spend.
 
 ### Should Before Mainnet
