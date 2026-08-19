@@ -9,7 +9,7 @@ use super::ticket::ticket_block_min_timestamp;
 use super::{
     Amount, BURN_LINEAGE_MATURITY_HEIGHTS, Block, BurnBundle, BurnBundleSignature,
     BurnCommitteeMember, BurnLeaderRank, ChainSnapshot, GenesisBurn, Ledger, MICRO_IUNA,
-    MaskedBurn, Transaction, VDF_TARGET_BLOCK_MS, Wallet, run_vdf,
+    MaskedBurn, Transaction, TransactionSubmitOutcome, VDF_TARGET_BLOCK_MS, Wallet, run_vdf,
 };
 
 const NOW_MS: u64 = 10_000_000_000;
@@ -465,6 +465,62 @@ fn fork_harness_from(source: &Harness, snapshot: ChainSnapshot) -> Harness {
         seed: source.seed,
         resource: source.resource,
     }
+}
+
+fn live_supply(ledger: &Ledger) -> Amount {
+    ledger
+        .all_utxos()
+        .into_iter()
+        .try_fold(0_u64, |total, (_, output)| total.checked_add(output.amount))
+        .expect("test supply should not overflow")
+}
+
+fn expected_supply(snapshot: &ChainSnapshot) -> Amount {
+    let mut supply = snapshot
+        .genesis_allocations
+        .values()
+        .try_fold(0_u64, |total, amount| total.checked_add(*amount))
+        .expect("test genesis supply should not overflow");
+
+    for block in &snapshot.blocks {
+        supply = supply
+            .checked_add(block.reward)
+            .expect("test reward supply should not overflow");
+        for transaction in &block.transactions {
+            match transaction {
+                Transaction::Transfer { fee, .. } => {
+                    supply = supply
+                        .checked_sub(*fee)
+                        .expect("transfer fee should be backed by supply");
+                }
+                Transaction::Burn { amount, fee, .. } => {
+                    supply = supply
+                        .checked_sub(amount.checked_add(*fee).expect("burn debit overflow"))
+                        .expect("burn should be backed by supply");
+                }
+                Transaction::Mine { .. } => {
+                    supply = supply
+                        .checked_add(transaction.amount())
+                        .expect("mine reward supply should not overflow");
+                }
+            }
+        }
+    }
+
+    supply
+}
+
+fn assert_supply_invariant(ledger: &Ledger) {
+    let snapshot = ledger.snapshot();
+    for block in snapshot.blocks.iter().skip(1) {
+        assert_eq!(
+            block.reward,
+            block_reward(&block.transactions, 0).unwrap(),
+            "block {} reward does not match fee total",
+            block.height
+        );
+    }
+    assert_eq!(live_supply(ledger), expected_supply(&snapshot));
 }
 
 fn mutate_signature(signature: &mut String) {
@@ -1148,6 +1204,211 @@ fn pending_transactions_from_stale_fork_are_carried_forward_after_reorg() {
             .iter()
             .any(|tx| tx.signature() == stale_fork_tx.signature()),
         "stale fork transaction was not carried forward"
+    );
+}
+
+#[test]
+fn supply_invariant_holds_for_mixed_burns_fees_and_pow_mine_actions() {
+    let mut harness = harness_for_percent(27, 25);
+    assert_supply_invariant(&harness.ledger);
+    let starting_supply = live_supply(&harness.ledger);
+    let leader = harness.next_rank(0);
+    let finalizer = harness.wallet(&leader.owner).clone();
+    let actors = harness
+        .honest
+        .iter()
+        .filter(|wallet| wallet.address() != finalizer.address())
+        .cloned()
+        .collect::<Vec<_>>();
+    assert!(actors.len() >= 4, "test fixture needs non-finalizer actors");
+
+    let transfer = harness
+        .ledger
+        .build_transfer(&actors[0], actors[1].address(), 11, 2)
+        .unwrap();
+    harness.ledger.submit_transaction(transfer.clone()).unwrap();
+    let burn = harness.ledger.build_burn(&actors[2], 7, 3).unwrap();
+    harness.ledger.submit_transaction(burn.clone()).unwrap();
+    let mine = harness.ledger.build_mine(actors[3].address()).unwrap();
+    harness.ledger.submit_transaction(mine.clone()).unwrap();
+    let anchor = harness.submit_anchor_burn(&finalizer);
+
+    let block = harness.finish_ticket_block_from_pending(0, Vec::new());
+    let block_signatures = block
+        .transactions
+        .iter()
+        .map(|transaction| transaction.signature().to_string())
+        .collect::<BTreeSet<_>>();
+    for transaction in [&transfer, &burn, &mine, &anchor] {
+        assert!(
+            block_signatures.contains(transaction.signature()),
+            "mixed block did not include transaction {}",
+            transaction.signature()
+        );
+    }
+
+    harness
+        .ledger
+        .apply_block_at(block, NOW_MS.saturating_add(VDF_TARGET_BLOCK_MS))
+        .unwrap();
+
+    assert_supply_invariant(&harness.ledger);
+    assert_eq!(
+        live_supply(&harness.ledger),
+        starting_supply
+            .checked_add(mine.amount())
+            .and_then(|supply| supply.checked_add(mine.fee()))
+            .and_then(|supply| supply.checked_sub(burn.amount()))
+            .and_then(|supply| supply.checked_sub(anchor.amount()))
+            .unwrap()
+    );
+}
+
+#[test]
+fn supply_invariant_tracks_reorg_to_better_fork() {
+    let base = harness_for_percent(28, 25);
+    let snapshot = base.ledger.snapshot();
+    let mut local = fork_harness_from(&base, snapshot.clone());
+    let mut remote = fork_harness_from(&base, snapshot);
+
+    local.mine_ticket_block(0);
+    assert_supply_invariant(&local.ledger);
+
+    let remote_leader = remote.next_rank(0);
+    let remote_finalizer = remote.wallet(&remote_leader.owner).clone();
+    let mine_recipient = remote
+        .honest
+        .iter()
+        .find(|wallet| wallet.address() != remote_finalizer.address())
+        .unwrap()
+        .clone();
+    let remote_mine = remote.ledger.build_mine(mine_recipient.address()).unwrap();
+    remote
+        .ledger
+        .submit_transaction(remote_mine.clone())
+        .unwrap();
+    let remote_first_block = remote.mine_ticket_block(0);
+    assert!(
+        remote_first_block
+            .transactions
+            .iter()
+            .any(|transaction| transaction.signature() == remote_mine.signature()),
+        "remote fork did not include PoW mine action"
+    );
+    remote.mine_ticket_block(0);
+    assert_supply_invariant(&remote.ledger);
+
+    let switched = local
+        .ledger
+        .extend_from_snapshot_at(remote.ledger.snapshot(), NOW_MS)
+        .unwrap();
+
+    assert!(switched, "better remote fork should be adopted");
+    assert_eq!(local.ledger.tip_hash(), remote.ledger.tip_hash());
+    assert_supply_invariant(&local.ledger);
+    assert_eq!(live_supply(&local.ledger), live_supply(&remote.ledger));
+}
+
+#[test]
+fn replay_and_double_spend_do_not_change_supply() {
+    let mut harness = harness_for_percent(29, 25);
+    let leader = harness.next_rank(0);
+    let finalizer = harness.wallet(&leader.owner).clone();
+    let actors = harness
+        .honest
+        .iter()
+        .filter(|wallet| wallet.address() != finalizer.address())
+        .cloned()
+        .collect::<Vec<_>>();
+    assert!(actors.len() >= 3, "test fixture needs non-finalizer actors");
+    let spend_outpoint = harness
+        .ledger
+        .available_utxos_for_address(actors[0].address())
+        .unwrap()
+        .first()
+        .map(|(outpoint, _)| outpoint.clone())
+        .expect("sender should have a spendable output");
+    let first_spend = harness
+        .ledger
+        .build_transfer_with_inputs(
+            &actors[0],
+            actors[1].address(),
+            1,
+            1,
+            &[spend_outpoint.clone()],
+        )
+        .unwrap();
+    let double_spend = harness
+        .ledger
+        .build_transfer_with_inputs(&actors[0], actors[2].address(), 1, 2, &[spend_outpoint])
+        .unwrap();
+    let starting_supply = live_supply(&harness.ledger);
+
+    assert_eq!(
+        harness
+            .ledger
+            .submit_transaction_with_outcome(first_spend.clone())
+            .unwrap(),
+        TransactionSubmitOutcome::Added
+    );
+    assert_eq!(
+        harness
+            .ledger
+            .submit_transaction_with_outcome(first_spend.clone())
+            .unwrap(),
+        TransactionSubmitOutcome::AlreadyKnown
+    );
+    assert_eq!(
+        harness
+            .ledger
+            .submit_transaction_with_outcome(double_spend.clone())
+            .unwrap(),
+        TransactionSubmitOutcome::ConflictsWithPending
+    );
+
+    let anchor = harness.submit_anchor_burn(&finalizer);
+    let block = harness.finish_ticket_block_from_pending(0, Vec::new());
+    let block_signatures = block
+        .transactions
+        .iter()
+        .map(|transaction| transaction.signature().to_string())
+        .collect::<BTreeSet<_>>();
+    assert!(
+        block_signatures.contains(first_spend.signature()),
+        "test block did not mine the first spend before replay check"
+    );
+    assert!(
+        block_signatures.contains(anchor.signature()),
+        "test block did not mine the anchor burn"
+    );
+    let mut malicious_block = block.clone();
+    malicious_block.transactions.push(double_spend);
+    malicious_block.reward = block_reward(&malicious_block.transactions, 0).unwrap();
+    malicious_block.hash = malicious_block.compute_hash();
+    assert!(
+        harness
+            .ledger
+            .clone()
+            .apply_block_at(malicious_block, NOW_MS.saturating_add(VDF_TARGET_BLOCK_MS))
+            .is_err(),
+        "double-spend block was accepted"
+    );
+
+    harness
+        .ledger
+        .apply_block_at(block, NOW_MS.saturating_add(VDF_TARGET_BLOCK_MS))
+        .unwrap();
+    assert_eq!(
+        harness
+            .ledger
+            .submit_transaction_with_outcome(first_spend)
+            .unwrap(),
+        TransactionSubmitOutcome::AlreadyKnown
+    );
+    assert_supply_invariant(&harness.ledger);
+    assert_eq!(
+        live_supply(&harness.ledger),
+        starting_supply.checked_sub(anchor.amount()).unwrap()
     );
 }
 
