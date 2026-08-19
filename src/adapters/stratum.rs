@@ -30,6 +30,10 @@ const STRATUM_IDLE_TIMEOUT: Duration = Duration::from_secs(120);
 
 #[cfg(feature = "fuzzing")]
 pub fn fuzz_parse_stratum_request(line: &str) -> Result<Value> {
+    parse_stratum_request(line)
+}
+
+fn parse_stratum_request(line: &str) -> Result<Value> {
     if line.len() > STRATUM_MAX_LINE_BYTES {
         bail!("Stratum request exceeds {STRATUM_MAX_LINE_BYTES} byte limit");
     }
@@ -141,7 +145,7 @@ async fn handle_connection(server: StratumServer, stream: TcpStream) -> Result<(
         if line.trim().is_empty() {
             continue;
         }
-        let request: Value = serde_json::from_str(&line).context("invalid Stratum JSON")?;
+        let request = parse_stratum_request(&line)?;
         session.handle_request(request).await?;
     }
     Ok(())
@@ -443,7 +447,7 @@ mod tests {
 
     use super::{
         STRATUM_MAX_JOBS_PER_SESSION, STRATUM_MAX_LINE_BYTES, STRATUM_MAX_SESSIONS, StratumJob,
-        StratumLineReader, StratumSessionLimiter, insert_bounded_job,
+        StratumLineReader, StratumSessionLimiter, insert_bounded_job, parse_stratum_request,
     };
 
     fn dummy_job() -> StratumJob {
@@ -513,5 +517,24 @@ mod tests {
         assert!(limiter.try_acquire().is_none());
         drop(permits);
         assert!(limiter.try_acquire().is_some());
+    }
+
+    #[test]
+    fn performance_budget_stratum_request_parser_enforces_line_size() {
+        let prefix = r#"{"id":1,"method":"mining.configure","params":[""#;
+        let suffix = r#""]}"#;
+        let fill_len = STRATUM_MAX_LINE_BYTES - prefix.len() - suffix.len();
+        let at_budget = format!("{prefix}{}{suffix}", "a".repeat(fill_len));
+
+        let parsed =
+            parse_stratum_request(&at_budget).expect("request at line budget should parse");
+        assert_eq!(
+            parsed.get("method").and_then(serde_json::Value::as_str),
+            Some("mining.configure")
+        );
+
+        let over_budget = format!("{prefix}{}{suffix}", "a".repeat(fill_len + 1));
+        let error = parse_stratum_request(&over_budget).unwrap_err();
+        assert!(error.to_string().contains("Stratum request exceeds"));
     }
 }

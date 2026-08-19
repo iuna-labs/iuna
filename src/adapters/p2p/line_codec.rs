@@ -206,6 +206,8 @@ fn ensure_len(label: &str, len: usize, max: usize) -> Result<()> {
 
 #[cfg(test)]
 mod tests {
+    use tokio::io::AsyncWriteExt;
+
     use crate::{
         adapters::p2p::metrics::P2pMetricsCounters,
         app::{BlockInventory, GossipEnvelope, TRANSACTION_BATCH_LIMIT},
@@ -216,9 +218,9 @@ mod tests {
     };
 
     use super::{
-        MAX_BLOCK_BATCH, MAX_INVENTORY_ITEMS, MAX_OBJECT_REQUESTS, MAX_PEER_LIST,
-        MAX_SNAPSHOT_BLOCKS, parse_envelope, record_received_envelope_kind,
-        validate_envelope_limits,
+        LimitedLineReader, MAX_BLOCK_BATCH, MAX_GOSSIP_LINE_BYTES, MAX_INVENTORY_ITEMS,
+        MAX_OBJECT_REQUESTS, MAX_PEER_LIST, MAX_SNAPSHOT_BLOCKS, parse_envelope,
+        record_received_envelope_kind, validate_envelope_limits,
     };
 
     fn burn(signature: &str) -> Transaction {
@@ -430,5 +432,46 @@ mod tests {
             })
             .is_err()
         );
+    }
+
+    #[tokio::test]
+    async fn performance_budget_p2p_line_reader_enforces_message_size() {
+        let (mut client, server) = tokio::io::duplex(MAX_GOSSIP_LINE_BYTES + 1);
+        let mut reader = LimitedLineReader::new(server);
+        let line = vec![b'a'; MAX_GOSSIP_LINE_BYTES];
+        client.write_all(&line).await.unwrap();
+        client.write_all(b"\n").await.unwrap();
+
+        let read = reader.read_line().await.unwrap().unwrap();
+
+        assert_eq!(read.len(), MAX_GOSSIP_LINE_BYTES);
+
+        let (mut client, server) = tokio::io::duplex(MAX_GOSSIP_LINE_BYTES + 2);
+        let mut reader = LimitedLineReader::new(server);
+        let line = vec![b'a'; MAX_GOSSIP_LINE_BYTES + 1];
+        client.write_all(&line).await.unwrap();
+        client.write_all(b"\n").await.unwrap();
+
+        let error = reader.read_line().await.unwrap_err();
+
+        assert!(error.to_string().contains("p2p message exceeds"));
+    }
+
+    #[test]
+    fn performance_budget_p2p_batch_parser_enforces_item_limits() {
+        let at_budget = GossipEnvelope::PeerList {
+            peers: vec!["127.0.0.1:9444".to_string(); MAX_PEER_LIST],
+        };
+        let line = serde_json::to_string(&at_budget).unwrap();
+
+        assert_eq!(parse_envelope(&line).unwrap(), at_budget);
+
+        let over_budget = GossipEnvelope::PeerList {
+            peers: vec!["127.0.0.1:9444".to_string(); MAX_PEER_LIST + 1],
+        };
+        let line = serde_json::to_string(&over_budget).unwrap();
+        let error = parse_envelope(&line).unwrap_err();
+
+        assert!(error.to_string().contains("peer list has"));
     }
 }
