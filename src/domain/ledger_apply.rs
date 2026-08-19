@@ -10,7 +10,6 @@ use super::ledger_ops::{
 use super::mine_policy::ensure_mine_anchor_limit;
 use super::ticket::{
     apply_finalizer_ticket_effects, ticket_block_min_timestamp, tickets_created_by_block,
-    tickets_created_by_transactions,
 };
 use super::transaction::transaction_inputs_available;
 use super::{
@@ -101,11 +100,6 @@ impl Ledger {
         let mut tickets = self.tickets.clone();
         apply_finalizer_ticket_effects(self.tip(), &block, &mut tickets)?;
         tickets.extend(tickets_created_by_block(&block, &self.launch_profile)?);
-        tickets.extend(tickets_created_by_transactions(
-            block.height,
-            &block.transactions,
-            &self.launch_profile,
-        )?);
         credit_reward_output(&mut utxos, &block)?;
         self.utxos = utxos;
         self.utxo_lineage = utxo_lineage;

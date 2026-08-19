@@ -2,15 +2,18 @@ use std::collections::{BTreeMap, BTreeSet};
 
 use proptest::prelude::*;
 use proptest::test_runner::Config;
+use sha2::{Digest, Sha256};
 
 use super::ledger_ops::{block_reward, verify_address_signature};
 use super::reveal::{BurnBundlePayload, burn_bundle_slot_mask};
-use super::ticket::ticket_block_min_timestamp;
+use super::ticket::{
+    BurnTicket, MISSED_FALLBACK_TICKET_INVALIDATION_HEIGHT, ticket_block_min_timestamp,
+};
 use super::{
     Amount, BURN_LINEAGE_MATURITY_HEIGHTS, Block, BurnBundle, BurnBundleSignature,
     BurnCommitteeMember, BurnLeaderRank, ChainSnapshot, FinalizerMode, GenesisBurn,
     LeaderProofPayload, Ledger, MAX_BLOCK_BYTES, MICRO_IUNA, MaskedBurn, Transaction,
-    TransactionSubmitOutcome, VDF_TARGET_BLOCK_MS, Wallet, run_vdf,
+    TransactionSubmitOutcome, VDF_TARGET_BLOCK_MS, Wallet, hex_hash, run_vdf,
 };
 
 const NOW_MS: u64 = 10_000_000_000;
@@ -73,6 +76,8 @@ struct AdversarialMetrics {
     third_party_burns: usize,
     censored_third_party_burns: usize,
     third_party_burn_censorship_rate: f64,
+    fallback_opportunities: usize,
+    fallback_blocks: usize,
     fallback_rate: f64,
     recovery_rate: f64,
     average_blocks_until_recovery: f64,
@@ -348,15 +353,19 @@ impl Harness {
         let mut committee_slots = 0usize;
         let mut attacker_committee_slots = 0usize;
         let mut fallback_blocks = 0usize;
+        let mut fallback_opportunities = 0usize;
         let mut recovery_blocks = 0usize;
         let mut blocks_until_recovery = Vec::new();
 
         for step in 0..blocks {
+            let rank_count = self.ledger.finalizer_rank_count_for_next_block();
             let rank = match self.attacker.strategy {
                 AdversaryStrategy::MissRank0
                 | AdversaryStrategy::ForceFallback
                 | AdversaryStrategy::CombinedStrategy => {
-                    usize::from(self.ledger.finalizer_rank_count_for_next_block() > 1)
+                    let has_fallback = rank_count > 1;
+                    fallback_opportunities += usize::from(has_fallback);
+                    usize::from(has_fallback)
                 }
                 _ => 0,
             };
@@ -440,6 +449,8 @@ impl Harness {
         metrics.censored_third_party_burns = censored_third_party_burns;
         metrics.third_party_burn_censorship_rate =
             share(censored_third_party_burns, third_party_burns);
+        metrics.fallback_opportunities = fallback_opportunities;
+        metrics.fallback_blocks = fallback_blocks;
         metrics.fallback_rate = share(fallback_blocks, blocks);
         metrics.recovery_rate = share(recovery_blocks, blocks);
         metrics.average_blocks_until_recovery = if blocks_until_recovery.is_empty() {
@@ -499,6 +510,31 @@ enum MiniBlockVerdict {
 enum MiniSupplyVerdict {
     Balanced,
     Mismatch,
+}
+
+#[derive(Clone, Debug, Eq, Ord, PartialEq, PartialOrd)]
+struct MiniTicket {
+    id: String,
+    owner: String,
+    amount: Amount,
+    eligible_from_height: u64,
+    eligible_until_height: u64,
+}
+
+impl MiniTicket {
+    fn from_ticket(ticket: &BurnTicket) -> Self {
+        Self {
+            id: ticket.id.clone(),
+            owner: ticket.owner.clone(),
+            amount: ticket.amount,
+            eligible_from_height: ticket.eligible_from_height,
+            eligible_until_height: ticket.eligible_until_height,
+        }
+    }
+
+    fn is_eligible_for_height(&self, height: u64) -> bool {
+        self.eligible_from_height <= height && height <= self.eligible_until_height
+    }
 }
 
 fn mini_block_verdict(ledger: &Ledger, block: &Block, now_ms: u64) -> MiniBlockVerdict {
@@ -715,6 +751,279 @@ fn mini_supply_verdict(ledger: &Ledger, snapshot: &ChainSnapshot) -> MiniSupplyV
     }
 }
 
+fn mini_ticket_inventory(snapshot: &ChainSnapshot) -> Option<Vec<MiniTicket>> {
+    let genesis = snapshot.blocks.first()?;
+    let mut tickets = mini_genesis_tickets(&snapshot.genesis_allocations, genesis, snapshot)?;
+
+    for pair in snapshot.blocks.windows(2) {
+        let [parent, block] = pair else {
+            unreachable!("windows(2) yields two blocks");
+        };
+        mini_apply_ticket_block(parent, block, snapshot, &mut tickets)?;
+    }
+
+    Some(tickets)
+}
+
+fn mini_genesis_tickets(
+    genesis_allocations: &BTreeMap<String, Amount>,
+    genesis: &Block,
+    snapshot: &ChainSnapshot,
+) -> Option<Vec<MiniTicket>> {
+    if snapshot.launch_profile.ticket_maturity_delay_heights == 0 {
+        return mini_tickets_created_by_transactions(
+            genesis.height,
+            &genesis.transactions,
+            snapshot,
+        );
+    }
+
+    let burn_sources = genesis
+        .transactions
+        .iter()
+        .filter_map(|transaction| {
+            let Transaction::Burn {
+                inputs,
+                amount,
+                signature,
+                ..
+            } = transaction
+            else {
+                return None;
+            };
+            let owner = inputs.first()?.owner.clone();
+            (*amount > 0).then(|| (owner, *amount, signature.clone()))
+        })
+        .collect::<Vec<_>>();
+
+    if !burn_sources.is_empty() {
+        return mini_genesis_bootstrap_tickets(burn_sources, snapshot, genesis);
+    }
+
+    let (owner, amount) = genesis_allocations
+        .iter()
+        .rev()
+        .find(|(_, amount)| **amount > 0)?;
+    let source_id = hex_hash(format!(
+        "iuna-genesis-ticket:{owner}:{amount}:{}",
+        genesis.hash
+    ));
+    mini_genesis_bootstrap_tickets(vec![(owner.clone(), 1, source_id)], snapshot, genesis)
+}
+
+fn mini_genesis_bootstrap_tickets(
+    sources: Vec<(String, Amount, String)>,
+    snapshot: &ChainSnapshot,
+    genesis: &Block,
+) -> Option<Vec<MiniTicket>> {
+    let mut tickets = Vec::new();
+    for height in 1..=snapshot.launch_profile.ticket_maturity_delay_heights {
+        for (owner, amount, source_id) in &sources {
+            tickets.push(MiniTicket {
+                id: hex_hash(format!(
+                    "iuna-genesis-bootstrap-ticket:{}:{source_id}:{height}",
+                    genesis.hash
+                )),
+                owner: owner.clone(),
+                amount: *amount,
+                eligible_from_height: height,
+                eligible_until_height: height,
+            });
+        }
+    }
+    Some(tickets)
+}
+
+fn mini_tickets_created_by_transactions(
+    block_height: u64,
+    transactions: &[Transaction],
+    snapshot: &ChainSnapshot,
+) -> Option<Vec<MiniTicket>> {
+    if snapshot.launch_profile.ticket_expiry_window_heights == 0 {
+        return None;
+    }
+    let mut tickets = Vec::new();
+    for transaction in transactions {
+        let Transaction::Burn {
+            inputs,
+            amount,
+            signature,
+            ..
+        } = transaction
+        else {
+            continue;
+        };
+        let Some(owner) = inputs.first().map(|input| input.owner.clone()) else {
+            continue;
+        };
+        if *amount == 0 {
+            continue;
+        }
+        let eligible_from_height =
+            block_height.checked_add(snapshot.launch_profile.ticket_maturity_delay_heights)?;
+        let eligible_until_height = eligible_from_height
+            .checked_add(snapshot.launch_profile.ticket_expiry_window_heights - 1)?;
+        tickets.push(MiniTicket {
+            id: signature.clone(),
+            owner,
+            amount: *amount,
+            eligible_from_height,
+            eligible_until_height,
+        });
+    }
+    Some(tickets)
+}
+
+fn mini_apply_ticket_block(
+    parent: &Block,
+    block: &Block,
+    snapshot: &ChainSnapshot,
+    tickets: &mut Vec<MiniTicket>,
+) -> Option<()> {
+    match block.finalizer_mode {
+        FinalizerMode::Ticket => {
+            let proof = block.leader_proof.as_ref()?;
+            if !tickets.iter().any(|ticket| {
+                ticket.id == proof.ticket_id && ticket.is_eligible_for_height(block.height)
+            }) {
+                return None;
+            }
+            let invalidated = mini_invalidated_ticket_ids(parent, block, tickets, &proof.ticket_id);
+            tickets.retain(|ticket| {
+                !invalidated.contains(&ticket.id) && ticket.eligible_until_height > block.height
+            });
+        }
+        FinalizerMode::Recovery => {
+            tickets.retain(|ticket| {
+                !ticket.is_eligible_for_height(block.height)
+                    && ticket.eligible_until_height > block.height
+            });
+        }
+    }
+    tickets.extend(mini_tickets_created_by_transactions(
+        block.height,
+        &block.transactions,
+        snapshot,
+    )?);
+    Some(())
+}
+
+fn mini_invalidated_ticket_ids(
+    parent: &Block,
+    block: &Block,
+    tickets: &[MiniTicket],
+    leader_ticket_id: &str,
+) -> BTreeSet<String> {
+    let ranked_tickets = mini_ranked_tickets_for_height(parent, block.height, tickets);
+    let Some(finalizer_index) = ranked_tickets
+        .iter()
+        .position(|ticket| ticket.id == leader_ticket_id)
+    else {
+        return [leader_ticket_id.to_string()].into();
+    };
+    if block.height < MISSED_FALLBACK_TICKET_INVALIDATION_HEIGHT || finalizer_index == 0 {
+        return [leader_ticket_id.to_string()].into();
+    }
+
+    let missed_and_finalizer_owners = ranked_tickets
+        .iter()
+        .take(finalizer_index + 1)
+        .map(|ticket| ticket.owner.clone())
+        .collect::<BTreeSet<_>>();
+
+    tickets
+        .iter()
+        .filter(|ticket| {
+            ticket.is_eligible_for_height(block.height)
+                && missed_and_finalizer_owners.contains(&ticket.owner)
+        })
+        .map(|ticket| ticket.id.clone())
+        .collect()
+}
+
+fn mini_ranked_tickets_for_height(
+    parent: &Block,
+    target_height: u64,
+    tickets: &[MiniTicket],
+) -> Vec<MiniTicket> {
+    let mut remaining = tickets
+        .iter()
+        .filter(|ticket| ticket.is_eligible_for_height(target_height))
+        .cloned()
+        .collect::<Vec<_>>();
+    let mut ranked = Vec::with_capacity(remaining.len());
+
+    for rank in 0.. {
+        let Some(selected_index) =
+            mini_select_weighted_ticket_index(parent, target_height, rank, &remaining)
+        else {
+            break;
+        };
+        ranked.push(remaining.remove(selected_index));
+    }
+
+    ranked
+}
+
+fn mini_select_weighted_ticket_index(
+    parent: &Block,
+    target_height: u64,
+    rank: u32,
+    tickets: &[MiniTicket],
+) -> Option<usize> {
+    let total_weight = tickets.iter().try_fold(0_u128, |total, ticket| {
+        total.checked_add(u128::from(ticket.amount))
+    })?;
+    if total_weight == 0 {
+        return None;
+    }
+    let draw = mini_weighted_ticket_draw(parent, target_height, rank, total_weight);
+    let mut cumulative = 0_u128;
+    for (index, ticket) in tickets.iter().enumerate() {
+        cumulative = cumulative.checked_add(u128::from(ticket.amount))?;
+        if draw < cumulative {
+            return Some(index);
+        }
+    }
+    None
+}
+
+fn mini_weighted_ticket_draw(
+    parent: &Block,
+    target_height: u64,
+    rank: u32,
+    total_weight: u128,
+) -> u128 {
+    let seed = if rank == 0 {
+        format!(
+            "iuna-ticket-draw:{}:{}:{}",
+            target_height, parent.hash, parent.vdf_output
+        )
+    } else {
+        format!(
+            "iuna-ticket-draw-rank:{}:{}:{}:{}",
+            target_height, rank, parent.hash, parent.vdf_output
+        )
+    };
+    let digest = Sha256::digest(seed.as_bytes());
+    let mut bytes = [0_u8; 16];
+    bytes.copy_from_slice(&digest[..16]);
+    u128::from_be_bytes(bytes) % total_weight
+}
+
+fn assert_mini_ticket_inventory_matches(ledger: &Ledger) {
+    let mut ledger_tickets = ledger
+        .tickets
+        .iter()
+        .map(MiniTicket::from_ticket)
+        .collect::<Vec<_>>();
+    ledger_tickets.sort();
+    let mut mini_tickets = mini_ticket_inventory(&ledger.snapshot())
+        .expect("ledger snapshot has valid ticket history");
+    mini_tickets.sort();
+    assert_eq!(mini_tickets, ledger_tickets);
+}
+
 fn harness_for_percent(seed: u64, burn_percent: u8) -> Harness {
     Harness::new(seed, burn_percent, 10, AdversaryStrategy::Honest)
 }
@@ -879,7 +1188,7 @@ proptest! {
                 prop_assert!(metrics.third_party_burn_censorship_rate > 0.0);
             }
             AdversaryStrategy::MissRank0 | AdversaryStrategy::ForceFallback => {
-                prop_assert!(metrics.fallback_rate > 0.0);
+                prop_assert_eq!(metrics.fallback_blocks, metrics.fallback_opportunities);
                 prop_assert_eq!(metrics.recovery_rate, 0.0);
             }
             AdversaryStrategy::AttemptRecovery => {
@@ -891,7 +1200,7 @@ proptest! {
             }
             AdversaryStrategy::CombinedStrategy => {
                 prop_assert!(metrics.third_party_burn_censorship_rate > 0.0);
-                prop_assert!(metrics.fallback_rate > 0.0);
+                prop_assert_eq!(metrics.fallback_blocks, metrics.fallback_opportunities);
             }
         }
     }
@@ -1402,6 +1711,94 @@ fn consumed_ticket_cannot_be_reused() {
         next_ranks.iter().all(|rank| rank.ticket_id != used_ticket),
         "consumed ticket {used_ticket} was eligible again"
     );
+}
+
+#[test]
+fn mini_ticket_oracle_matches_ledger_across_maturity_expiry_and_consumption() {
+    let mut harness = harness_for_percent(32, 25);
+    assert_mini_ticket_inventory_matches(&harness.ledger);
+
+    for _ in 0..8 {
+        let before_inventory =
+            mini_ticket_inventory(&harness.ledger.snapshot()).expect("valid ticket snapshot");
+        let next_height = harness.ledger.height() + 1;
+        let mini_ranked_ids =
+            mini_ranked_tickets_for_height(harness.ledger.tip(), next_height, &before_inventory)
+                .into_iter()
+                .map(|ticket| ticket.id)
+                .collect::<Vec<_>>();
+        let ledger_ranked_ids = harness
+            .ledger
+            .burn_leader_ranks_for_block(next_height)
+            .unwrap()
+            .into_iter()
+            .map(|rank| rank.ticket_id)
+            .collect::<Vec<_>>();
+        assert_eq!(
+            mini_ranked_ids, ledger_ranked_ids,
+            "mini ticket ranking diverged at height {next_height}"
+        );
+
+        let block = harness.mine_ticket_block(0);
+        let used_ticket = block.leader_proof.as_ref().unwrap().ticket_id.clone();
+        assert_mini_ticket_inventory_matches(&harness.ledger);
+        let after_inventory =
+            mini_ticket_inventory(&harness.ledger.snapshot()).expect("valid ticket snapshot");
+        let after_ids = after_inventory
+            .iter()
+            .map(|ticket| ticket.id.clone())
+            .collect::<BTreeSet<_>>();
+
+        assert!(
+            !after_ids.contains(&used_ticket),
+            "consumed ticket {used_ticket} stayed live after block {}",
+            block.height
+        );
+        for ticket in before_inventory {
+            if ticket.eligible_until_height <= block.height {
+                assert!(
+                    !after_ids.contains(&ticket.id),
+                    "expired ticket {} stayed live after block {}",
+                    ticket.id,
+                    block.height
+                );
+            }
+        }
+
+        for transaction in &block.transactions {
+            let Transaction::Burn {
+                inputs,
+                amount,
+                signature,
+                ..
+            } = transaction
+            else {
+                continue;
+            };
+            if *amount == 0 {
+                continue;
+            }
+            let expected_from = block
+                .height
+                .checked_add(harness.ledger.launch_profile.ticket_maturity_delay_heights)
+                .unwrap();
+            let expected_until = expected_from
+                .checked_add(harness.ledger.launch_profile.ticket_expiry_window_heights - 1)
+                .unwrap();
+            let owner = inputs.first().expect("burn has owner input").owner.as_str();
+            assert!(
+                after_inventory.iter().any(|ticket| {
+                    ticket.id == *signature
+                        && ticket.owner == owner
+                        && ticket.amount == *amount
+                        && ticket.eligible_from_height == expected_from
+                        && ticket.eligible_until_height == expected_until
+                }),
+                "burn ticket {} was not scheduled with expected maturity/expiry",
+                signature
+            );
+        }
+    }
 }
 
 #[test]
@@ -1940,9 +2337,9 @@ fn adversarial_scenarios_cover_resource_matrix() {
                 );
             }
             AdversaryStrategy::ForceFallback => {
-                assert!(
-                    metrics.fallback_rate > 0.0,
-                    "force-fallback strategy did not produce fallback blocks: {metrics:?}"
+                assert_eq!(
+                    metrics.fallback_blocks, metrics.fallback_opportunities,
+                    "force-fallback strategy did not use every fallback opportunity: {metrics:?}"
                 );
                 assert_eq!(
                     metrics.recovery_rate, 0.0,
@@ -1960,9 +2357,9 @@ fn adversarial_scenarios_cover_resource_matrix() {
                     metrics.third_party_burn_censorship_rate > 0.0,
                     "combined strategy did not withhold burns: {metrics:?}"
                 );
-                assert!(
-                    metrics.fallback_rate > 0.0,
-                    "combined strategy did not produce fallback blocks: {metrics:?}"
+                assert_eq!(
+                    metrics.fallback_blocks, metrics.fallback_opportunities,
+                    "combined strategy did not use every fallback opportunity: {metrics:?}"
                 );
                 assert!(
                     metrics.recovery_rate > 0.0,

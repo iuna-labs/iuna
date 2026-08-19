@@ -30,7 +30,8 @@ Acceptance:
 
 Status: started with a test-only block precheck oracle for height, parent hash,
 block hash, reward, VDF rounds, timestamps, block limits, burn presence, fee
-policy, ticket finalizer proof selection, and snapshot supply accounting.
+policy, ticket finalizer proof selection, snapshot supply accounting, and ticket
+lifecycle reconstruction.
 
 Goal: compare the production validator against a small, deliberately separate
 oracle for consensus-critical facts.

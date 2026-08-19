@@ -7,7 +7,7 @@ use super::genesis::balances_from_utxos;
 use super::mine_policy::mine_anchor;
 use super::ticket::{
     BurnTicket, apply_finalizer_ticket_effects, genesis_tickets, ranked_tickets_for_height,
-    tickets_created_by_block, tickets_created_by_transactions,
+    tickets_created_by_block,
 };
 use super::{
     Amount, Block, BurnCommitteeMember, BurnLeaderRank, ChainSnapshot, ChainStatus, LaunchProfile,
@@ -22,11 +22,6 @@ fn apply_historical_ticket_block(
 ) -> Result<()> {
     apply_finalizer_ticket_effects(parent, block, tickets)?;
     tickets.extend(tickets_created_by_block(block, launch_profile)?);
-    tickets.extend(tickets_created_by_transactions(
-        block.height,
-        &block.transactions,
-        launch_profile,
-    )?);
     Ok(())
 }
 
