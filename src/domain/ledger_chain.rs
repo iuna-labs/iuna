@@ -55,13 +55,8 @@ impl Ledger {
             tickets,
             pending: Vec::new(),
             orphans: Vec::new(),
-            pending_blinded: Vec::new(),
-            pending_reveals: Vec::new(),
             pending_bytes: 0,
             orphan_bytes: 0,
-            pending_blinded_bytes: 0,
-            pending_reveal_bytes: 0,
-            active_blinded: BTreeMap::new(),
             mine_reward: MINE_REWARD,
             initial_vdf_rounds: vdf_rounds,
             vdf_rounds,
@@ -117,13 +112,8 @@ impl Ledger {
             tickets: Vec::new(),
             pending: Vec::new(),
             orphans: Vec::new(),
-            pending_blinded: Vec::new(),
-            pending_reveals: Vec::new(),
             pending_bytes: 0,
             orphan_bytes: 0,
-            pending_blinded_bytes: 0,
-            pending_reveal_bytes: 0,
-            active_blinded: BTreeMap::new(),
             mine_reward: MINE_REWARD,
             initial_vdf_rounds: vdf_rounds,
             vdf_rounds,
@@ -268,16 +258,12 @@ impl Ledger {
     fn replace_with_better_chain(&mut self, mut candidate: Ledger, fork_point: ForkPoint) {
         let mut carry_forward = self.pending.clone();
         carry_forward.extend(self.orphans.clone());
-        let mut carry_forward_blinded = self.pending_blinded.clone();
-        let mut carry_forward_reveals = self.pending_reveals.clone();
         for block in self
             .chain
             .iter()
             .skip(fork_point.first_diverging_height() as usize)
         {
             carry_forward.extend(block.transactions.clone());
-            carry_forward_blinded.extend(block.blinded_transactions.clone());
-            carry_forward_reveals.extend(block.all_blinded_reveals().into_iter().cloned());
         }
 
         let mined_signatures = candidate
@@ -286,32 +272,9 @@ impl Ledger {
             .flat_map(|block| block.transactions.iter())
             .map(|tx| tx.signature().to_string())
             .collect::<BTreeSet<_>>();
-        let mined_blinded_commitments = candidate
-            .chain
-            .iter()
-            .flat_map(|block| block.blinded_transactions.iter())
-            .map(|transaction| transaction.commitment.clone())
-            .collect::<BTreeSet<_>>();
-        let mined_reveal_commitments = candidate
-            .chain
-            .iter()
-            .flat_map(|block| block.all_blinded_reveals())
-            .map(|reveal| reveal.commitment.clone())
-            .collect::<BTreeSet<_>>();
-
         for transaction in carry_forward {
             if !mined_signatures.contains(transaction.signature()) {
                 let _ = candidate.submit_transaction(transaction);
-            }
-        }
-        for transaction in carry_forward_blinded {
-            if !mined_blinded_commitments.contains(&transaction.commitment) {
-                let _ = candidate.submit_blinded_transaction(transaction);
-            }
-        }
-        for reveal in carry_forward_reveals {
-            if !mined_reveal_commitments.contains(&reveal.commitment) {
-                let _ = candidate.submit_blinded_reveal(reveal);
             }
         }
 

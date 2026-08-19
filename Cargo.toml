@@ -21,5 +21,6 @@ rusqlite = { version = "0.32.1", features = ["bundled"] }
 tokio = { version = "1.45.1", features = ["full"] }
 
 [dev-dependencies]
+proptest = "1.6.0"
 tempfile = "3.20.0"
 tower = { version = "0.5.2", features = ["util"] }

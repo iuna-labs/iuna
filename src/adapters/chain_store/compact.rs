@@ -1,13 +1,12 @@
 use anyhow::{Context, Result, bail};
 
 use crate::domain::{
-    BlindedReveal, BlindedTransaction, Block, ChainSnapshot, FinalizerMode, LaunchProfile,
-    LeaderProof, MaskedBlindedReveal, OutPoint, RevealBundleSection, RevealBundleSignature,
-    Transaction, TxInput, TxOutput,
+    Block, BurnBundleSection, BurnBundleSignature, ChainSnapshot, FinalizerMode, LaunchProfile,
+    LeaderProof, MaskedBurn, OutPoint, Transaction, TxInput, TxOutput,
 };
 
 const COMPACT_SNAPSHOT_MAGIC: &[u8] = b"IUNA-SNAPSHOT";
-const COMPACT_SNAPSHOT_VERSION: u8 = 3;
+const COMPACT_SNAPSHOT_VERSION: u8 = 4;
 
 pub(super) fn encode_compact_snapshot(snapshot: &ChainSnapshot) -> Result<Vec<u8>> {
     let mut writer = CompactWriter::default();
@@ -114,11 +113,7 @@ fn encode_block_body(writer: &mut CompactWriter, block: &Block) -> Result<()> {
         writer.hex(&proof.public_key)?;
         writer.hex(&proof.signature)?;
     }
-    writer.varint(block.blinded_transactions.len() as u64);
-    for transaction in &block.blinded_transactions {
-        encode_blinded_transaction(writer, transaction)?;
-    }
-    encode_reveal_bundle_section(writer, &block.reveal_bundle_section)?;
+    encode_burn_bundle_section(writer, &block.burn_bundle_section)?;
     writer.varint(block.transactions.len() as u64);
     for transaction in &block.transactions {
         encode_transaction(writer, transaction)?;
@@ -152,8 +147,7 @@ fn decode_block_body(
     } else {
         None
     };
-    let blinded_transactions = decode_vec(reader, decode_blinded_transaction)?;
-    let reveal_bundle_section = decode_reveal_bundle_section(reader)?;
+    let burn_bundle_section = decode_burn_bundle_section(reader)?;
     let transactions = decode_vec(reader, decode_transaction)?;
     let hash = reader.hex()?;
     Ok(Block {
@@ -167,57 +161,15 @@ fn decode_block_body(
         vdf_rounds,
         vdf_output,
         leader_proof,
-        blinded_transactions,
-        reveal_bundle_section,
+        burn_bundle_section,
         transactions,
         hash,
     })
 }
 
-fn encode_blinded_transaction(
+fn encode_burn_bundle_section(
     writer: &mut CompactWriter,
-    transaction: &BlindedTransaction,
-) -> Result<()> {
-    writer.hex(&transaction.commitment)?;
-    encode_inputs(writer, &transaction.inputs)?;
-    writer.varint(transaction.fee);
-    writer.varint(u64::from(transaction.encrypted_size));
-    writer.varint(transaction.expires_at_height);
-    writer.hex(&transaction.nonce)?;
-    writer.hex(&transaction.ciphertext)?;
-    writer.hex(&transaction.payload_hash)?;
-    Ok(())
-}
-
-fn decode_blinded_transaction(reader: &mut CompactReader<'_>) -> Result<BlindedTransaction> {
-    Ok(BlindedTransaction {
-        commitment: reader.hex()?,
-        inputs: decode_inputs(reader)?,
-        fee: reader.varint()?,
-        encrypted_size: reader.u32()?,
-        expires_at_height: reader.varint()?,
-        nonce: reader.hex()?,
-        ciphertext: reader.hex()?,
-        payload_hash: reader.hex()?,
-    })
-}
-
-fn encode_blinded_reveal(writer: &mut CompactWriter, reveal: &BlindedReveal) -> Result<()> {
-    writer.hex(&reveal.commitment)?;
-    writer.hex(&reveal.key)?;
-    Ok(())
-}
-
-fn decode_blinded_reveal(reader: &mut CompactReader<'_>) -> Result<BlindedReveal> {
-    Ok(BlindedReveal {
-        commitment: reader.hex()?,
-        key: reader.hex()?,
-    })
-}
-
-fn encode_reveal_bundle_section(
-    writer: &mut CompactWriter,
-    section: &RevealBundleSection,
+    section: &BurnBundleSection,
 ) -> Result<()> {
     writer.varint(section.signatures.len() as u64);
     for signature in &section.signatures {
@@ -225,32 +177,29 @@ fn encode_reveal_bundle_section(
         writer.hex(&signature.member)?;
         writer.hex(&signature.signature)?;
     }
-    writer.varint(section.reveals.len() as u64);
-    for masked in &section.reveals {
-        encode_blinded_reveal(writer, &masked.reveal)?;
+    writer.varint(section.burns.len() as u64);
+    for masked in &section.burns {
+        encode_transaction(writer, &masked.burn)?;
         writer.u8(masked.bundle_mask);
     }
     Ok(())
 }
 
-fn decode_reveal_bundle_section(reader: &mut CompactReader<'_>) -> Result<RevealBundleSection> {
+fn decode_burn_bundle_section(reader: &mut CompactReader<'_>) -> Result<BurnBundleSection> {
     let signatures = decode_vec(reader, |reader| {
-        Ok(RevealBundleSignature {
-            slot: u8::try_from(reader.varint()?).context("reveal bundle slot does not fit u8")?,
+        Ok(BurnBundleSignature {
+            slot: u8::try_from(reader.varint()?).context("burn bundle slot does not fit u8")?,
             member: reader.hex()?,
             signature: reader.hex()?,
         })
     })?;
-    let reveals = decode_vec(reader, |reader| {
-        Ok(MaskedBlindedReveal {
-            reveal: decode_blinded_reveal(reader)?,
+    let burns = decode_vec(reader, |reader| {
+        Ok(MaskedBurn {
+            burn: decode_transaction(reader)?,
             bundle_mask: reader.u8()?,
         })
     })?;
-    Ok(RevealBundleSection {
-        signatures,
-        reveals,
-    })
+    Ok(BurnBundleSection { signatures, burns })
 }
 
 fn encode_transaction(writer: &mut CompactWriter, transaction: &Transaction) -> Result<()> {

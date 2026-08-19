@@ -2,9 +2,7 @@ use anyhow::Result;
 
 use std::collections::BTreeSet;
 
-use crate::domain::{
-    BlindedReveal, BlindedTransaction, Block, BurnLeaderRank, Ledger, OutPoint, Transaction,
-};
+use crate::domain::{Block, BurnLeaderRank, Ledger, OutPoint, Transaction};
 
 use super::{NodeCore, helpers::transaction_input_outpoints};
 
@@ -20,7 +18,6 @@ impl NodeCore {
     pub fn wallet_view_ledger(&self) -> Result<Ledger> {
         let mut ledger = self.ledger.clone();
         self.queue_local_block_anchor(&mut ledger)?;
-        self.queue_owned_blinded_payloads(&mut ledger)?;
         Ok(ledger)
     }
 
@@ -30,17 +27,6 @@ impl NodeCore {
             .pending()
             .iter()
             .flat_map(transaction_input_outpoints)
-            .chain(
-                self.ledger
-                    .pending_blinded_transactions()
-                    .iter()
-                    .flat_map(|transaction| {
-                        transaction
-                            .inputs
-                            .iter()
-                            .map(|input| input.outpoint.clone())
-                    }),
-            )
             .collect::<BTreeSet<_>>();
         if let Some((height, burn)) = &self.local_block_anchor_burn {
             if *height == self.ledger.height() && !self.ledger.has_transaction(burn.signature()) {
@@ -80,19 +66,5 @@ impl NodeCore {
 
     pub fn pending_transactions(&self) -> Vec<Transaction> {
         self.ledger.pending().to_vec()
-    }
-
-    pub fn pending_blinded_transactions(&self) -> Vec<BlindedTransaction> {
-        self.ledger.pending_blinded_transactions().to_vec()
-    }
-
-    pub fn pending_blinded_reveals(&self) -> Vec<BlindedReveal> {
-        self.ledger.pending_blinded_reveals().to_vec()
-    }
-
-    pub fn pending_revealed_blinded_transactions(
-        &self,
-    ) -> Vec<crate::domain::RevealedBlindedTransaction> {
-        self.ledger.pending_revealed_blinded_transactions()
     }
 }

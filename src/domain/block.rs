@@ -4,9 +4,8 @@ use anyhow::{Context, Result};
 use serde::{Deserialize, Serialize};
 
 use super::{
-    Amount, BlindedReveal, BlindedTransaction, BurnTicket, LaunchProfile, LeaderScore,
-    REVEAL_COMMITTEE_SIZE, RevealBundleSection, Transaction, Wallet, hex_hash,
-    recovery_vdf_seed_for_child, vdf_seed_for_child,
+    Amount, BURN_COMMITTEE_SIZE, BurnBundleSection, BurnTicket, LaunchProfile, LeaderScore,
+    Transaction, Wallet, hex_hash, recovery_vdf_seed_for_child, vdf_seed_for_child,
 };
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
@@ -24,9 +23,7 @@ pub struct Block {
     pub vdf_output: String,
     pub leader_proof: Option<LeaderProof>,
     #[serde(default)]
-    pub blinded_transactions: Vec<BlindedTransaction>,
-    #[serde(default)]
-    pub reveal_bundle_section: RevealBundleSection,
+    pub burn_bundle_section: BurnBundleSection,
     pub transactions: Vec<Transaction>,
     pub hash: String,
 }
@@ -50,7 +47,7 @@ impl Block {
     }
 
     pub fn vdf_seed(&self) -> String {
-        let bundle_hashes = self.reveal_bundle_hashes();
+        let bundle_hashes = self.burn_bundle_hashes();
         match self.finalizer_mode {
             FinalizerMode::Ticket => {
                 vdf_seed_for_child(&self.prev_hash, self.height, &bundle_hashes)
@@ -71,13 +68,7 @@ impl Block {
             .map(Transaction::canonical)
             .collect::<Vec<_>>()
             .join("|");
-        let blinded = self
-            .blinded_transactions
-            .iter()
-            .map(BlindedTransaction::canonical)
-            .collect::<Vec<_>>()
-            .join("|");
-        let reveal_section = self.reveal_bundle_section.canonical();
+        let burn_section = self.burn_bundle_section.canonical();
         let leader_proof = self
             .leader_proof
             .as_ref()
@@ -89,7 +80,7 @@ impl Block {
             })
             .unwrap_or_default();
         hex_hash(format!(
-            "block-content-v3:{}:{}:{}:{}:{}:{}:{}:{}:{}:{}",
+            "block-content-v4:{}:{}:{}:{}:{}:{}:{}:{}:{}:{}",
             self.height,
             self.prev_hash,
             self.timestamp_ms,
@@ -99,7 +90,7 @@ impl Block {
             self.vdf_rounds,
             leader_proof,
             txs,
-            canonical_blinded_block_items(&blinded, &reveal_section)
+            canonical_burn_block_items(&burn_section)
         ))
     }
 
@@ -121,17 +112,17 @@ impl Block {
             .context("failed to serialize block for size check")
     }
 
-    pub fn all_blinded_reveals(&self) -> Vec<&BlindedReveal> {
-        self.reveal_bundle_section.all_reveals()
+    pub fn required_burns(&self) -> Vec<&Transaction> {
+        self.burn_bundle_section.required_burns()
     }
 
-    pub fn reveal_bundle_hashes(&self) -> [String; REVEAL_COMMITTEE_SIZE] {
-        self.reveal_bundle_section
-            .reveal_bundle_hashes(self.height, &self.prev_hash, &self.miner)
+    pub fn burn_bundle_hashes(&self) -> [String; BURN_COMMITTEE_SIZE] {
+        self.burn_bundle_section
+            .burn_bundle_hashes(self.height, &self.prev_hash, &self.miner)
     }
 
-    pub fn included_reveal_bundle_count(&self) -> usize {
-        self.reveal_bundle_section.included_bundle_count()
+    pub fn included_burn_bundle_count(&self) -> usize {
+        self.burn_bundle_section.included_bundle_count()
     }
 }
 
@@ -144,8 +135,8 @@ impl FinalizerMode {
     }
 }
 
-fn canonical_blinded_block_items(blinded: &str, reveal_section: &str) -> String {
-    format!("blinded-v3:{blinded}:reveal-section:{reveal_section}")
+fn canonical_burn_block_items(burn_section: &str) -> String {
+    format!("burn-section-v1:{burn_section}")
 }
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
@@ -225,8 +216,7 @@ pub struct PreparedBlock {
     pub(super) vdf_rounds: u64,
     pub(super) vdf_seed: String,
     pub(super) leader_ticket: Option<BurnTicket>,
-    pub(super) blinded_transactions: Vec<BlindedTransaction>,
-    pub(super) reveal_bundle_section: RevealBundleSection,
+    pub(super) burn_bundle_section: BurnBundleSection,
     pub(super) transactions: Vec<Transaction>,
 }
 
@@ -289,8 +279,7 @@ impl PreparedBlock {
             vdf_rounds: self.vdf_rounds,
             vdf_output,
             leader_proof,
-            blinded_transactions: self.blinded_transactions,
-            reveal_bundle_section: self.reveal_bundle_section,
+            burn_bundle_section: self.burn_bundle_section,
             transactions: self.transactions,
             hash: String::new(),
         };
@@ -321,8 +310,8 @@ pub struct ChainSnapshot {
 
 #[cfg(test)]
 mod tests {
-    use super::{Block, FinalizerMode, LeaderProofPayload, canonical_blinded_block_items};
-    use crate::domain::{RevealBundleSection, Transaction};
+    use super::{Block, FinalizerMode, LeaderProofPayload, canonical_burn_block_items};
+    use crate::domain::{BurnBundleSection, Transaction};
 
     #[test]
     fn primary_leader_proof_payload_omits_rank_from_canonical_form() {
@@ -351,10 +340,10 @@ mod tests {
     }
 
     #[test]
-    fn blinded_block_items_keep_canonical_prefix() {
+    fn burn_block_items_keep_canonical_prefix() {
         assert_eq!(
-            canonical_blinded_block_items("blind", "section"),
-            "blinded-v3:blind:reveal-section:section"
+            canonical_burn_block_items("section"),
+            "burn-section-v1:section"
         );
     }
 
@@ -371,8 +360,7 @@ mod tests {
             vdf_rounds: 1,
             vdf_output: "out".to_string(),
             leader_proof: None,
-            blinded_transactions: Vec::new(),
-            reveal_bundle_section: RevealBundleSection::default(),
+            burn_bundle_section: BurnBundleSection::default(),
             transactions: vec![Transaction::genesis_burn("owner", 1)],
             hash: String::new(),
         };

@@ -1,9 +1,7 @@
 use std::collections::BTreeMap;
 
 use crate::domain::{
-    BlindedReveal, BlindedTransaction, Block, BurnLeaderRank, ChainSnapshot, MINE_REWARD, OutPoint,
-    RevealedBlindedTransaction, Transaction, TxInput, TxOutput,
-    reveal_committee_slot_count_for_height,
+    Block, BurnLeaderRank, ChainSnapshot, MINE_REWARD, OutPoint, Transaction, TxInput, TxOutput,
 };
 
 use crate::adapters::ui_index::build_ui_chain_index;
@@ -11,7 +9,7 @@ use crate::adapters::ui_index::build_ui_chain_index;
 use super::{
     HttpState, UiChainView,
     types::{
-        UiBlock, UiByteBreakdown, UiRevealBundle, UiRevealFeePenalty, UiTransaction, UiTxInput,
+        UiBlock, UiBurnBundle, UiBurnBundleQuorum, UiByteBreakdown, UiTransaction, UiTxInput,
         WalletTransactionContext, WalletTransactionFilters, WalletTransactionRow,
     },
 };
@@ -19,9 +17,7 @@ use super::{
 pub(super) fn wallet_transaction_rows(
     wallet: &str,
     pending: Vec<Transaction>,
-    owned_blinded: Vec<Transaction>,
     chain: &[Block],
-    revealed_by_height: &BTreeMap<u64, Vec<RevealedBlindedTransaction>>,
     outputs: &BTreeMap<OutPoint, TxOutput>,
     filters: WalletTransactionFilters,
 ) -> Vec<WalletTransactionRow> {
@@ -31,7 +27,6 @@ pub(super) fn wallet_transaction_rows(
         block_height: None,
         timestamp_ms: None,
         block_finalizer: None,
-        blinded: false,
     };
 
     for (index, tx) in pending.iter().enumerate() {
@@ -40,19 +35,6 @@ pub(super) fn wallet_transaction_rows(
         }
         if let Some(row) = wallet_transaction_row(wallet, tx, outputs, &pending_context) {
             rows.push((u128::MAX - index as u128, row));
-        }
-    }
-
-    let pending_blind_context = WalletTransactionContext {
-        blinded: true,
-        ..pending_context
-    };
-    for (index, tx) in owned_blinded.iter().enumerate() {
-        if !filters.allows(tx) {
-            continue;
-        }
-        if let Some(row) = wallet_transaction_row(wallet, tx, outputs, &pending_blind_context) {
-            rows.push((u128::MAX - 10_000 - index as u128, row));
         }
     }
 
@@ -70,32 +52,9 @@ pub(super) fn wallet_transaction_rows(
                     block_height: Some(block.height),
                     timestamp_ms: Some(block.timestamp_ms),
                     block_finalizer: Some(block.miner.clone()),
-                    blinded: false,
                 },
             ) {
                 rows.push((block.height as u128 * 10_000 + index as u128, row));
-            }
-        }
-        if let Some(revealed_transactions) = revealed_by_height.get(&block.height) {
-            for (index, revealed) in revealed_transactions.iter().rev().enumerate() {
-                let tx = &revealed.transaction;
-                if !filters.allows(tx) {
-                    continue;
-                }
-                if let Some(row) = wallet_transaction_row(
-                    wallet,
-                    tx,
-                    outputs,
-                    &WalletTransactionContext {
-                        status: "confirmed",
-                        block_height: Some(block.height),
-                        timestamp_ms: Some(block.timestamp_ms),
-                        block_finalizer: Some(block.miner.clone()),
-                        blinded: false,
-                    },
-                ) {
-                    rows.push((block.height as u128 * 10_000 + 5_000 + index as u128, row));
-                }
             }
         }
     }
@@ -135,7 +94,6 @@ pub(super) fn wallet_transaction_row(
             } else {
                 "sent"
             },
-            blinded: context.blinded,
             difficulty_bits: None,
             proof_bits: None,
             proof_hash: None,
@@ -161,7 +119,6 @@ pub(super) fn wallet_transaction_row(
             timestamp_ms: context.timestamp_ms,
             block_finalizer: context.block_finalizer.clone(),
             direction: "burned",
-            blinded: context.blinded,
             difficulty_bits: None,
             proof_bits: None,
             proof_hash: None,
@@ -189,7 +146,6 @@ pub(super) fn wallet_transaction_row(
             timestamp_ms: context.timestamp_ms,
             block_finalizer: context.block_finalizer.clone(),
             direction: "received",
-            blinded: context.blinded,
             difficulty_bits: Some(*difficulty_bits),
             proof_bits: Some(proof_bits(signature)),
             proof_hash: Some(signature.clone()),
@@ -198,37 +154,14 @@ pub(super) fn wallet_transaction_row(
     }
 }
 
-#[cfg(test)]
-pub(super) fn revealed_transactions_by_height(
-    snapshot: &ChainSnapshot,
-) -> BTreeMap<u64, Vec<RevealedBlindedTransaction>> {
-    crate::adapters::ui_index::revealed_transactions_by_height(snapshot)
-}
-
-#[cfg(test)]
-pub(super) fn ui_blocks(
-    blocks: Vec<Block>,
-    snapshot: &ChainSnapshot,
-    pending: &[Transaction],
-    burn_leader_ranks: &BTreeMap<String, Vec<BurnLeaderRank>>,
-) -> Vec<UiBlock> {
-    let outputs = known_output_index(snapshot, pending);
-    let revealed = revealed_transactions_by_height(snapshot);
-    ui_blocks_from_indexes(blocks, &outputs, &revealed, burn_leader_ranks)
-}
-
 pub(super) fn ui_blocks_from_indexes(
     blocks: Vec<Block>,
     outputs: &BTreeMap<OutPoint, TxOutput>,
-    revealed: &BTreeMap<u64, Vec<RevealedBlindedTransaction>>,
     burn_leader_ranks: &BTreeMap<String, Vec<BurnLeaderRank>>,
 ) -> Vec<UiBlock> {
     blocks
         .into_iter()
-        .map(|block| {
-            let revealed_transactions = revealed.get(&block.height).cloned().unwrap_or_default();
-            ui_block(block, outputs, burn_leader_ranks, &revealed_transactions)
-        })
+        .map(|block| ui_block(block, outputs, burn_leader_ranks))
         .collect()
 }
 
@@ -236,97 +169,52 @@ pub(super) fn ui_block(
     block: Block,
     outputs: &BTreeMap<OutPoint, TxOutput>,
     burn_leader_ranks: &BTreeMap<String, Vec<BurnLeaderRank>>,
-    revealed_transactions: &[RevealedBlindedTransaction],
 ) -> UiBlock {
     let ranks = burn_leader_ranks
         .get(&block.hash)
         .cloned()
         .unwrap_or_default();
-    let reveal_lists_included = block.included_reveal_bundle_count();
-    let committee_size = if ranks.is_empty() {
-        reveal_lists_included
-    } else {
-        reveal_committee_slot_count_for_height(
-            block.height,
-            ranks.len(),
-            ranks.iter().map(|rank| rank.owner.as_str()),
-        )
-    };
+    let burn_bundles_included = block.included_burn_bundle_count();
+    let committee_size = ranks.len();
     let public_fees = block
         .transactions
         .iter()
         .fold(0_u64, |total, tx| total.saturating_add(tx.fee()));
-    let revealed_fees = revealed_transactions.iter().fold(0_u64, |total, revealed| {
-        total.saturating_add(revealed.transaction.fee())
-    });
-    let total_fees = public_fees.saturating_add(revealed_fees);
-    let reveal_fee_penalty = reveal_fee_penalty(
-        total_fees,
-        !revealed_transactions.is_empty(),
-        reveal_lists_included,
-        committee_size,
-    );
+    let total_fees = public_fees;
     let transaction_bytes = block
         .transactions
         .iter()
         .map(|tx| tx.serialized_size_bytes().unwrap_or_default())
         .sum::<usize>();
     let transaction_byte_breakdown = transaction_byte_breakdown(&block.transactions);
-    let blinded_transaction_bytes = block
-        .blinded_transactions
-        .iter()
-        .map(|tx| tx.serialized_size_bytes().unwrap_or_default())
-        .sum::<usize>();
-    let mut transactions = block
+    let transactions = block
         .transactions
         .iter()
         .map(|tx| ui_transaction(tx, outputs))
         .collect::<Vec<_>>();
-    transactions.extend(
-        block
-            .blinded_transactions
-            .iter()
-            .map(|transaction| ui_blinded_transaction(transaction, outputs)),
-    );
-    transactions.extend(
-        revealed_transactions
-            .iter()
-            .map(|revealed| ui_revealed_transaction(&revealed.transaction, outputs)),
-    );
-    let revealed_by_commitment = revealed_transactions
-        .iter()
-        .map(|revealed| (revealed.commitment.clone(), revealed.transaction.clone()))
-        .collect::<BTreeMap<_, _>>();
-    let reveal_bundles: Vec<UiRevealBundle> = block
-        .reveal_bundle_section
+    let burn_bundles: Vec<UiBurnBundle> = block
+        .burn_bundle_section
         .expand(block.height, &block.prev_hash)
         .into_iter()
-        .map(|bundle| UiRevealBundle {
+        .map(|bundle| UiBurnBundle {
             slot: bundle.slot,
             member: bundle.member.clone(),
             hash: bundle.bundle_hash(),
             byte_size: bundle.serialized_size_bytes().unwrap_or_default(),
-            reveals: bundle
-                .reveals
+            burns: bundle
+                .burns
                 .iter()
-                .map(|reveal| {
-                    revealed_by_commitment
-                        .get(&reveal.commitment)
-                        .map(|tx| ui_revealed_transaction(tx, outputs))
-                        .unwrap_or_else(|| ui_blinded_reveal(reveal))
-                })
+                .map(|burn| ui_transaction(burn, outputs))
                 .collect(),
         })
         .collect();
-    let reveal_bundle_bytes = reveal_bundles
+    let burn_bundle_bytes = burn_bundles
         .iter()
-        .map(|bundle: &UiRevealBundle| bundle.byte_size)
+        .map(|bundle: &UiBurnBundle| bundle.byte_size)
         .sum::<usize>();
-    let total_bytes = block.serialized_size_bytes().unwrap_or_else(|_| {
-        transaction_bytes
-            .saturating_add(blinded_transaction_bytes)
-            .saturating_add(reveal_bundle_bytes)
-    });
+    let total_bytes = block
+        .serialized_size_bytes()
+        .unwrap_or_else(|_| transaction_bytes.saturating_add(burn_bundle_bytes));
     UiBlock {
         height: block.height,
         prev_hash: block.prev_hash,
@@ -339,50 +227,19 @@ pub(super) fn ui_block(
         total_bytes,
         transaction_bytes,
         transaction_byte_breakdown,
-        blinded_transaction_bytes,
-        reveal_bundle_bytes,
-        reveal_fee_penalty,
+        burn_bundle_bytes,
+        burn_bundle_quorum: UiBurnBundleQuorum {
+            burn_bundles_included,
+            committee_size,
+        },
         vdf_rounds: block.vdf_rounds,
         vdf_output: block.vdf_output,
         leader_proof: block.leader_proof,
         burn_leader_ranks: ranks,
         transactions,
-        revealed_transactions: revealed_transactions
-            .iter()
-            .map(|revealed| ui_revealed_transaction(&revealed.transaction, outputs))
-            .collect(),
-        reveal_bundles,
+        burn_bundles,
         hash: block.hash,
     }
-}
-
-fn reveal_fee_penalty(
-    total_fees: u64,
-    has_reveals: bool,
-    reveal_lists_included: usize,
-    committee_size: usize,
-) -> UiRevealFeePenalty {
-    let fee_penalty =
-        if !has_reveals || committee_size == 0 || reveal_lists_included >= committee_size {
-            0
-        } else {
-            let missing = committee_size.saturating_sub(reveal_lists_included);
-            ((total_fees as u128 * missing as u128) / committee_size as u128) as u64
-        };
-    UiRevealFeePenalty {
-        reveal_lists_included,
-        committee_size,
-        fee_penalty,
-    }
-}
-
-fn ui_revealed_transaction(
-    transaction: &Transaction,
-    outputs_by_outpoint: &BTreeMap<OutPoint, TxOutput>,
-) -> UiTransaction {
-    let mut row = ui_transaction(transaction, outputs_by_outpoint);
-    row.revealed = true;
-    row
 }
 
 fn transaction_byte_breakdown(transactions: &[Transaction]) -> Vec<UiByteBreakdown> {
@@ -405,15 +262,6 @@ fn transaction_byte_breakdown(transactions: &[Transaction]) -> Vec<UiByteBreakdo
     .into_iter()
     .filter_map(|(label, bytes)| (bytes > 0).then_some(UiByteBreakdown { label, bytes }))
     .collect()
-}
-
-pub(super) fn ui_pending_revealed_transaction(
-    revealed: &RevealedBlindedTransaction,
-    outputs_by_outpoint: &BTreeMap<OutPoint, TxOutput>,
-) -> UiTransaction {
-    let mut row = ui_revealed_transaction(&revealed.transaction, outputs_by_outpoint);
-    row.commitment = Some(revealed.commitment.clone());
-    row
 }
 
 pub(super) fn ui_transaction(
@@ -439,10 +287,6 @@ pub(super) fn ui_transaction(
             difficulty_bits: None,
             proof_bits: None,
             proof_hash: None,
-            commitment: None,
-            encrypted_size: None,
-            expires_at_height: None,
-            revealed: false,
         },
         Transaction::Burn {
             inputs,
@@ -463,10 +307,6 @@ pub(super) fn ui_transaction(
             difficulty_bits: None,
             proof_bits: None,
             proof_hash: None,
-            commitment: None,
-            encrypted_size: None,
-            expires_at_height: None,
-            revealed: false,
         },
         Transaction::Mine {
             recipient,
@@ -489,60 +329,7 @@ pub(super) fn ui_transaction(
             difficulty_bits: Some(*difficulty_bits),
             proof_bits: Some(proof_bits(signature)),
             proof_hash: Some(signature.clone()),
-            commitment: None,
-            encrypted_size: None,
-            expires_at_height: None,
-            revealed: false,
         },
-    }
-}
-
-pub(super) fn ui_blinded_transaction(
-    transaction: &BlindedTransaction,
-    outputs_by_outpoint: &BTreeMap<OutPoint, TxOutput>,
-) -> UiTransaction {
-    UiTransaction {
-        kind: "blinded",
-        from: transaction
-            .inputs
-            .first()
-            .map(|input| input.owner.clone())
-            .unwrap_or_else(|| "encrypted".to_string()),
-        to: None,
-        amount: 0,
-        fee: transaction.fee,
-        inputs: ui_inputs(&transaction.inputs, outputs_by_outpoint),
-        outputs: Vec::new(),
-        change: Vec::new(),
-        signature: transaction.commitment.clone(),
-        difficulty_bits: None,
-        proof_bits: None,
-        proof_hash: None,
-        commitment: Some(transaction.commitment.clone()),
-        encrypted_size: Some(transaction.encrypted_size),
-        expires_at_height: Some(transaction.expires_at_height),
-        revealed: false,
-    }
-}
-
-pub(super) fn ui_blinded_reveal(reveal: &BlindedReveal) -> UiTransaction {
-    UiTransaction {
-        kind: "reveal",
-        from: "encrypted".to_string(),
-        to: None,
-        amount: 0,
-        fee: 0,
-        inputs: Vec::new(),
-        outputs: Vec::new(),
-        change: Vec::new(),
-        signature: reveal.commitment.clone(),
-        difficulty_bits: None,
-        proof_bits: None,
-        proof_hash: None,
-        commitment: Some(reveal.commitment.clone()),
-        encrypted_size: None,
-        expires_at_height: None,
-        revealed: false,
     }
 }
 
@@ -590,16 +377,6 @@ fn hex_nibble(byte: u8) -> Option<u8> {
     }
 }
 
-#[cfg(test)]
-pub(super) fn known_output_index(
-    snapshot: &ChainSnapshot,
-    pending: &[Transaction],
-) -> BTreeMap<OutPoint, TxOutput> {
-    let mut outputs = build_ui_chain_index(snapshot).outputs;
-    add_pending_outputs(&mut outputs, pending);
-    outputs
-}
-
 pub(super) async fn cached_chain_view(
     state: &HttpState,
     snapshot: &ChainSnapshot,
@@ -625,11 +402,9 @@ pub(super) async fn cached_chain_view(
 
     cache.tip_hash = computed_tip_hash;
     cache.outputs = view.outputs.clone();
-    cache.revealed_by_height = view.revealed_by_height.clone();
     cache.burn_leader_ranks_by_hash = view.burn_leader_ranks_by_hash.clone();
     Ok(UiChainView {
         outputs: view.outputs,
-        revealed_by_height: view.revealed_by_height,
         burn_leader_ranks_by_hash: view.burn_leader_ranks_by_hash,
     })
 }
@@ -640,20 +415,13 @@ pub(super) async fn cached_ui_blocks_for_tip(
     blocks: Vec<Block>,
 ) -> Option<Vec<UiBlock>> {
     let cache = state.ui_cache.lock().await;
-    (cache.tip_hash.as_deref() == tip_hash).then(|| {
-        ui_blocks_from_indexes(
-            blocks,
-            &cache.outputs,
-            &cache.revealed_by_height,
-            &cache.burn_leader_ranks_by_hash,
-        )
-    })
+    (cache.tip_hash.as_deref() == tip_hash)
+        .then(|| ui_blocks_from_indexes(blocks, &cache.outputs, &cache.burn_leader_ranks_by_hash))
 }
 
 fn ui_chain_view_from_cache(cache: &super::UiChainCache) -> UiChainView {
     UiChainView {
         outputs: cache.outputs.clone(),
-        revealed_by_height: cache.revealed_by_height.clone(),
         burn_leader_ranks_by_hash: cache.burn_leader_ranks_by_hash.clone(),
     }
 }
@@ -664,7 +432,6 @@ fn build_chain_view(snapshot: &ChainSnapshot) -> (Option<String>, UiChainView) {
         index.tip_hash.clone(),
         UiChainView {
             outputs: index.outputs,
-            revealed_by_height: index.revealed_by_height,
             burn_leader_ranks_by_hash: index.burn_leader_ranks_by_hash,
         },
     )
@@ -699,5 +466,75 @@ fn index_transaction_outputs(
             },
             output.clone(),
         );
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::collections::BTreeMap;
+
+    use crate::domain::{
+        Block, BurnBundleSection, FinalizerMode, MaskedBurn, OutPoint, Transaction, TxInput,
+        TxOutput,
+    };
+
+    use super::ui_block;
+
+    fn burn(signature: &str) -> Transaction {
+        Transaction::Burn {
+            inputs: vec![TxInput {
+                outpoint: OutPoint {
+                    txid: format!("{signature:0<64}"),
+                    index: 0,
+                },
+                owner: "owner".to_string(),
+                signature: signature.to_string(),
+            }],
+            change: vec![TxOutput {
+                address: "owner".to_string(),
+                amount: 1,
+            }],
+            amount: 1,
+            fee: 1,
+            signature: signature.to_string(),
+        }
+    }
+
+    #[test]
+    fn ui_block_exposes_burn_bundles() {
+        let burn = burn("burn-a");
+        let block = Block {
+            height: 1,
+            prev_hash: "parent".to_string(),
+            timestamp_ms: 1,
+            miner: "finalizer".to_string(),
+            finalizer_mode: FinalizerMode::Ticket,
+            finalizer_rank: 0,
+            reward: 1,
+            vdf_rounds: 1,
+            vdf_output: "vdf".to_string(),
+            leader_proof: None,
+            burn_bundle_section: BurnBundleSection {
+                signatures: vec![crate::domain::BurnBundleSignature {
+                    slot: 1,
+                    member: "member-1".to_string(),
+                    signature: "sig-1".to_string(),
+                }],
+                burns: vec![MaskedBurn {
+                    burn: burn.clone(),
+                    bundle_mask: 1 << 1,
+                }],
+            },
+            transactions: vec![burn],
+            hash: "hash".to_string(),
+        };
+
+        let ui = ui_block(block, &BTreeMap::new(), &BTreeMap::new());
+
+        assert_eq!(ui.burn_bundle_quorum.burn_bundles_included, 1);
+        assert_eq!(ui.burn_bundles.len(), 1);
+        assert_eq!(ui.burn_bundles[0].slot, 1);
+        assert_eq!(ui.burn_bundles[0].burns.len(), 1);
+        assert!(ui.burn_bundle_bytes > 0);
     }
 }

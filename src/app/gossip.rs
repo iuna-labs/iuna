@@ -1,4 +1,4 @@
-use crate::domain::{Block, ChainSnapshot, Transaction};
+use crate::domain::{Block, ChainSnapshot};
 
 use super::{
     BLOCK_REQUEST_LIMIT, GossipEnvelope, NETWORK_ID, NodeCore, PROTOCOL_VERSION, ProtocolHello,
@@ -8,38 +8,18 @@ use super::{
 impl NodeCore {
     pub fn mempool_gossip(&mut self) -> Vec<GossipEnvelope> {
         let mut gossip = Vec::new();
-        let mine_actions = self
-            .ledger
-            .pending()
-            .iter()
-            .filter(|transaction| matches!(transaction, Transaction::Mine { .. }))
-            .cloned()
-            .collect::<Vec<_>>();
-        gossip.extend(mine_actions.chunks(TRANSACTION_BATCH_LIMIT).map(|chunk| {
-            GossipEnvelope::MineActions {
-                transactions: chunk.to_vec(),
-            }
-        }));
         gossip.extend(
             self.ledger
-                .pending_blinded_transactions()
+                .pending()
                 .chunks(TRANSACTION_BATCH_LIMIT)
-                .map(|chunk| GossipEnvelope::BlindedTransactions {
+                .map(|chunk| GossipEnvelope::Transactions {
                     transactions: chunk.to_vec(),
                 }),
         );
         gossip.extend(
-            self.ledger
-                .pending_blinded_reveals()
+            self.usable_burn_bundles()
                 .chunks(TRANSACTION_BATCH_LIMIT)
-                .map(|chunk| GossipEnvelope::BlindedReveals {
-                    reveals: chunk.to_vec(),
-                }),
-        );
-        gossip.extend(
-            self.usable_reveal_bundles()
-                .chunks(TRANSACTION_BATCH_LIMIT)
-                .map(|chunk| GossipEnvelope::RevealBundles {
+                .map(|chunk| GossipEnvelope::BurnBundles {
                     bundles: chunk.to_vec(),
                 }),
         );
@@ -123,26 +103,30 @@ mod tests {
     };
 
     #[test]
-    fn mempool_gossip_includes_blinded_transactions() {
-        let alice = Wallet::from_seed("blinded-gossip-alice");
-        let mut genesis = BTreeMap::new();
-        genesis.insert(alice.address().to_string(), 10 * MICRO_IUNA);
-        let ledger = Ledger::new(genesis, 1);
-        let blinded = ledger.build_blinded_burn(&alice, MICRO_IUNA, 7, 3).unwrap();
-        let mut sender = NodeCore::from_ledger(alice.clone(), ledger.clone(), 0);
-        let mut receiver = NodeCore::from_ledger(alice, ledger, 0);
+    fn mempool_gossip_rebroadcasts_public_burns() {
+        let wallet = Wallet::from_seed("mempool-gossip-public-burn");
+        let mut allocations = BTreeMap::new();
+        allocations.insert(wallet.address().to_string(), 10 * MICRO_IUNA);
+        let ledger = Ledger::new_with_genesis_burns(
+            allocations,
+            vec![GenesisBurn::new(wallet.address(), MICRO_IUNA)],
+            1,
+        )
+        .unwrap();
+        let mut node = NodeCore::from_ledger(wallet, ledger, 0);
+        let burn = node.burn_with_fee(MICRO_IUNA / 10, 1).unwrap();
+        node.drain_outbox();
 
-        sender
-            .receive_blinded_transaction(blinded.transaction.clone())
-            .unwrap();
-        for envelope in sender.mempool_gossip() {
-            receiver.receive(envelope).unwrap();
-        }
+        let gossip = node.mempool_gossip();
 
-        assert_eq!(
-            receiver.ledger().pending_blinded_transactions(),
-            std::slice::from_ref(&blinded.transaction)
-        );
+        assert!(gossip.iter().any(|envelope| {
+            match envelope {
+                GossipEnvelope::Transactions { transactions } => transactions
+                    .iter()
+                    .any(|tx| tx.signature() == burn.signature()),
+                _ => false,
+            }
+        }));
     }
 
     #[test]
@@ -159,7 +143,6 @@ mod tests {
         }
 
         assert_eq!(receiver.ledger().pending(), std::slice::from_ref(&mine));
-        assert!(receiver.ledger().pending_blinded_transactions().is_empty());
     }
 
     #[test]
@@ -167,8 +150,8 @@ mod tests {
         let alice = Wallet::from_seed("missing-inv-alice");
         let bob = Wallet::from_seed("missing-inv-bob");
         let allocations = allocations(&[alice.clone(), bob], 1_000);
-        let mut local = node("local", alice.clone(), allocations.clone());
-        let mut remote = node("remote", alice.clone(), allocations);
+        let mut local = node(alice.clone(), allocations.clone());
+        let mut remote = node(alice.clone(), allocations);
         queue_plaintext_burn(&mut local, &alice, 1);
         let block = local.mine_one_at(1).unwrap();
         let inventory = [BlockInventory {
@@ -189,8 +172,8 @@ mod tests {
         let alice = Wallet::from_seed("gap-inv-alice");
         let bob = Wallet::from_seed("gap-inv-bob");
         let allocations = allocations(&[alice.clone(), bob.clone()], 1_000);
-        let mut local = node("local", alice.clone(), allocations.clone());
-        let remote = node("remote", bob, allocations);
+        let mut local = node(alice.clone(), allocations.clone());
+        let remote = node(bob, allocations);
 
         let mut latest = None;
         for height in 1..=3 {
@@ -214,7 +197,7 @@ mod tests {
         }
     }
 
-    fn node(_network_key: &str, wallet: Wallet, allocations: BTreeMap<String, Amount>) -> NodeCore {
+    fn node(wallet: Wallet, allocations: BTreeMap<String, Amount>) -> NodeCore {
         let ledger = Ledger::new_with_genesis_burns(
             allocations,
             vec![GenesisBurn::new(wallet.address(), 1)],
@@ -225,7 +208,7 @@ mod tests {
     }
 
     fn queue_plaintext_burn(node: &mut NodeCore, wallet: &Wallet, amount: Amount) -> Transaction {
-        let tx = node.ledger().build_burn(wallet, amount, 0).unwrap();
+        let tx = node.ledger().build_burn(wallet, amount, 1).unwrap();
         node.receive_transaction(tx.clone()).unwrap();
         tx
     }

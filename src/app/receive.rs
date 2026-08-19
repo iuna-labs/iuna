@@ -1,13 +1,10 @@
-use anyhow::{Result, bail};
+use anyhow::Result;
 
 use crate::domain::{
-    BlindedReveal, BlindedTransaction, Block, ChainSnapshot, Ledger, RevealBundle, Transaction,
-    TransactionSubmitOutcome,
+    Block, BurnBundle, ChainSnapshot, Ledger, Transaction, TransactionSubmitOutcome,
 };
 
-use super::{
-    GossipEnvelope, IMPORT_REBROADCAST_LIMIT, NodeCore, helpers::transaction_input_outpoints,
-};
+use super::{GossipEnvelope, IMPORT_REBROADCAST_LIMIT, NodeCore};
 
 impl NodeCore {
     pub fn receive_transaction(&mut self, tx: Transaction) -> Result<TransactionSubmitOutcome> {
@@ -15,60 +12,18 @@ impl NodeCore {
         Ok(outcome)
     }
 
-    pub fn receive_mine_action(&mut self, tx: Transaction) -> Result<()> {
-        if !matches!(tx, Transaction::Mine { .. }) {
-            bail!("only mine actions may be gossiped as plaintext");
-        }
+    pub fn receive_gossiped_transaction(&mut self, tx: Transaction) -> Result<()> {
         if self
             .ledger
             .submit_transaction_with_outcome(tx.clone())?
             .added()
         {
-            self.outbox.push(GossipEnvelope::MineAction(tx));
+            self.outbox.push(GossipEnvelope::Transaction(tx));
         }
         Ok(())
     }
 
-    pub fn receive_blinded_transaction(&mut self, tx: BlindedTransaction) -> Result<()> {
-        if self.blinded_transaction_conflicts_with_local_anchor(&tx) {
-            return Ok(());
-        }
-        if self.ledger.submit_blinded_transaction(tx.clone())? {
-            self.outbox.push(GossipEnvelope::BlindedTransaction(tx));
-        }
-        Ok(())
-    }
-
-    fn blinded_transaction_conflicts_with_local_anchor(&self, tx: &BlindedTransaction) -> bool {
-        let Some((height, burn)) = &self.local_block_anchor_burn else {
-            return false;
-        };
-        if *height != self.ledger.height() || self.ledger.has_transaction(burn.signature()) {
-            return false;
-        }
-        let anchor_inputs = transaction_input_outpoints(burn);
-        tx.inputs
-            .iter()
-            .any(|input| anchor_inputs.contains(&input.outpoint))
-    }
-
-    pub fn receive_blinded_reveal(&mut self, reveal: BlindedReveal) -> Result<()> {
-        self.receive_blinded_reveal_without_bundle_publish(reveal)?;
-        Ok(())
-    }
-
-    fn receive_blinded_reveal_without_bundle_publish(
-        &mut self,
-        reveal: BlindedReveal,
-    ) -> Result<bool> {
-        if self.ledger.submit_blinded_reveal(reveal.clone())? {
-            self.outbox.push(GossipEnvelope::BlindedReveal(reveal));
-            return Ok(true);
-        }
-        Ok(false)
-    }
-
-    pub fn receive_reveal_bundle(&mut self, bundle: RevealBundle) -> Result<()> {
+    pub fn receive_burn_bundle(&mut self, bundle: BurnBundle) -> Result<()> {
         let next_height = self.ledger.height().saturating_add(1);
         if bundle.height <= self.ledger.height() {
             return Ok(());
@@ -77,20 +32,23 @@ impl NodeCore {
             return Ok(());
         }
         let key = (bundle.height, bundle.slot);
+        for burn in &bundle.burns {
+            self.receive_gossiped_transaction(burn.clone())?;
+        }
         self.ledger
-            .validate_next_block_reveal_bundles(vec![bundle.clone()])?;
-        if self.equivocated_reveal_bundle_slots.contains(&key) {
+            .validate_next_block_burn_bundles(vec![bundle.clone()])?;
+        if self.equivocated_burn_bundle_slots.contains(&key) {
             return Ok(());
         }
-        if let Some(existing) = self.reveal_bundles.get(&key) {
+        if let Some(existing) = self.burn_bundles.get(&key) {
             if existing.canonical() != bundle.canonical() {
-                self.reveal_bundles.remove(&key);
-                self.equivocated_reveal_bundle_slots.insert(key);
+                self.burn_bundles.remove(&key);
+                self.equivocated_burn_bundle_slots.insert(key);
             }
             return Ok(());
         }
-        self.reveal_bundles.insert(key, bundle.clone());
-        self.outbox.push(GossipEnvelope::RevealBundle(bundle));
+        self.burn_bundles.insert(key, bundle.clone());
+        self.outbox.push(GossipEnvelope::BurnBundle(bundle));
         Ok(())
     }
 
@@ -102,31 +60,17 @@ impl NodeCore {
             | GossipEnvelope::BlockRangeRequest { .. }
             | GossipEnvelope::BlockRequest { .. }
             | GossipEnvelope::Inventory { .. } => Ok(()),
-            GossipEnvelope::BlindedTransaction(tx) => self.receive_blinded_transaction(tx),
-            GossipEnvelope::BlindedTransactions { transactions } => {
+            GossipEnvelope::Transaction(tx) => self.receive_gossiped_transaction(tx),
+            GossipEnvelope::Transactions { transactions } => {
                 for tx in transactions {
-                    self.receive_blinded_transaction(tx)?;
+                    self.receive_gossiped_transaction(tx)?;
                 }
                 Ok(())
             }
-            GossipEnvelope::MineAction(tx) => self.receive_mine_action(tx),
-            GossipEnvelope::MineActions { transactions } => {
-                for tx in transactions {
-                    self.receive_mine_action(tx)?;
-                }
-                Ok(())
-            }
-            GossipEnvelope::BlindedReveal(reveal) => self.receive_blinded_reveal(reveal),
-            GossipEnvelope::BlindedReveals { reveals } => {
-                for reveal in reveals {
-                    self.receive_blinded_reveal_without_bundle_publish(reveal)?;
-                }
-                Ok(())
-            }
-            GossipEnvelope::RevealBundle(bundle) => self.receive_reveal_bundle(bundle),
-            GossipEnvelope::RevealBundles { bundles } => {
+            GossipEnvelope::BurnBundle(bundle) => self.receive_burn_bundle(bundle),
+            GossipEnvelope::BurnBundles { bundles } => {
                 for bundle in bundles {
-                    self.receive_reveal_bundle(bundle)?;
+                    self.receive_burn_bundle(bundle)?;
                 }
                 Ok(())
             }
@@ -135,10 +79,8 @@ impl NodeCore {
                 self.ledger.apply_block(block.clone())?;
                 if self.ledger.height() > previous_height {
                     self.clear_stale_local_block_anchor();
-                    self.clear_stale_reveal_bundle_collection();
-                    self.prune_reveal_bundles();
-                    self.prune_owned_blinded_payloads_for_block(&block);
-                    self.publish_owned_reveals_for_block(&block)?;
+                    self.clear_stale_burn_bundle_collection();
+                    self.prune_burn_bundles();
                     self.outbox.push(GossipEnvelope::Block(block));
                 }
                 Ok(())
@@ -150,10 +92,8 @@ impl NodeCore {
                     self.ledger.apply_block(block.clone())?;
                     if self.ledger.height() > previous_height {
                         self.clear_stale_local_block_anchor();
-                        self.clear_stale_reveal_bundle_collection();
-                        self.prune_reveal_bundles();
-                        self.prune_owned_blinded_payloads_for_block(&block);
-                        self.publish_owned_reveals_for_block(&block)?;
+                        self.clear_stale_burn_bundle_collection();
+                        self.prune_burn_bundles();
                         imported.push(block);
                     }
                 }
@@ -176,10 +116,8 @@ impl NodeCore {
             .apply_preverified_block_at(block.clone(), now_ms)?;
         if self.ledger.height() > previous_height {
             self.clear_stale_local_block_anchor();
-            self.clear_stale_reveal_bundle_collection();
-            self.prune_reveal_bundles();
-            self.prune_owned_blinded_payloads_for_block(&block);
-            self.publish_owned_reveals_for_block(&block)?;
+            self.clear_stale_burn_bundle_collection();
+            self.prune_burn_bundles();
             self.outbox.push(GossipEnvelope::Block(block));
         }
         Ok(())
@@ -200,8 +138,8 @@ impl NodeCore {
         if imported {
             self.reset_automatic_mining_progress();
             self.clear_stale_local_block_anchor();
-            self.clear_stale_reveal_bundle_collection();
-            self.prune_reveal_bundles();
+            self.clear_stale_burn_bundle_collection();
+            self.prune_burn_bundles();
             self.enqueue_imported_blocks(previous_height)?;
         }
         Ok(())
@@ -221,8 +159,8 @@ impl NodeCore {
         self.ledger = ledger;
         self.reset_automatic_mining_progress();
         self.clear_stale_local_block_anchor();
-        self.clear_stale_reveal_bundle_collection();
-        self.prune_reveal_bundles();
+        self.clear_stale_burn_bundle_collection();
+        self.prune_burn_bundles();
         self.enqueue_imported_blocks(previous_height)?;
         Ok(true)
     }
@@ -238,11 +176,9 @@ impl NodeCore {
         let blocks = self
             .ledger
             .blocks_from(previous_height + 1, IMPORT_REBROADCAST_LIMIT);
-        for block in &blocks {
-            self.prune_reveal_bundles();
-            self.clear_stale_reveal_bundle_collection();
-            self.prune_owned_blinded_payloads_for_block(block);
-            self.publish_owned_reveals_for_block(block)?;
+        for _ in &blocks {
+            self.prune_burn_bundles();
+            self.clear_stale_burn_bundle_collection();
         }
         if !blocks.is_empty() {
             self.outbox.push(GossipEnvelope::Blocks { blocks });
@@ -256,271 +192,53 @@ mod tests {
     use std::collections::BTreeMap;
 
     use crate::{
-        app::{
-            GossipEnvelope, NodeCore, REVEAL_BUNDLE_COLLECTION_MS,
-            helpers::transaction_input_outpoints,
-        },
+        app::NodeCore,
         domain::{GenesisBurn, Ledger, MICRO_IUNA, Wallet},
     };
 
-    fn wallet_for_address<'a>(wallets: &'a [Wallet], address: &str) -> &'a Wallet {
-        wallets
+    fn funded_ledger(wallets: &[Wallet]) -> Ledger {
+        let allocations = wallets
             .iter()
-            .find(|wallet| wallet.address() == address)
-            .unwrap_or_else(|| panic!("missing wallet for address {address}"))
-    }
-
-    #[test]
-    fn receiving_blinded_reveal_batch_waits_before_signing_committee_bundle() {
-        let alice = Wallet::from_seed("immediate-bundle-alice");
-        let bob = Wallet::from_seed("immediate-bundle-bob");
-        let carol = Wallet::from_seed("immediate-bundle-carol");
-        let dave = Wallet::from_seed("immediate-bundle-dave");
-        let finalizers = [alice.clone(), bob.clone()];
-        let mut allocations = BTreeMap::new();
-        allocations.insert(alice.address().to_string(), 10 * MICRO_IUNA);
-        allocations.insert(bob.address().to_string(), 10 * MICRO_IUNA);
-        allocations.insert(carol.address().to_string(), 10 * MICRO_IUNA);
-        allocations.insert(dave.address().to_string(), 10 * MICRO_IUNA);
-        let mut ledger = Ledger::new_with_genesis_burns(
-            allocations,
-            finalizers
-                .iter()
-                .map(|wallet| GenesisBurn::new(wallet.address(), MICRO_IUNA))
-                .collect(),
-            1,
-        )
-        .unwrap();
-        let first = ledger
-            .build_blinded_burn(&carol, 3, 100, ledger.height() + 4)
-            .unwrap();
-        let second = ledger
-            .build_blinded_burn(&dave, 4, 100, ledger.height() + 4)
-            .unwrap();
-        ledger
-            .submit_blinded_transaction(first.transaction.clone())
-            .unwrap();
-        ledger
-            .submit_blinded_transaction(second.transaction.clone())
-            .unwrap();
-        let leader = ledger.expected_leader_for_next_block().unwrap();
-        let leader_wallet = wallet_for_address(&finalizers, &leader);
-        let burn = ledger.build_burn(leader_wallet, 1, 0).unwrap();
-        ledger.submit_transaction(burn).unwrap();
-        let commit_block = ledger.mine_next_block(leader_wallet, 1).unwrap();
-        ledger.apply_locally_mined_block(commit_block).unwrap();
-
-        let committee = ledger.reveal_committee_for_next_block();
-        let committee_wallet = committee
+            .map(|wallet| (wallet.address().to_string(), 10 * MICRO_IUNA))
+            .collect::<BTreeMap<_, _>>();
+        let genesis_burns = wallets
             .iter()
-            .filter_map(|member| {
-                finalizers
-                    .iter()
-                    .find(|wallet| wallet.address() == member.owner)
-            })
-            .next()
-            .expect("test finalizer should be in reveal committee");
-        let mut committee_node = NodeCore::from_ledger_with_burn_fee_and_enabled(
-            committee_wallet.clone(),
-            ledger,
-            true,
-            0,
-            0,
-        );
-
-        committee_node
-            .receive(GossipEnvelope::BlindedReveals {
-                reveals: vec![first.reveal.clone()],
-            })
-            .unwrap();
-        let outbox = committee_node.drain_outbox();
-
-        assert!(outbox.iter().any(|envelope| matches!(
-            envelope,
-            GossipEnvelope::BlindedReveal(reveal) if reveal.commitment == first.reveal.commitment
-        )));
-        assert!(
-            !outbox
-                .iter()
-                .any(|envelope| matches!(envelope, GossipEnvelope::RevealBundle(_)))
-        );
-
-        let early = committee_node.prepare_automatic_finalization(2);
-        assert!(early.work.is_none());
-        assert!(
-            early
-                .skipped_reason
-                .as_deref()
-                .unwrap_or_default()
-                .contains("collecting blinded reveals")
-        );
-        assert!(
-            !committee_node
-                .drain_outbox()
-                .iter()
-                .any(|envelope| matches!(envelope, GossipEnvelope::RevealBundle(_)))
-        );
-
-        committee_node
-            .receive(GossipEnvelope::BlindedReveals {
-                reveals: vec![second.reveal.clone()],
-            })
-            .unwrap();
-        let outbox = committee_node.drain_outbox();
-        assert!(outbox.iter().any(|envelope| matches!(
-            envelope,
-            GossipEnvelope::BlindedReveal(reveal) if reveal.commitment == second.reveal.commitment
-        )));
-        assert!(
-            !outbox
-                .iter()
-                .any(|envelope| matches!(envelope, GossipEnvelope::RevealBundle(_)))
-        );
-
-        let ready = committee_node.prepare_automatic_finalization(REVEAL_BUNDLE_COLLECTION_MS + 3);
-        let _ = ready;
-        let outbox = committee_node.drain_outbox();
-        assert!(outbox.iter().any(|envelope| matches!(
-            envelope,
-            GossipEnvelope::RevealBundle(bundle)
-                if bundle.member == committee_wallet.address()
-                    && bundle.reveals.len() == 2
-                    && bundle.reveals.iter().any(|reveal| reveal.commitment == first.reveal.commitment)
-                    && bundle.reveals.iter().any(|reveal| reveal.commitment == second.reveal.commitment)
-        )));
-    }
-
-    #[test]
-    fn invalid_conflicting_reveal_bundle_does_not_poison_stored_slot() {
-        const TEST_SIGNATURE_BYTES: usize = 64;
-
-        let alice = Wallet::from_seed("invalid-conflict-bundle-alice");
-        let bob = Wallet::from_seed("invalid-conflict-bundle-bob");
-        let carol = Wallet::from_seed("invalid-conflict-bundle-carol");
-        let finalizers = [alice.clone(), bob.clone()];
-        let mut allocations = BTreeMap::new();
-        allocations.insert(alice.address().to_string(), 10 * MICRO_IUNA);
-        allocations.insert(bob.address().to_string(), 10 * MICRO_IUNA);
-        allocations.insert(carol.address().to_string(), 10 * MICRO_IUNA);
-        let mut ledger = Ledger::new_with_genesis_burns(
-            allocations,
-            finalizers
-                .iter()
-                .map(|wallet| GenesisBurn::new(wallet.address(), MICRO_IUNA))
-                .collect(),
-            1,
-        )
-        .unwrap();
-        let blinded = ledger
-            .build_blinded_burn(&carol, 3, 100, ledger.height() + 4)
-            .unwrap();
-        ledger
-            .submit_blinded_transaction(blinded.transaction.clone())
-            .unwrap();
-        let leader = ledger.expected_leader_for_next_block().unwrap();
-        let leader_wallet = wallet_for_address(&finalizers, &leader);
-        let burn = ledger.build_burn(leader_wallet, 1, 0).unwrap();
-        ledger.submit_transaction(burn).unwrap();
-        let commit_block = ledger.mine_next_block(leader_wallet, 1).unwrap();
-        ledger.apply_locally_mined_block(commit_block).unwrap();
-        ledger.submit_blinded_reveal(blinded.reveal).unwrap();
-
-        let committee_member = ledger.reveal_committee_for_next_block()[0].clone();
-        let committee_wallet = wallet_for_address(&finalizers, &committee_member.owner);
-        let valid_bundle = ledger
-            .build_reveal_bundle(committee_wallet)
-            .unwrap()
-            .unwrap();
-        let mut node = NodeCore::from_ledger_with_burn_fee_and_enabled(
-            committee_wallet.clone(),
-            ledger,
-            true,
-            0,
-            0,
-        );
-
-        node.receive_reveal_bundle(valid_bundle.clone()).unwrap();
-        node.drain_outbox();
-
-        let mut invalid_conflict = valid_bundle.clone();
-        invalid_conflict.signature = "00".repeat(TEST_SIGNATURE_BYTES);
-        let error = node.receive_reveal_bundle(invalid_conflict).unwrap_err();
-
-        assert!(format!("{error:#}").contains("reveal bundle signature is invalid"));
-        let key = (valid_bundle.height, valid_bundle.slot);
-        assert_eq!(node.reveal_bundles.get(&key), Some(&valid_bundle));
-        assert!(!node.equivocated_reveal_bundle_slots.contains(&key));
-        assert_eq!(node.usable_reveal_bundles(), vec![valid_bundle]);
-        assert!(node.drain_outbox().is_empty());
-    }
-
-    #[test]
-    fn inbound_blinded_transaction_conflicting_with_local_anchor_is_not_queued() {
-        let alice = Wallet::from_seed("local-anchor-inbound-alice");
-        let bob = Wallet::from_seed("local-anchor-inbound-bob");
-        let finalizers = [alice.clone(), bob.clone()];
-        let mut allocations = BTreeMap::new();
-        allocations.insert(alice.address().to_string(), 10 * MICRO_IUNA);
-        allocations.insert(bob.address().to_string(), 10 * MICRO_IUNA);
-        let ledger = Ledger::new_with_genesis_burns(
-            allocations,
-            finalizers
-                .iter()
-                .map(|wallet| GenesisBurn::new(wallet.address(), MICRO_IUNA))
-                .collect(),
-            1,
-        )
-        .unwrap();
-        let leader = ledger.expected_leader_for_next_block().unwrap();
-        let leader_wallet = finalizers
-            .iter()
-            .find(|wallet| wallet.address() == leader)
-            .unwrap()
-            .clone();
-        let mut node = NodeCore::from_ledger_with_burn_fee_and_enabled(
-            leader_wallet.clone(),
-            ledger,
-            true,
-            MICRO_IUNA / 10,
-            1,
-        );
-
-        let plan = node.prepare_automatic_finalization(1);
-        assert!(plan.burned.is_some());
-        assert_eq!(node.ledger().pending_blinded_transactions().len(), 1);
-        let automatic_burn_commitment = node.ledger().pending_blinded_transactions()[0]
-            .commitment
-            .clone();
-        assert_eq!(
-            node.ledger().pending_blinded_transactions()[0].commitment,
-            automatic_burn_commitment
-        );
-        node.drain_outbox();
-        let (_, anchor_burn) = node
-            .local_block_anchor_burn
-            .clone()
-            .expect("leader burn should be held as a local block anchor");
-        let anchor_inputs = transaction_input_outpoints(&anchor_burn)
-            .into_iter()
+            .map(|wallet| GenesisBurn::new(wallet.address(), MICRO_IUNA))
             .collect::<Vec<_>>();
-        let conflicting_payload = node
-            .ledger()
-            .build_transfer_with_inputs(&leader_wallet, bob.address(), 1, 0, &anchor_inputs)
-            .unwrap();
-        let conflicting = node
-            .ledger()
-            .build_blinded_transaction(&leader_wallet, conflicting_payload, node.chain_height() + 4)
-            .unwrap();
+        Ledger::new_with_genesis_burns(allocations, genesis_burns, 1).unwrap()
+    }
 
-        node.receive_blinded_transaction(conflicting.transaction)
-            .unwrap();
+    #[test]
+    fn burn_bundle_imports_new_signed_burns_to_mempool() {
+        let alice = Wallet::from_seed("bundle-import-new-burn-alice");
+        let bob = Wallet::from_seed("bundle-import-new-burn-bob");
+        let wallets = [alice.clone(), bob.clone()];
+        let ledger = funded_ledger(&wallets);
+        let finalizer = ledger.expected_leader_for_next_block().unwrap();
+        let signer = wallets
+            .iter()
+            .find(|wallet| wallet.address() == finalizer)
+            .expect("test ledger should include selected finalizer")
+            .clone();
+        let burner = wallets
+            .iter()
+            .find(|wallet| wallet.address() != signer.address())
+            .expect("test ledger should include a non-finalizer")
+            .clone();
+        let burn = ledger.build_burn(&burner, 1, 1).unwrap();
+        let mut signer_ledger = ledger.clone();
+        signer_ledger.submit_transaction(burn.clone()).unwrap();
+        let bundle = signer_ledger.build_burn_bundle(&signer).unwrap().unwrap();
+        let mut receiver = NodeCore::from_ledger(signer, ledger, 0);
 
-        assert_eq!(node.ledger().pending_blinded_transactions().len(), 1);
-        assert_eq!(
-            node.ledger().pending_blinded_transactions()[0].commitment,
-            automatic_burn_commitment
+        receiver.receive_burn_bundle(bundle).unwrap();
+
+        assert!(
+            receiver
+                .ledger()
+                .pending()
+                .iter()
+                .any(|transaction| transaction.signature() == burn.signature())
         );
-        assert!(node.drain_outbox().is_empty());
-        assert!(node.prepare_automatic_finalization(1).work.is_some());
     }
 }

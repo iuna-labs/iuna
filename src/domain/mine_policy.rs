@@ -10,12 +10,11 @@ pub(super) const MINE_MIN_DIFFICULTY_BITS: u32 = 10;
 pub(super) const MINE_MAX_ANCHOR_AGE_BLOCKS: u64 = MINE_RETARGET_WINDOW_BLOCKS;
 
 const MINE_TARGET_ACTIONS_PER_BLOCK: u64 = 1;
-const MINE_MAX_DIFFICULTY_BITS: u32 = 32;
 
 pub(super) fn retarget_mine_difficulty_bits(current: u32, mine_actions: u64) -> u32 {
     let target = MINE_RETARGET_WINDOW_BLOCKS.saturating_mul(MINE_TARGET_ACTIONS_PER_BLOCK);
     if target == 0 || mine_actions == target {
-        return current.clamp(MINE_MIN_DIFFICULTY_BITS, MINE_MAX_DIFFICULTY_BITS);
+        return current.max(MINE_MIN_DIFFICULTY_BITS);
     }
 
     let step = if mine_actions > target {
@@ -27,16 +26,12 @@ pub(super) fn retarget_mine_difficulty_bits(current: u32, mine_actions: u64) -> 
     };
 
     if step == 0 {
-        return current.clamp(MINE_MIN_DIFFICULTY_BITS, MINE_MAX_DIFFICULTY_BITS);
+        return current.max(MINE_MIN_DIFFICULTY_BITS);
     }
     if mine_actions > target {
-        current
-            .saturating_add(step)
-            .clamp(MINE_MIN_DIFFICULTY_BITS, MINE_MAX_DIFFICULTY_BITS)
+        current.saturating_add(step).max(MINE_MIN_DIFFICULTY_BITS)
     } else {
-        current
-            .saturating_sub(step)
-            .clamp(MINE_MIN_DIFFICULTY_BITS, MINE_MAX_DIFFICULTY_BITS)
+        current.saturating_sub(step).max(MINE_MIN_DIFFICULTY_BITS)
     }
 }
 
@@ -95,7 +90,7 @@ mod tests {
     use crate::domain::MINE_DIFFICULTY_BITS;
 
     #[test]
-    fn retarget_bounds_match_protocol_constants() {
+    fn retarget_keeps_protocol_minimum() {
         assert_eq!(
             retarget_mine_difficulty_bits(MINE_DIFFICULTY_BITS, 0),
             MINE_DIFFICULTY_BITS - MINE_MAX_RETARGET_STEP_BITS
@@ -104,5 +99,11 @@ mod tests {
             retarget_mine_difficulty_bits(1, 0),
             MINE_MIN_DIFFICULTY_BITS
         );
+    }
+
+    #[test]
+    fn retarget_does_not_cap_difficulty_at_32_bits() {
+        assert_eq!(retarget_mine_difficulty_bits(33, 20), 34);
+        assert_eq!(retarget_mine_difficulty_bits(40, 10), 40);
     }
 }

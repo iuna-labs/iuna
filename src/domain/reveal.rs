@@ -1,30 +1,27 @@
 use anyhow::{Context, Result, bail};
 use serde::{Deserialize, Serialize};
 
-use super::{
-    Amount, BlindedReveal, REVEAL_BUNDLE_SIGNATURE_THRESHOLDS_HEIGHT, REVEAL_COMMITTEE_SIZE,
-    hex_hash,
-};
+use super::{Amount, BURN_COMMITTEE_SIZE, Transaction, hex_hash};
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(rename_all = "camelCase")]
-pub struct RevealBundle {
+pub struct BurnBundle {
     pub height: u64,
     pub prev_hash: String,
     pub slot: u8,
     pub member: String,
-    pub reveals: Vec<BlindedReveal>,
+    pub burns: Vec<Transaction>,
     pub signature: String,
 }
 
-impl RevealBundle {
+impl BurnBundle {
     pub fn canonical_payload(&self) -> String {
-        RevealBundlePayload {
+        BurnBundlePayload {
             height: self.height,
             prev_hash: self.prev_hash.clone(),
             slot: self.slot,
             member: self.member.clone(),
-            reveals: self.reveals.clone(),
+            burns: self.burns.clone(),
         }
         .canonical()
     }
@@ -40,13 +37,13 @@ impl RevealBundle {
     pub fn serialized_size_bytes(&self) -> Result<usize> {
         serde_json::to_vec(self)
             .map(|bytes| bytes.len())
-            .context("failed to serialize reveal bundle for size check")
+            .context("failed to serialize burn bundle for size check")
     }
 }
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(rename_all = "camelCase")]
-pub struct RevealBundleSignature {
+pub struct BurnBundleSignature {
     pub slot: u8,
     pub member: String,
     pub signature: String,
@@ -54,67 +51,65 @@ pub struct RevealBundleSignature {
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(rename_all = "camelCase")]
-pub struct MaskedBlindedReveal {
-    pub reveal: BlindedReveal,
+pub struct MaskedBurn {
+    pub burn: Transaction,
     pub bundle_mask: u8,
 }
 
 #[derive(Clone, Debug, Default, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(rename_all = "camelCase")]
-pub struct RevealBundleSection {
+pub struct BurnBundleSection {
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    pub signatures: Vec<RevealBundleSignature>,
+    pub signatures: Vec<BurnBundleSignature>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    pub reveals: Vec<MaskedBlindedReveal>,
+    pub burns: Vec<MaskedBurn>,
 }
 
-impl RevealBundleSection {
+impl BurnBundleSection {
     pub fn is_empty(&self) -> bool {
-        self.signatures.is_empty() && self.reveals.is_empty()
+        self.signatures.is_empty() && self.burns.is_empty()
     }
 
-    pub fn all_reveals(&self) -> Vec<&BlindedReveal> {
-        self.reveals.iter().map(|masked| &masked.reveal).collect()
+    pub fn required_burns(&self) -> Vec<&Transaction> {
+        self.burns.iter().map(|masked| &masked.burn).collect()
     }
 
     pub fn included_bundle_count(&self) -> usize {
         self.signatures.len()
     }
 
-    pub fn expand(&self, height: u64, prev_hash: &str) -> Vec<RevealBundle> {
+    pub fn expand(&self, height: u64, prev_hash: &str) -> Vec<BurnBundle> {
         self.signatures
             .iter()
             .map(|signature| {
-                let slot_mask = reveal_bundle_slot_mask(signature.slot).unwrap_or(0);
-                let reveals = self
-                    .reveals
+                let slot_mask = burn_bundle_slot_mask(signature.slot).unwrap_or(0);
+                let burns = self
+                    .burns
                     .iter()
                     .filter(|masked| masked.bundle_mask & slot_mask != 0)
-                    .map(|masked| masked.reveal.clone())
+                    .map(|masked| masked.burn.clone())
                     .collect();
-                RevealBundle {
+                BurnBundle {
                     height,
                     prev_hash: prev_hash.to_string(),
                     slot: signature.slot,
                     member: signature.member.clone(),
-                    reveals,
+                    burns,
                     signature: signature.signature.clone(),
                 }
             })
             .collect()
     }
 
-    pub fn reveal_bundle_hashes(
+    pub fn burn_bundle_hashes(
         &self,
         height: u64,
         prev_hash: &str,
         finalizer: &str,
-    ) -> [String; REVEAL_COMMITTEE_SIZE] {
+    ) -> [String; BURN_COMMITTEE_SIZE] {
         let bundles = self.expand(height, prev_hash);
-        let mut hashes = reveal_bundle_hashes(&bundles);
-        if height >= REVEAL_BUNDLE_SIGNATURE_THRESHOLDS_HEIGHT {
-            hashes[0] = finalizer_attestation_hash(height, prev_hash, finalizer, &self.reveals);
-        }
+        let mut hashes = burn_bundle_hashes(&bundles);
+        hashes[0] = finalizer_attestation_hash(height, prev_hash, finalizer, &self.burns);
         hashes
     }
 
@@ -130,72 +125,71 @@ impl RevealBundleSection {
             })
             .collect::<Vec<_>>()
             .join("|");
-        let reveals = self
-            .reveals
+        let burns = self
+            .burns
             .iter()
-            .map(|masked| format!("{}:{}", masked.bundle_mask, masked.reveal.canonical()))
+            .map(|masked| format!("{}:{}", masked.bundle_mask, masked.burn.canonical()))
             .collect::<Vec<_>>()
             .join("|");
-        format!("reveal-bundle-section-v1:{signatures}:reveals:{reveals}")
+        format!("burn-bundle-section-v1:{signatures}:burns:{burns}")
     }
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
-pub(super) struct RevealBundlePayload {
-    pub(super) height: u64,
-    pub(super) prev_hash: String,
-    pub(super) slot: u8,
-    pub(super) member: String,
-    pub(super) reveals: Vec<BlindedReveal>,
+pub struct BurnBundlePayload {
+    pub height: u64,
+    pub prev_hash: String,
+    pub slot: u8,
+    pub member: String,
+    pub burns: Vec<Transaction>,
 }
 
-impl RevealBundlePayload {
-    pub(super) fn canonical(&self) -> String {
-        let reveals = self
-            .reveals
+impl BurnBundlePayload {
+    pub fn canonical(&self) -> String {
+        let burns = self
+            .burns
             .iter()
-            .map(BlindedReveal::canonical)
+            .map(Transaction::canonical)
             .collect::<Vec<_>>()
             .join("|");
         format!(
-            "iuna-reveal-bundle-v1:{}:{}:{}:{}:{}",
-            self.height, self.prev_hash, self.slot, self.member, reveals
+            "iuna-burn-bundle-v1:{}:{}:{}:{}:{}",
+            self.height, self.prev_hash, self.slot, self.member, burns
         )
     }
 }
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(rename_all = "camelCase")]
-pub struct RevealCommitteeMember {
+pub struct BurnCommitteeMember {
     pub slot: u8,
-    pub rank: u32,
-    pub ticket_id: String,
+    pub root: String,
     pub owner: String,
-    pub amount: Amount,
+    pub weight: Amount,
 }
 
-pub fn default_reveal_bundle_hash(slot: usize) -> String {
-    hex_hash(format!("iuna-default-reveal-bundle-v1:{slot}"))
+pub fn default_burn_bundle_hash(slot: usize) -> String {
+    hex_hash(format!("iuna-default-burn-bundle-v1:{slot}"))
 }
 
-pub(super) fn reveal_bundle_slot_mask(slot: u8) -> Result<u8> {
-    if usize::from(slot) >= REVEAL_COMMITTEE_SIZE || slot >= 8 {
-        bail!("reveal bundle slot is invalid");
+pub(super) fn burn_bundle_slot_mask(slot: u8) -> Result<u8> {
+    if usize::from(slot) >= BURN_COMMITTEE_SIZE || slot >= 8 {
+        bail!("burn bundle slot is invalid");
     }
     Ok(1_u8 << slot)
 }
 
-pub(super) fn reveal_committee_mask() -> u8 {
-    (0..REVEAL_COMMITTEE_SIZE).fold(0_u8, |mask, slot| mask | (1_u8 << slot))
+pub(super) fn burn_committee_mask() -> u8 {
+    (0..BURN_COMMITTEE_SIZE).fold(0_u8, |mask, slot| mask | (1_u8 << slot))
 }
 
-pub(super) fn reveal_bundle_hashes(bundles: &[RevealBundle]) -> [String; REVEAL_COMMITTEE_SIZE] {
+pub(super) fn burn_bundle_hashes(bundles: &[BurnBundle]) -> [String; BURN_COMMITTEE_SIZE] {
     std::array::from_fn(|slot| {
         bundles
             .iter()
             .find(|bundle| usize::from(bundle.slot) == slot)
-            .map(RevealBundle::bundle_hash)
-            .unwrap_or_else(|| default_reveal_bundle_hash(slot))
+            .map(BurnBundle::bundle_hash)
+            .unwrap_or_else(|| default_burn_bundle_hash(slot))
     })
 }
 
@@ -203,98 +197,20 @@ pub(super) fn finalizer_attestation_hash(
     height: u64,
     prev_hash: &str,
     finalizer: &str,
-    reveals: &[MaskedBlindedReveal],
+    burns: &[MaskedBurn],
 ) -> String {
-    let canonical_reveals = reveals
+    let canonical_burns = burns
         .iter()
-        .map(|masked| masked.reveal.canonical())
+        .map(|masked| masked.burn.canonical())
         .collect::<Vec<_>>()
         .join("|");
     hex_hash(format!(
-        "iuna-finalizer-reveal-attestation-v1:{height}:{prev_hash}:{finalizer}:{canonical_reveals}"
+        "iuna-finalizer-burn-attestation-v1:{height}:{prev_hash}:{finalizer}:{canonical_burns}"
     ))
 }
 
-pub(super) fn canonical_reveal_bundle_hashes(
-    bundle_hashes: &[String; REVEAL_COMMITTEE_SIZE],
+pub(super) fn canonical_burn_bundle_hashes(
+    bundle_hashes: &[String; BURN_COMMITTEE_SIZE],
 ) -> String {
     bundle_hashes.join("|")
-}
-
-#[cfg(test)]
-mod tests {
-    use super::{
-        MaskedBlindedReveal, RevealBundle, RevealBundlePayload, RevealBundleSection,
-        RevealBundleSignature, default_reveal_bundle_hash, reveal_bundle_hashes,
-        reveal_bundle_slot_mask,
-    };
-    use crate::domain::BlindedReveal;
-
-    #[test]
-    fn reveal_bundle_payload_is_canonical() {
-        let payload = RevealBundlePayload {
-            height: 7,
-            prev_hash: "prev".to_string(),
-            slot: 1,
-            member: "member".to_string(),
-            reveals: vec![BlindedReveal {
-                commitment: "commitment".to_string(),
-                key: "key".to_string(),
-            }],
-        };
-
-        assert_eq!(
-            payload.canonical(),
-            "iuna-reveal-bundle-v1:7:prev:1:member:blinded-reveal:commitment:key"
-        );
-    }
-
-    #[test]
-    fn reveal_bundle_hashes_fill_missing_slots_with_defaults() {
-        let bundle = RevealBundle {
-            height: 1,
-            prev_hash: "prev".to_string(),
-            slot: 1,
-            member: "member".to_string(),
-            reveals: Vec::new(),
-            signature: "sig".to_string(),
-        };
-
-        let hashes = reveal_bundle_hashes(&[bundle.clone()]);
-
-        assert_eq!(hashes[0], default_reveal_bundle_hash(0));
-        assert_eq!(hashes[1], bundle.bundle_hash());
-        assert_eq!(hashes[2], default_reveal_bundle_hash(2));
-    }
-
-    #[test]
-    fn reveal_bundle_section_expands_masked_reveals_by_slot() {
-        let reveal = BlindedReveal {
-            commitment: "commitment".to_string(),
-            key: "key".to_string(),
-        };
-        let section = RevealBundleSection {
-            signatures: vec![
-                RevealBundleSignature {
-                    slot: 0,
-                    member: "a".to_string(),
-                    signature: "sig-a".to_string(),
-                },
-                RevealBundleSignature {
-                    slot: 1,
-                    member: "b".to_string(),
-                    signature: "sig-b".to_string(),
-                },
-            ],
-            reveals: vec![MaskedBlindedReveal {
-                reveal: reveal.clone(),
-                bundle_mask: reveal_bundle_slot_mask(1).unwrap(),
-            }],
-        };
-
-        let expanded = section.expand(3, "prev");
-
-        assert!(expanded[0].reveals.is_empty());
-        assert_eq!(expanded[1].reveals, vec![reveal]);
-    }
 }

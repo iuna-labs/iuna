@@ -1,7 +1,7 @@
 use anyhow::{Result, bail};
 
 use super::{
-    FinalizerMode, Ledger, PreparedBlock, RECOVERY_BLOCK_DELAY_MS, RevealBundle, Wallet,
+    BurnBundle, FinalizerMode, Ledger, PreparedBlock, RECOVERY_BLOCK_DELAY_MS, Wallet,
     ensure_block_has_burn, ensure_block_has_burn_from, recovery_vdf_seed_for_child, run_vdf,
     ticket_block_min_timestamp, vdf_seed_for_child,
 };
@@ -20,28 +20,28 @@ impl Ledger {
     }
 
     pub fn prepare_next_block(&self, miner: &str, timestamp_ms: u64) -> Result<PreparedBlock> {
-        self.prepare_next_block_with_reveal_bundles(miner, timestamp_ms, Vec::new())
+        self.prepare_next_block_with_burn_bundles(miner, timestamp_ms, Vec::new())
     }
 
-    pub fn prepare_next_block_with_reveal_bundles(
+    pub fn prepare_next_block_with_burn_bundles(
         &self,
         miner: &str,
         timestamp_ms: u64,
-        reveal_bundles: Vec<RevealBundle>,
+        burn_bundles: Vec<BurnBundle>,
     ) -> Result<PreparedBlock> {
-        self.prepare_next_block_with_required_burn_and_reveal_bundles(
+        self.prepare_next_block_with_required_burn_and_burn_bundles(
             miner,
             timestamp_ms,
-            reveal_bundles,
+            burn_bundles,
             None,
         )
     }
 
-    pub(crate) fn prepare_next_block_with_required_burn_and_reveal_bundles(
+    pub(crate) fn prepare_next_block_with_required_burn_and_burn_bundles(
         &self,
         miner: &str,
         timestamp_ms: u64,
-        reveal_bundles: Vec<RevealBundle>,
+        burn_bundles: Vec<BurnBundle>,
         required_burn_signature: Option<&str>,
     ) -> Result<PreparedBlock> {
         let height = self.tip().height + 1;
@@ -53,19 +53,19 @@ impl Ledger {
             bail!("no selected leader for block {height}");
         }
 
-        let reveal_bundles = self.validate_next_block_reveal_bundles(reveal_bundles)?;
-        let reveal_bundle_section = self.reveal_bundle_section_from_bundles(reveal_bundles);
-        let selection = self.select_block_transactions_with_reveal_section(
+        let burn_bundles = self.validate_next_block_burn_bundles(burn_bundles)?;
+        let burn_bundle_section = self.burn_bundle_section_from_bundles(burn_bundles);
+        let selection = self.select_block_transactions_with_burn_section(
             miner,
             required_burn_signature,
-            &reveal_bundle_section,
+            &burn_bundle_section,
         )?;
         ensure_block_has_burn(&selection.transactions)?;
 
         let tip = self.tip();
         let prev_hash = tip.hash.clone();
         let timestamp_ms = timestamp_ms.max(ticket_block_min_timestamp(tip, finalizer_rank)?);
-        let bundle_hashes = reveal_bundle_section.reveal_bundle_hashes(height, &prev_hash, miner);
+        let bundle_hashes = burn_bundle_section.burn_bundle_hashes(height, &prev_hash, miner);
         let vdf_seed = vdf_seed_for_child(&prev_hash, height, &bundle_hashes);
         Ok(PreparedBlock {
             height,
@@ -74,13 +74,12 @@ impl Ledger {
             miner: miner.to_string(),
             finalizer_mode: FinalizerMode::Ticket,
             reward: self
-                .expected_reward_for_next_block(&selection.transactions, &reveal_bundle_section)?,
+                .expected_reward_for_next_block(&selection.transactions, &burn_bundle_section)?,
             vdf_rounds: self.vdf_rounds_for_finalizer_rank(finalizer_rank)?,
             vdf_seed,
             finalizer_rank,
             leader_ticket: Some(leader_ticket),
-            blinded_transactions: selection.blinded_transactions,
-            reveal_bundle_section,
+            burn_bundle_section,
             transactions: selection.transactions,
         })
     }
@@ -96,28 +95,28 @@ impl Ledger {
     }
 
     pub fn prepare_recovery_block(&self, miner: &str, timestamp_ms: u64) -> Result<PreparedBlock> {
-        self.prepare_recovery_block_with_reveal_bundles(miner, timestamp_ms, Vec::new())
+        self.prepare_recovery_block_with_burn_bundles(miner, timestamp_ms, Vec::new())
     }
 
-    pub fn prepare_recovery_block_with_reveal_bundles(
+    pub fn prepare_recovery_block_with_burn_bundles(
         &self,
         miner: &str,
         timestamp_ms: u64,
-        reveal_bundles: Vec<RevealBundle>,
+        burn_bundles: Vec<BurnBundle>,
     ) -> Result<PreparedBlock> {
-        self.prepare_recovery_block_with_required_burn_and_reveal_bundles(
+        self.prepare_recovery_block_with_required_burn_and_burn_bundles(
             miner,
             timestamp_ms,
-            reveal_bundles,
+            burn_bundles,
             None,
         )
     }
 
-    pub(crate) fn prepare_recovery_block_with_required_burn_and_reveal_bundles(
+    pub(crate) fn prepare_recovery_block_with_required_burn_and_burn_bundles(
         &self,
         miner: &str,
         timestamp_ms: u64,
-        reveal_bundles: Vec<RevealBundle>,
+        burn_bundles: Vec<BurnBundle>,
         required_burn_signature: Option<&str>,
     ) -> Result<PreparedBlock> {
         let height = self.tip().height + 1;
@@ -126,12 +125,12 @@ impl Ledger {
             bail!("recovery block is not available before timestamp {min_timestamp}");
         }
 
-        let reveal_bundles = self.validate_next_block_reveal_bundles(reveal_bundles)?;
-        let reveal_bundle_section = self.reveal_bundle_section_from_bundles(reveal_bundles);
-        let selection = self.select_recovery_block_transactions_with_reveal_section(
+        let burn_bundles = self.validate_next_block_burn_bundles(burn_bundles)?;
+        let burn_bundle_section = self.burn_bundle_section_from_bundles(burn_bundles);
+        let selection = self.select_recovery_block_transactions_with_burn_section(
             miner,
             required_burn_signature,
-            &reveal_bundle_section,
+            &burn_bundle_section,
         )?;
         ensure_block_has_burn(&selection.transactions)?;
         ensure_block_has_burn_from(&selection.transactions, miner)?;
@@ -139,7 +138,7 @@ impl Ledger {
         let tip = self.tip();
         let prev_hash = tip.hash.clone();
         let timestamp_ms = timestamp_ms.max(tip.timestamp_ms + 1);
-        let bundle_hashes = reveal_bundle_section.reveal_bundle_hashes(height, &prev_hash, miner);
+        let bundle_hashes = burn_bundle_section.burn_bundle_hashes(height, &prev_hash, miner);
         let vdf_seed =
             recovery_vdf_seed_for_child(&prev_hash, height, timestamp_ms, &bundle_hashes);
         Ok(PreparedBlock {
@@ -150,12 +149,11 @@ impl Ledger {
             finalizer_mode: FinalizerMode::Recovery,
             finalizer_rank: 0,
             reward: self
-                .expected_reward_for_next_block(&selection.transactions, &reveal_bundle_section)?,
+                .expected_reward_for_next_block(&selection.transactions, &burn_bundle_section)?,
             vdf_rounds: self.recovery_vdf_rounds()?,
             vdf_seed,
             leader_ticket: None,
-            blinded_transactions: selection.blinded_transactions,
-            reveal_bundle_section,
+            burn_bundle_section,
             transactions: selection.transactions,
         })
     }

@@ -990,7 +990,7 @@ window.iunaApp = function iunaApp() {
     },
 
     mempoolKey(tx) {
-      return tx?.signature || tx?.commitment || "";
+      return tx?.signature || "";
     },
 
     mempoolItemClass(tx) {
@@ -998,7 +998,6 @@ window.iunaApp = function iunaApp() {
       const firstSeenHeight = Number(this.mempoolFirstSeenHeights[key]);
       const markerHeight = Number(this.status.chain?.height ?? this.lastBlockMempoolHeight);
       const classes = [];
-      if (isBlindedMempoolItem(tx)) classes.push("blinded-hidden");
       if (key && Number.isFinite(firstSeenHeight) && Number.isFinite(markerHeight)) {
         classes.push(firstSeenHeight >= markerHeight ? "new-since-block" : "before-last-block");
       }
@@ -2486,21 +2485,16 @@ window.iunaApp = function iunaApp() {
       return tx?.kind === "mine";
     },
 
-    isBlindedMempoolItem(tx) {
-      return !tx?.revealed && (tx?.kind === "blinded" || tx?.kind === "reveal");
-    },
-
     txFeeLabel(tx) {
-      if (!tx?.revealed && tx?.kind === "reveal") return "unknown until reveal";
       return `IUNA ${this.amountLabel(tx?.fee ?? 0)}`;
     },
 
     txPillLabel(tx) {
-      return tx?.revealed ? "revealed" : (tx?.kind || "-");
+      return tx?.kind || "-";
     },
 
     txPillClass(tx) {
-      return tx?.revealed ? "revealed" : (tx?.kind || "");
+      return tx?.kind || "";
     },
 
     txDifficultyBits(tx) {
@@ -2727,25 +2721,19 @@ window.iunaApp = function iunaApp() {
     blockPayloadBytes(block) {
       return (
         Number(block?.transactionBytes ?? block?.transaction_bytes ?? 0) +
-        Number(block?.blindedTransactionBytes ?? block?.blinded_transaction_bytes ?? 0) +
-        Number(block?.revealBundleBytes ?? block?.reveal_bundle_bytes ?? 0)
+        Number(block?.burnBundleBytes ?? block?.burn_bundle_bytes ?? 0)
       );
     },
 
-    blockRevealFeePenalty(block) {
-      return block?.revealFeePenalty ?? block?.reveal_fee_penalty ?? {};
+    blockBurnBundleQuorum(block) {
+      return block?.burnBundleQuorum ?? block?.burn_bundle_quorum ?? {};
     },
 
-    blockRevealListRatio(block) {
-      const penalty = this.blockRevealFeePenalty(block);
-      const included = Number(penalty.revealListsIncluded ?? penalty.reveal_lists_included ?? 0);
-      const committeeSize = Number(penalty.committeeSize ?? penalty.committee_size ?? 0);
+    blockBurnBundleRatio(block) {
+      const quorum = this.blockBurnBundleQuorum(block);
+      const included = Number(quorum.burnBundlesIncluded ?? quorum.burn_bundles_included ?? 0);
+      const committeeSize = Number(quorum.committeeSize ?? quorum.committee_size ?? 0);
       return `${included}/${committeeSize}`;
-    },
-
-    blockRevealFeePenaltyAmount(block) {
-      const penalty = this.blockRevealFeePenalty(block);
-      return Number(penalty.feePenalty ?? penalty.fee_penalty ?? 0);
     },
 
     blockByteBreakdown(block) {
@@ -2755,8 +2743,7 @@ window.iunaApp = function iunaApp() {
         ...(transactionRows.length
           ? transactionRows
           : [["Transactions", Number(block?.transactionBytes ?? block?.transaction_bytes ?? 0), ""]]),
-        ["Blinded commits", Number(block?.blindedTransactionBytes ?? block?.blinded_transaction_bytes ?? 0), "blinded"],
-        ["Reveal bundles", Number(block?.revealBundleBytes ?? block?.reveal_bundle_bytes ?? 0), "reveal"],
+        ["Burn bundles", Number(block?.burnBundleBytes ?? block?.burn_bundle_bytes ?? 0), "burn"],
       ];
     },
 
@@ -2785,21 +2772,12 @@ window.iunaApp = function iunaApp() {
       return this.blockTransactions(block).filter((tx) => tx.kind === "transfer").length;
     },
 
-    blockCommitCount(block) {
-      return this.blockTransactions(block).filter((tx) => tx.kind === "blinded").length;
-    },
-
     blockMineCount(block) {
       return this.blockTransactions(block).filter((tx) => tx.kind === "mine").length;
     },
 
     blockTransactions(block) {
-      const transactions = block?.transactions || [];
-      if (transactions.some((tx) => tx?.revealed)) return transactions;
-      return [
-        ...transactions,
-        ...(block?.revealedTransactions || block?.revealed_transactions || []),
-      ];
+      return block?.transactions || [];
     },
 
     burnCountLabel(block) {
@@ -2810,11 +2788,6 @@ window.iunaApp = function iunaApp() {
     transferCountLabel(block) {
       const count = this.blockTransferCount(block);
       return `${count} transfer${count === 1 ? "" : "s"}`;
-    },
-
-    commitCountLabel(block) {
-      const count = this.blockCommitCount(block);
-      return `${count} commit${count === 1 ? "" : "s"}`;
     },
 
     mineCountLabel(block) {
@@ -2854,7 +2827,7 @@ window.iunaApp = function iunaApp() {
     },
 
     txTitle(tx) {
-      if (tx.status === "pending") return tx.blinded ? "Pending blind" : "Pending";
+      if (tx.status === "pending") return "Pending";
       return tx.blockHeight === null ? "Confirmed" : `Block ${tx.blockHeight}`;
     },
 

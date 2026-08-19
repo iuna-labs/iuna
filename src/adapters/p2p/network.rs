@@ -20,25 +20,6 @@ use super::{
 };
 
 impl GossipNetwork {
-    #[cfg(test)]
-    pub(crate) fn new_for_tests(node: SharedNode, peers: SharedPeerBook) -> Self {
-        Self {
-            inner: Arc::new(GossipNetworkInner {
-                node,
-                peers,
-                listen_addr: "127.0.0.1:0".parse().unwrap(),
-                p2p_announce_addr: tokio::sync::Mutex::new(None),
-                node_id: new_node_id(),
-                accept_task: tokio::sync::Mutex::new(None),
-                sessions: tokio::sync::Mutex::new(
-                    BTreeMap::<String, mpsc::Sender<OutboundBatch>>::new(),
-                ),
-                inbound_limiter: Arc::new(StdMutex::new(InboundConnectionLimiter::default())),
-                metrics: P2pMetricsCounters::default(),
-            }),
-        }
-    }
-
     pub async fn start(
         node: SharedNode,
         peers: SharedPeerBook,

@@ -3,7 +3,7 @@ use std::collections::{BTreeMap, BTreeSet};
 use anyhow::{Context, Result, bail};
 use sha2::{Digest, Sha256};
 
-use crate::domain::{Amount, BuiltBlindedTransaction, MINE_REWARD, OutPoint, Transaction};
+use crate::domain::{Amount, MINE_REWARD, OutPoint, Transaction};
 
 use super::FeeEstimate;
 
@@ -16,25 +16,24 @@ pub(super) fn auto_pow_salt(wallet_address: &str, anchor: &str) -> u64 {
 
 pub(super) fn converge_fee_by_byte(
     fee_per_byte: Amount,
-    mut build: impl FnMut(Amount) -> Result<BuiltBlindedTransaction>,
-) -> Result<(BuiltBlindedTransaction, FeeEstimate)> {
-    let mut fee = if fee_per_byte == 0 { 0 } else { 1 };
+    mut build: impl FnMut(Amount) -> Result<Transaction>,
+) -> Result<(Transaction, FeeEstimate)> {
+    let mut fee = 1;
     let mut best = None;
     for _ in 0..64 {
         let built = build(fee)?;
-        let bytes = built.transaction.fee_rate_size_bytes();
+        let bytes = built.economic_size_bytes();
         let required_fee = fee_per_byte
             .checked_mul(bytes as Amount)
-            .context("fee per byte times blinded transaction bytes overflows")?;
+            .context("fee per byte times transaction bytes overflows")?
+            .max(1);
         if fee == required_fee {
             return Ok((built, FeeEstimate { bytes, fee }));
         }
         if fee > required_fee
             && best
                 .as_ref()
-                .is_none_or(|(_, estimate): &(BuiltBlindedTransaction, FeeEstimate)| {
-                    fee < estimate.fee
-                })
+                .is_none_or(|(_, estimate): &(Transaction, FeeEstimate)| fee < estimate.fee)
         {
             best = Some((built, FeeEstimate { bytes, fee }));
         }
@@ -42,14 +41,15 @@ pub(super) fn converge_fee_by_byte(
     }
 
     let built = build(fee)?;
-    let bytes = built.transaction.fee_rate_size_bytes();
+    let bytes = built.economic_size_bytes();
     let required_fee = fee_per_byte
         .checked_mul(bytes as Amount)
-        .context("fee per byte times blinded transaction bytes overflows")?;
+        .context("fee per byte times transaction bytes overflows")?
+        .max(1);
     if fee >= required_fee {
         if best
             .as_ref()
-            .is_none_or(|(_, estimate): &(BuiltBlindedTransaction, FeeEstimate)| fee < estimate.fee)
+            .is_none_or(|(_, estimate): &(Transaction, FeeEstimate)| fee < estimate.fee)
         {
             best = Some((built, FeeEstimate { bytes, fee }));
         }
@@ -58,10 +58,11 @@ pub(super) fn converge_fee_by_byte(
         }
     }
     let built = build(required_fee)?;
-    let bytes = built.transaction.fee_rate_size_bytes();
+    let bytes = built.economic_size_bytes();
     let final_required_fee = fee_per_byte
         .checked_mul(bytes as Amount)
-        .context("fee per byte times blinded transaction bytes overflows")?;
+        .context("fee per byte times transaction bytes overflows")?
+        .max(1);
     if required_fee < final_required_fee {
         bail!("fee per byte did not converge");
     }
@@ -128,62 +129,4 @@ pub(super) fn allowed_recovery_vdf_rank_count(rank_count: usize, percent: u8) ->
 pub(super) fn recovery_vdf_sample_percent(address: &str, tip_hash: &str) -> u8 {
     let digest = Sha256::digest(format!("iuna-recovery-vdf-sample:{tip_hash}:{address}"));
     digest[0] % 100
-}
-
-#[cfg(test)]
-mod tests {
-    use anyhow::bail;
-
-    use crate::domain::{BlindedReveal, BlindedTransaction, BuiltBlindedTransaction, Transaction};
-
-    use super::converge_fee_by_byte;
-
-    fn built_with_fee(fee: u64) -> BuiltBlindedTransaction {
-        BuiltBlindedTransaction {
-            payload: Transaction::Burn {
-                inputs: Vec::new(),
-                change: Vec::new(),
-                amount: 1,
-                fee,
-                signature: "payload".to_string(),
-            },
-            transaction: BlindedTransaction {
-                commitment: "0".repeat(64),
-                inputs: Vec::new(),
-                fee,
-                encrypted_size: 1,
-                expires_at_height: 1,
-                nonce: "0".repeat(24),
-                ciphertext: "00".to_string(),
-                payload_hash: "1".repeat(64),
-            },
-            reveal: BlindedReveal {
-                commitment: "0".repeat(64),
-                key: "2".repeat(64),
-            },
-        }
-    }
-
-    #[test]
-    fn fee_convergence_does_not_probe_zero_when_fee_rate_is_positive() {
-        let (built, estimate) = converge_fee_by_byte(1, |fee| {
-            if fee == 0 {
-                bail!("zero fee rejected after activation");
-            }
-            Ok(built_with_fee(fee))
-        })
-        .expect("positive fee-rate convergence should skip invalid zero fee");
-
-        assert!(estimate.fee > 0);
-        assert_eq!(built.transaction.fee, estimate.fee);
-    }
-
-    #[test]
-    fn fee_convergence_allows_zero_when_fee_rate_is_zero() {
-        let (built, estimate) =
-            converge_fee_by_byte(0, |fee| Ok(built_with_fee(fee))).expect("zero fee rate works");
-
-        assert_eq!(estimate.fee, 0);
-        assert_eq!(built.transaction.fee, 0);
-    }
 }

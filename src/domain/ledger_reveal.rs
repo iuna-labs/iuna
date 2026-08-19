@@ -3,142 +3,145 @@ use std::collections::{BTreeMap, BTreeSet};
 use anyhow::{Context, Result, bail};
 
 use super::ledger_ops::verify_address_signature;
-use super::reveal::{reveal_bundle_slot_mask, reveal_committee_mask};
+use super::reveal::{burn_bundle_slot_mask, burn_committee_mask};
 use super::{
-    Amount, FinalizerMode, Ledger, MAX_REVEAL_BUNDLE_BYTES, MaskedBlindedReveal,
-    REVEAL_BUNDLE_SIGNATURE_THRESHOLDS_HEIGHT, REVEAL_COMMITTEE_SIZE, RevealBundle,
-    RevealBundlePayload, RevealBundleSection, RevealBundleSignature, Wallet,
+    Amount, BURN_COMMITTEE_SIZE, Block, BurnBundle, BurnBundlePayload, BurnBundleSection,
+    BurnBundleSignature, FinalizerMode, Ledger, MAX_BURN_BUNDLE_BYTES, MaskedBurn, Transaction,
+    Wallet,
 };
 
 impl Ledger {
-    pub fn reveal_bundle_attestations_required_for_next_block(&self) -> bool {
-        self.tip().height.saturating_add(1) >= REVEAL_BUNDLE_SIGNATURE_THRESHOLDS_HEIGHT
-            && !self.active_blinded.is_empty()
+    pub fn burn_bundle_attestations_required_for_next_block(&self) -> bool {
+        self.pending.iter().any(Transaction::is_burn)
     }
 
-    pub fn build_reveal_bundle(&self, wallet: &Wallet) -> Result<Option<RevealBundle>> {
+    pub fn explicit_burn_bundle_signatures_required_for_next_block(
+        &self,
+        finalizer_mode: FinalizerMode,
+        finalizer_rank: u32,
+        finalizer: &str,
+    ) -> usize {
+        self.required_explicit_burn_signatures(
+            finalizer_mode,
+            finalizer_rank,
+            self.burn_committee_for_next_block().len(),
+            transactions_have_attestable_burns(&self.pending, finalizer),
+        )
+    }
+
+    pub fn build_burn_bundle(&self, wallet: &Wallet) -> Result<Option<BurnBundle>> {
         let height = self.tip().height + 1;
         let prev_hash = self.tip().hash.clone();
         let Some(member) = self
-            .reveal_committee_for_next_block()
+            .burn_committee_for_next_block()
             .into_iter()
             .find(|member| member.owner == wallet.address())
         else {
             return Ok(None);
         };
-        let mut reveals = self.valid_pending_blinded_reveals();
-        reveals.sort_by(|left, right| {
-            self.reveal_fee_order_key(right)
-                .cmp(&self.reveal_fee_order_key(left))
-                .then_with(|| left.commitment.cmp(&right.commitment))
+        let mut burns = self
+            .valid_pending_transactions()
+            .into_iter()
+            .filter(Transaction::is_burn)
+            .collect::<Vec<_>>();
+        burns.sort_by(|left, right| {
+            right
+                .fee()
+                .cmp(&left.fee())
+                .then_with(|| left.signature().cmp(right.signature()))
         });
 
         let mut selected = Vec::new();
-        for reveal in reveals {
+        for burn in burns {
             let mut candidate = selected.clone();
-            candidate.push(reveal);
-            let bundle = wallet.reveal_bundle(RevealBundlePayload {
+            candidate.push(burn);
+            let bundle = wallet.burn_bundle(BurnBundlePayload {
                 height,
                 prev_hash: prev_hash.clone(),
                 slot: member.slot,
                 member: wallet.address().to_string(),
-                reveals: candidate.clone(),
+                burns: candidate.clone(),
             });
-            if bundle.serialized_size_bytes()? <= MAX_REVEAL_BUNDLE_BYTES {
+            if bundle.serialized_size_bytes()? <= MAX_BURN_BUNDLE_BYTES {
                 selected = candidate;
             }
         }
-        if selected.is_empty() && !self.reveal_bundle_attestations_required_for_next_block() {
+        if selected.is_empty() && !self.burn_bundle_attestations_required_for_next_block() {
             return Ok(None);
         }
-        Ok(Some(wallet.reveal_bundle(RevealBundlePayload {
+        Ok(Some(wallet.burn_bundle(BurnBundlePayload {
             height,
             prev_hash,
             slot: member.slot,
             member: wallet.address().to_string(),
-            reveals: selected,
+            burns: selected,
         })))
     }
 
-    pub fn validate_next_block_reveal_bundles(
+    pub fn validate_next_block_burn_bundles(
         &self,
-        bundles: Vec<RevealBundle>,
-    ) -> Result<Vec<RevealBundle>> {
+        bundles: Vec<BurnBundle>,
+    ) -> Result<Vec<BurnBundle>> {
         let expected_height = self.tip().height + 1;
         let expected_prev_hash = self.tip().hash.clone();
-        self.validate_reveal_bundles_for_block(expected_height, &expected_prev_hash, bundles)
+        self.validate_burn_bundles_for_block(expected_height, &expected_prev_hash, bundles)
     }
 
-    pub(super) fn reveal_bundle_section_from_bundles(
+    pub(super) fn burn_bundle_section_from_bundles(
         &self,
-        bundles: Vec<RevealBundle>,
-    ) -> RevealBundleSection {
-        let height = self.tip().height + 1;
+        bundles: Vec<BurnBundle>,
+    ) -> BurnBundleSection {
         let signatures = bundles
             .iter()
-            .filter(|bundle| height < REVEAL_BUNDLE_SIGNATURE_THRESHOLDS_HEIGHT || bundle.slot != 0)
-            .map(|bundle| RevealBundleSignature {
+            .filter(|bundle| bundle.slot != 0)
+            .map(|bundle| BurnBundleSignature {
                 slot: bundle.slot,
                 member: bundle.member.clone(),
                 signature: bundle.signature.clone(),
             })
             .collect::<Vec<_>>();
-        let mut by_commitment: BTreeMap<String, MaskedBlindedReveal> = BTreeMap::new();
+        let mut by_signature: BTreeMap<String, MaskedBurn> = BTreeMap::new();
         for bundle in bundles {
-            let slot_mask =
-                if height >= REVEAL_BUNDLE_SIGNATURE_THRESHOLDS_HEIGHT && bundle.slot == 0 {
-                    0
-                } else {
-                    reveal_bundle_slot_mask(bundle.slot).unwrap_or(0)
-                };
-            for reveal in bundle.reveals {
-                by_commitment
-                    .entry(reveal.commitment.clone())
+            let slot_mask = if bundle.slot == 0 {
+                0
+            } else {
+                burn_bundle_slot_mask(bundle.slot).unwrap_or(0)
+            };
+            for burn in bundle.burns {
+                by_signature
+                    .entry(burn.signature().to_string())
                     .and_modify(|masked| masked.bundle_mask |= slot_mask)
-                    .or_insert(MaskedBlindedReveal {
-                        reveal,
+                    .or_insert(MaskedBurn {
+                        burn,
                         bundle_mask: slot_mask,
                     });
             }
         }
-        let mut reveals = by_commitment.into_values().collect::<Vec<_>>();
-        reveals.sort_by(|left, right| {
-            self.reveal_fee_order_key(&right.reveal)
-                .cmp(&self.reveal_fee_order_key(&left.reveal))
-                .then_with(|| left.reveal.commitment.cmp(&right.reveal.commitment))
+        let mut burns = by_signature.into_values().collect::<Vec<_>>();
+        burns.sort_by(|left, right| {
+            right
+                .burn
+                .fee()
+                .cmp(&left.burn.fee())
+                .then_with(|| left.burn.signature().cmp(right.burn.signature()))
         });
-        RevealBundleSection {
-            signatures,
-            reveals,
-        }
+        BurnBundleSection { signatures, burns }
     }
 
-    pub(super) fn validate_reveal_bundle_section_for_block(
-        &self,
-        expected_height: u64,
-        expected_prev_hash: &str,
-        finalizer_mode: FinalizerMode,
-        finalizer_rank: u32,
-        section: &RevealBundleSection,
-    ) -> Result<()> {
-        let explicit_signature_limit =
-            if expected_height >= REVEAL_BUNDLE_SIGNATURE_THRESHOLDS_HEIGHT {
-                REVEAL_COMMITTEE_SIZE.saturating_sub(1)
-            } else {
-                REVEAL_COMMITTEE_SIZE
-            };
-        if section.signatures.len() > explicit_signature_limit {
-            bail!("block has too many reveal bundle signatures");
+    pub(super) fn validate_burn_bundle_section_for_block(&self, block: &Block) -> Result<()> {
+        let section = &block.burn_bundle_section;
+        if section.signatures.len() > BURN_COMMITTEE_SIZE.saturating_sub(1) {
+            bail!("block has too many burn bundle signatures");
         }
         if section
             .signatures
             .windows(2)
             .any(|pair| pair[0].slot >= pair[1].slot)
         {
-            bail!("reveal bundle signatures are not in slot order");
+            bail!("burn bundle signatures are not in slot order");
         }
         let committee = self
-            .reveal_committee_for_height(expected_height)
+            .burn_committee_for_height(block.height)
             .into_iter()
             .map(|member| (member.slot, member))
             .collect::<BTreeMap<_, _>>();
@@ -146,174 +149,165 @@ impl Ledger {
         let mut seen_members = BTreeSet::new();
         let mut included_mask = 0_u8;
         for signature in &section.signatures {
-            if usize::from(signature.slot) >= REVEAL_COMMITTEE_SIZE {
-                bail!("reveal bundle slot is invalid");
+            if usize::from(signature.slot) >= BURN_COMMITTEE_SIZE {
+                bail!("burn bundle slot is invalid");
             }
-            if expected_height >= REVEAL_BUNDLE_SIGNATURE_THRESHOLDS_HEIGHT && signature.slot == 0 {
-                bail!("finalizer reveal attestation must be implicit from height 1500");
+            if signature.slot == 0 {
+                bail!("finalizer burn attestation is implicit");
             }
             if !seen_slots.insert(signature.slot) {
-                bail!("duplicate reveal bundle slot");
+                bail!("duplicate burn bundle slot");
             }
             if !seen_members.insert(signature.member.clone()) {
-                bail!("duplicate reveal bundle member");
+                bail!("duplicate burn bundle member");
             }
             let member = committee
                 .get(&signature.slot)
-                .context("reveal bundle slot is not assigned")?;
+                .context("burn bundle slot is not assigned")?;
             if signature.member != member.owner {
-                bail!("reveal bundle member is not assigned to slot");
+                bail!("burn bundle member is not assigned to slot");
             }
-            included_mask |= reveal_bundle_slot_mask(signature.slot)?;
+            included_mask |= burn_bundle_slot_mask(signature.slot)?;
         }
-        let required_signatures = self.required_reveal_bundle_signatures(
-            expected_height,
-            finalizer_mode,
-            finalizer_rank,
+        let required_signatures = self.required_explicit_burn_signatures(
+            block.finalizer_mode,
+            block.finalizer_rank,
             committee.len(),
+            transactions_have_attestable_burns(&block.transactions, &block.miner),
         );
         if section.signatures.len() < required_signatures {
             bail!(
-                "block has too few reveal bundle signatures: got {}, need {required_signatures}",
+                "block has too few burn bundle signatures: got {}, need {required_signatures}",
                 section.signatures.len()
             );
         }
 
-        let mut seen_reveals = BTreeSet::new();
-        let mut previous_key: Option<((u128, Amount), String)> = None;
-        for masked in &section.reveals {
-            if masked.bundle_mask == 0
-                && expected_height < REVEAL_BUNDLE_SIGNATURE_THRESHOLDS_HEIGHT
-            {
-                bail!("masked blinded reveal is not assigned to a reveal bundle");
-            }
-            if masked.bundle_mask & !reveal_committee_mask() != 0 {
-                bail!("masked blinded reveal references an invalid reveal bundle slot");
+        let mut seen_burns = BTreeSet::new();
+        let mut previous_key: Option<(Amount, String)> = None;
+        for masked in &section.burns {
+            if masked.bundle_mask & !burn_committee_mask() != 0 {
+                bail!("masked burn references an invalid burn bundle slot");
             }
             if masked.bundle_mask & !included_mask != 0 {
-                bail!("masked blinded reveal references a missing reveal bundle signature");
+                bail!("masked burn references a missing burn bundle signature");
             }
-            if !seen_reveals.insert(masked.reveal.commitment.clone()) {
-                bail!("duplicate blinded reveal in reveal bundle section");
+            if !seen_burns.insert(masked.burn.signature().to_string()) {
+                bail!("duplicate burn in burn bundle section");
             }
-            self.pending_reveal_transaction(&masked.reveal)?;
-            let key = (
-                self.reveal_fee_order_key(&masked.reveal),
-                masked.reveal.commitment.clone(),
-            );
-            if let Some((previous_fee_key, previous_commitment)) = &previous_key {
-                if key.0 > *previous_fee_key
-                    || key.0 == *previous_fee_key && key.1 < *previous_commitment
-                {
-                    bail!("reveal bundle section is not fee ordered");
+            if !masked.burn.is_burn() {
+                bail!("burn bundle section contains a non-burn transaction");
+            }
+            if matching_burn_by_signature(&masked.burn, &block.transactions).is_none() {
+                bail!("attested burn is not included in the block");
+            }
+            self.validate_transaction_terms(&masked.burn)?;
+            let key = (masked.burn.fee(), masked.burn.signature().to_string());
+            if let Some((previous_fee, previous_signature)) = &previous_key {
+                if key.0 > *previous_fee || key.0 == *previous_fee && key.1 < *previous_signature {
+                    bail!("burn bundle section is not fee ordered");
                 }
             }
             previous_key = Some(key);
         }
 
-        for bundle in section.expand(expected_height, expected_prev_hash) {
-            if bundle.serialized_size_bytes()? > MAX_REVEAL_BUNDLE_BYTES {
-                bail!("reveal bundle exceeds max size");
+        for bundle in section.expand(block.height, &block.prev_hash) {
+            if bundle.serialized_size_bytes()? > MAX_BURN_BUNDLE_BYTES {
+                bail!("burn bundle exceeds max size");
             }
             verify_address_signature(
                 &bundle.member,
                 &bundle.canonical_payload(),
                 &bundle.signature,
-                "reveal bundle",
+                "burn bundle",
             )?;
         }
         Ok(())
     }
 
-    fn required_reveal_bundle_signatures(
+    fn required_explicit_burn_signatures(
         &self,
-        height: u64,
         finalizer_mode: FinalizerMode,
         finalizer_rank: u32,
         committee_size: usize,
+        has_attested_burns: bool,
     ) -> usize {
-        if height < REVEAL_BUNDLE_SIGNATURE_THRESHOLDS_HEIGHT
-            || self.active_blinded.is_empty()
-            || committee_size == 0
-        {
+        if !has_attested_burns || committee_size == 0 {
             return 0;
         }
         match finalizer_mode {
-            FinalizerMode::Ticket if finalizer_rank == 0 => {
-                required_explicit_reveal_signatures(height, committee_size)
-            }
-            FinalizerMode::Ticket if finalizer_rank == 1 => {
-                required_explicit_reveal_signatures(height, committee_size.min(2))
-            }
-            FinalizerMode::Ticket => required_explicit_reveal_signatures(height, 1),
+            FinalizerMode::Ticket if finalizer_rank == 0 => committee_size.saturating_sub(1),
+            FinalizerMode::Ticket if finalizer_rank == 1 => committee_size.saturating_sub(2),
+            FinalizerMode::Ticket => 0,
             FinalizerMode::Recovery => 0,
         }
     }
 
-    fn validate_reveal_bundles_for_block(
+    fn validate_burn_bundles_for_block(
         &self,
         expected_height: u64,
         expected_prev_hash: &str,
-        mut bundles: Vec<RevealBundle>,
-    ) -> Result<Vec<RevealBundle>> {
-        if bundles.len() > REVEAL_COMMITTEE_SIZE {
-            bail!("block has too many reveal bundles");
-        }
-        if bundles.windows(2).any(|pair| pair[0].slot >= pair[1].slot) {
-            bail!("reveal bundles are not in slot order");
+        mut bundles: Vec<BurnBundle>,
+    ) -> Result<Vec<BurnBundle>> {
+        if bundles.len() > BURN_COMMITTEE_SIZE {
+            bail!("block has too many burn bundles");
         }
         bundles.sort_by_key(|bundle| bundle.slot);
+        if bundles.windows(2).any(|pair| pair[0].slot == pair[1].slot) {
+            bail!("duplicate burn bundle slot");
+        }
         let committee = self
-            .reveal_committee_for_height(expected_height)
+            .burn_committee_for_height(expected_height)
             .into_iter()
             .map(|member| (member.slot, member))
             .collect::<BTreeMap<_, _>>();
-        let mut seen_slots = BTreeSet::new();
         let mut seen_members = BTreeSet::new();
         for bundle in &bundles {
             if bundle.height != expected_height {
-                bail!("reveal bundle height is invalid");
+                bail!("burn bundle height is invalid");
             }
             if bundle.prev_hash != expected_prev_hash {
-                bail!("reveal bundle parent hash is invalid");
+                bail!("burn bundle parent hash is invalid");
             }
-            if usize::from(bundle.slot) >= REVEAL_COMMITTEE_SIZE {
-                bail!("reveal bundle slot is invalid");
-            }
-            if !seen_slots.insert(bundle.slot) {
-                bail!("duplicate reveal bundle slot");
+            if usize::from(bundle.slot) >= BURN_COMMITTEE_SIZE {
+                bail!("burn bundle slot is invalid");
             }
             if !seen_members.insert(bundle.member.clone()) {
-                bail!("duplicate reveal bundle member");
+                bail!("duplicate burn bundle member");
             }
             let member = committee
                 .get(&bundle.slot)
-                .context("reveal bundle slot is not assigned")?;
+                .context("burn bundle slot is not assigned")?;
             if bundle.member != member.owner {
-                bail!("reveal bundle member is not assigned to slot");
+                bail!("burn bundle member is not assigned to slot");
             }
-            if bundle.serialized_size_bytes()? > MAX_REVEAL_BUNDLE_BYTES {
-                bail!("reveal bundle exceeds max size");
+            if bundle.serialized_size_bytes()? > MAX_BURN_BUNDLE_BYTES {
+                bail!("burn bundle exceeds max size");
             }
             verify_address_signature(
                 &bundle.member,
                 &bundle.canonical_payload(),
                 &bundle.signature,
-                "reveal bundle",
+                "burn bundle",
             )?;
-            let mut seen_bundle_reveals = BTreeSet::new();
-            let mut previous_key: Option<((u128, Amount), String)> = None;
-            for reveal in &bundle.reveals {
-                if !seen_bundle_reveals.insert(reveal.commitment.clone()) {
-                    bail!("duplicate blinded reveal in reveal bundle");
+            let mut seen_bundle_burns = BTreeSet::new();
+            let mut previous_key: Option<(Amount, String)> = None;
+            for burn in &bundle.burns {
+                if !seen_bundle_burns.insert(burn.signature().to_string()) {
+                    bail!("duplicate burn in burn bundle");
                 }
-                self.pending_reveal_transaction(reveal)?;
-                let key = (self.reveal_fee_order_key(reveal), reveal.commitment.clone());
-                if let Some((previous_fee_key, previous_commitment)) = &previous_key {
-                    if key.0 > *previous_fee_key
-                        || key.0 == *previous_fee_key && key.1 < *previous_commitment
+                if !burn.is_burn() {
+                    bail!("burn bundle contains a non-burn transaction");
+                }
+                if matching_burn_by_signature(burn, &self.pending).is_none() {
+                    bail!("burn bundle references a burn that is not in the mempool");
+                }
+                self.validate_transaction_terms(burn)?;
+                let key = (burn.fee(), burn.signature().to_string());
+                if let Some((previous_fee, previous_signature)) = &previous_key {
+                    if key.0 > *previous_fee
+                        || key.0 == *previous_fee && key.1 < *previous_signature
                     {
-                        bail!("reveal bundle is not fee ordered");
+                        bail!("burn bundle is not fee ordered");
                     }
                 }
                 previous_key = Some(key);
@@ -323,10 +317,177 @@ impl Ledger {
     }
 }
 
-fn required_explicit_reveal_signatures(height: u64, attestations: usize) -> usize {
-    if height >= REVEAL_BUNDLE_SIGNATURE_THRESHOLDS_HEIGHT {
-        attestations.saturating_sub(1)
-    } else {
-        attestations
+fn matching_burn_by_signature<'a>(
+    attested: &Transaction,
+    transactions: &'a [Transaction],
+) -> Option<&'a Transaction> {
+    transactions.iter().find(|transaction| {
+        transaction.is_burn()
+            && transaction.signature() == attested.signature()
+            && transaction.canonical() == attested.canonical()
+    })
+}
+
+fn transactions_have_attestable_burns(transactions: &[Transaction], finalizer: &str) -> bool {
+    let mut finalizer_anchor_seen = false;
+    for transaction in transactions {
+        if !transaction.is_burn() {
+            continue;
+        }
+        if transaction.sender() == finalizer && !finalizer_anchor_seen {
+            finalizer_anchor_seen = true;
+            continue;
+        }
+        return true;
+    }
+    false
+}
+
+#[cfg(test)]
+mod tests {
+    use std::collections::BTreeMap;
+
+    use super::*;
+    use crate::domain::{GenesisBurn, MICRO_IUNA, OutPoint, TxInput, TxOutput, Wallet};
+
+    fn ledger() -> Ledger {
+        Ledger::new(BTreeMap::new(), 1)
+    }
+
+    fn burn(signature: &str, fee: Amount) -> Transaction {
+        Transaction::Burn {
+            inputs: vec![TxInput {
+                outpoint: OutPoint {
+                    txid: format!("{signature:0<64}"),
+                    index: 0,
+                },
+                owner: "owner".to_string(),
+                signature: signature.to_string(),
+            }],
+            change: vec![TxOutput {
+                address: "owner".to_string(),
+                amount: 1,
+            }],
+            amount: 1,
+            fee,
+            signature: signature.to_string(),
+        }
+    }
+
+    fn funded_ledger(wallets: &[Wallet]) -> Ledger {
+        let allocations = wallets
+            .iter()
+            .map(|wallet| (wallet.address().to_string(), 10 * MICRO_IUNA))
+            .collect::<BTreeMap<_, _>>();
+        let genesis_burns = wallets
+            .iter()
+            .map(|wallet| GenesisBurn::new(wallet.address(), MICRO_IUNA))
+            .collect::<Vec<_>>();
+        Ledger::new_with_genesis_burns(allocations, genesis_burns, 1).unwrap()
+    }
+
+    #[test]
+    fn burn_quorum_depends_on_rank_and_included_burns() {
+        let ledger = ledger();
+
+        assert_eq!(
+            ledger.required_explicit_burn_signatures(FinalizerMode::Ticket, 0, 3, true),
+            2
+        );
+        assert_eq!(
+            ledger.required_explicit_burn_signatures(FinalizerMode::Ticket, 1, 3, true),
+            1
+        );
+        assert_eq!(
+            ledger.required_explicit_burn_signatures(FinalizerMode::Ticket, 2, 3, true),
+            0
+        );
+        assert_eq!(
+            ledger.required_explicit_burn_signatures(FinalizerMode::Recovery, 0, 3, true),
+            0
+        );
+        assert_eq!(
+            ledger.required_explicit_burn_signatures(FinalizerMode::Ticket, 0, 3, false),
+            0
+        );
+    }
+
+    #[test]
+    fn burn_bundle_section_deduplicates_burns_and_tracks_member_masks() {
+        let ledger = ledger();
+        let high_fee_burn = burn("a", 10);
+        let low_fee_burn = burn("b", 1);
+        let bundles = vec![
+            BurnBundle {
+                height: 1,
+                prev_hash: "parent".to_string(),
+                slot: 1,
+                member: "member-1".to_string(),
+                burns: vec![low_fee_burn.clone(), high_fee_burn.clone()],
+                signature: "sig-1".to_string(),
+            },
+            BurnBundle {
+                height: 1,
+                prev_hash: "parent".to_string(),
+                slot: 2,
+                member: "member-2".to_string(),
+                burns: vec![high_fee_burn.clone()],
+                signature: "sig-2".to_string(),
+            },
+        ];
+
+        let section = ledger.burn_bundle_section_from_bundles(bundles);
+
+        assert_eq!(section.signatures.len(), 2);
+        assert_eq!(section.burns.len(), 2);
+        assert_eq!(section.burns[0].burn.signature(), high_fee_burn.signature());
+        assert_eq!(
+            section.burns[0].bundle_mask,
+            burn_bundle_slot_mask(1).unwrap() | burn_bundle_slot_mask(2).unwrap()
+        );
+        assert_eq!(section.burns[1].burn.signature(), low_fee_burn.signature());
+        assert_eq!(
+            section.burns[1].bundle_mask,
+            burn_bundle_slot_mask(1).unwrap()
+        );
+
+        let expanded = section.expand(1, "parent");
+        assert_eq!(expanded[0].burns, vec![high_fee_burn.clone(), low_fee_burn]);
+        assert_eq!(expanded[1].burns, vec![high_fee_burn]);
+    }
+
+    #[test]
+    fn burn_bundle_rejects_different_burn_with_same_signature() {
+        let alice = Wallet::from_seed("bundle-match-alice");
+        let bob = Wallet::from_seed("bundle-match-bob");
+        let mut ledger = funded_ledger(&[alice.clone(), bob.clone()]);
+        let pending_burn = ledger.build_burn(&bob, 1, 1).unwrap();
+        ledger.submit_transaction(pending_burn.clone()).unwrap();
+        let member = ledger
+            .burn_committee_for_next_block()
+            .into_iter()
+            .find(|member| member.owner == alice.address())
+            .expect("alice should be in the burn committee");
+        let mut attested_burn = pending_burn.clone();
+        if let Transaction::Burn { amount, .. } = &mut attested_burn {
+            *amount += 1;
+        }
+        let bundle = alice.burn_bundle(BurnBundlePayload {
+            height: ledger.height() + 1,
+            prev_hash: ledger.tip_hash().to_string(),
+            slot: member.slot,
+            member: alice.address().to_string(),
+            burns: vec![attested_burn],
+        });
+
+        let error = ledger
+            .validate_next_block_burn_bundles(vec![bundle])
+            .unwrap_err();
+
+        assert!(
+            error
+                .to_string()
+                .contains("burn bundle references a burn that is not in the mempool")
+        );
     }
 }

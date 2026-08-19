@@ -26,7 +26,7 @@ pub(super) fn queue_plaintext_burn(
     wallet: &Wallet,
     amount: Amount,
 ) -> Transaction {
-    let tx = node.ledger().build_burn(wallet, amount, 0).unwrap();
+    let tx = node.ledger().build_burn(wallet, amount, 1).unwrap();
     node.receive_transaction(tx.clone()).unwrap();
     tx
 }

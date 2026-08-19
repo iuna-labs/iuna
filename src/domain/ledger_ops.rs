@@ -3,17 +3,16 @@ use std::collections::{BTreeMap, BTreeSet};
 use anyhow::{Context, Result, bail};
 use ed25519_dalek::{Signature, Verifier, VerifyingKey};
 
-use super::blinded::verify_blinded_input_signatures;
 use super::hex::hex_hash;
-use super::reveal::{RevealBundleSection, canonical_reveal_bundle_hashes};
-use super::selection::{TransactionKind, blinded_fee_rate_key, fee_rate_key};
+use super::reveal::{BurnBundleSection, canonical_burn_bundle_hashes};
+use super::selection::{TransactionKind, fee_rate_key};
 use super::ticket::ticket_is_eligible_for_height;
-use super::transaction::{BlindedTransaction, Transaction};
+use super::transaction::Transaction;
 use super::{
     Amount, Block, BlockSelection, BurnTicket, FinalizerMode, LeaderProof, LeaderProofPayload,
-    Ledger, MINE_REWARD, OutPoint, PUBLIC_KEY_BYTES, RECOVERY_BLOCK_DELAY_MS,
-    REVEAL_COMMITTEE_SIZE, SIGNATURE_BYTES, TxInput, TxOutput, decode_hex_array, validate_address,
-    validate_hash, validate_protocol_id, validate_signature,
+    MINE_REWARD, OutPoint, PUBLIC_KEY_BYTES, RECOVERY_BLOCK_DELAY_MS, SIGNATURE_BYTES, TxInput,
+    TxOutput, decode_hex_array, validate_address, validate_hash, validate_protocol_id,
+    validate_signature,
 };
 
 pub(super) fn validate_genesis_allocations(
@@ -70,7 +69,7 @@ pub(super) fn validate_genesis_burn_transaction(transaction: &Transaction) -> Re
 pub(super) fn estimated_block_selection_size_bytes(
     selection: &BlockSelection,
     recovery: bool,
-    reveal_bundle_section: &RevealBundleSection,
+    burn_bundle_section: &BurnBundleSection,
 ) -> Result<usize> {
     let block = Block {
         height: u64::MAX,
@@ -91,8 +90,7 @@ pub(super) fn estimated_block_selection_size_bytes(
             public_key: "f".repeat(64),
             signature: "f".repeat(128),
         }),
-        blinded_transactions: selection.blinded_transactions.clone(),
-        reveal_bundle_section: reveal_bundle_section.clone(),
+        burn_bundle_section: burn_bundle_section.clone(),
         transactions: selection.transactions.clone(),
         hash: "f".repeat(64),
     };
@@ -105,28 +103,11 @@ pub(super) fn ensure_transaction_fits_empty_block(
 ) -> Result<()> {
     let selection = BlockSelection {
         transactions: vec![transaction.clone()],
-        blinded_transactions: Vec::new(),
     };
-    if estimated_block_selection_size_bytes(&selection, false, &RevealBundleSection::default())?
+    if estimated_block_selection_size_bytes(&selection, false, &BurnBundleSection::default())?
         > max_block_bytes
     {
         bail!("transaction exceeds max block size");
-    }
-    Ok(())
-}
-
-pub(super) fn ensure_blinded_transaction_fits_empty_block(
-    transaction: &BlindedTransaction,
-    max_block_bytes: usize,
-) -> Result<()> {
-    let selection = BlockSelection {
-        transactions: Vec::new(),
-        blinded_transactions: vec![transaction.clone()],
-    };
-    if estimated_block_selection_size_bytes(&selection, false, &RevealBundleSection::default())?
-        > max_block_bytes
-    {
-        bail!("blinded transaction exceeds max block size");
     }
     Ok(())
 }
@@ -197,11 +178,11 @@ pub(super) fn verify_address_signature(
 pub(super) fn vdf_seed_for_child(
     prev_hash: &str,
     height: u64,
-    bundle_hashes: &[String; REVEAL_COMMITTEE_SIZE],
+    bundle_hashes: &[String; super::BURN_COMMITTEE_SIZE],
 ) -> String {
     hex_hash(format!(
         "iuna-vdf-child:{prev_hash}:{height}:{}",
-        canonical_reveal_bundle_hashes(bundle_hashes)
+        canonical_burn_bundle_hashes(bundle_hashes)
     ))
 }
 
@@ -209,11 +190,11 @@ pub(super) fn recovery_vdf_seed_for_child(
     prev_hash: &str,
     height: u64,
     timestamp_ms: u64,
-    bundle_hashes: &[String; REVEAL_COMMITTEE_SIZE],
+    bundle_hashes: &[String; super::BURN_COMMITTEE_SIZE],
 ) -> String {
     hex_hash(format!(
         "iuna-recovery-vdf-child:{prev_hash}:{height}:{timestamp_ms}:{}",
-        canonical_reveal_bundle_hashes(bundle_hashes)
+        canonical_burn_bundle_hashes(bundle_hashes)
     ))
 }
 
@@ -273,79 +254,10 @@ pub(super) fn apply_transaction(
 }
 
 pub(super) fn validate_block_fee_policy(block: &Block) -> Result<()> {
-    if block.height < super::BLOCK_ITEM_FEES_REQUIRED_HEIGHT {
-        return Ok(());
-    }
-
-    let mut free_finalizer_anchor_burns = 0usize;
     for transaction in &block.transactions {
-        if transaction.fee() > 0 {
-            continue;
+        if transaction.fee() == 0 {
+            bail!("block transaction fee must be greater than zero");
         }
-        if transaction.is_burn() && transaction.sender() == block.miner {
-            free_finalizer_anchor_burns += 1;
-            if free_finalizer_anchor_burns > 1 {
-                bail!(
-                    "block may include only one zero-fee finalizer anchor burn from height {}",
-                    super::BLOCK_ITEM_FEES_REQUIRED_HEIGHT
-                );
-            }
-            continue;
-        }
-        bail!(
-            "block transaction must pay a fee from height {} unless it is the finalizer anchor burn",
-            super::BLOCK_ITEM_FEES_REQUIRED_HEIGHT
-        );
-    }
-
-    for transaction in &block.blinded_transactions {
-        if transaction.fee == 0 {
-            bail!(
-                "blinded transaction must pay a fee from height {}",
-                super::BLOCK_ITEM_FEES_REQUIRED_HEIGHT
-            );
-        }
-    }
-    Ok(())
-}
-
-pub(super) fn validate_block_blinded_items(block: &Block, ledger: &Ledger) -> Result<()> {
-    let mut commitments = BTreeSet::new();
-    for transaction in &block.blinded_transactions {
-        if !commitments.insert(transaction.commitment.clone()) {
-            bail!("duplicate blinded transaction in block");
-        }
-        ledger.validate_blinded_transaction(transaction)?;
-        if transaction.expires_at_height <= block.height {
-            bail!("blinded transaction is expired for block height");
-        }
-        if ledger.active_blinded.contains_key(&transaction.commitment) {
-            bail!("blinded transaction is already active");
-        }
-        if ledger.chain.iter().any(|block| {
-            block
-                .blinded_transactions
-                .iter()
-                .any(|existing| existing.commitment == transaction.commitment)
-        }) {
-            bail!("blinded transaction is already on chain");
-        }
-    }
-
-    let mut reveals = BTreeSet::new();
-    for reveal in block.all_blinded_reveals() {
-        if !reveals.insert(reveal.commitment.clone()) {
-            bail!("duplicate blinded reveal in block");
-        }
-        if ledger.chain.iter().any(|block| {
-            block
-                .all_blinded_reveals()
-                .iter()
-                .any(|existing| existing.commitment == reveal.commitment)
-        }) {
-            bail!("blinded reveal is already on chain");
-        }
-        ledger.pending_reveal_transaction(reveal)?;
     }
     Ok(())
 }
@@ -358,10 +270,10 @@ pub(super) fn fee_reward(transactions: &[Transaction]) -> Result<Amount> {
 
 pub(super) fn block_reward(
     transactions: &[Transaction],
-    aggregated_reveal_finalizer_fees: Amount,
+    additional_finalizer_fees: Amount,
 ) -> Result<Amount> {
     fee_reward(transactions)?
-        .checked_add(aggregated_reveal_finalizer_fees)
+        .checked_add(additional_finalizer_fees)
         .context("block reward overflow")
 }
 
@@ -452,89 +364,6 @@ pub(super) fn transaction_input_total(
             .context("transaction input total overflows")?;
     }
     Ok(total)
-}
-
-pub(super) fn spend_blinded_inputs(
-    transaction: &BlindedTransaction,
-    utxos: &mut BTreeMap<OutPoint, TxOutput>,
-) -> Result<Vec<TxOutput>> {
-    verify_blinded_input_signatures(transaction)?;
-    if transaction.inputs.is_empty() {
-        return Ok(Vec::new());
-    }
-    let mut seen = BTreeSet::new();
-    let mut locked = Vec::new();
-    for input in &transaction.inputs {
-        if !seen.insert(input.outpoint.clone()) {
-            bail!("duplicate input in blinded transaction");
-        }
-        let output = utxos.remove(&input.outpoint).with_context(|| {
-            format!(
-                "blinded transaction spends missing output {}",
-                input.outpoint.id()
-            )
-        })?;
-        if output.address != input.owner {
-            bail!("blinded transaction input owner does not match spent output");
-        }
-        locked.push(output);
-    }
-    let locked_total = locked.iter().try_fold(0_u64, |total, output| {
-        total
-            .checked_add(output.amount)
-            .context("blinded transaction locked input total overflows")
-    })?;
-    if transaction.fee > locked_total {
-        bail!("blinded transaction fee exceeds locked inputs");
-    }
-    Ok(locked)
-}
-
-pub(super) fn spend_spendable_blinded_inputs(
-    transaction: &BlindedTransaction,
-    utxos: &mut BTreeMap<OutPoint, TxOutput>,
-) -> Result<Vec<TxOutput>> {
-    let locked = blinded_input_outputs(transaction, utxos)?;
-    for input in &transaction.inputs {
-        utxos.remove(&input.outpoint);
-    }
-    Ok(locked)
-}
-
-pub(super) fn blinded_input_outputs(
-    transaction: &BlindedTransaction,
-    utxos: &BTreeMap<OutPoint, TxOutput>,
-) -> Result<Vec<TxOutput>> {
-    verify_blinded_input_signatures(transaction)?;
-    if transaction.inputs.is_empty() {
-        return Ok(Vec::new());
-    }
-    let mut seen = BTreeSet::new();
-    let mut locked = Vec::new();
-    for input in &transaction.inputs {
-        if !seen.insert(input.outpoint.clone()) {
-            bail!("duplicate input in blinded transaction");
-        }
-        let output = utxos.get(&input.outpoint).with_context(|| {
-            format!(
-                "blinded transaction spends missing output {}",
-                input.outpoint.id()
-            )
-        })?;
-        if output.address != input.owner {
-            bail!("blinded transaction input owner does not match spent output");
-        }
-        locked.push(output.clone());
-    }
-    let locked_total = locked.iter().try_fold(0_u64, |total, output| {
-        total
-            .checked_add(output.amount)
-            .context("blinded transaction locked input total overflows")
-    })?;
-    if transaction.fee > locked_total {
-        bail!("blinded transaction fee exceeds locked inputs");
-    }
-    Ok(locked)
 }
 
 pub(super) fn transaction_has_missing_inputs(
@@ -629,26 +458,6 @@ pub(super) fn ensure_valid_recovery_block(block: &Block, parent: &Block) -> Resu
         bail!("recovery block is not available before timestamp {min_timestamp}");
     }
     ensure_block_has_burn_from(&block.transactions, &block.miner)
-}
-
-pub(super) fn best_selectable_blinded_index(
-    transactions: &[BlindedTransaction],
-    utxos: &BTreeMap<OutPoint, TxOutput>,
-) -> Option<usize> {
-    transactions
-        .iter()
-        .enumerate()
-        .filter(|(_, transaction)| {
-            let mut utxos = utxos.clone();
-            spend_blinded_inputs(transaction, &mut utxos).is_ok()
-        })
-        .max_by(|(_, left), (_, right)| {
-            blinded_fee_rate_key(left)
-                .cmp(&blinded_fee_rate_key(right))
-                .then_with(|| left.fee.cmp(&right.fee))
-                .then_with(|| right.commitment.cmp(&left.commitment))
-        })
-        .map(|(index, _)| index)
 }
 
 pub(super) fn best_selectable_transaction_index(

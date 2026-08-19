@@ -61,65 +61,6 @@ pub enum Transaction {
     },
 }
 
-#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
-#[serde(tag = "kind", rename_all = "snake_case")]
-pub(super) enum BlindedTransactionPayload {
-    Transfer {
-        outputs: Vec<TxOutput>,
-        signature: String,
-    },
-    Burn {
-        change: Vec<TxOutput>,
-        amount: Amount,
-        signature: String,
-    },
-}
-
-#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
-#[serde(rename_all = "camelCase")]
-pub struct BlindedTransaction {
-    pub commitment: String,
-    #[serde(default)]
-    pub inputs: Vec<TxInput>,
-    pub fee: Amount,
-    pub encrypted_size: u32,
-    pub expires_at_height: u64,
-    pub nonce: String,
-    pub ciphertext: String,
-    pub payload_hash: String,
-}
-
-#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
-#[serde(rename_all = "camelCase")]
-pub struct BlindedReveal {
-    pub commitment: String,
-    pub key: String,
-}
-
-#[derive(Clone, Debug, Eq, PartialEq)]
-pub struct BuiltBlindedTransaction {
-    pub payload: Transaction,
-    pub transaction: BlindedTransaction,
-    pub reveal: BlindedReveal,
-}
-
-#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
-#[serde(rename_all = "camelCase")]
-pub struct OwnedBlindedTransaction {
-    pub transaction: BlindedTransaction,
-    pub payload: Transaction,
-    pub reveal: BlindedReveal,
-}
-
-#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
-#[serde(rename_all = "camelCase")]
-pub struct RevealedBlindedTransaction {
-    pub height: u64,
-    pub commitment: String,
-    pub included_by: String,
-    pub transaction: Transaction,
-}
-
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct MineSearchOutcome {
     pub transaction: Option<Transaction>,
@@ -360,42 +301,6 @@ impl Transaction {
     }
 }
 
-impl BlindedTransaction {
-    pub fn id(&self) -> &str {
-        &self.commitment
-    }
-
-    pub fn canonical(&self) -> String {
-        format!(
-            "blinded-tx:{}:{}:{}:{}:{}:{}:{}",
-            canonical_signed_inputs(&self.inputs),
-            self.fee,
-            self.encrypted_size,
-            self.expires_at_height,
-            self.nonce,
-            self.ciphertext,
-            self.payload_hash
-        )
-    }
-
-    pub fn fee_rate_size_bytes(&self) -> usize {
-        self.serialized_size_bytes()
-            .unwrap_or(self.encrypted_size as usize)
-    }
-
-    pub fn serialized_size_bytes(&self) -> Result<usize> {
-        serde_json::to_vec(self)
-            .map(|bytes| bytes.len())
-            .context("failed to serialize blinded transaction for size check")
-    }
-}
-
-impl BlindedReveal {
-    pub fn canonical(&self) -> String {
-        format!("blinded-reveal:{}:{}", self.commitment, self.key)
-    }
-}
-
 impl TxInput {
     pub(super) fn without_signature(&self) -> UnsignedTxInput {
         UnsignedTxInput {
@@ -501,17 +406,6 @@ pub(super) fn unsigned_inputs(inputs: &[TxInput]) -> Vec<UnsignedTxInput> {
     inputs.iter().map(TxInput::without_signature).collect()
 }
 
-pub(super) fn signed_blinded_inputs(inputs: &[UnsignedTxInput], signature: &str) -> Vec<TxInput> {
-    inputs
-        .iter()
-        .map(|input| TxInput {
-            outpoint: input.outpoint.clone(),
-            owner: input.owner.clone(),
-            signature: signature.to_string(),
-        })
-        .collect()
-}
-
 pub(super) fn canonical_inputs(inputs: &[UnsignedTxInput]) -> String {
     inputs
         .iter()
@@ -519,19 +413,6 @@ pub(super) fn canonical_inputs(inputs: &[UnsignedTxInput]) -> String {
             format!(
                 "{}:{}:{}",
                 input.outpoint.txid, input.outpoint.index, input.owner
-            )
-        })
-        .collect::<Vec<_>>()
-        .join("|")
-}
-
-pub(super) fn canonical_signed_inputs(inputs: &[TxInput]) -> String {
-    inputs
-        .iter()
-        .map(|input| {
-            format!(
-                "{}:{}:{}:{}",
-                input.outpoint.txid, input.outpoint.index, input.owner, input.signature
             )
         })
         .collect::<Vec<_>>()
@@ -564,49 +445,12 @@ pub(super) fn transaction_inputs_spent_by(
         .any(|input| spent.contains(&input.outpoint))
 }
 
-pub(super) fn transaction_inputs_spent_by_inputs(
-    inputs: &[TxInput],
-    pending: &[Transaction],
-) -> bool {
-    let spent = pending_spent_outpoints(pending);
-    inputs.iter().any(|input| spent.contains(&input.outpoint))
-}
-
-pub(super) fn blinded_transaction_inputs_spent_by(
-    transaction: &BlindedTransaction,
-    pending: &[BlindedTransaction],
-) -> bool {
-    let spent = pending
-        .iter()
-        .flat_map(|transaction| {
-            transaction
-                .inputs
-                .iter()
-                .map(|input| input.outpoint.clone())
-        })
-        .collect::<BTreeSet<_>>();
-    transaction
-        .inputs
-        .iter()
-        .any(|input| spent.contains(&input.outpoint))
-}
-
 pub(super) fn transaction_inputs_available(
     transaction: &Transaction,
     utxos: &BTreeMap<OutPoint, TxOutput>,
 ) -> bool {
     transaction
         .inputs()
-        .iter()
-        .all(|input| utxos.contains_key(&input.outpoint))
-}
-
-pub(super) fn blinded_transaction_inputs_available(
-    transaction: &BlindedTransaction,
-    utxos: &BTreeMap<OutPoint, TxOutput>,
-) -> bool {
-    transaction
-        .inputs
         .iter()
         .all(|input| utxos.contains_key(&input.outpoint))
 }

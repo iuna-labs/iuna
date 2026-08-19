@@ -3,8 +3,8 @@ use std::collections::BTreeMap;
 use serde::{Deserialize, Serialize};
 
 use crate::domain::{
-    Amount, BlindedReveal, BlindedTransaction, Block, ChainSnapshot, ChainStatus, PreparedBlock,
-    RevealBundle, StratumMineTemplate, Transaction, Wallet,
+    Amount, Block, BurnBundle, ChainSnapshot, ChainStatus, PreparedBlock, StratumMineTemplate,
+    Transaction, Wallet,
 };
 
 #[derive(Clone, Debug)]
@@ -50,21 +50,13 @@ pub enum GossipEnvelope {
     Inventory {
         blocks: Vec<BlockInventory>,
     },
-    BlindedTransaction(BlindedTransaction),
-    BlindedTransactions {
-        transactions: Vec<BlindedTransaction>,
-    },
-    MineAction(Transaction),
-    MineActions {
+    Transaction(Transaction),
+    Transactions {
         transactions: Vec<Transaction>,
     },
-    BlindedReveal(BlindedReveal),
-    BlindedReveals {
-        reveals: Vec<BlindedReveal>,
-    },
-    RevealBundle(RevealBundle),
-    RevealBundles {
-        bundles: Vec<RevealBundle>,
+    BurnBundle(BurnBundle),
+    BurnBundles {
+        bundles: Vec<BurnBundle>,
     },
     Block(Block),
     Blocks {

@@ -3,7 +3,7 @@ use sha2::{Digest, Sha256};
 
 use super::block::LeaderProofPayload;
 use super::{
-    LeaderProof, PUBLIC_KEY_BYTES, RevealBundle, RevealBundlePayload, decode_hex_array, hex_encode,
+    BurnBundle, BurnBundlePayload, LeaderProof, PUBLIC_KEY_BYTES, decode_hex_array, hex_encode,
 };
 
 const WALLET_SEED_DOMAIN: &str = "iuna-wallet-seed";
@@ -46,14 +46,14 @@ impl Wallet {
         }
     }
 
-    pub(super) fn reveal_bundle(&self, payload: RevealBundlePayload) -> RevealBundle {
+    pub(super) fn burn_bundle(&self, payload: BurnBundlePayload) -> BurnBundle {
         let signature = self.sign_payload(&payload.canonical());
-        RevealBundle {
+        BurnBundle {
             height: payload.height,
             prev_hash: payload.prev_hash,
             slot: payload.slot,
             member: self.address.clone(),
-            reveals: payload.reveals,
+            burns: payload.burns,
             signature,
         }
     }

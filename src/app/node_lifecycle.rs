@@ -2,7 +2,7 @@ use std::collections::{BTreeMap, BTreeSet};
 
 use crate::{
     adapters::config_store::{DEFAULT_POW_MINING_WORKERS, clamp_pow_mining_workers},
-    domain::{Amount, DEFAULT_FEE_PER_BYTE, Ledger, RevealBundle, Wallet},
+    domain::{Amount, BurnBundle, DEFAULT_FEE_PER_BYTE, Ledger, Wallet},
 };
 
 use super::{GossipEnvelope, NodeConfig, NodeCore, NodeWallet};
@@ -102,13 +102,9 @@ impl NodeCore {
             last_auto_pow_mine_anchor: None,
             last_auto_pow_mine_status: None,
             auto_pow_mine_cursor: None,
-            owned_blinded_transactions: BTreeMap::new(),
-            owned_blinded_reveals: BTreeMap::new(),
-            owned_blinded_payloads: BTreeMap::new(),
-            owned_blinded_outbox_version: 0,
-            reveal_bundles: BTreeMap::<(u64, u8), RevealBundle>::new(),
-            equivocated_reveal_bundle_slots: BTreeSet::new(),
-            reveal_bundle_collection_started: None,
+            burn_bundles: BTreeMap::<(u64, u8), BurnBundle>::new(),
+            equivocated_burn_bundle_slots: BTreeSet::new(),
+            burn_bundle_collection_started: None,
             local_block_anchor_burn: None,
             outbox: Vec::<GossipEnvelope>::new(),
         }
@@ -125,26 +121,18 @@ impl NodeCore {
     pub fn replace_wallet(&mut self, wallet: Wallet) {
         self.wallet = NodeWallet::Unlocked(wallet);
         self.reset_automatic_mining_progress();
-        self.owned_blinded_transactions.clear();
-        self.owned_blinded_reveals.clear();
-        self.owned_blinded_payloads.clear();
-        self.bump_owned_blinded_outbox_version();
-        self.reveal_bundles.clear();
-        self.equivocated_reveal_bundle_slots.clear();
-        self.reveal_bundle_collection_started = None;
+        self.burn_bundles.clear();
+        self.equivocated_burn_bundle_slots.clear();
+        self.burn_bundle_collection_started = None;
         self.local_block_anchor_burn = None;
     }
 
     pub fn reset_chain_to_setup_placeholder(&mut self) {
         self.ledger = Ledger::new(BTreeMap::new(), 1);
         self.reset_automatic_mining_progress();
-        self.owned_blinded_transactions.clear();
-        self.owned_blinded_reveals.clear();
-        self.owned_blinded_payloads.clear();
-        self.bump_owned_blinded_outbox_version();
-        self.reveal_bundles.clear();
-        self.equivocated_reveal_bundle_slots.clear();
-        self.reveal_bundle_collection_started = None;
+        self.burn_bundles.clear();
+        self.equivocated_burn_bundle_slots.clear();
+        self.burn_bundle_collection_started = None;
         self.local_block_anchor_burn = None;
         self.outbox.clear();
     }
@@ -156,6 +144,6 @@ impl NodeCore {
         self.last_auto_pow_mine_anchor = None;
         self.last_auto_pow_mine_status = None;
         self.auto_pow_mine_cursor = None;
-        self.reveal_bundle_collection_started = None;
+        self.burn_bundle_collection_started = None;
     }
 }

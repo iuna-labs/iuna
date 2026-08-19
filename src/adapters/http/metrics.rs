@@ -253,8 +253,6 @@ pub(super) fn network_health_at(
         banned_peers,
         pending_transactions: local.pending_transactions,
         pending_plain_transactions: mempool.plain_transactions,
-        pending_blinded_transactions: mempool.blinded_transactions,
-        pending_blinded_reveals: mempool.blinded_reveals,
         network_time_offset_ms,
         bad_clock_peers,
         last_error,

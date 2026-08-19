@@ -6,12 +6,10 @@ use axum::{
     extract::{Query, State},
 };
 
-#[cfg(test)]
-use crate::domain::Ledger;
 use crate::{
     adapters::p2p::P2pMetrics,
     app::{NodeStatus, PeerInfo},
-    domain::{BlindedTransaction, OutPoint, Transaction, TxOutput},
+    domain::{OutPoint, Transaction, TxOutput},
 };
 
 use super::types::{LeaderboardEntry, MetricsLeaderboards};
@@ -24,8 +22,7 @@ use super::{
 use super::{
     DATASET_LIMIT, DATASET_PAGE_LIMIT, EXPLORER_LIMIT, EXPLORER_PAGE_LIMIT, HttpState,
     add_pending_outputs, cached_chain_view, cached_ui_blocks_for_tip, metrics_response,
-    network_health, ui_blinded_reveal, ui_blinded_transaction, ui_blocks_from_indexes,
-    ui_pending_revealed_transaction, ui_transaction, wallet_transaction_row,
+    network_health, ui_blocks_from_indexes, ui_transaction, wallet_transaction_row,
     wallet_transaction_rows,
 };
 
@@ -70,7 +67,6 @@ pub(super) async fn api_blocks(
     Json(ui_blocks_from_indexes(
         blocks,
         &view.outputs,
-        &view.revealed_by_height,
         &view.burn_leader_ranks_by_hash,
     ))
 }
@@ -88,27 +84,12 @@ pub(super) async fn api_mempool(
     Query(query): Query<PageQuery>,
 ) -> Json<Page<UiTransaction>> {
     let ui_data_ready = ensure_ui_data_current(&state).await.is_ok();
-    let (pending, pending_blinded, pending_reveals, pending_revealed) = {
+    let pending = {
         let node = state.node.lock().await;
-        let pending = node.pending_transactions();
-        let pending_blinded = node.pending_blinded_transactions();
-        let pending_reveals = node.pending_blinded_reveals();
-        let pending_revealed = node
-            .pending_revealed_blinded_transactions()
-            .into_iter()
-            .map(|revealed| (revealed.commitment.clone(), revealed))
-            .collect::<BTreeMap<_, _>>();
-        (pending, pending_blinded, pending_reveals, pending_revealed)
+        node.pending_transactions()
     };
     let mut required_outputs = BTreeSet::new();
     collect_transaction_input_outpoints(pending.iter(), &mut required_outputs);
-    collect_blinded_input_outpoints(pending_blinded.iter(), &mut required_outputs);
-    collect_transaction_input_outpoints(
-        pending_revealed
-            .values()
-            .map(|revealed| &revealed.transaction),
-        &mut required_outputs,
-    );
     let mut outputs = if ui_data_ready {
         load_outputs_for_outpoints(&state, required_outputs)
             .await
@@ -121,17 +102,6 @@ pub(super) async fn api_mempool(
         .iter()
         .map(|tx| ui_transaction(tx, &outputs))
         .collect::<Vec<_>>();
-    items.extend(
-        pending_blinded
-            .iter()
-            .map(|transaction| ui_blinded_transaction(transaction, &outputs)),
-    );
-    items.extend(pending_reveals.iter().map(|reveal| {
-        pending_revealed
-            .get(&reveal.commitment)
-            .map(|revealed| ui_pending_revealed_transaction(revealed, &outputs))
-            .unwrap_or_else(|| ui_blinded_reveal(reveal))
-    }));
     items.reverse();
     Json(page_items(items, query))
 }
@@ -157,30 +127,21 @@ pub(super) async fn api_wallet_transactions(
             next_offset: None,
         });
     }
-    let (wallet, pending, owned_blinded) = {
+    let (wallet, pending) = {
         let node = state.node.lock().await;
         (
             node.wallet_address().to_string(),
             node.pending_transactions(),
-            node.owned_blinded_payloads(),
         )
     };
     let mut pending_required_outputs = BTreeSet::new();
     collect_transaction_input_outpoints(pending.iter(), &mut pending_required_outputs);
-    collect_transaction_input_outpoints(owned_blinded.iter(), &mut pending_required_outputs);
     let mut pending_outputs = load_outputs_for_outpoints(&state, pending_required_outputs)
         .await
         .unwrap_or_default();
     add_pending_outputs(&mut pending_outputs, &pending);
-    let pending_rows = wallet_transaction_rows(
-        &wallet,
-        pending.clone(),
-        owned_blinded.clone(),
-        &[],
-        &BTreeMap::new(),
-        &pending_outputs,
-        filters,
-    );
+    let pending_rows =
+        wallet_transaction_rows(&wallet, pending.clone(), &[], &pending_outputs, filters);
     let pending_total = pending_rows.len();
     let mut items = pending_rows
         .into_iter()
@@ -227,7 +188,6 @@ pub(super) async fn api_wallet_transactions(
                 block_height: Some(row.block_height),
                 timestamp_ms: Some(row.timestamp_ms),
                 block_finalizer: Some(row.block_finalizer),
-                blinded: row.blinded,
             },
         )
     }));
@@ -326,20 +286,6 @@ fn collect_transaction_input_outpoints<'a>(
     }
 }
 
-fn collect_blinded_input_outpoints<'a>(
-    transactions: impl IntoIterator<Item = &'a BlindedTransaction>,
-    outpoints: &mut BTreeSet<OutPoint>,
-) {
-    for transaction in transactions {
-        outpoints.extend(
-            transaction
-                .inputs
-                .iter()
-                .map(|input| input.outpoint.clone()),
-        );
-    }
-}
-
 pub(super) async fn api_wallet_utxos(
     State(state): State<HttpState>,
     Query(query): Query<PageQuery>,
@@ -430,37 +376,6 @@ fn wallet_transaction_filter_kinds(filters: WalletTransactionFilters) -> Vec<&'s
     kinds
 }
 
-#[cfg(test)]
-pub(super) fn wallet_utxo_rows(ledger: &Ledger, wallet: &str) -> Vec<WalletUtxoRow> {
-    let spendable_outpoints = ledger
-        .available_utxos_for_address(wallet)
-        .unwrap_or_default()
-        .into_iter()
-        .map(|(outpoint, _)| outpoint)
-        .collect::<BTreeSet<_>>();
-    let mut utxos = ledger
-        .utxos_for_address(wallet)
-        .into_iter()
-        .map(|(outpoint, output)| {
-            let spendable = spendable_outpoints.contains(&outpoint);
-            WalletUtxoRow {
-                outpoint,
-                address: output.address,
-                amount: output.amount,
-                spendable,
-            }
-        })
-        .collect::<Vec<_>>();
-    utxos.sort_by(|left, right| {
-        right
-            .amount
-            .cmp(&left.amount)
-            .then_with(|| left.outpoint.txid.cmp(&right.outpoint.txid))
-            .then_with(|| left.outpoint.index.cmp(&right.outpoint.index))
-    });
-    utxos
-}
-
 fn wallet_utxo_rows_from_ui_data(
     utxos: Vec<(crate::domain::OutPoint, crate::domain::TxOutput)>,
     pending_spent: &BTreeSet<crate::domain::OutPoint>,
@@ -476,14 +391,6 @@ fn wallet_utxo_rows_from_ui_data(
                 spendable,
             }
         })
-        .collect()
-}
-
-#[cfg(test)]
-pub(super) fn selectable_wallet_utxo_rows(ledger: &Ledger, wallet: &str) -> Vec<WalletUtxoRow> {
-    wallet_utxo_rows(ledger, wallet)
-        .into_iter()
-        .filter(|utxo| utxo.spendable)
         .collect()
 }
 
@@ -576,8 +483,6 @@ pub(super) async fn api_network_health(
         let node = state.node.lock().await;
         let mempool = MempoolCounts {
             plain_transactions: node.pending_transactions().len(),
-            blinded_transactions: node.pending_blinded_transactions().len(),
-            blinded_reveals: node.pending_blinded_reveals().len(),
         };
         (
             NetworkHealthLocalState {

@@ -38,8 +38,6 @@ pub(super) struct NetworkHealthResponse {
     pub(super) banned_peers: usize,
     pub(super) pending_transactions: usize,
     pub(super) pending_plain_transactions: usize,
-    pub(super) pending_blinded_transactions: usize,
-    pub(super) pending_blinded_reveals: usize,
     pub(super) network_time_offset_ms: Option<i64>,
     pub(super) bad_clock_peers: usize,
     pub(super) last_error: Option<String>,
@@ -48,15 +46,11 @@ pub(super) struct NetworkHealthResponse {
 #[derive(Clone, Copy, Debug, Default)]
 pub(super) struct MempoolCounts {
     pub(super) plain_transactions: usize,
-    pub(super) blinded_transactions: usize,
-    pub(super) blinded_reveals: usize,
 }
 
 impl MempoolCounts {
     pub(super) fn total(&self) -> usize {
         self.plain_transactions
-            .saturating_add(self.blinded_transactions)
-            .saturating_add(self.blinded_reveals)
     }
 }
 
@@ -324,7 +318,6 @@ pub(super) struct WalletTransactionRow {
     pub(super) timestamp_ms: Option<u64>,
     pub(super) block_finalizer: Option<String>,
     pub(super) direction: &'static str,
-    pub(super) blinded: bool,
     pub(super) difficulty_bits: Option<u32>,
     pub(super) proof_bits: Option<u32>,
     pub(super) proof_hash: Option<String>,
@@ -345,7 +338,6 @@ pub(super) struct WalletTransactionContext {
     pub(super) block_height: Option<u64>,
     pub(super) timestamp_ms: Option<u64>,
     pub(super) block_finalizer: Option<String>,
-    pub(super) blinded: bool,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq, Serialize)]
@@ -361,24 +353,21 @@ pub(super) struct UiBlock {
     pub(super) total_bytes: usize,
     pub(super) transaction_bytes: usize,
     pub(super) transaction_byte_breakdown: Vec<UiByteBreakdown>,
-    pub(super) blinded_transaction_bytes: usize,
-    pub(super) reveal_bundle_bytes: usize,
-    pub(super) reveal_fee_penalty: UiRevealFeePenalty,
+    pub(super) burn_bundle_bytes: usize,
+    pub(super) burn_bundle_quorum: UiBurnBundleQuorum,
     pub(super) vdf_rounds: u64,
     pub(super) vdf_output: String,
     pub(super) leader_proof: Option<crate::domain::LeaderProof>,
     pub(super) burn_leader_ranks: Vec<BurnLeaderRank>,
     pub(super) transactions: Vec<UiTransaction>,
-    pub(super) revealed_transactions: Vec<UiTransaction>,
-    pub(super) reveal_bundles: Vec<UiRevealBundle>,
+    pub(super) burn_bundles: Vec<UiBurnBundle>,
     pub(super) hash: String,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq, Serialize)]
-pub(super) struct UiRevealFeePenalty {
-    pub(super) reveal_lists_included: usize,
+pub(super) struct UiBurnBundleQuorum {
+    pub(super) burn_bundles_included: usize,
     pub(super) committee_size: usize,
-    pub(super) fee_penalty: Amount,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq, Serialize)]
@@ -389,12 +378,12 @@ pub(super) struct UiByteBreakdown {
 
 #[derive(Clone, Debug, Eq, PartialEq, Serialize)]
 #[serde(rename_all = "camelCase")]
-pub(super) struct UiRevealBundle {
+pub(super) struct UiBurnBundle {
     pub(super) slot: u8,
     pub(super) member: String,
     pub(super) hash: String,
     pub(super) byte_size: usize,
-    pub(super) reveals: Vec<UiTransaction>,
+    pub(super) burns: Vec<UiTransaction>,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq, Serialize)]
@@ -411,10 +400,6 @@ pub(super) struct UiTransaction {
     pub(super) difficulty_bits: Option<u32>,
     pub(super) proof_bits: Option<u32>,
     pub(super) proof_hash: Option<String>,
-    pub(super) commitment: Option<String>,
-    pub(super) encrypted_size: Option<u32>,
-    pub(super) expires_at_height: Option<u64>,
-    pub(super) revealed: bool,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq, Serialize)]

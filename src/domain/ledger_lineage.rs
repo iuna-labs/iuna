@@ -45,47 +45,6 @@ pub(super) fn spend_inputs_with_lineage(
     Ok((total, inherited_root))
 }
 
-pub(super) fn spend_blinded_inputs_with_lineage(
-    transaction: &super::BlindedTransaction,
-    utxos: &mut BTreeMap<OutPoint, TxOutput>,
-    utxo_lineage: &mut BTreeMap<OutPoint, UtxoLineageRoot>,
-    lineage_values: &mut BTreeMap<UtxoLineageRoot, Amount>,
-    lineage_owners: &mut LineageOwnerValues,
-) -> Result<(Vec<TxOutput>, Option<UtxoLineageRoot>)> {
-    let mut locked = Vec::new();
-    let mut seen = std::collections::BTreeSet::new();
-    let mut inherited_root = None;
-    for input in &transaction.inputs {
-        if !seen.insert(input.outpoint.clone()) {
-            bail!("duplicate input in blinded transaction");
-        }
-        let output = utxos.remove(&input.outpoint).with_context(|| {
-            format!(
-                "blinded transaction spends missing output {}",
-                input.outpoint.id()
-            )
-        })?;
-        if output.address != input.owner {
-            bail!("blinded transaction input owner does not match spent output");
-        }
-        if let Some(root) = utxo_lineage.remove(&input.outpoint) {
-            subtract_lineage_value(lineage_values, &root, output.amount)?;
-            subtract_lineage_owner_value(lineage_owners, &root, &output.address, &input.outpoint)?;
-            inherited_root = newest_lineage_root(inherited_root, Some(root));
-        }
-        locked.push(output);
-    }
-    let locked_total = locked.iter().try_fold(0_u64, |total, output| {
-        total
-            .checked_add(output.amount)
-            .context("blinded transaction locked input total overflows")
-    })?;
-    if transaction.fee > locked_total {
-        bail!("blinded transaction fee exceeds locked inputs");
-    }
-    Ok((locked, inherited_root))
-}
-
 pub(super) fn insert_output_with_lineage(
     outpoint: OutPoint,
     output: TxOutput,

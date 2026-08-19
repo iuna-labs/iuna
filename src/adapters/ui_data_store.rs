@@ -13,11 +13,8 @@ use serde::Serialize;
 use crate::{
     adapters::ui_index::{UiChainIndex, build_ui_chain_index},
     domain::{
-        Amount, BLINDED_COMMITTER_FEE_BPS, BLINDED_FEE_BPS_DENOMINATOR,
-        BLINDED_REVEAL_BUNDLE_SIGNER_FEE_BPS, BlindedTransaction, Block, BurnLeaderRank,
-        ChainSnapshot, Ledger, MINE_REWARD, OutPoint, REVEAL_COMMITTEE_SIZE,
-        RevealedBlindedTransaction, Transaction, TxInput, TxOutput, blinded_reveal_finalizer_fee,
-        hex_hash, reveal_committee_slot_count_for_height, revealed_blinded_transactions,
+        Amount, Block, BurnLeaderRank, ChainSnapshot, Ledger, MINE_REWARD, OutPoint, Transaction,
+        TxInput, TxOutput, hex_hash,
     },
 };
 
@@ -76,7 +73,6 @@ CREATE TABLE IF NOT EXISTS ui_wallet_transactions (
     block_height INTEGER NOT NULL,
     timestamp_ms INTEGER NOT NULL,
     block_finalizer TEXT NOT NULL,
-    blinded INTEGER NOT NULL,
     transaction_json BLOB NOT NULL,
     PRIMARY KEY (address, signature)
 );
@@ -86,16 +82,6 @@ ON ui_wallet_transactions(address, kind, sort_key DESC);
 
 CREATE INDEX IF NOT EXISTS idx_ui_wallet_transactions_address_sort
 ON ui_wallet_transactions(address, sort_key DESC);
-
-CREATE TABLE IF NOT EXISTS ui_revealed_transactions (
-    height INTEGER NOT NULL,
-    commitment TEXT PRIMARY KEY,
-    included_by TEXT NOT NULL,
-    transaction_json BLOB NOT NULL
-);
-
-CREATE INDEX IF NOT EXISTS idx_ui_revealed_transactions_height
-ON ui_revealed_transactions(height);
 
 CREATE TABLE IF NOT EXISTS ui_burn_leader_ranks (
     block_hash TEXT NOT NULL,
@@ -113,7 +99,7 @@ CREATE TABLE IF NOT EXISTS ui_burn_leader_rank_blocks (
 );
 "#;
 
-const UI_CACHE_SCHEMA_VERSION: u32 = 1;
+const UI_CACHE_SCHEMA_VERSION: u32 = 2;
 
 #[derive(Clone, Debug, Eq, PartialEq, Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -151,7 +137,6 @@ pub struct WalletTransactionProjection {
     pub block_height: u64,
     pub timestamp_ms: u64,
     pub block_finalizer: String,
-    pub blinded: bool,
     pub transaction: Transaction,
 }
 
@@ -211,7 +196,6 @@ impl SqliteUiDataStore {
             Ok(Some(UiChainIndex {
                 tip_hash: Some(stored_tip_hash),
                 outputs: load_ui_output_index(connection)?,
-                revealed_by_height: load_ui_revealed_transactions(connection)?,
                 burn_leader_ranks_by_hash: load_ui_burn_leader_ranks(connection)?,
             }))
         })
@@ -662,31 +646,6 @@ VALUES (?1, ?2, ?3, ?4)
                 )
             })?;
     }
-    for (height, revealed_transactions) in &index.revealed_by_height {
-        for revealed in revealed_transactions {
-            let transaction_json = serde_json::to_vec(&revealed.transaction)
-                .context("failed to serialize UI revealed transaction")?;
-            transaction
-                .execute(
-                    r#"
-INSERT INTO ui_revealed_transactions (height, commitment, included_by, transaction_json)
-VALUES (?1, ?2, ?3, ?4)
-"#,
-                    params![
-                        height,
-                        revealed.commitment,
-                        revealed.included_by,
-                        transaction_json
-                    ],
-                )
-                .with_context(|| {
-                    format!(
-                        "failed to persist UI revealed transaction {}",
-                        revealed.commitment
-                    )
-                })?;
-        }
-    }
     for (block_hash, ranks) in &index.burn_leader_ranks_by_hash {
         transaction
             .execute(
@@ -763,9 +722,9 @@ fn replace_ui_wallet_transactions(
             .execute(
                 r#"
 INSERT INTO ui_wallet_transactions (
-    address, sort_key, kind, signature, block_height, timestamp_ms, block_finalizer, blinded,
+    address, sort_key, kind, signature, block_height, timestamp_ms, block_finalizer,
     transaction_json
-) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)
+) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)
 "#,
                 params![
                     address,
@@ -775,7 +734,6 @@ INSERT INTO ui_wallet_transactions (
                     row.block_height,
                     row.timestamp_ms,
                     row.block_finalizer,
-                    row.blinded,
                     transaction_json,
                 ],
             )
@@ -803,9 +761,6 @@ fn clear_ui_chain_index_in_transaction(transaction: &rusqlite::Transaction<'_>) 
     transaction
         .execute("DELETE FROM ui_wallet_transactions", [])
         .context("failed to clear old UI wallet transaction index")?;
-    transaction
-        .execute("DELETE FROM ui_revealed_transactions", [])
-        .context("failed to clear old UI revealed transaction index")?;
     transaction
         .execute("DELETE FROM ui_burn_leader_ranks", [])
         .context("failed to clear old UI burn leader rank index")?;
@@ -932,7 +887,7 @@ fn load_wallet_transactions(
         let mut statement = connection
             .prepare(
                 r#"
-SELECT sort_key, kind, block_height, timestamp_ms, block_finalizer, blinded, transaction_json
+SELECT sort_key, kind, block_height, timestamp_ms, block_finalizer, transaction_json
 FROM ui_wallet_transactions
 WHERE address = ?1
 ORDER BY sort_key DESC
@@ -966,7 +921,7 @@ LIMIT ?2 OFFSET ?3
 
     let query_sql = format!(
         r#"
-SELECT sort_key, kind, block_height, timestamp_ms, block_finalizer, blinded, transaction_json
+SELECT sort_key, kind, block_height, timestamp_ms, block_finalizer, transaction_json
 FROM ui_wallet_transactions
 WHERE address = ? AND kind IN ({placeholders})
 ORDER BY sort_key DESC
@@ -1002,7 +957,7 @@ fn wallet_transaction_kinds_cover_all(kinds: &[&str]) -> bool {
 fn wallet_transaction_projection_from_row(
     row: &rusqlite::Row<'_>,
 ) -> rusqlite::Result<WalletTransactionProjection> {
-    let transaction_json = row.get::<_, Vec<u8>>(6)?;
+    let transaction_json = row.get::<_, Vec<u8>>(5)?;
     let transaction =
         serde_json::from_slice::<Transaction>(&transaction_json).map_err(|error| {
             rusqlite::Error::FromSqlConversionFailure(
@@ -1017,7 +972,6 @@ fn wallet_transaction_projection_from_row(
         block_height: row.get(2)?,
         timestamp_ms: row.get(3)?,
         block_finalizer: row.get(4)?,
-        blinded: row.get::<_, u64>(5)? != 0,
         transaction,
     })
 }
@@ -1030,45 +984,6 @@ fn read_wallet_transaction_rows(
 ) -> Result<Vec<WalletTransactionProjection>> {
     rows.collect::<std::result::Result<Vec<_>, _>>()
         .context("failed to read UI wallet transaction rows")
-}
-
-fn load_ui_revealed_transactions(
-    connection: &Connection,
-) -> Result<BTreeMap<u64, Vec<RevealedBlindedTransaction>>> {
-    let mut statement = connection
-        .prepare(
-            r#"
-SELECT height, commitment, included_by, transaction_json
-FROM ui_revealed_transactions
-ORDER BY height, commitment
-"#,
-        )
-        .context("failed to prepare UI revealed transaction query")?;
-    let rows = statement
-        .query_map([], |row| {
-            let transaction_json = row.get::<_, Vec<u8>>(3)?;
-            let transaction =
-                serde_json::from_slice::<Transaction>(&transaction_json).map_err(|error| {
-                    rusqlite::Error::FromSqlConversionFailure(
-                        transaction_json.len(),
-                        rusqlite::types::Type::Blob,
-                        Box::new(error),
-                    )
-                })?;
-            Ok(RevealedBlindedTransaction {
-                height: row.get(0)?,
-                commitment: row.get(1)?,
-                included_by: row.get(2)?,
-                transaction,
-            })
-        })
-        .context("failed to load UI revealed transactions")?;
-    let mut by_height = BTreeMap::<u64, Vec<RevealedBlindedTransaction>>::new();
-    for revealed in rows {
-        let revealed = revealed.context("failed to read UI revealed transaction row")?;
-        by_height.entry(revealed.height).or_default().push(revealed);
-    }
-    Ok(by_height)
 }
 
 fn load_ui_burn_leader_ranks(
@@ -1122,16 +1037,6 @@ ORDER BY block_hash, rank
 fn wallet_transactions_from_snapshot(
     snapshot: &ChainSnapshot,
 ) -> Vec<(String, WalletTransactionProjection)> {
-    let revealed_by_height = revealed_blinded_transactions(snapshot)
-        .unwrap_or_default()
-        .into_iter()
-        .fold(
-            BTreeMap::<u64, Vec<RevealedBlindedTransaction>>::new(),
-            |mut by_height, revealed| {
-                by_height.entry(revealed.height).or_default().push(revealed);
-                by_height
-            },
-        );
     let mut rows = Vec::new();
     for block in &snapshot.blocks {
         for (index, transaction) in block.transactions.iter().rev().enumerate() {
@@ -1140,19 +1045,7 @@ fn wallet_transactions_from_snapshot(
                 transaction,
                 block,
                 block.height as u128 * 10_000 + index as u128,
-                false,
             );
-        }
-        if let Some(revealed) = revealed_by_height.get(&block.height) {
-            for (index, revealed) in revealed.iter().rev().enumerate() {
-                push_wallet_transaction_projection(
-                    &mut rows,
-                    &revealed.transaction,
-                    block,
-                    block.height as u128 * 10_000 + 5_000 + index as u128,
-                    false,
-                );
-            }
         }
     }
     rows
@@ -1163,7 +1056,6 @@ fn push_wallet_transaction_projection(
     transaction: &Transaction,
     block: &Block,
     sort_key: u128,
-    blinded: bool,
 ) {
     let kind = transaction_kind(transaction).to_string();
     let projection = WalletTransactionProjection {
@@ -1172,7 +1064,6 @@ fn push_wallet_transaction_projection(
         block_height: block.height,
         timestamp_ms: block.timestamp_ms,
         block_finalizer: block.miner.clone(),
-        blinded,
         transaction: transaction.clone(),
     };
     for address in wallet_transaction_addresses(transaction) {
@@ -1219,13 +1110,6 @@ fn metrics_from_snapshot(snapshot: &ChainSnapshot) -> Result<Vec<BlockMetricRow>
         blocks: vec![genesis],
     })
     .context("failed to rebuild genesis ledger for metrics")?;
-    let revealed = revealed_blinded_transactions(snapshot)?.into_iter().fold(
-        BTreeMap::<u64, Vec<crate::domain::RevealedBlindedTransaction>>::new(),
-        |mut by_height, revealed| {
-            by_height.entry(revealed.height).or_default().push(revealed);
-            by_height
-        },
-    );
     let mut known_wallet_addresses = snapshot
         .genesis_allocations
         .keys()
@@ -1234,39 +1118,18 @@ fn metrics_from_snapshot(snapshot: &ChainSnapshot) -> Result<Vec<BlockMetricRow>
     let mut total_burned_amount = 0_u64;
     let mut rows = Vec::with_capacity(snapshot.blocks.len());
     let mut previous_timestamp_ms = None;
-    let mut active_blinded = BTreeMap::<String, BlindedTransaction>::new();
     let mut metric_utxos = metric_genesis_utxos(snapshot);
-    let mut metric_locked_blinded_inputs = BTreeMap::<String, Amount>::new();
-    let reveal_bundle_slots_by_height = ledger
-        .burn_leader_ranks_for_blocks(snapshot.blocks.iter().map(|block| block.height))
-        .map(|ranks_by_height| {
-            ranks_by_height
-                .into_iter()
-                .map(|(height, ranks)| {
-                    (
-                        height,
-                        reveal_committee_slot_count_for_height(
-                            height,
-                            ranks.len(),
-                            ranks.iter().map(|rank| rank.owner.as_str()),
-                        ),
-                    )
-                })
-                .collect::<BTreeMap<_, _>>()
-        })
-        .unwrap_or_default();
 
     for block in &snapshot.blocks {
-        let revealed_transactions = revealed.get(&block.height).cloned().unwrap_or_default();
         let mut transfer_count = 0_u64;
         let mut burn_count = 0_u64;
         let mut mine_count = 0_u64;
         let mut burned_amount = 0_u64;
-        let mut burned_fee_amount = 0_u64;
+        let burned_fee_amount = 0_u64;
         let mut fees_amount = 0_u64;
 
         known_wallet_addresses.insert(block.miner.clone());
-        for signature in &block.reveal_bundle_section.signatures {
+        for signature in &block.burn_bundle_section.signatures {
             known_wallet_addresses.insert(signature.member.clone());
         }
         for transaction in &block.transactions {
@@ -1288,103 +1151,6 @@ fn metrics_from_snapshot(snapshot: &ChainSnapshot) -> Result<Vec<BlockMetricRow>
                 }
             }
         }
-        for revealed in &revealed_transactions {
-            let transaction = &revealed.transaction;
-            known_wallet_addresses.insert(revealed.included_by.clone());
-            collect_transaction_addresses(transaction, &mut known_wallet_addresses);
-            metric_index_transaction_outputs(&mut metric_utxos, transaction);
-            metric_index_blinded_fee_outputs(
-                &mut metric_utxos,
-                &revealed.commitment,
-                &revealed.included_by,
-                block,
-                transaction.fee(),
-            );
-            fees_amount = fees_amount
-                .checked_add(transaction.fee())
-                .context("block metric fees overflow")?;
-            let committer_fee = blinded_fee_share(transaction.fee(), BLINDED_COMMITTER_FEE_BPS);
-            let included_reveal_bundle_count = block.included_reveal_bundle_count();
-            let available_reveal_bundle_slots = reveal_bundle_slots_by_height
-                .get(&block.height)
-                .copied()
-                .unwrap_or(REVEAL_COMMITTEE_SIZE);
-            let reveal_finalizer_fee = blinded_reveal_finalizer_fee(
-                transaction.fee(),
-                included_reveal_bundle_count,
-                available_reveal_bundle_slots,
-            );
-            let reveal_bundle_signer_fees =
-                blinded_fee_share(transaction.fee(), BLINDED_REVEAL_BUNDLE_SIGNER_FEE_BPS)
-                    .saturating_mul(included_reveal_bundle_count as u64);
-            let distributed_fee = committer_fee
-                .saturating_add(reveal_finalizer_fee)
-                .saturating_add(reveal_bundle_signer_fees);
-            burned_fee_amount = burned_fee_amount
-                .checked_add(transaction.fee().saturating_sub(distributed_fee))
-                .context("block metric burned fees overflow")?;
-            match transaction {
-                Transaction::Transfer { .. } => transfer_count += 1,
-                Transaction::Burn { amount, .. } => {
-                    burn_count += 1;
-                    burned_amount = burned_amount
-                        .checked_add(*amount)
-                        .context("block metric burns overflow")?;
-                }
-                Transaction::Mine { .. } => {
-                    mine_count += 1;
-                }
-            }
-        }
-        let revealed_commitments = block
-            .all_blinded_reveals()
-            .into_iter()
-            .map(|reveal| reveal.commitment.clone())
-            .collect::<std::collections::BTreeSet<_>>();
-        let mut expired_blinded_fee_values = Vec::new();
-        active_blinded.retain(|commitment, transaction| {
-            if revealed_commitments.contains(commitment) {
-                metric_locked_blinded_inputs.remove(commitment);
-                return false;
-            }
-            if block.height >= transaction.expires_at_height {
-                if !transaction.inputs.is_empty() {
-                    expired_blinded_fee_values.push(transaction.fee);
-                    metric_index_expired_blinded_change(
-                        &mut metric_utxos,
-                        commitment,
-                        transaction,
-                        metric_locked_blinded_inputs
-                            .remove(commitment)
-                            .unwrap_or_default(),
-                    );
-                }
-                return false;
-            }
-            true
-        });
-        let expired_blinded_fees =
-            expired_blinded_fee_values
-                .into_iter()
-                .try_fold(0_u64, |total, fee| {
-                    total
-                        .checked_add(fee)
-                        .context("block metric expiry fees overflow")
-                })?;
-        fees_amount = fees_amount
-            .checked_add(expired_blinded_fees)
-            .context("block metric expiry fees overflow")?;
-        burned_fee_amount = burned_fee_amount
-            .checked_add(expired_blinded_fees)
-            .context("block metric expired burned fees overflow")?;
-        for transaction in &block.blinded_transactions {
-            for input in &transaction.inputs {
-                known_wallet_addresses.insert(input.owner.clone());
-            }
-            let locked_total = metric_spend_blinded_inputs(transaction, &mut metric_utxos)?;
-            metric_locked_blinded_inputs.insert(transaction.commitment.clone(), locked_total);
-            active_blinded.insert(transaction.commitment.clone(), transaction.clone());
-        }
         total_burned_amount = total_burned_amount
             .checked_add(burned_amount)
             .and_then(|amount| amount.checked_add(burned_fee_amount))
@@ -1396,9 +1162,7 @@ fn metrics_from_snapshot(snapshot: &ChainSnapshot) -> Result<Vec<BlockMetricRow>
                 .with_context(|| format!("failed to replay block {} for metrics", block.height))?;
         }
         metric_index_block_reward(&mut metric_utxos, block);
-        let circulating_supply = ledger_circulating_supply(&running_ledger)?
-            .checked_add(metric_locked_supply(&metric_locked_blinded_inputs)?)
-            .context("circulating supply metric overflows")?;
+        let circulating_supply = ledger_circulating_supply(&running_ledger)?;
         let block_time_ms =
             previous_timestamp_ms.map(|previous| block.timestamp_ms.saturating_sub(previous));
         previous_timestamp_ms = Some(block.timestamp_ms);
@@ -1410,7 +1174,7 @@ fn metrics_from_snapshot(snapshot: &ChainSnapshot) -> Result<Vec<BlockMetricRow>
             mine_difficulty_bits: ledger.mine_difficulty_bits_at_height(block.height),
             circulating_supply,
             known_wallet_addresses: known_wallet_addresses.len() as u64,
-            transaction_count: (block.transactions.len() + revealed_transactions.len()) as u64,
+            transaction_count: block.transactions.len() as u64,
             transfer_count,
             burn_count,
             mine_count,
@@ -1437,14 +1201,6 @@ fn ledger_circulating_supply(ledger: &Ledger) -> Result<Amount> {
         })
 }
 
-fn metric_locked_supply(locked: &BTreeMap<String, Amount>) -> Result<Amount> {
-    locked.values().try_fold(0_u64, |total, amount| {
-        total
-            .checked_add(*amount)
-            .context("circulating supply metric overflows")
-    })
-}
-
 fn metric_genesis_utxos(snapshot: &ChainSnapshot) -> BTreeMap<OutPoint, TxOutput> {
     snapshot
         .genesis_allocations
@@ -1460,10 +1216,6 @@ fn metric_genesis_utxos(snapshot: &ChainSnapshot) -> BTreeMap<OutPoint, TxOutput
             )
         })
         .collect()
-}
-
-fn blinded_fee_share(fee: Amount, bps: u64) -> Amount {
-    ((fee as u128 * bps as u128) / BLINDED_FEE_BPS_DENOMINATOR as u128) as Amount
 }
 
 fn metric_apply_public_transaction(
@@ -1484,13 +1236,6 @@ fn metric_spend_transaction_inputs(
         Transaction::Mine { .. } => return Ok(0),
     };
     metric_spend_inputs(inputs, utxos)
-}
-
-fn metric_spend_blinded_inputs(
-    transaction: &BlindedTransaction,
-    utxos: &mut BTreeMap<OutPoint, TxOutput>,
-) -> Result<Amount> {
-    metric_spend_inputs(&transaction.inputs, utxos)
 }
 
 fn metric_spend_inputs(
@@ -1533,62 +1278,6 @@ fn metric_index_transaction_outputs(
     }
 }
 
-fn metric_index_blinded_fee_outputs(
-    utxos: &mut BTreeMap<OutPoint, TxOutput>,
-    commitment: &str,
-    included_by: &str,
-    block: &Block,
-    fee: Amount,
-) {
-    if fee == 0 {
-        return;
-    }
-    let committer_fee = blinded_fee_share(fee, BLINDED_COMMITTER_FEE_BPS);
-    if committer_fee > 0 {
-        utxos.insert(
-            metric_blinded_committer_fee_outpoint(commitment),
-            TxOutput {
-                address: included_by.to_string(),
-                amount: committer_fee,
-            },
-        );
-    }
-    let reveal_bundle_signer_fee = blinded_fee_share(fee, BLINDED_REVEAL_BUNDLE_SIGNER_FEE_BPS);
-    if reveal_bundle_signer_fee > 0 {
-        for signature in &block.reveal_bundle_section.signatures {
-            utxos.insert(
-                metric_blinded_reveal_bundle_signer_fee_outpoint(commitment, signature.slot),
-                TxOutput {
-                    address: signature.member.clone(),
-                    amount: reveal_bundle_signer_fee,
-                },
-            );
-        }
-    }
-}
-
-fn metric_index_expired_blinded_change(
-    utxos: &mut BTreeMap<OutPoint, TxOutput>,
-    commitment: &str,
-    transaction: &BlindedTransaction,
-    locked_total: Amount,
-) {
-    let Some(first_input) = transaction.inputs.first() else {
-        return;
-    };
-    let change = locked_total.saturating_sub(transaction.fee);
-    if change == 0 {
-        return;
-    }
-    utxos.insert(
-        metric_blinded_expiry_change_outpoint(commitment),
-        TxOutput {
-            address: first_input.owner.clone(),
-            amount: change,
-        },
-    );
-}
-
 fn metric_index_block_reward(utxos: &mut BTreeMap<OutPoint, TxOutput>, block: &Block) {
     if block.reward == 0 {
         return;
@@ -1613,27 +1302,6 @@ fn metric_reward_outpoint(block_hash: &str) -> OutPoint {
     OutPoint {
         txid: block_hash.to_string(),
         index: u32::MAX,
-    }
-}
-
-fn metric_blinded_committer_fee_outpoint(commitment: &str) -> OutPoint {
-    OutPoint {
-        txid: commitment.to_string(),
-        index: u32::MAX - 1,
-    }
-}
-
-fn metric_blinded_reveal_bundle_signer_fee_outpoint(commitment: &str, slot: u8) -> OutPoint {
-    OutPoint {
-        txid: commitment.to_string(),
-        index: u32::MAX - 3 - u32::from(slot),
-    }
-}
-
-fn metric_blinded_expiry_change_outpoint(commitment: &str) -> OutPoint {
-    OutPoint {
-        txid: commitment.to_string(),
-        index: 0,
     }
 }
 
@@ -1673,6 +1341,3 @@ fn unix_ms() -> u64 {
         .unwrap_or_default()
         .as_millis() as u64
 }
-
-#[cfg(test)]
-mod tests;

@@ -3,8 +3,8 @@ use std::collections::BTreeMap;
 use anyhow::{Result, bail};
 
 use super::{
-    Amount, BLOCK_REWARD, Block, FinalizerMode, OutPoint, RevealBundleSection, Transaction,
-    TxOutput, apply_transaction, credit_reward_output, hex_hash, validate_genesis_burn_transaction,
+    Amount, BLOCK_REWARD, Block, BurnBundleSection, FinalizerMode, OutPoint, Transaction, TxOutput,
+    apply_transaction, credit_reward_output, hex_hash, validate_genesis_burn_transaction,
 };
 
 pub(super) fn build_genesis_block(
@@ -30,8 +30,7 @@ pub(super) fn build_genesis_block(
         vdf_rounds: 0,
         vdf_output,
         leader_proof: None,
-        blinded_transactions: Vec::new(),
-        reveal_bundle_section: RevealBundleSection::default(),
+        burn_bundle_section: BurnBundleSection::default(),
         transactions,
         hash: String::new(),
     };
@@ -117,8 +116,8 @@ pub(super) fn validate_genesis_block(block: &Block) -> Result<()> {
     if block.leader_proof.is_some() {
         bail!("genesis block must not carry a leader proof");
     }
-    if !block.blinded_transactions.is_empty() || !block.reveal_bundle_section.is_empty() {
-        bail!("genesis block must not carry blinded transactions");
+    if !block.burn_bundle_section.is_empty() {
+        bail!("genesis block must not carry burn bundle attestations");
     }
     if block.compute_hash() != block.hash {
         bail!("genesis block hash is invalid");

@@ -14,7 +14,7 @@ use pbkdf2::pbkdf2_hmac;
 use serde::{Deserialize, Serialize};
 use sha2::Sha256;
 
-use crate::domain::{OwnedBlindedTransaction, Wallet};
+use crate::domain::Wallet;
 
 const WALLET_FILE_VERSION: u32 = 3;
 const PLAINTEXT_WALLET_FILE_VERSION: u32 = 2;
@@ -30,8 +30,6 @@ struct WalletFile {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     seed: Option<String>,
     address: String,
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    owned_blinded_transactions: Vec<OwnedBlindedTransaction>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     encryption: Option<EncryptedWalletSeed>,
 }
@@ -39,8 +37,6 @@ struct WalletFile {
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 struct WalletData {
     seed: String,
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    owned_blinded_transactions: Vec<OwnedBlindedTransaction>,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -144,36 +140,6 @@ pub fn load_with_password(path: &Path, password: &str) -> Result<Wallet> {
     load_encrypted_or_plaintext(path, Some(password))
 }
 
-pub fn load_owned_blinded_transactions(
-    path: &Path,
-    password: Option<&str>,
-) -> Result<Vec<OwnedBlindedTransaction>> {
-    let stored = read_wallet_file(path)?;
-    Ok(wallet_data(&stored, password)?.owned_blinded_transactions)
-}
-
-pub fn replace_owned_blinded_transactions(
-    path: &Path,
-    password: Option<&str>,
-    owned_blinded_transactions: Vec<OwnedBlindedTransaction>,
-) -> Result<()> {
-    if !path.exists() {
-        return Ok(());
-    }
-    let stored = read_wallet_file(path)?;
-    let mut data = wallet_data(&stored, password)?;
-    data.owned_blinded_transactions = owned_blinded_transactions;
-    let mut file = open_wallet_file(path, WalletFileMode::Replace)?;
-    if stored.encryption.is_some() {
-        let password = password
-            .context("wallet is encrypted; unlock it before persisting blinded transactions")?;
-        write_encrypted_wallet_data_file(&mut file, data, &stored.address, password)
-    } else {
-        write_wallet_data_file(&mut file, data, &stored.address)
-    }
-    .with_context(|| format!("failed to update wallet file {}", path.display()))
-}
-
 pub fn encrypt_existing_with_password(path: &Path, password: &str) -> Result<()> {
     if !path.exists() {
         return Ok(());
@@ -195,16 +161,8 @@ pub fn encrypt_existing_with_password(path: &Path, password: &str) -> Result<()>
         );
     }
     let mut file = open_wallet_file(path, WalletFileMode::Replace)?;
-    write_encrypted_wallet_data_file(
-        &mut file,
-        WalletData {
-            seed,
-            owned_blinded_transactions: data.owned_blinded_transactions,
-        },
-        wallet.address(),
-        password,
-    )
-    .with_context(|| format!("failed to encrypt wallet file {}", path.display()))
+    write_encrypted_wallet_data_file(&mut file, WalletData { seed }, wallet.address(), password)
+        .with_context(|| format!("failed to encrypt wallet file {}", path.display()))
 }
 
 pub fn reencrypt_with_password(
@@ -227,10 +185,7 @@ pub fn reencrypt_with_password(
     let mut file = open_wallet_file(path, WalletFileMode::Replace)?;
     write_encrypted_wallet_data_file(
         &mut file,
-        WalletData {
-            seed,
-            owned_blinded_transactions: data.owned_blinded_transactions,
-        },
+        WalletData { seed },
         wallet.address(),
         new_password,
     )
@@ -327,14 +282,7 @@ fn write_wallet_encrypted(
 }
 
 fn write_wallet_file(file: &mut File, seed: String, address: &str) -> Result<()> {
-    write_wallet_data_file(
-        file,
-        WalletData {
-            seed,
-            owned_blinded_transactions: Vec::new(),
-        },
-        address,
-    )
+    write_wallet_data_file(file, WalletData { seed }, address)
 }
 
 fn write_wallet_data_file(file: &mut File, data: WalletData, address: &str) -> Result<()> {
@@ -342,7 +290,6 @@ fn write_wallet_data_file(file: &mut File, data: WalletData, address: &str) -> R
         version: PLAINTEXT_WALLET_FILE_VERSION,
         seed: Some(data.seed),
         address: address.to_string(),
-        owned_blinded_transactions: data.owned_blinded_transactions,
         encryption: None,
     };
     let bytes = serde_json::to_vec_pretty(&stored).context("failed to serialize wallet file")?;
@@ -357,15 +304,7 @@ fn write_encrypted_wallet_file(
     address: &str,
     password: &str,
 ) -> Result<()> {
-    write_encrypted_wallet_data_file(
-        file,
-        WalletData {
-            seed,
-            owned_blinded_transactions: Vec::new(),
-        },
-        address,
-        password,
-    )
+    write_encrypted_wallet_data_file(file, WalletData { seed }, address, password)
 }
 
 fn write_encrypted_wallet_data_file(
@@ -379,7 +318,6 @@ fn write_encrypted_wallet_data_file(
         version: WALLET_FILE_VERSION,
         seed: None,
         address: address.to_string(),
-        owned_blinded_transactions: Vec::new(),
         encryption: Some(encryption),
     };
     let bytes = serde_json::to_vec_pretty(&stored).context("failed to serialize wallet file")?;
@@ -397,10 +335,7 @@ fn wallet_data(stored: &WalletFile, password: Option<&str>) -> Result<WalletData
         .seed
         .clone()
         .context("wallet file does not contain a seed")?;
-    Ok(WalletData {
-        seed,
-        owned_blinded_transactions: stored.owned_blinded_transactions.clone(),
-    })
+    Ok(WalletData { seed })
 }
 
 fn encrypt_wallet_data(
@@ -469,7 +404,6 @@ fn decrypt_wallet_data(
         Ok(data) => Ok(data),
         Err(_) => Ok(WalletData {
             seed: String::from_utf8(plaintext).context("wallet seed is not valid utf-8")?,
-            owned_blinded_transactions: Vec::new(),
         }),
     }
 }
@@ -578,303 +512,4 @@ fn open_wallet_file(path: &Path, mode: WalletFileMode) -> Result<File> {
     options
         .open(path)
         .with_context(|| format!("failed to create wallet file {}", path.display()))
-}
-
-#[cfg(test)]
-mod tests {
-    use std::fs;
-
-    use bip39::{Language, Mnemonic};
-    use tempfile::tempdir;
-
-    use crate::domain::{
-        BlindedReveal, BlindedTransaction, OwnedBlindedTransaction, Transaction, TxInput, TxOutput,
-    };
-
-    use super::{
-        encrypt_existing_with_password, load_or_create, load_owned_blinded_transactions,
-        load_with_password, metadata, replace_owned_blinded_transactions,
-        replace_with_generated_seed_phrase, replace_with_generated_seed_phrase_encrypted,
-        replace_with_imported_seed_phrase, setup_seed_phrase, setup_seed_phrase_with_password,
-    };
-
-    #[test]
-    fn creates_and_reuses_wallet_file() {
-        let dir = tempdir().unwrap();
-        let path = dir.path().join("wallet.json");
-
-        let first = load_or_create(&path).unwrap();
-        let second = load_or_create(&path).unwrap();
-
-        assert_eq!(first.address(), second.address());
-        let stored = fs::read_to_string(path).unwrap();
-        assert!(stored.contains(first.address()));
-        assert!(!stored.contains("dev-wallet"));
-        assert!(
-            setup_seed_phrase(&dir.path().join("wallet.json"))
-                .unwrap()
-                .is_some()
-        );
-    }
-
-    #[test]
-    fn generated_wallet_uses_recovery_phrase() {
-        let dir = tempdir().unwrap();
-        let path = dir.path().join("wallet.json");
-
-        let (_wallet, seed_phrase) = replace_with_generated_seed_phrase(&path).unwrap();
-        let words = seed_phrase.split_whitespace().collect::<Vec<_>>();
-
-        assert_eq!(words.len(), 24);
-        assert!(Mnemonic::parse_in_normalized(Language::English, &seed_phrase).is_ok());
-        assert_eq!(
-            setup_seed_phrase(&path).unwrap().as_deref(),
-            Some(seed_phrase.as_str())
-        );
-    }
-
-    #[test]
-    fn generated_verified_phrase_imports_to_same_wallet() {
-        let dir = tempdir().unwrap();
-        let generated_path = dir.path().join("generated-wallet.json");
-        let imported_path = dir.path().join("imported-wallet.json");
-
-        let (generated_wallet, seed_phrase) =
-            replace_with_generated_seed_phrase(&generated_path).unwrap();
-        assert_recovery_words_verify(&seed_phrase, &[0, 6, 13, 23]);
-
-        let generated_loaded = load_or_create(&generated_path).unwrap();
-        assert_eq!(generated_wallet.address(), generated_loaded.address());
-
-        let imported_wallet =
-            replace_with_imported_seed_phrase(&imported_path, &seed_phrase).unwrap();
-        assert_recovery_words_verify(
-            setup_seed_phrase(&imported_path)
-                .unwrap()
-                .as_deref()
-                .unwrap(),
-            &[0, 6, 13, 23],
-        );
-
-        let imported_loaded = load_or_create(&imported_path).unwrap();
-        assert_eq!(generated_wallet.address(), imported_wallet.address());
-        assert_eq!(generated_wallet.address(), imported_loaded.address());
-        assert_eq!(
-            setup_seed_phrase(&generated_path).unwrap(),
-            setup_seed_phrase(&imported_path).unwrap()
-        );
-    }
-
-    #[test]
-    fn encrypted_generated_wallet_hides_seed_and_requires_password() {
-        let dir = tempdir().unwrap();
-        let path = dir.path().join("wallet.json");
-
-        let (wallet, seed_phrase) =
-            replace_with_generated_seed_phrase_encrypted(&path, "correct horse battery staple")
-                .unwrap();
-        let stored = fs::read_to_string(&path).unwrap();
-
-        assert!(stored.contains("\"version\": 3"));
-        assert!(stored.contains("\"encryption\""));
-        assert!(!stored.contains(&seed_phrase));
-        assert_eq!(metadata(&path).unwrap().unwrap().address, wallet.address());
-        assert!(metadata(&path).unwrap().unwrap().encrypted);
-        assert!(
-            load_or_create(&path)
-                .unwrap_err()
-                .to_string()
-                .contains("encrypted")
-        );
-        assert!(load_with_password(&path, "wrong password").is_err());
-
-        let loaded = load_with_password(&path, "correct horse battery staple").unwrap();
-        assert_eq!(loaded.address(), wallet.address());
-        assert_eq!(
-            setup_seed_phrase_with_password(&path, Some("correct horse battery staple"))
-                .unwrap()
-                .as_deref(),
-            Some(seed_phrase.as_str())
-        );
-        assert!(setup_seed_phrase(&path).unwrap().is_none());
-    }
-
-    #[test]
-    fn plaintext_wallet_can_be_encrypted_in_place() {
-        let dir = tempdir().unwrap();
-        let path = dir.path().join("wallet.json");
-
-        let (wallet, seed_phrase) = replace_with_generated_seed_phrase(&path).unwrap();
-        encrypt_existing_with_password(&path, "correct horse battery staple").unwrap();
-        let stored = fs::read_to_string(&path).unwrap();
-
-        assert!(stored.contains("\"version\": 3"));
-        assert!(!stored.contains(&seed_phrase));
-        assert_eq!(
-            load_with_password(&path, "correct horse battery staple")
-                .unwrap()
-                .address(),
-            wallet.address()
-        );
-    }
-
-    #[test]
-    fn plaintext_wallet_persists_owned_blinded_transactions() {
-        let dir = tempdir().unwrap();
-        let path = dir.path().join("wallet.json");
-        replace_with_generated_seed_phrase(&path).unwrap();
-        let owned = sample_owned_blinded_transaction();
-
-        replace_owned_blinded_transactions(&path, None, vec![owned.clone()]).unwrap();
-
-        assert_eq!(
-            load_owned_blinded_transactions(&path, None).unwrap(),
-            vec![owned]
-        );
-    }
-
-    #[test]
-    fn encrypted_wallet_persists_owned_blinded_transactions_without_plaintext() {
-        let dir = tempdir().unwrap();
-        let path = dir.path().join("wallet.json");
-        replace_with_generated_seed_phrase_encrypted(&path, "correct horse battery staple")
-            .unwrap();
-        let owned = sample_owned_blinded_transaction();
-
-        replace_owned_blinded_transactions(
-            &path,
-            Some("correct horse battery staple"),
-            vec![owned.clone()],
-        )
-        .unwrap();
-
-        let stored = fs::read_to_string(&path).unwrap();
-        assert!(!stored.contains(&owned.payload.signature().to_string()));
-        assert!(!stored.contains(&owned.reveal.key));
-        assert_eq!(
-            load_owned_blinded_transactions(&path, Some("correct horse battery staple")).unwrap(),
-            vec![owned]
-        );
-        assert!(load_owned_blinded_transactions(&path, Some("wrong password")).is_err());
-    }
-
-    #[test]
-    fn imports_normalized_seed_phrase() {
-        let dir = tempdir().unwrap();
-        let path = dir.path().join("wallet.json");
-
-        let wallet = replace_with_imported_seed_phrase(
-            &path,
-            " ABANDON  abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon art ",
-        )
-        .unwrap();
-        let loaded = load_or_create(&path).unwrap();
-
-        assert_eq!(wallet.address(), loaded.address());
-        assert_eq!(
-            setup_seed_phrase(&path).unwrap().as_deref(),
-            Some(
-                "abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon art"
-            )
-        );
-    }
-
-    #[test]
-    fn rejects_invalid_imported_seed_phrase() {
-        let dir = tempdir().unwrap();
-        let path = dir.path().join("wallet.json");
-
-        let error = replace_with_imported_seed_phrase(&path, "too few words").unwrap_err();
-
-        assert!(error.to_string().contains("24 words"));
-    }
-
-    #[test]
-    fn rejects_imported_seed_phrase_with_invalid_checksum() {
-        let dir = tempdir().unwrap();
-        let path = dir.path().join("wallet.json");
-        let invalid_checksum = "abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon";
-
-        let error = replace_with_imported_seed_phrase(&path, invalid_checksum).unwrap_err();
-
-        assert!(error.to_string().contains("BIP-39"));
-    }
-
-    fn assert_recovery_words_verify(seed_phrase: &str, indexes: &[usize]) {
-        let words = seed_phrase.split_whitespace().collect::<Vec<_>>();
-        assert_eq!(words.len(), 24);
-        for index in indexes {
-            let answer = words[*index].to_ascii_uppercase();
-            assert_eq!(
-                answer.trim().to_ascii_lowercase(),
-                words[*index],
-                "word {} should verify case-insensitively",
-                index + 1
-            );
-        }
-    }
-
-    fn sample_owned_blinded_transaction() -> OwnedBlindedTransaction {
-        let payload = Transaction::Transfer {
-            inputs: vec![TxInput {
-                outpoint: crate::domain::OutPoint {
-                    txid: "a".repeat(64),
-                    index: 0,
-                },
-                owner: "mv_sample_owner".to_string(),
-                signature: "b".repeat(64),
-            }],
-            outputs: vec![TxOutput {
-                address: "mv_sample_recipient".to_string(),
-                amount: 1,
-            }],
-            fee: 1,
-            signature: "c".repeat(64),
-        };
-        OwnedBlindedTransaction {
-            transaction: BlindedTransaction {
-                commitment: "d".repeat(64),
-                inputs: Vec::new(),
-                fee: 1,
-                encrypted_size: 42,
-                expires_at_height: 10,
-                nonce: "e".repeat(24),
-                ciphertext: "f".repeat(84),
-                payload_hash: "1".repeat(64),
-            },
-            payload,
-            reveal: BlindedReveal {
-                commitment: "d".repeat(64),
-                key: "2".repeat(64),
-            },
-        }
-    }
-
-    #[test]
-    fn migrates_v1_wallet_file_to_current_address() {
-        let dir = tempdir().unwrap();
-        let path = dir.path().join("wallet.json");
-        fs::write(&path, r#"{"version":1,"seed":"alice","address":"old"}"#).unwrap();
-
-        let wallet = load_or_create(&path).unwrap();
-        let stored = fs::read_to_string(path).unwrap();
-
-        assert!(stored.contains("\"version\": 2"));
-        assert!(stored.contains(wallet.address()));
-    }
-
-    #[test]
-    fn rejects_seed_address_mismatch() {
-        let dir = tempdir().unwrap();
-        let path = dir.path().join("wallet.json");
-        fs::write(
-            &path,
-            r#"{"version":2,"seed":"alice","address":"mv_wrong"}"#,
-        )
-        .unwrap();
-
-        let error = load_or_create(&path).unwrap_err();
-
-        assert!(error.to_string().contains("seed derives"));
-    }
 }

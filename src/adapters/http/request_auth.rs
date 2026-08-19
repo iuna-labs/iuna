@@ -251,13 +251,11 @@ pub(super) async fn change_auth_password(
 pub(super) async fn restore_node_wallet_from_store(
     state: &HttpState,
     wallet: Wallet,
-    password: Option<&str>,
+    _password: Option<&str>,
 ) -> Result<()> {
-    let owned_blinded_transactions =
-        wallet_store::load_owned_blinded_transactions(&state.wallet_path, password)?;
     let mut node = state.node.lock().await;
     node.replace_wallet(wallet);
-    node.restore_owned_blinded_transactions(owned_blinded_transactions)
+    Ok(())
 }
 
 async fn check_auth_backoff(state: &HttpState, client_key: &str) -> Result<()> {

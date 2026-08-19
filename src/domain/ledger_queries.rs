@@ -1,11 +1,8 @@
 use std::collections::{BTreeMap, BTreeSet};
 
-use anyhow::{Context, Result, bail};
+use anyhow::{Context, Result};
 use sha2::{Digest, Sha256};
 
-use super::blinded::{
-    ActiveBlindedTransaction, blinded_envelope_fee_for_transaction, decrypt_blinded_transaction,
-};
 use super::genesis::balances_from_utxos;
 use super::mine_policy::mine_anchor;
 use super::ticket::{
@@ -13,61 +10,23 @@ use super::ticket::{
     tickets_created_by_block, tickets_created_by_transactions,
 };
 use super::{
-    Amount, BlindedReveal, BlindedTransaction, Block, BurnLeaderRank, ChainSnapshot, ChainStatus,
-    LaunchProfile, Ledger, OutPoint, REVEAL_BUNDLE_SIGNATURE_THRESHOLDS_HEIGHT,
-    RevealCommitteeMember, RevealedBlindedTransaction, Transaction, TxOutput,
-    UNIQUE_OWNER_REVEAL_COMMITTEE_HEIGHT, UtxoLineageRoot, reveal_committee_slot_count,
-    reveal_committee_slot_count_for_height,
+    Amount, Block, BurnCommitteeMember, BurnLeaderRank, ChainSnapshot, ChainStatus, LaunchProfile,
+    Ledger, OutPoint, Transaction, TxOutput, UtxoLineageRoot,
 };
 
 fn apply_historical_ticket_block(
     parent: &Block,
     block: &Block,
-    launch_profile: &LaunchProfile,
+    launch_profile: &super::LaunchProfile,
     tickets: &mut Vec<BurnTicket>,
-    active_blinded: &mut BTreeMap<String, ActiveBlindedTransaction>,
 ) -> Result<()> {
     apply_finalizer_ticket_effects(parent, block, tickets)?;
     tickets.extend(tickets_created_by_block(block, launch_profile)?);
-    let mut revealed_transactions = Vec::new();
-    for reveal in block.all_blinded_reveals() {
-        let active = active_blinded.get(&reveal.commitment).with_context(|| {
-            format!(
-                "block {} reveals unknown blinded transaction {}",
-                block.height, reveal.commitment
-            )
-        })?;
-        let transaction = decrypt_blinded_transaction(&active.transaction, reveal)?;
-        if matches!(transaction, Transaction::Mine { .. }) {
-            bail!("mine actions are public and cannot be blinded");
-        }
-        if blinded_envelope_fee_for_transaction(&transaction) != active.transaction.fee {
-            bail!(
-                "block {} blinded reveal fee does not match envelope",
-                block.height
-            );
-        }
-        revealed_transactions.push(transaction);
-        active_blinded.remove(&reveal.commitment);
-    }
     tickets.extend(tickets_created_by_transactions(
         block.height,
-        &revealed_transactions,
+        &block.transactions,
         launch_profile,
     )?);
-    active_blinded.retain(|_, active| block.height < active.transaction.expires_at_height);
-    for transaction in &block.blinded_transactions {
-        active_blinded.insert(
-            transaction.commitment.clone(),
-            ActiveBlindedTransaction {
-                transaction: transaction.clone(),
-                locked_outputs: Vec::new(),
-                locked_lineage_root: None,
-                included_height: block.height,
-                included_by: block.miner.clone(),
-            },
-        );
-    }
     Ok(())
 }
 
@@ -96,7 +55,7 @@ pub(super) fn select_weighted_lineage_index(
         return None;
     }
     let seed = format!(
-        "iuna-reveal-lineage-draw-v1:{target_height}:{}:{}:{slot}",
+        "iuna-burn-lineage-draw-v1:{target_height}:{}:{}:{slot}",
         parent.hash, parent.vdf_output
     );
     let digest = Sha256::digest(seed.as_bytes());
@@ -142,9 +101,7 @@ impl Ledger {
             balances: include_balances
                 .then(|| balances_from_utxos(&self.utxos))
                 .unwrap_or_default(),
-            pending_transactions: self.pending.len()
-                + self.pending_blinded.len()
-                + self.pending_reveals.len(),
+            pending_transactions: self.pending.len(),
         }
     }
 
@@ -184,7 +141,6 @@ impl Ledger {
             &self.chain[0],
             &self.launch_profile,
         )?;
-        let mut active_blinded = BTreeMap::<String, ActiveBlindedTransaction>::new();
         let mut next_block_index = 1;
 
         for height in requested {
@@ -206,7 +162,6 @@ impl Ledger {
                     block,
                     &self.launch_profile,
                     &mut tickets,
-                    &mut active_blinded,
                 )?;
                 next_block_index += 1;
             }
@@ -231,77 +186,28 @@ impl Ledger {
         Ok(ranks_by_height)
     }
 
-    pub fn reveal_committee_for_next_block(&self) -> Vec<RevealCommitteeMember> {
-        self.reveal_committee_for_height(self.tip().height + 1)
+    pub fn burn_committee_for_next_block(&self) -> Vec<BurnCommitteeMember> {
+        self.burn_committee_for_height(self.tip().height + 1)
     }
 
-    pub fn reveal_committee_for_height(&self, height: u64) -> Vec<RevealCommitteeMember> {
+    pub fn burn_committee_for_height(&self, height: u64) -> Vec<BurnCommitteeMember> {
         let ranked = ranked_tickets_for_height(self.tip(), height, &self.tickets);
-        if height >= REVEAL_BUNDLE_SIGNATURE_THRESHOLDS_HEIGHT {
-            return self.lineage_reveal_committee_for_height(height, ranked);
-        }
-        let selected = if height < UNIQUE_OWNER_REVEAL_COMMITTEE_HEIGHT {
-            let mut selected = Vec::new();
-            if !ranked.is_empty() {
-                selected.push(0);
-            }
-            for index in (0..ranked.len()).rev() {
-                if selected.len() >= reveal_committee_slot_count(ranked.len()) {
-                    break;
-                }
-                if !selected.contains(&index) {
-                    selected.push(index);
-                }
-            }
-            selected
-        } else {
-            let target_slots = reveal_committee_slot_count_for_height(
-                height,
-                ranked.len(),
-                ranked.iter().map(|ticket| ticket.owner.as_str()),
-            );
-            let mut seen_owners = BTreeSet::new();
-            let mut selected = Vec::new();
-            for (index, ticket) in ranked.iter().enumerate() {
-                if selected.len() >= target_slots {
-                    break;
-                }
-                if seen_owners.insert(ticket.owner.clone()) {
-                    selected.push(index);
-                }
-            }
-            selected
-        };
-        selected
-            .into_iter()
-            .enumerate()
-            .filter_map(|(slot, rank)| {
-                let ticket = ranked.get(rank)?.clone();
-                Some(RevealCommitteeMember {
-                    slot: u8::try_from(slot).ok()?,
-                    rank: u32::try_from(rank).ok()?,
-                    ticket_id: ticket.id,
-                    owner: ticket.owner,
-                    amount: ticket.amount,
-                })
-            })
-            .collect()
+        self.lineage_burn_committee_for_height(height, ranked)
     }
 
-    fn lineage_reveal_committee_for_height(
+    fn lineage_burn_committee_for_height(
         &self,
         height: u64,
         ranked: Vec<BurnTicket>,
-    ) -> Vec<RevealCommitteeMember> {
+    ) -> Vec<BurnCommitteeMember> {
         let Some(finalizer) = ranked.first() else {
             return Vec::new();
         };
-        let mut committee = vec![RevealCommitteeMember {
+        let mut committee = vec![BurnCommitteeMember {
             slot: 0,
-            rank: 0,
-            ticket_id: finalizer.id.clone(),
+            root: finalizer.id.clone(),
             owner: finalizer.owner.clone(),
-            amount: finalizer.amount,
+            weight: finalizer.amount,
         }];
         let mut skipped_owners = BTreeSet::from([finalizer.owner.clone()]);
         let mut remaining = self
@@ -319,7 +225,7 @@ impl Ledger {
             })
             .collect::<Vec<_>>();
 
-        for slot in 1..super::REVEAL_COMMITTEE_SIZE {
+        for slot in 1..super::BURN_COMMITTEE_SIZE {
             let Some(index) =
                 select_weighted_lineage_index(self.tip(), height, slot as u8, &remaining)
             else {
@@ -327,12 +233,11 @@ impl Ledger {
             };
             let selected = remaining.remove(index);
             skipped_owners.insert(selected.owner.clone());
-            committee.push(RevealCommitteeMember {
+            committee.push(BurnCommitteeMember {
                 slot: slot as u8,
-                rank: slot as u32,
-                ticket_id: selected.root.outpoint.id(),
+                root: selected.root.outpoint.id(),
                 owner: selected.owner,
-                amount: selected.value,
+                weight: selected.value,
             });
             remaining.retain(|candidate| {
                 candidate.root != selected.root
@@ -358,7 +263,7 @@ impl Ledger {
                 **value > 0
                     && root
                         .height
-                        .saturating_add(super::REVEAL_LINEAGE_MATURITY_HEIGHTS)
+                        .saturating_add(super::BURN_LINEAGE_MATURITY_HEIGHTS)
                         <= parent_height
                     && !self.lineage_root_has_owner(root, finalizer)
             })
@@ -459,53 +364,6 @@ impl Ledger {
         &self.pending
     }
 
-    pub fn pending_blinded_transactions(&self) -> &[BlindedTransaction] {
-        &self.pending_blinded
-    }
-
-    pub fn pending_blinded_reveals(&self) -> &[BlindedReveal] {
-        &self.pending_reveals
-    }
-
-    pub fn pending_revealed_blinded_transactions(&self) -> Vec<RevealedBlindedTransaction> {
-        self.pending_reveals
-            .iter()
-            .filter_map(|reveal| {
-                let active = self.active_blinded.get(&reveal.commitment)?;
-                let transaction = self.pending_reveal_transaction(reveal).ok()?;
-                Some(RevealedBlindedTransaction {
-                    height: self.height().saturating_add(1),
-                    commitment: reveal.commitment.clone(),
-                    included_by: active.included_by.clone(),
-                    transaction,
-                })
-            })
-            .collect()
-    }
-
-    pub(crate) fn drop_pending_blinded_conflicting_with_transaction(
-        &mut self,
-        transaction: &Transaction,
-    ) {
-        let spent = transaction
-            .inputs()
-            .iter()
-            .map(|input| input.outpoint.clone())
-            .collect::<BTreeSet<_>>();
-        self.pending_blinded.retain(|blinded| {
-            !blinded
-                .inputs
-                .iter()
-                .any(|input| spent.contains(&input.outpoint))
-        });
-        let _ = self.refresh_pending_pool_byte_counters();
-    }
-
-    pub(crate) fn clear_pending_blinded_transactions(&mut self) {
-        self.pending_blinded.clear();
-        self.pending_blinded_bytes = 0;
-    }
-
     pub(crate) fn clear_pending_transactions(&mut self) {
         self.pending.clear();
         self.pending_bytes = 0;
@@ -537,42 +395,6 @@ impl Ledger {
             .iter()
             .filter(|tx| mine_anchor(tx) == Some(anchor))
             .count()
-    }
-
-    pub fn has_blinded_transaction(&self, commitment: &str) -> bool {
-        self.pending_blinded
-            .iter()
-            .any(|transaction| transaction.commitment == commitment)
-            || self.active_blinded.contains_key(commitment)
-            || self.chain.iter().any(|block| {
-                block
-                    .blinded_transactions
-                    .iter()
-                    .any(|tx| tx.commitment == commitment)
-            })
-    }
-
-    pub fn has_unrevealed_blinded_transaction(&self, commitment: &str) -> bool {
-        self.pending_blinded
-            .iter()
-            .any(|transaction| transaction.commitment == commitment)
-            || self.active_blinded.contains_key(commitment)
-    }
-
-    pub fn has_active_blinded_transaction(&self, commitment: &str) -> bool {
-        self.active_blinded.contains_key(commitment)
-    }
-
-    pub fn has_blinded_reveal(&self, commitment: &str) -> bool {
-        self.pending_reveals
-            .iter()
-            .any(|reveal| reveal.commitment == commitment)
-            || self.chain.iter().any(|block| {
-                block
-                    .all_blinded_reveals()
-                    .iter()
-                    .any(|reveal| reveal.commitment == commitment)
-            })
     }
 
     pub fn vdf_rounds(&self) -> u64 {

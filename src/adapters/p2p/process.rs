@@ -5,7 +5,7 @@ use tokio::net::tcp::OwnedWriteHalf;
 
 use crate::{
     app::{GossipEnvelope, debug_logging_enabled},
-    domain::{BlindedReveal, BlindedTransaction, RevealBundle, Transaction},
+    domain::{BurnBundle, Transaction},
 };
 
 use super::{
@@ -88,29 +88,17 @@ pub(super) async fn process_envelope(
         GossipEnvelope::PeerList { peers } => {
             apply_peer_list(network, remote_addr, peers).await?;
         }
-        GossipEnvelope::BlindedTransaction(tx) => {
-            process_blinded_transactions(network, remote_addr, known_peer, vec![tx]).await;
+        GossipEnvelope::Transaction(tx) => {
+            process_transactions(network, remote_addr, known_peer, vec![tx]).await;
         }
-        GossipEnvelope::BlindedTransactions { transactions } => {
-            process_blinded_transactions(network, remote_addr, known_peer, transactions).await;
+        GossipEnvelope::Transactions { transactions } => {
+            process_transactions(network, remote_addr, known_peer, transactions).await;
         }
-        GossipEnvelope::MineAction(tx) => {
-            process_mine_actions(network, remote_addr, known_peer, vec![tx]).await;
+        GossipEnvelope::BurnBundle(bundle) => {
+            process_burn_bundles(network, remote_addr, known_peer, vec![bundle]).await;
         }
-        GossipEnvelope::MineActions { transactions } => {
-            process_mine_actions(network, remote_addr, known_peer, transactions).await;
-        }
-        GossipEnvelope::BlindedReveal(reveal) => {
-            process_blinded_reveals(network, remote_addr, known_peer, vec![reveal]).await;
-        }
-        GossipEnvelope::BlindedReveals { reveals } => {
-            process_blinded_reveals(network, remote_addr, known_peer, reveals).await;
-        }
-        GossipEnvelope::RevealBundle(bundle) => {
-            process_reveal_bundles(network, remote_addr, known_peer, vec![bundle]).await;
-        }
-        GossipEnvelope::RevealBundles { bundles } => {
-            process_reveal_bundles(network, remote_addr, known_peer, bundles).await;
+        GossipEnvelope::BurnBundles { bundles } => {
+            process_burn_bundles(network, remote_addr, known_peer, bundles).await;
         }
         GossipEnvelope::Block(block) => {
             let adjusted_time_ms = super::network_adjusted_time_ms(network).await;
@@ -185,35 +173,7 @@ pub(super) async fn process_envelope(
     Ok(())
 }
 
-async fn process_blinded_transactions(
-    network: &GossipNetwork,
-    remote_addr: SocketAddr,
-    known_peer: &Option<String>,
-    transactions: Vec<BlindedTransaction>,
-) {
-    let first_error = {
-        let mut node = network.inner.node.lock().await;
-        let mut first_error = None;
-        for tx in transactions {
-            if let Err(error) = node.receive_blinded_transaction(tx) {
-                first_error.get_or_insert(error);
-            }
-        }
-        first_error
-    };
-    record_inbound_result(
-        network,
-        known_peer,
-        remote_addr,
-        first_error
-            .map(|error| Err(anyhow!(format!("{error:#}"))))
-            .unwrap_or(Ok(())),
-    )
-    .await;
-    network.forward_outbox().await;
-}
-
-async fn process_mine_actions(
+async fn process_transactions(
     network: &GossipNetwork,
     remote_addr: SocketAddr,
     known_peer: &Option<String>,
@@ -223,7 +183,7 @@ async fn process_mine_actions(
         let mut node = network.inner.node.lock().await;
         let mut first_error = None;
         for tx in transactions {
-            if let Err(error) = node.receive_mine_action(tx) {
+            if let Err(error) = node.receive_gossiped_transaction(tx) {
                 first_error.get_or_insert(error);
             }
         }
@@ -241,45 +201,17 @@ async fn process_mine_actions(
     network.forward_outbox().await;
 }
 
-async fn process_blinded_reveals(
+async fn process_burn_bundles(
     network: &GossipNetwork,
     remote_addr: SocketAddr,
     known_peer: &Option<String>,
-    reveals: Vec<BlindedReveal>,
-) {
-    let first_error = {
-        let mut node = network.inner.node.lock().await;
-        let mut first_error = None;
-        for reveal in reveals {
-            if let Err(error) = node.receive_blinded_reveal(reveal) {
-                first_error.get_or_insert(error);
-            }
-        }
-        first_error
-    };
-    record_inbound_result(
-        network,
-        known_peer,
-        remote_addr,
-        first_error
-            .map(|error| Err(anyhow!(format!("{error:#}"))))
-            .unwrap_or(Ok(())),
-    )
-    .await;
-    network.forward_outbox().await;
-}
-
-async fn process_reveal_bundles(
-    network: &GossipNetwork,
-    remote_addr: SocketAddr,
-    known_peer: &Option<String>,
-    bundles: Vec<RevealBundle>,
+    bundles: Vec<BurnBundle>,
 ) {
     let first_error = {
         let mut node = network.inner.node.lock().await;
         let mut first_error = None;
         for bundle in bundles {
-            if let Err(error) = node.receive_reveal_bundle(bundle) {
+            if let Err(error) = node.receive_burn_bundle(bundle) {
                 first_error.get_or_insert(error);
             }
         }

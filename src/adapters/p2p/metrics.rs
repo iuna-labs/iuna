@@ -21,10 +21,10 @@ pub(super) struct P2pMetricsCounters {
     pub(super) peer_status_envelopes_received: AtomicU64,
     pub(super) inventory_envelopes_received: AtomicU64,
     pub(super) data_envelopes_received: AtomicU64,
-    pub(super) blinded_transaction_envelopes_received: AtomicU64,
-    pub(super) blinded_transactions_received: AtomicU64,
-    pub(super) blinded_reveal_envelopes_received: AtomicU64,
-    pub(super) blinded_reveals_received: AtomicU64,
+    pub(super) transaction_envelopes_received: AtomicU64,
+    pub(super) transactions_received: AtomicU64,
+    pub(super) burn_bundle_envelopes_received: AtomicU64,
+    pub(super) burn_bundles_received: AtomicU64,
     pub(super) control_envelopes_received: AtomicU64,
     pub(super) bytes_received: AtomicU64,
     pub(super) parse_errors: AtomicU64,
@@ -54,10 +54,10 @@ pub struct P2pMetrics {
     pub peer_status_envelopes_received: u64,
     pub inventory_envelopes_received: u64,
     pub data_envelopes_received: u64,
-    pub blinded_transaction_envelopes_received: u64,
-    pub blinded_transactions_received: u64,
-    pub blinded_reveal_envelopes_received: u64,
-    pub blinded_reveals_received: u64,
+    pub transaction_envelopes_received: u64,
+    pub transactions_received: u64,
+    pub burn_bundle_envelopes_received: u64,
+    pub burn_bundles_received: u64,
     pub control_envelopes_received: u64,
     pub bytes_received: u64,
     pub parse_errors: u64,
@@ -104,16 +104,14 @@ impl P2pMetricsCounters {
                 .load(Ordering::Relaxed),
             inventory_envelopes_received: self.inventory_envelopes_received.load(Ordering::Relaxed),
             data_envelopes_received: self.data_envelopes_received.load(Ordering::Relaxed),
-            blinded_transaction_envelopes_received: self
-                .blinded_transaction_envelopes_received
+            transaction_envelopes_received: self
+                .transaction_envelopes_received
                 .load(Ordering::Relaxed),
-            blinded_transactions_received: self
-                .blinded_transactions_received
+            transactions_received: self.transactions_received.load(Ordering::Relaxed),
+            burn_bundle_envelopes_received: self
+                .burn_bundle_envelopes_received
                 .load(Ordering::Relaxed),
-            blinded_reveal_envelopes_received: self
-                .blinded_reveal_envelopes_received
-                .load(Ordering::Relaxed),
-            blinded_reveals_received: self.blinded_reveals_received.load(Ordering::Relaxed),
+            burn_bundles_received: self.burn_bundles_received.load(Ordering::Relaxed),
             control_envelopes_received: self.control_envelopes_received.load(Ordering::Relaxed),
             bytes_received: self.bytes_received.load(Ordering::Relaxed),
             parse_errors: self.parse_errors.load(Ordering::Relaxed),

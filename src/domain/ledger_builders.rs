@@ -1,24 +1,15 @@
-use anyhow::{Context, Result, anyhow, bail};
-use getrandom::getrandom;
-
-use super::blinded::{
-    blinded_envelope_fee_for_transaction, blinded_payload_from_transaction,
-    blinded_transaction_commitment, blinded_transaction_signing_payload, encrypt_blinded_payload,
-};
-use super::hex::{hex_encode, hex_hash};
+use super::hex::hex_encode;
 use super::mining::mine_signature;
 use super::stratum::{
     hash_meets_difficulty, stratum_mine_header_bytes, stratum_mine_signature, stratum_mine_template,
 };
-use super::transaction::{
-    UnsignedTxInput, UnsignedUtxoTransaction, signed_blinded_inputs, unsigned_inputs,
-};
+use super::transaction::{UnsignedTxInput, UnsignedUtxoTransaction};
 use super::validation::validate_address;
 use super::{
-    Amount, BLINDED_KEY_BYTES, BLINDED_NONCE_BYTES, BlindedReveal, BlindedTransaction,
-    BuiltBlindedTransaction, Ledger, MAX_BLINDED_TRANSACTION_EXPIRY_HEIGHTS, MineSearchOutcome,
-    OutPoint, StratumMineShare, StratumMineTemplate, Transaction, TxOutput, Wallet,
+    Amount, Ledger, MineSearchOutcome, OutPoint, StratumMineShare, StratumMineTemplate,
+    Transaction, TxOutput, Wallet,
 };
+use anyhow::{Context, Result, bail};
 
 impl Ledger {
     pub fn build_transfer(
@@ -149,126 +140,6 @@ impl Ledger {
         .sign(wallet);
         self.validate_new_transaction(&transaction)?;
         Ok(transaction)
-    }
-
-    pub fn build_blinded_burn(
-        &self,
-        wallet: &Wallet,
-        amount: Amount,
-        fee: Amount,
-        expires_at_height: u64,
-    ) -> Result<BuiltBlindedTransaction> {
-        let transaction = self.build_burn(wallet, amount, fee)?;
-        self.blind_transaction(wallet, transaction, fee, expires_at_height)
-    }
-
-    pub fn build_blinded_transfer(
-        &self,
-        wallet: &Wallet,
-        to: impl Into<String>,
-        amount: Amount,
-        fee: Amount,
-        expires_at_height: u64,
-    ) -> Result<BuiltBlindedTransaction> {
-        let transaction = self.build_transfer(wallet, to, amount, fee)?;
-        self.blind_transaction(wallet, transaction, fee, expires_at_height)
-    }
-
-    pub fn build_blinded_transaction(
-        &self,
-        wallet: &Wallet,
-        transaction: Transaction,
-        expires_at_height: u64,
-    ) -> Result<BuiltBlindedTransaction> {
-        if matches!(transaction, Transaction::Mine { .. }) {
-            bail!("mine actions are public and cannot be blinded");
-        }
-        let fee = blinded_envelope_fee_for_transaction(&transaction);
-        self.blind_transaction(wallet, transaction, fee, expires_at_height)
-    }
-
-    fn blind_transaction(
-        &self,
-        wallet: &Wallet,
-        transaction: Transaction,
-        fee: Amount,
-        expires_at_height: u64,
-    ) -> Result<BuiltBlindedTransaction> {
-        if expires_at_height <= self.height() {
-            bail!("blinded transaction expiry must be in the future");
-        }
-        if expires_at_height
-            > self
-                .height()
-                .saturating_add(MAX_BLINDED_TRANSACTION_EXPIRY_HEIGHTS)
-        {
-            bail!("blinded transaction expiry is too far in the future");
-        }
-        if fee != blinded_envelope_fee_for_transaction(&transaction) {
-            bail!("blinded transaction fee must match plaintext transaction fee");
-        }
-        let unsigned_inputs = if transaction.inputs().is_empty() && transaction.fee() > 0 {
-            self.select_inputs(wallet.address(), transaction.fee())?.0
-        } else {
-            unsigned_inputs(transaction.inputs())
-        };
-        if unsigned_inputs
-            .iter()
-            .any(|input| input.owner != wallet.address())
-        {
-            bail!("blinded transaction inputs must be owned by the signing wallet");
-        }
-        let blinded_payload = blinded_payload_from_transaction(&transaction)?;
-        let plaintext = serde_json::to_vec(&blinded_payload)
-            .context("failed to serialize transaction for blinded payload")?;
-        let payload_hash = hex_hash(&plaintext);
-        let unsigned_commit_inputs = signed_blinded_inputs(&unsigned_inputs, "");
-        let payload = transaction;
-        let mut key = [0_u8; BLINDED_KEY_BYTES];
-        let mut nonce = [0_u8; BLINDED_NONCE_BYTES];
-        getrandom(&mut key)
-            .map_err(|error| anyhow!("failed to generate blinded transaction key: {error}"))?;
-        getrandom(&mut nonce)
-            .map_err(|error| anyhow!("failed to generate blinded transaction nonce: {error}"))?;
-        let ciphertext = encrypt_blinded_payload(
-            &key,
-            &nonce,
-            &unsigned_commit_inputs,
-            fee,
-            expires_at_height,
-            &plaintext,
-        )?;
-        let encrypted_size = u32::try_from(ciphertext.len())
-            .context("blinded transaction ciphertext is too large")?;
-        let transaction = BlindedTransaction {
-            commitment: String::new(),
-            inputs: unsigned_commit_inputs,
-            fee,
-            encrypted_size,
-            expires_at_height,
-            nonce: hex_encode(nonce),
-            ciphertext: hex_encode(&ciphertext),
-            payload_hash,
-        };
-        let signature = wallet.sign_payload(&blinded_transaction_signing_payload(&transaction));
-        let transaction = BlindedTransaction {
-            inputs: signed_blinded_inputs(&unsigned_inputs, &signature),
-            ..transaction
-        };
-        let commitment = blinded_transaction_commitment(&transaction)?;
-        let transaction = BlindedTransaction {
-            commitment: commitment.clone(),
-            ..transaction
-        };
-        self.validate_blinded_transaction(&transaction)?;
-        Ok(BuiltBlindedTransaction {
-            payload,
-            transaction,
-            reveal: BlindedReveal {
-                commitment,
-                key: hex_encode(key),
-            },
-        })
     }
 
     pub fn build_mine(&self, recipient: impl Into<String>) -> Result<Transaction> {

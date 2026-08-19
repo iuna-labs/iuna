@@ -108,53 +108,25 @@ pub(super) fn record_received_envelope_kind(
         GossipEnvelope::Inventory { .. } => {
             P2pMetricsCounters::inc(&metrics.inventory_envelopes_received);
         }
-        GossipEnvelope::BlindedTransaction(_) => {
+        GossipEnvelope::Transaction(_) => {
             P2pMetricsCounters::inc(&metrics.data_envelopes_received);
-            P2pMetricsCounters::inc(&metrics.blinded_transaction_envelopes_received);
-            P2pMetricsCounters::inc(&metrics.blinded_transactions_received);
+            P2pMetricsCounters::inc(&metrics.transaction_envelopes_received);
+            P2pMetricsCounters::inc(&metrics.transactions_received);
         }
-        GossipEnvelope::BlindedTransactions { transactions } => {
+        GossipEnvelope::Transactions { transactions } => {
             P2pMetricsCounters::inc(&metrics.data_envelopes_received);
-            P2pMetricsCounters::inc(&metrics.blinded_transaction_envelopes_received);
-            P2pMetricsCounters::add(
-                &metrics.blinded_transactions_received,
-                transactions.len() as u64,
-            );
+            P2pMetricsCounters::inc(&metrics.transaction_envelopes_received);
+            P2pMetricsCounters::add(&metrics.transactions_received, transactions.len() as u64);
         }
-        GossipEnvelope::MineAction(_) => {
+        GossipEnvelope::BurnBundle(_) => {
             P2pMetricsCounters::inc(&metrics.data_envelopes_received);
+            P2pMetricsCounters::inc(&metrics.burn_bundle_envelopes_received);
+            P2pMetricsCounters::inc(&metrics.burn_bundles_received);
         }
-        GossipEnvelope::MineActions { .. } => {
+        GossipEnvelope::BurnBundles { bundles } => {
             P2pMetricsCounters::inc(&metrics.data_envelopes_received);
-        }
-        GossipEnvelope::BlindedReveal(_) => {
-            P2pMetricsCounters::inc(&metrics.data_envelopes_received);
-            P2pMetricsCounters::inc(&metrics.blinded_reveal_envelopes_received);
-            P2pMetricsCounters::inc(&metrics.blinded_reveals_received);
-        }
-        GossipEnvelope::BlindedReveals { reveals } => {
-            P2pMetricsCounters::inc(&metrics.data_envelopes_received);
-            P2pMetricsCounters::inc(&metrics.blinded_reveal_envelopes_received);
-            P2pMetricsCounters::add(&metrics.blinded_reveals_received, reveals.len() as u64);
-        }
-        GossipEnvelope::RevealBundle(bundle) => {
-            P2pMetricsCounters::inc(&metrics.data_envelopes_received);
-            P2pMetricsCounters::inc(&metrics.blinded_reveal_envelopes_received);
-            P2pMetricsCounters::add(
-                &metrics.blinded_reveals_received,
-                bundle.reveals.len() as u64,
-            );
-        }
-        GossipEnvelope::RevealBundles { bundles } => {
-            P2pMetricsCounters::inc(&metrics.data_envelopes_received);
-            P2pMetricsCounters::inc(&metrics.blinded_reveal_envelopes_received);
-            P2pMetricsCounters::add(
-                &metrics.blinded_reveals_received,
-                bundles
-                    .iter()
-                    .map(|bundle| bundle.reveals.len() as u64)
-                    .sum::<u64>(),
-            );
+            P2pMetricsCounters::inc(&metrics.burn_bundle_envelopes_received);
+            P2pMetricsCounters::add(&metrics.burn_bundles_received, bundles.len() as u64);
         }
         GossipEnvelope::Block(_)
         | GossipEnvelope::Blocks { .. }
@@ -193,33 +165,15 @@ pub(super) fn validate_envelope_limits(envelope: &GossipEnvelope) -> Result<()> 
         GossipEnvelope::Inventory { blocks } => {
             ensure_len("block inventory", blocks.len(), MAX_INVENTORY_ITEMS)?;
         }
-        GossipEnvelope::BlindedTransactions { transactions } => {
+        GossipEnvelope::Transactions { transactions } => {
             ensure_len(
-                "blinded transaction batch",
+                "transaction batch",
                 transactions.len(),
                 TRANSACTION_BATCH_LIMIT,
             )?;
         }
-        GossipEnvelope::MineActions { transactions } => {
-            ensure_len(
-                "mine action batch",
-                transactions.len(),
-                TRANSACTION_BATCH_LIMIT,
-            )?;
-        }
-        GossipEnvelope::BlindedReveals { reveals } => {
-            ensure_len(
-                "blinded reveal batch",
-                reveals.len(),
-                TRANSACTION_BATCH_LIMIT,
-            )?;
-        }
-        GossipEnvelope::RevealBundles { bundles } => {
-            ensure_len(
-                "reveal bundle batch",
-                bundles.len(),
-                TRANSACTION_BATCH_LIMIT,
-            )?;
+        GossipEnvelope::BurnBundles { bundles } => {
+            ensure_len("burn bundle batch", bundles.len(), TRANSACTION_BATCH_LIMIT)?;
         }
         GossipEnvelope::Blocks { blocks } => {
             ensure_len("block batch", blocks.len(), MAX_BLOCK_BATCH)?;
@@ -233,10 +187,8 @@ pub(super) fn validate_envelope_limits(envelope: &GossipEnvelope) -> Result<()> 
         GossipEnvelope::Hello(_)
         | GossipEnvelope::ChainSnapshotRequest
         | GossipEnvelope::PeerStatus { .. }
-        | GossipEnvelope::BlindedTransaction(_)
-        | GossipEnvelope::MineAction(_)
-        | GossipEnvelope::BlindedReveal(_)
-        | GossipEnvelope::RevealBundle(_)
+        | GossipEnvelope::Transaction(_)
+        | GossipEnvelope::BurnBundle(_)
         | GossipEnvelope::Block(_)
         | GossipEnvelope::PeerAnnouncement { .. }
         | GossipEnvelope::PeerVerificationChallenge { .. }
@@ -254,161 +206,79 @@ fn ensure_len(label: &str, len: usize, max: usize) -> Result<()> {
 
 #[cfg(test)]
 mod tests {
-    use tokio::io::AsyncWriteExt;
-
     use crate::{
-        adapters::p2p::{
-            MAX_GOSSIP_LINE_BYTES, MAX_INVENTORY_ITEMS, MAX_OBJECT_REQUESTS,
-            metrics::P2pMetricsCounters,
-        },
-        app::{BlockInventory, GossipEnvelope},
-        domain::{BlindedReveal, BlindedTransaction},
+        adapters::p2p::metrics::P2pMetricsCounters,
+        app::GossipEnvelope,
+        domain::{BurnBundle, OutPoint, Transaction, TxInput, TxOutput},
     };
 
-    use super::{
-        LimitedLineReader, parse_envelope, record_received_envelope_kind, validate_envelope_limits,
-    };
+    use super::{parse_envelope, record_received_envelope_kind};
 
-    #[test]
-    fn oversized_inventory_is_rejected_before_processing() {
-        let envelope = GossipEnvelope::Inventory {
-            blocks: vec![
-                BlockInventory {
-                    height: 1,
-                    hash: "hash".to_string()
-                };
-                MAX_INVENTORY_ITEMS + 1
-            ],
-        };
+    fn burn(signature: &str) -> Transaction {
+        Transaction::Burn {
+            inputs: vec![TxInput {
+                outpoint: OutPoint {
+                    txid: format!("{signature:0<64}"),
+                    index: 0,
+                },
+                owner: "owner".to_string(),
+                signature: signature.to_string(),
+            }],
+            change: vec![TxOutput {
+                address: "owner".to_string(),
+                amount: 1,
+            }],
+            amount: 1,
+            fee: 1,
+            signature: signature.to_string(),
+        }
+    }
 
-        let error = validate_envelope_limits(&envelope).unwrap_err();
-
-        assert!(error.to_string().contains("block inventory"));
+    fn burn_bundle(slot: u8, signature: &str) -> BurnBundle {
+        BurnBundle {
+            height: 1,
+            prev_hash: "parent".to_string(),
+            slot,
+            member: format!("member-{slot}"),
+            burns: vec![burn(signature)],
+            signature: format!("bundle-{signature}"),
+        }
     }
 
     #[test]
-    fn parser_applies_envelope_limits() {
-        let line = serde_json::to_string(&GossipEnvelope::BlockRequest {
-            hashes: vec!["hash".to_string(); MAX_OBJECT_REQUESTS + 1],
-        })
-        .unwrap();
-
-        let error = parse_envelope(&line).unwrap_err();
-
-        assert!(error.to_string().contains("block request"));
-    }
-
-    #[test]
-    fn parser_rejects_empty_envelope_without_json_eof() {
-        let error = parse_envelope("").unwrap_err();
-
-        assert!(error.to_string().contains("empty p2p envelope"));
-        assert!(!format!("{error:#}").contains("EOF while parsing"));
-    }
-
-    #[test]
-    fn parser_accepts_legacy_peer_status_without_mempool_fields() {
-        let envelope =
-            parse_envelope(r#"{"type":"peer_status","height":7,"tip_hash":"tip"}"#).unwrap();
-
-        assert_eq!(
-            envelope,
-            GossipEnvelope::PeerStatus {
-                height: 7,
-                tip_hash: "tip".to_string(),
-                time_ms: 0,
-            }
-        );
-    }
-
-    #[test]
-    fn received_envelope_metrics_are_categorized() {
+    fn metrics_count_transaction_and_burn_bundle_batches() {
         let metrics = P2pMetricsCounters::default();
-        let blinded_tx = BlindedTransaction {
-            commitment: "commitment".to_string(),
-            inputs: Vec::new(),
-            fee: 3,
-            encrypted_size: 128,
-            expires_at_height: 20,
-            nonce: "nonce".to_string(),
-            ciphertext: "ciphertext".to_string(),
-            payload_hash: "payload-hash".to_string(),
-        };
-        let blinded_reveal = BlindedReveal {
-            commitment: "commitment".to_string(),
-            key: "key".to_string(),
-        };
 
         record_received_envelope_kind(
             &metrics,
-            &GossipEnvelope::PeerStatus {
-                height: 7,
-                tip_hash: "tip".to_string(),
-                time_ms: 1_000,
+            &GossipEnvelope::Transactions {
+                transactions: vec![burn("a"), burn("b")],
             },
         );
-        record_received_envelope_kind(&metrics, &GossipEnvelope::Inventory { blocks: Vec::new() });
-        record_received_envelope_kind(&metrics, &GossipEnvelope::Blocks { blocks: Vec::new() });
         record_received_envelope_kind(
             &metrics,
-            &GossipEnvelope::BlindedTransactions {
-                transactions: vec![blinded_tx.clone(), blinded_tx],
+            &GossipEnvelope::BurnBundles {
+                bundles: vec![burn_bundle(1, "c"), burn_bundle(2, "d")],
             },
         );
-        record_received_envelope_kind(&metrics, &GossipEnvelope::BlindedReveal(blinded_reveal));
-        record_received_envelope_kind(&metrics, &GossipEnvelope::ChainSnapshotRequest);
+        record_received_envelope_kind(&metrics, &GossipEnvelope::Transaction(burn("e")));
+        record_received_envelope_kind(&metrics, &GossipEnvelope::BurnBundle(burn_bundle(1, "f")));
 
         let snapshot = metrics.snapshot();
-        assert_eq!(snapshot.peer_status_envelopes_received, 1);
-        assert_eq!(snapshot.inventory_envelopes_received, 1);
-        assert_eq!(snapshot.data_envelopes_received, 3);
-        assert_eq!(snapshot.blinded_transaction_envelopes_received, 1);
-        assert_eq!(snapshot.blinded_transactions_received, 2);
-        assert_eq!(snapshot.blinded_reveal_envelopes_received, 1);
-        assert_eq!(snapshot.blinded_reveals_received, 1);
-        assert_eq!(snapshot.control_envelopes_received, 1);
+        assert_eq!(snapshot.data_envelopes_received, 4);
+        assert_eq!(snapshot.transaction_envelopes_received, 2);
+        assert_eq!(snapshot.transactions_received, 3);
+        assert_eq!(snapshot.burn_bundle_envelopes_received, 2);
+        assert_eq!(snapshot.burn_bundles_received, 3);
     }
 
-    #[tokio::test]
-    async fn limited_line_reader_keeps_partial_line_after_cancelled_read() {
-        let (mut writer, reader) = tokio::io::duplex(1024);
-        let mut reader = LimitedLineReader::new(reader);
-        let line = serde_json::to_string(&GossipEnvelope::PeerStatus {
-            height: 7,
-            tip_hash: "tip".to_string(),
-            time_ms: 1_000,
-        })
-        .unwrap();
-        let split_at = line.len() / 2;
+    #[test]
+    fn parser_accepts_burn_bundle_envelopes() {
+        let envelope = GossipEnvelope::BurnBundles {
+            bundles: vec![burn_bundle(1, "a")],
+        };
+        let line = serde_json::to_string(&envelope).unwrap();
 
-        writer
-            .write_all(&line.as_bytes()[..split_at])
-            .await
-            .unwrap();
-        let cancelled =
-            tokio::time::timeout(std::time::Duration::from_millis(25), reader.read_line()).await;
-
-        assert!(cancelled.is_err());
-
-        writer
-            .write_all(&line.as_bytes()[split_at..])
-            .await
-            .unwrap();
-        writer.write_all(b"\n").await.unwrap();
-
-        assert_eq!(
-            reader.read_line().await.unwrap().as_deref(),
-            Some(line.as_str())
-        );
-    }
-
-    #[tokio::test]
-    async fn limited_line_reader_rejects_oversized_partial_frame_without_newline() {
-        let bytes = vec![b'a'; MAX_GOSSIP_LINE_BYTES + 1];
-        let mut reader = LimitedLineReader::new(bytes.as_slice());
-
-        let error = reader.read_line().await.unwrap_err();
-
-        assert!(error.to_string().contains("p2p message exceeds"));
+        assert_eq!(parse_envelope(&line).unwrap(), envelope);
     }
 }

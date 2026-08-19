@@ -35,13 +35,6 @@ mod state;
 mod static_assets;
 mod ui;
 mod wallet;
-mod wallet_persistence;
-#[cfg(test)]
-use actions::{
-    add_peer, persist_burn_settings_config, persist_pow_mining_config, remove_address_book_entry,
-    remove_peer, reset_local_chain, set_burn_settings, set_keep_track_of_metrics,
-    set_p2p_accept_inbound, set_p2p_announce_addr, upsert_address_book_entry,
-};
 use actions::{
     api_address_book_delete_form, api_address_book_form, api_burn_fee_estimate_form,
     api_burn_per_block_form, api_chain_reset_form, api_metrics_settings_form,
@@ -54,39 +47,25 @@ use api::{
     api_blocks, api_config, api_mempool, api_metrics, api_network_health, api_p2p_metrics,
     api_peers, api_status, api_wallet_selectable_utxos, api_wallet_transactions, api_wallet_utxos,
 };
-#[cfg(test)]
-use api::{page_items, selectable_wallet_utxo_rows, wallet_utxo_rows};
-#[cfg(test)]
-use auth::{hash_password, hex_encode, pbkdf2_sha256, validate_password, verify_password};
 use auth_routes::{
     api_auth_change_password_form, api_auth_login_form, api_auth_logout_form, api_auth_setup_form,
     api_auth_status, require_auth_middleware,
 };
 use index_html::INDEX_HTML;
-#[cfg(test)]
-use metrics::network_health_at;
 use metrics::{metrics_response, network_health};
 use request_auth::wallet_password_for_request;
-#[cfg(test)]
-use request_auth::{auth_client_key, login_auth_password, same_origin_request};
 pub use state::ServeOptions;
 use state::{AuthClientKey, AuthSession, HttpState, UiChainCache, UiChainView};
 use static_assets::{alpine_js, app_js, favicon, index};
 use ui::{
-    add_pending_outputs, cached_chain_view, cached_ui_blocks_for_tip, ui_blinded_reveal,
-    ui_blinded_transaction, ui_blocks_from_indexes, ui_pending_revealed_transaction,
+    add_pending_outputs, cached_chain_view, cached_ui_blocks_for_tip, ui_blocks_from_indexes,
     ui_transaction, wallet_transaction_row, wallet_transaction_rows,
 };
-#[cfg(test)]
-use ui::{known_output_index, revealed_transactions_by_height, ui_block, ui_blocks};
 use wallet::{
     api_wallet_setup, estimate_burn_fee, estimate_mine_fee, estimate_transfer_fee,
     fee_estimate_json, import_setup_wallet_seed, replace_setup_wallet_with_generated_seed,
     required_fee_per_byte_burn, setup_requires_peer, transfer, wallet_setup_json,
 };
-#[cfg(test)]
-use wallet::{dev_seed_verify_bypass_allowed, validate_transfer_form};
-use wallet_persistence::run_owned_blinded_outbox_persistence;
 
 const EXPLORER_LIMIT: usize = 50;
 const EXPLORER_PAGE_LIMIT: usize = 20;
@@ -107,8 +86,6 @@ use types::{
     NetworkHealthResponse, Page, PageQuery, UiBlock, UiTransaction, WalletTransactionContext,
     WalletTransactionFilters, WalletTransactionRow, WalletTransactionsQuery, WalletUtxoRow,
 };
-#[cfg(test)]
-use types::{BurnSettingsForm, TransferForm};
 
 pub async fn serve(
     node: SharedNode,
@@ -142,14 +119,12 @@ pub async fn serve(
     {
         let cache = state.ui_cache.lock().await;
         println!(
-            "UI data cache ready in {:.2}s (outputs: {}, revealed heights: {}, burn-rank blocks: {})",
+            "UI data cache ready in {:.2}s (outputs: {}, burn-rank blocks: {})",
             ui_data_started.elapsed().as_secs_f64(),
             cache.outputs.len(),
-            cache.revealed_by_height.len(),
             cache.burn_leader_ranks_by_hash.len()
         );
     }
-    tokio::spawn(run_owned_blinded_outbox_persistence(state.clone()));
     let app = Router::new()
         .route("/", get(index))
         .route("/favicon.ico", get(favicon))
@@ -255,7 +230,6 @@ async fn prewarm_chain_view_cache(state: HttpState) -> Result<()> {
         let mut cache = state.ui_cache.lock().await;
         cache.tip_hash = index.tip_hash;
         cache.outputs = index.outputs;
-        cache.revealed_by_height = index.revealed_by_height;
         cache.burn_leader_ranks_by_hash = index.burn_leader_ranks_by_hash;
         return Ok(());
     }
@@ -311,6 +285,3 @@ fn now_ms() -> u64 {
         .unwrap_or_default()
         .as_millis() as u64
 }
-
-#[cfg(test)]
-mod tests;

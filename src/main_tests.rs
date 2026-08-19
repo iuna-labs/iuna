@@ -34,13 +34,13 @@ fn help_mentions_dev_seed_verify_bypass_env() {
 
 fn ledger_with_one_spendable_iuna(wallet: &Wallet) -> Ledger {
     let mut genesis = BTreeMap::new();
-    genesis.insert(wallet.address().to_string(), 2);
+    genesis.insert(wallet.address().to_string(), 3);
     Ledger::new_with_genesis_burns(genesis, vec![GenesisBurn::new(wallet.address(), 1)], 1).unwrap()
 }
 
 fn ledger_with_one_mined_block(wallet: &Wallet) -> Ledger {
     let mut ledger = ledger_with_one_spendable_iuna(wallet);
-    let burn = ledger.build_burn(wallet, 1, 0).unwrap();
+    let burn = ledger.build_burn(wallet, 1, 1).unwrap();
     ledger.submit_transaction(burn).unwrap();
     let block = ledger.mine_next_block(wallet, 1_000).unwrap();
     ledger.apply_locally_mined_block(block).unwrap();
@@ -510,7 +510,7 @@ async fn startup_resumes_persisted_chain_with_network_accepted_future_tip() {
     let store = SqliteChainStore::open(&chain_path).unwrap();
     let persisted_wallet = Wallet::from_seed("persisted-future-chain-owner");
     let mut persisted = ledger_with_one_spendable_iuna(&persisted_wallet);
-    let burn = persisted.build_burn(&persisted_wallet, 1, 0).unwrap();
+    let burn = persisted.build_burn(&persisted_wallet, 1, 1).unwrap();
     persisted.submit_transaction(burn).unwrap();
     let future_tip_ms = iuna::app::now_ms().saturating_add(VDF_TARGET_BLOCK_MS);
     let future_block = persisted
@@ -629,7 +629,7 @@ async fn persistence_loop_saves_new_tip_after_node_changes() {
     ));
     {
         let mut node = node.lock().await;
-        let burn = node.ledger().build_burn(&wallet, 1, 0).unwrap();
+        let burn = node.ledger().build_burn(&wallet, 1, 1).unwrap();
         node.receive_transaction(burn).unwrap();
         node.mine_one_at(1_000).unwrap();
     }

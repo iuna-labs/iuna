@@ -3,10 +3,10 @@ use anyhow::{Context, Result};
 use super::helpers::{allowed_recovery_vdf_rank_count, recovery_vdf_sample_percent};
 use super::{
     AUTO_BLOCK_ANCHOR_BURN_AMOUNT, AUTO_BLOCK_ANCHOR_BURN_FEE,
-    AUTO_PLAINTEXT_BURN_BEFORE_RECOVERY_MS, AutoMineOutcome, AutoMinePlan, BuiltBlindedTransaction,
-    Ledger, NodeCore, PreparedBlock, REVEAL_BUNDLE_COLLECTION_MS, Transaction, run_vdf,
+    AUTO_PLAINTEXT_BURN_BEFORE_RECOVERY_MS, AutoMineOutcome, AutoMinePlan,
+    BURN_BUNDLE_COLLECTION_MS, Ledger, NodeCore, PreparedBlock, Transaction, run_vdf,
 };
-use crate::domain::Amount;
+use crate::domain::{Amount, FinalizerMode};
 
 mod pow;
 
@@ -94,17 +94,17 @@ impl NodeCore {
         let will_run_recovery_vdf = self.should_prepare_recovery_vdf(timestamp_ms);
         let will_run_ticket_vdf = !will_run_recovery_vdf
             && wallet_rank.is_some_and(|rank| self.wallet_rank_runs_vdf(rank));
-        if let Some(wait_ms) = self.reveal_bundle_collection_wait_ms(
+        if let Some(wait_ms) = self.burn_bundle_collection_wait_ms(
             timestamp_ms,
             will_run_ticket_vdf || will_run_recovery_vdf,
         ) {
             plan.skipped_reason = Some(format!(
-                "collecting blinded reveals for next block ({:.1}s remaining)",
+                "collecting burns for next block ({:.1}s remaining)",
                 wait_ms as f64 / 1000.0
             ));
             return plan;
         }
-        if let Err(error) = self.publish_reveal_bundle_for_next_block() {
+        if let Err(error) = self.publish_burn_bundle_for_next_block() {
             plan.skipped_reason = Some(format!("{error:#}"));
             return plan;
         }
@@ -184,18 +184,18 @@ impl NodeCore {
         let will_run_recovery_vdf = self.should_prepare_recovery_vdf(timestamp_ms);
         let will_run_ticket_vdf = !will_run_recovery_vdf
             && wallet_rank.is_some_and(|rank| self.wallet_rank_runs_vdf(rank));
-        if let Some(wait_ms) = self.reveal_bundle_collection_wait_ms(
+        if let Some(wait_ms) = self.burn_bundle_collection_wait_ms(
             timestamp_ms,
             will_run_ticket_vdf || will_run_recovery_vdf,
         ) {
             plan.skipped_reason = Some(format!(
-                "collecting blinded reveals for next block ({:.1}s remaining)",
+                "collecting burns for next block ({:.1}s remaining)",
                 wait_ms as f64 / 1000.0
             ));
             self.last_auto_finalization_status = plan.skipped_reason.clone();
             return plan;
         }
-        if let Err(error) = self.publish_reveal_bundle_for_next_block() {
+        if let Err(error) = self.publish_burn_bundle_for_next_block() {
             plan.skipped_reason = Some(format!("{error:#}"));
             self.last_auto_finalization_status = plan.skipped_reason.clone();
             return plan;
@@ -280,8 +280,8 @@ impl NodeCore {
             self.last_auto_burn_height = Some(current_height);
             return Ok(anchor_burn);
         };
-        let burn = tx.payload.clone();
-        self.submit_owned_blinded_transaction(tx)?;
+        let burn = tx.clone();
+        self.submit_public_transaction(tx)?;
         self.last_auto_burn_height = Some(current_height);
         Ok(Some(burn))
     }
@@ -343,13 +343,13 @@ impl NodeCore {
         ledger: &Ledger,
         fee_per_byte: Amount,
         balance: Amount,
-    ) -> Option<BuiltBlindedTransaction> {
+    ) -> Option<Transaction> {
         let target = self.burn_per_block.min(balance);
         if target == 0 {
             return None;
         }
         let exact_at_fee_rate =
-            self.build_blinded_burn_with_fee_rate_on_ledger(ledger, target, fee_per_byte);
+            self.build_burn_with_fee_rate_on_ledger(ledger, target, fee_per_byte);
         if let Ok((built, estimate)) = exact_at_fee_rate {
             if target
                 .checked_add(estimate.fee)
@@ -361,7 +361,7 @@ impl NodeCore {
         if self.burn_per_block <= balance {
             let affordable_fee = balance.saturating_sub(target);
             if let Ok(built) =
-                self.build_blinded_burn_with_fee_on_ledger(ledger, target, affordable_fee)
+                ledger.build_burn(self.wallet.unlocked().ok()?, target, affordable_fee)
             {
                 return Some(built);
             }
@@ -372,7 +372,7 @@ impl NodeCore {
         let mut best = None;
         while low <= high {
             let amount = low + (high - low) / 2;
-            match self.build_blinded_burn_with_fee_rate_on_ledger(ledger, amount, fee_per_byte) {
+            match self.build_burn_with_fee_rate_on_ledger(ledger, amount, fee_per_byte) {
                 Ok((built, estimate)) => {
                     let fits = amount
                         .checked_add(estimate.fee)
@@ -428,39 +428,56 @@ impl NodeCore {
             < self.recovery_vdf_top_rank_percent
     }
 
-    fn reveal_bundle_collection_wait_ms(
+    fn burn_bundle_collection_wait_ms(
         &mut self,
         timestamp_ms: u64,
         will_run_vdf: bool,
     ) -> Option<u64> {
         let next_height = self.ledger.height().saturating_add(1);
-        let needs_reveal_attestations = self
-            .ledger
-            .reveal_bundle_attestations_required_for_next_block();
-        let has_pending_reveals = !self.ledger.pending_blinded_reveals().is_empty();
-        let needs_reveal_collection = has_pending_reveals || needs_reveal_attestations;
+        let (attestation_ledger, _) = self.ledger_with_local_block_anchor();
+        let explicit_signatures_required = if will_run_vdf {
+            let finalizer_mode = if self.should_prepare_recovery_vdf(timestamp_ms) {
+                FinalizerMode::Recovery
+            } else {
+                FinalizerMode::Ticket
+            };
+            let finalizer_rank = if matches!(finalizer_mode, FinalizerMode::Ticket) {
+                attestation_ledger
+                    .finalizer_rank_for_next_block(self.wallet.address())
+                    .unwrap_or(0)
+            } else {
+                0
+            };
+            attestation_ledger.explicit_burn_bundle_signatures_required_for_next_block(
+                finalizer_mode,
+                finalizer_rank,
+                self.wallet.address(),
+            )
+        } else {
+            0
+        };
         let wallet_is_committee_member = self
             .ledger
-            .reveal_committee_for_next_block()
+            .burn_committee_for_next_block()
             .iter()
             .any(|member| member.owner == self.wallet.address());
-        if !needs_reveal_collection || (!wallet_is_committee_member && !will_run_vdf) {
-            if !needs_reveal_collection {
-                self.reveal_bundle_collection_started = None;
+        if explicit_signatures_required == 0 || (!wallet_is_committee_member && !will_run_vdf) {
+            if explicit_signatures_required == 0 {
+                self.burn_bundle_collection_started = None;
             }
             return None;
         }
 
-        let started_at = match self.reveal_bundle_collection_started {
+        let started_at = match self.burn_bundle_collection_started {
             Some((height, started_at)) if height == next_height => started_at,
             _ => {
-                self.reveal_bundle_collection_started = Some((next_height, timestamp_ms));
+                self.burn_bundle_collection_started = Some((next_height, timestamp_ms));
                 timestamp_ms
             }
         };
         let elapsed = timestamp_ms.saturating_sub(started_at);
-        (elapsed < REVEAL_BUNDLE_COLLECTION_MS)
-            .then(|| REVEAL_BUNDLE_COLLECTION_MS.saturating_sub(elapsed))
+        (elapsed < BURN_BUNDLE_COLLECTION_MS)
+            .then(|| BURN_BUNDLE_COLLECTION_MS.saturating_sub(elapsed))
     }
 
     pub(super) fn prepare_next_block_with_local_anchor(
@@ -468,34 +485,34 @@ impl NodeCore {
         timestamp_ms: u64,
     ) -> Result<PreparedBlock> {
         let (ledger, required_burn_signature) = self.ledger_with_local_block_anchor();
-        ledger.prepare_next_block_with_required_burn_and_reveal_bundles(
+        ledger.prepare_next_block_with_required_burn_and_burn_bundles(
             self.wallet.address(),
             timestamp_ms,
-            self.usable_reveal_bundles(),
+            self.usable_burn_bundles(),
             required_burn_signature.as_deref(),
         )
     }
 
     fn prepare_recovery_block_with_local_anchor(&self, timestamp_ms: u64) -> Result<PreparedBlock> {
         let (ledger, required_burn_signature) = self.ledger_with_local_block_anchor();
-        ledger.prepare_recovery_block_with_required_burn_and_reveal_bundles(
+        ledger.prepare_recovery_block_with_required_burn_and_burn_bundles(
             self.wallet.address(),
             timestamp_ms,
-            self.usable_reveal_bundles(),
+            self.usable_burn_bundles(),
             required_burn_signature.as_deref(),
         )
     }
 
-    fn ledger_with_local_block_anchor(&self) -> (Ledger, Option<String>) {
+    pub(super) fn ledger_with_local_block_anchor(&self) -> (Ledger, Option<String>) {
         let mut ledger = self.ledger.clone();
         let Some((height, burn)) = &self.local_block_anchor_burn else {
             return (ledger, None);
         };
-        if *height == ledger.height() && !ledger.has_transaction(burn.signature()) {
-            ledger.drop_pending_blinded_conflicting_with_transaction(burn);
-            if ledger.submit_transaction(burn.clone()).is_ok() {
-                return (ledger, Some(burn.signature().to_string()));
-            }
+        if *height == ledger.height()
+            && !ledger.has_transaction(burn.signature())
+            && ledger.submit_transaction(burn.clone()).is_ok()
+        {
+            return (ledger, Some(burn.signature().to_string()));
         }
         (ledger, None)
     }
@@ -510,19 +527,208 @@ impl NodeCore {
         }
     }
 
-    pub(super) fn clear_stale_reveal_bundle_collection(&mut self) {
+    pub(super) fn clear_stale_burn_bundle_collection(&mut self) {
         let current_next_height = self.ledger.height().saturating_add(1);
         if self
-            .reveal_bundle_collection_started
+            .burn_bundle_collection_started
             .is_some_and(|(height, _)| height != current_next_height)
         {
-            self.reveal_bundle_collection_started = None;
-        }
-        if self.ledger.pending_blinded_reveals().is_empty() {
-            self.reveal_bundle_collection_started = None;
+            self.burn_bundle_collection_started = None;
         }
     }
 }
 
 #[cfg(test)]
-mod tests;
+mod tests {
+    use std::collections::BTreeMap;
+
+    use crate::{
+        app::InMemoryNetwork,
+        domain::{GenesisBurn, Ledger, MICRO_IUNA, Wallet, run_vdf},
+    };
+
+    use super::NodeCore;
+
+    fn funded_ledger(wallets: &[Wallet]) -> Ledger {
+        let allocations = wallets
+            .iter()
+            .map(|wallet| (wallet.address().to_string(), 10 * MICRO_IUNA))
+            .collect::<BTreeMap<_, _>>();
+        let genesis_burns = wallets
+            .iter()
+            .map(|wallet| GenesisBurn::new(wallet.address(), MICRO_IUNA))
+            .collect::<Vec<_>>();
+        Ledger::new_with_genesis_burns(allocations, genesis_burns, 1).unwrap()
+    }
+
+    fn selected_finalizer(ledger: &Ledger, wallets: &[Wallet]) -> Wallet {
+        let leader = ledger
+            .expected_leader_for_next_block()
+            .expect("test ledger should have a next finalizer");
+        wallets
+            .iter()
+            .find(|wallet| wallet.address() == leader)
+            .unwrap_or_else(|| panic!("missing wallet for selected finalizer {leader}"))
+            .clone()
+    }
+
+    fn non_finalizer_wallet<'a>(wallets: &'a [Wallet], finalizer: &Wallet) -> &'a Wallet {
+        wallets
+            .iter()
+            .find(|wallet| wallet.address() != finalizer.address())
+            .expect("test fixture should include a non-finalizer wallet")
+    }
+
+    #[test]
+    fn local_anchor_burn_is_included_when_publishing_bundle() {
+        let wallet = Wallet::from_seed("local-anchor-bundle-wallet");
+        let mut allocations = BTreeMap::new();
+        allocations.insert(wallet.address().to_string(), 10 * MICRO_IUNA);
+        let ledger = Ledger::new_with_genesis_burns(
+            allocations,
+            vec![GenesisBurn::new(wallet.address(), MICRO_IUNA)],
+            1,
+        )
+        .unwrap();
+        assert!(
+            ledger
+                .finalizer_rank_for_next_block(wallet.address())
+                .is_some()
+        );
+        let mut node =
+            NodeCore::from_ledger_with_burn_fee_and_enabled(wallet.clone(), ledger, true, 0, 1);
+
+        node.prepare_automatic_burn(1).unwrap();
+
+        assert_eq!(node.burn_bundle_collection_wait_ms(1, true), None);
+
+        node.publish_burn_bundle_for_next_block().unwrap();
+
+        assert!(
+            node.usable_burn_bundles()
+                .iter()
+                .any(|bundle| bundle.member == wallet.address() && !bundle.burns.is_empty())
+        );
+    }
+
+    #[test]
+    fn burn_bundle_gossip_reaches_peer_with_matching_mempool() {
+        let alice = Wallet::from_seed("bundle-gossip-alice");
+        let bob = Wallet::from_seed("bundle-gossip-bob");
+        let wallets = [alice.clone(), bob.clone()];
+        let ledger = funded_ledger(&wallets);
+        let finalizer = selected_finalizer(&ledger, &wallets);
+        let burner = non_finalizer_wallet(&wallets, &finalizer);
+        let burn = ledger.build_burn(burner, 1, 1).unwrap();
+        let mut sender = NodeCore::from_ledger(finalizer.clone(), ledger.clone(), 0);
+        let mut receiver = NodeCore::from_ledger(finalizer.clone(), ledger, 0);
+        sender.receive_transaction(burn.clone()).unwrap();
+        receiver.receive_transaction(burn).unwrap();
+
+        sender.publish_burn_bundle_for_next_block().unwrap();
+        let mut network = InMemoryNetwork::default();
+        network.insert("sender", sender);
+        network.insert("receiver", receiver);
+
+        network.deliver_until_idle().unwrap();
+
+        assert!(
+            network
+                .node("receiver")
+                .unwrap()
+                .usable_burn_bundles()
+                .iter()
+                .any(|bundle| bundle.member == finalizer.address() && !bundle.burns.is_empty())
+        );
+    }
+
+    #[test]
+    fn block_with_burn_bundle_imports_on_independent_peer_ledger() {
+        let alice = Wallet::from_seed("bundle-import-alice");
+        let bob = Wallet::from_seed("bundle-import-bob");
+        let wallets = [alice.clone(), bob.clone()];
+        let ledger = funded_ledger(&wallets);
+        let finalizer = selected_finalizer(&ledger, &wallets);
+        let burner = non_finalizer_wallet(&wallets, &finalizer);
+        let burn = ledger.build_burn(burner, 1, 1).unwrap();
+        let mut producer = NodeCore::from_ledger_with_burn_fee_and_enabled(
+            finalizer.clone(),
+            ledger.clone(),
+            true,
+            0,
+            1,
+        );
+        let mut peer = NodeCore::from_ledger(finalizer.clone(), ledger, 0);
+        producer.receive_transaction(burn.clone()).unwrap();
+        peer.receive_transaction(burn.clone()).unwrap();
+        producer.prepare_automatic_burn(1).unwrap();
+        producer.publish_burn_bundle_for_next_block().unwrap();
+
+        let work = producer.prepare_next_block_with_local_anchor(1).unwrap();
+        let block = producer
+            .complete_prepared_block_at(
+                work.clone(),
+                run_vdf(work.vdf_seed(), work.vdf_rounds()),
+                1,
+            )
+            .unwrap();
+        assert!(!block.burn_bundle_section.burns.is_empty());
+
+        peer.receive(super::super::GossipEnvelope::Block(block))
+            .unwrap();
+
+        assert_eq!(producer.chain_tip_hash(), peer.chain_tip_hash());
+        assert!(
+            !peer
+                .pending_transactions()
+                .iter()
+                .any(|transaction| transaction.signature() == burn.signature())
+        );
+    }
+
+    #[test]
+    fn burn_bundle_contents_change_prepared_vdf_seed() {
+        let alice = Wallet::from_seed("bundle-seed-alice");
+        let bob = Wallet::from_seed("bundle-seed-bob");
+        let wallets = [alice.clone(), bob.clone()];
+        let ledger = funded_ledger(&wallets);
+        let finalizer = selected_finalizer(&ledger, &wallets);
+        let burner = non_finalizer_wallet(&wallets, &finalizer);
+        let burn = ledger.build_burn(burner, 1, 1).unwrap();
+        let mut node =
+            NodeCore::from_ledger_with_burn_fee_and_enabled(finalizer, ledger, true, 0, 1);
+        node.receive_transaction(burn).unwrap();
+        node.prepare_automatic_burn(1).unwrap();
+
+        let (ledger_with_anchor, required_burn_signature) = node.ledger_with_local_block_anchor();
+        let without_bundle = ledger_with_anchor
+            .prepare_next_block_with_required_burn_and_burn_bundles(
+                node.wallet_address(),
+                1,
+                Vec::new(),
+                required_burn_signature.as_deref(),
+            )
+            .unwrap();
+
+        node.publish_burn_bundle_for_next_block().unwrap();
+        let with_bundle = node.prepare_next_block_with_local_anchor(1).unwrap();
+
+        assert_ne!(without_bundle.vdf_seed(), with_bundle.vdf_seed());
+        assert_ne!(
+            without_bundle
+                .finish_at(
+                    node.wallet.unlocked().unwrap(),
+                    "precheck-vdf-output".to_string(),
+                    1,
+                )
+                .burn_bundle_hashes(),
+            with_bundle
+                .finish_at(
+                    node.wallet.unlocked().unwrap(),
+                    "precheck-vdf-output".to_string(),
+                    1,
+                )
+                .burn_bundle_hashes()
+        );
+    }
+}

@@ -2,25 +2,17 @@ use std::collections::{BTreeMap, BTreeSet};
 
 use anyhow::{Context, Result, bail};
 
-use super::blinded::{
-    ActiveBlindedTransaction, blinded_envelope_fee_for_transaction, blinded_reveal_inputs_match,
-    blinded_transaction_commitment, decrypt_blinded_transaction, verify_blinded_input_signatures,
-};
 use super::ledger_mempool::pending_pool_item_bytes;
 use super::ledger_ops::{
-    apply_spendable_pending_transaction, apply_transaction, best_selectable_blinded_index,
-    best_selectable_burn_from_index, best_selectable_transaction_index,
-    ensure_blinded_transaction_fits_empty_block, ensure_transaction_fits_empty_block,
-    estimated_block_selection_size_bytes, spend_blinded_inputs, spend_spendable_blinded_inputs,
-    transaction_has_missing_inputs, validate_transaction_inputs, validate_transaction_outputs,
+    apply_spendable_pending_transaction, apply_transaction, best_selectable_burn_from_index,
+    best_selectable_transaction_index, ensure_transaction_fits_empty_block,
+    estimated_block_selection_size_bytes, transaction_has_missing_inputs,
+    validate_transaction_inputs, validate_transaction_outputs,
 };
 use super::mine_policy::{
     MINE_MAX_ANCHOR_AGE_BLOCKS, mine_anchor, mine_anchor_count_before_height,
 };
-use super::selection::{
-    BlockSelection, SelectableItem, TransactionKind, best_selectable_item, blinded_fee_rate_key,
-    fee_rate_key,
-};
+use super::selection::{BlockSelection, TransactionKind};
 use super::transaction::{
     UnsignedTxInput, transaction_inputs_available, transaction_inputs_spent_by,
 };
@@ -28,11 +20,8 @@ use super::validation::{
     validate_address, validate_hash, validate_signature, validate_stratum_header,
 };
 use super::{
-    Amount, BLINDED_KEY_BYTES, BLINDED_NONCE_BYTES, BLINDED_VISIBLE_INPUTS_REQUIRED_HEIGHT,
-    BLOCK_ITEM_FEES_REQUIRED_HEIGHT, BlindedReveal, BlindedTransaction, Ledger,
-    MAX_BLINDED_TRANSACTION_EXPIRY_HEIGHTS, MAX_PENDING_POOL_BYTES, MAX_PENDING_TRANSACTIONS,
-    MINE_ACTIONS_PER_ANCHOR_LIMIT, OutPoint, RevealBundleSection, Transaction, TxOutput,
-    decode_hex, decode_hex_array,
+    Amount, BurnBundleSection, Ledger, MAX_PENDING_POOL_BYTES, MAX_PENDING_TRANSACTIONS,
+    MINE_ACTIONS_PER_ANCHOR_LIMIT, OutPoint, Transaction, TxOutput,
 };
 
 impl Ledger {
@@ -86,29 +75,29 @@ impl Ledger {
         valid
     }
 
-    pub(super) fn select_block_transactions_with_reveal_section(
+    pub(super) fn select_block_transactions_with_burn_section(
         &self,
         miner: &str,
         required_burn_signature: Option<&str>,
-        reveal_bundle_section: &RevealBundleSection,
+        burn_bundle_section: &BurnBundleSection,
     ) -> Result<BlockSelection> {
         self.select_block_transactions_with_required_burn_owner(
             Some(miner),
             required_burn_signature,
-            reveal_bundle_section,
+            burn_bundle_section,
         )
     }
 
-    pub(super) fn select_recovery_block_transactions_with_reveal_section(
+    pub(super) fn select_recovery_block_transactions_with_burn_section(
         &self,
         miner: &str,
         required_burn_signature: Option<&str>,
-        reveal_bundle_section: &RevealBundleSection,
+        burn_bundle_section: &BurnBundleSection,
     ) -> Result<BlockSelection> {
         self.select_block_transactions_with_required_burn_owner(
             Some(miner),
             required_burn_signature,
-            reveal_bundle_section,
+            burn_bundle_section,
         )
     }
 
@@ -116,49 +105,73 @@ impl Ledger {
         &self,
         required_burn_owner: Option<&str>,
         required_burn_signature: Option<&str>,
-        reveal_bundle_section: &RevealBundleSection,
+        burn_bundle_section: &BurnBundleSection,
     ) -> Result<BlockSelection> {
         let mut utxos = self.utxos.clone();
         let mut remaining = self.valid_pending_transactions();
-        let mut remaining_blinded = self.valid_pending_blinded_transactions();
         let mut selected = Vec::new();
-        let mut selected_blinded = Vec::new();
-        let next_height = self.height().saturating_add(1);
 
-        if let Some(signature) = required_burn_signature {
-            let index = remaining
-                .iter()
-                .position(|transaction| transaction.signature() == signature)
-                .with_context(|| format!("required burn {signature} is not pending"))?;
+        let required_burn_signatures = burn_bundle_section
+            .required_burns()
+            .into_iter()
+            .map(|burn| burn.signature().to_string())
+            .collect::<BTreeSet<_>>();
+        let mut selected_required_burn_signatures = BTreeSet::new();
+        let mut index = 0;
+        while index < remaining.len()
+            && selected_required_burn_signatures.len() < required_burn_signatures.len()
+        {
+            if !required_burn_signatures.contains(remaining[index].signature()) {
+                index += 1;
+                continue;
+            }
             let tx = remaining.remove(index);
             if !tx.is_burn() {
-                bail!("required block anchor must be a burn transaction");
+                bail!("attested transaction must be a burn");
             }
-            if let Some(owner) = required_burn_owner {
-                if tx.sender() != owner {
-                    bail!("required block anchor burn must be from the recovery finalizer");
-                }
-            }
-            let candidate = BlockSelection {
-                transactions: vec![tx.clone()],
-                blinded_transactions: selected_blinded.clone(),
+            let signature = tx.signature().to_string();
+            let mut candidate = BlockSelection {
+                transactions: selected.clone(),
             };
+            candidate.transactions.push(tx.clone());
             if estimated_block_selection_size_bytes(
                 &candidate,
                 required_burn_owner.is_some(),
-                reveal_bundle_section,
+                burn_bundle_section,
             )? > self.launch_profile.max_block_bytes
             {
-                bail!("required block anchor burn does not fit in the block");
+                bail!("attested burns do not fit in the block");
             }
-            apply_transaction(&tx, &mut utxos)
-                .context("required block anchor burn is not spendable")?;
+            apply_transaction(&tx, &mut utxos).context("attested burn is not spendable")?;
             selected.push(tx);
-            remove_extra_zero_fee_transactions_after_anchor(
-                &mut remaining,
-                required_burn_owner,
-                next_height,
-            );
+            selected_required_burn_signatures.insert(signature);
+        }
+        if selected_required_burn_signatures.len() != required_burn_signatures.len() {
+            let missing = required_burn_signatures
+                .difference(&selected_required_burn_signatures)
+                .next()
+                .expect("required burn set differs");
+            bail!("attested burn {missing} is not pending");
+        }
+
+        if let Some(signature) = required_burn_signature {
+            if !selected
+                .iter()
+                .any(|transaction| transaction.signature() == signature)
+            {
+                let index = remaining
+                    .iter()
+                    .position(|transaction| transaction.signature() == signature)
+                    .with_context(|| format!("required burn {signature} is not pending"))?;
+                let tx = remaining.remove(index);
+                self.select_required_anchor_burn(
+                    tx,
+                    required_burn_owner,
+                    burn_bundle_section,
+                    &mut utxos,
+                    &mut selected,
+                )?;
+            }
         }
 
         let needs_first_burn = !selected.iter().any(Transaction::is_burn);
@@ -175,96 +188,71 @@ impl Ledger {
             };
             if let Some(index) = first_burn_index {
                 let tx = remaining.remove(index);
-                let mut candidate = BlockSelection {
-                    transactions: selected.clone(),
-                    blinded_transactions: selected_blinded.clone(),
-                };
-                candidate.transactions.push(tx.clone());
-                if estimated_block_selection_size_bytes(
-                    &candidate,
-                    required_burn_owner.is_some(),
-                    reveal_bundle_section,
-                )? <= self.launch_profile.max_block_bytes
-                {
-                    apply_transaction(&tx, &mut utxos)?;
-                    selected.push(tx);
-                    remove_extra_zero_fee_transactions_after_anchor(
-                        &mut remaining,
-                        required_burn_owner,
-                        next_height,
-                    );
-                }
+                self.select_required_anchor_burn(
+                    tx,
+                    required_burn_owner,
+                    burn_bundle_section,
+                    &mut utxos,
+                    &mut selected,
+                )?;
             }
         }
 
         while selected.len() < self.launch_profile.max_block_transactions {
-            let selected_count = selected.len() + selected_blinded.len();
-            if selected_count >= self.launch_profile.max_block_transactions {
-                break;
-            }
-
-            let best_plain = best_selectable_transaction_index(&remaining, &utxos, None)
-                .map(|index| SelectableItem::Plain(index, fee_rate_key(&remaining[index])));
-            let best_blinded =
-                best_selectable_blinded_index(&remaining_blinded, &utxos).map(|index| {
-                    SelectableItem::Blinded(index, blinded_fee_rate_key(&remaining_blinded[index]))
-                });
-            let Some(item) = best_selectable_item(best_plain, best_blinded) else {
+            let Some(index) = best_selectable_transaction_index(&remaining, &utxos, None) else {
                 break;
             };
-
-            match item {
-                SelectableItem::Plain(index, _) => {
-                    let tx = remaining.remove(index);
-                    if !zero_fee_transaction_is_selectable(
-                        &tx,
-                        required_burn_owner,
-                        selected.iter().filter(|tx| tx.fee() == 0).count(),
-                        next_height,
-                    ) {
-                        continue;
-                    }
-                    let mut candidate = BlockSelection {
-                        transactions: selected.clone(),
-                        blinded_transactions: selected_blinded.clone(),
-                    };
-                    candidate.transactions.push(tx.clone());
-                    if estimated_block_selection_size_bytes(
-                        &candidate,
-                        required_burn_owner.is_some(),
-                        reveal_bundle_section,
-                    )? <= self.launch_profile.max_block_bytes
-                    {
-                        apply_transaction(&tx, &mut utxos)?;
-                        selected.push(tx);
-                    }
-                }
-                SelectableItem::Blinded(index, _) => {
-                    let transaction = remaining_blinded.remove(index);
-                    if next_height >= BLOCK_ITEM_FEES_REQUIRED_HEIGHT && transaction.fee == 0 {
-                        continue;
-                    }
-                    let mut candidate = BlockSelection {
-                        transactions: selected.clone(),
-                        blinded_transactions: selected_blinded.clone(),
-                    };
-                    candidate.blinded_transactions.push(transaction.clone());
-                    if estimated_block_selection_size_bytes(
-                        &candidate,
-                        required_burn_owner.is_some(),
-                        reveal_bundle_section,
-                    )? <= self.launch_profile.max_block_bytes
-                    {
-                        spend_blinded_inputs(&transaction, &mut utxos)?;
-                        selected_blinded.push(transaction);
-                    }
-                }
+            let tx = remaining.remove(index);
+            let mut candidate = BlockSelection {
+                transactions: selected.clone(),
+            };
+            candidate.transactions.push(tx.clone());
+            if estimated_block_selection_size_bytes(
+                &candidate,
+                required_burn_owner.is_some(),
+                burn_bundle_section,
+            )? <= self.launch_profile.max_block_bytes
+            {
+                apply_transaction(&tx, &mut utxos)?;
+                selected.push(tx);
             }
         }
         Ok(BlockSelection {
             transactions: selected,
-            blinded_transactions: selected_blinded,
         })
+    }
+
+    fn select_required_anchor_burn(
+        &self,
+        tx: Transaction,
+        required_burn_owner: Option<&str>,
+        burn_bundle_section: &BurnBundleSection,
+        utxos: &mut BTreeMap<OutPoint, TxOutput>,
+        selected: &mut Vec<Transaction>,
+    ) -> Result<()> {
+        if !tx.is_burn() {
+            bail!("required block anchor must be a burn transaction");
+        }
+        if let Some(owner) = required_burn_owner {
+            if tx.sender() != owner {
+                bail!("required block anchor burn must be from the recovery finalizer");
+            }
+        }
+        let mut candidate = BlockSelection {
+            transactions: selected.clone(),
+        };
+        candidate.transactions.push(tx.clone());
+        if estimated_block_selection_size_bytes(
+            &candidate,
+            required_burn_owner.is_some(),
+            burn_bundle_section,
+        )? > self.launch_profile.max_block_bytes
+        {
+            bail!("required block anchor burn does not fit in the block");
+        }
+        apply_transaction(&tx, utxos).context("required block anchor burn is not spendable")?;
+        selected.push(tx);
+        Ok(())
     }
 
     pub(super) fn select_inputs(
@@ -369,7 +357,7 @@ impl Ledger {
                 return Ok(());
             }
             let mut promoted = None;
-            let mut utxos = self.utxos_after_valid_pending_and_blinded()?;
+            let mut utxos = self.utxos_after_valid_pending()?;
             for (index, transaction) in self.orphans.iter().enumerate() {
                 if transaction_inputs_spent_by(transaction, &self.pending) {
                     continue;
@@ -408,9 +396,13 @@ impl Ledger {
             Transaction::Transfer {
                 inputs,
                 outputs,
+                fee,
                 signature,
                 ..
             } => {
+                if *fee == 0 {
+                    bail!("transfer transaction fee must be greater than zero");
+                }
                 validate_transaction_inputs(inputs)?;
                 validate_transaction_outputs(outputs)?;
                 validate_signature(signature, "transaction signature")?;
@@ -418,9 +410,13 @@ impl Ledger {
             Transaction::Burn {
                 inputs,
                 change,
+                fee,
                 signature,
                 ..
             } => {
+                if *fee == 0 {
+                    bail!("burn transaction fee must be greater than zero");
+                }
                 validate_transaction_inputs(inputs)?;
                 validate_transaction_outputs(change)?;
                 validate_signature(signature, "transaction signature")?;
@@ -458,150 +454,10 @@ impl Ledger {
         Ok(())
     }
 
-    pub(super) fn validate_blinded_transaction(
-        &self,
-        transaction: &BlindedTransaction,
-    ) -> Result<()> {
-        validate_hash(&transaction.commitment, "blinded transaction commitment")?;
-        validate_hash(
-            &transaction.payload_hash,
-            "blinded transaction payload hash",
-        )?;
-        decode_hex_array::<BLINDED_NONCE_BYTES>(&transaction.nonce)
-            .context("invalid blinded transaction nonce")?;
-        let ciphertext = decode_hex(&transaction.ciphertext)
-            .context("invalid blinded transaction ciphertext")?;
-        if ciphertext.is_empty() {
-            bail!("blinded transaction ciphertext is empty");
-        }
-        if ciphertext.len() != transaction.encrypted_size as usize {
-            bail!("blinded transaction encrypted size is invalid");
-        }
-        if transaction.expires_at_height <= self.height() {
-            bail!("blinded transaction is expired");
-        }
-        if transaction.expires_at_height
-            > self
-                .height()
-                .saturating_add(MAX_BLINDED_TRANSACTION_EXPIRY_HEIGHTS)
-        {
-            bail!("blinded transaction expiry is too far in the future");
-        }
-        validate_transaction_inputs(&transaction.inputs)?;
-        let next_height = self.height().saturating_add(1);
-        if transaction.inputs.is_empty() && next_height >= BLINDED_VISIBLE_INPUTS_REQUIRED_HEIGHT {
-            bail!(
-                "blinded transaction must lock visible inputs from height {}",
-                BLINDED_VISIBLE_INPUTS_REQUIRED_HEIGHT
-            );
-        }
-        if next_height >= BLOCK_ITEM_FEES_REQUIRED_HEIGHT && transaction.fee == 0 {
-            bail!(
-                "blinded transaction must pay a fee from height {}",
-                BLOCK_ITEM_FEES_REQUIRED_HEIGHT
-            );
-        }
-        if transaction.inputs.is_empty() && transaction.fee > 0 {
-            bail!("blinded transaction with a fee must lock visible inputs");
-        }
-        if !transaction.inputs.is_empty() {
-            verify_blinded_input_signatures(transaction)?;
-        }
-        let expected = blinded_transaction_commitment(transaction)?;
-        if transaction.commitment != expected {
-            bail!("blinded transaction commitment is invalid");
-        }
-        ensure_blinded_transaction_fits_empty_block(
-            transaction,
-            self.launch_profile.max_block_bytes,
-        )?;
-        Ok(())
-    }
-
-    pub(super) fn validate_blinded_reveal_terms(&self, reveal: &BlindedReveal) -> Result<()> {
-        validate_hash(&reveal.commitment, "blinded reveal commitment")?;
-        decode_hex_array::<BLINDED_KEY_BYTES>(&reveal.key).context("invalid blinded reveal key")?;
-        Ok(())
-    }
-
-    pub(super) fn valid_pending_blinded_transactions(&self) -> Vec<BlindedTransaction> {
-        let next_height = self.height().saturating_add(1);
-        self.pending_blinded
-            .iter()
-            .filter(|transaction| {
-                transaction.expires_at_height > next_height
-                    && self.validate_blinded_transaction(transaction).is_ok()
-            })
-            .cloned()
-            .collect()
-    }
-
-    pub(super) fn valid_pending_blinded_reveals(&self) -> Vec<BlindedReveal> {
-        self.pending_reveals
-            .iter()
-            .filter(|reveal| self.pending_reveal_transaction(reveal).is_ok())
-            .cloned()
-            .collect()
-    }
-
-    pub(super) fn reveal_fee_order_key(&self, reveal: &BlindedReveal) -> (u128, Amount) {
-        let Some(active) = self.active_blinded.get(&reveal.commitment) else {
-            return (0, 0);
-        };
-        let size = active.transaction.fee_rate_size_bytes();
-        let rate = if size == 0 {
-            0
-        } else {
-            u128::from(active.transaction.fee) * 1_000_000 / size as u128
-        };
-        (rate, active.transaction.fee)
-    }
-
-    pub(super) fn pending_reveal_transaction(&self, reveal: &BlindedReveal) -> Result<Transaction> {
-        self.validate_blinded_reveal_terms(reveal)?;
-        let active = self
-            .active_blinded
-            .get(&reveal.commitment)
-            .context("blinded reveal does not reference an active blinded transaction")?;
-        self.decrypt_active_blinded(active, reveal)
-    }
-
-    pub(super) fn decrypt_active_blinded(
-        &self,
-        active: &ActiveBlindedTransaction,
-        reveal: &BlindedReveal,
-    ) -> Result<Transaction> {
-        if self.height() >= active.transaction.expires_at_height {
-            bail!("blinded transaction reveal is expired");
-        }
-        let transaction = decrypt_blinded_transaction(&active.transaction, reveal)?;
-        if matches!(transaction, Transaction::Mine { .. }) {
-            bail!("mine actions are public and cannot be blinded");
-        }
-        if blinded_envelope_fee_for_transaction(&transaction) != active.transaction.fee {
-            bail!("blinded transaction reveal fee does not match envelope");
-        }
-        if !blinded_reveal_inputs_match(active, &transaction) {
-            bail!("blinded transaction reveal inputs do not match envelope");
-        }
-        self.validate_transaction_terms(&transaction)?;
-        Ok(transaction)
-    }
-
     pub(super) fn utxos_after_valid_pending(&self) -> Result<BTreeMap<OutPoint, TxOutput>> {
         let mut utxos = self.utxos.clone();
         for pending in self.valid_pending_transactions() {
             apply_transaction(&pending, &mut utxos)?;
-        }
-        Ok(utxos)
-    }
-
-    pub(super) fn utxos_after_valid_pending_and_blinded(
-        &self,
-    ) -> Result<BTreeMap<OutPoint, TxOutput>> {
-        let mut utxos = self.utxos_after_valid_pending()?;
-        for pending in self.valid_pending_blinded_transactions() {
-            spend_blinded_inputs(&pending, &mut utxos)?;
         }
         Ok(utxos)
     }
@@ -616,40 +472,6 @@ impl Ledger {
                 continue;
             }
         }
-        for pending in self.valid_pending_blinded_transactions() {
-            if spend_spendable_blinded_inputs(&pending, &mut utxos).is_err() {
-                continue;
-            }
-        }
         Ok(utxos)
     }
-}
-
-fn zero_fee_transaction_is_selectable(
-    transaction: &Transaction,
-    finalizer: Option<&str>,
-    selected_zero_fee_transactions: usize,
-    height: u64,
-) -> bool {
-    if height < BLOCK_ITEM_FEES_REQUIRED_HEIGHT || transaction.fee() > 0 {
-        return true;
-    }
-    selected_zero_fee_transactions == 0
-        && transaction.is_burn()
-        && finalizer.is_some_and(|owner| transaction.sender() == owner)
-}
-
-fn remove_extra_zero_fee_transactions_after_anchor(
-    remaining: &mut Vec<Transaction>,
-    finalizer: Option<&str>,
-    height: u64,
-) {
-    if height < BLOCK_ITEM_FEES_REQUIRED_HEIGHT {
-        return;
-    }
-    remaining.retain(|transaction| {
-        transaction.fee() > 0
-            || !(transaction.is_burn()
-                && finalizer.is_some_and(|owner| transaction.sender() == owner))
-    });
 }

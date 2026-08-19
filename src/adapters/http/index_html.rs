@@ -397,7 +397,6 @@ pub(super) const INDEX_HTML: &str = r#"<!doctype html>
     .mempool-item.before-last-block { opacity: .56; }
     .mempool-item.new-since-block { background: #151a12; opacity: 1; }
     .mempool-item.new-since-block::before { content: ""; position: absolute; inset: 0 auto 0 0; width: 3px; border-radius: 8px 0 0 8px; background: #d5f55f; }
-    .mempool-item.blinded-hidden { background: linear-gradient(135deg, #141218, #101316); border-color: #353040; }
     .mempool-state { color: #d5f55f; font-size: 10px; font-weight: 850; text-transform: uppercase; }
     .mempool-time { color: #8d989f; font-size: 11px; font-weight: 700; }
     .mempool-top { display: flex; justify-content: space-between; gap: 8px; align-items: flex-start; min-width: 0; }
@@ -408,8 +407,6 @@ pub(super) const INDEX_HTML: &str = r#"<!doctype html>
     .pill.burn { background: #332918; color: #ffd070; }
     .pill.transfer { background: #17312a; color: #8de9cd; }
     .pill.mine { background: #172a34; color: #8bdcff; }
-    .pill.blinded { background: #272433; color: #c8b8ff; }
-    .pill.reveal, .pill.revealed { background: #2b2f20; color: #d5f55f; }
     .pill.error { background: #341918; color: #ffb1a8; }
     .mempool-panel { min-width: 0; overflow: hidden; }
     .mempool-strip { width: 100%; min-width: 0; display: flex; gap: 8px; overflow-x: auto; overscroll-behavior-x: contain; padding: 1px 0 10px; scroll-snap-type: x proximity; }
@@ -812,8 +809,6 @@ pub(super) const INDEX_HTML: &str = r#"<!doctype html>
             <div class="peer-summary-item"><div class="peer-summary-label">Banned</div><div class="peer-summary-value" x-text="networkHealth.banned_peers ?? '-'"></div></div>
             <div class="peer-summary-item"><div class="peer-summary-label">Mempool</div><div class="peer-summary-value" x-text="networkHealth.pending_transactions ?? '-'"></div></div>
             <div class="peer-summary-item"><div class="peer-summary-label">Plain Tx</div><div class="peer-summary-value" x-text="networkHealth.pending_plain_transactions ?? '-'"></div></div>
-            <div class="peer-summary-item"><div class="peer-summary-label">Commits</div><div class="peer-summary-value" x-text="networkHealth.pending_blinded_transactions ?? '-'"></div></div>
-            <div class="peer-summary-item"><div class="peer-summary-label">Reveals</div><div class="peer-summary-value" x-text="networkHealth.pending_blinded_reveals ?? '-'"></div></div>
             <div class="peer-summary-item"><div class="peer-summary-label">Time Offset</div><div class="peer-summary-value" x-text="networkTimeOffsetLabel()"></div></div>
             <div class="peer-summary-item"><div class="peer-summary-label">Clock Warnings</div><div class="peer-summary-value" x-text="networkHealth.bad_clock_peers ?? '-'"></div></div>
           </div>
@@ -877,10 +872,10 @@ pub(super) const INDEX_HTML: &str = r#"<!doctype html>
           <div class="metric"><div class="label">Hello Rx</div><div class="value" x-text="p2pMetrics.hello_envelopes_received ?? 0"></div></div>
           <div class="metric"><div class="label">Inventory Rx</div><div class="value" x-text="p2pMetrics.inventory_envelopes_received ?? 0"></div></div>
           <div class="metric"><div class="label">Data Rx</div><div class="value" x-text="p2pMetrics.data_envelopes_received ?? 0"></div></div>
-          <div class="metric"><div class="label">Commit Rx</div><div class="value" x-text="p2pMetrics.blinded_transactions_received ?? 0"></div></div>
-          <div class="metric"><div class="label">Commit Batches Rx</div><div class="value" x-text="p2pMetrics.blinded_transaction_envelopes_received ?? 0"></div></div>
-          <div class="metric"><div class="label">Reveal Rx</div><div class="value" x-text="p2pMetrics.blinded_reveals_received ?? 0"></div></div>
-          <div class="metric"><div class="label">Reveal Batches Rx</div><div class="value" x-text="p2pMetrics.blinded_reveal_envelopes_received ?? 0"></div></div>
+          <div class="metric"><div class="label">Tx Rx</div><div class="value" x-text="p2pMetrics.transactions_received ?? 0"></div></div>
+          <div class="metric"><div class="label">Tx Envelopes Rx</div><div class="value" x-text="p2pMetrics.transaction_envelopes_received ?? 0"></div></div>
+          <div class="metric"><div class="label">Burn Bundles Rx</div><div class="value" x-text="p2pMetrics.burn_bundles_received ?? 0"></div></div>
+          <div class="metric"><div class="label">Burn Bundle Envelopes Rx</div><div class="value" x-text="p2pMetrics.burn_bundle_envelopes_received ?? 0"></div></div>
           <div class="metric"><div class="label">Control Rx</div><div class="value" x-text="p2pMetrics.control_envelopes_received ?? 0"></div></div>
         </div>
         <div class="metric-context">
@@ -905,7 +900,6 @@ pub(super) const INDEX_HTML: &str = r#"<!doctype html>
                 <div class="block-meta">
                   <span x-text="burnCountLabel(block)"></span>
                   <span x-text="transferCountLabel(block)"></span>
-                  <span x-text="commitCountLabel(block)"></span>
                   <span x-text="mineCountLabel(block)"></span>
                 </div>
                 <div class="block-miner" x-text="blockFinalizerLabel(block)"></div>
@@ -963,8 +957,7 @@ pub(super) const INDEX_HTML: &str = r#"<!doctype html>
                 </div>
                 <div class="detail-kv"><div class="key">Mode</div><div x-text="selectedBlock.finalizer_mode === 'recovery' ? 'Recovery' : `Rank ${selectedBlock.finalizer_rank ?? 0}`"></div></div>
                 <div class="detail-kv"><div class="key">Reward</div><div>IUNA <span x-text="amountLabel(selectedBlock.reward)"></span></div></div>
-                <div class="detail-kv"><div class="key">Reveal Lists</div><div x-text="blockRevealListRatio(selectedBlock)"></div></div>
-                <div class="detail-kv"><div class="key">Fee Penalty</div><div class="fee-penalty-value" :class="{ penalty: blockRevealFeePenaltyAmount(selectedBlock) > 0 }">IUNA <span x-text="amountLabel(blockRevealFeePenaltyAmount(selectedBlock))"></span></div></div>
+                <div class="detail-kv"><div class="key">Burn Bundles</div><div x-text="blockBurnBundleRatio(selectedBlock)"></div></div>
                 <div class="detail-kv"><div class="key">Burns</div><div x-text="blockBurnCount(selectedBlock)"></div></div>
                 <div class="detail-kv"><div class="key">Transfers</div><div x-text="blockTransferCount(selectedBlock)"></div></div>
                 <div class="detail-kv"><div class="key">Total Burned</div><div>IUNA <span x-text="amountLabel(blockBurned(selectedBlock))"></span></div></div>
@@ -984,39 +977,35 @@ pub(super) const INDEX_HTML: &str = r#"<!doctype html>
                     <template x-for="tx in selectedBlock.transactions" :key="tx.signature">
                       <div class="tx-card" role="button" tabindex="0" @click="openTransactionModal(tx, { source: 'Envelope', blockHeight: selectedBlock.height, blockFinalizer: selectedBlock.miner })" @keydown.enter.prevent="openTransactionModal(tx, { source: 'Envelope', blockHeight: selectedBlock.height, blockFinalizer: selectedBlock.miner })" @keydown.space.prevent="openTransactionModal(tx, { source: 'Envelope', blockHeight: selectedBlock.height, blockFinalizer: selectedBlock.miner })">
                         <span class="pill" :class="txPillClass(tx)" x-text="txPillLabel(tx)"></span>
-                        <div class="tx-field" x-show="!isBlindedMempoolItem(tx)"><span class="tx-label">Amount</span><span class="tx-value money">IUNA <span x-text="amountLabel(txAmount(tx))"></span></span></div>
+                        <div class="tx-field"><span class="tx-label">Amount</span><span class="tx-value money">IUNA <span x-text="amountLabel(txAmount(tx))"></span></span></div>
                         <div class="tx-field"><span class="tx-label">Fee</span><span class="tx-value money" x-text="txFeeLabel(tx)"></span></div>
-                        <div class="tx-field" x-show="!isBlindedMempoolItem(tx)"><span class="tx-label">From</span><code class="tx-value hash" x-text="shortAddressLabel(txFrom(tx))"></code></div>
+                        <div class="tx-field"><span class="tx-label">From</span><code class="tx-value hash" x-text="shortAddressLabel(txFrom(tx))"></code></div>
                         <div class="tx-field" x-show="txTo(tx)"><span class="tx-label">To</span><code class="tx-value hash" x-text="shortAddressLabel(txTo(tx))"></code></div>
-                        <div class="tx-field" x-show="isBlindedMempoolItem(tx)"><span class="tx-label">Commitment</span><code class="tx-value hash" x-text="short(tx.commitment || tx.signature)"></code></div>
-                        <div class="tx-field" x-show="tx.encrypted_size || tx.encryptedSize"><span class="tx-label">Bytes</span><span class="tx-value number" x-text="tx.encrypted_size || tx.encryptedSize"></span></div>
-                        <div class="tx-field" x-show="tx.expires_at_height || tx.expiresAtHeight"><span class="tx-label">Expires</span><span class="tx-value number" x-text="tx.expires_at_height || tx.expiresAtHeight"></span></div>
                         <div class="tx-field" x-show="isMineTx(tx)"><span class="tx-label">Proof Bits</span><span class="tx-value number"><span x-text="txProofBits(tx) ?? '-'"></span> / <span x-text="txDifficultyBits(tx) ?? '-'"></span></span></div>
                         <div class="tx-field" x-show="isMineTx(tx)"><span class="tx-label">Proof Hash</span><code class="tx-value hash" x-text="short(txProofHash(tx))"></code></div>
-                        <div class="tx-field" x-show="!isBlindedMempoolItem(tx)"><span class="tx-label">Signature</span><code class="tx-value hash" x-text="short(tx.signature)"></code></div>
+                        <div class="tx-field"><span class="tx-label">Signature</span><code class="tx-value hash" x-text="short(tx.signature)"></code></div>
                       </div>
                     </template>
                   </div>
                   <div class="muted" x-show="selectedBlock.transactions.length === 0">No envelope transactions</div>
                 </div>
-                <template x-for="bundle in selectedBlock.reveal_bundles || selectedBlock.revealBundles || []" :key="bundle.hash">
+                <template x-for="bundle in selectedBlock.burn_bundles || selectedBlock.burnBundles || []" :key="bundle.hash">
                   <details class="tx-section">
-                    <summary class="tx-section-title"><span x-text="`Reveal bundle ${bundle.slot}`"></span><span class="tx-section-meta"><span x-text="shortAddressLabel(bundle.member)"></span> · <span x-text="bundle.byte_size || bundle.byteSize || 0"></span>B</span></summary>
-                    <template x-for="tx in bundle.reveals" :key="tx.signature">
-                      <div class="tx-card" role="button" tabindex="0" @click="openTransactionModal(tx, { source: 'Reveal bundle', blockHeight: selectedBlock.height, blockFinalizer: bundle.member })" @keydown.enter.prevent="openTransactionModal(tx, { source: 'Reveal bundle', blockHeight: selectedBlock.height, blockFinalizer: bundle.member })" @keydown.space.prevent="openTransactionModal(tx, { source: 'Reveal bundle', blockHeight: selectedBlock.height, blockFinalizer: bundle.member })">
+                    <summary class="tx-section-title"><span x-text="`Burn bundle ${bundle.slot}`"></span><span class="tx-section-meta"><span x-text="shortAddressLabel(bundle.member)"></span> · <span x-text="bundle.byte_size || bundle.byteSize || 0"></span>B</span></summary>
+                    <template x-for="tx in bundle.burns" :key="tx.signature">
+                      <div class="tx-card" role="button" tabindex="0" @click="openTransactionModal(tx, { source: 'Burn bundle', blockHeight: selectedBlock.height, blockFinalizer: bundle.member })" @keydown.enter.prevent="openTransactionModal(tx, { source: 'Burn bundle', blockHeight: selectedBlock.height, blockFinalizer: bundle.member })" @keydown.space.prevent="openTransactionModal(tx, { source: 'Burn bundle', blockHeight: selectedBlock.height, blockFinalizer: bundle.member })">
                         <span class="pill" :class="txPillClass(tx)" x-text="txPillLabel(tx)"></span>
-                        <div class="tx-field" x-show="!isBlindedMempoolItem(tx)"><span class="tx-label">Amount</span><span class="tx-value money">IUNA <span x-text="amountLabel(txAmount(tx))"></span></span></div>
+                        <div class="tx-field"><span class="tx-label">Amount</span><span class="tx-value money">IUNA <span x-text="amountLabel(txAmount(tx))"></span></span></div>
                         <div class="tx-field"><span class="tx-label">Fee</span><span class="tx-value money" x-text="txFeeLabel(tx)"></span></div>
-                        <div class="tx-field" x-show="!isBlindedMempoolItem(tx)"><span class="tx-label">From</span><code class="tx-value hash" x-text="shortAddressLabel(txFrom(tx))"></code></div>
+                        <div class="tx-field"><span class="tx-label">From</span><code class="tx-value hash" x-text="shortAddressLabel(txFrom(tx))"></code></div>
                         <div class="tx-field" x-show="txTo(tx)"><span class="tx-label">To</span><code class="tx-value hash" x-text="shortAddressLabel(txTo(tx))"></code></div>
-                        <div class="tx-field" x-show="isBlindedMempoolItem(tx)"><span class="tx-label">Commitment</span><code class="tx-value hash" x-text="short(tx.commitment || tx.signature)"></code></div>
-                        <div class="tx-field" x-show="!isBlindedMempoolItem(tx)"><span class="tx-label">Signature</span><code class="tx-value hash" x-text="short(tx.signature)"></code></div>
+                        <div class="tx-field"><span class="tx-label">Signature</span><code class="tx-value hash" x-text="short(tx.signature)"></code></div>
                       </div>
                     </template>
-                    <div class="muted" x-show="bundle.reveals.length === 0">No reveals in bundle</div>
+                    <div class="muted" x-show="bundle.burns.length === 0">No burns in bundle</div>
                   </details>
                 </template>
-                <div class="muted" x-show="selectedBlock.transactions.length === 0 && !(selectedBlock.reveal_bundles || selectedBlock.revealBundles || []).length">No transactions</div>
+                <div class="muted" x-show="selectedBlock.transactions.length === 0 && !(selectedBlock.burn_bundles || selectedBlock.burnBundles || []).length">No transactions</div>
               </div>
             </div>
           </template>
@@ -1035,16 +1024,13 @@ pub(super) const INDEX_HTML: &str = r#"<!doctype html>
                   </div>
                   <span class="pill" :class="tx.kind" x-text="tx.kind"></span>
                 </div>
-                <div class="tx-field" x-show="!isBlindedMempoolItem(tx)"><span class="tx-label">Amount</span><span class="tx-value money">IUNA <span x-text="amountLabel(txAmount(tx))"></span></span></div>
+                <div class="tx-field"><span class="tx-label">Amount</span><span class="tx-value money">IUNA <span x-text="amountLabel(txAmount(tx))"></span></span></div>
                 <div class="tx-field"><span class="tx-label">Fee</span><span class="tx-value money" x-text="txFeeLabel(tx)"></span></div>
-                <div class="tx-field" x-show="!isBlindedMempoolItem(tx)"><span class="tx-label">From</span><code class="tx-value hash" x-text="shortAddressLabel(txFrom(tx))"></code></div>
+                <div class="tx-field"><span class="tx-label">From</span><code class="tx-value hash" x-text="shortAddressLabel(txFrom(tx))"></code></div>
                 <div class="tx-field" x-show="txTo(tx)"><span class="tx-label">To</span><code class="tx-value hash" x-text="shortAddressLabel(txTo(tx))"></code></div>
-                <div class="tx-field" x-show="isBlindedMempoolItem(tx)"><span class="tx-label">Commitment</span><code class="tx-value hash" x-text="short(tx.commitment || tx.signature)"></code></div>
-                <div class="tx-field" x-show="tx.encrypted_size || tx.encryptedSize"><span class="tx-label">Bytes</span><span class="tx-value number" x-text="tx.encrypted_size || tx.encryptedSize"></span></div>
-                <div class="tx-field" x-show="tx.expires_at_height || tx.expiresAtHeight"><span class="tx-label">Expires</span><span class="tx-value number" x-text="tx.expires_at_height || tx.expiresAtHeight"></span></div>
                 <div class="tx-field" x-show="isMineTx(tx)"><span class="tx-label">Proof Bits</span><span class="tx-value number"><span x-text="txProofBits(tx) ?? '-'"></span> / <span x-text="txDifficultyBits(tx) ?? '-'"></span></span></div>
                 <div class="tx-field" x-show="isMineTx(tx)"><span class="tx-label">Proof Hash</span><code class="tx-value hash" x-text="short(txProofHash(tx))"></code></div>
-                <div class="tx-field" x-show="!isBlindedMempoolItem(tx)"><span class="tx-label">Signature</span><code class="tx-value hash" x-text="short(tx.signature)"></code></div>
+                <div class="tx-field"><span class="tx-label">Signature</span><code class="tx-value hash" x-text="short(tx.signature)"></code></div>
               </div>
             </template>
             <template x-if="mempoolPage.loading">
@@ -1387,13 +1373,10 @@ pub(super) const INDEX_HTML: &str = r#"<!doctype html>
       </div>
       <div class="tx-modal-summary">
         <div class="tx-field"><span class="tx-label">Source</span><span class="tx-value text" x-text="selectedTransactionLabel()"></span></div>
-        <div class="tx-field" x-show="!isBlindedMempoolItem(selectedTransaction?.tx)"><span class="tx-label">Amount</span><span class="tx-value money">IUNA <span x-text="amountLabel(txAmount(selectedTransaction?.tx || {}))"></span></span></div>
+        <div class="tx-field"><span class="tx-label">Amount</span><span class="tx-value money">IUNA <span x-text="amountLabel(txAmount(selectedTransaction?.tx || {}))"></span></span></div>
         <div class="tx-field"><span class="tx-label">Fee</span><span class="tx-value money" x-text="txFeeLabel(selectedTransaction?.tx)"></span></div>
-        <div class="tx-field" x-show="!isBlindedMempoolItem(selectedTransaction?.tx)"><span class="tx-label">From</span><code class="tx-value hash" x-text="addressLabel(txFrom(selectedTransaction?.tx || {}))"></code></div>
+        <div class="tx-field"><span class="tx-label">From</span><code class="tx-value hash" x-text="addressLabel(txFrom(selectedTransaction?.tx || {}))"></code></div>
         <div class="tx-field" x-show="txTo(selectedTransaction?.tx || {})"><span class="tx-label">To</span><code class="tx-value hash" x-text="addressLabel(txTo(selectedTransaction?.tx || {}))"></code></div>
-        <div class="tx-field" x-show="isBlindedMempoolItem(selectedTransaction?.tx) || selectedTransaction?.tx?.commitment"><span class="tx-label">Commitment</span><code class="tx-value hash" x-text="selectedTransaction?.tx?.commitment || selectedTransaction?.tx?.signature || '-'"></code></div>
-        <div class="tx-field" x-show="selectedTransaction?.tx?.encrypted_size || selectedTransaction?.tx?.encryptedSize"><span class="tx-label">Encrypted Bytes</span><span class="tx-value number" x-text="selectedTransaction?.tx?.encrypted_size || selectedTransaction?.tx?.encryptedSize"></span></div>
-        <div class="tx-field" x-show="selectedTransaction?.tx?.expires_at_height || selectedTransaction?.tx?.expiresAtHeight"><span class="tx-label">Expires</span><span class="tx-value number" x-text="selectedTransaction?.tx?.expires_at_height || selectedTransaction?.tx?.expiresAtHeight"></span></div>
         <div class="tx-field" x-show="isMineTx(selectedTransaction?.tx)"><span class="tx-label">Difficulty</span><span class="tx-value number" x-text="txDifficultyBits(selectedTransaction?.tx) ?? '-'"></span></div>
         <div class="tx-field" x-show="isMineTx(selectedTransaction?.tx)"><span class="tx-label">Proof Bits</span><span class="tx-value number" x-text="txProofBits(selectedTransaction?.tx) ?? '-'"></span></div>
         <div class="tx-field" x-show="isMineTx(selectedTransaction?.tx)"><span class="tx-label">Proof Hash</span><code class="tx-value hash" x-text="txProofHash(selectedTransaction?.tx) || '-'"></code></div>

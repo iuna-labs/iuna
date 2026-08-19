@@ -1,5 +1,3 @@
-use std::collections::BTreeMap;
-
 use anyhow::Result;
 
 use crate::{
@@ -72,24 +70,7 @@ impl NodeCore {
             .utxos_for_address(address)
             .into_iter()
             .map(|(outpoint, output)| (outpoint, output.amount))
-            .collect::<BTreeMap<_, _>>();
-
-        for (commitment, payload) in &self.owned_blinded_payloads {
-            if !self.ledger.has_unrevealed_blinded_transaction(commitment) {
-                continue;
-            }
-            let output_total = transaction_output_total_for_address(payload, address);
-            if self.ledger.has_active_blinded_transaction(commitment) {
-                balance = balance.saturating_add(output_total);
-            } else {
-                let input_total =
-                    transaction_input_total_from_outputs(payload, address, &confirmed_outputs);
-                balance = balance
-                    .saturating_sub(input_total)
-                    .saturating_add(output_total);
-            }
-        }
-
+            .collect::<std::collections::BTreeMap<_, _>>();
         if let Some((height, burn)) = &self.local_block_anchor_burn {
             if *height == self.ledger.height() && !self.ledger.has_transaction(burn.signature()) {
                 let output_total = transaction_output_total_for_address(burn, address);
