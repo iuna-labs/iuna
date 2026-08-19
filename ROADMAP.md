@@ -30,6 +30,8 @@ The current goal is to keep a small real testnet stable while increasing confide
 - [x] Upgrade and rollback instructions exist.
 - [x] Basic operational monitoring is available for height, tip hash, peers, last block age, finalizer mode, VDF rounds, mempool, and rejected blocks.
 
+Security review tracking lives in [Security Review Checklist](docs/security-review.md). Do not check the security-review item complete until its sign-off table is filled and the launch-blocking review items are resolved or explicitly accepted for the candidate.
+
 ## Pre-Candidate Launch Test Backlog
 
 These items are not protocol rules. They are the attack and reliability checks to finish or consciously defer before the planned devnet reset that creates the mainnet-candidate network. If that candidate stays healthy through the agreed window, the same genesis, chain history, UTXOs, and mined coins should be promoted to mainnet instead of being reset again.
@@ -52,6 +54,7 @@ These items are not protocol rules. They are the attack and reliability checks t
 - [x] Long-running release-mode soak test runs with automatic burn/finalization, P2P sync, Stratum-disabled and Stratum-enabled nodes, and periodic node restarts.
 - [x] Operator failure playbooks exist for stalled height, divergent tips, old snapshots, no burn committee signatures, recovery blocks, and corrupted local persistence.
 - [x] Mainnet-candidate release rehearsal includes fresh genesis, published bootnodes, checksums, backup/restore instructions, and a no-reset stability window.
+- [x] Security review checklist exists for consensus validation, transaction validation, P2P input handling, wallet/key storage, Stratum, release evidence, and candidate manifest sign-off.
 
 ## Milestones
 

@@ -123,6 +123,7 @@ Use your iuna wallet address as the worker username. Accepted shares become PoW 
 
 - [Genesis and candidate rehearsal](docs/genesis.md)
 - [Operator failure playbooks](docs/operator-playbooks.md)
+- [Security review checklist](docs/security-review.md)
 
 ## Contributing
 
