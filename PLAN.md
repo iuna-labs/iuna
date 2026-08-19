@@ -55,7 +55,10 @@ Acceptance:
 
 Status: started with a deterministic in-process sweep runner that maps attack
 dimensions to adversarial strategies and classifies observed censorship as
-unavailable, network-isolation dependent, or finalizer-disruption dependent.
+unavailable, network-isolation dependent, fee-pressure dependent, or
+finalizer-disruption dependent. Fee pressure, gossip latency, peer isolation, and
+offline finalizer schedules are now modeled as runner inputs instead of only as
+strategy labels.
 
 Goal: quantify whether attacks are impossible, only possible under network
 isolation, or possible but expensive.

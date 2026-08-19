@@ -83,6 +83,7 @@ enum EconomicAttackClass {
     NoCensorship,
     RequiresNetworkIsolation,
     RequiresFinalizerDisruption,
+    RequiresFeePressure,
 }
 
 #[derive(Clone, Debug)]
@@ -101,8 +102,12 @@ struct AdversarialMetrics {
     committee_slots: usize,
     attacker_committee_share: f64,
     third_party_burns: usize,
+    unseen_third_party_burns: usize,
+    delayed_third_party_burns: usize,
     censored_third_party_burns: usize,
     third_party_burn_censorship_rate: f64,
+    fee_pressure_burns: usize,
+    fee_pressure_displaced_burns: usize,
     fallback_opportunities: usize,
     fallback_blocks: usize,
     fallback_rate: f64,
@@ -259,6 +264,25 @@ impl Harness {
                 self.wallets
                     .get(&member.owner)
                     .and_then(|wallet| self.ledger.build_burn_bundle(wallet).unwrap())
+            })
+            .collect()
+    }
+
+    fn committee_bundles_for_burns(&self, burns: Vec<Transaction>) -> Vec<BurnBundle> {
+        let height = self.ledger.height() + 1;
+        let prev_hash = self.ledger.tip_hash().to_string();
+        self.ledger
+            .burn_committee_for_next_block()
+            .into_iter()
+            .filter_map(|member| {
+                let wallet = self.wallets.get(&member.owner)?;
+                Some(wallet.burn_bundle(BurnBundlePayload {
+                    height,
+                    prev_hash: prev_hash.clone(),
+                    slot: member.slot,
+                    member: member.owner,
+                    burns: burns.clone(),
+                }))
             })
             .collect()
     }
@@ -504,6 +528,184 @@ impl Harness {
         metrics.attacker_net_reward -= i128::from(metrics.attacker_burn_cost);
         metrics
     }
+
+    fn run_economic_case(&mut self, case: EconomicSweepCase, blocks: usize) -> AdversarialMetrics {
+        self.mature_resource_lineages();
+        if case.fee_pressure_burns_per_block > 0 {
+            self.ledger.launch_profile.max_block_transactions = 2;
+        }
+
+        let attacker_addresses = self.attacker_addresses();
+        let mut metrics = AdversarialMetrics::default();
+        let mut delayed_burns: Vec<(usize, Transaction)> = Vec::new();
+        let mut finalizations = 0usize;
+        let mut attacker_finalizations = 0usize;
+        let mut committee_slots = 0usize;
+        let mut attacker_committee_slots = 0usize;
+        let mut fallback_blocks = 0usize;
+        let mut fallback_opportunities = 0usize;
+        let mut recovery_blocks = 0usize;
+        let mut blocks_until_recovery = Vec::new();
+
+        for step in 0..blocks {
+            let mut visible_burns = Vec::new();
+            let ready = delayed_burns
+                .iter()
+                .filter(|(release_step, _)| *release_step <= step)
+                .map(|(_, burn)| burn.clone())
+                .collect::<Vec<_>>();
+            delayed_burns.retain(|(release_step, _)| *release_step > step);
+            for burn in ready {
+                if self.ledger.submit_transaction(burn.clone()).is_ok() {
+                    metrics.delayed_third_party_burns += 1;
+                    visible_burns.push(burn);
+                }
+            }
+
+            let rank_count = self.ledger.finalizer_rank_count_for_next_block();
+            let finalizer_offline =
+                economic_percent_active(case.offline_finalizer_percent, case.seed, step);
+            let has_fallback = finalizer_offline && rank_count > 1;
+            fallback_opportunities += usize::from(has_fallback);
+            let rank = usize::from(has_fallback);
+            let planned_finalizer = self.next_rank(rank).owner;
+
+            let victim = self
+                .honest
+                .iter()
+                .cycle()
+                .skip(step)
+                .find(|wallet| wallet.address() != planned_finalizer)
+                .expect("test fixture should have a non-finalizer victim")
+                .clone();
+            let isolated = economic_percent_active(case.peer_isolation_percent, case.seed, step);
+            let victim_burn = self.ledger.build_burn(&victim, 1, 1).unwrap();
+            metrics.third_party_burns += 1;
+            if isolated {
+                metrics.unseen_third_party_burns += 1;
+            } else if case.gossip_latency_blocks > 0 {
+                metrics.unseen_third_party_burns += 1;
+                delayed_burns.push((
+                    step.saturating_add(usize::from(case.gossip_latency_blocks)),
+                    victim_burn,
+                ));
+            } else {
+                self.ledger.submit_transaction(victim_burn.clone()).unwrap();
+                visible_burns.push(victim_burn);
+            }
+
+            let mut pressure_burns = Vec::new();
+            for pressure_index in 0..case.fee_pressure_burns_per_block {
+                let pressure_wallet = self
+                    .honest
+                    .iter()
+                    .cycle()
+                    .skip(step + usize::from(pressure_index) + 1)
+                    .find(|wallet| {
+                        wallet.address() != planned_finalizer
+                            && wallet.address() != victim.address()
+                    })
+                    .expect("test fixture should have fee pressure wallets")
+                    .clone();
+                if let Ok(burn) =
+                    self.ledger
+                        .build_burn(&pressure_wallet, 1, 10 + u64::from(pressure_index))
+                {
+                    if self.ledger.submit_transaction(burn.clone()).is_ok() {
+                        metrics.fee_pressure_burns += 1;
+                        pressure_burns.push(burn);
+                    }
+                }
+            }
+
+            let committee = self.ledger.burn_committee_for_next_block();
+            committee_slots += committee.len();
+            attacker_committee_slots += committee
+                .iter()
+                .filter(|member| attacker_addresses.contains(&member.owner))
+                .count();
+
+            let block = if case.fee_pressure_burns_per_block > 0 {
+                if rank > 0 {
+                    fallback_blocks += 1;
+                }
+                let bundles = self.committee_bundles_for_burns(
+                    pressure_burns.into_iter().take(1).collect::<Vec<_>>(),
+                );
+                let leader = self.next_rank(rank);
+                let wallet = self.wallet(&leader.owner).clone();
+                self.submit_anchor_burn(&wallet);
+                let block = self.finish_ticket_block_from_pending(rank, bundles);
+                self.ledger
+                    .apply_block_at(block.clone(), NOW_MS.saturating_add(block.timestamp_ms))
+                    .unwrap_or_else(|error| {
+                        panic!(
+                            "seed {} validator rejected generated fee-pressure block: {error:#}",
+                            self.seed
+                        )
+                    });
+                block
+            } else if finalizer_offline
+                && self
+                    .ledger
+                    .recovery_block_available_at(self.ledger.recovery_block_min_timestamp())
+                && step % 7 == 6
+            {
+                recovery_blocks += 1;
+                blocks_until_recovery.push((step + 1) as f64);
+                let wallet = self.attacker.wallet.clone();
+                self.mine_recovery_block(&wallet)
+            } else {
+                if rank > 0 {
+                    fallback_blocks += 1;
+                }
+                self.mine_ticket_block(rank)
+            };
+
+            finalizations += 1;
+            if attacker_addresses.contains(&block.miner) {
+                attacker_finalizations += 1;
+                metrics.attacker_burn_cost = metrics.attacker_burn_cost.saturating_add(1);
+                metrics.attacker_net_reward += i128::from(block.reward);
+            }
+            for burn in visible_burns {
+                let included = block
+                    .transactions
+                    .iter()
+                    .any(|tx| tx.signature() == burn.signature());
+                if !included {
+                    metrics.censored_third_party_burns += 1;
+                    if case.fee_pressure_burns_per_block > 0 {
+                        metrics.fee_pressure_displaced_burns += 1;
+                    }
+                }
+            }
+            if case.fee_pressure_burns_per_block > 0 {
+                self.ledger.clear_pending_transactions();
+            }
+        }
+
+        metrics.attacker_finalizations = attacker_finalizations;
+        metrics.attacker_finalization_share = share(attacker_finalizations, finalizations);
+        metrics.attacker_committee_slots = attacker_committee_slots;
+        metrics.committee_slots = committee_slots;
+        metrics.attacker_committee_share = share(attacker_committee_slots, committee_slots);
+        metrics.third_party_burn_censorship_rate = share(
+            metrics.censored_third_party_burns,
+            metrics.third_party_burns,
+        );
+        metrics.fallback_opportunities = fallback_opportunities;
+        metrics.fallback_blocks = fallback_blocks;
+        metrics.fallback_rate = share(fallback_blocks, blocks);
+        metrics.recovery_rate = share(recovery_blocks, blocks);
+        metrics.average_blocks_until_recovery = if blocks_until_recovery.is_empty() {
+            0.0
+        } else {
+            blocks_until_recovery.iter().sum::<f64>() / blocks_until_recovery.len() as f64
+        };
+        metrics.attacker_net_reward -= i128::from(metrics.attacker_burn_cost);
+        metrics
+    }
 }
 
 fn share(numerator: usize, denominator: usize) -> f64 {
@@ -529,7 +731,7 @@ fn run_economic_sweep(cases: &[EconomicSweepCase], blocks: usize) -> Vec<Economi
             } else {
                 blocks
             };
-            let metrics = harness.run_strategy(run_blocks);
+            let metrics = harness.run_economic_case(*case, run_blocks);
             let class = classify_economic_attack(*case, &metrics);
             EconomicSweepResult {
                 case: *case,
@@ -545,6 +747,12 @@ fn classify_economic_attack(
     case: EconomicSweepCase,
     metrics: &AdversarialMetrics,
 ) -> EconomicAttackClass {
+    if metrics.fee_pressure_displaced_burns > 0 {
+        return EconomicAttackClass::RequiresFeePressure;
+    }
+    if metrics.unseen_third_party_burns > 0 {
+        return EconomicAttackClass::RequiresNetworkIsolation;
+    }
     if metrics.censored_third_party_burns == 0 {
         return EconomicAttackClass::NoCensorship;
     }
@@ -552,6 +760,10 @@ fn classify_economic_attack(
         return EconomicAttackClass::RequiresNetworkIsolation;
     }
     EconomicAttackClass::RequiresFinalizerDisruption
+}
+
+fn economic_percent_active(percent: u8, seed: u64, step: usize) -> bool {
+    percent >= 100 || ((seed as usize + step.saturating_mul(37)) % 100) < usize::from(percent)
 }
 
 fn lineage_resource_roots(lineage_percent: u8) -> (usize, usize) {
@@ -3319,12 +3531,14 @@ fn economic_sweep_runner_classifies_attack_costs_across_dimensions() {
         results[1].class,
         EconomicAttackClass::RequiresNetworkIsolation
     );
-    assert!(results[1].metrics.censored_third_party_burns > 0);
+    assert!(results[1].metrics.unseen_third_party_burns > 0);
+    assert_eq!(results[1].metrics.censored_third_party_burns, 0);
     assert_eq!(
         results[2].class,
         EconomicAttackClass::RequiresNetworkIsolation
     );
-    assert!(results[2].metrics.censored_third_party_burns > 0);
+    assert!(results[2].metrics.unseen_third_party_burns > 0);
+    assert!(results[2].metrics.delayed_third_party_burns > 0);
 
     assert_eq!(results[3].class, EconomicAttackClass::NoCensorship);
     assert_eq!(
@@ -3334,7 +3548,9 @@ fn economic_sweep_runner_classifies_attack_costs_across_dimensions() {
     );
 
     assert_eq!(results[4].strategy, AdversaryStrategy::MaximizeBurnWeight);
-    assert_eq!(results[4].class, EconomicAttackClass::NoCensorship);
+    assert_eq!(results[4].class, EconomicAttackClass::RequiresFeePressure);
+    assert!(results[4].metrics.fee_pressure_burns > 0);
+    assert!(results[4].metrics.fee_pressure_displaced_burns > 0);
 }
 
 #[test]
