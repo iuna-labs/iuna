@@ -3009,6 +3009,126 @@ fn pending_transactions_from_stale_fork_are_carried_forward_after_reorg() {
 }
 
 #[test]
+fn partition_delayed_burn_bundle_block_import_deduplicates_late_burn_gossip() {
+    let base = harness_for_percent(1_600, 25);
+    let snapshot = base.ledger.snapshot();
+    let mut producer = fork_harness_from(&base, snapshot.clone());
+    let mut isolated = fork_harness_from(&base, snapshot);
+
+    let leader = producer.next_rank(0);
+    let finalizer = producer.wallet(&leader.owner).clone();
+    let victim = producer
+        .honest
+        .iter()
+        .find(|wallet| wallet.address() != finalizer.address())
+        .expect("fixture should contain a non-finalizer burn victim")
+        .clone();
+    let delayed_burn = producer.submit_fee_burn(&victim, 7, 2);
+    producer.submit_anchor_burn(&finalizer);
+    let bundles = producer.committee_bundles();
+    assert!(
+        bundles.iter().any(|bundle| {
+            bundle
+                .burns
+                .iter()
+                .any(|burn| burn.signature() == delayed_burn.signature())
+        }),
+        "producer partition did not attest delayed burn"
+    );
+
+    let block = producer.finish_ticket_block_from_pending(0, bundles);
+    assert!(
+        block
+            .transactions
+            .iter()
+            .any(|transaction| transaction.signature() == delayed_burn.signature()),
+        "attested delayed burn was not included in the produced block"
+    );
+    assert!(
+        block
+            .burn_bundle_section
+            .burns
+            .iter()
+            .any(|masked| masked.burn.signature() == delayed_burn.signature()),
+        "produced block did not carry delayed burn attestation"
+    );
+    assert!(
+        isolated.ledger.pending().is_empty(),
+        "isolated partition should not know the delayed burn before reconnect"
+    );
+
+    let now_ms = NOW_MS.saturating_add(block.timestamp_ms);
+    producer
+        .ledger
+        .apply_block_at(block.clone(), now_ms)
+        .unwrap();
+    isolated
+        .ledger
+        .apply_block_at(block.clone(), now_ms)
+        .unwrap();
+    assert_eq!(isolated.ledger.tip_hash(), block.hash);
+    assert_eq!(
+        isolated
+            .ledger
+            .submit_transaction_with_outcome(delayed_burn.clone())
+            .unwrap(),
+        TransactionSubmitOutcome::AlreadyKnown,
+        "late burn gossip after reconnect should be deduplicated against the chain"
+    );
+    assert!(
+        isolated
+            .ledger
+            .pending()
+            .iter()
+            .all(|transaction| transaction.signature() != delayed_burn.signature()),
+        "delayed burn was re-added to pending after it was already mined"
+    );
+}
+
+#[test]
+fn eclipsed_node_rejects_minority_fork_then_recovers_to_majority_tip() {
+    let base = harness_for_percent(1_601, 25);
+    let snapshot = base.ledger.snapshot();
+    let mut local = fork_harness_from(&base, snapshot.clone());
+    let mut minority = fork_harness_from(&base, snapshot.clone());
+    let mut majority = fork_harness_from(&base, snapshot);
+
+    local.mine_ticket_block(0);
+    local.mine_ticket_block(0);
+    let local_tip_before_minority = local.ledger.tip_hash().to_string();
+
+    minority.mine_ticket_block(1);
+    let switched_to_minority = local
+        .ledger
+        .extend_from_snapshot_at(minority.ledger.snapshot(), NOW_MS)
+        .unwrap();
+    assert!(
+        !switched_to_minority,
+        "eclipsed node accepted a shorter attacker-only fork"
+    );
+    assert_eq!(local.ledger.tip_hash(), local_tip_before_minority);
+
+    for _ in 0..3 {
+        majority.mine_ticket_block(0);
+    }
+    assert_eq!(
+        mini_choose_fork(&local.ledger, &majority.ledger),
+        Some(true)
+    );
+    let switched_to_majority = local
+        .ledger
+        .extend_from_snapshot_at(majority.ledger.snapshot(), NOW_MS)
+        .unwrap();
+
+    assert!(
+        switched_to_majority,
+        "node did not recover to the better chain after partition healed"
+    );
+    assert_eq!(local.ledger.tip_hash(), majority.ledger.tip_hash());
+    assert_supply_invariant(&local.ledger);
+}
+
+#[test]
 fn supply_invariant_holds_for_mixed_burns_fees_and_pow_mine_actions() {
     let mut harness = harness_for_percent(27, 25);
     assert_supply_invariant(&harness.ledger);

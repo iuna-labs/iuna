@@ -106,6 +106,10 @@ Acceptance:
 
 ## 5. Eclipse And Partition Chaos
 
+Status: started with deterministic tests for delayed burn-bundle import across
+partitions, late burn gossip deduplication after reconnect, and rejecting a
+shorter attacker-only fork before recovering to a better majority tip.
+
 Goal: ensure isolated or stale nodes reject bad histories and recover cleanly.
 
 Scenarios:
