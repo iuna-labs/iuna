@@ -495,6 +495,12 @@ enum MiniBlockVerdict {
     FinalizerTicket,
 }
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum MiniSupplyVerdict {
+    Balanced,
+    Mismatch,
+}
+
 fn mini_block_verdict(ledger: &Ledger, block: &Block, now_ms: u64) -> MiniBlockVerdict {
     let parent = ledger.tip();
     if block.height != parent.height.saturating_add(1) {
@@ -675,6 +681,40 @@ fn assert_mini_validator_agrees(
     );
 }
 
+fn mini_expected_supply(snapshot: &ChainSnapshot) -> Option<Amount> {
+    let mut supply = snapshot
+        .genesis_allocations
+        .values()
+        .try_fold(0_u64, |total, amount| total.checked_add(*amount))?;
+
+    for block in &snapshot.blocks {
+        supply = supply.checked_add(block.reward)?;
+        for transaction in &block.transactions {
+            match transaction {
+                Transaction::Transfer { fee, .. } => {
+                    supply = supply.checked_sub(*fee)?;
+                }
+                Transaction::Burn { amount, fee, .. } => {
+                    supply = supply.checked_sub(amount.checked_add(*fee)?)?;
+                }
+                Transaction::Mine { .. } => {
+                    supply = supply.checked_add(transaction.amount())?;
+                }
+            }
+        }
+    }
+
+    Some(supply)
+}
+
+fn mini_supply_verdict(ledger: &Ledger, snapshot: &ChainSnapshot) -> MiniSupplyVerdict {
+    if mini_expected_supply(snapshot) == Some(live_supply(ledger)) {
+        MiniSupplyVerdict::Balanced
+    } else {
+        MiniSupplyVerdict::Mismatch
+    }
+}
+
 fn harness_for_percent(seed: u64, burn_percent: u8) -> Harness {
     Harness::new(seed, burn_percent, 10, AdversaryStrategy::Honest)
 }
@@ -699,38 +739,7 @@ fn live_supply(ledger: &Ledger) -> Amount {
 }
 
 fn expected_supply(snapshot: &ChainSnapshot) -> Amount {
-    let mut supply = snapshot
-        .genesis_allocations
-        .values()
-        .try_fold(0_u64, |total, amount| total.checked_add(*amount))
-        .expect("test genesis supply should not overflow");
-
-    for block in &snapshot.blocks {
-        supply = supply
-            .checked_add(block.reward)
-            .expect("test reward supply should not overflow");
-        for transaction in &block.transactions {
-            match transaction {
-                Transaction::Transfer { fee, .. } => {
-                    supply = supply
-                        .checked_sub(*fee)
-                        .expect("transfer fee should be backed by supply");
-                }
-                Transaction::Burn { amount, fee, .. } => {
-                    supply = supply
-                        .checked_sub(amount.checked_add(*fee).expect("burn debit overflow"))
-                        .expect("burn should be backed by supply");
-                }
-                Transaction::Mine { .. } => {
-                    supply = supply
-                        .checked_add(transaction.amount())
-                        .expect("mine reward supply should not overflow");
-                }
-            }
-        }
-    }
-
-    supply
+    mini_expected_supply(snapshot).expect("test snapshot supply accounting should not overflow")
 }
 
 fn assert_supply_invariant(ledger: &Ledger) {
@@ -1637,6 +1646,89 @@ fn supply_invariant_holds_for_mixed_burns_fees_and_pow_mine_actions() {
             .and_then(|supply| supply.checked_sub(burn.amount()))
             .and_then(|supply| supply.checked_sub(anchor.amount()))
             .unwrap()
+    );
+}
+
+#[test]
+fn mini_supply_oracle_detects_accounting_mutations() {
+    let mut harness = harness_for_percent(31, 25);
+    let leader = harness.next_rank(0);
+    let finalizer = harness.wallet(&leader.owner).clone();
+    let actors = harness
+        .honest
+        .iter()
+        .filter(|wallet| wallet.address() != finalizer.address())
+        .cloned()
+        .collect::<Vec<_>>();
+    assert!(actors.len() >= 4, "test fixture needs non-finalizer actors");
+
+    let transfer = harness
+        .ledger
+        .build_transfer(&actors[0], actors[1].address(), 11, 2)
+        .unwrap();
+    harness.ledger.submit_transaction(transfer).unwrap();
+    let burn = harness.ledger.build_burn(&actors[2], 7, 3).unwrap();
+    harness.ledger.submit_transaction(burn).unwrap();
+    let mine = harness.ledger.build_mine(actors[3].address()).unwrap();
+    harness.ledger.submit_transaction(mine).unwrap();
+    harness.submit_anchor_burn(&finalizer);
+
+    let block = harness.finish_ticket_block_from_pending(0, Vec::new());
+    harness
+        .ledger
+        .apply_block_at(block, NOW_MS.saturating_add(VDF_TARGET_BLOCK_MS))
+        .unwrap();
+    let snapshot = harness.ledger.snapshot();
+    assert_eq!(
+        mini_supply_verdict(&harness.ledger, &snapshot),
+        MiniSupplyVerdict::Balanced
+    );
+
+    let mut reward_inflation = snapshot.clone();
+    reward_inflation
+        .blocks
+        .last_mut()
+        .expect("snapshot has a mined block")
+        .reward += 1;
+    assert_eq!(
+        mini_supply_verdict(&harness.ledger, &reward_inflation),
+        MiniSupplyVerdict::Mismatch
+    );
+
+    let mut fee_erasure = snapshot.clone();
+    let fee = fee_erasure
+        .blocks
+        .last_mut()
+        .expect("snapshot has a mined block")
+        .transactions
+        .iter_mut()
+        .find_map(|transaction| match transaction {
+            Transaction::Transfer { fee, .. } if *fee > 0 => Some(fee),
+            _ => None,
+        })
+        .expect("mixed block has a fee-paying transfer");
+    *fee = 0;
+    assert_eq!(
+        mini_supply_verdict(&harness.ledger, &fee_erasure),
+        MiniSupplyVerdict::Mismatch
+    );
+
+    let mut burn_erasure = snapshot;
+    let amount = burn_erasure
+        .blocks
+        .last_mut()
+        .expect("snapshot has a mined block")
+        .transactions
+        .iter_mut()
+        .find_map(|transaction| match transaction {
+            Transaction::Burn { amount, .. } if *amount > 0 => Some(amount),
+            _ => None,
+        })
+        .expect("mixed block has a positive burn");
+    *amount = 0;
+    assert_eq!(
+        mini_supply_verdict(&harness.ledger, &burn_erasure),
+        MiniSupplyVerdict::Mismatch
     );
 }
 
