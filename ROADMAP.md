@@ -50,7 +50,7 @@ These items are not protocol rules. They are the attack and reliability checks t
 - [x] HTTP/auth abuse tests cover CSRF same-origin behavior, lockout/backoff behavior, forwarded-header spoofing from untrusted peers, and session expiry.
 - [x] Multi-node in-memory simulation covers delayed gossip, withheld burn bundles, bundle equivocation, partitions, restarts, persistence reload, and convergence.
 - [x] Long-running release-mode soak test runs with automatic burn/finalization, P2P sync, Stratum-disabled and Stratum-enabled nodes, and periodic node restarts.
-- [ ] Operator failure playbooks exist for stalled height, divergent tips, old snapshots, no burn committee signatures, recovery blocks, and corrupted local persistence.
+- [x] Operator failure playbooks exist for stalled height, divergent tips, old snapshots, no burn committee signatures, recovery blocks, and corrupted local persistence.
 - [ ] Mainnet-candidate release rehearsal includes fresh genesis, published bootnodes, checksums, backup/restore instructions, and a no-reset stability window.
 
 ## Milestones
@@ -72,7 +72,7 @@ Focus: make failure modes boring and observable.
 - [x] Run long-running tests unconditionally during deployment.
 - [ ] Run a multi-day public testnet without manual chain resets.
 - [ ] Add or improve operator-facing health metrics.
-- [ ] Document common testnet failure/recovery playbooks.
+- [x] Document common testnet failure/recovery playbooks.
 
 ### M2: Mainnet Candidate
 

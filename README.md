@@ -119,6 +119,11 @@ iuna can expose a Stratum V1 endpoint for SHA-256 ASIC miners such as a Bitaxe:
 
 Use your iuna wallet address as the worker username. Accepted shares become PoW mine actions in the node mempool and are gossiped to peers.
 
+## Operator Docs
+
+- [Starting the genesis node](docs/genesis.md)
+- [Operator failure playbooks](docs/operator-playbooks.md)
+
 ## Contributing
 
 We are open to PRs and help running, testing, and improving the devnet.
