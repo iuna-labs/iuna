@@ -456,7 +456,7 @@ pub(super) const INDEX_HTML: &str = r#"<!doctype html>
       .block-card { flex-basis: 108px; }
     }
   </style>
-  <script defer src="/assets/iuna-ui.js?v=109"></script>
+  <script defer src="/assets/iuna-ui.js?v=110"></script>
   <script defer src="/assets/alpine.min.js"></script>
 </head>
 <body x-data="iunaApp()" x-init="init()" @keydown.window.escape="closeModals()" x-cloak>
@@ -799,16 +799,22 @@ pub(super) const INDEX_HTML: &str = r#"<!doctype html>
           <div class="network-health-state" :class="networkHealthClass()">
             <div class="network-health-label">Network Health</div>
             <div class="network-health-value" x-text="networkHealth.state || '-'"></div>
-            <div class="network-health-detail" x-text="networkHealth.last_error || 'No peer errors reported'"></div>
+            <div class="network-health-detail" x-text="networkHealth.last_chain_payload_error || networkHealth.last_error || 'No peer errors reported'"></div>
           </div>
           <div class="network-health-grid">
             <div class="peer-summary-item"><div class="peer-summary-label">Local Height</div><div class="peer-summary-value" x-text="networkHealth.local_height ?? '-'"></div></div>
+            <div class="peer-summary-item"><div class="peer-summary-label">Tip</div><code class="peer-summary-value" x-text="networkTipLabel()"></code></div>
+            <div class="peer-summary-item"><div class="peer-summary-label">Last Block</div><div class="peer-summary-value" x-text="networkLastBlockAgeLabel()"></div></div>
             <div class="peer-summary-item"><div class="peer-summary-label">Best Known</div><div class="peer-summary-value" x-text="networkHealth.best_known_height ?? '-'"></div></div>
             <div class="peer-summary-item"><div class="peer-summary-label">Lag</div><div class="peer-summary-value" x-text="networkLagLabel()"></div></div>
             <div class="peer-summary-item"><div class="peer-summary-label">Stale</div><div class="peer-summary-value" x-text="networkHealth.stale_peers ?? '-'"></div></div>
             <div class="peer-summary-item"><div class="peer-summary-label">Banned</div><div class="peer-summary-value" x-text="networkHealth.banned_peers ?? '-'"></div></div>
             <div class="peer-summary-item"><div class="peer-summary-label">Mempool</div><div class="peer-summary-value" x-text="networkHealth.pending_transactions ?? '-'"></div></div>
             <div class="peer-summary-item"><div class="peer-summary-label">Plain Tx</div><div class="peer-summary-value" x-text="networkHealth.pending_plain_transactions ?? '-'"></div></div>
+            <div class="peer-summary-item"><div class="peer-summary-label">Next Finalizer</div><code class="peer-summary-value" x-text="networkFinalizerLabel()"></code></div>
+            <div class="peer-summary-item"><div class="peer-summary-label">Last Mode</div><div class="peer-summary-value" x-text="networkFinalizerModeLabel()"></div></div>
+            <div class="peer-summary-item"><div class="peer-summary-label">VDF</div><div class="peer-summary-value" x-text="networkVdfLabel()"></div></div>
+            <div class="peer-summary-item"><div class="peer-summary-label">Rejected Chain</div><div class="peer-summary-value" x-text="networkHealth.rejected_chain_payloads ?? '-'"></div></div>
             <div class="peer-summary-item"><div class="peer-summary-label">Time Offset</div><div class="peer-summary-value" x-text="networkTimeOffsetLabel()"></div></div>
             <div class="peer-summary-item"><div class="peer-summary-label">Clock Warnings</div><div class="peer-summary-value" x-text="networkHealth.bad_clock_peers ?? '-'"></div></div>
           </div>

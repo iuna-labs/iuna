@@ -483,13 +483,37 @@ pub(super) async fn api_network_health(
 ) -> Json<NetworkHealthResponse> {
     let (local, mempool) = {
         let node = state.node.lock().await;
+        let status = node.status();
+        let tip = node.chain().last().cloned();
+        let p2p_metrics = state.gossip.metrics();
+        let tip_timestamp_ms = tip
+            .as_ref()
+            .filter(|block| block.height > 0)
+            .map(|block| block.timestamp_ms);
         let mempool = MempoolCounts {
             plain_transactions: node.pending_transactions().len(),
         };
         (
             NetworkHealthLocalState {
-                height: node.chain_height(),
+                height: status.chain.height,
+                tip_hash: status.chain.tip_hash,
+                tip_timestamp_ms,
                 pending_transactions: mempool.total(),
+                last_finalizer_mode: tip.as_ref().map(|block| match block.finalizer_mode {
+                    crate::domain::FinalizerMode::Ticket => "ticket".to_string(),
+                    crate::domain::FinalizerMode::Recovery => "recovery".to_string(),
+                }),
+                last_finalizer_rank: tip.as_ref().map(|block| block.finalizer_rank),
+                last_block_finalizer: tip.as_ref().map(|block| block.miner.clone()),
+                current_leader: status.mining.current_leader,
+                wallet_is_current_leader: status.mining.wallet_is_current_leader,
+                last_auto_finalization_status: status.mining.last_auto_finalization_status,
+                vdf_rounds: status.mining.vdf_rounds,
+                vdf_target_block_ms: status.mining.vdf_target_block_ms,
+                rejected_blocks: p2p_metrics.rejected_blocks,
+                rejected_block_batches: p2p_metrics.rejected_block_batches,
+                rejected_snapshots: p2p_metrics.rejected_snapshots,
+                last_chain_payload_error: p2p_metrics.last_chain_payload_error,
             },
             mempool,
         )

@@ -27,6 +27,8 @@ pub(super) struct NetworkHealthResponse {
     pub(super) ok: bool,
     pub(super) state: String,
     pub(super) local_height: u64,
+    pub(super) local_tip_hash: String,
+    pub(super) last_block_age_ms: Option<u64>,
     pub(super) best_known_height: u64,
     pub(super) shared_height: u64,
     pub(super) lag_blocks: u64,
@@ -38,6 +40,19 @@ pub(super) struct NetworkHealthResponse {
     pub(super) banned_peers: usize,
     pub(super) pending_transactions: usize,
     pub(super) pending_plain_transactions: usize,
+    pub(super) last_finalizer_mode: Option<String>,
+    pub(super) last_finalizer_rank: Option<u32>,
+    pub(super) last_block_finalizer: Option<String>,
+    pub(super) current_leader: Option<String>,
+    pub(super) wallet_is_current_leader: bool,
+    pub(super) last_auto_finalization_status: Option<String>,
+    pub(super) vdf_rounds: u64,
+    pub(super) vdf_target_block_ms: u64,
+    pub(super) rejected_blocks: u64,
+    pub(super) rejected_block_batches: u64,
+    pub(super) rejected_snapshots: u64,
+    pub(super) rejected_chain_payloads: u64,
+    pub(super) last_chain_payload_error: Option<String>,
     pub(super) network_time_offset_ms: Option<i64>,
     pub(super) bad_clock_peers: usize,
     pub(super) last_error: Option<String>,
@@ -54,10 +69,24 @@ impl MempoolCounts {
     }
 }
 
-#[derive(Clone, Copy, Debug)]
+#[derive(Clone, Debug)]
 pub(super) struct NetworkHealthLocalState {
     pub(super) height: u64,
+    pub(super) tip_hash: String,
+    pub(super) tip_timestamp_ms: Option<u64>,
     pub(super) pending_transactions: usize,
+    pub(super) last_finalizer_mode: Option<String>,
+    pub(super) last_finalizer_rank: Option<u32>,
+    pub(super) last_block_finalizer: Option<String>,
+    pub(super) current_leader: Option<String>,
+    pub(super) wallet_is_current_leader: bool,
+    pub(super) last_auto_finalization_status: Option<String>,
+    pub(super) vdf_rounds: u64,
+    pub(super) vdf_target_block_ms: u64,
+    pub(super) rejected_blocks: u64,
+    pub(super) rejected_block_batches: u64,
+    pub(super) rejected_snapshots: u64,
+    pub(super) last_chain_payload_error: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]

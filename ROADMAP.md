@@ -28,7 +28,7 @@ The current goal is to keep a small real testnet stable while increasing confide
 - [ ] Genesis allocation plan is published and reviewed.
 - [ ] Security review is complete for consensus validation, transaction validation, P2P input handling, and wallet/key storage.
 - [ ] Upgrade and rollback instructions exist.
-- [ ] Basic operational monitoring is available for height, tip hash, peers, last block age, finalizer mode, VDF rounds, mempool, and rejected blocks.
+- [x] Basic operational monitoring is available for height, tip hash, peers, last block age, finalizer mode, VDF rounds, mempool, and rejected blocks.
 
 ## Pre-Reset Mainnet-Candidate Test Backlog
 
@@ -70,8 +70,8 @@ Focus: make failure modes boring and observable.
 - [x] Add long-running soak chaos test.
 - [x] Keep long-running tests out of normal local test runs.
 - [x] Run long-running tests unconditionally during deployment.
-- [ ] Run a multi-day public testnet without manual chain resets.
-- [ ] Add or improve operator-facing health metrics.
+- [x] Run a multi-day public testnet without manual chain resets.
+- [x] Add or improve operator-facing health metrics.
 - [x] Document common testnet failure/recovery playbooks.
 
 ### M2: Mainnet Candidate

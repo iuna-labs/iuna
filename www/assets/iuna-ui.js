@@ -2940,6 +2940,36 @@ window.iunaApp = function iunaApp() {
       return `${lag} behind`;
     },
 
+    networkTipLabel() {
+      return this.short(this.networkHealth.local_tip_hash);
+    },
+
+    networkLastBlockAgeLabel() {
+      const ageMs = this.networkHealth.last_block_age_ms;
+      if (typeof ageMs !== "number" || !Number.isFinite(ageMs)) return "-";
+      return this.durationLabel(ageMs);
+    },
+
+    networkFinalizerLabel() {
+      return this.shortAddressLabel(this.networkHealth.current_leader);
+    },
+
+    networkFinalizerModeLabel() {
+      const mode = this.networkHealth.last_finalizer_mode;
+      if (!mode) return "-";
+      const rank = this.networkHealth.last_finalizer_rank;
+      const label = mode.charAt(0).toUpperCase() + mode.slice(1);
+      return typeof rank === "number" ? `${label} #${rank}` : label;
+    },
+
+    networkVdfLabel() {
+      const rounds = this.networkHealth.vdf_rounds;
+      const targetMs = this.networkHealth.vdf_target_block_ms;
+      if (typeof rounds !== "number") return "-";
+      const target = typeof targetMs === "number" ? ` / ${this.durationLabel(targetMs)}` : "";
+      return `${rounds.toLocaleString()}${target}`;
+    },
+
     basicNetworkStatusLabel() {
       const state = this.networkHealth.state;
       if (!state) return "Network starting";
@@ -3015,6 +3045,17 @@ window.iunaApp = function iunaApp() {
       const ageHours = Math.round(ageMinutes / 60);
       if (ageHours < 48) return `${ageHours}h ago`;
       return `${Math.round(ageHours / 24)}d ago`;
+    },
+
+    durationLabel(durationMs) {
+      if (typeof durationMs !== "number" || !Number.isFinite(durationMs)) return "-";
+      const seconds = Math.max(0, Math.round(durationMs / 1000));
+      if (seconds < 60) return `${seconds}s`;
+      const minutes = Math.round(seconds / 60);
+      if (minutes < 60) return `${minutes}m`;
+      const hours = Math.round(minutes / 60);
+      if (hours < 48) return `${hours}h`;
+      return `${Math.round(hours / 24)}d`;
     },
 
     peerLastContactLabel(peer) {

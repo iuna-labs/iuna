@@ -120,6 +120,12 @@ pub(super) async fn process_envelope(
                 Err(error) => Err(error),
             };
             let request_snapshot = result.as_ref().err().is_some_and(is_possible_fork_error);
+            record_rejected_chain_payload(
+                network,
+                &network.inner.metrics.rejected_blocks,
+                "block",
+                &result,
+            );
             record_inbound_result(network, known_peer, remote_addr, result).await;
             if request_snapshot {
                 write_envelope(writer, &GossipEnvelope::ChainSnapshotRequest).await?;
@@ -141,6 +147,12 @@ pub(super) async fn process_envelope(
                     Err(error) => Err(error),
                 };
             let request_snapshot = result.as_ref().err().is_some_and(is_possible_fork_error);
+            record_rejected_chain_payload(
+                network,
+                &network.inner.metrics.rejected_block_batches,
+                "block batch",
+                &result,
+            );
             record_inbound_result(network, known_peer, remote_addr, result).await;
             if request_snapshot {
                 write_envelope(writer, &GossipEnvelope::ChainSnapshotRequest).await?;
@@ -161,6 +173,12 @@ pub(super) async fn process_envelope(
                         .map(|_| ()),
                     Err(error) => Err(error),
                 };
+            record_rejected_chain_payload(
+                network,
+                &network.inner.metrics.rejected_snapshots,
+                "snapshot",
+                &result,
+            );
             record_inbound_result(network, known_peer, remote_addr, result).await;
             network.forward_outbox().await;
         }
@@ -227,6 +245,22 @@ async fn process_burn_bundles(
     )
     .await;
     network.forward_outbox().await;
+}
+
+fn record_rejected_chain_payload(
+    network: &GossipNetwork,
+    counter: &std::sync::atomic::AtomicU64,
+    kind: &str,
+    result: &Result<()>,
+) {
+    let Err(error) = result else {
+        return;
+    };
+    P2pMetricsCounters::inc(counter);
+    P2pMetricsCounters::set_last(
+        &network.inner.metrics.last_chain_payload_error,
+        format!("{kind}: {error:#}"),
+    );
 }
 
 async fn record_inbound_result(

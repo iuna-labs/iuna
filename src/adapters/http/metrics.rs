@@ -163,6 +163,9 @@ pub(super) fn network_health_at(
     now_ms: u64,
 ) -> NetworkHealthResponse {
     let local_height = local.height;
+    let last_block_age_ms = local
+        .tip_timestamp_ms
+        .map(|tip_timestamp_ms| now_ms.saturating_sub(tip_timestamp_ms));
     let remote_best_height = peers.iter().filter_map(|peer| peer.last_known_height).max();
     let best_known_height = remote_best_height.unwrap_or(local_height).max(local_height);
     let healthy_heights = peers
@@ -220,6 +223,10 @@ pub(super) fn network_health_at(
             .as_ref()
             .map(|error| format!("{}: {error}", peer.address))
     });
+    let rejected_chain_payloads = local
+        .rejected_blocks
+        .saturating_add(local.rejected_block_batches)
+        .saturating_add(local.rejected_snapshots);
 
     let state = if peers.is_empty() {
         "isolated"
@@ -242,6 +249,8 @@ pub(super) fn network_health_at(
         ok: !peers.is_empty() && lag_blocks == 0 && healthy_peers > stale_peers,
         state,
         local_height,
+        local_tip_hash: local.tip_hash,
+        last_block_age_ms,
         best_known_height,
         shared_height,
         lag_blocks,
@@ -253,6 +262,19 @@ pub(super) fn network_health_at(
         banned_peers,
         pending_transactions: local.pending_transactions,
         pending_plain_transactions: mempool.plain_transactions,
+        last_finalizer_mode: local.last_finalizer_mode,
+        last_finalizer_rank: local.last_finalizer_rank,
+        last_block_finalizer: local.last_block_finalizer,
+        current_leader: local.current_leader,
+        wallet_is_current_leader: local.wallet_is_current_leader,
+        last_auto_finalization_status: local.last_auto_finalization_status,
+        vdf_rounds: local.vdf_rounds,
+        vdf_target_block_ms: local.vdf_target_block_ms,
+        rejected_blocks: local.rejected_blocks,
+        rejected_block_batches: local.rejected_block_batches,
+        rejected_snapshots: local.rejected_snapshots,
+        rejected_chain_payloads,
+        last_chain_payload_error: local.last_chain_payload_error,
         network_time_offset_ms,
         bad_clock_peers,
         last_error,
@@ -277,4 +299,66 @@ fn median_peer_clock_offset(peers: &[PeerInfo], now_ms: u64) -> Option<i64> {
     }
     offsets.sort_unstable();
     Some(offsets[offsets.len() / 2])
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{MempoolCounts, NetworkHealthLocalState, network_health_at};
+
+    #[test]
+    fn network_health_exposes_operator_chain_and_rejection_context() {
+        let local = NetworkHealthLocalState {
+            height: 42,
+            tip_hash: "tip-hash".to_string(),
+            tip_timestamp_ms: Some(1_000),
+            pending_transactions: 3,
+            last_finalizer_mode: Some("ticket".to_string()),
+            last_finalizer_rank: Some(1),
+            last_block_finalizer: Some("last-finalizer".to_string()),
+            current_leader: Some("next-leader".to_string()),
+            wallet_is_current_leader: true,
+            last_auto_finalization_status: Some("waiting for VDF".to_string()),
+            vdf_rounds: 67_000_000,
+            vdf_target_block_ms: 120_000,
+            rejected_blocks: 2,
+            rejected_block_batches: 3,
+            rejected_snapshots: 5,
+            last_chain_payload_error: Some("snapshot: invalid block".to_string()),
+        };
+
+        let health = network_health_at(
+            local,
+            &[],
+            MempoolCounts {
+                plain_transactions: 3,
+            },
+            2_500,
+        );
+
+        assert_eq!(health.local_height, 42);
+        assert_eq!(health.local_tip_hash, "tip-hash");
+        assert_eq!(health.last_block_age_ms, Some(1_500));
+        assert_eq!(health.last_finalizer_mode.as_deref(), Some("ticket"));
+        assert_eq!(health.last_finalizer_rank, Some(1));
+        assert_eq!(
+            health.last_block_finalizer.as_deref(),
+            Some("last-finalizer")
+        );
+        assert_eq!(health.current_leader.as_deref(), Some("next-leader"));
+        assert!(health.wallet_is_current_leader);
+        assert_eq!(
+            health.last_auto_finalization_status.as_deref(),
+            Some("waiting for VDF")
+        );
+        assert_eq!(health.vdf_rounds, 67_000_000);
+        assert_eq!(health.vdf_target_block_ms, 120_000);
+        assert_eq!(health.rejected_blocks, 2);
+        assert_eq!(health.rejected_block_batches, 3);
+        assert_eq!(health.rejected_snapshots, 5);
+        assert_eq!(health.rejected_chain_payloads, 10);
+        assert_eq!(
+            health.last_chain_payload_error.as_deref(),
+            Some("snapshot: invalid block")
+        );
+    }
 }

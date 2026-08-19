@@ -26,6 +26,9 @@ pub(super) struct P2pMetricsCounters {
     pub(super) burn_bundle_envelopes_received: AtomicU64,
     pub(super) burn_bundles_received: AtomicU64,
     pub(super) control_envelopes_received: AtomicU64,
+    pub(super) rejected_blocks: AtomicU64,
+    pub(super) rejected_block_batches: AtomicU64,
+    pub(super) rejected_snapshots: AtomicU64,
     pub(super) bytes_received: AtomicU64,
     pub(super) parse_errors: AtomicU64,
     pub(super) empty_frames: AtomicU64,
@@ -36,6 +39,7 @@ pub(super) struct P2pMetricsCounters {
     pub(super) last_session_failure: StdMutex<Option<String>>,
     pub(super) last_empty_frame_remote: StdMutex<Option<String>>,
     pub(super) last_parse_error: StdMutex<Option<String>>,
+    pub(super) last_chain_payload_error: StdMutex<Option<String>>,
 }
 
 #[derive(Clone, Debug, Default, Eq, PartialEq, Serialize)]
@@ -59,6 +63,9 @@ pub struct P2pMetrics {
     pub burn_bundle_envelopes_received: u64,
     pub burn_bundles_received: u64,
     pub control_envelopes_received: u64,
+    pub rejected_blocks: u64,
+    pub rejected_block_batches: u64,
+    pub rejected_snapshots: u64,
     pub bytes_received: u64,
     pub parse_errors: u64,
     pub empty_frames: u64,
@@ -69,6 +76,7 @@ pub struct P2pMetrics {
     pub last_session_failure: Option<String>,
     pub last_empty_frame_remote: Option<String>,
     pub last_parse_error: Option<String>,
+    pub last_chain_payload_error: Option<String>,
 }
 
 impl P2pMetricsCounters {
@@ -113,6 +121,9 @@ impl P2pMetricsCounters {
                 .load(Ordering::Relaxed),
             burn_bundles_received: self.burn_bundles_received.load(Ordering::Relaxed),
             control_envelopes_received: self.control_envelopes_received.load(Ordering::Relaxed),
+            rejected_blocks: self.rejected_blocks.load(Ordering::Relaxed),
+            rejected_block_batches: self.rejected_block_batches.load(Ordering::Relaxed),
+            rejected_snapshots: self.rejected_snapshots.load(Ordering::Relaxed),
             bytes_received: self.bytes_received.load(Ordering::Relaxed),
             parse_errors: self.parse_errors.load(Ordering::Relaxed),
             empty_frames: self.empty_frames.load(Ordering::Relaxed),
@@ -135,6 +146,35 @@ impl P2pMetricsCounters {
                 .lock()
                 .ok()
                 .and_then(|last| last.clone()),
+            last_chain_payload_error: self
+                .last_chain_payload_error
+                .lock()
+                .ok()
+                .and_then(|last| last.clone()),
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::P2pMetricsCounters;
+
+    #[test]
+    fn snapshot_reports_rejected_chain_payloads() {
+        let metrics = P2pMetricsCounters::default();
+
+        P2pMetricsCounters::inc(&metrics.rejected_blocks);
+        P2pMetricsCounters::inc(&metrics.rejected_block_batches);
+        P2pMetricsCounters::inc(&metrics.rejected_snapshots);
+        P2pMetricsCounters::set_last(&metrics.last_chain_payload_error, "block: invalid VDF");
+
+        let snapshot = metrics.snapshot();
+        assert_eq!(snapshot.rejected_blocks, 1);
+        assert_eq!(snapshot.rejected_block_batches, 1);
+        assert_eq!(snapshot.rejected_snapshots, 1);
+        assert_eq!(
+            snapshot.last_chain_payload_error.as_deref(),
+            Some("block: invalid VDF")
+        );
     }
 }
