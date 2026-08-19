@@ -83,6 +83,10 @@ Metrics:
 
 ## 4. Performance Budgets
 
+Status: started with deterministic tests for consensus block count/byte caps,
+burn bundle 10kB selection, snapshot replay, and blockspace-flood bounded
+mempool selection.
+
 Goal: make valid input DoS visible before launch.
 
 Budgets:

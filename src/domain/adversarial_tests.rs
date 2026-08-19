@@ -1990,6 +1990,11 @@ fn expected_supply(snapshot: &ChainSnapshot) -> Amount {
     mini_expected_supply(snapshot).expect("test snapshot supply accounting should not overflow")
 }
 
+fn finish_prepared_block(wallet: &Wallet, block: super::PreparedBlock) -> Block {
+    let vdf_output = run_vdf(block.vdf_seed(), block.vdf_rounds());
+    block.finish(wallet, vdf_output)
+}
+
 fn assert_supply_invariant(ledger: &Ledger) {
     let snapshot = ledger.snapshot();
     for block in snapshot.blocks.iter().skip(1) {
@@ -3605,6 +3610,125 @@ fn attack_economics_committee_capture_requires_matured_lineage_weight() {
         high_metrics.third_party_burn_censorship_rate, 0.0,
         "high-lineage committee strategy should not censor by itself: {high_metrics:?}"
     );
+}
+
+#[test]
+fn performance_budget_block_validation_rejects_count_and_byte_overflow() {
+    let mut harness = harness_for_percent(1_500, 25);
+    let leader = harness.next_rank(0);
+    let finalizer = harness.wallet(&leader.owner).clone();
+    harness.submit_anchor_burn(&finalizer);
+    let block = harness.finish_ticket_block_from_pending(0, Vec::new());
+    let now_ms = NOW_MS.saturating_add(block.timestamp_ms);
+
+    let mut count_limited = harness.ledger.clone();
+    count_limited.launch_profile.max_block_transactions = block.transactions.len();
+    count_limited
+        .apply_block_at(block.clone(), now_ms)
+        .expect("block at transaction-count budget should validate");
+
+    let mut count_overflow = harness.ledger.clone();
+    count_overflow.launch_profile.max_block_transactions =
+        block.transactions.len().saturating_sub(1);
+    assert!(
+        count_overflow
+            .apply_block_at(block.clone(), now_ms)
+            .is_err(),
+        "block over transaction-count budget validated"
+    );
+
+    let block_bytes = block.serialized_size_bytes().unwrap();
+    let mut byte_limited = harness.ledger.clone();
+    byte_limited.launch_profile.max_block_bytes = block_bytes;
+    byte_limited
+        .apply_block_at(block.clone(), now_ms)
+        .expect("block at byte budget should validate");
+
+    let mut byte_overflow = harness.ledger;
+    byte_overflow.launch_profile.max_block_bytes = block_bytes.saturating_sub(1);
+    assert!(
+        byte_overflow.apply_block_at(block, now_ms).is_err(),
+        "block over byte budget validated"
+    );
+}
+
+#[test]
+fn performance_budget_burn_bundle_processing_respects_10kb_cap() {
+    let finalizer = Wallet::from_seed("burn-bundle-budget-finalizer");
+    let victims = (0..128)
+        .map(|index| Wallet::from_seed(&format!("burn-bundle-budget-victim-{index}")))
+        .collect::<Vec<_>>();
+    let mut allocations = BTreeMap::new();
+    allocations.insert(finalizer.address().to_string(), 10 * MICRO_IUNA);
+    for victim in &victims {
+        allocations.insert(victim.address().to_string(), 10 * MICRO_IUNA);
+    }
+    let mut ledger = Ledger::new_with_genesis_burns(
+        allocations,
+        vec![GenesisBurn::new(finalizer.address(), MICRO_IUNA)],
+        1,
+    )
+    .unwrap();
+
+    for victim in &victims {
+        let burn = ledger.build_burn(victim, 1, 1).unwrap();
+        ledger.submit_transaction(burn).unwrap();
+    }
+
+    let bundle = ledger
+        .build_burn_bundle(&finalizer)
+        .unwrap()
+        .expect("pending burns should produce a bundle");
+    let bundle_size = bundle.serialized_size_bytes().unwrap();
+    assert!(
+        bundle_size <= MAX_BURN_BUNDLE_BYTES,
+        "selected burn bundle exceeds budget: {bundle_size} > {MAX_BURN_BUNDLE_BYTES}"
+    );
+
+    let selected = bundle
+        .burns
+        .iter()
+        .map(|burn| burn.signature().to_string())
+        .collect::<BTreeSet<_>>();
+    let excluded = ledger
+        .pending()
+        .iter()
+        .find(|transaction| transaction.is_burn() && !selected.contains(transaction.signature()))
+        .expect("fixture should contain at least one burn that does not fit");
+    let mut oversized = bundle.clone();
+    oversized.burns.push(excluded.clone());
+    assert!(
+        oversized.serialized_size_bytes().unwrap() > MAX_BURN_BUNDLE_BYTES,
+        "adding one more burn should exceed the bundle budget"
+    );
+
+    let prepared = ledger
+        .prepare_next_block_with_burn_bundles(finalizer.address(), 1, vec![bundle])
+        .unwrap();
+    let block = finish_prepared_block(&finalizer, prepared);
+    ledger
+        .apply_block_at(block, NOW_MS.saturating_add(VDF_TARGET_BLOCK_MS))
+        .unwrap();
+}
+
+#[test]
+fn performance_budget_snapshot_replay_handles_multi_block_chain() {
+    let mut harness = harness_for_percent(1_501, 25);
+    for _ in 0..32 {
+        harness.mine_ticket_block(0);
+    }
+    let snapshot = harness.ledger.snapshot();
+    let expected_height = harness.ledger.height();
+    let expected_tip = harness.ledger.tip_hash().to_string();
+    let expected_supply = live_supply(&harness.ledger);
+
+    let restored = Ledger::from_persisted_snapshot(snapshot).unwrap();
+
+    assert_eq!(restored.height(), expected_height);
+    assert_eq!(restored.tip_hash(), expected_tip);
+    assert_eq!(live_supply(&restored), expected_supply);
+    assert_mini_ticket_inventory_matches(&restored);
+    assert_mini_burn_committee_matches(&restored);
 }
 
 #[test]
