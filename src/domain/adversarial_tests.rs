@@ -10,10 +10,11 @@ use super::ticket::{
     BurnTicket, MISSED_FALLBACK_TICKET_INVALIDATION_HEIGHT, ticket_block_min_timestamp,
 };
 use super::{
-    Amount, BURN_LINEAGE_MATURITY_HEIGHTS, Block, BurnBundle, BurnBundleSignature,
-    BurnCommitteeMember, BurnLeaderRank, ChainSnapshot, FinalizerMode, GenesisBurn,
-    LeaderProofPayload, Ledger, MAX_BLOCK_BYTES, MICRO_IUNA, MaskedBurn, Transaction,
-    TransactionSubmitOutcome, VDF_TARGET_BLOCK_MS, Wallet, hex_hash, run_vdf,
+    Amount, BURN_COMMITTEE_SIZE, BURN_LINEAGE_MATURITY_HEIGHTS, Block, BurnBundle,
+    BurnBundleSignature, BurnCommitteeMember, BurnLeaderRank, ChainSnapshot, FinalizerMode,
+    GenesisBurn, LeaderProofPayload, Ledger, MAX_BLOCK_BYTES, MAX_BURN_BUNDLE_BYTES, MICRO_IUNA,
+    MaskedBurn, OutPoint, Transaction, TransactionSubmitOutcome, TxOutput, UtxoLineageRoot,
+    VDF_TARGET_BLOCK_MS, Wallet, hex_hash, run_vdf,
 };
 
 const NOW_MS: u64 = 10_000_000_000;
@@ -503,6 +504,7 @@ enum MiniBlockVerdict {
     TooLarge,
     MissingBurn,
     FeePolicy,
+    BurnBundleSection,
     FinalizerTicket,
 }
 
@@ -519,6 +521,29 @@ struct MiniTicket {
     amount: Amount,
     eligible_from_height: u64,
     eligible_until_height: u64,
+}
+
+#[derive(Clone, Debug, Default)]
+struct MiniLineageState {
+    utxos: BTreeMap<OutPoint, TxOutput>,
+    utxo_lineage: BTreeMap<OutPoint, UtxoLineageRoot>,
+    lineage_values: BTreeMap<UtxoLineageRoot, Amount>,
+    lineage_owners: BTreeMap<UtxoLineageRoot, BTreeMap<String, BTreeMap<OutPoint, Amount>>>,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+struct MiniLineageCandidate {
+    root: UtxoLineageRoot,
+    value: Amount,
+    weight: u64,
+    owner: String,
+}
+
+#[derive(Clone, Debug, Eq, Ord, PartialEq, PartialOrd)]
+struct MiniLeaderScore {
+    finalizer_mode_rank: u8,
+    finalizer_rank: u32,
+    proof_rank: String,
 }
 
 impl MiniTicket {
@@ -617,6 +642,9 @@ fn mini_block_verdict(ledger: &Ledger, block: &Block, now_ms: u64) -> MiniBlockV
     {
         return MiniBlockVerdict::FeePolicy;
     }
+    if mini_validate_burn_bundle_section(ledger, block).is_none() {
+        return MiniBlockVerdict::BurnBundleSection;
+    }
 
     if block.finalizer_mode == FinalizerMode::Ticket {
         let Ok(ranks) = ledger.burn_leader_ranks_for_block(block.height) else {
@@ -689,6 +717,8 @@ fn consensus_block_verdict(mut ledger: Ledger, block: Block, now_ms: u64) -> Min
         MiniBlockVerdict::MissingBurn
     } else if error.contains("fee must be greater than zero") {
         MiniBlockVerdict::FeePolicy
+    } else if error.contains("burn bundle") || error.contains("attested burn") {
+        MiniBlockVerdict::BurnBundleSection
     } else if error.contains("selected for rank")
         || error.contains("selected ticket")
         || error.contains("leader proof")
@@ -1024,6 +1054,621 @@ fn assert_mini_ticket_inventory_matches(ledger: &Ledger) {
     assert_eq!(mini_tickets, ledger_tickets);
 }
 
+fn mini_lineage_state(snapshot: &ChainSnapshot) -> Option<MiniLineageState> {
+    let mut state = MiniLineageState::default();
+    for (address, amount) in snapshot
+        .genesis_allocations
+        .iter()
+        .filter(|(_, amount)| **amount > 0)
+    {
+        mini_insert_output(
+            &mut state,
+            OutPoint {
+                txid: hex_hash(format!("iuna-genesis-allocation:{address}")),
+                index: 0,
+            },
+            TxOutput {
+                address: address.clone(),
+                amount: *amount,
+            },
+            None,
+        )?;
+    }
+
+    let genesis = snapshot.blocks.first()?;
+    for transaction in &genesis.transactions {
+        mini_apply_transaction(&mut state, transaction, genesis.height, false)?;
+    }
+    mini_credit_reward(&mut state, genesis)?;
+
+    for block in snapshot.blocks.iter().skip(1) {
+        for transaction in &block.transactions {
+            mini_apply_transaction(&mut state, transaction, block.height, true)?;
+        }
+        mini_credit_reward(&mut state, block)?;
+    }
+
+    Some(state)
+}
+
+fn mini_apply_transaction(
+    state: &mut MiniLineageState,
+    transaction: &Transaction,
+    block_height: u64,
+    track_mine_lineage: bool,
+) -> Option<()> {
+    if let Transaction::Mine { recipient, .. } = transaction {
+        let outpoint = OutPoint {
+            txid: transaction.signature().to_string(),
+            index: 0,
+        };
+        let root = track_mine_lineage.then(|| UtxoLineageRoot {
+            outpoint: outpoint.clone(),
+            height: block_height,
+        });
+        return mini_insert_output(
+            state,
+            outpoint,
+            TxOutput {
+                address: recipient.clone(),
+                amount: transaction.amount(),
+            },
+            root,
+        );
+    }
+
+    let mut seen = BTreeSet::new();
+    let mut input_total = 0_u64;
+    let mut inherited_root = None;
+    for input in transaction.inputs() {
+        if !seen.insert(input.outpoint.clone()) {
+            return None;
+        }
+        let output = state.utxos.remove(&input.outpoint)?;
+        if output.address != input.owner {
+            return None;
+        }
+        input_total = input_total.checked_add(output.amount)?;
+        if let Some(root) = state.utxo_lineage.remove(&input.outpoint) {
+            mini_subtract_lineage(
+                state,
+                &root,
+                &output.address,
+                &input.outpoint,
+                output.amount,
+            )?;
+            inherited_root = mini_newest_lineage_root(inherited_root, Some(root));
+        }
+    }
+
+    let outputs = transaction.outputs();
+    let output_total = outputs
+        .iter()
+        .try_fold(0_u64, |total, output| total.checked_add(output.amount))?;
+    let burn_amount = match transaction {
+        Transaction::Burn { amount, .. } => *amount,
+        Transaction::Transfer { .. } => 0,
+        Transaction::Mine { .. } => unreachable!("mine transactions returned above"),
+    };
+    let required = output_total
+        .checked_add(transaction.fee())?
+        .checked_add(burn_amount)?;
+    if input_total != required {
+        return None;
+    }
+
+    for (index, output) in outputs.into_iter().enumerate() {
+        mini_insert_output(
+            state,
+            OutPoint {
+                txid: transaction.signature().to_string(),
+                index: index as u32,
+            },
+            output,
+            inherited_root.clone(),
+        )?;
+    }
+    Some(())
+}
+
+fn mini_insert_output(
+    state: &mut MiniLineageState,
+    outpoint: OutPoint,
+    output: TxOutput,
+    root: Option<UtxoLineageRoot>,
+) -> Option<()> {
+    if state
+        .utxos
+        .insert(outpoint.clone(), output.clone())
+        .is_some()
+    {
+        return None;
+    }
+    if let Some(root) = root {
+        state.utxo_lineage.insert(outpoint.clone(), root.clone());
+        let value = state.lineage_values.entry(root.clone()).or_insert(0);
+        *value = value.checked_add(output.amount)?;
+        state
+            .lineage_owners
+            .entry(root)
+            .or_default()
+            .entry(output.address)
+            .or_default()
+            .insert(outpoint, output.amount);
+    }
+    Some(())
+}
+
+fn mini_credit_reward(state: &mut MiniLineageState, block: &Block) -> Option<()> {
+    if block.reward == 0 {
+        return Some(());
+    }
+    mini_insert_output(
+        state,
+        OutPoint {
+            txid: block.hash.clone(),
+            index: u32::MAX,
+        },
+        TxOutput {
+            address: block.miner.clone(),
+            amount: block.reward,
+        },
+        None,
+    )
+}
+
+fn mini_subtract_lineage(
+    state: &mut MiniLineageState,
+    root: &UtxoLineageRoot,
+    owner: &str,
+    outpoint: &OutPoint,
+    amount: Amount,
+) -> Option<()> {
+    let value = state.lineage_values.get_mut(root)?;
+    *value = value.checked_sub(amount)?;
+    if *value == 0 {
+        state.lineage_values.remove(root);
+    }
+
+    let owners = state.lineage_owners.get_mut(root)?;
+    let outputs = owners.get_mut(owner)?;
+    outputs.remove(outpoint)?;
+    if outputs.is_empty() {
+        owners.remove(owner);
+    }
+    if owners.is_empty() {
+        state.lineage_owners.remove(root);
+    }
+    Some(())
+}
+
+fn mini_newest_lineage_root(
+    left: Option<UtxoLineageRoot>,
+    right: Option<UtxoLineageRoot>,
+) -> Option<UtxoLineageRoot> {
+    match (left, right) {
+        (None, None) => None,
+        (Some(root), None) | (None, Some(root)) => Some(root),
+        (Some(left), Some(right)) => {
+            if (right.height, &right.outpoint) > (left.height, &left.outpoint) {
+                Some(right)
+            } else {
+                Some(left)
+            }
+        }
+    }
+}
+
+fn mini_lineage_committee_weight(value: Amount) -> u64 {
+    u64::BITS as u64 - value.saturating_add(1).leading_zeros() as u64 - 1
+}
+
+fn mini_burn_committee_for_next_block(ledger: &Ledger) -> Option<Vec<BurnCommitteeMember>> {
+    let snapshot = ledger.snapshot();
+    let parent = snapshot.blocks.last()?;
+    let tickets = mini_ticket_inventory(&snapshot)?;
+    let state = mini_lineage_state(&snapshot)?;
+    Some(mini_burn_committee_for_height(
+        parent,
+        parent.height.checked_add(1)?,
+        &tickets,
+        &state,
+    ))
+}
+
+fn mini_burn_committee_for_height(
+    parent: &Block,
+    height: u64,
+    tickets: &[MiniTicket],
+    state: &MiniLineageState,
+) -> Vec<BurnCommitteeMember> {
+    let ranked = mini_ranked_tickets_for_height(parent, height, tickets);
+    let Some(finalizer) = ranked.first() else {
+        return Vec::new();
+    };
+    let mut committee = vec![BurnCommitteeMember {
+        slot: 0,
+        root: finalizer.id.clone(),
+        owner: finalizer.owner.clone(),
+        weight: finalizer.amount,
+    }];
+    let mut skipped_owners = BTreeSet::from([finalizer.owner.clone()]);
+    let mut remaining = mini_eligible_lineage_candidates(parent, state, &finalizer.owner)
+        .into_iter()
+        .filter_map(|candidate| {
+            let owner = mini_representative_owner_for_lineage_root(
+                state,
+                &candidate.root,
+                &skipped_owners,
+            )?;
+            Some(MiniLineageCandidate { owner, ..candidate })
+        })
+        .collect::<Vec<_>>();
+
+    for slot in 1..BURN_COMMITTEE_SIZE {
+        let Some(index) =
+            mini_select_weighted_lineage_index(parent, height, slot as u8, &remaining)
+        else {
+            break;
+        };
+        let selected = remaining.remove(index);
+        skipped_owners.insert(selected.owner.clone());
+        committee.push(BurnCommitteeMember {
+            slot: slot as u8,
+            root: outpoint_id(&selected.root.outpoint),
+            owner: selected.owner,
+            weight: selected.value,
+        });
+        remaining.retain(|candidate| {
+            candidate.root != selected.root
+                && mini_representative_owner_for_lineage_root(
+                    state,
+                    &candidate.root,
+                    &skipped_owners,
+                )
+                .is_some()
+        });
+        for candidate in &mut remaining {
+            candidate.owner =
+                mini_representative_owner_for_lineage_root(state, &candidate.root, &skipped_owners)
+                    .expect("retained mini lineage candidate has representative owner");
+        }
+    }
+
+    committee
+}
+
+fn mini_eligible_lineage_candidates(
+    parent: &Block,
+    state: &MiniLineageState,
+    finalizer: &str,
+) -> Vec<MiniLineageCandidate> {
+    state
+        .lineage_values
+        .iter()
+        .filter(|(root, value)| {
+            **value > 0
+                && root.height.saturating_add(BURN_LINEAGE_MATURITY_HEIGHTS) <= parent.height
+                && !mini_lineage_root_has_owner(state, root, finalizer)
+        })
+        .filter_map(|(root, value)| {
+            let weight = mini_lineage_committee_weight(*value);
+            (weight > 0).then(|| MiniLineageCandidate {
+                root: root.clone(),
+                value: *value,
+                weight,
+                owner: String::new(),
+            })
+        })
+        .collect()
+}
+
+fn mini_lineage_root_has_owner(
+    state: &MiniLineageState,
+    root: &UtxoLineageRoot,
+    owner: &str,
+) -> bool {
+    state
+        .lineage_owners
+        .get(root)
+        .and_then(|owners| owners.get(owner))
+        .is_some_and(|outputs| !outputs.is_empty())
+}
+
+fn mini_representative_owner_for_lineage_root(
+    state: &MiniLineageState,
+    root: &UtxoLineageRoot,
+    skipped_owners: &BTreeSet<String>,
+) -> Option<String> {
+    state.lineage_owners.get(root).and_then(|owners| {
+        owners
+            .iter()
+            .filter(|(owner, outputs)| !skipped_owners.contains(*owner) && !outputs.is_empty())
+            .filter_map(|(owner, outputs)| {
+                let (outpoint, amount) = outputs
+                    .iter()
+                    .max_by(|left, right| left.1.cmp(right.1).then_with(|| right.0.cmp(left.0)))?;
+                Some((owner.clone(), *amount, outpoint.clone()))
+            })
+            .max_by(|left, right| {
+                left.1
+                    .cmp(&right.1)
+                    .then_with(|| right.2.cmp(&left.2))
+                    .then_with(|| right.0.cmp(&left.0))
+            })
+            .map(|(owner, _, _)| owner)
+    })
+}
+
+fn mini_select_weighted_lineage_index(
+    parent: &Block,
+    target_height: u64,
+    slot: u8,
+    candidates: &[MiniLineageCandidate],
+) -> Option<usize> {
+    let total_weight = candidates.iter().try_fold(0_u128, |total, candidate| {
+        total.checked_add(u128::from(candidate.weight))
+    })?;
+    if total_weight == 0 {
+        return None;
+    }
+    let seed = format!(
+        "iuna-burn-lineage-draw-v1:{target_height}:{}:{}:{slot}",
+        parent.hash, parent.vdf_output
+    );
+    let digest = Sha256::digest(seed.as_bytes());
+    let mut bytes = [0_u8; 16];
+    bytes.copy_from_slice(&digest[..16]);
+    let draw = u128::from_be_bytes(bytes) % total_weight;
+    let mut cumulative = 0_u128;
+    for (index, candidate) in candidates.iter().enumerate() {
+        cumulative = cumulative.checked_add(u128::from(candidate.weight))?;
+        if draw < cumulative {
+            return Some(index);
+        }
+    }
+    None
+}
+
+fn outpoint_id(outpoint: &OutPoint) -> String {
+    format!("{}:{}", outpoint.txid, outpoint.index)
+}
+
+fn mini_validate_burn_bundle_section(ledger: &Ledger, block: &Block) -> Option<()> {
+    let section = &block.burn_bundle_section;
+    if section.signatures.len() > BURN_COMMITTEE_SIZE.saturating_sub(1) {
+        return None;
+    }
+    if section
+        .signatures
+        .windows(2)
+        .any(|pair| pair[0].slot >= pair[1].slot)
+    {
+        return None;
+    }
+
+    let committee = mini_burn_committee_for_next_block(ledger)?
+        .into_iter()
+        .map(|member| (member.slot, member))
+        .collect::<BTreeMap<_, _>>();
+    let mut seen_slots = BTreeSet::new();
+    let mut seen_members = BTreeSet::new();
+    let mut included_mask = 0_u8;
+    for signature in &section.signatures {
+        if usize::from(signature.slot) >= BURN_COMMITTEE_SIZE || signature.slot == 0 {
+            return None;
+        }
+        if !seen_slots.insert(signature.slot) || !seen_members.insert(signature.member.clone()) {
+            return None;
+        }
+        let member = committee.get(&signature.slot)?;
+        if signature.member != member.owner {
+            return None;
+        }
+        included_mask |= mini_burn_bundle_slot_mask(signature.slot)?;
+    }
+
+    let required_signatures = mini_required_explicit_burn_signatures(
+        block.finalizer_mode,
+        block.finalizer_rank,
+        committee.len(),
+        mini_transactions_have_attestable_burns(&block.transactions, &block.miner),
+    );
+    if section.signatures.len() < required_signatures {
+        return None;
+    }
+
+    let mut seen_burns = BTreeSet::new();
+    let mut previous_key: Option<(Amount, String)> = None;
+    for masked in &section.burns {
+        if masked.bundle_mask & !mini_burn_committee_mask() != 0 {
+            return None;
+        }
+        if masked.bundle_mask & !included_mask != 0 {
+            return None;
+        }
+        if !seen_burns.insert(masked.burn.signature().to_string()) {
+            return None;
+        }
+        if !masked.burn.is_burn() || !mini_matching_burn_by_signature(&masked.burn, block) {
+            return None;
+        }
+        let key = (masked.burn.fee(), masked.burn.signature().to_string());
+        if let Some((previous_fee, previous_signature)) = &previous_key {
+            if key.0 > *previous_fee || key.0 == *previous_fee && key.1 < *previous_signature {
+                return None;
+            }
+        }
+        previous_key = Some(key);
+    }
+
+    for signature in &section.signatures {
+        let slot_mask = mini_burn_bundle_slot_mask(signature.slot)?;
+        let burns = section
+            .burns
+            .iter()
+            .filter(|masked| masked.bundle_mask & slot_mask != 0)
+            .map(|masked| masked.burn.clone())
+            .collect::<Vec<_>>();
+        let bundle = BurnBundle {
+            height: block.height,
+            prev_hash: block.prev_hash.clone(),
+            slot: signature.slot,
+            member: signature.member.clone(),
+            burns: burns.clone(),
+            signature: signature.signature.clone(),
+        };
+        if bundle.serialized_size_bytes().ok()? > MAX_BURN_BUNDLE_BYTES {
+            return None;
+        }
+        let payload = BurnBundlePayload {
+            height: block.height,
+            prev_hash: block.prev_hash.clone(),
+            slot: signature.slot,
+            member: signature.member.clone(),
+            burns,
+        };
+        if verify_address_signature(
+            &signature.member,
+            &payload.canonical(),
+            &signature.signature,
+            "mini-validator burn bundle",
+        )
+        .is_err()
+        {
+            return None;
+        }
+    }
+
+    Some(())
+}
+
+fn mini_required_explicit_burn_signatures(
+    finalizer_mode: FinalizerMode,
+    finalizer_rank: u32,
+    committee_size: usize,
+    has_attested_burns: bool,
+) -> usize {
+    if !has_attested_burns || committee_size == 0 {
+        return 0;
+    }
+    match finalizer_mode {
+        FinalizerMode::Ticket if finalizer_rank == 0 => committee_size.saturating_sub(1),
+        FinalizerMode::Ticket if finalizer_rank == 1 => committee_size.saturating_sub(2),
+        FinalizerMode::Ticket | FinalizerMode::Recovery => 0,
+    }
+}
+
+fn mini_transactions_have_attestable_burns(transactions: &[Transaction], finalizer: &str) -> bool {
+    let mut finalizer_anchor_seen = false;
+    for transaction in transactions {
+        if !transaction.is_burn() {
+            continue;
+        }
+        if transaction.sender() == finalizer && !finalizer_anchor_seen {
+            finalizer_anchor_seen = true;
+            continue;
+        }
+        return true;
+    }
+    false
+}
+
+fn mini_matching_burn_by_signature(attested: &Transaction, block: &Block) -> bool {
+    block.transactions.iter().any(|transaction| {
+        transaction.is_burn()
+            && transaction.signature() == attested.signature()
+            && transaction.canonical() == attested.canonical()
+    })
+}
+
+fn mini_burn_bundle_slot_mask(slot: u8) -> Option<u8> {
+    if usize::from(slot) >= BURN_COMMITTEE_SIZE || slot >= 8 {
+        return None;
+    }
+    Some(1_u8 << slot)
+}
+
+fn mini_burn_committee_mask() -> u8 {
+    (0..BURN_COMMITTEE_SIZE).fold(0_u8, |mask, slot| mask | (1_u8 << slot))
+}
+
+fn assert_mini_burn_committee_matches(ledger: &Ledger) {
+    let mini_committee =
+        mini_burn_committee_for_next_block(ledger).expect("ledger snapshot has valid lineage");
+    assert_eq!(mini_committee, ledger.burn_committee_for_next_block());
+}
+
+fn mini_choose_fork(local: &Ledger, candidate: &Ledger) -> Option<bool> {
+    if candidate.genesis_hash() != local.genesis_hash() {
+        return None;
+    }
+    let common_ancestor_height = mini_common_ancestor_height(local.chain(), candidate.chain())?;
+    if candidate.height() == local.height() && candidate.tip_hash() == local.tip_hash() {
+        return Some(false);
+    }
+
+    let finalized_floor = local.height().saturating_sub(super::FORK_FINALITY_DEPTH);
+    if common_ancestor_height < finalized_floor {
+        return Some(false);
+    }
+    if candidate.height() > local.height() {
+        return Some(true);
+    }
+    if candidate.height() < local.height() {
+        return Some(false);
+    }
+
+    Some(mini_remote_fork_is_better(
+        local.chain(),
+        candidate.chain(),
+        common_ancestor_height.saturating_add(1),
+    ))
+}
+
+fn mini_common_ancestor_height(local: &[Block], candidate: &[Block]) -> Option<u64> {
+    let max_common_index = local.len().min(candidate.len()).checked_sub(1)?;
+    for index in 0..=max_common_index {
+        if local[index] != candidate[index] {
+            return (index > 0).then_some(index as u64 - 1);
+        }
+    }
+    Some(max_common_index as u64)
+}
+
+fn mini_remote_fork_is_better(local: &[Block], candidate: &[Block], first_diverging: u64) -> bool {
+    let local_fork = local.iter().skip(first_diverging as usize);
+    let remote_fork = candidate.iter().skip(first_diverging as usize);
+    for (local_block, remote_block) in local_fork.zip(remote_fork) {
+        match mini_leader_score(local_block).cmp(&mini_leader_score(remote_block)) {
+            std::cmp::Ordering::Less => return false,
+            std::cmp::Ordering::Greater => return true,
+            std::cmp::Ordering::Equal => {}
+        }
+    }
+    false
+}
+
+fn mini_leader_score(block: &Block) -> MiniLeaderScore {
+    MiniLeaderScore {
+        finalizer_mode_rank: match block.finalizer_mode {
+            FinalizerMode::Ticket => 0,
+            FinalizerMode::Recovery => 1,
+        },
+        finalizer_rank: block.finalizer_rank,
+        proof_rank: block
+            .leader_proof
+            .as_ref()
+            .map(|proof| {
+                hex_hash(format!(
+                    "iuna-leader-rank:{}:{}",
+                    proof.ticket_id, proof.signature
+                ))
+            })
+            .unwrap_or_else(|| block.hash.clone()),
+    }
+}
+
 fn harness_for_percent(seed: u64, burn_percent: u8) -> Harness {
     Harness::new(seed, burn_percent, 10, AdversaryStrategy::Honest)
 }
@@ -1149,11 +1794,14 @@ proptest! {
         let mut harness = Harness::new(seed, 10, LEVELS[lineage_idx], AdversaryStrategy::AddressRotation);
         harness.mature_lineages(2, 4);
         let committee = harness.ledger.burn_committee_for_next_block();
+        let mini_committee = mini_burn_committee_for_next_block(&harness.ledger)
+            .expect("mini committee oracle should replay generated lineage");
         let snapshot_committee = Ledger::from_snapshot_at(harness.ledger.snapshot(), NOW_MS)
             .unwrap()
             .burn_committee_for_next_block();
 
         prop_assert_eq!(committee.clone(), snapshot_committee, "seed={} committee selection is not deterministic", seed);
+        prop_assert_eq!(committee.clone(), mini_committee, "seed={} mini committee oracle diverged", seed);
         prop_assert!(committee_roots_are_unique(&committee), "seed={} selected one lineage more than once: {:?}", seed, committee);
         let non_finalizer_roots = committee.iter().filter(|member| member.slot > 0).count();
         prop_assert!(non_finalizer_roots < super::BURN_COMMITTEE_SIZE);
@@ -1489,6 +2137,74 @@ fn misused_or_extra_committee_bundle_is_rejected() {
     rehash(&mut block);
 
     assert_rejects(harness.ledger, block, "extra committee signature");
+}
+
+#[test]
+fn mini_burn_bundle_quorum_oracle_matches_consensus_mutations() {
+    let mut harness = harness_for_percent(38, 25);
+    harness.mature_lineages(2, 4);
+    assert_mini_burn_committee_matches(&harness.ledger);
+
+    let leader = harness.next_rank(0);
+    let finalizer = harness.wallet(&leader.owner).clone();
+    harness.submit_anchor_burn(&finalizer);
+    let victim = harness
+        .honest
+        .iter()
+        .find(|wallet| wallet.address() != finalizer.address())
+        .unwrap()
+        .clone();
+    harness.submit_fee_burn(&victim, 1, 1);
+    let bundles = harness.committee_bundles();
+    let block = harness.finish_ticket_block_from_pending(0, bundles);
+    assert!(
+        !block.burn_bundle_section.signatures.is_empty(),
+        "test setup should require explicit committee signatures"
+    );
+    assert!(
+        !block.burn_bundle_section.burns.is_empty(),
+        "test setup should include an attested third-party burn"
+    );
+    let now_ms = NOW_MS.saturating_add(block.timestamp_ms);
+    assert_mini_validator_agrees(
+        &harness.ledger,
+        block.clone(),
+        now_ms,
+        MiniBlockVerdict::Accept,
+    );
+
+    let mut missing_signature = block.clone();
+    missing_signature.burn_bundle_section.signatures.pop();
+    rehash(&mut missing_signature);
+    assert_mini_validator_agrees(
+        &harness.ledger,
+        missing_signature,
+        now_ms,
+        MiniBlockVerdict::BurnBundleSection,
+    );
+
+    let mut invalid_mask = block.clone();
+    invalid_mask.burn_bundle_section.burns[0].bundle_mask |= 0b1000_0000;
+    rehash(&mut invalid_mask);
+    assert_mini_validator_agrees(
+        &harness.ledger,
+        invalid_mask,
+        now_ms,
+        MiniBlockVerdict::BurnBundleSection,
+    );
+
+    let mut duplicate_burn = block;
+    duplicate_burn
+        .burn_bundle_section
+        .burns
+        .push(duplicate_burn.burn_bundle_section.burns[0].clone());
+    rehash(&mut duplicate_burn);
+    assert_mini_validator_agrees(
+        &harness.ledger,
+        duplicate_burn,
+        now_ms,
+        MiniBlockVerdict::BurnBundleSection,
+    );
 }
 
 #[test]
@@ -1856,6 +2572,7 @@ fn recovery_and_fork_choice_cannot_cross_finality_depth() {
         remote.mine_ticket_block(0);
     }
 
+    assert_eq!(mini_choose_fork(&local.ledger, &remote.ledger), Some(false));
     let switched = local
         .ledger
         .extend_from_snapshot_at(remote.ledger.snapshot(), NOW_MS)
@@ -1874,7 +2591,9 @@ fn same_height_fork_switches_to_better_leader_quality() {
     let remote_block = remote.mine_ticket_block(0);
     assert_eq!(local.ledger.height(), remote.ledger.height());
     assert!(remote_block.leader_score() < local_block.leader_score());
+    assert!(mini_leader_score(&remote_block) < mini_leader_score(&local_block));
 
+    assert_eq!(mini_choose_fork(&local.ledger, &remote.ledger), Some(true));
     let switched = local
         .ledger
         .extend_from_snapshot_at(remote.ledger.snapshot(), NOW_MS)
@@ -1897,6 +2616,7 @@ fn taller_valid_fork_inside_finality_window_is_adopted() {
     remote.mine_ticket_block(0);
     remote.mine_ticket_block(0);
 
+    assert_eq!(mini_choose_fork(&local.ledger, &remote.ledger), Some(true));
     let switched = local
         .ledger
         .extend_from_snapshot_at(remote.ledger.snapshot(), NOW_MS)

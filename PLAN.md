@@ -31,7 +31,8 @@ Acceptance:
 Status: started with a test-only block precheck oracle for height, parent hash,
 block hash, reward, VDF rounds, timestamps, block limits, burn presence, fee
 policy, ticket finalizer proof selection, snapshot supply accounting, and ticket
-lifecycle reconstruction.
+lifecycle reconstruction. The oracle now also reconstructs burn committee
+lineage selection, burn bundle quorum rules, and fork-choice finality decisions.
 
 Goal: compare the production validator against a small, deliberately separate
 oracle for consensus-critical facts.
