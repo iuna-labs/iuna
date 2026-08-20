@@ -965,7 +965,7 @@ pub(super) const INDEX_HTML: &str = r#"<!doctype html>
                 <div class="detail-kv"><div class="key">Burn Bundles</div><div x-text="blockBurnBundleRatio(selectedBlock)"></div></div>
                 <div class="detail-kv"><div class="key">Burns</div><div x-text="blockBurnCount(selectedBlock)"></div></div>
                 <div class="detail-kv"><div class="key">Transfers</div><div x-text="blockTransferCount(selectedBlock)"></div></div>
-                <div class="detail-kv"><div class="key">Total Burned</div><div>IUNA <span x-text="amountLabel(blockBurned(selectedBlock))"></span></div></div>
+                <div class="detail-kv"><div class="key">Total Lost</div><div>IUNA <span x-text="amountLabel(blockLostIuna(selectedBlock))"></span></div></div>
                 <div class="detail-kv">
                   <div class="key">Bytes</div>
                   <button class="detail-link" type="button" @click="openBlockBytesModal(selectedBlock)" title="Block byte breakdown">

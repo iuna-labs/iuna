@@ -41,6 +41,7 @@ const VDF_MEASUREMENT_MIN_ELAPSED: Duration = Duration::from_millis(150);
 const VDF_PROGRESS_LOG_INTERVAL: Duration = Duration::from_secs(10);
 const AUTOMATIC_BURN_ENABLED_ENV: &str = "IUNA_AUTOMATIC_BURN_ENABLED";
 const POW_MINING_ENABLED_ENV: &str = "IUNA_POW_MINING_ENABLED";
+const SETUP_COMPLETE_ENV: &str = "IUNA_SETUP_COMPLETE";
 const WALLET_PASSWORD_ENV: &str = "IUNA_WALLET_PASSWORD";
 
 #[tokio::main]
@@ -69,6 +70,7 @@ async fn main() -> Result<()> {
     let startup_wallet_password = startup_wallet_password_from_env()?;
     let startup_automatic_burn_enabled = startup_bool_from_env(AUTOMATIC_BURN_ENABLED_ENV)?;
     let startup_pow_mining_enabled = startup_bool_from_env(POW_MINING_ENABLED_ENV)?;
+    let startup_setup_complete = startup_bool_from_env(SETUP_COMPLETE_ENV)?;
     let p2p_config_dirty = apply_cli_p2p_config_overrides(&opts, &mut ui_config);
     let stratum_config_dirty = apply_cli_stratum_config_overrides(&opts, &mut ui_config);
     let p2p_announce_addr = configured_p2p_announce_addr(&opts, &ui_config)?;
@@ -88,6 +90,12 @@ async fn main() -> Result<()> {
         startup_automatic_burn_enabled,
         startup_pow_mining_enabled,
     );
+    let setup_config_dirty = apply_startup_setup_config_override(
+        &opts,
+        persisted_chain_exists,
+        &mut ui_config,
+        startup_setup_complete,
+    )?;
     let auth_config_dirty = apply_startup_wallet_password_config(
         &config_path,
         &mut ui_config,
@@ -98,7 +106,8 @@ async fn main() -> Result<()> {
     let ui_config_dirty = opts.chain_mode == ChainMode::Genesis
         || p2p_config_dirty
         || stratum_config_dirty
-        || mining_config_dirty;
+        || mining_config_dirty
+        || setup_config_dirty;
     if ui_config_dirty || auth_config_dirty {
         config_store::save(&config_path, &ui_config)?;
     }
@@ -346,6 +355,31 @@ fn apply_startup_mining_config_overrides(
         }
     }
     dirty
+}
+
+fn apply_startup_setup_config_override(
+    opts: &CliOptions,
+    persisted_chain_exists: bool,
+    ui_config: &mut config_store::UiConfig,
+    setup_complete: Option<bool>,
+) -> Result<bool> {
+    let Some(setup_complete) = setup_complete else {
+        return Ok(false);
+    };
+    if setup_complete
+        && opts.chain_mode == ChainMode::Setup
+        && !persisted_chain_exists
+        && opts.join_peers.is_empty()
+    {
+        bail!(
+            "{SETUP_COMPLETE_ENV}=true requires --genesis, --join, or an existing chain database"
+        );
+    }
+    if ui_config.setup_complete == setup_complete {
+        return Ok(false);
+    }
+    ui_config.setup_complete = setup_complete;
+    Ok(true)
 }
 
 fn apply_startup_wallet_password_config(

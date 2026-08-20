@@ -135,7 +135,9 @@ stable Docker-network addresses to each other.
 The local compose file sets `IUNA_WALLET_PASSWORD` for every container. On first
 start this configures the management UI password and encrypts the wallet; on
 restart it unlocks the encrypted wallet so finalization and automatic mining can
-continue without UI login. Override the local defaults from your shell or a
+continue without UI login. Compose also sets `IUNA_SETUP_COMPLETE=true`, so
+after unlocking the management UI you land directly in the node instead of the
+initial setup wizard. Override the local password defaults from your shell or a
 `.env` file:
 
 ```sh
@@ -150,6 +152,7 @@ Do not use compose-file default passwords for public nodes or valuable wallets.
 For unattended local nodes, startup environment flags can also persist mining
 settings:
 
+- `IUNA_SETUP_COMPLETE=true|false`
 - `IUNA_AUTOMATIC_BURN_ENABLED=true|false`
 - `IUNA_POW_MINING_ENABLED=true|false`
 

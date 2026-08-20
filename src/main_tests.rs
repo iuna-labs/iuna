@@ -17,11 +17,12 @@ use tokio::sync::Mutex;
 use super::{
     ChainMode, CliOptions, GENESIS_INITIAL_BURN_FEE, GENESIS_INITIAL_BURN_PER_BLOCK, StartupWallet,
     apply_cli_p2p_config_overrides, apply_cli_stratum_config_overrides,
-    apply_startup_mining_config_overrides, apply_startup_wallet_password_config,
-    configured_p2p_announce_addr, configured_p2p_bind_addr, configured_stratum_addr,
-    extrapolate_vdf_rounds, help_text, initial_burn_fee, initial_burn_per_block, initialize_ledger,
-    load_startup_wallet, measure_vdf_rounds, parse_startup_bool_env_value, persist_chain_snapshot,
-    project_ui_data_store, run_chain_persistence_with_interval, validate_wallet_for_mode,
+    apply_startup_mining_config_overrides, apply_startup_setup_config_override,
+    apply_startup_wallet_password_config, configured_p2p_announce_addr, configured_p2p_bind_addr,
+    configured_stratum_addr, extrapolate_vdf_rounds, help_text, initial_burn_fee,
+    initial_burn_per_block, initialize_ledger, load_startup_wallet, measure_vdf_rounds,
+    parse_startup_bool_env_value, persist_chain_snapshot, project_ui_data_store,
+    run_chain_persistence_with_interval, validate_wallet_for_mode,
 };
 
 fn parse(args: &[&str]) -> anyhow::Result<Option<CliOptions>> {
@@ -31,6 +32,7 @@ fn parse(args: &[&str]) -> anyhow::Result<Option<CliOptions>> {
 #[test]
 fn help_mentions_dev_seed_verify_bypass_env() {
     assert!(help_text().contains("IUNA_WALLET_PASSWORD=<password>"));
+    assert!(help_text().contains("IUNA_SETUP_COMPLETE=true|false"));
     assert!(help_text().contains("IUNA_AUTOMATIC_BURN_ENABLED=true|false"));
     assert!(help_text().contains("IUNA_POW_MINING_ENABLED=true|false"));
     assert!(help_text().contains("IUNA_DEV_SKIP_SEED_VERIFY=1"));
@@ -259,6 +261,42 @@ fn startup_bool_env_parser_accepts_common_boolean_values() {
         assert!(!parse_startup_bool_env_value("TEST_BOOL", value).unwrap());
     }
     assert!(parse_startup_bool_env_value("TEST_BOOL", "maybe").is_err());
+}
+
+#[test]
+fn startup_setup_complete_env_marks_join_and_genesis_nodes_ready() {
+    let join = parse(&["--join", "127.0.0.1:9444"]).unwrap().unwrap();
+    let mut join_config = UiConfig::default();
+    assert!(
+        apply_startup_setup_config_override(&join, false, &mut join_config, Some(true)).unwrap()
+    );
+    assert!(join_config.setup_complete);
+
+    let genesis = parse(&["--genesis"]).unwrap().unwrap();
+    let mut genesis_config = UiConfig {
+        setup_complete: false,
+        mining_enabled: true,
+        pow_mining_enabled: false,
+        burn_per_block: GENESIS_INITIAL_BURN_PER_BLOCK,
+        burn_fee: GENESIS_INITIAL_BURN_FEE,
+        ..UiConfig::default()
+    };
+    assert!(
+        apply_startup_setup_config_override(&genesis, false, &mut genesis_config, Some(true))
+            .unwrap()
+    );
+    assert!(genesis_config.setup_complete);
+}
+
+#[test]
+fn startup_setup_complete_env_rejects_empty_setup_node() {
+    let setup = parse(&[]).unwrap().unwrap();
+    let mut config = UiConfig::default();
+    let error =
+        apply_startup_setup_config_override(&setup, false, &mut config, Some(true)).unwrap_err();
+
+    assert!(error.to_string().contains("requires --genesis, --join"));
+    assert!(!config.setup_complete);
 }
 
 #[test]

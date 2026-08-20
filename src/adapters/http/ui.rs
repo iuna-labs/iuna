@@ -1,7 +1,8 @@
 use std::collections::BTreeMap;
 
 use crate::domain::{
-    Block, BurnLeaderRank, ChainSnapshot, MINE_REWARD, OutPoint, Transaction, TxInput, TxOutput,
+    Amount, Block, BurnLeaderRank, ChainSnapshot, MINE_REWARD, OutPoint, Transaction, TxInput,
+    TxOutput,
 };
 
 use crate::adapters::ui_index::build_ui_chain_index;
@@ -224,6 +225,7 @@ pub(super) fn ui_block(
         finalizer_rank: block.finalizer_rank,
         reward: block.reward,
         total_fees,
+        lost_iuna: block_lost_iuna(&block.transactions, block.reward),
         total_bytes,
         transaction_bytes,
         transaction_byte_breakdown,
@@ -240,6 +242,30 @@ pub(super) fn ui_block(
         burn_bundles,
         hash: block.hash,
     }
+}
+
+fn block_lost_iuna(transactions: &[Transaction], reward: Amount) -> Amount {
+    let mut burned = 0_u64;
+    let mut existing_supply_fees = 0_u64;
+    let mut minted_finalizer_fees = 0_u64;
+    for transaction in transactions {
+        match transaction {
+            Transaction::Burn { amount, fee, .. } => {
+                burned = burned.saturating_add(*amount);
+                existing_supply_fees = existing_supply_fees.saturating_add(*fee);
+            }
+            Transaction::Transfer { fee, .. } => {
+                existing_supply_fees = existing_supply_fees.saturating_add(*fee);
+            }
+            Transaction::Mine { .. } => {
+                minted_finalizer_fees = minted_finalizer_fees.saturating_add(transaction.fee());
+            }
+        }
+    }
+    let returned_fees = reward
+        .saturating_sub(minted_finalizer_fees)
+        .min(existing_supply_fees);
+    burned.saturating_add(existing_supply_fees.saturating_sub(returned_fees))
 }
 
 fn transaction_byte_breakdown(transactions: &[Transaction]) -> Vec<UiByteBreakdown> {
@@ -474,11 +500,11 @@ mod tests {
     use std::collections::BTreeMap;
 
     use crate::domain::{
-        Block, BurnBundleSection, FinalizerMode, MaskedBurn, OutPoint, Transaction, TxInput,
-        TxOutput,
+        Amount, Block, BurnBundleSection, FinalizerMode, MaskedBurn, OutPoint, Transaction,
+        TxInput, TxOutput,
     };
 
-    use super::ui_block;
+    use super::{block_lost_iuna, ui_block};
 
     fn burn(signature: &str) -> Transaction {
         Transaction::Burn {
@@ -498,6 +524,77 @@ mod tests {
             fee: 1,
             signature: signature.to_string(),
         }
+    }
+
+    fn transfer(signature: &str, fee: Amount) -> Transaction {
+        Transaction::Transfer {
+            inputs: vec![TxInput {
+                outpoint: OutPoint {
+                    txid: format!("{signature:0<64}"),
+                    index: 0,
+                },
+                owner: "owner".to_string(),
+                signature: signature.to_string(),
+            }],
+            outputs: vec![TxOutput {
+                address: "recipient".to_string(),
+                amount: 1,
+            }],
+            fee,
+            signature: signature.to_string(),
+        }
+    }
+
+    #[test]
+    fn block_lost_iuna_counts_burns_without_rewarded_fees() {
+        let burn = Transaction::Burn {
+            inputs: Vec::new(),
+            change: Vec::new(),
+            amount: 7,
+            fee: 3,
+            signature: "burn".to_string(),
+        };
+
+        assert_eq!(block_lost_iuna(&[burn], 3), 7);
+    }
+
+    #[test]
+    fn block_lost_iuna_counts_unreturned_existing_supply_fees() {
+        let transfer = transfer("transfer-a", 5);
+
+        assert_eq!(block_lost_iuna(&[transfer], 2), 3);
+    }
+
+    #[test]
+    fn block_lost_iuna_ignores_minted_mine_finalizer_fees() {
+        let mine = Transaction::Mine {
+            recipient: "miner".to_string(),
+            anchor: "anchor".to_string(),
+            salt: 0,
+            nonce: 0,
+            difficulty_bits: 1,
+            proof_header: None,
+            signature: "mine".to_string(),
+        };
+
+        assert_eq!(block_lost_iuna(&[mine], 1), 0);
+    }
+
+    #[test]
+    fn block_lost_iuna_does_not_count_mine_fees_as_returned_existing_supply() {
+        let transfer = transfer("transfer-a", 5);
+        let mine = Transaction::Mine {
+            recipient: "miner".to_string(),
+            anchor: "anchor".to_string(),
+            salt: 0,
+            nonce: 0,
+            difficulty_bits: 1,
+            proof_header: None,
+            signature: "mine".to_string(),
+        };
+        let reward = mine.fee().saturating_add(2);
+
+        assert_eq!(block_lost_iuna(&[transfer, mine], reward), 3);
     }
 
     #[test]
@@ -532,6 +629,7 @@ mod tests {
         let ui = ui_block(block, &BTreeMap::new(), &BTreeMap::new());
 
         assert_eq!(ui.burn_bundle_quorum.burn_bundles_included, 1);
+        assert_eq!(ui.lost_iuna, 1);
         assert_eq!(ui.burn_bundles.len(), 1);
         assert_eq!(ui.burn_bundles[0].slot, 1);
         assert_eq!(ui.burn_bundles[0].burns.len(), 1);

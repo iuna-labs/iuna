@@ -387,6 +387,7 @@ pub(super) struct UiBlock {
     pub(super) finalizer_rank: u32,
     pub(super) reward: Amount,
     pub(super) total_fees: Amount,
+    pub(super) lost_iuna: Amount,
     pub(super) total_bytes: usize,
     pub(super) transaction_bytes: usize,
     pub(super) transaction_byte_breakdown: Vec<UiByteBreakdown>,

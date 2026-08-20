@@ -2765,7 +2765,9 @@ window.iunaApp = function iunaApp() {
       return context.source || "-";
     },
 
-    blockBurned(block) {
+    blockLostIuna(block) {
+      const explicitTotal = block?.lostIuna ?? block?.lost_iuna;
+      if (explicitTotal !== null && explicitTotal !== undefined) return Number(explicitTotal) || 0;
       return this.blockTransactions(block)
         .filter((tx) => tx.kind === "burn")
         .reduce((sum, tx) => sum + this.txAmount(tx), 0);
