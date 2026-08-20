@@ -380,7 +380,6 @@ pub(super) const INDEX_HTML: &str = r#"<!doctype html>
     .detail-kv .key { color: #8d989f; }
     .detail-link { width: fit-content; max-width: 100%; padding: 0; border: 0; background: transparent; color: #d7f2ff; font: inherit; text-align: left; cursor: pointer; }
     .detail-link code { color: inherit; text-decoration: underline; text-underline-offset: 3px; }
-    .fee-penalty-value.penalty { color: #ffb1a8; font-weight: 900; }
     .rank-list { display: grid; gap: 8px; }
     .rank-row { display: grid; grid-template-columns: 52px minmax(0, 1fr); gap: 10px; align-items: start; border: 1px solid #30383d; border-radius: 8px; padding: 10px; background: #15191d; }
     .rank-number { color: #d7f2ff; font-weight: 700; }
