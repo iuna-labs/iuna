@@ -109,6 +109,52 @@ On Windows PowerShell:
 
 The binary prints a local management URL. Open it and follow setup.
 
+## Optional: Local Docker Testnet
+
+For local P2P and consensus testing, start a three-node testnet with Docker
+Compose:
+
+```sh
+docker compose up --build
+```
+
+The compose file starts one bootstrap genesis node and two joining nodes on an
+isolated Docker network. Management UIs are exposed on:
+
+- bootstrap: <http://127.0.0.1:18661/>
+- node2: <http://127.0.0.1:18662/>
+- node3: <http://127.0.0.1:18663/>
+
+Node3 also exposes Stratum on `127.0.0.1:3333`. P2P ports are mapped to
+`19444`, `19445`, and `19446` for local inspection, while nodes announce their
+stable Docker-network addresses to each other.
+
+The local compose file sets `IUNA_WALLET_PASSWORD` for every container. On first
+start this configures the management UI password and encrypts the wallet; on
+restart it unlocks the encrypted wallet so finalization can continue without UI
+login. Override the local defaults from your shell or a `.env` file:
+
+```sh
+IUNA_BOOTSTRAP_WALLET_PASSWORD='change-this-bootstrap-password' \
+IUNA_NODE2_WALLET_PASSWORD='change-this-node2-password' \
+IUNA_NODE3_WALLET_PASSWORD='change-this-node3-password' \
+docker compose up --build
+```
+
+Do not use compose-file default passwords for public nodes or valuable wallets.
+
+Stop the network while keeping chain data:
+
+```sh
+docker compose down
+```
+
+Reset the local testnet volumes and create a fresh genesis:
+
+```sh
+docker compose down -v
+```
+
 ## Optional: Stratum Mining
 
 iuna can expose a Stratum V1 endpoint for SHA-256 ASIC miners such as a Bitaxe:

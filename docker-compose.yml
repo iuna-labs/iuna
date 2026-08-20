@@ -1,0 +1,86 @@
+name: iuna-local-testnet
+
+x-iuna-node: &iuna-node
+  build:
+    context: .
+    dockerfile: Dockerfile.local-testnet
+  image: iuna-local-testnet:latest
+  init: true
+  restart: unless-stopped
+  healthcheck:
+    test: ["CMD", "curl", "-fsS", "http://127.0.0.1:18661/api/auth/status"]
+    interval: 10s
+    timeout: 3s
+    retries: 12
+    start_period: 10s
+
+services:
+  bootstrap:
+    <<: *iuna-node
+    hostname: iuna-bootstrap
+    environment:
+      IUNA_WALLET_PASSWORD: ${IUNA_BOOTSTRAP_WALLET_PASSWORD:-local-testnet-bootstrap-password}
+    entrypoint: ["/bin/sh", "-c"]
+    command:
+      - if [ -s /data/chain.sqlite3 ]; then exec iuna --data-dir /data --http 0.0.0.0:18661 --p2p 0.0.0.0:9444 --p2p-announce 172.28.0.10:9444 --debug; else exec iuna --genesis --data-dir /data --http 0.0.0.0:18661 --p2p 0.0.0.0:9444 --p2p-announce 172.28.0.10:9444 --debug; fi
+    ports:
+      - "18661:18661"
+      - "19444:9444"
+    volumes:
+      - bootstrap-data:/data
+    networks:
+      iuna-testnet:
+        ipv4_address: 172.28.0.10
+
+  node2:
+    <<: *iuna-node
+    hostname: iuna-node2
+    environment:
+      IUNA_WALLET_PASSWORD: ${IUNA_NODE2_WALLET_PASSWORD:-local-testnet-node2-password}
+    entrypoint: ["/bin/sh", "-c"]
+    command:
+      - exec iuna --join 172.28.0.10:9444 --data-dir /data --http 0.0.0.0:18661 --p2p 0.0.0.0:9444 --p2p-announce 172.28.0.11:9444 --debug
+    depends_on:
+      bootstrap:
+        condition: service_healthy
+    ports:
+      - "18662:18661"
+      - "19445:9444"
+    volumes:
+      - node2-data:/data
+    networks:
+      iuna-testnet:
+        ipv4_address: 172.28.0.11
+
+  node3:
+    <<: *iuna-node
+    hostname: iuna-node3
+    environment:
+      IUNA_WALLET_PASSWORD: ${IUNA_NODE3_WALLET_PASSWORD:-local-testnet-node3-password}
+    entrypoint: ["/bin/sh", "-c"]
+    command:
+      - exec iuna --join 172.28.0.10:9444 --data-dir /data --http 0.0.0.0:18661 --p2p 0.0.0.0:9444 --p2p-announce 172.28.0.12:9444 --stratum 0.0.0.0:3333 --debug
+    depends_on:
+      bootstrap:
+        condition: service_healthy
+    ports:
+      - "18663:18661"
+      - "19446:9444"
+      - "3333:3333"
+    volumes:
+      - node3-data:/data
+    networks:
+      iuna-testnet:
+        ipv4_address: 172.28.0.12
+
+networks:
+  iuna-testnet:
+    driver: bridge
+    ipam:
+      config:
+        - subnet: 172.28.0.0/24
+
+volumes:
+  bootstrap-data:
+  node2-data:
+  node3-data:

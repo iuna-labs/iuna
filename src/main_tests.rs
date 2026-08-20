@@ -2,7 +2,9 @@ use std::{collections::BTreeMap, sync::Arc, time::Duration};
 
 use iuna::{
     adapters::{
-        chain_store::SqliteChainStore, config_store::UiConfig, ui_data_store::SqliteUiDataStore,
+        chain_store::SqliteChainStore,
+        config_store::{self, UiConfig},
+        ui_data_store::SqliteUiDataStore,
         wallet_store,
     },
     app::{DEFAULT_BURN_PER_BLOCK, MAINNET_CANDIDATE_NETWORK_ID, MAINNET_NETWORK_ID, NodeCore},
@@ -15,10 +17,11 @@ use tokio::sync::Mutex;
 use super::{
     ChainMode, CliOptions, GENESIS_INITIAL_BURN_FEE, GENESIS_INITIAL_BURN_PER_BLOCK, StartupWallet,
     apply_cli_p2p_config_overrides, apply_cli_stratum_config_overrides,
-    configured_p2p_announce_addr, configured_p2p_bind_addr, configured_stratum_addr,
-    extrapolate_vdf_rounds, help_text, initial_burn_fee, initial_burn_per_block, initialize_ledger,
-    load_startup_wallet, measure_vdf_rounds, persist_chain_snapshot, project_ui_data_store,
-    run_chain_persistence_with_interval, validate_wallet_for_mode,
+    apply_startup_wallet_password_config, configured_p2p_announce_addr, configured_p2p_bind_addr,
+    configured_stratum_addr, extrapolate_vdf_rounds, help_text, initial_burn_fee,
+    initial_burn_per_block, initialize_ledger, load_startup_wallet, measure_vdf_rounds,
+    persist_chain_snapshot, project_ui_data_store, run_chain_persistence_with_interval,
+    validate_wallet_for_mode,
 };
 
 fn parse(args: &[&str]) -> anyhow::Result<Option<CliOptions>> {
@@ -117,12 +120,87 @@ fn encrypted_startup_wallet_loads_as_locked_metadata() {
         wallet_store::replace_with_generated_seed_phrase_encrypted(&path, "password-123456")
             .unwrap();
 
-    let startup = load_startup_wallet(&path).unwrap();
+    let startup = load_startup_wallet(&path, None).unwrap();
 
     match startup {
         StartupWallet::Locked { address } => assert_eq!(address, wallet.address()),
         StartupWallet::Unlocked { .. } => panic!("encrypted wallet should start locked"),
     }
+}
+
+#[test]
+fn startup_wallet_password_encrypts_new_wallet_and_configures_auth() {
+    let dir = tempdir().unwrap();
+    let wallet_path = dir.path().join("wallet.json");
+    let config_path = dir.path().join("config.json");
+    let password = "local-testnet-password";
+    let mut config = UiConfig::default();
+
+    let dirty =
+        apply_startup_wallet_password_config(&config_path, &mut config, Some(password)).unwrap();
+    config_store::save(&config_path, &config).unwrap();
+    let startup = load_startup_wallet(&wallet_path, Some(password)).unwrap();
+
+    assert!(dirty);
+    assert!(config.auth_password_hash.is_some());
+    assert!(
+        wallet_store::metadata(&wallet_path)
+            .unwrap()
+            .unwrap()
+            .encrypted
+    );
+    match startup {
+        StartupWallet::Unlocked { wallet } => {
+            let reloaded = wallet_store::load_with_password(&wallet_path, password).unwrap();
+            assert_eq!(reloaded.address(), wallet.address());
+        }
+        StartupWallet::Locked { .. } => panic!("env password should unlock startup wallet"),
+    }
+}
+
+#[test]
+fn startup_wallet_password_unlocks_existing_encrypted_wallet() {
+    let dir = tempdir().unwrap();
+    let wallet_path = dir.path().join("wallet.json");
+    let password = "local-testnet-password";
+    let (wallet, _) =
+        wallet_store::replace_with_generated_seed_phrase_encrypted(&wallet_path, password).unwrap();
+
+    let startup = load_startup_wallet(&wallet_path, Some(password)).unwrap();
+
+    match startup {
+        StartupWallet::Unlocked { wallet: startup } => {
+            assert_eq!(startup.address(), wallet.address());
+        }
+        StartupWallet::Locked { .. } => panic!("env password should unlock encrypted wallet"),
+    }
+}
+
+#[test]
+fn startup_wallet_password_mismatch_does_not_encrypt_plaintext_wallet() {
+    let dir = tempdir().unwrap();
+    let wallet_path = dir.path().join("wallet.json");
+    let config_path = dir.path().join("config.json");
+    let (_wallet, _seed) = wallet_store::replace_with_generated_seed_phrase(&wallet_path).unwrap();
+    let mut config = UiConfig {
+        auth_password_hash: Some(
+            iuna::adapters::http::hash_management_password("correct-password").unwrap(),
+        ),
+        ..UiConfig::default()
+    };
+
+    let error =
+        apply_startup_wallet_password_config(&config_path, &mut config, Some("wrong-password"))
+            .unwrap_err();
+
+    assert!(error.to_string().contains("does not match"));
+    assert!(
+        !wallet_store::metadata(&wallet_path)
+            .unwrap()
+            .unwrap()
+            .encrypted
+    );
+    assert!(wallet_store::load_or_create(&wallet_path).is_ok());
 }
 
 #[test]

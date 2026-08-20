@@ -39,6 +39,7 @@ const VDF_MEASUREMENT_INITIAL_ROUNDS: u64 = 1_000;
 const VDF_MEASUREMENT_MAX_ROUNDS: u64 = 10_000_000;
 const VDF_MEASUREMENT_MIN_ELAPSED: Duration = Duration::from_millis(150);
 const VDF_PROGRESS_LOG_INTERVAL: Duration = Duration::from_secs(10);
+const WALLET_PASSWORD_ENV: &str = "IUNA_WALLET_PASSWORD";
 
 #[tokio::main]
 async fn main() -> Result<()> {
@@ -63,24 +64,31 @@ async fn main() -> Result<()> {
         );
     }
     let mut ui_config = config_store::load_or_create(&config_path)?;
+    let startup_wallet_password = startup_wallet_password_from_env()?;
     let p2p_config_dirty = apply_cli_p2p_config_overrides(&opts, &mut ui_config);
     let stratum_config_dirty = apply_cli_stratum_config_overrides(&opts, &mut ui_config);
-    let ui_config_dirty = p2p_config_dirty || stratum_config_dirty;
     let p2p_announce_addr = configured_p2p_announce_addr(&opts, &ui_config)?;
     let configured_p2p_addr = configured_p2p_bind_addr(&opts, &ui_config);
     let configured_stratum_addr = configured_stratum_addr(&opts, &ui_config);
     let p2p_accept_inbound = ui_config.p2p_accept_inbound;
     let advertised_p2p_addr = p2p_announce_addr.unwrap_or(configured_p2p_addr);
-    let wallet_load = load_startup_wallet(&wallet_path)?;
-    let wallet_address = wallet_load.address().to_string();
     if opts.chain_mode == ChainMode::Genesis {
         ui_config.setup_complete = false;
         ui_config.mining_enabled = true;
         ui_config.pow_mining_enabled = false;
         ui_config.burn_per_block = GENESIS_INITIAL_BURN_PER_BLOCK;
         ui_config.burn_fee = GENESIS_INITIAL_BURN_FEE;
-        config_store::save(&config_path, &ui_config)?;
-    } else if ui_config_dirty {
+    }
+    let auth_config_dirty = apply_startup_wallet_password_config(
+        &config_path,
+        &mut ui_config,
+        startup_wallet_password.as_deref(),
+    )?;
+    let wallet_load = load_startup_wallet(&wallet_path, startup_wallet_password.as_deref())?;
+    let wallet_address = wallet_load.address().to_string();
+    let ui_config_dirty =
+        opts.chain_mode == ChainMode::Genesis || p2p_config_dirty || stratum_config_dirty;
+    if ui_config_dirty || auth_config_dirty {
         config_store::save(&config_path, &ui_config)?;
     }
     let ledger =
@@ -245,7 +253,21 @@ impl StartupWallet {
     }
 }
 
-fn load_startup_wallet(wallet_path: &Path) -> Result<StartupWallet> {
+fn load_startup_wallet(
+    wallet_path: &Path,
+    startup_wallet_password: Option<&str>,
+) -> Result<StartupWallet> {
+    if let Some(password) = startup_wallet_password {
+        if wallet_path.exists() {
+            wallet_store::encrypt_existing_with_password(wallet_path, password)?;
+            let wallet = wallet_store::load_with_password(wallet_path, password)?;
+            return Ok(StartupWallet::Unlocked { wallet });
+        }
+        let (wallet, _) =
+            wallet_store::replace_with_generated_seed_phrase_encrypted(wallet_path, password)?;
+        return Ok(StartupWallet::Unlocked { wallet });
+    }
+
     match wallet_store::load_or_create(wallet_path) {
         Ok(wallet) => Ok(StartupWallet::Unlocked { wallet }),
         Err(error) => {
@@ -261,6 +283,39 @@ fn load_startup_wallet(wallet_path: &Path) -> Result<StartupWallet> {
             }
         }
     }
+}
+
+fn startup_wallet_password_from_env() -> Result<Option<String>> {
+    let Some(password) = std::env::var_os(WALLET_PASSWORD_ENV) else {
+        return Ok(None);
+    };
+    let password = password
+        .into_string()
+        .map_err(|_| anyhow::anyhow!("{WALLET_PASSWORD_ENV} must be valid UTF-8"))?;
+    http::validate_management_password(&password)
+        .with_context(|| format!("{WALLET_PASSWORD_ENV} is not a valid wallet password"))?;
+    Ok(Some(password))
+}
+
+fn apply_startup_wallet_password_config(
+    config_path: &Path,
+    ui_config: &mut config_store::UiConfig,
+    password: Option<&str>,
+) -> Result<bool> {
+    let Some(password) = password else {
+        return Ok(false);
+    };
+    let Some(existing_hash) = ui_config.auth_password_hash.as_deref() else {
+        ui_config.auth_password_hash = Some(http::hash_management_password(password)?);
+        return Ok(true);
+    };
+    if !http::verify_management_password(password, existing_hash)? {
+        bail!(
+            "{WALLET_PASSWORD_ENV} does not match the configured management UI and wallet password in {}",
+            config_path.display()
+        );
+    }
+    Ok(false)
 }
 
 fn format_iuna(amount: Amount) -> String {

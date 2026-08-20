@@ -67,6 +67,18 @@ use wallet::{
     required_fee_per_byte_burn, setup_requires_peer, transfer, wallet_setup_json,
 };
 
+pub fn validate_management_password(password: &str) -> Result<()> {
+    auth::validate_password(password)
+}
+
+pub fn hash_management_password(password: &str) -> Result<String> {
+    auth::hash_password(password)
+}
+
+pub fn verify_management_password(password: &str, encoded: &str) -> Result<bool> {
+    auth::verify_password(password, encoded)
+}
+
 const EXPLORER_LIMIT: usize = 50;
 const EXPLORER_PAGE_LIMIT: usize = 20;
 const DATASET_LIMIT: usize = 1_000;
