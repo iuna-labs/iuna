@@ -2,6 +2,7 @@ use std::collections::BTreeMap;
 
 use crate::domain::{
     Block, BurnLeaderRank, ChainSnapshot, Ledger, OutPoint, Transaction, TxOutput, hex_hash,
+    reward_outputs_for_block,
 };
 
 #[derive(Clone, Debug, Default, Eq, PartialEq)]
@@ -47,6 +48,15 @@ pub(crate) fn burn_leader_ranks_for_blocks(
 
 fn known_chain_output_index(snapshot: &ChainSnapshot) -> BTreeMap<OutPoint, TxOutput> {
     let mut outputs = BTreeMap::new();
+    let mut running_ledger = snapshot.blocks.first().cloned().and_then(|genesis| {
+        Ledger::from_persisted_snapshot(ChainSnapshot {
+            genesis_allocations: snapshot.genesis_allocations.clone(),
+            vdf_rounds: snapshot.vdf_rounds,
+            launch_profile: snapshot.launch_profile.clone(),
+            blocks: vec![genesis],
+        })
+        .ok()
+    });
     for (address, amount) in &snapshot.genesis_allocations {
         if *amount == 0 {
             continue;
@@ -63,17 +73,21 @@ fn known_chain_output_index(snapshot: &ChainSnapshot) -> BTreeMap<OutPoint, TxOu
         for transaction in &block.transactions {
             index_transaction_outputs(&mut outputs, transaction);
         }
-        if block.reward > 0 {
-            outputs.insert(
-                OutPoint {
-                    txid: block.hash.clone(),
-                    index: u32::MAX,
-                },
-                TxOutput {
-                    address: block.miner.clone(),
-                    amount: block.reward,
-                },
-            );
+        let reward_committee = if block.height == 0 {
+            Vec::new()
+        } else {
+            running_ledger
+                .as_ref()
+                .map(|ledger| ledger.burn_committee_for_block(block))
+                .unwrap_or_default()
+        };
+        for (outpoint, output) in reward_outputs_for_block(block, &reward_committee) {
+            outputs.insert(outpoint, output);
+        }
+        if block.height > 0 {
+            if let Some(ledger) = running_ledger.as_mut() {
+                let _ = ledger.apply_preverified_block_at(block.clone(), u64::MAX);
+            }
         }
     }
     outputs

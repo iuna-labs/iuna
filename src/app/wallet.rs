@@ -1,3 +1,5 @@
+use std::collections::BTreeMap;
+
 use anyhow::{Context, Result, bail};
 
 use crate::domain::{
@@ -180,11 +182,13 @@ impl NodeCore {
         let mut bundles = self
             .burn_bundles
             .iter()
-            .filter(|((height, slot), _)| {
+            .filter(|((height, slot, member), _)| {
                 *height == next_height
-                    && !self
-                        .equivocated_burn_bundle_slots
-                        .contains(&(*height, *slot))
+                    && !self.equivocated_burn_bundle_slots.contains(&(
+                        *height,
+                        *slot,
+                        member.clone(),
+                    ))
             })
             .map(|(_, bundle)| bundle.clone())
             .collect::<Vec<_>>();
@@ -192,12 +196,32 @@ impl NodeCore {
         bundles
     }
 
+    pub(super) fn usable_burn_bundles_for_finalizer_rank(
+        &self,
+        finalizer_rank: u32,
+    ) -> Vec<BurnBundle> {
+        let committee = self
+            .ledger
+            .burn_committee_for_next_ticket_block(finalizer_rank)
+            .into_iter()
+            .map(|member| (member.slot, member.owner))
+            .collect::<BTreeMap<_, _>>();
+        self.usable_burn_bundles()
+            .into_iter()
+            .filter(|bundle| {
+                committee
+                    .get(&bundle.slot)
+                    .is_some_and(|owner| *owner == bundle.member)
+            })
+            .collect()
+    }
+
     pub(super) fn prune_burn_bundles(&mut self) {
         let height = self.ledger.height();
         self.burn_bundles
-            .retain(|(bundle_height, _), _| *bundle_height > height);
+            .retain(|(bundle_height, _, _), _| *bundle_height > height);
         self.equivocated_burn_bundle_slots
-            .retain(|(bundle_height, _)| *bundle_height > height);
+            .retain(|(bundle_height, _, _)| *bundle_height > height);
     }
 
     pub(super) fn publish_burn_bundle_for_next_block(&mut self) -> Result<()> {
@@ -206,17 +230,17 @@ impl NodeCore {
             NodeWallet::Locked { .. } => return Ok(()),
         };
         let (ledger, _) = self.ledger_with_local_block_anchor();
-        let Some(bundle) = ledger.build_burn_bundle(wallet)? else {
-            return Ok(());
-        };
-        let key = (bundle.height, bundle.slot);
-        if self.equivocated_burn_bundle_slots.contains(&key) || self.burn_bundles.contains_key(&key)
-        {
-            return Ok(());
+        for bundle in ledger.build_burn_bundles(wallet)? {
+            let key = (bundle.height, bundle.slot, bundle.member.clone());
+            if self.equivocated_burn_bundle_slots.contains(&key)
+                || self.burn_bundles.contains_key(&key)
+            {
+                continue;
+            }
+            ledger.validate_next_block_burn_bundles(vec![bundle.clone()])?;
+            self.burn_bundles.insert(key, bundle.clone());
+            self.outbox.push(GossipEnvelope::BurnBundle(bundle));
         }
-        ledger.validate_next_block_burn_bundles(vec![bundle.clone()])?;
-        self.burn_bundles.insert(key, bundle.clone());
-        self.outbox.push(GossipEnvelope::BurnBundle(bundle));
         Ok(())
     }
 

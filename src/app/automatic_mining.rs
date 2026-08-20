@@ -456,11 +456,10 @@ impl NodeCore {
         } else {
             0
         };
-        let wallet_is_committee_member = self
+        let wallet_is_committee_member = !self
             .ledger
-            .burn_committee_for_next_block()
-            .iter()
-            .any(|member| member.owner == self.wallet.address());
+            .burn_committee_memberships_for_next_block(self.wallet.address())
+            .is_empty();
         if explicit_signatures_required == 0 || (!wallet_is_committee_member && !will_run_vdf) {
             if explicit_signatures_required == 0 {
                 self.burn_bundle_collection_started = None;
@@ -485,10 +484,13 @@ impl NodeCore {
         timestamp_ms: u64,
     ) -> Result<PreparedBlock> {
         let (ledger, required_burn_signature) = self.ledger_with_local_block_anchor();
+        let finalizer_rank = ledger
+            .finalizer_rank_for_next_block(self.wallet.address())
+            .context("cannot prepare ticket block without a mature burn ticket")?;
         ledger.prepare_next_block_with_required_burn_and_burn_bundles(
             self.wallet.address(),
             timestamp_ms,
-            self.usable_burn_bundles(),
+            self.usable_burn_bundles_for_finalizer_rank(finalizer_rank),
             required_burn_signature.as_deref(),
         )
     }
@@ -498,7 +500,7 @@ impl NodeCore {
         ledger.prepare_recovery_block_with_required_burn_and_burn_bundles(
             self.wallet.address(),
             timestamp_ms,
-            self.usable_burn_bundles(),
+            Vec::new(),
             required_burn_signature.as_deref(),
         )
     }
@@ -545,7 +547,7 @@ mod tests {
     use crate::{
         adapters::chain_store::SqliteChainStore,
         app::{GossipEnvelope, InMemoryNetwork},
-        domain::{GenesisBurn, Ledger, MICRO_IUNA, Wallet, run_vdf},
+        domain::{BurnBundle, GenesisBurn, Ledger, MICRO_IUNA, Wallet, run_vdf},
     };
     use tempfile::tempdir;
 
@@ -579,6 +581,49 @@ mod tests {
             .iter()
             .find(|wallet| wallet.address() != finalizer.address())
             .expect("test fixture should include a non-finalizer wallet")
+    }
+
+    #[test]
+    fn same_slot_bundles_for_different_members_do_not_conflict_locally() {
+        let wallet = Wallet::from_seed("rank-bundle-cache-node");
+        let ledger = funded_ledger(std::slice::from_ref(&wallet));
+        let mut node = NodeCore::from_ledger(wallet, ledger, 0);
+        let next_height = node.ledger.height() + 1;
+        let alpha = BurnBundle {
+            height: next_height,
+            prev_hash: node.ledger.tip_hash().to_string(),
+            slot: 1,
+            member: "alpha".to_string(),
+            burns: Vec::new(),
+            signature: "sig-alpha".to_string(),
+        };
+        let beta = BurnBundle {
+            height: next_height,
+            prev_hash: node.ledger.tip_hash().to_string(),
+            slot: 1,
+            member: "beta".to_string(),
+            burns: Vec::new(),
+            signature: "sig-beta".to_string(),
+        };
+
+        node.burn_bundles
+            .insert((alpha.height, alpha.slot, alpha.member.clone()), alpha);
+        node.burn_bundles
+            .insert((beta.height, beta.slot, beta.member.clone()), beta);
+        node.equivocated_burn_bundle_slots
+            .insert((next_height, 1, "alpha".to_string()));
+
+        let usable = node.usable_burn_bundles();
+        assert!(
+            usable
+                .iter()
+                .all(|bundle| bundle.slot != 1 || bundle.member != "alpha")
+        );
+        assert!(
+            usable
+                .iter()
+                .any(|bundle| bundle.slot == 1 && bundle.member == "beta")
+        );
     }
 
     #[test]
@@ -688,7 +733,7 @@ mod tests {
                 .unwrap()
                 .usable_burn_bundles()
                 .into_iter()
-                .all(|candidate| candidate.slot != bundle.slot)
+                .all(|candidate| candidate.slot != bundle.slot || candidate.member != bundle.member)
         );
 
         let block = {

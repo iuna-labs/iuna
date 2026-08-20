@@ -14,7 +14,7 @@ use super::{
     BurnBundleSignature, BurnCommitteeMember, BurnLeaderRank, ChainSnapshot, FinalizerMode,
     GenesisBurn, LeaderProofPayload, Ledger, MAX_BLOCK_BYTES, MAX_BURN_BUNDLE_BYTES, MICRO_IUNA,
     MaskedBurn, OutPoint, Transaction, TransactionSubmitOutcome, TxOutput, UtxoLineageRoot,
-    VDF_TARGET_BLOCK_MS, Wallet, hex_hash, run_vdf,
+    VDF_TARGET_BLOCK_MS, Wallet, hex_hash, reward_outputs_for_block, run_vdf,
 };
 
 const NOW_MS: u64 = 10_000_000_000;
@@ -257,22 +257,35 @@ impl Harness {
     }
 
     fn committee_bundles(&self) -> Vec<BurnBundle> {
-        self.ledger
-            .burn_committee_for_next_block()
-            .into_iter()
-            .filter_map(|member| {
-                self.wallets
-                    .get(&member.owner)
-                    .and_then(|wallet| self.ledger.build_burn_bundle(wallet).unwrap())
-            })
-            .collect()
+        self.committee_bundles_for_rank(0)
     }
 
-    fn committee_bundles_for_burns(&self, burns: Vec<Transaction>) -> Vec<BurnBundle> {
+    fn committee_bundles_for_rank(&self, rank: usize) -> Vec<BurnBundle> {
+        let burns = self
+            .ledger
+            .pending()
+            .iter()
+            .filter(|transaction| transaction.is_burn())
+            .cloned()
+            .collect::<Vec<_>>();
+        self.committee_bundles_for_rank_and_burns(rank, burns)
+    }
+
+    fn committee_bundles_for_rank_and_burns(
+        &self,
+        rank: usize,
+        mut burns: Vec<Transaction>,
+    ) -> Vec<BurnBundle> {
         let height = self.ledger.height() + 1;
         let prev_hash = self.ledger.tip_hash().to_string();
+        burns.sort_by(|left, right| {
+            right
+                .fee()
+                .cmp(&left.fee())
+                .then_with(|| left.signature().cmp(right.signature()))
+        });
         self.ledger
-            .burn_committee_for_next_block()
+            .burn_committee_for_next_ticket_block(rank as u32)
             .into_iter()
             .filter_map(|member| {
                 let wallet = self.wallets.get(&member.owner)?;
@@ -320,7 +333,7 @@ impl Harness {
         let leader = self.next_rank(rank);
         let wallet = self.wallet(&leader.owner).clone();
         self.submit_anchor_burn(&wallet);
-        let bundles = self.committee_bundles();
+        let bundles = self.committee_bundles_for_rank(rank);
         let block = self.finish_ticket_block_from_pending(rank, bundles);
         self.ledger
             .apply_block_at(block.clone(), NOW_MS.saturating_add(block.timestamp_ms))
@@ -492,10 +505,14 @@ impl Harness {
             };
 
             finalizations += 1;
+            metrics.attacker_net_reward += i128::from(attacker_reward_from_block(
+                &block,
+                &committee,
+                &attacker_addresses,
+            ));
             if attacker_addresses.contains(&block.miner) {
                 attacker_finalizations += 1;
                 metrics.attacker_burn_cost = metrics.attacker_burn_cost.saturating_add(1);
-                metrics.attacker_net_reward += i128::from(block.reward);
             }
             if let Some(burn) = third_party_burn {
                 censored_third_party_burns += usize::from(
@@ -629,7 +646,8 @@ impl Harness {
                 if rank > 0 {
                     fallback_blocks += 1;
                 }
-                let bundles = self.committee_bundles_for_burns(
+                let bundles = self.committee_bundles_for_rank_and_burns(
+                    rank,
                     pressure_burns.into_iter().take(1).collect::<Vec<_>>(),
                 );
                 let leader = self.next_rank(rank);
@@ -663,10 +681,14 @@ impl Harness {
             };
 
             finalizations += 1;
+            metrics.attacker_net_reward += i128::from(attacker_reward_from_block(
+                &block,
+                &committee,
+                &attacker_addresses,
+            ));
             if attacker_addresses.contains(&block.miner) {
                 attacker_finalizations += 1;
                 metrics.attacker_burn_cost = metrics.attacker_burn_cost.saturating_add(1);
-                metrics.attacker_net_reward += i128::from(block.reward);
             }
             for burn in visible_burns {
                 let included = block
@@ -1394,13 +1416,18 @@ fn mini_lineage_state(snapshot: &ChainSnapshot) -> Option<MiniLineageState> {
     for transaction in &genesis.transactions {
         mini_apply_transaction(&mut state, transaction, genesis.height, false)?;
     }
-    mini_credit_reward(&mut state, genesis)?;
+    mini_credit_reward(&mut state, genesis, &[])?;
 
+    let mut tickets = mini_genesis_tickets(&snapshot.genesis_allocations, genesis, snapshot)?;
+    let mut parent = genesis;
     for block in snapshot.blocks.iter().skip(1) {
+        let committee = mini_burn_committee_for_block(parent, block, &tickets, &state);
         for transaction in &block.transactions {
             mini_apply_transaction(&mut state, transaction, block.height, true)?;
         }
-        mini_credit_reward(&mut state, block)?;
+        mini_credit_reward(&mut state, block, &committee)?;
+        mini_apply_ticket_block(parent, block, snapshot, &mut tickets)?;
+        parent = block;
     }
 
     Some(state)
@@ -1514,22 +1541,15 @@ fn mini_insert_output(
     Some(())
 }
 
-fn mini_credit_reward(state: &mut MiniLineageState, block: &Block) -> Option<()> {
-    if block.reward == 0 {
-        return Some(());
+fn mini_credit_reward(
+    state: &mut MiniLineageState,
+    block: &Block,
+    committee: &[BurnCommitteeMember],
+) -> Option<()> {
+    for (outpoint, output) in reward_outputs_for_block(block, committee) {
+        mini_insert_output(state, outpoint, output, None)?;
     }
-    mini_insert_output(
-        state,
-        OutPoint {
-            txid: block.hash.clone(),
-            index: u32::MAX,
-        },
-        TxOutput {
-            address: block.miner.clone(),
-            amount: block.reward,
-        },
-        None,
-    )
+    Some(())
 }
 
 fn mini_subtract_lineage(
@@ -1588,7 +1608,31 @@ fn mini_burn_committee_for_next_block(ledger: &Ledger) -> Option<Vec<BurnCommitt
         parent.height.checked_add(1)?,
         &tickets,
         &state,
+        0,
     ))
+}
+
+fn mini_burn_committee_for_block(
+    parent: &Block,
+    block: &Block,
+    tickets: &[MiniTicket],
+    state: &MiniLineageState,
+) -> Vec<BurnCommitteeMember> {
+    match block.finalizer_mode {
+        FinalizerMode::Ticket => mini_burn_committee_for_height(
+            parent,
+            block.height,
+            tickets,
+            state,
+            block.finalizer_rank,
+        ),
+        FinalizerMode::Recovery => vec![BurnCommitteeMember {
+            slot: 0,
+            root: block.hash.clone(),
+            owner: block.miner.clone(),
+            weight: 0,
+        }],
+    }
 }
 
 fn mini_burn_committee_for_height(
@@ -1596,9 +1640,10 @@ fn mini_burn_committee_for_height(
     height: u64,
     tickets: &[MiniTicket],
     state: &MiniLineageState,
+    finalizer_rank: u32,
 ) -> Vec<BurnCommitteeMember> {
     let ranked = mini_ranked_tickets_for_height(parent, height, tickets);
-    let Some(finalizer) = ranked.first() else {
+    let Some(finalizer) = ranked.get(finalizer_rank as usize) else {
         return Vec::new();
     };
     let mut committee = vec![BurnCommitteeMember {
@@ -1607,8 +1652,16 @@ fn mini_burn_committee_for_height(
         owner: finalizer.owner.clone(),
         weight: finalizer.amount,
     }];
-    let mut skipped_owners = BTreeSet::from([finalizer.owner.clone()]);
-    let mut remaining = mini_eligible_lineage_candidates(parent, state, &finalizer.owner)
+    let max_committee_size = BURN_COMMITTEE_SIZE
+        .saturating_sub(finalizer_rank as usize)
+        .max(1);
+    let mut skipped_owners = ranked
+        .iter()
+        .take(finalizer_rank as usize)
+        .map(|ticket| ticket.owner.clone())
+        .collect::<BTreeSet<_>>();
+    skipped_owners.insert(finalizer.owner.clone());
+    let mut remaining = mini_eligible_lineage_candidates(parent, state, &skipped_owners)
         .into_iter()
         .filter_map(|candidate| {
             let owner = mini_representative_owner_for_lineage_root(
@@ -1620,7 +1673,7 @@ fn mini_burn_committee_for_height(
         })
         .collect::<Vec<_>>();
 
-    for slot in 1..BURN_COMMITTEE_SIZE {
+    for slot in 1..max_committee_size {
         let Some(index) =
             mini_select_weighted_lineage_index(parent, height, slot as u8, &remaining)
         else {
@@ -1656,7 +1709,7 @@ fn mini_burn_committee_for_height(
 fn mini_eligible_lineage_candidates(
     parent: &Block,
     state: &MiniLineageState,
-    finalizer: &str,
+    skipped_owners: &BTreeSet<String>,
 ) -> Vec<MiniLineageCandidate> {
     state
         .lineage_values
@@ -1664,7 +1717,9 @@ fn mini_eligible_lineage_candidates(
         .filter(|(root, value)| {
             **value > 0
                 && root.height.saturating_add(BURN_LINEAGE_MATURITY_HEIGHTS) <= parent.height
-                && !mini_lineage_root_has_owner(state, root, finalizer)
+                && !skipped_owners
+                    .iter()
+                    .any(|owner| mini_lineage_root_has_owner(state, root, owner))
         })
         .filter_map(|(root, value)| {
             let weight = mini_lineage_committee_weight(*value);
@@ -1787,7 +1842,6 @@ fn mini_validate_burn_bundle_section(ledger: &Ledger, block: &Block) -> Option<(
         block.finalizer_mode,
         block.finalizer_rank,
         committee.len(),
-        mini_transactions_have_attestable_burns(&block.transactions, &block.miner),
     );
     if section.signatures.len() < required_signatures {
         return None;
@@ -1862,31 +1916,15 @@ fn mini_required_explicit_burn_signatures(
     finalizer_mode: FinalizerMode,
     finalizer_rank: u32,
     committee_size: usize,
-    has_attested_burns: bool,
 ) -> usize {
-    if !has_attested_burns || committee_size == 0 {
+    if committee_size == 0 {
         return 0;
     }
     match finalizer_mode {
         FinalizerMode::Ticket if finalizer_rank == 0 => committee_size.saturating_sub(1),
-        FinalizerMode::Ticket if finalizer_rank == 1 => committee_size.saturating_sub(2),
+        FinalizerMode::Ticket if finalizer_rank == 1 => committee_size.saturating_sub(1),
         FinalizerMode::Ticket | FinalizerMode::Recovery => 0,
     }
-}
-
-fn mini_transactions_have_attestable_burns(transactions: &[Transaction], finalizer: &str) -> bool {
-    let mut finalizer_anchor_seen = false;
-    for transaction in transactions {
-        if !transaction.is_burn() {
-            continue;
-        }
-        if transaction.sender() == finalizer && !finalizer_anchor_seen {
-            finalizer_anchor_seen = true;
-            continue;
-        }
-        return true;
-    }
-    false
 }
 
 fn mini_matching_burn_by_signature(attested: &Transaction, block: &Block) -> bool {
@@ -2007,6 +2045,18 @@ fn live_supply(ledger: &Ledger) -> Amount {
         .expect("test supply should not overflow")
 }
 
+fn attacker_reward_from_block(
+    block: &Block,
+    committee: &[BurnCommitteeMember],
+    attacker_addresses: &BTreeSet<String>,
+) -> Amount {
+    reward_outputs_for_block(block, committee)
+        .into_iter()
+        .filter(|(_, output)| attacker_addresses.contains(&output.address))
+        .try_fold(0_u64, |total, (_, output)| total.checked_add(output.amount))
+        .expect("test reward should not overflow")
+}
+
 fn expected_supply(snapshot: &ChainSnapshot) -> Amount {
     mini_expected_supply(snapshot).expect("test snapshot supply accounting should not overflow")
 }
@@ -2040,6 +2090,67 @@ fn committee_roots_are_unique(committee: &[BurnCommitteeMember]) -> bool {
         .iter()
         .filter(|member| member.slot > 0)
         .all(|member| roots.insert(member.root.clone()))
+}
+
+#[test]
+fn rank_zero_reward_is_credited_to_finalizer_and_extra_committee_members() {
+    let mut harness = Harness::new(91, 50, 50, AdversaryStrategy::Honest);
+    harness.mature_lineages(2, 2);
+    let committee = harness.ledger.burn_committee_for_next_block();
+    assert_eq!(committee.len(), 3, "test setup needs a full committee");
+
+    let finalizer = harness.next_rank(0).owner;
+    let committee_two = committee
+        .iter()
+        .find(|member| member.slot == 1)
+        .expect("slot 1 should be assigned")
+        .owner
+        .clone();
+    let committee_three = committee
+        .iter()
+        .find(|member| member.slot == 2)
+        .expect("slot 2 should be assigned")
+        .owner
+        .clone();
+    let third_party = harness
+        .wallets
+        .values()
+        .find(|wallet| {
+            wallet.address() != finalizer
+                && wallet.address() != committee_two
+                && wallet.address() != committee_three
+        })
+        .expect("test setup has a third-party burner")
+        .clone();
+
+    let finalizer_before = harness.ledger.balance_of(&finalizer);
+    let committee_two_before = harness.ledger.balance_of(&committee_two);
+    let committee_three_before = harness.ledger.balance_of(&committee_three);
+
+    let finalizer_wallet = harness.wallet(&finalizer).clone();
+    harness.submit_anchor_burn(&finalizer_wallet);
+    harness.submit_fee_burn(&third_party, 1, 99);
+    let bundles = harness.committee_bundles();
+    let block = harness.finish_ticket_block_from_pending(0, bundles);
+    assert_eq!(block.reward, 100);
+
+    harness
+        .ledger
+        .apply_block_at(block, NOW_MS.saturating_add(VDF_TARGET_BLOCK_MS))
+        .unwrap();
+
+    assert_eq!(
+        harness.ledger.balance_of(&finalizer),
+        finalizer_before + 50 - 2
+    );
+    assert_eq!(
+        harness.ledger.balance_of(&committee_two),
+        committee_two_before + 25
+    );
+    assert_eq!(
+        harness.ledger.balance_of(&committee_three),
+        committee_three_before + 25
+    );
 }
 
 proptest! {
@@ -2528,14 +2639,132 @@ fn mini_burn_bundle_quorum_oracle_matches_consensus_mutations() {
 }
 
 #[test]
-fn finalizer_anchor_alone_does_not_require_committee_signatures() {
+fn finalizer_anchor_alone_requires_available_committee_signatures() {
     let mut harness = harness_for_percent(20, 25);
     harness.mature_lineages(1, 4);
-    let block = harness.prepared_ticket_block(0, Vec::new());
+    let leader = harness.next_rank(0);
+    let finalizer = harness.wallet(&leader.owner).clone();
+    harness.submit_anchor_burn(&finalizer);
+
+    let without_committee = harness.finish_ticket_block_from_pending(0, Vec::new());
+    assert_rejects(
+        harness.ledger.clone(),
+        without_committee,
+        "anchor-only block without available committee signatures",
+    );
+
+    let bundles = harness.committee_bundles();
+    let with_committee = harness.finish_ticket_block_from_pending(0, bundles);
+    harness
+        .ledger
+        .apply_block_at(with_committee, NOW_MS.saturating_add(1))
+        .unwrap();
+}
+
+#[test]
+fn rank_one_committee_excludes_missed_rank_zero_owner_and_requires_remaining_slot() {
+    let mut harness = harness_for_percent(22, 25);
+    harness.mature_lineages(2, 4);
+    let target_height = harness.ledger.height() + 1;
+    harness.ledger.tickets = harness
+        .honest
+        .iter()
+        .take(2)
+        .enumerate()
+        .map(|(index, wallet)| BurnTicket {
+            id: format!("fallback-ticket-{index}"),
+            owner: wallet.address().to_string(),
+            amount: MICRO_IUNA,
+            eligible_from_height: target_height,
+            eligible_until_height: target_height,
+        })
+        .collect();
+    let rank_zero = harness
+        .ledger
+        .ticket_for_finalizer_rank(target_height, 0)
+        .expect("synthetic rank 0 ticket should be eligible")
+        .owner;
+    let rank_one = harness
+        .ledger
+        .ticket_for_finalizer_rank(target_height, 1)
+        .expect("synthetic rank 1 ticket should be eligible")
+        .owner;
+
+    let committee = harness.ledger.burn_committee_for_next_ticket_block(1);
+    assert_eq!(
+        committee.len(),
+        2,
+        "test setup should have one remaining rank-1 committee member"
+    );
+    assert_eq!(
+        committee.first().map(|member| member.owner.as_str()),
+        Some(rank_one.as_str())
+    );
+    assert!(
+        committee.iter().all(|member| member.owner != rank_zero),
+        "missed rank-0 owner must not remain in rank-1 committee: {committee:?}"
+    );
+
+    let finalizer = harness.wallet(&rank_one).clone();
+    harness.submit_anchor_burn(&finalizer);
+    let without_committee = finish_prepared_block(
+        &finalizer,
+        harness
+            .ledger
+            .prepare_next_block_with_burn_bundles(
+                finalizer.address(),
+                harness
+                    .ledger
+                    .tip()
+                    .timestamp_ms
+                    .saturating_add(VDF_TARGET_BLOCK_MS * 2)
+                    .saturating_add(1),
+                Vec::new(),
+            )
+            .unwrap(),
+    );
+    assert_rejects(
+        harness.ledger.clone(),
+        without_committee,
+        "rank-1 block without remaining committee signature",
+    );
+
+    let member = committee
+        .iter()
+        .find(|member| member.slot == 1)
+        .expect("rank-1 committee should have slot 1")
+        .clone();
+    let wallet = harness.wallet(&member.owner);
+    let bundle = wallet.burn_bundle(BurnBundlePayload {
+        height: harness.ledger.height() + 1,
+        prev_hash: harness.ledger.tip_hash().to_string(),
+        slot: member.slot,
+        member: member.owner,
+        burns: Vec::new(),
+    });
+    let with_committee = finish_prepared_block(
+        &finalizer,
+        harness
+            .ledger
+            .prepare_next_block_with_burn_bundles(
+                finalizer.address(),
+                harness
+                    .ledger
+                    .tip()
+                    .timestamp_ms
+                    .saturating_add(VDF_TARGET_BLOCK_MS * 2)
+                    .saturating_add(1),
+                vec![bundle],
+            )
+            .unwrap(),
+    );
 
     harness
         .ledger
-        .apply_block_at(block, NOW_MS.saturating_add(1))
+        .apply_block_at(
+            with_committee,
+            NOW_MS.saturating_add(VDF_TARGET_BLOCK_MS * 2 + 1),
+        )
         .unwrap();
 }
 
@@ -2553,7 +2782,8 @@ fn pending_third_party_burn_does_not_affect_block_validity() {
         .unwrap()
         .clone();
     let third_party = harness.submit_fee_burn(&victim, 1, 1);
-    let mut block = harness.finish_ticket_block_from_pending(0, Vec::new());
+    let bundles = harness.committee_bundles_for_rank_and_burns(0, Vec::new());
+    let mut block = harness.finish_ticket_block_from_pending(0, bundles);
     block
         .transactions
         .retain(|tx| tx.signature() == anchor.signature());

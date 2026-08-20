@@ -182,20 +182,71 @@ impl Ledger {
     }
 
     pub fn burn_committee_for_next_block(&self) -> Vec<BurnCommitteeMember> {
-        self.burn_committee_for_height(self.tip().height + 1)
+        self.burn_committee_for_next_ticket_block(0)
+    }
+
+    pub fn burn_committee_for_next_ticket_block(
+        &self,
+        finalizer_rank: u32,
+    ) -> Vec<BurnCommitteeMember> {
+        self.burn_committee_for_ticket_block(self.tip().height + 1, finalizer_rank)
     }
 
     pub fn burn_committee_for_height(&self, height: u64) -> Vec<BurnCommitteeMember> {
+        self.burn_committee_for_ticket_block(height, 0)
+    }
+
+    pub fn burn_committee_for_block(&self, block: &Block) -> Vec<BurnCommitteeMember> {
+        match block.finalizer_mode {
+            super::FinalizerMode::Ticket => {
+                self.burn_committee_for_ticket_block(block.height, block.finalizer_rank)
+            }
+            super::FinalizerMode::Recovery => vec![BurnCommitteeMember {
+                slot: 0,
+                root: block.hash.clone(),
+                owner: block.miner.clone(),
+                weight: 0,
+            }],
+        }
+    }
+
+    fn burn_committee_for_ticket_block(
+        &self,
+        height: u64,
+        finalizer_rank: u32,
+    ) -> Vec<BurnCommitteeMember> {
         let ranked = ranked_tickets_for_height(self.tip(), height, &self.tickets);
-        self.lineage_burn_committee_for_height(height, ranked)
+        self.lineage_burn_committee_for_height(height, ranked, finalizer_rank)
+    }
+
+    pub fn burn_committee_memberships_for_next_block(
+        &self,
+        owner: &str,
+    ) -> Vec<BurnCommitteeMember> {
+        let max_rank = self
+            .finalizer_rank_count_for_next_block()
+            .min(super::BURN_COMMITTEE_SIZE);
+        let mut memberships = Vec::new();
+        let mut seen_slots = BTreeSet::new();
+        for rank in 0..max_rank {
+            for member in self.burn_committee_for_next_ticket_block(rank as u32) {
+                if member.owner != owner || !seen_slots.insert(member.slot) {
+                    continue;
+                }
+                memberships.push(member);
+            }
+        }
+        memberships.sort_by_key(|member| member.slot);
+        memberships
     }
 
     fn lineage_burn_committee_for_height(
         &self,
         height: u64,
         ranked: Vec<BurnTicket>,
+        finalizer_rank: u32,
     ) -> Vec<BurnCommitteeMember> {
-        let Some(finalizer) = ranked.first() else {
+        let Some(finalizer) = ranked.get(finalizer_rank as usize) else {
             return Vec::new();
         };
         let mut committee = vec![BurnCommitteeMember {
@@ -204,9 +255,17 @@ impl Ledger {
             owner: finalizer.owner.clone(),
             weight: finalizer.amount,
         }];
-        let mut skipped_owners = BTreeSet::from([finalizer.owner.clone()]);
+        let max_committee_size = super::BURN_COMMITTEE_SIZE
+            .saturating_sub(finalizer_rank as usize)
+            .max(1);
+        let mut skipped_owners = ranked
+            .iter()
+            .take(finalizer_rank as usize)
+            .map(|ticket| ticket.owner.clone())
+            .collect::<BTreeSet<_>>();
+        skipped_owners.insert(finalizer.owner.clone());
         let mut remaining = self
-            .eligible_lineage_candidates(finalizer.owner.as_str())
+            .eligible_lineage_candidates(&skipped_owners)
             .into_iter()
             .filter_map(|candidate| {
                 let owner =
@@ -220,7 +279,7 @@ impl Ledger {
             })
             .collect::<Vec<_>>();
 
-        for slot in 1..super::BURN_COMMITTEE_SIZE {
+        for slot in 1..max_committee_size {
             let Some(index) =
                 select_weighted_lineage_index(self.tip(), height, slot as u8, &remaining)
             else {
@@ -250,7 +309,10 @@ impl Ledger {
         committee
     }
 
-    fn eligible_lineage_candidates(&self, finalizer: &str) -> Vec<LineageCommitteeCandidate> {
+    fn eligible_lineage_candidates(
+        &self,
+        skipped_owners: &BTreeSet<String>,
+    ) -> Vec<LineageCommitteeCandidate> {
         let parent_height = self.tip().height;
         self.lineage_values
             .iter()
@@ -260,7 +322,9 @@ impl Ledger {
                         .height
                         .saturating_add(super::BURN_LINEAGE_MATURITY_HEIGHTS)
                         <= parent_height
-                    && !self.lineage_root_has_owner(root, finalizer)
+                    && !skipped_owners
+                        .iter()
+                        .any(|owner| self.lineage_root_has_owner(root, owner))
             })
             .filter_map(|(root, value)| {
                 let weight = lineage_committee_weight(*value);

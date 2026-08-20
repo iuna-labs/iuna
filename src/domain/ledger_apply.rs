@@ -3,7 +3,7 @@ use std::collections::BTreeSet;
 use anyhow::{Context, Result, bail};
 
 use super::ledger_ops::{
-    block_reward, credit_reward_output, ensure_block_has_burn, ensure_outputs_do_not_overflow,
+    block_reward, credit_reward_outputs, ensure_block_has_burn, ensure_outputs_do_not_overflow,
     ensure_single_input_owner, ensure_valid_recovery_block, validate_block_fee_policy,
     verify_leader_proof,
 };
@@ -69,6 +69,7 @@ impl Ledger {
             bail!("block VDF output is invalid");
         }
 
+        let reward_committee = self.burn_committee_for_block(&block);
         let mut utxos = self.utxos.clone();
         let mut utxo_lineage = self.utxo_lineage.clone();
         let mut lineage_values = self.lineage_values.clone();
@@ -100,7 +101,7 @@ impl Ledger {
         let mut tickets = self.tickets.clone();
         apply_finalizer_ticket_effects(self.tip(), &block, &mut tickets)?;
         tickets.extend(tickets_created_by_block(&block, &self.launch_profile)?);
-        credit_reward_output(&mut utxos, &block)?;
+        credit_reward_outputs(&mut utxos, &block, &reward_committee)?;
         self.utxos = utxos;
         self.utxo_lineage = utxo_lineage;
         self.lineage_values = lineage_values;

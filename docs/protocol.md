@@ -199,13 +199,27 @@ Splitting one large root across many addresses does not multiply committee influ
 
 The lineage weight is logarithmic. A larger root has more chance to be selected, but doubling value does not double influence forever. This keeps committee selection from becoming a simple rich-get-richer vote while still giving larger, older mined lineages some weight.
 
-For a target height, validators derive a deterministic committee seed from the parent hash and height. Slot `0` is assigned to the block finalizer. Slots `1` and `2` are assigned without replacement by weighted deterministic draws over eligible lineage roots using `root_weight`.
+For a target height, validators derive a deterministic committee seed from the parent hash and height. Slot `0` is assigned to the actual block finalizer. Rank `0` ticket blocks can use slots `1` and `2`; rank `1` ticket blocks can use slot `1`; rank `2` and later ticket blocks use only the finalizer slot. Lower-ranked ticket owners that missed their slot are skipped for fallback committee selection, because their tickets are no longer valid for that height. Extra slots are assigned without replacement by weighted deterministic draws over eligible lineage roots using `root_weight`.
 
 After a lineage root wins, validators deterministically choose one representative owner from the unspent outputs tagged with that root. The additional slots are meant to be independent from the finalizer, so the finalizer's address and any address already selected for an earlier additional burn committee slot are skipped when choosing representatives. If no eligible non-finalizer representative remains for a winning root, that root is skipped and the draw continues to the next eligible root.
 
 The protocol can detect addresses and lineage roots, not hidden common control, so a finalizer using unrelated addresses is still a social and economic risk rather than something this rule can perfectly identify.
 
-If fewer than two eligible non-finalizer lineages exist, the committee has the finalizer plus one or zero additional members. If no eligible non-finalizer lineage exists, burn inclusion quorum falls back to `1-of-1` through the finalizer's implicit slot `0` attestation.
+If fewer eligible non-finalizer lineages exist than the rank can use, the committee is smaller. If no eligible non-finalizer lineage exists, burn inclusion quorum falls back to `1-of-1` through the finalizer's implicit slot `0` attestation.
+
+### Burn Committee Reward Split
+
+The block reward is the total fee reward for the block. It remains a single deterministic amount in the block, but validators credit it as one or more implicit reward outputs.
+
+For normal ticket blocks, lower-rank finalization pays more to the independent burn-inclusion committee:
+
+- rank `0`: the finalizer receives `50%`; committee slot `1` and slot `2` split the other `50%` equally (`25%` each when both slots are available);
+- rank `1`: the finalizer receives `50%`; committee slot `1` receives the other `50%`;
+- rank `2` and later: the finalizer receives `100%`.
+
+Recovery blocks pay `100%` to the recovery finalizer.
+
+If fewer extra committee members are available than the rank rule can pay, the available extra members share the committee half. If no extra committee member is available, the finalizer receives the full reward. Integer amounts are rounded down into the committee half (`reward / 2`), so the finalizer receives the remainder when the reward is odd. Committee reward outputs do not create UTXO lineage; lineage selection remains based on mature mine-action descendants.
 
 A committee member can sign one burn bundle for its slot, height, and parent hash. A bundle is at most `10,000` bytes and lists valid fee-paying pending burns ordered by absolute fee, with signature as the deterministic tie-breaker. Honest committee policy is to include every valid burn it selects by that canonical ordering, or to sign an empty bundle only when the signer knows no valid burn for that height. Empty bundles are an honest-policy signal, not something validators can prove from their own mempools. Consensus checks committee membership, signature validity, lineage assignment, ordering, and threshold.
 
@@ -229,15 +243,15 @@ Block validity is not allowed to depend on a validator's local mempool. Validato
 
 A block may contain at most one bundle per slot. If a block includes one valid bundle for a slot, validators check that included bundle and do not need to know whether another bundle for the same slot existed elsewhere. If a block builder sees two different signed bundles for the same height and slot before block assembly, it ignores that slot's bundles for the round as local safety policy. The current protocol does not have a separate slashing rule for this.
 
-Ticket blocks must carry enough burn-list attestations for their finalizer rank. Rank `0` has the strictest rule because it is the preferred path. Fallback ranks relax the threshold so the chain can keep moving if the primary finalizer or some committee members are unavailable. If the primary cannot gather the required attestations in time, a lower-ranked finalizer eventually gets a looser threshold.
+Ticket blocks must carry every burn-list attestation that is available for their finalizer rank. Rank `0` has the strictest rule because it is the preferred path. Fallback ranks have fewer possible committee slots because missed lower-rank ticket owners are no longer valid for that height. If a committee member can participate under the rank rule, its attestation is mandatory; otherwise the block is invalid.
 
-That is a deliberate liveness tradeoff. A lower-ranked finalizer can use fewer attestations, so its required burn list may omit burns that appeared only in committee bundles it did not use. This is weaker for fairness than the rank `0` path, but stronger for liveness when the strict path is stuck.
+That is a deliberate liveness tradeoff. A lower-ranked finalizer can have a smaller committee, so its required burn list may omit burns that appeared only to members that are no longer eligible for that fallback rank. This is weaker for fairness than the rank `0` path, but stronger for liveness when the strict path is stuck.
 
 The available committee size is the finalizer plus the selected non-finalizer committee members for that height:
 
 - rank `0` needs all available burn committee attestations (`3-of-3`, `2-of-2`, or `1-of-1`), where the finalizer's block signature counts as the slot `0` attestation;
-- rank `1` needs one fewer than all available attestations, with at least one attestation required (`2-of-3`, `1-of-2`, or `1-of-1`);
-- rank `2` and later ticket finalizers need one valid burn-list attestation from the available committee (`1-of-3`, `1-of-2`, or `1-of-1`), where the finalizer's block signature still counts if no non-finalizer bundle is included.
+- rank `1` needs all available attestations for the reduced rank-1 committee (`2-of-2` or `1-of-1`);
+- rank `2` and later ticket finalizers use only the finalizer's implicit slot `0` attestation (`1-of-1`).
 
 Recovery blocks do not require burn-list signatures. They are the last liveness escape hatch after the ticket path has failed, so committee failure must not be able to stop the chain forever. Recovery is weaker for fairness and is not meant to be the normal block path.
 

@@ -9,10 +9,10 @@ use super::selection::{TransactionKind, fee_rate_key};
 use super::ticket::ticket_is_eligible_for_height;
 use super::transaction::Transaction;
 use super::{
-    Amount, Block, BlockSelection, BurnTicket, FinalizerMode, LeaderProof, LeaderProofPayload,
-    MINE_REWARD, OutPoint, PUBLIC_KEY_BYTES, RECOVERY_BLOCK_DELAY_MS, SIGNATURE_BYTES, TxInput,
-    TxOutput, decode_hex_array, validate_address, validate_hash, validate_protocol_id,
-    validate_signature,
+    Amount, BURN_COMMITTEE_SIZE, Block, BlockSelection, BurnCommitteeMember, BurnTicket,
+    FinalizerMode, LeaderProof, LeaderProofPayload, MINE_REWARD, OutPoint, PUBLIC_KEY_BYTES,
+    RECOVERY_BLOCK_DELAY_MS, SIGNATURE_BYTES, TxInput, TxOutput, decode_hex_array,
+    validate_address, validate_hash, validate_protocol_id, validate_signature,
 };
 
 pub(super) fn validate_genesis_allocations(
@@ -393,20 +393,95 @@ pub(super) fn ensure_single_input_owner_for_inputs(inputs: &[TxInput]) -> Result
     Ok(())
 }
 
+pub(super) fn credit_reward_outputs(
+    utxos: &mut BTreeMap<OutPoint, TxOutput>,
+    block: &Block,
+    committee: &[BurnCommitteeMember],
+) -> Result<()> {
+    let outputs = reward_outputs_for_block(block, committee);
+    let tx_outputs = outputs
+        .iter()
+        .map(|(_, output)| output.clone())
+        .collect::<Vec<_>>();
+    ensure_outputs_do_not_overflow(utxos, &tx_outputs)?;
+    for (outpoint, output) in outputs {
+        utxos.insert(outpoint, output);
+    }
+    Ok(())
+}
+
 pub(super) fn credit_reward_output(
     utxos: &mut BTreeMap<OutPoint, TxOutput>,
     block: &Block,
 ) -> Result<()> {
+    credit_reward_outputs(utxos, block, &[])
+}
+
+pub fn reward_outputs_for_block(
+    block: &Block,
+    committee: &[BurnCommitteeMember],
+) -> Vec<(OutPoint, TxOutput)> {
     if block.reward == 0 {
-        return Ok(());
+        return Vec::new();
     }
-    let output = TxOutput {
-        address: block.miner.clone(),
-        amount: block.reward,
+
+    let mut outputs = Vec::new();
+    let committee_slots = reward_committee_slots(block);
+    let committee_members = committee_slots
+        .into_iter()
+        .filter_map(|slot| {
+            committee
+                .iter()
+                .find(|member| member.slot == slot && member.owner != block.miner)
+        })
+        .collect::<Vec<_>>();
+    let committee_pool = if committee_members.is_empty() {
+        0
+    } else {
+        block.reward / 2
     };
-    ensure_outputs_do_not_overflow(utxos, std::slice::from_ref(&output))?;
-    utxos.insert(reward_outpoint(&block.hash), output);
-    Ok(())
+    let finalizer_amount = block.reward.saturating_sub(committee_pool);
+
+    if finalizer_amount > 0 {
+        outputs.push((
+            reward_outpoint(&block.hash),
+            TxOutput {
+                address: block.miner.clone(),
+                amount: finalizer_amount,
+            },
+        ));
+    }
+
+    let mut remaining = committee_pool;
+    for (index, member) in committee_members.iter().enumerate() {
+        let members_left = committee_members.len() - index;
+        let amount = if members_left == 1 {
+            remaining
+        } else {
+            remaining / members_left as u64
+        };
+        remaining = remaining.saturating_sub(amount);
+        if amount == 0 {
+            continue;
+        }
+        outputs.push((
+            committee_reward_outpoint(&block.hash, member.slot),
+            TxOutput {
+                address: member.owner.clone(),
+                amount,
+            },
+        ));
+    }
+
+    outputs
+}
+
+fn reward_committee_slots(block: &Block) -> Vec<u8> {
+    match block.finalizer_mode {
+        FinalizerMode::Ticket if block.finalizer_rank == 0 => vec![1, 2],
+        FinalizerMode::Ticket if block.finalizer_rank == 1 => vec![1],
+        FinalizerMode::Ticket | FinalizerMode::Recovery => Vec::new(),
+    }
 }
 
 pub(super) fn ensure_outputs_do_not_overflow(
@@ -512,5 +587,146 @@ pub(super) fn reward_outpoint(block_hash: &str) -> OutPoint {
     OutPoint {
         txid: block_hash.to_string(),
         index: u32::MAX,
+    }
+}
+
+fn committee_reward_outpoint(block_hash: &str, slot: u8) -> OutPoint {
+    let slot = usize::from(slot).min(BURN_COMMITTEE_SIZE.saturating_sub(1));
+    OutPoint {
+        txid: block_hash.to_string(),
+        index: u32::MAX.saturating_sub(slot as u32),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::domain::BurnBundleSection;
+
+    fn reward_block(finalizer_mode: FinalizerMode, finalizer_rank: u32, reward: Amount) -> Block {
+        let mut block = Block {
+            height: 1,
+            prev_hash: "p".repeat(64),
+            timestamp_ms: 1,
+            miner: "finalizer".to_string(),
+            finalizer_mode,
+            finalizer_rank,
+            reward,
+            vdf_rounds: 1,
+            vdf_output: "out".to_string(),
+            leader_proof: None,
+            burn_bundle_section: BurnBundleSection::default(),
+            transactions: Vec::new(),
+            hash: "h".repeat(64),
+        };
+        block.hash = block.compute_hash();
+        block
+    }
+
+    fn committee_member(slot: u8, owner: &str) -> BurnCommitteeMember {
+        BurnCommitteeMember {
+            slot,
+            root: format!("root-{slot}"),
+            owner: owner.to_string(),
+            weight: 1,
+        }
+    }
+
+    fn output_amount(outputs: &[(OutPoint, TxOutput)], owner: &str) -> Amount {
+        outputs
+            .iter()
+            .filter(|(_, output)| output.address == owner)
+            .map(|(_, output)| output.amount)
+            .sum()
+    }
+
+    #[test]
+    fn rank_zero_splits_half_to_two_extra_committee_members() {
+        let block = reward_block(FinalizerMode::Ticket, 0, 100);
+        let committee = vec![
+            committee_member(0, "finalizer"),
+            committee_member(1, "committee-2"),
+            committee_member(2, "committee-3"),
+        ];
+
+        let outputs = reward_outputs_for_block(&block, &committee);
+
+        assert_eq!(output_amount(&outputs, "finalizer"), 50);
+        assert_eq!(output_amount(&outputs, "committee-2"), 25);
+        assert_eq!(output_amount(&outputs, "committee-3"), 25);
+        assert!(
+            outputs
+                .iter()
+                .any(|(outpoint, _)| outpoint.index == u32::MAX)
+        );
+        assert!(
+            outputs
+                .iter()
+                .any(|(outpoint, _)| outpoint.index == u32::MAX - 1)
+        );
+        assert!(
+            outputs
+                .iter()
+                .any(|(outpoint, _)| outpoint.index == u32::MAX - 2)
+        );
+    }
+
+    #[test]
+    fn rank_zero_gives_committee_half_to_the_only_available_extra_member() {
+        let block = reward_block(FinalizerMode::Ticket, 0, 101);
+        let committee = vec![
+            committee_member(0, "finalizer"),
+            committee_member(1, "committee-2"),
+        ];
+
+        let outputs = reward_outputs_for_block(&block, &committee);
+
+        assert_eq!(output_amount(&outputs, "finalizer"), 51);
+        assert_eq!(output_amount(&outputs, "committee-2"), 50);
+    }
+
+    #[test]
+    fn rank_one_splits_only_with_committee_slot_one() {
+        let block = reward_block(FinalizerMode::Ticket, 1, 100);
+        let committee = vec![
+            committee_member(0, "missed-primary"),
+            committee_member(1, "committee-2"),
+            committee_member(2, "committee-3"),
+        ];
+
+        let outputs = reward_outputs_for_block(&block, &committee);
+
+        assert_eq!(output_amount(&outputs, "finalizer"), 50);
+        assert_eq!(output_amount(&outputs, "committee-2"), 50);
+        assert_eq!(output_amount(&outputs, "committee-3"), 0);
+        assert_eq!(output_amount(&outputs, "missed-primary"), 0);
+    }
+
+    #[test]
+    fn rank_two_and_recovery_pay_the_finalizer_only() {
+        let committee = vec![
+            committee_member(1, "committee-2"),
+            committee_member(2, "committee-3"),
+        ];
+
+        let rank_two = reward_block(FinalizerMode::Ticket, 2, 100);
+        let recovery = reward_block(FinalizerMode::Recovery, 0, 100);
+
+        assert_eq!(
+            output_amount(
+                &reward_outputs_for_block(&rank_two, &committee),
+                "finalizer"
+            ),
+            100
+        );
+        assert_eq!(reward_outputs_for_block(&rank_two, &committee).len(), 1);
+        assert_eq!(
+            output_amount(
+                &reward_outputs_for_block(&recovery, &committee),
+                "finalizer"
+            ),
+            100
+        );
+        assert_eq!(reward_outputs_for_block(&recovery, &committee).len(), 1);
     }
 }

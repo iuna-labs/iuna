@@ -19,26 +19,28 @@ impl Ledger {
         &self,
         finalizer_mode: FinalizerMode,
         finalizer_rank: u32,
-        finalizer: &str,
+        _finalizer: &str,
     ) -> usize {
-        self.required_explicit_burn_signatures(
-            finalizer_mode,
-            finalizer_rank,
-            self.burn_committee_for_next_block().len(),
-            transactions_have_attestable_burns(&self.pending, finalizer),
-        )
+        let committee_size = match finalizer_mode {
+            FinalizerMode::Ticket => self
+                .burn_committee_for_next_ticket_block(finalizer_rank)
+                .len(),
+            FinalizerMode::Recovery => 1,
+        };
+        self.required_explicit_burn_signatures(finalizer_mode, finalizer_rank, committee_size)
     }
 
     pub fn build_burn_bundle(&self, wallet: &Wallet) -> Result<Option<BurnBundle>> {
+        Ok(self.build_burn_bundles(wallet)?.into_iter().next())
+    }
+
+    pub fn build_burn_bundles(&self, wallet: &Wallet) -> Result<Vec<BurnBundle>> {
         let height = self.tip().height + 1;
         let prev_hash = self.tip().hash.clone();
-        let Some(member) = self
-            .burn_committee_for_next_block()
-            .into_iter()
-            .find(|member| member.owner == wallet.address())
-        else {
-            return Ok(None);
-        };
+        let memberships = self.burn_committee_memberships_for_next_block(wallet.address());
+        if memberships.is_empty() {
+            return Ok(Vec::new());
+        }
         let mut burns = self
             .valid_pending_transactions()
             .into_iter()
@@ -51,31 +53,32 @@ impl Ledger {
                 .then_with(|| left.signature().cmp(right.signature()))
         });
 
-        let mut selected = Vec::new();
-        for burn in burns {
-            let mut candidate = selected.clone();
-            candidate.push(burn);
-            let bundle = wallet.burn_bundle(BurnBundlePayload {
+        let mut bundles = Vec::new();
+        for member in memberships {
+            let mut selected = Vec::new();
+            for burn in &burns {
+                let mut candidate = selected.clone();
+                candidate.push(burn.clone());
+                let bundle = wallet.burn_bundle(BurnBundlePayload {
+                    height,
+                    prev_hash: prev_hash.clone(),
+                    slot: member.slot,
+                    member: wallet.address().to_string(),
+                    burns: candidate.clone(),
+                });
+                if bundle.serialized_size_bytes()? <= MAX_BURN_BUNDLE_BYTES {
+                    selected = candidate;
+                }
+            }
+            bundles.push(wallet.burn_bundle(BurnBundlePayload {
                 height,
                 prev_hash: prev_hash.clone(),
                 slot: member.slot,
                 member: wallet.address().to_string(),
-                burns: candidate.clone(),
-            });
-            if bundle.serialized_size_bytes()? <= MAX_BURN_BUNDLE_BYTES {
-                selected = candidate;
-            }
+                burns: selected,
+            }));
         }
-        if selected.is_empty() && !self.burn_bundle_attestations_required_for_next_block() {
-            return Ok(None);
-        }
-        Ok(Some(wallet.burn_bundle(BurnBundlePayload {
-            height,
-            prev_hash,
-            slot: member.slot,
-            member: wallet.address().to_string(),
-            burns: selected,
-        })))
+        Ok(bundles)
     }
 
     pub fn validate_next_block_burn_bundles(
@@ -84,23 +87,61 @@ impl Ledger {
     ) -> Result<Vec<BurnBundle>> {
         let expected_height = self.tip().height + 1;
         let expected_prev_hash = self.tip().hash.clone();
-        self.validate_burn_bundles_for_block(expected_height, &expected_prev_hash, bundles)
+        self.validate_burn_bundles_for_any_next_ticket_block(
+            expected_height,
+            &expected_prev_hash,
+            bundles,
+        )
+    }
+
+    pub(super) fn validate_next_block_burn_bundles_for_finalizer_rank(
+        &self,
+        finalizer_rank: u32,
+        bundles: Vec<BurnBundle>,
+    ) -> Result<Vec<BurnBundle>> {
+        let expected_height = self.tip().height + 1;
+        let expected_prev_hash = self.tip().hash.clone();
+        let committee = self
+            .burn_committee_for_next_ticket_block(finalizer_rank)
+            .into_iter()
+            .map(|member| (member.slot, member))
+            .collect::<BTreeMap<_, _>>();
+        self.validate_burn_bundles_for_committee(
+            expected_height,
+            &expected_prev_hash,
+            &committee,
+            bundles,
+        )
     }
 
     pub(crate) fn precheck_next_block_burn_bundle(&self, bundle: &BurnBundle) -> Result<()> {
         let expected_height = self.tip().height + 1;
         let expected_prev_hash = self.tip().hash.clone();
-        let committee = self
-            .burn_committee_for_height(expected_height)
-            .into_iter()
-            .map(|member| (member.slot, member))
-            .collect::<BTreeMap<_, _>>();
-        self.precheck_burn_bundle_for_block(
-            expected_height,
-            &expected_prev_hash,
-            &committee,
-            bundle,
-        )
+        let max_rank = self
+            .finalizer_rank_count_for_next_block()
+            .min(BURN_COMMITTEE_SIZE);
+        let mut first_error = None;
+        for rank in 0..max_rank {
+            let committee = self
+                .burn_committee_for_next_ticket_block(rank as u32)
+                .into_iter()
+                .map(|member| (member.slot, member))
+                .collect::<BTreeMap<_, _>>();
+            match self.precheck_burn_bundle_for_block(
+                expected_height,
+                &expected_prev_hash,
+                &committee,
+                bundle,
+            ) {
+                Ok(()) => return Ok(()),
+                Err(error) => {
+                    if first_error.is_none() {
+                        first_error = Some(error);
+                    }
+                }
+            }
+        }
+        Err(first_error.unwrap_or_else(|| anyhow::anyhow!("burn bundle slot is not assigned")))
     }
 
     #[cfg(test)]
@@ -175,7 +216,7 @@ impl Ledger {
             bail!("burn bundle signatures are not in slot order");
         }
         let committee = self
-            .burn_committee_for_height(block.height)
+            .burn_committee_for_block(block)
             .into_iter()
             .map(|member| (member.slot, member))
             .collect::<BTreeMap<_, _>>();
@@ -207,7 +248,6 @@ impl Ledger {
             block.finalizer_mode,
             block.finalizer_rank,
             committee.len(),
-            transactions_have_attestable_burns(&block.transactions, &block.miner),
         );
         if section.signatures.len() < required_signatures {
             bail!(
@@ -263,23 +303,56 @@ impl Ledger {
         finalizer_mode: FinalizerMode,
         finalizer_rank: u32,
         committee_size: usize,
-        has_attested_burns: bool,
     ) -> usize {
-        if !has_attested_burns || committee_size == 0 {
+        if committee_size == 0 {
             return 0;
         }
         match finalizer_mode {
             FinalizerMode::Ticket if finalizer_rank == 0 => committee_size.saturating_sub(1),
-            FinalizerMode::Ticket if finalizer_rank == 1 => committee_size.saturating_sub(2),
+            FinalizerMode::Ticket if finalizer_rank == 1 => committee_size.saturating_sub(1),
             FinalizerMode::Ticket => 0,
             FinalizerMode::Recovery => 0,
         }
     }
 
-    fn validate_burn_bundles_for_block(
+    fn validate_burn_bundles_for_any_next_ticket_block(
         &self,
         expected_height: u64,
         expected_prev_hash: &str,
+        bundles: Vec<BurnBundle>,
+    ) -> Result<Vec<BurnBundle>> {
+        let max_rank = self
+            .finalizer_rank_count_for_next_block()
+            .min(BURN_COMMITTEE_SIZE);
+        let mut first_error = None;
+        for rank in 0..max_rank {
+            let committee = self
+                .burn_committee_for_next_ticket_block(rank as u32)
+                .into_iter()
+                .map(|member| (member.slot, member))
+                .collect::<BTreeMap<_, _>>();
+            match self.validate_burn_bundles_for_committee(
+                expected_height,
+                expected_prev_hash,
+                &committee,
+                bundles.clone(),
+            ) {
+                Ok(validated) => return Ok(validated),
+                Err(error) => {
+                    if first_error.is_none() {
+                        first_error = Some(error);
+                    }
+                }
+            }
+        }
+        Err(first_error.unwrap_or_else(|| anyhow::anyhow!("no ticket committee is available")))
+    }
+
+    fn validate_burn_bundles_for_committee(
+        &self,
+        expected_height: u64,
+        expected_prev_hash: &str,
+        committee: &BTreeMap<u8, BurnCommitteeMember>,
         mut bundles: Vec<BurnBundle>,
     ) -> Result<Vec<BurnBundle>> {
         if bundles.len() > BURN_COMMITTEE_SIZE {
@@ -289,11 +362,6 @@ impl Ledger {
         if bundles.windows(2).any(|pair| pair[0].slot == pair[1].slot) {
             bail!("duplicate burn bundle slot");
         }
-        let committee = self
-            .burn_committee_for_height(expected_height)
-            .into_iter()
-            .map(|member| (member.slot, member))
-            .collect::<BTreeMap<_, _>>();
         let mut seen_members = BTreeSet::new();
         for bundle in &bundles {
             if !seen_members.insert(bundle.member.clone()) {
@@ -302,7 +370,7 @@ impl Ledger {
             self.precheck_burn_bundle_for_block(
                 expected_height,
                 expected_prev_hash,
-                &committee,
+                committee,
                 bundle,
             )?;
             for burn in &bundle.burns {
@@ -378,21 +446,6 @@ fn matching_burn_by_signature<'a>(
     })
 }
 
-fn transactions_have_attestable_burns(transactions: &[Transaction], finalizer: &str) -> bool {
-    let mut finalizer_anchor_seen = false;
-    for transaction in transactions {
-        if !transaction.is_burn() {
-            continue;
-        }
-        if transaction.sender() == finalizer && !finalizer_anchor_seen {
-            finalizer_anchor_seen = true;
-            continue;
-        }
-        return true;
-    }
-    false
-}
-
 #[cfg(test)]
 mod tests {
     use std::collections::BTreeMap;
@@ -437,27 +490,27 @@ mod tests {
     }
 
     #[test]
-    fn burn_quorum_depends_on_rank_and_included_burns() {
+    fn burn_quorum_depends_on_rank_and_available_committee() {
         let ledger = ledger();
 
         assert_eq!(
-            ledger.required_explicit_burn_signatures(FinalizerMode::Ticket, 0, 3, true),
+            ledger.required_explicit_burn_signatures(FinalizerMode::Ticket, 0, 3),
             2
         );
         assert_eq!(
-            ledger.required_explicit_burn_signatures(FinalizerMode::Ticket, 1, 3, true),
+            ledger.required_explicit_burn_signatures(FinalizerMode::Ticket, 1, 2),
             1
         );
         assert_eq!(
-            ledger.required_explicit_burn_signatures(FinalizerMode::Ticket, 2, 3, true),
+            ledger.required_explicit_burn_signatures(FinalizerMode::Ticket, 2, 3),
             0
         );
         assert_eq!(
-            ledger.required_explicit_burn_signatures(FinalizerMode::Recovery, 0, 3, true),
+            ledger.required_explicit_burn_signatures(FinalizerMode::Recovery, 0, 3),
             0
         );
         assert_eq!(
-            ledger.required_explicit_burn_signatures(FinalizerMode::Ticket, 0, 3, false),
+            ledger.required_explicit_burn_signatures(FinalizerMode::Ticket, 0, 1),
             0
         );
     }

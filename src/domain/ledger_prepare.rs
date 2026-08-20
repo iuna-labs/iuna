@@ -53,7 +53,8 @@ impl Ledger {
             bail!("no selected leader for block {height}");
         }
 
-        let burn_bundles = self.validate_next_block_burn_bundles(burn_bundles)?;
+        let burn_bundles =
+            self.validate_next_block_burn_bundles_for_finalizer_rank(finalizer_rank, burn_bundles)?;
         let burn_bundle_section = self.burn_bundle_section_from_bundles(burn_bundles);
         let selection = self.select_block_transactions_with_burn_section(
             miner,

@@ -31,7 +31,7 @@ impl NodeCore {
         if bundle.height > next_height {
             return Ok(());
         }
-        let key = (bundle.height, bundle.slot);
+        let key = (bundle.height, bundle.slot, bundle.member.clone());
         self.ledger.precheck_next_block_burn_bundle(&bundle)?;
         for burn in &bundle.burns {
             self.receive_gossiped_transaction(burn.clone())?;
@@ -276,7 +276,10 @@ mod tests {
 
         let error = receiver.receive_burn_bundle(oversized_bundle).unwrap_err();
 
-        assert!(error.to_string().contains("burn bundle exceeds max size"));
+        assert!(
+            error.to_string().contains("burn bundle exceeds max size"),
+            "{error:#}"
+        );
         assert!(
             receiver
                 .ledger()

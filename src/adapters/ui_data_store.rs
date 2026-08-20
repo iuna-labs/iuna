@@ -14,7 +14,7 @@ use crate::{
     adapters::ui_index::{UiChainIndex, build_ui_chain_index},
     domain::{
         Amount, Block, BurnLeaderRank, ChainSnapshot, Ledger, MINE_REWARD, OutPoint, Transaction,
-        TxInput, TxOutput, hex_hash,
+        TxInput, TxOutput, hex_hash, reward_outputs_for_block,
     },
 };
 
@@ -1121,6 +1121,11 @@ fn metrics_from_snapshot(snapshot: &ChainSnapshot) -> Result<Vec<BlockMetricRow>
     let mut metric_utxos = metric_genesis_utxos(snapshot);
 
     for block in &snapshot.blocks {
+        let reward_committee = if block.height == 0 {
+            Vec::new()
+        } else {
+            running_ledger.burn_committee_for_block(block)
+        };
         let mut transfer_count = 0_u64;
         let mut burn_count = 0_u64;
         let mut mine_count = 0_u64;
@@ -1131,6 +1136,9 @@ fn metrics_from_snapshot(snapshot: &ChainSnapshot) -> Result<Vec<BlockMetricRow>
         known_wallet_addresses.insert(block.miner.clone());
         for signature in &block.burn_bundle_section.signatures {
             known_wallet_addresses.insert(signature.member.clone());
+        }
+        for (_, output) in reward_outputs_for_block(block, &reward_committee) {
+            known_wallet_addresses.insert(output.address);
         }
         for transaction in &block.transactions {
             collect_transaction_addresses(transaction, &mut known_wallet_addresses);
@@ -1151,6 +1159,7 @@ fn metrics_from_snapshot(snapshot: &ChainSnapshot) -> Result<Vec<BlockMetricRow>
                 }
             }
         }
+        metric_index_block_reward(&mut metric_utxos, block, &reward_committee);
         total_burned_amount = total_burned_amount
             .checked_add(burned_amount)
             .and_then(|amount| amount.checked_add(burned_fee_amount))
@@ -1161,7 +1170,6 @@ fn metrics_from_snapshot(snapshot: &ChainSnapshot) -> Result<Vec<BlockMetricRow>
                 .apply_preverified_block_at(block.clone(), u64::MAX)
                 .with_context(|| format!("failed to replay block {} for metrics", block.height))?;
         }
-        metric_index_block_reward(&mut metric_utxos, block);
         let circulating_supply = ledger_circulating_supply(&running_ledger)?;
         let block_time_ms =
             previous_timestamp_ms.map(|previous| block.timestamp_ms.saturating_sub(previous));
@@ -1278,30 +1286,20 @@ fn metric_index_transaction_outputs(
     }
 }
 
-fn metric_index_block_reward(utxos: &mut BTreeMap<OutPoint, TxOutput>, block: &Block) {
-    if block.reward == 0 {
-        return;
+fn metric_index_block_reward(
+    utxos: &mut BTreeMap<OutPoint, TxOutput>,
+    block: &Block,
+    committee: &[crate::domain::BurnCommitteeMember],
+) {
+    for (outpoint, output) in reward_outputs_for_block(block, committee) {
+        utxos.insert(outpoint, output);
     }
-    utxos.insert(
-        metric_reward_outpoint(&block.hash),
-        TxOutput {
-            address: block.miner.clone(),
-            amount: block.reward,
-        },
-    );
 }
 
 fn metric_genesis_allocation_outpoint(address: &str) -> OutPoint {
     OutPoint {
         txid: hex_hash(format!("iuna-genesis-allocation:{address}")),
         index: 0,
-    }
-}
-
-fn metric_reward_outpoint(block_hash: &str) -> OutPoint {
-    OutPoint {
-        txid: block_hash.to_string(),
-        index: u32::MAX,
     }
 }
 

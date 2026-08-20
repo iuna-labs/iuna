@@ -102,7 +102,7 @@ impl NodeCore {
             last_auto_pow_mine_anchor: None,
             last_auto_pow_mine_status: None,
             auto_pow_mine_cursor: None,
-            burn_bundles: BTreeMap::<(u64, u8), BurnBundle>::new(),
+            burn_bundles: BTreeMap::<(u64, u8, String), BurnBundle>::new(),
             equivocated_burn_bundle_slots: BTreeSet::new(),
             burn_bundle_collection_started: None,
             local_block_anchor_burn: None,

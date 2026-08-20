@@ -42,6 +42,7 @@ use ledger_lineage::{
     LineageOwnerValues, UtxoLineageRoot, insert_output_with_lineage,
     output_lineage_root_for_transaction, spend_inputs_with_lineage,
 };
+pub use ledger_ops::reward_outputs_for_block;
 use ledger_ops::{
     apply_transaction, credit_reward_output, ensure_block_has_burn, ensure_block_has_burn_from,
     recovery_vdf_seed_for_child, validate_genesis_burn_transaction, vdf_seed_for_child,
