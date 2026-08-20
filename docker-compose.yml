@@ -37,6 +37,7 @@ services:
     hostname: iuna-node2
     environment:
       IUNA_WALLET_PASSWORD: ${IUNA_NODE2_WALLET_PASSWORD:-local-testnet-node2-password}
+      IUNA_POW_MINING_ENABLED: "true"
     entrypoint: ["/bin/sh", "-c"]
     command:
       - exec iuna --join 172.28.0.10:9444 --data-dir /data --http 0.0.0.0:18661 --p2p 0.0.0.0:9444 --p2p-announce 172.28.0.11:9444 --debug
@@ -57,6 +58,7 @@ services:
     hostname: iuna-node3
     environment:
       IUNA_WALLET_PASSWORD: ${IUNA_NODE3_WALLET_PASSWORD:-local-testnet-node3-password}
+      IUNA_AUTOMATIC_BURN_ENABLED: "true"
     entrypoint: ["/bin/sh", "-c"]
     command:
       - exec iuna --join 172.28.0.10:9444 --data-dir /data --http 0.0.0.0:18661 --p2p 0.0.0.0:9444 --p2p-announce 172.28.0.12:9444 --stratum 0.0.0.0:3333 --debug

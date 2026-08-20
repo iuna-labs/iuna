@@ -39,6 +39,8 @@ const VDF_MEASUREMENT_INITIAL_ROUNDS: u64 = 1_000;
 const VDF_MEASUREMENT_MAX_ROUNDS: u64 = 10_000_000;
 const VDF_MEASUREMENT_MIN_ELAPSED: Duration = Duration::from_millis(150);
 const VDF_PROGRESS_LOG_INTERVAL: Duration = Duration::from_secs(10);
+const AUTOMATIC_BURN_ENABLED_ENV: &str = "IUNA_AUTOMATIC_BURN_ENABLED";
+const POW_MINING_ENABLED_ENV: &str = "IUNA_POW_MINING_ENABLED";
 const WALLET_PASSWORD_ENV: &str = "IUNA_WALLET_PASSWORD";
 
 #[tokio::main]
@@ -65,6 +67,8 @@ async fn main() -> Result<()> {
     }
     let mut ui_config = config_store::load_or_create(&config_path)?;
     let startup_wallet_password = startup_wallet_password_from_env()?;
+    let startup_automatic_burn_enabled = startup_bool_from_env(AUTOMATIC_BURN_ENABLED_ENV)?;
+    let startup_pow_mining_enabled = startup_bool_from_env(POW_MINING_ENABLED_ENV)?;
     let p2p_config_dirty = apply_cli_p2p_config_overrides(&opts, &mut ui_config);
     let stratum_config_dirty = apply_cli_stratum_config_overrides(&opts, &mut ui_config);
     let p2p_announce_addr = configured_p2p_announce_addr(&opts, &ui_config)?;
@@ -79,6 +83,11 @@ async fn main() -> Result<()> {
         ui_config.burn_per_block = GENESIS_INITIAL_BURN_PER_BLOCK;
         ui_config.burn_fee = GENESIS_INITIAL_BURN_FEE;
     }
+    let mining_config_dirty = apply_startup_mining_config_overrides(
+        &mut ui_config,
+        startup_automatic_burn_enabled,
+        startup_pow_mining_enabled,
+    );
     let auth_config_dirty = apply_startup_wallet_password_config(
         &config_path,
         &mut ui_config,
@@ -86,8 +95,10 @@ async fn main() -> Result<()> {
     )?;
     let wallet_load = load_startup_wallet(&wallet_path, startup_wallet_password.as_deref())?;
     let wallet_address = wallet_load.address().to_string();
-    let ui_config_dirty =
-        opts.chain_mode == ChainMode::Genesis || p2p_config_dirty || stratum_config_dirty;
+    let ui_config_dirty = opts.chain_mode == ChainMode::Genesis
+        || p2p_config_dirty
+        || stratum_config_dirty
+        || mining_config_dirty;
     if ui_config_dirty || auth_config_dirty {
         config_store::save(&config_path, &ui_config)?;
     }
@@ -295,6 +306,46 @@ fn startup_wallet_password_from_env() -> Result<Option<String>> {
     http::validate_management_password(&password)
         .with_context(|| format!("{WALLET_PASSWORD_ENV} is not a valid wallet password"))?;
     Ok(Some(password))
+}
+
+fn startup_bool_from_env(name: &str) -> Result<Option<bool>> {
+    let Some(value) = std::env::var_os(name) else {
+        return Ok(None);
+    };
+    let value = value
+        .into_string()
+        .map_err(|_| anyhow::anyhow!("{name} must be valid UTF-8"))?;
+    let normalized = value.trim().to_ascii_lowercase();
+    parse_startup_bool_env_value(name, &normalized).map(Some)
+}
+
+fn parse_startup_bool_env_value(name: &str, normalized: &str) -> Result<bool> {
+    match normalized {
+        "1" | "true" | "yes" | "on" => Ok(true),
+        "0" | "false" | "no" | "off" => Ok(false),
+        _ => bail!("{name} must be one of true, false, 1, 0, yes, no, on, or off"),
+    }
+}
+
+fn apply_startup_mining_config_overrides(
+    ui_config: &mut config_store::UiConfig,
+    automatic_burn_enabled: Option<bool>,
+    pow_mining_enabled: Option<bool>,
+) -> bool {
+    let mut dirty = false;
+    if let Some(enabled) = automatic_burn_enabled {
+        if ui_config.mining_enabled != enabled {
+            ui_config.mining_enabled = enabled;
+            dirty = true;
+        }
+    }
+    if let Some(enabled) = pow_mining_enabled {
+        if ui_config.pow_mining_enabled != enabled {
+            ui_config.pow_mining_enabled = enabled;
+            dirty = true;
+        }
+    }
+    dirty
 }
 
 fn apply_startup_wallet_password_config(

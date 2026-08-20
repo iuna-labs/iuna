@@ -119,7 +119,10 @@ docker compose up --build
 ```
 
 The compose file starts one bootstrap genesis node and two joining nodes on an
-isolated Docker network. Management UIs are exposed on:
+isolated Docker network. Bootstrap automatically finalizes with burns, node2
+starts automatic PoW mining, and node3 starts with automatic burn/finalization
+enabled. Node3 can only create burns once its wallet has spendable IUNA.
+Management UIs are exposed on:
 
 - bootstrap: <http://127.0.0.1:18661/>
 - node2: <http://127.0.0.1:18662/>
@@ -131,8 +134,9 @@ stable Docker-network addresses to each other.
 
 The local compose file sets `IUNA_WALLET_PASSWORD` for every container. On first
 start this configures the management UI password and encrypts the wallet; on
-restart it unlocks the encrypted wallet so finalization can continue without UI
-login. Override the local defaults from your shell or a `.env` file:
+restart it unlocks the encrypted wallet so finalization and automatic mining can
+continue without UI login. Override the local defaults from your shell or a
+`.env` file:
 
 ```sh
 IUNA_BOOTSTRAP_WALLET_PASSWORD='change-this-bootstrap-password' \
@@ -142,6 +146,12 @@ docker compose up --build
 ```
 
 Do not use compose-file default passwords for public nodes or valuable wallets.
+
+For unattended local nodes, startup environment flags can also persist mining
+settings:
+
+- `IUNA_AUTOMATIC_BURN_ENABLED=true|false`
+- `IUNA_POW_MINING_ENABLED=true|false`
 
 Stop the network while keeping chain data:
 

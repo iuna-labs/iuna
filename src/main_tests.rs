@@ -17,11 +17,11 @@ use tokio::sync::Mutex;
 use super::{
     ChainMode, CliOptions, GENESIS_INITIAL_BURN_FEE, GENESIS_INITIAL_BURN_PER_BLOCK, StartupWallet,
     apply_cli_p2p_config_overrides, apply_cli_stratum_config_overrides,
-    apply_startup_wallet_password_config, configured_p2p_announce_addr, configured_p2p_bind_addr,
-    configured_stratum_addr, extrapolate_vdf_rounds, help_text, initial_burn_fee,
-    initial_burn_per_block, initialize_ledger, load_startup_wallet, measure_vdf_rounds,
-    persist_chain_snapshot, project_ui_data_store, run_chain_persistence_with_interval,
-    validate_wallet_for_mode,
+    apply_startup_mining_config_overrides, apply_startup_wallet_password_config,
+    configured_p2p_announce_addr, configured_p2p_bind_addr, configured_stratum_addr,
+    extrapolate_vdf_rounds, help_text, initial_burn_fee, initial_burn_per_block, initialize_ledger,
+    load_startup_wallet, measure_vdf_rounds, parse_startup_bool_env_value, persist_chain_snapshot,
+    project_ui_data_store, run_chain_persistence_with_interval, validate_wallet_for_mode,
 };
 
 fn parse(args: &[&str]) -> anyhow::Result<Option<CliOptions>> {
@@ -30,6 +30,9 @@ fn parse(args: &[&str]) -> anyhow::Result<Option<CliOptions>> {
 
 #[test]
 fn help_mentions_dev_seed_verify_bypass_env() {
+    assert!(help_text().contains("IUNA_WALLET_PASSWORD=<password>"));
+    assert!(help_text().contains("IUNA_AUTOMATIC_BURN_ENABLED=true|false"));
+    assert!(help_text().contains("IUNA_POW_MINING_ENABLED=true|false"));
     assert!(help_text().contains("IUNA_DEV_SKIP_SEED_VERIFY=1"));
     assert!(help_text().contains("skip seed verification"));
     assert!(help_text().contains("--stratum <addr:port>"));
@@ -201,6 +204,61 @@ fn startup_wallet_password_mismatch_does_not_encrypt_plaintext_wallet() {
             .encrypted
     );
     assert!(wallet_store::load_or_create(&wallet_path).is_ok());
+}
+
+#[test]
+fn startup_mining_env_overrides_persisted_config() {
+    let mut config = UiConfig {
+        mining_enabled: false,
+        pow_mining_enabled: true,
+        ..UiConfig::default()
+    };
+
+    assert!(apply_startup_mining_config_overrides(
+        &mut config,
+        Some(true),
+        Some(false),
+    ));
+    assert!(config.mining_enabled);
+    assert!(!config.pow_mining_enabled);
+
+    assert!(!apply_startup_mining_config_overrides(
+        &mut config,
+        Some(true),
+        Some(false),
+    ));
+}
+
+#[test]
+fn startup_mining_env_can_override_genesis_defaults() {
+    let mut config = UiConfig {
+        mining_enabled: true,
+        pow_mining_enabled: false,
+        burn_per_block: GENESIS_INITIAL_BURN_PER_BLOCK,
+        burn_fee: GENESIS_INITIAL_BURN_FEE,
+        ..UiConfig::default()
+    };
+
+    assert!(apply_startup_mining_config_overrides(
+        &mut config,
+        Some(false),
+        Some(true),
+    ));
+    assert!(!config.mining_enabled);
+    assert!(config.pow_mining_enabled);
+    assert_eq!(config.burn_per_block, GENESIS_INITIAL_BURN_PER_BLOCK);
+    assert_eq!(config.burn_fee, GENESIS_INITIAL_BURN_FEE);
+}
+
+#[test]
+fn startup_bool_env_parser_accepts_common_boolean_values() {
+    for value in ["1", "true", "yes", "on"] {
+        assert!(parse_startup_bool_env_value("TEST_BOOL", value).unwrap());
+    }
+    for value in ["0", "false", "no", "off"] {
+        assert!(!parse_startup_bool_env_value("TEST_BOOL", value).unwrap());
+    }
+    assert!(parse_startup_bool_env_value("TEST_BOOL", "maybe").is_err());
 }
 
 #[test]
