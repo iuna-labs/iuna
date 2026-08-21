@@ -271,6 +271,13 @@ impl NodeCore {
             self.last_auto_burn_height = Some(current_height);
             return Ok(anchor_burn);
         }
+        if anchor_burn
+            .as_ref()
+            .is_some_and(|burn| burn.amount() >= self.burn_per_block)
+        {
+            self.last_auto_burn_height = Some(current_height);
+            return Ok(anchor_burn);
+        }
         if self.last_auto_burn_height == Some(current_height) {
             return Ok(anchor_burn);
         }

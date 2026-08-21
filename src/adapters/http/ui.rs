@@ -1,8 +1,8 @@
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 
 use crate::domain::{
-    Amount, Block, BurnLeaderRank, ChainSnapshot, FinalizerMode, MINE_REWARD, OutPoint,
-    Transaction, TxInput, TxOutput,
+    Amount, BURN_COMMITTEE_SIZE, Block, BurnLeaderRank, ChainSnapshot, FinalizerMode, MINE_REWARD,
+    OutPoint, Transaction, TxInput, TxOutput,
 };
 
 use crate::adapters::ui_index::build_ui_chain_index;
@@ -175,9 +175,7 @@ pub(super) fn ui_block(
         .get(&block.hash)
         .cloned()
         .unwrap_or_default();
-    let burn_bundles_included = block.included_burn_bundle_count();
-    let burn_bundles_required =
-        explicit_burn_bundle_signatures_required(&block, burn_bundles_included);
+    let (burn_bundles_included, burn_bundles_required) = burn_bundle_wallet_quorum(&block, &ranks);
     let public_fees = block
         .transactions
         .iter()
@@ -245,11 +243,33 @@ pub(super) fn ui_block(
     }
 }
 
-fn explicit_burn_bundle_signatures_required(block: &Block, burn_bundles_included: usize) -> usize {
-    match block.finalizer_mode {
-        FinalizerMode::Ticket if block.finalizer_rank <= 1 => burn_bundles_included,
-        FinalizerMode::Ticket | FinalizerMode::Recovery => 0,
+fn burn_bundle_wallet_quorum(block: &Block, ranks: &[BurnLeaderRank]) -> (usize, usize) {
+    if block.finalizer_mode != FinalizerMode::Ticket {
+        return (0, 0);
     }
+
+    let owner_count = ranks
+        .iter()
+        .filter(|rank| rank.rank >= block.finalizer_rank)
+        .map(|rank| rank.owner.as_str())
+        .chain(std::iter::once(block.miner.as_str()))
+        .collect::<BTreeSet<_>>()
+        .len();
+    let rank_committee_cap = BURN_COMMITTEE_SIZE
+        .saturating_sub(block.finalizer_rank as usize)
+        .max(1);
+    let committee_size = owner_count.min(rank_committee_cap);
+    let included = block
+        .burn_bundle_section
+        .signatures
+        .iter()
+        .map(|signature| signature.member.as_str())
+        .chain(std::iter::once(block.miner.as_str()))
+        .collect::<BTreeSet<_>>()
+        .len()
+        .min(committee_size);
+
+    (included, committee_size)
 }
 
 fn block_lost_iuna(transactions: &[Transaction], reward: Amount) -> Amount {
@@ -646,7 +666,7 @@ mod tests {
     }
 
     #[test]
-    fn ui_block_does_not_count_implicit_finalizer_attestation_as_missing_bundle() {
+    fn ui_block_counts_implicit_finalizer_attestation_in_wallet_quorum() {
         let block = Block {
             height: 1,
             prev_hash: "parent".to_string(),
@@ -676,7 +696,151 @@ mod tests {
 
         let ui = ui_block(block, &BTreeMap::new(), &ranks);
 
-        assert_eq!(ui.burn_bundle_quorum.burn_bundles_included, 0);
-        assert_eq!(ui.burn_bundle_quorum.committee_size, 0);
+        assert_eq!(ui.burn_bundle_quorum.burn_bundles_included, 1);
+        assert_eq!(ui.burn_bundle_quorum.committee_size, 1);
+    }
+
+    #[test]
+    fn ui_block_burn_bundle_quorum_counts_unique_ticket_wallets() {
+        let block = Block {
+            height: 1,
+            prev_hash: "parent".to_string(),
+            timestamp_ms: 1,
+            miner: "finalizer".to_string(),
+            finalizer_mode: FinalizerMode::Ticket,
+            finalizer_rank: 0,
+            reward: 1,
+            vdf_rounds: 1,
+            vdf_output: "vdf".to_string(),
+            leader_proof: None,
+            burn_bundle_section: BurnBundleSection {
+                signatures: vec![crate::domain::BurnBundleSignature {
+                    slot: 1,
+                    member: "member-1".to_string(),
+                    signature: "sig-1".to_string(),
+                }],
+                burns: Vec::new(),
+            },
+            transactions: vec![burn("burn-a")],
+            hash: "hash".to_string(),
+        };
+        let ranks = BTreeMap::from([(
+            "hash".to_string(),
+            vec![
+                BurnLeaderRank {
+                    rank: 0,
+                    ticket_id: "ticket-0".to_string(),
+                    owner: "finalizer".to_string(),
+                    amount: 1,
+                    eligible_from_height: 1,
+                    eligible_until_height: 1,
+                },
+                BurnLeaderRank {
+                    rank: 1,
+                    ticket_id: "ticket-1".to_string(),
+                    owner: "member-1".to_string(),
+                    amount: 1,
+                    eligible_from_height: 1,
+                    eligible_until_height: 1,
+                },
+                BurnLeaderRank {
+                    rank: 2,
+                    ticket_id: "ticket-2".to_string(),
+                    owner: "finalizer".to_string(),
+                    amount: 1,
+                    eligible_from_height: 1,
+                    eligible_until_height: 1,
+                },
+                BurnLeaderRank {
+                    rank: 3,
+                    ticket_id: "ticket-3".to_string(),
+                    owner: "member-1".to_string(),
+                    amount: 1,
+                    eligible_from_height: 1,
+                    eligible_until_height: 1,
+                },
+                BurnLeaderRank {
+                    rank: 4,
+                    ticket_id: "ticket-4".to_string(),
+                    owner: "finalizer".to_string(),
+                    amount: 1,
+                    eligible_from_height: 1,
+                    eligible_until_height: 1,
+                },
+            ],
+        )]);
+
+        let ui = ui_block(block, &BTreeMap::new(), &ranks);
+
+        assert_eq!(ui.burn_bundle_quorum.burn_bundles_included, 2);
+        assert_eq!(ui.burn_bundle_quorum.committee_size, 2);
+    }
+
+    #[test]
+    fn ui_block_burn_bundle_quorum_uses_fallback_rank_window() {
+        let block = Block {
+            height: 1,
+            prev_hash: "parent".to_string(),
+            timestamp_ms: 1,
+            miner: "fallback".to_string(),
+            finalizer_mode: FinalizerMode::Ticket,
+            finalizer_rank: 1,
+            reward: 1,
+            vdf_rounds: 1,
+            vdf_output: "vdf".to_string(),
+            leader_proof: None,
+            burn_bundle_section: BurnBundleSection {
+                signatures: vec![crate::domain::BurnBundleSignature {
+                    slot: 1,
+                    member: "member-1".to_string(),
+                    signature: "sig-1".to_string(),
+                }],
+                burns: Vec::new(),
+            },
+            transactions: vec![burn("burn-a")],
+            hash: "hash".to_string(),
+        };
+        let ranks = BTreeMap::from([(
+            "hash".to_string(),
+            vec![
+                BurnLeaderRank {
+                    rank: 0,
+                    ticket_id: "ticket-0".to_string(),
+                    owner: "missed-primary".to_string(),
+                    amount: 1,
+                    eligible_from_height: 1,
+                    eligible_until_height: 1,
+                },
+                BurnLeaderRank {
+                    rank: 1,
+                    ticket_id: "ticket-1".to_string(),
+                    owner: "fallback".to_string(),
+                    amount: 1,
+                    eligible_from_height: 1,
+                    eligible_until_height: 1,
+                },
+                BurnLeaderRank {
+                    rank: 2,
+                    ticket_id: "ticket-2".to_string(),
+                    owner: "member-1".to_string(),
+                    amount: 1,
+                    eligible_from_height: 1,
+                    eligible_until_height: 1,
+                },
+                BurnLeaderRank {
+                    rank: 3,
+                    ticket_id: "ticket-3".to_string(),
+                    owner: "member-2".to_string(),
+                    amount: 1,
+                    eligible_from_height: 1,
+                    eligible_until_height: 1,
+                },
+            ],
+        )]);
+
+        let ui = ui_block(block, &BTreeMap::new(), &ranks);
+
+        assert_eq!(ui.burn_bundle_quorum.burn_bundles_included, 2);
+        assert_eq!(ui.burn_bundle_quorum.committee_size, 2);
     }
 }

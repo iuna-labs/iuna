@@ -422,7 +422,7 @@ fn genesis_mode_starts_with_default_burn_rate_and_fee() {
 fn genesis_default_auto_mining_keeps_burning_after_first_block() {
     let wallet = Wallet::from_seed("genesis-auto-burn-wallet");
     let mut genesis = BTreeMap::new();
-    genesis.insert(wallet.address().to_string(), MICRO_IUNA);
+    genesis.insert(wallet.address().to_string(), 10 * MICRO_IUNA);
     let ledger = Ledger::new_with_genesis_burns(
         genesis,
         vec![GenesisBurn::new(wallet.address(), MICRO_IUNA)],
@@ -440,11 +440,20 @@ fn genesis_default_auto_mining_keeps_burning_after_first_block() {
     let second = node.automatic_mine_once(2_000);
     let third = node.automatic_mine_once(3_000);
 
-    assert_eq!(first.burned.as_ref().map(|tx| tx.amount()), Some(1));
+    assert_eq!(
+        first.burned.as_ref().map(|tx| tx.amount()),
+        Some(GENESIS_INITIAL_BURN_PER_BLOCK)
+    );
     assert!(first.block.is_some(), "{first:?}");
-    assert_eq!(second.burned.as_ref().map(|tx| tx.amount()), Some(1));
+    assert_eq!(
+        second.burned.as_ref().map(|tx| tx.amount()),
+        Some(GENESIS_INITIAL_BURN_PER_BLOCK)
+    );
     assert!(second.block.is_some(), "{second:?}");
-    assert_eq!(third.burned.as_ref().map(|tx| tx.amount()), Some(1));
+    assert_eq!(
+        third.burned.as_ref().map(|tx| tx.amount()),
+        Some(GENESIS_INITIAL_BURN_PER_BLOCK)
+    );
     assert!(third.block.is_some(), "{third:?}");
     assert!(
         second.skipped_reason.as_deref().is_none_or(|reason| {
@@ -454,7 +463,8 @@ fn genesis_default_auto_mining_keeps_burning_after_first_block() {
     );
     assert!(
         node.ledger().balance_of(wallet.address())
-            >= BLOCK_REWARD - 3 * (GENESIS_INITIAL_BURN_PER_BLOCK + GENESIS_INITIAL_BURN_FEE)
+            >= BLOCK_REWARD
+                .saturating_sub(3 * (GENESIS_INITIAL_BURN_PER_BLOCK + GENESIS_INITIAL_BURN_FEE))
     );
 }
 
