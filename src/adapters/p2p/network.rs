@@ -207,15 +207,20 @@ impl GossipNetwork {
             STALE_INBOUND_PEER_RETENTION_MS,
             STALE_DISCOVERED_PEER_RETENTION_MS,
         );
+        let max_discovered_outbound_dials = {
+            let node = self.inner.node.lock().await;
+            if node.ledger().is_setup_placeholder() {
+                0
+            } else {
+                MAX_DISCOVERED_OUTBOUND_DIALS_PER_CYCLE
+            }
+        };
         let addresses = self
             .inner
             .peers
             .lock()
             .await
-            .outbound_session_candidates_at(
-                crate::app::now_ms(),
-                MAX_DISCOVERED_OUTBOUND_DIALS_PER_CYCLE,
-            );
+            .outbound_session_candidates_at(crate::app::now_ms(), max_discovered_outbound_dials);
         let address_set = addresses.iter().cloned().collect::<BTreeSet<_>>();
         let self_filter_addr = self.self_filter_addr().await;
         let mut sessions = self.inner.sessions.lock().await;
@@ -254,11 +259,11 @@ impl GossipNetwork {
 
 #[cfg(test)]
 mod tests {
-    use std::sync::Arc;
+    use std::{collections::BTreeMap, sync::Arc};
 
     use crate::{
-        app::{GossipEnvelope, PeerBook},
-        domain::Wallet,
+        app::{GossipEnvelope, NodeCore, PeerBook},
+        domain::{Ledger, Wallet},
     };
 
     use super::super::test_support::{allocations, gossip_network, node};
@@ -279,6 +284,30 @@ mod tests {
             }
             other => panic!("expected peer list, got {other:?}"),
         }
+    }
+
+    #[tokio::test]
+    async fn setup_placeholder_only_dials_explicit_outbound_peers() {
+        let alice = Wallet::from_seed("setup-placeholder-outbound-alice");
+        let node = Arc::new(tokio::sync::Mutex::new(NodeCore::from_ledger(
+            alice,
+            Ledger::new(BTreeMap::new(), 1),
+            0,
+        )));
+        let peers = Arc::new(tokio::sync::Mutex::new(PeerBook::from_addresses(vec![
+            "127.0.0.1:9545".to_string(),
+        ])));
+        peers
+            .lock()
+            .await
+            .add_discovered_peer("127.0.0.1:9546".to_string());
+        let network = gossip_network(node, peers, "127.0.0.1:9544".parse().unwrap(), None);
+
+        network.ensure_outbound_sessions().await;
+
+        let sessions = network.inner.sessions.lock().await;
+        assert!(sessions.contains_key("127.0.0.1:9545"));
+        assert!(!sessions.contains_key("127.0.0.1:9546"));
     }
 
     #[tokio::test]
