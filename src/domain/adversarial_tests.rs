@@ -2093,6 +2093,7 @@ fn committee_roots_are_unique(committee: &[BurnCommitteeMember]) -> bool {
 }
 
 #[test]
+#[ignore = "long-running adversarial reward split coverage; run via deployment.sh"]
 fn rank_zero_reward_is_credited_to_finalizer_and_extra_committee_members() {
     let mut harness = Harness::new(91, 50, 50, AdversaryStrategy::Honest);
     harness.mature_lineages(2, 2);
@@ -2157,6 +2158,7 @@ proptest! {
     #![proptest_config(Config { cases: 32, .. Config::default() })]
 
     #[test]
+    #[ignore = "long-running adversarial proptest; run via deployment.sh"]
     fn required_attested_burn_must_be_included(seed in any::<u64>(), burn_idx in 0usize..LEVELS.len()) {
         let mut harness = harness_for_percent(seed, LEVELS[burn_idx]);
         let leader = harness.next_rank(0);
@@ -2191,6 +2193,7 @@ proptest! {
     }
 
     #[test]
+    #[ignore = "long-running adversarial proptest; run via deployment.sh"]
     fn timing_and_vdf_mutations_are_rejected(seed in any::<u64>(), rank in 1usize..3) {
         let mut harness = harness_for_percent(seed, 25);
         let leader = harness.next_rank(rank);
@@ -2221,6 +2224,7 @@ proptest! {
     }
 
     #[test]
+    #[ignore = "long-running adversarial proptest; run via deployment.sh"]
     fn committee_selection_is_deterministic_and_sybil_resistant(seed in any::<u64>(), lineage_idx in 0usize..LEVELS.len()) {
         let mut harness = Harness::new(seed, 10, LEVELS[lineage_idx], AdversaryStrategy::AddressRotation);
         harness.mature_lineages(2, 4);
@@ -2239,6 +2243,7 @@ proptest! {
     }
 
     #[test]
+    #[ignore = "long-running adversarial state-machine proptest; run via deployment.sh"]
     fn adversarial_state_machine_keeps_invalid_paths_out(
         seed in any::<u64>(),
         strategy_idx in 0usize..10,
@@ -2571,6 +2576,7 @@ fn misused_or_extra_committee_bundle_is_rejected() {
 }
 
 #[test]
+#[ignore = "long-running committee quorum mutation coverage; run via deployment.sh"]
 fn mini_burn_bundle_quorum_oracle_matches_consensus_mutations() {
     let mut harness = harness_for_percent(38, 25);
     harness.mature_lineages(2, 4);
@@ -2639,6 +2645,7 @@ fn mini_burn_bundle_quorum_oracle_matches_consensus_mutations() {
 }
 
 #[test]
+#[ignore = "long-running committee availability coverage; run via deployment.sh"]
 fn finalizer_anchor_alone_requires_available_committee_signatures() {
     let mut harness = harness_for_percent(20, 25);
     harness.mature_lineages(1, 4);
@@ -2662,6 +2669,7 @@ fn finalizer_anchor_alone_requires_available_committee_signatures() {
 }
 
 #[test]
+#[ignore = "long-running rank fallback committee coverage; run via deployment.sh"]
 fn rank_one_committee_excludes_missed_rank_zero_owner_and_requires_remaining_slot() {
     let mut harness = harness_for_percent(22, 25);
     harness.mature_lineages(2, 4);
@@ -2803,6 +2811,7 @@ fn pending_third_party_burn_does_not_affect_block_validity() {
 }
 
 #[test]
+#[ignore = "long-running third-party burn committee coverage; run via deployment.sh"]
 fn included_third_party_burn_requires_committee_signatures() {
     let mut harness = harness_for_percent(21, 25);
     harness.mature_lineages(1, 4);
@@ -2882,6 +2891,7 @@ fn post_genesis_transactions_cannot_spend_with_genesis_input_signatures() {
 }
 
 #[test]
+#[ignore = "long-running committee signature rejection coverage; run via deployment.sh"]
 fn invalid_committee_signature_is_rejected() {
     let mut harness = harness_for_percent(13, 25);
     harness.mature_lineages(1, 4);
@@ -2980,6 +2990,7 @@ fn consumed_ticket_cannot_be_reused() {
 }
 
 #[test]
+#[ignore = "long-running mini ticket oracle sweep; run via deployment.sh"]
 fn mini_ticket_oracle_matches_ledger_across_maturity_expiry_and_consumption() {
     let mut harness = harness_for_percent(32, 25);
     assert_mini_ticket_inventory_matches(&harness.ledger);
@@ -3178,6 +3189,7 @@ fn mini_validator_matches_consensus_for_recovery_rules() {
 }
 
 #[test]
+#[ignore = "long-running recovery/fork-choice coverage; run via deployment.sh"]
 fn recovery_and_fork_choice_cannot_cross_finality_depth() {
     let mut local = harness_for_percent(19, 25);
     for _ in 0..9 {
@@ -3749,6 +3761,7 @@ fn replay_and_double_spend_do_not_change_supply() {
 }
 
 #[test]
+#[ignore = "long-running adversarial resource matrix; run via deployment.sh"]
 fn adversarial_scenarios_cover_resource_matrix() {
     let strategies = [
         AdversaryStrategy::MaximizeBurnWeight,
@@ -3876,6 +3889,7 @@ fn adversarial_scenarios_cover_resource_matrix() {
 }
 
 #[test]
+#[ignore = "long-running economic attack sweep; run via deployment.sh"]
 fn attack_economics_visible_burns_have_no_finite_censorship_price() {
     let cases = [(1, 1), (10, 1), (10, 25), (25, 10), (50, 50)];
 
@@ -3913,6 +3927,7 @@ fn attack_economics_visible_burns_have_no_finite_censorship_price() {
 }
 
 #[test]
+#[ignore = "long-running economic attack sweep; run via deployment.sh"]
 fn economic_sweep_runner_classifies_attack_costs_across_dimensions() {
     let cases = [
         EconomicSweepCase {
@@ -4035,6 +4050,7 @@ fn economic_sweep_runner_classifies_attack_costs_across_dimensions() {
 }
 
 #[test]
+#[ignore = "long-running economic attack sweep; run via deployment.sh"]
 fn attack_economics_withheld_burns_require_gossip_isolation() {
     let mut visible = Harness::new(1_100, 25, 25, AdversaryStrategy::CensorBurns);
     let visible_metrics = visible.run_strategy(4);
@@ -4064,6 +4080,7 @@ fn attack_economics_withheld_burns_require_gossip_isolation() {
 }
 
 #[test]
+#[ignore = "long-running economic attack sweep; run via deployment.sh"]
 fn attack_economics_committee_capture_requires_matured_lineage_weight() {
     let mut low_lineage = Harness::new(1_200, 10, 1, AdversaryStrategy::MaximizeCommitteeWeight);
     let low_metrics = low_lineage.run_strategy(8);
@@ -4188,6 +4205,7 @@ fn performance_budget_burn_bundle_processing_respects_10kb_cap() {
 }
 
 #[test]
+#[ignore = "long-running snapshot replay budget coverage; run via deployment.sh"]
 fn performance_budget_snapshot_replay_handles_multi_block_chain() {
     let mut harness = harness_for_percent(1_501, 25);
     for _ in 0..32 {

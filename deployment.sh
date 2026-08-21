@@ -87,6 +87,7 @@ run_release_tests() {
   validate_positive_integer IUNA_VDF_FUZZ_RUNS "$vdf_fuzz_runs"
 
   cargo test --locked
+  cargo test --locked domain::adversarial_tests:: -- --ignored
   cargo check --locked --manifest-path fuzz/Cargo.toml
   cargo run --locked --manifest-path fuzz/Cargo.toml --bin p2p_envelope -- -runs="$fuzz_runs" fuzz/corpus/p2p_envelope
   cargo run --locked --manifest-path fuzz/Cargo.toml --bin compact_snapshot -- -runs="$fuzz_runs" fuzz/corpus/compact_snapshot
