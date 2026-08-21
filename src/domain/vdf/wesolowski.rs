@@ -66,6 +66,9 @@ pub(super) fn serialize_solution(output: &Form, proof: &Form) -> Result<Vec<u8>,
 
 #[cfg(test)]
 mod tests {
+    #[cfg(target_os = "macos")]
+    use std::process::Command;
+
     use super::{SOLUTION_BYTES, prove, verify};
 
     const CHIA_CHALLENGE_42_PROOF_HEX: &str = concat!(
@@ -99,6 +102,19 @@ mod tests {
         assert!(verify(&[0x42; 32], 300, &solution));
     }
 
+    #[cfg(target_os = "macos")]
+    #[test]
+    #[ignore = "requires the optional Python chiavdf package"]
+    fn prover_matches_chiavdf_python_binding() {
+        for (seed, rounds) in [([0x42; 32], 100), ([0x42; 32], 300)] {
+            let expected = chiavdf_prove(&seed, rounds);
+            let actual = prove(&seed, rounds, |_, _| {}).unwrap();
+
+            assert_eq!(actual, expected, "rounds={rounds}");
+            assert!(verify(&seed, rounds, &actual));
+        }
+    }
+
     #[test]
     fn proof_is_exactly_two_bqfc_forms() {
         let solution = prove(b"iuna-vdf-wire-format", 16, |_, _| {}).unwrap();
@@ -126,5 +142,42 @@ mod tests {
         solution[199] = 1;
 
         assert!(!verify(&[0x42; 32], 100, &solution));
+    }
+
+    #[cfg(target_os = "macos")]
+    fn chiavdf_prove(seed: &[u8; 32], rounds: u64) -> Vec<u8> {
+        let python = std::env::var("IUNA_CHIAVDF_PYTHON").unwrap_or_else(|_| "python3".to_owned());
+        let seed_hex = crate::domain::hex_encode(seed);
+        let script = r#"
+import sys
+import tempfile
+
+from chiavdf import prove
+
+seed = bytes.fromhex(sys.argv[1])
+rounds = int(sys.argv[2])
+initial_el = b"\x08" + (b"\x00" * 99)
+
+with tempfile.NamedTemporaryFile(prefix="iuna-chiavdf-shutdown-") as shutdown:
+    solution = prove(seed, initial_el, 1024, rounds, shutdown.name)
+
+sys.stdout.write(bytes(solution).hex())
+"#;
+
+        let output = Command::new(&python)
+            .args(["-c", script, &seed_hex, &rounds.to_string()])
+            .output()
+            .unwrap_or_else(|error| panic!("failed to run {python}: {error}"));
+
+        assert!(
+            output.status.success(),
+            "chiavdf subprocess failed with status {:?}\nstdout:\n{}\nstderr:\n{}",
+            output.status.code(),
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr)
+        );
+
+        let stdout = String::from_utf8(output.stdout).expect("chiavdf stdout must be UTF-8 hex");
+        crate::domain::decode_hex(stdout.trim()).expect("chiavdf stdout must be hex")
     }
 }
