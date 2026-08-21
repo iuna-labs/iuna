@@ -2781,7 +2781,8 @@ window.iunaApp = function iunaApp() {
 
     blockTimestampLabel(block) {
       const timestamp = Number(block?.timestamp_ms ?? block?.timestampMs);
-      if (!Number.isFinite(timestamp)) return "-";
+      if (Number(block?.height) === 0) return "Genesis";
+      if (!Number.isFinite(timestamp) || timestamp <= 0) return "-";
       return new Date(timestamp).toLocaleString();
     },
 

@@ -1,8 +1,8 @@
 use std::collections::BTreeMap;
 
 use crate::domain::{
-    Amount, Block, BurnLeaderRank, ChainSnapshot, MINE_REWARD, OutPoint, Transaction, TxInput,
-    TxOutput,
+    Amount, Block, BurnLeaderRank, ChainSnapshot, FinalizerMode, MINE_REWARD, OutPoint,
+    Transaction, TxInput, TxOutput,
 };
 
 use crate::adapters::ui_index::build_ui_chain_index;
@@ -176,7 +176,8 @@ pub(super) fn ui_block(
         .cloned()
         .unwrap_or_default();
     let burn_bundles_included = block.included_burn_bundle_count();
-    let committee_size = ranks.len();
+    let burn_bundles_required =
+        explicit_burn_bundle_signatures_required(&block, burn_bundles_included);
     let public_fees = block
         .transactions
         .iter()
@@ -232,7 +233,7 @@ pub(super) fn ui_block(
         burn_bundle_bytes,
         burn_bundle_quorum: UiBurnBundleQuorum {
             burn_bundles_included,
-            committee_size,
+            committee_size: burn_bundles_required,
         },
         vdf_rounds: block.vdf_rounds,
         vdf_output: block.vdf_output,
@@ -241,6 +242,13 @@ pub(super) fn ui_block(
         transactions,
         burn_bundles,
         hash: block.hash,
+    }
+}
+
+fn explicit_burn_bundle_signatures_required(block: &Block, burn_bundles_included: usize) -> usize {
+    match block.finalizer_mode {
+        FinalizerMode::Ticket if block.finalizer_rank <= 1 => burn_bundles_included,
+        FinalizerMode::Ticket | FinalizerMode::Recovery => 0,
     }
 }
 
@@ -500,8 +508,8 @@ mod tests {
     use std::collections::BTreeMap;
 
     use crate::domain::{
-        Amount, Block, BurnBundleSection, FinalizerMode, MaskedBurn, OutPoint, Transaction,
-        TxInput, TxOutput,
+        Amount, Block, BurnBundleSection, BurnLeaderRank, FinalizerMode, MaskedBurn, OutPoint,
+        Transaction, TxInput, TxOutput,
     };
 
     use super::{block_lost_iuna, ui_block};
@@ -629,10 +637,46 @@ mod tests {
         let ui = ui_block(block, &BTreeMap::new(), &BTreeMap::new());
 
         assert_eq!(ui.burn_bundle_quorum.burn_bundles_included, 1);
+        assert_eq!(ui.burn_bundle_quorum.committee_size, 1);
         assert_eq!(ui.lost_iuna, 1);
         assert_eq!(ui.burn_bundles.len(), 1);
         assert_eq!(ui.burn_bundles[0].slot, 1);
         assert_eq!(ui.burn_bundles[0].burns.len(), 1);
         assert!(ui.burn_bundle_bytes > 0);
+    }
+
+    #[test]
+    fn ui_block_does_not_count_implicit_finalizer_attestation_as_missing_bundle() {
+        let block = Block {
+            height: 1,
+            prev_hash: "parent".to_string(),
+            timestamp_ms: 1,
+            miner: "finalizer".to_string(),
+            finalizer_mode: FinalizerMode::Ticket,
+            finalizer_rank: 0,
+            reward: 1,
+            vdf_rounds: 1,
+            vdf_output: "vdf".to_string(),
+            leader_proof: None,
+            burn_bundle_section: BurnBundleSection::default(),
+            transactions: vec![burn("burn-a")],
+            hash: "hash".to_string(),
+        };
+        let ranks = BTreeMap::from([(
+            "hash".to_string(),
+            vec![BurnLeaderRank {
+                rank: 0,
+                ticket_id: "ticket".to_string(),
+                owner: "finalizer".to_string(),
+                amount: 1,
+                eligible_from_height: 1,
+                eligible_until_height: 1,
+            }],
+        )]);
+
+        let ui = ui_block(block, &BTreeMap::new(), &ranks);
+
+        assert_eq!(ui.burn_bundle_quorum.burn_bundles_included, 0);
+        assert_eq!(ui.burn_bundle_quorum.committee_size, 0);
     }
 }

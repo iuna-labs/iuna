@@ -92,9 +92,9 @@ impl NodeCore {
         let wallet_rank = self
             .ledger
             .finalizer_rank_for_next_block(self.wallet.address());
-        let will_run_recovery_vdf = self.should_prepare_recovery_vdf(timestamp_ms);
-        let will_run_ticket_vdf = !will_run_recovery_vdf
-            && wallet_rank.is_some_and(|rank| self.wallet_rank_runs_vdf(rank));
+        let will_run_ticket_vdf = wallet_rank.is_some_and(|rank| self.wallet_rank_runs_vdf(rank));
+        let will_run_recovery_vdf =
+            !will_run_ticket_vdf && self.should_prepare_recovery_vdf(timestamp_ms);
         if let Some(wait_ms) = self.burn_bundle_collection_wait_ms(
             timestamp_ms,
             will_run_ticket_vdf || will_run_recovery_vdf,
@@ -183,9 +183,9 @@ impl NodeCore {
         let wallet_rank = self
             .ledger
             .finalizer_rank_for_next_block(self.wallet.address());
-        let will_run_recovery_vdf = self.should_prepare_recovery_vdf(timestamp_ms);
-        let will_run_ticket_vdf = !will_run_recovery_vdf
-            && wallet_rank.is_some_and(|rank| self.wallet_rank_runs_vdf(rank));
+        let will_run_ticket_vdf = wallet_rank.is_some_and(|rank| self.wallet_rank_runs_vdf(rank));
+        let will_run_recovery_vdf =
+            !will_run_ticket_vdf && self.should_prepare_recovery_vdf(timestamp_ms);
         if let Some(wait_ms) = self.burn_bundle_collection_wait_ms(
             timestamp_ms,
             will_run_ticket_vdf || will_run_recovery_vdf,
@@ -439,15 +439,18 @@ impl NodeCore {
         let next_height = self.ledger.height().saturating_add(1);
         let (attestation_ledger, _) = self.ledger_with_local_block_anchor();
         let explicit_signatures_required = if will_run_vdf {
-            let finalizer_mode = if self.should_prepare_recovery_vdf(timestamp_ms) {
-                FinalizerMode::Recovery
-            } else {
-                FinalizerMode::Ticket
-            };
+            let wallet_rank =
+                attestation_ledger.finalizer_rank_for_next_block(self.wallet.address());
+            let will_run_ticket_vdf =
+                wallet_rank.is_some_and(|rank| self.wallet_rank_runs_vdf(rank));
+            let finalizer_mode =
+                if !will_run_ticket_vdf && self.should_prepare_recovery_vdf(timestamp_ms) {
+                    FinalizerMode::Recovery
+                } else {
+                    FinalizerMode::Ticket
+                };
             let finalizer_rank = if matches!(finalizer_mode, FinalizerMode::Ticket) {
-                attestation_ledger
-                    .finalizer_rank_for_next_block(self.wallet.address())
-                    .unwrap_or(0)
+                wallet_rank.unwrap_or(0)
             } else {
                 0
             };
@@ -482,10 +485,7 @@ impl NodeCore {
             .then(|| BURN_BUNDLE_COLLECTION_MS.saturating_sub(elapsed))
     }
 
-    fn request_missing_burn_bundles_for_next_block(&mut self, timestamp_ms: u64) {
-        if self.should_prepare_recovery_vdf(timestamp_ms) {
-            return;
-        }
+    fn request_missing_burn_bundles_for_next_block(&mut self, _timestamp_ms: u64) {
         let (attestation_ledger, _) = self.ledger_with_local_block_anchor();
         let Some(finalizer_rank) =
             attestation_ledger.finalizer_rank_for_next_block(self.wallet.address())
@@ -618,7 +618,8 @@ mod tests {
         adapters::chain_store::SqliteChainStore,
         app::{GossipEnvelope, InMemoryNetwork},
         domain::{
-            BurnBundle, BurnCommitteeMember, GenesisBurn, Ledger, MICRO_IUNA, Wallet, run_vdf,
+            BurnBundle, BurnCommitteeMember, FinalizerMode, GenesisBurn, Ledger, MICRO_IUNA,
+            Wallet, run_vdf,
         },
     };
     use tempfile::tempdir;
@@ -653,6 +654,27 @@ mod tests {
             .iter()
             .find(|wallet| wallet.address() != finalizer.address())
             .expect("test fixture should include a non-finalizer wallet")
+    }
+
+    #[test]
+    fn automatic_mining_prefers_runnable_ticket_over_available_recovery() {
+        let wallet = Wallet::from_seed("ticket-before-recovery-wallet");
+        let ledger = funded_ledger(std::slice::from_ref(&wallet));
+        assert_eq!(
+            ledger.finalizer_rank_for_next_block(wallet.address()),
+            Some(0)
+        );
+        let timestamp_ms = ledger.recovery_block_min_timestamp();
+        let mut node = NodeCore::from_ledger_with_burn_fee_and_enabled(wallet, ledger, true, 0, 1);
+
+        let outcome = node.automatic_mine_once(timestamp_ms);
+        let block = outcome
+            .block
+            .expect("rank 0 ticket finalizer should produce a block");
+
+        assert_eq!(block.finalizer_mode, FinalizerMode::Ticket);
+        assert_eq!(block.finalizer_rank, 0);
+        assert!(block.leader_proof.is_some());
     }
 
     #[test]
