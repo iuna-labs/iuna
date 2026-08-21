@@ -2,10 +2,9 @@ use anyhow::{Context, Result};
 
 use super::helpers::{allowed_recovery_vdf_rank_count, recovery_vdf_sample_percent};
 use super::{
-    AUTO_BLOCK_ANCHOR_BURN_AMOUNT, AUTO_BLOCK_ANCHOR_BURN_FEE,
-    AUTO_PLAINTEXT_BURN_BEFORE_RECOVERY_MS, AutoMineOutcome, AutoMinePlan,
-    BURN_BUNDLE_COLLECTION_MS, GossipEnvelope, Ledger, NodeCore, PreparedBlock, Transaction,
-    run_vdf,
+    AUTO_BLOCK_ANCHOR_BURN_FEE, AUTO_PLAINTEXT_BURN_BEFORE_RECOVERY_MS, AutoMineOutcome,
+    AutoMinePlan, BURN_BUNDLE_COLLECTION_MS, GossipEnvelope, Ledger,
+    MIN_AUTO_BLOCK_ANCHOR_BURN_AMOUNT, NodeCore, PreparedBlock, Transaction, run_vdf,
 };
 use crate::domain::{Amount, BurnCommitteeMember, FinalizerMode};
 
@@ -319,7 +318,11 @@ impl NodeCore {
 
         let ledger = self.wallet_anchor_build_ledger()?;
         let wallet = self.wallet.unlocked()?;
-        let required = AUTO_BLOCK_ANCHOR_BURN_AMOUNT
+        // The plaintext anchor is the block's automatic burn when one is configured.
+        // Keep a one-micro-IUNA anchor when automatic finalization is enabled with a
+        // zero target, because the finalizer still needs a local burn to anchor.
+        let anchor_burn_amount = self.burn_per_block.max(MIN_AUTO_BLOCK_ANCHOR_BURN_AMOUNT);
+        let required = anchor_burn_amount
             .checked_add(AUTO_BLOCK_ANCHOR_BURN_FEE)
             .context("automatic finalizer anchor burn amount plus fee overflows")?;
         let outpoint = ledger
@@ -331,15 +334,11 @@ impl NodeCore {
         let burn = match outpoint {
             Some(outpoint) => ledger.build_burn_with_inputs(
                 wallet,
-                AUTO_BLOCK_ANCHOR_BURN_AMOUNT,
+                anchor_burn_amount,
                 AUTO_BLOCK_ANCHOR_BURN_FEE,
                 &[outpoint],
             ),
-            None => ledger.build_burn(
-                wallet,
-                AUTO_BLOCK_ANCHOR_BURN_AMOUNT,
-                AUTO_BLOCK_ANCHOR_BURN_FEE,
-            ),
+            None => ledger.build_burn(wallet, anchor_burn_amount, AUTO_BLOCK_ANCHOR_BURN_FEE),
         };
         let burn = match burn {
             Ok(burn) => burn,

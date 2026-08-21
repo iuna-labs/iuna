@@ -32,7 +32,7 @@ use cli::{
 #[cfg(test)]
 use cli::{default_data_dir, help_text};
 
-const GENESIS_BOOTSTRAP_BALANCE: Amount = 100 * MICRO_IUNA;
+const GENESIS_BOOTSTRAP_BALANCE: Amount = MICRO_IUNA;
 const GENESIS_BOOTSTRAP_BURN_AMOUNT: Amount = MICRO_IUNA;
 const GENESIS_INITIAL_BURN_PER_BLOCK: Amount = config_store::DEFAULT_BURN_AMOUNT;
 const GENESIS_INITIAL_BURN_FEE: Amount = config_store::DEFAULT_BURN_FEE;

@@ -15,7 +15,8 @@ use tempfile::tempdir;
 use tokio::sync::Mutex;
 
 use super::{
-    ChainMode, CliOptions, GENESIS_INITIAL_BURN_FEE, GENESIS_INITIAL_BURN_PER_BLOCK, StartupWallet,
+    ChainMode, CliOptions, GENESIS_BOOTSTRAP_BALANCE, GENESIS_BOOTSTRAP_BURN_AMOUNT,
+    GENESIS_INITIAL_BURN_FEE, GENESIS_INITIAL_BURN_PER_BLOCK, StartupWallet,
     apply_cli_p2p_config_overrides, apply_cli_stratum_config_overrides,
     apply_startup_mining_config_overrides, apply_startup_setup_config_override,
     apply_startup_wallet_password_config, configured_p2p_announce_addr, configured_p2p_bind_addr,
@@ -416,6 +417,24 @@ fn genesis_mode_starts_with_default_burn_rate_and_fee() {
         initial_burn_fee(&genesis, &configured),
         UiConfig::default().burn_fee
     );
+}
+
+#[test]
+fn genesis_bootstrap_allocation_is_fully_burned_before_reward() {
+    let wallet = Wallet::from_seed("fully-burned-genesis-bootstrap");
+    let allocations = BTreeMap::from([(wallet.address().to_string(), GENESIS_BOOTSTRAP_BALANCE)]);
+    let ledger = Ledger::new_with_genesis_burns(
+        allocations,
+        vec![GenesisBurn::new(
+            wallet.address(),
+            GENESIS_BOOTSTRAP_BURN_AMOUNT,
+        )],
+        1,
+    )
+    .unwrap();
+
+    assert_eq!(GENESIS_BOOTSTRAP_BALANCE, GENESIS_BOOTSTRAP_BURN_AMOUNT);
+    assert_eq!(ledger.balance_of(wallet.address()), BLOCK_REWARD);
 }
 
 #[test]
