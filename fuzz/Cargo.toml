@@ -41,3 +41,9 @@ name = "wallet_config"
 path = "fuzz_targets/wallet_config.rs"
 test = false
 doc = false
+
+[[bin]]
+name = "vdf_proof"
+path = "fuzz_targets/vdf_proof.rs"
+test = false
+doc = false

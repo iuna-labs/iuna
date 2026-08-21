@@ -8,6 +8,7 @@ use super::reveal::{BurnBundleSection, canonical_burn_bundle_hashes};
 use super::selection::{TransactionKind, fee_rate_key};
 use super::ticket::ticket_is_eligible_for_height;
 use super::transaction::Transaction;
+use super::vdf::vdf_solution_placeholder;
 use super::{
     Amount, BURN_COMMITTEE_SIZE, Block, BlockSelection, BurnCommitteeMember, BurnTicket,
     FinalizerMode, LeaderProof, LeaderProofPayload, MINE_REWARD, OutPoint, PUBLIC_KEY_BYTES,
@@ -84,7 +85,7 @@ pub(super) fn estimated_block_selection_size_bytes(
         finalizer_rank: 0,
         reward: u64::MAX,
         vdf_rounds: u64::MAX,
-        vdf_output: format!("{}:{}", "f".repeat(512), "f".repeat(512)),
+        vdf_output: vdf_solution_placeholder(),
         leader_proof: (!recovery).then(|| LeaderProof {
             ticket_id: "f".repeat(64),
             public_key: "f".repeat(64),

@@ -82,7 +82,9 @@ run_release_tests() {
   require_command cargo
 
   local fuzz_runs="${IUNA_FUZZ_RUNS:-256}"
+  local vdf_fuzz_runs="${IUNA_VDF_FUZZ_RUNS:-16}"
   validate_positive_integer IUNA_FUZZ_RUNS "$fuzz_runs"
+  validate_positive_integer IUNA_VDF_FUZZ_RUNS "$vdf_fuzz_runs"
 
   cargo test --locked
   cargo check --locked --manifest-path fuzz/Cargo.toml
@@ -91,6 +93,7 @@ run_release_tests() {
   cargo run --locked --manifest-path fuzz/Cargo.toml --bin domain_json -- -runs="$fuzz_runs" fuzz/corpus/domain_json
   cargo run --locked --manifest-path fuzz/Cargo.toml --bin stratum_request -- -runs="$fuzz_runs" fuzz/corpus/stratum_request
   cargo run --locked --manifest-path fuzz/Cargo.toml --bin wallet_config -- -runs="$fuzz_runs" fuzz/corpus/wallet_config
+  cargo run --locked --manifest-path fuzz/Cargo.toml --bin vdf_proof -- -runs="$vdf_fuzz_runs" fuzz/corpus/vdf_proof
   cargo test --locked --release --test properties -- --ignored
 }
 

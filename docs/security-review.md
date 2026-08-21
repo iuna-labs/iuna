@@ -159,10 +159,41 @@ see which revision was tested.
 
 ## Launch-Blocking Review Items
 
-- VDF trust assumption: `docs/protocol.md` documents that the devnet uses the
-  public RSA-2048 challenge modulus and that production mainnet should use a
-  purpose-specific trusted setup or class-group VDF. Before promotion, decide
-  whether this is accepted for the candidate or blocks mainnet.
+- VDF implementation: `docs/protocol.md` documents the Rust-only,
+  Chia-compatible class-group Wesolowski VDF and its
+  `classgroup-wesolowski-bqfc-v1` solution encoding. The implementation must not
+  depend on GMP, MPIR, or native runtime libraries. On local Apple Silicon, a
+  100,000-round release benchmark with seed `iuna-vdf-prover-benchmark` measured
+  about `0.89s` to `0.92s` for the current Rust-only checkpoint prover and about `1.78s`
+  for the Rust-only constant-memory prover after moving output squaring, proof
+  composition, and proof squaring onto the local custom `Vec<u64>` limb backend
+  with reusable division/GCD/reduction scratch buffers, Lehmer-style full and
+  partial XGCD batching, x-only extended-GCD paths for call sites that do not
+  need the second Bezout coefficient, positive-input left-GCD fast paths,
+  mutable Lehmer linear-combination outputs for XGCD batch updates, `u64`
+  Lehmer quotient windows, scratch-backed scalar combinations, one-limb scalar
+  multiplication into scratch buffers, quotient/remainder-directed
+  division outputs, exact power-of-two division fast paths, and owned
+  add/sub/shift helpers for formula temporaries, clone-free signed subtraction,
+  scratch-backed reduction steps with small-quotient fast paths and quotient
+  comparison that avoids temporary doubled limbs,
+  tighter add/sub limb loops, one-limb multiplication, small-shift fast paths,
+  plus sparse proof buckets that keep empty buckets implicit instead of cloning
+  full identity forms or composing identity aggregates, and per-pass incremental
+  checkpoint bucket selection with a 100,000-round checkpoint parameter floor of
+  `k = 10`, release thin-LTO/codegen-unit tuning, and replacement of
+  per-checkpoint modular exponentiation with one modular exponentiation plus
+  fixed modular steps; an official
+  Python/C++ `chiavdf` reference measurement was about `0.673s`. Phase profiling
+  measured about `0.78s` to `0.81s` in output squaring and about `0.11s` to `0.12s` in proof
+  construction. The limb backend covers signed limb arithmetic, division, full
+  and partial XGCD, production NUDUPL/NUCOMP, checkpoint bucket selection, and
+  class-group exponentiation.
+  Before promotion, review the
+  limb backend's canonical encoding and division behavior, add deeper in-place
+  arithmetic for multiplication intermediates where profiling justifies it, and run
+  fixed vectors, differential VDF tests, fuzz targets, release benchmarks, and
+  Windows MSVC builds on every release platform.
 - Wallet/key handling: review the encrypted wallet format, PBKDF2 iteration
   count, password UX, recovery phrase exposure, and backup guidance.
 - Public exposure: verify bootnodes expose only the intended P2P and optional
