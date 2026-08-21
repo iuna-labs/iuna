@@ -17,7 +17,7 @@ This is still experimental. The rules below describe the current devnet and main
 The current mainnet-candidate parameter set is intentionally close to Bitcoin where that is useful for operator expectations:
 
 - P2P network ID: `iuna-mainnet-candidate-v1`;
-- protocol version: `2`;
+- protocol version: `1`;
 - launch profile ID: `iuna-mainnet-candidate-v1`;
 - launch profile hash: `aef51531eaa3a5c5d3ea8a2524ffba029dcb106e4b0a432b57d5ac1f4f8963de`;
 - target block time: `10 minutes`;

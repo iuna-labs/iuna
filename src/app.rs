@@ -38,7 +38,7 @@ pub type SharedPeerBook = Arc<Mutex<PeerBook>>;
 
 pub const DEFAULT_BURN_PER_BLOCK: Amount = 0;
 pub const DEFAULT_VDF_ROUNDS: u32 = 67_000_000;
-pub const PROTOCOL_VERSION: u32 = 2;
+pub const PROTOCOL_VERSION: u32 = 1;
 pub const MAINNET_CANDIDATE_NETWORK_ID: &str = "iuna-mainnet-candidate-v1";
 pub const MAINNET_NETWORK_ID: &str = "iuna-mainnet-v1";
 pub const NETWORK_ID: &str = MAINNET_CANDIDATE_NETWORK_ID;
@@ -66,7 +66,7 @@ mod tests {
     #[test]
     fn mainnet_candidate_network_parameters_are_frozen() {
         assert_eq!(DEFAULT_VDF_ROUNDS, 67_000_000);
-        assert_eq!(PROTOCOL_VERSION, 2);
+        assert_eq!(PROTOCOL_VERSION, 1);
         assert_eq!(MAINNET_CANDIDATE_NETWORK_ID, "iuna-mainnet-candidate-v1");
         assert_eq!(MAINNET_NETWORK_ID, "iuna-mainnet-v1");
         assert_ne!(MAINNET_CANDIDATE_NETWORK_ID, MAINNET_NETWORK_ID);
