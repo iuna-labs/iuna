@@ -4,7 +4,10 @@ use tokio::{
     net::tcp::OwnedReadHalf,
 };
 
-use crate::app::{GossipEnvelope, TRANSACTION_BATCH_LIMIT};
+use crate::{
+    app::{GossipEnvelope, TRANSACTION_BATCH_LIMIT},
+    domain::BURN_COMMITTEE_SIZE,
+};
 
 use super::{
     GossipNetwork, MAX_BLOCK_BATCH, MAX_GOSSIP_LINE_BYTES, MAX_INVENTORY_ITEMS,
@@ -136,6 +139,7 @@ pub(super) fn record_received_envelope_kind(
         GossipEnvelope::ChainSnapshotRequest
         | GossipEnvelope::BlockRangeRequest { .. }
         | GossipEnvelope::BlockRequest { .. }
+        | GossipEnvelope::BurnBundleRequest { .. }
         | GossipEnvelope::PeerAnnouncement { .. }
         | GossipEnvelope::PeerVerificationChallenge { .. }
         | GossipEnvelope::PeerVerificationResponse { .. }
@@ -175,6 +179,9 @@ pub(super) fn validate_envelope_limits(envelope: &GossipEnvelope) -> Result<()> 
         GossipEnvelope::BurnBundles { bundles } => {
             ensure_len("burn bundle batch", bundles.len(), TRANSACTION_BATCH_LIMIT)?;
         }
+        GossipEnvelope::BurnBundleRequest { slots, .. } => {
+            ensure_len("burn bundle request", slots.len(), BURN_COMMITTEE_SIZE)?;
+        }
         GossipEnvelope::Blocks { blocks } => {
             ensure_len("block batch", blocks.len(), MAX_BLOCK_BATCH)?;
         }
@@ -212,8 +219,8 @@ mod tests {
         adapters::p2p::metrics::P2pMetricsCounters,
         app::{BlockInventory, GossipEnvelope, TRANSACTION_BATCH_LIMIT},
         domain::{
-            Block, BurnBundle, BurnBundleSection, ChainSnapshot, FinalizerMode, LaunchProfile,
-            OutPoint, Transaction, TxInput, TxOutput,
+            BURN_COMMITTEE_SIZE, Block, BurnBundle, BurnBundleSection, ChainSnapshot,
+            FinalizerMode, LaunchProfile, OutPoint, Transaction, TxInput, TxOutput,
         },
     };
 
@@ -393,6 +400,22 @@ mod tests {
         assert!(
             validate_envelope_limits(&GossipEnvelope::BurnBundles {
                 bundles: vec![burn_bundle(1, "a"); TRANSACTION_BATCH_LIMIT + 1]
+            })
+            .is_err()
+        );
+        assert!(
+            validate_envelope_limits(&GossipEnvelope::BurnBundleRequest {
+                height: 1,
+                prev_hash: "0".repeat(64),
+                slots: vec![1; BURN_COMMITTEE_SIZE]
+            })
+            .is_ok()
+        );
+        assert!(
+            validate_envelope_limits(&GossipEnvelope::BurnBundleRequest {
+                height: 1,
+                prev_hash: "0".repeat(64),
+                slots: vec![1; BURN_COMMITTEE_SIZE + 1]
             })
             .is_err()
         );

@@ -216,6 +216,19 @@ impl NodeCore {
             .collect()
     }
 
+    pub(crate) fn burn_bundles_for_request(
+        &self,
+        height: u64,
+        prev_hash: &str,
+        slots: &[u8],
+    ) -> Vec<BurnBundle> {
+        self.usable_burn_bundles()
+            .into_iter()
+            .filter(|bundle| bundle.height == height && bundle.prev_hash == prev_hash)
+            .filter(|bundle| slots.is_empty() || slots.contains(&bundle.slot))
+            .collect()
+    }
+
     pub(super) fn prune_burn_bundles(&mut self) {
         let height = self.ledger.height();
         self.burn_bundles

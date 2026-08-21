@@ -58,6 +58,11 @@ pub enum GossipEnvelope {
     BurnBundles {
         bundles: Vec<BurnBundle>,
     },
+    BurnBundleRequest {
+        height: u64,
+        prev_hash: String,
+        slots: Vec<u8>,
+    },
     Block(Block),
     Blocks {
         blocks: Vec<Block>,

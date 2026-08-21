@@ -17,7 +17,7 @@ This is still experimental. The rules below describe the current devnet and main
 The current mainnet-candidate parameter set is intentionally close to Bitcoin where that is useful for operator expectations:
 
 - P2P network ID: `iuna-mainnet-candidate-v1`;
-- protocol version: `1`;
+- protocol version: `2`;
 - launch profile ID: `iuna-mainnet-candidate-v1`;
 - launch profile hash: `aef51531eaa3a5c5d3ea8a2524ffba029dcb106e4b0a432b57d5ac1f4f8963de`;
 - target block time: `10 minutes`;
@@ -285,9 +285,16 @@ The P2P mempool gossips:
 - burns;
 - mine actions;
 - signed burn bundles;
+- burn-bundle repair requests for a specific next-block height, parent hash, and committee slots;
 - block inventory and blocks.
 
 Anchor burns are prepared locally by the finalizer and are not normal wallet traffic.
+
+When a ticket finalizer is collecting burn-bundle attestations and has fewer signatures than the
+rank requires, it may gossip a bounded burn-bundle request for the missing committee slots. Peers
+answer from their local cache with matching signed burn bundles for the requested height and parent
+hash. The request/response path repairs missed gossip only; it does not change the block format,
+attestation signatures, or VDF seed rules.
 
 Nodes only keep transactions in their local mempool when they are valid, fee-paying, and unexpired. Pending transaction, burn-bundle, and orphan pools are bounded by both item count and serialized byte size.
 

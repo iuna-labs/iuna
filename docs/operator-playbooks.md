@@ -128,7 +128,7 @@ Symptoms:
 Checks:
 
 1. Check `/api/mempool` for fee-paying burn transactions.
-2. Check `/api/peers` for enough healthy peers. Burn bundles are gossip, so isolated nodes see fewer attestations.
+2. Check `/api/peers` for enough healthy peers. Burn bundles are gossip; finalizers request missing burn-bundle slots during collection, but isolated nodes still cannot receive responses.
 3. Check whether committee members are online and unlocked if they are expected to sign bundles.
 4. Inspect recent blocks: rank `0` needs the strictest burn-list attestation threshold; fallback ranks relax it for liveness.
 

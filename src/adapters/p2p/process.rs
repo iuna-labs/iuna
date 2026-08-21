@@ -100,6 +100,21 @@ pub(super) async fn process_envelope(
         GossipEnvelope::BurnBundles { bundles } => {
             process_burn_bundles(network, remote_addr, known_peer, bundles).await;
         }
+        GossipEnvelope::BurnBundleRequest {
+            height,
+            prev_hash,
+            slots,
+        } => {
+            let bundles = network
+                .inner
+                .node
+                .lock()
+                .await
+                .burn_bundles_for_request(height, &prev_hash, &slots);
+            if !bundles.is_empty() {
+                write_envelope(writer, &GossipEnvelope::BurnBundles { bundles }).await?;
+            }
+        }
         GossipEnvelope::Block(block) => {
             let adjusted_time_ms = super::network_adjusted_time_ms(network).await;
             let needs_vdf = {

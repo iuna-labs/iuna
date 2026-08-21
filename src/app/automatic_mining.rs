@@ -4,9 +4,10 @@ use super::helpers::{allowed_recovery_vdf_rank_count, recovery_vdf_sample_percen
 use super::{
     AUTO_BLOCK_ANCHOR_BURN_AMOUNT, AUTO_BLOCK_ANCHOR_BURN_FEE,
     AUTO_PLAINTEXT_BURN_BEFORE_RECOVERY_MS, AutoMineOutcome, AutoMinePlan,
-    BURN_BUNDLE_COLLECTION_MS, Ledger, NodeCore, PreparedBlock, Transaction, run_vdf,
+    BURN_BUNDLE_COLLECTION_MS, GossipEnvelope, Ledger, NodeCore, PreparedBlock, Transaction,
+    run_vdf,
 };
-use crate::domain::{Amount, FinalizerMode};
+use crate::domain::{Amount, BurnCommitteeMember, FinalizerMode};
 
 mod pow;
 
@@ -98,6 +99,7 @@ impl NodeCore {
             timestamp_ms,
             will_run_ticket_vdf || will_run_recovery_vdf,
         ) {
+            self.request_missing_burn_bundles_for_next_block(timestamp_ms);
             plan.skipped_reason = Some(format!(
                 "collecting burns for next block ({:.1}s remaining)",
                 wait_ms as f64 / 1000.0
@@ -188,6 +190,7 @@ impl NodeCore {
             timestamp_ms,
             will_run_ticket_vdf || will_run_recovery_vdf,
         ) {
+            self.request_missing_burn_bundles_for_next_block(timestamp_ms);
             plan.skipped_reason = Some(format!(
                 "collecting burns for next block ({:.1}s remaining)",
                 wait_ms as f64 / 1000.0
@@ -479,6 +482,73 @@ impl NodeCore {
             .then(|| BURN_BUNDLE_COLLECTION_MS.saturating_sub(elapsed))
     }
 
+    fn request_missing_burn_bundles_for_next_block(&mut self, timestamp_ms: u64) {
+        if self.should_prepare_recovery_vdf(timestamp_ms) {
+            return;
+        }
+        let (attestation_ledger, _) = self.ledger_with_local_block_anchor();
+        let Some(finalizer_rank) =
+            attestation_ledger.finalizer_rank_for_next_block(self.wallet.address())
+        else {
+            return;
+        };
+        if !self.wallet_rank_runs_vdf(finalizer_rank) {
+            return;
+        }
+        let required = attestation_ledger.explicit_burn_bundle_signatures_required_for_next_block(
+            FinalizerMode::Ticket,
+            finalizer_rank,
+            self.wallet.address(),
+        );
+        if required == 0 {
+            return;
+        }
+
+        let present_slots = self
+            .usable_burn_bundles_for_finalizer_rank(finalizer_rank)
+            .into_iter()
+            .map(|bundle| bundle.slot)
+            .collect::<std::collections::BTreeSet<_>>();
+        if present_slots.len() >= required {
+            return;
+        }
+
+        self.enqueue_missing_burn_bundle_request(
+            self.ledger.height().saturating_add(1),
+            self.ledger.tip_hash().to_string(),
+            required,
+            attestation_ledger.burn_committee_for_next_ticket_block(finalizer_rank),
+            &present_slots,
+        );
+    }
+
+    fn enqueue_missing_burn_bundle_request(
+        &mut self,
+        height: u64,
+        prev_hash: String,
+        required: usize,
+        committee: Vec<BurnCommitteeMember>,
+        present_slots: &std::collections::BTreeSet<u8>,
+    ) {
+        if present_slots.len() >= required {
+            return;
+        }
+        let slots = committee
+            .into_iter()
+            .map(|member| member.slot)
+            .filter(|slot| *slot != 0 && !present_slots.contains(slot))
+            .collect::<Vec<_>>();
+        if slots.is_empty() {
+            return;
+        }
+
+        self.outbox.push(GossipEnvelope::BurnBundleRequest {
+            height,
+            prev_hash,
+            slots,
+        });
+    }
+
     pub(super) fn prepare_next_block_with_local_anchor(
         &self,
         timestamp_ms: u64,
@@ -547,7 +617,9 @@ mod tests {
     use crate::{
         adapters::chain_store::SqliteChainStore,
         app::{GossipEnvelope, InMemoryNetwork},
-        domain::{BurnBundle, GenesisBurn, Ledger, MICRO_IUNA, Wallet, run_vdf},
+        domain::{
+            BurnBundle, BurnCommitteeMember, GenesisBurn, Ledger, MICRO_IUNA, Wallet, run_vdf,
+        },
     };
     use tempfile::tempdir;
 
@@ -873,6 +945,88 @@ mod tests {
             .expect("second publish should rebroadcast the existing burn bundle");
 
         assert_eq!(rebroadcast.canonical(), first.canonical());
+    }
+
+    #[test]
+    fn finalizer_requests_missing_burn_bundles_while_collecting() {
+        let wallet = Wallet::from_seed("missing-bundle-request-wallet");
+        let ledger = funded_ledger(std::slice::from_ref(&wallet));
+        let mut node = NodeCore::from_ledger(wallet, ledger, 0);
+        let present_slots = std::collections::BTreeSet::from([1]);
+
+        node.enqueue_missing_burn_bundle_request(
+            42,
+            "parent-hash".to_string(),
+            2,
+            vec![
+                BurnCommitteeMember {
+                    slot: 0,
+                    root: "root-0".to_string(),
+                    owner: "finalizer".to_string(),
+                    weight: 1,
+                },
+                BurnCommitteeMember {
+                    slot: 1,
+                    root: "root-1".to_string(),
+                    owner: "present".to_string(),
+                    weight: 1,
+                },
+                BurnCommitteeMember {
+                    slot: 2,
+                    root: "root-2".to_string(),
+                    owner: "missing".to_string(),
+                    weight: 1,
+                },
+            ],
+            &present_slots,
+        );
+        let request = node
+            .drain_outbox()
+            .into_iter()
+            .find_map(|envelope| match envelope {
+                GossipEnvelope::BurnBundleRequest {
+                    height,
+                    prev_hash,
+                    slots,
+                } => Some((height, prev_hash, slots)),
+                _ => None,
+            })
+            .expect("collecting finalizer should request missing burn bundles");
+
+        assert_eq!(request.0, 42);
+        assert_eq!(request.1, "parent-hash");
+        assert_eq!(request.2, vec![2]);
+    }
+
+    #[test]
+    fn burn_bundle_request_response_only_returns_matching_slots() {
+        let alice = Wallet::from_seed("bundle-request-response-alice");
+        let bob = Wallet::from_seed("bundle-request-response-bob");
+        let wallets = [alice.clone(), bob.clone()];
+        let ledger = funded_ledger(&wallets);
+        let signer = selected_finalizer(&ledger, &wallets);
+        let mut node = NodeCore::from_ledger(signer.clone(), ledger.clone(), 0);
+
+        node.publish_burn_bundle_for_next_block().unwrap();
+        let bundle = node
+            .usable_burn_bundles()
+            .into_iter()
+            .find(|bundle| bundle.member == signer.address())
+            .expect("signer should have a local burn bundle");
+
+        let matching =
+            node.burn_bundles_for_request(bundle.height, &bundle.prev_hash, &[bundle.slot]);
+        let wrong_parent = node.burn_bundles_for_request(bundle.height, "wrong-parent", &[]);
+        let wrong_slot = node.burn_bundles_for_request(
+            bundle.height,
+            &bundle.prev_hash,
+            &[bundle.slot.saturating_add(1)],
+        );
+
+        assert_eq!(matching.len(), 1);
+        assert_eq!(matching[0].canonical(), bundle.canonical());
+        assert!(wrong_parent.is_empty());
+        assert!(wrong_slot.is_empty());
     }
 
     #[test]

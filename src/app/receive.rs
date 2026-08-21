@@ -75,6 +75,7 @@ impl NodeCore {
                 }
                 Ok(())
             }
+            GossipEnvelope::BurnBundleRequest { .. } => Ok(()),
             GossipEnvelope::Block(block) => {
                 let previous_height = self.ledger.height();
                 self.ledger.apply_block(block.clone())?;
