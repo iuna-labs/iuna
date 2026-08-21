@@ -981,13 +981,35 @@ async fn persistence_loop_saves_new_tip_after_node_changes() {
     }
 
     let expected_tip = node.lock().await.ledger().status().tip_hash;
-    let mut restored_tip = None;
-    let mut projected_tip = None;
-    for _ in 0..100 {
-        if let Some(snapshot) = store.load().unwrap() {
-            restored_tip = snapshot.blocks.last().map(|block| block.hash.clone());
+    let (restored_tip, projected_tip) = tokio::time::timeout(Duration::from_secs(5), async {
+        loop {
+            let restored_tip = store
+                .load()
+                .unwrap()
+                .and_then(|snapshot| snapshot.blocks.last().map(|block| block.hash.clone()));
+            let projected_tip = Connection::open(ui_data_store.path())
+                .unwrap()
+                .query_row(
+                    "SELECT tip_hash FROM ui_cache_meta WHERE id = 1",
+                    [],
+                    |row| row.get::<_, String>(0),
+                )
+                .ok();
+            if restored_tip.as_deref() == Some(expected_tip.as_str())
+                && projected_tip.as_deref() == Some(expected_tip.as_str())
+            {
+                return (restored_tip, projected_tip);
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
         }
-        projected_tip = Connection::open(ui_data_store.path())
+    })
+    .await
+    .unwrap_or_else(|_| {
+        let restored_tip = store
+            .load()
+            .unwrap()
+            .and_then(|snapshot| snapshot.blocks.last().map(|block| block.hash.clone()));
+        let projected_tip = Connection::open(ui_data_store.path())
             .unwrap()
             .query_row(
                 "SELECT tip_hash FROM ui_cache_meta WHERE id = 1",
@@ -995,13 +1017,8 @@ async fn persistence_loop_saves_new_tip_after_node_changes() {
                 |row| row.get::<_, String>(0),
             )
             .ok();
-        if restored_tip.as_deref() == Some(expected_tip.as_str())
-            && projected_tip.as_deref() == Some(expected_tip.as_str())
-        {
-            break;
-        }
-        tokio::time::sleep(Duration::from_millis(10)).await;
-    }
+        (restored_tip, projected_tip)
+    });
     persistence_task.abort();
 
     assert_eq!(restored_tip.as_deref(), Some(expected_tip.as_str()));
