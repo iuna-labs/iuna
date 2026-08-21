@@ -24,6 +24,8 @@ const PLAINTEXT_WALLET_FILE_VERSION: u32 = 2;
 const WALLET_ENCRYPTION_ALGORITHM: &str = "chacha20poly1305";
 const WALLET_ENCRYPTION_KDF: &str = "pbkdf2-sha256";
 const WALLET_ENCRYPTION_ITERATIONS: u32 = 210_000;
+const MIN_WALLET_ENCRYPTION_ITERATIONS: u32 = 100_000;
+const MAX_WALLET_ENCRYPTION_ITERATIONS: u32 = 1_000_000;
 const GENERATED_SEED_WORDS: usize = 24;
 const BIP39_SEED_ENTROPY_BYTES: usize = 32;
 
@@ -390,9 +392,13 @@ fn decrypt_wallet_data(
     if encryption.kdf != WALLET_ENCRYPTION_KDF {
         bail!("unsupported wallet encryption kdf");
     }
+    validate_wallet_encryption_iterations(encryption.kdf_iterations)?;
     let salt = decode_hex(&encryption.salt).context("invalid wallet encryption salt")?;
     let nonce = decode_hex(&encryption.nonce).context("invalid wallet encryption nonce")?;
     let ciphertext = decode_hex(&encryption.ciphertext).context("invalid wallet encrypted seed")?;
+    if salt.len() != 16 {
+        bail!("invalid wallet encryption salt length");
+    }
     if nonce.len() != 12 {
         bail!("invalid wallet encryption nonce length");
     }
@@ -419,6 +425,14 @@ fn wallet_encryption_key(password: &str, salt: &[u8], iterations: u32) -> [u8; 3
     let mut key = [0_u8; 32];
     pbkdf2_hmac::<Sha256>(password.as_bytes(), salt, iterations, &mut key);
     key
+}
+
+fn validate_wallet_encryption_iterations(iterations: u32) -> Result<()> {
+    if !(MIN_WALLET_ENCRYPTION_ITERATIONS..=MAX_WALLET_ENCRYPTION_ITERATIONS).contains(&iterations)
+    {
+        bail!("unsupported wallet encryption iteration count");
+    }
+    Ok(())
 }
 
 fn random_bytes<const N: usize>() -> Result<[u8; N]> {
@@ -495,7 +509,11 @@ fn validate_wallet_file_metadata(stored: &WalletFile) -> Result<()> {
         if encryption.kdf != WALLET_ENCRYPTION_KDF {
             bail!("unsupported wallet encryption kdf");
         }
-        let _ = decode_hex(&encryption.salt).context("invalid wallet encryption salt")?;
+        validate_wallet_encryption_iterations(encryption.kdf_iterations)?;
+        let salt = decode_hex(&encryption.salt).context("invalid wallet encryption salt")?;
+        if salt.len() != 16 {
+            bail!("invalid wallet encryption salt length");
+        }
         let nonce = decode_hex(&encryption.nonce).context("invalid wallet encryption nonce")?;
         if nonce.len() != 12 {
             bail!("invalid wallet encryption nonce length");
@@ -638,7 +656,10 @@ mod tests {
 
     use tempfile::tempdir;
 
-    use super::{load_or_create, replace_with_imported_seed_phrase};
+    use super::{
+        load_or_create, load_with_password, read_wallet_file, replace_with_imported_seed_phrase,
+        replace_with_imported_seed_phrase_encrypted,
+    };
 
     const TEST_SEED: &str = "abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon art";
 
@@ -654,5 +675,47 @@ mod tests {
 
         assert_eq!(loaded.address(), wallet.address());
         assert!(stale_temp.exists());
+    }
+
+    #[test]
+    fn encrypted_wallet_rejects_unreasonable_kdf_iterations_before_unlock() {
+        let dir = tempdir().unwrap();
+        let path = dir.path().join("wallet.json");
+        replace_with_imported_seed_phrase_encrypted(&path, TEST_SEED, "password-123456").unwrap();
+        let wallet_json = fs::read_to_string(&path).unwrap();
+        fs::write(
+            &path,
+            wallet_json.replace(
+                "\"kdf_iterations\": 210000",
+                "\"kdf_iterations\": 1000000000",
+            ),
+        )
+        .unwrap();
+
+        let error = load_with_password(&path, "password-123456").unwrap_err();
+
+        assert!(
+            error
+                .to_string()
+                .contains("unsupported wallet encryption iteration count")
+        );
+    }
+
+    #[test]
+    fn encrypted_wallet_metadata_rejects_short_salt() {
+        let dir = tempdir().unwrap();
+        let path = dir.path().join("wallet.json");
+        replace_with_imported_seed_phrase_encrypted(&path, TEST_SEED, "password-123456").unwrap();
+        let mut stored = read_wallet_file(&path).unwrap();
+        stored.encryption.as_mut().unwrap().salt = "abcd".to_string();
+        fs::write(&path, serde_json::to_vec_pretty(&stored).unwrap()).unwrap();
+
+        let error = load_with_password(&path, "password-123456").unwrap_err();
+
+        assert!(
+            error
+                .to_string()
+                .contains("invalid wallet encryption salt length")
+        );
     }
 }

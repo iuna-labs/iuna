@@ -5,6 +5,8 @@ use sha2::{Digest, Sha256};
 
 const PASSWORD_KDF_ALGORITHM: &str = "pbkdf2-sha256";
 const PASSWORD_KDF_ITERATIONS: u32 = 210_000;
+const MIN_PASSWORD_KDF_ITERATIONS: u32 = 100_000;
+const MAX_PASSWORD_KDF_ITERATIONS: u32 = 1_000_000;
 
 pub(super) fn validate_password(password: &str) -> Result<()> {
     if password.len() < 12 {
@@ -34,10 +36,18 @@ pub(super) fn verify_password(password: &str, encoded: &str) -> Result<bool> {
     let iterations = parts[1]
         .parse::<u32>()
         .context("invalid password hash iterations")?;
+    validate_password_kdf_iterations(iterations)?;
     let salt = decode_hex(parts[2]).context("invalid password hash salt")?;
     let expected = decode_hex(parts[3]).context("invalid password hash")?;
     let actual = pbkdf2_sha256(password.as_bytes(), &salt, iterations);
     Ok(constant_time_eq(&actual, &expected))
+}
+
+fn validate_password_kdf_iterations(iterations: u32) -> Result<()> {
+    if !(MIN_PASSWORD_KDF_ITERATIONS..=MAX_PASSWORD_KDF_ITERATIONS).contains(&iterations) {
+        bail!("unsupported password hash iteration count");
+    }
+    Ok(())
 }
 
 pub(super) fn session_token_hash(token: &str) -> String {
@@ -103,5 +113,24 @@ fn decode_hex_nibble(byte: u8) -> Result<u8> {
         b'a'..=b'f' => Ok(byte - b'a' + 10),
         b'A'..=b'F' => Ok(byte - b'A' + 10),
         _ => bail!("invalid hex character"),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{hash_password, verify_password};
+
+    #[test]
+    fn password_hash_rejects_unreasonable_kdf_iterations() {
+        let encoded = hash_password("password-123456").unwrap();
+        let excessive = encoded.replacen("$210000$", "$1000000000$", 1);
+
+        let error = verify_password("password-123456", &excessive).unwrap_err();
+
+        assert!(
+            error
+                .to_string()
+                .contains("unsupported password hash iteration count")
+        );
     }
 }

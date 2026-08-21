@@ -150,7 +150,16 @@ cargo run --locked --manifest-path fuzz/Cargo.toml --bin compact_snapshot -- -ru
 cargo run --locked --manifest-path fuzz/Cargo.toml --bin domain_json -- -runs=256 fuzz/corpus/domain_json
 cargo run --locked --manifest-path fuzz/Cargo.toml --bin stratum_request -- -runs=256 fuzz/corpus/stratum_request
 cargo run --locked --manifest-path fuzz/Cargo.toml --bin wallet_config -- -runs=256 fuzz/corpus/wallet_config
+cargo run --locked --manifest-path fuzz/Cargo.toml --bin vdf_proof -- -runs=16 fuzz/corpus/vdf_proof
+cargo test --locked domain::adversarial_tests:: -- --ignored
 cargo test --locked --release --test properties -- --ignored
+```
+
+On macOS hosts with the optional Python/C++ `chiavdf` package installed, also
+run the byte-for-byte compatibility test:
+
+```sh
+IUNA_CHIAVDF_PYTHON=/path/to/python cargo test --locked --release domain::vdf::wesolowski::tests::prover_matches_chiavdf_python_binding -- --ignored --nocapture
 ```
 
 The deployment script runs these gates for release builds. Keep the exact
@@ -189,19 +198,33 @@ see which revision was tested.
   construction. The limb backend covers signed limb arithmetic, division, full
   and partial XGCD, production NUDUPL/NUCOMP, checkpoint bucket selection, and
   class-group exponentiation.
-  Before promotion, review the
-  limb backend's canonical encoding and division behavior, add deeper in-place
-  arithmetic for multiplication intermediates where profiling justifies it, and run
-  fixed vectors, differential VDF tests, fuzz targets, release benchmarks, and
-  Windows MSVC builds on every release platform.
-- Wallet/key handling: review the encrypted wallet format, PBKDF2 iteration
-  count, password UX, recovery phrase exposure, and backup guidance.
+  Before promotion, keep running fixed vectors, differential VDF tests, fuzz
+  targets, release benchmarks, and the optional `chiavdf` compatibility test on
+  at least one macOS host. Windows MSVC release benchmarking remains a platform
+  readiness item, not a wire-compatibility requirement.
+- Wallet/key handling: reviewed for the mainnet-candidate run. Wallet files use
+  versioned JSON. Plaintext seed files are still supported for legacy/setup
+  flows, but setting a management password encrypts existing or newly generated
+  wallets before normal authenticated use. Encrypted wallets store no plaintext
+  seed, use `chacha20poly1305` with a random 16-byte salt, random 12-byte nonce,
+  PBKDF2-SHA256 at 210,000 iterations, and bind the ciphertext to the wallet
+  address as AEAD associated data. Unlock rejects unsupported algorithms, KDFs,
+  unreasonable PBKDF2 iteration counts, wrong salt/nonce lengths, wrong
+  passwords, and address/seed mismatches. Wallet writes are atomic and use
+  `0600` temporary files on Unix. Management UI password hashes also use
+  PBKDF2-SHA256 with bounded iteration counts, login backoff, session expiry,
+  `HttpOnly`/`SameSite=Strict` cookies, CSRF same-origin checks, and trusted
+  forwarded headers only from loopback proxies. Residual accepted risk for the
+  candidate: PBKDF2 is CPU-hard rather than memory-hard, so operators must use
+  strong unique passwords and keep the management UI local or otherwise
+  protected.
 - Public exposure: verify bootnodes expose only the intended P2P and optional
   Stratum ports, and that the management UI remains bound to a local or
   otherwise protected address.
-- Candidate manifest: verify genesis hash, network ID, bootnodes, checksums,
-  promotion policy, and rollback instructions before the stability window
-  starts.
+- Candidate manifest: `docs/genesis.md` contains the manifest template and
+  operating procedure. For a specific candidate, verify and publish the real
+  genesis hash, network ID, bootnodes, checksums, promotion policy, rollback
+  instructions, release tag, and git commit before the stability window starts.
 - Release evidence: keep successful release-gate logs from the exact tagged
   candidate revision.
 
@@ -215,7 +238,7 @@ filled in for the candidate release.
 | Consensus validation |  |  |  |  |
 | Transaction and mempool validation |  |  |  |  |
 | P2P input handling |  |  |  |  |
-| Wallet, key storage, and HTTP auth |  |  |  |  |
+| Wallet, key storage, and HTTP auth | Codex | 2026-08-21 | Candidate accepted with residual operational risk | Reviewed encryption/auth paths; added PBKDF2 iteration and salt-length hardening. |
 | Stratum |  |  |  |  |
 | Release evidence |  |  |  |  |
 | Candidate manifest |  |  |  |  |

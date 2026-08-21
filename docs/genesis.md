@@ -48,13 +48,17 @@ cargo run --locked --manifest-path fuzz/Cargo.toml --bin compact_snapshot -- -ru
 cargo run --locked --manifest-path fuzz/Cargo.toml --bin domain_json -- -runs=256 fuzz/corpus/domain_json
 cargo run --locked --manifest-path fuzz/Cargo.toml --bin stratum_request -- -runs=256 fuzz/corpus/stratum_request
 cargo run --locked --manifest-path fuzz/Cargo.toml --bin wallet_config -- -runs=256 fuzz/corpus/wallet_config
+cargo run --locked --manifest-path fuzz/Cargo.toml --bin vdf_proof -- -runs=16 fuzz/corpus/vdf_proof
+cargo test --locked domain::adversarial_tests:: -- --ignored
 cargo test --locked --release --test properties -- --ignored
 ./deployment.sh <version>
 ```
 
 The deployment script writes release packages to `downloads/` and creates `downloads/SHA256SUMS`.
-It runs `256` iterations per fuzz target by default; set `IUNA_FUZZ_RUNS`
-to a positive integer only for an explicitly documented emergency redeploy.
+It runs `256` iterations per general fuzz target and `16` iterations for the
+slower VDF proof fuzz target by default; set `IUNA_FUZZ_RUNS` or
+`IUNA_VDF_FUZZ_RUNS` to a positive integer only for an explicitly documented
+emergency redeploy.
 
 Verify the files before publishing them:
 
