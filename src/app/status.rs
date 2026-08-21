@@ -31,6 +31,7 @@ impl NodeCore {
                 ticket_maturity_delay_heights: launch_profile.ticket_maturity_delay_heights,
                 ticket_expiry_window_heights: launch_profile.ticket_expiry_window_heights,
                 mine_difficulty_bits: launch_profile.mine_difficulty_bits,
+                burn_lineage_maturity_heights: launch_profile.burn_lineage_maturity_heights,
             },
             mining: MiningStatus {
                 automatic: self.automatic_mining_enabled,

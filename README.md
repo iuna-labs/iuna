@@ -156,6 +156,14 @@ settings:
 - `IUNA_AUTOMATIC_BURN_ENABLED=true|false`
 - `IUNA_POW_MINING_ENABLED=true|false`
 
+The compose bootstrap also selects the isolated `iuna-local-testnet-v1` launch
+profile. Its PoW burn-committee lineages are eligible immediately, so node2 can
+provide a real second committee attestation as soon as its first mine action is
+confirmed. The normal launch profile retains the 20-block lineage maturity.
+Existing compose volumes created with the normal profile must be reset once
+with `docker compose down -v`, because consensus launch profiles cannot be
+changed in place.
+
 Stop the network while keeping chain data:
 
 ```sh

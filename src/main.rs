@@ -17,7 +17,7 @@ use iuna::{
         now_ms, set_debug_logging,
     },
     domain::{
-        Amount, ChainSnapshot, GenesisBurn, Ledger, MAX_VDF_ROUNDS, MICRO_IUNA,
+        Amount, ChainSnapshot, GenesisBurn, LaunchProfile, Ledger, MAX_VDF_ROUNDS, MICRO_IUNA,
         VDF_TARGET_BLOCK_MS, VdfProgress, VdfProgressPhase, run_vdf, run_vdf_with_progress,
     },
 };
@@ -42,6 +42,7 @@ const VDF_MEASUREMENT_MIN_ELAPSED: Duration = Duration::from_millis(150);
 const VDF_PROGRESS_LOG_INTERVAL: Duration = Duration::from_secs(10);
 const AUTOMATIC_BURN_ENABLED_ENV: &str = "IUNA_AUTOMATIC_BURN_ENABLED";
 const POW_MINING_ENABLED_ENV: &str = "IUNA_POW_MINING_ENABLED";
+const LOCAL_TESTNET_ENV: &str = "IUNA_LOCAL_TESTNET";
 const SETUP_COMPLETE_ENV: &str = "IUNA_SETUP_COMPLETE";
 const WALLET_PASSWORD_ENV: &str = "IUNA_WALLET_PASSWORD";
 
@@ -71,6 +72,7 @@ async fn main() -> Result<()> {
     let startup_wallet_password = startup_wallet_password_from_env()?;
     let startup_automatic_burn_enabled = startup_bool_from_env(AUTOMATIC_BURN_ENABLED_ENV)?;
     let startup_pow_mining_enabled = startup_bool_from_env(POW_MINING_ENABLED_ENV)?;
+    let startup_local_testnet = startup_bool_from_env(LOCAL_TESTNET_ENV)?.unwrap_or(false);
     let startup_setup_complete = startup_bool_from_env(SETUP_COMPLETE_ENV)?;
     let p2p_config_dirty = apply_cli_p2p_config_overrides(&opts, &mut ui_config);
     let stratum_config_dirty = apply_cli_stratum_config_overrides(&opts, &mut ui_config);
@@ -112,8 +114,14 @@ async fn main() -> Result<()> {
     if ui_config_dirty || auth_config_dirty {
         config_store::save(&config_path, &ui_config)?;
     }
-    let ledger =
-        initialize_ledger(&opts, &wallet_address, &chain_store, advertised_p2p_addr).await?;
+    let ledger = initialize_ledger(
+        &opts,
+        &wallet_address,
+        &chain_store,
+        advertised_p2p_addr,
+        startup_local_testnet,
+    )
+    .await?;
     let has_chain = opts.has_chain() || persisted_chain_exists;
     let initial_burn_per_block = initial_burn_per_block(&opts, &ui_config);
     let initial_burn_fee = initial_burn_fee(&opts, &ui_config);
@@ -427,12 +435,18 @@ async fn initialize_ledger(
     wallet_address: &str,
     chain_store: &SqliteChainStore,
     advertised_p2p_addr: SocketAddr,
+    local_testnet: bool,
 ) -> Result<Ledger> {
     if let Some(snapshot) = chain_store.load()? {
         if opts.chain_mode == ChainMode::Genesis {
             bail!(
                 "--genesis refuses to run because chain database already contains a blockchain at {}; start without --genesis to resume it",
                 chain_store.path().display()
+            );
+        }
+        if local_testnet && snapshot.launch_profile != LaunchProfile::local_testnet() {
+            bail!(
+                "{LOCAL_TESTNET_ENV}=true requires the iuna-local-testnet-v1 launch profile; reset this local chain before restarting"
             );
         }
         let height = snapshot_height(&snapshot);
@@ -450,7 +464,7 @@ async fn initialize_ledger(
     } else {
         match opts.chain_mode {
             ChainMode::Setup => Ok(setup_ledger()),
-            ChainMode::Genesis => start_genesis_ledger(wallet_address),
+            ChainMode::Genesis => start_genesis_ledger(wallet_address, local_testnet),
             ChainMode::Join => join_chain_ledger(&opts.join_peers, advertised_p2p_addr).await,
         }
     }
@@ -468,17 +482,23 @@ fn setup_ledger() -> Ledger {
     Ledger::new(BTreeMap::new(), 1)
 }
 
-fn start_genesis_ledger(wallet_address: &str) -> Result<Ledger> {
+fn start_genesis_ledger(wallet_address: &str, local_testnet: bool) -> Result<Ledger> {
     let vdf_rounds = measure_initial_vdf_rounds();
     let mut genesis = BTreeMap::new();
     genesis.insert(wallet_address.to_string(), GENESIS_BOOTSTRAP_BALANCE);
-    Ledger::new_with_genesis_burns(
+    let launch_profile = if local_testnet {
+        LaunchProfile::local_testnet()
+    } else {
+        LaunchProfile::default()
+    };
+    Ledger::new_with_genesis_burns_and_profile(
         genesis,
         vec![GenesisBurn::new(
             wallet_address,
             GENESIS_BOOTSTRAP_BURN_AMOUNT,
         )],
         vdf_rounds,
+        launch_profile,
     )
 }
 

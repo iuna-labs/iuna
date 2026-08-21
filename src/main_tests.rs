@@ -756,7 +756,7 @@ async fn genesis_refuses_to_start_when_chain_database_exists() {
         .unwrap()
         .unwrap();
 
-    let error = initialize_ledger(&opts, fresh_wallet.address(), &store, opts.p2p_addr)
+    let error = initialize_ledger(&opts, fresh_wallet.address(), &store, opts.p2p_addr, false)
         .await
         .unwrap_err();
 
@@ -779,7 +779,7 @@ async fn startup_resumes_persisted_chain_without_genesis_flag() {
         .unwrap()
         .unwrap();
 
-    let resumed = initialize_ledger(&opts, fresh_wallet.address(), &store, opts.p2p_addr)
+    let resumed = initialize_ledger(&opts, fresh_wallet.address(), &store, opts.p2p_addr, false)
         .await
         .unwrap();
 
@@ -787,6 +787,31 @@ async fn startup_resumes_persisted_chain_without_genesis_flag() {
     assert_eq!(resumed.status().tip_hash, persisted.status().tip_hash);
     assert_eq!(resumed.genesis_hash(), persisted.genesis_hash());
     assert_eq!(resumed.balance_of(fresh_wallet.address()), 0);
+}
+
+#[tokio::test]
+async fn local_testnet_refuses_persisted_chain_with_normal_launch_profile() {
+    let dir = tempdir().unwrap();
+    let chain_path = dir.path().join("chain.sqlite3");
+    let store = SqliteChainStore::open(&chain_path).unwrap();
+    let persisted_wallet = Wallet::from_seed("normal-profile-chain-owner");
+    let persisted = ledger_with_one_mined_block(&persisted_wallet);
+    store.save(&persisted.snapshot()).unwrap();
+    let opts = parse(&["--chain-db", chain_path.to_str().unwrap()])
+        .unwrap()
+        .unwrap();
+
+    let error = initialize_ledger(
+        &opts,
+        persisted_wallet.address(),
+        &store,
+        opts.p2p_addr,
+        true,
+    )
+    .await
+    .unwrap_err();
+
+    assert!(error.to_string().contains("reset this local chain"));
 }
 
 #[tokio::test]
@@ -810,7 +835,7 @@ async fn candidate_promotion_reuses_chain_data_and_can_continue_mining() {
         .unwrap()
         .unwrap();
 
-    let mut promoted = initialize_ledger(&opts, wallets[0].address(), &store, opts.p2p_addr)
+    let mut promoted = initialize_ledger(&opts, wallets[0].address(), &store, opts.p2p_addr, false)
         .await
         .unwrap();
 
@@ -886,7 +911,7 @@ async fn startup_resumes_persisted_chain_with_network_accepted_future_tip() {
         .unwrap()
         .unwrap();
 
-    let resumed = initialize_ledger(&opts, fresh_wallet.address(), &store, opts.p2p_addr)
+    let resumed = initialize_ledger(&opts, fresh_wallet.address(), &store, opts.p2p_addr, false)
         .await
         .unwrap();
 
@@ -915,7 +940,7 @@ async fn persisted_chain_satisfies_join_mode_without_contacting_peer() {
     .unwrap()
     .unwrap();
 
-    let resumed = initialize_ledger(&opts, bob.address(), &store, opts.p2p_addr)
+    let resumed = initialize_ledger(&opts, bob.address(), &store, opts.p2p_addr, false)
         .await
         .unwrap();
 
@@ -943,7 +968,7 @@ VALUES (1, 4, 'bad-tip', x'00010203', 0)
         .unwrap()
         .unwrap();
 
-    let error = initialize_ledger(&opts, wallet.address(), &store, opts.p2p_addr)
+    let error = initialize_ledger(&opts, wallet.address(), &store, opts.p2p_addr, false)
         .await
         .unwrap_err();
 

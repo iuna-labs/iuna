@@ -13,14 +13,33 @@ use super::{
 
 impl Ledger {
     pub fn new(genesis_allocations: BTreeMap<String, Amount>, vdf_rounds: u64) -> Self {
-        Self::new_with_genesis_transactions(genesis_allocations, Vec::new(), vdf_rounds)
-            .expect("empty genesis transactions are valid")
+        Self::new_with_genesis_transactions(
+            genesis_allocations,
+            Vec::new(),
+            vdf_rounds,
+            LaunchProfile::default(),
+        )
+        .expect("empty genesis transactions are valid")
     }
 
     pub fn new_with_genesis_burns(
         genesis_allocations: BTreeMap<String, Amount>,
         genesis_burns: Vec<GenesisBurn>,
         vdf_rounds: u64,
+    ) -> Result<Self> {
+        Self::new_with_genesis_burns_and_profile(
+            genesis_allocations,
+            genesis_burns,
+            vdf_rounds,
+            LaunchProfile::default(),
+        )
+    }
+
+    pub fn new_with_genesis_burns_and_profile(
+        genesis_allocations: BTreeMap<String, Amount>,
+        genesis_burns: Vec<GenesisBurn>,
+        vdf_rounds: u64,
+        launch_profile: LaunchProfile,
     ) -> Result<Self> {
         let transactions = genesis_burns
             .into_iter()
@@ -32,16 +51,21 @@ impl Ledger {
                 Transaction::genesis_burn_with_allocation(burn.from, burn.amount, allocation)
             })
             .collect::<Result<Vec<_>>>()?;
-        Self::new_with_genesis_transactions(genesis_allocations, transactions, vdf_rounds)
+        Self::new_with_genesis_transactions(
+            genesis_allocations,
+            transactions,
+            vdf_rounds,
+            launch_profile,
+        )
     }
 
     fn new_with_genesis_transactions(
         genesis_allocations: BTreeMap<String, Amount>,
         genesis_transactions: Vec<Transaction>,
         vdf_rounds: u64,
+        launch_profile: LaunchProfile,
     ) -> Result<Self> {
         validate_genesis_allocations(&genesis_allocations)?;
-        let launch_profile = LaunchProfile::default();
         let genesis = build_genesis_block(&genesis_allocations, genesis_transactions);
         let utxos = utxos_after_genesis(&genesis_allocations, &genesis)?;
         let tickets = genesis_tickets(&genesis_allocations, &genesis, &launch_profile)?;

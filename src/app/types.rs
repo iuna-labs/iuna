@@ -127,6 +127,7 @@ pub struct LaunchProfileStatus {
     pub ticket_maturity_delay_heights: u64,
     pub ticket_expiry_window_heights: u64,
     pub mine_difficulty_bits: u32,
+    pub burn_lineage_maturity_heights: u64,
 }
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]

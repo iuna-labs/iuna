@@ -6,7 +6,8 @@ use crate::domain::{
 };
 
 const COMPACT_SNAPSHOT_MAGIC: &[u8] = b"IUNA-SNAPSHOT";
-const COMPACT_SNAPSHOT_VERSION: u8 = 4;
+const LEGACY_COMPACT_SNAPSHOT_VERSION: u8 = 4;
+const COMPACT_SNAPSHOT_VERSION: u8 = 5;
 const MAX_COMPACT_GENESIS_ALLOCATIONS: usize = 100_000;
 const MAX_COMPACT_SNAPSHOT_BLOCKS: usize = 10_000;
 const MAX_COMPACT_VEC_ITEMS: usize = 10_000;
@@ -15,14 +16,21 @@ const MAX_COMPACT_BYTE_FIELD: usize = 8 * 1024 * 1024;
 pub(super) fn encode_compact_snapshot(snapshot: &ChainSnapshot) -> Result<Vec<u8>> {
     let mut writer = CompactWriter::default();
     writer.bytes(COMPACT_SNAPSHOT_MAGIC);
-    writer.u8(COMPACT_SNAPSHOT_VERSION);
+    let version = if snapshot.launch_profile.burn_lineage_maturity_heights
+        == crate::domain::BURN_LINEAGE_MATURITY_HEIGHTS
+    {
+        LEGACY_COMPACT_SNAPSHOT_VERSION
+    } else {
+        COMPACT_SNAPSHOT_VERSION
+    };
+    writer.u8(version);
     writer.varint(snapshot.genesis_allocations.len() as u64);
     for (address, amount) in &snapshot.genesis_allocations {
         writer.hex(address)?;
         writer.varint(*amount);
     }
     writer.varint(snapshot.vdf_rounds);
-    encode_launch_profile(&mut writer, &snapshot.launch_profile);
+    encode_launch_profile(&mut writer, &snapshot.launch_profile, version);
     writer.varint(snapshot.blocks.len() as u64);
     let mut expected_prev_hash = "0".repeat(64);
     for (height, block) in snapshot.blocks.iter().enumerate() {
@@ -49,7 +57,10 @@ pub(super) fn decode_compact_snapshot(bytes: &[u8]) -> Result<ChainSnapshot> {
     let mut reader = CompactReader::new(bytes);
     reader.magic(COMPACT_SNAPSHOT_MAGIC)?;
     let version = reader.u8()?;
-    if version != COMPACT_SNAPSHOT_VERSION {
+    if !matches!(
+        version,
+        LEGACY_COMPACT_SNAPSHOT_VERSION | COMPACT_SNAPSHOT_VERSION
+    ) {
         bail!("unsupported compact chain snapshot version {version}");
     }
     let genesis_count =
@@ -61,7 +72,7 @@ pub(super) fn decode_compact_snapshot(bytes: &[u8]) -> Result<ChainSnapshot> {
         genesis_allocations.insert(address, amount);
     }
     let vdf_rounds = reader.varint()?;
-    let launch_profile = decode_launch_profile(&mut reader)?;
+    let launch_profile = decode_launch_profile(&mut reader, version)?;
     let block_count = reader.bounded_usize("block count", MAX_COMPACT_SNAPSHOT_BLOCKS)?;
     let mut blocks = Vec::with_capacity(block_count);
     let mut prev_hash = "0".repeat(64);
@@ -79,22 +90,30 @@ pub(super) fn decode_compact_snapshot(bytes: &[u8]) -> Result<ChainSnapshot> {
     })
 }
 
-fn encode_launch_profile(writer: &mut CompactWriter, profile: &LaunchProfile) {
+fn encode_launch_profile(writer: &mut CompactWriter, profile: &LaunchProfile, version: u8) {
     writer.string(&profile.profile_id);
     writer.varint(profile.ticket_maturity_delay_heights);
     writer.varint(profile.ticket_expiry_window_heights);
     writer.varint(u64::from(profile.mine_difficulty_bits));
+    if version >= COMPACT_SNAPSHOT_VERSION {
+        writer.varint(profile.burn_lineage_maturity_heights);
+    }
     writer.varint(profile.max_pending_transactions as u64);
     writer.varint(profile.max_block_transactions as u64);
     writer.varint(profile.max_block_bytes as u64);
 }
 
-fn decode_launch_profile(reader: &mut CompactReader<'_>) -> Result<LaunchProfile> {
+fn decode_launch_profile(reader: &mut CompactReader<'_>, version: u8) -> Result<LaunchProfile> {
     Ok(LaunchProfile {
         profile_id: reader.string()?,
         ticket_maturity_delay_heights: reader.varint()?,
         ticket_expiry_window_heights: reader.varint()?,
         mine_difficulty_bits: reader.u32()?,
+        burn_lineage_maturity_heights: if version >= COMPACT_SNAPSHOT_VERSION {
+            reader.varint()?
+        } else {
+            crate::domain::BURN_LINEAGE_MATURITY_HEIGHTS
+        },
         max_pending_transactions: reader.usize()?,
         max_block_transactions: reader.usize()?,
         max_block_bytes: reader.usize()?,
@@ -576,15 +595,64 @@ fn hex_encode(bytes: impl AsRef<[u8]>) -> String {
 
 #[cfg(test)]
 mod tests {
-    use std::panic;
+    use std::{collections::BTreeMap, panic};
 
-    use crate::domain::LaunchProfile;
+    use crate::domain::{LaunchProfile, Ledger, MICRO_IUNA, Wallet};
 
     use super::{
-        COMPACT_SNAPSHOT_MAGIC, COMPACT_SNAPSHOT_VERSION, CompactWriter, MAX_COMPACT_BYTE_FIELD,
-        MAX_COMPACT_GENESIS_ALLOCATIONS, MAX_COMPACT_SNAPSHOT_BLOCKS, MAX_COMPACT_VEC_ITEMS,
-        decode_compact_snapshot, encode_launch_profile,
+        COMPACT_SNAPSHOT_MAGIC, COMPACT_SNAPSHOT_VERSION, CompactReader, CompactWriter,
+        LEGACY_COMPACT_SNAPSHOT_VERSION, MAX_COMPACT_BYTE_FIELD, MAX_COMPACT_GENESIS_ALLOCATIONS,
+        MAX_COMPACT_SNAPSHOT_BLOCKS, MAX_COMPACT_VEC_ITEMS, decode_compact_snapshot,
+        decode_launch_profile, encode_compact_snapshot, encode_launch_profile,
     };
+
+    #[test]
+    fn default_profile_keeps_v4_wire_format_while_local_profile_uses_v5() {
+        let wallet = Wallet::from_seed("compact-profile-wire-version");
+        let allocations = BTreeMap::from([(wallet.address().to_string(), MICRO_IUNA)]);
+        let default_snapshot = Ledger::new(allocations.clone(), 1).snapshot();
+        let default_bytes = encode_compact_snapshot(&default_snapshot).unwrap();
+        assert_eq!(
+            default_bytes[COMPACT_SNAPSHOT_MAGIC.len()],
+            LEGACY_COMPACT_SNAPSHOT_VERSION
+        );
+        assert_eq!(
+            decode_compact_snapshot(&default_bytes).unwrap(),
+            default_snapshot
+        );
+
+        let local_ledger = Ledger::new_with_genesis_burns_and_profile(
+            allocations,
+            Vec::new(),
+            1,
+            LaunchProfile::local_testnet(),
+        )
+        .unwrap();
+        let local_snapshot = local_ledger.snapshot();
+        let local_bytes = encode_compact_snapshot(&local_snapshot).unwrap();
+        assert_eq!(
+            local_bytes[COMPACT_SNAPSHOT_MAGIC.len()],
+            COMPACT_SNAPSHOT_VERSION
+        );
+        assert_eq!(
+            decode_compact_snapshot(&local_bytes).unwrap(),
+            local_snapshot
+        );
+    }
+
+    #[test]
+    fn compact_launch_profile_roundtrips_local_lineage_maturity() {
+        let expected = LaunchProfile::local_testnet();
+        let mut writer = CompactWriter::default();
+        encode_launch_profile(&mut writer, &expected, COMPACT_SNAPSHOT_VERSION);
+        let bytes = writer.into_inner();
+        let mut reader = CompactReader::new(&bytes);
+
+        let decoded = decode_launch_profile(&mut reader, COMPACT_SNAPSHOT_VERSION).unwrap();
+
+        reader.finish().unwrap();
+        assert_eq!(decoded, expected);
+    }
 
     fn snapshot_prefix(block_count: u64) -> Vec<u8> {
         let mut writer = CompactWriter::default();
@@ -592,7 +660,11 @@ mod tests {
         writer.u8(COMPACT_SNAPSHOT_VERSION);
         writer.varint(0);
         writer.varint(1);
-        encode_launch_profile(&mut writer, &LaunchProfile::default());
+        encode_launch_profile(
+            &mut writer,
+            &LaunchProfile::default(),
+            COMPACT_SNAPSHOT_VERSION,
+        );
         writer.varint(block_count);
         writer.into_inner()
     }

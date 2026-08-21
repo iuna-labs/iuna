@@ -166,6 +166,11 @@ impl NodeCore {
         }
 
         if !self.automatic_mining_enabled {
+            if let Err(error) = self.publish_burn_bundle_for_next_block() {
+                plan.skipped_reason = Some(format!("burn committee signing failed: {error:#}"));
+                self.last_auto_finalization_status = plan.skipped_reason.clone();
+                return plan;
+            }
             plan.skipped_reason = Some("automatic mining is off".to_string());
             self.last_auto_finalization_status = plan.skipped_reason.clone();
             return plan;
@@ -931,6 +936,34 @@ mod tests {
                 .iter()
                 .any(|bundle| bundle.member == wallet.address() && !bundle.burns.is_empty())
         );
+    }
+
+    #[test]
+    fn automatic_finalization_disabled_node_still_publishes_committee_bundle() {
+        let wallet = Wallet::from_seed("disabled-finalizer-committee-wallet");
+        let mut allocations = BTreeMap::new();
+        allocations.insert(wallet.address().to_string(), 10 * MICRO_IUNA);
+        let ledger = Ledger::new_with_genesis_burns(
+            allocations,
+            vec![GenesisBurn::new(wallet.address(), MICRO_IUNA)],
+            1,
+        )
+        .unwrap();
+        let mut node =
+            NodeCore::from_ledger_with_burn_fee_and_enabled(wallet.clone(), ledger, false, 0, 1);
+
+        let plan = node.prepare_automatic_finalization(1);
+
+        assert_eq!(
+            plan.skipped_reason.as_deref(),
+            Some("automatic mining is off")
+        );
+        assert!(node.drain_outbox().into_iter().any(|envelope| {
+            matches!(
+                envelope,
+                GossipEnvelope::BurnBundle(bundle) if bundle.member == wallet.address()
+            )
+        }));
     }
 
     #[test]

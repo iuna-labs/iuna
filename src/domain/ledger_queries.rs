@@ -320,7 +320,7 @@ impl Ledger {
                 **value > 0
                     && root
                         .height
-                        .saturating_add(super::BURN_LINEAGE_MATURITY_HEIGHTS)
+                        .saturating_add(self.launch_profile.burn_lineage_maturity_heights)
                         <= parent_height
                     && !skipped_owners
                         .iter()

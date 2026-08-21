@@ -2938,6 +2938,41 @@ fn non_mature_lineage_cannot_join_committee() {
 }
 
 #[test]
+fn local_testnet_lineage_is_immediately_required_by_rank_zero_quorum() {
+    let mut harness = harness_for_percent(141, 25);
+    harness.ledger.launch_profile.burn_lineage_maturity_heights = 0;
+    let committee_wallet = harness.attacker.lineage_wallets[0].clone();
+    let mine = harness
+        .ledger
+        .build_mine(committee_wallet.address())
+        .unwrap();
+    harness.ledger.submit_transaction(mine).unwrap();
+    harness.mine_ticket_block(0);
+
+    let committee = harness.ledger.burn_committee_for_next_block();
+    assert!(
+        committee
+            .iter()
+            .any(|member| member.slot > 0 && member.owner == committee_wallet.address()),
+        "local-testnet lineage did not enter the next committee: {committee:?}"
+    );
+
+    let leader = harness.next_rank(0);
+    let finalizer = harness.wallet(&leader.owner).clone();
+    harness.submit_anchor_burn(&finalizer);
+    let missing_bundle_block = harness.finish_ticket_block_from_pending(0, Vec::new());
+    let error = harness
+        .ledger
+        .apply_block_at(
+            missing_bundle_block,
+            NOW_MS.saturating_add(VDF_TARGET_BLOCK_MS),
+        )
+        .unwrap_err();
+
+    assert!(error.to_string().contains("too few burn bundle signatures"));
+}
+
+#[test]
 fn changing_attestation_set_after_vdf_changes_seed_and_invalidates_block() {
     let mut harness = harness_for_percent(15, 25);
     let leader = harness.next_rank(0);

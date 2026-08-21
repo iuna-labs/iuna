@@ -1,8 +1,8 @@
-use std::collections::{BTreeMap, BTreeSet};
+use std::collections::BTreeMap;
 
 use crate::domain::{
-    Amount, BURN_COMMITTEE_SIZE, Block, BurnLeaderRank, ChainSnapshot, FinalizerMode, MINE_REWARD,
-    OutPoint, Transaction, TxInput, TxOutput,
+    Amount, Block, BurnLeaderRank, ChainSnapshot, FinalizerMode, MINE_REWARD, OutPoint,
+    Transaction, TxInput, TxOutput,
 };
 
 use crate::adapters::ui_index::build_ui_chain_index;
@@ -175,7 +175,7 @@ pub(super) fn ui_block(
         .get(&block.hash)
         .cloned()
         .unwrap_or_default();
-    let (burn_bundles_included, burn_bundles_required) = burn_bundle_wallet_quorum(&block, &ranks);
+    let (burn_bundles_included, burn_bundles_required) = burn_bundle_wallet_quorum(&block);
     let public_fees = block
         .transactions
         .iter()
@@ -243,33 +243,17 @@ pub(super) fn ui_block(
     }
 }
 
-fn burn_bundle_wallet_quorum(block: &Block, ranks: &[BurnLeaderRank]) -> (usize, usize) {
+fn burn_bundle_wallet_quorum(block: &Block) -> (usize, usize) {
     if block.finalizer_mode != FinalizerMode::Ticket {
         return (0, 0);
     }
 
-    let owner_count = ranks
-        .iter()
-        .filter(|rank| rank.rank >= block.finalizer_rank)
-        .map(|rank| rank.owner.as_str())
-        .chain(std::iter::once(block.miner.as_str()))
-        .collect::<BTreeSet<_>>()
-        .len();
-    let rank_committee_cap = BURN_COMMITTEE_SIZE
-        .saturating_sub(block.finalizer_rank as usize)
-        .max(1);
-    let committee_size = owner_count.min(rank_committee_cap);
-    let included = block
-        .burn_bundle_section
-        .signatures
-        .iter()
-        .map(|signature| signature.member.as_str())
-        .chain(std::iter::once(block.miner.as_str()))
-        .collect::<BTreeSet<_>>()
-        .len()
-        .min(committee_size);
-
-    (included, committee_size)
+    // Consensus requires every available explicit committee signature for rank 0
+    // and rank 1. Rank 2 and later have no additional committee slots. Therefore
+    // an accepted ticket block records its actual quorum without consulting the
+    // unrelated burn-ticket rank owners.
+    let committee_size = block.burn_bundle_section.signatures.len().saturating_add(1);
+    (committee_size, committee_size)
 }
 
 fn block_lost_iuna(transactions: &[Transaction], reward: Amount) -> Amount {
@@ -656,8 +640,8 @@ mod tests {
 
         let ui = ui_block(block, &BTreeMap::new(), &BTreeMap::new());
 
-        assert_eq!(ui.burn_bundle_quorum.burn_bundles_included, 1);
-        assert_eq!(ui.burn_bundle_quorum.committee_size, 1);
+        assert_eq!(ui.burn_bundle_quorum.burn_bundles_included, 2);
+        assert_eq!(ui.burn_bundle_quorum.committee_size, 2);
         assert_eq!(ui.lost_iuna, 1);
         assert_eq!(ui.burn_bundles.len(), 1);
         assert_eq!(ui.burn_bundles[0].slot, 1);
@@ -701,7 +685,7 @@ mod tests {
     }
 
     #[test]
-    fn ui_block_burn_bundle_quorum_counts_unique_ticket_wallets() {
+    fn ui_block_burn_bundle_quorum_uses_included_lineage_attestations() {
         let block = Block {
             height: 1,
             prev_hash: "parent".to_string(),
@@ -777,7 +761,7 @@ mod tests {
     }
 
     #[test]
-    fn ui_block_burn_bundle_quorum_uses_fallback_rank_window() {
+    fn ui_block_burn_bundle_quorum_ignores_unrelated_ticket_rank_window() {
         let block = Block {
             height: 1,
             prev_hash: "parent".to_string(),
