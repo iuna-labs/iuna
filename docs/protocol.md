@@ -279,22 +279,20 @@ This does not make censorship impossible. A finalizer can still censor burns tha
 
 ## P2P Mempool Gossip
 
-The P2P mempool gossips:
+Nodes gossip:
 
 - transfers;
 - burns;
 - mine actions;
 - signed burn bundles;
-- burn-bundle repair requests for a specific next-block height, parent hash, and committee slots;
+- burn-bundle requests for missing committee slots at a specific next-block height and parent hash;
 - block inventory and blocks.
 
 Anchor burns are prepared locally by the finalizer and are not normal wallet traffic.
 
-When a ticket finalizer is collecting burn-bundle attestations and has fewer signatures than the
-rank requires, it may gossip a bounded burn-bundle request for the missing committee slots. Peers
-answer from their local cache with matching signed burn bundles for the requested height and parent
-hash. The request/response path repairs missed gossip only; it does not change the block format,
-attestation signatures, or VDF seed rules.
+When a ticket finalizer is collecting burn-bundle attestations and has fewer signatures than its
+rank requires, it may request the missing slots. Peers answer from their local cache with matching
+signed burn bundles for that height, parent hash, and slot set.
 
 Nodes only keep transactions in their local mempool when they are valid, fee-paying, and unexpired. Pending transaction, burn-bundle, and orphan pools are bounded by both item count and serialized byte size.
 
