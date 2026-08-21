@@ -232,9 +232,12 @@ impl NodeCore {
         let (ledger, _) = self.ledger_with_local_block_anchor();
         for bundle in ledger.build_burn_bundles(wallet)? {
             let key = (bundle.height, bundle.slot, bundle.member.clone());
-            if self.equivocated_burn_bundle_slots.contains(&key)
-                || self.burn_bundles.contains_key(&key)
-            {
+            if self.equivocated_burn_bundle_slots.contains(&key) {
+                continue;
+            }
+            if let Some(existing) = self.burn_bundles.get(&key) {
+                self.outbox
+                    .push(GossipEnvelope::BurnBundle(existing.clone()));
                 continue;
             }
             ledger.validate_next_block_burn_bundles(vec![bundle.clone()])?;

@@ -833,6 +833,49 @@ mod tests {
     }
 
     #[test]
+    fn publish_burn_bundle_rebroadcasts_existing_local_bundle() {
+        let wallet = Wallet::from_seed("rebroadcast-existing-bundle-wallet");
+        let mut allocations = BTreeMap::new();
+        allocations.insert(wallet.address().to_string(), 10 * MICRO_IUNA);
+        let ledger = Ledger::new_with_genesis_burns(
+            allocations,
+            vec![GenesisBurn::new(wallet.address(), MICRO_IUNA)],
+            1,
+        )
+        .unwrap();
+        assert!(
+            ledger
+                .burn_committee_memberships_for_next_block(wallet.address())
+                .iter()
+                .any(|member| member.owner == wallet.address())
+        );
+        let mut node =
+            NodeCore::from_ledger_with_burn_fee_and_enabled(wallet.clone(), ledger, true, 0, 1);
+
+        node.publish_burn_bundle_for_next_block().unwrap();
+        let first = node
+            .drain_outbox()
+            .into_iter()
+            .find_map(|envelope| match envelope {
+                GossipEnvelope::BurnBundle(bundle) => Some(bundle),
+                _ => None,
+            })
+            .expect("first publish should gossip the local burn bundle");
+
+        node.publish_burn_bundle_for_next_block().unwrap();
+        let rebroadcast = node
+            .drain_outbox()
+            .into_iter()
+            .find_map(|envelope| match envelope {
+                GossipEnvelope::BurnBundle(bundle) => Some(bundle),
+                _ => None,
+            })
+            .expect("second publish should rebroadcast the existing burn bundle");
+
+        assert_eq!(rebroadcast.canonical(), first.canonical());
+    }
+
+    #[test]
     fn burn_bundle_gossip_reaches_peer_with_matching_mempool() {
         let alice = Wallet::from_seed("bundle-gossip-alice");
         let bob = Wallet::from_seed("bundle-gossip-bob");
