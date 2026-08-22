@@ -132,22 +132,30 @@ Node3 also exposes Stratum on `127.0.0.1:3333`. P2P ports are mapped to
 `19444`, `19445`, and `19446` for local inspection, while nodes announce their
 stable Docker-network addresses to each other.
 
-The local compose file sets `IUNA_WALLET_PASSWORD` for every container. On first
-start this configures the management UI password and encrypts the wallet; on
-restart it unlocks the encrypted wallet so finalization and automatic mining can
-continue without UI login. Compose also sets `IUNA_SETUP_COMPLETE=true`, so
-after unlocking the management UI you land directly in the node instead of the
-initial setup wizard. Override the local password defaults from your shell or a
-`.env` file:
+The local compose file uses `test` as the management UI and wallet password for
+all three nodes. On first start this configures the management UI password and
+encrypts the wallet; on restart it unlocks the encrypted wallet so finalization
+and automatic mining can continue without UI login. Compose also sets
+`IUNA_SETUP_COMPLETE=true`, so after unlocking the management UI you land
+directly in the node instead of the initial setup wizard. Override the shared
+local-testnet password from your shell or a `.env` file:
 
 ```sh
-IUNA_BOOTSTRAP_WALLET_PASSWORD='change-this-bootstrap-password' \
-IUNA_NODE2_WALLET_PASSWORD='change-this-node2-password' \
-IUNA_NODE3_WALLET_PASSWORD='change-this-node3-password' \
+IUNA_TESTNET_PASSWORD='change-this-testnet-password' \
 docker compose up --build
 ```
 
 Do not use compose-file default passwords for public nodes or valuable wallets.
+If the volumes were created with the older per-node passwords, change those
+passwords first or recreate the disposable local-testnet volumes before starting
+the updated compose stack.
+
+Bootstrap uses `--genesis` only while `/data/chain.sqlite3` is absent or empty.
+Once the chain database exists, container restarts launch bootstrap normally and
+preserve the existing chain.
+
+Fresh nodes prefill automatic burns at `0.0001 IUNA` per block with a
+`0.000001 IUNA` per-byte fee.
 
 For unattended local nodes, startup environment flags can also persist mining
 settings:

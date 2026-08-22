@@ -214,6 +214,7 @@ pub(super) const INDEX_HTML: &str = r#"<!doctype html>
     .mine-settings-form { display: grid; gap: 10px; }
     .mine-fee-fields { display: flex; flex-wrap: wrap; gap: 10px; align-items: end; }
     .fee-preview { flex-basis: 100%; color: #9eb3bc; font-size: 12px; font-weight: 700; }
+    .fee-warning { flex-basis: 100%; color: #ffd070; font-size: 12px; font-weight: 800; }
     .mine-stats { display: grid; grid-template-columns: repeat(4, minmax(112px, 1fr)); gap: 8px; min-width: 0; }
     .local-mining-stats { grid-template-columns: repeat(auto-fit, minmax(150px, 1fr)); }
     .fee-history { grid-template-columns: repeat(3, minmax(112px, 1fr)); margin-top: 12px; }
@@ -536,6 +537,7 @@ pub(super) const INDEX_HTML: &str = r#"<!doctype html>
               </div>
               <label>Fee / byte<input x-model="transferFee" @input="scheduleFeeEstimates" type="number" min="0" step="0.000001" required></label>
               <div class="fee-preview" x-text="feeEstimateLabel('transfer')"></div>
+              <div class="fee-warning" x-show="feeExceedsAmount('transfer')" x-text="feeExceedsAmountLabel('transfer')" role="status" aria-live="polite"></div>
               <button class="advanced-toggle" type="button" @click="toggleSendAdvanced" x-text="showSendAdvanced ? 'Hide UTXOs' : 'UTXOs'"></button>
               <div class="send-utxo-summary" x-show="showSendAdvanced">
                 <div>Selected UTXOs: <span x-text="selectedTransferUtxos.length"></span></div>
@@ -713,6 +715,7 @@ pub(super) const INDEX_HTML: &str = r#"<!doctype html>
               <button class="primary" type="submit">Save</button>
             </div>
             <div class="fee-preview" x-text="feeEstimateLabel('burn')"></div>
+            <div class="fee-warning" x-show="feeExceedsAmount('burn')" x-text="feeExceedsAmountLabel('burn')" role="status" aria-live="polite"></div>
           </form>
           <div class="mine-stats fee-history" aria-label="Recent block fees">
             <div class="mine-stat">

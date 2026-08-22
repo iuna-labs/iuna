@@ -42,6 +42,37 @@ fn help_mentions_dev_seed_verify_bypass_env() {
     assert!(help_text().contains("--debug"));
 }
 
+#[test]
+fn local_testnet_compose_uses_one_obvious_test_password() {
+    let compose = include_str!("../docker-compose.yml");
+    assert_eq!(
+        compose
+            .matches("IUNA_WALLET_PASSWORD: ${IUNA_TESTNET_PASSWORD:-test}")
+            .count(),
+        3
+    );
+    assert!(!compose.contains("IUNA_BOOTSTRAP_WALLET_PASSWORD"));
+    assert!(!compose.contains("IUNA_NODE2_WALLET_PASSWORD"));
+    assert!(!compose.contains("IUNA_NODE3_WALLET_PASSWORD"));
+}
+
+#[test]
+fn local_testnet_bootstrap_only_uses_genesis_for_an_empty_chain() {
+    let compose = include_str!("../docker-compose.yml");
+    assert!(compose.contains("if [ -s /data/chain.sqlite3 ]; then exec iuna --data-dir /data"));
+    assert!(compose.contains("else exec iuna --genesis --data-dir /data"));
+}
+
+#[test]
+fn management_ui_warns_when_estimated_fees_exceed_amounts() {
+    let html = include_str!("adapters/http/index_html.rs");
+    let javascript = include_str!("../www/assets/iuna-ui.js");
+    assert!(html.contains("feeExceedsAmount('transfer')"));
+    assert!(html.contains("feeExceedsAmount('burn')"));
+    assert!(javascript.contains("feeExceedsAmount(kind)"));
+    assert!(javascript.contains("estimated fee IUNA ${this.amountLabel(fee)} exceeds"));
+}
+
 fn ledger_with_one_spendable_iuna(wallet: &Wallet) -> Ledger {
     let mut genesis = BTreeMap::new();
     genesis.insert(wallet.address().to_string(), 3);

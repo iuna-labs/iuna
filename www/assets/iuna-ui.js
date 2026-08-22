@@ -82,8 +82,8 @@ window.iunaApp = function iunaApp() {
     setupFeedback: null,
     burnAmount: 100,
     burnAmountDraft: "0.0001",
-    burnFee: 100,
-    burnFeeDraft: "0.0001",
+    burnFee: 1,
+    burnFeeDraft: "0.000001",
     miningEnabled: false,
     powMiningEnabled: false,
     powMiningWorkers: 1,
@@ -1416,6 +1416,26 @@ window.iunaApp = function iunaApp() {
       if (!estimate) return "Enter details to estimate fee";
       if (estimate.error) return estimate.error;
       return `${estimate.bytes} bytes -> IUNA ${this.amountLabel(estimate.fee)}`;
+    },
+
+    feeExceedsAmount(kind) {
+      const estimate = this.feeEstimates[kind];
+      if (!estimate || estimate.error) return false;
+      const amount = kind === "burn"
+        ? this.parseiunaAmount(this.burnAmountDraft)
+        : this.parseiunaAmount(this.transferAmount);
+      const fee = Number(estimate.fee);
+      return amount > 0 && Number.isFinite(fee) && fee > amount;
+    },
+
+    feeExceedsAmountLabel(kind) {
+      if (!this.feeExceedsAmount(kind)) return "";
+      const label = kind === "burn" ? "burn" : "transfer";
+      const amount = kind === "burn"
+        ? this.parseiunaAmount(this.burnAmountDraft)
+        : this.parseiunaAmount(this.transferAmount);
+      const fee = Number(this.feeEstimates[kind].fee);
+      return `Warning: estimated fee IUNA ${this.amountLabel(fee)} exceeds the ${label} amount IUNA ${this.amountLabel(amount)}.`;
     },
 
     async saveBurn() {

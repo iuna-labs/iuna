@@ -19,7 +19,7 @@ services:
     <<: *iuna-node
     hostname: iuna-bootstrap
     environment:
-      IUNA_WALLET_PASSWORD: ${IUNA_BOOTSTRAP_WALLET_PASSWORD:-local-testnet-bootstrap-password}
+      IUNA_WALLET_PASSWORD: ${IUNA_TESTNET_PASSWORD:-test}
       IUNA_SETUP_COMPLETE: "true"
       IUNA_LOCAL_TESTNET: "true"
     entrypoint: ["/bin/sh", "-c"]
@@ -38,7 +38,7 @@ services:
     <<: *iuna-node
     hostname: iuna-node2
     environment:
-      IUNA_WALLET_PASSWORD: ${IUNA_NODE2_WALLET_PASSWORD:-local-testnet-node2-password}
+      IUNA_WALLET_PASSWORD: ${IUNA_TESTNET_PASSWORD:-test}
       IUNA_SETUP_COMPLETE: "true"
       IUNA_POW_MINING_ENABLED: "true"
     entrypoint: ["/bin/sh", "-c"]
@@ -60,7 +60,7 @@ services:
     <<: *iuna-node
     hostname: iuna-node3
     environment:
-      IUNA_WALLET_PASSWORD: ${IUNA_NODE3_WALLET_PASSWORD:-local-testnet-node3-password}
+      IUNA_WALLET_PASSWORD: ${IUNA_TESTNET_PASSWORD:-test}
       IUNA_SETUP_COMPLETE: "true"
       IUNA_AUTOMATIC_BURN_ENABLED: "true"
     entrypoint: ["/bin/sh", "-c"]
