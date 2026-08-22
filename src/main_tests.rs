@@ -22,8 +22,9 @@ use super::{
     apply_startup_wallet_password_config, configured_p2p_announce_addr, configured_p2p_bind_addr,
     configured_stratum_addr, extrapolate_vdf_rounds, help_text, initial_burn_fee,
     initial_burn_per_block, initialize_ledger, load_startup_wallet, measure_vdf_rounds,
-    parse_startup_bool_env_value, persist_chain_snapshot, project_ui_data_store,
-    run_chain_persistence_with_interval, validate_wallet_for_mode,
+    parse_startup_bool_env_value, parse_startup_pow_mining_workers_env_value,
+    persist_chain_snapshot, project_ui_data_store, run_chain_persistence_with_interval,
+    validate_wallet_for_mode,
 };
 
 fn parse(args: &[&str]) -> anyhow::Result<Option<CliOptions>> {
@@ -33,6 +34,7 @@ fn parse(args: &[&str]) -> anyhow::Result<Option<CliOptions>> {
 #[test]
 fn help_mentions_dev_seed_verify_bypass_env() {
     assert!(help_text().contains("IUNA_WALLET_PASSWORD=<password>"));
+    assert!(help_text().contains("IUNA_POW_MINING_WORKERS=1..32"));
     assert!(help_text().contains("IUNA_SETUP_COMPLETE=true|false"));
     assert!(help_text().contains("IUNA_AUTOMATIC_BURN_ENABLED=true|false"));
     assert!(help_text().contains("IUNA_POW_MINING_ENABLED=true|false"));
@@ -47,13 +49,16 @@ fn local_testnet_compose_uses_one_obvious_test_password() {
     let compose = include_str!("../docker-compose.yml");
     assert_eq!(
         compose
-            .matches("IUNA_WALLET_PASSWORD: ${IUNA_TESTNET_PASSWORD:-test}")
+            .matches("IUNA_WALLET_PASSWORD: ${IUNA_TESTNET_PASSWORD:-testtesttest}")
             .count(),
-        3
+        6
     );
     assert!(!compose.contains("IUNA_BOOTSTRAP_WALLET_PASSWORD"));
     assert!(!compose.contains("IUNA_NODE2_WALLET_PASSWORD"));
     assert!(!compose.contains("IUNA_NODE3_WALLET_PASSWORD"));
+    assert!(!compose.contains("IUNA_NODE4_WALLET_PASSWORD"));
+    assert!(!compose.contains("IUNA_NODE5_WALLET_PASSWORD"));
+    assert!(!compose.contains("IUNA_NODE6_WALLET_PASSWORD"));
 }
 
 #[test]
@@ -252,14 +257,17 @@ fn startup_mining_env_overrides_persisted_config() {
         &mut config,
         Some(true),
         Some(false),
+        Some(1),
     ));
     assert!(config.mining_enabled);
     assert!(!config.pow_mining_enabled);
+    assert_eq!(config.pow_mining_workers, 1);
 
     assert!(!apply_startup_mining_config_overrides(
         &mut config,
         Some(true),
         Some(false),
+        Some(1),
     ));
 }
 
@@ -277,6 +285,7 @@ fn startup_mining_env_can_override_genesis_defaults() {
         &mut config,
         Some(false),
         Some(true),
+        Some(1),
     ));
     assert!(!config.mining_enabled);
     assert!(config.pow_mining_enabled);
@@ -293,6 +302,18 @@ fn startup_bool_env_parser_accepts_common_boolean_values() {
         assert!(!parse_startup_bool_env_value("TEST_BOOL", value).unwrap());
     }
     assert!(parse_startup_bool_env_value("TEST_BOOL", "maybe").is_err());
+}
+
+#[test]
+fn startup_pow_worker_parser_enforces_supported_range() {
+    assert_eq!(parse_startup_pow_mining_workers_env_value("1").unwrap(), 1);
+    assert_eq!(
+        parse_startup_pow_mining_workers_env_value("32").unwrap(),
+        32
+    );
+    assert!(parse_startup_pow_mining_workers_env_value("0").is_err());
+    assert!(parse_startup_pow_mining_workers_env_value("33").is_err());
+    assert!(parse_startup_pow_mining_workers_env_value("many").is_err());
 }
 
 #[test]

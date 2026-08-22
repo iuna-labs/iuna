@@ -248,9 +248,8 @@ fn burn_bundle_wallet_quorum(block: &Block) -> (usize, usize) {
         return (0, 0);
     }
 
-    // Consensus requires every available explicit committee signature for rank 0
-    // and rank 1. Rank 2 and later have no additional committee slots. Therefore
-    // an accepted ticket block records its actual quorum without consulting the
+    // The block records the attestations actually included in its rank-dependent
+    // quorum. This UI summary does not reconstruct the historical committee from
     // unrelated burn-ticket rank owners.
     let committee_size = block.burn_bundle_section.signatures.len().saturating_add(1);
     (committee_size, committee_size)

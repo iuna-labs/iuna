@@ -212,18 +212,19 @@ impl Harness {
     }
 
     fn next_rank(&self, rank: usize) -> BurnLeaderRank {
-        self.ledger
-            .burn_leader_ranks_for_block(self.ledger.height() + 1)
-            .unwrap()
-            .get(rank)
-            .cloned()
-            .unwrap_or_else(|| {
-                panic!(
-                    "seed {} has no rank {rank} at height {}",
-                    self.seed,
-                    self.ledger.height() + 1
-                )
-            })
+        let height = self.ledger.height() + 1;
+        let ticket = self
+            .ledger
+            .ticket_for_finalizer_rank(height, rank as u32)
+            .unwrap_or_else(|| panic!("seed {} has no rank {rank} at height {height}", self.seed));
+        BurnLeaderRank {
+            rank: rank as u32,
+            ticket_id: ticket.id,
+            owner: ticket.owner,
+            amount: ticket.amount,
+            eligible_from_height: ticket.eligible_from_height,
+            eligible_until_height: ticket.eligible_until_height,
+        }
     }
 
     fn submit_anchor_burn(&mut self, wallet: &Wallet) -> Transaction {
@@ -403,6 +404,32 @@ impl Harness {
     fn mature_resource_lineages(&mut self) {
         let (attacker_roots, honest_roots) = lineage_resource_roots(self.resource.lineage_percent);
         self.mature_lineages(attacker_roots, honest_roots);
+    }
+
+    fn ensure_lineage_owners_have_next_height_tickets(&mut self) {
+        let target_height = self.ledger.height() + 1;
+        let owners = self
+            .ledger
+            .lineage_owners
+            .values()
+            .flat_map(|owners| owners.keys().cloned())
+            .collect::<BTreeSet<_>>();
+        for (index, owner) in owners.into_iter().enumerate() {
+            if self.ledger.tickets.iter().any(|ticket| {
+                ticket.owner == owner
+                    && ticket.eligible_from_height <= target_height
+                    && target_height <= ticket.eligible_until_height
+            }) {
+                continue;
+            }
+            self.ledger.tickets.push(BurnTicket {
+                id: format!("fixture-lineage-ticket-{target_height}-{index}"),
+                owner,
+                amount: 1,
+                eligible_from_height: target_height,
+                eligible_until_height: target_height,
+            });
+        }
     }
 
     fn attacker_addresses(&self) -> BTreeSet<String> {
@@ -1652,9 +1679,11 @@ fn mini_burn_committee_for_height(
         owner: finalizer.owner.clone(),
         weight: finalizer.amount,
     }];
-    let max_committee_size = BURN_COMMITTEE_SIZE
-        .saturating_sub(finalizer_rank as usize)
-        .max(1);
+    let max_committee_size = BURN_COMMITTEE_SIZE;
+    let eligible_ticket_owners = ranked
+        .iter()
+        .map(|ticket| ticket.owner.clone())
+        .collect::<BTreeSet<_>>();
     let mut skipped_owners = ranked
         .iter()
         .take(finalizer_rank as usize)
@@ -1668,6 +1697,7 @@ fn mini_burn_committee_for_height(
                 state,
                 &candidate.root,
                 &skipped_owners,
+                &eligible_ticket_owners,
             )?;
             Some(MiniLineageCandidate { owner, ..candidate })
         })
@@ -1693,13 +1723,18 @@ fn mini_burn_committee_for_height(
                     state,
                     &candidate.root,
                     &skipped_owners,
+                    &eligible_ticket_owners,
                 )
                 .is_some()
         });
         for candidate in &mut remaining {
-            candidate.owner =
-                mini_representative_owner_for_lineage_root(state, &candidate.root, &skipped_owners)
-                    .expect("retained mini lineage candidate has representative owner");
+            candidate.owner = mini_representative_owner_for_lineage_root(
+                state,
+                &candidate.root,
+                &skipped_owners,
+                &eligible_ticket_owners,
+            )
+            .expect("retained mini lineage candidate has representative owner");
         }
     }
 
@@ -1749,11 +1784,16 @@ fn mini_representative_owner_for_lineage_root(
     state: &MiniLineageState,
     root: &UtxoLineageRoot,
     skipped_owners: &BTreeSet<String>,
+    eligible_ticket_owners: &BTreeSet<String>,
 ) -> Option<String> {
     state.lineage_owners.get(root).and_then(|owners| {
         owners
             .iter()
-            .filter(|(owner, outputs)| !skipped_owners.contains(*owner) && !outputs.is_empty())
+            .filter(|(owner, outputs)| {
+                eligible_ticket_owners.contains(*owner)
+                    && !skipped_owners.contains(*owner)
+                    && !outputs.is_empty()
+            })
             .filter_map(|(owner, outputs)| {
                 let (outpoint, amount) = outputs
                     .iter()
@@ -1921,8 +1961,8 @@ fn mini_required_explicit_burn_signatures(
         return 0;
     }
     match finalizer_mode {
-        FinalizerMode::Ticket if finalizer_rank == 0 => committee_size.saturating_sub(1),
-        FinalizerMode::Ticket if finalizer_rank == 1 => committee_size.saturating_sub(1),
+        FinalizerMode::Ticket if finalizer_rank == 0 => committee_size.min(3).saturating_sub(1),
+        FinalizerMode::Ticket if finalizer_rank == 1 => committee_size.min(2).saturating_sub(1),
         FinalizerMode::Ticket | FinalizerMode::Recovery => 0,
     }
 }
@@ -2097,36 +2137,36 @@ fn committee_roots_are_unique(committee: &[BurnCommitteeMember]) -> bool {
 fn rank_zero_reward_is_credited_to_finalizer_and_extra_committee_members() {
     let mut harness = Harness::new(91, 50, 50, AdversaryStrategy::Honest);
     harness.mature_lineages(2, 2);
+    harness.ensure_lineage_owners_have_next_height_tickets();
     let committee = harness.ledger.burn_committee_for_next_block();
-    assert_eq!(committee.len(), 3, "test setup needs a full committee");
+    assert!(
+        committee.len() >= 3,
+        "test setup needs multiple eligible ticket-owning committee members"
+    );
 
     let finalizer = harness.next_rank(0).owner;
-    let committee_two = committee
+    let committee_owners = committee
         .iter()
-        .find(|member| member.slot == 1)
-        .expect("slot 1 should be assigned")
-        .owner
-        .clone();
-    let committee_three = committee
-        .iter()
-        .find(|member| member.slot == 2)
-        .expect("slot 2 should be assigned")
-        .owner
-        .clone();
+        .filter(|member| member.slot > 0)
+        .map(|member| member.owner.clone())
+        .collect::<Vec<_>>();
     let third_party = harness
         .wallets
         .values()
         .find(|wallet| {
             wallet.address() != finalizer
-                && wallet.address() != committee_two
-                && wallet.address() != committee_three
+                && !committee_owners
+                    .iter()
+                    .any(|owner| owner == wallet.address())
         })
         .expect("test setup has a third-party burner")
         .clone();
 
     let finalizer_before = harness.ledger.balance_of(&finalizer);
-    let committee_two_before = harness.ledger.balance_of(&committee_two);
-    let committee_three_before = harness.ledger.balance_of(&committee_three);
+    let committee_before = committee_owners
+        .iter()
+        .map(|owner| (owner.clone(), harness.ledger.balance_of(owner)))
+        .collect::<BTreeMap<_, _>>();
 
     let finalizer_wallet = harness.wallet(&finalizer).clone();
     harness.submit_anchor_burn(&finalizer_wallet);
@@ -2144,14 +2184,15 @@ fn rank_zero_reward_is_credited_to_finalizer_and_extra_committee_members() {
         harness.ledger.balance_of(&finalizer),
         finalizer_before + 50 - 2
     );
-    assert_eq!(
-        harness.ledger.balance_of(&committee_two),
-        committee_two_before + 25
-    );
-    assert_eq!(
-        harness.ledger.balance_of(&committee_three),
-        committee_three_before + 25
-    );
+    let committee_reward = committee_owners
+        .iter()
+        .map(|owner| {
+            let credited = harness.ledger.balance_of(owner) - committee_before[owner];
+            assert!(credited > 0, "included committee member must be rewarded");
+            credited
+        })
+        .sum::<Amount>();
+    assert_eq!(committee_reward, 50);
 }
 
 proptest! {
@@ -2649,6 +2690,7 @@ fn mini_burn_bundle_quorum_oracle_matches_consensus_mutations() {
 fn finalizer_anchor_alone_requires_available_committee_signatures() {
     let mut harness = harness_for_percent(20, 25);
     harness.mature_lineages(1, 4);
+    harness.ensure_lineage_owners_have_next_height_tickets();
     let leader = harness.next_rank(0);
     let finalizer = harness.wallet(&leader.owner).clone();
     harness.submit_anchor_burn(&finalizer);
@@ -2673,20 +2715,8 @@ fn finalizer_anchor_alone_requires_available_committee_signatures() {
 fn rank_one_committee_excludes_missed_rank_zero_owner_and_requires_remaining_slot() {
     let mut harness = harness_for_percent(22, 25);
     harness.mature_lineages(2, 4);
+    harness.ensure_lineage_owners_have_next_height_tickets();
     let target_height = harness.ledger.height() + 1;
-    harness.ledger.tickets = harness
-        .honest
-        .iter()
-        .take(2)
-        .enumerate()
-        .map(|(index, wallet)| BurnTicket {
-            id: format!("fallback-ticket-{index}"),
-            owner: wallet.address().to_string(),
-            amount: MICRO_IUNA,
-            eligible_from_height: target_height,
-            eligible_until_height: target_height,
-        })
-        .collect();
     let rank_zero = harness
         .ledger
         .ticket_for_finalizer_rank(target_height, 0)
@@ -2699,10 +2729,9 @@ fn rank_one_committee_excludes_missed_rank_zero_owner_and_requires_remaining_slo
         .owner;
 
     let committee = harness.ledger.burn_committee_for_next_ticket_block(1);
-    assert_eq!(
-        committee.len(),
-        2,
-        "test setup should have one remaining rank-1 committee member"
+    assert!(
+        committee.len() > 1,
+        "test setup should retain at least one rank-1 committee member"
     );
     assert_eq!(
         committee.first().map(|member| member.owner.as_str()),
@@ -2895,6 +2924,7 @@ fn post_genesis_transactions_cannot_spend_with_genesis_input_signatures() {
 fn invalid_committee_signature_is_rejected() {
     let mut harness = harness_for_percent(13, 25);
     harness.mature_lineages(1, 4);
+    harness.ensure_lineage_owners_have_next_height_tickets();
     let member = harness
         .ledger
         .burn_committee_for_next_block()
@@ -2938,10 +2968,16 @@ fn non_mature_lineage_cannot_join_committee() {
 }
 
 #[test]
-fn local_testnet_lineage_is_immediately_required_by_rank_zero_quorum() {
+fn local_testnet_lineage_with_an_eligible_ticket_is_immediately_required_by_rank_zero_quorum() {
     let mut harness = harness_for_percent(141, 25);
     harness.ledger.launch_profile.burn_lineage_maturity_heights = 0;
-    let committee_wallet = harness.attacker.lineage_wallets[0].clone();
+    let current_leader = harness.next_rank(0).owner;
+    let committee_wallet = harness
+        .honest
+        .iter()
+        .find(|wallet| wallet.address() != current_leader)
+        .expect("test setup needs a non-finalizer ticket wallet")
+        .clone();
     let mine = harness
         .ledger
         .build_mine(committee_wallet.address())
@@ -2955,6 +2991,17 @@ fn local_testnet_lineage_is_immediately_required_by_rank_zero_quorum() {
             .iter()
             .any(|member| member.slot > 0 && member.owner == committee_wallet.address()),
         "local-testnet lineage did not enter the next committee: {committee:?}"
+    );
+    assert!(
+        harness
+            .ledger
+            .explicit_burn_bundle_signatures_required_for_next_block(
+                FinalizerMode::Ticket,
+                0,
+                harness.next_rank(0).owner.as_str(),
+            )
+            > 0,
+        "rank-0 committee should require an explicit signature: {committee:?}"
     );
 
     let leader = harness.next_rank(0);

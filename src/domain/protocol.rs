@@ -13,7 +13,7 @@ pub const RECOVERY_BLOCK_DELAY_MS: u64 = VDF_TARGET_BLOCK_MS * 6;
 pub const MAX_VDF_ROUNDS: u64 = i64::MAX as u64;
 pub const MINE_DIFFICULTY_BITS: u32 = 12;
 pub const MINE_ACTIONS_PER_ANCHOR_LIMIT: usize = 2;
-pub const BURN_COMMITTEE_SIZE: usize = 3;
+pub const BURN_COMMITTEE_SIZE: usize = 5;
 pub const MAX_BURN_BUNDLE_BYTES: usize = 10_000;
 pub const BURN_LINEAGE_MATURITY_HEIGHTS: u64 = 20;
 
@@ -58,7 +58,7 @@ mod tests {
         assert_eq!(RECOVERY_BLOCK_DELAY_MS, 6 * VDF_TARGET_BLOCK_MS);
         assert_eq!(MINE_DIFFICULTY_BITS, 12);
         assert_eq!(MINE_ACTIONS_PER_ANCHOR_LIMIT, 2);
-        assert_eq!(BURN_COMMITTEE_SIZE, 3);
+        assert_eq!(BURN_COMMITTEE_SIZE, 5);
         assert_eq!(MAX_BURN_BUNDLE_BYTES, 10_000);
         assert_eq!(BURN_LINEAGE_MATURITY_HEIGHTS, 20);
         assert_eq!(MAX_PENDING_TRANSACTIONS, 10_000);

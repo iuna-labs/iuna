@@ -479,8 +479,12 @@ pub fn reward_outputs_for_block(
 
 fn reward_committee_slots(block: &Block) -> Vec<u8> {
     match block.finalizer_mode {
-        FinalizerMode::Ticket if block.finalizer_rank == 0 => vec![1, 2],
-        FinalizerMode::Ticket if block.finalizer_rank == 1 => vec![1],
+        FinalizerMode::Ticket if block.finalizer_rank <= 1 => block
+            .burn_bundle_section
+            .signatures
+            .iter()
+            .map(|signature| signature.slot)
+            .collect(),
         FinalizerMode::Ticket | FinalizerMode::Recovery => Vec::new(),
     }
 }
@@ -602,7 +606,7 @@ fn committee_reward_outpoint(block_hash: &str, slot: u8) -> OutPoint {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::domain::BurnBundleSection;
+    use crate::domain::{BurnBundleSection, BurnBundleSignature};
 
     fn reward_block(finalizer_mode: FinalizerMode, finalizer_rank: u32, reward: Amount) -> Block {
         let mut block = Block {
@@ -633,6 +637,17 @@ mod tests {
         }
     }
 
+    fn attest(block: &mut Block, slots: &[u8]) {
+        block.burn_bundle_section.signatures = slots
+            .iter()
+            .map(|slot| BurnBundleSignature {
+                slot: *slot,
+                member: format!("committee-{slot}"),
+                signature: format!("signature-{slot}"),
+            })
+            .collect();
+    }
+
     fn output_amount(outputs: &[(OutPoint, TxOutput)], owner: &str) -> Amount {
         outputs
             .iter()
@@ -643,7 +658,8 @@ mod tests {
 
     #[test]
     fn rank_zero_splits_half_to_two_extra_committee_members() {
-        let block = reward_block(FinalizerMode::Ticket, 0, 100);
+        let mut block = reward_block(FinalizerMode::Ticket, 0, 100);
+        attest(&mut block, &[1, 2]);
         let committee = vec![
             committee_member(0, "finalizer"),
             committee_member(1, "committee-2"),
@@ -674,7 +690,8 @@ mod tests {
 
     #[test]
     fn rank_zero_gives_committee_half_to_the_only_available_extra_member() {
-        let block = reward_block(FinalizerMode::Ticket, 0, 101);
+        let mut block = reward_block(FinalizerMode::Ticket, 0, 101);
+        attest(&mut block, &[1]);
         let committee = vec![
             committee_member(0, "finalizer"),
             committee_member(1, "committee-2"),
@@ -687,20 +704,20 @@ mod tests {
     }
 
     #[test]
-    fn rank_one_splits_only_with_committee_slot_one() {
-        let block = reward_block(FinalizerMode::Ticket, 1, 100);
+    fn rank_one_splits_with_the_member_that_attested() {
+        let mut block = reward_block(FinalizerMode::Ticket, 1, 100);
+        attest(&mut block, &[2]);
         let committee = vec![
-            committee_member(0, "missed-primary"),
-            committee_member(1, "committee-2"),
-            committee_member(2, "committee-3"),
+            committee_member(0, "finalizer"),
+            committee_member(1, "committee-1"),
+            committee_member(2, "committee-2"),
         ];
 
         let outputs = reward_outputs_for_block(&block, &committee);
 
         assert_eq!(output_amount(&outputs, "finalizer"), 50);
         assert_eq!(output_amount(&outputs, "committee-2"), 50);
-        assert_eq!(output_amount(&outputs, "committee-3"), 0);
-        assert_eq!(output_amount(&outputs, "missed-primary"), 0);
+        assert_eq!(output_amount(&outputs, "committee-1"), 0);
     }
 
     #[test]

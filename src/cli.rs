@@ -290,6 +290,7 @@ pub(crate) fn help_text() -> &'static str {
            IUNA_SETUP_COMPLETE=true|false Persist initial setup completion at startup\n\
            IUNA_AUTOMATIC_BURN_ENABLED=true|false Persist automatic burn/finalization at startup\n\
            IUNA_POW_MINING_ENABLED=true|false Persist automatic PoW mining at startup\n\
+           IUNA_POW_MINING_WORKERS=1..32 Set and persist the PoW worker count at startup\n\
            IUNA_DEV_SKIP_SEED_VERIFY=1 Show a setup button to skip seed verification\n"
 }
 

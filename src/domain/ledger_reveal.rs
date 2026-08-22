@@ -308,8 +308,8 @@ impl Ledger {
             return 0;
         }
         match finalizer_mode {
-            FinalizerMode::Ticket if finalizer_rank == 0 => committee_size.saturating_sub(1),
-            FinalizerMode::Ticket if finalizer_rank == 1 => committee_size.saturating_sub(1),
+            FinalizerMode::Ticket if finalizer_rank == 0 => committee_size.min(3).saturating_sub(1),
+            FinalizerMode::Ticket if finalizer_rank == 1 => committee_size.min(2).saturating_sub(1),
             FinalizerMode::Ticket => 0,
             FinalizerMode::Recovery => 0,
         }
@@ -494,8 +494,24 @@ mod tests {
         let ledger = ledger();
 
         assert_eq!(
+            ledger.required_explicit_burn_signatures(FinalizerMode::Ticket, 0, 5),
+            2
+        );
+        assert_eq!(
+            ledger.required_explicit_burn_signatures(FinalizerMode::Ticket, 0, 4),
+            2
+        );
+        assert_eq!(
             ledger.required_explicit_burn_signatures(FinalizerMode::Ticket, 0, 3),
             2
+        );
+        assert_eq!(
+            ledger.required_explicit_burn_signatures(FinalizerMode::Ticket, 0, 2),
+            1
+        );
+        assert_eq!(
+            ledger.required_explicit_burn_signatures(FinalizerMode::Ticket, 1, 5),
+            1
         );
         assert_eq!(
             ledger.required_explicit_burn_signatures(FinalizerMode::Ticket, 1, 2),

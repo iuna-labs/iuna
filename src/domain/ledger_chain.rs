@@ -96,6 +96,10 @@ impl Ledger {
         Self::from_snapshot_at(snapshot, u64::MAX)
     }
 
+    pub(crate) fn from_preverified_snapshot(snapshot: ChainSnapshot) -> Result<Self> {
+        Self::from_snapshot_with_vdf_policy(snapshot, false, u64::MAX)
+    }
+
     pub(crate) fn from_snapshot_at(snapshot: ChainSnapshot, now_ms: u64) -> Result<Self> {
         Self::from_snapshot_with_vdf_policy(snapshot, true, now_ms)
     }

@@ -111,29 +111,32 @@ The binary prints a local management URL. Open it and follow setup.
 
 ## Optional: Local Docker Testnet
 
-For local P2P and consensus testing, start a three-node testnet with Docker
+For local P2P and consensus testing, start a six-node testnet with Docker
 Compose:
 
 ```sh
 docker compose up --build
 ```
 
-The compose file starts one bootstrap genesis node and two joining nodes on an
-isolated Docker network. Bootstrap automatically finalizes with burns, node2
-starts automatic PoW mining, and node3 starts with automatic burn/finalization
-enabled. Node3 can only create burns once its wallet has spendable IUNA.
+The compose file starts one bootstrap genesis node and five joining nodes on an
+isolated Docker network. Every node automatically mines with one PoW worker and
+enables burn/finalization. Joining nodes can therefore earn their first
+spendable IUNA without a bootstrap transfer and begin burning afterward.
 Management UIs are exposed on:
 
 - bootstrap: <http://127.0.0.1:18661/>
 - node2: <http://127.0.0.1:18662/>
 - node3: <http://127.0.0.1:18663/>
+- node4: <http://127.0.0.1:18664/>
+- node5: <http://127.0.0.1:18665/>
+- node6: <http://127.0.0.1:18666/>
 
-Node3 also exposes Stratum on `127.0.0.1:3333`. P2P ports are mapped to
-`19444`, `19445`, and `19446` for local inspection, while nodes announce their
+Node3 also exposes Stratum on `127.0.0.1:3333`. P2P ports `19444` through
+`19449` are mapped for local inspection, while nodes announce their
 stable Docker-network addresses to each other.
 
-The local compose file uses `test` as the management UI and wallet password for
-all three nodes. On first start this configures the management UI password and
+The local compose file uses `testtesttest` as the management UI and wallet
+password for all six nodes. On first start this configures the management UI password and
 encrypts the wallet; on restart it unlocks the encrypted wallet so finalization
 and automatic mining can continue without UI login. Compose also sets
 `IUNA_SETUP_COMPLETE=true`, so after unlocking the management UI you land
@@ -163,14 +166,18 @@ settings:
 - `IUNA_SETUP_COMPLETE=true|false`
 - `IUNA_AUTOMATIC_BURN_ENABLED=true|false`
 - `IUNA_POW_MINING_ENABLED=true|false`
+- `IUNA_POW_MINING_WORKERS=1..32`
 
 The compose bootstrap also selects the isolated `iuna-local-testnet-v1` launch
-profile. Its PoW burn-committee lineages are eligible immediately, so node2 can
-provide a real second committee attestation as soon as its first mine action is
-confirmed. The normal launch profile retains the 20-block lineage maturity.
+profile. Its PoW burn-committee lineages are eligible immediately, so joining
+nodes can provide independent committee attestations as soon as their first mine
+actions are confirmed. Six distinct owners allow the testnet to exercise a full
+five-member rank-1 committee even though the missed rank-0 owner is excluded.
+The normal launch profile retains the 20-block lineage maturity.
 Existing compose volumes created with the normal profile must be reset once
 with `docker compose down -v`, because consensus launch profiles cannot be
-changed in place.
+changed in place. The five-slot committee is also a consensus reset: volumes
+created by the earlier three-slot protocol must likewise be recreated.
 
 Stop the network while keeping chain data:
 

@@ -42,6 +42,7 @@ const VDF_MEASUREMENT_MIN_ELAPSED: Duration = Duration::from_millis(150);
 const VDF_PROGRESS_LOG_INTERVAL: Duration = Duration::from_secs(10);
 const AUTOMATIC_BURN_ENABLED_ENV: &str = "IUNA_AUTOMATIC_BURN_ENABLED";
 const POW_MINING_ENABLED_ENV: &str = "IUNA_POW_MINING_ENABLED";
+const POW_MINING_WORKERS_ENV: &str = "IUNA_POW_MINING_WORKERS";
 const LOCAL_TESTNET_ENV: &str = "IUNA_LOCAL_TESTNET";
 const SETUP_COMPLETE_ENV: &str = "IUNA_SETUP_COMPLETE";
 const WALLET_PASSWORD_ENV: &str = "IUNA_WALLET_PASSWORD";
@@ -72,6 +73,7 @@ async fn main() -> Result<()> {
     let startup_wallet_password = startup_wallet_password_from_env()?;
     let startup_automatic_burn_enabled = startup_bool_from_env(AUTOMATIC_BURN_ENABLED_ENV)?;
     let startup_pow_mining_enabled = startup_bool_from_env(POW_MINING_ENABLED_ENV)?;
+    let startup_pow_mining_workers = startup_pow_mining_workers_from_env()?;
     let startup_local_testnet = startup_bool_from_env(LOCAL_TESTNET_ENV)?.unwrap_or(false);
     let startup_setup_complete = startup_bool_from_env(SETUP_COMPLETE_ENV)?;
     let p2p_config_dirty = apply_cli_p2p_config_overrides(&opts, &mut ui_config);
@@ -92,6 +94,7 @@ async fn main() -> Result<()> {
         &mut ui_config,
         startup_automatic_burn_enabled,
         startup_pow_mining_enabled,
+        startup_pow_mining_workers,
     );
     let setup_config_dirty = apply_startup_setup_config_override(
         &opts,
@@ -345,10 +348,34 @@ fn parse_startup_bool_env_value(name: &str, normalized: &str) -> Result<bool> {
     }
 }
 
+fn startup_pow_mining_workers_from_env() -> Result<Option<u8>> {
+    let Some(value) = std::env::var_os(POW_MINING_WORKERS_ENV) else {
+        return Ok(None);
+    };
+    let value = value
+        .into_string()
+        .map_err(|_| anyhow::anyhow!("{POW_MINING_WORKERS_ENV} must be valid UTF-8"))?;
+    parse_startup_pow_mining_workers_env_value(value.trim()).map(Some)
+}
+
+fn parse_startup_pow_mining_workers_env_value(value: &str) -> Result<u8> {
+    let workers = value
+        .parse::<u8>()
+        .with_context(|| format!("{POW_MINING_WORKERS_ENV} must be an integer"))?;
+    if !(1..=config_store::MAX_POW_MINING_WORKERS).contains(&workers) {
+        bail!(
+            "{POW_MINING_WORKERS_ENV} must be between 1 and {}",
+            config_store::MAX_POW_MINING_WORKERS
+        );
+    }
+    Ok(workers)
+}
+
 fn apply_startup_mining_config_overrides(
     ui_config: &mut config_store::UiConfig,
     automatic_burn_enabled: Option<bool>,
     pow_mining_enabled: Option<bool>,
+    pow_mining_workers: Option<u8>,
 ) -> bool {
     let mut dirty = false;
     if let Some(enabled) = automatic_burn_enabled {
@@ -360,6 +387,12 @@ fn apply_startup_mining_config_overrides(
     if let Some(enabled) = pow_mining_enabled {
         if ui_config.pow_mining_enabled != enabled {
             ui_config.pow_mining_enabled = enabled;
+            dirty = true;
+        }
+    }
+    if let Some(workers) = pow_mining_workers {
+        if ui_config.pow_mining_workers != workers {
+            ui_config.pow_mining_workers = workers;
             dirty = true;
         }
     }

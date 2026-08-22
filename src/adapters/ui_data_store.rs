@@ -221,7 +221,7 @@ impl SqliteUiDataStore {
     pub fn project_snapshot(&self, snapshot: &ChainSnapshot, keep_metrics: bool) -> Result<()> {
         let updated_at_ms = unix_ms();
         let ui_index = build_ui_chain_index(snapshot);
-        let utxos = Ledger::from_persisted_snapshot(snapshot.clone())
+        let utxos = Ledger::from_preverified_snapshot(snapshot.clone())
             .context("failed to rebuild ledger for UI UTXO projection")?
             .all_utxos();
         let wallet_transactions = wallet_transactions_from_snapshot(snapshot);

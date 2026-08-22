@@ -24,7 +24,7 @@ pub(crate) fn burn_leader_ranks_for_blocks(
     snapshot: &ChainSnapshot,
     blocks: &[Block],
 ) -> BTreeMap<String, Vec<BurnLeaderRank>> {
-    let Some(ranks_by_height) = Ledger::from_persisted_snapshot(snapshot.clone())
+    let Some(ranks_by_height) = Ledger::from_preverified_snapshot(snapshot.clone())
         .ok()
         .and_then(|ledger| {
             ledger
@@ -49,7 +49,7 @@ pub(crate) fn burn_leader_ranks_for_blocks(
 fn known_chain_output_index(snapshot: &ChainSnapshot) -> BTreeMap<OutPoint, TxOutput> {
     let mut outputs = BTreeMap::new();
     let mut running_ledger = snapshot.blocks.first().cloned().and_then(|genesis| {
-        Ledger::from_persisted_snapshot(ChainSnapshot {
+        Ledger::from_preverified_snapshot(ChainSnapshot {
             genesis_allocations: snapshot.genesis_allocations.clone(),
             vdf_rounds: snapshot.vdf_rounds,
             launch_profile: snapshot.launch_profile.clone(),
