@@ -24,6 +24,8 @@ use super::{
     MINE_ACTIONS_PER_ANCHOR_LIMIT, OutPoint, Transaction, TxOutput,
 };
 
+pub(crate) const MINE_ANCHOR_LIMIT_REACHED: &str = "mine transaction anchor limit reached";
+
 impl Ledger {
     pub(super) fn valid_pending_transactions(&self) -> Vec<Transaction> {
         let mut utxos = self.utxos.clone();
@@ -345,7 +347,7 @@ impl Ledger {
                         .count(),
                 );
             if known_count >= MINE_ACTIONS_PER_ANCHOR_LIMIT {
-                bail!("mine transaction anchor limit reached");
+                bail!(MINE_ANCHOR_LIMIT_REACHED);
             }
         }
         Ok(())

@@ -2,7 +2,10 @@ use std::{
     collections::BTreeMap,
     net::SocketAddr,
     path::{Path, PathBuf},
-    sync::Arc,
+    sync::{
+        Arc,
+        atomic::{AtomicBool, Ordering},
+    },
     time::{Duration, Instant},
 };
 
@@ -18,7 +21,8 @@ use iuna::{
     },
     domain::{
         Amount, ChainSnapshot, GenesisBurn, LaunchProfile, Ledger, MAX_VDF_ROUNDS, MICRO_IUNA,
-        VDF_TARGET_BLOCK_MS, VdfProgress, VdfProgressPhase, run_vdf, run_vdf_with_progress,
+        VDF_TARGET_BLOCK_MS, VdfProgress, VdfProgressPhase, run_vdf,
+        run_vdf_cancellable_with_progress,
     },
 };
 use tokio::sync::Mutex;
@@ -656,6 +660,7 @@ async fn run_automatic_finalizer(node: SharedNode, gossip: p2p::GossipNetwork, d
         }
 
         let candidate_height = work.height();
+        let candidate_parent = work.prev_hash().to_string();
         let seed = work.vdf_seed().to_string();
         let rounds = work.vdf_rounds();
         let publish_at_ms = work.timestamp_ms();
@@ -675,11 +680,20 @@ async fn run_automatic_finalizer(node: SharedNode, gossip: p2p::GossipNetwork, d
             continue;
         }
         let (progress_tx, progress_rx) = std::sync::mpsc::channel();
+        let cancellation = Arc::new(AtomicBool::new(false));
+        let worker_cancellation = Arc::clone(&cancellation);
         let mut vdf_worker = tokio::task::spawn_blocking(move || {
-            run_vdf_with_progress(&seed, rounds, VDF_PROGRESS_LOG_INTERVAL, |progress| {
-                let _ = progress_tx.send(progress);
-            })
+            run_vdf_cancellable_with_progress(
+                &seed,
+                rounds,
+                VDF_PROGRESS_LOG_INTERVAL,
+                worker_cancellation.as_ref(),
+                |progress| {
+                    let _ = progress_tx.send(progress);
+                },
+            )
         });
+        let mut cancelled_for_new_tip = false;
         let vdf_output = loop {
             tokio::select! {
                 result = &mut vdf_worker => {
@@ -689,7 +703,7 @@ async fn run_automatic_finalizer(node: SharedNode, gossip: p2p::GossipNetwork, d
                             if debug {
                                 eprintln!("VDF worker failed: {error:#}");
                             }
-                            continue;
+                            None
                         }
                     };
                 }
@@ -701,8 +715,27 @@ async fn run_automatic_finalizer(node: SharedNode, gossip: p2p::GossipNetwork, d
                         }
                         node.lock().await.record_automatic_finalization_status(message);
                     }
+                    let tip_changed = node.lock().await.ledger().tip_hash() != candidate_parent;
+                    if tip_changed {
+                        cancelled_for_new_tip = true;
+                        cancellation.store(true, Ordering::Relaxed);
+                    }
                 }
             }
+        };
+        let Some(vdf_output) = vdf_output else {
+            let message = if cancelled_for_new_tip {
+                format!("cancelled stale VDF for candidate block {candidate_height}")
+            } else {
+                format!("VDF worker failed for candidate block {candidate_height}")
+            };
+            if debug {
+                println!("auto-finalization {message}");
+            }
+            node.lock()
+                .await
+                .record_automatic_finalization_status(message);
+            continue;
         };
 
         let completed_at_ms = now_ms();

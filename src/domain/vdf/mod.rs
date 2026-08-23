@@ -1,4 +1,7 @@
-use std::time::{Duration, Instant};
+use std::{
+    sync::atomic::AtomicBool,
+    time::{Duration, Instant},
+};
 
 use super::{Block, FinalizerMode, MAX_VDF_ROUNDS, VDF_TARGET_BLOCK_MS, decode_hex, hex_encode};
 
@@ -45,30 +48,47 @@ pub fn run_vdf_with_progress(
     seed: &str,
     rounds: u64,
     progress_interval: Duration,
-    mut progress: impl FnMut(VdfProgress),
+    progress: impl FnMut(VdfProgress),
 ) -> String {
+    let cancelled = AtomicBool::new(false);
+    run_vdf_cancellable_with_progress(seed, rounds, progress_interval, &cancelled, progress)
+        .expect("non-cancellable VDF must finish")
+}
+
+pub fn run_vdf_cancellable_with_progress(
+    seed: &str,
+    rounds: u64,
+    progress_interval: Duration,
+    cancelled: &AtomicBool,
+    mut progress: impl FnMut(VdfProgress),
+) -> Option<String> {
     let total_steps = rounds.saturating_mul(2);
     let mut last_progress = Instant::now();
-    let solution = wesolowski::prove(seed.as_bytes(), rounds, |phase, completed_phase_rounds| {
-        let completed_steps = match phase {
-            VdfProgressPhase::Output => completed_phase_rounds,
-            VdfProgressPhase::Proof => rounds.saturating_add(completed_phase_rounds),
-        };
-        maybe_report_vdf_progress(
-            &mut last_progress,
-            progress_interval,
-            VdfProgress {
-                completed_steps,
-                total_steps,
-                completed_phase_rounds,
-                phase_rounds: rounds,
-                phase,
-            },
-            &mut progress,
-        );
-    })
+    let solution = wesolowski::prove_cancellable(
+        seed.as_bytes(),
+        rounds,
+        |phase, completed_phase_rounds| {
+            let completed_steps = match phase {
+                VdfProgressPhase::Output => completed_phase_rounds,
+                VdfProgressPhase::Proof => rounds.saturating_add(completed_phase_rounds),
+            };
+            maybe_report_vdf_progress(
+                &mut last_progress,
+                progress_interval,
+                VdfProgress {
+                    completed_steps,
+                    total_steps,
+                    completed_phase_rounds,
+                    phase_rounds: rounds,
+                    phase,
+                },
+                &mut progress,
+            );
+        },
+        cancelled,
+    )
     .expect("valid IUNA VDF parameters must produce a class-group proof");
-    encode_vdf_solution(&solution)
+    solution.map(|solution| encode_vdf_solution(&solution))
 }
 
 pub fn verify_vdf(seed: &str, rounds: u64, solution: &str) -> bool {
@@ -151,11 +171,14 @@ fn decode_vdf_solution(solution: &str) -> Option<Vec<u8>> {
 
 #[cfg(test)]
 mod tests {
-    use std::time::Duration;
+    use std::{
+        sync::atomic::{AtomicBool, Ordering},
+        time::Duration,
+    };
 
     use super::{
-        VDF_SOLUTION_PREFIX, VdfProgressPhase, run_vdf, run_vdf_with_progress,
-        vdf_solution_placeholder, verify_vdf, wesolowski,
+        VDF_SOLUTION_PREFIX, VdfProgressPhase, run_vdf, run_vdf_cancellable_with_progress,
+        run_vdf_with_progress, vdf_solution_placeholder, verify_vdf, wesolowski,
     };
 
     #[test]
@@ -194,6 +217,26 @@ mod tests {
             progress.last().map(|snapshot| snapshot.total_steps),
             Some(8)
         );
+    }
+
+    #[test]
+    fn cancellable_vdf_stops_during_output_or_proof() {
+        for phase in [VdfProgressPhase::Output, VdfProgressPhase::Proof] {
+            let cancelled = AtomicBool::new(false);
+            let solution = run_vdf_cancellable_with_progress(
+                "cancelled-seed",
+                128,
+                Duration::ZERO,
+                &cancelled,
+                |progress| {
+                    if progress.phase == phase && progress.completed_phase_rounds >= 10 {
+                        cancelled.store(true, Ordering::Relaxed);
+                    }
+                },
+            );
+
+            assert!(solution.is_none(), "VDF did not stop during {phase:?}");
+        }
     }
 
     #[test]

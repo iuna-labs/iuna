@@ -47,6 +47,7 @@ use ledger_ops::{
     apply_transaction, credit_reward_output, ensure_block_has_burn, ensure_block_has_burn_from,
     recovery_vdf_seed_for_child, validate_genesis_burn_transaction, vdf_seed_for_child,
 };
+pub(crate) use ledger_pending::MINE_ANCHOR_LIMIT_REACHED;
 pub use ledger_state::Ledger;
 use ledger_state::unix_now_ms;
 use mining::{mine_payload, mine_signature};
@@ -80,7 +81,10 @@ pub use validation::validate_address;
 use validation::{
     canonical_transaction_size_bytes, validate_hash, validate_protocol_id, validate_signature,
 };
-pub use vdf::{VdfProgress, VdfProgressPhase, run_vdf, run_vdf_with_progress, verify_vdf};
+pub use vdf::{
+    VdfProgress, VdfProgressPhase, run_vdf, run_vdf_cancellable_with_progress,
+    run_vdf_with_progress, verify_vdf,
+};
 pub use wallet::Wallet;
 
 pub fn burn_committee_slot_count(eligible_rank_count: usize) -> usize {

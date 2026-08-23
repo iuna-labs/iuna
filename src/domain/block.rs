@@ -233,6 +233,10 @@ impl PreparedBlock {
         self.height
     }
 
+    pub fn prev_hash(&self) -> &str {
+        &self.prev_hash
+    }
+
     pub fn timestamp_ms(&self) -> u64 {
         self.timestamp_ms
     }

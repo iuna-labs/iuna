@@ -1,3 +1,5 @@
+use std::sync::atomic::{AtomicBool, Ordering};
+
 use kyn_vdf::{Form, KynVdfError, get_b};
 use num_bigint::{BigInt, BigUint};
 use num_traits::{One, ToPrimitive};
@@ -24,6 +26,15 @@ struct ClassGroup<'a> {
     threshold: &'a BigInt,
 }
 
+struct CheckpointProofInput<'a> {
+    generator: &'a Form,
+    output: &'a Form,
+    checkpoints: &'a [limb_arithmetic::LimbForm],
+    rounds: u64,
+    parameters: ProofParameters,
+}
+
+#[cfg(test)]
 pub(super) fn prove(
     discriminant: &BigInt,
     generator: &Form,
@@ -31,25 +42,53 @@ pub(super) fn prove(
     rounds: u64,
     progress: impl FnMut(VdfProgressPhase, u64),
 ) -> Result<(Form, Form), KynVdfError> {
+    let cancelled = AtomicBool::new(false);
+    prove_cancellable(
+        discriminant,
+        generator,
+        threshold,
+        rounds,
+        progress,
+        &cancelled,
+    )?
+    .ok_or_else(|| arithmetic_error("non-cancellable VDF was cancelled"))
+}
+
+pub(super) fn prove_cancellable(
+    discriminant: &BigInt,
+    generator: &Form,
+    threshold: &BigInt,
+    rounds: u64,
+    progress: impl FnMut(VdfProgressPhase, u64),
+    cancelled: &AtomicBool,
+) -> Result<Option<(Form, Form)>, KynVdfError> {
     let group = ClassGroup {
         discriminant,
         threshold,
     };
     let parameters = ProofParameters::for_rounds(rounds);
     if parameters.checkpoint_count > MAX_CHECKPOINTS || parameters.bucket_count > MAX_BUCKETS {
-        return prove_constant_memory(discriminant, generator, threshold, rounds, progress);
+        return prove_constant_memory_cancellable(
+            discriminant,
+            generator,
+            threshold,
+            rounds,
+            progress,
+            cancelled,
+        );
     }
 
-    prove_checkpointed(group, generator, rounds, parameters, progress)
+    prove_checkpointed_cancellable(group, generator, rounds, parameters, progress, cancelled)
 }
 
-fn prove_checkpointed(
+fn prove_checkpointed_cancellable(
     group: ClassGroup<'_>,
     generator: &Form,
     rounds: u64,
     parameters: ProofParameters,
     mut progress: impl FnMut(VdfProgressPhase, u64),
-) -> Result<(Form, Form), KynVdfError> {
+    cancelled: &AtomicBool,
+) -> Result<Option<(Form, Form)>, KynVdfError> {
     let checkpoint_capacity = usize::try_from(parameters.checkpoint_count)
         .map_err(|_| arithmetic_error("checkpoint count does not fit in memory"))?;
     let checkpoint_stride = u64::from(parameters.k)
@@ -61,6 +100,9 @@ fn prove_checkpointed(
     let mut output = limb_arithmetic::LimbForm::from_form(generator);
     let mut output_scratch = limb_arithmetic::LimbFormScratch::default();
     for completed_rounds in 1..=rounds {
+        if cancelled.load(Ordering::Relaxed) {
+            return Ok(None);
+        }
         if (completed_rounds - 1) % checkpoint_stride == 0 {
             checkpoints.push(output.clone());
         }
@@ -74,27 +116,37 @@ fn prove_checkpointed(
 
     let output = output.into_form();
     debug_assert_eq!(checkpoints.len(), checkpoint_capacity);
-    let proof = generate_checkpoint_proof(
+    let Some(proof) = generate_checkpoint_proof_cancellable(
         group,
-        generator,
-        &output,
-        &checkpoints,
-        rounds,
-        parameters,
+        CheckpointProofInput {
+            generator,
+            output: &output,
+            checkpoints: &checkpoints,
+            rounds,
+            parameters,
+        },
         &mut progress,
-    )?;
-    Ok((output, proof))
+        cancelled,
+    )?
+    else {
+        return Ok(None);
+    };
+    Ok(Some((output, proof)))
 }
 
-fn generate_checkpoint_proof(
+fn generate_checkpoint_proof_cancellable(
     group: ClassGroup<'_>,
-    generator: &Form,
-    output: &Form,
-    checkpoints: &[limb_arithmetic::LimbForm],
-    rounds: u64,
-    parameters: ProofParameters,
+    input: CheckpointProofInput<'_>,
     progress: &mut impl FnMut(VdfProgressPhase, u64),
-) -> Result<Form, KynVdfError> {
+    cancelled: &AtomicBool,
+) -> Result<Option<Form>, KynVdfError> {
+    let CheckpointProofInput {
+        generator,
+        output,
+        checkpoints,
+        rounds,
+        parameters,
+    } = input;
     let challenge = get_b(group.discriminant, generator, output)?;
     let bucket_count = usize::try_from(parameters.bucket_count)
         .map_err(|_| arithmetic_error("bucket count does not fit in memory"))?;
@@ -122,6 +174,9 @@ fn generate_checkpoint_proof(
     let block_step = BigUint::from(2_u8).modpow(&BigUint::from(block_step_exponent), &challenge);
 
     for j in (0..parameters.l).rev() {
+        if cancelled.load(Ordering::Relaxed) {
+            return Ok(None);
+        }
         proof = proof.fast_pow_u64_with_scratch(
             1_u64 << parameters.k,
             &limb_discriminant,
@@ -133,6 +188,9 @@ fn generate_checkpoint_proof(
             get_blocks_for_pass(j, parameters, rounds, &challenge, &block_step)?;
         let mut buckets: Vec<Option<limb_arithmetic::LimbForm>> = vec![None; bucket_count];
         for (i, checkpoint) in checkpoints.iter().enumerate() {
+            if cancelled.load(Ordering::Relaxed) {
+                return Ok(None);
+            }
             let bucket = checkpoint_blocks[i];
             if bucket != INVALID_BUCKET {
                 let bucket_form = buckets[bucket].take();
@@ -152,6 +210,9 @@ fn generate_checkpoint_proof(
         }
 
         for b1 in 0..row_count {
+            if cancelled.load(Ordering::Relaxed) {
+                return Ok(None);
+            }
             let row_start = b1 << k0;
             let mut aggregate: Option<limb_arithmetic::LimbForm> = None;
             for b0 in 0..column_count {
@@ -188,6 +249,9 @@ fn generate_checkpoint_proof(
         }
 
         for b0 in 0..column_count {
+            if cancelled.load(Ordering::Relaxed) {
+                return Ok(None);
+            }
             let mut aggregate: Option<limb_arithmetic::LimbForm> = None;
             for b1 in 0..row_count {
                 if let Some(bucket) = &buckets[((b1 << k0) + b0) as usize] {
@@ -225,7 +289,7 @@ fn generate_checkpoint_proof(
 
     proof.reduce();
     progress(VdfProgressPhase::Proof, rounds);
-    Ok(proof.into_form())
+    Ok(Some(proof.into_form()))
 }
 
 fn get_blocks_for_pass(
@@ -311,18 +375,22 @@ fn block_from_residue(
         .ok_or_else(|| arithmetic_error("proof block does not fit in its bucket range"))
 }
 
-fn prove_constant_memory(
+fn prove_constant_memory_cancellable(
     discriminant: &BigInt,
     generator: &Form,
     threshold: &BigInt,
     rounds: u64,
     mut progress: impl FnMut(VdfProgressPhase, u64),
-) -> Result<(Form, Form), KynVdfError> {
+    cancelled: &AtomicBool,
+) -> Result<Option<(Form, Form)>, KynVdfError> {
     let limb_discriminant = limb_arithmetic::to_limb(discriminant);
     let limb_threshold = limb_arithmetic::to_limb(threshold);
     let mut output = limb_arithmetic::LimbForm::from_form(generator);
     let mut output_scratch = limb_arithmetic::LimbFormScratch::default();
     for completed_rounds in 1..=rounds {
+        if cancelled.load(Ordering::Relaxed) {
+            return Ok(None);
+        }
         output = output.nudupl_reduce_with_scratch(
             &limb_discriminant,
             &limb_threshold,
@@ -338,6 +406,9 @@ fn prove_constant_memory(
     let mut proof_scratch = limb_arithmetic::LimbFormScratch::default();
     let mut remainder = BigUint::one() % &challenge;
     for completed_rounds in 1..=rounds {
+        if cancelled.load(Ordering::Relaxed) {
+            return Ok(None);
+        }
         let doubled = &remainder << 1_usize;
         let carry = doubled >= challenge;
         proof = proof.nudupl_reduce_with_scratch(
@@ -357,7 +428,66 @@ fn prove_constant_memory(
         progress(VdfProgressPhase::Proof, completed_rounds);
     }
 
-    Ok((output, proof.into_form()))
+    Ok(Some((output, proof.into_form())))
+}
+
+#[cfg(test)]
+fn prove_checkpointed(
+    group: ClassGroup<'_>,
+    generator: &Form,
+    rounds: u64,
+    parameters: ProofParameters,
+    progress: impl FnMut(VdfProgressPhase, u64),
+) -> Result<(Form, Form), KynVdfError> {
+    let cancelled = AtomicBool::new(false);
+    prove_checkpointed_cancellable(group, generator, rounds, parameters, progress, &cancelled)?
+        .ok_or_else(|| arithmetic_error("non-cancellable VDF was cancelled"))
+}
+
+#[cfg(test)]
+fn generate_checkpoint_proof(
+    group: ClassGroup<'_>,
+    generator: &Form,
+    output: &Form,
+    checkpoints: &[limb_arithmetic::LimbForm],
+    rounds: u64,
+    parameters: ProofParameters,
+    progress: &mut impl FnMut(VdfProgressPhase, u64),
+) -> Result<Form, KynVdfError> {
+    let cancelled = AtomicBool::new(false);
+    generate_checkpoint_proof_cancellable(
+        group,
+        CheckpointProofInput {
+            generator,
+            output,
+            checkpoints,
+            rounds,
+            parameters,
+        },
+        progress,
+        &cancelled,
+    )?
+    .ok_or_else(|| arithmetic_error("non-cancellable VDF was cancelled"))
+}
+
+#[cfg(test)]
+fn prove_constant_memory(
+    discriminant: &BigInt,
+    generator: &Form,
+    threshold: &BigInt,
+    rounds: u64,
+    progress: impl FnMut(VdfProgressPhase, u64),
+) -> Result<(Form, Form), KynVdfError> {
+    let cancelled = AtomicBool::new(false);
+    prove_constant_memory_cancellable(
+        discriminant,
+        generator,
+        threshold,
+        rounds,
+        progress,
+        &cancelled,
+    )?
+    .ok_or_else(|| arithmetic_error("non-cancellable VDF was cancelled"))
 }
 
 fn arithmetic_error(message: &str) -> KynVdfError {

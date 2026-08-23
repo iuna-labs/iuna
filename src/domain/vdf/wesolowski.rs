@@ -1,3 +1,5 @@
+use std::sync::atomic::AtomicBool;
+
 use kyn_vdf::{
     Form, KynVdfError, create_discriminant, deserialize_form, isqrt_fourth, serialize_form,
     verify_wesolowski,
@@ -10,11 +12,24 @@ pub(super) const DISCRIMINANT_BITS: usize = 1024;
 const FORM_BYTES: usize = 100;
 pub(super) const SOLUTION_BYTES: usize = FORM_BYTES * 2;
 
+#[cfg(test)]
 pub(super) fn prove(
     seed: &[u8],
     rounds: u64,
-    mut progress: impl FnMut(VdfProgressPhase, u64),
+    progress: impl FnMut(VdfProgressPhase, u64),
 ) -> Result<Vec<u8>, KynVdfError> {
+    let cancelled = AtomicBool::new(false);
+    prove_cancellable(seed, rounds, progress, &cancelled)?.ok_or_else(|| {
+        KynVdfError::ArithmeticError("non-cancellable VDF was cancelled".to_string())
+    })
+}
+
+pub(super) fn prove_cancellable(
+    seed: &[u8],
+    rounds: u64,
+    mut progress: impl FnMut(VdfProgressPhase, u64),
+    cancelled: &AtomicBool,
+) -> Result<Option<Vec<u8>>, KynVdfError> {
     if rounds == 0 {
         return Err(KynVdfError::InvalidIterations(rounds));
     }
@@ -24,9 +39,18 @@ pub(super) fn prove(
         Form::generator(&discriminant).ok_or(KynVdfError::InvalidDiscriminantIdentity)?;
     let threshold = isqrt_fourth(&discriminant.abs());
 
-    let (output, proof) =
-        prover::prove(&discriminant, &generator, &threshold, rounds, &mut progress)?;
-    serialize_solution(&output, &proof)
+    let Some((output, proof)) = prover::prove_cancellable(
+        &discriminant,
+        &generator,
+        &threshold,
+        rounds,
+        &mut progress,
+        cancelled,
+    )?
+    else {
+        return Ok(None);
+    };
+    serialize_solution(&output, &proof).map(Some)
 }
 
 pub(super) fn verify(seed: &[u8], rounds: u64, solution: &[u8]) -> bool {

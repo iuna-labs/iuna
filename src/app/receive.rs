@@ -1,7 +1,8 @@
 use anyhow::Result;
 
 use crate::domain::{
-    Block, BurnBundle, ChainSnapshot, Ledger, Transaction, TransactionSubmitOutcome,
+    Block, BurnBundle, ChainSnapshot, Ledger, MINE_ANCHOR_LIMIT_REACHED, Transaction,
+    TransactionSubmitOutcome,
 };
 
 use super::{GossipEnvelope, IMPORT_REBROADCAST_LIMIT, NodeCore};
@@ -13,11 +14,17 @@ impl NodeCore {
     }
 
     pub fn receive_gossiped_transaction(&mut self, tx: Transaction) -> Result<()> {
-        if self
-            .ledger
-            .submit_transaction_with_outcome(tx.clone())?
-            .added()
-        {
+        let outcome = match self.ledger.submit_transaction_with_outcome(tx.clone()) {
+            Ok(outcome) => outcome,
+            Err(error)
+                if matches!(&tx, Transaction::Mine { .. })
+                    && error.to_string() == MINE_ANCHOR_LIMIT_REACHED =>
+            {
+                return Ok(());
+            }
+            Err(error) => return Err(error),
+        };
+        if outcome.added() {
             self.outbox.push(GossipEnvelope::Transaction(tx));
         }
         Ok(())
@@ -208,6 +215,41 @@ mod tests {
             .map(|wallet| GenesisBurn::new(wallet.address(), MICRO_IUNA))
             .collect::<Vec<_>>();
         Ledger::new_with_genesis_burns(allocations, genesis_burns, 1).unwrap()
+    }
+
+    #[test]
+    fn gossiped_mine_over_anchor_limit_is_silently_ignored() {
+        let wallets = (0..4)
+            .map(|index| {
+                let seed = format!("gossip-mine-limit-{index}");
+                Wallet::from_seed(&seed)
+            })
+            .collect::<Vec<_>>();
+        let ledger = Ledger::new(BTreeMap::new(), 1);
+        let mine_actions = wallets
+            .iter()
+            .map(|wallet| ledger.build_mine(wallet.address()).unwrap())
+            .collect::<Vec<_>>();
+        let mut node = NodeCore::from_ledger(wallets[0].clone(), ledger, 0);
+
+        node.receive_gossiped_transaction(mine_actions[0].clone())
+            .unwrap();
+        node.receive_gossiped_transaction(mine_actions[1].clone())
+            .unwrap();
+        node.receive_gossiped_transaction(mine_actions[2].clone())
+            .unwrap();
+
+        assert_eq!(node.ledger().pending().len(), 2);
+        assert!(
+            node.ledger()
+                .pending()
+                .iter()
+                .all(|transaction| transaction.signature() != mine_actions[2].signature())
+        );
+        let error = node
+            .receive_transaction(mine_actions[3].clone())
+            .unwrap_err();
+        assert_eq!(error.to_string(), "mine transaction anchor limit reached");
     }
 
     #[test]
