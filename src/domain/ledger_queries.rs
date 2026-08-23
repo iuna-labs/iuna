@@ -77,6 +77,15 @@ impl Ledger {
         }
     }
 
+    pub(crate) fn genesis_snapshot(&self) -> ChainSnapshot {
+        ChainSnapshot {
+            genesis_allocations: self.genesis_allocations.clone(),
+            vdf_rounds: self.initial_vdf_rounds,
+            launch_profile: self.launch_profile.clone(),
+            blocks: vec![self.chain[0].clone()],
+        }
+    }
+
     pub fn status(&self) -> ChainStatus {
         self.status_with_balances(true)
     }
@@ -427,6 +436,35 @@ impl Ledger {
             .take(limit)
             .cloned()
             .collect()
+    }
+
+    pub(crate) fn block_locator(&self) -> Vec<String> {
+        let mut locator = Vec::new();
+        let mut index = self.chain.len().saturating_sub(1);
+        let mut step = 1_usize;
+        loop {
+            locator.push(self.chain[index].hash.clone());
+            if index == 0 {
+                break;
+            }
+            index = index.saturating_sub(step);
+            if locator.len() > 10 {
+                step = step.saturating_mul(2);
+            }
+        }
+        locator
+    }
+
+    pub(crate) fn blocks_after_locator(&self, locator: &[String], limit: usize) -> Vec<Block> {
+        let common_height = locator.iter().find_map(|hash| {
+            self.chain
+                .iter()
+                .find(|block| block.hash == *hash)
+                .map(|block| block.height)
+        });
+        common_height
+            .map(|height| self.blocks_from(height.saturating_add(1), limit))
+            .unwrap_or_default()
     }
 
     pub fn block_by_hash(&self, hash: &str) -> Option<Block> {

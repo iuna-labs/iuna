@@ -28,8 +28,9 @@ mod wallet;
 pub use in_memory_network::InMemoryNetwork;
 pub use peer_book::{PeerBook, PeerDirection, PeerInfo};
 pub use types::{
-    AutoMineOutcome, AutoMinePlan, BlockInventory, ExternalMineJob, FeeEstimate, GossipEnvelope,
-    LaunchProfileStatus, MiningStatus, NodeConfig, NodeStatus, ProtocolHello, StratumStatus,
+    AutoMineOutcome, AutoMinePlan, BlockInventory, ChainBootstrap, ExternalMineJob, FeeEstimate,
+    GossipEnvelope, LaunchProfileStatus, MiningStatus, NodeConfig, NodeStatus, ProtocolHello,
+    StratumStatus,
 };
 use wallet::NodeWallet;
 

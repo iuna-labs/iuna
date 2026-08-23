@@ -12,7 +12,7 @@ pub(super) fn next_reconnect_delay(current: Duration, max_delay: Duration) -> Du
     (current * 2).min(max_delay)
 }
 
-pub(super) fn peer_needs_snapshot(peer_height: u64, envelopes: &[GossipEnvelope]) -> bool {
+pub(super) fn peer_has_block_gap(peer_height: u64, envelopes: &[GossipEnvelope]) -> bool {
     envelopes
         .iter()
         .filter_map(|envelope| match envelope {

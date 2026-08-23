@@ -70,7 +70,7 @@ async fn full_outbound_queue_is_metric_not_peer_error() {
 }
 
 #[tokio::test]
-async fn single_block_fork_error_requests_chain_snapshot() {
+async fn single_block_fork_error_requests_blocks_by_locator() {
     let alice = Wallet::from_seed("single-block-fork-alice");
     let allocations = allocations(std::slice::from_ref(&alice), 1_000);
     let mut local_node = node(
@@ -129,10 +129,18 @@ async fn single_block_fork_error_requests_chain_snapshot() {
         .unwrap()
         .unwrap()
         .unwrap();
-    assert!(matches!(
-        super::parse_envelope(&line).unwrap(),
-        GossipEnvelope::ChainSnapshotRequest
-    ));
+    let GossipEnvelope::BlockLocatorRequest { locator, limit } =
+        super::parse_envelope(&line).unwrap()
+    else {
+        panic!("expected block locator request");
+    };
+    let fork_blocks = remote_node.blocks_after_locator(&locator, limit);
+    assert_eq!(fork_blocks.len(), 2);
+    let local_ledger = network.inner.node.lock().await.clone_ledger();
+    let adopted = super::validate_blocks_extension(local_ledger, fork_blocks, crate::app::now_ms())
+        .await
+        .unwrap();
+    assert_eq!(adopted.tip_hash(), remote_node.ledger().tip_hash());
 }
 
 #[tokio::test]
@@ -294,7 +302,7 @@ async fn invalid_block_batch_is_rejected_atomically_without_partial_import() {
 }
 
 #[tokio::test]
-async fn chain_snapshot_request_only_writes_snapshot_without_mutating_local_state() {
+async fn chain_bootstrap_request_only_writes_bootstrap_without_mutating_local_state() {
     let alice = Wallet::from_seed("snapshot-request-spam-alice");
     let allocations = allocations(std::slice::from_ref(&alice), 1_000);
     let mut local_node = node("snapshot-request-spam", alice.clone(), allocations);
@@ -326,7 +334,7 @@ async fn chain_snapshot_request_only_writes_snapshot_without_mutating_local_stat
         &mut server_writer,
         remote_addr,
         &mut known_peer,
-        GossipEnvelope::ChainSnapshotRequest,
+        GossipEnvelope::ChainBootstrapRequest,
     )
     .await
     .unwrap();
@@ -336,10 +344,12 @@ async fn chain_snapshot_request_only_writes_snapshot_without_mutating_local_stat
         .unwrap()
         .unwrap()
         .unwrap();
-    assert_eq!(
-        super::parse_envelope(&line).unwrap(),
-        GossipEnvelope::ChainSnapshot(before.clone())
-    );
+    let GossipEnvelope::ChainBootstrap(bootstrap) = super::parse_envelope(&line).unwrap() else {
+        panic!("expected chain bootstrap");
+    };
+    assert_eq!(bootstrap.genesis_block, before.blocks[0]);
+    assert_eq!(bootstrap.height, before.blocks.last().unwrap().height);
+    assert_eq!(bootstrap.tip_hash, before.blocks.last().unwrap().hash);
     assert_eq!(network.inner.node.lock().await.chain_snapshot(), before);
     assert!(peers.lock().await.list().is_empty());
     assert!(known_peer.is_none());
@@ -759,7 +769,7 @@ async fn inbound_verification_only_session_closes_after_response() {
 }
 
 #[tokio::test]
-async fn setup_placeholder_accepts_remote_genesis_and_adopts_snapshot() {
+async fn setup_placeholder_accepts_remote_genesis_and_adopts_bootstrap() {
     let local_wallet = Wallet::from_seed("setup-placeholder-local");
     let local_ledger = Ledger::new(BTreeMap::new(), 1);
     let local_node = Arc::new(tokio::sync::Mutex::new(NodeCore::from_ledger(
@@ -784,13 +794,13 @@ async fn setup_placeholder_accepts_remote_genesis_and_adopts_snapshot() {
     };
 
     let remote_wallet = Wallet::from_seed("setup-placeholder-remote");
-    let remote_snapshot = node(
+    let remote_node = node(
         "remote",
         remote_wallet.clone(),
         allocations(std::slice::from_ref(&remote_wallet), 1_000),
-    )
-    .chain_snapshot();
-    let remote_genesis = remote_snapshot.blocks[0].hash.clone();
+    );
+    let remote_genesis = remote_node.ledger().genesis_hash().to_string();
+    let remote_bootstrap = remote_node.chain_bootstrap();
     let hello = ProtocolHello {
         protocol_version: PROTOCOL_VERSION,
         network_id: NETWORK_ID.to_string(),
@@ -811,8 +821,8 @@ async fn setup_placeholder_accepts_remote_genesis_and_adopts_snapshot() {
     .await
     .unwrap();
 
-    assert!(peer_status.request_snapshot);
-    assert!(!peer_status.push_snapshot);
+    assert!(peer_status.request_bootstrap);
+    assert!(!peer_status.push_bootstrap);
     assert_eq!(known_peer.as_deref(), Some("iuna.jhx.app:9444"));
     let listed = network.inner.peers.lock().await.list();
     assert_eq!(listed.len(), 1);
@@ -823,10 +833,9 @@ async fn setup_placeholder_accepts_remote_genesis_and_adopts_snapshot() {
     assert_eq!(peer.misbehavior_score, 0);
     assert!(!peer.is_banned_at(crate::app::now_ms()));
 
-    let adopted =
-        super::validate_snapshot_extension(local_ledger, remote_snapshot, crate::app::now_ms())
-            .await
-            .unwrap();
+    let adopted = super::validate_chain_bootstrap(remote_bootstrap, crate::app::now_ms())
+        .await
+        .unwrap();
     assert_eq!(adopted.genesis_hash(), remote_genesis);
     assert!(
         network
@@ -844,7 +853,7 @@ async fn setup_placeholder_accepts_remote_genesis_and_adopts_snapshot() {
 }
 
 #[tokio::test]
-async fn real_node_accepts_setup_placeholder_peer_and_pushes_snapshot() {
+async fn real_node_accepts_setup_placeholder_peer_and_pushes_bootstrap() {
     let wallet = Wallet::from_seed("setup-placeholder-peer-real-node");
     let node = Arc::new(tokio::sync::Mutex::new(node(
         "real",
@@ -885,12 +894,38 @@ async fn real_node_accepts_setup_placeholder_peer_and_pushes_snapshot() {
     .await
     .unwrap();
 
-    assert!(!peer_status.request_snapshot);
-    assert!(peer_status.push_snapshot);
+    assert!(!peer_status.request_bootstrap);
+    assert!(peer_status.push_bootstrap);
     let payload = super::catchup_payload_for_peer(&node, &peer_status).await;
     assert!(matches!(
         payload.as_slice(),
-        [GossipEnvelope::ChainSnapshot(_)]
+        [GossipEnvelope::ChainBootstrap(_)]
+    ));
+}
+
+#[tokio::test]
+async fn lagging_peer_receives_block_pages_before_mempool() {
+    let wallet = Wallet::from_seed("lagging-peer-blocks-before-mempool");
+    let mut local = node(
+        "lagging-peer-source",
+        wallet.clone(),
+        allocations(std::slice::from_ref(&wallet), 1_000),
+    );
+    let genesis_hash = local.ledger().genesis_hash().to_string();
+    queue_plaintext_burn(&mut local, &wallet, 1);
+    local.drain_outbox();
+    local.mine_one_at(1).unwrap();
+    local.drain_outbox();
+    queue_plaintext_burn(&mut local, &wallet, 1);
+    assert!(!local.ledger().pending().is_empty());
+    let local = Arc::new(tokio::sync::Mutex::new(local));
+    let peer_status = super::PeerStatus::new(0, genesis_hash);
+
+    let payload = super::catchup_payload_for_peer(&local, &peer_status).await;
+
+    assert!(matches!(
+        payload.as_slice(),
+        [GossipEnvelope::Blocks { .. }]
     ));
 }
 

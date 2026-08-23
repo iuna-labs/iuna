@@ -136,8 +136,8 @@ async fn process_hello_inner(
     let genesis_mismatch = hello.genesis_hash != local_genesis;
     let remote_is_setup_placeholder =
         hello.height == 0 && hello.genesis_hash == setup_placeholder_genesis_hash();
-    let request_snapshot = genesis_mismatch && local_accepts_remote_genesis;
-    let push_snapshot = genesis_mismatch && remote_is_setup_placeholder;
+    let request_bootstrap = genesis_mismatch && local_accepts_remote_genesis;
+    let push_bootstrap = genesis_mismatch && remote_is_setup_placeholder;
     if genesis_mismatch && !local_accepts_remote_genesis && !remote_is_setup_placeholder {
         anyhow::bail!(
             "wrong genesis {}; expected {local_genesis}",
@@ -180,14 +180,14 @@ async fn process_hello_inner(
         &PeerStatus::with_time(hello.height, hello.tip_hash.clone(), hello.time_ms),
     )
     .await;
-    if request_snapshot {
-        Ok(PeerStatus::with_snapshot_request(
+    if request_bootstrap {
+        Ok(PeerStatus::with_bootstrap_request(
             hello.height,
             hello.tip_hash,
             hello.time_ms,
         ))
-    } else if push_snapshot {
-        Ok(PeerStatus::with_snapshot_push(
+    } else if push_bootstrap {
+        Ok(PeerStatus::with_bootstrap_push(
             hello.height,
             hello.tip_hash,
             hello.time_ms,

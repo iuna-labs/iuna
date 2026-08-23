@@ -29,8 +29,7 @@ mod test_support;
 mod writer;
 pub use fetch::{fetch_peer_height, fetch_snapshot, fetch_snapshot_with_announcement};
 use fetch::{
-    network_adjusted_time_ms, validate_blocks_extension, validate_snapshot_extension,
-    verify_block_vdf,
+    network_adjusted_time_ms, validate_blocks_extension, validate_chain_bootstrap, verify_block_vdf,
 };
 #[cfg(test)]
 use handshake::verify_advertised_peer_node_id;
@@ -60,13 +59,13 @@ use sync::{
     apply_peer_list, envelopes_for_peer, maybe_request_catchup, push_catchup_to_peer,
     write_peer_exchange,
 };
-use writer::{write_envelope, write_payload};
+use writer::{byte_bounded_block_page, write_envelope, write_payload};
 
 const MAX_BLOCK_BATCH: usize = 128;
 const MAX_OBJECT_REQUESTS: usize = 128;
 const MAX_INVENTORY_ITEMS: usize = 512;
+const MAX_BLOCK_LOCATOR_HASHES: usize = 64;
 const MAX_PEER_LIST: usize = 128;
-const MAX_SNAPSHOT_BLOCKS: usize = 10_000;
 const MAX_GOSSIP_LINE_BYTES: usize = 8 * 1024 * 1024;
 const MAX_INBOUND_SESSIONS: usize = 64;
 const MAX_INBOUND_SESSIONS_PER_IP: usize = 8;

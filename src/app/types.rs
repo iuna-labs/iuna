@@ -3,7 +3,7 @@ use std::collections::BTreeMap;
 use serde::{Deserialize, Serialize};
 
 use crate::domain::{
-    Amount, Block, BurnBundle, ChainSnapshot, ChainStatus, PreparedBlock, StratumMineTemplate,
+    Amount, Block, BurnBundle, ChainStatus, LaunchProfile, PreparedBlock, StratumMineTemplate,
     Transaction, Wallet,
 };
 
@@ -39,7 +39,12 @@ pub enum GossipEnvelope {
         #[serde(default)]
         time_ms: u64,
     },
-    ChainSnapshotRequest,
+    ChainBootstrapRequest,
+    ChainBootstrap(ChainBootstrap),
+    BlockLocatorRequest {
+        locator: Vec<String>,
+        limit: usize,
+    },
     BlockRangeRequest {
         from_height: u64,
         limit: usize,
@@ -67,7 +72,6 @@ pub enum GossipEnvelope {
     Blocks {
         blocks: Vec<Block>,
     },
-    ChainSnapshot(ChainSnapshot),
     PeerAnnouncement {
         address: String,
         #[serde(default)]
@@ -86,6 +90,16 @@ pub enum GossipEnvelope {
     PeerList {
         peers: Vec<String>,
     },
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+pub struct ChainBootstrap {
+    pub genesis_allocations: BTreeMap<String, Amount>,
+    pub vdf_rounds: u64,
+    pub launch_profile: LaunchProfile,
+    pub genesis_block: Block,
+    pub height: u64,
+    pub tip_hash: String,
 }
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]

@@ -1,8 +1,8 @@
 use crate::domain::{Block, ChainSnapshot};
 
 use super::{
-    BLOCK_REQUEST_LIMIT, GossipEnvelope, NETWORK_ID, NodeCore, PROTOCOL_VERSION, ProtocolHello,
-    TRANSACTION_BATCH_LIMIT, now_ms, types::BlockInventory,
+    BLOCK_REQUEST_LIMIT, ChainBootstrap, GossipEnvelope, NETWORK_ID, NodeCore, PROTOCOL_VERSION,
+    ProtocolHello, TRANSACTION_BATCH_LIMIT, now_ms, types::BlockInventory,
 };
 
 impl NodeCore {
@@ -28,6 +28,26 @@ impl NodeCore {
 
     pub fn chain_snapshot(&self) -> ChainSnapshot {
         self.ledger.snapshot()
+    }
+
+    pub fn chain_bootstrap(&self) -> ChainBootstrap {
+        let snapshot = self.ledger.genesis_snapshot();
+        ChainBootstrap {
+            genesis_allocations: snapshot.genesis_allocations,
+            vdf_rounds: snapshot.vdf_rounds,
+            launch_profile: snapshot.launch_profile,
+            genesis_block: snapshot.blocks[0].clone(),
+            height: self.ledger.height(),
+            tip_hash: self.ledger.tip_hash().to_string(),
+        }
+    }
+
+    pub fn block_locator(&self) -> Vec<String> {
+        self.ledger.block_locator()
+    }
+
+    pub fn blocks_after_locator(&self, locator: &[String], limit: usize) -> Vec<Block> {
+        self.ledger.blocks_after_locator(locator, limit)
     }
 
     pub fn hello(&self, listen_addr: Option<String>, node_id: Option<String>) -> GossipEnvelope {

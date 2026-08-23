@@ -327,7 +327,7 @@ pub(super) async fn reset_local_chain(state: &HttpState, confirmation: &str) -> 
     clear_ui_data(&state.ui_data_store).await?;
     state
         .gossip
-        .broadcast(vec![GossipEnvelope::ChainSnapshotRequest])
+        .broadcast(vec![GossipEnvelope::ChainBootstrapRequest])
         .await?;
     Ok(())
 }

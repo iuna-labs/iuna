@@ -2,19 +2,18 @@ use std::net::SocketAddr;
 
 use anyhow::{Context, Result};
 use tokio::{
-    io::AsyncWriteExt,
     net::{TcpStream, tcp::OwnedReadHalf},
     time::timeout,
 };
 
 use crate::{
-    app::{GossipEnvelope, NETWORK_ID, PROTOCOL_VERSION, now_ms},
+    app::{ChainBootstrap, GossipEnvelope, NETWORK_ID, PROTOCOL_VERSION, now_ms},
     domain::{Block, ChainSnapshot, Ledger, verify_vdf},
 };
 
 use super::{
-    GossipNetwork, JOIN_RESPONSE_TIMEOUT, LimitedLineReader, MAX_JOIN_RESPONSE_ENVELOPES,
-    PeerStatus, parse_envelope,
+    GossipNetwork, JOIN_RESPONSE_TIMEOUT, LimitedLineReader, MAX_BLOCK_BATCH,
+    MAX_JOIN_RESPONSE_ENVELOPES, PeerStatus, parse_envelope, write_envelope,
 };
 
 pub async fn fetch_snapshot(peer: &str) -> Result<ChainSnapshot> {
@@ -100,65 +99,109 @@ pub async fn fetch_snapshot_with_announcement(
         other => anyhow::bail!("join peer {peer} sent {other:?} instead of peer status"),
     }
 
-    let line = serde_json::to_string(&GossipEnvelope::ChainSnapshotRequest)?;
-    writer.write_all(line.as_bytes()).await?;
-    writer.write_all(b"\n").await?;
-    let snapshot = read_join_snapshot_response(peer, &mut reader).await?;
+    write_envelope(&mut writer, &GossipEnvelope::ChainBootstrapRequest).await?;
+    let bootstrap = read_join_bootstrap_response(peer, &mut reader).await?;
+
+    let mut snapshot = ChainSnapshot {
+        genesis_allocations: bootstrap.genesis_allocations,
+        vdf_rounds: bootstrap.vdf_rounds,
+        launch_profile: bootstrap.launch_profile,
+        blocks: vec![bootstrap.genesis_block],
+    };
+    while snapshot.blocks.last().map_or(0, |block| block.height) < bootstrap.height {
+        let from_height = snapshot.blocks.last().map_or(0, |block| block.height) + 1;
+        let remaining = bootstrap.height - from_height + 1;
+        write_envelope(
+            &mut writer,
+            &GossipEnvelope::BlockRangeRequest {
+                from_height,
+                limit: remaining.min(MAX_BLOCK_BATCH as u64) as usize,
+            },
+        )
+        .await?;
+        let blocks = read_join_blocks_response(peer, &mut reader).await?;
+        if blocks.is_empty() {
+            anyhow::bail!("join peer {peer} returned an empty block page at height {from_height}");
+        }
+        if blocks[0].height != from_height {
+            anyhow::bail!("join peer {peer} returned a non-contiguous block page");
+        }
+        snapshot.blocks.extend(blocks);
+    }
+    if snapshot.blocks.last().map(|block| &block.hash) != Some(&bootstrap.tip_hash) {
+        anyhow::bail!("join peer {peer} changed tips while serving block pages");
+    }
 
     Ok(snapshot)
 }
 
-async fn read_join_snapshot_response(
+async fn read_join_bootstrap_response(
     peer: &str,
     reader: &mut LimitedLineReader<OwnedReadHalf>,
-) -> Result<ChainSnapshot> {
+) -> Result<ChainBootstrap> {
     for _ in 0..MAX_JOIN_RESPONSE_ENVELOPES {
-        let line = timeout(JOIN_RESPONSE_TIMEOUT, reader.read_line())
-            .await
-            .with_context(|| format!("join peer {peer} timed out waiting for a chain snapshot"))??
-            .with_context(|| format!("join peer {peer} closed before sending a chain snapshot"))?;
-        match join_snapshot_response(peer, parse_envelope(&line)?)? {
-            Some(snapshot) => return Ok(snapshot),
-            None => continue,
+        let envelope = read_join_envelope(peer, reader, "chain bootstrap").await?;
+        match envelope {
+            GossipEnvelope::ChainBootstrap(bootstrap) => return Ok(bootstrap),
+            envelope if is_join_control_envelope(&envelope) => continue,
+            other => anyhow::bail!("join peer {peer} sent {other:?} instead of chain bootstrap"),
         }
     }
-
-    anyhow::bail!("join peer {peer} sent too many non-snapshot envelopes while joining")
+    anyhow::bail!("join peer {peer} sent too many control envelopes while joining")
 }
 
-pub(super) fn join_snapshot_response(
+async fn read_join_blocks_response(
     peer: &str,
-    envelope: GossipEnvelope,
-) -> Result<Option<ChainSnapshot>> {
-    match envelope {
-        GossipEnvelope::ChainSnapshot(snapshot) => Ok(Some(snapshot)),
-        GossipEnvelope::Hello(_)
-        | GossipEnvelope::PeerStatus { .. }
-        | GossipEnvelope::PeerList { .. }
-        | GossipEnvelope::PeerVerificationChallenge { .. }
-        | GossipEnvelope::PeerVerificationResponse { .. }
-        | GossipEnvelope::Inventory { .. } => Ok(None),
-        other => anyhow::bail!("join peer {peer} sent {other:?} instead of a chain snapshot"),
+    reader: &mut LimitedLineReader<OwnedReadHalf>,
+) -> Result<Vec<Block>> {
+    for _ in 0..MAX_JOIN_RESPONSE_ENVELOPES {
+        let envelope = read_join_envelope(peer, reader, "block page").await?;
+        match envelope {
+            GossipEnvelope::Blocks { blocks } => return Ok(blocks),
+            envelope if is_join_control_envelope(&envelope) => continue,
+            other => anyhow::bail!("join peer {peer} sent {other:?} instead of a block page"),
+        }
     }
+    anyhow::bail!("join peer {peer} sent too many control envelopes while joining")
 }
 
-pub(super) async fn validate_snapshot_extension(
-    mut ledger: Ledger,
-    snapshot: ChainSnapshot,
+async fn read_join_envelope(
+    peer: &str,
+    reader: &mut LimitedLineReader<OwnedReadHalf>,
+    expected: &str,
+) -> Result<GossipEnvelope> {
+    let line = timeout(JOIN_RESPONSE_TIMEOUT, reader.read_line())
+        .await
+        .with_context(|| format!("join peer {peer} timed out waiting for {expected}"))??
+        .with_context(|| format!("join peer {peer} closed before sending {expected}"))?;
+    parse_envelope(&line)
+}
+
+fn is_join_control_envelope(envelope: &GossipEnvelope) -> bool {
+    matches!(
+        envelope,
+        GossipEnvelope::Hello(_)
+            | GossipEnvelope::PeerStatus { .. }
+            | GossipEnvelope::PeerList { .. }
+            | GossipEnvelope::PeerVerificationChallenge { .. }
+            | GossipEnvelope::PeerVerificationResponse { .. }
+            | GossipEnvelope::Inventory { .. }
+    )
+}
+
+pub(super) async fn validate_chain_bootstrap(
+    bootstrap: ChainBootstrap,
     now_ms: u64,
 ) -> Result<Ledger> {
-    if ledger.is_setup_placeholder() {
-        return tokio::task::spawn_blocking(move || Ledger::from_snapshot_at(snapshot, now_ms))
-            .await
-            .context("chain snapshot adoption worker failed")?;
-    }
-
-    tokio::task::spawn_blocking(move || {
-        ledger.extend_from_snapshot_at(snapshot, now_ms)?;
-        Ok(ledger)
-    })
-    .await
-    .context("chain snapshot extension worker failed")?
+    let snapshot = ChainSnapshot {
+        genesis_allocations: bootstrap.genesis_allocations,
+        vdf_rounds: bootstrap.vdf_rounds,
+        launch_profile: bootstrap.launch_profile,
+        blocks: vec![bootstrap.genesis_block],
+    };
+    tokio::task::spawn_blocking(move || Ledger::from_snapshot_at(snapshot, now_ms))
+        .await
+        .context("chain bootstrap adoption worker failed")?
 }
 
 pub(super) async fn validate_blocks_extension(
@@ -171,6 +214,18 @@ pub(super) async fn validate_blocks_extension(
     }
 
     tokio::task::spawn_blocking(move || {
+        if blocks[0].prev_hash != ledger.tip_hash() {
+            let mut candidate = ledger.snapshot();
+            let ancestor = candidate
+                .blocks
+                .iter()
+                .position(|block| block.hash == blocks[0].prev_hash)
+                .context("block page has no common ancestor with local chain")?;
+            candidate.blocks.truncate(ancestor + 1);
+            candidate.blocks.extend(blocks);
+            ledger.extend_from_snapshot_at(candidate, now_ms)?;
+            return Ok(ledger);
+        }
         for block in blocks {
             ledger.apply_block_at(block, now_ms)?;
         }

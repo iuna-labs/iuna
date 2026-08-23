@@ -10,8 +10,8 @@ use crate::{
 };
 
 use super::{
-    GossipNetwork, MAX_BLOCK_BATCH, MAX_GOSSIP_LINE_BYTES, MAX_INVENTORY_ITEMS,
-    MAX_OBJECT_REQUESTS, MAX_PEER_LIST, MAX_SNAPSHOT_BLOCKS, metrics::P2pMetricsCounters,
+    GossipNetwork, MAX_BLOCK_BATCH, MAX_BLOCK_LOCATOR_HASHES, MAX_GOSSIP_LINE_BYTES,
+    MAX_INVENTORY_ITEMS, MAX_OBJECT_REQUESTS, MAX_PEER_LIST, metrics::P2pMetricsCounters,
 };
 
 pub(super) struct LimitedLineReader<R> {
@@ -133,10 +133,11 @@ pub(super) fn record_received_envelope_kind(
         }
         GossipEnvelope::Block(_)
         | GossipEnvelope::Blocks { .. }
-        | GossipEnvelope::ChainSnapshot(_) => {
+        | GossipEnvelope::ChainBootstrap(_) => {
             P2pMetricsCounters::inc(&metrics.data_envelopes_received);
         }
-        GossipEnvelope::ChainSnapshotRequest
+        GossipEnvelope::ChainBootstrapRequest
+        | GossipEnvelope::BlockLocatorRequest { .. }
         | GossipEnvelope::BlockRangeRequest { .. }
         | GossipEnvelope::BlockRequest { .. }
         | GossipEnvelope::BurnBundleRequest { .. }
@@ -163,6 +164,10 @@ pub(super) fn validate_envelope_limits(envelope: &GossipEnvelope) -> Result<()> 
         GossipEnvelope::BlockRangeRequest { limit, .. } => {
             ensure_len("block range request", *limit, MAX_BLOCK_BATCH)?;
         }
+        GossipEnvelope::BlockLocatorRequest { locator, limit } => {
+            ensure_len("block locator", locator.len(), MAX_BLOCK_LOCATOR_HASHES)?;
+            ensure_len("block locator request", *limit, MAX_BLOCK_BATCH)?;
+        }
         GossipEnvelope::BlockRequest { hashes } => {
             ensure_len("block request", hashes.len(), MAX_OBJECT_REQUESTS)?;
         }
@@ -185,14 +190,12 @@ pub(super) fn validate_envelope_limits(envelope: &GossipEnvelope) -> Result<()> 
         GossipEnvelope::Blocks { blocks } => {
             ensure_len("block batch", blocks.len(), MAX_BLOCK_BATCH)?;
         }
-        GossipEnvelope::ChainSnapshot(snapshot) => {
-            ensure_len("chain snapshot", snapshot.blocks.len(), MAX_SNAPSHOT_BLOCKS)?;
-        }
         GossipEnvelope::PeerList { peers } => {
             ensure_len("peer list", peers.len(), MAX_PEER_LIST)?;
         }
         GossipEnvelope::Hello(_)
-        | GossipEnvelope::ChainSnapshotRequest
+        | GossipEnvelope::ChainBootstrapRequest
+        | GossipEnvelope::ChainBootstrap(_)
         | GossipEnvelope::PeerStatus { .. }
         | GossipEnvelope::Transaction(_)
         | GossipEnvelope::BurnBundle(_)
@@ -219,14 +222,14 @@ mod tests {
         adapters::p2p::metrics::P2pMetricsCounters,
         app::{BlockInventory, GossipEnvelope, TRANSACTION_BATCH_LIMIT},
         domain::{
-            BURN_COMMITTEE_SIZE, Block, BurnBundle, BurnBundleSection, ChainSnapshot,
-            FinalizerMode, LaunchProfile, OutPoint, Transaction, TxInput, TxOutput,
+            BURN_COMMITTEE_SIZE, Block, BurnBundle, BurnBundleSection, FinalizerMode, OutPoint,
+            Transaction, TxInput, TxOutput,
         },
     };
 
     use super::{
-        LimitedLineReader, MAX_BLOCK_BATCH, MAX_GOSSIP_LINE_BYTES, MAX_INVENTORY_ITEMS,
-        MAX_OBJECT_REQUESTS, MAX_PEER_LIST, MAX_SNAPSHOT_BLOCKS, parse_envelope,
+        LimitedLineReader, MAX_BLOCK_BATCH, MAX_BLOCK_LOCATOR_HASHES, MAX_GOSSIP_LINE_BYTES,
+        MAX_INVENTORY_ITEMS, MAX_OBJECT_REQUESTS, MAX_PEER_LIST, parse_envelope,
         record_received_envelope_kind, validate_envelope_limits,
     };
 
@@ -276,17 +279,6 @@ mod tests {
             burn_bundle_section: BurnBundleSection::default(),
             transactions: Vec::new(),
             hash: format!("{height:064x}"),
-        }
-    }
-
-    fn dummy_snapshot(blocks: usize) -> ChainSnapshot {
-        ChainSnapshot {
-            genesis_allocations: Default::default(),
-            vdf_rounds: 1,
-            launch_profile: LaunchProfile::default(),
-            blocks: (0..blocks)
-                .map(|height| dummy_block(height as u64))
-                .collect(),
         }
     }
 
@@ -432,15 +424,17 @@ mod tests {
             .is_err()
         );
         assert!(
-            validate_envelope_limits(&GossipEnvelope::ChainSnapshot(dummy_snapshot(
-                MAX_SNAPSHOT_BLOCKS
-            )))
+            validate_envelope_limits(&GossipEnvelope::BlockLocatorRequest {
+                locator: vec!["0".repeat(64); MAX_BLOCK_LOCATOR_HASHES],
+                limit: MAX_BLOCK_BATCH,
+            })
             .is_ok()
         );
         assert!(
-            validate_envelope_limits(&GossipEnvelope::ChainSnapshot(dummy_snapshot(
-                MAX_SNAPSHOT_BLOCKS + 1
-            )))
+            validate_envelope_limits(&GossipEnvelope::BlockLocatorRequest {
+                locator: vec!["0".repeat(64); MAX_BLOCK_LOCATOR_HASHES + 1],
+                limit: MAX_BLOCK_BATCH,
+            })
             .is_err()
         );
         assert!(

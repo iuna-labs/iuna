@@ -869,7 +869,7 @@ mod tests {
                         envelope,
                         GossipEnvelope::Block(_)
                             | GossipEnvelope::Blocks { .. }
-                            | GossipEnvelope::ChainSnapshot(_)
+                            | GossipEnvelope::ChainBootstrap(_)
                     ))
             })
             .unwrap();

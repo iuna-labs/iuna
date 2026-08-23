@@ -64,7 +64,9 @@ impl NodeCore {
         match envelope {
             GossipEnvelope::Hello(_)
             | GossipEnvelope::PeerStatus { .. }
-            | GossipEnvelope::ChainSnapshotRequest
+            | GossipEnvelope::ChainBootstrapRequest
+            | GossipEnvelope::ChainBootstrap(_)
+            | GossipEnvelope::BlockLocatorRequest { .. }
             | GossipEnvelope::BlockRangeRequest { .. }
             | GossipEnvelope::BlockRequest { .. }
             | GossipEnvelope::Inventory { .. } => Ok(()),
@@ -111,7 +113,6 @@ impl NodeCore {
                 }
                 Ok(())
             }
-            GossipEnvelope::ChainSnapshot(snapshot) => self.import_chain_snapshot(snapshot),
             GossipEnvelope::PeerAnnouncement { .. }
             | GossipEnvelope::PeerVerificationChallenge { .. }
             | GossipEnvelope::PeerVerificationResponse { .. }

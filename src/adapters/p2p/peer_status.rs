@@ -5,8 +5,8 @@ pub(super) struct PeerStatus {
     pub(super) height: u64,
     pub(super) tip_hash: String,
     pub(super) time_ms: u64,
-    pub(super) request_snapshot: bool,
-    pub(super) push_snapshot: bool,
+    pub(super) request_bootstrap: bool,
+    pub(super) push_bootstrap: bool,
 }
 
 impl PeerStatus {
@@ -19,8 +19,8 @@ impl PeerStatus {
             height,
             tip_hash,
             time_ms,
-            request_snapshot: false,
-            push_snapshot: false,
+            request_bootstrap: false,
+            push_bootstrap: false,
         }
     }
 
@@ -29,28 +29,28 @@ impl PeerStatus {
             height,
             tip_hash,
             time_ms,
-            request_snapshot: false,
-            push_snapshot: false,
+            request_bootstrap: false,
+            push_bootstrap: false,
         }
     }
 
-    pub(super) fn with_snapshot_request(height: u64, tip_hash: String, time_ms: u64) -> Self {
+    pub(super) fn with_bootstrap_request(height: u64, tip_hash: String, time_ms: u64) -> Self {
         Self {
             height,
             tip_hash,
             time_ms,
-            request_snapshot: true,
-            push_snapshot: false,
+            request_bootstrap: true,
+            push_bootstrap: false,
         }
     }
 
-    pub(super) fn with_snapshot_push(height: u64, tip_hash: String, time_ms: u64) -> Self {
+    pub(super) fn with_bootstrap_push(height: u64, tip_hash: String, time_ms: u64) -> Self {
         Self {
             height,
             tip_hash,
             time_ms,
-            request_snapshot: false,
-            push_snapshot: true,
+            request_bootstrap: false,
+            push_bootstrap: true,
         }
     }
 }

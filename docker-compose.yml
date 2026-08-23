@@ -23,8 +23,7 @@ services:
       IUNA_SETUP_COMPLETE: "true"
       IUNA_LOCAL_TESTNET: "true"
       IUNA_AUTOMATIC_BURN_ENABLED: "true"
-      IUNA_POW_MINING_ENABLED: "true"
-      IUNA_POW_MINING_WORKERS: "1"
+      IUNA_POW_MINING_ENABLED: "false"
     entrypoint: ["/bin/sh", "-c"]
     command:
       - if [ -s /data/chain.sqlite3 ]; then exec iuna --data-dir /data --http 0.0.0.0:18661 --p2p 0.0.0.0:9444 --p2p-announce 172.28.0.10:9444 --debug; else exec iuna --genesis --data-dir /data --http 0.0.0.0:18661 --p2p 0.0.0.0:9444 --p2p-announce 172.28.0.10:9444 --debug; fi

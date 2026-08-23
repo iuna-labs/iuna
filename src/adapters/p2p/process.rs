@@ -11,7 +11,7 @@ use crate::{
 use super::{
     GossipNetwork, MAX_BLOCK_BATCH, P2pMetricsCounters, apply_peer_list, forget_stale_self_peer,
     is_possible_fork_error, normalize_advertised_peer, peer_verification_response, process_hello,
-    validate_blocks_extension, validate_snapshot_extension, verify_block_vdf, write_envelope,
+    validate_blocks_extension, validate_chain_bootstrap, verify_block_vdf, write_envelope,
     write_payload,
 };
 
@@ -40,9 +40,19 @@ pub(super) async fn process_envelope(
         GossipEnvelope::Hello(hello) => {
             let _ = process_hello(network, remote_addr, known_peer, hello).await?;
         }
-        GossipEnvelope::ChainSnapshotRequest => {
-            let snapshot = network.inner.node.lock().await.chain_snapshot();
-            write_envelope(writer, &GossipEnvelope::ChainSnapshot(snapshot)).await?;
+        GossipEnvelope::ChainBootstrapRequest => {
+            let bootstrap = network.inner.node.lock().await.chain_bootstrap();
+            write_envelope(writer, &GossipEnvelope::ChainBootstrap(bootstrap)).await?;
+        }
+        GossipEnvelope::BlockLocatorRequest { locator, limit } => {
+            let blocks = network
+                .inner
+                .node
+                .lock()
+                .await
+                .blocks_after_locator(&locator, limit.min(MAX_BLOCK_BATCH));
+            let blocks = super::byte_bounded_block_page(blocks);
+            write_envelope(writer, &GossipEnvelope::Blocks { blocks }).await?;
         }
         GossipEnvelope::BlockRangeRequest { from_height, limit } => {
             let blocks = network
@@ -51,11 +61,13 @@ pub(super) async fn process_envelope(
                 .lock()
                 .await
                 .blocks_from(from_height, limit.min(MAX_BLOCK_BATCH));
+            let blocks = super::byte_bounded_block_page(blocks);
             write_envelope(writer, &GossipEnvelope::Blocks { blocks }).await?;
         }
         GossipEnvelope::BlockRequest { hashes } => {
             let blocks = network.inner.node.lock().await.blocks_by_hash(&hashes);
             if !blocks.is_empty() {
+                let blocks = super::byte_bounded_block_page(blocks);
                 write_envelope(writer, &GossipEnvelope::Blocks { blocks }).await?;
             }
         }
@@ -76,8 +88,8 @@ pub(super) async fn process_envelope(
             } else if node_id.is_some() && debug_logging_enabled() {
                 eprintln!("p2p peer announcement for {peer} ignored until hello verification");
             }
-            let snapshot = network.inner.node.lock().await.chain_snapshot();
-            write_envelope(writer, &GossipEnvelope::ChainSnapshot(snapshot)).await?;
+            let bootstrap = network.inner.node.lock().await.chain_bootstrap();
+            write_envelope(writer, &GossipEnvelope::ChainBootstrap(bootstrap)).await?;
         }
         GossipEnvelope::PeerVerificationChallenge { address, nonce } => {
             if let Some(response) = peer_verification_response(network, &address, &nonce) {
@@ -134,7 +146,7 @@ pub(super) async fn process_envelope(
                 },
                 Err(error) => Err(error),
             };
-            let request_snapshot = result.as_ref().err().is_some_and(is_possible_fork_error);
+            let request_locator = result.as_ref().err().is_some_and(is_possible_fork_error);
             record_rejected_chain_payload(
                 network,
                 &network.inner.metrics.rejected_blocks,
@@ -142,8 +154,8 @@ pub(super) async fn process_envelope(
                 &result,
             );
             record_inbound_result(network, known_peer, remote_addr, result).await;
-            if request_snapshot {
-                write_envelope(writer, &GossipEnvelope::ChainSnapshotRequest).await?;
+            if request_locator {
+                request_fork_blocks(network, writer).await?;
             }
             network.forward_outbox().await;
         }
@@ -161,7 +173,7 @@ pub(super) async fn process_envelope(
                         .map(|_| ()),
                     Err(error) => Err(error),
                 };
-            let request_snapshot = result.as_ref().err().is_some_and(is_possible_fork_error);
+            let request_locator = result.as_ref().err().is_some_and(is_possible_fork_error);
             record_rejected_chain_payload(
                 network,
                 &network.inner.metrics.rejected_block_batches,
@@ -169,29 +181,27 @@ pub(super) async fn process_envelope(
                 &result,
             );
             record_inbound_result(network, known_peer, remote_addr, result).await;
-            if request_snapshot {
-                write_envelope(writer, &GossipEnvelope::ChainSnapshotRequest).await?;
+            if request_locator {
+                request_fork_blocks(network, writer).await?;
             }
             network.forward_outbox().await;
         }
-        GossipEnvelope::ChainSnapshot(snapshot) => {
+        GossipEnvelope::ChainBootstrap(bootstrap) => {
             let adjusted_time_ms = super::network_adjusted_time_ms(network).await;
-            let local_ledger = network.inner.node.lock().await.clone_ledger();
-            let result =
-                match validate_snapshot_extension(local_ledger, snapshot, adjusted_time_ms).await {
-                    Ok(ledger) => network
-                        .inner
-                        .node
-                        .lock()
-                        .await
-                        .import_verified_ledger(ledger)
-                        .map(|_| ()),
-                    Err(error) => Err(error),
-                };
+            let result = match validate_chain_bootstrap(bootstrap, adjusted_time_ms).await {
+                Ok(ledger) => network
+                    .inner
+                    .node
+                    .lock()
+                    .await
+                    .import_verified_ledger(ledger)
+                    .map(|_| ()),
+                Err(error) => Err(error),
+            };
             record_rejected_chain_payload(
                 network,
                 &network.inner.metrics.rejected_snapshots,
-                "snapshot",
+                "chain bootstrap",
                 &result,
             );
             record_inbound_result(network, known_peer, remote_addr, result).await;
@@ -204,6 +214,18 @@ pub(super) async fn process_envelope(
         }
     }
     Ok(())
+}
+
+async fn request_fork_blocks(network: &GossipNetwork, writer: &mut OwnedWriteHalf) -> Result<()> {
+    let locator = network.inner.node.lock().await.block_locator();
+    write_envelope(
+        writer,
+        &GossipEnvelope::BlockLocatorRequest {
+            locator,
+            limit: MAX_BLOCK_BATCH,
+        },
+    )
+    .await
 }
 
 async fn process_transactions(
