@@ -1078,6 +1078,7 @@ async fn persistence_loop_saves_new_tip_after_node_changes() {
         ui_config,
         Duration::from_millis(10),
         initial_tip,
+        false,
     ));
     {
         let mut node = node.lock().await;
@@ -1172,6 +1173,7 @@ async fn persistence_loop_skips_tip_already_projected_at_startup() {
         ui_config,
         Duration::from_millis(10),
         initial_tip,
+        false,
     ));
     tokio::time::sleep(Duration::from_millis(50)).await;
     persistence_task.abort();
@@ -1185,6 +1187,54 @@ async fn persistence_loop_skips_tip_already_projected_at_startup() {
         )
         .unwrap();
     assert_eq!(updated_at_ms, 123);
+}
+
+#[tokio::test]
+async fn persistence_loop_projects_metrics_when_mode_changes_without_a_new_tip() {
+    let dir = tempdir().unwrap();
+    let store = SqliteChainStore::open(dir.path().join("chain.sqlite3")).unwrap();
+    let ui_data_store = SqliteUiDataStore::open(dir.path().join("ui_data.sqlite3")).unwrap();
+    let wallet = Wallet::from_seed("background-metrics-mode-change");
+    let ledger = ledger_with_one_spendable_iuna(&wallet);
+    let node = Arc::new(Mutex::new(NodeCore::from_ledger(
+        wallet,
+        ledger,
+        DEFAULT_BURN_PER_BLOCK,
+    )));
+    let initial_snapshot = { node.lock().await.chain_snapshot() };
+    let initial_tip = initial_snapshot
+        .blocks
+        .last()
+        .map(|block| block.hash.clone());
+    persist_chain_snapshot(&store, initial_snapshot.clone())
+        .await
+        .unwrap();
+    project_ui_data_store(&ui_data_store, initial_snapshot, false)
+        .await
+        .unwrap();
+    let ui_config = Arc::new(Mutex::new(UiConfig::default()));
+
+    let persistence_task = tokio::spawn(run_chain_persistence_with_interval(
+        Arc::clone(&node),
+        store,
+        ui_data_store.clone(),
+        Arc::clone(&ui_config),
+        Duration::from_millis(10),
+        initial_tip,
+        false,
+    ));
+    ui_config.lock().await.keep_track_of_metrics = true;
+
+    tokio::time::timeout(Duration::from_secs(5), async {
+        while ui_data_store.load_metrics().unwrap().is_empty() {
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    })
+    .await
+    .unwrap();
+    persistence_task.abort();
+
+    assert!(!ui_data_store.load_metrics().unwrap().is_empty());
 }
 
 #[tokio::test]
@@ -1204,6 +1254,7 @@ async fn persistence_loop_skips_setup_placeholder_chain() {
         ui_config,
         Duration::from_millis(10),
         None,
+        false,
     ));
     tokio::time::sleep(Duration::from_millis(50)).await;
     persistence_task.abort();

@@ -1070,7 +1070,7 @@ pub(super) const INDEX_HTML: &str = r#"<!doctype html>
           <div class="metric"><div class="label">Total burned</div><div class="value" x-text="metricAmountLabel(metricsLatest().totalBurnedAmount)"></div></div>
           <div class="metric"><div class="label">Difficulty</div><div class="value" x-text="metricsLatest().mineDifficultyBits ?? '-'"></div></div>
         </div>
-        <div class="metrics-grid" x-show="loadingMetrics && metricsCharts().length === 0">
+        <div class="metrics-grid" x-show="(loadingMetrics || metricsPreparing()) && metricsCharts().length === 0">
           <article class="metric-chart-card skeleton-card" aria-hidden="true">
             <div class="metric-chart-head"><div class="skeleton-line medium"></div><div class="skeleton-line short"></div></div>
             <div class="metric-chart-frame"><div class="skeleton-line long"></div></div>
@@ -1080,7 +1080,8 @@ pub(super) const INDEX_HTML: &str = r#"<!doctype html>
             <div class="metric-chart-frame"><div class="skeleton-line long"></div></div>
           </article>
         </div>
-        <div class="metrics-empty" x-show="metricsCharts().length === 0 && !loadingMetrics">No metrics collected yet</div>
+        <div class="metrics-empty" x-show="metricsPreparing() && !loadingMetrics">Preparing development mode from the current chain. Metrics will stay updated in the background.</div>
+        <div class="metrics-empty" x-show="metricsCharts().length === 0 && !loadingMetrics && !metricsPreparing()">No metrics collected yet</div>
         <div class="metrics-grid">
           <template x-for="chart in metricsCharts()" :key="chart.id">
             <article class="metric-chart-card">

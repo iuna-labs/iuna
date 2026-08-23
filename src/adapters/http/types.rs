@@ -273,6 +273,7 @@ pub(super) struct Page<T> {
 #[serde(rename_all = "camelCase")]
 pub(super) struct MetricsResponse {
     pub(super) enabled: bool,
+    pub(super) preparing: bool,
     pub(super) latest: Option<BlockMetricRow>,
     pub(super) charts: Vec<MetricsChart>,
     pub(super) leaderboards: MetricsLeaderboards,

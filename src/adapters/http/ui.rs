@@ -1,18 +1,13 @@
 use std::collections::BTreeMap;
 
 use crate::domain::{
-    Amount, Block, BurnLeaderRank, ChainSnapshot, FinalizerMode, MINE_REWARD, OutPoint,
-    Transaction, TxInput, TxOutput,
+    Amount, Block, BurnLeaderRank, FinalizerMode, MINE_REWARD, OutPoint, Transaction, TxInput,
+    TxOutput,
 };
 
-use crate::adapters::ui_index::build_ui_chain_index;
-
-use super::{
-    HttpState, UiChainView,
-    types::{
-        UiBlock, UiBurnBundle, UiBurnBundleQuorum, UiByteBreakdown, UiTransaction, UiTxInput,
-        WalletTransactionContext, WalletTransactionFilters, WalletTransactionRow,
-    },
+use super::types::{
+    UiBlock, UiBurnBundle, UiBurnBundleQuorum, UiByteBreakdown, UiTransaction, UiTxInput,
+    WalletTransactionContext, WalletTransactionFilters, WalletTransactionRow,
 };
 
 pub(super) fn wallet_transaction_rows(
@@ -412,66 +407,6 @@ fn hex_nibble(byte: u8) -> Option<u8> {
         b'A'..=b'F' => Some(byte - b'A' + 10),
         _ => None,
     }
-}
-
-pub(super) async fn cached_chain_view(
-    state: &HttpState,
-    snapshot: &ChainSnapshot,
-) -> anyhow::Result<UiChainView> {
-    let tip_hash = snapshot.blocks.last().map(|block| block.hash.clone());
-    {
-        let cache = state.ui_cache.lock().await;
-        if cache.tip_hash == tip_hash {
-            return Ok(ui_chain_view_from_cache(&cache));
-        }
-    }
-
-    let (computed_tip_hash, view) = tokio::task::spawn_blocking({
-        let snapshot = snapshot.clone();
-        move || build_chain_view(&snapshot)
-    })
-    .await?;
-
-    let mut cache = state.ui_cache.lock().await;
-    if cache.tip_hash == tip_hash {
-        return Ok(ui_chain_view_from_cache(&cache));
-    }
-
-    cache.tip_hash = computed_tip_hash;
-    cache.outputs = view.outputs.clone();
-    cache.burn_leader_ranks_by_hash = view.burn_leader_ranks_by_hash.clone();
-    Ok(UiChainView {
-        outputs: view.outputs,
-        burn_leader_ranks_by_hash: view.burn_leader_ranks_by_hash,
-    })
-}
-
-pub(super) async fn cached_ui_blocks_for_tip(
-    state: &HttpState,
-    tip_hash: Option<&str>,
-    blocks: Vec<Block>,
-) -> Option<Vec<UiBlock>> {
-    let cache = state.ui_cache.lock().await;
-    (cache.tip_hash.as_deref() == tip_hash)
-        .then(|| ui_blocks_from_indexes(blocks, &cache.outputs, &cache.burn_leader_ranks_by_hash))
-}
-
-fn ui_chain_view_from_cache(cache: &super::UiChainCache) -> UiChainView {
-    UiChainView {
-        outputs: cache.outputs.clone(),
-        burn_leader_ranks_by_hash: cache.burn_leader_ranks_by_hash.clone(),
-    }
-}
-
-fn build_chain_view(snapshot: &ChainSnapshot) -> (Option<String>, UiChainView) {
-    let index = build_ui_chain_index(snapshot);
-    (
-        index.tip_hash.clone(),
-        UiChainView {
-            outputs: index.outputs,
-            burn_leader_ranks_by_hash: index.burn_leader_ranks_by_hash,
-        },
-    )
 }
 
 pub(super) fn add_pending_outputs(

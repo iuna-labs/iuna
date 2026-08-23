@@ -1551,7 +1551,7 @@ window.iunaApp = function iunaApp() {
         await this.postForm(
           "/api/settings/metrics",
           { enabled },
-          enabled ? "Development mode turned on" : "Development mode turned off"
+          enabled ? "Development mode is preparing" : "Development mode turned off"
         );
         await this.refreshConfig();
         if (!enabled && this.tab === "metrics") {
@@ -1914,6 +1914,10 @@ window.iunaApp = function iunaApp() {
 
     metricsCharts() {
       return Array.isArray(this.blockchainMetrics?.charts) ? this.blockchainMetrics.charts : [];
+    },
+
+    metricsPreparing() {
+      return this.blockchainMetrics?.preparing === true;
     },
 
     metricsLatest() {

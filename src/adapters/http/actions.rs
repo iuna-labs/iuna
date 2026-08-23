@@ -306,23 +306,12 @@ pub(super) async fn set_recovery_vdf_top_rank_percent(
 }
 
 pub(super) async fn set_keep_track_of_metrics(state: &HttpState, enabled: bool) -> Result<()> {
-    if enabled {
-        let snapshot = {
-            let node = state.node.lock().await;
-            node.has_real_chain().then(|| node.chain_snapshot())
-        };
-        if let Some(snapshot) = snapshot {
-            replace_metrics_for_snapshot(&state.ui_data_store, snapshot).await?;
-        } else {
-            clear_metrics(&state.ui_data_store).await?;
-        }
-    } else {
-        clear_metrics(&state.ui_data_store).await?;
-    }
-
     let mut config = state.ui_config.lock().await;
-    config.keep_track_of_metrics = enabled;
-    config_store::save(&state.config_path, &config)
+    let mut next_config = config.clone();
+    next_config.keep_track_of_metrics = enabled;
+    config_store::save(&state.config_path, &next_config)?;
+    *config = next_config;
+    Ok(())
 }
 
 pub(super) async fn reset_local_chain(state: &HttpState, confirmation: &str) -> Result<()> {
@@ -333,10 +322,6 @@ pub(super) async fn reset_local_chain(state: &HttpState, confirmation: &str) -> 
     {
         let mut node = state.node.lock().await;
         node.reset_chain_to_setup_placeholder();
-    }
-    {
-        let mut cache = state.ui_cache.lock().await;
-        *cache = super::UiChainCache::default();
     }
     clear_chain(&state.chain_store).await?;
     clear_ui_data(&state.ui_data_store).await?;
@@ -417,25 +402,6 @@ pub(super) async fn set_stratum_settings(
     next_config.stratum_bind_port = bind_port;
     config_store::save(&state.config_path, &next_config)?;
     *config = next_config;
-    Ok(())
-}
-
-async fn replace_metrics_for_snapshot(
-    store: &SqliteUiDataStore,
-    snapshot: crate::domain::ChainSnapshot,
-) -> Result<()> {
-    let store = store.clone();
-    tokio::task::spawn_blocking(move || store.replace_metrics_for_snapshot(&snapshot))
-        .await
-        .context("metrics worker failed")??;
-    Ok(())
-}
-
-async fn clear_metrics(store: &SqliteUiDataStore) -> Result<()> {
-    let store = store.clone();
-    tokio::task::spawn_blocking(move || store.clear_metrics())
-        .await
-        .context("metrics cleanup worker failed")??;
     Ok(())
 }
 
@@ -557,7 +523,7 @@ mod tests {
         domain::{GenesisBurn, Ledger, MICRO_IUNA},
     };
 
-    use super::super::{AuthSession, HttpState, UiChainCache, state::AuthBackoff};
+    use super::super::{AuthSession, HttpState, state::AuthBackoff};
     use super::{CHAIN_RESET_CONFIRMATION, reset_local_chain};
 
     fn socket() -> SocketAddr {
@@ -617,8 +583,6 @@ mod tests {
             },
             auth_sessions: Arc::new(Mutex::new(BTreeMap::<String, AuthSession>::new())),
             auth_backoff: Arc::new(Mutex::new(BTreeMap::<String, AuthBackoff>::new())),
-            ui_cache: Arc::new(Mutex::new(UiChainCache::default())),
-            ui_data_refresh: Arc::new(Mutex::new(())),
         };
 
         reset_local_chain(&state, CHAIN_RESET_CONFIRMATION)

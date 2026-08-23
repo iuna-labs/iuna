@@ -323,7 +323,7 @@ mod tests {
         domain::{GenesisBurn, Ledger, MICRO_IUNA, Wallet},
     };
 
-    use super::super::state::{AuthSession, HttpState, UiChainCache};
+    use super::super::state::{AuthSession, HttpState};
     use super::{AUTH_COOKIE_NAME, now_ms};
     use super::{
         auth_client_key, check_auth_backoff, record_auth_failure, request_is_authenticated,
@@ -380,8 +380,6 @@ mod tests {
             },
             auth_sessions: Arc::new(Mutex::new(BTreeMap::new())),
             auth_backoff: Arc::new(Mutex::new(BTreeMap::new())),
-            ui_cache: Arc::new(Mutex::new(UiChainCache::default())),
-            ui_data_refresh: Arc::new(Mutex::new(())),
         }
     }
 

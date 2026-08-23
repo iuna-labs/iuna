@@ -28,6 +28,7 @@ pub(super) fn metrics_response(
     let latest = rows.last().cloned();
     MetricsResponse {
         enabled,
+        preparing: false,
         latest,
         leaderboards,
         charts: vec![

@@ -19,7 +19,7 @@ use axum::{
 use tokio::{net::TcpListener, sync::Mutex};
 
 use crate::{
-    adapters::{config_store, config_store::UiConfig, p2p::GossipNetwork, ui_index::UiChainIndex},
+    adapters::{config_store, config_store::UiConfig, p2p::GossipNetwork},
     app::{SharedNode, SharedPeerBook},
     domain::validate_address,
 };
@@ -55,11 +55,11 @@ use index_html::INDEX_HTML;
 use metrics::{metrics_response, network_health};
 use request_auth::wallet_password_for_request;
 pub use state::ServeOptions;
-use state::{AuthClientKey, AuthSession, HttpState, UiChainCache, UiChainView};
+use state::{AuthClientKey, AuthSession, HttpState};
 use static_assets::{alpine_js, app_js, favicon, index};
 use ui::{
-    add_pending_outputs, cached_chain_view, cached_ui_blocks_for_tip, ui_blocks_from_indexes,
-    ui_transaction, wallet_transaction_row, wallet_transaction_rows,
+    add_pending_outputs, ui_blocks_from_indexes, ui_transaction, wallet_transaction_row,
+    wallet_transaction_rows,
 };
 use wallet::{
     api_wallet_setup, estimate_burn_fee, estimate_mine_fee, estimate_transfer_fee,
@@ -119,24 +119,7 @@ pub async fn serve(
         stratum: options.stratum,
         auth_sessions: Arc::new(Mutex::new(BTreeMap::new())),
         auth_backoff: Arc::new(Mutex::new(BTreeMap::new())),
-        ui_cache: Arc::new(Mutex::new(UiChainCache::default())),
-        ui_data_refresh: Arc::new(Mutex::new(())),
     };
-    println!(
-        "warming UI data cache from {}...",
-        state.ui_data_store.path().display()
-    );
-    let ui_data_started = Instant::now();
-    prewarm_chain_view_cache(state.clone()).await?;
-    {
-        let cache = state.ui_cache.lock().await;
-        println!(
-            "UI data cache ready in {:.2}s (outputs: {}, burn-rank blocks: {})",
-            ui_data_started.elapsed().as_secs_f64(),
-            cache.outputs.len(),
-            cache.burn_leader_ranks_by_hash.len()
-        );
-    }
     let app = Router::new()
         .route("/", get(index))
         .route("/favicon.ico", get(favicon))
@@ -232,37 +215,6 @@ async fn log_slow_api_request(request: Request<Body>, next: Next) -> Response {
         );
     }
     response
-}
-
-async fn prewarm_chain_view_cache(state: HttpState) -> Result<()> {
-    let tip_hash = {
-        let node = state.node.lock().await;
-        node.chain_tip_hash()
-    };
-    if let Some(index) = load_persisted_ui_chain_index(&state, tip_hash.clone()).await? {
-        let mut cache = state.ui_cache.lock().await;
-        cache.tip_hash = index.tip_hash;
-        cache.outputs = index.outputs;
-        cache.burn_leader_ranks_by_hash = index.burn_leader_ranks_by_hash;
-        return Ok(());
-    }
-
-    let snapshot = {
-        let node = state.node.lock().await;
-        node.chain_snapshot()
-    };
-    let _ = cached_chain_view(&state, &snapshot).await?;
-    Ok(())
-}
-
-async fn load_persisted_ui_chain_index(
-    state: &HttpState,
-    tip_hash: String,
-) -> Result<Option<UiChainIndex>> {
-    let store = state.ui_data_store.clone();
-    tokio::task::spawn_blocking(move || store.load_ui_chain_index(&tip_hash))
-        .await
-        .context("UI chain index loader failed")?
 }
 
 async fn api_config_form(

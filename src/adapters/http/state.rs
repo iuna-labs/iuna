@@ -8,7 +8,6 @@ use crate::{
         ui_data_store::SqliteUiDataStore,
     },
     app::{SharedNode, SharedPeerBook, StratumStatus},
-    domain::{BurnLeaderRank, OutPoint, TxOutput},
 };
 
 #[derive(Clone)]
@@ -24,8 +23,6 @@ pub(super) struct HttpState {
     pub(super) stratum: StratumStatus,
     pub(super) auth_sessions: Arc<Mutex<BTreeMap<String, AuthSession>>>,
     pub(super) auth_backoff: Arc<Mutex<BTreeMap<String, AuthBackoff>>>,
-    pub(super) ui_cache: Arc<Mutex<UiChainCache>>,
-    pub(super) ui_data_refresh: Arc<Mutex<()>>,
 }
 
 #[derive(Clone)]
@@ -41,19 +38,6 @@ pub(super) struct AuthClientKey(pub(super) String);
 pub(super) struct AuthBackoff {
     pub(super) failed_attempts: u32,
     pub(super) locked_until_ms: Option<u64>,
-}
-
-#[derive(Clone, Debug, Default)]
-pub(super) struct UiChainCache {
-    pub(super) tip_hash: Option<String>,
-    pub(super) outputs: BTreeMap<OutPoint, TxOutput>,
-    pub(super) burn_leader_ranks_by_hash: BTreeMap<String, Vec<BurnLeaderRank>>,
-}
-
-#[derive(Clone, Debug, Default)]
-pub(super) struct UiChainView {
-    pub(super) outputs: BTreeMap<OutPoint, TxOutput>,
-    pub(super) burn_leader_ranks_by_hash: BTreeMap<String, Vec<BurnLeaderRank>>,
 }
 
 pub struct ServeOptions {

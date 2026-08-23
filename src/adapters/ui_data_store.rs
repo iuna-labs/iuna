@@ -201,6 +201,7 @@ impl SqliteUiDataStore {
         })
     }
 
+    #[cfg(test)]
     pub(crate) fn is_projected_to(&self, tip_hash: &str) -> Result<bool> {
         self.with_connection(|connection| {
             let projected = connection
@@ -215,6 +216,18 @@ impl SqliteUiDataStore {
                     schema_version == UI_CACHE_SCHEMA_VERSION && stored_tip_hash == tip_hash
                 });
             Ok(projected)
+        })
+    }
+
+    pub(crate) fn metrics_are_projected_to(&self, tip_hash: &str) -> Result<bool> {
+        self.with_connection(|connection| {
+            connection
+                .query_row(
+                    "SELECT EXISTS(SELECT 1 FROM block_metrics WHERE block_hash = ?1)",
+                    [tip_hash],
+                    |row| row.get(0),
+                )
+                .context("failed to inspect metrics projection")
         })
     }
 
@@ -1367,6 +1380,7 @@ mod tests {
         let tip = snapshot.blocks.last().unwrap().hash.clone();
         store.project_snapshot(&snapshot, true).unwrap();
         assert!(store.is_projected_to(&tip).unwrap());
+        assert!(store.metrics_are_projected_to(&tip).unwrap());
         assert!(!store.load_metrics().unwrap().is_empty());
 
         let mut invalid = snapshot.clone();
@@ -1378,6 +1392,7 @@ mod tests {
             "{error:#}"
         );
         assert!(store.is_projected_to(&tip).unwrap());
+        assert!(store.metrics_are_projected_to(&tip).unwrap());
         assert!(!store.load_metrics().unwrap().is_empty());
     }
 }

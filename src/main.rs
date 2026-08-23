@@ -225,6 +225,7 @@ async fn main() -> Result<()> {
             None
         }
     };
+    let persistence_initial_keep_metrics = ui_config.lock().await.keep_track_of_metrics;
     tokio::spawn(async move {
         run_chain_persistence(
             persistence_node,
@@ -232,6 +233,7 @@ async fn main() -> Result<()> {
             persistence_ui_data_store,
             persistence_config,
             persistence_initial_tip,
+            persistence_initial_keep_metrics,
         )
         .await;
     });
@@ -913,6 +915,7 @@ async fn run_chain_persistence(
     ui_data_store: SqliteUiDataStore,
     ui_config: Arc<Mutex<config_store::UiConfig>>,
     initial_saved_tip: Option<String>,
+    initial_projected_keep_metrics: bool,
 ) {
     run_chain_persistence_with_interval(
         node,
@@ -921,6 +924,7 @@ async fn run_chain_persistence(
         ui_config,
         Duration::from_secs(2),
         initial_saved_tip,
+        initial_projected_keep_metrics,
     )
     .await;
 }
@@ -932,8 +936,10 @@ async fn run_chain_persistence_with_interval(
     ui_config: Arc<Mutex<config_store::UiConfig>>,
     interval: Duration,
     initial_saved_tip: Option<String>,
+    initial_projected_keep_metrics: bool,
 ) {
     let mut last_saved_tip = initial_saved_tip;
+    let mut last_projected_keep_metrics = initial_projected_keep_metrics;
     loop {
         tokio::time::sleep(interval).await;
         let snapshot = {
@@ -946,15 +952,23 @@ async fn run_chain_persistence_with_interval(
         let Some(tip_hash) = snapshot.blocks.last().map(|block| block.hash.clone()) else {
             continue;
         };
-        if last_saved_tip.as_deref() == Some(tip_hash.as_str()) {
+        let keep_metrics = ui_config.lock().await.keep_track_of_metrics;
+        let tip_changed = last_saved_tip.as_deref() != Some(tip_hash.as_str());
+        let metrics_mode_changed = last_projected_keep_metrics != keep_metrics;
+        if !tip_changed && !metrics_mode_changed {
             continue;
         }
 
-        let keep_metrics = ui_config.lock().await.keep_track_of_metrics;
-        match persist_chain_and_project_ui_data(&store, &ui_data_store, snapshot, keep_metrics)
-            .await
-        {
-            Ok(()) => last_saved_tip = Some(tip_hash),
+        let result = if tip_changed {
+            persist_chain_and_project_ui_data(&store, &ui_data_store, snapshot, keep_metrics).await
+        } else {
+            project_ui_data_store(&ui_data_store, snapshot, keep_metrics).await
+        };
+        match result {
+            Ok(()) => {
+                last_saved_tip = Some(tip_hash);
+                last_projected_keep_metrics = keep_metrics;
+            }
             Err(error) if debug_logging_enabled() => {
                 eprintln!("chain persistence failed: {error:#}")
             }

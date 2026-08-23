@@ -1,6 +1,6 @@
 use std::collections::{BTreeMap, BTreeSet};
 
-use anyhow::{Context, Result};
+use anyhow::Result;
 use axum::{
     Json,
     extract::{Query, State},
@@ -21,9 +21,8 @@ use super::{
 };
 use super::{
     DATASET_LIMIT, DATASET_PAGE_LIMIT, EXPLORER_LIMIT, EXPLORER_PAGE_LIMIT, HttpState,
-    add_pending_outputs, cached_chain_view, cached_ui_blocks_for_tip, metrics_response,
-    network_health, ui_blocks_from_indexes, ui_transaction, wallet_transaction_row,
-    wallet_transaction_rows,
+    add_pending_outputs, metrics_response, network_health, ui_blocks_from_indexes, ui_transaction,
+    wallet_transaction_row, wallet_transaction_rows,
 };
 
 pub(super) async fn api_status(State(state): State<HttpState>) -> Json<NodeStatus> {
@@ -48,21 +47,12 @@ pub(super) async fn api_blocks(
         };
         (node.chain_tip_hash(), blocks)
     };
-    if let Some(blocks) = cached_ui_blocks_for_tip(&state, Some(tip_hash.as_str()), blocks).await {
-        return Json(blocks);
-    }
-
-    let (snapshot, blocks) = {
-        let node = state.node.lock().await;
-        let snapshot = node.chain_snapshot();
-        let blocks = match query.before_height {
-            Some(before_height) => node.blocks_before(before_height, limit),
-            None => node.recent_blocks(limit),
-        };
-        (snapshot, blocks)
-    };
-    let view = cached_chain_view(&state, &snapshot)
+    let store = state.ui_data_store.clone();
+    let view = tokio::task::spawn_blocking(move || store.load_ui_chain_index(&tip_hash))
         .await
+        .ok()
+        .and_then(Result::ok)
+        .flatten()
         .unwrap_or_default();
     Json(ui_blocks_from_indexes(
         blocks,
@@ -85,20 +75,15 @@ pub(super) async fn api_mempool(
     State(state): State<HttpState>,
     Query(query): Query<PageQuery>,
 ) -> Json<Page<UiTransaction>> {
-    let ui_data_ready = ensure_ui_data_current(&state).await.is_ok();
     let pending = {
         let node = state.node.lock().await;
         node.pending_transactions()
     };
     let mut required_outputs = BTreeSet::new();
     collect_transaction_input_outpoints(pending.iter(), &mut required_outputs);
-    let mut outputs = if ui_data_ready {
-        load_outputs_for_outpoints(&state, required_outputs)
-            .await
-            .unwrap_or_default()
-    } else {
-        BTreeMap::new()
-    };
+    let mut outputs = load_outputs_for_outpoints(&state, required_outputs)
+        .await
+        .unwrap_or_default();
     add_pending_outputs(&mut outputs, &pending);
     let mut items = pending
         .iter()
@@ -119,16 +104,6 @@ pub(super) async fn api_wallet_transactions(
         .unwrap_or(DATASET_PAGE_LIMIT)
         .clamp(1, DATASET_LIMIT);
     let filters = WalletTransactionFilters::from_query(query);
-    if ensure_ui_data_current(&state).await.is_err() {
-        return Json(Page {
-            items: Vec::new(),
-            offset,
-            limit,
-            total: 0,
-            has_more: false,
-            next_offset: None,
-        });
-    }
     let (wallet, pending) = {
         let node = state.node.lock().await;
         (
@@ -218,60 +193,9 @@ async fn load_outputs_for_outpoints(
         .unwrap_or_else(|_| Ok(BTreeMap::new()))
 }
 
-async fn ensure_ui_data_current(state: &HttpState) -> Result<()> {
-    let Some(tip_hash) = current_real_chain_tip(state).await else {
-        return Ok(());
-    };
-    if ui_data_matches_tip(state, tip_hash).await? {
-        return Ok(());
-    }
-
-    let _refresh_guard = state.ui_data_refresh.lock().await;
-    let Some(tip_hash) = current_real_chain_tip(state).await else {
-        return Ok(());
-    };
-    if ui_data_matches_tip(state, tip_hash).await? {
-        return Ok(());
-    }
-
-    let (snapshot, tip_hash) = {
-        let node = state.node.lock().await;
-        if !node.has_real_chain() {
-            return Ok(());
-        }
-        (node.chain_snapshot(), node.chain_tip_hash())
-    };
-    let keep_metrics = state.ui_config.lock().await.keep_track_of_metrics;
-    let chain_store = state.chain_store.clone();
-    let ui_data_store = state.ui_data_store.clone();
-    tokio::task::spawn_blocking(move || {
-        chain_store
-            .save(&snapshot)
-            .context("failed to persist chain before UI data catch-up")?;
-        ui_data_store
-            .project_snapshot(&snapshot, keep_metrics)
-            .context("failed to project UI data catch-up")?;
-        Ok::<(), anyhow::Error>(())
-    })
-    .await
-    .context("UI data catch-up worker failed")??;
-
-    ui_data_matches_tip(state, tip_hash)
-        .await?
-        .then_some(())
-        .context("UI data catch-up completed but projection tip does not match the chain tip")
-}
-
 async fn current_real_chain_tip(state: &HttpState) -> Option<String> {
     let node = state.node.lock().await;
     node.has_real_chain().then(|| node.chain_tip_hash())
-}
-
-async fn ui_data_matches_tip(state: &HttpState, tip_hash: String) -> Result<bool> {
-    let store = state.ui_data_store.clone();
-    tokio::task::spawn_blocking(move || store.is_projected_to(&tip_hash))
-        .await
-        .context("UI data projection metadata worker failed")?
 }
 
 fn collect_transaction_input_outpoints<'a>(
@@ -292,9 +216,6 @@ pub(super) async fn api_wallet_utxos(
     State(state): State<HttpState>,
     Query(query): Query<PageQuery>,
 ) -> Json<Page<WalletUtxoRow>> {
-    if ensure_ui_data_current(&state).await.is_err() {
-        return Json(page_items(Vec::new(), query));
-    }
     let (wallet, pending_spent) = {
         let node = state.node.lock().await;
         (
@@ -317,9 +238,6 @@ pub(super) async fn api_wallet_utxos(
 pub(super) async fn api_wallet_selectable_utxos(
     State(state): State<HttpState>,
 ) -> Json<Vec<WalletUtxoRow>> {
-    if ensure_ui_data_current(&state).await.is_err() {
-        return Json(Vec::new());
-    }
     let (wallet, pending_spent) = {
         let node = state.node.lock().await;
         (
@@ -413,10 +331,19 @@ pub(super) async fn api_metrics(
 ) -> Json<MetricsResponse> {
     let enabled = state.ui_config.lock().await.keep_track_of_metrics;
     if !enabled {
-        return Json(empty_metrics_response(enabled));
+        return Json(empty_metrics_response(enabled, false));
     }
-    if ensure_ui_data_current(&state).await.is_err() {
-        return Json(empty_metrics_response(enabled));
+    let Some(tip_hash) = current_real_chain_tip(&state).await else {
+        return Json(empty_metrics_response(enabled, false));
+    };
+    let store = state.ui_data_store.clone();
+    let ready = tokio::task::spawn_blocking(move || store.metrics_are_projected_to(&tip_hash))
+        .await
+        .ok()
+        .and_then(Result::ok)
+        .unwrap_or(false);
+    if !ready {
+        return Json(empty_metrics_response(enabled, true));
     }
     let store = state.ui_data_store.clone();
     let rows = tokio::task::spawn_blocking(move || match query.limit {
@@ -437,9 +364,10 @@ pub(super) async fn api_metrics(
     Json(metrics_response(enabled, rows, leaderboards))
 }
 
-fn empty_metrics_response(enabled: bool) -> MetricsResponse {
+fn empty_metrics_response(enabled: bool, preparing: bool) -> MetricsResponse {
     MetricsResponse {
         enabled,
+        preparing,
         latest: None,
         charts: Vec::new(),
         leaderboards: MetricsLeaderboards::default(),
