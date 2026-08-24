@@ -33,6 +33,7 @@ window.iunaApp = function iunaApp() {
       return 100;
     })(),
     networkHealth: {},
+    networkHealthLoaded: false,
     uiMode: (() => {
       try {
         return localStorage.getItem("iunaUiMode") === "advanced" ? "advanced" : "basic";
@@ -660,15 +661,20 @@ window.iunaApp = function iunaApp() {
       if (tab === "chain") pagedDatasets.push("mempool");
       if (tab === "p2p") pagedDatasets.push("peer");
       try {
-        const [config, status, blocks, p2pMetrics, blockchainMetrics] = await Promise.all([
+        const [config, status, networkHealth, blocks, p2pMetrics, blockchainMetrics] = await Promise.all([
           this.fetchJson("/api/config"),
           this.fetchJson("/api/status"),
+          this.refreshNetworkHealth({ silent: options.silent === true }),
           shouldLoadBlocks ? this.fetchJson("/api/blocks?limit=30") : Promise.resolve(null),
           shouldLoadP2pMetrics ? this.fetchJson("/api/p2p/metrics") : Promise.resolve(this.p2pMetrics),
           Promise.resolve(this.blockchainMetrics),
         ]);
         const previousChainHeight = this.status.chain?.height;
         this.status = status;
+        if (networkHealth) {
+          this.networkHealth = networkHealth;
+          this.networkHealthLoaded = true;
+        }
         this.config = config;
         this.syncConfigState({ addressBookVersion });
         if (!this.allowedTabs().includes(this.tab)) {
@@ -696,7 +702,6 @@ window.iunaApp = function iunaApp() {
         this.lastUpdated = new Date();
         this.syncMiningEvents({ status, blocks });
         this.scheduleFeeEstimates();
-        this.refreshNetworkHealth({ silent: options.silent === true });
         await Promise.all(
           pagedDatasets.map((kind) =>
             this.refreshPagedDataset(kind, { silent: options.silent === true })
@@ -721,10 +726,15 @@ window.iunaApp = function iunaApp() {
       this.shellRefreshPromise = Promise.all([
         this.fetchJson("/api/config"),
         this.fetchJson("/api/status"),
+        this.refreshNetworkHealth({ silent: true }),
       ])
-        .then(async ([config, status]) => {
+        .then(async ([config, status, networkHealth]) => {
           const previousChainHeight = this.status.chain?.height;
           this.status = status;
+          if (networkHealth) {
+            this.networkHealth = networkHealth;
+            this.networkHealthLoaded = true;
+          }
           this.config = config;
           this.syncConfigState({ addressBookVersion });
           if (!this.allowedTabs().includes(this.tab)) {
@@ -748,7 +758,6 @@ window.iunaApp = function iunaApp() {
           this.lastUpdated = new Date();
           this.syncMiningEvents({ status, blocks: null });
           this.scheduleFeeEstimates();
-          this.refreshNetworkHealth({ silent: true });
         })
         .catch((error) => {
           if (options.silent !== true) this.showFlash(error.message, "error");
@@ -760,13 +769,10 @@ window.iunaApp = function iunaApp() {
     },
 
     async refreshNetworkHealth(options = {}) {
-      if (!this.canUseProtectedApi()) return;
+      if (!this.canUseProtectedApi()) return null;
       if (this.networkHealthPromise) return this.networkHealthPromise;
       this.networkHealthPromise = this.fetchJson("/api/network/health")
-        .then((networkHealth) => {
-          this.networkHealth = networkHealth;
-          return networkHealth;
-        })
+        .then((networkHealth) => networkHealth)
         .catch((error) => {
           if (options.silent !== true) this.showFlash(error.message, "error");
           return null;
@@ -2958,6 +2964,38 @@ window.iunaApp = function iunaApp() {
       if (this.networkHealth.state === "stale") return "stale";
       if (this.networkHealth.state === "banned") return "banned";
       return "error";
+    },
+
+    syncingNode() {
+      return (
+        this.canUseProtectedApi() &&
+        this.config.setup_complete === true &&
+        this.networkHealthLoaded &&
+        this.networkHealth.state === "syncing"
+      );
+    },
+
+    syncCurrentHeight() {
+      const height = Number(this.networkHealth.local_height ?? this.status.chain?.height ?? 0);
+      return Number.isFinite(height) && height >= 0 ? Math.floor(height) : 0;
+    },
+
+    syncTargetHeight() {
+      const target = Number(this.networkHealth.best_known_height ?? this.syncCurrentHeight());
+      return Number.isFinite(target) && target >= 0
+        ? Math.max(this.syncCurrentHeight(), Math.floor(target))
+        : this.syncCurrentHeight();
+    },
+
+    syncProgressPercent() {
+      const current = this.syncCurrentHeight();
+      const target = this.syncTargetHeight();
+      if (target <= 0) return 0;
+      return Math.max(0, Math.min(100, (current / target) * 100));
+    },
+
+    syncProgressLabel() {
+      return `Syncing ${this.syncCurrentHeight().toLocaleString()} of ${this.syncTargetHeight().toLocaleString()}`;
     },
 
     networkLagLabel() {

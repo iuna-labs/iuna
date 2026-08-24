@@ -98,6 +98,17 @@ pub(super) const INDEX_HTML: &str = r#"<!doctype html>
     .page-title { margin-bottom: 16px; }
     .setup-overlay { position: fixed; inset: 0; z-index: 30; display: grid; place-items: center; padding: 22px; background: rgba(8, 9, 10, .72); backdrop-filter: blur(8px); }
     .transaction-overlay { z-index: 40; }
+    .sync-overlay { position: fixed; inset: 0; z-index: 60; display: grid; place-items: center; padding: 22px; background: #0f1012; }
+    .sync-screen { width: min(460px, 100%); display: grid; justify-items: center; gap: 18px; text-align: center; }
+    .sync-mark { width: 54px; height: 54px; display: grid; place-items: center; border: 1px solid #566d25; border-radius: 14px; background: #1c2516; box-shadow: 0 18px 48px rgba(0, 0, 0, .32); }
+    .sync-spinner { width: 25px; height: 25px; border: 3px solid rgba(213, 245, 95, .2); border-top-color: #d5f55f; border-radius: 999px; animation: sync-spin .9s linear infinite; }
+    .sync-screen h1 { margin: 0; font-size: clamp(25px, 5vw, 36px); }
+    .sync-copy { margin: -8px 0 0; color: #9fa8ad; line-height: 1.5; }
+    .sync-progress { width: 100%; height: 9px; overflow: hidden; border: 1px solid #30373b; border-radius: 999px; background: #191c1f; }
+    .sync-progress-fill { height: 100%; border-radius: inherit; background: linear-gradient(90deg, #8de9cd, #d5f55f); transition: width .35s ease; }
+    .sync-progress-label { color: #d5f55f; font-size: 14px; font-weight: 850; font-variant-numeric: tabular-nums; }
+    @keyframes sync-spin { to { transform: rotate(360deg); } }
+    @media (prefers-reduced-motion: reduce) { .sync-spinner { animation-duration: 1.8s; } .sync-progress-fill { transition: none; } }
     .setup-modal { width: min(980px, 100%); max-height: calc(100vh - 44px); overflow: auto; border: 1px solid #3b4448; border-radius: 8px; padding: 18px; background: #181b1f; box-shadow: 0 24px 80px rgba(0, 0, 0, .42); }
     .setup-modal-head { display: grid; gap: 5px; margin-bottom: 16px; }
     .setup-modal-head h2 { margin: 0; font-size: 24px; }
@@ -456,11 +467,11 @@ pub(super) const INDEX_HTML: &str = r#"<!doctype html>
       .block-card { flex-basis: 108px; }
     }
   </style>
-  <script defer src="/assets/iuna-ui.js?v=110"></script>
+  <script defer src="/assets/iuna-ui.js?v=111"></script>
   <script defer src="/assets/alpine.min.js"></script>
 </head>
 <body x-data="iunaApp()" x-init="init()" @keydown.window.escape="closeModals()" x-cloak>
-  <div class="app-shell">
+  <div class="app-shell" :inert="syncingNode()">
     <aside class="sidebar" aria-label="iuna navigation">
       <div class="brand-mark" title="iuna" aria-label="iuna"><svg viewBox="0 0 32 32" aria-hidden="true" focusable="false"><circle class="mark-dot" cx="9.4" cy="7.6" r="2.8"></circle><path class="mark-loop" d="M9.4 13v7.1c0 3.7 2.9 6.4 6.6 6.4s6.6-2.7 6.6-6.4V13"></path></svg></div>
       <nav class="side-nav">
@@ -1249,6 +1260,17 @@ pub(super) const INDEX_HTML: &str = r#"<!doctype html>
       </div>
     </section>
     </main>
+  </div>
+  <div class="sync-overlay" x-show="syncingNode()" role="status" aria-live="polite" aria-label="Blockchain synchronization in progress">
+    <section class="sync-screen">
+      <div class="sync-mark" aria-hidden="true"><div class="sync-spinner"></div></div>
+      <h1>Synchronizing blockchain</h1>
+      <p class="sync-copy">Your node is catching up with the network. The interface will unlock automatically when synchronization is complete.</p>
+      <div class="sync-progress" role="progressbar" aria-label="Blockchain sync progress" aria-valuemin="0" aria-valuemax="100" :aria-valuenow="Math.round(syncProgressPercent())">
+        <div class="sync-progress-fill" :style="`width: ${syncProgressPercent()}%`"></div>
+      </div>
+      <div class="sync-progress-label" x-text="syncProgressLabel()"></div>
+    </section>
   </div>
   <div class="setup-overlay transaction-overlay" x-show="chainResetModalOpen" x-transition.opacity @click.self="closeChainResetModal()" role="dialog" aria-modal="true" aria-labelledby="chain-reset-title">
     <section class="tx-modal">

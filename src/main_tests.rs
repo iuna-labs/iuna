@@ -78,6 +78,17 @@ fn management_ui_warns_when_estimated_fees_exceed_amounts() {
     assert!(javascript.contains("estimated fee IUNA ${this.amountLabel(fee)} exceeds"));
 }
 
+#[test]
+fn management_ui_blocks_interaction_while_the_node_is_syncing() {
+    let html = include_str!("adapters/http/index_html.rs");
+    let javascript = include_str!("../www/assets/iuna-ui.js");
+    assert!(html.contains(":inert=\"syncingNode()\""));
+    assert!(html.contains("Synchronizing blockchain"));
+    assert!(html.contains("syncProgressPercent()"));
+    assert!(javascript.contains("this.networkHealth.state === \"syncing\""));
+    assert!(javascript.contains("Syncing ${this.syncCurrentHeight().toLocaleString()} of"));
+}
+
 fn ledger_with_one_spendable_iuna(wallet: &Wallet) -> Ledger {
     let mut genesis = BTreeMap::new();
     genesis.insert(wallet.address().to_string(), 3);
