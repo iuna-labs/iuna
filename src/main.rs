@@ -1016,7 +1016,35 @@ async fn warm_ui_data_store(
 ) -> Result<()> {
     println!("warming UI data database...");
     let started = Instant::now();
-    project_ui_data_store(store, snapshot, keep_metrics).await?;
+    let tip_hash = snapshot
+        .blocks
+        .last()
+        .map(|block| block.hash.clone())
+        .context("cannot warm UI data database from an empty chain")?;
+    let readiness_store = store.clone();
+    let readiness_tip = tip_hash.clone();
+    let (ui_ready, metrics_ready) = tokio::task::spawn_blocking(move || {
+        Ok::<_, anyhow::Error>((
+            readiness_store.is_projected_to(&readiness_tip)?,
+            readiness_store.metrics_are_projected_to(&readiness_tip)?,
+        ))
+    })
+    .await
+    .context("UI data readiness worker failed")??;
+
+    if !ui_ready {
+        project_ui_data_store(store, snapshot, keep_metrics).await?;
+    } else if keep_metrics && !metrics_ready {
+        let metrics_store = store.clone();
+        tokio::task::spawn_blocking(move || metrics_store.replace_metrics_for_snapshot(&snapshot))
+            .await
+            .context("metrics warm-up worker failed")??;
+    } else if !keep_metrics {
+        let metrics_store = store.clone();
+        tokio::task::spawn_blocking(move || metrics_store.clear_metrics())
+            .await
+            .context("metrics cleanup worker failed")??;
+    }
     println!(
         "UI data database ready in {:.2}s",
         started.elapsed().as_secs_f64()

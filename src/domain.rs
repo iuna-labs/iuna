@@ -50,6 +50,7 @@ use ledger_ops::{
 pub(crate) use ledger_pending::MINE_ANCHOR_LIMIT_REACHED;
 pub use ledger_state::Ledger;
 use ledger_state::unix_now_ms;
+pub(crate) use mine_policy::{MINE_RETARGET_WINDOW_BLOCKS, retarget_mine_difficulty_bits};
 use mining::{mine_payload, mine_signature};
 pub use profile::{GenesisBurn, LaunchProfile};
 pub use protocol::{

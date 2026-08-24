@@ -22,13 +22,14 @@ pub(super) fn network_health(
 
 pub(super) fn metrics_response(
     enabled: bool,
+    preparing: bool,
     rows: Vec<BlockMetricRow>,
     leaderboards: MetricsLeaderboards,
 ) -> MetricsResponse {
     let latest = rows.last().cloned();
     MetricsResponse {
         enabled,
-        preparing: false,
+        preparing,
         latest,
         leaderboards,
         charts: vec![
@@ -304,7 +305,46 @@ fn median_peer_clock_offset(peers: &[PeerInfo], now_ms: u64) -> Option<i64> {
 
 #[cfg(test)]
 mod tests {
-    use super::{MempoolCounts, NetworkHealthLocalState, network_health_at};
+    use crate::adapters::ui_data_store::BlockMetricRow;
+
+    use super::{
+        MempoolCounts, MetricsLeaderboards, NetworkHealthLocalState, metrics_response,
+        network_health_at,
+    };
+
+    #[test]
+    fn stale_metrics_remain_visible_while_the_latest_tip_is_preparing() {
+        let row = BlockMetricRow {
+            height: 7,
+            block_hash: "cached-tip".to_string(),
+            timestamp_ms: 1_000,
+            block_time_ms: Some(100),
+            mine_difficulty_bits: 10,
+            circulating_supply: 100,
+            known_wallet_addresses: 2,
+            transaction_count: 1,
+            transfer_count: 0,
+            burn_count: 1,
+            mine_count: 0,
+            burned_amount: 1,
+            total_burned_amount: 3,
+            fees_amount: 1,
+            reward_amount: 1,
+            vdf_rounds: 10,
+            finalizer_rank: 0,
+        };
+
+        let response = metrics_response(
+            true,
+            true,
+            vec![row.clone()],
+            MetricsLeaderboards::default(),
+        );
+
+        assert!(response.preparing);
+        assert_eq!(response.latest, Some(row));
+        assert!(response.charts.iter().any(|chart| !chart.points.is_empty()));
+    }
 
     #[test]
     fn network_health_exposes_operator_chain_and_rejection_context() {

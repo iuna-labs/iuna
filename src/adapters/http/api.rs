@@ -342,9 +342,6 @@ pub(super) async fn api_metrics(
         .ok()
         .and_then(Result::ok)
         .unwrap_or(false);
-    if !ready {
-        return Json(empty_metrics_response(enabled, true));
-    }
     let store = state.ui_data_store.clone();
     let rows = tokio::task::spawn_blocking(move || match query.limit {
         Some(limit) => store.load_recent_metrics(limit.clamp(1, DATASET_LIMIT)),
@@ -361,7 +358,10 @@ pub(super) async fn api_metrics(
         .and_then(Result::ok)
         .map(metrics_leaderboards)
         .unwrap_or_default();
-    Json(metrics_response(enabled, rows, leaderboards))
+    if rows.is_empty() {
+        return Json(empty_metrics_response(enabled, !ready));
+    }
+    Json(metrics_response(enabled, !ready, rows, leaderboards))
 }
 
 fn empty_metrics_response(enabled: bool, preparing: bool) -> MetricsResponse {

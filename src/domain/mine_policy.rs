@@ -4,14 +4,14 @@ use anyhow::{Result, bail};
 
 use super::{Block, MINE_ACTIONS_PER_ANCHOR_LIMIT, Transaction};
 
-pub(super) const MINE_RETARGET_WINDOW_BLOCKS: u64 = 10;
+pub(crate) const MINE_RETARGET_WINDOW_BLOCKS: u64 = 10;
 pub(super) const MINE_MAX_RETARGET_STEP_BITS: u32 = 2;
 pub(super) const MINE_MIN_DIFFICULTY_BITS: u32 = 10;
 pub(super) const MINE_MAX_ANCHOR_AGE_BLOCKS: u64 = MINE_RETARGET_WINDOW_BLOCKS;
 
 const MINE_TARGET_ACTIONS_PER_BLOCK: u64 = 1;
 
-pub(super) fn retarget_mine_difficulty_bits(current: u32, mine_actions: u64) -> u32 {
+pub(crate) fn retarget_mine_difficulty_bits(current: u32, mine_actions: u64) -> u32 {
     let target = MINE_RETARGET_WINDOW_BLOCKS.saturating_mul(MINE_TARGET_ACTIONS_PER_BLOCK);
     if target == 0 || mine_actions == target {
         return current.max(MINE_MIN_DIFFICULTY_BITS);
