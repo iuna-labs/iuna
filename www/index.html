@@ -4,8 +4,8 @@
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <meta name="color-scheme" content="dark">
-  <meta name="description" content="iuna is an experimental cryptocurrency devnet that combines VDF finalization, a burn lottery, and proof-of-work issuance.">
-  <title>iuna Devnet</title>
+  <meta name="description" content="iuna is an experimental mainnet-candidate cryptocurrency network that combines VDF finalization, a burn lottery, and proof-of-work issuance.">
+  <title>iuna Mainnet Candidate</title>
   <style>
     :root {
       color-scheme: dark;
@@ -134,7 +134,7 @@
     p { max-width: 720px; color: #b7c3c9; font-size: 17px; line-height: 1.6; }
     .lead { color: #eef4f6; font-size: 21px; }
     .actions { display: flex; flex-wrap: wrap; gap: 10px; margin-top: 26px; }
-    .devnet-callout {
+    .candidate-callout {
       position: relative;
       display: grid;
       gap: 14px;
@@ -146,7 +146,7 @@
       background: linear-gradient(180deg, rgba(213, 245, 95, .12), rgba(21, 25, 27, .92));
       box-shadow: 0 20px 50px rgba(0, 0, 0, .24), inset 0 1px 0 rgba(255, 255, 255, .08);
     }
-    .devnet-callout::before {
+    .candidate-callout::before {
       content: "";
       position: absolute;
       inset: 0;
@@ -165,18 +165,18 @@
       font-weight: 900;
       text-transform: uppercase;
     }
-    .devnet-callout h2 {
+    .candidate-callout h2 {
       margin: 0;
       font-size: 30px;
       line-height: 1;
     }
-    .devnet-callout p {
+    .candidate-callout p {
       margin: 0;
       color: #d8e2e6;
       font-size: 15px;
       line-height: 1.45;
     }
-    .devnet-callout .button {
+    .candidate-callout .button {
       width: fit-content;
       margin-top: 2px;
     }
@@ -330,7 +330,7 @@
     @media (max-width: 820px) {
       .hero { padding-top: 58px; }
       .hero-grid, .split, .grid, .join-panel { grid-template-columns: 1fr; }
-      .devnet-callout { max-width: none; justify-self: stretch; }
+      .candidate-callout { max-width: none; justify-self: stretch; }
       nav { display: none; }
       .wrap { width: min(100% - 32px, 1060px); }
       h1 { font-size: clamp(44px, 18vw, 78px); }
@@ -362,20 +362,20 @@
   <header class="hero">
     <div class="wrap hero-grid">
       <div>
-        <div class="eyebrow"><span class="dot"></span> Devnet prototype</div>
+        <div class="eyebrow"><span class="dot"></span> Mainnet candidate</div>
         <h1>iuna</h1>
         <p class="pronunciation" aria-label="Pronounced yoo-nuh">/ˈjuː.nə/</p>
-        <p class="lead">An experimental cryptocurrency devnet that combines VDF finalization, a burn lottery, and open proof-of-work issuance.</p>
-        <p>iuna is not a mainnet and not money yet. It is a small L1 lab for learning how a wallet, node, finalizer, miner, mempool, and peer network behave when real people run it on real machines.</p>
+        <p class="lead">An experimental mainnet-candidate cryptocurrency network that combines VDF finalization, a burn lottery, and open proof-of-work issuance.</p>
+        <p>iuna is not mainnet yet. If the candidate remains stable, its genesis, history, UTXOs, tickets, and mined coins are intended to be promoted without a second genesis. That outcome is not guaranteed.</p>
         <div class="actions">
           <a class="button primary" href="/downloads/">Download builds</a>
           <a class="button" href="/git/iuna/file/docs/protocol.md.html">Read protocol</a>
           <a class="button discord" href="https://discord.gg/JcXRSSDhS" target="_blank" rel="noopener noreferrer"><svg class="button-icon" aria-hidden="true" focusable="false"><use href="#discord-icon"></use></svg><span>Join Discord</span></a>
         </div>
       </div>
-      <aside class="devnet-callout" aria-label="Help run the devnet">
+      <aside class="candidate-callout" aria-label="Help run the mainnet candidate">
         <span class="callout-kicker">Node runners wanted</span>
-        <h2>Help Run The Devnet</h2>
+        <h2>Help Run The Candidate</h2>
         <p>We are looking for people willing to keep an iuna node online, test real peer behavior, and report what breaks.</p>
         <a class="button primary" href="#howtojoin">Run a node</a>
       </aside>
@@ -424,7 +424,7 @@
               </div>
               <div class="join-step">
                 <h3>Set Up</h3>
-                <p>Create or import a wallet, back up your recovery phrase, and connect to the devnet.</p>
+                <p>Create or import a wallet, back up your recovery phrase, and connect to the mainnet-candidate network.</p>
               </div>
               <div class="join-step">
                 <h3>Choose Your Role</h3>
@@ -462,7 +462,7 @@
 
   <section class="footer">
     <div class="wrap">
-      <span>iuna devnet prototype.</span>
+      <span>iuna mainnet candidate.</span>
       <a href="/git/iuna/file/README.md.html">Source</a>
     </div>
   </section>

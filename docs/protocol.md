@@ -1,6 +1,6 @@
 # iuna protocol in simple terms
 
-iuna is an experimental devnet protocol that combines three mechanisms:
+iuna is an experimental mainnet-candidate protocol that combines three mechanisms:
 
 - **Burn lottery:** burning IUNA creates tickets for future block finalization.
 - **VDF timing:** the selected finalizer must do sequential delay work before publishing a block.
@@ -10,7 +10,7 @@ The goal is to avoid relying on only one scarce resource. Proof-of-work chains t
 
 Burns do not remove wealth advantage. More capital can still buy more lottery weight. The difference from stake is that burn power is paid again and again: it expires, does not unbond, and does not accumulate into a permanent stake position. The design converts wealth-bias from a growing asset into a recurring cost.
 
-This is still experimental. The rules below describe the current devnet and mainnet-candidate protocol, not a proven mainnet design.
+This is still experimental. The rules below describe the frozen mainnet-candidate protocol, not a proven mainnet design.
 
 ## Mainnet-Candidate Frozen Parameters
 
@@ -321,7 +321,7 @@ Within that finality window, a taller valid candidate chain wins over the local 
 
 Genesis is explicit. A normal node without a chain starts in setup mode and waits to join an existing chain from peers rather than silently creating a separate chain.
 
-The genesis flow bootstraps the devnet with an initial burn ticket and a fixed `1 IUNA` initial reward for the genesis wallet. New nodes fetch and validate chain snapshots from peers, then continue with normal block validation.
+The genesis flow bootstraps the mainnet-candidate network with an initial burn ticket and a fixed `1 IUNA` initial reward for the genesis wallet. New nodes fetch and validate chain snapshots from peers, then continue with normal block validation.
 
 ## What This Design Is Trying to Achieve
 
@@ -334,4 +334,4 @@ iuna is trying to make these things true at the same time:
 - Block timing should be hard to rush.
 - Finalizers should have a consensus-level reason to include independently witnessed burn traffic.
 
-The design is intentionally small and still evolving. The devnet exists to find out where these assumptions hold and where they break.
+The design is intentionally small and still evolving. The candidate exists to find out whether these assumptions hold under mainnet-like operation and where they break.

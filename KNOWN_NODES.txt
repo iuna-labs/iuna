@@ -1,4 +1,4 @@
-# Known iuna devnet nodes
+# Known iuna mainnet-candidate nodes
 #
 # These are bootstrap peers, not authorities. You may run without them or use
 # your own trusted peer. A bootstrap peer helps your node find the network; it

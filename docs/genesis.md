@@ -1,6 +1,6 @@
 # Genesis And Candidate Rehearsal
 
-This is operator documentation for bootstrapping a iuna devnet or mainnet-candidate network. Most users should join an existing bootnode instead of creating genesis.
+This is operator documentation for bootstrapping an iuna local/test network or the mainnet-candidate network. Most users should join an existing bootnode instead of creating genesis.
 
 The mainnet-candidate genesis is not disposable by default. It is the genesis that can become mainnet if the candidate passes the agreed stability window and release gates. In that case, mined coins, UTXOs, tickets, and chain history remain on the same ledger; promotion is a coordinated release and network-identity cutover, not a second genesis.
 

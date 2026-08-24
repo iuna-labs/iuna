@@ -1,6 +1,6 @@
 # iuna
 
-iuna is an experimental cryptocurrency devnet.
+iuna is an experimental cryptocurrency network preparing to launch its mainnet candidate.
 
 It combines three ideas:
 
@@ -10,9 +10,9 @@ It combines three ideas:
 
 ## Status
 
-iuna is still in development. It is not a mainnet, not money, and not something to treat as financially valuable yet.
+iuna is still in development. It is not mainnet yet and remains experimental. The upcoming mainnet-candidate ledger is intended to be preserved if it proves stable enough for promotion, but that outcome is not guaranteed.
 
-The goal right now is to run a real test network, improve the wallet and node software, and learn how the protocol behaves with real users.
+The goal right now is to launch and operate that candidate with mainnet-like release, security, and recovery procedures while learning how the protocol behaves with real users.
 
 ## Why Another Crypto?
 
@@ -34,7 +34,7 @@ The simplest way to run iuna is:
 3. Start the app or binary.
 4. Follow the setup screen.
 
-The setup flow helps you create or import a wallet, back up your recovery phrase, and connect to the devnet.
+The setup flow helps you create or import a wallet, back up your recovery phrase, and connect to the mainnet-candidate network.
 
 You do not need Rust or Cargo unless you want to work on the code.
 
@@ -71,7 +71,7 @@ Release and deploy with:
 Deployment publishes two images to the `jhx-app` k3s cluster:
 
 - `https://getiuna.org/` routes to the static website image.
-- `https://admin.iuna.jhx.app/` routes to the node management UI.
+- `https://admin.iuna.jhx.app/` routes to the IP-restricted node management UI.
 - `iuna.jhx.app:9444` routes to the node P2P listener.
 
 Useful overrides:
@@ -88,7 +88,7 @@ You can use iuna as a wallet, a node, or a public peer.
 - **Node:** keep a local chain copy and participate in mining/finalization settings.
 - **Public peer:** same as a node, but reachable by other nodes through a public P2P address.
 
-Keep the management UI local. Only the P2P listener should be reachable by other nodes.
+Keep the management UI local or behind a strict access control such as the production IP allowlist. Only the P2P listener should be generally reachable by other nodes.
 
 ## Optional: CLI
 
@@ -209,7 +209,7 @@ Use your iuna wallet address as the worker username. Accepted shares become PoW 
 
 ## Contributing
 
-We are open to PRs and help running, testing, and improving the devnet.
+We are open to PRs and help running, testing, and improving the mainnet candidate.
 
 See [THANKS.md](THANKS.md) for people who have helped test and improve iuna.
 

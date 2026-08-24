@@ -34,7 +34,7 @@ RUN set -eux; \
     test -d /src/iuna-work/.git; \
     git clone --bare /src/iuna-work /src/iuna.git; \
     mkdir -p /site/git/iuna /var/cache/stagit-iuna; \
-    echo "iuna - experimental devnet protocol" > /src/iuna.git/description; \
+    echo "iuna - experimental mainnet-candidate protocol" > /src/iuna.git/description; \
     echo "iuna-labs" > /src/iuna.git/owner; \
     echo "https://getiuna.org/git/iuna.git" > /src/iuna.git/url; \
     cd /src/iuna.git; \

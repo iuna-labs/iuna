@@ -1,12 +1,12 @@
 # Roadmap
 
-iuna is currently an experimental cryptocurrency devnet. This roadmap is the canonical planning document for moving from devnet/testnet hardening toward a mainnet candidate and, if the candidate stays healthy, promoting that same chain to mainnet.
+iuna is preparing to launch an experimental mainnet-candidate network. This roadmap is the canonical planning document for completing pre-candidate hardening and, if the candidate stays healthy, promoting that same chain to mainnet.
 
 ## Current Phase
 
-Testnet hardening.
+Mainnet-candidate launch preparation.
 
-The current goal is to keep a small real testnet stable while increasing confidence in consensus, sync, recovery, fork choice, transaction handling, and release operations.
+The current goal is to finalize release evidence and launch operations while preserving the confidence already built in consensus, sync, recovery, fork choice, transaction handling, and release operations.
 
 ## Mainnet Readiness Checklist
 
@@ -34,7 +34,7 @@ Security review tracking lives in [Security Review Checklist](docs/security-revi
 
 ## Pre-Candidate Launch Test Backlog
 
-These items are not protocol rules. They are the attack and reliability checks to finish or consciously defer before the planned devnet reset that creates the mainnet-candidate network. If that candidate stays healthy through the agreed window, the same genesis, chain history, UTXOs, and mined coins should be promoted to mainnet instead of being reset again.
+These items are not protocol rules. They are the attack and reliability checks to finish or consciously defer before the planned reset of the current `0.3.10` network that creates the mainnet-candidate network. If that candidate stays healthy through the agreed window, the same genesis, chain history, UTXOs, and mined coins should be promoted to mainnet instead of being reset again.
 
 ### Must Before Candidate Genesis
 

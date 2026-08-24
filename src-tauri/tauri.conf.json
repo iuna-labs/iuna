@@ -38,8 +38,8 @@
       "icons/icon.ico"
     ],
     "category": "DeveloperTool",
-    "shortDescription": "Local iuna devnet node",
-    "longDescription": "Runs a local iuna devnet node and opens its management UI.",
+    "shortDescription": "Local iuna mainnet-candidate node",
+    "longDescription": "Runs a local iuna mainnet-candidate node and opens its management UI.",
     "windows": {
       "webviewInstallMode": {
         "type": "downloadBootstrapper"

@@ -117,7 +117,7 @@ metadata:
   namespace: iuna
   annotations:
     cert-manager.io/cluster-issuer: letsencrypt-prod
-    traefik.ingress.kubernetes.io/router.middlewares: default-redirect-https@kubernetescrd
+    traefik.ingress.kubernetes.io/router.middlewares: default-redirect-https@kubernetescrd,iuna-iuna-admin-ip-allowlist@kubernetescrd
 spec:
   ingressClassName: traefik
   rules:
@@ -128,13 +128,22 @@ spec:
             pathType: Prefix
             backend:
               service:
-                name: iuna
+                name: iuna-management
                 port:
                   number: 18661
   tls:
     - secretName: iuna-admin-tls
       hosts:
         - admin.iuna.jhx.app
+---
+apiVersion: traefik.containo.us/v1alpha1
+kind: Middleware
+metadata:
+  name: iuna-admin-ip-allowlist
+  namespace: iuna
+spec:
+  ipAllowList:
+    sourceRange:
 ---
 apiVersion: apps/v1
 kind: Deployment
@@ -171,6 +180,19 @@ spec:
 apiVersion: v1
 kind: Service
 metadata:
+  name: iuna-management
+  namespace: iuna
+spec:
+  selector:
+    app: iuna-node
+  ports:
+    - name: management
+      port: 18661
+      targetPort: 18661
+---
+apiVersion: v1
+kind: Service
+metadata:
   name: iuna
   namespace: iuna
 spec:
@@ -179,9 +201,6 @@ spec:
   selector:
     app: iuna-node
   ports:
-    - name: management
-      port: 18661
-      targetPort: 18661
     - name: p2p
       port: 9444
       targetPort: 9444
