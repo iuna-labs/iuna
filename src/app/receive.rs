@@ -143,6 +143,9 @@ impl NodeCore {
     }
 
     pub fn import_chain_snapshot(&mut self, snapshot: ChainSnapshot) -> Result<()> {
+        if self.network_migration_from().is_some() {
+            anyhow::bail!("local chain reset is required before joining the new network");
+        }
         let previous_height = self.ledger.height();
         let imported = self.ledger.extend_from_snapshot(snapshot)?;
         if imported {
@@ -156,6 +159,9 @@ impl NodeCore {
     }
 
     pub(crate) fn import_verified_ledger(&mut self, ledger: Ledger) -> Result<bool> {
+        if self.network_migration_from().is_some() {
+            anyhow::bail!("local chain reset is required before joining the new network");
+        }
         let replaces_setup_placeholder = self.ledger.is_setup_placeholder()
             && ledger.genesis_hash() != self.ledger.genesis_hash();
         if ledger.genesis_hash() != self.ledger.genesis_hash() && !replaces_setup_placeholder {

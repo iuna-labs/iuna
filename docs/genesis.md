@@ -230,7 +230,7 @@ If the candidate passes the stability window, publish a promotion notice instead
 - promoted tip height and tip hash;
 - final candidate release tag and mainnet release tag;
 - bootnodes that will remain online through the cutover;
-- whether the P2P network ID changes from `iuna-mainnet-candidate-v1` to `iuna-mainnet-v1`;
+- whether the P2P network ID changes from `iuna-mainnet-candidate` to `iuna-mainnet-v1`;
 - the exact upgrade window for operators.
 
 Do not delete chain data when promoting. Nodes should keep `chain.sqlite3`, wallet files, and UI data, then upgrade or restart with the promoted release. A P2P network ID change fences upgraded mainnet nodes away from old candidate binaries, but it must not change genesis, launch profile rules, or any existing ledger state.

@@ -26,7 +26,8 @@ pub(super) async fn wallet_setup_response(
 ) -> Result<WalletSetupResponse> {
     let setup_complete = state.ui_config.lock().await.setup_complete;
     let password = wallet_password_for_request(state, headers).await;
-    let seed_phrase = if setup_complete {
+    let migration_required = state.node.lock().await.network_migration_from().is_some();
+    let seed_phrase = if setup_complete && !migration_required {
         None
     } else {
         wallet_store::setup_seed_phrase_with_password(&state.wallet_path, password.as_deref())?
@@ -96,7 +97,8 @@ pub(super) async fn import_setup_wallet_seed(
 
 async fn ensure_wallet_setup_open(state: &HttpState) -> Result<()> {
     let setup_complete = state.ui_config.lock().await.setup_complete;
-    if setup_complete {
+    let migration_required = state.node.lock().await.network_migration_from().is_some();
+    if setup_complete && !migration_required {
         bail!("wallet setup is already complete");
     }
     Ok(())

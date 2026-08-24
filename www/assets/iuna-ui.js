@@ -82,6 +82,7 @@ window.iunaApp = function iunaApp() {
     importSeedPhrase: "",
     walletVerified: false,
     setupFeedback: null,
+    migrationBusy: false,
     burnAmount: 100,
     burnAmountDraft: "0.0001",
     burnFee: 1,
@@ -281,7 +282,38 @@ window.iunaApp = function iunaApp() {
     },
 
     showingSetup() {
-      return this.authLoaded && !this.showingAuth() && !this.config.setup_complete;
+      return this.authLoaded && !this.showingAuth() && !this.showingNetworkMigration() && !this.config.setup_complete;
+    },
+
+    showingNetworkMigration() {
+      return this.authLoaded && !this.showingAuth() && this.status.network_migration?.required === true;
+    },
+
+    migrationNetworkLabel() {
+      return this.status.network_migration?.to_network || "the new Iuna network";
+    },
+
+    async finishNetworkMigration(setUpDifferentWallet) {
+      this.migrationBusy = true;
+      try {
+        await this.submitForm("/api/settings/chain-reset", { confirm: "RESET" });
+        if (setUpDifferentWallet) {
+          const response = await this.fetchWithTimeout("/api/config", {
+            method: "POST",
+            headers: { Accept: "application/json", "Content-Type": "application/x-www-form-urlencoded" },
+            body: new URLSearchParams({ setup_complete: "false", peer: "" }),
+          });
+          const payload = await response.json();
+          if (!response.ok || !payload.ok) throw new Error(payload.error || "Could not open wallet setup");
+          this.config.setup_complete = false;
+        }
+        await this.refresh({ force: true });
+        this.showFlash(setUpDifferentWallet ? "Local chain reset. Choose or import a wallet." : "Local chain reset. Sync requested from peers.", "success");
+      } catch (error) {
+        this.showFlash(error.message, "error");
+      } finally {
+        this.migrationBusy = false;
+      }
     },
 
     showingAuth() {
@@ -689,7 +721,7 @@ window.iunaApp = function iunaApp() {
         if (!this.allowedTabs().includes(this.tab)) {
           this.setTab("wallet");
         }
-        if (!this.config.setup_complete) {
+        if (!this.config.setup_complete || status.network_migration?.required === true) {
           await this.refreshWalletSetup();
         }
         this.syncMempoolBlockMarker(previousChainHeight, status.chain?.height);
@@ -3018,6 +3050,8 @@ window.iunaApp = function iunaApp() {
     syncingNode() {
       return (
         this.canUseProtectedApi() &&
+        !this.showingNetworkMigration() &&
+        !this.chainResetModalOpen &&
         this.config.setup_complete === true &&
         this.networkHealthLoaded &&
         this.networkHealth.state === "syncing"

@@ -89,6 +89,10 @@ fn management_ui_blocks_interaction_while_the_node_is_syncing() {
     assert!(javascript.contains("this.networkHealth.sync_validated_height"));
     assert!(javascript.contains("this.syncingNode() ? 1000 : 5000"));
     assert!(javascript.contains("Syncing ${this.syncCurrentHeight().toLocaleString()} of"));
+    assert!(javascript.contains("!this.showingNetworkMigration()"));
+    assert!(javascript.contains("!this.chainResetModalOpen"));
+    assert!(html.contains("Sync stuck? Reset local chain"));
+    assert!(html.contains("@click=\"openChainResetModal\""));
 }
 
 fn ledger_with_one_spendable_iuna(wallet: &Wallet) -> Ledger {
@@ -900,7 +904,7 @@ async fn startup_resumes_persisted_chain_without_genesis_flag() {
 }
 
 #[tokio::test]
-async fn local_testnet_refuses_persisted_chain_with_normal_launch_profile() {
+async fn local_testnet_requests_reset_for_persisted_normal_launch_profile() {
     let dir = tempdir().unwrap();
     let chain_path = dir.path().join("chain.sqlite3");
     let store = SqliteChainStore::open(&chain_path).unwrap();
@@ -911,7 +915,7 @@ async fn local_testnet_refuses_persisted_chain_with_normal_launch_profile() {
         .unwrap()
         .unwrap();
 
-    let error = initialize_ledger(
+    let initialized = initialize_ledger(
         &opts,
         persisted_wallet.address(),
         &store,
@@ -919,14 +923,46 @@ async fn local_testnet_refuses_persisted_chain_with_normal_launch_profile() {
         true,
     )
     .await
-    .unwrap_err();
+    .unwrap();
 
-    assert!(error.to_string().contains("reset this local chain"));
+    assert_eq!(
+        initialized.migration_from.as_deref(),
+        Some("iuna-mainnet-candidate")
+    );
+    assert!(initialized.ledger.is_setup_placeholder());
+}
+
+#[tokio::test]
+async fn startup_requests_reset_for_a_legacy_network_profile() {
+    let dir = tempdir().unwrap();
+    let chain_path = dir.path().join("chain.sqlite3");
+    let store = SqliteChainStore::open(&chain_path).unwrap();
+    let wallet = Wallet::from_seed("legacy-network-owner");
+    let mut snapshot = ledger_with_one_mined_block(&wallet).snapshot();
+    snapshot.launch_profile.profile_id = "iuna-devnet-v5".to_string();
+    store.save(&snapshot).unwrap();
+    let opts = parse(&["--chain-db", chain_path.to_str().unwrap()])
+        .unwrap()
+        .unwrap();
+
+    let initialized = initialize_ledger(&opts, wallet.address(), &store, opts.p2p_addr, false)
+        .await
+        .unwrap();
+
+    assert_eq!(
+        initialized.migration_from.as_deref(),
+        Some("iuna-devnet-v5")
+    );
+    assert!(initialized.ledger.is_setup_placeholder());
+    assert_eq!(
+        store.load().unwrap().unwrap().launch_profile.profile_id,
+        "iuna-devnet-v5"
+    );
 }
 
 #[tokio::test]
 async fn candidate_promotion_reuses_chain_data_and_can_continue_mining() {
-    assert_eq!(MAINNET_CANDIDATE_NETWORK_ID, "iuna-mainnet-candidate-v1");
+    assert_eq!(MAINNET_CANDIDATE_NETWORK_ID, "iuna-mainnet-candidate");
     assert_eq!(MAINNET_NETWORK_ID, "iuna-mainnet-v1");
     assert_ne!(MAINNET_CANDIDATE_NETWORK_ID, MAINNET_NETWORK_ID);
     let dir = tempdir().unwrap();

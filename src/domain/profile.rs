@@ -25,7 +25,7 @@ pub struct LaunchProfile {
 impl Default for LaunchProfile {
     fn default() -> Self {
         Self {
-            profile_id: "iuna-mainnet-candidate-v1".to_string(),
+            profile_id: "iuna-mainnet-candidate".to_string(),
             ticket_maturity_delay_heights: DEFAULT_TICKET_MATURITY_DELAY,
             ticket_expiry_window_heights: DEFAULT_TICKET_EXPIRY_WINDOW,
             mine_difficulty_bits: MINE_DIFFICULTY_BITS,
@@ -64,9 +64,8 @@ impl LaunchProfile {
 
     pub fn hash(&self) -> String {
         let canonical = if self.burn_lineage_maturity_heights == BURN_LINEAGE_MATURITY_HEIGHTS {
-            // Preserve the existing mainnet-candidate profile hash. The maturity
-            // used to be a frozen protocol constant, so including its unchanged
-            // default would needlessly split the existing network.
+            // Preserve the legacy canonical format when maturity remains at its
+            // protocol default. The field used to be a frozen constant.
             format!(
                 "iuna-launch-profile:{}:{}:{}:{}:{}:{}:{}",
                 self.profile_id,
@@ -121,7 +120,7 @@ mod tests {
     fn default_launch_profile_matches_protocol_defaults() {
         let profile = LaunchProfile::default();
 
-        assert_eq!(profile.profile_id, "iuna-mainnet-candidate-v1");
+        assert_eq!(profile.profile_id, "iuna-mainnet-candidate");
         assert_eq!(
             profile.ticket_maturity_delay_heights,
             DEFAULT_TICKET_MATURITY_DELAY
@@ -140,7 +139,7 @@ mod tests {
         assert_eq!(profile.max_block_bytes, MAX_BLOCK_BYTES);
         assert_eq!(
             profile.hash(),
-            "aef51531eaa3a5c5d3ea8a2524ffba029dcb106e4b0a432b57d5ac1f4f8963de"
+            "eb2f67e9d735474859ceb1fe124fe270977214f6e2f4cd855a4d8c3b5ecac558"
         );
     }
 

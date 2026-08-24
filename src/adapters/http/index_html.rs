@@ -1280,6 +1280,24 @@ pub(super) const INDEX_HTML: &str = r#"<!doctype html>
     </section>
     </main>
   </div>
+  <div class="setup-overlay" x-show="showingNetworkMigration()" x-transition.opacity role="dialog" aria-modal="true" aria-labelledby="network-migration-title">
+    <section class="setup-modal">
+      <div class="setup-modal-head">
+        <div class="setup-welcome">A new Iuna network is ready 🎉</div>
+        <h2 id="network-migration-title">Start from block 0</h2>
+        <div class="setup-copy">This version connects to <strong x-text="migrationNetworkLabel()"></strong>. To join it, this node must remove its previous local blockchain and synchronize again.</div>
+      </div>
+      <div class="panel">
+        <h3>Your wallet is separate</h3>
+        <p class="muted">Keeping your current wallet preserves its address and recovery phrase. Removing the local chain does not remove your wallet or settings.</p>
+        <div class="setup-actions">
+          <button class="primary" type="button" :disabled="migrationBusy" @click="finishNetworkMigration(false)" x-text="migrationBusy ? 'Preparing...' : 'Keep wallet and resync'"></button>
+          <button class="subtle" type="button" :disabled="migrationBusy" @click="finishNetworkMigration(true)">Use a different wallet</button>
+        </div>
+        <p class="danger-copy">Choose a different wallet only if you want a new address or need to import another recovery phrase. Without the old recovery phrase, its funds cannot be recovered on your new address.</p>
+      </div>
+    </section>
+  </div>
   <div class="sync-overlay" x-show="syncingNode()" role="status" aria-live="polite" aria-label="Blockchain synchronization in progress">
     <section class="sync-screen">
       <div class="sync-mark" aria-hidden="true"><div class="sync-spinner"></div></div>
@@ -1289,6 +1307,8 @@ pub(super) const INDEX_HTML: &str = r#"<!doctype html>
         <div class="sync-progress-fill" :style="`width: ${syncProgressPercent()}%`"></div>
       </div>
       <div class="sync-progress-label" x-text="syncProgressLabel()"></div>
+      <button class="subtle" type="button" @click="openChainResetModal">Sync stuck? Reset local chain</button>
+      <p class="muted">This recovery option removes only the local blockchain. Your wallet and settings stay on this device.</p>
     </section>
   </div>
   <div class="setup-overlay transaction-overlay" x-show="chainResetModalOpen" x-transition.opacity @click.self="closeChainResetModal()" role="dialog" aria-modal="true" aria-labelledby="chain-reset-title">

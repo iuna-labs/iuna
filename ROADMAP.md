@@ -98,7 +98,7 @@ Focus: promote the stable candidate ledger. Mainnet launch should not create a s
 - [ ] Tag the mainnet release from the promoted candidate code line.
 - [ ] Publish release artifacts and checksums.
 - [ ] Upgrade or restart bootnodes on the mainnet release while preserving chain data.
-- [ ] If the P2P network ID changes from `iuna-mainnet-candidate-v1` to `iuna-mainnet-v1`, coordinate the cutover without changing genesis or launch profile rules.
+- [ ] If the P2P network ID changes from `iuna-mainnet-candidate` to `iuna-mainnet-v1`, coordinate the cutover without changing genesis or launch profile rules.
 - [ ] Monitor first blocks and first recovery/fallback events.
 - [ ] Keep feature changes frozen during the launch window.
 - [ ] Document any required hard-fork or emergency procedure before launch.

@@ -132,6 +132,14 @@ pub struct NodeStatus {
     pub mining: MiningStatus,
     pub stratum: StratumStatus,
     pub chain: ChainStatus,
+    pub network_migration: NetworkMigrationStatus,
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+pub struct NetworkMigrationStatus {
+    pub required: bool,
+    pub from_network: Option<String>,
+    pub to_network: String,
 }
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]

@@ -121,7 +121,7 @@ async fn main() -> Result<()> {
     if ui_config_dirty || auth_config_dirty {
         config_store::save(&config_path, &ui_config)?;
     }
-    let ledger = initialize_ledger(
+    let initialized_ledger = initialize_ledger(
         &opts,
         &wallet_address,
         &chain_store,
@@ -129,7 +129,10 @@ async fn main() -> Result<()> {
         startup_local_testnet,
     )
     .await?;
-    let has_chain = opts.has_chain() || persisted_chain_exists;
+    let migration_from = initialized_ledger.migration_from.clone();
+    let migration_required = migration_from.is_some();
+    let ledger = initialized_ledger.ledger;
+    let has_chain = migration_from.is_none() && (opts.has_chain() || persisted_chain_exists);
     let initial_burn_per_block = initial_burn_per_block(&opts, &ui_config);
     let initial_burn_fee = initial_burn_fee(&opts, &ui_config);
 
@@ -152,6 +155,13 @@ async fn main() -> Result<()> {
     node_core.set_pow_mining_workers(ui_config.pow_mining_workers);
     node_core.set_pow_mining_enabled(ui_config.pow_mining_enabled);
     node_core.set_recovery_vdf_top_rank_percent(ui_config.recovery_vdf_top_rank_percent);
+    if let Some(from_network) = migration_from {
+        println!(
+            "network upgrade requires local chain reset: {from_network} -> {}",
+            iuna::app::NETWORK_ID
+        );
+        node_core.require_network_migration(from_network);
+    }
     let node: SharedNode = Arc::new(Mutex::new(node_core));
     let ui_config = Arc::new(Mutex::new(ui_config));
     let mut peers = ui_config.lock().await.peers.clone();
@@ -162,7 +172,7 @@ async fn main() -> Result<()> {
         let keep_metrics = ui_config.lock().await.keep_track_of_metrics;
         persist_chain_snapshot(&chain_store, initial_snapshot.clone()).await?;
         warm_ui_data_store(&ui_data_store, initial_snapshot, keep_metrics).await?;
-    } else {
+    } else if !migration_required {
         clear_ui_data_store(&ui_data_store).await?;
     }
 
@@ -475,7 +485,7 @@ async fn initialize_ledger(
     chain_store: &SqliteChainStore,
     advertised_p2p_addr: SocketAddr,
     local_testnet: bool,
-) -> Result<Ledger> {
+) -> Result<InitializedLedger> {
     if let Some(snapshot) = chain_store.load()? {
         if opts.chain_mode == ChainMode::Genesis {
             bail!(
@@ -483,10 +493,16 @@ async fn initialize_ledger(
                 chain_store.path().display()
             );
         }
-        if local_testnet && snapshot.launch_profile != LaunchProfile::local_testnet() {
-            bail!(
-                "{LOCAL_TESTNET_ENV}=true requires the iuna-local-testnet-v1 launch profile; reset this local chain before restarting"
-            );
+        let expected_profile = if local_testnet {
+            LaunchProfile::local_testnet()
+        } else {
+            LaunchProfile::default()
+        };
+        if snapshot.launch_profile.profile_id != expected_profile.profile_id {
+            return Ok(InitializedLedger {
+                ledger: setup_ledger(),
+                migration_from: Some(snapshot.launch_profile.profile_id),
+            });
         }
         let height = snapshot_height(&snapshot);
         let ledger = Ledger::from_persisted_snapshot(snapshot).with_context(|| {
@@ -499,13 +515,40 @@ async fn initialize_ledger(
             "resumed chain from {} at height {height}",
             chain_store.path().display()
         );
-        Ok(ledger)
+        Ok(InitializedLedger {
+            ledger,
+            migration_from: None,
+        })
     } else {
-        match opts.chain_mode {
+        let ledger = match opts.chain_mode {
             ChainMode::Setup => Ok(setup_ledger()),
             ChainMode::Genesis => start_genesis_ledger(wallet_address, local_testnet),
             ChainMode::Join => join_chain_ledger(&opts.join_peers, advertised_p2p_addr).await,
-        }
+        }?;
+        Ok(InitializedLedger {
+            ledger,
+            migration_from: None,
+        })
+    }
+}
+
+#[derive(Debug)]
+struct InitializedLedger {
+    ledger: Ledger,
+    migration_from: Option<String>,
+}
+
+impl std::ops::Deref for InitializedLedger {
+    type Target = Ledger;
+
+    fn deref(&self) -> &Self::Target {
+        &self.ledger
+    }
+}
+
+impl std::ops::DerefMut for InitializedLedger {
+    fn deref_mut(&mut self) -> &mut Self::Target {
+        &mut self.ledger
     }
 }
 

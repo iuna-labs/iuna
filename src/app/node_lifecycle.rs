@@ -107,7 +107,20 @@ impl NodeCore {
             burn_bundle_collection_started: None,
             local_block_anchor_burn: None,
             outbox: Vec::<GossipEnvelope>::new(),
+            network_migration_from: None,
         }
+    }
+
+    pub fn require_network_migration(&mut self, from_network: impl Into<String>) {
+        self.network_migration_from = Some(from_network.into());
+    }
+
+    pub fn network_migration_from(&self) -> Option<&str> {
+        self.network_migration_from.as_deref()
+    }
+
+    pub fn complete_network_migration(&mut self) {
+        self.network_migration_from = None;
     }
 
     pub fn wallet_address(&self) -> &str {

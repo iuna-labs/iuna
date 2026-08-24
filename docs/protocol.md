@@ -16,10 +16,10 @@ This is still experimental. The rules below describe the current devnet and main
 
 The current mainnet-candidate parameter set is intentionally close to Bitcoin where that is useful for operator expectations:
 
-- P2P network ID: `iuna-mainnet-candidate-v1`;
+- P2P network ID: `iuna-mainnet-candidate`;
 - protocol version: `2`;
-- launch profile ID: `iuna-mainnet-candidate-v1`;
-- launch profile hash: `aef51531eaa3a5c5d3ea8a2524ffba029dcb106e4b0a432b57d5ac1f4f8963de`;
+- launch profile ID: `iuna-mainnet-candidate`;
+- launch profile hash: `eb2f67e9d735474859ceb1fe124fe270977214f6e2f4cd855a4d8c3b5ecac558`;
 - target block time: `10 minutes`;
 - maximum serialized block size: `1,000,000` bytes;
 - maximum transaction items per block: `1,000`;

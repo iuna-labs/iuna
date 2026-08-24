@@ -6,7 +6,8 @@ use crate::{
 };
 
 use super::{
-    LaunchProfileStatus, MiningStatus, NodeCore, NodeStatus, StratumStatus,
+    LaunchProfileStatus, MiningStatus, NETWORK_ID, NetworkMigrationStatus, NodeCore, NodeStatus,
+    StratumStatus,
     helpers::{transaction_input_total_from_outputs, transaction_output_total_for_address},
     now_ms,
 };
@@ -60,6 +61,11 @@ impl NodeCore {
                 listen_addr: None,
             },
             chain,
+            network_migration: NetworkMigrationStatus {
+                required: self.network_migration_from().is_some(),
+                from_network: self.network_migration_from().map(str::to_string),
+                to_network: NETWORK_ID.to_string(),
+            },
         }
     }
 
@@ -211,5 +217,22 @@ mod tests {
             node.status().mining.last_auto_pow_mine_status.as_deref(),
             Some("waiting for a real chain before PoW mining can start")
         );
+    }
+
+    #[test]
+    fn status_exposes_required_network_migration() {
+        let wallet = Wallet::from_seed("network-migration-status-wallet");
+        let ledger = Ledger::new(BTreeMap::new(), 1);
+        let mut node = NodeCore::from_ledger(wallet, ledger, 0);
+
+        node.require_network_migration("iuna-devnet-v5");
+        let status = node.status();
+
+        assert!(status.network_migration.required);
+        assert_eq!(
+            status.network_migration.from_network.as_deref(),
+            Some("iuna-devnet-v5")
+        );
+        assert_eq!(status.network_migration.to_network, crate::app::NETWORK_ID);
     }
 }

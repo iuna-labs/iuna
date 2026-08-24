@@ -325,6 +325,7 @@ pub(super) async fn reset_local_chain(state: &HttpState, confirmation: &str) -> 
     }
     clear_chain(&state.chain_store).await?;
     clear_ui_data(&state.ui_data_store).await?;
+    state.node.lock().await.complete_network_migration();
     state
         .gossip
         .broadcast(vec![GossipEnvelope::ChainBootstrapRequest])
@@ -563,7 +564,9 @@ mod tests {
         chain_store.save(&snapshot).unwrap();
         ui_data_store.project_snapshot(&snapshot, true).unwrap();
 
-        let node = Arc::new(Mutex::new(NodeCore::from_ledger(wallet, ledger, 0)));
+        let mut node_core = NodeCore::from_ledger(wallet, ledger, 0);
+        node_core.require_network_migration("iuna-devnet-v5");
+        let node = Arc::new(Mutex::new(node_core));
         let peers = Arc::new(Mutex::new(PeerBook::default()));
         let gossip = GossipNetwork::start(node.clone(), peers.clone(), socket(), None, false)
             .await
@@ -590,6 +593,7 @@ mod tests {
             .unwrap();
 
         assert!(!state.node.lock().await.has_real_chain());
+        assert!(state.node.lock().await.network_migration_from().is_none());
         assert!(chain_store.load().unwrap().is_none());
         assert!(ui_data_store.load_metrics().unwrap().is_empty());
         assert_eq!(std::fs::read(&wallet_path).unwrap(), wallet_before);
