@@ -391,11 +391,25 @@ pub(super) const INDEX_HTML: &str = r#"<!doctype html>
     .detail-kv { display: grid; grid-template-columns: 90px minmax(0, 1fr); gap: 8px; font-size: 13px; margin: 7px 0; }
     .detail-kv .key { color: #8d989f; }
     .detail-link { width: fit-content; max-width: 100%; padding: 0; border: 0; background: transparent; color: #d7f2ff; font: inherit; text-align: left; cursor: pointer; }
-    .detail-link code { color: inherit; text-decoration: underline; text-underline-offset: 3px; }
+    .detail-link code, .detail-link .link-value { color: inherit; text-decoration: underline; text-underline-offset: 3px; }
+    .detail-link:hover { color: #d5f55f; }
     .rank-list { display: grid; gap: 8px; }
     .rank-row { display: grid; grid-template-columns: 52px minmax(0, 1fr); gap: 10px; align-items: start; border: 1px solid #30383d; border-radius: 8px; padding: 10px; background: #15191d; }
     .rank-number { color: #d7f2ff; font-weight: 700; }
     .rank-details { display: grid; gap: 6px; min-width: 0; }
+    .bundle-summary { display: grid; gap: 5px; border: 1px solid #425027; border-radius: 8px; padding: 12px; margin-bottom: 14px; background: #1b2116; }
+    .bundle-summary strong { color: #d5f55f; }
+    .bundle-flow { display: grid; grid-template-columns: repeat(auto-fit, minmax(175px, 1fr)); gap: 8px; margin-bottom: 14px; }
+    .bundle-slot { display: grid; align-content: start; gap: 8px; min-width: 0; border: 1px solid #30383d; border-radius: 8px; padding: 11px; background: #111316; }
+    .bundle-slot-head { display: flex; align-items: center; justify-content: space-between; gap: 8px; }
+    .bundle-slot-number { display: inline-grid; place-items: center; width: 26px; height: 26px; border-radius: 50%; background: #d5f55f; color: #111316; font-size: 12px; font-weight: 900; }
+    .bundle-slot-status { color: #9fbd42; font-size: 11px; font-weight: 850; text-transform: uppercase; }
+    .bundle-slot .tx-field { grid-template-columns: minmax(0, 1fr); gap: 3px; align-items: start; }
+    .bundle-slot code { overflow-wrap: anywhere; color: #9eb3bc; font-size: 11px; }
+    .bundle-how { display: grid; gap: 8px; border-top: 1px solid #30383d; padding-top: 14px; }
+    .bundle-how h3 { margin: 0 0 2px; }
+    .bundle-how-step { display: grid; grid-template-columns: 24px minmax(0, 1fr); gap: 8px; align-items: start; color: #cbd3d7; }
+    .bundle-how-step > span:first-child { display: inline-grid; place-items: center; width: 22px; height: 22px; border: 1px solid #4a555b; border-radius: 50%; color: #d7f2ff; font-size: 11px; font-weight: 800; }
     .tx-list { display: grid; gap: 8px; }
     .tx-section { display: grid; gap: 8px; }
     .tx-section + .tx-section { margin-top: 10px; padding-top: 10px; border-top: 1px solid #2f363c; }
@@ -976,7 +990,12 @@ pub(super) const INDEX_HTML: &str = r#"<!doctype html>
                 </div>
                 <div class="detail-kv"><div class="key">Mode</div><div x-text="selectedBlock.finalizer_mode === 'recovery' ? 'Recovery' : `Rank ${selectedBlock.finalizer_rank ?? 0}`"></div></div>
                 <div class="detail-kv"><div class="key">Reward</div><div>IUNA <span x-text="amountLabel(selectedBlock.reward)"></span></div></div>
-                <div class="detail-kv"><div class="key">Burn Bundles</div><div x-text="blockBurnBundleRatio(selectedBlock)"></div></div>
+                <div class="detail-kv">
+                  <div class="key">Burn Bundles</div>
+                  <button class="detail-link" type="button" @click="openBurnBundleModal(selectedBlock)" title="How the burn bundle attestations were selected" aria-label="Show burn bundle selection details">
+                    <span class="link-value" x-text="blockBurnBundleRatio(selectedBlock)"></span>
+                  </button>
+                </div>
                 <div class="detail-kv"><div class="key">Burns</div><div x-text="blockBurnCount(selectedBlock)"></div></div>
                 <div class="detail-kv"><div class="key">Transfers</div><div x-text="blockTransferCount(selectedBlock)"></div></div>
                 <div class="detail-kv"><div class="key">Total Lost</div><div>IUNA <span x-text="amountLabel(blockLostIuna(selectedBlock))"></span></div></div>
@@ -1383,6 +1402,43 @@ pub(super) const INDEX_HTML: &str = r#"<!doctype html>
             </div>
           </div>
         </template>
+      </div>
+    </section>
+  </div>
+  <div class="setup-overlay transaction-overlay" x-show="selectedBurnBundleBlock" x-transition.opacity @click.self="closeBurnBundleModal()" role="dialog" aria-modal="true" aria-labelledby="burn-bundles-title">
+    <section class="tx-modal">
+      <div class="tx-modal-head">
+        <div class="tx-modal-title">
+          <h2 id="burn-bundles-title" x-text="selectedBurnBundleBlock ? `Block ${selectedBurnBundleBlock.height} Burn Bundles` : 'Burn Bundles'"></h2>
+          <div class="tx-field"><span class="tx-label">Attestations</span><span class="tx-value number" x-text="blockBurnBundleRatio(selectedBurnBundleBlock)"></span></div>
+        </div>
+        <button type="button" @click="closeBurnBundleModal">Close</button>
+      </div>
+      <div class="bundle-summary" x-show="blockBurnBundleSlots(selectedBurnBundleBlock).length > 0">
+        <strong><span x-text="blockBurnBundleRatio(selectedBurnBundleBlock)"></span> attestations committed</strong>
+        <span class="muted">The first number is the attestations used by this block. The second is the committed committee represented in the block—not every candidate wallet considered by the network.</span>
+      </div>
+      <div class="bundle-flow" x-show="blockBurnBundleSlots(selectedBurnBundleBlock).length > 0">
+        <template x-for="slot in blockBurnBundleSlots(selectedBurnBundleBlock)" :key="`${selectedBurnBundleBlock.hash}-${slot.slot}`">
+          <div class="bundle-slot">
+            <div class="bundle-slot-head">
+              <span class="bundle-slot-number" x-text="slot.slot"></span>
+              <span class="bundle-slot-status">Included</span>
+            </div>
+            <div class="tx-field"><span class="tx-label" x-text="slot.role"></span><code x-text="addressLabel(slot.member)"></code></div>
+            <div class="tx-field"><span class="tx-label">Contribution</span><span class="tx-value text" x-text="burnBundleSlotDetail(slot)"></span></div>
+            <div class="tx-field" x-show="slot.hash"><span class="tx-label">Bundle</span><code x-text="short(slot.hash)"></code></div>
+          </div>
+        </template>
+      </div>
+      <div class="tx-modal-empty" x-show="blockBurnBundleSlots(selectedBurnBundleBlock).length === 0">Recovery blocks do not require burn-bundle attestations.</div>
+      <div class="bundle-how" x-show="blockBurnBundleSlots(selectedBurnBundleBlock).length > 0">
+        <h3>How are they chosen?</h3>
+        <div class="bundle-how-step"><span>1</span><span><strong>Finalizer:</strong> the burn-ticket ranking chooses the block finalizer, which implicitly fills slot 0.</span></div>
+        <div class="bundle-how-step"><span>2</span><span><strong>Root groups:</strong> mature UTXO lineage weight selects independent groups for the additional committee slots. One root can win at most one slot.</span></div>
+        <div class="bundle-how-step"><span>3</span><span><strong>Wallet:</strong> a wallet with a valid ticket represents each winning root group. Its burn amount does not increase that root's committee weight.</span></div>
+        <div class="bundle-how-step"><span>4</span><span><strong>Burn list:</strong> each member bundles valid pending burns by highest absolute fee, using the signature as the deterministic tie-breaker.</span></div>
+        <p class="muted">This block records the included members and attestations. Historical lineage weights and candidates that were not included are not stored in the block.</p>
       </div>
     </section>
   </div>

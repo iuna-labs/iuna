@@ -8,6 +8,7 @@ window.iunaApp = function iunaApp() {
     blocks: [],
     selectedBlock: null,
     selectedByteBlock: null,
+    selectedBurnBundleBlock: null,
     selectedTransaction: null,
     selectedBurnLeaderBlock: null,
     loadingInitialBlocks: false,
@@ -1201,6 +1202,14 @@ window.iunaApp = function iunaApp() {
       this.selectedByteBlock = null;
     },
 
+    openBurnBundleModal(block) {
+      this.selectedBurnBundleBlock = block;
+    },
+
+    closeBurnBundleModal() {
+      this.selectedBurnBundleBlock = null;
+    },
+
     openTransactionModal(tx, context = {}) {
       this.selectedTransaction = { tx, context };
     },
@@ -1277,6 +1286,7 @@ window.iunaApp = function iunaApp() {
       this.closeWalletUtxosModal();
       this.closePowDifficultyInfo();
       this.closeBurnLeaderRanksModal();
+      this.closeBurnBundleModal();
       this.closeChainResetModal();
     },
 
@@ -2844,6 +2854,37 @@ window.iunaApp = function iunaApp() {
       const included = Number(quorum.burnBundlesIncluded ?? quorum.burn_bundles_included ?? 0);
       const committeeSize = Number(quorum.committeeSize ?? quorum.committee_size ?? 0);
       return `${included}/${committeeSize}`;
+    },
+
+    blockBurnBundleSlots(block) {
+      if (!block || block.finalizer_mode === "recovery") return [];
+      const bundles = block.burn_bundles || block.burnBundles || [];
+      return [
+        {
+          slot: 0,
+          member: block.miner,
+          role: "Finalizer",
+          implicit: true,
+          burns: this.blockTransactions(block).filter((tx) => tx.kind === "burn"),
+          byteSize: 0,
+          hash: "",
+        },
+        ...bundles.map((bundle) => ({
+          slot: Number(bundle.slot),
+          member: bundle.member,
+          role: "Committee member",
+          implicit: false,
+          burns: bundle.burns || [],
+          byteSize: Number(bundle.byte_size ?? bundle.byteSize ?? 0),
+          hash: bundle.hash || "",
+        })),
+      ].sort((left, right) => left.slot - right.slot);
+    },
+
+    burnBundleSlotDetail(slot) {
+      if (slot?.implicit) return "Implicit block attestation";
+      const count = slot?.burns?.length || 0;
+      return `${count} burn${count === 1 ? "" : "s"} · ${slot?.byteSize || 0}B`;
     },
 
     blockByteBreakdown(block) {
