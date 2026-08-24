@@ -642,24 +642,15 @@ async fn run_automatic_finalizer(node: SharedNode, gossip: p2p::GossipNetwork, d
 
         let Some(work) = plan.work else {
             if let Some(reason) = &plan.skipped_reason {
-                let skip = (height, reason.clone());
-                if debug && last_logged_skip.as_ref() != Some(&skip) {
+                if debug
+                    && should_log_automatic_finalization_skip(&mut last_logged_skip, height, reason)
+                {
                     println!("auto-finalization skipped at height {height}: {reason}");
-                    last_logged_skip = Some(skip);
                 }
             }
             tokio::time::sleep(std::time::Duration::from_secs(1)).await;
             continue;
         };
-
-        last_logged_skip = None;
-        if debug {
-            println!(
-                "leader selected locally for candidate block {}; running VDF for {} rounds",
-                work.height(),
-                work.vdf_rounds()
-            );
-        }
 
         let candidate_height = work.height();
         let candidate_parent = work.prev_hash().to_string();
@@ -672,7 +663,9 @@ async fn run_automatic_finalizer(node: SharedNode, gossip: p2p::GossipNetwork, d
         };
         if let Err(error) = precheck {
             let message = format!("skipped before VDF: {error:#}");
-            if debug {
+            if debug
+                && should_log_automatic_finalization_skip(&mut last_logged_skip, height, &message)
+            {
                 println!("auto-finalization {message}");
             }
             node.lock()
@@ -680,6 +673,14 @@ async fn run_automatic_finalizer(node: SharedNode, gossip: p2p::GossipNetwork, d
                 .record_automatic_finalization_status(message);
             tokio::time::sleep(std::time::Duration::from_secs(1)).await;
             continue;
+        }
+        last_logged_skip = None;
+        if debug {
+            println!(
+                "leader selected locally for candidate block {}; running VDF for {} rounds",
+                work.height(),
+                work.vdf_rounds()
+            );
         }
         let (progress_tx, progress_rx) = std::sync::mpsc::channel();
         let cancellation = Arc::new(AtomicBool::new(false));
@@ -791,6 +792,19 @@ async fn run_automatic_finalizer(node: SharedNode, gossip: p2p::GossipNetwork, d
 
         tokio::task::yield_now().await;
     }
+}
+
+fn should_log_automatic_finalization_skip(
+    last_logged_skip: &mut Option<(u64, String)>,
+    height: u64,
+    reason: &str,
+) -> bool {
+    let skip = (height, reason.to_string());
+    if last_logged_skip.as_ref() == Some(&skip) {
+        return false;
+    }
+    *last_logged_skip = Some(skip);
+    true
 }
 
 fn format_vdf_progress(candidate_height: u64, progress: VdfProgress) -> String {

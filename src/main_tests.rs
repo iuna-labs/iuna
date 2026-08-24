@@ -24,7 +24,7 @@ use super::{
     initial_burn_per_block, initialize_ledger, load_startup_wallet, measure_vdf_rounds,
     parse_startup_bool_env_value, parse_startup_pow_mining_workers_env_value,
     persist_chain_snapshot, project_ui_data_store, run_chain_persistence_with_interval,
-    validate_wallet_for_mode,
+    should_log_automatic_finalization_skip, validate_wallet_for_mode,
 };
 
 fn parse(args: &[&str]) -> anyhow::Result<Option<CliOptions>> {
@@ -424,6 +424,32 @@ fn automatic_pow_worker_searches_outside_node_lock() {
     assert!(worker.contains("tokio::task::spawn_blocking"));
     assert!(worker.contains("finish_automatic_pow_mining_job"));
     assert!(!worker.contains("prepare_automatic_pow_mining()"));
+}
+
+#[test]
+fn automatic_finalization_skip_logging_only_reports_state_changes() {
+    let mut last = None;
+
+    assert!(should_log_automatic_finalization_skip(
+        &mut last,
+        54,
+        "skipped before VDF: block timestamp is too far in the future",
+    ));
+    assert!(!should_log_automatic_finalization_skip(
+        &mut last,
+        54,
+        "skipped before VDF: block timestamp is too far in the future",
+    ));
+    assert!(should_log_automatic_finalization_skip(
+        &mut last,
+        55,
+        "skipped before VDF: block timestamp is too far in the future",
+    ));
+    assert!(should_log_automatic_finalization_skip(
+        &mut last,
+        55,
+        "waiting for burn bundles",
+    ));
 }
 
 #[test]
