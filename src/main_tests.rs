@@ -95,6 +95,18 @@ fn management_ui_blocks_interaction_while_the_node_is_syncing() {
     assert!(html.contains("@click=\"openChainResetModal\""));
 }
 
+#[test]
+fn management_ui_block_reward_opens_a_fee_flow_transaction() {
+    let html = include_str!("adapters/http/index_html.rs");
+    let javascript = include_str!("../www/assets/iuna-ui.js");
+    assert!(html.contains("@click=\"openBlockRewardModal(selectedBlock)\""));
+    assert!(html.contains("input.rewardFee ? `Paid fee ${index + 1}`"));
+    assert!(javascript.contains("blockRewardTransaction(block)"));
+    assert!(javascript.contains("blockRewardOutputs(block)"));
+    assert!(javascript.contains("label: \"Finalizer reward\""));
+    assert!(javascript.contains("label: `Committee reward (slot ${bundle.slot})`"));
+}
+
 fn ledger_with_one_spendable_iuna(wallet: &Wallet) -> Ledger {
     let mut genesis = BTreeMap::new();
     genesis.insert(wallet.address().to_string(), 3);

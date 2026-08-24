@@ -1246,6 +1246,15 @@ window.iunaApp = function iunaApp() {
       this.selectedTransaction = { tx, context };
     },
 
+    openBlockRewardModal(block) {
+      this.openTransactionModal(this.blockRewardTransaction(block), {
+        source: "Block reward",
+        blockHeight: block.height,
+        blockFinalizer: block.miner,
+        reward: true,
+      });
+    },
+
     closeTransactionModal() {
       this.selectedTransaction = null;
     },
@@ -2634,6 +2643,10 @@ window.iunaApp = function iunaApp() {
       return tx?.kind === "mine";
     },
 
+    isRewardTx(tx) {
+      return tx?.kind === "reward";
+    },
+
     txFeeLabel(tx) {
       return `IUNA ${this.amountLabel(tx?.fee ?? 0)}`;
     },
@@ -2685,8 +2698,8 @@ window.iunaApp = function iunaApp() {
       const directOutputs = Array.isArray(tx.outputs) ? tx.outputs : [];
       for (const [index, output] of directOutputs.entries()) {
         rows.push({
-          kind: "output",
-          label: `Output ${index + 1}`,
+          kind: output.kind || "output",
+          label: output.label || `Output ${index + 1}`,
           amount: output.amount,
           address: output.address,
         });
@@ -2837,6 +2850,7 @@ window.iunaApp = function iunaApp() {
     selectedTransactionLabel() {
       if (!this.selectedTransaction) return "-";
       const { tx, context } = this.selectedTransaction;
+      if (context.reward && context.blockHeight !== undefined) return `Block ${context.blockHeight} reward`;
       if (context.blockHeight !== undefined) return `Block ${context.blockHeight}`;
       if (tx?.status === "pending") return "Wallet pending";
       if (tx?.blockHeight !== null && tx?.blockHeight !== undefined) {
@@ -2857,6 +2871,64 @@ window.iunaApp = function iunaApp() {
       const explicitTotal = block?.totalFees ?? block?.total_fees ?? block?.reward;
       if (explicitTotal !== null && explicitTotal !== undefined) return Number(explicitTotal) || 0;
       return this.blockTransactions(block).reduce((sum, tx) => sum + Number(tx.fee || 0), 0);
+    },
+
+    blockRewardTransaction(block) {
+      const inputs = this.blockTransactions(block)
+        .filter((tx) => Number(tx.fee || 0) > 0)
+        .map((tx) => ({
+          rewardFee: true,
+          transactionKind: tx.kind || "transaction",
+          amount: tx.fee,
+          owner: this.txFrom(tx) || this.txTo(tx) || null,
+          signature: tx.signature,
+          outpoint: { txid: tx.signature, index: "fee" },
+        }));
+      return {
+        kind: "reward",
+        signature: block.hash,
+        amount: block.reward,
+        fee: 0,
+        inputs,
+        outputs: this.blockRewardOutputs(block),
+      };
+    },
+
+    blockRewardOutputs(block) {
+      const reward = Math.max(0, Math.trunc(Number(block?.reward || 0)));
+      if (reward === 0) return [];
+
+      const bundles = Array.isArray(block?.burn_bundles)
+        ? block.burn_bundles
+        : (Array.isArray(block?.burnBundles) ? block.burnBundles : []);
+      const committee = block?.finalizer_mode === "ticket" && Number(block?.finalizer_rank || 0) <= 1
+        ? [...bundles]
+            .sort((left, right) => Number(left.slot || 0) - Number(right.slot || 0))
+            .filter((bundle) => bundle.member && bundle.member !== block.miner)
+        : [];
+      const committeePool = committee.length > 0 ? Math.floor(reward / 2) : 0;
+      const outputs = [{
+        kind: "reward",
+        label: "Finalizer reward",
+        amount: reward - committeePool,
+        address: block.miner,
+      }];
+
+      let remaining = committeePool;
+      committee.forEach((bundle, index) => {
+        const membersLeft = committee.length - index;
+        const amount = membersLeft === 1 ? remaining : Math.floor(remaining / membersLeft);
+        remaining -= amount;
+        if (amount > 0) {
+          outputs.push({
+            kind: "reward",
+            label: `Committee reward (slot ${bundle.slot})`,
+            amount,
+            address: bundle.member,
+          });
+        }
+      });
+      return outputs;
     },
 
     blockTimestampLabel(block) {

@@ -432,6 +432,7 @@ pub(super) const INDEX_HTML: &str = r#"<!doctype html>
     .pill.burn { background: #332918; color: #ffd070; }
     .pill.transfer { background: #17312a; color: #8de9cd; }
     .pill.mine { background: #172a34; color: #8bdcff; }
+    .pill.reward { background: #263016; color: #d5f55f; }
     .pill.error { background: #341918; color: #ffb1a8; }
     .mempool-panel { min-width: 0; overflow: hidden; }
     .mempool-strip { width: 100%; min-width: 0; display: flex; gap: 8px; overflow-x: auto; overscroll-behavior-x: contain; padding: 1px 0 10px; scroll-snap-type: x proximity; }
@@ -447,6 +448,7 @@ pub(super) const INDEX_HTML: &str = r#"<!doctype html>
     .utxo-node { display: grid; gap: 5px; border: 1px solid #2f363c; border-radius: 8px; padding: 10px; background: #111316; min-width: 0; }
     .utxo-node.burned { border-color: #5e4821; background: #1f1a12; }
     .utxo-node.fee { border-color: #4b5260; background: #171a20; }
+    .utxo-node.reward { border-color: #526329; background: #1a2013; }
     .utxo-node-label { display: flex; justify-content: space-between; gap: 8px; color: #8d989f; font-size: 11px; font-weight: 800; text-transform: uppercase; }
     .utxo-node-amount { color: #d5f55f; font-weight: 850; font-variant-numeric: tabular-nums; }
     .utxo-node-address, .utxo-node-ref { color: #9eb3bc; font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; font-size: 12px; overflow-wrap: anywhere; }
@@ -481,7 +483,7 @@ pub(super) const INDEX_HTML: &str = r#"<!doctype html>
       .block-card { flex-basis: 108px; }
     }
   </style>
-  <script defer src="/assets/iuna-ui.js?v=111"></script>
+  <script defer src="/assets/iuna-ui.js?v=112"></script>
   <script defer src="/assets/alpine.min.js"></script>
 </head>
 <body x-data="iunaApp()" x-init="init()" @keydown.window.escape="closeModals()" x-cloak>
@@ -989,7 +991,12 @@ pub(super) const INDEX_HTML: &str = r#"<!doctype html>
                   </button>
                 </div>
                 <div class="detail-kv"><div class="key">Mode</div><div x-text="selectedBlock.finalizer_mode === 'recovery' ? 'Recovery' : `Rank ${selectedBlock.finalizer_rank ?? 0}`"></div></div>
-                <div class="detail-kv"><div class="key">Reward</div><div>IUNA <span x-text="amountLabel(selectedBlock.reward)"></span></div></div>
+                <div class="detail-kv">
+                  <div class="key">Reward</div>
+                  <button class="detail-link" type="button" @click="openBlockRewardModal(selectedBlock)" title="Show paid and distributed fees" aria-label="Show block reward fee flow">
+                    <span class="link-value">IUNA <span x-text="amountLabel(selectedBlock.reward)"></span></span>
+                  </button>
+                </div>
                 <div class="detail-kv">
                   <div class="key">Burn Bundles</div>
                   <button class="detail-link" type="button" @click="openBurnBundleModal(selectedBlock)" title="How the burn bundle attestations were selected" aria-label="Show burn bundle selection details">
@@ -1500,9 +1507,9 @@ pub(super) const INDEX_HTML: &str = r#"<!doctype html>
       <div class="tx-modal-summary">
         <div class="tx-field"><span class="tx-label">Source</span><span class="tx-value text" x-text="selectedTransactionLabel()"></span></div>
         <div class="tx-field"><span class="tx-label">Amount</span><span class="tx-value money">IUNA <span x-text="amountLabel(txAmount(selectedTransaction?.tx || {}))"></span></span></div>
-        <div class="tx-field"><span class="tx-label">Fee</span><span class="tx-value money" x-text="txFeeLabel(selectedTransaction?.tx)"></span></div>
-        <div class="tx-field"><span class="tx-label">From</span><code class="tx-value hash" x-text="addressLabel(txFrom(selectedTransaction?.tx || {}))"></code></div>
-        <div class="tx-field" x-show="txTo(selectedTransaction?.tx || {})"><span class="tx-label">To</span><code class="tx-value hash" x-text="addressLabel(txTo(selectedTransaction?.tx || {}))"></code></div>
+        <div class="tx-field" x-show="!isRewardTx(selectedTransaction?.tx)"><span class="tx-label">Fee</span><span class="tx-value money" x-text="txFeeLabel(selectedTransaction?.tx)"></span></div>
+        <div class="tx-field" x-show="!isRewardTx(selectedTransaction?.tx)"><span class="tx-label">From</span><code class="tx-value hash" x-text="addressLabel(txFrom(selectedTransaction?.tx || {}))"></code></div>
+        <div class="tx-field" x-show="!isRewardTx(selectedTransaction?.tx) && txTo(selectedTransaction?.tx || {})"><span class="tx-label">To</span><code class="tx-value hash" x-text="addressLabel(txTo(selectedTransaction?.tx || {}))"></code></div>
         <div class="tx-field" x-show="isMineTx(selectedTransaction?.tx)"><span class="tx-label">Difficulty</span><span class="tx-value number" x-text="txDifficultyBits(selectedTransaction?.tx) ?? '-'"></span></div>
         <div class="tx-field" x-show="isMineTx(selectedTransaction?.tx)"><span class="tx-label">Proof Bits</span><span class="tx-value number" x-text="txProofBits(selectedTransaction?.tx) ?? '-'"></span></div>
         <div class="tx-field" x-show="isMineTx(selectedTransaction?.tx)"><span class="tx-label">Proof Hash</span><code class="tx-value hash" x-text="txProofHash(selectedTransaction?.tx) || '-'"></code></div>
@@ -1512,11 +1519,11 @@ pub(super) const INDEX_HTML: &str = r#"<!doctype html>
           <h3>Inputs</h3>
           <template x-for="(input, index) in txInputs(selectedTransaction?.tx || {})" :key="txInputKey(input, index)">
             <div class="utxo-node">
-              <div class="utxo-node-label"><span>Input <span x-text="index + 1"></span></span><span>spent</span></div>
+              <div class="utxo-node-label"><span x-text="input.rewardFee ? `Paid fee ${index + 1}` : `Input ${index + 1}`"></span><span x-text="input.rewardFee ? input.transactionKind : 'spent'"></span></div>
               <div class="utxo-node-ref" x-text="txInputOutpoint(input)"></div>
               <div class="tx-field"><span class="tx-label">Value</span><span class="tx-value money" x-text="txInputAmountLabel(input)"></span></div>
-              <div class="tx-field"><span class="tx-label">Owner</span><code class="tx-value hash" x-text="addressLabel(input.owner)"></code></div>
-              <div class="tx-field"><span class="tx-label">Sig</span><code class="tx-value hash" x-text="short(input.signature)"></code></div>
+              <div class="tx-field" x-show="input.owner"><span class="tx-label" x-text="input.rewardFee ? 'Paid by' : 'Owner'"></span><code class="tx-value hash" x-text="addressLabel(input.owner)"></code></div>
+              <div class="tx-field"><span class="tx-label" x-text="input.rewardFee ? 'Transaction' : 'Sig'"></span><code class="tx-value hash" x-text="short(input.signature)"></code></div>
             </div>
           </template>
           <div class="tx-modal-empty" x-show="txInputs(selectedTransaction?.tx || {}).length === 0">No inputs</div>
@@ -1525,7 +1532,7 @@ pub(super) const INDEX_HTML: &str = r#"<!doctype html>
         <div class="utxo-column">
           <h3>Outputs</h3>
           <template x-for="(output, index) in txVisualOutputs(selectedTransaction?.tx || {})" :key="txOutputKey(output, index)">
-            <div class="utxo-node" :class="{ burned: output.kind === 'burned', fee: output.kind === 'fee' }">
+            <div class="utxo-node" :class="{ burned: output.kind === 'burned', fee: output.kind === 'fee', reward: output.kind === 'reward' }">
               <div class="utxo-node-label"><span x-text="output.label"></span><span x-text="output.kind"></span></div>
               <div class="utxo-node-amount">IUNA <span x-text="amountLabel(output.amount)"></span></div>
               <template x-if="output.address">
