@@ -162,17 +162,35 @@ pub(super) async fn process_envelope(
         GossipEnvelope::Blocks { blocks } => {
             let adjusted_time_ms = super::network_adjusted_time_ms(network).await;
             let local_ledger = network.inner.node.lock().await.clone_ledger();
-            let result =
-                match validate_blocks_extension(local_ledger, blocks, adjusted_time_ms).await {
-                    Ok(ledger) => network
-                        .inner
-                        .node
-                        .lock()
-                        .await
-                        .import_verified_ledger(ledger)
-                        .map(|_| ()),
-                    Err(error) => Err(error),
-                };
+            let start_height = blocks
+                .first()
+                .map(|block| block.height.saturating_sub(1))
+                .unwrap_or_else(|| local_ledger.height());
+            let target_height = blocks
+                .last()
+                .map(|block| block.height)
+                .unwrap_or(start_height);
+            let progress_guard = network.begin_sync_progress(start_height, target_height);
+            let progress_id = progress_guard.id();
+            let progress_network = network.clone();
+            let result = match validate_blocks_extension(
+                local_ledger,
+                blocks,
+                adjusted_time_ms,
+                move |height| progress_network.update_sync_progress(progress_id, height),
+            )
+            .await
+            {
+                Ok(ledger) => network
+                    .inner
+                    .node
+                    .lock()
+                    .await
+                    .import_verified_ledger(ledger)
+                    .map(|_| ()),
+                Err(error) => Err(error),
+            };
+            drop(progress_guard);
             let request_locator = result.as_ref().err().is_some_and(is_possible_fork_error);
             record_rejected_chain_payload(
                 network,

@@ -86,6 +86,8 @@ fn management_ui_blocks_interaction_while_the_node_is_syncing() {
     assert!(html.contains("Synchronizing blockchain"));
     assert!(html.contains("syncProgressPercent()"));
     assert!(javascript.contains("this.networkHealth.state === \"syncing\""));
+    assert!(javascript.contains("this.networkHealth.sync_validated_height"));
+    assert!(javascript.contains("this.syncingNode() ? 1000 : 5000"));
     assert!(javascript.contains("Syncing ${this.syncCurrentHeight().toLocaleString()} of"));
 }
 

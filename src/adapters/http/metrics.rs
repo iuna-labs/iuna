@@ -169,7 +169,10 @@ pub(super) fn network_health_at(
         .tip_timestamp_ms
         .map(|tip_timestamp_ms| now_ms.saturating_sub(tip_timestamp_ms));
     let remote_best_height = peers.iter().filter_map(|peer| peer.last_known_height).max();
-    let best_known_height = remote_best_height.unwrap_or(local_height).max(local_height);
+    let best_known_height = remote_best_height
+        .unwrap_or(local_height)
+        .max(local.sync_target_height.unwrap_or(local_height))
+        .max(local_height);
     let healthy_heights = peers
         .iter()
         .filter(|peer| peer.last_error.is_none())
@@ -229,8 +232,13 @@ pub(super) fn network_health_at(
         .rejected_blocks
         .saturating_add(local.rejected_block_batches)
         .saturating_add(local.rejected_snapshots);
+    let actively_syncing = local
+        .sync_target_height
+        .is_some_and(|target_height| target_height > local_height);
 
-    let state = if peers.is_empty() {
+    let state = if actively_syncing {
+        "syncing"
+    } else if peers.is_empty() {
         "isolated"
     } else if banned_peers > 0 && healthy_peers == 0 {
         "banned"
@@ -254,6 +262,9 @@ pub(super) fn network_health_at(
         local_tip_hash: local.tip_hash,
         last_block_age_ms,
         best_known_height,
+        sync_start_height: local.sync_start_height,
+        sync_validated_height: local.sync_validated_height,
+        sync_target_height: local.sync_target_height,
         shared_height,
         lag_blocks,
         outbound_peers,
@@ -352,6 +363,9 @@ mod tests {
             height: 42,
             tip_hash: "tip-hash".to_string(),
             tip_timestamp_ms: Some(1_000),
+            sync_start_height: Some(42),
+            sync_validated_height: Some(47),
+            sync_target_height: Some(60),
             pending_transactions: 3,
             last_finalizer_mode: Some("ticket".to_string()),
             last_finalizer_rank: Some(1),
@@ -377,6 +391,11 @@ mod tests {
         );
 
         assert_eq!(health.local_height, 42);
+        assert_eq!(health.best_known_height, 60);
+        assert_eq!(health.sync_start_height, Some(42));
+        assert_eq!(health.sync_validated_height, Some(47));
+        assert_eq!(health.sync_target_height, Some(60));
+        assert_eq!(health.state, "syncing");
         assert_eq!(health.local_tip_hash, "tip-hash");
         assert_eq!(health.last_block_age_ms, Some(1_500));
         assert_eq!(health.last_finalizer_mode.as_deref(), Some("ticket"));

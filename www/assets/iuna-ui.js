@@ -158,9 +158,7 @@ window.iunaApp = function iunaApp() {
       }
       await this.refresh();
       this.checkLatestRelease();
-      if (!this.pollHandle) {
-        this.pollHandle = setInterval(() => this.refresh({ silent: true }), 5000);
-      }
+      this.schedulePoll();
     },
 
     canUseProtectedApi() {
@@ -169,8 +167,18 @@ window.iunaApp = function iunaApp() {
 
     stopPolling() {
       if (!this.pollHandle) return;
-      clearInterval(this.pollHandle);
+      clearTimeout(this.pollHandle);
       this.pollHandle = null;
+    },
+
+    schedulePoll() {
+      if (this.pollHandle || !this.canUseProtectedApi()) return;
+      const delay = this.syncingNode() ? 1000 : 5000;
+      this.pollHandle = setTimeout(async () => {
+        this.pollHandle = null;
+        await this.refresh({ silent: true });
+        this.schedulePoll();
+      }, delay);
     },
 
     tabFromHash() {
@@ -2976,12 +2984,23 @@ window.iunaApp = function iunaApp() {
     },
 
     syncCurrentHeight() {
-      const height = Number(this.networkHealth.local_height ?? this.status.chain?.height ?? 0);
+      const height = Number(
+        this.networkHealth.sync_validated_height ??
+          this.networkHealth.local_height ??
+          this.status.chain?.height ??
+          0
+      );
       return Number.isFinite(height) && height >= 0 ? Math.floor(height) : 0;
     },
 
     syncTargetHeight() {
-      const target = Number(this.networkHealth.best_known_height ?? this.syncCurrentHeight());
+      const batchTarget = Number(this.networkHealth.sync_target_height ?? 0);
+      const knownTarget = Number(this.networkHealth.best_known_height ?? 0);
+      const target = Math.max(
+        Number.isFinite(batchTarget) ? batchTarget : 0,
+        Number.isFinite(knownTarget) ? knownTarget : 0,
+        this.syncCurrentHeight()
+      );
       return Number.isFinite(target) && target >= 0
         ? Math.max(this.syncCurrentHeight(), Math.floor(target))
         : this.syncCurrentHeight();

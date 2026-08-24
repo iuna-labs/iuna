@@ -208,12 +208,14 @@ pub(super) async fn validate_blocks_extension(
     mut ledger: Ledger,
     blocks: Vec<Block>,
     now_ms: u64,
+    on_progress: impl Fn(u64) + Send + 'static,
 ) -> Result<Ledger> {
     if blocks.is_empty() {
         return Ok(ledger);
     }
 
     tokio::task::spawn_blocking(move || {
+        let target_height = blocks.last().map(|block| block.height);
         if blocks[0].prev_hash != ledger.tip_hash() {
             let mut candidate = ledger.snapshot();
             let ancestor = candidate
@@ -224,10 +226,15 @@ pub(super) async fn validate_blocks_extension(
             candidate.blocks.truncate(ancestor + 1);
             candidate.blocks.extend(blocks);
             ledger.extend_from_snapshot_at(candidate, now_ms)?;
+            if let Some(target_height) = target_height {
+                on_progress(target_height);
+            }
             return Ok(ledger);
         }
         for block in blocks {
+            let height = block.height;
             ledger.apply_block_at(block, now_ms)?;
+            on_progress(height);
         }
         Ok(ledger)
     })

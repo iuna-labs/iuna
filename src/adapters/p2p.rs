@@ -96,6 +96,23 @@ pub struct GossipNetwork {
     inner: Arc<GossipNetworkInner>,
 }
 
+pub(super) struct SyncProgressGuard {
+    network: GossipNetwork,
+    id: u64,
+}
+
+impl SyncProgressGuard {
+    pub(super) fn id(&self) -> u64 {
+        self.id
+    }
+}
+
+impl Drop for SyncProgressGuard {
+    fn drop(&mut self) {
+        self.network.finish_sync_progress(self.id);
+    }
+}
+
 struct GossipNetworkInner {
     node: SharedNode,
     peers: SharedPeerBook,
@@ -106,6 +123,20 @@ struct GossipNetworkInner {
     sessions: Mutex<BTreeMap<String, mpsc::Sender<OutboundBatch>>>,
     inbound_limiter: Arc<StdMutex<InboundConnectionLimiter>>,
     metrics: P2pMetricsCounters,
+    sync_progress: StdMutex<SyncProgressState>,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct SyncProgress {
+    pub start_height: u64,
+    pub validated_height: u64,
+    pub target_height: u64,
+}
+
+#[derive(Default)]
+struct SyncProgressState {
+    next_id: u64,
+    active: BTreeMap<u64, SyncProgress>,
 }
 
 #[cfg(test)]

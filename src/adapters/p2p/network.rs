@@ -40,6 +40,7 @@ impl GossipNetwork {
                 ),
                 inbound_limiter: Arc::new(StdMutex::new(InboundConnectionLimiter::default())),
                 metrics: P2pMetricsCounters::default(),
+                sync_progress: StdMutex::new(super::SyncProgressState::default()),
             }),
         };
 
@@ -105,6 +106,64 @@ impl GossipNetwork {
 
     pub fn metrics(&self) -> P2pMetrics {
         self.inner.metrics.snapshot()
+    }
+
+    pub fn sync_progress(&self) -> Option<super::SyncProgress> {
+        self.inner
+            .sync_progress
+            .lock()
+            .expect("sync progress mutex poisoned")
+            .active
+            .values()
+            .copied()
+            .max_by_key(|progress| (progress.target_height, progress.validated_height))
+    }
+
+    pub(super) fn begin_sync_progress(
+        &self,
+        start_height: u64,
+        target_height: u64,
+    ) -> super::SyncProgressGuard {
+        let mut state = self
+            .inner
+            .sync_progress
+            .lock()
+            .expect("sync progress mutex poisoned");
+        state.next_id = state.next_id.wrapping_add(1);
+        let id = state.next_id;
+        state.active.insert(
+            id,
+            super::SyncProgress {
+                start_height,
+                validated_height: start_height,
+                target_height: target_height.max(start_height),
+            },
+        );
+        super::SyncProgressGuard {
+            network: self.clone(),
+            id,
+        }
+    }
+
+    pub(super) fn update_sync_progress(&self, id: u64, validated_height: u64) {
+        let mut state = self
+            .inner
+            .sync_progress
+            .lock()
+            .expect("sync progress mutex poisoned");
+        if let Some(progress) = state.active.get_mut(&id) {
+            progress.validated_height =
+                validated_height.clamp(progress.start_height, progress.target_height);
+        }
+    }
+
+    pub(super) fn finish_sync_progress(&self, id: u64) {
+        let mut state = self
+            .inner
+            .sync_progress
+            .lock()
+            .expect("sync progress mutex poisoned");
+        state.active.remove(&id);
     }
 
     pub(super) fn try_acquire_inbound_session(
@@ -267,6 +326,35 @@ mod tests {
     };
 
     use super::super::test_support::{allocations, gossip_network, node};
+
+    #[tokio::test]
+    async fn sync_progress_is_incremental_and_scoped_to_the_active_validation() {
+        let alice = Wallet::from_seed("sync-progress-alice");
+        let allocations = allocations(std::slice::from_ref(&alice), 1_000);
+        let node = Arc::new(tokio::sync::Mutex::new(node("alice", alice, allocations)));
+        let peers = Arc::new(tokio::sync::Mutex::new(PeerBook::default()));
+        let network = gossip_network(node, peers, "127.0.0.1:9544".parse().unwrap(), None);
+
+        let first = network.begin_sync_progress(0, 90);
+        network.update_sync_progress(first.id(), 23);
+        assert_eq!(
+            network.sync_progress(),
+            Some(super::super::SyncProgress {
+                start_height: 0,
+                validated_height: 23,
+                target_height: 90,
+            })
+        );
+
+        let second = network.begin_sync_progress(23, 76);
+        network.update_sync_progress(second.id(), 41);
+        assert_eq!(network.sync_progress().unwrap().target_height, 90);
+        drop(first);
+        assert_eq!(network.sync_progress().unwrap().validated_height, 41);
+
+        drop(second);
+        assert_eq!(network.sync_progress(), None);
+    }
 
     #[tokio::test]
     async fn peer_exchange_does_not_advertise_self_when_outbound_only() {

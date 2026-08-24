@@ -16,6 +16,35 @@ use tokio::io::AsyncWriteExt;
 use super::test_support::{allocations, gossip_network, node, queue_plaintext_burn};
 
 #[tokio::test]
+async fn block_batch_validation_reports_each_validated_height() {
+    let alice = Wallet::from_seed("batch-validation-progress-alice");
+    let allocations = allocations(std::slice::from_ref(&alice), 1_000);
+    let local = node("batch-progress-local", alice.clone(), allocations.clone());
+    let mut remote = node("batch-progress-remote", alice.clone(), allocations);
+    for timestamp_ms in [1, 2] {
+        queue_plaintext_burn(&mut remote, &alice, 1);
+        remote.drain_outbox();
+        remote.mine_one_at(timestamp_ms).unwrap();
+        remote.drain_outbox();
+    }
+    let blocks = remote.ledger().blocks_from(1, 10);
+    let progress = Arc::new(StdMutex::new(Vec::new()));
+    let reported = Arc::clone(&progress);
+
+    let adopted = super::validate_blocks_extension(
+        local.clone_ledger(),
+        blocks,
+        crate::app::now_ms(),
+        move |height| reported.lock().unwrap().push(height),
+    )
+    .await
+    .unwrap();
+
+    assert_eq!(*progress.lock().unwrap(), vec![1, 2]);
+    assert_eq!(adopted.height(), 2);
+}
+
+#[tokio::test]
 async fn full_outbound_queue_is_metric_not_peer_error() {
     let wallet = Wallet::from_seed("full-outbound-queue");
     let node = Arc::new(tokio::sync::Mutex::new(node(
@@ -37,6 +66,7 @@ async fn full_outbound_queue_is_metric_not_peer_error() {
             sessions: tokio::sync::Mutex::new(BTreeMap::new()),
             inbound_limiter: Arc::new(StdMutex::new(super::InboundConnectionLimiter::default())),
             metrics: super::P2pMetricsCounters::default(),
+            sync_progress: StdMutex::new(super::SyncProgressState::default()),
         }),
     };
     let (sender, _receiver) = tokio::sync::mpsc::channel(1);
@@ -137,9 +167,10 @@ async fn single_block_fork_error_requests_blocks_by_locator() {
     let fork_blocks = remote_node.blocks_after_locator(&locator, limit);
     assert_eq!(fork_blocks.len(), 2);
     let local_ledger = network.inner.node.lock().await.clone_ledger();
-    let adopted = super::validate_blocks_extension(local_ledger, fork_blocks, crate::app::now_ms())
-        .await
-        .unwrap();
+    let adopted =
+        super::validate_blocks_extension(local_ledger, fork_blocks, crate::app::now_ms(), |_| {})
+            .await
+            .unwrap();
     assert_eq!(adopted.tip_hash(), remote_node.ledger().tip_hash());
 }
 
@@ -371,6 +402,7 @@ async fn hello_rejects_wrong_network_or_genesis_without_banning() {
             sessions: tokio::sync::Mutex::new(BTreeMap::new()),
             inbound_limiter: Arc::new(StdMutex::new(super::InboundConnectionLimiter::default())),
             metrics: super::P2pMetricsCounters::default(),
+            sync_progress: StdMutex::new(super::SyncProgressState::default()),
         }),
     };
 
@@ -476,6 +508,7 @@ async fn hello_records_remote_clock_observation() {
             sessions: tokio::sync::Mutex::new(BTreeMap::new()),
             inbound_limiter: Arc::new(StdMutex::new(super::InboundConnectionLimiter::default())),
             metrics: super::P2pMetricsCounters::default(),
+            sync_progress: StdMutex::new(super::SyncProgressState::default()),
         }),
     };
     let remote_time_ms = crate::app::now_ms().saturating_add(60_000);
@@ -533,6 +566,7 @@ async fn hello_remembers_advertised_address_after_signed_session_and_dialback() 
             sessions: tokio::sync::Mutex::new(BTreeMap::new()),
             inbound_limiter: Arc::new(StdMutex::new(super::InboundConnectionLimiter::default())),
             metrics: super::P2pMetricsCounters::default(),
+            sync_progress: StdMutex::new(super::SyncProgressState::default()),
         }),
     };
     let remote_node_id = super::new_node_id();
@@ -609,6 +643,7 @@ async fn hello_ignores_advertised_address_when_connected_peer_cannot_sign_claime
             sessions: tokio::sync::Mutex::new(BTreeMap::new()),
             inbound_limiter: Arc::new(StdMutex::new(super::InboundConnectionLimiter::default())),
             metrics: super::P2pMetricsCounters::default(),
+            sync_progress: StdMutex::new(super::SyncProgressState::default()),
         }),
     };
     let victim_node_id = super::new_node_id();
@@ -679,6 +714,7 @@ async fn dialback_rejects_address_that_signs_with_different_node_id() {
             sessions: tokio::sync::Mutex::new(BTreeMap::new()),
             inbound_limiter: Arc::new(StdMutex::new(super::InboundConnectionLimiter::default())),
             metrics: super::P2pMetricsCounters::default(),
+            sync_progress: StdMutex::new(super::SyncProgressState::default()),
         }),
     };
     let honest_node_id = super::new_node_id();
@@ -790,6 +826,7 @@ async fn setup_placeholder_accepts_remote_genesis_and_adopts_bootstrap() {
             sessions: tokio::sync::Mutex::new(BTreeMap::new()),
             inbound_limiter: Arc::new(StdMutex::new(super::InboundConnectionLimiter::default())),
             metrics: super::P2pMetricsCounters::default(),
+            sync_progress: StdMutex::new(super::SyncProgressState::default()),
         }),
     };
 
@@ -871,6 +908,7 @@ async fn real_node_accepts_setup_placeholder_peer_and_pushes_bootstrap() {
             sessions: tokio::sync::Mutex::new(BTreeMap::new()),
             inbound_limiter: Arc::new(StdMutex::new(super::InboundConnectionLimiter::default())),
             metrics: super::P2pMetricsCounters::default(),
+            sync_progress: StdMutex::new(super::SyncProgressState::default()),
         }),
     };
     let setup_ledger = Ledger::new(BTreeMap::new(), 1);
@@ -946,6 +984,7 @@ async fn hello_ignores_private_advertised_listen_address() {
             sessions: tokio::sync::Mutex::new(BTreeMap::new()),
             inbound_limiter: Arc::new(StdMutex::new(super::InboundConnectionLimiter::default())),
             metrics: super::P2pMetricsCounters::default(),
+            sync_progress: StdMutex::new(super::SyncProgressState::default()),
         }),
     };
     let status = node.lock().await.ledger().status();
@@ -991,6 +1030,7 @@ async fn hello_ignores_loopback_alias_for_unspecified_self() {
             sessions: tokio::sync::Mutex::new(BTreeMap::new()),
             inbound_limiter: Arc::new(StdMutex::new(super::InboundConnectionLimiter::default())),
             metrics: super::P2pMetricsCounters::default(),
+            sync_progress: StdMutex::new(super::SyncProgressState::default()),
         }),
     };
     let hello = ProtocolHello {
@@ -1046,6 +1086,7 @@ async fn hello_removes_outbound_peer_that_announces_self_address() {
             sessions: tokio::sync::Mutex::new(BTreeMap::new()),
             inbound_limiter: Arc::new(StdMutex::new(super::InboundConnectionLimiter::default())),
             metrics: super::P2pMetricsCounters::default(),
+            sync_progress: StdMutex::new(super::SyncProgressState::default()),
         }),
     };
     let hello = ProtocolHello {
@@ -1100,6 +1141,7 @@ async fn hello_removes_outbound_peer_with_same_node_id() {
             sessions: tokio::sync::Mutex::new(BTreeMap::new()),
             inbound_limiter: Arc::new(StdMutex::new(super::InboundConnectionLimiter::default())),
             metrics: super::P2pMetricsCounters::default(),
+            sync_progress: StdMutex::new(super::SyncProgressState::default()),
         }),
     };
     let hello = ProtocolHello {

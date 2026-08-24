@@ -55,6 +55,7 @@ pub(super) fn gossip_network(
             sessions: tokio::sync::Mutex::new(BTreeMap::new()),
             inbound_limiter: Arc::new(std::sync::Mutex::new(InboundConnectionLimiter::default())),
             metrics: P2pMetricsCounters::default(),
+            sync_progress: std::sync::Mutex::new(super::SyncProgressState::default()),
         }),
     }
 }

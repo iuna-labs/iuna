@@ -409,6 +409,7 @@ fn metrics_leaderboard_entry(
 pub(super) async fn api_network_health(
     State(state): State<HttpState>,
 ) -> Json<NetworkHealthResponse> {
+    let sync_progress = state.gossip.sync_progress();
     let (local, mempool) = {
         let node = state.node.lock().await;
         let status = node.status();
@@ -426,6 +427,9 @@ pub(super) async fn api_network_health(
                 height: status.chain.height,
                 tip_hash: status.chain.tip_hash,
                 tip_timestamp_ms,
+                sync_start_height: sync_progress.map(|progress| progress.start_height),
+                sync_validated_height: sync_progress.map(|progress| progress.validated_height),
+                sync_target_height: sync_progress.map(|progress| progress.target_height),
                 pending_transactions: mempool.total(),
                 last_finalizer_mode: tip.as_ref().map(|block| match block.finalizer_mode {
                     crate::domain::FinalizerMode::Ticket => "ticket".to_string(),
