@@ -69,8 +69,8 @@ Release and deploy with:
 ```
 
 To start a new chain, deploy with `--genesis`. This asks for confirmation,
-starts the node with `--genesis`, and switches it to a new version-specific PVC;
-the existing PVC is retained:
+deletes and recreates the permanent `local-path-db-pvc`, and starts the node
+once with `--genesis`. The existing chain data is permanently removed:
 
 ```sh
 ./deployment.sh --genesis 0.4.0

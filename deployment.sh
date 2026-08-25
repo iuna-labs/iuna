@@ -429,50 +429,29 @@ render_manifest() {
     ' > "$output"
 }
 
-genesis_pvc_name() {
-  local version="$1"
-  printf 'local-path-db-pvc-v%s' "${version//./-}"
-}
-
-ensure_genesis_pvc_is_new() {
-  local version="$1"
-  local kubectl_context="${IUNA_KUBECTL_CONTEXT:-jhx-app}"
-  local node_pvc
-  local existing_pvc
-
-  require_command kubectl
-  node_pvc="$(genesis_pvc_name "$version")"
-  existing_pvc="$(kubectl --context "$kubectl_context" -n iuna get pvc "$node_pvc" --ignore-not-found -o name)" || \
-    die "could not check whether genesis PVC ${node_pvc} exists"
-  [ -z "$existing_pvc" ] || die "genesis PVC ${node_pvc} already exists; refusing to reuse it"
-}
-
 deploy_docker_image() {
   local version="$1"
   local genesis="$2"
   local www_image="${IUNA_WWW_IMAGE:-iuna-www:v${version}}"
   local node_image="${IUNA_NODE_IMAGE:-iuna-node:v${version}}"
-  local node_pvc
+  local node_pvc="local-path-db-pvc"
   local kubectl_context="${IUNA_KUBECTL_CONTEXT:-jhx-app}"
   local tmp_folder
 
   require_command kubectl
 
-  node_pvc="$(kubectl --context "$kubectl_context" -n iuna get deployment node --ignore-not-found -o jsonpath='{.spec.template.spec.volumes[?(@.name=="data")].persistentVolumeClaim.claimName}')" || \
-    die "could not determine the PVC used by the current node deployment"
-  node_pvc="${node_pvc:-local-path-db-pvc}"
-
   tmp_folder="$(mktemp -d)"
   trap 'rm -rf "$tmp_folder"' RETURN
-
-  if [ "$genesis" = "true" ]; then
-    node_pvc="$(genesis_pvc_name "$version")"
-    ensure_genesis_pvc_is_new "$version"
-  fi
 
   import_image_to_k3s "$www_image" "$tmp_folder"
   import_image_to_k3s "$node_image" "$tmp_folder"
   render_manifest "$www_image" "$node_image" "$node_pvc" "$genesis" "${tmp_folder}/deployment.yml"
+
+  if [ "$genesis" = "true" ]; then
+    echo "Bestaande node en PVC ${node_pvc} worden verwijderd"
+    kubectl --context "$kubectl_context" -n iuna delete deployment node --ignore-not-found --wait=true
+    kubectl --context "$kubectl_context" -n iuna delete pvc "$node_pvc" --ignore-not-found --wait=true
+  fi
 
   local current_www_selector
   current_www_selector="$(kubectl --context "$kubectl_context" -n iuna get deployment www -o jsonpath='{.spec.selector.matchLabels.app}' 2>/dev/null || true)"
@@ -521,12 +500,12 @@ main() {
 
   if [ "$genesis" = "true" ]; then
     echo "LET OP: dit start een nieuwe chain met --genesis en een nieuwe PVC."
-    echo "De bestaande chain en PVC blijven bewaard, maar de node schakelt over naar local-path-db-pvc-v${version//./-}."
+    echo "De bestaande chain in PVC local-path-db-pvc wordt DEFINITIEF VERWIJDERD."
+    echo "Daarna wordt een lege PVC met dezelfde permanente naam aangemaakt."
     if ! confirm "Weet je het zeker? (Y/N) "; then
       echo "Deployment afgebroken"
       exit 1
     fi
-    ensure_genesis_pvc_is_new "$version"
   fi
 
   # Check if the tag already exists; if it does, only deploy
