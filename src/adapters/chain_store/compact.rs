@@ -15,6 +15,15 @@ const MAX_COMPACT_SNAPSHOT_BLOCKS: usize = 10_000;
 const MAX_COMPACT_VEC_ITEMS: usize = 10_000;
 const MAX_COMPACT_BYTE_FIELD: usize = 8 * 1024 * 1024;
 
+pub(super) fn legacy_compact_snapshot_version(bytes: &[u8]) -> Option<u8> {
+    let version_offset = COMPACT_SNAPSHOT_MAGIC.len();
+    if !bytes.starts_with(COMPACT_SNAPSHOT_MAGIC) || bytes.len() <= version_offset {
+        return None;
+    }
+    let version = bytes[version_offset];
+    (version < COMPACT_SNAPSHOT_VERSION).then_some(version)
+}
+
 #[derive(Clone, Debug, Default)]
 struct EncodeTables {
     addresses: BTreeMap<String, u64>,

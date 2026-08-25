@@ -119,17 +119,18 @@ Avoid:
 
 ## Coordinated Snapshot V6 Reset
 
-The next release accepts compact local snapshot format v6 only and does not migrate earlier chain history. This is a planned consensus/network reset, not a corrupted-database incident. All operators must agree on the release, genesis, network identity, bootnodes, and start time before bringing public nodes back online.
+The next release accepts compact local snapshot format v6 only and does not migrate earlier chain history. This is a planned consensus/network reset, not a corrupted-database incident. At startup, the node detects the legacy JSON schema and compact snapshot versions older than v6, checkpoints the database, archives it as `chain.sqlite3.pre-v6` (or the next available numbered suffix), and creates a fresh v6 database. The UI cache is then cleared normally. Wallet and configuration files are left untouched.
+
+All operators must still agree on the release, genesis, network identity, bootnodes, and start time before bringing public nodes back online. Automatic local archiving does not coordinate genesis.
 
 Before upgrading:
 
-1. Stop the node and preserve `chain.sqlite3` if it is needed as historical evidence.
-2. Keep `wallet.json` and `config.json`; verify that their backups are readable.
-3. Archive or remove only `chain.sqlite3` and `ui_data.sqlite3` from the node's configured data directory.
-4. Start exactly one designated node with `--genesis`, record its genesis hash, and publish that hash with the release commit and checksums.
-5. Start every other node without `--genesis` and join a trusted published bootnode.
+1. Stop the node and back up `wallet.json` and `config.json`; verify that the backups are readable.
+2. Start exactly one designated node with a fresh chain database and `--genesis`, record its genesis hash, and publish that hash with the release commit and checksums.
+3. Start every other node without `--genesis` and join a trusted published bootnode. Its incompatible chain database is archived automatically.
+4. Preserve the generated `.pre-v6` archive if the old chain is needed as historical evidence.
 
-Example for a default data directory, retaining the old databases as evidence:
+Manual equivalent for operators who want to choose the archive names before starting:
 
 ```sh
 mv ~/.iuna/chain.sqlite3 ~/.iuna/chain.sqlite3.pre-v6 2>/dev/null || true

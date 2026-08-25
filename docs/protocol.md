@@ -330,7 +330,7 @@ The genesis flow bootstraps the mainnet-candidate network with an initial burn t
 
 ## Local Chain Persistence And Reset Boundary
 
-The local `chain.sqlite3` database stores one atomically replaced compact snapshot blob plus independently checked tip height and tip hash metadata. Snapshot format v6 is the only accepted local format in the next release; older compact snapshot versions are deliberately not decoded or migrated.
+The local `chain.sqlite3` database stores one atomically replaced compact snapshot blob plus independently checked tip height and tip hash metadata. Snapshot format v6 is the only accepted local format in the next release; older compact snapshot versions are deliberately not decoded or migrated. Legacy JSON databases and compact versions older than v6 are checkpointed, renamed with a unique `.pre-v6` suffix, and replaced by a fresh database during startup.
 
 This persistence change is paired with a coordinated network reset. Every node must start the next release without its previous chain and UI databases, then either create the agreed new genesis or join a trusted peer on that new chain. Wallet and configuration files are not chain state and should be retained. Detailed recovery and reset commands are in [Operator Failure Playbooks](operator-playbooks.md).
 

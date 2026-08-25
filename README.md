@@ -181,10 +181,11 @@ changed in place. The five-slot committee is also a consensus reset: volumes
 created by the earlier three-slot protocol must likewise be recreated.
 
 The next release also introduces compact snapshot v6 and deliberately provides
-no old-chain migration. All nodes must participate in the coordinated network
-reset: preserve wallet/configuration files, remove or archive the old chain and
-UI databases, and create or join the new genesis. See the operator playbooks for
-non-Compose reset commands.
+no old-chain migration. On startup, legacy chain databases are archived with a
+`.pre-v6` suffix and replaced by a fresh database; wallet and configuration
+files are retained. All nodes must still participate in the coordinated network
+reset and create or join the agreed new genesis. See the operator playbooks for
+details and manual archive commands.
 
 Stop the network while keeping chain data:
 
