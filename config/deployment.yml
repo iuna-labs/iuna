@@ -153,6 +153,7 @@ metadata:
   namespace: iuna
 spec:
   replicas: 1
+  minReadySeconds: 3
   strategy:
     type: Recreate
     rollingUpdate: null
@@ -183,6 +184,13 @@ ${IUNA_NODE_GENESIS_ARG}
               containerPort: 18661
             - name: p2p
               containerPort: 9444
+          readinessProbe:
+            tcpSocket:
+              port: management
+            initialDelaySeconds: 1
+            periodSeconds: 2
+            timeoutSeconds: 1
+            failureThreshold: 30
           volumeMounts:
             - name: data
               mountPath: /data

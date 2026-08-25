@@ -448,7 +448,15 @@ deploy_docker_image() {
   render_manifest "$www_image" "$node_image" "$node_pvc" "$genesis" "${tmp_folder}/deployment.yml"
 
   if [ "$genesis" = "true" ]; then
-    echo "Bestaande node en PVC ${node_pvc} worden verwijderd"
+    echo "WARNING: the existing chain is about to be permanently deleted."
+    echo "Kubernetes context: ${kubectl_context}"
+    echo "Namespace: iuna"
+    echo "PVC: ${node_pvc}"
+    if ! confirm "Are you absolutely sure? (Y/N) "; then
+      echo "Deployment aborted; the existing node and PVC were not deleted"
+      exit 1
+    fi
+    echo "Deleting the existing node and PVC ${node_pvc}"
     kubectl --context "$kubectl_context" -n iuna delete deployment node --ignore-not-found --wait=true
     kubectl --context "$kubectl_context" -n iuna delete pvc "$node_pvc" --ignore-not-found --wait=true
   fi
@@ -465,7 +473,7 @@ deploy_docker_image() {
   kubectl --context "$kubectl_context" -n iuna rollout status deployment/node
 
   if [ "$genesis" = "true" ]; then
-    echo "Genesis is gestart; --genesis wordt nu verwijderd voor volgende pod-starts"
+    echo "Genesis started successfully; removing --genesis for subsequent pod starts"
     render_manifest "$www_image" "$node_image" "$node_pvc" false "${tmp_folder}/deployment.yml"
     kubectl --context "$kubectl_context" apply -f "${tmp_folder}/deployment.yml"
     kubectl --context "$kubectl_context" -n iuna rollout status deployment/node
@@ -499,11 +507,11 @@ main() {
   ensure_clean_worktree
 
   if [ "$genesis" = "true" ]; then
-    echo "LET OP: dit start een nieuwe chain met --genesis en een nieuwe PVC."
-    echo "De bestaande chain in PVC local-path-db-pvc wordt DEFINITIEF VERWIJDERD."
-    echo "Daarna wordt een lege PVC met dezelfde permanente naam aangemaakt."
-    if ! confirm "Weet je het zeker? (Y/N) "; then
-      echo "Deployment afgebroken"
+    echo "WARNING: this starts a new chain with --genesis and a fresh PVC."
+    echo "The existing chain in PVC local-path-db-pvc will be PERMANENTLY DELETED."
+    echo "An empty PVC will then be created with the same permanent name."
+    if ! confirm "Are you sure? (Y/N) "; then
+      echo "Deployment aborted"
       exit 1
     fi
   fi
