@@ -118,12 +118,13 @@ Compose:
 docker compose up --build
 ```
 
-The compose file starts one bootstrap genesis node and five joining nodes on an
-isolated Docker network. Every node automatically mines with one PoW worker and
-enables burn/finalization. Joining nodes can therefore earn their first
-spendable IUNA without a bootstrap transfer and begin burning afterward.
-Management UIs are exposed on:
+The compose file starts the static website, one bootstrap genesis node, and five
+joining nodes on an isolated Docker network. Every node automatically mines with
+one PoW worker and enables burn/finalization. Joining nodes can therefore earn
+their first spendable IUNA without a bootstrap transfer and begin burning
+afterward. The website and management UIs are exposed on:
 
+- website: <http://127.0.0.1:8080/>
 - bootstrap: <http://127.0.0.1:18661/>
 - node2: <http://127.0.0.1:18662/>
 - node3: <http://127.0.0.1:18663/>
