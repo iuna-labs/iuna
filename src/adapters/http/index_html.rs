@@ -1,4 +1,5 @@
-pub(super) const INDEX_HTML: &str = r#"<!doctype html>
+pub(super) const INDEX_HTML: &str = concat!(
+    r#"<!doctype html>
 <html lang="en">
 <head>
   <meta charset="utf-8">
@@ -483,7 +484,9 @@ pub(super) const INDEX_HTML: &str = r#"<!doctype html>
       .block-card { flex-basis: 108px; }
     }
   </style>
-  <script defer src="/assets/iuna-ui.js?v=112"></script>
+  <script defer src="/assets/iuna-ui.js?v="#,
+    env!("CARGO_PKG_VERSION"),
+    r#""></script>
   <script defer src="/assets/alpine.min.js"></script>
 </head>
 <body x-data="iunaApp()" x-init="init()" @keydown.window.escape="closeModals()" x-cloak>
@@ -1702,4 +1705,19 @@ pub(super) const INDEX_HTML: &str = r#"<!doctype html>
     </section>
   </div>
 </body>
-</html>"#;
+</html>"#
+);
+
+#[cfg(test)]
+mod tests {
+    use super::INDEX_HTML;
+
+    #[test]
+    fn app_javascript_cachebuster_matches_package_version() {
+        assert!(INDEX_HTML.contains(concat!(
+            r#"<script defer src="/assets/iuna-ui.js?v="#,
+            env!("CARGO_PKG_VERSION"),
+            r#""></script>"#
+        )));
+    }
+}
