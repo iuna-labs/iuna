@@ -144,6 +144,7 @@ metadata:
 spec:
   ipAllowList:
     sourceRange:
+${IUNA_ADMIN_IP_ALLOWLIST_LOCAL}
 ---
 apiVersion: apps/v1
 kind: Deployment

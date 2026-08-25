@@ -380,16 +380,41 @@ render_manifest() {
   local www_image="$1"
   local node_image="$2"
   local output="$3"
+  local local_allowlist_file="config/admin-ip-allowlist.local"
+  local allowlist_entry
+  local allowlist_entry_count=0
   local escaped_www_image
   local escaped_node_image
 
   escaped_www_image="$(escape_sed_replacement "$www_image")"
   escaped_node_image="$(escape_sed_replacement "$node_image")"
 
+  [ -f "$local_allowlist_file" ] || die "missing local admin allowlist: ${local_allowlist_file}"
+  while IFS= read -r allowlist_entry || [ -n "$allowlist_entry" ]; do
+    allowlist_entry="${allowlist_entry%%#*}"
+    allowlist_entry="${allowlist_entry//[[:space:]]/}"
+    [ -z "$allowlist_entry" ] && continue
+    [[ "$allowlist_entry" =~ ^([0-9]{1,3}\.){3}[0-9]{1,3}/(3[0-2]|[12]?[0-9])$ ]] || \
+      die "invalid CIDR in ${local_allowlist_file}: ${allowlist_entry}"
+    allowlist_entry_count=$((allowlist_entry_count + 1))
+  done < "$local_allowlist_file"
+  [ "$allowlist_entry_count" -gt 0 ] || die "local admin allowlist is empty: ${local_allowlist_file}"
+
   sed \
     -e "s|\${IUNA_WWW_IMAGE}|${escaped_www_image}|g" \
     -e "s|\${IUNA_NODE_IMAGE}|${escaped_node_image}|g" \
-    config/deployment.yml > "$output"
+    config/deployment.yml | awk -v local_allowlist_file="$local_allowlist_file" '
+      $0 == "${IUNA_ADMIN_IP_ALLOWLIST_LOCAL}" {
+        while ((getline entry < local_allowlist_file) > 0) {
+          sub(/#.*/, "", entry)
+          gsub(/[[:space:]]/, "", entry)
+          if (entry != "") print "      - " entry
+        }
+        close(local_allowlist_file)
+        next
+      }
+      { print }
+    ' > "$output"
 }
 
 deploy_docker_image() {

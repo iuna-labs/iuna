@@ -8,5 +8,6 @@
 /src-tauri/binaries/iuna-sidecar-*
 /downloads/*
 !/downloads/.gitkeep
+/config/admin-ip-allowlist.local
 __pycache__/
 *.py[cod]
