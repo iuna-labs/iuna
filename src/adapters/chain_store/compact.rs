@@ -3,8 +3,8 @@ use std::collections::BTreeMap;
 use anyhow::{Context, Result, bail};
 
 use crate::domain::{
-    Block, BurnBundleSection, BurnBundleSignature, ChainSnapshot, FinalizerMode, LaunchProfile,
-    LeaderProof, MaskedBurn, OutPoint, Transaction, TxInput, TxOutput,
+    Amount, Block, BurnBundleSection, BurnBundleSignature, ChainSnapshot, FinalizerMode,
+    LaunchProfile, LeaderProof, MaskedBurn, OutPoint, Transaction, TxInput, TxOutput,
 };
 
 const COMPACT_SNAPSHOT_MAGIC: &[u8] = b"IUNA-SNAPSHOT";
@@ -15,10 +15,49 @@ const MAX_COMPACT_SNAPSHOT_BLOCKS: usize = 10_000;
 const MAX_COMPACT_VEC_ITEMS: usize = 10_000;
 const MAX_COMPACT_BYTE_FIELD: usize = 8 * 1024 * 1024;
 
-#[derive(Default)]
+#[derive(Clone, Debug, Default)]
 struct EncodeTables {
     addresses: BTreeMap<String, u64>,
     protocol_ids: BTreeMap<String, u64>,
+}
+
+#[derive(Clone, Debug, Default)]
+pub(crate) struct CompactBlockContext {
+    tables: EncodeTables,
+}
+
+impl CompactBlockContext {
+    pub(crate) fn for_chain(
+        genesis_allocations: &BTreeMap<String, Amount>,
+        blocks: &[Block],
+    ) -> Result<Self> {
+        let mut context = Self::default();
+        for address in genesis_allocations.keys() {
+            context.tables.register_address(address);
+        }
+        for block in blocks {
+            let mut writer = CompactWriter::default();
+            encode_block_body(&mut writer, block, &mut context.tables)?;
+            context.tables.register_protocol_id(&block.hash);
+        }
+        Ok(context)
+    }
+
+    pub(crate) fn block_size_bytes(&self, block: &Block) -> Result<usize> {
+        let mut tables = self.tables.clone();
+        let mut writer = CompactWriter::default();
+        encode_block_body(&mut writer, block, &mut tables)?;
+        Ok(writer.into_inner().len())
+    }
+
+    pub(crate) fn append_block(&mut self, block: &Block) -> Result<()> {
+        let mut tables = self.tables.clone();
+        let mut writer = CompactWriter::default();
+        encode_block_body(&mut writer, block, &mut tables)?;
+        tables.register_protocol_id(&block.hash);
+        self.tables = tables;
+        Ok(())
+    }
 }
 
 #[derive(Default)]

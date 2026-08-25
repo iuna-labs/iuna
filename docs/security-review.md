@@ -22,7 +22,7 @@ Primary code:
 - `src/domain/ledger_consensus.rs`
 - `src/domain/ledger_reveal.rs`
 - `src/domain/ticket.rs`
-- `src/domain/vdf.rs`
+- `src/domain/vdf/mod.rs`
 - `src/domain/protocol.rs`
 
 Evidence already in the tree:
@@ -30,7 +30,7 @@ Evidence already in the tree:
 - adversarial consensus tests in `src/domain/adversarial_tests.rs`;
 - release soak test in `tests/properties.rs`;
 - protocol rules documented in `docs/protocol.md`;
-- candidate rehearsal and rollback process in `docs/genesis.md`.
+- reset, joining, recovery, and rollback procedures in `docs/operator-playbooks.md`.
 
 ### Transaction And Mempool Validation
 
@@ -85,6 +85,8 @@ Evidence already in the tree:
 
 - P2P tests in `src/adapters/p2p/tests.rs`;
 - compact snapshot malformed-input tests in `src/adapters/chain_store/compact.rs`;
+- compact block-size boundary tests proving that selection and consensus use the
+  same snapshot v6 block-body encoder;
 - fuzz targets for `p2p_envelope`, `compact_snapshot`, and `domain_json`.
 
 ### Wallet, Key Storage, And HTTP Auth
@@ -221,10 +223,10 @@ see which revision was tested.
 - Public exposure: verify bootnodes expose only the intended P2P and optional
   Stratum ports, and that the management UI remains bound to a local or
   otherwise protected address.
-- Candidate manifest: `docs/genesis.md` contains the manifest template and
-  operating procedure. For a specific candidate, verify and publish the real
-  genesis hash, network ID, bootnodes, checksums, promotion policy, rollback
-  instructions, release tag, and git commit before the stability window starts.
+- Candidate manifest: release coordination must publish the real genesis hash,
+  network ID, bootnodes, checksums, reset and rollback instructions, release tag,
+  and git commit before the stability window starts. The protocol and operator
+  playbooks are the maintained in-tree references.
 - Release evidence: keep successful release-gate logs from the exact tagged
   candidate revision.
 

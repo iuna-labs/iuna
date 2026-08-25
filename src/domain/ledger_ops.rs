@@ -1,6 +1,8 @@
 use std::collections::{BTreeMap, BTreeSet};
 
 use anyhow::{Context, Result, bail};
+
+use crate::compact::CompactBlockContext;
 use ed25519_dalek::{Signature, Verifier, VerifyingKey};
 
 use super::hex::hex_hash;
@@ -11,10 +13,20 @@ use super::transaction::Transaction;
 use super::vdf::vdf_solution_placeholder;
 use super::{
     Amount, BURN_COMMITTEE_SIZE, Block, BlockSelection, BurnCommitteeMember, BurnTicket,
-    FinalizerMode, LeaderProof, LeaderProofPayload, MINE_REWARD, OutPoint, PUBLIC_KEY_BYTES,
-    RECOVERY_BLOCK_DELAY_MS, SIGNATURE_BYTES, TxInput, TxOutput, decode_hex_array,
-    validate_address, validate_hash, validate_protocol_id, validate_signature,
+    FinalizerMode, LeaderProof, LeaderProofPayload, Ledger, MINE_REWARD, OutPoint,
+    PUBLIC_KEY_BYTES, RECOVERY_BLOCK_DELAY_MS, SIGNATURE_BYTES, TxInput, TxOutput,
+    decode_hex_array, validate_address, validate_hash, validate_protocol_id, validate_signature,
 };
+
+pub(super) fn compact_block_context(ledger: &Ledger) -> &CompactBlockContext {
+    &ledger.compact_block_context
+}
+
+impl Ledger {
+    pub(crate) fn consensus_block_size_bytes(&self, block: &Block) -> Result<usize> {
+        self.compact_block_context.block_size_bytes(block)
+    }
+}
 
 pub(super) fn validate_genesis_allocations(
     genesis_allocations: &BTreeMap<String, Amount>,
@@ -68,6 +80,7 @@ pub(super) fn validate_genesis_burn_transaction(transaction: &Transaction) -> Re
 }
 
 pub(super) fn estimated_block_selection_size_bytes(
+    context: &CompactBlockContext,
     selection: &BlockSelection,
     recovery: bool,
     burn_bundle_section: &BurnBundleSection,
@@ -95,18 +108,23 @@ pub(super) fn estimated_block_selection_size_bytes(
         transactions: selection.transactions.clone(),
         hash: "f".repeat(64),
     };
-    block.serialized_size_bytes()
+    context.block_size_bytes(&block)
 }
 
 pub(super) fn ensure_transaction_fits_empty_block(
+    context: &CompactBlockContext,
     transaction: &Transaction,
     max_block_bytes: usize,
 ) -> Result<()> {
     let selection = BlockSelection {
         transactions: vec![transaction.clone()],
     };
-    if estimated_block_selection_size_bytes(&selection, false, &BurnBundleSection::default())?
-        > max_block_bytes
+    if estimated_block_selection_size_bytes(
+        context,
+        &selection,
+        false,
+        &BurnBundleSection::default(),
+    )? > max_block_bytes
     {
         bail!("transaction exceeds max block size");
     }

@@ -180,6 +180,12 @@ with `docker compose down -v`, because consensus launch profiles cannot be
 changed in place. The five-slot committee is also a consensus reset: volumes
 created by the earlier three-slot protocol must likewise be recreated.
 
+The next release also introduces compact snapshot v6 and deliberately provides
+no old-chain migration. All nodes must participate in the coordinated network
+reset: preserve wallet/configuration files, remove or archive the old chain and
+UI databases, and create or join the new genesis. See the operator playbooks for
+non-Compose reset commands.
+
 Stop the network while keeping chain data:
 
 ```sh
@@ -204,7 +210,7 @@ Use your iuna wallet address as the worker username. Accepted shares become PoW 
 
 ## Operator Docs
 
-- [Genesis and candidate rehearsal](docs/genesis.md)
+- [Protocol](docs/protocol.md)
 - [Operator failure playbooks](docs/operator-playbooks.md)
 - [Security review checklist](docs/security-review.md)
 

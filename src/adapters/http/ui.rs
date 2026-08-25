@@ -208,7 +208,7 @@ pub(super) fn ui_block(
         .map(|bundle: &UiBurnBundle| bundle.byte_size)
         .sum::<usize>();
     let total_bytes = block
-        .serialized_size_bytes()
+        .json_size_bytes()
         .unwrap_or_else(|_| transaction_bytes.saturating_add(burn_bundle_bytes));
     UiBlock {
         height: block.height,

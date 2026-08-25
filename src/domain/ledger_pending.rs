@@ -5,7 +5,7 @@ use anyhow::{Context, Result, bail};
 use super::ledger_mempool::pending_pool_item_bytes;
 use super::ledger_ops::{
     apply_spendable_pending_transaction, apply_transaction, best_selectable_burn_from_index,
-    best_selectable_transaction_index, ensure_transaction_fits_empty_block,
+    best_selectable_transaction_index, compact_block_context, ensure_transaction_fits_empty_block,
     estimated_block_selection_size_bytes, transaction_has_missing_inputs,
     validate_transaction_inputs, validate_transaction_outputs,
 };
@@ -109,6 +109,7 @@ impl Ledger {
         required_burn_signature: Option<&str>,
         burn_bundle_section: &BurnBundleSection,
     ) -> Result<BlockSelection> {
+        let block_context = compact_block_context(self);
         let mut utxos = self.utxos.clone();
         let mut remaining = self.valid_pending_transactions();
         let mut selected = Vec::new();
@@ -135,13 +136,7 @@ impl Ledger {
         if let Some(index) = anchor_index {
             let tx = remaining.remove(index);
             let signature = tx.signature().to_string();
-            self.select_required_anchor_burn(
-                tx,
-                required_burn_owner,
-                burn_bundle_section,
-                &mut utxos,
-                &mut selected,
-            )?;
+            self.select_required_anchor_burn(tx, required_burn_owner, &mut utxos, &mut selected)?;
             if required_burn_signatures.contains(&signature) {
                 selected_required_burn_signatures.insert(signature);
             }
@@ -163,18 +158,6 @@ impl Ledger {
                 bail!("attested burns do not fit within the block transaction count limit");
             }
             let signature = tx.signature().to_string();
-            let mut candidate = BlockSelection {
-                transactions: selected.clone(),
-            };
-            candidate.transactions.push(tx.clone());
-            if estimated_block_selection_size_bytes(
-                &candidate,
-                required_burn_owner.is_some(),
-                burn_bundle_section,
-            )? > self.launch_profile.max_block_bytes
-            {
-                bail!("attested burns do not fit in the block");
-            }
             apply_transaction(&tx, &mut utxos).context("attested burn is not spendable")?;
             selected.push(tx);
             selected_required_burn_signatures.insert(signature);
@@ -187,6 +170,19 @@ impl Ledger {
             bail!("attested burn {missing} is not pending");
         }
 
+        let required_selection = BlockSelection {
+            transactions: selected.clone(),
+        };
+        if estimated_block_selection_size_bytes(
+            block_context,
+            &required_selection,
+            required_burn_owner.is_some(),
+            burn_bundle_section,
+        )? > self.launch_profile.max_block_bytes
+        {
+            bail!("required block content does not fit in the block");
+        }
+
         while selected.len() < self.launch_profile.max_block_transactions {
             let Some(index) = best_selectable_transaction_index(&remaining, &utxos, None) else {
                 break;
@@ -197,6 +193,7 @@ impl Ledger {
             };
             candidate.transactions.push(tx.clone());
             if estimated_block_selection_size_bytes(
+                block_context,
                 &candidate,
                 required_burn_owner.is_some(),
                 burn_bundle_section,
@@ -215,7 +212,6 @@ impl Ledger {
         &self,
         tx: Transaction,
         required_burn_owner: Option<&str>,
-        burn_bundle_section: &BurnBundleSection,
         utxos: &mut BTreeMap<OutPoint, TxOutput>,
         selected: &mut Vec<Transaction>,
     ) -> Result<()> {
@@ -229,18 +225,6 @@ impl Ledger {
         }
         if selected.len() >= self.launch_profile.max_block_transactions {
             bail!("required block anchor burn does not fit within the transaction count limit");
-        }
-        let mut candidate = BlockSelection {
-            transactions: selected.clone(),
-        };
-        candidate.transactions.push(tx.clone());
-        if estimated_block_selection_size_bytes(
-            &candidate,
-            required_burn_owner.is_some(),
-            burn_bundle_section,
-        )? > self.launch_profile.max_block_bytes
-        {
-            bail!("required block anchor burn does not fit in the block");
         }
         apply_transaction(&tx, utxos).context("required block anchor burn is not spendable")?;
         selected.push(tx);
@@ -312,7 +296,11 @@ impl Ledger {
 
     pub(super) fn validate_new_transaction(&self, transaction: &Transaction) -> Result<()> {
         self.validate_transaction_terms(transaction)?;
-        ensure_transaction_fits_empty_block(transaction, self.launch_profile.max_block_bytes)?;
+        ensure_transaction_fits_empty_block(
+            compact_block_context(self),
+            transaction,
+            self.launch_profile.max_block_bytes,
+        )?;
         self.validate_mine_anchor_available(transaction)?;
         let mut utxos = self.utxos_after_spendable_pending()?;
         apply_transaction(transaction, &mut utxos)

@@ -969,8 +969,8 @@ fn mini_block_verdict(ledger: &Ledger, block: &Block, now_ms: u64) -> MiniBlockV
     if block.transactions.len() > ledger.launch_profile.max_block_transactions {
         return MiniBlockVerdict::TooManyTransactions;
     }
-    if block
-        .serialized_size_bytes()
+    if ledger
+        .consensus_block_size_bytes(block)
         .ok()
         .is_none_or(|bytes| bytes > ledger.launch_profile.max_block_bytes)
     {
@@ -2454,8 +2454,10 @@ fn independent_mini_validator_matches_consensus_for_block_prechecks() {
     );
 
     let mut size_limited_ledger = ledger.clone();
-    size_limited_ledger.launch_profile.max_block_bytes =
-        block.serialized_size_bytes().unwrap().saturating_sub(1);
+    size_limited_ledger.launch_profile.max_block_bytes = ledger
+        .consensus_block_size_bytes(&block)
+        .unwrap()
+        .saturating_sub(1);
     assert_mini_validator_agrees(
         &size_limited_ledger,
         block.clone(),
@@ -4234,7 +4236,7 @@ fn performance_budget_block_validation_rejects_count_and_byte_overflow() {
         "block over transaction-count budget validated"
     );
 
-    let block_bytes = block.serialized_size_bytes().unwrap();
+    let block_bytes = harness.ledger.consensus_block_size_bytes(&block).unwrap();
     let mut byte_limited = harness.ledger.clone();
     byte_limited.launch_profile.max_block_bytes = block_bytes;
     byte_limited
@@ -4379,11 +4381,10 @@ fn blockspace_flood_stays_bounded_by_transaction_count_and_bytes() {
         block.transactions.len(),
         max_test_transactions
     );
+    let block_bytes = ledger.consensus_block_size_bytes(&block).unwrap();
     assert!(
-        block.serialized_size_bytes().unwrap() <= MAX_BLOCK_BYTES,
-        "block exceeded byte limit under flood: {} > {}",
-        block.serialized_size_bytes().unwrap(),
-        MAX_BLOCK_BYTES
+        block_bytes <= MAX_BLOCK_BYTES,
+        "block exceeded byte limit under flood: {block_bytes} > {MAX_BLOCK_BYTES}"
     );
 
     ledger

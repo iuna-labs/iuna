@@ -7,6 +7,7 @@ use super::{
     Amount, Block, BurnTicket, LaunchProfile, LineageOwnerValues, OutPoint, Transaction, TxOutput,
     UtxoLineageRoot,
 };
+use crate::compact::CompactBlockContext;
 
 #[derive(Clone, Debug)]
 pub struct Ledger {
@@ -25,6 +26,7 @@ pub struct Ledger {
     pub(super) initial_vdf_rounds: u64,
     pub(super) vdf_rounds: u64,
     pub(super) launch_profile: LaunchProfile,
+    pub(super) compact_block_context: CompactBlockContext,
 }
 
 pub(super) fn unix_now_ms() -> u64 {

@@ -7,10 +7,10 @@ use std::{
 use anyhow::{Context, Result};
 use rusqlite::{Connection, OptionalExtension, params};
 
-use crate::domain::ChainSnapshot;
-
-mod compact;
-use compact::{decode_compact_snapshot, encode_compact_snapshot};
+use crate::{
+    compact::{decode_compact_snapshot, encode_compact_snapshot},
+    domain::ChainSnapshot,
+};
 
 #[cfg(feature = "fuzzing")]
 pub fn fuzz_decode_compact_snapshot(bytes: &[u8]) -> Result<ChainSnapshot> {

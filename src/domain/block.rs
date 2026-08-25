@@ -106,10 +106,10 @@ impl Block {
         }
     }
 
-    pub fn serialized_size_bytes(&self) -> Result<usize> {
+    pub fn json_size_bytes(&self) -> Result<usize> {
         serde_json::to_vec(self)
             .map(|bytes| bytes.len())
-            .context("failed to serialize block for size check")
+            .context("failed to serialize block as JSON for size check")
     }
 
     pub fn required_burns(&self) -> Vec<&Transaction> {
@@ -377,7 +377,7 @@ mod tests {
     }
 
     #[test]
-    fn serialized_block_size_uses_canonical_node_representation() {
+    fn json_block_size_uses_canonical_node_representation() {
         let compact_wire_json = format!(
             r#"{{"height":1,"prev_hash":"{}","timestamp_ms":1,"miner":"{}","reward":0,"vdf_rounds":1,"vdf_output":"out","leader_proof":null,"transactions":[],"hash":"{}"}}"#,
             "0".repeat(64),
@@ -391,7 +391,7 @@ mod tests {
         assert_eq!(block.finalizer_mode, FinalizerMode::Ticket);
         assert_eq!(block.finalizer_rank, 0);
         assert_eq!(block.burn_bundle_section, BurnBundleSection::default());
-        assert_eq!(block.serialized_size_bytes().unwrap(), canonical_json_len);
+        assert_eq!(block.json_size_bytes().unwrap(), canonical_json_len);
         assert!(canonical_json_len > compact_wire_json.len());
     }
 }

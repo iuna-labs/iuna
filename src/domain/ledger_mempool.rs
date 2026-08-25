@@ -2,7 +2,8 @@ use anyhow::{Context, Result, bail};
 use serde::Serialize;
 
 use super::ledger_ops::{
-    apply_transaction, ensure_transaction_fits_empty_block, transaction_has_missing_inputs,
+    apply_transaction, compact_block_context, ensure_transaction_fits_empty_block,
+    transaction_has_missing_inputs,
 };
 use super::transaction::{Transaction, transaction_inputs_spent_by};
 use super::{
@@ -45,7 +46,11 @@ impl Ledger {
 
         transaction.verify_signature()?;
         self.validate_transaction_terms(&transaction)?;
-        ensure_transaction_fits_empty_block(&transaction, self.launch_profile.max_block_bytes)?;
+        ensure_transaction_fits_empty_block(
+            compact_block_context(self),
+            &transaction,
+            self.launch_profile.max_block_bytes,
+        )?;
         self.validate_mine_anchor_available(&transaction)?;
 
         if transaction_inputs_spent_by(&transaction, &self.pending) {

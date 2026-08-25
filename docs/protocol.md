@@ -21,7 +21,7 @@ The current mainnet-candidate parameter set is intentionally close to Bitcoin wh
 - launch profile ID: `iuna-mainnet-candidate`;
 - launch profile hash: `eb2f67e9d735474859ceb1fe124fe270977214f6e2f4cd855a4d8c3b5ecac558`;
 - target block time: `10 minutes`;
-- maximum serialized block size: `1,000,000` bytes;
+- maximum compact stored block-body size: `1,000,000` bytes;
 - maximum transaction items per block: `1,000`;
 - maximum pending transactions per node: `10,000`;
 - maximum pending transaction pool bytes per node: `8 MiB`;
@@ -49,7 +49,11 @@ Changing any value in this section requires a conscious mainnet-candidate reset 
 
 If the mainnet-candidate network is promoted to mainnet, the candidate genesis, chain history, UTXOs, tickets, and launch profile remain intact. A later P2P network ID change to `iuna-mainnet-v1` is only a peer-network cutover unless it is accompanied by an explicitly announced hard fork or reset.
 
-Block size is checked from the node's canonical serialized block representation after parsing, so alternate JSON whitespace or key order cannot make a block count smaller. Transaction selection and fee-rate policy use compact economic transaction size: addresses, hashes, signatures, and Stratum headers count as their decoded byte lengths, and numeric fields count as compact base-128 varint widths. That keeps hex text and JSON decimal formatting from making transactions look larger or smaller economically than their protocol data.
+The consensus block-size limit is the exact number of bytes produced by the compact snapshot v6 block-body encoder when the block is appended to its parent chain. The encoder's reference tables are seeded by genesis allocations and extended in chain order, so all nodes calculate the same context-dependent size. The snapshot header, launch profile, block-count field, SQLite row metadata, and SQLite page overhead are not charged to an individual block.
+
+The compact representation stores binary hashes, addresses, signatures, and VDF data instead of their hexadecimal text. It uses base-128 varints for integers, chain-wide references for repeated addresses and protocol IDs, a single shared owner and signature for transaction inputs, implicit burn change where possible, and transaction indexes for burns repeated by the burn-bundle section. Heights, parent hashes, and block hashes are reconstructed from chain order and canonical block contents rather than repeated in each stored block body. Burns benefit most from this layout, followed by transfers and mine actions.
+
+P2P messages and management API responses still use JSON. Their byte length is not the consensus block size. Transaction fee-rate ordering uses a separate compact economic transaction weight, so changing JSON whitespace, key order, or hexadecimal formatting cannot change consensus size or fee priority.
 
 ## Coins and Transactions
 
@@ -308,7 +312,7 @@ When a node builds a block, the flow is:
 5. Fill remaining block space with valid fee-paying transfers, additional burns, and mine actions ordered by fee rate. Mine actions are limited to `2` actions per anchor.
 6. Bind the VDF seed to the five burn-attestation slot hashes, using default hashes for missing slots. Slot `0` uses the synthetic finalizer attestation hash instead of a separate burn-bundle signature.
 
-Blocks are bounded by transaction count and serialized byte size. The mainnet-candidate maximum block size is `1,000,000` bytes.
+Blocks are bounded by transaction count and exact compact stored block-body size. The mainnet-candidate maximum is `1,000,000` bytes. Block admission checks the finished block with the parent chain's compact reference context. Block construction uses the same encoder while reserving mandatory anchor and attested burns before filling the remaining space.
 
 ## Fork Choice
 
@@ -323,6 +327,12 @@ Within that finality window, a taller valid candidate chain wins over the local 
 Genesis is explicit. A normal node without a chain starts in setup mode and waits to join an existing chain from peers rather than silently creating a separate chain.
 
 The genesis flow bootstraps the mainnet-candidate network with an initial burn ticket and a fixed `1 IUNA` initial reward for the genesis wallet. New nodes fetch and validate chain snapshots from peers, then continue with normal block validation.
+
+## Local Chain Persistence And Reset Boundary
+
+The local `chain.sqlite3` database stores one atomically replaced compact snapshot blob plus independently checked tip height and tip hash metadata. Snapshot format v6 is the only accepted local format in the next release; older compact snapshot versions are deliberately not decoded or migrated.
+
+This persistence change is paired with a coordinated network reset. Every node must start the next release without its previous chain and UI databases, then either create the agreed new genesis or join a trusted peer on that new chain. Wallet and configuration files are not chain state and should be retained. Detailed recovery and reset commands are in [Operator Failure Playbooks](operator-playbooks.md).
 
 ## What This Design Is Trying to Achieve
 

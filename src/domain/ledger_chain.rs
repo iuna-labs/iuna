@@ -2,6 +2,8 @@ use std::collections::{BTreeMap, BTreeSet};
 
 use anyhow::{Result, bail};
 
+use crate::compact::CompactBlockContext;
+
 use super::fork::{ForkChoice, ForkPoint, ForkQuality};
 use super::genesis::{build_genesis_block, utxos_after_genesis, validate_genesis_block};
 use super::ledger_ops::validate_genesis_allocations;
@@ -69,6 +71,11 @@ impl Ledger {
         let genesis = build_genesis_block(&genesis_allocations, genesis_transactions);
         let utxos = utxos_after_genesis(&genesis_allocations, &genesis)?;
         let tickets = genesis_tickets(&genesis_allocations, &genesis, &launch_profile)?;
+        let compact_block_context = if genesis_allocations.is_empty() {
+            CompactBlockContext::default()
+        } else {
+            CompactBlockContext::for_chain(&genesis_allocations, std::slice::from_ref(&genesis))?
+        };
         Ok(Self {
             chain: vec![genesis],
             genesis_allocations: genesis_allocations.clone(),
@@ -85,6 +92,7 @@ impl Ledger {
             initial_vdf_rounds: vdf_rounds,
             vdf_rounds,
             launch_profile,
+            compact_block_context,
         })
     }
 
@@ -129,6 +137,8 @@ impl Ledger {
             bail!("chain snapshot genesis does not match its allocations and transactions");
         }
         let utxos = utxos_after_genesis(&genesis_allocations, &genesis)?;
+        let compact_block_context =
+            CompactBlockContext::for_chain(&genesis_allocations, std::slice::from_ref(&genesis))?;
 
         let mut ledger = Self {
             chain: vec![genesis],
@@ -146,6 +156,7 @@ impl Ledger {
             initial_vdf_rounds: vdf_rounds,
             vdf_rounds,
             launch_profile,
+            compact_block_context,
         };
         ledger.tickets = genesis_tickets(
             &ledger.genesis_allocations,

@@ -102,6 +102,7 @@ impl Ledger {
         apply_finalizer_ticket_effects(self.tip(), &block, &mut tickets)?;
         tickets.extend(tickets_created_by_block(&block, &self.launch_profile)?);
         credit_reward_outputs(&mut utxos, &block, &reward_committee)?;
+        self.compact_block_context.append_block(&block)?;
         self.utxos = utxos;
         self.utxo_lineage = utxo_lineage;
         self.lineage_values = lineage_values;
@@ -190,7 +191,7 @@ impl Ledger {
         if block.transactions.len() > self.launch_profile.max_block_transactions {
             bail!("block has too many transactions");
         }
-        if block.serialized_size_bytes()? > self.launch_profile.max_block_bytes {
+        if self.consensus_block_size_bytes(block)? > self.launch_profile.max_block_bytes {
             bail!("block exceeds max block size");
         }
         ensure_mine_anchor_limit(block.height, &block.transactions)?;

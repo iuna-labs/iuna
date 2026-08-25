@@ -117,6 +117,35 @@ Avoid:
 - deleting the chain database before capturing the startup error;
 - using `--genesis` to recover an old node. `--genesis` is only for creating a fresh network.
 
+## Coordinated Snapshot V6 Reset
+
+The next release accepts compact local snapshot format v6 only and does not migrate earlier chain history. This is a planned consensus/network reset, not a corrupted-database incident. All operators must agree on the release, genesis, network identity, bootnodes, and start time before bringing public nodes back online.
+
+Before upgrading:
+
+1. Stop the node and preserve `chain.sqlite3` if it is needed as historical evidence.
+2. Keep `wallet.json` and `config.json`; verify that their backups are readable.
+3. Archive or remove only `chain.sqlite3` and `ui_data.sqlite3` from the node's configured data directory.
+4. Start exactly one designated node with `--genesis`, record its genesis hash, and publish that hash with the release commit and checksums.
+5. Start every other node without `--genesis` and join a trusted published bootnode.
+
+Example for a default data directory, retaining the old databases as evidence:
+
+```sh
+mv ~/.iuna/chain.sqlite3 ~/.iuna/chain.sqlite3.pre-v6 2>/dev/null || true
+mv ~/.iuna/ui_data.sqlite3 ~/.iuna/ui_data.sqlite3.pre-v6 2>/dev/null || true
+iuna --join <trusted-peer-addr:port>
+```
+
+For the disposable Compose testnet, `docker compose down -v` removes all volumes and the configured bootstrap creates the fresh genesis on the next start.
+
+Avoid:
+
+- running multiple independent `--genesis` nodes;
+- copying an old snapshot blob into a v6 database;
+- deleting or replacing wallets as part of the chain reset;
+- starting before the published genesis hash and release checksum are available.
+
 ## No Burn Committee Signatures
 
 Symptoms:
