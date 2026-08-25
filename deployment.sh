@@ -4,8 +4,9 @@ set -euo pipefail
 cd "$(dirname "${BASH_SOURCE[0]}")"
 
 usage() {
-  echo "Usage: $0 <version>" >&2
+  echo "Usage: $0 [--genesis] <version>" >&2
   echo "Example: $0 0.2.48" >&2
+  echo "         $0 --genesis 0.4.0" >&2
 }
 
 die() {
@@ -379,15 +380,19 @@ import_image_to_k3s() {
 render_manifest() {
   local www_image="$1"
   local node_image="$2"
-  local output="$3"
+  local node_pvc="$3"
+  local genesis="$4"
+  local output="$5"
   local local_allowlist_file="config/admin-ip-allowlist.local"
   local allowlist_entry
   local allowlist_entry_count=0
   local escaped_www_image
   local escaped_node_image
+  local escaped_node_pvc
 
   escaped_www_image="$(escape_sed_replacement "$www_image")"
   escaped_node_image="$(escape_sed_replacement "$node_image")"
+  escaped_node_pvc="$(escape_sed_replacement "$node_pvc")"
 
   [ -f "$local_allowlist_file" ] || die "missing local admin allowlist: ${local_allowlist_file}"
   while IFS= read -r allowlist_entry || [ -n "$allowlist_entry" ]; do
@@ -403,7 +408,14 @@ render_manifest() {
   sed \
     -e "s|\${IUNA_WWW_IMAGE}|${escaped_www_image}|g" \
     -e "s|\${IUNA_NODE_IMAGE}|${escaped_node_image}|g" \
-    config/deployment.yml | awk -v local_allowlist_file="$local_allowlist_file" '
+    -e "s|\${IUNA_NODE_PVC}|${escaped_node_pvc}|g" \
+    config/deployment.yml | awk \
+      -v local_allowlist_file="$local_allowlist_file" \
+      -v genesis="$genesis" '
+      $0 == "${IUNA_NODE_GENESIS_ARG}" {
+        if (genesis == "true") print "            - --genesis"
+        next
+      }
       $0 == "${IUNA_ADMIN_IP_ALLOWLIST_LOCAL}" {
         while ((getline entry < local_allowlist_file) > 0) {
           sub(/#.*/, "", entry)
@@ -417,21 +429,50 @@ render_manifest() {
     ' > "$output"
 }
 
+genesis_pvc_name() {
+  local version="$1"
+  printf 'local-path-db-pvc-v%s' "${version//./-}"
+}
+
+ensure_genesis_pvc_is_new() {
+  local version="$1"
+  local kubectl_context="${IUNA_KUBECTL_CONTEXT:-jhx-app}"
+  local node_pvc
+  local existing_pvc
+
+  require_command kubectl
+  node_pvc="$(genesis_pvc_name "$version")"
+  existing_pvc="$(kubectl --context "$kubectl_context" -n iuna get pvc "$node_pvc" --ignore-not-found -o name)" || \
+    die "could not check whether genesis PVC ${node_pvc} exists"
+  [ -z "$existing_pvc" ] || die "genesis PVC ${node_pvc} already exists; refusing to reuse it"
+}
+
 deploy_docker_image() {
   local version="$1"
+  local genesis="$2"
   local www_image="${IUNA_WWW_IMAGE:-iuna-www:v${version}}"
   local node_image="${IUNA_NODE_IMAGE:-iuna-node:v${version}}"
+  local node_pvc
   local kubectl_context="${IUNA_KUBECTL_CONTEXT:-jhx-app}"
   local tmp_folder
 
   require_command kubectl
 
+  node_pvc="$(kubectl --context "$kubectl_context" -n iuna get deployment node --ignore-not-found -o jsonpath='{.spec.template.spec.volumes[?(@.name=="data")].persistentVolumeClaim.claimName}')" || \
+    die "could not determine the PVC used by the current node deployment"
+  node_pvc="${node_pvc:-local-path-db-pvc}"
+
   tmp_folder="$(mktemp -d)"
   trap 'rm -rf "$tmp_folder"' RETURN
 
+  if [ "$genesis" = "true" ]; then
+    node_pvc="$(genesis_pvc_name "$version")"
+    ensure_genesis_pvc_is_new "$version"
+  fi
+
   import_image_to_k3s "$www_image" "$tmp_folder"
   import_image_to_k3s "$node_image" "$tmp_folder"
-  render_manifest "$www_image" "$node_image" "${tmp_folder}/deployment.yml"
+  render_manifest "$www_image" "$node_image" "$node_pvc" "$genesis" "${tmp_folder}/deployment.yml"
 
   local current_www_selector
   current_www_selector="$(kubectl --context "$kubectl_context" -n iuna get deployment www -o jsonpath='{.spec.selector.matchLabels.app}' 2>/dev/null || true)"
@@ -443,28 +484,63 @@ deploy_docker_image() {
   kubectl --context "$kubectl_context" -n iuna rollout restart deployment/www deployment/node
   kubectl --context "$kubectl_context" -n iuna rollout status deployment/www
   kubectl --context "$kubectl_context" -n iuna rollout status deployment/node
+
+  if [ "$genesis" = "true" ]; then
+    echo "Genesis is gestart; --genesis wordt nu verwijderd voor volgende pod-starts"
+    render_manifest "$www_image" "$node_image" "$node_pvc" false "${tmp_folder}/deployment.yml"
+    kubectl --context "$kubectl_context" apply -f "${tmp_folder}/deployment.yml"
+    kubectl --context "$kubectl_context" -n iuna rollout status deployment/node
+  fi
 }
 
 main() {
-  [ "$#" -eq 1 ] || { usage; exit 2; }
+  local genesis=false
+  local version=""
 
-  local version="${1#v}"
+  while [ "$#" -gt 0 ]; do
+    case "$1" in
+      --genesis)
+        [ "$genesis" = "false" ] || die "--genesis may only be specified once"
+        genesis=true
+        ;;
+      -*)
+        die "unknown option: $1"
+        ;;
+      *)
+        [ -z "$version" ] || { usage; exit 2; }
+        version="${1#v}"
+        ;;
+    esac
+    shift
+  done
+
+  [ -n "$version" ] || { usage; exit 2; }
   [[ "$version" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]] || die "version must look like 0.2.48"
 
   ensure_clean_worktree
+
+  if [ "$genesis" = "true" ]; then
+    echo "LET OP: dit start een nieuwe chain met --genesis en een nieuwe PVC."
+    echo "De bestaande chain en PVC blijven bewaard, maar de node schakelt over naar local-path-db-pvc-v${version//./-}."
+    if ! confirm "Weet je het zeker? (Y/N) "; then
+      echo "Deployment afgebroken"
+      exit 1
+    fi
+    ensure_genesis_pvc_is_new "$version"
+  fi
 
   # Check if the tag already exists; if it does, only deploy
   if git rev-parse --verify "v${version}" >/dev/null 2>&1; then
     ensure_head_matches_tag "v${version}"
     echo "Tag v${version} already exists; rebuilding Docker images and deploying"
-    if ! confirm "Are you sure you want to deploy v${version}? (y/N) "; then
+    if [ "$genesis" != "true" ] && ! confirm "Are you sure you want to deploy v${version}? (y/N) "; then
       echo "Aborting deployment"
       exit 1
     fi
     run_release_tests
     build_linux_cli_archives "$version"
     build_docker_image "$version"
-    deploy_docker_image "$version"
+    deploy_docker_image "$version" "$genesis"
     exit 0
   fi
 
@@ -473,7 +549,9 @@ main() {
   build_versions "$version"
   commit_and_tag "$version"
   build_docker_image "$version"
-  deploy_docker_image "$version"
+  deploy_docker_image "$version" "$genesis"
 }
 
-main "$@"
+if [[ "${BASH_SOURCE[0]}" == "$0" ]]; then
+  main "$@"
+fi

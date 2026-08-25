@@ -68,6 +68,14 @@ Release and deploy with:
 ./deployment.sh 0.2.48
 ```
 
+To start a new chain, deploy with `--genesis`. This asks for confirmation,
+starts the node with `--genesis`, and switches it to a new version-specific PVC;
+the existing PVC is retained:
+
+```sh
+./deployment.sh --genesis 0.4.0
+```
+
 Deployment publishes two images to the `jhx-app` k3s cluster:
 
 - `https://getiuna.org/` routes to the static website image.

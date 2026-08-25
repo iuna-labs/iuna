@@ -6,7 +6,7 @@ metadata:
 apiVersion: v1
 kind: PersistentVolumeClaim
 metadata:
-  name: local-path-db-pvc
+  name: ${IUNA_NODE_PVC}
   namespace: iuna
 spec:
   accessModes:
@@ -153,6 +153,9 @@ metadata:
   namespace: iuna
 spec:
   replicas: 1
+  strategy:
+    type: Recreate
+    rollingUpdate: null
   selector:
     matchLabels:
       app: iuna-node
@@ -165,6 +168,16 @@ spec:
         - name: iuna-node
           image: ${IUNA_NODE_IMAGE}
           imagePullPolicy: IfNotPresent
+          args:
+${IUNA_NODE_GENESIS_ARG}
+            - --data-dir
+            - /data
+            - --http
+            - 0.0.0.0:18661
+            - --p2p
+            - 0.0.0.0:9444
+            - --p2p-announce
+            - 142.132.164.59:9444
           ports:
             - name: management
               containerPort: 18661
@@ -176,7 +189,7 @@ spec:
       volumes:
         - name: data
           persistentVolumeClaim:
-            claimName: local-path-db-pvc
+            claimName: ${IUNA_NODE_PVC}
 ---
 apiVersion: v1
 kind: Service
