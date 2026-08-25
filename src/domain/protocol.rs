@@ -73,5 +73,9 @@ mod tests {
         assert_eq!(PUBLIC_KEY_BYTES, 32);
         assert_eq!(HASH_BYTES, 32);
         assert_eq!(SIGNATURE_BYTES, 64);
+        assert_eq!(
+            crate::domain::ticket::MISSED_FALLBACK_TICKET_INVALIDATION_HEIGHT,
+            300
+        );
     }
 }

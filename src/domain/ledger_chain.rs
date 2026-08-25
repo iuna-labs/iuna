@@ -247,8 +247,7 @@ impl Ledger {
             return ForkChoice::KeepLocal;
         }
 
-        let finalized_floor = local_height.saturating_sub(super::FORK_FINALITY_DEPTH);
-        if fork_point.common_ancestor_height < finalized_floor {
+        if fork_rewrites_finalized_history(local_height, fork_point.common_ancestor_height) {
             return ForkChoice::KeepLocal;
         }
 
@@ -307,5 +306,24 @@ impl Ledger {
         }
 
         *self = candidate;
+    }
+}
+
+fn fork_rewrites_finalized_history(local_height: u64, common_ancestor_height: u64) -> bool {
+    let finalized_floor = local_height.saturating_sub(super::FORK_FINALITY_DEPTH);
+    common_ancestor_height < finalized_floor
+}
+
+#[cfg(test)]
+mod tests {
+    use super::fork_rewrites_finalized_history;
+    use crate::domain::FORK_FINALITY_DEPTH;
+
+    #[test]
+    fn forks_may_rewrite_six_blocks_but_not_seven() {
+        assert_eq!(FORK_FINALITY_DEPTH, 6);
+        assert!(!fork_rewrites_finalized_history(100, 94));
+        assert!(fork_rewrites_finalized_history(100, 93));
+        assert!(!fork_rewrites_finalized_history(5, 0));
     }
 }

@@ -106,4 +106,37 @@ mod tests {
         assert_eq!(retarget_mine_difficulty_bits(33, 20), 34);
         assert_eq!(retarget_mine_difficulty_bits(40, 10), 40);
     }
+
+    #[test]
+    fn pow_retarget_parameters_and_action_targets_match_the_protocol() {
+        assert_eq!(MINE_RETARGET_WINDOW_BLOCKS, 10);
+        assert_eq!(MINE_TARGET_ACTIONS_PER_BLOCK, 1);
+        assert_eq!(MINE_MAX_RETARGET_STEP_BITS, 2);
+        assert_eq!(MINE_MIN_DIFFICULTY_BITS, 10);
+        assert_eq!(MINE_MAX_ANCHOR_AGE_BLOCKS, 10);
+
+        assert_eq!(retarget_mine_difficulty_bits(12, 0), 10);
+        assert_eq!(retarget_mine_difficulty_bits(12, 5), 11);
+        assert_eq!(retarget_mine_difficulty_bits(12, 9), 12);
+        assert_eq!(retarget_mine_difficulty_bits(12, 10), 12);
+        assert_eq!(retarget_mine_difficulty_bits(12, 20), 13);
+        assert_eq!(retarget_mine_difficulty_bits(12, 40), 14);
+        assert_eq!(retarget_mine_difficulty_bits(12, 1_000), 14);
+    }
+
+    #[test]
+    fn block_rejects_a_third_mine_action_for_the_same_anchor() {
+        let mine = |signature: &str| Transaction::Mine {
+            recipient: "recipient".to_string(),
+            anchor: "a".repeat(64),
+            salt: 1,
+            nonce: 1,
+            difficulty_bits: 10,
+            proof_header: None,
+            signature: signature.repeat(64),
+        };
+
+        assert!(ensure_mine_anchor_limit(1, &[mine("1"), mine("2")]).is_ok());
+        assert!(ensure_mine_anchor_limit(1, &[mine("1"), mine("2"), mine("3")]).is_err());
+    }
 }

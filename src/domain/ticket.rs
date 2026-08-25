@@ -328,3 +328,199 @@ pub(super) fn mine_action_count(block: &Block) -> u64 {
         .filter(|transaction| matches!(transaction, Transaction::Mine { .. }))
         .count() as u64
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::domain::{BurnBundleSection, LeaderProof, TxInput};
+
+    fn parent(height: u64) -> Block {
+        Block {
+            height,
+            prev_hash: "0".repeat(64),
+            timestamp_ms: 1_000,
+            miner: "parent".to_string(),
+            finalizer_mode: FinalizerMode::Ticket,
+            finalizer_rank: 0,
+            reward: 0,
+            vdf_rounds: 100,
+            vdf_output: "parent-vdf-output".to_string(),
+            leader_proof: None,
+            burn_bundle_section: BurnBundleSection::default(),
+            transactions: Vec::new(),
+            hash: "1".repeat(64),
+        }
+    }
+
+    fn ticket(id: char, owner: &str, from: u64, until: u64) -> BurnTicket {
+        BurnTicket {
+            id: id.to_string().repeat(64),
+            owner: owner.to_string(),
+            amount: 1,
+            eligible_from_height: from,
+            eligible_until_height: until,
+        }
+    }
+
+    fn ticket_block(parent: &Block, height: u64, rank: u32, selected: &BurnTicket) -> Block {
+        Block {
+            height,
+            prev_hash: parent.hash.clone(),
+            timestamp_ms: ticket_block_min_timestamp(parent, rank).unwrap(),
+            miner: selected.owner.clone(),
+            finalizer_mode: FinalizerMode::Ticket,
+            finalizer_rank: rank,
+            reward: 0,
+            vdf_rounds: vdf_rounds_for_finalizer_rank(100, rank).unwrap(),
+            vdf_output: "child-vdf-output".to_string(),
+            leader_proof: Some(LeaderProof {
+                ticket_id: selected.id.clone(),
+                public_key: selected.owner.clone(),
+                signature: "2".repeat(128),
+            }),
+            burn_bundle_section: BurnBundleSection::default(),
+            transactions: Vec::new(),
+            hash: "3".repeat(64),
+        }
+    }
+
+    #[test]
+    fn burns_create_tickets_after_three_blocks_for_three_heights() {
+        let burn = Transaction::Burn {
+            inputs: vec![TxInput {
+                outpoint: super::super::OutPoint {
+                    txid: "a".repeat(64),
+                    index: 0,
+                },
+                owner: "burner".to_string(),
+                signature: "b".repeat(128),
+            }],
+            change: Vec::new(),
+            amount: 42,
+            fee: 1,
+            signature: "b".repeat(128),
+        };
+
+        let tickets =
+            tickets_created_by_transactions(10, &[burn], &LaunchProfile::default()).unwrap();
+
+        assert_eq!(tickets.len(), 1);
+        assert_eq!(tickets[0].amount, 42);
+        assert_eq!(tickets[0].eligible_from_height, 13);
+        assert_eq!(tickets[0].eligible_until_height, 15);
+    }
+
+    #[test]
+    fn ticket_draw_has_a_fixed_parent_vdf_height_rank_and_weight_vector() {
+        let parent = parent(41);
+        let tickets = vec![
+            BurnTicket {
+                amount: 2,
+                ..ticket('a', "alice", 42, 42)
+            },
+            BurnTicket {
+                amount: 3,
+                ..ticket('b', "bob", 42, 42)
+            },
+            BurnTicket {
+                amount: 5,
+                ..ticket('c', "carol", 42, 42)
+            },
+        ];
+
+        let ranked = ranked_tickets_for_height(&parent, 42, &tickets)
+            .into_iter()
+            .map(|ticket| ticket.id)
+            .collect::<Vec<_>>();
+
+        assert_eq!(ranked, vec!["c".repeat(64), "a".repeat(64), "b".repeat(64)]);
+    }
+
+    #[test]
+    fn fallback_consumes_missed_owners_current_tickets_but_keeps_future_tickets() {
+        assert_eq!(MISSED_FALLBACK_TICKET_INVALIDATION_HEIGHT, 300);
+        let parent = parent(299);
+        let mut tickets = vec![
+            ticket('a', "alice", 300, 302),
+            ticket('b', "bob", 300, 302),
+            ticket('c', "carol", 300, 302),
+            ticket('d', "alice", 300, 302),
+            ticket('e', "bob", 301, 303),
+        ];
+        let ranked = ranked_tickets_for_height(&parent, 300, &tickets);
+        let selected = ranked[1].clone();
+        let missed_owner = ranked[0].owner.clone();
+        let selected_owner = selected.owner.clone();
+        let block = ticket_block(&parent, 300, 1, &selected);
+
+        consume_leader_ticket(&parent, &block, &mut tickets).unwrap();
+
+        assert!(tickets.iter().all(|ticket| {
+            ticket.eligible_from_height > 300
+                || (ticket.owner != missed_owner && ticket.owner != selected_owner)
+        }));
+        assert!(
+            tickets.iter().any(|ticket| ticket.id == "e".repeat(64)),
+            "future tickets must remain pending"
+        );
+    }
+
+    #[test]
+    fn fallback_before_activation_consumes_only_the_finalizing_ticket() {
+        let parent = parent(MISSED_FALLBACK_TICKET_INVALIDATION_HEIGHT - 2);
+        let height = MISSED_FALLBACK_TICKET_INVALIDATION_HEIGHT - 1;
+        let mut tickets = vec![
+            ticket('a', "alice", height, height + 2),
+            ticket('b', "bob", height, height + 2),
+            ticket('c', "alice", height, height + 2),
+        ];
+        let ranked = ranked_tickets_for_height(&parent, height, &tickets);
+        let missed_ticket_id = ranked[0].id.clone();
+        let selected = ranked[1].clone();
+        let block = ticket_block(&parent, height, 1, &selected);
+
+        consume_leader_ticket(&parent, &block, &mut tickets).unwrap();
+
+        assert_eq!(tickets.len(), 2);
+        assert!(tickets.iter().all(|ticket| ticket.id != selected.id));
+        assert!(
+            tickets.iter().any(|ticket| ticket.id == missed_ticket_id),
+            "the missed rank-0 ticket must survive before activation"
+        );
+    }
+
+    #[test]
+    fn rank_zero_consumes_only_its_winning_ticket() {
+        let parent = parent(300);
+        let mut tickets = vec![
+            ticket('a', "alice", 301, 303),
+            ticket('b', "alice", 301, 303),
+            ticket('c', "bob", 301, 303),
+        ];
+        let selected = ranked_tickets_for_height(&parent, 301, &tickets)[0].clone();
+        let block = ticket_block(&parent, 301, 0, &selected);
+
+        consume_leader_ticket(&parent, &block, &mut tickets).unwrap();
+
+        assert_eq!(tickets.len(), 2);
+        assert!(tickets.iter().all(|ticket| ticket.id != selected.id));
+    }
+
+    #[test]
+    fn fallback_vdf_rounds_and_time_slots_scale_with_rank() {
+        let parent = parent(10);
+
+        assert_eq!(vdf_rounds_for_finalizer_rank(100, 0).unwrap(), 100);
+        assert_eq!(vdf_rounds_for_finalizer_rank(100, 1).unwrap(), 200);
+        assert_eq!(vdf_rounds_for_finalizer_rank(100, 2).unwrap(), 300);
+        assert_eq!(ticket_block_min_timestamp(&parent, 0).unwrap(), 1_001);
+        assert_eq!(
+            ticket_block_min_timestamp(&parent, 1).unwrap(),
+            1_000 + 2 * VDF_TARGET_BLOCK_MS
+        );
+        assert_eq!(
+            ticket_block_min_timestamp(&parent, 2).unwrap(),
+            1_000 + 4 * VDF_TARGET_BLOCK_MS
+        );
+    }
+}

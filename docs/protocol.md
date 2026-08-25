@@ -42,7 +42,8 @@ The current mainnet-candidate parameter set is intentionally close to Bitcoin wh
 - maximum mine actions per anchor: `2`;
 - burn committee size: `5` slots;
 - maximum signed burn bundle size: `10,000` bytes;
-- burn committee lineage maturity: `20` blocks.
+- burn committee lineage maturity: `20` blocks;
+- fallback ticket invalidation activation height: `300`.
 
 Changing any value in this section requires a conscious mainnet-candidate reset or later hard-fork process.
 
@@ -82,7 +83,7 @@ For each block height, eligible tickets are ranked:
 
 The selected finalizer must prove ownership of the selected ticket, respect its rank time slot, and run the required VDF work. A block is valid only if the finalizer matches its ranked ticket, carries the correct leader proof, has a valid timestamp for its rank, includes a valid VDF output, and follows the transaction selection rules.
 
-Fallback finalization invalidates missed ticket opportunities. If a ticket block is finalized by rank `1` or higher, nodes invalidate all tickets ranked from `0` through the finalizing rank for that height. They also invalidate any other currently eligible tickets owned by those same addresses. Future tickets from those addresses that are not yet eligible remain pending. Rank `0` ticket blocks continue to consume only the winning ticket.
+From height `300`, fallback finalization invalidates missed ticket opportunities. If a ticket block is finalized by rank `1` or higher, nodes invalidate all tickets ranked from `0` through the finalizing rank for that height. They also invalidate any other currently eligible tickets owned by those same addresses. Future tickets from those addresses that are not yet eligible remain pending. Rank `0` ticket blocks continue to consume only the winning ticket. Earlier candidate history keeps the legacy behavior of consuming only the finalizing ticket.
 
 Every normal block must include at least one burn. This keeps the future ticket pool alive even during quiet periods. A node that may finalize prepares a local anchor burn for the next block from the finalizer wallet, and that anchor burn appears directly in the block.
 
@@ -201,7 +202,7 @@ Splitting one large root across many addresses does not multiply committee influ
 
 The lineage weight is logarithmic. A larger root has more chance to be selected, but doubling value does not double influence forever. This keeps committee selection from becoming a simple rich-get-richer vote while still giving larger, older mined lineages some weight.
 
-For a target height, validators derive a deterministic committee seed from the parent hash and height. Slot `0` is assigned to the actual block finalizer. Every ticket rank can derive up to four additional slots, while the rank-dependent quorum determines how many attestations are required. Lower-ranked ticket owners that missed their slot are skipped for fallback committee selection. Extra slots are assigned without replacement by weighted deterministic draws over eligible lineage roots using `root_weight`.
+For a target height and committee slot, validators derive a deterministic committee seed from the parent hash, parent VDF output, target height, and slot number. Slot `0` is assigned to the actual block finalizer. Every ticket rank can derive up to four additional slots, while the rank-dependent quorum determines how many attestations are required. Lower-ranked ticket owners that missed their slot are skipped for fallback committee selection. Extra slots are assigned without replacement by weighted deterministic draws over eligible lineage roots using `root_weight`.
 
 After a lineage root wins, validators deterministically choose one representative from the owners of unspent outputs tagged with that root. The representative must own a valid ticket for the target height. Non-ticket owners cannot sign for the group, even when they hold the root's largest output. The finalizer, missed fallback owners, and addresses already selected for an earlier slot are skipped. If no eligible ticket-owning representative remains for a root, that root cannot provide a committee slot.
 
@@ -243,7 +244,7 @@ Validators reconstruct each signed committee bundle from this compact section be
 
 Block validity is not allowed to depend on a validator's local mempool. Validators decide the required burn-list threshold from deterministic chain and block data only. Pending burns can affect local relay, bundle-signing, and block-building policy, but they cannot make the same block valid on one node and invalid on another.
 
-A block may contain at most one bundle per slot. If a block includes one valid bundle for a slot, validators check that included bundle and do not need to know whether another bundle for the same slot existed elsewhere. If a block builder sees two different signed bundles for the same height and slot before block assembly, it ignores that slot's bundles for the round as local safety policy. The current protocol does not have a separate slashing rule for this.
+A block may contain at most one bundle per slot. If a block includes one valid bundle for a slot, validators check that included bundle and do not need to know whether another bundle for the same slot existed elsewhere. If a block builder sees the same assigned member sign two different bundles for the same height, parent, and slot before block assembly, it ignores that member's bundles for the round as local safety policy. Different ticket ranks can assign different members to the same slot, so those bundles do not conflict. The current protocol does not have a separate slashing rule for this.
 
 Ticket blocks need a rank-dependent threshold of burn-list attestations. Rank `0` has the strictest rule because it is the preferred path. Missed lower-rank ticket owners are excluded from fallback committees, but each rank can still select up to five committee members from the remaining eligible owners.
 
@@ -267,7 +268,7 @@ Recovery blocks additionally bind the block timestamp into the VDF seed:
 
 The burn-list attestation hashes are part of the VDF seed. This forces the finalizer to choose the included burn-attestation set before doing the delay work. After the VDF is computed, changing that attestation set changes the seed and invalidates the work.
 
-Slot `0` uses a synthetic finalizer attestation hash derived from the parent, height, finalizer address, and the block's canonical deduplicated required burn list. Slots `1` and `2` use the signed burn-bundle hash or the fixed default hash when absent.
+Slot `0` uses a synthetic finalizer attestation hash derived from the parent, height, finalizer address, and the block's canonical deduplicated required burn list. Slots `1` through `4` use the signed burn-bundle hash or the fixed default hash when absent.
 
 For recovery blocks, missing burn-list attestations use the fixed default hashes. A recovery block may include available burn bundles, but it does not need burn bundles in order to be valid.
 
@@ -294,7 +295,7 @@ When a ticket finalizer is collecting burn-bundle attestations and has fewer sig
 rank requires, it may request the missing slots. Peers answer from their local cache with matching
 signed burn bundles for that height, parent hash, and slot set.
 
-Nodes only keep transactions in their local mempool when they are valid, fee-paying, and unexpired. Pending transaction, burn-bundle, and orphan pools are bounded by both item count and serialized byte size.
+Nodes only keep transactions in their local mempool when they are valid, fee-paying, and unexpired. Pending and orphan transaction pools are bounded by both item count and serialized byte size. A signed burn bundle is limited to `10,000` bytes, and nodes only cache valid bundles for the next height and current parent.
 
 ## Block Selection
 

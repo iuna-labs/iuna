@@ -34,7 +34,8 @@ pub(super) struct LineageCommitteeCandidate {
 }
 
 pub(super) fn lineage_committee_weight(value: Amount) -> u64 {
-    u64::BITS as u64 - value.saturating_add(1).leading_zeros() as u64 - 1
+    let one_plus_value = u128::from(value) + 1;
+    u128::BITS as u64 - one_plus_value.leading_zeros() as u64 - 1
 }
 
 pub(super) fn select_weighted_lineage_index(
@@ -745,6 +746,45 @@ mod tests {
         assert_eq!(committee[1].root, ticket_root.outpoint.id());
         assert_eq!(committee[1].owner, ticket_owner.address());
         assert_ne!(committee[1].owner, non_ticket_owner.address());
+    }
+
+    #[test]
+    fn lineage_weight_is_floor_log2_of_one_plus_root_value() {
+        assert_eq!(lineage_committee_weight(0), 0);
+        assert_eq!(lineage_committee_weight(1), 1);
+        assert_eq!(lineage_committee_weight(2), 1);
+        assert_eq!(lineage_committee_weight(3), 2);
+        assert_eq!(lineage_committee_weight(7), 3);
+        assert_eq!(lineage_committee_weight(8), 3);
+        assert_eq!(lineage_committee_weight(u64::MAX), 64);
+    }
+
+    #[test]
+    fn committee_draw_seed_has_a_fixed_parent_vdf_height_and_slot_vector() {
+        let mut parent = Ledger::new(BTreeMap::new(), 1).tip().clone();
+        parent.hash = "a".repeat(64);
+        parent.vdf_output = "parent-vdf".to_string();
+        let candidates = [1_u64, 2, 4]
+            .into_iter()
+            .enumerate()
+            .map(|(index, weight)| LineageCommitteeCandidate {
+                root: UtxoLineageRoot {
+                    outpoint: OutPoint {
+                        txid: format!("{:064x}", index + 1),
+                        index: 0,
+                    },
+                    height: 1,
+                },
+                value: weight,
+                weight,
+                owner: format!("owner-{index}"),
+            })
+            .collect::<Vec<_>>();
+
+        assert_eq!(
+            select_weighted_lineage_index(&parent, 42, 1, &candidates),
+            Some(2)
+        );
     }
 
     proptest! {

@@ -145,6 +145,24 @@ pub(super) fn vdf_retarget_observed_block_ms(parent: &Block, child: &Block) -> O
     ))
 }
 
+pub(super) fn recent_vdf_retarget_average_observed_block_ms(chain: &[Block]) -> Option<u64> {
+    let observations = chain
+        .windows(2)
+        .rev()
+        .filter(|pair| pair[0].height > 0)
+        .filter_map(|pair| vdf_retarget_observed_block_ms(&pair[0], &pair[1]))
+        .take(VDF_RETARGET_WINDOW_BLOCKS)
+        .collect::<Vec<_>>();
+    if observations.is_empty() {
+        return None;
+    }
+    let total = observations
+        .iter()
+        .map(|observed| u128::from(*observed))
+        .sum::<u128>();
+    Some((total / observations.len() as u128) as u64)
+}
+
 fn maybe_report_vdf_progress(
     last_progress: &mut Instant,
     progress_interval: Duration,
@@ -177,9 +195,102 @@ mod tests {
     };
 
     use super::{
-        VDF_SOLUTION_PREFIX, VdfProgressPhase, run_vdf, run_vdf_cancellable_with_progress,
-        run_vdf_with_progress, vdf_solution_placeholder, verify_vdf, wesolowski,
+        MAX_VDF_RETARGET_OBSERVED_BLOCK_MS, MAX_VDF_RETARGET_STEP_PERCENT,
+        MIN_VDF_RETARGET_OBSERVED_BLOCK_MS, VDF_RETARGET_DEADBAND_PERCENT,
+        VDF_RETARGET_WINDOW_BLOCKS, VDF_SOLUTION_PREFIX, VdfProgressPhase,
+        clamped_vdf_retarget_observed_block_ms, recent_vdf_retarget_average_observed_block_ms,
+        retarget_vdf_rounds, run_vdf, run_vdf_cancellable_with_progress, run_vdf_with_progress,
+        vdf_retarget_observed_block_ms, vdf_solution_placeholder, verify_vdf, wesolowski,
     };
+    use crate::domain::{Block, BurnBundleSection, FinalizerMode, VDF_TARGET_BLOCK_MS};
+
+    fn block(height: u64, timestamp_ms: u64, mode: FinalizerMode, rank: u32) -> Block {
+        Block {
+            height,
+            prev_hash: format!("{height:064x}"),
+            timestamp_ms,
+            miner: "finalizer".to_string(),
+            finalizer_mode: mode,
+            finalizer_rank: rank,
+            reward: 0,
+            vdf_rounds: 100,
+            vdf_output: format!("output-{height}"),
+            leader_proof: None,
+            burn_bundle_section: BurnBundleSection::default(),
+            transactions: Vec::new(),
+            hash: format!("{:064x}", height + 1),
+        }
+    }
+
+    #[test]
+    fn vdf_retarget_parameters_and_boundaries_match_the_protocol() {
+        assert_eq!(VDF_RETARGET_WINDOW_BLOCKS, 20);
+        assert_eq!(VDF_RETARGET_DEADBAND_PERCENT, 10);
+        assert_eq!(MAX_VDF_RETARGET_STEP_PERCENT, 2);
+        assert_eq!(MIN_VDF_RETARGET_OBSERVED_BLOCK_MS, VDF_TARGET_BLOCK_MS / 4);
+        assert_eq!(MAX_VDF_RETARGET_OBSERVED_BLOCK_MS, VDF_TARGET_BLOCK_MS * 4);
+
+        assert_eq!(
+            retarget_vdf_rounds(1_000, VDF_TARGET_BLOCK_MS * 9 / 10),
+            1_000
+        );
+        assert_eq!(
+            retarget_vdf_rounds(1_000, VDF_TARGET_BLOCK_MS * 11 / 10),
+            1_000
+        );
+        assert_eq!(retarget_vdf_rounds(1_000, VDF_TARGET_BLOCK_MS / 2), 1_020);
+        assert_eq!(retarget_vdf_rounds(1_000, VDF_TARGET_BLOCK_MS * 2), 980);
+        assert_eq!(
+            clamped_vdf_retarget_observed_block_ms(1),
+            VDF_TARGET_BLOCK_MS / 4
+        );
+        assert_eq!(
+            clamped_vdf_retarget_observed_block_ms(u64::MAX),
+            VDF_TARGET_BLOCK_MS * 4
+        );
+    }
+
+    #[test]
+    fn vdf_retarget_observes_only_rank_zero_ticket_blocks() {
+        let parent = block(1, 1_000, FinalizerMode::Ticket, 0);
+        let primary = block(2, 1_000 + VDF_TARGET_BLOCK_MS, FinalizerMode::Ticket, 0);
+        let fallback = block(2, 1_000 + VDF_TARGET_BLOCK_MS, FinalizerMode::Ticket, 1);
+        let recovery = block(2, 1_000 + VDF_TARGET_BLOCK_MS, FinalizerMode::Recovery, 0);
+
+        assert_eq!(
+            vdf_retarget_observed_block_ms(&parent, &primary),
+            Some(VDF_TARGET_BLOCK_MS)
+        );
+        assert_eq!(vdf_retarget_observed_block_ms(&parent, &fallback), None);
+        assert_eq!(vdf_retarget_observed_block_ms(&parent, &recovery), None);
+    }
+
+    #[test]
+    fn fallback_blocks_do_not_consume_the_twenty_primary_observation_window() {
+        let mut chain = vec![block(0, 0, FinalizerMode::Ticket, 0)];
+        chain.push(block(1, VDF_TARGET_BLOCK_MS / 2, FinalizerMode::Ticket, 0));
+        for height in 2..=21 {
+            chain.push(block(
+                height,
+                height * (VDF_TARGET_BLOCK_MS / 2),
+                FinalizerMode::Ticket,
+                0,
+            ));
+        }
+        for height in 22..=46 {
+            chain.push(block(
+                height,
+                height * (VDF_TARGET_BLOCK_MS / 2),
+                FinalizerMode::Ticket,
+                1,
+            ));
+        }
+
+        assert_eq!(
+            recent_vdf_retarget_average_observed_block_ms(&chain),
+            Some(VDF_TARGET_BLOCK_MS / 2)
+        );
+    }
 
     #[test]
     fn vdf_solution_verifies_and_is_bound_to_seed_and_rounds() {

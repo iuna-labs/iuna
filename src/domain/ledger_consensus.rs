@@ -5,7 +5,7 @@ use super::ticket::{
     BurnTicket, base_vdf_rounds_for_finalizer_rank, mine_action_count, ranked_tickets_for_height,
     vdf_rounds_for_finalizer_rank,
 };
-use super::vdf::{VDF_RETARGET_WINDOW_BLOCKS, retarget_vdf_rounds, vdf_retarget_observed_block_ms};
+use super::vdf::{recent_vdf_retarget_average_observed_block_ms, retarget_vdf_rounds};
 use super::{Block, FinalizerMode, Ledger};
 
 impl Ledger {
@@ -17,26 +17,10 @@ impl Ledger {
             return self.vdf_rounds;
         }
 
-        let mut total_observed_ms = 0_u128;
-        let mut observed_blocks = 0_u128;
-        for pair in self
-            .chain
-            .windows(2)
-            .rev()
-            .filter(|pair| pair[0].height > 0)
-            .take(VDF_RETARGET_WINDOW_BLOCKS)
-        {
-            let Some(observed_ms) = vdf_retarget_observed_block_ms(&pair[0], &pair[1]) else {
-                continue;
-            };
-            total_observed_ms += u128::from(observed_ms);
-            observed_blocks += 1;
-        }
-        if observed_blocks == 0 {
+        let Some(average_observed_ms) = recent_vdf_retarget_average_observed_block_ms(&self.chain)
+        else {
             return self.vdf_rounds;
-        }
-
-        let average_observed_ms = (total_observed_ms / observed_blocks) as u64;
+        };
         let base_rounds = base_vdf_rounds_for_finalizer_rank(tip.vdf_rounds, tip.finalizer_rank);
         retarget_vdf_rounds(base_rounds, average_observed_ms)
     }

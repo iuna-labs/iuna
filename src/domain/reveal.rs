@@ -214,3 +214,28 @@ pub(super) fn canonical_burn_bundle_hashes(
 ) -> String {
     bundle_hashes.join("|")
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn burn_bundle_hash_array_covers_slots_zero_through_four() {
+        let slot_four = BurnBundle {
+            height: 1,
+            prev_hash: "parent".to_string(),
+            slot: 4,
+            member: "member".to_string(),
+            burns: Vec::new(),
+            signature: "signature".to_string(),
+        };
+
+        let hashes = burn_bundle_hashes(std::slice::from_ref(&slot_four));
+
+        assert_eq!(hashes.len(), 5);
+        for (slot, hash) in hashes.iter().enumerate().take(4) {
+            assert_eq!(hash, &default_burn_bundle_hash(slot));
+        }
+        assert_eq!(hashes[4], slot_four.bundle_hash());
+    }
+}

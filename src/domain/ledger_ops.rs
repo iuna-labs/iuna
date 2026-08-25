@@ -747,4 +747,42 @@ mod tests {
         );
         assert_eq!(reward_outputs_for_block(&recovery, &committee).len(), 1);
     }
+
+    #[test]
+    fn finalizer_and_committee_reward_outputs_do_not_create_lineage() {
+        let mut block = reward_block(FinalizerMode::Ticket, 0, 100);
+        attest(&mut block, &[1]);
+        let committee = vec![
+            committee_member(0, "finalizer"),
+            committee_member(1, "committee-1"),
+        ];
+        let mut utxos = BTreeMap::new();
+        let utxo_lineage = BTreeMap::<OutPoint, super::super::UtxoLineageRoot>::new();
+        let lineage_values = BTreeMap::<super::super::UtxoLineageRoot, Amount>::new();
+
+        credit_reward_outputs(&mut utxos, &block, &committee).unwrap();
+
+        assert_eq!(utxos.len(), 2);
+        assert!(
+            utxos
+                .keys()
+                .all(|outpoint| !utxo_lineage.contains_key(outpoint))
+        );
+        assert!(lineage_values.is_empty());
+    }
+
+    #[test]
+    fn recovery_vdf_seed_binds_timestamp_while_ticket_seed_does_not() {
+        let hashes = std::array::from_fn(super::super::default_burn_bundle_hash);
+        let ticket_seed = vdf_seed_for_child(&"a".repeat(64), 42, &hashes);
+        let recovery_at_one = recovery_vdf_seed_for_child(&"a".repeat(64), 42, 1, &hashes);
+        let recovery_at_two = recovery_vdf_seed_for_child(&"a".repeat(64), 42, 2, &hashes);
+
+        assert_ne!(ticket_seed, recovery_at_one);
+        assert_ne!(recovery_at_one, recovery_at_two);
+        assert_eq!(
+            ticket_seed,
+            vdf_seed_for_child(&"a".repeat(64), 42, &hashes)
+        );
+    }
 }

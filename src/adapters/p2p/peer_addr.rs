@@ -154,3 +154,19 @@ pub(super) fn inbound_error_counts_as_misbehavior(message: &str) -> bool {
     !message.contains("block timestamp is too far in the future")
         && !message.contains("block timestamp is before finalizer rank")
 }
+
+#[cfg(test)]
+mod tests {
+    use super::inbound_error_counts_as_misbehavior;
+
+    #[test]
+    fn future_and_unopened_rank_slot_errors_are_temporal_not_misbehavior() {
+        assert!(!inbound_error_counts_as_misbehavior(
+            "block timestamp is too far in the future"
+        ));
+        assert!(!inbound_error_counts_as_misbehavior(
+            "block timestamp is before finalizer rank 1 time slot"
+        ));
+        assert!(inbound_error_counts_as_misbehavior("block hash is invalid"));
+    }
+}

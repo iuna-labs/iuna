@@ -190,9 +190,6 @@ impl Ledger {
         if block.transactions.len() > self.launch_profile.max_block_transactions {
             bail!("block has too many transactions");
         }
-        if block.transactions.len() > self.launch_profile.max_block_transactions {
-            bail!("block has too many transaction items");
-        }
         if block.serialized_size_bytes()? > self.launch_profile.max_block_bytes {
             bail!("block exceeds max block size");
         }
@@ -322,4 +319,33 @@ fn apply_transaction_with_lineage(
         )?;
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use std::collections::BTreeMap;
+
+    use super::*;
+
+    #[test]
+    fn median_time_past_uses_the_median_of_the_latest_eleven_blocks() {
+        let mut ledger = Ledger::new(BTreeMap::new(), 1);
+        let template = ledger.tip().clone();
+        let timestamps = [5, 500, 20, 400, 30, 300, 40, 200, 50, 100, 60, 1_000];
+        ledger.chain = timestamps
+            .into_iter()
+            .enumerate()
+            .map(|(index, timestamp_ms)| {
+                let mut block = template.clone();
+                block.height = index as u64;
+                block.timestamp_ms = timestamp_ms;
+                block.hash = format!("{:064x}", index + 1);
+                block
+            })
+            .collect();
+
+        // The oldest value (5) falls outside the 11-block window. The sorted
+        // window is 20,30,40,50,60,100,200,300,400,500,1000.
+        assert_eq!(ledger.median_time_past(), 100);
+    }
 }

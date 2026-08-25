@@ -1622,7 +1622,8 @@ fn mini_newest_lineage_root(
 }
 
 fn mini_lineage_committee_weight(value: Amount) -> u64 {
-    u64::BITS as u64 - value.saturating_add(1).leading_zeros() as u64 - 1
+    let one_plus_value = u128::from(value) + 1;
+    u128::BITS as u64 - one_plus_value.leading_zeros() as u64 - 1
 }
 
 fn mini_burn_committee_for_next_block(ledger: &Ledger) -> Option<Vec<BurnCommitteeMember>> {
@@ -2621,6 +2622,19 @@ fn misused_or_extra_committee_bundle_is_rejected() {
 fn mini_burn_bundle_quorum_oracle_matches_consensus_mutations() {
     let mut harness = harness_for_percent(38, 25);
     harness.mature_lineages(2, 4);
+    let lineage_owners = harness
+        .ledger
+        .lineage_owners
+        .values()
+        .flat_map(|owners| owners.keys().cloned())
+        .collect::<BTreeSet<_>>();
+    for owner in lineage_owners {
+        let wallet = harness.wallet(&owner).clone();
+        harness.submit_fee_burn(&wallet, 1, 1);
+    }
+    for _ in 0..harness.ledger.launch_profile.ticket_maturity_delay_heights {
+        harness.mine_ticket_block(0);
+    }
     assert_mini_burn_committee_matches(&harness.ledger);
 
     let leader = harness.next_rank(0);
@@ -2840,10 +2854,11 @@ fn pending_third_party_burn_does_not_affect_block_validity() {
 }
 
 #[test]
-#[ignore = "long-running third-party burn committee coverage; run via deployment.sh"]
-fn included_third_party_burn_requires_committee_signatures() {
+#[ignore = "long-running required third-party burn committee coverage; run via deployment.sh"]
+fn required_third_party_burn_requires_committee_signatures() {
     let mut harness = harness_for_percent(21, 25);
     harness.mature_lineages(1, 4);
+    harness.ensure_lineage_owners_have_next_height_tickets();
     let leader = harness.next_rank(0);
     let finalizer = harness.wallet(&leader.owner).clone();
     harness.submit_anchor_burn(&finalizer);
@@ -2853,13 +2868,20 @@ fn included_third_party_burn_requires_committee_signatures() {
         .find(|wallet| wallet.address() != finalizer.address())
         .unwrap()
         .clone();
-    harness.submit_fee_burn(&victim, 1, 1);
-    let block = harness.finish_ticket_block_from_pending(0, Vec::new());
+    let third_party = harness.submit_fee_burn(&victim, 1, 1);
+    let bundles = harness.committee_bundles_for_rank_and_burns(0, vec![third_party]);
+    assert!(
+        !bundles.is_empty(),
+        "test setup should provide an explicit committee signature"
+    );
+    let mut block = harness.finish_ticket_block_from_pending(0, bundles);
+    block.burn_bundle_section.signatures.clear();
+    rehash(&mut block);
 
     assert_rejects(
         harness.ledger,
         block,
-        "included third-party burn without committee signatures",
+        "required third-party burn without committee signatures",
     );
 }
 

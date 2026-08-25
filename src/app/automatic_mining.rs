@@ -491,9 +491,7 @@ impl NodeCore {
                 timestamp_ms
             }
         };
-        let elapsed = timestamp_ms.saturating_sub(started_at);
-        (elapsed < BURN_BUNDLE_COLLECTION_MS)
-            .then(|| BURN_BUNDLE_COLLECTION_MS.saturating_sub(elapsed))
+        burn_bundle_collection_remaining_ms(started_at, timestamp_ms)
     }
 
     fn request_missing_burn_bundles_for_next_block(&mut self, _timestamp_ms: u64) {
@@ -621,6 +619,11 @@ impl NodeCore {
     }
 }
 
+fn burn_bundle_collection_remaining_ms(started_at_ms: u64, now_ms: u64) -> Option<u64> {
+    let elapsed = now_ms.saturating_sub(started_at_ms);
+    (elapsed < BURN_BUNDLE_COLLECTION_MS).then(|| BURN_BUNDLE_COLLECTION_MS.saturating_sub(elapsed))
+}
+
 #[cfg(test)]
 mod tests {
     use std::collections::BTreeMap;
@@ -635,7 +638,18 @@ mod tests {
     };
     use tempfile::tempdir;
 
-    use super::NodeCore;
+    use super::{NodeCore, burn_bundle_collection_remaining_ms};
+
+    #[test]
+    fn burn_bundle_collection_waits_exactly_thirty_seconds() {
+        assert_eq!(
+            burn_bundle_collection_remaining_ms(1_000, 1_000),
+            Some(30_000)
+        );
+        assert_eq!(burn_bundle_collection_remaining_ms(1_000, 30_999), Some(1));
+        assert_eq!(burn_bundle_collection_remaining_ms(1_000, 31_000), None);
+        assert_eq!(burn_bundle_collection_remaining_ms(1_000, 40_000), None);
+    }
 
     fn funded_ledger(wallets: &[Wallet]) -> Ledger {
         let allocations = wallets

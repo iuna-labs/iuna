@@ -609,4 +609,89 @@ mod tests {
                 .contains("burn bundle references a burn that is not in the mempool")
         );
     }
+
+    #[test]
+    fn invalid_committee_bundle_signature_is_rejected() {
+        let alice = Wallet::from_seed("bundle-signature-alice");
+        let bob = Wallet::from_seed("bundle-signature-bob");
+        let ledger = funded_ledger(&[alice.clone(), bob.clone()]);
+        let finalizer_address = ledger.expected_leader_for_next_block().unwrap();
+        let finalizer = [&alice, &bob]
+            .into_iter()
+            .find(|wallet| wallet.address() == finalizer_address)
+            .unwrap();
+        let mut bundle = ledger.test_burn_bundle(finalizer, Vec::new());
+        let replacement = if bundle.signature.starts_with('0') {
+            "1"
+        } else {
+            "0"
+        };
+        bundle.signature.replace_range(0..1, replacement);
+
+        assert!(
+            ledger
+                .validate_next_block_burn_bundles(vec![bundle])
+                .unwrap_err()
+                .to_string()
+                .contains("signature")
+        );
+    }
+
+    #[test]
+    fn block_bundle_validation_rejects_duplicate_slots() {
+        let alice = Wallet::from_seed("duplicate-slot-alice");
+        let bob = Wallet::from_seed("duplicate-slot-bob");
+        let ledger = funded_ledger(&[alice.clone(), bob.clone()]);
+        let finalizer_address = ledger.expected_leader_for_next_block().unwrap();
+        let finalizer = [&alice, &bob]
+            .into_iter()
+            .find(|wallet| wallet.address() == finalizer_address)
+            .unwrap();
+        let bundle = ledger.test_burn_bundle(finalizer, Vec::new());
+
+        assert!(
+            ledger
+                .validate_next_block_burn_bundles(vec![bundle.clone(), bundle])
+                .unwrap_err()
+                .to_string()
+                .contains("duplicate burn bundle slot")
+        );
+    }
+
+    #[test]
+    fn attested_burn_omitted_from_block_is_rejected_without_consulting_mempool_policy() {
+        let alice = Wallet::from_seed("required-burn-alice");
+        let bob = Wallet::from_seed("required-burn-bob");
+        let mut ledger = funded_ledger(&[alice.clone(), bob.clone()]);
+        let finalizer_address = ledger.expected_leader_for_next_block().unwrap();
+        let finalizer = [&alice, &bob]
+            .into_iter()
+            .find(|wallet| wallet.address() == finalizer_address)
+            .unwrap();
+        let other = [&alice, &bob]
+            .into_iter()
+            .find(|wallet| wallet.address() != finalizer_address)
+            .unwrap();
+        let pending_burn = ledger.build_burn(other, 1, 1).unwrap();
+        ledger.submit_transaction(pending_burn.clone()).unwrap();
+        let anchor = ledger.build_burn(finalizer, 1, 1).unwrap();
+        ledger.submit_transaction(anchor).unwrap();
+        let mut block = ledger
+            .prepare_next_block(finalizer.address(), 1)
+            .unwrap()
+            .finish(finalizer, "unused-vdf".to_string());
+        let bundle = ledger.test_burn_bundle(finalizer, vec![pending_burn.clone()]);
+        block.burn_bundle_section = ledger.burn_bundle_section_from_bundles(vec![bundle]);
+        block
+            .transactions
+            .retain(|transaction| transaction.signature() != pending_burn.signature());
+
+        assert!(
+            ledger
+                .validate_burn_bundle_section_for_block(&block)
+                .unwrap_err()
+                .to_string()
+                .contains("attested burn is not included")
+        );
+    }
 }

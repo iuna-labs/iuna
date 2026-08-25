@@ -127,3 +127,107 @@ fn serialized_len<T: Serialize>(item: &T) -> Result<usize> {
         .context("failed to serialize pending item for size check")
         .map(|bytes| bytes.len())
 }
+
+#[cfg(test)]
+mod tests {
+    use std::collections::BTreeMap;
+
+    use super::*;
+    use crate::domain::transaction::{UnsignedTxInput, UnsignedUtxoTransaction};
+    use crate::domain::{OutPoint, TxOutput, Wallet};
+
+    fn dummy_mine(signature_digit: char) -> Transaction {
+        Transaction::Mine {
+            recipient: "recipient".to_string(),
+            anchor: "a".repeat(64),
+            salt: 1,
+            nonce: 1,
+            difficulty_bits: 10,
+            proof_header: None,
+            signature: signature_digit.to_string().repeat(64),
+        }
+    }
+
+    #[test]
+    fn pending_pool_byte_limit_accepts_the_boundary_and_rejects_one_byte_over() {
+        let item = "bounded-item";
+        let item_bytes = serialized_len(&item).unwrap();
+
+        assert_eq!(
+            ensure_pending_pool_bytes(
+                "test pool",
+                MAX_PENDING_POOL_BYTES - item_bytes,
+                &item,
+                MAX_PENDING_POOL_BYTES,
+            )
+            .unwrap(),
+            item_bytes
+        );
+        assert!(
+            ensure_pending_pool_bytes(
+                "test pool",
+                MAX_PENDING_POOL_BYTES - item_bytes + 1,
+                &item,
+                MAX_PENDING_POOL_BYTES,
+            )
+            .unwrap_err()
+            .to_string()
+            .contains("byte limit exceeded")
+        );
+    }
+
+    #[test]
+    fn mempool_rejects_transaction_after_ten_thousand_items() {
+        let alice = Wallet::from_seed("pending-limit-alice");
+        let bob = Wallet::from_seed("pending-limit-bob");
+        let mut ledger = Ledger::new(
+            BTreeMap::from([
+                (alice.address().to_string(), 10),
+                (bob.address().to_string(), 10),
+            ]),
+            1,
+        );
+        let candidate = ledger.build_transfer(&alice, bob.address(), 1, 1).unwrap();
+        ledger.pending = vec![dummy_mine('f'); MAX_PENDING_TRANSACTIONS];
+
+        assert_eq!(ledger.pending.len(), 10_000);
+        assert!(
+            ledger
+                .submit_transaction(candidate)
+                .unwrap_err()
+                .to_string()
+                .contains("mempool is full")
+        );
+    }
+
+    #[test]
+    fn orphan_pool_rejects_transaction_after_1024_items() {
+        let wallet = Wallet::from_seed("orphan-limit-wallet");
+        let mut ledger = Ledger::new(BTreeMap::from([(wallet.address().to_string(), 10)]), 1);
+        let orphan = UnsignedUtxoTransaction::Transfer {
+            inputs: vec![UnsignedTxInput {
+                outpoint: OutPoint {
+                    txid: "b".repeat(64),
+                    index: 0,
+                },
+                owner: wallet.address().to_string(),
+            }],
+            outputs: vec![TxOutput {
+                address: wallet.address().to_string(),
+                amount: 1,
+            }],
+            fee: 1,
+        }
+        .sign(&wallet);
+        ledger.orphans = vec![dummy_mine('e'); MAX_ORPHAN_TRANSACTIONS];
+
+        assert_eq!(ledger.orphans.len(), 1_024);
+        assert!(
+            ledger
+                .submit_transaction(orphan)
+                .unwrap_err()
+                .to_string()
+                .contains("orphan transaction pool is full")
+        );
+    }
+}

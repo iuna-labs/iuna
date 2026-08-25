@@ -150,6 +150,30 @@ mod tests {
     }
 
     #[test]
+    fn mempool_gossip_rebroadcasts_public_transfers() {
+        let alice = Wallet::from_seed("mempool-gossip-transfer-alice");
+        let bob = Wallet::from_seed("mempool-gossip-transfer-bob");
+        let ledger = Ledger::new(
+            BTreeMap::from([(alice.address().to_string(), 10 * MICRO_IUNA)]),
+            1,
+        );
+        let mut node = NodeCore::from_ledger(alice, ledger, 0);
+        let transfer = node
+            .transfer_with_fee(bob.address(), MICRO_IUNA, 1)
+            .unwrap();
+        node.drain_outbox();
+
+        assert!(node.mempool_gossip().iter().any(|envelope| {
+            match envelope {
+                GossipEnvelope::Transactions { transactions } => transactions
+                    .iter()
+                    .any(|transaction| transaction.signature() == transfer.signature()),
+                _ => false,
+            }
+        }));
+    }
+
+    #[test]
     fn mempool_gossip_includes_public_mine_actions() {
         let alice = Wallet::from_seed("mine-gossip-alice");
         let ledger = Ledger::new(BTreeMap::new(), 1);
