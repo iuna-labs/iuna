@@ -423,7 +423,7 @@ impl Harness {
                 continue;
             }
             self.ledger.tickets.push(BurnTicket {
-                id: format!("fixture-lineage-ticket-{target_height}-{index}"),
+                id: hex_hash(format!("fixture-lineage-ticket-{target_height}-{index}")),
                 owner,
                 amount: 1,
                 eligible_from_height: target_height,
