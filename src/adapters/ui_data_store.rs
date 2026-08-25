@@ -123,6 +123,21 @@ CREATE TABLE IF NOT EXISTS ui_burn_leader_rank_blocks (
 );
 "#;
 
+const RESET_SCHEMA: &str = r#"
+DROP TABLE IF EXISTS block_metrics;
+DROP TABLE IF EXISTS metrics_cache_meta;
+DROP TABLE IF EXISTS metric_known_addresses;
+DROP TABLE IF EXISTS ui_leaderboards;
+DROP TABLE IF EXISTS ui_cache_meta;
+DROP TABLE IF EXISTS ui_output_index;
+DROP TABLE IF EXISTS ui_utxos;
+DROP TABLE IF EXISTS ui_wallet_transactions;
+DROP TABLE IF EXISTS ui_revealed_transactions;
+DROP TABLE IF EXISTS ui_burn_leader_ranks;
+DROP TABLE IF EXISTS ui_burn_leader_rank_blocks;
+"#;
+
+const UI_DATA_SCHEMA_VERSION: u32 = 1;
 const UI_CACHE_SCHEMA_VERSION: u32 = 3;
 const METRICS_CACHE_SCHEMA_VERSION: u32 = 1;
 
@@ -184,15 +199,7 @@ impl SqliteUiDataStore {
 
         let store = Self { path };
         store.with_connection_mut(|connection| {
-            connection
-                .execute_batch(SCHEMA)
-                .context("failed to initialize UI data database schema")?;
-            ensure_block_metrics_column(
-                connection,
-                "known_wallet_addresses",
-                "INTEGER NOT NULL DEFAULT 0",
-            )?;
-            Ok(())
+            initialize_ui_data_schema(connection, store.path())
         })?;
         Ok(store)
     }
@@ -480,6 +487,55 @@ PRAGMA synchronous = NORMAL;
         Connection::open(&self.path)
             .with_context(|| format!("failed to open UI data database {}", self.path.display()))
     }
+}
+
+fn initialize_ui_data_schema(connection: &mut Connection, path: &Path) -> Result<()> {
+    let stored_version = connection
+        .pragma_query_value(None, "user_version", |row| row.get::<_, u32>(0))
+        .context("failed to inspect UI data database schema version")?;
+    let has_tables = connection
+        .query_row(
+            "SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE type = 'table' AND name NOT LIKE 'sqlite_%')",
+            [],
+            |row| row.get::<_, bool>(0),
+        )
+        .context("failed to inspect UI data database tables")?;
+
+    if has_tables && stored_version != UI_DATA_SCHEMA_VERSION {
+        println!(
+            "rebuilding incompatible UI cache schema at {} (version {stored_version}, expected {UI_DATA_SCHEMA_VERSION})",
+            path.display()
+        );
+        let transaction = connection
+            .transaction()
+            .context("failed to start UI data schema rebuild transaction")?;
+        transaction
+            .execute_batch(RESET_SCHEMA)
+            .context("failed to clear incompatible UI data database schema")?;
+        transaction
+            .execute_batch(SCHEMA)
+            .context("failed to recreate UI data database schema")?;
+        transaction
+            .pragma_update(None, "user_version", UI_DATA_SCHEMA_VERSION)
+            .context("failed to record UI data database schema version")?;
+        transaction
+            .commit()
+            .context("failed to commit UI data database schema rebuild")?;
+        return Ok(());
+    }
+
+    connection
+        .execute_batch(SCHEMA)
+        .context("failed to initialize UI data database schema")?;
+    ensure_block_metrics_column(
+        connection,
+        "known_wallet_addresses",
+        "INTEGER NOT NULL DEFAULT 0",
+    )?;
+    connection
+        .pragma_update(None, "user_version", UI_DATA_SCHEMA_VERSION)
+        .context("failed to record UI data database schema version")?;
+    Ok(())
 }
 
 #[derive(Clone, Debug, Default, Eq, PartialEq)]
@@ -1592,6 +1648,63 @@ mod tests {
         ledger.submit_transaction(burn).unwrap();
         let block = ledger.mine_next_block(wallet, timestamp_ms).unwrap();
         ledger.apply_locally_mined_block(block).unwrap();
+    }
+
+    #[test]
+    fn opening_legacy_ui_schema_rebuilds_the_derived_cache() {
+        let dir = tempdir().unwrap();
+        let path = dir.path().join("ui_data.sqlite3");
+        let connection = Connection::open(&path).unwrap();
+        connection
+            .execute_batch(
+                r#"
+CREATE TABLE ui_wallet_transactions (
+    address TEXT NOT NULL,
+    sort_key INTEGER NOT NULL,
+    kind TEXT NOT NULL,
+    signature TEXT NOT NULL,
+    block_height INTEGER NOT NULL,
+    timestamp_ms INTEGER NOT NULL,
+    block_finalizer TEXT NOT NULL,
+    blinded INTEGER NOT NULL,
+    transaction_json BLOB NOT NULL,
+    PRIMARY KEY (address, signature)
+);
+"#,
+            )
+            .unwrap();
+        drop(connection);
+
+        let store = SqliteUiDataStore::open(&path).unwrap();
+        let connection = Connection::open(&path).unwrap();
+        let columns = connection
+            .prepare("PRAGMA table_info(ui_wallet_transactions)")
+            .unwrap()
+            .query_map([], |row| row.get::<_, String>(1))
+            .unwrap()
+            .collect::<rusqlite::Result<Vec<_>>>()
+            .unwrap();
+        let schema_version = connection
+            .pragma_query_value(None, "user_version", |row| row.get::<_, u32>(0))
+            .unwrap();
+        assert!(!columns.iter().any(|column| column == "blinded"));
+        assert_eq!(schema_version, super::UI_DATA_SCHEMA_VERSION);
+        drop(connection);
+
+        let seed = "legacy-ui-schema";
+        let snapshot = test_snapshot(seed);
+        let tip = snapshot.blocks.last().unwrap().hash.clone();
+        let wallet = Wallet::from_seed(seed);
+        store.project_snapshot(&snapshot, true).unwrap();
+        let (_, total) = store
+            .load_wallet_transactions(wallet.address(), &["burn"], 0, 10)
+            .unwrap();
+        assert!(total > 0);
+
+        drop(store);
+        let reopened = SqliteUiDataStore::open(&path).unwrap();
+        assert!(reopened.is_projected_to(&tip).unwrap());
+        assert!(reopened.metrics_are_projected_to(&tip).unwrap());
     }
 
     #[test]
