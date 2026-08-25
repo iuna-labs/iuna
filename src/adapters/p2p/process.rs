@@ -161,16 +161,20 @@ pub(super) async fn process_envelope(
         }
         GossipEnvelope::Blocks { blocks } => {
             let adjusted_time_ms = super::network_adjusted_time_ms(network).await;
-            let local_ledger = network.inner.node.lock().await.clone_ledger();
-            let start_height = blocks
-                .first()
-                .map(|block| block.height.saturating_sub(1))
-                .unwrap_or_else(|| local_ledger.height());
-            let target_height = blocks
-                .last()
-                .map(|block| block.height)
-                .unwrap_or(start_height);
-            let progress_guard = network.begin_sync_progress(start_height, target_height);
+            let (local_ledger, progress_guard) = {
+                let node = network.inner.node.lock().await;
+                let local_ledger = node.clone_ledger();
+                let start_height = blocks
+                    .first()
+                    .map(|block| block.height.saturating_sub(1))
+                    .unwrap_or_else(|| local_ledger.height());
+                let target_height = blocks
+                    .last()
+                    .map(|block| block.height)
+                    .unwrap_or(start_height);
+                let progress_guard = network.begin_sync_progress(start_height, target_height);
+                (local_ledger, progress_guard)
+            };
             let progress_id = progress_guard.id();
             let progress_network = network.clone();
             let result = match validate_blocks_extension(
@@ -181,13 +185,14 @@ pub(super) async fn process_envelope(
             )
             .await
             {
-                Ok(ledger) => network
-                    .inner
-                    .node
-                    .lock()
-                    .await
-                    .import_verified_ledger(ledger)
-                    .map(|_| ()),
+                Ok(ledger) => {
+                    let mut node = network.inner.node.lock().await;
+                    if progress_guard.is_current() {
+                        node.import_verified_ledger(ledger).map(|_| ())
+                    } else {
+                        Ok(())
+                    }
+                }
                 Err(error) => Err(error),
             };
             drop(progress_guard);
@@ -205,15 +210,17 @@ pub(super) async fn process_envelope(
             network.forward_outbox().await;
         }
         GossipEnvelope::ChainBootstrap(bootstrap) => {
+            let sync_generation = network.sync_generation();
             let adjusted_time_ms = super::network_adjusted_time_ms(network).await;
             let result = match validate_chain_bootstrap(bootstrap, adjusted_time_ms).await {
-                Ok(ledger) => network
-                    .inner
-                    .node
-                    .lock()
-                    .await
-                    .import_verified_ledger(ledger)
-                    .map(|_| ()),
+                Ok(ledger) => {
+                    let mut node = network.inner.node.lock().await;
+                    if network.sync_generation_is_current(sync_generation) {
+                        node.import_verified_ledger(ledger).map(|_| ())
+                    } else {
+                        Ok(())
+                    }
+                }
                 Err(error) => Err(error),
             };
             record_rejected_chain_payload(

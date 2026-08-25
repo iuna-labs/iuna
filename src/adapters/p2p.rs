@@ -99,11 +99,16 @@ pub struct GossipNetwork {
 pub(super) struct SyncProgressGuard {
     network: GossipNetwork,
     id: u64,
+    generation: u64,
 }
 
 impl SyncProgressGuard {
     pub(super) fn id(&self) -> u64 {
         self.id
+    }
+
+    pub(super) fn is_current(&self) -> bool {
+        self.network.sync_generation_is_current(self.generation)
     }
 }
 
@@ -136,6 +141,7 @@ pub struct SyncProgress {
 #[derive(Default)]
 struct SyncProgressState {
     next_id: u64,
+    generation: u64,
     active: BTreeMap<u64, SyncProgress>,
 }
 

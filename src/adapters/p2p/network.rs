@@ -142,7 +142,30 @@ impl GossipNetwork {
         super::SyncProgressGuard {
             network: self.clone(),
             id,
+            generation: state.generation,
         }
+    }
+
+    pub(crate) fn invalidate_sync_progress(&self) {
+        let mut state = self
+            .inner
+            .sync_progress
+            .lock()
+            .expect("sync progress mutex poisoned");
+        state.generation = state.generation.wrapping_add(1);
+        state.active.clear();
+    }
+
+    pub(super) fn sync_generation(&self) -> u64 {
+        self.inner
+            .sync_progress
+            .lock()
+            .expect("sync progress mutex poisoned")
+            .generation
+    }
+
+    pub(super) fn sync_generation_is_current(&self, generation: u64) -> bool {
+        self.sync_generation() == generation
     }
 
     pub(super) fn update_sync_progress(&self, id: u64, validated_height: u64) {
@@ -354,6 +377,33 @@ mod tests {
 
         drop(second);
         assert_eq!(network.sync_progress(), None);
+    }
+
+    #[tokio::test]
+    async fn invalidating_sync_progress_hides_and_rejects_stale_validation() {
+        let alice = Wallet::from_seed("invalidated-sync-progress-alice");
+        let allocations = allocations(std::slice::from_ref(&alice), 1_000);
+        let node = Arc::new(tokio::sync::Mutex::new(node("alice", alice, allocations)));
+        let peers = Arc::new(tokio::sync::Mutex::new(PeerBook::default()));
+        let network = gossip_network(node, peers, "127.0.0.1:9544".parse().unwrap(), None);
+
+        let stale = network.begin_sync_progress(20, 90);
+        network.update_sync_progress(stale.id(), 41);
+        assert!(stale.is_current());
+
+        network.invalidate_sync_progress();
+
+        assert_eq!(network.sync_progress(), None);
+        assert!(!stale.is_current());
+        network.update_sync_progress(stale.id(), 42);
+        assert_eq!(network.sync_progress(), None);
+
+        let fresh = network.begin_sync_progress(0, 90);
+        assert!(fresh.is_current());
+        assert_eq!(network.sync_progress().unwrap().validated_height, 0);
+
+        drop(stale);
+        assert_eq!(network.sync_progress().unwrap().validated_height, 0);
     }
 
     #[tokio::test]
