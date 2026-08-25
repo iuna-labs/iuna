@@ -17,7 +17,7 @@ fuzz_target!(|data: &[u8]| {
     let _ = serde_json::from_str::<Transaction>(line);
     let _ = serde_json::from_str::<BurnBundle>(line);
     let _ = serde_json::from_str::<Block>(line).map(|block| {
-        let _ = block.serialized_size_bytes();
+        let _ = block.json_size_bytes();
         let _ = block.compute_hash();
     });
     let _ = serde_json::from_str::<ChainSnapshot>(line);

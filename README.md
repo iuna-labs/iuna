@@ -68,6 +68,14 @@ Release and deploy with:
 ./deployment.sh 0.2.48
 ```
 
+By default, deployment runs the regular unit tests and verifies that the fuzz
+targets compile against their locked dependencies. Run the extended adversarial,
+fuzz, and release-property suites explicitly when needed:
+
+```sh
+./deployment.sh --full-tests 0.2.48
+```
+
 To start a new chain, deploy with `--genesis`. This asks for confirmation,
 deletes and recreates the permanent `local-path-db-pvc`, and starts the node
 once with `--genesis`. The existing chain data is permanently removed:

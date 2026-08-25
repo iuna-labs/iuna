@@ -4,9 +4,10 @@ set -euo pipefail
 cd "$(dirname "${BASH_SOURCE[0]}")"
 
 usage() {
-  echo "Usage: $0 [--genesis] <version>" >&2
+  echo "Usage: $0 [--genesis] [--full-tests] <version>" >&2
   echo "Example: $0 0.2.48" >&2
   echo "         $0 --genesis 0.4.0" >&2
+  echo "         $0 --full-tests 0.4.0" >&2
 }
 
 die() {
@@ -80,16 +81,24 @@ ensure_tauri_cli() {
 }
 
 run_release_tests() {
+  local full_tests="$1"
+
   require_command cargo
+
+  cargo test --locked
+  cargo check --locked --manifest-path fuzz/Cargo.toml
+
+  if [ "$full_tests" != "true" ]; then
+    echo "Quick release checks passed; use --full-tests to run adversarial, fuzz, and property suites"
+    return 0
+  fi
 
   local fuzz_runs="${IUNA_FUZZ_RUNS:-256}"
   local vdf_fuzz_runs="${IUNA_VDF_FUZZ_RUNS:-16}"
   validate_positive_integer IUNA_FUZZ_RUNS "$fuzz_runs"
   validate_positive_integer IUNA_VDF_FUZZ_RUNS "$vdf_fuzz_runs"
 
-  cargo test --locked
   cargo test --locked domain::adversarial_tests:: -- --ignored
-  cargo check --locked --manifest-path fuzz/Cargo.toml
   cargo run --locked --manifest-path fuzz/Cargo.toml --bin p2p_envelope -- -runs="$fuzz_runs" fuzz/corpus/p2p_envelope
   cargo run --locked --manifest-path fuzz/Cargo.toml --bin compact_snapshot -- -runs="$fuzz_runs" fuzz/corpus/compact_snapshot
   cargo run --locked --manifest-path fuzz/Cargo.toml --bin domain_json -- -runs="$fuzz_runs" fuzz/corpus/domain_json
@@ -111,10 +120,12 @@ update_versions() {
   replace_in_file README.md 'downloads/iuna-v[0-9]+\.[0-9]+\.[0-9]+-macos-aarch64-desktop\.app\.zip' "downloads/iuna-v${version}-macos-aarch64-desktop.app.zip"
   replace_in_file README.md 'downloads/iuna-v[0-9]+\.[0-9]+\.[0-9]+-windows-x86_64-desktop-setup\.exe' "downloads/iuna-v${version}-windows-x86_64-desktop-setup.exe"
 
-  cargo update -p iuna --precise "$version"
-  cargo update --manifest-path src-tauri/Cargo.toml -p iuna-desktop --precise "$version"
+  cargo update --offline -p iuna --precise "$version"
+  cargo update --offline --manifest-path src-tauri/Cargo.toml -p iuna-desktop --precise "$version"
+  cargo update --offline --manifest-path fuzz/Cargo.toml -p iuna --precise "$version"
   cargo check --locked >/dev/null
   cargo check --locked --manifest-path src-tauri/Cargo.toml >/dev/null
+  cargo check --locked --manifest-path fuzz/Cargo.toml >/dev/null
 }
 
 commit_and_tag() {
@@ -123,7 +134,7 @@ commit_and_tag() {
 
   require_command git
 
-  git add Cargo.toml Cargo.lock src-tauri/Cargo.toml src-tauri/Cargo.lock src-tauri/tauri.conf.json README.md
+  git add Cargo.toml Cargo.lock fuzz/Cargo.lock src-tauri/Cargo.toml src-tauri/Cargo.lock src-tauri/tauri.conf.json README.md
   git commit -m "Release ${tag}" --no-verify
   git tag -a "$tag" -m "Release ${tag}"
 }
@@ -482,6 +493,7 @@ deploy_docker_image() {
 
 main() {
   local genesis=false
+  local full_tests=false
   local version=""
 
   while [ "$#" -gt 0 ]; do
@@ -489,6 +501,10 @@ main() {
       --genesis)
         [ "$genesis" = "false" ] || die "--genesis may only be specified once"
         genesis=true
+        ;;
+      --full-tests)
+        [ "$full_tests" = "false" ] || die "--full-tests may only be specified once"
+        full_tests=true
         ;;
       -*)
         die "unknown option: $1"
@@ -524,7 +540,7 @@ main() {
       echo "Aborting deployment"
       exit 1
     fi
-    run_release_tests
+    run_release_tests "$full_tests"
     build_linux_cli_archives "$version"
     build_docker_image "$version"
     deploy_docker_image "$version" "$genesis"
@@ -532,7 +548,7 @@ main() {
   fi
 
   update_versions "$version"
-  run_release_tests
+  run_release_tests "$full_tests"
   build_versions "$version"
   commit_and_tag "$version"
   build_docker_image "$version"
