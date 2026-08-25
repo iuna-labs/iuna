@@ -60,19 +60,33 @@ impl SqliteChainStore {
 
     pub fn load(&self) -> Result<Option<ChainSnapshot>> {
         self.with_connection(|connection| {
-            let snapshot_blob = connection
+            let stored = connection
                 .query_row(
-                    "SELECT snapshot_blob FROM chain_snapshots WHERE id = 1",
+                    "SELECT height, tip_hash, snapshot_blob FROM chain_snapshots WHERE id = 1",
                     [],
-                    |row| row.get::<_, Vec<u8>>(0),
+                    |row| {
+                        Ok((
+                            row.get::<_, u64>(0)?,
+                            row.get::<_, String>(1)?,
+                            row.get::<_, Vec<u8>>(2)?,
+                        ))
+                    },
                 )
                 .optional()
                 .context("failed to load chain snapshot from database")?;
 
-            snapshot_blob
-                .map(|blob| {
-                    decode_compact_snapshot(&blob)
-                        .context("failed to parse compact chain snapshot from database")
+            stored
+                .map(|(stored_height, stored_tip_hash, blob)| {
+                    let snapshot = decode_compact_snapshot(&blob)
+                        .context("failed to parse compact chain snapshot from database")?;
+                    let (height, tip_hash) = snapshot_tip(&snapshot)
+                        .context("compact chain snapshot contains no blocks")?;
+                    if height != stored_height || tip_hash != stored_tip_hash {
+                        anyhow::bail!(
+                            "compact chain snapshot tip does not match database metadata"
+                        );
+                    }
+                    Ok(snapshot)
                 })
                 .transpose()
         })
@@ -205,5 +219,30 @@ mod tests {
         assert!(error.to_string().contains("cannot persist empty chain"));
         let restored = store.load().unwrap().unwrap();
         assert_eq!(restored.blocks.last().unwrap().hash, tip);
+    }
+
+    #[test]
+    fn load_rejects_snapshot_that_does_not_match_stored_tip_metadata() {
+        let dir = tempdir().unwrap();
+        let store = SqliteChainStore::open(dir.path().join("chain.sqlite3")).unwrap();
+        store
+            .save(&test_snapshot("chain-store-tip-integrity"))
+            .unwrap();
+        store
+            .with_connection_mut(|connection| {
+                connection.execute(
+                    "UPDATE chain_snapshots SET tip_hash = ?1 WHERE id = 1",
+                    ["0".repeat(64)],
+                )?;
+                Ok(())
+            })
+            .unwrap();
+
+        let error = store.load().unwrap_err();
+        assert!(
+            error
+                .to_string()
+                .contains("snapshot tip does not match database metadata")
+        );
     }
 }

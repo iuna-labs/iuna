@@ -1,3 +1,5 @@
+use std::collections::BTreeMap;
+
 use anyhow::{Context, Result, bail};
 
 use crate::domain::{
@@ -6,31 +8,70 @@ use crate::domain::{
 };
 
 const COMPACT_SNAPSHOT_MAGIC: &[u8] = b"IUNA-SNAPSHOT";
-const LEGACY_COMPACT_SNAPSHOT_VERSION: u8 = 4;
-const COMPACT_SNAPSHOT_VERSION: u8 = 5;
+const COMPACT_SNAPSHOT_VERSION: u8 = 6;
+const VDF_SOLUTION_PREFIX: &str = "classgroup-wesolowski-bqfc-v1:";
 const MAX_COMPACT_GENESIS_ALLOCATIONS: usize = 100_000;
 const MAX_COMPACT_SNAPSHOT_BLOCKS: usize = 10_000;
 const MAX_COMPACT_VEC_ITEMS: usize = 10_000;
 const MAX_COMPACT_BYTE_FIELD: usize = 8 * 1024 * 1024;
 
+#[derive(Default)]
+struct EncodeTables {
+    addresses: BTreeMap<String, u64>,
+    protocol_ids: BTreeMap<String, u64>,
+}
+
+#[derive(Default)]
+struct DecodeTables {
+    addresses: Vec<String>,
+    address_indices: BTreeMap<String, u64>,
+    protocol_ids: Vec<String>,
+    protocol_id_indices: BTreeMap<String, u64>,
+}
+
+impl EncodeTables {
+    fn register_address(&mut self, value: &str) {
+        let next = self.addresses.len() as u64;
+        self.addresses.entry(value.to_string()).or_insert(next);
+    }
+
+    fn register_protocol_id(&mut self, value: &str) {
+        let next = self.protocol_ids.len() as u64;
+        self.protocol_ids.entry(value.to_string()).or_insert(next);
+    }
+}
+
+impl DecodeTables {
+    fn register_address(&mut self, value: &str) {
+        if !self.address_indices.contains_key(value) {
+            let index = self.addresses.len() as u64;
+            self.addresses.push(value.to_string());
+            self.address_indices.insert(value.to_string(), index);
+        }
+    }
+
+    fn register_protocol_id(&mut self, value: &str) {
+        if !self.protocol_id_indices.contains_key(value) {
+            let index = self.protocol_ids.len() as u64;
+            self.protocol_ids.push(value.to_string());
+            self.protocol_id_indices.insert(value.to_string(), index);
+        }
+    }
+}
+
 pub(super) fn encode_compact_snapshot(snapshot: &ChainSnapshot) -> Result<Vec<u8>> {
     let mut writer = CompactWriter::default();
+    let mut tables = EncodeTables::default();
     writer.bytes(COMPACT_SNAPSHOT_MAGIC);
-    let version = if snapshot.launch_profile.burn_lineage_maturity_heights
-        == crate::domain::BURN_LINEAGE_MATURITY_HEIGHTS
-    {
-        LEGACY_COMPACT_SNAPSHOT_VERSION
-    } else {
-        COMPACT_SNAPSHOT_VERSION
-    };
+    let version = COMPACT_SNAPSHOT_VERSION;
     writer.u8(version);
     writer.varint(snapshot.genesis_allocations.len() as u64);
     for (address, amount) in &snapshot.genesis_allocations {
-        writer.hex(address)?;
+        writer.address(address, &mut tables)?;
         writer.varint(*amount);
     }
     writer.varint(snapshot.vdf_rounds);
-    encode_launch_profile(&mut writer, &snapshot.launch_profile, version);
+    encode_launch_profile(&mut writer, &snapshot.launch_profile);
     writer.varint(snapshot.blocks.len() as u64);
     let mut expected_prev_hash = "0".repeat(64);
     for (height, block) in snapshot.blocks.iter().enumerate() {
@@ -47,7 +88,11 @@ pub(super) fn encode_compact_snapshot(snapshot: &ChainSnapshot) -> Result<Vec<u8
                 height
             );
         }
-        encode_block_body(&mut writer, block)?;
+        if block.hash != block.compute_hash() {
+            bail!("chain snapshot block {height} has a non-canonical hash");
+        }
+        encode_block_body(&mut writer, block, &mut tables)?;
+        tables.register_protocol_id(&block.hash);
         expected_prev_hash = block.hash.clone();
     }
     Ok(writer.into_inner())
@@ -55,29 +100,28 @@ pub(super) fn encode_compact_snapshot(snapshot: &ChainSnapshot) -> Result<Vec<u8
 
 pub(super) fn decode_compact_snapshot(bytes: &[u8]) -> Result<ChainSnapshot> {
     let mut reader = CompactReader::new(bytes);
+    let mut tables = DecodeTables::default();
     reader.magic(COMPACT_SNAPSHOT_MAGIC)?;
     let version = reader.u8()?;
-    if !matches!(
-        version,
-        LEGACY_COMPACT_SNAPSHOT_VERSION | COMPACT_SNAPSHOT_VERSION
-    ) {
+    if version != COMPACT_SNAPSHOT_VERSION {
         bail!("unsupported compact chain snapshot version {version}");
     }
     let genesis_count =
         reader.bounded_usize("genesis allocation count", MAX_COMPACT_GENESIS_ALLOCATIONS)?;
     let mut genesis_allocations = std::collections::BTreeMap::new();
     for _ in 0..genesis_count {
-        let address = reader.hex()?;
+        let address = reader.address(&mut tables)?;
         let amount = reader.varint()?;
         genesis_allocations.insert(address, amount);
     }
     let vdf_rounds = reader.varint()?;
-    let launch_profile = decode_launch_profile(&mut reader, version)?;
+    let launch_profile = decode_launch_profile(&mut reader)?;
     let block_count = reader.bounded_usize("block count", MAX_COMPACT_SNAPSHOT_BLOCKS)?;
     let mut blocks = Vec::with_capacity(block_count);
     let mut prev_hash = "0".repeat(64);
     for height in 0..block_count {
-        let block = decode_block_body(&mut reader, height as u64, prev_hash)?;
+        let block = decode_block_body(&mut reader, height as u64, prev_hash, &mut tables)?;
+        tables.register_protocol_id(&block.hash);
         prev_hash = block.hash.clone();
         blocks.push(block);
     }
@@ -90,39 +134,37 @@ pub(super) fn decode_compact_snapshot(bytes: &[u8]) -> Result<ChainSnapshot> {
     })
 }
 
-fn encode_launch_profile(writer: &mut CompactWriter, profile: &LaunchProfile, version: u8) {
+fn encode_launch_profile(writer: &mut CompactWriter, profile: &LaunchProfile) {
     writer.string(&profile.profile_id);
     writer.varint(profile.ticket_maturity_delay_heights);
     writer.varint(profile.ticket_expiry_window_heights);
     writer.varint(u64::from(profile.mine_difficulty_bits));
-    if version >= COMPACT_SNAPSHOT_VERSION {
-        writer.varint(profile.burn_lineage_maturity_heights);
-    }
+    writer.varint(profile.burn_lineage_maturity_heights);
     writer.varint(profile.max_pending_transactions as u64);
     writer.varint(profile.max_block_transactions as u64);
     writer.varint(profile.max_block_bytes as u64);
 }
 
-fn decode_launch_profile(reader: &mut CompactReader<'_>, version: u8) -> Result<LaunchProfile> {
+fn decode_launch_profile(reader: &mut CompactReader<'_>) -> Result<LaunchProfile> {
     Ok(LaunchProfile {
         profile_id: reader.string()?,
         ticket_maturity_delay_heights: reader.varint()?,
         ticket_expiry_window_heights: reader.varint()?,
         mine_difficulty_bits: reader.u32()?,
-        burn_lineage_maturity_heights: if version >= COMPACT_SNAPSHOT_VERSION {
-            reader.varint()?
-        } else {
-            crate::domain::BURN_LINEAGE_MATURITY_HEIGHTS
-        },
+        burn_lineage_maturity_heights: reader.varint()?,
         max_pending_transactions: reader.usize()?,
         max_block_transactions: reader.usize()?,
         max_block_bytes: reader.usize()?,
     })
 }
 
-fn encode_block_body(writer: &mut CompactWriter, block: &Block) -> Result<()> {
+fn encode_block_body(
+    writer: &mut CompactWriter,
+    block: &Block,
+    tables: &mut EncodeTables,
+) -> Result<()> {
     writer.varint(block.timestamp_ms);
-    writer.hex(&block.miner)?;
+    writer.address(&block.miner, tables)?;
     writer.u8(match block.finalizer_mode {
         FinalizerMode::Ticket => 0,
         FinalizerMode::Recovery => 1,
@@ -130,19 +172,19 @@ fn encode_block_body(writer: &mut CompactWriter, block: &Block) -> Result<()> {
     writer.varint(u64::from(block.finalizer_rank));
     writer.varint(block.reward);
     writer.varint(block.vdf_rounds);
-    writer.string(&block.vdf_output);
+    writer.compact_vdf_output(&block.vdf_output)?;
     writer.bool(block.leader_proof.is_some());
     if let Some(proof) = &block.leader_proof {
-        writer.hexish(&proof.ticket_id)?;
-        writer.hex(&proof.public_key)?;
-        writer.hex(&proof.signature)?;
+        writer.protocol_id_ref(&proof.ticket_id, tables)?;
+        writer.address(&proof.public_key, tables)?;
+        writer.fixed_hex::<64>(&proof.signature, "leader signature")?;
     }
-    encode_burn_bundle_section(writer, &block.burn_bundle_section)?;
     writer.varint(block.transactions.len() as u64);
     for transaction in &block.transactions {
-        encode_transaction(writer, transaction)?;
+        encode_transaction(writer, transaction, tables)?;
+        tables.register_protocol_id(transaction.signature());
     }
-    writer.hex(&block.hash)?;
+    encode_burn_bundle_section(writer, block, tables)?;
     Ok(())
 }
 
@@ -150,9 +192,10 @@ fn decode_block_body(
     reader: &mut CompactReader<'_>,
     height: u64,
     prev_hash: String,
+    tables: &mut DecodeTables,
 ) -> Result<Block> {
     let timestamp_ms = reader.varint()?;
-    let miner = reader.hex()?;
+    let miner = reader.address(tables)?;
     let finalizer_mode = match reader.u8()? {
         0 => FinalizerMode::Ticket,
         1 => FinalizerMode::Recovery,
@@ -161,25 +204,26 @@ fn decode_block_body(
     let finalizer_rank = reader.u32()?;
     let reward = reader.varint()?;
     let vdf_rounds = reader.varint()?;
-    let vdf_output = reader.string()?;
+    let vdf_output = reader.compact_vdf_output()?;
     let leader_proof = if reader.bool()? {
         Some(LeaderProof {
-            ticket_id: reader.hexish()?,
-            public_key: reader.hex()?,
-            signature: reader.hex()?,
+            ticket_id: reader.protocol_id_ref(tables)?,
+            public_key: reader.address(tables)?,
+            signature: reader.fixed_hex::<64>()?,
         })
     } else {
         None
     };
-    let burn_bundle_section = decode_burn_bundle_section(reader)?;
-    let transactions = decode_vec(
-        reader,
-        "block transaction count",
-        MAX_COMPACT_VEC_ITEMS,
-        decode_transaction,
-    )?;
-    let hash = reader.hex()?;
-    Ok(Block {
+    let transaction_count =
+        reader.bounded_usize("block transaction count", MAX_COMPACT_VEC_ITEMS)?;
+    let mut transactions = Vec::with_capacity(transaction_count);
+    for _ in 0..transaction_count {
+        let transaction = decode_transaction(reader, tables)?;
+        tables.register_protocol_id(transaction.signature());
+        transactions.push(transaction);
+    }
+    let burn_bundle_section = decode_burn_bundle_section(reader, &transactions, tables)?;
+    let mut block = Block {
         height,
         prev_hash,
         timestamp_ms,
@@ -192,29 +236,42 @@ fn decode_block_body(
         leader_proof,
         burn_bundle_section,
         transactions,
-        hash,
-    })
+        hash: String::new(),
+    };
+    block.hash = block.compute_hash();
+    Ok(block)
 }
 
 fn encode_burn_bundle_section(
     writer: &mut CompactWriter,
-    section: &BurnBundleSection,
+    block: &Block,
+    tables: &mut EncodeTables,
 ) -> Result<()> {
+    let section = &block.burn_bundle_section;
     writer.varint(section.signatures.len() as u64);
     for signature in &section.signatures {
         writer.varint(u64::from(signature.slot));
-        writer.hex(&signature.member)?;
-        writer.hex(&signature.signature)?;
+        writer.address(&signature.member, tables)?;
+        writer.fixed_hex::<64>(&signature.signature, "burn bundle signature")?;
     }
     writer.varint(section.burns.len() as u64);
     for masked in &section.burns {
-        encode_transaction(writer, &masked.burn)?;
+        let transaction_index = block
+            .transactions
+            .iter()
+            .position(|transaction| transaction == &masked.burn)
+            .context("burn bundle transaction is missing from block transactions")?;
+        writer.varint(transaction_index as u64);
         writer.u8(masked.bundle_mask);
     }
     Ok(())
 }
 
-fn decode_burn_bundle_section(reader: &mut CompactReader<'_>) -> Result<BurnBundleSection> {
+fn decode_burn_bundle_section(
+    reader: &mut CompactReader<'_>,
+    transactions: &[Transaction],
+    tables: &mut DecodeTables,
+) -> Result<BurnBundleSection> {
     let signatures = decode_vec(
         reader,
         "burn bundle signature count",
@@ -222,8 +279,8 @@ fn decode_burn_bundle_section(reader: &mut CompactReader<'_>) -> Result<BurnBund
         |reader| {
             Ok(BurnBundleSignature {
                 slot: u8::try_from(reader.varint()?).context("burn bundle slot does not fit u8")?,
-                member: reader.hex()?,
-                signature: reader.hex()?,
+                member: reader.address(tables)?,
+                signature: reader.fixed_hex::<64>()?,
             })
         },
     )?;
@@ -232,8 +289,19 @@ fn decode_burn_bundle_section(reader: &mut CompactReader<'_>) -> Result<BurnBund
         "burn bundle burn count",
         MAX_COMPACT_VEC_ITEMS,
         |reader| {
+            let transaction_index = reader.bounded_usize(
+                "burn bundle transaction index",
+                transactions.len().saturating_sub(1),
+            )?;
+            let burn = transactions
+                .get(transaction_index)
+                .context("burn bundle transaction index is out of bounds")?
+                .clone();
+            if !burn.is_burn() {
+                bail!("burn bundle transaction index does not reference a burn");
+            }
             Ok(MaskedBurn {
-                burn: decode_transaction(reader)?,
+                burn,
                 bundle_mask: reader.u8()?,
             })
         },
@@ -241,7 +309,11 @@ fn decode_burn_bundle_section(reader: &mut CompactReader<'_>) -> Result<BurnBund
     Ok(BurnBundleSection { signatures, burns })
 }
 
-fn encode_transaction(writer: &mut CompactWriter, transaction: &Transaction) -> Result<()> {
+fn encode_transaction(
+    writer: &mut CompactWriter,
+    transaction: &Transaction,
+    tables: &mut EncodeTables,
+) -> Result<()> {
     match transaction {
         Transaction::Transfer {
             inputs,
@@ -250,10 +322,13 @@ fn encode_transaction(writer: &mut CompactWriter, transaction: &Transaction) -> 
             signature,
         } => {
             writer.u8(0);
-            encode_inputs(writer, inputs)?;
-            encode_outputs(writer, outputs)?;
+            let owner = common_input_owner(inputs)?;
+            encode_outpoints(writer, inputs, tables)?;
+            writer.address(owner, tables)?;
+            encode_outputs(writer, outputs, tables)?;
             writer.varint(*fee);
-            writer.hex(signature)?;
+            writer.fixed_hex::<64>(signature, "transfer signature")?;
+            ensure_input_signatures(inputs, signature)?;
         }
         Transaction::Burn {
             inputs,
@@ -263,11 +338,32 @@ fn encode_transaction(writer: &mut CompactWriter, transaction: &Transaction) -> 
             signature,
         } => {
             writer.u8(1);
-            encode_inputs(writer, inputs)?;
-            encode_outputs(writer, change)?;
+            let owner = common_input_owner(inputs)?;
+            let genesis = inputs.iter().all(|input| input.signature == "genesis");
+            if !genesis {
+                ensure_input_signatures(inputs, signature)?;
+            }
+            let change_mode = match change.as_slice() {
+                [] => 0,
+                [output] if output.address == owner => 1,
+                _ => 2,
+            };
+            writer.u8(change_mode | (u8::from(genesis) << 2));
+            encode_outpoints(writer, inputs, tables)?;
+            writer.address(owner, tables)?;
+            match change_mode {
+                0 => {}
+                1 => writer.varint(change[0].amount),
+                2 => encode_outputs(writer, change, tables)?,
+                _ => unreachable!(),
+            }
             writer.varint(*amount);
             writer.varint(*fee);
-            writer.hexish(signature)?;
+            if genesis {
+                writer.fixed_hex::<32>(signature, "genesis burn signature")?;
+            } else {
+                writer.fixed_hex::<64>(signature, "burn signature")?;
+            }
         }
         Transaction::Mine {
             recipient,
@@ -279,48 +375,84 @@ fn encode_transaction(writer: &mut CompactWriter, transaction: &Transaction) -> 
             signature,
         } => {
             writer.u8(2);
-            writer.hex(recipient)?;
-            writer.hex(anchor)?;
+            writer.address(recipient, tables)?;
+            writer.protocol_id_ref(anchor, tables)?;
             writer.varint(*salt);
             writer.varint(*nonce);
             writer.varint(u64::from(*difficulty_bits));
             writer.bool(proof_header.is_some());
             if let Some(proof_header) = proof_header {
-                writer.hex(proof_header)?;
+                writer.fixed_hex::<80>(proof_header, "mine proof header")?;
             }
-            writer.hex(signature)?;
+            writer.fixed_hex::<32>(signature, "mine signature")?;
         }
     }
     Ok(())
 }
 
-fn decode_transaction(reader: &mut CompactReader<'_>) -> Result<Transaction> {
+fn decode_transaction(
+    reader: &mut CompactReader<'_>,
+    tables: &mut DecodeTables,
+) -> Result<Transaction> {
     match reader.u8()? {
-        0 => Ok(Transaction::Transfer {
-            inputs: decode_inputs(reader)?,
-            outputs: decode_outputs(reader)?,
-            fee: reader.varint()?,
-            signature: reader.hex()?,
-        }),
-        1 => Ok(Transaction::Burn {
-            inputs: decode_inputs(reader)?,
-            change: decode_outputs(reader)?,
-            amount: reader.varint()?,
-            fee: reader.varint()?,
-            signature: reader.hexish()?,
-        }),
+        0 => {
+            let outpoints = decode_outpoints(reader, tables)?;
+            let owner = reader.address(tables)?;
+            let outputs = decode_outputs(reader, tables)?;
+            let fee = reader.varint()?;
+            let signature = reader.fixed_hex::<64>()?;
+            Ok(Transaction::Transfer {
+                inputs: signed_inputs(outpoints, &owner, &signature),
+                outputs,
+                fee,
+                signature,
+            })
+        }
+        1 => {
+            let mode = reader.u8()?;
+            if mode & !0b111 != 0 || mode & 0b11 > 2 {
+                bail!("invalid compact burn mode {mode}");
+            }
+            let genesis = mode & 0b100 != 0;
+            let outpoints = decode_outpoints(reader, tables)?;
+            let owner = reader.address(tables)?;
+            let change = match mode & 0b11 {
+                0 => Vec::new(),
+                1 => vec![TxOutput {
+                    address: owner.clone(),
+                    amount: reader.varint()?,
+                }],
+                2 => decode_outputs(reader, tables)?,
+                _ => unreachable!(),
+            };
+            let amount = reader.varint()?;
+            let fee = reader.varint()?;
+            let signature = if genesis {
+                reader.fixed_hex::<32>()?
+            } else {
+                reader.fixed_hex::<64>()?
+            };
+            let input_signature = if genesis { "genesis" } else { &signature };
+            Ok(Transaction::Burn {
+                inputs: signed_inputs(outpoints, &owner, input_signature),
+                change,
+                amount,
+                fee,
+                signature,
+            })
+        }
         2 => {
-            let recipient = reader.hex()?;
-            let anchor = reader.hex()?;
+            let recipient = reader.address(tables)?;
+            let anchor = reader.protocol_id_ref(tables)?;
             let salt = reader.varint()?;
             let nonce = reader.varint()?;
             let difficulty_bits = reader.u32()?;
             let proof_header = if reader.bool()? {
-                Some(reader.hex()?)
+                Some(reader.fixed_hex::<80>()?)
             } else {
                 None
             };
-            let signature = reader.hex()?;
+            let signature = reader.fixed_hex::<32>()?;
             Ok(Transaction::Mine {
                 recipient,
                 anchor,
@@ -335,52 +467,89 @@ fn decode_transaction(reader: &mut CompactReader<'_>) -> Result<Transaction> {
     }
 }
 
-fn encode_inputs(writer: &mut CompactWriter, inputs: &[TxInput]) -> Result<()> {
-    writer.varint(inputs.len() as u64);
-    for input in inputs {
-        writer.hexish(&input.outpoint.txid)?;
-        writer.varint(u64::from(input.outpoint.index));
-        writer.hex(&input.owner)?;
-        writer.hexish(&input.signature)?;
+fn common_input_owner(inputs: &[TxInput]) -> Result<&str> {
+    let owner = inputs
+        .first()
+        .map(|input| input.owner.as_str())
+        .context("stored transaction has no inputs")?;
+    if inputs.iter().any(|input| input.owner != owner) {
+        bail!("stored transaction inputs have different owners");
+    }
+    Ok(owner)
+}
+
+fn ensure_input_signatures(inputs: &[TxInput], signature: &str) -> Result<()> {
+    if inputs.iter().any(|input| input.signature != signature) {
+        bail!("stored transaction input signature differs from transaction signature");
     }
     Ok(())
 }
 
-fn decode_inputs(reader: &mut CompactReader<'_>) -> Result<Vec<TxInput>> {
+fn encode_outpoints(
+    writer: &mut CompactWriter,
+    inputs: &[TxInput],
+    tables: &mut EncodeTables,
+) -> Result<()> {
+    writer.varint(inputs.len() as u64);
+    for input in inputs {
+        writer.protocol_id_ref(&input.outpoint.txid, tables)?;
+        writer.varint(u64::from(input.outpoint.index));
+    }
+    Ok(())
+}
+
+fn decode_outpoints(
+    reader: &mut CompactReader<'_>,
+    tables: &mut DecodeTables,
+) -> Result<Vec<OutPoint>> {
     decode_vec(
         reader,
         "transaction input count",
         MAX_COMPACT_VEC_ITEMS,
         |reader| {
-            Ok(TxInput {
-                outpoint: OutPoint {
-                    txid: reader.hexish()?,
-                    index: reader.u32()?,
-                },
-                owner: reader.hex()?,
-                signature: reader.hexish()?,
+            Ok(OutPoint {
+                txid: reader.protocol_id_ref(tables)?,
+                index: reader.u32()?,
             })
         },
     )
 }
 
-fn encode_outputs(writer: &mut CompactWriter, outputs: &[TxOutput]) -> Result<()> {
+fn signed_inputs(outpoints: Vec<OutPoint>, owner: &str, signature: &str) -> Vec<TxInput> {
+    outpoints
+        .into_iter()
+        .map(|outpoint| TxInput {
+            outpoint,
+            owner: owner.to_string(),
+            signature: signature.to_string(),
+        })
+        .collect()
+}
+
+fn encode_outputs(
+    writer: &mut CompactWriter,
+    outputs: &[TxOutput],
+    tables: &mut EncodeTables,
+) -> Result<()> {
     writer.varint(outputs.len() as u64);
     for output in outputs {
-        writer.hex(&output.address)?;
+        writer.address(&output.address, tables)?;
         writer.varint(output.amount);
     }
     Ok(())
 }
 
-fn decode_outputs(reader: &mut CompactReader<'_>) -> Result<Vec<TxOutput>> {
+fn decode_outputs(
+    reader: &mut CompactReader<'_>,
+    tables: &mut DecodeTables,
+) -> Result<Vec<TxOutput>> {
     decode_vec(
         reader,
         "transaction output count",
         MAX_COMPACT_VEC_ITEMS,
         |reader| {
             Ok(TxOutput {
-                address: reader.hex()?,
+                address: reader.address(tables)?,
                 amount: reader.varint()?,
             })
         },
@@ -443,8 +612,52 @@ impl CompactWriter {
         Ok(())
     }
 
-    fn hexish(&mut self, value: &str) -> Result<()> {
-        if value.len() % 2 == 0 && value.as_bytes().iter().all(|byte| byte.is_ascii_hexdigit()) {
+    fn fixed_hex<const N: usize>(&mut self, value: &str, label: &str) -> Result<()> {
+        let bytes = decode_hex(value).with_context(|| format!("invalid {label}"))?;
+        if bytes.len() != N {
+            bail!("invalid {label}: expected {N} bytes, got {}", bytes.len());
+        }
+        self.bytes(&bytes);
+        Ok(())
+    }
+
+    fn address(&mut self, value: &str, tables: &mut EncodeTables) -> Result<()> {
+        if let Some(index) = tables.addresses.get(value) {
+            self.u8(0);
+            self.varint(*index);
+        } else {
+            self.u8(1);
+            self.fixed_hex::<32>(value, "address")?;
+            tables.register_address(value);
+        }
+        Ok(())
+    }
+
+    fn protocol_id_ref(&mut self, value: &str, tables: &mut EncodeTables) -> Result<()> {
+        if let Some(index) = tables.protocol_ids.get(value) {
+            self.u8(0);
+            self.varint(*index);
+            return Ok(());
+        }
+        let bytes = decode_hex(value).context("invalid protocol id")?;
+        match bytes.len() {
+            32 => self.u8(1),
+            64 => self.u8(2),
+            length => bail!("invalid protocol id: expected 32 or 64 bytes, got {length}"),
+        }
+        self.bytes(&bytes);
+        tables.register_protocol_id(value);
+        Ok(())
+    }
+
+    fn compact_vdf_output(&mut self, value: &str) -> Result<()> {
+        if let Some(hex) = value.strip_prefix(VDF_SOLUTION_PREFIX) {
+            self.u8(2);
+            self.hex(hex)?;
+        } else if value.len() % 2 == 0
+            && !value.is_empty()
+            && value.as_bytes().iter().all(|byte| byte.is_ascii_hexdigit())
+        {
             self.u8(1);
             self.hex(value)?;
         } else {
@@ -554,11 +767,64 @@ impl<'a> CompactReader<'a> {
         Ok(hex_encode(self.take(len)?))
     }
 
-    fn hexish(&mut self) -> Result<String> {
+    fn fixed_hex<const N: usize>(&mut self) -> Result<String> {
+        Ok(hex_encode(self.take(N)?))
+    }
+
+    fn address(&mut self, tables: &mut DecodeTables) -> Result<String> {
+        match self.u8()? {
+            0 => {
+                let index = self.usize()?;
+                tables
+                    .addresses
+                    .get(index)
+                    .cloned()
+                    .context("compact address reference is out of bounds")
+            }
+            1 => {
+                let value = self.fixed_hex::<32>()?;
+                if tables.address_indices.contains_key(&value) {
+                    bail!("compact address is encoded twice instead of referenced");
+                }
+                tables.register_address(&value);
+                Ok(value)
+            }
+            other => bail!("invalid compact address tag {other}"),
+        }
+    }
+
+    fn protocol_id_ref(&mut self, tables: &mut DecodeTables) -> Result<String> {
+        match self.u8()? {
+            0 => {
+                let index = self.usize()?;
+                tables
+                    .protocol_ids
+                    .get(index)
+                    .cloned()
+                    .context("compact protocol id reference is out of bounds")
+            }
+            tag @ (1 | 2) => {
+                let value = if tag == 1 {
+                    self.fixed_hex::<32>()?
+                } else {
+                    self.fixed_hex::<64>()?
+                };
+                if tables.protocol_id_indices.contains_key(&value) {
+                    bail!("compact protocol id is encoded twice instead of referenced");
+                }
+                tables.register_protocol_id(&value);
+                Ok(value)
+            }
+            other => bail!("invalid compact protocol id tag {other}"),
+        }
+    }
+
+    fn compact_vdf_output(&mut self) -> Result<String> {
         match self.u8()? {
             0 => self.string(),
             1 => self.hex(),
-            other => bail!("invalid compact hexish tag {other}"),
+            2 => Ok(format!("{VDF_SOLUTION_PREFIX}{}", self.hex()?)),
+            other => bail!("invalid compact VDF output tag {other}"),
         }
     }
 }
@@ -597,24 +863,28 @@ fn hex_encode(bytes: impl AsRef<[u8]>) -> String {
 mod tests {
     use std::{collections::BTreeMap, panic};
 
-    use crate::domain::{LaunchProfile, Ledger, MICRO_IUNA, Wallet};
+    use crate::domain::{
+        Block, BurnBundleSection, FinalizerMode, LaunchProfile, Ledger, MICRO_IUNA, MaskedBurn,
+        OutPoint, Transaction, TxInput, TxOutput, Wallet,
+    };
 
     use super::{
         COMPACT_SNAPSHOT_MAGIC, COMPACT_SNAPSHOT_VERSION, CompactReader, CompactWriter,
-        LEGACY_COMPACT_SNAPSHOT_VERSION, MAX_COMPACT_BYTE_FIELD, MAX_COMPACT_GENESIS_ALLOCATIONS,
-        MAX_COMPACT_SNAPSHOT_BLOCKS, MAX_COMPACT_VEC_ITEMS, decode_compact_snapshot,
-        decode_launch_profile, encode_compact_snapshot, encode_launch_profile,
+        DecodeTables, EncodeTables, MAX_COMPACT_BYTE_FIELD, MAX_COMPACT_GENESIS_ALLOCATIONS,
+        MAX_COMPACT_SNAPSHOT_BLOCKS, MAX_COMPACT_VEC_ITEMS, decode_block_body,
+        decode_compact_snapshot, decode_launch_profile, decode_transaction, encode_block_body,
+        encode_compact_snapshot, encode_launch_profile, encode_transaction,
     };
 
     #[test]
-    fn default_profile_keeps_v4_wire_format_while_local_profile_uses_v5() {
+    fn compact_snapshot_v6_roundtrips_default_and_local_profiles() {
         let wallet = Wallet::from_seed("compact-profile-wire-version");
         let allocations = BTreeMap::from([(wallet.address().to_string(), MICRO_IUNA)]);
         let default_snapshot = Ledger::new(allocations.clone(), 1).snapshot();
         let default_bytes = encode_compact_snapshot(&default_snapshot).unwrap();
         assert_eq!(
             default_bytes[COMPACT_SNAPSHOT_MAGIC.len()],
-            LEGACY_COMPACT_SNAPSHOT_VERSION
+            COMPACT_SNAPSHOT_VERSION
         );
         assert_eq!(
             decode_compact_snapshot(&default_bytes).unwrap(),
@@ -644,14 +914,157 @@ mod tests {
     fn compact_launch_profile_roundtrips_local_lineage_maturity() {
         let expected = LaunchProfile::local_testnet();
         let mut writer = CompactWriter::default();
-        encode_launch_profile(&mut writer, &expected, COMPACT_SNAPSHOT_VERSION);
+        encode_launch_profile(&mut writer, &expected);
         let bytes = writer.into_inner();
         let mut reader = CompactReader::new(&bytes);
 
-        let decoded = decode_launch_profile(&mut reader, COMPACT_SNAPSHOT_VERSION).unwrap();
+        let decoded = decode_launch_profile(&mut reader).unwrap();
 
         reader.finish().unwrap();
         assert_eq!(decoded, expected);
+    }
+
+    fn input(owner: &str, signature: &str) -> TxInput {
+        TxInput {
+            outpoint: OutPoint {
+                txid: "1".repeat(128),
+                index: 0,
+            },
+            owner: owner.to_string(),
+            signature: signature.to_string(),
+        }
+    }
+
+    fn assert_transaction_roundtrip(transaction: &Transaction) -> usize {
+        let mut writer = CompactWriter::default();
+        encode_transaction(&mut writer, transaction, &mut EncodeTables::default()).unwrap();
+        let bytes = writer.into_inner();
+        let mut reader = CompactReader::new(&bytes);
+        let decoded = decode_transaction(&mut reader, &mut DecodeTables::default()).unwrap();
+        reader.finish().unwrap();
+        assert_eq!(&decoded, transaction);
+        bytes.len()
+    }
+
+    #[test]
+    fn compact_transactions_roundtrip_and_prioritize_burn_storage() {
+        let owner = "2".repeat(64);
+        let signature = "3".repeat(128);
+        let burn = Transaction::Burn {
+            inputs: vec![input(&owner, &signature)],
+            change: vec![TxOutput {
+                address: owner.clone(),
+                amount: 10,
+            }],
+            amount: 20,
+            fee: 1,
+            signature: signature.clone(),
+        };
+        let transfer = Transaction::Transfer {
+            inputs: vec![input(&owner, &signature)],
+            outputs: vec![TxOutput {
+                address: "4".repeat(64),
+                amount: 10,
+            }],
+            fee: 1,
+            signature,
+        };
+        let mine = Transaction::Mine {
+            recipient: owner,
+            anchor: "5".repeat(64),
+            salt: 1,
+            nonce: 1,
+            difficulty_bits: 1,
+            proof_header: None,
+            signature: "6".repeat(64),
+        };
+
+        assert_eq!(assert_transaction_roundtrip(&burn), 169);
+        assert_eq!(assert_transaction_roundtrip(&transfer), 201);
+        assert_eq!(assert_transaction_roundtrip(&mine), 103);
+    }
+
+    #[test]
+    fn repeated_burn_references_shrink_to_small_varints() {
+        let owner = "2".repeat(64);
+        let signature = "3".repeat(128);
+        let spent_txid = "1".repeat(128);
+        let burn = Transaction::Burn {
+            inputs: vec![input(&owner, &signature)],
+            change: vec![TxOutput {
+                address: owner.clone(),
+                amount: 10,
+            }],
+            amount: 20,
+            fee: 1,
+            signature,
+        };
+        let mut tables = EncodeTables::default();
+        tables.register_address(&owner);
+        tables.register_protocol_id(&spent_txid);
+        let mut writer = CompactWriter::default();
+        encode_transaction(&mut writer, &burn, &mut tables).unwrap();
+
+        assert_eq!(writer.into_inner().len(), 75);
+    }
+
+    #[test]
+    fn burn_bundle_section_stores_transaction_index_instead_of_burn_copy() {
+        let owner = "2".repeat(64);
+        let signature = "3".repeat(128);
+        let burn = Transaction::Burn {
+            inputs: vec![input(&owner, &signature)],
+            change: Vec::new(),
+            amount: 20,
+            fee: 1,
+            signature,
+        };
+        let block_with_section = |burn_bundle_section| {
+            let mut block = Block {
+                height: 0,
+                prev_hash: "0".repeat(64),
+                timestamp_ms: 1,
+                miner: owner.clone(),
+                finalizer_mode: FinalizerMode::Ticket,
+                finalizer_rank: 0,
+                reward: 0,
+                vdf_rounds: 1,
+                vdf_output: "vdf".to_string(),
+                leader_proof: None,
+                burn_bundle_section,
+                transactions: vec![burn.clone()],
+                hash: String::new(),
+            };
+            block.hash = block.compute_hash();
+            block
+        };
+        let without = block_with_section(BurnBundleSection::default());
+        let with = block_with_section(BurnBundleSection {
+            signatures: Vec::new(),
+            burns: vec![MaskedBurn {
+                burn: burn.clone(),
+                bundle_mask: 0b10,
+            }],
+        });
+        let encode = |block: &Block| {
+            let mut writer = CompactWriter::default();
+            encode_block_body(&mut writer, block, &mut EncodeTables::default()).unwrap();
+            writer.into_inner()
+        };
+        let without_bytes = encode(&without);
+        let with_bytes = encode(&with);
+        assert_eq!(with_bytes.len() - without_bytes.len(), 2);
+
+        let mut reader = CompactReader::new(&with_bytes);
+        let decoded = decode_block_body(
+            &mut reader,
+            with.height,
+            with.prev_hash.clone(),
+            &mut DecodeTables::default(),
+        )
+        .unwrap();
+        reader.finish().unwrap();
+        assert_eq!(decoded, with);
     }
 
     fn snapshot_prefix(block_count: u64) -> Vec<u8> {
@@ -660,11 +1073,7 @@ mod tests {
         writer.u8(COMPACT_SNAPSHOT_VERSION);
         writer.varint(0);
         writer.varint(1);
-        encode_launch_profile(
-            &mut writer,
-            &LaunchProfile::default(),
-            COMPACT_SNAPSHOT_VERSION,
-        );
+        encode_launch_profile(&mut writer, &LaunchProfile::default());
         writer.varint(block_count);
         writer.into_inner()
     }
@@ -675,7 +1084,10 @@ mod tests {
 
     fn block_body_prefix(writer: &mut CompactWriter) {
         writer.varint(1);
-        writer.hex(&"0".repeat(64)).unwrap();
+        writer.u8(1);
+        writer
+            .fixed_hex::<32>(&"0".repeat(64), "test miner")
+            .unwrap();
     }
 
     fn block_body_through_leader_proof_flag(writer: &mut CompactWriter) {
@@ -684,14 +1096,13 @@ mod tests {
         writer.varint(0);
         writer.varint(0);
         writer.varint(0);
+        writer.u8(0);
         writer.string("0:0");
     }
 
     fn block_body_through_transaction_count(writer: &mut CompactWriter, tx_count: u64) {
         block_body_through_leader_proof_flag(writer);
         writer.bool(false);
-        writer.varint(0);
-        writer.varint(0);
         writer.varint(tx_count);
     }
 
@@ -729,6 +1140,7 @@ mod tests {
         writer.varint(0);
         writer.varint(0);
         writer.varint(0);
+        writer.u8(0);
         writer.varint(MAX_COMPACT_BYTE_FIELD as u64 + 1);
         huge_string.extend(writer.into_inner());
         assert_decode_error_contains(&huge_string, "string length");
@@ -742,6 +1154,15 @@ mod tests {
         bytes.extend_from_slice(&[0xff; 10]);
 
         assert_decode_error_contains(&bytes, "compact varint is too large");
+    }
+
+    #[test]
+    fn compact_snapshot_decoder_rejects_pre_reset_versions() {
+        let mut bytes = Vec::new();
+        bytes.extend_from_slice(COMPACT_SNAPSHOT_MAGIC);
+        bytes.push(COMPACT_SNAPSHOT_VERSION - 1);
+
+        assert_decode_error_contains(&bytes, "unsupported compact chain snapshot version 5");
     }
 
     #[test]
