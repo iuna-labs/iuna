@@ -457,6 +457,7 @@ deploy_docker_image() {
   import_image_to_k3s "$www_image" "$tmp_folder"
   import_image_to_k3s "$node_image" "$tmp_folder"
   render_manifest "$www_image" "$node_image" "$node_pvc" "$genesis" "${tmp_folder}/deployment.yml"
+  kubectl --context "$kubectl_context" apply -f config/traefik.yml
 
   if [ "$genesis" = "true" ]; then
     echo "WARNING: the existing chain is about to be permanently deleted."
