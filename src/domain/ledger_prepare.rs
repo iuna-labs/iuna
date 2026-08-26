@@ -3,7 +3,7 @@ use anyhow::{Result, bail};
 use super::{
     BurnBundle, FinalizerMode, Ledger, PreparedBlock, RECOVERY_BLOCK_DELAY_MS, Wallet,
     ensure_block_has_burn, ensure_block_has_burn_from, recovery_vdf_seed_for_child, run_vdf,
-    ticket_block_min_timestamp, vdf_seed_for_child,
+    ticket_block_min_timestamp, vdf_content_commitment, vdf_seed_for_child,
 };
 
 impl Ledger {
@@ -67,16 +67,30 @@ impl Ledger {
         let prev_hash = tip.hash.clone();
         let timestamp_ms = timestamp_ms.max(ticket_block_min_timestamp(tip, finalizer_rank)?);
         let bundle_hashes = burn_bundle_section.burn_bundle_hashes(height, &prev_hash, miner);
-        let vdf_seed = vdf_seed_for_child(&prev_hash, height, &bundle_hashes);
+        let reward =
+            self.expected_reward_for_next_block(&selection.transactions, &burn_bundle_section)?;
+        let vdf_rounds = self.vdf_rounds_for_finalizer_rank(finalizer_rank)?;
+        let content_commitment = vdf_content_commitment(
+            height,
+            &prev_hash,
+            miner,
+            FinalizerMode::Ticket,
+            finalizer_rank,
+            reward,
+            vdf_rounds,
+            Some(&leader_ticket.id),
+            &burn_bundle_section,
+            &selection.transactions,
+        );
+        let vdf_seed = vdf_seed_for_child(&prev_hash, height, &bundle_hashes, &content_commitment);
         Ok(PreparedBlock {
             height,
             prev_hash,
             timestamp_ms,
             miner: miner.to_string(),
             finalizer_mode: FinalizerMode::Ticket,
-            reward: self
-                .expected_reward_for_next_block(&selection.transactions, &burn_bundle_section)?,
-            vdf_rounds: self.vdf_rounds_for_finalizer_rank(finalizer_rank)?,
+            reward,
+            vdf_rounds,
             vdf_seed,
             finalizer_rank,
             leader_ticket: Some(leader_ticket),
@@ -140,8 +154,28 @@ impl Ledger {
         let prev_hash = tip.hash.clone();
         let timestamp_ms = timestamp_ms.max(tip.timestamp_ms + 1);
         let bundle_hashes = burn_bundle_section.burn_bundle_hashes(height, &prev_hash, miner);
-        let vdf_seed =
-            recovery_vdf_seed_for_child(&prev_hash, height, timestamp_ms, &bundle_hashes);
+        let reward =
+            self.expected_reward_for_next_block(&selection.transactions, &burn_bundle_section)?;
+        let vdf_rounds = self.recovery_vdf_rounds()?;
+        let content_commitment = vdf_content_commitment(
+            height,
+            &prev_hash,
+            miner,
+            FinalizerMode::Recovery,
+            0,
+            reward,
+            vdf_rounds,
+            None,
+            &burn_bundle_section,
+            &selection.transactions,
+        );
+        let vdf_seed = recovery_vdf_seed_for_child(
+            &prev_hash,
+            height,
+            timestamp_ms,
+            &bundle_hashes,
+            &content_commitment,
+        );
         Ok(PreparedBlock {
             height,
             prev_hash,
@@ -149,9 +183,8 @@ impl Ledger {
             miner: miner.to_string(),
             finalizer_mode: FinalizerMode::Recovery,
             finalizer_rank: 0,
-            reward: self
-                .expected_reward_for_next_block(&selection.transactions, &burn_bundle_section)?,
-            vdf_rounds: self.recovery_vdf_rounds()?,
+            reward,
+            vdf_rounds,
             vdf_seed,
             leader_ticket: None,
             burn_bundle_section,

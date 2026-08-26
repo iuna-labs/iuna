@@ -5,7 +5,8 @@ use serde::{Deserialize, Serialize};
 
 use super::{
     Amount, BURN_COMMITTEE_SIZE, BurnBundleSection, BurnTicket, LaunchProfile, LeaderScore,
-    Transaction, Wallet, hex_hash, recovery_vdf_seed_for_child, vdf_seed_for_child,
+    Transaction, Wallet, hex_hash, recovery_vdf_seed_for_child, vdf_content_commitment,
+    vdf_seed_for_child,
 };
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
@@ -48,17 +49,39 @@ impl Block {
 
     pub fn vdf_seed(&self) -> String {
         let bundle_hashes = self.burn_bundle_hashes();
+        let content_commitment = self.vdf_content_commitment();
         match self.finalizer_mode {
-            FinalizerMode::Ticket => {
-                vdf_seed_for_child(&self.prev_hash, self.height, &bundle_hashes)
-            }
+            FinalizerMode::Ticket => vdf_seed_for_child(
+                &self.prev_hash,
+                self.height,
+                &bundle_hashes,
+                &content_commitment,
+            ),
             FinalizerMode::Recovery => recovery_vdf_seed_for_child(
                 &self.prev_hash,
                 self.height,
                 self.timestamp_ms,
                 &bundle_hashes,
+                &content_commitment,
             ),
         }
+    }
+
+    fn vdf_content_commitment(&self) -> String {
+        vdf_content_commitment(
+            self.height,
+            &self.prev_hash,
+            &self.miner,
+            self.finalizer_mode,
+            self.finalizer_rank,
+            self.reward,
+            self.vdf_rounds,
+            self.leader_proof
+                .as_ref()
+                .map(|proof| proof.ticket_id.as_str()),
+            &self.burn_bundle_section,
+            &self.transactions,
+        )
     }
 
     fn content_hash(&self) -> String {
@@ -317,7 +340,10 @@ mod tests {
     use super::{
         Block, BurnBundleSection, FinalizerMode, LeaderProofPayload, canonical_burn_block_items,
     };
-    use crate::domain::Transaction;
+    use crate::domain::{
+        BurnTicket, GRINDING_RESISTANCE_ACTIVATION_HEIGHT, PreparedBlock, Transaction, Wallet,
+        run_vdf, verify_vdf,
+    };
 
     #[test]
     fn primary_leader_proof_payload_omits_rank_from_canonical_form() {
@@ -374,6 +400,105 @@ mod tests {
         block.hash = block.compute_hash();
 
         assert_eq!(block.compute_hash(), block.hash);
+    }
+
+    #[test]
+    fn post_activation_vdf_binds_transactions_but_allows_ticket_timestamp_completion() {
+        let mut block = Block {
+            height: GRINDING_RESISTANCE_ACTIVATION_HEIGHT,
+            prev_hash: "0".repeat(64),
+            timestamp_ms: 1,
+            miner: "1".repeat(64),
+            finalizer_mode: FinalizerMode::Ticket,
+            finalizer_rank: 0,
+            reward: 1,
+            vdf_rounds: 16,
+            vdf_output: String::new(),
+            leader_proof: None,
+            burn_bundle_section: BurnBundleSection::default(),
+            transactions: vec![Transaction::genesis_burn("2".repeat(64), 1)],
+            hash: String::new(),
+        };
+        let original_seed = block.vdf_seed();
+        let output = run_vdf(&original_seed, block.vdf_rounds);
+        block.vdf_output = output.clone();
+        assert!(verify_vdf(&block.vdf_seed(), block.vdf_rounds, &output));
+
+        let mut changed_transactions = block.clone();
+        changed_transactions.transactions = vec![Transaction::genesis_burn("3".repeat(64), 1)];
+        assert_ne!(changed_transactions.vdf_seed(), original_seed);
+        assert!(!verify_vdf(
+            &changed_transactions.vdf_seed(),
+            changed_transactions.vdf_rounds,
+            &output
+        ));
+
+        let mut completed_later = block.clone();
+        completed_later.timestamp_ms += 1_000;
+        assert_eq!(completed_later.vdf_seed(), original_seed);
+        assert!(verify_vdf(
+            &completed_later.vdf_seed(),
+            completed_later.vdf_rounds,
+            &output
+        ));
+    }
+
+    #[test]
+    fn prepared_and_finished_blocks_share_post_activation_vdf_commitment() {
+        let wallet = Wallet::from_seed("vdf-commitment-finalizer");
+        let transactions = vec![Transaction::genesis_burn(wallet.address(), 1)];
+        let mut prepared = PreparedBlock {
+            height: GRINDING_RESISTANCE_ACTIVATION_HEIGHT,
+            prev_hash: "0".repeat(64),
+            timestamp_ms: 10,
+            miner: wallet.address().to_string(),
+            finalizer_mode: FinalizerMode::Ticket,
+            finalizer_rank: 0,
+            reward: 1,
+            vdf_rounds: 1,
+            vdf_seed: String::new(),
+            leader_ticket: Some(BurnTicket {
+                id: "4".repeat(64),
+                owner: wallet.address().to_string(),
+                amount: 1,
+                eligible_from_height: GRINDING_RESISTANCE_ACTIVATION_HEIGHT,
+                eligible_until_height: GRINDING_RESISTANCE_ACTIVATION_HEIGHT,
+            }),
+            burn_bundle_section: BurnBundleSection::default(),
+            transactions,
+        };
+        let bundle_hashes = prepared.burn_bundle_section.burn_bundle_hashes(
+            prepared.height,
+            &prepared.prev_hash,
+            &prepared.miner,
+        );
+        let commitment = super::vdf_content_commitment(
+            prepared.height,
+            &prepared.prev_hash,
+            &prepared.miner,
+            prepared.finalizer_mode,
+            prepared.finalizer_rank,
+            prepared.reward,
+            prepared.vdf_rounds,
+            prepared
+                .leader_ticket
+                .as_ref()
+                .map(|ticket| ticket.id.as_str()),
+            &prepared.burn_bundle_section,
+            &prepared.transactions,
+        );
+        prepared.vdf_seed = super::vdf_seed_for_child(
+            &prepared.prev_hash,
+            prepared.height,
+            &bundle_hashes,
+            &commitment,
+        );
+        let expected_seed = prepared.vdf_seed.clone();
+        let output = run_vdf(&expected_seed, prepared.vdf_rounds);
+
+        let block = prepared.finish_at(&wallet, output, 20);
+
+        assert_eq!(block.vdf_seed(), expected_seed);
     }
 
     #[test]

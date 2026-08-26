@@ -147,6 +147,26 @@ Avoid:
 - deleting or replacing wallets as part of the chain reset;
 - starting before the published genesis hash and release checksum are available.
 
+## Height 1000 Grinding-Resistance Upgrade
+
+Height `1000` is a coordinated consensus activation. At that height, VDF seeds
+start committing to block content and ticket draws stop using the final block
+hash. This preserves blocks below `1000`, but nodes running the earlier rule will
+reject the upgraded chain or build an incompatible fork at activation.
+
+Before height `1000`:
+
+1. Publish a tagged release, commit, checksums, and the activation height.
+2. Upgrade every known public peer, finalizer, and bootstrap node.
+3. Verify the reported package version on each managed node and compare tips.
+4. Stop or isolate nodes that cannot be upgraded before activation.
+5. Keep chain database backups from immediately before the activation window.
+
+At and after height `1000`, compare height and tip hash across at least three
+independent nodes. If upgraded nodes disagree, preserve both histories and stop
+automated restarts; do not reset the apparent majority until both forks have
+been validated.
+
 ## No Burn Committee Signatures
 
 Symptoms:

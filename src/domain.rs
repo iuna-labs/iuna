@@ -45,7 +45,8 @@ use ledger_lineage::{
 pub use ledger_ops::reward_outputs_for_block;
 use ledger_ops::{
     apply_transaction, credit_reward_output, ensure_block_has_burn, ensure_block_has_burn_from,
-    recovery_vdf_seed_for_child, validate_genesis_burn_transaction, vdf_seed_for_child,
+    recovery_vdf_seed_for_child, validate_genesis_burn_transaction, vdf_content_commitment,
+    vdf_seed_for_child,
 };
 pub(crate) use ledger_pending::MINE_ANCHOR_LIMIT_REACHED;
 pub use ledger_state::Ledger;
@@ -55,10 +56,10 @@ use mining::{mine_payload, mine_signature};
 pub use profile::{GenesisBurn, LaunchProfile};
 pub use protocol::{
     Amount, BLOCK_REWARD, BURN_COMMITTEE_SIZE, BURN_LINEAGE_MATURITY_HEIGHTS, DEFAULT_FEE_PER_BYTE,
-    DEFAULT_MINE_FEE, DEFAULT_TRANSACTION_FEE, MAX_BLOCK_BYTES, MAX_BURN_BUNDLE_BYTES,
-    MAX_PENDING_TRANSACTIONS, MAX_VDF_ROUNDS, MICRO_IUNA, MINE_ACTIONS_PER_ANCHOR_LIMIT,
-    MINE_DIFFICULTY_BITS, MINE_FINALIZER_FEE, MINE_REWARD, RECOVERY_BLOCK_DELAY_MS,
-    TransactionSubmitOutcome, VDF_TARGET_BLOCK_MS,
+    DEFAULT_MINE_FEE, DEFAULT_TRANSACTION_FEE, GRINDING_RESISTANCE_ACTIVATION_HEIGHT,
+    MAX_BLOCK_BYTES, MAX_BURN_BUNDLE_BYTES, MAX_PENDING_TRANSACTIONS, MAX_VDF_ROUNDS, MICRO_IUNA,
+    MINE_ACTIONS_PER_ANCHOR_LIMIT, MINE_DIFFICULTY_BITS, MINE_FINALIZER_FEE, MINE_REWARD,
+    RECOVERY_BLOCK_DELAY_MS, TransactionSubmitOutcome, VDF_TARGET_BLOCK_MS,
 };
 use protocol::{
     BLOCK_MEDIAN_TIME_PAST_WINDOW, DEFAULT_TICKET_EXPIRY_WINDOW, DEFAULT_TICKET_MATURITY_DELAY,

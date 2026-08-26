@@ -12,9 +12,10 @@ use super::ticket::{
 use super::{
     Amount, BURN_COMMITTEE_SIZE, BURN_LINEAGE_MATURITY_HEIGHTS, Block, BurnBundle,
     BurnBundleSignature, BurnCommitteeMember, BurnLeaderRank, ChainSnapshot, FinalizerMode,
-    GenesisBurn, LeaderProofPayload, Ledger, MAX_BLOCK_BYTES, MAX_BURN_BUNDLE_BYTES, MICRO_IUNA,
-    MaskedBurn, OutPoint, Transaction, TransactionSubmitOutcome, TxOutput, UtxoLineageRoot,
-    VDF_TARGET_BLOCK_MS, Wallet, hex_hash, reward_outputs_for_block, run_vdf,
+    GRINDING_RESISTANCE_ACTIVATION_HEIGHT, GenesisBurn, LeaderProofPayload, Ledger,
+    MAX_BLOCK_BYTES, MAX_BURN_BUNDLE_BYTES, MICRO_IUNA, MaskedBurn, OutPoint, Transaction,
+    TransactionSubmitOutcome, TxOutput, UtxoLineageRoot, VDF_TARGET_BLOCK_MS, Wallet, hex_hash,
+    reward_outputs_for_block, run_vdf,
 };
 
 const NOW_MS: u64 = 10_000_000_000;
@@ -1388,15 +1389,17 @@ fn mini_weighted_ticket_draw(
     rank: u32,
     total_weight: u128,
 ) -> u128 {
+    let parent_randomness = if target_height >= GRINDING_RESISTANCE_ACTIVATION_HEIGHT {
+        format!("{}:{}", parent.vdf_seed(), parent.vdf_output)
+    } else {
+        format!("{}:{}", parent.hash, parent.vdf_output)
+    };
     let seed = if rank == 0 {
-        format!(
-            "iuna-ticket-draw:{}:{}:{}",
-            target_height, parent.hash, parent.vdf_output
-        )
+        format!("iuna-ticket-draw:{}:{}", target_height, parent_randomness)
     } else {
         format!(
-            "iuna-ticket-draw-rank:{}:{}:{}:{}",
-            target_height, rank, parent.hash, parent.vdf_output
+            "iuna-ticket-draw-rank:{}:{}:{}",
+            target_height, rank, parent_randomness
         )
     };
     let digest = Sha256::digest(seed.as_bytes());

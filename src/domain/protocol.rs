@@ -16,6 +16,7 @@ pub const MINE_ACTIONS_PER_ANCHOR_LIMIT: usize = 2;
 pub const BURN_COMMITTEE_SIZE: usize = 5;
 pub const MAX_BURN_BUNDLE_BYTES: usize = 10_000;
 pub const BURN_LINEAGE_MATURITY_HEIGHTS: u64 = 20;
+pub const GRINDING_RESISTANCE_ACTIVATION_HEIGHT: u64 = 1_000;
 
 pub const MAX_PENDING_TRANSACTIONS: usize = 10_000;
 pub(super) const MAX_PENDING_POOL_BYTES: usize = 8 * 1024 * 1024;
@@ -61,6 +62,7 @@ mod tests {
         assert_eq!(BURN_COMMITTEE_SIZE, 5);
         assert_eq!(MAX_BURN_BUNDLE_BYTES, 10_000);
         assert_eq!(BURN_LINEAGE_MATURITY_HEIGHTS, 20);
+        assert_eq!(GRINDING_RESISTANCE_ACTIVATION_HEIGHT, 1_000);
         assert_eq!(MAX_PENDING_TRANSACTIONS, 10_000);
         assert_eq!(MAX_PENDING_POOL_BYTES, 8 * 1024 * 1024);
         assert_eq!(MAX_ORPHAN_TRANSACTIONS, 1_024);

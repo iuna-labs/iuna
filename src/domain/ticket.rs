@@ -4,8 +4,8 @@ use anyhow::{Context, Result, bail};
 use sha2::{Digest, Sha256};
 
 use super::{
-    Amount, Block, FinalizerMode, LaunchProfile, MAX_VDF_ROUNDS, Transaction, VDF_TARGET_BLOCK_MS,
-    hex_hash,
+    Amount, Block, FinalizerMode, GRINDING_RESISTANCE_ACTIVATION_HEIGHT, LaunchProfile,
+    MAX_VDF_ROUNDS, Transaction, VDF_TARGET_BLOCK_MS, hex_hash,
 };
 
 pub(super) const MISSED_FALLBACK_TICKET_INVALIDATION_HEIGHT: u64 = 300;
@@ -68,21 +68,27 @@ fn select_weighted_ticket_index(
 }
 
 fn weighted_ticket_draw(parent: &Block, target_height: u64, rank: u32, total_weight: u128) -> u128 {
-    let seed = if rank == 0 {
-        format!(
-            "iuna-ticket-draw:{}:{}:{}",
-            target_height, parent.hash, parent.vdf_output
-        )
-    } else {
-        format!(
-            "iuna-ticket-draw-rank:{}:{}:{}:{}",
-            target_height, rank, parent.hash, parent.vdf_output
-        )
-    };
+    let seed = ticket_draw_seed(parent, target_height, rank);
     let digest = Sha256::digest(seed.as_bytes());
     let mut bytes = [0_u8; 16];
     bytes.copy_from_slice(&digest[..16]);
     u128::from_be_bytes(bytes) % total_weight
+}
+
+fn ticket_draw_seed(parent: &Block, target_height: u64, rank: u32) -> String {
+    let parent_randomness = if target_height >= GRINDING_RESISTANCE_ACTIVATION_HEIGHT {
+        format!("{}:{}", parent.vdf_seed(), parent.vdf_output)
+    } else {
+        format!("{}:{}", parent.hash, parent.vdf_output)
+    };
+    if rank == 0 {
+        format!("iuna-ticket-draw:{}:{}", target_height, parent_randomness)
+    } else {
+        format!(
+            "iuna-ticket-draw-rank:{}:{}:{}",
+            target_height, rank, parent_randomness
+        )
+    }
 }
 
 pub(super) fn vdf_rounds_for_finalizer_rank(base_rounds: u64, rank: u32) -> Result<u64> {
@@ -350,6 +356,28 @@ mod tests {
             transactions: Vec::new(),
             hash: "1".repeat(64),
         }
+    }
+
+    #[test]
+    fn ticket_draw_stops_using_grindable_parent_hash_at_height_1000() {
+        let mut legacy_left = parent(GRINDING_RESISTANCE_ACTIVATION_HEIGHT - 2);
+        legacy_left.hash = "1".repeat(64);
+        let mut legacy_right = legacy_left.clone();
+        legacy_right.hash = "2".repeat(64);
+
+        assert_ne!(
+            ticket_draw_seed(&legacy_left, GRINDING_RESISTANCE_ACTIVATION_HEIGHT - 1, 0),
+            ticket_draw_seed(&legacy_right, GRINDING_RESISTANCE_ACTIVATION_HEIGHT - 1, 0)
+        );
+
+        let mut activated_left = parent(GRINDING_RESISTANCE_ACTIVATION_HEIGHT - 1);
+        activated_left.hash = "1".repeat(64);
+        let mut activated_right = activated_left.clone();
+        activated_right.hash = "2".repeat(64);
+        assert_eq!(
+            ticket_draw_seed(&activated_left, GRINDING_RESISTANCE_ACTIVATION_HEIGHT, 0),
+            ticket_draw_seed(&activated_right, GRINDING_RESISTANCE_ACTIVATION_HEIGHT, 0)
+        );
     }
 
     fn ticket(id: char, owner: &str, from: u64, until: u64) -> BurnTicket {

@@ -13,9 +13,10 @@ use super::transaction::Transaction;
 use super::vdf::vdf_solution_placeholder;
 use super::{
     Amount, BURN_COMMITTEE_SIZE, Block, BlockSelection, BurnCommitteeMember, BurnTicket,
-    FinalizerMode, LeaderProof, LeaderProofPayload, Ledger, MINE_REWARD, OutPoint,
-    PUBLIC_KEY_BYTES, RECOVERY_BLOCK_DELAY_MS, SIGNATURE_BYTES, TxInput, TxOutput,
-    decode_hex_array, validate_address, validate_hash, validate_protocol_id, validate_signature,
+    FinalizerMode, GRINDING_RESISTANCE_ACTIVATION_HEIGHT, LeaderProof, LeaderProofPayload, Ledger,
+    MINE_REWARD, OutPoint, PUBLIC_KEY_BYTES, RECOVERY_BLOCK_DELAY_MS, SIGNATURE_BYTES, TxInput,
+    TxOutput, decode_hex_array, validate_address, validate_hash, validate_protocol_id,
+    validate_signature,
 };
 
 pub(super) fn compact_block_context(ledger: &Ledger) -> &CompactBlockContext {
@@ -198,9 +199,16 @@ pub(super) fn vdf_seed_for_child(
     prev_hash: &str,
     height: u64,
     bundle_hashes: &[String; super::BURN_COMMITTEE_SIZE],
+    content_commitment: &str,
 ) -> String {
+    if height < GRINDING_RESISTANCE_ACTIVATION_HEIGHT {
+        return hex_hash(format!(
+            "iuna-vdf-child:{prev_hash}:{height}:{}",
+            canonical_burn_bundle_hashes(bundle_hashes)
+        ));
+    }
     hex_hash(format!(
-        "iuna-vdf-child:{prev_hash}:{height}:{}",
+        "iuna-vdf-child-v2:{prev_hash}:{height}:{content_commitment}:{}",
         canonical_burn_bundle_hashes(bundle_hashes)
     ))
 }
@@ -210,10 +218,52 @@ pub(super) fn recovery_vdf_seed_for_child(
     height: u64,
     timestamp_ms: u64,
     bundle_hashes: &[String; super::BURN_COMMITTEE_SIZE],
+    content_commitment: &str,
 ) -> String {
+    if height < GRINDING_RESISTANCE_ACTIVATION_HEIGHT {
+        return hex_hash(format!(
+            "iuna-recovery-vdf-child:{prev_hash}:{height}:{timestamp_ms}:{}",
+            canonical_burn_bundle_hashes(bundle_hashes)
+        ));
+    }
     hex_hash(format!(
-        "iuna-recovery-vdf-child:{prev_hash}:{height}:{timestamp_ms}:{}",
+        "iuna-recovery-vdf-child-v2:{prev_hash}:{height}:{timestamp_ms}:{content_commitment}:{}",
         canonical_burn_bundle_hashes(bundle_hashes)
+    ))
+}
+
+#[allow(clippy::too_many_arguments)]
+pub(super) fn vdf_content_commitment(
+    height: u64,
+    prev_hash: &str,
+    miner: &str,
+    finalizer_mode: FinalizerMode,
+    finalizer_rank: u32,
+    reward: Amount,
+    vdf_rounds: u64,
+    leader_ticket_id: Option<&str>,
+    burn_bundle_section: &BurnBundleSection,
+    transactions: &[Transaction],
+) -> String {
+    let mode = match finalizer_mode {
+        FinalizerMode::Ticket => "ticket",
+        FinalizerMode::Recovery => "recovery",
+    };
+    let ticket_id = leader_ticket_id.unwrap_or("none");
+    let transaction_hash = hex_hash(format!(
+        "iuna-vdf-transactions-v1:{}",
+        transactions
+            .iter()
+            .map(Transaction::canonical)
+            .collect::<Vec<_>>()
+            .join("|")
+    ));
+    let burn_section_hash = hex_hash(format!(
+        "iuna-vdf-burn-section-v1:{}",
+        burn_bundle_section.canonical()
+    ));
+    hex_hash(format!(
+        "iuna-vdf-content-v1:{height}:{prev_hash}:{miner}:{mode}:{finalizer_rank}:{reward}:{vdf_rounds}:{ticket_id}:{transaction_hash}:{burn_section_hash}"
     ))
 }
 
@@ -792,15 +842,27 @@ mod tests {
     #[test]
     fn recovery_vdf_seed_binds_timestamp_while_ticket_seed_does_not() {
         let hashes = std::array::from_fn(super::super::default_burn_bundle_hash);
-        let ticket_seed = vdf_seed_for_child(&"a".repeat(64), 42, &hashes);
-        let recovery_at_one = recovery_vdf_seed_for_child(&"a".repeat(64), 42, 1, &hashes);
-        let recovery_at_two = recovery_vdf_seed_for_child(&"a".repeat(64), 42, 2, &hashes);
+        let ticket_seed = vdf_seed_for_child(&"a".repeat(64), 42, &hashes, "content");
+        let recovery_at_one =
+            recovery_vdf_seed_for_child(&"a".repeat(64), 42, 1, &hashes, "content");
+        let recovery_at_two =
+            recovery_vdf_seed_for_child(&"a".repeat(64), 42, 2, &hashes, "content");
 
         assert_ne!(ticket_seed, recovery_at_one);
         assert_ne!(recovery_at_one, recovery_at_two);
         assert_eq!(
             ticket_seed,
-            vdf_seed_for_child(&"a".repeat(64), 42, &hashes)
+            vdf_seed_for_child(&"a".repeat(64), 42, &hashes, "content")
+        );
+        assert_eq!(
+            ticket_seed,
+            vdf_seed_for_child(&"a".repeat(64), 42, &hashes, "different-content")
+        );
+
+        let activated = GRINDING_RESISTANCE_ACTIVATION_HEIGHT;
+        assert_ne!(
+            vdf_seed_for_child(&"a".repeat(64), activated, &hashes, "content"),
+            vdf_seed_for_child(&"a".repeat(64), activated, &hashes, "different-content")
         );
     }
 }

@@ -43,7 +43,8 @@ The current mainnet-candidate parameter set is intentionally close to Bitcoin wh
 - burn committee size: `5` slots;
 - maximum signed burn bundle size: `10,000` bytes;
 - burn committee lineage maturity: `20` blocks;
-- fallback ticket invalidation activation height: `300`.
+- fallback ticket invalidation activation height: `300`;
+- grinding-resistance activation height: `1000`.
 
 Changing any value in this section requires a conscious mainnet-candidate reset or later hard-fork process.
 
@@ -77,6 +78,8 @@ A burn does not immediately select its own block. Instead:
 In the mainnet-candidate profile, tickets mature after `3` blocks and remain eligible for `3` block heights.
 
 The lottery draw for the next height is deterministic. Nodes rank all eligible burn tickets using the parent block hash, the parent VDF output, the target height, and the ticket amounts. More burned IUNA means more weight, but the winner is still drawn by the protocol.
+
+From height `1000`, leader selection uses the parent's VDF seed and VDF output instead of the parent's final block hash. Blocks at height `1000` and later commit the finalizer identity, mode, rank, reward, VDF rounds, leader ticket, transactions, and burn-bundle section into their VDF seed. Together these rules prevent a finalizer from completing one VDF and then cheaply varying transaction selection or the publication timestamp to grind the next leader. Ticket-block timestamps remain adjustable to the actual completion time, but they no longer influence the next lottery draw. Earlier candidate history retains the original parent-hash lottery rule.
 
 ## Finalizing Blocks
 

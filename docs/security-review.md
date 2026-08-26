@@ -229,6 +229,9 @@ see which revision was tested.
   playbooks are the maintained in-tree references.
 - Release evidence: keep successful release-gate logs from the exact tagged
   candidate revision.
+- Grinding resistance: height `1000` activates a VDF content commitment and
+  removes the final block hash from future ticket draws. All candidate nodes
+  must upgrade before activation; mixed versions will split at height `1000`.
 
 ## Sign-Off Table
 
