@@ -80,6 +80,22 @@ ensure_tauri_cli() {
   fi
 }
 
+clear_nsis_installers() {
+  local nsis_dir="$1"
+
+  mkdir -p "$nsis_dir"
+  find "$nsis_dir" -maxdepth 1 -type f -name '*-setup.exe' -delete
+}
+
+versioned_nsis_installer() {
+  local nsis_dir="$1"
+  local version="$2"
+  local installer="${nsis_dir}/iuna_${version}_x64-setup.exe"
+
+  [ -f "$installer" ] || die "Windows installer for version ${version} was not produced at ${installer}"
+  printf '%s\n' "$installer"
+}
+
 run_release_tests() {
   local full_tests="$1"
 
@@ -178,11 +194,12 @@ build_windows_desktop_if_possible() {
   cargo build --release --locked
   mkdir -p src-tauri/binaries downloads
   cp target/release/iuna.exe src-tauri/binaries/iuna-sidecar-x86_64-pc-windows-msvc.exe
+  local nsis_dir="src-tauri/target/release/bundle/nsis"
+  clear_nsis_installers "$nsis_dir"
   (cd src-tauri && cargo tauri build --bundles nsis)
 
   local installer
-  installer="$(find src-tauri/target/release/bundle/nsis -maxdepth 1 -type f -name '*.exe' | head -n 1)"
-  [ -n "$installer" ] || die "Windows installer was not produced"
+  installer="$(versioned_nsis_installer "$nsis_dir" "$version")"
   cp "$installer" "$artifact"
 }
 
@@ -240,10 +257,13 @@ build_windows_desktop_in_docker_if_possible() {
       cp target/x86_64-pc-windows-msvc/release/iuna.exe src-tauri/binaries/iuna-sidecar-x86_64-pc-windows-msvc.exe
 
       cd src-tauri
+      nsis_dir=target/x86_64-pc-windows-msvc/release/bundle/nsis
+      mkdir -p "$nsis_dir"
+      find "$nsis_dir" -maxdepth 1 -type f -name "*-setup.exe" -delete
       cargo tauri build --runner cargo-xwin --target x86_64-pc-windows-msvc --bundles nsis
 
-      installer="$(find target/x86_64-pc-windows-msvc/release/bundle/nsis -maxdepth 1 -type f -name "*setup.exe" | head -n 1)"
-      [ -n "$installer" ] || { echo "Windows installer was not produced" >&2; exit 1; }
+      installer="${nsis_dir}/iuna_${IUNA_VERSION}_x64-setup.exe"
+      [ -f "$installer" ] || { echo "Windows installer for version ${IUNA_VERSION} was not produced at ${installer}" >&2; exit 1; }
       cp "$installer" "/out/iuna-v${IUNA_VERSION}-windows-x86_64-desktop-setup.exe"
       chown "${HOST_UID}:${HOST_GID}" "/out/iuna-v${IUNA_VERSION}-windows-x86_64-desktop-setup.exe"
     '
