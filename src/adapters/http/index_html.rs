@@ -33,8 +33,9 @@ pub(super) const INDEX_HTML: &str = concat!(
     .nav-button svg.chain-icon { stroke-width: 1.35; }
     .nav-button span { font-size: 11px; font-weight: 800; }
     .nav-button:hover, .nav-button.active { background: #202328; border-color: #3b4448; color: #d5f55f; }
-    .settings-button { margin-top: auto; width: 64px; min-height: 54px; display: grid; place-items: center; border: 1px solid transparent; border-radius: 8px; padding: 7px 4px; color: #9fa8ad; background: transparent; text-align: center; }
+    .settings-button { margin-top: auto; width: 64px; min-height: 54px; display: grid; place-items: center; gap: 4px; border: 1px solid transparent; border-radius: 8px; padding: 7px 4px; color: #9fa8ad; background: transparent; text-align: center; }
     .settings-button svg { width: 23px; height: 23px; stroke: currentColor; stroke-width: 1.9; fill: none; }
+    .settings-button span { display: none; font-size: 10px; font-weight: 800; }
     .settings-button:hover, .settings-button.active { background: #202328; border-color: #3b4448; color: #d5f55f; }
     .version-panel { width: 64px; display: grid; gap: 4px; justify-items: center; border: 1px solid transparent; border-radius: 8px; padding: 7px 4px; color: #7f888e; background: transparent; font-size: 10px; font-weight: 850; text-align: center; }
     .version-panel.update { border-color: #566d25; color: #d5f55f; background: #1c2516; cursor: pointer; }
@@ -89,7 +90,7 @@ pub(super) const INDEX_HTML: &str = concat!(
     th, td { text-align: left; border-bottom: 1px solid #2a3035; padding: 8px; vertical-align: top; }
     th { color: #8d989f; font-size: 11px; text-transform: uppercase; }
     code { overflow-wrap: anywhere; color: #c7f5ea; }
-    .table-wrap { overflow-x: auto; }
+    .table-wrap { max-width: 100%; overflow-x: auto; overscroll-behavior-x: contain; -webkit-overflow-scrolling: touch; }
     .muted { color: #8d989f; }
     .flash { position: fixed; top: 18px; right: 18px; z-index: 80; width: min(420px, calc(100vw - 36px)); border-radius: 6px; padding: 10px 12px; border: 1px solid; font-weight: 700; box-shadow: 0 18px 48px rgba(0, 0, 0, .38); }
     .flash.success { color: #d5f55f; background: #1c2516; border-color: #566d25; }
@@ -460,28 +461,81 @@ pub(super) const INDEX_HTML: &str = concat!(
     @media (max-width: 760px) { .utxo-flow, .mine-action-row, .mine-stats { grid-template-columns: 1fr; } .utxo-arrow { min-height: 28px; transform: rotate(90deg); } .tx-modal-head { align-items: stretch; } }
     @media (max-width: 920px) { .setup-grid, .wallet-grid, .mining-grid, .detail-grid, .network-health { grid-template-columns: 1fr; } }
     @media (max-width: 760px) {
-      .app-shell { display: grid; grid-template-columns: 1fr; }
-      .sidebar { position: sticky; inset: auto; width: auto; height: auto; flex-direction: row; justify-content: space-between; padding: 8px; border-right: 0; border-bottom: 1px solid #262b2f; }
-      .brand-mark { width: 34px; height: 34px; }
-      .brand-mark svg { width: 22px; height: 22px; }
-      .side-nav { display: flex; width: auto; gap: 8px; }
-      .nav-button { width: 52px; min-height: 48px; }
+      body { padding-bottom: calc(68px + env(safe-area-inset-bottom)); }
+      .app-shell { display: block; min-height: 100dvh; overflow: visible; }
+      .sidebar { position: fixed; z-index: 20; inset: auto 0 0; width: 100%; height: auto; display: grid; grid-template-columns: repeat(auto-fit, minmax(48px, 1fr)); gap: 4px; padding: 6px max(8px, env(safe-area-inset-right)) calc(6px + env(safe-area-inset-bottom)) max(8px, env(safe-area-inset-left)); border: 0; border-top: 1px solid #30363b; background: rgba(21, 23, 26, .96); box-shadow: 0 -12px 32px rgba(0, 0, 0, .28); backdrop-filter: blur(14px); }
+      .brand-mark, .version-panel { display: none; }
+      .side-nav { display: contents; }
+      .nav-button { width: 100%; min-width: 0; min-height: 50px; gap: 2px; padding: 5px 2px; }
       .nav-button span { font-size: 10px; }
-      .settings-button, .version-panel { margin-top: 0; width: 48px; min-height: 48px; padding: 6px 3px; }
-      .settings-button svg { width: 21px; height: 21px; }
-      .content { padding: 16px 12px 36px; }
+      .settings-button { margin-top: 0; width: 100%; min-width: 0; min-height: 50px; gap: 2px; padding: 5px 2px; }
+      .settings-button svg { width: 20px; height: 20px; }
+      .settings-button span { display: block; }
+      .content { padding: 14px 12px 24px; }
       header, .split, .setup-grid, .wallet-grid, .mining-grid, .detail-grid, .wallet-tx-row { grid-template-columns: 1fr; }
-      header { display: grid; }
-      .settings-mode-row { align-items: flex-start; }
+      header { display: flex; align-items: flex-start; padding-bottom: 14px; }
+      h1 { font-size: 24px; }
+      h2 { font-size: 17px; }
+      .header-actions { flex-direction: column-reverse; gap: 6px; align-items: flex-end; text-align: right; font-size: 12px; }
+      .basic-status-row { flex-wrap: wrap; }
+      .page-title { margin-bottom: 12px; }
+      .panel, .metric { padding: 12px; }
+      .panel-head { align-items: flex-start; }
+      .settings-mode-row { flex-direction: column; align-items: stretch; }
+      .settings-mode-row .segmented { width: 100%; }
+      .settings-mode-row .segmented button { flex: 1; }
       .metrics-head { align-items: flex-start; flex-direction: column; }
       .metrics-range { width: 100%; }
       .metrics-range button { flex: 1 1 0; }
       .segmented.setup-mode-picker { grid-template-columns: 1fr; }
       .metrics-grid { grid-template-columns: 1fr; }
-      input { min-width: 0; width: 100%; }
+      form { width: 100%; align-items: stretch; }
+      form > label, .burn-fields, .mine-fee-fields, .recipient-field, .amount-field, .send-utxo-summary { width: 100%; }
+      .burn-fields, .mine-fee-fields { display: grid; grid-template-columns: 1fr; align-items: stretch; }
+      input, textarea { min-width: 0; width: 100%; font-size: 16px; }
       .switch input { width: auto; }
+      form > button.primary, .burn-fields > button.primary, .setup-actions > button.primary { min-height: 44px; }
+      .peer-toolbar { display: grid; }
+      .peer-form { display: grid; grid-template-columns: 1fr; }
+      .peer-form label { min-width: 0; }
+      .peer-form button { min-height: 44px; }
+      .peer-table, .peer-table tbody, .peer-table tr, .peer-table td { display: block; width: 100%; }
+      .peer-table { margin: 0; }
+      .peer-table thead { display: none; }
+      .peer-table tbody { display: grid; gap: 10px; }
+      .peer-table tr { overflow: hidden; border: 1px solid #2f363c; border-radius: 8px; background: #111316; }
+      .peer-table td { display: grid; grid-template-columns: minmax(82px, .38fr) minmax(0, 1fr); gap: 10px; align-items: baseline; border-bottom: 1px solid #2a3035; padding: 9px 10px; overflow-wrap: anywhere; }
+      .peer-table td::before { content: attr(data-label); color: #879198; font-size: 10px; font-weight: 850; text-transform: uppercase; }
+      .peer-table td:last-child { border-bottom: 0; }
+      .peer-table td[colspan] { display: block; }
+      .peer-table td[colspan]::before { display: none; }
+      .peer-actions { justify-content: flex-start; }
       .seed-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); }
       .block-card { flex-basis: 108px; }
+      .setup-overlay { place-items: end center; padding: 8px; }
+      .setup-modal, .tx-modal { width: 100%; max-height: calc(100vh - 16px); max-height: calc(100dvh - 16px); border-radius: 12px; padding: 14px; }
+      .setup-actions, .danger-actions, .address-book-modal-actions { flex-wrap: wrap; }
+      .setup-actions button, .danger-actions button, .address-book-modal-actions button { min-height: 44px; }
+      .tx-modal-head { flex-direction: column; }
+      .tx-modal-head > button { width: 100%; min-height: 44px; }
+      .flash { top: 10px; right: 10px; width: calc(100vw - 20px); }
+      .wallet-tx-list, .tx-scroll-list { max-height: none; overflow-y: visible; padding-right: 0; }
+      .mining-event { grid-template-columns: auto minmax(0, 1fr); }
+      .mining-event-time { grid-column: 2; }
+    }
+    @media (max-width: 420px) {
+      .content { padding-inline: 9px; }
+      .sidebar { gap: 2px; padding-inline: 4px; }
+      .nav-button, .settings-button { min-height: 48px; }
+      .nav-button svg, .settings-button svg { width: 19px; height: 19px; }
+      .nav-button span, .settings-button span { font-size: 9px; }
+      .panel, .metric, .block-rail-wrap { border-radius: 7px; padding: 10px; }
+      .grid, .peer-summary, .network-health-grid, .metrics-summary, .tx-modal-summary { grid-template-columns: 1fr 1fr; }
+      .wallet-balance-line { width: 100%; justify-content: space-between; }
+      .wallet-tx-main { padding-right: 0; padding-top: 24px; }
+      .wallet-tx-row .pill { top: 9px; left: 9px; right: auto; }
+      .tx-field, .detail-kv, .stratum-field { grid-template-columns: 1fr; gap: 3px; }
+      .seed-grid { grid-template-columns: 1fr; }
     }
   </style>
   <script defer src="/assets/iuna-ui.js?v="#,
@@ -517,6 +571,7 @@ pub(super) const INDEX_HTML: &str = concat!(
       </nav>
       <button class="settings-button" :class="{ active: tab === 'settings' }" type="button" @click="setTab('settings')" title="Settings" aria-label="Settings">
         <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M9.7 3.2 9.2 5.5a7.2 7.2 0 0 0-1.4.8L5.6 5.6 3.2 9.8l1.7 1.6a7.8 7.8 0 0 0 0 1.6l-1.7 1.6 2.4 4.2 2.2-.7a7.2 7.2 0 0 0 1.4.8l.5 2.3h4.8l.5-2.3a7.2 7.2 0 0 0 1.4-.8l2.2.7 2.4-4.2-1.7-1.6a7.8 7.8 0 0 0 0-1.6L21 9.8l-2.4-4.2-2.2.7a7.2 7.2 0 0 0-1.4-.8l-.5-2.3H9.7Z"></path><circle cx="12" cy="12.2" r="3.1"></circle></svg>
+        <span>Settings</span>
       </button>
       <button class="version-panel" type="button" :class="{ update: updateAvailable(), checking: releaseCheckState === 'checking', failed: releaseCheckState === 'failed' }" :title="versionPanelTitle()" @click="openLatestRelease">
         <span class="version-dot" aria-hidden="true"></span>
@@ -859,25 +914,25 @@ pub(super) const INDEX_HTML: &str = concat!(
           <div class="peer-summary-item"><div class="peer-summary-label">Shared Height</div><div class="peer-summary-value" x-text="sharedHeightLabel()"></div></div>
         </div>
         <div class="table-wrap">
-          <table>
+          <table class="peer-table">
             <thead><tr><th>Status</th><th>Address</th><th>Direction</th><th>Last Contact</th><th x-show="developmentMode()">Clock</th><th x-show="developmentMode()">Ban</th><th x-show="developmentMode()">Score</th><th>Height</th><th x-show="developmentMode()">Delta</th><th x-show="developmentMode()">Tip</th><th x-show="developmentMode()">Sent</th><th x-show="developmentMode()">Received</th><th x-show="developmentMode()">Last Error</th><th>Actions</th></tr></thead>
             <tbody>
               <template x-for="peer in peers" :key="peer.address">
                 <tr>
-                  <td><span class="peer-status" :class="peerStatus(peer)" x-text="peerStatusLabel(peer)"></span></td>
-                  <td><code x-text="peer.address"></code></td>
-                  <td x-text="peer.direction"></td>
-                  <td x-text="peerLastContactLabel(peer)"></td>
-                  <td x-show="developmentMode()" x-text="peerClockLabel(peer)"></td>
-                  <td x-show="developmentMode()" x-text="peerBanLabel(peer)"></td>
-                  <td x-show="developmentMode()" x-text="peer.misbehavior_score ?? 0"></td>
-                  <td x-text="peer.last_known_height ?? '-'"></td>
-                  <td x-show="developmentMode()" x-text="peerHeightDelta(peer)"></td>
-                  <td x-show="developmentMode()"><code x-text="short(peer.last_known_tip_hash)"></code></td>
-                  <td x-show="developmentMode()" x-text="peer.messages_sent"></td>
-                  <td x-show="developmentMode()" x-text="peer.messages_received"></td>
-                  <td x-show="developmentMode()" x-text="peer.last_error || ''"></td>
-                  <td><div class="peer-actions"><button class="peer-remove" type="button" x-show="canRemovePeer(peer)" @click="removePeer(peer)">Remove</button><span class="muted" x-show="!canRemovePeer(peer)">Observed</span></div></td>
+                  <td data-label="Status"><span class="peer-status" :class="peerStatus(peer)" x-text="peerStatusLabel(peer)"></span></td>
+                  <td data-label="Address"><code x-text="peer.address"></code></td>
+                  <td data-label="Direction" x-text="peer.direction"></td>
+                  <td data-label="Last contact" x-text="peerLastContactLabel(peer)"></td>
+                  <td data-label="Clock" x-show="developmentMode()" x-text="peerClockLabel(peer)"></td>
+                  <td data-label="Ban" x-show="developmentMode()" x-text="peerBanLabel(peer)"></td>
+                  <td data-label="Score" x-show="developmentMode()" x-text="peer.misbehavior_score ?? 0"></td>
+                  <td data-label="Height" x-text="peer.last_known_height ?? '-'"></td>
+                  <td data-label="Delta" x-show="developmentMode()" x-text="peerHeightDelta(peer)"></td>
+                  <td data-label="Tip" x-show="developmentMode()"><code x-text="short(peer.last_known_tip_hash)"></code></td>
+                  <td data-label="Sent" x-show="developmentMode()" x-text="peer.messages_sent"></td>
+                  <td data-label="Received" x-show="developmentMode()" x-text="peer.messages_received"></td>
+                  <td data-label="Last error" x-show="developmentMode()" x-text="peer.last_error || ''"></td>
+                  <td data-label="Actions"><div class="peer-actions"><button class="peer-remove" type="button" x-show="canRemovePeer(peer)" @click="removePeer(peer)">Remove</button><span class="muted" x-show="!canRemovePeer(peer)">Observed</span></div></td>
                 </tr>
               </template>
               <tr class="skeleton-card" x-show="peerPage.loading" aria-hidden="true">
