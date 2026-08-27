@@ -192,7 +192,9 @@ see which revision was tested.
   plus sparse proof buckets that keep empty buckets implicit instead of cloning
   full identity forms or composing identity aggregates, and per-pass incremental
   checkpoint bucket selection with a 100,000-round checkpoint parameter floor of
-  `k = 10`, release thin-LTO/codegen-unit tuning, and replacement of
+  `k = 10`, adaptive multi-pass fitting that keeps normal large workloads within
+  the fixed checkpoint memory budget instead of selecting the constant-memory
+  fallback, release thin-LTO/codegen-unit tuning, and replacement of
   per-checkpoint modular exponentiation with one modular exponentiation plus
   fixed modular steps; an official
   Python/C++ `chiavdf` reference measurement was about `0.673s`. Phase profiling

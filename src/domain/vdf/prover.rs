@@ -515,14 +515,29 @@ impl ProofParameters {
         if rounds >= 100_000 {
             k = k.max(10);
         }
-        let checkpoint_stride = u64::from(k).saturating_mul(l).max(1);
-
         Self {
             k,
             l,
-            checkpoint_count: rounds.div_ceil(checkpoint_stride),
+            checkpoint_count: rounds.div_ceil(u64::from(k).saturating_mul(l).max(1)),
             bucket_count: 1_u64.checked_shl(k).unwrap_or(u64::MAX),
         }
+        .fit_checkpoint_budget(rounds, MAX_CHECKPOINTS)
+    }
+
+    // k and l only select the checkpoint prover's time-memory tradeoff; they do
+    // not affect the resulting Wesolowski proof. Increasing l lets large, honest
+    // protocol workloads stay on the checkpoint path without raising the memory
+    // cap or falling back to a second round-sized sequential pass.
+    fn fit_checkpoint_budget(mut self, rounds: u64, max_checkpoints: u64) -> Self {
+        if max_checkpoints == 0 || self.checkpoint_count <= max_checkpoints {
+            return self;
+        }
+
+        let checkpoint_budget_stride = u64::from(self.k).saturating_mul(max_checkpoints).max(1);
+        self.l = self.l.max(rounds.div_ceil(checkpoint_budget_stride));
+        let checkpoint_stride = u64::from(self.k).saturating_mul(self.l).max(1);
+        self.checkpoint_count = rounds.div_ceil(checkpoint_stride);
+        self
     }
 }
 
@@ -559,6 +574,23 @@ mod tests {
                 }
             );
         }
+    }
+
+    #[test]
+    fn network_default_rounds_fit_the_checkpoint_memory_budget() {
+        let rounds = u64::from(crate::app::DEFAULT_VDF_ROUNDS);
+        let parameters = ProofParameters::for_rounds(rounds);
+
+        assert_eq!(
+            parameters,
+            ProofParameters {
+                k: 12,
+                l: 22,
+                checkpoint_count: 253_788,
+                bucket_count: 4_096,
+            }
+        );
+        assert!(parameters.checkpoint_count <= super::MAX_CHECKPOINTS);
     }
 
     #[test]
@@ -610,6 +642,31 @@ mod tests {
         assert_eq!(checkpoint, constant_memory);
         assert!(proof_progress.windows(2).all(|pair| pair[0] <= pair[1]));
         assert_eq!(proof_progress.last(), Some(&rounds));
+    }
+
+    #[test]
+    fn memory_fitted_checkpoint_proof_matches_constant_memory_proof() {
+        let rounds = 301_u64;
+        let discriminant = create_discriminant(b"iuna-vdf-checkpoint-memory-fit", 1024).unwrap();
+        let generator = Form::generator(&discriminant).unwrap();
+        let threshold = isqrt_fourth(&discriminant.abs());
+        let group = ClassGroup {
+            discriminant: &discriminant,
+            threshold: &threshold,
+        };
+        let parameters = ProofParameters::for_rounds(rounds).fit_checkpoint_budget(rounds, 20);
+
+        assert_eq!(parameters.k, 3);
+        assert_eq!(parameters.l, 6);
+        assert_eq!(parameters.checkpoint_count, 17);
+
+        let checkpoint =
+            prove_checkpointed(group, &generator, rounds, parameters, |_, _| {}).unwrap();
+        let constant_memory =
+            prove_constant_memory(&discriminant, &generator, &threshold, rounds, |_, _| {})
+                .unwrap();
+
+        assert_eq!(checkpoint, constant_memory);
     }
 
     #[test]
