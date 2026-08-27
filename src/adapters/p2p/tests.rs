@@ -175,6 +175,79 @@ async fn single_block_fork_error_requests_blocks_by_locator() {
 }
 
 #[tokio::test]
+async fn block_page_without_local_ancestor_requests_blocks_by_locator() {
+    let alice = Wallet::from_seed("block-page-fork-alice");
+    let allocations = allocations(std::slice::from_ref(&alice), 1_000);
+    let mut local_node = node("local-block-page-fork", alice.clone(), allocations.clone());
+    let mut remote_node = node("remote-block-page-fork", alice.clone(), allocations);
+
+    queue_plaintext_burn(&mut local_node, &alice, 1);
+    local_node.drain_outbox();
+    local_node.mine_one_at(1).unwrap();
+    local_node.drain_outbox();
+
+    for timestamp_ms in [2, 3] {
+        queue_plaintext_burn(&mut remote_node, &alice, 1);
+        remote_node.drain_outbox();
+        remote_node.mine_one_at(timestamp_ms).unwrap();
+        remote_node.drain_outbox();
+    }
+    let remote_page = remote_node.blocks_from(2, 10);
+    assert_eq!(remote_page.len(), 1);
+    assert_ne!(
+        remote_page[0].prev_hash,
+        local_node.ledger().tip_hash().to_string()
+    );
+
+    let network = gossip_network(
+        Arc::new(tokio::sync::Mutex::new(local_node)),
+        Arc::new(tokio::sync::Mutex::new(PeerBook::default())),
+        "127.0.0.1:9545".parse().unwrap(),
+        None,
+    );
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let client = tokio::net::TcpStream::connect(listener.local_addr().unwrap())
+        .await
+        .unwrap();
+    let (server, remote_addr) = listener.accept().await.unwrap();
+    let (_server_reader, mut server_writer) = server.into_split();
+    let (client_reader, _client_writer) = client.into_split();
+    let mut client_reader = super::LimitedLineReader::new(client_reader);
+    let mut known_peer = None;
+
+    super::process_envelope(
+        &network,
+        &mut server_writer,
+        remote_addr,
+        &mut known_peer,
+        GossipEnvelope::Blocks {
+            blocks: remote_page,
+        },
+    )
+    .await
+    .unwrap();
+
+    let line = tokio::time::timeout(std::time::Duration::from_secs(1), client_reader.read_line())
+        .await
+        .unwrap()
+        .unwrap()
+        .unwrap();
+    let GossipEnvelope::BlockLocatorRequest { locator, limit } =
+        super::parse_envelope(&line).unwrap()
+    else {
+        panic!("expected block locator request");
+    };
+    let fork_blocks = remote_node.blocks_after_locator(&locator, limit);
+    assert_eq!(fork_blocks.len(), 2);
+    let local_ledger = network.inner.node.lock().await.clone_ledger();
+    let adopted =
+        super::validate_blocks_extension(local_ledger, fork_blocks, crate::app::now_ms(), |_| {})
+            .await
+            .unwrap();
+    assert_eq!(adopted.tip_hash(), remote_node.ledger().tip_hash());
+}
+
+#[tokio::test]
 async fn future_block_rejection_does_not_poison_peer_or_later_acceptance() {
     let alice = Wallet::from_seed("future-block-p2p-alice");
     let allocations = allocations(std::slice::from_ref(&alice), 1_000);

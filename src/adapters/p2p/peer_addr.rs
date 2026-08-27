@@ -148,16 +148,20 @@ pub(super) fn is_possible_fork_error(error: &anyhow::Error) -> bool {
     message.contains("does not extend local tip")
         || message.contains("conflicts with local chain")
         || message.contains("expected block height")
+        || message.contains("block page has no common ancestor with local chain")
 }
 
 pub(super) fn inbound_error_counts_as_misbehavior(message: &str) -> bool {
     !message.contains("block timestamp is too far in the future")
         && !message.contains("block timestamp is before finalizer rank")
+        && !message.contains("block page has no common ancestor with local chain")
 }
 
 #[cfg(test)]
 mod tests {
-    use super::inbound_error_counts_as_misbehavior;
+    use anyhow::anyhow;
+
+    use super::{inbound_error_counts_as_misbehavior, is_possible_fork_error};
 
     #[test]
     fn future_and_unopened_rank_slot_errors_are_temporal_not_misbehavior() {
@@ -168,5 +172,13 @@ mod tests {
             "block timestamp is before finalizer rank 1 time slot"
         ));
         assert!(inbound_error_counts_as_misbehavior("block hash is invalid"));
+    }
+
+    #[test]
+    fn missing_block_page_ancestor_triggers_fork_recovery_without_peer_penalty() {
+        let message = "block batch: block page has no common ancestor with local chain";
+
+        assert!(is_possible_fork_error(&anyhow!(message)));
+        assert!(!inbound_error_counts_as_misbehavior(message));
     }
 }
