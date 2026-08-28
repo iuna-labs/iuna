@@ -3,6 +3,8 @@
 This document tracks the pre-mainnet security review. It is a review ledger, not
 a claim that mainnet is safe. Keep the roadmap security-review checkbox open
 until every launch-blocking item below is resolved or explicitly accepted.
+Actionable remediation and final go/no-go criteria are tracked in
+`docs/mainnet-security-checklist.md`.
 
 ## Review Scope
 

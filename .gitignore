@@ -11,3 +11,4 @@
 /config/admin-ip-allowlist.local
 __pycache__/
 *.py[cod]
+.scratch
