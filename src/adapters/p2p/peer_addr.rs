@@ -6,24 +6,8 @@ use std::{
 
 use anyhow::{Context, Result};
 
-use crate::app::GossipEnvelope;
-
 pub(super) fn next_reconnect_delay(current: Duration, max_delay: Duration) -> Duration {
     (current * 2).min(max_delay)
-}
-
-pub(super) fn peer_has_block_gap(peer_height: u64, envelopes: &[GossipEnvelope]) -> bool {
-    envelopes
-        .iter()
-        .filter_map(|envelope| match envelope {
-            GossipEnvelope::Block(block) => Some(block.height),
-            GossipEnvelope::Inventory { blocks, .. } => {
-                blocks.iter().map(|block| block.height).min()
-            }
-            _ => None,
-        })
-        .min()
-        .is_some_and(|first_block_height| peer_height + 1 < first_block_height)
 }
 
 pub(super) fn reachable_advertised_addr(

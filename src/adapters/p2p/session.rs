@@ -1,24 +1,30 @@
 use std::{net::SocketAddr, time::Duration};
 
-use anyhow::Result;
+use anyhow::{Context, Result, bail};
 use tokio::{
     net::{TcpListener, TcpStream},
-    sync::mpsc,
+    sync::{mpsc, watch},
     time::{Instant, interval, interval_at, sleep, timeout},
 };
 
 use crate::app::{GossipEnvelope, debug_logging_enabled};
 
 use super::{
-    CONNECT_TIMEOUT, GossipNetwork, HANDSHAKE_TIMEOUT, INITIAL_RECONNECT_DELAY,
-    MAX_RECONNECT_DELAY, PEER_EXCHANGE_INTERVAL, PEER_QUEUE_SIZE, PeerStatus,
-    SESSION_SYNC_INTERVAL, is_self_peer_address_for, next_reconnect_delay_with_max,
-    process_envelope, process_hello_with_verification, push_catchup_to_peer, read_session_envelope,
-    record_peer_status, respond_to_peer_verification_challenge, write_envelope, write_payload,
-    write_peer_exchange,
+    CATCHUP_REQUEST_TIMEOUT, CONNECT_TIMEOUT, GossipNetwork, GossipSession, HANDSHAKE_TIMEOUT,
+    INBOUND_PEER_QUEUE_BYTES, INBOUND_PEER_QUEUE_SIZE, INBOUND_SESSION_PREFIX,
+    INITIAL_RECONNECT_DELAY, MAX_RECONNECT_DELAY, OutboundBatch, PEER_EXCHANGE_INTERVAL,
+    PEER_QUEUE_BYTES, PEER_QUEUE_SIZE, PeerStatus, SESSION_SYNC_INTERVAL, is_self_peer_address_for,
+    next_reconnect_delay_with_max, process_envelope, process_hello_with_verification,
+    read_session_envelope, record_peer_status, respond_to_peer_verification_challenge,
+    write_envelope, write_payload, write_peer_exchange,
 };
 
-type OutboundBatch = Vec<GossipEnvelope>;
+struct InboundRegistration {
+    key: String,
+    sender: mpsc::Sender<OutboundBatch>,
+    shutdown: watch::Sender<bool>,
+    queue_bytes: std::sync::Arc<tokio::sync::Semaphore>,
+}
 
 pub(super) async fn accept_loop(network: GossipNetwork, listener: TcpListener) {
     loop {
@@ -46,6 +52,17 @@ pub(super) async fn accept_loop(network: GossipNetwork, listener: TcpListener) {
                     }
                 };
                 super::P2pMetricsCounters::inc(&network.inner.metrics.inbound_sessions_started);
+                let session_key = format!("{INBOUND_SESSION_PREFIX}{remote_addr}");
+                let (sender, receiver) = mpsc::channel(INBOUND_PEER_QUEUE_SIZE);
+                let (shutdown, mut shutdown_receiver) = watch::channel(false);
+                let queue_bytes =
+                    std::sync::Arc::new(tokio::sync::Semaphore::new(INBOUND_PEER_QUEUE_BYTES));
+                let registration = InboundRegistration {
+                    key: session_key.clone(),
+                    sender,
+                    shutdown,
+                    queue_bytes,
+                };
                 tokio::spawn(async move {
                     let _permit = permit;
                     let result = session_loop(
@@ -53,9 +70,12 @@ pub(super) async fn accept_loop(network: GossipNetwork, listener: TcpListener) {
                         stream,
                         remote_addr,
                         None,
-                        mpsc::channel(1).1,
+                        receiver,
+                        &mut shutdown_receiver,
+                        Some(registration),
                     )
                     .await;
+                    network.inner.sessions.lock().await.remove(&session_key);
                     match result {
                         Ok(()) => {
                             super::P2pMetricsCounters::inc(&network.inner.metrics.sessions_closed);
@@ -98,6 +118,7 @@ pub(super) async fn outbound_session(
     network: GossipNetwork,
     peer: String,
     mut receiver: mpsc::Receiver<OutboundBatch>,
+    mut shutdown: watch::Receiver<bool>,
 ) {
     let mut reconnect_delay = INITIAL_RECONNECT_DELAY;
     loop {
@@ -156,8 +177,14 @@ pub(super) async fn outbound_session(
             remote_addr,
             Some(peer.clone()),
             receiver,
+            &mut shutdown,
+            None,
         )
         .await;
+        if *shutdown.borrow() {
+            network.inner.sessions.lock().await.remove(&peer);
+            return;
+        }
         match result {
             Ok(()) => {
                 super::P2pMetricsCounters::inc(&network.inner.metrics.sessions_closed);
@@ -185,17 +212,23 @@ pub(super) async fn outbound_session(
         }
 
         let (sender, next_receiver) = mpsc::channel(PEER_QUEUE_SIZE);
+        let (next_shutdown, next_shutdown_receiver) = watch::channel(false);
+        let queue_bytes = std::sync::Arc::new(tokio::sync::Semaphore::new(PEER_QUEUE_BYTES));
         receiver = next_receiver;
+        shutdown = next_shutdown_receiver;
         if !peer_is_connectable(&network, &peer).await {
             network.inner.sessions.lock().await.remove(&peer);
             return;
         }
-        network
-            .inner
-            .sessions
-            .lock()
-            .await
-            .insert(peer.clone(), sender);
+        network.inner.sessions.lock().await.insert(
+            peer.clone(),
+            GossipSession {
+                peer: peer.clone(),
+                sender,
+                shutdown: next_shutdown,
+                queue_bytes,
+            },
+        );
         sleep(reconnect_delay).await;
         reconnect_delay = next_reconnect_delay(reconnect_delay);
     }
@@ -207,6 +240,8 @@ async fn session_loop(
     remote_addr: SocketAddr,
     stable_peer: Option<String>,
     mut outbound: mpsc::Receiver<OutboundBatch>,
+    shutdown: &mut watch::Receiver<bool>,
+    inbound_registration: Option<InboundRegistration>,
 ) -> Result<()> {
     let (reader, mut writer) = stream.into_split();
     let connection_label = stable_peer
@@ -230,10 +265,68 @@ async fn session_loop(
     );
     let mut outbound_closed = false;
     let mut peer_status: Option<PeerStatus> = None;
+    let mut catchup_requested_at: Option<Instant> = None;
     let is_outbound_session = stable_peer.is_some();
     let mut known_peer = stable_peer;
+    let mut handshake_complete = false;
+    let mut shutdown_closed = false;
 
-    if known_peer.is_some() {
+    if !is_outbound_session {
+        let envelope = timeout(
+            HANDSHAKE_TIMEOUT,
+            read_session_envelope(&network, &connection_label, &mut reader),
+        )
+        .await
+        .context("inbound p2p handshake timed out")??
+        .context("inbound peer closed before sending Hello")?;
+        let hello = match envelope {
+            GossipEnvelope::Hello(hello) => hello,
+            challenge @ GossipEnvelope::PeerVerificationChallenge { .. } => {
+                respond_to_peer_verification_challenge(&network, &mut writer, &challenge).await?;
+                return Ok(());
+            }
+            _ => bail!("inbound peer sent data before Hello"),
+        };
+        let status = process_hello_with_verification(
+            &network,
+            &mut writer,
+            &mut reader,
+            &connection_label,
+            remote_addr,
+            &mut known_peer,
+            hello,
+        )
+        .await?;
+        if status.reject_session {
+            return Ok(());
+        }
+        peer_status = Some(status);
+        handshake_complete = true;
+        if let Some(registration) = inbound_registration {
+            let peer = known_peer
+                .clone()
+                .unwrap_or_else(|| remote_addr.to_string());
+            network.inner.sessions.lock().await.insert(
+                registration.key,
+                GossipSession {
+                    peer,
+                    sender: registration.sender,
+                    shutdown: registration.shutdown,
+                    queue_bytes: registration.queue_bytes,
+                },
+            );
+        }
+        maybe_start_catchup(
+            &network,
+            &mut writer,
+            peer_status.as_ref().unwrap(),
+            &mut catchup_requested_at,
+        )
+        .await?;
+        write_peer_exchange(&network, &mut writer, &known_peer).await?;
+    }
+
+    if is_outbound_session {
         if let Ok(Ok(Some(envelope))) = timeout(
             HANDSHAKE_TIMEOUT,
             read_session_envelope(&network, &connection_label, &mut reader),
@@ -241,23 +334,31 @@ async fn session_loop(
         .await
         {
             if let GossipEnvelope::Hello(hello) = envelope {
-                peer_status = Some(
-                    process_hello_with_verification(
-                        &network,
-                        &mut writer,
-                        &mut reader,
-                        &connection_label,
-                        remote_addr,
-                        &mut known_peer,
-                        hello,
-                    )
-                    .await?,
-                );
+                let status = process_hello_with_verification(
+                    &network,
+                    &mut writer,
+                    &mut reader,
+                    &connection_label,
+                    remote_addr,
+                    &mut known_peer,
+                    hello,
+                )
+                .await?;
+                if status.reject_session {
+                    return Ok(());
+                }
+                peer_status = Some(status);
+                handshake_complete = true;
                 if is_outbound_session && known_peer.is_none() {
                     return Ok(());
                 }
-                super::maybe_request_catchup(&network, &mut writer, peer_status.as_ref().unwrap())
-                    .await?;
+                maybe_start_catchup(
+                    &network,
+                    &mut writer,
+                    peer_status.as_ref().unwrap(),
+                    &mut catchup_requested_at,
+                )
+                .await?;
                 write_peer_exchange(&network, &mut writer, &known_peer).await?;
             } else if let GossipEnvelope::PeerStatus {
                 height,
@@ -268,8 +369,14 @@ async fn session_loop(
                 let status = PeerStatus::from_envelope(height, tip_hash, time_ms);
                 record_peer_status(&network, &known_peer, remote_addr, &status).await;
                 peer_status = Some(status);
-                super::maybe_request_catchup(&network, &mut writer, peer_status.as_ref().unwrap())
-                    .await?;
+                handshake_complete = true;
+                maybe_start_catchup(
+                    &network,
+                    &mut writer,
+                    peer_status.as_ref().unwrap(),
+                    &mut catchup_requested_at,
+                )
+                .await?;
                 write_peer_exchange(&network, &mut writer, &known_peer).await?;
             } else if respond_to_peer_verification_challenge(&network, &mut writer, &envelope)
                 .await?
@@ -277,8 +384,15 @@ async fn session_loop(
                 if known_peer.is_none() {
                     return Ok(());
                 }
-            } else {
-                process_envelope(
+            } else if !maybe_request_inventory(
+                &network,
+                &mut writer,
+                &envelope,
+                &mut catchup_requested_at,
+            )
+            .await?
+            {
+                let requested_chain_data = process_envelope(
                     &network,
                     &mut writer,
                     remote_addr,
@@ -286,6 +400,9 @@ async fn session_loop(
                     envelope,
                 )
                 .await?;
+                if requested_chain_data {
+                    catchup_requested_at = Some(Instant::now());
+                }
                 if is_outbound_session && known_peer.is_none() {
                     return Ok(());
                 }
@@ -295,13 +412,21 @@ async fn session_loop(
 
     loop {
         tokio::select! {
+            result = shutdown.changed(), if !shutdown_closed => {
+                match result {
+                    Ok(()) if *shutdown.borrow() => return Ok(()),
+                    Ok(()) => {}
+                    Err(_) if !is_outbound_session => return Ok(()),
+                    Err(_) => shutdown_closed = true,
+                }
+            }
             maybe_batch = outbound.recv(), if !outbound_closed => {
                 match maybe_batch {
                     Some(batch) => {
                         let payload = super::envelopes_for_peer(
                             Some(&network.inner.node),
                             peer_status.clone(),
-                            &batch,
+                            &batch.envelopes,
                         ).await;
                         write_payload(&mut writer, &payload).await?;
                         if let Some(peer) = &known_peer {
@@ -314,10 +439,11 @@ async fn session_loop(
             _ = sync_tick.tick() => {
                 let status = network.inner.node.lock().await.peer_status();
                 write_envelope(&mut writer, &status).await?;
-                if let Some(status) = peer_status.as_mut() {
-                    if let Some(updated_status) = push_catchup_to_peer(&network, &mut writer, status).await? {
-                        *status = updated_status;
-                    }
+                if catchup_requested_at.is_some_and(|started| started.elapsed() >= CATCHUP_REQUEST_TIMEOUT) {
+                    catchup_requested_at = None;
+                }
+                if let Some(status) = peer_status.as_ref() {
+                    maybe_start_catchup(&network, &mut writer, status, &mut catchup_requested_at).await?;
                 }
             }
             _ = peer_exchange_tick.tick() => {
@@ -328,8 +454,10 @@ async fn session_loop(
                     return Ok(());
                 };
                 if let GossipEnvelope::Hello(hello) = envelope {
-                    peer_status = Some(
-                        process_hello_with_verification(
+                    if handshake_complete {
+                        bail!("peer sent duplicate Hello");
+                    }
+                    let status = process_hello_with_verification(
                             &network,
                             &mut writer,
                             &mut reader,
@@ -338,12 +466,21 @@ async fn session_loop(
                             &mut known_peer,
                             hello,
                         )
-                        .await?,
-                    );
+                        .await?;
+                    if status.reject_session {
+                        return Ok(());
+                    }
+                    peer_status = Some(status);
+                    handshake_complete = true;
                     if is_outbound_session && known_peer.is_none() {
                         return Ok(());
                     }
-                    super::maybe_request_catchup(&network, &mut writer, peer_status.as_ref().unwrap()).await?;
+                    maybe_start_catchup(
+                        &network,
+                        &mut writer,
+                        peer_status.as_ref().unwrap(),
+                        &mut catchup_requested_at,
+                    ).await?;
                     write_peer_exchange(&network, &mut writer, &known_peer).await?;
                     continue;
                 }
@@ -356,7 +493,12 @@ async fn session_loop(
                     let status = PeerStatus::from_envelope(*height, tip_hash.clone(), *time_ms);
                     record_peer_status(&network, &known_peer, remote_addr, &status).await;
                     peer_status = Some(status);
-                    super::maybe_request_catchup(&network, &mut writer, peer_status.as_ref().unwrap()).await?;
+                    maybe_start_catchup(
+                        &network,
+                        &mut writer,
+                        peer_status.as_ref().unwrap(),
+                        &mut catchup_requested_at,
+                    ).await?;
                     write_peer_exchange(&network, &mut writer, &known_peer).await?;
                     continue;
                 }
@@ -367,13 +509,70 @@ async fn session_loop(
                     }
                     continue;
                 }
-                process_envelope(
+                if maybe_request_inventory(
+                    &network,
+                    &mut writer,
+                    &envelope,
+                    &mut catchup_requested_at,
+                )
+                .await?
+                {
+                    continue;
+                }
+                let continue_catchup = matches!(
+                    &envelope,
+                    GossipEnvelope::Block(_) | GossipEnvelope::Blocks { .. } | GossipEnvelope::ChainBootstrap(_)
+                );
+                let completes_catchup_request = matches!(
+                    &envelope,
+                    GossipEnvelope::Blocks { .. } | GossipEnvelope::ChainBootstrap(_)
+                );
+                let (height_before, response_already_applied) = if continue_catchup {
+                    let node = network.inner.node.lock().await;
+                    let status = node.ledger().status();
+                    let already_applied = match &envelope {
+                        GossipEnvelope::Blocks { blocks } => {
+                            !blocks.is_empty() && node.ledger().contains_block_sequence(blocks)
+                        }
+                        _ => false,
+                    };
+                    (Some((status.height, status.tip_hash)), already_applied)
+                } else {
+                    (None, false)
+                };
+                let requested_chain_data = process_envelope(
                     &network,
                     &mut writer,
                     remote_addr,
                     &mut known_peer,
                     envelope,
                 ).await?;
+                let chain_changed = if let Some(height_before) = height_before {
+                    let status = network.inner.node.lock().await.ledger().status();
+                    status.height != height_before.0 || status.tip_hash != height_before.1
+                } else {
+                    false
+                };
+                let response_satisfied = chain_changed || response_already_applied;
+                update_catchup_request_state(
+                    &mut catchup_requested_at,
+                    completes_catchup_request,
+                    response_satisfied,
+                    requested_chain_data,
+                );
+                if continue_catchup && response_satisfied && !requested_chain_data {
+                    if let Some(status) = peer_status.as_ref() {
+                        maybe_start_catchup(
+                            &network,
+                            &mut writer,
+                            status,
+                            &mut catchup_requested_at,
+                        ).await?;
+                    }
+                }
+                if session_peer_is_banned(&network, &known_peer, remote_addr).await {
+                    return Ok(());
+                }
                 if is_outbound_session && known_peer.is_none() {
                     return Ok(());
                 }
@@ -382,8 +581,70 @@ async fn session_loop(
     }
 }
 
+async fn maybe_start_catchup(
+    network: &GossipNetwork,
+    writer: &mut tokio::net::tcp::OwnedWriteHalf,
+    peer_status: &PeerStatus,
+    requested_at: &mut Option<Instant>,
+) -> Result<()> {
+    if requested_at.is_none() && super::maybe_request_catchup(network, writer, peer_status).await? {
+        *requested_at = Some(Instant::now());
+    }
+    Ok(())
+}
+
+fn update_catchup_request_state(
+    requested_at: &mut Option<Instant>,
+    completes_request: bool,
+    response_satisfied: bool,
+    requested_chain_data: bool,
+) {
+    if requested_chain_data || (completes_request && !response_satisfied) {
+        *requested_at = Some(Instant::now());
+    } else if completes_request {
+        *requested_at = None;
+    }
+}
+
+async fn maybe_request_inventory(
+    network: &GossipNetwork,
+    writer: &mut tokio::net::tcp::OwnedWriteHalf,
+    envelope: &GossipEnvelope,
+    requested_at: &mut Option<Instant>,
+) -> Result<bool> {
+    let GossipEnvelope::Inventory { blocks } = envelope else {
+        return Ok(false);
+    };
+    if requested_at.is_some() {
+        return Ok(true);
+    }
+    let request = network
+        .inner
+        .node
+        .lock()
+        .await
+        .missing_inventory_request(blocks);
+    if let Some(request) = request {
+        write_envelope(writer, &request).await?;
+        *requested_at = Some(Instant::now());
+    }
+    Ok(true)
+}
+
 async fn peer_is_connectable(network: &GossipNetwork, peer: &str) -> bool {
     network.inner.peers.lock().await.is_connectable_peer(peer)
+}
+
+async fn session_peer_is_banned(
+    network: &GossipNetwork,
+    known_peer: &Option<String>,
+    remote_addr: SocketAddr,
+) -> bool {
+    let peer = known_peer
+        .as_deref()
+        .map(str::to_owned)
+        .unwrap_or_else(|| remote_addr.to_string());
+    network.inner.peers.lock().await.is_banned(&peer)
 }
 
 pub(super) fn next_reconnect_delay(current: Duration) -> Duration {
@@ -394,8 +655,10 @@ pub(super) fn next_reconnect_delay(current: Duration) -> Duration {
 mod tests {
     use std::time::Duration;
 
+    use tokio::time::Instant;
+
     use super::super::{INITIAL_RECONNECT_DELAY, MAX_RECONNECT_DELAY};
-    use super::next_reconnect_delay;
+    use super::{next_reconnect_delay, update_catchup_request_state};
 
     #[test]
     fn reconnect_backoff_is_capped() {
@@ -407,5 +670,23 @@ mod tests {
             next_reconnect_delay(MAX_RECONNECT_DELAY),
             MAX_RECONNECT_DELAY
         );
+    }
+
+    #[test]
+    fn already_applied_response_clears_in_flight_request() {
+        let mut requested_at = Some(Instant::now());
+
+        update_catchup_request_state(&mut requested_at, true, true, false);
+
+        assert!(requested_at.is_none());
+    }
+
+    #[test]
+    fn fork_recovery_request_is_marked_in_flight() {
+        let mut requested_at = None;
+
+        update_catchup_request_state(&mut requested_at, false, false, true);
+
+        assert!(requested_at.is_some());
     }
 }

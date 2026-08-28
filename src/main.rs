@@ -44,6 +44,7 @@ const VDF_MEASUREMENT_INITIAL_ROUNDS: u64 = 1_000;
 const VDF_MEASUREMENT_MAX_ROUNDS: u64 = 10_000_000;
 const VDF_MEASUREMENT_MIN_ELAPSED: Duration = Duration::from_millis(150);
 const VDF_PROGRESS_LOG_INTERVAL: Duration = Duration::from_secs(10);
+const SYNC_CHAIN_CHECKPOINT_INTERVAL: Duration = Duration::from_secs(30);
 const AUTOMATIC_BURN_ENABLED_ENV: &str = "IUNA_AUTOMATIC_BURN_ENABLED";
 const POW_MINING_ENABLED_ENV: &str = "IUNA_POW_MINING_ENABLED";
 const POW_MINING_WORKERS_ENV: &str = "IUNA_POW_MINING_WORKERS";
@@ -227,6 +228,7 @@ async fn main() -> Result<()> {
     let persistence_store = chain_store.clone();
     let persistence_ui_data_store = ui_data_store.clone();
     let persistence_config = Arc::clone(&ui_config);
+    let persistence_gossip = gossip.clone();
     let persistence_initial_tip = {
         let node = node.lock().await;
         if node.has_real_chain() {
@@ -242,6 +244,7 @@ async fn main() -> Result<()> {
             persistence_store,
             persistence_ui_data_store,
             persistence_config,
+            persistence_gossip,
             persistence_initial_tip,
             persistence_initial_keep_metrics,
         )
@@ -971,21 +974,29 @@ async fn run_chain_persistence(
     store: SqliteChainStore,
     ui_data_store: SqliteUiDataStore,
     ui_config: Arc<Mutex<config_store::UiConfig>>,
+    gossip: p2p::GossipNetwork,
     initial_saved_tip: Option<String>,
     initial_projected_keep_metrics: bool,
 ) {
-    run_chain_persistence_with_interval(
+    let initial_state = ChainPersistenceState {
+        projected_tip: initial_saved_tip.clone(),
+        saved_tip: initial_saved_tip,
+        projected_keep_metrics: initial_projected_keep_metrics,
+        sync_checkpoint_interval: SYNC_CHAIN_CHECKPOINT_INTERVAL,
+    };
+    run_chain_persistence_loop(
         node,
         store,
         ui_data_store,
         ui_config,
         Duration::from_secs(2),
-        initial_saved_tip,
-        initial_projected_keep_metrics,
+        Some(gossip),
+        initial_state,
     )
     .await;
 }
 
+#[cfg(test)]
 async fn run_chain_persistence_with_interval(
     node: SharedNode,
     store: SqliteChainStore,
@@ -995,14 +1006,65 @@ async fn run_chain_persistence_with_interval(
     initial_saved_tip: Option<String>,
     initial_projected_keep_metrics: bool,
 ) {
-    let mut last_saved_tip = initial_saved_tip;
-    let mut last_projected_keep_metrics = initial_projected_keep_metrics;
+    let initial_state = ChainPersistenceState {
+        projected_tip: initial_saved_tip.clone(),
+        saved_tip: initial_saved_tip,
+        projected_keep_metrics: initial_projected_keep_metrics,
+        sync_checkpoint_interval: SYNC_CHAIN_CHECKPOINT_INTERVAL,
+    };
+    run_chain_persistence_loop(
+        node,
+        store,
+        ui_data_store,
+        ui_config,
+        interval,
+        None,
+        initial_state,
+    )
+    .await;
+}
+
+struct ChainPersistenceState {
+    saved_tip: Option<String>,
+    projected_tip: Option<String>,
+    projected_keep_metrics: bool,
+    sync_checkpoint_interval: Duration,
+}
+
+async fn run_chain_persistence_loop(
+    node: SharedNode,
+    store: SqliteChainStore,
+    ui_data_store: SqliteUiDataStore,
+    ui_config: Arc<Mutex<config_store::UiConfig>>,
+    interval: Duration,
+    gossip: Option<p2p::GossipNetwork>,
+    initial_state: ChainPersistenceState,
+) {
+    let mut last_saved_tip = initial_state.saved_tip;
+    let mut last_projected_tip = initial_state.projected_tip;
+    let mut last_projected_keep_metrics = initial_state.projected_keep_metrics;
+    let mut last_chain_checkpoint = Instant::now();
     loop {
         tokio::time::sleep(interval).await;
+        let syncing = gossip
+            .as_ref()
+            .is_some_and(|network| network.chain_sync_active_or_recent(Duration::from_secs(5)));
+        let defer_sync_checkpoint = should_defer_sync_checkpoint(
+            syncing,
+            last_chain_checkpoint.elapsed(),
+            initial_state.sync_checkpoint_interval,
+        );
         let snapshot = {
             let node = node.lock().await;
             if !node.has_real_chain() {
                 continue;
+            }
+            let tip_hash = node.ledger().tip_hash();
+            if syncing {
+                let tip_changed = last_saved_tip.as_deref() != Some(tip_hash);
+                if !tip_changed || defer_sync_checkpoint {
+                    continue;
+                }
             }
             node.chain_snapshot()
         };
@@ -1011,20 +1073,29 @@ async fn run_chain_persistence_with_interval(
         };
         let keep_metrics = ui_config.lock().await.keep_track_of_metrics;
         let tip_changed = last_saved_tip.as_deref() != Some(tip_hash.as_str());
+        let projected_tip_changed = last_projected_tip.as_deref() != Some(tip_hash.as_str());
         let metrics_mode_changed = last_projected_keep_metrics != keep_metrics;
-        if !tip_changed && !metrics_mode_changed {
+        if !tip_changed && !projected_tip_changed && !metrics_mode_changed {
             continue;
         }
 
-        let result = if tip_changed {
+        let result = if syncing && tip_changed {
+            persist_chain_snapshot(&store, snapshot).await
+        } else if tip_changed {
             persist_chain_and_project_ui_data(&store, &ui_data_store, snapshot, keep_metrics).await
         } else {
             project_ui_data_store(&ui_data_store, snapshot, keep_metrics).await
         };
         match result {
             Ok(()) => {
+                if !syncing {
+                    last_projected_tip = Some(tip_hash.clone());
+                    last_projected_keep_metrics = keep_metrics;
+                }
                 last_saved_tip = Some(tip_hash);
-                last_projected_keep_metrics = keep_metrics;
+                if tip_changed {
+                    last_chain_checkpoint = Instant::now();
+                }
             }
             Err(error) if debug_logging_enabled() => {
                 eprintln!("chain persistence failed: {error:#}")
@@ -1032,6 +1103,14 @@ async fn run_chain_persistence_with_interval(
             Err(_) => {}
         }
     }
+}
+
+fn should_defer_sync_checkpoint(
+    syncing: bool,
+    since_last_checkpoint: Duration,
+    checkpoint_interval: Duration,
+) -> bool {
+    syncing && since_last_checkpoint < checkpoint_interval
 }
 
 async fn persist_chain_and_project_ui_data(

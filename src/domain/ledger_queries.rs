@@ -431,12 +431,25 @@ impl Ledger {
         if limit == 0 {
             return Vec::new();
         }
+        let Ok(start) = usize::try_from(from_height) else {
+            return Vec::new();
+        };
         self.chain
+            .get(start..)
+            .unwrap_or_default()
             .iter()
-            .filter(|block| block.height >= from_height)
             .take(limit)
             .cloned()
             .collect()
+    }
+
+    pub(crate) fn contains_block_sequence(&self, blocks: &[Block]) -> bool {
+        blocks.iter().all(|block| {
+            usize::try_from(block.height)
+                .ok()
+                .and_then(|height| self.chain.get(height))
+                .is_some_and(|known| known.hash == block.hash)
+        })
     }
 
     pub(crate) fn block_locator(&self) -> Vec<String> {

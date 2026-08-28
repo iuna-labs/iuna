@@ -11,7 +11,7 @@ use crate::{
     },
     domain::{Ledger, Wallet, run_vdf},
 };
-use tokio::io::AsyncWriteExt;
+use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 
 use super::test_support::{allocations, gossip_network, node, queue_plaintext_burn};
 
@@ -45,6 +45,340 @@ async fn block_batch_validation_reports_each_validated_height() {
 }
 
 #[tokio::test]
+async fn session_serializes_inventory_and_paginated_catchup_requests() {
+    let alice = Wallet::from_seed("immediate-page-sync-alice");
+    let allocations = allocations(std::slice::from_ref(&alice), 1_000);
+    let local = Arc::new(tokio::sync::Mutex::new(node(
+        "immediate-page-local",
+        alice.clone(),
+        allocations.clone(),
+    )));
+    let mut remote = node("immediate-page-remote", alice.clone(), allocations);
+    for timestamp_ms in [1, 2] {
+        queue_plaintext_burn(&mut remote, &alice, 1);
+        remote.drain_outbox();
+        remote.mine_one_at(timestamp_ms).unwrap();
+        remote.drain_outbox();
+    }
+    let hello = remote.hello(None, None);
+    let blocks = remote.ledger().blocks_from(1, 2);
+
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let peer_addr = listener.local_addr().unwrap();
+    let server = tokio::spawn(async move {
+        let (stream, _) = listener.accept().await.unwrap();
+        let (reader, mut writer) = stream.into_split();
+        let mut lines = BufReader::new(reader).lines();
+        let first = lines.next_line().await.unwrap().unwrap();
+        assert!(matches!(
+            super::parse_envelope(&first).unwrap(),
+            GossipEnvelope::Hello(_)
+        ));
+        super::write_envelope(&mut writer, &hello).await.unwrap();
+
+        let mut sent_first_page = false;
+        loop {
+            let line = tokio::time::timeout(std::time::Duration::from_secs(30), lines.next_line())
+                .await
+                .expect("next block request did not follow the imported page")
+                .unwrap()
+                .unwrap();
+            match super::parse_envelope(&line).unwrap() {
+                GossipEnvelope::BlockRangeRequest { from_height: 1, .. } => {
+                    assert!(!sent_first_page);
+                    sent_first_page = true;
+                    super::write_envelope(
+                        &mut writer,
+                        &GossipEnvelope::Inventory {
+                            blocks: vec![crate::app::BlockInventory {
+                                height: blocks[1].height,
+                                hash: blocks[1].hash.clone(),
+                            }],
+                        },
+                    )
+                    .await
+                    .unwrap();
+                    let duplicate_request =
+                        tokio::time::timeout(std::time::Duration::from_millis(200), async {
+                            loop {
+                                let line = lines.next_line().await.unwrap().unwrap();
+                                let envelope = super::parse_envelope(&line).unwrap();
+                                if matches!(
+                                    envelope,
+                                    GossipEnvelope::BlockRequest { .. }
+                                        | GossipEnvelope::BlockRangeRequest { .. }
+                                        | GossipEnvelope::BlockLocatorRequest { .. }
+                                ) {
+                                    break envelope;
+                                }
+                            }
+                        })
+                        .await;
+                    assert!(
+                        duplicate_request.is_err(),
+                        "Inventory bypassed the outstanding paginated catchup request: {duplicate_request:?}"
+                    );
+                    super::write_envelope(
+                        &mut writer,
+                        &GossipEnvelope::Blocks {
+                            blocks: vec![blocks[0].clone()],
+                        },
+                    )
+                    .await
+                    .unwrap();
+                }
+                GossipEnvelope::BlockRangeRequest { from_height: 2, .. } => {
+                    assert!(sent_first_page);
+                    super::write_envelope(
+                        &mut writer,
+                        &GossipEnvelope::Blocks {
+                            blocks: vec![blocks[1].clone()],
+                        },
+                    )
+                    .await
+                    .unwrap();
+                    break;
+                }
+                _ => {}
+            }
+        }
+    });
+
+    let peers = Arc::new(tokio::sync::Mutex::new(PeerBook::from_addresses(vec![
+        peer_addr.to_string(),
+    ])));
+    let _network = super::GossipNetwork::start(
+        Arc::clone(&local),
+        peers,
+        "127.0.0.1:0".parse().unwrap(),
+        None,
+        false,
+    )
+    .await
+    .unwrap();
+
+    tokio::time::timeout(std::time::Duration::from_secs(60), server)
+        .await
+        .unwrap()
+        .unwrap();
+    tokio::time::timeout(std::time::Duration::from_secs(30), async {
+        loop {
+            if local.lock().await.ledger().height() == 2 {
+                break;
+            }
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .unwrap();
+}
+
+#[tokio::test]
+async fn invalid_bootstrap_response_is_not_retried_without_backoff() {
+    let wallet = Wallet::from_seed("invalid-bootstrap-backoff");
+    let remote = node(
+        "invalid-bootstrap-remote",
+        wallet.clone(),
+        allocations(std::slice::from_ref(&wallet), 1_000),
+    );
+    let hello = remote.hello(None, None);
+    let mut invalid_bootstrap = remote.chain_bootstrap();
+    invalid_bootstrap.genesis_block.hash = "0".repeat(64);
+
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let peer_addr = listener.local_addr().unwrap();
+    let server = tokio::spawn(async move {
+        let (stream, _) = listener.accept().await.unwrap();
+        let (reader, mut writer) = stream.into_split();
+        let mut lines = BufReader::new(reader).lines();
+        let first = lines.next_line().await.unwrap().unwrap();
+        assert!(matches!(
+            super::parse_envelope(&first).unwrap(),
+            GossipEnvelope::Hello(_)
+        ));
+        super::write_envelope(&mut writer, &hello).await.unwrap();
+
+        loop {
+            let line = lines.next_line().await.unwrap().unwrap();
+            if matches!(
+                super::parse_envelope(&line).unwrap(),
+                GossipEnvelope::ChainBootstrapRequest
+            ) {
+                break;
+            }
+        }
+        super::write_envelope(
+            &mut writer,
+            &GossipEnvelope::ChainBootstrap(invalid_bootstrap),
+        )
+        .await
+        .unwrap();
+
+        tokio::time::timeout(std::time::Duration::from_secs(3), async {
+            loop {
+                let Some(line) = lines.next_line().await.unwrap() else {
+                    break;
+                };
+                assert!(
+                    !matches!(
+                        super::parse_envelope(&line).unwrap(),
+                        GossipEnvelope::ChainBootstrapRequest
+                    ),
+                    "invalid bootstrap was retried immediately"
+                );
+            }
+        })
+        .await
+        .ok();
+    });
+
+    let local = Arc::new(tokio::sync::Mutex::new(NodeCore::from_ledger(
+        wallet,
+        Ledger::new(BTreeMap::new(), 1),
+        0,
+    )));
+    let peers = Arc::new(tokio::sync::Mutex::new(PeerBook::from_addresses(vec![
+        peer_addr.to_string(),
+    ])));
+    let _network =
+        super::GossipNetwork::start(local, peers, "127.0.0.1:0".parse().unwrap(), None, false)
+            .await
+            .unwrap();
+
+    tokio::time::timeout(std::time::Duration::from_secs(5), server)
+        .await
+        .unwrap()
+        .unwrap();
+}
+
+#[tokio::test]
+async fn inbound_session_receives_new_block_inventory_without_waiting_for_status_tick() {
+    let alice = Wallet::from_seed("inbound-fast-block-relay-alice");
+    let allocations = allocations(std::slice::from_ref(&alice), 1_000);
+    let mut source = node(
+        "inbound-fast-block-relay-source",
+        alice.clone(),
+        allocations.clone(),
+    );
+    let remote = node(
+        "inbound-fast-block-relay-remote",
+        alice.clone(),
+        allocations,
+    );
+    queue_plaintext_burn(&mut source, &alice, 1);
+    source.drain_outbox();
+    let block = source.mine_one_at(1).unwrap();
+    source.drain_outbox();
+
+    let reserved = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let listen_addr = reserved.local_addr().unwrap();
+    drop(reserved);
+    let network = super::GossipNetwork::start(
+        Arc::new(tokio::sync::Mutex::new(source)),
+        Arc::new(tokio::sync::Mutex::new(PeerBook::default())),
+        listen_addr,
+        None,
+        true,
+    )
+    .await
+    .unwrap();
+
+    let stream = tokio::net::TcpStream::connect(listen_addr).await.unwrap();
+    let (reader, mut writer) = stream.into_split();
+    let mut lines = BufReader::new(reader).lines();
+    let hello = lines.next_line().await.unwrap().unwrap();
+    assert!(matches!(
+        super::parse_envelope(&hello).unwrap(),
+        GossipEnvelope::Hello(_)
+    ));
+
+    network
+        .broadcast(vec![GossipEnvelope::Block(block.clone())])
+        .await
+        .unwrap();
+    assert!(
+        tokio::time::timeout(std::time::Duration::from_millis(150), lines.next_line())
+            .await
+            .is_err(),
+        "inbound peer received gossip before completing Hello"
+    );
+
+    super::write_envelope(&mut writer, &remote.hello(None, None))
+        .await
+        .unwrap();
+    tokio::time::timeout(std::time::Duration::from_secs(1), async {
+        loop {
+            if !network.inner.sessions.lock().await.is_empty() {
+                break;
+            }
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .expect("inbound session was not registered after Hello");
+
+    network
+        .broadcast(vec![GossipEnvelope::Block(block.clone())])
+        .await
+        .unwrap();
+    let relayed = tokio::time::timeout(std::time::Duration::from_secs(1), async {
+        loop {
+            let line = lines.next_line().await.unwrap().unwrap();
+            if let GossipEnvelope::Inventory { blocks } = super::parse_envelope(&line).unwrap() {
+                break blocks;
+            }
+        }
+    })
+    .await
+    .expect("inbound block relay waited for periodic anti-entropy");
+
+    assert!(relayed.iter().any(|item| item.hash == block.hash));
+    network.set_accept_inbound(false).await.unwrap();
+}
+
+#[tokio::test]
+async fn inbound_self_connection_is_closed_before_relay_registration() {
+    let wallet = Wallet::from_seed("inbound-self-connection");
+    let reserved = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let listen_addr = reserved.local_addr().unwrap();
+    drop(reserved);
+    let network = super::GossipNetwork::start(
+        Arc::new(tokio::sync::Mutex::new(node(
+            "inbound-self-connection",
+            wallet.clone(),
+            allocations(&[wallet], 1_000),
+        ))),
+        Arc::new(tokio::sync::Mutex::new(PeerBook::default())),
+        listen_addr,
+        None,
+        true,
+    )
+    .await
+    .unwrap();
+
+    let stream = tokio::net::TcpStream::connect(listen_addr).await.unwrap();
+    let (reader, mut writer) = stream.into_split();
+    let mut lines = BufReader::new(reader).lines();
+    let local_hello =
+        match super::parse_envelope(&lines.next_line().await.unwrap().unwrap()).unwrap() {
+            GossipEnvelope::Hello(hello) => hello,
+            other => panic!("expected Hello, got {other:?}"),
+        };
+    super::write_envelope(&mut writer, &GossipEnvelope::Hello(local_hello))
+        .await
+        .unwrap();
+
+    let closed = tokio::time::timeout(std::time::Duration::from_secs(1), lines.next_line())
+        .await
+        .expect("self connection remained open")
+        .unwrap();
+    assert!(closed.is_none());
+    assert!(network.inner.sessions.lock().await.is_empty());
+    assert_eq!(network.metrics().self_peer_rejections, 1);
+    network.set_accept_inbound(false).await.unwrap();
+}
+
+#[tokio::test]
 async fn full_outbound_queue_is_metric_not_peer_error() {
     let wallet = Wallet::from_seed("full-outbound-queue");
     let node = Arc::new(tokio::sync::Mutex::new(node(
@@ -67,22 +401,31 @@ async fn full_outbound_queue_is_metric_not_peer_error() {
             inbound_limiter: Arc::new(StdMutex::new(super::InboundConnectionLimiter::default())),
             metrics: super::P2pMetricsCounters::default(),
             sync_progress: StdMutex::new(super::SyncProgressState::default()),
+            chain_validation: Arc::new(super::ChainValidationCoordinator::default()),
         }),
     };
     let (sender, _receiver) = tokio::sync::mpsc::channel(1);
+    let queue_bytes = Arc::new(tokio::sync::Semaphore::new(super::PEER_QUEUE_BYTES));
+    let queued_bytes = Arc::clone(&queue_bytes).try_acquire_many_owned(1).unwrap();
     sender
-        .try_send(vec![GossipEnvelope::PeerStatus {
-            height: 1,
-            tip_hash: "queued".to_string(),
-            time_ms: 1_000,
-        }])
+        .try_send(super::OutboundBatch {
+            envelopes: Arc::from(vec![GossipEnvelope::PeerStatus {
+                height: 1,
+                tip_hash: "queued".to_string(),
+                time_ms: 1_000,
+            }]),
+            _queued_bytes: queued_bytes,
+        })
         .unwrap();
-    network
-        .inner
-        .sessions
-        .lock()
-        .await
-        .insert("127.0.0.1:9444".to_string(), sender);
+    network.inner.sessions.lock().await.insert(
+        "127.0.0.1:9444".to_string(),
+        super::GossipSession {
+            peer: "127.0.0.1:9444".to_string(),
+            sender,
+            shutdown: tokio::sync::watch::channel(false).0,
+            queue_bytes,
+        },
+    );
 
     network
         .broadcast(vec![GossipEnvelope::PeerStatus {
@@ -97,6 +440,167 @@ async fn full_outbound_queue_is_metric_not_peer_error() {
     let peer = peers.lock().await.list().pop().unwrap();
     assert_eq!(peer.last_error, None);
     assert_eq!(peer.last_error_ms, None);
+}
+
+#[tokio::test]
+async fn full_inbound_queue_disconnects_the_session() {
+    let wallet = Wallet::from_seed("full-inbound-queue");
+    let network = gossip_network(
+        Arc::new(tokio::sync::Mutex::new(node(
+            "full-inbound-queue",
+            wallet.clone(),
+            allocations(&[wallet], 1_000),
+        ))),
+        Arc::new(tokio::sync::Mutex::new(PeerBook::default())),
+        "127.0.0.1:9544".parse().unwrap(),
+        None,
+    );
+    let session_id = format!("{}127.0.0.1:51234", super::INBOUND_SESSION_PREFIX);
+    let (sender, _receiver) = tokio::sync::mpsc::channel(1);
+    let (shutdown, mut shutdown_receiver) = tokio::sync::watch::channel(false);
+    let queue_bytes = Arc::new(tokio::sync::Semaphore::new(super::INBOUND_PEER_QUEUE_BYTES));
+    let queued_bytes = Arc::clone(&queue_bytes).try_acquire_many_owned(1).unwrap();
+    sender
+        .try_send(super::OutboundBatch {
+            envelopes: Arc::from(vec![GossipEnvelope::PeerStatus {
+                height: 1,
+                tip_hash: "queued".to_string(),
+                time_ms: 1_000,
+            }]),
+            _queued_bytes: queued_bytes,
+        })
+        .unwrap();
+    network.inner.sessions.lock().await.insert(
+        session_id.clone(),
+        super::GossipSession {
+            peer: "127.0.0.1:51234".to_string(),
+            sender,
+            shutdown,
+            queue_bytes,
+        },
+    );
+
+    network
+        .broadcast(vec![GossipEnvelope::PeerStatus {
+            height: 2,
+            tip_hash: "new".to_string(),
+            time_ms: 2_000,
+        }])
+        .await
+        .unwrap();
+
+    assert_eq!(network.metrics().outbound_queue_full, 1);
+    assert!(
+        !network
+            .inner
+            .sessions
+            .lock()
+            .await
+            .contains_key(&session_id)
+    );
+    shutdown_receiver.changed().await.unwrap();
+    assert!(*shutdown_receiver.borrow());
+}
+
+#[tokio::test]
+async fn exhausted_inbound_byte_budget_disconnects_the_session() {
+    let wallet = Wallet::from_seed("inbound-byte-budget");
+    let network = gossip_network(
+        Arc::new(tokio::sync::Mutex::new(node(
+            "inbound-byte-budget",
+            wallet.clone(),
+            allocations(&[wallet], 1_000),
+        ))),
+        Arc::new(tokio::sync::Mutex::new(PeerBook::default())),
+        "127.0.0.1:9544".parse().unwrap(),
+        None,
+    );
+    let session_id = format!("{}127.0.0.1:51235", super::INBOUND_SESSION_PREFIX);
+    let (sender, mut receiver) = tokio::sync::mpsc::channel(4);
+    let (shutdown, mut shutdown_receiver) = tokio::sync::watch::channel(false);
+    network.inner.sessions.lock().await.insert(
+        session_id.clone(),
+        super::GossipSession {
+            peer: "127.0.0.1:51235".to_string(),
+            sender,
+            shutdown,
+            queue_bytes: Arc::new(tokio::sync::Semaphore::new(1)),
+        },
+    );
+
+    network
+        .broadcast(vec![GossipEnvelope::PeerStatus {
+            height: 2,
+            tip_hash: "larger-than-one-byte".to_string(),
+            time_ms: 2_000,
+        }])
+        .await
+        .unwrap();
+
+    assert_eq!(network.metrics().outbound_queue_full, 1);
+    assert!(
+        !network
+            .inner
+            .sessions
+            .lock()
+            .await
+            .contains_key(&session_id)
+    );
+    shutdown_receiver.changed().await.unwrap();
+    assert!(*shutdown_receiver.borrow());
+    assert!(matches!(
+        receiver.try_recv(),
+        Err(tokio::sync::mpsc::error::TryRecvError::Disconnected)
+    ));
+}
+
+#[tokio::test]
+async fn broadcast_skips_banned_inbound_session_identity() {
+    let wallet = Wallet::from_seed("banned-inbound-relay");
+    let node = Arc::new(tokio::sync::Mutex::new(node(
+        "banned-inbound-relay",
+        wallet.clone(),
+        allocations(&[wallet], 1_000),
+    )));
+    let peers = Arc::new(tokio::sync::Mutex::new(PeerBook::default()));
+    let network = gossip_network(
+        node,
+        Arc::clone(&peers),
+        "127.0.0.1:9544".parse().unwrap(),
+        None,
+    );
+    let peer = "127.0.0.1:51234";
+    for _ in 0..crate::app::PEER_MISBEHAVIOR_BAN_SCORE {
+        peers
+            .lock()
+            .await
+            .record_inbound_misbehavior(peer, "invalid block");
+    }
+    let (sender, mut receiver) = tokio::sync::mpsc::channel(1);
+    let queue_bytes = Arc::new(tokio::sync::Semaphore::new(super::INBOUND_PEER_QUEUE_BYTES));
+    network.inner.sessions.lock().await.insert(
+        format!("{}{peer}", super::INBOUND_SESSION_PREFIX),
+        super::GossipSession {
+            peer: peer.to_string(),
+            sender,
+            shutdown: tokio::sync::watch::channel(false).0,
+            queue_bytes,
+        },
+    );
+
+    network
+        .broadcast(vec![GossipEnvelope::PeerStatus {
+            height: 1,
+            tip_hash: "tip".to_string(),
+            time_ms: 1_000,
+        }])
+        .await
+        .unwrap();
+
+    assert!(matches!(
+        receiver.try_recv(),
+        Err(tokio::sync::mpsc::error::TryRecvError::Empty)
+    ));
 }
 
 #[tokio::test]
@@ -144,7 +648,7 @@ async fn single_block_fork_error_requests_blocks_by_locator() {
     let mut client_reader = super::LimitedLineReader::new(client_reader);
     let mut known_peer = None;
 
-    super::process_envelope(
+    let requested_chain_data = super::process_envelope(
         &network,
         &mut server_writer,
         remote_addr,
@@ -153,6 +657,7 @@ async fn single_block_fork_error_requests_blocks_by_locator() {
     )
     .await
     .unwrap();
+    assert!(requested_chain_data);
 
     let line = tokio::time::timeout(std::time::Duration::from_secs(1), client_reader.read_line())
         .await
@@ -215,7 +720,7 @@ async fn block_page_without_local_ancestor_requests_blocks_by_locator() {
     let mut client_reader = super::LimitedLineReader::new(client_reader);
     let mut known_peer = None;
 
-    super::process_envelope(
+    let requested_chain_data = super::process_envelope(
         &network,
         &mut server_writer,
         remote_addr,
@@ -226,6 +731,7 @@ async fn block_page_without_local_ancestor_requests_blocks_by_locator() {
     )
     .await
     .unwrap();
+    assert!(requested_chain_data);
 
     let line = tokio::time::timeout(std::time::Duration::from_secs(1), client_reader.read_line())
         .await
@@ -476,6 +982,7 @@ async fn hello_rejects_wrong_network_or_genesis_without_banning() {
             inbound_limiter: Arc::new(StdMutex::new(super::InboundConnectionLimiter::default())),
             metrics: super::P2pMetricsCounters::default(),
             sync_progress: StdMutex::new(super::SyncProgressState::default()),
+            chain_validation: Arc::new(super::ChainValidationCoordinator::default()),
         }),
     };
 
@@ -582,6 +1089,7 @@ async fn hello_records_remote_clock_observation() {
             inbound_limiter: Arc::new(StdMutex::new(super::InboundConnectionLimiter::default())),
             metrics: super::P2pMetricsCounters::default(),
             sync_progress: StdMutex::new(super::SyncProgressState::default()),
+            chain_validation: Arc::new(super::ChainValidationCoordinator::default()),
         }),
     };
     let remote_time_ms = crate::app::now_ms().saturating_add(60_000);
@@ -640,6 +1148,7 @@ async fn hello_remembers_advertised_address_after_signed_session_and_dialback() 
             inbound_limiter: Arc::new(StdMutex::new(super::InboundConnectionLimiter::default())),
             metrics: super::P2pMetricsCounters::default(),
             sync_progress: StdMutex::new(super::SyncProgressState::default()),
+            chain_validation: Arc::new(super::ChainValidationCoordinator::default()),
         }),
     };
     let remote_node_id = super::new_node_id();
@@ -717,6 +1226,7 @@ async fn hello_ignores_advertised_address_when_connected_peer_cannot_sign_claime
             inbound_limiter: Arc::new(StdMutex::new(super::InboundConnectionLimiter::default())),
             metrics: super::P2pMetricsCounters::default(),
             sync_progress: StdMutex::new(super::SyncProgressState::default()),
+            chain_validation: Arc::new(super::ChainValidationCoordinator::default()),
         }),
     };
     let victim_node_id = super::new_node_id();
@@ -788,6 +1298,7 @@ async fn dialback_rejects_address_that_signs_with_different_node_id() {
             inbound_limiter: Arc::new(StdMutex::new(super::InboundConnectionLimiter::default())),
             metrics: super::P2pMetricsCounters::default(),
             sync_progress: StdMutex::new(super::SyncProgressState::default()),
+            chain_validation: Arc::new(super::ChainValidationCoordinator::default()),
         }),
     };
     let honest_node_id = super::new_node_id();
@@ -900,6 +1411,7 @@ async fn setup_placeholder_accepts_remote_genesis_and_adopts_bootstrap() {
             inbound_limiter: Arc::new(StdMutex::new(super::InboundConnectionLimiter::default())),
             metrics: super::P2pMetricsCounters::default(),
             sync_progress: StdMutex::new(super::SyncProgressState::default()),
+            chain_validation: Arc::new(super::ChainValidationCoordinator::default()),
         }),
     };
 
@@ -932,7 +1444,6 @@ async fn setup_placeholder_accepts_remote_genesis_and_adopts_bootstrap() {
     .unwrap();
 
     assert!(peer_status.request_bootstrap);
-    assert!(!peer_status.push_bootstrap);
     assert_eq!(known_peer.as_deref(), Some("iuna.jhx.app:9444"));
     let listed = network.inner.peers.lock().await.list();
     assert_eq!(listed.len(), 1);
@@ -963,7 +1474,7 @@ async fn setup_placeholder_accepts_remote_genesis_and_adopts_bootstrap() {
 }
 
 #[tokio::test]
-async fn real_node_accepts_setup_placeholder_peer_and_pushes_bootstrap() {
+async fn real_node_accepts_setup_placeholder_peer_without_requesting_its_chain() {
     let wallet = Wallet::from_seed("setup-placeholder-peer-real-node");
     let node = Arc::new(tokio::sync::Mutex::new(node(
         "real",
@@ -982,6 +1493,7 @@ async fn real_node_accepts_setup_placeholder_peer_and_pushes_bootstrap() {
             inbound_limiter: Arc::new(StdMutex::new(super::InboundConnectionLimiter::default())),
             metrics: super::P2pMetricsCounters::default(),
             sync_progress: StdMutex::new(super::SyncProgressState::default()),
+            chain_validation: Arc::new(super::ChainValidationCoordinator::default()),
         }),
     };
     let setup_ledger = Ledger::new(BTreeMap::new(), 1);
@@ -1006,19 +1518,13 @@ async fn real_node_accepts_setup_placeholder_peer_and_pushes_bootstrap() {
     .unwrap();
 
     assert!(!peer_status.request_bootstrap);
-    assert!(peer_status.push_bootstrap);
-    let payload = super::catchup_payload_for_peer(&node, &peer_status).await;
-    assert!(matches!(
-        payload.as_slice(),
-        [GossipEnvelope::ChainBootstrap(_)]
-    ));
 }
 
 #[tokio::test]
-async fn lagging_peer_receives_block_pages_before_mempool() {
-    let wallet = Wallet::from_seed("lagging-peer-blocks-before-mempool");
+async fn periodic_broadcast_does_not_push_duplicate_block_pages_to_lagging_peer() {
+    let wallet = Wallet::from_seed("lagging-peer-pull-only");
     let mut local = node(
-        "lagging-peer-source",
+        "lagging-peer-pull-only-source",
         wallet.clone(),
         allocations(std::slice::from_ref(&wallet), 1_000),
     );
@@ -1027,16 +1533,22 @@ async fn lagging_peer_receives_block_pages_before_mempool() {
     local.drain_outbox();
     local.mine_one_at(1).unwrap();
     local.drain_outbox();
-    queue_plaintext_burn(&mut local, &wallet, 1);
-    assert!(!local.ledger().pending().is_empty());
     let local = Arc::new(tokio::sync::Mutex::new(local));
-    let peer_status = super::PeerStatus::new(0, genesis_hash);
 
-    let payload = super::catchup_payload_for_peer(&local, &peer_status).await;
+    let payload = super::envelopes_for_peer(
+        Some(&local),
+        Some(super::PeerStatus::new(0, genesis_hash)),
+        &[GossipEnvelope::PeerStatus {
+            height: 1,
+            tip_hash: "tip".to_string(),
+            time_ms: 1,
+        }],
+    )
+    .await;
 
     assert!(matches!(
         payload.as_slice(),
-        [GossipEnvelope::Blocks { .. }]
+        [GossipEnvelope::PeerStatus { .. }]
     ));
 }
 
@@ -1058,6 +1570,7 @@ async fn hello_ignores_private_advertised_listen_address() {
             inbound_limiter: Arc::new(StdMutex::new(super::InboundConnectionLimiter::default())),
             metrics: super::P2pMetricsCounters::default(),
             sync_progress: StdMutex::new(super::SyncProgressState::default()),
+            chain_validation: Arc::new(super::ChainValidationCoordinator::default()),
         }),
     };
     let status = node.lock().await.ledger().status();
@@ -1104,6 +1617,7 @@ async fn hello_ignores_loopback_alias_for_unspecified_self() {
             inbound_limiter: Arc::new(StdMutex::new(super::InboundConnectionLimiter::default())),
             metrics: super::P2pMetricsCounters::default(),
             sync_progress: StdMutex::new(super::SyncProgressState::default()),
+            chain_validation: Arc::new(super::ChainValidationCoordinator::default()),
         }),
     };
     let hello = ProtocolHello {
@@ -1160,6 +1674,7 @@ async fn hello_removes_outbound_peer_that_announces_self_address() {
             inbound_limiter: Arc::new(StdMutex::new(super::InboundConnectionLimiter::default())),
             metrics: super::P2pMetricsCounters::default(),
             sync_progress: StdMutex::new(super::SyncProgressState::default()),
+            chain_validation: Arc::new(super::ChainValidationCoordinator::default()),
         }),
     };
     let hello = ProtocolHello {
@@ -1215,6 +1730,7 @@ async fn hello_removes_outbound_peer_with_same_node_id() {
             inbound_limiter: Arc::new(StdMutex::new(super::InboundConnectionLimiter::default())),
             metrics: super::P2pMetricsCounters::default(),
             sync_progress: StdMutex::new(super::SyncProgressState::default()),
+            chain_validation: Arc::new(super::ChainValidationCoordinator::default()),
         }),
     };
     let hello = ProtocolHello {

@@ -5,20 +5,16 @@ use tokio::net::tcp::OwnedWriteHalf;
 
 use super::metrics::P2pMetricsCounters;
 use super::peer_addr::{
-    is_self_peer_address_for, normalize_advertised_peer, peer_has_block_gap,
-    peer_list_address_is_discoverable,
+    is_self_peer_address_for, normalize_advertised_peer, peer_list_address_is_discoverable,
 };
-use super::{
-    GossipNetwork, MAX_BLOCK_BATCH, PeerStatus, byte_bounded_block_page, write_envelope,
-    write_payload,
-};
+use super::{GossipNetwork, MAX_BLOCK_BATCH, PeerStatus, write_envelope};
 use crate::app::{GossipEnvelope, SharedNode, debug_logging_enabled};
 
 pub(super) async fn maybe_request_catchup(
     network: &GossipNetwork,
     writer: &mut OwnedWriteHalf,
     peer_status: &PeerStatus,
-) -> Result<()> {
+) -> Result<bool> {
     let (local_height, local_tip_hash) = {
         let node = network.inner.node.lock().await;
         let status = node.ledger().status();
@@ -26,6 +22,7 @@ pub(super) async fn maybe_request_catchup(
     };
     if peer_status.request_bootstrap {
         write_envelope(writer, &GossipEnvelope::ChainBootstrapRequest).await?;
+        return Ok(true);
     } else if peer_status.height > local_height {
         write_envelope(
             writer,
@@ -35,6 +32,7 @@ pub(super) async fn maybe_request_catchup(
             },
         )
         .await?;
+        return Ok(true);
     } else if peer_status.height == local_height && peer_status.tip_hash != local_tip_hash {
         let locator = network.inner.node.lock().await.block_locator();
         write_envelope(
@@ -45,58 +43,9 @@ pub(super) async fn maybe_request_catchup(
             },
         )
         .await?;
+        return Ok(true);
     }
-    Ok(())
-}
-
-pub(super) async fn push_catchup_to_peer(
-    network: &GossipNetwork,
-    writer: &mut OwnedWriteHalf,
-    peer_status: &PeerStatus,
-) -> Result<Option<PeerStatus>> {
-    let payload = catchup_payload_for_peer(&network.inner.node, peer_status).await;
-    if payload.is_empty() {
-        return Ok(None);
-    }
-
-    let updated_status = payload.iter().find_map(|envelope| match envelope {
-        GossipEnvelope::Blocks { blocks } => blocks
-            .last()
-            .map(|block| PeerStatus::new(block.height, block.hash.clone())),
-        GossipEnvelope::ChainBootstrap(bootstrap) => {
-            Some(PeerStatus::new(0, bootstrap.genesis_block.hash.clone()))
-        }
-        _ => None,
-    });
-    write_payload(writer, &payload).await?;
-    Ok(updated_status)
-}
-
-pub(super) async fn catchup_payload_for_peer(
-    node: &SharedNode,
-    peer_status: &PeerStatus,
-) -> Vec<GossipEnvelope> {
-    let mut node = node.lock().await;
-    let local_status = node.ledger().status();
-    if node.ledger().is_setup_placeholder() {
-        return Vec::new();
-    }
-    if peer_status.push_bootstrap {
-        return vec![GossipEnvelope::ChainBootstrap(node.chain_bootstrap())];
-    }
-    if peer_status.height < local_status.height {
-        let blocks =
-            byte_bounded_block_page(node.blocks_from(peer_status.height + 1, MAX_BLOCK_BATCH));
-        return (!blocks.is_empty())
-            .then_some(GossipEnvelope::Blocks { blocks })
-            .into_iter()
-            .collect();
-    } else if peer_status.height == local_status.height
-        && peer_status.tip_hash != local_status.tip_hash
-    {
-        return Vec::new();
-    }
-    node.mempool_gossip()
+    Ok(false)
 }
 
 pub(super) async fn apply_peer_list(
@@ -168,22 +117,20 @@ pub(super) async fn envelopes_for_peer(
             .collect();
     }
     if peer_status.height < local_status.height {
-        let blocks =
-            byte_bounded_block_page(node.blocks_from(peer_status.height + 1, MAX_BLOCK_BATCH));
-        return (!blocks.is_empty())
-            .then_some(GossipEnvelope::Blocks { blocks })
-            .into_iter()
+        return envelopes
+            .iter()
+            .filter(|envelope| {
+                matches!(
+                    envelope,
+                    GossipEnvelope::PeerStatus { .. } | GossipEnvelope::Inventory { .. }
+                )
+            })
+            .cloned()
             .collect();
     }
 
     if peer_status.height == local_status.height && peer_status.tip_hash != local_status.tip_hash {
         return Vec::new();
-    }
-
-    if peer_has_block_gap(peer_status.height, envelopes) {
-        let blocks =
-            byte_bounded_block_page(node.blocks_from(peer_status.height + 1, MAX_BLOCK_BATCH));
-        return vec![GossipEnvelope::Blocks { blocks }];
     }
 
     envelopes

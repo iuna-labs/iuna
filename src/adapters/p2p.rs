@@ -6,7 +6,7 @@ use std::{
 };
 
 use tokio::{
-    sync::{Mutex, mpsc},
+    sync::{Mutex, OwnedSemaphorePermit, Semaphore, mpsc, watch},
     task::JoinHandle,
 };
 
@@ -53,12 +53,7 @@ use peer_addr::{
 use peer_status::PeerStatus;
 use process::{process_envelope, respond_to_peer_verification_challenge};
 use session::{accept_loop, outbound_session, outbound_supervisor};
-#[cfg(test)]
-use sync::catchup_payload_for_peer;
-use sync::{
-    apply_peer_list, envelopes_for_peer, maybe_request_catchup, push_catchup_to_peer,
-    write_peer_exchange,
-};
+use sync::{apply_peer_list, envelopes_for_peer, maybe_request_catchup, write_peer_exchange};
 use writer::{byte_bounded_block_page, write_envelope, write_payload};
 
 const MAX_BLOCK_BATCH: usize = 128;
@@ -72,19 +67,72 @@ const MAX_INBOUND_SESSIONS_PER_IP: usize = 8;
 const MAX_INBOUND_ACCEPTS_PER_IP_PER_WINDOW: usize = 24;
 const INBOUND_ACCEPT_RATE_WINDOW_MS: u64 = 10_000;
 const PEER_QUEUE_SIZE: usize = 256;
+const INBOUND_PEER_QUEUE_SIZE: usize = 16;
+const MAX_OUTBOUND_BATCH_BYTES: usize = MAX_GOSSIP_LINE_BYTES + 1;
+const PEER_QUEUE_BYTES: usize = 4 * MAX_OUTBOUND_BATCH_BYTES;
+const INBOUND_PEER_QUEUE_BYTES: usize = 2 * MAX_OUTBOUND_BATCH_BYTES;
+const MAX_CONCURRENT_CHAIN_VALIDATIONS: usize = 2;
 const STALE_INBOUND_PEER_RETENTION_MS: u64 = 60 * 60 * 1_000;
 const STALE_DISCOVERED_PEER_RETENTION_MS: u64 = 60 * 60 * 1_000;
 const MAX_DISCOVERED_OUTBOUND_DIALS_PER_CYCLE: usize = 32;
 const CONNECT_TIMEOUT: Duration = Duration::from_secs(5);
 const HANDSHAKE_TIMEOUT: Duration = Duration::from_secs(5);
+const WRITE_TIMEOUT: Duration = Duration::from_secs(10);
 const SESSION_SYNC_INTERVAL: Duration = Duration::from_secs(2);
+const CATCHUP_REQUEST_TIMEOUT: Duration = Duration::from_secs(10);
 const PEER_EXCHANGE_INTERVAL: Duration = Duration::from_secs(30);
 const JOIN_RESPONSE_TIMEOUT: Duration = Duration::from_secs(5);
 const MAX_JOIN_RESPONSE_ENVELOPES: usize = 16;
 const MAX_PEER_VERIFICATION_ENVELOPES: usize = 8;
 const INITIAL_RECONNECT_DELAY: Duration = Duration::from_secs(1);
 const MAX_RECONNECT_DELAY: Duration = Duration::from_secs(30);
-type OutboundBatch = Vec<GossipEnvelope>;
+const INBOUND_SESSION_PREFIX: &str = "inbound://";
+struct OutboundBatch {
+    envelopes: Arc<[GossipEnvelope]>,
+    _queued_bytes: OwnedSemaphorePermit,
+}
+
+#[derive(Clone)]
+struct GossipSession {
+    peer: String,
+    sender: mpsc::Sender<OutboundBatch>,
+    shutdown: watch::Sender<bool>,
+    queue_bytes: Arc<Semaphore>,
+}
+
+struct ChainValidationCoordinator {
+    permits: Arc<Semaphore>,
+    active: StdMutex<BTreeMap<String, watch::Sender<bool>>>,
+}
+
+impl Default for ChainValidationCoordinator {
+    fn default() -> Self {
+        Self {
+            permits: Arc::new(Semaphore::new(MAX_CONCURRENT_CHAIN_VALIDATIONS)),
+            active: StdMutex::new(BTreeMap::new()),
+        }
+    }
+}
+
+struct ChainValidationGuard {
+    coordinator: Arc<ChainValidationCoordinator>,
+    key: String,
+    _permit: OwnedSemaphorePermit,
+}
+
+impl Drop for ChainValidationGuard {
+    fn drop(&mut self) {
+        let sender = self
+            .coordinator
+            .active
+            .lock()
+            .expect("chain validation mutex poisoned")
+            .remove(&self.key);
+        if let Some(sender) = sender {
+            let _ = sender.send(true);
+        }
+    }
+}
 
 #[cfg(feature = "fuzzing")]
 pub fn fuzz_parse_envelope(line: &str) -> anyhow::Result<GossipEnvelope> {
@@ -125,10 +173,11 @@ struct GossipNetworkInner {
     p2p_announce_addr: Mutex<Option<SocketAddr>>,
     node_id: String,
     accept_task: Mutex<Option<JoinHandle<()>>>,
-    sessions: Mutex<BTreeMap<String, mpsc::Sender<OutboundBatch>>>,
+    sessions: Mutex<BTreeMap<String, GossipSession>>,
     inbound_limiter: Arc<StdMutex<InboundConnectionLimiter>>,
     metrics: P2pMetricsCounters,
     sync_progress: StdMutex<SyncProgressState>,
+    chain_validation: Arc<ChainValidationCoordinator>,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -143,6 +192,7 @@ struct SyncProgressState {
     next_id: u64,
     generation: u64,
     active: BTreeMap<u64, SyncProgress>,
+    last_activity: Option<std::time::Instant>,
 }
 
 #[cfg(test)]

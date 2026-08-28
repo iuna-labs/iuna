@@ -5,18 +5,22 @@ use std::{
 };
 
 use anyhow::{Context, Result};
-use tokio::{net::TcpListener, sync::mpsc};
+use tokio::{
+    net::TcpListener,
+    sync::{mpsc, watch},
+};
 
 use crate::app::{
     BlockInventory, GossipEnvelope, SharedNode, SharedPeerBook, debug_logging_enabled, now_ms,
 };
 
 use super::{
-    GossipNetwork, GossipNetworkInner, InboundConnectionLimiter, InboundSessionPermit,
-    InboundSessionRejection, MAX_DISCOVERED_OUTBOUND_DIALS_PER_CYCLE, OutboundBatch, P2pMetrics,
-    P2pMetricsCounters, PEER_QUEUE_SIZE, STALE_DISCOVERED_PEER_RETENTION_MS,
-    STALE_INBOUND_PEER_RETENTION_MS, accept_loop, is_self_peer_address_for, new_node_id,
-    outbound_session, outbound_supervisor,
+    ChainValidationCoordinator, ChainValidationGuard, GossipNetwork, GossipNetworkInner,
+    GossipSession, INBOUND_SESSION_PREFIX, InboundConnectionLimiter, InboundSessionPermit,
+    InboundSessionRejection, MAX_DISCOVERED_OUTBOUND_DIALS_PER_CYCLE, MAX_GOSSIP_LINE_BYTES,
+    MAX_OUTBOUND_BATCH_BYTES, OutboundBatch, P2pMetrics, P2pMetricsCounters, PEER_QUEUE_BYTES,
+    PEER_QUEUE_SIZE, STALE_DISCOVERED_PEER_RETENTION_MS, STALE_INBOUND_PEER_RETENTION_MS,
+    accept_loop, is_self_peer_address_for, new_node_id, outbound_session, outbound_supervisor,
 };
 
 impl GossipNetwork {
@@ -35,12 +39,11 @@ impl GossipNetwork {
                 p2p_announce_addr: tokio::sync::Mutex::new(p2p_announce_addr),
                 node_id: new_node_id(),
                 accept_task: tokio::sync::Mutex::new(None),
-                sessions: tokio::sync::Mutex::new(
-                    BTreeMap::<String, mpsc::Sender<OutboundBatch>>::new(),
-                ),
+                sessions: tokio::sync::Mutex::new(BTreeMap::new()),
                 inbound_limiter: Arc::new(StdMutex::new(InboundConnectionLimiter::default())),
                 metrics: P2pMetricsCounters::default(),
                 sync_progress: StdMutex::new(super::SyncProgressState::default()),
+                chain_validation: Arc::new(ChainValidationCoordinator::default()),
             }),
         };
 
@@ -139,6 +142,7 @@ impl GossipNetwork {
                 target_height: target_height.max(start_height),
             },
         );
+        state.last_activity = Some(std::time::Instant::now());
         super::SyncProgressGuard {
             network: self.clone(),
             id,
@@ -177,6 +181,7 @@ impl GossipNetwork {
         if let Some(progress) = state.active.get_mut(&id) {
             progress.validated_height =
                 validated_height.clamp(progress.start_height, progress.target_height);
+            state.last_activity = Some(std::time::Instant::now());
         }
     }
 
@@ -187,6 +192,21 @@ impl GossipNetwork {
             .lock()
             .expect("sync progress mutex poisoned");
         state.active.remove(&id);
+        state.last_activity = Some(std::time::Instant::now());
+    }
+
+    pub fn chain_sync_active_or_recent(&self, quiet_period: std::time::Duration) -> bool {
+        let state = self
+            .inner
+            .sync_progress
+            .lock()
+            .expect("sync progress mutex poisoned");
+        if !state.active.is_empty() {
+            return true;
+        }
+        state
+            .last_activity
+            .is_some_and(|last_activity| last_activity.elapsed() <= quiet_period)
     }
 
     pub(super) fn try_acquire_inbound_session(
@@ -204,24 +224,118 @@ impl GossipNetwork {
         })
     }
 
+    pub(super) async fn claim_chain_validation(&self, key: String) -> Option<ChainValidationGuard> {
+        loop {
+            let active = self
+                .inner
+                .chain_validation
+                .active
+                .lock()
+                .expect("chain validation mutex poisoned")
+                .get(&key)
+                .map(watch::Sender::subscribe);
+            if let Some(mut active) = active {
+                while !*active.borrow() {
+                    if active.changed().await.is_err() {
+                        break;
+                    }
+                }
+                continue;
+            }
+
+            let permit = Arc::clone(&self.inner.chain_validation.permits)
+                .acquire_owned()
+                .await
+                .ok()?;
+            let duplicate = {
+                let mut active = self
+                    .inner
+                    .chain_validation
+                    .active
+                    .lock()
+                    .expect("chain validation mutex poisoned");
+                if let Some(sender) = active.get(&key) {
+                    Some(sender.subscribe())
+                } else {
+                    let (sender, _) = watch::channel(false);
+                    active.insert(key.clone(), sender);
+                    None
+                }
+            };
+            if let Some(mut receiver) = duplicate {
+                drop(permit);
+                while !*receiver.borrow() {
+                    if receiver.changed().await.is_err() {
+                        break;
+                    }
+                }
+                continue;
+            }
+            return Some(ChainValidationGuard {
+                coordinator: Arc::clone(&self.inner.chain_validation),
+                key,
+                _permit: permit,
+            });
+        }
+    }
+
     pub async fn broadcast(&self, envelopes: Vec<GossipEnvelope>) -> Result<()> {
         let envelopes = self.prepare_gossip(envelopes).await;
         if envelopes.is_empty() {
             return Ok(());
         }
 
+        let batches = byte_bounded_gossip_batches(envelopes)?;
         let sessions = self.inner.sessions.lock().await.clone();
-        for (peer, sender) in sessions {
-            if self.inner.peers.lock().await.is_banned(&peer) {
+        let mut disconnect = Vec::new();
+        for (session_id, session) in sessions {
+            if self.inner.peers.lock().await.is_banned(&session.peer) {
                 continue;
             }
-            match sender.try_send(envelopes.clone()) {
-                Ok(()) => {}
-                Err(mpsc::error::TrySendError::Full(_)) => {
-                    P2pMetricsCounters::inc(&self.inner.metrics.outbound_queue_full);
+            for (envelopes, encoded_bytes) in &batches {
+                let permit =
+                    match Arc::clone(&session.queue_bytes).try_acquire_many_owned(*encoded_bytes) {
+                        Ok(permit) => permit,
+                        Err(_) => {
+                            P2pMetricsCounters::inc(&self.inner.metrics.outbound_queue_full);
+                            if session_id.starts_with(INBOUND_SESSION_PREFIX) {
+                                let _ = session.shutdown.send(true);
+                                disconnect.push((session_id.clone(), session.sender.clone()));
+                            }
+                            break;
+                        }
+                    };
+                let batch = OutboundBatch {
+                    envelopes: Arc::clone(envelopes),
+                    _queued_bytes: permit,
+                };
+                match session.sender.try_send(batch) {
+                    Ok(()) => {}
+                    Err(mpsc::error::TrySendError::Full(_)) => {
+                        P2pMetricsCounters::inc(&self.inner.metrics.outbound_queue_full);
+                        if session_id.starts_with(INBOUND_SESSION_PREFIX) {
+                            let _ = session.shutdown.send(true);
+                            disconnect.push((session_id.clone(), session.sender.clone()));
+                        }
+                        break;
+                    }
+                    Err(mpsc::error::TrySendError::Closed(_)) => {
+                        P2pMetricsCounters::inc(&self.inner.metrics.outbound_queue_closed);
+                        let _ = session.shutdown.send(true);
+                        disconnect.push((session_id.clone(), session.sender.clone()));
+                        break;
+                    }
                 }
-                Err(mpsc::error::TrySendError::Closed(_)) => {
-                    P2pMetricsCounters::inc(&self.inner.metrics.outbound_queue_closed);
+            }
+        }
+        if !disconnect.is_empty() {
+            let mut sessions = self.inner.sessions.lock().await;
+            for (session_id, sender) in disconnect {
+                if sessions
+                    .get(&session_id)
+                    .is_some_and(|session| session.sender.same_channel(&sender))
+                {
+                    sessions.remove(&session_id);
                 }
             }
         }
@@ -307,8 +421,9 @@ impl GossipNetwork {
         let self_filter_addr = self.self_filter_addr().await;
         let mut sessions = self.inner.sessions.lock().await;
         sessions.retain(|peer, _| {
-            let keep = address_set.contains(peer)
-                && !is_self_peer_address_for(peer, self.inner.listen_addr, self_filter_addr);
+            let keep = peer.starts_with(INBOUND_SESSION_PREFIX)
+                || (address_set.contains(peer)
+                    && !is_self_peer_address_for(peer, self.inner.listen_addr, self_filter_addr));
             if !keep {
                 P2pMetricsCounters::inc(&self.inner.metrics.self_peer_skips);
             }
@@ -324,8 +439,23 @@ impl GossipNetwork {
             }
 
             let (sender, receiver) = mpsc::channel(PEER_QUEUE_SIZE);
-            sessions.insert(peer.clone(), sender);
-            tokio::spawn(outbound_session(self.clone(), peer, receiver));
+            let (shutdown, shutdown_receiver) = watch::channel(false);
+            let queue_bytes = Arc::new(tokio::sync::Semaphore::new(PEER_QUEUE_BYTES));
+            sessions.insert(
+                peer.clone(),
+                GossipSession {
+                    peer: peer.clone(),
+                    sender,
+                    shutdown,
+                    queue_bytes,
+                },
+            );
+            tokio::spawn(outbound_session(
+                self.clone(),
+                peer,
+                receiver,
+                shutdown_receiver,
+            ));
         }
     }
 
@@ -339,6 +469,35 @@ impl GossipNetwork {
     }
 }
 
+fn byte_bounded_gossip_batches(
+    envelopes: Vec<GossipEnvelope>,
+) -> Result<Vec<(Arc<[GossipEnvelope]>, u32)>> {
+    let mut batches = Vec::new();
+    let mut batch = Vec::new();
+    let mut batch_bytes = 0_usize;
+    for envelope in envelopes {
+        let encoded_bytes = serde_json::to_vec(&envelope)?.len().saturating_add(1);
+        if encoded_bytes > MAX_GOSSIP_LINE_BYTES.saturating_add(1) {
+            anyhow::bail!(
+                "p2p message is {} bytes, exceeding {} byte limit",
+                encoded_bytes.saturating_sub(1),
+                MAX_GOSSIP_LINE_BYTES
+            );
+        }
+        if !batch.is_empty() && batch_bytes.saturating_add(encoded_bytes) > MAX_OUTBOUND_BATCH_BYTES
+        {
+            batches.push((Arc::from(std::mem::take(&mut batch)), batch_bytes as u32));
+            batch_bytes = 0;
+        }
+        batch_bytes = batch_bytes.saturating_add(encoded_bytes);
+        batch.push(envelope);
+    }
+    if !batch.is_empty() {
+        batches.push((Arc::from(batch), batch_bytes as u32));
+    }
+    Ok(batches)
+}
+
 #[cfg(test)]
 mod tests {
     use std::{collections::BTreeMap, sync::Arc};
@@ -349,6 +508,30 @@ mod tests {
     };
 
     use super::super::test_support::{allocations, gossip_network, node};
+
+    #[test]
+    fn outbound_batches_are_bounded_by_encoded_bytes() {
+        let large_tip = "a".repeat(super::super::MAX_GOSSIP_LINE_BYTES / 2);
+        let envelopes = vec![
+            GossipEnvelope::PeerStatus {
+                height: 1,
+                tip_hash: large_tip.clone(),
+                time_ms: 1,
+            },
+            GossipEnvelope::PeerStatus {
+                height: 2,
+                tip_hash: large_tip,
+                time_ms: 2,
+            },
+        ];
+
+        let batches = super::byte_bounded_gossip_batches(envelopes).unwrap();
+
+        assert_eq!(batches.len(), 2);
+        assert!(batches.iter().all(|(_, bytes)| {
+            usize::try_from(*bytes).unwrap() <= super::super::MAX_OUTBOUND_BATCH_BYTES
+        }));
+    }
 
     #[tokio::test]
     async fn sync_progress_is_incremental_and_scoped_to_the_active_validation() {
@@ -404,6 +587,45 @@ mod tests {
 
         drop(stale);
         assert_eq!(network.sync_progress().unwrap().validated_height, 0);
+    }
+
+    #[tokio::test]
+    async fn identical_chain_validations_cannot_run_concurrently() {
+        let alice = Wallet::from_seed("validation-coordinator-alice");
+        let allocations = allocations(std::slice::from_ref(&alice), 1_000);
+        let node = Arc::new(tokio::sync::Mutex::new(node("alice", alice, allocations)));
+        let peers = Arc::new(tokio::sync::Mutex::new(PeerBook::default()));
+        let network = gossip_network(node, peers, "127.0.0.1:9544".parse().unwrap(), None);
+
+        let first = network
+            .claim_chain_validation("same-page".to_string())
+            .await
+            .unwrap();
+        let waiting_network = network.clone();
+        let waiting = tokio::spawn(async move {
+            waiting_network
+                .claim_chain_validation("same-page".to_string())
+                .await
+                .unwrap()
+        });
+        tokio::time::sleep(std::time::Duration::from_millis(25)).await;
+        assert!(!waiting.is_finished());
+
+        drop(first);
+        let second = tokio::time::timeout(std::time::Duration::from_secs(1), waiting)
+            .await
+            .unwrap()
+            .unwrap();
+        drop(second);
+        assert!(
+            network
+                .inner
+                .chain_validation
+                .active
+                .lock()
+                .unwrap()
+                .is_empty()
+        );
     }
 
     #[tokio::test]

@@ -1,21 +1,36 @@
 use anyhow::Result;
-use tokio::{io::AsyncWriteExt, net::tcp::OwnedWriteHalf};
+use tokio::{io::AsyncWriteExt, net::tcp::OwnedWriteHalf, time::timeout};
 
 use crate::app::GossipEnvelope;
 
-use super::MAX_GOSSIP_LINE_BYTES;
+use super::{MAX_GOSSIP_LINE_BYTES, WRITE_TIMEOUT};
 
 pub(super) async fn write_payload(
     writer: &mut OwnedWriteHalf,
     payload: &[GossipEnvelope],
 ) -> Result<()> {
-    for envelope in payload {
-        write_envelope(writer, envelope).await?;
-    }
+    timeout(WRITE_TIMEOUT, async {
+        for envelope in payload {
+            write_envelope_inner(writer, envelope).await?;
+        }
+        Ok::<(), anyhow::Error>(())
+    })
+    .await
+    .map_err(|_| anyhow::anyhow!("p2p batch write timed out after {WRITE_TIMEOUT:?}"))??;
     Ok(())
 }
 
 pub(super) async fn write_envelope(
+    writer: &mut OwnedWriteHalf,
+    envelope: &GossipEnvelope,
+) -> Result<()> {
+    timeout(WRITE_TIMEOUT, write_envelope_inner(writer, envelope))
+        .await
+        .map_err(|_| anyhow::anyhow!("p2p write timed out after {WRITE_TIMEOUT:?}"))??;
+    Ok(())
+}
+
+async fn write_envelope_inner(
     writer: &mut OwnedWriteHalf,
     envelope: &GossipEnvelope,
 ) -> Result<()> {

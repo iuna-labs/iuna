@@ -120,7 +120,7 @@ async fn process_hello_inner(
     {
         P2pMetricsCounters::inc(&network.inner.metrics.self_peer_rejections);
         forget_stale_self_peer(network, known_peer).await;
-        return Ok(PeerStatus::with_time(
+        return Ok(PeerStatus::rejected(
             hello.height,
             hello.tip_hash,
             hello.time_ms,
@@ -137,7 +137,6 @@ async fn process_hello_inner(
     let remote_is_setup_placeholder =
         hello.height == 0 && hello.genesis_hash == setup_placeholder_genesis_hash();
     let request_bootstrap = genesis_mismatch && local_accepts_remote_genesis;
-    let push_bootstrap = genesis_mismatch && remote_is_setup_placeholder;
     if genesis_mismatch && !local_accepts_remote_genesis && !remote_is_setup_placeholder {
         anyhow::bail!(
             "wrong genesis {}; expected {local_genesis}",
@@ -146,11 +145,13 @@ async fn process_hello_inner(
     }
 
     let remote_node_id = hello.node_id.clone();
+    let mut reject_session = false;
     if let Some(listen_addr) = &hello.listen_addr {
         let peer = normalize_advertised_peer(listen_addr, remote_addr)?;
         if network.is_self_peer(&peer).await {
             P2pMetricsCounters::inc(&network.inner.metrics.self_peer_rejections);
             forget_stale_self_peer(network, known_peer).await;
+            reject_session = true;
         } else {
             let verified = match verification_session.as_mut() {
                 Some(session) => {
@@ -180,25 +181,13 @@ async fn process_hello_inner(
         &PeerStatus::with_time(hello.height, hello.tip_hash.clone(), hello.time_ms),
     )
     .await;
-    if request_bootstrap {
-        Ok(PeerStatus::with_bootstrap_request(
-            hello.height,
-            hello.tip_hash,
-            hello.time_ms,
-        ))
-    } else if push_bootstrap {
-        Ok(PeerStatus::with_bootstrap_push(
-            hello.height,
-            hello.tip_hash,
-            hello.time_ms,
-        ))
+    let mut status = if request_bootstrap {
+        PeerStatus::with_bootstrap_request(hello.height, hello.tip_hash, hello.time_ms)
     } else {
-        Ok(PeerStatus::with_time(
-            hello.height,
-            hello.tip_hash,
-            hello.time_ms,
-        ))
-    }
+        PeerStatus::with_time(hello.height, hello.tip_hash, hello.time_ms)
+    };
+    status.reject_session = reject_session;
+    Ok(status)
 }
 
 fn setup_placeholder_genesis_hash() -> String {

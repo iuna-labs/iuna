@@ -24,7 +24,7 @@ use super::{
     initial_burn_per_block, initialize_ledger, load_startup_wallet, measure_vdf_rounds,
     parse_startup_bool_env_value, parse_startup_pow_mining_workers_env_value,
     persist_chain_snapshot, project_ui_data_store, run_chain_persistence_with_interval,
-    should_log_automatic_finalization_skip, validate_wallet_for_mode,
+    should_defer_sync_checkpoint, should_log_automatic_finalization_skip, validate_wallet_for_mode,
 };
 
 fn parse(args: &[&str]) -> anyhow::Result<Option<CliOptions>> {
@@ -42,6 +42,23 @@ fn help_mentions_dev_seed_verify_bypass_env() {
     assert!(help_text().contains("skip seed verification"));
     assert!(help_text().contains("--stratum <addr:port>"));
     assert!(help_text().contains("--debug"));
+}
+
+#[test]
+fn active_sync_cannot_defer_chain_checkpoint_past_the_interval() {
+    let interval = Duration::from_secs(30);
+
+    assert!(should_defer_sync_checkpoint(
+        true,
+        Duration::from_secs(29),
+        interval
+    ));
+    assert!(!should_defer_sync_checkpoint(true, interval, interval));
+    assert!(!should_defer_sync_checkpoint(
+        false,
+        Duration::ZERO,
+        interval
+    ));
 }
 
 #[test]

@@ -82,7 +82,7 @@ impl NodeCore {
             .collect()
     }
 
-    pub fn missing_inventory_requests(&self, blocks: &[BlockInventory]) -> Vec<GossipEnvelope> {
+    pub fn missing_inventory_request(&self, blocks: &[BlockInventory]) -> Option<GossipEnvelope> {
         let local_height = self.ledger.height();
         let first_height_gap = blocks
             .iter()
@@ -97,19 +97,16 @@ impl NodeCore {
             .map(|block| block.hash.clone())
             .collect::<Vec<_>>();
 
-        let mut requests = Vec::new();
-        if !missing_blocks.is_empty() {
-            requests.push(GossipEnvelope::BlockRequest {
-                hashes: missing_blocks,
-            });
-        }
         if first_height_gap.is_some() {
-            requests.push(GossipEnvelope::BlockRangeRequest {
+            return Some(GossipEnvelope::BlockRangeRequest {
                 from_height: local_height + 1,
                 limit: BLOCK_REQUEST_LIMIT,
             });
         }
-        requests
+
+        (!missing_blocks.is_empty()).then_some(GossipEnvelope::BlockRequest {
+            hashes: missing_blocks,
+        })
     }
 }
 
@@ -203,12 +200,11 @@ mod tests {
             hash: block.hash.clone(),
         }];
 
-        let requests = remote.missing_inventory_requests(&inventory);
-        assert_eq!(requests.len(), 1);
-        assert!(matches!(requests[0], GossipEnvelope::BlockRequest { .. }));
+        let request = remote.missing_inventory_request(&inventory);
+        assert!(matches!(request, Some(GossipEnvelope::BlockRequest { .. })));
 
         remote.receive(GossipEnvelope::Block(block)).unwrap();
-        assert!(remote.missing_inventory_requests(&inventory).is_empty());
+        assert!(remote.missing_inventory_request(&inventory).is_none());
     }
 
     #[test]
@@ -226,19 +222,50 @@ mod tests {
         }
         let latest = latest.unwrap();
 
-        let requests = remote.missing_inventory_requests(&[BlockInventory {
+        let request = remote.missing_inventory_request(&[BlockInventory {
             height: latest.height,
             hash: latest.hash,
         }]);
 
-        assert_eq!(requests.len(), 1);
-        match &requests[0] {
-            GossipEnvelope::BlockRangeRequest { from_height, limit } => {
-                assert_eq!(*from_height, 1);
-                assert_eq!(*limit, BLOCK_REQUEST_LIMIT);
+        match request {
+            Some(GossipEnvelope::BlockRangeRequest { from_height, limit }) => {
+                assert_eq!(from_height, 1);
+                assert_eq!(limit, BLOCK_REQUEST_LIMIT);
             }
             other => panic!("expected block range request, got {other:?}"),
         }
+    }
+
+    #[test]
+    fn multi_block_inventory_starts_exactly_one_range_request() {
+        let alice = Wallet::from_seed("multi-inventory-alice");
+        let bob = Wallet::from_seed("multi-inventory-bob");
+        let allocations = allocations(&[alice.clone(), bob.clone()], 1_000);
+        let mut source = node(alice.clone(), allocations.clone());
+        let receiver = node(bob, allocations);
+        for timestamp_ms in [1, 2] {
+            queue_plaintext_burn(&mut source, &alice, 1);
+            source.mine_one_at(timestamp_ms).unwrap();
+        }
+        let inventory = source
+            .ledger()
+            .blocks_from(1, 2)
+            .into_iter()
+            .map(|block| BlockInventory {
+                height: block.height,
+                hash: block.hash,
+            })
+            .collect::<Vec<_>>();
+
+        let request = receiver.missing_inventory_request(&inventory);
+
+        assert!(matches!(
+            request,
+            Some(GossipEnvelope::BlockRangeRequest {
+                from_height: 1,
+                limit: BLOCK_REQUEST_LIMIT
+            })
+        ));
     }
 
     fn node(wallet: Wallet, allocations: BTreeMap<String, Amount>) -> NodeCore {

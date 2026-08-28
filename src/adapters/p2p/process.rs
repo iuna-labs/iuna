@@ -1,6 +1,7 @@
 use std::net::SocketAddr;
 
 use anyhow::{Result, anyhow};
+use sha2::{Digest, Sha256};
 use tokio::net::tcp::OwnedWriteHalf;
 
 use crate::{
@@ -12,7 +13,6 @@ use super::{
     GossipNetwork, MAX_BLOCK_BATCH, P2pMetricsCounters, apply_peer_list, forget_stale_self_peer,
     is_possible_fork_error, normalize_advertised_peer, peer_verification_response, process_hello,
     validate_blocks_extension, validate_chain_bootstrap, verify_block_vdf, write_envelope,
-    write_payload,
 };
 
 pub(super) async fn respond_to_peer_verification_challenge(
@@ -35,7 +35,8 @@ pub(super) async fn process_envelope(
     remote_addr: SocketAddr,
     known_peer: &mut Option<String>,
     envelope: GossipEnvelope,
-) -> Result<()> {
+) -> Result<bool> {
+    let mut requested_chain_data = false;
     match envelope {
         GossipEnvelope::Hello(hello) => {
             let _ = process_hello(network, remote_addr, known_peer, hello).await?;
@@ -70,15 +71,6 @@ pub(super) async fn process_envelope(
                 let blocks = super::byte_bounded_block_page(blocks);
                 write_envelope(writer, &GossipEnvelope::Blocks { blocks }).await?;
             }
-        }
-        GossipEnvelope::Inventory { blocks } => {
-            let requests = network
-                .inner
-                .node
-                .lock()
-                .await
-                .missing_inventory_requests(&blocks);
-            write_payload(writer, &requests).await?;
         }
         GossipEnvelope::PeerAnnouncement { address, node_id } => {
             let peer = normalize_advertised_peer(&address, remote_addr)?;
@@ -129,21 +121,45 @@ pub(super) async fn process_envelope(
         }
         GossipEnvelope::Block(block) => {
             let adjusted_time_ms = super::network_adjusted_time_ms(network).await;
-            let needs_vdf = {
+            let (needs_vdf, base_tip, sync_generation) = {
                 let node = network.inner.node.lock().await;
-                node.block_requires_vdf_verification_at(&block, adjusted_time_ms)
+                (
+                    node.block_requires_vdf_verification_at(&block, adjusted_time_ms),
+                    node.ledger().tip_hash().to_string(),
+                    network.sync_generation(),
+                )
             };
             let result = match needs_vdf {
                 Ok(false) => Ok(()),
-                Ok(true) => match verify_block_vdf(block).await {
-                    Ok(block) => network
-                        .inner
-                        .node
-                        .lock()
-                        .await
-                        .receive_preverified_block_at(block, adjusted_time_ms),
-                    Err(error) => Err(error),
-                },
+                Ok(true) => {
+                    let validation_key =
+                        chain_validation_key("block", &base_tip, std::slice::from_ref(&block));
+                    let Some(_validation) = network.claim_chain_validation(validation_key).await
+                    else {
+                        return Ok(false);
+                    };
+                    let base_is_current = {
+                        let node = network.inner.node.lock().await;
+                        network.sync_generation_is_current(sync_generation)
+                            && node.ledger().tip_hash() == base_tip
+                    };
+                    if !base_is_current {
+                        return Ok(false);
+                    }
+                    match verify_block_vdf(block).await {
+                        Ok(block) => {
+                            let mut node = network.inner.node.lock().await;
+                            if network.sync_generation_is_current(sync_generation)
+                                && node.ledger().tip_hash() == base_tip
+                            {
+                                node.receive_preverified_block_at(block, adjusted_time_ms)
+                            } else {
+                                Ok(())
+                            }
+                        }
+                        Err(error) => Err(error),
+                    }
+                }
                 Err(error) => Err(error),
             };
             let request_locator = result.as_ref().err().is_some_and(is_possible_fork_error);
@@ -156,24 +172,48 @@ pub(super) async fn process_envelope(
             record_inbound_result(network, known_peer, remote_addr, result).await;
             if request_locator {
                 request_fork_blocks(network, writer).await?;
+                requested_chain_data = true;
             }
             network.forward_outbox().await;
         }
         GossipEnvelope::Blocks { blocks } => {
             let adjusted_time_ms = super::network_adjusted_time_ms(network).await;
+            let (base_tip, sync_generation) = {
+                let node = network.inner.node.lock().await;
+                if blocks.is_empty() || node.ledger().contains_block_sequence(&blocks) {
+                    drop(node);
+                    record_inbound_result(network, known_peer, remote_addr, Ok(())).await;
+                    return Ok(false);
+                }
+                (
+                    node.ledger().tip_hash().to_string(),
+                    network.sync_generation(),
+                )
+            };
+            let validation_key = chain_validation_key("blocks", &base_tip, &blocks);
+            let Some(_validation) = network.claim_chain_validation(validation_key).await else {
+                return Ok(false);
+            };
             let (local_ledger, progress_guard) = {
                 let node = network.inner.node.lock().await;
-                let local_ledger = node.clone_ledger();
+                if !network.sync_generation_is_current(sync_generation)
+                    || node.ledger().tip_hash() != base_tip
+                    || node.ledger().contains_block_sequence(&blocks)
+                {
+                    drop(node);
+                    record_inbound_result(network, known_peer, remote_addr, Ok(())).await;
+                    return Ok(false);
+                }
                 let start_height = blocks
                     .first()
                     .map(|block| block.height.saturating_sub(1))
-                    .unwrap_or_else(|| local_ledger.height());
+                    .unwrap_or_else(|| node.ledger().height());
                 let target_height = blocks
                     .last()
                     .map(|block| block.height)
                     .unwrap_or(start_height);
                 let progress_guard = network.begin_sync_progress(start_height, target_height);
-                (local_ledger, progress_guard)
+                (node.clone_ledger(), progress_guard)
             };
             let progress_id = progress_guard.id();
             let progress_network = network.clone();
@@ -187,7 +227,10 @@ pub(super) async fn process_envelope(
             {
                 Ok(ledger) => {
                     let mut node = network.inner.node.lock().await;
-                    if progress_guard.is_current() {
+                    if progress_guard.is_current()
+                        && network.sync_generation_is_current(sync_generation)
+                        && node.ledger().tip_hash() == base_tip
+                    {
                         node.import_verified_ledger(ledger).map(|_| ())
                     } else {
                         Ok(())
@@ -206,16 +249,43 @@ pub(super) async fn process_envelope(
             record_inbound_result(network, known_peer, remote_addr, result).await;
             if request_locator {
                 request_fork_blocks(network, writer).await?;
+                requested_chain_data = true;
             }
             network.forward_outbox().await;
         }
         GossipEnvelope::ChainBootstrap(bootstrap) => {
             let sync_generation = network.sync_generation();
+            let base_tip = network
+                .inner
+                .node
+                .lock()
+                .await
+                .ledger()
+                .tip_hash()
+                .to_string();
+            let validation_key = chain_validation_key(
+                "bootstrap",
+                &base_tip,
+                std::slice::from_ref(&bootstrap.genesis_block),
+            );
+            let Some(_validation) = network.claim_chain_validation(validation_key).await else {
+                return Ok(false);
+            };
+            let base_is_current = {
+                let node = network.inner.node.lock().await;
+                network.sync_generation_is_current(sync_generation)
+                    && node.ledger().tip_hash() == base_tip
+            };
+            if !base_is_current {
+                return Ok(false);
+            }
             let adjusted_time_ms = super::network_adjusted_time_ms(network).await;
             let result = match validate_chain_bootstrap(bootstrap, adjusted_time_ms).await {
                 Ok(ledger) => {
                     let mut node = network.inner.node.lock().await;
-                    if network.sync_generation_is_current(sync_generation) {
+                    if network.sync_generation_is_current(sync_generation)
+                        && node.ledger().tip_hash() == base_tip
+                    {
                         node.import_verified_ledger(ledger).map(|_| ())
                     } else {
                         Ok(())
@@ -238,7 +308,22 @@ pub(super) async fn process_envelope(
             network.forward_outbox().await;
         }
     }
-    Ok(())
+    Ok(requested_chain_data)
+}
+
+fn chain_validation_key(kind: &str, base_tip: &str, blocks: &[crate::domain::Block]) -> String {
+    let mut digest = Sha256::new();
+    digest.update(kind.as_bytes());
+    digest.update([0]);
+    digest.update(base_tip.as_bytes());
+    for block in blocks {
+        digest.update(block.height.to_be_bytes());
+        digest.update(block.prev_hash.as_bytes());
+        digest.update([0]);
+        digest.update(block.hash.as_bytes());
+        digest.update([0]);
+    }
+    format!("{:x}", digest.finalize())
 }
 
 async fn request_fork_blocks(network: &GossipNetwork, writer: &mut OwnedWriteHalf) -> Result<()> {
@@ -342,13 +427,15 @@ async fn record_inbound_result(
         }
         Err(error) => {
             let message = format!("{error:#}");
-            if known_peer.is_some() {
-                let mut peers = network.inner.peers.lock().await;
-                if super::inbound_error_counts_as_misbehavior(&message) {
+            let mut peers = network.inner.peers.lock().await;
+            if super::inbound_error_counts_as_misbehavior(&message) {
+                if known_peer.is_some() {
                     peers.record_misbehavior(&peer, message.clone());
                 } else {
-                    peers.record_inbound_error(&peer, message.clone());
+                    peers.record_inbound_misbehavior(&peer, message.clone());
                 }
+            } else {
+                peers.record_inbound_error(&peer, message.clone());
             }
             if debug_logging_enabled() {
                 eprintln!("p2p envelope from {peer} ignored: {message}");
