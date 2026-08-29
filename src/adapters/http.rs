@@ -21,7 +21,6 @@ use tokio::{net::TcpListener, sync::Mutex};
 use crate::{
     adapters::{config_store, config_store::UiConfig, p2p::GossipNetwork},
     app::{SharedNode, SharedPeerBook},
-    domain::validate_address,
 };
 
 mod actions;

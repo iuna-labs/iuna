@@ -616,6 +616,7 @@ pub(super) const INDEX_HTML: &str = concat!(
                   <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M4 5.5A2.5 2.5 0 0 1 6.5 3H20v18H6.5A2.5 2.5 0 0 1 4 18.5z"></path><path d="M8 7h8"></path><path d="M8 11h6"></path><path d="M8 15h4"></path></svg>
                 </button>
               </div>
+              <div class="fee-preview" x-show="transferTo.trim()">Verify recipient: <code x-text="transferTo.trim()"></code></div>
               <div class="amount-field">
                 <label>Amount<input x-model="transferAmount" @input="scheduleFeeEstimates" type="number" min="0.000001" step="0.000001" required></label>
                 <button class="amount-max-button" type="button" @click="setMaxTransferAmount" :disabled="transferMaxDisabled()" title="Use maximum spendable amount">Max</button>
@@ -665,7 +666,7 @@ pub(super) const INDEX_HTML: &str = concat!(
             </div>
             <div class="receive-address">
               <div class="muted">Public key / address</div>
-              <div class="address-box"><code x-text="status.wallet_address || '-'"></code></div>
+              <div class="address-box"><code x-text="setupAddress()"></code></div>
             </div>
           </div>
           <div class="panel">
@@ -1634,7 +1635,7 @@ pub(super) const INDEX_HTML: &str = concat!(
       <form class="address-book-form" x-show="addressBookModalOpen" @submit.prevent="saveAddressBookEntry">
         <label>Name<input x-model="addressBookDraftName" autocomplete="off" required></label>
         <label>Address<input x-model="addressBookDraftAddress" autocomplete="off" required :class="{ invalid: addressBookDraftAddress && !validAddressBookAddress(addressBookDraftAddress) }"></label>
-        <div class="setup-feedback error" x-show="addressBookDraftAddress && !validAddressBookAddress(addressBookDraftAddress)">Address must be a 64 character hex public key</div>
+        <div class="setup-feedback error" x-show="addressBookDraftAddress && !validAddressBookAddress(addressBookDraftAddress)">Address must be a Bech32m address for this network</div>
         <div class="address-book-modal-actions">
           <button class="icon-button modal-delete-button" type="button" x-show="addressBookEditingAddress" @click="removeAddressBookEntry({ address: addressBookEditingAddress, name: addressBookDraftName || addressBookEditingAddress })" title="Delete contact" aria-label="Delete contact">
             <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M4 7h16"></path><path d="M10 11v6"></path><path d="M14 11v6"></path><path d="M6 7l1 14h10l1-14"></path><path d="M9 7V4h6v3"></path></svg>

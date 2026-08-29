@@ -1,5 +1,6 @@
 use std::collections::BTreeSet;
 
+mod address;
 #[cfg(test)]
 mod adversarial_tests;
 mod block;
@@ -30,6 +31,7 @@ mod transaction;
 mod validation;
 mod vdf;
 mod wallet;
+pub use address::{AddressNetwork, decode_address, encode_address, migrate_legacy_address};
 use block::LeaderProofPayload;
 pub use block::{
     Block, BurnLeaderRank, ChainSnapshot, ChainStatus, FinalizerMode, LeaderProof, PreparedBlock,

@@ -1,8 +1,13 @@
 use std::collections::{BTreeMap, BTreeSet};
 
+use anyhow::Result;
+
 use crate::{
     adapters::config_store::{DEFAULT_POW_MINING_WORKERS, clamp_pow_mining_workers},
-    domain::{Amount, BurnBundle, DEFAULT_FEE_PER_BYTE, Ledger, Wallet},
+    domain::{
+        AddressNetwork, Amount, BurnBundle, DEFAULT_FEE_PER_BYTE, Ledger, Wallet, decode_address,
+        encode_address,
+    },
 };
 
 use super::{GossipEnvelope, NodeConfig, NodeCore, NodeWallet};
@@ -127,6 +132,18 @@ impl NodeCore {
         self.wallet.address()
     }
 
+    pub fn wallet_receive_address(&self) -> Result<String> {
+        encode_address(self.wallet.address(), self.address_network())
+    }
+
+    pub fn normalize_user_address(&self, address: &str) -> Result<String> {
+        decode_address(address, self.address_network())
+    }
+
+    fn address_network(&self) -> AddressNetwork {
+        AddressNetwork::from_profile_id(&self.ledger.launch_profile().profile_id)
+    }
+
     pub fn wallet_is_locked(&self) -> bool {
         self.wallet.is_locked()
     }
@@ -141,7 +158,14 @@ impl NodeCore {
     }
 
     pub fn reset_chain_to_setup_placeholder(&mut self) {
-        self.ledger = Ledger::new(BTreeMap::new(), 1);
+        let launch_profile = self.ledger.launch_profile().clone();
+        self.ledger = Ledger::new_with_genesis_burns_and_profile(
+            BTreeMap::new(),
+            Vec::new(),
+            1,
+            launch_profile,
+        )
+        .expect("empty setup ledger is valid");
         self.reset_automatic_mining_progress();
         self.burn_bundles.clear();
         self.equivocated_burn_bundle_slots.clear();

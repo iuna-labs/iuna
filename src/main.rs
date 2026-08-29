@@ -503,7 +503,7 @@ async fn initialize_ledger(
         };
         if snapshot.launch_profile.profile_id != expected_profile.profile_id {
             return Ok(InitializedLedger {
-                ledger: setup_ledger(),
+                ledger: setup_ledger(local_testnet),
                 migration_from: Some(snapshot.launch_profile.profile_id),
             });
         }
@@ -524,7 +524,7 @@ async fn initialize_ledger(
         })
     } else {
         let ledger = match opts.chain_mode {
-            ChainMode::Setup => Ok(setup_ledger()),
+            ChainMode::Setup => Ok(setup_ledger(local_testnet)),
             ChainMode::Genesis => start_genesis_ledger(wallet_address, local_testnet),
             ChainMode::Join => join_chain_ledger(&opts.join_peers, advertised_p2p_addr).await,
         }?;
@@ -563,8 +563,18 @@ fn snapshot_height(snapshot: &ChainSnapshot) -> u64 {
         .unwrap_or(0)
 }
 
-fn setup_ledger() -> Ledger {
-    Ledger::new(BTreeMap::new(), 1)
+fn setup_ledger(local_testnet: bool) -> Ledger {
+    if local_testnet {
+        Ledger::new_with_genesis_burns_and_profile(
+            BTreeMap::new(),
+            Vec::new(),
+            1,
+            LaunchProfile::local_testnet(),
+        )
+        .expect("empty local-testnet setup ledger is valid")
+    } else {
+        Ledger::new(BTreeMap::new(), 1)
+    }
 }
 
 fn start_genesis_ledger(wallet_address: &str, local_testnet: bool) -> Result<Ledger> {

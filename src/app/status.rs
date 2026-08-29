@@ -24,6 +24,7 @@ impl NodeCore {
         NodeStatus {
             app_version: env!("CARGO_PKG_VERSION").to_string(),
             wallet_address: self.wallet.address().to_string(),
+            wallet_receive_address: self.wallet_receive_address().unwrap_or_default(),
             wallet_balance: self.wallet_projected_balance(),
             wallet_locked: self.wallet.is_locked(),
             launch_profile: LaunchProfileStatus {
@@ -168,7 +169,7 @@ mod tests {
 
     use crate::{
         app::{NodeConfig, NodeCore},
-        domain::{Ledger, Wallet},
+        domain::{LaunchProfile, Ledger, Wallet},
     };
 
     #[test]
@@ -184,7 +185,55 @@ mod tests {
             recovery_vdf_top_rank_percent: 100,
         });
 
-        assert_eq!(node.status().app_version, env!("CARGO_PKG_VERSION"));
+        let status = node.status();
+        assert_eq!(status.app_version, env!("CARGO_PKG_VERSION"));
+        assert!(status.wallet_receive_address.starts_with("iuna1q"));
+    }
+
+    #[test]
+    fn local_testnet_status_uses_a_distinct_receive_address_prefix() {
+        let wallet = Wallet::from_seed("status-testnet-wallet");
+        let ledger = Ledger::new_with_genesis_burns_and_profile(
+            BTreeMap::new(),
+            Vec::new(),
+            1,
+            LaunchProfile::local_testnet(),
+        )
+        .unwrap();
+        let node = NodeCore::from_ledger(wallet, ledger, 0);
+        let status = node.status();
+
+        assert!(status.wallet_receive_address.starts_with("tiuna1q"));
+        assert!(
+            node.normalize_user_address(&status.wallet_receive_address)
+                .is_ok()
+        );
+        let wrong_network = status.wallet_receive_address.replacen("tiuna", "iuna", 1);
+        assert!(node.normalize_user_address(&wrong_network).is_err());
+
+        let receive_address = status.wallet_receive_address;
+        let mut reset_node = node;
+        reset_node.reset_chain_to_setup_placeholder();
+        assert_eq!(
+            reset_node.wallet_receive_address().unwrap(),
+            receive_address
+        );
+    }
+
+    #[test]
+    fn status_does_not_panic_on_invalid_locked_wallet_metadata() {
+        let node = NodeCore::from_locked_wallet_address(
+            "corrupt-wallet-address",
+            Ledger::new(BTreeMap::new(), 1),
+            false,
+            0,
+            0,
+        );
+
+        let status = node.status();
+
+        assert_eq!(status.wallet_address, "corrupt-wallet-address");
+        assert!(status.wallet_receive_address.is_empty());
     }
 
     #[test]

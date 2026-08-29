@@ -18,7 +18,7 @@ use super::types::{
 use super::{
     HttpState, action_json, api_error, config_store, estimate_burn_fee, estimate_mine_fee,
     estimate_transfer_fee, fee_estimate_json, required_fee_per_byte_burn, transfer,
-    validate_address, wallet_setup_json,
+    wallet_setup_json,
 };
 use crate::{
     adapters::{
@@ -455,9 +455,14 @@ pub(super) async fn upsert_address_book_entry(
     name: String,
     old_address: Option<String>,
 ) -> Result<()> {
-    let address = validate_address_book_address(address)?;
+    let address = validate_address_book_address(state, address).await?;
     let name = validate_address_book_name(name)?;
-    let old_address = old_address.map(validate_address_book_address).transpose()?;
+    let old_address = match old_address {
+        Some(old_address) => {
+            Some(validate_existing_address_book_address(state, old_address).await?)
+        }
+        None => None,
+    };
     let mut config = state.ui_config.lock().await;
     if let Some(old_address) = old_address.as_deref() {
         if old_address != address {
@@ -474,7 +479,7 @@ pub(super) async fn upsert_address_book_entry(
 }
 
 pub(super) async fn remove_address_book_entry(state: &HttpState, address: String) -> Result<()> {
-    let address = validate_address_book_address(address)?;
+    let address = validate_existing_address_book_address(state, address).await?;
     let mut config = state.ui_config.lock().await;
     config.address_book.remove(&address);
     config_store::save(&state.config_path, &config)
@@ -488,12 +493,38 @@ fn validate_peer_address(peer: String) -> Result<String> {
     Ok(peer)
 }
 
-fn validate_address_book_address(address: String) -> Result<String> {
+async fn validate_address_book_address(state: &HttpState, address: String) -> Result<String> {
     let address = address.trim().to_string();
     if address.is_empty() {
         bail!("address is required");
     }
-    validate_address(&address, "address book")?;
+    state
+        .node
+        .lock()
+        .await
+        .normalize_user_address(&address)
+        .context("invalid address book address")?;
+    Ok(address.to_ascii_lowercase())
+}
+
+async fn validate_existing_address_book_address(
+    state: &HttpState,
+    address: String,
+) -> Result<String> {
+    let address = address.trim().to_string();
+    if address.is_empty() {
+        bail!("address is required");
+    }
+    if state
+        .node
+        .lock()
+        .await
+        .normalize_user_address(&address)
+        .is_err()
+    {
+        crate::domain::validate_address(&address, "legacy address book")
+            .context("invalid existing address book address")?;
+    }
     Ok(address.to_ascii_lowercase())
 }
 

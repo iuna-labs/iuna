@@ -505,7 +505,7 @@ window.iunaApp = function iunaApp() {
     },
 
     setupAddress() {
-      return this.setupWallet.address || this.status.wallet_address || "-";
+      return this.setupWallet.address || this.status.wallet_receive_address || "-";
     },
 
     selectSetupWalletMode(mode) {
@@ -2365,10 +2365,14 @@ window.iunaApp = function iunaApp() {
       try {
         const amount = this.parseiunaAmount(this.transferAmount);
         const fee = this.parseiunaAmountRequired(this.transferFee, "Transfer fee per byte is required");
-        const recipient = this.short(this.transferTo);
+        const fullRecipient = this.transferTo.trim();
+        if (!window.confirm(`Confirm transfer\n\nRecipient:\n${fullRecipient}\n\nAmount: ${this.amountLabel(amount)} IUNA`)) {
+          return;
+        }
+        const recipient = this.short(fullRecipient);
         await this.postForm(
           "/api/transfer",
-          { to: this.transferTo, amount, fee_per_byte: fee, utxos: this.selectedTransferUtxos.join("\n") },
+          { to: fullRecipient, amount, fee_per_byte: fee, utxos: this.selectedTransferUtxos.join("\n") },
           `Queued transfer of ${this.amountLabel(amount)} IUNA to ${recipient}`
         );
         this.transferTo = "";
@@ -2491,7 +2495,13 @@ window.iunaApp = function iunaApp() {
     },
 
     validAddressBookAddress(address) {
-      return /^[0-9a-fA-F]{64}$/.test(String(address ?? "").trim());
+      const text = String(address ?? "").trim();
+      const hasLower = /[a-z]/.test(text);
+      const hasUpper = /[A-Z]/.test(text);
+      if (hasLower && hasUpper) return false;
+      const normalized = text.toLowerCase();
+      const prefix = this.setupAddress().startsWith("tiuna1") ? "tiuna1" : "iuna1";
+      return normalized.startsWith(prefix) && /^[02-9ac-hj-np-z]{59}$/.test(normalized.slice(prefix.length));
     },
 
     selectTransferContact(address) {
@@ -2526,18 +2536,19 @@ window.iunaApp = function iunaApp() {
     },
 
     async saveAddressBookEntry() {
-      const address = this.addressBookDraftAddress.trim().toLowerCase();
+      const address = this.addressBookDraftAddress.trim();
       const name = this.addressBookDraftName.trim();
       if (!address || !name) {
         this.showFlash("Address and name are required", "error");
         return;
       }
       if (!this.validAddressBookAddress(address)) {
-        this.showFlash("Address must be a 64 character hex public key", "error");
+        this.showFlash("Address must be a Bech32m address for this network", "error");
         return;
       }
+      const canonicalAddress = address.toLowerCase();
       const oldAddress = this.addressBookEditingAddress;
-      if (this.addressBook?.[address] && address !== oldAddress) {
+      if (this.addressBook?.[canonicalAddress] && canonicalAddress !== oldAddress) {
         this.showFlash("Address is already saved", "error");
         return;
       }
@@ -2546,8 +2557,8 @@ window.iunaApp = function iunaApp() {
         await this.submitForm("/api/address-book", fields);
         this.addressBookVersion += 1;
         const nextBook = { ...(this.addressBook || {}) };
-        if (oldAddress && oldAddress !== address) delete nextBook[oldAddress];
-        nextBook[address] = name;
+        if (oldAddress && oldAddress !== canonicalAddress) delete nextBook[oldAddress];
+        nextBook[canonicalAddress] = name;
         this.addressBook = nextBook;
         this.config = { ...this.config, address_book: this.addressBook };
         this.closeAddressBookModal();

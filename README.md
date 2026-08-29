@@ -223,7 +223,11 @@ iuna can expose a Stratum V1 endpoint for SHA-256 ASIC miners such as a Bitaxe:
 ./iuna --stratum <bind-address>:<port>
 ```
 
-Use your iuna wallet address as the worker username. Accepted shares become PoW mine actions in the node mempool and are gossiped to peers.
+Use the checksummed Bech32m address shown by your iuna wallet as the worker
+username (`iuna1...` on mainnet/mainnet-candidate or `tiuna1...` on local
+testnet). Hex public keys and addresses for another network are rejected.
+Accepted shares become PoW mine actions in the node mempool and are gossiped to
+peers.
 
 ## Operator Docs
 

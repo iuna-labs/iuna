@@ -126,6 +126,7 @@ pub struct BlockInventory {
 pub struct NodeStatus {
     pub app_version: String,
     pub wallet_address: String,
+    pub wallet_receive_address: String,
     pub wallet_balance: Amount,
     pub wallet_locked: bool,
     pub launch_profile: LaunchProfileStatus,

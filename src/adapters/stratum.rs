@@ -234,6 +234,7 @@ impl StratumSession {
                     .and_then(Value::as_str)
                     .context("mining.authorize requires worker address")?
                     .to_string();
+                self.normalized_worker_recipient(&worker).await?;
                 self.authorized_worker = Some(worker.clone());
                 self.send_response(id, json!(true)).await?;
                 self.send_job(&worker, true).await?;
@@ -267,12 +268,13 @@ impl StratumSession {
         let job_id = self.next_job_id.to_string();
         self.next_job_id = self.next_job_id.saturating_add(1);
         let salt = self.server.next_job_salt.fetch_add(1, Ordering::Relaxed);
+        let recipient = self.normalized_worker_recipient(worker).await?;
         let mine = self
             .server
             .node
             .lock()
             .await
-            .external_mine_job(recipient_from_worker(worker), salt)?;
+            .external_mine_job(recipient, salt)?;
         let difficulty = stratum_difficulty_for_bits(mine.template.difficulty_bits);
         self.send_notification("mining.set_difficulty", json!([difficulty]))
             .await?;
@@ -323,8 +325,9 @@ impl StratumSession {
 
         let (result, outbox) = {
             let mut node = self.server.node.lock().await;
+            let recipient = node.normalize_user_address(recipient_from_worker(worker))?;
             let result = node.submit_external_mine(
-                recipient_from_worker(worker),
+                recipient,
                 job.mine.template.clone(),
                 StratumMineShare {
                     extranonce2,
@@ -343,6 +346,15 @@ impl StratumSession {
             }
             Err(error) => Err(error),
         }
+    }
+
+    async fn normalized_worker_recipient(&self, worker: &str) -> Result<String> {
+        self.server
+            .node
+            .lock()
+            .await
+            .normalize_user_address(recipient_from_worker(worker))
+            .context("invalid Stratum worker address")
     }
 
     async fn send_response(&self, id: Value, result: Value) -> Result<()> {

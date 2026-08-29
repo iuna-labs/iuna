@@ -24,7 +24,8 @@ use super::{
     initial_burn_per_block, initialize_ledger, load_startup_wallet, measure_vdf_rounds,
     parse_startup_bool_env_value, parse_startup_pow_mining_workers_env_value,
     persist_chain_snapshot, project_ui_data_store, run_chain_persistence_with_interval,
-    should_defer_sync_checkpoint, should_log_automatic_finalization_skip, validate_wallet_for_mode,
+    setup_ledger, should_defer_sync_checkpoint, should_log_automatic_finalization_skip,
+    validate_wallet_for_mode,
 };
 
 fn parse(args: &[&str]) -> anyhow::Result<Option<CliOptions>> {
@@ -403,6 +404,18 @@ fn no_args_starts_setup_mode() {
     let opts = parse(&[]).unwrap().unwrap();
     assert_eq!(opts.chain_mode, ChainMode::Setup);
     assert!(opts.join_peers.is_empty());
+}
+
+#[test]
+fn setup_ledger_uses_the_requested_address_network_profile() {
+    assert_eq!(
+        setup_ledger(false).launch_profile().profile_id,
+        "iuna-mainnet-candidate"
+    );
+    assert_eq!(
+        setup_ledger(true).launch_profile().profile_id,
+        "iuna-local-testnet-v1"
+    );
 }
 
 #[test]

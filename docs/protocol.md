@@ -57,6 +57,41 @@ The compact representation stores binary hashes, addresses, signatures, and VDF 
 
 P2P messages and management API responses still use JSON. Their byte length is not the consensus block size. Transaction fee-rate ordering uses a separate compact economic transaction weight, so changing JSON whitespace, key order, or hexadecimal formatting cannot change consensus size or fee priority.
 
+## Wallet address format
+
+Wallets display and accept version `0` Bech32m addresses. Mainnet and the
+mainnet-candidate use the human-readable prefix `iuna`; local testnet uses
+`tiuna`. The payload is one 5-bit version value followed by the wallet's exact
+32-byte Ed25519 verifying key converted from 8-bit to 5-bit groups. Decoding
+must verify the Bech32m constant, reject mixed case and non-zero padding, require
+the expected network prefix and version, require exactly 32 payload bytes, and
+parse those bytes as a non-weak Ed25519 verifying key. An all-uppercase address
+is accepted and normalized to lowercase; mixed uppercase/lowercase is invalid.
+
+Consensus objects and persisted chainstate continue to store the same public
+key as canonical 64-character lowercase hexadecimal. The management wallet,
+address book, transfer endpoints, and Stratum worker usernames decode Bech32m
+to that internal key before constructing a transaction. This boundary keeps the
+checksum and network distinction out of consensus identity while avoiding any
+rewrite of genesis allocation outpoints, historical UTXOs, signatures, or block
+hashes.
+
+Legacy hexadecimal addresses are therefore not valid recipient or address-book
+input. Before mainnet genesis, contacts must replace them with an address newly
+copied from the owner's upgraded wallet. The code exposes an explicit
+`migrate_legacy_address` conversion for controlled migration tooling, but no UI
+silently guesses a network or upgrades an entered hex string. Wallet files keep
+their internal hex public key and need no seed or file migration.
+
+This address rollout does not require a consensus activation height: decoded
+transactions contain the same internal public-key bytes and therefore produce
+the same signatures, transaction IDs, blocks, and UTXO identities understood by
+older nodes. It does require a coordinated client rollout. Older wallets expose
+hex receive values that upgraded send forms reject, and existing Stratum miners
+must replace their hex worker username with the Bech32m form before connecting
+to an upgraded node. Wallet UI, backend, and Stratum configuration should be
+upgraded together.
+
 ## Coins and Transactions
 
 iuna uses a UTXO-style ledger. The main transaction types are:

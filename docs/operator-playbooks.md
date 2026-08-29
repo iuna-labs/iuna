@@ -34,6 +34,27 @@ iuna --help
 
 The process prints the wallet file, config file, chain database, management UI, and P2P listener on startup.
 
+## Legacy address-book migration
+
+The upgraded wallet shows checksummed Bech32m receive addresses: `iuna1...` for
+mainnet/mainnet-candidate and `tiuna1...` for local testnet. Transfer,
+address-book, and Stratum input no longer accepts a 64-character hex public key.
+This is intentional: silently accepting hex would bypass typo and
+wrong-network protection.
+
+Before genesis or before reusing an old contact, ask the recipient to copy a new
+address from their upgraded wallet and replace the old address-book entry.
+Never change `iuna` to `tiuna` (or the reverse) by hand; the checksum covers the
+prefix. Existing wallet files and chain databases retain their internal hex
+keys and must not be rewritten. Controlled migration tools may call the domain
+`migrate_legacy_address` function only when the target network is explicitly
+known.
+
+No block-height activation is needed because on-chain and P2P address bytes do
+not change. Treat this as a client compatibility rollout instead: deploy the
+wallet UI and backend together, have recipients publish their new display
+address, and update Stratum worker usernames before restarting miners.
+
 ## Stalled Height
 
 Symptoms:

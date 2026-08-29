@@ -32,7 +32,7 @@ pub(super) async fn wallet_setup_response(
     } else {
         wallet_store::setup_seed_phrase_with_password(&state.wallet_path, password.as_deref())?
     };
-    let address = state.node.lock().await.wallet_address().to_string();
+    let address = state.node.lock().await.wallet_receive_address()?;
     Ok(WalletSetupResponse {
         ok: true,
         error: None,
@@ -57,8 +57,8 @@ pub(super) async fn replace_setup_wallet_with_generated_seed(
         .context("wallet password session is required")?;
     let (wallet, seed_phrase) =
         wallet_store::replace_with_generated_seed_phrase_encrypted(&state.wallet_path, &password)?;
-    let address = wallet.address().to_string();
     state.node.lock().await.replace_wallet(wallet);
+    let address = state.node.lock().await.wallet_receive_address()?;
     Ok(WalletSetupResponse {
         ok: true,
         error: None,
@@ -83,8 +83,8 @@ pub(super) async fn import_setup_wallet_seed(
         seed_phrase,
         &password,
     )?;
-    let address = wallet.address().to_string();
     state.node.lock().await.replace_wallet(wallet);
+    let address = state.node.lock().await.wallet_receive_address()?;
     Ok(WalletSetupResponse {
         ok: true,
         error: None,
@@ -131,6 +131,7 @@ pub(super) async fn transfer(state: &HttpState, form: TransferForm) -> Result<()
 
     let result = {
         let mut node = state.node.lock().await;
+        let to = node.normalize_user_address(&to)?;
         let result = node.transfer_with_fee_rate(to, amount, fee_per_byte, &selected_utxos);
         let outbox = node.drain_outbox();
         (result, outbox)
@@ -169,11 +170,9 @@ pub(super) async fn estimate_transfer_fee(
     form: TransferForm,
 ) -> Result<FeeEstimate> {
     let (to, amount, fee_per_byte, selected_utxos) = validate_transfer_form(form)?;
-    state
-        .node
-        .lock()
-        .await
-        .estimate_transfer_fee(to, amount, fee_per_byte, &selected_utxos)
+    let node = state.node.lock().await;
+    let to = node.normalize_user_address(&to)?;
+    node.estimate_transfer_fee(to, amount, fee_per_byte, &selected_utxos)
 }
 
 pub(super) async fn estimate_burn_fee(
