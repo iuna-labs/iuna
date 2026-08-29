@@ -1,8 +1,8 @@
 use std::collections::BTreeMap;
 
 use crate::domain::{
-    Block, BurnLeaderRank, ChainSnapshot, Ledger, OutPoint, Transaction, TxOutput, hex_hash,
-    reward_outputs_for_block,
+    Block, BurnLeaderRank, ChainSnapshot, Ledger, OutPoint, Transaction, TxOutput,
+    genesis_allocation_outpoint, reward_outputs_for_block,
 };
 
 #[derive(Clone, Debug, Default, Eq, PartialEq)]
@@ -62,7 +62,7 @@ fn known_chain_output_index(snapshot: &ChainSnapshot) -> BTreeMap<OutPoint, TxOu
             continue;
         }
         outputs.insert(
-            genesis_allocation_outpoint(address),
+            genesis_allocation_outpoint(&snapshot.launch_profile.profile_id, address),
             TxOutput {
                 address: address.clone(),
                 amount: *amount,
@@ -116,13 +116,6 @@ fn index_transaction_outputs(
     }
 }
 
-fn genesis_allocation_outpoint(address: &str) -> OutPoint {
-    OutPoint {
-        txid: hex_hash(format!("iuna-genesis-allocation:{address}")),
-        index: 0,
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use std::collections::BTreeMap;
@@ -145,7 +138,8 @@ mod tests {
         };
 
         let index = build_ui_chain_index(&snapshot);
-        let outpoint = genesis_allocation_outpoint(wallet.address());
+        let outpoint =
+            genesis_allocation_outpoint(&snapshot.launch_profile.profile_id, wallet.address());
 
         assert_eq!(
             index.outputs.get(&outpoint).map(|output| output.amount),

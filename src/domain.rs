@@ -35,7 +35,7 @@ pub use block::{
     Block, BurnLeaderRank, ChainSnapshot, ChainStatus, FinalizerMode, LeaderProof, PreparedBlock,
 };
 use fork::LeaderScore;
-use genesis::genesis_allocation_outpoint;
+pub(crate) use genesis::genesis_allocation_outpoint;
 pub use hex::hex_hash;
 use hex::{decode_hex, decode_hex_array, hex_encode};
 use ledger_lineage::{
@@ -78,7 +78,10 @@ pub use stratum::{
 };
 use stratum::{hash_meets_difficulty, stratum_mine_header_bytes, stratum_mine_signature};
 use ticket::{BurnTicket, ticket_block_min_timestamp};
-pub use transaction::{MineSearchOutcome, OutPoint, Transaction, TxInput, TxOutput};
+pub use transaction::{
+    MineSearchOutcome, OutPoint, TRANSACTION_SIGNING_FORMAT_VERSION, Transaction, TxInput, TxOutput,
+};
+use transaction::{TransactionSigningDomain, mine_signing_bytes};
 pub use validation::validate_address;
 use validation::{
     canonical_transaction_size_bytes, validate_hash, validate_protocol_id, validate_signature,

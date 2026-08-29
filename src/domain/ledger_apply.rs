@@ -74,6 +74,7 @@ impl Ledger {
         let mut utxo_lineage = self.utxo_lineage.clone();
         let mut lineage_values = self.lineage_values.clone();
         let mut lineage_owners = self.lineage_owners.clone();
+        let signing_domain = self.transaction_signing_domain();
         let mut signatures = BTreeSet::new();
         for tx in &block.transactions {
             if !signatures.insert(tx.signature()) {
@@ -87,6 +88,7 @@ impl Ledger {
                 &mut utxo_lineage,
                 &mut lineage_values,
                 &mut lineage_owners,
+                &signing_domain,
             )?;
         }
         let expected_reward = block_reward(&block.transactions, 0)?;
@@ -259,8 +261,9 @@ fn apply_transaction_with_lineage(
     utxo_lineage: &mut std::collections::BTreeMap<super::OutPoint, super::UtxoLineageRoot>,
     lineage_values: &mut std::collections::BTreeMap<super::UtxoLineageRoot, Amount>,
     lineage_owners: &mut super::LineageOwnerValues,
+    signing_domain: &super::TransactionSigningDomain,
 ) -> Result<()> {
-    transaction.verify_signature()?;
+    transaction.verify_signature(signing_domain)?;
     if matches!(transaction, Transaction::Mine { .. }) {
         let output = transaction.outputs().remove(0);
         ensure_outputs_do_not_overflow(utxos, std::slice::from_ref(&output))?;

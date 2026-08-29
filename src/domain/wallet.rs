@@ -30,10 +30,14 @@ impl Wallet {
     }
 
     pub(super) fn sign_payload(&self, payload: &str) -> String {
+        self.sign_bytes(payload.as_bytes())
+    }
+
+    pub(super) fn sign_bytes(&self, payload: &[u8]) -> String {
         let seed =
             decode_hex_array::<PUBLIC_KEY_BYTES>(&self.secret).expect("wallet secret is valid hex");
         let signing_key = SigningKey::from_bytes(&seed);
-        let signature: Signature = signing_key.sign(payload.as_bytes());
+        let signature: Signature = signing_key.sign(payload);
         hex_encode(signature.to_bytes())
     }
 

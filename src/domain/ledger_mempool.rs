@@ -44,7 +44,8 @@ impl Ledger {
             return Ok(TransactionSubmitOutcome::AlreadyKnown);
         }
 
-        transaction.verify_signature()?;
+        let signing_domain = self.transaction_signing_domain();
+        transaction.verify_signature(&signing_domain)?;
         self.validate_transaction_terms(&transaction)?;
         ensure_transaction_fits_empty_block(
             compact_block_context(self),
@@ -79,7 +80,7 @@ impl Ledger {
             self.orphan_bytes = self.orphan_bytes.saturating_add(candidate_bytes);
             return Ok(TransactionSubmitOutcome::Added);
         }
-        apply_transaction(&transaction, &mut utxos)?;
+        apply_transaction(&transaction, &mut utxos, &signing_domain)?;
         let candidate_bytes = ensure_pending_pool_bytes(
             "mempool",
             self.pending_bytes,
@@ -223,7 +224,8 @@ mod tests {
             }],
             fee: 1,
         }
-        .sign(&wallet);
+        .sign(&wallet, &ledger.transaction_signing_domain())
+        .unwrap();
         ledger.orphans = vec![dummy_mine('e'); MAX_ORPHAN_TRANSACTIONS];
 
         assert_eq!(ledger.orphans.len(), 1_024);

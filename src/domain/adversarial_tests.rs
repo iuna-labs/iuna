@@ -14,8 +14,8 @@ use super::{
     BurnBundleSignature, BurnCommitteeMember, BurnLeaderRank, ChainSnapshot, FinalizerMode,
     GRINDING_RESISTANCE_ACTIVATION_HEIGHT, GenesisBurn, LeaderProofPayload, Ledger,
     MAX_BLOCK_BYTES, MAX_BURN_BUNDLE_BYTES, MICRO_IUNA, MaskedBurn, OutPoint, Transaction,
-    TransactionSubmitOutcome, TxOutput, UtxoLineageRoot, VDF_TARGET_BLOCK_MS, Wallet, hex_hash,
-    reward_outputs_for_block, run_vdf,
+    TransactionSubmitOutcome, TxOutput, UtxoLineageRoot, VDF_TARGET_BLOCK_MS, Wallet,
+    genesis_allocation_outpoint, hex_hash, reward_outputs_for_block, run_vdf,
 };
 
 const NOW_MS: u64 = 10_000_000_000;
@@ -1430,10 +1430,7 @@ fn mini_lineage_state(snapshot: &ChainSnapshot) -> Option<MiniLineageState> {
     {
         mini_insert_output(
             &mut state,
-            OutPoint {
-                txid: hex_hash(format!("iuna-genesis-allocation:{address}")),
-                index: 0,
-            },
+            genesis_allocation_outpoint(&snapshot.launch_profile.profile_id, address),
             TxOutput {
                 address: address.clone(),
                 amount: *amount,

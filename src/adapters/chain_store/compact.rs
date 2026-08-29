@@ -654,14 +654,14 @@ impl CompactWriter {
     }
 
     fn hex(&mut self, value: &str) -> Result<()> {
-        let bytes = decode_hex(value)?;
+        let bytes = decode_canonical_hex(value)?;
         self.varint(bytes.len() as u64);
         self.bytes(&bytes);
         Ok(())
     }
 
     fn fixed_hex<const N: usize>(&mut self, value: &str, label: &str) -> Result<()> {
-        let bytes = decode_hex(value).with_context(|| format!("invalid {label}"))?;
+        let bytes = decode_canonical_hex(value).with_context(|| format!("invalid {label}"))?;
         if bytes.len() != N {
             bail!("invalid {label}: expected {N} bytes, got {}", bytes.len());
         }
@@ -687,7 +687,7 @@ impl CompactWriter {
             self.varint(*index);
             return Ok(());
         }
-        let bytes = decode_hex(value).context("invalid protocol id")?;
+        let bytes = decode_canonical_hex(value).context("invalid protocol id")?;
         match bytes.len() {
             32 => self.u8(1),
             64 => self.u8(2),
@@ -890,6 +890,14 @@ fn decode_hex(input: &str) -> Result<Vec<u8>> {
     Ok(bytes)
 }
 
+fn decode_canonical_hex(input: &str) -> Result<Vec<u8>> {
+    let bytes = decode_hex(input)?;
+    if hex_encode(&bytes) != input {
+        bail!("hex must use canonical lowercase encoding");
+    }
+    Ok(bytes)
+}
+
 fn hex_value(byte: u8) -> Result<u8> {
     match byte {
         b'0'..=b'9' => Ok(byte - b'0'),
@@ -1030,6 +1038,26 @@ mod tests {
         assert_eq!(assert_transaction_roundtrip(&burn), 169);
         assert_eq!(assert_transaction_roundtrip(&transfer), 201);
         assert_eq!(assert_transaction_roundtrip(&mine), 103);
+    }
+
+    #[test]
+    fn compact_transaction_writer_rejects_noncanonical_hex() {
+        let signature = "3".repeat(128);
+        let transaction = Transaction::Transfer {
+            inputs: vec![input(&"2".repeat(64), &signature)],
+            outputs: vec![TxOutput {
+                address: "AB".repeat(32),
+                amount: 10,
+            }],
+            fee: 1,
+            signature,
+        };
+        let mut writer = CompactWriter::default();
+
+        let error = encode_transaction(&mut writer, &transaction, &mut EncodeTables::default())
+            .unwrap_err();
+
+        assert!(format!("{error:#}").contains("canonical lowercase"));
     }
 
     #[test]

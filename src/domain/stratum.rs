@@ -2,8 +2,8 @@ use anyhow::{Context, Result};
 use sha2::{Digest, Sha256};
 
 use super::{
-    HASH_BYTES, decode_hex_array, hex_encode,
-    validation::{validate_address, validate_hash},
+    HASH_BYTES, TransactionSigningDomain, hex_encode, mine_signing_bytes,
+    validation::{decode_canonical_hex_array, validate_address, validate_hash},
 };
 
 pub const STRATUM_EXTRANONCE1_HEX: &str = "00000000";
@@ -52,26 +52,28 @@ fn unpack_stratum_nonce(nonce: u64) -> ([u8; 4], [u8; 4]) {
 }
 
 fn stratum_coinbase_prefix(
+    domain: &TransactionSigningDomain,
     recipient: &str,
     anchor: &str,
     salt: u64,
     difficulty_bits: u32,
-) -> Vec<u8> {
-    format!("iuna-stratum-mine:{recipient}:{anchor}:{salt}:{difficulty_bits}:").into_bytes()
+) -> Result<Vec<u8>> {
+    mine_signing_bytes(domain, recipient, anchor, salt, 0, difficulty_bits)
 }
 
 fn stratum_coinbase_bytes(
+    domain: &TransactionSigningDomain,
     recipient: &str,
     anchor: &str,
     salt: u64,
     nonce: u64,
     difficulty_bits: u32,
-) -> Vec<u8> {
+) -> Result<Vec<u8>> {
     let (extranonce2, _) = unpack_stratum_nonce(nonce);
-    let mut coinbase = stratum_coinbase_prefix(recipient, anchor, salt, difficulty_bits);
+    let mut coinbase = stratum_coinbase_prefix(domain, recipient, anchor, salt, difficulty_bits)?;
     coinbase.extend_from_slice(&[0, 0, 0, 0]);
     coinbase.extend_from_slice(&extranonce2);
-    coinbase
+    Ok(coinbase)
 }
 
 fn double_sha256(bytes: &[u8]) -> [u8; 32] {
@@ -81,6 +83,7 @@ fn double_sha256(bytes: &[u8]) -> [u8; 32] {
 }
 
 pub(super) fn stratum_mine_header_bytes(
+    domain: &TransactionSigningDomain,
     recipient: &str,
     anchor: &str,
     salt: u64,
@@ -89,16 +92,17 @@ pub(super) fn stratum_mine_header_bytes(
 ) -> Result<[u8; 80]> {
     let mut header = [0_u8; STRATUM_MINE_HEADER_BYTES];
     header[0..4].copy_from_slice(&STRATUM_MINE_VERSION);
-    let anchor_bytes =
-        decode_hex_array::<HASH_BYTES>(anchor).context("mine transaction anchor is not hex")?;
+    let anchor_bytes = decode_canonical_hex_array::<HASH_BYTES>(anchor)
+        .context("mine transaction anchor is not hex")?;
     header[4..36].copy_from_slice(&anchor_bytes);
     let merkle_root = double_sha256(&stratum_coinbase_bytes(
+        domain,
         recipient,
         anchor,
         salt,
         nonce,
         difficulty_bits,
-    ));
+    )?);
     header[36..68].copy_from_slice(&merkle_root);
     header[68..72].copy_from_slice(&STRATUM_MINE_NTIME);
     header[72..76].copy_from_slice(&difficulty_bits.to_le_bytes());
@@ -114,6 +118,7 @@ pub(super) fn stratum_mine_signature(header: &[u8; 80]) -> String {
 }
 
 pub(super) fn stratum_mine_template(
+    domain: &TransactionSigningDomain,
     recipient: impl Into<String>,
     anchor: &str,
     salt: u64,
@@ -122,14 +127,20 @@ pub(super) fn stratum_mine_template(
     let recipient = recipient.into();
     validate_address(&recipient, "mine recipient")?;
     validate_hash(anchor, "mine transaction anchor")?;
-    let anchor_bytes =
-        decode_hex_array::<HASH_BYTES>(anchor).context("mine transaction anchor is not hex")?;
+    let anchor_bytes = decode_canonical_hex_array::<HASH_BYTES>(anchor)
+        .context("mine transaction anchor is not hex")?;
     Ok(StratumMineTemplate {
         recipient: recipient.clone(),
         anchor: anchor.to_string(),
         salt,
         difficulty_bits,
-        coinbase_prefix: stratum_coinbase_prefix(&recipient, anchor, salt, difficulty_bits),
+        coinbase_prefix: stratum_coinbase_prefix(
+            domain,
+            &recipient,
+            anchor,
+            salt,
+            difficulty_bits,
+        )?,
         version_hex: hex_encode(STRATUM_MINE_VERSION),
         prev_hash_hex: hex_encode(anchor_bytes),
         nbits_hex: hex_encode(difficulty_bits.to_le_bytes()),
@@ -167,6 +178,7 @@ mod tests {
         STRATUM_EXTRANONCE1_HEX, STRATUM_EXTRANONCE2_SIZE, hash_meets_difficulty,
         pack_stratum_nonce, stratum_mine_header_bytes,
     };
+    use crate::domain::{TransactionSigningDomain, Wallet};
 
     #[test]
     fn stratum_nonce_packs_extranonce_big_endian_and_header_nonce_little_endian() {
@@ -183,7 +195,10 @@ mod tests {
 
     #[test]
     fn stratum_header_rejects_non_hex_anchor() {
-        let error = stratum_mine_header_bytes("recipient", "not-hex", 0, 0, 12).unwrap_err();
+        let wallet = Wallet::from_seed("stratum-invalid-anchor-recipient");
+        let domain = TransactionSigningDomain::new("test", "0".repeat(64));
+        let error =
+            stratum_mine_header_bytes(&domain, wallet.address(), "not-hex", 0, 0, 12).unwrap_err();
 
         assert!(
             error

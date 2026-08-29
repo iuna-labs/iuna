@@ -48,7 +48,7 @@ The current mainnet-candidate parameter set is intentionally close to Bitcoin wh
 
 Changing any value in this section requires a conscious mainnet-candidate reset or later hard-fork process.
 
-If the mainnet-candidate network is promoted to mainnet, the candidate genesis, chain history, UTXOs, tickets, and launch profile remain intact. A later P2P network ID change to `iuna-mainnet-v1` is only a peer-network cutover unless it is accompanied by an explicitly announced hard fork or reset.
+Mainnet must start from a newly generated genesis and a distinct mainnet chain ID. The candidate chain, its UTXOs, and its signatures cannot be promoted in place: transaction signing format v1 intentionally makes old signatures invalid on the new genesis. A chain-ID change is therefore a consensus reset, not only a P2P network cutover.
 
 The consensus block-size limit is the exact number of bytes produced by the compact snapshot v6 block-body encoder when the block is appended to its parent chain. The encoder's reference tables are seeded by genesis allocations and extended in chain order, so all nodes calculate the same context-dependent size. The snapshot header, launch profile, block-count field, SQLite row metadata, and SQLite page overhead are not charged to an individual block.
 
@@ -65,6 +65,14 @@ iuna uses a UTXO-style ledger. The main transaction types are:
 3. **Mine action:** proves SHA-256-style PoW against the current chain tip. A valid mine action mints a fixed `1 IUNA` reward to its recipient and pays a fixed `1 IUNA` fee to the block finalizer.
 
 Burn and transfer fees are chosen by the sender. Mine action reward and mine action fee are deterministic protocol values.
+
+### Transaction signing format v1
+
+Every transfer, burn, and mine action is cryptographically scoped to one chain. Its signing or proof preimage starts with the fixed `IUNA-TX` type tag, the big-endian signing-format version `1`, a length-prefixed UTF-8 chain ID, and the length-prefixed 32-byte genesis block hash. The remaining payload uses an explicit one-byte transaction type and canonical binary fields: big-endian fixed-width integers, length-prefixed decoded hashes, signatures and Ed25519 keys, and ordered input/output counts. JSON spelling, field order, and separators never enter the sighash. All hexadecimal wire fields must use canonical lowercase encoding; alternate casing is rejected before signature validation so it cannot malleate addresses, transaction IDs, block hashes, or persisted snapshots.
+
+Transfers and burns use Ed25519 over this binary preimage. Native and Stratum mine proofs commit the same domain and logical mine fields before proof-specific hashing. Validators reconstruct the domain from their local launch profile and genesis block, so a transaction valid on candidate, mainnet, testnet, or another genesis fails signature/proof validation everywhere else. There is no legacy-signature fallback.
+
+Synthetic genesis-allocation outpoints use a separate typed binary commitment over the chain ID and allocation address. This avoids a circular dependency on the final genesis block hash while ensuring that otherwise identical allocations on different network identities do not create the same outpoints. Changing the chain ID or signing format requires a new genesis.
 
 ## Burns Become Tickets
 

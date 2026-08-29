@@ -402,6 +402,13 @@ impl Ledger {
         &self.chain[0].hash
     }
 
+    pub(super) fn transaction_signing_domain(&self) -> super::TransactionSigningDomain {
+        super::TransactionSigningDomain::new(
+            self.launch_profile.profile_id.clone(),
+            self.genesis_hash().to_string(),
+        )
+    }
+
     pub fn is_setup_placeholder(&self) -> bool {
         self.height() == 0
             && self.genesis_allocations.is_empty()

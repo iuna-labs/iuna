@@ -4,12 +4,39 @@ use anyhow::{Context, Result, bail};
 use ed25519_dalek::{Signature, Verifier, VerifyingKey};
 use serde::{Deserialize, Serialize};
 
+use super::validation::{decode_canonical_hex, decode_canonical_hex_array};
 use super::{
-    Amount, MINE_FINALIZER_FEE, MINE_REWARD, PUBLIC_KEY_BYTES, SIGNATURE_BYTES, Wallet,
-    canonical_transaction_size_bytes, decode_hex_array, genesis_allocation_outpoint,
-    hash_meets_difficulty, hex_encode, hex_hash, mine_payload, mine_signature,
-    stratum_mine_header_bytes, stratum_mine_signature,
+    Amount, HASH_BYTES, MINE_FINALIZER_FEE, MINE_REWARD, PUBLIC_KEY_BYTES, SIGNATURE_BYTES, Wallet,
+    canonical_transaction_size_bytes, genesis_allocation_outpoint, hash_meets_difficulty,
+    hex_encode, hex_hash, mine_payload, mine_signature, stratum_mine_header_bytes,
+    stratum_mine_signature,
 };
+
+pub const TRANSACTION_SIGNING_FORMAT_VERSION: u16 = 1;
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub(super) struct TransactionSigningDomain {
+    chain_id: String,
+    genesis_hash: String,
+}
+
+impl TransactionSigningDomain {
+    pub(super) fn new(chain_id: impl Into<String>, genesis_hash: impl Into<String>) -> Self {
+        Self {
+            chain_id: chain_id.into(),
+            genesis_hash: genesis_hash.into(),
+        }
+    }
+
+    pub(super) fn encode(&self, bytes: &mut Vec<u8>) -> Result<()> {
+        bytes.extend_from_slice(b"IUNA-TX");
+        bytes.extend_from_slice(&TRANSACTION_SIGNING_FORMAT_VERSION.to_be_bytes());
+        encode_bytes(bytes, self.chain_id.as_bytes(), "chain ID")?;
+        let genesis_hash = decode_canonical_hex_array::<HASH_BYTES>(&self.genesis_hash)
+            .context("transaction signing genesis hash is invalid")?;
+        encode_bytes(bytes, &genesis_hash, "genesis hash")
+    }
+}
 
 #[derive(Clone, Debug, Deserialize, Eq, Ord, PartialEq, PartialOrd, Serialize)]
 pub struct OutPoint {
@@ -71,13 +98,19 @@ pub struct MineSearchOutcome {
 impl Transaction {
     pub fn genesis_burn(from: impl Into<String>, amount: Amount) -> Self {
         let from = from.into();
-        Self::genesis_burn_with_change(from, amount, Vec::new())
+        Self::genesis_burn_with_change(
+            from,
+            amount,
+            Vec::new(),
+            &super::LaunchProfile::default().profile_id,
+        )
     }
 
     pub(super) fn genesis_burn_with_allocation(
         from: impl Into<String>,
         amount: Amount,
         allocation: Amount,
+        chain_id: &str,
     ) -> Result<Self> {
         if amount > allocation {
             bail!("genesis burn exceeds allocation");
@@ -92,12 +125,19 @@ impl Transaction {
         } else {
             Vec::new()
         };
-        Ok(Self::genesis_burn_with_change(from, amount, change))
+        Ok(Self::genesis_burn_with_change(
+            from, amount, change, chain_id,
+        ))
     }
 
-    fn genesis_burn_with_change(from: String, amount: Amount, change: Vec<TxOutput>) -> Self {
+    fn genesis_burn_with_change(
+        from: String,
+        amount: Amount,
+        change: Vec<TxOutput>,
+        chain_id: &str,
+    ) -> Self {
         let input = TxInput {
-            outpoint: genesis_allocation_outpoint(&from),
+            outpoint: genesis_allocation_outpoint(chain_id, &from),
             owner: from.clone(),
             signature: "genesis".to_string(),
         };
@@ -223,7 +263,7 @@ impl Transaction {
         }
     }
 
-    pub(super) fn verify_signature(&self) -> Result<()> {
+    pub(super) fn verify_signature(&self, domain: &TransactionSigningDomain) -> Result<()> {
         if let Self::Mine {
             recipient,
             anchor,
@@ -235,15 +275,21 @@ impl Transaction {
         } = self
         {
             let expected = if let Some(proof_header) = proof_header {
-                let header =
-                    stratum_mine_header_bytes(recipient, anchor, *salt, *nonce, *difficulty_bits)?;
+                let header = stratum_mine_header_bytes(
+                    domain,
+                    recipient,
+                    anchor,
+                    *salt,
+                    *nonce,
+                    *difficulty_bits,
+                )?;
                 let expected_header = hex_encode(header);
                 if *proof_header != expected_header {
                     bail!("mine transaction proof header is invalid");
                 }
                 stratum_mine_signature(&header)
             } else {
-                mine_signature(recipient, anchor, *salt, *nonce, *difficulty_bits)
+                mine_signature(domain, recipient, anchor, *salt, *nonce, *difficulty_bits)?
             };
             if *signature != expected {
                 bail!("mine transaction proof hash is invalid");
@@ -264,15 +310,15 @@ impl Transaction {
             bail!("transaction input signature does not match transaction signature");
         }
         let sender = self.sender();
-        let public_key = decode_hex_array::<PUBLIC_KEY_BYTES>(sender)
+        let public_key = decode_canonical_hex_array::<PUBLIC_KEY_BYTES>(sender)
             .with_context(|| format!("invalid public key for {sender}"))?;
-        let signature = decode_hex_array::<SIGNATURE_BYTES>(self.signature())
+        let signature = decode_canonical_hex_array::<SIGNATURE_BYTES>(self.signature())
             .context("invalid signature hex")?;
         let verifying_key =
             VerifyingKey::from_bytes(&public_key).context("invalid transaction public key")?;
         let signature = Signature::from_bytes(&signature);
         verifying_key
-            .verify(self.signing_payload().as_bytes(), &signature)
+            .verify(&self.signing_bytes(domain)?, &signature)
             .context("transaction signature is invalid")
     }
 
@@ -298,6 +344,36 @@ impl Transaction {
         self.inputs()
             .iter()
             .all(|input| input.signature == "genesis")
+    }
+
+    fn signing_bytes(&self, domain: &TransactionSigningDomain) -> Result<Vec<u8>> {
+        match self {
+            Self::Transfer {
+                inputs,
+                outputs,
+                fee,
+                ..
+            } => UnsignedUtxoTransaction::Transfer {
+                inputs: unsigned_inputs(inputs),
+                outputs: outputs.clone(),
+                fee: *fee,
+            }
+            .signing_bytes(domain),
+            Self::Burn {
+                inputs,
+                change,
+                amount,
+                fee,
+                ..
+            } => UnsignedUtxoTransaction::Burn {
+                inputs: unsigned_inputs(inputs),
+                change: change.clone(),
+                amount: *amount,
+                fee: *fee,
+            }
+            .signing_bytes(domain),
+            Self::Mine { .. } => unreachable!("mine transactions use proof hashes"),
+        }
     }
 }
 
@@ -338,8 +414,12 @@ pub(super) enum UnsignedUtxoTransaction {
 }
 
 impl UnsignedUtxoTransaction {
-    pub(super) fn sign(self, wallet: &Wallet) -> Transaction {
-        let signature = wallet.sign_payload(&self.canonical());
+    pub(super) fn sign(
+        self,
+        wallet: &Wallet,
+        domain: &TransactionSigningDomain,
+    ) -> Result<Transaction> {
+        let signature = wallet.sign_bytes(&self.signing_bytes(domain)?);
         let signed_inputs = self
             .inputs()
             .iter()
@@ -349,7 +429,7 @@ impl UnsignedUtxoTransaction {
                 signature: signature.clone(),
             })
             .collect::<Vec<_>>();
-        match self {
+        Ok(match self {
             Self::Transfer { outputs, fee, .. } => Transaction::Transfer {
                 inputs: signed_inputs,
                 outputs,
@@ -368,7 +448,7 @@ impl UnsignedUtxoTransaction {
                 fee,
                 signature,
             },
-        }
+        })
     }
 
     fn inputs(&self) -> &[UnsignedTxInput] {
@@ -400,6 +480,99 @@ impl UnsignedUtxoTransaction {
             ),
         }
     }
+
+    pub(super) fn signing_bytes(&self, domain: &TransactionSigningDomain) -> Result<Vec<u8>> {
+        let mut bytes = Vec::new();
+        domain.encode(&mut bytes)?;
+        match self {
+            Self::Transfer {
+                inputs,
+                outputs,
+                fee,
+            } => {
+                bytes.push(1);
+                encode_inputs(&mut bytes, inputs)?;
+                encode_outputs(&mut bytes, outputs)?;
+                bytes.extend_from_slice(&fee.to_be_bytes());
+            }
+            Self::Burn {
+                inputs,
+                change,
+                amount,
+                fee,
+            } => {
+                bytes.push(2);
+                encode_inputs(&mut bytes, inputs)?;
+                encode_outputs(&mut bytes, change)?;
+                bytes.extend_from_slice(&amount.to_be_bytes());
+                bytes.extend_from_slice(&fee.to_be_bytes());
+            }
+        }
+        Ok(bytes)
+    }
+}
+
+fn encode_inputs(bytes: &mut Vec<u8>, inputs: &[UnsignedTxInput]) -> Result<()> {
+    encode_len(bytes, inputs.len(), "input count")?;
+    for input in inputs {
+        let txid = decode_canonical_hex(&input.outpoint.txid)
+            .context("transaction input txid is invalid")?;
+        if txid.len() != HASH_BYTES && txid.len() != SIGNATURE_BYTES {
+            bail!("transaction input txid must be a hash or signature");
+        }
+        encode_bytes(bytes, &txid, "input txid")?;
+        bytes.extend_from_slice(&input.outpoint.index.to_be_bytes());
+        let owner = decode_canonical_hex_array::<PUBLIC_KEY_BYTES>(&input.owner)
+            .context("transaction input owner is invalid")?;
+        encode_bytes(bytes, &owner, "input owner")?;
+    }
+    Ok(())
+}
+
+fn encode_outputs(bytes: &mut Vec<u8>, outputs: &[TxOutput]) -> Result<()> {
+    encode_len(bytes, outputs.len(), "output count")?;
+    for output in outputs {
+        let address = decode_canonical_hex_array::<PUBLIC_KEY_BYTES>(&output.address)
+            .context("transaction output address is invalid")?;
+        encode_bytes(bytes, &address, "output address")?;
+        bytes.extend_from_slice(&output.amount.to_be_bytes());
+    }
+    Ok(())
+}
+
+fn encode_bytes(bytes: &mut Vec<u8>, value: &[u8], label: &str) -> Result<()> {
+    encode_len(bytes, value.len(), label)?;
+    bytes.extend_from_slice(value);
+    Ok(())
+}
+
+fn encode_len(bytes: &mut Vec<u8>, len: usize, label: &str) -> Result<()> {
+    let len = u32::try_from(len).with_context(|| format!("{label} exceeds u32 length"))?;
+    bytes.extend_from_slice(&len.to_be_bytes());
+    Ok(())
+}
+
+pub(super) fn mine_signing_bytes(
+    domain: &TransactionSigningDomain,
+    recipient: &str,
+    anchor: &str,
+    salt: u64,
+    nonce: u64,
+    difficulty_bits: u32,
+) -> Result<Vec<u8>> {
+    let mut bytes = Vec::new();
+    domain.encode(&mut bytes)?;
+    bytes.push(3);
+    let recipient = decode_canonical_hex_array::<PUBLIC_KEY_BYTES>(recipient)
+        .context("mine recipient is invalid")?;
+    encode_bytes(&mut bytes, &recipient, "mine recipient")?;
+    let anchor =
+        decode_canonical_hex_array::<HASH_BYTES>(anchor).context("mine anchor is invalid")?;
+    encode_bytes(&mut bytes, &anchor, "mine anchor")?;
+    bytes.extend_from_slice(&salt.to_be_bytes());
+    bytes.extend_from_slice(&nonce.to_be_bytes());
+    bytes.extend_from_slice(&difficulty_bits.to_be_bytes());
+    Ok(bytes)
 }
 
 pub(super) fn unsigned_inputs(inputs: &[TxInput]) -> Vec<UnsignedTxInput> {
@@ -453,4 +626,93 @@ pub(super) fn transaction_inputs_available(
         .inputs()
         .iter()
         .all(|input| utxos.contains_key(&input.outpoint))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn signing_format_v1_has_a_stable_typed_binary_vector() {
+        let transaction = UnsignedUtxoTransaction::Transfer {
+            inputs: vec![UnsignedTxInput {
+                outpoint: OutPoint {
+                    txid: "11".repeat(32),
+                    index: 7,
+                },
+                owner: "33".repeat(32),
+            }],
+            outputs: vec![TxOutput {
+                address: "44".repeat(32),
+                amount: 5,
+            }],
+            fee: 1,
+        };
+        let domain = TransactionSigningDomain::new("iuna-test-vector", "22".repeat(32));
+
+        let encoded = hex_encode(transaction.signing_bytes(&domain).unwrap());
+
+        assert_eq!(
+            encoded,
+            concat!(
+                "49554e412d5458", // IUNA-TX domain tag
+                "0001",           // signing format version
+                "00000010",
+                "69756e612d746573742d766563746f72", // chain ID
+                "00000020",
+                "2222222222222222222222222222222222222222222222222222222222222222", // genesis hash
+                "01",                                                               // transfer type
+                "00000001",                                                         // input count
+                "00000020",
+                "1111111111111111111111111111111111111111111111111111111111111111", // txid
+                "00000007",                                                         // output index
+                "00000020",
+                "3333333333333333333333333333333333333333333333333333333333333333", // owner
+                "00000001",                                                         // output count
+                "00000020",
+                "4444444444444444444444444444444444444444444444444444444444444444", // address
+                "0000000000000005",                                                 // amount
+                "0000000000000001",                                                 // fee
+            )
+        );
+    }
+
+    #[test]
+    fn legacy_text_signature_is_invalid_under_format_v1() {
+        let wallet = Wallet::from_seed("legacy-transaction-signature");
+        let unsigned = UnsignedUtxoTransaction::Transfer {
+            inputs: vec![UnsignedTxInput {
+                outpoint: OutPoint {
+                    txid: "11".repeat(32),
+                    index: 0,
+                },
+                owner: wallet.address().to_string(),
+            }],
+            outputs: vec![TxOutput {
+                address: wallet.address().to_string(),
+                amount: 9,
+            }],
+            fee: 1,
+        };
+        let legacy_signature = wallet.sign_payload(&unsigned.canonical());
+        let transaction = Transaction::Transfer {
+            inputs: vec![TxInput {
+                outpoint: OutPoint {
+                    txid: "11".repeat(32),
+                    index: 0,
+                },
+                owner: wallet.address().to_string(),
+                signature: legacy_signature.clone(),
+            }],
+            outputs: vec![TxOutput {
+                address: wallet.address().to_string(),
+                amount: 9,
+            }],
+            fee: 1,
+            signature: legacy_signature,
+        };
+        let domain = TransactionSigningDomain::new("iuna-mainnet-v1", "22".repeat(32));
+
+        assert!(transaction.verify_signature(&domain).is_err());
+    }
 }

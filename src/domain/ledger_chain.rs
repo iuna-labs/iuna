@@ -50,7 +50,12 @@ impl Ledger {
                     .get(&burn.from)
                     .copied()
                     .unwrap_or_default();
-                Transaction::genesis_burn_with_allocation(burn.from, burn.amount, allocation)
+                Transaction::genesis_burn_with_allocation(
+                    burn.from,
+                    burn.amount,
+                    allocation,
+                    &launch_profile.profile_id,
+                )
             })
             .collect::<Result<Vec<_>>>()?;
         Self::new_with_genesis_transactions(
@@ -69,7 +74,8 @@ impl Ledger {
     ) -> Result<Self> {
         validate_genesis_allocations(&genesis_allocations)?;
         let genesis = build_genesis_block(&genesis_allocations, genesis_transactions);
-        let utxos = utxos_after_genesis(&genesis_allocations, &genesis)?;
+        let utxos =
+            utxos_after_genesis(&genesis_allocations, &genesis, &launch_profile.profile_id)?;
         let tickets = genesis_tickets(&genesis_allocations, &genesis, &launch_profile)?;
         let compact_block_context = if genesis_allocations.is_empty() {
             CompactBlockContext::default()
@@ -136,7 +142,8 @@ impl Ledger {
         if genesis != expected_genesis {
             bail!("chain snapshot genesis does not match its allocations and transactions");
         }
-        let utxos = utxos_after_genesis(&genesis_allocations, &genesis)?;
+        let utxos =
+            utxos_after_genesis(&genesis_allocations, &genesis, &launch_profile.profile_id)?;
         let compact_block_context =
             CompactBlockContext::for_chain(&genesis_allocations, std::slice::from_ref(&genesis))?;
 
@@ -327,8 +334,25 @@ fn fork_rewrites_finalized_history(local_height: u64, common_ancestor_height: u6
 
 #[cfg(test)]
 mod tests {
+    use std::collections::BTreeMap;
+
     use super::fork_rewrites_finalized_history;
-    use crate::domain::FORK_FINALITY_DEPTH;
+    use crate::domain::{
+        FORK_FINALITY_DEPTH, LaunchProfile, Ledger, StratumMineShare, Transaction, Wallet,
+    };
+
+    fn profile(profile_id: &str) -> LaunchProfile {
+        LaunchProfile {
+            profile_id: profile_id.to_string(),
+            mine_difficulty_bits: 0,
+            ..LaunchProfile::default()
+        }
+    }
+
+    fn ledger_with_profile(allocations: BTreeMap<String, u64>, profile_id: &str) -> Ledger {
+        Ledger::new_with_genesis_burns_and_profile(allocations, Vec::new(), 1, profile(profile_id))
+            .unwrap()
+    }
 
     #[test]
     fn forks_may_rewrite_six_blocks_but_not_seven() {
@@ -336,5 +360,175 @@ mod tests {
         assert!(!fork_rewrites_finalized_history(100, 94));
         assert!(fork_rewrites_finalized_history(100, 93));
         assert!(!fork_rewrites_finalized_history(5, 0));
+    }
+
+    #[test]
+    fn transfer_and_burn_signatures_cannot_replay_between_chain_ids() {
+        let alice = Wallet::from_seed("chain-replay-alice");
+        let bob = Wallet::from_seed("chain-replay-bob");
+        let allocations = BTreeMap::from([(alice.address().to_string(), 100)]);
+        let chain_ids = [
+            "iuna-mainnet-candidate",
+            "iuna-mainnet-v1",
+            "iuna-testnet-v1",
+        ];
+
+        for foreign_chain_id in &chain_ids[1..] {
+            let source = ledger_with_profile(allocations.clone(), chain_ids[0]);
+            let mut foreign = ledger_with_profile(allocations.clone(), foreign_chain_id);
+            assert_eq!(source.genesis_hash(), foreign.genesis_hash());
+            assert_ne!(source.utxos, foreign.utxos);
+
+            let transfer = source.build_transfer(&alice, bob.address(), 10, 1).unwrap();
+            let transfer_error = foreign.submit_transaction(transfer).unwrap_err();
+            assert!(
+                transfer_error
+                    .to_string()
+                    .contains("transaction signature is invalid")
+            );
+
+            let burn = source.build_burn(&alice, 10, 1).unwrap();
+            let burn_error = foreign.submit_transaction(burn).unwrap_err();
+            assert!(
+                burn_error
+                    .to_string()
+                    .contains("transaction signature is invalid")
+            );
+        }
+    }
+
+    #[test]
+    fn signatures_cannot_replay_between_distinct_genesis_hashes() {
+        let alice = Wallet::from_seed("genesis-replay-alice");
+        let bob = Wallet::from_seed("genesis-replay-bob");
+        let base_allocations = BTreeMap::from([(alice.address().to_string(), 100)]);
+        let other_allocations = BTreeMap::from([
+            (alice.address().to_string(), 100),
+            (bob.address().to_string(), 1),
+        ]);
+        let source = ledger_with_profile(base_allocations, "same-chain-id");
+        let mut foreign = ledger_with_profile(other_allocations, "same-chain-id");
+        assert_ne!(source.genesis_hash(), foreign.genesis_hash());
+
+        let transfer = source.build_transfer(&alice, bob.address(), 10, 1).unwrap();
+        let error = foreign.submit_transaction(transfer).unwrap_err();
+
+        assert!(
+            error
+                .to_string()
+                .contains("transaction signature is invalid")
+        );
+    }
+
+    #[test]
+    fn mine_proofs_cannot_replay_between_chain_ids() {
+        let miner = Wallet::from_seed("mine-replay-miner");
+        let allocations = BTreeMap::from([(miner.address().to_string(), 100)]);
+        let source = ledger_with_profile(allocations.clone(), "mine-chain-a");
+        let mut foreign = ledger_with_profile(allocations, "mine-chain-b");
+        assert_eq!(source.genesis_hash(), foreign.genesis_hash());
+
+        let mine = source.build_mine(miner.address()).unwrap();
+        let error = foreign.submit_transaction(mine).unwrap_err();
+
+        assert!(
+            error
+                .to_string()
+                .contains("mine transaction proof hash is invalid")
+        );
+    }
+
+    #[test]
+    fn stratum_mine_proofs_cannot_replay_between_chain_ids() {
+        let miner = Wallet::from_seed("stratum-replay-miner");
+        let allocations = BTreeMap::from([(miner.address().to_string(), 100)]);
+        let source = ledger_with_profile(allocations.clone(), "stratum-chain-a");
+        let mut foreign = ledger_with_profile(allocations, "stratum-chain-b");
+        let template = source
+            .stratum_mine_template(
+                miner.address(),
+                source.genesis_hash(),
+                7,
+                source.current_mine_difficulty_bits(),
+            )
+            .unwrap();
+        let mine = source
+            .build_stratum_mine(
+                template,
+                StratumMineShare {
+                    extranonce2: [0; 4],
+                    header_nonce: [0; 4],
+                },
+            )
+            .unwrap();
+
+        let error = foreign.submit_transaction(mine).unwrap_err();
+
+        assert!(error.to_string().contains("proof header is invalid"));
+    }
+
+    #[test]
+    fn transaction_hex_casing_cannot_be_malleated_after_signing() {
+        let alice = Wallet::from_seed("hex-malleability-alice");
+        let bob = Wallet::from_seed("hex-malleability-bob");
+        let ledger = ledger_with_profile(
+            BTreeMap::from([(alice.address().to_string(), 100)]),
+            "hex-malleability-chain",
+        );
+        let transaction = ledger.build_transfer(&alice, bob.address(), 10, 1).unwrap();
+
+        let reject = |mutated| {
+            let error = ledger
+                .clone()
+                .submit_transaction(mutated)
+                .expect_err("noncanonical transaction hex must be rejected");
+            assert!(
+                format!("{error:#}").contains("canonical lowercase"),
+                "unexpected rejection: {error:#}"
+            );
+        };
+
+        let mut recipient = transaction.clone();
+        let Transaction::Transfer { outputs, .. } = &mut recipient else {
+            unreachable!()
+        };
+        outputs[0].address.make_ascii_uppercase();
+        reject(recipient);
+
+        let mut change = transaction.clone();
+        let Transaction::Transfer { outputs, .. } = &mut change else {
+            unreachable!()
+        };
+        outputs[1].address.make_ascii_uppercase();
+        reject(change);
+
+        let mut owner = transaction.clone();
+        let Transaction::Transfer { inputs, .. } = &mut owner else {
+            unreachable!()
+        };
+        inputs[0].owner.make_ascii_uppercase();
+        reject(owner);
+
+        let mut outpoint = transaction.clone();
+        let Transaction::Transfer { inputs, .. } = &mut outpoint else {
+            unreachable!()
+        };
+        inputs[0].outpoint.txid.make_ascii_uppercase();
+        reject(outpoint);
+
+        let mut signature = transaction;
+        let Transaction::Transfer {
+            inputs,
+            signature: transaction_signature,
+            ..
+        } = &mut signature
+        else {
+            unreachable!()
+        };
+        transaction_signature.make_ascii_uppercase();
+        for input in inputs {
+            input.signature.make_ascii_uppercase();
+        }
+        reject(signature);
     }
 }

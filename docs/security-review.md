@@ -53,6 +53,13 @@ Primary code:
 - `src/domain/selection.rs`
 - `src/domain/validation.rs`
 
+Transaction signing uses binary format v1 and commits the launch-profile chain ID
+and local genesis hash for transfers, burns, native mine actions, and Stratum mine
+actions. Genesis allocation outpoints are independently scoped to the chain ID.
+Fixed vectors and replay tests cover candidate/mainnet/testnet IDs, distinct
+genesis hashes, legacy text signatures, identical allocations, and hexadecimal
+casing malleability across validation and compact persistence.
+
 Evidence already in the tree:
 
 - focused adversarial tests for zero-fee burns, bundle import ordering,

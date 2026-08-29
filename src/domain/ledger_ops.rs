@@ -270,8 +270,9 @@ pub(super) fn vdf_content_commitment(
 pub(super) fn apply_transaction(
     transaction: &Transaction,
     utxos: &mut BTreeMap<OutPoint, TxOutput>,
+    signing_domain: &super::TransactionSigningDomain,
 ) -> Result<()> {
-    transaction.verify_signature()?;
+    transaction.verify_signature(signing_domain)?;
     match transaction {
         Transaction::Mine { recipient, .. } => {
             let output = TxOutput {
@@ -372,11 +373,12 @@ pub(super) fn spend_inputs(
 pub(super) fn apply_spendable_pending_transaction(
     transaction: &Transaction,
     utxos: &mut BTreeMap<OutPoint, TxOutput>,
+    signing_domain: &super::TransactionSigningDomain,
 ) -> Result<()> {
     if matches!(transaction, Transaction::Mine { .. }) {
         bail!("pending mine outputs are not spendable");
     }
-    transaction.verify_signature()?;
+    transaction.verify_signature(signing_domain)?;
     ensure_single_input_owner(transaction)?;
     let input_total = transaction_input_total(transaction, utxos)?;
     let outputs = transaction.outputs();
@@ -612,6 +614,7 @@ pub(super) fn best_selectable_transaction_index(
     transactions: &[Transaction],
     utxos: &BTreeMap<OutPoint, TxOutput>,
     required_kind: Option<TransactionKind>,
+    signing_domain: &super::TransactionSigningDomain,
 ) -> Option<usize> {
     transactions
         .iter()
@@ -622,7 +625,7 @@ pub(super) fn best_selectable_transaction_index(
         })
         .filter(|(_, tx)| {
             let mut utxos = utxos.clone();
-            apply_transaction(tx, &mut utxos).is_ok()
+            apply_transaction(tx, &mut utxos, signing_domain).is_ok()
         })
         .max_by(|(_, left), (_, right)| {
             fee_rate_key(left)
@@ -638,6 +641,7 @@ pub(super) fn best_selectable_burn_from_index(
     transactions: &[Transaction],
     utxos: &BTreeMap<OutPoint, TxOutput>,
     owner: &str,
+    signing_domain: &super::TransactionSigningDomain,
 ) -> Option<usize> {
     transactions
         .iter()
@@ -645,7 +649,7 @@ pub(super) fn best_selectable_burn_from_index(
         .filter(|(_, tx)| tx.is_burn() && tx.sender() == owner)
         .filter(|(_, tx)| {
             let mut utxos = utxos.clone();
-            apply_transaction(tx, &mut utxos).is_ok()
+            apply_transaction(tx, &mut utxos, signing_domain).is_ok()
         })
         .max_by(|(_, left), (_, right)| {
             fee_rate_key(left)

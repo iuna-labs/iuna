@@ -29,6 +29,7 @@ pub(crate) const MINE_ANCHOR_LIMIT_REACHED: &str = "mine transaction anchor limi
 impl Ledger {
     pub(super) fn valid_pending_transactions(&self) -> Vec<Transaction> {
         let mut utxos = self.utxos.clone();
+        let signing_domain = self.transaction_signing_domain();
         let mut valid = Vec::new();
         let mut remaining = self.pending.iter().collect::<Vec<_>>();
         let mut selected_mine_anchor_counts = BTreeMap::new();
@@ -52,7 +53,7 @@ impl Ledger {
                 }
                 if transaction_inputs_available(tx, &utxos)
                     && self.validate_transaction_terms(tx).is_ok()
-                    && apply_transaction(tx, &mut utxos).is_ok()
+                    && apply_transaction(tx, &mut utxos, &signing_domain).is_ok()
                 {
                     if let Some(anchor) = mine_anchor(tx) {
                         selected_mine_anchor_counts
@@ -110,6 +111,7 @@ impl Ledger {
         burn_bundle_section: &BurnBundleSection,
     ) -> Result<BlockSelection> {
         let block_context = compact_block_context(self);
+        let signing_domain = self.transaction_signing_domain();
         let mut utxos = self.utxos.clone();
         let mut remaining = self.valid_pending_transactions();
         let mut selected = Vec::new();
@@ -129,9 +131,14 @@ impl Ledger {
                     .with_context(|| format!("required burn {signature} is not pending"))?,
             )
         } else if let Some(owner) = required_burn_owner {
-            best_selectable_burn_from_index(&remaining, &utxos, owner)
+            best_selectable_burn_from_index(&remaining, &utxos, owner, &signing_domain)
         } else {
-            best_selectable_transaction_index(&remaining, &utxos, Some(TransactionKind::Burn))
+            best_selectable_transaction_index(
+                &remaining,
+                &utxos,
+                Some(TransactionKind::Burn),
+                &signing_domain,
+            )
         };
         if let Some(index) = anchor_index {
             let tx = remaining.remove(index);
@@ -158,7 +165,8 @@ impl Ledger {
                 bail!("attested burns do not fit within the block transaction count limit");
             }
             let signature = tx.signature().to_string();
-            apply_transaction(&tx, &mut utxos).context("attested burn is not spendable")?;
+            apply_transaction(&tx, &mut utxos, &signing_domain)
+                .context("attested burn is not spendable")?;
             selected.push(tx);
             selected_required_burn_signatures.insert(signature);
         }
@@ -184,7 +192,9 @@ impl Ledger {
         }
 
         while selected.len() < self.launch_profile.max_block_transactions {
-            let Some(index) = best_selectable_transaction_index(&remaining, &utxos, None) else {
+            let Some(index) =
+                best_selectable_transaction_index(&remaining, &utxos, None, &signing_domain)
+            else {
                 break;
             };
             let tx = remaining.remove(index);
@@ -199,7 +209,7 @@ impl Ledger {
                 burn_bundle_section,
             )? <= self.launch_profile.max_block_bytes
             {
-                apply_transaction(&tx, &mut utxos)?;
+                apply_transaction(&tx, &mut utxos, &signing_domain)?;
                 selected.push(tx);
             }
         }
@@ -226,7 +236,8 @@ impl Ledger {
         if selected.len() >= self.launch_profile.max_block_transactions {
             bail!("required block anchor burn does not fit within the transaction count limit");
         }
-        apply_transaction(&tx, utxos).context("required block anchor burn is not spendable")?;
+        apply_transaction(&tx, utxos, &self.transaction_signing_domain())
+            .context("required block anchor burn is not spendable")?;
         selected.push(tx);
         Ok(())
     }
@@ -303,7 +314,7 @@ impl Ledger {
         )?;
         self.validate_mine_anchor_available(transaction)?;
         let mut utxos = self.utxos_after_spendable_pending()?;
-        apply_transaction(transaction, &mut utxos)
+        apply_transaction(transaction, &mut utxos, &self.transaction_signing_domain())
     }
 
     pub(super) fn validate_mine_anchor_available(&self, transaction: &Transaction) -> Result<()> {
@@ -332,6 +343,7 @@ impl Ledger {
     }
 
     pub(super) fn promote_orphan_transactions(&mut self) -> Result<()> {
+        let signing_domain = self.transaction_signing_domain();
         loop {
             if self.pending.len() >= MAX_PENDING_TRANSACTIONS {
                 return Ok(());
@@ -346,7 +358,7 @@ impl Ledger {
                     continue;
                 }
                 if self.validate_new_transaction(transaction).is_ok()
-                    && apply_transaction(transaction, &mut utxos).is_ok()
+                    && apply_transaction(transaction, &mut utxos, &signing_domain).is_ok()
                 {
                     let transaction_bytes = pending_pool_item_bytes(transaction)?;
                     let promoted_bytes = self
@@ -436,19 +448,21 @@ impl Ledger {
 
     pub(super) fn utxos_after_valid_pending(&self) -> Result<BTreeMap<OutPoint, TxOutput>> {
         let mut utxos = self.utxos.clone();
+        let signing_domain = self.transaction_signing_domain();
         for pending in self.valid_pending_transactions() {
-            apply_transaction(&pending, &mut utxos)?;
+            apply_transaction(&pending, &mut utxos, &signing_domain)?;
         }
         Ok(utxos)
     }
 
     pub(super) fn utxos_after_spendable_pending(&self) -> Result<BTreeMap<OutPoint, TxOutput>> {
         let mut utxos = self.utxos.clone();
+        let signing_domain = self.transaction_signing_domain();
         for pending in self.valid_pending_transactions() {
             if matches!(pending, Transaction::Mine { .. }) {
                 continue;
             }
-            if apply_spendable_pending_transaction(&pending, &mut utxos).is_err() {
+            if apply_spendable_pending_transaction(&pending, &mut utxos, &signing_domain).is_err() {
                 continue;
             }
         }

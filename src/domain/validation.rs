@@ -2,37 +2,54 @@ use anyhow::{Context, Result, bail};
 
 use super::{
     HASH_BYTES, PUBLIC_KEY_BYTES, SIGNATURE_BYTES, Transaction, TxInput, TxOutput, decode_hex,
-    decode_hex_array, stratum::STRATUM_MINE_HEADER_BYTES,
+    hex_encode, stratum::STRATUM_MINE_HEADER_BYTES,
 };
 
 pub fn validate_address(address: &str, label: &str) -> Result<()> {
-    decode_hex_array::<PUBLIC_KEY_BYTES>(address)
+    decode_canonical_hex_array::<PUBLIC_KEY_BYTES>(address)
         .with_context(|| format!("invalid {label} address"))?;
     Ok(())
 }
 
 pub(super) fn validate_hash(hash: &str, label: &str) -> Result<()> {
-    decode_hex_array::<HASH_BYTES>(hash).with_context(|| format!("invalid {label}"))?;
+    decode_canonical_hex_array::<HASH_BYTES>(hash).with_context(|| format!("invalid {label}"))?;
     Ok(())
 }
 
 pub(super) fn validate_signature(signature: &str, label: &str) -> Result<()> {
-    decode_hex_array::<SIGNATURE_BYTES>(signature).with_context(|| format!("invalid {label}"))?;
+    decode_canonical_hex_array::<SIGNATURE_BYTES>(signature)
+        .with_context(|| format!("invalid {label}"))?;
     Ok(())
 }
 
 pub(super) fn validate_stratum_header(header: &str) -> Result<()> {
-    decode_hex_array::<STRATUM_MINE_HEADER_BYTES>(header)
+    decode_canonical_hex_array::<STRATUM_MINE_HEADER_BYTES>(header)
         .context("invalid mine transaction proof header")?;
     Ok(())
 }
 
 pub(super) fn validate_protocol_id(value: &str, label: &str) -> Result<()> {
-    let bytes = decode_hex(value).with_context(|| format!("invalid {label}"))?;
+    let bytes = decode_canonical_hex(value).with_context(|| format!("invalid {label}"))?;
     match bytes.len() {
         HASH_BYTES | SIGNATURE_BYTES => Ok(()),
         length => bail!("invalid {label}: expected 32 or 64 bytes, got {length}"),
     }
+}
+
+pub(super) fn decode_canonical_hex(value: &str) -> Result<Vec<u8>> {
+    let bytes = decode_hex(value)?;
+    if hex_encode(&bytes) != value {
+        bail!("hex must use canonical lowercase encoding");
+    }
+    Ok(bytes)
+}
+
+pub(super) fn decode_canonical_hex_array<const N: usize>(value: &str) -> Result<[u8; N]> {
+    let bytes = decode_canonical_hex(value)?;
+    let len = bytes.len();
+    bytes
+        .try_into()
+        .map_err(|_| anyhow::anyhow!("expected {N} hex bytes, got {len}"))
 }
 
 pub(super) fn canonical_transaction_size_bytes(transaction: &Transaction) -> usize {
@@ -170,6 +187,15 @@ mod tests {
         assert!(validate_signature("zz", "test").is_err());
         assert!(validate_stratum_header(&"0".repeat(158)).is_err());
         assert!(validate_protocol_id(&"0".repeat(96), "test").is_err());
+    }
+
+    #[test]
+    fn validators_reject_noncanonical_uppercase_hex() {
+        assert!(validate_address(&"AB".repeat(32), "test").is_err());
+        assert!(validate_hash(&"AB".repeat(32), "test").is_err());
+        assert!(validate_signature(&"AB".repeat(64), "test").is_err());
+        assert!(validate_stratum_header(&"AB".repeat(80)).is_err());
+        assert!(validate_protocol_id(&"AB".repeat(32), "test").is_err());
     }
 
     #[test]

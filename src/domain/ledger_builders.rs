@@ -43,7 +43,7 @@ impl Ledger {
             outputs,
             fee,
         }
-        .sign(wallet);
+        .sign(wallet, &self.transaction_signing_domain())?;
         self.validate_new_transaction(&transaction)?;
         Ok(transaction)
     }
@@ -81,7 +81,7 @@ impl Ledger {
             outputs,
             fee,
         }
-        .sign(wallet);
+        .sign(wallet, &self.transaction_signing_domain())?;
         self.validate_new_transaction(&transaction)?;
         Ok(transaction)
     }
@@ -137,7 +137,7 @@ impl Ledger {
             amount,
             fee,
         }
-        .sign(wallet);
+        .sign(wallet, &self.transaction_signing_domain())?;
         self.validate_new_transaction(&transaction)?;
         Ok(transaction)
     }
@@ -148,8 +148,16 @@ impl Ledger {
         let anchor = self.tip().hash.clone();
         let salt = 1;
         let difficulty_bits = self.current_mine_difficulty_bits();
+        let signing_domain = self.transaction_signing_domain();
         for nonce in 0..u64::MAX {
-            let signature = mine_signature(&recipient, &anchor, salt, nonce, difficulty_bits);
+            let signature = mine_signature(
+                &signing_domain,
+                &recipient,
+                &anchor,
+                salt,
+                nonce,
+                difficulty_bits,
+            )?;
             if !hash_meets_difficulty(&signature, difficulty_bits) {
                 continue;
             }
@@ -182,10 +190,18 @@ impl Ledger {
         validate_address(&recipient, "mine recipient")?;
         let anchor = self.tip().hash.clone();
         let difficulty_bits = self.current_mine_difficulty_bits();
+        let signing_domain = self.transaction_signing_domain();
         let mut attempts = 0_u64;
         let mut nonce = start_nonce;
         while attempts < max_attempts {
-            let signature = mine_signature(&recipient, &anchor, salt, nonce, difficulty_bits);
+            let signature = mine_signature(
+                &signing_domain,
+                &recipient,
+                &anchor,
+                salt,
+                nonce,
+                difficulty_bits,
+            )?;
             attempts = attempts.saturating_add(1);
             let next_nonce = nonce.checked_add(1).unwrap_or(0);
             if hash_meets_difficulty(&signature, difficulty_bits) {
@@ -223,7 +239,13 @@ impl Ledger {
         salt: u64,
         difficulty_bits: u32,
     ) -> Result<StratumMineTemplate> {
-        stratum_mine_template(recipient, anchor.as_ref(), salt, difficulty_bits)
+        stratum_mine_template(
+            &self.transaction_signing_domain(),
+            recipient,
+            anchor.as_ref(),
+            salt,
+            difficulty_bits,
+        )
     }
 
     pub fn build_stratum_mine(
@@ -233,6 +255,7 @@ impl Ledger {
     ) -> Result<Transaction> {
         let nonce = super::stratum::pack_stratum_nonce(share.extranonce2, share.header_nonce);
         let header = stratum_mine_header_bytes(
+            &self.transaction_signing_domain(),
             &template.recipient,
             &template.anchor,
             template.salt,
