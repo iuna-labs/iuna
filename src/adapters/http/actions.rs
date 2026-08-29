@@ -587,6 +587,8 @@ mod tests {
             },
             auth_sessions: Arc::new(Mutex::new(BTreeMap::<String, AuthSession>::new())),
             auth_backoff: Arc::new(Mutex::new(BTreeMap::<String, AuthBackoff>::new())),
+            setup_capability: Arc::new(Mutex::new(Some("test-setup-capability".to_string()))),
+            management_port: 9444,
         };
 
         reset_local_chain(&state, CHAIN_RESET_CONFIRMATION)

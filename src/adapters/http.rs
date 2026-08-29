@@ -84,6 +84,8 @@ const EXPLORER_PAGE_LIMIT: usize = 20;
 const DATASET_LIMIT: usize = 1_000;
 const DATASET_PAGE_LIMIT: usize = 25;
 const AUTH_COOKIE_NAME: &str = "iuna_session";
+const SETUP_COOKIE_NAME: &str = "iuna_setup";
+const SETUP_COOKIE_TTL_SECS: u64 = 10 * 60;
 const AUTH_SESSION_TTL_MS: u64 = 12 * 60 * 60 * 1_000;
 const AUTH_MAX_FAILED_ATTEMPTS: u32 = 5;
 const AUTH_LOCKOUT_MS: u64 = 60 * 1_000;
@@ -107,6 +109,7 @@ pub async fn serve(
     options: ServeOptions,
 ) -> Result<()> {
     let addr = options.addr;
+    let setup_capability = auth::random_hex(32)?;
     let state = HttpState {
         node,
         peers,
@@ -119,6 +122,8 @@ pub async fn serve(
         stratum: options.stratum,
         auth_sessions: Arc::new(Mutex::new(BTreeMap::new())),
         auth_backoff: Arc::new(Mutex::new(BTreeMap::new())),
+        setup_capability: Arc::new(Mutex::new(Some(setup_capability))),
+        management_port: addr.port(),
     };
     let app = Router::new()
         .route("/", get(index))

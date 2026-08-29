@@ -23,6 +23,8 @@ pub(super) struct HttpState {
     pub(super) stratum: StratumStatus,
     pub(super) auth_sessions: Arc<Mutex<BTreeMap<String, AuthSession>>>,
     pub(super) auth_backoff: Arc<Mutex<BTreeMap<String, AuthBackoff>>>,
+    pub(super) setup_capability: Arc<Mutex<Option<String>>>,
+    pub(super) management_port: u16,
 }
 
 #[derive(Clone)]

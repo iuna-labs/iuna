@@ -3,8 +3,6 @@
 This document tracks the pre-mainnet security review. It is a review ledger, not
 a claim that mainnet is safe. Keep the roadmap security-review checkbox open
 until every launch-blocking item below is resolved or explicitly accepted.
-Actionable remediation and final go/no-go criteria are tracked in
-`docs/mainnet-security-checklist.md`.
 
 ## Review Scope
 
@@ -220,10 +218,12 @@ see which revision was tested.
   `0600` temporary files on Unix. Management UI password hashes also use
   PBKDF2-SHA256 with bounded iteration counts, login backoff, session expiry,
   `HttpOnly`/`SameSite=Strict` cookies, CSRF same-origin checks, and trusted
-  forwarded headers only from loopback proxies. Residual accepted risk for the
-  candidate: PBKDF2 is CPU-hard rather than memory-hard, so operators must use
-  strong unique passwords and keep the management UI local or otherwise
-  protected.
+  forwarded headers only from loopback proxies. First-run password setup also
+  requires an exact loopback Host/Origin/port match and a cryptographically
+  random, one-time `HttpOnly` setup capability issued only to the local
+  management page. Residual accepted risk for the candidate: PBKDF2 is CPU-hard
+  rather than memory-hard, so operators must use strong unique passwords and
+  keep the management UI local or otherwise protected.
 - Public exposure: verify bootnodes expose only the intended P2P and optional
   Stratum ports, and that the management UI remains bound to a local or
   otherwise protected address.

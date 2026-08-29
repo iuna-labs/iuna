@@ -1,7 +1,10 @@
-use std::net::SocketAddr;
+use std::{
+    net::{IpAddr, SocketAddr},
+    str::FromStr,
+};
 
 use anyhow::{Context, Result, bail};
-use axum::http::{HeaderMap, Method, header};
+use axum::http::{HeaderMap, Method, Uri, header, uri::Authority};
 
 use crate::{
     adapters::{config_store, wallet_store},
@@ -10,7 +13,7 @@ use crate::{
 
 use super::{
     AUTH_COOKIE_NAME, AUTH_LOCKOUT_MS, AUTH_MAX_FAILED_ATTEMPTS, AUTH_SESSION_TTL_MS, AuthSession,
-    HttpState, UNKNOWN_CLIENT_KEY,
+    HttpState, SETUP_COOKIE_NAME, SETUP_COOKIE_TTL_SECS, UNKNOWN_CLIENT_KEY,
     auth::{hash_password, random_hex, session_token_hash, validate_password, verify_password},
     now_ms,
 };
@@ -37,6 +40,64 @@ pub(super) fn same_origin_request(headers: &HeaderMap, socket_addr: Option<Socke
         return false;
     };
     normalize_host(&origin_host) == normalize_host(&request_host)
+}
+
+pub(super) fn local_setup_page_request(
+    headers: &HeaderMap,
+    socket_addr: Option<SocketAddr>,
+    management_port: u16,
+) -> bool {
+    socket_addr.is_some_and(|addr| addr.ip().is_loopback())
+        && raw_request_local_authority(headers, management_port).is_some()
+}
+
+pub(super) fn local_setup_request(
+    headers: &HeaderMap,
+    socket_addr: Option<SocketAddr>,
+    management_port: u16,
+) -> bool {
+    if !local_setup_page_request(headers, socket_addr, management_port) {
+        return false;
+    }
+    let Some(request_authority) = raw_request_local_authority(headers, management_port) else {
+        return false;
+    };
+    let Some(origin_authority) = local_origin_authority(headers, management_port) else {
+        return false;
+    };
+    request_authority == origin_authority
+}
+
+fn raw_request_local_authority(headers: &HeaderMap, management_port: u16) -> Option<(String, u16)> {
+    let host = header_string(headers, "host")?;
+    parse_local_authority(&host, management_port)
+}
+
+fn local_origin_authority(headers: &HeaderMap, management_port: u16) -> Option<(String, u16)> {
+    let value = header_string(headers, "origin").or_else(|| header_string(headers, "referer"))?;
+    let uri = Uri::from_str(&value).ok()?;
+    if uri.scheme_str() != Some("http") {
+        return None;
+    }
+    parse_local_authority(uri.authority()?.as_str(), management_port)
+}
+
+fn parse_local_authority(value: &str, management_port: u16) -> Option<(String, u16)> {
+    let authority = Authority::from_str(value.trim()).ok()?;
+    let port = authority.port_u16()?;
+    if port != management_port {
+        return None;
+    }
+    let host = authority
+        .host()
+        .trim_matches(['[', ']'])
+        .trim_end_matches('.')
+        .to_ascii_lowercase();
+    if host == "localhost" {
+        return Some((host, port));
+    }
+    let ip = IpAddr::from_str(&host).ok()?;
+    ip.is_loopback().then(|| (ip.to_string(), port))
 }
 
 fn request_host(headers: &HeaderMap, socket_addr: Option<SocketAddr>) -> Option<String> {
@@ -91,6 +152,36 @@ pub(super) async fn request_is_authenticated(state: &HttpState, headers: &Header
     sessions
         .get(&token_hash)
         .is_some_and(|session| session.expires_at > now)
+}
+
+pub(super) async fn setup_capability_cookie(state: &HttpState) -> Option<String> {
+    state.setup_capability.lock().await.as_ref().map(|token| {
+        format!(
+            "{SETUP_COOKIE_NAME}={token}; Path=/api/auth/setup; HttpOnly; SameSite=Strict; Max-Age={SETUP_COOKIE_TTL_SECS}"
+        )
+    })
+}
+
+pub(super) async fn validate_setup_capability(
+    state: &HttpState,
+    headers: &HeaderMap,
+) -> Result<()> {
+    let supplied = named_cookie(headers, SETUP_COOKIE_NAME)
+        .context("local password setup capability is required")?;
+    let expected = state
+        .setup_capability
+        .lock()
+        .await
+        .clone()
+        .context("local password setup capability is no longer available")?;
+    if session_token_hash(supplied) != session_token_hash(&expected) {
+        bail!("local password setup capability is invalid");
+    }
+    Ok(())
+}
+
+pub(super) async fn consume_setup_capability(state: &HttpState) {
+    state.setup_capability.lock().await.take();
 }
 
 pub(super) async fn wallet_password_for_request(
@@ -296,10 +387,14 @@ async fn create_session_cookie(state: &HttpState, password: &str) -> Result<Stri
 }
 
 pub(super) fn auth_cookie(headers: &HeaderMap) -> Option<&str> {
+    named_cookie(headers, AUTH_COOKIE_NAME)
+}
+
+fn named_cookie<'a>(headers: &'a HeaderMap, expected_name: &str) -> Option<&'a str> {
     let cookie = headers.get(header::COOKIE)?.to_str().ok()?;
     cookie.split(';').find_map(|part| {
         let (name, value) = part.trim().split_once('=')?;
-        (name == AUTH_COOKIE_NAME).then_some(value)
+        (name == expected_name).then_some(value)
     })
 }
 
@@ -307,7 +402,7 @@ pub(super) fn auth_cookie(headers: &HeaderMap) -> Option<&str> {
 mod tests {
     use std::{
         collections::BTreeMap,
-        net::{IpAddr, Ipv4Addr, SocketAddr},
+        net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr},
         sync::Arc,
     };
 
@@ -326,8 +421,9 @@ mod tests {
     use super::super::state::{AuthSession, HttpState};
     use super::{AUTH_COOKIE_NAME, now_ms};
     use super::{
-        auth_client_key, check_auth_backoff, record_auth_failure, request_is_authenticated,
-        same_origin_request, session_token_hash,
+        auth_client_key, check_auth_backoff, consume_setup_capability, local_setup_page_request,
+        local_setup_request, record_auth_failure, request_is_authenticated, same_origin_request,
+        session_token_hash, setup_capability_cookie, validate_setup_capability,
     };
 
     fn headers(values: &[(&'static str, &'static str)]) -> HeaderMap {
@@ -340,6 +436,10 @@ mod tests {
 
     fn socket(ip: [u8; 4]) -> SocketAddr {
         SocketAddr::new(IpAddr::V4(Ipv4Addr::from(ip)), 9444)
+    }
+
+    fn ipv6_loopback_socket() -> SocketAddr {
+        SocketAddr::new(IpAddr::V6(Ipv6Addr::LOCALHOST), 9444)
     }
 
     async fn test_state() -> HttpState {
@@ -380,6 +480,8 @@ mod tests {
             },
             auth_sessions: Arc::new(Mutex::new(BTreeMap::new())),
             auth_backoff: Arc::new(Mutex::new(BTreeMap::new())),
+            setup_capability: Arc::new(Mutex::new(Some("test-setup-capability".to_string()))),
+            management_port: 9444,
         }
     }
 
@@ -410,6 +512,132 @@ mod tests {
             &headers(&[("host", "127.0.0.1:9444")]),
             None
         ));
+    }
+
+    #[test]
+    fn local_setup_accepts_only_exact_loopback_management_origins() {
+        assert!(local_setup_page_request(
+            &headers(&[("host", "127.0.0.1:9444")]),
+            Some(socket([127, 0, 0, 1])),
+            9444
+        ));
+        assert!(local_setup_request(
+            &headers(&[
+                ("host", "127.0.0.1:9444"),
+                ("origin", "http://127.0.0.1:9444")
+            ]),
+            Some(socket([127, 0, 0, 1])),
+            9444
+        ));
+        assert!(local_setup_request(
+            &headers(&[
+                ("host", "localhost:9444"),
+                ("referer", "http://localhost:9444/setup")
+            ]),
+            Some(socket([127, 0, 0, 1])),
+            9444
+        ));
+        assert!(local_setup_request(
+            &headers(&[("host", "[::1]:9444"), ("origin", "http://[::1]:9444")]),
+            Some(ipv6_loopback_socket()),
+            9444
+        ));
+    }
+
+    #[test]
+    fn local_setup_rejects_dns_rebinding_and_remote_requests() {
+        assert!(!local_setup_request(
+            &headers(&[
+                ("host", "rebound.evil:9444"),
+                ("origin", "http://rebound.evil:9444")
+            ]),
+            Some(socket([127, 0, 0, 1])),
+            9444
+        ));
+        assert!(!local_setup_request(
+            &headers(&[
+                ("host", "127.0.0.1:9444"),
+                ("origin", "http://localhost:9444")
+            ]),
+            Some(socket([127, 0, 0, 1])),
+            9444
+        ));
+        assert!(!local_setup_request(
+            &headers(&[
+                ("host", "127.0.0.1:9444"),
+                ("origin", "https://127.0.0.1:9444")
+            ]),
+            Some(socket([127, 0, 0, 1])),
+            9444
+        ));
+        assert!(!local_setup_request(
+            &headers(&[
+                ("host", "127.0.0.1:9444"),
+                ("origin", "http://127.0.0.1:9444")
+            ]),
+            Some(socket([203, 0, 113, 10])),
+            9444
+        ));
+        assert!(!local_setup_request(
+            &headers(&[
+                ("host", "127.0.0.1:9555"),
+                ("origin", "http://127.0.0.1:9555")
+            ]),
+            Some(socket([127, 0, 0, 1])),
+            9444
+        ));
+        assert!(!local_setup_request(
+            &headers(&[
+                ("host", "rebound.evil:9444"),
+                ("x-forwarded-host", "127.0.0.1:9444"),
+                ("origin", "http://127.0.0.1:9444")
+            ]),
+            Some(socket([127, 0, 0, 1])),
+            9444
+        ));
+    }
+
+    #[tokio::test]
+    async fn setup_capability_cookie_is_required_and_one_time() {
+        let state = test_state().await;
+        let cookie = setup_capability_cookie(&state).await.unwrap();
+        assert!(cookie.starts_with("iuna_setup=test-setup-capability;"));
+        assert!(cookie.contains("Path=/api/auth/setup"));
+        assert!(cookie.contains("HttpOnly"));
+        assert!(cookie.contains("SameSite=Strict"));
+
+        assert!(
+            validate_setup_capability(&state, &HeaderMap::new())
+                .await
+                .is_err()
+        );
+        assert!(
+            validate_setup_capability(
+                &state,
+                &headers(&[("cookie", "iuna_setup=wrong-capability")])
+            )
+            .await
+            .is_err()
+        );
+        assert!(
+            validate_setup_capability(
+                &state,
+                &headers(&[("cookie", "other=value; iuna_setup=test-setup-capability")])
+            )
+            .await
+            .is_ok()
+        );
+
+        consume_setup_capability(&state).await;
+        assert!(
+            validate_setup_capability(
+                &state,
+                &headers(&[("cookie", "iuna_setup=test-setup-capability")])
+            )
+            .await
+            .is_err()
+        );
+        assert!(setup_capability_cookie(&state).await.is_none());
     }
 
     #[test]
