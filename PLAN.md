@@ -111,9 +111,10 @@ Acceptance:
 
 ## 5. Eclipse And Partition Chaos
 
-Status: started with deterministic tests for delayed burn-bundle import across
-partitions, late burn gossip deduplication after reconnect, and rejecting a
-shorter attacker-only fork before recovering to a better majority tip.
+Status: objective finality activates at height `1000`; deterministic tests cover
+delayed burn-bundle import, late burn gossip deduplication, rejecting a shorter
+attacker-only fork, choosing a higher certified checkpoint even when its tip is
+shorter, and deterministic recovery from conflicting same-height certificates.
 
 Goal: ensure isolated or stale nodes reject bad histories and recover cleanly.
 
@@ -127,7 +128,9 @@ Scenarios:
 Acceptance:
 
 - invalid chains are not adopted;
-- valid longer/better chains inside finality are adopted;
+- before height `1000`, valid longer/better chains inside legacy finality are adopted;
+- from height `1000`, the highest valid objective checkpoint is adopted without
+  a six-block recovery ceiling;
 - old nodes catch up without manual database deletion.
 
 ## 6. Crash Consistency

@@ -13,9 +13,10 @@ use super::ticket::{
 };
 use super::transaction::transaction_inputs_available;
 use super::{
-    Amount, BLOCK_MEDIAN_TIME_PAST_WINDOW, Block, BurnBundleSection, FinalizerMode, Ledger,
-    MAX_BLOCK_TIMESTAMP_FUTURE_DRIFT_MS, Transaction, insert_output_with_lineage,
-    output_lineage_root_for_transaction, spend_inputs_with_lineage, unix_now_ms, verify_vdf,
+    Amount, BLOCK_MEDIAN_TIME_PAST_WINDOW, Block, BurnBundleSection, FinalityCheckpoint,
+    FinalizerMode, Ledger, MAX_BLOCK_TIMESTAMP_FUTURE_DRIFT_MS, Transaction,
+    insert_output_with_lineage, output_lineage_root_for_transaction, spend_inputs_with_lineage,
+    unix_now_ms, verify_vdf,
 };
 
 impl Ledger {
@@ -70,6 +71,12 @@ impl Ledger {
         }
 
         let reward_committee = self.burn_committee_for_block(&block);
+        let certified_parent = self
+            .block_certifies_parent(&block, reward_committee.len())
+            .then(|| FinalityCheckpoint {
+                height: self.tip().height,
+                hash: self.tip().hash.clone(),
+            });
         let mut utxos = self.utxos.clone();
         let mut utxo_lineage = self.utxo_lineage.clone();
         let mut lineage_values = self.lineage_values.clone();
@@ -111,6 +118,9 @@ impl Ledger {
         self.lineage_owners = lineage_owners;
         self.tickets = tickets;
         self.chain.push(block);
+        if let Some(checkpoint) = certified_parent {
+            self.objective_finality_checkpoint = Some(checkpoint);
+        }
         let next_signing_domain = self.transaction_signing_domain();
         let available = self.utxos.clone();
         let pending = std::mem::take(&mut self.pending);

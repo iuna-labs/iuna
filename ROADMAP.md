@@ -16,7 +16,7 @@ The current goal is to finalize release evidence and launch operations while pre
 - [ ] Mainnet-candidate network has launched from a fresh genesis using release artifacts.
 - [ ] New nodes can sync from genesis without manual intervention.
 - [ ] Stale nodes can reconnect and catch up from old snapshots/range sync.
-- [ ] Network partitions heal according to fork choice.
+- [ ] Post-activation network partitions have an implemented objective checkpoint-based recovery rule; live soak evidence is still required to close this gate.
 - [ ] Recovery blocks restore liveness when selected finalizers disappear.
 - [ ] Multiple recovery candidates converge safely.
 - [ ] Clock skew and future timestamp cases do not stall the network.
@@ -43,7 +43,7 @@ These items are not protocol rules. They are the attack and reliability checks t
 - [x] Post-genesis transactions cannot spend with `genesis` input signatures.
 - [x] P2P envelope item limits reject batches only above their configured boundaries.
 - [x] Stratum endpoint has explicit DoS limits: maximum line size, maximum jobs per session, idle timeout, and connection/session caps.
-- [x] Fork and snapshot adversarial tests cover same-height leader-quality choice, taller valid forks inside finality, invalid late snapshot blocks, and pending transaction carry-forward after reorg.
+- [x] Fork and snapshot adversarial tests cover legacy finality, post-height-1000 objective checkpoints, deterministic conflicting-certificate recovery, same-height leader-quality choice, invalid late snapshot blocks, and pending transaction carry-forward after reorg.
 - [x] Compact snapshot decoder has malformed-input tests for huge lengths, oversized varints, trailing bytes, truncated payloads, invalid tags, and random byte inputs without panics or excessive allocation.
 - [x] Supply invariant tests cover mixed burns, fees, PoW mine actions, reorgs, no replay, and no double spend.
 

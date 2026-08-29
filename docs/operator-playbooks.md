@@ -101,10 +101,11 @@ Checks:
 
 Recovery:
 
-- If the divergence is inside the finality window, keep nodes connected. The protocol can reorg to a taller valid fork or to a same-height fork with better leader quality.
+- Before height `1000`, if the divergence is inside the six-block legacy finality window, keep nodes connected. The protocol can reorg to a taller valid fork or to a same-height fork with better leader quality.
+- From height `1000`, compare `finalized_height` and `finalized_hash` in `/api/status` or `/api/network/health`. Keep nodes connected when one valid chain has a higher checkpoint: fork choice adopts it even if its tip is temporarily shorter.
 - If your node is behind a healthy majority, add direct peers to that majority and let snapshot/range sync resolve it.
 - If your node is alone on an old tip and does not converge, use Delete local chain in Settings. That clears local chain/UI data, keeps wallet and settings, and broadcasts a snapshot request to peers.
-- If multiple public nodes disagree beyond the finality window, stop automated restarts and preserve chain databases from both sides for analysis.
+- If multiple public nodes report conflicting hashes at the same finalized height, preserve both databases and signing evidence immediately. Nodes deterministically choose the lower checkpoint hash, so operators do not need to trust the first peer seen, but the conflict is a quorum safety incident and must be investigated before resuming release activity.
 
 Avoid:
 
@@ -173,7 +174,9 @@ Avoid:
 Height `1000` is a coordinated consensus activation. At that height, VDF seeds
 start committing to block content and ticket draws stop using the final block
 hash. Transaction signatures and native and Stratum mine proofs also switch to
-chain-bound binary format v1. This preserves blocks, snapshots, and UTXOs below
+chain-bound binary format v1. Rank `0` blocks also start requiring a strict
+two-thirds committee quorum so their next rank `0` child can objectively certify
+them. This preserves blocks, snapshots, and UTXOs below
 `1000`, but nodes running the earlier rule will reject the upgraded chain or
 build an incompatible fork at activation. No database reset, new genesis, or
 migration command is needed for this height activation.
@@ -183,13 +186,18 @@ Before height `1000`:
 1. Publish a tagged release, commit, checksums, and the activation height.
 2. Upgrade every known public peer, finalizer, and bootstrap node.
 3. Verify the reported package version on each managed node and compare tips.
-4. Stop or isolate nodes that cannot be upgraded before activation.
-5. Keep chain database backups from immediately before the activation window.
+4. Confirm every independent node agrees on the block hash at height `999`;
+   upgraded nodes freeze pre-activation history once they reach `1000`.
+5. Stop or isolate nodes that cannot be upgraded before activation.
+6. Keep chain database backups from immediately before the activation window.
 
 At and after height `1000`, compare height and tip hash across at least three
-independent nodes. If upgraded nodes disagree, preserve both histories and stop
-automated restarts; do not reset the apparent majority until both forks have
-been validated.
+independent nodes. From height `1001`, also compare finalized height and hash.
+If one chain has the higher valid checkpoint, normal sync should converge to it.
+If equal-height checkpoint hashes conflict, preserve both histories and the
+committee signatures, stop automated restarts, and investigate the quorum
+failure; the deterministic lower-hash rule is the recovery decision and does
+not by itself make the safety breach harmless.
 
 ## No Burn Committee Signatures
 

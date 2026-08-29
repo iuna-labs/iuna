@@ -4,13 +4,13 @@ use anyhow::{Result, bail};
 
 use crate::compact::CompactBlockContext;
 
-use super::fork::{ForkChoice, ForkPoint, ForkQuality};
+use super::fork::{FinalityCheckpoint, ForkChoice, ForkPoint, ForkQuality};
 use super::genesis::{build_genesis_block, utxos_after_genesis, validate_genesis_block};
 use super::ledger_ops::validate_genesis_allocations;
 use super::ticket::genesis_tickets;
 use super::{
-    Amount, ChainSnapshot, GenesisBurn, LaunchProfile, Ledger, MINE_REWARD, Transaction,
-    unix_now_ms,
+    Amount, ChainSnapshot, GenesisBurn, LaunchProfile, Ledger, MINE_REWARD,
+    OBJECTIVE_FINALITY_ACTIVATION_HEIGHT, Transaction, unix_now_ms,
 };
 
 impl Ledger {
@@ -93,6 +93,7 @@ impl Ledger {
             vdf_rounds,
             launch_profile,
             compact_block_context,
+            objective_finality_checkpoint: None,
         })
     }
 
@@ -157,6 +158,7 @@ impl Ledger {
             vdf_rounds,
             launch_profile,
             compact_block_context,
+            objective_finality_checkpoint: None,
         };
         ledger.tickets = genesis_tickets(
             &ledger.genesis_allocations,
@@ -258,8 +260,21 @@ impl Ledger {
             return ForkChoice::KeepLocal;
         }
 
-        if fork_rewrites_finalized_history(local_height, fork_point.common_ancestor_height) {
-            return ForkChoice::KeepLocal;
+        if fork_point.first_diverging_height() < OBJECTIVE_FINALITY_ACTIVATION_HEIGHT {
+            if local_height >= OBJECTIVE_FINALITY_ACTIVATION_HEIGHT
+                || fork_rewrites_finalized_history(local_height, fork_point.common_ancestor_height)
+            {
+                return ForkChoice::KeepLocal;
+            }
+        } else {
+            match objective_finality_quality(
+                self.objective_finality_checkpoint.as_ref(),
+                candidate.objective_finality_checkpoint.as_ref(),
+            ) {
+                ForkQuality::RemoteBetter => return ForkChoice::SwitchToCandidate,
+                ForkQuality::LocalBetter => return ForkChoice::KeepLocal,
+                ForkQuality::Equal => {}
+            }
         }
 
         if remote_height > local_height {
@@ -320,6 +335,26 @@ impl Ledger {
     }
 }
 
+fn objective_finality_quality(
+    local: Option<&FinalityCheckpoint>,
+    remote: Option<&FinalityCheckpoint>,
+) -> ForkQuality {
+    match (local, remote) {
+        (None, None) => ForkQuality::Equal,
+        (None, Some(_)) => ForkQuality::RemoteBetter,
+        (Some(_), None) => ForkQuality::LocalBetter,
+        (Some(local), Some(remote)) => match local.height.cmp(&remote.height) {
+            std::cmp::Ordering::Less => ForkQuality::RemoteBetter,
+            std::cmp::Ordering::Greater => ForkQuality::LocalBetter,
+            std::cmp::Ordering::Equal if local.hash == remote.hash => ForkQuality::Equal,
+            // A conflicting certificate is a safety failure. The canonical hash ordering
+            // nevertheless gives every honest node the same recovery decision.
+            std::cmp::Ordering::Equal if remote.hash < local.hash => ForkQuality::RemoteBetter,
+            std::cmp::Ordering::Equal => ForkQuality::LocalBetter,
+        },
+    }
+}
+
 fn fork_rewrites_finalized_history(local_height: u64, common_ancestor_height: u64) -> bool {
     let finalized_floor = local_height.saturating_sub(super::FORK_FINALITY_DEPTH);
     common_ancestor_height < finalized_floor
@@ -329,9 +364,12 @@ fn fork_rewrites_finalized_history(local_height: u64, common_ancestor_height: u6
 mod tests {
     use std::collections::BTreeMap;
 
-    use super::fork_rewrites_finalized_history;
+    use super::{
+        ForkChoice, ForkPoint, ForkQuality, fork_rewrites_finalized_history,
+        objective_finality_quality,
+    };
     use crate::domain::{
-        FORK_FINALITY_DEPTH, LaunchProfile, Ledger, StratumMineShare,
+        FORK_FINALITY_DEPTH, FinalityCheckpoint, LaunchProfile, Ledger, StratumMineShare,
         TRANSACTION_SIGNING_V1_ACTIVATION_HEIGHT, Transaction, Wallet,
     };
 
@@ -358,6 +396,134 @@ mod tests {
         assert!(!fork_rewrites_finalized_history(100, 94));
         assert!(fork_rewrites_finalized_history(100, 93));
         assert!(!fork_rewrites_finalized_history(5, 0));
+    }
+
+    #[test]
+    fn higher_objective_checkpoint_wins_even_when_candidate_is_shorter() {
+        let mut local = Ledger::new(BTreeMap::new(), 1);
+        let mut candidate = local.clone();
+        local.chain.last_mut().unwrap().height = 1_012;
+        local.chain.last_mut().unwrap().hash = "local-tip".to_string();
+        local.objective_finality_checkpoint = Some(FinalityCheckpoint {
+            height: 1_004,
+            hash: "local-finalized".to_string(),
+        });
+        candidate.chain.last_mut().unwrap().height = 1_008;
+        candidate.chain.last_mut().unwrap().hash = "remote-tip".to_string();
+        candidate.objective_finality_checkpoint = Some(FinalityCheckpoint {
+            height: 1_007,
+            hash: "remote-finalized".to_string(),
+        });
+
+        assert_eq!(
+            local.choose_fork(
+                &candidate,
+                ForkPoint {
+                    common_ancestor_height: 1_000,
+                },
+            ),
+            ForkChoice::SwitchToCandidate
+        );
+    }
+
+    #[test]
+    fn conflicting_same_height_certificates_have_deterministic_hash_tie_break() {
+        let local = FinalityCheckpoint {
+            height: 1_010,
+            hash: "bbbb".to_string(),
+        };
+        let remote = FinalityCheckpoint {
+            height: 1_010,
+            hash: "aaaa".to_string(),
+        };
+
+        assert_eq!(
+            objective_finality_quality(Some(&local), Some(&remote)),
+            ForkQuality::RemoteBetter
+        );
+        assert_eq!(
+            objective_finality_quality(Some(&remote), Some(&local)),
+            ForkQuality::LocalBetter
+        );
+    }
+
+    #[test]
+    fn objective_finality_partition_model_is_total_antisymmetric_and_transitive() {
+        let checkpoints = [
+            None,
+            Some(FinalityCheckpoint {
+                height: 1_000,
+                hash: "aaaa".to_string(),
+            }),
+            Some(FinalityCheckpoint {
+                height: 1_000,
+                hash: "bbbb".to_string(),
+            }),
+            Some(FinalityCheckpoint {
+                height: 1_001,
+                hash: "aaaa".to_string(),
+            }),
+            Some(FinalityCheckpoint {
+                height: 1_020,
+                hash: "cccc".to_string(),
+            }),
+        ];
+
+        for local in &checkpoints {
+            for remote in &checkpoints {
+                let forward = objective_finality_quality(local.as_ref(), remote.as_ref());
+                let reverse = objective_finality_quality(remote.as_ref(), local.as_ref());
+                assert!(matches!(
+                    (forward, reverse),
+                    (ForkQuality::Equal, ForkQuality::Equal)
+                        | (ForkQuality::LocalBetter, ForkQuality::RemoteBetter)
+                        | (ForkQuality::RemoteBetter, ForkQuality::LocalBetter)
+                ));
+            }
+        }
+
+        for first in &checkpoints {
+            for second in &checkpoints {
+                for third in &checkpoints {
+                    let first_beats_second =
+                        objective_finality_quality(first.as_ref(), second.as_ref())
+                            == ForkQuality::LocalBetter;
+                    let second_beats_third =
+                        objective_finality_quality(second.as_ref(), third.as_ref())
+                            == ForkQuality::LocalBetter;
+                    if first_beats_second && second_beats_third {
+                        assert_eq!(
+                            objective_finality_quality(first.as_ref(), third.as_ref()),
+                            ForkQuality::LocalBetter
+                        );
+                    }
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn activated_node_freezes_history_before_height_1000() {
+        let mut local = Ledger::new(BTreeMap::new(), 1);
+        let mut candidate = local.clone();
+        local.chain.last_mut().unwrap().height = 1_010;
+        local.chain.last_mut().unwrap().hash = "local-tip".to_string();
+        candidate.chain.last_mut().unwrap().height = 1_020;
+        candidate.chain.last_mut().unwrap().hash = "remote-tip".to_string();
+        candidate.objective_finality_checkpoint = Some(FinalityCheckpoint {
+            height: 1_019,
+            hash: "remote-finalized".to_string(),
+        });
+
+        assert_eq!(
+            local.choose_fork(
+                &candidate,
+                ForkPoint {
+                    common_ancestor_height: 998,
+                },
+            ),
+            ForkChoice::KeepLocal
+        );
     }
 
     #[test]

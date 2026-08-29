@@ -7,7 +7,7 @@ use super::reveal::{burn_bundle_slot_mask, burn_committee_mask};
 use super::{
     Amount, BURN_COMMITTEE_SIZE, Block, BurnBundle, BurnBundlePayload, BurnBundleSection,
     BurnBundleSignature, BurnCommitteeMember, FinalizerMode, Ledger, MAX_BURN_BUNDLE_BYTES,
-    MaskedBurn, Transaction, Wallet,
+    MaskedBurn, OBJECTIVE_FINALITY_ACTIVATION_HEIGHT, Transaction, Wallet,
 };
 
 impl Ledger {
@@ -27,7 +27,12 @@ impl Ledger {
                 .len(),
             FinalizerMode::Recovery => 1,
         };
-        self.required_explicit_burn_signatures(finalizer_mode, finalizer_rank, committee_size)
+        self.required_explicit_burn_signatures(
+            self.height() + 1,
+            finalizer_mode,
+            finalizer_rank,
+            committee_size,
+        )
     }
 
     pub fn build_burn_bundle(&self, wallet: &Wallet) -> Result<Option<BurnBundle>> {
@@ -245,6 +250,7 @@ impl Ledger {
             included_mask |= burn_bundle_slot_mask(signature.slot)?;
         }
         let required_signatures = self.required_explicit_burn_signatures(
+            block.height,
             block.finalizer_mode,
             block.finalizer_rank,
             committee.len(),
@@ -300,6 +306,7 @@ impl Ledger {
 
     fn required_explicit_burn_signatures(
         &self,
+        height: u64,
         finalizer_mode: FinalizerMode,
         finalizer_rank: u32,
         committee_size: usize,
@@ -308,11 +315,25 @@ impl Ledger {
             return 0;
         }
         match finalizer_mode {
+            FinalizerMode::Ticket
+                if finalizer_rank == 0 && height >= OBJECTIVE_FINALITY_ACTIVATION_HEIGHT =>
+            {
+                objective_finality_quorum(committee_size).saturating_sub(1)
+            }
             FinalizerMode::Ticket if finalizer_rank == 0 => committee_size.min(3).saturating_sub(1),
             FinalizerMode::Ticket if finalizer_rank == 1 => committee_size.min(2).saturating_sub(1),
             FinalizerMode::Ticket => 0,
             FinalizerMode::Recovery => 0,
         }
+    }
+
+    pub(super) fn block_certifies_parent(&self, block: &Block, committee_size: usize) -> bool {
+        block.height > OBJECTIVE_FINALITY_ACTIVATION_HEIGHT
+            && block.finalizer_mode == FinalizerMode::Ticket
+            && block.finalizer_rank == 0
+            && committee_size > 0
+            && block.burn_bundle_section.signatures.len() + 1
+                >= objective_finality_quorum(committee_size)
     }
 
     fn validate_burn_bundles_for_any_next_ticket_block(
@@ -435,6 +456,14 @@ impl Ledger {
     }
 }
 
+pub(super) fn objective_finality_quorum(committee_size: usize) -> usize {
+    if committee_size == 0 {
+        0
+    } else {
+        committee_size.saturating_mul(2) / 3 + 1
+    }
+}
+
 fn matching_burn_by_signature<'a>(
     attested: &Transaction,
     transactions: &'a [Transaction],
@@ -494,41 +523,87 @@ mod tests {
         let ledger = ledger();
 
         assert_eq!(
-            ledger.required_explicit_burn_signatures(FinalizerMode::Ticket, 0, 5),
+            ledger.required_explicit_burn_signatures(999, FinalizerMode::Ticket, 0, 5),
             2
         );
         assert_eq!(
-            ledger.required_explicit_burn_signatures(FinalizerMode::Ticket, 0, 4),
+            ledger.required_explicit_burn_signatures(999, FinalizerMode::Ticket, 0, 4),
             2
         );
         assert_eq!(
-            ledger.required_explicit_burn_signatures(FinalizerMode::Ticket, 0, 3),
+            ledger.required_explicit_burn_signatures(999, FinalizerMode::Ticket, 0, 3),
             2
         );
         assert_eq!(
-            ledger.required_explicit_burn_signatures(FinalizerMode::Ticket, 0, 2),
+            ledger.required_explicit_burn_signatures(999, FinalizerMode::Ticket, 0, 2),
             1
         );
         assert_eq!(
-            ledger.required_explicit_burn_signatures(FinalizerMode::Ticket, 1, 5),
+            ledger.required_explicit_burn_signatures(1_000, FinalizerMode::Ticket, 0, 5),
+            3
+        );
+        assert_eq!(
+            ledger.required_explicit_burn_signatures(1_000, FinalizerMode::Ticket, 0, 4),
+            2
+        );
+        assert_eq!(
+            ledger.required_explicit_burn_signatures(1_000, FinalizerMode::Ticket, 0, 3),
+            2
+        );
+        assert_eq!(
+            ledger.required_explicit_burn_signatures(1_000, FinalizerMode::Ticket, 1, 5),
             1
         );
         assert_eq!(
-            ledger.required_explicit_burn_signatures(FinalizerMode::Ticket, 1, 2),
+            ledger.required_explicit_burn_signatures(1_000, FinalizerMode::Ticket, 1, 2),
             1
         );
         assert_eq!(
-            ledger.required_explicit_burn_signatures(FinalizerMode::Ticket, 2, 3),
+            ledger.required_explicit_burn_signatures(1_000, FinalizerMode::Ticket, 2, 3),
             0
         );
         assert_eq!(
-            ledger.required_explicit_burn_signatures(FinalizerMode::Recovery, 0, 3),
+            ledger.required_explicit_burn_signatures(1_000, FinalizerMode::Recovery, 0, 3),
             0
         );
         assert_eq!(
-            ledger.required_explicit_burn_signatures(FinalizerMode::Ticket, 0, 1),
+            ledger.required_explicit_burn_signatures(1_000, FinalizerMode::Ticket, 0, 1),
             0
         );
+    }
+
+    #[test]
+    fn only_post_activation_rank_zero_quorum_certifies_its_parent() {
+        let ledger = ledger();
+        let mut block = ledger.tip().clone();
+        block.height = 1_001;
+        block.finalizer_mode = FinalizerMode::Ticket;
+        block.finalizer_rank = 0;
+        block.burn_bundle_section.signatures = (1..=3)
+            .map(|slot| BurnBundleSignature {
+                slot,
+                member: format!("member-{slot}"),
+                signature: format!("signature-{slot}"),
+            })
+            .collect();
+
+        assert!(ledger.block_certifies_parent(&block, 5));
+
+        block.height = OBJECTIVE_FINALITY_ACTIVATION_HEIGHT;
+        assert!(!ledger.block_certifies_parent(&block, 5));
+        block.height += 1;
+        block.burn_bundle_section.signatures.pop();
+        assert!(!ledger.block_certifies_parent(&block, 5));
+        block
+            .burn_bundle_section
+            .signatures
+            .push(BurnBundleSignature {
+                slot: 3,
+                member: "member-3".to_string(),
+                signature: "signature-3".to_string(),
+            });
+        block.finalizer_rank = 1;
+        assert!(!ledger.block_certifies_parent(&block, 5));
     }
 
     #[test]

@@ -13,9 +13,10 @@ use super::{
     Amount, BURN_COMMITTEE_SIZE, BURN_LINEAGE_MATURITY_HEIGHTS, Block, BurnBundle,
     BurnBundleSignature, BurnCommitteeMember, BurnLeaderRank, ChainSnapshot, FinalizerMode,
     GRINDING_RESISTANCE_ACTIVATION_HEIGHT, GenesisBurn, LeaderProofPayload, Ledger,
-    MAX_BLOCK_BYTES, MAX_BURN_BUNDLE_BYTES, MICRO_IUNA, MaskedBurn, OutPoint, Transaction,
-    TransactionSubmitOutcome, TxOutput, UtxoLineageRoot, VDF_TARGET_BLOCK_MS, Wallet,
-    genesis_allocation_outpoint, hex_hash, reward_outputs_for_block, run_vdf,
+    MAX_BLOCK_BYTES, MAX_BURN_BUNDLE_BYTES, MICRO_IUNA, MaskedBurn,
+    OBJECTIVE_FINALITY_ACTIVATION_HEIGHT, OutPoint, Transaction, TransactionSubmitOutcome,
+    TxOutput, UtxoLineageRoot, VDF_TARGET_BLOCK_MS, Wallet, genesis_allocation_outpoint, hex_hash,
+    reward_outputs_for_block, run_vdf,
 };
 
 const NOW_MS: u64 = 10_000_000_000;
@@ -1880,6 +1881,7 @@ fn mini_validate_burn_bundle_section(ledger: &Ledger, block: &Block) -> Option<(
     }
 
     let required_signatures = mini_required_explicit_burn_signatures(
+        block.height,
         block.finalizer_mode,
         block.finalizer_rank,
         committee.len(),
@@ -1954,6 +1956,7 @@ fn mini_validate_burn_bundle_section(ledger: &Ledger, block: &Block) -> Option<(
 }
 
 fn mini_required_explicit_burn_signatures(
+    height: u64,
     finalizer_mode: FinalizerMode,
     finalizer_rank: u32,
     committee_size: usize,
@@ -1962,6 +1965,11 @@ fn mini_required_explicit_burn_signatures(
         return 0;
     }
     match finalizer_mode {
+        FinalizerMode::Ticket
+            if finalizer_rank == 0 && height >= OBJECTIVE_FINALITY_ACTIVATION_HEIGHT =>
+        {
+            committee_size.saturating_mul(2) / 3
+        }
         FinalizerMode::Ticket if finalizer_rank == 0 => committee_size.min(3).saturating_sub(1),
         FinalizerMode::Ticket if finalizer_rank == 1 => committee_size.min(2).saturating_sub(1),
         FinalizerMode::Ticket | FinalizerMode::Recovery => 0,
@@ -2002,9 +2010,31 @@ fn mini_choose_fork(local: &Ledger, candidate: &Ledger) -> Option<bool> {
         return Some(false);
     }
 
-    let finalized_floor = local.height().saturating_sub(super::FORK_FINALITY_DEPTH);
-    if common_ancestor_height < finalized_floor {
-        return Some(false);
+    let first_diverging_height = common_ancestor_height.saturating_add(1);
+    if first_diverging_height < OBJECTIVE_FINALITY_ACTIVATION_HEIGHT {
+        let finalized_floor = local.height().saturating_sub(super::FORK_FINALITY_DEPTH);
+        if local.height() >= OBJECTIVE_FINALITY_ACTIVATION_HEIGHT
+            || common_ancestor_height < finalized_floor
+        {
+            return Some(false);
+        }
+    } else {
+        match (
+            local.objective_finality_checkpoint(),
+            candidate.objective_finality_checkpoint(),
+        ) {
+            (None, Some(_)) => return Some(true),
+            (Some(_), None) => return Some(false),
+            (Some((local_height, local_hash)), Some((remote_height, remote_hash))) => {
+                if remote_height != local_height {
+                    return Some(remote_height > local_height);
+                }
+                if remote_hash != local_hash {
+                    return Some(remote_hash < local_hash);
+                }
+            }
+            (None, None) => {}
+        }
     }
     if candidate.height() > local.height() {
         return Some(true);

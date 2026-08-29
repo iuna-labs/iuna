@@ -892,6 +892,8 @@ pub(super) const INDEX_HTML: &str = concat!(
           <div class="network-health-grid">
             <div class="peer-summary-item"><div class="peer-summary-label">Local Height</div><div class="peer-summary-value" x-text="networkHealth.local_height ?? '-'"></div></div>
             <div class="peer-summary-item"><div class="peer-summary-label">Tip</div><code class="peer-summary-value" x-text="networkTipLabel()"></code></div>
+            <div class="peer-summary-item"><div class="peer-summary-label">Finalized</div><div class="peer-summary-value" x-text="networkHealth.finalized_height ?? '-'"></div></div>
+            <div class="peer-summary-item"><div class="peer-summary-label">Finalized Hash</div><code class="peer-summary-value" x-text="short(networkHealth.finalized_hash)"></code></div>
             <div class="peer-summary-item"><div class="peer-summary-label">Last Block</div><div class="peer-summary-value" x-text="networkLastBlockAgeLabel()"></div></div>
             <div class="peer-summary-item"><div class="peer-summary-label">Best Known</div><div class="peer-summary-value" x-text="networkHealth.best_known_height ?? '-'"></div></div>
             <div class="peer-summary-item"><div class="peer-summary-label">Lag</div><div class="peer-summary-value" x-text="networkLagLabel()"></div></div>

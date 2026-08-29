@@ -28,6 +28,8 @@ pub(super) struct NetworkHealthResponse {
     pub(super) state: String,
     pub(super) local_height: u64,
     pub(super) local_tip_hash: String,
+    pub(super) finalized_height: Option<u64>,
+    pub(super) finalized_hash: Option<String>,
     pub(super) last_block_age_ms: Option<u64>,
     pub(super) best_known_height: u64,
     pub(super) sync_start_height: Option<u64>,
@@ -76,6 +78,8 @@ impl MempoolCounts {
 pub(super) struct NetworkHealthLocalState {
     pub(super) height: u64,
     pub(super) tip_hash: String,
+    pub(super) finalized_height: Option<u64>,
+    pub(super) finalized_hash: Option<String>,
     pub(super) tip_timestamp_ms: Option<u64>,
     pub(super) sync_start_height: Option<u64>,
     pub(super) sync_validated_height: Option<u64>,

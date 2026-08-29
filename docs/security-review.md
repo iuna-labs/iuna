@@ -10,7 +10,8 @@ until every launch-blocking item below is resolved or explicitly accepted.
 
 Review:
 
-- block validation, fork choice, finality depth, recovery blocks, and VDF checks;
+- block validation, legacy finality depth, objective finality certificates and
+  fork choice, recovery blocks, and VDF checks;
 - burn ticket eligibility, lineage limits, burn-list attestations, and bundle quorum;
 - supply accounting across transfers, burns, fees, mine actions, and reorgs;
 - genesis, snapshot adoption, and candidate-to-mainnet promotion rules.
@@ -28,6 +29,9 @@ Primary code:
 Evidence already in the tree:
 
 - adversarial consensus tests in `src/domain/adversarial_tests.rs`;
+- activation-boundary, quorum, higher-checkpoint, conflicting-certificate, and
+  pre-activation-history tests in `src/domain/ledger_reveal.rs` and
+  `src/domain/ledger_chain.rs`;
 - release soak test in `tests/properties.rs`;
 - protocol rules documented in `docs/protocol.md`;
 - reset, joining, recovery, and rollback procedures in `docs/operator-playbooks.md`.

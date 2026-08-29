@@ -28,7 +28,9 @@ The current mainnet-candidate parameter set is intentionally close to Bitcoin wh
 - maximum orphan transactions per node: `1,024`;
 - ticket maturity delay: `3` blocks;
 - ticket expiry window: `3` block heights;
-- finality depth: `6` blocks;
+- legacy finality depth before height `1000`: `6` blocks;
+- objective finality activation height: `1000`;
+- objective finality quorum: strictly more than `2/3` of the selected committee;
 - recovery delay: `6` target block times;
 - future timestamp drift limit: `2 minutes`;
 - VDF retarget window: `20` rank `0` ticket blocks;
@@ -49,7 +51,7 @@ The current mainnet-candidate parameter set is intentionally close to Bitcoin wh
 
 Changing any value in this section requires a conscious mainnet-candidate reset or later hard-fork process.
 
-Transaction signing format v1 activates automatically at height `1000`. Existing chain state and history remain valid; operators only need to upgrade every consensus node before activation. A chain-ID or genesis change remains a separate consensus reset.
+Transaction signing format v1 and objective finality activate automatically at height `1000`. Existing chain state and history remain valid; operators only need to upgrade every consensus node before activation. A chain-ID or genesis change remains a separate consensus reset.
 
 The consensus block-size limit is the exact number of bytes produced by the compact snapshot v6 block-body encoder when the block is appended to its parent chain. The encoder's reference tables are seeded by genesis allocations and extended in chain order, so all nodes calculate the same context-dependent size. The snapshot header, launch profile, block-count field, SQLite row metadata, and SQLite page overhead are not charged to an individual block.
 
@@ -363,11 +365,19 @@ Blocks are bounded by transaction count and exact compact stored block-body size
 
 ## Fork Choice
 
-Nodes fully validate candidate blocks or snapshots before considering a reorg. A candidate chain must share the same genesis and cannot rewrite history deeper than the finality depth. In the mainnet-candidate profile, forks whose common ancestor is below `local height - 6` are rejected.
+Nodes fully validate candidate blocks or snapshots before considering a reorg. A candidate chain must share the same genesis. Before height `1000`, the legacy rule rejects forks whose common ancestor is below `local height - 6`.
 
 Burn inclusion is part of block validity. If a ticket block carries burn-list attestations but omits a burn required by those attestations, nodes reject the block before fork choice. The fork choice rule only compares chains made of valid blocks.
 
-Within that finality window, a taller valid candidate chain wins over the local chain. If the candidate and local chains have the same height but different tips, nodes compare the first divergent blocks by leader score: ticket blocks beat recovery blocks, lower finalizer rank beats higher rank, and the leader proof rank breaks remaining ties. Equal quality keeps the local chain.
+From block height `1000`, a rank `0` ticket block requires signatures from strictly more than two thirds of its selected burn committee. The leader counts as one signer through its leader proof; the other signers are the existing burn-bundle signatures. Every signature commits to the child height and parent hash. A valid rank `0` child above height `1000` therefore certifies its parent. For a five-slot committee this means the leader plus three explicit committee signatures. Smaller committees use `floor(2n/3) + 1` total signatures. Rank `1`, later ticket ranks, and recovery blocks retain their liveness thresholds but do not create an objective finality checkpoint.
+
+The first objective checkpoint is block `1000`, certified by a valid rank `0` block at height `1001`. Nodes reconstruct the highest checkpoint while replaying the existing compact snapshot; no block field, database migration, second genesis, or coin-state rewrite is required.
+
+For forks that first diverge at or after height `1000`, fork choice compares the highest valid checkpoint before chain length. A higher checkpoint wins even when its current tip is shorter, so healthy partitions can converge after more than six blocks. When checkpoints are identical, the taller chain wins and equal-height chains retain the existing first-divergent leader-score comparison. Conflicting certificates at the same height indicate a quorum safety failure; all nodes nevertheless recover deterministically to the lexicographically smaller checkpoint hash. A strictly higher conflicting certificate supersedes a lower checkpoint.
+
+This is **recoverable objective finality**, not an irreversible promise that a finalized block can never be reorganized. “Finalized” means that the selected committee for the next rank `0` block signed the block's hash as its parent with a strict two-thirds quorum, and that no competing chain has a better checkpoint under the public rule above. No node uses first-seen or first-peer trust to resolve a post-activation fork.
+
+An upgraded node that has reached height `1000` will not rewrite history below `1000`. Operators must therefore verify that the candidate network agrees on height `999` before activation. A node still below activation follows the legacy six-block rule while catching up; the candidate-to-mainnet promotion manifest can later pin a signed checkpoint without changing this ledger.
 
 ## Genesis and Joining
 

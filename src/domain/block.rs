@@ -319,6 +319,8 @@ impl PreparedBlock {
 pub struct ChainStatus {
     pub height: u64,
     pub tip_hash: String,
+    pub finalized_height: Option<u64>,
+    pub finalized_hash: Option<String>,
     pub next_leader: Option<String>,
     pub launch_profile_hash: String,
     pub mine_reward: Amount,

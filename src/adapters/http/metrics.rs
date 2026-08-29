@@ -260,6 +260,8 @@ pub(super) fn network_health_at(
         state,
         local_height,
         local_tip_hash: local.tip_hash,
+        finalized_height: local.finalized_height,
+        finalized_hash: local.finalized_hash,
         last_block_age_ms,
         best_known_height,
         sync_start_height: local.sync_start_height,
@@ -362,6 +364,8 @@ mod tests {
         let local = NetworkHealthLocalState {
             height: 42,
             tip_hash: "tip-hash".to_string(),
+            finalized_height: Some(40),
+            finalized_hash: Some("finalized-hash".to_string()),
             tip_timestamp_ms: Some(1_000),
             sync_start_height: Some(42),
             sync_validated_height: Some(47),
@@ -397,6 +401,8 @@ mod tests {
         assert_eq!(health.sync_target_height, Some(60));
         assert_eq!(health.state, "syncing");
         assert_eq!(health.local_tip_hash, "tip-hash");
+        assert_eq!(health.finalized_height, Some(40));
+        assert_eq!(health.finalized_hash.as_deref(), Some("finalized-hash"));
         assert_eq!(health.last_block_age_ms, Some(1_500));
         assert_eq!(health.last_finalizer_mode.as_deref(), Some("ticket"));
         assert_eq!(health.last_finalizer_rank, Some(1));

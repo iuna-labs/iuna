@@ -426,6 +426,8 @@ pub(super) async fn api_network_health(
             NetworkHealthLocalState {
                 height: status.chain.height,
                 tip_hash: status.chain.tip_hash,
+                finalized_height: status.chain.finalized_height,
+                finalized_hash: status.chain.finalized_hash,
                 tip_timestamp_ms,
                 sync_start_height: sync_progress.map(|progress| progress.start_height),
                 sync_validated_height: sync_progress.map(|progress| progress.validated_height),

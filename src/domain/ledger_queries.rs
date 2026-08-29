@@ -99,6 +99,14 @@ impl Ledger {
         ChainStatus {
             height: self.tip().height,
             tip_hash: self.tip().hash.clone(),
+            finalized_height: self
+                .objective_finality_checkpoint
+                .as_ref()
+                .map(|checkpoint| checkpoint.height),
+            finalized_hash: self
+                .objective_finality_checkpoint
+                .as_ref()
+                .map(|checkpoint| checkpoint.hash.clone()),
             next_leader: self.expected_leader_for_next_block(),
             launch_profile_hash: self.launch_profile.hash(),
             mine_reward: self.mine_reward,
@@ -112,6 +120,12 @@ impl Ledger {
 
     pub fn tip_hash(&self) -> &str {
         &self.tip().hash
+    }
+
+    pub fn objective_finality_checkpoint(&self) -> Option<(u64, &str)> {
+        self.objective_finality_checkpoint
+            .as_ref()
+            .map(|checkpoint| (checkpoint.height, checkpoint.hash.as_str()))
     }
 
     pub fn chain(&self) -> &[Block] {

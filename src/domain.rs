@@ -36,7 +36,7 @@ use block::LeaderProofPayload;
 pub use block::{
     Block, BurnLeaderRank, ChainSnapshot, ChainStatus, FinalizerMode, LeaderProof, PreparedBlock,
 };
-use fork::LeaderScore;
+use fork::{FinalityCheckpoint, LeaderScore};
 pub(crate) use genesis::genesis_allocation_outpoint;
 pub use hex::hex_hash;
 use hex::{decode_hex, decode_hex_array, hex_encode};
@@ -61,8 +61,8 @@ pub use protocol::{
     DEFAULT_MINE_FEE, DEFAULT_TRANSACTION_FEE, GRINDING_RESISTANCE_ACTIVATION_HEIGHT,
     MAX_BLOCK_BYTES, MAX_BURN_BUNDLE_BYTES, MAX_PENDING_TRANSACTIONS, MAX_VDF_ROUNDS, MICRO_IUNA,
     MINE_ACTIONS_PER_ANCHOR_LIMIT, MINE_DIFFICULTY_BITS, MINE_FINALIZER_FEE, MINE_REWARD,
-    RECOVERY_BLOCK_DELAY_MS, TRANSACTION_SIGNING_V1_ACTIVATION_HEIGHT, TransactionSubmitOutcome,
-    VDF_TARGET_BLOCK_MS,
+    OBJECTIVE_FINALITY_ACTIVATION_HEIGHT, RECOVERY_BLOCK_DELAY_MS,
+    TRANSACTION_SIGNING_V1_ACTIVATION_HEIGHT, TransactionSubmitOutcome, VDF_TARGET_BLOCK_MS,
 };
 use protocol::{
     BLOCK_MEDIAN_TIME_PAST_WINDOW, DEFAULT_TICKET_EXPIRY_WINDOW, DEFAULT_TICKET_MATURITY_DELAY,

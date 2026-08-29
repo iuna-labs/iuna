@@ -4,8 +4,8 @@ use std::{
 };
 
 use super::{
-    Amount, Block, BurnTicket, LaunchProfile, LineageOwnerValues, OutPoint, Transaction, TxOutput,
-    UtxoLineageRoot,
+    Amount, Block, BurnTicket, FinalityCheckpoint, LaunchProfile, LineageOwnerValues, OutPoint,
+    Transaction, TxOutput, UtxoLineageRoot,
 };
 use crate::compact::CompactBlockContext;
 
@@ -27,6 +27,7 @@ pub struct Ledger {
     pub(super) vdf_rounds: u64,
     pub(super) launch_profile: LaunchProfile,
     pub(super) compact_block_context: CompactBlockContext,
+    pub(super) objective_finality_checkpoint: Option<FinalityCheckpoint>,
 }
 
 pub(super) fn unix_now_ms() -> u64 {

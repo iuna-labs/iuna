@@ -3,6 +3,12 @@ pub(super) struct ForkPoint {
     pub(super) common_ancestor_height: u64,
 }
 
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub(super) struct FinalityCheckpoint {
+    pub(super) height: u64,
+    pub(super) hash: String,
+}
+
 impl ForkPoint {
     pub(super) fn first_diverging_height(self) -> u64 {
         self.common_ancestor_height + 1
