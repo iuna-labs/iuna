@@ -53,12 +53,14 @@ Primary code:
 - `src/domain/selection.rs`
 - `src/domain/validation.rs`
 
-Transaction signing uses binary format v1 and commits the launch-profile chain ID
-and local genesis hash for transfers, burns, native mine actions, and Stratum mine
-actions. Genesis allocation outpoints are independently scoped to the chain ID.
-Fixed vectors and replay tests cover candidate/mainnet/testnet IDs, distinct
-genesis hashes, legacy text signatures, identical allocations, and hexadecimal
-casing malleability across validation and compact persistence.
+Transaction signing automatically switches at height `1000` from the legacy
+format to binary format v1, which commits the launch-profile chain ID and local
+genesis hash for transfers, burns, native mine actions, and Stratum mine actions.
+Historical blocks and genesis allocation outpoints retain their original rules,
+while blocks from the activation height have no legacy fallback. Fixed vectors
+and boundary/replay tests cover pre-activation compatibility, candidate/mainnet/
+testnet IDs, distinct genesis hashes, native and Stratum proofs, and hexadecimal
+casing malleability under format v1.
 
 Evidence already in the tree:
 
@@ -240,9 +242,10 @@ see which revision was tested.
   playbooks are the maintained in-tree references.
 - Release evidence: keep successful release-gate logs from the exact tagged
   candidate revision.
-- Grinding resistance: height `1000` activates a VDF content commitment and
-  removes the final block hash from future ticket draws. All candidate nodes
-  must upgrade before activation; mixed versions will split at height `1000`.
+- Height `1000` activation: the release activates both grinding resistance and
+  transaction signing format v1 automatically. All candidate nodes must upgrade
+  before activation; the height activation itself requires no chain-state reset
+  or operator migration command, but mixed versions will split at height `1000`.
 
 ## Sign-Off Table
 

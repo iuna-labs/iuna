@@ -42,10 +42,9 @@ pub(super) fn build_genesis_block(
 pub(super) fn utxos_after_genesis(
     genesis_allocations: &BTreeMap<String, Amount>,
     genesis: &Block,
-    chain_id: &str,
 ) -> Result<BTreeMap<OutPoint, TxOutput>> {
-    let mut utxos = genesis_allocation_utxos(genesis_allocations, chain_id);
-    let signing_domain = TransactionSigningDomain::new(chain_id, genesis.hash.clone());
+    let mut utxos = genesis_allocation_utxos(genesis_allocations);
+    let signing_domain = TransactionSigningDomain::legacy();
     for transaction in &genesis.transactions {
         match transaction {
             Transaction::Burn { .. } => {
@@ -63,14 +62,13 @@ pub(super) fn utxos_after_genesis(
 
 fn genesis_allocation_utxos(
     genesis_allocations: &BTreeMap<String, Amount>,
-    chain_id: &str,
 ) -> BTreeMap<OutPoint, TxOutput> {
     genesis_allocations
         .iter()
         .filter(|(_, amount)| **amount > 0)
         .map(|(address, amount)| {
             (
-                genesis_allocation_outpoint(chain_id, address),
+                genesis_allocation_outpoint(address),
                 TxOutput {
                     address: address.clone(),
                     amount: *amount,
@@ -91,14 +89,9 @@ pub(super) fn balances_from_utxos(
     balances
 }
 
-pub(crate) fn genesis_allocation_outpoint(chain_id: &str, address: &str) -> OutPoint {
-    let mut payload = b"IUNA-GENESIS-ALLOCATION".to_vec();
-    payload.extend_from_slice(&(chain_id.len() as u64).to_be_bytes());
-    payload.extend_from_slice(chain_id.as_bytes());
-    payload.extend_from_slice(&(address.len() as u64).to_be_bytes());
-    payload.extend_from_slice(address.as_bytes());
+pub(crate) fn genesis_allocation_outpoint(address: &str) -> OutPoint {
     OutPoint {
-        txid: hex_hash(payload),
+        txid: hex_hash(format!("iuna-genesis-allocation:{address}")),
         index: 0,
     }
 }
@@ -174,17 +167,10 @@ mod tests {
         let bob = Wallet::from_seed("genesis-outpoint-bob");
 
         assert_ne!(
-            genesis_allocation_outpoint("chain-a", alice.address()),
-            genesis_allocation_outpoint("chain-a", bob.address())
+            genesis_allocation_outpoint(alice.address()),
+            genesis_allocation_outpoint(bob.address())
         );
-        assert_ne!(
-            genesis_allocation_outpoint("chain-a", alice.address()),
-            genesis_allocation_outpoint("chain-b", alice.address())
-        );
-        assert_eq!(
-            genesis_allocation_outpoint("chain-a", alice.address()).index,
-            0
-        );
+        assert_eq!(genesis_allocation_outpoint(alice.address()).index, 0);
     }
 
     #[test]

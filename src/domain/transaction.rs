@@ -7,9 +7,9 @@ use serde::{Deserialize, Serialize};
 use super::validation::{decode_canonical_hex, decode_canonical_hex_array};
 use super::{
     Amount, HASH_BYTES, MINE_FINALIZER_FEE, MINE_REWARD, PUBLIC_KEY_BYTES, SIGNATURE_BYTES, Wallet,
-    canonical_transaction_size_bytes, genesis_allocation_outpoint, hash_meets_difficulty,
-    hex_encode, hex_hash, mine_payload, mine_signature, stratum_mine_header_bytes,
-    stratum_mine_signature,
+    canonical_transaction_size_bytes, decode_hex_array, genesis_allocation_outpoint,
+    hash_meets_difficulty, hex_encode, hex_hash, mine_payload, mine_signature,
+    stratum_mine_header_bytes, stratum_mine_signature,
 };
 
 pub const TRANSACTION_SIGNING_FORMAT_VERSION: u16 = 1;
@@ -18,6 +18,7 @@ pub const TRANSACTION_SIGNING_FORMAT_VERSION: u16 = 1;
 pub(super) struct TransactionSigningDomain {
     chain_id: String,
     genesis_hash: String,
+    chain_bound: bool,
 }
 
 impl TransactionSigningDomain {
@@ -25,10 +26,38 @@ impl TransactionSigningDomain {
         Self {
             chain_id: chain_id.into(),
             genesis_hash: genesis_hash.into(),
+            chain_bound: true,
         }
     }
 
+    pub(super) fn legacy() -> Self {
+        Self {
+            chain_id: String::new(),
+            genesis_hash: String::new(),
+            chain_bound: false,
+        }
+    }
+
+    pub(super) fn for_height(
+        chain_id: impl Into<String>,
+        genesis_hash: impl Into<String>,
+        height: u64,
+    ) -> Self {
+        if height >= super::TRANSACTION_SIGNING_V1_ACTIVATION_HEIGHT {
+            Self::new(chain_id, genesis_hash)
+        } else {
+            Self::legacy()
+        }
+    }
+
+    pub(super) fn is_chain_bound(&self) -> bool {
+        self.chain_bound
+    }
+
     pub(super) fn encode(&self, bytes: &mut Vec<u8>) -> Result<()> {
+        if !self.chain_bound {
+            bail!("legacy transaction signing has no binary chain domain");
+        }
         bytes.extend_from_slice(b"IUNA-TX");
         bytes.extend_from_slice(&TRANSACTION_SIGNING_FORMAT_VERSION.to_be_bytes());
         encode_bytes(bytes, self.chain_id.as_bytes(), "chain ID")?;
@@ -98,19 +127,13 @@ pub struct MineSearchOutcome {
 impl Transaction {
     pub fn genesis_burn(from: impl Into<String>, amount: Amount) -> Self {
         let from = from.into();
-        Self::genesis_burn_with_change(
-            from,
-            amount,
-            Vec::new(),
-            &super::LaunchProfile::default().profile_id,
-        )
+        Self::genesis_burn_with_change(from, amount, Vec::new())
     }
 
     pub(super) fn genesis_burn_with_allocation(
         from: impl Into<String>,
         amount: Amount,
         allocation: Amount,
-        chain_id: &str,
     ) -> Result<Self> {
         if amount > allocation {
             bail!("genesis burn exceeds allocation");
@@ -125,19 +148,12 @@ impl Transaction {
         } else {
             Vec::new()
         };
-        Ok(Self::genesis_burn_with_change(
-            from, amount, change, chain_id,
-        ))
+        Ok(Self::genesis_burn_with_change(from, amount, change))
     }
 
-    fn genesis_burn_with_change(
-        from: String,
-        amount: Amount,
-        change: Vec<TxOutput>,
-        chain_id: &str,
-    ) -> Self {
+    fn genesis_burn_with_change(from: String, amount: Amount, change: Vec<TxOutput>) -> Self {
         let input = TxInput {
-            outpoint: genesis_allocation_outpoint(chain_id, &from),
+            outpoint: genesis_allocation_outpoint(&from),
             owner: from.clone(),
             signature: "genesis".to_string(),
         };
@@ -310,15 +326,28 @@ impl Transaction {
             bail!("transaction input signature does not match transaction signature");
         }
         let sender = self.sender();
-        let public_key = decode_canonical_hex_array::<PUBLIC_KEY_BYTES>(sender)
-            .with_context(|| format!("invalid public key for {sender}"))?;
-        let signature = decode_canonical_hex_array::<SIGNATURE_BYTES>(self.signature())
-            .context("invalid signature hex")?;
+        let public_key = if domain.is_chain_bound() {
+            decode_canonical_hex_array::<PUBLIC_KEY_BYTES>(sender)
+        } else {
+            decode_hex_array::<PUBLIC_KEY_BYTES>(sender)
+        }
+        .with_context(|| format!("invalid public key for {sender}"))?;
+        let signature = if domain.is_chain_bound() {
+            decode_canonical_hex_array::<SIGNATURE_BYTES>(self.signature())
+        } else {
+            decode_hex_array::<SIGNATURE_BYTES>(self.signature())
+        }
+        .context("invalid signature hex")?;
         let verifying_key =
             VerifyingKey::from_bytes(&public_key).context("invalid transaction public key")?;
         let signature = Signature::from_bytes(&signature);
+        let signing_bytes = if domain.is_chain_bound() {
+            self.signing_bytes(domain)?
+        } else {
+            self.signing_payload().into_bytes()
+        };
         verifying_key
-            .verify(&self.signing_bytes(domain)?, &signature)
+            .verify(&signing_bytes, &signature)
             .context("transaction signature is invalid")
     }
 
@@ -419,7 +448,11 @@ impl UnsignedUtxoTransaction {
         wallet: &Wallet,
         domain: &TransactionSigningDomain,
     ) -> Result<Transaction> {
-        let signature = wallet.sign_bytes(&self.signing_bytes(domain)?);
+        let signature = if domain.is_chain_bound() {
+            wallet.sign_bytes(&self.signing_bytes(domain)?)
+        } else {
+            wallet.sign_payload(&self.canonical())
+        };
         let signed_inputs = self
             .inputs()
             .iter()
@@ -633,6 +666,23 @@ mod tests {
     use super::*;
 
     #[test]
+    fn signing_domain_switches_exactly_at_height_1000() {
+        let before = TransactionSigningDomain::for_height(
+            "activation-chain",
+            "11".repeat(32),
+            crate::domain::TRANSACTION_SIGNING_V1_ACTIVATION_HEIGHT - 1,
+        );
+        let activated = TransactionSigningDomain::for_height(
+            "activation-chain",
+            "11".repeat(32),
+            crate::domain::TRANSACTION_SIGNING_V1_ACTIVATION_HEIGHT,
+        );
+
+        assert!(!before.is_chain_bound());
+        assert!(activated.is_chain_bound());
+    }
+
+    #[test]
     fn signing_format_v1_has_a_stable_typed_binary_vector() {
         let transaction = UnsignedUtxoTransaction::Transfer {
             inputs: vec![UnsignedTxInput {
@@ -714,5 +764,8 @@ mod tests {
         let domain = TransactionSigningDomain::new("iuna-mainnet-v1", "22".repeat(32));
 
         assert!(transaction.verify_signature(&domain).is_err());
+        transaction
+            .verify_signature(&TransactionSigningDomain::legacy())
+            .unwrap();
     }
 }

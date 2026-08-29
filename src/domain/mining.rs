@@ -20,14 +20,24 @@ pub(super) fn mine_signature(
     nonce: u64,
     difficulty_bits: u32,
 ) -> Result<String> {
-    Ok(hex_hash(mine_signing_bytes(
-        domain,
-        recipient,
-        anchor,
-        salt,
-        nonce,
-        difficulty_bits,
-    )?))
+    if domain.is_chain_bound() {
+        Ok(hex_hash(mine_signing_bytes(
+            domain,
+            recipient,
+            anchor,
+            salt,
+            nonce,
+            difficulty_bits,
+        )?))
+    } else {
+        Ok(hex_hash(mine_payload(
+            recipient,
+            anchor,
+            salt,
+            nonce,
+            difficulty_bits,
+        )))
+    }
 }
 
 #[cfg(test)]
@@ -53,6 +63,22 @@ mod tests {
                 12,
             )
             .unwrap()
+        );
+    }
+
+    #[test]
+    fn legacy_mine_signature_keeps_the_original_payload_hash() {
+        assert_eq!(
+            mine_signature(
+                &TransactionSigningDomain::legacy(),
+                "recipient",
+                "anchor",
+                1,
+                2,
+                12,
+            )
+            .unwrap(),
+            "47f9ad353685fdb9b4932cefa9dd1d27f8af70e27eaedf15c4f9ffbbb64300a3"
         );
     }
 }

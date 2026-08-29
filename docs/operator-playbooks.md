@@ -147,12 +147,15 @@ Avoid:
 - deleting or replacing wallets as part of the chain reset;
 - starting before the published genesis hash and release checksum are available.
 
-## Height 1000 Grinding-Resistance Upgrade
+## Height 1000 Consensus Upgrade
 
 Height `1000` is a coordinated consensus activation. At that height, VDF seeds
 start committing to block content and ticket draws stop using the final block
-hash. This preserves blocks below `1000`, but nodes running the earlier rule will
-reject the upgraded chain or build an incompatible fork at activation.
+hash. Transaction signatures and native and Stratum mine proofs also switch to
+chain-bound binary format v1. This preserves blocks, snapshots, and UTXOs below
+`1000`, but nodes running the earlier rule will reject the upgraded chain or
+build an incompatible fork at activation. No database reset, new genesis, or
+migration command is needed for this height activation.
 
 Before height `1000`:
 

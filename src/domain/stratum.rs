@@ -2,7 +2,7 @@ use anyhow::{Context, Result};
 use sha2::{Digest, Sha256};
 
 use super::{
-    HASH_BYTES, TransactionSigningDomain, hex_encode, mine_signing_bytes,
+    HASH_BYTES, TransactionSigningDomain, decode_hex_array, hex_encode, mine_signing_bytes,
     validation::{decode_canonical_hex_array, validate_address, validate_hash},
 };
 
@@ -58,7 +58,14 @@ fn stratum_coinbase_prefix(
     salt: u64,
     difficulty_bits: u32,
 ) -> Result<Vec<u8>> {
-    mine_signing_bytes(domain, recipient, anchor, salt, 0, difficulty_bits)
+    if domain.is_chain_bound() {
+        mine_signing_bytes(domain, recipient, anchor, salt, 0, difficulty_bits)
+    } else {
+        Ok(
+            format!("iuna-stratum-mine:{recipient}:{anchor}:{salt}:{difficulty_bits}:")
+                .into_bytes(),
+        )
+    }
 }
 
 fn stratum_coinbase_bytes(
@@ -92,8 +99,12 @@ pub(super) fn stratum_mine_header_bytes(
 ) -> Result<[u8; 80]> {
     let mut header = [0_u8; STRATUM_MINE_HEADER_BYTES];
     header[0..4].copy_from_slice(&STRATUM_MINE_VERSION);
-    let anchor_bytes = decode_canonical_hex_array::<HASH_BYTES>(anchor)
-        .context("mine transaction anchor is not hex")?;
+    let anchor_bytes = if domain.is_chain_bound() {
+        decode_canonical_hex_array::<HASH_BYTES>(anchor)
+    } else {
+        decode_hex_array::<HASH_BYTES>(anchor)
+    }
+    .context("mine transaction anchor is not hex")?;
     header[4..36].copy_from_slice(&anchor_bytes);
     let merkle_root = double_sha256(&stratum_coinbase_bytes(
         domain,
@@ -127,8 +138,12 @@ pub(super) fn stratum_mine_template(
     let recipient = recipient.into();
     validate_address(&recipient, "mine recipient")?;
     validate_hash(anchor, "mine transaction anchor")?;
-    let anchor_bytes = decode_canonical_hex_array::<HASH_BYTES>(anchor)
-        .context("mine transaction anchor is not hex")?;
+    let anchor_bytes = if domain.is_chain_bound() {
+        decode_canonical_hex_array::<HASH_BYTES>(anchor)
+    } else {
+        decode_hex_array::<HASH_BYTES>(anchor)
+    }
+    .context("mine transaction anchor is not hex")?;
     Ok(StratumMineTemplate {
         recipient: recipient.clone(),
         anchor: anchor.to_string(),

@@ -62,7 +62,7 @@ fn known_chain_output_index(snapshot: &ChainSnapshot) -> BTreeMap<OutPoint, TxOu
             continue;
         }
         outputs.insert(
-            genesis_allocation_outpoint(&snapshot.launch_profile.profile_id, address),
+            genesis_allocation_outpoint(address),
             TxOutput {
                 address: address.clone(),
                 amount: *amount,
@@ -138,8 +138,7 @@ mod tests {
         };
 
         let index = build_ui_chain_index(&snapshot);
-        let outpoint =
-            genesis_allocation_outpoint(&snapshot.launch_profile.profile_id, wallet.address());
+        let outpoint = genesis_allocation_outpoint(wallet.address());
 
         assert_eq!(
             index.outputs.get(&outpoint).map(|output| output.amount),

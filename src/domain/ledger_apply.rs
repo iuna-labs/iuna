@@ -74,7 +74,7 @@ impl Ledger {
         let mut utxo_lineage = self.utxo_lineage.clone();
         let mut lineage_values = self.lineage_values.clone();
         let mut lineage_owners = self.lineage_owners.clone();
-        let signing_domain = self.transaction_signing_domain();
+        let signing_domain = self.transaction_signing_domain_at(block.height);
         let mut signatures = BTreeSet::new();
         for tx in &block.transactions {
             if !signatures.insert(tx.signature()) {
@@ -111,6 +111,7 @@ impl Ledger {
         self.lineage_owners = lineage_owners;
         self.tickets = tickets;
         self.chain.push(block);
+        let next_signing_domain = self.transaction_signing_domain();
         let available = self.utxos.clone();
         let pending = std::mem::take(&mut self.pending);
         self.pending = pending
@@ -119,6 +120,7 @@ impl Ledger {
                 !mined_signatures.contains(tx.signature())
                     && transaction_inputs_available(tx, &available)
                     && self.validate_transaction_terms(tx).is_ok()
+                    && tx.verify_signature(&next_signing_domain).is_ok()
             })
             .collect();
         let orphans = std::mem::take(&mut self.orphans);
@@ -127,6 +129,7 @@ impl Ledger {
             .filter(|tx| {
                 !mined_signatures.contains(tx.signature())
                     && self.validate_transaction_terms(tx).is_ok()
+                    && tx.verify_signature(&next_signing_domain).is_ok()
             })
             .collect();
         self.refresh_pending_pool_byte_counters()?;

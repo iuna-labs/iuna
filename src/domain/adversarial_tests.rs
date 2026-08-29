@@ -1430,7 +1430,7 @@ fn mini_lineage_state(snapshot: &ChainSnapshot) -> Option<MiniLineageState> {
     {
         mini_insert_output(
             &mut state,
-            genesis_allocation_outpoint(&snapshot.launch_profile.profile_id, address),
+            genesis_allocation_outpoint(address),
             TxOutput {
                 address: address.clone(),
                 amount: *amount,

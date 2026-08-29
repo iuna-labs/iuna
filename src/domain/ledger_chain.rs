@@ -50,12 +50,7 @@ impl Ledger {
                     .get(&burn.from)
                     .copied()
                     .unwrap_or_default();
-                Transaction::genesis_burn_with_allocation(
-                    burn.from,
-                    burn.amount,
-                    allocation,
-                    &launch_profile.profile_id,
-                )
+                Transaction::genesis_burn_with_allocation(burn.from, burn.amount, allocation)
             })
             .collect::<Result<Vec<_>>>()?;
         Self::new_with_genesis_transactions(
@@ -74,8 +69,7 @@ impl Ledger {
     ) -> Result<Self> {
         validate_genesis_allocations(&genesis_allocations)?;
         let genesis = build_genesis_block(&genesis_allocations, genesis_transactions);
-        let utxos =
-            utxos_after_genesis(&genesis_allocations, &genesis, &launch_profile.profile_id)?;
+        let utxos = utxos_after_genesis(&genesis_allocations, &genesis)?;
         let tickets = genesis_tickets(&genesis_allocations, &genesis, &launch_profile)?;
         let compact_block_context = if genesis_allocations.is_empty() {
             CompactBlockContext::default()
@@ -142,8 +136,7 @@ impl Ledger {
         if genesis != expected_genesis {
             bail!("chain snapshot genesis does not match its allocations and transactions");
         }
-        let utxos =
-            utxos_after_genesis(&genesis_allocations, &genesis, &launch_profile.profile_id)?;
+        let utxos = utxos_after_genesis(&genesis_allocations, &genesis)?;
         let compact_block_context =
             CompactBlockContext::for_chain(&genesis_allocations, std::slice::from_ref(&genesis))?;
 
@@ -338,7 +331,8 @@ mod tests {
 
     use super::fork_rewrites_finalized_history;
     use crate::domain::{
-        FORK_FINALITY_DEPTH, LaunchProfile, Ledger, StratumMineShare, Transaction, Wallet,
+        FORK_FINALITY_DEPTH, LaunchProfile, Ledger, StratumMineShare,
+        TRANSACTION_SIGNING_V1_ACTIVATION_HEIGHT, Transaction, Wallet,
     };
 
     fn profile(profile_id: &str) -> LaunchProfile {
@@ -352,6 +346,10 @@ mod tests {
     fn ledger_with_profile(allocations: BTreeMap<String, u64>, profile_id: &str) -> Ledger {
         Ledger::new_with_genesis_burns_and_profile(allocations, Vec::new(), 1, profile(profile_id))
             .unwrap()
+    }
+
+    fn set_next_height(ledger: &mut Ledger, next_height: u64) {
+        ledger.chain.last_mut().unwrap().height = next_height.saturating_sub(1);
     }
 
     #[test]
@@ -374,10 +372,12 @@ mod tests {
         ];
 
         for foreign_chain_id in &chain_ids[1..] {
-            let source = ledger_with_profile(allocations.clone(), chain_ids[0]);
+            let mut source = ledger_with_profile(allocations.clone(), chain_ids[0]);
             let mut foreign = ledger_with_profile(allocations.clone(), foreign_chain_id);
+            set_next_height(&mut source, TRANSACTION_SIGNING_V1_ACTIVATION_HEIGHT);
+            set_next_height(&mut foreign, TRANSACTION_SIGNING_V1_ACTIVATION_HEIGHT);
             assert_eq!(source.genesis_hash(), foreign.genesis_hash());
-            assert_ne!(source.utxos, foreign.utxos);
+            assert_eq!(source.utxos, foreign.utxos);
 
             let transfer = source.build_transfer(&alice, bob.address(), 10, 1).unwrap();
             let transfer_error = foreign.submit_transaction(transfer).unwrap_err();
@@ -398,6 +398,21 @@ mod tests {
     }
 
     #[test]
+    fn legacy_signatures_remain_compatible_before_height_1000() {
+        let alice = Wallet::from_seed("pre-activation-replay-alice");
+        let bob = Wallet::from_seed("pre-activation-replay-bob");
+        let allocations = BTreeMap::from([(alice.address().to_string(), 100)]);
+        let mut source = ledger_with_profile(allocations.clone(), "legacy-chain-a");
+        let mut foreign = ledger_with_profile(allocations, "legacy-chain-b");
+        set_next_height(&mut source, TRANSACTION_SIGNING_V1_ACTIVATION_HEIGHT - 1);
+        set_next_height(&mut foreign, TRANSACTION_SIGNING_V1_ACTIVATION_HEIGHT - 1);
+
+        let transfer = source.build_transfer(&alice, bob.address(), 10, 1).unwrap();
+
+        assert!(foreign.submit_transaction(transfer).unwrap());
+    }
+
+    #[test]
     fn signatures_cannot_replay_between_distinct_genesis_hashes() {
         let alice = Wallet::from_seed("genesis-replay-alice");
         let bob = Wallet::from_seed("genesis-replay-bob");
@@ -406,8 +421,10 @@ mod tests {
             (alice.address().to_string(), 100),
             (bob.address().to_string(), 1),
         ]);
-        let source = ledger_with_profile(base_allocations, "same-chain-id");
+        let mut source = ledger_with_profile(base_allocations, "same-chain-id");
         let mut foreign = ledger_with_profile(other_allocations, "same-chain-id");
+        set_next_height(&mut source, TRANSACTION_SIGNING_V1_ACTIVATION_HEIGHT);
+        set_next_height(&mut foreign, TRANSACTION_SIGNING_V1_ACTIVATION_HEIGHT);
         assert_ne!(source.genesis_hash(), foreign.genesis_hash());
 
         let transfer = source.build_transfer(&alice, bob.address(), 10, 1).unwrap();
@@ -424,8 +441,10 @@ mod tests {
     fn mine_proofs_cannot_replay_between_chain_ids() {
         let miner = Wallet::from_seed("mine-replay-miner");
         let allocations = BTreeMap::from([(miner.address().to_string(), 100)]);
-        let source = ledger_with_profile(allocations.clone(), "mine-chain-a");
+        let mut source = ledger_with_profile(allocations.clone(), "mine-chain-a");
         let mut foreign = ledger_with_profile(allocations, "mine-chain-b");
+        set_next_height(&mut source, TRANSACTION_SIGNING_V1_ACTIVATION_HEIGHT);
+        set_next_height(&mut foreign, TRANSACTION_SIGNING_V1_ACTIVATION_HEIGHT);
         assert_eq!(source.genesis_hash(), foreign.genesis_hash());
 
         let mine = source.build_mine(miner.address()).unwrap();
@@ -442,8 +461,10 @@ mod tests {
     fn stratum_mine_proofs_cannot_replay_between_chain_ids() {
         let miner = Wallet::from_seed("stratum-replay-miner");
         let allocations = BTreeMap::from([(miner.address().to_string(), 100)]);
-        let source = ledger_with_profile(allocations.clone(), "stratum-chain-a");
+        let mut source = ledger_with_profile(allocations.clone(), "stratum-chain-a");
         let mut foreign = ledger_with_profile(allocations, "stratum-chain-b");
+        set_next_height(&mut source, TRANSACTION_SIGNING_V1_ACTIVATION_HEIGHT);
+        set_next_height(&mut foreign, TRANSACTION_SIGNING_V1_ACTIVATION_HEIGHT);
         let template = source
             .stratum_mine_template(
                 miner.address(),
@@ -452,15 +473,19 @@ mod tests {
                 source.current_mine_difficulty_bits(),
             )
             .unwrap();
-        let mine = source
-            .build_stratum_mine(
-                template,
-                StratumMineShare {
-                    extranonce2: [0; 4],
-                    header_nonce: [0; 4],
-                },
-            )
-            .unwrap();
+        let mine = (0..u32::MAX)
+            .find_map(|nonce| {
+                source
+                    .build_stratum_mine(
+                        template.clone(),
+                        StratumMineShare {
+                            extranonce2: [0; 4],
+                            header_nonce: nonce.to_le_bytes(),
+                        },
+                    )
+                    .ok()
+            })
+            .expect("test difficulty must yield a Stratum share");
 
         let error = foreign.submit_transaction(mine).unwrap_err();
 
@@ -471,10 +496,11 @@ mod tests {
     fn transaction_hex_casing_cannot_be_malleated_after_signing() {
         let alice = Wallet::from_seed("hex-malleability-alice");
         let bob = Wallet::from_seed("hex-malleability-bob");
-        let ledger = ledger_with_profile(
+        let mut ledger = ledger_with_profile(
             BTreeMap::from([(alice.address().to_string(), 100)]),
             "hex-malleability-chain",
         );
+        set_next_height(&mut ledger, TRANSACTION_SIGNING_V1_ACTIVATION_HEIGHT);
         let transaction = ledger.build_transfer(&alice, bob.address(), 10, 1).unwrap();
 
         let reject = |mutated| {

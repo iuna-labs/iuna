@@ -403,9 +403,17 @@ impl Ledger {
     }
 
     pub(super) fn transaction_signing_domain(&self) -> super::TransactionSigningDomain {
-        super::TransactionSigningDomain::new(
+        self.transaction_signing_domain_at(self.height().saturating_add(1))
+    }
+
+    pub(super) fn transaction_signing_domain_at(
+        &self,
+        height: u64,
+    ) -> super::TransactionSigningDomain {
+        super::TransactionSigningDomain::for_height(
             self.launch_profile.profile_id.clone(),
             self.genesis_hash().to_string(),
+            height,
         )
     }
 

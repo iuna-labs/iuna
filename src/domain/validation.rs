@@ -2,34 +2,33 @@ use anyhow::{Context, Result, bail};
 
 use super::{
     HASH_BYTES, PUBLIC_KEY_BYTES, SIGNATURE_BYTES, Transaction, TxInput, TxOutput, decode_hex,
-    hex_encode, stratum::STRATUM_MINE_HEADER_BYTES,
+    decode_hex_array, hex_encode, stratum::STRATUM_MINE_HEADER_BYTES,
 };
 
 pub fn validate_address(address: &str, label: &str) -> Result<()> {
-    decode_canonical_hex_array::<PUBLIC_KEY_BYTES>(address)
+    decode_hex_array::<PUBLIC_KEY_BYTES>(address)
         .with_context(|| format!("invalid {label} address"))?;
     Ok(())
 }
 
 pub(super) fn validate_hash(hash: &str, label: &str) -> Result<()> {
-    decode_canonical_hex_array::<HASH_BYTES>(hash).with_context(|| format!("invalid {label}"))?;
+    decode_hex_array::<HASH_BYTES>(hash).with_context(|| format!("invalid {label}"))?;
     Ok(())
 }
 
 pub(super) fn validate_signature(signature: &str, label: &str) -> Result<()> {
-    decode_canonical_hex_array::<SIGNATURE_BYTES>(signature)
-        .with_context(|| format!("invalid {label}"))?;
+    decode_hex_array::<SIGNATURE_BYTES>(signature).with_context(|| format!("invalid {label}"))?;
     Ok(())
 }
 
 pub(super) fn validate_stratum_header(header: &str) -> Result<()> {
-    decode_canonical_hex_array::<STRATUM_MINE_HEADER_BYTES>(header)
+    decode_hex_array::<STRATUM_MINE_HEADER_BYTES>(header)
         .context("invalid mine transaction proof header")?;
     Ok(())
 }
 
 pub(super) fn validate_protocol_id(value: &str, label: &str) -> Result<()> {
-    let bytes = decode_canonical_hex(value).with_context(|| format!("invalid {label}"))?;
+    let bytes = decode_hex(value).with_context(|| format!("invalid {label}"))?;
     match bytes.len() {
         HASH_BYTES | SIGNATURE_BYTES => Ok(()),
         length => bail!("invalid {label}: expected 32 or 64 bytes, got {length}"),
@@ -190,12 +189,12 @@ mod tests {
     }
 
     #[test]
-    fn validators_reject_noncanonical_uppercase_hex() {
-        assert!(validate_address(&"AB".repeat(32), "test").is_err());
-        assert!(validate_hash(&"AB".repeat(32), "test").is_err());
-        assert!(validate_signature(&"AB".repeat(64), "test").is_err());
-        assert!(validate_stratum_header(&"AB".repeat(80)).is_err());
-        assert!(validate_protocol_id(&"AB".repeat(32), "test").is_err());
+    fn validators_keep_accepting_legacy_uppercase_hex() {
+        assert!(validate_address(&"AB".repeat(32), "test").is_ok());
+        assert!(validate_hash(&"AB".repeat(32), "test").is_ok());
+        assert!(validate_signature(&"AB".repeat(64), "test").is_ok());
+        assert!(validate_stratum_header(&"AB".repeat(80)).is_ok());
+        assert!(validate_protocol_id(&"AB".repeat(32), "test").is_ok());
     }
 
     #[test]
