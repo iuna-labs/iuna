@@ -86,20 +86,6 @@
       color: rgba(244, 240, 232, 0.58);
     }
 
-    button {
-      margin-top: 1.25rem;
-      border: 1px solid rgba(244, 240, 232, 0.2);
-      border-radius: 0.5rem;
-      padding: 0.72rem 0.95rem;
-      background: rgba(244, 240, 232, 0.08);
-      color: #f4f0e8;
-      font: inherit;
-      cursor: pointer;
-    }
-
-    button:hover {
-      background: rgba(244, 240, 232, 0.13);
-    }
   </style>
 </head>
 <body>
@@ -113,12 +99,10 @@
     <h1>Starting iuna</h1>
     <p>The local node is starting. The management UI opens here when it is ready.</p>
     <div id="status" class="status">Waiting for http://127.0.0.1:18661</div>
-    <button id="open" type="button">Open Management UI</button>
   </main>
   <script>
     const managementUrl = "http://127.0.0.1:18661/";
     const statusEl = document.getElementById("status");
-    const openButton = document.getElementById("open");
     let attempts = 0;
 
     async function waitForNode() {
@@ -131,10 +115,6 @@
         window.setTimeout(waitForNode, 700);
       }
     }
-
-    openButton.addEventListener("click", () => {
-      window.location.href = managementUrl;
-    });
 
     waitForNode();
   </script>
