@@ -1,5 +1,5 @@
 use std::{
-    collections::BTreeMap,
+    collections::{BTreeMap, BTreeSet},
     time::{SystemTime, UNIX_EPOCH},
 };
 
@@ -18,6 +18,7 @@ pub struct Ledger {
     pub(super) lineage_values: BTreeMap<UtxoLineageRoot, Amount>,
     pub(super) lineage_owners: LineageOwnerValues,
     pub(super) tickets: Vec<BurnTicket>,
+    pub(super) mined_transaction_ids: BTreeSet<String>,
     pub(super) pending: Vec<Transaction>,
     pub(super) orphans: Vec<Transaction>,
     pub(super) pending_bytes: usize,

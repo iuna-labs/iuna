@@ -47,11 +47,12 @@ The current mainnet-candidate parameter set is intentionally close to Bitcoin wh
 - burn committee lineage maturity: `20` blocks;
 - fallback ticket invalidation activation height: `300`;
 - grinding-resistance activation height: `1000`;
-- transaction signing format v1 activation height: `1000`.
+- transaction signing format v1 activation height: `1000`;
+- transaction replay-protection activation height: `1000`.
 
 Changing any value in this section requires a conscious mainnet-candidate reset or later hard-fork process.
 
-Transaction signing format v1 and objective finality activate automatically at height `1000`. Existing chain state and history remain valid; operators only need to upgrade every consensus node before activation. A chain-ID or genesis change remains a separate consensus reset.
+Transaction signing format v1, chain-wide transaction replay protection, and objective finality activate automatically at height `1000`. Existing chain state and history remain valid; operators only need to upgrade every consensus node before activation. A chain-ID or genesis change remains a separate consensus reset.
 
 The consensus block-size limit is the exact number of bytes produced by the compact snapshot v6 block-body encoder when the block is appended to its parent chain. The encoder's reference tables are seeded by genesis allocations and extended in chain order, so all nodes calculate the same context-dependent size. The snapshot header, launch profile, block-count field, SQLite row metadata, and SQLite page overhead are not charged to an individual block.
 
@@ -109,6 +110,15 @@ Burn and transfer fees are chosen by the sender. Mine action reward and mine act
 At height `1000`, every transfer, burn, and mine action becomes cryptographically scoped to one chain. Its signing or proof preimage starts with the fixed `IUNA-TX` type tag, the big-endian signing-format version `1`, a length-prefixed UTF-8 chain ID, and the length-prefixed 32-byte genesis block hash. The remaining payload uses an explicit one-byte transaction type and canonical binary fields: big-endian fixed-width integers, length-prefixed decoded hashes, signatures and Ed25519 keys, and ordered input/output counts. JSON spelling, field order, and separators never enter the sighash. Hexadecimal fields committed by format v1 must use canonical lowercase encoding; alternate casing is rejected during signature or proof validation.
 
 Transfers and burns use Ed25519 over this binary preimage. Native and Stratum mine proofs commit the same domain and logical mine fields before proof-specific hashing. Validators reconstruct the domain from their local launch profile and genesis block, so a transaction valid on candidate, mainnet, testnet, or another genesis fails signature/proof validation everywhere else. Blocks below height `1000` retain the legacy text signatures and proof preimages permanently so existing history and snapshots replay unchanged. Blocks at height `1000` and later accept only format v1; there is no post-activation legacy fallback.
+
+Height `1000` also activates chain-wide transaction-ID uniqueness. A block at or
+above the activation height is invalid if any transaction ID already occurred in
+an earlier block on that chain. This is especially important for inputless mine
+actions: without the historical check, a previously included proof could be
+replayed after its reward output was spent, recreating the same outpoint and
+inflating supply. Pre-activation blocks retain their original validation rules,
+while the first activated block rejects replays of both legacy history and newer
+transactions.
 
 Synthetic genesis-allocation outpoints retain their original address-based derivation for the lifetime of the chain. Changing them at activation would rewrite the existing UTXO set, so chain isolation is introduced only in new signatures and proofs.
 
@@ -210,6 +220,10 @@ Difficulty targets about one mine action per block:
 This keeps issuance separate from finalization. PoW miners compete to create mine actions; burn-ticket finalizers decide blocks.
 
 A block may contain at most `2` mine actions for the same anchor. This leaves room for the difficulty retarget to move upward when PoW regularly fills both slots, while still bounding issuance from any single anchor.
+
+Each mine proof may be included only once in the chain from height `1000`, under
+the transaction-ID uniqueness rule above. Spending a mine reward never makes
+its proof eligible for inclusion again.
 
 ## Fair Burn Inclusion
 

@@ -76,6 +76,11 @@ impl Ledger {
         } else {
             CompactBlockContext::for_chain(&genesis_allocations, std::slice::from_ref(&genesis))?
         };
+        let mined_transaction_ids = genesis
+            .transactions
+            .iter()
+            .map(|transaction| transaction.signature().to_string())
+            .collect();
         Ok(Self {
             chain: vec![genesis],
             genesis_allocations: genesis_allocations.clone(),
@@ -84,6 +89,7 @@ impl Ledger {
             lineage_values: BTreeMap::new(),
             lineage_owners: BTreeMap::new(),
             tickets,
+            mined_transaction_ids,
             pending: Vec::new(),
             orphans: Vec::new(),
             pending_bytes: 0,
@@ -140,6 +146,11 @@ impl Ledger {
         let utxos = utxos_after_genesis(&genesis_allocations, &genesis)?;
         let compact_block_context =
             CompactBlockContext::for_chain(&genesis_allocations, std::slice::from_ref(&genesis))?;
+        let mined_transaction_ids = genesis
+            .transactions
+            .iter()
+            .map(|transaction| transaction.signature().to_string())
+            .collect();
 
         let mut ledger = Self {
             chain: vec![genesis],
@@ -149,6 +160,7 @@ impl Ledger {
             lineage_values: BTreeMap::new(),
             lineage_owners: BTreeMap::new(),
             tickets: Vec::new(),
+            mined_transaction_ids,
             pending: Vec::new(),
             orphans: Vec::new(),
             pending_bytes: 0,

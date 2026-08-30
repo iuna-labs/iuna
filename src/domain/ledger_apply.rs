@@ -14,9 +14,9 @@ use super::ticket::{
 use super::transaction::transaction_inputs_available;
 use super::{
     Amount, BLOCK_MEDIAN_TIME_PAST_WINDOW, Block, BurnBundleSection, FinalityCheckpoint,
-    FinalizerMode, Ledger, MAX_BLOCK_TIMESTAMP_FUTURE_DRIFT_MS, Transaction,
-    insert_output_with_lineage, output_lineage_root_for_transaction, spend_inputs_with_lineage,
-    unix_now_ms, verify_vdf,
+    FinalizerMode, Ledger, MAX_BLOCK_TIMESTAMP_FUTURE_DRIFT_MS,
+    TRANSACTION_REPLAY_PROTECTION_ACTIVATION_HEIGHT, Transaction, insert_output_with_lineage,
+    output_lineage_root_for_transaction, spend_inputs_with_lineage, unix_now_ms, verify_vdf,
 };
 
 impl Ledger {
@@ -117,6 +117,8 @@ impl Ledger {
         self.lineage_values = lineage_values;
         self.lineage_owners = lineage_owners;
         self.tickets = tickets;
+        self.mined_transaction_ids
+            .extend(mined_signatures.iter().cloned());
         self.chain.push(block);
         if let Some(checkpoint) = certified_parent {
             self.objective_finality_checkpoint = Some(checkpoint);
@@ -148,6 +150,20 @@ impl Ledger {
         Ok(())
     }
 
+    fn ensure_block_transactions_are_not_replays(&self, block: &Block) -> Result<()> {
+        if block.height < TRANSACTION_REPLAY_PROTECTION_ACTIVATION_HEIGHT {
+            return Ok(());
+        }
+        if block
+            .transactions
+            .iter()
+            .any(|transaction| self.mined_transaction_ids.contains(transaction.signature()))
+        {
+            bail!("block replays a previously mined transaction");
+        }
+        Ok(())
+    }
+
     fn precheck_block_without_vdf_at(&self, block: &Block, now_ms: u64) -> Result<bool> {
         if block.height <= self.tip().height {
             let existing = self
@@ -176,6 +192,7 @@ impl Ledger {
         if block.compute_hash() != block.hash {
             bail!("block hash is invalid");
         }
+        self.ensure_block_transactions_are_not_replays(block)?;
         if block.reward != self.expected_reward_for_block(block)? {
             bail!("block reward is invalid");
         }
@@ -343,6 +360,123 @@ mod tests {
     use std::collections::BTreeMap;
 
     use super::*;
+    use crate::domain::{BurnTicket, GenesisBurn, MICRO_IUNA, Wallet, run_vdf};
+
+    fn mine_transaction(signature: &str) -> Transaction {
+        Transaction::Mine {
+            recipient: "1".repeat(64),
+            anchor: "2".repeat(64),
+            salt: 1,
+            nonce: 1,
+            difficulty_bits: 10,
+            proof_header: None,
+            signature: signature.to_string(),
+        }
+    }
+
+    #[test]
+    fn historical_mine_replay_is_rejected_from_height_1000() {
+        let signature = "3".repeat(64);
+        let mut ledger = Ledger::new(BTreeMap::new(), 1);
+        ledger.mined_transaction_ids.insert(signature.clone());
+        let mut block = ledger.tip().clone();
+        block.transactions = vec![mine_transaction(&signature)];
+
+        block.height = TRANSACTION_REPLAY_PROTECTION_ACTIVATION_HEIGHT - 1;
+        ledger
+            .ensure_block_transactions_are_not_replays(&block)
+            .unwrap();
+
+        block.height = TRANSACTION_REPLAY_PROTECTION_ACTIVATION_HEIGHT;
+        assert!(
+            ledger
+                .ensure_block_transactions_are_not_replays(&block)
+                .unwrap_err()
+                .to_string()
+                .contains("replays a previously mined transaction")
+        );
+    }
+
+    #[test]
+    fn activated_block_validation_rejects_replayed_mine_proof() {
+        let wallet = Wallet::from_seed("activated-mine-replay-wallet");
+        let mut ledger = Ledger::new_with_genesis_burns(
+            BTreeMap::from([(wallet.address().to_string(), 10 * MICRO_IUNA)]),
+            vec![GenesisBurn::new(wallet.address(), MICRO_IUNA)],
+            1,
+        )
+        .unwrap();
+        ledger.chain.last_mut().unwrap().height =
+            TRANSACTION_REPLAY_PROTECTION_ACTIVATION_HEIGHT - 1;
+        ledger.tickets = vec![BurnTicket {
+            id: "5".repeat(64),
+            owner: wallet.address().to_string(),
+            amount: MICRO_IUNA,
+            eligible_from_height: TRANSACTION_REPLAY_PROTECTION_ACTIVATION_HEIGHT,
+            eligible_until_height: TRANSACTION_REPLAY_PROTECTION_ACTIVATION_HEIGHT,
+        }];
+
+        let burn = ledger.build_burn(&wallet, 1, 1).unwrap();
+        ledger.submit_transaction(burn).unwrap();
+        let mine = ledger.build_mine(wallet.address()).unwrap();
+        let replayed_id = mine.signature().to_string();
+        ledger.submit_transaction(mine).unwrap();
+        let prepared = ledger.prepare_next_block(wallet.address(), 1).unwrap();
+        let block = prepared.finish(&wallet, "test-vdf-output".to_string());
+        assert_eq!(
+            block.height,
+            TRANSACTION_REPLAY_PROTECTION_ACTIVATION_HEIGHT
+        );
+
+        ledger.mined_transaction_ids.insert(replayed_id);
+        let error = ledger
+            .apply_preverified_block_at(block, 1)
+            .unwrap_err()
+            .to_string();
+
+        assert!(error.contains("replays a previously mined transaction"));
+    }
+
+    #[test]
+    fn applied_blocks_and_snapshot_restore_index_mined_transaction_ids() {
+        let wallet = Wallet::from_seed("replay-index-genesis-wallet");
+        let mut ledger = Ledger::new_with_genesis_burns(
+            BTreeMap::from([(wallet.address().to_string(), 10 * MICRO_IUNA)]),
+            vec![GenesisBurn::new(wallet.address(), MICRO_IUNA)],
+            1,
+        )
+        .unwrap();
+        let genesis_transaction_id = ledger.chain[0].transactions[0].signature().to_string();
+        let burn = ledger.build_burn(&wallet, 1, 1).unwrap();
+        ledger.submit_transaction(burn).unwrap();
+        let mine = ledger.build_mine(wallet.address()).unwrap();
+        let mine_transaction_id = mine.signature().to_string();
+        ledger.submit_transaction(mine).unwrap();
+        let prepared = ledger.prepare_next_block(wallet.address(), 1).unwrap();
+        let vdf_output = run_vdf(prepared.vdf_seed(), prepared.vdf_rounds());
+        let block = prepared.finish(&wallet, vdf_output);
+        ledger.apply_preverified_block_at(block, 1).unwrap();
+
+        assert!(
+            ledger
+                .mined_transaction_ids
+                .contains(&genesis_transaction_id)
+        );
+        assert!(ledger.mined_transaction_ids.contains(&mine_transaction_id));
+        let restored = Ledger::from_persisted_snapshot(ledger.snapshot()).unwrap();
+        assert!(
+            restored
+                .mined_transaction_ids
+                .contains(&genesis_transaction_id)
+        );
+        assert!(
+            restored
+                .mined_transaction_ids
+                .contains(&mine_transaction_id)
+        );
+        assert!(restored.has_transaction(&genesis_transaction_id));
+        assert!(restored.has_transaction(&mine_transaction_id));
+    }
 
     #[test]
     fn median_time_past_uses_the_median_of_the_latest_eleven_blocks() {

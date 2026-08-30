@@ -549,7 +549,12 @@ impl Ledger {
     }
 
     pub fn has_transaction(&self, signature: &str) -> bool {
-        self.transaction_by_signature(signature).is_some()
+        self.mined_transaction_ids.contains(signature)
+            || self
+                .pending
+                .iter()
+                .chain(self.orphans.iter())
+                .any(|transaction| transaction.signature() == signature)
     }
 
     pub fn pending_mine_count_for_anchor(&self, anchor: &str) -> usize {

@@ -66,6 +66,14 @@ and boundary/replay tests cover pre-activation compatibility, candidate/mainnet/
 testnet IDs, distinct genesis hashes, native and Stratum proofs, and hexadecimal
 casing malleability under format v1.
 
+Chain-wide transaction-ID replay protection activates at the same height.
+Validators maintain an index reconstructed from genesis/snapshots and reject an
+activated block when any transaction ID already exists in its history. This
+closes an issuance bug where an inputless mine proof could be included again
+after its original reward outpoint had been spent, recreating the output. Tests
+cover the activation boundary, the full block-validation path, and index rebuild
+from a persisted snapshot.
+
 Evidence already in the tree:
 
 - focused adversarial tests for zero-fee burns, bundle import ordering,
@@ -259,9 +267,10 @@ see which revision was tested.
   advisory); iuna does not call that iterator API directly. Reassess this
   transitive stack on every Tauri upgrade and no later than 2026-11-30.
 - Height `1000` activation: the release activates both grinding resistance and
-  transaction signing format v1 automatically. All candidate nodes must upgrade
-  before activation; the height activation itself requires no chain-state reset
-  or operator migration command, but mixed versions will split at height `1000`.
+  transaction signing format v1 plus chain-wide transaction-ID replay protection
+  automatically. All candidate nodes must upgrade before activation; the height
+  activation itself requires no chain-state reset or operator migration command,
+  but mixed versions will split at height `1000`.
 
 ## Sign-Off Table
 

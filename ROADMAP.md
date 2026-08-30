@@ -41,6 +41,8 @@ These items are not protocol rules. They are the attack and reliability checks t
 - [x] Burn bundle relay cannot import embedded burns before bundle metadata, membership, signature, fee ordering, and size are prechecked.
 - [x] Block validation with burn attestations remains independent of local mempool contents, including empty and conflicting mempools.
 - [x] Post-genesis transactions cannot spend with `genesis` input signatures.
+- [x] From height 1000, previously mined transaction IDs cannot be replayed; in
+  particular, spending a mine reward cannot make its inputless proof mint again.
 - [x] P2P envelope item limits reject batches only above their configured boundaries.
 - [x] Stratum endpoint has explicit DoS limits: maximum line size, maximum jobs per session, idle timeout, and connection/session caps.
 - [x] Fork and snapshot adversarial tests cover legacy finality, post-height-1000 objective checkpoints, deterministic conflicting-certificate recovery, same-height leader-quality choice, invalid late snapshot blocks, and pending transaction carry-forward after reorg.
