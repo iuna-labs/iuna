@@ -1,10 +1,12 @@
 use anyhow::{Context, Result};
 
-use super::helpers::{allowed_recovery_vdf_rank_count, recovery_vdf_sample_percent};
+use super::helpers::{
+    allowed_recovery_vdf_rank_count, converge_fee_by_byte, recovery_vdf_sample_percent,
+};
 use super::{
-    AUTO_BLOCK_ANCHOR_BURN_FEE, AUTO_PLAINTEXT_BURN_BEFORE_RECOVERY_MS, AutoMineOutcome,
-    AutoMinePlan, BURN_BUNDLE_COLLECTION_MS, GossipEnvelope, Ledger,
-    MIN_AUTO_BLOCK_ANCHOR_BURN_AMOUNT, NodeCore, PreparedBlock, Transaction, run_vdf,
+    AUTO_PLAINTEXT_BURN_BEFORE_RECOVERY_MS, AutoMineOutcome, AutoMinePlan,
+    BURN_BUNDLE_COLLECTION_MS, GossipEnvelope, Ledger, MIN_AUTO_BLOCK_ANCHOR_BURN_AMOUNT, NodeCore,
+    PreparedBlock, Transaction, run_vdf,
 };
 use crate::domain::{Amount, BurnCommitteeMember, FinalizerMode};
 
@@ -318,30 +320,31 @@ impl NodeCore {
 
         let ledger = self.wallet_anchor_build_ledger()?;
         let wallet = self.wallet.unlocked()?;
+        let available_utxos = ledger.available_utxos_for_address(wallet.address())?;
         // The plaintext anchor is the block's automatic burn when one is configured.
         // Keep a one-micro-IUNA anchor when automatic finalization is enabled with a
         // zero target, because the finalizer still needs a local burn to anchor.
         let anchor_burn_amount = self.burn_per_block.max(MIN_AUTO_BLOCK_ANCHOR_BURN_AMOUNT);
-        let required = anchor_burn_amount
-            .checked_add(AUTO_BLOCK_ANCHOR_BURN_FEE)
-            .context("automatic finalizer anchor burn amount plus fee overflows")?;
-        let outpoint = ledger
-            .available_utxos_for_address(wallet.address())?
-            .into_iter()
-            .filter(|(_, output)| output.amount >= required)
-            .min_by_key(|(_, output)| output.amount)
-            .map(|(outpoint, _)| outpoint);
-        let burn = match outpoint {
-            Some(outpoint) => ledger.build_burn_with_inputs(
-                wallet,
-                anchor_burn_amount,
-                AUTO_BLOCK_ANCHOR_BURN_FEE,
-                &[outpoint],
-            ),
-            None => ledger.build_burn(wallet, anchor_burn_amount, AUTO_BLOCK_ANCHOR_BURN_FEE),
-        };
-        let burn = match burn {
-            Ok(burn) => burn,
+        let burn = match converge_fee_by_byte(self.burn_fee, |fee| {
+            let required = anchor_burn_amount
+                .checked_add(fee)
+                .context("automatic finalizer anchor burn amount plus fee overflows")?;
+            let outpoint = available_utxos
+                .iter()
+                .filter(|(_, output)| output.amount >= required)
+                .min_by_key(|(_, output)| output.amount)
+                .map(|(outpoint, _)| outpoint);
+            match outpoint {
+                Some(outpoint) => ledger.build_burn_with_inputs(
+                    wallet,
+                    anchor_burn_amount,
+                    fee,
+                    std::slice::from_ref(outpoint),
+                ),
+                None => ledger.build_burn(wallet, anchor_burn_amount, fee),
+            }
+        }) {
+            Ok((burn, _)) => burn,
             Err(error) => {
                 self.last_auto_anchor_burn_height = Some(current_height);
                 return Err(error).context("automatic finalizer anchor burn failed");
@@ -647,7 +650,7 @@ mod tests {
         app::{GossipEnvelope, InMemoryNetwork},
         domain::{
             BurnBundle, BurnCommitteeMember, FinalizerMode, GenesisBurn, Ledger, MICRO_IUNA,
-            Wallet, run_vdf,
+            Transaction, Wallet, run_vdf,
         },
     };
     use tempfile::tempdir;
@@ -958,11 +961,56 @@ mod tests {
 
         node.publish_burn_bundle_for_next_block().unwrap();
 
-        assert!(
-            node.usable_burn_bundles()
-                .iter()
-                .any(|bundle| bundle.member == wallet.address() && !bundle.burns.is_empty())
+        let bundles = node.usable_burn_bundles();
+        let bundled_anchor = bundles
+            .iter()
+            .find(|bundle| bundle.member == wallet.address())
+            .and_then(|bundle| bundle.burns.first())
+            .expect("the local anchor should be exposed through the committee bundle");
+        assert_eq!(
+            bundled_anchor.fee(),
+            bundled_anchor.economic_size_bytes() as u64
         );
+    }
+
+    #[test]
+    fn local_anchor_burn_stores_total_fee_derived_from_configured_fee_rate() {
+        let wallet = Wallet::from_seed("local-anchor-fee-rate-wallet");
+        let ledger = funded_ledger(std::slice::from_ref(&wallet));
+        let fee_per_byte = 100;
+        let mut node = NodeCore::from_ledger_with_burn_fee_and_enabled(
+            wallet,
+            ledger,
+            true,
+            3_000,
+            fee_per_byte,
+        );
+
+        node.prepare_automatic_burn(1).unwrap();
+
+        let burn = node
+            .local_block_anchor_burn
+            .as_ref()
+            .map(|(_, burn)| burn)
+            .expect("selected finalizer should prepare a local anchor");
+        assert_eq!(burn.amount(), 3_000);
+        assert_eq!(burn.fee(), fee_per_byte * burn.economic_size_bytes() as u64);
+        assert_ne!(burn.fee(), fee_per_byte);
+        let required = burn.amount().checked_add(burn.fee()).unwrap();
+        let expected_outpoint = node
+            .ledger()
+            .available_utxos_for_address(node.wallet_address())
+            .unwrap()
+            .into_iter()
+            .filter(|(_, output)| output.amount >= required)
+            .min_by_key(|(_, output)| output.amount)
+            .map(|(outpoint, _)| outpoint)
+            .expect("fixture should contain a single UTXO large enough for the burn");
+        let Transaction::Burn { inputs, .. } = burn else {
+            panic!("local anchor should be a burn transaction");
+        };
+        assert_eq!(inputs.len(), 1);
+        assert_eq!(inputs[0].outpoint, expected_outpoint);
     }
 
     #[test]
