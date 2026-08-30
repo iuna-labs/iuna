@@ -24,7 +24,13 @@ tokio = { version = "1.45.1", features = ["full"] }
 kyn-vdf = "=0.1.1"
 
 [features]
+e2e = []
 fuzzing = []
+
+[[bin]]
+name = "iuna-e2e-checkpoint"
+path = "src/bin/iuna-e2e-checkpoint.rs"
+required-features = ["e2e"]
 
 [dev-dependencies]
 proptest = "1.6.0"

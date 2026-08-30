@@ -8,7 +8,10 @@ pub const DEFAULT_MINE_FEE: Amount = MINE_FINALIZER_FEE;
 pub const DEFAULT_TRANSACTION_FEE: Amount = MICRO_IUNA;
 pub const DEFAULT_FEE_PER_BYTE: Amount = 1;
 pub const MAX_BLOCK_BYTES: usize = 1_000_000;
+#[cfg(not(feature = "e2e"))]
 pub const VDF_TARGET_BLOCK_MS: u64 = 10 * 60 * 1_000;
+#[cfg(feature = "e2e")]
+pub const VDF_TARGET_BLOCK_MS: u64 = 5_000;
 pub const RECOVERY_BLOCK_DELAY_MS: u64 = VDF_TARGET_BLOCK_MS * 6;
 pub const MAX_VDF_ROUNDS: u64 = i64::MAX as u64;
 pub const MINE_DIFFICULTY_BITS: u32 = 12;
@@ -58,7 +61,10 @@ mod tests {
         assert_eq!(MINE_REWARD, MICRO_IUNA);
         assert_eq!(MINE_FINALIZER_FEE, MICRO_IUNA);
         assert_eq!(MAX_BLOCK_BYTES, 1_000_000);
+        #[cfg(not(feature = "e2e"))]
         assert_eq!(VDF_TARGET_BLOCK_MS, 10 * 60 * 1_000);
+        #[cfg(feature = "e2e")]
+        assert_eq!(VDF_TARGET_BLOCK_MS, 5_000);
         assert_eq!(RECOVERY_BLOCK_DELAY_MS, 6 * VDF_TARGET_BLOCK_MS);
         assert_eq!(MINE_DIFFICULTY_BITS, 12);
         assert_eq!(MINE_ACTIONS_PER_ANCHOR_LIMIT, 2);

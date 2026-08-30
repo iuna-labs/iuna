@@ -1,0 +1,67 @@
+{
+  "format": 1,
+  "name": "pre-fallback-invalidation",
+  "height": 299,
+  "tip_hash": "a20f7af9100ebaf65edb3acfee28a283fb4c1898f6591e8bbfb63f8923ee98c0",
+  "profile_id": "iuna-local-e2e-5s-v1",
+  "target_block_ms": 5000,
+  "source_height": 1002,
+  "nodes": {
+    "bootstrap": {
+      "height": 299,
+      "tip_hash": "a20f7af9100ebaf65edb3acfee28a283fb4c1898f6591e8bbfb63f8923ee98c0",
+      "updated_at_ms": 1788119372099
+    },
+    "node2": {
+      "height": 299,
+      "tip_hash": "a20f7af9100ebaf65edb3acfee28a283fb4c1898f6591e8bbfb63f8923ee98c0",
+      "updated_at_ms": 1788119372099
+    },
+    "node3": {
+      "height": 299,
+      "tip_hash": "a20f7af9100ebaf65edb3acfee28a283fb4c1898f6591e8bbfb63f8923ee98c0",
+      "updated_at_ms": 1788119372099
+    },
+    "node4": {
+      "height": 299,
+      "tip_hash": "a20f7af9100ebaf65edb3acfee28a283fb4c1898f6591e8bbfb63f8923ee98c0",
+      "updated_at_ms": 1788119372099
+    },
+    "node5": {
+      "height": 299,
+      "tip_hash": "a20f7af9100ebaf65edb3acfee28a283fb4c1898f6591e8bbfb63f8923ee98c0",
+      "updated_at_ms": 1788119372099
+    },
+    "node6": {
+      "height": 299,
+      "tip_hash": "a20f7af9100ebaf65edb3acfee28a283fb4c1898f6591e8bbfb63f8923ee98c0",
+      "updated_at_ms": 1788119372099
+    }
+  },
+  "sha256": {
+    "bootstrap/chain.sqlite3": "bdc6893efdb63a763a4f39f46951c85ca10cd163ff8675a83b9f3807b61c8c07",
+    "bootstrap/config.json": "ee490011fee4bad2a08641cca4710efad5ee0cc7ff0f418e9b6b3b97f6d64c8e",
+    "bootstrap/ui_data.sqlite3": "04e4b2c870a0f3e774362fdeab16fb253e3664719fe9072f982b4d67f15e8f61",
+    "bootstrap/wallet.json": "9e545dee2d7d8c430a301fd9cc4530467c6ba36787d2407ec31eee96eee88874",
+    "node2/chain.sqlite3": "bdc6893efdb63a763a4f39f46951c85ca10cd163ff8675a83b9f3807b61c8c07",
+    "node2/config.json": "5f38677b8e290f412a2ff5833518a1b1fec75d9c8ab9dbc72b1762fd889e33c8",
+    "node2/ui_data.sqlite3": "04e4b2c870a0f3e774362fdeab16fb253e3664719fe9072f982b4d67f15e8f61",
+    "node2/wallet.json": "80c81d94fa958deb3212c3ae52bcfcdcf1f2ce446ec3c4addcfb8ffa6e669a4b",
+    "node3/chain.sqlite3": "bdc6893efdb63a763a4f39f46951c85ca10cd163ff8675a83b9f3807b61c8c07",
+    "node3/config.json": "63a8c0d8b06091dbfb899bba7f6603497c44e7af1bee9f21cc5152a3fafc037d",
+    "node3/ui_data.sqlite3": "04e4b2c870a0f3e774362fdeab16fb253e3664719fe9072f982b4d67f15e8f61",
+    "node3/wallet.json": "15d4b71da0e31f6045fc6b98b7d3414f7925556932de42b52bacd35e670c1c86",
+    "node4/chain.sqlite3": "bdc6893efdb63a763a4f39f46951c85ca10cd163ff8675a83b9f3807b61c8c07",
+    "node4/config.json": "f9bed39ec29fbff17fb6155e718454706991603d5993632c6f6b18cbf3d80fa4",
+    "node4/ui_data.sqlite3": "04e4b2c870a0f3e774362fdeab16fb253e3664719fe9072f982b4d67f15e8f61",
+    "node4/wallet.json": "204ff6327b0c5da43418f704322fcfe8de09f799239896146bfb0320d42e3780",
+    "node5/chain.sqlite3": "bdc6893efdb63a763a4f39f46951c85ca10cd163ff8675a83b9f3807b61c8c07",
+    "node5/config.json": "0bd460df616c8effb1091625887cab053d95e9f30afbc4237e7e5923c0cd6b73",
+    "node5/ui_data.sqlite3": "04e4b2c870a0f3e774362fdeab16fb253e3664719fe9072f982b4d67f15e8f61",
+    "node5/wallet.json": "4612e7e2143a11b5834b89e1dbaebb30d9c898930bfeb3eeedb347771b827808",
+    "node6/chain.sqlite3": "bdc6893efdb63a763a4f39f46951c85ca10cd163ff8675a83b9f3807b61c8c07",
+    "node6/config.json": "1d6aaba498ee1f273c89d7f84806318cf5f15c36088346460236e114a0fd73bb",
+    "node6/ui_data.sqlite3": "04e4b2c870a0f3e774362fdeab16fb253e3664719fe9072f982b4d67f15e8f61",
+    "node6/wallet.json": "1eaf0a87b89c5a36a3f43162894922176412817f468e907faa5970f1656a04f7"
+  }
+}

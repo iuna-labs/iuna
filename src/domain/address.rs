@@ -16,7 +16,7 @@ pub enum AddressNetwork {
 
 impl AddressNetwork {
     pub fn from_profile_id(profile_id: &str) -> Self {
-        if profile_id == "iuna-local-testnet-v1" {
+        if matches!(profile_id, "iuna-local-testnet-v1" | "iuna-local-e2e-5s-v1") {
             Self::Testnet
         } else {
             Self::Mainnet

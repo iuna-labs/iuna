@@ -57,6 +57,11 @@ async fn main() -> Result<()> {
     let Some(opts) = CliOptions::parse()? else {
         return Ok(());
     };
+    let startup_local_testnet = startup_bool_from_env(LOCAL_TESTNET_ENV)?.unwrap_or(false);
+    #[cfg(feature = "e2e")]
+    if !startup_local_testnet {
+        bail!("the e2e build requires {LOCAL_TESTNET_ENV}=true");
+    }
     set_debug_logging(opts.debug);
     let debug_logging = opts.debug;
     let wallet_path = opts.wallet_path();
@@ -79,7 +84,6 @@ async fn main() -> Result<()> {
     let startup_automatic_burn_enabled = startup_bool_from_env(AUTOMATIC_BURN_ENABLED_ENV)?;
     let startup_pow_mining_enabled = startup_bool_from_env(POW_MINING_ENABLED_ENV)?;
     let startup_pow_mining_workers = startup_pow_mining_workers_from_env()?;
-    let startup_local_testnet = startup_bool_from_env(LOCAL_TESTNET_ENV)?.unwrap_or(false);
     let startup_setup_complete = startup_bool_from_env(SETUP_COMPLETE_ENV)?;
     let p2p_config_dirty = apply_cli_p2p_config_overrides(&opts, &mut ui_config);
     let stratum_config_dirty = apply_cli_stratum_config_overrides(&opts, &mut ui_config);

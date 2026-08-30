@@ -414,7 +414,11 @@ fn setup_ledger_uses_the_requested_address_network_profile() {
     );
     assert_eq!(
         setup_ledger(true).launch_profile().profile_id,
-        "iuna-local-testnet-v1"
+        if cfg!(feature = "e2e") {
+            "iuna-local-e2e-5s-v1"
+        } else {
+            "iuna-local-testnet-v1"
+        }
     );
 }
 
@@ -869,13 +873,17 @@ fn genesis_requires_fresh_wallet_path() {
 
 #[test]
 fn vdf_measurement_extrapolates_to_target() {
+    let rounds_per_target = 10_000_u64.saturating_mul(VDF_TARGET_BLOCK_MS) / 1_000;
+    let rounds_from_zero_elapsed = 10_000_u64
+        .saturating_mul(VDF_TARGET_BLOCK_MS)
+        .saturating_mul(1_000_000);
     assert_eq!(
         extrapolate_vdf_rounds(
             10_000,
             Duration::from_secs(1),
             Duration::from_millis(VDF_TARGET_BLOCK_MS),
         ),
-        6_000_000
+        rounds_per_target
     );
     assert_eq!(
         extrapolate_vdf_rounds(
@@ -883,7 +891,7 @@ fn vdf_measurement_extrapolates_to_target() {
             Duration::from_secs(0),
             Duration::from_millis(VDF_TARGET_BLOCK_MS),
         ),
-        6_000_000_000_000_000
+        rounds_from_zero_elapsed
     );
 }
 
@@ -1081,7 +1089,7 @@ async fn startup_resumes_persisted_chain_with_network_accepted_future_tip() {
     let mut persisted = ledger_with_one_spendable_iuna(&persisted_wallet);
     let burn = persisted.build_burn(&persisted_wallet, 1, 1).unwrap();
     persisted.submit_transaction(burn).unwrap();
-    let future_tip_ms = iuna::app::now_ms().saturating_add(VDF_TARGET_BLOCK_MS);
+    let future_tip_ms = iuna::app::now_ms().saturating_add(10 * 60 * 1_000);
     let future_block = persisted
         .mine_next_block(&persisted_wallet, future_tip_ms)
         .unwrap();

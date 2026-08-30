@@ -4,7 +4,8 @@ FROM rust:1.88.0-bookworm AS builder
 
 WORKDIR /src/iuna
 COPY . .
-RUN cargo build --release --locked --bin iuna
+ARG IUNA_CARGO_FEATURES=""
+RUN cargo build --release --locked --bin iuna ${IUNA_CARGO_FEATURES}
 
 FROM debian:bookworm-slim
 

@@ -1,0 +1,127 @@
+services:
+  bootstrap:
+    build:
+      args:
+        IUNA_CARGO_FEATURES: "--features e2e"
+    image: iuna-local-e2e:latest
+    restart: "no"
+    command:
+      - if [ -s /data/chain.sqlite3 ]; then exec iuna --data-dir /data --http 0.0.0.0:18661 --p2p 0.0.0.0:9444 --p2p-announce 172.29.0.10:9444 --debug; else exec iuna --genesis --data-dir /data --http 0.0.0.0:18661 --p2p 0.0.0.0:9444 --p2p-announce 172.29.0.10:9444 --debug; fi
+    healthcheck:
+      interval: 1s
+      retries: 900
+      start_period: 2s
+    ports: !override
+      - "${IUNA_E2E_BOOTSTRAP_PORT:-28661}:18661"
+    volumes: !override
+      - "${IUNA_E2E_RUNTIME_DIR:?set IUNA_E2E_RUNTIME_DIR}/bootstrap:/data"
+    networks:
+      iuna-testnet:
+        ipv4_address: 172.29.0.10
+
+  node2:
+    build:
+      args:
+        IUNA_CARGO_FEATURES: "--features e2e"
+    image: iuna-local-e2e:latest
+    restart: "no"
+    command:
+      - exec iuna --join 172.29.0.10:9444 --data-dir /data --http 0.0.0.0:18661 --p2p 0.0.0.0:9444 --p2p-announce 172.29.0.11:9444 --debug
+    healthcheck:
+      interval: 1s
+      retries: 900
+      start_period: 2s
+    ports: !override
+      - "${IUNA_E2E_NODE2_PORT:-28662}:18661"
+    volumes: !override
+      - "${IUNA_E2E_RUNTIME_DIR:?set IUNA_E2E_RUNTIME_DIR}/node2:/data"
+    networks:
+      iuna-testnet:
+        ipv4_address: 172.29.0.11
+
+  node3:
+    build:
+      args:
+        IUNA_CARGO_FEATURES: "--features e2e"
+    image: iuna-local-e2e:latest
+    restart: "no"
+    command:
+      - exec iuna --join 172.29.0.10:9444 --data-dir /data --http 0.0.0.0:18661 --p2p 0.0.0.0:9444 --p2p-announce 172.29.0.12:9444 --stratum 0.0.0.0:3333 --debug
+    healthcheck:
+      interval: 1s
+      retries: 900
+      start_period: 2s
+    ports: !override
+      - "${IUNA_E2E_NODE3_PORT:-28663}:18661"
+      - "${IUNA_E2E_STRATUM_PORT:-23333}:3333"
+    volumes: !override
+      - "${IUNA_E2E_RUNTIME_DIR:?set IUNA_E2E_RUNTIME_DIR}/node3:/data"
+    networks:
+      iuna-testnet:
+        ipv4_address: 172.29.0.12
+
+  node4:
+    build:
+      args:
+        IUNA_CARGO_FEATURES: "--features e2e"
+    image: iuna-local-e2e:latest
+    restart: "no"
+    command:
+      - exec iuna --join 172.29.0.10:9444 --data-dir /data --http 0.0.0.0:18661 --p2p 0.0.0.0:9444 --p2p-announce 172.29.0.13:9444 --debug
+    healthcheck:
+      interval: 1s
+      retries: 900
+      start_period: 2s
+    ports: !override
+      - "${IUNA_E2E_NODE4_PORT:-28664}:18661"
+    volumes: !override
+      - "${IUNA_E2E_RUNTIME_DIR:?set IUNA_E2E_RUNTIME_DIR}/node4:/data"
+    networks:
+      iuna-testnet:
+        ipv4_address: 172.29.0.13
+
+  node5:
+    build:
+      args:
+        IUNA_CARGO_FEATURES: "--features e2e"
+    image: iuna-local-e2e:latest
+    restart: "no"
+    command:
+      - exec iuna --join 172.29.0.10:9444 --data-dir /data --http 0.0.0.0:18661 --p2p 0.0.0.0:9444 --p2p-announce 172.29.0.14:9444 --debug
+    healthcheck:
+      interval: 1s
+      retries: 900
+      start_period: 2s
+    ports: !override
+      - "${IUNA_E2E_NODE5_PORT:-28665}:18661"
+    volumes: !override
+      - "${IUNA_E2E_RUNTIME_DIR:?set IUNA_E2E_RUNTIME_DIR}/node5:/data"
+    networks:
+      iuna-testnet:
+        ipv4_address: 172.29.0.14
+
+  node6:
+    build:
+      args:
+        IUNA_CARGO_FEATURES: "--features e2e"
+    image: iuna-local-e2e:latest
+    restart: "no"
+    command:
+      - exec iuna --join 172.29.0.10:9444 --data-dir /data --http 0.0.0.0:18661 --p2p 0.0.0.0:9444 --p2p-announce 172.29.0.15:9444 --debug
+    healthcheck:
+      interval: 1s
+      retries: 900
+      start_period: 2s
+    ports: !override
+      - "${IUNA_E2E_NODE6_PORT:-28666}:18661"
+    volumes: !override
+      - "${IUNA_E2E_RUNTIME_DIR:?set IUNA_E2E_RUNTIME_DIR}/node6:/data"
+    networks:
+      iuna-testnet:
+        ipv4_address: 172.29.0.15
+
+networks:
+  iuna-testnet:
+    ipam:
+      config: !override
+        - subnet: 172.29.0.0/24

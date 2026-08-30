@@ -56,7 +56,7 @@ fn default_burn_lineage_maturity_heights() -> u64 {
 impl LaunchProfile {
     pub fn local_testnet() -> Self {
         Self {
-            profile_id: "iuna-local-testnet-v1".to_string(),
+            profile_id: local_testnet_profile_id().to_string(),
             burn_lineage_maturity_heights: 0,
             ..Self::default()
         }
@@ -91,6 +91,16 @@ impl LaunchProfile {
         };
         hex_hash(canonical)
     }
+}
+
+#[cfg(not(feature = "e2e"))]
+fn local_testnet_profile_id() -> &'static str {
+    "iuna-local-testnet-v1"
+}
+
+#[cfg(feature = "e2e")]
+fn local_testnet_profile_id() -> &'static str {
+    "iuna-local-e2e-5s-v1"
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -147,7 +157,10 @@ mod tests {
     fn local_testnet_profile_has_immediate_burn_lineage_eligibility() {
         let profile = LaunchProfile::local_testnet();
 
+        #[cfg(not(feature = "e2e"))]
         assert_eq!(profile.profile_id, "iuna-local-testnet-v1");
+        #[cfg(feature = "e2e")]
+        assert_eq!(profile.profile_id, "iuna-local-e2e-5s-v1");
         assert_eq!(profile.burn_lineage_maturity_heights, 0);
         assert_ne!(profile.hash(), LaunchProfile::default().hash());
     }

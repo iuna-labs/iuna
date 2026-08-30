@@ -1,4 +1,4 @@
-use std::net::SocketAddr;
+use std::{collections::BTreeMap, net::SocketAddr};
 
 use anyhow::{Context, Result};
 use tokio::{
@@ -7,7 +7,7 @@ use tokio::{
 };
 
 use crate::{
-    app::{ChainBootstrap, GossipEnvelope, NETWORK_ID, PROTOCOL_VERSION, now_ms},
+    app::{ChainBootstrap, GossipEnvelope, NETWORK_ID, PROTOCOL_VERSION, ProtocolHello, now_ms},
     domain::{Block, ChainSnapshot, Ledger, verify_vdf},
 };
 
@@ -99,6 +99,7 @@ pub async fn fetch_snapshot_with_announcement(
         other => anyhow::bail!("join peer {peer} sent {other:?} instead of peer status"),
     }
 
+    write_envelope(&mut writer, &join_client_hello()).await?;
     write_envelope(&mut writer, &GossipEnvelope::ChainBootstrapRequest).await?;
     let bootstrap = read_join_bootstrap_response(peer, &mut reader).await?;
 
@@ -133,6 +134,20 @@ pub async fn fetch_snapshot_with_announcement(
     }
 
     Ok(snapshot)
+}
+
+fn join_client_hello() -> GossipEnvelope {
+    let setup = Ledger::new(BTreeMap::new(), 1);
+    GossipEnvelope::Hello(ProtocolHello {
+        protocol_version: PROTOCOL_VERSION,
+        network_id: NETWORK_ID.to_string(),
+        genesis_hash: setup.genesis_hash().to_string(),
+        listen_addr: None,
+        node_id: None,
+        height: 0,
+        tip_hash: setup.tip_hash().to_string(),
+        time_ms: now_ms(),
+    })
 }
 
 async fn read_join_bootstrap_response(
@@ -264,4 +279,24 @@ pub(super) async fn verify_block_vdf(block: Block) -> Result<Block> {
     }
 
     Ok(block)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::join_client_hello;
+    use crate::app::{GossipEnvelope, NETWORK_ID, PROTOCOL_VERSION};
+
+    #[test]
+    fn snapshot_join_identifies_as_an_unannounced_setup_placeholder() {
+        let GossipEnvelope::Hello(hello) = join_client_hello() else {
+            panic!("join handshake must start with Hello");
+        };
+
+        assert_eq!(hello.protocol_version, PROTOCOL_VERSION);
+        assert_eq!(hello.network_id, NETWORK_ID);
+        assert_eq!(hello.height, 0);
+        assert_eq!(hello.genesis_hash, hello.tip_hash);
+        assert!(hello.listen_addr.is_none());
+        assert!(hello.node_id.is_none());
+    }
 }

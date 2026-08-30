@@ -1,0 +1,20 @@
+{
+  "version": 1,
+  "amount_unit": "microiuna",
+  "setup_complete": true,
+  "auth_password_hash": "pbkdf2-sha256$210000$795b8db3cec7f3e710865c4b2f05ee37$709f4e7c66b5ac6153c312a1c602e49c4cfe719389a38dfadadfd339d08676b8",
+  "mining_enabled": true,
+  "pow_mining_enabled": false,
+  "pow_mining_workers": 1,
+  "burn_per_block": 100,
+  "burn_fee": 1,
+  "recovery_vdf_top_rank_percent": 50,
+  "keep_track_of_metrics": false,
+  "p2p_accept_inbound": true,
+  "p2p_bind_port": 9444,
+  "p2p_announce_addr": "172.29.0.10:9444",
+  "stratum_enabled": false,
+  "stratum_bind_port": 3333,
+  "peers": [],
+  "address_book": {}
+}

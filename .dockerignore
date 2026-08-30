@@ -1,6 +1,8 @@
 target
+fuzz/target
 src-tauri/target
 src-tauri/binaries
+.docker-build
 .agents
 .codex
 .DS_Store

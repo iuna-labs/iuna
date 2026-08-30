@@ -108,7 +108,9 @@ impl Ledger {
     }
 
     pub fn from_persisted_snapshot(snapshot: ChainSnapshot) -> Result<Self> {
-        Self::from_snapshot_at(snapshot, u64::MAX)
+        let verify_vdf = !(cfg!(feature = "e2e")
+            && snapshot.launch_profile.profile_id == LaunchProfile::local_testnet().profile_id);
+        Self::from_snapshot_with_vdf_policy(snapshot, verify_vdf, u64::MAX)
     }
 
     pub(crate) fn from_preverified_snapshot(snapshot: ChainSnapshot) -> Result<Self> {

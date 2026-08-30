@@ -1,0 +1,12 @@
+{
+  "version": 3,
+  "address": "24b37cfe96e5116e9c3de7f6e1ad3cf3a4b967c4b57c142fbf16f8733efafc47",
+  "encryption": {
+    "algorithm": "chacha20poly1305",
+    "kdf": "pbkdf2-sha256",
+    "kdf_iterations": 210000,
+    "salt": "628e9496c3a9f564e14584a24f28cc73",
+    "nonce": "0efe22ab02929c0a31b1ee98",
+    "ciphertext": "de0f0045b0084dfbe1051f1b37b0d0bde7c51859a63ddacef724af91db0caab19489d1b0e98b07f8acacd679f7f8cfad0c2b79b722beed9b5c483d2b61edde835cd1db531fae5820b1969effcb7387a2fe087b467c5de43afa5f41d3150a8f53cb0ccc2776d393065348b99d3fe7197515d98a40be545c7a2f9010318d035fcd7c3ebd0ab385b262d9149b6443093882812701ee0e346e95768a398cd6e36a1c9da3c9242337afc0114ed47e2b92f3"
+  }
+}

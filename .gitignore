@@ -3,6 +3,7 @@
 /fuzz/artifacts
 /.docker-build
 /.iuna
+/e2e/.runtime
 /src-tauri/target
 /src-tauri/gen
 /src-tauri/binaries/iuna-sidecar-*

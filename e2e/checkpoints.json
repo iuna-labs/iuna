@@ -1,0 +1,27 @@
+[
+  {
+    "name": "pre-fallback-invalidation",
+    "height": 299,
+    "purpose": "Last block before fallback ticket invalidation activates"
+  },
+  {
+    "name": "fallback-invalidation",
+    "height": 300,
+    "purpose": "Fallback ticket invalidation activation block"
+  },
+  {
+    "name": "pre-objective-finality",
+    "height": 999,
+    "purpose": "Last legacy signing, replay and fork-choice block"
+  },
+  {
+    "name": "objective-finality",
+    "height": 1000,
+    "purpose": "Signing v1, replay protection and objective finality activation block"
+  },
+  {
+    "name": "first-objective-checkpoint",
+    "height": 1001,
+    "purpose": "First block that can certify checkpoint 1000"
+  }
+]

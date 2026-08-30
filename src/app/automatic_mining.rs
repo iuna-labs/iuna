@@ -655,17 +655,26 @@ mod tests {
     };
     use tempfile::tempdir;
 
-    use super::{NodeCore, burn_bundle_collection_remaining_ms};
+    use super::{BURN_BUNDLE_COLLECTION_MS, NodeCore, burn_bundle_collection_remaining_ms};
 
     #[test]
-    fn burn_bundle_collection_waits_exactly_thirty_seconds() {
+    fn burn_bundle_collection_waits_for_configured_window() {
+        let started_at_ms = 1_000;
+        let last_waiting_ms = started_at_ms + BURN_BUNDLE_COLLECTION_MS - 1;
+        let finished_ms = started_at_ms + BURN_BUNDLE_COLLECTION_MS;
+
         assert_eq!(
-            burn_bundle_collection_remaining_ms(1_000, 1_000),
-            Some(30_000)
+            burn_bundle_collection_remaining_ms(started_at_ms, started_at_ms),
+            Some(BURN_BUNDLE_COLLECTION_MS)
         );
-        assert_eq!(burn_bundle_collection_remaining_ms(1_000, 30_999), Some(1));
-        assert_eq!(burn_bundle_collection_remaining_ms(1_000, 31_000), None);
-        assert_eq!(burn_bundle_collection_remaining_ms(1_000, 40_000), None);
+        assert_eq!(
+            burn_bundle_collection_remaining_ms(started_at_ms, last_waiting_ms),
+            Some(1)
+        );
+        assert_eq!(
+            burn_bundle_collection_remaining_ms(started_at_ms, finished_ms),
+            None
+        );
     }
 
     fn funded_ledger(wallets: &[Wallet]) -> Ledger {

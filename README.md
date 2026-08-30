@@ -136,6 +136,11 @@ Compose:
 docker compose up --build
 ```
 
+For repeatable end-to-end tests around mature protocol heights such as 999,
+1000, and 1001, use the isolated 5-second harness documented in
+[`e2e/README.md`](e2e/README.md). It captures and restores all six chain
+databases and test identities rather than re-mining from genesis for every run.
+
 The compose file starts the static website, one bootstrap genesis node, and five
 joining nodes on an isolated Docker network. Every node automatically mines with
 one PoW worker and enables burn/finalization. Joining nodes can therefore earn
