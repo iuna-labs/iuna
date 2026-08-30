@@ -21,6 +21,24 @@ require_command() {
   command -v "$command_name" >/dev/null 2>&1 || die "missing required command: ${command_name}"
 }
 
+docker_native_linux_platform() {
+  local architecture
+
+  # Keep rustc native to the Docker engine; cross-compile only the release binaries.
+  architecture="$(docker info --format '{{.Architecture}}')" || die "could not determine Docker engine architecture"
+  case "$architecture" in
+    amd64|x86_64)
+      printf '%s\n' linux/amd64
+      ;;
+    arm64|aarch64)
+      printf '%s\n' linux/arm64
+      ;;
+    *)
+      die "unsupported Docker engine architecture: ${architecture}"
+      ;;
+  esac
+}
+
 is_apple_silicon_macos() {
   [ "$(uname -s)" = "Darwin" ] || return 1
   [ "$(uname -m)" = "arm64" ] && return 0
@@ -207,20 +225,25 @@ build_windows_desktop_if_possible() {
 build_windows_desktop_in_docker_if_possible() {
   local version="$1"
   local artifact="downloads/iuna-v${version}-windows-x86_64-desktop-setup.exe"
+  local builder_platform
+  local builder_arch
 
   [ -f "$artifact" ] && return 0
   command -v docker >/dev/null 2>&1 || return 0
 
+  builder_platform="$(docker_native_linux_platform)"
+  builder_arch="${builder_platform#linux/}"
+
   mkdir -p downloads
-  docker run --rm --platform=linux/amd64 \
+  docker run --rm --pull=always --platform="$builder_platform" \
     -e "IUNA_VERSION=${version}" \
     -e "HOST_UID=$(id -u)" \
     -e "HOST_GID=$(id -g)" \
     -v iuna-windows-cargo-registry:/usr/local/cargo/registry \
     -v iuna-windows-cargo-git:/usr/local/cargo/git \
     -v iuna-windows-root-cache:/root/.cache \
-    -v iuna-windows-target:/work/iuna/target \
-    -v iuna-windows-tauri-target:/work/iuna/src-tauri/target \
+    -v "iuna-windows-${builder_arch}-target:/work/iuna/target" \
+    -v "iuna-windows-${builder_arch}-tauri-target:/work/iuna/src-tauri/target" \
     -v "$(pwd):/src/iuna:ro" \
     -v "$(pwd)/downloads:/out" \
     rust:1.88-bookworm \
@@ -284,6 +307,7 @@ build_linux_cli_archives() {
   local tag="v${version}"
   local linux_x86_64_package="iuna-${tag}-linux-x86_64"
   local linux_aarch64_package="iuna-${tag}-linux-aarch64"
+  local builder_platform
 
   mkdir -p .docker-build downloads
   [ -f "downloads/${linux_x86_64_package}.tar.gz" ] \
@@ -292,8 +316,9 @@ build_linux_cli_archives() {
     && return 0
 
   require_command docker
+  builder_platform="$(docker_native_linux_platform)"
 
-  docker run --rm --platform=linux/amd64 \
+  docker run --rm --pull=always --platform="$builder_platform" \
     -e "IUNA_VERSION=${version}" \
     -e "HOST_UID=$(id -u)" \
     -e "HOST_GID=$(id -g)" \
@@ -305,9 +330,20 @@ build_linux_cli_archives() {
       set -euo pipefail
 
       apt-get update
-      apt-get install -y --no-install-recommends gcc-aarch64-linux-gnu libc6-dev-arm64-cross
+      case "$(uname -m)" in
+        x86_64)
+          apt-get install -y --no-install-recommends gcc-aarch64-linux-gnu libc6-dev-arm64-cross
+          ;;
+        aarch64|arm64)
+          apt-get install -y --no-install-recommends gcc-x86-64-linux-gnu libc6-dev-amd64-cross
+          ;;
+        *)
+          echo "unsupported Linux builder architecture: $(uname -m)" >&2
+          exit 1
+          ;;
+      esac
       rm -rf /var/lib/apt/lists/*
-      rustup target add aarch64-unknown-linux-gnu
+      rustup target add aarch64-unknown-linux-gnu x86_64-unknown-linux-gnu
 
       mkdir -p /work/iuna
       tar -C /src/iuna \
@@ -324,15 +360,18 @@ build_linux_cli_archives() {
       AR_aarch64_unknown_linux_gnu=aarch64-linux-gnu-ar \
       CARGO_TARGET_AARCH64_UNKNOWN_LINUX_GNU_LINKER=aarch64-linux-gnu-gcc \
       cargo build --release --locked --target aarch64-unknown-linux-gnu
-      cargo build --release --locked
+      CC_x86_64_unknown_linux_gnu=x86_64-linux-gnu-gcc \
+      AR_x86_64_unknown_linux_gnu=x86_64-linux-gnu-ar \
+      CARGO_TARGET_X86_64_UNKNOWN_LINUX_GNU_LINKER=x86_64-linux-gnu-gcc \
+      cargo build --release --locked --target x86_64-unknown-linux-gnu
 
       tag="v${IUNA_VERSION}"
       linux_x86_64_package="iuna-${tag}-linux-x86_64"
       linux_aarch64_package="iuna-${tag}-linux-aarch64"
       mkdir -p "/tmp/site/${linux_x86_64_package}" "/tmp/site/${linux_aarch64_package}"
-      cp target/release/iuna "/tmp/site/${linux_x86_64_package}/"
+      cp target/x86_64-unknown-linux-gnu/release/iuna "/tmp/site/${linux_x86_64_package}/"
       cp target/aarch64-unknown-linux-gnu/release/iuna "/tmp/site/${linux_aarch64_package}/"
-      cp target/release/iuna /node-out/iuna-node-linux-x86_64
+      cp target/x86_64-unknown-linux-gnu/release/iuna /node-out/iuna-node-linux-x86_64
       cp README.md LICENSE "/tmp/site/${linux_x86_64_package}/"
       cp README.md LICENSE "/tmp/site/${linux_aarch64_package}/"
       tar -C /tmp/site -czf "/out/${linux_x86_64_package}.tar.gz" "${linux_x86_64_package}"
