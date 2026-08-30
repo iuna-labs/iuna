@@ -1824,10 +1824,12 @@ fn mini_select_weighted_lineage_index(
     if total_weight == 0 {
         return None;
     }
-    let seed = format!(
-        "iuna-burn-lineage-draw-v1:{target_height}:{}:{}:{slot}",
-        parent.hash, parent.vdf_output
-    );
+    let parent_randomness = if target_height >= GRINDING_RESISTANCE_ACTIVATION_HEIGHT {
+        format!("{}:{}", parent.vdf_seed(), parent.vdf_output)
+    } else {
+        format!("{}:{}", parent.hash, parent.vdf_output)
+    };
+    let seed = format!("iuna-burn-lineage-draw-v1:{target_height}:{parent_randomness}:{slot}");
     let digest = Sha256::digest(seed.as_bytes());
     let mut bytes = [0_u8; 16];
     bytes.copy_from_slice(&digest[..16]);

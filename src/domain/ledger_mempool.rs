@@ -16,6 +16,28 @@ impl Ledger {
         Ok(self.submit_transaction_with_outcome(transaction)?.added())
     }
 
+    /// Inserts a locally required block transaction ahead of the current
+    /// mempool, then rebuilds the pool around it. This is only used on a cloned
+    /// ledger while assembling a block; the node's public mempool is unchanged.
+    pub(crate) fn prioritize_transaction_for_block_building(
+        &mut self,
+        transaction: Transaction,
+    ) -> Result<bool> {
+        let mut displaced = std::mem::take(&mut self.pending);
+        displaced.append(&mut self.orphans);
+        self.pending_bytes = 0;
+        self.orphan_bytes = 0;
+
+        let added = self.submit_transaction(transaction)?;
+        if !added {
+            return Ok(false);
+        }
+        for candidate in displaced {
+            let _ = self.submit_transaction(candidate);
+        }
+        Ok(true)
+    }
+
     pub(crate) fn reserve_transaction_inputs(&mut self, transaction: &Transaction) -> Result<()> {
         self.validate_new_transaction(transaction)?;
         let mut utxos = self.utxos.clone();

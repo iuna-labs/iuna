@@ -76,7 +76,13 @@ async fn release_soak_auto_finalization_p2p_stratum_and_restarts() -> Result<()>
         stratum_addr,
     )
     .await?;
-    assert_stratum_serves_work(stratum_addr, wallets[1].address()).await?;
+    let stratum_worker = nodes[1]
+        .node
+        .lock()
+        .await
+        .wallet_receive_address()
+        .context("release-soak wallet must have a checksummed receive address")?;
+    assert_stratum_serves_work(stratum_addr, &stratum_worker).await?;
     sleep(Duration::from_secs(2)).await;
 
     for target_height in 1..=SOAK_BLOCKS {
@@ -190,10 +196,53 @@ async fn finalize_one_block(nodes: &[SoakNode], target_height: u64) -> Result<()
             }
         }
         if tokio::time::Instant::now() >= deadline {
-            bail!("no node finalized block {target_height}");
+            bail!(
+                "no node finalized block {target_height}:\n{}",
+                soak_diagnostics(nodes, target_height).await
+            );
         }
         sleep(Duration::from_millis(100)).await;
     }
+}
+
+async fn soak_diagnostics(nodes: &[SoakNode], target_height: u64) -> String {
+    let mut lines = Vec::new();
+    for (index, node) in nodes.iter().enumerate() {
+        let core = node.node.lock().await;
+        let status = core.status();
+        let rank = core
+            .burn_leader_ranks_for_block(target_height)
+            .ok()
+            .and_then(|ranks| {
+                ranks
+                    .into_iter()
+                    .find(|rank| rank.owner == core.wallet_address())
+                    .map(|rank| rank.rank)
+            });
+        let pending = core.pending_transactions();
+        let pending_burns = pending.iter().filter(|tx| tx.is_burn()).count();
+        let metrics = node.network.metrics();
+        lines.push(format!(
+            "node {index}: height={}, tip={}, wallet_rank={rank:?}, leader={:?}, \
+             last_finalization={:?}, pending={} (burns={pending_burns}), \
+             burn_bundles_received={}, control_received={}, rejected_blocks={}, \
+             session_failures={}, last_session_failure={:?}, last_chain_error={:?}, \
+             sync_progress={:?}",
+            status.chain.height,
+            status.chain.tip_hash,
+            status.mining.current_leader,
+            status.mining.last_auto_finalization_status,
+            pending.len(),
+            metrics.burn_bundles_received,
+            metrics.control_envelopes_received,
+            metrics.rejected_blocks,
+            metrics.session_failures,
+            metrics.last_session_failure,
+            metrics.last_chain_payload_error,
+            node.network.sync_progress(),
+        ));
+    }
+    lines.join("\n")
 }
 
 async fn prepare_and_broadcast(nodes: &[SoakNode], timestamp_ms: u64) -> Result<()> {

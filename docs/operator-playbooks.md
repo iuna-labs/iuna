@@ -173,7 +173,9 @@ Avoid:
 
 Height `1000` is a coordinated consensus activation. At that height, VDF seeds
 start committing to block content and ticket draws stop using the final block
-hash. Transaction signatures and native and Stratum mine proofs also switch to
+hash. Burn-committee lineage draws make the same switch, closing the timestamp/
+block-hash grinding path for both leader and committee selection. Transaction
+signatures and native and Stratum mine proofs also switch to
 chain-bound binary format v1. Rank `0` blocks also start requiring a strict
 two-thirds committee quorum so their next rank `0` child can objectively certify
 them. This preserves blocks, snapshots, and UTXOs below

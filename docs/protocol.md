@@ -125,7 +125,7 @@ In the mainnet-candidate profile, tickets mature after `3` blocks and remain eli
 
 The lottery draw for the next height is deterministic. Nodes rank all eligible burn tickets using the parent block hash, the parent VDF output, the target height, and the ticket amounts. More burned IUNA means more weight, but the winner is still drawn by the protocol.
 
-From height `1000`, leader selection uses the parent's VDF seed and VDF output instead of the parent's final block hash. Blocks at height `1000` and later commit the finalizer identity, mode, rank, reward, VDF rounds, leader ticket, transactions, and burn-bundle section into their VDF seed. Together these rules prevent a finalizer from completing one VDF and then cheaply varying transaction selection or the publication timestamp to grind the next leader. Ticket-block timestamps remain adjustable to the actual completion time, but they no longer influence the next lottery draw. Earlier candidate history retains the original parent-hash lottery rule.
+From height `1000`, leader and burn-committee selection use the parent's VDF seed and VDF output instead of the parent's final block hash. Blocks at height `1000` and later commit the finalizer identity, mode, rank, reward, VDF rounds, leader ticket, transactions, and burn-bundle section into their VDF seed. Together these rules prevent a finalizer from completing one VDF and then cheaply varying transaction selection or the publication timestamp to grind either the next leader or its committee. Ticket-block timestamps remain adjustable to the actual completion time, but they no longer influence either draw. Earlier candidate history retains the original parent-hash draw rules.
 
 ## Finalizing Blocks
 
@@ -311,13 +311,30 @@ The available committee size is the finalizer plus the selected non-finalizer co
 
 Recovery blocks do not require burn-list signatures. They are the last liveness escape hatch after the ticket path has failed, so committee failure must not be able to stop the chain forever. Recovery is weaker for fairness and is not meant to be the normal block path.
 
-The ticket-block VDF seed is bound to the burn-list attestation hashes:
+Before height `1000`, burn-committee lineage draws use the parent block hash and
+VDF output. From height `1000`, they use the same ungrindable parent randomness
+as the leader lottery: the parent VDF seed and VDF output. The target height and
+committee slot are domain-separated inputs to each draw. This prevents a
+completed ticket VDF from being reused with different publication timestamps to
+search for a favorable next committee.
+
+Before height `1000`, the ticket-block VDF seed is bound to the burn-list
+attestation hashes:
 
 `seed = hash(parent hash || height || attestation_hash[0] || ... || attestation_hash[4])`
 
-Recovery blocks additionally bind the block timestamp into the VDF seed:
+From height `1000`, ticket blocks additionally bind a content commitment that
+covers the finalizer, mode, rank, reward, VDF rounds, selected ticket,
+transactions, and burn-bundle section:
+
+`seed = hash(parent hash || height || content commitment || attestation_hash[0] || ... || attestation_hash[4])`
+
+Recovery blocks bind the block timestamp into the VDF seed both before and after
+activation, and add the same content commitment from height `1000`:
 
 `seed = hash(parent hash || height || timestamp_ms || attestation_hash[0] || ... || attestation_hash[4])`
+
+`activated seed = hash(parent hash || height || timestamp_ms || content commitment || attestation_hash[0] || ... || attestation_hash[4])`
 
 The burn-list attestation hashes are part of the VDF seed. This forces the finalizer to choose the included burn-attestation set before doing the delay work. After the VDF is computed, changing that attestation set changes the seed and invalidates the work.
 

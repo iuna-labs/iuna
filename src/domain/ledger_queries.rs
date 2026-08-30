@@ -6,8 +6,8 @@ use sha2::{Digest, Sha256};
 use super::genesis::balances_from_utxos;
 use super::mine_policy::mine_anchor;
 use super::ticket::{
-    BurnTicket, apply_finalizer_ticket_effects, genesis_tickets, ranked_tickets_for_height,
-    tickets_created_by_block,
+    BurnTicket, apply_finalizer_ticket_effects, draw_parent_randomness, genesis_tickets,
+    ranked_tickets_for_height, tickets_created_by_block,
 };
 use super::{
     Amount, Block, BurnCommitteeMember, BurnLeaderRank, ChainSnapshot, ChainStatus, LaunchProfile,
@@ -50,10 +50,7 @@ pub(super) fn select_weighted_lineage_index(
     if total_weight == 0 {
         return None;
     }
-    let seed = format!(
-        "iuna-burn-lineage-draw-v1:{target_height}:{}:{}:{slot}",
-        parent.hash, parent.vdf_output
-    );
+    let seed = lineage_committee_draw_seed(parent, target_height, slot);
     let digest = Sha256::digest(seed.as_bytes());
     let mut bytes = [0_u8; 16];
     bytes.copy_from_slice(&digest[..16]);
@@ -66,6 +63,11 @@ pub(super) fn select_weighted_lineage_index(
         }
     }
     None
+}
+
+fn lineage_committee_draw_seed(parent: &Block, target_height: u64, slot: u8) -> String {
+    let parent_randomness = draw_parent_randomness(parent, target_height);
+    format!("iuna-burn-lineage-draw-v1:{target_height}:{parent_randomness}:{slot}")
 }
 
 impl Ledger {
@@ -619,7 +621,9 @@ impl Ledger {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::domain::{BURN_COMMITTEE_SIZE, GenesisBurn, MICRO_IUNA, Wallet};
+    use crate::domain::{
+        BURN_COMMITTEE_SIZE, GRINDING_RESISTANCE_ACTIVATION_HEIGHT, GenesisBurn, MICRO_IUNA, Wallet,
+    };
     use proptest::prelude::*;
     use proptest::test_runner::Config;
 
@@ -802,7 +806,7 @@ mod tests {
     }
 
     #[test]
-    fn committee_draw_seed_has_a_fixed_parent_vdf_height_and_slot_vector() {
+    fn committee_draw_seed_has_a_fixed_legacy_parent_hash_height_and_slot_vector() {
         let mut parent = Ledger::new(BTreeMap::new(), 1).tip().clone();
         parent.hash = "a".repeat(64);
         parent.vdf_output = "parent-vdf".to_string();
@@ -826,6 +830,40 @@ mod tests {
         assert_eq!(
             select_weighted_lineage_index(&parent, 42, 1, &candidates),
             Some(2)
+        );
+    }
+
+    #[test]
+    fn committee_draw_stops_using_grindable_parent_hash_at_height_1000() {
+        let mut parent = Ledger::new(BTreeMap::new(), 1).tip().clone();
+        parent.height = GRINDING_RESISTANCE_ACTIVATION_HEIGHT - 1;
+        parent.hash = "1".repeat(64);
+        parent.vdf_output = "parent-vdf".to_string();
+        let mut alternate_hash = parent.clone();
+        alternate_hash.hash = "2".repeat(64);
+
+        assert_ne!(
+            lineage_committee_draw_seed(&parent, GRINDING_RESISTANCE_ACTIVATION_HEIGHT - 1, 1,),
+            lineage_committee_draw_seed(
+                &alternate_hash,
+                GRINDING_RESISTANCE_ACTIVATION_HEIGHT - 1,
+                1,
+            )
+        );
+        assert_eq!(
+            lineage_committee_draw_seed(&parent, GRINDING_RESISTANCE_ACTIVATION_HEIGHT, 1),
+            lineage_committee_draw_seed(&alternate_hash, GRINDING_RESISTANCE_ACTIVATION_HEIGHT, 1,)
+        );
+
+        let mut alternate_output = parent;
+        alternate_output.vdf_output = "different-vdf".to_string();
+        assert_ne!(
+            lineage_committee_draw_seed(
+                &alternate_output,
+                GRINDING_RESISTANCE_ACTIVATION_HEIGHT,
+                1,
+            ),
+            lineage_committee_draw_seed(&alternate_hash, GRINDING_RESISTANCE_ACTIVATION_HEIGHT, 1,)
         );
     }
 

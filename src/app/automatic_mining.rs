@@ -589,11 +589,25 @@ impl NodeCore {
         let Some((height, burn)) = &self.local_block_anchor_burn else {
             return (ledger, None);
         };
-        if *height == ledger.height()
-            && !ledger.has_transaction(burn.signature())
-            && ledger.submit_transaction(burn.clone()).is_ok()
-        {
-            return (ledger, Some(burn.signature().to_string()));
+        if *height == ledger.height() && !ledger.has_transaction(burn.signature()) {
+            // `submit_transaction` returns `Ok(false)` when another pending
+            // transaction already spends the anchor input. Prefer an existing
+            // pending burn from this wallet. Otherwise rebuild this cloned
+            // block-building mempool with the liveness anchor first.
+            if ledger.submit_transaction(burn.clone()).unwrap_or(false) {
+                return (ledger, Some(burn.signature().to_string()));
+            }
+            if ledger.pending().iter().any(|transaction| {
+                transaction.is_burn() && transaction.sender() == self.wallet.address()
+            }) {
+                return (ledger, None);
+            }
+            if ledger
+                .prioritize_transaction_for_block_building(burn.clone())
+                .unwrap_or(false)
+            {
+                return (ledger, Some(burn.signature().to_string()));
+            }
         }
         (ledger, None)
     }
@@ -949,6 +963,81 @@ mod tests {
                 .iter()
                 .any(|bundle| bundle.member == wallet.address() && !bundle.burns.is_empty())
         );
+    }
+
+    #[test]
+    fn conflicting_local_anchor_falls_back_to_pending_wallet_burn() {
+        let wallet = Wallet::from_seed("conflicting-local-anchor-wallet");
+        let ledger = funded_ledger(std::slice::from_ref(&wallet));
+        let pending_burn = ledger.build_burn(&wallet, 2, 1).unwrap();
+        let mut node =
+            NodeCore::from_ledger_with_burn_fee_and_enabled(wallet.clone(), ledger, true, 1, 1);
+        node.receive_transaction(pending_burn.clone()).unwrap();
+
+        node.prepare_automatic_burn(1).unwrap();
+        let local_anchor = node
+            .local_block_anchor_burn
+            .as_ref()
+            .map(|(_, burn)| burn)
+            .expect("selected finalizer should prepare a local anchor");
+        assert_ne!(local_anchor.signature(), pending_burn.signature());
+
+        let (candidate, required_burn_signature) = node.ledger_with_local_block_anchor();
+        assert_eq!(required_burn_signature, None);
+        assert!(
+            candidate
+                .pending()
+                .iter()
+                .any(|transaction| transaction.signature() == pending_burn.signature())
+        );
+
+        let prepared = node.prepare_next_block_with_local_anchor(1).unwrap();
+        let block = prepared.finish(&wallet, "test-vdf-output".to_string());
+        assert!(
+            block
+                .transactions
+                .iter()
+                .any(|transaction| transaction.signature() == pending_burn.signature())
+        );
+    }
+
+    #[test]
+    fn local_anchor_displaces_conflicting_pending_transfer_in_block_candidate() {
+        let wallet = Wallet::from_seed("priority-local-anchor-wallet");
+        let recipient = Wallet::from_seed("priority-local-anchor-recipient");
+        let ledger = funded_ledger(std::slice::from_ref(&wallet));
+        let pending_transfer = ledger
+            .build_transfer(&wallet, recipient.address(), 2, 1)
+            .unwrap();
+        let mut node =
+            NodeCore::from_ledger_with_burn_fee_and_enabled(wallet.clone(), ledger, true, 1, 1);
+        node.receive_transaction(pending_transfer.clone()).unwrap();
+
+        node.prepare_automatic_burn(1).unwrap();
+        let local_anchor_signature = node
+            .local_block_anchor_burn
+            .as_ref()
+            .map(|(_, burn)| burn.signature().to_string())
+            .expect("selected finalizer should prepare a local anchor");
+        let (candidate, required_burn_signature) = node.ledger_with_local_block_anchor();
+
+        assert_eq!(
+            required_burn_signature,
+            Some(local_anchor_signature.clone())
+        );
+        assert!(
+            candidate
+                .pending()
+                .iter()
+                .any(|transaction| transaction.signature() == local_anchor_signature)
+        );
+        assert!(
+            !candidate
+                .pending()
+                .iter()
+                .any(|transaction| transaction.signature() == pending_transfer.signature())
+        );
+        assert!(node.prepare_next_block_with_local_anchor(1).is_ok());
     }
 
     #[test]

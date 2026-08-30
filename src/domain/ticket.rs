@@ -75,12 +75,16 @@ fn weighted_ticket_draw(parent: &Block, target_height: u64, rank: u32, total_wei
     u128::from_be_bytes(bytes) % total_weight
 }
 
-fn ticket_draw_seed(parent: &Block, target_height: u64, rank: u32) -> String {
-    let parent_randomness = if target_height >= GRINDING_RESISTANCE_ACTIVATION_HEIGHT {
+pub(super) fn draw_parent_randomness(parent: &Block, target_height: u64) -> String {
+    if target_height >= GRINDING_RESISTANCE_ACTIVATION_HEIGHT {
         format!("{}:{}", parent.vdf_seed(), parent.vdf_output)
     } else {
         format!("{}:{}", parent.hash, parent.vdf_output)
-    };
+    }
+}
+
+fn ticket_draw_seed(parent: &Block, target_height: u64, rank: u32) -> String {
+    let parent_randomness = draw_parent_randomness(parent, target_height);
     if rank == 0 {
         format!("iuna-ticket-draw:{}:{}", target_height, parent_randomness)
     } else {
