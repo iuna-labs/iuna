@@ -68,9 +68,11 @@ Release and deploy with:
 ./deployment.sh 0.2.48
 ```
 
-By default, deployment runs the regular unit tests and verifies that the fuzz
-targets compile against their locked dependencies. Run the extended adversarial,
-fuzz, and release-property suites explicitly when needed:
+By default, deployment audits all three Rust lockfiles, enforces the dependency
+source/license policy, runs the regular unit tests, and verifies that the fuzz
+targets compile against their locked dependencies. Release hosts therefore need
+`cargo-audit` and `jq` in addition to the pinned Rust 1.88 toolchain. Run the
+extended adversarial, fuzz, and release-property suites explicitly when needed:
 
 ```sh
 ./deployment.sh --full-tests 0.2.48

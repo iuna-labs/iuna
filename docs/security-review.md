@@ -158,6 +158,7 @@ Evidence already in the tree:
 Before the mainnet-candidate launch, attach or publish logs for:
 
 ```sh
+./scripts/check-dependencies.sh
 cargo test --locked
 cargo check --locked --manifest-path fuzz/Cargo.toml
 cargo run --locked --manifest-path fuzz/Cargo.toml --bin p2p_envelope -- -runs=256 fuzz/corpus/p2p_envelope
@@ -246,6 +247,17 @@ see which revision was tested.
   playbooks are the maintained in-tree references.
 - Release evidence: keep successful release-gate logs from the exact tagged
   candidate revision.
+- Desktop dependency security: the project and release builders use Rust 1.88.
+  The desktop lockfile pins `quick-xml 0.41.0`, `plist 1.10.0`, and
+  `time 0.3.47`, removing RUSTSEC-2026-0194, RUSTSEC-2026-0195, and
+  RUSTSEC-2026-0009. `scripts/check-dependencies.sh` audits the root, fuzz, and
+  desktop lockfiles without vulnerability ignores and rejects unapproved
+  dependency sources or license identifiers. It is mandatory in
+  `deployment.sh` and the CI security job. CI also test-builds the desktop crate
+  on Linux, macOS, and Windows. RustSec still reports non-vulnerability warnings
+  for Tauri's Linux GTK3 stack (unmaintained crates and the `glib::VariantStrIter`
+  advisory); iuna does not call that iterator API directly. Reassess this
+  transitive stack on every Tauri upgrade and no later than 2026-11-30.
 - Height `1000` activation: the release activates both grinding resistance and
   transaction signing format v1 automatically. All candidate nodes must upgrade
   before activation; the height activation itself requires no chain-state reset

@@ -86,12 +86,9 @@ pub(super) fn draw_parent_randomness(parent: &Block, target_height: u64) -> Stri
 fn ticket_draw_seed(parent: &Block, target_height: u64, rank: u32) -> String {
     let parent_randomness = draw_parent_randomness(parent, target_height);
     if rank == 0 {
-        format!("iuna-ticket-draw:{}:{}", target_height, parent_randomness)
+        format!("iuna-ticket-draw:{target_height}:{parent_randomness}")
     } else {
-        format!(
-            "iuna-ticket-draw-rank:{}:{}:{}",
-            target_height, rank, parent_randomness
-        )
+        format!("iuna-ticket-draw-rank:{target_height}:{rank}:{parent_randomness}")
     }
 }
 

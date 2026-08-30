@@ -113,9 +113,11 @@ impl Ledger {
             launch_profile_hash: self.launch_profile.hash(),
             mine_reward: self.mine_reward,
             current_mine_difficulty_bits: self.current_mine_difficulty_bits(),
-            balances: include_balances
-                .then(|| balances_from_utxos(&self.utxos))
-                .unwrap_or_default(),
+            balances: if include_balances {
+                balances_from_utxos(&self.utxos)
+            } else {
+                Default::default()
+            },
             pending_transactions: self.pending.len(),
         }
     }

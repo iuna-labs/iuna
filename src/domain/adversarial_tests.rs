@@ -1396,12 +1396,9 @@ fn mini_weighted_ticket_draw(
         format!("{}:{}", parent.hash, parent.vdf_output)
     };
     let seed = if rank == 0 {
-        format!("iuna-ticket-draw:{}:{}", target_height, parent_randomness)
+        format!("iuna-ticket-draw:{target_height}:{parent_randomness}")
     } else {
-        format!(
-            "iuna-ticket-draw-rank:{}:{}:{}",
-            target_height, rank, parent_randomness
-        )
+        format!("iuna-ticket-draw-rank:{target_height}:{rank}:{parent_randomness}")
     };
     let digest = Sha256::digest(seed.as_bytes());
     let mut bytes = [0_u8; 16];
@@ -3209,8 +3206,7 @@ fn mini_ticket_oracle_matches_ledger_across_maturity_expiry_and_consumption() {
                         && ticket.eligible_from_height == expected_from
                         && ticket.eligible_until_height == expected_until
                 }),
-                "burn ticket {} was not scheduled with expected maturity/expiry",
-                signature
+                "burn ticket {signature} was not scheduled with expected maturity/expiry"
             );
         }
     }

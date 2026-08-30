@@ -118,8 +118,12 @@ Focus: improve usability, tooling, and governance after the base network is stab
 
 A release intended for deployment must pass:
 
+- `./scripts/check-dependencies.sh`, which audits `Cargo.lock`,
+  `fuzz/Cargo.lock`, and `src-tauri/Cargo.lock` and enforces the dependency
+  source/license allowlist
 - `cargo test --locked`
 - `cargo check --locked --manifest-path fuzz/Cargo.toml`
+- desktop test/build jobs on Linux, macOS, and Windows
 - fuzz gate runs with `256` iterations each for `p2p_envelope`,
   `compact_snapshot`, `domain_json`, `stratum_request`, and `wallet_config`
 - `cargo test --locked --release --test properties -- --ignored`

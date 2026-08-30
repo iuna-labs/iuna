@@ -187,7 +187,7 @@ async fn main() -> Result<()> {
     println!("UI data database: {}", ui_data_store.path().display());
     println!("management UI: http://{}", opts.http_addr);
     if p2p_accept_inbound {
-        println!("p2p listener: {}", configured_p2p_addr);
+        println!("p2p listener: {configured_p2p_addr}");
     } else {
         println!("p2p listener: disabled (outbound-only)");
     }

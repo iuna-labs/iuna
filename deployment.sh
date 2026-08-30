@@ -101,6 +101,7 @@ run_release_tests() {
 
   require_command cargo
 
+  ./scripts/check-dependencies.sh
   cargo test --locked
   cargo check --locked --manifest-path fuzz/Cargo.toml
 
@@ -222,7 +223,7 @@ build_windows_desktop_in_docker_if_possible() {
     -v iuna-windows-tauri-target:/work/iuna/src-tauri/target \
     -v "$(pwd):/src/iuna:ro" \
     -v "$(pwd)/downloads:/out" \
-    rust:1.86-bookworm \
+    rust:1.88-bookworm \
     bash -c '
       set -euo pipefail
 
@@ -299,7 +300,7 @@ build_linux_cli_archives() {
     -v "$(pwd):/src/iuna:ro" \
     -v "$(pwd)/downloads:/out" \
     -v "$(pwd)/.docker-build:/node-out" \
-    rust:1.86-bookworm \
+    rust:1.88-bookworm \
     bash -c '
       set -euo pipefail
 

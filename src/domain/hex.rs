@@ -10,7 +10,7 @@ pub(super) fn decode_hex_array<const N: usize>(input: &str) -> Result<[u8; N]> {
     let len = bytes.len();
     bytes
         .try_into()
-        .map_err(|_| anyhow!("expected {} hex bytes, got {len}", N))
+        .map_err(|_| anyhow!("expected {N} hex bytes, got {len}"))
 }
 
 pub(super) fn decode_hex(input: &str) -> Result<Vec<u8>> {

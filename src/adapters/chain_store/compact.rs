@@ -131,10 +131,7 @@ pub(super) fn encode_compact_snapshot(snapshot: &ChainSnapshot) -> Result<Vec<u8
             );
         }
         if block.prev_hash != expected_prev_hash {
-            bail!(
-                "chain snapshot block {} has non-canonical previous hash",
-                height
-            );
+            bail!("chain snapshot block {height} has non-canonical previous hash");
         }
         if block.hash != block.compute_hash() {
             bail!("chain snapshot block {height} has a non-canonical hash");

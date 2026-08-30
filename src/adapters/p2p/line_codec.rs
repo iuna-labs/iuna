@@ -39,7 +39,7 @@ impl<R: AsyncRead + Unpin> LimitedLineReader<R> {
 
             if let Some(newline) = available.iter().position(|byte| *byte == b'\n') {
                 if self.pending.len() + newline > MAX_GOSSIP_LINE_BYTES {
-                    anyhow::bail!("p2p message exceeds {} byte limit", MAX_GOSSIP_LINE_BYTES);
+                    anyhow::bail!("p2p message exceeds {MAX_GOSSIP_LINE_BYTES} byte limit");
                 }
                 self.pending.extend_from_slice(&available[..newline]);
                 self.reader.consume(newline + 1);
@@ -53,7 +53,7 @@ impl<R: AsyncRead + Unpin> LimitedLineReader<R> {
             }
 
             if self.pending.len() + available.len() > MAX_GOSSIP_LINE_BYTES {
-                anyhow::bail!("p2p message exceeds {} byte limit", MAX_GOSSIP_LINE_BYTES);
+                anyhow::bail!("p2p message exceeds {MAX_GOSSIP_LINE_BYTES} byte limit");
             }
             let consumed = available.len();
             self.pending.extend_from_slice(available);
