@@ -1,12 +1,22 @@
-target
-fuzz/target
-src-tauri/target
-src-tauri/binaries
-.docker-build
-.agents
-.codex
-.DS_Store
+# Deny everything by default. Every Docker build input must be explicitly
+# allowlisted below.
+**
 
-# Keep git history in the build context. The static git browser and the
-# clonable dumb-HTTP repo are generated from this metadata.
-!.git
+# Production node image (Dockerfile.node).
+!.docker-build/iuna-node-linux-x86_64
+!README.md
+!LICENSE
+
+# Local testnet node image (Dockerfile.local-testnet).
+!Cargo.toml
+!Cargo.lock
+!rust-toolchain.toml
+!src/**
+
+# Static website and repository browser (Dockerfile).
+!.git/**
+!www/**
+!downloads/**
+!scripts/postprocess_stagit_site.py
+!src-tauri/icons/32x32.png
+!nginx.conf
