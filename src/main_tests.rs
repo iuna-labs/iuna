@@ -102,9 +102,22 @@ fn management_ui_uses_an_in_app_transfer_confirmation_and_marks_fee_errors() {
     let javascript = include_str!("../www/assets/iuna-ui.js");
     assert!(html.contains("Confirm transfer"));
     assert!(html.contains("@click=\"confirmTransfer\""));
+    assert!(html.contains("Transaction size"));
+    assert!(html.contains("Network fee"));
+    assert!(!html.contains("Verify recipient"));
     assert!(html.contains("error: feeEstimateError('transfer')"));
+    assert!(javascript.contains("bytes: Number(estimate.bytes)"));
+    assert!(javascript.contains("fee: this.microiunaAmount(estimate.fee)"));
+    assert!(javascript.contains("fee_per_byte: transfer.feePerByte"));
     assert!(javascript.contains("async confirmTransfer()"));
     assert!(!javascript.contains("window.confirm"));
+}
+
+#[test]
+fn management_ui_matches_bech32m_contacts_to_canonical_transaction_addresses() {
+    let javascript = include_str!("../www/assets/iuna-ui.js");
+    assert!(javascript.contains("canonicalAddressKey(address)"));
+    assert!(javascript.contains("this.canonicalAddressKey(savedAddress) === canonical"));
 }
 
 #[test]

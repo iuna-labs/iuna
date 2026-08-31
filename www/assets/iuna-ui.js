@@ -2384,7 +2384,9 @@ window.iunaApp = function iunaApp() {
         this.pendingTransfer = {
           recipient: fullRecipient,
           amount,
-          fee,
+          feePerByte: fee,
+          bytes: Number(estimate.bytes),
+          fee: this.microiunaAmount(estimate.fee),
           utxos: this.selectedTransferUtxos.join("\n"),
         };
         this.sendConfirmModalOpen = true;
@@ -2412,7 +2414,7 @@ window.iunaApp = function iunaApp() {
           {
             to: transfer.recipient,
             amount: transfer.amount,
-            fee_per_byte: transfer.fee,
+            fee_per_byte: transfer.feePerByte,
             utxos: transfer.utxos,
           },
           `Queued transfer of ${this.amountLabel(transfer.amount)} IUNA to ${recipient}`
@@ -2503,7 +2505,12 @@ window.iunaApp = function iunaApp() {
         fee_per_byte: this.parseiunaAmount(this.transferFee),
         utxos: this.selectedTransferUtxos.join("\n"),
       });
-      if (estimate?.error || !Number.isFinite(Number(estimate?.fee))) {
+      if (
+        estimate?.error
+        || !Number.isFinite(Number(estimate?.fee))
+        || !Number.isInteger(Number(estimate?.bytes))
+        || Number(estimate.bytes) <= 0
+      ) {
         throw new Error(estimate?.error || "Could not estimate transfer fee");
       }
       return estimate;
@@ -2671,9 +2678,47 @@ window.iunaApp = function iunaApp() {
       return `${value.slice(0, 8)}...${value.slice(-8)}`;
     },
 
+    canonicalAddressKey(address) {
+      const normalized = String(address ?? "").trim().toLowerCase();
+      if (/^[0-9a-f]{64}$/.test(normalized)) return normalized;
+
+      const separator = normalized.lastIndexOf("1");
+      const hrp = normalized.slice(0, separator);
+      if (separator <= 0 || (hrp !== "iuna" && hrp !== "tiuna")) return normalized;
+
+      const charset = "qpzry9x8gf2tvdw0s3jn54khce6mua7l";
+      const encoded = normalized.slice(separator + 1);
+      if (encoded.length < 7) return normalized;
+      const payload = [...encoded.slice(0, -6)].map((character) => charset.indexOf(character));
+      if (payload.length === 0 || payload[0] !== 0 || payload.some((value) => value < 0)) return normalized;
+
+      let accumulator = 0;
+      let bits = 0;
+      const bytes = [];
+      for (const value of payload.slice(1)) {
+        accumulator = (accumulator << 5) | value;
+        bits += 5;
+        while (bits >= 8) {
+          bits -= 8;
+          bytes.push((accumulator >> bits) & 0xff);
+          accumulator &= (1 << bits) - 1;
+        }
+      }
+      if (bits >= 5 || accumulator !== 0 || bytes.length !== 32) return normalized;
+      return bytes.map((byte) => byte.toString(16).padStart(2, "0")).join("");
+    },
+
     addressName(address) {
       if (!address) return null;
-      return this.addressBook?.[address] || null;
+      const normalized = String(address).trim().toLowerCase();
+      const directName = this.addressBook?.[normalized];
+      if (directName) return directName;
+
+      const canonical = this.canonicalAddressKey(normalized);
+      for (const [savedAddress, name] of Object.entries(this.addressBook || {})) {
+        if (this.canonicalAddressKey(savedAddress) === canonical) return name;
+      }
+      return null;
     },
 
     addressLabel(address) {

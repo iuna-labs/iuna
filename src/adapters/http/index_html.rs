@@ -617,7 +617,6 @@ pub(super) const INDEX_HTML: &str = concat!(
                   <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M4 5.5A2.5 2.5 0 0 1 6.5 3H20v18H6.5A2.5 2.5 0 0 1 4 18.5z"></path><path d="M8 7h8"></path><path d="M8 11h6"></path><path d="M8 15h4"></path></svg>
                 </button>
               </div>
-              <div class="fee-preview" x-show="transferTo.trim()">Verify recipient: <code x-text="transferTo.trim()"></code></div>
               <div class="amount-field">
                 <label>Amount<input x-model="transferAmount" @input="scheduleFeeEstimates" type="number" min="0.000001" step="0.000001" required></label>
                 <button class="amount-max-button" type="button" @click="setMaxTransferAmount" :disabled="transferMaxDisabled()" title="Use maximum spendable amount">Max</button>
@@ -1402,6 +1401,14 @@ pub(super) const INDEX_HTML: &str = concat!(
           </div>
           <div class="info-fact">
             <div class="label">Fee / byte</div>
+            <div class="value">IUNA <span x-text="amountLabel(pendingTransfer?.feePerByte || 0)"></span></div>
+          </div>
+          <div class="info-fact">
+            <div class="label">Transaction size</div>
+            <div class="value"><span x-text="pendingTransfer?.bytes || 0"></span> bytes</div>
+          </div>
+          <div class="info-fact">
+            <div class="label">Network fee</div>
             <div class="value">IUNA <span x-text="amountLabel(pendingTransfer?.fee || 0)"></span></div>
           </div>
         </div>
