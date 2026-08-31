@@ -136,6 +136,8 @@ impl Ledger {
             change,
             amount,
             fee,
+            anchor: (self.height().saturating_add(1) >= super::TIP_BOUND_BURN_ACTIVATION_HEIGHT)
+                .then(|| self.tip().hash.clone()),
         }
         .sign(wallet, &self.transaction_signing_domain())?;
         self.validate_new_transaction(&transaction)?;

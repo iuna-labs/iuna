@@ -427,6 +427,7 @@ mod tests {
             change: Vec::new(),
             amount: 42,
             fee: 1,
+            anchor: None,
             signature: "b".repeat(128),
         };
 

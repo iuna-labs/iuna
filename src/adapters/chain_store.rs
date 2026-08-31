@@ -404,7 +404,7 @@ VALUES (1, 0, 'legacy-tip', ?1, 0)
     fn open_does_not_archive_corrupt_or_future_compact_snapshots() {
         for (name, blob) in [
             ("corrupt", vec![0, 1, 2, 3]),
-            ("future", [b"IUNA-SNAPSHOT".as_slice(), &[7]].concat()),
+            ("future", [b"IUNA-SNAPSHOT".as_slice(), &[8]].concat()),
         ] {
             let dir = tempdir().unwrap();
             let path = dir.path().join(format!("{name}.sqlite3"));

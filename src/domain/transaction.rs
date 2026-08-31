@@ -102,6 +102,8 @@ pub enum Transaction {
         amount: Amount,
         #[serde(default)]
         fee: Amount,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        anchor: Option<String>,
         signature: String,
     },
     Mine {
@@ -162,6 +164,7 @@ impl Transaction {
             change: change.clone(),
             amount,
             fee: 0,
+            anchor: None,
         };
         let signature = hex_hash(format!("iuna-genesis-burn:{}", unsigned.canonical()));
         Self::Burn {
@@ -169,6 +172,7 @@ impl Transaction {
             change,
             amount,
             fee: 0,
+            anchor: None,
             signature,
         }
     }
@@ -228,6 +232,13 @@ impl Transaction {
         matches!(self, Self::Burn { .. })
     }
 
+    pub(super) fn burn_anchor(&self) -> Option<&str> {
+        match self {
+            Self::Burn { anchor, .. } => anchor.as_deref(),
+            Self::Transfer { .. } | Self::Mine { .. } => None,
+        }
+    }
+
     pub fn canonical(&self) -> String {
         format!("{}:{}", self.signing_payload(), self.signature())
     }
@@ -260,12 +271,14 @@ impl Transaction {
                 change,
                 amount,
                 fee,
+                anchor,
                 ..
             } => UnsignedUtxoTransaction::Burn {
                 inputs: unsigned_inputs(inputs),
                 change: change.clone(),
                 amount: *amount,
                 fee: *fee,
+                anchor: anchor.clone(),
             }
             .canonical(),
             Self::Mine {
@@ -393,12 +406,14 @@ impl Transaction {
                 change,
                 amount,
                 fee,
+                anchor,
                 ..
             } => UnsignedUtxoTransaction::Burn {
                 inputs: unsigned_inputs(inputs),
                 change: change.clone(),
                 amount: *amount,
                 fee: *fee,
+                anchor: anchor.clone(),
             }
             .signing_bytes(domain),
             Self::Mine { .. } => unreachable!("mine transactions use proof hashes"),
@@ -439,6 +454,7 @@ pub(super) enum UnsignedUtxoTransaction {
         change: Vec<TxOutput>,
         amount: Amount,
         fee: Amount,
+        anchor: Option<String>,
     },
 }
 
@@ -473,12 +489,14 @@ impl UnsignedUtxoTransaction {
                 change,
                 amount,
                 fee,
+                anchor,
                 ..
             } => Transaction::Burn {
                 inputs: signed_inputs,
                 change,
                 amount,
                 fee,
+                anchor,
                 signature,
             },
         })
@@ -506,11 +524,19 @@ impl UnsignedUtxoTransaction {
                 change,
                 amount,
                 fee,
-            } => format!(
-                "utxo-burn:{}:{}:{amount}:{fee}",
-                canonical_inputs(inputs),
-                canonical_outputs(change)
-            ),
+                anchor,
+            } => match anchor {
+                Some(anchor) => format!(
+                    "utxo-burn-v2:{}:{}:{amount}:{fee}:{anchor}",
+                    canonical_inputs(inputs),
+                    canonical_outputs(change)
+                ),
+                None => format!(
+                    "utxo-burn:{}:{}:{amount}:{fee}",
+                    canonical_inputs(inputs),
+                    canonical_outputs(change)
+                ),
+            },
         }
     }
 
@@ -533,12 +559,18 @@ impl UnsignedUtxoTransaction {
                 change,
                 amount,
                 fee,
+                anchor,
             } => {
-                bytes.push(2);
+                bytes.push(if anchor.is_some() { 3 } else { 2 });
                 encode_inputs(&mut bytes, inputs)?;
                 encode_outputs(&mut bytes, change)?;
                 bytes.extend_from_slice(&amount.to_be_bytes());
                 bytes.extend_from_slice(&fee.to_be_bytes());
+                if let Some(anchor) = anchor {
+                    let anchor = decode_canonical_hex_array::<HASH_BYTES>(anchor)
+                        .context("burn anchor is invalid")?;
+                    encode_bytes(&mut bytes, &anchor, "burn anchor")?;
+                }
             }
         }
         Ok(bytes)

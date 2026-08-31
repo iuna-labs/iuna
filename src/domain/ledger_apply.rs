@@ -88,6 +88,7 @@ impl Ledger {
                 bail!("duplicate transaction in block");
             }
             self.validate_transaction_terms(tx)?;
+            self.validate_transaction_anchor_for_height(tx, block.height, &block.prev_hash)?;
             apply_transaction_with_lineage(
                 tx,
                 block.height,
@@ -132,6 +133,13 @@ impl Ledger {
                 !mined_signatures.contains(tx.signature())
                     && transaction_inputs_available(tx, &available)
                     && self.validate_transaction_terms(tx).is_ok()
+                    && self
+                        .validate_transaction_anchor_for_height(
+                            tx,
+                            self.height().saturating_add(1),
+                            self.tip_hash(),
+                        )
+                        .is_ok()
                     && tx.verify_signature(&next_signing_domain).is_ok()
             })
             .collect();
@@ -141,6 +149,13 @@ impl Ledger {
             .filter(|tx| {
                 !mined_signatures.contains(tx.signature())
                     && self.validate_transaction_terms(tx).is_ok()
+                    && self
+                        .validate_transaction_anchor_for_height(
+                            tx,
+                            self.height().saturating_add(1),
+                            self.tip_hash(),
+                        )
+                        .is_ok()
                     && tx.verify_signature(&next_signing_domain).is_ok()
             })
             .collect();

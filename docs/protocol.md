@@ -150,6 +150,8 @@ From height `300`, fallback finalization invalidates missed ticket opportunities
 
 Every normal block must include at least one burn. This keeps the future ticket pool alive even during quiet periods. A node that may finalize prepares a local anchor burn for the next block from the finalizer wallet, and that anchor burn appears directly in the block.
 
+From height `1000`, every burn is bound to the block parent hash. The parent hash is part of the signed transaction payload, and validators require it to equal the `prev_hash` of the block containing the burn. A burn left in a mempool after any normal, fallback, or recovery block therefore expires immediately. An online wallet can sign a replacement against the new tip, while an offline wallet cannot keep creating tickets from previously broadcast burns. Earlier history retains the unanchored burn format.
+
 The anchor burn is not a fairness mechanism. By itself, it would mostly help the current finalizer keep creating future tickets. Fairness against self-serving finalizers comes from the burn inclusion committee described below.
 
 ## VDF Timing

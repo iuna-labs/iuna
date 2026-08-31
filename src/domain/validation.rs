@@ -71,6 +71,7 @@ pub(super) fn canonical_transaction_size_bytes(transaction: &Transaction) -> usi
             change,
             amount,
             fee,
+            anchor,
             signature,
         } => {
             1 + compact_len(inputs.len() as u128)
@@ -79,6 +80,7 @@ pub(super) fn canonical_transaction_size_bytes(transaction: &Transaction) -> usi
                 + compact_outputs_size_bytes(change)
                 + compact_len(u128::from(*amount))
                 + compact_len(u128::from(*fee))
+                + anchor.as_ref().map_or(0, |anchor| hash_size_bytes(anchor))
                 + signature_size_bytes(signature)
         }
         Transaction::Mine {

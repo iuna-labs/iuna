@@ -249,6 +249,7 @@ mod tests {
             }],
             amount: 1,
             fee: 1,
+            anchor: None,
             signature: signature.to_string(),
         }
     }

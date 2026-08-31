@@ -100,6 +100,7 @@ pub(super) fn wallet_transaction_row(
             amount,
             fee,
             signature,
+            ..
         } if tx.sender() == wallet => Some(WalletTransactionRow {
             kind: "burn",
             from: tx.sender().to_string(),
@@ -326,6 +327,7 @@ pub(super) fn ui_transaction(
             amount,
             fee,
             signature,
+            ..
         } => UiTransaction {
             kind: "burn",
             from: transaction.sender().to_string(),
@@ -468,6 +470,7 @@ mod tests {
             }],
             amount: 1,
             fee: 1,
+            anchor: None,
             signature: signature.to_string(),
         }
     }
@@ -498,6 +501,7 @@ mod tests {
             change: Vec::new(),
             amount: 7,
             fee: 3,
+            anchor: None,
             signature: "burn".to_string(),
         };
 

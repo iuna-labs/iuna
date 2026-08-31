@@ -8,7 +8,8 @@ use crate::domain::{
 };
 
 const COMPACT_SNAPSHOT_MAGIC: &[u8] = b"IUNA-SNAPSHOT";
-const COMPACT_SNAPSHOT_VERSION: u8 = 6;
+const MIN_SUPPORTED_COMPACT_SNAPSHOT_VERSION: u8 = 6;
+const COMPACT_SNAPSHOT_VERSION: u8 = 7;
 const VDF_SOLUTION_PREFIX: &str = "classgroup-wesolowski-bqfc-v1:";
 const MAX_COMPACT_GENESIS_ALLOCATIONS: usize = 100_000;
 const MAX_COMPACT_SNAPSHOT_BLOCKS: usize = 10_000;
@@ -21,7 +22,7 @@ pub(super) fn legacy_compact_snapshot_version(bytes: &[u8]) -> Option<u8> {
         return None;
     }
     let version = bytes[version_offset];
-    (version < COMPACT_SNAPSHOT_VERSION).then_some(version)
+    (version < MIN_SUPPORTED_COMPACT_SNAPSHOT_VERSION).then_some(version)
 }
 
 #[derive(Clone, Debug, Default)]
@@ -148,7 +149,7 @@ pub(super) fn decode_compact_snapshot(bytes: &[u8]) -> Result<ChainSnapshot> {
     let mut tables = DecodeTables::default();
     reader.magic(COMPACT_SNAPSHOT_MAGIC)?;
     let version = reader.u8()?;
-    if version != COMPACT_SNAPSHOT_VERSION {
+    if !(MIN_SUPPORTED_COMPACT_SNAPSHOT_VERSION..=COMPACT_SNAPSHOT_VERSION).contains(&version) {
         bail!("unsupported compact chain snapshot version {version}");
     }
     let genesis_count =
@@ -380,6 +381,7 @@ fn encode_transaction(
             change,
             amount,
             fee,
+            anchor,
             signature,
         } => {
             writer.u8(1);
@@ -393,7 +395,7 @@ fn encode_transaction(
                 [output] if output.address == owner => 1,
                 _ => 2,
             };
-            writer.u8(change_mode | (u8::from(genesis) << 2));
+            writer.u8(change_mode | (u8::from(genesis) << 2) | (u8::from(anchor.is_some()) << 3));
             encode_outpoints(writer, inputs, tables)?;
             writer.address(owner, tables)?;
             match change_mode {
@@ -404,6 +406,9 @@ fn encode_transaction(
             }
             writer.varint(*amount);
             writer.varint(*fee);
+            if let Some(anchor) = anchor {
+                writer.protocol_id_ref(anchor, tables)?;
+            }
             if genesis {
                 writer.fixed_hex::<32>(signature, "genesis burn signature")?;
             } else {
@@ -455,10 +460,11 @@ fn decode_transaction(
         }
         1 => {
             let mode = reader.u8()?;
-            if mode & !0b111 != 0 || mode & 0b11 > 2 {
+            if mode & !0b1111 != 0 || mode & 0b11 > 2 {
                 bail!("invalid compact burn mode {mode}");
             }
             let genesis = mode & 0b100 != 0;
+            let anchored = mode & 0b1000 != 0;
             let outpoints = decode_outpoints(reader, tables)?;
             let owner = reader.address(tables)?;
             let change = match mode & 0b11 {
@@ -472,6 +478,11 @@ fn decode_transaction(
             };
             let amount = reader.varint()?;
             let fee = reader.varint()?;
+            let anchor = if anchored {
+                Some(reader.protocol_id_ref(tables)?)
+            } else {
+                None
+            };
             let signature = if genesis {
                 reader.fixed_hex::<32>()?
             } else {
@@ -483,6 +494,7 @@ fn decode_transaction(
                 change,
                 amount,
                 fee,
+                anchor,
                 signature,
             })
         }
@@ -916,13 +928,13 @@ mod tests {
     use super::{
         COMPACT_SNAPSHOT_MAGIC, COMPACT_SNAPSHOT_VERSION, CompactReader, CompactWriter,
         DecodeTables, EncodeTables, MAX_COMPACT_BYTE_FIELD, MAX_COMPACT_GENESIS_ALLOCATIONS,
-        MAX_COMPACT_SNAPSHOT_BLOCKS, MAX_COMPACT_VEC_ITEMS, decode_block_body,
-        decode_compact_snapshot, decode_launch_profile, decode_transaction, encode_block_body,
-        encode_compact_snapshot, encode_launch_profile, encode_transaction,
+        MAX_COMPACT_SNAPSHOT_BLOCKS, MAX_COMPACT_VEC_ITEMS, MIN_SUPPORTED_COMPACT_SNAPSHOT_VERSION,
+        decode_block_body, decode_compact_snapshot, decode_launch_profile, decode_transaction,
+        encode_block_body, encode_compact_snapshot, encode_launch_profile, encode_transaction,
     };
 
     #[test]
-    fn compact_snapshot_v6_roundtrips_default_and_local_profiles() {
+    fn compact_snapshot_v7_roundtrips_default_and_local_profiles() {
         let wallet = Wallet::from_seed("compact-profile-wire-version");
         let allocations = BTreeMap::from([(wallet.address().to_string(), MICRO_IUNA)]);
         let default_snapshot = Ledger::new(allocations.clone(), 1).snapshot();
@@ -1003,6 +1015,7 @@ mod tests {
             }],
             amount: 20,
             fee: 1,
+            anchor: None,
             signature: signature.clone(),
         };
         let transfer = Transaction::Transfer {
@@ -1030,6 +1043,34 @@ mod tests {
     }
 
     #[test]
+    fn compact_transaction_roundtrips_tip_bound_burn() {
+        let owner = "2".repeat(64);
+        let signature = "3".repeat(128);
+        let anchor = "4".repeat(64);
+        let burn = Transaction::Burn {
+            inputs: vec![input(&owner, &signature)],
+            change: Vec::new(),
+            amount: 20,
+            fee: 1,
+            anchor: Some(anchor.clone()),
+            signature,
+        };
+        let mut encode_tables = EncodeTables::default();
+        encode_tables.register_protocol_id(&anchor);
+        let mut writer = CompactWriter::default();
+        encode_transaction(&mut writer, &burn, &mut encode_tables).unwrap();
+        let bytes = writer.into_inner();
+        let mut decode_tables = DecodeTables::default();
+        decode_tables.register_protocol_id(&anchor);
+        let mut reader = CompactReader::new(&bytes);
+
+        let decoded = decode_transaction(&mut reader, &mut decode_tables).unwrap();
+
+        reader.finish().unwrap();
+        assert_eq!(decoded, burn);
+    }
+
+    #[test]
     fn repeated_burn_references_shrink_to_small_varints() {
         let owner = "2".repeat(64);
         let signature = "3".repeat(128);
@@ -1042,6 +1083,7 @@ mod tests {
             }],
             amount: 20,
             fee: 1,
+            anchor: None,
             signature,
         };
         let mut tables = EncodeTables::default();
@@ -1062,6 +1104,7 @@ mod tests {
             change: Vec::new(),
             amount: 20,
             fee: 1,
+            anchor: None,
             signature,
         };
         let block_with_section = |burn_bundle_section| {
@@ -1205,7 +1248,7 @@ mod tests {
     fn compact_snapshot_decoder_rejects_pre_reset_versions() {
         let mut bytes = Vec::new();
         bytes.extend_from_slice(COMPACT_SNAPSHOT_MAGIC);
-        bytes.push(COMPACT_SNAPSHOT_VERSION - 1);
+        bytes.push(MIN_SUPPORTED_COMPACT_SNAPSHOT_VERSION - 1);
 
         assert_decode_error_contains(&bytes, "unsupported compact chain snapshot version 5");
     }

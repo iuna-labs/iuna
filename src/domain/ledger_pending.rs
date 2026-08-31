@@ -53,6 +53,13 @@ impl Ledger {
                 }
                 if transaction_inputs_available(tx, &utxos)
                     && self.validate_transaction_terms(tx).is_ok()
+                    && self
+                        .validate_transaction_anchor_for_height(
+                            tx,
+                            self.height().saturating_add(1),
+                            self.tip_hash(),
+                        )
+                        .is_ok()
                     && apply_transaction(tx, &mut utxos, &signing_domain).is_ok()
                 {
                     if let Some(anchor) = mine_anchor(tx) {
@@ -307,6 +314,11 @@ impl Ledger {
 
     pub(super) fn validate_new_transaction(&self, transaction: &Transaction) -> Result<()> {
         self.validate_transaction_terms(transaction)?;
+        self.validate_transaction_anchor_for_height(
+            transaction,
+            self.height().saturating_add(1),
+            self.tip_hash(),
+        )?;
         ensure_transaction_fits_empty_block(
             compact_block_context(self),
             transaction,
@@ -403,6 +415,7 @@ impl Ledger {
                 inputs,
                 change,
                 fee,
+                anchor,
                 signature,
                 ..
             } => {
@@ -411,6 +424,9 @@ impl Ledger {
                 }
                 validate_transaction_inputs(inputs)?;
                 validate_transaction_outputs(change)?;
+                if let Some(anchor) = anchor {
+                    validate_hash(anchor, "burn transaction anchor")?;
+                }
                 validate_signature(signature, "transaction signature")?;
             }
             Transaction::Mine {
@@ -442,6 +458,30 @@ impl Ledger {
                     bail!("mine transaction difficulty is invalid");
                 }
             }
+        }
+        Ok(())
+    }
+
+    pub(super) fn validate_transaction_anchor_for_height(
+        &self,
+        transaction: &Transaction,
+        height: u64,
+        parent_hash: &str,
+    ) -> Result<()> {
+        if !transaction.is_burn() {
+            return Ok(());
+        }
+        if height < super::TIP_BOUND_BURN_ACTIVATION_HEIGHT {
+            if transaction.burn_anchor().is_some() {
+                bail!("burn transaction anchor is not active yet");
+            }
+            return Ok(());
+        }
+        let anchor = transaction
+            .burn_anchor()
+            .context("burn transaction is missing its parent anchor")?;
+        if anchor != parent_hash {
+            bail!("burn transaction anchor does not match the block parent");
         }
         Ok(())
     }
@@ -519,6 +559,53 @@ mod tests {
                 .unwrap_err()
                 .to_string()
                 .contains("anchor is too old")
+        );
+    }
+
+    #[test]
+    fn burns_become_tip_bound_at_activation_and_expire_after_tip_change() {
+        let wallet = Wallet::from_seed("tip-bound-burn-wallet");
+        let mut ledger = Ledger::new(BTreeMap::from([(wallet.address().to_string(), 10)]), 1);
+
+        extend_synthetic_chain_to(
+            &mut ledger,
+            super::super::TIP_BOUND_BURN_ACTIVATION_HEIGHT - 2,
+        );
+        let legacy_burn = ledger.build_burn(&wallet, 1, 1).unwrap();
+        assert_eq!(legacy_burn.burn_anchor(), None);
+
+        extend_synthetic_chain_to(
+            &mut ledger,
+            super::super::TIP_BOUND_BURN_ACTIVATION_HEIGHT - 1,
+        );
+        let anchored_burn = ledger.build_burn(&wallet, 1, 1).unwrap();
+        assert_eq!(anchored_burn.burn_anchor(), Some(ledger.tip_hash()));
+        assert!(ledger.submit_transaction(anchored_burn.clone()).unwrap());
+        assert_eq!(ledger.valid_pending_transactions(), vec![anchored_burn]);
+
+        extend_synthetic_chain_to(&mut ledger, super::super::TIP_BOUND_BURN_ACTIVATION_HEIGHT);
+        assert!(ledger.valid_pending_transactions().is_empty());
+    }
+
+    #[test]
+    fn burn_signature_commits_to_parent_anchor() {
+        let wallet = Wallet::from_seed("tip-bound-burn-signature-wallet");
+        let mut ledger = Ledger::new(BTreeMap::from([(wallet.address().to_string(), 10)]), 1);
+        extend_synthetic_chain_to(
+            &mut ledger,
+            super::super::TIP_BOUND_BURN_ACTIVATION_HEIGHT - 1,
+        );
+        let mut burn = ledger.build_burn(&wallet, 1, 1).unwrap();
+        let Transaction::Burn { anchor, .. } = &mut burn else {
+            unreachable!();
+        };
+        *anchor = Some("f".repeat(64));
+
+        assert!(
+            burn.verify_signature(&ledger.transaction_signing_domain())
+                .unwrap_err()
+                .to_string()
+                .contains("signature is invalid")
         );
     }
 

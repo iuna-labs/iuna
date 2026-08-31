@@ -502,6 +502,7 @@ mod tests {
             }],
             amount: 1,
             fee,
+            anchor: None,
             signature: signature.to_string(),
         }
     }
