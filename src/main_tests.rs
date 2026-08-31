@@ -97,6 +97,17 @@ fn management_ui_warns_when_estimated_fees_exceed_amounts() {
 }
 
 #[test]
+fn management_ui_uses_an_in_app_transfer_confirmation_and_marks_fee_errors() {
+    let html = include_str!("adapters/http/index_html.rs");
+    let javascript = include_str!("../www/assets/iuna-ui.js");
+    assert!(html.contains("Confirm transfer"));
+    assert!(html.contains("@click=\"confirmTransfer\""));
+    assert!(html.contains("error: feeEstimateError('transfer')"));
+    assert!(javascript.contains("async confirmTransfer()"));
+    assert!(!javascript.contains("window.confirm"));
+}
+
+#[test]
 fn management_ui_blocks_interaction_while_the_node_is_syncing() {
     let html = include_str!("adapters/http/index_html.rs");
     let javascript = include_str!("../www/assets/iuna-ui.js");

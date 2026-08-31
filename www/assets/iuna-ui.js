@@ -100,6 +100,10 @@ window.iunaApp = function iunaApp() {
     transferTo: "",
     transferAmount: null,
     transferFee: "0.000001",
+    sendPreparing: false,
+    sendConfirmModalOpen: false,
+    sendConfirmBusy: false,
+    pendingTransfer: null,
     feeEstimates: { transfer: null, burn: null, mine: null },
     feeEstimateTimer: null,
     showSendAdvanced: false,
@@ -1323,6 +1327,7 @@ window.iunaApp = function iunaApp() {
     },
 
     closeModals() {
+      this.closeSendConfirmModal();
       this.closeTransactionModal();
       this.closeWalletUtxosModal();
       this.closePowDifficultyInfo();
@@ -1481,6 +1486,10 @@ window.iunaApp = function iunaApp() {
       if (!estimate) return "Enter details to estimate fee";
       if (estimate.error) return estimate.error;
       return `${estimate.bytes} bytes -> IUNA ${this.amountLabel(estimate.fee)}`;
+    },
+
+    feeEstimateError(kind) {
+      return Boolean(this.feeEstimates[kind]?.error);
     },
 
     feeExceedsAmount(kind) {
@@ -2362,19 +2371,54 @@ window.iunaApp = function iunaApp() {
     },
 
     async sendTransfer() {
+      if (this.sendPreparing || this.sendConfirmBusy) return;
+      this.sendPreparing = true;
       try {
-        const amount = this.parseiunaAmount(this.transferAmount);
+        const amount = this.parseiunaAmountRequired(this.transferAmount, "Transfer amount is required");
+        if (amount <= 0) throw new Error("Transfer amount must be greater than zero");
         const fee = this.parseiunaAmountRequired(this.transferFee, "Transfer fee per byte is required");
         const fullRecipient = this.transferTo.trim();
-        if (!window.confirm(`Confirm transfer\n\nRecipient:\n${fullRecipient}\n\nAmount: ${this.amountLabel(amount)} IUNA`)) {
-          return;
-        }
-        const recipient = this.short(fullRecipient);
+        if (!fullRecipient) throw new Error("Recipient is required");
+        const estimate = await this.transferFeeEstimateForAmount(amount);
+        this.feeEstimates.transfer = estimate;
+        this.pendingTransfer = {
+          recipient: fullRecipient,
+          amount,
+          fee,
+          utxos: this.selectedTransferUtxos.join("\n"),
+        };
+        this.sendConfirmModalOpen = true;
+      } catch (error) {
+        this.showFlash(error.message, "error");
+      } finally {
+        this.sendPreparing = false;
+      }
+    },
+
+    closeSendConfirmModal() {
+      if (this.sendConfirmBusy) return;
+      this.sendConfirmModalOpen = false;
+      this.pendingTransfer = null;
+    },
+
+    async confirmTransfer() {
+      const transfer = this.pendingTransfer;
+      if (!transfer || this.sendConfirmBusy) return;
+      this.sendConfirmBusy = true;
+      try {
+        const recipient = this.short(transfer.recipient);
         await this.postForm(
           "/api/transfer",
-          { to: fullRecipient, amount, fee_per_byte: fee, utxos: this.selectedTransferUtxos.join("\n") },
-          `Queued transfer of ${this.amountLabel(amount)} IUNA to ${recipient}`
+          {
+            to: transfer.recipient,
+            amount: transfer.amount,
+            fee_per_byte: transfer.fee,
+            utxos: transfer.utxos,
+          },
+          `Queued transfer of ${this.amountLabel(transfer.amount)} IUNA to ${recipient}`
         );
+        this.sendConfirmModalOpen = false;
+        this.pendingTransfer = null;
         this.transferTo = "";
         this.transferAmount = null;
         this.selectedTransferUtxos = [];
@@ -2383,6 +2427,8 @@ window.iunaApp = function iunaApp() {
         this.feeEstimates.transfer = null;
       } catch (error) {
         this.showFlash(error.message, "error");
+      } finally {
+        this.sendConfirmBusy = false;
       }
     },
 

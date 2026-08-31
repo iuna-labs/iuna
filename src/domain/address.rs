@@ -279,6 +279,13 @@ mod tests {
     }
 
     #[test]
+    fn production_reported_mainnet_address_is_valid() {
+        let address = "iuna1q7fj9u5pqpuq0gfl4a3a7afsqfmfm22x4lgz4w8aqmggs4e33aqfqkx5kyt";
+
+        assert!(decode_address(address, AddressNetwork::Mainnet).is_ok());
+    }
+
+    #[test]
     fn uppercase_is_accepted_but_mixed_case_is_rejected() {
         let key = wallet_key();
         let address = encode_address(&key, AddressNetwork::Mainnet).unwrap();

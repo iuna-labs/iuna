@@ -227,6 +227,7 @@ pub(super) const INDEX_HTML: &str = concat!(
     .mine-settings-form { display: grid; gap: 10px; }
     .mine-fee-fields { display: flex; flex-wrap: wrap; gap: 10px; align-items: end; }
     .fee-preview { flex-basis: 100%; color: #9eb3bc; font-size: 12px; font-weight: 700; }
+    .fee-preview.error { color: #ffb1a8; }
     .fee-warning { flex-basis: 100%; color: #ffd070; font-size: 12px; font-weight: 800; }
     .mine-stats { display: grid; grid-template-columns: repeat(4, minmax(112px, 1fr)); gap: 8px; min-width: 0; }
     .local-mining-stats { grid-template-columns: repeat(auto-fit, minmax(150px, 1fr)); }
@@ -622,7 +623,7 @@ pub(super) const INDEX_HTML: &str = concat!(
                 <button class="amount-max-button" type="button" @click="setMaxTransferAmount" :disabled="transferMaxDisabled()" title="Use maximum spendable amount">Max</button>
               </div>
               <label>Fee / byte<input x-model="transferFee" @input="scheduleFeeEstimates" type="number" min="0" step="0.000001" required></label>
-              <div class="fee-preview" x-text="feeEstimateLabel('transfer')"></div>
+              <div class="fee-preview" :class="{ error: feeEstimateError('transfer') }" x-text="feeEstimateLabel('transfer')" role="status" aria-live="polite"></div>
               <div class="fee-warning" x-show="feeExceedsAmount('transfer')" x-text="feeExceedsAmountLabel('transfer')" role="status" aria-live="polite"></div>
               <button class="advanced-toggle" type="button" @click="toggleSendAdvanced" x-text="showSendAdvanced ? 'Hide UTXOs' : 'UTXOs'"></button>
               <div class="send-utxo-summary" x-show="showSendAdvanced">
@@ -656,7 +657,7 @@ pub(super) const INDEX_HTML: &str = concat!(
                   <div class="tx-modal-empty" x-show="walletUtxos.length === 0 && !walletUtxoPage.loading">No UTXOs</div>
                 </div>
               </div>
-              <button class="primary" type="submit">Send</button>
+              <button class="primary" type="submit" :disabled="sendPreparing || sendConfirmBusy" x-text="sendPreparing ? 'Checking...' : 'Send'"></button>
             </form>
           </div>
           <div class="panel">
@@ -1377,6 +1378,38 @@ pub(super) const INDEX_HTML: &str = concat!(
       <div class="sync-progress-label" x-text="syncProgressLabel()"></div>
       <button class="subtle" type="button" @click="openChainResetModal">Sync stuck? Reset local chain</button>
       <p class="muted">This recovery option removes only the local blockchain. Your wallet and settings stay on this device.</p>
+    </section>
+  </div>
+  <div class="setup-overlay transaction-overlay" x-show="sendConfirmModalOpen" x-transition.opacity @click.self="closeSendConfirmModal()" role="dialog" aria-modal="true" aria-labelledby="send-confirm-title">
+    <section class="tx-modal address-book-modal">
+      <div class="tx-modal-head">
+        <div class="tx-modal-title">
+          <span class="pill transfer">Send</span>
+          <h2 id="send-confirm-title">Confirm transfer</h2>
+        </div>
+        <button type="button" @click="closeSendConfirmModal" :disabled="sendConfirmBusy">Close</button>
+      </div>
+      <div class="info-copy">
+        <p>Check the full recipient address before sending.</p>
+        <div class="info-fact">
+          <div class="label">Recipient</div>
+          <code class="tx-value hash" x-text="pendingTransfer?.recipient || '-'"></code>
+        </div>
+        <div class="info-facts">
+          <div class="info-fact">
+            <div class="label">Amount</div>
+            <div class="value">IUNA <span x-text="amountLabel(pendingTransfer?.amount || 0)"></span></div>
+          </div>
+          <div class="info-fact">
+            <div class="label">Fee / byte</div>
+            <div class="value">IUNA <span x-text="amountLabel(pendingTransfer?.fee || 0)"></span></div>
+          </div>
+        </div>
+      </div>
+      <div class="danger-actions">
+        <button class="subtle" type="button" @click="closeSendConfirmModal" :disabled="sendConfirmBusy">Cancel</button>
+        <button class="primary" type="button" @click="confirmTransfer" :disabled="sendConfirmBusy" x-text="sendConfirmBusy ? 'Sending...' : 'Confirm and send'"></button>
+      </div>
     </section>
   </div>
   <div class="setup-overlay transaction-overlay" x-show="chainResetModalOpen" x-transition.opacity @click.self="closeChainResetModal()" role="dialog" aria-modal="true" aria-labelledby="chain-reset-title">
