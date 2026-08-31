@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import argparse
+from dataclasses import dataclass
 import hashlib
 import http.cookiejar
 import json
@@ -47,6 +48,36 @@ EXPECTED_BLOCK_MS = 5_000
 HTTP_TIMEOUT_SECONDS = 30
 NAME_PATTERN = re.compile(r"^[a-z0-9][a-z0-9._-]*$")
 _OPENERS: dict[str, urllib.request.OpenerDirector] = {}
+
+
+@dataclass(frozen=True)
+class Scenario:
+    snapshot: str
+    through: int
+    minimum_finalized_height: int | None = None
+    canonical_height: int | None = None
+    require_fixture_hash: bool = False
+
+
+SCENARIOS = {
+    "fallback-activation": Scenario(
+        snapshot="pre-fallback-invalidation",
+        through=300,
+    ),
+    "objective-finality": Scenario(
+        snapshot="pre-objective-finality",
+        through=1_001,
+        minimum_finalized_height=1_000,
+        canonical_height=1_000,
+    ),
+    "checkpoint-restart": Scenario(
+        snapshot="first-objective-checkpoint",
+        through=1_002,
+        minimum_finalized_height=1_000,
+        canonical_height=1_000,
+        require_fixture_hash=True,
+    ),
+}
 
 
 class E2EError(RuntimeError):
@@ -107,7 +138,7 @@ def node_port(service: str) -> int:
     return int(os.environ.get(PORT_ENV[service], DEFAULT_PORTS[service]))
 
 
-def node_status(service: str) -> dict:
+def node_json(service: str, path: str) -> object:
     base_url = f"http://127.0.0.1:{node_port(service)}"
     opener = _OPENERS.get(service)
     if opener is None:
@@ -129,9 +160,16 @@ def node_status(service: str) -> dict:
             raise E2EError(f"{service} login failed: {result.get('error', 'unknown error')}")
         _OPENERS[service] = opener
     with opener.open(
-        f"{base_url}/api/status", timeout=HTTP_TIMEOUT_SECONDS
+        f"{base_url}{path}", timeout=HTTP_TIMEOUT_SECONDS
     ) as response:
         return json.load(response)
+
+
+def node_status(service: str) -> dict:
+    result = node_json(service, "/api/status")
+    if not isinstance(result, dict):
+        raise E2EError(f"{service} returned a non-object status response")
+    return result
 
 
 def all_statuses() -> dict[str, dict]:
@@ -157,6 +195,76 @@ def assert_e2e_profile(statuses: dict[str, dict]) -> None:
             errors.append(f"{service}: profile={profile}, target_block_ms={block_ms}")
     if errors:
         raise E2EError("not running the isolated 5s e2e build: " + "; ".join(errors))
+
+
+def assert_converged(statuses: dict[str, dict]) -> None:
+    tips = {
+        (status["chain"]["height"], status["chain"]["tip_hash"])
+        for status in statuses.values()
+    }
+    if len(tips) != 1:
+        summary = ", ".join(
+            f"{service}={status['chain']['height']}:{status['chain']['tip_hash'][:12]}"
+            for service, status in statuses.items()
+        )
+        raise E2EError(f"nodes did not converge: {summary}")
+
+
+def assert_finality(statuses: dict[str, dict], minimum_height: int | None) -> None:
+    checkpoints = {
+        (status["chain"].get("finalized_height"), status["chain"].get("finalized_hash"))
+        for status in statuses.values()
+    }
+    if len(checkpoints) != 1:
+        raise E2EError(f"nodes disagree about objective finality: {checkpoints}")
+    finalized_height, finalized_hash = next(iter(checkpoints))
+    if minimum_height is None:
+        if finalized_height is not None or finalized_hash is not None:
+            raise E2EError(
+                f"objective finality activated too early at height {finalized_height}"
+            )
+        return
+    if finalized_height is None or finalized_height < minimum_height or not finalized_hash:
+        raise E2EError(
+            f"expected a finalized checkpoint at or above {minimum_height}, "
+            f"got {finalized_height}:{finalized_hash}"
+        )
+    block_hashes = {
+        block_at_height(service, finalized_height)["hash"] for service in SERVICES
+    }
+    if block_hashes != {finalized_hash}:
+        raise E2EError(
+            f"finalized hash does not identify block {finalized_height}: {block_hashes}"
+        )
+
+
+def block_at_height(service: str, height: int) -> dict:
+    result = node_json(service, f"/api/blocks?before_height={height + 1}&limit=1")
+    if not isinstance(result, list) or len(result) != 1 or result[0].get("height") != height:
+        raise E2EError(f"{service} block API did not return block {height}")
+    return result[0]
+
+
+def assert_api_health(statuses: dict[str, dict], through: int) -> None:
+    for service in SERVICES:
+        blocks = node_json(service, "/api/blocks?limit=3")
+        health = node_json(service, "/api/network/health")
+        peers = node_json(service, "/api/peers?limit=100")
+        mempool = node_json(service, "/api/mempool?limit=100")
+        wallet = node_json(service, "/api/wallet/transactions?limit=3")
+        if not isinstance(blocks, list) or not blocks:
+            raise E2EError(f"{service} block API returned no blocks")
+        if max(block.get("height", -1) for block in blocks) < through:
+            raise E2EError(f"{service} block API has not projected height {through}")
+        if not isinstance(health, dict) or health.get("local_height", -1) < through:
+            raise E2EError(f"{service} network health is behind height {through}")
+        for label, page in (("peers", peers), ("mempool", mempool), ("wallet", wallet)):
+            if not isinstance(page, dict) or not isinstance(page.get("items"), list):
+                raise E2EError(f"{service} {label} API returned an invalid page")
+        if health.get("local_tip_hash") != statuses[service]["chain"]["tip_hash"]:
+            # The chain is live; advancing between the status and health requests is valid.
+            if health.get("local_height", 0) <= statuses[service]["chain"]["height"]:
+                raise E2EError(f"{service} status and network health disagree about the tip")
 
 
 def read_chain_metadata(path: Path) -> dict:
@@ -279,6 +387,68 @@ def verify_snapshot(directory: Path) -> dict:
     return manifest
 
 
+def test_snapshots(plan_path: Path = E2E_DIR / "checkpoints.json") -> None:
+    plan = json.loads(plan_path.read_text())
+    expected_names = {checkpoint["name"] for checkpoint in plan}
+    scenario_snapshots = {scenario.snapshot for scenario in SCENARIOS.values()}
+    missing_scenarios = scenario_snapshots - expected_names
+    if missing_scenarios:
+        raise E2EError(f"scenarios reference snapshots outside the plan: {missing_scenarios}")
+
+    for checkpoint in plan:
+        name = validate_snapshot_name(checkpoint["name"])
+        expected_height = int(checkpoint["height"])
+        directory = snapshot_path(name)
+        manifest = verify_snapshot(directory)
+        if manifest.get("name") != name or manifest.get("height") != expected_height:
+            raise E2EError(
+                f"{name} manifest identity mismatch: "
+                f"{manifest.get('name')} at {manifest.get('height')}"
+            )
+        if manifest.get("profile_id") != EXPECTED_PROFILE:
+            raise E2EError(f"{name} uses profile {manifest.get('profile_id')}")
+        if manifest.get("target_block_ms") != EXPECTED_BLOCK_MS:
+            raise E2EError(f"{name} uses target {manifest.get('target_block_ms')}ms")
+        nodes = manifest.get("nodes", {})
+        if set(nodes) != set(SERVICES):
+            raise E2EError(f"{name} does not contain exactly the six e2e nodes")
+        for service in SERVICES:
+            metadata = read_chain_metadata(directory / service / "chain.sqlite3")
+            recorded = nodes[service]
+            if metadata != recorded:
+                raise E2EError(f"{name}/{service} chain metadata differs from its manifest")
+            if metadata["height"] != expected_height:
+                raise E2EError(
+                    f"{name}/{service} is at {metadata['height']}, expected {expected_height}"
+                )
+            if metadata["tip_hash"] != manifest.get("tip_hash"):
+                raise E2EError(f"{name}/{service} has a different canonical tip")
+    print(f"e2e snapshots passed ({len(plan)} checkpoints)")
+
+
+def assert_canonical_block(height: int, require_fixture_hash: bool) -> None:
+    hashes = {block_at_height(service, height)["hash"] for service in SERVICES}
+    if len(hashes) != 1:
+        raise E2EError(f"nodes disagree about canonical block {height}: {hashes}")
+    if not require_fixture_hash:
+        return
+    checkpoint = next(
+        (
+            item
+            for item in json.loads((E2E_DIR / "checkpoints.json").read_text())
+            if int(item["height"]) == height
+        ),
+        None,
+    )
+    if checkpoint is None:
+        raise E2EError(f"no checkpoint fixture records canonical block {height}")
+    expected_hash = verify_snapshot(snapshot_path(checkpoint["name"]))["tip_hash"]
+    if hashes != {expected_hash}:
+        raise E2EError(
+            f"canonical block {height} differs from the checkpoint: {hashes}"
+        )
+
+
 def capture_snapshot(name: str, height: int, timeout: float, force: bool) -> None:
     destination = snapshot_path(name)
     if destination.exists() and not force:
@@ -349,6 +519,7 @@ def restore_snapshot(name: str) -> None:
         raise E2EError(
             f"snapshot profile is {manifest.get('profile_id')}, expected {EXPECTED_PROFILE}"
         )
+    _OPENERS.clear()
     compose("down", "--remove-orphans", check=False)
     base = runtime_dir()
     base.mkdir(parents=True, exist_ok=True)
@@ -377,6 +548,7 @@ def reset_runtime() -> None:
 
 
 def start(build: bool) -> None:
+    _OPENERS.clear()
     runtime_dir().mkdir(parents=True, exist_ok=True)
     for service in SERVICES:
         (runtime_dir() / service).mkdir(parents=True, exist_ok=True)
@@ -418,6 +590,50 @@ def smoke(name: str, through: int, timeout: float, build: bool, keep: bool) -> N
             compose("down", "--remove-orphans", check=False)
 
 
+def run_scenario(
+    name: str, scenario: Scenario, timeout: float, build: bool, keep: bool
+) -> None:
+    print(
+        f"running e2e scenario {name}: {scenario.snapshot} -> {scenario.through}",
+        flush=True,
+    )
+    restore_snapshot(scenario.snapshot)
+    try:
+        start(build)
+        statuses = wait_for_height(scenario.through, timeout, converge=True)
+        assert_converged(statuses)
+        assert_finality(statuses, scenario.minimum_finalized_height)
+        if scenario.canonical_height is not None:
+            assert_canonical_block(
+                scenario.canonical_height, scenario.require_fixture_hash
+            )
+        assert_api_health(statuses, scenario.through)
+        print(f"e2e scenario {name} passed")
+    except Exception:
+        compose("logs", "--tail", "200", *SERVICES, check=False)
+        raise
+    finally:
+        if not keep:
+            compose("down", "--remove-orphans", check=False)
+
+
+def run_tests(name: str, timeout: float, build: bool, keep: bool) -> None:
+    if name in ("snapshots", "all"):
+        test_snapshots()
+    selected = list(SCENARIOS) if name == "all" else [name]
+    selected = [scenario_name for scenario_name in selected if scenario_name != "snapshots"]
+    for index, scenario_name in enumerate(selected):
+        scenario_keep = keep and index == len(selected) - 1
+        run_scenario(
+            scenario_name,
+            SCENARIOS[scenario_name],
+            timeout,
+            build and index == 0,
+            scenario_keep,
+        )
+    print(f"e2e test run passed: {name}")
+
+
 def parser() -> argparse.ArgumentParser:
     result = argparse.ArgumentParser(description=__doc__)
     commands = result.add_subparsers(dest="command", required=True)
@@ -449,12 +665,25 @@ def parser() -> argparse.ArgumentParser:
     plan.add_argument("--timeout", type=float, default=7_200)
     plan.add_argument("--force", action="store_true")
 
-    test = commands.add_parser("smoke", help="restore a checkpoint and test network convergence")
-    test.add_argument("--from", dest="snapshot", required=True)
-    test.add_argument("--through", type=int, required=True)
-    test.add_argument("--timeout", type=float, default=600)
-    test.add_argument("--build", action="store_true")
-    test.add_argument("--keep", action="store_true")
+    smoke_test = commands.add_parser(
+        "smoke", help="restore a checkpoint and test network convergence"
+    )
+    smoke_test.add_argument("--from", dest="snapshot", required=True)
+    smoke_test.add_argument("--through", type=int, required=True)
+    smoke_test.add_argument("--timeout", type=float, default=600)
+    smoke_test.add_argument("--build", action="store_true")
+    smoke_test.add_argument("--keep", action="store_true")
+
+    tests = commands.add_parser("test", help="run named e2e assertions")
+    tests.add_argument(
+        "scenario",
+        nargs="?",
+        default="all",
+        choices=("all", "snapshots", *SCENARIOS),
+    )
+    tests.add_argument("--timeout", type=float, default=600)
+    tests.add_argument("--build", action="store_true")
+    tests.add_argument("--keep", action="store_true")
     return result
 
 
@@ -484,6 +713,8 @@ def main() -> int:
             capture_plan(args.plan, args.timeout, args.force)
         elif args.command == "smoke":
             smoke(args.snapshot, args.through, args.timeout, args.build, args.keep)
+        elif args.command == "test":
+            run_tests(args.scenario, args.timeout, args.build, args.keep)
         return 0
     except (E2EError, OSError, sqlite3.Error, subprocess.CalledProcessError) as error:
         print(f"e2e error: {error}", file=sys.stderr)

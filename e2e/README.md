@@ -34,6 +34,33 @@ Run the same flow as one test, including log collection on failure and teardown:
   --through 1001
 ```
 
+Run the complete assertion suite (build the image on the first scenario):
+
+```sh
+./e2e/iuna_e2e.py test --build
+```
+
+Tests can also be selected individually:
+
+```sh
+./e2e/iuna_e2e.py test snapshots
+./e2e/iuna_e2e.py test fallback-activation
+./e2e/iuna_e2e.py test objective-finality
+./e2e/iuna_e2e.py test checkpoint-restart
+```
+
+`snapshots` is fast and does not need Docker. It verifies checksums, manifest
+metadata, the six stored chain databases, canonical heights and tips, and the
+profile of every committed checkpoint. The network scenarios restore the
+checkpoint before a protocol boundary and assert six-node convergence, the
+isolated e2e profile, finality state, canonical block identity, and the read-only
+blocks, network-health, peers, mempool, and wallet APIs on every node.
+
+`fallback-activation` crosses height 300 and checks that objective finality has
+not activated early. `objective-finality` crosses heights 1000 and 1001 and
+requires a certified checkpoint. `checkpoint-restart` proves that the certified
+checkpoint survives a full six-node restart and that the chain keeps advancing.
+
 Use `--keep` on `smoke` to leave a failed or successful network running. Stop a
 network without deleting its mutable data with:
 
