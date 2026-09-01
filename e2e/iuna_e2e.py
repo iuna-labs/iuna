@@ -57,6 +57,7 @@ class Scenario:
     minimum_finalized_height: int | None = None
     canonical_height: int | None = None
     require_fixture_hash: bool = False
+    leader_burn_minimum_height: int | None = None
 
 
 SCENARIOS = {
@@ -72,10 +73,11 @@ SCENARIOS = {
     ),
     "checkpoint-restart": Scenario(
         snapshot="first-objective-checkpoint",
-        through=1_002,
+        through=1_007,
         minimum_finalized_height=1_000,
         canonical_height=1_000,
         require_fixture_hash=True,
+        leader_burn_minimum_height=1_002,
     ),
 }
 
@@ -243,6 +245,36 @@ def block_at_height(service: str, height: int) -> dict:
     if not isinstance(result, list) or len(result) != 1 or result[0].get("height") != height:
         raise E2EError(f"{service} block API did not return block {height}")
     return result[0]
+
+
+def assert_leader_uses_burn_from_height(
+    block_height: int, minimum_height: int
+) -> None:
+    block = block_at_height(SERVICES[0], block_height)
+    leader_proof = block.get("leader_proof")
+    if block.get("finalizer_mode") != "ticket" or not isinstance(leader_proof, dict):
+        raise E2EError(f"block {block_height} was not finalized by a burn ticket")
+
+    ticket_id = leader_proof.get("ticket_id")
+    if not isinstance(ticket_id, str) or not ticket_id:
+        raise E2EError(f"block {block_height} has no valid leader ticket ID")
+
+    for height in range(minimum_height, block_height):
+        source = block_at_height(SERVICES[0], height)
+        if any(
+            transaction.get("kind") == "burn"
+            and transaction.get("signature") == ticket_id
+            for transaction in source.get("transactions", [])
+        ):
+            print(
+                f"block {block_height} leader ticket comes from burn at height {height}"
+            )
+            return
+
+    raise E2EError(
+        f"block {block_height} leader ticket does not come from a burn at or after "
+        f"height {minimum_height}"
+    )
 
 
 def assert_api_health(statuses: dict[str, dict], through: int) -> None:
@@ -606,6 +638,10 @@ def run_scenario(
         if scenario.canonical_height is not None:
             assert_canonical_block(
                 scenario.canonical_height, scenario.require_fixture_hash
+            )
+        if scenario.leader_burn_minimum_height is not None:
+            assert_leader_uses_burn_from_height(
+                scenario.through, scenario.leader_burn_minimum_height
             )
         assert_api_health(statuses, scenario.through)
         print(f"e2e scenario {name} passed")

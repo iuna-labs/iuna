@@ -59,7 +59,11 @@ blocks, network-health, peers, mempool, and wallet APIs on every node.
 `fallback-activation` crosses height 300 and checks that objective finality has
 not activated early. `objective-finality` crosses heights 1000 and 1001 and
 requires a certified checkpoint. `checkpoint-restart` proves that the certified
-checkpoint survives a full six-node restart and that the chain keeps advancing.
+checkpoint survives a full six-node restart, advances through height 1007, and
+that block 1007 is finalized by a ticket derived from a burn included at height
+1002 or later. At that height, the ticket maturity and expiry windows exclude
+every pre-pipeline burn, so this covers a complete post-activation burn-to-block
+lifecycle.
 
 Use `--keep` on `smoke` to leave a failed or successful network running. Stop a
 network without deleting its mutable data with:
