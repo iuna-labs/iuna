@@ -4,10 +4,10 @@ set -euo pipefail
 cd "$(dirname "${BASH_SOURCE[0]}")"
 
 usage() {
-  echo "Usage: $0 [--genesis] [--full-tests] <version>" >&2
+  echo "Usage: $0 [--genesis] [--skip-long-tests] <version>" >&2
   echo "Example: $0 0.2.48" >&2
   echo "         $0 --genesis 0.4.0" >&2
-  echo "         $0 --full-tests 0.4.0" >&2
+  echo "         $0 --skip-long-tests 0.4.0" >&2
 }
 
 die() {
@@ -115,7 +115,7 @@ versioned_nsis_installer() {
 }
 
 run_release_tests() {
-  local full_tests="$1"
+  local skip_long_tests="$1"
 
   require_command cargo
 
@@ -123,8 +123,8 @@ run_release_tests() {
   cargo test --locked
   cargo check --locked --manifest-path fuzz/Cargo.toml
 
-  if [ "$full_tests" != "true" ]; then
-    echo "Quick release checks passed; use --full-tests to run adversarial, fuzz, and property suites"
+  if [ "$skip_long_tests" = "true" ]; then
+    echo "WARNING: skipping long-running adversarial, fuzz, and property test suites"
     return 0
   fi
 
@@ -554,7 +554,7 @@ deploy_docker_image() {
 
 main() {
   local genesis=false
-  local full_tests=false
+  local skip_long_tests=false
   local version=""
 
   while [ "$#" -gt 0 ]; do
@@ -563,9 +563,9 @@ main() {
         [ "$genesis" = "false" ] || die "--genesis may only be specified once"
         genesis=true
         ;;
-      --full-tests)
-        [ "$full_tests" = "false" ] || die "--full-tests may only be specified once"
-        full_tests=true
+      --skip-long-tests)
+        [ "$skip_long_tests" = "false" ] || die "--skip-long-tests may only be specified once"
+        skip_long_tests=true
         ;;
       -*)
         die "unknown option: $1"
@@ -601,7 +601,7 @@ main() {
       echo "Aborting deployment"
       exit 1
     fi
-    run_release_tests "$full_tests"
+    run_release_tests "$skip_long_tests"
     build_linux_cli_archives "$version"
     build_docker_image "$version"
     deploy_docker_image "$version" "$genesis"
@@ -609,7 +609,7 @@ main() {
   fi
 
   update_versions "$version"
-  run_release_tests "$full_tests"
+  run_release_tests "$skip_long_tests"
   build_versions "$version"
   commit_and_tag "$version"
   build_docker_image "$version"

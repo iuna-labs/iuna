@@ -69,13 +69,14 @@ Release and deploy with:
 ```
 
 By default, deployment audits all three Rust lockfiles, enforces the dependency
-source/license policy, runs the regular unit tests, and verifies that the fuzz
-targets compile against their locked dependencies. Release hosts therefore need
-`cargo-audit` and `jq` in addition to the pinned Rust 1.88 toolchain. Run the
-extended adversarial, fuzz, and release-property suites explicitly when needed:
+source/license policy, runs the regular unit tests, verifies that the fuzz
+targets compile against their locked dependencies, and runs the extended
+adversarial, fuzz, and release-property suites. Release hosts therefore need
+`cargo-audit` and `jq` in addition to the pinned Rust 1.88 toolchain. To
+explicitly skip the long-running suites:
 
 ```sh
-./deployment.sh --full-tests 0.2.48
+./deployment.sh --skip-long-tests 0.2.48
 ```
 
 To start a new chain, deploy with `--genesis`. This asks for confirmation,
