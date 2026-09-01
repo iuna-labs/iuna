@@ -1,15 +1,20 @@
 use std::{
-    collections::BTreeMap,
     net::{Ipv4Addr, SocketAddr, TcpListener as StdTcpListener},
+    path::Path,
     sync::Arc,
     time::Duration,
 };
 
 use anyhow::{Context, Result, bail};
 use iuna::{
-    adapters::{chain_store::SqliteChainStore, p2p::GossipNetwork, stratum::StratumServer},
+    adapters::{
+        chain_store::SqliteChainStore, p2p::GossipNetwork, stratum::StratumServer, wallet_store,
+    },
     app::{NodeCore, PeerBook, SharedNode, now_ms},
-    domain::{GenesisBurn, Ledger, MICRO_IUNA, Wallet, run_vdf},
+    domain::{
+        Ledger, OBJECTIVE_FINALITY_ACTIVATION_HEIGHT, Transaction, VDF_TARGET_BLOCK_MS, Wallet,
+        run_vdf,
+    },
 };
 use serde_json::{Value, json};
 use tempfile::tempdir;
@@ -21,15 +26,14 @@ use tokio::{
 };
 
 const SOAK_BLOCKS: u64 = 12;
-const BURN_COLLECTION_MS: u64 = 31_000;
+const BURN_COLLECTION_MS: u64 = VDF_TARGET_BLOCK_MS / 20 + 1;
+const SOAK_START_HEIGHT: u64 = OBJECTIVE_FINALITY_ACTIVATION_HEIGHT + 1;
+const FIXTURE_SERVICES: [&str; 6] = ["bootstrap", "node2", "node3", "node4", "node5", "node6"];
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-#[ignore = "long-running release-mode soak; run with cargo test --release --test properties -- --ignored"]
-async fn release_soak_auto_finalization_p2p_stratum_and_restarts() -> Result<()> {
-    let wallets = (0..3)
-        .map(|index| Wallet::from_seed(&format!("release-soak-wallet-{index}")))
-        .collect::<Vec<_>>();
-    let genesis = funded_ledger(&wallets);
+#[ignore = "long-running post-activation soak; run with cargo test --release --features e2e --test properties -- --ignored"]
+async fn release_soak_post_activation_auto_finalization_p2p_stratum_and_restarts() -> Result<()> {
+    let (wallets, genesis) = post_activation_fixture()?;
     let p2p_addrs = reserve_loopback_addrs(wallets.len())?;
     let stratum_addr = reserve_loopback_addrs(1)?.remove(0);
     let store_dirs = (0..wallets.len())
@@ -85,7 +89,7 @@ async fn release_soak_auto_finalization_p2p_stratum_and_restarts() -> Result<()>
     assert_stratum_serves_work(stratum_addr, &stratum_worker).await?;
     sleep(Duration::from_secs(2)).await;
 
-    for target_height in 1..=SOAK_BLOCKS {
+    for target_height in (SOAK_START_HEIGHT + 1)..=(SOAK_START_HEIGHT + SOAK_BLOCKS) {
         finalize_one_block(&nodes, target_height).await?;
         wait_for_convergence(&nodes, target_height, Duration::from_secs(8)).await?;
 
@@ -101,7 +105,15 @@ async fn release_soak_auto_finalization_p2p_stratum_and_restarts() -> Result<()>
 
     let final_tip = nodes[0].node.lock().await.chain_tip_hash();
     for node in &nodes {
-        assert_eq!(node.node.lock().await.chain_tip_hash(), final_tip);
+        let core = node.node.lock().await;
+        assert_eq!(core.chain_tip_hash(), final_tip);
+        assert!(core.chain_height() > OBJECTIVE_FINALITY_ACTIVATION_HEIGHT);
+        assert!(
+            core.status()
+                .chain
+                .finalized_height
+                .is_some_and(|height| height >= OBJECTIVE_FINALITY_ACTIVATION_HEIGHT)
+        );
     }
     assert!(configured_automatic_burn_was_included(&nodes[0]).await);
     Ok(())
@@ -115,16 +127,37 @@ struct SoakNode {
     store: SqliteChainStore,
 }
 
-fn funded_ledger(wallets: &[Wallet]) -> Ledger {
-    let allocations = wallets
+fn post_activation_fixture() -> Result<(Vec<Wallet>, Ledger)> {
+    if !cfg!(feature = "e2e") {
+        bail!("post-activation soak requires --features e2e");
+    }
+
+    let fixture =
+        Path::new(env!("CARGO_MANIFEST_DIR")).join("e2e/snapshots/first-objective-checkpoint");
+    let wallets = FIXTURE_SERVICES
         .iter()
-        .map(|wallet| (wallet.address().to_string(), 100 * MICRO_IUNA))
-        .collect::<BTreeMap<_, _>>();
-    let genesis_burns = wallets
-        .iter()
-        .map(|wallet| GenesisBurn::new(wallet.address(), MICRO_IUNA))
-        .collect::<Vec<_>>();
-    Ledger::new_with_genesis_burns(allocations, genesis_burns, 1).unwrap()
+        .map(|service| {
+            wallet_store::load_with_password(
+                &fixture.join(service).join("wallet.json"),
+                "testtesttest",
+            )
+        })
+        .collect::<Result<Vec<_>>>()?;
+    // SQLite may create journals while opening a database; never open the committed fixture in place.
+    let chain_copy_dir = tempdir()?;
+    let chain_copy = chain_copy_dir.path().join("chain.sqlite3");
+    std::fs::copy(fixture.join("bootstrap/chain.sqlite3"), &chain_copy)?;
+    let snapshot = SqliteChainStore::open(chain_copy)?
+        .load()?
+        .context("post-activation checkpoint has no chain snapshot")?;
+    let ledger = Ledger::from_persisted_snapshot(snapshot)?;
+    if ledger.height() != SOAK_START_HEIGHT {
+        bail!(
+            "post-activation checkpoint height is {}, expected {SOAK_START_HEIGHT}",
+            ledger.height()
+        );
+    }
+    Ok((wallets, ledger))
 }
 
 fn reserve_loopback_addrs(count: usize) -> Result<Vec<SocketAddr>> {
@@ -181,8 +214,11 @@ async fn finalize_one_block(nodes: &[SoakNode], target_height: u64) -> Result<()
     let start = now_ms().saturating_sub(BURN_COLLECTION_MS + 1);
     prepare_and_broadcast(nodes, start).await?;
     sleep(Duration::from_millis(250)).await;
-    let timestamp_ms = now_ms();
-    prepare_and_broadcast(nodes, timestamp_ms).await?;
+    // Post-activation finalizers must see the complete committee quorum before preparing VDF work.
+    for _ in 0..3 {
+        prepare_and_broadcast(nodes, now_ms()).await?;
+        sleep(Duration::from_millis(100)).await;
+    }
 
     let deadline = tokio::time::Instant::now() + Duration::from_secs(8);
     loop {
@@ -221,10 +257,32 @@ async fn soak_diagnostics(nodes: &[SoakNode], target_height: u64) -> String {
             });
         let pending = core.pending_transactions();
         let pending_burns = pending.iter().filter(|tx| tx.is_burn()).count();
+        let pending_burn_details = pending
+            .iter()
+            .filter(|tx| tx.is_burn())
+            .map(|tx| {
+                let Transaction::Burn { anchor, .. } = tx else {
+                    unreachable!();
+                };
+                let eligible_anchor = core.chain()[core.chain().len() - 1].prev_hash.as_str();
+                format!(
+                    "sender={}, amount={}, anchor={:?}, eligible={}",
+                    tx.sender(),
+                    tx.amount(),
+                    anchor,
+                    anchor.as_deref() == Some(eligible_anchor)
+                )
+            })
+            .collect::<Vec<_>>();
+        let wallet_view_pending = core
+            .wallet_view_ledger()
+            .map(|ledger| ledger.pending().len())
+            .unwrap_or_default();
         let metrics = node.network.metrics();
         lines.push(format!(
             "node {index}: height={}, tip={}, wallet_rank={rank:?}, leader={:?}, \
-             last_finalization={:?}, pending={} (burns={pending_burns}), \
+             last_finalization={:?}, pending={} (burns={pending_burns}, \
+             wallet_view={wallet_view_pending}, details={pending_burn_details:?}), \
              burn_bundles_received={}, control_received={}, rejected_blocks={}, \
              session_failures={}, last_session_failure={:?}, last_chain_error={:?}, \
              sync_progress={:?}",
@@ -305,6 +363,7 @@ async fn configured_automatic_burn_was_included(node: &SoakNode) -> bool {
         .await
         .chain()
         .iter()
+        .filter(|block| block.height > SOAK_START_HEIGHT)
         .flat_map(|block| &block.transactions)
         .any(|tx| tx.is_burn() && tx.sender() == node.wallet.address() && tx.amount() == 2)
 }

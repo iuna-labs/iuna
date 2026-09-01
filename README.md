@@ -71,8 +71,9 @@ Release and deploy with:
 By default, deployment audits all three Rust lockfiles, enforces the dependency
 source/license policy, runs the regular unit tests, verifies that the fuzz
 targets compile against their locked dependencies, and runs the extended
-adversarial, fuzz, and release-property suites. Release hosts therefore need
-`cargo-audit` and `jq` in addition to the pinned Rust 1.88 toolchain. To
+adversarial, fuzz, post-height-1000 six-node E2E, and release-property suites.
+Release hosts therefore need `cargo-audit`, `jq`, and Docker Compose in addition
+to the pinned Rust 1.88 toolchain. To
 explicitly skip the long-running suites:
 
 ```sh

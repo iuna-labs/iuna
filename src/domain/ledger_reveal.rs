@@ -115,12 +115,25 @@ impl Ledger {
             .into_iter()
             .map(|member| (member.slot, member))
             .collect::<BTreeMap<_, _>>();
-        self.validate_burn_bundles_for_committee(
+        let validated = self.validate_burn_bundles_for_committee(
             expected_height,
             &expected_prev_hash,
             &committee,
             bundles,
-        )
+        )?;
+        let required_signatures = self.required_explicit_burn_signatures(
+            expected_height,
+            FinalizerMode::Ticket,
+            finalizer_rank,
+            committee.len(),
+        );
+        let explicit_signatures = validated.iter().filter(|bundle| bundle.slot != 0).count();
+        if explicit_signatures < required_signatures {
+            bail!(
+                "not enough burn bundle signatures collected: got {explicit_signatures}, need {required_signatures}"
+            );
+        }
+        Ok(validated)
     }
 
     pub(crate) fn precheck_next_block_burn_bundle(&self, bundle: &BurnBundle) -> Result<()> {
@@ -485,7 +498,9 @@ mod tests {
     use std::collections::BTreeMap;
 
     use super::*;
-    use crate::domain::{GenesisBurn, MICRO_IUNA, OutPoint, TxInput, TxOutput, Wallet};
+    use crate::domain::{
+        GenesisBurn, MICRO_IUNA, OutPoint, TxInput, TxOutput, UtxoLineageRoot, Wallet,
+    };
 
     fn ledger() -> Ledger {
         Ledger::new(BTreeMap::new(), 1)
@@ -575,6 +590,52 @@ mod tests {
         assert_eq!(
             ledger.required_explicit_burn_signatures(1_000, FinalizerMode::Ticket, 0, 1),
             0
+        );
+    }
+
+    #[test]
+    fn finalizer_waits_until_the_required_burn_bundle_quorum_is_available() {
+        let wallets = (0..3)
+            .map(|index| Wallet::from_seed(&format!("bundle-quorum-wallet-{index}")))
+            .collect::<Vec<_>>();
+        let mut ledger = funded_ledger(&wallets);
+        ledger.launch_profile.burn_lineage_maturity_heights = 0;
+        for (index, wallet) in wallets.iter().enumerate() {
+            let outpoint = OutPoint {
+                txid: format!("{:064x}", index + 1),
+                index: 0,
+            };
+            let root = UtxoLineageRoot {
+                outpoint: outpoint.clone(),
+                height: 0,
+            };
+            ledger.lineage_values.insert(root.clone(), 10);
+            ledger.lineage_owners.insert(
+                root,
+                BTreeMap::from([(
+                    wallet.address().to_string(),
+                    BTreeMap::from([(outpoint, 10)]),
+                )]),
+            );
+        }
+        let committee_size = ledger.burn_committee_for_next_ticket_block(0).len();
+        assert!(
+            ledger.required_explicit_burn_signatures(
+                ledger.height() + 1,
+                FinalizerMode::Ticket,
+                0,
+                committee_size,
+            ) > 0
+        );
+
+        let error = ledger
+            .validate_next_block_burn_bundles_for_finalizer_rank(0, Vec::new())
+            .unwrap_err();
+
+        assert!(
+            error
+                .to_string()
+                .contains("not enough burn bundle signatures collected")
         );
     }
 

@@ -3060,16 +3060,21 @@ fn local_testnet_lineage_with_an_eligible_ticket_is_immediately_required_by_rank
     let leader = harness.next_rank(0);
     let finalizer = harness.wallet(&leader.owner).clone();
     harness.submit_anchor_burn(&finalizer);
-    let missing_bundle_block = harness.finish_ticket_block_from_pending(0, Vec::new());
+    let timestamp = harness
+        .ledger
+        .tip()
+        .timestamp_ms
+        .saturating_add(VDF_TARGET_BLOCK_MS);
     let error = harness
         .ledger
-        .apply_block_at(
-            missing_bundle_block,
-            NOW_MS.saturating_add(VDF_TARGET_BLOCK_MS),
-        )
+        .prepare_next_block_with_burn_bundles(finalizer.address(), timestamp, Vec::new())
         .unwrap_err();
 
-    assert!(error.to_string().contains("too few burn bundle signatures"));
+    assert!(
+        error
+            .to_string()
+            .contains("not enough burn bundle signatures collected")
+    );
 }
 
 #[test]

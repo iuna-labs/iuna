@@ -40,6 +40,15 @@ Run the complete assertion suite (build the image on the first scenario):
 ./e2e/iuna_e2e.py test --build
 ```
 
+Run the standard post-activation gate used by deployment:
+
+```sh
+./e2e/iuna_e2e.py test post-activation --build
+```
+
+This verifies the committed checkpoints, crosses 999 through 1001, then restores
+the first objective checkpoint and advances the restarted network through 1007.
+
 Tests can also be selected individually:
 
 ```sh

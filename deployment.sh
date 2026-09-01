@@ -122,9 +122,10 @@ run_release_tests() {
   ./scripts/check-dependencies.sh
   cargo test --locked
   cargo check --locked --manifest-path fuzz/Cargo.toml
+  ./e2e/iuna_e2e.py test snapshots
 
   if [ "$skip_long_tests" = "true" ]; then
-    echo "WARNING: skipping long-running adversarial, fuzz, and property test suites"
+    echo "WARNING: skipping long-running adversarial, fuzz, post-activation E2E, and property test suites"
     return 0
   fi
 
@@ -140,7 +141,8 @@ run_release_tests() {
   cargo run --locked --manifest-path fuzz/Cargo.toml --bin stratum_request -- -runs="$fuzz_runs" fuzz/corpus/stratum_request
   cargo run --locked --manifest-path fuzz/Cargo.toml --bin wallet_config -- -runs="$fuzz_runs" fuzz/corpus/wallet_config
   cargo run --locked --manifest-path fuzz/Cargo.toml --bin vdf_proof -- -runs="$vdf_fuzz_runs" fuzz/corpus/vdf_proof
-  cargo test --locked --release --test properties -- --ignored
+  cargo test --locked --release --features e2e --test properties -- --ignored
+  ./e2e/iuna_e2e.py test post-activation --build
 }
 
 update_versions() {

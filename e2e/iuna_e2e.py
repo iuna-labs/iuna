@@ -80,6 +80,7 @@ SCENARIOS = {
         leader_burn_minimum_height=1_002,
     ),
 }
+POST_ACTIVATION_SCENARIOS = ("objective-finality", "checkpoint-restart")
 
 
 class E2EError(RuntimeError):
@@ -656,7 +657,13 @@ def run_scenario(
 def run_tests(name: str, timeout: float, build: bool, keep: bool) -> None:
     if name in ("snapshots", "all"):
         test_snapshots()
-    selected = list(SCENARIOS) if name == "all" else [name]
+    if name == "all":
+        selected = list(SCENARIOS)
+    elif name == "post-activation":
+        test_snapshots()
+        selected = list(POST_ACTIVATION_SCENARIOS)
+    else:
+        selected = [name]
     selected = [scenario_name for scenario_name in selected if scenario_name != "snapshots"]
     for index, scenario_name in enumerate(selected):
         scenario_keep = keep and index == len(selected) - 1
@@ -715,7 +722,7 @@ def parser() -> argparse.ArgumentParser:
         "scenario",
         nargs="?",
         default="all",
-        choices=("all", "snapshots", *SCENARIOS),
+        choices=("all", "post-activation", "snapshots", *SCENARIOS),
     )
     tests.add_argument("--timeout", type=float, default=600)
     tests.add_argument("--build", action="store_true")

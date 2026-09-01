@@ -128,7 +128,10 @@ A release intended for deployment must pass:
 - desktop test/build jobs on Linux, macOS, and Windows
 - fuzz gate runs with `256` iterations each for `p2p_envelope`,
   `compact_snapshot`, `domain_json`, `stratum_request`, and `wallet_config`
-- `cargo test --locked --release --test properties -- --ignored`
+- `cargo test --locked --release --features e2e --test properties -- --ignored`,
+  restoring the first objective checkpoint before exercising P2P, Stratum, and restarts
+- `./e2e/iuna_e2e.py test post-activation --build`, which crosses height 1000,
+  checks objective finality, restarts all six nodes, and advances through 1007
 
 Normal local development may skip ignored long-running property tests and long fuzzing sessions, but deployment must run the release gate smoke checks.
 
@@ -138,3 +141,6 @@ Normal local development may skip ignored long-running property tests and long f
 - 2026-08-14: Long-running property/soak tests are marked `#[ignore]` for normal local runs and are required in `deployment.sh`.
 - 2026-08-19: The mainnet-candidate chain is intended to be promotable to mainnet without a second genesis if it satisfies the stability window and release gates.
 - 2026-08-20: The agreed independent-node long-running testnet stability window completed without requiring an unplanned chain reset.
+- 2026-09-01: Post-height-1000 operation is the standard integration baseline;
+  deployment restores mature checkpoints instead of treating genesis-only runs
+  as sufficient release coverage.
