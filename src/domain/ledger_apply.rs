@@ -88,7 +88,7 @@ impl Ledger {
                 bail!("duplicate transaction in block");
             }
             self.validate_transaction_terms(tx)?;
-            self.validate_transaction_anchor_for_height(tx, block.height, &block.prev_hash)?;
+            self.validate_transaction_anchor_for_block(tx, block.height)?;
             apply_transaction_with_lineage(
                 tx,
                 block.height,
@@ -124,7 +124,6 @@ impl Ledger {
         if let Some(checkpoint) = certified_parent {
             self.objective_finality_checkpoint = Some(checkpoint);
         }
-        let next_signing_domain = self.transaction_signing_domain();
         let available = self.utxos.clone();
         let pending = std::mem::take(&mut self.pending);
         self.pending = pending
@@ -133,14 +132,10 @@ impl Ledger {
                 !mined_signatures.contains(tx.signature())
                     && transaction_inputs_available(tx, &available)
                     && self.validate_transaction_terms(tx).is_ok()
-                    && self
-                        .validate_transaction_anchor_for_height(
-                            tx,
-                            self.height().saturating_add(1),
-                            self.tip_hash(),
-                        )
+                    && self.validate_transaction_anchor_for_pending(tx).is_ok()
+                    && tx
+                        .verify_signature(&self.transaction_signing_domain_for_pending(tx))
                         .is_ok()
-                    && tx.verify_signature(&next_signing_domain).is_ok()
             })
             .collect();
         let orphans = std::mem::take(&mut self.orphans);
@@ -149,14 +144,10 @@ impl Ledger {
             .filter(|tx| {
                 !mined_signatures.contains(tx.signature())
                     && self.validate_transaction_terms(tx).is_ok()
-                    && self
-                        .validate_transaction_anchor_for_height(
-                            tx,
-                            self.height().saturating_add(1),
-                            self.tip_hash(),
-                        )
+                    && self.validate_transaction_anchor_for_pending(tx).is_ok()
+                    && tx
+                        .verify_signature(&self.transaction_signing_domain_for_pending(tx))
                         .is_ok()
-                    && tx.verify_signature(&next_signing_domain).is_ok()
             })
             .collect();
         self.refresh_pending_pool_byte_counters()?;
@@ -431,7 +422,7 @@ mod tests {
             eligible_until_height: TRANSACTION_REPLAY_PROTECTION_ACTIVATION_HEIGHT,
         }];
 
-        let burn = ledger.build_burn(&wallet, 1, 1).unwrap();
+        let burn = ledger.build_burn_for_next_block(&wallet, 1, 1).unwrap();
         ledger.submit_transaction(burn).unwrap();
         let mine = ledger.build_mine(wallet.address()).unwrap();
         let replayed_id = mine.signature().to_string();
@@ -450,6 +441,93 @@ mod tests {
             .to_string();
 
         assert!(error.contains("replays a previously mined transaction"));
+    }
+
+    #[test]
+    fn queued_burn_survives_one_applied_block_and_is_included_in_the_following_block() {
+        let finalizer = Wallet::from_seed("queued-burn-finalizer");
+        let burner = Wallet::from_seed("queued-burn-wallet");
+        let mut ledger = Ledger::new_with_genesis_burns(
+            BTreeMap::from([
+                (finalizer.address().to_string(), 10 * MICRO_IUNA),
+                (burner.address().to_string(), 10 * MICRO_IUNA),
+            ]),
+            vec![GenesisBurn::new(finalizer.address(), MICRO_IUNA)],
+            1,
+        )
+        .unwrap();
+        ledger.chain.last_mut().unwrap().height =
+            super::super::TIP_BOUND_BURN_ACTIVATION_HEIGHT - 2;
+        ledger.tickets = vec![BurnTicket {
+            id: "6".repeat(64),
+            owner: finalizer.address().to_string(),
+            amount: MICRO_IUNA,
+            eligible_from_height: super::super::TIP_BOUND_BURN_ACTIVATION_HEIGHT - 1,
+            eligible_until_height: super::super::TIP_BOUND_BURN_ACTIVATION_HEIGHT - 1,
+        }];
+
+        let queued_burn = ledger.build_burn(&burner, 1, 1).unwrap();
+        assert_eq!(queued_burn.burn_anchor(), Some(ledger.tip_hash()));
+        ledger.submit_transaction(queued_burn.clone()).unwrap();
+        let legacy_anchor = ledger.build_burn_for_next_block(&finalizer, 1, 1).unwrap();
+        assert_eq!(legacy_anchor.burn_anchor(), None);
+        ledger.submit_transaction(legacy_anchor).unwrap();
+
+        let prepared = ledger.prepare_next_block(finalizer.address(), 2).unwrap();
+        let first_block = prepared.finish(&finalizer, "first-vdf-output".to_string());
+        assert!(
+            first_block
+                .transactions
+                .iter()
+                .all(|transaction| transaction.signature() != queued_burn.signature())
+        );
+        ledger
+            .apply_preverified_block_at(first_block, u64::MAX)
+            .unwrap();
+
+        assert!(
+            ledger
+                .pending()
+                .iter()
+                .any(|transaction| transaction.signature() == queued_burn.signature())
+        );
+        assert!(ledger.transaction_is_eligible_for_next_block(&queued_burn));
+
+        ledger.tickets.push(BurnTicket {
+            id: "7".repeat(64),
+            owner: finalizer.address().to_string(),
+            amount: MICRO_IUNA,
+            eligible_from_height: super::super::TIP_BOUND_BURN_ACTIVATION_HEIGHT,
+            eligible_until_height: super::super::TIP_BOUND_BURN_ACTIVATION_HEIGHT,
+        });
+        let activated_anchor = ledger.build_burn_for_next_block(&finalizer, 1, 1).unwrap();
+        assert_eq!(
+            activated_anchor.burn_anchor(),
+            Some(ledger.tip().prev_hash.as_str())
+        );
+        ledger.submit_transaction(activated_anchor).unwrap();
+
+        let prepared = ledger.prepare_next_block(finalizer.address(), 3).unwrap();
+        let activated_block = prepared.finish(&finalizer, "second-vdf-output".to_string());
+        assert_eq!(
+            activated_block.height,
+            super::super::TIP_BOUND_BURN_ACTIVATION_HEIGHT
+        );
+        assert!(
+            activated_block
+                .transactions
+                .iter()
+                .any(|transaction| transaction.signature() == queued_burn.signature())
+        );
+        ledger
+            .apply_preverified_block_at(activated_block, u64::MAX)
+            .unwrap();
+        assert!(
+            ledger
+                .pending()
+                .iter()
+                .all(|transaction| transaction.signature() != queued_burn.signature())
+        );
     }
 
     #[test]

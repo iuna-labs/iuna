@@ -29,7 +29,6 @@ pub(crate) const MINE_ANCHOR_LIMIT_REACHED: &str = "mine transaction anchor limi
 impl Ledger {
     pub(super) fn valid_pending_transactions(&self) -> Vec<Transaction> {
         let mut utxos = self.utxos.clone();
-        let signing_domain = self.transaction_signing_domain();
         let mut valid = Vec::new();
         let mut remaining = self.pending.iter().collect::<Vec<_>>();
         let mut selected_mine_anchor_counts = BTreeMap::new();
@@ -53,14 +52,13 @@ impl Ledger {
                 }
                 if transaction_inputs_available(tx, &utxos)
                     && self.validate_transaction_terms(tx).is_ok()
-                    && self
-                        .validate_transaction_anchor_for_height(
-                            tx,
-                            self.height().saturating_add(1),
-                            self.tip_hash(),
-                        )
-                        .is_ok()
-                    && apply_transaction(tx, &mut utxos, &signing_domain).is_ok()
+                    && self.validate_transaction_anchor_for_pending(tx).is_ok()
+                    && apply_transaction(
+                        tx,
+                        &mut utxos,
+                        &self.transaction_signing_domain_for_pending(tx),
+                    )
+                    .is_ok()
                 {
                     if let Some(anchor) = mine_anchor(tx) {
                         selected_mine_anchor_counts
@@ -120,7 +118,11 @@ impl Ledger {
         let block_context = compact_block_context(self);
         let signing_domain = self.transaction_signing_domain();
         let mut utxos = self.utxos.clone();
-        let mut remaining = self.valid_pending_transactions();
+        let mut remaining = self
+            .valid_pending_transactions()
+            .into_iter()
+            .filter(|transaction| self.transaction_is_eligible_for_next_block(transaction))
+            .collect::<Vec<_>>();
         let mut selected = Vec::new();
 
         let required_burn_signatures = burn_bundle_section
@@ -314,11 +316,7 @@ impl Ledger {
 
     pub(super) fn validate_new_transaction(&self, transaction: &Transaction) -> Result<()> {
         self.validate_transaction_terms(transaction)?;
-        self.validate_transaction_anchor_for_height(
-            transaction,
-            self.height().saturating_add(1),
-            self.tip_hash(),
-        )?;
+        self.validate_transaction_anchor_for_pending(transaction)?;
         ensure_transaction_fits_empty_block(
             compact_block_context(self),
             transaction,
@@ -326,7 +324,11 @@ impl Ledger {
         )?;
         self.validate_mine_anchor_available(transaction)?;
         let mut utxos = self.utxos_after_spendable_pending()?;
-        apply_transaction(transaction, &mut utxos, &self.transaction_signing_domain())
+        apply_transaction(
+            transaction,
+            &mut utxos,
+            &self.transaction_signing_domain_for_pending(transaction),
+        )
     }
 
     pub(super) fn validate_mine_anchor_available(&self, transaction: &Transaction) -> Result<()> {
@@ -355,7 +357,6 @@ impl Ledger {
     }
 
     pub(super) fn promote_orphan_transactions(&mut self) -> Result<()> {
-        let signing_domain = self.transaction_signing_domain();
         loop {
             if self.pending.len() >= MAX_PENDING_TRANSACTIONS {
                 return Ok(());
@@ -370,7 +371,12 @@ impl Ledger {
                     continue;
                 }
                 if self.validate_new_transaction(transaction).is_ok()
-                    && apply_transaction(transaction, &mut utxos, &signing_domain).is_ok()
+                    && apply_transaction(
+                        transaction,
+                        &mut utxos,
+                        &self.transaction_signing_domain_for_pending(transaction),
+                    )
+                    .is_ok()
                 {
                     let transaction_bytes = pending_pool_item_bytes(transaction)?;
                     let promoted_bytes = self
@@ -462,11 +468,10 @@ impl Ledger {
         Ok(())
     }
 
-    pub(super) fn validate_transaction_anchor_for_height(
+    pub(super) fn validate_transaction_anchor_for_block(
         &self,
         transaction: &Transaction,
         height: u64,
-        parent_hash: &str,
     ) -> Result<()> {
         if !transaction.is_burn() {
             return Ok(());
@@ -479,30 +484,89 @@ impl Ledger {
         }
         let anchor = transaction
             .burn_anchor()
-            .context("burn transaction is missing its parent anchor")?;
-        if anchor != parent_hash {
-            bail!("burn transaction anchor does not match the block parent");
+            .context("burn transaction is missing its chain anchor")?;
+        if anchor != self.tip().prev_hash {
+            bail!("burn transaction anchor does not match the block grandparent");
         }
         Ok(())
     }
 
+    pub(super) fn validate_transaction_anchor_for_pending(
+        &self,
+        transaction: &Transaction,
+    ) -> Result<()> {
+        if !transaction.is_burn() {
+            return Ok(());
+        }
+
+        let next_height = self.height().saturating_add(1);
+        let following_height = self.height().saturating_add(2);
+        let anchor = transaction.burn_anchor();
+
+        // Keep both pipeline stages: burns anchored to the tip's parent are
+        // eligible now, while burns anchored to the tip wait one more block.
+        if next_height < super::TIP_BOUND_BURN_ACTIVATION_HEIGHT && anchor.is_none() {
+            return Ok(());
+        }
+        if next_height >= super::TIP_BOUND_BURN_ACTIVATION_HEIGHT
+            && anchor == Some(self.tip().prev_hash.as_str())
+        {
+            return Ok(());
+        }
+        if following_height >= super::TIP_BOUND_BURN_ACTIVATION_HEIGHT
+            && anchor == Some(self.tip_hash())
+        {
+            return Ok(());
+        }
+
+        bail!("burn transaction anchor is not valid for either of the next two block heights")
+    }
+
+    pub(crate) fn transaction_is_eligible_for_next_block(&self, transaction: &Transaction) -> bool {
+        self.validate_transaction_anchor_for_block(transaction, self.height().saturating_add(1))
+            .is_ok()
+    }
+
+    pub(super) fn transaction_signing_domain_for_pending(
+        &self,
+        transaction: &Transaction,
+    ) -> super::TransactionSigningDomain {
+        let height = if transaction.is_burn()
+            && transaction.burn_anchor() == Some(self.tip_hash())
+            && self.height().saturating_add(2) >= super::TIP_BOUND_BURN_ACTIVATION_HEIGHT
+        {
+            self.height().saturating_add(2)
+        } else {
+            self.height().saturating_add(1)
+        };
+        self.transaction_signing_domain_at(height)
+    }
+
     pub(super) fn utxos_after_valid_pending(&self) -> Result<BTreeMap<OutPoint, TxOutput>> {
         let mut utxos = self.utxos.clone();
-        let signing_domain = self.transaction_signing_domain();
         for pending in self.valid_pending_transactions() {
-            apply_transaction(&pending, &mut utxos, &signing_domain)?;
+            apply_transaction(
+                &pending,
+                &mut utxos,
+                &self.transaction_signing_domain_for_pending(&pending),
+            )?;
         }
         Ok(utxos)
     }
 
     pub(super) fn utxos_after_spendable_pending(&self) -> Result<BTreeMap<OutPoint, TxOutput>> {
         let mut utxos = self.utxos.clone();
-        let signing_domain = self.transaction_signing_domain();
         for pending in self.valid_pending_transactions() {
             if matches!(pending, Transaction::Mine { .. }) {
                 continue;
             }
-            if apply_spendable_pending_transaction(&pending, &mut utxos, &signing_domain).is_err() {
+            if apply_spendable_pending_transaction(
+                &pending,
+                &mut utxos,
+                &self.transaction_signing_domain_for_pending(&pending),
+            )
+            .is_err()
+            {
                 continue;
             }
         }
@@ -563,28 +627,83 @@ mod tests {
     }
 
     #[test]
-    fn burns_become_tip_bound_at_activation_and_expire_after_tip_change() {
+    fn burns_queue_for_one_block_then_expire_after_their_inclusion_height() {
         let wallet = Wallet::from_seed("tip-bound-burn-wallet");
         let mut ledger = Ledger::new(BTreeMap::from([(wallet.address().to_string(), 10)]), 1);
 
         extend_synthetic_chain_to(
             &mut ledger,
-            super::super::TIP_BOUND_BURN_ACTIVATION_HEIGHT - 2,
+            super::super::TIP_BOUND_BURN_ACTIVATION_HEIGHT - 3,
         );
         let legacy_burn = ledger.build_burn(&wallet, 1, 1).unwrap();
         assert_eq!(legacy_burn.burn_anchor(), None);
 
         extend_synthetic_chain_to(
             &mut ledger,
-            super::super::TIP_BOUND_BURN_ACTIVATION_HEIGHT - 1,
+            super::super::TIP_BOUND_BURN_ACTIVATION_HEIGHT - 2,
         );
         let anchored_burn = ledger.build_burn(&wallet, 1, 1).unwrap();
         assert_eq!(anchored_burn.burn_anchor(), Some(ledger.tip_hash()));
         assert!(ledger.submit_transaction(anchored_burn.clone()).unwrap());
-        assert_eq!(ledger.valid_pending_transactions(), vec![anchored_burn]);
+        assert_eq!(
+            ledger.valid_pending_transactions(),
+            vec![anchored_burn.clone()]
+        );
+        assert!(
+            ledger
+                .select_block_transactions_with_required_burn_owner(
+                    None,
+                    None,
+                    &BurnBundleSection::default(),
+                )
+                .unwrap()
+                .transactions
+                .is_empty()
+        );
+
+        extend_synthetic_chain_to(
+            &mut ledger,
+            super::super::TIP_BOUND_BURN_ACTIVATION_HEIGHT - 1,
+        );
+        assert_eq!(
+            ledger.valid_pending_transactions(),
+            vec![anchored_burn.clone()]
+        );
+        assert_eq!(
+            ledger
+                .select_block_transactions_with_required_burn_owner(
+                    None,
+                    None,
+                    &BurnBundleSection::default(),
+                )
+                .unwrap()
+                .transactions,
+            vec![anchored_burn]
+        );
 
         extend_synthetic_chain_to(&mut ledger, super::super::TIP_BOUND_BURN_ACTIVATION_HEIGHT);
         assert!(ledger.valid_pending_transactions().is_empty());
+    }
+
+    #[test]
+    fn finalizer_burn_for_next_block_anchors_to_the_current_tip_parent() {
+        let wallet = Wallet::from_seed("next-block-burn-wallet");
+        let mut ledger = Ledger::new(BTreeMap::from([(wallet.address().to_string(), 10)]), 1);
+        extend_synthetic_chain_to(
+            &mut ledger,
+            super::super::TIP_BOUND_BURN_ACTIVATION_HEIGHT - 1,
+        );
+
+        let future_burn = ledger.build_burn(&wallet, 1, 1).unwrap();
+        let next_block_burn = ledger.build_burn_for_next_block(&wallet, 1, 1).unwrap();
+
+        assert_eq!(future_burn.burn_anchor(), Some(ledger.tip_hash()));
+        assert_eq!(
+            next_block_burn.burn_anchor(),
+            Some(ledger.tip().prev_hash.as_str())
+        );
+        assert!(!ledger.transaction_is_eligible_for_next_block(&future_burn));
+        assert!(ledger.transaction_is_eligible_for_next_block(&next_block_burn));
     }
 
     #[test]

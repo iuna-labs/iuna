@@ -91,7 +91,14 @@ impl Ledger {
             .checked_add(fee)
             .context("burn amount plus fee overflows")?;
         let (inputs, input_total) = self.select_inputs(wallet.address(), required)?;
-        self.build_burn_from_inputs(wallet, amount, fee, inputs, input_total)
+        self.build_burn_from_inputs(
+            wallet,
+            amount,
+            fee,
+            inputs,
+            input_total,
+            self.public_burn_anchor(),
+        )
     }
 
     pub fn build_burn_with_inputs(
@@ -106,7 +113,56 @@ impl Ledger {
             .context("burn amount plus fee overflows")?;
         let (inputs, input_total) =
             self.select_inputs_by_outpoint(wallet.address(), required, outpoints)?;
-        self.build_burn_from_inputs(wallet, amount, fee, inputs, input_total)
+        self.build_burn_from_inputs(
+            wallet,
+            amount,
+            fee,
+            inputs,
+            input_total,
+            self.public_burn_anchor(),
+        )
+    }
+
+    pub(crate) fn build_burn_for_next_block(
+        &self,
+        wallet: &Wallet,
+        amount: Amount,
+        fee: Amount,
+    ) -> Result<Transaction> {
+        let required = amount
+            .checked_add(fee)
+            .context("burn amount plus fee overflows")?;
+        let (inputs, input_total) = self.select_inputs(wallet.address(), required)?;
+        self.build_burn_from_inputs(
+            wallet,
+            amount,
+            fee,
+            inputs,
+            input_total,
+            self.next_block_burn_anchor(),
+        )
+    }
+
+    pub(crate) fn build_burn_for_next_block_with_inputs(
+        &self,
+        wallet: &Wallet,
+        amount: Amount,
+        fee: Amount,
+        outpoints: &[OutPoint],
+    ) -> Result<Transaction> {
+        let required = amount
+            .checked_add(fee)
+            .context("burn amount plus fee overflows")?;
+        let (inputs, input_total) =
+            self.select_inputs_by_outpoint(wallet.address(), required, outpoints)?;
+        self.build_burn_from_inputs(
+            wallet,
+            amount,
+            fee,
+            inputs,
+            input_total,
+            self.next_block_burn_anchor(),
+        )
     }
 
     fn build_burn_from_inputs(
@@ -116,7 +172,13 @@ impl Ledger {
         fee: Amount,
         inputs: Vec<UnsignedTxInput>,
         input_total: Amount,
+        anchor: Option<String>,
     ) -> Result<Transaction> {
+        let signing_height = if anchor.as_deref() == Some(self.tip_hash()) {
+            self.height().saturating_add(2)
+        } else {
+            self.height().saturating_add(1)
+        };
         let required = amount
             .checked_add(fee)
             .context("burn amount plus fee overflows")?;
@@ -136,12 +198,25 @@ impl Ledger {
             change,
             amount,
             fee,
-            anchor: (self.height().saturating_add(1) >= super::TIP_BOUND_BURN_ACTIVATION_HEIGHT)
-                .then(|| self.tip().hash.clone()),
+            anchor,
         }
-        .sign(wallet, &self.transaction_signing_domain())?;
+        .sign(wallet, &self.transaction_signing_domain_at(signing_height))?;
         self.validate_new_transaction(&transaction)?;
         Ok(transaction)
+    }
+
+    fn public_burn_anchor(&self) -> Option<String> {
+        // Public burns enter a one-block queue: a burn signed at tip H is
+        // eligible in the block after H's direct child.
+        (self.height().saturating_add(2) >= super::TIP_BOUND_BURN_ACTIVATION_HEIGHT)
+            .then(|| self.tip().hash.clone())
+    }
+
+    fn next_block_burn_anchor(&self) -> Option<String> {
+        // A finalizer learns its role only after the parent exists, so its
+        // mandatory local burn is signed directly against that parent's parent.
+        (self.height().saturating_add(1) >= super::TIP_BOUND_BURN_ACTIVATION_HEIGHT)
+            .then(|| self.tip().prev_hash.clone())
     }
 
     pub fn build_mine(&self, recipient: impl Into<String>) -> Result<Transaction> {

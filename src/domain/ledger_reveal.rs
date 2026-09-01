@@ -12,7 +12,9 @@ use super::{
 
 impl Ledger {
     pub fn burn_bundle_attestations_required_for_next_block(&self) -> bool {
-        self.pending.iter().any(Transaction::is_burn)
+        self.pending.iter().any(|transaction| {
+            transaction.is_burn() && self.transaction_is_eligible_for_next_block(transaction)
+        })
     }
 
     pub fn explicit_burn_bundle_signatures_required_for_next_block(
@@ -49,7 +51,9 @@ impl Ledger {
         let mut burns = self
             .valid_pending_transactions()
             .into_iter()
-            .filter(Transaction::is_burn)
+            .filter(|transaction| {
+                transaction.is_burn() && self.transaction_is_eligible_for_next_block(transaction)
+            })
             .collect::<Vec<_>>();
         burns.sort_by(|left, right| {
             right
@@ -444,6 +448,7 @@ impl Ledger {
                 bail!("burn bundle contains a non-burn transaction");
             }
             self.validate_transaction_terms(burn)?;
+            self.validate_transaction_anchor_for_block(burn, expected_height)?;
             let key = (burn.fee(), burn.signature().to_string());
             if let Some((previous_fee, previous_signature)) = &previous_key {
                 if key.0 > *previous_fee || key.0 == *previous_fee && key.1 < *previous_signature {
@@ -684,6 +689,44 @@ mod tests {
                 .to_string()
                 .contains("burn bundle references a burn that is not in the mempool")
         );
+    }
+
+    #[test]
+    fn burn_bundle_rejects_a_burn_queued_for_the_following_height() {
+        let member = Wallet::from_seed("future-burn-bundle-member");
+        let mut ledger = funded_ledger(std::slice::from_ref(&member));
+        let tip = ledger.chain.last_mut().unwrap();
+        tip.height = super::super::TIP_BOUND_BURN_ACTIVATION_HEIGHT - 1;
+        tip.prev_hash = "a".repeat(64);
+        tip.hash = "b".repeat(64);
+        let future_burn = ledger.build_burn(&member, 1, 1).unwrap();
+        let bundle = member.burn_bundle(BurnBundlePayload {
+            height: ledger.height() + 1,
+            prev_hash: ledger.tip_hash().to_string(),
+            slot: 1,
+            member: member.address().to_string(),
+            burns: vec![future_burn],
+        });
+        let committee = BTreeMap::from([(
+            1,
+            BurnCommitteeMember {
+                slot: 1,
+                root: "c".repeat(64),
+                owner: member.address().to_string(),
+                weight: 1,
+            },
+        )]);
+
+        let error = ledger
+            .precheck_burn_bundle_for_block(
+                ledger.height() + 1,
+                ledger.tip_hash(),
+                &committee,
+                &bundle,
+            )
+            .unwrap_err();
+
+        assert!(error.to_string().contains("block grandparent"));
     }
 
     #[test]

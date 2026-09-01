@@ -335,13 +335,13 @@ impl NodeCore {
                 .min_by_key(|(_, output)| output.amount)
                 .map(|(outpoint, _)| outpoint);
             match outpoint {
-                Some(outpoint) => ledger.build_burn_with_inputs(
+                Some(outpoint) => ledger.build_burn_for_next_block_with_inputs(
                     wallet,
                     anchor_burn_amount,
                     fee,
                     std::slice::from_ref(outpoint),
                 ),
-                None => ledger.build_burn(wallet, anchor_burn_amount, fee),
+                None => ledger.build_burn_for_next_block(wallet, anchor_burn_amount, fee),
             }
         }) {
             Ok((burn, _)) => burn,
@@ -601,7 +601,9 @@ impl NodeCore {
                 return (ledger, Some(burn.signature().to_string()));
             }
             if ledger.pending().iter().any(|transaction| {
-                transaction.is_burn() && transaction.sender() == self.wallet.address()
+                transaction.is_burn()
+                    && transaction.sender() == self.wallet.address()
+                    && ledger.transaction_is_eligible_for_next_block(transaction)
             }) {
                 return (ledger, None);
             }

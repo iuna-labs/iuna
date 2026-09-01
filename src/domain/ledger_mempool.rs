@@ -66,14 +66,10 @@ impl Ledger {
             return Ok(TransactionSubmitOutcome::AlreadyKnown);
         }
 
-        let signing_domain = self.transaction_signing_domain();
-        transaction.verify_signature(&signing_domain)?;
         self.validate_transaction_terms(&transaction)?;
-        self.validate_transaction_anchor_for_height(
-            &transaction,
-            self.height().saturating_add(1),
-            self.tip_hash(),
-        )?;
+        self.validate_transaction_anchor_for_pending(&transaction)?;
+        let signing_domain = self.transaction_signing_domain_for_pending(&transaction);
+        transaction.verify_signature(&signing_domain)?;
         ensure_transaction_fits_empty_block(
             compact_block_context(self),
             &transaction,
