@@ -1,19 +1,19 @@
 # Roadmap
 
-iuna is preparing to launch an experimental mainnet-candidate network. This roadmap is the canonical planning document for completing pre-candidate hardening and, if the candidate stays healthy, promoting that same chain to mainnet.
+iuna is operating a live experimental mainnet-candidate network. This roadmap is the canonical planning document for stabilizing that candidate and, if it stays healthy, promoting the same chain to mainnet.
 
 ## Current Phase
 
-Mainnet-candidate launch preparation.
+Live mainnet-candidate stabilization and promotion evidence.
 
-The current goal is to finalize release evidence and launch operations while preserving the confidence already built in consensus, sync, recovery, fork choice, transaction handling, and release operations.
+The current goal is to operate the candidate without unplanned resets, collect live evidence, and close the remaining security, recovery, sync, and promotion gates.
 
 ## Mainnet Readiness Checklist
 
 - [x] Protocol rules are frozen for mainnet candidate.
 - [x] Block, transaction, ticket, VDF, recovery, fork-choice, and peer compatibility rules are documented.
 - [x] Long-running testnet has stayed stable with independent nodes for an agreed window.
-- [ ] Mainnet-candidate network has launched from a fresh genesis using release artifacts.
+- [x] Mainnet-candidate network has launched from a fresh genesis using release artifacts.
 - [ ] New nodes can sync from genesis without manual intervention.
 - [ ] Stale nodes can reconnect and catch up from old snapshots/range sync.
 - [ ] Post-activation network partitions have an implemented objective checkpoint-based recovery rule; live soak evidence is still required to close this gate.
@@ -30,13 +30,13 @@ The current goal is to finalize release evidence and launch operations while pre
 - [x] Upgrade and rollback instructions exist.
 - [x] Basic operational monitoring is available for height, tip hash, peers, last block age, finalizer mode, VDF rounds, mempool, and rejected blocks.
 
-Security review tracking lives in [Security Review Checklist](docs/security-review.md). Do not check the security-review item complete until its sign-off table is filled and the launch-blocking review items are resolved or explicitly accepted for the candidate.
+Security review tracking lives in [Security Review Checklist](docs/security-review.md). Do not check the security-review item complete until its sign-off table is filled and the promotion-blocking review items are resolved or explicitly accepted.
 
-## Pre-Candidate Launch Test Backlog
+## Candidate Launch Test Backlog (Completed)
 
-These items are not protocol rules. They are the attack and reliability checks to finish or consciously defer before the planned reset of the current `0.3.10` network that creates the mainnet-candidate network. If that candidate stays healthy through the agreed window, the same genesis, chain history, UTXOs, and mined coins should be promoted to mainnet instead of being reset again.
+These items are not protocol rules. They record the attack and reliability work completed before the live mainnet-candidate network was created. If the candidate stays healthy through the agreed window, the same genesis, chain history, UTXOs, and mined coins should be promoted to mainnet instead of being reset again.
 
-### Must Before Candidate Genesis
+### Completed Before Candidate Genesis
 
 - [x] Burn bundle relay cannot import embedded burns before bundle metadata, membership, signature, fee ordering, and size are prechecked.
 - [x] Block validation with burn attestations remains independent of local mempool contents, including empty and conflicting mempools.
@@ -79,17 +79,17 @@ Focus: make failure modes boring and observable.
 - [x] Add or improve operator-facing health metrics.
 - [x] Document common testnet failure/recovery playbooks.
 
-### M2: Mainnet Candidate
+### M2: Live Mainnet Candidate
 
-Focus: launch the candidate with mainnet-like process and treat it as the chain that can become mainnet if it stays healthy.
+Focus: operate the live candidate with mainnet-like process and treat it as the chain that can become mainnet if it stays healthy.
 
 - [x] Freeze protocol parameters for the candidate.
-- [ ] Create a fresh mainnet-candidate genesis.
-- [ ] Publish bootnodes and release artifacts.
-- [ ] Publish checksums for every release artifact.
+- [x] Create a fresh mainnet-candidate genesis.
+- [x] Publish bootnodes and release artifacts.
+- [x] Publish checksums for every release artifact.
 - [x] Document node setup, backup, restore, and upgrade steps.
 - [ ] Run a candidate network for an agreed stability window.
-- [x] Treat resets as launch-blocking incidents unless explicitly planned.
+- [x] Treat resets as promotion-blocking incidents unless explicitly planned.
 - [ ] Decide and publish whether the candidate ledger is promoted to mainnet without a second genesis.
 
 ### M3: Mainnet Launch
@@ -144,3 +144,6 @@ Normal local development may skip ignored long-running property tests and long f
 - 2026-09-01: Post-height-1000 operation is the standard integration baseline;
   deployment restores mature checkpoints instead of treating genesis-only runs
   as sufficient release coverage.
+- 2026-09-02: Update project status to reflect that the mainnet-candidate network
+  is live. The candidate manifest and promotion decision remain explicit open
+  publication gates.

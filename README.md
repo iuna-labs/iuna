@@ -1,6 +1,6 @@
 # iuna
 
-iuna is an experimental cryptocurrency network preparing to launch its mainnet candidate.
+iuna is an experimental cryptocurrency network running a live mainnet-candidate chain.
 
 It combines three ideas:
 
@@ -10,9 +10,9 @@ It combines three ideas:
 
 ## Status
 
-iuna is still in development. It is not mainnet yet and remains experimental. The upcoming mainnet-candidate ledger is intended to be preserved if it proves stable enough for promotion, but that outcome is not guaranteed.
+iuna is still in development. Its mainnet-candidate network is live, but it is not mainnet yet and remains experimental. The live candidate ledger is intended to be preserved if it proves stable enough for promotion, but that outcome is not guaranteed.
 
-The goal right now is to launch and operate that candidate with mainnet-like release, security, and recovery procedures while learning how the protocol behaves with real users.
+The goal right now is to operate and harden the live candidate with mainnet-like release, security, and recovery procedures while learning how the protocol behaves with real users.
 
 ## Why Another Crypto?
 
@@ -65,7 +65,7 @@ The deployment script builds Linux CLI archives for x86_64 and aarch64, builds t
 Release and deploy with:
 
 ```sh
-./deployment.sh 0.2.48
+./deployment.sh 0.4.7
 ```
 
 By default, deployment audits all three Rust lockfiles, enforces the dependency
@@ -77,7 +77,7 @@ to the pinned Rust 1.88 toolchain. To
 explicitly skip the long-running suites:
 
 ```sh
-./deployment.sh --skip-long-tests 0.2.48
+./deployment.sh --skip-long-tests 0.4.7
 ```
 
 To start a new chain, deploy with `--genesis`. This asks for confirmation,
@@ -85,7 +85,7 @@ deletes and recreates the permanent `local-path-db-pvc`, and starts the node
 once with `--genesis`. The existing chain data is permanently removed:
 
 ```sh
-./deployment.sh --genesis 0.4.0
+./deployment.sh --genesis 0.4.7
 ```
 
 Deployment publishes two images to the `jhx-app` k3s cluster:
@@ -97,7 +97,7 @@ Deployment publishes two images to the `jhx-app` k3s cluster:
 Useful overrides:
 
 ```sh
-IUNA_DEPLOY_HOST=root@jhx.app IUNA_KUBECTL_CONTEXT=jhx-app ./deployment.sh 0.2.48
+IUNA_DEPLOY_HOST=root@jhx.app IUNA_KUBECTL_CONTEXT=jhx-app ./deployment.sh 0.4.7
 ```
 
 ## What You Can Run
@@ -205,11 +205,12 @@ with `docker compose down -v`, because consensus launch profiles cannot be
 changed in place. The five-slot committee is also a consensus reset: volumes
 created by the earlier three-slot protocol must likewise be recreated.
 
-The next release also introduces compact snapshot v6 and deliberately provides
-no old-chain migration. On startup, legacy chain databases are archived with a
-`.pre-v6` suffix and replaced by a fresh database; wallet and configuration
-files are retained. All nodes must still participate in the coordinated network
-reset and create or join the agreed new genesis. See the operator playbooks for
+The current release writes compact snapshot v7 and accepts snapshot versions v6
+and v7. Legacy JSON databases and compact versions older than v6 are archived
+with a `.pre-v6` suffix and replaced by a fresh database; wallet and
+configuration files are retained. The coordinated reset that created the live
+mainnet-candidate chain is complete. Existing and new operators should join that
+chain instead of creating another genesis. See the operator playbooks for
 details and manual archive commands.
 
 Stop the network while keeping chain data:

@@ -139,18 +139,20 @@ Avoid:
 - deleting the chain database before capturing the startup error;
 - using `--genesis` to recover an old node. `--genesis` is only for creating a fresh network.
 
-## Coordinated Snapshot V6 Reset
+## Legacy Pre-v6 Reset
 
-The next release accepts compact local snapshot format v6 only and does not migrate earlier chain history. This is a planned consensus/network reset, not a corrupted-database incident. At startup, the node detects the legacy JSON schema and compact snapshot versions older than v6, checkpoints the database, archives it as `chain.sqlite3.pre-v6` (or the next available numbered suffix), and creates a fresh v6 database. The UI cache is then cleared normally. Wallet and configuration files are left untouched.
+The live candidate release writes compact snapshot v7 and accepts snapshot
+versions v6 and v7. At startup, the node detects the legacy JSON schema and
+compact snapshot versions older than v6, checkpoints the database, archives it
+as `chain.sqlite3.pre-v6` (or the next available numbered suffix), and creates a
+fresh database. The UI cache is then cleared normally. Wallet and configuration
+files are left untouched.
 
-All operators must still agree on the release, genesis, network identity, bootnodes, and start time before bringing public nodes back online. Automatic local archiving does not coordinate genesis.
-
-Before upgrading:
-
-1. Stop the node and back up `wallet.json` and `config.json`; verify that the backups are readable.
-2. Start exactly one designated node with a fresh chain database and `--genesis`, record its genesis hash, and publish that hash with the release commit and checksums.
-3. Start every other node without `--genesis` and join a trusted published bootnode. Its incompatible chain database is archived automatically.
-4. Preserve the generated `.pre-v6` archive if the old chain is needed as historical evidence.
+The coordinated reset that created the live mainnet-candidate genesis is
+complete. A current operator encountering a pre-v6 archive should join the
+published candidate bootnode without `--genesis`; creating another genesis would
+create a separate, incompatible network. Preserve the generated `.pre-v6`
+archive if the old chain is needed as historical evidence.
 
 Manual equivalent for operators who want to choose the archive names before starting:
 
@@ -165,11 +167,12 @@ For the disposable Compose testnet, `docker compose down -v` removes all volumes
 Avoid:
 
 - running multiple independent `--genesis` nodes;
-- copying an old snapshot blob into a v6 database;
+- using `--genesis` to join or recover the live mainnet candidate;
+- copying an old snapshot blob into the current chain database;
 - deleting or replacing wallets as part of the chain reset;
-- starting before the published genesis hash and release checksum are available.
+- joining a peer before checking the published network identity and release checksum.
 
-## Height 1000 Consensus Upgrade
+## Height 1000 Consensus Activation
 
 Height `1000` is a coordinated consensus activation. At that height, VDF seeds
 start committing to block content and ticket draws stop using the final block
@@ -183,7 +186,7 @@ them. This preserves blocks, snapshots, and UTXOs below
 build an incompatible fork at activation. No database reset, new genesis, or
 migration command is needed for this height activation.
 
-Before height `1000`:
+Required activation procedure:
 
 1. Publish a tagged release, commit, checksums, and the activation height.
 2. Upgrade every known public peer, finalizer, and bootstrap node.

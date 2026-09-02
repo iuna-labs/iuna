@@ -4,8 +4,19 @@
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <meta name="color-scheme" content="dark">
-  <meta name="description" content="iuna is an experimental mainnet-candidate cryptocurrency network that combines VDF finalization, a burn lottery, and proof-of-work issuance.">
-  <title>iuna Mainnet Candidate</title>
+  <meta name="description" content="Help test iuna, an open cryptocurrency experiment exploring temporary consensus power, open issuance, and a network shaped by its participants.">
+  <meta property="og:title" content="Help test a different kind of network.">
+  <meta property="og:description" content="iuna is an open cryptocurrency experiment. Try the app, run a node, test the network, or explore the protocol.">
+  <meta property="og:type" content="website">
+  <meta property="og:url" content="https://getiuna.org/">
+  <meta property="og:image" content="https://getiuna.org/assets/og.png">
+  <meta property="og:image:alt" content="iuna — Help test a different kind of network">
+  <meta name="twitter:card" content="summary_large_image">
+  <meta name="twitter:title" content="Help test a different kind of network.">
+  <meta name="twitter:description" content="iuna is an open cryptocurrency experiment. Try the app, run a node, test the network, or explore the protocol.">
+  <meta name="twitter:image" content="https://getiuna.org/assets/og.png">
+  <meta name="twitter:image:alt" content="iuna — Help test a different kind of network">
+  <title>iuna — Help Test a Different Kind of Network</title>
   <style>
     :root {
       color-scheme: dark;
@@ -117,11 +128,11 @@
     }
     .dot { width: 8px; height: 8px; border-radius: 999px; background: var(--green); box-shadow: 0 0 18px rgba(213, 245, 95, .75); }
     h1 {
-      max-width: 760px;
+      max-width: 800px;
       margin: 0 0 8px;
-      font-size: clamp(48px, 9vw, 104px);
-      line-height: .92;
-      letter-spacing: 0;
+      font-size: clamp(46px, 7.4vw, 82px);
+      line-height: .96;
+      letter-spacing: -.035em;
     }
     .pronunciation {
       margin: 0 0 20px;
@@ -132,7 +143,8 @@
     h2 { margin: 0 0 12px; font-size: 28px; line-height: 1.1; letter-spacing: 0; }
     h3 { margin: 0 0 8px; font-size: 16px; letter-spacing: 0; }
     p { max-width: 720px; color: #b7c3c9; font-size: 17px; line-height: 1.6; }
-    .lead { color: #eef4f6; font-size: 21px; }
+    .lead { max-width: 700px; color: #eef4f6; font-size: 21px; }
+    .hero-support { max-width: 650px; margin-bottom: 0; }
     .actions { display: flex; flex-wrap: wrap; gap: 10px; margin-top: 26px; }
     .candidate-callout {
       position: relative;
@@ -245,6 +257,125 @@
     .tag.green { border-color: rgba(213, 245, 95, .42); color: var(--green); }
     .tag.cyan { border-color: rgba(141, 233, 205, .4); color: var(--cyan); }
     .tag.blue { border-color: rgba(139, 220, 255, .4); color: var(--blue); }
+    .tag.amber { border-color: rgba(255, 208, 112, .4); color: var(--amber); }
+    .section-kicker {
+      color: var(--green);
+      font-size: 11px;
+      font-weight: 900;
+      letter-spacing: .08em;
+      text-transform: uppercase;
+    }
+    .principle-list { border-top: 1px solid var(--line); }
+    .principle-row {
+      display: grid;
+      grid-template-columns: minmax(130px, .58fr) minmax(190px, .9fr) minmax(0, 1.45fr);
+      gap: 22px;
+      align-items: baseline;
+      border-bottom: 1px solid var(--line);
+      padding: 18px 0;
+    }
+    .principle-row .tag { width: fit-content; margin: 0; }
+    .principle-row h3 { margin: 0; font-size: 18px; }
+    .principle-row p { margin: 0; font-size: 15px; }
+    .participation-grid { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 12px; }
+    .participation-card {
+      display: grid;
+      grid-template-columns: minmax(0, 1fr) auto;
+      gap: 16px;
+      align-items: start;
+      border: 1px solid var(--line);
+      border-radius: 8px;
+      padding: 18px;
+      background: rgba(21, 25, 27, .88);
+    }
+    .participation-card:hover { border-color: #465159; }
+    .participation-card h3 { margin-top: 2px; font-size: 19px; }
+    .participation-card p { margin: 0; font-size: 15px; }
+    .participation-card .button { margin-top: 16px; }
+    .effort {
+      white-space: nowrap;
+      border: 1px solid #39444a;
+      border-radius: 999px;
+      padding: 4px 8px;
+      color: var(--muted);
+      font-size: 11px;
+      font-weight: 850;
+    }
+    .participation-copy { min-width: 0; }
+    .participation-number { color: var(--green); font-size: 12px; font-weight: 900; }
+    .status-panel {
+      display: grid;
+      grid-template-columns: minmax(240px, .72fr) minmax(0, 1fr);
+      gap: 22px;
+      border: 1px solid rgba(141, 233, 205, .35);
+      border-radius: 8px;
+      padding: 20px;
+      background: linear-gradient(135deg, rgba(141, 233, 205, .08), rgba(21, 25, 27, .9) 42%);
+    }
+    .status-panel h3 { font-size: 23px; }
+    .status-panel p { margin: 0; font-size: 15px; }
+    .status-list { display: grid; gap: 10px; }
+    .status-item {
+      display: grid;
+      grid-template-columns: 18px minmax(0, 1fr);
+      gap: 10px;
+      align-items: start;
+      color: #cfd8dc;
+      font-size: 14px;
+      line-height: 1.5;
+    }
+    .status-check { color: var(--green); font-weight: 900; }
+    .status-next { color: var(--amber); font-weight: 900; }
+    .mechanism-flow {
+      display: grid;
+      grid-template-columns: repeat(3, minmax(0, 1fr));
+      border-top: 1px solid var(--line);
+      border-bottom: 1px solid var(--line);
+    }
+    .mechanism-step { padding: 20px 22px; }
+    .mechanism-step + .mechanism-step { border-left: 1px solid var(--line); }
+    .mechanism-step:first-child { padding-left: 0; }
+    .mechanism-step:last-child { padding-right: 0; }
+    .mechanism-step p { margin: 0; font-size: 15px; }
+    .mechanism-number { display: block; margin-bottom: 20px; color: var(--muted); font-size: 12px; font-weight: 900; }
+    .trust-band {
+      display: grid;
+      grid-template-columns: minmax(240px, .72fr) minmax(0, 1.25fr);
+      gap: 32px;
+      align-items: start;
+      border-top: 1px solid var(--line);
+      border-bottom: 1px solid var(--line);
+      padding: 22px 0;
+    }
+    .trust-band p { margin: 0; font-size: 15px; }
+    .trust-links { display: grid; }
+    .trust-link {
+      display: flex;
+      justify-content: space-between;
+      gap: 20px;
+      border-bottom: 1px solid var(--line);
+      padding: 12px 0;
+      color: var(--text);
+      font-size: 14px;
+      font-weight: 800;
+      text-decoration: none;
+    }
+    .trust-link:first-child { padding-top: 0; }
+    .trust-link:last-child { border-bottom: 0; padding-bottom: 0; }
+    .trust-link span:last-child { color: var(--green); }
+    .community-panel {
+      display: flex;
+      justify-content: space-between;
+      gap: 24px;
+      align-items: center;
+      border: 1px solid rgba(213, 245, 95, .4);
+      border-radius: 8px;
+      padding: 24px;
+      background: linear-gradient(110deg, rgba(213, 245, 95, .11), rgba(21, 25, 27, .9) 60%);
+    }
+    .community-panel h2 { font-size: 31px; }
+    .community-panel p { margin: 0; font-size: 15px; }
+    .community-panel .actions { flex: 0 0 auto; margin-top: 0; }
     .split {
       display: grid;
       grid-template-columns: minmax(0, 1fr) minmax(260px, .54fr);
@@ -329,7 +460,12 @@
     }
     @media (max-width: 820px) {
       .hero { padding-top: 58px; }
-      .hero-grid, .split, .grid, .join-panel { grid-template-columns: 1fr; }
+      .hero-grid, .split, .grid, .join-panel, .participation-grid, .status-panel, .trust-band { grid-template-columns: 1fr; }
+      .principle-row { grid-template-columns: 1fr; gap: 8px; align-items: start; }
+      .mechanism-flow { grid-template-columns: 1fr; }
+      .mechanism-step, .mechanism-step:first-child, .mechanism-step:last-child { padding: 18px 0; }
+      .mechanism-step + .mechanism-step { border-top: 1px solid var(--line); border-left: 0; }
+      .mechanism-number { margin-bottom: 10px; }
       .candidate-callout { max-width: none; justify-self: stretch; }
       nav { display: none; }
       .wrap { width: min(100% - 32px, 1060px); }
@@ -337,6 +473,14 @@
       .lead { font-size: 19px; }
       .button { max-width: 100%; justify-content: center; }
       .role-list { border-left: 0; border-top: 1px solid var(--line); padding-left: 0; padding-top: 16px; }
+      .community-panel { align-items: stretch; flex-direction: column; }
+      .community-panel .actions { width: 100%; }
+      .community-panel .button { width: 100%; }
+    }
+    @media (max-width: 520px) {
+      .participation-card { grid-template-columns: 1fr; }
+      .effort { width: fit-content; }
+      .actions .button { width: 100%; }
     }
   </style>
 </head>
@@ -350,10 +494,10 @@
     <div class="wrap">
       <a class="brand repo-link" href="/"><span class="mark" aria-label="iuna"><svg viewBox="0 0 32 32" aria-hidden="true" focusable="false"><circle class="mark-dot" cx="9.4" cy="7.6" r="2.8"></circle><path class="mark-loop" d="M9.4 13v7.1c0 3.7 2.9 6.4 6.6 6.4s6.6-2.7 6.6-6.4V13"></path></svg></span><span>iuna</span></a>
       <nav aria-label="Page sections">
-        <a href="#whatisiuna">What is iuna</a>
-        <a href="#howtojoin">Join</a>
-        <a href="/git/iuna/file/docs/protocol.md.html">Protocol</a>
-        <a href="/git/iuna/file/README.md.html">Source</a>
+        <a href="#why">Why iuna</a>
+        <a href="#join">Take part</a>
+        <a href="#how">How it works</a>
+        <a href="#progress">Progress</a>
         <a href="/downloads/">Downloads</a>
       </nav>
     </div>
@@ -362,108 +506,202 @@
   <header class="hero">
     <div class="wrap hero-grid">
       <div>
-        <div class="eyebrow"><span class="dot"></span> Mainnet candidate</div>
-        <h1>iuna</h1>
-        <p class="pronunciation" aria-label="Pronounced yoo-nuh">/ˈjuː.nə/</p>
-        <p class="lead">An experimental mainnet-candidate cryptocurrency network that combines VDF finalization, a burn lottery, and open proof-of-work issuance.</p>
-        <p>iuna is not mainnet yet. If the candidate remains stable, its genesis, history, UTXOs, tickets, and mined coins are intended to be promoted without a second genesis. That outcome is not guaranteed.</p>
+        <div class="eyebrow"><span class="dot"></span> Open experiment · Mainnet candidate</div>
+        <h1>Help test a different kind of network.</h1>
+        <p class="lead">iuna is an open cryptocurrency experiment exploring whether network power can be temporary instead of permanently accumulated.</p>
+        <p class="hero-support">Try the app, run a node, test the network, or inspect the protocol. You do not need to be a blockchain expert to make a useful contribution.</p>
         <div class="actions">
-          <a class="button primary" href="/downloads/">Download builds</a>
-          <a class="button" href="/git/iuna/file/docs/protocol.md.html">Read protocol</a>
-          <a class="button discord" href="https://discord.gg/JcXRSSDhS" target="_blank" rel="noopener noreferrer"><svg class="button-icon" aria-hidden="true" focusable="false"><use href="#discord-icon"></use></svg><span>Join Discord</span></a>
+          <a class="button primary" href="/downloads/">Try iuna</a>
+          <a class="button" href="#join">Choose how to help</a>
+          <a class="button" href="#how">Explore the technology</a>
         </div>
       </div>
-      <aside class="candidate-callout" aria-label="Help run the mainnet candidate">
-        <span class="callout-kicker">Node runners wanted</span>
-        <h2>Help Run The Candidate</h2>
-        <p>We are looking for people willing to keep an iuna node online, test real peer behavior, and report what breaks.</p>
-        <a class="button primary" href="#howtojoin">Run a node</a>
+      <aside class="candidate-callout" aria-label="Why participation matters now">
+        <span class="callout-kicker">Why now?</span>
+        <h2>The network needs real-world pressure.</h2>
+        <p>The mainnet candidate is live. Independent nodes, unfamiliar devices, honest questions, and unexpected failures are what turn tested code into a credible network.</p>
+        <a class="button primary" href="#join">Take part</a>
       </aside>
     </div>
   </header>
 
   <main>
-    <section id="whatisiuna">
+    <section id="why">
       <div class="wrap">
         <div class="section-head">
-          <h2>What Is iuna?</h2>
-          <p>iuna combines proof-of-burn finalization, a VDF clock, and proof-of-work issuance. Burns turn capital into temporary timing power that must be paid for again, rather than a permanent stake position.</p>
+          <span class="section-kicker">The idea</span>
+          <h2>What are we trying to change?</h2>
+          <p>Many networks give lasting influence to whoever already controls the most capital or mining scale. iuna tests a different balance: open coin issuance, lightweight finalization, and influence that expires.</p>
         </div>
-        <div class="grid">
-          <div class="card">
-            <span class="tag green">PoB</span>
-            <h3>Proof Of Burn</h3>
-            <p>Nodes burn IUNA to enter the block lottery. The top-ranked burner finalizes first; lower ranks can take over with extra VDF delay if the first one disappears.</p>
+        <div class="principle-list">
+          <div class="principle-row">
+            <span class="tag green">Temporary influence</span>
+            <h3>No permanent seat at the table</h3>
+            <p>Finalization power is paid for again each time. Past participation does not become a permanent claim on the network.</p>
           </div>
-          <div class="card">
-            <span class="tag cyan">VDF</span>
-            <h3>Verifiable Delay</h3>
-            <p>The selected finalizer must run sequential VDF work before publishing a block. That delay is the chain's clock and gives fallback finalizers a clean way to take over.</p>
+          <div class="principle-row">
+            <span class="tag cyan">Open entry</span>
+            <h3>New supply stays mineable</h3>
+            <p>Anyone can search for proof-of-work mine actions. Issuance is kept separate from block finalization.</p>
           </div>
-          <div class="card">
-            <span class="tag blue">PoW</span>
-            <h3>Proof Of Work Issuance</h3>
-            <p>PoW mine actions introduce new IUNA. Each action issues 2 IUNA: 1 IUNA goes to the miner and 1 IUNA is paid as a fixed fee to the block finalizer.</p>
+          <div class="principle-row">
+            <span class="tag amber">Still unproven</span>
+            <h3>An experiment, not a promise</h3>
+            <p>The design is public so its assumptions can be tested, challenged, and improved with evidence.</p>
           </div>
         </div>
       </div>
     </section>
 
-    <section id="howtojoin">
+    <section id="join">
       <div class="wrap">
         <div class="section-head">
-          <h2>How To Join</h2>
-          <p>Download the latest available build from <a href="/downloads/">Downloads</a>, start it, and follow setup. Choose how much of the network you want to run.</p>
+          <span class="section-kicker">Take part</span>
+          <h2>Choose your level of involvement</h2>
+          <p>Start small or go deep. Every path helps us learn how iuna behaves beyond a controlled test environment.</p>
         </div>
-        <div class="join-panel">
-          <div>
-            <div class="join-steps">
-              <div class="join-step">
-                <h3>Download</h3>
-                <p>Get the latest available build from the local downloads page.</p>
-              </div>
-              <div class="join-step">
-                <h3>Set Up</h3>
-                <p>Create or import a wallet, back up your recovery phrase, and connect to the mainnet-candidate network.</p>
-              </div>
-              <div class="join-step">
-                <h3>Choose Your Role</h3>
-                <p>Start simple as a wallet, then switch to node mode whenever you want to do more.</p>
-              </div>
+        <div class="participation-grid">
+          <article class="participation-card">
+            <div class="participation-copy">
+              <div class="participation-number">01 · Explore</div>
+              <h3>Try the app</h3>
+              <p>Create a wallet, watch the chain synchronize, and tell us where the experience is unclear.</p>
+              <a class="button primary" href="/downloads/">Download iuna</a>
             </div>
-            <div class="actions join-actions">
-              <a class="button primary" href="/downloads/">Download builds</a>
-              <a class="button" href="/git/iuna/">Browse source</a>
+            <span class="effort">10–15 min</span>
+          </article>
+          <article class="participation-card">
+            <div class="participation-copy">
+              <div class="participation-number">02 · Participate</div>
+              <h3>Run a private node</h3>
+              <p>Keep your own chain copy, try mining or finalization, and observe how the network responds.</p>
+              <a class="button" href="/downloads/">Get started</a>
+            </div>
+            <span class="effort">An evening</span>
+          </article>
+          <article class="participation-card">
+            <div class="participation-copy">
+              <div class="participation-number">03 · Strengthen</div>
+              <h3>Become a public peer</h3>
+              <p>Keep a node reachable on TCP port <code>9444</code> so other participants can discover and synchronize with it.</p>
               <a class="button discord" href="https://discord.gg/JcXRSSDhS" target="_blank" rel="noopener noreferrer"><svg class="button-icon" aria-hidden="true" focusable="false"><use href="#discord-icon"></use></svg><span>Join Discord</span></a>
             </div>
+            <span class="effort">Ongoing</span>
+          </article>
+          <article class="participation-card">
+            <div class="participation-copy">
+              <div class="participation-number">04 · Challenge</div>
+              <h3>Review or improve the technology</h3>
+              <p>Inspect the source, question protocol assumptions, reproduce failures, or contribute code and tests.</p>
+              <a class="button" href="/git/iuna/">Browse the source</a>
+            </div>
+            <span class="effort">Go deep</span>
+          </article>
+        </div>
+        <p class="note"><strong>Experimental:</strong> only participate with time, hardware, and funds you can afford to risk.<br><strong>Public peer safety:</strong> expose only the P2P listener on TCP port <code>9444</code>; keep the management UI local or behind strict access control.</p>
+      </div>
+    </section>
+
+    <section id="how">
+      <div class="wrap">
+        <div class="section-head">
+          <span class="section-kicker">Under the hood</span>
+          <h2>Three mechanisms, three different jobs</h2>
+          <p>iuna separates coin issuance, block selection, and timing instead of asking one scarce resource to control everything.</p>
+        </div>
+        <div class="mechanism-flow">
+          <article class="mechanism-step">
+            <span class="mechanism-number">01 · Issue</span>
+            <h3>Proof of work creates IUNA</h3>
+            <p>Open proof-of-work mine actions introduce new coins without deciding who finalizes the next block.</p>
+          </article>
+          <article class="mechanism-step">
+            <span class="mechanism-number">02 · Select</span>
+            <h3>Burns enter a block lottery</h3>
+            <p>Nodes permanently spend IUNA for a temporary chance to finalize. That influence must be paid for again.</p>
+          </article>
+          <article class="mechanism-step">
+            <span class="mechanism-number">03 · Time</span>
+            <h3>A verifiable delay sets the pace</h3>
+            <p>Sequential work creates a checkable clock and gives fallback finalizers a predictable way to take over.</p>
+          </article>
+        </div>
+        <div class="actions">
+          <a class="button" href="/git/iuna/file/docs/protocol.md.html">Read the full protocol</a>
+          <a class="button" href="/git/iuna/file/README.md.html">Build from source</a>
+        </div>
+      </div>
+    </section>
+
+    <section id="progress">
+      <div class="wrap">
+        <div class="section-head">
+          <span class="section-kicker">Building in public</span>
+          <h2>Progress you can verify</h2>
+          <p>The candidate is not presented as finished. Its rules, release gates, security work, and remaining launch blockers are documented in public.</p>
+        </div>
+        <div class="status-panel">
+          <div>
+            <span class="tag cyan">Current phase</span>
+            <h3>Live mainnet candidate</h3>
+            <p>The candidate ledger is running now and may later be promoted without replacing its history. That outcome is deliberately not guaranteed.</p>
+            <div class="actions">
+              <a class="button" href="/git/iuna/file/ROADMAP.md.html">View roadmap</a>
+            </div>
           </div>
-          <div class="role-list" aria-label="iuna roles">
-            <div class="role-row">
-              <span class="tag green">Wallet</span>
-              <h3>Wallet</h3>
-              <p>Send, receive, and inspect activity.</p>
-            </div>
-            <div class="role-row">
-              <span class="tag cyan">Node</span>
-              <h3>Private Node</h3>
-              <p>Mine new coins with PoW actions or earn finalizer rewards by burning, without opening an inbound P2P port.</p>
-            </div>
-            <div class="role-row">
-              <span class="tag blue">Public Peer</span>
-              <h3>Public Node</h3>
-              <p>Help strengthen the network by opening TCP port <code>9444</code> and sharing your public P2P address.</p>
-            </div>
+          <div class="status-list" aria-label="Candidate progress">
+            <div class="status-item"><span class="status-check">✓</span><span>Candidate protocol rules are frozen and documented.</span></div>
+            <div class="status-item"><span class="status-check">✓</span><span>The mainnet-candidate network launched from a fresh genesis with public builds, checksums, and a bootstrap peer.</span></div>
+            <div class="status-item"><span class="status-check">✓</span><span>An independent-node testnet completed its agreed stability window without an unplanned reset.</span></div>
+            <div class="status-item"><span class="status-check">✓</span><span>Release gates include audits, fuzzing, adversarial tests, recovery scenarios, and a six-node end-to-end network.</span></div>
+            <div class="status-item"><span class="status-next">→</span><span>The candidate manifest, live recovery evidence, security sign-off, stability window, and promotion decision remain open.</span></div>
           </div>
         </div>
-        <p class="note">Keep the management UI local. Only the P2P listener should be reachable by other nodes.</p>
+      </div>
+    </section>
+
+    <section id="trust">
+      <div class="wrap">
+        <div class="section-head">
+          <span class="section-kicker">Trust through inspection</span>
+          <h2>Do not take the claims on faith</h2>
+          <p>iuna is designed to be inspected. The code, rules, known risks, and launch criteria are available before you decide to participate.</p>
+        </div>
+        <div class="trust-band">
+          <div>
+            <span class="tag amber">No guarantees</span>
+            <h3>Treat value as uncertain</h3>
+            <p>The candidate can fail, require intervention, or never gain economic value. Participation is for testing the experiment.</p>
+          </div>
+          <div class="trust-links" aria-label="Ways to inspect iuna">
+            <a class="trust-link" href="/git/iuna/"><span>Complete source and history · Apache 2.0</span><span>Browse source →</span></a>
+            <a class="trust-link" href="/git/iuna/file/docs/security-review.md.html"><span>Consensus, networking, wallet, and release review</span><span>Security review →</span></a>
+            <a class="trust-link" href="/git/iuna/file/ROADMAP.md.html"><span>Public launch gates and unresolved work</span><span>View roadmap →</span></a>
+          </div>
+        </div>
+      </div>
+    </section>
+
+    <section id="community">
+      <div class="wrap">
+        <div class="community-panel">
+          <div>
+            <span class="section-kicker">A network is its participants</span>
+            <h2>Bring a node, a question, or a way to break it.</h2>
+            <p>Meet the people testing iuna, share what you observe, and help decide which evidence the candidate still needs.</p>
+          </div>
+          <div class="actions">
+            <a class="button discord" href="https://discord.gg/JcXRSSDhS" target="_blank" rel="noopener noreferrer"><svg class="button-icon" aria-hidden="true" focusable="false"><use href="#discord-icon"></use></svg><span>Join Discord</span></a>
+          </div>
+        </div>
       </div>
     </section>
   </main>
 
   <section class="footer">
     <div class="wrap">
-      <span>iuna mainnet candidate.</span>
-      <a href="/git/iuna/file/README.md.html">Source</a>
+      <span>iuna <span aria-hidden="true">·</span> an open cryptocurrency experiment</span>
+      <span><a href="/downloads/">Downloads</a> · <a href="/git/iuna/">Source</a> · <a href="https://discord.gg/JcXRSSDhS" target="_blank" rel="noopener noreferrer">Discord</a></span>
     </div>
   </section>
 </body>

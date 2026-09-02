@@ -52,9 +52,9 @@ The current mainnet-candidate parameter set is intentionally close to Bitcoin wh
 
 Changing any value in this section requires a conscious mainnet-candidate reset or later hard-fork process.
 
-Transaction signing format v1, chain-wide transaction replay protection, and objective finality activate automatically at height `1000`. Existing chain state and history remain valid; operators only need to upgrade every consensus node before activation. A chain-ID or genesis change remains a separate consensus reset.
+Transaction signing format v1, chain-wide transaction replay protection, and objective finality activate automatically at height `1000`. Existing chain state and history remain valid. Nodes following post-activation chain history must run an activation-capable release; a chain-ID or genesis change remains a separate consensus reset.
 
-The consensus block-size limit is the exact number of bytes produced by the compact snapshot v6 block-body encoder when the block is appended to its parent chain. The encoder's reference tables are seeded by genesis allocations and extended in chain order, so all nodes calculate the same context-dependent size. The snapshot header, launch profile, block-count field, SQLite row metadata, and SQLite page overhead are not charged to an individual block.
+The consensus block-size limit is the exact number of bytes produced by the current compact snapshot block-body encoder when the block is appended to its parent chain. The encoder's reference tables are seeded by genesis allocations and extended in chain order, so all nodes calculate the same context-dependent size. The snapshot header, launch profile, block-count field, SQLite row metadata, and SQLite page overhead are not charged to an individual block.
 
 The compact representation stores binary hashes, addresses, signatures, and VDF data instead of their hexadecimal text. It uses base-128 varints for integers, chain-wide references for repeated addresses and protocol IDs, a single shared owner and signature for transaction inputs, implicit burn change where possible, and transaction indexes for burns repeated by the burn-bundle section. Heights, parent hashes, and block hashes are reconstructed from chain order and canonical block contents rather than repeated in each stored block body. Burns benefit most from this layout, followed by transfers and mine actions.
 
@@ -410,7 +410,7 @@ For forks that first diverge at or after height `1000`, fork choice compares the
 
 This is **recoverable objective finality**, not an irreversible promise that a finalized block can never be reorganized. “Finalized” means that the selected committee for the next rank `0` block signed the block's hash as its parent with a strict two-thirds quorum, and that no competing chain has a better checkpoint under the public rule above. No node uses first-seen or first-peer trust to resolve a post-activation fork.
 
-An upgraded node that has reached height `1000` will not rewrite history below `1000`. Operators must therefore verify that the candidate network agrees on height `999` before activation. A node still below activation follows the legacy six-block rule while catching up; the candidate-to-mainnet promotion manifest can later pin a signed checkpoint without changing this ledger.
+An upgraded node that has reached height `1000` will not rewrite history below `1000`. The coordinated activation therefore required agreement on the candidate block hash at height `999`. A node still replaying history below activation follows the legacy six-block rule while catching up; the candidate-to-mainnet promotion manifest can later pin a signed checkpoint without changing this ledger.
 
 ## Genesis and Joining
 
@@ -420,9 +420,18 @@ The genesis flow bootstraps the mainnet-candidate network with an initial burn t
 
 ## Local Chain Persistence And Reset Boundary
 
-The local `chain.sqlite3` database stores one atomically replaced compact snapshot blob plus independently checked tip height and tip hash metadata. Snapshot format v6 is the only accepted local format in the next release; older compact snapshot versions are deliberately not decoded or migrated. Legacy JSON databases and compact versions older than v6 are checkpointed, renamed with a unique `.pre-v6` suffix, and replaced by a fresh database during startup.
+The local `chain.sqlite3` database stores one atomically replaced compact
+snapshot blob plus independently checked tip height and tip hash metadata. The
+current release writes snapshot format v7 and accepts v6 and v7. Legacy JSON
+databases and compact versions older than v6 are deliberately not decoded or
+migrated; they are checkpointed, renamed with a unique `.pre-v6` suffix, and
+replaced by a fresh database during startup.
 
-This persistence change is paired with a coordinated network reset. Every node must start the next release without its previous chain and UI databases, then either create the agreed new genesis or join a trusted peer on that new chain. Wallet and configuration files are not chain state and should be retained. Detailed recovery and reset commands are in [Operator Failure Playbooks](operator-playbooks.md).
+The coordinated reset associated with that persistence boundary created the
+live mainnet-candidate chain and is complete. Current nodes without compatible
+chain state should retain their wallet and configuration files and join a
+published candidate peer; they must not create a separate genesis. Detailed
+recovery and archive commands are in [Operator Failure Playbooks](operator-playbooks.md).
 
 ## What This Design Is Trying to Achieve
 

@@ -1,8 +1,9 @@
 # Security Review Checklist
 
-This document tracks the pre-mainnet security review. It is a review ledger, not
-a claim that mainnet is safe. Keep the roadmap security-review checkbox open
-until every launch-blocking item below is resolved or explicitly accepted.
+This document tracks the security review of the live mainnet candidate before a
+mainnet promotion decision. It is a review ledger, not a claim that mainnet is
+safe. Keep the roadmap security-review checkbox open until every
+promotion-blocking item below is resolved or explicitly accepted.
 
 ## Review Scope
 
@@ -107,7 +108,7 @@ Evidence already in the tree:
 - P2P tests in `src/adapters/p2p/tests.rs`;
 - compact snapshot malformed-input tests in `src/adapters/chain_store/compact.rs`;
 - compact block-size boundary tests proving that selection and consensus use the
-  same snapshot v6 block-body encoder;
+  same current compact snapshot block-body encoder;
 - fuzz targets for `p2p_envelope`, `compact_snapshot`, and `domain_json`.
 
 ### Wallet, Key Storage, And HTTP Auth
@@ -163,7 +164,8 @@ Evidence already in the tree:
 
 ## Required Release Evidence
 
-Before the mainnet-candidate launch, attach or publish logs for:
+For every release deployed to the live mainnet-candidate network, attach or
+publish logs for:
 
 ```sh
 ./scripts/check-dependencies.sh
@@ -190,7 +192,7 @@ The deployment script runs these gates for release builds. Keep the exact
 command output with the candidate release notes so independent operators can
 see which revision was tested.
 
-## Launch-Blocking Review Items
+## Promotion-Blocking Review Items
 
 - VDF implementation: `docs/protocol.md` documents the Rust-only,
   Chia-compatible class-group Wesolowski VDF and its
@@ -249,10 +251,12 @@ see which revision was tested.
 - Public exposure: verify bootnodes expose only the intended P2P and optional
   Stratum ports, and that the management UI remains bound to a local or
   otherwise protected address.
-- Candidate manifest: release coordination must publish the real genesis hash,
-  network ID, bootnodes, checksums, reset and rollback instructions, release tag,
-  and git commit before the stability window starts. The protocol and operator
-  playbooks are the maintained in-tree references.
+- Candidate manifest: because the candidate is live, release coordination must
+  publish and preserve the real genesis hash, network ID, bootnodes, checksums,
+  reset and rollback instructions, release tag, and git commit as part of the
+  candidate record. The manifest remains a promotion blocker until it is
+  published and reviewed. The protocol and operator playbooks are the maintained
+  in-tree references.
 - Release evidence: keep successful release-gate logs from the exact tagged
   candidate revision.
 - Desktop dependency security: the project and release builders use Rust 1.88.
@@ -268,9 +272,9 @@ see which revision was tested.
   transitive stack on every Tauri upgrade and no later than 2026-11-30.
 - Height `1000` activation: the release activates both grinding resistance and
   transaction signing format v1 plus chain-wide transaction-ID replay protection
-  automatically. All candidate nodes must upgrade before activation; the height
-  activation itself requires no chain-state reset or operator migration command,
-  but mixed versions will split at height `1000`.
+  automatically. Nodes running pre-activation software cannot follow candidate
+  history at or after height `1000`. The activation itself requires no chain-state reset
+  or operator migration command, but mixed versions split at height `1000`.
 
 ## Sign-Off Table
 

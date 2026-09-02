@@ -92,7 +92,7 @@ burn bundle 10kB selection, snapshot replay, blockspace-flood bounded mempool
 selection, P2P batch parsing, P2P line-size enforcement, and Stratum request
 line-size enforcement.
 
-Goal: make valid input DoS visible before launch.
+Goal: make valid input DoS visible before mainnet promotion.
 
 Budgets:
 
