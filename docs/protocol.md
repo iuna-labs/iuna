@@ -1,5 +1,7 @@
 # iuna protocol in simple terms
 
+This document describes the current protocol after height `1000`. It does not describe older protocol rules.
+
 iuna is an experimental mainnet-candidate protocol that combines three mechanisms:
 
 - **Burn lottery:** burning IUNA creates tickets for future block finalization.
@@ -28,8 +30,6 @@ The current mainnet-candidate parameter set is intentionally close to Bitcoin wh
 - maximum orphan transactions per node: `1,024`;
 - ticket maturity delay: `3` blocks;
 - ticket expiry window: `3` block heights;
-- legacy finality depth before height `1000`: `6` blocks;
-- objective finality activation height: `1000`;
 - objective finality quorum: strictly more than `2/3` of the selected committee;
 - recovery delay: `6` target block times;
 - future timestamp drift limit: `2 minutes`;
@@ -45,14 +45,9 @@ The current mainnet-candidate parameter set is intentionally close to Bitcoin wh
 - burn committee size: `5` slots;
 - maximum signed burn bundle size: `10,000` bytes;
 - burn committee lineage maturity: `20` blocks;
-- fallback ticket invalidation activation height: `300`;
-- grinding-resistance activation height: `1000`;
-- transaction signing format v1 activation height: `1000`;
-- transaction replay-protection activation height: `1000`.
+- transaction signing format: `1`.
 
 Changing any value in this section requires a conscious mainnet-candidate reset or later hard-fork process.
-
-Transaction signing format v1, chain-wide transaction replay protection, and objective finality activate automatically at height `1000`. Existing chain state and history remain valid. Nodes following post-activation chain history must run an activation-capable release; a chain-ID or genesis change remains a separate consensus reset.
 
 The consensus block-size limit is the exact number of bytes produced by the current compact snapshot block-body encoder when the block is appended to its parent chain. The encoder's reference tables are seeded by genesis allocations and extended in chain order, so all nodes calculate the same context-dependent size. The snapshot header, launch profile, block-count field, SQLite row metadata, and SQLite page overhead are not charged to an individual block.
 
@@ -107,20 +102,13 @@ Burn and transfer fees are chosen by the sender. Mine action reward and mine act
 
 ### Transaction signing format v1
 
-At height `1000`, every transfer, burn, and mine action becomes cryptographically scoped to one chain. Its signing or proof preimage starts with the fixed `IUNA-TX` type tag, the big-endian signing-format version `1`, a length-prefixed UTF-8 chain ID, and the length-prefixed 32-byte genesis block hash. The remaining payload uses an explicit one-byte transaction type and canonical binary fields: big-endian fixed-width integers, length-prefixed decoded hashes, signatures and Ed25519 keys, and ordered input/output counts. JSON spelling, field order, and separators never enter the sighash. Hexadecimal fields committed by format v1 must use canonical lowercase encoding; alternate casing is rejected during signature or proof validation.
+Every transfer, burn, and mine action is cryptographically scoped to one chain. Its signing or proof preimage starts with the fixed `IUNA-TX` type tag, the big-endian signing-format version `1`, a length-prefixed UTF-8 chain ID, and the length-prefixed 32-byte genesis block hash. The remaining payload uses an explicit one-byte transaction type and canonical binary fields: big-endian fixed-width integers, length-prefixed decoded hashes, signatures and Ed25519 keys, and ordered input/output counts. JSON spelling, field order, and separators never enter the sighash. Hexadecimal fields committed by format v1 must use canonical lowercase encoding; alternate casing is rejected during signature or proof validation.
 
-Transfers and burns use Ed25519 over this binary preimage. Native and Stratum mine proofs commit the same domain and logical mine fields before proof-specific hashing. Validators reconstruct the domain from their local launch profile and genesis block, so a transaction valid on candidate, mainnet, testnet, or another genesis fails signature/proof validation everywhere else. Blocks below height `1000` retain the legacy text signatures and proof preimages permanently so existing history and snapshots replay unchanged. Blocks at height `1000` and later accept only format v1; there is no post-activation legacy fallback.
+Transfers and burns use Ed25519 over this binary preimage. Native and Stratum mine proofs commit the same domain and logical mine fields before proof-specific hashing. Validators reconstruct the domain from their local launch profile and genesis block, so a transaction valid on candidate, mainnet, testnet, or another genesis fails signature/proof validation everywhere else. Only format v1 is accepted.
 
-Height `1000` also activates chain-wide transaction-ID uniqueness. A block at or
-above the activation height is invalid if any transaction ID already occurred in
-an earlier block on that chain. This is especially important for inputless mine
-actions: without the historical check, a previously included proof could be
-replayed after its reward output was spent, recreating the same outpoint and
-inflating supply. Pre-activation blocks retain their original validation rules,
-while the first activated block rejects replays of both legacy history and newer
-transactions.
+A block is invalid if any transaction ID already occurred earlier on that chain. This is especially important for inputless mine actions: without this check, someone could replay an included proof after spending its reward, recreate the same outpoint, and inflate the supply.
 
-Synthetic genesis-allocation outpoints retain their original address-based derivation for the lifetime of the chain. Changing them at activation would rewrite the existing UTXO set, so chain isolation is introduced only in new signatures and proofs.
+Synthetic genesis-allocation outpoints keep their address-based derivation for the lifetime of the chain. Chain isolation is applied through transaction signatures and proofs.
 
 ## Burns Become Tickets
 
@@ -133,9 +121,9 @@ A burn does not immediately select its own block. Instead:
 
 In the mainnet-candidate profile, tickets mature after `3` blocks and remain eligible for `3` block heights.
 
-The lottery draw for the next height is deterministic. Nodes rank all eligible burn tickets using the parent block hash, the parent VDF output, the target height, and the ticket amounts. More burned IUNA means more weight, but the winner is still drawn by the protocol.
+The lottery draw for the next height is deterministic. Nodes rank all eligible burn tickets using the parent's VDF seed and output, the target height, and the ticket amounts. More burned IUNA means more weight, but the winner is still drawn by the protocol.
 
-From height `1000`, leader and burn-committee selection use the parent's VDF seed and VDF output instead of the parent's final block hash. Blocks at height `1000` and later commit the finalizer identity, mode, rank, reward, VDF rounds, leader ticket, transactions, and burn-bundle section into their VDF seed. Together these rules prevent a finalizer from completing one VDF and then cheaply varying transaction selection or the publication timestamp to grind either the next leader or its committee. Ticket-block timestamps remain adjustable to the actual completion time, but they no longer influence either draw. Earlier candidate history retains the original parent-hash draw rules.
+Blocks commit the finalizer identity, mode, rank, reward, VDF rounds, leader ticket, transactions, and burn-bundle section into their VDF seed. This prevents a finalizer from completing one VDF and then cheaply changing transactions or the publication timestamp to search for a favorable next leader or committee. Ticket-block timestamps can still reflect the actual completion time, but they do not affect either draw.
 
 ## Finalizing Blocks
 
@@ -146,11 +134,11 @@ For each block height, eligible tickets are ranked:
 
 The selected finalizer must prove ownership of the selected ticket, respect its rank time slot, and run the required VDF work. A block is valid only if the finalizer matches its ranked ticket, carries the correct leader proof, has a valid timestamp for its rank, includes a valid VDF output, and follows the transaction selection rules.
 
-From height `300`, fallback finalization invalidates missed ticket opportunities. If a ticket block is finalized by rank `1` or higher, nodes invalidate all tickets ranked from `0` through the finalizing rank for that height. They also invalidate any other currently eligible tickets owned by those same addresses. Future tickets from those addresses that are not yet eligible remain pending. Rank `0` ticket blocks continue to consume only the winning ticket. Earlier candidate history keeps the legacy behavior of consuming only the finalizing ticket.
+Fallback finalization invalidates missed ticket opportunities. If a ticket block is finalized by rank `1` or higher, nodes invalidate all tickets ranked from `0` through the finalizing rank for that height. They also invalidate any other currently eligible tickets owned by those same addresses. Future tickets from those addresses that are not yet eligible remain pending. Rank `0` ticket blocks consume only the winning ticket.
 
 Every normal block must include at least one burn. This keeps the future ticket pool alive even during quiet periods. A node that may finalize prepares a local anchor burn for the next block from the finalizer wallet, and that anchor burn appears directly in the block.
 
-From height `1000`, burns use a one-block admission pipeline. A public burn is signed against the current chain tip, but is queued while the child of that tip is produced and may only appear in the following block. Validators therefore require its signed anchor to equal the containing block's grandparent hash (the containing block's parent `prev_hash`). This gives the burn a full VDF interval plus the next burn-collection window to propagate without allowing the finalizer to change the transaction list after starting its VDF. A queued burn survives the first tip change and expires after its single inclusion height if it was not included. The finalizer's mandatory local burn is signed directly for the next block using the same grandparent anchor rule. Earlier history retains the unanchored burn format.
+Burns use a one-block admission pipeline. A public burn is signed against the current chain tip, then queued while the child of that tip is produced. It may appear only in the following block. Validators require its signed anchor to equal the containing block's grandparent hash (the containing block's parent `prev_hash`). This gives the burn a full VDF interval plus the next burn-collection window to propagate without allowing the finalizer to change the transaction list after starting its VDF. A queued burn survives the first tip change and expires after its single inclusion height if it was not included. The finalizer's mandatory local burn is signed directly for the next block using the same grandparent anchor rule.
 
 The anchor burn is not a fairness mechanism. By itself, it would mostly help the current finalizer keep creating future tickets. Fairness against self-serving finalizers comes from the burn inclusion committee described below.
 
@@ -223,9 +211,7 @@ This keeps issuance separate from finalization. PoW miners compete to create min
 
 A block may contain at most `2` mine actions for the same anchor. This leaves room for the difficulty retarget to move upward when PoW regularly fills both slots, while still bounding issuance from any single anchor.
 
-Each mine proof may be included only once in the chain from height `1000`, under
-the transaction-ID uniqueness rule above. Spending a mine reward never makes
-its proof eligible for inclusion again.
+Each mine proof may be included only once in the chain under the transaction-ID uniqueness rule above. Spending a mine reward never makes its proof eligible for inclusion again.
 
 ## Fair Burn Inclusion
 
@@ -327,30 +313,15 @@ The available committee size is the finalizer plus the selected non-finalizer co
 
 Recovery blocks do not require burn-list signatures. They are the last liveness escape hatch after the ticket path has failed, so committee failure must not be able to stop the chain forever. Recovery is weaker for fairness and is not meant to be the normal block path.
 
-Before height `1000`, burn-committee lineage draws use the parent block hash and
-VDF output. From height `1000`, they use the same ungrindable parent randomness
-as the leader lottery: the parent VDF seed and VDF output. The target height and
-committee slot are domain-separated inputs to each draw. This prevents a
-completed ticket VDF from being reused with different publication timestamps to
-search for a favorable next committee.
+Burn-committee lineage draws use the same ungrindable parent randomness as the leader lottery: the parent VDF seed and VDF output. The target height and committee slot are separate inputs to each draw. This prevents a completed ticket VDF from being reused with different publication timestamps to search for a favorable next committee.
 
-Before height `1000`, the ticket-block VDF seed is bound to the burn-list
-attestation hashes:
-
-`seed = hash(parent hash || height || attestation_hash[0] || ... || attestation_hash[4])`
-
-From height `1000`, ticket blocks additionally bind a content commitment that
-covers the finalizer, mode, rank, reward, VDF rounds, selected ticket,
-transactions, and burn-bundle section:
+The ticket-block VDF seed includes a content commitment that covers the finalizer, mode, rank, reward, VDF rounds, selected ticket, transactions, and burn-bundle section:
 
 `seed = hash(parent hash || height || content commitment || attestation_hash[0] || ... || attestation_hash[4])`
 
-Recovery blocks bind the block timestamp into the VDF seed both before and after
-activation, and add the same content commitment from height `1000`:
+Recovery blocks also bind the block timestamp into the VDF seed:
 
-`seed = hash(parent hash || height || timestamp_ms || attestation_hash[0] || ... || attestation_hash[4])`
-
-`activated seed = hash(parent hash || height || timestamp_ms || content commitment || attestation_hash[0] || ... || attestation_hash[4])`
+`seed = hash(parent hash || height || timestamp_ms || content commitment || attestation_hash[0] || ... || attestation_hash[4])`
 
 The burn-list attestation hashes are part of the VDF seed. This forces the finalizer to choose the included burn-attestation set before doing the delay work. After the VDF is computed, changing that attestation set changes the seed and invalidates the work.
 
@@ -398,19 +369,15 @@ Blocks are bounded by transaction count and exact compact stored block-body size
 
 ## Fork Choice
 
-Nodes fully validate candidate blocks or snapshots before considering a reorg. A candidate chain must share the same genesis. Before height `1000`, the legacy rule rejects forks whose common ancestor is below `local height - 6`.
+Nodes fully validate candidate blocks or snapshots before considering a reorg. A candidate chain must share the same genesis.
 
 Burn inclusion is part of block validity. If a ticket block carries burn-list attestations but omits a burn required by those attestations, nodes reject the block before fork choice. The fork choice rule only compares chains made of valid blocks.
 
-From block height `1000`, a rank `0` ticket block requires signatures from strictly more than two thirds of its selected burn committee. The leader counts as one signer through its leader proof; the other signers are the existing burn-bundle signatures. Every signature commits to the child height and parent hash. A valid rank `0` child above height `1000` therefore certifies its parent. For a five-slot committee this means the leader plus three explicit committee signatures. Smaller committees use `floor(2n/3) + 1` total signatures. Rank `1`, later ticket ranks, and recovery blocks retain their liveness thresholds but do not create an objective finality checkpoint.
+A rank `0` ticket block requires signatures from strictly more than two thirds of its selected burn committee. The leader counts as one signer through its leader proof; the other signers use burn-bundle signatures. Every signature commits to the child height and parent hash, so a valid rank `0` child certifies its parent. For a five-slot committee, this means the leader plus three explicit committee signatures. Smaller committees require `floor(2n/3) + 1` total signatures. Rank `1`, later ticket ranks, and recovery blocks use their liveness thresholds but do not create an objective finality checkpoint.
 
-The first objective checkpoint is block `1000`, certified by a valid rank `0` block at height `1001`. Nodes reconstruct the highest checkpoint while replaying the existing compact snapshot; no block field, database migration, second genesis, or coin-state rewrite is required.
+Fork choice compares the highest valid checkpoint before chain length. A higher checkpoint wins even when its current tip is shorter, so healthy partitions can converge after more than six blocks. When checkpoints are identical, the taller chain wins. Equal-height chains use the existing first-divergent leader-score comparison. If certificates conflict at the same height, nodes choose the lexicographically smaller checkpoint hash. A strictly higher conflicting certificate supersedes a lower checkpoint.
 
-For forks that first diverge at or after height `1000`, fork choice compares the highest valid checkpoint before chain length. A higher checkpoint wins even when its current tip is shorter, so healthy partitions can converge after more than six blocks. When checkpoints are identical, the taller chain wins and equal-height chains retain the existing first-divergent leader-score comparison. Conflicting certificates at the same height indicate a quorum safety failure; all nodes nevertheless recover deterministically to the lexicographically smaller checkpoint hash. A strictly higher conflicting certificate supersedes a lower checkpoint.
-
-This is **recoverable objective finality**, not an irreversible promise that a finalized block can never be reorganized. “Finalized” means that the selected committee for the next rank `0` block signed the block's hash as its parent with a strict two-thirds quorum, and that no competing chain has a better checkpoint under the public rule above. No node uses first-seen or first-peer trust to resolve a post-activation fork.
-
-An upgraded node that has reached height `1000` will not rewrite history below `1000`. The coordinated activation therefore required agreement on the candidate block hash at height `999`. A node still replaying history below activation follows the legacy six-block rule while catching up; the candidate-to-mainnet promotion manifest can later pin a signed checkpoint without changing this ledger.
+This is **recoverable objective finality**, not a promise that a finalized block can never be reorganized. “Finalized” means that the selected committee for the next rank `0` block signed the block's hash as its parent with a strict two-thirds quorum, and that no competing chain has a better checkpoint under the public rule above. Nodes do not use first-seen or first-peer trust to resolve a fork.
 
 ## Genesis and Joining
 
