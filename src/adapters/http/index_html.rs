@@ -21,10 +21,13 @@ pub(super) const INDEX_HTML: &str = concat!(
     .app-shell { width: 100%; max-width: 100%; min-height: 100vh; display: block; overflow-x: hidden; }
     .sidebar { position: fixed; z-index: 5; inset: 0 auto 0 0; width: 84px; height: 100vh; display: flex; flex-direction: column; align-items: center; gap: 20px; padding: 16px 10px; background: #15171a; border-right: 1px solid #262b2f; }
     .brand-mark { position: relative; width: 64px; min-height: 58px; display: grid; place-items: center; overflow: hidden; border: 1px solid transparent; border-radius: 8px; padding: 7px 4px; background: transparent; color: #d5f55f; user-select: none; cursor: pointer; }
+    .brand-mark::after { content: ""; position: absolute; inset: -40% -70%; background: linear-gradient(100deg, transparent 42%, rgba(255, 255, 255, .34) 50%, transparent 58%); transform: translateX(-58%) rotate(8deg); opacity: 0; pointer-events: none; }
     .brand-mark svg { position: relative; z-index: 1; width: 24px; height: 24px; display: block; }
     .brand-mark .mark-loop { fill: none; stroke: currentColor; stroke-width: 4.2; stroke-linecap: round; stroke-linejoin: round; }
     .brand-mark .mark-dot { fill: currentColor; }
     .brand-mark:hover, .brand-mark.active { border-color: #3b4448; background: #202328; }
+    .brand-mark:hover::after { animation: mark-sheen .72s ease both; }
+    @keyframes mark-sheen { from { opacity: 0; transform: translateX(-58%) rotate(8deg); } 32% { opacity: 1; } to { opacity: 0; transform: translateX(58%) rotate(8deg); } }
     .side-nav { display: grid; gap: 10px; width: 100%; }
     .nav-button { width: 64px; min-height: 58px; display: grid; place-items: center; gap: 4px; border: 1px solid transparent; border-radius: 8px; padding: 7px 4px; background: transparent; color: #9fa8ad; }
     .nav-button svg { width: 21px; height: 21px; stroke: currentColor; stroke-width: 2; fill: none; }
