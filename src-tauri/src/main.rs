@@ -7,6 +7,13 @@ use std::{
 use tauri::WindowEvent;
 use tauri_plugin_shell::{ShellExt, process::CommandChild};
 
+#[cfg(any(target_os = "macos", target_os = "windows"))]
+use tauri::{
+    Manager,
+    menu::{Menu, MenuItem},
+    tray::{MouseButton, MouseButtonState, TrayIconBuilder, TrayIconEvent},
+};
+
 struct IunaSidecar(Mutex<Option<CommandChild>>);
 struct IunaSleepInhibitor(Mutex<Option<SleepInhibitor>>);
 
@@ -17,6 +24,9 @@ fn main() {
     tauri::Builder::default()
         .plugin(tauri_plugin_shell::init())
         .setup(|app| {
+            #[cfg(any(target_os = "macos", target_os = "windows"))]
+            setup_desktop_tray(app)?;
+
             let (mut events, child) = app
                 .shell()
                 .sidecar("iuna-sidecar")
@@ -30,9 +40,19 @@ fn main() {
 
             let sidecar = SIDECAR.get_or_init(|| IunaSidecar(Mutex::new(None)));
             *sidecar.0.lock().expect("sidecar mutex poisoned") = Some(child);
+
             Ok(())
         })
         .on_window_event(|_window, event| {
+            #[cfg(any(target_os = "macos", target_os = "windows"))]
+            if let WindowEvent::CloseRequested { api, .. } = event {
+                api.prevent_close();
+                if let Err(error) = _window.hide() {
+                    eprintln!("iuna desktop could not hide its window: {error}");
+                }
+            }
+
+            #[cfg(not(any(target_os = "macos", target_os = "windows")))]
             if matches!(event, WindowEvent::CloseRequested { .. }) {
                 stop_sidecar();
             }
@@ -40,6 +60,17 @@ fn main() {
         .build(tauri::generate_context!())
         .expect("error while building iuna desktop")
         .run(|_app, event| {
+            #[cfg(target_os = "macos")]
+            if matches!(
+                &event,
+                tauri::RunEvent::Reopen {
+                    has_visible_windows: false,
+                    ..
+                }
+            ) {
+                show_main_window(_app);
+            }
+
             if matches!(
                 event,
                 tauri::RunEvent::Exit | tauri::RunEvent::ExitRequested { .. }
@@ -47,6 +78,63 @@ fn main() {
                 stop_sidecar();
             }
         });
+}
+
+#[cfg(any(target_os = "macos", target_os = "windows"))]
+fn setup_desktop_tray(app: &tauri::App) -> tauri::Result<()> {
+    const OPEN_MENU_ID: &str = "open-iuna";
+    const QUIT_MENU_ID: &str = "quit-iuna";
+
+    let open = MenuItem::with_id(app, OPEN_MENU_ID, "Open iuna", true, None::<&str>)?;
+    let quit = MenuItem::with_id(app, QUIT_MENU_ID, "Quit iuna", true, None::<&str>)?;
+    let menu = Menu::with_items(app, &[&open, &quit])?;
+
+    let mut tray = TrayIconBuilder::new()
+        .menu(&menu)
+        .tooltip("iuna — node running")
+        .show_menu_on_left_click(cfg!(target_os = "macos"))
+        .on_menu_event(|app, event| match event.id().as_ref() {
+            OPEN_MENU_ID => show_main_window(app),
+            QUIT_MENU_ID => app.exit(0),
+            _ => {}
+        })
+        .on_tray_icon_event(|tray, event| {
+            if cfg!(target_os = "windows")
+                && matches!(
+                    event,
+                    TrayIconEvent::Click {
+                        button: MouseButton::Left,
+                        button_state: MouseButtonState::Up,
+                        ..
+                    }
+                )
+            {
+                show_main_window(tray.app_handle());
+            }
+        });
+
+    if let Some(icon) = app.default_window_icon() {
+        tray = tray.icon(icon.clone());
+    }
+
+    tray.build(app)?;
+    Ok(())
+}
+
+#[cfg(any(target_os = "macos", target_os = "windows"))]
+fn show_main_window(app: &tauri::AppHandle) {
+    let Some(window) = app.get_webview_window("main") else {
+        eprintln!("iuna desktop could not find its main window");
+        return;
+    };
+
+    if let Err(error) = window
+        .show()
+        .and_then(|_| window.unminimize())
+        .and_then(|_| window.set_focus())
+    {
+        eprintln!("iuna desktop could not show its window: {error}");
+    }
 }
 
 fn stop_sidecar() {
