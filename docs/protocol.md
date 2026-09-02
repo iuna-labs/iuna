@@ -1,7 +1,5 @@
 # iuna protocol in simple terms
 
-This document describes the current protocol after height `1000`. It does not describe older protocol rules.
-
 iuna is an experimental mainnet-candidate protocol that combines three mechanisms:
 
 - **Burn lottery:** burning IUNA creates tickets for future block finalization.
@@ -66,29 +64,13 @@ the expected network prefix and version, require exactly 32 payload bytes, and
 parse those bytes as a non-weak Ed25519 verifying key. An all-uppercase address
 is accepted and normalized to lowercase; mixed uppercase/lowercase is invalid.
 
-Consensus objects and persisted chainstate continue to store the same public
-key as canonical 64-character lowercase hexadecimal. The management wallet,
-address book, transfer endpoints, and Stratum worker usernames decode Bech32m
-to that internal key before constructing a transaction. This boundary keeps the
-checksum and network distinction out of consensus identity while avoiding any
-rewrite of genesis allocation outpoints, historical UTXOs, signatures, or block
-hashes.
-
-Legacy hexadecimal addresses are therefore not valid recipient or address-book
-input. Before mainnet genesis, contacts must replace them with an address newly
-copied from the owner's upgraded wallet. The code exposes an explicit
-`migrate_legacy_address` conversion for controlled migration tooling, but no UI
-silently guesses a network or upgrades an entered hex string. Wallet files keep
-their internal hex public key and need no seed or file migration.
-
-This address rollout does not require a consensus activation height: decoded
-transactions contain the same internal public-key bytes and therefore produce
-the same signatures, transaction IDs, blocks, and UTXO identities understood by
-older nodes. It does require a coordinated client rollout. Older wallets expose
-hex receive values that upgraded send forms reject, and existing Stratum miners
-must replace their hex worker username with the Bech32m form before connecting
-to an upgraded node. Wallet UI, backend, and Stratum configuration should be
-upgraded together.
+Consensus identity is the exact 32-byte Ed25519 verifying key, represented in
+consensus objects and persisted chainstate as canonical 64-character lowercase
+hexadecimal. The management wallet, address book, transfer endpoints, and
+Stratum worker usernames accept Bech32m addresses and decode them to that
+internal key before constructing a transaction. Recipient, address-book, and
+Stratum username input rejects raw hexadecimal keys. This boundary keeps the
+checksum and network distinction out of consensus identity.
 
 ## Coins and Transactions
 
@@ -146,7 +128,7 @@ The anchor burn is not a fairness mechanism. By itself, it would mostly help the
 
 The VDF is there to make block production sequential and time-based. It uses a Chia-compatible Wesolowski proof over a class group of imaginary quadratic forms. The 1024-bit class-group discriminant is derived deterministically from the block VDF seed, so the protocol does not rely on an RSA trusted setup or on anyone destroying hidden factors.
 
-VDF solutions are encoded with the `classgroup-wesolowski-bqfc-v1` prefix followed by two 100-byte Chia BQFC forms in hexadecimal: the output `y` and the Wesolowski proof `pi`. The implementation is Rust-only and has no GMP, MPIR, or other native runtime dependency. Proof generation uses a Chia-compatible checkpoint-and-bucket time-memory tradeoff. For large workloads, the prover increases its internal pass count to keep the checkpoints within a fixed memory budget; a bounded-memory constant-space fallback remains available when no checkpoint configuration fits the allocation limits. These internal strategies produce the same proof and do not change verification or the wire format. Older RSA-modulus and GMP class-group VDF outputs are not valid for this protocol version.
+VDF solutions are encoded with the `classgroup-wesolowski-bqfc-v1` prefix followed by two 100-byte Chia BQFC forms in hexadecimal: the output `y` and the Wesolowski proof `pi`. The implementation is Rust-only and has no GMP, MPIR, or other native runtime dependency. Proof generation uses a Chia-compatible checkpoint-and-bucket time-memory tradeoff. For large workloads, the prover increases its internal pass count to keep the checkpoints within a fixed memory budget; a bounded-memory constant-space fallback remains available when no checkpoint configuration fits the allocation limits. These internal strategies produce the same proof and do not change verification or the wire format.
 
 In a local Apple Silicon release benchmark, the Rust-only checkpoint prover completed 100,000 rounds in about `0.9s`. Its lower-memory fallback took about `1.8s`, while the official Python/C++ Chia reference took about `0.67s`. These measurements are only a performance snapshot on one machine; they do not affect consensus or the VDF wire format.
 
@@ -384,21 +366,6 @@ This is **recoverable objective finality**, not a promise that a finalized block
 Genesis is explicit. A normal node without a chain starts in setup mode and waits to join an existing chain from peers rather than silently creating a separate chain.
 
 The genesis flow bootstraps the mainnet-candidate network with an initial burn ticket and a fixed `1 IUNA` initial reward for the genesis wallet. New nodes fetch and validate chain snapshots from peers, then continue with normal block validation.
-
-## Local Chain Persistence And Reset Boundary
-
-The local `chain.sqlite3` database stores one atomically replaced compact
-snapshot blob plus independently checked tip height and tip hash metadata. The
-current release writes snapshot format v7 and accepts v6 and v7. Legacy JSON
-databases and compact versions older than v6 are deliberately not decoded or
-migrated; they are checkpointed, renamed with a unique `.pre-v6` suffix, and
-replaced by a fresh database during startup.
-
-The coordinated reset associated with that persistence boundary created the
-live mainnet-candidate chain and is complete. Current nodes without compatible
-chain state should retain their wallet and configuration files and join a
-published candidate peer; they must not create a separate genesis. Detailed
-recovery and archive commands are in [Operator Failure Playbooks](operator-playbooks.md).
 
 ## What This Design Is Trying to Achieve
 
