@@ -72,7 +72,7 @@ async fn main() -> Result<()> {
     let ui_data_db_path = ui_data_db_path(&chain_db_path);
     let chain_store = SqliteChainStore::open(&chain_db_path)?;
     let ui_data_store = SqliteUiDataStore::open(&ui_data_db_path)?;
-    let persisted_chain_exists = chain_store.load()?.is_some();
+    let persisted_chain_exists = chain_store.contains_chain()?;
     if opts.chain_mode == ChainMode::Genesis && persisted_chain_exists {
         bail!(
             "--genesis refuses to run because chain database already contains a blockchain at {}; start without --genesis to resume it",
@@ -493,7 +493,8 @@ async fn initialize_ledger(
     advertised_p2p_addr: SocketAddr,
     local_testnet: bool,
 ) -> Result<InitializedLedger> {
-    if let Some(snapshot) = chain_store.load()? {
+    if let Some(loaded) = chain_store.load_with_verification_status()? {
+        let snapshot = loaded.snapshot;
         if opts.chain_mode == ChainMode::Genesis {
             bail!(
                 "--genesis refuses to run because chain database already contains a blockchain at {}; start without --genesis to resume it",
@@ -512,7 +513,20 @@ async fn initialize_ledger(
             });
         }
         let height = snapshot_height(&snapshot);
-        let ledger = Ledger::from_persisted_snapshot(snapshot).with_context(|| {
+        let ledger = if loaded.verified_by_current_version {
+            println!(
+                "local chain was verified by version {}; skipping VDF reverification",
+                env!("CARGO_PKG_VERSION")
+            );
+            Ledger::from_locally_verified_snapshot(snapshot)
+        } else {
+            println!(
+                "verifying local chain for version {}...",
+                env!("CARGO_PKG_VERSION")
+            );
+            Ledger::from_persisted_snapshot(snapshot)
+        }
+        .with_context(|| {
             format!(
                 "failed to load chain database {}",
                 chain_store.path().display()
@@ -1139,7 +1153,7 @@ async fn persist_chain_and_project_ui_data(
 
 async fn persist_chain_snapshot(store: &SqliteChainStore, snapshot: ChainSnapshot) -> Result<()> {
     let store = store.clone();
-    tokio::task::spawn_blocking(move || store.save(&snapshot))
+    tokio::task::spawn_blocking(move || store.save_verified(&snapshot))
         .await
         .context("chain persistence worker failed")??;
     Ok(())

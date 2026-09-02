@@ -113,6 +113,12 @@ impl Ledger {
         Self::from_snapshot_with_vdf_policy(snapshot, verify_vdf, u64::MAX)
     }
 
+    /// Restore state from a local snapshot whose VDF proofs were already verified by this
+    /// software version. All other block validation still runs while rebuilding the ledger.
+    pub fn from_locally_verified_snapshot(snapshot: ChainSnapshot) -> Result<Self> {
+        Self::from_snapshot_with_vdf_policy(snapshot, false, u64::MAX)
+    }
+
     pub(crate) fn from_preverified_snapshot(snapshot: ChainSnapshot) -> Result<Self> {
         Self::from_snapshot_with_vdf_policy(snapshot, false, u64::MAX)
     }

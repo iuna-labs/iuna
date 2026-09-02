@@ -25,11 +25,25 @@ CREATE TABLE IF NOT EXISTS chain_snapshots (
     snapshot_blob BLOB NOT NULL,
     updated_at_ms INTEGER NOT NULL
 );
+CREATE TABLE IF NOT EXISTS chain_verification (
+    id INTEGER PRIMARY KEY CHECK (id = 1),
+    tip_hash TEXT NOT NULL,
+    verifier_version TEXT NOT NULL,
+    verified_at_ms INTEGER NOT NULL
+);
 "#;
+
+const CURRENT_VERIFIER_VERSION: &str = env!("CARGO_PKG_VERSION");
 
 #[derive(Clone, Debug)]
 pub struct SqliteChainStore {
     path: PathBuf,
+}
+
+#[derive(Debug)]
+pub struct LoadedChainSnapshot {
+    pub snapshot: ChainSnapshot,
+    pub verified_by_current_version: bool,
 }
 
 impl SqliteChainStore {
@@ -68,6 +82,24 @@ impl SqliteChainStore {
     }
 
     pub fn load(&self) -> Result<Option<ChainSnapshot>> {
+        Ok(self
+            .load_with_verification_status()?
+            .map(|loaded| loaded.snapshot))
+    }
+
+    pub fn contains_chain(&self) -> Result<bool> {
+        self.with_connection(|connection| {
+            connection
+                .query_row(
+                    "SELECT EXISTS(SELECT 1 FROM chain_snapshots WHERE id = 1)",
+                    [],
+                    |row| row.get(0),
+                )
+                .context("failed to inspect chain database")
+        })
+    }
+
+    pub fn load_with_verification_status(&self) -> Result<Option<LoadedChainSnapshot>> {
         self.with_connection(|connection| {
             let stored = connection
                 .query_row(
@@ -84,7 +116,7 @@ impl SqliteChainStore {
                 .optional()
                 .context("failed to load chain snapshot from database")?;
 
-            stored
+            let snapshot = stored
                 .map(|(stored_height, stored_tip_hash, blob)| {
                     let snapshot = decode_compact_snapshot(&blob)
                         .context("failed to parse compact chain snapshot from database")?;
@@ -95,13 +127,45 @@ impl SqliteChainStore {
                             "compact chain snapshot tip does not match database metadata"
                         );
                     }
-                    Ok(snapshot)
+                    Ok((snapshot, tip_hash))
                 })
-                .transpose()
+                .transpose()?;
+            let Some((snapshot, tip_hash)) = snapshot else {
+                return Ok(None);
+            };
+            let verified_by_current_version = connection
+                .query_row(
+                    r#"
+SELECT 1 FROM chain_verification
+WHERE id = 1 AND tip_hash = ?1 AND verifier_version = ?2
+"#,
+                    params![tip_hash, CURRENT_VERIFIER_VERSION],
+                    |_| Ok(()),
+                )
+                .optional()
+                .context("failed to inspect chain verification status")?
+                .is_some();
+            Ok(Some(LoadedChainSnapshot {
+                snapshot,
+                verified_by_current_version,
+            }))
         })
     }
 
     pub fn save(&self, snapshot: &ChainSnapshot) -> Result<()> {
+        self.save_with_verification_status(snapshot, false)
+    }
+
+    /// Persist a snapshot that has already passed consensus validation in this binary.
+    pub fn save_verified(&self, snapshot: &ChainSnapshot) -> Result<()> {
+        self.save_with_verification_status(snapshot, true)
+    }
+
+    fn save_with_verification_status(
+        &self,
+        snapshot: &ChainSnapshot,
+        verified: bool,
+    ) -> Result<()> {
         let (height, tip_hash) = snapshot_tip(snapshot).context("cannot persist empty chain")?;
         let snapshot_blob =
             encode_compact_snapshot(snapshot).context("failed to encode compact chain snapshot")?;
@@ -125,6 +189,25 @@ ON CONFLICT(id) DO UPDATE SET
                     params![height, tip_hash, snapshot_blob, updated_at_ms],
                 )
                 .context("failed to persist chain snapshot")?;
+            if verified {
+                transaction
+                    .execute(
+                        r#"
+INSERT INTO chain_verification (id, tip_hash, verifier_version, verified_at_ms)
+VALUES (1, ?1, ?2, ?3)
+ON CONFLICT(id) DO UPDATE SET
+    tip_hash = excluded.tip_hash,
+    verifier_version = excluded.verifier_version,
+    verified_at_ms = excluded.verified_at_ms
+"#,
+                        params![tip_hash, CURRENT_VERIFIER_VERSION, updated_at_ms],
+                    )
+                    .context("failed to persist chain verification status")?;
+            } else {
+                transaction
+                    .execute("DELETE FROM chain_verification", [])
+                    .context("failed to clear chain verification status")?;
+            }
             transaction
                 .commit()
                 .context("failed to commit chain persistence transaction")?;
@@ -140,6 +223,9 @@ ON CONFLICT(id) DO UPDATE SET
             transaction
                 .execute("DELETE FROM chain_snapshots", [])
                 .context("failed to delete chain snapshot")?;
+            transaction
+                .execute("DELETE FROM chain_verification", [])
+                .context("failed to delete chain verification status")?;
             transaction
                 .commit()
                 .context("failed to commit chain reset transaction")?;
@@ -468,5 +554,86 @@ VALUES (1, 0, 'bad-tip', ?1, 0)
                 .to_string()
                 .contains("snapshot tip does not match database metadata")
         );
+    }
+
+    #[test]
+    fn verified_snapshot_is_trusted_only_for_current_version_and_tip() {
+        let dir = tempdir().unwrap();
+        let store = SqliteChainStore::open(dir.path().join("chain.sqlite3")).unwrap();
+        let snapshot = test_snapshot("chain-store-verification-status");
+        store.save_verified(&snapshot).unwrap();
+
+        let loaded = store.load_with_verification_status().unwrap().unwrap();
+        assert!(loaded.verified_by_current_version);
+
+        store
+            .with_connection_mut(|connection| {
+                connection.execute(
+                    "UPDATE chain_verification SET verifier_version = 'previous-version'",
+                    [],
+                )?;
+                Ok(())
+            })
+            .unwrap();
+        let loaded = store.load_with_verification_status().unwrap().unwrap();
+        assert!(!loaded.verified_by_current_version);
+
+        store
+            .with_connection_mut(|connection| {
+                connection.execute(
+                    "UPDATE chain_verification SET verifier_version = ?1, tip_hash = 'other-tip'",
+                    [super::CURRENT_VERIFIER_VERSION],
+                )?;
+                Ok(())
+            })
+            .unwrap();
+        let loaded = store.load_with_verification_status().unwrap().unwrap();
+        assert!(!loaded.verified_by_current_version);
+    }
+
+    #[test]
+    fn ordinary_save_invalidates_previous_verification_status() {
+        let dir = tempdir().unwrap();
+        let store = SqliteChainStore::open(dir.path().join("chain.sqlite3")).unwrap();
+        let snapshot = test_snapshot("chain-store-unverified-save");
+        store.save_verified(&snapshot).unwrap();
+        assert!(
+            store
+                .load_with_verification_status()
+                .unwrap()
+                .unwrap()
+                .verified_by_current_version
+        );
+
+        store.save(&snapshot).unwrap();
+
+        assert!(store.contains_chain().unwrap());
+        assert!(
+            !store
+                .load_with_verification_status()
+                .unwrap()
+                .unwrap()
+                .verified_by_current_version
+        );
+    }
+
+    #[test]
+    fn opening_database_without_verification_table_migrates_as_untrusted() {
+        let dir = tempdir().unwrap();
+        let path = dir.path().join("chain.sqlite3");
+        let store = SqliteChainStore::open(&path).unwrap();
+        let snapshot = test_snapshot("chain-store-verification-migration");
+        store.save_verified(&snapshot).unwrap();
+        drop(store);
+        Connection::open(&path)
+            .unwrap()
+            .execute("DROP TABLE chain_verification", [])
+            .unwrap();
+
+        let reopened = SqliteChainStore::open(&path).unwrap();
+        let loaded = reopened.load_with_verification_status().unwrap().unwrap();
+
+        assert_eq!(loaded.snapshot, snapshot);
+        assert!(!loaded.verified_by_current_version);
     }
 }
