@@ -38,6 +38,8 @@ pub(super) const INDEX_HTML: &str = concat!(
     .settings-button svg { width: 23px; height: 23px; stroke: currentColor; stroke-width: 1.9; fill: none; }
     .settings-button span { display: none; font-size: 10px; font-weight: 800; }
     .settings-button:hover, .settings-button.active { background: #202328; border-color: #3b4448; color: #d5f55f; }
+    .brand-mark, .nav-button, .settings-button { transition: filter .1s ease, background-color .14s ease, border-color .14s ease, color .14s ease; }
+    .brand-mark:active, .nav-button:active, .settings-button:active { filter: brightness(1.14); }
     .version-panel { width: 64px; display: grid; gap: 4px; justify-items: center; border: 1px solid transparent; border-radius: 8px; padding: 7px 4px; color: #7f888e; background: transparent; font-size: 10px; font-weight: 850; text-align: center; }
     .version-panel.update { border-color: #566d25; color: #d5f55f; background: #1c2516; cursor: pointer; }
     .version-panel.checking { color: #a8b2b8; }
@@ -128,7 +130,7 @@ pub(super) const INDEX_HTML: &str = concat!(
     .sync-progress-fill { height: 100%; border-radius: inherit; background: linear-gradient(90deg, #8de9cd, #d5f55f); transition: width .35s ease; }
     .sync-progress-label { color: #d5f55f; font-size: 14px; font-weight: 850; font-variant-numeric: tabular-nums; }
     @keyframes sync-spin { to { transform: rotate(360deg); } }
-    @media (prefers-reduced-motion: reduce) { .sync-spinner { animation-duration: 1.8s; } .sync-progress-fill { transition: none; } }
+    @media (prefers-reduced-motion: reduce) { .sync-spinner { animation-duration: 1.8s; } .sync-progress-fill, .brand-mark, .nav-button, .settings-button { transition: none; } .brand-mark:hover::after { animation: none; } }
     .setup-modal { width: min(980px, 100%); max-height: calc(100vh - 44px); overflow: auto; border: 1px solid #3b4448; border-radius: 8px; padding: 18px; background: #181b1f; box-shadow: 0 24px 80px rgba(0, 0, 0, .42); }
     .setup-modal-head { display: grid; gap: 5px; margin-bottom: 16px; }
     .setup-modal-head h2 { margin: 0; font-size: 24px; }
