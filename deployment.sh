@@ -264,7 +264,15 @@ build_windows_desktop_in_docker_if_possible() {
       set -euo pipefail
 
       apt-get update
-      apt-get install -y --no-install-recommends clang lld llvm nsis
+      # The Linux-hosted Tauri CLI inspects enabled tray features while preparing
+      # bundle settings, even when cargo-xwin targets a Windows NSIS installer.
+      apt-get install -y --no-install-recommends \
+        clang \
+        libayatana-appindicator3-dev \
+        lld \
+        llvm \
+        nsis \
+        pkg-config
       rm -rf /var/lib/apt/lists/*
       rustup target add x86_64-pc-windows-msvc
       cargo install --locked cargo-xwin --version 0.19.2
