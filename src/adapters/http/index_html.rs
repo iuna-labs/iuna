@@ -46,7 +46,7 @@ pub(super) const INDEX_HTML: &str = concat!(
     .version-panel.failed .version-dot { background: #ff8f82; }
     .version-label { line-height: 1; }
     .version-update { color: #d5f55f; font-size: 9px; line-height: 1; text-transform: uppercase; }
-    .content { width: 100%; min-width: 0; overflow-x: hidden; padding: 22px 24px 48px 108px; }
+    .content { width: 100%; min-width: 0; min-height: 100vh; min-height: 100dvh; display: flex; flex-direction: column; overflow-x: hidden; padding: 22px 24px 48px 108px; }
     main { width: 100%; }
     main > section { width: 100%; }
     header { display: flex; justify-content: space-between; gap: 18px; align-items: flex-start; padding: 0 0 18px; }
@@ -80,7 +80,7 @@ pub(super) const INDEX_HTML: &str = concat!(
     .metric .label { color: #8d989f; font-size: 11px; text-transform: uppercase; }
     .metric .value { margin-top: 7px; font-weight: 850; overflow-wrap: anywhere; }
     .panel { margin-bottom: 12px; }
-    .dashboard-section { min-height: calc(100vh - 112px); display: grid; place-items: center; }
+    .dashboard-section { min-height: 0; flex: 1; display: grid; place-items: center; }
     .dashboard-grid { width: 100%; display: grid; grid-template-columns: repeat(5, minmax(0, 156px)); justify-content: center; align-content: center; gap: 10px; }
     .dashboard-card { aspect-ratio: 1; min-width: 0; display: flex; flex-direction: column; justify-content: center; align-items: center; gap: 13px; border: 1px solid #2a3035; border-radius: 9px; padding: 15px; background: #181b1f; text-align: center; }
     .dashboard-card-icon { width: 52px; height: 52px; display: grid; place-items: center; flex: 0 0 auto; border-radius: 10px; background: #111316; color: #9fa8ad; }
@@ -480,7 +480,7 @@ pub(super) const INDEX_HTML: &str = concat!(
     @media (max-width: 920px) { .setup-grid, .wallet-grid, .mining-grid, .detail-grid, .network-health { grid-template-columns: 1fr; } }
     @media (max-width: 760px) {
       body { padding-bottom: calc(68px + env(safe-area-inset-bottom)); }
-      .app-shell { display: block; min-height: 100dvh; overflow: visible; }
+      .app-shell { display: block; min-height: calc(100vh - 68px - env(safe-area-inset-bottom)); min-height: calc(100dvh - 68px - env(safe-area-inset-bottom)); overflow: visible; }
       .sidebar { position: fixed; z-index: 20; inset: auto 0 0; width: 100%; height: auto; display: grid; grid-template-columns: repeat(auto-fit, minmax(48px, 1fr)); gap: 4px; padding: 6px max(8px, env(safe-area-inset-right)) calc(6px + env(safe-area-inset-bottom)) max(8px, env(safe-area-inset-left)); border: 0; border-top: 1px solid #30363b; background: rgba(21, 23, 26, .96); box-shadow: 0 -12px 32px rgba(0, 0, 0, .28); backdrop-filter: blur(14px); }
       .version-panel { display: none; }
       .brand-mark { width: 100%; height: auto; min-height: 50px; border-color: transparent; padding: 5px 2px; background: transparent; box-shadow: none; color: #d5f55f; }
@@ -493,7 +493,7 @@ pub(super) const INDEX_HTML: &str = concat!(
       .settings-button { margin-top: 0; width: 100%; min-width: 0; min-height: 50px; gap: 2px; padding: 5px 2px; }
       .settings-button svg { width: 20px; height: 20px; }
       .settings-button span { display: block; }
-      .content { padding: 14px 12px 24px; }
+      .content { min-height: calc(100vh - 68px - env(safe-area-inset-bottom)); min-height: calc(100dvh - 68px - env(safe-area-inset-bottom)); padding: 14px 12px 24px; }
       header, .split, .setup-grid, .wallet-grid, .mining-grid, .detail-grid, .wallet-tx-row { grid-template-columns: 1fr; }
       header { display: flex; align-items: flex-start; padding-bottom: 14px; }
       h1 { font-size: 24px; }
@@ -545,7 +545,6 @@ pub(super) const INDEX_HTML: &str = concat!(
       .mining-event { grid-template-columns: auto minmax(0, 1fr); }
       .mining-event-time { grid-column: 2; }
       .dashboard-grid { grid-template-columns: repeat(2, minmax(0, 156px)); }
-      .dashboard-section { min-height: calc(100dvh - 150px); }
       .dashboard-card { aspect-ratio: 1; min-height: 0; }
     }
     @media (max-width: 420px) {
