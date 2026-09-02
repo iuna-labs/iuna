@@ -20,7 +20,7 @@ pub(super) const INDEX_HTML: &str = concat!(
     body { margin: 0; min-height: 100vh; max-width: 100%; overflow-x: hidden; background: #0f1012; color: #e8edf0; }
     .app-shell { width: 100%; max-width: 100%; min-height: 100vh; display: block; overflow-x: hidden; }
     .sidebar { position: fixed; z-index: 5; inset: 0 auto 0 0; width: 84px; height: 100vh; display: flex; flex-direction: column; align-items: center; gap: 20px; padding: 16px 10px; background: #15171a; border-right: 1px solid #262b2f; }
-    .brand-mark { position: relative; width: 38px; height: 38px; display: grid; place-items: center; overflow: hidden; border: 1px solid #e8ff8d; border-radius: 8px; background: linear-gradient(145deg, #ecff8a 0%, #d5f55f 54%, #8de9cd 100%); box-shadow: inset 0 1px 0 rgba(255, 255, 255, .42), 0 10px 24px rgba(213, 245, 95, .16); user-select: none; cursor: default; }
+    .brand-mark { position: relative; width: 38px; height: 38px; display: grid; place-items: center; overflow: hidden; border: 1px solid #e8ff8d; border-radius: 8px; padding: 0; background: linear-gradient(145deg, #ecff8a 0%, #d5f55f 54%, #8de9cd 100%); box-shadow: inset 0 1px 0 rgba(255, 255, 255, .42), 0 10px 24px rgba(213, 245, 95, .16); user-select: none; cursor: pointer; }
     .brand-mark::after { content: ""; position: absolute; inset: -40% -70%; background: linear-gradient(100deg, transparent 42%, rgba(255, 255, 255, .34) 50%, transparent 58%); transform: translateX(-58%) rotate(8deg); opacity: 0; pointer-events: none; }
     .brand-mark svg { position: relative; z-index: 1; width: 24px; height: 24px; display: block; }
     .brand-mark .mark-loop { fill: none; stroke: #101315; stroke-width: 4.2; stroke-linecap: round; stroke-linejoin: round; }
@@ -80,6 +80,23 @@ pub(super) const INDEX_HTML: &str = concat!(
     .metric .label { color: #8d989f; font-size: 11px; text-transform: uppercase; }
     .metric .value { margin-top: 7px; font-weight: 850; overflow-wrap: anywhere; }
     .panel { margin-bottom: 12px; }
+    .dashboard-section { min-height: calc(100vh - 112px); display: grid; place-items: center; }
+    .dashboard-grid { width: 100%; display: grid; grid-template-columns: repeat(5, minmax(0, 156px)); justify-content: center; align-content: center; gap: 10px; }
+    .dashboard-card { aspect-ratio: 1; min-width: 0; display: flex; flex-direction: column; justify-content: center; align-items: center; gap: 13px; border: 1px solid #2a3035; border-radius: 9px; padding: 15px; background: #181b1f; text-align: center; }
+    .dashboard-card-icon { width: 52px; height: 52px; display: grid; place-items: center; flex: 0 0 auto; border-radius: 10px; background: #111316; color: #9fa8ad; }
+    .dashboard-card-icon svg { width: 31px; height: 31px; fill: none; stroke: currentColor; stroke-width: 1.6; stroke-linecap: round; stroke-linejoin: round; }
+    .dashboard-card.good .dashboard-card-icon { background: #1c2516; color: #d5f55f; }
+    .dashboard-card.warning .dashboard-card-icon { background: #292315; color: #ffd070; }
+    .dashboard-card.bad .dashboard-card-icon { background: #2a1717; color: #ff8f82; }
+    .dashboard-card-copy { min-width: 0; width: 100%; display: grid; justify-items: center; }
+    .dashboard-card-label { margin-bottom: 6px; color: #8d989f; font-size: 10px; font-weight: 850; text-transform: uppercase; }
+    .dashboard-card-value { color: #d5f55f; font-size: 14px; font-weight: 850; font-variant-numeric: tabular-nums; line-height: 1.25; overflow-wrap: anywhere; }
+    .dashboard-card.balance { padding-inline: 10px; }
+    .dashboard-card.balance .dashboard-card-value { font-size: clamp(10px, 1.25vw, 13px); letter-spacing: -.015em; white-space: nowrap; }
+    .dashboard-status { color: #8d989f; font-size: 14px; font-weight: 850; font-variant-numeric: tabular-nums; line-height: 1.25; overflow-wrap: anywhere; }
+    .dashboard-card.good .dashboard-status { color: #d5f55f; }
+    .dashboard-card.warning .dashboard-status { color: #ffd070; }
+    .dashboard-card.bad .dashboard-status { color: #ff9d91; }
     .split { display: grid; grid-template-columns: minmax(0, 1fr) minmax(320px, .72fr); gap: 12px; }
     form { display: flex; flex-wrap: wrap; gap: 10px; align-items: end; }
     label { display: grid; gap: 5px; color: #a8b2b8; font-size: 13px; }
@@ -465,7 +482,11 @@ pub(super) const INDEX_HTML: &str = concat!(
       body { padding-bottom: calc(68px + env(safe-area-inset-bottom)); }
       .app-shell { display: block; min-height: 100dvh; overflow: visible; }
       .sidebar { position: fixed; z-index: 20; inset: auto 0 0; width: 100%; height: auto; display: grid; grid-template-columns: repeat(auto-fit, minmax(48px, 1fr)); gap: 4px; padding: 6px max(8px, env(safe-area-inset-right)) calc(6px + env(safe-area-inset-bottom)) max(8px, env(safe-area-inset-left)); border: 0; border-top: 1px solid #30363b; background: rgba(21, 23, 26, .96); box-shadow: 0 -12px 32px rgba(0, 0, 0, .28); backdrop-filter: blur(14px); }
-      .brand-mark, .version-panel { display: none; }
+      .version-panel { display: none; }
+      .brand-mark { width: 100%; height: auto; min-height: 50px; border-color: transparent; padding: 5px 2px; background: transparent; box-shadow: none; color: #d5f55f; }
+      .brand-mark:hover, .brand-mark.active { border-color: #3b4448; background: #202328; }
+      .brand-mark .mark-loop { stroke: currentColor; }
+      .brand-mark .mark-dot { fill: currentColor; }
       .side-nav { display: contents; }
       .nav-button { width: 100%; min-width: 0; min-height: 50px; gap: 2px; padding: 5px 2px; }
       .nav-button span { font-size: 10px; }
@@ -523,6 +544,9 @@ pub(super) const INDEX_HTML: &str = concat!(
       .wallet-tx-list, .tx-scroll-list { max-height: none; overflow-y: visible; padding-right: 0; }
       .mining-event { grid-template-columns: auto minmax(0, 1fr); }
       .mining-event-time { grid-column: 2; }
+      .dashboard-grid { grid-template-columns: repeat(2, minmax(0, 156px)); }
+      .dashboard-section { min-height: calc(100dvh - 150px); }
+      .dashboard-card { aspect-ratio: 1; min-height: 0; }
     }
     @media (max-width: 420px) {
       .content { padding-inline: 9px; }
@@ -547,7 +571,7 @@ pub(super) const INDEX_HTML: &str = concat!(
 <body x-data="iunaApp()" x-init="init()" @keydown.window.escape="closeModals()" x-cloak>
   <div class="app-shell" :inert="syncingNode()">
     <aside class="sidebar" aria-label="iuna navigation">
-      <div class="brand-mark" title="iuna" aria-label="iuna"><svg viewBox="0 0 32 32" aria-hidden="true" focusable="false"><circle class="mark-dot" cx="9.4" cy="7.6" r="2.8"></circle><path class="mark-loop" d="M9.4 13v7.1c0 3.7 2.9 6.4 6.6 6.4s6.6-2.7 6.6-6.4V13"></path></svg></div>
+      <button class="brand-mark" :class="{ active: tab === 'dashboard' }" type="button" @click="setTab('dashboard')" title="Dashboard" aria-label="Dashboard"><svg viewBox="0 0 32 32" aria-hidden="true" focusable="false"><circle class="mark-dot" cx="9.4" cy="7.6" r="2.8"></circle><path class="mark-loop" d="M9.4 13v7.1c0 3.7 2.9 6.4 6.6 6.4s6.6-2.7 6.6-6.4V13"></path></svg></button>
       <nav class="side-nav">
         <button class="nav-button" :class="{ active: tab === 'wallet' }" @click="setTab('wallet')" type="button" title="Wallet" aria-label="Wallet">
           <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M3 7h16a2 2 0 0 1 2 2v8a2 2 0 0 1-2 2H3z"></path><path d="M3 7V5a2 2 0 0 1 2-2h12"></path><path d="M16 13h3"></path></svg>
@@ -598,6 +622,50 @@ pub(super) const INDEX_HTML: &str = concat!(
 
     <div class="flash" :class="flash?.kind" x-show="flash" x-transition x-text="flash?.message"></div>
     <div class="persistent-banner" x-show="p2pRestartRequired()" x-transition x-text="p2pRestartMessage()"></div>
+
+    <section class="dashboard-section" x-show="tab === 'dashboard'">
+      <div class="dashboard-grid">
+        <article class="dashboard-card balance good">
+          <div class="dashboard-card-icon" aria-hidden="true"><svg viewBox="0 0 24 24"><path d="M4 7.5h14a2 2 0 0 1 2 2v9H4a2 2 0 0 1-2-2v-11a2 2 0 0 1 2-2h13"></path><path d="M15 12h5"></path><circle cx="15" cy="12" r=".5"></circle></svg></div>
+          <div class="dashboard-card-copy">
+            <div class="dashboard-card-label">Current balance</div>
+            <div class="dashboard-card-value">IUNA <span x-text="amountLabel(status.wallet_balance)"></span></div>
+          </div>
+        </article>
+
+        <article class="dashboard-card" :class="dashboardMiningState()">
+          <div class="dashboard-card-icon" aria-hidden="true"><svg viewBox="0 0 24 24"><path d="m14 13-8.381 8.38a1 1 0 0 1-3.001-3L11 9.999"></path><path d="M15.973 4.027A13 13 0 0 0 5.902 2.373c-1.398.342-1.092 2.158.277 2.601a19.9 19.9 0 0 1 5.822 3.024"></path><path d="M16.001 11.999a19.9 19.9 0 0 1 3.024 5.824c.444 1.369 2.26 1.676 2.603.278A13 13 0 0 0 20 8.069"></path><path d="M18.352 3.352a1.205 1.205 0 0 0-1.704 0l-5.296 5.296a1.205 1.205 0 0 0 0 1.704l2.296 2.296a1.205 1.205 0 0 0 1.704 0l5.296-5.296a1.205 1.205 0 0 0 0-1.704z"></path></svg></div>
+          <div class="dashboard-card-copy">
+            <div class="dashboard-card-label">Mining</div>
+            <div class="dashboard-status" x-text="powMiningEnabled ? 'On' : 'Off'"></div>
+          </div>
+        </article>
+
+        <article class="dashboard-card" :class="dashboardBurnState()">
+          <div class="dashboard-card-icon" aria-hidden="true"><svg viewBox="0 0 24 24"><path d="M12 12c2-3 0-7-1-8 0 3-1.8 4.7-3 6s-2 3.2-2 5a6 6 0 1 0 12 0c0-1.5-1.1-3.9-2-5 0 3-1.7 4-3 4s-2-1-1-2Z"></path></svg></div>
+          <div class="dashboard-card-copy">
+            <div class="dashboard-card-label">Burning</div>
+            <div class="dashboard-status" x-text="miningEnabled ? 'On' : 'Off'"></div>
+          </div>
+        </article>
+
+        <article class="dashboard-card" :class="dashboardBlockState()">
+          <div class="dashboard-card-icon" aria-hidden="true"><svg viewBox="0 0 24 24"><path d="m12 2.8 8 4.4v9.6l-8 4.4-8-4.4V7.2z"></path><path d="m4.3 7.4 7.7 4.3 7.7-4.3M12 11.7v9.1"></path></svg></div>
+          <div class="dashboard-card-copy">
+            <div class="dashboard-card-label">Last block</div>
+            <div class="dashboard-status" x-text="dashboardLastBlockLabel()"></div>
+          </div>
+        </article>
+
+        <article class="dashboard-card" :class="dashboardNetworkState()">
+          <div class="dashboard-card-icon" aria-hidden="true"><svg viewBox="0 0 24 24"><circle cx="5" cy="12" r="2.5"></circle><circle cx="19" cy="6" r="2.5"></circle><circle cx="19" cy="18" r="2.5"></circle><path d="m7.3 11 9.4-4M7.3 13l9.4 4"></path></svg></div>
+          <div class="dashboard-card-copy">
+            <div class="dashboard-card-label">Network</div>
+            <div class="dashboard-status" x-text="basicNetworkStatusLabel()"></div>
+          </div>
+        </article>
+      </div>
+    </section>
 
     <section x-show="tab === 'wallet'">
       <div class="page-title">

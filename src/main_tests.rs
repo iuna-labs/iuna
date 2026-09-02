@@ -97,6 +97,19 @@ fn management_ui_warns_when_estimated_fees_exceed_amounts() {
 }
 
 #[test]
+fn management_ui_opens_on_the_dashboard_and_exposes_chain_health_thresholds() {
+    let html = include_str!("adapters/http/index_html.rs");
+    let javascript = include_str!("../www/assets/iuna-ui.js");
+    assert!(html.contains("@click=\"setTab('dashboard')\""));
+    assert!(html.contains("Current balance"));
+    assert!(html.contains("dashboardLastBlockLabel()"));
+    assert!(html.contains("basicNetworkStatusLabel()"));
+    assert!(javascript.contains("tab: \"dashboard\""));
+    assert!(javascript.contains("ageMs < 10 * 60 * 1000"));
+    assert!(javascript.contains("ageMs < 20 * 60 * 1000"));
+}
+
+#[test]
 fn management_ui_uses_an_in_app_transfer_confirmation_and_marks_fee_errors() {
     let html = include_str!("adapters/http/index_html.rs");
     let javascript = include_str!("../www/assets/iuna-ui.js");

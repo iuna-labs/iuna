@@ -3,7 +3,7 @@ const IUNA_RELEASE_METADATA_URL = "https://getiuna.org/downloads/latest.json";
 
 window.iunaApp = function iunaApp() {
   return {
-    tab: "wallet",
+    tab: "dashboard",
     status: {},
     blocks: [],
     selectedBlock: null,
@@ -189,7 +189,7 @@ window.iunaApp = function iunaApp() {
 
     tabFromHash() {
       const hash = window.location.hash.replace(/^#\/?/, "");
-      return this.allowedTabs().includes(hash) ? hash : "wallet";
+      return this.allowedTabs().includes(hash) ? hash : "dashboard";
     },
 
     setTab(tab) {
@@ -205,8 +205,8 @@ window.iunaApp = function iunaApp() {
 
     allowedTabs() {
       const tabs = this.advancedMode()
-        ? ["wallet", "mining", "p2p", "chain", "settings"]
-        : ["wallet", "p2p", "chain", "settings"];
+        ? ["dashboard", "wallet", "mining", "p2p", "chain", "settings"]
+        : ["dashboard", "wallet", "p2p", "chain", "settings"];
       if (this.developmentMode()) {
         tabs.splice(tabs.indexOf("chain") + 1, 0, "metrics");
       }
@@ -231,7 +231,7 @@ window.iunaApp = function iunaApp() {
         localStorage.setItem("iunaUiMode", this.uiMode);
       } catch {}
       if (!this.allowedTabs().includes(this.tab)) {
-        this.setTab("wallet");
+        this.setTab("dashboard");
       }
     },
 
@@ -241,6 +241,7 @@ window.iunaApp = function iunaApp() {
 
     pageTitle() {
       return {
+        dashboard: "Dashboard",
         wallet: "iuna",
         mining: "Mining",
         p2p: "P2P",
@@ -649,7 +650,7 @@ window.iunaApp = function iunaApp() {
         this.verifyChallenges = [];
         this.verifyAnswers = {};
         this.showFlash("Setup complete", "success");
-        this.setTab("wallet");
+        this.setTab("dashboard");
       } catch (error) {
         this.showSetupFeedback(error.message, "error");
       }
@@ -723,7 +724,7 @@ window.iunaApp = function iunaApp() {
         this.config = config;
         this.syncConfigState({ addressBookVersion });
         if (!this.allowedTabs().includes(this.tab)) {
-          this.setTab("wallet");
+          this.setTab("dashboard");
         }
         if (!this.config.setup_complete || status.network_migration?.required === true) {
           await this.refreshWalletSetup();
@@ -783,7 +784,7 @@ window.iunaApp = function iunaApp() {
           this.config = config;
           this.syncConfigState({ addressBookVersion });
           if (!this.allowedTabs().includes(this.tab)) {
-            this.setTab("wallet");
+            this.setTab("dashboard");
           }
           if (!this.config.setup_complete) {
             await this.refreshWalletSetup();
@@ -3281,6 +3282,35 @@ window.iunaApp = function iunaApp() {
       const ageMs = this.networkHealth.last_block_age_ms;
       if (typeof ageMs !== "number" || !Number.isFinite(ageMs)) return "-";
       return this.durationLabel(ageMs);
+    },
+
+    dashboardMiningState() {
+      return this.powMiningEnabled ? "good" : "neutral";
+    },
+
+    dashboardBurnState() {
+      return this.miningEnabled ? "good" : "neutral";
+    },
+
+    dashboardBlockState() {
+      const ageMs = this.networkHealth.last_block_age_ms;
+      if (typeof ageMs !== "number" || !Number.isFinite(ageMs)) return "neutral";
+      if (ageMs < 10 * 60 * 1000) return "good";
+      if (ageMs < 20 * 60 * 1000) return "warning";
+      return "bad";
+    },
+
+    dashboardLastBlockLabel() {
+      const age = this.networkLastBlockAgeLabel();
+      return age === "-" ? "Unavailable" : `${age} ago`;
+    },
+
+    dashboardNetworkState() {
+      const state = this.networkHealth.state;
+      if (!state) return "neutral";
+      if (state === "healthy" || state === "ahead of peers") return "good";
+      if (state === "syncing" || state === "mempool syncing") return "warning";
+      return "bad";
     },
 
     networkFinalizerLabel() {
