@@ -4,10 +4,21 @@ set -euo pipefail
 cd "$(dirname "${BASH_SOURCE[0]}")"
 
 usage() {
-  echo "Usage: $0 [--genesis] [--skip-long-tests] <version>" >&2
-  echo "Example: $0 0.2.48" >&2
-  echo "         $0 --genesis 0.4.0" >&2
-  echo "         $0 --skip-long-tests 0.4.0" >&2
+  echo "Usage:"
+  echo "  $0 [--genesis] [--skip-long-tests] <version>"
+  echo "  $0 --website-only"
+  echo
+  echo "Options:"
+  echo "  --genesis          Start a new chain and permanently replace the node PVC"
+  echo "  --skip-long-tests  Skip long-running release test suites"
+  echo "  --website-only     Deploy the website from the current commit without a release"
+  echo "  -h, --help         Show this help"
+  echo
+  echo "Examples:"
+  echo "  $0 0.4.7"
+  echo "  $0 --skip-long-tests 0.4.7"
+  echo "  $0 --genesis 0.4.7"
+  echo "  $0 --website-only"
 }
 
 die() {
@@ -76,7 +87,7 @@ ensure_clean_worktree() {
   require_command git
 
   if ! git diff --quiet || ! git diff --cached --quiet || [ -n "$(git ls-files --others --exclude-standard)" ]; then
-    die "worktree is not clean; commit or stash changes before releasing"
+    die "worktree is not clean; commit or stash changes before deploying or releasing"
   fi
 }
 
@@ -434,6 +445,22 @@ build_docker_image() {
   echo "Built Docker images: ${www_image}, ${node_image}"
 }
 
+website_image_for_head() {
+  local commit
+
+  require_command git
+  commit="$(git rev-parse --short=12 HEAD)"
+  printf '%s\n' "${IUNA_WWW_IMAGE:-iuna-www:git-${commit}}"
+}
+
+build_website_image() {
+  local image="$1"
+
+  require_command docker
+  docker build --platform=linux/amd64 --progress=plain -t "$image" .
+  echo "Built website image: ${image}"
+}
+
 import_image_to_k3s() {
   local image="$1"
   local tmp_folder="$2"
@@ -448,6 +475,22 @@ import_image_to_k3s() {
   docker save "$image" -o "$image_file"
   scp "$image_file" "${remote_host}:~/"
   ssh "$remote_host" "sudo k3s ctr -n k8s.io images import ~/${remote_file} && rm ~/${remote_file}"
+}
+
+deploy_website_image() {
+  local image="$1"
+  local kubectl_context="${IUNA_KUBECTL_CONTEXT:-jhx-app}"
+  local tmp_folder
+
+  require_command kubectl
+
+  tmp_folder="$(mktemp -d)"
+  trap 'rm -rf "$tmp_folder"' RETURN
+
+  import_image_to_k3s "$image" "$tmp_folder"
+  kubectl --context "$kubectl_context" -n iuna set image deployment/www "iuna-www=${image}"
+  kubectl --context "$kubectl_context" -n iuna rollout restart deployment/www
+  kubectl --context "$kubectl_context" -n iuna rollout status deployment/www
 }
 
 render_manifest() {
@@ -557,6 +600,7 @@ deploy_docker_image() {
 main() {
   local genesis=false
   local skip_long_tests=false
+  local website_only=false
   local version=""
 
   while [ "$#" -gt 0 ]; do
@@ -569,18 +613,46 @@ main() {
         [ "$skip_long_tests" = "false" ] || die "--skip-long-tests may only be specified once"
         skip_long_tests=true
         ;;
+      --website-only)
+        [ "$website_only" = "false" ] || die "--website-only may only be specified once"
+        website_only=true
+        ;;
+      -h|--help)
+        usage
+        exit 0
+        ;;
       -*)
         die "unknown option: $1"
         ;;
       *)
-        [ -z "$version" ] || { usage; exit 2; }
+        [ -z "$version" ] || { usage >&2; exit 2; }
         version="${1#v}"
         ;;
     esac
     shift
   done
 
-  [ -n "$version" ] || { usage; exit 2; }
+  if [ "$website_only" = "true" ]; then
+    [ -z "$version" ] || die "--website-only does not accept a version"
+    [ "$genesis" = "false" ] || die "--website-only cannot be combined with --genesis"
+    [ "$skip_long_tests" = "false" ] || die "--website-only cannot be combined with --skip-long-tests"
+
+    ensure_clean_worktree
+
+    local website_image
+    website_image="$(website_image_for_head)"
+    echo "Website-only deployment from commit $(git rev-parse --short HEAD)"
+    echo "Image: ${website_image}"
+    if ! confirm "Are you sure you want to deploy the website? (y/N) "; then
+      echo "Aborting deployment"
+      exit 1
+    fi
+    build_website_image "$website_image"
+    deploy_website_image "$website_image"
+    exit 0
+  fi
+
+  [ -n "$version" ] || { usage >&2; exit 2; }
   [[ "$version" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]] || die "version must look like 0.2.48"
 
   ensure_clean_worktree

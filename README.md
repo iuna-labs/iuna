@@ -68,6 +68,18 @@ Release and deploy with:
 ./deployment.sh 0.4.7
 ```
 
+To deploy only the website from the current commit, without changing the
+project version, creating a release tag, rebuilding release artifacts, or
+restarting the node:
+
+```sh
+./deployment.sh --website-only
+```
+
+The website-only deployment requires a clean worktree and tags the image with
+the current Git commit, for example `iuna-www:git-2f9e36fabc12`. Use
+`./deployment.sh --help` to see all supported modes.
+
 By default, deployment audits all three Rust lockfiles, enforces the dependency
 source/license policy, runs the regular unit tests, verifies that the fuzz
 targets compile against their locked dependencies, and runs the extended
