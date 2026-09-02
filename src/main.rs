@@ -513,19 +513,18 @@ async fn initialize_ledger(
             });
         }
         let height = snapshot_height(&snapshot);
-        let ledger = if loaded.verified_by_current_version {
-            println!(
-                "local chain was verified by version {}; skipping VDF reverification",
-                env!("CARGO_PKG_VERSION")
-            );
-            Ledger::from_locally_verified_snapshot(snapshot)
-        } else {
-            println!(
-                "verifying local chain for version {}...",
-                env!("CARGO_PKG_VERSION")
-            );
-            Ledger::from_persisted_snapshot(snapshot)
+        match loaded.revalidation_from_height {
+            Some(from_height) => println!(
+                "validating local chain from height {from_height} for the current consensus ruleset..."
+            ),
+            None => println!(
+                "local chain is trusted under the current consensus ruleset; skipping historical validation"
+            ),
         }
+        let ledger = Ledger::from_persisted_snapshot_revalidating_from(
+            snapshot,
+            loaded.revalidation_from_height,
+        )
         .with_context(|| {
             format!(
                 "failed to load chain database {}",

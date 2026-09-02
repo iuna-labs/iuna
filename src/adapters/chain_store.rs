@@ -33,7 +33,25 @@ CREATE TABLE IF NOT EXISTS chain_verification (
 );
 "#;
 
-const CURRENT_VERIFIER_VERSION: &str = env!("CARGO_PKG_VERSION");
+// This identifies the consensus rules, not the application release. UI, packaging, and
+// other non-consensus releases must not invalidate a chain that this node already verified.
+// Bump this value only when historical validation semantics change, and add the old ruleset to
+// `revalidation_from_height` with the first affected block height.
+const CURRENT_CONSENSUS_RULESET: &str = "iuna-consensus-v1";
+
+// v0.4.10 introduced the verification marker and wrote the package version into it. Its
+// validator is identical to the first stable consensus ruleset, so it can be migrated safely.
+const LEGACY_EQUIVALENT_VERIFIER_VERSIONS: &[&str] = &["0.4.10"];
+
+struct ConsensusRulesetMigration {
+    from_ruleset: &'static str,
+    revalidate_from_height: u64,
+}
+
+// When a future release changes consensus validation, bump CURRENT_CONSENSUS_RULESET and add a
+// direct migration for every still-supported older ruleset. The height is the first block whose
+// validity can differ under the new rules.
+const CONSENSUS_RULESET_MIGRATIONS: &[ConsensusRulesetMigration] = &[];
 
 #[derive(Clone, Debug)]
 pub struct SqliteChainStore {
@@ -43,7 +61,9 @@ pub struct SqliteChainStore {
 #[derive(Debug)]
 pub struct LoadedChainSnapshot {
     pub snapshot: ChainSnapshot,
-    pub verified_by_current_version: bool,
+    /// First block that must be validated again. `None` means the entire persisted chain is
+    /// already trusted under the current consensus ruleset.
+    pub revalidation_from_height: Option<u64>,
 }
 
 impl SqliteChainStore {
@@ -133,21 +153,20 @@ impl SqliteChainStore {
             let Some((snapshot, tip_hash)) = snapshot else {
                 return Ok(None);
             };
-            let verified_by_current_version = connection
+            let stored_ruleset = connection
                 .query_row(
                     r#"
-SELECT 1 FROM chain_verification
-WHERE id = 1 AND tip_hash = ?1 AND verifier_version = ?2
+SELECT verifier_version FROM chain_verification
+WHERE id = 1 AND tip_hash = ?1
 "#,
-                    params![tip_hash, CURRENT_VERIFIER_VERSION],
-                    |_| Ok(()),
+                    params![tip_hash],
+                    |row| row.get::<_, String>(0),
                 )
                 .optional()
-                .context("failed to inspect chain verification status")?
-                .is_some();
+                .context("failed to inspect chain verification status")?;
             Ok(Some(LoadedChainSnapshot {
                 snapshot,
-                verified_by_current_version,
+                revalidation_from_height: revalidation_from_height(stored_ruleset.as_deref()),
             }))
         })
     }
@@ -200,7 +219,7 @@ ON CONFLICT(id) DO UPDATE SET
     verifier_version = excluded.verifier_version,
     verified_at_ms = excluded.verified_at_ms
 "#,
-                        params![tip_hash, CURRENT_VERIFIER_VERSION, updated_at_ms],
+                        params![tip_hash, CURRENT_CONSENSUS_RULESET, updated_at_ms],
                     )
                     .context("failed to persist chain verification status")?;
             } else {
@@ -386,6 +405,21 @@ fn snapshot_tip(snapshot: &ChainSnapshot) -> Option<(u64, String)> {
         .map(|block| (block.height, block.hash.clone()))
 }
 
+fn revalidation_from_height(stored_ruleset: Option<&str>) -> Option<u64> {
+    match stored_ruleset {
+        Some(CURRENT_CONSENSUS_RULESET) => None,
+        Some(version) if LEGACY_EQUIVALENT_VERIFIER_VERSIONS.contains(&version) => None,
+        Some(ruleset) => CONSENSUS_RULESET_MIGRATIONS
+            .iter()
+            .find(|migration| migration.from_ruleset == ruleset)
+            .map(|migration| migration.revalidate_from_height)
+            // Unknown markers are untrusted.
+            .or(Some(1)),
+        // A missing marker means the snapshot was not persisted as validated.
+        None => Some(1),
+    }
+}
+
 fn unix_ms() -> u64 {
     SystemTime::now()
         .duration_since(UNIX_EPOCH)
@@ -557,14 +591,14 @@ VALUES (1, 0, 'bad-tip', ?1, 0)
     }
 
     #[test]
-    fn verified_snapshot_is_trusted_only_for_current_version_and_tip() {
+    fn verified_snapshot_is_trusted_only_for_current_ruleset_and_tip() {
         let dir = tempdir().unwrap();
         let store = SqliteChainStore::open(dir.path().join("chain.sqlite3")).unwrap();
         let snapshot = test_snapshot("chain-store-verification-status");
         store.save_verified(&snapshot).unwrap();
 
         let loaded = store.load_with_verification_status().unwrap().unwrap();
-        assert!(loaded.verified_by_current_version);
+        assert_eq!(loaded.revalidation_from_height, None);
 
         store
             .with_connection_mut(|connection| {
@@ -576,19 +610,19 @@ VALUES (1, 0, 'bad-tip', ?1, 0)
             })
             .unwrap();
         let loaded = store.load_with_verification_status().unwrap().unwrap();
-        assert!(!loaded.verified_by_current_version);
+        assert_eq!(loaded.revalidation_from_height, Some(1));
 
         store
             .with_connection_mut(|connection| {
                 connection.execute(
                     "UPDATE chain_verification SET verifier_version = ?1, tip_hash = 'other-tip'",
-                    [super::CURRENT_VERIFIER_VERSION],
+                    [super::CURRENT_CONSENSUS_RULESET],
                 )?;
                 Ok(())
             })
             .unwrap();
         let loaded = store.load_with_verification_status().unwrap().unwrap();
-        assert!(!loaded.verified_by_current_version);
+        assert_eq!(loaded.revalidation_from_height, Some(1));
     }
 
     #[test]
@@ -602,18 +636,20 @@ VALUES (1, 0, 'bad-tip', ?1, 0)
                 .load_with_verification_status()
                 .unwrap()
                 .unwrap()
-                .verified_by_current_version
+                .revalidation_from_height
+                .is_none()
         );
 
         store.save(&snapshot).unwrap();
 
         assert!(store.contains_chain().unwrap());
         assert!(
-            !store
+            store
                 .load_with_verification_status()
                 .unwrap()
                 .unwrap()
-                .verified_by_current_version
+                .revalidation_from_height
+                .is_some()
         );
     }
 
@@ -634,6 +670,27 @@ VALUES (1, 0, 'bad-tip', ?1, 0)
         let loaded = reopened.load_with_verification_status().unwrap().unwrap();
 
         assert_eq!(loaded.snapshot, snapshot);
-        assert!(!loaded.verified_by_current_version);
+        assert_eq!(loaded.revalidation_from_height, Some(1));
+    }
+
+    #[test]
+    fn v0410_verification_marker_migrates_without_historical_revalidation() {
+        let dir = tempdir().unwrap();
+        let store = SqliteChainStore::open(dir.path().join("chain.sqlite3")).unwrap();
+        let snapshot = test_snapshot("chain-store-legacy-ruleset-marker");
+        store.save_verified(&snapshot).unwrap();
+        store
+            .with_connection_mut(|connection| {
+                connection.execute(
+                    "UPDATE chain_verification SET verifier_version = '0.4.10'",
+                    [],
+                )?;
+                Ok(())
+            })
+            .unwrap();
+
+        let loaded = store.load_with_verification_status().unwrap().unwrap();
+
+        assert_eq!(loaded.revalidation_from_height, None);
     }
 }

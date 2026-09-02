@@ -68,6 +68,13 @@ impl CompactBlockContext {
         self.tables = tables;
         Ok(())
     }
+
+    pub(crate) fn append_trusted_block(&mut self, block: &Block) -> Result<()> {
+        let mut writer = CompactWriter::default();
+        encode_block_body(&mut writer, block, &mut self.tables)?;
+        self.tables.register_protocol_id(&block.hash);
+        Ok(())
+    }
 }
 
 #[derive(Default)]

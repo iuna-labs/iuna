@@ -108,15 +108,35 @@ impl Ledger {
     }
 
     pub fn from_persisted_snapshot(snapshot: ChainSnapshot) -> Result<Self> {
-        let verify_vdf = !(cfg!(feature = "e2e")
-            && snapshot.launch_profile.profile_id == LaunchProfile::local_testnet().profile_id);
-        Self::from_snapshot_with_vdf_policy(snapshot, verify_vdf, u64::MAX)
+        Self::from_persisted_snapshot_revalidating_from(snapshot, Some(1))
     }
 
-    /// Restore state from a local snapshot whose VDF proofs were already verified by this
-    /// software version. All other block validation still runs while rebuilding the ledger.
+    /// Restore a local snapshot and only revalidate blocks at or above the supplied height.
+    /// `None` trusts every persisted block while rebuilding its derived in-memory state.
+    pub fn from_persisted_snapshot_revalidating_from(
+        snapshot: ChainSnapshot,
+        revalidate_from_height: Option<u64>,
+    ) -> Result<Self> {
+        let verify_vdf_from_height = if cfg!(feature = "e2e")
+            && snapshot.launch_profile.profile_id == LaunchProfile::local_testnet().profile_id
+        {
+            None
+        } else {
+            revalidate_from_height
+        };
+        let trusted_before_height = revalidate_from_height.unwrap_or(u64::MAX);
+        Self::from_snapshot_with_revalidation_policy(
+            snapshot,
+            Some(trusted_before_height),
+            revalidate_from_height,
+            verify_vdf_from_height,
+            u64::MAX,
+        )
+    }
+
+    /// Restore state from a local snapshot already trusted under the current consensus ruleset.
     pub fn from_locally_verified_snapshot(snapshot: ChainSnapshot) -> Result<Self> {
-        Self::from_snapshot_with_vdf_policy(snapshot, false, u64::MAX)
+        Self::from_persisted_snapshot_revalidating_from(snapshot, None)
     }
 
     pub(crate) fn from_preverified_snapshot(snapshot: ChainSnapshot) -> Result<Self> {
@@ -130,6 +150,22 @@ impl Ledger {
     pub(crate) fn from_snapshot_with_vdf_policy(
         snapshot: ChainSnapshot,
         verify_vdf: bool,
+        now_ms: u64,
+    ) -> Result<Self> {
+        Self::from_snapshot_with_revalidation_policy(
+            snapshot,
+            None,
+            Some(0),
+            verify_vdf.then_some(0),
+            now_ms,
+        )
+    }
+
+    fn from_snapshot_with_revalidation_policy(
+        snapshot: ChainSnapshot,
+        trusted_before_height: Option<u64>,
+        revalidate_from_height: Option<u64>,
+        verify_vdf_from_height: Option<u64>,
         now_ms: u64,
     ) -> Result<Self> {
         let ChainSnapshot {
@@ -187,8 +223,14 @@ impl Ledger {
         )?;
 
         for block in blocks.into_iter().skip(1) {
-            if verify_vdf {
-                ledger.apply_block_at(block, now_ms)?;
+            if trusted_before_height.is_some_and(|height| block.height < height) {
+                ledger.apply_trusted_block_at(block)?;
+            } else if revalidate_from_height.is_some_and(|height| block.height >= height) {
+                if verify_vdf_from_height.is_some_and(|height| block.height >= height) {
+                    ledger.apply_block_at(block, now_ms)?;
+                } else {
+                    ledger.apply_preverified_block_at(block, now_ms)?;
+                }
             } else {
                 ledger.apply_preverified_block_at(block, now_ms)?;
             }

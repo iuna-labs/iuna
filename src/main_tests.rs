@@ -991,6 +991,42 @@ async fn startup_resumes_persisted_chain_without_genesis_flag() {
 }
 
 #[tokio::test]
+async fn startup_rebuilds_state_from_a_locally_trusted_chain() {
+    let dir = tempdir().unwrap();
+    let chain_path = dir.path().join("chain.sqlite3");
+    let store = SqliteChainStore::open(&chain_path).unwrap();
+    let wallet = Wallet::from_seed("trusted-persisted-chain-owner");
+    let persisted = ledger_with_one_mined_block(&wallet);
+    store.save_verified(&persisted.snapshot()).unwrap();
+    let opts = parse(&["--chain-db", chain_path.to_str().unwrap()])
+        .unwrap()
+        .unwrap();
+
+    let resumed = initialize_ledger(&opts, wallet.address(), &store, opts.p2p_addr, false)
+        .await
+        .unwrap();
+
+    assert_eq!(resumed.status(), persisted.status());
+    assert_eq!(
+        resumed.balance_of(wallet.address()),
+        persisted.balance_of(wallet.address())
+    );
+    assert_eq!(resumed.snapshot(), persisted.snapshot());
+}
+
+#[test]
+fn consensus_migration_revalidates_only_from_its_activation_height() {
+    let wallet = Wallet::from_seed("consensus-revalidation-boundary-owner");
+    let mut snapshot = ledger_with_one_mined_block(&wallet).snapshot();
+    snapshot.blocks[1].leader_proof.as_mut().unwrap().signature = "0".repeat(128);
+
+    assert!(Ledger::from_persisted_snapshot_revalidating_from(snapshot.clone(), Some(1)).is_err());
+    let trusted_prefix =
+        Ledger::from_persisted_snapshot_revalidating_from(snapshot, Some(2)).unwrap();
+    assert_eq!(trusted_prefix.height(), 1);
+}
+
+#[tokio::test]
 async fn local_testnet_requests_reset_for_persisted_normal_launch_profile() {
     let dir = tempdir().unwrap();
     let chain_path = dir.path().join("chain.sqlite3");

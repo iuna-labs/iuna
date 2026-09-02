@@ -96,7 +96,7 @@ impl Ledger {
                 &mut utxo_lineage,
                 &mut lineage_values,
                 &mut lineage_owners,
-                &signing_domain,
+                Some(&signing_domain),
             )?;
         }
         let expected_reward = block_reward(&block.transactions, 0)?;
@@ -152,6 +152,51 @@ impl Ledger {
             .collect();
         self.refresh_pending_pool_byte_counters()?;
         self.promote_orphan_transactions()?;
+        self.vdf_rounds = self.next_vdf_rounds_after_tip();
+        Ok(())
+    }
+
+    /// Rebuild derived state from a block that this node previously validated and persisted.
+    /// This is deliberately private to snapshot restoration: network and newly produced blocks
+    /// must always use one of the validating apply paths above.
+    pub(super) fn apply_trusted_block_at(&mut self, block: Block) -> Result<()> {
+        debug_assert!(self.pending.is_empty() && self.orphans.is_empty());
+
+        let reward_committee = self.burn_committee_for_block(&block);
+        let certified_parent = self
+            .block_certifies_parent(&block, reward_committee.len())
+            .then(|| FinalityCheckpoint {
+                height: self.tip().height,
+                hash: self.tip().hash.clone(),
+            });
+        for transaction in &block.transactions {
+            apply_transaction_with_lineage(
+                transaction,
+                block.height,
+                &mut self.utxos,
+                &mut self.utxo_lineage,
+                &mut self.lineage_values,
+                &mut self.lineage_owners,
+                None,
+            )?;
+        }
+
+        let mined_signatures = block
+            .transactions
+            .iter()
+            .map(|transaction| transaction.signature().to_string())
+            .collect::<BTreeSet<_>>();
+        let parent = self.tip().clone();
+        apply_finalizer_ticket_effects(&parent, &block, &mut self.tickets)?;
+        self.tickets
+            .extend(tickets_created_by_block(&block, &self.launch_profile)?);
+        credit_reward_outputs(&mut self.utxos, &block, &reward_committee)?;
+        self.compact_block_context.append_trusted_block(&block)?;
+        self.mined_transaction_ids.extend(mined_signatures);
+        self.chain.push(block);
+        if let Some(checkpoint) = certified_parent {
+            self.objective_finality_checkpoint = Some(checkpoint);
+        }
         self.vdf_rounds = self.next_vdf_rounds_after_tip();
         Ok(())
     }
@@ -297,9 +342,11 @@ fn apply_transaction_with_lineage(
     utxo_lineage: &mut std::collections::BTreeMap<super::OutPoint, super::UtxoLineageRoot>,
     lineage_values: &mut std::collections::BTreeMap<super::UtxoLineageRoot, Amount>,
     lineage_owners: &mut super::LineageOwnerValues,
-    signing_domain: &super::TransactionSigningDomain,
+    signing_domain: Option<&super::TransactionSigningDomain>,
 ) -> Result<()> {
-    transaction.verify_signature(signing_domain)?;
+    if let Some(signing_domain) = signing_domain {
+        transaction.verify_signature(signing_domain)?;
+    }
     if matches!(transaction, Transaction::Mine { .. }) {
         let output = transaction.outputs().remove(0);
         ensure_outputs_do_not_overflow(utxos, std::slice::from_ref(&output))?;
