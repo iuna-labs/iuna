@@ -2740,11 +2740,19 @@ fn finalizer_anchor_alone_requires_available_committee_signatures() {
     let finalizer = harness.wallet(&leader.owner).clone();
     harness.submit_anchor_burn(&finalizer);
 
-    let without_committee = harness.finish_ticket_block_from_pending(0, Vec::new());
-    assert_rejects(
-        harness.ledger.clone(),
-        without_committee,
-        "anchor-only block without available committee signatures",
+    let error = harness
+        .ledger
+        .prepare_next_block_with_burn_bundles(
+            finalizer.address(),
+            harness.ledger.tip().timestamp_ms.saturating_add(1),
+            Vec::new(),
+        )
+        .unwrap_err();
+    assert!(
+        error
+            .to_string()
+            .contains("not enough burn bundle signatures collected"),
+        "unexpected anchor-only preparation error: {error:#}"
     );
 
     let bundles = harness.committee_bundles();
@@ -2789,26 +2797,24 @@ fn rank_one_committee_excludes_missed_rank_zero_owner_and_requires_remaining_slo
 
     let finalizer = harness.wallet(&rank_one).clone();
     harness.submit_anchor_burn(&finalizer);
-    let without_committee = finish_prepared_block(
-        &finalizer,
-        harness
-            .ledger
-            .prepare_next_block_with_burn_bundles(
-                finalizer.address(),
-                harness
-                    .ledger
-                    .tip()
-                    .timestamp_ms
-                    .saturating_add(VDF_TARGET_BLOCK_MS * 2)
-                    .saturating_add(1),
-                Vec::new(),
-            )
-            .unwrap(),
-    );
-    assert_rejects(
-        harness.ledger.clone(),
-        without_committee,
-        "rank-1 block without remaining committee signature",
+    let error = harness
+        .ledger
+        .prepare_next_block_with_burn_bundles(
+            finalizer.address(),
+            harness
+                .ledger
+                .tip()
+                .timestamp_ms
+                .saturating_add(VDF_TARGET_BLOCK_MS * 2)
+                .saturating_add(1),
+            Vec::new(),
+        )
+        .unwrap_err();
+    assert!(
+        error
+            .to_string()
+            .contains("not enough burn bundle signatures collected"),
+        "unexpected rank-1 preparation error: {error:#}"
     );
 
     let member = committee
