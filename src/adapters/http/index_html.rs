@@ -20,13 +20,11 @@ pub(super) const INDEX_HTML: &str = concat!(
     body { margin: 0; min-height: 100vh; max-width: 100%; overflow-x: hidden; background: #0f1012; color: #e8edf0; }
     .app-shell { width: 100%; max-width: 100%; min-height: 100vh; display: block; overflow-x: hidden; }
     .sidebar { position: fixed; z-index: 5; inset: 0 auto 0 0; width: 84px; height: 100vh; display: flex; flex-direction: column; align-items: center; gap: 20px; padding: 16px 10px; background: #15171a; border-right: 1px solid #262b2f; }
-    .brand-mark { position: relative; width: 38px; height: 38px; display: grid; place-items: center; overflow: hidden; border: 1px solid #e8ff8d; border-radius: 8px; padding: 0; background: linear-gradient(145deg, #ecff8a 0%, #d5f55f 54%, #8de9cd 100%); box-shadow: inset 0 1px 0 rgba(255, 255, 255, .42), 0 10px 24px rgba(213, 245, 95, .16); user-select: none; cursor: pointer; }
-    .brand-mark::after { content: ""; position: absolute; inset: -40% -70%; background: linear-gradient(100deg, transparent 42%, rgba(255, 255, 255, .34) 50%, transparent 58%); transform: translateX(-58%) rotate(8deg); opacity: 0; pointer-events: none; }
+    .brand-mark { position: relative; width: 64px; min-height: 58px; display: grid; place-items: center; overflow: hidden; border: 1px solid transparent; border-radius: 8px; padding: 7px 4px; background: transparent; color: #d5f55f; user-select: none; cursor: pointer; }
     .brand-mark svg { position: relative; z-index: 1; width: 24px; height: 24px; display: block; }
-    .brand-mark .mark-loop { fill: none; stroke: #101315; stroke-width: 4.2; stroke-linecap: round; stroke-linejoin: round; }
-    .brand-mark .mark-dot { fill: #101315; }
-    .brand-mark:hover::after { animation: mark-sheen .72s ease both; }
-    @keyframes mark-sheen { from { opacity: 0; transform: translateX(-58%) rotate(8deg); } 32% { opacity: 1; } to { opacity: 0; transform: translateX(58%) rotate(8deg); } }
+    .brand-mark .mark-loop { fill: none; stroke: currentColor; stroke-width: 4.2; stroke-linecap: round; stroke-linejoin: round; }
+    .brand-mark .mark-dot { fill: currentColor; }
+    .brand-mark:hover, .brand-mark.active { border-color: #3b4448; background: #202328; }
     .side-nav { display: grid; gap: 10px; width: 100%; }
     .nav-button { width: 64px; min-height: 58px; display: grid; place-items: center; gap: 4px; border: 1px solid transparent; border-radius: 8px; padding: 7px 4px; background: transparent; color: #9fa8ad; }
     .nav-button svg { width: 21px; height: 21px; stroke: currentColor; stroke-width: 2; fill: none; }
@@ -483,10 +481,7 @@ pub(super) const INDEX_HTML: &str = concat!(
       .app-shell { display: block; min-height: calc(100vh - 68px - env(safe-area-inset-bottom)); min-height: calc(100dvh - 68px - env(safe-area-inset-bottom)); overflow: visible; }
       .sidebar { position: fixed; z-index: 20; inset: auto 0 0; width: 100%; height: auto; display: grid; grid-template-columns: repeat(auto-fit, minmax(48px, 1fr)); gap: 4px; padding: 6px max(8px, env(safe-area-inset-right)) calc(6px + env(safe-area-inset-bottom)) max(8px, env(safe-area-inset-left)); border: 0; border-top: 1px solid #30363b; background: rgba(21, 23, 26, .96); box-shadow: 0 -12px 32px rgba(0, 0, 0, .28); backdrop-filter: blur(14px); }
       .version-panel { display: none; }
-      .brand-mark { width: 100%; height: auto; min-height: 50px; border-color: transparent; padding: 5px 2px; background: transparent; box-shadow: none; color: #d5f55f; }
-      .brand-mark:hover, .brand-mark.active { border-color: #3b4448; background: #202328; }
-      .brand-mark .mark-loop { stroke: currentColor; }
-      .brand-mark .mark-dot { fill: currentColor; }
+      .brand-mark { width: 100%; min-height: 50px; padding: 5px 2px; }
       .side-nav { display: contents; }
       .nav-button { width: 100%; min-width: 0; min-height: 50px; gap: 2px; padding: 5px 2px; }
       .nav-button span { font-size: 10px; }
