@@ -592,11 +592,15 @@ impl NodeCore {
         let Some((height, burn)) = &self.local_block_anchor_burn else {
             return (ledger, None);
         };
-        if *height == ledger.height() && !ledger.has_transaction(burn.signature()) {
-            // `submit_transaction` returns `Ok(false)` when another pending
-            // transaction already spends the anchor input. Prefer an existing
-            // pending burn from this wallet. Otherwise rebuild this cloned
-            // block-building mempool with the liveness anchor first.
+        let anchor_is_pending = ledger
+            .pending()
+            .iter()
+            .any(|transaction| transaction.signature() == burn.signature());
+        if *height == ledger.height() && !anchor_is_pending {
+            // `has_transaction` also includes orphans, which cannot anchor a
+            // block. Try to promote the local burn, prefer another eligible
+            // wallet burn, or rebuild this cloned mempool with the liveness
+            // anchor first when a pending transaction spends the same input.
             if ledger.submit_transaction(burn.clone()).unwrap_or(false) {
                 return (ledger, Some(burn.signature().to_string()));
             }
