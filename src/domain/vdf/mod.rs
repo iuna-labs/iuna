@@ -1,7 +1,11 @@
+use std::borrow::Cow;
 use std::{
     sync::atomic::AtomicBool,
     time::{Duration, Instant},
 };
+
+#[cfg(feature = "e2e")]
+use std::sync::atomic::{AtomicU64, Ordering};
 
 use super::{Block, FinalizerMode, MAX_VDF_ROUNDS, VDF_TARGET_BLOCK_MS, decode_hex, hex_encode};
 
@@ -19,6 +23,8 @@ mod reference;
 
 const VDF_SOLUTION_PREFIX: &str = "classgroup-wesolowski-bqfc-v1:";
 const MIN_VDF_ROUNDS: u64 = 1;
+#[cfg(feature = "e2e")]
+static E2E_VDF_ROUND_DIVISOR: AtomicU64 = AtomicU64::new(1);
 pub(super) const VDF_RETARGET_WINDOW_BLOCKS: usize = 20;
 pub(super) const MAX_VDF_RETARGET_STEP_PERCENT: u128 = 2;
 pub(super) const VDF_RETARGET_DEADBAND_PERCENT: u128 = 10;
@@ -38,6 +44,13 @@ pub struct VdfProgress {
 pub enum VdfProgressPhase {
     Output,
     Proof,
+}
+
+/// Shortens newly produced and verified VDFs inside an isolated e2e test
+/// process. Every participant in that process must use the same divisor.
+#[cfg(feature = "e2e")]
+pub fn configure_e2e_vdf_round_divisor_for_tests(divisor: u64) {
+    E2E_VDF_ROUND_DIVISOR.store(divisor.max(1), Ordering::Relaxed);
 }
 
 pub fn run_vdf(seed: &str, rounds: u64) -> String {
@@ -62,15 +75,16 @@ pub fn run_vdf_cancellable_with_progress(
     cancelled: &AtomicBool,
     mut progress: impl FnMut(VdfProgress),
 ) -> Option<String> {
-    let total_steps = rounds.saturating_mul(2);
+    let (proof_seed, proof_rounds) = vdf_proof_parameters(seed, rounds);
+    let total_steps = proof_rounds.saturating_mul(2);
     let mut last_progress = Instant::now();
     let solution = wesolowski::prove_cancellable(
-        seed.as_bytes(),
-        rounds,
+        proof_seed.as_bytes(),
+        proof_rounds,
         |phase, completed_phase_rounds| {
             let completed_steps = match phase {
                 VdfProgressPhase::Output => completed_phase_rounds,
-                VdfProgressPhase::Proof => rounds.saturating_add(completed_phase_rounds),
+                VdfProgressPhase::Proof => proof_rounds.saturating_add(completed_phase_rounds),
             };
             maybe_report_vdf_progress(
                 &mut last_progress,
@@ -79,7 +93,7 @@ pub fn run_vdf_cancellable_with_progress(
                     completed_steps,
                     total_steps,
                     completed_phase_rounds,
-                    phase_rounds: rounds,
+                    phase_rounds: proof_rounds,
                     phase,
                 },
                 &mut progress,
@@ -95,7 +109,22 @@ pub fn verify_vdf(seed: &str, rounds: u64, solution: &str) -> bool {
     let Some(solution) = decode_vdf_solution(solution) else {
         return false;
     };
-    wesolowski::verify(seed.as_bytes(), rounds, &solution)
+    let (proof_seed, proof_rounds) = vdf_proof_parameters(seed, rounds);
+    wesolowski::verify(proof_seed.as_bytes(), proof_rounds, &solution)
+}
+
+fn vdf_proof_parameters(seed: &str, rounds: u64) -> (Cow<'_, str>, u64) {
+    #[cfg(feature = "e2e")]
+    {
+        let divisor = E2E_VDF_ROUND_DIVISOR.load(Ordering::Relaxed);
+        if divisor > 1 {
+            return (
+                Cow::Owned(format!("iuna-e2e-vdf:{rounds}:{seed}")),
+                rounds.div_ceil(divisor).max(MIN_VDF_ROUNDS),
+            );
+        }
+    }
+    (Cow::Borrowed(seed), rounds)
 }
 
 pub(super) fn vdf_solution_placeholder() -> String {

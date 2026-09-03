@@ -40,6 +40,13 @@ pub(super) fn converge_fee_by_byte(
         fee = required_fee;
     }
 
+    // Transaction size can oscillate when a new fee selects a different UTXO.
+    // A previously built candidate whose fee covers its own size is already
+    // valid, even when the final iteration happens to underpay.
+    if let Some(best) = best {
+        return Ok(best);
+    }
+
     let built = build(fee)?;
     let bytes = built.economic_size_bytes();
     let required_fee = fee_per_byte
@@ -129,4 +136,44 @@ pub(super) fn allowed_recovery_vdf_rank_count(rank_count: usize, percent: u8) ->
 pub(super) fn recovery_vdf_sample_percent(address: &str, tip_hash: &str) -> u8 {
     let digest = Sha256::digest(format!("iuna-recovery-vdf-sample:{tip_hash}:{address}"));
     digest[0] % 100
+}
+
+#[cfg(test)]
+mod tests {
+    use crate::domain::{OutPoint, Transaction, TxInput};
+
+    use super::converge_fee_by_byte;
+
+    fn burn_with_inputs(fee: u64, input_count: usize) -> Transaction {
+        Transaction::Burn {
+            inputs: (0..input_count)
+                .map(|index| TxInput {
+                    outpoint: OutPoint {
+                        txid: format!("{index:064x}"),
+                        index: index as u32,
+                    },
+                    owner: "a".repeat(64),
+                    signature: "b".repeat(128),
+                })
+                .collect(),
+            change: Vec::new(),
+            amount: 1,
+            fee,
+            anchor: None,
+            signature: "c".repeat(128),
+        }
+    }
+
+    #[test]
+    fn fee_convergence_keeps_valid_candidate_when_transaction_size_oscillates() {
+        let large_size = burn_with_inputs(1, 2).economic_size_bytes() as u64;
+        let (transaction, estimate) = converge_fee_by_byte(1, |fee| {
+            let input_count = if fee < large_size { 2 } else { 1 };
+            Ok(burn_with_inputs(fee, input_count))
+        })
+        .unwrap();
+
+        assert_eq!(estimate.fee, transaction.fee());
+        assert!(estimate.fee >= transaction.economic_size_bytes() as u64);
+    }
 }

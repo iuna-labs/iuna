@@ -90,6 +90,8 @@ pub use validation::validate_address;
 use validation::{
     canonical_transaction_size_bytes, validate_hash, validate_protocol_id, validate_signature,
 };
+#[cfg(feature = "e2e")]
+pub use vdf::configure_e2e_vdf_round_divisor_for_tests;
 pub use vdf::{
     VdfProgress, VdfProgressPhase, run_vdf, run_vdf_cancellable_with_progress,
     run_vdf_with_progress, verify_vdf,

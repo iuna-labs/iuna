@@ -13,7 +13,7 @@ use iuna::{
     app::{NodeCore, PeerBook, SharedNode, now_ms},
     domain::{
         Ledger, OBJECTIVE_FINALITY_ACTIVATION_HEIGHT, Transaction, VDF_TARGET_BLOCK_MS, Wallet,
-        run_vdf,
+        configure_e2e_vdf_round_divisor_for_tests, run_vdf,
     },
 };
 use serde_json::{Value, json};
@@ -26,6 +26,7 @@ use tokio::{
 };
 
 const SOAK_BLOCKS: u64 = 12;
+const SOAK_VDF_ROUND_DIVISOR: u64 = 100;
 const BURN_COLLECTION_MS: u64 = VDF_TARGET_BLOCK_MS / 20 + 1;
 const SOAK_START_HEIGHT: u64 = OBJECTIVE_FINALITY_ACTIVATION_HEIGHT + 1;
 const FIXTURE_SERVICES: [&str; 6] = ["bootstrap", "node2", "node3", "node4", "node5", "node6"];
@@ -33,6 +34,7 @@ const FIXTURE_SERVICES: [&str; 6] = ["bootstrap", "node2", "node3", "node4", "no
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 #[ignore = "long-running post-activation soak; run with cargo test --release --features e2e --test properties -- --ignored"]
 async fn release_soak_post_activation_auto_finalization_p2p_stratum_and_restarts() -> Result<()> {
+    configure_e2e_vdf_round_divisor_for_tests(SOAK_VDF_ROUND_DIVISOR);
     let (wallets, genesis) = post_activation_fixture()?;
     let p2p_addrs = reserve_loopback_addrs(wallets.len())?;
     let stratum_addr = reserve_loopback_addrs(1)?.remove(0);
@@ -223,10 +225,11 @@ async fn finalize_one_block(nodes: &[SoakNode], target_height: u64) -> Result<()
     let deadline = tokio::time::Instant::now() + Duration::from_secs(8);
     loop {
         for node in nodes {
-            if let Some(block) = complete_if_ready(node, now_ms()).await? {
-                node.network
-                    .broadcast(node.node.lock().await.drain_outbox())
-                    .await?;
+            let block = complete_if_ready(node, now_ms()).await?;
+            node.network
+                .broadcast(node.node.lock().await.drain_outbox())
+                .await?;
+            if let Some(block) = block {
                 assert_eq!(block.height, target_height);
                 return Ok(());
             }
