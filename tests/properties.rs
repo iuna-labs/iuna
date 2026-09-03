@@ -1,3 +1,5 @@
+#![cfg(feature = "e2e")]
+
 use std::{
     net::{Ipv4Addr, SocketAddr, TcpListener as StdTcpListener},
     path::Path,

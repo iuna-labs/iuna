@@ -145,7 +145,7 @@ run_release_tests() {
   validate_positive_integer IUNA_FUZZ_RUNS "$fuzz_runs"
   validate_positive_integer IUNA_VDF_FUZZ_RUNS "$vdf_fuzz_runs"
 
-  cargo test --locked domain::adversarial_tests:: -- --ignored
+  cargo test --locked --release --lib domain::adversarial_tests:: -- --ignored
   cargo run --locked --manifest-path fuzz/Cargo.toml --bin p2p_envelope -- -runs="$fuzz_runs" fuzz/corpus/p2p_envelope
   cargo run --locked --manifest-path fuzz/Cargo.toml --bin compact_snapshot -- -runs="$fuzz_runs" fuzz/corpus/compact_snapshot
   cargo run --locked --manifest-path fuzz/Cargo.toml --bin domain_json -- -runs="$fuzz_runs" fuzz/corpus/domain_json

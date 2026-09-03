@@ -1,7 +1,7 @@
 use std::collections::{BTreeMap, BTreeSet};
 
 use proptest::prelude::*;
-use proptest::test_runner::Config;
+use proptest::test_runner::{Config, TestCaseResult};
 use sha2::{Digest, Sha256};
 
 use super::ledger_ops::{block_reward, verify_address_signature};
@@ -2294,72 +2294,133 @@ proptest! {
         );
     }
 
-    #[test]
-    #[ignore = "long-running adversarial proptest; run via deployment.sh"]
-    fn committee_selection_is_deterministic_and_sybil_resistant(seed in any::<u64>(), lineage_idx in 0usize..LEVELS.len()) {
-        let mut harness = Harness::new(seed, 10, LEVELS[lineage_idx], AdversaryStrategy::AddressRotation);
-        harness.mature_lineages(2, 4);
-        let committee = harness.ledger.burn_committee_for_next_block();
-        let mini_committee = mini_burn_committee_for_next_block(&harness.ledger)
-            .expect("mini committee oracle should replay generated lineage");
-        let snapshot_committee = Ledger::from_snapshot_at(harness.ledger.snapshot(), NOW_MS)
-            .unwrap()
-            .burn_committee_for_next_block();
+}
 
-        prop_assert_eq!(committee.clone(), snapshot_committee, "seed={} committee selection is not deterministic", seed);
-        prop_assert_eq!(committee.clone(), mini_committee, "seed={} mini committee oracle diverged", seed);
-        prop_assert!(committee_roots_are_unique(&committee), "seed={} selected one lineage more than once: {:?}", seed, committee);
-        let non_finalizer_roots = committee.iter().filter(|member| member.slot > 0).count();
-        prop_assert!(non_finalizer_roots < super::BURN_COMMITTEE_SIZE);
-    }
+fn check_committee_selection(seed: u64, lineage_idx: usize) -> TestCaseResult {
+    let mut harness = Harness::new(
+        seed,
+        10,
+        LEVELS[lineage_idx],
+        AdversaryStrategy::AddressRotation,
+    );
+    harness.mature_lineages(2, 4);
+    let committee = harness.ledger.burn_committee_for_next_block();
+    let mini_committee = mini_burn_committee_for_next_block(&harness.ledger)
+        .expect("mini committee oracle should replay generated lineage");
+    let snapshot_committee = Ledger::from_snapshot_at(harness.ledger.snapshot(), NOW_MS)
+        .unwrap()
+        .burn_committee_for_next_block();
 
-    #[test]
-    #[ignore = "long-running adversarial state-machine proptest; run via deployment.sh"]
-    fn adversarial_state_machine_keeps_invalid_paths_out(
-        seed in any::<u64>(),
-        strategy_idx in 0usize..10,
-        level_idx in 0usize..LEVELS.len(),
-        blocks in 3usize..8,
-    ) {
-        let strategy = AdversaryStrategy::from_index(strategy_idx);
-        let level = LEVELS[level_idx];
-        let mut harness = Harness::new(seed, level, level, strategy);
-        let metrics = harness.run_strategy(blocks);
-        prop_assert!(metrics.attacker_finalization_share.is_finite());
-        prop_assert!(metrics.attacker_committee_share.is_finite());
-        match strategy {
-            AdversaryStrategy::Honest
-            | AdversaryStrategy::MaximizeBurnWeight
-            | AdversaryStrategy::MaximizeCommitteeWeight
-            | AdversaryStrategy::AddressRotation => {
-                prop_assert_eq!(metrics.third_party_burn_censorship_rate, 0.0);
-                prop_assert_eq!(metrics.fallback_rate, 0.0);
+    prop_assert_eq!(
+        committee.clone(),
+        snapshot_committee,
+        "seed={} committee selection is not deterministic",
+        seed
+    );
+    prop_assert_eq!(
+        committee.clone(),
+        mini_committee,
+        "seed={} mini committee oracle diverged",
+        seed
+    );
+    prop_assert!(
+        committee_roots_are_unique(&committee),
+        "seed={} selected one lineage more than once: {:?}",
+        seed,
+        committee
+    );
+    let non_finalizer_roots = committee.iter().filter(|member| member.slot > 0).count();
+    prop_assert!(non_finalizer_roots < super::BURN_COMMITTEE_SIZE);
+    Ok(())
+}
+
+fn check_adversarial_state_machine(
+    seed: u64,
+    strategy_idx: usize,
+    level_idx: usize,
+    blocks: usize,
+) -> TestCaseResult {
+    let strategy = AdversaryStrategy::from_index(strategy_idx);
+    let level = LEVELS[level_idx];
+    let mut harness = Harness::new(seed, level, level, strategy);
+    let metrics = harness.run_strategy(blocks);
+    prop_assert!(metrics.attacker_finalization_share.is_finite());
+    prop_assert!(metrics.attacker_committee_share.is_finite());
+    match strategy {
+        AdversaryStrategy::Honest
+        | AdversaryStrategy::MaximizeBurnWeight
+        | AdversaryStrategy::MaximizeCommitteeWeight
+        | AdversaryStrategy::AddressRotation => {
+            prop_assert_eq!(metrics.third_party_burn_censorship_rate, 0.0);
+            prop_assert_eq!(metrics.fallback_rate, 0.0);
+            prop_assert_eq!(metrics.recovery_rate, 0.0);
+        }
+        AdversaryStrategy::CensorBurns => {
+            prop_assert_eq!(metrics.third_party_burn_censorship_rate, 0.0);
+        }
+        AdversaryStrategy::WithholdBurnFromCommittee => {
+            prop_assert!(metrics.third_party_burn_censorship_rate > 0.0);
+        }
+        AdversaryStrategy::MissRank0 | AdversaryStrategy::ForceFallback => {
+            prop_assert_eq!(metrics.fallback_blocks, metrics.fallback_opportunities);
+            prop_assert_eq!(metrics.recovery_rate, 0.0);
+        }
+        AdversaryStrategy::AttemptRecovery => {
+            if blocks >= 7 {
+                prop_assert!(metrics.recovery_rate > 0.0);
+            } else {
                 prop_assert_eq!(metrics.recovery_rate, 0.0);
-            }
-            AdversaryStrategy::CensorBurns => {
-                prop_assert_eq!(metrics.third_party_burn_censorship_rate, 0.0);
-            }
-            AdversaryStrategy::WithholdBurnFromCommittee => {
-                prop_assert!(metrics.third_party_burn_censorship_rate > 0.0);
-            }
-            AdversaryStrategy::MissRank0 | AdversaryStrategy::ForceFallback => {
-                prop_assert_eq!(metrics.fallback_blocks, metrics.fallback_opportunities);
-                prop_assert_eq!(metrics.recovery_rate, 0.0);
-            }
-            AdversaryStrategy::AttemptRecovery => {
-                if blocks >= 7 {
-                    prop_assert!(metrics.recovery_rate > 0.0);
-                } else {
-                    prop_assert_eq!(metrics.recovery_rate, 0.0);
-                }
-            }
-            AdversaryStrategy::CombinedStrategy => {
-                prop_assert!(metrics.third_party_burn_censorship_rate > 0.0);
-                prop_assert_eq!(metrics.fallback_blocks, metrics.fallback_opportunities);
             }
         }
+        AdversaryStrategy::CombinedStrategy => {
+            prop_assert!(metrics.third_party_burn_censorship_rate > 0.0);
+            prop_assert_eq!(metrics.fallback_blocks, metrics.fallback_opportunities);
+        }
     }
+    Ok(())
 }
+
+macro_rules! adversarial_proptest_shard {
+    ($committee_name:ident, $state_machine_name:ident) => {
+        proptest! {
+            #![proptest_config(Config { cases: 8, .. Config::default() })]
+
+            #[test]
+            #[ignore = "long-running adversarial proptest; run via deployment.sh"]
+            fn $committee_name(seed in any::<u64>(), lineage_idx in 0usize..LEVELS.len()) {
+                check_committee_selection(seed, lineage_idx)?;
+            }
+
+            #[test]
+            #[ignore = "long-running adversarial state-machine proptest; run via deployment.sh"]
+            fn $state_machine_name(
+                seed in any::<u64>(),
+                strategy_idx in 0usize..10,
+                level_idx in 0usize..LEVELS.len(),
+                blocks in 3usize..8,
+            ) {
+                check_adversarial_state_machine(seed, strategy_idx, level_idx, blocks)?;
+            }
+        }
+    };
+}
+
+adversarial_proptest_shard!(
+    committee_selection_is_deterministic_and_sybil_resistant_shard_1,
+    adversarial_state_machine_keeps_invalid_paths_out_shard_1
+);
+adversarial_proptest_shard!(
+    committee_selection_is_deterministic_and_sybil_resistant_shard_2,
+    adversarial_state_machine_keeps_invalid_paths_out_shard_2
+);
+adversarial_proptest_shard!(
+    committee_selection_is_deterministic_and_sybil_resistant_shard_3,
+    adversarial_state_machine_keeps_invalid_paths_out_shard_3
+);
+adversarial_proptest_shard!(
+    committee_selection_is_deterministic_and_sybil_resistant_shard_4,
+    adversarial_state_machine_keeps_invalid_paths_out_shard_4
+);
 
 #[test]
 fn attested_burn_is_not_selected_again_as_normal_transaction() {
@@ -3998,39 +4059,60 @@ fn adversarial_scenarios_cover_resource_matrix() {
             AdversaryStrategy::Honest | AdversaryStrategy::MissRank0 => unreachable!(),
         }
     }
+}
 
-    for burn in LEVELS {
-        for lineage in LEVELS {
-            let mut harness = Harness::new(
-                200 + u64::from(burn) * 10 + u64::from(lineage),
-                burn,
-                lineage,
-                AdversaryStrategy::Honest,
-            );
-            let metrics = harness.run_strategy(3);
-            assert!(
-                metrics.attacker_finalization_share.is_finite()
-                    && metrics.attacker_committee_share.is_finite(),
-                "burn={burn}% lineage={lineage}% configured={:?} metrics={metrics:?}",
-                (
-                    harness.resource.burn_percent,
-                    harness.resource.lineage_percent
-                ),
-            );
-            assert_eq!(
-                metrics.third_party_burn_censorship_rate, 0.0,
-                "honest resource matrix run censored third-party burns: {metrics:?}"
-            );
-            assert_eq!(
-                metrics.fallback_rate, 0.0,
-                "honest resource matrix run produced fallback blocks: {metrics:?}"
-            );
-            assert_eq!(
-                metrics.recovery_rate, 0.0,
-                "honest resource matrix run produced recovery blocks: {metrics:?}"
-            );
-        }
+fn assert_honest_resource_matrix_for_burn(burn: u8) {
+    for lineage in LEVELS {
+        let mut harness = Harness::new(
+            200 + u64::from(burn) * 10 + u64::from(lineage),
+            burn,
+            lineage,
+            AdversaryStrategy::Honest,
+        );
+        let metrics = harness.run_strategy(3);
+        assert!(
+            metrics.attacker_finalization_share.is_finite()
+                && metrics.attacker_committee_share.is_finite(),
+            "burn={burn}% lineage={lineage}% configured={:?} metrics={metrics:?}",
+            (
+                harness.resource.burn_percent,
+                harness.resource.lineage_percent
+            ),
+        );
+        assert_eq!(
+            metrics.third_party_burn_censorship_rate, 0.0,
+            "honest resource matrix run censored third-party burns: {metrics:?}"
+        );
+        assert_eq!(
+            metrics.fallback_rate, 0.0,
+            "honest resource matrix run produced fallback blocks: {metrics:?}"
+        );
+        assert_eq!(
+            metrics.recovery_rate, 0.0,
+            "honest resource matrix run produced recovery blocks: {metrics:?}"
+        );
     }
+}
+
+macro_rules! honest_resource_matrix_tests {
+    ($($name:ident: $burn:literal),+ $(,)?) => {
+        $(
+            #[test]
+            #[ignore = "long-running adversarial resource matrix; run via deployment.sh"]
+            fn $name() {
+                assert_honest_resource_matrix_for_burn($burn);
+            }
+        )+
+    };
+}
+
+honest_resource_matrix_tests! {
+    adversarial_honest_resource_matrix_burn_1: 1,
+    adversarial_honest_resource_matrix_burn_5: 5,
+    adversarial_honest_resource_matrix_burn_10: 10,
+    adversarial_honest_resource_matrix_burn_25: 25,
+    adversarial_honest_resource_matrix_burn_33: 33,
+    adversarial_honest_resource_matrix_burn_50: 50,
 }
 
 #[test]
