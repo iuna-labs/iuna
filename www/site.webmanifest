@@ -1,0 +1,17 @@
+{
+  "name": "iuna",
+  "short_name": "iuna",
+  "description": "An open cryptocurrency experiment.",
+  "start_url": "/",
+  "display": "standalone",
+  "background_color": "#0d0f10",
+  "theme_color": "#0d0f10",
+  "icons": [
+    {
+      "src": "/favicon.svg",
+      "sizes": "any",
+      "type": "image/svg+xml",
+      "purpose": "any maskable"
+    }
+  ]
+}

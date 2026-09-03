@@ -4,12 +4,24 @@
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <meta name="color-scheme" content="dark">
+  <meta name="theme-color" content="#0d0f10">
   <meta name="description" content="Help test iuna, an open cryptocurrency experiment exploring temporary consensus power, open issuance, and a network shaped by its participants.">
+  <meta name="robots" content="index, follow, max-image-preview:large">
+  <link rel="canonical" href="https://getiuna.org/">
+  <link rel="icon" href="/favicon.svg" type="image/svg+xml">
+  <link rel="icon" href="/favicon.ico" sizes="any">
+  <link rel="apple-touch-icon" href="/apple-touch-icon.png">
+  <link rel="manifest" href="/site.webmanifest">
   <meta property="og:title" content="A cryptocurrency where power is temporary.">
   <meta property="og:description" content="iuna is an open cryptocurrency experiment. Try the app, run a node, test the network, or explore the protocol.">
   <meta property="og:type" content="website">
   <meta property="og:url" content="https://getiuna.org/">
+  <meta property="og:site_name" content="iuna">
+  <meta property="og:locale" content="en_US">
   <meta property="og:image" content="https://getiuna.org/assets/og.png">
+  <meta property="og:image:width" content="1200">
+  <meta property="og:image:height" content="630">
+  <meta property="og:image:type" content="image/png">
   <meta property="og:image:alt" content="iuna — Help test a different kind of network">
   <meta name="twitter:card" content="summary_large_image">
   <meta name="twitter:title" content="A cryptocurrency where power is temporary.">
@@ -17,6 +29,32 @@
   <meta name="twitter:image" content="https://getiuna.org/assets/og.png">
   <meta name="twitter:image:alt" content="iuna — Help test a different kind of network">
   <title>iuna — A Cryptocurrency Where Power Is Temporary</title>
+  <script type="application/ld+json">
+    {
+      "@context": "https://schema.org",
+      "@graph": [
+        {
+          "@type": "WebSite",
+          "@id": "https://getiuna.org/#website",
+          "url": "https://getiuna.org/",
+          "name": "iuna",
+          "description": "An open cryptocurrency experiment exploring temporary consensus power and open issuance.",
+          "inLanguage": "en"
+        },
+        {
+          "@type": "SoftwareApplication",
+          "@id": "https://getiuna.org/#software",
+          "name": "iuna",
+          "url": "https://getiuna.org/",
+          "downloadUrl": "https://getiuna.org/downloads/",
+          "applicationCategory": "FinanceApplication",
+          "operatingSystem": "Linux, macOS, Windows",
+          "isAccessibleForFree": true,
+          "description": "An experimental cryptocurrency node and wallet for participating in the iuna network."
+        }
+      ]
+    }
+  </script>
   <style>
     :root {
       color-scheme: dark;
@@ -117,31 +155,13 @@
     }
     .brand { display: flex; gap: 10px; align-items: center; font-weight: 900; }
     .mark {
-      position: relative;
       width: 32px;
       height: 32px;
       display: grid;
       place-items: center;
-      overflow: hidden;
-      border: 1px solid #e8ff8d;
-      border-radius: 8px;
-      background: linear-gradient(145deg, #ecff8a 0%, var(--green) 54%, var(--cyan) 100%);
-      box-shadow: inset 0 1px 0 rgba(255, 255, 255, .38), 0 9px 20px rgba(213, 245, 95, .14);
+      color: var(--green);
     }
-    .mark::after {
-      content: "";
-      position: absolute;
-      inset: -40% -70%;
-      background: linear-gradient(100deg, transparent 42%, rgba(255, 255, 255, .34) 50%, transparent 58%);
-      transform: translateX(-58%) rotate(8deg);
-      opacity: 0;
-      pointer-events: none;
-    }
-    .mark svg { position: relative; z-index: 1; width: 21px; height: 21px; display: block; }
-    .mark .mark-loop { fill: none; stroke: #101315; stroke-width: 4.2; stroke-linecap: round; stroke-linejoin: round; }
-    .mark .mark-dot { fill: #101315; }
-    .brand:hover .mark::after { animation: mark-sheen .72s ease both; }
-    @keyframes mark-sheen { from { opacity: 0; transform: translateX(-58%) rotate(8deg); } 32% { opacity: 1; } to { opacity: 0; transform: translateX(58%) rotate(8deg); } }
+    .mark svg { width: 24px; height: 24px; display: block; }
     nav { display: flex; gap: 16px; flex-wrap: wrap; color: var(--muted); font-size: 13px; font-weight: 750; }
     nav a { color: var(--muted); text-decoration: none; }
     nav a:hover { color: var(--green); }
@@ -743,7 +763,7 @@
   </svg>
   <div class="topbar">
     <div class="wrap">
-      <a class="brand repo-link" href="/"><span class="mark" aria-label="iuna"><svg viewBox="0 0 32 32" aria-hidden="true" focusable="false"><circle class="mark-dot" cx="9.4" cy="7.6" r="2.8"></circle><path class="mark-loop" d="M9.4 13v7.1c0 3.7 2.9 6.4 6.6 6.4s6.6-2.7 6.6-6.4V13"></path></svg></span><span>iuna</span></a>
+      <a class="brand repo-link" href="/"><span class="mark" aria-hidden="true"><svg viewBox="0 0 32 32" focusable="false"><circle cx="9.4" cy="7.6" r="2.8" fill="currentColor"></circle><path d="M9.4 13v7.1c0 3.7 2.9 6.4 6.6 6.4s6.6-2.7 6.6-6.4V13" fill="none" stroke="currentColor" stroke-width="4.2" stroke-linecap="round" stroke-linejoin="round"></path></svg></span><span>iuna</span></a>
       <nav aria-label="Page sections">
         <a href="#why">Why iuna</a>
         <a href="#join">Take part</a>

@@ -62,6 +62,9 @@ RUN set -eux; \
 COPY www /site
 COPY downloads /site/downloads
 RUN set -eux; \
+    cp /src/iuna-work/src-tauri/icons/icon.svg /site/favicon.svg; \
+    cp /src/iuna-work/src-tauri/icons/icon.ico /site/favicon.ico; \
+    cp /src/iuna-work/src-tauri/icons/128x128@2x.png /site/apple-touch-icon.png; \
     version="$(sed -n 's/^version = "\(.*\)"/\1/p' /src/iuna-work/Cargo.toml | head -n 1)"; \
     mkdir -p /site/downloads; \
     cp /site/downloads.html /site/downloads/index.html; \

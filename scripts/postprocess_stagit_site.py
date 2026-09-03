@@ -7,7 +7,7 @@ from pathlib import Path
 TOPBAR = """
 <div class="topbar">
   <div class="wrap">
-    <a class="brand repo-link" href="/"><span class="mark" aria-label="iuna"><svg viewBox="0 0 32 32" aria-hidden="true" focusable="false"><circle class="mark-dot" cx="9.4" cy="7.6" r="2.8"></circle><path class="mark-loop" d="M9.4 13v7.1c0 3.7 2.9 6.4 6.6 6.4s6.6-2.7 6.6-6.4V13"></path></svg></span><span>iuna</span></a>
+    <a class="brand repo-link" href="/"><span class="mark" aria-hidden="true"><svg viewBox="0 0 32 32" focusable="false"><circle cx="9.4" cy="7.6" r="2.8" fill="currentColor"></circle><path d="M9.4 13v7.1c0 3.7 2.9 6.4 6.6 6.4s6.6-2.7 6.6-6.4V13" fill="none" stroke="currentColor" stroke-width="4.2" stroke-linecap="round" stroke-linejoin="round"></path></svg></span><span>iuna</span></a>
     <nav aria-label="Page sections">
       <a href="/#whatisiuna">What is iuna</a>
       <a href="/#howtojoin">Join</a>

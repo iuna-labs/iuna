@@ -1,5 +1,5 @@
 use axum::{
-    http::{StatusCode, header},
+    http::header,
     response::{Html, IntoResponse},
 };
 
@@ -11,8 +11,11 @@ pub(super) async fn index() -> Html<&'static str> {
 
 pub(super) async fn favicon() -> impl IntoResponse {
     (
-        StatusCode::NO_CONTENT,
-        [(header::CACHE_CONTROL, "public, max-age=86400")],
+        [
+            (header::CONTENT_TYPE, "image/x-icon"),
+            (header::CACHE_CONTROL, "public, max-age=86400"),
+        ],
+        include_bytes!("../../../src-tauri/icons/icon.ico").as_slice(),
     )
 }
 

@@ -89,35 +89,18 @@ body > :not(.topbar):not(script) {
 .brand:hover { color: var(--green); }
 
 .mark {
-  position: relative;
   width: 32px;
   height: 32px;
   display: grid;
   place-items: center;
-  overflow: hidden;
-  border: 1px solid #e8ff8d;
-  border-radius: 8px;
-  background: linear-gradient(145deg, #ecff8a 0%, var(--green) 54%, var(--cyan) 100%);
-  box-shadow: inset 0 1px 0 rgba(255, 255, 255, .38), 0 9px 20px rgba(213, 245, 95, .14);
+  color: var(--green);
 }
 
 .mark svg {
-  position: relative;
-  z-index: 1;
-  width: 21px;
-  height: 21px;
+  width: 24px;
+  height: 24px;
   display: block;
 }
-
-.mark .mark-loop {
-  fill: none;
-  stroke: #101315;
-  stroke-width: 4.2;
-  stroke-linecap: round;
-  stroke-linejoin: round;
-}
-
-.mark .mark-dot { fill: #101315; }
 
 nav {
   display: flex;
