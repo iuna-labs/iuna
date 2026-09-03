@@ -984,46 +984,57 @@
       const screens = [...document.querySelectorAll('.hero, main > section')];
       const headerOffset = 64;
       const gestureThreshold = 32;
+      const gestureDebounceMs = 160;
+      const scrollDurationMs = 800;
       let accumulatedDelta = 0;
       let gestureReset;
+      let gestureConsumed = false;
       let scrollLocked = false;
-      let lockUntil = 0;
+      let scrollTargetIndex = null;
       let unlockTimer;
 
-      const scheduleUnlock = () => {
+      const closestScreenIndex = () => screens.reduce((closest, screen, index) => {
+        const distance = Math.abs(screen.getBoundingClientRect().top - headerOffset);
+        return distance < closest.distance ? { index, distance } : closest;
+      }, { index: 0, distance: Infinity }).index;
+
+      const scheduleUnlock = (targetIndex) => {
         window.clearTimeout(unlockTimer);
-        unlockTimer = window.setTimeout(() => { scrollLocked = false; }, Math.max(0, lockUntil - performance.now()));
+        scrollLocked = true;
+        scrollTargetIndex = targetIndex;
+        unlockTimer = window.setTimeout(() => {
+          scrollLocked = false;
+          scrollTargetIndex = null;
+        }, scrollDurationMs);
       };
 
       window.addEventListener('wheel', (event) => {
         if (!desktopMotion.matches || event.ctrlKey || Math.abs(event.deltaX) > Math.abs(event.deltaY)) return;
 
         event.preventDefault();
-        if (scrollLocked) {
-          lockUntil = Math.max(lockUntil, performance.now() + 180);
-          scheduleUnlock();
-          return;
-        }
-
         window.clearTimeout(gestureReset);
+        gestureReset = window.setTimeout(() => {
+          accumulatedDelta = 0;
+          gestureConsumed = false;
+        }, gestureDebounceMs);
+
+        if (gestureConsumed) return;
+
         accumulatedDelta += event.deltaY;
-        gestureReset = window.setTimeout(() => { accumulatedDelta = 0; }, 160);
 
         if (Math.abs(accumulatedDelta) < gestureThreshold) return;
 
         const direction = Math.sign(accumulatedDelta);
         accumulatedDelta = 0;
-        const currentIndex = screens.reduce((closest, screen, index) => {
-          const distance = Math.abs(screen.getBoundingClientRect().top - headerOffset);
-          return distance < closest.distance ? { index, distance } : closest;
-        }, { index: 0, distance: Infinity }).index;
+        gestureConsumed = true;
+        const currentIndex = scrollLocked && scrollTargetIndex !== null
+          ? scrollTargetIndex
+          : closestScreenIndex();
         const nextIndex = Math.max(0, Math.min(screens.length - 1, currentIndex + direction));
 
         if (nextIndex === currentIndex) return;
 
-        scrollLocked = true;
-        lockUntil = performance.now() + 800;
-        scheduleUnlock();
+        scheduleUnlock(nextIndex);
         screens[nextIndex].scrollIntoView({ behavior: 'smooth', block: 'start' });
       }, { passive: false });
     })();
