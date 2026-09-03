@@ -310,6 +310,8 @@ pub(super) const INDEX_HTML: &str = concat!(
     .compact-number-field input:focus { border-color: #d5f55f; outline: 2px solid rgba(213,245,95,.2); outline-offset: 2px; }
     .receive-address { display: grid; gap: 8px; }
     .address-box { border: 1px solid #2f363c; border-radius: 8px; padding: 11px; background: #111316; }
+    .wallet-address-link { cursor: pointer; text-decoration: underline; text-decoration-style: dotted; text-decoration-color: #59656c; text-underline-offset: 3px; }
+    .wallet-address-link:hover, .wallet-address-link:focus-visible { color: #d5f55f; text-decoration-color: #d5f55f; outline: none; }
     .address-book-list { display: grid; gap: 8px; margin-top: 12px; }
     .address-book-row { width: 100%; display: grid; grid-template-columns: minmax(0, 1fr) auto; gap: 8px; align-items: center; text-align: left; border: 1px solid #2f363c; border-radius: 8px; padding: 9px; background: #111316; color: inherit; }
     .address-book-row:hover { border-color: #4c565c; background: #15181b; }
@@ -387,10 +389,11 @@ pub(super) const INDEX_HTML: &str = concat!(
     .block-card:hover { border-color: #d5f55f; color: #d5f55f; }
     .block-card.selected { background: #202616; border-color: #d5f55f; box-shadow: inset 0 0 0 1px #d5f55f; }
     .block-card.new-block { animation: block-arrive .45s ease both; }
+    .block-card-select { display: grid; gap: 6px; padding: 0; border: 0; background: transparent; color: inherit; text-align: left; }
     @keyframes block-arrive { from { opacity: .2; transform: translateX(-12px); } to { opacity: 1; transform: translateX(0); } }
     .block-height { font-size: 18px; font-weight: 900; }
     .block-meta { display: flex; gap: 8px; color: #8d989f; font-size: 12px; }
-    .block-miner { font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; font-size: 11px; overflow-wrap: anywhere; color: #9eb3bc; }
+    .block-miner { width: 100%; padding: 0; border: 0; background: transparent; font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; font-size: 11px; text-align: left; overflow-wrap: anywhere; color: #9eb3bc; }
     .block-skeleton-group { flex: 0 0 auto; display: flex; gap: 8px; }
     .block-card-skeleton { grid-template-rows: 22px 18px minmax(28px, 1fr); align-items: start; cursor: default; }
     .skeleton-block-height { width: 46px; height: 22px; border-radius: 6px; background: #30383d; }
@@ -733,7 +736,7 @@ pub(super) const INDEX_HTML: &str = concat!(
             </div>
             <div class="receive-address">
               <div class="muted">Public key / address</div>
-              <div class="address-box"><code x-text="setupAddress()"></code></div>
+              <div class="address-box"><code class="wallet-address-link" role="button" tabindex="0" x-text="setupAddress()" @click="openAddressContact(setupAddress())" @keydown.enter.prevent="openAddressContact(setupAddress())" @keydown.space.prevent="openAddressContact(setupAddress())" title="Add or edit contact"></code></div>
             </div>
           </div>
           <div class="panel">
@@ -786,8 +789,8 @@ pub(super) const INDEX_HTML: &str = concat!(
                   <div class="tx-field"><span class="tx-label">Fee</span><span class="tx-value money" x-text="txFeeLabel(tx)"></span></div>
                   <div class="tx-field"><span class="tx-label">Status</span><span class="tx-value text" x-text="txTitle(tx)"></span></div>
                   <div class="tx-field"><span class="tx-label">Time</span><span class="tx-value text" x-text="walletTxTimeLabel(tx)"></span></div>
-                  <div class="tx-field"><span class="tx-label">From</span><code class="tx-value hash" x-text="shortAddressLabel(tx.from)"></code></div>
-                  <div class="tx-field" x-show="tx.to"><span class="tx-label">To</span><code class="tx-value hash" x-text="shortAddressLabel(tx.to)"></code></div>
+                  <div class="tx-field"><span class="tx-label">From</span><code class="tx-value hash" :class="{ 'wallet-address-link': hasWalletAddress(tx.from) }" role="button" :tabindex="hasWalletAddress(tx.from) ? 0 : -1" x-text="shortAddressLabel(tx.from)" @click.stop="openAddressContact(tx.from)" @keydown.enter.stop.prevent="openAddressContact(tx.from)" @keydown.space.stop.prevent="openAddressContact(tx.from)" :title="hasWalletAddress(tx.from) ? 'Add or edit contact' : null"></code></div>
+                  <div class="tx-field" x-show="tx.to"><span class="tx-label">To</span><code class="tx-value hash wallet-address-link" role="button" tabindex="0" x-text="shortAddressLabel(tx.to)" @click.stop="openAddressContact(tx.to)" @keydown.enter.stop.prevent="openAddressContact(tx.to)" @keydown.space.stop.prevent="openAddressContact(tx.to)" title="Add or edit contact"></code></div>
                   <div class="tx-field" x-show="isMineTx(tx)"><span class="tx-label">Proof Bits</span><span class="tx-value number"><span x-text="txProofBits(tx) ?? '-'"></span> / <span x-text="txDifficultyBits(tx) ?? '-'"></span></span></div>
                   <div class="tx-field" x-show="isMineTx(tx)"><span class="tx-label">Proof Hash</span><code class="tx-value hash" x-text="short(txProofHash(tx))"></code></div>
                   <div class="tx-field"><span class="tx-label">Signature</span><code class="tx-value hash" x-text="short(tx.signature)"></code></div>
@@ -827,7 +830,7 @@ pub(super) const INDEX_HTML: &str = concat!(
             </div>
             <div class="mine-stat">
               <div class="mine-stat-label">Selected Finalizer</div>
-              <code class="mine-stat-value" x-text="currentFinalizerLabel()"></code>
+              <code class="mine-stat-value" :class="{ 'wallet-address-link': hasWalletAddress(currentFinalizerAddress()) }" role="button" :tabindex="hasWalletAddress(currentFinalizerAddress()) ? 0 : -1" x-text="currentFinalizerLabel()" @click="openAddressContact(currentFinalizerAddress())" @keydown.enter.prevent="openAddressContact(currentFinalizerAddress())" @keydown.space.prevent="openAddressContact(currentFinalizerAddress())" :title="hasWalletAddress(currentFinalizerAddress()) ? 'Add or edit contact' : null"></code>
             </div>
             <div class="mine-stat">
               <div class="mine-stat-label">Mempool</div>
@@ -968,7 +971,7 @@ pub(super) const INDEX_HTML: &str = concat!(
             <div class="peer-summary-item"><div class="peer-summary-label">Banned</div><div class="peer-summary-value" x-text="networkHealth.banned_peers ?? '-'"></div></div>
             <div class="peer-summary-item"><div class="peer-summary-label">Mempool</div><div class="peer-summary-value" x-text="networkHealth.pending_transactions ?? '-'"></div></div>
             <div class="peer-summary-item"><div class="peer-summary-label">Plain Tx</div><div class="peer-summary-value" x-text="networkHealth.pending_plain_transactions ?? '-'"></div></div>
-            <div class="peer-summary-item"><div class="peer-summary-label">Next Finalizer</div><code class="peer-summary-value" x-text="networkFinalizerLabel()"></code></div>
+            <div class="peer-summary-item"><div class="peer-summary-label">Next Finalizer</div><code class="peer-summary-value" :class="{ 'wallet-address-link': hasWalletAddress(networkHealth.current_leader) }" role="button" :tabindex="hasWalletAddress(networkHealth.current_leader) ? 0 : -1" x-text="networkFinalizerLabel()" @click="openAddressContact(networkHealth.current_leader)" @keydown.enter.prevent="openAddressContact(networkHealth.current_leader)" @keydown.space.prevent="openAddressContact(networkHealth.current_leader)" :title="hasWalletAddress(networkHealth.current_leader) ? 'Add or edit contact' : null"></code></div>
             <div class="peer-summary-item"><div class="peer-summary-label">Last Mode</div><div class="peer-summary-value" x-text="networkFinalizerModeLabel()"></div></div>
             <div class="peer-summary-item"><div class="peer-summary-label">VDF</div><div class="peer-summary-value" x-text="networkVdfLabel()"></div></div>
             <div class="peer-summary-item"><div class="peer-summary-label">Rejected Chain</div><div class="peer-summary-value" x-text="networkHealth.rejected_chain_payloads ?? '-'"></div></div>
@@ -1058,15 +1061,17 @@ pub(super) const INDEX_HTML: &str = concat!(
           </div>
           <div class="block-rail" x-ref="blockRail" @scroll.debounce.200ms="maybeLoadOlderBlocks($event)">
             <template x-for="block in blocks" :key="block.hash">
-              <button class="block-card" :class="{ selected: selectedBlock?.hash === block.hash, 'new-block': newBlockHashes.has(block.hash) }" @click="selectBlock(block)" type="button">
-                <div class="block-height" x-text="block.height"></div>
-                <div class="block-meta">
-                  <span x-text="burnCountLabel(block)"></span>
-                  <span x-text="transferCountLabel(block)"></span>
-                  <span x-text="mineCountLabel(block)"></span>
-                </div>
-                <div class="block-miner" x-text="blockFinalizerLabel(block)"></div>
-              </button>
+              <article class="block-card" :class="{ selected: selectedBlock?.hash === block.hash, 'new-block': newBlockHashes.has(block.hash) }">
+                <button class="block-card-select" @click="selectBlock(block)" type="button" title="Open block details">
+                  <div class="block-height" x-text="block.height"></div>
+                  <div class="block-meta">
+                    <span x-text="burnCountLabel(block)"></span>
+                    <span x-text="transferCountLabel(block)"></span>
+                    <span x-text="mineCountLabel(block)"></span>
+                  </div>
+                </button>
+                <button class="block-miner wallet-address-link" type="button" x-text="blockFinalizerLabel(block)" @click="openAddressContact(block.miner)" title="Add or edit contact"></button>
+              </article>
             </template>
             <template x-if="loadingInitialBlocks && blocks.length === 0">
               <div class="block-skeleton-group" aria-hidden="true">
@@ -1145,15 +1150,15 @@ pub(super) const INDEX_HTML: &str = concat!(
               <div class="tx-list">
                 <h3>Transactions</h3>
                 <div class="tx-section">
-                  <div class="tx-section-title"><span>Envelope</span><span class="tx-section-meta" x-text="shortAddressLabel(selectedBlock.miner)"></span></div>
+                  <div class="tx-section-title"><span>Envelope</span><span class="tx-section-meta wallet-address-link" role="button" tabindex="0" x-text="shortAddressLabel(selectedBlock.miner)" @click.stop="openAddressContact(selectedBlock.miner)" @keydown.enter.stop.prevent="openAddressContact(selectedBlock.miner)" @keydown.space.stop.prevent="openAddressContact(selectedBlock.miner)" title="Add or edit contact"></span></div>
                   <div class="tx-scroll-list">
                     <template x-for="tx in selectedBlock.transactions" :key="tx.signature">
                       <div class="tx-card" role="button" tabindex="0" @click="openTransactionModal(tx, { source: 'Envelope', blockHeight: selectedBlock.height, blockFinalizer: selectedBlock.miner })" @keydown.enter.prevent="openTransactionModal(tx, { source: 'Envelope', blockHeight: selectedBlock.height, blockFinalizer: selectedBlock.miner })" @keydown.space.prevent="openTransactionModal(tx, { source: 'Envelope', blockHeight: selectedBlock.height, blockFinalizer: selectedBlock.miner })">
                         <span class="pill" :class="txPillClass(tx)" x-text="txPillLabel(tx)"></span>
                         <div class="tx-field"><span class="tx-label">Amount</span><span class="tx-value money">IUNA <span x-text="amountLabel(txAmount(tx))"></span></span></div>
                         <div class="tx-field"><span class="tx-label">Fee</span><span class="tx-value money" x-text="txFeeLabel(tx)"></span></div>
-                        <div class="tx-field"><span class="tx-label">From</span><code class="tx-value hash" x-text="shortAddressLabel(txFrom(tx))"></code></div>
-                        <div class="tx-field" x-show="txTo(tx)"><span class="tx-label">To</span><code class="tx-value hash" x-text="shortAddressLabel(txTo(tx))"></code></div>
+                        <div class="tx-field"><span class="tx-label">From</span><code class="tx-value hash" :class="{ 'wallet-address-link': hasWalletAddress(txFrom(tx)) }" role="button" :tabindex="hasWalletAddress(txFrom(tx)) ? 0 : -1" x-text="shortAddressLabel(txFrom(tx))" @click.stop="openAddressContact(txFrom(tx))" @keydown.enter.stop.prevent="openAddressContact(txFrom(tx))" @keydown.space.stop.prevent="openAddressContact(txFrom(tx))" :title="hasWalletAddress(txFrom(tx)) ? 'Add or edit contact' : null"></code></div>
+                        <div class="tx-field" x-show="txTo(tx)"><span class="tx-label">To</span><code class="tx-value hash wallet-address-link" role="button" tabindex="0" x-text="shortAddressLabel(txTo(tx))" @click.stop="openAddressContact(txTo(tx))" @keydown.enter.stop.prevent="openAddressContact(txTo(tx))" @keydown.space.stop.prevent="openAddressContact(txTo(tx))" title="Add or edit contact"></code></div>
                         <div class="tx-field" x-show="isMineTx(tx)"><span class="tx-label">Proof Bits</span><span class="tx-value number"><span x-text="txProofBits(tx) ?? '-'"></span> / <span x-text="txDifficultyBits(tx) ?? '-'"></span></span></div>
                         <div class="tx-field" x-show="isMineTx(tx)"><span class="tx-label">Proof Hash</span><code class="tx-value hash" x-text="short(txProofHash(tx))"></code></div>
                         <div class="tx-field"><span class="tx-label">Signature</span><code class="tx-value hash" x-text="short(tx.signature)"></code></div>
@@ -1164,14 +1169,14 @@ pub(super) const INDEX_HTML: &str = concat!(
                 </div>
                 <template x-for="bundle in selectedBlock.burn_bundles || selectedBlock.burnBundles || []" :key="bundle.hash">
                   <details class="tx-section">
-                    <summary class="tx-section-title"><span x-text="`Burn bundle ${bundle.slot}`"></span><span class="tx-section-meta"><span x-text="shortAddressLabel(bundle.member)"></span> · <span x-text="bundle.byte_size || bundle.byteSize || 0"></span>B</span></summary>
+                    <summary class="tx-section-title"><span x-text="`Burn bundle ${bundle.slot}`"></span><span class="tx-section-meta"><span class="wallet-address-link" role="button" tabindex="0" x-text="shortAddressLabel(bundle.member)" @click.stop="openAddressContact(bundle.member)" @keydown.enter.stop.prevent="openAddressContact(bundle.member)" @keydown.space.stop.prevent="openAddressContact(bundle.member)" title="Add or edit contact"></span> · <span x-text="bundle.byte_size || bundle.byteSize || 0"></span>B</span></summary>
                     <template x-for="tx in bundle.burns" :key="tx.signature">
                       <div class="tx-card" role="button" tabindex="0" @click="openTransactionModal(tx, { source: 'Burn bundle', blockHeight: selectedBlock.height, blockFinalizer: bundle.member })" @keydown.enter.prevent="openTransactionModal(tx, { source: 'Burn bundle', blockHeight: selectedBlock.height, blockFinalizer: bundle.member })" @keydown.space.prevent="openTransactionModal(tx, { source: 'Burn bundle', blockHeight: selectedBlock.height, blockFinalizer: bundle.member })">
                         <span class="pill" :class="txPillClass(tx)" x-text="txPillLabel(tx)"></span>
                         <div class="tx-field"><span class="tx-label">Amount</span><span class="tx-value money">IUNA <span x-text="amountLabel(txAmount(tx))"></span></span></div>
                         <div class="tx-field"><span class="tx-label">Fee</span><span class="tx-value money" x-text="txFeeLabel(tx)"></span></div>
-                        <div class="tx-field"><span class="tx-label">From</span><code class="tx-value hash" x-text="shortAddressLabel(txFrom(tx))"></code></div>
-                        <div class="tx-field" x-show="txTo(tx)"><span class="tx-label">To</span><code class="tx-value hash" x-text="shortAddressLabel(txTo(tx))"></code></div>
+                        <div class="tx-field"><span class="tx-label">From</span><code class="tx-value hash" :class="{ 'wallet-address-link': hasWalletAddress(txFrom(tx)) }" role="button" :tabindex="hasWalletAddress(txFrom(tx)) ? 0 : -1" x-text="shortAddressLabel(txFrom(tx))" @click.stop="openAddressContact(txFrom(tx))" @keydown.enter.stop.prevent="openAddressContact(txFrom(tx))" @keydown.space.stop.prevent="openAddressContact(txFrom(tx))" :title="hasWalletAddress(txFrom(tx)) ? 'Add or edit contact' : null"></code></div>
+                        <div class="tx-field" x-show="txTo(tx)"><span class="tx-label">To</span><code class="tx-value hash wallet-address-link" role="button" tabindex="0" x-text="shortAddressLabel(txTo(tx))" @click.stop="openAddressContact(txTo(tx))" @keydown.enter.stop.prevent="openAddressContact(txTo(tx))" @keydown.space.stop.prevent="openAddressContact(txTo(tx))" title="Add or edit contact"></code></div>
                         <div class="tx-field"><span class="tx-label">Signature</span><code class="tx-value hash" x-text="short(tx.signature)"></code></div>
                       </div>
                     </template>
@@ -1199,8 +1204,8 @@ pub(super) const INDEX_HTML: &str = concat!(
                 </div>
                 <div class="tx-field"><span class="tx-label">Amount</span><span class="tx-value money">IUNA <span x-text="amountLabel(txAmount(tx))"></span></span></div>
                 <div class="tx-field"><span class="tx-label">Fee</span><span class="tx-value money" x-text="txFeeLabel(tx)"></span></div>
-                <div class="tx-field"><span class="tx-label">From</span><code class="tx-value hash" x-text="shortAddressLabel(txFrom(tx))"></code></div>
-                <div class="tx-field" x-show="txTo(tx)"><span class="tx-label">To</span><code class="tx-value hash" x-text="shortAddressLabel(txTo(tx))"></code></div>
+                <div class="tx-field"><span class="tx-label">From</span><code class="tx-value hash" :class="{ 'wallet-address-link': hasWalletAddress(txFrom(tx)) }" role="button" :tabindex="hasWalletAddress(txFrom(tx)) ? 0 : -1" x-text="shortAddressLabel(txFrom(tx))" @click.stop="openAddressContact(txFrom(tx))" @keydown.enter.stop.prevent="openAddressContact(txFrom(tx))" @keydown.space.stop.prevent="openAddressContact(txFrom(tx))" :title="hasWalletAddress(txFrom(tx)) ? 'Add or edit contact' : null"></code></div>
+                <div class="tx-field" x-show="txTo(tx)"><span class="tx-label">To</span><code class="tx-value hash wallet-address-link" role="button" tabindex="0" x-text="shortAddressLabel(txTo(tx))" @click.stop="openAddressContact(txTo(tx))" @keydown.enter.stop.prevent="openAddressContact(txTo(tx))" @keydown.space.stop.prevent="openAddressContact(txTo(tx))" title="Add or edit contact"></code></div>
                 <div class="tx-field" x-show="isMineTx(tx)"><span class="tx-label">Proof Bits</span><span class="tx-value number"><span x-text="txProofBits(tx) ?? '-'"></span> / <span x-text="txDifficultyBits(tx) ?? '-'"></span></span></div>
                 <div class="tx-field" x-show="isMineTx(tx)"><span class="tx-label">Proof Hash</span><code class="tx-value hash" x-text="short(txProofHash(tx))"></code></div>
                 <div class="tx-field"><span class="tx-label">Signature</span><code class="tx-value hash" x-text="short(tx.signature)"></code></div>
@@ -1295,7 +1300,7 @@ pub(super) const INDEX_HTML: &str = concat!(
                   <div class="leaderboard-row">
                     <div class="leaderboard-rank" :class="leaderboardRankClass(index)" x-text="leaderboardRankLabel(index)"></div>
                     <div class="leaderboard-main">
-                      <code class="tx-value hash" x-text="shortAddressLabel(row.address)"></code>
+                      <code class="tx-value hash wallet-address-link" role="button" tabindex="0" x-text="shortAddressLabel(row.address)" @click="openAddressContact(row.address)" @keydown.enter.prevent="openAddressContact(row.address)" @keydown.space.prevent="openAddressContact(row.address)" title="Add or edit contact"></code>
                       <div class="muted" x-text="leaderboardCountLabel(board.key, row)"></div>
                     </div>
                     <div class="leaderboard-amount" x-text="leaderboardAmountLabel(row)"></div>
@@ -1544,7 +1549,7 @@ pub(super) const INDEX_HTML: &str = concat!(
           <div class="wallet-utxo-row">
             <div class="utxo-node-label"><span>UTXO</span><span class="utxo-node-amount">IUNA <span x-text="amountLabel(utxo.amount)"></span></span></div>
             <div class="tx-field"><span class="tx-label">Outpoint</span><code class="tx-value hash" x-text="txInputOutpoint({ outpoint: utxo.outpoint })"></code></div>
-            <div class="tx-field"><span class="tx-label">Address</span><code class="tx-value hash" x-text="addressLabel(utxo.address)"></code></div>
+            <div class="tx-field"><span class="tx-label">Address</span><code class="tx-value hash wallet-address-link" role="button" tabindex="0" x-text="addressLabel(utxo.address)" @click="openAddressContact(utxo.address)" @keydown.enter.prevent="openAddressContact(utxo.address)" @keydown.space.prevent="openAddressContact(utxo.address)" title="Add or edit contact"></code></div>
           </div>
         </template>
         <div class="dataset-loader" x-show="walletUtxoPage.loading" aria-hidden="true">
@@ -1620,7 +1625,7 @@ pub(super) const INDEX_HTML: &str = concat!(
               <span class="bundle-slot-number" x-text="slot.slot"></span>
               <span class="bundle-slot-status">Included</span>
             </div>
-            <div class="tx-field"><span class="tx-label" x-text="slot.role"></span><code x-text="addressLabel(slot.member)"></code></div>
+            <div class="tx-field"><span class="tx-label" x-text="slot.role"></span><code class="wallet-address-link" role="button" tabindex="0" x-text="addressLabel(slot.member)" @click="openAddressContact(slot.member)" @keydown.enter.prevent="openAddressContact(slot.member)" @keydown.space.prevent="openAddressContact(slot.member)" title="Add or edit contact"></code></div>
             <div class="tx-field"><span class="tx-label">Contribution</span><span class="tx-value text" x-text="burnBundleSlotDetail(slot)"></span></div>
             <div class="tx-field" x-show="slot.hash"><span class="tx-label">Bundle</span><code x-text="short(slot.hash)"></code></div>
           </div>
@@ -1642,7 +1647,7 @@ pub(super) const INDEX_HTML: &str = concat!(
       <div class="tx-modal-head">
         <div class="tx-modal-title">
           <h2 id="burn-ranks-title" x-text="burnLeaderRanksTitle(selectedBurnLeaderBlock)"></h2>
-          <div class="tx-field"><span class="tx-label">Finalizer</span><code class="tx-value hash" x-text="selectedBurnLeaderBlock ? addressLabel(selectedBurnLeaderBlock.miner) : '-'"></code></div>
+          <div class="tx-field"><span class="tx-label">Finalizer</span><code class="tx-value hash wallet-address-link" role="button" tabindex="0" x-text="selectedBurnLeaderBlock ? addressLabel(selectedBurnLeaderBlock.miner) : '-'" @click="openAddressContact(selectedBurnLeaderBlock?.miner)" @keydown.enter.prevent="openAddressContact(selectedBurnLeaderBlock?.miner)" @keydown.space.prevent="openAddressContact(selectedBurnLeaderBlock?.miner)" title="Add or edit contact"></code></div>
         </div>
         <button type="button" @click="closeBurnLeaderRanksModal">Close</button>
       </div>
@@ -1651,7 +1656,7 @@ pub(super) const INDEX_HTML: &str = concat!(
           <div class="rank-row">
             <div class="rank-number" x-text="burnLeaderRankLabel(rank)"></div>
             <div class="rank-details">
-              <div class="tx-field"><span class="tx-label">Owner</span><code class="tx-value hash" x-text="addressLabel(rank.owner)"></code></div>
+              <div class="tx-field"><span class="tx-label">Owner</span><code class="tx-value hash wallet-address-link" role="button" tabindex="0" x-text="addressLabel(rank.owner)" @click="openAddressContact(rank.owner)" @keydown.enter.prevent="openAddressContact(rank.owner)" @keydown.space.prevent="openAddressContact(rank.owner)" title="Add or edit contact"></code></div>
               <div class="tx-field"><span class="tx-label">Burn</span><span class="tx-value money">IUNA <span x-text="amountLabel(rank.amount)"></span></span></div>
               <div class="tx-field"><span class="tx-label">Ticket</span><code class="tx-value hash" x-text="short(rank.ticket_id ?? rank.ticketId)"></code></div>
               <div class="tx-field"><span class="tx-label">Eligible</span><span class="tx-value number" x-text="burnLeaderEligibilityLabel(rank)"></span></div>
@@ -1676,8 +1681,8 @@ pub(super) const INDEX_HTML: &str = concat!(
         <div class="tx-field"><span class="tx-label">Source</span><span class="tx-value text" x-text="selectedTransactionLabel()"></span></div>
         <div class="tx-field"><span class="tx-label">Amount</span><span class="tx-value money">IUNA <span x-text="amountLabel(txAmount(selectedTransaction?.tx || {}))"></span></span></div>
         <div class="tx-field" x-show="!isRewardTx(selectedTransaction?.tx)"><span class="tx-label">Fee</span><span class="tx-value money" x-text="txFeeLabel(selectedTransaction?.tx)"></span></div>
-        <div class="tx-field" x-show="!isRewardTx(selectedTransaction?.tx)"><span class="tx-label">From</span><code class="tx-value hash" x-text="addressLabel(txFrom(selectedTransaction?.tx || {}))"></code></div>
-        <div class="tx-field" x-show="!isRewardTx(selectedTransaction?.tx) && txTo(selectedTransaction?.tx || {})"><span class="tx-label">To</span><code class="tx-value hash" x-text="addressLabel(txTo(selectedTransaction?.tx || {}))"></code></div>
+        <div class="tx-field" x-show="!isRewardTx(selectedTransaction?.tx)"><span class="tx-label">From</span><code class="tx-value hash" :class="{ 'wallet-address-link': hasWalletAddress(txFrom(selectedTransaction?.tx || {})) }" role="button" :tabindex="hasWalletAddress(txFrom(selectedTransaction?.tx || {})) ? 0 : -1" x-text="addressLabel(txFrom(selectedTransaction?.tx || {}))" @click="openAddressContact(txFrom(selectedTransaction?.tx || {}))" @keydown.enter.prevent="openAddressContact(txFrom(selectedTransaction?.tx || {}))" @keydown.space.prevent="openAddressContact(txFrom(selectedTransaction?.tx || {}))" :title="hasWalletAddress(txFrom(selectedTransaction?.tx || {})) ? 'Add or edit contact' : null"></code></div>
+        <div class="tx-field" x-show="!isRewardTx(selectedTransaction?.tx) && txTo(selectedTransaction?.tx || {})"><span class="tx-label">To</span><code class="tx-value hash wallet-address-link" role="button" tabindex="0" x-text="addressLabel(txTo(selectedTransaction?.tx || {}))" @click="openAddressContact(txTo(selectedTransaction?.tx || {}))" @keydown.enter.prevent="openAddressContact(txTo(selectedTransaction?.tx || {}))" @keydown.space.prevent="openAddressContact(txTo(selectedTransaction?.tx || {}))" title="Add or edit contact"></code></div>
         <div class="tx-field" x-show="isMineTx(selectedTransaction?.tx)"><span class="tx-label">Difficulty</span><span class="tx-value number" x-text="txDifficultyBits(selectedTransaction?.tx) ?? '-'"></span></div>
         <div class="tx-field" x-show="isMineTx(selectedTransaction?.tx)"><span class="tx-label">Proof Bits</span><span class="tx-value number" x-text="txProofBits(selectedTransaction?.tx) ?? '-'"></span></div>
         <div class="tx-field" x-show="isMineTx(selectedTransaction?.tx)"><span class="tx-label">Proof Hash</span><code class="tx-value hash" x-text="txProofHash(selectedTransaction?.tx) || '-'"></code></div>
@@ -1690,7 +1695,7 @@ pub(super) const INDEX_HTML: &str = concat!(
               <div class="utxo-node-label"><span x-text="input.rewardFee ? `Paid fee ${index + 1}` : `Input ${index + 1}`"></span><span x-text="input.rewardFee ? input.transactionKind : 'spent'"></span></div>
               <div class="utxo-node-ref" x-text="txInputOutpoint(input)"></div>
               <div class="tx-field"><span class="tx-label">Value</span><span class="tx-value money" x-text="txInputAmountLabel(input)"></span></div>
-              <div class="tx-field" x-show="input.owner"><span class="tx-label" x-text="input.rewardFee ? 'Paid by' : 'Owner'"></span><code class="tx-value hash" x-text="addressLabel(input.owner)"></code></div>
+              <div class="tx-field" x-show="input.owner"><span class="tx-label" x-text="input.rewardFee ? 'Paid by' : 'Owner'"></span><code class="tx-value hash wallet-address-link" role="button" tabindex="0" x-text="addressLabel(input.owner)" @click="openAddressContact(input.owner)" @keydown.enter.prevent="openAddressContact(input.owner)" @keydown.space.prevent="openAddressContact(input.owner)" title="Add or edit contact"></code></div>
               <div class="tx-field"><span class="tx-label" x-text="input.rewardFee ? 'Transaction' : 'Sig'"></span><code class="tx-value hash" x-text="short(input.signature)"></code></div>
             </div>
           </template>
@@ -1704,7 +1709,7 @@ pub(super) const INDEX_HTML: &str = concat!(
               <div class="utxo-node-label"><span x-text="output.label"></span><span x-text="output.kind"></span></div>
               <div class="utxo-node-amount">IUNA <span x-text="amountLabel(output.amount)"></span></div>
               <template x-if="output.address">
-                <div class="tx-field"><span class="tx-label">To</span><code class="tx-value hash" x-text="addressLabel(output.address)"></code></div>
+                <div class="tx-field"><span class="tx-label">To</span><code class="tx-value hash wallet-address-link" role="button" tabindex="0" x-text="addressLabel(output.address)" @click="openAddressContact(output.address)" @keydown.enter.prevent="openAddressContact(output.address)" @keydown.space.prevent="openAddressContact(output.address)" title="Add or edit contact"></code></div>
               </template>
               <template x-if="output.detail">
                 <div class="tx-field"><span class="tx-label" x-text="output.detailLabel"></span><code class="tx-value hash" x-text="output.detail"></code></div>
@@ -1720,11 +1725,11 @@ pub(super) const INDEX_HTML: &str = concat!(
     <section class="tx-modal address-book-modal">
       <div class="tx-modal-head">
         <div class="tx-modal-title">
-          <span class="pill">Send</span>
-          <h2 id="address-book-picker-title">Choose Contact</h2>
+          <span class="pill" x-text="addressBookStandalone ? 'Contact' : 'Send'"></span>
+          <h2 id="address-book-picker-title" x-text="addressBookStandalone ? (addressBookEditingAddress ? 'Edit Contact' : 'Add Contact') : 'Choose Contact'"></h2>
         </div>
         <div class="address-book-actions">
-          <button class="icon-button" type="button" x-show="!addressBookModalOpen" @click="openAddressBookModal()" title="Add contact" aria-label="Add contact">
+          <button class="icon-button" type="button" x-show="!addressBookModalOpen" @click="openAddressBookModal(null, false)" title="Add contact" aria-label="Add contact">
             <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 5v14"></path><path d="M5 12h14"></path></svg>
           </button>
           <button class="icon-button" type="button" @click="closeAddressBookPicker()" title="Close" aria-label="Close">
@@ -1749,7 +1754,7 @@ pub(super) const INDEX_HTML: &str = concat!(
           <button class="icon-button modal-delete-button" type="button" x-show="addressBookEditingAddress" @click="removeAddressBookEntry({ address: addressBookEditingAddress, name: addressBookDraftName || addressBookEditingAddress })" title="Delete contact" aria-label="Delete contact">
             <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M4 7h16"></path><path d="M10 11v6"></path><path d="M14 11v6"></path><path d="M6 7l1 14h10l1-14"></path><path d="M9 7V4h6v3"></path></svg>
           </button>
-          <button class="icon-button" type="button" @click="closeAddressBookModal()" title="Back to contacts" aria-label="Back to contacts">
+          <button class="icon-button" type="button" @click="closeAddressBookModal()" :title="addressBookStandalone ? 'Cancel' : 'Back to contacts'" :aria-label="addressBookStandalone ? 'Cancel' : 'Back to contacts'">
             <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M15 18l-6-6 6-6"></path></svg>
           </button>
           <button class="primary icon-button" type="submit" title="Save contact" aria-label="Save contact">
@@ -1803,7 +1808,7 @@ pub(super) const INDEX_HTML: &str = concat!(
             <div class="setup-field">
               <div class="setup-field-label">Address</div>
               <div class="address-box setup-address-box">
-                <code x-text="setupAddress()"></code>
+                <code class="wallet-address-link" role="button" tabindex="0" x-text="setupAddress()" @click="openAddressContact(setupAddress())" @keydown.enter.prevent="openAddressContact(setupAddress())" @keydown.space.prevent="openAddressContact(setupAddress())" title="Add or edit contact"></code>
                 <button type="button" @click="copyAddress">Copy</button>
               </div>
             </div>

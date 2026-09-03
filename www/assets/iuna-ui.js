@@ -61,6 +61,7 @@ window.iunaApp = function iunaApp() {
     addressBookVersion: 0,
     addressBookModalOpen: false,
     addressBookPickerOpen: false,
+    addressBookStandalone: false,
     addressBookEditingAddress: null,
     addressBookDraftAddress: "",
     addressBookDraftName: "",
@@ -1834,10 +1835,14 @@ window.iunaApp = function iunaApp() {
     },
 
     currentFinalizerLabel() {
-      const leader = this.status.mining?.current_leader ?? this.status.chain?.next_leader;
+      const leader = this.currentFinalizerAddress();
       if (!leader) return "-";
       if (leader === this.status.wallet_address) return "you";
       return this.shortAddressLabel(leader);
+    },
+
+    currentFinalizerAddress() {
+      return this.status.mining?.current_leader ?? this.status.chain?.next_leader ?? null;
     },
 
     localMiningMempoolLabel() {
@@ -2565,22 +2570,91 @@ window.iunaApp = function iunaApp() {
       this.closeAddressBookPicker();
     },
 
-    openAddressBookModal(entry = null) {
+    openAddressBookModal(entry = null, standalone = true) {
       this.addressBookEditingAddress = entry?.address || null;
       this.addressBookDraftAddress = entry?.address || "";
       this.addressBookDraftName = entry?.name || "";
+      this.addressBookStandalone = standalone;
       this.addressBookPickerOpen = true;
       this.addressBookModalOpen = true;
     },
 
+    openAddressContact(address) {
+      const value = String(address ?? "").trim();
+      const publicAddress = this.contactAddress(value);
+      if (!publicAddress) return;
+      const canonical = this.canonicalAddressKey(value);
+      const entry = this.addressBookEntries().find(
+        (candidate) => this.canonicalAddressKey(candidate.address) === canonical,
+      );
+      this.addressBookEditingAddress = entry?.address || null;
+      this.addressBookDraftAddress = entry && this.validAddressBookAddress(entry.address)
+        ? entry.address
+        : publicAddress;
+      this.addressBookDraftName = entry?.name || "";
+      this.addressBookStandalone = true;
+      this.addressBookPickerOpen = true;
+      this.addressBookModalOpen = true;
+    },
+
+    contactAddress(address) {
+      const normalized = String(address ?? "").trim().toLowerCase();
+      if (this.validAddressBookAddress(normalized)) return normalized;
+      if (!/^[0-9a-f]{64}$/.test(normalized)) return null;
+
+      const hrp = this.setupAddress().startsWith("tiuna1") ? "tiuna" : "iuna";
+      const charset = "qpzry9x8gf2tvdw0s3jn54khce6mua7l";
+      const bytes = normalized.match(/../g).map((pair) => Number.parseInt(pair, 16));
+      const data = [0];
+      let accumulator = 0;
+      let bits = 0;
+      for (const byte of bytes) {
+        accumulator = ((accumulator << 8) | byte) & 0xfff;
+        bits += 8;
+        while (bits >= 5) {
+          bits -= 5;
+          data.push((accumulator >> bits) & 31);
+        }
+      }
+      if (bits > 0) data.push((accumulator << (5 - bits)) & 31);
+
+      const values = [
+        ...[...hrp].map((character) => character.charCodeAt(0) >> 5),
+        0,
+        ...[...hrp].map((character) => character.charCodeAt(0) & 31),
+        ...data,
+        0, 0, 0, 0, 0, 0,
+      ];
+      const generators = [0x3b6a57b2, 0x26508e6d, 0x1ea119fa, 0x3d4233dd, 0x2a1462b3];
+      let polymod = 1;
+      for (const value of values) {
+        const top = polymod >>> 25;
+        polymod = (((polymod & 0x1ffffff) << 5) ^ value) >>> 0;
+        for (let index = 0; index < generators.length; index += 1) {
+          if ((top >>> index) & 1) polymod = (polymod ^ generators[index]) >>> 0;
+        }
+      }
+      polymod = (polymod ^ 0x2bc830a3) >>> 0;
+      const checksum = Array.from({ length: 6 }, (_, index) => (polymod >>> (5 * (5 - index))) & 31);
+      return `${hrp}1${[...data, ...checksum].map((value) => charset[value]).join("")}`;
+    },
+
+    hasWalletAddress(address) {
+      return this.contactAddress(address) !== null;
+    },
+
     closeAddressBookModal() {
+      const closePicker = this.addressBookStandalone;
       this.addressBookModalOpen = false;
+      this.addressBookStandalone = false;
       this.addressBookEditingAddress = null;
       this.addressBookDraftAddress = "";
       this.addressBookDraftName = "";
+      if (closePicker) this.addressBookPickerOpen = false;
     },
 
     openAddressBookPicker() {
+      this.addressBookStandalone = false;
       this.addressBookPickerOpen = true;
     },
 

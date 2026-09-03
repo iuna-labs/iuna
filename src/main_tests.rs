@@ -134,6 +134,19 @@ fn management_ui_matches_bech32m_contacts_to_canonical_transaction_addresses() {
 }
 
 #[test]
+fn management_ui_opens_contact_editor_from_wallet_addresses() {
+    let html = include_str!("adapters/http/index_html.rs");
+    let javascript = include_str!("../www/assets/iuna-ui.js");
+    assert!(html.contains("wallet-address-link"));
+    assert!(html.contains("openAddressContact(txFrom(tx))"));
+    assert!(html.contains("openBurnLeaderRanksModal(selectedBlock)"));
+    assert!(html.contains("openAddressContact(rank.owner)"));
+    assert!(javascript.contains("openAddressContact(address)"));
+    assert!(javascript.contains("contactAddress(address)"));
+    assert!(javascript.contains("this.addressBookEditingAddress = entry?.address || null"));
+}
+
+#[test]
 fn management_ui_blocks_interaction_while_the_node_is_syncing() {
     let html = include_str!("adapters/http/index_html.rs");
     let javascript = include_str!("../www/assets/iuna-ui.js");
