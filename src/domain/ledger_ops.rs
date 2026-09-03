@@ -83,24 +83,21 @@ pub(super) fn validate_genesis_burn_transaction(transaction: &Transaction) -> Re
 pub(super) fn estimated_block_selection_size_bytes(
     context: &CompactBlockContext,
     selection: &BlockSelection,
-    recovery: bool,
+    finalizer_mode: FinalizerMode,
     burn_bundle_section: &BurnBundleSection,
 ) -> Result<usize> {
+    let has_leader_proof = finalizer_mode == FinalizerMode::Ticket;
     let block = Block {
         height: u64::MAX,
         prev_hash: "f".repeat(64),
         timestamp_ms: u64::MAX,
         miner: "f".repeat(64),
-        finalizer_mode: if recovery {
-            FinalizerMode::Recovery
-        } else {
-            FinalizerMode::Ticket
-        },
+        finalizer_mode,
         finalizer_rank: 0,
         reward: u64::MAX,
         vdf_rounds: u64::MAX,
         vdf_output: vdf_solution_placeholder(),
-        leader_proof: (!recovery).then(|| LeaderProof {
+        leader_proof: has_leader_proof.then(|| LeaderProof {
             ticket_id: "f".repeat(64),
             public_key: "f".repeat(64),
             signature: "f".repeat(128),
@@ -123,7 +120,7 @@ pub(super) fn ensure_transaction_fits_empty_block(
     if estimated_block_selection_size_bytes(
         context,
         &selection,
-        false,
+        FinalizerMode::Ticket,
         &BurnBundleSection::default(),
     )? > max_block_bytes
     {

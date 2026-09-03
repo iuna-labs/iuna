@@ -20,8 +20,8 @@ use super::validation::{
     validate_address, validate_hash, validate_signature, validate_stratum_header,
 };
 use super::{
-    Amount, BurnBundleSection, Ledger, MAX_PENDING_POOL_BYTES, MAX_PENDING_TRANSACTIONS,
-    MINE_ACTIONS_PER_ANCHOR_LIMIT, OutPoint, Transaction, TxOutput,
+    Amount, BurnBundleSection, FinalizerMode, Ledger, MAX_PENDING_POOL_BYTES,
+    MAX_PENDING_TRANSACTIONS, MINE_ACTIONS_PER_ANCHOR_LIMIT, OutPoint, Transaction, TxOutput,
 };
 
 pub(crate) const MINE_ANCHOR_LIMIT_REACHED: &str = "mine transaction anchor limit reached";
@@ -92,6 +92,7 @@ impl Ledger {
         self.select_block_transactions_with_required_burn_owner(
             Some(miner),
             required_burn_signature,
+            FinalizerMode::Ticket,
             burn_bundle_section,
         )
     }
@@ -105,6 +106,7 @@ impl Ledger {
         self.select_block_transactions_with_required_burn_owner(
             Some(miner),
             required_burn_signature,
+            FinalizerMode::Recovery,
             burn_bundle_section,
         )
     }
@@ -113,6 +115,7 @@ impl Ledger {
         &self,
         required_burn_owner: Option<&str>,
         required_burn_signature: Option<&str>,
+        finalizer_mode: FinalizerMode,
         burn_bundle_section: &BurnBundleSection,
     ) -> Result<BlockSelection> {
         let block_context = compact_block_context(self);
@@ -193,7 +196,7 @@ impl Ledger {
         if estimated_block_selection_size_bytes(
             block_context,
             &required_selection,
-            required_burn_owner.is_some(),
+            finalizer_mode,
             burn_bundle_section,
         )? > self.launch_profile.max_block_bytes
         {
@@ -214,7 +217,7 @@ impl Ledger {
             if estimated_block_selection_size_bytes(
                 block_context,
                 &candidate,
-                required_burn_owner.is_some(),
+                finalizer_mode,
                 burn_bundle_section,
             )? <= self.launch_profile.max_block_bytes
             {
@@ -654,6 +657,7 @@ mod tests {
                 .select_block_transactions_with_required_burn_owner(
                     None,
                     None,
+                    FinalizerMode::Ticket,
                     &BurnBundleSection::default(),
                 )
                 .unwrap()
@@ -674,6 +678,7 @@ mod tests {
                 .select_block_transactions_with_required_burn_owner(
                     None,
                     None,
+                    FinalizerMode::Ticket,
                     &BurnBundleSection::default(),
                 )
                 .unwrap()
@@ -755,6 +760,7 @@ mod tests {
             .select_block_transactions_with_required_burn_owner(
                 Some(finalizer.address()),
                 Some(anchor.signature()),
+                FinalizerMode::Ticket,
                 &BurnBundleSection::default(),
             )
             .unwrap();
@@ -771,6 +777,58 @@ mod tests {
                 .iter()
                 .any(|transaction| transaction.signature() == high_fee.signature())
         );
+    }
+
+    #[test]
+    fn ticket_block_selection_reserves_space_for_leader_proof() {
+        let finalizer = Wallet::from_seed("ticket-selection-leader-proof-finalizer");
+        let mut ledger = Ledger::new(BTreeMap::from([(finalizer.address().to_string(), 10)]), 1);
+        let anchor = ledger.build_burn(&finalizer, 1, 1).unwrap();
+        ledger.submit_transaction(anchor.clone()).unwrap();
+
+        let required_selection = BlockSelection {
+            transactions: vec![anchor.clone()],
+        };
+        let ticket_bytes = estimated_block_selection_size_bytes(
+            compact_block_context(&ledger),
+            &required_selection,
+            FinalizerMode::Ticket,
+            &BurnBundleSection::default(),
+        )
+        .unwrap();
+        let recovery_bytes = estimated_block_selection_size_bytes(
+            compact_block_context(&ledger),
+            &required_selection,
+            FinalizerMode::Recovery,
+            &BurnBundleSection::default(),
+        )
+        .unwrap();
+        assert!(ticket_bytes > recovery_bytes);
+
+        ledger.launch_profile.max_block_bytes = ticket_bytes - 1;
+        assert!(recovery_bytes <= ledger.launch_profile.max_block_bytes);
+
+        let error = ledger
+            .select_block_transactions_with_burn_section(
+                finalizer.address(),
+                Some(anchor.signature()),
+                &BurnBundleSection::default(),
+            )
+            .unwrap_err();
+        assert!(
+            error
+                .to_string()
+                .contains("required block content does not fit in the block")
+        );
+
+        let recovery_selection = ledger
+            .select_recovery_block_transactions_with_burn_section(
+                finalizer.address(),
+                Some(anchor.signature()),
+                &BurnBundleSection::default(),
+            )
+            .unwrap();
+        assert_eq!(recovery_selection.transactions, vec![anchor]);
     }
 
     #[test]
@@ -824,6 +882,7 @@ mod tests {
                 .select_block_transactions_with_required_burn_owner(
                     Some(finalizer.address()),
                     Some(anchor.signature()),
+                    FinalizerMode::Ticket,
                     &section,
                 )
                 .unwrap_err()
