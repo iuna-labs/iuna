@@ -11,6 +11,7 @@
   --text: #edf2f5;
   --green: #d5f55f;
   --cyan: #8de9cd;
+  --amber: #ffd070;
 }
 
 * { box-sizing: border-box; }
@@ -397,6 +398,19 @@ body > h3 {
   margin: 0 0 28px;
   font-size: 13px;
 }
+
+.safety-note {
+  border: 1px solid rgba(255, 208, 112, .24);
+  border-left: 3px solid var(--amber);
+  border-radius: 0 10px 10px 0;
+  padding: 14px 16px;
+  background: rgba(255, 208, 112, .055);
+  color: #ddd5c5;
+  font-size: 15px;
+  line-height: 1.55;
+}
+
+.safety-note code { color: #ffe2a3; }
 
 .source-build {
   margin-top: 28px;
