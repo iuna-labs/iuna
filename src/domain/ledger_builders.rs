@@ -123,6 +123,7 @@ impl Ledger {
         )
     }
 
+    #[cfg(test)]
     pub(crate) fn build_burn_for_next_block(
         &self,
         wallet: &Wallet,

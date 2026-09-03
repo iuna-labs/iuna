@@ -1,4 +1,4 @@
-use anyhow::{Context, Result};
+use anyhow::{Context, Result, bail};
 
 use super::helpers::{
     allowed_recovery_vdf_rank_count, converge_fee_by_byte, recovery_vdf_sample_percent,
@@ -318,6 +318,19 @@ impl NodeCore {
             return Ok(None);
         }
 
+        // Pending wallet burns can themselves satisfy the block-anchor requirement.
+        // Pending transfers cannot, so keep their confirmed inputs reserved.
+        let pending_transfer_spent_outpoints = self
+            .ledger
+            .pending()
+            .iter()
+            .filter_map(|transaction| match transaction {
+                Transaction::Transfer { inputs, .. } => Some(inputs),
+                Transaction::Burn { .. } | Transaction::Mine { .. } => None,
+            })
+            .flatten()
+            .map(|input| input.outpoint.clone())
+            .collect::<std::collections::BTreeSet<_>>();
         let ledger = self.wallet_anchor_build_ledger()?;
         let wallet = self.wallet.unlocked()?;
         let available_utxos = ledger.available_utxos_for_address(wallet.address())?;
@@ -331,6 +344,7 @@ impl NodeCore {
                 .context("automatic finalizer anchor burn amount plus fee overflows")?;
             let outpoint = available_utxos
                 .iter()
+                .filter(|(outpoint, _)| !pending_transfer_spent_outpoints.contains(outpoint))
                 .filter(|(_, output)| output.amount >= required)
                 .min_by_key(|(_, output)| output.amount)
                 .map(|(outpoint, _)| outpoint);
@@ -341,7 +355,34 @@ impl NodeCore {
                     fee,
                     std::slice::from_ref(outpoint),
                 ),
-                None => ledger.build_burn_for_next_block(wallet, anchor_burn_amount, fee),
+                None => {
+                    let mut total = 0_u64;
+                    let outpoints = available_utxos
+                        .iter()
+                        .filter(|(outpoint, _)| {
+                            !pending_transfer_spent_outpoints.contains(outpoint)
+                        })
+                        .take_while(|(_, output)| {
+                            if total >= required {
+                                return false;
+                            }
+                            total = total.saturating_add(output.amount);
+                            true
+                        })
+                        .map(|(outpoint, _)| outpoint.clone())
+                        .collect::<Vec<_>>();
+                    if total < required {
+                        bail!(
+                            "automatic finalizer anchor burn has insufficient confirmed funds outside pending transfers"
+                        );
+                    }
+                    ledger.build_burn_for_next_block_with_inputs(
+                        wallet,
+                        anchor_burn_amount,
+                        fee,
+                        &outpoints,
+                    )
+                }
             }
         }) {
             Ok((burn, _)) => burn,
@@ -1065,7 +1106,7 @@ mod tests {
     }
 
     #[test]
-    fn local_anchor_displaces_conflicting_pending_transfer_in_block_candidate() {
+    fn local_anchor_preserves_pending_transfer_when_another_utxo_is_available() {
         let wallet = Wallet::from_seed("priority-local-anchor-wallet");
         let recipient = Wallet::from_seed("priority-local-anchor-recipient");
         let ledger = funded_ledger(std::slice::from_ref(&wallet));
@@ -1095,12 +1136,121 @@ mod tests {
                 .any(|transaction| transaction.signature() == local_anchor_signature)
         );
         assert!(
-            !candidate
+            candidate
                 .pending()
                 .iter()
                 .any(|transaction| transaction.signature() == pending_transfer.signature())
         );
-        assert!(node.prepare_next_block_with_local_anchor(1).is_ok());
+        let prepared = node.prepare_next_block_with_local_anchor(1).unwrap();
+        let block = prepared.finish(&wallet, "test-vdf-output".to_string());
+        assert!(
+            block
+                .transactions
+                .iter()
+                .any(|transaction| transaction.signature() == pending_transfer.signature())
+        );
+    }
+
+    #[test]
+    fn local_anchor_uses_unreserved_utxo_instead_of_displacing_pending_transfer() {
+        let wallet = Wallet::from_seed("non-conflicting-local-anchor-wallet");
+        let recipient = Wallet::from_seed("non-conflicting-local-anchor-recipient");
+        let ledger = funded_ledger(std::slice::from_ref(&wallet));
+        let timestamp_ms = ledger.recovery_block_min_timestamp();
+        let mut node =
+            NodeCore::from_ledger_with_burn_fee_and_enabled(wallet.clone(), ledger, true, 1, 1);
+
+        let first = node.automatic_mine_once(timestamp_ms);
+        assert!(
+            first.block.is_some(),
+            "fixture should create multiple wallet UTXOs"
+        );
+        let available = node
+            .ledger()
+            .available_utxos_for_address(wallet.address())
+            .unwrap();
+        assert!(available.len() >= 2);
+        let transfer_outpoint = available
+            .iter()
+            .filter(|(_, output)| output.amount >= 2)
+            .min_by_key(|(_, output)| output.amount)
+            .map(|(outpoint, _)| outpoint.clone())
+            .expect("fixture should have a transfer input");
+        let pending_transfer = node
+            .ledger()
+            .build_transfer_with_inputs(
+                &wallet,
+                recipient.address(),
+                1,
+                1,
+                std::slice::from_ref(&transfer_outpoint),
+            )
+            .unwrap();
+        node.receive_transaction(pending_transfer.clone()).unwrap();
+
+        node.prepare_automatic_burn(timestamp_ms + 1).unwrap();
+        let anchor = node
+            .local_block_anchor_burn
+            .as_ref()
+            .map(|(_, burn)| burn)
+            .expect("selected finalizer should prepare a local anchor");
+        let Transaction::Burn { inputs, .. } = anchor else {
+            panic!("local anchor should be a burn transaction");
+        };
+        assert!(
+            inputs
+                .iter()
+                .all(|input| input.outpoint != transfer_outpoint)
+        );
+        let anchor_signature = anchor.signature().to_string();
+
+        let prepared = node
+            .prepare_next_block_with_local_anchor(timestamp_ms + 1)
+            .unwrap();
+        let block = prepared.finish(&wallet, "test-vdf-output".to_string());
+        assert!(
+            block
+                .transactions
+                .iter()
+                .any(|transaction| { transaction.signature() == pending_transfer.signature() })
+        );
+        assert!(
+            block
+                .transactions
+                .iter()
+                .any(|transaction| transaction.signature() == anchor_signature)
+        );
+    }
+
+    #[test]
+    fn local_anchor_waits_when_all_confirmed_utxos_are_reserved_by_pending_transfer() {
+        let wallet = Wallet::from_seed("reserved-local-anchor-wallet");
+        let recipient = Wallet::from_seed("reserved-local-anchor-recipient");
+        let ledger = funded_ledger(std::slice::from_ref(&wallet));
+        let outpoints = ledger
+            .available_utxos_for_address(wallet.address())
+            .unwrap()
+            .into_iter()
+            .map(|(outpoint, _)| outpoint)
+            .collect::<Vec<_>>();
+        let pending_transfer = ledger
+            .build_transfer_with_inputs(&wallet, recipient.address(), 1, 1, &outpoints)
+            .unwrap();
+        let mut node = NodeCore::from_ledger_with_burn_fee_and_enabled(wallet, ledger, true, 1, 1);
+        node.receive_transaction(pending_transfer.clone()).unwrap();
+
+        let error = node.prepare_automatic_burn(1).unwrap_err();
+
+        assert!(format!("{error:#}").contains(
+            "automatic finalizer anchor burn has insufficient confirmed funds outside pending transfers"
+        ));
+        assert!(node.local_block_anchor_burn.is_none());
+        assert!(
+            node.ledger()
+                .pending()
+                .iter()
+                .any(|transaction| transaction.signature() == pending_transfer.signature())
+        );
     }
 
     #[test]
