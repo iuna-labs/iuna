@@ -67,7 +67,8 @@ RUN set -eux; \
     cp /site/downloads.html /site/downloads/index.html; \
     sed -i "s|\${IUNA_VERSION}|${version}|g" /site/downloads/index.html; \
     printf '{"tag":"v%s","version":"%s","url":"https://getiuna.org/downloads/"}\n' "$version" "$version" > /site/downloads/latest.json; \
-    rm -f /site/downloads.html
+    rm -f /site/downloads.html; \
+    python3 /src/iuna-work/scripts/inject_cloudflare_analytics.py /site
 
 ########################################################################
 # 3. Ship it - plain nginx, static files only.

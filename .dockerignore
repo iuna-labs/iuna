@@ -17,6 +17,7 @@
 !.git/**
 !www/**
 !downloads/**
+!scripts/inject_cloudflare_analytics.py
 !scripts/postprocess_stagit_site.py
 !src-tauri/icons/32x32.png
 !nginx.conf
