@@ -1,5 +1,6 @@
 const IUNA_DOWNLOADS_URL = "https://getiuna.org/downloads/";
 const IUNA_RELEASE_METADATA_URL = "https://getiuna.org/downloads/latest.json";
+const IUNA_RELEASE_CHECK_INTERVAL_MS = 30 * 60 * 1000;
 
 window.iunaApp = function iunaApp() {
   return {
@@ -124,6 +125,7 @@ window.iunaApp = function iunaApp() {
     showPowDifficultyInfo: false,
     lastUpdated: null,
     pollHandle: null,
+    releaseCheckTimer: null,
     refreshPromise: null,
     shellRefreshPromise: null,
     networkHealthPromise: null,
@@ -166,6 +168,7 @@ window.iunaApp = function iunaApp() {
       }
       await this.refresh();
       this.checkLatestRelease();
+      this.scheduleReleaseCheck();
       this.schedulePoll();
     },
 
@@ -174,9 +177,26 @@ window.iunaApp = function iunaApp() {
     },
 
     stopPolling() {
+      this.stopReleaseCheck();
       if (!this.pollHandle) return;
       clearTimeout(this.pollHandle);
       this.pollHandle = null;
+    },
+
+    stopReleaseCheck() {
+      if (!this.releaseCheckTimer) return;
+      clearTimeout(this.releaseCheckTimer);
+      this.releaseCheckTimer = null;
+    },
+
+    scheduleReleaseCheck() {
+      if (this.releaseCheckTimer || !this.canUseProtectedApi()) return;
+      this.releaseCheckTimer = setTimeout(async () => {
+        this.releaseCheckTimer = null;
+        if (!this.canUseProtectedApi()) return;
+        await this.checkLatestRelease();
+        this.scheduleReleaseCheck();
+      }, IUNA_RELEASE_CHECK_INTERVAL_MS);
     },
 
     schedulePoll() {
