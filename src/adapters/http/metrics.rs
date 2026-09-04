@@ -1,15 +1,19 @@
+use std::collections::BTreeMap;
+
 use crate::{
     adapters::ui_data_store::BlockMetricRow,
     app::{PeerDirection, PeerInfo},
-    domain::Amount,
+    domain::{Amount, Block, Transaction},
 };
 
 use super::{
     PEER_STALE_AFTER_MS, now_ms,
     types::{
         MempoolCounts, MetricsChart, MetricsLeaderboards, MetricsPoint, MetricsResponse,
-        MetricsValueKind, NetworkHealthLocalState, NetworkHealthResponse,
+        MetricsValueKind, MineProofLeaderboardEntry, NetworkHealthLocalState,
+        NetworkHealthResponse,
     },
+    ui::proof_bits,
 };
 
 pub(super) fn network_health(
@@ -25,6 +29,8 @@ pub(super) fn metrics_response(
     preparing: bool,
     rows: Vec<BlockMetricRow>,
     leaderboards: MetricsLeaderboards,
+    chain_storage_bytes: &BTreeMap<String, u64>,
+    top_mine_proofs: Vec<MineProofLeaderboardEntry>,
 ) -> MetricsResponse {
     let latest = rows.last().cloned();
     MetricsResponse {
@@ -32,6 +38,7 @@ pub(super) fn metrics_response(
         preparing,
         latest,
         leaderboards,
+        top_mine_proofs,
         charts: vec![
             metrics_chart(
                 "block-time",
@@ -60,6 +67,18 @@ pub(super) fn metrics_response(
                 MetricsValueKind::Iuna,
                 &rows,
                 |row| Some(micro_iuna_as_iuna(row.circulating_supply)),
+            ),
+            metrics_chart(
+                "chain-storage-bytes",
+                "Total chain size",
+                "bytes",
+                MetricsValueKind::Bytes,
+                &rows,
+                |row| {
+                    chain_storage_bytes
+                        .get(&row.block_hash)
+                        .map(|bytes| *bytes as f64)
+                },
             ),
             metrics_chart(
                 "known-wallet-addresses",
@@ -127,6 +146,41 @@ pub(super) fn metrics_response(
             ),
         ],
     }
+}
+
+pub(super) fn top_mine_proofs(blocks: &[Block], limit: usize) -> Vec<MineProofLeaderboardEntry> {
+    let mut proofs = blocks
+        .iter()
+        .flat_map(|block| {
+            block.transactions.iter().filter_map(|transaction| {
+                let Transaction::Mine {
+                    recipient,
+                    difficulty_bits,
+                    signature,
+                    ..
+                } = transaction
+                else {
+                    return None;
+                };
+                Some(MineProofLeaderboardEntry {
+                    height: block.height,
+                    address: recipient.clone(),
+                    proof_bits: proof_bits(signature),
+                    difficulty_bits: *difficulty_bits,
+                    proof_hash: signature.clone(),
+                })
+            })
+        })
+        .collect::<Vec<_>>();
+    proofs.sort_by(|left, right| {
+        right
+            .proof_bits
+            .cmp(&left.proof_bits)
+            .then_with(|| left.proof_hash.cmp(&right.proof_hash))
+            .then_with(|| left.height.cmp(&right.height))
+    });
+    proofs.truncate(limit);
+    proofs
 }
 
 fn metrics_chart(
@@ -318,11 +372,16 @@ fn median_peer_clock_offset(peers: &[PeerInfo], now_ms: u64) -> Option<i64> {
 
 #[cfg(test)]
 mod tests {
-    use crate::adapters::ui_data_store::BlockMetricRow;
+    use std::collections::BTreeMap;
+
+    use crate::{
+        adapters::ui_data_store::BlockMetricRow,
+        domain::{Block, BurnBundleSection, FinalizerMode, Transaction},
+    };
 
     use super::{
         MempoolCounts, MetricsLeaderboards, NetworkHealthLocalState, metrics_response,
-        network_health_at,
+        network_health_at, top_mine_proofs,
     };
 
     #[test]
@@ -347,16 +406,68 @@ mod tests {
             finalizer_rank: 0,
         };
 
+        let chain_storage_bytes = BTreeMap::from([("cached-tip".to_string(), 12_345)]);
         let response = metrics_response(
             true,
             true,
             vec![row.clone()],
             MetricsLeaderboards::default(),
+            &chain_storage_bytes,
+            Vec::new(),
         );
 
         assert!(response.preparing);
         assert_eq!(response.latest, Some(row));
         assert!(response.charts.iter().any(|chart| !chart.points.is_empty()));
+        assert_eq!(
+            response
+                .charts
+                .iter()
+                .find(|chart| chart.id == "chain-storage-bytes")
+                .and_then(|chart| chart.points.first())
+                .map(|point| point.value),
+            Some(12_345.0)
+        );
+    }
+
+    #[test]
+    fn mine_proofs_are_ranked_by_achieved_bits() {
+        let mine = |recipient: &str, signature: &str| Transaction::Mine {
+            recipient: recipient.to_string(),
+            anchor: "anchor".to_string(),
+            salt: 0,
+            nonce: 0,
+            difficulty_bits: 4,
+            proof_header: None,
+            signature: signature.to_string(),
+        };
+        let block = Block {
+            height: 7,
+            prev_hash: "0".repeat(64),
+            timestamp_ms: 0,
+            miner: "finalizer".to_string(),
+            finalizer_mode: FinalizerMode::Ticket,
+            finalizer_rank: 0,
+            reward: 0,
+            vdf_rounds: 1,
+            vdf_output: String::new(),
+            leader_proof: None,
+            burn_bundle_section: BurnBundleSection::default(),
+            transactions: vec![
+                mine("four-bits", "0fff"),
+                mine("twelve-bits", "000f"),
+                mine("eight-bits", "00ff"),
+            ],
+            hash: "block-hash".to_string(),
+        };
+
+        let proofs = top_mine_proofs(&[block], 2);
+
+        assert_eq!(proofs.len(), 2);
+        assert_eq!(proofs[0].address, "twelve-bits");
+        assert_eq!(proofs[0].proof_bits, 12);
+        assert_eq!(proofs[1].address, "eight-bits");
+        assert_eq!(proofs[1].proof_bits, 8);
     }
 
     #[test]

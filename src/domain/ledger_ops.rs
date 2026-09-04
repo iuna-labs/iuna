@@ -2,7 +2,10 @@ use std::collections::{BTreeMap, BTreeSet};
 
 use anyhow::{Context, Result, bail};
 
-use crate::compact::{CompactBlockContext, CompactBlockSizeBreakdown};
+use crate::compact::{
+    CompactBlockContext, CompactBlockSizeBreakdown, compact_snapshot_fixed_prefix_size,
+    compact_varint_size,
+};
 use ed25519_dalek::{Signature, Verifier, VerifyingKey};
 
 use super::hex::hex_hash;
@@ -42,6 +45,39 @@ impl Ledger {
                     .map(|breakdown| (block.hash.clone(), breakdown))
             })
             .collect()
+    }
+
+    pub(crate) fn chain_storage_bytes_by_hash(&self) -> Result<BTreeMap<String, u64>> {
+        let mut cumulative_block_bytes = 0_u64;
+        let mut sizes = BTreeMap::new();
+        let fixed_prefix_bytes = compact_snapshot_fixed_prefix_size(
+            &self.genesis_allocations,
+            self.initial_vdf_rounds,
+            &self.launch_profile,
+        )?;
+        for (index, block) in self.chain.iter().enumerate() {
+            let block_bytes = self
+                .compact_block_context
+                .stored_block_size_breakdown(&block.hash)
+                .with_context(|| {
+                    format!(
+                        "missing compact storage size for block {} at height {}",
+                        block.hash, block.height
+                    )
+                })?
+                .total_bytes;
+            cumulative_block_bytes = cumulative_block_bytes
+                .checked_add(u64::try_from(block_bytes).context("block storage size overflows")?)
+                .context("cumulative block storage size overflows")?;
+            let prefix_bytes = fixed_prefix_bytes
+                .checked_add(compact_varint_size(index + 1))
+                .context("snapshot prefix size overflows")?;
+            let chain_bytes = cumulative_block_bytes
+                .checked_add(u64::try_from(prefix_bytes).context("snapshot prefix size overflows")?)
+                .context("chain storage size overflows")?;
+            sizes.insert(block.hash.clone(), chain_bytes);
+        }
+        Ok(sizes)
     }
 }
 

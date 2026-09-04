@@ -69,6 +69,10 @@ impl NodeCore {
         self.ledger.storage_size_breakdowns(blocks)
     }
 
+    pub(crate) fn chain_storage_bytes_by_hash(&self) -> Result<BTreeMap<String, u64>> {
+        self.ledger.chain_storage_bytes_by_hash()
+    }
+
     pub fn burn_leader_ranks_for_block(&self, height: u64) -> Result<Vec<BurnLeaderRank>> {
         self.ledger.burn_leader_ranks_for_block(height)
     }

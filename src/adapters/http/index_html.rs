@@ -1070,7 +1070,7 @@ pub(super) const INDEX_HTML: &str = concat!(
                     <span x-text="mineCountLabel(block)"></span>
                   </div>
                 </button>
-                <button class="block-miner wallet-address-link" type="button" x-text="blockFinalizerLabel(block)" @click="openAddressContact(block.miner)" title="Add or edit contact"></button>
+                <div class="block-miner" x-text="blockFinalizerLabel(block)"></div>
               </article>
             </template>
             <template x-if="loadingInitialBlocks && blocks.length === 0">
@@ -1310,6 +1310,22 @@ pub(super) const INDEX_HTML: &str = concat!(
               </div>
             </article>
           </template>
+          <article class="leaderboard-card">
+            <h3>Top 10 Mine Proof Bits</h3>
+            <div class="leaderboard-list">
+              <template x-for="(row, index) in topMineProofRows()" :key="`${row.proofHash}-${row.height}`">
+                <div class="leaderboard-row">
+                  <div class="leaderboard-rank" :class="leaderboardRankClass(index)" x-text="leaderboardRankLabel(index)"></div>
+                  <div class="leaderboard-main">
+                    <code class="tx-value hash wallet-address-link" role="button" tabindex="0" x-text="shortAddressLabel(row.address)" @click="openAddressContact(row.address)" @keydown.enter.prevent="openAddressContact(row.address)" @keydown.space.prevent="openAddressContact(row.address)" title="Add or edit contact"></code>
+                    <div class="muted">Block #<span x-text="row.height"></span> · target <span x-text="row.difficultyBits"></span> bits · <code x-text="short(row.proofHash)"></code></div>
+                  </div>
+                  <div class="leaderboard-amount"><span x-text="row.proofBits"></span> bits</div>
+                </div>
+              </template>
+              <div class="metrics-empty" x-show="topMineProofRows().length === 0">No entries</div>
+            </div>
+          </article>
         </div>
       </div>
     </section>

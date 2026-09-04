@@ -21,8 +21,8 @@ use super::{
 };
 use super::{
     DATASET_LIMIT, DATASET_PAGE_LIMIT, EXPLORER_LIMIT, EXPLORER_PAGE_LIMIT, HttpState,
-    add_pending_outputs, metrics_response, network_health, ui_blocks_from_indexes, ui_transaction,
-    wallet_transaction_row, wallet_transaction_rows,
+    add_pending_outputs, metrics_response, network_health, top_mine_proofs, ui_blocks_from_indexes,
+    ui_transaction, wallet_transaction_row, wallet_transaction_rows,
 };
 
 pub(super) async fn api_status(State(state): State<HttpState>) -> Json<NodeStatus> {
@@ -360,10 +360,26 @@ pub(super) async fn api_metrics(
         .and_then(Result::ok)
         .map(metrics_leaderboards)
         .unwrap_or_default();
+    let (chain_storage_bytes, top_mine_proofs) = {
+        let node = state.node.lock().await;
+        (
+            node.chain_storage_bytes_by_hash().unwrap_or_default(),
+            top_mine_proofs(node.chain(), 10),
+        )
+    };
     if rows.is_empty() {
-        return Json(empty_metrics_response(enabled, !ready));
+        let mut response = empty_metrics_response(enabled, !ready);
+        response.top_mine_proofs = top_mine_proofs;
+        return Json(response);
     }
-    Json(metrics_response(enabled, !ready, rows, leaderboards))
+    Json(metrics_response(
+        enabled,
+        !ready,
+        rows,
+        leaderboards,
+        &chain_storage_bytes,
+        top_mine_proofs,
+    ))
 }
 
 fn empty_metrics_response(enabled: bool, preparing: bool) -> MetricsResponse {
@@ -373,6 +389,7 @@ fn empty_metrics_response(enabled: bool, preparing: bool) -> MetricsResponse {
         latest: None,
         charts: Vec::new(),
         leaderboards: MetricsLeaderboards::default(),
+        top_mine_proofs: Vec::new(),
     }
 }
 

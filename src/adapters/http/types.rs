@@ -287,6 +287,7 @@ pub(super) struct MetricsResponse {
     pub(super) latest: Option<BlockMetricRow>,
     pub(super) charts: Vec<MetricsChart>,
     pub(super) leaderboards: MetricsLeaderboards,
+    pub(super) top_mine_proofs: Vec<MineProofLeaderboardEntry>,
 }
 
 #[derive(Clone, Debug, Default, PartialEq, Serialize)]
@@ -303,6 +304,16 @@ pub(super) struct LeaderboardEntry {
     pub(super) address: String,
     pub(super) amount: Amount,
     pub(super) count: u64,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub(super) struct MineProofLeaderboardEntry {
+    pub(super) height: u64,
+    pub(super) address: String,
+    pub(super) proof_bits: u32,
+    pub(super) difficulty_bits: u32,
+    pub(super) proof_hash: String,
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize)]
@@ -328,6 +339,7 @@ pub(super) enum MetricsValueKind {
     Number,
     Seconds,
     Iuna,
+    Bytes,
 }
 
 #[derive(Debug, Serialize)]

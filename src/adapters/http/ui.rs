@@ -426,7 +426,7 @@ fn ui_inputs(
         .collect()
 }
 
-fn proof_bits(hex_hash: &str) -> u32 {
+pub(super) fn proof_bits(hex_hash: &str) -> u32 {
     let mut bits = 0_u32;
     for byte in hex_hash.as_bytes() {
         let Some(nibble) = hex_nibble(*byte) else {

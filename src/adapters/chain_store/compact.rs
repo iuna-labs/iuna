@@ -143,17 +143,14 @@ impl DecodeTables {
 pub(super) fn encode_compact_snapshot(snapshot: &ChainSnapshot) -> Result<Vec<u8>> {
     let mut writer = CompactWriter::default();
     let mut tables = EncodeTables::default();
-    writer.bytes(COMPACT_SNAPSHOT_MAGIC);
-    let version = COMPACT_SNAPSHOT_VERSION;
-    writer.u8(version);
-    writer.varint(snapshot.genesis_allocations.len() as u64);
-    for (address, amount) in &snapshot.genesis_allocations {
-        writer.address(address, &mut tables)?;
-        writer.varint(*amount);
-    }
-    writer.varint(snapshot.vdf_rounds);
-    encode_launch_profile(&mut writer, &snapshot.launch_profile);
-    writer.varint(snapshot.blocks.len() as u64);
+    encode_compact_snapshot_prefix(
+        &mut writer,
+        &mut tables,
+        &snapshot.genesis_allocations,
+        snapshot.vdf_rounds,
+        &snapshot.launch_profile,
+        snapshot.blocks.len(),
+    )?;
     let mut expected_prev_hash = "0".repeat(64);
     for (height, block) in snapshot.blocks.iter().enumerate() {
         if block.height != height as u64 {
@@ -174,6 +171,71 @@ pub(super) fn encode_compact_snapshot(snapshot: &ChainSnapshot) -> Result<Vec<u8
         expected_prev_hash = block.hash.clone();
     }
     Ok(writer.into_inner())
+}
+
+pub(crate) fn compact_snapshot_fixed_prefix_size(
+    genesis_allocations: &BTreeMap<String, Amount>,
+    vdf_rounds: u64,
+    launch_profile: &LaunchProfile,
+) -> Result<usize> {
+    let mut writer = CompactWriter::default();
+    let mut tables = EncodeTables::default();
+    encode_compact_snapshot_fixed_prefix(
+        &mut writer,
+        &mut tables,
+        genesis_allocations,
+        vdf_rounds,
+        launch_profile,
+    )?;
+    Ok(writer.into_inner().len())
+}
+
+pub(crate) fn compact_varint_size(mut value: usize) -> usize {
+    let mut bytes = 1;
+    while value >= 0x80 {
+        value >>= 7;
+        bytes += 1;
+    }
+    bytes
+}
+
+fn encode_compact_snapshot_prefix(
+    writer: &mut CompactWriter,
+    tables: &mut EncodeTables,
+    genesis_allocations: &BTreeMap<String, Amount>,
+    vdf_rounds: u64,
+    launch_profile: &LaunchProfile,
+    block_count: usize,
+) -> Result<()> {
+    encode_compact_snapshot_fixed_prefix(
+        writer,
+        tables,
+        genesis_allocations,
+        vdf_rounds,
+        launch_profile,
+    )?;
+    writer.varint(block_count as u64);
+    Ok(())
+}
+
+fn encode_compact_snapshot_fixed_prefix(
+    writer: &mut CompactWriter,
+    tables: &mut EncodeTables,
+    genesis_allocations: &BTreeMap<String, Amount>,
+    vdf_rounds: u64,
+    launch_profile: &LaunchProfile,
+) -> Result<()> {
+    writer.bytes(COMPACT_SNAPSHOT_MAGIC);
+    let version = COMPACT_SNAPSHOT_VERSION;
+    writer.u8(version);
+    writer.varint(genesis_allocations.len() as u64);
+    for (address, amount) in genesis_allocations {
+        writer.address(address, tables)?;
+        writer.varint(*amount);
+    }
+    writer.varint(vdf_rounds);
+    encode_launch_profile(writer, launch_profile);
+    Ok(())
 }
 
 pub(super) fn decode_compact_snapshot(bytes: &[u8]) -> Result<ChainSnapshot> {
@@ -994,9 +1056,10 @@ mod tests {
         COMPACT_SNAPSHOT_MAGIC, COMPACT_SNAPSHOT_VERSION, CompactBlockContext, CompactReader,
         CompactWriter, DecodeTables, EncodeTables, MAX_COMPACT_BYTE_FIELD,
         MAX_COMPACT_GENESIS_ALLOCATIONS, MAX_COMPACT_SNAPSHOT_BLOCKS, MAX_COMPACT_VEC_ITEMS,
-        MIN_SUPPORTED_COMPACT_SNAPSHOT_VERSION, decode_block_body, decode_compact_snapshot,
-        decode_launch_profile, decode_transaction, encode_block_body, encode_compact_snapshot,
-        encode_launch_profile, encode_transaction,
+        MIN_SUPPORTED_COMPACT_SNAPSHOT_VERSION, compact_snapshot_fixed_prefix_size,
+        compact_varint_size, decode_block_body, decode_compact_snapshot, decode_launch_profile,
+        decode_transaction, encode_block_body, encode_compact_snapshot, encode_launch_profile,
+        encode_transaction,
     };
 
     #[test]
@@ -1012,6 +1075,32 @@ mod tests {
         assert_eq!(
             decode_compact_snapshot(&default_bytes).unwrap(),
             default_snapshot
+        );
+        let default_context = CompactBlockContext::for_chain(
+            &default_snapshot.genesis_allocations,
+            &default_snapshot.blocks,
+        )
+        .unwrap();
+        let default_block_bytes = default_snapshot
+            .blocks
+            .iter()
+            .map(|block| {
+                default_context
+                    .stored_block_size_breakdown(&block.hash)
+                    .unwrap()
+                    .total_bytes
+            })
+            .sum::<usize>();
+        assert_eq!(
+            default_bytes.len(),
+            compact_snapshot_fixed_prefix_size(
+                &default_snapshot.genesis_allocations,
+                default_snapshot.vdf_rounds,
+                &default_snapshot.launch_profile,
+            )
+            .unwrap()
+                + compact_varint_size(default_snapshot.blocks.len())
+                + default_block_bytes
         );
 
         let local_ledger = Ledger::new_with_genesis_burns_and_profile(

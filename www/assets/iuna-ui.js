@@ -2008,6 +2008,11 @@ window.iunaApp = function iunaApp() {
       return this.blockchainMetrics?.leaderboards || {};
     },
 
+    topMineProofRows() {
+      const rows = this.blockchainMetrics?.topMineProofs;
+      return Array.isArray(rows) ? rows : [];
+    },
+
     leaderboardRows(kind) {
       const rows = this.metricsLeaderboards()?.[kind];
       return Array.isArray(rows) ? rows : [];
@@ -2318,6 +2323,7 @@ window.iunaApp = function iunaApp() {
       const number = Number(value);
       if (!Number.isFinite(number)) return "-";
       if (chart?.valueKind === "seconds") return `${this.compactNumber(number)}s`;
+      if (chart?.valueKind === "bytes") return `${this.compactNumber(number)} B`;
       return this.compactNumber(number);
     },
 
@@ -2326,6 +2332,7 @@ window.iunaApp = function iunaApp() {
       if (!Number.isFinite(number)) return "-";
       if (chart?.valueKind === "iuna") return `IUNA ${this.compactNumber(number)}`;
       if (chart?.valueKind === "seconds") return `${this.compactNumber(number)} s`;
+      if (chart?.valueKind === "bytes") return `${this.compactNumber(number)} bytes`;
       return `${this.compactNumber(number)}${chart?.unit ? ` ${chart.unit}` : ""}`;
     },
 

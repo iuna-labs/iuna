@@ -51,7 +51,7 @@ use auth_routes::{
     api_auth_status, require_auth_middleware,
 };
 use index_html::INDEX_HTML;
-use metrics::{metrics_response, network_health};
+use metrics::{metrics_response, network_health, top_mine_proofs};
 use request_auth::wallet_password_for_request;
 pub use state::ServeOptions;
 use state::{AuthClientKey, AuthSession, HttpState};
