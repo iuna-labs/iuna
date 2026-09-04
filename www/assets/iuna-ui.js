@@ -210,7 +210,7 @@ window.iunaApp = function iunaApp() {
         ? ["dashboard", "wallet", "mining", "p2p", "chain", "settings"]
         : ["dashboard", "wallet", "p2p", "chain", "settings"];
       if (this.developmentMode()) {
-        tabs.splice(tabs.indexOf("chain") + 1, 0, "metrics");
+        tabs.splice(tabs.indexOf("chain") + 1, 0, "metrics", "leaderboards");
       }
       return tabs;
     },
@@ -249,6 +249,7 @@ window.iunaApp = function iunaApp() {
         p2p: "P2P",
         chain: "Chain",
         metrics: "Metrics",
+        leaderboards: "Leaderboards",
         settings: "Settings",
       }[this.tab] || "iuna";
     },
@@ -697,7 +698,7 @@ window.iunaApp = function iunaApp() {
       const tab = this.tab;
       const shouldLoadBlocks = tab === "chain" || tab === "mining";
       const shouldLoadP2pMetrics = tab === "p2p" && this.developmentMode();
-      const shouldLoadMetrics = tab === "metrics";
+      const shouldLoadMetrics = tab === "metrics" || tab === "leaderboards";
       if (shouldLoadMetrics) {
         await this.refreshMetrics(options);
         this.refreshShellState({ addressBookVersion, silent: true });
@@ -1631,7 +1632,7 @@ window.iunaApp = function iunaApp() {
           enabled ? "Development mode is preparing" : "Development mode turned off"
         );
         await this.refreshConfig();
-        if (!enabled && this.tab === "metrics") {
+        if (!enabled && (this.tab === "metrics" || this.tab === "leaderboards")) {
           this.setTab("settings");
         }
       } catch (error) {
@@ -2017,6 +2018,11 @@ window.iunaApp = function iunaApp() {
     leaderboardRows(kind) {
       const rows = this.metricsLeaderboards()?.[kind];
       return Array.isArray(rows) ? rows : [];
+    },
+
+    leaderboardPlaceholderRanks(rowCount) {
+      const count = Math.min(10, Math.max(0, Number(rowCount) || 0));
+      return Array.from({ length: 10 - count }, (_, index) => count + index);
     },
 
     leaderboardTitle(kind) {

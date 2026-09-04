@@ -179,12 +179,9 @@ pub(super) const INDEX_HTML: &str = concat!(
     .danger-copy { color: #d69a92; line-height: 1.45; }
     .danger-actions { display: flex; justify-content: flex-end; gap: 10px; margin-top: 12px; }
     .metrics-shell { display: grid; gap: 12px; }
-    .metrics-head { display: flex; justify-content: space-between; gap: 12px; align-items: center; }
-    .metrics-head h2 { margin: 0; }
+    .metrics-head { display: flex; justify-content: flex-end; gap: 12px; align-items: center; }
     .metrics-range { flex: 0 0 auto; }
     .metrics-range button { padding: 5px 9px; font-size: 12px; white-space: nowrap; }
-    .metrics-subhead { width: min(100%, 960px); justify-self: center; display: flex; justify-content: space-between; gap: 12px; align-items: baseline; margin-top: 8px; }
-    .metrics-subhead h2 { margin: 0; }
     .metrics-summary { display: grid; grid-template-columns: repeat(auto-fit, minmax(150px, 1fr)); gap: 10px; }
     .metrics-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(min(100%, 430px), 1fr)); gap: 12px; }
     .metric-chart-card { display: grid; gap: 10px; min-width: 0; border: 1px solid #2a3035; border-radius: 8px; padding: 12px; background: #181b1f; }
@@ -205,12 +202,17 @@ pub(super) const INDEX_HTML: &str = concat!(
     .metric-chart-hover-point { position: absolute; width: 8px; height: 8px; border-radius: 50%; background: #d5f55f; pointer-events: none; transform: translate(-50%, -50%); box-shadow: 0 0 0 4px rgba(213, 245, 95, .18); }
     .metric-chart-tooltip { position: absolute; z-index: 1; max-width: min(180px, 80%); border: 1px solid #566d25; border-radius: 6px; padding: 5px 7px; background: #202615; color: #e8edf0; font-size: 11px; font-weight: 850; font-variant-numeric: tabular-nums; line-height: 1.25; pointer-events: none; box-shadow: 0 8px 20px rgba(0, 0, 0, .28); white-space: nowrap; }
     .metrics-empty { border: 1px dashed #3a4248; border-radius: 8px; padding: 14px; color: #8d989f; background: #111316; }
-    .leaderboard-tabs { flex-wrap: wrap; }
-    .leaderboard-grid { width: min(100%, 960px); justify-self: center; display: grid; grid-template-columns: minmax(0, 1fr); gap: 12px; }
+    .leaderboard-tabs { width: 100%; display: flex; gap: 12px; margin-bottom: 16px; border-bottom: 1px solid #2f363c; overflow-x: auto; scrollbar-width: none; }
+    .leaderboard-tabs::-webkit-scrollbar { display: none; }
+    .leaderboard-tabs button { flex: 1 0 auto; border: 0; border-bottom: 2px solid transparent; border-radius: 0; padding: 6px 2px 8px; background: transparent; color: #8d989f; font-size: 12px; white-space: nowrap; }
+    .leaderboard-tabs button:hover { border-bottom-color: #566d25; color: #d6dee2; }
+    .leaderboard-tabs button.active { border-bottom-color: #d5f55f; background: transparent; color: #d5f55f; }
+    .leaderboard-grid { width: min(100%, 400px); justify-self: center; display: grid; grid-template-columns: minmax(0, 1fr); gap: 12px; margin-top: 8px; }
     .leaderboard-card { min-width: 0; border: 1px solid #2a3035; border-radius: 8px; padding: 12px; background: #181b1f; }
     .leaderboard-card h3 { margin: 0 0 10px; }
     .leaderboard-list { display: grid; gap: 8px; }
     .leaderboard-row { display: grid; grid-template-columns: 54px minmax(0, 1fr) auto; gap: 10px; align-items: center; border: 1px solid #2f363c; border-radius: 8px; padding: 9px; background: #111316; }
+    .leaderboard-row-empty { opacity: .45; }
     .leaderboard-rank { display: grid; place-items: center; min-height: 30px; border: 1px solid #3a4248; border-radius: 999px; color: #a8b2b8; font-size: 11px; font-weight: 900; }
     .leaderboard-rank.medal-1 { border-color: #ffd070; background: #2d2513; color: #ffd070; }
     .leaderboard-rank.medal-2 { border-color: #c7d0d5; background: #20252a; color: #e8edf0; }
@@ -489,7 +491,7 @@ pub(super) const INDEX_HTML: &str = concat!(
     @media (max-width: 760px) {
       body { padding-bottom: calc(68px + env(safe-area-inset-bottom)); }
       .app-shell { display: block; min-height: calc(100vh - 68px - env(safe-area-inset-bottom)); min-height: calc(100dvh - 68px - env(safe-area-inset-bottom)); overflow: visible; }
-      .sidebar { position: fixed; z-index: 20; inset: auto 0 0; width: 100%; height: auto; display: grid; grid-template-columns: repeat(auto-fit, minmax(48px, 1fr)); gap: 4px; padding: 6px max(8px, env(safe-area-inset-right)) calc(6px + env(safe-area-inset-bottom)) max(8px, env(safe-area-inset-left)); border: 0; border-top: 1px solid #30363b; background: rgba(21, 23, 26, .96); box-shadow: 0 -12px 32px rgba(0, 0, 0, .28); backdrop-filter: blur(14px); }
+      .sidebar { position: fixed; z-index: 20; inset: auto 0 0; width: 100%; height: auto; display: grid; grid-template-columns: repeat(auto-fit, minmax(34px, 1fr)); gap: 4px; padding: 6px max(8px, env(safe-area-inset-right)) calc(6px + env(safe-area-inset-bottom)) max(8px, env(safe-area-inset-left)); border: 0; border-top: 1px solid #30363b; background: rgba(21, 23, 26, .96); box-shadow: 0 -12px 32px rgba(0, 0, 0, .28); backdrop-filter: blur(14px); }
       .version-panel { display: none; }
       .brand-mark { width: 100%; min-height: 50px; padding: 5px 2px; }
       .side-nav { display: contents; }
@@ -512,11 +514,8 @@ pub(super) const INDEX_HTML: &str = concat!(
       .settings-mode-row .segmented { width: 100%; }
       .settings-mode-row .segmented button { flex: 1; }
       .metrics-head { align-items: flex-start; flex-direction: column; }
-      .metrics-subhead { align-items: stretch; flex-direction: column; }
       .metrics-range { width: 100%; }
       .metrics-range button { flex: 1 1 0; }
-      .leaderboard-tabs { width: 100%; }
-      .leaderboard-tabs button { flex: 1 1 auto; }
       .segmented.setup-mode-picker { grid-template-columns: 1fr; }
       .metrics-grid { grid-template-columns: 1fr; }
       form { width: 100%; align-items: stretch; }
@@ -599,6 +598,10 @@ pub(super) const INDEX_HTML: &str = concat!(
         <button class="nav-button" x-show="developmentMode()" :class="{ active: tab === 'metrics' }" @click="setTab('metrics')" type="button" title="Metrics" aria-label="Metrics">
           <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M4 19V5"></path><path d="M4 19h16"></path><path d="M7 15l3-4 3 2 4-7"></path><path d="M7 17h10"></path></svg>
           <span>Metrics</span>
+        </button>
+        <button class="nav-button" x-show="developmentMode()" :class="{ active: tab === 'leaderboards' }" @click="setTab('leaderboards')" type="button" title="Leaderboards" aria-label="Leaderboards">
+          <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M8 4h8v4a4 4 0 0 1-8 0V4Z"></path><path d="M8 6H5v1a4 4 0 0 0 4 4"></path><path d="M16 6h3v1a4 4 0 0 1-4 4"></path><path d="M12 12v4"></path><path d="M8 20h8"></path><path d="M9 16h6v4H9z"></path></svg>
+          <span>Leaders</span>
         </button>
       </nav>
       <button class="settings-button" :class="{ active: tab === 'settings' }" type="button" @click="setTab('settings')" title="Settings" aria-label="Settings">
@@ -1231,7 +1234,6 @@ pub(super) const INDEX_HTML: &str = concat!(
     <section x-show="tab === 'metrics'">
       <div class="metrics-shell">
         <div class="metrics-head">
-          <h2>Metrics</h2>
           <div class="segmented metrics-range" role="group" aria-label="Metrics block range">
             <button type="button" :class="{ active: metricsRange === 100 }" @click="setMetricsRange(100)">Last 100</button>
             <button type="button" :class="{ active: metricsRange === 1000 }" @click="setMetricsRange(1000)">Last 1000</button>
@@ -1293,18 +1295,19 @@ pub(super) const INDEX_HTML: &str = concat!(
             </article>
           </template>
         </div>
-        <div class="metrics-subhead">
-          <h2>Leaderboards</h2>
-          <div class="segmented leaderboard-tabs" role="tablist" aria-label="Leaderboard">
-            <button type="button" role="tab" :aria-selected="leaderboardTab === 'balances'" :class="{ active: leaderboardTab === 'balances' }" @click="leaderboardTab = 'balances'">Balance</button>
-            <button type="button" role="tab" :aria-selected="leaderboardTab === 'miners'" :class="{ active: leaderboardTab === 'miners' }" @click="leaderboardTab = 'miners'">Miners</button>
-            <button type="button" role="tab" :aria-selected="leaderboardTab === 'burners'" :class="{ active: leaderboardTab === 'burners' }" @click="leaderboardTab = 'burners'">Burners</button>
-            <button type="button" role="tab" :aria-selected="leaderboardTab === 'mineProofs'" :class="{ active: leaderboardTab === 'mineProofs' }" @click="leaderboardTab = 'mineProofs'">Mine Proof Bits</button>
-          </div>
-        </div>
+      </div>
+    </section>
+    <section x-show="developmentMode() && tab === 'leaderboards'">
         <div class="leaderboard-grid">
-          <template x-if="leaderboardTab !== 'mineProofs'">
-            <article class="leaderboard-card">
+          <article class="leaderboard-card">
+            <div class="leaderboard-tabs" role="tablist" aria-label="Leaderboard">
+              <button type="button" role="tab" :aria-selected="leaderboardTab === 'balances'" :class="{ active: leaderboardTab === 'balances' }" @click="leaderboardTab = 'balances'">Balance</button>
+              <button type="button" role="tab" :aria-selected="leaderboardTab === 'miners'" :class="{ active: leaderboardTab === 'miners' }" @click="leaderboardTab = 'miners'">Miners</button>
+              <button type="button" role="tab" :aria-selected="leaderboardTab === 'burners'" :class="{ active: leaderboardTab === 'burners' }" @click="leaderboardTab = 'burners'">Burners</button>
+              <button type="button" role="tab" :aria-selected="leaderboardTab === 'mineProofs'" :class="{ active: leaderboardTab === 'mineProofs' }" @click="leaderboardTab = 'mineProofs'">Proof bits</button>
+            </div>
+            <template x-if="leaderboardTab !== 'mineProofs'">
+              <div>
               <h3 x-text="leaderboardTitle(leaderboardTab)"></h3>
               <div class="leaderboard-list">
                 <template x-for="(row, index) in leaderboardRows(leaderboardTab)" :key="`${leaderboardTab}-${row.address}`">
@@ -1317,12 +1320,18 @@ pub(super) const INDEX_HTML: &str = concat!(
                     <div class="leaderboard-amount" x-text="leaderboardAmountLabel(row)"></div>
                   </div>
                 </template>
-                <div class="metrics-empty" x-show="leaderboardRows(leaderboardTab).length === 0">No entries</div>
+                <template x-for="index in leaderboardPlaceholderRanks(leaderboardRows(leaderboardTab).length)" :key="`${leaderboardTab}-empty-${index}`">
+                  <div class="leaderboard-row leaderboard-row-empty" aria-hidden="true">
+                    <div class="leaderboard-rank" x-text="`#${index + 1}`"></div>
+                    <div class="leaderboard-main">&nbsp;</div>
+                    <div class="leaderboard-amount">&nbsp;</div>
+                  </div>
+                </template>
               </div>
-            </article>
-          </template>
-          <template x-if="leaderboardTab === 'mineProofs'">
-            <article class="leaderboard-card">
+              </div>
+            </template>
+            <template x-if="leaderboardTab === 'mineProofs'">
+              <div>
               <h3>Top 10 Mine Proof Bits</h3>
               <div class="leaderboard-list">
                 <template x-for="(row, index) in topMineProofRows()" :key="`${row.proofHash}-${row.height}`">
@@ -1335,12 +1344,18 @@ pub(super) const INDEX_HTML: &str = concat!(
                     <div class="leaderboard-amount"><span x-text="row.proofBits"></span> bits</div>
                   </div>
                 </template>
-                <div class="metrics-empty" x-show="topMineProofRows().length === 0">No entries</div>
+                <template x-for="index in leaderboardPlaceholderRanks(topMineProofRows().length)" :key="`mine-proofs-empty-${index}`">
+                  <div class="leaderboard-row leaderboard-row-empty" aria-hidden="true">
+                    <div class="leaderboard-rank" x-text="`#${index + 1}`"></div>
+                    <div class="leaderboard-main">&nbsp;</div>
+                    <div class="leaderboard-amount">&nbsp;</div>
+                  </div>
+                </template>
               </div>
-            </article>
-          </template>
+              </div>
+            </template>
+          </article>
         </div>
-      </div>
     </section>
     <section x-show="tab === 'settings'">
       <div class="settings-grid">
@@ -1358,19 +1373,6 @@ pub(super) const INDEX_HTML: &str = concat!(
               <input type="checkbox" :checked="advancedMode()" @change="setUiMode($event.target.checked ? 'advanced' : 'basic')">
               <span class="toggle-track" aria-hidden="true"><span class="toggle-thumb"></span></span>
               <span class="toggle-text" x-text="advancedMode() ? 'Node' : 'Wallet'"></span>
-            </label>
-          </div>
-        </div>
-        <div class="panel">
-          <div class="settings-mode-row">
-            <div class="settings-mode-copy">
-              <div class="settings-mode-title">Development mode</div>
-              <div class="muted" x-text="developmentMode() ? 'Detailed P2P data and the metrics screen are available.' : 'P2P stays focused on a simple peer list.'"></div>
-            </div>
-            <label class="toggle-switch" :class="{ active: keepTrackOfMetrics }">
-              <input type="checkbox" :checked="keepTrackOfMetrics" @change="setKeepTrackOfMetrics($event.target.checked)">
-              <span class="toggle-track" aria-hidden="true"><span class="toggle-thumb"></span></span>
-              <span class="toggle-text" x-text="developmentMode() ? 'On' : 'Off'"></span>
             </label>
           </div>
         </div>
@@ -1434,6 +1436,19 @@ pub(super) const INDEX_HTML: &str = concat!(
             <label>Confirm new password<input x-model="settingsPasswordConfirm" type="password" autocomplete="new-password" minlength="12" required></label>
             <div class="setup-actions"><button class="primary" type="submit">Change password</button></div>
           </form>
+        </div>
+        <div class="panel">
+          <div class="settings-mode-row">
+            <div class="settings-mode-copy">
+              <div class="settings-mode-title">Development mode</div>
+              <div class="muted" x-text="developmentMode() ? 'Detailed P2P data, metrics, and leaderboards are available.' : 'P2P stays focused on a simple peer list.'"></div>
+            </div>
+            <label class="toggle-switch" :class="{ active: keepTrackOfMetrics }">
+              <input type="checkbox" :checked="keepTrackOfMetrics" @change="setKeepTrackOfMetrics($event.target.checked)">
+              <span class="toggle-track" aria-hidden="true"><span class="toggle-thumb"></span></span>
+              <span class="toggle-text" x-text="developmentMode() ? 'On' : 'Off'"></span>
+            </label>
+          </div>
         </div>
         <div class="panel danger-panel">
           <h3>Danger Zone</h3>
