@@ -34,12 +34,17 @@ pub(super) const INDEX_HTML: &str = concat!(
     .nav-button svg.chain-icon { stroke-width: 1.35; }
     .nav-button span { font-size: 11px; font-weight: 800; }
     .nav-button:hover, .nav-button.active { background: #202328; border-color: #3b4448; color: #d5f55f; }
-    .settings-button { margin-top: auto; width: 64px; min-height: 54px; display: grid; place-items: center; gap: 4px; border: 1px solid transparent; border-radius: 8px; padding: 7px 4px; color: #9fa8ad; background: transparent; text-align: center; }
+    .sidebar-bottom-actions { width: 100%; display: grid; gap: 6px; margin-top: auto; }
+    .discord-button { width: 64px; height: 34px; min-height: 34px; display: grid; place-items: center; gap: 2px; border: 1px solid rgba(88, 101, 242, .72); border-radius: 8px; padding: 5px 4px; background: rgba(88, 101, 242, .16); color: #eef1ff; text-align: center; text-decoration: none; }
+    .discord-button svg { width: 18px; height: 18px; fill: currentColor; }
+    .discord-button span { display: none; font-size: 10px; font-weight: 800; }
+    .discord-button:hover { border-color: #8e99ff; background: rgba(88, 101, 242, .28); color: #fff; }
+    .settings-button { width: 64px; min-height: 54px; display: grid; place-items: center; gap: 4px; border: 1px solid transparent; border-radius: 8px; padding: 7px 4px; color: #9fa8ad; background: transparent; text-align: center; }
     .settings-button svg { width: 23px; height: 23px; stroke: currentColor; stroke-width: 1.9; fill: none; }
     .settings-button span { display: none; font-size: 10px; font-weight: 800; }
     .settings-button:hover, .settings-button.active { background: #202328; border-color: #3b4448; color: #d5f55f; }
-    .brand-mark, .nav-button, .settings-button { transition: filter .1s ease, background-color .14s ease, border-color .14s ease, color .14s ease; }
-    .brand-mark:active, .nav-button:active, .settings-button:active { filter: brightness(1.14); }
+    .brand-mark, .nav-button, .discord-button, .settings-button { transition: filter .1s ease, background-color .14s ease, border-color .14s ease, color .14s ease; }
+    .brand-mark:active, .nav-button:active, .discord-button:active, .settings-button:active { filter: brightness(1.14); }
     .version-panel { width: 64px; display: grid; gap: 4px; justify-items: center; border: 1px solid transparent; border-radius: 8px; padding: 7px 4px; color: #7f888e; background: transparent; font-size: 10px; font-weight: 850; text-align: center; }
     .version-panel.update { border-color: #566d25; color: #d5f55f; background: #1c2516; cursor: pointer; }
     .version-panel.checking { color: #a8b2b8; }
@@ -130,7 +135,7 @@ pub(super) const INDEX_HTML: &str = concat!(
     .sync-progress-fill { height: 100%; border-radius: inherit; background: linear-gradient(90deg, #8de9cd, #d5f55f); transition: width .35s ease; }
     .sync-progress-label { color: #d5f55f; font-size: 14px; font-weight: 850; font-variant-numeric: tabular-nums; }
     @keyframes sync-spin { to { transform: rotate(360deg); } }
-    @media (prefers-reduced-motion: reduce) { .sync-spinner { animation-duration: 1.8s; } .sync-progress-fill, .brand-mark, .nav-button, .settings-button { transition: none; } .brand-mark:hover::after { animation: none; } }
+    @media (prefers-reduced-motion: reduce) { .sync-spinner { animation-duration: 1.8s; } .sync-progress-fill, .brand-mark, .nav-button, .discord-button, .settings-button { transition: none; } .brand-mark:hover::after { animation: none; } }
     .setup-modal { width: min(980px, 100%); max-height: calc(100vh - 44px); overflow: auto; border: 1px solid #3b4448; border-radius: 8px; padding: 18px; background: #181b1f; box-shadow: 0 24px 80px rgba(0, 0, 0, .42); }
     .setup-modal-head { display: grid; gap: 5px; margin-bottom: 16px; }
     .setup-modal-head h2 { margin: 0; font-size: 24px; }
@@ -497,7 +502,8 @@ pub(super) const INDEX_HTML: &str = concat!(
       .side-nav { display: contents; }
       .nav-button { width: 100%; min-width: 0; min-height: 50px; gap: 2px; padding: 5px 2px; }
       .nav-button span { font-size: 10px; }
-      .settings-button { margin-top: 0; width: 100%; min-width: 0; min-height: 50px; gap: 2px; padding: 5px 2px; }
+      .discord-button, .settings-button { width: 100%; min-width: 0; min-height: 50px; height: 50px; gap: 2px; padding: 5px 2px; }
+      .sidebar-bottom-actions { display: contents; }
       .settings-button svg { width: 20px; height: 20px; }
       .settings-button span { display: block; }
       .content { min-height: calc(100vh - 68px - env(safe-area-inset-bottom)); min-height: calc(100dvh - 68px - env(safe-area-inset-bottom)); padding: 14px 12px 24px; }
@@ -557,9 +563,9 @@ pub(super) const INDEX_HTML: &str = concat!(
     @media (max-width: 420px) {
       .content { padding-inline: 9px; }
       .sidebar { gap: 2px; padding-inline: 4px; }
-      .nav-button, .settings-button { min-height: 48px; }
-      .nav-button svg, .settings-button svg { width: 19px; height: 19px; }
-      .nav-button span, .settings-button span { font-size: 9px; }
+      .nav-button, .discord-button, .settings-button { min-height: 48px; }
+      .nav-button svg, .discord-button svg, .settings-button svg { width: 19px; height: 19px; }
+      .nav-button span, .discord-button span, .settings-button span { font-size: 9px; }
       .panel, .metric, .block-rail-wrap { border-radius: 7px; padding: 10px; }
       .grid, .peer-summary, .network-health-grid, .metrics-summary, .tx-modal-summary { grid-template-columns: 1fr 1fr; }
       .wallet-balance-line { width: 100%; justify-content: space-between; }
@@ -604,15 +610,21 @@ pub(super) const INDEX_HTML: &str = concat!(
           <span>Leaders</span>
         </button>
       </nav>
-      <button class="settings-button" :class="{ active: tab === 'settings' }" type="button" @click="setTab('settings')" title="Settings" aria-label="Settings">
-        <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M9.7 3.2 9.2 5.5a7.2 7.2 0 0 0-1.4.8L5.6 5.6 3.2 9.8l1.7 1.6a7.8 7.8 0 0 0 0 1.6l-1.7 1.6 2.4 4.2 2.2-.7a7.2 7.2 0 0 0 1.4.8l.5 2.3h4.8l.5-2.3a7.2 7.2 0 0 0 1.4-.8l2.2.7 2.4-4.2-1.7-1.6a7.8 7.8 0 0 0 0-1.6L21 9.8l-2.4-4.2-2.2.7a7.2 7.2 0 0 0-1.4-.8l-.5-2.3H9.7Z"></path><circle cx="12" cy="12.2" r="3.1"></circle></svg>
-        <span>Settings</span>
-      </button>
-      <button class="version-panel" type="button" :class="{ update: updateAvailable(), checking: releaseCheckState === 'checking', failed: releaseCheckState === 'failed' }" :title="versionPanelTitle()" @click="openLatestRelease">
+      <div class="sidebar-bottom-actions">
+        <button class="settings-button" :class="{ active: tab === 'settings' }" type="button" @click="setTab('settings')" title="Settings" aria-label="Settings">
+          <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M9.7 3.2 9.2 5.5a7.2 7.2 0 0 0-1.4.8L5.6 5.6 3.2 9.8l1.7 1.6a7.8 7.8 0 0 0 0 1.6l-1.7 1.6 2.4 4.2 2.2-.7a7.2 7.2 0 0 0 1.4.8l.5 2.3h4.8l.5-2.3a7.2 7.2 0 0 0 1.4-.8l2.2.7 2.4-4.2-1.7-1.6a7.8 7.8 0 0 0 0-1.6L21 9.8l-2.4-4.2-2.2.7a7.2 7.2 0 0 0-1.4-.8l-.5-2.3H9.7Z"></path><circle cx="12" cy="12.2" r="3.1"></circle></svg>
+          <span>Settings</span>
+        </button>
+        <button class="version-panel" type="button" :class="{ update: updateAvailable(), checking: releaseCheckState === 'checking', failed: releaseCheckState === 'failed' }" :title="versionPanelTitle()" @click="openLatestRelease">
         <span class="version-dot" aria-hidden="true"></span>
         <span class="version-label" x-text="appVersionLabel()"></span>
         <span class="version-update" x-show="updateAvailable()">Update</span>
-      </button>
+        </button>
+        <a class="discord-button" href="https://discord.gg/JcXRSSDhS" target="_blank" rel="noopener noreferrer" title="Discord" aria-label="Discord">
+        <svg viewBox="0 0 24 24" aria-hidden="true" focusable="false"><path d="M19.54 5.34A16.9 16.9 0 0 0 15.35 4a11.7 11.7 0 0 0-.54 1.1 15.8 15.8 0 0 0-4.62 0A11.7 11.7 0 0 0 9.65 4a16.9 16.9 0 0 0-4.19 1.34C2.81 9.28 2.09 13.12 2.45 16.9A16.8 16.8 0 0 0 7.59 19.5a12.8 12.8 0 0 0 1.1-1.79 10.9 10.9 0 0 1-1.73-.83c.14-.1.28-.21.42-.32a12.1 12.1 0 0 0 9.24 0c.14.11.28.22.42.32-.55.32-1.13.6-1.74.83.32.63.69 1.23 1.1 1.79a16.8 16.8 0 0 0 5.15-2.6c.42-4.38-.72-8.18-2.01-11.56ZM9.32 14.57c-1 0-1.82-.92-1.82-2.04 0-1.13.8-2.05 1.82-2.05 1.02 0 1.84.92 1.82 2.05 0 1.12-.8 2.04-1.82 2.04Zm5.36 0c-1 0-1.82-.92-1.82-2.04 0-1.13.8-2.05 1.82-2.05 1.02 0 1.84.92 1.82 2.05 0 1.12-.8 2.04-1.82 2.04Z"></path></svg>
+        <span>Discord</span>
+        </a>
+      </div>
     </aside>
 
     <main class="content">
