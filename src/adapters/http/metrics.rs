@@ -176,8 +176,8 @@ pub(super) fn top_mine_proofs(blocks: &[Block], limit: usize) -> Vec<MineProofLe
         right
             .proof_bits
             .cmp(&left.proof_bits)
-            .then_with(|| left.proof_hash.cmp(&right.proof_hash))
             .then_with(|| left.height.cmp(&right.height))
+            .then_with(|| left.proof_hash.cmp(&right.proof_hash))
     });
     proofs.truncate(limit);
     proofs
@@ -441,8 +441,8 @@ mod tests {
             proof_header: None,
             signature: signature.to_string(),
         };
-        let block = Block {
-            height: 7,
+        let block = |height, transactions| Block {
+            height,
             prev_hash: "0".repeat(64),
             timestamp_ms: 0,
             miner: "finalizer".to_string(),
@@ -453,21 +453,36 @@ mod tests {
             vdf_output: String::new(),
             leader_proof: None,
             burn_bundle_section: BurnBundleSection::default(),
-            transactions: vec![
-                mine("four-bits", "0fff"),
-                mine("twelve-bits", "000f"),
-                mine("eight-bits", "00ff"),
-            ],
-            hash: "block-hash".to_string(),
+            transactions,
+            hash: format!("block-{height}"),
         };
 
-        let proofs = top_mine_proofs(&[block], 2);
+        let proofs = top_mine_proofs(
+            &[
+                block(
+                    7,
+                    vec![mine("four-bits", "0fff"), mine("late-twelve-bits", "000f")],
+                ),
+                block(
+                    3,
+                    vec![
+                        mine("early-twelve-bits", "000a"),
+                        mine("eight-bits", "00ff"),
+                    ],
+                ),
+            ],
+            3,
+        );
 
-        assert_eq!(proofs.len(), 2);
-        assert_eq!(proofs[0].address, "twelve-bits");
+        assert_eq!(proofs.len(), 3);
+        assert_eq!(proofs[0].address, "early-twelve-bits");
         assert_eq!(proofs[0].proof_bits, 12);
-        assert_eq!(proofs[1].address, "eight-bits");
-        assert_eq!(proofs[1].proof_bits, 8);
+        assert_eq!(proofs[0].height, 3);
+        assert_eq!(proofs[1].address, "late-twelve-bits");
+        assert_eq!(proofs[1].proof_bits, 12);
+        assert_eq!(proofs[1].height, 7);
+        assert_eq!(proofs[2].address, "eight-bits");
+        assert_eq!(proofs[2].proof_bits, 8);
     }
 
     #[test]

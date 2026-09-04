@@ -23,6 +23,7 @@ window.iunaApp = function iunaApp() {
     loadingMetrics: false,
     metricsRequestSeq: 0,
     metricHover: null,
+    leaderboardTab: "balances",
     metricsRange: (() => {
       try {
         const stored = localStorage.getItem("iunaMetricsRange");
@@ -2016,6 +2017,14 @@ window.iunaApp = function iunaApp() {
     leaderboardRows(kind) {
       const rows = this.metricsLeaderboards()?.[kind];
       return Array.isArray(rows) ? rows : [];
+    },
+
+    leaderboardTitle(kind) {
+      return {
+        balances: "Top 10 Balance",
+        miners: "Top 10 Miners",
+        burners: "Top 10 Burners",
+      }[kind] || "Leaderboard";
     },
 
     leaderboardRankLabel(index) {

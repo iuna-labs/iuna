@@ -183,7 +183,7 @@ pub(super) const INDEX_HTML: &str = concat!(
     .metrics-head h2 { margin: 0; }
     .metrics-range { flex: 0 0 auto; }
     .metrics-range button { padding: 5px 9px; font-size: 12px; white-space: nowrap; }
-    .metrics-subhead { display: flex; justify-content: space-between; gap: 12px; align-items: baseline; margin-top: 8px; }
+    .metrics-subhead { width: min(100%, 960px); justify-self: center; display: flex; justify-content: space-between; gap: 12px; align-items: baseline; margin-top: 8px; }
     .metrics-subhead h2 { margin: 0; }
     .metrics-summary { display: grid; grid-template-columns: repeat(auto-fit, minmax(150px, 1fr)); gap: 10px; }
     .metrics-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(min(100%, 430px), 1fr)); gap: 12px; }
@@ -205,7 +205,8 @@ pub(super) const INDEX_HTML: &str = concat!(
     .metric-chart-hover-point { position: absolute; width: 8px; height: 8px; border-radius: 50%; background: #d5f55f; pointer-events: none; transform: translate(-50%, -50%); box-shadow: 0 0 0 4px rgba(213, 245, 95, .18); }
     .metric-chart-tooltip { position: absolute; z-index: 1; max-width: min(180px, 80%); border: 1px solid #566d25; border-radius: 6px; padding: 5px 7px; background: #202615; color: #e8edf0; font-size: 11px; font-weight: 850; font-variant-numeric: tabular-nums; line-height: 1.25; pointer-events: none; box-shadow: 0 8px 20px rgba(0, 0, 0, .28); white-space: nowrap; }
     .metrics-empty { border: 1px dashed #3a4248; border-radius: 8px; padding: 14px; color: #8d989f; background: #111316; }
-    .leaderboard-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(min(100%, 300px), 1fr)); gap: 12px; }
+    .leaderboard-tabs { flex-wrap: wrap; }
+    .leaderboard-grid { width: min(100%, 960px); justify-self: center; display: grid; grid-template-columns: minmax(0, 1fr); gap: 12px; }
     .leaderboard-card { min-width: 0; border: 1px solid #2a3035; border-radius: 8px; padding: 12px; background: #181b1f; }
     .leaderboard-card h3 { margin: 0 0 10px; }
     .leaderboard-list { display: grid; gap: 8px; }
@@ -386,6 +387,7 @@ pub(super) const INDEX_HTML: &str = concat!(
     .block-rail-head { display: flex; justify-content: space-between; gap: 10px; align-items: center; margin-bottom: 10px; }
     .block-rail { display: flex; gap: 8px; overflow-x: auto; padding: 1px 0 10px; scroll-snap-type: x proximity; }
     .block-card { flex: 0 0 122px; min-height: 100px; display: grid; gap: 6px; border: 1px solid #2f363c; border-radius: 8px; padding: 9px; background: #111316; color: #e8edf0; text-align: left; scroll-snap-align: start; }
+    button.block-card { cursor: pointer; user-select: none; }
     .block-card:hover { border-color: #d5f55f; color: #d5f55f; }
     .block-card.selected { background: #202616; border-color: #d5f55f; box-shadow: inset 0 0 0 1px #d5f55f; }
     .block-card.new-block { animation: block-arrive .45s ease both; }
@@ -510,8 +512,11 @@ pub(super) const INDEX_HTML: &str = concat!(
       .settings-mode-row .segmented { width: 100%; }
       .settings-mode-row .segmented button { flex: 1; }
       .metrics-head { align-items: flex-start; flex-direction: column; }
+      .metrics-subhead { align-items: stretch; flex-direction: column; }
       .metrics-range { width: 100%; }
       .metrics-range button { flex: 1 1 0; }
+      .leaderboard-tabs { width: 100%; }
+      .leaderboard-tabs button { flex: 1 1 auto; }
       .segmented.setup-mode-picker { grid-template-columns: 1fr; }
       .metrics-grid { grid-template-columns: 1fr; }
       form { width: 100%; align-items: stretch; }
@@ -1061,17 +1066,17 @@ pub(super) const INDEX_HTML: &str = concat!(
           </div>
           <div class="block-rail" x-ref="blockRail" @scroll.debounce.200ms="maybeLoadOlderBlocks($event)">
             <template x-for="block in blocks" :key="block.hash">
-              <article class="block-card" :class="{ selected: selectedBlock?.hash === block.hash, 'new-block': newBlockHashes.has(block.hash) }">
-                <button class="block-card-select" @click="selectBlock(block)" type="button" title="Open block details">
+              <button class="block-card" :class="{ selected: selectedBlock?.hash === block.hash, 'new-block': newBlockHashes.has(block.hash) }" @click="selectBlock(block)" type="button" title="Open block details">
+                <div class="block-card-select">
                   <div class="block-height" x-text="block.height"></div>
                   <div class="block-meta">
                     <span x-text="burnCountLabel(block)"></span>
                     <span x-text="transferCountLabel(block)"></span>
                     <span x-text="mineCountLabel(block)"></span>
                   </div>
-                </button>
+                </div>
                 <div class="block-miner" x-text="blockFinalizerLabel(block)"></div>
-              </article>
+              </button>
             </template>
             <template x-if="loadingInitialBlocks && blocks.length === 0">
               <div class="block-skeleton-group" aria-hidden="true">
@@ -1290,42 +1295,50 @@ pub(super) const INDEX_HTML: &str = concat!(
         </div>
         <div class="metrics-subhead">
           <h2>Leaderboards</h2>
+          <div class="segmented leaderboard-tabs" role="tablist" aria-label="Leaderboard">
+            <button type="button" role="tab" :aria-selected="leaderboardTab === 'balances'" :class="{ active: leaderboardTab === 'balances' }" @click="leaderboardTab = 'balances'">Balance</button>
+            <button type="button" role="tab" :aria-selected="leaderboardTab === 'miners'" :class="{ active: leaderboardTab === 'miners' }" @click="leaderboardTab = 'miners'">Miners</button>
+            <button type="button" role="tab" :aria-selected="leaderboardTab === 'burners'" :class="{ active: leaderboardTab === 'burners' }" @click="leaderboardTab = 'burners'">Burners</button>
+            <button type="button" role="tab" :aria-selected="leaderboardTab === 'mineProofs'" :class="{ active: leaderboardTab === 'mineProofs' }" @click="leaderboardTab = 'mineProofs'">Mine Proof Bits</button>
+          </div>
         </div>
         <div class="leaderboard-grid">
-          <template x-for="board in [{ key: 'balances', title: 'Top 10 Balance' }, { key: 'miners', title: 'Top 10 Miners' }, { key: 'burners', title: 'Top 10 Burners' }]" :key="board.key">
+          <template x-if="leaderboardTab !== 'mineProofs'">
             <article class="leaderboard-card">
-              <h3 x-text="board.title"></h3>
+              <h3 x-text="leaderboardTitle(leaderboardTab)"></h3>
               <div class="leaderboard-list">
-                <template x-for="(row, index) in leaderboardRows(board.key)" :key="`${board.key}-${row.address}`">
+                <template x-for="(row, index) in leaderboardRows(leaderboardTab)" :key="`${leaderboardTab}-${row.address}`">
                   <div class="leaderboard-row">
                     <div class="leaderboard-rank" :class="leaderboardRankClass(index)" x-text="leaderboardRankLabel(index)"></div>
                     <div class="leaderboard-main">
                       <code class="tx-value hash wallet-address-link" role="button" tabindex="0" x-text="shortAddressLabel(row.address)" @click="openAddressContact(row.address)" @keydown.enter.prevent="openAddressContact(row.address)" @keydown.space.prevent="openAddressContact(row.address)" title="Add or edit contact"></code>
-                      <div class="muted" x-text="leaderboardCountLabel(board.key, row)"></div>
+                      <div class="muted" x-text="leaderboardCountLabel(leaderboardTab, row)"></div>
                     </div>
                     <div class="leaderboard-amount" x-text="leaderboardAmountLabel(row)"></div>
                   </div>
                 </template>
-                <div class="metrics-empty" x-show="leaderboardRows(board.key).length === 0">No entries</div>
+                <div class="metrics-empty" x-show="leaderboardRows(leaderboardTab).length === 0">No entries</div>
               </div>
             </article>
           </template>
-          <article class="leaderboard-card">
-            <h3>Top 10 Mine Proof Bits</h3>
-            <div class="leaderboard-list">
-              <template x-for="(row, index) in topMineProofRows()" :key="`${row.proofHash}-${row.height}`">
-                <div class="leaderboard-row">
-                  <div class="leaderboard-rank" :class="leaderboardRankClass(index)" x-text="leaderboardRankLabel(index)"></div>
-                  <div class="leaderboard-main">
-                    <code class="tx-value hash wallet-address-link" role="button" tabindex="0" x-text="shortAddressLabel(row.address)" @click="openAddressContact(row.address)" @keydown.enter.prevent="openAddressContact(row.address)" @keydown.space.prevent="openAddressContact(row.address)" title="Add or edit contact"></code>
-                    <div class="muted">Block #<span x-text="row.height"></span> · target <span x-text="row.difficultyBits"></span> bits · <code x-text="short(row.proofHash)"></code></div>
+          <template x-if="leaderboardTab === 'mineProofs'">
+            <article class="leaderboard-card">
+              <h3>Top 10 Mine Proof Bits</h3>
+              <div class="leaderboard-list">
+                <template x-for="(row, index) in topMineProofRows()" :key="`${row.proofHash}-${row.height}`">
+                  <div class="leaderboard-row">
+                    <div class="leaderboard-rank" :class="leaderboardRankClass(index)" x-text="leaderboardRankLabel(index)"></div>
+                    <div class="leaderboard-main">
+                      <code class="tx-value hash wallet-address-link" role="button" tabindex="0" x-text="shortAddressLabel(row.address)" @click="openAddressContact(row.address)" @keydown.enter.prevent="openAddressContact(row.address)" @keydown.space.prevent="openAddressContact(row.address)" title="Add or edit contact"></code>
+                      <div class="muted">Block #<span x-text="row.height"></span></div>
+                    </div>
+                    <div class="leaderboard-amount"><span x-text="row.proofBits"></span> bits</div>
                   </div>
-                  <div class="leaderboard-amount"><span x-text="row.proofBits"></span> bits</div>
-                </div>
-              </template>
-              <div class="metrics-empty" x-show="topMineProofRows().length === 0">No entries</div>
-            </div>
-          </article>
+                </template>
+                <div class="metrics-empty" x-show="topMineProofRows().length === 0">No entries</div>
+              </div>
+            </article>
+          </template>
         </div>
       </div>
     </section>
