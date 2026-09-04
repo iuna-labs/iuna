@@ -1,5 +1,6 @@
 use std::collections::BTreeMap;
 
+use crate::compact::CompactBlockSizeBreakdown;
 use crate::domain::{
     Amount, Block, BurnLeaderRank, FinalizerMode, MINE_REWARD, OutPoint, Transaction, TxInput,
     TxOutput,
@@ -155,10 +156,14 @@ pub(super) fn ui_blocks_from_indexes(
     blocks: Vec<Block>,
     outputs: &BTreeMap<OutPoint, TxOutput>,
     burn_leader_ranks: &BTreeMap<String, Vec<BurnLeaderRank>>,
+    storage_size_breakdowns: &BTreeMap<String, CompactBlockSizeBreakdown>,
 ) -> Vec<UiBlock> {
     blocks
         .into_iter()
-        .map(|block| ui_block(block, outputs, burn_leader_ranks))
+        .map(|block| {
+            let storage_size = storage_size_breakdowns.get(&block.hash);
+            ui_block(block, outputs, burn_leader_ranks, storage_size)
+        })
         .collect()
 }
 
@@ -166,6 +171,7 @@ pub(super) fn ui_block(
     block: Block,
     outputs: &BTreeMap<OutPoint, TxOutput>,
     burn_leader_ranks: &BTreeMap<String, Vec<BurnLeaderRank>>,
+    storage_size: Option<&CompactBlockSizeBreakdown>,
 ) -> UiBlock {
     let ranks = burn_leader_ranks
         .get(&block.hash)
@@ -177,12 +183,19 @@ pub(super) fn ui_block(
         .iter()
         .fold(0_u64, |total, tx| total.saturating_add(tx.fee()));
     let total_fees = public_fees;
-    let transaction_bytes = block
-        .transactions
-        .iter()
-        .map(|tx| tx.serialized_size_bytes().unwrap_or_default())
-        .sum::<usize>();
-    let transaction_byte_breakdown = transaction_byte_breakdown(&block.transactions);
+    let transaction_bytes = storage_size
+        .map(|size| size.transaction_bytes)
+        .unwrap_or_else(|| {
+            block
+                .transactions
+                .iter()
+                .map(|tx| tx.serialized_size_bytes().unwrap_or_default())
+                .sum()
+        });
+    let transaction_byte_breakdown = transaction_byte_breakdown(&block.transactions, storage_size);
+    let header_and_proof_bytes = storage_size
+        .map(|size| size.header_and_proof_bytes)
+        .unwrap_or_default();
     let transactions = block
         .transactions
         .iter()
@@ -204,13 +217,21 @@ pub(super) fn ui_block(
                 .collect(),
         })
         .collect();
-    let burn_bundle_bytes = burn_bundles
-        .iter()
-        .map(|bundle: &UiBurnBundle| bundle.byte_size)
-        .sum::<usize>();
-    let total_bytes = block
-        .json_size_bytes()
-        .unwrap_or_else(|_| transaction_bytes.saturating_add(burn_bundle_bytes));
+    let burn_bundle_bytes = storage_size
+        .map(|size| size.burn_bundle_bytes)
+        .unwrap_or_else(|| {
+            burn_bundles
+                .iter()
+                .map(|bundle: &UiBurnBundle| bundle.byte_size)
+                .sum::<usize>()
+        });
+    let total_bytes = storage_size
+        .map(|size| size.total_bytes)
+        .unwrap_or_else(|| {
+            block
+                .json_size_bytes()
+                .unwrap_or_else(|_| transaction_bytes.saturating_add(burn_bundle_bytes))
+        });
     UiBlock {
         height: block.height,
         prev_hash: block.prev_hash,
@@ -222,6 +243,7 @@ pub(super) fn ui_block(
         total_fees,
         lost_iuna: block_lost_iuna(&block.transactions, block.reward),
         total_bytes,
+        header_and_proof_bytes,
         transaction_bytes,
         transaction_byte_breakdown,
         burn_bundle_bytes,
@@ -275,7 +297,17 @@ fn block_lost_iuna(transactions: &[Transaction], reward: Amount) -> Amount {
     burned.saturating_add(existing_supply_fees.saturating_sub(returned_fees))
 }
 
-fn transaction_byte_breakdown(transactions: &[Transaction]) -> Vec<UiByteBreakdown> {
+fn transaction_byte_breakdown(
+    transactions: &[Transaction],
+    storage_size: Option<&CompactBlockSizeBreakdown>,
+) -> Vec<UiByteBreakdown> {
+    if let Some(storage_size) = storage_size {
+        return byte_breakdown_rows(
+            storage_size.transfer_bytes,
+            storage_size.burn_bytes,
+            storage_size.mine_bytes,
+        );
+    }
     let mut transfer_bytes = 0_usize;
     let mut burn_bytes = 0_usize;
     let mut mine_bytes = 0_usize;
@@ -287,6 +319,14 @@ fn transaction_byte_breakdown(transactions: &[Transaction]) -> Vec<UiByteBreakdo
             Transaction::Mine { .. } => mine_bytes = mine_bytes.saturating_add(bytes),
         }
     }
+    byte_breakdown_rows(transfer_bytes, burn_bytes, mine_bytes)
+}
+
+fn byte_breakdown_rows(
+    transfer_bytes: usize,
+    burn_bytes: usize,
+    mine_bytes: usize,
+) -> Vec<UiByteBreakdown> {
     [
         ("transfer", transfer_bytes),
         ("burn", burn_bytes),
@@ -447,6 +487,7 @@ fn index_transaction_outputs(
 mod tests {
     use std::collections::BTreeMap;
 
+    use crate::compact::CompactBlockSizeBreakdown;
     use crate::domain::{
         Amount, Block, BurnBundleSection, BurnLeaderRank, FinalizerMode, MaskedBurn, OutPoint,
         Transaction, TxInput, TxOutput,
@@ -576,7 +617,21 @@ mod tests {
             hash: "hash".to_string(),
         };
 
-        let ui = ui_block(block, &BTreeMap::new(), &BTreeMap::new());
+        let storage_size = CompactBlockSizeBreakdown {
+            total_bytes: 120,
+            header_and_proof_bytes: 10,
+            transaction_bytes: 80,
+            transfer_bytes: 0,
+            burn_bytes: 80,
+            mine_bytes: 0,
+            burn_bundle_bytes: 30,
+        };
+        let ui = ui_block(
+            block,
+            &BTreeMap::new(),
+            &BTreeMap::new(),
+            Some(&storage_size),
+        );
 
         assert_eq!(ui.burn_bundle_quorum.burn_bundles_included, 2);
         assert_eq!(ui.burn_bundle_quorum.committee_size, 2);
@@ -584,7 +639,10 @@ mod tests {
         assert_eq!(ui.burn_bundles.len(), 1);
         assert_eq!(ui.burn_bundles[0].slot, 1);
         assert_eq!(ui.burn_bundles[0].burns.len(), 1);
-        assert!(ui.burn_bundle_bytes > 0);
+        assert_eq!(ui.total_bytes, 120);
+        assert_eq!(ui.header_and_proof_bytes, 10);
+        assert_eq!(ui.transaction_bytes, 80);
+        assert_eq!(ui.burn_bundle_bytes, 30);
     }
 
     #[test]
@@ -616,7 +674,7 @@ mod tests {
             }],
         )]);
 
-        let ui = ui_block(block, &BTreeMap::new(), &ranks);
+        let ui = ui_block(block, &BTreeMap::new(), &ranks, None);
 
         assert_eq!(ui.burn_bundle_quorum.burn_bundles_included, 1);
         assert_eq!(ui.burn_bundle_quorum.committee_size, 1);
@@ -692,7 +750,7 @@ mod tests {
             ],
         )]);
 
-        let ui = ui_block(block, &BTreeMap::new(), &ranks);
+        let ui = ui_block(block, &BTreeMap::new(), &ranks, None);
 
         assert_eq!(ui.burn_bundle_quorum.burn_bundles_included, 2);
         assert_eq!(ui.burn_bundle_quorum.committee_size, 2);
@@ -760,7 +818,7 @@ mod tests {
             ],
         )]);
 
-        let ui = ui_block(block, &BTreeMap::new(), &ranks);
+        let ui = ui_block(block, &BTreeMap::new(), &ranks, None);
 
         assert_eq!(ui.burn_bundle_quorum.burn_bundles_included, 2);
         assert_eq!(ui.burn_bundle_quorum.committee_size, 2);

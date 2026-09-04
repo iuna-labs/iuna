@@ -1140,8 +1140,8 @@ pub(super) const INDEX_HTML: &str = concat!(
                 <div class="detail-kv"><div class="key">Transfers</div><div x-text="blockTransferCount(selectedBlock)"></div></div>
                 <div class="detail-kv"><div class="key">Total Lost</div><div>IUNA <span x-text="amountLabel(blockLostIuna(selectedBlock))"></span></div></div>
                 <div class="detail-kv">
-                  <div class="key">Bytes</div>
-                  <button class="detail-link" type="button" @click="openBlockBytesModal(selectedBlock)" title="Block byte breakdown">
+                  <div class="key">Storage</div>
+                  <button class="detail-link" type="button" @click="openBlockBytesModal(selectedBlock)" title="Compact storage byte breakdown">
                     <span x-text="blockTotalBytes(selectedBlock)"></span>B
                   </button>
                 </div>
@@ -1584,7 +1584,7 @@ pub(super) const INDEX_HTML: &str = concat!(
     <section class="tx-modal">
       <div class="tx-modal-head">
         <div class="tx-modal-title">
-          <h2 id="block-bytes-title" x-text="selectedByteBlock ? `Block ${selectedByteBlock.height} Bytes` : 'Block Bytes'"></h2>
+          <h2 id="block-bytes-title" x-text="selectedByteBlock ? `Block ${selectedByteBlock.height} Storage` : 'Block Storage'"></h2>
           <div class="tx-field"><span class="tx-label">Total</span><span class="tx-value number"><span x-text="blockTotalBytes(selectedByteBlock)"></span>B</span></div>
         </div>
         <button type="button" @click="closeBlockBytesModal">Close</button>

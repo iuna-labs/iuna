@@ -400,6 +400,7 @@ pub(super) struct UiBlock {
     pub(super) total_fees: Amount,
     pub(super) lost_iuna: Amount,
     pub(super) total_bytes: usize,
+    pub(super) header_and_proof_bytes: usize,
     pub(super) transaction_bytes: usize,
     pub(super) transaction_byte_breakdown: Vec<UiByteBreakdown>,
     pub(super) burn_bundle_bytes: usize,

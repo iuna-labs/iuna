@@ -2,7 +2,9 @@ use anyhow::Result;
 
 use std::collections::BTreeSet;
 
+use crate::compact::CompactBlockSizeBreakdown;
 use crate::domain::{Block, BurnLeaderRank, Ledger, OutPoint, Transaction};
+use std::collections::BTreeMap;
 
 use super::{NodeCore, helpers::transaction_input_outpoints};
 
@@ -58,6 +60,13 @@ impl NodeCore {
 
     pub fn blocks_before(&self, before_height: u64, limit: usize) -> Vec<Block> {
         self.ledger.blocks_before(before_height, limit)
+    }
+
+    pub(crate) fn block_storage_size_breakdowns(
+        &self,
+        blocks: &[Block],
+    ) -> BTreeMap<String, CompactBlockSizeBreakdown> {
+        self.ledger.storage_size_breakdowns(blocks)
     }
 
     pub fn burn_leader_ranks_for_block(&self, height: u64) -> Result<Vec<BurnLeaderRank>> {

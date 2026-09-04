@@ -2,7 +2,7 @@ use std::collections::{BTreeMap, BTreeSet};
 
 use anyhow::{Context, Result, bail};
 
-use crate::compact::CompactBlockContext;
+use crate::compact::{CompactBlockContext, CompactBlockSizeBreakdown};
 use ed25519_dalek::{Signature, Verifier, VerifyingKey};
 
 use super::hex::hex_hash;
@@ -26,6 +26,22 @@ pub(super) fn compact_block_context(ledger: &Ledger) -> &CompactBlockContext {
 impl Ledger {
     pub(crate) fn consensus_block_size_bytes(&self, block: &Block) -> Result<usize> {
         self.compact_block_context.block_size_bytes(block)
+    }
+
+    pub(crate) fn storage_size_breakdowns(
+        &self,
+        requested_blocks: &[Block],
+    ) -> BTreeMap<String, CompactBlockSizeBreakdown> {
+        requested_blocks
+            .iter()
+            .filter_map(|block| {
+                self.compact_block_context
+                    .stored_block_size_breakdown(&block.hash)
+                    .cloned()
+                    .or_else(|| self.compact_block_context.block_size_breakdown(block).ok())
+                    .map(|breakdown| (block.hash.clone(), breakdown))
+            })
+            .collect()
     }
 }
 

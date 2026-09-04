@@ -3119,13 +3119,6 @@ window.iunaApp = function iunaApp() {
       return Number(block?.totalBytes ?? block?.total_bytes ?? 0);
     },
 
-    blockPayloadBytes(block) {
-      return (
-        Number(block?.transactionBytes ?? block?.transaction_bytes ?? 0) +
-        Number(block?.burnBundleBytes ?? block?.burn_bundle_bytes ?? 0)
-      );
-    },
-
     blockBurnBundleQuorum(block) {
       return block?.burnBundleQuorum ?? block?.burn_bundle_quorum ?? {};
     },
@@ -3165,13 +3158,13 @@ window.iunaApp = function iunaApp() {
     burnBundleSlotDetail(slot) {
       if (slot?.implicit) return "Implicit block attestation";
       const count = slot?.burns?.length || 0;
-      return `${count} burn${count === 1 ? "" : "s"} · ${slot?.byteSize || 0}B`;
+      return `${count} burn${count === 1 ? "" : "s"} · ${slot?.byteSize || 0}B gossip JSON`;
     },
 
     blockByteBreakdown(block) {
       const transactionRows = this.blockTransactionByteBreakdown(block);
       return [
-        ["Header and proof", Math.max(0, this.blockTotalBytes(block) - this.blockPayloadBytes(block)), ""],
+        ["Header and proof", Number(block?.headerAndProofBytes ?? block?.header_and_proof_bytes ?? 0), ""],
         ...(transactionRows.length
           ? transactionRows
           : [["Transactions", Number(block?.transactionBytes ?? block?.transaction_bytes ?? 0), ""]]),

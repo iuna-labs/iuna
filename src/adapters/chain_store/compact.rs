@@ -1,4 +1,4 @@
-use std::collections::BTreeMap;
+use std::{collections::BTreeMap, sync::Arc};
 
 use anyhow::{Context, Result, bail};
 
@@ -34,6 +34,18 @@ struct EncodeTables {
 #[derive(Clone, Debug, Default)]
 pub(crate) struct CompactBlockContext {
     tables: EncodeTables,
+    size_breakdowns: Arc<BTreeMap<String, CompactBlockSizeBreakdown>>,
+}
+
+#[derive(Clone, Debug, Default, Eq, PartialEq)]
+pub(crate) struct CompactBlockSizeBreakdown {
+    pub(crate) total_bytes: usize,
+    pub(crate) header_and_proof_bytes: usize,
+    pub(crate) transaction_bytes: usize,
+    pub(crate) transfer_bytes: usize,
+    pub(crate) burn_bytes: usize,
+    pub(crate) mine_bytes: usize,
+    pub(crate) burn_bundle_bytes: usize,
 }
 
 impl CompactBlockContext {
@@ -46,34 +58,47 @@ impl CompactBlockContext {
             context.tables.register_address(address);
         }
         for block in blocks {
-            let mut writer = CompactWriter::default();
-            encode_block_body(&mut writer, block, &mut context.tables)?;
-            context.tables.register_protocol_id(&block.hash);
+            context.append_block_with_size_breakdown(block)?;
         }
         Ok(context)
     }
 
     pub(crate) fn block_size_bytes(&self, block: &Block) -> Result<usize> {
+        Ok(self.block_size_breakdown(block)?.total_bytes)
+    }
+
+    pub(crate) fn block_size_breakdown(&self, block: &Block) -> Result<CompactBlockSizeBreakdown> {
         let mut tables = self.tables.clone();
         let mut writer = CompactWriter::default();
-        encode_block_body(&mut writer, block, &mut tables)?;
-        Ok(writer.into_inner().len())
+        encode_block_body_with_size_breakdown(&mut writer, block, &mut tables)
     }
 
     pub(crate) fn append_block(&mut self, block: &Block) -> Result<()> {
+        self.append_block_with_size_breakdown(block).map(|_| ())
+    }
+
+    pub(crate) fn append_block_with_size_breakdown(
+        &mut self,
+        block: &Block,
+    ) -> Result<CompactBlockSizeBreakdown> {
         let mut tables = self.tables.clone();
         let mut writer = CompactWriter::default();
-        encode_block_body(&mut writer, block, &mut tables)?;
+        let breakdown = encode_block_body_with_size_breakdown(&mut writer, block, &mut tables)?;
         tables.register_protocol_id(&block.hash);
         self.tables = tables;
-        Ok(())
+        Arc::make_mut(&mut self.size_breakdowns).insert(block.hash.clone(), breakdown.clone());
+        Ok(breakdown)
     }
 
     pub(crate) fn append_trusted_block(&mut self, block: &Block) -> Result<()> {
-        let mut writer = CompactWriter::default();
-        encode_block_body(&mut writer, block, &mut self.tables)?;
-        self.tables.register_protocol_id(&block.hash);
-        Ok(())
+        self.append_block(block)
+    }
+
+    pub(crate) fn stored_block_size_breakdown(
+        &self,
+        block_hash: &str,
+    ) -> Option<&CompactBlockSizeBreakdown> {
+        self.size_breakdowns.get(block_hash)
     }
 }
 
@@ -216,6 +241,15 @@ fn encode_block_body(
     block: &Block,
     tables: &mut EncodeTables,
 ) -> Result<()> {
+    encode_block_body_with_size_breakdown(writer, block, tables).map(|_| ())
+}
+
+fn encode_block_body_with_size_breakdown(
+    writer: &mut CompactWriter,
+    block: &Block,
+    tables: &mut EncodeTables,
+) -> Result<CompactBlockSizeBreakdown> {
+    let block_start = writer.bytes.len();
     writer.varint(block.timestamp_ms);
     writer.address(&block.miner, tables)?;
     writer.u8(match block.finalizer_mode {
@@ -233,12 +267,36 @@ fn encode_block_body(
         writer.fixed_hex::<64>(&proof.signature, "leader signature")?;
     }
     writer.varint(block.transactions.len() as u64);
+    let header_end = writer.bytes.len();
+    let transaction_start = writer.bytes.len();
+    let mut transfer_bytes = 0_usize;
+    let mut burn_bytes = 0_usize;
+    let mut mine_bytes = 0_usize;
     for transaction in &block.transactions {
+        let item_start = writer.bytes.len();
         encode_transaction(writer, transaction, tables)?;
+        let item_bytes = writer.bytes.len().saturating_sub(item_start);
+        match transaction {
+            Transaction::Transfer { .. } => {
+                transfer_bytes = transfer_bytes.saturating_add(item_bytes)
+            }
+            Transaction::Burn { .. } => burn_bytes = burn_bytes.saturating_add(item_bytes),
+            Transaction::Mine { .. } => mine_bytes = mine_bytes.saturating_add(item_bytes),
+        }
         tables.register_protocol_id(transaction.signature());
     }
+    let burn_bundle_start = writer.bytes.len();
     encode_burn_bundle_section(writer, block, tables)?;
-    Ok(())
+    let block_end = writer.bytes.len();
+    Ok(CompactBlockSizeBreakdown {
+        total_bytes: block_end.saturating_sub(block_start),
+        header_and_proof_bytes: header_end.saturating_sub(block_start),
+        transaction_bytes: burn_bundle_start.saturating_sub(transaction_start),
+        transfer_bytes,
+        burn_bytes,
+        mine_bytes,
+        burn_bundle_bytes: block_end.saturating_sub(burn_bundle_start),
+    })
 }
 
 fn decode_block_body(
@@ -933,11 +991,12 @@ mod tests {
     };
 
     use super::{
-        COMPACT_SNAPSHOT_MAGIC, COMPACT_SNAPSHOT_VERSION, CompactReader, CompactWriter,
-        DecodeTables, EncodeTables, MAX_COMPACT_BYTE_FIELD, MAX_COMPACT_GENESIS_ALLOCATIONS,
-        MAX_COMPACT_SNAPSHOT_BLOCKS, MAX_COMPACT_VEC_ITEMS, MIN_SUPPORTED_COMPACT_SNAPSHOT_VERSION,
-        decode_block_body, decode_compact_snapshot, decode_launch_profile, decode_transaction,
-        encode_block_body, encode_compact_snapshot, encode_launch_profile, encode_transaction,
+        COMPACT_SNAPSHOT_MAGIC, COMPACT_SNAPSHOT_VERSION, CompactBlockContext, CompactReader,
+        CompactWriter, DecodeTables, EncodeTables, MAX_COMPACT_BYTE_FIELD,
+        MAX_COMPACT_GENESIS_ALLOCATIONS, MAX_COMPACT_SNAPSHOT_BLOCKS, MAX_COMPACT_VEC_ITEMS,
+        MIN_SUPPORTED_COMPACT_SNAPSHOT_VERSION, decode_block_body, decode_compact_snapshot,
+        decode_launch_profile, decode_transaction, encode_block_body, encode_compact_snapshot,
+        encode_launch_profile, encode_transaction,
     };
 
     #[test]
@@ -1149,6 +1208,24 @@ mod tests {
         let without_bytes = encode(&without);
         let with_bytes = encode(&with);
         assert_eq!(with_bytes.len() - without_bytes.len(), 2);
+
+        let mut context = CompactBlockContext::default();
+        let breakdown = context.append_block_with_size_breakdown(&with).unwrap();
+        assert_eq!(breakdown.total_bytes, with_bytes.len());
+        assert_eq!(breakdown.burn_bundle_bytes, 4);
+        assert!(breakdown.burn_bytes > 0);
+        assert_eq!(breakdown.transfer_bytes, 0);
+        assert_eq!(breakdown.mine_bytes, 0);
+        assert_eq!(
+            breakdown.total_bytes,
+            breakdown.header_and_proof_bytes
+                + breakdown.transaction_bytes
+                + breakdown.burn_bundle_bytes
+        );
+        assert_eq!(
+            context.stored_block_size_breakdown(&with.hash),
+            Some(&breakdown)
+        );
 
         let mut reader = CompactReader::new(&with_bytes);
         let decoded = decode_block_body(

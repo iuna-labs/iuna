@@ -39,13 +39,14 @@ pub(super) async fn api_blocks(
         .limit
         .unwrap_or(EXPLORER_PAGE_LIMIT)
         .min(EXPLORER_LIMIT);
-    let (tip_hash, blocks) = {
+    let (tip_hash, blocks, storage_size_breakdowns) = {
         let node = state.node.lock().await;
         let blocks = match query.before_height {
             Some(before_height) => node.blocks_before(before_height, limit),
             None => node.recent_blocks(limit),
         };
-        (node.chain_tip_hash(), blocks)
+        let storage_size_breakdowns = node.block_storage_size_breakdowns(&blocks);
+        (node.chain_tip_hash(), blocks, storage_size_breakdowns)
     };
     let store = state.ui_data_store.clone();
     let view = tokio::task::spawn_blocking(move || store.load_ui_chain_index(&tip_hash))
@@ -58,6 +59,7 @@ pub(super) async fn api_blocks(
         blocks,
         &view.outputs,
         &view.burn_leader_ranks_by_hash,
+        &storage_size_breakdowns,
     ))
 }
 
