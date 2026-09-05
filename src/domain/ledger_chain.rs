@@ -242,6 +242,17 @@ impl Ledger {
         self.extend_from_snapshot_with_vdf_policy(snapshot, true, unix_now_ms())
     }
 
+    /// Applies normal snapshot identity, consensus, finality, and fork-choice checks while
+    /// skipping only VDF verification. Accelerated e2e tests verify newly produced proofs
+    /// separately because their committed fixture uses the production VDF round count.
+    #[cfg(feature = "e2e")]
+    pub fn extend_from_preverified_snapshot_for_e2e(
+        &mut self,
+        snapshot: ChainSnapshot,
+    ) -> Result<bool> {
+        self.extend_from_snapshot_with_vdf_policy(snapshot, false, u64::MAX)
+    }
+
     pub(crate) fn extend_from_snapshot_at(
         &mut self,
         snapshot: ChainSnapshot,

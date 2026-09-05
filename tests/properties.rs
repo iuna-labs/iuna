@@ -14,8 +14,9 @@ use iuna::{
     },
     app::{NodeCore, PeerBook, SharedNode, now_ms},
     domain::{
-        Ledger, OBJECTIVE_FINALITY_ACTIVATION_HEIGHT, Transaction, VDF_TARGET_BLOCK_MS, Wallet,
-        configure_e2e_vdf_round_divisor_for_tests, run_vdf,
+        FinalizerMode, Ledger, OBJECTIVE_FINALITY_ACTIVATION_HEIGHT, Transaction,
+        VDF_TARGET_BLOCK_MS, Wallet, configure_e2e_vdf_round_divisor_for_tests, run_vdf,
+        verify_vdf,
     },
 };
 use serde_json::{Value, json};
@@ -120,6 +121,107 @@ async fn release_soak_post_activation_auto_finalization_p2p_stratum_and_restarts
         );
     }
     assert!(configured_automatic_burn_was_included(&nodes[0]).await);
+    Ok(())
+}
+
+#[test]
+#[ignore = "accelerated post-activation recovery soak; run with cargo test --release --features e2e --test properties -- --ignored"]
+fn post_activation_recovery_candidates_converge_and_ticket_finalization_resumes() -> Result<()> {
+    configure_e2e_vdf_round_divisor_for_tests(SOAK_VDF_ROUND_DIVISOR);
+    let (wallets, parent) = post_activation_fixture()?;
+    let recovery_height = parent.height() + 1;
+    let recovery_timestamp = parent.recovery_block_min_timestamp();
+
+    let mut branches = Vec::new();
+    for wallet in &wallets {
+        let mut candidate = NodeCore::from_ledger_with_burn_fee_and_enabled(
+            wallet.clone(),
+            parent.clone(),
+            true,
+            2,
+            1,
+        );
+        candidate.set_recovery_vdf_top_rank_percent(100);
+        let _ = candidate.prepare_automatic_finalization(recovery_timestamp);
+        let Ok(mut branch) = candidate.wallet_view_ledger() else {
+            continue;
+        };
+        let block = branch.mine_recovery_block(wallet, recovery_timestamp)?;
+        assert_eq!(block.height, recovery_height);
+        assert_eq!(block.finalizer_mode, FinalizerMode::Recovery);
+        assert!(verify_vdf(
+            &block.vdf_seed(),
+            block.vdf_rounds,
+            &block.vdf_output
+        ));
+        branch.apply_locally_mined_block(block.clone())?;
+        branches.push((branch, block));
+        if branches.len() == 2 {
+            break;
+        }
+    }
+    if branches.len() < 2 {
+        bail!("post-activation fixture needs two funded recovery candidates");
+    }
+
+    let (mut left, left_block) = branches.remove(0);
+    let (mut right, right_block) = branches.remove(0);
+    assert_ne!(left_block.hash, right_block.hash);
+    let left_snapshot = left.snapshot();
+    let right_snapshot = right.snapshot();
+
+    left.extend_from_preverified_snapshot_for_e2e(right_snapshot)?;
+    right.extend_from_preverified_snapshot_for_e2e(left_snapshot)?;
+    assert_eq!(left.height(), recovery_height);
+    assert_eq!(right.height(), recovery_height);
+    assert_eq!(left.tip_hash(), right.tip_hash());
+    assert_eq!(
+        left.chain()
+            .last()
+            .context("converged recovery chain has no tip")?
+            .finalizer_mode,
+        FinalizerMode::Recovery
+    );
+
+    let recovery_hash = left.tip_hash().to_string();
+    let leader = left
+        .expected_leader_for_next_block()
+        .context("ticket finalization did not resume after recovery")?;
+    let leader_wallet = wallets
+        .iter()
+        .find(|wallet| wallet.address() == leader)
+        .context("selected post-recovery leader is absent from the fixture")?;
+    let mut leader_node =
+        NodeCore::from_ledger_with_burn_fee_and_enabled(leader_wallet.clone(), left, true, 2, 1);
+    leader_node.set_recovery_vdf_top_rank_percent(100);
+    let ticket_timestamp = recovery_timestamp.saturating_add(1);
+    let _ = leader_node.prepare_automatic_finalization(ticket_timestamp);
+    let mut continued = leader_node.wallet_view_ledger()?;
+    let burn_bundles = wallets.iter().try_fold(Vec::new(), |mut bundles, wallet| {
+        bundles.extend(continued.build_burn_bundles(wallet)?);
+        Ok::<_, anyhow::Error>(bundles)
+    })?;
+    let prepared = continued.prepare_next_block_with_burn_bundles(
+        leader_wallet.address(),
+        ticket_timestamp,
+        burn_bundles,
+    )?;
+    let output = run_vdf(prepared.vdf_seed(), prepared.vdf_rounds());
+    let ticket_block = prepared.finish(leader_wallet, output);
+    assert_eq!(ticket_block.finalizer_mode, FinalizerMode::Ticket);
+    assert_eq!(ticket_block.finalizer_rank, 0);
+    assert!(verify_vdf(
+        &ticket_block.vdf_seed(),
+        ticket_block.vdf_rounds,
+        &ticket_block.vdf_output
+    ));
+    continued.apply_locally_mined_block(ticket_block)?;
+
+    assert_eq!(continued.height(), recovery_height + 1);
+    assert_eq!(
+        continued.objective_finality_checkpoint(),
+        Some((recovery_height, recovery_hash.as_str()))
+    );
     Ok(())
 }
 
