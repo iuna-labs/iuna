@@ -73,6 +73,8 @@ hoogte 811 afgebroken, en convergeerde na herstart met alle nodes op hoogte
 
 ## Eerstvolgende definitie van klaar
 
-Stap 1 is klaar wanneer een enkele runner-opdracht de 3-3-partitie aanbrengt,
-aan beide kanten recovery waarneemt, de scheiding opheft, zes-node convergentie
-bewijst, een persistente node herstart en hervatte ticketfinalisatie bevestigt.
+Stap 4 is klaar wanneer alle gates uit `docs/security-review.md` op exact
+dezelfde revision zijn gedraaid, de bijbehorende logs zijn gearchiveerd, iedere
+sign-offrij een reviewer, datum, resultaat en restrisico bevat, en het candidate
+manifest met genesis-hash, network ID, bootnodes, release-tag, commit en
+artifact-checksums is gepubliceerd en gereviewd.
