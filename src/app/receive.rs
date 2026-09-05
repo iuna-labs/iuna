@@ -168,8 +168,13 @@ impl NodeCore {
             anyhow::bail!("chain snapshot genesis does not match local chain");
         }
         let previous_height = self.ledger.height();
-        if !replaces_setup_placeholder && ledger.height() <= previous_height {
-            return Ok(false);
+        if !replaces_setup_placeholder {
+            if ledger.height() < previous_height {
+                return Ok(false);
+            }
+            if ledger.height() == previous_height && ledger.tip_hash() == self.ledger.tip_hash() {
+                return Ok(false);
+            }
         }
 
         self.ledger = ledger;
@@ -222,6 +227,30 @@ mod tests {
             .map(|wallet| GenesisBurn::new(wallet.address(), MICRO_IUNA))
             .collect::<Vec<_>>();
         Ledger::new_with_genesis_burns(allocations, genesis_burns, 1).unwrap()
+    }
+
+    #[test]
+    fn verified_same_height_fork_replaces_local_ledger() {
+        let wallet = Wallet::from_seed("verified-same-height-fork");
+        let parent = funded_ledger(std::slice::from_ref(&wallet));
+        let mut local = parent.clone();
+        let burn = local.build_burn(&wallet, 1, 1).unwrap();
+        local.submit_transaction(burn.clone()).unwrap();
+        let local_block = local.mine_next_block(&wallet, 1).unwrap();
+        local.apply_locally_mined_block(local_block).unwrap();
+
+        let mut remote = parent;
+        remote.submit_transaction(burn).unwrap();
+        let remote_block = remote.mine_next_block(&wallet, 2).unwrap();
+        remote
+            .apply_locally_mined_block(remote_block.clone())
+            .unwrap();
+        assert_eq!(local.height(), remote.height());
+        assert_ne!(local.tip_hash(), remote.tip_hash());
+
+        let mut node = NodeCore::from_ledger(wallet, local, 0);
+        assert!(node.import_verified_ledger(remote).unwrap());
+        assert_eq!(node.ledger().tip_hash(), remote_block.hash);
     }
 
     #[test]

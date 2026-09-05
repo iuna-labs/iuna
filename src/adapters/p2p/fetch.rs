@@ -238,8 +238,17 @@ pub(super) async fn validate_blocks_extension(
                 .iter()
                 .position(|block| block.hash == blocks[0].prev_hash)
                 .context("block page has no common ancestor with local chain")?;
+            #[cfg(feature = "e2e")]
+            for block in &blocks {
+                if !verify_vdf(&block.vdf_seed(), block.vdf_rounds, &block.vdf_output) {
+                    anyhow::bail!("block VDF output is invalid");
+                }
+            }
             candidate.blocks.truncate(ancestor + 1);
             candidate.blocks.extend(blocks);
+            #[cfg(feature = "e2e")]
+            ledger.extend_from_preverified_snapshot_for_e2e(candidate)?;
+            #[cfg(not(feature = "e2e"))]
             ledger.extend_from_snapshot_at(candidate, now_ms)?;
             if let Some(target_height) = target_height {
                 on_progress(target_height);

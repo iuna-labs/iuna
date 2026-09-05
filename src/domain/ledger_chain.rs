@@ -253,6 +253,7 @@ impl Ledger {
         self.extend_from_snapshot_with_vdf_policy(snapshot, false, u64::MAX)
     }
 
+    #[cfg_attr(feature = "e2e", allow(dead_code))]
     pub(crate) fn extend_from_snapshot_at(
         &mut self,
         snapshot: ChainSnapshot,
