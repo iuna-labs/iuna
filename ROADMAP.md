@@ -19,6 +19,13 @@ The current goal is to operate the candidate without unplanned resets, collect l
 - [ ] Post-activation network partitions have an implemented objective checkpoint-based recovery rule; live soak evidence is still required to close this gate.
 - [ ] Recovery blocks restore liveness when selected finalizers disappear.
 - [ ] Multiple recovery candidates converge safely.
+
+The [live recovery audit](docs/live-recovery-evidence.md) records 12 recovery
+blocks across 8 episodes, each followed by resumed ticket production. The
+recovery-liveness and multiple-candidate gates remain open pending correlated
+live node logs and live competing-candidate evidence; the accelerated
+process-level partition test is supporting test evidence, not a substitute for
+that soak evidence.
 - [ ] Clock skew and future timestamp cases do not stall the network.
 - [ ] Blinded commit/reveal flows survive partitions and delayed gossip.
 - [ ] Mempool state remains sane across reorgs.

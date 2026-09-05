@@ -18,12 +18,18 @@ test is nodig, maar sluit een live-soak gate niet automatisch.
 
 ## 2. Live recovery-bewijs
 
-- [ ] Analyseer de chain-database onder `~/.iuna` uitsluitend read-only.
-- [ ] Leg recovery-hoogtes, hashes, voorafgaande stall en eerstvolgende
+- [x] Analyseer de chain-database onder `~/.iuna` uitsluitend read-only.
+- [x] Leg recovery-hoogtes, hashes, voorafgaande stall en eerstvolgende
       ticketblock vast zonder walletmateriaal of secrets te kopiëren.
-- [ ] Bepaal welke recovery-gates hiermee objectief gesloten kunnen worden.
-- [ ] Laat gates voor meerdere recovery-candidates open tenzij de live historie
+- [x] Bepaal welke recovery-gates hiermee objectief gesloten kunnen worden.
+- [x] Laat gates voor meerdere recovery-candidates open tenzij de live historie
       of de procesniveau-partitietest dit daadwerkelijk bewijst.
+
+Resultaat: [de live-chain-audit](docs/live-recovery-evidence.md) vond 12
+recovery-blocks in 8 episodes en na iedere episode hervatte een ticketblock.
+De roadmap-gates blijven bewust open omdat de chainhistorie niet bewijst welke
+finalizers tijdens de stalls offline waren en geen concurrerende live
+recovery-candidates bevat.
 
 ## 3. Sync-bewijs
 
