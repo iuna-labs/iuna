@@ -5,6 +5,7 @@ services:
         IUNA_CARGO_FEATURES: "--features e2e"
     image: iuna-local-e2e:latest
     restart: "no"
+    cap_add: [NET_ADMIN]
     command:
       - if [ -s /data/chain.sqlite3 ]; then exec iuna --data-dir /data --http 0.0.0.0:18661 --p2p 0.0.0.0:9444 --p2p-announce 172.29.0.10:9444 --debug; else exec iuna --genesis --data-dir /data --http 0.0.0.0:18661 --p2p 0.0.0.0:9444 --p2p-announce 172.29.0.10:9444 --debug; fi
     healthcheck:
@@ -25,6 +26,7 @@ services:
         IUNA_CARGO_FEATURES: "--features e2e"
     image: iuna-local-e2e:latest
     restart: "no"
+    cap_add: [NET_ADMIN]
     command:
       - exec iuna --join 172.29.0.10:9444 --data-dir /data --http 0.0.0.0:18661 --p2p 0.0.0.0:9444 --p2p-announce 172.29.0.11:9444 --debug
     healthcheck:
@@ -45,6 +47,7 @@ services:
         IUNA_CARGO_FEATURES: "--features e2e"
     image: iuna-local-e2e:latest
     restart: "no"
+    cap_add: [NET_ADMIN]
     command:
       - exec iuna --join 172.29.0.10:9444 --data-dir /data --http 0.0.0.0:18661 --p2p 0.0.0.0:9444 --p2p-announce 172.29.0.12:9444 --stratum 0.0.0.0:3333 --debug
     healthcheck:
@@ -66,6 +69,7 @@ services:
         IUNA_CARGO_FEATURES: "--features e2e"
     image: iuna-local-e2e:latest
     restart: "no"
+    cap_add: [NET_ADMIN]
     command:
       - exec iuna --join 172.29.0.10:9444 --data-dir /data --http 0.0.0.0:18661 --p2p 0.0.0.0:9444 --p2p-announce 172.29.0.13:9444 --debug
     healthcheck:
@@ -86,8 +90,9 @@ services:
         IUNA_CARGO_FEATURES: "--features e2e"
     image: iuna-local-e2e:latest
     restart: "no"
+    cap_add: [NET_ADMIN]
     command:
-      - exec iuna --join 172.29.0.10:9444 --data-dir /data --http 0.0.0.0:18661 --p2p 0.0.0.0:9444 --p2p-announce 172.29.0.14:9444 --debug
+      - exec iuna --join 172.29.0.13:9444 --data-dir /data --http 0.0.0.0:18661 --p2p 0.0.0.0:9444 --p2p-announce 172.29.0.14:9444 --debug
     healthcheck:
       interval: 1s
       retries: 900
@@ -106,8 +111,9 @@ services:
         IUNA_CARGO_FEATURES: "--features e2e"
     image: iuna-local-e2e:latest
     restart: "no"
+    cap_add: [NET_ADMIN]
     command:
-      - exec iuna --join 172.29.0.10:9444 --data-dir /data --http 0.0.0.0:18661 --p2p 0.0.0.0:9444 --p2p-announce 172.29.0.15:9444 --debug
+      - exec iuna --join 172.29.0.13:9444 --data-dir /data --http 0.0.0.0:18661 --p2p 0.0.0.0:9444 --p2p-announce 172.29.0.15:9444 --debug
     healthcheck:
       interval: 1s
       retries: 900

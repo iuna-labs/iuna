@@ -47,7 +47,8 @@ Run the standard post-activation gate used by deployment:
 ```
 
 This verifies the committed checkpoints, crosses 999 through 1001, then restores
-the first objective checkpoint and advances the restarted network through 1007.
+the first objective checkpoint, advances the restarted network through 1007,
+and runs a physical 3-3 P2P partition/recovery scenario.
 
 Tests can also be selected individually:
 
@@ -56,6 +57,7 @@ Tests can also be selected individually:
 ./e2e/iuna_e2e.py test fallback-activation
 ./e2e/iuna_e2e.py test objective-finality
 ./e2e/iuna_e2e.py test checkpoint-restart
+./e2e/iuna_e2e.py test partition-recovery
 ```
 
 `snapshots` is fast and does not need Docker. It verifies checksums, manifest
@@ -73,6 +75,18 @@ that block 1007 is finalized by a ticket derived from a burn included at height
 1002 or later. At that height, the ticket maturity and expiry windows exclude
 every pre-pipeline burn, so this covers a complete post-activation burn-to-block
 lifecycle.
+
+`partition-recovery` gives the e2e containers network-administration capability
+and installs temporary firewall rules that split the six real node processes
+into two connected groups of three. It requires both islands to converge
+internally on different tips containing new recovery blocks, removes the rules,
+requires six-node convergence, restarts node6 with its existing data, and waits
+for a new rank-0 ticket block that finalizes at or beyond the canonical recovery
+height. The disposable scenario deterministically selects one sampled recovery
+worker per island and tip
+while leaving the other island members out of the recovery race. It restores the
+normal 50% configuration before healing, avoiding both a recovery-less small
+island and unrestricted fallback-ticket production.
 
 Use `--keep` on `smoke` to leave a failed or successful network running. Stop a
 network without deleting its mutable data with:

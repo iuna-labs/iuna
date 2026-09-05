@@ -26,6 +26,15 @@ ROOT = Path(__file__).resolve().parent.parent
 E2E_DIR = ROOT / "e2e"
 COMPOSE_FILES = (ROOT / "docker-compose.yml", E2E_DIR / "docker-compose.e2e.yml")
 SERVICES = ("bootstrap", "node2", "node3", "node4", "node5", "node6")
+SERVICE_IPS = {
+    "bootstrap": "172.29.0.10",
+    "node2": "172.29.0.11",
+    "node3": "172.29.0.12",
+    "node4": "172.29.0.13",
+    "node5": "172.29.0.14",
+    "node6": "172.29.0.15",
+}
+PARTITION_GROUPS = (SERVICES[:3], SERVICES[3:])
 DEFAULT_PORTS = {
     "bootstrap": 28661,
     "node2": 28662,
@@ -80,7 +89,12 @@ SCENARIOS = {
         leader_burn_minimum_height=1_002,
     ),
 }
-POST_ACTIVATION_SCENARIOS = ("objective-finality", "checkpoint-restart")
+SPECIAL_SCENARIOS = ("partition-recovery",)
+POST_ACTIVATION_SCENARIOS = (
+    "objective-finality",
+    "checkpoint-restart",
+    *SPECIAL_SCENARIOS,
+)
 
 
 class E2EError(RuntimeError):
@@ -122,6 +136,69 @@ def compose(*args: str, check: bool = True) -> subprocess.CompletedProcess[str]:
         check=check,
         text=True,
     )
+
+
+def container_command(
+    service: str, *args: str, check: bool = True
+) -> subprocess.CompletedProcess[str]:
+    return subprocess.run(
+        compose_command("exec", "-T", service, *args),
+        cwd=ROOT,
+        env=compose_env(),
+        check=check,
+        text=True,
+        stdout=None if check else subprocess.DEVNULL,
+        stderr=None if check else subprocess.DEVNULL,
+    )
+
+
+def clear_partition() -> None:
+    for service in SERVICES:
+        for builtin, chain in (
+            ("INPUT", "IUNA_E2E_INPUT"),
+            ("OUTPUT", "IUNA_E2E_OUTPUT"),
+        ):
+            container_command(
+                service, "iptables", "-D", builtin, "-j", chain, check=False
+            )
+            container_command(service, "iptables", "-F", chain, check=False)
+            container_command(service, "iptables", "-X", chain, check=False)
+
+
+def apply_partition() -> None:
+    clear_partition()
+    left, right = PARTITION_GROUPS
+    for group, blocked_group in ((left, right), (right, left)):
+        for service in group:
+            for builtin, chain in (
+                ("INPUT", "IUNA_E2E_INPUT"),
+                ("OUTPUT", "IUNA_E2E_OUTPUT"),
+            ):
+                container_command(service, "iptables", "-N", chain)
+                container_command(service, "iptables", "-I", builtin, "1", "-j", chain)
+            for blocked_service in blocked_group:
+                blocked_ip = SERVICE_IPS[blocked_service]
+                container_command(
+                    service,
+                    "iptables",
+                    "-A",
+                    "IUNA_E2E_INPUT",
+                    "-s",
+                    blocked_ip,
+                    "-j",
+                    "REJECT",
+                )
+                container_command(
+                    service,
+                    "iptables",
+                    "-A",
+                    "IUNA_E2E_OUTPUT",
+                    "-d",
+                    blocked_ip,
+                    "-j",
+                    "REJECT",
+                )
+    print(f"partition active: {left} | {right}", flush=True)
 
 
 def validate_snapshot_name(name: str) -> str:
@@ -166,6 +243,22 @@ def node_json(service: str, path: str) -> object:
         f"{base_url}{path}", timeout=HTTP_TIMEOUT_SECONDS
     ) as response:
         return json.load(response)
+
+
+def node_form(service: str, path: str, values: dict[str, object]) -> dict:
+    node_json(service, "/api/status")
+    base_url = f"http://127.0.0.1:{node_port(service)}"
+    request = urllib.request.Request(
+        f"{base_url}{path}",
+        data=urllib.parse.urlencode(values).encode(),
+        headers={"Content-Type": "application/x-www-form-urlencoded", "Origin": base_url},
+        method="POST",
+    )
+    with _OPENERS[service].open(request, timeout=HTTP_TIMEOUT_SECONDS) as response:
+        result = json.load(response)
+    if not isinstance(result, dict) or not result.get("ok"):
+        raise E2EError(f"{service} form request failed for {path}: {result}")
+    return result
 
 
 def node_status(service: str) -> dict:
@@ -246,6 +339,146 @@ def block_at_height(service: str, height: int) -> dict:
     if not isinstance(result, list) or len(result) != 1 or result[0].get("height") != height:
         raise E2EError(f"{service} block API did not return block {height}")
     return result[0]
+
+
+def recent_blocks(service: str, limit: int = 100) -> list[dict]:
+    result = node_json(service, f"/api/blocks?limit={limit}")
+    if not isinstance(result, list):
+        raise E2EError(f"{service} block API returned a non-list response")
+    return result
+
+
+def wait_for_partition_recovery(
+    after_heights: dict[str, int], timeout: float
+) -> tuple[dict[str, dict], dict[str, int]]:
+    deadline = time.monotonic() + timeout
+    last_summary = "nodes unavailable"
+    left, right = PARTITION_GROUPS
+    tuned_tips: dict[str, str] = {}
+    while time.monotonic() < deadline:
+        try:
+            statuses = all_statuses()
+            assert_e2e_profile(statuses)
+            group_tips = []
+            recovery_heights: dict[str, int] = {}
+            for label, group in (("left", left), ("right", right)):
+                tips = {
+                    (
+                        statuses[service]["chain"]["height"],
+                        statuses[service]["chain"]["tip_hash"],
+                    )
+                    for service in group
+                }
+                if len(tips) != 1:
+                    break
+                group_tip = next(iter(tips))
+                group_tips.append(group_tip)
+                recoveries = [
+                    int(block["height"])
+                    for block in recent_blocks(group[0])
+                    if block.get("finalizer_mode") == "recovery"
+                    and int(block.get("height", -1)) > after_heights[label]
+                ]
+                if recoveries:
+                    recovery_heights[label] = max(recoveries)
+                elif tuned_tips.get(label) != group_tip[1]:
+                    tune_recovery_worker(group, group_tip[1])
+                    tuned_tips[label] = group_tip[1]
+            last_summary = ", ".join(
+                f"{service}={status['chain']['height']}:{status['chain']['tip_hash'][:12]}"
+                for service, status in statuses.items()
+            )
+            if (
+                len(group_tips) == 2
+                and group_tips[0] != group_tips[1]
+                and set(recovery_heights) == {"left", "right"}
+            ):
+                return statuses, recovery_heights
+        except (
+            E2EError,
+            OSError,
+            KeyError,
+            ValueError,
+            urllib.error.URLError,
+        ) as error:
+            last_summary = str(error)
+        time.sleep(0.25)
+    raise E2EError(
+        "timed out waiting for divergent recovery blocks in both partitions; "
+        + last_summary
+    )
+
+
+def tune_recovery_worker(group: tuple[str, ...], tip_hash: str) -> None:
+    samples = {}
+    for service in group:
+        wallet = json.loads((runtime_dir() / service / "wallet.json").read_text())
+        address = wallet["address"]
+        digest = hashlib.sha256(
+            f"iuna-recovery-vdf-sample:{tip_hash}:{address}".encode()
+        ).digest()
+        samples[service] = digest[0] % 100
+    worker = min(samples, key=samples.get)
+    for service in group:
+        percent = samples[worker] + 1 if service == worker else 0
+        node_form(
+            service,
+            "/api/settings/recovery-vdf",
+            {"top_rank_percent": percent},
+        )
+    print(
+        f"recovery worker for {group}: {worker} at {samples[worker] + 1}%",
+        flush=True,
+    )
+
+
+def restore_recovery_participation(percent: int = 50) -> None:
+    for service in SERVICES:
+        node_form(
+            service,
+            "/api/settings/recovery-vdf",
+            {"top_rank_percent": percent},
+        )
+
+
+def wait_for_ticket_after(height: int, timeout: float) -> tuple[dict[str, dict], dict]:
+    deadline = time.monotonic() + timeout
+    last_summary = "nodes unavailable"
+    while time.monotonic() < deadline:
+        try:
+            statuses = all_statuses()
+            assert_e2e_profile(statuses)
+            assert_converged(statuses)
+            tickets = [
+                block
+                for block in recent_blocks(SERVICES[0])
+                if block.get("finalizer_mode") == "ticket"
+                and int(block.get("height", -1)) > height
+                and int(block.get("finalizer_rank", -1)) == 0
+            ]
+            if tickets:
+                ticket = min(tickets, key=lambda block: int(block["height"]))
+                finalized_height = statuses[SERVICES[0]]["chain"].get(
+                    "finalized_height"
+                )
+                if finalized_height is not None and finalized_height >= height:
+                    return statuses, ticket
+            last_summary = ", ".join(
+                f"{service}={status['chain']['height']}"
+                for service, status in statuses.items()
+            )
+        except (
+            E2EError,
+            OSError,
+            KeyError,
+            ValueError,
+            urllib.error.URLError,
+        ) as error:
+            last_summary = str(error)
+        time.sleep(0.25)
+    raise E2EError(
+        f"timed out waiting for a rank-0 ticket after {height}; {last_summary}"
+    )
 
 
 def assert_leader_uses_burn_from_height(
@@ -558,9 +791,12 @@ def restore_snapshot(name: str) -> None:
     base.mkdir(parents=True, exist_ok=True)
     for service in SERVICES:
         target = base / service
-        if target.exists():
-            shutil.rmtree(target)
-        target.mkdir(parents=True)
+        target.mkdir(parents=True, exist_ok=True)
+        for existing in target.iterdir():
+            if existing.is_dir() and not existing.is_symlink():
+                shutil.rmtree(existing)
+            else:
+                existing.unlink()
         for filename in SNAPSHOT_FILES:
             snapshot_file = source / service / filename
             if filename == "ui_data.sqlite3" and not snapshot_file.exists():
@@ -654,11 +890,81 @@ def run_scenario(
             compose("down", "--remove-orphans", check=False)
 
 
+def run_partition_recovery_scenario(timeout: float, build: bool, keep: bool) -> None:
+    name = "partition-recovery"
+    print(
+        "running e2e scenario partition-recovery: physical 3-3 split, heal and restart",
+        flush=True,
+    )
+    restore_snapshot("first-objective-checkpoint")
+    try:
+        start(build)
+        wait_for_height(1_001, timeout, converge=True)
+        apply_partition()
+        partitioned_start = all_statuses()
+        left, right = PARTITION_GROUPS
+        partition_boundaries = {
+            label: max(
+                partitioned_start[service]["chain"]["height"] for service in group
+            )
+            for label, group in (("left", left), ("right", right))
+        }
+        partitioned, recovery_heights = wait_for_partition_recovery(
+            partition_boundaries, timeout
+        )
+        print(
+            "partition recovery observed: "
+            + json.dumps(recovery_heights, sort_keys=True),
+            flush=True,
+        )
+
+        restore_recovery_participation()
+        clear_partition()
+        heal_target = max(status["chain"]["height"] for status in partitioned.values())
+        healed = wait_for_height(heal_target, timeout, converge=True)
+        assert_converged(healed)
+        partition_height = max(partition_boundaries.values())
+        canonical_recoveries = [
+            block
+            for block in recent_blocks(SERVICES[0])
+            if block.get("finalizer_mode") == "recovery"
+            and int(block.get("height", -1)) > partition_height
+        ]
+        if not canonical_recoveries:
+            raise E2EError(
+                "healed canonical chain contains no partition recovery block"
+            )
+        canonical_recovery_height = max(
+            int(block["height"]) for block in canonical_recoveries
+        )
+
+        restart_height = max(status["chain"]["height"] for status in healed.values())
+        compose("restart", "node6")
+        _OPENERS.pop("node6", None)
+        resumed, ticket = wait_for_ticket_after(
+            max(canonical_recovery_height, restart_height), timeout
+        )
+        assert_converged(resumed)
+        assert_api_health(resumed, int(ticket["height"]))
+        print(
+            f"e2e scenario {name} passed: recovery at {canonical_recovery_height}, "
+            f"rank-0 ticket resumed at {ticket['height']}",
+            flush=True,
+        )
+    except Exception:
+        compose("logs", "--tail", "300", *SERVICES, check=False)
+        raise
+    finally:
+        clear_partition()
+        if not keep:
+            compose("down", "--remove-orphans", check=False)
+
+
 def run_tests(name: str, timeout: float, build: bool, keep: bool) -> None:
     if name in ("snapshots", "all"):
         test_snapshots()
     if name == "all":
-        selected = list(SCENARIOS)
+        selected = [*SCENARIOS, *SPECIAL_SCENARIOS]
     elif name == "post-activation":
         test_snapshots()
         selected = list(POST_ACTIVATION_SCENARIOS)
@@ -667,13 +973,20 @@ def run_tests(name: str, timeout: float, build: bool, keep: bool) -> None:
     selected = [scenario_name for scenario_name in selected if scenario_name != "snapshots"]
     for index, scenario_name in enumerate(selected):
         scenario_keep = keep and index == len(selected) - 1
-        run_scenario(
-            scenario_name,
-            SCENARIOS[scenario_name],
-            timeout,
-            build and index == 0,
-            scenario_keep,
-        )
+        if scenario_name == "partition-recovery":
+            run_partition_recovery_scenario(
+                timeout,
+                build and index == 0,
+                scenario_keep,
+            )
+        else:
+            run_scenario(
+                scenario_name,
+                SCENARIOS[scenario_name],
+                timeout,
+                build and index == 0,
+                scenario_keep,
+            )
     print(f"e2e test run passed: {name}")
 
 
@@ -722,7 +1035,13 @@ def parser() -> argparse.ArgumentParser:
         "scenario",
         nargs="?",
         default="all",
-        choices=("all", "post-activation", "snapshots", *SCENARIOS),
+        choices=(
+            "all",
+            "post-activation",
+            "snapshots",
+            *SCENARIOS,
+            *SPECIAL_SCENARIOS,
+        ),
     )
     tests.add_argument("--timeout", type=float, default=600)
     tests.add_argument("--build", action="store_true")
