@@ -14,8 +14,8 @@ The current goal is to operate the candidate without unplanned resets, collect l
 - [x] Block, transaction, ticket, VDF, recovery, fork-choice, and peer compatibility rules are documented.
 - [x] Long-running testnet has stayed stable with independent nodes for an agreed window.
 - [x] Mainnet-candidate network has launched from a fresh genesis using release artifacts.
-- [ ] New nodes can sync from genesis without manual intervention.
-- [ ] Stale nodes can reconnect and catch up from old snapshots/range sync.
+- [x] New nodes can sync from genesis without manual intervention.
+- [x] Stale nodes can reconnect and catch up from old snapshots/range sync.
 - [ ] Post-activation network partitions have an implemented objective checkpoint-based recovery rule; live soak evidence is still required to close this gate.
 - [ ] Recovery blocks restore liveness when selected finalizers disappear.
 - [ ] Multiple recovery candidates converge safely.
@@ -139,7 +139,8 @@ A release intended for deployment must pass:
   restoring the first objective checkpoint before exercising P2P, Stratum, and restarts
 - `./e2e/iuna_e2e.py test post-activation --build --evidence-dir release-evidence`,
   which crosses height 1000, checks objective finality, restarts all six nodes,
-  advances through 1007, and preserves process-level partition recovery evidence
+  advances through 1007, interrupts empty and stale node sync, and preserves
+  process-level sync and partition recovery evidence
 
 Normal local development may skip ignored long-running property tests and long fuzzing sessions, but deployment must run the release gate smoke checks.
 

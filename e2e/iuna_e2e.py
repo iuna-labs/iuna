@@ -27,6 +27,7 @@ ROOT = Path(__file__).resolve().parent.parent
 E2E_DIR = ROOT / "e2e"
 COMPOSE_FILES = (ROOT / "docker-compose.yml", E2E_DIR / "docker-compose.e2e.yml")
 SERVICES = ("bootstrap", "node2", "node3", "node4", "node5", "node6")
+SYNC_SERVICE = "syncnode"
 SERVICE_IPS = {
     "bootstrap": "172.29.0.10",
     "node2": "172.29.0.11",
@@ -43,6 +44,7 @@ DEFAULT_PORTS = {
     "node4": 28664,
     "node5": 28665,
     "node6": 28666,
+    SYNC_SERVICE: 28667,
 }
 PORT_ENV = {
     "bootstrap": "IUNA_E2E_BOOTSTRAP_PORT",
@@ -51,6 +53,7 @@ PORT_ENV = {
     "node4": "IUNA_E2E_NODE4_PORT",
     "node5": "IUNA_E2E_NODE5_PORT",
     "node6": "IUNA_E2E_NODE6_PORT",
+    SYNC_SERVICE: "IUNA_E2E_SYNCNODE_PORT",
 }
 SNAPSHOT_FILES = ("chain.sqlite3", "ui_data.sqlite3", "wallet.json", "config.json")
 EXPECTED_PROFILE = "iuna-local-e2e-5s-v1"
@@ -90,7 +93,7 @@ SCENARIOS = {
         leader_burn_minimum_height=1_002,
     ),
 }
-SPECIAL_SCENARIOS = ("partition-recovery",)
+SPECIAL_SCENARIOS = ("sync-resilience", "partition-recovery")
 POST_ACTIVATION_SCENARIOS = (
     "objective-finality",
     "checkpoint-restart",
@@ -204,11 +207,13 @@ def write_evidence_report(run: Path | None, report: dict) -> None:
     temporary.replace(run / "report.json")
 
 
-def capture_evidence_logs(run: Path | None) -> None:
+def capture_evidence_logs(
+    run: Path | None, services: tuple[str, ...] = SERVICES
+) -> None:
     if run is None:
         return
     result = subprocess.run(
-        compose_command("logs", "--no-color", *SERVICES),
+        compose_command("logs", "--no-color", *services),
         cwd=ROOT,
         env=compose_env(),
         check=False,
@@ -610,8 +615,10 @@ def assert_leader_uses_burn_from_height(
     )
 
 
-def assert_api_health(statuses: dict[str, dict], through: int) -> None:
-    for service in SERVICES:
+def assert_api_health(
+    statuses: dict[str, dict], through: int, services: tuple[str, ...] = SERVICES
+) -> None:
+    for service in services:
         blocks = node_json(service, "/api/blocks?limit=3")
         health = node_json(service, "/api/network/health")
         peers = node_json(service, "/api/peers?limit=100")
@@ -645,6 +652,69 @@ def read_chain_metadata(path: Path) -> dict:
     if row is None:
         raise E2EError(f"chain database has no persisted snapshot: {path}")
     return {"height": row[0], "tip_hash": row[1], "updated_at_ms": row[2]}
+
+
+def remove_node_databases(service: str) -> None:
+    directory = runtime_dir() / service
+    for filename in ("chain.sqlite3", "ui_data.sqlite3"):
+        database = directory / filename
+        for suffix in ("", "-wal", "-shm", "-journal"):
+            candidate = Path(f"{database}{suffix}")
+            if candidate.exists():
+                candidate.unlink()
+
+
+def restore_node_databases(
+    service: str, snapshot: str, fixture_service: str | None = None
+) -> dict:
+    source = snapshot_path(snapshot)
+    verify_snapshot(source)
+    target = runtime_dir() / service
+    source_service = fixture_service or service
+    remove_node_databases(service)
+    for filename in ("chain.sqlite3", "ui_data.sqlite3"):
+        shutil.copy2(source / source_service / filename, target / filename)
+    return read_chain_metadata(target / "chain.sqlite3")
+
+
+def wait_for_active_sync(service: str, minimum_target: int, timeout: float) -> dict:
+    deadline = time.monotonic() + timeout
+    last_summary = "node unavailable"
+    while time.monotonic() < deadline:
+        try:
+            health = node_json(service, "/api/network/health")
+            start = health.get("sync_start_height")
+            validated = health.get("sync_validated_height")
+            target = health.get("sync_target_height")
+            last_summary = (
+                f"local={health.get('local_height')}, start={start}, "
+                f"validated={validated}, target={target}"
+            )
+            if (
+                isinstance(start, int)
+                and isinstance(validated, int)
+                and isinstance(target, int)
+                and target >= minimum_target
+                and validated < target
+            ):
+                return {
+                    "local_height": health.get("local_height"),
+                    "start_height": start,
+                    "validated_height": validated,
+                    "target_height": target,
+                }
+        except (
+            E2EError,
+            OSError,
+            KeyError,
+            ValueError,
+            urllib.error.URLError,
+        ) as error:
+            last_summary = str(error)
+        time.sleep(0.01)
+    raise E2EError(
+        f"timed out waiting for active range sync on {service}; {last_summary}"
+    )
 
 
 def wait_for_persisted_height(target: int, timeout: float) -> dict:
@@ -689,12 +759,17 @@ def materialize_chain_checkpoint(
     )
 
 
-def wait_for_height(target: int, timeout: float, converge: bool) -> dict[str, dict]:
+def wait_for_height(
+    target: int,
+    timeout: float,
+    converge: bool,
+    services: tuple[str, ...] = SERVICES,
+) -> dict[str, dict]:
     deadline = time.monotonic() + timeout
     last_summary = "nodes unavailable"
     while time.monotonic() < deadline:
         try:
-            statuses = all_statuses()
+            statuses = {service: node_status(service) for service in services}
             assert_e2e_profile(statuses)
             tips = {
                 (status["chain"]["height"], status["chain"]["tip_hash"])
@@ -907,7 +982,7 @@ def restore_snapshot(name: str) -> None:
 def reset_runtime() -> None:
     compose("down", "--remove-orphans", check=False)
     base = runtime_dir()
-    for service in SERVICES:
+    for service in (*SERVICES, SYNC_SERVICE):
         target = base / service
         if target.exists():
             shutil.rmtree(target)
@@ -983,6 +1058,140 @@ def run_scenario(
         print(f"e2e scenario {name} passed")
     except Exception:
         compose("logs", "--tail", "200", *SERVICES, check=False)
+        raise
+    finally:
+        if not keep:
+            compose("down", "--remove-orphans", check=False)
+
+
+def run_sync_resilience_scenario(
+    timeout: float, build: bool, keep: bool, evidence_dir: Path | None
+) -> None:
+    name = "sync-resilience"
+    service = SYNC_SERVICE
+    sync_services = (*SERVICES, service)
+    evidence_run, evidence = create_evidence_run(evidence_dir, name)
+    print(
+        "running e2e scenario sync-resilience: interrupted empty bootstrap and stale range sync",
+        flush=True,
+    )
+    restore_snapshot("first-objective-checkpoint")
+    try:
+        start(build)
+        initial = wait_for_height(1_001, timeout, converge=True)
+        initial_height = min(
+            status["chain"]["height"] for status in initial.values()
+        )
+        evidence["phases"]["initial"] = evidence_statuses(initial)
+        write_evidence_report(evidence_run, evidence)
+
+        compose("rm", "--force", "--stop", service, check=False)
+        _OPENERS.pop(service, None)
+        sync_directory = runtime_dir() / service
+        if sync_directory.exists():
+            shutil.rmtree(sync_directory)
+        sync_directory.mkdir(parents=True)
+        chain_database = sync_directory / "chain.sqlite3"
+        evidence["phases"]["empty_bootstrap_started"] = {
+            "service": service,
+            "source_height": initial_height,
+            "chain_snapshot_present": False,
+        }
+        write_evidence_report(evidence_run, evidence)
+        compose("up", "--detach", "--no-deps", service)
+        time.sleep(0.05)
+        compose("kill", "--signal", "SIGKILL", service)
+        _OPENERS.pop(service, None)
+        try:
+            interrupted = read_chain_metadata(chain_database)
+        except (E2EError, sqlite3.Error):
+            interrupted = None
+        if interrupted is not None and interrupted["height"] >= initial_height:
+            raise E2EError(
+                "empty bootstrap completed before it could be interrupted; "
+                "increase the fixture height"
+            )
+        evidence["phases"]["empty_bootstrap_interrupted"] = {
+            "signal": "SIGKILL",
+            "persisted_height": (
+                interrupted["height"] if interrupted is not None else None
+            ),
+        }
+        write_evidence_report(evidence_run, evidence)
+        compose("start", service)
+        empty_synced = wait_for_height(
+            initial_height, timeout, converge=True, services=sync_services
+        )
+        assert_converged(empty_synced)
+        evidence["phases"]["empty_bootstrap_resumed"] = {
+            "interrupted_before_target_persisted": True,
+            "nodes": evidence_statuses(empty_synced),
+        }
+        write_evidence_report(evidence_run, evidence)
+
+        stale_target = min(empty_synced[node]["chain"]["height"] for node in SERVICES)
+        compose("stop", service)
+        _OPENERS.pop(service, None)
+        stale = restore_node_databases(
+            service, "pre-fallback-invalidation", fixture_service="node6"
+        )
+        if stale["height"] >= stale_target:
+            raise E2EError(
+                f"stale fixture height {stale['height']} is not below target {stale_target}"
+            )
+        evidence["phases"]["stale_range_started"] = {
+            "service": service,
+            "stale_snapshot": "pre-fallback-invalidation",
+            "stale_height": stale["height"],
+            "stale_tip_hash": stale["tip_hash"],
+            "minimum_target_height": stale_target,
+        }
+        write_evidence_report(evidence_run, evidence)
+        compose("up", "--detach", "--no-deps", service)
+        _OPENERS.pop(service, None)
+        progress = wait_for_active_sync(service, stale_target, timeout)
+        compose("kill", "--signal", "SIGKILL", service)
+        _OPENERS.pop(service, None)
+        interrupted = read_chain_metadata(chain_database)
+        if interrupted["height"] >= progress["target_height"]:
+            raise E2EError(
+                "stale range sync reached its target before process interruption"
+            )
+        evidence["phases"]["stale_range_interrupted"] = {
+            **progress,
+            "signal": "SIGKILL",
+            "persisted_height": interrupted["height"],
+            "persisted_tip_hash": interrupted["tip_hash"],
+        }
+        write_evidence_report(evidence_run, evidence)
+        compose("start", service)
+        stale_synced = wait_for_height(
+            stale_target, timeout, converge=True, services=sync_services
+        )
+        assert_converged(stale_synced)
+        assert_api_health(stale_synced, stale_target, services=sync_services)
+        evidence["phases"]["stale_range_resumed"] = {
+            "nodes": evidence_statuses(stale_synced),
+        }
+        evidence["outcome"] = "passed"
+        evidence["finished_at"] = datetime.now(timezone.utc).isoformat()
+        write_evidence_report(evidence_run, evidence)
+        capture_evidence_logs(evidence_run, sync_services)
+        print(
+            f"e2e scenario {name} passed: empty bootstrap and range sync "
+            f"resumed through at least height {stale_target}",
+            flush=True,
+        )
+    except Exception as error:
+        evidence["outcome"] = "failed"
+        evidence["finished_at"] = datetime.now(timezone.utc).isoformat()
+        evidence["error"] = {
+            "type": type(error).__name__,
+            "message": str(error),
+        }
+        write_evidence_report(evidence_run, evidence)
+        capture_evidence_logs(evidence_run, sync_services)
+        compose("logs", "--tail", "300", *sync_services, check=False)
         raise
     finally:
         if not keep:
@@ -1127,6 +1336,13 @@ def run_tests(
                 scenario_keep,
                 evidence_dir,
             )
+        elif scenario_name == "sync-resilience":
+            run_sync_resilience_scenario(
+                timeout,
+                build and index == 0,
+                scenario_keep,
+                evidence_dir,
+            )
         else:
             run_scenario(
                 scenario_name,
@@ -1197,7 +1413,7 @@ def parser() -> argparse.ArgumentParser:
     tests.add_argument(
         "--evidence-dir",
         type=Path,
-        help="write partition recovery report and node logs below this directory",
+        help="write scenario phase reports and node logs below this directory",
     )
     return result
 

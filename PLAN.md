@@ -33,11 +33,18 @@ recovery-candidates bevat.
 
 ## 3. Sync-bewijs
 
-- [ ] Test een lege node die zonder handwerk vanaf genesis synchroniseert.
-- [ ] Test een stale node vanaf een oud snapshot via range/fork sync.
-- [ ] Test onderbreking en herstart tijdens beide sync-paden.
-- [ ] Archiveer hoogtes, tip-hashes, doorlooptijden en foutlogs als
+- [x] Test een lege node die zonder handwerk vanaf genesis synchroniseert.
+- [x] Test een stale node vanaf een oud snapshot via range/fork sync.
+- [x] Test onderbreking en herstart tijdens beide sync-paden.
+- [x] Archiveer hoogtes, tip-hashes, doorlooptijden en foutlogs als
       release-evidence.
+
+Resultaat: de versnelde zeven-node `sync-resilience`-gate onderbrak een lege
+bootstrap vóór de eerste persistente snapshot en hervatte tot zeven-node
+convergentie op hoogte 1032. Daarna synchroniseerde dezelfde node vanaf hoogte
+299, werd tijdens actieve range-validatie met een persistente tussenstand op
+hoogte 811 afgebroken, en convergeerde na herstart met alle nodes op hoogte
+1059.
 
 ## 4. Release- en security-sign-off
 

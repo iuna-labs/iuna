@@ -126,6 +126,38 @@ services:
       iuna-testnet:
         ipv4_address: 172.29.0.15
 
+  syncnode:
+    build:
+      context: .
+      dockerfile: Dockerfile.local-testnet
+      args:
+        IUNA_CARGO_FEATURES: "--features e2e"
+    image: iuna-local-e2e:latest
+    init: true
+    restart: "no"
+    environment:
+      IUNA_WALLET_PASSWORD: ${IUNA_TESTNET_PASSWORD:-testtesttest}
+      IUNA_SETUP_COMPLETE: "true"
+      IUNA_LOCAL_TESTNET: "true"
+      IUNA_AUTOMATIC_BURN_ENABLED: "false"
+      IUNA_POW_MINING_ENABLED: "false"
+    entrypoint: ["/bin/sh", "-c"]
+    command:
+      - exec iuna --join 172.29.0.13:9444 --data-dir /data --http 0.0.0.0:18661 --p2p 0.0.0.0:9444 --p2p-announce 172.29.0.16:9444 --debug
+    healthcheck:
+      test: ["CMD", "curl", "-fsS", "http://127.0.0.1:18661/api/auth/status"]
+      interval: 1s
+      timeout: 3s
+      retries: 900
+      start_period: 2s
+    ports:
+      - "${IUNA_E2E_SYNCNODE_PORT:-28667}:18661"
+    volumes:
+      - "${IUNA_E2E_RUNTIME_DIR:?set IUNA_E2E_RUNTIME_DIR}/syncnode:/data"
+    networks:
+      iuna-testnet:
+        ipv4_address: 172.29.0.16
+
 networks:
   iuna-testnet:
     ipam:

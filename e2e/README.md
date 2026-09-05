@@ -3,7 +3,8 @@
 This harness runs the six-node network with a deliberately isolated consensus
 profile, `iuna-local-e2e-5s-v1`. Its target block time is 5 seconds, its Docker
 subnet is `172.29.0.0/24`, and its management ports are `28661` through `28666`.
-The regular local testnet keeps its 10-minute target and can run alongside it.
+The optional sync-test node uses `28667`. The regular local testnet keeps its
+10-minute target and can run alongside it.
 
 The e2e binary refuses to start unless `IUNA_LOCAL_TESTNET=true`. Its profile ID
 is part of the launch-profile hash, so a 5-second checkpoint cannot be loaded by
@@ -48,7 +49,8 @@ Run the standard post-activation gate used by deployment:
 
 This verifies the committed checkpoints, crosses 999 through 1001, then restores
 the first objective checkpoint, advances the restarted network through 1007,
-and runs a physical 3-3 P2P partition/recovery scenario.
+interrupts both an empty-node bootstrap and stale range sync, and runs a physical
+3-3 P2P partition/recovery scenario.
 
 Tests can also be selected individually:
 
@@ -57,13 +59,14 @@ Tests can also be selected individually:
 ./e2e/iuna_e2e.py test fallback-activation
 ./e2e/iuna_e2e.py test objective-finality
 ./e2e/iuna_e2e.py test checkpoint-restart
+./e2e/iuna_e2e.py test sync-resilience
 ./e2e/iuna_e2e.py test partition-recovery
 ```
 
 Preserve a machine-readable phase report and complete container logs:
 
 ```sh
-./e2e/iuna_e2e.py test partition-recovery \
+./e2e/iuna_e2e.py test sync-resilience \
   --evidence-dir release-evidence
 ```
 
@@ -95,13 +98,24 @@ while leaving the other island members out of the recovery race. It restores the
 normal 50% configuration before healing, avoiding both a recovery-less small
 island and unrestricted fallback-ticket production.
 
+`sync-resilience` restores the mature six-node checkpoint and adds a seventh,
+non-finalizing `syncnode` with a fresh data directory. It interrupts that node
+before its fetched chain is persisted, then requires a successful restart and
+seven-node convergence. Next it gives the same node the height-299 chain/UI
+fixture, waits until the management API reports active incremental range
+validation, interrupts it again, and requires the persisted stale node to
+resume and converge. The six finalizing reference nodes remain untouched, so
+their consensus participation is not conflated with the sync failure being
+tested.
+
 Each evidence run is stored in a timestamped directory with `report.json` and
 `nodes.log`. The report records the base Git revision, dirty-worktree flag, an
-exact SHA-256 fingerprint of all tracked working-tree contents, per-phase node
-tips and checkpoints, both partition recovery heights, the canonical recovery
-block, the restarted service, and the resumed rank-0 ticket. The tree fingerprint
-also identifies the tested state while deployment has staged version changes
-that are committed and tagged only after all gates pass.
+exact SHA-256 fingerprint of all tracked working-tree contents, and per-phase
+node tips and checkpoints. Scenario-specific phases add the sync start,
+validated and target heights or both partition recovery heights, the canonical
+recovery block, the restarted service, and the resumed rank-0 ticket. The tree
+fingerprint also identifies the tested state while deployment has staged
+version changes that are committed and tagged only after all gates pass.
 It is updated after every completed phase so a failed run remains useful. Raw
 node logs contain public node/wallet addresses but no configuration files,
 passwords, wallet ciphertext, or recovery phrases. `deployment.sh` enables this
@@ -119,7 +133,8 @@ Runtime data lives in `e2e/.runtime` and is ignored by Git. Set
 `IUNA_E2E_RUNTIME_DIR`, `IUNA_E2E_SNAPSHOTS_DIR`, `IUNA_E2E_PROJECT`, or the
 `IUNA_E2E_*_PORT` variables when a test needs independent paths or ports.
 `reset` only removes the six service directories beneath that configured runtime
-directory; committed checkpoints are never touched.
+directory plus the disposable sync-node directory; committed checkpoints are
+never touched.
 
 ## Building mature checkpoints
 
