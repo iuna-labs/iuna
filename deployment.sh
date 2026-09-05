@@ -153,7 +153,8 @@ run_release_tests() {
   cargo run --locked --manifest-path fuzz/Cargo.toml --bin wallet_config -- -runs="$fuzz_runs" fuzz/corpus/wallet_config
   cargo run --locked --manifest-path fuzz/Cargo.toml --bin vdf_proof -- -runs="$vdf_fuzz_runs" fuzz/corpus/vdf_proof
   cargo test --locked --release --features e2e --test properties -- --ignored
-  ./e2e/iuna_e2e.py test post-activation --build
+  local release_evidence_dir="${IUNA_RELEASE_EVIDENCE_DIR:-release-evidence}"
+  ./e2e/iuna_e2e.py test post-activation --build --evidence-dir "$release_evidence_dir"
 }
 
 update_versions() {

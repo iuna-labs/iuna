@@ -130,8 +130,9 @@ A release intended for deployment must pass:
   `compact_snapshot`, `domain_json`, `stratum_request`, and `wallet_config`
 - `cargo test --locked --release --features e2e --test properties -- --ignored`,
   restoring the first objective checkpoint before exercising P2P, Stratum, and restarts
-- `./e2e/iuna_e2e.py test post-activation --build`, which crosses height 1000,
-  checks objective finality, restarts all six nodes, and advances through 1007
+- `./e2e/iuna_e2e.py test post-activation --build --evidence-dir release-evidence`,
+  which crosses height 1000, checks objective finality, restarts all six nodes,
+  advances through 1007, and preserves process-level partition recovery evidence
 
 Normal local development may skip ignored long-running property tests and long fuzzing sessions, but deployment must run the release gate smoke checks.
 

@@ -13,7 +13,7 @@ test is nodig, maar sluit een live-soak gate niet automatisch.
 - [x] Herstart een node met zijn bestaande persistente data.
 - [x] Verifieer dat na recovery weer een normaal ticketblock wordt geproduceerd.
 - [x] Neem het scenario op in de verplichte post-activation release-gate.
-- [ ] Bewaar bij falen en bij een candidate release de relevante node-logs en
+- [x] Bewaar bij falen en bij een candidate release de relevante node-logs en
       tip/checkpoint-samenvatting.
 
 ## 2. Live recovery-bewijs

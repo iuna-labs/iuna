@@ -179,6 +179,7 @@ cargo run --locked --manifest-path fuzz/Cargo.toml --bin wallet_config -- -runs=
 cargo run --locked --manifest-path fuzz/Cargo.toml --bin vdf_proof -- -runs=16 fuzz/corpus/vdf_proof
 cargo test --locked domain::adversarial_tests:: -- --ignored
 cargo test --locked --release --test properties -- --ignored
+./e2e/iuna_e2e.py test post-activation --build --evidence-dir release-evidence
 ```
 
 On macOS hosts with the optional Python/C++ `chiavdf` package installed, also

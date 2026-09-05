@@ -60,6 +60,13 @@ Tests can also be selected individually:
 ./e2e/iuna_e2e.py test partition-recovery
 ```
 
+Preserve a machine-readable phase report and complete container logs:
+
+```sh
+./e2e/iuna_e2e.py test partition-recovery \
+  --evidence-dir release-evidence
+```
+
 `snapshots` is fast and does not need Docker. It verifies checksums, manifest
 metadata, the six stored chain databases, canonical heights and tips, and the
 profile of every committed checkpoint. The network scenarios restore the
@@ -87,6 +94,19 @@ worker per island and tip
 while leaving the other island members out of the recovery race. It restores the
 normal 50% configuration before healing, avoiding both a recovery-less small
 island and unrestricted fallback-ticket production.
+
+Each evidence run is stored in a timestamped directory with `report.json` and
+`nodes.log`. The report records the base Git revision, dirty-worktree flag, an
+exact SHA-256 fingerprint of all tracked working-tree contents, per-phase node
+tips and checkpoints, both partition recovery heights, the canonical recovery
+block, the restarted service, and the resumed rank-0 ticket. The tree fingerprint
+also identifies the tested state while deployment has staged version changes
+that are committed and tagged only after all gates pass.
+It is updated after every completed phase so a failed run remains useful. Raw
+node logs contain public node/wallet addresses but no configuration files,
+passwords, wallet ciphertext, or recovery phrases. `deployment.sh` enables this
+automatically under `release-evidence/`; set `IUNA_RELEASE_EVIDENCE_DIR` to copy
+release evidence to another retained location.
 
 Use `--keep` on `smoke` to leave a failed or successful network running. Stop a
 network without deleting its mutable data with:

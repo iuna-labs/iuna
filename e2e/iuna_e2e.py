@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import argparse
 from dataclasses import dataclass
+from datetime import datetime, timezone
 import hashlib
 import http.cookiejar
 import json
@@ -136,6 +137,104 @@ def compose(*args: str, check: bool = True) -> subprocess.CompletedProcess[str]:
         check=check,
         text=True,
     )
+
+
+def create_evidence_run(base: Path | None, scenario: str) -> tuple[Path | None, dict]:
+    started_at = datetime.now(timezone.utc)
+    report = {
+        "format": 1,
+        "scenario": scenario,
+        "started_at": started_at.isoformat(),
+        "git_commit": subprocess.run(
+            ["git", "rev-parse", "HEAD"],
+            cwd=ROOT,
+            check=True,
+            capture_output=True,
+            text=True,
+        ).stdout.strip(),
+        "git_dirty": bool(
+            subprocess.run(
+                ["git", "status", "--porcelain"],
+                cwd=ROOT,
+                check=True,
+                capture_output=True,
+                text=True,
+            ).stdout.strip()
+        ),
+        "tracked_tree_sha256": tracked_tree_sha256(),
+        "phases": {},
+        "outcome": "running",
+    }
+    if base is None:
+        return None, report
+    run = base.resolve() / f"{started_at.strftime('%Y%m%dT%H%M%S.%fZ')}-{scenario}"
+    run.mkdir(parents=True, exist_ok=False)
+    write_evidence_report(run, report)
+    return run, report
+
+
+def tracked_tree_sha256() -> str:
+    tracked = subprocess.run(
+        ["git", "ls-files", "-z"],
+        cwd=ROOT,
+        check=True,
+        capture_output=True,
+    ).stdout.split(b"\0")
+    digest = hashlib.sha256()
+    for encoded_path in tracked:
+        if not encoded_path:
+            continue
+        path = ROOT / os.fsdecode(encoded_path)
+        digest.update(encoded_path)
+        digest.update(b"\0")
+        if path.exists():
+            contents = path.read_bytes()
+            digest.update(len(contents).to_bytes(8, "big"))
+            digest.update(contents)
+        else:
+            digest.update(b"missing")
+    return digest.hexdigest()
+
+
+def write_evidence_report(run: Path | None, report: dict) -> None:
+    if run is None:
+        return
+    temporary = run / "report.json.tmp"
+    temporary.write_text(json.dumps(report, indent=2, sort_keys=True) + "\n")
+    temporary.replace(run / "report.json")
+
+
+def capture_evidence_logs(run: Path | None) -> None:
+    if run is None:
+        return
+    result = subprocess.run(
+        compose_command("logs", "--no-color", *SERVICES),
+        cwd=ROOT,
+        env=compose_env(),
+        check=False,
+        capture_output=True,
+        text=True,
+    )
+    (run / "nodes.log").write_text(result.stdout + result.stderr)
+
+
+def evidence_block(block: dict) -> dict:
+    return {
+        key: block.get(key)
+        for key in (
+            "height",
+            "hash",
+            "prev_hash",
+            "timestamp_ms",
+            "finalizer_mode",
+            "finalizer_rank",
+            "miner",
+        )
+    }
+
+
+def evidence_statuses(statuses: dict[str, dict]) -> dict[str, dict]:
+    return {service: compact_status(status) for service, status in statuses.items()}
 
 
 def container_command(
@@ -890,8 +989,11 @@ def run_scenario(
             compose("down", "--remove-orphans", check=False)
 
 
-def run_partition_recovery_scenario(timeout: float, build: bool, keep: bool) -> None:
+def run_partition_recovery_scenario(
+    timeout: float, build: bool, keep: bool, evidence_dir: Path | None
+) -> None:
     name = "partition-recovery"
+    evidence_run, evidence = create_evidence_run(evidence_dir, name)
     print(
         "running e2e scenario partition-recovery: physical 3-3 split, heal and restart",
         flush=True,
@@ -899,7 +1001,9 @@ def run_partition_recovery_scenario(timeout: float, build: bool, keep: bool) -> 
     restore_snapshot("first-objective-checkpoint")
     try:
         start(build)
-        wait_for_height(1_001, timeout, converge=True)
+        initial = wait_for_height(1_001, timeout, converge=True)
+        evidence["phases"]["initial"] = evidence_statuses(initial)
+        write_evidence_report(evidence_run, evidence)
         apply_partition()
         partitioned_start = all_statuses()
         left, right = PARTITION_GROUPS
@@ -909,9 +1013,19 @@ def run_partition_recovery_scenario(timeout: float, build: bool, keep: bool) -> 
             )
             for label, group in (("left", left), ("right", right))
         }
+        evidence["phases"]["partition_started"] = {
+            "boundaries": partition_boundaries,
+            "nodes": evidence_statuses(partitioned_start),
+        }
+        write_evidence_report(evidence_run, evidence)
         partitioned, recovery_heights = wait_for_partition_recovery(
             partition_boundaries, timeout
         )
+        evidence["phases"]["partition_recovery"] = {
+            "recovery_heights": recovery_heights,
+            "nodes": evidence_statuses(partitioned),
+        }
+        write_evidence_report(evidence_run, evidence)
         print(
             "partition recovery observed: "
             + json.dumps(recovery_heights, sort_keys=True),
@@ -937,21 +1051,52 @@ def run_partition_recovery_scenario(timeout: float, build: bool, keep: bool) -> 
         canonical_recovery_height = max(
             int(block["height"]) for block in canonical_recoveries
         )
+        canonical_recovery = next(
+            block
+            for block in canonical_recoveries
+            if int(block["height"]) == canonical_recovery_height
+        )
+        evidence["phases"]["healed"] = {
+            "canonical_recovery": evidence_block(canonical_recovery),
+            "nodes": evidence_statuses(healed),
+        }
+        write_evidence_report(evidence_run, evidence)
 
         restart_height = max(status["chain"]["height"] for status in healed.values())
         compose("restart", "node6")
         _OPENERS.pop("node6", None)
+        evidence["phases"]["restart"] = {
+            "service": "node6",
+            "after_height": restart_height,
+        }
+        write_evidence_report(evidence_run, evidence)
         resumed, ticket = wait_for_ticket_after(
             max(canonical_recovery_height, restart_height), timeout
         )
         assert_converged(resumed)
         assert_api_health(resumed, int(ticket["height"]))
+        evidence["phases"]["resumed"] = {
+            "ticket": evidence_block(ticket),
+            "nodes": evidence_statuses(resumed),
+        }
+        evidence["outcome"] = "passed"
+        evidence["finished_at"] = datetime.now(timezone.utc).isoformat()
+        write_evidence_report(evidence_run, evidence)
+        capture_evidence_logs(evidence_run)
         print(
             f"e2e scenario {name} passed: recovery at {canonical_recovery_height}, "
             f"rank-0 ticket resumed at {ticket['height']}",
             flush=True,
         )
-    except Exception:
+    except Exception as error:
+        evidence["outcome"] = "failed"
+        evidence["finished_at"] = datetime.now(timezone.utc).isoformat()
+        evidence["error"] = {
+            "type": type(error).__name__,
+            "message": str(error),
+        }
+        write_evidence_report(evidence_run, evidence)
+        capture_evidence_logs(evidence_run)
         compose("logs", "--tail", "300", *SERVICES, check=False)
         raise
     finally:
@@ -960,7 +1105,9 @@ def run_partition_recovery_scenario(timeout: float, build: bool, keep: bool) -> 
             compose("down", "--remove-orphans", check=False)
 
 
-def run_tests(name: str, timeout: float, build: bool, keep: bool) -> None:
+def run_tests(
+    name: str, timeout: float, build: bool, keep: bool, evidence_dir: Path | None
+) -> None:
     if name in ("snapshots", "all"):
         test_snapshots()
     if name == "all":
@@ -978,6 +1125,7 @@ def run_tests(name: str, timeout: float, build: bool, keep: bool) -> None:
                 timeout,
                 build and index == 0,
                 scenario_keep,
+                evidence_dir,
             )
         else:
             run_scenario(
@@ -1046,6 +1194,11 @@ def parser() -> argparse.ArgumentParser:
     tests.add_argument("--timeout", type=float, default=600)
     tests.add_argument("--build", action="store_true")
     tests.add_argument("--keep", action="store_true")
+    tests.add_argument(
+        "--evidence-dir",
+        type=Path,
+        help="write partition recovery report and node logs below this directory",
+    )
     return result
 
 
@@ -1076,7 +1229,13 @@ def main() -> int:
         elif args.command == "smoke":
             smoke(args.snapshot, args.through, args.timeout, args.build, args.keep)
         elif args.command == "test":
-            run_tests(args.scenario, args.timeout, args.build, args.keep)
+            run_tests(
+                args.scenario,
+                args.timeout,
+                args.build,
+                args.keep,
+                args.evidence_dir,
+            )
         return 0
     except (E2EError, OSError, sqlite3.Error, subprocess.CalledProcessError) as error:
         print(f"e2e error: {error}", file=sys.stderr)
