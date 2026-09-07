@@ -125,7 +125,7 @@ window.iunaApp = function iunaApp() {
     selectedTransferUtxos: [],
     selectedTransferUtxoAmounts: {},
     lastSelectedTransferUtxo: null,
-    walletTxFilters: { transfer: true, mine: false, burn: false },
+    walletTxFilters: { transfer: true, mine: false, burn: false, reward: true },
     setupPeerAddress: "iuna.jhx.app:9444",
     peerAddress: "",
     flash: null,
@@ -1151,6 +1151,7 @@ window.iunaApp = function iunaApp() {
         tx: String(this.walletTxFilters.transfer),
         mine: String(this.walletTxFilters.mine),
         burn: String(this.walletTxFilters.burn),
+        reward: String(this.walletTxFilters.reward),
       });
       return `/api/wallet/transactions?${params.toString()}`;
     },

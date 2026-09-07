@@ -222,6 +222,7 @@ pub(super) struct WalletTransactionsQuery {
     pub(super) tx: Option<bool>,
     pub(super) mine: Option<bool>,
     pub(super) burn: Option<bool>,
+    pub(super) reward: Option<bool>,
     pub(super) offset: Option<usize>,
     pub(super) limit: Option<usize>,
 }
@@ -240,6 +241,7 @@ pub(super) struct WalletTransactionFilters {
     pub(super) transfer: bool,
     pub(super) mine: bool,
     pub(super) burn: bool,
+    pub(super) reward: bool,
 }
 
 impl Default for WalletTransactionFilters {
@@ -248,6 +250,7 @@ impl Default for WalletTransactionFilters {
             transfer: true,
             mine: false,
             burn: false,
+            reward: true,
         }
     }
 }
@@ -258,6 +261,7 @@ impl WalletTransactionFilters {
             transfer: query.tx.unwrap_or(true),
             mine: query.mine.unwrap_or(false),
             burn: query.burn.unwrap_or(false),
+            reward: query.reward.unwrap_or(true),
         }
     }
 

@@ -809,6 +809,10 @@ pub(super) const INDEX_HTML: &str = concat!(
                 <input type="checkbox" x-model="walletTxFilters.burn" @change="refreshWalletTransactions()">
                 <span>Burn</span>
               </label>
+              <label class="tx-filter" :class="{ active: walletTxFilters.reward }">
+                <input type="checkbox" x-model="walletTxFilters.reward" @change="refreshWalletTransactions()">
+                <span>Reward</span>
+              </label>
             </div>
           </div>
           <div class="wallet-tx-list">

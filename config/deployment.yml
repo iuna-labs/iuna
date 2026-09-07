@@ -73,10 +73,21 @@ spec:
                 name: iuna-www
                 port:
                   number: 80
+    - host: wallet.getiuna.org
+      http:
+        paths:
+          - path: /
+            pathType: Prefix
+            backend:
+              service:
+                name: iuna-www
+                port:
+                  number: 80
   tls:
     - secretName: iuna-tls
       hosts:
         - getiuna.org
+        - wallet.getiuna.org
 ---
 apiVersion: traefik.containo.us/v1alpha1
 kind: Middleware

@@ -121,6 +121,10 @@ function nav() {
 function transactionInfo(item) {
   const tx = item.transaction || {};
   const owner = state.wallet.publicKeyHex;
+  if (item.kind === "reward") {
+    const amount = tx.outputs?.find((output) => output.address === owner)?.amount || 0;
+    return { title: "Block reward", incoming: true, amount, symbol: "★" };
+  }
   if (tx.kind === "mine") return { title: "Mining reward", incoming: true, amount: 1_000_000, symbol: "✦" };
   if (tx.kind === "burn") return { title: "Burn", incoming: false, amount: tx.amount || 0, symbol: "×" };
   const sent = tx.inputs?.some((input) => input.owner === owner);

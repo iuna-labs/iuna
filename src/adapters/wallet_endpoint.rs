@@ -114,6 +114,7 @@ struct TransactionsResponse {
 
 #[derive(Debug, Serialize)]
 struct AddressTransaction {
+    kind: String,
     status: &'static str,
     block_height: Option<u64>,
     timestamp_ms: Option<u64>,
@@ -293,6 +294,7 @@ async fn address_transactions(
         .skip(offset.min(pending_total))
         .take(limit)
         .map(|transaction| AddressTransaction {
+            kind: transaction_kind(&transaction).to_string(),
             status: "pending",
             block_height: None,
             timestamp_ms: None,
@@ -306,7 +308,7 @@ async fn address_transactions(
     let confirmed = tokio::task::spawn_blocking(move || {
         store.load_wallet_transactions(
             &public_key,
-            &["transfer", "mine", "burn"],
+            &["transfer", "mine", "burn", "reward"],
             confirmed_offset,
             remaining,
         )
@@ -316,6 +318,7 @@ async fn address_transactions(
     .map_err(internal_error)?;
     let confirmed_total = confirmed.1;
     items.extend(confirmed.0.into_iter().map(|row| AddressTransaction {
+        kind: row.kind,
         status: "confirmed",
         block_height: Some(row.block_height),
         timestamp_ms: Some(row.timestamp_ms),
@@ -346,6 +349,14 @@ fn transaction_mentions_address(transaction: &Transaction, address: &str) -> boo
                 || change.iter().any(|output| output.address == address)
         }
         Transaction::Mine { recipient, .. } => recipient == address,
+    }
+}
+
+fn transaction_kind(transaction: &Transaction) -> &'static str {
+    match transaction {
+        Transaction::Transfer { .. } => "transfer",
+        Transaction::Burn { .. } => "burn",
+        Transaction::Mine { .. } => "mine",
     }
 }
 

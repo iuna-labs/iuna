@@ -15,6 +15,7 @@ use crate::{
     domain::{
         Amount, Block, BurnLeaderRank, ChainSnapshot, Ledger, MINE_RETARGET_WINDOW_BLOCKS,
         MINE_REWARD, OutPoint, Transaction, TxInput, TxOutput, retarget_mine_difficulty_bits,
+        reward_outputs_for_block,
     },
 };
 
@@ -141,7 +142,7 @@ DROP TABLE IF EXISTS ui_burn_leader_rank_blocks;
 "#;
 
 const UI_DATA_SCHEMA_VERSION: u32 = 1;
-const UI_CACHE_SCHEMA_VERSION: u32 = 3;
+const UI_CACHE_SCHEMA_VERSION: u32 = 4;
 const METRICS_CACHE_SCHEMA_VERSION: u32 = 1;
 
 #[derive(Clone, Debug, Eq, PartialEq, Serialize)]
@@ -1247,7 +1248,7 @@ LIMIT ? OFFSET ?
 }
 
 fn wallet_transaction_kinds_cover_all(kinds: &[&str]) -> bool {
-    ["transfer", "mine", "burn"]
+    ["transfer", "mine", "burn", "reward"]
         .into_iter()
         .all(|kind| kinds.contains(&kind))
 }
@@ -1387,6 +1388,15 @@ fn wallet_transactions_from_snapshot(
     snapshot: &ChainSnapshot,
 ) -> Vec<(String, WalletTransactionProjection)> {
     let mut rows = Vec::new();
+    let mut running_ledger = snapshot.blocks.first().cloned().and_then(|genesis| {
+        Ledger::from_preverified_snapshot(ChainSnapshot {
+            genesis_allocations: snapshot.genesis_allocations.clone(),
+            vdf_rounds: snapshot.vdf_rounds,
+            launch_profile: snapshot.launch_profile.clone(),
+            blocks: vec![genesis],
+        })
+        .ok()
+    });
     for block in &snapshot.blocks {
         for (index, transaction) in block.transactions.iter().rev().enumerate() {
             push_wallet_transaction_projection(
@@ -1395,6 +1405,44 @@ fn wallet_transactions_from_snapshot(
                 block,
                 block.height as u128 * 10_000 + index as u128,
             );
+        }
+        let reward_committee = if block.height == 0 {
+            Vec::new()
+        } else {
+            running_ledger
+                .as_ref()
+                .map(|ledger| ledger.burn_committee_for_block(block))
+                .unwrap_or_default()
+        };
+        let reward_outputs = if block.height > 0 {
+            reward_outputs_for_block(block, &reward_committee)
+        } else {
+            Vec::new()
+        };
+        for (index, (outpoint, output)) in reward_outputs.into_iter().enumerate() {
+            let signature = format!("reward:{}:{}", outpoint.txid, outpoint.index);
+            rows.push((
+                output.address.clone(),
+                WalletTransactionProjection {
+                    sort_key: (block.height as u128 * 10_000 + 9_999 - index as u128)
+                        .min(u128::from(u64::MAX)) as u64,
+                    kind: "reward".to_string(),
+                    block_height: block.height,
+                    timestamp_ms: block.timestamp_ms,
+                    block_finalizer: block.miner.clone(),
+                    transaction: Transaction::Transfer {
+                        inputs: Vec::new(),
+                        outputs: vec![output],
+                        fee: 0,
+                        signature,
+                    },
+                },
+            ));
+        }
+        if block.height > 0 {
+            if let Some(ledger) = running_ledger.as_mut() {
+                let _ = ledger.apply_preverified_block_at(block.clone(), u64::MAX);
+            }
         }
     }
     rows
@@ -1672,6 +1720,26 @@ mod tests {
         ledger.submit_transaction(burn).unwrap();
         let block = ledger.mine_next_block(wallet, timestamp_ms).unwrap();
         ledger.apply_locally_mined_block(block).unwrap();
+    }
+
+    #[test]
+    fn wallet_projection_includes_block_rewards() {
+        let dir = tempdir().unwrap();
+        let store = SqliteUiDataStore::open(dir.path().join("ui_data.sqlite3")).unwrap();
+        let (mut ledger, wallet) = test_ledger("wallet-reward-history");
+        append_test_block(&mut ledger, &wallet, 1_234);
+
+        store.project_snapshot(&ledger.snapshot(), false).unwrap();
+        let (rows, total) = store
+            .load_wallet_transactions(wallet.address(), &["reward"], 0, 10)
+            .unwrap();
+
+        assert_eq!(total, 1);
+        assert_eq!(rows[0].kind, "reward");
+        assert_eq!(rows[0].block_height, 1);
+        assert_eq!(rows[0].timestamp_ms, 1_234);
+        assert_eq!(rows[0].transaction.to(), Some(wallet.address()));
+        assert!(rows[0].transaction.amount() > 0);
     }
 
     #[test]

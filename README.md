@@ -275,11 +275,10 @@ configuration, or authentication routes. JSON request bodies are capped at 64
 KiB. The production manifest exposes this API as `https://iuna.jhx.app/v1` while
 `https://admin.iuna.jhx.app/` remains the separately protected management UI.
 
-The lightweight browser wallet MVP lives in `wallet/` and is copied to
-`/wallet/` in the public site image. It keeps the seed encrypted in browser
+The lightweight browser wallet lives in `wallet/` and is served at
+`https://wallet.getiuna.org/`. It keeps the seed encrypted in browser
 `localStorage`, signs transfers locally, and talks only to the public v1 wallet
-endpoint. A separate host such as `wallet.getiuna.org` can point its document
-root at that same `/wallet/` directory.
+endpoint. Requests to the old `/wallet/` path redirect to the dedicated host.
 
 ## Optional: Stratum Mining
 

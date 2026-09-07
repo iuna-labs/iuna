@@ -162,7 +162,8 @@ pub(super) async fn api_wallet_transactions(
         .await
         .unwrap_or_default();
     items.extend(confirmed_rows.into_iter().filter_map(|row| {
-        wallet_transaction_row(
+        let is_reward = row.kind == "reward";
+        let mut item = wallet_transaction_row(
             &wallet,
             &row.transaction,
             &confirmed_outputs,
@@ -172,7 +173,13 @@ pub(super) async fn api_wallet_transactions(
                 timestamp_ms: Some(row.timestamp_ms),
                 block_finalizer: Some(row.block_finalizer),
             },
-        )
+        )?;
+        if is_reward {
+            item.kind = "reward";
+            item.from = "protocol".to_string();
+            item.direction = "reward";
+        }
+        Some(item)
     }));
     let total = pending_total + confirmed_total;
     let next_offset = offset + items.len();
@@ -298,6 +305,9 @@ fn wallet_transaction_filter_kinds(filters: WalletTransactionFilters) -> Vec<&'s
     }
     if filters.burn {
         kinds.push("burn");
+    }
+    if filters.reward {
+        kinds.push("reward");
     }
     kinds
 }
