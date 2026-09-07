@@ -60,6 +60,7 @@ RUN set -eux; \
     python3 /src/iuna-work/scripts/postprocess_stagit_site.py /site/git
 
 COPY www /site
+COPY wallet /site/wallet
 COPY downloads /site/downloads
 RUN set -eux; \
     cp /src/iuna-work/src-tauri/icons/icon.svg /site/favicon.svg; \
