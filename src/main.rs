@@ -730,9 +730,10 @@ async fn run_automatic_finalizer(node: SharedNode, gossip: p2p::GossipNetwork, d
         let seed = work.vdf_seed().to_string();
         let rounds = work.vdf_rounds();
         let publish_at_ms = work.timestamp_ms();
+        let precheck_at_ms = automatic_finalization_precheck_time(now_ms(), publish_at_ms);
         let precheck = {
             let node = node.lock().await;
-            node.precheck_prepared_block_without_vdf_at(&work, now_ms())
+            node.precheck_prepared_block_without_vdf_at(&work, precheck_at_ms)
         };
         if let Err(error) = precheck {
             let message = format!("skipped before VDF: {error:#}");
@@ -865,6 +866,14 @@ async fn run_automatic_finalizer(node: SharedNode, gossip: p2p::GossipNetwork, d
 
         tokio::task::yield_now().await;
     }
+}
+
+fn automatic_finalization_precheck_time(now_ms: u64, publish_at_ms: u64) -> u64 {
+    // A fallback ticket's rank slot can be well beyond the normal future-drift
+    // allowance. Validate the candidate as it will stand when that known slot
+    // opens, so its VDF can run in advance; final application still validates
+    // the actual publication timestamp against the then-current clock.
+    now_ms.max(publish_at_ms)
 }
 
 fn should_log_automatic_finalization_skip(

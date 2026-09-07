@@ -776,6 +776,39 @@ mod tests {
     }
 
     #[test]
+    fn configured_top_percentage_limits_fallback_ticket_vdfs() {
+        let wallets = (0..4)
+            .map(|index| Wallet::from_seed(&format!("fallback-percent-wallet-{index}")))
+            .collect::<Vec<_>>();
+        let ledger = funded_ledger(&wallets);
+        assert_eq!(ledger.finalizer_rank_count_for_next_block(), wallets.len());
+
+        let rank_one = wallets
+            .iter()
+            .find(|wallet| ledger.finalizer_rank_for_next_block(wallet.address()) == Some(1))
+            .expect("fixture should contain the rank-one fallback")
+            .clone();
+        let mut node =
+            NodeCore::from_ledger_with_burn_fee_and_enabled(rank_one, ledger, true, 0, 1);
+
+        node.set_recovery_vdf_top_rank_percent(25);
+        assert!(!node.wallet_rank_runs_vdf(1));
+        let excluded = node.prepare_automatic_finalization(1);
+        assert!(excluded.work.is_none());
+        assert_eq!(
+            excluded.skipped_reason.as_deref(),
+            Some("wallet finalizer rank 1 is outside the top 25% VDF threshold")
+        );
+
+        node.set_recovery_vdf_top_rank_percent(50);
+        assert!(node.wallet_rank_runs_vdf(1));
+
+        node.set_recovery_vdf_top_rank_percent(0);
+        assert!(node.wallet_rank_runs_vdf(0));
+        assert!(!node.wallet_rank_runs_vdf(1));
+    }
+
+    #[test]
     fn same_slot_bundles_for_different_members_do_not_conflict_locally() {
         let wallet = Wallet::from_seed("rank-bundle-cache-node");
         let ledger = funded_ledger(std::slice::from_ref(&wallet));

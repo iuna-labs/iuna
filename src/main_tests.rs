@@ -19,13 +19,13 @@ use super::{
     GENESIS_INITIAL_BURN_FEE, GENESIS_INITIAL_BURN_PER_BLOCK, StartupWallet,
     apply_cli_p2p_config_overrides, apply_cli_stratum_config_overrides,
     apply_startup_mining_config_overrides, apply_startup_setup_config_override,
-    apply_startup_wallet_password_config, configured_p2p_announce_addr, configured_p2p_bind_addr,
-    configured_stratum_addr, extrapolate_vdf_rounds, help_text, initial_burn_fee,
-    initial_burn_per_block, initialize_ledger, load_startup_wallet, measure_vdf_rounds,
-    parse_startup_bool_env_value, parse_startup_pow_mining_workers_env_value,
-    persist_chain_snapshot, project_ui_data_store, run_chain_persistence_with_interval,
-    setup_ledger, should_defer_sync_checkpoint, should_log_automatic_finalization_skip,
-    validate_wallet_for_mode,
+    apply_startup_wallet_password_config, automatic_finalization_precheck_time,
+    configured_p2p_announce_addr, configured_p2p_bind_addr, configured_stratum_addr,
+    extrapolate_vdf_rounds, help_text, initial_burn_fee, initial_burn_per_block, initialize_ledger,
+    load_startup_wallet, measure_vdf_rounds, parse_startup_bool_env_value,
+    parse_startup_pow_mining_workers_env_value, persist_chain_snapshot, project_ui_data_store,
+    run_chain_persistence_with_interval, setup_ledger, should_defer_sync_checkpoint,
+    should_log_automatic_finalization_skip, validate_wallet_for_mode,
 };
 
 fn parse(args: &[&str]) -> anyhow::Result<Option<CliOptions>> {
@@ -552,6 +552,21 @@ fn automatic_finalization_skip_logging_only_reports_state_changes() {
         55,
         "waiting for burn bundles",
     ));
+}
+
+#[test]
+fn automatic_finalization_prechecks_future_fallback_at_its_publish_time() {
+    let now_ms = 1_000;
+    let publish_at_ms = now_ms + 20 * 60 * 1_000;
+
+    assert_eq!(
+        automatic_finalization_precheck_time(now_ms, publish_at_ms),
+        publish_at_ms
+    );
+    assert_eq!(
+        automatic_finalization_precheck_time(publish_at_ms, now_ms),
+        publish_at_ms
+    );
 }
 
 #[test]
