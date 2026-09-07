@@ -110,6 +110,15 @@ window.iunaApp = function iunaApp() {
     feeEstimates: { transfer: null, burn: null, mine: null },
     feeEstimateTimer: null,
     showSendAdvanced: false,
+    optimizeOpen: false,
+    optimizeBusy: false,
+    optimizeRunning: false,
+    optimizeFee: "0.000001",
+    optimizeMergeRoots: false,
+    optimizePlan: null,
+    optimizeMessage: "",
+    optimizeError: "",
+    optimizeDismissed: false,
     selectedTransferUtxos: [],
     selectedTransferUtxoAmounts: {},
     lastSelectedTransferUtxo: null,
@@ -1351,6 +1360,7 @@ window.iunaApp = function iunaApp() {
     },
 
     closeModals() {
+      this.closeOptimizeWallet();
       this.closeSendConfirmModal();
       this.closeTransactionModal();
       this.closeWalletUtxosModal();
@@ -2416,6 +2426,90 @@ window.iunaApp = function iunaApp() {
       const parsed = this.parseiunaAmount(text);
       if (parsed === 0 && !/^0(?:\.0*)?$/.test(text)) throw new Error(message);
       return parsed;
+    },
+
+    showOptimizeSuggestion() {
+      if (this.optimizeDismissed || this.walletUtxoPage.total < 500) return false;
+      try {
+        return Date.now() > Number(localStorage.getItem(`iunaOptimizeLater:${this.status.wallet_address}`) || 0);
+      } catch { return true; }
+    },
+
+    dismissOptimizeSuggestion() {
+      this.optimizeDismissed = true;
+      try { localStorage.setItem(`iunaOptimizeLater:${this.status.wallet_address}`, String(Date.now() + 7 * 86400000)); } catch {}
+    },
+
+    openOptimizeWallet() {
+      this.showWalletUtxos = false;
+      this.optimizeOpen = true;
+    },
+
+    closeOptimizeWallet() {
+      if (this.optimizeRunning) return;
+      this.optimizeOpen = false;
+    },
+
+    async previewOptimization() {
+      if (this.optimizeBusy || this.optimizeRunning) return;
+      this.optimizeBusy = true;
+      this.optimizePlan = null;
+      this.optimizeError = "";
+      this.optimizeMessage = "";
+      try {
+        const rate = this.parseiunaAmountRequired(this.optimizeFee, "Enter a fee per byte");
+        if (!Number.isSafeInteger(rate) || rate < 1) throw new Error("Fee per byte must be at least 0.000001 IUNA");
+        const result = await this.submitForm("/api/wallet/optimize/preview", {
+          fee_per_byte: rate, merge_roots: this.optimizeMergeRoots,
+        });
+        const plan = result.plan;
+        if (![plan.fee, ...plan.batches.flatMap(batch => [batch.fee, batch.amount])].every(Number.isSafeInteger)) {
+          throw new Error("Amounts exceed the safe range for this interface");
+        }
+        this.optimizePlan = { ...plan, rate, mergeRoots: this.optimizeMergeRoots };
+      } catch (error) { this.optimizeError = error.message; }
+      finally { this.optimizeBusy = false; }
+    },
+
+    async runOptimization() {
+      const plan = this.optimizePlan;
+      if (!plan || this.optimizeRunning || this.optimizeBusy) return;
+      this.optimizeRunning = true;
+      this.optimizeError = "";
+      try {
+        for (let batchIndex = 0; batchIndex < plan.batches.length; batchIndex += 1) {
+          if (this.status.wallet_locked || this.status.wallet_address !== plan.address) {
+            throw new Error("Wallet locked or changed. Unlock the original wallet and request a new preview.");
+          }
+          const batch = plan.batches[batchIndex];
+          this.optimizeMessage = `Submitting batch ${batchIndex + 1} of ${plan.batches.length}…`;
+          let result;
+          try {
+            result = await this.submitForm("/api/wallet/optimize/submit", {
+              address: plan.address, fee_per_byte: plan.rate, max_fee: batch.fee,
+              merge_roots: plan.mergeRoots, utxos: JSON.stringify(batch.utxos),
+            });
+            if (!result.signature) throw new Error("No transaction confirmation received from the node");
+          } catch (error) {
+            // A timeout may mean the transaction was accepted. Never retry it automatically.
+            this.optimizePlan = null;
+            throw new Error(`${error.message}. Check wallet activity before requesting a new preview.`);
+          }
+          if (result.broadcast_error) {
+            this.optimizePlan = null;
+            throw new Error("Batch queued locally, but broadcasting failed. Check connectivity before requesting a new preview.");
+          }
+        }
+        this.optimizeMessage = `Optimization submitted. Expected after confirmation: ${plan.before - plan.after} fewer balance parts; network fees ${this.amountLabel(plan.fee)} IUNA.`;
+        this.optimizePlan = null;
+        this.optimizeOpen = false;
+        this.showFlash(this.optimizeMessage, "success");
+        await this.refresh({ force: true });
+      } catch (error) {
+        this.optimizePlan = null;
+        this.optimizeError = error.message;
+      }
+      finally { this.optimizeRunning = false; }
     },
 
     async sendTransfer() {

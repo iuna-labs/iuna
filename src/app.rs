@@ -15,6 +15,7 @@ use crate::domain::{
 };
 
 mod automatic_mining;
+mod consolidation;
 mod gossip;
 mod helpers;
 mod in_memory_network;

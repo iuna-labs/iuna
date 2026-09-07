@@ -24,28 +24,42 @@ impl Ledger {
         let required = amount
             .checked_add(fee)
             .context("transfer amount plus fee overflows")?;
-        let (inputs, input_total) = self.select_inputs(wallet.address(), required)?;
-        let mut outputs = vec![TxOutput {
-            address: to,
-            amount,
-        }];
-        let change = input_total
-            .checked_sub(required)
-            .context("selected inputs do not cover transfer")?;
-        if change > 0 {
-            outputs.push(TxOutput {
-                address: wallet.address().to_string(),
-                amount: change,
-            });
+        let mut available = self.available_utxos_for_address(wallet.address())?;
+        // Prefer the smallest sufficient single output. Otherwise minimize input count.
+        if let Some((point, _)) = available
+            .iter()
+            .filter(|(_, output)| output.amount >= required)
+            .min_by_key(|(point, output)| (output.amount, point))
+        {
+            return self.build_transfer_with_inputs(
+                wallet,
+                to,
+                amount,
+                fee,
+                std::slice::from_ref(point),
+            );
         }
-        let transaction = UnsignedUtxoTransaction::Transfer {
-            inputs,
-            outputs,
-            fee,
+        available.sort_by(|(left_point, left), (right_point, right)| {
+            right
+                .amount
+                .cmp(&left.amount)
+                .then_with(|| left_point.cmp(right_point))
+        });
+        let mut total = 0_u64;
+        let mut points = Vec::new();
+        for (point, output) in available {
+            total = total
+                .checked_add(output.amount)
+                .context("selected input total overflows")?;
+            points.push(point);
+            if total >= required {
+                break;
+            }
         }
-        .sign(wallet, &self.transaction_signing_domain())?;
-        self.validate_new_transaction(&transaction)?;
-        Ok(transaction)
+        if total < required {
+            bail!("insufficient funds for {}", wallet.address());
+        }
+        self.build_transfer_with_inputs(wallet, to, amount, fee, &points)
     }
 
     pub fn build_transfer_with_inputs(

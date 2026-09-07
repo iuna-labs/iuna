@@ -603,6 +603,13 @@ impl Ledger {
             .collect()
     }
 
+    /// Consolidation keeps mining roots separate unless explicitly requested.
+    pub(crate) fn consolidation_root(&self, outpoint: &OutPoint) -> Option<OutPoint> {
+        self.utxo_lineage
+            .get(outpoint)
+            .map(|root| root.outpoint.clone())
+    }
+
     pub fn available_utxos_for_address(&self, address: &str) -> Result<Vec<(OutPoint, TxOutput)>> {
         Ok(self
             .utxos_after_spendable_pending()?

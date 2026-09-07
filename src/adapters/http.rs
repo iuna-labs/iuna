@@ -27,6 +27,7 @@ mod actions;
 mod api;
 mod auth;
 mod auth_routes;
+mod consolidation;
 mod index_html;
 mod metrics;
 mod request_auth;
@@ -184,6 +185,8 @@ pub async fn serve(
         .route("/api/settings/p2p-announce", post(api_p2p_announce_form))
         .route("/api/settings/stratum", post(api_stratum_settings_form))
         .route("/api/transfer", post(api_transfer_form))
+        .route("/api/wallet/optimize/preview", post(consolidation::preview))
+        .route("/api/wallet/optimize/submit", post(consolidation::submit))
         .route("/settings/burn-per-block", post(burn_per_block_form))
         .route("/transfer", post(transfer_form))
         .route("/peers", post(peer_form))

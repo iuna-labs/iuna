@@ -4,6 +4,8 @@ mod address;
 #[cfg(test)]
 mod adversarial_tests;
 mod block;
+#[cfg(test)]
+mod consolidation_tests;
 mod fork;
 mod genesis;
 mod hex;

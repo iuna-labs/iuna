@@ -226,6 +226,10 @@ pub(super) const INDEX_HTML: &str = concat!(
     .leaderboard-amount { color: #d5f55f; font-size: 13px; font-weight: 900; font-variant-numeric: tabular-nums; white-space: nowrap; }
     .wallet-grid { width: 100%; display: grid; grid-template-columns: minmax(0, 1fr) minmax(300px, .8fr); gap: 12px; align-items: start; }
     .wallet-actions { display: grid; gap: 12px; }
+    .optimize-form { display: grid; gap: 12px; }
+    .optimize-form .optimize-choice { display: flex; align-items: center; gap: 8px; }
+    .optimize-choice input { width: auto; min-width: auto; margin: 0; }
+    .optimize-form button { justify-self: start; }
     .amount-field { display: grid; grid-template-columns: minmax(0, 1fr) auto; gap: 8px; align-items: end; }
     .amount-field label { min-width: 0; }
     .amount-field input { width: 100%; }
@@ -695,6 +699,13 @@ pub(super) const INDEX_HTML: &str = concat!(
           <span class="tx-label">Balance</span>
           <span class="tx-value money">IUNA <span x-text="amountLabel(status.wallet_balance)"></span></span>
         </button>
+        <button type="button" @click="openOptimizeWallet">Optimize wallet</button>
+      </div>
+      <div class="panel" x-show="showOptimizeSuggestion()">
+        <h3>Your wallet could be more efficient</h3>
+        <p class="panel-description">Your balance consists of <span x-text="walletUtxoPage.total"></span> parts. Combining them can reduce the number of inputs needed for future payments. Review the network fee before deciding.</p>
+        <button type="button" @click="openOptimizeWallet">Review optimization</button>
+        <button type="button" @click="dismissOptimizeSuggestion">Later</button>
       </div>
       <div class="wallet-grid">
         <div class="wallet-actions">
@@ -1591,11 +1602,46 @@ pub(super) const INDEX_HTML: &str = concat!(
       </form>
     </section>
   </div>
+  <div class="setup-overlay transaction-overlay" x-show="optimizeOpen" x-transition.opacity @click.self="closeOptimizeWallet()" @keydown.escape.stop="closeOptimizeWallet()" role="dialog" aria-modal="true" aria-labelledby="optimize-title">
+    <section class="tx-modal">
+      <div class="tx-modal-head">
+        <div class="tx-modal-title"><h2 id="optimize-title">Optimize wallet</h2></div>
+        <button type="button" @click="closeOptimizeWallet" :disabled="optimizeRunning">Close</button>
+      </div>
+      <p>Your balance is made up of many small parts. Combining them can make future payments simpler and cheaper.</p>
+      <p>Your money stays in your wallet. You only pay the network fee shown below. Parts that would be relatively expensive to combine are skipped.</p>
+      <p class="muted">Only available parts are combined. The largest part is kept separate so you can continue making payments.</p>
+      <form class="optimize-form" @submit.prevent="previewOptimization">
+        <label>Network fee / byte (IUNA)<input type="number" min="0.000001" step="0.000001" x-model="optimizeFee" :disabled="optimizeBusy || optimizeRunning || !!optimizePlan" required></label>
+        <label class="optimize-choice"><input type="checkbox" x-model="optimizeMergeRoots" :disabled="optimizeBusy || optimizeRunning || !!optimizePlan"> Also combine different mining groups</label>
+        <p class="panel-description">Mining groups are kept separate by default. Combining different groups changes their lineage and can affect burn-committee selection and maturity.</p>
+        <button type="submit" :disabled="optimizeBusy || optimizeRunning || !!optimizePlan || status.wallet_locked" x-text="optimizeBusy ? 'Calculating…' : 'Preview costs'"></button>
+        <span x-show="status.wallet_locked">Unlock your wallet to preview.</span>
+      </form>
+      <template x-if="optimizePlan">
+        <div>
+          <div class="tx-modal-summary" style="margin-top:16px">
+            <div class="tx-field"><span class="tx-label">Balance parts (expected)</span><span class="tx-value" x-text="`${optimizePlan.before} → ${optimizePlan.after}`"></span></div>
+            <div class="tx-field"><span class="tx-label">Maximum total fee</span><span class="tx-value" x-text="`${amountLabel(optimizePlan.fee)} IUNA`"></span></div>
+            <div class="tx-field"><span class="tx-label">Transactions</span><span class="tx-value" x-text="optimizePlan.batches.length"></span></div>
+          </div>
+          <p class="muted">After confirmation, all batches are submitted automatically. The modal closes when they are queued; confirmation can continue in the background. Fees are fixed by this preview and never raised automatically.</p>
+          <p x-show="optimizePlan.batches.length === 0">No suitable batches at this fee and mining-group setting. You can leave your wallet as it is. Small or reserved parts and separate mining groups may remain.</p>
+          <p x-show="optimizePlan.batches.length === 32">This preview covers up to 32 batches. You can review another optimization afterwards.</p>
+          <button class="primary" type="button" x-show="optimizePlan.batches.length > 0 && !optimizeRunning" @click="runOptimization">Confirm and optimize</button>
+          <button type="button" x-show="!optimizeRunning" @click="optimizePlan = null; optimizeError = ''; optimizeMessage = ''">Change settings</button>
+        </div>
+      </template>
+      <p role="status" aria-live="polite" x-text="optimizeMessage"></p>
+      <p class="fee-warning" role="alert" x-show="optimizeError" x-text="optimizeError"></p>
+    </section>
+  </div>
   <div class="setup-overlay transaction-overlay" x-show="showWalletUtxos" x-transition.opacity @click.self="closeWalletUtxosModal()" role="dialog" aria-modal="true" aria-labelledby="wallet-utxos-title">
     <section class="tx-modal">
       <div class="tx-modal-head">
         <div class="tx-modal-title">
           <h2 id="wallet-utxos-title">Wallet UTXOs</h2>
+          <button type="button" @click="openOptimizeWallet">Optimize wallet</button>
           <div class="tx-field"><span class="tx-label">Total</span><span class="tx-value money">IUNA <span x-text="amountLabel(status.wallet_balance)"></span></span></div>
         </div>
         <button type="button" @click="closeWalletUtxosModal">Close</button>
