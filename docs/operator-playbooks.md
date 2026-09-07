@@ -250,7 +250,7 @@ Recovery:
 
 - If recovery blocks are converging across peers, do not reset. Recovery is part of the liveness design.
 - Bring ticket finalizer nodes back online and unlocked.
-- Keep recovery VDF threshold conservative on low-power hosts if too many nodes are wasting work on fallback/recovery paths.
+- Keep the fallback VDF threshold conservative on low-power hosts if too many nodes are wasting work on lower-ranked ticket paths. Every automatic node remains eligible for recovery once the recovery delay has elapsed.
 - After recovery, watch the next normal ticket blocks. Persistent recovery means the normal ticket path needs investigation.
 
 Avoid:

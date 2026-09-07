@@ -1669,7 +1669,7 @@ window.iunaApp = function iunaApp() {
         await this.postForm(
           "/api/settings/recovery-vdf",
           { top_rank_percent: String(normalized) },
-          `Recovery VDF threshold set to top ${normalized}%`
+          `Fallback VDF threshold set to top ${normalized}%`
         );
         await this.refreshConfig();
       } catch (error) {

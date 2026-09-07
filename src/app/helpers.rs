@@ -123,7 +123,7 @@ pub(super) fn transaction_input_outpoints(transaction: &Transaction) -> BTreeSet
     .collect()
 }
 
-pub(super) fn allowed_recovery_vdf_rank_count(rank_count: usize, percent: u8) -> usize {
+pub(super) fn allowed_fallback_vdf_rank_count(rank_count: usize, percent: u8) -> usize {
     if rank_count == 0 || percent == 0 {
         return 0;
     }
@@ -131,11 +131,6 @@ pub(super) fn allowed_recovery_vdf_rank_count(rank_count: usize, percent: u8) ->
         .saturating_mul(usize::from(percent.min(100)))
         .saturating_add(99)
         / 100
-}
-
-pub(super) fn recovery_vdf_sample_percent(address: &str, tip_hash: &str) -> u8 {
-    let digest = Sha256::digest(format!("iuna-recovery-vdf-sample:{tip_hash}:{address}"));
-    digest[0] % 100
 }
 
 #[cfg(test)]

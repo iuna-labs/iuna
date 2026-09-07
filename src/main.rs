@@ -800,6 +800,15 @@ async fn run_automatic_finalizer(node: SharedNode, gossip: p2p::GossipNetwork, d
                 }
             }
         };
+        while let Ok(progress) = progress_rx.try_recv() {
+            let message = format_vdf_progress(candidate_height, progress);
+            if debug {
+                println!("{message}");
+            }
+            node.lock()
+                .await
+                .record_automatic_finalization_status(message);
+        }
         let Some(vdf_output) = vdf_output else {
             let message = if cancelled_for_new_tip {
                 format!("cancelled stale VDF for candidate block {candidate_height}")
@@ -816,18 +825,45 @@ async fn run_automatic_finalizer(node: SharedNode, gossip: p2p::GossipNetwork, d
         };
 
         let completed_at_ms = now_ms();
-        let publish_timestamp_ms = completed_at_ms.max(publish_at_ms);
+        let mut stale_before_publish = false;
         if completed_at_ms < publish_at_ms {
             let wait_ms = publish_at_ms - completed_at_ms;
+            let message = format!(
+                "VDF complete for candidate block {}; waiting for finalizer rank time slot ({:.1}s)",
+                work.height(),
+                wait_ms as f64 / 1000.0
+            );
             if debug {
-                println!(
-                    "VDF completed early for candidate block {}; waiting {:.3}s for rank time slot",
-                    work.height(),
-                    wait_ms as f64 / 1000.0
-                );
+                println!("{message}");
             }
-            tokio::time::sleep(std::time::Duration::from_millis(wait_ms)).await;
+            node.lock()
+                .await
+                .record_automatic_finalization_status(message);
+            loop {
+                let current_ms = now_ms();
+                if current_ms >= publish_at_ms {
+                    break;
+                }
+                let wait_ms = publish_at_ms - current_ms;
+                tokio::time::sleep(std::time::Duration::from_millis(wait_ms.min(1_000))).await;
+                if node.lock().await.ledger().tip_hash() != candidate_parent {
+                    stale_before_publish = true;
+                    break;
+                }
+            }
         }
+        if stale_before_publish {
+            let message =
+                format!("cancelled completed VDF for stale candidate block {candidate_height}");
+            if debug {
+                println!("auto-finalization {message}");
+            }
+            node.lock()
+                .await
+                .record_automatic_finalization_status(message);
+            continue;
+        }
+        let publish_timestamp_ms = now_ms().max(publish_at_ms);
 
         let (finalized, outbox) = {
             let mut node = node.lock().await;

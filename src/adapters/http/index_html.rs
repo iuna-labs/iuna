@@ -1391,8 +1391,8 @@ pub(super) const INDEX_HTML: &str = concat!(
         <div class="panel" x-show="advancedMode()">
           <div class="settings-mode-row">
             <div class="settings-mode-copy">
-              <div class="settings-mode-title">Recovery VDF</div>
-              <div class="muted">Top <span x-text="recoveryVdfTopRankPercent"></span>% threshold for fallback/recovery work.</div>
+              <div class="settings-mode-title">Fallback VDF</div>
+              <div class="muted">Top <span x-text="recoveryVdfTopRankPercent"></span>% of ticket ranks run fallback work. Recovery remains available to every node.</div>
             </div>
             <label>Top ranks
               <input type="range" min="0" max="100" step="5" :value="recoveryVdfTopRankPercent" @change="setRecoveryVdfTopRankPercent($event.target.value)">

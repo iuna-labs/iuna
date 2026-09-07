@@ -1,8 +1,6 @@
 use anyhow::{Context, Result, bail};
 
-use super::helpers::{
-    allowed_recovery_vdf_rank_count, converge_fee_by_byte, recovery_vdf_sample_percent,
-};
+use super::helpers::{allowed_fallback_vdf_rank_count, converge_fee_by_byte};
 use super::{
     AUTO_PLAINTEXT_BURN_BEFORE_RECOVERY_MS, AutoMineOutcome, AutoMinePlan,
     BURN_BUNDLE_COLLECTION_MS, GossipEnvelope, Ledger, MIN_AUTO_BLOCK_ANCHOR_BURN_AMOUNT, NodeCore,
@@ -94,8 +92,7 @@ impl NodeCore {
             .ledger
             .finalizer_rank_for_next_block(self.wallet.address());
         let will_run_ticket_vdf = wallet_rank.is_some_and(|rank| self.wallet_rank_runs_vdf(rank));
-        let will_run_recovery_vdf =
-            !will_run_ticket_vdf && self.should_prepare_recovery_vdf(timestamp_ms);
+        let will_run_recovery_vdf = self.should_prepare_recovery_vdf(timestamp_ms);
         if let Some(wait_ms) = self.burn_bundle_collection_wait_ms(
             timestamp_ms,
             will_run_ticket_vdf || will_run_recovery_vdf,
@@ -134,9 +131,21 @@ impl NodeCore {
             }
         } else {
             let selected_leader = self.ledger.expected_leader_for_next_block();
-            plan.skipped_reason = selected_leader.map(|leader| {
-                format!("wallet is waiting for selected finalizer {leader} to finish the VDF")
-            });
+            plan.skipped_reason = Some(selected_leader.map_or_else(
+                || {
+                    let wait_ms = self
+                        .ledger
+                        .recovery_block_min_timestamp()
+                        .saturating_sub(timestamp_ms);
+                    format!(
+                        "wallet is waiting for recovery to become available ({:.1}s remaining)",
+                        wait_ms as f64 / 1000.0
+                    )
+                },
+                |leader| {
+                    format!("wallet is waiting for selected finalizer {leader} to finish the VDF")
+                },
+            ));
             return plan;
         }
 
@@ -190,8 +199,7 @@ impl NodeCore {
             .ledger
             .finalizer_rank_for_next_block(self.wallet.address());
         let will_run_ticket_vdf = wallet_rank.is_some_and(|rank| self.wallet_rank_runs_vdf(rank));
-        let will_run_recovery_vdf =
-            !will_run_ticket_vdf && self.should_prepare_recovery_vdf(timestamp_ms);
+        let will_run_recovery_vdf = self.should_prepare_recovery_vdf(timestamp_ms);
         if let Some(wait_ms) = self.burn_bundle_collection_wait_ms(
             timestamp_ms,
             will_run_ticket_vdf || will_run_recovery_vdf,
@@ -239,9 +247,21 @@ impl NodeCore {
             }
         } else {
             let selected_leader = self.ledger.expected_leader_for_next_block();
-            plan.skipped_reason = selected_leader.map(|leader| {
-                format!("wallet is waiting for selected finalizer {leader} to finish the VDF")
-            });
+            plan.skipped_reason = Some(selected_leader.map_or_else(
+                || {
+                    let wait_ms = self
+                        .ledger
+                        .recovery_block_min_timestamp()
+                        .saturating_sub(timestamp_ms);
+                    format!(
+                        "wallet is waiting for recovery to become available ({:.1}s remaining)",
+                        wait_ms as f64 / 1000.0
+                    )
+                },
+                |leader| {
+                    format!("wallet is waiting for selected finalizer {leader} to finish the VDF")
+                },
+            ));
             self.last_auto_finalization_status = plan.skipped_reason.clone();
             return plan;
         }
@@ -468,22 +488,12 @@ impl NodeCore {
         }
         let rank_count = self.ledger.finalizer_rank_count_for_next_block();
         let allowed =
-            allowed_recovery_vdf_rank_count(rank_count, self.recovery_vdf_top_rank_percent);
+            allowed_fallback_vdf_rank_count(rank_count, self.recovery_vdf_top_rank_percent);
         usize::try_from(rank).is_ok_and(|rank| rank < allowed)
     }
 
     fn should_prepare_recovery_vdf(&self, timestamp_ms: u64) -> bool {
-        if !self.ledger.recovery_block_available_at(timestamp_ms) {
-            return false;
-        }
-        if self.recovery_vdf_top_rank_percent == 100 {
-            return true;
-        }
-        if self.recovery_vdf_top_rank_percent == 0 {
-            return false;
-        }
-        recovery_vdf_sample_percent(self.wallet.address(), self.ledger.tip_hash())
-            < self.recovery_vdf_top_rank_percent
+        self.ledger.recovery_block_available_at(timestamp_ms)
     }
 
     fn burn_bundle_collection_wait_ms(
@@ -496,14 +506,11 @@ impl NodeCore {
         let explicit_signatures_required = if will_run_vdf {
             let wallet_rank =
                 attestation_ledger.finalizer_rank_for_next_block(self.wallet.address());
-            let will_run_ticket_vdf =
-                wallet_rank.is_some_and(|rank| self.wallet_rank_runs_vdf(rank));
-            let finalizer_mode =
-                if !will_run_ticket_vdf && self.should_prepare_recovery_vdf(timestamp_ms) {
-                    FinalizerMode::Recovery
-                } else {
-                    FinalizerMode::Ticket
-                };
+            let finalizer_mode = if self.should_prepare_recovery_vdf(timestamp_ms) {
+                FinalizerMode::Recovery
+            } else {
+                FinalizerMode::Ticket
+            };
             let finalizer_rank = if matches!(finalizer_mode, FinalizerMode::Ticket) {
                 wallet_rank.unwrap_or(0)
             } else {
@@ -755,7 +762,7 @@ mod tests {
     }
 
     #[test]
-    fn automatic_mining_prefers_runnable_ticket_over_available_recovery() {
+    fn automatic_mining_uses_recovery_after_delay_even_for_runnable_ticket_finalizer() {
         let wallet = Wallet::from_seed("ticket-before-recovery-wallet");
         let ledger = funded_ledger(std::slice::from_ref(&wallet));
         assert_eq!(
@@ -764,15 +771,76 @@ mod tests {
         );
         let timestamp_ms = ledger.recovery_block_min_timestamp();
         let mut node = NodeCore::from_ledger_with_burn_fee_and_enabled(wallet, ledger, true, 0, 1);
+        node.set_recovery_vdf_top_rank_percent(0);
 
         let outcome = node.automatic_mine_once(timestamp_ms);
         let block = outcome
             .block
-            .expect("rank 0 ticket finalizer should produce a block");
+            .expect("every node should be able to produce recovery after the delay");
 
-        assert_eq!(block.finalizer_mode, FinalizerMode::Ticket);
+        assert_eq!(block.finalizer_mode, FinalizerMode::Recovery);
         assert_eq!(block.finalizer_rank, 0);
-        assert!(block.leader_proof.is_some());
+        assert!(block.leader_proof.is_none());
+    }
+
+    #[test]
+    fn automatic_mining_allows_recovery_without_a_ticket_or_fallback_participation() {
+        let ticket_owner = Wallet::from_seed("recovery-ticket-owner");
+        let recovery_wallet = Wallet::from_seed("recovery-without-ticket-wallet");
+        let allocations = [ticket_owner.clone(), recovery_wallet.clone()]
+            .into_iter()
+            .map(|wallet| (wallet.address().to_string(), 10 * MICRO_IUNA))
+            .collect::<BTreeMap<_, _>>();
+        let ledger = Ledger::new_with_genesis_burns(
+            allocations,
+            vec![GenesisBurn::new(ticket_owner.address(), MICRO_IUNA)],
+            1,
+        )
+        .unwrap();
+        assert_eq!(
+            ledger.finalizer_rank_for_next_block(recovery_wallet.address()),
+            None
+        );
+        let timestamp_ms = ledger.recovery_block_min_timestamp();
+        let mut node =
+            NodeCore::from_ledger_with_burn_fee_and_enabled(recovery_wallet, ledger, true, 0, 1);
+        node.set_recovery_vdf_top_rank_percent(0);
+
+        let outcome = node.automatic_mine_once(timestamp_ms);
+        let block = outcome
+            .block
+            .expect("a node without a ticket should still produce recovery after the delay");
+
+        assert_eq!(block.finalizer_mode, FinalizerMode::Recovery);
+        assert!(block.leader_proof.is_none());
+    }
+
+    #[test]
+    fn automatic_finalization_keeps_an_explicit_wait_status_without_a_local_ticket() {
+        let ticket_owner = Wallet::from_seed("wait-status-ticket-owner");
+        let wallet = Wallet::from_seed("wait-status-without-ticket-wallet");
+        let allocations = [ticket_owner.clone(), wallet.clone()]
+            .into_iter()
+            .map(|wallet| (wallet.address().to_string(), 10 * MICRO_IUNA))
+            .collect::<BTreeMap<_, _>>();
+        let ledger = Ledger::new_with_genesis_burns(
+            allocations,
+            vec![GenesisBurn::new(ticket_owner.address(), MICRO_IUNA)],
+            1,
+        )
+        .unwrap();
+        assert_eq!(ledger.finalizer_rank_for_next_block(wallet.address()), None);
+        let mut node = NodeCore::from_ledger_with_burn_fee_and_enabled(wallet, ledger, true, 0, 1);
+
+        let plan = node.prepare_automatic_finalization(1);
+
+        assert!(plan.work.is_none());
+        assert!(
+            plan.skipped_reason.as_deref().is_some_and(
+                |reason| reason.starts_with("wallet is waiting for selected finalizer")
+            )
+        );
+        assert!(node.status().mining.last_auto_finalization_status.is_some());
     }
 
     #[test]
