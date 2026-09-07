@@ -699,7 +699,6 @@ pub(super) const INDEX_HTML: &str = concat!(
           <span class="tx-label">Balance</span>
           <span class="tx-value money">IUNA <span x-text="amountLabel(status.wallet_balance)"></span></span>
         </button>
-        <button type="button" @click="openOptimizeWallet">Optimize wallet</button>
       </div>
       <div class="panel" x-show="showOptimizeSuggestion()">
         <h3>Your wallet could be more efficient</h3>

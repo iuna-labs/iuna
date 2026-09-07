@@ -147,6 +147,16 @@ fn management_ui_opens_contact_editor_from_wallet_addresses() {
 }
 
 #[test]
+fn management_ui_only_offers_wallet_optimization_when_relevant_or_requested() {
+    let html = include_str!("adapters/http/index_html.rs");
+    let javascript = include_str!("../www/assets/iuna-ui.js");
+    assert_eq!(html.matches("@click=\"openOptimizeWallet\"").count(), 2);
+    assert!(html.contains("x-show=\"showOptimizeSuggestion()\""));
+    assert!(javascript.contains("this.walletUtxoPage.total < 500"));
+    assert!(html.contains("id=\"wallet-utxos-title\""));
+}
+
+#[test]
 fn management_ui_blocks_interaction_while_the_node_is_syncing() {
     let html = include_str!("adapters/http/index_html.rs");
     let javascript = include_str!("../www/assets/iuna-ui.js");
