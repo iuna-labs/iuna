@@ -177,8 +177,8 @@ cargo run --locked --manifest-path fuzz/Cargo.toml --bin domain_json -- -runs=25
 cargo run --locked --manifest-path fuzz/Cargo.toml --bin stratum_request -- -runs=256 fuzz/corpus/stratum_request
 cargo run --locked --manifest-path fuzz/Cargo.toml --bin wallet_config -- -runs=256 fuzz/corpus/wallet_config
 cargo run --locked --manifest-path fuzz/Cargo.toml --bin vdf_proof -- -runs=16 fuzz/corpus/vdf_proof
-cargo test --locked domain::adversarial_tests:: -- --ignored
-cargo test --locked --release --test properties -- --ignored
+cargo test --locked --release --lib domain::adversarial_tests:: -- --ignored
+cargo test --locked --release --features e2e --test properties -- --ignored
 ./e2e/iuna_e2e.py test post-activation --build --evidence-dir release-evidence
 ```
 
@@ -284,10 +284,10 @@ filled in for the candidate release.
 
 | Area | Reviewer | Date | Result | Notes |
 | --- | --- | --- | --- | --- |
-| Consensus validation |  |  |  |  |
-| Transaction and mempool validation |  |  |  |  |
-| P2P input handling |  |  |  |  |
+| Consensus validation | Codex | 2026-09-07 | Automated candidate review passed; independent promotion review pending | Exact-revision unit, adversarial, corrected release-soak, and process-level partition gates passed. Residual risk: protocol-design assumptions and live finalizer diversity still need independent review. |
+| Transaction and mempool validation | Codex | 2026-09-07 | Automated candidate review passed; independent promotion review pending | Unit, adversarial, replay, signing-domain, block-size, and fuzz gates passed. Residual risk: no external cryptographic or economic review. |
+| P2P input handling | Codex | 2026-09-07 | Automated candidate review passed; independent promotion review pending | P2P unit/fuzz gates and seven-node sync/partition scenarios passed. Residual risk: bounded local scenarios do not model Internet-scale eclipse or resource exhaustion. |
 | Wallet, key storage, and HTTP auth | Codex | 2026-08-21 | Candidate accepted with residual operational risk | Reviewed encryption/auth paths; added PBKDF2 iteration and salt-length hardening. |
-| Stratum |  |  |  |  |
-| Release evidence |  |  |  |  |
-| Candidate manifest |  |  |  |  |
+| Stratum | Codex | 2026-09-07 | Automated candidate review passed; independent promotion review pending | Parser fuzz, limits, signing-domain tests, and release soak passed. Residual risk: public production load and abuse behavior were not soak-tested. |
+| Release evidence | Codex | 2026-09-07 | Test gates passed; release packaging blocked | Evidence index: `docs/release-evidence-2db6cfb3.md`. The optional `chiavdf` package was unavailable. Only the macOS desktop compile-check and Linux e2e image build are current; tagged cross-platform artifacts still need rebuilding. |
+| Candidate manifest | Codex | 2026-09-07 | Blocked | `docs/candidate-manifest.md` records the network identity, but tested commit `2db6cfb...` is untagged and existing v0.4.17 artifacts belong to `0b1452...`; publication and independent review remain open. |

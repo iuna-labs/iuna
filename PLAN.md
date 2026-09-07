@@ -48,9 +48,9 @@ hoogte 811 afgebroken, en convergeerde na herstart met alle nodes op hoogte
 
 ## 4. Release- en security-sign-off
 
-- [ ] Draai alle gates uit `docs/security-review.md` op exact dezelfde revision.
+- [x] Draai alle gates uit `docs/security-review.md` op exact dezelfde revision.
 - [ ] Bewaar dependency-, test-, fuzz-, e2e- en platform-buildlogs.
-- [ ] Vul reviewers, datum, resultaat en restrisico in voor consensus,
+- [x] Vul reviewers, datum, resultaat en restrisico in voor consensus,
       transacties/mempool, P2P, Stratum, release-evidence en candidate manifest.
 - [ ] Publiceer en review genesis-hash, network ID, bootnodes, release-tag,
       commit en artifact-checksums.

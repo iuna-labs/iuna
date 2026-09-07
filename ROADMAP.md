@@ -26,11 +26,11 @@ recovery-liveness and multiple-candidate gates remain open pending correlated
 live node logs and live competing-candidate evidence; the accelerated
 process-level partition test is supporting test evidence, not a substitute for
 that soak evidence.
-- [ ] Clock skew and future timestamp cases do not stall the network.
-- [ ] Blinded commit/reveal flows survive partitions and delayed gossip.
-- [ ] Mempool state remains sane across reorgs.
-- [ ] Block selection stays bounded by transaction count and size limits.
-- [ ] Long-running chaos/property tests pass in release deployment.
+- [x] Clock skew and future timestamp cases do not stall the network.
+- [x] Blinded commit/reveal flows survive partitions and delayed gossip.
+- [x] Mempool state remains sane across reorgs.
+- [x] Block selection stays bounded by transaction count and size limits.
+- [x] Long-running chaos/property tests pass in release deployment.
 - [ ] Release artifacts are tagged, checksummed, and reproducible enough for testers to verify.
 - [ ] Candidate genesis allocation plan, genesis hash, and promotion policy are published and reviewed.
 - [ ] Security review is complete for consensus validation, transaction validation, P2P input handling, and wallet/key storage.
