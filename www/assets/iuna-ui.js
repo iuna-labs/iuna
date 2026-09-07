@@ -3512,7 +3512,15 @@ window.iunaApp = function iunaApp() {
       const state = this.networkHealth.state;
       if (!state) return "neutral";
       if (state === "healthy" || state === "ahead of peers") return "good";
-      if (state === "syncing" || state === "mempool syncing") return "warning";
+      if (
+        state === "syncing" ||
+        state === "mempool syncing" ||
+        state === "stale" ||
+        state === "peer errors" ||
+        state === "banned"
+      ) {
+        return "warning";
+      }
       return "bad";
     },
 

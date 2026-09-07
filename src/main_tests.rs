@@ -107,6 +107,14 @@ fn management_ui_opens_on_the_dashboard_and_exposes_chain_health_thresholds() {
     assert!(javascript.contains("tab: \"dashboard\""));
     assert!(javascript.contains("ageMs < 10 * 60 * 1000"));
     assert!(javascript.contains("ageMs < 20 * 60 * 1000"));
+    let dashboard_network_state = javascript
+        .split_once("dashboardNetworkState()")
+        .and_then(|(_, rest)| rest.split_once("\n    },"))
+        .map(|(body, _)| body)
+        .expect("dashboard network state helper");
+    assert!(dashboard_network_state.contains("state === \"stale\""));
+    assert!(dashboard_network_state.contains("state === \"peer errors\""));
+    assert!(dashboard_network_state.contains("state === \"banned\""));
 }
 
 #[test]
