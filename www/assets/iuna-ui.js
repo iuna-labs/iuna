@@ -75,6 +75,9 @@ window.iunaApp = function iunaApp() {
     stratumEnabled: false,
     stratumBindPort: 3333,
     stratumBindPortDirty: false,
+    walletEndpointEnabled: false,
+    walletEndpointBindPort: 18662,
+    walletEndpointBindPortDirty: false,
     setupWallet: { address: null, seed_phrase: null, dev_verify_bypass: false, requires_peer: false },
     setupNodeMode: "wallet",
     setupWalletMode: "create",
@@ -505,6 +508,10 @@ window.iunaApp = function iunaApp() {
       this.stratumEnabled = this.config.stratum_enabled === true;
       if (!this.stratumBindPortDirty) {
         this.stratumBindPort = Number(this.config.stratum_bind_port || 3333);
+      }
+      this.walletEndpointEnabled = this.config.wallet_endpoint_enabled === true;
+      if (!this.walletEndpointBindPortDirty) {
+        this.walletEndpointBindPort = Number(this.config.wallet_endpoint_bind_port || 18662);
       }
       if (
         options.addressBookVersion === undefined ||
@@ -1690,6 +1697,7 @@ window.iunaApp = function iunaApp() {
 
     async setP2pAcceptInbound(enabled) {
       const previous = this.p2pAcceptInbound;
+      const walletWasEnabled = this.walletEndpointEnabled;
       try {
         this.p2pAcceptInbound = enabled;
         await this.postForm(
@@ -1699,6 +1707,9 @@ window.iunaApp = function iunaApp() {
         );
         this.p2pBindPortDirty = false;
         await this.refreshConfig();
+        if (!enabled && walletWasEnabled && this.walletEndpointRestartRequired()) {
+          this.showFlash(this.walletEndpointRestartMessage(), "success");
+        }
       } catch (error) {
         this.p2pAcceptInbound = previous;
         this.showFlash(error.message, "error");
@@ -1747,6 +1758,8 @@ window.iunaApp = function iunaApp() {
         );
         this.stratumBindPortDirty = false;
         await this.refreshConfig();
+        const restartMessage = this.stratumRestartMessage();
+        if (restartMessage) this.showFlash(restartMessage, "success");
       } catch (error) {
         this.stratumEnabled = previous;
         this.showFlash(error.message, "error");
@@ -1793,6 +1806,84 @@ window.iunaApp = function iunaApp() {
         );
         this.stratumBindPortDirty = false;
         await this.refreshConfig();
+        const restartMessage = this.stratumRestartMessage();
+        if (restartMessage) this.showFlash(restartMessage, "success");
+      } catch (error) {
+        this.showFlash(error.message, "error");
+      }
+    },
+
+    async setWalletEndpointEnabled(enabled) {
+      if (enabled && !this.p2pAcceptInbound) {
+        this.showFlash("Enable Public node before enabling the wallet endpoint", "error");
+        return;
+      }
+      const previous = this.walletEndpointEnabled;
+      try {
+        this.walletEndpointEnabled = enabled;
+        await this.postForm(
+          "/api/settings/wallet-endpoint",
+          { enabled, bind_port: this.walletEndpointBindPortValue() },
+          enabled ? "Wallet endpoint setting saved" : "Wallet endpoint disabled"
+        );
+        this.walletEndpointBindPortDirty = false;
+        await this.refreshConfig();
+        const restartMessage = this.walletEndpointRestartMessage();
+        if (restartMessage) this.showFlash(restartMessage, "success");
+      } catch (error) {
+        this.walletEndpointEnabled = previous;
+        this.showFlash(error.message, "error");
+      }
+    },
+
+    walletEndpointBindPortValue() {
+      const port = Number(this.walletEndpointBindPort);
+      if (!Number.isInteger(port) || port < 1 || port > 65535) {
+        throw new Error("Wallet endpoint bind port must be between 1 and 65535");
+      }
+      return port;
+    },
+
+    walletEndpointConfiguredBindAddr() {
+      const port = Number(this.config.wallet_endpoint_bind_port || 18662);
+      if (!Number.isInteger(port) || port < 1 || port > 65535) return null;
+      return `0.0.0.0:${port}`;
+    },
+
+    walletEndpointRestartRequired() {
+      const runtimeActive = this.config.wallet_endpoint_runtime_enabled === true;
+      if (this.walletEndpointEnabled !== runtimeActive) return true;
+      if (!this.walletEndpointEnabled) return false;
+      const configured = this.walletEndpointConfiguredBindAddr();
+      return configured
+        ? this.config.wallet_endpoint_runtime_listen_addr !== configured
+        : false;
+    },
+
+    walletEndpointRestartMessage() {
+      if (!this.walletEndpointRestartRequired()) return "";
+      if (!this.walletEndpointEnabled && this.config.wallet_endpoint_runtime_enabled === true) {
+        return "Restart iuna to close the public wallet listener.";
+      }
+      const configured = this.walletEndpointConfiguredBindAddr();
+      return `Restart iuna to open the wallet API on ${configured || "the configured bind port"}.`;
+    },
+
+    async saveWalletEndpointSettings() {
+      if (!this.p2pAcceptInbound) {
+        this.showFlash("Enable Public node before configuring the wallet endpoint", "error");
+        return;
+      }
+      try {
+        await this.postForm(
+          "/api/settings/wallet-endpoint",
+          { enabled: this.walletEndpointEnabled, bind_port: this.walletEndpointBindPortValue() },
+          "Wallet endpoint setting saved"
+        );
+        this.walletEndpointBindPortDirty = false;
+        await this.refreshConfig();
+        const restartMessage = this.walletEndpointRestartMessage();
+        if (restartMessage) this.showFlash(restartMessage, "success");
       } catch (error) {
         this.showFlash(error.message, "error");
       }

@@ -482,6 +482,7 @@ mod tests {
             auth_backoff: Arc::new(Mutex::new(BTreeMap::new())),
             setup_capability: Arc::new(Mutex::new(Some("test-setup-capability".to_string()))),
             management_port: 9444,
+            wallet_endpoint_addr: None,
         }
     }
 

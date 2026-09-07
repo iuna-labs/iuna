@@ -40,8 +40,9 @@ use actions::{
     api_burn_per_block_form, api_chain_reset_form, api_metrics_settings_form,
     api_mine_fee_estimate_form, api_p2p_announce_form, api_p2p_inbound_form, api_peer_delete_form,
     api_peer_form, api_pow_mining_form, api_recovery_vdf_settings_form, api_stratum_settings_form,
-    api_transfer_fee_estimate_form, api_transfer_form, api_wallet_generate_form,
-    api_wallet_import_form, apply_config_form, burn_per_block_form, peer_form, transfer_form,
+    api_transfer_fee_estimate_form, api_transfer_form, api_wallet_endpoint_settings_form,
+    api_wallet_generate_form, api_wallet_import_form, apply_config_form, burn_per_block_form,
+    peer_form, transfer_form,
 };
 use api::{
     api_blocks, api_config, api_mempool, api_metrics, api_network_health, api_p2p_metrics,
@@ -124,6 +125,7 @@ pub async fn serve(
         auth_backoff: Arc::new(Mutex::new(BTreeMap::new())),
         setup_capability: Arc::new(Mutex::new(Some(setup_capability))),
         management_port: addr.port(),
+        wallet_endpoint_addr: options.wallet_endpoint_addr,
     };
     let app = Router::new()
         .route("/", get(index))
@@ -184,6 +186,10 @@ pub async fn serve(
         .route("/api/settings/p2p-inbound", post(api_p2p_inbound_form))
         .route("/api/settings/p2p-announce", post(api_p2p_announce_form))
         .route("/api/settings/stratum", post(api_stratum_settings_form))
+        .route(
+            "/api/settings/wallet-endpoint",
+            post(api_wallet_endpoint_settings_form),
+        )
         .route("/api/transfer", post(api_transfer_form))
         .route("/api/wallet/optimize/preview", post(consolidation::preview))
         .route("/api/wallet/optimize/submit", post(consolidation::submit))

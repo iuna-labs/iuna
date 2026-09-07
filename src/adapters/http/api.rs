@@ -70,6 +70,10 @@ pub(super) async fn api_config(State(state): State<HttpState>) -> Json<ConfigRes
         p2p_runtime_bind_addr: state.gossip.listen_addr().to_string(),
         stratum_runtime_enabled: state.stratum.enabled,
         stratum_runtime_listen_addr: state.stratum.listen_addr.clone(),
+        wallet_endpoint_runtime_enabled: state.wallet_endpoint_addr.is_some(),
+        wallet_endpoint_runtime_listen_addr: state
+            .wallet_endpoint_addr
+            .map(|addr| addr.to_string()),
     })
 }
 

@@ -1430,6 +1430,24 @@ pub(super) const INDEX_HTML: &str = concat!(
             <div class="setup-actions"><button class="primary" type="submit">Save</button></div>
           </form>
         </div>
+        <div class="panel" x-show="advancedMode() && p2pAcceptInbound">
+          <div class="settings-mode-row">
+            <div class="settings-mode-copy">
+              <div class="settings-mode-title">Wallet endpoint</div>
+              <div class="muted" x-text="walletEndpointEnabled ? 'Public read and transaction relay API for lightweight wallets.' : 'Public wallet API is disabled.'"></div>
+            </div>
+            <label class="toggle-switch" :class="{ active: walletEndpointEnabled }">
+              <input type="checkbox" :checked="walletEndpointEnabled" @change="setWalletEndpointEnabled($event.target.checked)">
+              <span class="toggle-track" aria-hidden="true"><span class="toggle-thumb"></span></span>
+              <span class="toggle-text" x-text="walletEndpointEnabled ? 'On' : 'Off'"></span>
+            </label>
+          </div>
+          <form class="settings-form" x-show="walletEndpointEnabled" x-transition @submit.prevent="saveWalletEndpointSettings">
+            <label>Wallet API port<input x-model.number="walletEndpointBindPort" @input="walletEndpointBindPortDirty = true" type="number" min="1" max="65535" step="1" required></label>
+            <div class="muted">This is a separate listener from the management UI. Only forward this port publicly.</div>
+            <div class="setup-actions"><button class="primary" type="submit">Save</button></div>
+          </form>
+        </div>
         <div class="panel" x-show="advancedMode()">
           <div class="settings-mode-row">
             <div class="settings-mode-copy">
@@ -1444,10 +1462,8 @@ pub(super) const INDEX_HTML: &str = concat!(
           </div>
           <form class="settings-form" x-show="stratumEnabled" x-transition @submit.prevent="saveStratumSettings">
             <label>Bind port<input x-model.number="stratumBindPort" @input="stratumBindPortDirty = true" type="number" min="1" max="65535" step="1" required></label>
-            <div class="muted" x-text="stratumRestartMessage() || 'Stratum is using the configured runtime setting.'"></div>
             <div class="setup-actions"><button class="primary" type="submit">Save</button></div>
           </form>
-          <div class="muted" x-show="!stratumEnabled && stratumRestartRequired()" x-text="stratumRestartMessage()"></div>
         </div>
         <div class="panel">
           <h3>Change Password</h3>
@@ -1991,5 +2007,21 @@ mod tests {
             env!("CARGO_PKG_VERSION"),
             r#""></script>"#
         )));
+    }
+
+    #[test]
+    fn wallet_endpoint_is_public_only_and_precedes_stratum() {
+        let wallet = INDEX_HTML.find("Wallet endpoint").expect("wallet endpoint");
+        let stratum = INDEX_HTML
+            .find("Stratum endpoint")
+            .expect("stratum endpoint");
+
+        assert!(wallet < stratum);
+        assert!(
+            INDEX_HTML
+                .contains(r#"<div class="panel" x-show="advancedMode() && p2pAcceptInbound">"#)
+        );
+        assert!(!INDEX_HTML.contains(r#"x-text="walletEndpointRestartMessage()""#));
+        assert!(!INDEX_HTML.contains(r#"x-text="stratumRestartMessage()""#));
     }
 }

@@ -23,6 +23,7 @@ pub const DEFAULT_POW_MINING_WORKERS: u8 = 1;
 pub const MAX_POW_MINING_WORKERS: u8 = 32;
 pub const DEFAULT_P2P_BIND_PORT: u16 = 9444;
 pub const DEFAULT_STRATUM_BIND_PORT: u16 = 3333;
+pub const DEFAULT_WALLET_ENDPOINT_BIND_PORT: u16 = 18662;
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 pub struct UiConfig {
@@ -41,6 +42,8 @@ pub struct UiConfig {
     pub p2p_announce_addr: Option<String>,
     pub stratum_enabled: bool,
     pub stratum_bind_port: u16,
+    pub wallet_endpoint_enabled: bool,
+    pub wallet_endpoint_bind_port: u16,
     pub peers: Vec<String>,
     pub address_book: BTreeMap<String, String>,
 }
@@ -62,6 +65,8 @@ impl Default for UiConfig {
             p2p_announce_addr: None,
             stratum_enabled: false,
             stratum_bind_port: DEFAULT_STRATUM_BIND_PORT,
+            wallet_endpoint_enabled: false,
+            wallet_endpoint_bind_port: DEFAULT_WALLET_ENDPOINT_BIND_PORT,
             peers: Vec::new(),
             address_book: BTreeMap::new(),
         }
@@ -101,6 +106,10 @@ struct ConfigFile {
     #[serde(default = "default_stratum_bind_port")]
     stratum_bind_port: u16,
     #[serde(default)]
+    wallet_endpoint_enabled: bool,
+    #[serde(default = "default_wallet_endpoint_bind_port")]
+    wallet_endpoint_bind_port: u16,
+    #[serde(default)]
     peers: Vec<String>,
     #[serde(default)]
     address_book: BTreeMap<String, String>,
@@ -139,6 +148,8 @@ pub fn save(path: &Path, config: &UiConfig) -> Result<()> {
         p2p_announce_addr: config.p2p_announce_addr.clone(),
         stratum_enabled: config.stratum_enabled,
         stratum_bind_port: config.stratum_bind_port,
+        wallet_endpoint_enabled: config.wallet_endpoint_enabled,
+        wallet_endpoint_bind_port: config.wallet_endpoint_bind_port,
         peers: config.peers.clone(),
         address_book: config.address_book.clone(),
     };
@@ -199,6 +210,8 @@ fn parse_config_bytes(bytes: &[u8], source: &str) -> Result<UiConfig> {
         p2p_announce_addr: stored.p2p_announce_addr,
         stratum_enabled: stored.stratum_enabled,
         stratum_bind_port: stored.stratum_bind_port,
+        wallet_endpoint_enabled: stored.wallet_endpoint_enabled,
+        wallet_endpoint_bind_port: stored.wallet_endpoint_bind_port,
         peers: stored.peers,
         address_book: stored.address_book,
     })
@@ -223,6 +236,10 @@ fn default_p2p_bind_port() -> u16 {
 
 fn default_stratum_bind_port() -> u16 {
     DEFAULT_STRATUM_BIND_PORT
+}
+
+fn default_wallet_endpoint_bind_port() -> u16 {
+    DEFAULT_WALLET_ENDPOINT_BIND_PORT
 }
 
 fn atomic_write_config_file(path: &Path, bytes: &[u8]) -> Result<()> {
@@ -344,6 +361,8 @@ mod tests {
         assert!(stored.contains("\"p2p_announce_addr\": null"));
         assert!(stored.contains("\"stratum_enabled\": false"));
         assert!(stored.contains("\"stratum_bind_port\": 3333"));
+        assert!(stored.contains("\"wallet_endpoint_enabled\": false"));
+        assert!(stored.contains("\"wallet_endpoint_bind_port\": 18662"));
         assert!(stored.contains("\"peers\": []"));
         assert!(stored.contains("\"address_book\": {}"));
     }
@@ -369,6 +388,8 @@ mod tests {
                 p2p_announce_addr: Some("203.0.113.10:9444".to_string()),
                 stratum_enabled: true,
                 stratum_bind_port: 3334,
+                wallet_endpoint_enabled: true,
+                wallet_endpoint_bind_port: 18663,
                 peers: vec!["127.0.0.1:9444".to_string()],
                 address_book: [("iuna-address".to_string(), "Alice".to_string())].into(),
                 ..UiConfig::default()
@@ -393,6 +414,8 @@ mod tests {
         );
         assert!(config.stratum_enabled);
         assert_eq!(config.stratum_bind_port, 3334);
+        assert!(config.wallet_endpoint_enabled);
+        assert_eq!(config.wallet_endpoint_bind_port, 18663);
         assert_eq!(config.peers, vec!["127.0.0.1:9444"]);
         assert_eq!(
             config.address_book.get("iuna-address"),
@@ -466,6 +489,8 @@ mod tests {
         assert_eq!(config.p2p_bind_port, 9444);
         assert!(!config.stratum_enabled);
         assert_eq!(config.stratum_bind_port, 3333);
+        assert!(!config.wallet_endpoint_enabled);
+        assert_eq!(config.wallet_endpoint_bind_port, 18662);
         assert_eq!(config.peers, vec!["127.0.0.1:9444"]);
         assert!(config.address_book.is_empty());
     }

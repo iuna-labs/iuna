@@ -108,6 +108,7 @@ Deployment publishes two images to the `jhx-app` k3s cluster:
 
 - `https://getiuna.org/` routes to the static website image.
 - `https://admin.iuna.jhx.app/` routes to the IP-restricted node management UI.
+- `https://iuna.jhx.app/v1` routes to the public lightweight-wallet API.
 - `iuna.jhx.app:9444` routes to the node P2P listener.
 
 Useful overrides:
@@ -124,7 +125,9 @@ You can use iuna as a wallet, a node, or a public peer.
 - **Node:** keep a local chain copy and participate in mining/finalization settings.
 - **Public peer:** same as a node, but reachable by other nodes through a public P2P address.
 
-Keep the management UI local or behind a strict access control such as the production IP allowlist. Only the P2P listener should be generally reachable by other nodes.
+Keep the management UI local or behind a strict access control such as the
+production IP allowlist. Only the P2P listener and explicitly enabled wallet
+endpoint should be generally reachable.
 
 ## Optional: CLI
 
@@ -209,6 +212,8 @@ settings:
 - `IUNA_AUTOMATIC_BURN_ENABLED=true|false`
 - `IUNA_POW_MINING_ENABLED=true|false`
 - `IUNA_POW_MINING_WORKERS=1..32`
+- `IUNA_WALLET_ENDPOINT_ENABLED=true|false`
+- `IUNA_WALLET_ENDPOINT_PORT=1..65535` (default `18662`)
 
 The compose bootstrap also selects the isolated `iuna-local-testnet-v1` launch
 profile. Its PoW burn-committee lineages are eligible immediately, so joining
@@ -240,6 +245,35 @@ Reset the local testnet volumes and create a fresh genesis:
 ```sh
 docker compose down -v
 ```
+
+## Optional: Public Wallet Endpoint
+
+Public nodes can expose an unauthenticated API for lightweight mobile wallets on
+a listener that is completely separate from the management UI:
+
+```sh
+./iuna --wallet-endpoint 0.0.0.0:18662
+```
+
+The same setting can be managed in **Settings → Wallet endpoint**, or at startup
+with `IUNA_WALLET_ENDPOINT_ENABLED=true` and
+`IUNA_WALLET_ENDPOINT_PORT=18662`. A settings change takes effect after restart.
+Keep port `18661` local or access-controlled; forward only the wallet API port.
+
+The v1 API provides:
+
+- `GET /v1/status` — chain/signing parameters and current tip;
+- `GET /v1/addresses/{address}/balance` — confirmed and spendable balance;
+- `GET /v1/addresses/{address}/utxos` — spendable inputs for local signing;
+- `GET /v1/addresses/{address}/transactions` — paginated pending/confirmed history;
+- `GET /v1/transactions/{signature}` — pending or confirmed transaction lookup;
+- `POST /v1/transactions` — validate, relay, and gossip a signed transfer/burn.
+
+Clients keep private keys and seed phrases locally. The public endpoint never
+creates signatures and does not expose management, local-wallet, mining, peer,
+configuration, or authentication routes. JSON request bodies are capped at 64
+KiB. The production manifest exposes this API as `https://iuna.jhx.app/v1` while
+`https://admin.iuna.jhx.app/` remains the separately protected management UI.
 
 ## Optional: Stratum Mining
 

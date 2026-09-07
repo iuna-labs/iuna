@@ -47,6 +47,17 @@ pub(crate) fn configured_stratum_addr(
     })
 }
 
+pub(crate) fn configured_wallet_endpoint_addr(
+    opts: &CliOptions,
+    ui_config: &config_store::UiConfig,
+) -> Option<SocketAddr> {
+    opts.wallet_endpoint_addr.or_else(|| {
+        ui_config
+            .wallet_endpoint_enabled
+            .then(|| SocketAddr::from((Ipv4Addr::UNSPECIFIED, ui_config.wallet_endpoint_bind_port)))
+    })
+}
+
 pub(crate) fn apply_cli_p2p_config_overrides(
     opts: &CliOptions,
     ui_config: &mut config_store::UiConfig,
@@ -91,6 +102,20 @@ pub(crate) fn apply_cli_stratum_config_overrides(
     dirty
 }
 
+pub(crate) fn apply_cli_wallet_endpoint_config_overrides(
+    opts: &CliOptions,
+    ui_config: &mut config_store::UiConfig,
+) -> bool {
+    let Some(addr) = opts.wallet_endpoint_addr else {
+        return false;
+    };
+    let dirty =
+        !ui_config.wallet_endpoint_enabled || ui_config.wallet_endpoint_bind_port != addr.port();
+    ui_config.wallet_endpoint_enabled = true;
+    ui_config.wallet_endpoint_bind_port = addr.port();
+    dirty
+}
+
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(crate) enum ChainMode {
     Setup,
@@ -107,6 +132,7 @@ pub(crate) struct CliOptions {
     pub(crate) p2p_addr_configured: bool,
     pub(crate) p2p_announce_addr: Option<SocketAddr>,
     pub(crate) stratum_addr: Option<SocketAddr>,
+    pub(crate) wallet_endpoint_addr: Option<SocketAddr>,
     pub(crate) peers: Vec<String>,
     pub(crate) join_peers: Vec<String>,
     pub(crate) chain_mode: ChainMode,
@@ -128,6 +154,7 @@ impl CliOptions {
             p2p_addr_configured: false,
             p2p_announce_addr: None,
             stratum_addr: None,
+            wallet_endpoint_addr: None,
             peers: Vec::new(),
             join_peers: Vec::new(),
             chain_mode: ChainMode::Setup,
@@ -181,6 +208,13 @@ impl CliOptions {
                             .context("invalid --stratum address")?,
                     );
                 }
+                "--wallet-endpoint" => {
+                    opts.wallet_endpoint_addr = Some(
+                        next_value(&mut args, "--wallet-endpoint")?
+                            .parse()
+                            .context("invalid --wallet-endpoint address")?,
+                    );
+                }
                 "--join" => {
                     if opts.chain_mode == ChainMode::Genesis {
                         bail!("choose either --genesis or --join, not both");
@@ -202,6 +236,12 @@ impl CliOptions {
 
         if opts.chain_mode == ChainMode::Genesis && !opts.join_peers.is_empty() {
             bail!("choose either --genesis or --join, not both");
+        }
+        if opts
+            .wallet_endpoint_addr
+            .is_some_and(|address| address.port() == 0)
+        {
+            bail!("--wallet-endpoint port must be between 1 and 65535");
         }
 
         Ok(Some(opts))
@@ -282,6 +322,7 @@ pub(crate) fn help_text() -> &'static str {
            --p2p <addr:port>             Inbound P2P listener address when public node is enabled\n\
            --p2p-announce <addr:port>    Public P2P address to gossip; enables inbound P2P\n\
            --stratum <addr:port>         Stratum V1 listener for SHA-256 ASIC miners\n\
+           --wallet-endpoint <addr:port> Public lightweight-wallet API on a separate listener\n\
            --join <addr:port>            Fetch chain snapshot from this peer before finalization\n\
            --data-dir <path>             Local wallet directory (default ~/.iuna)\n\
            --debug                       Print verbose runtime logs\n\n\
@@ -291,6 +332,8 @@ pub(crate) fn help_text() -> &'static str {
            IUNA_AUTOMATIC_BURN_ENABLED=true|false Persist automatic burn/finalization at startup\n\
            IUNA_POW_MINING_ENABLED=true|false Persist automatic PoW mining at startup\n\
            IUNA_POW_MINING_WORKERS=1..32 Set and persist the PoW worker count at startup\n\
+           IUNA_WALLET_ENDPOINT_ENABLED=true|false Enable the separate public wallet API\n\
+           IUNA_WALLET_ENDPOINT_PORT=1..65535 Set its public listener port (default 18662)\n\
            IUNA_DEV_SKIP_SEED_VERIFY=1 Show a setup button to skip seed verification\n"
 }
 

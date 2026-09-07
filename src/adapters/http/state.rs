@@ -25,6 +25,7 @@ pub(super) struct HttpState {
     pub(super) auth_backoff: Arc<Mutex<BTreeMap<String, AuthBackoff>>>,
     pub(super) setup_capability: Arc<Mutex<Option<String>>>,
     pub(super) management_port: u16,
+    pub(super) wallet_endpoint_addr: Option<SocketAddr>,
 }
 
 #[derive(Clone)]
@@ -48,5 +49,6 @@ pub struct ServeOptions {
     pub ui_data_store: SqliteUiDataStore,
     pub wallet_path: PathBuf,
     pub stratum: StratumStatus,
+    pub wallet_endpoint_addr: Option<SocketAddr>,
     pub addr: SocketAddr,
 }

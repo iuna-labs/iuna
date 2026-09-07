@@ -144,6 +144,12 @@ pub(super) struct StratumSettingsForm {
     pub(super) bind_port: Option<u16>,
 }
 
+#[derive(Debug, Deserialize)]
+pub(super) struct WalletEndpointSettingsForm {
+    pub(super) enabled: bool,
+    pub(super) bind_port: Option<u16>,
+}
+
 #[derive(Debug, Serialize)]
 pub(super) struct ConfigResponse {
     #[serde(flatten)]
@@ -152,6 +158,8 @@ pub(super) struct ConfigResponse {
     pub(super) p2p_runtime_bind_addr: String,
     pub(super) stratum_runtime_enabled: bool,
     pub(super) stratum_runtime_listen_addr: Option<String>,
+    pub(super) wallet_endpoint_runtime_enabled: bool,
+    pub(super) wallet_endpoint_runtime_listen_addr: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]

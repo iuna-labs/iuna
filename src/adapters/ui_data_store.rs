@@ -107,6 +107,9 @@ ON ui_wallet_transactions(address, kind, sort_key DESC);
 CREATE INDEX IF NOT EXISTS idx_ui_wallet_transactions_address_sort
 ON ui_wallet_transactions(address, sort_key DESC);
 
+CREATE INDEX IF NOT EXISTS idx_ui_wallet_transactions_signature
+ON ui_wallet_transactions(signature);
+
 CREATE TABLE IF NOT EXISTS ui_burn_leader_ranks (
     block_hash TEXT NOT NULL,
     rank INTEGER NOT NULL,
@@ -453,6 +456,27 @@ LIMIT ?1
     ) -> Result<(Vec<WalletTransactionProjection>, usize)> {
         self.with_connection(|connection| {
             load_wallet_transactions(connection, address, kinds, offset, limit)
+        })
+    }
+
+    pub fn load_wallet_transaction_by_signature(
+        &self,
+        signature: &str,
+    ) -> Result<Option<WalletTransactionProjection>> {
+        self.with_connection(|connection| {
+            connection
+                .query_row(
+                    r#"
+SELECT sort_key, kind, block_height, timestamp_ms, block_finalizer, transaction_json
+FROM ui_wallet_transactions
+WHERE signature = ?1
+LIMIT 1
+"#,
+                    [signature],
+                    wallet_transaction_projection_from_row,
+                )
+                .optional()
+                .context("failed to load UI wallet transaction by signature")
         })
     }
 

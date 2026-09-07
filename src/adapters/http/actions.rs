@@ -13,7 +13,7 @@ use super::types::{
     ActionResponse, AddressBookDeleteForm, AddressBookForm, BurnSettingsForm, ChainResetForm,
     ConfigForm, FeeEstimateResponse, MetricsSettingsForm, P2pAnnounceForm, P2pInboundForm,
     PeerForm, PowMiningForm, RecoveryVdfSettingsForm, SeedPhraseForm, StratumSettingsForm,
-    TransferForm, WalletSetupResponse,
+    TransferForm, WalletEndpointSettingsForm, WalletSetupResponse,
 };
 use super::{
     HttpState, action_json, api_error, config_store, estimate_burn_fee, estimate_mine_fee,
@@ -141,6 +141,13 @@ pub(super) async fn api_stratum_settings_form(
     Form(form): Form<StratumSettingsForm>,
 ) -> Json<ActionResponse> {
     action_json(set_stratum_settings(&state, form.enabled, form.bind_port).await)
+}
+
+pub(super) async fn api_wallet_endpoint_settings_form(
+    State(state): State<HttpState>,
+    Form(form): Form<WalletEndpointSettingsForm>,
+) -> Json<ActionResponse> {
+    action_json(set_wallet_endpoint_settings(&state, form.enabled, form.bind_port).await)
 }
 
 pub(super) async fn burn_per_block_form(
@@ -374,6 +381,9 @@ pub(super) async fn set_p2p_accept_inbound(
     let mut next_config = config.clone();
     next_config.p2p_accept_inbound = enabled;
     next_config.p2p_bind_port = bind_port;
+    if !enabled {
+        next_config.wallet_endpoint_enabled = false;
+    }
     if let Err(error) = config_store::save(&state.config_path, &next_config) {
         let _ = state.gossip.set_accept_inbound(previous).await;
         return Err(error);
@@ -404,6 +414,45 @@ pub(super) async fn set_stratum_settings(
     next_config.stratum_bind_port = bind_port;
     config_store::save(&state.config_path, &next_config)?;
     *config = next_config;
+    Ok(())
+}
+
+pub(super) async fn set_wallet_endpoint_settings(
+    state: &HttpState,
+    enabled: bool,
+    bind_port: Option<u16>,
+) -> Result<()> {
+    let bind_port = bind_port.unwrap_or(config_store::DEFAULT_WALLET_ENDPOINT_BIND_PORT);
+    if bind_port == 0 {
+        bail!("Wallet endpoint bind port must be between 1 and 65535");
+    }
+    if enabled && bind_port == state.management_port {
+        bail!("Wallet endpoint port must differ from the management UI port");
+    }
+
+    let mut config = state.ui_config.lock().await;
+    let mut next_config = config.clone();
+    validate_wallet_endpoint_public_node(&next_config, enabled)?;
+    if enabled && next_config.p2p_accept_inbound && bind_port == next_config.p2p_bind_port {
+        bail!("Wallet endpoint port must differ from the P2P listener port");
+    }
+    if enabled && next_config.stratum_enabled && bind_port == next_config.stratum_bind_port {
+        bail!("Wallet endpoint port must differ from the Stratum listener port");
+    }
+    next_config.wallet_endpoint_enabled = enabled;
+    next_config.wallet_endpoint_bind_port = bind_port;
+    config_store::save(&state.config_path, &next_config)?;
+    *config = next_config;
+    Ok(())
+}
+
+fn validate_wallet_endpoint_public_node(
+    config: &config_store::UiConfig,
+    enabled: bool,
+) -> Result<()> {
+    if enabled && !config.p2p_accept_inbound {
+        bail!("Enable Public node before enabling the wallet endpoint");
+    }
     Ok(())
 }
 
@@ -557,10 +606,23 @@ mod tests {
     };
 
     use super::super::{AuthSession, HttpState, state::AuthBackoff};
-    use super::{CHAIN_RESET_CONFIRMATION, reset_local_chain};
+    use super::{
+        CHAIN_RESET_CONFIRMATION, reset_local_chain, validate_wallet_endpoint_public_node,
+    };
 
     fn socket() -> SocketAddr {
         SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 9444)
+    }
+
+    #[test]
+    fn wallet_endpoint_requires_a_public_node() {
+        let mut config = UiConfig::default();
+        let error = validate_wallet_endpoint_public_node(&config, true).unwrap_err();
+        assert!(error.to_string().contains("Public node"));
+
+        config.p2p_accept_inbound = true;
+        validate_wallet_endpoint_public_node(&config, true).unwrap();
+        validate_wallet_endpoint_public_node(&UiConfig::default(), false).unwrap();
     }
 
     #[tokio::test]
@@ -620,6 +682,7 @@ mod tests {
             auth_backoff: Arc::new(Mutex::new(BTreeMap::<String, AuthBackoff>::new())),
             setup_capability: Arc::new(Mutex::new(Some("test-setup-capability".to_string()))),
             management_port: 9444,
+            wallet_endpoint_addr: None,
         };
 
         reset_local_chain(&state, CHAIN_RESET_CONFIRMATION)

@@ -4,7 +4,7 @@ use anyhow::{Context, Result, bail};
 
 use crate::domain::{
     Amount, Block, BurnBundle, DEFAULT_TRANSACTION_FEE, Ledger, OutPoint, PreparedBlock,
-    StratumMineShare, StratumMineTemplate, Transaction, Wallet, run_vdf,
+    StratumMineShare, StratumMineTemplate, Transaction, TransactionSubmitOutcome, Wallet, run_vdf,
 };
 
 use super::{
@@ -38,6 +38,22 @@ impl NodeWallet {
 }
 
 impl NodeCore {
+    /// Accept a transaction signed by an external/lightweight wallet.
+    /// Mining actions are deliberately excluded from the public wallet API.
+    pub fn submit_external_wallet_transaction(
+        &mut self,
+        tx: Transaction,
+    ) -> Result<TransactionSubmitOutcome> {
+        if matches!(tx, Transaction::Mine { .. }) {
+            bail!("the wallet endpoint accepts only transfer and burn transactions");
+        }
+        let outcome = self.ledger.submit_transaction_with_outcome(tx.clone())?;
+        if outcome.added() {
+            self.outbox.push(GossipEnvelope::Transaction(tx));
+        }
+        Ok(outcome)
+    }
+
     pub fn burn(&mut self, amount: Amount) -> Result<Transaction> {
         self.burn_with_fee(amount, DEFAULT_TRANSACTION_FEE)
     }

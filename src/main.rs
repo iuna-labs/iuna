@@ -13,7 +13,7 @@ use anyhow::{Context, Result, bail};
 use iuna::{
     adapters::{
         chain_store::SqliteChainStore, config_store, http, p2p, stratum,
-        ui_data_store::SqliteUiDataStore, wallet_store,
+        ui_data_store::SqliteUiDataStore, wallet_endpoint, wallet_store,
     },
     app::{
         NodeCore, PeerBook, SharedNode, SharedPeerBook, StratumStatus, debug_logging_enabled,
@@ -30,7 +30,8 @@ use tokio::sync::Mutex;
 mod cli;
 use cli::{
     ChainMode, CliOptions, apply_cli_p2p_config_overrides, apply_cli_stratum_config_overrides,
-    configured_p2p_announce_addr, configured_p2p_bind_addr, configured_stratum_addr,
+    apply_cli_wallet_endpoint_config_overrides, configured_p2p_announce_addr,
+    configured_p2p_bind_addr, configured_stratum_addr, configured_wallet_endpoint_addr,
     initial_burn_fee, initial_burn_per_block, validate_wallet_for_mode,
 };
 #[cfg(test)]
@@ -51,6 +52,8 @@ const POW_MINING_WORKERS_ENV: &str = "IUNA_POW_MINING_WORKERS";
 const LOCAL_TESTNET_ENV: &str = "IUNA_LOCAL_TESTNET";
 const SETUP_COMPLETE_ENV: &str = "IUNA_SETUP_COMPLETE";
 const WALLET_PASSWORD_ENV: &str = "IUNA_WALLET_PASSWORD";
+const WALLET_ENDPOINT_ENABLED_ENV: &str = "IUNA_WALLET_ENDPOINT_ENABLED";
+const WALLET_ENDPOINT_PORT_ENV: &str = "IUNA_WALLET_ENDPOINT_PORT";
 
 #[tokio::main]
 async fn main() -> Result<()> {
@@ -85,11 +88,38 @@ async fn main() -> Result<()> {
     let startup_pow_mining_enabled = startup_bool_from_env(POW_MINING_ENABLED_ENV)?;
     let startup_pow_mining_workers = startup_pow_mining_workers_from_env()?;
     let startup_setup_complete = startup_bool_from_env(SETUP_COMPLETE_ENV)?;
+    let startup_wallet_endpoint_enabled = startup_bool_from_env(WALLET_ENDPOINT_ENABLED_ENV)?;
+    let startup_wallet_endpoint_port = startup_port_from_env(WALLET_ENDPOINT_PORT_ENV)?;
+    let wallet_endpoint_env_dirty = apply_startup_wallet_endpoint_config_overrides(
+        &mut ui_config,
+        startup_wallet_endpoint_enabled,
+        startup_wallet_endpoint_port,
+    );
     let p2p_config_dirty = apply_cli_p2p_config_overrides(&opts, &mut ui_config);
     let stratum_config_dirty = apply_cli_stratum_config_overrides(&opts, &mut ui_config);
+    let wallet_endpoint_cli_dirty =
+        apply_cli_wallet_endpoint_config_overrides(&opts, &mut ui_config);
     let p2p_announce_addr = configured_p2p_announce_addr(&opts, &ui_config)?;
     let configured_p2p_addr = configured_p2p_bind_addr(&opts, &ui_config);
     let configured_stratum_addr = configured_stratum_addr(&opts, &ui_config);
+    let configured_wallet_endpoint_addr = configured_wallet_endpoint_addr(&opts, &ui_config);
+    if let Some(wallet_addr) = configured_wallet_endpoint_addr {
+        if !ui_config.p2p_accept_inbound {
+            bail!("wallet endpoint requires the node to be configured as Public");
+        }
+        if wallet_addr.port() == 0 {
+            bail!("wallet endpoint port must be between 1 and 65535");
+        }
+        if wallet_addr.port() == opts.http_addr.port() {
+            bail!("wallet endpoint port must differ from the management UI port");
+        }
+        if ui_config.p2p_accept_inbound && wallet_addr.port() == configured_p2p_addr.port() {
+            bail!("wallet endpoint port must differ from the P2P listener port");
+        }
+        if configured_stratum_addr.is_some_and(|addr| addr.port() == wallet_addr.port()) {
+            bail!("wallet endpoint port must differ from the Stratum listener port");
+        }
+    }
     let p2p_accept_inbound = ui_config.p2p_accept_inbound;
     let advertised_p2p_addr = p2p_announce_addr.unwrap_or(configured_p2p_addr);
     if opts.chain_mode == ChainMode::Genesis {
@@ -121,6 +151,8 @@ async fn main() -> Result<()> {
     let ui_config_dirty = opts.chain_mode == ChainMode::Genesis
         || p2p_config_dirty
         || stratum_config_dirty
+        || wallet_endpoint_env_dirty
+        || wallet_endpoint_cli_dirty
         || mining_config_dirty
         || setup_config_dirty;
     if ui_config_dirty || auth_config_dirty {
@@ -194,6 +226,11 @@ async fn main() -> Result<()> {
         println!("p2p listener: {configured_p2p_addr}");
     } else {
         println!("p2p listener: disabled (outbound-only)");
+    }
+    if let Some(addr) = configured_wallet_endpoint_addr {
+        println!("public wallet endpoint configured on separate listener: {addr}");
+    } else {
+        println!("public wallet endpoint: disabled");
     }
     if p2p_accept_inbound {
         if let Some(addr) = p2p_announce_addr {
@@ -277,10 +314,11 @@ async fn main() -> Result<()> {
         println!("setup mode: waiting to join or create a chain");
     }
 
-    http::serve(
-        node,
+    let wallet_endpoint_ui_data_store = ui_data_store.clone();
+    let management = http::serve(
+        Arc::clone(&node),
         peers,
-        gossip,
+        gossip.clone(),
         ui_config,
         http::ServeOptions {
             config_path,
@@ -288,10 +326,19 @@ async fn main() -> Result<()> {
             ui_data_store,
             wallet_path,
             stratum: stratum_status,
+            wallet_endpoint_addr: configured_wallet_endpoint_addr,
             addr: opts.http_addr,
         },
-    )
-    .await
+    );
+    if let Some(addr) = configured_wallet_endpoint_addr {
+        tokio::try_join!(
+            management,
+            wallet_endpoint::serve(node, gossip, wallet_endpoint_ui_data_store, addr)
+        )?;
+        Ok(())
+    } else {
+        management.await
+    }
 }
 
 enum StartupWallet {
@@ -379,6 +426,40 @@ fn startup_pow_mining_workers_from_env() -> Result<Option<u8>> {
         .into_string()
         .map_err(|_| anyhow::anyhow!("{POW_MINING_WORKERS_ENV} must be valid UTF-8"))?;
     parse_startup_pow_mining_workers_env_value(value.trim()).map(Some)
+}
+
+fn startup_port_from_env(name: &str) -> Result<Option<u16>> {
+    let Some(value) = std::env::var_os(name) else {
+        return Ok(None);
+    };
+    let value = value
+        .into_string()
+        .map_err(|_| anyhow::anyhow!("{name} must be valid UTF-8"))?;
+    let port = value
+        .trim()
+        .parse::<u16>()
+        .with_context(|| format!("{name} must be an integer between 1 and 65535"))?;
+    if port == 0 {
+        bail!("{name} must be between 1 and 65535");
+    }
+    Ok(Some(port))
+}
+
+fn apply_startup_wallet_endpoint_config_overrides(
+    ui_config: &mut config_store::UiConfig,
+    enabled: Option<bool>,
+    port: Option<u16>,
+) -> bool {
+    let mut dirty = false;
+    if let Some(enabled) = enabled {
+        dirty |= ui_config.wallet_endpoint_enabled != enabled;
+        ui_config.wallet_endpoint_enabled = enabled;
+    }
+    if let Some(port) = port {
+        dirty |= ui_config.wallet_endpoint_bind_port != port;
+        ui_config.wallet_endpoint_bind_port = port;
+    }
+    dirty
 }
 
 fn parse_startup_pow_mining_workers_env_value(value: &str) -> Result<u8> {
