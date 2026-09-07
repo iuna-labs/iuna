@@ -3491,14 +3491,24 @@ window.iunaApp = function iunaApp() {
       return this.powMiningEnabled ? "good" : "neutral";
     },
 
+    dashboardMiningLabel() {
+      if (!this.powMiningEnabled) return "Off";
+      return `${this.powMiningWorkers} worker${this.powMiningWorkers === 1 ? "" : "s"}`;
+    },
+
     dashboardBurnState() {
       return this.miningEnabled ? "good" : "neutral";
+    },
+
+    dashboardBurnLabel() {
+      if (!this.miningEnabled) return "Off";
+      return `IUNA ${this.amountLabel(this.burnAmount)} / blk`;
     },
 
     dashboardBlockState() {
       const ageMs = this.networkHealth.last_block_age_ms;
       if (typeof ageMs !== "number" || !Number.isFinite(ageMs)) return "neutral";
-      if (ageMs < 10 * 60 * 1000) return "good";
+      if (ageMs < 15 * 60 * 1000) return "good";
       if (ageMs < 20 * 60 * 1000) return "warning";
       return "bad";
     },

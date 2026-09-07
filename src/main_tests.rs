@@ -103,10 +103,17 @@ fn management_ui_opens_on_the_dashboard_and_exposes_chain_health_thresholds() {
     assert!(html.contains("@click=\"setTab('dashboard')\""));
     assert!(html.contains("Current balance"));
     assert!(html.contains("dashboardLastBlockLabel()"));
+    assert!(html.contains("dashboardMiningLabel()"));
+    assert!(html.contains("dashboardBurnLabel()"));
+    assert!(html.contains(".dashboard-card.burning .dashboard-status"));
     assert!(html.contains("basicNetworkStatusLabel()"));
     assert!(javascript.contains("tab: \"dashboard\""));
-    assert!(javascript.contains("ageMs < 10 * 60 * 1000"));
+    assert!(javascript.contains("ageMs < 15 * 60 * 1000"));
     assert!(javascript.contains("ageMs < 20 * 60 * 1000"));
+    assert!(javascript.contains(
+        "`${this.powMiningWorkers} worker${this.powMiningWorkers === 1 ? \"\" : \"s\"}`"
+    ));
+    assert!(javascript.contains("`IUNA ${this.amountLabel(this.burnAmount)} / blk`"));
     let dashboard_network_state = javascript
         .split_once("dashboardNetworkState()")
         .and_then(|(_, rest)| rest.split_once("\n    },"))

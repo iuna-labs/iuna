@@ -100,7 +100,8 @@ pub(super) const INDEX_HTML: &str = concat!(
     .dashboard-card-label { margin-bottom: 6px; color: #8d989f; font-size: 10px; font-weight: 850; text-transform: uppercase; }
     .dashboard-card-value { color: #d5f55f; font-size: 14px; font-weight: 850; font-variant-numeric: tabular-nums; line-height: 1.25; overflow-wrap: anywhere; }
     .dashboard-card.balance { padding-inline: 10px; }
-    .dashboard-card.balance .dashboard-card-value { font-size: clamp(10px, 1.25vw, 13px); letter-spacing: -.015em; white-space: nowrap; }
+    .dashboard-card.balance .dashboard-card-value, .dashboard-card.burning .dashboard-status { font-size: clamp(10px, 1.25vw, 13px); letter-spacing: -.015em; white-space: nowrap; }
+    .dashboard-card.burning .dashboard-status { width: 100%; text-align: center; }
     .dashboard-status { color: #8d989f; font-size: 14px; font-weight: 850; font-variant-numeric: tabular-nums; line-height: 1.25; overflow-wrap: anywhere; }
     .dashboard-card.good .dashboard-status { color: #d5f55f; }
     .dashboard-card.warning .dashboard-status { color: #ffd070; }
@@ -663,15 +664,15 @@ pub(super) const INDEX_HTML: &str = concat!(
           <div class="dashboard-card-icon" aria-hidden="true"><svg viewBox="0 0 24 24"><path d="m14 13-8.381 8.38a1 1 0 0 1-3.001-3L11 9.999"></path><path d="M15.973 4.027A13 13 0 0 0 5.902 2.373c-1.398.342-1.092 2.158.277 2.601a19.9 19.9 0 0 1 5.822 3.024"></path><path d="M16.001 11.999a19.9 19.9 0 0 1 3.024 5.824c.444 1.369 2.26 1.676 2.603.278A13 13 0 0 0 20 8.069"></path><path d="M18.352 3.352a1.205 1.205 0 0 0-1.704 0l-5.296 5.296a1.205 1.205 0 0 0 0 1.704l2.296 2.296a1.205 1.205 0 0 0 1.704 0l5.296-5.296a1.205 1.205 0 0 0 0-1.704z"></path></svg></div>
           <div class="dashboard-card-copy">
             <div class="dashboard-card-label">Mining</div>
-            <div class="dashboard-status" x-text="powMiningEnabled ? 'On' : 'Off'"></div>
+            <div class="dashboard-status" x-text="dashboardMiningLabel()"></div>
           </div>
         </article>
 
-        <article class="dashboard-card" :class="dashboardBurnState()">
+        <article class="dashboard-card burning" :class="dashboardBurnState()">
           <div class="dashboard-card-icon" aria-hidden="true"><svg viewBox="0 0 24 24"><path d="M12 12c2-3 0-7-1-8 0 3-1.8 4.7-3 6s-2 3.2-2 5a6 6 0 1 0 12 0c0-1.5-1.1-3.9-2-5 0 3-1.7 4-3 4s-2-1-1-2Z"></path></svg></div>
           <div class="dashboard-card-copy">
             <div class="dashboard-card-label">Burning</div>
-            <div class="dashboard-status" x-text="miningEnabled ? 'On' : 'Off'"></div>
+            <div class="dashboard-status" x-text="dashboardBurnLabel()"></div>
           </div>
         </article>
 
