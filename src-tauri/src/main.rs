@@ -113,9 +113,9 @@ fn setup_desktop_tray(app: &tauri::App) -> tauri::Result<()> {
             }
         });
 
-    if let Some(icon) = app.default_window_icon() {
-        tray = tray.icon(icon.clone());
-    }
+    tray = tray
+        .icon(tauri::include_image!("./icons/tray-icon.png"))
+        .icon_as_template(cfg!(target_os = "macos"));
 
     tray.build(app)?;
     Ok(())
