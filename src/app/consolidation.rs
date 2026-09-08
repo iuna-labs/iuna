@@ -4,7 +4,7 @@ use anyhow::{Context, Result, bail};
 use serde::Serialize;
 
 use super::{NodeCore, helpers::converge_fee_by_byte};
-use crate::domain::{Amount, Ledger, OutPoint, Transaction};
+use crate::domain::{Amount, Ledger, OutPoint, Transaction, minimum_transfer_economic_size_bytes};
 
 const BATCH_INPUTS: usize = 128;
 const MAX_BATCHES: usize = 32;
@@ -48,14 +48,14 @@ impl NodeCore {
         candidates.sort_by_key(|(point, output)| (output.amount, point.clone()));
         // Leave the largest spendable output for payments and automatic burns.
         candidates.pop();
-        let mut groups = BTreeMap::<Option<OutPoint>, Vec<OutPoint>>::new();
-        for (point, _) in candidates {
+        let mut groups = BTreeMap::<Option<OutPoint>, Vec<(OutPoint, Amount)>>::new();
+        for (point, output) in candidates {
             let root = if merge_roots {
                 None
             } else {
                 ledger.consolidation_root(&point)
             };
-            groups.entry(root).or_default().push(point);
+            groups.entry(root).or_default().push((point, output.amount));
         }
         let mut plan = ConsolidationPlan {
             address: self.wallet.address().to_string(),
@@ -73,12 +73,16 @@ impl NodeCore {
                     if count < 2 {
                         break None;
                     }
-                    match self.build_consolidation(
-                        &ledger,
-                        &group[offset..offset + count],
-                        fee_per_byte,
-                        merge_roots,
-                    ) {
+                    let candidates = &group[offset..offset + count];
+                    if !can_meet_consolidation_fee_cap(candidates, fee_per_byte) {
+                        count /= 2;
+                        continue;
+                    }
+                    let outpoints = candidates
+                        .iter()
+                        .map(|(point, _)| point.clone())
+                        .collect::<Vec<_>>();
+                    match self.build_consolidation(&ledger, &outpoints, fee_per_byte, merge_roots) {
                         Ok(value) => break Some(value),
                         Err(_) => count /= 2,
                     }
@@ -180,4 +184,15 @@ impl NodeCore {
         }
         self.submit_public_transaction(transaction)
     }
+}
+
+fn can_meet_consolidation_fee_cap(candidates: &[(OutPoint, Amount)], fee_per_byte: Amount) -> bool {
+    let total = candidates
+        .iter()
+        .map(|(_, amount)| u128::from(*amount))
+        .sum::<u128>();
+    let minimum_fee = (u128::from(fee_per_byte)
+        * minimum_transfer_economic_size_bytes(candidates.len()) as u128)
+        .max(1);
+    minimum_fee * 100 <= total
 }

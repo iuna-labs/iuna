@@ -120,6 +120,16 @@ fn consolidation_skips_uneconomic_and_locked_wallets() {
 }
 
 #[test]
+fn consolidation_large_uneconomic_wallet_skips_dust_without_building_transactions() {
+    let (wallet, ledger) = fixture(2000, 10, false);
+    let node = NodeCore::from_ledger(wallet, ledger, 0);
+    let plan = node.consolidation_plan(1, false).unwrap();
+    assert_eq!(plan.before, 2000);
+    assert_eq!(plan.after, 2000);
+    assert!(plan.batches.is_empty());
+}
+
+#[test]
 fn consolidation_adapts_to_the_network_block_limit() {
     let (wallet, mut ledger) = fixture(150, 1_000_000, false);
     ledger.launch_profile.max_block_bytes = 3000;

@@ -107,6 +107,19 @@ pub(super) fn canonical_transaction_size_bytes(transaction: &Transaction) -> usi
     }
 }
 
+pub(crate) fn minimum_transfer_economic_size_bytes(input_count: usize) -> usize {
+    // A transfer always contains its tag, collection lengths, one output, fee,
+    // and signature. Each input contains at least a 32-byte transaction id,
+    // one byte for its output index, and a 32-byte owner address.
+    1 + compact_len(input_count as u128)
+        + input_count * (HASH_BYTES + 1 + PUBLIC_KEY_BYTES)
+        + compact_len(1)
+        + PUBLIC_KEY_BYTES
+        + 1
+        + 1
+        + SIGNATURE_BYTES
+}
+
 fn compact_inputs_size_bytes(inputs: &[TxInput]) -> usize {
     inputs
         .iter()
@@ -166,8 +179,9 @@ pub(super) fn compact_len(mut value: u128) -> usize {
 #[cfg(test)]
 mod tests {
     use super::{
-        canonical_transaction_size_bytes, compact_len, validate_address, validate_hash,
-        validate_protocol_id, validate_signature, validate_stratum_header,
+        canonical_transaction_size_bytes, compact_len, minimum_transfer_economic_size_bytes,
+        validate_address, validate_hash, validate_protocol_id, validate_signature,
+        validate_stratum_header,
     };
     use crate::domain::{OutPoint, Transaction, TxInput, TxOutput};
 
@@ -243,5 +257,7 @@ mod tests {
                 + 64 // signature bytes
         );
         assert!(tx.serialized_size_bytes().unwrap() > canonical_transaction_size_bytes(&tx));
+        assert_eq!(minimum_transfer_economic_size_bytes(1), 166);
+        assert!(minimum_transfer_economic_size_bytes(1) <= canonical_transaction_size_bytes(&tx));
     }
 }

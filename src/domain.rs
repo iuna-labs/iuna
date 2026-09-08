@@ -88,6 +88,7 @@ pub use transaction::{
     MineSearchOutcome, OutPoint, TRANSACTION_SIGNING_FORMAT_VERSION, Transaction, TxInput, TxOutput,
 };
 use transaction::{TransactionSigningDomain, mine_signing_bytes};
+pub(crate) use validation::minimum_transfer_economic_size_bytes;
 pub use validation::validate_address;
 use validation::{
     canonical_transaction_size_bytes, validate_hash, validate_protocol_id, validate_signature,
