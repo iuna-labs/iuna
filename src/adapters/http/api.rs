@@ -176,7 +176,7 @@ pub(super) async fn api_wallet_transactions(
         )?;
         if is_reward {
             item.kind = "reward";
-            item.from = "protocol".to_string();
+            item.from = "fees".to_string();
             item.direction = "reward";
         }
         Some(item)
