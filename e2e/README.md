@@ -104,9 +104,9 @@ before its fetched chain is persisted, then requires a successful restart and
 seven-node convergence. Next it gives the same node the height-299 chain/UI
 fixture, waits until the management API reports active incremental range
 validation, interrupts it again, and requires the persisted stale node to
-resume and converge. The six finalizing reference nodes remain untouched, so
-their consensus participation is not conflated with the sync failure being
-tested.
+resume and converge. The six reference nodes start with finalization paused so
+the sync target stays fixed and fork races are not conflated with the sync
+failure being tested.
 
 Each evidence run is stored in a timestamped directory with `report.json` and
 `nodes.log`. The report records the base Git revision, dirty-worktree flag, an

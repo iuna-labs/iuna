@@ -28,6 +28,7 @@ E2E_DIR = ROOT / "e2e"
 COMPOSE_FILES = (ROOT / "docker-compose.yml", E2E_DIR / "docker-compose.e2e.yml")
 SERVICES = ("bootstrap", "node2", "node3", "node4", "node5", "node6")
 SYNC_SERVICE = "syncnode"
+REFERENCE_MINING_ENV = "IUNA_E2E_REFERENCE_MINING_ENABLED"
 SERVICE_IPS = {
     "bootstrap": "172.29.0.10",
     "node2": "172.29.0.11",
@@ -1075,8 +1076,13 @@ def run_sync_resilience_scenario(
         "running e2e scenario sync-resilience: interrupted empty bootstrap and stale range sync",
         flush=True,
     )
-    restore_snapshot("first-objective-checkpoint")
+    previous_reference_mining = os.environ.get(REFERENCE_MINING_ENV)
+    os.environ[REFERENCE_MINING_ENV] = "false"
     try:
+        # Sync interruption is the variable under test. Start the reference chain
+        # paused so a slow deployment host cannot turn range validation into an
+        # unrelated moving-tip fork race while the seventh node catches up.
+        restore_snapshot("first-objective-checkpoint")
         start(build)
         initial = wait_for_height(1_001, timeout, converge=True)
         initial_height = min(
@@ -1194,8 +1200,14 @@ def run_sync_resilience_scenario(
         compose("logs", "--tail", "300", *sync_services, check=False)
         raise
     finally:
-        if not keep:
-            compose("down", "--remove-orphans", check=False)
+        try:
+            if not keep:
+                compose("down", "--remove-orphans", check=False)
+        finally:
+            if previous_reference_mining is None:
+                os.environ.pop(REFERENCE_MINING_ENV, None)
+            else:
+                os.environ[REFERENCE_MINING_ENV] = previous_reference_mining
 
 
 def run_partition_recovery_scenario(

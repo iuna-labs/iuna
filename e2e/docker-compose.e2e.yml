@@ -6,6 +6,8 @@ services:
     image: iuna-local-e2e:latest
     restart: "no"
     cap_add: [NET_ADMIN]
+    environment:
+      IUNA_AUTOMATIC_BURN_ENABLED: "${IUNA_E2E_REFERENCE_MINING_ENABLED:-true}"
     command:
       - if [ -s /data/chain.sqlite3 ]; then exec iuna --data-dir /data --http 0.0.0.0:18661 --p2p 0.0.0.0:9444 --p2p-announce 172.29.0.10:9444 --debug; else exec iuna --genesis --data-dir /data --http 0.0.0.0:18661 --p2p 0.0.0.0:9444 --p2p-announce 172.29.0.10:9444 --debug; fi
     healthcheck:
@@ -27,6 +29,9 @@ services:
     image: iuna-local-e2e:latest
     restart: "no"
     cap_add: [NET_ADMIN]
+    environment:
+      IUNA_AUTOMATIC_BURN_ENABLED: "${IUNA_E2E_REFERENCE_MINING_ENABLED:-true}"
+      IUNA_POW_MINING_ENABLED: "${IUNA_E2E_REFERENCE_MINING_ENABLED:-true}"
     command:
       - exec iuna --join 172.29.0.10:9444 --data-dir /data --http 0.0.0.0:18661 --p2p 0.0.0.0:9444 --p2p-announce 172.29.0.11:9444 --debug
     healthcheck:
@@ -48,6 +53,9 @@ services:
     image: iuna-local-e2e:latest
     restart: "no"
     cap_add: [NET_ADMIN]
+    environment:
+      IUNA_AUTOMATIC_BURN_ENABLED: "${IUNA_E2E_REFERENCE_MINING_ENABLED:-true}"
+      IUNA_POW_MINING_ENABLED: "${IUNA_E2E_REFERENCE_MINING_ENABLED:-true}"
     command:
       - exec iuna --join 172.29.0.10:9444 --data-dir /data --http 0.0.0.0:18661 --p2p 0.0.0.0:9444 --p2p-announce 172.29.0.12:9444 --stratum 0.0.0.0:3333 --debug
     healthcheck:
@@ -70,6 +78,9 @@ services:
     image: iuna-local-e2e:latest
     restart: "no"
     cap_add: [NET_ADMIN]
+    environment:
+      IUNA_AUTOMATIC_BURN_ENABLED: "${IUNA_E2E_REFERENCE_MINING_ENABLED:-true}"
+      IUNA_POW_MINING_ENABLED: "${IUNA_E2E_REFERENCE_MINING_ENABLED:-true}"
     command:
       - exec iuna --join 172.29.0.10:9444 --data-dir /data --http 0.0.0.0:18661 --p2p 0.0.0.0:9444 --p2p-announce 172.29.0.13:9444 --debug
     healthcheck:
@@ -91,6 +102,9 @@ services:
     image: iuna-local-e2e:latest
     restart: "no"
     cap_add: [NET_ADMIN]
+    environment:
+      IUNA_AUTOMATIC_BURN_ENABLED: "${IUNA_E2E_REFERENCE_MINING_ENABLED:-true}"
+      IUNA_POW_MINING_ENABLED: "${IUNA_E2E_REFERENCE_MINING_ENABLED:-true}"
     command:
       - exec iuna --join 172.29.0.13:9444 --data-dir /data --http 0.0.0.0:18661 --p2p 0.0.0.0:9444 --p2p-announce 172.29.0.14:9444 --debug
     healthcheck:
@@ -112,6 +126,9 @@ services:
     image: iuna-local-e2e:latest
     restart: "no"
     cap_add: [NET_ADMIN]
+    environment:
+      IUNA_AUTOMATIC_BURN_ENABLED: "${IUNA_E2E_REFERENCE_MINING_ENABLED:-true}"
+      IUNA_POW_MINING_ENABLED: "${IUNA_E2E_REFERENCE_MINING_ENABLED:-true}"
     command:
       - exec iuna --join 172.29.0.13:9444 --data-dir /data --http 0.0.0.0:18661 --p2p 0.0.0.0:9444 --p2p-announce 172.29.0.15:9444 --debug
     healthcheck:
