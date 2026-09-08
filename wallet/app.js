@@ -30,7 +30,7 @@ function toast(message, error = false) {
   toastElement.textContent = message;
   toastElement.className = `toast show${error ? " error" : ""}`;
   window.clearTimeout(toastElement.timeout);
-  toastElement.timeout = window.setTimeout(() => { toastElement.className = "toast"; }, 3000);
+  toastElement.timeout = window.setTimeout(() => { toastElement.className = "toast"; }, error ? 7000 : 3000);
 }
 
 function readJson(key) {

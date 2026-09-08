@@ -41,3 +41,26 @@ test('refuses to sign with a watch-only wallet', async () => {
     /watch-only wallet cannot sign/,
   );
 });
+
+test('explains oversized transactions before submission', () => {
+  const signature = 'aa'.repeat(64);
+  const transaction = {
+    kind: 'transfer',
+    inputs: Array.from({ length: 205 }, (_, index) => ({
+      outpoint: { txid: 'bb'.repeat(32), index },
+      owner: 'cc'.repeat(32),
+      signature,
+    })),
+    outputs: [
+      { address: 'dd'.repeat(32), amount: 1 },
+      { address: 'cc'.repeat(32), amount: 1 },
+    ],
+    fee: 1,
+    signature,
+  };
+
+  assert.throws(
+    () => core.ensureTransactionBodySize(transaction),
+    /205 inputs, 65 KiB; maximum 64 KiB.*smaller amount.*consolidate/s,
+  );
+});

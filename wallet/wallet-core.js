@@ -4,6 +4,7 @@ export const API_BASE = "https://iuna.jhx.app/v1";
 export const STORAGE_KEY = "iuna.wallets.v2";
 export const LEGACY_STORAGE_KEY = "iuna.wallet.v1";
 export const MICRO_IUNA = 1_000_000n;
+export const MAX_TRANSACTION_BODY_BYTES = 64 * 1024;
 
 export function emptyWalletStore() {
   return { version: 2, activeId: null, wallets: [] };
@@ -48,6 +49,16 @@ export function upsertWallet(store, wallet) {
 export function removeWallet(store, id) {
   const wallets = store.wallets.filter((wallet) => wallet.id !== id);
   return { version: 2, activeId: wallets[0]?.id || null, wallets };
+}
+
+export function ensureTransactionBodySize(transaction) {
+  const bodyBytes = encoder.encode(JSON.stringify(transaction)).byteLength;
+  if (bodyBytes > MAX_TRANSACTION_BODY_BYTES) {
+    const inputCount = transaction.inputs?.length || 0;
+    const bodyKiB = Math.ceil(bodyBytes / 1024);
+    throw new Error(`Transaction is too large (${inputCount} inputs, ${bodyKiB} KiB; maximum 64 KiB). Try a smaller amount or consolidate this wallet’s UTXOs first.`);
+  }
+  return bodyBytes;
 }
 
 export function bytesToHex(bytes) {
@@ -304,16 +315,15 @@ export async function buildSignedTransfer({ wallet, status, utxos, recipientAddr
     ? transferSigningBytes(status, inputs, outputs, fee)
     : encoder.encode(legacyTransferPayload(inputs, outputs, fee));
   const signature = bytesToHex(new Uint8Array(await crypto.subtle.sign("Ed25519", wallet.privateKey, signingPayload)));
-  return {
-    transaction: {
-      kind: "transfer",
-      inputs: inputs.map((input) => ({ ...input, signature })),
-      outputs: outputs.map((output) => ({ ...output, amount: Number(output.amount) })),
-      fee: Number(fee),
-      signature,
-    },
-    fee,
+  const transaction = {
+    kind: "transfer",
+    inputs: inputs.map((input) => ({ ...input, signature })),
+    outputs: outputs.map((output) => ({ ...output, amount: Number(output.amount) })),
+    fee: Number(fee),
+    signature,
   };
+  ensureTransactionBodySize(transaction);
+  return { transaction, fee };
 }
 
 export function parseIuna(value) {
@@ -353,6 +363,9 @@ export async function api(path, options = {}) {
   }
   let body;
   try { body = await response.json(); } catch { body = {}; }
+  if (response.status === 413 && path === "/transactions" && requestOptions.method === "POST") {
+    throw new Error("Transaction is too large for the public endpoint. Try a smaller amount or consolidate this wallet’s UTXOs first.");
+  }
   if (!response.ok) throw new Error(body.error || `Endpoint returned status ${response.status}`);
   return body;
 }
