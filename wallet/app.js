@@ -41,29 +41,29 @@ function logo() {
 }
 
 function renderWelcome() {
-  app.innerHTML = `<section class="onboarding"><div class="hero">${logo()}<h1>Jouw iuna.<br><em>In jouw handen.</em></h1><p>Een lichte wallet die rechtstreeks met het iuna-netwerk praat. Je seed blijft versleuteld op dit apparaat.</p></div><div class="onboarding-actions"><button class="button" data-action="create">Nieuwe wallet maken</button><button class="button secondary" data-action="import">Bestaande seed gebruiken</button><div class="security-note"><span>◇</span><span>Self-custody betekent dat alleen jij je seed kunt herstellen. iuna kan hem niet terughalen.</span></div></div></section>`;
+  app.innerHTML = `<section class="onboarding"><div class="hero">${logo()}<h1>Your iuna.<br><em>In your hands.</em></h1><p>A lightweight wallet that connects directly to the iuna network. Your seed stays encrypted on this device.</p></div><div class="onboarding-actions"><button class="button" data-action="create">Create a new wallet</button><button class="button secondary" data-action="import">Use an existing seed</button><div class="security-note"><span>◇</span><span>Self-custody means only you can recover your seed. iuna cannot retrieve it for you.</span></div></div></section>`;
 }
 
 function renderLock() {
   const record = storedWallet();
-  app.innerHTML = `<section class="onboarding"><div class="lock-card">${logo()}<h1>Welkom terug.</h1><p class="view-copy">Ontgrendel je wallet op dit apparaat.</p><form id="unlock-form"><div class="field"><label for="password">Wachtwoord</label><input id="password" type="password" autocomplete="current-password" autofocus required></div><button class="button" type="submit">Ontgrendelen</button></form><button class="button ghost" data-action="forget" style="width:100%;margin-top:10px">Andere wallet gebruiken</button><p class="security-note">Wallet ${escapeHtml(record?.address?.slice(0, 8))}… is lokaal versleuteld.</p></div></section>`;
+  app.innerHTML = `<section class="onboarding"><div class="lock-card">${logo()}<h1>Welcome back.</h1><p class="view-copy">Unlock your wallet on this device.</p><form id="unlock-form"><div class="field"><label for="password">Password</label><input id="password" type="password" autocomplete="current-password" autofocus required></div><button class="button" type="submit">Unlock</button></form><button class="button ghost" data-action="forget" style="width:100%;margin-top:10px">Use a different wallet</button><p class="security-note">Wallet ${escapeHtml(record?.address?.slice(0, 8))}… is encrypted locally.</p></div></section>`;
 }
 
 function renderImport() {
-  app.innerHTML = `<section class="onboarding"><div><button class="back" data-action="welcome">← Terug</button><p class="eyebrow">Wallet herstellen</p><h1 class="view-title">Bestaande seed</h1><p class="view-copy">Vul de 24 woorden in dezelfde volgorde in. Ze worden alleen lokaal verwerkt.</p><form id="import-form"><div class="field"><label for="seed">Seed phrase</label><textarea id="seed" autocomplete="off" autocapitalize="none" spellcheck="false" placeholder="woord 1  woord 2  woord 3 …" required></textarea></div><div class="field"><label for="new-password">Nieuw wallet-wachtwoord</label><input id="new-password" type="password" minlength="10" autocomplete="new-password" placeholder="Minimaal 10 tekens" required></div><button class="button" type="submit" style="width:100%">Wallet herstellen</button></form></div><div class="security-note" style="margin-top:auto"><span>◇</span><span>Je seed verlaat deze browser niet.</span></div></section>`;
+  app.innerHTML = `<section class="onboarding"><div><button class="back" data-action="welcome">← Back</button><p class="eyebrow">Recover wallet</p><h1 class="view-title">Existing seed</h1><p class="view-copy">Enter the 24 words in the same order. They are processed locally only.</p><form id="import-form"><div class="field"><label for="seed">Seed phrase</label><textarea id="seed" autocomplete="off" autocapitalize="none" spellcheck="false" placeholder="word 1  word 2  word 3 …" required></textarea></div><div class="field"><label for="new-password">New wallet password</label><input id="new-password" type="password" minlength="10" autocomplete="new-password" placeholder="At least 10 characters" required></div><button class="button" type="submit" style="width:100%">Recover wallet</button></form></div><div class="security-note" style="margin-top:auto"><span>◇</span><span>Your seed never leaves this browser.</span></div></section>`;
 }
 
 async function renderNewSeed() {
-  app.innerHTML = `<section class="center-card"><div class="spinner"></div><p>Veilige seed maken…</p></section>`;
+  app.innerHTML = `<section class="center-card"><div class="spinner"></div><p>Creating a secure seed…</p></section>`;
   const seed = await generateMnemonic();
   const words = seed.split(" ").map((word) => `<div class="seed-word">${word}</div>`).join("");
-  app.innerHTML = `<section class="onboarding"><div><button class="back" data-action="welcome">← Terug</button><p class="eyebrow">Stap 1 van 2</p><h1 class="view-title">Bewaar je seed.</h1><p class="view-copy">Schrijf deze 24 woorden op papier, in exact deze volgorde.</p><div class="seed-grid">${words}</div><div class="warning">Maak geen screenshot. Wie deze woorden heeft, heeft toegang tot je wallet.</div><button class="button secondary" data-action="copy-seed" style="width:100%">Seed kopiëren</button><button class="button" data-action="seed-saved" style="width:100%;margin-top:10px">Ik heb de woorden bewaard</button></div></section>`;
+  app.innerHTML = `<section class="onboarding"><div><button class="back" data-action="welcome">← Back</button><p class="eyebrow">Step 1 of 2</p><h1 class="view-title">Save your seed.</h1><p class="view-copy">Write these 24 words on paper in this exact order.</p><div class="seed-grid">${words}</div><div class="warning">Do not take a screenshot. Anyone with these words can access your wallet.</div><button class="button secondary" data-action="copy-seed" style="width:100%">Copy seed</button><button class="button" data-action="seed-saved" style="width:100%;margin-top:10px">I have saved the words</button></div></section>`;
   app.dataset.pendingSeed = seed;
 }
 
 function renderPasswordSetup() {
   const seed = app.dataset.pendingSeed;
-  app.innerHTML = `<section class="onboarding" data-seed="${escapeHtml(seed)}"><div><button class="back" data-action="create">← Terug</button><p class="eyebrow">Stap 2 van 2</p><h1 class="view-title">Beveilig dit apparaat.</h1><p class="view-copy">Dit wachtwoord versleutelt je seed voordat hij in de browser wordt opgeslagen.</p><form id="create-form"><div class="field"><label for="create-password">Wachtwoord</label><input id="create-password" type="password" minlength="10" autocomplete="new-password" required></div><div class="field"><label for="confirm-password">Herhaal wachtwoord</label><input id="confirm-password" type="password" minlength="10" autocomplete="new-password" required></div><button class="button" type="submit" style="width:100%">Wallet openen</button></form></div></section>`;
+  app.innerHTML = `<section class="onboarding" data-seed="${escapeHtml(seed)}"><div><button class="back" data-action="create">← Back</button><p class="eyebrow">Step 2 of 2</p><h1 class="view-title">Secure this device.</h1><p class="view-copy">This password encrypts your seed before it is stored in the browser.</p><form id="create-form"><div class="field"><label for="create-password">Password</label><input id="create-password" type="password" minlength="10" autocomplete="new-password" required></div><div class="field"><label for="confirm-password">Repeat password</label><input id="confirm-password" type="password" minlength="10" autocomplete="new-password" required></div><button class="button" type="submit" style="width:100%">Open wallet</button></form></div></section>`;
   app.dataset.pendingSeed = seed;
 }
 
@@ -89,7 +89,7 @@ async function fetchWalletData() {
 }
 
 async function openWallet() {
-  app.innerHTML = `<section class="center-card"><div class="spinner"></div><p>Verbinden met iuna…</p></section>`;
+  app.innerHTML = `<section class="center-card"><div class="spinner"></div><p>Connecting to iuna…</p></section>`;
   try {
     await fetchWalletData();
     renderApp();
@@ -101,7 +101,7 @@ async function openWallet() {
 }
 
 function renderOffline(message) {
-  app.innerHTML = `<section class="onboarding"><div class="lock-card">${logo()}<p class="eyebrow">Verbinding mislukt</p><h1 class="view-title">Endpoint niet bereikbaar.</h1><p class="view-copy">${escapeHtml(message)}</p><button class="button" data-action="retry" style="width:100%">Opnieuw proberen</button><button class="button ghost" data-action="lock" style="width:100%;margin-top:10px">Wallet vergrendelen</button><p class="security-note">Endpoint: ${escapeHtml(API_BASE)}</p></div></section>`;
+  app.innerHTML = `<section class="onboarding"><div class="lock-card">${logo()}<p class="eyebrow">Connection failed</p><h1 class="view-title">Endpoint unavailable.</h1><p class="view-copy">${escapeHtml(message)}</p><button class="button" data-action="retry" style="width:100%">Try again</button><button class="button ghost" data-action="lock" style="width:100%;margin-top:10px">Lock wallet</button><p class="security-note">Endpoint: ${escapeHtml(API_BASE)}</p></div></section>`;
 }
 
 async function refreshSilently() {
@@ -111,11 +111,11 @@ async function refreshSilently() {
 
 function topbar() {
   const online = state.status?.ready;
-  return `<header class="topbar">${logo()}<div style="display:flex;align-items:center;gap:10px"><div class="network"><span class="dot ${online ? "live" : ""}"></span>${online ? "Mainnet" : "Synchroniseren"}</div><button class="icon-button" data-action="lock" aria-label="Vergrendel">${icon("lock")}</button></div></header>`;
+  return `<header class="topbar">${logo()}<div style="display:flex;align-items:center;gap:10px"><div class="network"><span class="dot ${online ? "live" : ""}"></span>${online ? "Mainnet" : "Syncing"}</div><button class="icon-button" data-action="lock" aria-label="Lock">${icon("lock")}</button></div></header>`;
 }
 
 function nav() {
-  return `<nav class="bottom-nav">${[["home","Overzicht"],["send","Verstuur"],["receive","Ontvang"],["settings","Instellingen"]].map(([view,label]) => `<button class="nav-item ${state.view === view ? "active" : ""}" data-view="${view}"><span>${icon(view)}</span>${label}</button>`).join("")}</nav>`;
+  return `<nav class="bottom-nav">${[["home","Overview"],["send","Send"],["receive","Receive"],["settings","Settings"]].map(([view,label]) => `<button class="nav-item ${state.view === view ? "active" : ""}" data-view="${view}"><span>${icon(view)}</span>${label}</button>`).join("")}</nav>`;
 }
 
 function transactionInfo(item) {
@@ -129,14 +129,14 @@ function transactionInfo(item) {
   if (tx.kind === "burn") return { title: "Burn", incoming: false, amount: tx.amount || 0, symbol: "×" };
   const sent = tx.inputs?.some((input) => input.owner === owner);
   const relevant = tx.outputs?.filter((output) => sent ? output.address !== owner : output.address === owner) || [];
-  return { title: sent ? "Verstuurd" : "Ontvangen", incoming: !sent, amount: relevant.reduce((sum, output) => sum + Number(output.amount || 0), 0), symbol: sent ? "↗" : "↙" };
+  return { title: sent ? "Sent" : "Received", incoming: !sent, amount: relevant.reduce((sum, output) => sum + Number(output.amount || 0), 0), symbol: sent ? "↗" : "↙" };
 }
 
 function formatTransactionDate(item) {
-  if (!item.timestamp_ms) return "In behandeling";
+  if (!item.timestamp_ms) return "Pending";
   const timestamp = new Date(Number(item.timestamp_ms));
-  if (Number.isNaN(timestamp.getTime())) return "Onbekende tijd";
-  return timestamp.toLocaleString("nl-NL", {
+  if (Number.isNaN(timestamp.getTime())) return "Unknown time";
+  return timestamp.toLocaleString("en-GB", {
     day: "numeric",
     month: "short",
     hour: "2-digit",
@@ -146,7 +146,7 @@ function formatTransactionDate(item) {
 
 function activityList(limit) {
   const items = state.transactions.slice(0, limit);
-  if (!items.length) return '<div class="empty">Nog geen transacties.<br>Je nieuwe wallet is klaar voor gebruik.</div>';
+  if (!items.length) return '<div class="empty">No transactions yet.<br>Your new wallet is ready to use.</div>';
   return `<div class="activity-list">${items.map((item) => {
     const info = transactionInfo(item);
     const date = formatTransactionDate(item);
@@ -155,23 +155,23 @@ function activityList(limit) {
 }
 
 function renderHome() {
-  return `${topbar()}<section><p class="eyebrow">Beschikbaar saldo</p><h1 class="balance">${formatIuna(state.balance?.spendable, 6)} <span>IUNA</span></h1><p class="subbalance">${formatIuna(state.balance?.confirmed, 6)} bevestigd · blok ${escapeHtml(state.balance?.height)}</p><div class="actions"><button class="button" data-view="send">${icon("send")} Verstuur</button><button class="button secondary" data-view="receive">${icon("receive")} Ontvang</button></div><div class="section-head"><h2>Recente activiteit</h2><button data-view="activity">Bekijk alles</button></div><div class="panel">${activityList(5)}</div></section>`;
+  return `${topbar()}<section><p class="eyebrow">Available balance</p><h1 class="balance">${formatIuna(state.balance?.spendable, 6)} <span>IUNA</span></h1><p class="subbalance">${formatIuna(state.balance?.confirmed, 6)} confirmed · block ${escapeHtml(state.balance?.height)}</p><div class="actions"><button class="button" data-view="send">${icon("send")} Send</button><button class="button secondary" data-view="receive">${icon("receive")} Receive</button></div><div class="section-head"><h2>Recent activity</h2><button data-view="activity">View all</button></div><div class="panel">${activityList(5)}</div></section>`;
 }
 
 function renderSend() {
-  return `${topbar()}<p class="eyebrow">Transactie</p><h1 class="view-title">Verstuur IUNA</h1><p class="view-copy">De transactie wordt op dit apparaat ondertekend.</p><form id="send-form" class="panel send-card"><div class="field"><label for="recipient">Ontvanger</label><input id="recipient" autocomplete="off" autocapitalize="none" spellcheck="false" placeholder="iuna1q…" required></div><div class="field"><label for="amount">Bedrag</label><div class="amount-wrap"><input id="amount" inputmode="decimal" placeholder="0,00" required><span>IUNA</span></div></div><div class="fee-line"><span>Beschikbaar</span><strong>${formatIuna(state.balance?.spendable)} IUNA</strong></div><div class="fee-line"><span>Tarief</span><strong>${escapeHtml(state.status.default_fee_per_byte)} µIUNA / byte</strong></div><button class="button" type="submit">Controleer transactie</button></form>`;
+  return `${topbar()}<p class="eyebrow">Transaction</p><h1 class="view-title">Send IUNA</h1><p class="view-copy">The transaction is signed on this device.</p><form id="send-form" class="panel send-card"><div class="field"><label for="recipient">Recipient</label><input id="recipient" autocomplete="off" autocapitalize="none" spellcheck="false" placeholder="iuna1q…" required></div><div class="field"><label for="amount">Amount</label><div class="amount-wrap"><input id="amount" inputmode="decimal" placeholder="0.00" required><span>IUNA</span></div></div><div class="fee-line"><span>Available</span><strong>${formatIuna(state.balance?.spendable)} IUNA</strong></div><div class="fee-line"><span>Fee rate</span><strong>${escapeHtml(state.status.default_fee_per_byte)} µIUNA / byte</strong></div><button class="button" type="submit">Review transaction</button></form>`;
 }
 
 function renderReceive() {
-  return `${topbar()}<p class="eyebrow">Jouw adres</p><h1 class="view-title">Ontvang IUNA</h1><p class="view-copy">Deel dit mainnet-adres met de afzender.</p><div class="panel"><div class="receive-emblem">${icon("receive")}</div><p class="eyebrow">Ontvangstadres</p><div class="address-box"><code>${escapeHtml(state.address)}</code><button class="icon-button" data-action="copy-address" aria-label="Kopieer adres">${icon("copy")}</button></div><p class="security-note">Controleer altijd de eerste en laatste tekens wanneer je een adres deelt.</p></div>`;
+  return `${topbar()}<p class="eyebrow">Your address</p><h1 class="view-title">Receive IUNA</h1><p class="view-copy">Share this mainnet address with the sender.</p><div class="panel"><div class="receive-emblem">${icon("receive")}</div><p class="eyebrow">Receiving address</p><div class="address-box"><code>${escapeHtml(state.address)}</code><button class="icon-button" data-action="copy-address" aria-label="Copy address">${icon("copy")}</button></div><p class="security-note">Always verify the first and last characters when sharing an address.</p></div>`;
 }
 
 function renderActivity() {
-  return `${topbar()}<p class="eyebrow">Wallet</p><h1 class="view-title">Activiteit</h1><p class="view-copy">Bevestigde en nog lopende transacties.</p><div class="panel">${activityList(50)}</div>`;
+  return `${topbar()}<p class="eyebrow">Wallet</p><h1 class="view-title">Activity</h1><p class="view-copy">Confirmed and pending transactions.</p><div class="panel">${activityList(50)}</div>`;
 }
 
 function renderSettings() {
-  return `${topbar()}<p class="eyebrow">Wallet</p><h1 class="view-title">Instellingen</h1><div class="panel"><div class="setting"><h3>Netwerk</h3><p>${escapeHtml(state.status.network_id)} · blok ${escapeHtml(state.status.height)}</p></div><div class="setting"><h3>Public endpoint</h3><p>${escapeHtml(API_BASE)}</p></div><div class="setting"><h3>Lokale beveiliging</h3><p>AES-256-GCM · PBKDF2-SHA256 · 310.000 iteraties</p></div><div class="setting"><h3>Wallet-adres</h3><p style="word-break:break-all">${escapeHtml(state.address)}</p></div></div><button class="button ghost" data-action="lock" style="width:100%;margin-top:12px">Wallet vergrendelen</button><button class="button danger" data-action="forget" style="width:100%;margin-top:10px">Wallet van dit apparaat verwijderen</button><p class="security-note">iuna is experimentele software. Gebruik alleen bedragen die je kunt missen.</p>`;
+  return `${topbar()}<p class="eyebrow">Wallet</p><h1 class="view-title">Settings</h1><div class="panel"><div class="setting"><h3>Network</h3><p>${escapeHtml(state.status.network_id)} · block ${escapeHtml(state.status.height)}</p></div><div class="setting"><h3>Public endpoint</h3><p>${escapeHtml(API_BASE)}</p></div><div class="setting"><h3>Local security</h3><p>AES-256-GCM · PBKDF2-SHA256 · 310,000 iterations</p></div><div class="setting"><h3>Wallet address</h3><p style="word-break:break-all">${escapeHtml(state.address)}</p></div></div><button class="button ghost" data-action="lock" style="width:100%;margin-top:12px">Lock wallet</button><button class="button danger" data-action="forget" style="width:100%;margin-top:10px">Remove wallet from this device</button><p class="security-note">iuna is experimental software. Only use funds you can afford to lose.</p>`;
 }
 
 function renderApp() {
@@ -180,17 +180,17 @@ function renderApp() {
 }
 
 function renderConfirmation(transaction, fee, recipientAddress, amount) {
-  app.innerHTML = `${topbar()}<button class="back" data-view="send">← Wijzigen</button><p class="eyebrow">Controle</p><h1 class="view-title">Klopt alles?</h1><div class="panel"><div class="detail-line"><span>Je verstuurt</span><strong>${formatIuna(amount)} IUNA</strong></div><div class="detail-line"><span>Naar</span><strong>${escapeHtml(recipientAddress.slice(0, 12))}…${escapeHtml(recipientAddress.slice(-8))}</strong></div><div class="detail-line"><span>Netwerkkosten</span><strong>${formatIuna(fee)} IUNA</strong></div><div class="detail-line"><span>Totaal</span><strong>${formatIuna(amount + fee)} IUNA</strong></div></div><button class="button" id="confirm-send" style="width:100%;margin-top:14px">Onderteken & verstuur</button><p class="security-note">Deze actie kan na verzending niet worden teruggedraaid.</p>${nav()}`;
+  app.innerHTML = `${topbar()}<button class="back" data-view="send">← Edit</button><p class="eyebrow">Review</p><h1 class="view-title">Does everything look right?</h1><div class="panel"><div class="detail-line"><span>You send</span><strong>${formatIuna(amount)} IUNA</strong></div><div class="detail-line"><span>To</span><strong>${escapeHtml(recipientAddress.slice(0, 12))}…${escapeHtml(recipientAddress.slice(-8))}</strong></div><div class="detail-line"><span>Network fee</span><strong>${formatIuna(fee)} IUNA</strong></div><div class="detail-line"><span>Total</span><strong>${formatIuna(amount + fee)} IUNA</strong></div></div><button class="button" id="confirm-send" style="width:100%;margin-top:14px">Sign & send</button><p class="security-note">This action cannot be reversed after submission.</p>${nav()}`;
   document.querySelector("#confirm-send").addEventListener("click", async (event) => {
     const button = event.currentTarget;
-    button.disabled = true; button.innerHTML = '<span class="spinner"></span> Verzenden…';
+    button.disabled = true; button.innerHTML = '<span class="spinner"></span> Sending…';
     try {
       const result = await api("/transactions", { method: "POST", body: JSON.stringify(transaction) });
-      toast(result.status === "accepted" ? "Transactie verstuurd" : "Transactie was al bekend");
+      toast(result.status === "accepted" ? "Transaction sent" : "Transaction was already known");
       state.view = "home";
       await fetchWalletData();
       renderApp();
-    } catch (error) { toast(error.message, true); button.disabled = false; button.textContent = "Opnieuw proberen"; }
+    } catch (error) { toast(error.message, true); button.disabled = false; button.textContent = "Try again"; }
   });
 }
 
@@ -203,12 +203,12 @@ app.addEventListener("click", async (event) => {
   if (action === "create") await renderNewSeed();
   if (action === "import") renderImport();
   if (action === "seed-saved") renderPasswordSetup();
-  if (action === "copy-seed") { await navigator.clipboard.writeText(app.dataset.pendingSeed); toast("Seed gekopieerd — wis je klembord na gebruik"); }
-  if (action === "copy-address") { await navigator.clipboard.writeText(state.address); toast("Adres gekopieerd"); }
+  if (action === "copy-seed") { await navigator.clipboard.writeText(app.dataset.pendingSeed); toast("Seed copied — clear your clipboard after use"); }
+  if (action === "copy-address") { await navigator.clipboard.writeText(state.address); toast("Address copied"); }
   if (action === "retry") await openWallet();
   if (action === "lock") { window.clearInterval(state.timer); state.wallet = null; state.view = "home"; renderLock(); }
   if (action === "forget") {
-    if (window.confirm("Weet je zeker dat je de lokale wallet wilt verwijderen? Zorg dat je de seed hebt bewaard.")) {
+    if (window.confirm("Are you sure you want to remove the local wallet? Make sure you have saved the seed.")) {
       localStorage.removeItem(STORAGE_KEY); window.clearInterval(state.timer); state.wallet = null; renderWelcome();
     }
   }
@@ -220,7 +220,7 @@ app.addEventListener("submit", async (event) => {
   const button = form.querySelector('[type="submit"]');
   button.disabled = true;
   const original = button.textContent;
-  button.innerHTML = '<span class="spinner"></span> Even geduld…';
+  button.innerHTML = '<span class="spinner"></span> Please wait…';
   try {
     if (form.id === "unlock-form") {
       state.wallet = await decryptWallet(storedWallet(), form.password.value);
@@ -229,7 +229,7 @@ app.addEventListener("submit", async (event) => {
       const seed = await validateMnemonic(form.seed.value);
       await saveAndOpen(seed, form["new-password"].value);
     } else if (form.id === "create-form") {
-      if (form["create-password"].value !== form["confirm-password"].value) throw new Error("De wachtwoorden komen niet overeen");
+      if (form["create-password"].value !== form["confirm-password"].value) throw new Error("The passwords do not match");
       await saveAndOpen(app.dataset.pendingSeed, form["create-password"].value);
     } else if (form.id === "send-form") {
       const amount = parseIuna(form.amount.value);
@@ -242,5 +242,5 @@ app.addEventListener("submit", async (event) => {
 });
 
 if (!window.isSecureContext || !crypto?.subtle) {
-  app.innerHTML = '<section class="center-card"><div><h1>Veilige verbinding vereist</h1><p>Open deze wallet via HTTPS of localhost.</p></div></section>';
+  app.innerHTML = '<section class="center-card"><div><h1>Secure connection required</h1><p>Open this wallet over HTTPS or localhost.</p></div></section>';
 } else if (storedWallet()) renderLock(); else renderWelcome();

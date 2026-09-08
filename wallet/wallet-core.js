@@ -9,7 +9,7 @@ export function bytesToHex(bytes) {
 }
 
 export function hexToBytes(hex) {
-  if (!/^[0-9a-f]*$/.test(hex) || hex.length % 2) throw new Error("Ongeldige hexwaarde");
+  if (!/^[0-9a-f]*$/.test(hex) || hex.length % 2) throw new Error("Invalid hexadecimal value");
   return Uint8Array.from(hex.match(/.{2}/g) || [], (pair) => Number.parseInt(pair, 16));
 }
 
@@ -36,7 +36,7 @@ export async function walletFromSeed(seedPhrase) {
   try {
     privateKey = await crypto.subtle.importKey("pkcs8", pkcs8, { name: "Ed25519" }, true, ["sign"]);
   } catch {
-    throw new Error("Deze browser ondersteunt geen veilige Ed25519-sleutels. Gebruik een recente Safari, Chrome, Edge of Firefox.");
+    throw new Error("This browser does not support secure Ed25519 keys. Use a recent version of Safari, Chrome, Edge, or Firefox.");
   }
   const jwk = await crypto.subtle.exportKey("jwk", privateKey);
   const publicKey = fromBase64url(jwk.x);
@@ -48,7 +48,7 @@ export function normalizeSeed(seed) {
 }
 
 export async function encryptWallet(seedPhrase, password, publicKeyHex) {
-  if (password.length < 10) throw new Error("Kies een wachtwoord van minimaal 10 tekens");
+  if (password.length < 10) throw new Error("Choose a password of at least 10 characters");
   const salt = crypto.getRandomValues(new Uint8Array(16));
   const iv = crypto.getRandomValues(new Uint8Array(12));
   const material = await crypto.subtle.importKey("raw", encoder.encode(password), "PBKDF2", false, ["deriveKey"]);
@@ -93,10 +93,10 @@ export async function decryptWallet(record, password) {
       fromBase64url(record.ciphertext),
     );
     const wallet = await walletFromSeed(JSON.parse(new TextDecoder().decode(plaintext)).seed);
-    if (wallet.publicKeyHex !== record.address) throw new Error("Adrescontrole mislukt");
+    if (wallet.publicKeyHex !== record.address) throw new Error("Address verification failed");
     return wallet;
   } catch {
-    throw new Error("Onjuist wachtwoord of beschadigde wallet");
+    throw new Error("Incorrect password or damaged wallet");
   }
 }
 
@@ -125,13 +125,13 @@ function convertBits(data, from, to, pad) {
   const result = [];
   const max = (1 << to) - 1;
   for (const value of data) {
-    if (value >>> from) throw new Error("Ongeldige adresdata");
+    if (value >>> from) throw new Error("Invalid address data");
     acc = ((acc << from) | value) & ((1 << (from + to - 1)) - 1);
     bits += from;
     while (bits >= to) { bits -= to; result.push((acc >>> bits) & max); }
   }
   if (pad && bits) result.push((acc << (to - bits)) & max);
-  else if (!pad && (bits >= from || ((acc << (to - bits)) & max))) throw new Error("Ongeldige adrespadding");
+  else if (!pad && (bits >= from || ((acc << (to - bits)) & max))) throw new Error("Invalid address padding");
   return result;
 }
 
@@ -146,19 +146,19 @@ export function encodeAddress(publicKey, networkId = "iuna-mainnet-v1") {
 
 export function decodeAddress(address, expectedHrp = "iuna") {
   const normalized = address.trim().toLowerCase();
-  if (address !== address.toLowerCase() && address !== address.toUpperCase()) throw new Error("Adres gebruikt hoofdletters en kleine letters door elkaar");
+  if (address !== address.toLowerCase() && address !== address.toUpperCase()) throw new Error("Address mixes uppercase and lowercase characters");
   const separator = normalized.lastIndexOf("1");
-  if (separator < 1 || separator + 7 > normalized.length || normalized.slice(0, separator) !== expectedHrp) throw new Error(`Dit is geen geldig ${expectedHrp}-adres`);
+  if (separator < 1 || separator + 7 > normalized.length || normalized.slice(0, separator) !== expectedHrp) throw new Error(`This is not a valid ${expectedHrp} address`);
   const data = [...normalized.slice(separator + 1)].map((char) => {
     const value = CHARSET.indexOf(char);
-    if (value < 0) throw new Error("Adres bevat een ongeldig teken");
+    if (value < 0) throw new Error("Address contains an invalid character");
     return value;
   });
-  if (polymod([...hrpExpand(expectedHrp), ...data]) !== BECH32M) throw new Error("De adres-checksum klopt niet");
+  if (polymod([...hrpExpand(expectedHrp), ...data]) !== BECH32M) throw new Error("Address checksum is invalid");
   const payload = data.slice(0, -6);
-  if (payload.shift() !== 0) throw new Error("Niet-ondersteunde adresversie");
+  if (payload.shift() !== 0) throw new Error("Unsupported address version");
   const key = Uint8Array.from(convertBits(payload, 5, 8, false));
-  if (key.length !== 32) throw new Error("Ongeldige adressleutel");
+  if (key.length !== 32) throw new Error("Invalid address key");
   return bytesToHex(key);
 }
 
@@ -240,7 +240,7 @@ export function selectInputs(utxos, amount, feeRate, owner, recipient) {
     }
     if (total >= amount + fee) return { inputs: selected, total, fee };
   }
-  throw new Error("Onvoldoende besteedbaar saldo voor bedrag en netwerkkosten");
+  throw new Error("Insufficient spendable balance for the amount and network fee");
 }
 
 export async function buildSignedTransfer({ wallet, status, utxos, recipientAddress, amount }) {
@@ -271,7 +271,7 @@ export async function buildSignedTransfer({ wallet, status, utxos, recipientAddr
 
 export function parseIuna(value) {
   const normalized = value.trim().replace(",", ".");
-  if (!/^\d+(\.\d{0,6})?$/.test(normalized)) throw new Error("Vul een geldig bedrag in (maximaal 6 decimalen)");
+  if (!/^\d+(\.\d{0,6})?$/.test(normalized)) throw new Error("Enter a valid amount (up to 6 decimal places)");
   const [whole, fraction = ""] = normalized.split(".");
   return BigInt(whole) * MICRO_IUNA + BigInt(fraction.padEnd(6, "0"));
 }
@@ -280,7 +280,7 @@ export function formatIuna(value, maximumFractionDigits = 6) {
   const amount = BigInt(value || 0);
   const whole = amount / MICRO_IUNA;
   const fraction = (amount % MICRO_IUNA).toString().padStart(6, "0").slice(0, maximumFractionDigits).replace(/0+$/, "");
-  return `${whole.toLocaleString("nl-NL")}${fraction ? `,${fraction}` : ""}`;
+  return `${whole.toLocaleString("en-US")}${fraction ? `.${fraction}` : ""}`;
 }
 
 export async function api(path, options = {}) {
@@ -299,13 +299,13 @@ export async function api(path, options = {}) {
       },
     });
   } catch (error) {
-    if (error.name === "AbortError") throw new Error(`Geen antwoord van iuna na ${(_timeoutMs || 8_000) / 1000} seconden`);
-    throw new Error("Kan geen verbinding maken met het iuna-endpoint");
+    if (error.name === "AbortError") throw new Error(`No response from iuna after ${(_timeoutMs || 8_000) / 1000} seconds`);
+    throw new Error("Could not connect to the iuna endpoint");
   } finally {
     window.clearTimeout(timeout);
   }
   let body;
   try { body = await response.json(); } catch { body = {}; }
-  if (!response.ok) throw new Error(body.error || `Endpoint gaf status ${response.status}`);
+  if (!response.ok) throw new Error(body.error || `Endpoint returned status ${response.status}`);
   return body;
 }

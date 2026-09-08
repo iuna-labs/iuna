@@ -5,6 +5,6 @@
   "display": "standalone",
   "background_color": "#0d1512",
   "theme_color": "#0d1512",
-  "description": "Een lichte, self-custody wallet voor iuna.",
+  "description": "A lightweight, self-custody wallet for iuna.",
   "icons": [{ "src": "./icon.svg", "sizes": "any", "type": "image/svg+xml", "purpose": "any maskable" }]
 }
