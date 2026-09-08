@@ -5,7 +5,7 @@
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <meta name="color-scheme" content="dark">
   <meta name="theme-color" content="#0d0f10">
-  <meta name="description" content="Download the latest iuna node and desktop app releases for Linux, macOS, and Windows, with SHA-256 checksums.">
+  <meta name="description" content="Open the lightweight iuna mobile wallet or download the latest node and desktop app releases for Linux, macOS, and Windows.">
   <meta name="robots" content="index, follow, max-image-preview:large">
   <link rel="canonical" href="https://getiuna.org/downloads/">
   <link rel="icon" href="/favicon.svg" type="image/svg+xml">
@@ -13,7 +13,7 @@
   <link rel="apple-touch-icon" href="/apple-touch-icon.png">
   <link rel="manifest" href="/site.webmanifest">
   <meta property="og:title" content="Download iuna">
-  <meta property="og:description" content="Get the latest iuna node and desktop app releases for Linux, macOS, and Windows.">
+  <meta property="og:description" content="Use the lightweight iuna mobile wallet or get the latest node and desktop app releases.">
   <meta property="og:type" content="website">
   <meta property="og:url" content="https://getiuna.org/downloads/">
   <meta property="og:site_name" content="iuna">
@@ -25,10 +25,10 @@
   <meta property="og:image:alt" content="iuna — Help test a different kind of network">
   <meta name="twitter:card" content="summary_large_image">
   <meta name="twitter:title" content="Download iuna">
-  <meta name="twitter:description" content="Get the latest iuna node and desktop app releases for Linux, macOS, and Windows.">
+  <meta name="twitter:description" content="Use the lightweight iuna mobile wallet or get the latest node and desktop app releases.">
   <meta name="twitter:image" content="https://getiuna.org/assets/og.png">
   <meta name="twitter:image:alt" content="iuna — Help test a different kind of network">
-  <title>Download iuna for Linux, macOS, and Windows</title>
+  <title>iuna light wallet and node downloads</title>
   <link rel="stylesheet" href="/assets/static-listing.css">
 </head>
 <body>
@@ -52,6 +52,34 @@
       <h1>iuna Downloads</h1>
       <p>Release artifacts for iuna <span data-download-version>${IUNA_VERSION}</span>.</p>
     </section>
+
+    <aside class="light-wallet-card" aria-labelledby="light-wallet-title">
+      <div class="light-wallet-icon" aria-hidden="true">
+        <svg viewBox="0 0 24 24" focusable="false">
+          <rect x="7" y="2.5" width="10" height="19" rx="2.5"></rect>
+          <path d="M10 5.5h4M11 18.5h2"></path>
+        </svg>
+      </div>
+      <div class="light-wallet-copy">
+        <div class="light-wallet-tags">
+          <span class="tag">Light wallet</span>
+          <span class="wallet-platform">Mobile ready</span>
+        </div>
+        <h2 id="light-wallet-title">Just need a wallet?</h2>
+        <p>Send and receive IUNA from your phone or browser. No download and no node required—your encrypted seed stays on your device.</p>
+      </div>
+      <a class="button light-wallet-button" href="https://wallet.getiuna.org/">
+        Open light wallet
+        <span aria-hidden="true">↗</span>
+      </a>
+    </aside>
+
+    <div class="download-heading">
+      <div>
+        <h2>Run iuna</h2>
+        <p class="muted">Download the node and desktop software for your platform.</p>
+      </div>
+    </div>
 
     <div class="grid download-grid" data-download-cards>
       <article class="card">

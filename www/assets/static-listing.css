@@ -325,6 +325,117 @@ body > h3 {
   margin-bottom: 10px;
 }
 
+.light-wallet-card {
+  position: relative;
+  display: grid;
+  grid-template-columns: auto minmax(0, 1fr) auto;
+  gap: 18px;
+  align-items: center;
+  overflow: hidden;
+  margin: 18px 0 32px;
+  border: 1px solid rgba(141, 233, 205, .38);
+  border-radius: 14px;
+  padding: 22px;
+  background:
+    radial-gradient(circle at 88% 20%, rgba(213, 245, 95, .13), transparent 34%),
+    linear-gradient(135deg, rgba(141, 233, 205, .1), rgba(21, 25, 27, .96) 54%);
+  box-shadow: inset 0 1px 0 rgba(255, 255, 255, .035);
+}
+
+.light-wallet-card::after {
+  content: "";
+  position: absolute;
+  right: -54px;
+  bottom: -72px;
+  width: 180px;
+  height: 180px;
+  border: 1px solid rgba(213, 245, 95, .1);
+  border-radius: 50%;
+  pointer-events: none;
+}
+
+.light-wallet-icon {
+  position: relative;
+  z-index: 1;
+  display: grid;
+  place-items: center;
+  width: 58px;
+  height: 58px;
+  border: 1px solid rgba(141, 233, 205, .32);
+  border-radius: 16px;
+  background: rgba(141, 233, 205, .09);
+  color: var(--cyan);
+}
+
+.light-wallet-icon svg {
+  width: 29px;
+  height: 29px;
+  fill: none;
+  stroke: currentColor;
+  stroke-width: 1.7;
+  stroke-linecap: round;
+}
+
+.light-wallet-copy {
+  position: relative;
+  z-index: 1;
+}
+
+.light-wallet-copy h2 {
+  margin: 7px 0 4px;
+  font-size: 22px;
+}
+
+.light-wallet-copy p {
+  max-width: 620px;
+  margin: 0;
+  font-size: 14px;
+}
+
+.light-wallet-tags {
+  display: flex;
+  gap: 9px;
+  align-items: center;
+}
+
+.light-wallet-tags .tag {
+  margin: 0;
+  border-color: rgba(141, 233, 205, .42);
+  color: var(--cyan);
+}
+
+.wallet-platform {
+  color: var(--muted);
+  font-size: 11px;
+  font-weight: 800;
+  letter-spacing: .04em;
+  text-transform: uppercase;
+}
+
+.light-wallet-button {
+  position: relative;
+  z-index: 1;
+  gap: 8px;
+  white-space: nowrap;
+}
+
+.download-heading {
+  display: flex;
+  justify-content: space-between;
+  align-items: end;
+  gap: 16px;
+  margin-top: 10px;
+}
+
+.download-heading h2 {
+  margin: 0 0 3px;
+}
+
+.download-heading p {
+  margin: 0;
+  font-size: 14px;
+}
+
 .card {
   min-width: 0;
   border: 1px solid var(--line);
@@ -426,6 +537,14 @@ hr {
   h1 { font-size: 34px; }
   .grid { grid-template-columns: 1fr; }
   .download-grid { grid-template-columns: 1fr; }
+  .light-wallet-card {
+    grid-template-columns: auto minmax(0, 1fr);
+  }
+  .light-wallet-button {
+    grid-column: 1 / -1;
+    justify-content: center;
+    width: 100%;
+  }
   table { display: block; overflow-x: auto; }
 }
 
