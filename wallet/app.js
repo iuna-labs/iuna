@@ -1,7 +1,7 @@
 import {
   API_BASE, LEGACY_STORAGE_KEY, STORAGE_KEY, api, buildSignedTransfer, decodeAddress,
   decryptWallet, encodeAddress, encryptWallet, formatIuna, normalizeWalletStore,
-  parseIuna, removeWallet, upsertWallet, walletFromSeed, walletId,
+  parseFeeRate, parseIuna, removeWallet, upsertWallet, walletFromSeed, walletId,
 } from "./wallet-core.js";
 import { generateMnemonic, validateMnemonic } from "./mnemonic.js";
 
@@ -210,7 +210,8 @@ function renderHome() {
 
 function renderSend() {
   if (state.walletMeta?.type === "readonly") return `${topbar()}<p class="eyebrow">Watch-only</p><h1 class="view-title">Sending is disabled.</h1><p class="view-copy">This wallet contains no seed or private key, so it cannot sign transactions.</p><button class="button secondary" data-view="home" style="width:100%">Back to overview</button>`;
-  return `${topbar()}<p class="eyebrow">Transaction</p><h1 class="view-title">Send IUNA</h1><p class="view-copy">The transaction is signed on this device.</p><form id="send-form" class="panel send-card"><div class="field"><label for="recipient">Recipient</label><input id="recipient" autocomplete="off" autocapitalize="none" spellcheck="false" placeholder="iuna1q…" required></div><div class="field"><label for="amount">Amount</label><div class="amount-wrap"><input id="amount" inputmode="decimal" placeholder="0.00" required><span>IUNA</span></div></div><div class="fee-line"><span>Available</span><strong>${formatIuna(state.balance?.spendable)} IUNA</strong></div><div class="fee-line"><span>Fee rate</span><strong>${escapeHtml(state.status.default_fee_per_byte)} µIUNA / byte</strong></div><button class="button" type="submit">Review transaction</button></form>`;
+  const defaultFeeRate = state.status.default_fee_per_byte ?? 1;
+  return `${topbar()}<p class="eyebrow">Transaction</p><h1 class="view-title">Send IUNA</h1><p class="view-copy">The transaction is signed on this device.</p><form id="send-form" class="panel send-card"><div class="field"><label for="recipient">Recipient</label><input id="recipient" autocomplete="off" autocapitalize="none" spellcheck="false" placeholder="iuna1q…" required></div><div class="field"><label for="amount">Amount</label><div class="amount-wrap"><input id="amount" inputmode="decimal" placeholder="0.00" required><span>IUNA</span></div></div><div class="field"><label for="fee-rate">Fee rate (µIUNA per byte)</label><input id="fee-rate" name="fee-rate" type="number" inputmode="numeric" min="1" step="1" value="${escapeHtml(defaultFeeRate)}" required></div><div class="fee-line"><span>Available</span><strong>${formatIuna(state.balance?.spendable)} IUNA</strong></div><button class="button" type="submit">Review transaction</button></form>`;
 }
 
 function renderReceive() {
@@ -317,7 +318,8 @@ app.addEventListener("submit", async (event) => {
     } else if (form.id === "send-form") {
       if (state.walletMeta?.type === "readonly") throw new Error("Watch-only wallets cannot sign transactions");
       const amount = parseIuna(form.amount.value);
-      const built = await buildSignedTransfer({ wallet: state.wallet, status: state.status, utxos: state.utxos, recipientAddress: form.recipient.value, amount });
+      const feeRate = parseFeeRate(form["fee-rate"].value);
+      const built = await buildSignedTransfer({ wallet: state.wallet, status: state.status, utxos: state.utxos, recipientAddress: form.recipient.value, amount, feeRate });
       renderConfirmation(built.transaction, built.fee, form.recipient.value.trim(), amount);
     }
   } catch (error) {

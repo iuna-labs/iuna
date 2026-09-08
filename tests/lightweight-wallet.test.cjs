@@ -64,3 +64,23 @@ test('explains oversized transactions before submission', () => {
     /205 inputs, 65 KiB; maximum 64 KiB.*smaller amount.*consolidate/s,
   );
 });
+
+test('validates a configurable fee rate with a default minimum of one', () => {
+  assert.equal(core.parseFeeRate('1'), 1n);
+  assert.equal(core.parseFeeRate('25'), 25n);
+  assert.throws(() => core.parseFeeRate('0'), /at least 1/);
+  assert.throws(() => core.parseFeeRate('1.5'), /whole number/);
+});
+
+test('uses the selected fee rate when calculating a transfer', () => {
+  const utxos = [{
+    outpoint: { txid: 'aa'.repeat(32), index: 0 },
+    output: { address: 'bb'.repeat(32), amount: 1_000_000 },
+  }];
+  const owner = 'bb'.repeat(32);
+  const recipient = 'cc'.repeat(32);
+  const standard = core.selectInputs(utxos, 100_000n, 1n, owner, recipient);
+  const priority = core.selectInputs(utxos, 100_000n, 5n, owner, recipient);
+
+  assert.equal(priority.fee, standard.fee * 5n);
+});

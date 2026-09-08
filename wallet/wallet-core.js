@@ -300,12 +300,13 @@ export function selectInputs(utxos, amount, feeRate, owner, recipient) {
   throw new Error("Insufficient spendable balance for the amount and network fee");
 }
 
-export async function buildSignedTransfer({ wallet, status, utxos, recipientAddress, amount }) {
+export async function buildSignedTransfer({ wallet, status, utxos, recipientAddress, amount, feeRate }) {
   if (!wallet?.privateKey) throw new Error("This watch-only wallet cannot sign transactions");
   const expectedHrp = status.chain_id.includes("testnet") || status.chain_id.includes("e2e") ? "tiuna" : "iuna";
   const recipient = decodeAddress(recipientAddress, expectedHrp);
-  const feeRate = BigInt(status.default_fee_per_byte || 1);
-  const { inputs, total, fee } = selectInputs(utxos, amount, feeRate, wallet.publicKeyHex, recipient);
+  const selectedFeeRate = BigInt(feeRate ?? status.default_fee_per_byte ?? 1);
+  if (selectedFeeRate < 1n) throw new Error("Fee rate must be at least 1 µIUNA per byte");
+  const { inputs, total, fee } = selectInputs(utxos, amount, selectedFeeRate, wallet.publicKeyHex, recipient);
   const outputs = [{ address: recipient, amount }];
   const change = total - amount - fee;
   if (change > 0n) outputs.push({ address: wallet.publicKeyHex, amount: change });
@@ -338,6 +339,16 @@ export function formatIuna(value, maximumFractionDigits = 6) {
   const whole = amount / MICRO_IUNA;
   const fraction = (amount % MICRO_IUNA).toString().padStart(6, "0").slice(0, maximumFractionDigits).replace(/0+$/, "");
   return `${whole.toLocaleString("en-US")}${fraction ? `.${fraction}` : ""}`;
+}
+
+export function parseFeeRate(value) {
+  const normalized = String(value).trim();
+  if (!/^\d+$/.test(normalized) || BigInt(normalized) < 1n) {
+    throw new Error("Fee rate must be a whole number of at least 1 µIUNA per byte");
+  }
+  const feeRate = BigInt(normalized);
+  if (feeRate > BigInt(Number.MAX_SAFE_INTEGER)) throw new Error("Fee rate is too large");
+  return feeRate;
 }
 
 export async function api(path, options = {}) {
