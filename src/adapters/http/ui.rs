@@ -7,8 +7,9 @@ use crate::domain::{
 };
 
 use super::types::{
-    UiBlock, UiBurnBundle, UiBurnBundleQuorum, UiByteBreakdown, UiTransaction, UiTxInput,
-    WalletTransactionContext, WalletTransactionFilters, WalletTransactionRow,
+    UiBlock, UiBurnBundle, UiBurnBundleQuorum, UiByteBreakdown, UiRewardFeeInput, UiRewardOutput,
+    UiTransaction, UiTxInput, WalletTransactionContext, WalletTransactionFilters,
+    WalletTransactionRow,
 };
 
 pub(super) fn wallet_transaction_rows(
@@ -72,29 +73,39 @@ pub(super) fn wallet_transaction_row(
             outputs,
             fee,
             signature,
-        } if tx.sender() == wallet || tx.to() == Some(wallet) => Some(WalletTransactionRow {
-            kind: "transfer",
-            from: tx.sender().to_string(),
-            to: tx.to().map(str::to_string),
-            amount: tx.amount(),
-            fee: *fee,
-            inputs: ui_inputs(inputs, outputs_by_outpoint),
-            outputs: outputs.clone(),
-            change: Vec::new(),
-            signature: signature.clone(),
-            status: context.status,
-            block_height: context.block_height,
-            timestamp_ms: context.timestamp_ms,
-            block_finalizer: context.block_finalizer.clone(),
-            direction: if tx.to() == Some(wallet) {
-                "received"
+        } if tx.sender() == wallet || outputs.iter().any(|output| output.address == wallet) => {
+            let sent = tx.sender() == wallet;
+            let amount = if sent {
+                tx.amount()
             } else {
-                "sent"
-            },
-            difficulty_bits: None,
-            proof_bits: None,
-            proof_hash: None,
-        }),
+                outputs
+                    .iter()
+                    .filter(|output| output.address == wallet)
+                    .fold(0_u64, |total, output| total.saturating_add(output.amount))
+            };
+            Some(WalletTransactionRow {
+                kind: "transfer",
+                from: tx.sender().to_string(),
+                to: tx.to().map(str::to_string),
+                amount,
+                fee: *fee,
+                inputs: ui_inputs(inputs, outputs_by_outpoint),
+                outputs: outputs.clone(),
+                change: Vec::new(),
+                signature: signature.clone(),
+                status: context.status,
+                block_height: context.block_height,
+                timestamp_ms: context.timestamp_ms,
+                block_finalizer: context.block_finalizer.clone(),
+                direction: if sent { "sent" } else { "received" },
+                difficulty_bits: None,
+                proof_bits: None,
+                proof_hash: None,
+                reward_total: None,
+                reward_fee_inputs: Vec::new(),
+                reward_outputs: Vec::new(),
+            })
+        }
         Transaction::Burn {
             inputs,
             change,
@@ -120,6 +131,9 @@ pub(super) fn wallet_transaction_row(
             difficulty_bits: None,
             proof_bits: None,
             proof_hash: None,
+            reward_total: None,
+            reward_fee_inputs: Vec::new(),
+            reward_outputs: Vec::new(),
         }),
         Transaction::Mine {
             recipient,
@@ -147,8 +161,63 @@ pub(super) fn wallet_transaction_row(
             difficulty_bits: Some(*difficulty_bits),
             proof_bits: Some(proof_bits(signature)),
             proof_hash: Some(signature.clone()),
+            reward_total: None,
+            reward_fee_inputs: Vec::new(),
+            reward_outputs: Vec::new(),
         }),
         _ => None,
+    }
+}
+
+pub(super) fn populate_wallet_reward_flow(row: &mut WalletTransactionRow, block: &Block) {
+    row.reward_total = Some(block.reward);
+    row.reward_fee_inputs = block
+        .transactions
+        .iter()
+        .filter(|transaction| transaction.fee() > 0)
+        .map(|transaction| UiRewardFeeInput {
+            transaction_kind: transaction_kind(transaction),
+            amount: transaction.fee(),
+            owner: match transaction {
+                Transaction::Mine { .. } => "pow".to_string(),
+                _ => transaction.sender().to_string(),
+            },
+            signature: transaction.signature().to_string(),
+        })
+        .collect();
+
+    let committee_slots = block
+        .burn_bundle_section
+        .signatures
+        .iter()
+        .filter(|signature| signature.member != block.miner)
+        .map(|signature| (signature.member.as_str(), signature.slot))
+        .collect::<BTreeMap<_, _>>();
+
+    row.reward_outputs = row
+        .outputs
+        .iter()
+        .cloned()
+        .enumerate()
+        .map(|(index, output)| UiRewardOutput {
+            label: if index == 0 {
+                "Finalizer reward".to_string()
+            } else if let Some(slot) = committee_slots.get(output.address.as_str()) {
+                format!("Committee reward (slot {slot})")
+            } else {
+                format!("Committee reward {index}")
+            },
+            amount: output.amount,
+            address: output.address,
+        })
+        .collect();
+}
+
+fn transaction_kind(transaction: &Transaction) -> &'static str {
+    match transaction {
+        Transaction::Transfer { .. } => "transfer",
+        Transaction::Burn { .. } => "burn",
+        Transaction::Mine { .. } => "mine",
     }
 }
 
@@ -489,11 +558,12 @@ mod tests {
 
     use crate::compact::CompactBlockSizeBreakdown;
     use crate::domain::{
-        Amount, Block, BurnBundleSection, BurnLeaderRank, FinalizerMode, MaskedBurn, OutPoint,
-        Transaction, TxInput, TxOutput,
+        Amount, Block, BurnBundleSection, BurnBundleSignature, BurnLeaderRank, FinalizerMode,
+        MaskedBurn, OutPoint, Transaction, TxInput, TxOutput,
     };
 
-    use super::{block_lost_iuna, ui_block};
+    use super::{block_lost_iuna, populate_wallet_reward_flow, ui_block, wallet_transaction_row};
+    use crate::adapters::http::types::WalletTransactionContext;
 
     fn burn(signature: &str) -> Transaction {
         Transaction::Burn {
@@ -533,6 +603,91 @@ mod tests {
             fee,
             signature: signature.to_string(),
         }
+    }
+
+    #[test]
+    fn wallet_reward_flow_contains_every_fee_and_payout() {
+        let reward_projection = Transaction::Transfer {
+            inputs: Vec::new(),
+            outputs: vec![
+                TxOutput {
+                    address: "finalizer".to_string(),
+                    amount: 3,
+                },
+                TxOutput {
+                    address: "committee".to_string(),
+                    amount: 2,
+                },
+            ],
+            fee: 0,
+            signature: "reward:block:0".to_string(),
+        };
+        let mut row = wallet_transaction_row(
+            "finalizer",
+            &reward_projection,
+            &BTreeMap::new(),
+            &WalletTransactionContext {
+                status: "confirmed",
+                block_height: Some(1),
+                timestamp_ms: Some(1_000),
+                block_finalizer: Some("finalizer".to_string()),
+            },
+        )
+        .unwrap();
+        row.kind = "reward";
+        let committee_row = wallet_transaction_row(
+            "committee",
+            &reward_projection,
+            &BTreeMap::new(),
+            &WalletTransactionContext {
+                status: "confirmed",
+                block_height: Some(1),
+                timestamp_ms: Some(1_000),
+                block_finalizer: Some("finalizer".to_string()),
+            },
+        )
+        .unwrap();
+        assert_eq!(committee_row.amount, 2);
+        assert_eq!(committee_row.direction, "received");
+
+        let block = Block {
+            height: 1,
+            prev_hash: "parent".to_string(),
+            timestamp_ms: 1_000,
+            miner: "finalizer".to_string(),
+            finalizer_mode: FinalizerMode::Ticket,
+            finalizer_rank: 0,
+            reward: 5,
+            vdf_rounds: 1,
+            vdf_output: "vdf".to_string(),
+            leader_proof: None,
+            burn_bundle_section: BurnBundleSection {
+                signatures: vec![BurnBundleSignature {
+                    slot: 2,
+                    member: "committee".to_string(),
+                    signature: "attestation".to_string(),
+                }],
+                burns: Vec::new(),
+            },
+            transactions: vec![transfer("transfer", 2), burn("burn")],
+            hash: "block".to_string(),
+        };
+
+        populate_wallet_reward_flow(&mut row, &block);
+
+        assert_eq!(row.reward_fee_inputs.len(), 2);
+        assert_eq!(row.reward_total, Some(5));
+        assert_eq!(row.reward_fee_inputs[0].transaction_kind, "transfer");
+        assert_eq!(row.reward_fee_inputs[0].amount, 2);
+        assert_eq!(row.reward_fee_inputs[1].transaction_kind, "burn");
+        assert_eq!(row.reward_fee_inputs[1].amount, 1);
+        assert_eq!(row.reward_outputs.len(), 2);
+        assert_eq!(row.reward_outputs[0].label, "Finalizer reward");
+        assert_eq!(row.reward_outputs[0].address, "finalizer");
+        assert_eq!(row.reward_outputs[0].amount, 3);
+        assert_eq!(row.reward_outputs[1].label, "Committee reward (slot 2)");
+        assert_eq!(row.reward_outputs[1].address, "committee");
+        assert_eq!(row.reward_outputs[1].amount, 2);
     }
 
     #[test]

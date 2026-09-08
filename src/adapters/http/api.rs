@@ -21,8 +21,9 @@ use super::{
 };
 use super::{
     DATASET_LIMIT, DATASET_PAGE_LIMIT, EXPLORER_LIMIT, EXPLORER_PAGE_LIMIT, HttpState,
-    add_pending_outputs, metrics_response, network_health, top_mine_proofs, ui_blocks_from_indexes,
-    ui_transaction, wallet_transaction_row, wallet_transaction_rows,
+    add_pending_outputs, metrics_response, network_health, populate_wallet_reward_flow,
+    top_mine_proofs, ui_blocks_from_indexes, ui_transaction, wallet_transaction_row,
+    wallet_transaction_rows,
 };
 
 pub(super) async fn api_status(State(state): State<HttpState>) -> Json<NodeStatus> {
@@ -161,6 +162,17 @@ pub(super) async fn api_wallet_transactions(
     let confirmed_outputs = load_outputs_for_outpoints(&state, confirmed_required_outputs)
         .await
         .unwrap_or_default();
+    let reward_blocks = {
+        let node = state.node.lock().await;
+        confirmed_rows
+            .iter()
+            .filter(|row| row.kind == "reward")
+            .filter_map(|row| {
+                let block = node.chain().get(row.block_height as usize)?.clone();
+                Some((row.block_height, block))
+            })
+            .collect::<BTreeMap<_, _>>()
+    };
     items.extend(confirmed_rows.into_iter().filter_map(|row| {
         let is_reward = row.kind == "reward";
         let mut item = wallet_transaction_row(
@@ -177,7 +189,11 @@ pub(super) async fn api_wallet_transactions(
         if is_reward {
             item.kind = "reward";
             item.from = "fees".to_string();
+            item.to = Some(wallet.clone());
             item.direction = "reward";
+            if let Some(block) = reward_blocks.get(&row.block_height) {
+                populate_wallet_reward_flow(&mut item, block);
+            }
         }
         Some(item)
     }));

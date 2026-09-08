@@ -201,6 +201,16 @@ fn management_ui_block_reward_opens_a_fee_flow_transaction() {
     assert!(javascript.contains("label: `Committee reward (slot ${bundle.slot})`"));
 }
 
+#[test]
+fn management_ui_wallet_transactions_share_the_generic_detail_flow() {
+    let html = include_str!("adapters/http/index_html.rs");
+    let javascript = include_str!("../www/assets/iuna-ui.js");
+    assert!(html.contains("openTransactionModal(tx, { source: 'Wallet' })"));
+    assert!(javascript.contains("Array.isArray(tx.rewardFeeInputs)"));
+    assert!(javascript.contains("Array.isArray(tx.rewardOutputs)"));
+    assert!(javascript.contains("outpoint: { txid: input.signature, index: \"fee\" }"));
+}
+
 fn ledger_with_one_spendable_iuna(wallet: &Wallet) -> Ledger {
     let mut genesis = BTreeMap::new();
     genesis.insert(wallet.address().to_string(), 3);

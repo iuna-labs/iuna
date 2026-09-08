@@ -142,7 +142,7 @@ DROP TABLE IF EXISTS ui_burn_leader_rank_blocks;
 "#;
 
 const UI_DATA_SCHEMA_VERSION: u32 = 1;
-const UI_CACHE_SCHEMA_VERSION: u32 = 4;
+const UI_CACHE_SCHEMA_VERSION: u32 = 5;
 const METRICS_CACHE_SCHEMA_VERSION: u32 = 1;
 
 #[derive(Clone, Debug, Eq, PartialEq, Serialize)]
@@ -1419,6 +1419,10 @@ fn wallet_transactions_from_snapshot(
         } else {
             Vec::new()
         };
+        let all_reward_outputs = reward_outputs
+            .iter()
+            .map(|(_, output)| output.clone())
+            .collect::<Vec<_>>();
         for (index, (outpoint, output)) in reward_outputs.into_iter().enumerate() {
             let signature = format!("reward:{}:{}", outpoint.txid, outpoint.index);
             rows.push((
@@ -1432,7 +1436,7 @@ fn wallet_transactions_from_snapshot(
                     block_finalizer: block.miner.clone(),
                     transaction: Transaction::Transfer {
                         inputs: Vec::new(),
-                        outputs: vec![output],
+                        outputs: all_reward_outputs.clone(),
                         fee: 0,
                         signature,
                     },

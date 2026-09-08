@@ -3041,6 +3041,9 @@ window.iunaApp = function iunaApp() {
     },
 
     txAmount(tx) {
+      if (tx?.kind === "reward" && tx.rewardTotal !== null && tx.rewardTotal !== undefined) {
+        return tx.rewardTotal;
+      }
       return tx.amount ?? tx.outputs?.[0]?.amount ?? 0;
     },
 
@@ -3077,10 +3080,20 @@ window.iunaApp = function iunaApp() {
     },
 
     txInputs(tx) {
+      if (tx?.kind === "reward" && Array.isArray(tx.rewardFeeInputs)) {
+        return tx.rewardFeeInputs.map((input) => ({
+          ...input,
+          rewardFee: true,
+          outpoint: { txid: input.signature, index: "fee" },
+        }));
+      }
       return Array.isArray(tx.inputs) ? tx.inputs : [];
     },
 
     txVisualOutputs(tx) {
+      if (tx?.kind === "reward" && Array.isArray(tx.rewardOutputs)) {
+        return tx.rewardOutputs.map((output) => ({ ...output, kind: "reward" }));
+      }
       const rows = [];
       if (tx.kind === "burn" && Number(tx.amount || 0) > 0) {
         rows.push({

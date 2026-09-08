@@ -393,6 +393,26 @@ pub(super) struct WalletTransactionRow {
     pub(super) difficulty_bits: Option<u32>,
     pub(super) proof_bits: Option<u32>,
     pub(super) proof_hash: Option<String>,
+    pub(super) reward_total: Option<Amount>,
+    pub(super) reward_fee_inputs: Vec<UiRewardFeeInput>,
+    pub(super) reward_outputs: Vec<UiRewardOutput>,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub(super) struct UiRewardFeeInput {
+    pub(super) transaction_kind: &'static str,
+    pub(super) amount: Amount,
+    pub(super) owner: String,
+    pub(super) signature: String,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub(super) struct UiRewardOutput {
+    pub(super) label: String,
+    pub(super) amount: Amount,
+    pub(super) address: String,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq, Serialize)]
