@@ -96,7 +96,7 @@ async fn release_soak_post_activation_auto_finalization_p2p_stratum_and_restarts
     sleep(Duration::from_secs(2)).await;
 
     for target_height in (SOAK_START_HEIGHT + 1)..=(SOAK_START_HEIGHT + SOAK_BLOCKS) {
-        finalize_one_block(&nodes, target_height).await?;
+        finalize_one_block(&nodes, target_height, None).await?;
         wait_for_convergence(&nodes, target_height, Duration::from_secs(8)).await?;
 
         if target_height % 3 == 0 {
@@ -210,7 +210,15 @@ async fn post_activation_p2p_partition_recovers_converges_and_resumes_tickets() 
 
     restart_node_core(&nodes[3]).await?;
     wait_for_convergence(&nodes, recovery_height, Duration::from_secs(8)).await?;
-    finalize_one_block(&nodes, recovery_height + 1).await?;
+    // The committed fixture has historical timestamps, so wall-clock time is
+    // already beyond the next recovery deadline. Exercise ticket resumption
+    // immediately after the recovery block instead.
+    finalize_one_block(
+        &nodes,
+        recovery_height + 1,
+        Some(recovery_timestamp.saturating_add(1)),
+    )
+    .await?;
     wait_for_convergence(&nodes, recovery_height + 1, Duration::from_secs(8)).await?;
     for node in &nodes {
         let core = node.node.lock().await;
@@ -421,20 +429,25 @@ fn json_line(value: Value) -> Result<String> {
     Ok(format!("{}\n", serde_json::to_string(&value)?))
 }
 
-async fn finalize_one_block(nodes: &[SoakNode], target_height: u64) -> Result<()> {
-    let start = now_ms().saturating_sub(BURN_COLLECTION_MS + 1);
+async fn finalize_one_block(
+    nodes: &[SoakNode],
+    target_height: u64,
+    fixed_timestamp_ms: Option<u64>,
+) -> Result<()> {
+    let timestamp_ms = || fixed_timestamp_ms.unwrap_or_else(now_ms);
+    let start = timestamp_ms().saturating_sub(BURN_COLLECTION_MS + 1);
     prepare_and_broadcast(nodes, start).await?;
     sleep(Duration::from_millis(250)).await;
     // Post-activation finalizers must see the complete committee quorum before preparing VDF work.
     for _ in 0..3 {
-        prepare_and_broadcast(nodes, now_ms()).await?;
+        prepare_and_broadcast(nodes, timestamp_ms()).await?;
         sleep(Duration::from_millis(100)).await;
     }
 
     let deadline = tokio::time::Instant::now() + Duration::from_secs(8);
     loop {
         for node in nodes {
-            let block = complete_if_ready(node, now_ms()).await?;
+            let block = complete_if_ready(node, timestamp_ms()).await?;
             node.network
                 .broadcast(node.node.lock().await.drain_outbox())
                 .await?;
