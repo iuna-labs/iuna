@@ -1,8 +1,54 @@
 const encoder = new TextEncoder();
 
 export const API_BASE = "https://iuna.jhx.app/v1";
-export const STORAGE_KEY = "iuna.wallet.v1";
+export const STORAGE_KEY = "iuna.wallets.v2";
+export const LEGACY_STORAGE_KEY = "iuna.wallet.v1";
 export const MICRO_IUNA = 1_000_000n;
+
+export function emptyWalletStore() {
+  return { version: 2, activeId: null, wallets: [] };
+}
+
+export function normalizeWalletStore(value, legacyWallet = null) {
+  if (value?.version === 2 && Array.isArray(value.wallets)) {
+    const wallets = value.wallets.filter((wallet) => wallet
+      && wallet.id
+      && /^[0-9a-f]{64}$/.test(wallet.publicKeyHex)
+      && ["signing", "readonly"].includes(wallet.type)
+      && (wallet.type === "readonly" || wallet.record));
+    const activeId = wallets.some((wallet) => wallet.id === value.activeId) ? value.activeId : wallets[0]?.id || null;
+    return { version: 2, activeId, wallets };
+  }
+  if (legacyWallet?.address) {
+    return {
+      version: 2,
+      activeId: `wallet-${legacyWallet.address}`,
+      wallets: [{
+        id: `wallet-${legacyWallet.address}`,
+        name: "My wallet",
+        type: "signing",
+        record: legacyWallet,
+        publicKeyHex: legacyWallet.address,
+      }],
+    };
+  }
+  return emptyWalletStore();
+}
+
+export function walletId(publicKeyHex) {
+  return `wallet-${publicKeyHex}`;
+}
+
+export function upsertWallet(store, wallet) {
+  const wallets = store.wallets.filter((item) => item.id !== wallet.id);
+  wallets.push(wallet);
+  return { version: 2, activeId: wallet.id, wallets };
+}
+
+export function removeWallet(store, id) {
+  const wallets = store.wallets.filter((wallet) => wallet.id !== id);
+  return { version: 2, activeId: wallets[0]?.id || null, wallets };
+}
 
 export function bytesToHex(bytes) {
   return Array.from(bytes, (byte) => byte.toString(16).padStart(2, "0")).join("");
@@ -244,6 +290,7 @@ export function selectInputs(utxos, amount, feeRate, owner, recipient) {
 }
 
 export async function buildSignedTransfer({ wallet, status, utxos, recipientAddress, amount }) {
+  if (!wallet?.privateKey) throw new Error("This watch-only wallet cannot sign transactions");
   const expectedHrp = status.chain_id.includes("testnet") || status.chain_id.includes("e2e") ? "tiuna" : "iuna";
   const recipient = decodeAddress(recipientAddress, expectedHrp);
   const feeRate = BigInt(status.default_fee_per_byte || 1);

@@ -1,0 +1,53 @@
+.wallet-button {
+  appearance: none;
+  border: 0;
+  background: transparent;
+  color: var(--ink);
+  padding: 0;
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  text-align: left;
+  cursor: pointer;
+}
+.wallet-button .brand span { display: none; }
+.wallet-button .brand-mark { width: 38px; height: 38px; border-radius: 12px; }
+.wallet-button > span { display: grid; gap: 3px; }
+.wallet-button strong {
+  font-size: 13px;
+  max-width: 120px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.wallet-button small, .wallet-row small { font-size: 10px; color: var(--muted); }
+.picker-title { margin-top: 34px; }
+.wallet-list { display: grid; gap: 9px; margin: 22px 0; }
+.wallet-row {
+  appearance: none;
+  width: 100%;
+  border: 1px solid var(--line);
+  background: var(--panel);
+  color: var(--ink);
+  border-radius: 16px;
+  padding: 15px;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  text-align: left;
+  cursor: pointer;
+}
+.wallet-row.active { border-color: rgba(213, 245, 95, .5); }
+.wallet-row span:first-child { display: grid; gap: 6px; min-width: 0; }
+.wallet-row strong { overflow: hidden; text-overflow: ellipsis; }
+.mode-badge {
+  display: inline-flex;
+  margin: 0 0 18px;
+  padding: 7px 10px;
+  border-radius: 999px;
+  background: rgba(213, 245, 95, .08);
+  border: 1px solid rgba(213, 245, 95, .24);
+  color: var(--lime);
+  font-size: 11px;
+  font-weight: 700;
+}
