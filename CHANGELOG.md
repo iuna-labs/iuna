@@ -5,6 +5,16 @@ from the Git history and Conventional Commit titles by `deployment.sh`.
 
 ## [Unreleased]
 
+## [0.4.28] - 2026-09-09
+
+### Fixed
+
+- show all transaction types by default
+
+### Maintenance
+
+- automate complete changelog generation
+
 ## [0.4.27] - 2026-09-09
 
 ### Added
