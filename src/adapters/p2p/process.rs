@@ -255,14 +255,13 @@ pub(super) async fn process_envelope(
         }
         GossipEnvelope::ChainBootstrap(bootstrap) => {
             let sync_generation = network.sync_generation();
-            let base_tip = network
-                .inner
-                .node
-                .lock()
-                .await
-                .ledger()
-                .tip_hash()
-                .to_string();
+            let (base_tip, expected_profile_id) = {
+                let node = network.inner.node.lock().await;
+                (
+                    node.ledger().tip_hash().to_string(),
+                    node.ledger().launch_profile().profile_id.clone(),
+                )
+            };
             let validation_key = chain_validation_key(
                 "bootstrap",
                 &base_tip,
@@ -280,19 +279,22 @@ pub(super) async fn process_envelope(
                 return Ok(false);
             }
             let adjusted_time_ms = super::network_adjusted_time_ms(network).await;
-            let result = match validate_chain_bootstrap(bootstrap, adjusted_time_ms).await {
-                Ok(ledger) => {
-                    let mut node = network.inner.node.lock().await;
-                    if network.sync_generation_is_current(sync_generation)
-                        && node.ledger().tip_hash() == base_tip
-                    {
-                        node.import_verified_ledger(ledger).map(|_| ())
-                    } else {
-                        Ok(())
+            let result =
+                match validate_chain_bootstrap(&expected_profile_id, bootstrap, adjusted_time_ms)
+                    .await
+                {
+                    Ok(ledger) => {
+                        let mut node = network.inner.node.lock().await;
+                        if network.sync_generation_is_current(sync_generation)
+                            && node.ledger().tip_hash() == base_tip
+                        {
+                            node.import_verified_ledger(ledger).map(|_| ())
+                        } else {
+                            Ok(())
+                        }
                     }
-                }
-                Err(error) => Err(error),
-            };
+                    Err(error) => Err(error),
+                };
             record_rejected_chain_payload(
                 network,
                 &network.inner.metrics.rejected_snapshots,

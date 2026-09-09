@@ -20,7 +20,7 @@ found in the reviewed validation paths.
 | --- | --- | ---: | --- |
 | IUNA-2026-001 | High | Effectively EUR 0 from one public IP | Patched |
 | IUNA-2026-002 | High over chain lifetime | A basic host and bandwidth; well below EUR 100/month | Patched |
-| IUNA-2026-003 | High during first sync | Below EUR 10,000 when DNS/routing/bootstrap access is available | Open promotion blocker |
+| IUNA-2026-003 | High during first sync | Below EUR 10,000 when DNS/routing/bootstrap access is available | Patched |
 | IUNA-2026-004 | Medium | 10,000 minimum-fee transactions; protocol value likely far below EUR 10,000 | Open hardening item |
 
 ## IUNA-2026-001 — one source could exhaust every Stratum session
@@ -95,20 +95,21 @@ Impact: a new operator whose DNS, route, configuration, or only bootstrap peer
 is controlled can be placed on a valid but attacker-created chain. Subsequent
 same-genesis validation will keep that node isolated from the real candidate.
 
-The repository manifest records genesis
+The production database and repository manifest both record genesis
 `3d677cd7ced1c04d3a276cbee7ea38076e34ac65f18a2c9b8286a4872d986a9a`, but the
-manifest still describes v0.4.18 while this audit targets v0.4.28. Hard-coding
-that value without first reconciling and signing the release manifest could
-lock in stale governance data, so no automatic patch was applied.
+manifest still describes v0.4.18 while this audit targets v0.4.28.
 
-Required before promotion:
+Patch:
 
-1. Publish and sign an updated candidate manifest.
-2. Pin the approved genesis hash (and preferably one finalized checkpoint) in
-   the mainnet-candidate binary.
-3. Require fresh nodes to match it before downloading or adopting block pages.
-4. Pin bootstrap node identities or obtain the checkpoint from at least two
-   independently operated sources.
+- pin the production genesis in the mainnet-candidate binary;
+- reject a mismatched genesis during direct join, setup-placeholder bootstrap,
+  and persisted candidate-chain startup;
+- prevent `--genesis` from creating a second mainnet-candidate chain while
+  leaving local testnet genesis creation available.
+
+Residual hardening before promotion: publish and sign an updated candidate
+manifest, pin a finalized checkpoint, and pin bootstrap identities or obtain
+the checkpoint from at least two independently operated sources.
 
 ## IUNA-2026-004 — full mempool rejects higher-fee transactions
 
@@ -149,7 +150,7 @@ therefore not claimed by this report.
 
 ## Promotion recommendation
 
-Do not promote to mainnet until IUNA-2026-003 is resolved, the complete release
-gate is run on the exact final revision, and the custom VDF plus economic
-finality assumptions receive independent review. IUNA-2026-004 should be fixed
-before exposing a high-value public transaction network.
+Do not promote to mainnet until the complete release gate is run on the exact
+final revision, the candidate manifest is updated, and the custom VDF plus
+economic finality assumptions receive independent review. IUNA-2026-004 should
+be fixed before exposing a high-value public transaction network.

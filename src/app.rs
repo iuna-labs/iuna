@@ -42,6 +42,8 @@ pub const DEFAULT_BURN_PER_BLOCK: Amount = 0;
 pub const DEFAULT_VDF_ROUNDS: u32 = 67_000_000;
 pub const PROTOCOL_VERSION: u32 = 2;
 pub const MAINNET_CANDIDATE_NETWORK_ID: &str = "iuna-mainnet-candidate";
+pub const MAINNET_CANDIDATE_GENESIS_HASH: &str =
+    "3d677cd7ced1c04d3a276cbee7ea38076e34ac65f18a2c9b8286a4872d986a9a";
 pub const MAINNET_NETWORK_ID: &str = "iuna-mainnet-v1";
 pub const NETWORK_ID: &str = MAINNET_CANDIDATE_NETWORK_ID;
 pub const BLOCK_REQUEST_LIMIT: usize = 128;
@@ -60,8 +62,9 @@ static DEBUG_LOGGING: AtomicBool = AtomicBool::new(false);
 #[cfg(test)]
 mod tests {
     use super::{
-        BLOCK_REQUEST_LIMIT, DEFAULT_VDF_ROUNDS, MAINNET_CANDIDATE_NETWORK_ID, MAINNET_NETWORK_ID,
-        NETWORK_ID, PROTOCOL_VERSION, TRANSACTION_BATCH_LIMIT,
+        BLOCK_REQUEST_LIMIT, DEFAULT_VDF_ROUNDS, MAINNET_CANDIDATE_GENESIS_HASH,
+        MAINNET_CANDIDATE_NETWORK_ID, MAINNET_NETWORK_ID, NETWORK_ID, PROTOCOL_VERSION,
+        TRANSACTION_BATCH_LIMIT, validate_network_genesis,
     };
 
     #[test]
@@ -69,12 +72,33 @@ mod tests {
         assert_eq!(DEFAULT_VDF_ROUNDS, 67_000_000);
         assert_eq!(PROTOCOL_VERSION, 2);
         assert_eq!(MAINNET_CANDIDATE_NETWORK_ID, "iuna-mainnet-candidate");
+        assert_eq!(MAINNET_CANDIDATE_GENESIS_HASH.len(), 64);
         assert_eq!(MAINNET_NETWORK_ID, "iuna-mainnet-v1");
         assert_ne!(MAINNET_CANDIDATE_NETWORK_ID, MAINNET_NETWORK_ID);
         assert_eq!(NETWORK_ID, MAINNET_CANDIDATE_NETWORK_ID);
         assert_eq!(BLOCK_REQUEST_LIMIT, 128);
         assert_eq!(TRANSACTION_BATCH_LIMIT, 128);
     }
+
+    #[test]
+    fn candidate_genesis_is_pinned_while_local_profiles_remain_unpinned() {
+        assert!(
+            validate_network_genesis(MAINNET_CANDIDATE_NETWORK_ID, MAINNET_CANDIDATE_GENESIS_HASH)
+                .is_ok()
+        );
+        assert!(validate_network_genesis(MAINNET_CANDIDATE_NETWORK_ID, &"0".repeat(64)).is_err());
+        assert!(validate_network_genesis("iuna-local-testnet-v1", &"0".repeat(64)).is_ok());
+    }
+}
+
+pub fn validate_network_genesis(profile_id: &str, genesis_hash: &str) -> Result<()> {
+    if profile_id == MAINNET_CANDIDATE_NETWORK_ID && genesis_hash != MAINNET_CANDIDATE_GENESIS_HASH
+    {
+        anyhow::bail!(
+            "mainnet-candidate genesis {genesis_hash} does not match pinned genesis {MAINNET_CANDIDATE_GENESIS_HASH}"
+        );
+    }
+    Ok(())
 }
 
 pub fn set_debug_logging(enabled: bool) {

@@ -7,8 +7,11 @@ use tokio::{
 };
 
 use crate::{
-    app::{ChainBootstrap, GossipEnvelope, NETWORK_ID, PROTOCOL_VERSION, ProtocolHello, now_ms},
-    domain::{Block, ChainSnapshot, Ledger, verify_vdf},
+    app::{
+        ChainBootstrap, GossipEnvelope, NETWORK_ID, PROTOCOL_VERSION, ProtocolHello, now_ms,
+        validate_network_genesis,
+    },
+    domain::{Block, ChainSnapshot, LaunchProfile, Ledger, verify_vdf},
 };
 
 use super::{
@@ -102,6 +105,7 @@ pub async fn fetch_snapshot_with_announcement(
     write_envelope(&mut writer, &join_client_hello()).await?;
     write_envelope(&mut writer, &GossipEnvelope::ChainBootstrapRequest).await?;
     let bootstrap = read_join_bootstrap_response(peer, &mut reader).await?;
+    validate_bootstrap_genesis(&LaunchProfile::default().profile_id, &bootstrap)?;
 
     let mut snapshot = ChainSnapshot {
         genesis_allocations: bootstrap.genesis_allocations,
@@ -205,9 +209,11 @@ fn is_join_control_envelope(envelope: &GossipEnvelope) -> bool {
 }
 
 pub(super) async fn validate_chain_bootstrap(
+    expected_profile_id: &str,
     bootstrap: ChainBootstrap,
     now_ms: u64,
 ) -> Result<Ledger> {
+    validate_bootstrap_genesis(expected_profile_id, &bootstrap)?;
     let snapshot = ChainSnapshot {
         genesis_allocations: bootstrap.genesis_allocations,
         vdf_rounds: bootstrap.vdf_rounds,
@@ -217,6 +223,16 @@ pub(super) async fn validate_chain_bootstrap(
     tokio::task::spawn_blocking(move || Ledger::from_snapshot_at(snapshot, now_ms))
         .await
         .context("chain bootstrap adoption worker failed")?
+}
+
+fn validate_bootstrap_genesis(expected_profile_id: &str, bootstrap: &ChainBootstrap) -> Result<()> {
+    if bootstrap.launch_profile.profile_id != expected_profile_id {
+        anyhow::bail!(
+            "chain bootstrap profile {} does not match expected profile {expected_profile_id}",
+            bootstrap.launch_profile.profile_id
+        );
+    }
+    validate_network_genesis(expected_profile_id, &bootstrap.genesis_block.hash)
 }
 
 pub(super) async fn validate_blocks_extension(

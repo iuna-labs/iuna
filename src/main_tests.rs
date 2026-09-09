@@ -26,7 +26,7 @@ use super::{
     parse_startup_bool_env_value, parse_startup_pow_mining_workers_env_value,
     persist_chain_snapshot, project_ui_data_store, run_chain_persistence_with_interval,
     setup_ledger, should_defer_sync_checkpoint, should_log_automatic_finalization_skip,
-    validate_wallet_for_mode,
+    start_genesis_ledger, validate_wallet_for_mode,
 };
 
 fn parse(args: &[&str]) -> anyhow::Result<Option<CliOptions>> {
@@ -691,6 +691,15 @@ fn genesis_mode_is_explicit() {
 }
 
 #[test]
+fn candidate_genesis_mode_cannot_create_a_second_network() {
+    let wallet = Wallet::from_seed("second-candidate-genesis");
+    let error = start_genesis_ledger(wallet.address(), false).unwrap_err();
+
+    assert!(error.to_string().contains("genesis is pinned"));
+    assert!(error.to_string().contains("use --join"));
+}
+
+#[test]
 fn join_mode_does_not_start_new_chain() {
     let opts = parse(&["--join", "127.0.0.1:9444"]).unwrap().unwrap();
     assert_eq!(opts.chain_mode, ChainMode::Join);
@@ -1075,9 +1084,16 @@ async fn genesis_refuses_to_start_when_chain_database_exists() {
         .unwrap()
         .unwrap();
 
-    let error = initialize_ledger(&opts, fresh_wallet.address(), &store, opts.p2p_addr, false)
-        .await
-        .unwrap_err();
+    let error = initialize_ledger(
+        &opts,
+        fresh_wallet.address(),
+        &store,
+        opts.p2p_addr,
+        false,
+        false,
+    )
+    .await
+    .unwrap_err();
 
     assert!(
         error.to_string().contains("already contains a blockchain"),
@@ -1098,14 +1114,40 @@ async fn startup_resumes_persisted_chain_without_genesis_flag() {
         .unwrap()
         .unwrap();
 
-    let resumed = initialize_ledger(&opts, fresh_wallet.address(), &store, opts.p2p_addr, false)
-        .await
-        .unwrap();
+    let resumed = initialize_ledger(
+        &opts,
+        fresh_wallet.address(),
+        &store,
+        opts.p2p_addr,
+        false,
+        false,
+    )
+    .await
+    .unwrap();
 
     assert_eq!(resumed.status().height, 1);
     assert_eq!(resumed.status().tip_hash, persisted.status().tip_hash);
     assert_eq!(resumed.genesis_hash(), persisted.genesis_hash());
     assert_eq!(resumed.balance_of(fresh_wallet.address()), 0);
+}
+
+#[tokio::test]
+async fn startup_rejects_unpinned_candidate_genesis() {
+    let dir = tempdir().unwrap();
+    let chain_path = dir.path().join("chain.sqlite3");
+    let store = SqliteChainStore::open(&chain_path).unwrap();
+    let wallet = Wallet::from_seed("unpinned-candidate-genesis");
+    let persisted = ledger_with_one_mined_block(&wallet);
+    store.save(&persisted.snapshot()).unwrap();
+    let opts = parse(&["--chain-db", chain_path.to_str().unwrap()])
+        .unwrap()
+        .unwrap();
+
+    let error = initialize_ledger(&opts, wallet.address(), &store, opts.p2p_addr, false, true)
+        .await
+        .unwrap_err();
+
+    assert!(error.to_string().contains("does not match pinned genesis"));
 }
 
 #[tokio::test]
@@ -1120,7 +1162,7 @@ async fn startup_rebuilds_state_from_a_locally_trusted_chain() {
         .unwrap()
         .unwrap();
 
-    let resumed = initialize_ledger(&opts, wallet.address(), &store, opts.p2p_addr, false)
+    let resumed = initialize_ledger(&opts, wallet.address(), &store, opts.p2p_addr, false, false)
         .await
         .unwrap();
 
@@ -1162,6 +1204,7 @@ async fn local_testnet_requests_reset_for_persisted_normal_launch_profile() {
         &store,
         opts.p2p_addr,
         true,
+        false,
     )
     .await
     .unwrap();
@@ -1186,9 +1229,10 @@ async fn startup_requests_reset_for_a_legacy_network_profile() {
         .unwrap()
         .unwrap();
 
-    let initialized = initialize_ledger(&opts, wallet.address(), &store, opts.p2p_addr, false)
-        .await
-        .unwrap();
+    let initialized =
+        initialize_ledger(&opts, wallet.address(), &store, opts.p2p_addr, false, false)
+            .await
+            .unwrap();
 
     assert_eq!(
         initialized.migration_from.as_deref(),
@@ -1222,9 +1266,16 @@ async fn candidate_promotion_reuses_chain_data_and_can_continue_mining() {
         .unwrap()
         .unwrap();
 
-    let mut promoted = initialize_ledger(&opts, wallets[0].address(), &store, opts.p2p_addr, false)
-        .await
-        .unwrap();
+    let mut promoted = initialize_ledger(
+        &opts,
+        wallets[0].address(),
+        &store,
+        opts.p2p_addr,
+        false,
+        false,
+    )
+    .await
+    .unwrap();
 
     assert_eq!(promoted.genesis_hash(), candidate_genesis);
     assert_eq!(promoted.tip_hash(), candidate_tip);
@@ -1298,9 +1349,16 @@ async fn startup_resumes_persisted_chain_with_network_accepted_future_tip() {
         .unwrap()
         .unwrap();
 
-    let resumed = initialize_ledger(&opts, fresh_wallet.address(), &store, opts.p2p_addr, false)
-        .await
-        .unwrap();
+    let resumed = initialize_ledger(
+        &opts,
+        fresh_wallet.address(),
+        &store,
+        opts.p2p_addr,
+        false,
+        false,
+    )
+    .await
+    .unwrap();
 
     assert_eq!(resumed.status().height, 1);
     assert_eq!(
@@ -1327,7 +1385,7 @@ async fn persisted_chain_satisfies_join_mode_without_contacting_peer() {
     .unwrap()
     .unwrap();
 
-    let resumed = initialize_ledger(&opts, bob.address(), &store, opts.p2p_addr, false)
+    let resumed = initialize_ledger(&opts, bob.address(), &store, opts.p2p_addr, false, false)
         .await
         .unwrap();
 
@@ -1355,7 +1413,7 @@ VALUES (1, 4, 'bad-tip', x'00010203', 0)
         .unwrap()
         .unwrap();
 
-    let error = initialize_ledger(&opts, wallet.address(), &store, opts.p2p_addr, false)
+    let error = initialize_ledger(&opts, wallet.address(), &store, opts.p2p_addr, false, false)
         .await
         .unwrap_err();
 

@@ -6,8 +6,8 @@ use std::{
 
 use crate::{
     app::{
-        GossipEnvelope, NETWORK_ID, NodeCore, PROTOCOL_VERSION, PeerBook, PeerDirection,
-        ProtocolHello,
+        GossipEnvelope, MAINNET_CANDIDATE_NETWORK_ID, NETWORK_ID, NodeCore, PROTOCOL_VERSION,
+        PeerBook, PeerDirection, ProtocolHello,
     },
     domain::{Ledger, Wallet, run_vdf},
 };
@@ -1389,7 +1389,7 @@ async fn inbound_verification_only_session_closes_after_response() {
 }
 
 #[tokio::test]
-async fn setup_placeholder_accepts_remote_genesis_and_adopts_bootstrap() {
+async fn setup_placeholder_rejects_bootstrap_with_unpinned_candidate_genesis() {
     let local_wallet = Wallet::from_seed("setup-placeholder-local");
     let local_ledger = Ledger::new(BTreeMap::new(), 1);
     let local_node = Arc::new(tokio::sync::Mutex::new(NodeCore::from_ledger(
@@ -1454,22 +1454,17 @@ async fn setup_placeholder_accepts_remote_genesis_and_adopts_bootstrap() {
     assert_eq!(peer.misbehavior_score, 0);
     assert!(!peer.is_banned_at(crate::app::now_ms()));
 
-    let adopted = super::validate_chain_bootstrap(remote_bootstrap, crate::app::now_ms())
-        .await
-        .unwrap();
-    assert_eq!(adopted.genesis_hash(), remote_genesis);
-    assert!(
-        network
-            .inner
-            .node
-            .lock()
-            .await
-            .import_verified_ledger(adopted)
-            .unwrap()
-    );
+    let error = super::validate_chain_bootstrap(
+        MAINNET_CANDIDATE_NETWORK_ID,
+        remote_bootstrap,
+        crate::app::now_ms(),
+    )
+    .await
+    .unwrap_err();
+    assert!(error.to_string().contains("does not match pinned genesis"));
     assert_eq!(
         network.inner.node.lock().await.ledger().genesis_hash(),
-        remote_genesis
+        local_ledger.genesis_hash()
     );
 }
 

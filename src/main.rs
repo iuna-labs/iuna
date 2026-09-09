@@ -17,7 +17,7 @@ use iuna::{
     },
     app::{
         NodeCore, PeerBook, SharedNode, SharedPeerBook, StratumStatus, debug_logging_enabled,
-        now_ms, set_debug_logging,
+        now_ms, set_debug_logging, validate_network_genesis,
     },
     domain::{
         Amount, ChainSnapshot, GenesisBurn, LaunchProfile, Ledger, MAX_VDF_ROUNDS, MICRO_IUNA,
@@ -172,6 +172,7 @@ async fn main() -> Result<()> {
         &chain_store,
         advertised_p2p_addr,
         startup_local_testnet,
+        true,
     )
     .await?;
     let migration_from = initialized_ledger.migration_from.clone();
@@ -581,6 +582,7 @@ async fn initialize_ledger(
     chain_store: &SqliteChainStore,
     advertised_p2p_addr: SocketAddr,
     local_testnet: bool,
+    enforce_pinned_genesis: bool,
 ) -> Result<InitializedLedger> {
     if let Some(loaded) = chain_store.load_with_verification_status()? {
         let snapshot = loaded.snapshot;
@@ -600,6 +602,13 @@ async fn initialize_ledger(
                 ledger: setup_ledger(local_testnet),
                 migration_from: Some(snapshot.launch_profile.profile_id),
             });
+        }
+        if enforce_pinned_genesis {
+            let stored_genesis = snapshot
+                .blocks
+                .first()
+                .context("persisted chain is missing its genesis block")?;
+            validate_network_genesis(&snapshot.launch_profile.profile_id, &stored_genesis.hash)?;
         }
         let height = snapshot_height(&snapshot);
         match loaded.revalidation_from_height {
@@ -684,6 +693,11 @@ fn setup_ledger(local_testnet: bool) -> Ledger {
 }
 
 fn start_genesis_ledger(wallet_address: &str, local_testnet: bool) -> Result<Ledger> {
+    if !local_testnet {
+        bail!(
+            "mainnet-candidate genesis is pinned; use --join instead of creating a new candidate chain"
+        );
+    }
     let vdf_rounds = measure_initial_vdf_rounds();
     let mut genesis = BTreeMap::new();
     genesis.insert(wallet_address.to_string(), GENESIS_BOOTSTRAP_BALANCE);
@@ -692,7 +706,7 @@ fn start_genesis_ledger(wallet_address: &str, local_testnet: bool) -> Result<Led
     } else {
         LaunchProfile::default()
     };
-    Ledger::new_with_genesis_burns_and_profile(
+    let ledger = Ledger::new_with_genesis_burns_and_profile(
         genesis,
         vec![GenesisBurn::new(
             wallet_address,
@@ -700,7 +714,9 @@ fn start_genesis_ledger(wallet_address: &str, local_testnet: bool) -> Result<Led
         )],
         vdf_rounds,
         launch_profile,
-    )
+    )?;
+    validate_network_genesis(&ledger.launch_profile().profile_id, ledger.genesis_hash())?;
+    Ok(ledger)
 }
 
 fn measure_initial_vdf_rounds() -> u64 {

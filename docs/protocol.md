@@ -17,6 +17,7 @@ This is still experimental. The rules below describe the frozen mainnet-candidat
 The current mainnet-candidate parameter set is intentionally close to Bitcoin where that is useful for operator expectations:
 
 - P2P network ID: `iuna-mainnet-candidate`;
+- genesis hash: `3d677cd7ced1c04d3a276cbee7ea38076e34ac65f18a2c9b8286a4872d986a9a`;
 - protocol version: `2`;
 - launch profile ID: `iuna-mainnet-candidate`;
 - launch profile hash: `eb2f67e9d735474859ceb1fe124fe270977214f6e2f4cd855a4d8c3b5ecac558`;
