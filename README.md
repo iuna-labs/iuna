@@ -312,7 +312,6 @@ peers.
 
 - [Protocol](docs/protocol.md)
 - [Operator failure playbooks](docs/operator-playbooks.md)
-- [Security review checklist](docs/security-review.md)
 
 ## Contributing
 

@@ -4,7 +4,6 @@
 /.docker-build
 /.iuna
 /e2e/.runtime
-/release-evidence
 /src-tauri/target
 /src-tauri/gen
 /src-tauri/binaries/iuna-sidecar-*
