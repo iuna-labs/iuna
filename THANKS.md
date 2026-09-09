@@ -8,3 +8,4 @@ Special thanks to:
 - [radbnl](https://github.com/radbnl) - running a public testnet node, security testing, and thoughtful protocol/product input.
 - Robin - Valuable UX/UI and protocol testing
 - Pim - Windows testing
+- [intergalactisch](https://github.com/intergalactisch) - running a testnet node
