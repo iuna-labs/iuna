@@ -373,3 +373,15 @@ impl SleepInhibitor {
         Ok(Self)
     }
 }
+
+#[cfg(test)]
+mod tests {
+    #[test]
+    fn tray_icon_contains_rgba8_pixels_for_its_declared_dimensions() {
+        let icon = tauri::include_image!("./icons/tray-icon.png");
+        let expected_bytes = icon.width() as usize * icon.height() as usize * 4;
+
+        assert_eq!(icon.rgba().len(), expected_bytes);
+        assert!(icon.rgba().chunks_exact(4).any(|pixel| pixel[3] > 0));
+    }
+}
