@@ -7,6 +7,7 @@ use axum::{
     http::HeaderMap,
     response::{IntoResponse, Redirect, Response},
 };
+use secrecy::ExposeSecret;
 use tokio::sync::Mutex;
 
 use super::types::{
@@ -58,7 +59,9 @@ pub(super) async fn api_wallet_import_form(
     headers: HeaderMap,
     Form(form): Form<SeedPhraseForm>,
 ) -> Json<WalletSetupResponse> {
-    wallet_setup_json(super::import_setup_wallet_seed(&state, &headers, &form.seed_phrase).await)
+    wallet_setup_json(
+        super::import_setup_wallet_seed(&state, &headers, form.seed_phrase.expose_secret()).await,
+    )
 }
 
 pub(super) async fn api_transfer_fee_estimate_form(
@@ -680,7 +683,7 @@ mod tests {
             },
             auth_sessions: Arc::new(Mutex::new(BTreeMap::<String, AuthSession>::new())),
             auth_backoff: Arc::new(Mutex::new(BTreeMap::<String, AuthBackoff>::new())),
-            setup_capability: Arc::new(Mutex::new(Some("test-setup-capability".to_string()))),
+            setup_capability: Arc::new(Mutex::new(Some("test-setup-capability".into()))),
             management_port: 9444,
             wallet_endpoint_addr: None,
         };

@@ -1,28 +1,37 @@
+use std::{fmt, sync::Arc};
+
 use ed25519_dalek::{Signature, Signer, SigningKey};
+use secrecy::{ExposeSecret, SecretBox, zeroize::Zeroize};
 use sha2::{Digest, Sha256};
 
 use super::block::LeaderProofPayload;
-use super::{
-    BurnBundle, BurnBundlePayload, LeaderProof, PUBLIC_KEY_BYTES, decode_hex_array, hex_encode,
-};
+use super::{BurnBundle, BurnBundlePayload, LeaderProof, hex_encode};
 
 const WALLET_SEED_DOMAIN: &str = "iuna-wallet-seed";
 
-#[derive(Clone, Debug, Eq, PartialEq)]
+#[derive(Clone)]
 pub struct Wallet {
     address: String,
-    secret: String,
+    signing_seed: Arc<SecretBox<[u8; 32]>>,
 }
 
 impl Wallet {
     pub fn from_seed(seed: &str) -> Self {
-        let seed_hash = Sha256::digest(format!("{WALLET_SEED_DOMAIN}:{seed}").as_bytes());
-        let mut signing_seed = [0_u8; 32];
-        signing_seed.copy_from_slice(&seed_hash);
-        let signing_key = SigningKey::from_bytes(&signing_seed);
-        let secret = hex_encode(signing_seed);
+        let mut hasher = Sha256::new();
+        hasher.update(WALLET_SEED_DOMAIN.as_bytes());
+        hasher.update(b":");
+        hasher.update(seed.as_bytes());
+        let mut seed_hash = hasher.finalize();
+        let signing_seed = SecretBox::init_with_mut(|signing_seed: &mut [u8; 32]| {
+            signing_seed.copy_from_slice(&seed_hash);
+        });
+        seed_hash.zeroize();
+        let signing_key = SigningKey::from_bytes(signing_seed.expose_secret());
         let address = hex_encode(signing_key.verifying_key().to_bytes());
-        Self { address, secret }
+        Self {
+            address,
+            signing_seed: Arc::new(signing_seed),
+        }
     }
 
     pub fn address(&self) -> &str {
@@ -34,9 +43,7 @@ impl Wallet {
     }
 
     pub(super) fn sign_bytes(&self, payload: &[u8]) -> String {
-        let seed =
-            decode_hex_array::<PUBLIC_KEY_BYTES>(&self.secret).expect("wallet secret is valid hex");
-        let signing_key = SigningKey::from_bytes(&seed);
+        let signing_key = SigningKey::from_bytes(self.signing_seed.expose_secret());
         let signature: Signature = signing_key.sign(payload);
         hex_encode(signature.to_bytes())
     }
@@ -60,5 +67,41 @@ impl Wallet {
             burns: payload.burns,
             signature,
         }
+    }
+}
+
+impl fmt::Debug for Wallet {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("Wallet")
+            .field("address", &self.address)
+            .field("signing_seed", &"[REDACTED]")
+            .finish()
+    }
+}
+
+impl PartialEq for Wallet {
+    fn eq(&self, other: &Self) -> bool {
+        self.address == other.address
+    }
+}
+
+impl Eq for Wallet {}
+
+#[cfg(test)]
+mod tests {
+    use secrecy::ExposeSecret;
+
+    use super::Wallet;
+    use crate::domain::hex_encode;
+
+    #[test]
+    fn debug_output_redacts_the_wallet_signing_seed() {
+        let wallet = Wallet::from_seed("debug-redaction-wallet-seed");
+        let signing_seed = hex_encode(wallet.signing_seed.expose_secret());
+        let debug = format!("{wallet:?}");
+
+        assert!(debug.contains("[REDACTED]"));
+        assert!(!debug.contains(&signing_seed));
     }
 }

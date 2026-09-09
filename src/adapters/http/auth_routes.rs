@@ -88,7 +88,7 @@ pub(super) async fn api_auth_setup_form(
     if let Err(error) = validate_setup_capability(&state, &headers).await {
         return (StatusCode::FORBIDDEN, action_json(Err(error))).into_response();
     }
-    match setup_auth_password(&state, &form.password, &client_key.0).await {
+    match setup_auth_password(&state, form.password, &client_key.0).await {
         Ok(cookie) => {
             consume_setup_capability(&state).await;
             let mut response = action_json(Ok(())).into_response();
@@ -113,7 +113,7 @@ pub(super) async fn api_auth_login_form(
     Extension(client_key): Extension<AuthClientKey>,
     Form(form): Form<AuthForm>,
 ) -> Response {
-    match login_auth_password(&state, &form.password, &client_key.0).await {
+    match login_auth_password(&state, form.password, &client_key.0).await {
         Ok(cookie) => ([(header::SET_COOKIE, cookie)], action_json(Ok(()))).into_response(),
         Err(error) => action_json(Err(error)).into_response(),
     }
@@ -145,14 +145,7 @@ pub(super) async fn api_auth_change_password_form(
     Extension(client_key): Extension<AuthClientKey>,
     Form(form): Form<ChangePasswordForm>,
 ) -> Response {
-    match change_auth_password(
-        &state,
-        &form.old_password,
-        &form.new_password,
-        &client_key.0,
-    )
-    .await
-    {
+    match change_auth_password(&state, form.old_password, form.new_password, &client_key.0).await {
         Ok(cookie) => ([(header::SET_COOKIE, cookie)], action_json(Ok(()))).into_response(),
         Err(error) => action_json(Err(error)).into_response(),
     }
@@ -289,7 +282,7 @@ mod tests {
             },
             auth_sessions: Arc::new(Mutex::new(BTreeMap::<String, AuthSession>::new())),
             auth_backoff: Arc::new(Mutex::new(BTreeMap::<String, AuthBackoff>::new())),
-            setup_capability: Arc::new(Mutex::new(Some(SETUP_CAPABILITY.to_string()))),
+            setup_capability: Arc::new(Mutex::new(Some(SETUP_CAPABILITY.into()))),
             management_port: MANAGEMENT_PORT,
             wallet_endpoint_addr: None,
         }

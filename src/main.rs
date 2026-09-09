@@ -25,6 +25,7 @@ use iuna::{
         run_vdf_cancellable_with_progress,
     },
 };
+use secrecy::{ExposeSecret, SecretString};
 use tokio::sync::Mutex;
 
 mod cli;
@@ -144,9 +145,16 @@ async fn main() -> Result<()> {
     let auth_config_dirty = apply_startup_wallet_password_config(
         &config_path,
         &mut ui_config,
-        startup_wallet_password.as_deref(),
+        startup_wallet_password
+            .as_ref()
+            .map(ExposeSecret::expose_secret),
     )?;
-    let wallet_load = load_startup_wallet(&wallet_path, startup_wallet_password.as_deref())?;
+    let wallet_load = load_startup_wallet(
+        &wallet_path,
+        startup_wallet_password
+            .as_ref()
+            .map(ExposeSecret::expose_secret),
+    )?;
     let wallet_address = wallet_load.address().to_string();
     let ui_config_dirty = opts.chain_mode == ChainMode::Genesis
         || p2p_config_dirty
@@ -387,7 +395,7 @@ fn load_startup_wallet(
     }
 }
 
-fn startup_wallet_password_from_env() -> Result<Option<String>> {
+fn startup_wallet_password_from_env() -> Result<Option<SecretString>> {
     let Some(password) = std::env::var_os(WALLET_PASSWORD_ENV) else {
         return Ok(None);
     };
@@ -396,7 +404,7 @@ fn startup_wallet_password_from_env() -> Result<Option<String>> {
         .map_err(|_| anyhow::anyhow!("{WALLET_PASSWORD_ENV} must be valid UTF-8"))?;
     http::validate_management_password(&password)
         .with_context(|| format!("{WALLET_PASSWORD_ENV} is not a valid wallet password"))?;
-    Ok(Some(password))
+    Ok(Some(password.into()))
 }
 
 fn startup_bool_from_env(name: &str) -> Result<Option<bool>> {

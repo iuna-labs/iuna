@@ -1,6 +1,7 @@
 use anyhow::{Context, Result, bail};
 use getrandom::getrandom;
 use pbkdf2::pbkdf2_hmac;
+use secrecy::{ExposeSecret, SecretBox, SecretString};
 use sha2::{Digest, Sha256};
 
 const PASSWORD_KDF_ALGORITHM: &str = "pbkdf2-sha256";
@@ -24,7 +25,7 @@ pub(super) fn hash_password(password: &str) -> Result<String> {
     Ok(format!(
         "{PASSWORD_KDF_ALGORITHM}${PASSWORD_KDF_ITERATIONS}${}${}",
         hex_encode(salt),
-        hex_encode(hash)
+        hex_encode(hash.expose_secret())
     ))
 }
 
@@ -40,7 +41,7 @@ pub(super) fn verify_password(password: &str, encoded: &str) -> Result<bool> {
     let salt = decode_hex(parts[2]).context("invalid password hash salt")?;
     let expected = decode_hex(parts[3]).context("invalid password hash")?;
     let actual = pbkdf2_sha256(password.as_bytes(), &salt, iterations);
-    Ok(constant_time_eq(&actual, &expected))
+    Ok(constant_time_eq(actual.expose_secret(), &expected))
 }
 
 fn validate_password_kdf_iterations(iterations: u32) -> Result<()> {
@@ -51,20 +52,30 @@ fn validate_password_kdf_iterations(iterations: u32) -> Result<()> {
 }
 
 pub(super) fn session_token_hash(token: &str) -> String {
-    hex_encode(Sha256::digest(format!("iuna-session:{token}").as_bytes()))
+    let mut hasher = Sha256::new();
+    hasher.update(b"iuna-session:");
+    hasher.update(token.as_bytes());
+    hex_encode(hasher.finalize())
 }
 
-pub(super) fn random_hex(bytes: usize) -> Result<String> {
-    let mut value = vec![0_u8; bytes];
-    getrandom(&mut value)
-        .map_err(|error| anyhow::anyhow!("secure random generation failed: {error}"))?;
-    Ok(hex_encode(value))
+pub(super) fn random_hex(bytes: usize) -> Result<SecretString> {
+    let mut random_error = None;
+    let value = SecretBox::<Vec<u8>>::init_with_mut(|value| {
+        value.resize(bytes, 0);
+        if let Err(error) = getrandom(value) {
+            random_error = Some(error);
+        }
+    });
+    if let Some(error) = random_error {
+        return Err(anyhow::anyhow!("secure random generation failed: {error}"));
+    }
+    Ok(hex_encode(value.expose_secret()).into())
 }
 
-pub(super) fn pbkdf2_sha256(password: &[u8], salt: &[u8], iterations: u32) -> [u8; 32] {
-    let mut output = [0_u8; 32];
-    pbkdf2_hmac::<Sha256>(password, salt, iterations, &mut output);
-    output
+pub(super) fn pbkdf2_sha256(password: &[u8], salt: &[u8], iterations: u32) -> SecretBox<[u8; 32]> {
+    SecretBox::init_with_mut(|output: &mut [u8; 32]| {
+        pbkdf2_hmac::<Sha256>(password, salt, iterations, output);
+    })
 }
 
 fn constant_time_eq(left: &[u8], right: &[u8]) -> bool {

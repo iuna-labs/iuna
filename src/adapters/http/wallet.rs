@@ -1,5 +1,6 @@
 use anyhow::{Context, Result, bail};
 use axum::{Json, extract::State, http::HeaderMap};
+use secrecy::ExposeSecret;
 
 use crate::{
     adapters::wallet_store,
@@ -30,7 +31,10 @@ pub(super) async fn wallet_setup_response(
     let seed_phrase = if setup_complete && !migration_required {
         None
     } else {
-        wallet_store::setup_seed_phrase_with_password(&state.wallet_path, password.as_deref())?
+        wallet_store::setup_seed_phrase_with_password(
+            &state.wallet_path,
+            password.as_ref().map(|password| password.expose_secret()),
+        )?
     };
     let address = state.node.lock().await.wallet_receive_address()?;
     Ok(WalletSetupResponse {
@@ -55,8 +59,10 @@ pub(super) async fn replace_setup_wallet_with_generated_seed(
     let password = wallet_password_for_request(state, headers)
         .await
         .context("wallet password session is required")?;
-    let (wallet, seed_phrase) =
-        wallet_store::replace_with_generated_seed_phrase_encrypted(&state.wallet_path, &password)?;
+    let (wallet, seed_phrase) = wallet_store::replace_with_generated_seed_phrase_encrypted(
+        &state.wallet_path,
+        password.expose_secret(),
+    )?;
     state.node.lock().await.replace_wallet(wallet);
     let address = state.node.lock().await.wallet_receive_address()?;
     Ok(WalletSetupResponse {
@@ -81,7 +87,7 @@ pub(super) async fn import_setup_wallet_seed(
     let wallet = wallet_store::replace_with_imported_seed_phrase_encrypted(
         &state.wallet_path,
         seed_phrase,
-        &password,
+        password.expose_secret(),
     )?;
     state.node.lock().await.replace_wallet(wallet);
     let address = state.node.lock().await.wallet_receive_address()?;

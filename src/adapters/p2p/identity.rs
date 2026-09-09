@@ -5,26 +5,29 @@ use std::{
 
 use anyhow::Result;
 use ed25519_dalek::{Signature, Signer, SigningKey, Verifier, VerifyingKey};
+use secrecy::{ExposeSecret, SecretBox};
 
 use crate::app::{GossipEnvelope, NETWORK_ID};
 
 use super::GossipNetwork;
 
-static NODE_SIGNING_KEYS: OnceLock<StdMutex<BTreeMap<String, SigningKey>>> = OnceLock::new();
+static NODE_SIGNING_KEYS: OnceLock<StdMutex<BTreeMap<String, SecretBox<[u8; 32]>>>> =
+    OnceLock::new();
 
 pub(super) fn new_node_id() -> String {
-    let mut bytes = [0_u8; 32];
-    getrandom::getrandom(&mut bytes).expect("secure randomness unavailable for p2p node id");
-    let signing_key = SigningKey::from_bytes(&bytes);
+    let signing_seed = SecretBox::init_with_mut(|bytes: &mut [u8; 32]| {
+        getrandom::getrandom(bytes).expect("secure randomness unavailable for p2p node id");
+    });
+    let signing_key = SigningKey::from_bytes(signing_seed.expose_secret());
     let node_id = hex_encode(&signing_key.verifying_key().to_bytes());
     node_signing_keys()
         .lock()
         .expect("node signing key registry mutex poisoned")
-        .insert(node_id.clone(), signing_key);
+        .insert(node_id.clone(), signing_seed);
     node_id
 }
 
-fn node_signing_keys() -> &'static StdMutex<BTreeMap<String, SigningKey>> {
+fn node_signing_keys() -> &'static StdMutex<BTreeMap<String, SecretBox<[u8; 32]>>> {
     NODE_SIGNING_KEYS.get_or_init(|| StdMutex::new(BTreeMap::new()))
 }
 
@@ -87,7 +90,8 @@ pub(super) fn peer_verification_response_for_node_id(
     let keys = node_signing_keys()
         .lock()
         .expect("node signing key registry mutex poisoned");
-    let signing_key = keys.get(node_id)?;
+    let signing_seed = keys.get(node_id)?;
+    let signing_key = SigningKey::from_bytes(signing_seed.expose_secret());
     let payload = peer_verification_payload(address, nonce, node_id);
     let signature: Signature = signing_key.sign(payload.as_bytes());
     Some(GossipEnvelope::PeerVerificationResponse {

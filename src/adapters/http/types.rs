@@ -1,4 +1,5 @@
-use serde::{Deserialize, Serialize};
+use secrecy::{ExposeSecret, SecretString};
+use serde::{Deserialize, Serialize, Serializer};
 
 use crate::{
     adapters::{config_store::UiConfig, ui_data_store::BlockMetricRow},
@@ -7,13 +8,13 @@ use crate::{
 
 #[derive(Debug, Deserialize)]
 pub(super) struct AuthForm {
-    pub(super) password: String,
+    pub(super) password: SecretString,
 }
 
 #[derive(Debug, Deserialize)]
 pub(super) struct ChangePasswordForm {
-    pub(super) old_password: String,
-    pub(super) new_password: String,
+    pub(super) old_password: SecretString,
+    pub(super) new_password: SecretString,
 }
 
 #[derive(Debug, Serialize)]
@@ -197,7 +198,7 @@ pub(super) struct ConfigForm {
 
 #[derive(Debug, Deserialize)]
 pub(super) struct SeedPhraseForm {
-    pub(super) seed_phrase: String,
+    pub(super) seed_phrase: SecretString,
 }
 
 #[derive(Debug, Deserialize)]
@@ -368,9 +369,45 @@ pub(super) struct WalletSetupResponse {
     pub(super) ok: bool,
     pub(super) error: Option<String>,
     pub(super) address: Option<String>,
-    pub(super) seed_phrase: Option<String>,
+    #[serde(serialize_with = "serialize_optional_secret")]
+    pub(super) seed_phrase: Option<SecretString>,
     pub(super) dev_verify_bypass: bool,
     pub(super) requires_peer: bool,
+}
+
+fn serialize_optional_secret<S>(
+    value: &Option<SecretString>,
+    serializer: S,
+) -> Result<S::Ok, S::Error>
+where
+    S: Serializer,
+{
+    match value {
+        Some(secret) => serializer.serialize_some(secret.expose_secret()),
+        None => serializer.serialize_none(),
+    }
+}
+
+#[cfg(test)]
+mod secret_tests {
+    use super::{AuthForm, ChangePasswordForm};
+
+    #[test]
+    fn auth_form_debug_output_redacts_passwords() {
+        let auth = AuthForm {
+            password: "correct-horse-battery-staple".into(),
+        };
+        let change = ChangePasswordForm {
+            old_password: "old-password-value".into(),
+            new_password: "new-password-value".into(),
+        };
+
+        let debug = format!("{auth:?} {change:?}");
+        assert!(debug.contains("[REDACTED]"));
+        assert!(!debug.contains("correct-horse-battery-staple"));
+        assert!(!debug.contains("old-password-value"));
+        assert!(!debug.contains("new-password-value"));
+    }
 }
 
 #[derive(Clone, Debug, Eq, PartialEq, Serialize)]

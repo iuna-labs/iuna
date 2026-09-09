@@ -1,5 +1,6 @@
 use std::{collections::BTreeMap, net::SocketAddr, path::PathBuf, sync::Arc};
 
+use secrecy::SecretString;
 use tokio::sync::Mutex;
 
 use crate::{
@@ -23,7 +24,7 @@ pub(super) struct HttpState {
     pub(super) stratum: StratumStatus,
     pub(super) auth_sessions: Arc<Mutex<BTreeMap<String, AuthSession>>>,
     pub(super) auth_backoff: Arc<Mutex<BTreeMap<String, AuthBackoff>>>,
-    pub(super) setup_capability: Arc<Mutex<Option<String>>>,
+    pub(super) setup_capability: Arc<Mutex<Option<SecretString>>>,
     pub(super) management_port: u16,
     pub(super) wallet_endpoint_addr: Option<SocketAddr>,
 }
@@ -31,7 +32,7 @@ pub(super) struct HttpState {
 #[derive(Clone)]
 pub(super) struct AuthSession {
     pub(super) expires_at: u64,
-    pub(super) wallet_password: String,
+    pub(super) wallet_password: Arc<SecretString>,
 }
 
 #[derive(Clone, Debug)]

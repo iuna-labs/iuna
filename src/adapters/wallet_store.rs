@@ -12,7 +12,8 @@ use chacha20poly1305::{
     aead::{Aead, Payload},
 };
 use pbkdf2::pbkdf2_hmac;
-use serde::{Deserialize, Serialize};
+use secrecy::{ExposeSecret, SecretBox, SecretString};
+use serde::{Deserialize, Serialize, Serializer};
 use sha2::Sha256;
 
 use crate::domain::Wallet;
@@ -32,16 +33,21 @@ const BIP39_SEED_ENTROPY_BYTES: usize = 32;
 #[derive(Debug, Serialize, Deserialize)]
 struct WalletFile {
     version: u32,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    seed: Option<String>,
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        serialize_with = "serialize_optional_secret"
+    )]
+    seed: Option<SecretString>,
     address: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     encryption: Option<EncryptedWalletSeed>,
 }
 
-#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[derive(Debug, Deserialize, Serialize)]
 struct WalletData {
-    seed: String,
+    #[serde(serialize_with = "serialize_secret")]
+    seed: SecretString,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -60,19 +66,39 @@ struct EncryptedWalletSeed {
     ciphertext: String,
 }
 
+fn serialize_secret<S>(value: &SecretString, serializer: S) -> std::result::Result<S::Ok, S::Error>
+where
+    S: Serializer,
+{
+    serializer.serialize_str(value.expose_secret())
+}
+
+fn serialize_optional_secret<S>(
+    value: &Option<SecretString>,
+    serializer: S,
+) -> std::result::Result<S::Ok, S::Error>
+where
+    S: Serializer,
+{
+    match value {
+        Some(secret) => serializer.serialize_some(secret.expose_secret()),
+        None => serializer.serialize_none(),
+    }
+}
+
 pub fn load_or_create(path: &Path) -> Result<Wallet> {
     if path.exists() {
         return load(path);
     }
 
     let seed = generate_seed_phrase()?;
-    let wallet = Wallet::from_seed(&seed);
+    let wallet = Wallet::from_seed(seed.expose_secret());
     write_wallet_file(path, seed, wallet.address(), WalletFileMode::CreateNew)?;
 
     Ok(wallet)
 }
 
-pub fn replace_with_generated_seed_phrase(path: &Path) -> Result<(Wallet, String)> {
+pub fn replace_with_generated_seed_phrase(path: &Path) -> Result<(Wallet, SecretString)> {
     let seed = generate_seed_phrase()?;
     let wallet = write_wallet(path, seed.clone(), WalletFileMode::Replace)?;
     Ok((wallet, seed))
@@ -81,7 +107,7 @@ pub fn replace_with_generated_seed_phrase(path: &Path) -> Result<(Wallet, String
 pub fn replace_with_generated_seed_phrase_encrypted(
     path: &Path,
     password: &str,
-) -> Result<(Wallet, String)> {
+) -> Result<(Wallet, SecretString)> {
     let seed = generate_seed_phrase()?;
     let wallet = write_wallet_encrypted(path, seed.clone(), password, WalletFileMode::Replace)?;
     Ok((wallet, seed))
@@ -101,14 +127,14 @@ pub fn replace_with_imported_seed_phrase_encrypted(
     write_wallet_encrypted(path, seed, password, WalletFileMode::Replace)
 }
 
-pub fn setup_seed_phrase(path: &Path) -> Result<Option<String>> {
+pub fn setup_seed_phrase(path: &Path) -> Result<Option<SecretString>> {
     setup_seed_phrase_with_password(path, None)
 }
 
 pub fn setup_seed_phrase_with_password(
     path: &Path,
     password: Option<&str>,
-) -> Result<Option<String>> {
+) -> Result<Option<SecretString>> {
     if !path.exists() {
         return Ok(None);
     }
@@ -117,11 +143,11 @@ pub fn setup_seed_phrase_with_password(
         Ok(seed) => seed,
         Err(_) => return Ok(None),
     };
-    let normalized = match normalize_seed_phrase(&seed) {
+    let normalized = match normalize_seed_phrase(seed.expose_secret()) {
         Ok(seed) => seed,
         Err(_) => return Ok(None),
     };
-    if normalized == seed {
+    if normalized.expose_secret() == seed.expose_secret() {
         Ok(Some(normalized))
     } else {
         Ok(None)
@@ -154,8 +180,8 @@ pub fn encrypt_existing_with_password(path: &Path, password: &str) -> Result<()>
     }
     let data = wallet_data(&stored, None)?;
     let seed = data.seed;
-    let seed = normalize_seed_phrase(&seed).unwrap_or(seed);
-    let wallet = Wallet::from_seed(&seed);
+    let seed = normalize_seed_phrase(seed.expose_secret()).unwrap_or(seed);
+    let wallet = Wallet::from_seed(seed.expose_secret());
     if wallet.address() != stored.address {
         bail!(
             "wallet file has address {}, but its seed derives {}",
@@ -181,8 +207,8 @@ pub fn reencrypt_with_password(
     let stored = read_wallet_file(path)?;
     let data = wallet_data(&stored, Some(current_password))?;
     let seed = data.seed;
-    let seed = normalize_seed_phrase(&seed).unwrap_or(seed);
-    let wallet = Wallet::from_seed(&seed);
+    let seed = normalize_seed_phrase(seed.expose_secret()).unwrap_or(seed);
+    let wallet = Wallet::from_seed(seed.expose_secret());
     if wallet.address() != stored.address {
         bail!(
             "wallet file has address {}, but its seed derives {}",
@@ -237,10 +263,10 @@ fn load_encrypted_or_plaintext(path: &Path, password: Option<&str>) -> Result<Wa
 
 fn wallet_from_stored(stored: &WalletFile, password: Option<&str>) -> Result<Wallet> {
     let seed = wallet_seed(stored, password)?;
-    Ok(Wallet::from_seed(&seed))
+    Ok(Wallet::from_seed(seed.expose_secret()))
 }
 
-fn wallet_seed(stored: &WalletFile, password: Option<&str>) -> Result<String> {
+fn wallet_seed(stored: &WalletFile, password: Option<&str>) -> Result<SecretString> {
     if let Some(encryption) = &stored.encryption {
         let password = password.context("wallet is encrypted; unlock it with the UI password")?;
         return decrypt_seed(encryption, &stored.address, password);
@@ -253,8 +279,10 @@ fn wallet_seed(stored: &WalletFile, password: Option<&str>) -> Result<String> {
 
 fn read_wallet_file(path: &Path) -> Result<WalletFile> {
     let bytes =
-        fs::read(path).with_context(|| format!("failed to read wallet file {}", path.display()))?;
-    parse_wallet_file_bytes(&bytes, &path.display().to_string())
+        SecretBox::new(Box::new(fs::read(path).with_context(|| {
+            format!("failed to read wallet file {}", path.display())
+        })?));
+    parse_wallet_file_bytes(bytes.expose_secret(), &path.display().to_string())
 }
 
 fn parse_wallet_file_bytes(bytes: &[u8], source: &str) -> Result<WalletFile> {
@@ -266,24 +294,29 @@ enum WalletFileMode {
     Replace,
 }
 
-fn write_wallet(path: &Path, seed: String, mode: WalletFileMode) -> Result<Wallet> {
-    let wallet = Wallet::from_seed(&seed);
+fn write_wallet(path: &Path, seed: SecretString, mode: WalletFileMode) -> Result<Wallet> {
+    let wallet = Wallet::from_seed(seed.expose_secret());
     write_wallet_file(path, seed, wallet.address(), mode)?;
     Ok(wallet)
 }
 
 fn write_wallet_encrypted(
     path: &Path,
-    seed: String,
+    seed: SecretString,
     password: &str,
     mode: WalletFileMode,
 ) -> Result<Wallet> {
-    let wallet = Wallet::from_seed(&seed);
+    let wallet = Wallet::from_seed(seed.expose_secret());
     write_encrypted_wallet_file(path, seed, wallet.address(), password, mode)?;
     Ok(wallet)
 }
 
-fn write_wallet_file(path: &Path, seed: String, address: &str, mode: WalletFileMode) -> Result<()> {
+fn write_wallet_file(
+    path: &Path,
+    seed: SecretString,
+    address: &str,
+    mode: WalletFileMode,
+) -> Result<()> {
     write_wallet_data_file(path, WalletData { seed }, address, mode)
 }
 
@@ -302,12 +335,13 @@ fn write_wallet_data_file(
     let mut bytes =
         serde_json::to_vec_pretty(&stored).context("failed to serialize wallet file")?;
     bytes.push(b'\n');
-    atomic_write_wallet_file(path, &bytes, mode)
+    let bytes = SecretBox::new(Box::new(bytes));
+    atomic_write_wallet_file(path, bytes.expose_secret(), mode)
 }
 
 fn write_encrypted_wallet_file(
     path: &Path,
-    seed: String,
+    seed: SecretString,
     address: &str,
     password: &str,
     mode: WalletFileMode,
@@ -355,14 +389,15 @@ fn encrypt_wallet_data(
     let salt = random_bytes::<16>()?;
     let nonce = random_bytes::<12>()?;
     let key = wallet_encryption_key(password, &salt, WALLET_ENCRYPTION_ITERATIONS);
-    let cipher = ChaCha20Poly1305::new((&key).into());
-    let plaintext =
-        serde_json::to_vec(data).context("failed to serialize encrypted wallet data")?;
+    let cipher = ChaCha20Poly1305::new(key.expose_secret().into());
+    let plaintext = SecretBox::new(Box::new(
+        serde_json::to_vec(data).context("failed to serialize encrypted wallet data")?,
+    ));
     let ciphertext = cipher
         .encrypt(
             Nonce::from_slice(&nonce),
             Payload {
-                msg: &plaintext,
+                msg: plaintext.expose_secret(),
                 aad: address.as_bytes(),
             },
         )
@@ -377,7 +412,11 @@ fn encrypt_wallet_data(
     })
 }
 
-fn decrypt_seed(encryption: &EncryptedWalletSeed, address: &str, password: &str) -> Result<String> {
+fn decrypt_seed(
+    encryption: &EncryptedWalletSeed,
+    address: &str,
+    password: &str,
+) -> Result<SecretString> {
     Ok(decrypt_wallet_data(encryption, address, password)?.seed)
 }
 
@@ -403,28 +442,32 @@ fn decrypt_wallet_data(
         bail!("invalid wallet encryption nonce length");
     }
     let key = wallet_encryption_key(password, &salt, encryption.kdf_iterations);
-    let cipher = ChaCha20Poly1305::new((&key).into());
-    let plaintext = cipher
-        .decrypt(
-            Nonce::from_slice(&nonce),
-            Payload {
-                msg: &ciphertext,
-                aad: address.as_bytes(),
-            },
-        )
-        .map_err(|_| anyhow!("invalid wallet password"))?;
-    match serde_json::from_slice::<WalletData>(&plaintext) {
+    let cipher = ChaCha20Poly1305::new(key.expose_secret().into());
+    let plaintext = SecretBox::new(Box::new(
+        cipher
+            .decrypt(
+                Nonce::from_slice(&nonce),
+                Payload {
+                    msg: &ciphertext,
+                    aad: address.as_bytes(),
+                },
+            )
+            .map_err(|_| anyhow!("invalid wallet password"))?,
+    ));
+    match serde_json::from_slice::<WalletData>(plaintext.expose_secret()) {
         Ok(data) => Ok(data),
         Err(_) => Ok(WalletData {
-            seed: String::from_utf8(plaintext).context("wallet seed is not valid utf-8")?,
+            seed: String::from_utf8(plaintext.expose_secret().to_vec())
+                .context("wallet seed is not valid utf-8")?
+                .into(),
         }),
     }
 }
 
-fn wallet_encryption_key(password: &str, salt: &[u8], iterations: u32) -> [u8; 32] {
-    let mut key = [0_u8; 32];
-    pbkdf2_hmac::<Sha256>(password.as_bytes(), salt, iterations, &mut key);
-    key
+fn wallet_encryption_key(password: &str, salt: &[u8], iterations: u32) -> SecretBox<[u8; 32]> {
+    SecretBox::init_with_mut(|key: &mut [u8; 32]| {
+        pbkdf2_hmac::<Sha256>(password.as_bytes(), salt, iterations, key);
+    })
 }
 
 fn validate_wallet_encryption_iterations(iterations: u32) -> Result<()> {
@@ -442,13 +485,19 @@ fn random_bytes<const N: usize>() -> Result<[u8; N]> {
     Ok(bytes)
 }
 
-fn generate_seed_phrase() -> Result<String> {
-    let mut entropy = [0_u8; BIP39_SEED_ENTROPY_BYTES];
-    getrandom::getrandom(&mut entropy)
-        .map_err(|error| anyhow!("failed to read system randomness: {error:?}"))?;
-    let mnemonic = Mnemonic::from_entropy_in(Language::English, &entropy)
+fn generate_seed_phrase() -> Result<SecretString> {
+    let mut random_error = None;
+    let entropy = SecretBox::init_with_mut(|entropy: &mut [u8; BIP39_SEED_ENTROPY_BYTES]| {
+        if let Err(error) = getrandom::getrandom(entropy) {
+            random_error = Some(error);
+        }
+    });
+    if let Some(error) = random_error {
+        return Err(anyhow!("failed to read system randomness: {error:?}"));
+    }
+    let mnemonic = Mnemonic::from_entropy_in(Language::English, entropy.expose_secret())
         .context("failed to generate BIP-39 seed phrase")?;
-    Ok(mnemonic.to_string())
+    Ok(mnemonic.to_string().into())
 }
 
 fn hex_encode(bytes: impl AsRef<[u8]>) -> String {
@@ -522,31 +571,37 @@ fn validate_wallet_file_metadata(stored: &WalletFile) -> Result<()> {
     } else {
         let seed = stored
             .seed
-            .as_deref()
+            .as_ref()
+            .map(ExposeSecret::expose_secret)
             .context("wallet file does not contain a seed")?;
         let _ = normalize_seed_phrase(seed)?;
     }
     Ok(())
 }
 
-fn normalize_seed_phrase(seed_phrase: &str) -> Result<String> {
-    let normalized = seed_phrase
-        .split_whitespace()
-        .map(|word| word.trim().to_ascii_lowercase())
-        .filter(|word| !word.is_empty())
-        .collect::<Vec<_>>()
-        .join(" ");
-    if normalized.split_whitespace().count() != GENERATED_SEED_WORDS {
+fn normalize_seed_phrase(seed_phrase: &str) -> Result<SecretString> {
+    let mut normalized = String::new();
+    for word in seed_phrase.split_whitespace().map(str::trim) {
+        if word.is_empty() {
+            continue;
+        }
+        if !normalized.is_empty() {
+            normalized.push(' ');
+        }
+        normalized.extend(word.chars().map(|character| character.to_ascii_lowercase()));
+    }
+    let normalized: SecretString = normalized.into();
+    if normalized.expose_secret().split_whitespace().count() != GENERATED_SEED_WORDS {
         bail!("seed phrase must contain 24 words");
     }
-    for word in normalized.split_whitespace() {
+    for word in normalized.expose_secret().split_whitespace() {
         if !word.chars().all(|ch| ch.is_ascii_lowercase()) {
             bail!("seed phrase words must contain only letters");
         }
     }
-    let mnemonic = Mnemonic::parse_in_normalized(Language::English, &normalized)
+    let mnemonic = Mnemonic::parse_in_normalized(Language::English, normalized.expose_secret())
         .context("invalid BIP-39 seed phrase")?;
-    Ok(mnemonic.to_string())
+    Ok(mnemonic.to_string().into())
 }
 
 fn atomic_write_wallet_file(path: &Path, bytes: &[u8], mode: WalletFileMode) -> Result<()> {

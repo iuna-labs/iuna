@@ -1,10 +1,12 @@
 use std::{
     net::{IpAddr, SocketAddr},
     str::FromStr,
+    sync::Arc,
 };
 
 use anyhow::{Context, Result, bail};
 use axum::http::{HeaderMap, Method, Uri, header, uri::Authority};
+use secrecy::{ExposeSecret, SecretString};
 
 use crate::{
     adapters::{config_store, wallet_store},
@@ -157,7 +159,8 @@ pub(super) async fn request_is_authenticated(state: &HttpState, headers: &Header
 pub(super) async fn setup_capability_cookie(state: &HttpState) -> Option<String> {
     state.setup_capability.lock().await.as_ref().map(|token| {
         format!(
-            "{SETUP_COOKIE_NAME}={token}; Path=/api/auth/setup; HttpOnly; SameSite=Strict; Max-Age={SETUP_COOKIE_TTL_SECS}"
+            "{SETUP_COOKIE_NAME}={}; Path=/api/auth/setup; HttpOnly; SameSite=Strict; Max-Age={SETUP_COOKIE_TTL_SECS}",
+            token.expose_secret()
         )
     })
 }
@@ -168,13 +171,11 @@ pub(super) async fn validate_setup_capability(
 ) -> Result<()> {
     let supplied = named_cookie(headers, SETUP_COOKIE_NAME)
         .context("local password setup capability is required")?;
-    let expected = state
-        .setup_capability
-        .lock()
-        .await
-        .clone()
+    let capability = state.setup_capability.lock().await;
+    let expected = capability
+        .as_ref()
         .context("local password setup capability is no longer available")?;
-    if session_token_hash(supplied) != session_token_hash(&expected) {
+    if session_token_hash(supplied) != session_token_hash(expected.expose_secret()) {
         bail!("local password setup capability is invalid");
     }
     Ok(())
@@ -187,7 +188,7 @@ pub(super) async fn consume_setup_capability(state: &HttpState) {
 pub(super) async fn wallet_password_for_request(
     state: &HttpState,
     headers: &HeaderMap,
-) -> Option<String> {
+) -> Option<Arc<SecretString>> {
     let token = auth_cookie(headers)?;
     let token_hash = session_token_hash(token);
     let now = now_ms();
@@ -250,11 +251,12 @@ fn forwarded_header_client(headers: &HeaderMap) -> Option<String> {
 
 pub(super) async fn setup_auth_password(
     state: &HttpState,
-    password: &str,
+    password: SecretString,
     client_key: &str,
 ) -> Result<String> {
+    let exposed_password = password.expose_secret();
     check_auth_backoff(state, client_key).await?;
-    if let Err(error) = validate_password(password) {
+    if let Err(error) = validate_password(exposed_password) {
         record_auth_failure(state, client_key).await;
         return Err(error);
     }
@@ -263,21 +265,22 @@ pub(super) async fn setup_auth_password(
         record_auth_failure(state, client_key).await;
         bail!("authentication is already configured");
     }
-    config.auth_password_hash = Some(hash_password(password)?);
+    config.auth_password_hash = Some(hash_password(exposed_password)?);
     config_store::save(&state.config_path, &config)?;
     drop(config);
-    wallet_store::encrypt_existing_with_password(&state.wallet_path, password)?;
-    let wallet = wallet_store::load_with_password(&state.wallet_path, password)?;
-    restore_node_wallet_from_store(state, wallet, Some(password)).await?;
+    wallet_store::encrypt_existing_with_password(&state.wallet_path, exposed_password)?;
+    let wallet = wallet_store::load_with_password(&state.wallet_path, exposed_password)?;
+    restore_node_wallet_from_store(state, wallet, Some(exposed_password)).await?;
     clear_auth_backoff(state, client_key).await;
     create_session_cookie(state, password).await
 }
 
 pub(super) async fn login_auth_password(
     state: &HttpState,
-    password: &str,
+    password: SecretString,
     client_key: &str,
 ) -> Result<String> {
+    let exposed_password = password.expose_secret();
     check_auth_backoff(state, client_key).await?;
     let hash = state
         .ui_config
@@ -286,25 +289,27 @@ pub(super) async fn login_auth_password(
         .auth_password_hash
         .clone()
         .context("authentication setup is required")?;
-    if !verify_password(password, &hash)? {
+    if !verify_password(exposed_password, &hash)? {
         record_auth_failure(state, client_key).await;
         bail!("invalid password");
     }
-    wallet_store::encrypt_existing_with_password(&state.wallet_path, password)?;
-    let wallet = wallet_store::load_with_password(&state.wallet_path, password)?;
-    restore_node_wallet_from_store(state, wallet, Some(password)).await?;
+    wallet_store::encrypt_existing_with_password(&state.wallet_path, exposed_password)?;
+    let wallet = wallet_store::load_with_password(&state.wallet_path, exposed_password)?;
+    restore_node_wallet_from_store(state, wallet, Some(exposed_password)).await?;
     clear_auth_backoff(state, client_key).await;
     create_session_cookie(state, password).await
 }
 
 pub(super) async fn change_auth_password(
     state: &HttpState,
-    old_password: &str,
-    new_password: &str,
+    old_password: SecretString,
+    new_password: SecretString,
     client_key: &str,
 ) -> Result<String> {
+    let exposed_old_password = old_password.expose_secret();
+    let exposed_new_password = new_password.expose_secret();
     check_auth_backoff(state, client_key).await?;
-    validate_password(new_password)?;
+    validate_password(exposed_new_password)?;
     let current_hash = state
         .ui_config
         .lock()
@@ -312,18 +317,21 @@ pub(super) async fn change_auth_password(
         .auth_password_hash
         .clone()
         .context("authentication setup is required")?;
-    if !verify_password(old_password, &current_hash)? {
+    if !verify_password(exposed_old_password, &current_hash)? {
         record_auth_failure(state, client_key).await;
         bail!("invalid current password");
     }
-    let wallet =
-        wallet_store::reencrypt_with_password(&state.wallet_path, old_password, new_password)?;
+    let wallet = wallet_store::reencrypt_with_password(
+        &state.wallet_path,
+        exposed_old_password,
+        exposed_new_password,
+    )?;
     {
         let mut config = state.ui_config.lock().await;
-        config.auth_password_hash = Some(hash_password(new_password)?);
+        config.auth_password_hash = Some(hash_password(exposed_new_password)?);
         config_store::save(&state.config_path, &config)?;
     }
-    restore_node_wallet_from_store(state, wallet, Some(new_password)).await?;
+    restore_node_wallet_from_store(state, wallet, Some(exposed_new_password)).await?;
     state.auth_sessions.lock().await.clear();
     clear_auth_backoff(state, client_key).await;
     create_session_cookie(state, new_password).await
@@ -369,19 +377,20 @@ async fn clear_auth_backoff(state: &HttpState, client_key: &str) {
     state.auth_backoff.lock().await.remove(client_key);
 }
 
-async fn create_session_cookie(state: &HttpState, password: &str) -> Result<String> {
+async fn create_session_cookie(state: &HttpState, password: SecretString) -> Result<String> {
     let token = random_hex(32)?;
-    let token_hash = session_token_hash(&token);
+    let token_hash = session_token_hash(token.expose_secret());
     let expires_at = now_ms().saturating_add(AUTH_SESSION_TTL_MS);
     state.auth_sessions.lock().await.insert(
         token_hash,
         AuthSession {
             expires_at,
-            wallet_password: password.to_string(),
+            wallet_password: Arc::new(password),
         },
     );
     Ok(format!(
-        "{AUTH_COOKIE_NAME}={token}; Path=/; HttpOnly; SameSite=Strict; Max-Age={}",
+        "{AUTH_COOKIE_NAME}={}; Path=/; HttpOnly; SameSite=Strict; Max-Age={}",
+        token.expose_secret(),
         AUTH_SESSION_TTL_MS / 1000
     ))
 }
@@ -480,7 +489,7 @@ mod tests {
             },
             auth_sessions: Arc::new(Mutex::new(BTreeMap::new())),
             auth_backoff: Arc::new(Mutex::new(BTreeMap::new())),
-            setup_capability: Arc::new(Mutex::new(Some("test-setup-capability".to_string()))),
+            setup_capability: Arc::new(Mutex::new(Some("test-setup-capability".into()))),
             management_port: 9444,
             wallet_endpoint_addr: None,
         }
@@ -724,14 +733,14 @@ mod tests {
             session_token_hash(expired_token),
             AuthSession {
                 expires_at: now_ms().saturating_sub(1),
-                wallet_password: "expired-password".to_string(),
+                wallet_password: Arc::new("expired-password".into()),
             },
         );
         state.auth_sessions.lock().await.insert(
             session_token_hash(live_token),
             AuthSession {
                 expires_at: now_ms().saturating_add(60_000),
-                wallet_password: "live-password".to_string(),
+                wallet_password: Arc::new("live-password".into()),
             },
         );
 
