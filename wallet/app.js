@@ -7,7 +7,15 @@ import { generateMnemonic, validateMnemonic } from "./mnemonic.js";
 
 const app = document.querySelector("#app");
 const toastElement = document.querySelector("#toast");
-const state = { store: null, wallet: null, walletMeta: null, status: null, address: "", balance: null, utxos: [], transactions: [], view: "home", timer: null };
+const TRANSACTION_PAGE_SIZE = 25;
+const state = {
+  store: null, wallet: null, walletMeta: null, status: null, address: "", balance: null,
+  utxos: [], transactions: [], view: "home", timer: null,
+  transactionFilters: { transfer: true, mine: false, burn: false, reward: true },
+  transactionPage: { offset: 0, total: 0, hasMore: true, loading: false, error: "" },
+  transactionRequest: 0,
+  activityObserver: null,
+};
 const icon = (name) => {
   const paths = {
     send: '<path d="M6 18 18 6M6 6h12v12"/>',
@@ -125,19 +133,108 @@ async function openStoredWallet(meta) {
 
 async function fetchWalletData() {
   state.status = await api("/status");
-  state.address = encodeAddress(state.wallet.publicKey, state.status.chain_id);
+  const address = encodeAddress(state.wallet.publicKey, state.status.chain_id);
+  if (state.address && state.address !== address) {
+    state.transactions = [];
+    Object.assign(state.transactionPage, { offset: 0, total: 0, hasMore: true, loading: false, error: "" });
+  }
+  state.address = address;
   const encoded = encodeURIComponent(state.address);
+  const previousTransactionCount = state.transactions.length;
+  const transactionLimit = Math.min(100, Math.max(TRANSACTION_PAGE_SIZE, previousTransactionCount));
+  const refreshTransactions = !state.transactionPage.loading;
+  const transactionRequest = refreshTransactions ? ++state.transactionRequest : null;
   const [balance, utxos, transactions] = await Promise.all([
     api(`/addresses/${encoded}/balance`),
     api(`/addresses/${encoded}/utxos`),
-    api(`/addresses/${encoded}/transactions?limit=50`),
+    refreshTransactions ? api(transactionPath(0, transactionLimit)) : Promise.resolve(null),
   ]);
   state.balance = balance;
   state.utxos = utxos.utxos || [];
-  state.transactions = transactions.items || [];
+  if (transactions && transactionRequest === state.transactionRequest) {
+    applyTransactionPage(transactions, true, previousTransactionCount);
+  }
+}
+
+function transactionPath(offset, limit) {
+  const encoded = encodeURIComponent(state.address);
+  const params = new URLSearchParams({
+    tx: String(state.transactionFilters.transfer),
+    mine: String(state.transactionFilters.mine),
+    burn: String(state.transactionFilters.burn),
+    reward: String(state.transactionFilters.reward),
+    offset: String(offset),
+    limit: String(limit),
+  });
+  return `/addresses/${encoded}/transactions?${params.toString()}`;
+}
+
+function transactionKey(item) {
+  return `${item.kind || ""}:${item.transaction?.signature || ""}`;
+}
+
+function applyTransactionPage(payload, replace, preserveCount = 0) {
+  const items = Array.isArray(payload?.items) ? payload.items : [];
+  state.transactionPage.error = "";
+  if (replace) {
+    if (preserveCount > items.length && payload?.has_more === true) {
+      const fresh = new Set(items.map(transactionKey));
+      const retained = state.transactions.filter((item) => !fresh.has(transactionKey(item)));
+      state.transactions = items.concat(retained).slice(0, preserveCount);
+    } else {
+      state.transactions = items;
+    }
+  } else {
+    const known = new Set(state.transactions.map(transactionKey));
+    state.transactions = state.transactions.concat(items.filter((item) => {
+      const key = transactionKey(item);
+      if (known.has(key)) return false;
+      known.add(key);
+      return true;
+    }));
+  }
+  state.transactionPage.offset = preserveCount > items.length
+    ? state.transactions.length
+    : Number(payload?.next_offset ?? (replace ? items.length : state.transactionPage.offset + items.length));
+  state.transactionPage.total = Number(payload?.total ?? state.transactions.length);
+  state.transactionPage.hasMore = state.transactions.length < state.transactionPage.total;
+}
+
+async function loadTransactions({ replace = false } = {}) {
+  if (!state.wallet || (state.transactionPage.loading && !replace)) return;
+  const request = ++state.transactionRequest;
+  if (replace) {
+    state.transactions = [];
+    Object.assign(state.transactionPage, { offset: 0, total: 0, hasMore: true });
+  } else if (!state.transactionPage.hasMore) {
+    return;
+  }
+  state.transactionPage.loading = true;
+  state.transactionPage.error = "";
+  if (state.view === "activity") renderApp();
+  try {
+    const offset = replace ? 0 : state.transactionPage.offset;
+    const payload = await api(transactionPath(offset, TRANSACTION_PAGE_SIZE));
+    if (request !== state.transactionRequest) return;
+    applyTransactionPage(payload, replace);
+  } catch (error) {
+    if (request === state.transactionRequest) {
+      state.transactionPage.error = error.message;
+      toast(error.message, true);
+    }
+  } finally {
+    if (request === state.transactionRequest) {
+      state.transactionPage.loading = false;
+      if (state.view === "activity") renderApp();
+    }
+  }
 }
 
 async function openWallet() {
+  state.transactionRequest += 1;
+  state.transactionPage.loading = false;
+  state.activityObserver?.disconnect();
+  state.activityObserver = null;
   app.innerHTML = `<section class="center-card"><div class="spinner"></div><p>Connecting to iuna…</p></section>`;
   try {
     await fetchWalletData();
@@ -193,9 +290,12 @@ function formatTransactionDate(item) {
   }).replace(",", "");
 }
 
-function activityList(limit) {
-  const items = state.transactions.slice(0, limit);
-  if (!items.length) return '<div class="empty">No transactions yet.<br>Your new wallet is ready to use.</div>';
+function activityList(limit, filtered = false) {
+  const items = typeof limit === "number" ? state.transactions.slice(0, limit) : state.transactions;
+  if (!items.length && state.transactionPage.loading) return '';
+  if (!items.length) return filtered
+    ? '<div class="empty">No transactions match these filters.</div>'
+    : '<div class="empty">No transactions yet.<br>Your new wallet is ready to use.</div>';
   return `<div class="activity-list">${items.map((item) => {
     const info = transactionInfo(item);
     const date = formatTransactionDate(item);
@@ -219,7 +319,13 @@ function renderReceive() {
 }
 
 function renderActivity() {
-  return `${topbar()}<p class="eyebrow">Wallet</p><h1 class="view-title">Activity</h1><p class="view-copy">Confirmed and pending transactions.</p><div class="panel">${activityList(50)}</div>`;
+  const filters = [["transfer", "Tx"], ["mine", "Mine"], ["burn", "Burn"], ["reward", "Reward"]]
+    .map(([kind, label]) => `<button class="transaction-filter ${state.transactionFilters[kind] ? "active" : ""}" data-transaction-filter="${kind}" aria-pressed="${state.transactionFilters[kind]}">${label}</button>`)
+    .join("");
+  const loader = state.transactionPage.loading ? '<div class="activity-loader"><span class="spinner"></span><span>Loading transactions…</span></div>' : '';
+  const retry = state.transactionPage.error ? '<button class="activity-retry" data-action="retry-transactions">Loading failed · try again</button>' : '';
+  const sentinel = state.transactionPage.hasMore && !state.transactionPage.error ? '<div id="activity-sentinel" class="activity-sentinel" aria-hidden="true"></div>' : '';
+  return `${topbar()}<p class="eyebrow">Wallet</p><h1 class="view-title">Activity</h1><p class="view-copy">Confirmed and pending transactions.</p><div class="transaction-filters" aria-label="Transaction filters">${filters}</div><div class="panel">${activityList(undefined, true)}${loader}${retry}${sentinel}</div>`;
 }
 
 function renderSettings() {
@@ -229,7 +335,18 @@ function renderSettings() {
 
 function renderApp() {
   const renderers = { home: renderHome, send: renderSend, receive: renderReceive, activity: renderActivity, settings: renderSettings };
+  state.activityObserver?.disconnect();
+  state.activityObserver = null;
   app.innerHTML = `${(renderers[state.view] || renderHome)()}${nav()}`;
+  if (state.view === "activity") {
+    const sentinel = document.querySelector("#activity-sentinel");
+    if (sentinel) {
+      state.activityObserver = new IntersectionObserver((entries) => {
+        if (entries.some((entry) => entry.isIntersecting)) loadTransactions();
+      }, { rootMargin: "240px 0px" });
+      state.activityObserver.observe(sentinel);
+    }
+  }
 }
 
 function renderConfirmation(transaction, fee, recipientAddress, amount) {
@@ -251,6 +368,16 @@ app.addEventListener("click", async (event) => {
   const button = event.target.closest("button");
   if (!button) return;
   const action = button.dataset.action;
+  if (button.dataset.transactionFilter) {
+    const filter = button.dataset.transactionFilter;
+    state.transactionFilters[filter] = !state.transactionFilters[filter];
+    await loadTransactions({ replace: true });
+    return;
+  }
+  if (action === "retry-transactions") {
+    await loadTransactions({ replace: state.transactions.length === 0 });
+    return;
+  }
   if (button.dataset.view) {
     if (button.dataset.view === "send" && state.walletMeta?.type === "readonly") { toast("Watch-only wallets cannot send", true); return; }
     state.view = button.dataset.view; renderApp(); return;

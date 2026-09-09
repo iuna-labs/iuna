@@ -24,6 +24,12 @@ button:focus-visible { outline:2px solid var(--lime); outline-offset:3px; }
 .activity { grid-template-columns:36px minmax(0,1fr) auto; gap:10px; padding:15px 0; border-color:var(--line); }
 .activity-icon { width:34px; height:34px; border-radius:9px; background:#22291a; color:var(--lime); }
 .activity-title { font-size:12px; }.activity-meta { font-size:10px; line-height:1.6; }.activity-amount { font-size:12px; font-variant-numeric:tabular-nums; overflow-wrap:anywhere; max-width:135px; }.activity-amount.in { color:var(--lime); }
+.transaction-filters { display:flex; flex-wrap:wrap; gap:7px; margin:0 0 14px; }
+.transaction-filter { appearance:none; border:1px solid var(--line); border-radius:999px; background:var(--panel); color:var(--muted); padding:8px 12px; font:700 11px/1 inherit; cursor:pointer; }
+.transaction-filter.active { border-color:#d5f55f70; background:#252b20; color:var(--lime); }
+.activity-loader { display:flex; align-items:center; justify-content:center; gap:10px; padding:20px 8px 8px; color:var(--muted); font-size:11px; }
+.activity-retry { appearance:none; display:block; margin:16px auto 2px; border:0; background:transparent; color:var(--lime); padding:8px; font:700 11px/1 inherit; cursor:pointer; }
+.activity-sentinel { height:1px; }
 .empty { padding:30px 8px; font-size:13px; line-height:1.9; }
 .bottom-nav { border-radius:13px; padding:6px; background:#15171af5; border-color:#30363c; box-shadow:0 8px 30px #0005; }
 .nav-item { min-height:52px; border-radius:8px; font-size:10px; font-weight:650; gap:6px; }.nav-item.active { background:#252b20; color:var(--lime); }

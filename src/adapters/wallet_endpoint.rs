@@ -98,8 +98,58 @@ struct TransactionResponse {
 
 #[derive(Debug, Default, Deserialize)]
 struct TransactionsQuery {
+    tx: Option<bool>,
+    mine: Option<bool>,
+    burn: Option<bool>,
+    reward: Option<bool>,
     offset: Option<usize>,
     limit: Option<usize>,
+}
+
+#[derive(Clone, Copy)]
+struct TransactionFilters {
+    transfer: bool,
+    mine: bool,
+    burn: bool,
+    reward: bool,
+}
+
+impl TransactionFilters {
+    fn from_query(query: &TransactionsQuery) -> Self {
+        Self {
+            transfer: query.tx.unwrap_or(true),
+            // Keep the public endpoint's unfiltered default backwards compatible.
+            // The wallet sends all four choices explicitly.
+            mine: query.mine.unwrap_or(true),
+            burn: query.burn.unwrap_or(true),
+            reward: query.reward.unwrap_or(true),
+        }
+    }
+
+    fn allows(self, transaction: &Transaction) -> bool {
+        match transaction {
+            Transaction::Transfer { .. } => self.transfer,
+            Transaction::Mine { .. } => self.mine,
+            Transaction::Burn { .. } => self.burn,
+        }
+    }
+
+    fn kinds(self) -> Vec<&'static str> {
+        let mut kinds = Vec::with_capacity(4);
+        if self.transfer {
+            kinds.push("transfer");
+        }
+        if self.mine {
+            kinds.push("mine");
+        }
+        if self.burn {
+            kinds.push("burn");
+        }
+        if self.reward {
+            kinds.push("reward");
+        }
+        kinds
+    }
 }
 
 #[derive(Debug, Serialize)]
@@ -277,6 +327,7 @@ async fn address_transactions(
 ) -> Result<Json<TransactionsResponse>, (StatusCode, Json<ApiError>)> {
     let offset = query.offset.unwrap_or(0);
     let limit = query.limit.unwrap_or(25).clamp(1, 100);
+    let filters = TransactionFilters::from_query(&query);
     let (public_key, pending) = {
         let node = state.node.lock().await;
         let public_key = node.normalize_user_address(&address).map_err(bad_request)?;
@@ -285,6 +336,7 @@ async fn address_transactions(
             .into_iter()
             .rev()
             .filter(|transaction| transaction_mentions_address(transaction, &public_key))
+            .filter(|transaction| filters.allows(transaction))
             .collect::<Vec<_>>();
         (public_key, pending)
     };
@@ -304,18 +356,18 @@ async fn address_transactions(
 
     let confirmed_offset = offset.saturating_sub(pending_total);
     let remaining = limit.saturating_sub(items.len());
-    let store = state.ui_data_store.clone();
-    let confirmed = tokio::task::spawn_blocking(move || {
-        store.load_wallet_transactions(
-            &public_key,
-            &["transfer", "mine", "burn", "reward"],
-            confirmed_offset,
-            remaining,
-        )
-    })
-    .await
-    .map_err(internal_error)?
-    .map_err(internal_error)?;
+    let kinds = filters.kinds();
+    let confirmed = if kinds.is_empty() {
+        (Vec::new(), 0)
+    } else {
+        let store = state.ui_data_store.clone();
+        tokio::task::spawn_blocking(move || {
+            store.load_wallet_transactions(&public_key, &kinds, confirmed_offset, remaining)
+        })
+        .await
+        .map_err(internal_error)?
+        .map_err(internal_error)?
+    };
     let confirmed_total = confirmed.1;
     items.extend(confirmed.0.into_iter().map(|row| AddressTransaction {
         kind: row.kind,
@@ -591,6 +643,7 @@ mod tests {
         assert_eq!(value["status"], "pending");
 
         let response = app
+            .clone()
             .oneshot(
                 Request::builder()
                     .uri(format!("/v1/addresses/{receive_address}/transactions"))
@@ -604,5 +657,23 @@ mod tests {
         let value: serde_json::Value = serde_json::from_slice(&body).unwrap();
         assert_eq!(value["total"], 1);
         assert_eq!(value["items"][0]["status"], "pending");
+
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .uri(format!(
+                        "/v1/addresses/{receive_address}/transactions?tx=false&mine=true&burn=false&reward=false"
+                    ))
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+        let body = to_bytes(response.into_body(), 64 * 1024).await.unwrap();
+        let value: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        assert_eq!(value["total"], 0);
+        assert_eq!(value["has_more"], false);
+        assert_eq!(value["items"].as_array().unwrap().len(), 0);
     }
 }
