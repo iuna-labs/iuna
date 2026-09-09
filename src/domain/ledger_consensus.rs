@@ -80,25 +80,132 @@ impl Ledger {
     }
 
     pub(super) fn mine_difficulty_bits_for_anchor_height(&self, anchor_height: u64) -> u32 {
-        let mut difficulty = self.launch_profile.mine_difficulty_bits;
-        let mut window_end = MINE_RETARGET_WINDOW_BLOCKS;
-        while window_end <= anchor_height {
-            let window_start = window_end + 1 - MINE_RETARGET_WINDOW_BLOCKS;
-            let mine_actions = self
-                .chain
-                .iter()
-                .filter(|block| window_start <= block.height && block.height <= window_end)
-                .map(mine_action_count)
-                .sum::<u64>();
-            difficulty = retarget_mine_difficulty_bits(difficulty, mine_actions);
-            window_end = window_end.saturating_add(MINE_RETARGET_WINDOW_BLOCKS);
+        let completed_windows = anchor_height / MINE_RETARGET_WINDOW_BLOCKS;
+        if let Ok(index) = usize::try_from(completed_windows)
+            && let Some(difficulty) = self.mine_difficulty_windows.get(index)
+        {
+            return *difficulty;
         }
-        difficulty
+
+        // Tests and migration helpers may construct synthetic chains directly.
+        // Keep a linear fallback for those callers; production ledgers update
+        // the cache as each block is applied.
+        mine_difficulty_windows_for_chain(
+            &self.chain,
+            self.launch_profile.mine_difficulty_bits,
+            anchor_height,
+        )
+        .last()
+        .copied()
+        .unwrap_or(self.launch_profile.mine_difficulty_bits)
+    }
+
+    pub(super) fn update_mine_difficulty_cache_after_tip(&mut self) {
+        let height = self.tip().height;
+        if height == 0 || !height.is_multiple_of(MINE_RETARGET_WINDOW_BLOCKS) {
+            return;
+        }
+        let expected_len = usize::try_from(height / MINE_RETARGET_WINDOW_BLOCKS)
+            .unwrap_or(usize::MAX)
+            .saturating_add(1);
+        if self.mine_difficulty_windows.len() >= expected_len {
+            return;
+        }
+        let mine_actions = self
+            .chain
+            .iter()
+            .rev()
+            .take(MINE_RETARGET_WINDOW_BLOCKS as usize)
+            .map(mine_action_count)
+            .sum();
+        let previous = self
+            .mine_difficulty_windows
+            .last()
+            .copied()
+            .unwrap_or(self.launch_profile.mine_difficulty_bits);
+        self.mine_difficulty_windows
+            .push(retarget_mine_difficulty_bits(previous, mine_actions));
     }
 
     pub(super) fn tip(&self) -> &Block {
         self.chain
             .last()
             .expect("ledger is always initialized with genesis")
+    }
+}
+
+fn mine_difficulty_windows_for_chain(
+    chain: &[Block],
+    initial_difficulty: u32,
+    anchor_height: u64,
+) -> Vec<u32> {
+    let completed_windows = anchor_height / MINE_RETARGET_WINDOW_BLOCKS;
+    let mut difficulties = Vec::with_capacity(
+        usize::try_from(completed_windows)
+            .unwrap_or_default()
+            .saturating_add(1),
+    );
+    difficulties.push(initial_difficulty);
+    let mut difficulty = initial_difficulty;
+    for window in 1..=completed_windows {
+        let window_end = window.saturating_mul(MINE_RETARGET_WINDOW_BLOCKS);
+        let window_start = window_end + 1 - MINE_RETARGET_WINDOW_BLOCKS;
+        let mine_actions = chain
+            .iter()
+            .filter(|block| window_start <= block.height && block.height <= window_end)
+            .map(mine_action_count)
+            .sum();
+        difficulty = retarget_mine_difficulty_bits(difficulty, mine_actions);
+        difficulties.push(difficulty);
+    }
+    difficulties
+}
+
+#[cfg(test)]
+mod tests {
+    use std::collections::BTreeMap;
+
+    use super::*;
+    use crate::domain::{BurnBundleSection, Transaction};
+
+    fn mine(anchor: &str, nonce: u64) -> Transaction {
+        Transaction::Mine {
+            recipient: "1".repeat(64),
+            anchor: anchor.to_string(),
+            salt: 1,
+            nonce,
+            difficulty_bits: 12,
+            proof_header: None,
+            signature: format!("{nonce:064x}"),
+        }
+    }
+
+    #[test]
+    fn applied_window_cache_preserves_retarget_results_for_constant_time_lookup() {
+        let mut ledger = Ledger::new(BTreeMap::new(), 1);
+        for height in 1..=20 {
+            let parent = ledger.tip().clone();
+            let mut block = parent.clone();
+            block.height = height;
+            block.prev_hash = parent.hash.clone();
+            block.hash = format!("{height:064x}");
+            block.burn_bundle_section = BurnBundleSection::default();
+            block.transactions = if height <= 10 {
+                vec![mine(&parent.hash, height)]
+            } else {
+                Vec::new()
+            };
+            ledger.chain.push(block);
+            ledger.update_mine_difficulty_cache_after_tip();
+        }
+
+        assert_eq!(ledger.mine_difficulty_windows, vec![12, 12, 10]);
+        assert_eq!(ledger.mine_difficulty_bits_for_anchor_height(9), 12);
+        assert_eq!(ledger.mine_difficulty_bits_for_anchor_height(10), 12);
+        assert_eq!(ledger.mine_difficulty_bits_for_anchor_height(20), 10);
+
+        let mut uncached = ledger.clone();
+        uncached.mine_difficulty_windows.truncate(1);
+        assert_eq!(uncached.mine_difficulty_bits_for_anchor_height(20), 10);
     }
 }

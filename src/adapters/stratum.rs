@@ -1,8 +1,8 @@
 use std::{
     collections::BTreeMap,
-    net::SocketAddr,
+    net::{IpAddr, Ipv6Addr, SocketAddr},
     sync::{
-        Arc,
+        Arc, Mutex as StdMutex,
         atomic::{AtomicU64, Ordering},
     },
     time::Duration,
@@ -26,7 +26,9 @@ use crate::{
 const STRATUM_MAX_LINE_BYTES: usize = 16 * 1024;
 const STRATUM_MAX_JOBS_PER_SESSION: usize = 128;
 const STRATUM_MAX_SESSIONS: usize = 64;
+const STRATUM_MAX_SESSIONS_PER_SOURCE: usize = 4;
 const STRATUM_IDLE_TIMEOUT: Duration = Duration::from_secs(120);
+const STRATUM_WRITE_TIMEOUT: Duration = Duration::from_secs(10);
 
 #[cfg(feature = "fuzzing")]
 pub fn fuzz_parse_stratum_request(line: &str) -> Result<Value> {
@@ -57,17 +59,72 @@ struct StratumJob {
 #[derive(Clone)]
 struct StratumSessionLimiter {
     permits: Arc<Semaphore>,
+    active_by_source: Arc<StdMutex<BTreeMap<IpAddr, usize>>>,
+}
+
+struct StratumSessionPermit {
+    _global: OwnedSemaphorePermit,
+    source: IpAddr,
+    active_by_source: Arc<StdMutex<BTreeMap<IpAddr, usize>>>,
 }
 
 impl StratumSessionLimiter {
     fn new(max_sessions: usize) -> Self {
         Self {
             permits: Arc::new(Semaphore::new(max_sessions)),
+            active_by_source: Arc::new(StdMutex::new(BTreeMap::new())),
         }
     }
 
-    fn try_acquire(&self) -> Option<OwnedSemaphorePermit> {
-        self.permits.clone().try_acquire_owned().ok()
+    fn try_acquire(&self, remote_ip: IpAddr) -> Option<StratumSessionPermit> {
+        let global = self.permits.clone().try_acquire_owned().ok()?;
+        let source = stratum_source_key(remote_ip);
+        let mut active_by_source = self.active_by_source.lock().ok()?;
+        let active = active_by_source.entry(source).or_default();
+        if *active >= STRATUM_MAX_SESSIONS_PER_SOURCE {
+            return None;
+        }
+        *active += 1;
+        drop(active_by_source);
+        Some(StratumSessionPermit {
+            _global: global,
+            source,
+            active_by_source: Arc::clone(&self.active_by_source),
+        })
+    }
+}
+
+impl Drop for StratumSessionPermit {
+    fn drop(&mut self) {
+        let Ok(mut active_by_source) = self.active_by_source.lock() else {
+            return;
+        };
+        let Some(active) = active_by_source.get_mut(&self.source) else {
+            return;
+        };
+        *active = active.saturating_sub(1);
+        if *active == 0 {
+            active_by_source.remove(&self.source);
+        }
+    }
+}
+
+fn stratum_source_key(ip: IpAddr) -> IpAddr {
+    match ip {
+        IpAddr::V4(_) => ip,
+        IpAddr::V6(ip) => {
+            let segments = ip.segments();
+            IpAddr::V6(Ipv6Addr::new(
+                segments[0],
+                segments[1],
+                segments[2],
+                segments[3],
+                0,
+                0,
+                0,
+                0,
+            ))
+        }
     }
 }
 
@@ -101,7 +158,7 @@ async fn run_listener(server: StratumServer, listener: TcpListener) {
     loop {
         match listener.accept().await {
             Ok((stream, remote)) => {
-                let Some(permit) = server.session_limiter.try_acquire() else {
+                let Some(permit) = server.session_limiter.try_acquire(remote.ip()) else {
                     if debug_logging_enabled() {
                         eprintln!("stratum session with {remote} rejected: session limit reached");
                     }
@@ -373,11 +430,12 @@ impl StratumSession {
     }
 
     async fn send(&self, value: Value) -> Result<()> {
+        let mut payload = serde_json::to_vec(&value)?;
+        payload.push(b'\n');
         let mut writer = self.writer.lock().await;
-        writer
-            .write_all(serde_json::to_string(&value)?.as_bytes())
-            .await?;
-        writer.write_all(b"\n").await?;
+        timeout(STRATUM_WRITE_TIMEOUT, writer.write_all(&payload))
+            .await
+            .context("Stratum response write timeout")??;
         Ok(())
     }
 }
@@ -458,8 +516,9 @@ mod tests {
     use crate::{app::ExternalMineJob, domain::StratumMineTemplate};
 
     use super::{
-        STRATUM_MAX_JOBS_PER_SESSION, STRATUM_MAX_LINE_BYTES, STRATUM_MAX_SESSIONS, StratumJob,
-        StratumLineReader, StratumSessionLimiter, insert_bounded_job, parse_stratum_request,
+        STRATUM_MAX_JOBS_PER_SESSION, STRATUM_MAX_LINE_BYTES, STRATUM_MAX_SESSIONS,
+        STRATUM_MAX_SESSIONS_PER_SOURCE, StratumJob, StratumLineReader, StratumSessionLimiter,
+        insert_bounded_job, parse_stratum_request,
     };
 
     fn dummy_job() -> StratumJob {
@@ -523,12 +582,62 @@ mod tests {
     fn stratum_session_limiter_enforces_global_cap() {
         let limiter = StratumSessionLimiter::new(STRATUM_MAX_SESSIONS);
         let permits = (0..STRATUM_MAX_SESSIONS)
-            .map(|_| limiter.try_acquire().expect("permit should be available"))
+            .map(|index| {
+                limiter
+                    .try_acquire(format!("192.0.2.{}", index + 1).parse().unwrap())
+                    .expect("permit should be available")
+            })
             .collect::<Vec<_>>();
 
-        assert!(limiter.try_acquire().is_none());
+        assert!(
+            limiter
+                .try_acquire("198.51.100.1".parse().unwrap())
+                .is_none()
+        );
         drop(permits);
-        assert!(limiter.try_acquire().is_some());
+        assert!(
+            limiter
+                .try_acquire("198.51.100.1".parse().unwrap())
+                .is_some()
+        );
+    }
+
+    #[test]
+    fn stratum_session_limiter_prevents_one_source_from_exhausting_global_slots() {
+        let limiter = StratumSessionLimiter::new(STRATUM_MAX_SESSIONS);
+        let source = "192.0.2.10".parse().unwrap();
+        let permits = (0..STRATUM_MAX_SESSIONS_PER_SOURCE)
+            .map(|_| limiter.try_acquire(source).unwrap())
+            .collect::<Vec<_>>();
+
+        assert!(limiter.try_acquire(source).is_none());
+        assert!(limiter.try_acquire("192.0.2.11".parse().unwrap()).is_some());
+        drop(permits);
+        assert!(limiter.try_acquire(source).is_some());
+    }
+
+    #[test]
+    fn stratum_session_limiter_groups_ipv6_clients_by_prefix() {
+        let limiter = StratumSessionLimiter::new(STRATUM_MAX_SESSIONS);
+        let permits = (1..=STRATUM_MAX_SESSIONS_PER_SOURCE)
+            .map(|index| {
+                limiter
+                    .try_acquire(format!("2001:db8:1:2::{index}").parse().unwrap())
+                    .unwrap()
+            })
+            .collect::<Vec<_>>();
+
+        assert!(
+            limiter
+                .try_acquire("2001:db8:1:2::ffff".parse().unwrap())
+                .is_none()
+        );
+        assert!(
+            limiter
+                .try_acquire("2001:db8:1:3::1".parse().unwrap())
+                .is_some()
+        );
+        drop(permits);
     }
 
     #[test]

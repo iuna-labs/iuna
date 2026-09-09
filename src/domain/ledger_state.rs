@@ -24,6 +24,10 @@ pub struct Ledger {
     pub(super) pending_bytes: usize,
     pub(super) orphan_bytes: usize,
     pub(super) mine_reward: Amount,
+    /// PoW difficulty after each completed retarget window. Index zero is the
+    /// launch difficulty; index `n` is the difficulty at anchor height
+    /// `n * MINE_RETARGET_WINDOW_BLOCKS`.
+    pub(super) mine_difficulty_windows: Vec<u32>,
     pub(super) initial_vdf_rounds: u64,
     pub(super) vdf_rounds: u64,
     pub(super) launch_profile: LaunchProfile,

@@ -121,6 +121,7 @@ impl Ledger {
         self.mined_transaction_ids
             .extend(mined_signatures.iter().cloned());
         self.chain.push(block);
+        self.update_mine_difficulty_cache_after_tip();
         if let Some(checkpoint) = certified_parent {
             self.objective_finality_checkpoint = Some(checkpoint);
         }
@@ -194,6 +195,7 @@ impl Ledger {
         self.compact_block_context.append_trusted_block(&block)?;
         self.mined_transaction_ids.extend(mined_signatures);
         self.chain.push(block);
+        self.update_mine_difficulty_cache_after_tip();
         if let Some(checkpoint) = certified_parent {
             self.objective_finality_checkpoint = Some(checkpoint);
         }
