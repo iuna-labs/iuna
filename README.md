@@ -72,6 +72,18 @@ Release and deploy with:
 ./deployment.sh 0.4.7
 ```
 
+Releases regenerate [`CHANGELOG.md`](CHANGELOG.md) automatically from the full
+tagged Git history and commit titles. All new commits must use a Conventional
+Commit prefix such as `feat:`, `fix(wallet):`, or `docs:`. Enable the repository
+hooks once after cloning:
+
+```sh
+./scripts/install-git-hooks.sh
+```
+
+Use `!` for a breaking change, for example `feat(api)!: change the wallet
+response format`.
+
 To deploy only the website from the current commit, without changing the
 project version, creating a release tag, rebuilding release artifacts, or
 restarting the node:

@@ -177,14 +177,170 @@ update_versions() {
   cargo check --locked --manifest-path fuzz/Cargo.toml >/dev/null
 }
 
+write_changelog_section() {
+  local version="$1"
+  local release_date="$2"
+  local range="$3"
+  local enforce_titles="$4"
+  local output="$5"
+  local subject
+  local prefix
+  local type
+  local description
+  local category
+  local fragments_dir
+  local commit_count=0
+  local conventional_pattern='^(feat|fix|docs|refactor|perf|test|build|ci|chore|revert)(\([a-z0-9][a-z0-9._/-]*\))?!?: .+'
+
+  fragments_dir="$(mktemp -d)"
+
+  while IFS= read -r subject; do
+    [ -n "$subject" ] || continue
+
+    case "$subject" in
+      "Release v${version}"|"Release ${version}"|"Bump version to ${version}"|\
+      "Prepare v${version}"|"v${version}"|"iuna v${version}"|\
+      "chore(release): release v${version}")
+        continue
+        ;;
+    esac
+
+    if [ "$enforce_titles" = "true" ]; then
+      ./scripts/check-commit-title.sh --title "$subject" || \
+        die "release commits must use Conventional Commit titles"
+    fi
+
+    if [[ "$subject" =~ $conventional_pattern ]]; then
+      prefix="${subject%%:*}"
+      type="${prefix%%\(*}"
+      type="${type%%!*}"
+      description="${subject#*: }"
+      if [[ "$prefix" == *! ]]; then
+        description="**Breaking:** ${description}"
+      fi
+
+      case "$type" in
+        feat) category=added ;;
+        fix) category=fixed ;;
+        perf) category=performance ;;
+        refactor) category=changed ;;
+        docs) category=documentation ;;
+        test) category=tests ;;
+        build) category=build ;;
+        ci) category=ci ;;
+        chore) category=maintenance ;;
+        revert) category=reverted ;;
+        *) die "unsupported commit type in title: ${subject}" ;;
+      esac
+    else
+      category=changed
+      description="$subject"
+    fi
+
+    printf -- '- %s\n' "$description" >> "${fragments_dir}/${category}"
+    commit_count=$((commit_count + 1))
+  done < <(git log --reverse --no-merges --format='%s' "$range")
+
+  {
+    printf '## [%s] - %s\n' "$version" "$release_date"
+    if [ "$commit_count" -eq 0 ]; then
+      printf '\n### Changed\n\n- No notable changes recorded.\n'
+    fi
+    while IFS='|' read -r category heading; do
+      [ -s "${fragments_dir}/${category}" ] || continue
+      printf '\n### %s\n\n' "$heading"
+      cat "${fragments_dir}/${category}"
+    done <<'EOF'
+added|Added
+fixed|Fixed
+changed|Changed
+performance|Performance
+documentation|Documentation
+tests|Tests
+build|Build
+ci|Continuous integration
+maintenance|Maintenance
+reverted|Reverted
+EOF
+    printf '\n'
+  } >> "$output"
+
+  rm -rf "$fragments_dir"
+  changelog_section_commit_count="$commit_count"
+}
+
+generate_changelog() {
+  local version="${1:-}"
+  local latest_tag
+  local range
+  local changelog_file
+  local tag
+  local previous_tag
+  local release_date
+  local i
+  local section_count=0
+  local tags=()
+
+  require_command git
+  require_command perl
+
+  changelog_file="$(mktemp)"
+
+  {
+    printf '# Changelog\n\n'
+    printf 'All notable changes to iuna are documented in this file. Releases are generated\n'
+    printf 'from the Git history and Conventional Commit titles by `deployment.sh`.\n\n'
+    printf '## [Unreleased]\n\n'
+  } > "$changelog_file"
+
+  latest_tag="$(git describe --tags --abbrev=0 2>/dev/null || true)"
+  if [ -n "$version" ]; then
+    if [ -n "$latest_tag" ]; then
+      range="${latest_tag}..HEAD"
+    else
+      range="HEAD"
+    fi
+    write_changelog_section "$version" "$(date +%Y-%m-%d)" "$range" true "$changelog_file"
+    [ "$changelog_section_commit_count" -gt 0 ] || \
+      die "no commits found for changelog since ${latest_tag:-the start of the repository}"
+    section_count=$((section_count + 1))
+  fi
+
+  while IFS= read -r tag; do
+    [[ "$tag" =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ ]] || continue
+    tags+=("$tag")
+  done < <(git tag --list 'v*' --sort=v:refname)
+
+  i=$((${#tags[@]} - 1))
+  while [ "$i" -ge 0 ]; do
+    tag="${tags[$i]}"
+    if [ "$i" -gt 0 ]; then
+      previous_tag="${tags[$((i - 1))]}"
+      range="${previous_tag}..${tag}"
+    else
+      range="${tag}^{commit}"
+    fi
+    release_date="$(git for-each-ref --format='%(creatordate:short)' "refs/tags/${tag}")"
+    [ -n "$release_date" ] || release_date="$(git log -1 --format='%cs' "${tag}^{commit}")"
+    write_changelog_section "${tag#v}" "$release_date" "$range" false "$changelog_file"
+    section_count=$((section_count + 1))
+    i=$((i - 1))
+  done
+
+  perl -0pi -e 's/\n+\z/\n/' "$changelog_file"
+  chmod 644 "$changelog_file"
+  mv "$changelog_file" CHANGELOG.md
+  echo "Generated CHANGELOG.md with ${section_count} release section(s)"
+}
+
 commit_and_tag() {
   local version="$1"
   local tag="v${version}"
 
   require_command git
 
-  git add Cargo.toml Cargo.lock fuzz/Cargo.lock src-tauri/Cargo.toml src-tauri/Cargo.lock src-tauri/tauri.conf.json README.md
-  git commit -m "Release ${tag}" --no-verify
+  git add CHANGELOG.md Cargo.toml Cargo.lock fuzz/Cargo.lock src-tauri/Cargo.toml src-tauri/Cargo.lock src-tauri/tauri.conf.json README.md
+  git commit -m "chore(release): release ${tag}"
   git tag -a "$tag" -m "Release ${tag}"
 }
 
@@ -691,6 +847,7 @@ main() {
     exit 0
   fi
 
+  generate_changelog "$version"
   update_versions "$version"
   run_release_tests "$skip_long_tests"
   build_versions "$version"
