@@ -211,6 +211,24 @@ fn management_ui_wallet_transactions_share_the_generic_detail_flow() {
     assert!(javascript.contains("outpoint: { txid: input.signature, index: \"fee\" }"));
 }
 
+#[test]
+fn transaction_filters_default_to_every_transaction_type() {
+    let management_javascript = include_str!("../www/assets/iuna-ui.js");
+    let wallet_javascript = include_str!("../wallet/app.js");
+    let all_filters = "{ transfer: true, mine: true, burn: true, reward: true }";
+
+    assert!(management_javascript.contains(&format!("walletTxFilters: {all_filters}")));
+    assert!(wallet_javascript.contains(&format!("const ALL_TRANSACTION_FILTERS = {all_filters}")));
+}
+
+#[test]
+fn lightweight_wallet_recent_activity_does_not_use_view_all_filters() {
+    let javascript = include_str!("../wallet/app.js");
+
+    assert!(javascript.contains("api(transactionPath(0, 5, ALL_TRANSACTION_FILTERS))"));
+    assert!(javascript.contains("activityList(5, false, state.recentTransactions)"));
+}
+
 fn ledger_with_one_spendable_iuna(wallet: &Wallet) -> Ledger {
     let mut genesis = BTreeMap::new();
     genesis.insert(wallet.address().to_string(), 3);

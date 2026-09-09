@@ -248,8 +248,8 @@ impl Default for WalletTransactionFilters {
     fn default() -> Self {
         Self {
             transfer: true,
-            mine: false,
-            burn: false,
+            mine: true,
+            burn: true,
             reward: true,
         }
     }
@@ -259,8 +259,8 @@ impl WalletTransactionFilters {
     pub(super) fn from_query(query: WalletTransactionsQuery) -> Self {
         Self {
             transfer: query.tx.unwrap_or(true),
-            mine: query.mine.unwrap_or(false),
-            burn: query.burn.unwrap_or(false),
+            mine: query.mine.unwrap_or(true),
+            burn: query.burn.unwrap_or(true),
             reward: query.reward.unwrap_or(true),
         }
     }

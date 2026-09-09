@@ -8,10 +8,11 @@ import { generateMnemonic, validateMnemonic } from "./mnemonic.js";
 const app = document.querySelector("#app");
 const toastElement = document.querySelector("#toast");
 const TRANSACTION_PAGE_SIZE = 25;
+const ALL_TRANSACTION_FILTERS = { transfer: true, mine: true, burn: true, reward: true };
 const state = {
   store: null, wallet: null, walletMeta: null, status: null, address: "", balance: null,
-  utxos: [], transactions: [], view: "home", timer: null,
-  transactionFilters: { transfer: true, mine: false, burn: false, reward: true },
+  utxos: [], transactions: [], recentTransactions: [], view: "home", timer: null,
+  transactionFilters: { ...ALL_TRANSACTION_FILTERS },
   transactionPage: { offset: 0, total: 0, hasMore: true, loading: false, error: "" },
   transactionRequest: 0,
   activityObserver: null,
@@ -136,6 +137,7 @@ async function fetchWalletData() {
   const address = encodeAddress(state.wallet.publicKey, state.status.chain_id);
   if (state.address && state.address !== address) {
     state.transactions = [];
+    state.recentTransactions = [];
     Object.assign(state.transactionPage, { offset: 0, total: 0, hasMore: true, loading: false, error: "" });
   }
   state.address = address;
@@ -144,25 +146,27 @@ async function fetchWalletData() {
   const transactionLimit = Math.min(100, Math.max(TRANSACTION_PAGE_SIZE, previousTransactionCount));
   const refreshTransactions = !state.transactionPage.loading;
   const transactionRequest = refreshTransactions ? ++state.transactionRequest : null;
-  const [balance, utxos, transactions] = await Promise.all([
+  const [balance, utxos, transactions, recentTransactions] = await Promise.all([
     api(`/addresses/${encoded}/balance`),
     api(`/addresses/${encoded}/utxos`),
     refreshTransactions ? api(transactionPath(0, transactionLimit)) : Promise.resolve(null),
+    api(transactionPath(0, 5, ALL_TRANSACTION_FILTERS)),
   ]);
   state.balance = balance;
   state.utxos = utxos.utxos || [];
+  state.recentTransactions = Array.isArray(recentTransactions?.items) ? recentTransactions.items : [];
   if (transactions && transactionRequest === state.transactionRequest) {
     applyTransactionPage(transactions, true, previousTransactionCount);
   }
 }
 
-function transactionPath(offset, limit) {
+function transactionPath(offset, limit, filters = state.transactionFilters) {
   const encoded = encodeURIComponent(state.address);
   const params = new URLSearchParams({
-    tx: String(state.transactionFilters.transfer),
-    mine: String(state.transactionFilters.mine),
-    burn: String(state.transactionFilters.burn),
-    reward: String(state.transactionFilters.reward),
+    tx: String(filters.transfer),
+    mine: String(filters.mine),
+    burn: String(filters.burn),
+    reward: String(filters.reward),
     offset: String(offset),
     limit: String(limit),
   });
@@ -290,9 +294,9 @@ function formatTransactionDate(item) {
   }).replace(",", "");
 }
 
-function activityList(limit, filtered = false) {
-  const items = typeof limit === "number" ? state.transactions.slice(0, limit) : state.transactions;
-  if (!items.length && state.transactionPage.loading) return '';
+function activityList(limit, filtered = false, source = state.transactions) {
+  const items = typeof limit === "number" ? source.slice(0, limit) : source;
+  if (!items.length && filtered && state.transactionPage.loading) return '';
   if (!items.length) return filtered
     ? '<div class="empty">No transactions match these filters.</div>'
     : '<div class="empty">No transactions yet.<br>Your new wallet is ready to use.</div>';
@@ -305,7 +309,7 @@ function activityList(limit, filtered = false) {
 
 function renderHome() {
   const readonly = state.walletMeta?.type === "readonly";
-  return `${topbar()}<section>${readonly ? '<div class="mode-badge">Watch-only · signing disabled</div>' : ""}<p class="eyebrow">Available balance</p><h1 class="balance">${formatIuna(state.balance?.spendable, 6)} <span>IUNA</span></h1><p class="subbalance">${formatIuna(state.balance?.confirmed, 6)} confirmed · block ${escapeHtml(state.balance?.height)}</p><div class="actions"><button class="button" data-view="send" ${readonly ? "disabled" : ""}>${icon("send")} Send</button><button class="button secondary" data-view="receive">${icon("receive")} Receive</button></div><div class="section-head"><h2>Recent activity</h2><button data-view="activity">View all</button></div><div class="panel">${activityList(5)}</div></section>`;
+  return `${topbar()}<section>${readonly ? '<div class="mode-badge">Watch-only · signing disabled</div>' : ""}<p class="eyebrow">Available balance</p><h1 class="balance">${formatIuna(state.balance?.spendable, 6)} <span>IUNA</span></h1><p class="subbalance">${formatIuna(state.balance?.confirmed, 6)} confirmed · block ${escapeHtml(state.balance?.height)}</p><div class="actions"><button class="button" data-view="send" ${readonly ? "disabled" : ""}>${icon("send")} Send</button><button class="button secondary" data-view="receive">${icon("receive")} Receive</button></div><div class="section-head"><h2>Recent activity</h2><button data-view="activity">View all</button></div><div class="panel">${activityList(5, false, state.recentTransactions)}</div></section>`;
 }
 
 function renderSend() {
