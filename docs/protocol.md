@@ -337,6 +337,8 @@ signed burn bundles for that height, parent hash, and slot set.
 
 Nodes only keep transactions in their local mempool when they are valid, fee-paying, and unexpired. Pending and orphan transaction pools are bounded by both item count and serialized byte size. A signed burn bundle is limited to `10,000` bytes, and nodes only cache valid bundles for the next height and current parent.
 
+When the pending count or byte bound is reached, a node admits an independent transaction only if its fee rate is strictly higher than the lowest evictable pending package. Package eviction removes dependent pending transactions and orphan descendants together. This is local relay policy, not a block-consensus rule.
+
 ## Block Selection
 
 When a node builds a block, the flow is:

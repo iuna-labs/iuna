@@ -21,7 +21,7 @@ found in the reviewed validation paths.
 | IUNA-2026-001 | High | Effectively EUR 0 from one public IP | Patched |
 | IUNA-2026-002 | High over chain lifetime | A basic host and bandwidth; well below EUR 100/month | Patched |
 | IUNA-2026-003 | High during first sync | Below EUR 10,000 when DNS/routing/bootstrap access is available | Patched |
-| IUNA-2026-004 | Medium | 10,000 minimum-fee transactions; protocol value likely far below EUR 10,000 | Open hardening item |
+| IUNA-2026-004 | Medium | 10,000 minimum-fee transactions; protocol value likely far below EUR 10,000 | Patched |
 
 ## IUNA-2026-001 — one source could exhaust every Stratum session
 
@@ -122,12 +122,13 @@ bounds memory, but not admission fairness or repeated validation cost.
 Impact: delayed transaction propagation and local CPU load. Consensus remains
 valid and directly connected block producers can still include transactions.
 
-Recommended patch: introduce a minimum relay fee rate and dependency-aware
-replacement of the lowest-fee transaction package. This should be implemented
-as mempool policy, leaving block consensus compatible with already signed
-low-fee transactions. Add tests proving that a full pool accepts a higher-fee
-independent transaction, removes descendants of an evicted parent, and keeps
-byte/count counters exact.
+Patch: once the count or byte bound is reached, the lowest-fee-rate independent
+package becomes the dynamic relay floor. A candidate is admitted only when its
+fee rate is strictly higher; eviction removes the package's pending and orphan
+descendants atomically and recalculates both byte counters. Ordinary low-fee
+admission and block consensus remain compatible. Regression tests prove that a
+full pool accepts a higher-fee independent transaction, descendants are removed
+as one package, and the byte/count counters remain exact.
 
 ## Verification evidence
 
@@ -141,7 +142,7 @@ cargo clippy --locked --all-targets --all-features -- -D warnings: passed
 
 The initial sandboxed run completed 330 tests successfully; its 15 socket-based
 P2P tests could not call `bind(2)`. The suite was then repeated locally with
-loopback permission and passed completely: 427 passed, 0 failed, and 36
+loopback permission and passed completely: 432 passed, 0 failed, and 36
 long-running tests were ignored by their existing configuration.
 
 `scripts/check-dependencies.sh` could not refresh RustSec because the sandbox
@@ -152,5 +153,4 @@ therefore not claimed by this report.
 
 Do not promote to mainnet until the complete release gate is run on the exact
 final revision, the candidate manifest is updated, and the custom VDF plus
-economic finality assumptions receive independent review. IUNA-2026-004 should
-be fixed before exposing a high-value public transaction network.
+economic finality assumptions receive independent review.
