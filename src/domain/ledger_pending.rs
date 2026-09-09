@@ -464,7 +464,12 @@ impl Ledger {
                 let required_difficulty =
                     self.mine_difficulty_bits_for_anchor_height(anchor_block.height);
                 if *difficulty_bits != required_difficulty {
-                    bail!("mine transaction difficulty is invalid");
+                    bail!(
+                        "mine transaction difficulty is invalid: got {}, required {} at anchor height {}",
+                        difficulty_bits,
+                        required_difficulty,
+                        anchor_block.height
+                    );
                 }
             }
         }

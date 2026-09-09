@@ -183,6 +183,7 @@ impl Harness {
         );
         let mut ledger = Ledger::new_with_genesis_burns(allocations, genesis_burns, 1).unwrap();
         ledger.launch_profile.mine_difficulty_bits = 0;
+        ledger.mine_difficulty_windows[0] = 0;
 
         let wallets = all_wallets
             .into_iter()
@@ -2307,9 +2308,14 @@ fn check_committee_selection(seed: u64, lineage_idx: usize) -> TestCaseResult {
     let committee = harness.ledger.burn_committee_for_next_block();
     let mini_committee = mini_burn_committee_for_next_block(&harness.ledger)
         .expect("mini committee oracle should replay generated lineage");
-    let snapshot_committee = Ledger::from_snapshot_at(harness.ledger.snapshot(), NOW_MS)
-        .unwrap()
-        .burn_committee_for_next_block();
+    let snapshot_ledger = Ledger::from_snapshot_at(harness.ledger.snapshot(), NOW_MS);
+    prop_assert!(
+        snapshot_ledger.is_ok(),
+        "seed={} snapshot replay failed: {}",
+        seed,
+        snapshot_ledger.as_ref().err().unwrap()
+    );
+    let snapshot_committee = snapshot_ledger.unwrap().burn_committee_for_next_block();
 
     prop_assert_eq!(
         committee.clone(),
