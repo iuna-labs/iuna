@@ -139,6 +139,11 @@ pub(super) fn inbound_error_counts_as_misbehavior(message: &str) -> bool {
     !message.contains("block timestamp is too far in the future")
         && !message.contains("block timestamp is before finalizer rank")
         && !message.contains("block page has no common ancestor with local chain")
+        && !message.contains("burn bundle parent hash is invalid")
+        && !message.contains(
+            "burn transaction anchor is not valid for either of the next two block heights",
+        )
+        && !message.contains("mine transaction anchor is not on this chain")
 }
 
 #[cfg(test)]
@@ -164,5 +169,20 @@ mod tests {
 
         assert!(is_possible_fork_error(&anyhow!(message)));
         assert!(!inbound_error_counts_as_misbehavior(message));
+    }
+
+    #[test]
+    fn fork_scoped_gossip_errors_do_not_penalize_peers() {
+        for message in [
+            "burn bundle parent hash is invalid",
+            "burn transaction anchor is not valid for either of the next two block heights",
+            "mine transaction anchor is not on this chain",
+        ] {
+            assert!(!inbound_error_counts_as_misbehavior(message));
+        }
+
+        assert!(inbound_error_counts_as_misbehavior(
+            "burn bundle signature is invalid"
+        ));
     }
 }
