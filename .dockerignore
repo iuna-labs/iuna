@@ -12,6 +12,7 @@
 !Cargo.lock
 !rust-toolchain.toml
 !src/**
+!config/update-signing.key.pub
 
 # Static website and repository browser (Dockerfile).
 !.git/**
