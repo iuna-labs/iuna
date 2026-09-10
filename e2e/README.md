@@ -92,11 +92,12 @@ into two connected groups of three. It requires both islands to converge
 internally on different tips containing new recovery blocks, removes the rules,
 requires six-node convergence, restarts node6 with its existing data, and waits
 for a new rank-0 ticket block that finalizes at or beyond the canonical recovery
-height. The disposable scenario deterministically selects one sampled recovery
-worker per island and tip
-while leaving the other island members out of the recovery race. It restores the
-normal 50% configuration before healing, avoiding both a recovery-less small
-island and unrestricted fallback-ticket production.
+height. The disposable scenario deterministically leaves one automatic finalizer
+active per island; disabling the other members cancels their in-flight VDFs
+before partitioning. Before healing it also stops one island's worker so a single
+canonical branch can overtake the other. It restores every node's original
+finalization settings after convergence, avoiding both a recovery-less small
+island and competing recovery branches.
 
 `sync-resilience` restores the mature six-node checkpoint and adds a seventh,
 non-finalizing `syncnode` with a fresh data directory. It interrupts that node

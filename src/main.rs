@@ -904,6 +904,7 @@ async fn run_automatic_finalizer(node: SharedNode, gossip: p2p::GossipNetwork, d
             )
         });
         let mut cancelled_for_new_tip = false;
+        let mut cancelled_for_disabled = false;
         let vdf_output = loop {
             tokio::select! {
                 result = &mut vdf_worker => {
@@ -925,9 +926,18 @@ async fn run_automatic_finalizer(node: SharedNode, gossip: p2p::GossipNetwork, d
                         }
                         node.lock().await.record_automatic_finalization_status(message);
                     }
-                    let tip_changed = node.lock().await.ledger().tip_hash() != candidate_parent;
+                    let (tip_changed, finalization_disabled) = {
+                        let node = node.lock().await;
+                        (
+                            node.ledger().tip_hash() != candidate_parent,
+                            !node.automatic_mining_enabled(),
+                        )
+                    };
                     if tip_changed {
                         cancelled_for_new_tip = true;
+                        cancellation.store(true, Ordering::Relaxed);
+                    } else if finalization_disabled {
+                        cancelled_for_disabled = true;
                         cancellation.store(true, Ordering::Relaxed);
                     }
                 }
@@ -945,6 +955,10 @@ async fn run_automatic_finalizer(node: SharedNode, gossip: p2p::GossipNetwork, d
         let Some(vdf_output) = vdf_output else {
             let message = if cancelled_for_new_tip {
                 format!("cancelled stale VDF for candidate block {candidate_height}")
+            } else if cancelled_for_disabled {
+                format!(
+                    "cancelled VDF for candidate block {candidate_height} because automatic finalization is disabled"
+                )
             } else {
                 format!("VDF worker failed for candidate block {candidate_height}")
             };
@@ -959,6 +973,7 @@ async fn run_automatic_finalizer(node: SharedNode, gossip: p2p::GossipNetwork, d
 
         let completed_at_ms = now_ms();
         let mut stale_before_publish = false;
+        let mut disabled_before_publish = false;
         if completed_at_ms < publish_at_ms {
             let wait_ms = publish_at_ms - completed_at_ms;
             let message = format!(
@@ -979,15 +994,28 @@ async fn run_automatic_finalizer(node: SharedNode, gossip: p2p::GossipNetwork, d
                 }
                 let wait_ms = publish_at_ms - current_ms;
                 tokio::time::sleep(std::time::Duration::from_millis(wait_ms.min(1_000))).await;
-                if node.lock().await.ledger().tip_hash() != candidate_parent {
-                    stale_before_publish = true;
+                let (tip_changed, finalization_disabled) = {
+                    let node = node.lock().await;
+                    (
+                        node.ledger().tip_hash() != candidate_parent,
+                        !node.automatic_mining_enabled(),
+                    )
+                };
+                if tip_changed || finalization_disabled {
+                    stale_before_publish = tip_changed;
+                    disabled_before_publish = finalization_disabled;
                     break;
                 }
             }
         }
-        if stale_before_publish {
-            let message =
-                format!("cancelled completed VDF for stale candidate block {candidate_height}");
+        if stale_before_publish || disabled_before_publish {
+            let message = if stale_before_publish {
+                format!("cancelled completed VDF for stale candidate block {candidate_height}")
+            } else {
+                format!(
+                    "cancelled completed VDF for candidate block {candidate_height} because automatic finalization is disabled"
+                )
+            };
             if debug {
                 println!("auto-finalization {message}");
             }
@@ -1000,6 +1028,12 @@ async fn run_automatic_finalizer(node: SharedNode, gossip: p2p::GossipNetwork, d
 
         let (finalized, outbox) = {
             let mut node = node.lock().await;
+            if !node.automatic_mining_enabled() {
+                node.record_automatic_finalization_status(format!(
+                    "cancelled completed VDF for candidate block {candidate_height} because automatic finalization is disabled"
+                ));
+                continue;
+            }
             let finalized = node.complete_prepared_block_at(work, vdf_output, publish_timestamp_ms);
             match &finalized {
                 Ok(block) => node.record_automatic_finalization_status(format!(

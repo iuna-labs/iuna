@@ -459,7 +459,6 @@ def wait_for_partition_recovery(
     deadline = time.monotonic() + timeout
     last_summary = "nodes unavailable"
     left, right = PARTITION_GROUPS
-    tuned_tips: dict[str, str] = {}
     while time.monotonic() < deadline:
         try:
             statuses = all_statuses()
@@ -486,9 +485,6 @@ def wait_for_partition_recovery(
                 ]
                 if recoveries:
                     recovery_heights[label] = max(recoveries)
-                elif tuned_tips.get(label) != group_tip[1]:
-                    tune_recovery_worker(group, group_tip[1])
-                    tuned_tips[label] = group_tip[1]
             last_summary = ", ".join(
                 f"{service}={status['chain']['height']}:{status['chain']['tip_hash'][:12]}"
                 for service, status in statuses.items()
@@ -514,35 +510,80 @@ def wait_for_partition_recovery(
     )
 
 
-def tune_recovery_worker(group: tuple[str, ...], tip_hash: str) -> None:
-    samples = {}
-    for service in group:
-        wallet = json.loads((runtime_dir() / service / "wallet.json").read_text())
-        address = wallet["address"]
-        digest = hashlib.sha256(
-            f"iuna-recovery-vdf-sample:{tip_hash}:{address}".encode()
-        ).digest()
-        samples[service] = digest[0] % 100
-    worker = min(samples, key=samples.get)
-    for service in group:
-        percent = samples[worker] + 1 if service == worker else 0
+def automatic_finalization_settings(statuses: dict[str, dict]) -> dict[str, dict]:
+    return {
+        service: {
+            "enabled": bool(statuses[service]["mining"]["automatic"]),
+            "amount": int(statuses[service]["mining"]["burn_per_block"]),
+            "fee_per_byte": int(statuses[service]["mining"]["automatic_burn_fee"]),
+        }
+        for service in SERVICES
+    }
+
+
+def configure_partition_recovery_workers(
+    statuses: dict[str, dict], settings: dict[str, dict], timeout: float
+) -> dict[str, str]:
+    workers = {
+        "left": PARTITION_GROUPS[0][0],
+        "right": PARTITION_GROUPS[1][0],
+    }
+    for label, group in (("left", PARTITION_GROUPS[0]), ("right", PARTITION_GROUPS[1])):
+        tips = {statuses[service]["chain"]["tip_hash"] for service in group}
+        if len(tips) != 1:
+            raise E2EError(f"cannot select {label} recovery worker before convergence")
+    if not all(values["enabled"] for values in settings.values()):
+        raise E2EError("partition recovery requires automatic finalization on every node")
+
+    for service in SERVICES:
+        mining = statuses[service]["mining"]
+        if service == workers["left"]:
+            continue
         node_form(
             service,
-            "/api/settings/recovery-vdf",
-            {"top_rank_percent": percent},
+            "/api/settings/burn-per-block",
+            {
+                "enabled": "false",
+                "amount": mining["burn_per_block"],
+                "fee_per_byte": mining["automatic_burn_fee"],
+            },
         )
+
+    # The automatic-finalizer loop polls this setting and cancels any in-flight
+    # VDF. Let every disabled node observe it, then absorb a block that may have
+    # crossed the publication boundary concurrently with the settings update.
+    time.sleep(2)
+    current = all_statuses()
+    target = max(status["chain"]["height"] for status in current.values())
+    wait_for_height(target, timeout, converge=True)
+
+    right_settings = settings[workers["right"]]
+    node_form(
+        workers["right"],
+        "/api/settings/burn-per-block",
+        {
+            "enabled": "true",
+            "amount": right_settings["amount"],
+            "fee_per_byte": right_settings["fee_per_byte"],
+        },
+    )
     print(
-        f"recovery worker for {group}: {worker} at {samples[worker] + 1}%",
+        "partition recovery workers: " + json.dumps(workers, sort_keys=True),
         flush=True,
     )
+    return workers
 
 
-def restore_recovery_participation(percent: int = 50) -> None:
-    for service in SERVICES:
+def restore_automatic_finalization(settings: dict[str, dict]) -> None:
+    for service, values in settings.items():
         node_form(
             service,
-            "/api/settings/recovery-vdf",
-            {"top_rank_percent": percent},
+            "/api/settings/burn-per-block",
+            {
+                "enabled": "true" if values["enabled"] else "false",
+                "amount": values["amount"],
+                "fee_per_byte": values["fee_per_byte"],
+            },
         )
 
 
@@ -1219,12 +1260,17 @@ def run_partition_recovery_scenario(
         "running e2e scenario partition-recovery: physical 3-3 split, heal and restart",
         flush=True,
     )
+    mining_settings = None
     restore_snapshot("first-objective-checkpoint")
     try:
         start(build)
         initial = wait_for_height(1_001, timeout, converge=True)
         evidence["phases"]["initial"] = evidence_statuses(initial)
         write_evidence_report(evidence_run, evidence)
+        mining_settings = automatic_finalization_settings(initial)
+        recovery_workers = configure_partition_recovery_workers(
+            initial, mining_settings, timeout
+        )
         apply_partition()
         partitioned_start = all_statuses()
         left, right = PARTITION_GROUPS
@@ -1236,6 +1282,7 @@ def run_partition_recovery_scenario(
         }
         evidence["phases"]["partition_started"] = {
             "boundaries": partition_boundaries,
+            "recovery_workers": recovery_workers,
             "nodes": evidence_statuses(partitioned_start),
         }
         write_evidence_report(evidence_run, evidence)
@@ -1253,11 +1300,26 @@ def run_partition_recovery_scenario(
             flush=True,
         )
 
-        restore_recovery_participation()
+        right_worker = recovery_workers["right"]
+        right_mining = mining_settings[right_worker]
+        node_form(
+            right_worker,
+            "/api/settings/burn-per-block",
+            {
+                "enabled": "false",
+                "amount": right_mining["amount"],
+                "fee_per_byte": right_mining["fee_per_byte"],
+            },
+        )
+        # Stop the competing branch before reconnecting the islands. Otherwise
+        # equally paced recovery workers can keep both branches growing forever.
+        time.sleep(2)
         clear_partition()
         heal_target = max(status["chain"]["height"] for status in partitioned.values())
         healed = wait_for_height(heal_target, timeout, converge=True)
         assert_converged(healed)
+        restore_automatic_finalization(mining_settings)
+        mining_settings = None
         partition_height = max(partition_boundaries.values())
         canonical_recoveries = [
             block
@@ -1322,6 +1384,14 @@ def run_partition_recovery_scenario(
         raise
     finally:
         clear_partition()
+        if mining_settings is not None:
+            try:
+                restore_automatic_finalization(mining_settings)
+            except Exception as error:
+                print(
+                    f"warning: could not restore automatic finalization settings: {error}",
+                    file=sys.stderr,
+                )
         if not keep:
             compose("down", "--remove-orphans", check=False)
 

@@ -122,6 +122,10 @@ impl NodeCore {
         self.prepare_automatic_burn(now_ms())
     }
 
+    pub fn automatic_mining_enabled(&self) -> bool {
+        self.automatic_mining_enabled
+    }
+
     pub fn set_pow_mining_enabled(&mut self, enabled: bool) {
         self.pow_mining_enabled = enabled;
         self.auto_pow_mine_cursor = None;
