@@ -5,6 +5,20 @@ from the Git history and Conventional Commit titles by `deployment.sh`.
 
 ## [Unreleased]
 
+## [0.4.30] - 2026-09-10
+
+### Added
+
+- add signed automatic updates
+
+### Fixed
+
+- include updater public key in Docker context
+- use Rustls for cross-platform releases
+- roll back failed release preparation
+- use native roots for updater TLS
+- cancel competing recovery finalizers
+
 ## [0.4.29] - 2026-09-10
 
 ### Added
