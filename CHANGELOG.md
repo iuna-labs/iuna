@@ -5,6 +5,31 @@ from the Git history and Conventional Commit titles by `deployment.sh`.
 
 ## [Unreleased]
 
+## [0.4.29] - 2026-09-10
+
+### Added
+
+- protect in-memory secrets
+
+### Fixed
+
+- reduce app icon mark size
+- harden cheap denial of service paths
+- pin candidate genesis
+- evict lower-fee packages under pressure
+- keep adversarial difficulty cache consistent
+- honor local profile during initial sync
+- tolerate stale fork gossip
+
+### Changed
+
+- type validation control flow
+
+### Documentation
+
+- update thanks
+- remove stale release planning artifacts
+
 ## [0.4.28] - 2026-09-09
 
 ### Fixed
