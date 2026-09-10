@@ -641,7 +641,19 @@ async fn initialize_ledger(
         let ledger = match opts.chain_mode {
             ChainMode::Setup => Ok(setup_ledger(local_testnet)),
             ChainMode::Genesis => start_genesis_ledger(wallet_address, local_testnet),
-            ChainMode::Join => join_chain_ledger(&opts.join_peers, advertised_p2p_addr).await,
+            ChainMode::Join => {
+                let expected_profile = if local_testnet {
+                    LaunchProfile::local_testnet()
+                } else {
+                    LaunchProfile::default()
+                };
+                join_chain_ledger(
+                    &opts.join_peers,
+                    advertised_p2p_addr,
+                    &expected_profile.profile_id,
+                )
+                .await
+            }
         }?;
         Ok(InitializedLedger {
             ledger,
@@ -772,10 +784,20 @@ fn extrapolate_vdf_rounds(measured_rounds: u64, elapsed: Duration, target: Durat
     rounds.min(u128::from(MAX_VDF_ROUNDS)) as u64
 }
 
-async fn join_chain_ledger(join_peers: &[String], advertised_addr: SocketAddr) -> Result<Ledger> {
+async fn join_chain_ledger(
+    join_peers: &[String],
+    advertised_addr: SocketAddr,
+    expected_profile_id: &str,
+) -> Result<Ledger> {
     let mut errors = Vec::new();
     for peer in join_peers {
-        match p2p::fetch_snapshot_with_announcement(peer, Some(advertised_addr)).await {
+        match p2p::fetch_snapshot_with_announcement(
+            peer,
+            Some(advertised_addr),
+            expected_profile_id,
+        )
+        .await
+        {
             Ok(snapshot) => {
                 let height = snapshot
                     .blocks

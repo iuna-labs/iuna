@@ -20,7 +20,7 @@ use super::{
 };
 
 pub async fn fetch_snapshot(peer: &str) -> Result<ChainSnapshot> {
-    fetch_snapshot_with_announcement(peer, None).await
+    fetch_snapshot_with_announcement(peer, None, &LaunchProfile::default().profile_id).await
 }
 
 pub async fn fetch_peer_height(peer: &str) -> Result<u64> {
@@ -71,6 +71,7 @@ async fn fetch_peer_status(peer: &str) -> Result<PeerStatus> {
 pub async fn fetch_snapshot_with_announcement(
     peer: &str,
     _advertised_addr: Option<SocketAddr>,
+    expected_profile_id: &str,
 ) -> Result<ChainSnapshot> {
     let stream = TcpStream::connect(peer)
         .await
@@ -105,7 +106,7 @@ pub async fn fetch_snapshot_with_announcement(
     write_envelope(&mut writer, &join_client_hello()).await?;
     write_envelope(&mut writer, &GossipEnvelope::ChainBootstrapRequest).await?;
     let bootstrap = read_join_bootstrap_response(peer, &mut reader).await?;
-    validate_bootstrap_genesis(&LaunchProfile::default().profile_id, &bootstrap)?;
+    validate_bootstrap_genesis(expected_profile_id, &bootstrap)?;
 
     let mut snapshot = ChainSnapshot {
         genesis_allocations: bootstrap.genesis_allocations,
