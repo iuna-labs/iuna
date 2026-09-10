@@ -3,6 +3,19 @@ set -euo pipefail
 
 cd "$(dirname "${BASH_SOURCE[0]}")"
 
+RELEASE_ROLLBACK_ARMED=false
+RELEASE_START_HEAD=""
+RELEASE_VERSION_FILES=(
+  CHANGELOG.md
+  Cargo.toml
+  Cargo.lock
+  fuzz/Cargo.lock
+  src-tauri/Cargo.toml
+  src-tauri/Cargo.lock
+  src-tauri/tauri.conf.json
+  README.md
+)
+
 usage() {
   echo "Usage:"
   echo "  $0 [--genesis] [--skip-long-tests] <version>"
@@ -99,6 +112,36 @@ ensure_head_matches_tag() {
   head_commit="$(git rev-parse HEAD)"
   tag_commit="$(git rev-parse "${tag}^{commit}")"
   [ "$head_commit" = "$tag_commit" ] || die "${tag} exists, but HEAD is not at ${tag}; checkout ${tag} before redeploying it"
+}
+
+arm_release_rollback() {
+  RELEASE_START_HEAD="$(git rev-parse HEAD)"
+  RELEASE_ROLLBACK_ARMED=true
+  trap 'rollback_release_changes "$?"' EXIT
+}
+
+disarm_release_rollback() {
+  RELEASE_ROLLBACK_ARMED=false
+}
+
+rollback_release_changes() {
+  local exit_status="$1"
+  local current_head
+
+  [ "$exit_status" -ne 0 ] || return 0
+  [ "$RELEASE_ROLLBACK_ARMED" = "true" ] || return 0
+
+  current_head="$(git rev-parse HEAD 2>/dev/null || true)"
+  if [ "$current_head" != "$RELEASE_START_HEAD" ]; then
+    echo "WARNING: release failed after HEAD changed; version changes were not rolled back" >&2
+    return 0
+  fi
+
+  if git restore --source="$RELEASE_START_HEAD" --staged --worktree -- "${RELEASE_VERSION_FILES[@]}"; then
+    echo "Release failed; restored version and changelog files to $(git rev-parse --short "$RELEASE_START_HEAD")" >&2
+  else
+    echo "WARNING: release failed and version changes could not be restored automatically" >&2
+  fi
 }
 
 ensure_tauri_cli() {
@@ -360,7 +403,7 @@ commit_and_tag() {
 
   require_command git
 
-  git add CHANGELOG.md Cargo.toml Cargo.lock fuzz/Cargo.lock src-tauri/Cargo.toml src-tauri/Cargo.lock src-tauri/tauri.conf.json README.md
+  git add "${RELEASE_VERSION_FILES[@]}"
   git commit -m "chore(release): release ${tag}"
   git tag -a "$tag" -m "Release ${tag}"
 }
@@ -964,11 +1007,13 @@ main() {
     exit 0
   fi
 
+  arm_release_rollback
   generate_changelog "$version"
   update_versions "$version"
   run_release_tests "$skip_long_tests"
   build_versions "$version"
   commit_and_tag "$version"
+  disarm_release_rollback
   build_docker_image "$version"
   deploy_docker_image "$version" "$genesis"
 }
