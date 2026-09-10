@@ -226,21 +226,22 @@ impl Ledger {
             if existing.hash == block.hash {
                 return Ok(false);
             }
-            bail!(
-                "block at height {} conflicts with local chain",
-                block.height
-            );
+            return Err(super::ValidationError::BlockConflictsWithLocalChain {
+                height: block.height,
+            }
+            .into());
         }
 
         let expected_height = self.tip().height + 1;
         if block.height != expected_height {
-            bail!(
-                "expected block height {expected_height}, got {}",
-                block.height
-            );
+            return Err(super::ValidationError::UnexpectedBlockHeight {
+                expected: expected_height,
+                actual: block.height,
+            }
+            .into());
         }
         if block.prev_hash != self.tip().hash {
-            bail!("block does not extend local tip");
+            return Err(super::ValidationError::BlockDoesNotExtendLocalTip.into());
         }
         if block.compute_hash() != block.hash {
             bail!("block hash is invalid");
@@ -259,10 +260,11 @@ impl Ledger {
         if block.finalizer_mode == FinalizerMode::Ticket {
             let min_timestamp = ticket_block_min_timestamp(self.tip(), block.finalizer_rank)?;
             if block.timestamp_ms < min_timestamp {
-                bail!(
-                    "block timestamp is before finalizer rank {} time slot {min_timestamp}",
-                    block.finalizer_rank
-                );
+                return Err(super::ValidationError::BlockBeforeFinalizerRankSlot {
+                    rank: block.finalizer_rank,
+                    min_timestamp,
+                }
+                .into());
             }
         }
         let median_time_past = self.median_time_past();
@@ -271,7 +273,7 @@ impl Ledger {
         }
         let max_future_timestamp = now_ms.saturating_add(MAX_BLOCK_TIMESTAMP_FUTURE_DRIFT_MS);
         if block.timestamp_ms > max_future_timestamp {
-            bail!("block timestamp is too far in the future");
+            return Err(super::ValidationError::BlockTimestampTooFarInFuture.into());
         }
         if block.transactions.len() > self.launch_profile.max_block_transactions {
             bail!("block has too many transactions");

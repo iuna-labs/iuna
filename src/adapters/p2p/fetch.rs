@@ -254,7 +254,7 @@ pub(super) async fn validate_blocks_extension(
                 .blocks
                 .iter()
                 .position(|block| block.hash == blocks[0].prev_hash)
-                .context("block page has no common ancestor with local chain")?;
+                .ok_or(super::SyncError::BlockPageHasNoCommonAncestor)?;
             #[cfg(feature = "e2e")]
             for block in &blocks {
                 if !verify_vdf(&block.vdf_seed(), block.vdf_rounds, &block.vdf_output) {

@@ -1,8 +1,8 @@
 use anyhow::Result;
 
 use crate::domain::{
-    Block, BurnBundle, ChainSnapshot, Ledger, MINE_ANCHOR_LIMIT_REACHED, Transaction,
-    TransactionSubmitOutcome,
+    Block, BurnBundle, ChainSnapshot, Ledger, Transaction, TransactionSubmitOutcome,
+    ValidationError, error_has_validation,
 };
 
 use super::{GossipEnvelope, IMPORT_REBROADCAST_LIMIT, NodeCore};
@@ -18,7 +18,9 @@ impl NodeCore {
             Ok(outcome) => outcome,
             Err(error)
                 if matches!(&tx, Transaction::Mine { .. })
-                    && error.to_string() == MINE_ANCHOR_LIMIT_REACHED =>
+                    && error_has_validation(&error, |kind| {
+                        kind == ValidationError::MineAnchorLimitReached
+                    }) =>
             {
                 return Ok(());
             }

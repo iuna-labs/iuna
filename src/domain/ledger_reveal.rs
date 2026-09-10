@@ -431,7 +431,7 @@ impl Ledger {
             bail!("burn bundle height is invalid");
         }
         if bundle.prev_hash != expected_prev_hash {
-            bail!("burn bundle parent hash is invalid");
+            return Err(super::ValidationError::BurnBundleParentMismatch.into());
         }
         if usize::from(bundle.slot) >= BURN_COMMITTEE_SIZE {
             bail!("burn bundle slot is invalid");

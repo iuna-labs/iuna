@@ -6,6 +6,7 @@ mod adversarial_tests;
 mod block;
 #[cfg(test)]
 mod consolidation_tests;
+mod error;
 mod fork;
 mod genesis;
 mod hex;
@@ -38,6 +39,7 @@ use block::LeaderProofPayload;
 pub use block::{
     Block, BurnLeaderRank, ChainSnapshot, ChainStatus, FinalizerMode, LeaderProof, PreparedBlock,
 };
+pub(crate) use error::{ValidationError, error_has_validation};
 use fork::{FinalityCheckpoint, LeaderScore};
 pub(crate) use genesis::genesis_allocation_outpoint;
 pub use hex::hex_hash;
@@ -52,7 +54,6 @@ use ledger_ops::{
     recovery_vdf_seed_for_child, validate_genesis_burn_transaction, vdf_content_commitment,
     vdf_seed_for_child,
 };
-pub(crate) use ledger_pending::MINE_ANCHOR_LIMIT_REACHED;
 pub use ledger_state::Ledger;
 use ledger_state::unix_now_ms;
 pub(crate) use mine_policy::{MINE_RETARGET_WINDOW_BLOCKS, retarget_mine_difficulty_bits};

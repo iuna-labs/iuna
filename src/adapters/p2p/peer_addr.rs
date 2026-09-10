@@ -6,6 +6,10 @@ use std::{
 
 use anyhow::{Context, Result};
 
+use crate::domain::{ValidationError, error_has_validation};
+
+use super::SyncError;
+
 pub(super) fn next_reconnect_delay(current: Duration, max_delay: Duration) -> Duration {
     (current * 2).min(max_delay)
 }
@@ -128,61 +132,77 @@ pub(super) fn is_quiet_disconnect(error: &anyhow::Error) -> bool {
 }
 
 pub(super) fn is_possible_fork_error(error: &anyhow::Error) -> bool {
-    let message = format!("{error:#}");
-    message.contains("does not extend local tip")
-        || message.contains("conflicts with local chain")
-        || message.contains("expected block height")
-        || message.contains("block page has no common ancestor with local chain")
+    error_has_validation(error, ValidationError::requests_fork_recovery)
+        || error.chain().any(|cause| {
+            matches!(
+                cause.downcast_ref::<SyncError>(),
+                Some(SyncError::BlockPageHasNoCommonAncestor)
+            )
+        })
 }
 
-pub(super) fn inbound_error_counts_as_misbehavior(message: &str) -> bool {
-    !message.contains("block timestamp is too far in the future")
-        && !message.contains("block timestamp is before finalizer rank")
-        && !message.contains("block page has no common ancestor with local chain")
-        && !message.contains("burn bundle parent hash is invalid")
-        && !message.contains(
-            "burn transaction anchor is not valid for either of the next two block heights",
-        )
-        && !message.contains("mine transaction anchor is not on this chain")
+pub(super) fn inbound_error_counts_as_misbehavior(error: &anyhow::Error) -> bool {
+    !is_possible_fork_error(error)
+        && !error_has_validation(error, |kind| kind.is_fork_relative() || kind.is_temporal())
 }
 
 #[cfg(test)]
 mod tests {
     use anyhow::anyhow;
 
+    use crate::domain::ValidationError;
+
+    use super::super::SyncError;
+
     use super::{inbound_error_counts_as_misbehavior, is_possible_fork_error};
 
     #[test]
     fn future_and_unopened_rank_slot_errors_are_temporal_not_misbehavior() {
-        assert!(!inbound_error_counts_as_misbehavior(
-            "block timestamp is too far in the future"
-        ));
-        assert!(!inbound_error_counts_as_misbehavior(
-            "block timestamp is before finalizer rank 1 time slot"
-        ));
-        assert!(inbound_error_counts_as_misbehavior("block hash is invalid"));
+        assert!(!inbound_error_counts_as_misbehavior(&anyhow::Error::new(
+            ValidationError::BlockTimestampTooFarInFuture
+        )));
+        assert!(!inbound_error_counts_as_misbehavior(&anyhow::Error::new(
+            ValidationError::BlockBeforeFinalizerRankSlot {
+                rank: 1,
+                min_timestamp: 123,
+            }
+        )));
+        assert!(inbound_error_counts_as_misbehavior(&anyhow!(
+            "block hash is invalid"
+        )));
     }
 
     #[test]
     fn missing_block_page_ancestor_triggers_fork_recovery_without_peer_penalty() {
-        let message = "block batch: block page has no common ancestor with local chain";
+        let error =
+            anyhow::Error::new(SyncError::BlockPageHasNoCommonAncestor).context("block batch");
 
-        assert!(is_possible_fork_error(&anyhow!(message)));
-        assert!(!inbound_error_counts_as_misbehavior(message));
+        assert!(is_possible_fork_error(&error));
+        assert!(!inbound_error_counts_as_misbehavior(&error));
     }
 
     #[test]
     fn fork_scoped_gossip_errors_do_not_penalize_peers() {
-        for message in [
-            "burn bundle parent hash is invalid",
-            "burn transaction anchor is not valid for either of the next two block heights",
-            "mine transaction anchor is not on this chain",
+        for kind in [
+            ValidationError::BurnBundleParentMismatch,
+            ValidationError::BurnAnchorOutsidePendingWindow,
+            ValidationError::MineAnchorNotOnChain,
         ] {
-            assert!(!inbound_error_counts_as_misbehavior(message));
+            let error = anyhow::Error::new(kind);
+            assert!(!inbound_error_counts_as_misbehavior(&error));
+            assert!(!is_possible_fork_error(&error));
         }
 
-        assert!(inbound_error_counts_as_misbehavior(
+        assert!(inbound_error_counts_as_misbehavior(&anyhow!(
             "burn bundle signature is invalid"
-        ));
+        )));
+    }
+
+    #[test]
+    fn matching_text_without_a_typed_error_is_not_trusted() {
+        let error = anyhow!("burn bundle parent hash is invalid");
+
+        assert!(inbound_error_counts_as_misbehavior(&error));
+        assert!(!is_possible_fork_error(&error));
     }
 }

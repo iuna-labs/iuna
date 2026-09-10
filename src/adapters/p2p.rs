@@ -12,6 +12,7 @@ use tokio::{
 
 use crate::app::{GossipEnvelope, SharedNode, SharedPeerBook};
 
+mod error;
 mod fetch;
 mod handshake;
 mod identity;
@@ -27,6 +28,7 @@ mod sync;
 #[cfg(test)]
 mod test_support;
 mod writer;
+use error::SyncError;
 pub use fetch::{fetch_peer_height, fetch_snapshot, fetch_snapshot_with_announcement};
 use fetch::{
     network_adjusted_time_ms, validate_blocks_extension, validate_chain_bootstrap, verify_block_vdf,

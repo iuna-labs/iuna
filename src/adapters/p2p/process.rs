@@ -1,6 +1,6 @@
 use std::net::SocketAddr;
 
-use anyhow::{Result, anyhow};
+use anyhow::Result;
 use sha2::{Digest, Sha256};
 use tokio::net::tcp::OwnedWriteHalf;
 
@@ -360,9 +360,7 @@ async fn process_transactions(
         network,
         known_peer,
         remote_addr,
-        first_error
-            .map(|error| Err(anyhow!(format!("{error:#}"))))
-            .unwrap_or(Ok(())),
+        first_error.map(Err).unwrap_or(Ok(())),
     )
     .await;
     network.forward_outbox().await;
@@ -388,9 +386,7 @@ async fn process_burn_bundles(
         network,
         known_peer,
         remote_addr,
-        first_error
-            .map(|error| Err(anyhow!(format!("{error:#}"))))
-            .unwrap_or(Ok(())),
+        first_error.map(Err).unwrap_or(Ok(())),
     )
     .await;
     network.forward_outbox().await;
@@ -430,7 +426,7 @@ async fn record_inbound_result(
         Err(error) => {
             let message = format!("{error:#}");
             let mut peers = network.inner.peers.lock().await;
-            if super::inbound_error_counts_as_misbehavior(&message) {
+            if super::inbound_error_counts_as_misbehavior(&error) {
                 if known_peer.is_some() {
                     peers.record_misbehavior(&peer, message.clone());
                 } else {

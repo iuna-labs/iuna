@@ -24,8 +24,6 @@ use super::{
     MAX_PENDING_TRANSACTIONS, MINE_ACTIONS_PER_ANCHOR_LIMIT, OutPoint, Transaction, TxOutput,
 };
 
-pub(crate) const MINE_ANCHOR_LIMIT_REACHED: &str = "mine transaction anchor limit reached";
-
 impl Ledger {
     pub(super) fn valid_pending_transactions(&self) -> Vec<Transaction> {
         let mut utxos = self.utxos.clone();
@@ -353,7 +351,7 @@ impl Ledger {
                         .count(),
                 );
             if known_count >= MINE_ACTIONS_PER_ANCHOR_LIMIT {
-                bail!(MINE_ANCHOR_LIMIT_REACHED);
+                return Err(super::ValidationError::MineAnchorLimitReached.into());
             }
         }
         Ok(())
@@ -456,7 +454,7 @@ impl Ledger {
                     .chain
                     .iter()
                     .find(|block| block.hash == *anchor)
-                    .context("mine transaction anchor is not on this chain")?;
+                    .ok_or(super::ValidationError::MineAnchorNotOnChain)?;
                 let anchor_age = self.tip().height.saturating_sub(anchor_block.height);
                 if anchor_age > MINE_MAX_ANCHOR_AGE_BLOCKS {
                     bail!("mine transaction anchor is too old");
@@ -527,7 +525,7 @@ impl Ledger {
             return Ok(());
         }
 
-        bail!("burn transaction anchor is not valid for either of the next two block heights")
+        Err(super::ValidationError::BurnAnchorOutsidePendingWindow.into())
     }
 
     pub(crate) fn transaction_is_eligible_for_next_block(&self, transaction: &Transaction) -> bool {
