@@ -4,8 +4,9 @@ use std::{
     sync::{Mutex, OnceLock},
 };
 
-use tauri::WindowEvent;
+use tauri::{AppHandle, State, WindowEvent};
 use tauri_plugin_shell::{ShellExt, process::CommandChild};
+use tauri_plugin_updater::{Update, UpdaterExt};
 
 #[cfg(any(target_os = "macos", target_os = "windows"))]
 use tauri::{
@@ -16,13 +17,22 @@ use tauri::{
 
 struct IunaSidecar(Mutex<Option<CommandChild>>);
 struct IunaSleepInhibitor(Mutex<Option<SleepInhibitor>>);
+struct PendingDesktopUpdate(Mutex<Option<Update>>);
 
 static SIDECAR: OnceLock<IunaSidecar> = OnceLock::new();
 static SLEEP_INHIBITOR: OnceLock<IunaSleepInhibitor> = OnceLock::new();
 
 fn main() {
+    let updater = tauri_plugin_updater::Builder::new()
+        .pubkey(include_str!("../../config/update-signing.key.pub").trim());
     tauri::Builder::default()
         .plugin(tauri_plugin_shell::init())
+        .plugin(updater.build())
+        .manage(PendingDesktopUpdate(Mutex::new(None)))
+        .invoke_handler(tauri::generate_handler![
+            check_desktop_update,
+            install_desktop_update
+        ])
         .setup(|app| {
             #[cfg(any(target_os = "macos", target_os = "windows"))]
             setup_desktop_tray(app)?;
@@ -78,6 +88,47 @@ fn main() {
                 stop_sidecar();
             }
         });
+}
+
+#[tauri::command]
+async fn check_desktop_update(
+    app: AppHandle,
+    pending: State<'_, PendingDesktopUpdate>,
+) -> Result<Option<String>, String> {
+    let update = app
+        .updater()
+        .map_err(|error| error.to_string())?
+        .check()
+        .await
+        .map_err(|error| error.to_string())?;
+    let version = update.as_ref().map(|update| update.version.clone());
+    *pending.0.lock().map_err(|_| "updater mutex poisoned")? = update;
+    Ok(version)
+}
+
+#[tauri::command]
+async fn install_desktop_update(
+    app: AppHandle,
+    pending: State<'_, PendingDesktopUpdate>,
+) -> Result<(), String> {
+    let update = pending
+        .0
+        .lock()
+        .map_err(|_| "updater mutex poisoned")?
+        .take()
+        .ok_or_else(|| "no verified desktop update is ready".to_string())?;
+    let bytes = update
+        .download(|_, _| {}, || {})
+        .await
+        .map_err(|error| error.to_string())?;
+
+    stop_sidecar();
+    update.install(bytes).map_err(|error| error.to_string())?;
+
+    #[cfg(not(target_os = "windows"))]
+    app.restart();
+    #[cfg(target_os = "windows")]
+    Ok(())
 }
 
 #[cfg(any(target_os = "macos", target_os = "windows"))]

@@ -10,7 +10,7 @@ publish = false
 cargo-fuzz = true
 
 [dependencies]
-iuna = { path = "..", features = ["fuzzing"] }
+iuna = { path = "..", default-features = false, features = ["fuzzing"] }
 libfuzzer-sys = "0.4"
 serde_json = "1"
 

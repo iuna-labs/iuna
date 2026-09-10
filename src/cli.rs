@@ -313,8 +313,11 @@ pub(crate) fn help_text() -> &'static str {
          Usage:\n\
            iuna [options]\n\
            iuna --genesis [options]\n\
-           iuna --join <addr:port> [options]\n\n\
+           iuna --join <addr:port> [options]\n\
+           iuna update [--check]\n\n\
          Options:\n\
+           --version                     Print the installed iuna version\n\
+           update [--check]              Install or only check for a signed CLI update\n\
            --genesis                     Create a new chain with a fresh setup wallet\n\
            --wallet <path>               Wallet file (default <data-dir>/wallet.json)\n\
            --chain-db <path>             Chain SQLite database (default <data-dir>/chain.sqlite3)\n\

@@ -222,6 +222,17 @@ fn transaction_filters_default_to_every_transaction_type() {
 }
 
 #[test]
+fn management_ui_uses_the_native_desktop_updater_when_available() {
+    let html = include_str!("adapters/http/index_html.rs");
+    let javascript = include_str!("../www/assets/iuna-ui.js");
+
+    assert!(javascript.contains("invoke(\"check_desktop_update\")"));
+    assert!(javascript.contains("invoke(\"install_desktop_update\")"));
+    assert!(html.contains("Install and restart"));
+    assert!(!javascript.contains("window.confirm"));
+}
+
+#[test]
 fn lightweight_wallet_recent_activity_does_not_use_view_all_filters() {
     let javascript = include_str!("../wallet/app.js");
 

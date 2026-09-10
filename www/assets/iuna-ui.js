@@ -47,6 +47,8 @@ window.iunaApp = function iunaApp() {
     latestRelease: null,
     releaseCheckState: "idle",
     releaseCheckError: null,
+    desktopUpdateModalOpen: false,
+    desktopUpdateBusy: false,
     config: { setup_complete: false },
     auth: { configured: false, authenticated: false },
     authLoaded: false,
@@ -303,6 +305,7 @@ window.iunaApp = function iunaApp() {
     },
 
     versionPanelTitle() {
+      if (this.desktopUpdateBusy) return "Installing update";
       if (this.updateAvailable()) return `Update available: ${this.latestReleaseLabel()}`;
       if (this.releaseCheckState === "failed") return this.releaseCheckError || "Could not check latest release";
       if (this.releaseCheckState === "checking") return "Checking latest release";
@@ -311,6 +314,15 @@ window.iunaApp = function iunaApp() {
 
     async openLatestRelease() {
       const url = this.latestRelease?.url || IUNA_DOWNLOADS_URL;
+      const invoke = window.__TAURI__?.core?.invoke;
+      if (
+        this.updateAvailable()
+        && this.latestRelease?.desktopReady === true
+        && typeof invoke === "function"
+      ) {
+        this.desktopUpdateModalOpen = true;
+        return;
+      }
       try {
         const tauriOpen = window.__TAURI__?.shell?.open;
         if (typeof tauriOpen === "function") {
@@ -319,6 +331,24 @@ window.iunaApp = function iunaApp() {
         }
       } catch {}
       window.open(url, "_blank", "noopener,noreferrer");
+    },
+
+    closeDesktopUpdateModal() {
+      if (this.desktopUpdateBusy) return;
+      this.desktopUpdateModalOpen = false;
+    },
+
+    async installDesktopUpdate() {
+      const invoke = window.__TAURI__?.core?.invoke;
+      if (typeof invoke !== "function") return;
+      this.desktopUpdateBusy = true;
+      try {
+        await invoke("install_desktop_update");
+      } catch (error) {
+        this.desktopUpdateBusy = false;
+        this.desktopUpdateModalOpen = false;
+        this.showFlash(error?.message || String(error) || "Desktop update failed", "error");
+      }
     },
 
     showingSetup() {
@@ -1177,9 +1207,17 @@ window.iunaApp = function iunaApp() {
         if (!version) {
           throw new Error("Release metadata is missing a version");
         }
+        let desktopVersion = null;
+        const invoke = window.__TAURI__?.core?.invoke;
+        if (typeof invoke === "function") {
+          try {
+            desktopVersion = this.normalizeVersion(await invoke("check_desktop_update"));
+          } catch {}
+        }
         this.latestRelease = {
           tag: `v${version}`,
           url: release.url || IUNA_DOWNLOADS_URL,
+          desktopReady: desktopVersion === version,
         };
         this.releaseCheckState = "done";
       } catch (error) {
@@ -1368,6 +1406,7 @@ window.iunaApp = function iunaApp() {
     },
 
     closeModals() {
+      this.closeDesktopUpdateModal();
       this.closeOptimizeWallet();
       this.closeSendConfirmModal();
       this.closeTransactionModal();

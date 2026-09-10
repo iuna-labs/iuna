@@ -66,11 +66,21 @@ On macOS and Windows, closing the desktop window keeps the node running from the
 system tray. Choose **Open iuna** to reopen the window, or **Quit iuna** to stop the node. On
 Windows, a left click on the tray icon also reopens the window directly.
 
+The desktop app checks for signed updates. When a new release is available, click the version
+badge and choose **Install and restart**. The bundled node is stopped before installation; wallet,
+settings, and chain data are not part of the app bundle and remain in place.
+
 Release and deploy with:
 
 ```sh
 ./deployment.sh 0.4.7
 ```
+
+Updater artifacts are signed with the private key at `config/update-signing.key` by default. This
+file is ignored by Git and must be backed up separately; losing it prevents existing installations
+from accepting future updates. Set `IUNA_UPDATE_SIGNING_KEY` to use a securely stored copy, and
+`TAURI_SIGNING_PRIVATE_KEY_PASSWORD` when that key is password-protected. The matching public key
+is committed at `config/update-signing.key.pub`.
 
 Releases regenerate [`CHANGELOG.md`](CHANGELOG.md) automatically from the full
 tagged Git history and commit titles. All new commits must use a Conventional
@@ -159,6 +169,18 @@ On Windows PowerShell:
 ```
 
 The binary prints a local management URL. Open it and follow setup.
+
+On supported Linux releases, check or install a signed CLI update with:
+
+```sh
+iuna --version
+iuna update --check
+iuna update
+```
+
+The updater replaces only the running executable. If it is installed in a system-owned directory,
+run the command with suitable permissions or move Iuna to a user-writable binary directory. Restart
+any long-running service after updating.
 
 ## Optional: Local Docker Testnet
 

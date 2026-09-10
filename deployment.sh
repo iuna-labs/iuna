@@ -109,6 +109,27 @@ ensure_tauri_cli() {
   fi
 }
 
+update_signing_key() {
+  local key="${IUNA_UPDATE_SIGNING_KEY:-config/update-signing.key}"
+  [ -f "$key" ] || die "missing update signing key: ${key}; restore it from the secure release-key backup"
+  (
+    cd "$(dirname "$key")"
+    printf '%s/%s\n' "$(pwd)" "$(basename "$key")"
+  )
+}
+
+validate_update_public_key() {
+  local configured_key
+  local committed_key
+
+  require_command jq
+  configured_key="$(jq -r '.plugins.updater.pubkey' src-tauri/tauri.conf.json)"
+  committed_key="$(tr -d '\r\n' < config/update-signing.key.pub)"
+  [ -n "$configured_key" ] || die "desktop updater public key is empty"
+  [ "$configured_key" = "$committed_key" ] || \
+    die "src-tauri/tauri.conf.json updater key does not match config/update-signing.key.pub"
+}
+
 clear_nsis_installers() {
   local nsis_dir="$1"
 
@@ -348,7 +369,10 @@ build_macos_desktop_if_possible() {
   local version="$1"
   local artifact="downloads/iuna-v${version}-macos-aarch64-desktop.app.zip"
 
-  [ -f "$artifact" ] && return 0
+  [ -f "$artifact" ] \
+    && [ -f "downloads/iuna-v${version}-macos-aarch64-desktop-update.app.tar.gz" ] \
+    && [ -f "downloads/iuna-v${version}-macos-aarch64-desktop-update.app.tar.gz.sig" ] \
+    && return 0
   [ "$(uname -s)" = "Darwin" ] || return 0
   is_apple_silicon_macos || die "macOS desktop artifact requires Apple silicon; expected ${artifact}"
 
@@ -356,40 +380,56 @@ build_macos_desktop_if_possible() {
   require_command ditto
   require_command rustup
   ensure_tauri_cli
+  local signing_key
+  signing_key="$(update_signing_key)"
   rustup target add aarch64-apple-darwin
   cargo build --release --locked --target aarch64-apple-darwin
   mkdir -p src-tauri/binaries downloads
   cp target/aarch64-apple-darwin/release/iuna src-tauri/binaries/iuna-sidecar-aarch64-apple-darwin
   chmod +x src-tauri/binaries/iuna-sidecar-aarch64-apple-darwin
-  (cd src-tauri && cargo tauri build --target aarch64-apple-darwin --bundles app)
+  (cd src-tauri && \
+    TAURI_SIGNING_PRIVATE_KEY="$(cat "$signing_key")" \
+    TAURI_SIGNING_PRIVATE_KEY_PASSWORD="${TAURI_SIGNING_PRIVATE_KEY_PASSWORD-}" \
+    cargo tauri build --target aarch64-apple-darwin --bundles app)
 
   local app="src-tauri/target/aarch64-apple-darwin/release/bundle/macos/iuna.app"
-  codesign --force --deep --sign - --options runtime "$app"
+  local updater_archive="${app}.tar.gz"
   codesign --verify --deep --strict --verbose=4 "$app"
+  [ -f "$updater_archive" ] || die "missing macOS updater archive: ${updater_archive}"
+  [ -f "${updater_archive}.sig" ] || die "missing macOS updater signature: ${updater_archive}.sig"
   ditto -c -k --keepParent "$app" "$artifact"
+  cp "$updater_archive" "downloads/iuna-v${version}-macos-aarch64-desktop-update.app.tar.gz"
+  cp "${updater_archive}.sig" "downloads/iuna-v${version}-macos-aarch64-desktop-update.app.tar.gz.sig"
 }
 
 build_windows_desktop_if_possible() {
   local version="$1"
   local artifact="downloads/iuna-v${version}-windows-x86_64-desktop-setup.exe"
 
-  [ -f "$artifact" ] && return 0
+  [ -f "$artifact" ] && [ -f "${artifact}.sig" ] && return 0
   case "$(uname -s)" in
     MINGW*|MSYS*|CYGWIN*) ;;
     *) return 0 ;;
   esac
 
   ensure_tauri_cli
+  local signing_key
+  signing_key="$(update_signing_key)"
   cargo build --release --locked
   mkdir -p src-tauri/binaries downloads
   cp target/release/iuna.exe src-tauri/binaries/iuna-sidecar-x86_64-pc-windows-msvc.exe
   local nsis_dir="src-tauri/target/release/bundle/nsis"
   clear_nsis_installers "$nsis_dir"
-  (cd src-tauri && cargo tauri build --bundles nsis)
+  (cd src-tauri && \
+    TAURI_SIGNING_PRIVATE_KEY="$(cat "$signing_key")" \
+    TAURI_SIGNING_PRIVATE_KEY_PASSWORD="${TAURI_SIGNING_PRIVATE_KEY_PASSWORD-}" \
+    cargo tauri build --bundles nsis)
 
   local installer
   installer="$(versioned_nsis_installer "$nsis_dir" "$version")"
   cp "$installer" "$artifact"
+  [ -f "${installer}.sig" ] || die "missing Windows updater signature: ${installer}.sig"
+  cp "${installer}.sig" "${artifact}.sig"
 }
 
 build_windows_desktop_in_docker_if_possible() {
@@ -397,18 +437,21 @@ build_windows_desktop_in_docker_if_possible() {
   local artifact="downloads/iuna-v${version}-windows-x86_64-desktop-setup.exe"
   local builder_platform
   local builder_arch
+  local signing_key
 
-  [ -f "$artifact" ] && return 0
+  [ -f "$artifact" ] && [ -f "${artifact}.sig" ] && return 0
   command -v docker >/dev/null 2>&1 || return 0
 
   builder_platform="$(docker_native_linux_platform)"
   builder_arch="${builder_platform#linux/}"
+  signing_key="$(update_signing_key)"
 
   mkdir -p downloads
   docker run --rm --pull=always --platform="$builder_platform" \
     -e "IUNA_VERSION=${version}" \
     -e "HOST_UID=$(id -u)" \
     -e "HOST_GID=$(id -g)" \
+    -e "TAURI_SIGNING_PRIVATE_KEY_PASSWORD=${TAURI_SIGNING_PRIVATE_KEY_PASSWORD-}" \
     -v iuna-windows-cargo-registry:/usr/local/cargo/registry \
     -v iuna-windows-cargo-git:/usr/local/cargo/git \
     -v iuna-windows-root-cache:/root/.cache \
@@ -416,9 +459,12 @@ build_windows_desktop_in_docker_if_possible() {
     -v "iuna-windows-${builder_arch}-tauri-target:/work/iuna/src-tauri/target" \
     -v "$(pwd):/src/iuna:ro" \
     -v "$(pwd)/downloads:/out" \
+    -v "${signing_key}:/run/secrets/iuna-update.key:ro" \
     rust:1.88-bookworm \
     bash -c '
       set -euo pipefail
+
+      export TAURI_SIGNING_PRIVATE_KEY="$(cat /run/secrets/iuna-update.key)"
 
       apt-get update
       # The Linux-hosted Tauri CLI inspects enabled tray features while preparing
@@ -467,7 +513,9 @@ build_windows_desktop_in_docker_if_possible() {
       installer="${nsis_dir}/iuna_${IUNA_VERSION}_x64-setup.exe"
       [ -f "$installer" ] || { echo "Windows installer for version ${IUNA_VERSION} was not produced at ${installer}" >&2; exit 1; }
       cp "$installer" "/out/iuna-v${IUNA_VERSION}-windows-x86_64-desktop-setup.exe"
-      chown "${HOST_UID}:${HOST_GID}" "/out/iuna-v${IUNA_VERSION}-windows-x86_64-desktop-setup.exe"
+      test -f "${installer}.sig" || { echo "missing Windows updater signature: ${installer}.sig" >&2; exit 1; }
+      cp "${installer}.sig" "/out/iuna-v${IUNA_VERSION}-windows-x86_64-desktop-setup.exe.sig"
+      chown "${HOST_UID}:${HOST_GID}" "/out/iuna-v${IUNA_VERSION}-windows-x86_64-desktop-setup.exe" "/out/iuna-v${IUNA_VERSION}-windows-x86_64-desktop-setup.exe.sig"
     '
 }
 
@@ -558,6 +606,72 @@ build_linux_cli_archives() {
     '
 }
 
+sign_cli_archives() {
+  local version="$1"
+  local signing_key
+  local artifact
+
+  ensure_tauri_cli
+  signing_key="$(update_signing_key)"
+  for artifact in \
+    "downloads/iuna-v${version}-linux-x86_64.tar.gz" \
+    "downloads/iuna-v${version}-linux-aarch64.tar.gz"; do
+    [ -f "$artifact" ] || die "missing CLI update artifact: ${artifact}"
+    cargo tauri signer sign -f "$signing_key" -p "${TAURI_SIGNING_PRIVATE_KEY_PASSWORD-}" "$artifact"
+  done
+}
+
+file_sha256() {
+  local file="$1"
+  if command -v sha256sum >/dev/null 2>&1; then
+    sha256sum "$file" | awk '{print $1}'
+  else
+    shasum -a 256 "$file" | awk '{print $1}'
+  fi
+}
+
+write_release_metadata() {
+  local version="$1"
+  local base="https://getiuna.org/downloads"
+  local linux_x86="iuna-v${version}-linux-x86_64.tar.gz"
+  local linux_arm="iuna-v${version}-linux-aarch64.tar.gz"
+  local mac="iuna-v${version}-macos-aarch64-desktop-update.app.tar.gz"
+  local windows="iuna-v${version}-windows-x86_64-desktop-setup.exe"
+
+  require_command jq
+  for file in "$linux_x86" "$linux_arm" "$mac" "$windows"; do
+    [ -f "downloads/$file" ] || die "missing release artifact: downloads/${file}"
+    [ -f "downloads/${file}.sig" ] || die "missing release signature: downloads/${file}.sig"
+  done
+
+  jq -n \
+    --arg tag "v${version}" \
+    --arg version "$version" \
+    --arg url "${base}/" \
+    --arg linux_x86_url "${base}/${linux_x86}" \
+    --arg linux_x86_sha "$(file_sha256 "downloads/$linux_x86")" \
+    --rawfile linux_x86_sig "downloads/${linux_x86}.sig" \
+    --arg linux_arm_url "${base}/${linux_arm}" \
+    --arg linux_arm_sha "$(file_sha256 "downloads/$linux_arm")" \
+    --rawfile linux_arm_sig "downloads/${linux_arm}.sig" \
+    '{tag: $tag, version: $version, url: $url, artifacts: {
+      "linux-x86_64": {url: $linux_x86_url, sha256: $linux_x86_sha, signature: $linux_x86_sig},
+      "linux-aarch64": {url: $linux_arm_url, sha256: $linux_arm_sha, signature: $linux_arm_sig}
+    }}' > downloads/latest.json
+
+  mkdir -p downloads/desktop
+  jq -n \
+    --arg version "$version" \
+    --arg mac_url "${base}/${mac}" \
+    --rawfile mac_sig "downloads/${mac}.sig" \
+    --arg windows_url "${base}/${windows}" \
+    --rawfile windows_sig "downloads/${windows}.sig" \
+    '{version: $version, platforms: {
+      "darwin-aarch64": {url: $mac_url, signature: $mac_sig},
+      "windows-x86_64": {url: $windows_url, signature: $windows_sig}
+    }}' > downloads/desktop/latest.json
+}
+
 write_download_checksums() {
   (
     cd downloads
@@ -588,11 +702,14 @@ build_versions() {
   local version="$1"
 
   mkdir -p downloads
+  validate_update_public_key
   build_linux_cli_archives "$version"
   build_macos_desktop_if_possible "$version"
   build_windows_desktop_if_possible "$version"
   build_windows_desktop_in_docker_if_possible "$version"
   require_desktop_artifacts "$version"
+  sign_cli_archives "$version"
+  write_release_metadata "$version"
   write_download_checksums
 }
 
@@ -841,7 +958,7 @@ main() {
       exit 1
     fi
     run_release_tests "$skip_long_tests"
-    build_linux_cli_archives "$version"
+    build_versions "$version"
     build_docker_image "$version"
     deploy_docker_image "$version" "$genesis"
     exit 0

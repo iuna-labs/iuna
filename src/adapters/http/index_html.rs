@@ -620,7 +620,7 @@ pub(super) const INDEX_HTML: &str = concat!(
           <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M9.7 3.2 9.2 5.5a7.2 7.2 0 0 0-1.4.8L5.6 5.6 3.2 9.8l1.7 1.6a7.8 7.8 0 0 0 0 1.6l-1.7 1.6 2.4 4.2 2.2-.7a7.2 7.2 0 0 0 1.4.8l.5 2.3h4.8l.5-2.3a7.2 7.2 0 0 0 1.4-.8l2.2.7 2.4-4.2-1.7-1.6a7.8 7.8 0 0 0 0-1.6L21 9.8l-2.4-4.2-2.2.7a7.2 7.2 0 0 0-1.4-.8l-.5-2.3H9.7Z"></path><circle cx="12" cy="12.2" r="3.1"></circle></svg>
           <span>Settings</span>
         </button>
-        <button class="version-panel" type="button" :class="{ update: updateAvailable(), checking: releaseCheckState === 'checking', failed: releaseCheckState === 'failed' }" :title="versionPanelTitle()" @click="openLatestRelease">
+        <button class="version-panel" type="button" :disabled="desktopUpdateBusy" :class="{ update: updateAvailable(), checking: releaseCheckState === 'checking', failed: releaseCheckState === 'failed' }" :title="versionPanelTitle()" @click="openLatestRelease">
         <span class="version-dot" aria-hidden="true"></span>
         <span class="version-label" x-text="appVersionLabel()"></span>
         <span class="version-update" x-show="updateAvailable()">Update</span>
@@ -1575,6 +1575,25 @@ pub(super) const INDEX_HTML: &str = concat!(
       <div class="danger-actions">
         <button class="subtle" type="button" @click="closeSendConfirmModal" :disabled="sendConfirmBusy">Cancel</button>
         <button class="primary" type="button" @click="confirmTransfer" :disabled="sendConfirmBusy" x-text="sendConfirmBusy ? 'Sending...' : 'Confirm and send'"></button>
+      </div>
+    </section>
+  </div>
+  <div class="setup-overlay transaction-overlay" x-show="desktopUpdateModalOpen" x-transition.opacity @click.self="closeDesktopUpdateModal()" role="dialog" aria-modal="true" aria-labelledby="desktop-update-title">
+    <section class="tx-modal">
+      <div class="tx-modal-head">
+        <div class="tx-modal-title">
+          <span class="pill transfer">Update</span>
+          <h2 id="desktop-update-title">Install <span x-text="latestReleaseLabel()"></span></h2>
+        </div>
+        <button type="button" @click="closeDesktopUpdateModal" :disabled="desktopUpdateBusy">Close</button>
+      </div>
+      <div class="info-copy">
+        <p>Iuna will download and verify the signed update, stop the local node, install it, and restart the desktop app.</p>
+        <p>Your wallet, settings, and local chain data stay on this device.</p>
+      </div>
+      <div class="danger-actions">
+        <button class="subtle" type="button" @click="closeDesktopUpdateModal" :disabled="desktopUpdateBusy">Later</button>
+        <button class="primary" type="button" @click="installDesktopUpdate" :disabled="desktopUpdateBusy" x-text="desktopUpdateBusy ? 'Installing...' : 'Install and restart'"></button>
       </div>
     </section>
   </div>

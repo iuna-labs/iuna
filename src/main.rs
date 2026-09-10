@@ -29,6 +29,8 @@ use secrecy::{ExposeSecret, SecretString};
 use tokio::sync::Mutex;
 
 mod cli;
+#[cfg(feature = "cli-updater")]
+mod updater;
 use cli::{
     ChainMode, CliOptions, apply_cli_p2p_config_overrides, apply_cli_stratum_config_overrides,
     apply_cli_wallet_endpoint_config_overrides, configured_p2p_announce_addr,
@@ -58,6 +60,10 @@ const WALLET_ENDPOINT_PORT_ENV: &str = "IUNA_WALLET_ENDPOINT_PORT";
 
 #[tokio::main]
 async fn main() -> Result<()> {
+    #[cfg(feature = "cli-updater")]
+    if updater::handle_cli_command().await? {
+        return Ok(());
+    }
     let Some(opts) = CliOptions::parse()? else {
         return Ok(());
     };
