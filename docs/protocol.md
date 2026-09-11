@@ -6,7 +6,14 @@ iuna is an experimental mainnet-candidate protocol that combines three mechanism
 - **VDF timing:** the selected finalizer must do sequential delay work before publishing a block.
 - **Proof-of-work issuance:** new IUNA enters the chain through PoW mine actions.
 
-The goal is to avoid relying on only one scarce resource. Proof-of-work chains tend to centralize around hardware and cheap energy. Proof-of-stake chains tend to centralize around existing wealth and staking pools. iuna tries a split design: burns choose who finalizes blocks, VDFs pace block production, and PoW keeps new issuance open to anyone who can find valid work.
+The goal is to make network power scale linearly rather than superlinearly.
+
+Existing consensus models can amplify existing advantages:
+
+- **Proof of Work:** economies of scale and specialized hardware such as ASICs can amplify advantages in capital and infrastructure.
+- **Proof of Stake:** existing stake directly increases a participant's influence and rewards, creating a wealth-compounding dynamic.
+
+iuna uses self-burn Proof of Burn (PoB), where block-finalization power scales directly with the amount burned. VDFs impose a verifiable time cost that limits the feasibility of low-cost attacks. PoW keeps new coin issuance permissionless, allowing anyone capable of producing valid work to earn newly issued coins.
 
 Burns do not remove wealth advantage. More capital can still buy more lottery weight. The difference from stake is that burn power is paid again and again: it expires, does not unbond, and does not accumulate into a permanent stake position. The design converts wealth-bias from a growing asset into a recurring cost.
 
