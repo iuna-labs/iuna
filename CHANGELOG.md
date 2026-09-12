@@ -5,6 +5,12 @@ from the Git history and Conventional Commit titles by `deployment.sh`.
 
 ## [Unreleased]
 
+## [0.4.32] - 2026-09-13
+
+### Fixed
+
+- allow updater commands from local UI
+
 ## [0.4.31] - 2026-09-12
 
 ### Added
