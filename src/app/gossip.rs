@@ -2,7 +2,7 @@ use crate::domain::{Block, ChainSnapshot};
 
 use super::{
     BLOCK_REQUEST_LIMIT, ChainBootstrap, GossipEnvelope, NETWORK_ID, NodeCore, PROTOCOL_VERSION,
-    ProtocolHello, TRANSACTION_BATCH_LIMIT, now_ms, types::BlockInventory,
+    ProtocolHello, TRANSACTION_BATCH_LIMIT, now_ms, protocol_capabilities, types::BlockInventory,
 };
 
 impl NodeCore {
@@ -53,6 +53,7 @@ impl NodeCore {
     pub fn hello(&self, listen_addr: Option<String>, node_id: Option<String>) -> GossipEnvelope {
         GossipEnvelope::Hello(ProtocolHello {
             protocol_version: PROTOCOL_VERSION,
+            capabilities: protocol_capabilities(),
             network_id: NETWORK_ID.to_string(),
             genesis_hash: self.ledger.genesis_hash().to_string(),
             listen_addr,
@@ -115,9 +116,23 @@ mod tests {
     use std::collections::BTreeMap;
 
     use crate::{
-        app::{BLOCK_REQUEST_LIMIT, BlockInventory, GossipEnvelope, NodeCore},
+        app::{
+            BLOCK_REQUEST_LIMIT, BlockInventory, GossipEnvelope, NodeCore, protocol_capabilities,
+        },
         domain::{Amount, GenesisBurn, Ledger, MICRO_IUNA, Transaction, Wallet},
     };
+
+    #[test]
+    fn hello_advertises_current_protocol_capabilities() {
+        let wallet = Wallet::from_seed("hello-capabilities");
+        let node = NodeCore::from_ledger(wallet, Ledger::new(BTreeMap::new(), 1), 0);
+
+        let GossipEnvelope::Hello(hello) = node.hello(None, None) else {
+            panic!("hello builder returned another envelope type");
+        };
+
+        assert_eq!(hello.capabilities, protocol_capabilities());
+    }
 
     #[test]
     fn mempool_gossip_rebroadcasts_public_burns() {

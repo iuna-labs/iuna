@@ -19,7 +19,7 @@ use super::{
 use crate::{
     app::{
         GossipEnvelope, NETWORK_ID, PROTOCOL_VERSION, PeerDirection, ProtocolHello,
-        debug_logging_enabled, now_ms,
+        debug_logging_enabled, now_ms, validate_protocol_capabilities,
     },
     domain::Ledger,
 };
@@ -106,6 +106,7 @@ async fn process_hello_inner(
             PROTOCOL_VERSION
         );
     }
+    validate_protocol_capabilities(&hello.capabilities)?;
     if hello.network_id != NETWORK_ID {
         anyhow::bail!(
             "wrong network {}; expected {}",
@@ -367,7 +368,10 @@ async fn advertised_peer_hello_is_compatible(
     network: &GossipNetwork,
     hello: &ProtocolHello,
 ) -> bool {
-    if hello.protocol_version != PROTOCOL_VERSION || hello.network_id != NETWORK_ID {
+    if hello.protocol_version != PROTOCOL_VERSION
+        || hello.network_id != NETWORK_ID
+        || validate_protocol_capabilities(&hello.capabilities).is_err()
+    {
         return false;
     }
     let (local_genesis, local_accepts_remote_genesis) = {

@@ -9,7 +9,7 @@ use tokio::{
 use crate::{
     app::{
         ChainBootstrap, GossipEnvelope, NETWORK_ID, PROTOCOL_VERSION, ProtocolHello, now_ms,
-        validate_network_genesis,
+        protocol_capabilities, validate_network_genesis, validate_protocol_capabilities,
     },
     domain::{Block, ChainSnapshot, LaunchProfile, Ledger, verify_vdf},
 };
@@ -53,6 +53,7 @@ async fn fetch_peer_status(peer: &str) -> Result<PeerStatus> {
                     NETWORK_ID
                 );
             }
+            validate_protocol_capabilities(&hello.capabilities)?;
             Ok(PeerStatus::with_time(
                 hello.height,
                 hello.tip_hash,
@@ -98,6 +99,7 @@ pub async fn fetch_snapshot_with_announcement(
                     NETWORK_ID
                 );
             }
+            validate_protocol_capabilities(&hello.capabilities)?;
         }
         GossipEnvelope::PeerStatus { .. } => {}
         other => anyhow::bail!("join peer {peer} sent {other:?} instead of peer status"),
@@ -145,6 +147,7 @@ fn join_client_hello() -> GossipEnvelope {
     let setup = Ledger::new(BTreeMap::new(), 1);
     GossipEnvelope::Hello(ProtocolHello {
         protocol_version: PROTOCOL_VERSION,
+        capabilities: protocol_capabilities(),
         network_id: NETWORK_ID.to_string(),
         genesis_hash: setup.genesis_hash().to_string(),
         listen_addr: None,

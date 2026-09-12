@@ -41,6 +41,10 @@ pub type SharedPeerBook = Arc<Mutex<PeerBook>>;
 pub const DEFAULT_BURN_PER_BLOCK: Amount = 0;
 pub const DEFAULT_VDF_ROUNDS: u32 = 67_000_000;
 pub const PROTOCOL_VERSION: u32 = 2;
+pub const MAX_PROTOCOL_CAPABILITIES: usize = 16;
+pub const MAX_PROTOCOL_CAPABILITY_BYTES: usize = 64;
+pub const CAPABILITY_ADDRESS_V1_READ: &str = "address-v1-read";
+pub const CAPABILITY_SIGNATURE_SCHEMES_V1: &str = "signature-schemes-v1";
 pub const MAINNET_CANDIDATE_NETWORK_ID: &str = "iuna-mainnet-candidate";
 pub const MAINNET_CANDIDATE_GENESIS_HASH: &str =
     "3d677cd7ced1c04d3a276cbee7ea38076e34ac65f18a2c9b8286a4872d986a9a";
@@ -59,12 +63,43 @@ const BURN_BUNDLE_COLLECTION_MS: u64 = crate::domain::VDF_TARGET_BLOCK_MS / 20;
 const MIN_AUTO_BLOCK_ANCHOR_BURN_AMOUNT: Amount = 1;
 static DEBUG_LOGGING: AtomicBool = AtomicBool::new(false);
 
+pub fn protocol_capabilities() -> Vec<String> {
+    vec![
+        CAPABILITY_ADDRESS_V1_READ.to_string(),
+        CAPABILITY_SIGNATURE_SCHEMES_V1.to_string(),
+    ]
+}
+
+pub fn validate_protocol_capabilities(capabilities: &[String]) -> Result<()> {
+    if capabilities.len() > MAX_PROTOCOL_CAPABILITIES {
+        anyhow::bail!("peer advertises too many protocol capabilities");
+    }
+    let mut previous: Option<&str> = None;
+    for capability in capabilities {
+        if capability.is_empty()
+            || capability.len() > MAX_PROTOCOL_CAPABILITY_BYTES
+            || !capability
+                .bytes()
+                .all(|byte| byte.is_ascii_lowercase() || byte.is_ascii_digit() || byte == b'-')
+        {
+            anyhow::bail!("peer advertises an invalid protocol capability");
+        }
+        if previous.is_some_and(|previous| previous >= capability.as_str()) {
+            anyhow::bail!("peer protocol capabilities must be sorted and unique");
+        }
+        previous = Some(capability);
+    }
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::{
-        BLOCK_REQUEST_LIMIT, DEFAULT_VDF_ROUNDS, MAINNET_CANDIDATE_GENESIS_HASH,
-        MAINNET_CANDIDATE_NETWORK_ID, MAINNET_NETWORK_ID, NETWORK_ID, PROTOCOL_VERSION,
-        TRANSACTION_BATCH_LIMIT, validate_network_genesis,
+        BLOCK_REQUEST_LIMIT, CAPABILITY_ADDRESS_V1_READ, CAPABILITY_SIGNATURE_SCHEMES_V1,
+        DEFAULT_VDF_ROUNDS, MAINNET_CANDIDATE_GENESIS_HASH, MAINNET_CANDIDATE_NETWORK_ID,
+        MAINNET_NETWORK_ID, MAX_PROTOCOL_CAPABILITIES, NETWORK_ID, PROTOCOL_VERSION,
+        TRANSACTION_BATCH_LIMIT, protocol_capabilities, validate_network_genesis,
+        validate_protocol_capabilities,
     };
 
     #[test]
@@ -88,6 +123,36 @@ mod tests {
         );
         assert!(validate_network_genesis(MAINNET_CANDIDATE_NETWORK_ID, &"0".repeat(64)).is_err());
         assert!(validate_network_genesis("iuna-local-testnet-v1", &"0".repeat(64)).is_ok());
+    }
+
+    #[test]
+    fn current_protocol_capabilities_are_stable_and_valid() {
+        let capabilities = protocol_capabilities();
+        assert_eq!(
+            capabilities,
+            [CAPABILITY_ADDRESS_V1_READ, CAPABILITY_SIGNATURE_SCHEMES_V1]
+        );
+        validate_protocol_capabilities(&capabilities).unwrap();
+        validate_protocol_capabilities(&[]).unwrap();
+    }
+
+    #[test]
+    fn malformed_protocol_capabilities_fail_closed() {
+        assert!(validate_protocol_capabilities(&["UPPERCASE".to_string()]).is_err());
+        assert!(
+            validate_protocol_capabilities(&["duplicate".to_string(), "duplicate".to_string()])
+                .is_err()
+        );
+        assert!(
+            validate_protocol_capabilities(&["z-last".to_string(), "a-first".to_string()]).is_err()
+        );
+        assert!(
+            validate_protocol_capabilities(&vec![
+                "capability".to_string();
+                MAX_PROTOCOL_CAPABILITIES + 1
+            ])
+            .is_err()
+        );
     }
 }
 

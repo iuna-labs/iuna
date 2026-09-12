@@ -105,6 +105,8 @@ pub struct ChainBootstrap {
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 pub struct ProtocolHello {
     pub protocol_version: u32,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub capabilities: Vec<String>,
     pub network_id: String,
     pub genesis_hash: String,
     pub listen_addr: Option<String>,
@@ -120,6 +122,24 @@ pub struct ProtocolHello {
 pub struct BlockInventory {
     pub height: u64,
     pub hash: String,
+}
+
+#[cfg(test)]
+mod protocol_hello_tests {
+    use super::ProtocolHello;
+
+    #[test]
+    fn legacy_hello_without_capabilities_remains_compatible() {
+        let json = r#"{"protocol_version":2,"network_id":"test","genesis_hash":"genesis","listen_addr":null,"node_id":null,"height":0,"tip_hash":"tip","time_ms":1}"#;
+        let hello: ProtocolHello = serde_json::from_str(json).unwrap();
+
+        assert!(hello.capabilities.is_empty());
+        assert!(
+            !serde_json::to_string(&hello)
+                .unwrap()
+                .contains("capabilities")
+        );
+    }
 }
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]

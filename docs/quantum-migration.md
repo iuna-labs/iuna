@@ -81,6 +81,23 @@ boundary tests with maximum-size hybrid authorizations.
 All stages must be rehearsed across the height boundary with old and new nodes, snapshot restore,
 fork recovery, mempool rebroadcast, compact-store reload, and lightweight-wallet signing.
 
+## Release sequence
+
+Application, transport, and consensus versions move independently:
+
+1. A protocol-v2 application release advertises read capabilities in the optional `capabilities`
+   field. Old nodes ignore the field and an omitted field means no advertised capabilities.
+2. A later application release ships dormant transaction-v2 and hybrid verification code. It does
+   not choose an activation height.
+3. Only after deployment coverage is measured does another release announce a future activation
+   height and protocol-v3 transition. The feature must not be introduced and activated in the same
+   release.
+4. Wallet defaults may change after activation without another consensus version. Refusing new
+   legacy outputs, changing the VDF, or removing Ed25519 each requires its own later activation.
+
+Capability names are sorted, unique, lowercase ASCII tokens. A hello may advertise at most 16
+tokens of at most 64 bytes each. These limits are enforced before the handshake is accepted.
+
 ## Other trust boundaries
 
 - P2P node IDs need versioned, algorithm-tagged proofs independent of wallet activation.

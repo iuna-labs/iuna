@@ -988,6 +988,7 @@ async fn hello_rejects_wrong_network_or_genesis_without_banning() {
 
     let wrong_network = ProtocolHello {
         protocol_version: PROTOCOL_VERSION,
+        capabilities: Vec::new(),
         network_id: "other-network".to_string(),
         genesis_hash: network
             .inner
@@ -1018,6 +1019,7 @@ async fn hello_rejects_wrong_network_or_genesis_without_banning() {
 
     let wrong_genesis = ProtocolHello {
         protocol_version: PROTOCOL_VERSION,
+        capabilities: Vec::new(),
         network_id: NETWORK_ID.to_string(),
         genesis_hash: "not-local-genesis".to_string(),
         listen_addr: Some("127.0.0.1:9545".to_string()),
@@ -1041,6 +1043,7 @@ async fn hello_rejects_wrong_network_or_genesis_without_banning() {
 
     let wrong_protocol = ProtocolHello {
         protocol_version: PROTOCOL_VERSION + 1,
+        capabilities: Vec::new(),
         network_id: NETWORK_ID.to_string(),
         genesis_hash: network
             .inner
@@ -1095,6 +1098,7 @@ async fn hello_records_remote_clock_observation() {
     let remote_time_ms = crate::app::now_ms().saturating_add(60_000);
     let hello = ProtocolHello {
         protocol_version: PROTOCOL_VERSION,
+        capabilities: Vec::new(),
         network_id: NETWORK_ID.to_string(),
         genesis_hash: network
             .inner
@@ -1154,6 +1158,7 @@ async fn hello_remembers_advertised_address_after_signed_session_and_dialback() 
     let remote_node_id = super::new_node_id();
     let remote_addr = spawn_hello_server(ProtocolHello {
         protocol_version: PROTOCOL_VERSION,
+        capabilities: Vec::new(),
         network_id: NETWORK_ID.to_string(),
         genesis_hash: node.lock().await.ledger().genesis_hash().to_string(),
         listen_addr: None,
@@ -1170,6 +1175,7 @@ async fn hello_remembers_advertised_address_after_signed_session_and_dialback() 
     let mut reader = super::LimitedLineReader::new(reader);
     let hello = ProtocolHello {
         protocol_version: PROTOCOL_VERSION,
+        capabilities: Vec::new(),
         network_id: NETWORK_ID.to_string(),
         genesis_hash: node.lock().await.ledger().genesis_hash().to_string(),
         listen_addr: Some(remote_addr.to_string()),
@@ -1233,6 +1239,7 @@ async fn hello_ignores_advertised_address_when_connected_peer_cannot_sign_claime
     let attacker_node_id = super::new_node_id();
     let remote_addr = spawn_hello_server(ProtocolHello {
         protocol_version: PROTOCOL_VERSION,
+        capabilities: Vec::new(),
         network_id: NETWORK_ID.to_string(),
         genesis_hash: node.lock().await.ledger().genesis_hash().to_string(),
         listen_addr: None,
@@ -1249,6 +1256,7 @@ async fn hello_ignores_advertised_address_when_connected_peer_cannot_sign_claime
     let mut reader = super::LimitedLineReader::new(reader);
     let hello = ProtocolHello {
         protocol_version: PROTOCOL_VERSION,
+        capabilities: Vec::new(),
         network_id: NETWORK_ID.to_string(),
         genesis_hash: node.lock().await.ledger().genesis_hash().to_string(),
         listen_addr: Some(remote_addr.to_string()),
@@ -1305,6 +1313,7 @@ async fn dialback_rejects_address_that_signs_with_different_node_id() {
     let claimed_node_id = super::new_node_id();
     let remote_addr = spawn_hello_server(ProtocolHello {
         protocol_version: PROTOCOL_VERSION,
+        capabilities: Vec::new(),
         network_id: NETWORK_ID.to_string(),
         genesis_hash: node.lock().await.ledger().genesis_hash().to_string(),
         listen_addr: None,
@@ -1425,6 +1434,7 @@ async fn setup_placeholder_rejects_bootstrap_with_unpinned_candidate_genesis() {
     let remote_bootstrap = remote_node.chain_bootstrap();
     let hello = ProtocolHello {
         protocol_version: PROTOCOL_VERSION,
+        capabilities: Vec::new(),
         network_id: NETWORK_ID.to_string(),
         genesis_hash: remote_genesis.clone(),
         listen_addr: Some("142.132.164.59:9444".to_string()),
@@ -1494,6 +1504,7 @@ async fn real_node_accepts_setup_placeholder_peer_without_requesting_its_chain()
     let setup_ledger = Ledger::new(BTreeMap::new(), 1);
     let hello = ProtocolHello {
         protocol_version: PROTOCOL_VERSION,
+        capabilities: Vec::new(),
         network_id: NETWORK_ID.to_string(),
         genesis_hash: setup_ledger.genesis_hash().to_string(),
         listen_addr: Some("127.0.0.1:9545".to_string()),
@@ -1571,6 +1582,7 @@ async fn hello_ignores_private_advertised_listen_address() {
     let status = node.lock().await.ledger().status();
     let hello = ProtocolHello {
         protocol_version: PROTOCOL_VERSION,
+        capabilities: Vec::new(),
         network_id: NETWORK_ID.to_string(),
         genesis_hash: node.lock().await.ledger().genesis_hash().to_string(),
         listen_addr: Some("10.42.1.1:12138".to_string()),
@@ -1617,6 +1629,7 @@ async fn hello_ignores_loopback_alias_for_unspecified_self() {
     };
     let hello = ProtocolHello {
         protocol_version: PROTOCOL_VERSION,
+        capabilities: Vec::new(),
         network_id: NETWORK_ID.to_string(),
         genesis_hash: network
             .inner
@@ -1674,6 +1687,7 @@ async fn hello_removes_outbound_peer_that_announces_self_address() {
     };
     let hello = ProtocolHello {
         protocol_version: PROTOCOL_VERSION,
+        capabilities: Vec::new(),
         network_id: NETWORK_ID.to_string(),
         genesis_hash: network
             .inner
@@ -1730,6 +1744,7 @@ async fn hello_removes_outbound_peer_with_same_node_id() {
     };
     let hello = ProtocolHello {
         protocol_version: PROTOCOL_VERSION,
+        capabilities: Vec::new(),
         network_id: NETWORK_ID.to_string(),
         genesis_hash: network
             .inner
