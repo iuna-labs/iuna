@@ -5,6 +5,17 @@ from the Git history and Conventional Commit titles by `deployment.sh`.
 
 ## [Unreleased]
 
+## [0.4.31] - 2026-09-12
+
+### Added
+
+- prepare quantum-safe migration
+- advertise quantum migration capabilities
+
+### Documentation
+
+- update protocol
+
 ## [0.4.30] - 2026-09-10
 
 ### Added
