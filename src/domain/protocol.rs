@@ -34,9 +34,9 @@ pub(super) const DEFAULT_TICKET_EXPIRY_WINDOW: u64 = 3;
 pub(super) const MAX_BLOCK_TIMESTAMP_FUTURE_DRIFT_MS: u64 = 2 * 60 * 1_000;
 pub(super) const BLOCK_MEDIAN_TIME_PAST_WINDOW: usize = 11;
 pub(super) const FORK_FINALITY_DEPTH: u64 = 6;
-pub(super) const PUBLIC_KEY_BYTES: usize = 32;
+pub(super) const PUBLIC_KEY_BYTES: usize = super::SignatureScheme::Ed25519.public_key_bytes();
 pub(super) const HASH_BYTES: usize = 32;
-pub(super) const SIGNATURE_BYTES: usize = 64;
+pub(super) const SIGNATURE_BYTES: usize = super::SignatureScheme::Ed25519.signature_bytes();
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum TransactionSubmitOutcome {

@@ -4,10 +4,12 @@ use std::{
 };
 
 use anyhow::Result;
-use ed25519_dalek::{Signature, Signer, SigningKey, Verifier, VerifyingKey};
 use secrecy::{ExposeSecret, SecretBox};
 
-use crate::app::{GossipEnvelope, NETWORK_ID};
+use crate::{
+    app::{GossipEnvelope, NETWORK_ID},
+    domain::{ed25519_public_key, sign_ed25519, verify_ed25519},
+};
 
 use super::GossipNetwork;
 
@@ -18,8 +20,7 @@ pub(super) fn new_node_id() -> String {
     let signing_seed = SecretBox::init_with_mut(|bytes: &mut [u8; 32]| {
         getrandom::getrandom(bytes).expect("secure randomness unavailable for p2p node id");
     });
-    let signing_key = SigningKey::from_bytes(signing_seed.expose_secret());
-    let node_id = hex_encode(&signing_key.verifying_key().to_bytes());
+    let node_id = hex_encode(&ed25519_public_key(signing_seed.expose_secret()));
     node_signing_keys()
         .lock()
         .expect("node signing key registry mutex poisoned")
@@ -91,14 +92,13 @@ pub(super) fn peer_verification_response_for_node_id(
         .lock()
         .expect("node signing key registry mutex poisoned");
     let signing_seed = keys.get(node_id)?;
-    let signing_key = SigningKey::from_bytes(signing_seed.expose_secret());
     let payload = peer_verification_payload(address, nonce, node_id);
-    let signature: Signature = signing_key.sign(payload.as_bytes());
+    let signature = sign_ed25519(signing_seed.expose_secret(), payload.as_bytes());
     Some(GossipEnvelope::PeerVerificationResponse {
         address: address.to_string(),
         nonce: nonce.to_string(),
         node_id: node_id.to_string(),
-        signature: hex_encode(&signature.to_bytes()),
+        signature: hex_encode(&signature),
     })
 }
 
@@ -122,18 +122,14 @@ pub(super) fn peer_verification_response_is_valid(
         Err(_) => return false,
     };
     let signature = match decode_hex_array::<64>(signature) {
-        Ok(signature) => Signature::from_bytes(&signature),
+        Ok(signature) => signature,
         Err(_) => return false,
     };
-    let verifying_key = match VerifyingKey::from_bytes(&public_key) {
-        Ok(verifying_key) => verifying_key,
-        Err(_) => return false,
-    };
-    verifying_key
-        .verify(
-            peer_verification_payload(expected_address, expected_nonce, expected_node_id)
-                .as_bytes(),
-            &signature,
-        )
-        .is_ok()
+    verify_ed25519(
+        &public_key,
+        peer_verification_payload(expected_address, expected_nonce, expected_node_id).as_bytes(),
+        &signature,
+        "peer verification",
+    )
+    .is_ok()
 }

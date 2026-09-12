@@ -1,9 +1,6 @@
+use super::{PUBLIC_KEY_BYTES, decode_hex_array, hex_encode, validate_ed25519_public_key};
 use anyhow::{Context, Result, bail};
-use ed25519_dalek::VerifyingKey;
 
-use super::{PUBLIC_KEY_BYTES, decode_hex_array, hex_encode};
-
-const ADDRESS_VERSION: u8 = 0;
 const BECH32M_CONST: u32 = 0x2bc8_30a3;
 const BECH32_CHARSET: &[u8; 32] = b"qpzry9x8gf2tvdw0s3jn54khce6mua7l";
 const MAX_BECH32_LENGTH: usize = 90;
@@ -12,6 +9,29 @@ const MAX_BECH32_LENGTH: usize = 90;
 pub enum AddressNetwork {
     Mainnet,
     Testnet,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[repr(u8)]
+pub enum AddressVersion {
+    Ed25519PublicKey = 0,
+    HybridKeyCommitment = 1,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct VersionedAddress {
+    pub version: AddressVersion,
+    pub payload: [u8; PUBLIC_KEY_BYTES],
+}
+
+impl AddressVersion {
+    fn from_wire_id(id: u8) -> Option<Self> {
+        match id {
+            0 => Some(Self::Ed25519PublicKey),
+            1 => Some(Self::HybridKeyCommitment),
+            _ => None,
+        }
+    }
 }
 
 impl AddressNetwork {
@@ -37,8 +57,25 @@ pub fn encode_address(public_key_hex: &str, network: AddressNetwork) -> Result<S
         .context("address public key must be 32-byte hexadecimal")?;
     validate_public_key(&public_key)?;
 
-    let mut data = vec![ADDRESS_VERSION];
-    data.extend(convert_bits(&public_key, 8, 5, true)?);
+    encode_versioned_address(
+        VersionedAddress {
+            version: AddressVersion::Ed25519PublicKey,
+            payload: public_key,
+        },
+        network,
+    )
+}
+
+pub fn encode_versioned_address(
+    address: VersionedAddress,
+    network: AddressNetwork,
+) -> Result<String> {
+    if address.version == AddressVersion::Ed25519PublicKey {
+        validate_public_key(&address.payload)?;
+    }
+
+    let mut data = vec![address.version as u8];
+    data.extend(convert_bits(&address.payload, 8, 5, true)?);
     let checksum = create_checksum(network.hrp(), &data);
     let mut encoded = String::with_capacity(network.hrp().len() + 1 + data.len() + 6);
     encoded.push_str(network.hrp());
@@ -54,6 +91,20 @@ pub fn encode_address(public_key_hex: &str, network: AddressNetwork) -> Result<S
 /// Legacy hexadecimal addresses are deliberately not accepted here. They remain
 /// valid only inside existing consensus data and wallet files.
 pub fn decode_address(address: &str, expected_network: AddressNetwork) -> Result<String> {
+    let decoded = decode_versioned_address(address, expected_network)?;
+    if decoded.version != AddressVersion::Ed25519PublicKey {
+        bail!("address version is recognized but not consensus-active");
+    }
+    validate_public_key(&decoded.payload)?;
+    Ok(hex_encode(decoded.payload))
+}
+
+/// Parses every reserved address version without making it consensus-active.
+/// Callers must apply the activation rule before accepting the result.
+pub fn decode_versioned_address(
+    address: &str,
+    expected_network: AddressNetwork,
+) -> Result<VersionedAddress> {
     let address = address.trim();
     if address.is_empty() {
         bail!("address is required");
@@ -92,15 +143,19 @@ pub fn decode_address(address: &str, expected_network: AddressNetwork) -> Result
     let Some((&version, encoded_key)) = payload.split_first() else {
         bail!("address payload is empty");
     };
-    if version != ADDRESS_VERSION {
-        bail!("unsupported address version {version}");
-    }
+    let version = AddressVersion::from_wire_id(version)
+        .with_context(|| format!("unsupported address version {version}"))?;
     let public_key = convert_bits(encoded_key, 5, 8, false)?;
     let public_key: [u8; PUBLIC_KEY_BYTES] = public_key.try_into().map_err(|bytes: Vec<u8>| {
         anyhow::anyhow!("address public key has {} bytes", bytes.len())
     })?;
-    validate_public_key(&public_key)?;
-    Ok(hex_encode(public_key))
+    if version == AddressVersion::Ed25519PublicKey {
+        validate_public_key(&public_key)?;
+    }
+    Ok(VersionedAddress {
+        version,
+        payload: public_key,
+    })
 }
 
 /// Converts a pre-mainnet hex address for one-time display/migration tooling.
@@ -109,12 +164,7 @@ pub fn migrate_legacy_address(address: &str, network: AddressNetwork) -> Result<
 }
 
 fn validate_public_key(public_key: &[u8; PUBLIC_KEY_BYTES]) -> Result<()> {
-    let verifying_key = VerifyingKey::from_bytes(public_key)
-        .context("address payload is not a valid Ed25519 verifying key")?;
-    if verifying_key.is_weak() {
-        bail!("address payload contains a weak Ed25519 verifying key");
-    }
-    Ok(())
+    validate_ed25519_public_key(public_key)
 }
 
 fn network_label(network: AddressNetwork) -> &'static str {
@@ -213,7 +263,8 @@ fn convert_bits(data: &[u8], from: u8, to: u8, pad: bool) -> Result<Vec<u8>> {
 #[cfg(test)]
 mod tests {
     use super::{
-        AddressNetwork, decode_address, decode_charset, encode_address, migrate_legacy_address,
+        AddressNetwork, AddressVersion, VersionedAddress, decode_address, decode_charset,
+        decode_versioned_address, encode_address, encode_versioned_address, migrate_legacy_address,
         verify_checksum,
     };
     use crate::domain::Wallet;
@@ -258,6 +309,26 @@ mod tests {
             key
         );
         assert_ne!(mainnet, testnet);
+    }
+
+    #[test]
+    fn reserved_hybrid_addresses_parse_but_are_not_consensus_active() {
+        let expected = VersionedAddress {
+            version: AddressVersion::HybridKeyCommitment,
+            payload: [0x42; 32],
+        };
+        let encoded = encode_versioned_address(expected, AddressNetwork::Mainnet).unwrap();
+
+        assert_eq!(
+            decode_versioned_address(&encoded, AddressNetwork::Mainnet).unwrap(),
+            expected
+        );
+        assert!(
+            decode_address(&encoded, AddressNetwork::Mainnet)
+                .unwrap_err()
+                .to_string()
+                .contains("not consensus-active")
+        );
     }
 
     #[test]

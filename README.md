@@ -333,6 +333,7 @@ peers.
 ## Operator Docs
 
 - [Protocol](docs/protocol.md)
+- [Quantum-resistance migration](docs/quantum-migration.md)
 - [Operator failure playbooks](docs/operator-playbooks.md)
 
 ## Contributing

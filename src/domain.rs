@@ -28,13 +28,17 @@ mod profile;
 mod protocol;
 mod reveal;
 mod selection;
+mod signature;
 mod stratum;
 mod ticket;
 mod transaction;
 mod validation;
 mod vdf;
 mod wallet;
-pub use address::{AddressNetwork, decode_address, encode_address, migrate_legacy_address};
+pub use address::{
+    AddressNetwork, AddressVersion, VersionedAddress, decode_address, decode_versioned_address,
+    encode_address, encode_versioned_address, migrate_legacy_address,
+};
 use block::LeaderProofPayload;
 pub use block::{
     Block, BurnLeaderRank, ChainSnapshot, ChainStatus, FinalizerMode, LeaderProof, PreparedBlock,
@@ -79,6 +83,10 @@ pub use reveal::{
     default_burn_bundle_hash,
 };
 use selection::BlockSelection;
+pub use signature::{ProtocolPublicKey, ProtocolSignature, SignatureScheme};
+pub(crate) use signature::{
+    ed25519_public_key, sign_ed25519, validate_ed25519_public_key, verify_ed25519,
+};
 pub use stratum::{
     STRATUM_EXTRANONCE1_HEX, STRATUM_EXTRANONCE2_SIZE, StratumMineShare, StratumMineTemplate,
     pack_stratum_nonce,

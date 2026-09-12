@@ -1,7 +1,6 @@
 use std::collections::{BTreeMap, BTreeSet};
 
 use anyhow::{Context, Result, bail};
-use ed25519_dalek::{Signature, Verifier, VerifyingKey};
 use serde::{Deserialize, Serialize};
 
 use super::validation::{decode_canonical_hex, decode_canonical_hex_array};
@@ -9,7 +8,7 @@ use super::{
     Amount, HASH_BYTES, MINE_FINALIZER_FEE, MINE_REWARD, PUBLIC_KEY_BYTES, SIGNATURE_BYTES, Wallet,
     canonical_transaction_size_bytes, decode_hex_array, genesis_allocation_outpoint,
     hash_meets_difficulty, hex_encode, hex_hash, mine_payload, mine_signature,
-    stratum_mine_header_bytes, stratum_mine_signature,
+    stratum_mine_header_bytes, stratum_mine_signature, verify_ed25519,
 };
 
 pub const TRANSACTION_SIGNING_FORMAT_VERSION: u16 = 1;
@@ -351,17 +350,12 @@ impl Transaction {
             decode_hex_array::<SIGNATURE_BYTES>(self.signature())
         }
         .context("invalid signature hex")?;
-        let verifying_key =
-            VerifyingKey::from_bytes(&public_key).context("invalid transaction public key")?;
-        let signature = Signature::from_bytes(&signature);
         let signing_bytes = if domain.is_chain_bound() {
             self.signing_bytes(domain)?
         } else {
             self.signing_payload().into_bytes()
         };
-        verifying_key
-            .verify(&signing_bytes, &signature)
-            .context("transaction signature is invalid")
+        verify_ed25519(&public_key, &signing_bytes, &signature, "transaction")
     }
 
     pub(super) fn inputs(&self) -> &[TxInput] {

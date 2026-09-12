@@ -6,7 +6,6 @@ use crate::compact::{
     CompactBlockContext, CompactBlockSizeBreakdown, compact_snapshot_fixed_prefix_size,
     compact_varint_size,
 };
-use ed25519_dalek::{Signature, Verifier, VerifyingKey};
 
 use super::hex::hex_hash;
 use super::reveal::{BurnBundleSection, canonical_burn_bundle_hashes};
@@ -236,12 +235,7 @@ pub(super) fn verify_address_signature(
         .with_context(|| format!("invalid {label} public key {address}"))?;
     let signature = decode_hex_array::<SIGNATURE_BYTES>(signature)
         .with_context(|| format!("invalid {label} signature hex"))?;
-    let verifying_key = VerifyingKey::from_bytes(&public_key)
-        .with_context(|| format!("invalid {label} public key"))?;
-    let signature = Signature::from_bytes(&signature);
-    verifying_key
-        .verify(payload.as_bytes(), &signature)
-        .with_context(|| format!("{label} signature is invalid"))
+    super::verify_ed25519(&public_key, payload.as_bytes(), &signature, label)
 }
 
 pub(super) fn vdf_seed_for_child(

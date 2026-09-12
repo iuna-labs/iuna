@@ -1,11 +1,12 @@
 use std::{fmt, sync::Arc};
 
-use ed25519_dalek::{Signature, Signer, SigningKey};
 use secrecy::{ExposeSecret, SecretBox, zeroize::Zeroize};
 use sha2::{Digest, Sha256};
 
 use super::block::LeaderProofPayload;
-use super::{BurnBundle, BurnBundlePayload, LeaderProof, hex_encode};
+use super::{
+    BurnBundle, BurnBundlePayload, LeaderProof, ed25519_public_key, hex_encode, sign_ed25519,
+};
 
 const WALLET_SEED_DOMAIN: &str = "iuna-wallet-seed";
 
@@ -26,8 +27,7 @@ impl Wallet {
             signing_seed.copy_from_slice(&seed_hash);
         });
         seed_hash.zeroize();
-        let signing_key = SigningKey::from_bytes(signing_seed.expose_secret());
-        let address = hex_encode(signing_key.verifying_key().to_bytes());
+        let address = hex_encode(ed25519_public_key(signing_seed.expose_secret()));
         Self {
             address,
             signing_seed: Arc::new(signing_seed),
@@ -43,9 +43,7 @@ impl Wallet {
     }
 
     pub(super) fn sign_bytes(&self, payload: &[u8]) -> String {
-        let signing_key = SigningKey::from_bytes(self.signing_seed.expose_secret());
-        let signature: Signature = signing_key.sign(payload);
-        hex_encode(signature.to_bytes())
+        hex_encode(sign_ed25519(self.signing_seed.expose_secret(), payload))
     }
 
     pub(super) fn leader_proof(&self, payload: &LeaderProofPayload) -> LeaderProof {
