@@ -9,6 +9,7 @@ from the Git history and Conventional Commit titles by `deployment.sh`.
 
 - expose complete peer handshake details in the P2P interface
 - add dormant transaction-v2 encoding and activation gating
+- verify both components of dormant hybrid transaction authorizations
 
 ## [0.4.32] - 2026-09-13
 

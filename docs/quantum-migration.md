@@ -108,9 +108,11 @@ the mempool and chain until a later reviewed release assigns an activation heigh
 
 The reserved format binds the chain ID and genesis hash, uses typed versioned addresses, stores one
 length-delimited authorization per spending input, and hashes the complete canonical signed bytes
-for its transaction ID. The initial spending authorization is Ed25519 + ML-DSA-44. Only the
-classical component is currently executable; selecting and reviewing an ML-DSA backend remains a
-separate prerequisite before activation. No transaction-v2 gossip capability is advertised yet.
+for its transaction ID. The initial spending authorization is Ed25519 + ML-DSA-44. Dormant
+verification uses the exact-pinned RustCrypto `ml-dsa` 0.1.1 implementation. That implementation
+has not been independently audited, so an independent review and an explicit backend acceptance
+decision remain prerequisites before activation. No transaction-v2 gossip capability is
+advertised yet.
 
 ## Other trust boundaries
 

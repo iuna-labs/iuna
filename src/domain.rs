@@ -86,7 +86,7 @@ pub use reveal::{
 use selection::BlockSelection;
 pub use signature::{ProtocolPublicKey, ProtocolSignature, SignatureScheme};
 pub(crate) use signature::{
-    ed25519_public_key, sign_ed25519, validate_ed25519_public_key, verify_ed25519,
+    ed25519_public_key, sign_ed25519, validate_ed25519_public_key, verify_ed25519, verify_ml_dsa44,
 };
 pub use stratum::{
     STRATUM_EXTRANONCE1_HEX, STRATUM_EXTRANONCE2_SIZE, StratumMineShare, StratumMineTemplate,

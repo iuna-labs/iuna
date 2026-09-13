@@ -1,5 +1,8 @@
 use anyhow::{Context, Result, bail};
 use ed25519_dalek::{Signature, Signer, SigningKey, Verifier, VerifyingKey};
+use ml_dsa::{
+    EncodedVerifyingKey, MlDsa44, Signature as MlDsaSignature, VerifyingKey as MlDsaVerifyingKey,
+};
 
 /// Signature schemes understood by the protocol implementation.
 ///
@@ -175,6 +178,23 @@ pub(crate) fn verify_ed25519(
     verifying_key
         .verify(payload, &Signature::from_bytes(signature))
         .with_context(|| format!("{label} signature is invalid"))
+}
+
+pub(crate) fn verify_ml_dsa44(
+    public_key: &[u8; 1_312],
+    payload: &[u8],
+    signature: &[u8; 2_420],
+    label: &str,
+) -> Result<()> {
+    let encoded_public_key = EncodedVerifyingKey::<MlDsa44>::try_from(public_key.as_slice())
+        .with_context(|| format!("invalid {label} ML-DSA-44 public key length"))?;
+    let public_key = MlDsaVerifyingKey::<MlDsa44>::decode(&encoded_public_key);
+    let signature = MlDsaSignature::<MlDsa44>::try_from(signature.as_slice())
+        .with_context(|| format!("invalid {label} ML-DSA-44 signature encoding"))?;
+    if !public_key.verify_with_context(payload, &[], &signature) {
+        bail!("{label} ML-DSA-44 signature is invalid");
+    }
+    Ok(())
 }
 
 #[cfg(test)]

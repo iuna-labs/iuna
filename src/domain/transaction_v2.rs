@@ -3,7 +3,7 @@ use sha2::{Digest, Sha256};
 
 use super::{
     AddressVersion, ProtocolPublicKey, ProtocolSignature, SignatureScheme, VersionedAddress,
-    verify_ed25519,
+    verify_ed25519, verify_ml_dsa44,
 };
 
 const TRANSACTION_V2_TAG: &[u8] = b"IUNA-TX-V2";
@@ -263,23 +263,39 @@ impl TransactionV2 {
         Ok(())
     }
 
-    /// Verifies the Ed25519 half of every hybrid signature. ML-DSA verification remains dormant
-    /// until a reviewed cryptographic backend is selected; this method must not imply activation.
-    pub fn verify_classical_hybrid_components(&self, domain: &TransactionV2Domain) -> Result<()> {
+    /// Verifies both components of every hybrid spending authorization. This remains unreachable
+    /// from live consensus while `TRANSACTION_V2_ACTIVATION_HEIGHT` is `None`.
+    pub fn verify_hybrid_authorizations(&self, domain: &TransactionV2Domain) -> Result<()> {
         self.validate_authorization_commitments()?;
         let payload = self.signing_bytes(domain)?;
         for authorization in self.authorizations() {
-            let public_key: [u8; 32] = authorization.public_key().as_bytes()[..32]
+            let (ed25519_public_key, ml_dsa_public_key) =
+                authorization.public_key().as_bytes().split_at(32);
+            let (ed25519_signature, ml_dsa_signature) =
+                authorization.signature().as_bytes().split_at(64);
+            let ed25519_public_key: [u8; 32] = ed25519_public_key
                 .try_into()
                 .expect("validated hybrid public key length");
-            let signature: [u8; 64] = authorization.signature().as_bytes()[..64]
+            let ml_dsa_public_key: [u8; 1_312] = ml_dsa_public_key
+                .try_into()
+                .expect("validated hybrid public key length");
+            let ed25519_signature: [u8; 64] = ed25519_signature
+                .try_into()
+                .expect("validated hybrid signature length");
+            let ml_dsa_signature: [u8; 2_420] = ml_dsa_signature
                 .try_into()
                 .expect("validated hybrid signature length");
             verify_ed25519(
-                &public_key,
+                &ed25519_public_key,
                 &payload,
-                &signature,
+                &ed25519_signature,
                 "transaction v2 classical component",
+            )?;
+            verify_ml_dsa44(
+                &ml_dsa_public_key,
+                &payload,
+                &ml_dsa_signature,
+                "transaction v2 post-quantum component",
             )?;
         }
         Ok(())
@@ -673,6 +689,7 @@ impl<'a> Reader<'a> {
 #[cfg(test)]
 mod tests {
     use ed25519_dalek::{Signer, SigningKey};
+    use ml_dsa::{Keypair, MlDsa44, Seed, SigningKey as MlDsaSigningKey};
 
     use super::*;
     use crate::domain::hex::hex_encode;
@@ -681,14 +698,28 @@ mod tests {
         TransactionV2Domain::new("iuna-v2-test", [0x22; 32]).unwrap()
     }
 
-    fn hybrid_authorization(payload: &[u8]) -> V2SpendingAuthorization {
+    fn hybrid_public_key() -> ProtocolPublicKey {
         let signing_key = SigningKey::from_bytes(&[7; 32]);
         let mut public_key = signing_key.verifying_key().to_bytes().to_vec();
-        public_key.extend_from_slice(&vec![0x44; 1_312]);
+        let ml_dsa_signing_key = MlDsaSigningKey::<MlDsa44>::from_seed(&Seed::from([9; 32]));
+        public_key.extend_from_slice(&ml_dsa_signing_key.verifying_key().encode());
+        ProtocolPublicKey::new(SignatureScheme::HybridEd25519MlDsa44, public_key).unwrap()
+    }
+
+    fn hybrid_authorization(payload: &[u8]) -> V2SpendingAuthorization {
+        let signing_key = SigningKey::from_bytes(&[7; 32]);
+        let public_key = hybrid_public_key();
         let mut signature = signing_key.sign(payload).to_bytes().to_vec();
-        signature.extend_from_slice(&vec![0x55; 2_420]);
+        let ml_dsa_signing_key = MlDsaSigningKey::<MlDsa44>::from_seed(&Seed::from([9; 32]));
+        signature.extend_from_slice(
+            &ml_dsa_signing_key
+                .expanded_key()
+                .sign_deterministic(payload, &[])
+                .unwrap()
+                .encode(),
+        );
         V2SpendingAuthorization::new(
-            ProtocolPublicKey::new(SignatureScheme::HybridEd25519MlDsa44, public_key).unwrap(),
+            public_key,
             ProtocolSignature::new(SignatureScheme::HybridEd25519MlDsa44, signature).unwrap(),
         )
         .unwrap()
@@ -723,12 +754,7 @@ mod tests {
 
     #[test]
     fn hybrid_transfer_roundtrips_and_has_a_hash_id() {
-        let signing_key = SigningKey::from_bytes(&[7; 32]);
-        let mut public_key_bytes = signing_key.verifying_key().to_bytes().to_vec();
-        public_key_bytes.extend_from_slice(&vec![0x44; 1_312]);
-        let public_key =
-            ProtocolPublicKey::new(SignatureScheme::HybridEd25519MlDsa44, public_key_bytes)
-                .unwrap();
+        let public_key = hybrid_public_key();
         let owner = hybrid_key_commitment_address(&public_key).unwrap();
         let mut transaction = unsigned_transfer(owner);
         let signing_bytes = transaction.signing_bytes(&domain()).unwrap();
@@ -742,9 +768,7 @@ mod tests {
             owner
         );
         transaction.validate_authorization_commitments().unwrap();
-        transaction
-            .verify_classical_hybrid_components(&domain())
-            .unwrap();
+        transaction.verify_hybrid_authorizations(&domain()).unwrap();
         let encoded = transaction.encode(&domain()).unwrap();
         let (decoded_domain, decoded) = TransactionV2::decode(&encoded).unwrap();
         assert_eq!(decoded_domain, domain());
@@ -766,6 +790,24 @@ mod tests {
             inputs[0].owner.payload[0] ^= 1;
         }
         assert!(wrong_owner.validate_authorization_commitments().is_err());
+
+        let mut invalid_post_quantum_signature = transaction.clone();
+        if let TransactionV2::Transfer { authorizations, .. } = &mut invalid_post_quantum_signature
+        {
+            let public_key = authorizations[0].public_key().clone();
+            let mut signature = authorizations[0].signature().as_bytes().to_vec();
+            signature[64] ^= 1;
+            authorizations[0] = V2SpendingAuthorization::new(
+                public_key,
+                ProtocolSignature::new(SignatureScheme::HybridEd25519MlDsa44, signature).unwrap(),
+            )
+            .unwrap();
+        }
+        assert!(
+            invalid_post_quantum_signature
+                .verify_hybrid_authorizations(&domain())
+                .is_err()
+        );
     }
 
     #[test]
