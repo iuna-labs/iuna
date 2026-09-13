@@ -25,7 +25,11 @@ pub struct VersionedAddress {
 }
 
 impl AddressVersion {
-    fn from_wire_id(id: u8) -> Option<Self> {
+    pub const fn wire_id(self) -> u8 {
+        self as u8
+    }
+
+    pub(crate) const fn from_wire_id(id: u8) -> Option<Self> {
         match id {
             0 => Some(Self::Ed25519PublicKey),
             1 => Some(Self::HybridKeyCommitment),
@@ -74,7 +78,7 @@ pub fn encode_versioned_address(
         validate_public_key(&address.payload)?;
     }
 
-    let mut data = vec![address.version as u8];
+    let mut data = vec![address.version.wire_id()];
     data.extend(convert_bits(&address.payload, 8, 5, true)?);
     let checksum = create_checksum(network.hrp(), &data);
     let mut encoded = String::with_capacity(network.hrp().len() + 1 + data.len() + 6);

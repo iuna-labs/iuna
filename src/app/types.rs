@@ -126,7 +126,15 @@ pub struct BlockInventory {
 
 #[cfg(test)]
 mod protocol_hello_tests {
+    use serde::Deserialize;
+
     use super::ProtocolHello;
+
+    #[derive(Deserialize)]
+    struct V0430ProtocolHello {
+        protocol_version: u32,
+        network_id: String,
+    }
 
     #[test]
     fn legacy_hello_without_capabilities_remains_compatible() {
@@ -139,6 +147,26 @@ mod protocol_hello_tests {
                 .unwrap()
                 .contains("capabilities")
         );
+    }
+
+    #[test]
+    fn v0430_shape_ignores_new_capabilities_field() {
+        let current = ProtocolHello {
+            protocol_version: 2,
+            capabilities: vec!["address-v1-read".to_string()],
+            network_id: "iuna-mainnet-candidate".to_string(),
+            genesis_hash: "00".repeat(32),
+            listen_addr: None,
+            node_id: None,
+            height: 0,
+            tip_hash: "00".repeat(32),
+            time_ms: 1,
+        };
+        let legacy: V0430ProtocolHello =
+            serde_json::from_str(&serde_json::to_string(&current).unwrap()).unwrap();
+
+        assert_eq!(legacy.protocol_version, 2);
+        assert_eq!(legacy.network_id, "iuna-mainnet-candidate");
     }
 }
 

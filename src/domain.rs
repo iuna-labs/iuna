@@ -32,6 +32,7 @@ mod signature;
 mod stratum;
 mod ticket;
 mod transaction;
+mod transaction_v2;
 mod validation;
 mod vdf;
 mod wallet;
@@ -97,6 +98,11 @@ pub use transaction::{
     MineSearchOutcome, OutPoint, TRANSACTION_SIGNING_FORMAT_VERSION, Transaction, TxInput, TxOutput,
 };
 use transaction::{TransactionSigningDomain, mine_signing_bytes};
+pub use transaction_v2::{
+    TRANSACTION_V2_ACTIVATION_HEIGHT, TRANSACTION_V2_WIRE_VERSION, TransactionV2,
+    TransactionV2Domain, TransactionV2Input, TransactionV2Output, V2SpendingAuthorization,
+    ensure_transaction_v2_active, hybrid_key_commitment_address, transaction_v2_is_active,
+};
 pub(crate) use validation::minimum_transfer_economic_size_bytes;
 pub use validation::validate_address;
 use validation::{

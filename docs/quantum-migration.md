@@ -98,6 +98,20 @@ Application, transport, and consensus versions move independently:
 Capability names are sorted, unique, lowercase ASCII tokens. A hello may advertise at most 16
 tokens of at most 64 bytes each. These limits are enforced before the handshake is accepted.
 
+### Dormant transaction-v2 implementation
+
+The transaction-v2 binary envelope and its canonical hash identifier are compiled into the node,
+but remain separate from the live JSON `Transaction`, `Block`, and gossip types. The consensus
+activation constant is `None`: it is not an operator-controlled feature flag and cannot be enabled
+through configuration. Nodes may parse and inspect the reserved format, but must reject it from
+the mempool and chain until a later reviewed release assigns an activation height.
+
+The reserved format binds the chain ID and genesis hash, uses typed versioned addresses, stores one
+length-delimited authorization per spending input, and hashes the complete canonical signed bytes
+for its transaction ID. The initial spending authorization is Ed25519 + ML-DSA-44. Only the
+classical component is currently executable; selecting and reviewing an ML-DSA backend remains a
+separate prerequisite before activation. No transaction-v2 gossip capability is advertised yet.
+
 ## Other trust boundaries
 
 - P2P node IDs need versioned, algorithm-tagged proofs independent of wallet activation.
