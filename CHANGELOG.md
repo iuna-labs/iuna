@@ -5,6 +5,10 @@ from the Git history and Conventional Commit titles by `deployment.sh`.
 
 ## [Unreleased]
 
+### Added
+
+- expose complete peer handshake details in the P2P interface
+
 ## [0.4.32] - 2026-09-13
 
 ### Fixed

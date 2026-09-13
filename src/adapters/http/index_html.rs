@@ -382,8 +382,16 @@ pub(super) const INDEX_HTML: &str = concat!(
     .peer-status.banned { border-color: #713434; color: #ffb1a8; background: #2a1717; }
     .peer-status.error { border-color: #713434; color: #ffb1a8; background: #2a1717; }
     .peer-actions { display: flex; gap: 6px; align-items: center; }
+    .peer-details { padding: 4px 7px; font-size: 12px; }
     .peer-remove { padding: 4px 7px; border-color: #4f3737; background: #221717; color: #ffb1a8; font-size: 12px; }
     .peer-remove:hover { border-color: #ffb1a8; color: #ffd4cf; }
+    .peer-modal-section { display: grid; gap: 8px; margin-top: 14px; }
+    .peer-modal-section h3 { margin: 0; color: #8d989f; font-size: 11px; text-transform: uppercase; }
+    .peer-modal-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(210px, 1fr)); gap: 8px; }
+    .peer-modal-field { min-width: 0; display: grid; gap: 5px; border: 1px solid #2f363c; border-radius: 8px; padding: 10px; background: #111316; }
+    .peer-modal-field.wide { grid-column: 1 / -1; }
+    .peer-modal-value { min-width: 0; overflow-wrap: anywhere; }
+    .peer-capabilities { display: flex; flex-wrap: wrap; gap: 6px; }
     .network-health { display: grid; grid-template-columns: minmax(180px, .8fr) minmax(0, 1.2fr); gap: 12px; align-items: stretch; margin-bottom: 12px; }
     .network-health-state { display: grid; align-content: center; gap: 5px; border: 1px solid #3a4248; border-radius: 8px; padding: 12px; background: #111316; }
     .network-health-state.healthy { border-color: #566d25; background: #182112; }
@@ -1040,7 +1048,7 @@ pub(super) const INDEX_HTML: &str = concat!(
                   <td data-label="Sent" x-show="developmentMode()" x-text="peer.messages_sent"></td>
                   <td data-label="Received" x-show="developmentMode()" x-text="peer.messages_received"></td>
                   <td data-label="Last error" x-show="developmentMode()" x-text="peer.last_error || ''"></td>
-                  <td data-label="Actions"><div class="peer-actions"><button class="peer-remove" type="button" x-show="canRemovePeer(peer)" @click="removePeer(peer)">Remove</button><span class="muted" x-show="!canRemovePeer(peer)">Observed</span></div></td>
+                  <td data-label="Actions"><div class="peer-actions"><button class="peer-details" type="button" @click="openPeerModal(peer)">Details</button><button class="peer-remove" type="button" x-show="canRemovePeer(peer)" @click="removePeer(peer)">Remove</button><span class="muted" x-show="!canRemovePeer(peer)">Observed</span></div></td>
                 </tr>
               </template>
               <tr class="skeleton-card" x-show="peerPage.loading" aria-hidden="true">
@@ -1536,6 +1544,79 @@ pub(super) const INDEX_HTML: &str = concat!(
       <div class="sync-progress-label" x-text="syncProgressLabel()"></div>
       <button class="subtle" type="button" @click="openChainResetModal">Sync stuck? Reset local chain</button>
       <p class="muted">This recovery option removes only the local blockchain. Your wallet and settings stay on this device.</p>
+    </section>
+  </div>
+  <div class="setup-overlay transaction-overlay" x-show="selectedPeerAddress" x-transition.opacity @click.self="closePeerModal()" role="dialog" aria-modal="true" aria-labelledby="peer-details-title">
+    <section class="tx-modal">
+      <div class="tx-modal-head">
+        <div class="tx-modal-title">
+          <span class="peer-status" :class="peerDetail() ? peerStatus(peerDetail()) : 'pending'" x-text="peerDetail() ? peerStatusLabel(peerDetail()) : 'Unavailable'"></span>
+          <h2 id="peer-details-title">Peer details</h2>
+          <code x-text="peerDetail()?.address || selectedPeerAddress || '-'"></code>
+        </div>
+        <button type="button" @click="closePeerModal">Close</button>
+      </div>
+
+      <div class="tx-modal-empty" x-show="!peerDetail()">This peer is no longer present in the current peer list.</div>
+      <template x-if="peerDetail()">
+        <div>
+          <section class="peer-modal-section">
+            <h3>Connection</h3>
+            <div class="peer-modal-grid">
+              <div class="peer-modal-field"><span class="tx-label">Direction</span><span class="peer-modal-value" x-text="peerDetail().direction"></span></div>
+              <div class="peer-modal-field"><span class="tx-label">Last contact</span><span class="peer-modal-value" x-text="peerTimestampLabel(peerDetail().last_contact_ms)"></span></div>
+              <div class="peer-modal-field"><span class="tx-label">Last success</span><span class="peer-modal-value" x-text="peerTimestampLabel(peerDetail().last_success_ms)"></span></div>
+              <div class="peer-modal-field"><span class="tx-label">Messages sent</span><span class="peer-modal-value" x-text="peerDetail().messages_sent ?? 0"></span></div>
+              <div class="peer-modal-field"><span class="tx-label">Messages received</span><span class="peer-modal-value" x-text="peerDetail().messages_received ?? 0"></span></div>
+            </div>
+          </section>
+
+          <section class="peer-modal-section">
+            <h3>Current chain view</h3>
+            <div class="peer-modal-grid">
+              <div class="peer-modal-field"><span class="tx-label">Height</span><span class="peer-modal-value" x-text="peerDetail().last_known_height ?? '-'"></span></div>
+              <div class="peer-modal-field wide"><span class="tx-label">Tip hash</span><code class="peer-modal-value" x-text="peerDetail().last_known_tip_hash || '-'"></code></div>
+            </div>
+          </section>
+
+          <section class="peer-modal-section">
+            <h3>Last protocol hello</h3>
+            <div class="muted">These values are advertised by the remote peer during its handshake.</div>
+            <div class="peer-modal-grid">
+              <div class="peer-modal-field"><span class="tx-label">Protocol version</span><span class="peer-modal-value" x-text="peerDetail().last_hello?.protocol_version ?? '-'"></span></div>
+              <div class="peer-modal-field"><span class="tx-label">Network</span><code class="peer-modal-value" x-text="peerDetail().last_hello?.network_id || '-'"></code></div>
+              <div class="peer-modal-field"><span class="tx-label">Advertised address</span><code class="peer-modal-value" x-text="peerDetail().last_hello?.listen_addr || '-'"></code></div>
+              <div class="peer-modal-field"><span class="tx-label">Node ID</span><code class="peer-modal-value" x-text="peerDetail().last_hello?.node_id || '-'"></code></div>
+              <div class="peer-modal-field"><span class="tx-label">Hello height</span><span class="peer-modal-value" x-text="peerDetail().last_hello?.height ?? '-'"></span></div>
+              <div class="peer-modal-field"><span class="tx-label">Peer time</span><span class="peer-modal-value" x-text="peerTimestampLabel(peerDetail().last_hello?.time_ms)"></span></div>
+              <div class="peer-modal-field wide"><span class="tx-label">Genesis hash</span><code class="peer-modal-value" x-text="peerDetail().last_hello?.genesis_hash || '-'"></code></div>
+              <div class="peer-modal-field wide"><span class="tx-label">Hello tip hash</span><code class="peer-modal-value" x-text="peerDetail().last_hello?.tip_hash || '-'"></code></div>
+              <div class="peer-modal-field wide">
+                <span class="tx-label">Capabilities</span>
+                <div class="peer-capabilities" x-show="peerCapabilities(peerDetail()).length">
+                  <template x-for="capability in peerCapabilities(peerDetail())" :key="capability"><code class="pill" x-text="capability"></code></template>
+                </div>
+                <span class="muted" x-show="peerCapabilities(peerDetail()).length === 0">None advertised</span>
+              </div>
+            </div>
+          </section>
+
+          <section class="peer-modal-section">
+            <h3>Health and enforcement</h3>
+            <div class="peer-modal-grid">
+              <div class="peer-modal-field"><span class="tx-label">Clock offset</span><span class="peer-modal-value" x-text="peerClockLabel(peerDetail())"></span></div>
+              <div class="peer-modal-field"><span class="tx-label">Clock accepted</span><span class="peer-modal-value" x-text="peerDetail().last_clock_offset_accepted == null ? '-' : (peerDetail().last_clock_offset_accepted ? 'Yes' : 'No')"></span></div>
+              <div class="peer-modal-field"><span class="tx-label">Clock observed</span><span class="peer-modal-value" x-text="peerTimestampLabel(peerDetail().last_clock_observed_ms)"></span></div>
+              <div class="peer-modal-field"><span class="tx-label">Misbehavior score</span><span class="peer-modal-value" x-text="peerDetail().misbehavior_score ?? 0"></span></div>
+              <div class="peer-modal-field"><span class="tx-label">Banned for</span><span class="peer-modal-value" x-text="peerBanLabel(peerDetail())"></span></div>
+              <div class="peer-modal-field"><span class="tx-label">Banned until</span><span class="peer-modal-value" x-text="peerTimestampLabel(peerDetail().banned_until_ms)"></span></div>
+              <div class="peer-modal-field"><span class="tx-label">Last error time</span><span class="peer-modal-value" x-text="peerTimestampLabel(peerDetail().last_error_ms)"></span></div>
+              <div class="peer-modal-field wide"><span class="tx-label">Last error</span><span class="peer-modal-value" x-text="peerDetail().last_error || '-'"></span></div>
+              <div class="peer-modal-field wide"><span class="tx-label">Ban reason</span><span class="peer-modal-value" x-text="peerDetail().ban_reason || '-'"></span></div>
+            </div>
+          </section>
+        </div>
+      </template>
     </section>
   </div>
   <div class="setup-overlay transaction-overlay" x-show="sendConfirmModalOpen" x-transition.opacity @click.self="closeSendConfirmModal()" role="dialog" aria-modal="true" aria-labelledby="send-confirm-title">

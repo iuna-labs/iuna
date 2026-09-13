@@ -59,6 +59,24 @@ pub(super) async fn record_peer_status(
     }
 }
 
+async fn record_peer_hello(
+    network: &GossipNetwork,
+    known_peer: &Option<String>,
+    remote_addr: SocketAddr,
+    hello: ProtocolHello,
+) {
+    let (peer, direction) = match known_peer {
+        Some(peer) => (peer.clone(), PeerDirection::Outbound),
+        None => (remote_addr.to_string(), PeerDirection::Inbound),
+    };
+    network
+        .inner
+        .peers
+        .lock()
+        .await
+        .record_hello(&peer, direction, hello);
+}
+
 pub(super) async fn process_hello(
     network: &GossipNetwork,
     remote_addr: SocketAddr,
@@ -182,6 +200,7 @@ async fn process_hello_inner(
         &PeerStatus::with_time(hello.height, hello.tip_hash.clone(), hello.time_ms),
     )
     .await;
+    record_peer_hello(network, known_peer, remote_addr, hello.clone()).await;
     let mut status = if request_bootstrap {
         PeerStatus::with_bootstrap_request(hello.height, hello.tip_hash, hello.time_ms)
     } else {

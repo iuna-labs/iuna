@@ -4,7 +4,7 @@ use serde::{Deserialize, Serialize};
 
 use super::{
     PEER_CLOCK_OFFSET_ACCEPTANCE_MS, PEER_CLOCK_OFFSET_STALE_MS, PEER_MISBEHAVIOR_BAN_MS,
-    PEER_MISBEHAVIOR_BAN_SCORE, now_ms,
+    PEER_MISBEHAVIOR_BAN_SCORE, ProtocolHello, now_ms,
 };
 
 pub const MAX_DISCOVERED_PEERS: usize = 256;
@@ -212,6 +212,9 @@ impl PeerBook {
             .last_known_tip_hash
             .clone()
             .or(from_peer.last_known_tip_hash);
+        if to_peer.last_hello.is_none() {
+            to_peer.last_hello = from_peer.last_hello;
+        }
         if from_peer.last_clock_observed_ms > to_peer.last_clock_observed_ms {
             to_peer.last_clock_offset_ms = from_peer.last_clock_offset_ms;
             to_peer.last_clock_offset_accepted = from_peer.last_clock_offset_accepted;
@@ -357,6 +360,10 @@ impl PeerBook {
         }
     }
 
+    pub fn record_hello(&mut self, address: &str, direction: PeerDirection, hello: ProtocolHello) {
+        self.ensure(address, direction).last_hello = Some(hello);
+    }
+
     pub fn record_clock_observation(
         &mut self,
         address: &str,
@@ -498,6 +505,8 @@ pub struct PeerInfo {
     pub messages_received: u64,
     pub last_known_height: Option<u64>,
     pub last_known_tip_hash: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub last_hello: Option<ProtocolHello>,
     #[serde(default)]
     pub last_clock_offset_ms: Option<i64>,
     #[serde(default)]
@@ -522,6 +531,7 @@ impl PeerInfo {
             messages_received: 0,
             last_known_height: None,
             last_known_tip_hash: None,
+            last_hello: None,
             last_clock_offset_ms: None,
             last_clock_offset_accepted: None,
             last_clock_observed_ms: None,

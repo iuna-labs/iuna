@@ -1114,6 +1114,7 @@ async fn hello_records_remote_clock_observation() {
         tip_hash: "tip".to_string(),
         time_ms: remote_time_ms,
     };
+    let expected_hello = hello.clone();
 
     let mut known_peer = None;
     super::process_hello(
@@ -1132,6 +1133,7 @@ async fn hello_records_remote_clock_observation() {
         .unwrap();
     assert!(peer.last_clock_offset_ms.unwrap() > 30_000);
     assert_eq!(peer.last_clock_offset_accepted, Some(true));
+    assert_eq!(peer.last_hello.as_ref(), Some(&expected_hello));
 }
 
 #[tokio::test]

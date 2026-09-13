@@ -126,6 +126,20 @@ fn management_ui_opens_on_the_dashboard_and_exposes_chain_health_thresholds() {
 }
 
 #[test]
+fn management_ui_exposes_complete_peer_details() {
+    let html = include_str!("adapters/http/index_html.rs");
+    let javascript = include_str!("../www/assets/iuna-ui.js");
+    assert!(html.contains("@click=\"openPeerModal(peer)\""));
+    assert!(html.contains("Last protocol hello"));
+    assert!(html.contains("peerDetail().last_hello?.protocol_version"));
+    assert!(html.contains("peerCapabilities(peerDetail())"));
+    assert!(html.contains("Health and enforcement"));
+    assert!(javascript.contains("selectedPeerAddress: null"));
+    assert!(javascript.contains("peerDetail()"));
+    assert!(javascript.contains("closePeerModal()"));
+}
+
+#[test]
 fn management_ui_uses_an_in_app_transfer_confirmation_and_marks_fee_errors() {
     let html = include_str!("adapters/http/index_html.rs");
     let javascript = include_str!("../www/assets/iuna-ui.js");

@@ -19,6 +19,7 @@ window.iunaApp = function iunaApp() {
     walletUtxos: [],
     mempool: [],
     peers: [],
+    selectedPeerAddress: null,
     p2pMetrics: {},
     blockchainMetrics: { enabled: false, latest: null, charts: [] },
     loadingMetrics: false,
@@ -1415,6 +1416,7 @@ window.iunaApp = function iunaApp() {
       this.closeBurnLeaderRanksModal();
       this.closeBurnBundleModal();
       this.closeChainResetModal();
+      this.closePeerModal();
     },
 
     async loadOlderBlocks() {
@@ -2809,9 +2811,31 @@ window.iunaApp = function iunaApp() {
     async removePeer(peer) {
       try {
         await this.postForm("/api/peers", { peer: peer.address }, `Removed peer ${peer.address}`, "DELETE");
+        if (this.selectedPeerAddress === peer.address) this.closePeerModal();
       } catch (error) {
         this.showFlash(error.message, "error");
       }
+    },
+
+    openPeerModal(peer) {
+      this.selectedPeerAddress = peer?.address || null;
+    },
+
+    closePeerModal() {
+      this.selectedPeerAddress = null;
+    },
+
+    peerDetail() {
+      return this.peers.find((peer) => peer.address === this.selectedPeerAddress) || null;
+    },
+
+    peerCapabilities(peer) {
+      return Array.isArray(peer?.last_hello?.capabilities) ? peer.last_hello.capabilities : [];
+    },
+
+    peerTimestampLabel(timestampMs) {
+      if (typeof timestampMs !== "number" || !Number.isFinite(timestampMs) || timestampMs <= 0) return "-";
+      return `${new Date(timestampMs).toLocaleString()} (${this.relativeTimeLabel(timestampMs)})`;
     },
 
     addressBookEntries() {
