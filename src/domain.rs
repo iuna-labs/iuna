@@ -88,6 +88,17 @@ pub use signature::{ProtocolPublicKey, ProtocolSignature, SignatureScheme};
 pub(crate) use signature::{
     ed25519_public_key, sign_ed25519, validate_ed25519_public_key, verify_ed25519, verify_ml_dsa44,
 };
+
+#[cfg(feature = "fuzzing")]
+pub fn fuzz_verify_ml_dsa44(public_key: &[u8], payload: &[u8], signature: &[u8]) {
+    let Ok(public_key) = <&[u8; 1_312]>::try_from(public_key) else {
+        return;
+    };
+    let Ok(signature) = <&[u8; 2_420]>::try_from(signature) else {
+        return;
+    };
+    let _ = verify_ml_dsa44(public_key, payload, signature, "fuzz input");
+}
 pub use stratum::{
     STRATUM_EXTRANONCE1_HEX, STRATUM_EXTRANONCE2_SIZE, StratumMineShare, StratumMineTemplate,
     pack_stratum_nonce,

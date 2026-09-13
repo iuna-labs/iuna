@@ -114,6 +114,13 @@ has not been independently audited, so an independent review and an explicit bac
 decision remain prerequisites before activation. No transaction-v2 gossip capability is
 advertised yet.
 
+The verification tests include a small audit corpus pinned to exact NIST ACVP-Server and C2SP
+Wycheproof commits and file hashes. It covers a valid NIST signature, Wycheproof's repeated-hint
+regression, and a valid signature at the ML-DSA-44 norm boundary. A dedicated fuzz target exercises
+both the transaction-v2 decoder and arbitrary ML-DSA-44 verification inputs; it remains part of the
+release's time-bounded, coverage-guided `cargo fuzz` gate while transaction v2 is dormant. Seed
+corpora, newly discovered coverage inputs, and crash artifacts are retained as release evidence.
+
 ## Other trust boundaries
 
 - P2P node IDs need versioned, algorithm-tagged proofs independent of wallet activation.

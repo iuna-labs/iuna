@@ -186,12 +186,22 @@ pub(crate) fn verify_ml_dsa44(
     signature: &[u8; 2_420],
     label: &str,
 ) -> Result<()> {
+    verify_ml_dsa44_with_context(public_key, payload, &[], signature, label)
+}
+
+fn verify_ml_dsa44_with_context(
+    public_key: &[u8; 1_312],
+    payload: &[u8],
+    context: &[u8],
+    signature: &[u8; 2_420],
+    label: &str,
+) -> Result<()> {
     let encoded_public_key = EncodedVerifyingKey::<MlDsa44>::try_from(public_key.as_slice())
         .with_context(|| format!("invalid {label} ML-DSA-44 public key length"))?;
     let public_key = MlDsaVerifyingKey::<MlDsa44>::decode(&encoded_public_key);
     let signature = MlDsaSignature::<MlDsa44>::try_from(signature.as_slice())
         .with_context(|| format!("invalid {label} ML-DSA-44 signature encoding"))?;
-    if !public_key.verify_with_context(payload, &[], &signature) {
+    if !public_key.verify_with_context(payload, context, &signature) {
         bail!("{label} ML-DSA-44 signature is invalid");
     }
     Ok(())
@@ -199,10 +209,30 @@ pub(crate) fn verify_ml_dsa44(
 
 #[cfg(test)]
 mod tests {
+    use serde::Deserialize;
+
     use super::{
         ProtocolPublicKey, ProtocolSignature, SignatureScheme, ed25519_public_key, sign_ed25519,
-        verify_ed25519,
+        verify_ed25519, verify_ml_dsa44_with_context,
     };
+    use crate::domain::hex::decode_hex;
+
+    #[derive(Deserialize)]
+    struct MlDsaAuditFile {
+        vectors: Vec<MlDsaAuditVector>,
+    }
+
+    #[derive(Deserialize)]
+    struct MlDsaAuditVector {
+        source: String,
+        tc_id: u64,
+        comment: String,
+        expected_valid: bool,
+        public_key: String,
+        message: String,
+        context: String,
+        signature: String,
+    }
 
     #[test]
     fn signature_scheme_ids_and_sizes_are_stable() {
@@ -234,6 +264,36 @@ mod tests {
 
         verify_ed25519(&public_key, b"quantum-agility-test", &signature, "test").unwrap();
         assert!(verify_ed25519(&public_key, b"tampered", &signature, "test").is_err());
+    }
+
+    #[test]
+    fn ml_dsa44_matches_pinned_nist_and_wycheproof_vectors() {
+        let audit: MlDsaAuditFile =
+            serde_json::from_str(include_str!("../../tests/vectors/ml_dsa44_audit.json")).unwrap();
+
+        for vector in audit.vectors {
+            let public_key: [u8; 1_312] =
+                decode_hex(&vector.public_key).unwrap().try_into().unwrap();
+            let message = decode_hex(&vector.message).unwrap();
+            let context = decode_hex(&vector.context).unwrap();
+            let signature: [u8; 2_420] = decode_hex(&vector.signature).unwrap().try_into().unwrap();
+            let result = verify_ml_dsa44_with_context(
+                &public_key,
+                &message,
+                &context,
+                &signature,
+                "audit vector",
+            );
+
+            assert_eq!(
+                result.is_ok(),
+                vector.expected_valid,
+                "{} tcId {}: {}",
+                vector.source,
+                vector.tc_id,
+                vector.comment
+            );
+        }
     }
 
     #[test]

@@ -5,6 +5,7 @@ cd "$(dirname "${BASH_SOURCE[0]}")"
 
 RELEASE_ROLLBACK_ARMED=false
 RELEASE_START_HEAD=""
+CARGO_FUZZ_VERSION="0.13.2"
 RELEASE_VERSION_FILES=(
   CHANGELOG.md
   Cargo.toml
@@ -43,6 +44,33 @@ require_command() {
   local command_name="$1"
 
   command -v "$command_name" >/dev/null 2>&1 || die "missing required command: ${command_name}"
+}
+
+require_cargo_fuzz() {
+  require_command cargo-fuzz
+  require_command rustup
+
+  local installed_version
+  installed_version="$(cargo fuzz --version)"
+  [ "$installed_version" = "cargo-fuzz ${CARGO_FUZZ_VERSION}" ] || \
+    die "cargo-fuzz ${CARGO_FUZZ_VERSION} is required, found ${installed_version}"
+  rustup run nightly rustc --version >/dev/null 2>&1 || \
+    die "a nightly Rust toolchain is required for coverage-guided fuzzing"
+}
+
+run_fuzz_campaign() {
+  local target="$1"
+  local seconds="$2"
+  local evidence_dir="$3"
+  local corpus_dir="${evidence_dir}/corpus/${target}"
+  local artifact_dir="${evidence_dir}/artifacts/${target}"
+
+  mkdir -p "$corpus_dir" "$artifact_dir"
+  cp -R "fuzz/corpus/${target}/." "$corpus_dir/"
+  cargo +nightly fuzz run "$target" "$corpus_dir" -- \
+    -max_total_time="$seconds" \
+    -timeout=10 \
+    -artifact_prefix="${artifact_dir}/"
 }
 
 docker_native_linux_platform() {
@@ -204,20 +232,24 @@ run_release_tests() {
     return 0
   fi
 
-  local fuzz_runs="${IUNA_FUZZ_RUNS:-256}"
-  local vdf_fuzz_runs="${IUNA_VDF_FUZZ_RUNS:-16}"
-  validate_positive_integer IUNA_FUZZ_RUNS "$fuzz_runs"
-  validate_positive_integer IUNA_VDF_FUZZ_RUNS "$vdf_fuzz_runs"
+  local fuzz_seconds="${IUNA_FUZZ_SECONDS:-60}"
+  local vdf_fuzz_seconds="${IUNA_VDF_FUZZ_SECONDS:-15}"
+  validate_positive_integer IUNA_FUZZ_SECONDS "$fuzz_seconds"
+  validate_positive_integer IUNA_VDF_FUZZ_SECONDS "$vdf_fuzz_seconds"
+  require_cargo_fuzz
+
+  local release_evidence_dir="${IUNA_RELEASE_EVIDENCE_DIR:-release-evidence}"
+  local fuzz_evidence_dir="${release_evidence_dir}/fuzz"
 
   cargo test --locked --release --lib domain::adversarial_tests:: -- --ignored
-  cargo run --locked --manifest-path fuzz/Cargo.toml --bin p2p_envelope -- -runs="$fuzz_runs" fuzz/corpus/p2p_envelope
-  cargo run --locked --manifest-path fuzz/Cargo.toml --bin compact_snapshot -- -runs="$fuzz_runs" fuzz/corpus/compact_snapshot
-  cargo run --locked --manifest-path fuzz/Cargo.toml --bin domain_json -- -runs="$fuzz_runs" fuzz/corpus/domain_json
-  cargo run --locked --manifest-path fuzz/Cargo.toml --bin stratum_request -- -runs="$fuzz_runs" fuzz/corpus/stratum_request
-  cargo run --locked --manifest-path fuzz/Cargo.toml --bin wallet_config -- -runs="$fuzz_runs" fuzz/corpus/wallet_config
-  cargo run --locked --manifest-path fuzz/Cargo.toml --bin vdf_proof -- -runs="$vdf_fuzz_runs" fuzz/corpus/vdf_proof
+  run_fuzz_campaign p2p_envelope "$fuzz_seconds" "$fuzz_evidence_dir"
+  run_fuzz_campaign compact_snapshot "$fuzz_seconds" "$fuzz_evidence_dir"
+  run_fuzz_campaign domain_json "$fuzz_seconds" "$fuzz_evidence_dir"
+  run_fuzz_campaign stratum_request "$fuzz_seconds" "$fuzz_evidence_dir"
+  run_fuzz_campaign wallet_config "$fuzz_seconds" "$fuzz_evidence_dir"
+  run_fuzz_campaign vdf_proof "$vdf_fuzz_seconds" "$fuzz_evidence_dir"
+  run_fuzz_campaign transaction_v2 "$fuzz_seconds" "$fuzz_evidence_dir"
   cargo test --locked --release --features e2e --test properties -- --ignored
-  local release_evidence_dir="${IUNA_RELEASE_EVIDENCE_DIR:-release-evidence}"
   ./e2e/iuna_e2e.py test post-activation --build --evidence-dir "$release_evidence_dir"
 }
 

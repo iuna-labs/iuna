@@ -110,8 +110,11 @@ By default, deployment audits all three Rust lockfiles, enforces the dependency
 source/license policy, runs the regular unit tests, verifies that the fuzz
 targets compile against their locked dependencies, and runs the extended
 adversarial, fuzz, post-height-1000 six-node E2E, and release-property suites.
-Release hosts therefore need `cargo-audit`, `jq`, and Docker Compose in addition
-to the pinned Rust 1.88 toolchain. To
+Release hosts therefore need `cargo-audit`, `jq`, Docker Compose, the nightly Rust toolchain, and
+exactly `cargo-fuzz 0.13.2` in addition to the pinned Rust 1.88 toolchain. Coverage-guided fuzzing
+runs for 60 seconds per target and 15 seconds for the VDF target by default; override these with
+`IUNA_FUZZ_SECONDS` and `IUNA_VDF_FUZZ_SECONDS`. Corpus discoveries and crash artifacts are retained
+under `release-evidence/fuzz/`. To
 explicitly skip the long-running suites:
 
 ```sh

@@ -692,7 +692,7 @@ mod tests {
     use ml_dsa::{Keypair, MlDsa44, Seed, SigningKey as MlDsaSigningKey};
 
     use super::*;
-    use crate::domain::hex::hex_encode;
+    use crate::domain::hex::{decode_hex, hex_encode};
 
     fn domain() -> TransactionV2Domain {
         TransactionV2Domain::new("iuna-v2-test", [0x22; 32]).unwrap()
@@ -859,6 +859,18 @@ mod tests {
         trailing.push(0);
         assert!(TransactionV2::decode(&trailing).is_err());
         assert!(TransactionV2::decode(&encoded[..encoded.len() - 1]).is_err());
+    }
+
+    #[test]
+    fn transaction_v2_fuzz_corpus_contains_valid_decoder_and_verifier_seeds() {
+        for seed in [
+            include_str!("../../fuzz/corpus/transaction_v2/valid_mine.hex"),
+            include_str!("../../fuzz/corpus/transaction_v2/valid_hybrid_transfer.hex"),
+        ] {
+            let encoded = decode_hex(seed.trim().strip_prefix("hex:").unwrap()).unwrap();
+            let (domain, transaction) = TransactionV2::decode(&encoded).unwrap();
+            transaction.verify_hybrid_authorizations(&domain).unwrap();
+        }
     }
 
     #[test]
