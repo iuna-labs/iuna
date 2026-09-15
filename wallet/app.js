@@ -1,6 +1,6 @@
 import {
   API_BASE, LEGACY_STORAGE_KEY, STORAGE_KEY, api, buildSignedTransfer, decodeAddress,
-  decryptWallet, encodeAddress, encryptWallet, formatIuna, normalizeWalletStore,
+  decryptWallet, encodeAddress, encryptWallet, formatIuna, hexToBytes, normalizeWalletStore,
   parseFeeRate, parseIuna, removeWallet, upsertWallet, walletFromSeed, walletId,
 } from "./wallet-core.js";
 import { generateMnemonic, validateMnemonic } from "./mnemonic.js";
@@ -16,6 +16,8 @@ const state = {
   transactionPage: { offset: 0, total: 0, hasMore: true, loading: false, error: "" },
   transactionRequest: 0,
   activityObserver: null,
+  selectedTransaction: null,
+  transactionReturnView: "home",
 };
 const icon = (name) => {
   const paths = {
@@ -177,6 +179,15 @@ function transactionKey(item) {
   return `${item.kind || ""}:${item.transaction?.signature || ""}`;
 }
 
+function networkAddress(publicKey) {
+  if (!publicKey) return "Unknown";
+  try {
+    return encodeAddress(hexToBytes(publicKey), state.status?.chain_id);
+  } catch {
+    return String(publicKey);
+  }
+}
+
 function applyTransactionPage(payload, replace, preserveCount = 0) {
   const items = Array.isArray(payload?.items) ? payload.items : [];
   state.transactionPage.error = "";
@@ -303,8 +314,57 @@ function activityList(limit, filtered = false, source = state.transactions) {
   return `<div class="activity-list">${items.map((item) => {
     const info = transactionInfo(item);
     const date = formatTransactionDate(item);
-    return `<div class="activity"><div class="activity-icon">${info.symbol}</div><div><div class="activity-title">${info.title}</div><div class="activity-meta">${escapeHtml(date)} · ${escapeHtml(item.status)}</div></div><div class="activity-amount ${info.incoming ? "in" : ""}">${info.incoming ? "+" : "−"}${formatIuna(info.amount, 4)} IUNA</div></div>`;
+    return `<button class="activity" data-transaction-key="${escapeHtml(transactionKey(item))}" type="button" aria-label="View ${escapeHtml(info.title.toLowerCase())} transaction details"><span class="activity-icon">${info.symbol}</span><span><span class="activity-title">${info.title}</span><span class="activity-meta">${escapeHtml(date)} · ${escapeHtml(item.status)}</span></span><span class="activity-amount ${info.incoming ? "in" : ""}">${info.incoming ? "+" : "−"}${formatIuna(info.amount, 4)} IUNA</span><span class="activity-chevron" aria-hidden="true">›</span></button>`;
   }).join("")}</div>`;
+}
+
+function addressDetail(label, address, amount = null) {
+  const formattedAmount = amount === null ? "" : `<small>${formatIuna(amount, 6)} IUNA</small>`;
+  return `<div class="address-detail"><span>${escapeHtml(label)}</span><div><code>${escapeHtml(address)}</code>${formattedAmount}</div></div>`;
+}
+
+function transactionFlow(item) {
+  const tx = item.transaction || {};
+  if (item.kind === "reward") {
+    return {
+      from: [{ label: "From", address: "Network reward", amount: null }],
+      to: (tx.outputs || []).map((output) => ({ label: "To", address: networkAddress(output.address), amount: output.amount })),
+    };
+  }
+  if (tx.kind === "mine") {
+    return {
+      from: [{ label: "From", address: "Mining protocol", amount: null }],
+      to: [{ label: "To", address: networkAddress(tx.recipient), amount: 1_000_000 }],
+    };
+  }
+  const owners = [...new Set((tx.inputs || []).map((input) => input.owner).filter(Boolean))];
+  const outputs = tx.kind === "burn" ? (tx.change || []) : (tx.outputs || []);
+  const from = owners.map((owner) => ({ label: "From", address: networkAddress(owner), amount: null }));
+  const to = outputs.map((output) => ({
+    label: owners.includes(output.address) ? "Change to" : "To",
+    address: networkAddress(output.address),
+    amount: output.amount,
+  }));
+  if (tx.kind === "burn") to.unshift({ label: "To", address: "Burned permanently", amount: tx.amount || 0 });
+  return {
+    from: from.length ? from : [{ label: "From", address: "Unknown", amount: null }],
+    to: to.length ? to : [{ label: "To", address: "Unknown", amount: null }],
+  };
+}
+
+function renderTransaction() {
+  const item = state.selectedTransaction;
+  if (!item) {
+    state.view = state.transactionReturnView;
+    return state.view === "activity" ? renderActivity() : renderHome();
+  }
+  const tx = item.transaction || {};
+  const info = transactionInfo(item);
+  const flow = transactionFlow(item);
+  const transactionId = tx.signature || "Unknown";
+  const fee = Number(tx.fee || 0);
+  const addresses = [...flow.from, ...flow.to].map((entry) => addressDetail(entry.label, entry.address, entry.amount)).join("");
+  return `${topbar()}<button class="back" data-action="close-transaction">← Back</button><p class="eyebrow">Transaction details</p><h1 class="view-title">${escapeHtml(info.title)}</h1><p class="transaction-total ${info.incoming ? "in" : ""}">${info.incoming ? "+" : "−"}${formatIuna(info.amount, 6)} IUNA</p><div class="panel transaction-detail">${addresses}<div class="detail-line"><span>Status</span><strong class="status-value">${escapeHtml(item.status || "Unknown")}</strong></div><div class="detail-line"><span>Date</span><strong>${escapeHtml(formatTransactionDate(item))}</strong></div>${item.block_height === null || item.block_height === undefined ? "" : `<div class="detail-line"><span>Block</span><strong>${escapeHtml(item.block_height)}</strong></div>`}${fee ? `<div class="detail-line"><span>Network fee</span><strong>${formatIuna(fee, 6)} IUNA</strong></div>` : ""}<div class="transaction-id"><span>Transaction ID</span><code>${escapeHtml(transactionId)}</code><button class="icon-button" data-action="copy-transaction-id" aria-label="Copy transaction ID">${icon("copy")}</button></div></div>`;
 }
 
 function renderHome() {
@@ -338,7 +398,7 @@ function renderSettings() {
 }
 
 function renderApp() {
-  const renderers = { home: renderHome, send: renderSend, receive: renderReceive, activity: renderActivity, settings: renderSettings };
+  const renderers = { home: renderHome, send: renderSend, receive: renderReceive, activity: renderActivity, transaction: renderTransaction, settings: renderSettings };
   state.activityObserver?.disconnect();
   state.activityObserver = null;
   app.innerHTML = `${(renderers[state.view] || renderHome)()}${nav()}`;
@@ -372,6 +432,28 @@ app.addEventListener("click", async (event) => {
   const button = event.target.closest("button");
   if (!button) return;
   const action = button.dataset.action;
+  if (button.dataset.transactionKey) {
+    const key = button.dataset.transactionKey;
+    const item = [...state.recentTransactions, ...state.transactions].find((transaction) => transactionKey(transaction) === key);
+    if (item) {
+      state.transactionReturnView = state.view === "activity" ? "activity" : "home";
+      state.selectedTransaction = item;
+      state.view = "transaction";
+      renderApp();
+    }
+    return;
+  }
+  if (action === "close-transaction") {
+    state.selectedTransaction = null;
+    state.view = state.transactionReturnView;
+    renderApp();
+    return;
+  }
+  if (action === "copy-transaction-id") {
+    await navigator.clipboard.writeText(state.selectedTransaction?.transaction?.signature || "");
+    toast("Transaction ID copied");
+    return;
+  }
   if (button.dataset.transactionFilter) {
     const filter = button.dataset.transactionFilter;
     state.transactionFilters[filter] = !state.transactionFilters[filter];
