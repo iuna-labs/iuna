@@ -5,6 +5,17 @@ from the Git history and Conventional Commit titles by `deployment.sh`.
 
 ## [Unreleased]
 
+## [0.4.34] - 2026-09-15
+
+### Added
+
+- show transaction details
+- show peer country codes
+
+### Fixed
+
+- render clone command as code
+
 ## [0.4.33] - 2026-09-15
 
 ### Added
