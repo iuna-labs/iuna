@@ -5,23 +5,22 @@ from the Git history and Conventional Commit titles by `deployment.sh`.
 
 ## [Unreleased]
 
+## [0.4.33] - 2026-09-15
+
 ### Added
 
-- validate height-gated v2 migrations and hybrid transfers against the live UTXO model
-- admit v2 transactions to a separate byte-limited mempool without legacy double-spends
-- select v2 transactions into height-gated blocks and bind their canonical envelopes to the VDF and block hash
-- persist v2 block envelopes in compact snapshot v8 while retaining snapshot v7 read compatibility
-- preserve UTXO lineage and reorg carry-forward behavior across legacy-to-hybrid migrations
-- advertise transaction-v2 block support to peers
+- expose peer handshake details
+- add dormant transaction v2
+- verify dormant hybrid signatures
+- prepare height 3000 quantum migration
+- validate v2 transactions in mempool
+- include v2 transactions in blocks
+- update rustls
 
-- expose complete peer handshake details in the P2P interface
-- add dormant transaction-v2 encoding and activation gating
-- verify both components of dormant hybrid transaction authorizations
-- add pinned ML-DSA audit vectors and transaction-v2 fuzz coverage
-- define the independent-review scope and activation blockers for the quantum migration
-- derive dormant hybrid wallet keys and addresses from existing seed-phrase backups
-- set candidate-mainnet transaction-v2 activation height to 3000
-- build explicit v2 migrations from legacy UTXOs into a hybrid wallet output
+### Tests
+
+- add quantum audit coverage
+- run regular block-budget coverage post-activation
 
 ## [0.4.32] - 2026-09-13
 
