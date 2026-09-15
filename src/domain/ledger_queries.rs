@@ -118,7 +118,7 @@ impl Ledger {
             } else {
                 Default::default()
             },
-            pending_transactions: self.pending.len(),
+            pending_transactions: self.pending.len().saturating_add(self.pending_v2.len()),
         }
     }
 
@@ -526,9 +526,15 @@ impl Ledger {
         &self.pending
     }
 
+    pub fn pending_v2(&self) -> &[super::TransactionV2] {
+        &self.pending_v2
+    }
+
     pub(crate) fn clear_pending_transactions(&mut self) {
         self.pending.clear();
         self.pending_bytes = 0;
+        self.pending_v2.clear();
+        self.pending_v2_bytes = 0;
     }
 
     pub fn orphan_transactions(&self) -> &[Transaction] {

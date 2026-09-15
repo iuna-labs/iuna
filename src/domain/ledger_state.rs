@@ -5,7 +5,7 @@ use std::{
 
 use super::{
     Amount, Block, BurnTicket, FinalityCheckpoint, LaunchProfile, LineageOwnerValues, OutPoint,
-    Transaction, TxOutput, UtxoLineageRoot,
+    Transaction, TransactionV2, TxOutput, UtxoLineageRoot,
 };
 use crate::compact::CompactBlockContext;
 
@@ -23,6 +23,8 @@ pub struct Ledger {
     pub(super) orphans: Vec<Transaction>,
     pub(super) pending_bytes: usize,
     pub(super) orphan_bytes: usize,
+    pub(super) pending_v2: Vec<TransactionV2>,
+    pub(super) pending_v2_bytes: usize,
     pub(super) mine_reward: Amount,
     /// PoW difficulty after each completed retarget window. Index zero is the
     /// launch difficulty; index `n` is the difficulty at anchor height

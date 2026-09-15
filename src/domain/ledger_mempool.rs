@@ -85,6 +85,9 @@ impl Ledger {
         if transaction_inputs_spent_by(&transaction, &self.orphans) {
             return Ok(TransactionSubmitOutcome::ConflictsWithPending);
         }
+        if self.transaction_conflicts_with_pending_v2(&transaction) {
+            return Ok(TransactionSubmitOutcome::ConflictsWithPending);
+        }
 
         let mut utxos = self.utxos_after_valid_pending()?;
         if transaction_has_missing_inputs(&transaction, &utxos) {

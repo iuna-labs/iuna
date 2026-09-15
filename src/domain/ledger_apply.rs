@@ -153,6 +153,7 @@ impl Ledger {
             .collect();
         self.refresh_pending_pool_byte_counters()?;
         self.promote_orphan_transactions()?;
+        self.revalidate_pending_v2()?;
         self.vdf_rounds = self.next_vdf_rounds_after_tip();
         Ok(())
     }

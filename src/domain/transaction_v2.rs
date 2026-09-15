@@ -167,6 +167,15 @@ impl V2SpendingAuthorization {
 }
 
 impl TransactionV2 {
+    pub fn fee(&self) -> u64 {
+        match self {
+            Self::Migration { fee, .. } | Self::Transfer { fee, .. } | Self::Burn { fee, .. } => {
+                *fee
+            }
+            Self::Mine { .. } => 0,
+        }
+    }
+
     /// Canonical bytes signed by every spending authorization. Signatures are excluded.
     pub fn signing_bytes(&self, domain: &TransactionV2Domain) -> Result<Vec<u8>> {
         self.validate_unsigned_shape()?;
@@ -294,6 +303,10 @@ impl TransactionV2 {
     /// A v2 outpoint uses this fixed-size ID instead of a potentially variable signature.
     pub fn transaction_id(&self, domain: &TransactionV2Domain) -> Result<[u8; 32]> {
         Ok(Sha256::digest(self.encode(domain)?).into())
+    }
+
+    pub fn encoded_size_bytes(&self, domain: &TransactionV2Domain) -> Result<usize> {
+        Ok(self.encode(domain)?.len())
     }
 
     pub fn validate_authorization_commitments(&self) -> Result<()> {
@@ -440,6 +453,12 @@ impl TransactionV2 {
                 if inputs.is_empty() || outputs.is_empty() {
                     bail!("transaction v2 transfer requires inputs and outputs");
                 }
+                if outputs
+                    .iter()
+                    .any(|output| output.address.version != AddressVersion::HybridKeyCommitment)
+                {
+                    bail!("transaction v2 transfer outputs must use address v1");
+                }
                 let unique = inputs
                     .iter()
                     .map(|input| (input.outpoint_txid, input.outpoint_index))
@@ -448,9 +467,20 @@ impl TransactionV2 {
                     bail!("transaction v2 transfer contains a duplicate input");
                 }
             }
-            Self::Burn { inputs, amount, .. } => {
+            Self::Burn {
+                inputs,
+                change,
+                amount,
+                ..
+            } => {
                 if inputs.is_empty() || *amount == 0 {
                     bail!("transaction v2 burn requires inputs and a positive amount");
+                }
+                if change
+                    .iter()
+                    .any(|output| output.address.version != AddressVersion::HybridKeyCommitment)
+                {
+                    bail!("transaction v2 burn change must use address v1");
                 }
                 let unique = inputs
                     .iter()

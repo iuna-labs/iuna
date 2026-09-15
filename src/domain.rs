@@ -22,6 +22,7 @@ mod ledger_prepare;
 mod ledger_queries;
 mod ledger_reveal;
 mod ledger_state;
+mod ledger_v2;
 mod mine_policy;
 mod mining;
 mod profile;

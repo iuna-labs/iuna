@@ -141,6 +141,12 @@ This key capability alone does not create spendable address-v1 outputs. The wall
 offer the address until transaction-v2 submission, mempool, block, gossip, persistence, and fee
 accounting are connected and activated together on the candidate network.
 
+The domain layer now has a separate v2 pending pool. It checks the fixed height boundary, the
+ledger-derived chain domain, canonical encoded byte limits, UTXO ownership, value conservation,
+legacy/v2 double-spends, and dependent v2 transactions. It is not reachable from the public API or
+P2P layer and is not selected into blocks yet, so this is still an integration stage rather than an
+activation-ready release.
+
 ## Other trust boundaries
 
 - P2P node IDs need versioned, algorithm-tagged proofs independent of wallet activation.
