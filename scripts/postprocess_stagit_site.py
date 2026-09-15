@@ -42,10 +42,20 @@ def postprocess_html(html: str, path: Path | None = None) -> str:
         flags=re.S,
     )
     html = re.sub(r"<tr([^>]*)><td></td><td>", r"<tr\1><td>", html)
+    html = style_clone_command(html)
 
     if path is not None and is_markdown_file_page(path):
         html = style_markdown_blob(html)
     return html
+
+
+def style_clone_command(html: str) -> str:
+    return re.sub(
+        r'git clone\s+<a\s+href="[^"]+"[^>]*>(.*?)</a>',
+        r'<code class="clone-command">git clone \1</code>',
+        html,
+        flags=re.S,
+    )
 
 
 def is_markdown_file_page(path: Path) -> bool:
