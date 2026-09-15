@@ -11,6 +11,10 @@ from the Git history and Conventional Commit titles by `deployment.sh`.
 - add dormant transaction-v2 encoding and activation gating
 - verify both components of dormant hybrid transaction authorizations
 - add pinned ML-DSA audit vectors and transaction-v2 fuzz coverage
+- define the independent-review scope and activation blockers for the quantum migration
+- derive dormant hybrid wallet keys and addresses from existing seed-phrase backups
+- set candidate-mainnet transaction-v2 activation height to 3000
+- build explicit v2 migrations from legacy UTXOs into a hybrid wallet output
 
 ## [0.4.32] - 2026-09-13
 

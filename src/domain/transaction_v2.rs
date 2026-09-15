@@ -1,3 +1,5 @@
+use std::collections::BTreeSet;
+
 use anyhow::{Context, Result, bail};
 use sha2::{Digest, Sha256};
 
@@ -16,9 +18,12 @@ const STRATUM_PROOF_HEADER_BYTES: usize = 80;
 /// Reserved wire version. It is deliberately separate from the live `Transaction` JSON type.
 pub const TRANSACTION_V2_WIRE_VERSION: u16 = 2;
 
-/// `None` is an explicit dormant state, not a distant placeholder height.
-/// Activating v2 requires a reviewed protocol release that changes this constant.
-pub const TRANSACTION_V2_ACTIVATION_HEIGHT: Option<u64> = None;
+/// Fixed consensus activation height for the `iuna-mainnet-candidate` migration.
+///
+/// This is deliberately compiled into the protocol rather than exposed as an
+/// operator-controlled feature flag. Live consensus must not route v2
+/// transactions through this gate until the complete integration is present.
+pub const TRANSACTION_V2_ACTIVATION_HEIGHT: Option<u64> = Some(3_000);
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct TransactionV2Domain {
@@ -29,6 +34,19 @@ pub struct TransactionV2Domain {
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct TransactionV2Input {
     pub outpoint_txid: [u8; 32],
+    pub outpoint_index: u32,
+    pub owner: VersionedAddress,
+}
+
+#[derive(Clone, Debug, Eq, Ord, PartialEq, PartialOrd)]
+pub enum LegacyTransactionId {
+    Hash([u8; 32]),
+    Signature([u8; 64]),
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct TransactionV2LegacyInput {
+    pub outpoint_id: LegacyTransactionId,
     pub outpoint_index: u32,
     pub owner: VersionedAddress,
 }
@@ -47,6 +65,12 @@ pub struct V2SpendingAuthorization {
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum TransactionV2 {
+    Migration {
+        inputs: Vec<TransactionV2LegacyInput>,
+        outputs: Vec<TransactionV2Output>,
+        fee: u64,
+        authorizations: Vec<V2SpendingAuthorization>,
+    },
     Transfer {
         inputs: Vec<TransactionV2Input>,
         outputs: Vec<TransactionV2Output>,
@@ -116,7 +140,27 @@ impl V2SpendingAuthorization {
         &self.signature
     }
 
-    /// Computes the address-v1 commitment using unambiguous component lengths.
+    /// Computes the address authorized by this public key.
+    pub fn authorized_address(&self) -> Result<VersionedAddress> {
+        match self.public_key.scheme() {
+            SignatureScheme::Ed25519 => Ok(VersionedAddress {
+                version: AddressVersion::Ed25519PublicKey,
+                payload: self
+                    .public_key
+                    .as_bytes()
+                    .try_into()
+                    .expect("validated Ed25519 public key length"),
+            }),
+            SignatureScheme::HybridEd25519MlDsa44 => {
+                hybrid_key_commitment_address(&self.public_key)
+            }
+            SignatureScheme::MlDsa44 => {
+                bail!("ML-DSA-only transaction v2 authorizations are not supported")
+            }
+        }
+    }
+
+    /// Computes the address-v1 commitment for a hybrid authorization.
     pub fn committed_address(&self) -> Result<VersionedAddress> {
         hybrid_key_commitment_address(&self.public_key)
     }
@@ -211,6 +255,11 @@ impl TransactionV2 {
                     proof_hash,
                 }
             }
+            4 => UnsignedDecoded::Migration {
+                inputs: decode_legacy_inputs(&mut reader)?,
+                outputs: decode_outputs(&mut reader)?,
+                fee: reader.u64("migration fee")?,
+            },
             _ => bail!("unsupported transaction v2 kind {kind}"),
         };
 
@@ -249,86 +298,184 @@ impl TransactionV2 {
 
     pub fn validate_authorization_commitments(&self) -> Result<()> {
         self.validate_shape()?;
-        for (input, authorization) in self.inputs().iter().zip(self.authorizations()) {
-            if authorization.scheme() != SignatureScheme::HybridEd25519MlDsa44 {
-                bail!("transaction v2 spends require hybrid authorization");
+        match self {
+            Self::Migration {
+                inputs,
+                authorizations,
+                ..
+            } => {
+                for (input, authorization) in inputs.iter().zip(authorizations) {
+                    if input.owner.version != AddressVersion::Ed25519PublicKey
+                        || authorization.scheme() != SignatureScheme::Ed25519
+                        || input.owner != authorization.authorized_address()?
+                    {
+                        bail!(
+                            "transaction v2 migration authorization does not match its legacy owner"
+                        );
+                    }
+                }
             }
-            if input.owner.version != AddressVersion::HybridKeyCommitment {
-                bail!("transaction v2 input owner must be an address-v1 commitment");
+            Self::Transfer {
+                inputs,
+                authorizations,
+                ..
             }
-            if input.owner.payload != public_key_commitment(authorization.public_key()) {
-                bail!("transaction v2 authorization does not match its owner commitment");
+            | Self::Burn {
+                inputs,
+                authorizations,
+                ..
+            } => {
+                for (input, authorization) in inputs.iter().zip(authorizations) {
+                    if input.owner.version != AddressVersion::HybridKeyCommitment
+                        || authorization.scheme() != SignatureScheme::HybridEd25519MlDsa44
+                        || input.owner != authorization.authorized_address()?
+                    {
+                        bail!(
+                            "transaction v2 authorization does not match its hybrid owner commitment"
+                        );
+                    }
+                }
             }
+            Self::Mine { .. } => {}
         }
         Ok(())
     }
 
-    /// Verifies both components of every hybrid spending authorization. This remains unreachable
-    /// from live consensus while `TRANSACTION_V2_ACTIVATION_HEIGHT` is `None`.
-    pub fn verify_hybrid_authorizations(&self, domain: &TransactionV2Domain) -> Result<()> {
+    /// Verifies the authorization required by each input version. Version-0 inputs retain their
+    /// Ed25519 rule so existing value can migrate; version-1 inputs require both signature
+    /// components. Live consensus must call `ensure_transaction_v2_active` before acceptance.
+    pub fn verify_authorizations(&self, domain: &TransactionV2Domain) -> Result<()> {
         self.validate_authorization_commitments()?;
         let payload = self.signing_bytes(domain)?;
         for authorization in self.authorizations() {
-            let (ed25519_public_key, ml_dsa_public_key) =
-                authorization.public_key().as_bytes().split_at(32);
-            let (ed25519_signature, ml_dsa_signature) =
-                authorization.signature().as_bytes().split_at(64);
-            let ed25519_public_key: [u8; 32] = ed25519_public_key
-                .try_into()
-                .expect("validated hybrid public key length");
-            let ml_dsa_public_key: [u8; 1_312] = ml_dsa_public_key
-                .try_into()
-                .expect("validated hybrid public key length");
-            let ed25519_signature: [u8; 64] = ed25519_signature
-                .try_into()
-                .expect("validated hybrid signature length");
-            let ml_dsa_signature: [u8; 2_420] = ml_dsa_signature
-                .try_into()
-                .expect("validated hybrid signature length");
-            verify_ed25519(
-                &ed25519_public_key,
-                &payload,
-                &ed25519_signature,
-                "transaction v2 classical component",
-            )?;
-            verify_ml_dsa44(
-                &ml_dsa_public_key,
-                &payload,
-                &ml_dsa_signature,
-                "transaction v2 post-quantum component",
-            )?;
+            match authorization.scheme() {
+                SignatureScheme::Ed25519 => {
+                    let public_key = authorization
+                        .public_key()
+                        .as_bytes()
+                        .try_into()
+                        .expect("validated Ed25519 public key length");
+                    let signature = authorization
+                        .signature()
+                        .as_bytes()
+                        .try_into()
+                        .expect("validated Ed25519 signature length");
+                    verify_ed25519(public_key, &payload, signature, "transaction v2 input")?;
+                }
+                SignatureScheme::HybridEd25519MlDsa44 => {
+                    let (ed25519_public_key, ml_dsa_public_key) =
+                        authorization.public_key().as_bytes().split_at(32);
+                    let (ed25519_signature, ml_dsa_signature) =
+                        authorization.signature().as_bytes().split_at(64);
+                    verify_ed25519(
+                        ed25519_public_key
+                            .try_into()
+                            .expect("validated hybrid key length"),
+                        &payload,
+                        ed25519_signature
+                            .try_into()
+                            .expect("validated hybrid signature length"),
+                        "transaction v2 classical component",
+                    )?;
+                    verify_ml_dsa44(
+                        ml_dsa_public_key
+                            .try_into()
+                            .expect("validated hybrid key length"),
+                        &payload,
+                        ml_dsa_signature
+                            .try_into()
+                            .expect("validated hybrid signature length"),
+                        "transaction v2 post-quantum component",
+                    )?;
+                }
+                SignatureScheme::MlDsa44 => {
+                    bail!("ML-DSA-only transaction v2 authorizations are not supported")
+                }
+            }
         }
         Ok(())
     }
 
     fn validate_shape(&self) -> Result<()> {
         self.validate_unsigned_shape()?;
-        if self.authorizations().len() != self.inputs().len() {
+        if self.authorizations().len() != self.input_count() {
             bail!("transaction v2 requires exactly one authorization per input");
         }
         Ok(())
     }
 
     fn validate_unsigned_shape(&self) -> Result<()> {
-        if self.inputs().len() > MAX_V2_INPUTS {
+        if self.input_count() > MAX_V2_INPUTS {
             bail!("transaction v2 has too many inputs");
         }
         if self.outputs().len() > MAX_V2_OUTPUTS {
             bail!("transaction v2 has too many outputs");
         }
+        if self.outputs().iter().any(|output| output.amount == 0) {
+            bail!("transaction v2 outputs must be greater than zero");
+        }
+        match self {
+            Self::Migration {
+                inputs, outputs, ..
+            } => {
+                if inputs.is_empty() {
+                    bail!("transaction v2 migration requires at least one input");
+                }
+                if outputs.len() != 1
+                    || outputs[0].address.version != AddressVersion::HybridKeyCommitment
+                {
+                    bail!("transaction v2 migration requires exactly one address-v1 output");
+                }
+                let unique = inputs
+                    .iter()
+                    .map(|input| (&input.outpoint_id, input.outpoint_index))
+                    .collect::<BTreeSet<_>>();
+                if unique.len() != inputs.len() {
+                    bail!("transaction v2 migration contains a duplicate input");
+                }
+            }
+            Self::Transfer {
+                inputs, outputs, ..
+            } => {
+                if inputs.is_empty() || outputs.is_empty() {
+                    bail!("transaction v2 transfer requires inputs and outputs");
+                }
+                let unique = inputs
+                    .iter()
+                    .map(|input| (input.outpoint_txid, input.outpoint_index))
+                    .collect::<BTreeSet<_>>();
+                if unique.len() != inputs.len() {
+                    bail!("transaction v2 transfer contains a duplicate input");
+                }
+            }
+            Self::Burn { inputs, amount, .. } => {
+                if inputs.is_empty() || *amount == 0 {
+                    bail!("transaction v2 burn requires inputs and a positive amount");
+                }
+                let unique = inputs
+                    .iter()
+                    .map(|input| (input.outpoint_txid, input.outpoint_index))
+                    .collect::<BTreeSet<_>>();
+                if unique.len() != inputs.len() {
+                    bail!("transaction v2 burn contains a duplicate input");
+                }
+            }
+            Self::Mine { .. } => {}
+        }
         Ok(())
     }
 
-    fn inputs(&self) -> &[TransactionV2Input] {
+    fn input_count(&self) -> usize {
         match self {
-            Self::Transfer { inputs, .. } | Self::Burn { inputs, .. } => inputs,
-            Self::Mine { .. } => &[],
+            Self::Migration { inputs, .. } => inputs.len(),
+            Self::Transfer { inputs, .. } | Self::Burn { inputs, .. } => inputs.len(),
+            Self::Mine { .. } => 0,
         }
     }
 
     fn outputs(&self) -> &[TransactionV2Output] {
         match self {
-            Self::Transfer { outputs, .. } => outputs,
+            Self::Migration { outputs, .. } | Self::Transfer { outputs, .. } => outputs,
             Self::Burn { change, .. } => change,
             Self::Mine { .. } => &[],
         }
@@ -336,15 +483,26 @@ impl TransactionV2 {
 
     fn authorizations(&self) -> &[V2SpendingAuthorization] {
         match self {
-            Self::Transfer { authorizations, .. } | Self::Burn { authorizations, .. } => {
-                authorizations
-            }
+            Self::Migration { authorizations, .. }
+            | Self::Transfer { authorizations, .. }
+            | Self::Burn { authorizations, .. } => authorizations,
             Self::Mine { .. } => &[],
         }
     }
 
     fn encode_unsigned_body(&self, bytes: &mut Vec<u8>) -> Result<()> {
         match self {
+            Self::Migration {
+                inputs,
+                outputs,
+                fee,
+                ..
+            } => {
+                bytes.push(4);
+                encode_legacy_inputs(bytes, inputs)?;
+                encode_outputs(bytes, outputs)?;
+                bytes.extend_from_slice(&fee.to_be_bytes());
+            }
             Self::Transfer {
                 inputs,
                 outputs,
@@ -472,6 +630,45 @@ fn decode_inputs(reader: &mut Reader<'_>) -> Result<Vec<TransactionV2Input>> {
     Ok(inputs)
 }
 
+fn encode_legacy_inputs(bytes: &mut Vec<u8>, inputs: &[TransactionV2LegacyInput]) -> Result<()> {
+    encode_count(bytes, inputs.len(), "legacy input count")?;
+    for input in inputs {
+        match input.outpoint_id {
+            LegacyTransactionId::Hash(hash) => {
+                bytes.push(0);
+                bytes.extend_from_slice(&hash);
+            }
+            LegacyTransactionId::Signature(signature) => {
+                bytes.push(1);
+                bytes.extend_from_slice(&signature);
+            }
+        }
+        bytes.extend_from_slice(&input.outpoint_index.to_be_bytes());
+        encode_address(bytes, &input.owner);
+    }
+    Ok(())
+}
+
+fn decode_legacy_inputs(reader: &mut Reader<'_>) -> Result<Vec<TransactionV2LegacyInput>> {
+    let count = reader.count(MAX_V2_INPUTS, "legacy input count")?;
+    let mut inputs = Vec::with_capacity(count);
+    for _ in 0..count {
+        let outpoint_id = match reader.u8("legacy input ID kind")? {
+            0 => LegacyTransactionId::Hash(reader.array::<32>("legacy input hash")?),
+            1 => LegacyTransactionId::Signature(
+                reader.array::<64>("legacy input transaction signature")?,
+            ),
+            kind => bail!("unsupported legacy input ID kind {kind}"),
+        };
+        inputs.push(TransactionV2LegacyInput {
+            outpoint_id,
+            outpoint_index: reader.u32("legacy input output index")?,
+            owner: decode_address(reader, "legacy input owner")?,
+        });
+    }
+    Ok(inputs)
+}
+
 fn encode_outputs(bytes: &mut Vec<u8>, outputs: &[TransactionV2Output]) -> Result<()> {
     encode_count(bytes, outputs.len(), "output count")?;
     for output in outputs {
@@ -542,6 +739,11 @@ fn encode_bytes(bytes: &mut Vec<u8>, value: &[u8], label: &str) -> Result<()> {
 }
 
 enum UnsignedDecoded {
+    Migration {
+        inputs: Vec<TransactionV2LegacyInput>,
+        outputs: Vec<TransactionV2Output>,
+        fee: u64,
+    },
     Transfer {
         inputs: Vec<TransactionV2Input>,
         outputs: Vec<TransactionV2Output>,
@@ -571,6 +773,16 @@ impl UnsignedDecoded {
         authorizations: Vec<V2SpendingAuthorization>,
     ) -> Result<TransactionV2> {
         Ok(match self {
+            Self::Migration {
+                inputs,
+                outputs,
+                fee,
+            } => TransactionV2::Migration {
+                inputs,
+                outputs,
+                fee,
+                authorizations,
+            },
             Self::Transfer {
                 inputs,
                 outputs,
@@ -725,6 +937,23 @@ mod tests {
         .unwrap()
     }
 
+    fn ed25519_authorization(payload: &[u8]) -> V2SpendingAuthorization {
+        let signing_key = SigningKey::from_bytes(&[7; 32]);
+        V2SpendingAuthorization::new(
+            ProtocolPublicKey::new(
+                SignatureScheme::Ed25519,
+                signing_key.verifying_key().to_bytes().to_vec(),
+            )
+            .unwrap(),
+            ProtocolSignature::new(
+                SignatureScheme::Ed25519,
+                signing_key.sign(payload).to_bytes().to_vec(),
+            )
+            .unwrap(),
+        )
+        .unwrap()
+    }
+
     fn unsigned_transfer(owner: VersionedAddress) -> TransactionV2 {
         TransactionV2::Transfer {
             inputs: vec![TransactionV2Input {
@@ -745,11 +974,14 @@ mod tests {
     }
 
     #[test]
-    fn v2_is_explicitly_dormant_at_every_height() {
-        assert_eq!(TRANSACTION_V2_ACTIVATION_HEIGHT, None);
+    fn v2_activates_at_the_fixed_consensus_height() {
+        assert_eq!(TRANSACTION_V2_ACTIVATION_HEIGHT, Some(3_000));
         assert!(!transaction_v2_is_active(0));
-        assert!(!transaction_v2_is_active(u64::MAX));
-        assert!(ensure_transaction_v2_active(u64::MAX).is_err());
+        assert!(!transaction_v2_is_active(2_999));
+        assert!(ensure_transaction_v2_active(2_999).is_err());
+        assert!(transaction_v2_is_active(3_000));
+        assert!(transaction_v2_is_active(u64::MAX));
+        ensure_transaction_v2_active(3_000).unwrap();
     }
 
     #[test]
@@ -768,7 +1000,7 @@ mod tests {
             owner
         );
         transaction.validate_authorization_commitments().unwrap();
-        transaction.verify_hybrid_authorizations(&domain()).unwrap();
+        transaction.verify_authorizations(&domain()).unwrap();
         let encoded = transaction.encode(&domain()).unwrap();
         let (decoded_domain, decoded) = TransactionV2::decode(&encoded).unwrap();
         assert_eq!(decoded_domain, domain());
@@ -805,9 +1037,55 @@ mod tests {
         }
         assert!(
             invalid_post_quantum_signature
-                .verify_hybrid_authorizations(&domain())
+                .verify_authorizations(&domain())
                 .is_err()
         );
+    }
+
+    #[test]
+    fn version_zero_input_can_migrate_to_a_hybrid_output() {
+        let signing_key = SigningKey::from_bytes(&[7; 32]);
+        let legacy_owner = VersionedAddress {
+            version: AddressVersion::Ed25519PublicKey,
+            payload: signing_key.verifying_key().to_bytes(),
+        };
+        let hybrid_recipient = hybrid_key_commitment_address(&hybrid_public_key()).unwrap();
+        let mut transaction = TransactionV2::Migration {
+            inputs: vec![TransactionV2LegacyInput {
+                outpoint_id: LegacyTransactionId::Signature([0x11; 64]),
+                outpoint_index: 7,
+                owner: legacy_owner,
+            }],
+            outputs: vec![TransactionV2Output {
+                address: hybrid_recipient,
+                amount: 5,
+            }],
+            fee: 1,
+            authorizations: Vec::new(),
+        };
+        let authorization = ed25519_authorization(&transaction.signing_bytes(&domain()).unwrap());
+        if let TransactionV2::Migration { authorizations, .. } = &mut transaction {
+            authorizations.push(authorization);
+        }
+
+        transaction.verify_authorizations(&domain()).unwrap();
+        let encoded = transaction.encode(&domain()).unwrap();
+        let (decoded_domain, decoded) = TransactionV2::decode(&encoded).unwrap();
+        assert_eq!(decoded_domain, domain());
+        assert_eq!(decoded, transaction);
+        assert_eq!(
+            transaction.authorizations()[0]
+                .authorized_address()
+                .unwrap(),
+            legacy_owner
+        );
+
+        let mut wrong_scheme = transaction;
+        let wrong_scheme_payload = wrong_scheme.signing_bytes(&domain()).unwrap();
+        if let TransactionV2::Migration { authorizations, .. } = &mut wrong_scheme {
+            *authorizations = vec![hybrid_authorization(&wrong_scheme_payload)];
+        }
+        assert!(wrong_scheme.verify_authorizations(&domain()).is_err());
     }
 
     #[test]
@@ -869,7 +1147,7 @@ mod tests {
         ] {
             let encoded = decode_hex(seed.trim().strip_prefix("hex:").unwrap()).unwrap();
             let (domain, transaction) = TransactionV2::decode(&encoded).unwrap();
-            transaction.verify_hybrid_authorizations(&domain).unwrap();
+            transaction.verify_authorizations(&domain).unwrap();
         }
     }
 

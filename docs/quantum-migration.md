@@ -87,29 +87,37 @@ Application, transport, and consensus versions move independently:
 
 1. A protocol-v2 application release advertises read capabilities in the optional `capabilities`
    field. Old nodes ignore the field and an omitted field means no advertised capabilities.
-2. A later application release ships dormant transaction-v2 and hybrid verification code. It does
-   not choose an activation height.
-3. Only after deployment coverage is measured does another release announce a future activation
-   height and protocol-v3 transition. The feature must not be introduced and activated in the same
-   release.
+2. A later application release ships dormant transaction-v2 and hybrid verification code.
+3. After deployment coverage is measured, the complete integration release announces candidate
+   height 3000 as the protocol-v3 transition. The feature must not be introduced and activated in
+   the same release.
 4. Wallet defaults may change after activation without another consensus version. Refusing new
    legacy outputs, changing the VDF, or removing Ed25519 each requires its own later activation.
+
+There is no separate public Iuna testnet. The `iuna-mainnet-candidate` network is the rehearsal
+network for this migration. Once hybrid wallet keys and the complete transaction-v2 path are
+available, that candidate network may begin value migration at the fixed, reviewed activation
+height 3000. This does not turn activation into a runtime flag: nodes restored from old backups
+must still deterministically reach the same rule at the same height.
 
 Capability names are sorted, unique, lowercase ASCII tokens. A hello may advertise at most 16
 tokens of at most 64 bytes each. These limits are enforced before the handshake is accepted.
 
-### Dormant transaction-v2 implementation
+### Transaction-v2 activation target
 
 The transaction-v2 binary envelope and its canonical hash identifier are compiled into the node,
-but remain separate from the live JSON `Transaction`, `Block`, and gossip types. The consensus
-activation constant is `None`: it is not an operator-controlled feature flag and cannot be enabled
-through configuration. Nodes may parse and inspect the reserved format, but must reject it from
-the mempool and chain until a later reviewed release assigns an activation height.
+but remain separate from the live JSON `Transaction`, `Block`, and gossip types. Candidate height
+3000 is compiled in as the consensus activation target; it is not an operator-controlled feature
+flag and cannot be changed through configuration. Nodes must continue rejecting v2 from the live
+mempool and chain until the complete integration routes every acceptance path through that gate.
 
 The reserved format binds the chain ID and genesis hash, uses typed versioned addresses, stores one
 length-delimited authorization per spending input, and hashes the complete canonical signed bytes
-for its transaction ID. The initial spending authorization is Ed25519 + ML-DSA-44. Dormant
-verification uses the exact-pinned RustCrypto `ml-dsa` 0.1.1 implementation. That implementation
+for its transaction ID. An explicit migration transaction tags and references legacy 32-byte hash
+or 64-byte signature transaction IDs and retains Ed25519 authorization so existing value can move
+to a version-1 output. Ordinary v2 transactions use 32-byte hash IDs; every later spend of a
+version-1 output requires Ed25519 + ML-DSA-44.
+Verification uses the exact-pinned RustCrypto `ml-dsa` 0.1.1 implementation. That implementation
 has not been independently audited, so an independent review and an explicit backend acceptance
 decision remain prerequisites before activation. No transaction-v2 gossip capability is
 advertised yet.
@@ -120,6 +128,18 @@ regression, and a valid signature at the ML-DSA-44 norm boundary. A dedicated fu
 both the transaction-v2 decoder and arbitrary ML-DSA-44 verification inputs; it remains part of the
 release's time-bounded, coverage-guided `cargo fuzz` gate while transaction v2 is dormant. Seed
 corpora, newly discovered coverage inputs, and crash artifacts are retained as release evidence.
+
+### Dormant hybrid wallet keys
+
+The existing wallet seed phrase now deterministically derives a separate ML-DSA-44 seed using the
+fixed `iuna-wallet-ml-dsa44-seed-v1` domain. The original Ed25519 derivation is unchanged, so
+existing addresses, encrypted wallet files, and backups remain valid. The wallet can construct an
+address-v1 commitment and create an Ed25519 + ML-DSA-44 authorization over one byte-identical
+payload. ML-DSA secret intermediates use the backend's zeroization support.
+
+This key capability alone does not create spendable address-v1 outputs. The wallet UI must not
+offer the address until transaction-v2 submission, mempool, block, gossip, persistence, and fee
+accounting are connected and activated together on the candidate network.
 
 ## Other trust boundaries
 

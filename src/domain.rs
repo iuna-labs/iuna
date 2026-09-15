@@ -86,7 +86,8 @@ pub use reveal::{
 use selection::BlockSelection;
 pub use signature::{ProtocolPublicKey, ProtocolSignature, SignatureScheme};
 pub(crate) use signature::{
-    ed25519_public_key, sign_ed25519, validate_ed25519_public_key, verify_ed25519, verify_ml_dsa44,
+    ed25519_public_key, ml_dsa44_public_key, sign_ed25519, sign_ml_dsa44,
+    validate_ed25519_public_key, verify_ed25519, verify_ml_dsa44,
 };
 
 #[cfg(feature = "fuzzing")]
@@ -110,9 +111,10 @@ pub use transaction::{
 };
 use transaction::{TransactionSigningDomain, mine_signing_bytes};
 pub use transaction_v2::{
-    TRANSACTION_V2_ACTIVATION_HEIGHT, TRANSACTION_V2_WIRE_VERSION, TransactionV2,
-    TransactionV2Domain, TransactionV2Input, TransactionV2Output, V2SpendingAuthorization,
-    ensure_transaction_v2_active, hybrid_key_commitment_address, transaction_v2_is_active,
+    LegacyTransactionId, TRANSACTION_V2_ACTIVATION_HEIGHT, TRANSACTION_V2_WIRE_VERSION,
+    TransactionV2, TransactionV2Domain, TransactionV2Input, TransactionV2LegacyInput,
+    TransactionV2Output, V2SpendingAuthorization, ensure_transaction_v2_active,
+    hybrid_key_commitment_address, transaction_v2_is_active,
 };
 pub(crate) use validation::minimum_transfer_economic_size_bytes;
 pub use validation::validate_address;

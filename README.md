@@ -337,6 +337,7 @@ peers.
 
 - [Protocol](docs/protocol.md)
 - [Quantum-resistance migration](docs/quantum-migration.md)
+- [Quantum migration audit scope](docs/quantum-audit-scope.md)
 - [Operator failure playbooks](docs/operator-playbooks.md)
 
 ## Contributing

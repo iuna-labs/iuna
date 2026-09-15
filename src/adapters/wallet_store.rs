@@ -711,12 +711,32 @@ mod tests {
 
     use tempfile::tempdir;
 
+    use crate::domain::AddressNetwork;
+
     use super::{
         load_or_create, load_with_password, read_wallet_file, replace_with_imported_seed_phrase,
         replace_with_imported_seed_phrase_encrypted,
     };
 
     const TEST_SEED: &str = "abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon art";
+
+    #[test]
+    fn existing_seed_phrase_recovers_the_same_hybrid_key_from_plaintext_and_encrypted_wallets() {
+        let dir = tempdir().unwrap();
+        let plaintext_path = dir.path().join("plaintext-wallet.json");
+        let encrypted_path = dir.path().join("encrypted-wallet.json");
+        let plaintext = replace_with_imported_seed_phrase(&plaintext_path, TEST_SEED).unwrap();
+        replace_with_imported_seed_phrase_encrypted(&encrypted_path, TEST_SEED, "password-123456")
+            .unwrap();
+        let encrypted = load_with_password(&encrypted_path, "password-123456").unwrap();
+
+        assert_eq!(plaintext.address(), encrypted.address());
+        assert_eq!(plaintext.hybrid_public_key(), encrypted.hybrid_public_key());
+        assert_eq!(
+            plaintext.hybrid_address(AddressNetwork::Mainnet),
+            encrypted.hybrid_address(AddressNetwork::Mainnet)
+        );
+    }
 
     #[test]
     fn stale_atomic_temp_file_does_not_replace_saved_wallet() {

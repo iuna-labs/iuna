@@ -23,7 +23,7 @@ sha2 = "0.10.9"
 rusqlite = { version = "0.32.1", features = ["bundled"] }
 tokio = { version = "1.45.1", features = ["full"] }
 kyn-vdf = "=0.1.1"
-ml-dsa = "=0.1.1"
+ml-dsa = { version = "=0.1.1", features = ["zeroize"] }
 secrecy = { version = "0.10.3", default-features = false, features = ["serde"] }
 reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls-native-roots"], optional = true }
 semver = { version = "1", optional = true }

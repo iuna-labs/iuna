@@ -1,8 +1,10 @@
 use anyhow::{Context, Result, bail};
 use ed25519_dalek::{Signature, Signer, SigningKey, Verifier, VerifyingKey};
 use ml_dsa::{
-    EncodedVerifyingKey, MlDsa44, Signature as MlDsaSignature, VerifyingKey as MlDsaVerifyingKey,
+    EncodedVerifyingKey, Keypair, MlDsa44, Seed, Signature as MlDsaSignature,
+    SigningKey as MlDsaSigningKey, VerifyingKey as MlDsaVerifyingKey,
 };
+use secrecy::zeroize::Zeroize;
 
 /// Signature schemes understood by the protocol implementation.
 ///
@@ -205,6 +207,36 @@ fn verify_ml_dsa44_with_context(
         bail!("{label} ML-DSA-44 signature is invalid");
     }
     Ok(())
+}
+
+pub(crate) fn ml_dsa44_public_key(signing_seed: &[u8; 32]) -> [u8; 1_312] {
+    let signing_key = ml_dsa44_signing_key(signing_seed);
+    signing_key
+        .verifying_key()
+        .encode()
+        .as_slice()
+        .try_into()
+        .expect("ML-DSA-44 public key has a fixed 1,312-byte encoding")
+}
+
+pub(crate) fn sign_ml_dsa44(signing_seed: &[u8; 32], payload: &[u8]) -> Result<[u8; 2_420]> {
+    let signing_key = ml_dsa44_signing_key(signing_seed);
+    let signature = signing_key
+        .expanded_key()
+        .sign_deterministic(payload, &[])
+        .context("failed to create deterministic ML-DSA-44 signature")?;
+    Ok(signature
+        .encode()
+        .as_slice()
+        .try_into()
+        .expect("ML-DSA-44 signature has a fixed 2,420-byte encoding"))
+}
+
+fn ml_dsa44_signing_key(signing_seed: &[u8; 32]) -> MlDsaSigningKey<MlDsa44> {
+    let mut seed = Seed::from(*signing_seed);
+    let signing_key = MlDsaSigningKey::<MlDsa44>::from_seed(&seed);
+    seed.zeroize();
+    signing_key
 }
 
 #[cfg(test)]

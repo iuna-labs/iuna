@@ -22,7 +22,7 @@ fuzz_target!(|data: &[u8]| {
 
 fn exercise(data: &[u8]) {
     if let Ok((domain, transaction)) = TransactionV2::decode(data) {
-        let _ = transaction.verify_hybrid_authorizations(&domain);
+        let _ = transaction.verify_authorizations(&domain);
         let _ = transaction.encode(&domain);
     }
 

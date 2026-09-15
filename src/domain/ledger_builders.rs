@@ -1,4 +1,4 @@
-use super::hex::hex_encode;
+use super::hex::{decode_hex, decode_hex_array, hex_encode};
 use super::mining::mine_signature;
 use super::stratum::{
     hash_meets_difficulty, stratum_mine_header_bytes, stratum_mine_signature, stratum_mine_template,
@@ -6,12 +6,74 @@ use super::stratum::{
 use super::transaction::{UnsignedTxInput, UnsignedUtxoTransaction};
 use super::validation::validate_address;
 use super::{
-    Amount, Ledger, MineSearchOutcome, OutPoint, StratumMineShare, StratumMineTemplate,
-    Transaction, TxOutput, Wallet,
+    Amount, Ledger, LegacyTransactionId, MineSearchOutcome, OutPoint, StratumMineShare,
+    StratumMineTemplate, Transaction, TransactionV2, TransactionV2Domain, TransactionV2LegacyInput,
+    TransactionV2Output, TxOutput, Wallet,
 };
 use anyhow::{Context, Result, bail};
 
 impl Ledger {
+    /// Builds one consolidation transaction from every currently spendable legacy wallet output
+    /// into the wallet's hybrid address. Submission remains subject to the height-3000 gate.
+    pub fn build_v2_migration(&self, wallet: &Wallet, fee: Amount) -> Result<TransactionV2> {
+        let available = self.available_utxos_for_address(wallet.address())?;
+        if available.is_empty() {
+            bail!("no legacy outputs are available for migration");
+        }
+
+        let mut total = 0_u64;
+        let mut inputs = Vec::with_capacity(available.len());
+        for (outpoint, output) in available {
+            total = total
+                .checked_add(output.amount)
+                .context("migration input total overflows")?;
+            inputs.push(TransactionV2LegacyInput {
+                outpoint_id: legacy_transaction_id(&outpoint.txid)?,
+                outpoint_index: outpoint.index,
+                owner: wallet.legacy_versioned_address(),
+            });
+        }
+        let migrated_amount = total
+            .checked_sub(fee)
+            .context("migration fee exceeds available value")?;
+        if migrated_amount == 0 {
+            bail!("migration output must be greater than zero");
+        }
+
+        let domain = TransactionV2Domain::new(
+            self.launch_profile.profile_id.clone(),
+            decode_hex_array::<32>(self.genesis_hash())
+                .context("ledger genesis hash is not a 32-byte hexadecimal value")?,
+        )?;
+        let mut transaction = TransactionV2::Migration {
+            inputs,
+            outputs: vec![TransactionV2Output {
+                address: wallet.hybrid_versioned_address(),
+                amount: migrated_amount,
+            }],
+            fee,
+            authorizations: Vec::new(),
+        };
+        let payload = transaction.signing_bytes(&domain)?;
+        let authorization =
+            wallet.sign_v2_authorization(wallet.legacy_versioned_address(), &payload)?;
+        if let TransactionV2::Migration {
+            inputs,
+            authorizations,
+            ..
+        } = &mut transaction
+        {
+            authorizations.resize(inputs.len(), authorization);
+        }
+        transaction.verify_authorizations(&domain)?;
+        ensure_v2_transaction_within_block_budget(
+            &transaction,
+            &domain,
+            self.launch_profile.max_block_bytes,
+        )?;
+        Ok(transaction)
+    }
+
     pub fn build_transfer(
         &self,
         wallet: &Wallet,
@@ -365,5 +427,101 @@ impl Ledger {
         };
         self.validate_new_transaction(&transaction)?;
         Ok(transaction)
+    }
+}
+
+fn legacy_transaction_id(txid: &str) -> Result<LegacyTransactionId> {
+    let bytes = decode_hex(txid).context("legacy outpoint ID is not hexadecimal")?;
+    match bytes.len() {
+        32 => Ok(LegacyTransactionId::Hash(
+            bytes.try_into().expect("checked legacy hash length"),
+        )),
+        64 => Ok(LegacyTransactionId::Signature(
+            bytes.try_into().expect("checked legacy signature length"),
+        )),
+        length => bail!("legacy outpoint ID must contain 32 or 64 bytes, got {length}"),
+    }
+}
+
+fn ensure_v2_transaction_within_block_budget(
+    transaction: &TransactionV2,
+    domain: &TransactionV2Domain,
+    max_block_bytes: usize,
+) -> Result<()> {
+    let transaction_bytes = transaction.encode(domain)?.len();
+    if transaction_bytes > max_block_bytes {
+        bail!(
+            "transaction v2 requires {transaction_bytes} bytes and exceeds the {max_block_bytes}-byte block budget"
+        );
+    }
+    Ok(())
+}
+
+#[cfg(test)]
+mod v2_migration_tests {
+    use std::collections::BTreeMap;
+
+    use super::*;
+
+    #[test]
+    fn migration_builder_consolidates_legacy_value_into_one_hybrid_output() {
+        let wallet = Wallet::from_seed("v2-migration-builder-wallet");
+        let ledger = Ledger::new(BTreeMap::from([(wallet.address().to_string(), 100)]), 1);
+
+        let transaction = ledger.build_v2_migration(&wallet, 3).unwrap();
+        let TransactionV2::Migration {
+            inputs,
+            outputs,
+            fee,
+            authorizations,
+        } = &transaction
+        else {
+            panic!("builder returned a non-migration transaction");
+        };
+        assert_eq!(inputs.len(), 1);
+        assert!(matches!(
+            inputs[0].outpoint_id,
+            LegacyTransactionId::Hash(_)
+        ));
+        assert_eq!(outputs.len(), 1);
+        assert_eq!(outputs[0].address, wallet.hybrid_versioned_address());
+        assert_eq!(outputs[0].amount, 97);
+        assert_eq!(*fee, 3);
+        assert_eq!(authorizations.len(), inputs.len());
+
+        let domain = TransactionV2Domain::new(
+            ledger.launch_profile.profile_id.clone(),
+            decode_hex_array::<32>(ledger.genesis_hash()).unwrap(),
+        )
+        .unwrap();
+        transaction.verify_authorizations(&domain).unwrap();
+        let encoded = transaction.encode(&domain).unwrap();
+        assert_eq!(
+            TransactionV2::decode(&encoded).unwrap(),
+            (domain, transaction)
+        );
+    }
+
+    #[test]
+    fn migration_builder_rejects_a_transaction_larger_than_the_block_budget() {
+        let wallet = Wallet::from_seed("v2-oversized-migration-wallet");
+        let profile = crate::domain::LaunchProfile {
+            max_block_bytes: 1,
+            ..crate::domain::LaunchProfile::default()
+        };
+        let ledger = Ledger::new_with_genesis_burns_and_profile(
+            BTreeMap::from([(wallet.address().to_string(), 100)]),
+            Vec::new(),
+            1,
+            profile,
+        )
+        .unwrap();
+
+        let error = ledger.build_v2_migration(&wallet, 1).unwrap_err();
+        assert!(
+            error
+                .to_string()
+                .contains("exceeds the 1-byte block budget")
+        );
     }
 }
