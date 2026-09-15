@@ -3,7 +3,9 @@ use serde::{Deserialize, Serialize, Serializer};
 
 use crate::{
     adapters::{config_store::UiConfig, ui_data_store::BlockMetricRow},
+    app::PeerInfo,
     domain::{Amount, BurnLeaderRank, OutPoint, Transaction, TxOutput},
+    ip_geolocation::CountryCode,
 };
 
 #[derive(Debug, Deserialize)]
@@ -62,6 +64,14 @@ pub(super) struct NetworkHealthResponse {
     pub(super) network_time_offset_ms: Option<i64>,
     pub(super) bad_clock_peers: usize,
     pub(super) last_error: Option<String>,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Serialize)]
+pub(super) struct PeerPresentation {
+    #[serde(flatten)]
+    pub(super) peer: PeerInfo,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(super) country_code: Option<CountryCode>,
 }
 
 #[derive(Clone, Copy, Debug, Default)]

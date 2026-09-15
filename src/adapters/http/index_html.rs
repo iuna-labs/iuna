@@ -382,6 +382,8 @@ pub(super) const INDEX_HTML: &str = concat!(
     .peer-status.banned { border-color: #713434; color: #ffb1a8; background: #2a1717; }
     .peer-status.error { border-color: #713434; color: #ffb1a8; background: #2a1717; }
     .peer-actions { display: flex; gap: 6px; align-items: center; }
+    .peer-address { display: inline-flex; gap: 7px; align-items: center; flex-wrap: wrap; }
+    .country-code { border: 1px solid #3a4248; border-radius: 4px; padding: 1px 5px; color: #a8b2b8; font-size: 10px; font-weight: 850; letter-spacing: .06em; }
     .peer-details { padding: 4px 7px; font-size: 12px; }
     .peer-remove { padding: 4px 7px; border-color: #4f3737; background: #221717; color: #ffb1a8; font-size: 12px; }
     .peer-remove:hover { border-color: #ffb1a8; color: #ffd4cf; }
@@ -1036,7 +1038,7 @@ pub(super) const INDEX_HTML: &str = concat!(
               <template x-for="peer in peers" :key="peer.address">
                 <tr>
                   <td data-label="Status"><span class="peer-status" :class="peerStatus(peer)" x-text="peerStatusLabel(peer)"></span></td>
-                  <td data-label="Address"><code x-text="peer.address"></code></td>
+                  <td data-label="Address"><span class="peer-address"><code x-text="peer.address"></code><span class="country-code" x-show="peer.country_code" x-text="peer.country_code"></span></span></td>
                   <td data-label="Direction" x-text="peer.direction"></td>
                   <td data-label="Last contact" x-text="peerLastContactLabel(peer)"></td>
                   <td data-label="Clock" x-show="developmentMode()" x-text="peerClockLabel(peer)"></td>
@@ -1564,6 +1566,7 @@ pub(super) const INDEX_HTML: &str = concat!(
             <h3>Connection</h3>
             <div class="peer-modal-grid">
               <div class="peer-modal-field"><span class="tx-label">Direction</span><span class="peer-modal-value" x-text="peerDetail().direction"></span></div>
+              <div class="peer-modal-field"><span class="tx-label">Country</span><span class="peer-modal-value" x-text="peerDetail().country_code || '-'"></span></div>
               <div class="peer-modal-field"><span class="tx-label">Last contact</span><span class="peer-modal-value" x-text="peerTimestampLabel(peerDetail().last_contact_ms)"></span></div>
               <div class="peer-modal-field"><span class="tx-label">Last success</span><span class="peer-modal-value" x-text="peerTimestampLabel(peerDetail().last_success_ms)"></span></div>
               <div class="peer-modal-field"><span class="tx-label">Messages sent</span><span class="peer-modal-value" x-text="peerDetail().messages_sent ?? 0"></span></div>

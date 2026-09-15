@@ -134,6 +134,8 @@ fn management_ui_exposes_complete_peer_details() {
     assert!(html.contains("peerDetail().last_hello?.protocol_version"));
     assert!(html.contains("peerCapabilities(peerDetail())"));
     assert!(html.contains("Health and enforcement"));
+    assert!(html.contains("x-show=\"peer.country_code\""));
+    assert!(html.contains("peerDetail().country_code || '-'"));
     assert!(javascript.contains("selectedPeerAddress: null"));
     assert!(javascript.contains("peerDetail()"));
     assert!(javascript.contains("closePeerModal()"));

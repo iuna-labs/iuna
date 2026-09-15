@@ -1,4 +1,5 @@
 use std::collections::{BTreeMap, BTreeSet};
+use std::net::SocketAddr;
 
 use anyhow::Result;
 use axum::{
@@ -10,13 +11,14 @@ use crate::{
     adapters::p2p::P2pMetrics,
     app::{NodeStatus, PeerInfo},
     domain::{OutPoint, Transaction, TxOutput},
+    ip_geolocation::IpGeolocation,
 };
 
 use super::types::{LeaderboardEntry, MetricsLeaderboards};
 use super::{
     BlocksQuery, ConfigResponse, MempoolCounts, MetricsQuery, MetricsResponse,
-    NetworkHealthLocalState, NetworkHealthResponse, Page, PageQuery, UiBlock, UiTransaction,
-    WalletTransactionContext, WalletTransactionFilters, WalletTransactionRow,
+    NetworkHealthLocalState, NetworkHealthResponse, Page, PageQuery, PeerPresentation, UiBlock,
+    UiTransaction, WalletTransactionContext, WalletTransactionFilters, WalletTransactionRow,
     WalletTransactionsQuery, WalletUtxoRow,
 };
 use super::{
@@ -349,8 +351,23 @@ fn wallet_utxo_rows_from_ui_data(
 pub(super) async fn api_peers(
     State(state): State<HttpState>,
     Query(query): Query<PageQuery>,
-) -> Json<Page<PeerInfo>> {
-    Json(page_items(state.peers.lock().await.list(), query))
+) -> Json<Page<PeerPresentation>> {
+    let peers = peer_presentations(state.peers.lock().await.list(), IpGeolocation::bundled());
+    Json(page_items(peers, query))
+}
+
+fn peer_presentations(peers: Vec<PeerInfo>, geolocation: &IpGeolocation) -> Vec<PeerPresentation> {
+    peers
+        .into_iter()
+        .map(|peer| {
+            let country_code = peer
+                .address
+                .parse::<SocketAddr>()
+                .ok()
+                .and_then(|address| geolocation.country_for_ip(address.ip()));
+            PeerPresentation { peer, country_code }
+        })
+        .collect()
 }
 
 pub(super) async fn api_p2p_metrics(State(state): State<HttpState>) -> Json<P2pMetrics> {
@@ -503,4 +520,34 @@ pub(super) async fn api_network_health(
     };
     let peers = state.peers.lock().await.list();
     Json(network_health(local, &peers, mempool))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::peer_presentations;
+    use crate::{app::PeerBook, ip_geolocation::IpGeolocation};
+
+    #[test]
+    fn presents_multiple_peer_countries_without_guessing_hostnames() {
+        let peers = PeerBook::from_addresses(vec![
+            "8.8.8.8:9444".to_string(),
+            "[2001:4860:4860::8888]:9444".to_string(),
+            "seed.example:9444".to_string(),
+        ])
+        .list();
+        let geolocation = IpGeolocation::from_entries(&[
+            ("8.8.8.0".parse().unwrap(), 24, "NL"),
+            ("2001:4860::".parse().unwrap(), 32, "US"),
+        ]);
+
+        let presented = peer_presentations(peers, &geolocation);
+        assert_eq!(presented[0].country_code.unwrap().as_str(), "NL");
+        assert_eq!(presented[1].country_code.unwrap().as_str(), "US");
+        assert_eq!(presented[2].country_code, None);
+
+        let json = serde_json::to_value(presented).unwrap();
+        assert_eq!(json[0]["country_code"], "NL");
+        assert_eq!(json[1]["country_code"], "US");
+        assert!(json[2].get("country_code").is_none());
+    }
 }

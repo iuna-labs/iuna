@@ -21,6 +21,7 @@ use tokio::{net::TcpListener, sync::Mutex};
 use crate::{
     adapters::{config_store, config_store::UiConfig, p2p::GossipNetwork},
     app::{SharedNode, SharedPeerBook},
+    ip_geolocation::IpGeolocation,
 };
 
 mod actions;
@@ -98,8 +99,9 @@ mod types;
 use types::{
     ActionResponse, AuthForm, AuthStatusResponse, BlocksQuery, ChangePasswordForm, ConfigForm,
     ConfigResponse, MempoolCounts, MetricsQuery, MetricsResponse, NetworkHealthLocalState,
-    NetworkHealthResponse, Page, PageQuery, UiBlock, UiTransaction, WalletTransactionContext,
-    WalletTransactionFilters, WalletTransactionRow, WalletTransactionsQuery, WalletUtxoRow,
+    NetworkHealthResponse, Page, PageQuery, PeerPresentation, UiBlock, UiTransaction,
+    WalletTransactionContext, WalletTransactionFilters, WalletTransactionRow,
+    WalletTransactionsQuery, WalletUtxoRow,
 };
 
 pub async fn serve(
@@ -109,6 +111,8 @@ pub async fn serve(
     ui_config: Arc<Mutex<UiConfig>>,
     options: ServeOptions,
 ) -> Result<()> {
+    // Validate the embedded prefix index before the UI can issue its first peer request.
+    IpGeolocation::bundled();
     let addr = options.addr;
     let setup_capability = auth::random_hex(32)?;
     let state = HttpState {
