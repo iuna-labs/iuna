@@ -454,7 +454,22 @@ mod tests {
     use std::collections::BTreeMap;
 
     use super::*;
-    use crate::domain::{GenesisBurn, LaunchProfile, SignatureScheme, TransactionV2Output, Wallet};
+    use crate::domain::{
+        GenesisBurn, LaunchProfile, SignatureScheme, TRANSACTION_V2_ACTIVATION_HEIGHT,
+        TransactionV2Output, Wallet,
+    };
+
+    fn set_next_height(ledger: &mut Ledger, next_height: u64) {
+        ledger.chain.last_mut().unwrap().height = next_height.saturating_sub(1);
+        for ticket in &mut ledger.tickets {
+            ticket.eligible_from_height = next_height;
+            ticket.eligible_until_height = next_height;
+        }
+    }
+
+    fn post_activation_height() -> u64 {
+        TRANSACTION_V2_ACTIVATION_HEIGHT.unwrap().saturating_add(1)
+    }
 
     #[test]
     fn migration_validation_switches_at_3000_and_creates_a_hybrid_utxo() {
@@ -820,5 +835,121 @@ mod tests {
             97
         );
         assert!(ledger.pending_v2().is_empty());
+    }
+
+    #[test]
+    fn normal_post_activation_block_flow_shares_the_transaction_count_budget() {
+        let finalizer = Wallet::from_seed("v2-post-activation-count-finalizer");
+        let recipient = Wallet::from_seed("v2-post-activation-count-recipient");
+        let migrators = (0..4)
+            .map(|index| Wallet::from_seed(&format!("v2-post-activation-count-{index}")))
+            .collect::<Vec<_>>();
+        let legacy_senders = (0..2)
+            .map(|index| Wallet::from_seed(&format!("legacy-post-activation-count-{index}")))
+            .collect::<Vec<_>>();
+        let mut allocations = BTreeMap::from([
+            (finalizer.address().to_string(), 100),
+            (recipient.address().to_string(), 100),
+        ]);
+        for wallet in migrators.iter().chain(&legacy_senders) {
+            allocations.insert(wallet.address().to_string(), 100);
+        }
+        let mut ledger = Ledger::new_with_genesis_burns_and_profile(
+            allocations,
+            vec![GenesisBurn::new(finalizer.address(), 10)],
+            1,
+            LaunchProfile::local_testnet(),
+        )
+        .unwrap();
+        let next_height = post_activation_height();
+        set_next_height(&mut ledger, next_height);
+        ledger.launch_profile.max_block_transactions = 4;
+
+        let anchor = ledger.build_burn_for_next_block(&finalizer, 1, 1).unwrap();
+        ledger.submit_transaction(anchor.clone()).unwrap();
+        for (index, wallet) in migrators.iter().enumerate() {
+            let migration = ledger
+                .build_v2_migration(wallet, 10 + index as u64)
+                .unwrap();
+            ledger.submit_transaction_v2(migration).unwrap();
+        }
+        for wallet in &legacy_senders {
+            let transfer = ledger
+                .build_transfer(wallet, recipient.address(), 10, 1)
+                .unwrap();
+            ledger.submit_transaction(transfer).unwrap();
+        }
+
+        let prepared = ledger
+            .prepare_next_block(
+                finalizer.address(),
+                ledger.tip().timestamp_ms.saturating_add(1),
+            )
+            .unwrap();
+        assert_eq!(
+            prepared.transactions.len() + prepared.transactions_v2.len(),
+            ledger.launch_profile.max_block_transactions
+        );
+        assert!(
+            prepared
+                .transactions
+                .iter()
+                .any(|transaction| transaction.signature() == anchor.signature())
+        );
+        assert!(!prepared.transactions_v2.is_empty());
+        let block = prepared.finish(&finalizer, "preverified-vdf".to_string());
+        ledger.apply_preverified_block_at(block, u64::MAX).unwrap();
+
+        assert_eq!(ledger.height(), next_height);
+        assert!(
+            ledger.pending().len() + ledger.pending_v2().len() > 0,
+            "transactions over the shared block limit must remain pending"
+        );
+    }
+
+    #[test]
+    fn normal_post_activation_v2_block_enforces_the_exact_byte_boundary() {
+        let finalizer = Wallet::from_seed("v2-post-activation-bytes-finalizer");
+        let migrator = Wallet::from_seed("v2-post-activation-bytes-migrator");
+        let mut ledger = Ledger::new_with_genesis_burns_and_profile(
+            BTreeMap::from([
+                (finalizer.address().to_string(), 100),
+                (migrator.address().to_string(), 100),
+            ]),
+            vec![GenesisBurn::new(finalizer.address(), 10)],
+            1,
+            LaunchProfile::local_testnet(),
+        )
+        .unwrap();
+        let next_height = post_activation_height();
+        set_next_height(&mut ledger, next_height);
+        let anchor = ledger.build_burn_for_next_block(&finalizer, 1, 1).unwrap();
+        ledger.submit_transaction(anchor).unwrap();
+        let migration = ledger.build_v2_migration(&migrator, 3).unwrap();
+        ledger.submit_transaction_v2(migration).unwrap();
+        let prepared = ledger
+            .prepare_next_block(
+                finalizer.address(),
+                ledger.tip().timestamp_ms.saturating_add(1),
+            )
+            .unwrap();
+        assert_eq!(prepared.transactions_v2.len(), 1);
+        let block = prepared.finish(&finalizer, "preverified-vdf".to_string());
+        let block_bytes = ledger.consensus_block_size_bytes(&block).unwrap();
+
+        let mut exact = ledger.clone();
+        exact.launch_profile.max_block_bytes = block_bytes;
+        exact
+            .apply_preverified_block_at(block.clone(), u64::MAX)
+            .expect("post-activation v2 block at the byte limit should validate");
+
+        let mut one_byte_over = ledger;
+        one_byte_over.launch_profile.max_block_bytes = block_bytes.saturating_sub(1);
+        assert!(
+            one_byte_over
+                .apply_preverified_block_at(block, u64::MAX)
+                .is_err(),
+            "post-activation v2 block one byte over the limit validated"
+        );
     }
 }

@@ -14,9 +14,9 @@ use super::{
     BurnBundleSignature, BurnCommitteeMember, BurnLeaderRank, ChainSnapshot, FinalizerMode,
     GRINDING_RESISTANCE_ACTIVATION_HEIGHT, GenesisBurn, LeaderProofPayload, Ledger,
     MAX_BLOCK_BYTES, MAX_BURN_BUNDLE_BYTES, MICRO_IUNA, MaskedBurn,
-    OBJECTIVE_FINALITY_ACTIVATION_HEIGHT, OutPoint, Transaction, TransactionSubmitOutcome,
-    TxOutput, UtxoLineageRoot, VDF_TARGET_BLOCK_MS, Wallet, genesis_allocation_outpoint, hex_hash,
-    reward_outputs_for_block, run_vdf,
+    OBJECTIVE_FINALITY_ACTIVATION_HEIGHT, OutPoint, TRANSACTION_V2_ACTIVATION_HEIGHT, Transaction,
+    TransactionSubmitOutcome, TxOutput, UtxoLineageRoot, VDF_TARGET_BLOCK_MS, Wallet,
+    genesis_allocation_outpoint, hex_hash, reward_outputs_for_block, run_vdf,
 };
 
 const NOW_MS: u64 = 10_000_000_000;
@@ -212,6 +212,14 @@ impl Harness {
         self.wallets
             .get(address)
             .unwrap_or_else(|| panic!("seed {} missing wallet {address}", self.seed))
+    }
+
+    fn set_next_height(&mut self, next_height: u64) {
+        self.ledger.chain.last_mut().unwrap().height = next_height.saturating_sub(1);
+        for ticket in &mut self.ledger.tickets {
+            ticket.eligible_from_height = next_height;
+            ticket.eligible_until_height = next_height;
+        }
     }
 
     fn next_rank(&self, rank: usize) -> BurnLeaderRank {
@@ -4341,9 +4349,14 @@ fn attack_economics_committee_capture_requires_matured_lineage_weight() {
 #[test]
 fn performance_budget_block_validation_rejects_count_and_byte_overflow() {
     let mut harness = harness_for_percent(1_500, 25);
+    harness.set_next_height(TRANSACTION_V2_ACTIVATION_HEIGHT.unwrap().saturating_add(1));
     let leader = harness.next_rank(0);
     let finalizer = harness.wallet(&leader.owner).clone();
-    harness.submit_anchor_burn(&finalizer);
+    let anchor = harness
+        .ledger
+        .build_burn_for_next_block(&finalizer, 1, 1)
+        .unwrap();
+    harness.ledger.submit_transaction(anchor).unwrap();
     let block = harness.finish_ticket_block_from_pending(0, Vec::new());
     let now_ms = NOW_MS.saturating_add(block.timestamp_ms);
 
@@ -4466,11 +4479,14 @@ fn blockspace_flood_stays_bounded_by_transaction_count_and_bytes() {
     let senders = (0..(max_test_transactions + 32))
         .map(|index| Wallet::from_seed(&format!("blockspace-flood-sender-{index}")))
         .collect::<Vec<_>>();
+    let v2_migrators = (0..32)
+        .map(|index| Wallet::from_seed(&format!("blockspace-flood-v2-migrator-{index}")))
+        .collect::<Vec<_>>();
     let mut allocations = BTreeMap::new();
     allocations.insert(finalizer.address().to_string(), 10 * MICRO_IUNA);
     allocations.insert(recipient.address().to_string(), 10 * MICRO_IUNA);
-    for sender in &senders {
-        allocations.insert(sender.address().to_string(), 10 * MICRO_IUNA);
+    for wallet in senders.iter().chain(&v2_migrators) {
+        allocations.insert(wallet.address().to_string(), 10 * MICRO_IUNA);
     }
     let mut ledger = Ledger::new_with_genesis_burns(
         allocations,
@@ -4478,6 +4494,12 @@ fn blockspace_flood_stays_bounded_by_transaction_count_and_bytes() {
         1,
     )
     .unwrap();
+    let next_height = TRANSACTION_V2_ACTIVATION_HEIGHT.unwrap().saturating_add(1);
+    ledger.chain.last_mut().unwrap().height = next_height.saturating_sub(1);
+    for ticket in &mut ledger.tickets {
+        ticket.eligible_from_height = next_height;
+        ticket.eligible_until_height = next_height;
+    }
     ledger.launch_profile.max_block_transactions = max_test_transactions;
 
     for sender in &senders {
@@ -4486,7 +4508,11 @@ fn blockspace_flood_stays_bounded_by_transaction_count_and_bytes() {
             .unwrap();
         ledger.submit_transaction(tx).unwrap();
     }
-    let anchor = ledger.build_burn(&finalizer, 1, 1).unwrap();
+    for migrator in &v2_migrators {
+        let transaction = ledger.build_v2_migration(migrator, 10).unwrap();
+        ledger.submit_transaction_v2(transaction).unwrap();
+    }
+    let anchor = ledger.build_burn_for_next_block(&finalizer, 1, 1).unwrap();
     ledger.submit_transaction(anchor.clone()).unwrap();
 
     let prepared = ledger
@@ -4502,11 +4528,11 @@ fn blockspace_flood_stays_bounded_by_transaction_count_and_bytes() {
             .any(|tx| tx.signature() == anchor.signature()),
         "flooded block did not preserve the required finalizer anchor burn"
     );
+    let selected_transactions = block.transactions.len() + block.transactions_v2.len();
+    assert!(!block.transactions_v2.is_empty());
     assert!(
-        block.transactions.len() <= max_test_transactions,
-        "block selected too many transactions: {} > {}",
-        block.transactions.len(),
-        max_test_transactions
+        selected_transactions <= max_test_transactions,
+        "block selected too many transactions: {selected_transactions} > {max_test_transactions}"
     );
     let block_bytes = ledger.consensus_block_size_bytes(&block).unwrap();
     assert!(
@@ -4518,7 +4544,7 @@ fn blockspace_flood_stays_bounded_by_transaction_count_and_bytes() {
         .apply_block_at(block, NOW_MS.saturating_add(VDF_TARGET_BLOCK_MS))
         .unwrap();
     assert!(
-        !ledger.pending().is_empty(),
+        !ledger.pending().is_empty() || !ledger.pending_v2().is_empty(),
         "blockspace flood should leave excess paid transactions pending instead of exceeding limits"
     );
 }
