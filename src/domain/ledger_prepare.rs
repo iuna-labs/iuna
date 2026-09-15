@@ -67,8 +67,11 @@ impl Ledger {
         let prev_hash = tip.hash.clone();
         let timestamp_ms = timestamp_ms.max(ticket_block_min_timestamp(tip, finalizer_rank)?);
         let bundle_hashes = burn_bundle_section.burn_bundle_hashes(height, &prev_hash, miner);
-        let reward =
-            self.expected_reward_for_next_block(&selection.transactions, &burn_bundle_section)?;
+        let reward = self.expected_reward_for_next_block(
+            &selection.transactions,
+            &selection.transactions_v2,
+            &burn_bundle_section,
+        )?;
         let vdf_rounds = self.vdf_rounds_for_finalizer_rank(finalizer_rank)?;
         let content_commitment = vdf_content_commitment(
             height,
@@ -81,6 +84,7 @@ impl Ledger {
             Some(&leader_ticket.id),
             &burn_bundle_section,
             &selection.transactions,
+            &selection.transactions_v2,
         );
         let vdf_seed = vdf_seed_for_child(&prev_hash, height, &bundle_hashes, &content_commitment);
         Ok(PreparedBlock {
@@ -96,6 +100,7 @@ impl Ledger {
             leader_ticket: Some(leader_ticket),
             burn_bundle_section,
             transactions: selection.transactions,
+            transactions_v2: selection.transactions_v2,
         })
     }
 
@@ -154,8 +159,11 @@ impl Ledger {
         let prev_hash = tip.hash.clone();
         let timestamp_ms = timestamp_ms.max(tip.timestamp_ms + 1);
         let bundle_hashes = burn_bundle_section.burn_bundle_hashes(height, &prev_hash, miner);
-        let reward =
-            self.expected_reward_for_next_block(&selection.transactions, &burn_bundle_section)?;
+        let reward = self.expected_reward_for_next_block(
+            &selection.transactions,
+            &selection.transactions_v2,
+            &burn_bundle_section,
+        )?;
         let vdf_rounds = self.recovery_vdf_rounds()?;
         let content_commitment = vdf_content_commitment(
             height,
@@ -168,6 +176,7 @@ impl Ledger {
             None,
             &burn_bundle_section,
             &selection.transactions,
+            &selection.transactions_v2,
         );
         let vdf_seed = recovery_vdf_seed_for_child(
             &prev_hash,
@@ -189,6 +198,7 @@ impl Ledger {
             leader_ticket: None,
             burn_bundle_section,
             transactions: selection.transactions,
+            transactions_v2: selection.transactions_v2,
         })
     }
 }

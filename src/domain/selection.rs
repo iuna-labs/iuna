@@ -8,6 +8,7 @@ pub(super) enum TransactionKind {
 #[derive(Clone, Debug, Default, Eq, PartialEq)]
 pub(super) struct BlockSelection {
     pub(super) transactions: Vec<Transaction>,
+    pub(super) transactions_v2: Vec<String>,
 }
 
 pub(super) fn fee_rate_key(transaction: &Transaction) -> u128 {

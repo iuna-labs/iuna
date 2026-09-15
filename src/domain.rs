@@ -51,8 +51,9 @@ pub(crate) use genesis::genesis_allocation_outpoint;
 pub use hex::hex_hash;
 use hex::{decode_hex, decode_hex_array, hex_encode};
 use ledger_lineage::{
-    LineageOwnerValues, UtxoLineageRoot, insert_output_with_lineage,
-    output_lineage_root_for_transaction, spend_inputs_with_lineage,
+    LineageOwnerValues, UtxoLineageRoot, attach_existing_output_lineage,
+    insert_output_with_lineage, newest_lineage_root, output_lineage_root_for_transaction,
+    remove_spent_output_lineage, spend_inputs_with_lineage,
 };
 pub use ledger_ops::reward_outputs_for_block;
 use ledger_ops::{

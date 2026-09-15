@@ -9,10 +9,11 @@ use super::ledger_ops::{
     estimated_block_selection_size_bytes, transaction_has_missing_inputs,
     validate_transaction_inputs, validate_transaction_outputs,
 };
+use super::ledger_v2::apply_prevalidated_transaction_v2_to_utxos;
 use super::mine_policy::{
     MINE_MAX_ANCHOR_AGE_BLOCKS, mine_anchor, mine_anchor_count_before_height,
 };
-use super::selection::{BlockSelection, TransactionKind};
+use super::selection::{BlockSelection, TransactionKind, fee_rate_key};
 use super::transaction::{
     UnsignedTxInput, transaction_inputs_available, transaction_inputs_spent_by,
 };
@@ -20,8 +21,9 @@ use super::validation::{
     validate_address, validate_hash, validate_signature, validate_stratum_header,
 };
 use super::{
-    Amount, BurnBundleSection, FinalizerMode, Ledger, MAX_PENDING_POOL_BYTES,
+    AddressNetwork, Amount, BurnBundleSection, FinalizerMode, Ledger, MAX_PENDING_POOL_BYTES,
     MAX_PENDING_TRANSACTIONS, MINE_ACTIONS_PER_ANCHOR_LIMIT, OutPoint, Transaction, TxOutput,
+    hex_encode, transaction_v2_is_active,
 };
 
 impl Ledger {
@@ -190,6 +192,7 @@ impl Ledger {
 
         let required_selection = BlockSelection {
             transactions: selected.clone(),
+            transactions_v2: Vec::new(),
         };
         if estimated_block_selection_size_bytes(
             block_context,
@@ -201,31 +204,95 @@ impl Ledger {
             bail!("required block content does not fit in the block");
         }
 
-        while selected.len() < self.launch_profile.max_block_transactions {
-            let Some(index) =
-                best_selectable_transaction_index(&remaining, &utxos, None, &signing_domain)
-            else {
-                break;
-            };
-            let tx = remaining.remove(index);
-            let mut candidate = BlockSelection {
-                transactions: selected.clone(),
-            };
-            candidate.transactions.push(tx.clone());
-            if estimated_block_selection_size_bytes(
-                block_context,
-                &candidate,
-                finalizer_mode,
-                burn_bundle_section,
-            )? <= self.launch_profile.max_block_bytes
+        let mut selection = BlockSelection {
+            transactions: selected,
+            transactions_v2: Vec::new(),
+        };
+        let height = self.height().saturating_add(1);
+        let domain = self.transaction_v2_domain()?;
+        let network = AddressNetwork::from_profile_id(&self.launch_profile.profile_id);
+        let mut remaining_v2 = if transaction_v2_is_active(height) {
+            self.pending_v2.iter().collect::<Vec<_>>()
+        } else {
+            Vec::new()
+        };
+
+        loop {
+            if selection
+                .transactions
+                .len()
+                .saturating_add(selection.transactions_v2.len())
+                >= self.launch_profile.max_block_transactions
             {
-                apply_transaction(&tx, &mut utxos, &signing_domain)?;
-                selected.push(tx);
+                break;
+            }
+
+            let legacy =
+                best_selectable_transaction_index(&remaining, &utxos, None, &signing_domain)
+                    .map(|index| (index, fee_rate_key(&remaining[index])));
+            let v2 = remaining_v2
+                .iter()
+                .enumerate()
+                .filter_map(|(index, transaction)| {
+                    let mut candidate_utxos = utxos.clone();
+                    apply_prevalidated_transaction_v2_to_utxos(
+                        transaction,
+                        &domain,
+                        network,
+                        &mut candidate_utxos,
+                    )
+                    .ok()?;
+                    let bytes = transaction.encoded_size_bytes(&domain).ok()?;
+                    let rate = if bytes == 0 {
+                        0
+                    } else {
+                        u128::from(transaction.fee()) * 1_000_000 / bytes as u128
+                    };
+                    Some((index, rate, candidate_utxos))
+                })
+                .max_by_key(|(index, rate, _)| (*rate, std::cmp::Reverse(*index)));
+
+            if legacy.is_none() && v2.is_none() {
+                break;
+            }
+            if v2
+                .as_ref()
+                .is_some_and(|(_, v2_rate, _)| legacy.is_none_or(|(_, rate)| *v2_rate > rate))
+            {
+                let (index, _, candidate_utxos) = v2.expect("v2 candidate was selected");
+                let transaction = remaining_v2.remove(index);
+                let mut candidate = selection.clone();
+                candidate
+                    .transactions_v2
+                    .push(hex_encode(transaction.encode(&domain)?));
+                if estimated_block_selection_size_bytes(
+                    block_context,
+                    &candidate,
+                    finalizer_mode,
+                    burn_bundle_section,
+                )? <= self.launch_profile.max_block_bytes
+                {
+                    utxos = candidate_utxos;
+                    selection = candidate;
+                }
+            } else {
+                let (index, _) = legacy.expect("legacy candidate was selected");
+                let transaction = remaining.remove(index);
+                let mut candidate = selection.clone();
+                candidate.transactions.push(transaction.clone());
+                if estimated_block_selection_size_bytes(
+                    block_context,
+                    &candidate,
+                    finalizer_mode,
+                    burn_bundle_section,
+                )? <= self.launch_profile.max_block_bytes
+                {
+                    apply_transaction(&transaction, &mut utxos, &signing_domain)?;
+                    selection = candidate;
+                }
             }
         }
-        Ok(BlockSelection {
-            transactions: selected,
-        })
+        Ok(selection)
     }
 
     fn select_required_anchor_burn(
@@ -791,6 +858,7 @@ mod tests {
 
         let required_selection = BlockSelection {
             transactions: vec![anchor.clone()],
+            transactions_v2: Vec::new(),
         };
         let ticket_bytes = estimated_block_selection_size_bytes(
             compact_block_context(&ledger),

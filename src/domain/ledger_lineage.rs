@@ -148,6 +148,48 @@ fn subtract_lineage_owner_value(
     Ok(())
 }
 
+pub(super) fn remove_spent_output_lineage(
+    outpoint: &OutPoint,
+    output: &TxOutput,
+    utxo_lineage: &mut BTreeMap<OutPoint, UtxoLineageRoot>,
+    lineage_values: &mut BTreeMap<UtxoLineageRoot, Amount>,
+    lineage_owners: &mut LineageOwnerValues,
+) -> Result<Option<UtxoLineageRoot>> {
+    let Some(root) = utxo_lineage.remove(outpoint) else {
+        return Ok(None);
+    };
+    subtract_lineage_value(lineage_values, &root, output.amount)?;
+    subtract_lineage_owner_value(lineage_owners, &root, &output.address, outpoint)?;
+    Ok(Some(root))
+}
+
+pub(super) fn attach_existing_output_lineage(
+    outpoint: OutPoint,
+    output: &TxOutput,
+    root: UtxoLineageRoot,
+    utxo_lineage: &mut BTreeMap<OutPoint, UtxoLineageRoot>,
+    lineage_values: &mut BTreeMap<UtxoLineageRoot, Amount>,
+    lineage_owners: &mut LineageOwnerValues,
+) -> Result<()> {
+    if utxo_lineage
+        .insert(outpoint.clone(), root.clone())
+        .is_some()
+    {
+        bail!("created output replaces existing UTXO lineage");
+    }
+    let value = lineage_values.entry(root.clone()).or_insert(0);
+    *value = value
+        .checked_add(output.amount)
+        .context("lineage value overflows")?;
+    lineage_owners
+        .entry(root)
+        .or_default()
+        .entry(output.address.clone())
+        .or_default()
+        .insert(outpoint, output.amount);
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

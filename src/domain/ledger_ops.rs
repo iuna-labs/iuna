@@ -155,6 +155,7 @@ pub(super) fn estimated_block_selection_size_bytes(
         }),
         burn_bundle_section: burn_bundle_section.clone(),
         transactions: selection.transactions.clone(),
+        transactions_v2: selection.transactions_v2.clone(),
         hash: "f".repeat(64),
     };
     context.block_size_bytes(&block)
@@ -167,6 +168,7 @@ pub(super) fn ensure_transaction_fits_empty_block(
 ) -> Result<()> {
     let selection = BlockSelection {
         transactions: vec![transaction.clone()],
+        transactions_v2: Vec::new(),
     };
     if estimated_block_selection_size_bytes(
         context,
@@ -176,6 +178,27 @@ pub(super) fn ensure_transaction_fits_empty_block(
     )? > max_block_bytes
     {
         bail!("transaction exceeds max block size");
+    }
+    Ok(())
+}
+
+pub(super) fn ensure_transaction_v2_fits_empty_block(
+    context: &CompactBlockContext,
+    envelope: &str,
+    max_block_bytes: usize,
+) -> Result<()> {
+    let selection = BlockSelection {
+        transactions: Vec::new(),
+        transactions_v2: vec![envelope.to_string()],
+    };
+    if estimated_block_selection_size_bytes(
+        context,
+        &selection,
+        FinalizerMode::Ticket,
+        &BurnBundleSection::default(),
+    )? > max_block_bytes
+    {
+        bail!("transaction v2 exceeds max block size");
     }
     Ok(())
 }
@@ -287,6 +310,7 @@ pub(super) fn vdf_content_commitment(
     leader_ticket_id: Option<&str>,
     burn_bundle_section: &BurnBundleSection,
     transactions: &[Transaction],
+    transactions_v2: &[String],
 ) -> String {
     let mode = match finalizer_mode {
         FinalizerMode::Ticket => "ticket",
@@ -305,8 +329,17 @@ pub(super) fn vdf_content_commitment(
         "iuna-vdf-burn-section-v1:{}",
         burn_bundle_section.canonical()
     ));
+    if transactions_v2.is_empty() {
+        return hex_hash(format!(
+            "iuna-vdf-content-v1:{height}:{prev_hash}:{miner}:{mode}:{finalizer_rank}:{reward}:{vdf_rounds}:{ticket_id}:{transaction_hash}:{burn_section_hash}"
+        ));
+    }
+    let transaction_v2_hash = hex_hash(format!(
+        "iuna-vdf-transactions-v2:{}",
+        transactions_v2.join("|")
+    ));
     hex_hash(format!(
-        "iuna-vdf-content-v1:{height}:{prev_hash}:{miner}:{mode}:{finalizer_rank}:{reward}:{vdf_rounds}:{ticket_id}:{transaction_hash}:{burn_section_hash}"
+        "iuna-vdf-content-v2:{height}:{prev_hash}:{miner}:{mode}:{finalizer_rank}:{reward}:{vdf_rounds}:{ticket_id}:{transaction_hash}:{transaction_v2_hash}:{burn_section_hash}"
     ))
 }
 
@@ -737,6 +770,7 @@ mod tests {
             leader_proof: None,
             burn_bundle_section: BurnBundleSection::default(),
             transactions: Vec::new(),
+            transactions_v2: Vec::new(),
             hash: "h".repeat(64),
         };
         block.hash = block.compute_hash();

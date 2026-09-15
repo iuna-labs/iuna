@@ -33,6 +33,7 @@ pub(super) fn build_genesis_block(
         leader_proof: None,
         burn_bundle_section: BurnBundleSection::default(),
         transactions,
+        transactions_v2: Vec::new(),
         hash: String::new(),
     };
     genesis.hash = genesis.compute_hash();

@@ -1579,7 +1579,10 @@ fn incremental_metric_for_block(
         mine_difficulty_bits: metric_difficulty_for_block(snapshot, block, previous),
         circulating_supply,
         known_wallet_addresses: 0,
-        transaction_count: block.transactions.len() as u64,
+        transaction_count: block
+            .transactions
+            .len()
+            .saturating_add(block.transactions_v2.len()) as u64,
         transfer_count,
         burn_count,
         mine_count,

@@ -20,6 +20,7 @@ use crate::{
     app::{
         GossipEnvelope, NETWORK_ID, PROTOCOL_VERSION, PeerDirection, ProtocolHello,
         debug_logging_enabled, now_ms, validate_protocol_capabilities,
+        validate_transaction_v2_peer_capability,
     },
     domain::Ledger,
 };
@@ -145,13 +146,15 @@ async fn process_hello_inner(
             hello.time_ms,
         ));
     }
-    let (local_genesis, local_accepts_remote_genesis) = {
+    let (local_genesis, local_accepts_remote_genesis, local_height) = {
         let node = network.inner.node.lock().await;
         (
             node.ledger().genesis_hash().to_string(),
             node.ledger().is_setup_placeholder(),
+            node.ledger().height(),
         )
     };
+    validate_transaction_v2_peer_capability(&hello.capabilities, local_height, hello.height)?;
     let genesis_mismatch = hello.genesis_hash != local_genesis;
     let remote_is_setup_placeholder =
         hello.height == 0 && hello.genesis_hash == setup_placeholder_genesis_hash();
@@ -393,13 +396,19 @@ async fn advertised_peer_hello_is_compatible(
     {
         return false;
     }
-    let (local_genesis, local_accepts_remote_genesis) = {
+    let (local_genesis, local_accepts_remote_genesis, local_height) = {
         let node = network.inner.node.lock().await;
         (
             node.ledger().genesis_hash().to_string(),
             node.ledger().is_setup_placeholder(),
+            node.ledger().height(),
         )
     };
+    if validate_transaction_v2_peer_capability(&hello.capabilities, local_height, hello.height)
+        .is_err()
+    {
+        return false;
+    }
     let remote_is_setup_placeholder =
         hello.height == 0 && hello.genesis_hash == setup_placeholder_genesis_hash();
     hello.genesis_hash == local_genesis

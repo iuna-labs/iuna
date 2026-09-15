@@ -2,11 +2,14 @@ use std::collections::BTreeMap;
 
 use anyhow::{Context, Result, bail};
 
+use super::ledger_ops::{compact_block_context, ensure_transaction_v2_fits_empty_block};
 use super::{
-    AddressNetwork, AddressVersion, Ledger, LegacyTransactionId, MAX_PENDING_POOL_BYTES, OutPoint,
-    Transaction, TransactionSubmitOutcome, TransactionV2, TransactionV2Domain, TransactionV2Input,
-    TransactionV2LegacyInput, TransactionV2Output, TxOutput, decode_hex_array,
-    encode_versioned_address, ensure_transaction_v2_active, hex_encode,
+    AddressNetwork, AddressVersion, Amount, Ledger, LegacyTransactionId, LineageOwnerValues,
+    MAX_PENDING_POOL_BYTES, OutPoint, Transaction, TransactionSubmitOutcome, TransactionV2,
+    TransactionV2Domain, TransactionV2Input, TransactionV2LegacyInput, TransactionV2Output,
+    TxOutput, UtxoLineageRoot, attach_existing_output_lineage, decode_hex, decode_hex_array,
+    encode_versioned_address, ensure_transaction_v2_active, hex_encode, newest_lineage_root,
+    remove_spent_output_lineage,
 };
 
 impl Ledger {
@@ -63,10 +66,14 @@ impl Ledger {
         if transaction.fee() == 0 {
             bail!("public transaction v2 fee must be greater than zero");
         }
-        let transaction_bytes = transaction.encoded_size_bytes(&domain)?;
-        if transaction_bytes > self.launch_profile.max_block_bytes {
-            bail!("transaction v2 exceeds the maximum block byte budget");
-        }
+        let encoded = transaction.encode(&domain)?;
+        let transaction_bytes = encoded.len();
+        let envelope = hex_encode(&encoded);
+        ensure_transaction_v2_fits_empty_block(
+            compact_block_context(self),
+            &envelope,
+            self.launch_profile.max_block_bytes,
+        )?;
         if self.pending.len().saturating_add(self.pending_v2.len())
             >= self.launch_profile.max_pending_transactions
         {
@@ -168,6 +175,120 @@ impl Ledger {
     }
 }
 
+#[allow(clippy::too_many_arguments)]
+pub(super) fn apply_transaction_v2_with_lineage(
+    transaction: &TransactionV2,
+    domain: &TransactionV2Domain,
+    network: AddressNetwork,
+    utxos: &mut BTreeMap<OutPoint, TxOutput>,
+    utxo_lineage: &mut BTreeMap<OutPoint, UtxoLineageRoot>,
+    lineage_values: &mut BTreeMap<UtxoLineageRoot, Amount>,
+    lineage_owners: &mut LineageOwnerValues,
+    verify_authorizations: bool,
+) -> Result<()> {
+    let spent = transaction_v2_outpoints(transaction);
+    let spent_outputs = spent
+        .iter()
+        .map(|outpoint| {
+            utxos
+                .get(outpoint)
+                .cloned()
+                .map(|output| (outpoint.clone(), output))
+                .with_context(|| format!("transaction v2 input {} is not spendable", outpoint.id()))
+        })
+        .collect::<Result<Vec<_>>>()?;
+
+    apply_transaction_v2_to_utxos_with_policy(
+        transaction,
+        domain,
+        network,
+        utxos,
+        verify_authorizations,
+    )?;
+
+    let mut inherited_root = None;
+    for (outpoint, output) in &spent_outputs {
+        let root = remove_spent_output_lineage(
+            outpoint,
+            output,
+            utxo_lineage,
+            lineage_values,
+            lineage_owners,
+        )?;
+        inherited_root = newest_lineage_root(inherited_root, root);
+    }
+    if let Some(root) = inherited_root {
+        let transaction_id = hex_encode(transaction.transaction_id(domain)?);
+        for (index, output) in transaction_v2_outputs(transaction).iter().enumerate() {
+            let outpoint = OutPoint {
+                txid: transaction_id.clone(),
+                index: u32::try_from(index).context("transaction v2 output index exceeds u32")?,
+            };
+            let internal = utxos
+                .get(&outpoint)
+                .context("transaction v2 output is missing after application")?;
+            attach_existing_output_lineage(
+                outpoint,
+                internal,
+                root.clone(),
+                utxo_lineage,
+                lineage_values,
+                lineage_owners,
+            )?;
+            debug_assert_eq!(internal.amount, output.amount);
+        }
+    }
+    Ok(())
+}
+
+pub(super) fn decode_canonical_transaction_v2_envelope(
+    envelope: &str,
+    expected_domain: &TransactionV2Domain,
+) -> Result<TransactionV2> {
+    let bytes = decode_hex(envelope).context("transaction v2 envelope is not hexadecimal")?;
+    if hex_encode(&bytes) != envelope {
+        bail!("transaction v2 envelope is not canonical lowercase hexadecimal");
+    }
+    let (domain, transaction) = TransactionV2::decode(&bytes)?;
+    if &domain != expected_domain {
+        bail!("transaction v2 belongs to a different chain domain");
+    }
+    if transaction.encode(expected_domain)? != bytes {
+        bail!("transaction v2 envelope is not canonically encoded");
+    }
+    Ok(transaction)
+}
+
+fn transaction_v2_outpoints(transaction: &TransactionV2) -> Vec<OutPoint> {
+    match transaction {
+        TransactionV2::Migration { inputs, .. } => inputs
+            .iter()
+            .map(|input| OutPoint {
+                txid: legacy_transaction_id_hex(&input.outpoint_id),
+                index: input.outpoint_index,
+            })
+            .collect(),
+        TransactionV2::Transfer { inputs, .. } | TransactionV2::Burn { inputs, .. } => inputs
+            .iter()
+            .map(|input| OutPoint {
+                txid: hex_encode(input.outpoint_txid),
+                index: input.outpoint_index,
+            })
+            .collect(),
+        TransactionV2::Mine { .. } => Vec::new(),
+    }
+}
+
+fn transaction_v2_outputs(transaction: &TransactionV2) -> &[TransactionV2Output] {
+    match transaction {
+        TransactionV2::Migration { outputs, .. } | TransactionV2::Transfer { outputs, .. } => {
+            outputs
+        }
+        TransactionV2::Burn { change, .. } => change,
+        TransactionV2::Mine { .. } => &[],
+    }
+}
+
 pub(super) fn apply_transaction_v2_to_utxos(
     transaction: &TransactionV2,
     domain: &TransactionV2Domain,
@@ -177,7 +298,7 @@ pub(super) fn apply_transaction_v2_to_utxos(
     apply_transaction_v2_to_utxos_with_policy(transaction, domain, network, utxos, true)
 }
 
-fn apply_prevalidated_transaction_v2_to_utxos(
+pub(super) fn apply_prevalidated_transaction_v2_to_utxos(
     transaction: &TransactionV2,
     domain: &TransactionV2Domain,
     network: AddressNetwork,
@@ -333,7 +454,7 @@ mod tests {
     use std::collections::BTreeMap;
 
     use super::*;
-    use crate::domain::{SignatureScheme, TransactionV2Output, Wallet};
+    use crate::domain::{GenesisBurn, LaunchProfile, SignatureScheme, TransactionV2Output, Wallet};
 
     #[test]
     fn migration_validation_switches_at_3000_and_creates_a_hybrid_utxo() {
@@ -560,5 +681,144 @@ mod tests {
         );
         assert!(ledger.pending_v2().is_empty());
         assert_eq!(ledger.pending_v2_bytes, 0);
+    }
+
+    #[test]
+    fn v2_mempool_rejects_an_envelope_that_cannot_fit_with_block_overhead() {
+        let wallet = Wallet::from_seed("v2-empty-block-budget-wallet");
+        let mut ledger = Ledger::new(BTreeMap::from([(wallet.address().to_string(), 100)]), 1);
+        let migration = ledger.build_v2_migration(&wallet, 3).unwrap();
+        let domain = ledger.transaction_v2_domain().unwrap();
+        ledger.launch_profile.max_block_bytes = migration.encoded_size_bytes(&domain).unwrap();
+
+        assert!(
+            ledger
+                .submit_transaction_v2_at_height(migration, 3_000)
+                .unwrap_err()
+                .to_string()
+                .contains("exceeds max block size")
+        );
+        assert!(ledger.pending_v2().is_empty());
+    }
+
+    #[test]
+    fn block_selection_includes_v2_transactions_at_activation() {
+        let wallet = Wallet::from_seed("v2-block-selection-wallet");
+        let legacy_sender = Wallet::from_seed("v2-block-selection-legacy-sender");
+        let mut ledger = Ledger::new(
+            BTreeMap::from([
+                (wallet.address().to_string(), 100),
+                (legacy_sender.address().to_string(), 100),
+            ]),
+            1,
+        );
+        ledger.chain[0].height = 2_999;
+        let migration = ledger.build_v2_migration(&wallet, 50).unwrap();
+        let legacy = ledger
+            .build_transfer(&legacy_sender, wallet.address(), 50, 1)
+            .unwrap();
+        ledger.submit_transaction(legacy).unwrap();
+        ledger.submit_transaction_v2(migration.clone()).unwrap();
+        ledger.launch_profile.max_block_transactions = 1;
+
+        let selection = ledger
+            .select_block_transactions_with_required_burn_owner(
+                None,
+                None,
+                super::super::FinalizerMode::Ticket,
+                &super::super::BurnBundleSection::default(),
+            )
+            .unwrap();
+
+        assert!(selection.transactions.is_empty());
+        assert_eq!(selection.transactions_v2.len(), 1);
+        let encoded = decode_hex(&selection.transactions_v2[0]).unwrap();
+        assert_eq!(ledger.decode_transaction_v2(&encoded).unwrap(), migration);
+    }
+
+    #[test]
+    fn block_application_preserves_legacy_output_lineage_through_migration() {
+        let wallet = Wallet::from_seed("v2-block-lineage-wallet");
+        let mut ledger = Ledger::new(BTreeMap::from([(wallet.address().to_string(), 100)]), 1);
+        let migration = ledger.build_v2_migration(&wallet, 3).unwrap();
+        let spent = ledger.utxos.keys().next().unwrap().clone();
+        let root = UtxoLineageRoot {
+            outpoint: spent.clone(),
+            height: 1,
+        };
+        ledger.utxo_lineage.insert(spent.clone(), root.clone());
+        ledger.lineage_values.insert(root.clone(), 100);
+        ledger.lineage_owners.insert(
+            root.clone(),
+            BTreeMap::from([(wallet.address().to_string(), BTreeMap::from([(spent, 100)]))]),
+        );
+        let domain = ledger.transaction_v2_domain().unwrap();
+
+        apply_transaction_v2_with_lineage(
+            &migration,
+            &domain,
+            AddressNetwork::Mainnet,
+            &mut ledger.utxos,
+            &mut ledger.utxo_lineage,
+            &mut ledger.lineage_values,
+            &mut ledger.lineage_owners,
+            true,
+        )
+        .unwrap();
+
+        assert_eq!(
+            ledger.utxo_lineage.values().collect::<Vec<_>>(),
+            vec![&root]
+        );
+        assert_eq!(ledger.lineage_values.get(&root), Some(&97));
+        assert_eq!(
+            ledger
+                .lineage_owners
+                .get(&root)
+                .and_then(|owners| owners.get(&wallet.hybrid_address(AddressNetwork::Mainnet)))
+                .map(|outputs| outputs.values().copied().sum::<u64>()),
+            Some(97)
+        );
+    }
+
+    #[test]
+    fn height_3000_block_selects_applies_and_rewards_a_v2_migration() {
+        let finalizer = Wallet::from_seed("v2-height-3000-finalizer");
+        let migrator = Wallet::from_seed("v2-height-3000-migrator");
+        let mut ledger = Ledger::new_with_genesis_burns_and_profile(
+            BTreeMap::from([
+                (finalizer.address().to_string(), 100),
+                (migrator.address().to_string(), 100),
+            ]),
+            vec![GenesisBurn::new(finalizer.address(), 10)],
+            1,
+            LaunchProfile::local_testnet(),
+        )
+        .unwrap();
+        ledger.chain[0].height = 2_999;
+        for ticket in &mut ledger.tickets {
+            ticket.eligible_from_height = 3_000;
+            ticket.eligible_until_height = 3_000;
+        }
+        let anchor = ledger.build_burn_for_next_block(&finalizer, 1, 1).unwrap();
+        ledger.submit_transaction(anchor).unwrap();
+        let migration = ledger.build_v2_migration(&migrator, 3).unwrap();
+        ledger.submit_transaction_v2(migration.clone()).unwrap();
+        let timestamp_ms = ledger.tip().timestamp_ms.saturating_add(1);
+
+        let prepared = ledger
+            .prepare_next_block(finalizer.address(), timestamp_ms)
+            .unwrap();
+        assert_eq!(prepared.transactions_v2.len(), 1);
+        let block = prepared.finish(&finalizer, "preverified-vdf".to_string());
+        assert_eq!(block.reward, 4);
+        ledger.apply_preverified_block_at(block, u64::MAX).unwrap();
+
+        assert_eq!(ledger.height(), 3_000);
+        assert_eq!(
+            ledger.balance_of(&migrator.hybrid_address(AddressNetwork::Testnet)),
+            97
+        );
+        assert!(ledger.pending_v2().is_empty());
     }
 }

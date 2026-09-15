@@ -247,6 +247,7 @@ mod tests {
             leader_proof: None,
             burn_bundle_section: BurnBundleSection::default(),
             transactions: Vec::new(),
+            transactions_v2: Vec::new(),
             hash: format!("{:064x}", height + 1),
         }
     }

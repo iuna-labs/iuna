@@ -355,6 +355,7 @@ mod tests {
             leader_proof: None,
             burn_bundle_section: BurnBundleSection::default(),
             transactions: Vec::new(),
+            transactions_v2: Vec::new(),
             hash: "1".repeat(64),
         }
     }
@@ -409,6 +410,7 @@ mod tests {
             }),
             burn_bundle_section: BurnBundleSection::default(),
             transactions: Vec::new(),
+            transactions_v2: Vec::new(),
             hash: "3".repeat(64),
         }
     }

@@ -454,6 +454,7 @@ mod tests {
             leader_proof: None,
             burn_bundle_section: BurnBundleSection::default(),
             transactions,
+            transactions_v2: Vec::new(),
             hash: format!("block-{height}"),
         };
 

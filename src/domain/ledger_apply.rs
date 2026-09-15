@@ -7,16 +7,20 @@ use super::ledger_ops::{
     ensure_single_input_owner, ensure_valid_recovery_block, validate_block_fee_policy,
     verify_leader_proof,
 };
+use super::ledger_v2::{
+    apply_transaction_v2_with_lineage, decode_canonical_transaction_v2_envelope,
+};
 use super::mine_policy::ensure_mine_anchor_limit;
 use super::ticket::{
     apply_finalizer_ticket_effects, ticket_block_min_timestamp, tickets_created_by_block,
 };
 use super::transaction::transaction_inputs_available;
 use super::{
-    Amount, BLOCK_MEDIAN_TIME_PAST_WINDOW, Block, BurnBundleSection, FinalityCheckpoint,
-    FinalizerMode, Ledger, MAX_BLOCK_TIMESTAMP_FUTURE_DRIFT_MS,
-    TRANSACTION_REPLAY_PROTECTION_ACTIVATION_HEIGHT, Transaction, insert_output_with_lineage,
-    output_lineage_root_for_transaction, spend_inputs_with_lineage, unix_now_ms, verify_vdf,
+    AddressNetwork, Amount, BLOCK_MEDIAN_TIME_PAST_WINDOW, Block, BurnBundleSection,
+    FinalityCheckpoint, FinalizerMode, Ledger, MAX_BLOCK_TIMESTAMP_FUTURE_DRIFT_MS,
+    TRANSACTION_REPLAY_PROTECTION_ACTIVATION_HEIGHT, Transaction, ensure_transaction_v2_active,
+    hex_encode, insert_output_with_lineage, output_lineage_root_for_transaction,
+    spend_inputs_with_lineage, unix_now_ms, verify_vdf,
 };
 
 impl Ledger {
@@ -99,7 +103,28 @@ impl Ledger {
                 Some(&signing_domain),
             )?;
         }
-        let expected_reward = block_reward(&block.transactions, 0)?;
+        let transaction_v2_domain = self.transaction_v2_domain()?;
+        let network = AddressNetwork::from_profile_id(&self.launch_profile.profile_id);
+        let mut transaction_v2_ids = BTreeSet::new();
+        for envelope in &block.transactions_v2 {
+            let transaction =
+                decode_canonical_transaction_v2_envelope(envelope, &transaction_v2_domain)?;
+            let transaction_id = hex_encode(transaction.transaction_id(&transaction_v2_domain)?);
+            if !transaction_v2_ids.insert(transaction_id) {
+                bail!("duplicate transaction v2 in block");
+            }
+            apply_transaction_v2_with_lineage(
+                &transaction,
+                &transaction_v2_domain,
+                network,
+                &mut utxos,
+                &mut utxo_lineage,
+                &mut lineage_values,
+                &mut lineage_owners,
+                true,
+            )?;
+        }
+        let expected_reward = self.expected_reward_for_block(&block)?;
         if block.reward != expected_reward {
             bail!("block reward is invalid");
         }
@@ -120,6 +145,8 @@ impl Ledger {
         self.tickets = tickets;
         self.mined_transaction_ids
             .extend(mined_signatures.iter().cloned());
+        self.mined_transaction_ids
+            .extend(transaction_v2_ids.iter().cloned());
         self.chain.push(block);
         self.update_mine_difficulty_cache_after_tip();
         if let Some(checkpoint) = certified_parent {
@@ -182,6 +209,25 @@ impl Ledger {
                 None,
             )?;
         }
+        let transaction_v2_domain = self.transaction_v2_domain()?;
+        let network = AddressNetwork::from_profile_id(&self.launch_profile.profile_id);
+        let mut transaction_v2_ids = BTreeSet::new();
+        for envelope in &block.transactions_v2 {
+            let transaction =
+                decode_canonical_transaction_v2_envelope(envelope, &transaction_v2_domain)?;
+            let transaction_id = hex_encode(transaction.transaction_id(&transaction_v2_domain)?);
+            apply_transaction_v2_with_lineage(
+                &transaction,
+                &transaction_v2_domain,
+                network,
+                &mut self.utxos,
+                &mut self.utxo_lineage,
+                &mut self.lineage_values,
+                &mut self.lineage_owners,
+                false,
+            )?;
+            transaction_v2_ids.insert(transaction_id);
+        }
 
         let mined_signatures = block
             .transactions
@@ -195,6 +241,7 @@ impl Ledger {
         credit_reward_outputs(&mut self.utxos, &block, &reward_committee)?;
         self.compact_block_context.append_trusted_block(&block)?;
         self.mined_transaction_ids.extend(mined_signatures);
+        self.mined_transaction_ids.extend(transaction_v2_ids);
         self.chain.push(block);
         self.update_mine_difficulty_cache_after_tip();
         if let Some(checkpoint) = certified_parent {
@@ -214,6 +261,18 @@ impl Ledger {
             .any(|transaction| self.mined_transaction_ids.contains(transaction.signature()))
         {
             bail!("block replays a previously mined transaction");
+        }
+        let domain = self.transaction_v2_domain()?;
+        let mut transaction_v2_ids = BTreeSet::new();
+        for envelope in &block.transactions_v2 {
+            let transaction = decode_canonical_transaction_v2_envelope(envelope, &domain)?;
+            let transaction_id = hex_encode(transaction.transaction_id(&domain)?);
+            if !transaction_v2_ids.insert(transaction_id.clone()) {
+                bail!("duplicate transaction v2 in block");
+            }
+            if self.mined_transaction_ids.contains(&transaction_id) {
+                bail!("block replays a previously mined transaction v2");
+            }
         }
         Ok(())
     }
@@ -276,8 +335,16 @@ impl Ledger {
         if block.timestamp_ms > max_future_timestamp {
             return Err(super::ValidationError::BlockTimestampTooFarInFuture.into());
         }
-        if block.transactions.len() > self.launch_profile.max_block_transactions {
+        if block
+            .transactions
+            .len()
+            .saturating_add(block.transactions_v2.len())
+            > self.launch_profile.max_block_transactions
+        {
             bail!("block has too many transactions");
+        }
+        if !block.transactions_v2.is_empty() {
+            ensure_transaction_v2_active(block.height)?;
         }
         if self.consensus_block_size_bytes(block)? > self.launch_profile.max_block_bytes {
             bail!("block exceeds max block size");
@@ -330,13 +397,29 @@ impl Ledger {
     pub(super) fn expected_reward_for_next_block(
         &self,
         transactions: &[Transaction],
+        transactions_v2: &[String],
         _burn_bundle_section: &BurnBundleSection,
     ) -> Result<Amount> {
-        block_reward(transactions, 0)
+        let v2_fees = self.transaction_v2_fees(transactions_v2)?;
+        block_reward(transactions, v2_fees)
     }
 
     fn expected_reward_for_block(&self, block: &Block) -> Result<Amount> {
-        block_reward(&block.transactions, 0)
+        let v2_fees = self.transaction_v2_fees(&block.transactions_v2)?;
+        block_reward(&block.transactions, v2_fees)
+    }
+
+    fn transaction_v2_fees(&self, envelopes: &[String]) -> Result<Amount> {
+        let domain = self.transaction_v2_domain()?;
+        envelopes.iter().try_fold(0_u64, |total, envelope| {
+            let transaction = decode_canonical_transaction_v2_envelope(envelope, &domain)?;
+            if transaction.fee() == 0 {
+                bail!("block transaction v2 fee must be greater than zero");
+            }
+            total
+                .checked_add(transaction.fee())
+                .context("block transaction v2 fees overflow")
+        })
     }
 }
 

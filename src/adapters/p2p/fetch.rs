@@ -10,6 +10,7 @@ use crate::{
     app::{
         ChainBootstrap, GossipEnvelope, NETWORK_ID, PROTOCOL_VERSION, ProtocolHello, now_ms,
         protocol_capabilities, validate_network_genesis, validate_protocol_capabilities,
+        validate_transaction_v2_peer_capability,
     },
     domain::{Block, ChainSnapshot, LaunchProfile, Ledger, verify_vdf},
 };
@@ -54,6 +55,7 @@ async fn fetch_peer_status(peer: &str) -> Result<PeerStatus> {
                 );
             }
             validate_protocol_capabilities(&hello.capabilities)?;
+            validate_transaction_v2_peer_capability(&hello.capabilities, 0, hello.height)?;
             Ok(PeerStatus::with_time(
                 hello.height,
                 hello.tip_hash,
@@ -100,6 +102,7 @@ pub async fn fetch_snapshot_with_announcement(
                 );
             }
             validate_protocol_capabilities(&hello.capabilities)?;
+            validate_transaction_v2_peer_capability(&hello.capabilities, 0, hello.height)?;
         }
         GossipEnvelope::PeerStatus { .. } => {}
         other => anyhow::bail!("join peer {peer} sent {other:?} instead of peer status"),

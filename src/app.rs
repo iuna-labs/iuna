@@ -45,6 +45,7 @@ pub const MAX_PROTOCOL_CAPABILITIES: usize = 16;
 pub const MAX_PROTOCOL_CAPABILITY_BYTES: usize = 64;
 pub const CAPABILITY_ADDRESS_V1_READ: &str = "address-v1-read";
 pub const CAPABILITY_SIGNATURE_SCHEMES_V1: &str = "signature-schemes-v1";
+pub const CAPABILITY_TRANSACTION_V2_BLOCKS: &str = "transaction-v2-blocks";
 pub const MAINNET_CANDIDATE_NETWORK_ID: &str = "iuna-mainnet-candidate";
 pub const MAINNET_CANDIDATE_GENESIS_HASH: &str =
     "3d677cd7ced1c04d3a276cbee7ea38076e34ac65f18a2c9b8286a4872d986a9a";
@@ -67,6 +68,7 @@ pub fn protocol_capabilities() -> Vec<String> {
     vec![
         CAPABILITY_ADDRESS_V1_READ.to_string(),
         CAPABILITY_SIGNATURE_SCHEMES_V1.to_string(),
+        CAPABILITY_TRANSACTION_V2_BLOCKS.to_string(),
     ]
 }
 
@@ -92,14 +94,31 @@ pub fn validate_protocol_capabilities(capabilities: &[String]) -> Result<()> {
     Ok(())
 }
 
+pub fn validate_transaction_v2_peer_capability(
+    capabilities: &[String],
+    local_height: u64,
+    remote_height: u64,
+) -> Result<()> {
+    let activation_is_next =
+        crate::domain::transaction_v2_is_active(local_height.max(remote_height).saturating_add(1));
+    if activation_is_next
+        && !capabilities
+            .iter()
+            .any(|capability| capability == CAPABILITY_TRANSACTION_V2_BLOCKS)
+    {
+        anyhow::bail!("peer lacks transaction-v2 block capability near activation");
+    }
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::{
         BLOCK_REQUEST_LIMIT, CAPABILITY_ADDRESS_V1_READ, CAPABILITY_SIGNATURE_SCHEMES_V1,
-        DEFAULT_VDF_ROUNDS, MAINNET_CANDIDATE_GENESIS_HASH, MAINNET_CANDIDATE_NETWORK_ID,
-        MAINNET_NETWORK_ID, MAX_PROTOCOL_CAPABILITIES, NETWORK_ID, PROTOCOL_VERSION,
-        TRANSACTION_BATCH_LIMIT, protocol_capabilities, validate_network_genesis,
-        validate_protocol_capabilities,
+        CAPABILITY_TRANSACTION_V2_BLOCKS, DEFAULT_VDF_ROUNDS, MAINNET_CANDIDATE_GENESIS_HASH,
+        MAINNET_CANDIDATE_NETWORK_ID, MAINNET_NETWORK_ID, MAX_PROTOCOL_CAPABILITIES, NETWORK_ID,
+        PROTOCOL_VERSION, TRANSACTION_BATCH_LIMIT, protocol_capabilities, validate_network_genesis,
+        validate_protocol_capabilities, validate_transaction_v2_peer_capability,
     };
 
     #[test]
@@ -130,7 +149,11 @@ mod tests {
         let capabilities = protocol_capabilities();
         assert_eq!(
             capabilities,
-            [CAPABILITY_ADDRESS_V1_READ, CAPABILITY_SIGNATURE_SCHEMES_V1]
+            [
+                CAPABILITY_ADDRESS_V1_READ,
+                CAPABILITY_SIGNATURE_SCHEMES_V1,
+                CAPABILITY_TRANSACTION_V2_BLOCKS,
+            ]
         );
         validate_protocol_capabilities(&capabilities).unwrap();
         validate_protocol_capabilities(&[]).unwrap();
@@ -152,6 +175,20 @@ mod tests {
                 MAX_PROTOCOL_CAPABILITIES + 1
             ])
             .is_err()
+        );
+    }
+
+    #[test]
+    fn transaction_v2_block_capability_is_required_when_activation_is_next() {
+        assert!(validate_transaction_v2_peer_capability(&[], 2_998, 2_998).is_ok());
+        assert!(validate_transaction_v2_peer_capability(&[], 2_999, 2_998).is_err());
+        assert!(
+            validate_transaction_v2_peer_capability(
+                &[CAPABILITY_TRANSACTION_V2_BLOCKS.to_string()],
+                2_999,
+                2_998,
+            )
+            .is_ok()
         );
     }
 }

@@ -411,6 +411,34 @@ impl Ledger {
             }
         }
 
+        let mut carry_forward_v2 = Vec::new();
+        for block in self
+            .chain
+            .iter()
+            .skip(fork_point.first_diverging_height() as usize)
+        {
+            for envelope in &block.transactions_v2 {
+                if let Ok(bytes) = super::decode_hex(envelope)
+                    && let Ok(transaction) = self.decode_transaction_v2(&bytes)
+                {
+                    carry_forward_v2.push(transaction);
+                }
+            }
+        }
+        carry_forward_v2.extend(self.pending_v2.clone());
+        let candidate_domain = candidate.transaction_v2_domain().ok();
+        for transaction in carry_forward_v2 {
+            let already_mined = candidate_domain.as_ref().is_some_and(|domain| {
+                transaction
+                    .transaction_id(domain)
+                    .map(super::hex_encode)
+                    .is_ok_and(|id| candidate.mined_transaction_ids.contains(&id))
+            });
+            if !already_mined {
+                let _ = candidate.submit_transaction_v2(transaction);
+            }
+        }
+
         *self = candidate;
     }
 }

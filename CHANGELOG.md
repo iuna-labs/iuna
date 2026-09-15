@@ -9,6 +9,10 @@ from the Git history and Conventional Commit titles by `deployment.sh`.
 
 - validate height-gated v2 migrations and hybrid transfers against the live UTXO model
 - admit v2 transactions to a separate byte-limited mempool without legacy double-spends
+- select v2 transactions into height-gated blocks and bind their canonical envelopes to the VDF and block hash
+- persist v2 block envelopes in compact snapshot v8 while retaining snapshot v7 read compatibility
+- preserve UTXO lineage and reorg carry-forward behavior across legacy-to-hybrid migrations
+- advertise transaction-v2 block support to peers
 
 - expose complete peer handshake details in the P2P interface
 - add dormant transaction-v2 encoding and activation gating

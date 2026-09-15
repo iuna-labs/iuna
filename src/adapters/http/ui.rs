@@ -670,6 +670,7 @@ mod tests {
                 burns: Vec::new(),
             },
             transactions: vec![transfer("transfer", 2), burn("burn")],
+            transactions_v2: Vec::new(),
             hash: "block".to_string(),
         };
 
@@ -769,6 +770,7 @@ mod tests {
                 }],
             },
             transactions: vec![burn],
+            transactions_v2: Vec::new(),
             hash: "hash".to_string(),
         };
 
@@ -815,6 +817,7 @@ mod tests {
             leader_proof: None,
             burn_bundle_section: BurnBundleSection::default(),
             transactions: vec![burn("burn-a")],
+            transactions_v2: Vec::new(),
             hash: "hash".to_string(),
         };
         let ranks = BTreeMap::from([(
@@ -857,6 +860,7 @@ mod tests {
                 burns: Vec::new(),
             },
             transactions: vec![burn("burn-a")],
+            transactions_v2: Vec::new(),
             hash: "hash".to_string(),
         };
         let ranks = BTreeMap::from([(
@@ -933,6 +937,7 @@ mod tests {
                 burns: Vec::new(),
             },
             transactions: vec![burn("burn-a")],
+            transactions_v2: Vec::new(),
             hash: "hash".to_string(),
         };
         let ranks = BTreeMap::from([(

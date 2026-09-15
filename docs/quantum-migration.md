@@ -6,9 +6,10 @@ Iuna is not currently post-quantum secure. The live mainnet-candidate protocol u
 wallet transactions, leader proofs, burn-bundle attestations, peer identity, and release signing.
 Its class-group Wesolowski VDF also does not carry a post-quantum security claim.
 
-This document defines the migration constraints and staged protocol shape. It does **not** activate
-new consensus rules. Activation heights must only be chosen after implementation, independent
-cryptographic review, test vectors, adversarial tests, and a multi-node migration rehearsal.
+This document defines the migration constraints and staged protocol shape. The candidate-network
+implementation now contains the fixed height-3000 transaction-v2 consensus gate. Shipping a
+release that can reach that height still requires independent cryptographic review, adversarial
+tests, and a multi-node migration rehearsal.
 
 The standardized signature candidates are ML-DSA (FIPS 204) and SLH-DSA (FIPS 205). The initial
 transaction candidate is a hybrid of Ed25519 and ML-DSA-44: both signatures must verify. Hybrid
@@ -88,9 +89,9 @@ Application, transport, and consensus versions move independently:
 1. A protocol-v2 application release advertises read capabilities in the optional `capabilities`
    field. Old nodes ignore the field and an omitted field means no advertised capabilities.
 2. A later application release ships dormant transaction-v2 and hybrid verification code.
-3. After deployment coverage is measured, the complete integration release announces candidate
-   height 3000 as the protocol-v3 transition. The feature must not be introduced and activated in
-   the same release.
+3. After deployment coverage is measured, the complete integration release advertises
+   `transaction-v2-blocks` and announces candidate height 3000 as the consensus transition. The
+   feature must not be introduced and activated in the same release.
 4. Wallet defaults may change after activation without another consensus version. Refusing new
    legacy outputs, changing the VDF, or removing Ed25519 each requires its own later activation.
 
@@ -105,11 +106,11 @@ tokens of at most 64 bytes each. These limits are enforced before the handshake 
 
 ### Transaction-v2 activation target
 
-The transaction-v2 binary envelope and its canonical hash identifier are compiled into the node,
-but remain separate from the live JSON `Transaction`, `Block`, and gossip types. Candidate height
-3000 is compiled in as the consensus activation target; it is not an operator-controlled feature
-flag and cannot be changed through configuration. Nodes must continue rejecting v2 from the live
-mempool and chain until the complete integration routes every acceptance path through that gate.
+The transaction-v2 binary envelope and its canonical hash identifier are compiled into the node.
+Blocks carry canonical lowercase-hex envelopes in a separate `transactions_v2` list so legacy
+transaction JSON remains unchanged. Candidate height 3000 is compiled in as the consensus
+activation target; it is not an operator-controlled feature flag and cannot be changed through
+configuration. Nodes reject v2 mempool and block entries below that height.
 
 The reserved format binds the chain ID and genesis hash, uses typed versioned addresses, stores one
 length-delimited authorization per spending input, and hashes the complete canonical signed bytes
@@ -143,9 +144,12 @@ accounting are connected and activated together on the candidate network.
 
 The domain layer now has a separate v2 pending pool. It checks the fixed height boundary, the
 ledger-derived chain domain, canonical encoded byte limits, UTXO ownership, value conservation,
-legacy/v2 double-spends, and dependent v2 transactions. It is not reachable from the public API or
-P2P layer and is not selected into blocks yet, so this is still an integration stage rather than an
-activation-ready release.
+legacy/v2 double-spends, and dependent v2 transactions. At and after height 3000, block selection
+can include those transactions; their exact envelopes are committed by the VDF seed and block
+hash, counted against the shared transaction and byte limits, applied with UTXO lineage, persisted
+in compact snapshot v8, and carried forward after reorgs. Snapshot v7 remains readable. Blocks
+therefore propagate through the existing block P2P path, but standalone v2 mempool gossip and a
+public wallet/API submission route are still absent.
 
 ## Other trust boundaries
 

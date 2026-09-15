@@ -9,7 +9,8 @@ use crate::domain::{
 
 const COMPACT_SNAPSHOT_MAGIC: &[u8] = b"IUNA-SNAPSHOT";
 const MIN_SUPPORTED_COMPACT_SNAPSHOT_VERSION: u8 = 6;
-const COMPACT_SNAPSHOT_VERSION: u8 = 7;
+const COMPACT_SNAPSHOT_VERSION: u8 = 8;
+const TRANSACTION_V2_COMPACT_SNAPSHOT_VERSION: u8 = 8;
 const VDF_SOLUTION_PREFIX: &str = "classgroup-wesolowski-bqfc-v1:";
 const MAX_COMPACT_GENESIS_ALLOCATIONS: usize = 100_000;
 const MAX_COMPACT_SNAPSHOT_BLOCKS: usize = 10_000;
@@ -70,7 +71,15 @@ impl CompactBlockContext {
     pub(crate) fn block_size_breakdown(&self, block: &Block) -> Result<CompactBlockSizeBreakdown> {
         let mut tables = self.tables.clone();
         let mut writer = CompactWriter::default();
-        encode_block_body_with_size_breakdown(&mut writer, block, &mut tables)
+        // Preserve the exact pre-v2 consensus size for legacy-only blocks. Snapshot v8 has one
+        // additional count field, but that storage framing must not move the historical block-size
+        // boundary before height 3000.
+        let version = if block.transactions_v2.is_empty() {
+            TRANSACTION_V2_COMPACT_SNAPSHOT_VERSION - 1
+        } else {
+            TRANSACTION_V2_COMPACT_SNAPSHOT_VERSION
+        };
+        encode_block_body_with_size_breakdown_for_version(&mut writer, block, &mut tables, version)
     }
 
     pub(crate) fn append_block(&mut self, block: &Block) -> Result<()> {
@@ -260,7 +269,13 @@ pub(super) fn decode_compact_snapshot(bytes: &[u8]) -> Result<ChainSnapshot> {
     let mut blocks = Vec::with_capacity(block_count);
     let mut prev_hash = "0".repeat(64);
     for height in 0..block_count {
-        let block = decode_block_body(&mut reader, height as u64, prev_hash, &mut tables)?;
+        let block = decode_block_body_for_version(
+            &mut reader,
+            height as u64,
+            prev_hash,
+            &mut tables,
+            version,
+        )?;
         tables.register_protocol_id(&block.hash);
         prev_hash = block.hash.clone();
         blocks.push(block);
@@ -311,6 +326,20 @@ fn encode_block_body_with_size_breakdown(
     block: &Block,
     tables: &mut EncodeTables,
 ) -> Result<CompactBlockSizeBreakdown> {
+    encode_block_body_with_size_breakdown_for_version(
+        writer,
+        block,
+        tables,
+        COMPACT_SNAPSHOT_VERSION,
+    )
+}
+
+fn encode_block_body_with_size_breakdown_for_version(
+    writer: &mut CompactWriter,
+    block: &Block,
+    tables: &mut EncodeTables,
+    version: u8,
+) -> Result<CompactBlockSizeBreakdown> {
     let block_start = writer.bytes.len();
     writer.varint(block.timestamp_ms);
     writer.address(&block.miner, tables)?;
@@ -347,6 +376,14 @@ fn encode_block_body_with_size_breakdown(
         }
         tables.register_protocol_id(transaction.signature());
     }
+    if version >= TRANSACTION_V2_COMPACT_SNAPSHOT_VERSION {
+        writer.varint(block.transactions_v2.len() as u64);
+        for envelope in &block.transactions_v2 {
+            writer.hex(envelope)?;
+        }
+    } else if !block.transactions_v2.is_empty() {
+        bail!("compact snapshot version {version} cannot encode transaction v2 envelopes");
+    }
     let burn_bundle_start = writer.bytes.len();
     encode_burn_bundle_section(writer, block, tables)?;
     let block_end = writer.bytes.len();
@@ -361,11 +398,22 @@ fn encode_block_body_with_size_breakdown(
     })
 }
 
+#[cfg(test)]
 fn decode_block_body(
     reader: &mut CompactReader<'_>,
     height: u64,
     prev_hash: String,
     tables: &mut DecodeTables,
+) -> Result<Block> {
+    decode_block_body_for_version(reader, height, prev_hash, tables, COMPACT_SNAPSHOT_VERSION)
+}
+
+fn decode_block_body_for_version(
+    reader: &mut CompactReader<'_>,
+    height: u64,
+    prev_hash: String,
+    tables: &mut DecodeTables,
+    version: u8,
 ) -> Result<Block> {
     let timestamp_ms = reader.varint()?;
     let miner = reader.address(tables)?;
@@ -395,6 +443,16 @@ fn decode_block_body(
         tables.register_protocol_id(transaction.signature());
         transactions.push(transaction);
     }
+    let transactions_v2 = if version >= TRANSACTION_V2_COMPACT_SNAPSHOT_VERSION {
+        decode_vec(
+            reader,
+            "block transaction v2 count",
+            MAX_COMPACT_VEC_ITEMS,
+            |reader| reader.hex(),
+        )?
+    } else {
+        Vec::new()
+    };
     let burn_bundle_section = decode_burn_bundle_section(reader, &transactions, tables)?;
     let mut block = Block {
         height,
@@ -409,6 +467,7 @@ fn decode_block_body(
         leader_proof,
         burn_bundle_section,
         transactions,
+        transactions_v2,
         hash: String::new(),
     };
     block.hash = block.compute_hash();
@@ -1058,12 +1117,12 @@ mod tests {
         MAX_COMPACT_GENESIS_ALLOCATIONS, MAX_COMPACT_SNAPSHOT_BLOCKS, MAX_COMPACT_VEC_ITEMS,
         MIN_SUPPORTED_COMPACT_SNAPSHOT_VERSION, compact_snapshot_fixed_prefix_size,
         compact_varint_size, decode_block_body, decode_compact_snapshot, decode_launch_profile,
-        decode_transaction, encode_block_body, encode_compact_snapshot, encode_launch_profile,
-        encode_transaction,
+        decode_transaction, encode_block_body, encode_block_body_with_size_breakdown_for_version,
+        encode_compact_snapshot, encode_launch_profile, encode_transaction,
     };
 
     #[test]
-    fn compact_snapshot_v7_roundtrips_default_and_local_profiles() {
+    fn compact_snapshot_v8_roundtrips_default_and_local_profiles() {
         let wallet = Wallet::from_seed("compact-profile-wire-version");
         let allocations = BTreeMap::from([(wallet.address().to_string(), MICRO_IUNA)]);
         let default_snapshot = Ledger::new(allocations.clone(), 1).snapshot();
@@ -1119,6 +1178,38 @@ mod tests {
         assert_eq!(
             decode_compact_snapshot(&local_bytes).unwrap(),
             local_snapshot
+        );
+    }
+
+    #[test]
+    fn compact_snapshot_v7_remains_readable() {
+        let wallet = Wallet::from_seed("compact-v7-backward-compatibility");
+        let snapshot = Ledger::new(
+            BTreeMap::from([(wallet.address().to_string(), MICRO_IUNA)]),
+            1,
+        )
+        .snapshot();
+        let mut writer = CompactWriter::default();
+        let mut tables = EncodeTables::default();
+        writer.bytes(COMPACT_SNAPSHOT_MAGIC);
+        writer.u8(7);
+        writer.varint(snapshot.genesis_allocations.len() as u64);
+        for (address, amount) in &snapshot.genesis_allocations {
+            writer.address(address, &mut tables).unwrap();
+            writer.varint(*amount);
+        }
+        writer.varint(snapshot.vdf_rounds);
+        encode_launch_profile(&mut writer, &snapshot.launch_profile);
+        writer.varint(snapshot.blocks.len() as u64);
+        for block in &snapshot.blocks {
+            encode_block_body_with_size_breakdown_for_version(&mut writer, block, &mut tables, 7)
+                .unwrap();
+            tables.register_protocol_id(&block.hash);
+        }
+
+        assert_eq!(
+            decode_compact_snapshot(&writer.into_inner()).unwrap(),
+            snapshot
         );
     }
 
@@ -1276,6 +1367,7 @@ mod tests {
                 leader_proof: None,
                 burn_bundle_section,
                 transactions: vec![burn.clone()],
+                transactions_v2: Vec::new(),
                 hash: String::new(),
             };
             block.hash = block.compute_hash();
@@ -1326,6 +1418,61 @@ mod tests {
         .unwrap();
         reader.finish().unwrap();
         assert_eq!(decoded, with);
+    }
+
+    #[test]
+    fn compact_block_roundtrips_transaction_v2_envelopes() {
+        let wallet = Wallet::from_seed("compact-v2-envelope");
+        let mut block = Ledger::new(
+            BTreeMap::from([(wallet.address().to_string(), MICRO_IUNA)]),
+            1,
+        )
+        .snapshot()
+        .blocks[0]
+            .clone();
+        block.transactions_v2 = vec!["000102ff".to_string()];
+        block.hash = block.compute_hash();
+        let mut writer = CompactWriter::default();
+        encode_block_body(&mut writer, &block, &mut EncodeTables::default()).unwrap();
+        let bytes = writer.into_inner();
+        let mut reader = CompactReader::new(&bytes);
+
+        let decoded = decode_block_body(
+            &mut reader,
+            block.height,
+            block.prev_hash.clone(),
+            &mut DecodeTables::default(),
+        )
+        .unwrap();
+
+        reader.finish().unwrap();
+        assert_eq!(decoded, block);
+    }
+
+    #[test]
+    fn legacy_only_consensus_block_size_keeps_v7_framing() {
+        let wallet = Wallet::from_seed("compact-legacy-consensus-size");
+        let block = Ledger::new(
+            BTreeMap::from([(wallet.address().to_string(), MICRO_IUNA)]),
+            1,
+        )
+        .snapshot()
+        .blocks[0]
+            .clone();
+        let context = CompactBlockContext::default();
+        let mut writer = CompactWriter::default();
+        encode_block_body_with_size_breakdown_for_version(
+            &mut writer,
+            &block,
+            &mut EncodeTables::default(),
+            7,
+        )
+        .unwrap();
+
+        assert_eq!(
+            context.block_size_bytes(&block).unwrap(),
+            writer.bytes.len()
+        );
     }
 
     fn snapshot_prefix(block_count: u64) -> Vec<u8> {

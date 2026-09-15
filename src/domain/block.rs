@@ -26,6 +26,9 @@ pub struct Block {
     #[serde(default)]
     pub burn_bundle_section: BurnBundleSection,
     pub transactions: Vec<Transaction>,
+    /// Canonical hex-encoded transaction-v2 wire envelopes.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub transactions_v2: Vec<String>,
     pub hash: String,
 }
 
@@ -81,6 +84,7 @@ impl Block {
                 .map(|proof| proof.ticket_id.as_str()),
             &self.burn_bundle_section,
             &self.transactions,
+            &self.transactions_v2,
         )
     }
 
@@ -91,6 +95,7 @@ impl Block {
             .map(Transaction::canonical)
             .collect::<Vec<_>>()
             .join("|");
+        let txs_v2 = self.transactions_v2.join("|");
         let burn_section = self.burn_bundle_section.canonical();
         let leader_proof = self
             .leader_proof
@@ -102,8 +107,23 @@ impl Block {
                 )
             })
             .unwrap_or_default();
+        if self.transactions_v2.is_empty() {
+            return hex_hash(format!(
+                "block-content-v4:{}:{}:{}:{}:{}:{}:{}:{}:{}:{}",
+                self.height,
+                self.prev_hash,
+                self.timestamp_ms,
+                self.miner,
+                self.finalizer_rank,
+                self.reward,
+                self.vdf_rounds,
+                leader_proof,
+                txs,
+                canonical_burn_block_items(&burn_section)
+            ));
+        }
         hex_hash(format!(
-            "block-content-v4:{}:{}:{}:{}:{}:{}:{}:{}:{}:{}",
+            "block-content-v5:{}:{}:{}:{}:{}:{}:{}:{}:{}:{}:{}",
             self.height,
             self.prev_hash,
             self.timestamp_ms,
@@ -113,6 +133,7 @@ impl Block {
             self.vdf_rounds,
             leader_proof,
             txs,
+            txs_v2,
             canonical_burn_block_items(&burn_section)
         ))
     }
@@ -241,6 +262,7 @@ pub struct PreparedBlock {
     pub(super) leader_ticket: Option<BurnTicket>,
     pub(super) burn_bundle_section: BurnBundleSection,
     pub(super) transactions: Vec<Transaction>,
+    pub(super) transactions_v2: Vec<String>,
 }
 
 impl PreparedBlock {
@@ -308,6 +330,7 @@ impl PreparedBlock {
             leader_proof,
             burn_bundle_section: self.burn_bundle_section,
             transactions: self.transactions,
+            transactions_v2: self.transactions_v2,
             hash: String::new(),
         };
         block.hash = block.compute_hash();
@@ -396,6 +419,7 @@ mod tests {
             leader_proof: None,
             burn_bundle_section: BurnBundleSection::default(),
             transactions: vec![Transaction::genesis_burn("owner", 1)],
+            transactions_v2: Vec::new(),
             hash: String::new(),
         };
 
@@ -419,6 +443,7 @@ mod tests {
             leader_proof: None,
             burn_bundle_section: BurnBundleSection::default(),
             transactions: vec![Transaction::genesis_burn("2".repeat(64), 1)],
+            transactions_v2: Vec::new(),
             hash: String::new(),
         };
         let original_seed = block.vdf_seed();
@@ -446,6 +471,34 @@ mod tests {
     }
 
     #[test]
+    fn transaction_v2_envelopes_are_bound_to_vdf_and_block_hash() {
+        let mut block = Block {
+            height: GRINDING_RESISTANCE_ACTIVATION_HEIGHT,
+            prev_hash: "0".repeat(64),
+            timestamp_ms: 1,
+            miner: "1".repeat(64),
+            finalizer_mode: FinalizerMode::Ticket,
+            finalizer_rank: 0,
+            reward: 1,
+            vdf_rounds: 1,
+            vdf_output: "output".to_string(),
+            leader_proof: None,
+            burn_bundle_section: BurnBundleSection::default(),
+            transactions: vec![Transaction::genesis_burn("2".repeat(64), 1)],
+            transactions_v2: vec!["00".to_string()],
+            hash: String::new(),
+        };
+        block.hash = block.compute_hash();
+        let original_seed = block.vdf_seed();
+        let original_hash = block.hash.clone();
+
+        block.transactions_v2[0] = "01".to_string();
+
+        assert_ne!(block.vdf_seed(), original_seed);
+        assert_ne!(block.compute_hash(), original_hash);
+    }
+
+    #[test]
     fn prepared_and_finished_blocks_share_post_activation_vdf_commitment() {
         let wallet = Wallet::from_seed("vdf-commitment-finalizer");
         let transactions = vec![Transaction::genesis_burn(wallet.address(), 1)];
@@ -468,6 +521,7 @@ mod tests {
             }),
             burn_bundle_section: BurnBundleSection::default(),
             transactions,
+            transactions_v2: Vec::new(),
         };
         let bundle_hashes = prepared.burn_bundle_section.burn_bundle_hashes(
             prepared.height,
@@ -488,6 +542,7 @@ mod tests {
                 .map(|ticket| ticket.id.as_str()),
             &prepared.burn_bundle_section,
             &prepared.transactions,
+            &prepared.transactions_v2,
         );
         prepared.vdf_seed = super::vdf_seed_for_child(
             &prepared.prev_hash,

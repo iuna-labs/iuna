@@ -96,7 +96,9 @@ An auditor should independently confirm at least these cases:
 - transaction IDs change when any authorization byte changes;
 - maximum counts and lengths cannot overflow size accounting or cause excessive allocation;
 - transaction v2 remains rejected through height 2999 and becomes eligible at height 3000;
-- 0.4.30-shaped handshakes ignore optional capabilities and are never sent unsupported v2 data.
+- 0.4.30-shaped handshakes remain compatible before the activation boundary; new handshakes are
+  rejected once either peer is preparing height 3000 and omits `transaction-v2-blocks`. Auditors
+  must still verify the release/reconnect procedure for sessions opened before that boundary.
 
 ## Techniques adopted and rejected
 
@@ -136,12 +138,13 @@ crash artifacts with their report.
 Transaction v2 must remain dormant until all of the following are resolved:
 
 - the cryptographic backend and Iuna integration are independently reviewed;
-- the final consensus call sites and byte-based fee accounting exist and are reviewed;
+- the final consensus call sites and byte-based fee accounting receive independent review;
 - wallet backup compatibility, migration, and no-address-reuse behavior are implemented and
   reviewed; deterministic hybrid key generation already exists but is not yet exposed in the UI;
 - migration progress is observable without exposing wallet secrets;
-- P2P capability negotiation, restored old-node behavior, and activation-boundary recovery are
-  rehearsed on the mainnet-candidate network;
+- advertised `transaction-v2-blocks` behavior (including already-open sessions), restored
+  snapshot-v7 behavior, and activation-boundary recovery are rehearsed on the mainnet-candidate
+  network;
 - post-quantum plans exist for peer identity and update signing;
 - checkpoint signer authority is specified before any PQ checkpoint format is trusted;
 - the VDF has a separate quantum threat analysis;
