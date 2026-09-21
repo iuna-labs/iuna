@@ -29,7 +29,9 @@ mod sync;
 mod test_support;
 mod writer;
 use error::SyncError;
-pub use fetch::{fetch_peer_height, fetch_snapshot, fetch_snapshot_with_announcement};
+pub use fetch::{
+    fetch_peer_height, fetch_snapshot, fetch_snapshot_with_announcement, validate_chain_snapshot,
+};
 use fetch::{
     network_adjusted_time_ms, validate_blocks_extension, validate_chain_bootstrap, verify_block_vdf,
 };

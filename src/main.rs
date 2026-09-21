@@ -811,7 +811,7 @@ async fn join_chain_ledger(
                     .map(|block| block.height)
                     .unwrap_or(0);
                 println!("joined chain from {peer} at height {height}");
-                return Ledger::from_snapshot(snapshot);
+                return p2p::validate_chain_snapshot(snapshot).await;
             }
             Err(error) => {
                 errors.push(format!("{peer}: {error:#}"));

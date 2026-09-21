@@ -143,7 +143,14 @@ impl Ledger {
     }
 
     pub(crate) fn from_preverified_snapshot(snapshot: ChainSnapshot) -> Result<Self> {
-        Self::from_snapshot_with_vdf_policy(snapshot, false, u64::MAX)
+        Self::from_preverified_snapshot_at(snapshot, u64::MAX)
+    }
+
+    pub(crate) fn from_preverified_snapshot_at(
+        snapshot: ChainSnapshot,
+        now_ms: u64,
+    ) -> Result<Self> {
+        Self::from_snapshot_with_vdf_policy(snapshot, false, now_ms)
     }
 
     pub(crate) fn from_snapshot_at(snapshot: ChainSnapshot, now_ms: u64) -> Result<Self> {
@@ -256,10 +263,21 @@ impl Ledger {
         &mut self,
         snapshot: ChainSnapshot,
     ) -> Result<bool> {
-        self.extend_from_snapshot_with_vdf_policy(snapshot, false, u64::MAX)
+        self.extend_from_preverified_snapshot_at(snapshot, u64::MAX)
     }
 
-    #[cfg_attr(feature = "e2e", allow(dead_code))]
+    /// Applies all normal snapshot and fork-choice validation while skipping only VDF proof
+    /// verification. Callers must verify every untrusted block proof separately before adopting
+    /// the returned ledger.
+    pub(crate) fn extend_from_preverified_snapshot_at(
+        &mut self,
+        snapshot: ChainSnapshot,
+        now_ms: u64,
+    ) -> Result<bool> {
+        self.extend_from_snapshot_with_vdf_policy(snapshot, false, now_ms)
+    }
+
+    #[allow(dead_code)]
     pub(crate) fn extend_from_snapshot_at(
         &mut self,
         snapshot: ChainSnapshot,
