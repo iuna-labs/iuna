@@ -59,8 +59,8 @@ docker run --rm -p 8080:80 iuna-static-site:test
 
 The deployment script builds Linux CLI archives for x86_64 and aarch64, builds the macOS desktop artifact on Apple silicon, and tries to cross-build the Windows NSIS installer in Docker. Prebuilt desktop artifacts can still be added before the image build:
 
-- `downloads/iuna-v0.4.34-macos-aarch64-desktop.app.zip`
-- `downloads/iuna-v0.4.34-windows-x86_64-desktop-setup.exe`
+- `downloads/iuna-v0.4.35-macos-aarch64-desktop.app.zip`
+- `downloads/iuna-v0.4.35-windows-x86_64-desktop-setup.exe`
 
 On macOS and Windows, closing the desktop window keeps the node running from the menu bar or
 system tray. Choose **Open iuna** to reopen the window, or **Quit iuna** to stop the node. On

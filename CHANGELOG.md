@@ -5,6 +5,12 @@ from the Git history and Conventional Commit titles by `deployment.sh`.
 
 ## [Unreleased]
 
+## [0.4.35] - 2026-09-21
+
+### Performance
+
+- parallelize sync VDF verification
+
 ## [0.4.34] - 2026-09-15
 
 ### Added
