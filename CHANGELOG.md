@@ -19,6 +19,7 @@ from the Git history and Conventional Commit titles by `deployment.sh`.
 ### Fixed
 
 - rebuild confirmed transaction-v2 wallet history after chain reorganizations
+- persist, restore, revalidate, and rebroadcast pending transaction-v2 envelopes
 
 ### Documentation
 

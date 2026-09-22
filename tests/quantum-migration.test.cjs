@@ -85,6 +85,43 @@ test('uncertain migration submission requires a fresh preview', async () => {
   assert.match(ui.quantumMigrationError, /Check wallet activity/);
 });
 
+test('durability failure warns without inviting a duplicate migration', async () => {
+  const ui = app();
+  ui.quantumMigrationPreview = {
+    transaction_id: '34'.repeat(32),
+    rate: 1,
+    fee: 500,
+  };
+  ui.submitForm = async () => ({
+    transaction_id: '34'.repeat(32),
+    remaining_legacy_utxos: 0,
+    persistence_error: 'disk full',
+  });
+
+  await ui.submitQuantumMigration();
+
+  assert.equal(ui.quantumMigrationPreview, null);
+  assert.match(ui.quantumMigrationError, /durable recovery failed/);
+});
+
+test('broadcast failure explains that the saved migration will retry', async () => {
+  const ui = app();
+  ui.quantumMigrationPreview = {
+    transaction_id: '56'.repeat(32),
+    rate: 1,
+    fee: 500,
+  };
+  ui.submitForm = async () => ({
+    transaction_id: '56'.repeat(32),
+    remaining_legacy_utxos: 0,
+    broadcast_error: 'no peers',
+  });
+
+  await ui.submitQuantumMigration();
+
+  assert.match(ui.quantumMigrationError, /rebroadcast automatically/);
+});
+
 test('hybrid recipients never reuse selected legacy UTXOs', () => {
   const ui = app();
   ui.transferTo = `iuna1p${'q'.repeat(58)}`;

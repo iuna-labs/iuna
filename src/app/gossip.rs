@@ -1,3 +1,5 @@
+use anyhow::Result;
+
 use crate::domain::{Block, ChainSnapshot, hex_encode};
 
 use super::{
@@ -6,6 +8,20 @@ use super::{
 };
 
 impl NodeCore {
+    pub fn pending_transaction_v2_envelopes(&self) -> Result<Vec<(String, String)>> {
+        let domain = self.ledger.transaction_v2_domain()?;
+        self.ledger
+            .pending_v2()
+            .iter()
+            .map(|transaction| {
+                Ok((
+                    hex_encode(transaction.transaction_id(&domain)?),
+                    hex_encode(transaction.encode(&domain)?),
+                ))
+            })
+            .collect()
+    }
+
     pub fn mempool_gossip(&mut self) -> Vec<GossipEnvelope> {
         let mut gossip = Vec::new();
         gossip.extend(
@@ -16,21 +32,14 @@ impl NodeCore {
                     transactions: chunk.to_vec(),
                 }),
         );
-        let domain = self.ledger.transaction_v2_domain().ok();
-        if let Some(domain) = domain {
-            let envelopes = self
-                .ledger
-                .pending_v2()
-                .iter()
-                .filter_map(|transaction| transaction.encode(&domain).ok())
-                .map(hex_encode)
-                .collect::<Vec<_>>();
+        if let Ok(pending_v2) = self.pending_transaction_v2_envelopes() {
             // A single v2 transaction may approach the block byte limit after hex encoding.
             // Keep each envelope independently wire-bounded instead of building an oversized
             // JSON batch from several otherwise valid transactions.
             gossip.extend(
-                envelopes
+                pending_v2
                     .into_iter()
+                    .map(|(_, envelope)| envelope)
                     .map(|envelope| GossipEnvelope::TransactionV2 { envelope }),
             );
         }

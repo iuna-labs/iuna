@@ -24,9 +24,9 @@ use super::{
     configured_stratum_addr, extrapolate_vdf_rounds, help_text, initial_burn_fee,
     initial_burn_per_block, initialize_ledger, load_startup_wallet, measure_vdf_rounds,
     parse_startup_bool_env_value, parse_startup_pow_mining_workers_env_value,
-    persist_chain_snapshot, project_ui_data_store, run_chain_persistence_with_interval,
-    setup_ledger, should_defer_sync_checkpoint, should_log_automatic_finalization_skip,
-    start_genesis_ledger, validate_wallet_for_mode,
+    persist_chain_snapshot, project_ui_data_store, restore_pending_transactions_v2,
+    run_chain_persistence_with_interval, setup_ledger, should_defer_sync_checkpoint,
+    should_log_automatic_finalization_skip, start_genesis_ledger, validate_wallet_for_mode,
 };
 
 fn parse(args: &[&str]) -> anyhow::Result<Option<CliOptions>> {
@@ -1459,6 +1459,30 @@ VALUES (1, 4, 'bad-tip', x'00010203', 0)
         format!("{error:#}").contains("failed to parse compact chain snapshot from database"),
         "{error:#}"
     );
+}
+
+#[test]
+fn startup_prunes_a_persisted_v2_transaction_that_no_longer_validates() {
+    let dir = tempdir().unwrap();
+    let store = SqliteChainStore::open(dir.path().join("chain.sqlite3")).unwrap();
+    let wallet = Wallet::from_seed("stale-persisted-v2");
+    let ledger = ledger_with_one_spendable_iuna(&wallet);
+    let domain = ledger.transaction_v2_domain().unwrap();
+    let transaction = ledger.build_v2_migration_batch(&wallet, 1).unwrap();
+    let to_hex =
+        |bytes: &[u8]| -> String { bytes.iter().map(|byte| format!("{byte:02x}")).collect() };
+    let transaction_id = to_hex(&transaction.transaction_id(&domain).unwrap());
+    let envelope = to_hex(&transaction.encode(&domain).unwrap());
+    store
+        .save_pending_transaction_v2(&transaction_id, &envelope)
+        .unwrap();
+    let mut node = NodeCore::from_ledger(wallet, ledger, DEFAULT_BURN_PER_BLOCK);
+
+    let restored = restore_pending_transactions_v2(&mut node, &store).unwrap();
+
+    assert_eq!(restored, 0);
+    assert!(node.pending_transaction_v2_envelopes().unwrap().is_empty());
+    assert!(store.load_pending_transactions_v2().unwrap().is_empty());
 }
 
 #[tokio::test]

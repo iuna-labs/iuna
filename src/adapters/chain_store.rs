@@ -31,6 +31,12 @@ CREATE TABLE IF NOT EXISTS chain_verification (
     verifier_version TEXT NOT NULL,
     verified_at_ms INTEGER NOT NULL
 );
+CREATE TABLE IF NOT EXISTS pending_transactions_v2 (
+    transaction_id TEXT PRIMARY KEY,
+    envelope TEXT NOT NULL,
+    position INTEGER NOT NULL,
+    updated_at_ms INTEGER NOT NULL
+);
 "#;
 
 // This identifies the consensus rules, not the application release. UI, packaging, and
@@ -116,6 +122,79 @@ impl SqliteChainStore {
                     |row| row.get(0),
                 )
                 .context("failed to inspect chain database")
+        })
+    }
+
+    pub fn load_pending_transactions_v2(&self) -> Result<Vec<(String, String)>> {
+        self.with_connection(|connection| {
+            let mut statement = connection
+                .prepare(
+                    r#"
+SELECT transaction_id, envelope
+FROM pending_transactions_v2
+ORDER BY position ASC
+"#,
+                )
+                .context("failed to prepare pending transaction v2 query")?;
+            let rows = statement
+                .query_map([], |row| Ok((row.get(0)?, row.get(1)?)))
+                .context("failed to load pending transactions v2")?;
+            rows.collect::<std::result::Result<Vec<_>, _>>()
+                .context("failed to read pending transaction v2 rows")
+        })
+    }
+
+    pub fn save_pending_transaction_v2(&self, transaction_id: &str, envelope: &str) -> Result<()> {
+        self.with_connection_mut(|connection| {
+            connection
+                .execute(
+                    r#"
+INSERT INTO pending_transactions_v2 (transaction_id, envelope, position, updated_at_ms)
+VALUES (
+    ?1,
+    ?2,
+    COALESCE((SELECT MAX(position) + 1 FROM pending_transactions_v2), 0),
+    ?3
+)
+ON CONFLICT(transaction_id) DO UPDATE SET
+    envelope = excluded.envelope,
+    updated_at_ms = excluded.updated_at_ms
+"#,
+                    params![transaction_id, envelope, unix_ms()],
+                )
+                .context("failed to persist pending transaction v2")?;
+            Ok(())
+        })
+    }
+
+    pub fn replace_pending_transactions_v2(&self, rows: &[(String, String)]) -> Result<()> {
+        let updated_at_ms = unix_ms();
+        self.with_connection_mut(|connection| {
+            let transaction = connection
+                .transaction()
+                .context("failed to start pending transaction v2 persistence transaction")?;
+            transaction
+                .execute("DELETE FROM pending_transactions_v2", [])
+                .context("failed to clear pending transactions v2")?;
+            for (position, (transaction_id, envelope)) in rows.iter().enumerate() {
+                transaction
+                    .execute(
+                        r#"
+INSERT INTO pending_transactions_v2 (
+    transaction_id, envelope, position, updated_at_ms
+)
+VALUES (?1, ?2, ?3, ?4)
+"#,
+                        params![transaction_id, envelope, position, updated_at_ms],
+                    )
+                    .with_context(|| {
+                        format!("failed to persist pending transaction v2 {transaction_id}")
+                    })?;
+            }
+            transaction
+                .commit()
+                .context("failed to commit pending transaction v2 persistence transaction")?;
+            Ok(())
         })
     }
 
@@ -245,6 +324,9 @@ ON CONFLICT(id) DO UPDATE SET
             transaction
                 .execute("DELETE FROM chain_verification", [])
                 .context("failed to delete chain verification status")?;
+            transaction
+                .execute("DELETE FROM pending_transactions_v2", [])
+                .context("failed to delete pending transactions v2")?;
             transaction
                 .commit()
                 .context("failed to commit chain reset transaction")?;
@@ -563,6 +645,37 @@ VALUES (1, 0, 'bad-tip', ?1, 0)
         assert!(error.to_string().contains("cannot persist empty chain"));
         let restored = store.load().unwrap().unwrap();
         assert_eq!(restored.blocks.last().unwrap().hash, tip);
+    }
+
+    #[test]
+    fn pending_transaction_v2_journal_preserves_order_and_clears_with_chain() {
+        let dir = tempdir().unwrap();
+        let store = SqliteChainStore::open(dir.path().join("chain.sqlite3")).unwrap();
+        store
+            .save_pending_transaction_v2("tx-b", "envelope-b")
+            .unwrap();
+        store
+            .save_pending_transaction_v2("tx-a", "envelope-a")
+            .unwrap();
+
+        assert_eq!(
+            store.load_pending_transactions_v2().unwrap(),
+            vec![
+                ("tx-b".to_string(), "envelope-b".to_string()),
+                ("tx-a".to_string(), "envelope-a".to_string()),
+            ]
+        );
+
+        store
+            .replace_pending_transactions_v2(&[("tx-a".to_string(), "replacement-a".to_string())])
+            .unwrap();
+        assert_eq!(
+            store.load_pending_transactions_v2().unwrap(),
+            vec![("tx-a".to_string(), "replacement-a".to_string())]
+        );
+
+        store.clear_chain().unwrap();
+        assert!(store.load_pending_transactions_v2().unwrap().is_empty());
     }
 
     #[test]

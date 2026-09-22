@@ -130,6 +130,12 @@ broader recovery rehearsal remain release blockers.
 Pending and confirmed transaction-v2 entries are included in the management wallet history and
 chain views. Confirmed history is materialized from the canonical chain snapshot, so a chain
 reorganization atomically replaces entries from the abandoned branch.
+Pending transaction-v2 envelopes are journaled in the chain database before a wallet migration
+reports durable success; a storage failure is surfaced separately from broadcast failure. On
+restart they are decoded and validated against the restored
+canonical chain before re-entering the mempool and normal periodic rebroadcast path. Mining,
+reorganization, invalidation, and an explicit chain reset reconcile or clear the journal instead
+of blindly replaying stale spends.
 
 The verification tests include a small audit corpus pinned to exact NIST ACVP-Server and C2SP
 Wycheproof commits and file hashes. It covers a valid NIST signature, Wycheproof's repeated-hint

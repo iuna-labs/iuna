@@ -2655,8 +2655,11 @@ window.iunaApp = function iunaApp() {
           throw new Error(`${error.message}. Check wallet activity before requesting a new preview.`);
         }
         this.quantumMigrationPreview = null;
+        if (result.persistence_error) {
+          throw new Error("Migration queued locally, but durable recovery failed. Keep this node running and check its storage before continuing.");
+        }
         if (result.broadcast_error) {
-          throw new Error("Migration queued locally, but broadcasting failed. Check connectivity before continuing.");
+          throw new Error("Migration saved locally, but broadcasting failed. It will be rebroadcast automatically; check connectivity before continuing.");
         }
         const remainder = Number(result.remaining_legacy_utxos || 0);
         this.showFlash(

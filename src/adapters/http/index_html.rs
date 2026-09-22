@@ -732,7 +732,7 @@ pub(super) const INDEX_HTML: &str = concat!(
             <button type="submit" :disabled="quantumMigrationBusy || quantumMigrationSubmitting || status.wallet_locked || status.quantum_migration?.migration_pending" x-text="quantumMigrationBusy ? 'Calculating…' : 'Preview migration'"></button>
             <div class="fee-warning" role="alert" x-show="quantumMigrationError" x-text="quantumMigrationError"></div>
             <div class="muted" x-show="status.quantum_migration?.migration_pending">
-              A migration batch is still in this node's transaction-v2 mempool and is pending confirmation.
+              A migration batch is saved in this node's transaction-v2 mempool and will be rebroadcast until confirmation.
               <code x-show="status.quantum_migration?.pending_transaction_id" x-text="status.quantum_migration?.pending_transaction_id || ''"></code>
             </div>
           </form>

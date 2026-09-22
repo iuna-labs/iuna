@@ -214,6 +214,12 @@ async fn main() -> Result<()> {
         );
         node_core.require_network_migration(from_network);
     }
+    if !migration_required {
+        let restored = restore_pending_transactions_v2(&mut node_core, &chain_store)?;
+        if restored > 0 {
+            println!("restored {restored} pending transaction-v2 envelope(s)");
+        }
+    }
     let node: SharedNode = Arc::new(Mutex::new(node_core));
     let ui_config = Arc::new(Mutex::new(ui_config));
     let mut peers = ui_config.lock().await.peers.clone();
@@ -672,6 +678,24 @@ async fn initialize_ledger(
 struct InitializedLedger {
     ledger: Ledger,
     migration_from: Option<String>,
+}
+
+fn restore_pending_transactions_v2(
+    node: &mut NodeCore,
+    chain_store: &SqliteChainStore,
+) -> Result<usize> {
+    let mut restored = 0_usize;
+    for (transaction_id, envelope) in chain_store.load_pending_transactions_v2()? {
+        match node.receive_gossiped_transaction_v2(envelope) {
+            Ok(()) => restored = restored.saturating_add(1),
+            Err(error) if debug_logging_enabled() => {
+                eprintln!("dropping stale pending transaction v2 {transaction_id}: {error:#}");
+            }
+            Err(_) => {}
+        }
+    }
+    chain_store.replace_pending_transactions_v2(&node.pending_transaction_v2_envelopes()?)?;
+    Ok(restored)
 }
 
 impl std::ops::Deref for InitializedLedger {
@@ -1283,8 +1307,33 @@ async fn run_chain_persistence_loop(
     let mut last_projected_tip = initial_state.projected_tip;
     let mut last_projected_keep_metrics = initial_state.projected_keep_metrics;
     let mut last_chain_checkpoint = Instant::now();
+    let mut last_saved_pending_v2_ids = None::<Vec<String>>;
     loop {
         tokio::time::sleep(interval).await;
+        {
+            let node = node.lock().await;
+            match node.pending_transaction_v2_envelopes() {
+                Ok(pending_v2) => {
+                    let pending_v2_ids = pending_v2
+                        .iter()
+                        .map(|(transaction_id, _)| transaction_id.clone())
+                        .collect::<Vec<_>>();
+                    if last_saved_pending_v2_ids.as_ref() != Some(&pending_v2_ids) {
+                        match persist_pending_transactions_v2(&store, pending_v2).await {
+                            Ok(()) => last_saved_pending_v2_ids = Some(pending_v2_ids),
+                            Err(error) if debug_logging_enabled() => {
+                                eprintln!("pending transaction-v2 persistence failed: {error:#}");
+                            }
+                            Err(_) => {}
+                        }
+                    }
+                }
+                Err(error) if debug_logging_enabled() => {
+                    eprintln!("pending transaction-v2 encoding failed: {error:#}");
+                }
+                Err(_) => {}
+            }
+        }
         let syncing = gossip
             .as_ref()
             .is_some_and(|network| network.chain_sync_active_or_recent(Duration::from_secs(5)));
@@ -1367,6 +1416,17 @@ async fn persist_chain_snapshot(store: &SqliteChainStore, snapshot: ChainSnapsho
     tokio::task::spawn_blocking(move || store.save_verified(&snapshot))
         .await
         .context("chain persistence worker failed")??;
+    Ok(())
+}
+
+async fn persist_pending_transactions_v2(
+    store: &SqliteChainStore,
+    pending: Vec<(String, String)>,
+) -> Result<()> {
+    let store = store.clone();
+    tokio::task::spawn_blocking(move || store.replace_pending_transactions_v2(&pending))
+        .await
+        .context("pending transaction-v2 persistence worker failed")??;
     Ok(())
 }
 
