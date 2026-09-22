@@ -5,25 +5,17 @@ from the Git history and Conventional Commit titles by `deployment.sh`.
 
 ## [Unreleased]
 
+## [0.4.36] - 2026-09-22
+
 ### Added
 
-- relay transaction-v2 mempool envelopes
-- negotiate transaction-v2 mempool relay separately for mixed-version networks
-- preview quantum-resistant wallet migration
-- expose legacy and hybrid wallet balances
-- submit block-bounded wallet migration batches
-- send hybrid transaction-v2 transfers
-- merge pending transaction-v2 entries into the wallet and chain mempool views
-- show confirmed transaction-v2 entries in chain blocks and wallet history
+- enable quantum migration flow
+- expose compatible v2 mempool
+- retain confirmed v2 history
 
 ### Fixed
 
-- rebuild confirmed transaction-v2 wallet history after chain reorganizations
-- persist, restore, revalidate, and rebroadcast pending transaction-v2 envelopes
-
-### Documentation
-
-- update the quantum audit scope after height 3000
+- recover pending v2 transactions
 
 ## [0.4.35] - 2026-09-21
 
