@@ -8,7 +8,9 @@ use super::peer_addr::{
     is_self_peer_address_for, normalize_advertised_peer, peer_list_address_is_discoverable,
 };
 use super::{GossipNetwork, MAX_BLOCK_BATCH, PeerStatus, write_envelope};
-use crate::app::{GossipEnvelope, SharedNode, debug_logging_enabled};
+use crate::app::{
+    CAPABILITY_TRANSACTION_V2_MEMPOOL, GossipEnvelope, SharedNode, debug_logging_enabled,
+};
 
 pub(super) async fn maybe_request_catchup(
     network: &GossipNetwork,
@@ -103,8 +105,22 @@ pub(super) async fn envelopes_for_peer(
     let Some(node) = node else {
         return envelopes.to_vec();
     };
+    let supports_v2_mempool = peer_status
+        .as_ref()
+        .is_some_and(|status| status.supports(CAPABILITY_TRANSACTION_V2_MEMPOOL));
+    let envelopes = envelopes
+        .iter()
+        .filter(|envelope| {
+            supports_v2_mempool
+                || !matches!(
+                    envelope,
+                    GossipEnvelope::TransactionV2 { .. } | GossipEnvelope::TransactionsV2 { .. }
+                )
+        })
+        .cloned()
+        .collect::<Vec<_>>();
     let Some(peer_status) = peer_status else {
-        return envelopes.to_vec();
+        return envelopes;
     };
 
     let node = node.lock().await;

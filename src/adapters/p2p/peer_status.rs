@@ -8,6 +8,7 @@ pub(super) struct PeerStatus {
     pub(super) time_ms: u64,
     pub(super) request_bootstrap: bool,
     pub(super) reject_session: bool,
+    pub(super) capabilities: Vec<String>,
 }
 
 impl PeerStatus {
@@ -23,6 +24,7 @@ impl PeerStatus {
             time_ms,
             request_bootstrap: false,
             reject_session: false,
+            capabilities: Vec::new(),
         }
     }
 
@@ -33,6 +35,7 @@ impl PeerStatus {
             time_ms,
             request_bootstrap: false,
             reject_session: false,
+            capabilities: Vec::new(),
         }
     }
 
@@ -43,6 +46,7 @@ impl PeerStatus {
             time_ms,
             request_bootstrap: true,
             reject_session: false,
+            capabilities: Vec::new(),
         }
     }
 
@@ -53,6 +57,18 @@ impl PeerStatus {
             time_ms,
             request_bootstrap: false,
             reject_session: true,
+            capabilities: Vec::new(),
         }
+    }
+
+    pub(super) fn with_capabilities(mut self, capabilities: Vec<String>) -> Self {
+        self.capabilities = capabilities;
+        self
+    }
+
+    pub(super) fn supports(&self, capability: &str) -> bool {
+        self.capabilities
+            .binary_search_by(|candidate| candidate.as_str().cmp(capability))
+            .is_ok()
     }
 }

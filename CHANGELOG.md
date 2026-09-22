@@ -8,10 +8,12 @@ from the Git history and Conventional Commit titles by `deployment.sh`.
 ### Added
 
 - relay transaction-v2 mempool envelopes
+- negotiate transaction-v2 mempool relay separately for mixed-version networks
 - preview quantum-resistant wallet migration
 - expose legacy and hybrid wallet balances
 - submit block-bounded wallet migration batches
 - send hybrid transaction-v2 transfers
+- merge pending transaction-v2 entries into the wallet and chain mempool views
 
 ### Documentation
 

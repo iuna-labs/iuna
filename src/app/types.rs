@@ -210,6 +210,7 @@ pub struct QuantumMigrationStatus {
     pub hybrid_balance: Amount,
     pub legacy_utxos: usize,
     pub migration_pending: bool,
+    pub pending_transaction_id: Option<String>,
 }
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]

@@ -366,7 +366,13 @@ async fn session_loop(
                 time_ms,
             } = envelope
             {
-                let status = PeerStatus::from_envelope(height, tip_hash, time_ms);
+                let status = PeerStatus::from_envelope(height, tip_hash, time_ms)
+                    .with_capabilities(
+                        peer_status
+                            .as_ref()
+                            .map(|status| status.capabilities.clone())
+                            .unwrap_or_default(),
+                    );
                 record_peer_status(&network, &known_peer, remote_addr, &status).await;
                 peer_status = Some(status);
                 handshake_complete = true;
@@ -490,7 +496,13 @@ async fn session_loop(
                     time_ms,
                 } = &envelope
                 {
-                    let status = PeerStatus::from_envelope(*height, tip_hash.clone(), *time_ms);
+                    let status = PeerStatus::from_envelope(*height, tip_hash.clone(), *time_ms)
+                        .with_capabilities(
+                            peer_status
+                                .as_ref()
+                                .map(|status| status.capabilities.clone())
+                                .unwrap_or_default(),
+                        );
                     record_peer_status(&network, &known_peer, remote_addr, &status).await;
                     peer_status = Some(status);
                     maybe_start_catchup(

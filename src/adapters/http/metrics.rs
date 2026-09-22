@@ -331,6 +331,7 @@ pub(super) fn network_health_at(
         banned_peers,
         pending_transactions: local.pending_transactions,
         pending_plain_transactions: mempool.plain_transactions,
+        pending_v2_transactions: mempool.v2_transactions,
         last_finalizer_mode: local.last_finalizer_mode,
         last_finalizer_rank: local.last_finalizer_rank,
         last_block_finalizer: local.last_block_finalizer,
@@ -517,6 +518,7 @@ mod tests {
             &[],
             MempoolCounts {
                 plain_transactions: 3,
+                v2_transactions: 0,
             },
             2_500,
         );

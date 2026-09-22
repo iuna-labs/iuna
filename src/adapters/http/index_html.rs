@@ -731,7 +731,10 @@ pub(super) const INDEX_HTML: &str = concat!(
             <label>Fee / byte<input x-model="quantumMigrationFee" type="number" min="0.000001" step="0.000001" required></label>
             <button type="submit" :disabled="quantumMigrationBusy || quantumMigrationSubmitting || status.wallet_locked || status.quantum_migration?.migration_pending" x-text="quantumMigrationBusy ? 'Calculating…' : 'Preview migration'"></button>
             <div class="fee-warning" role="alert" x-show="quantumMigrationError" x-text="quantumMigrationError"></div>
-            <div class="muted" x-show="status.quantum_migration?.migration_pending">A migration batch is pending confirmation.</div>
+            <div class="muted" x-show="status.quantum_migration?.migration_pending">
+              A migration batch is still in this node's transaction-v2 mempool and is pending confirmation.
+              <code x-show="status.quantum_migration?.pending_transaction_id" x-text="status.quantum_migration?.pending_transaction_id || ''"></code>
+            </div>
           </form>
         </div>
         <div class="info-copy" x-show="quantumMigrationPreview">
@@ -1051,6 +1054,7 @@ pub(super) const INDEX_HTML: &str = concat!(
             <div class="peer-summary-item"><div class="peer-summary-label">Banned</div><div class="peer-summary-value" x-text="networkHealth.banned_peers ?? '-'"></div></div>
             <div class="peer-summary-item"><div class="peer-summary-label">Mempool</div><div class="peer-summary-value" x-text="networkHealth.pending_transactions ?? '-'"></div></div>
             <div class="peer-summary-item"><div class="peer-summary-label">Plain Tx</div><div class="peer-summary-value" x-text="networkHealth.pending_plain_transactions ?? '-'"></div></div>
+            <div class="peer-summary-item"><div class="peer-summary-label">V2 Tx</div><div class="peer-summary-value" x-text="networkHealth.pending_v2_transactions ?? '-'"></div></div>
             <div class="peer-summary-item"><div class="peer-summary-label">Next Finalizer</div><code class="peer-summary-value" :class="{ 'wallet-address-link': hasWalletAddress(networkHealth.current_leader) }" role="button" :tabindex="hasWalletAddress(networkHealth.current_leader) ? 0 : -1" x-text="networkFinalizerLabel()" @click="openAddressContact(networkHealth.current_leader)" @keydown.enter.prevent="openAddressContact(networkHealth.current_leader)" @keydown.space.prevent="openAddressContact(networkHealth.current_leader)" :title="hasWalletAddress(networkHealth.current_leader) ? 'Add or edit contact' : null"></code></div>
             <div class="peer-summary-item"><div class="peer-summary-label">Last Mode</div><div class="peer-summary-value" x-text="networkFinalizerModeLabel()"></div></div>
             <div class="peer-summary-item"><div class="peer-summary-label">VDF</div><div class="peer-summary-value" x-text="networkVdfLabel()"></div></div>

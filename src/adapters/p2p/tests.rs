@@ -1561,6 +1561,43 @@ async fn periodic_broadcast_does_not_push_duplicate_block_pages_to_lagging_peer(
 }
 
 #[tokio::test]
+async fn transaction_v2_mempool_gossip_requires_explicit_peer_capability() {
+    let wallet = Wallet::from_seed("v2-mempool-capability-filter");
+    let node = Arc::new(tokio::sync::Mutex::new(node(
+        "v2-mempool-capability-filter",
+        wallet.clone(),
+        allocations(std::slice::from_ref(&wallet), 1_000),
+    )));
+    let envelopes = vec![
+        GossipEnvelope::TransactionV2 {
+            envelope: "00".to_string(),
+        },
+        GossipEnvelope::PeerStatus {
+            height: 1,
+            tip_hash: "tip".to_string(),
+            time_ms: 1,
+        },
+    ];
+
+    let legacy = super::PeerStatus::new(1, "tip".to_string()).with_capabilities(vec![
+        crate::app::CAPABILITY_ADDRESS_V1_READ.to_string(),
+        crate::app::CAPABILITY_SIGNATURE_SCHEMES_V1.to_string(),
+        crate::app::CAPABILITY_TRANSACTION_V2_BLOCKS.to_string(),
+    ]);
+    let legacy_payload = super::envelopes_for_peer(Some(&node), Some(legacy), &envelopes).await;
+    assert!(matches!(
+        legacy_payload.as_slice(),
+        [GossipEnvelope::PeerStatus { .. }]
+    ));
+
+    let upgraded = super::PeerStatus::new(1, "tip".to_string()).with_capabilities(vec![
+        crate::app::CAPABILITY_TRANSACTION_V2_MEMPOOL.to_string(),
+    ]);
+    let upgraded_payload = super::envelopes_for_peer(Some(&node), Some(upgraded), &envelopes).await;
+    assert_eq!(upgraded_payload, envelopes);
+}
+
+#[tokio::test]
 async fn hello_ignores_private_advertised_listen_address() {
     let alice = Wallet::from_seed("hello-private-listen-alice");
     let allocations = allocations(std::slice::from_ref(&alice), 1_000);

@@ -3,7 +3,7 @@ use anyhow::Result;
 use std::collections::BTreeSet;
 
 use crate::compact::CompactBlockSizeBreakdown;
-use crate::domain::{Block, BurnLeaderRank, Ledger, OutPoint, Transaction};
+use crate::domain::{Block, BurnLeaderRank, Ledger, OutPoint, Transaction, TransactionV2};
 use std::collections::BTreeMap;
 
 use super::{NodeCore, helpers::transaction_input_outpoints};
@@ -79,5 +79,9 @@ impl NodeCore {
 
     pub fn pending_transactions(&self) -> Vec<Transaction> {
         self.ledger.pending().to_vec()
+    }
+
+    pub fn pending_transactions_v2(&self) -> Vec<TransactionV2> {
+        self.ledger.pending_v2().to_vec()
     }
 }

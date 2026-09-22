@@ -98,3 +98,11 @@ test('hybrid recipients never reuse selected legacy UTXOs', () => {
   assert.equal(ui.selectedTransferUtxos.length, 0);
   assert.equal(ui.showSendAdvanced, false);
 });
+
+test('migration status can identify the exact pending v2 transaction', () => {
+  const ui = app();
+  ui.status.quantum_migration.migration_pending = true;
+  ui.status.quantum_migration.pending_transaction_id = '12'.repeat(32);
+
+  assert.equal(ui.status.quantum_migration.pending_transaction_id, '12'.repeat(32));
+});

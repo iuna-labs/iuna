@@ -61,8 +61,9 @@ pub use state::ServeOptions;
 use state::{AuthClientKey, AuthSession, HttpState};
 use static_assets::{alpine_js, app_js, favicon, index};
 use ui::{
-    add_pending_outputs, populate_wallet_reward_flow, ui_blocks_from_indexes, ui_transaction,
-    wallet_transaction_row, wallet_transaction_rows,
+    add_pending_outputs, add_pending_v2_outputs, populate_wallet_reward_flow,
+    transaction_v2_input_outpoints, ui_blocks_from_indexes, ui_transaction, ui_transaction_v2,
+    wallet_transaction_row, wallet_transaction_rows, wallet_transaction_v2_rows,
 };
 use wallet::{
     api_wallet_setup, estimate_burn_fee, estimate_mine_fee, estimate_transfer_fee,

@@ -46,6 +46,7 @@ pub const MAX_PROTOCOL_CAPABILITY_BYTES: usize = 64;
 pub const CAPABILITY_ADDRESS_V1_READ: &str = "address-v1-read";
 pub const CAPABILITY_SIGNATURE_SCHEMES_V1: &str = "signature-schemes-v1";
 pub const CAPABILITY_TRANSACTION_V2_BLOCKS: &str = "transaction-v2-blocks";
+pub const CAPABILITY_TRANSACTION_V2_MEMPOOL: &str = "transaction-v2-mempool";
 pub const MAINNET_CANDIDATE_NETWORK_ID: &str = "iuna-mainnet-candidate";
 pub const MAINNET_CANDIDATE_GENESIS_HASH: &str =
     "3d677cd7ced1c04d3a276cbee7ea38076e34ac65f18a2c9b8286a4872d986a9a";
@@ -69,6 +70,7 @@ pub fn protocol_capabilities() -> Vec<String> {
         CAPABILITY_ADDRESS_V1_READ.to_string(),
         CAPABILITY_SIGNATURE_SCHEMES_V1.to_string(),
         CAPABILITY_TRANSACTION_V2_BLOCKS.to_string(),
+        CAPABILITY_TRANSACTION_V2_MEMPOOL.to_string(),
     ]
 }
 
@@ -115,10 +117,11 @@ pub fn validate_transaction_v2_peer_capability(
 mod tests {
     use super::{
         BLOCK_REQUEST_LIMIT, CAPABILITY_ADDRESS_V1_READ, CAPABILITY_SIGNATURE_SCHEMES_V1,
-        CAPABILITY_TRANSACTION_V2_BLOCKS, DEFAULT_VDF_ROUNDS, MAINNET_CANDIDATE_GENESIS_HASH,
-        MAINNET_CANDIDATE_NETWORK_ID, MAINNET_NETWORK_ID, MAX_PROTOCOL_CAPABILITIES, NETWORK_ID,
-        PROTOCOL_VERSION, TRANSACTION_BATCH_LIMIT, protocol_capabilities, validate_network_genesis,
-        validate_protocol_capabilities, validate_transaction_v2_peer_capability,
+        CAPABILITY_TRANSACTION_V2_BLOCKS, CAPABILITY_TRANSACTION_V2_MEMPOOL, DEFAULT_VDF_ROUNDS,
+        MAINNET_CANDIDATE_GENESIS_HASH, MAINNET_CANDIDATE_NETWORK_ID, MAINNET_NETWORK_ID,
+        MAX_PROTOCOL_CAPABILITIES, NETWORK_ID, PROTOCOL_VERSION, TRANSACTION_BATCH_LIMIT,
+        protocol_capabilities, validate_network_genesis, validate_protocol_capabilities,
+        validate_transaction_v2_peer_capability,
     };
 
     #[test]
@@ -153,6 +156,7 @@ mod tests {
                 CAPABILITY_ADDRESS_V1_READ,
                 CAPABILITY_SIGNATURE_SCHEMES_V1,
                 CAPABILITY_TRANSACTION_V2_BLOCKS,
+                CAPABILITY_TRANSACTION_V2_MEMPOOL,
             ]
         );
         validate_protocol_capabilities(&capabilities).unwrap();

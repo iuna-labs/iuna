@@ -4,7 +4,7 @@ use serde::{Deserialize, Serialize, Serializer};
 use crate::{
     adapters::{config_store::UiConfig, ui_data_store::BlockMetricRow},
     app::PeerInfo,
-    domain::{Amount, BurnLeaderRank, OutPoint, Transaction, TxOutput},
+    domain::{Amount, BurnLeaderRank, OutPoint, Transaction, TransactionV2, TxOutput},
     ip_geolocation::CountryCode,
 };
 
@@ -48,6 +48,7 @@ pub(super) struct NetworkHealthResponse {
     pub(super) banned_peers: usize,
     pub(super) pending_transactions: usize,
     pub(super) pending_plain_transactions: usize,
+    pub(super) pending_v2_transactions: usize,
     pub(super) last_finalizer_mode: Option<String>,
     pub(super) last_finalizer_rank: Option<u32>,
     pub(super) last_block_finalizer: Option<String>,
@@ -77,11 +78,12 @@ pub(super) struct PeerPresentation {
 #[derive(Clone, Copy, Debug, Default)]
 pub(super) struct MempoolCounts {
     pub(super) plain_transactions: usize,
+    pub(super) v2_transactions: usize,
 }
 
 impl MempoolCounts {
     pub(super) fn total(&self) -> usize {
-        self.plain_transactions
+        self.plain_transactions.saturating_add(self.v2_transactions)
     }
 }
 
@@ -281,6 +283,14 @@ impl WalletTransactionFilters {
             Transaction::Transfer { .. } => self.transfer,
             Transaction::Mine { .. } => self.mine,
             Transaction::Burn { .. } => self.burn,
+        }
+    }
+
+    pub(super) fn allows_v2(self, transaction: &TransactionV2) -> bool {
+        match transaction {
+            TransactionV2::Migration { .. } | TransactionV2::Transfer { .. } => self.transfer,
+            TransactionV2::Mine { .. } => self.mine,
+            TransactionV2::Burn { .. } => self.burn,
         }
     }
 }

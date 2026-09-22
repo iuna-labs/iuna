@@ -121,7 +121,9 @@ version-1 output requires Ed25519 + ML-DSA-44.
 Verification uses the exact-pinned RustCrypto `ml-dsa` 0.1.1 implementation. That implementation
 has not been independently audited, so an independent review and an explicit backend acceptance
 decision remain prerequisites for treating the active rules as production-ready. Nodes advertise
-the transaction-v2 block capability and relay canonical transaction-v2 envelopes. The management
+the transaction-v2 block capability and relay canonical transaction-v2 envelopes only to peers
+that advertise the separate `transaction-v2-mempool` capability. This keeps 0.4.35 block-validating
+peers connected during a gradual relay upgrade. The management
 wallet can submit reviewed migration batches and ordinary hybrid transfers; address rotation and
 broader recovery rehearsal remain release blockers.
 

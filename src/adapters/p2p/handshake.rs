@@ -155,6 +155,7 @@ async fn process_hello_inner(
         )
     };
     validate_transaction_v2_peer_capability(&hello.capabilities, local_height, hello.height)?;
+    let peer_capabilities = hello.capabilities.clone();
     let genesis_mismatch = hello.genesis_hash != local_genesis;
     let remote_is_setup_placeholder =
         hello.height == 0 && hello.genesis_hash == setup_placeholder_genesis_hash();
@@ -206,8 +207,10 @@ async fn process_hello_inner(
     record_peer_hello(network, known_peer, remote_addr, hello.clone()).await;
     let mut status = if request_bootstrap {
         PeerStatus::with_bootstrap_request(hello.height, hello.tip_hash, hello.time_ms)
+            .with_capabilities(peer_capabilities)
     } else {
         PeerStatus::with_time(hello.height, hello.tip_hash, hello.time_ms)
+            .with_capabilities(peer_capabilities)
     };
     status.reject_session = reject_session;
     Ok(status)

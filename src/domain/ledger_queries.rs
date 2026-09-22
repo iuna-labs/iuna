@@ -609,6 +609,10 @@ impl Ledger {
             .collect()
     }
 
+    pub fn output_for_outpoint(&self, outpoint: &OutPoint) -> Option<TxOutput> {
+        self.utxos.get(outpoint).cloned()
+    }
+
     /// Consolidation keeps mining roots separate unless explicitly requested.
     pub(crate) fn consolidation_root(&self, outpoint: &OutPoint) -> Option<OutPoint> {
         self.utxo_lineage

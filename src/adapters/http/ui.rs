@@ -1,9 +1,12 @@
 use std::collections::BTreeMap;
 
+use anyhow::Result;
+
 use crate::compact::CompactBlockSizeBreakdown;
 use crate::domain::{
-    Amount, Block, BurnLeaderRank, FinalizerMode, MINE_REWARD, OutPoint, Transaction, TxInput,
-    TxOutput,
+    AddressNetwork, Amount, Block, BurnLeaderRank, FinalizerMode, LegacyTransactionId, MINE_REWARD,
+    OutPoint, Transaction, TransactionV2, TransactionV2Domain, TxInput, TxOutput,
+    encode_versioned_address, hex_encode,
 };
 
 use super::types::{
@@ -59,6 +62,91 @@ pub(super) fn wallet_transaction_rows(
 
     rows.sort_by(|left, right| right.0.cmp(&left.0));
     rows.into_iter().map(|(_, row)| row).collect()
+}
+
+pub(super) fn wallet_transaction_v2_rows(
+    wallet_addresses: &[String],
+    pending: &[TransactionV2],
+    outputs: &BTreeMap<OutPoint, TxOutput>,
+    filters: WalletTransactionFilters,
+    domain: &TransactionV2Domain,
+    network: AddressNetwork,
+) -> Vec<WalletTransactionRow> {
+    pending
+        .iter()
+        .rev()
+        .filter(|transaction| filters.allows_v2(transaction))
+        .filter_map(|transaction| {
+            wallet_transaction_v2_row(wallet_addresses, transaction, outputs, domain, network)
+                .ok()
+                .flatten()
+        })
+        .collect()
+}
+
+fn wallet_transaction_v2_row(
+    wallet_addresses: &[String],
+    transaction: &TransactionV2,
+    outputs: &BTreeMap<OutPoint, TxOutput>,
+    domain: &TransactionV2Domain,
+    network: AddressNetwork,
+) -> Result<Option<WalletTransactionRow>> {
+    let presented = ui_transaction_v2(transaction, outputs, domain, network)?;
+    let is_wallet_address =
+        |candidate: &str| wallet_addresses.iter().any(|address| address == candidate);
+    let sent = is_wallet_address(&presented.from);
+    let received = presented
+        .outputs
+        .iter()
+        .chain(presented.change.iter())
+        .any(|output| is_wallet_address(&output.address));
+    if !sent && !received {
+        return Ok(None);
+    }
+    let amount = if matches!(transaction, TransactionV2::Migration { .. }) {
+        presented.amount
+    } else if sent {
+        presented
+            .outputs
+            .iter()
+            .filter(|output| !is_wallet_address(&output.address))
+            .fold(0_u64, |total, output| total.saturating_add(output.amount))
+    } else {
+        presented
+            .outputs
+            .iter()
+            .chain(presented.change.iter())
+            .filter(|output| is_wallet_address(&output.address))
+            .fold(0_u64, |total, output| total.saturating_add(output.amount))
+    };
+    let direction = match transaction {
+        TransactionV2::Migration { .. } => "migrated",
+        TransactionV2::Burn { .. } => "burned",
+        _ if sent => "sent",
+        _ => "received",
+    };
+    Ok(Some(WalletTransactionRow {
+        kind: presented.kind,
+        from: presented.from,
+        to: presented.to,
+        amount,
+        fee: presented.fee,
+        inputs: presented.inputs,
+        outputs: presented.outputs,
+        change: presented.change,
+        signature: presented.signature,
+        status: "pending",
+        block_height: None,
+        timestamp_ms: None,
+        block_finalizer: None,
+        direction,
+        difficulty_bits: presented.difficulty_bits,
+        proof_bits: presented.proof_bits,
+        proof_hash: presented.proof_hash,
+        reward_total: None,
+        reward_fee_inputs: Vec::new(),
+        reward_outputs: Vec::new(),
+    }))
 }
 
 pub(super) fn wallet_transaction_row(
@@ -476,6 +564,263 @@ pub(super) fn ui_transaction(
     }
 }
 
+pub(super) fn ui_transaction_v2(
+    transaction: &TransactionV2,
+    outputs_by_outpoint: &BTreeMap<OutPoint, TxOutput>,
+    domain: &TransactionV2Domain,
+    network: AddressNetwork,
+) -> Result<UiTransaction> {
+    let transaction_id = hex_encode(transaction.transaction_id(domain)?);
+    match transaction {
+        TransactionV2::Migration {
+            inputs,
+            outputs,
+            fee,
+            authorizations,
+        } => Ok(UiTransaction {
+            kind: "migration",
+            from: inputs
+                .first()
+                .map(|input| encode_versioned_address(input.owner, network))
+                .transpose()?
+                .unwrap_or_default(),
+            to: first_v2_output_address(outputs, network)?,
+            amount: outputs
+                .iter()
+                .fold(0_u64, |total, output| total.saturating_add(output.amount)),
+            fee: *fee,
+            inputs: inputs
+                .iter()
+                .enumerate()
+                .map(|(index, input)| {
+                    let txid = match &input.outpoint_id {
+                        LegacyTransactionId::Hash(value) => hex_encode(value),
+                        LegacyTransactionId::Signature(value) => hex_encode(value),
+                    };
+                    v2_ui_input(
+                        OutPoint {
+                            txid,
+                            index: input.outpoint_index,
+                        },
+                        input.owner,
+                        authorizations.get(index),
+                        outputs_by_outpoint,
+                        network,
+                    )
+                })
+                .collect::<Result<Vec<_>>>()?,
+            outputs: v2_ui_outputs(outputs, network)?,
+            change: Vec::new(),
+            signature: transaction_id,
+            difficulty_bits: None,
+            proof_bits: None,
+            proof_hash: None,
+        }),
+        TransactionV2::Transfer {
+            inputs,
+            outputs,
+            fee,
+            authorizations,
+        } => Ok(UiTransaction {
+            kind: "transfer",
+            from: inputs
+                .first()
+                .map(|input| encode_versioned_address(input.owner, network))
+                .transpose()?
+                .unwrap_or_default(),
+            to: first_v2_output_address(outputs, network)?,
+            amount: outputs.first().map(|output| output.amount).unwrap_or(0),
+            fee: *fee,
+            inputs: inputs
+                .iter()
+                .enumerate()
+                .map(|(index, input)| {
+                    v2_ui_input(
+                        OutPoint {
+                            txid: hex_encode(input.outpoint_txid),
+                            index: input.outpoint_index,
+                        },
+                        input.owner,
+                        authorizations.get(index),
+                        outputs_by_outpoint,
+                        network,
+                    )
+                })
+                .collect::<Result<Vec<_>>>()?,
+            outputs: v2_ui_outputs(outputs, network)?,
+            change: Vec::new(),
+            signature: transaction_id,
+            difficulty_bits: None,
+            proof_bits: None,
+            proof_hash: None,
+        }),
+        TransactionV2::Burn {
+            inputs,
+            change,
+            amount,
+            fee,
+            authorizations,
+            ..
+        } => Ok(UiTransaction {
+            kind: "burn",
+            from: inputs
+                .first()
+                .map(|input| encode_versioned_address(input.owner, network))
+                .transpose()?
+                .unwrap_or_default(),
+            to: None,
+            amount: *amount,
+            fee: *fee,
+            inputs: inputs
+                .iter()
+                .enumerate()
+                .map(|(index, input)| {
+                    v2_ui_input(
+                        OutPoint {
+                            txid: hex_encode(input.outpoint_txid),
+                            index: input.outpoint_index,
+                        },
+                        input.owner,
+                        authorizations.get(index),
+                        outputs_by_outpoint,
+                        network,
+                    )
+                })
+                .collect::<Result<Vec<_>>>()?,
+            outputs: Vec::new(),
+            change: v2_ui_outputs(change, network)?,
+            signature: transaction_id,
+            difficulty_bits: None,
+            proof_bits: None,
+            proof_hash: None,
+        }),
+        TransactionV2::Mine {
+            recipient,
+            difficulty_bits,
+            proof_hash,
+            ..
+        } => {
+            let recipient = encode_versioned_address(*recipient, network)?;
+            let proof_hash = hex_encode(proof_hash);
+            Ok(UiTransaction {
+                kind: "mine",
+                from: "pow".to_string(),
+                to: Some(recipient.clone()),
+                amount: MINE_REWARD,
+                fee: 0,
+                inputs: Vec::new(),
+                outputs: vec![TxOutput {
+                    address: recipient,
+                    amount: MINE_REWARD,
+                }],
+                change: Vec::new(),
+                signature: transaction_id,
+                difficulty_bits: Some(*difficulty_bits),
+                proof_bits: Some(proof_bits(&proof_hash)),
+                proof_hash: Some(proof_hash),
+            })
+        }
+    }
+}
+
+pub(super) fn transaction_v2_input_outpoints(transaction: &TransactionV2) -> Vec<OutPoint> {
+    match transaction {
+        TransactionV2::Migration { inputs, .. } => inputs
+            .iter()
+            .map(|input| OutPoint {
+                txid: match &input.outpoint_id {
+                    LegacyTransactionId::Hash(value) => hex_encode(value),
+                    LegacyTransactionId::Signature(value) => hex_encode(value),
+                },
+                index: input.outpoint_index,
+            })
+            .collect(),
+        TransactionV2::Transfer { inputs, .. } | TransactionV2::Burn { inputs, .. } => inputs
+            .iter()
+            .map(|input| OutPoint {
+                txid: hex_encode(input.outpoint_txid),
+                index: input.outpoint_index,
+            })
+            .collect(),
+        TransactionV2::Mine { .. } => Vec::new(),
+    }
+}
+
+pub(super) fn add_pending_v2_outputs(
+    outputs: &mut BTreeMap<OutPoint, TxOutput>,
+    pending: &[TransactionV2],
+    domain: &TransactionV2Domain,
+    network: AddressNetwork,
+) -> Result<()> {
+    for transaction in pending {
+        let txid = hex_encode(transaction.transaction_id(domain)?);
+        let transaction_outputs = match transaction {
+            TransactionV2::Migration { outputs, .. } | TransactionV2::Transfer { outputs, .. } => {
+                outputs.as_slice()
+            }
+            TransactionV2::Burn { change, .. } => change.as_slice(),
+            TransactionV2::Mine { .. } => &[],
+        };
+        for (index, output) in v2_ui_outputs(transaction_outputs, network)?
+            .into_iter()
+            .enumerate()
+        {
+            outputs.insert(
+                OutPoint {
+                    txid: txid.clone(),
+                    index: u32::try_from(index)?,
+                },
+                output,
+            );
+        }
+    }
+    Ok(())
+}
+
+fn first_v2_output_address(
+    outputs: &[crate::domain::TransactionV2Output],
+    network: AddressNetwork,
+) -> Result<Option<String>> {
+    outputs
+        .first()
+        .map(|output| encode_versioned_address(output.address, network))
+        .transpose()
+}
+
+fn v2_ui_input(
+    outpoint: OutPoint,
+    owner: crate::domain::VersionedAddress,
+    authorization: Option<&crate::domain::V2SpendingAuthorization>,
+    outputs_by_outpoint: &BTreeMap<OutPoint, TxOutput>,
+    network: AddressNetwork,
+) -> Result<UiTxInput> {
+    let spent_output = outputs_by_outpoint.get(&outpoint);
+    Ok(UiTxInput {
+        outpoint,
+        owner: encode_versioned_address(owner, network)?,
+        signature: authorization
+            .map(|authorization| hex_encode(authorization.signature().as_bytes()))
+            .unwrap_or_default(),
+        amount: spent_output.map(|output| output.amount),
+        address: spent_output.map(|output| output.address.clone()),
+    })
+}
+
+fn v2_ui_outputs(
+    outputs: &[crate::domain::TransactionV2Output],
+    network: AddressNetwork,
+) -> Result<Vec<TxOutput>> {
+    outputs
+        .iter()
+        .map(|output| {
+            Ok(TxOutput {
+                address: encode_versioned_address(output.address, network)?,
+                amount: output.amount,
+            })
+        })
+        .collect()
+}
+
 fn ui_inputs(
     inputs: &[TxInput],
     outputs_by_outpoint: &BTreeMap<OutPoint, TxOutput>,
@@ -558,12 +903,16 @@ mod tests {
 
     use crate::compact::CompactBlockSizeBreakdown;
     use crate::domain::{
-        Amount, Block, BurnBundleSection, BurnBundleSignature, BurnLeaderRank, FinalizerMode,
-        MaskedBurn, OutPoint, Transaction, TxInput, TxOutput,
+        AddressNetwork, Amount, Block, BurnBundleSection, BurnBundleSignature, BurnLeaderRank,
+        FinalizerMode, Ledger, MaskedBurn, OutPoint, Transaction, TxInput, TxOutput, Wallet,
+        encode_versioned_address,
     };
 
-    use super::{block_lost_iuna, populate_wallet_reward_flow, ui_block, wallet_transaction_row};
-    use crate::adapters::http::types::WalletTransactionContext;
+    use super::{
+        block_lost_iuna, populate_wallet_reward_flow, ui_block, ui_transaction_v2,
+        wallet_transaction_row, wallet_transaction_v2_rows,
+    };
+    use crate::adapters::http::types::{WalletTransactionContext, WalletTransactionFilters};
 
     fn burn(signature: &str) -> Transaction {
         Transaction::Burn {
@@ -603,6 +952,41 @@ mod tests {
             fee,
             signature: signature.to_string(),
         }
+    }
+
+    #[test]
+    fn pending_v2_migration_is_presented_in_chain_and_wallet_views() {
+        let wallet = Wallet::from_seed("pending-v2-ui-wallet");
+        let ledger = Ledger::new(BTreeMap::from([(wallet.address().to_string(), 100_000)]), 1);
+        let transaction = ledger.build_v2_migration_batch(&wallet, 100).unwrap();
+        let domain = ledger.transaction_v2_domain().unwrap();
+        let outputs = ledger.all_utxos().into_iter().collect::<BTreeMap<_, _>>();
+        let network = AddressNetwork::Mainnet;
+
+        let chain_row = ui_transaction_v2(&transaction, &outputs, &domain, network).unwrap();
+        assert_eq!(chain_row.kind, "migration");
+        assert_eq!(chain_row.signature.len(), 64);
+        assert_eq!(chain_row.inputs.len(), 1);
+        assert_eq!(chain_row.outputs.len(), 1);
+
+        let wallet_addresses = vec![
+            wallet.address().to_string(),
+            encode_versioned_address(wallet.legacy_versioned_address(), network).unwrap(),
+            wallet.hybrid_address(network),
+        ];
+        let rows = wallet_transaction_v2_rows(
+            &wallet_addresses,
+            &[transaction],
+            &outputs,
+            WalletTransactionFilters::default(),
+            &domain,
+            network,
+        );
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].kind, "migration");
+        assert_eq!(rows[0].direction, "migrated");
+        assert_eq!(rows[0].status, "pending");
+        assert_eq!(rows[0].amount, 99_900);
     }
 
     #[test]

@@ -35,18 +35,24 @@ impl NodeCore {
             .as_deref()
             .map(|address| self.ledger.balance_of(address))
             .unwrap_or(0);
-        let migration_pending = hybrid_address.as_deref().is_some_and(|address| {
-            self.ledger.pending_v2().iter().any(|transaction| {
-                matches!(transaction, TransactionV2::Migration { outputs, .. }
-                if outputs.iter().any(|output| {
-                    crate::domain::encode_versioned_address(
-                        output.address,
-                        AddressNetwork::from_profile_id(
-                            &self.ledger.launch_profile().profile_id,
-                        ),
-                    )
-                    .is_ok_and(|output_address| output_address == address)
-                }))
+        let address_network =
+            AddressNetwork::from_profile_id(&self.ledger.launch_profile().profile_id);
+        let transaction_v2_domain = self.ledger.transaction_v2_domain().ok();
+        let pending_transaction_id = hybrid_address.as_deref().and_then(|address| {
+            self.ledger.pending_v2().iter().find_map(|transaction| {
+                let TransactionV2::Migration { outputs, .. } = transaction else {
+                    return None;
+                };
+                let belongs_to_wallet = outputs.iter().any(|output| {
+                    crate::domain::encode_versioned_address(output.address, address_network)
+                        .is_ok_and(|output_address| output_address == address)
+                });
+                belongs_to_wallet.then(|| {
+                    transaction_v2_domain
+                        .as_ref()
+                        .and_then(|domain| transaction.transaction_id(domain).ok())
+                        .map(crate::domain::hex_encode)
+                })?
             })
         });
 
@@ -62,7 +68,8 @@ impl NodeCore {
                 legacy_balance,
                 hybrid_balance,
                 legacy_utxos,
-                migration_pending,
+                migration_pending: pending_transaction_id.is_some(),
+                pending_transaction_id,
             },
             launch_profile: LaunchProfileStatus {
                 profile_id: launch_profile.profile_id.clone(),

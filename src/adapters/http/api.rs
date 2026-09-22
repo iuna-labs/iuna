@@ -10,7 +10,7 @@ use axum::{
 use crate::{
     adapters::p2p::P2pMetrics,
     app::{NodeStatus, PeerInfo},
-    domain::{OutPoint, Transaction, TxOutput},
+    domain::{AddressNetwork, OutPoint, Transaction, TxOutput},
     ip_geolocation::IpGeolocation,
 };
 
@@ -23,9 +23,10 @@ use super::{
 };
 use super::{
     DATASET_LIMIT, DATASET_PAGE_LIMIT, EXPLORER_LIMIT, EXPLORER_PAGE_LIMIT, HttpState,
-    add_pending_outputs, metrics_response, network_health, populate_wallet_reward_flow,
-    top_mine_proofs, ui_blocks_from_indexes, ui_transaction, wallet_transaction_row,
-    wallet_transaction_rows,
+    add_pending_outputs, add_pending_v2_outputs, metrics_response, network_health,
+    populate_wallet_reward_flow, top_mine_proofs, transaction_v2_input_outpoints,
+    ui_blocks_from_indexes, ui_transaction, ui_transaction_v2, wallet_transaction_row,
+    wallet_transaction_rows, wallet_transaction_v2_rows,
 };
 
 pub(super) async fn api_status(State(state): State<HttpState>) -> Json<NodeStatus> {
@@ -84,9 +85,25 @@ pub(super) async fn api_mempool(
     State(state): State<HttpState>,
     Query(query): Query<PageQuery>,
 ) -> Json<Page<UiTransaction>> {
-    let pending = {
+    let (pending, pending_v2, domain, network, confirmed_outputs) = {
         let node = state.node.lock().await;
-        node.pending_transactions()
+        let pending_v2 = node.pending_transactions_v2();
+        let confirmed_outputs = pending_v2
+            .iter()
+            .flat_map(transaction_v2_input_outpoints)
+            .filter_map(|outpoint| {
+                node.ledger()
+                    .output_for_outpoint(&outpoint)
+                    .map(|output| (outpoint, output))
+            })
+            .collect::<BTreeMap<_, _>>();
+        (
+            node.pending_transactions(),
+            pending_v2,
+            node.ledger().transaction_v2_domain().ok(),
+            AddressNetwork::from_profile_id(&node.ledger().launch_profile().profile_id),
+            confirmed_outputs,
+        )
     };
     let mut required_outputs = BTreeSet::new();
     collect_transaction_input_outpoints(pending.iter(), &mut required_outputs);
@@ -98,6 +115,13 @@ pub(super) async fn api_mempool(
         .iter()
         .map(|tx| ui_transaction(tx, &outputs))
         .collect::<Vec<_>>();
+    let mut v2_outputs = confirmed_outputs;
+    if let Some(domain) = domain.as_ref() {
+        let _ = add_pending_v2_outputs(&mut v2_outputs, &pending_v2, domain, network);
+        items.extend(pending_v2.iter().filter_map(|transaction| {
+            ui_transaction_v2(transaction, &v2_outputs, domain, network).ok()
+        }));
+    }
     items.reverse();
     Json(page_items(items, query))
 }
@@ -113,11 +137,32 @@ pub(super) async fn api_wallet_transactions(
         .unwrap_or(DATASET_PAGE_LIMIT)
         .clamp(1, DATASET_LIMIT);
     let filters = WalletTransactionFilters::from_query(query);
-    let (wallet, pending) = {
+    let (wallet, wallet_addresses, pending, pending_v2, domain, network, v2_outputs) = {
         let node = state.node.lock().await;
+        let status = node.status();
+        let wallet = node.wallet_address().to_string();
+        let mut wallet_addresses = vec![wallet.clone(), status.wallet_receive_address];
+        if let Some(address) = status.quantum_migration.hybrid_address {
+            wallet_addresses.push(address);
+        }
+        let pending_v2 = node.pending_transactions_v2();
+        let v2_outputs = pending_v2
+            .iter()
+            .flat_map(transaction_v2_input_outpoints)
+            .filter_map(|outpoint| {
+                node.ledger()
+                    .output_for_outpoint(&outpoint)
+                    .map(|output| (outpoint, output))
+            })
+            .collect::<BTreeMap<_, _>>();
         (
-            node.wallet_address().to_string(),
+            wallet,
+            wallet_addresses,
             node.pending_transactions(),
+            pending_v2,
+            node.ledger().transaction_v2_domain().ok(),
+            AddressNetwork::from_profile_id(&node.ledger().launch_profile().profile_id),
+            v2_outputs,
         )
     };
     let mut pending_required_outputs = BTreeSet::new();
@@ -126,8 +171,22 @@ pub(super) async fn api_wallet_transactions(
         .await
         .unwrap_or_default();
     add_pending_outputs(&mut pending_outputs, &pending);
-    let pending_rows =
+    let mut pending_rows =
         wallet_transaction_rows(&wallet, pending.clone(), &[], &pending_outputs, filters);
+    if let Some(domain) = domain.as_ref() {
+        let mut v2_outputs = v2_outputs;
+        let _ = add_pending_v2_outputs(&mut v2_outputs, &pending_v2, domain, network);
+        let mut v2_rows = wallet_transaction_v2_rows(
+            &wallet_addresses,
+            &pending_v2,
+            &v2_outputs,
+            filters,
+            domain,
+            network,
+        );
+        v2_rows.append(&mut pending_rows);
+        pending_rows = v2_rows;
+    }
     let pending_total = pending_rows.len();
     let mut items = pending_rows
         .into_iter()
@@ -487,6 +546,7 @@ pub(super) async fn api_network_health(
             .map(|block| block.timestamp_ms);
         let mempool = MempoolCounts {
             plain_transactions: node.pending_transactions().len(),
+            v2_transactions: node.pending_transactions_v2().len(),
         };
         (
             NetworkHealthLocalState {

@@ -5,7 +5,8 @@
 This document defines the review package for Iuna's post-quantum migration. The current code
 reserves versioned addresses and transaction encodings, verifies hybrid Ed25519 + ML-DSA-44
 authorizations, and activated transaction v2 at height 3000. Live consensus and blocks accept v2
-transactions, and nodes relay canonical v2 mempool envelopes. The management wallet exposes
+transactions, and nodes relay canonical v2 mempool envelopes only across sessions that negotiated
+the `transaction-v2-mempool` capability. The management wallet exposes
 migration telemetry, reviewed block-bounded migration submission, and hybrid transfers.
 
 An audit of this scope must review the active consensus code and the enabled wallet migration
