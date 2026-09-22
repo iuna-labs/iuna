@@ -5,6 +5,12 @@ from the Git history and Conventional Commit titles by `deployment.sh`.
 
 ## [Unreleased]
 
+## [0.4.37] - 2026-09-22
+
+### Fixed
+
+- update Discord invite link
+
 ## [0.4.36] - 2026-09-22
 
 ### Added
