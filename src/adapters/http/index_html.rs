@@ -635,7 +635,7 @@ pub(super) const INDEX_HTML: &str = concat!(
         <span class="version-label" x-text="appVersionLabel()"></span>
         <span class="version-update" x-show="updateAvailable()">Update</span>
         </button>
-        <a class="discord-button" href="https://discord.gg/JcXRSSDhS" target="_blank" rel="noopener noreferrer" title="Discord" aria-label="Discord">
+        <a class="discord-button" href="https://discord.gg/wdk8cjkj2G" target="_blank" rel="noopener noreferrer" title="Discord" aria-label="Discord">
         <svg viewBox="0 0 24 24" aria-hidden="true" focusable="false"><path d="M19.54 5.34A16.9 16.9 0 0 0 15.35 4a11.7 11.7 0 0 0-.54 1.1 15.8 15.8 0 0 0-4.62 0A11.7 11.7 0 0 0 9.65 4a16.9 16.9 0 0 0-4.19 1.34C2.81 9.28 2.09 13.12 2.45 16.9A16.8 16.8 0 0 0 7.59 19.5a12.8 12.8 0 0 0 1.1-1.79 10.9 10.9 0 0 1-1.73-.83c.14-.1.28-.21.42-.32a12.1 12.1 0 0 0 9.24 0c.14.11.28.22.42.32-.55.32-1.13.6-1.74.83.32.63.69 1.23 1.1 1.79a16.8 16.8 0 0 0 5.15-2.6c.42-4.38-.72-8.18-2.01-11.56ZM9.32 14.57c-1 0-1.82-.92-1.82-2.04 0-1.13.8-2.05 1.82-2.05 1.02 0 1.84.92 1.82 2.05 0 1.12-.8 2.04-1.82 2.04Zm5.36 0c-1 0-1.82-.92-1.82-2.04 0-1.13.8-2.05 1.82-2.05 1.02 0 1.84.92 1.82 2.05 0 1.12-.8 2.04-1.82 2.04Z"></path></svg>
         <span>Discord</span>
         </a>
