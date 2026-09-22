@@ -13,9 +13,10 @@ use serde::Serialize;
 use crate::{
     adapters::ui_index::{UiChainIndex, build_ui_chain_index},
     domain::{
-        Amount, Block, BurnLeaderRank, ChainSnapshot, Ledger, MINE_RETARGET_WINDOW_BLOCKS,
-        MINE_REWARD, OutPoint, Transaction, TxInput, TxOutput, retarget_mine_difficulty_bits,
-        reward_outputs_for_block,
+        AddressNetwork, Amount, Block, BurnLeaderRank, ChainSnapshot, Ledger,
+        MINE_RETARGET_WINDOW_BLOCKS, MINE_REWARD, OutPoint, Transaction, TransactionV2,
+        TransactionV2Domain, TxInput, TxOutput, decode_hex, encode_versioned_address, hex_encode,
+        retarget_mine_difficulty_bits, reward_outputs_for_block,
     },
 };
 
@@ -111,6 +112,24 @@ ON ui_wallet_transactions(address, sort_key DESC);
 CREATE INDEX IF NOT EXISTS idx_ui_wallet_transactions_signature
 ON ui_wallet_transactions(signature);
 
+CREATE TABLE IF NOT EXISTS ui_wallet_transactions_v2 (
+    address TEXT NOT NULL,
+    sort_key INTEGER NOT NULL,
+    kind TEXT NOT NULL,
+    transaction_id TEXT NOT NULL,
+    block_height INTEGER NOT NULL,
+    timestamp_ms INTEGER NOT NULL,
+    block_finalizer TEXT NOT NULL,
+    envelope TEXT NOT NULL,
+    PRIMARY KEY (address, transaction_id)
+);
+
+CREATE INDEX IF NOT EXISTS idx_ui_wallet_transactions_v2_address_kind_sort
+ON ui_wallet_transactions_v2(address, kind, sort_key DESC);
+
+CREATE INDEX IF NOT EXISTS idx_ui_wallet_transactions_v2_transaction_id
+ON ui_wallet_transactions_v2(transaction_id);
+
 CREATE TABLE IF NOT EXISTS ui_burn_leader_ranks (
     block_hash TEXT NOT NULL,
     rank INTEGER NOT NULL,
@@ -136,12 +155,13 @@ DROP TABLE IF EXISTS ui_cache_meta;
 DROP TABLE IF EXISTS ui_output_index;
 DROP TABLE IF EXISTS ui_utxos;
 DROP TABLE IF EXISTS ui_wallet_transactions;
+DROP TABLE IF EXISTS ui_wallet_transactions_v2;
 DROP TABLE IF EXISTS ui_revealed_transactions;
 DROP TABLE IF EXISTS ui_burn_leader_ranks;
 DROP TABLE IF EXISTS ui_burn_leader_rank_blocks;
 "#;
 
-const UI_DATA_SCHEMA_VERSION: u32 = 1;
+const UI_DATA_SCHEMA_VERSION: u32 = 2;
 const UI_CACHE_SCHEMA_VERSION: u32 = 5;
 const METRICS_CACHE_SCHEMA_VERSION: u32 = 1;
 
@@ -182,6 +202,17 @@ pub struct WalletTransactionProjection {
     pub timestamp_ms: u64,
     pub block_finalizer: String,
     pub transaction: Transaction,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct WalletTransactionV2Projection {
+    pub sort_key: u64,
+    pub kind: String,
+    pub transaction_id: String,
+    pub block_height: u64,
+    pub timestamp_ms: u64,
+    pub block_finalizer: String,
+    pub envelope: String,
 }
 
 #[derive(Clone, Debug)]
@@ -286,6 +317,8 @@ impl SqliteUiDataStore {
         let ui_index = build_ui_chain_index(snapshot);
         let utxos = ledger.all_utxos();
         let wallet_transactions = wallet_transactions_from_snapshot(snapshot);
+        let wallet_transactions_v2 =
+            wallet_transactions_v2_from_snapshot(snapshot, &ledger.transaction_v2_domain()?);
         let leaderboards = build_ui_leaderboards(&utxos, &wallet_transactions)?;
 
         self.with_connection_mut(|connection| {
@@ -295,6 +328,7 @@ impl SqliteUiDataStore {
             replace_ui_chain_index(&transaction, &ui_index, updated_at_ms)?;
             replace_ui_utxos(&transaction, &utxos)?;
             replace_ui_wallet_transactions(&transaction, &wallet_transactions)?;
+            replace_ui_wallet_transactions_v2(&transaction, &wallet_transactions_v2)?;
             replace_ui_leaderboards(&transaction, &leaderboards)?;
             transaction
                 .commit()
@@ -457,6 +491,18 @@ LIMIT ?1
     ) -> Result<(Vec<WalletTransactionProjection>, usize)> {
         self.with_connection(|connection| {
             load_wallet_transactions(connection, address, kinds, offset, limit)
+        })
+    }
+
+    pub fn load_wallet_transactions_v2(
+        &self,
+        addresses: &[String],
+        kinds: &[&str],
+        offset: usize,
+        limit: usize,
+    ) -> Result<(Vec<WalletTransactionV2Projection>, usize)> {
+        self.with_connection(|connection| {
+            load_wallet_transactions_v2(connection, addresses, kinds, offset, limit)
         })
     }
 
@@ -1018,6 +1064,43 @@ INSERT INTO ui_wallet_transactions (
     Ok(())
 }
 
+fn replace_ui_wallet_transactions_v2(
+    transaction: &rusqlite::Transaction<'_>,
+    rows: &[(String, WalletTransactionV2Projection)],
+) -> Result<()> {
+    transaction
+        .execute("DELETE FROM ui_wallet_transactions_v2", [])
+        .context("failed to clear old UI wallet transaction v2 index")?;
+    for (address, row) in rows {
+        transaction
+            .execute(
+                r#"
+INSERT INTO ui_wallet_transactions_v2 (
+    address, sort_key, kind, transaction_id, block_height, timestamp_ms, block_finalizer,
+    envelope
+) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)
+"#,
+                params![
+                    address,
+                    row.sort_key,
+                    row.kind,
+                    row.transaction_id,
+                    row.block_height,
+                    row.timestamp_ms,
+                    row.block_finalizer,
+                    row.envelope,
+                ],
+            )
+            .with_context(|| {
+                format!(
+                    "failed to persist UI wallet transaction v2 {} for {}",
+                    row.transaction_id, address
+                )
+            })?;
+    }
+    Ok(())
+}
+
 fn replace_ui_leaderboards(
     transaction: &rusqlite::Transaction<'_>,
     rows: &[(String, UiLeaderboardEntry)],
@@ -1057,6 +1140,9 @@ fn clear_ui_chain_index_in_transaction(transaction: &rusqlite::Transaction<'_>) 
     transaction
         .execute("DELETE FROM ui_wallet_transactions", [])
         .context("failed to clear old UI wallet transaction index")?;
+    transaction
+        .execute("DELETE FROM ui_wallet_transactions_v2", [])
+        .context("failed to clear old UI wallet transaction v2 index")?;
     transaction
         .execute("DELETE FROM ui_leaderboards", [])
         .context("failed to clear old UI leaderboards")?;
@@ -1244,6 +1330,71 @@ LIMIT ? OFFSET ?
             })
             .context("failed to load UI wallet transactions")?,
     )?;
+    Ok((rows, total))
+}
+
+fn load_wallet_transactions_v2(
+    connection: &Connection,
+    addresses: &[String],
+    kinds: &[&str],
+    offset: usize,
+    limit: usize,
+) -> Result<(Vec<WalletTransactionV2Projection>, usize)> {
+    if addresses.is_empty() || kinds.is_empty() {
+        return Ok((Vec::new(), 0));
+    }
+    let address_placeholders = std::iter::repeat_n("?", addresses.len())
+        .collect::<Vec<_>>()
+        .join(", ");
+    let kind_placeholders = std::iter::repeat_n("?", kinds.len())
+        .collect::<Vec<_>>()
+        .join(", ");
+    let predicate =
+        format!("address IN ({address_placeholders}) AND kind IN ({kind_placeholders})");
+    let mut filter_params = Vec::<Value>::with_capacity(addresses.len() + kinds.len());
+    filter_params.extend(addresses.iter().cloned().map(Value::Text));
+    filter_params.extend(kinds.iter().map(|kind| Value::Text((*kind).to_string())));
+
+    let count_sql = format!(
+        "SELECT COUNT(DISTINCT transaction_id) FROM ui_wallet_transactions_v2 WHERE {predicate}"
+    );
+    let total = connection
+        .query_row(&count_sql, params_from_iter(filter_params.iter()), |row| {
+            row.get::<_, u64>(0)
+        })
+        .context("failed to count UI wallet transactions v2")? as usize;
+
+    let query_sql = format!(
+        r#"
+SELECT DISTINCT sort_key, kind, block_height, timestamp_ms, block_finalizer, envelope,
+       transaction_id
+FROM ui_wallet_transactions_v2
+WHERE {predicate}
+ORDER BY sort_key DESC, transaction_id ASC
+LIMIT ? OFFSET ?
+"#
+    );
+    let mut query_params = filter_params;
+    query_params.push(Value::Integer(limit as i64));
+    query_params.push(Value::Integer(offset as i64));
+    let mut statement = connection
+        .prepare(&query_sql)
+        .context("failed to prepare UI wallet transactions v2 query")?;
+    let rows = statement
+        .query_map(params_from_iter(query_params.iter()), |row| {
+            Ok(WalletTransactionV2Projection {
+                sort_key: row.get(0)?,
+                kind: row.get(1)?,
+                block_height: row.get(2)?,
+                timestamp_ms: row.get(3)?,
+                block_finalizer: row.get(4)?,
+                envelope: row.get(5)?,
+                transaction_id: row.get(6)?,
+            })
+        })
+        .context("failed to load UI wallet transactions v2")?
+        .collect::<std::result::Result<Vec<_>, _>>()
+        .context("failed to read UI wallet transaction v2 rows")?;
     Ok((rows, total))
 }
 
@@ -1450,6 +1601,89 @@ fn wallet_transactions_from_snapshot(
         }
     }
     rows
+}
+
+fn wallet_transactions_v2_from_snapshot(
+    snapshot: &ChainSnapshot,
+    expected_domain: &TransactionV2Domain,
+) -> Vec<(String, WalletTransactionV2Projection)> {
+    let network = AddressNetwork::from_profile_id(&snapshot.launch_profile.profile_id);
+    let mut rows = Vec::new();
+    for block in &snapshot.blocks {
+        for (index, envelope) in block.transactions_v2.iter().rev().enumerate() {
+            let Some(transaction) = decode_projected_transaction_v2(envelope, expected_domain)
+            else {
+                continue;
+            };
+            let Ok(transaction_id) = transaction.transaction_id(expected_domain).map(hex_encode)
+            else {
+                continue;
+            };
+            let projection = WalletTransactionV2Projection {
+                sort_key: (block.height as u128 * 10_000 + 5_000 + index as u128)
+                    .min(u128::from(u64::MAX)) as u64,
+                kind: transaction_v2_filter_kind(&transaction).to_string(),
+                transaction_id,
+                block_height: block.height,
+                timestamp_ms: block.timestamp_ms,
+                block_finalizer: block.miner.clone(),
+                envelope: envelope.clone(),
+            };
+            for address in wallet_transaction_v2_addresses(&transaction, network) {
+                rows.push((address, projection.clone()));
+            }
+        }
+    }
+    rows
+}
+
+fn decode_projected_transaction_v2(
+    envelope: &str,
+    expected_domain: &TransactionV2Domain,
+) -> Option<TransactionV2> {
+    let bytes = decode_hex(envelope).ok()?;
+    let (domain, transaction) = TransactionV2::decode(&bytes).ok()?;
+    (domain == *expected_domain).then_some(transaction)
+}
+
+fn wallet_transaction_v2_addresses(
+    transaction: &TransactionV2,
+    network: AddressNetwork,
+) -> BTreeSet<String> {
+    let mut addresses = BTreeSet::new();
+    let mut insert = |address| {
+        if let Ok(address) = encode_versioned_address(address, network) {
+            addresses.insert(address);
+        }
+    };
+    match transaction {
+        TransactionV2::Migration {
+            inputs, outputs, ..
+        } => {
+            inputs.iter().for_each(|input| insert(input.owner));
+            outputs.iter().for_each(|output| insert(output.address));
+        }
+        TransactionV2::Transfer {
+            inputs, outputs, ..
+        } => {
+            inputs.iter().for_each(|input| insert(input.owner));
+            outputs.iter().for_each(|output| insert(output.address));
+        }
+        TransactionV2::Burn { inputs, change, .. } => {
+            inputs.iter().for_each(|input| insert(input.owner));
+            change.iter().for_each(|output| insert(output.address));
+        }
+        TransactionV2::Mine { recipient, .. } => insert(*recipient),
+    }
+    addresses
+}
+
+fn transaction_v2_filter_kind(transaction: &TransactionV2) -> &'static str {
+    match transaction {
+        TransactionV2::Migration { .. } | TransactionV2::Transfer { .. } => "transfer",
+        TransactionV2::Burn { .. } => "burn",
+        TransactionV2::Mine { .. } => "mine",
+    }
 }
 
 fn push_wallet_transaction_projection(
@@ -1696,9 +1930,11 @@ mod tests {
     use rusqlite::Connection;
     use tempfile::tempdir;
 
-    use crate::domain::{ChainSnapshot, GenesisBurn, Ledger, Wallet};
+    use crate::domain::{AddressNetwork, ChainSnapshot, GenesisBurn, Ledger, Wallet, hex_encode};
 
-    use super::SqliteUiDataStore;
+    use super::{
+        SqliteUiDataStore, replace_ui_wallet_transactions_v2, wallet_transactions_v2_from_snapshot,
+    };
 
     fn test_snapshot(seed: &str) -> ChainSnapshot {
         let wallet = Wallet::from_seed(seed);
@@ -1747,6 +1983,55 @@ mod tests {
         assert_eq!(rows[0].timestamp_ms, 1_234);
         assert_eq!(rows[0].transaction.to(), Some(wallet.address()));
         assert!(rows[0].transaction.amount() > 0);
+    }
+
+    #[test]
+    fn confirmed_v2_wallet_projection_is_replaced_on_reorg() {
+        let dir = tempdir().unwrap();
+        let store = SqliteUiDataStore::open(dir.path().join("ui_data.sqlite3")).unwrap();
+        let wallet = Wallet::from_seed("confirmed-v2-wallet-history");
+        let ledger = Ledger::new(BTreeMap::from([(wallet.address().to_string(), 100_000)]), 1);
+        let domain = ledger.transaction_v2_domain().unwrap();
+        let transaction = ledger.build_v2_migration_batch(&wallet, 100).unwrap();
+        let mut snapshot = ledger.snapshot();
+        snapshot.blocks[0].transactions_v2 = vec![hex_encode(transaction.encode(&domain).unwrap())];
+        let rows = wallet_transactions_v2_from_snapshot(&snapshot, &domain);
+        let network = AddressNetwork::from_profile_id(&snapshot.launch_profile.profile_id);
+        let hybrid_address = wallet.hybrid_address(network);
+
+        assert!(rows.iter().any(|(address, _)| address == &hybrid_address));
+        store
+            .with_connection_mut(|connection| {
+                let transaction = connection.transaction()?;
+                replace_ui_wallet_transactions_v2(&transaction, &rows)?;
+                transaction.commit()?;
+                Ok(())
+            })
+            .unwrap();
+        let (projected, total) = store
+            .load_wallet_transactions_v2(
+                std::slice::from_ref(&hybrid_address),
+                &["transfer"],
+                0,
+                10,
+            )
+            .unwrap();
+        assert_eq!(total, 1);
+        assert_eq!(projected[0].transaction_id.len(), 64);
+        assert_eq!(projected[0].block_height, 0);
+
+        store
+            .with_connection_mut(|connection| {
+                let transaction = connection.transaction()?;
+                replace_ui_wallet_transactions_v2(&transaction, &[])?;
+                transaction.commit()?;
+                Ok(())
+            })
+            .unwrap();
+        let (_, total) = store
+            .load_wallet_transactions_v2(&[hybrid_address], &["transfer"], 0, 10)
+            .unwrap();
+        assert_eq!(total, 0);
     }
 
     #[test]

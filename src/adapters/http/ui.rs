@@ -5,7 +5,7 @@ use anyhow::Result;
 use crate::compact::CompactBlockSizeBreakdown;
 use crate::domain::{
     AddressNetwork, Amount, Block, BurnLeaderRank, FinalizerMode, LegacyTransactionId, MINE_REWARD,
-    OutPoint, Transaction, TransactionV2, TransactionV2Domain, TxInput, TxOutput,
+    OutPoint, Transaction, TransactionV2, TransactionV2Domain, TxInput, TxOutput, decode_hex,
     encode_versioned_address, hex_encode,
 };
 
@@ -72,24 +72,38 @@ pub(super) fn wallet_transaction_v2_rows(
     domain: &TransactionV2Domain,
     network: AddressNetwork,
 ) -> Vec<WalletTransactionRow> {
+    let context = WalletTransactionContext {
+        status: "pending",
+        block_height: None,
+        timestamp_ms: None,
+        block_finalizer: None,
+    };
     pending
         .iter()
         .rev()
         .filter(|transaction| filters.allows_v2(transaction))
         .filter_map(|transaction| {
-            wallet_transaction_v2_row(wallet_addresses, transaction, outputs, domain, network)
-                .ok()
-                .flatten()
+            wallet_transaction_v2_row(
+                wallet_addresses,
+                transaction,
+                outputs,
+                domain,
+                network,
+                &context,
+            )
+            .ok()
+            .flatten()
         })
         .collect()
 }
 
-fn wallet_transaction_v2_row(
+pub(super) fn wallet_transaction_v2_row(
     wallet_addresses: &[String],
     transaction: &TransactionV2,
     outputs: &BTreeMap<OutPoint, TxOutput>,
     domain: &TransactionV2Domain,
     network: AddressNetwork,
+    context: &WalletTransactionContext,
 ) -> Result<Option<WalletTransactionRow>> {
     let presented = ui_transaction_v2(transaction, outputs, domain, network)?;
     let is_wallet_address =
@@ -135,10 +149,10 @@ fn wallet_transaction_v2_row(
         outputs: presented.outputs,
         change: presented.change,
         signature: presented.signature,
-        status: "pending",
-        block_height: None,
-        timestamp_ms: None,
-        block_finalizer: None,
+        status: context.status,
+        block_height: context.block_height,
+        timestamp_ms: context.timestamp_ms,
+        block_finalizer: context.block_finalizer.clone(),
         direction,
         difficulty_bits: presented.difficulty_bits,
         proof_bits: presented.proof_bits,
@@ -314,21 +328,49 @@ pub(super) fn ui_blocks_from_indexes(
     outputs: &BTreeMap<OutPoint, TxOutput>,
     burn_leader_ranks: &BTreeMap<String, Vec<BurnLeaderRank>>,
     storage_size_breakdowns: &BTreeMap<String, CompactBlockSizeBreakdown>,
+    transaction_v2_domain: Option<&TransactionV2Domain>,
+    network: AddressNetwork,
 ) -> Vec<UiBlock> {
     blocks
         .into_iter()
         .map(|block| {
             let storage_size = storage_size_breakdowns.get(&block.hash);
-            ui_block(block, outputs, burn_leader_ranks, storage_size)
+            ui_block_with_v2(
+                block,
+                outputs,
+                burn_leader_ranks,
+                storage_size,
+                transaction_v2_domain,
+                network,
+            )
         })
         .collect()
 }
 
+#[cfg(test)]
 pub(super) fn ui_block(
     block: Block,
     outputs: &BTreeMap<OutPoint, TxOutput>,
     burn_leader_ranks: &BTreeMap<String, Vec<BurnLeaderRank>>,
     storage_size: Option<&CompactBlockSizeBreakdown>,
+) -> UiBlock {
+    ui_block_with_v2(
+        block,
+        outputs,
+        burn_leader_ranks,
+        storage_size,
+        None,
+        AddressNetwork::Mainnet,
+    )
+}
+
+fn ui_block_with_v2(
+    block: Block,
+    outputs: &BTreeMap<OutPoint, TxOutput>,
+    burn_leader_ranks: &BTreeMap<String, Vec<BurnLeaderRank>>,
+    storage_size: Option<&CompactBlockSizeBreakdown>,
+    transaction_v2_domain: Option<&TransactionV2Domain>,
+    network: AddressNetwork,
 ) -> UiBlock {
     let ranks = burn_leader_ranks
         .get(&block.hash)
@@ -339,25 +381,46 @@ pub(super) fn ui_block(
         .transactions
         .iter()
         .fold(0_u64, |total, tx| total.saturating_add(tx.fee()));
-    let total_fees = public_fees;
+    let transactions_v2 = transaction_v2_domain
+        .map(|domain| decode_block_transactions_v2(&block, domain))
+        .unwrap_or_default();
+    let total_fees = transactions_v2
+        .iter()
+        .fold(public_fees, |total, tx| total.saturating_add(tx.fee()));
     let transaction_bytes = storage_size
         .map(|size| size.transaction_bytes)
         .unwrap_or_else(|| {
-            block
+            let legacy_bytes = block
                 .transactions
                 .iter()
                 .map(|tx| tx.serialized_size_bytes().unwrap_or_default())
-                .sum()
+                .sum::<usize>();
+            let v2_bytes = transaction_v2_domain.map_or(0, |domain| {
+                transactions_v2.iter().fold(0_usize, |total, transaction| {
+                    total.saturating_add(transaction.encoded_size_bytes(domain).unwrap_or_default())
+                })
+            });
+            legacy_bytes.saturating_add(v2_bytes)
         });
-    let transaction_byte_breakdown = transaction_byte_breakdown(&block.transactions, storage_size);
+    let transaction_byte_breakdown = transaction_byte_breakdown(
+        &block.transactions,
+        &transactions_v2,
+        storage_size,
+        transaction_v2_domain,
+    );
     let header_and_proof_bytes = storage_size
         .map(|size| size.header_and_proof_bytes)
         .unwrap_or_default();
-    let transactions = block
+    let mut transactions = block
         .transactions
         .iter()
         .map(|tx| ui_transaction(tx, outputs))
         .collect::<Vec<_>>();
+    if let Some(domain) = transaction_v2_domain {
+        transactions.extend(transactions_v2.iter().filter_map(|transaction| {
+            ui_transaction_v2(transaction, outputs, domain, network).ok()
+        }));
+    }
     let burn_bundles: Vec<UiBurnBundle> = block
         .burn_bundle_section
         .expand(block.height, &block.prev_hash)
@@ -398,7 +461,7 @@ pub(super) fn ui_block(
         finalizer_rank: block.finalizer_rank,
         reward: block.reward,
         total_fees,
-        lost_iuna: block_lost_iuna(&block.transactions, block.reward),
+        lost_iuna: block_lost_iuna(&block.transactions, &transactions_v2, block.reward),
         total_bytes,
         header_and_proof_bytes,
         transaction_bytes,
@@ -418,6 +481,21 @@ pub(super) fn ui_block(
     }
 }
 
+fn decode_block_transactions_v2(
+    block: &Block,
+    expected_domain: &TransactionV2Domain,
+) -> Vec<TransactionV2> {
+    block
+        .transactions_v2
+        .iter()
+        .filter_map(|envelope| {
+            let bytes = decode_hex(envelope).ok()?;
+            let (domain, transaction) = TransactionV2::decode(&bytes).ok()?;
+            (domain == *expected_domain).then_some(transaction)
+        })
+        .collect()
+}
+
 fn burn_bundle_wallet_quorum(block: &Block) -> (usize, usize) {
     if block.finalizer_mode != FinalizerMode::Ticket {
         return (0, 0);
@@ -430,7 +508,11 @@ fn burn_bundle_wallet_quorum(block: &Block) -> (usize, usize) {
     (committee_size, committee_size)
 }
 
-fn block_lost_iuna(transactions: &[Transaction], reward: Amount) -> Amount {
+fn block_lost_iuna(
+    transactions: &[Transaction],
+    transactions_v2: &[TransactionV2],
+    reward: Amount,
+) -> Amount {
     let mut burned = 0_u64;
     let mut existing_supply_fees = 0_u64;
     let mut minted_finalizer_fees = 0_u64;
@@ -448,6 +530,12 @@ fn block_lost_iuna(transactions: &[Transaction], reward: Amount) -> Amount {
             }
         }
     }
+    for transaction in transactions_v2 {
+        if let TransactionV2::Burn { amount, .. } = transaction {
+            burned = burned.saturating_add(*amount);
+        }
+        existing_supply_fees = existing_supply_fees.saturating_add(transaction.fee());
+    }
     let returned_fees = reward
         .saturating_sub(minted_finalizer_fees)
         .min(existing_supply_fees);
@@ -456,14 +544,28 @@ fn block_lost_iuna(transactions: &[Transaction], reward: Amount) -> Amount {
 
 fn transaction_byte_breakdown(
     transactions: &[Transaction],
+    transactions_v2: &[TransactionV2],
     storage_size: Option<&CompactBlockSizeBreakdown>,
+    transaction_v2_domain: Option<&TransactionV2Domain>,
 ) -> Vec<UiByteBreakdown> {
     if let Some(storage_size) = storage_size {
-        return byte_breakdown_rows(
+        let mut rows = byte_breakdown_rows(
             storage_size.transfer_bytes,
             storage_size.burn_bytes,
             storage_size.mine_bytes,
         );
+        let legacy_bytes = storage_size
+            .transfer_bytes
+            .saturating_add(storage_size.burn_bytes)
+            .saturating_add(storage_size.mine_bytes);
+        let v2_bytes = storage_size.transaction_bytes.saturating_sub(legacy_bytes);
+        if v2_bytes > 0 {
+            rows.push(UiByteBreakdown {
+                label: "transaction v2",
+                bytes: v2_bytes,
+            });
+        }
+        return rows;
     }
     let mut transfer_bytes = 0_usize;
     let mut burn_bytes = 0_usize;
@@ -476,7 +578,19 @@ fn transaction_byte_breakdown(
             Transaction::Mine { .. } => mine_bytes = mine_bytes.saturating_add(bytes),
         }
     }
-    byte_breakdown_rows(transfer_bytes, burn_bytes, mine_bytes)
+    let mut rows = byte_breakdown_rows(transfer_bytes, burn_bytes, mine_bytes);
+    let transaction_v2_bytes = transaction_v2_domain.map_or(0, |domain| {
+        transactions_v2.iter().fold(0_usize, |total, transaction| {
+            total.saturating_add(transaction.encoded_size_bytes(domain).unwrap_or_default())
+        })
+    });
+    if transaction_v2_bytes > 0 {
+        rows.push(UiByteBreakdown {
+            label: "transaction v2",
+            bytes: transaction_v2_bytes,
+        });
+    }
+    rows
 }
 
 fn byte_breakdown_rows(
@@ -905,12 +1019,12 @@ mod tests {
     use crate::domain::{
         AddressNetwork, Amount, Block, BurnBundleSection, BurnBundleSignature, BurnLeaderRank,
         FinalizerMode, Ledger, MaskedBurn, OutPoint, Transaction, TxInput, TxOutput, Wallet,
-        encode_versioned_address,
+        encode_versioned_address, hex_encode,
     };
 
     use super::{
-        block_lost_iuna, populate_wallet_reward_flow, ui_block, ui_transaction_v2,
-        wallet_transaction_row, wallet_transaction_v2_rows,
+        block_lost_iuna, populate_wallet_reward_flow, ui_block, ui_blocks_from_indexes,
+        ui_transaction_v2, wallet_transaction_row, wallet_transaction_v2_rows,
     };
     use crate::adapters::http::types::{WalletTransactionContext, WalletTransactionFilters};
 
@@ -987,6 +1101,31 @@ mod tests {
         assert_eq!(rows[0].direction, "migrated");
         assert_eq!(rows[0].status, "pending");
         assert_eq!(rows[0].amount, 99_900);
+    }
+
+    #[test]
+    fn confirmed_v2_migration_is_presented_in_block_transactions() {
+        let wallet = Wallet::from_seed("confirmed-v2-chain-ui-wallet");
+        let ledger = Ledger::new(BTreeMap::from([(wallet.address().to_string(), 100_000)]), 1);
+        let transaction = ledger.build_v2_migration_batch(&wallet, 100).unwrap();
+        let domain = ledger.transaction_v2_domain().unwrap();
+        let mut block = ledger.chain().last().unwrap().clone();
+        block.transactions_v2 = vec![hex_encode(transaction.encode(&domain).unwrap())];
+        let blocks = ui_blocks_from_indexes(
+            vec![block],
+            &ledger.all_utxos().into_iter().collect(),
+            &BTreeMap::new(),
+            &BTreeMap::new(),
+            Some(&domain),
+            AddressNetwork::Mainnet,
+        );
+
+        assert_eq!(blocks.len(), 1);
+        assert_eq!(blocks[0].transactions.len(), 1);
+        assert_eq!(blocks[0].transactions[0].kind, "migration");
+        assert_eq!(blocks[0].transactions[0].fee, 100);
+        assert_eq!(blocks[0].transactions[0].signature.len(), 64);
+        assert_eq!(blocks[0].total_fees, 100);
     }
 
     #[test]
@@ -1086,14 +1225,14 @@ mod tests {
             signature: "burn".to_string(),
         };
 
-        assert_eq!(block_lost_iuna(&[burn], 3), 7);
+        assert_eq!(block_lost_iuna(&[burn], &[], 3), 7);
     }
 
     #[test]
     fn block_lost_iuna_counts_unreturned_existing_supply_fees() {
         let transfer = transfer("transfer-a", 5);
 
-        assert_eq!(block_lost_iuna(&[transfer], 2), 3);
+        assert_eq!(block_lost_iuna(&[transfer], &[], 2), 3);
     }
 
     #[test]
@@ -1108,7 +1247,7 @@ mod tests {
             signature: "mine".to_string(),
         };
 
-        assert_eq!(block_lost_iuna(&[mine], 1), 0);
+        assert_eq!(block_lost_iuna(&[mine], &[], 1), 0);
     }
 
     #[test]
@@ -1125,7 +1264,7 @@ mod tests {
         };
         let reward = mine.fee().saturating_add(2);
 
-        assert_eq!(block_lost_iuna(&[transfer, mine], reward), 3);
+        assert_eq!(block_lost_iuna(&[transfer, mine], &[], reward), 3);
     }
 
     #[test]

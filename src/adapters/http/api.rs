@@ -10,7 +10,7 @@ use axum::{
 use crate::{
     adapters::p2p::P2pMetrics,
     app::{NodeStatus, PeerInfo},
-    domain::{AddressNetwork, OutPoint, Transaction, TxOutput},
+    domain::{AddressNetwork, OutPoint, Transaction, TransactionV2, TxOutput, decode_hex},
     ip_geolocation::IpGeolocation,
 };
 
@@ -26,7 +26,7 @@ use super::{
     add_pending_outputs, add_pending_v2_outputs, metrics_response, network_health,
     populate_wallet_reward_flow, top_mine_proofs, transaction_v2_input_outpoints,
     ui_blocks_from_indexes, ui_transaction, ui_transaction_v2, wallet_transaction_row,
-    wallet_transaction_rows, wallet_transaction_v2_rows,
+    wallet_transaction_rows, wallet_transaction_v2_row, wallet_transaction_v2_rows,
 };
 
 pub(super) async fn api_status(State(state): State<HttpState>) -> Json<NodeStatus> {
@@ -43,14 +43,20 @@ pub(super) async fn api_blocks(
         .limit
         .unwrap_or(EXPLORER_PAGE_LIMIT)
         .min(EXPLORER_LIMIT);
-    let (tip_hash, blocks, storage_size_breakdowns) = {
+    let (tip_hash, blocks, storage_size_breakdowns, transaction_v2_domain, network) = {
         let node = state.node.lock().await;
         let blocks = match query.before_height {
             Some(before_height) => node.blocks_before(before_height, limit),
             None => node.recent_blocks(limit),
         };
         let storage_size_breakdowns = node.block_storage_size_breakdowns(&blocks);
-        (node.chain_tip_hash(), blocks, storage_size_breakdowns)
+        (
+            node.chain_tip_hash(),
+            blocks,
+            storage_size_breakdowns,
+            node.ledger().transaction_v2_domain().ok(),
+            AddressNetwork::from_profile_id(&node.ledger().launch_profile().profile_id),
+        )
     };
     let store = state.ui_data_store.clone();
     let view = tokio::task::spawn_blocking(move || store.load_ui_chain_index(&tip_hash))
@@ -64,6 +70,8 @@ pub(super) async fn api_blocks(
         &view.outputs,
         &view.burn_leader_ranks_by_hash,
         &storage_size_breakdowns,
+        transaction_v2_domain.as_ref(),
+        network,
     ))
 }
 
@@ -199,27 +207,47 @@ pub(super) async fn api_wallet_transactions(
     let kinds = wallet_transaction_filter_kinds(filters);
     let store = state.ui_data_store.clone();
     let wallet_for_query = wallet.clone();
-    let (confirmed_rows, confirmed_total) = if remaining_limit == 0 {
-        (Vec::new(), 0)
-    } else {
-        tokio::task::spawn_blocking(move || {
-            store.load_wallet_transactions(
-                &wallet_for_query,
-                &kinds,
-                confirmed_offset,
-                remaining_limit,
-            )
+    let wallet_addresses_for_query = wallet_addresses.clone();
+    let confirmed_fetch_limit = confirmed_offset.saturating_add(remaining_limit);
+    let ((confirmed_rows, confirmed_legacy_total), (confirmed_v2_rows, confirmed_v2_total)) =
+        tokio::task::spawn_blocking(move || -> Result<_> {
+            Ok((
+                store.load_wallet_transactions(
+                    &wallet_for_query,
+                    &kinds,
+                    0,
+                    confirmed_fetch_limit,
+                )?,
+                store.load_wallet_transactions_v2(
+                    &wallet_addresses_for_query,
+                    &kinds,
+                    0,
+                    confirmed_fetch_limit,
+                )?,
+            ))
         })
         .await
         .ok()
         .and_then(Result::ok)
-        .unwrap_or_default()
-    };
+        .unwrap_or_default();
+    let decoded_confirmed_v2 = domain.as_ref().map_or_else(Vec::new, |expected_domain| {
+        confirmed_v2_rows
+            .into_iter()
+            .filter_map(|row| {
+                let bytes = decode_hex(&row.envelope).ok()?;
+                let (decoded_domain, transaction) = TransactionV2::decode(&bytes).ok()?;
+                (decoded_domain == *expected_domain).then_some((row, transaction))
+            })
+            .collect::<Vec<_>>()
+    });
     let mut confirmed_required_outputs = BTreeSet::new();
     collect_transaction_input_outpoints(
         confirmed_rows.iter().map(|row| &row.transaction),
         &mut confirmed_required_outputs,
     );
+    for (_, transaction) in &decoded_confirmed_v2 {
+        confirmed_required_outputs.extend(transaction_v2_input_outpoints(transaction));
+    }
     let confirmed_outputs = load_outputs_for_outpoints(&state, confirmed_required_outputs)
         .await
         .unwrap_or_default();
@@ -234,30 +262,67 @@ pub(super) async fn api_wallet_transactions(
             })
             .collect::<BTreeMap<_, _>>()
     };
-    items.extend(confirmed_rows.into_iter().filter_map(|row| {
-        let is_reward = row.kind == "reward";
-        let mut item = wallet_transaction_row(
-            &wallet,
-            &row.transaction,
-            &confirmed_outputs,
-            &WalletTransactionContext {
-                status: "confirmed",
-                block_height: Some(row.block_height),
-                timestamp_ms: Some(row.timestamp_ms),
-                block_finalizer: Some(row.block_finalizer),
-            },
-        )?;
-        if is_reward {
-            item.kind = "reward";
-            item.from = "fees".to_string();
-            item.to = Some(wallet.clone());
-            item.direction = "reward";
-            if let Some(block) = reward_blocks.get(&row.block_height) {
-                populate_wallet_reward_flow(&mut item, block);
+    let mut confirmed_items = confirmed_rows
+        .into_iter()
+        .filter_map(|row| {
+            let sort_key = row.sort_key;
+            let is_reward = row.kind == "reward";
+            let mut item = wallet_transaction_row(
+                &wallet,
+                &row.transaction,
+                &confirmed_outputs,
+                &WalletTransactionContext {
+                    status: "confirmed",
+                    block_height: Some(row.block_height),
+                    timestamp_ms: Some(row.timestamp_ms),
+                    block_finalizer: Some(row.block_finalizer),
+                },
+            )?;
+            if is_reward {
+                item.kind = "reward";
+                item.from = "fees".to_string();
+                item.to = Some(wallet.clone());
+                item.direction = "reward";
+                if let Some(block) = reward_blocks.get(&row.block_height) {
+                    populate_wallet_reward_flow(&mut item, block);
+                }
             }
-        }
-        Some(item)
-    }));
+            Some((sort_key, item))
+        })
+        .collect::<Vec<_>>();
+    if let Some(domain) = domain.as_ref() {
+        confirmed_items.extend(decoded_confirmed_v2.into_iter().filter_map(
+            |(row, transaction)| {
+                let sort_key = row.sort_key;
+                let context = WalletTransactionContext {
+                    status: "confirmed",
+                    block_height: Some(row.block_height),
+                    timestamp_ms: Some(row.timestamp_ms),
+                    block_finalizer: Some(row.block_finalizer),
+                };
+                wallet_transaction_v2_row(
+                    &wallet_addresses,
+                    &transaction,
+                    &confirmed_outputs,
+                    domain,
+                    network,
+                    &context,
+                )
+                .ok()
+                .flatten()
+                .map(|item| (sort_key, item))
+            },
+        ));
+    }
+    confirmed_items.sort_by(|left, right| right.0.cmp(&left.0));
+    items.extend(
+        confirmed_items
+            .into_iter()
+            .skip(confirmed_offset)
+            .take(remaining_limit)
+            .map(|(_, item)| item),
+    );
+    let confirmed_total = confirmed_legacy_total.saturating_add(confirmed_v2_total);
     let total = pending_total + confirmed_total;
     let next_offset = offset + items.len();
     Json(Page {

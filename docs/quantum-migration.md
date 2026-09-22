@@ -127,6 +127,10 @@ peers connected during a gradual relay upgrade. The management
 wallet can submit reviewed migration batches and ordinary hybrid transfers; address rotation and
 broader recovery rehearsal remain release blockers.
 
+Pending and confirmed transaction-v2 entries are included in the management wallet history and
+chain views. Confirmed history is materialized from the canonical chain snapshot, so a chain
+reorganization atomically replaces entries from the abandoned branch.
+
 The verification tests include a small audit corpus pinned to exact NIST ACVP-Server and C2SP
 Wycheproof commits and file hashes. It covers a valid NIST signature, Wycheproof's repeated-hint
 regression, and a valid signature at the ML-DSA-44 norm boundary. A dedicated fuzz target exercises

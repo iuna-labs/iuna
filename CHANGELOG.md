@@ -14,6 +14,11 @@ from the Git history and Conventional Commit titles by `deployment.sh`.
 - submit block-bounded wallet migration batches
 - send hybrid transaction-v2 transfers
 - merge pending transaction-v2 entries into the wallet and chain mempool views
+- show confirmed transaction-v2 entries in chain blocks and wallet history
+
+### Fixed
+
+- rebuild confirmed transaction-v2 wallet history after chain reorganizations
 
 ### Documentation
 

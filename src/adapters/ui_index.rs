@@ -1,8 +1,9 @@
 use std::collections::BTreeMap;
 
 use crate::domain::{
-    Block, BurnLeaderRank, ChainSnapshot, Ledger, OutPoint, Transaction, TxOutput,
-    genesis_allocation_outpoint, reward_outputs_for_block,
+    AddressNetwork, Block, BurnLeaderRank, ChainSnapshot, Ledger, OutPoint, Transaction,
+    TransactionV2, TxOutput, decode_hex, encode_versioned_address, genesis_allocation_outpoint,
+    hex_encode, reward_outputs_for_block,
 };
 
 #[derive(Clone, Debug, Default, Eq, PartialEq)]
@@ -48,6 +49,7 @@ pub(crate) fn burn_leader_ranks_for_blocks(
 
 fn known_chain_output_index(snapshot: &ChainSnapshot) -> BTreeMap<OutPoint, TxOutput> {
     let mut outputs = BTreeMap::new();
+    let network = AddressNetwork::from_profile_id(&snapshot.launch_profile.profile_id);
     let mut running_ledger = snapshot.blocks.first().cloned().and_then(|genesis| {
         Ledger::from_preverified_snapshot(ChainSnapshot {
             genesis_allocations: snapshot.genesis_allocations.clone(),
@@ -73,6 +75,15 @@ fn known_chain_output_index(snapshot: &ChainSnapshot) -> BTreeMap<OutPoint, TxOu
         for transaction in &block.transactions {
             index_transaction_outputs(&mut outputs, transaction);
         }
+        for envelope in &block.transactions_v2 {
+            let Ok(bytes) = decode_hex(envelope) else {
+                continue;
+            };
+            let Ok((domain, transaction)) = TransactionV2::decode(&bytes) else {
+                continue;
+            };
+            index_transaction_v2_outputs(&mut outputs, &transaction, &domain, network);
+        }
         let reward_committee = if block.height == 0 {
             Vec::new()
         } else {
@@ -91,6 +102,42 @@ fn known_chain_output_index(snapshot: &ChainSnapshot) -> BTreeMap<OutPoint, TxOu
         }
     }
     outputs
+}
+
+fn index_transaction_v2_outputs(
+    outputs: &mut BTreeMap<OutPoint, TxOutput>,
+    transaction: &TransactionV2,
+    domain: &crate::domain::TransactionV2Domain,
+    network: AddressNetwork,
+) {
+    let transaction_outputs = match transaction {
+        TransactionV2::Migration { outputs, .. } | TransactionV2::Transfer { outputs, .. } => {
+            outputs.as_slice()
+        }
+        TransactionV2::Burn { change, .. } => change.as_slice(),
+        TransactionV2::Mine { .. } => return,
+    };
+    let Ok(transaction_id) = transaction.transaction_id(domain).map(hex_encode) else {
+        return;
+    };
+    for (index, output) in transaction_outputs.iter().enumerate() {
+        let Ok(address) = encode_versioned_address(output.address, network) else {
+            continue;
+        };
+        let Ok(index) = u32::try_from(index) else {
+            continue;
+        };
+        outputs.insert(
+            OutPoint {
+                txid: transaction_id.clone(),
+                index,
+            },
+            TxOutput {
+                address,
+                amount: output.amount,
+            },
+        );
+    }
 }
 
 fn index_transaction_outputs(
