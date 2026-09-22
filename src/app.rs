@@ -31,7 +31,7 @@ pub use peer_book::{PeerBook, PeerDirection, PeerInfo};
 pub use types::{
     AutoMineOutcome, AutoMinePlan, BlockInventory, ChainBootstrap, ExternalMineJob, FeeEstimate,
     GossipEnvelope, LaunchProfileStatus, MiningStatus, NetworkMigrationStatus, NodeConfig,
-    NodeStatus, ProtocolHello, StratumStatus,
+    NodeStatus, ProtocolHello, QuantumMigrationPreview, QuantumMigrationStatus, StratumStatus,
 };
 use wallet::NodeWallet;
 

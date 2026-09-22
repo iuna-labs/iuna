@@ -5,6 +5,18 @@ from the Git history and Conventional Commit titles by `deployment.sh`.
 
 ## [Unreleased]
 
+### Added
+
+- relay transaction-v2 mempool envelopes
+- preview quantum-resistant wallet migration
+- expose legacy and hybrid wallet balances
+- submit block-bounded wallet migration batches
+- send hybrid transaction-v2 transfers
+
+### Documentation
+
+- update the quantum audit scope after height 3000
+
 ## [0.4.35] - 2026-09-21
 
 ### Performance

@@ -103,7 +103,10 @@ impl InMemoryNetwork {
 fn receive_in_memory_envelope(node: &mut NodeCore, envelope: GossipEnvelope) -> Result<()> {
     let transaction_like = matches!(
         envelope,
-        GossipEnvelope::Transaction(_) | GossipEnvelope::Transactions { .. }
+        GossipEnvelope::Transaction(_)
+            | GossipEnvelope::Transactions { .. }
+            | GossipEnvelope::TransactionV2 { .. }
+            | GossipEnvelope::TransactionsV2 { .. }
     );
     match node.receive(envelope) {
         Ok(()) => Ok(()),

@@ -2,12 +2,15 @@ use anyhow::Result;
 
 use crate::{
     adapters::config_store::{MAX_POW_MINING_WORKERS, clamp_pow_mining_workers},
-    domain::{Amount, MINE_FINALIZER_FEE, Transaction, VDF_TARGET_BLOCK_MS},
+    domain::{
+        AddressNetwork, Amount, MINE_FINALIZER_FEE, Transaction, TransactionV2,
+        VDF_TARGET_BLOCK_MS, transaction_v2_is_active,
+    },
 };
 
 use super::{
     LaunchProfileStatus, MiningStatus, NETWORK_ID, NetworkMigrationStatus, NodeCore, NodeStatus,
-    StratumStatus,
+    QuantumMigrationStatus, StratumStatus,
     helpers::{transaction_input_total_from_outputs, transaction_output_total_for_address},
     now_ms,
 };
@@ -20,6 +23,32 @@ impl NodeCore {
         let wallet_is_current_leader = current_leader
             .as_deref()
             .is_none_or(|leader| leader == self.wallet.address());
+        let legacy_address = self.wallet.address();
+        let legacy_balance = self.ledger.balance_of(legacy_address);
+        let legacy_utxos = self.ledger.utxos_for_address(legacy_address).len();
+        let hybrid_address = self.wallet.unlocked().ok().map(|wallet| {
+            wallet.hybrid_address(AddressNetwork::from_profile_id(
+                &self.ledger.launch_profile().profile_id,
+            ))
+        });
+        let hybrid_balance = hybrid_address
+            .as_deref()
+            .map(|address| self.ledger.balance_of(address))
+            .unwrap_or(0);
+        let migration_pending = hybrid_address.as_deref().is_some_and(|address| {
+            self.ledger.pending_v2().iter().any(|transaction| {
+                matches!(transaction, TransactionV2::Migration { outputs, .. }
+                if outputs.iter().any(|output| {
+                    crate::domain::encode_versioned_address(
+                        output.address,
+                        AddressNetwork::from_profile_id(
+                            &self.ledger.launch_profile().profile_id,
+                        ),
+                    )
+                    .is_ok_and(|output_address| output_address == address)
+                }))
+            })
+        });
 
         NodeStatus {
             app_version: env!("CARGO_PKG_VERSION").to_string(),
@@ -27,6 +56,14 @@ impl NodeCore {
             wallet_receive_address: self.wallet_receive_address().unwrap_or_default(),
             wallet_balance: self.wallet_projected_balance(),
             wallet_locked: self.wallet.is_locked(),
+            quantum_migration: QuantumMigrationStatus {
+                active: transaction_v2_is_active(self.ledger.height()),
+                hybrid_address,
+                legacy_balance,
+                hybrid_balance,
+                legacy_utxos,
+                migration_pending,
+            },
             launch_profile: LaunchProfileStatus {
                 profile_id: launch_profile.profile_id.clone(),
                 profile_hash: chain.launch_profile_hash.clone(),
@@ -73,6 +110,12 @@ impl NodeCore {
     fn wallet_projected_balance(&self) -> Amount {
         let address = self.wallet.address();
         let mut balance = self.ledger.balance_of(address);
+        if let Ok(wallet) = self.wallet.unlocked() {
+            let hybrid_address = wallet.hybrid_address(AddressNetwork::from_profile_id(
+                &self.ledger.launch_profile().profile_id,
+            ));
+            balance = balance.saturating_add(self.ledger.balance_of(&hybrid_address));
+        }
         let confirmed_outputs = self
             .ledger
             .utxos_for_address(address)

@@ -125,6 +125,11 @@ window.iunaApp = function iunaApp() {
     optimizeMessage: "",
     optimizeError: "",
     optimizeDismissed: false,
+    quantumMigrationFee: "0.000001",
+    quantumMigrationBusy: false,
+    quantumMigrationSubmitting: false,
+    quantumMigrationPreview: null,
+    quantumMigrationError: "",
     selectedTransferUtxos: [],
     selectedTransferUtxoAmounts: {},
     lastSelectedTransferUtxo: null,
@@ -2604,6 +2609,70 @@ window.iunaApp = function iunaApp() {
       finally { this.optimizeBusy = false; }
     },
 
+    async previewQuantumMigration() {
+      if (this.quantumMigrationBusy) return;
+      this.quantumMigrationBusy = true;
+      this.quantumMigrationPreview = null;
+      this.quantumMigrationError = "";
+      try {
+        const rate = this.parseiunaAmountRequired(
+          this.quantumMigrationFee,
+          "Enter a migration fee per byte"
+        );
+        if (!Number.isSafeInteger(rate) || rate < 1) {
+          throw new Error("Fee per byte must be at least 0.000001 IUNA");
+        }
+        const result = await this.submitForm("/api/wallet/quantum-migration/preview", {
+          fee_per_byte: rate,
+        });
+        const preview = result.preview;
+        if (![preview.fee, preview.amount, preview.bytes, preview.input_count, preview.remaining_legacy_utxos].every(Number.isSafeInteger)) {
+          throw new Error("Migration values exceed the safe range for this interface");
+        }
+        this.quantumMigrationPreview = { ...preview, rate };
+      } catch (error) {
+        this.quantumMigrationError = error.message;
+      } finally {
+        this.quantumMigrationBusy = false;
+      }
+    },
+
+    async submitQuantumMigration() {
+      const preview = this.quantumMigrationPreview;
+      if (!preview || this.quantumMigrationSubmitting || this.quantumMigrationBusy) return;
+      this.quantumMigrationSubmitting = true;
+      this.quantumMigrationError = "";
+      try {
+        let result;
+        try {
+          result = await this.submitForm("/api/wallet/quantum-migration/submit", {
+            fee_per_byte: preview.rate,
+            max_fee: preview.fee,
+            transaction_id: preview.transaction_id,
+          });
+        } catch (error) {
+          this.quantumMigrationPreview = null;
+          throw new Error(`${error.message}. Check wallet activity before requesting a new preview.`);
+        }
+        this.quantumMigrationPreview = null;
+        if (result.broadcast_error) {
+          throw new Error("Migration queued locally, but broadcasting failed. Check connectivity before continuing.");
+        }
+        const remainder = Number(result.remaining_legacy_utxos || 0);
+        this.showFlash(
+          remainder > 0
+            ? `Migration batch queued. ${remainder} legacy UTXOs remain after confirmation.`
+            : "Wallet migration queued.",
+          "success"
+        );
+        await this.refresh({ force: true });
+      } catch (error) {
+        this.quantumMigrationError = error.message;
+      } finally {
+        this.quantumMigrationSubmitting = false;
+      }
+    },
+
     async runOptimization() {
       const plan = this.optimizePlan;
       if (!plan || this.optimizeRunning || this.optimizeBusy) return;
@@ -2662,7 +2731,7 @@ window.iunaApp = function iunaApp() {
           feePerByte: fee,
           bytes: Number(estimate.bytes),
           fee: this.microiunaAmount(estimate.fee),
-          utxos: this.selectedTransferUtxos.join("\n"),
+          utxos: this.hybridTransferRecipient() ? "" : this.selectedTransferUtxos.join("\n"),
         };
         this.sendConfirmModalOpen = true;
       } catch (error) {
@@ -2710,13 +2779,31 @@ window.iunaApp = function iunaApp() {
     },
 
     transferMaxDisabled() {
+      if (this.hybridTransferRecipient()) {
+        return Number(this.status.quantum_migration?.hybrid_balance || 0) <= 0;
+      }
       return this.selectedTransferUtxoTotal() <= 0 && Number(this.status.wallet_balance || 0) <= 0;
+    },
+
+    hybridTransferRecipient() {
+      return /^(?:iuna|tiuna)1p/i.test(this.transferTo.trim());
+    },
+
+    transferRecipientChanged() {
+      if (this.hybridTransferRecipient()) {
+        this.showSendAdvanced = false;
+        this.selectedTransferUtxos = [];
+        this.selectedTransferUtxoAmounts = {};
+      }
+      this.scheduleFeeEstimates();
     },
 
     async setMaxTransferAmount() {
       try {
-        let selectedTotal = this.selectedTransferUtxoTotal();
-        if (this.selectedTransferUtxos.length === 0) {
+        let selectedTotal = this.hybridTransferRecipient()
+          ? Number(this.status.quantum_migration?.hybrid_balance || 0)
+          : this.selectedTransferUtxoTotal();
+        if (!this.hybridTransferRecipient() && this.selectedTransferUtxos.length === 0) {
           const utxos = await this.fetchJson("/api/wallet/utxos/selectable");
           this.rememberUtxoAmounts(utxos);
           this.selectedTransferUtxos = utxos.map((utxo) => this.utxoOutpoint(utxo));
@@ -2778,7 +2865,7 @@ window.iunaApp = function iunaApp() {
         to: recipient,
         amount,
         fee_per_byte: this.parseiunaAmount(this.transferFee),
-        utxos: this.selectedTransferUtxos.join("\n"),
+        utxos: this.hybridTransferRecipient() ? "" : this.selectedTransferUtxos.join("\n"),
       });
       if (
         estimate?.error
@@ -3012,6 +3099,17 @@ window.iunaApp = function iunaApp() {
         this.showFlash("Address copied", "success");
       } catch (error) {
         this.showFlash("Could not copy address", "error");
+      }
+    },
+
+    async copyHybridAddress() {
+      try {
+        const address = this.status.quantum_migration?.hybrid_address;
+        if (!address) throw new Error("Hybrid address unavailable");
+        await navigator.clipboard.writeText(address);
+        this.showFlash("Hybrid address copied", "success");
+      } catch (error) {
+        this.showFlash("Could not copy hybrid address", "error");
       }
     },
 

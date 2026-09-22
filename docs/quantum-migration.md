@@ -120,17 +120,19 @@ to a version-1 output. Ordinary v2 transactions use 32-byte hash IDs; every late
 version-1 output requires Ed25519 + ML-DSA-44.
 Verification uses the exact-pinned RustCrypto `ml-dsa` 0.1.1 implementation. That implementation
 has not been independently audited, so an independent review and an explicit backend acceptance
-decision remain prerequisites before activation. No transaction-v2 gossip capability is
-advertised yet.
+decision remain prerequisites for treating the active rules as production-ready. Nodes advertise
+the transaction-v2 block capability and relay canonical transaction-v2 envelopes. The management
+wallet can submit reviewed migration batches and ordinary hybrid transfers; address rotation and
+broader recovery rehearsal remain release blockers.
 
 The verification tests include a small audit corpus pinned to exact NIST ACVP-Server and C2SP
 Wycheproof commits and file hashes. It covers a valid NIST signature, Wycheproof's repeated-hint
 regression, and a valid signature at the ML-DSA-44 norm boundary. A dedicated fuzz target exercises
 both the transaction-v2 decoder and arbitrary ML-DSA-44 verification inputs; it remains part of the
-release's time-bounded, coverage-guided `cargo fuzz` gate while transaction v2 is dormant. Seed
+release's time-bounded, coverage-guided `cargo fuzz` gate while wallet submission is gated. Seed
 corpora, newly discovered coverage inputs, and crash artifacts are retained as release evidence.
 
-### Dormant hybrid wallet keys
+### Hybrid wallet keys
 
 The existing wallet seed phrase now deterministically derives a separate ML-DSA-44 seed using the
 fixed `iuna-wallet-ml-dsa44-seed-v1` domain. The original Ed25519 derivation is unchanged, so
@@ -148,8 +150,11 @@ legacy/v2 double-spends, and dependent v2 transactions. At and after height 3000
 can include those transactions; their exact envelopes are committed by the VDF seed and block
 hash, counted against the shared transaction and byte limits, applied with UTXO lineage, persisted
 in compact snapshot v8, and carried forward after reorgs. Snapshot v7 remains readable. Blocks
-therefore propagate through the existing block P2P path, but standalone v2 mempool gossip and a
-public wallet/API submission route are still absent.
+therefore propagate through the existing block P2P path. Standalone v2 mempool gossip now accepts,
+validates, canonicalizes, rebroadcasts, and periodically re-announces v2 envelopes. The management
+wallet reports legacy and hybrid balances, exposes an authenticated migration preview, submits one
+reviewed block-bounded migration batch at a time, and can spend confirmed hybrid value to another
+address-v1 recipient. Automatic address rotation and full recovery rehearsal remain incomplete.
 
 ## Other trust boundaries
 

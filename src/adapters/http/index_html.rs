@@ -717,13 +717,40 @@ pub(super) const INDEX_HTML: &str = concat!(
         <button type="button" @click="openOptimizeWallet">Review optimization</button>
         <button type="button" @click="dismissOptimizeSuggestion">Later</button>
       </div>
+      <div class="panel" x-show="status.quantum_migration?.active && (status.quantum_migration?.legacy_balance > 0 || status.quantum_migration?.hybrid_balance > 0)">
+        <h3>Quantum-resistant wallet migration</h3>
+        <p class="panel-description">Transaction v2 is active. Review how your legacy Ed25519 balance can move to the hybrid Ed25519 + ML-DSA wallet.</p>
+        <div class="detail-grid">
+          <div>
+            <div class="detail-kv"><div class="key">Legacy balance</div><div>IUNA <span x-text="amountLabel(status.quantum_migration?.legacy_balance || 0)"></span></div></div>
+            <div class="detail-kv"><div class="key">Hybrid balance</div><div>IUNA <span x-text="amountLabel(status.quantum_migration?.hybrid_balance || 0)"></span></div></div>
+            <div class="detail-kv"><div class="key">Legacy UTXOs</div><div x-text="status.quantum_migration?.legacy_utxos || 0"></div></div>
+            <div class="detail-kv"><div class="key">Hybrid address</div><code x-text="status.quantum_migration?.hybrid_address || 'Unlock wallet to derive'"></code></div>
+          </div>
+          <form @submit.prevent="previewQuantumMigration" x-show="status.quantum_migration?.legacy_balance > 0">
+            <label>Fee / byte<input x-model="quantumMigrationFee" type="number" min="0.000001" step="0.000001" required></label>
+            <button type="submit" :disabled="quantumMigrationBusy || quantumMigrationSubmitting || status.wallet_locked || status.quantum_migration?.migration_pending" x-text="quantumMigrationBusy ? 'Calculating…' : 'Preview migration'"></button>
+            <div class="fee-warning" role="alert" x-show="quantumMigrationError" x-text="quantumMigrationError"></div>
+            <div class="muted" x-show="status.quantum_migration?.migration_pending">A migration batch is pending confirmation.</div>
+          </form>
+        </div>
+        <div class="info-copy" x-show="quantumMigrationPreview">
+          <p>Review this batch carefully. Migrated value can only be sent to hybrid address-v1 recipients.</p>
+          <div class="detail-kv"><div class="key">Inputs</div><div x-text="quantumMigrationPreview?.input_count || 0"></div></div>
+          <div class="detail-kv"><div class="key">Transaction size</div><div><span x-text="quantumMigrationPreview?.bytes || 0"></span> bytes</div></div>
+          <div class="detail-kv"><div class="key">Network fee</div><div>IUNA <span x-text="amountLabel(quantumMigrationPreview?.fee || 0)"></span></div></div>
+          <div class="detail-kv"><div class="key">Amount protected</div><div>IUNA <span x-text="amountLabel(quantumMigrationPreview?.amount || 0)"></span></div></div>
+          <div class="detail-kv"><div class="key">Legacy UTXOs after batch</div><div x-text="quantumMigrationPreview?.remaining_legacy_utxos || 0"></div></div>
+          <button class="primary" type="button" @click="submitQuantumMigration" :disabled="quantumMigrationSubmitting" x-text="quantumMigrationSubmitting ? 'Submitting…' : 'Confirm migration batch'"></button>
+        </div>
+      </div>
       <div class="wallet-grid">
         <div class="wallet-actions">
           <div class="panel">
             <h3>Send</h3>
             <form @submit.prevent="sendTransfer">
               <div class="recipient-field">
-                <label>Recipient<input x-model="transferTo" @input="scheduleFeeEstimates" autocomplete="off" required></label>
+                <label>Recipient<input x-model="transferTo" @input="transferRecipientChanged" autocomplete="off" required></label>
                 <button class="icon-button" type="button" @click="openAddressBookPicker()" title="Choose contact" aria-label="Choose contact">
                   <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M4 5.5A2.5 2.5 0 0 1 6.5 3H20v18H6.5A2.5 2.5 0 0 1 4 18.5z"></path><path d="M8 7h8"></path><path d="M8 11h6"></path><path d="M8 15h4"></path></svg>
                 </button>
@@ -735,8 +762,8 @@ pub(super) const INDEX_HTML: &str = concat!(
               <label>Fee / byte<input x-model="transferFee" @input="scheduleFeeEstimates" type="number" min="0" step="0.000001" required></label>
               <div class="fee-preview" :class="{ error: feeEstimateError('transfer') }" x-text="feeEstimateLabel('transfer')" role="status" aria-live="polite"></div>
               <div class="fee-warning" x-show="feeExceedsAmount('transfer')" x-text="feeExceedsAmountLabel('transfer')" role="status" aria-live="polite"></div>
-              <button class="advanced-toggle" type="button" @click="toggleSendAdvanced" x-text="showSendAdvanced ? 'Hide UTXOs' : 'UTXOs'"></button>
-              <div class="send-utxo-summary" x-show="showSendAdvanced">
+              <button class="advanced-toggle" type="button" x-show="!hybridTransferRecipient()" @click="toggleSendAdvanced" x-text="showSendAdvanced ? 'Hide UTXOs' : 'UTXOs'"></button>
+              <div class="send-utxo-summary" x-show="showSendAdvanced && !hybridTransferRecipient()">
                 <div>Selected UTXOs: <span x-text="selectedTransferUtxos.length"></span></div>
                 <div>Selected total: IUNA <span x-text="amountLabel(selectedTransferUtxoTotal())"></span></div>
                 <div>Required: IUNA <span x-text="amountLabel(transferRequiredTotal())"></span></div>
@@ -776,8 +803,16 @@ pub(super) const INDEX_HTML: &str = concat!(
               <button type="button" @click="copyAddress">Copy</button>
             </div>
             <div class="receive-address">
-              <div class="muted">Public key / address</div>
+              <div class="muted">Legacy Ed25519 address</div>
               <div class="address-box"><code class="wallet-address-link" role="button" tabindex="0" x-text="setupAddress()" @click="openAddressContact(setupAddress())" @keydown.enter.prevent="openAddressContact(setupAddress())" @keydown.space.prevent="openAddressContact(setupAddress())" title="Add or edit contact"></code></div>
+            </div>
+            <div class="receive-address" x-show="status.quantum_migration?.active && status.quantum_migration?.hybrid_address">
+              <div class="panel-head">
+                <div class="muted">Hybrid Ed25519 + ML-DSA address</div>
+                <button type="button" @click="copyHybridAddress">Copy</button>
+              </div>
+              <div class="address-box"><code x-text="status.quantum_migration?.hybrid_address || '-'"></code></div>
+              <div class="muted">Do not reuse this address after its key has been revealed by a spend. Address rotation is the next wallet upgrade.</div>
             </div>
           </div>
           <div class="panel">

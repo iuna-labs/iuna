@@ -1,4 +1,4 @@
-use crate::domain::{Block, ChainSnapshot};
+use crate::domain::{Block, ChainSnapshot, hex_encode};
 
 use super::{
     BLOCK_REQUEST_LIMIT, ChainBootstrap, GossipEnvelope, NETWORK_ID, NodeCore, PROTOCOL_VERSION,
@@ -16,6 +16,24 @@ impl NodeCore {
                     transactions: chunk.to_vec(),
                 }),
         );
+        let domain = self.ledger.transaction_v2_domain().ok();
+        if let Some(domain) = domain {
+            let envelopes = self
+                .ledger
+                .pending_v2()
+                .iter()
+                .filter_map(|transaction| transaction.encode(&domain).ok())
+                .map(hex_encode)
+                .collect::<Vec<_>>();
+            // A single v2 transaction may approach the block byte limit after hex encoding.
+            // Keep each envelope independently wire-bounded instead of building an oversized
+            // JSON batch from several otherwise valid transactions.
+            gossip.extend(
+                envelopes
+                    .into_iter()
+                    .map(|envelope| GossipEnvelope::TransactionV2 { envelope }),
+            );
+        }
         gossip.extend(
             self.usable_burn_bundles()
                 .chunks(TRANSACTION_BATCH_LIMIT)

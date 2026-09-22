@@ -24,6 +24,17 @@ pub struct FeeEstimate {
     pub fee: Amount,
 }
 
+#[derive(Clone, Debug, Eq, PartialEq, Serialize)]
+pub struct QuantumMigrationPreview {
+    pub address: String,
+    pub transaction_id: String,
+    pub input_count: usize,
+    pub remaining_legacy_utxos: usize,
+    pub bytes: usize,
+    pub fee: Amount,
+    pub amount: Amount,
+}
+
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct ExternalMineJob {
     pub template: StratumMineTemplate,
@@ -58,6 +69,12 @@ pub enum GossipEnvelope {
     Transaction(Transaction),
     Transactions {
         transactions: Vec<Transaction>,
+    },
+    TransactionV2 {
+        envelope: String,
+    },
+    TransactionsV2 {
+        envelopes: Vec<String>,
     },
     BurnBundle(BurnBundle),
     BurnBundles {
@@ -177,11 +194,22 @@ pub struct NodeStatus {
     pub wallet_receive_address: String,
     pub wallet_balance: Amount,
     pub wallet_locked: bool,
+    pub quantum_migration: QuantumMigrationStatus,
     pub launch_profile: LaunchProfileStatus,
     pub mining: MiningStatus,
     pub stratum: StratumStatus,
     pub chain: ChainStatus,
     pub network_migration: NetworkMigrationStatus,
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+pub struct QuantumMigrationStatus {
+    pub active: bool,
+    pub hybrid_address: Option<String>,
+    pub legacy_balance: Amount,
+    pub hybrid_balance: Amount,
+    pub legacy_utxos: usize,
+    pub migration_pending: bool,
 }
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]

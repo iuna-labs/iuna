@@ -3,12 +3,14 @@ use std::collections::BTreeMap;
 use anyhow::{Context, Result, bail};
 
 use crate::domain::{
-    Amount, Block, BurnBundle, DEFAULT_TRANSACTION_FEE, Ledger, OutPoint, PreparedBlock,
-    StratumMineShare, StratumMineTemplate, Transaction, TransactionSubmitOutcome, Wallet, run_vdf,
+    AddressNetwork, Amount, Block, BurnBundle, DEFAULT_TRANSACTION_FEE, Ledger, OutPoint,
+    PreparedBlock, StratumMineShare, StratumMineTemplate, Transaction, TransactionSubmitOutcome,
+    TransactionV2, VersionedAddress, Wallet, hex_encode, run_vdf,
 };
 
 use super::{
-    ExternalMineJob, FeeEstimate, GossipEnvelope, NodeCore, helpers::converge_fee_by_byte, now_ms,
+    ExternalMineJob, FeeEstimate, GossipEnvelope, NodeCore, QuantumMigrationPreview,
+    helpers::converge_fee_by_byte, now_ms,
 };
 
 #[derive(Clone, Debug)]
@@ -38,6 +40,121 @@ impl NodeWallet {
 }
 
 impl NodeCore {
+    pub fn preview_quantum_migration(
+        &self,
+        fee_per_byte: Amount,
+    ) -> Result<QuantumMigrationPreview> {
+        if fee_per_byte == 0 {
+            bail!("migration fee per byte must be greater than zero");
+        }
+        let ledger = self.wallet_build_ledger()?;
+        let wallet = self.wallet.unlocked()?;
+        let domain = ledger.transaction_v2_domain()?;
+        let initial = ledger.build_v2_migration_batch(wallet, 1)?;
+        let bytes = initial.encoded_size_bytes(&domain)?;
+        let fee = fee_per_byte
+            .checked_mul(bytes as u64)
+            .context("migration fee overflows")?;
+        let transaction = ledger.build_v2_migration_batch(wallet, fee)?;
+        let bytes = transaction.encoded_size_bytes(&domain)?;
+        let transaction_id = hex_encode(transaction.transaction_id(&domain)?);
+        let (input_count, amount) = match &transaction {
+            TransactionV2::Migration {
+                inputs, outputs, ..
+            } => (
+                inputs.len(),
+                outputs.iter().try_fold(0_u64, |total, output| {
+                    total
+                        .checked_add(output.amount)
+                        .context("migration amount overflows")
+                })?,
+            ),
+            _ => unreachable!("migration builder returned another transaction kind"),
+        };
+        Ok(QuantumMigrationPreview {
+            address: wallet.hybrid_address(AddressNetwork::from_profile_id(
+                &ledger.launch_profile().profile_id,
+            )),
+            transaction_id,
+            input_count,
+            remaining_legacy_utxos: ledger
+                .available_utxos_for_address(wallet.address())?
+                .len()
+                .saturating_sub(input_count),
+            bytes,
+            fee,
+            amount,
+        })
+    }
+
+    pub fn submit_quantum_migration(
+        &mut self,
+        fee_per_byte: Amount,
+        max_fee: Amount,
+        expected_transaction_id: &str,
+    ) -> Result<QuantumMigrationPreview> {
+        let preview = self.preview_quantum_migration(fee_per_byte)?;
+        if preview.fee > max_fee || preview.transaction_id != expected_transaction_id {
+            bail!("wallet outputs or migration fee changed; request a new preview");
+        }
+        let ledger = self.wallet_build_ledger()?;
+        let transaction = ledger.build_v2_migration_batch(self.wallet.unlocked()?, preview.fee)?;
+        self.submit_public_transaction_v2(transaction)?;
+        Ok(preview)
+    }
+
+    pub fn estimate_hybrid_transfer_fee(
+        &self,
+        recipient: VersionedAddress,
+        amount: Amount,
+        fee_per_byte: Amount,
+    ) -> Result<FeeEstimate> {
+        self.build_hybrid_transfer_with_fee_rate(recipient, amount, fee_per_byte)
+            .map(|(_, estimate)| estimate)
+    }
+
+    pub fn transfer_hybrid_with_fee_rate(
+        &mut self,
+        recipient: VersionedAddress,
+        amount: Amount,
+        fee_per_byte: Amount,
+    ) -> Result<String> {
+        let (transaction, _) =
+            self.build_hybrid_transfer_with_fee_rate(recipient, amount, fee_per_byte)?;
+        let domain = self.ledger.transaction_v2_domain()?;
+        let transaction_id = hex_encode(transaction.transaction_id(&domain)?);
+        self.submit_public_transaction_v2(transaction)?;
+        Ok(transaction_id)
+    }
+
+    fn build_hybrid_transfer_with_fee_rate(
+        &self,
+        recipient: VersionedAddress,
+        amount: Amount,
+        fee_per_byte: Amount,
+    ) -> Result<(TransactionV2, FeeEstimate)> {
+        if fee_per_byte == 0 {
+            bail!("fee per byte must be greater than zero");
+        }
+        let ledger = self.wallet_build_ledger()?;
+        let domain = ledger.transaction_v2_domain()?;
+        let wallet = self.wallet.unlocked()?;
+        let mut fee = 1;
+        for _ in 0..64 {
+            let transaction = ledger.build_v2_transfer(wallet, recipient, amount, fee)?;
+            let bytes = transaction.encoded_size_bytes(&domain)?;
+            let required_fee = fee_per_byte
+                .checked_mul(bytes as Amount)
+                .context("fee per byte times transaction bytes overflows")?
+                .max(1);
+            if fee >= required_fee {
+                return Ok((transaction, FeeEstimate { bytes, fee }));
+            }
+            fee = required_fee;
+        }
+        bail!("hybrid transfer fee did not converge")
+    }
+
     /// Accept a transaction signed by an external/lightweight wallet.
     /// Mining actions are deliberately excluded from the public wallet API.
     pub fn submit_external_wallet_transaction(
@@ -438,5 +555,34 @@ impl NodeCore {
         self.ledger
             .block_requires_vdf_verification_at(&block, timestamp_ms)?;
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod quantum_migration_tests {
+    use std::collections::BTreeMap;
+
+    use crate::{
+        app::NodeCore,
+        domain::{Ledger, Wallet},
+    };
+
+    #[test]
+    fn migration_preview_reports_the_canonical_hybrid_transaction() {
+        let wallet = Wallet::from_seed("migration-preview-wallet");
+        let ledger = Ledger::new(
+            BTreeMap::from([(wallet.address().to_string(), 1_000_000)]),
+            1,
+        );
+        let node = NodeCore::from_ledger(wallet, ledger, 0);
+
+        let preview = node.preview_quantum_migration(2).unwrap();
+
+        assert_eq!(preview.input_count, 1);
+        assert_eq!(preview.remaining_legacy_utxos, 0);
+        assert_eq!(preview.fee, preview.bytes as u64 * 2);
+        assert_eq!(preview.amount + preview.fee, 1_000_000);
+        assert_eq!(preview.transaction_id.len(), 64);
+        assert!(preview.address.starts_with("iuna1p"));
     }
 }

@@ -1,8 +1,8 @@
 use anyhow::Result;
 
 use crate::domain::{
-    Block, BurnBundle, ChainSnapshot, Ledger, Transaction, TransactionSubmitOutcome,
-    ValidationError, error_has_validation,
+    Block, BurnBundle, ChainSnapshot, Ledger, Transaction, TransactionSubmitOutcome, TransactionV2,
+    ValidationError, decode_hex, error_has_validation, hex_encode,
 };
 
 use super::{GossipEnvelope, IMPORT_REBROADCAST_LIMIT, NodeCore};
@@ -30,6 +30,34 @@ impl NodeCore {
             self.outbox.push(GossipEnvelope::Transaction(tx));
         }
         Ok(())
+    }
+
+    pub fn receive_gossiped_transaction_v2(&mut self, envelope: String) -> Result<()> {
+        let encoded = decode_hex(&envelope)?;
+        let transaction = self.ledger.decode_transaction_v2(&encoded)?;
+        let outcome = self.ledger.submit_transaction_v2(transaction)?;
+        if outcome.added() {
+            self.outbox.push(GossipEnvelope::TransactionV2 {
+                envelope: hex_encode(encoded),
+            });
+        }
+        Ok(())
+    }
+
+    pub(super) fn submit_public_transaction_v2(
+        &mut self,
+        transaction: TransactionV2,
+    ) -> Result<TransactionV2> {
+        let domain = self.ledger.transaction_v2_domain()?;
+        let envelope = hex_encode(transaction.encode(&domain)?);
+        if self
+            .ledger
+            .submit_transaction_v2(transaction.clone())?
+            .added()
+        {
+            self.outbox.push(GossipEnvelope::TransactionV2 { envelope });
+        }
+        Ok(transaction)
     }
 
     pub fn receive_burn_bundle(&mut self, bundle: BurnBundle) -> Result<()> {
@@ -76,6 +104,15 @@ impl NodeCore {
             GossipEnvelope::Transactions { transactions } => {
                 for tx in transactions {
                     self.receive_gossiped_transaction(tx)?;
+                }
+                Ok(())
+            }
+            GossipEnvelope::TransactionV2 { envelope } => {
+                self.receive_gossiped_transaction_v2(envelope)
+            }
+            GossipEnvelope::TransactionsV2 { envelopes } => {
+                for envelope in envelopes {
+                    self.receive_gossiped_transaction_v2(envelope)?;
                 }
                 Ok(())
             }

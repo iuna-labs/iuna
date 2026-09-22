@@ -5,7 +5,7 @@ pub fn hex_hash(input: impl AsRef<[u8]>) -> String {
     hex_encode(Sha256::digest(input.as_ref()))
 }
 
-pub(super) fn decode_hex_array<const N: usize>(input: &str) -> Result<[u8; N]> {
+pub(crate) fn decode_hex_array<const N: usize>(input: &str) -> Result<[u8; N]> {
     let bytes = decode_hex(input)?;
     let len = bytes.len();
     bytes
@@ -13,7 +13,7 @@ pub(super) fn decode_hex_array<const N: usize>(input: &str) -> Result<[u8; N]> {
         .map_err(|_| anyhow!("expected {N} hex bytes, got {len}"))
 }
 
-pub(super) fn decode_hex(input: &str) -> Result<Vec<u8>> {
+pub(crate) fn decode_hex(input: &str) -> Result<Vec<u8>> {
     if input.len() % 2 != 0 {
         bail!("hex string has odd length");
     }
@@ -36,7 +36,7 @@ fn hex_value(byte: u8) -> Result<u8> {
     }
 }
 
-pub(super) fn hex_encode(bytes: impl AsRef<[u8]>) -> String {
+pub(crate) fn hex_encode(bytes: impl AsRef<[u8]>) -> String {
     const HEX: &[u8; 16] = b"0123456789abcdef";
     let bytes = bytes.as_ref();
     let mut encoded = String::with_capacity(bytes.len() * 2);

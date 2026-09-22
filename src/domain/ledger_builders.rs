@@ -1,4 +1,5 @@
 use super::hex::{decode_hex, decode_hex_array, hex_encode};
+use super::ledger_ops::{compact_block_context, ensure_transaction_v2_fits_empty_block};
 use super::mining::mine_signature;
 use super::stratum::{
     hash_meets_difficulty, stratum_mine_header_bytes, stratum_mine_signature, stratum_mine_template,
@@ -6,9 +7,10 @@ use super::stratum::{
 use super::transaction::{UnsignedTxInput, UnsignedUtxoTransaction};
 use super::validation::validate_address;
 use super::{
-    Amount, Ledger, LegacyTransactionId, MineSearchOutcome, OutPoint, StratumMineShare,
-    StratumMineTemplate, Transaction, TransactionV2, TransactionV2Domain, TransactionV2LegacyInput,
-    TransactionV2Output, TxOutput, Wallet,
+    AddressNetwork, Amount, Ledger, LegacyTransactionId, MineSearchOutcome, OutPoint,
+    StratumMineShare, StratumMineTemplate, Transaction, TransactionV2, TransactionV2Domain,
+    TransactionV2Input, TransactionV2LegacyInput, TransactionV2Output, TxOutput, VersionedAddress,
+    Wallet,
 };
 use anyhow::{Context, Result, bail};
 
@@ -20,7 +22,54 @@ impl Ledger {
         if available.is_empty() {
             bail!("no legacy outputs are available for migration");
         }
+        self.build_v2_migration_from_available(wallet, fee, &available, true)
+    }
 
+    /// Builds the largest deterministic prefix of legacy outputs that fits one block.
+    pub fn build_v2_migration_batch(&self, wallet: &Wallet, fee: Amount) -> Result<TransactionV2> {
+        let available = self.available_utxos_for_address(wallet.address())?;
+        if available.is_empty() {
+            bail!("no legacy outputs are available for migration");
+        }
+        let mut input_count = available.len().min(1_000);
+        loop {
+            let transaction = self.build_v2_migration_from_available(
+                wallet,
+                fee,
+                &available[..input_count],
+                false,
+            )?;
+            let bytes = transaction.encoded_size_bytes(&self.transaction_v2_domain()?)?;
+            if ensure_v2_transaction_within_block_budget(
+                self,
+                &transaction,
+                &self.transaction_v2_domain()?,
+                self.launch_profile.max_block_bytes,
+            )
+            .is_ok()
+            {
+                return Ok(transaction);
+            }
+            if input_count == 1 {
+                bail!(
+                    "one-input migration requires {bytes} bytes and exceeds the {}-byte block budget",
+                    self.launch_profile.max_block_bytes
+                );
+            }
+            let proportional = ((input_count as u128)
+                .saturating_mul(self.launch_profile.max_block_bytes as u128)
+                / bytes as u128) as usize;
+            input_count = proportional.clamp(1, input_count - 1);
+        }
+    }
+
+    fn build_v2_migration_from_available(
+        &self,
+        wallet: &Wallet,
+        fee: Amount,
+        available: &[(OutPoint, TxOutput)],
+        enforce_block_budget: bool,
+    ) -> Result<TransactionV2> {
         let mut total = 0_u64;
         let mut inputs = Vec::with_capacity(available.len());
         for (outpoint, output) in available {
@@ -66,7 +115,96 @@ impl Ledger {
             authorizations.resize(inputs.len(), authorization);
         }
         transaction.verify_authorizations(&domain)?;
+        if enforce_block_budget {
+            ensure_v2_transaction_within_block_budget(
+                self,
+                &transaction,
+                &domain,
+                self.launch_profile.max_block_bytes,
+            )?;
+        }
+        Ok(transaction)
+    }
+
+    pub fn build_v2_transfer(
+        &self,
+        wallet: &Wallet,
+        recipient: VersionedAddress,
+        amount: Amount,
+        fee: Amount,
+    ) -> Result<TransactionV2> {
+        if recipient.version != super::AddressVersion::HybridKeyCommitment {
+            bail!("transaction v2 recipient must use address v1");
+        }
+        if amount == 0 {
+            bail!("transfer amount must be greater than zero");
+        }
+        let required = amount
+            .checked_add(fee)
+            .context("transfer amount plus fee overflows")?;
+        let owner = wallet.hybrid_versioned_address();
+        let owner_address = wallet.hybrid_address(AddressNetwork::from_profile_id(
+            &self.launch_profile.profile_id,
+        ));
+        let mut available = self.available_utxos_for_address(&owner_address)?;
+        available.sort_by(|(left_point, left), (right_point, right)| {
+            right
+                .amount
+                .cmp(&left.amount)
+                .then_with(|| left_point.cmp(right_point))
+        });
+
+        let mut total = 0_u64;
+        let mut inputs = Vec::new();
+        for (outpoint, output) in available {
+            total = total
+                .checked_add(output.amount)
+                .context("transaction v2 input total overflows")?;
+            inputs.push(TransactionV2Input {
+                outpoint_txid: decode_hex_array::<32>(&outpoint.txid)
+                    .context("transaction v2 outpoint ID must be a 32-byte hash")?,
+                outpoint_index: outpoint.index,
+                owner,
+            });
+            if total >= required {
+                break;
+            }
+        }
+        if total < required {
+            bail!("insufficient hybrid funds");
+        }
+
+        let mut outputs = vec![TransactionV2Output {
+            address: recipient,
+            amount,
+        }];
+        let change = total - required;
+        if change > 0 {
+            outputs.push(TransactionV2Output {
+                address: owner,
+                amount: change,
+            });
+        }
+        let domain = self.transaction_v2_domain()?;
+        let mut transaction = TransactionV2::Transfer {
+            inputs,
+            outputs,
+            fee,
+            authorizations: Vec::new(),
+        };
+        let payload = transaction.signing_bytes(&domain)?;
+        let authorization = wallet.sign_v2_authorization(owner, &payload)?;
+        if let TransactionV2::Transfer {
+            inputs,
+            authorizations,
+            ..
+        } = &mut transaction
+        {
+            authorizations.resize(inputs.len(), authorization);
+        }
+        transaction.verify_authorizations(&domain)?;
         ensure_v2_transaction_within_block_budget(
+            self,
             &transaction,
             &domain,
             self.launch_profile.max_block_bytes,
@@ -444,6 +582,7 @@ fn legacy_transaction_id(txid: &str) -> Result<LegacyTransactionId> {
 }
 
 fn ensure_v2_transaction_within_block_budget(
+    ledger: &Ledger,
     transaction: &TransactionV2,
     domain: &TransactionV2Domain,
     max_block_bytes: usize,
@@ -454,6 +593,11 @@ fn ensure_v2_transaction_within_block_budget(
             "transaction v2 requires {transaction_bytes} bytes and exceeds the {max_block_bytes}-byte block budget"
         );
     }
+    ensure_transaction_v2_fits_empty_block(
+        compact_block_context(ledger),
+        &hex_encode(transaction.encode(domain)?),
+        max_block_bytes,
+    )?;
     Ok(())
 }
 
@@ -523,5 +667,77 @@ mod v2_migration_tests {
                 .to_string()
                 .contains("exceeds the 1-byte block budget")
         );
+    }
+
+    #[test]
+    fn hybrid_transfer_builder_spends_migrated_value_and_returns_hybrid_change() {
+        let wallet = Wallet::from_seed("v2-transfer-builder-wallet");
+        let recipient = Wallet::from_seed("v2-transfer-builder-recipient");
+        let ledger = Ledger::new(BTreeMap::from([(wallet.address().to_string(), 100)]), 1);
+        let migration = ledger.build_v2_migration(&wallet, 3).unwrap();
+        let mut migrated = ledger.clone();
+        migrated.utxos = ledger
+            .validated_v2_utxos_at_height(&migration, 3_000)
+            .unwrap();
+
+        let transfer = migrated
+            .build_v2_transfer(&wallet, recipient.hybrid_versioned_address(), 40, 2)
+            .unwrap();
+        let TransactionV2::Transfer {
+            inputs,
+            outputs,
+            fee,
+            authorizations,
+        } = &transfer
+        else {
+            panic!("builder returned a non-transfer transaction");
+        };
+
+        assert_eq!(inputs.len(), 1);
+        assert_eq!(*fee, 2);
+        assert_eq!(outputs.len(), 2);
+        assert_eq!(outputs[0].address, recipient.hybrid_versioned_address());
+        assert_eq!(outputs[0].amount, 40);
+        assert_eq!(outputs[1].address, wallet.hybrid_versioned_address());
+        assert_eq!(outputs[1].amount, 55);
+        assert_eq!(authorizations.len(), inputs.len());
+        migrated
+            .validate_transaction_v2_at_height(&transfer, 3_001)
+            .unwrap();
+    }
+
+    #[test]
+    fn migration_batch_fits_the_real_empty_block_budget() {
+        let wallet = Wallet::from_seed("v2-migration-batch-wallet");
+        let profile = crate::domain::LaunchProfile {
+            max_block_bytes: 2_000,
+            ..crate::domain::LaunchProfile::default()
+        };
+        let mut ledger =
+            Ledger::new_with_genesis_burns_and_profile(BTreeMap::new(), Vec::new(), 1, profile)
+                .unwrap();
+        ledger.utxos = (1_u64..=50)
+            .map(|index| {
+                (
+                    OutPoint {
+                        txid: format!("{index:064x}"),
+                        index: 0,
+                    },
+                    TxOutput {
+                        address: wallet.address().to_string(),
+                        amount: 10_000,
+                    },
+                )
+            })
+            .collect();
+        ledger.chain.last_mut().unwrap().height = 2_999;
+
+        let transaction = ledger.build_v2_migration_batch(&wallet, 1).unwrap();
+        let TransactionV2::Migration { inputs, .. } = &transaction else {
+            panic!("builder returned a non-migration transaction");
+        };
+        assert!(!inputs.is_empty());
+        assert!(inputs.len() < 50);
+        ledger.submit_transaction_v2(transaction).unwrap();
     }
 }

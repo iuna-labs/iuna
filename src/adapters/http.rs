@@ -31,6 +31,7 @@ mod auth_routes;
 mod consolidation;
 mod index_html;
 mod metrics;
+mod quantum_migration;
 mod request_auth;
 mod state;
 mod static_assets;
@@ -197,6 +198,14 @@ pub async fn serve(
         .route("/api/transfer", post(api_transfer_form))
         .route("/api/wallet/optimize/preview", post(consolidation::preview))
         .route("/api/wallet/optimize/submit", post(consolidation::submit))
+        .route(
+            "/api/wallet/quantum-migration/preview",
+            post(quantum_migration::preview),
+        )
+        .route(
+            "/api/wallet/quantum-migration/submit",
+            post(quantum_migration::submit),
+        )
         .route("/settings/burn-per-block", post(burn_per_block_form))
         .route("/transfer", post(transfer_form))
         .route("/peers", post(peer_form))

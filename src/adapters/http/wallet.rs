@@ -5,7 +5,7 @@ use secrecy::ExposeSecret;
 use crate::{
     adapters::wallet_store,
     app::FeeEstimate,
-    domain::{Amount, MINE_FINALIZER_FEE, OutPoint},
+    domain::{AddressVersion, Amount, MINE_FINALIZER_FEE, OutPoint},
 };
 
 use super::{
@@ -137,14 +137,27 @@ pub(super) async fn transfer(state: &HttpState, form: TransferForm) -> Result<()
 
     let result = {
         let mut node = state.node.lock().await;
-        let to = node.normalize_user_address(&to)?;
-        let result = node.transfer_with_fee_rate(to, amount, fee_per_byte, &selected_utxos);
+        let recipient = node.decode_user_address(&to)?;
+        let result = match recipient.version {
+            AddressVersion::Ed25519PublicKey => {
+                let to = node.normalize_user_address(&to)?;
+                node.transfer_with_fee_rate(to, amount, fee_per_byte, &selected_utxos)
+                    .map(|_| ())
+            }
+            AddressVersion::HybridKeyCommitment => {
+                if !selected_utxos.is_empty() {
+                    bail!("manual UTXO selection is not available for hybrid transfers");
+                }
+                node.transfer_hybrid_with_fee_rate(recipient, amount, fee_per_byte)
+                    .map(|_| ())
+            }
+        };
         let outbox = node.drain_outbox();
         (result, outbox)
     };
 
     match result.0 {
-        Ok(_) => state.gossip.broadcast(result.1).await,
+        Ok(()) => state.gossip.broadcast(result.1).await,
         Err(error) => Err(error),
     }
 }
@@ -177,8 +190,19 @@ pub(super) async fn estimate_transfer_fee(
 ) -> Result<FeeEstimate> {
     let (to, amount, fee_per_byte, selected_utxos) = validate_transfer_form(form)?;
     let node = state.node.lock().await;
-    let to = node.normalize_user_address(&to)?;
-    node.estimate_transfer_fee(to, amount, fee_per_byte, &selected_utxos)
+    let recipient = node.decode_user_address(&to)?;
+    match recipient.version {
+        AddressVersion::Ed25519PublicKey => {
+            let to = node.normalize_user_address(&to)?;
+            node.estimate_transfer_fee(to, amount, fee_per_byte, &selected_utxos)
+        }
+        AddressVersion::HybridKeyCommitment => {
+            if !selected_utxos.is_empty() {
+                bail!("manual UTXO selection is not available for hybrid transfers");
+            }
+            node.estimate_hybrid_transfer_fee(recipient, amount, fee_per_byte)
+        }
+    }
 }
 
 pub(super) async fn estimate_burn_fee(

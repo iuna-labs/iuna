@@ -98,6 +98,12 @@ pub(super) async fn process_envelope(
         GossipEnvelope::Transactions { transactions } => {
             process_transactions(network, remote_addr, known_peer, transactions).await;
         }
+        GossipEnvelope::TransactionV2 { envelope } => {
+            process_transactions_v2(network, remote_addr, known_peer, vec![envelope]).await;
+        }
+        GossipEnvelope::TransactionsV2 { envelopes } => {
+            process_transactions_v2(network, remote_addr, known_peer, envelopes).await;
+        }
         GossipEnvelope::BurnBundle(bundle) => {
             process_burn_bundles(network, remote_addr, known_peer, vec![bundle]).await;
         }
@@ -351,6 +357,32 @@ async fn process_transactions(
         let mut first_error = None;
         for tx in transactions {
             if let Err(error) = node.receive_gossiped_transaction(tx) {
+                first_error.get_or_insert(error);
+            }
+        }
+        first_error
+    };
+    record_inbound_result(
+        network,
+        known_peer,
+        remote_addr,
+        first_error.map(Err).unwrap_or(Ok(())),
+    )
+    .await;
+    network.forward_outbox().await;
+}
+
+async fn process_transactions_v2(
+    network: &GossipNetwork,
+    remote_addr: SocketAddr,
+    known_peer: &Option<String>,
+    envelopes: Vec<String>,
+) {
+    let first_error = {
+        let mut node = network.inner.node.lock().await;
+        let mut first_error = None;
+        for envelope in envelopes {
+            if let Err(error) = node.receive_gossiped_transaction_v2(envelope) {
                 first_error.get_or_insert(error);
             }
         }

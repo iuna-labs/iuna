@@ -3,14 +3,14 @@
 ## Purpose and decision boundary
 
 This document defines the review package for Iuna's post-quantum migration. The current code
-reserves versioned addresses and transaction encodings, can verify hybrid Ed25519 + ML-DSA-44
-authorizations, and records height 3000 as the candidate activation target. Live consensus,
-blocks, and gossip do not yet accept or produce v2 transactions.
+reserves versioned addresses and transaction encodings, verifies hybrid Ed25519 + ML-DSA-44
+authorizations, and activated transaction v2 at height 3000. Live consensus and blocks accept v2
+transactions, and nodes relay canonical v2 mempool envelopes. The management wallet exposes
+migration telemetry, reviewed block-bounded migration submission, and hybrid transfers.
 
-An audit of this scope may approve shipping dormant code for continued testing. It must not be
-interpreted as approval to activate transaction v2. Activation requires a separate review of the
-final integration commit and the height-3000 migration rehearsal described in
-`quantum-migration.md`.
+An audit of this scope must review the active consensus code and the enabled wallet migration
+flow. It must cover the final integration commit and the
+post-height-3000 migration rehearsal described in `quantum-migration.md`.
 
 ## Security claims
 
@@ -135,12 +135,14 @@ crash artifacts with their report.
 
 ## Activation blockers
 
-Transaction v2 must remain dormant until all of the following are resolved:
+The active transaction-v2 and wallet-migration rules must not be described as production-ready
+until all of the following are resolved:
 
 - the cryptographic backend and Iuna integration are independently reviewed;
 - the final consensus call sites and byte-based fee accounting receive independent review;
-- wallet backup compatibility, migration, and no-address-reuse behavior are implemented and
-  reviewed; deterministic hybrid key generation already exists but is not yet exposed in the UI;
+- wallet backup compatibility, migration batching, hybrid spending, recovery, and no-address-reuse
+  behavior are reviewed; deterministic hybrid keys, block-bounded migration batches, and hybrid
+  transfers exist, but address rotation remains incomplete;
 - migration progress is observable without exposing wallet secrets;
 - advertised `transaction-v2-blocks` behavior (including already-open sessions), restored
   snapshot-v7 behavior, and activation-boundary recovery are rehearsed on the mainnet-candidate

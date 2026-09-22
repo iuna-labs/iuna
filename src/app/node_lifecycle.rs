@@ -5,8 +5,8 @@ use anyhow::Result;
 use crate::{
     adapters::config_store::{DEFAULT_POW_MINING_WORKERS, clamp_pow_mining_workers},
     domain::{
-        AddressNetwork, Amount, BurnBundle, DEFAULT_FEE_PER_BYTE, Ledger, Wallet, decode_address,
-        encode_address,
+        AddressNetwork, Amount, BurnBundle, DEFAULT_FEE_PER_BYTE, Ledger, VersionedAddress, Wallet,
+        decode_address, decode_versioned_address, encode_address,
     },
 };
 
@@ -138,6 +138,10 @@ impl NodeCore {
 
     pub fn normalize_user_address(&self, address: &str) -> Result<String> {
         decode_address(address, self.address_network())
+    }
+
+    pub fn decode_user_address(&self, address: &str) -> Result<VersionedAddress> {
+        decode_versioned_address(address, self.address_network())
     }
 
     fn address_network(&self) -> AddressNetwork {

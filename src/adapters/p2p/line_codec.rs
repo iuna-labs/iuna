@@ -121,6 +121,16 @@ pub(super) fn record_received_envelope_kind(
             P2pMetricsCounters::inc(&metrics.transaction_envelopes_received);
             P2pMetricsCounters::add(&metrics.transactions_received, transactions.len() as u64);
         }
+        GossipEnvelope::TransactionV2 { .. } => {
+            P2pMetricsCounters::inc(&metrics.data_envelopes_received);
+            P2pMetricsCounters::inc(&metrics.transaction_envelopes_received);
+            P2pMetricsCounters::inc(&metrics.transactions_received);
+        }
+        GossipEnvelope::TransactionsV2 { envelopes } => {
+            P2pMetricsCounters::inc(&metrics.data_envelopes_received);
+            P2pMetricsCounters::inc(&metrics.transaction_envelopes_received);
+            P2pMetricsCounters::add(&metrics.transactions_received, envelopes.len() as u64);
+        }
         GossipEnvelope::BurnBundle(_) => {
             P2pMetricsCounters::inc(&metrics.data_envelopes_received);
             P2pMetricsCounters::inc(&metrics.burn_bundle_envelopes_received);
@@ -181,6 +191,13 @@ pub(super) fn validate_envelope_limits(envelope: &GossipEnvelope) -> Result<()> 
                 TRANSACTION_BATCH_LIMIT,
             )?;
         }
+        GossipEnvelope::TransactionsV2 { envelopes } => {
+            ensure_len(
+                "transaction v2 batch",
+                envelopes.len(),
+                TRANSACTION_BATCH_LIMIT,
+            )?;
+        }
         GossipEnvelope::BurnBundles { bundles } => {
             ensure_len("burn bundle batch", bundles.len(), TRANSACTION_BATCH_LIMIT)?;
         }
@@ -198,6 +215,7 @@ pub(super) fn validate_envelope_limits(envelope: &GossipEnvelope) -> Result<()> 
         | GossipEnvelope::ChainBootstrap(_)
         | GossipEnvelope::PeerStatus { .. }
         | GossipEnvelope::Transaction(_)
+        | GossipEnvelope::TransactionV2 { .. }
         | GossipEnvelope::BurnBundle(_)
         | GossipEnvelope::Block(_)
         | GossipEnvelope::PeerAnnouncement { .. }
@@ -301,12 +319,24 @@ mod tests {
             },
         );
         record_received_envelope_kind(&metrics, &GossipEnvelope::Transaction(burn("e")));
+        record_received_envelope_kind(
+            &metrics,
+            &GossipEnvelope::TransactionsV2 {
+                envelopes: vec!["00".to_string(), "01".to_string()],
+            },
+        );
+        record_received_envelope_kind(
+            &metrics,
+            &GossipEnvelope::TransactionV2 {
+                envelope: "02".to_string(),
+            },
+        );
         record_received_envelope_kind(&metrics, &GossipEnvelope::BurnBundle(burn_bundle(1, "f")));
 
         let snapshot = metrics.snapshot();
-        assert_eq!(snapshot.data_envelopes_received, 4);
-        assert_eq!(snapshot.transaction_envelopes_received, 2);
-        assert_eq!(snapshot.transactions_received, 3);
+        assert_eq!(snapshot.data_envelopes_received, 6);
+        assert_eq!(snapshot.transaction_envelopes_received, 4);
+        assert_eq!(snapshot.transactions_received, 6);
         assert_eq!(snapshot.burn_bundle_envelopes_received, 2);
         assert_eq!(snapshot.burn_bundles_received, 3);
     }
@@ -318,6 +348,12 @@ mod tests {
         };
         let line = serde_json::to_string(&envelope).unwrap();
 
+        assert_eq!(parse_envelope(&line).unwrap(), envelope);
+
+        let envelope = GossipEnvelope::TransactionV2 {
+            envelope: "000102ff".to_string(),
+        };
+        let line = serde_json::to_string(&envelope).unwrap();
         assert_eq!(parse_envelope(&line).unwrap(), envelope);
     }
 
@@ -382,6 +418,18 @@ mod tests {
         assert!(
             validate_envelope_limits(&GossipEnvelope::Transactions {
                 transactions: vec![burn("a"); TRANSACTION_BATCH_LIMIT + 1]
+            })
+            .is_err()
+        );
+        assert!(
+            validate_envelope_limits(&GossipEnvelope::TransactionsV2 {
+                envelopes: vec!["00".to_string(); TRANSACTION_BATCH_LIMIT]
+            })
+            .is_ok()
+        );
+        assert!(
+            validate_envelope_limits(&GossipEnvelope::TransactionsV2 {
+                envelopes: vec!["00".to_string(); TRANSACTION_BATCH_LIMIT + 1]
             })
             .is_err()
         );
