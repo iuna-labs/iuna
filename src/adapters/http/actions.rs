@@ -25,7 +25,7 @@ use crate::{
     adapters::{
         chain_store::SqliteChainStore, config_store::UiConfig, ui_data_store::SqliteUiDataStore,
     },
-    app::GossipEnvelope,
+    app::{GossipEnvelope, NodeCore},
     domain::Amount,
 };
 
@@ -546,15 +546,16 @@ fn validate_peer_address(peer: String) -> Result<String> {
 }
 
 async fn validate_address_book_address(state: &HttpState, address: String) -> Result<String> {
+    let node = state.node.lock().await;
+    normalize_address_book_address(&node, address)
+}
+
+fn normalize_address_book_address(node: &NodeCore, address: String) -> Result<String> {
     let address = address.trim().to_string();
     if address.is_empty() {
         bail!("address is required");
     }
-    state
-        .node
-        .lock()
-        .await
-        .normalize_user_address(&address)
+    node.decode_user_address(&address)
         .context("invalid address book address")?;
     Ok(address.to_ascii_lowercase())
 }
@@ -571,7 +572,7 @@ async fn validate_existing_address_book_address(
         .node
         .lock()
         .await
-        .normalize_user_address(&address)
+        .decode_user_address(&address)
         .is_err()
     {
         crate::domain::validate_address(&address, "legacy address book")
@@ -605,12 +606,13 @@ mod tests {
             p2p::GossipNetwork, ui_data_store::SqliteUiDataStore, wallet_store,
         },
         app::{NodeCore, PeerBook, StratumStatus},
-        domain::{GenesisBurn, Ledger, MICRO_IUNA},
+        domain::{AddressNetwork, GenesisBurn, Ledger, MICRO_IUNA, Wallet, encode_address},
     };
 
     use super::super::{AuthSession, HttpState, state::AuthBackoff};
     use super::{
-        CHAIN_RESET_CONFIRMATION, reset_local_chain, validate_wallet_endpoint_public_node,
+        CHAIN_RESET_CONFIRMATION, normalize_address_book_address, reset_local_chain,
+        validate_wallet_endpoint_public_node,
     };
 
     fn socket() -> SocketAddr {
@@ -626,6 +628,28 @@ mod tests {
         config.p2p_accept_inbound = true;
         validate_wallet_endpoint_public_node(&config, true).unwrap();
         validate_wallet_endpoint_public_node(&UiConfig::default(), false).unwrap();
+    }
+
+    #[test]
+    fn address_book_accepts_legacy_and_hybrid_addresses_for_the_active_network() {
+        let wallet = Wallet::from_seed("hybrid-address-book-wallet");
+        let ledger = Ledger::new(BTreeMap::new(), 1);
+        let node = NodeCore::from_ledger(wallet.clone(), ledger, 0);
+        let legacy = encode_address(wallet.address(), AddressNetwork::Mainnet).unwrap();
+        let hybrid = wallet.hybrid_address(AddressNetwork::Mainnet);
+
+        assert_eq!(
+            normalize_address_book_address(&node, legacy.to_uppercase()).unwrap(),
+            legacy
+        );
+        assert_eq!(
+            normalize_address_book_address(&node, hybrid.to_uppercase()).unwrap(),
+            hybrid
+        );
+        assert!(
+            normalize_address_book_address(&node, wallet.hybrid_address(AddressNetwork::Testnet))
+                .is_err()
+        );
     }
 
     #[tokio::test]

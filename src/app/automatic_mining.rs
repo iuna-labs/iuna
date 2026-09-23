@@ -6,7 +6,10 @@ use super::{
     BURN_BUNDLE_COLLECTION_MS, GossipEnvelope, Ledger, MIN_AUTO_BLOCK_ANCHOR_BURN_AMOUNT, NodeCore,
     PreparedBlock, Transaction, run_vdf,
 };
-use crate::domain::{Amount, BurnCommitteeMember, FinalizerMode};
+use crate::domain::{
+    Amount, BurnCommitteeMember, FinalizerMode, HYBRID_REWARD_ACTIVATION_HEIGHT,
+    transaction_v2_is_active,
+};
 
 mod pow;
 
@@ -328,10 +331,9 @@ impl NodeCore {
         }
 
         let fee_per_byte = self.burn_fee;
-        let balance = self.ledger.balance_of(self.wallet.address());
         let ledger = self.wallet_build_ledger()?;
-        let best = self.best_automatic_burn_on_ledger(&ledger, fee_per_byte, balance);
-        let Some(tx) = best else {
+        let next_height = current_height.saturating_add(1);
+        if transaction_v2_is_active(next_height) {
             let hybrid_address = self.wallet.unlocked()?.hybrid_address(
                 crate::domain::AddressNetwork::from_profile_id(
                     &self.ledger.launch_profile().profile_id,
@@ -342,7 +344,17 @@ impl NodeCore {
                 self.best_automatic_v2_burn_on_ledger(&ledger, fee_per_byte, hybrid_balance, false)
             {
                 self.submit_public_transaction_v2(transaction)?;
+                self.last_auto_burn_height = Some(current_height);
+                return Ok(anchor_burn);
             }
+            if next_height >= HYBRID_REWARD_ACTIVATION_HEIGHT {
+                bail!("automatic hybrid burn has insufficient confirmed funds");
+            }
+        }
+
+        let balance = self.ledger.balance_of(self.wallet.address());
+        let best = self.best_automatic_burn_on_ledger(&ledger, fee_per_byte, balance);
+        let Some(tx) = best else {
             self.last_auto_burn_height = Some(current_height);
             return Ok(anchor_burn);
         };
@@ -382,6 +394,29 @@ impl NodeCore {
             return Ok(None);
         }
 
+        let anchor_burn_amount = self.burn_per_block.max(MIN_AUTO_BLOCK_ANCHOR_BURN_AMOUNT);
+        let next_height = current_height.saturating_add(1);
+        let mut hybrid_error = None;
+        if transaction_v2_is_active(next_height) {
+            let ledger = self.wallet_anchor_build_ledger()?;
+            match self.build_v2_burn_with_fee_rate_on_ledger(
+                &ledger,
+                anchor_burn_amount,
+                self.burn_fee,
+                true,
+            ) {
+                Ok((transaction, _)) => {
+                    self.submit_public_transaction_v2(transaction)?;
+                    self.last_auto_anchor_burn_height = Some(current_height);
+                    return Ok(None);
+                }
+                Err(error) if next_height >= HYBRID_REWARD_ACTIVATION_HEIGHT => {
+                    return Err(error).context("automatic hybrid finalizer anchor burn failed");
+                }
+                Err(error) => hybrid_error = Some(error),
+            }
+        }
+
         // Pending wallet burns can themselves satisfy the block-anchor requirement.
         // Pending transfers cannot, so keep their confirmed inputs reserved.
         let pending_transfer_spent_outpoints = self
@@ -401,7 +436,6 @@ impl NodeCore {
         // The plaintext anchor is the block's automatic burn when one is configured.
         // Keep a one-micro-IUNA anchor when automatic finalization is enabled with a
         // zero target, because the finalizer still needs a local burn to anchor.
-        let anchor_burn_amount = self.burn_per_block.max(MIN_AUTO_BLOCK_ANCHOR_BURN_AMOUNT);
         let burn = match converge_fee_by_byte(self.burn_fee, |fee| {
             let required = anchor_burn_amount
                 .checked_add(fee)
@@ -450,27 +484,15 @@ impl NodeCore {
             }
         }) {
             Ok((burn, _)) => burn,
-            Err(legacy_error) => {
-                match self.build_v2_burn_with_fee_rate_on_ledger(
-                    &ledger,
-                    anchor_burn_amount,
-                    self.burn_fee,
-                    true,
-                ) {
-                    Ok((transaction, _)) => {
-                        self.submit_public_transaction_v2(transaction)?;
-                        self.last_auto_anchor_burn_height = Some(current_height);
-                        return Ok(None);
-                    }
-                    Err(hybrid_error) => {
-                        self.last_auto_anchor_burn_height = Some(current_height);
-                        return Err(hybrid_error).with_context(|| {
-                            format!(
-                                "automatic finalizer anchor burn failed; legacy path: {legacy_error:#}"
-                            )
-                        });
-                    }
+            Err(error) => {
+                if let Some(hybrid_error) = hybrid_error {
+                    return Err(error).with_context(|| {
+                        format!(
+                            "automatic finalizer anchor burn failed; hybrid path: {hybrid_error:#}"
+                        )
+                    });
                 }
+                return Err(error).context("automatic legacy finalizer anchor burn failed");
             }
         };
         self.local_block_anchor_burn = Some((current_height, burn.clone()));
@@ -835,8 +857,9 @@ mod tests {
         adapters::chain_store::SqliteChainStore,
         app::{GossipEnvelope, InMemoryNetwork},
         domain::{
-            BurnBundle, BurnCommitteeMember, FinalizerMode, GenesisBurn, Ledger, MICRO_IUNA,
-            Transaction, Wallet, run_vdf,
+            BurnBundle, BurnCommitteeMember, FinalizerMode, GenesisBurn,
+            HYBRID_REWARD_ACTIVATION_HEIGHT, LaunchProfile, Ledger, MICRO_IUNA, Transaction,
+            TransactionV2, Wallet, run_vdf,
         },
     };
     use tempfile::tempdir;
@@ -973,6 +996,133 @@ mod tests {
             )
         );
         assert!(node.status().mining.last_auto_finalization_status.is_some());
+    }
+
+    #[test]
+    fn failed_anchor_burn_is_retried_at_the_same_height() {
+        let wallet = Wallet::from_seed("retry-failed-anchor-burn");
+        let ledger = Ledger::new(BTreeMap::new(), 1);
+        let timestamp_ms = ledger.recovery_block_min_timestamp();
+        let mut node =
+            NodeCore::from_ledger_with_burn_fee_and_enabled(wallet, ledger, true, 100, 1);
+
+        assert!(node.prepare_automatic_anchor_burn(timestamp_ms).is_err());
+        assert_eq!(node.last_auto_anchor_burn_height, None);
+        assert!(node.prepare_automatic_anchor_burn(timestamp_ms).is_err());
+        assert_eq!(node.last_auto_anchor_burn_height, None);
+    }
+
+    #[test]
+    fn first_migration_block_can_bootstrap_with_a_legacy_anchor() {
+        let wallet = Wallet::from_seed("migration-bootstrap-anchor-wallet");
+        let mut ledger = Ledger::new(
+            BTreeMap::from([(wallet.address().to_string(), 10 * MICRO_IUNA)]),
+            1,
+        );
+        ledger.set_tip_height_for_test(2_999);
+        let timestamp_ms = ledger.recovery_block_min_timestamp();
+        let mut node = NodeCore::from_ledger_with_burn_fee_and_enabled(wallet, ledger, true, 1, 1);
+
+        let anchor = node
+            .prepare_automatic_anchor_burn(timestamp_ms)
+            .unwrap()
+            .expect("the first migration block may still use a legacy bootstrap anchor");
+
+        assert!(anchor.is_burn());
+        assert!(node.local_block_anchor_burn.is_some());
+        assert!(node.ledger().pending_v2().is_empty());
+    }
+
+    #[test]
+    fn height_3750_rejects_legacy_anchor_fallback() {
+        let wallet = Wallet::from_seed("hybrid-only-anchor-wallet");
+        let mut ledger = Ledger::new(
+            BTreeMap::from([(wallet.address().to_string(), 10 * MICRO_IUNA)]),
+            1,
+        );
+        ledger.set_tip_height_for_test(HYBRID_REWARD_ACTIVATION_HEIGHT - 1);
+        let timestamp_ms = ledger.recovery_block_min_timestamp();
+        let mut node = NodeCore::from_ledger_with_burn_fee_and_enabled(wallet, ledger, true, 1, 1);
+
+        let error = node
+            .prepare_automatic_anchor_burn(timestamp_ms)
+            .unwrap_err();
+
+        assert!(format!("{error:#}").contains("automatic hybrid finalizer anchor burn failed"));
+        assert!(node.local_block_anchor_burn.is_none());
+        assert_eq!(node.last_auto_anchor_burn_height, None);
+    }
+
+    #[test]
+    fn post_activation_recovery_uses_hybrid_anchor_alongside_pending_migration() {
+        let wallet = Wallet::from_seed("hybrid-recovery-anchor-wallet");
+        let bootstrap = Wallet::from_seed("hybrid-recovery-bootstrap-wallet");
+        let migrator = Wallet::from_seed("hybrid-recovery-pending-migrator");
+        let allocations = [&wallet, &bootstrap, &migrator]
+            .into_iter()
+            .map(|wallet| (wallet.address().to_string(), 10 * MICRO_IUNA))
+            .collect::<BTreeMap<_, _>>();
+        let mut profile = LaunchProfile::local_testnet();
+        profile.ticket_maturity_delay_heights = 0;
+        profile.ticket_expiry_window_heights = 4_000;
+        let mut ledger = Ledger::new_with_genesis_burns_and_profile(
+            allocations,
+            vec![GenesisBurn::new(bootstrap.address(), MICRO_IUNA)],
+            1,
+            profile,
+        )
+        .unwrap();
+        ledger.set_tip_height_for_test(2_999);
+
+        let bootstrap_anchor = ledger.build_burn_for_next_block(&bootstrap, 1, 1).unwrap();
+        ledger.submit_transaction(bootstrap_anchor).unwrap();
+        let wallet_migration = ledger.build_v2_migration(&wallet, 1).unwrap();
+        ledger.submit_transaction_v2(wallet_migration).unwrap();
+        let migration_block = ledger
+            .mine_recovery_block(&bootstrap, ledger.recovery_block_min_timestamp())
+            .unwrap();
+        ledger
+            .apply_preverified_block_at(migration_block, u64::MAX)
+            .unwrap();
+
+        let pending_migration = ledger.build_v2_migration(&migrator, 1).unwrap();
+        ledger.submit_transaction_v2(pending_migration).unwrap();
+        let timestamp_ms = ledger.recovery_block_min_timestamp();
+        let mut node =
+            NodeCore::from_ledger_with_burn_fee_and_enabled(wallet.clone(), ledger, true, 1, 1);
+
+        assert_eq!(
+            node.prepare_automatic_anchor_burn(timestamp_ms).unwrap(),
+            None
+        );
+        assert!(node.local_block_anchor_burn.is_none());
+        assert_eq!(
+            node.ledger()
+                .pending_v2()
+                .iter()
+                .filter(|transaction| transaction.is_burn())
+                .count(),
+            1
+        );
+        assert!(
+            node.ledger()
+                .pending_v2()
+                .iter()
+                .any(|transaction| { matches!(transaction, TransactionV2::Migration { .. }) })
+        );
+
+        let prepared = node
+            .prepare_recovery_block_with_local_anchor(timestamp_ms)
+            .unwrap();
+        let block = prepared.finish(&wallet, "test-vdf-output".to_string());
+        assert!(!block.transactions.iter().any(Transaction::is_burn));
+        let hybrid_owner = wallet.hybrid_versioned_address();
+        assert!(block.transactions_v2.iter().any(|envelope| {
+            let bytes = crate::domain::decode_hex(envelope).unwrap();
+            let (_, transaction) = TransactionV2::decode(&bytes).unwrap();
+            matches!(transaction, TransactionV2::Burn { ref inputs, .. }
+                if inputs.iter().all(|input| input.owner == hybrid_owner))
+        }));
     }
 
     #[test]

@@ -119,21 +119,19 @@ pub(super) fn wallet_transaction_v2_row(
     if !sent && !received {
         return Ok(None);
     }
-    let amount = if matches!(transaction, TransactionV2::Migration { .. }) {
-        presented.amount
-    } else if sent {
-        presented
+    let amount = match transaction {
+        TransactionV2::Migration { .. } | TransactionV2::Burn { .. } => presented.amount,
+        _ if sent => presented
             .outputs
             .iter()
             .filter(|output| !is_wallet_address(&output.address))
-            .fold(0_u64, |total, output| total.saturating_add(output.amount))
-    } else {
-        presented
+            .fold(0_u64, |total, output| total.saturating_add(output.amount)),
+        _ => presented
             .outputs
             .iter()
             .chain(presented.change.iter())
             .filter(|output| is_wallet_address(&output.address))
-            .fold(0_u64, |total, output| total.saturating_add(output.amount))
+            .fold(0_u64, |total, output| total.saturating_add(output.amount)),
     };
     let direction = match transaction {
         TransactionV2::Migration { .. } => "migrated",
@@ -1048,7 +1046,8 @@ mod tests {
     use crate::compact::CompactBlockSizeBreakdown;
     use crate::domain::{
         AddressNetwork, Amount, Block, BurnBundleSection, BurnBundleSignature, BurnLeaderRank,
-        FinalizerMode, Ledger, MaskedBurn, OutPoint, Transaction, TxInput, TxOutput, Wallet,
+        FinalizerMode, Ledger, MaskedBurn, OutPoint, Transaction, TransactionV2,
+        TransactionV2Input, TransactionV2Output, TxInput, TxOutput, Wallet,
         encode_versioned_address, hex_encode,
     };
 
@@ -1131,6 +1130,64 @@ mod tests {
         assert_eq!(rows[0].direction, "migrated");
         assert_eq!(rows[0].status, "pending");
         assert_eq!(rows[0].amount, 99_900);
+    }
+
+    #[test]
+    fn pending_v2_burn_shows_the_burned_amount_in_the_wallet_view() {
+        let wallet = Wallet::from_seed("pending-v2-burn-ui-wallet");
+        let ledger = Ledger::new(BTreeMap::new(), 1);
+        let domain = ledger.transaction_v2_domain().unwrap();
+        let network = AddressNetwork::Mainnet;
+        let owner = wallet.hybrid_versioned_address();
+        let input_id = [0x42; 32];
+        let mut transaction = TransactionV2::Burn {
+            inputs: vec![TransactionV2Input {
+                outpoint_txid: input_id,
+                outpoint_index: 0,
+                owner,
+            }],
+            change: vec![TransactionV2Output {
+                address: owner,
+                amount: 2,
+            }],
+            amount: 7,
+            fee: 1,
+            anchor: Some([0x24; 32]),
+            authorizations: Vec::new(),
+        };
+        let payload = transaction.signing_bytes(&domain).unwrap();
+        let authorization = wallet.sign_v2_authorization(owner, &payload).unwrap();
+        let TransactionV2::Burn { authorizations, .. } = &mut transaction else {
+            unreachable!();
+        };
+        authorizations.push(authorization);
+        let outputs = BTreeMap::from([(
+            OutPoint {
+                txid: hex_encode(input_id),
+                index: 0,
+            },
+            TxOutput {
+                address: wallet.hybrid_address(network),
+                amount: 10,
+            },
+        )]);
+        let wallet_addresses = vec![wallet.hybrid_address(network)];
+
+        let rows = wallet_transaction_v2_rows(
+            &wallet_addresses,
+            &[transaction],
+            &outputs,
+            WalletTransactionFilters::default(),
+            &domain,
+            network,
+        );
+
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].kind, "burn");
+        assert_eq!(rows[0].direction, "burned");
+        assert_eq!(rows[0].status, "pending");
+        assert_eq!(rows[0].amount, 7);
+        assert_eq!(rows[0].fee, 1);
     }
 
     #[test]

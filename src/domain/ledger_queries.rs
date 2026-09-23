@@ -71,6 +71,14 @@ fn lineage_committee_draw_seed(parent: &Block, target_height: u64, slot: u8) -> 
 }
 
 impl Ledger {
+    #[cfg(test)]
+    pub(crate) fn set_tip_height_for_test(&mut self, height: u64) {
+        self.chain
+            .last_mut()
+            .expect("ledger is always initialized with genesis")
+            .height = height;
+    }
+
     pub fn snapshot(&self) -> ChainSnapshot {
         ChainSnapshot {
             genesis_allocations: self.genesis_allocations.clone(),

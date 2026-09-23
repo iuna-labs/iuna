@@ -717,7 +717,7 @@ pub(super) const INDEX_HTML: &str = concat!(
         <button type="button" @click="openOptimizeWallet">Review optimization</button>
         <button type="button" @click="dismissOptimizeSuggestion">Later</button>
       </div>
-      <div class="panel" x-show="status.quantum_migration?.active && (status.quantum_migration?.legacy_balance > 0 || status.quantum_migration?.hybrid_balance > 0)">
+      <div class="panel" x-show="status.quantum_migration?.active && status.quantum_migration?.legacy_utxos > 0">
         <h3>Quantum-resistant wallet migration</h3>
         <p class="panel-description">Transaction v2 is active. Review how your legacy Ed25519 balance can move to the hybrid Ed25519 + ML-DSA wallet.</p>
         <div class="detail-grid">
@@ -2169,5 +2169,15 @@ mod tests {
         );
         assert!(!INDEX_HTML.contains(r#"x-text="walletEndpointRestartMessage()""#));
         assert!(!INDEX_HTML.contains(r#"x-text="stratumRestartMessage()""#));
+    }
+
+    #[test]
+    fn migration_panel_is_only_visible_while_legacy_utxos_remain() {
+        assert!(INDEX_HTML.contains(
+            r#"x-show="status.quantum_migration?.active && status.quantum_migration?.legacy_utxos > 0""#
+        ));
+        assert!(!INDEX_HTML.contains(
+            r#"status.quantum_migration?.legacy_balance > 0 || status.quantum_migration?.hybrid_balance > 0"#
+        ));
     }
 }
