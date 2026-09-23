@@ -5,6 +5,12 @@ from the Git history and Conventional Commit titles by `deployment.sh`.
 
 ## [Unreleased]
 
+## [0.4.39] - 2026-09-23
+
+### Fixed
+
+- finalize hybrid migration flows
+
 ## [0.4.38] - 2026-09-23
 
 ### Added
