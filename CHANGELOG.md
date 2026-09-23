@@ -5,6 +5,12 @@ from the Git history and Conventional Commit titles by `deployment.sh`.
 
 ## [Unreleased]
 
+## [0.4.40] - 2026-09-23
+
+### Fixed
+
+- prioritize required hybrid anchor burn
+
 ## [0.4.39] - 2026-09-23
 
 ### Fixed
