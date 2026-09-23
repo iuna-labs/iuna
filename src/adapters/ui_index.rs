@@ -1,9 +1,9 @@
 use std::collections::BTreeMap;
 
 use crate::domain::{
-    AddressNetwork, Block, BurnLeaderRank, ChainSnapshot, Ledger, OutPoint, Transaction,
-    TransactionV2, TxOutput, decode_hex, encode_versioned_address, genesis_allocation_outpoint,
-    hex_encode, reward_outputs_for_block,
+    AddressNetwork, Block, BurnCommitteeMember, BurnLeaderRank, ChainSnapshot, Ledger, OutPoint,
+    Transaction, TransactionV2, TxOutput, decode_hex, encode_versioned_address,
+    genesis_allocation_outpoint, hex_encode, reward_outputs_for_block,
 };
 
 #[derive(Clone, Debug, Default, Eq, PartialEq)]
@@ -13,25 +13,33 @@ pub(crate) struct UiChainIndex {
     pub(crate) burn_leader_ranks_by_hash: BTreeMap<String, Vec<BurnLeaderRank>>,
 }
 
+#[cfg(test)]
 pub(crate) fn build_ui_chain_index(snapshot: &ChainSnapshot) -> UiChainIndex {
+    let Ok(ledger) = Ledger::from_preverified_snapshot(snapshot.clone()) else {
+        return UiChainIndex::default();
+    };
+    build_ui_chain_index_for_blocks(snapshot, &ledger, &snapshot.blocks, true)
+}
+
+pub(crate) fn build_ui_chain_index_for_blocks(
+    snapshot: &ChainSnapshot,
+    ledger: &Ledger,
+    blocks: &[Block],
+    include_genesis_allocations: bool,
+) -> UiChainIndex {
     UiChainIndex {
         tip_hash: snapshot.blocks.last().map(|block| block.hash.clone()),
-        outputs: known_chain_output_index(snapshot),
-        burn_leader_ranks_by_hash: burn_leader_ranks_for_blocks(snapshot, &snapshot.blocks),
+        outputs: known_chain_output_index(snapshot, blocks, include_genesis_allocations),
+        burn_leader_ranks_by_hash: burn_leader_ranks_for_blocks(ledger, blocks),
     }
 }
 
 pub(crate) fn burn_leader_ranks_for_blocks(
-    snapshot: &ChainSnapshot,
+    ledger: &Ledger,
     blocks: &[Block],
 ) -> BTreeMap<String, Vec<BurnLeaderRank>> {
-    let Some(ranks_by_height) = Ledger::from_preverified_snapshot(snapshot.clone())
-        .ok()
-        .and_then(|ledger| {
-            ledger
-                .burn_leader_ranks_for_blocks(blocks.iter().map(|block| block.height))
-                .ok()
-        })
+    let Ok(ranks_by_height) =
+        ledger.burn_leader_ranks_for_blocks(blocks.iter().map(|block| block.height))
     else {
         return BTreeMap::new();
     };
@@ -47,31 +55,28 @@ pub(crate) fn burn_leader_ranks_for_blocks(
         .collect()
 }
 
-fn known_chain_output_index(snapshot: &ChainSnapshot) -> BTreeMap<OutPoint, TxOutput> {
+fn known_chain_output_index(
+    snapshot: &ChainSnapshot,
+    blocks: &[Block],
+    include_genesis_allocations: bool,
+) -> BTreeMap<OutPoint, TxOutput> {
     let mut outputs = BTreeMap::new();
     let network = AddressNetwork::from_profile_id(&snapshot.launch_profile.profile_id);
-    let mut running_ledger = snapshot.blocks.first().cloned().and_then(|genesis| {
-        Ledger::from_preverified_snapshot(ChainSnapshot {
-            genesis_allocations: snapshot.genesis_allocations.clone(),
-            vdf_rounds: snapshot.vdf_rounds,
-            launch_profile: snapshot.launch_profile.clone(),
-            blocks: vec![genesis],
-        })
-        .ok()
-    });
-    for (address, amount) in &snapshot.genesis_allocations {
-        if *amount == 0 {
-            continue;
+    if include_genesis_allocations {
+        for (address, amount) in &snapshot.genesis_allocations {
+            if *amount == 0 {
+                continue;
+            }
+            outputs.insert(
+                genesis_allocation_outpoint(address),
+                TxOutput {
+                    address: address.clone(),
+                    amount: *amount,
+                },
+            );
         }
-        outputs.insert(
-            genesis_allocation_outpoint(address),
-            TxOutput {
-                address: address.clone(),
-                amount: *amount,
-            },
-        );
     }
-    for block in &snapshot.blocks {
+    for block in blocks {
         for transaction in &block.transactions {
             index_transaction_outputs(&mut outputs, transaction);
         }
@@ -84,24 +89,26 @@ fn known_chain_output_index(snapshot: &ChainSnapshot) -> BTreeMap<OutPoint, TxOu
             };
             index_transaction_v2_outputs(&mut outputs, &transaction, &domain, network);
         }
-        let reward_committee = if block.height == 0 {
-            Vec::new()
-        } else {
-            running_ledger
-                .as_ref()
-                .map(|ledger| ledger.burn_committee_for_block(block))
-                .unwrap_or_default()
-        };
-        for (outpoint, output) in reward_outputs_for_block(block, &reward_committee) {
+        for (outpoint, output) in projected_reward_outputs(block) {
             outputs.insert(outpoint, output);
-        }
-        if block.height > 0 {
-            if let Some(ledger) = running_ledger.as_mut() {
-                let _ = ledger.apply_preverified_block_at(block.clone(), u64::MAX);
-            }
         }
     }
     outputs
+}
+
+pub(crate) fn projected_reward_outputs(block: &Block) -> Vec<(OutPoint, TxOutput)> {
+    let committee = block
+        .burn_bundle_section
+        .signatures
+        .iter()
+        .map(|signature| BurnCommitteeMember {
+            slot: signature.slot,
+            root: block.hash.clone(),
+            owner: signature.member.clone(),
+            weight: 0,
+        })
+        .collect::<Vec<_>>();
+    reward_outputs_for_block(block, &committee)
 }
 
 fn index_transaction_v2_outputs(
