@@ -60,6 +60,20 @@ impl NodeCore {
         Ok(transaction)
     }
 
+    pub(super) fn submit_prioritized_public_transaction_v2(
+        &mut self,
+        transaction: TransactionV2,
+    ) -> Result<TransactionV2> {
+        let domain = self.ledger.transaction_v2_domain()?;
+        let envelope = hex_encode(transaction.encode(&domain)?);
+        let mut candidate = self.ledger.clone();
+        if candidate.prioritize_transaction_v2_for_block_building(transaction.clone())? {
+            self.ledger = candidate;
+            self.outbox.push(GossipEnvelope::TransactionV2 { envelope });
+        }
+        Ok(transaction)
+    }
+
     pub fn receive_burn_bundle(&mut self, bundle: BurnBundle) -> Result<()> {
         let next_height = self.ledger.height().saturating_add(1);
         if bundle.height <= self.ledger.height() {

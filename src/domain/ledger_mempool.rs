@@ -10,7 +10,7 @@ use super::ledger_ops::{
 use super::transaction::{Transaction, transaction_inputs_spent_by};
 use super::{
     Ledger, MAX_ORPHAN_TRANSACTIONS, MAX_PENDING_POOL_BYTES, MAX_PENDING_TRANSACTIONS,
-    TransactionSubmitOutcome, spend_inputs_with_lineage,
+    TransactionSubmitOutcome, TransactionV2, spend_inputs_with_lineage,
 };
 
 impl Ledger {
@@ -36,6 +36,26 @@ impl Ledger {
         }
         for candidate in displaced {
             let _ = self.submit_transaction(candidate);
+        }
+        Ok(true)
+    }
+
+    /// Inserts a required v2 anchor ahead of the current v2 mempool and then
+    /// rebuilds the displaced entries in their original order. Callers use a
+    /// cloned ledger and only publish it after the priority transaction is
+    /// admitted, so a failed replacement cannot mutate live state.
+    pub(crate) fn prioritize_transaction_v2_for_block_building(
+        &mut self,
+        transaction: TransactionV2,
+    ) -> Result<bool> {
+        let displaced = std::mem::take(&mut self.pending_v2);
+        self.pending_v2_bytes = 0;
+
+        if !self.submit_transaction_v2(transaction)?.added() {
+            return Ok(false);
+        }
+        for candidate in displaced {
+            let _ = self.submit_transaction_v2(candidate);
         }
         Ok(true)
     }

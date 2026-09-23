@@ -406,7 +406,7 @@ impl NodeCore {
                 true,
             ) {
                 Ok((transaction, _)) => {
-                    self.submit_public_transaction_v2(transaction)?;
+                    self.submit_prioritized_public_transaction_v2(transaction)?;
                     self.last_auto_anchor_burn_height = Some(current_height);
                     return Ok(None);
                 }
@@ -1085,6 +1085,10 @@ mod tests {
             .apply_preverified_block_at(migration_block, u64::MAX)
             .unwrap();
 
+        let queued_wallet_burn = ledger.build_v2_burn(&wallet, 1, 1).unwrap();
+        ledger
+            .submit_transaction_v2(queued_wallet_burn.clone())
+            .unwrap();
         let pending_migration = ledger.build_v2_migration(&migrator, 1).unwrap();
         ledger.submit_transaction_v2(pending_migration).unwrap();
         let timestamp_ms = ledger.recovery_block_min_timestamp();
@@ -1096,6 +1100,7 @@ mod tests {
             None
         );
         assert!(node.local_block_anchor_burn.is_none());
+        assert!(!node.ledger().pending_v2().contains(&queued_wallet_burn));
         assert_eq!(
             node.ledger()
                 .pending_v2()
