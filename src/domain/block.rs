@@ -15,6 +15,10 @@ pub struct Block {
     pub prev_hash: String,
     pub timestamp_ms: u64,
     pub miner: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reward_address: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reward_address_signature: Option<String>,
     #[serde(default)]
     pub finalizer_mode: FinalizerMode,
     #[serde(default)]
@@ -75,6 +79,7 @@ impl Block {
             self.height,
             &self.prev_hash,
             &self.miner,
+            self.reward_address.as_deref(),
             self.finalizer_mode,
             self.finalizer_rank,
             self.reward,
@@ -107,6 +112,25 @@ impl Block {
                 )
             })
             .unwrap_or_default();
+        if let Some(reward_address) = &self.reward_address {
+            let reward_address_signature = self.reward_address_signature.as_deref().unwrap_or("");
+            return hex_hash(format!(
+                "block-content-v6:{}:{}:{}:{}:{}:{}:{}:{}:{}:{}:{}:{}:{}",
+                self.height,
+                self.prev_hash,
+                self.timestamp_ms,
+                self.miner,
+                reward_address,
+                reward_address_signature,
+                self.finalizer_rank,
+                self.reward,
+                self.vdf_rounds,
+                leader_proof,
+                txs,
+                txs_v2,
+                canonical_burn_block_items(&burn_section)
+            ));
+        }
         if self.transactions_v2.is_empty() {
             return hex_hash(format!(
                 "block-content-v4:{}:{}:{}:{}:{}:{}:{}:{}:{}:{}",
@@ -254,6 +278,7 @@ pub struct PreparedBlock {
     pub(super) prev_hash: String,
     pub(super) timestamp_ms: u64,
     pub(super) miner: String,
+    pub(super) reward_address: Option<String>,
     pub(super) finalizer_mode: FinalizerMode,
     pub(super) finalizer_rank: u32,
     pub(super) reward: Amount,
@@ -317,11 +342,21 @@ impl PreparedBlock {
             };
             wallet.leader_proof(&proof_payload)
         });
+        let reward_address_signature = self.reward_address.as_ref().map(|reward_address| {
+            wallet.sign_payload(&reward_address_payload(
+                self.height,
+                &self.prev_hash,
+                &self.miner,
+                reward_address,
+            ))
+        });
         let mut block = Block {
             height: self.height,
             prev_hash: self.prev_hash,
             timestamp_ms,
             miner: self.miner,
+            reward_address: self.reward_address,
+            reward_address_signature,
             finalizer_mode: self.finalizer_mode,
             finalizer_rank: self.finalizer_rank,
             reward: self.reward,
@@ -336,6 +371,15 @@ impl PreparedBlock {
         block.hash = block.compute_hash();
         block
     }
+}
+
+pub(super) fn reward_address_payload(
+    height: u64,
+    prev_hash: &str,
+    miner: &str,
+    reward_address: &str,
+) -> String {
+    format!("iuna-hybrid-reward-v1:{height}:{prev_hash}:{miner}:{reward_address}")
 }
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
@@ -411,6 +455,8 @@ mod tests {
             prev_hash: "0".repeat(64),
             timestamp_ms: 1,
             miner: "miner".to_string(),
+            reward_address: None,
+            reward_address_signature: None,
             finalizer_mode: FinalizerMode::Ticket,
             finalizer_rank: 0,
             reward: 0,
@@ -435,6 +481,8 @@ mod tests {
             prev_hash: "0".repeat(64),
             timestamp_ms: 1,
             miner: "1".repeat(64),
+            reward_address: None,
+            reward_address_signature: None,
             finalizer_mode: FinalizerMode::Ticket,
             finalizer_rank: 0,
             reward: 1,
@@ -477,6 +525,8 @@ mod tests {
             prev_hash: "0".repeat(64),
             timestamp_ms: 1,
             miner: "1".repeat(64),
+            reward_address: None,
+            reward_address_signature: None,
             finalizer_mode: FinalizerMode::Ticket,
             finalizer_rank: 0,
             reward: 1,
@@ -507,6 +557,7 @@ mod tests {
             prev_hash: "0".repeat(64),
             timestamp_ms: 10,
             miner: wallet.address().to_string(),
+            reward_address: None,
             finalizer_mode: FinalizerMode::Ticket,
             finalizer_rank: 0,
             reward: 1,
@@ -532,6 +583,7 @@ mod tests {
             prepared.height,
             &prepared.prev_hash,
             &prepared.miner,
+            prepared.reward_address.as_deref(),
             prepared.finalizer_mode,
             prepared.finalizer_rank,
             prepared.reward,
@@ -575,5 +627,56 @@ mod tests {
         assert_eq!(block.burn_bundle_section, BurnBundleSection::default());
         assert_eq!(block.json_size_bytes().unwrap(), canonical_json_len);
         assert!(canonical_json_len > compact_wire_json.len());
+    }
+
+    #[test]
+    fn activated_reward_address_is_authenticated_by_finalizer() {
+        let wallet = Wallet::from_seed("hybrid-reward-finalizer");
+        let reward_address = wallet.hybrid_address(crate::domain::AddressNetwork::Mainnet);
+        let prepared = PreparedBlock {
+            height: crate::domain::HYBRID_REWARD_ACTIVATION_HEIGHT,
+            prev_hash: "0".repeat(64),
+            timestamp_ms: 10,
+            miner: wallet.address().to_string(),
+            reward_address: Some(reward_address.clone()),
+            finalizer_mode: FinalizerMode::Recovery,
+            finalizer_rank: 0,
+            reward: 1,
+            vdf_rounds: 1,
+            vdf_seed: "seed".to_string(),
+            leader_ticket: None,
+            burn_bundle_section: BurnBundleSection::default(),
+            transactions: Vec::new(),
+            transactions_v2: Vec::new(),
+        };
+
+        let block = prepared.finish(&wallet, "vdf".to_string());
+        let signature = block.reward_address_signature.as_deref().unwrap();
+        crate::domain::ledger_ops::verify_address_signature(
+            wallet.address(),
+            &super::reward_address_payload(
+                block.height,
+                &block.prev_hash,
+                &block.miner,
+                &reward_address,
+            ),
+            signature,
+            "reward address",
+        )
+        .unwrap();
+        assert!(
+            crate::domain::ledger_ops::verify_address_signature(
+                wallet.address(),
+                &super::reward_address_payload(
+                    block.height,
+                    &block.prev_hash,
+                    &block.miner,
+                    "iuna1ptampered",
+                ),
+                signature,
+                "reward address",
+            )
+            .is_err()
+        );
     }
 }

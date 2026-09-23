@@ -37,6 +37,7 @@ impl Ledger {
         transaction: &TransactionV2,
         height: u64,
     ) -> Result<()> {
+        self.validate_transaction_v2_anchor_for_block(transaction, height)?;
         self.validated_v2_utxos_at_height(transaction, height)?;
         Ok(())
     }
@@ -54,6 +55,7 @@ impl Ledger {
         height: u64,
     ) -> Result<TransactionSubmitOutcome> {
         ensure_transaction_v2_active(height)?;
+        self.validate_transaction_v2_anchor_for_pending(&transaction)?;
         let domain = self.transaction_v2_domain()?;
         let transaction_id = transaction.transaction_id(&domain)?;
         if self
@@ -141,13 +143,17 @@ impl Ledger {
         for transaction in pending {
             let bytes = transaction.encoded_size_bytes(&domain)?;
             let mut candidate_utxos = utxos.clone();
-            if apply_prevalidated_transaction_v2_to_utxos(
-                &transaction,
-                &domain,
-                network,
-                &mut candidate_utxos,
-            )
-            .is_ok()
+            if self
+                .validate_transaction_v2_anchor_for_pending(&transaction)
+                .and_then(|()| {
+                    apply_prevalidated_transaction_v2_to_utxos(
+                        &transaction,
+                        &domain,
+                        network,
+                        &mut candidate_utxos,
+                    )
+                })
+                .is_ok()
             {
                 utxos = candidate_utxos;
                 self.pending_v2.push(transaction);
@@ -172,6 +178,52 @@ impl Ledger {
             &mut utxos,
         )?;
         Ok(utxos)
+    }
+
+    pub(super) fn validate_transaction_v2_anchor_for_block(
+        &self,
+        transaction: &TransactionV2,
+        height: u64,
+    ) -> Result<()> {
+        if !transaction.is_burn() {
+            return Ok(());
+        }
+        let anchor = transaction
+            .burn_anchor()
+            .context("transaction v2 burn is missing its chain anchor")?;
+        let expected = decode_hex_array::<32>(&self.tip().prev_hash)
+            .context("block grandparent hash is invalid")?;
+        if height >= super::TIP_BOUND_BURN_ACTIVATION_HEIGHT && anchor != expected {
+            bail!("transaction v2 burn anchor does not match the block grandparent");
+        }
+        Ok(())
+    }
+
+    pub(super) fn validate_transaction_v2_anchor_for_pending(
+        &self,
+        transaction: &TransactionV2,
+    ) -> Result<()> {
+        if !transaction.is_burn() {
+            return Ok(());
+        }
+        let anchor = transaction
+            .burn_anchor()
+            .context("transaction v2 burn is missing its chain anchor")?;
+        let tip = decode_hex_array::<32>(self.tip_hash()).context("tip hash is invalid")?;
+        let parent =
+            decode_hex_array::<32>(&self.tip().prev_hash).context("tip parent hash is invalid")?;
+        if anchor != tip && anchor != parent {
+            return Err(super::ValidationError::BurnAnchorOutsidePendingWindow.into());
+        }
+        Ok(())
+    }
+
+    pub(crate) fn transaction_v2_is_eligible_for_next_block(
+        &self,
+        transaction: &TransactionV2,
+    ) -> bool {
+        self.validate_transaction_v2_anchor_for_block(transaction, self.height().saturating_add(1))
+            .is_ok()
     }
 }
 
@@ -314,7 +366,7 @@ fn apply_transaction_v2_to_utxos_with_policy(
     utxos: &mut BTreeMap<OutPoint, TxOutput>,
     verify_authorizations: bool,
 ) -> Result<()> {
-    let (spent, outputs, fee) = match transaction {
+    let (spent, outputs, fee, burned) = match transaction {
         TransactionV2::Migration {
             inputs,
             outputs,
@@ -324,6 +376,7 @@ fn apply_transaction_v2_to_utxos_with_policy(
             spend_legacy_inputs(inputs, utxos)?,
             outputs.as_slice(),
             *fee,
+            0,
         ),
         TransactionV2::Transfer {
             inputs,
@@ -334,9 +387,22 @@ fn apply_transaction_v2_to_utxos_with_policy(
             spend_v2_inputs(inputs, network, utxos)?,
             outputs.as_slice(),
             *fee,
+            0,
         ),
-        TransactionV2::Burn { .. } => {
-            bail!("transaction v2 burns are not integrated into live burn consensus")
+        TransactionV2::Burn {
+            inputs,
+            change,
+            amount,
+            fee,
+            ..
+        } => {
+            transaction.burn_legacy_owner()?;
+            (
+                spend_v2_inputs(inputs, network, utxos)?,
+                change.as_slice(),
+                *fee,
+                *amount,
+            )
         }
         TransactionV2::Mine { .. } => {
             bail!("transaction v2 mining is not integrated into live proof consensus")
@@ -346,7 +412,9 @@ fn apply_transaction_v2_to_utxos_with_policy(
     let credited = sum_outputs(outputs)?;
     let required = credited
         .checked_add(fee)
-        .context("transaction v2 output value plus fee overflows")?;
+        .context("transaction v2 output value plus fee overflows")?
+        .checked_add(burned)
+        .context("transaction v2 output value plus burn overflows")?;
     if spent != required {
         bail!("transaction v2 input value does not equal outputs plus fee");
     }
@@ -564,6 +632,102 @@ mod tests {
                 .validate_transaction_v2_at_height(&transfer, 3_001)
                 .is_err()
         );
+    }
+
+    #[test]
+    fn hybrid_wallet_can_build_select_and_create_a_ticket_from_a_v2_burn() {
+        let wallet = Wallet::from_seed("v2-burn-wallet");
+        let mut ledger = Ledger::new(BTreeMap::from([(wallet.address().to_string(), 100)]), 1);
+        let migration = ledger.build_v2_migration(&wallet, 3).unwrap();
+        ledger.utxos = ledger
+            .validated_v2_utxos_at_height(&migration, 3_000)
+            .unwrap();
+        let split = ledger
+            .build_v2_transfer(&wallet, wallet.hybrid_versioned_address(), 40, 1)
+            .unwrap();
+        ledger.utxos = ledger.validated_v2_utxos_at_height(&split, 3_000).unwrap();
+        set_next_height(&mut ledger, post_activation_height());
+
+        let burn = ledger.build_v2_burn_for_next_block(&wallet, 9, 5).unwrap();
+        assert_eq!(
+            burn.burn_legacy_owner().unwrap().as_deref(),
+            Some(wallet.address())
+        );
+        assert_eq!(burn.amount(), 9);
+        ledger.submit_transaction_v2(burn.clone()).unwrap();
+        let mut low_fee_build_ledger = ledger.clone();
+        low_fee_build_ledger
+            .utxos
+            .retain(|_, output| output.amount == 40);
+        let low_fee_burn = low_fee_build_ledger
+            .build_v2_burn_for_next_block(&wallet, 7, 1)
+            .unwrap();
+        ledger.submit_transaction_v2(low_fee_burn.clone()).unwrap();
+
+        let bundles = ledger.build_burn_bundles(&wallet).unwrap();
+        assert!(!bundles.is_empty());
+        let domain = ledger.transaction_v2_domain().unwrap();
+        let expected_burns = vec![
+            hex_encode(burn.encode(&domain).unwrap()),
+            hex_encode(low_fee_burn.encode(&domain).unwrap()),
+        ];
+        assert!(
+            bundles
+                .iter()
+                .all(|bundle| bundle.burns_v2 == vec![expected_burns[0].clone()])
+        );
+        let recovery = ledger
+            .prepare_recovery_block_with_required_burn_and_burn_bundles(
+                wallet.address(),
+                None,
+                ledger.recovery_block_min_timestamp(),
+                Vec::new(),
+                None,
+            )
+            .unwrap();
+        assert_eq!(recovery.transactions_v2.len(), 2);
+        let section = ledger.burn_bundle_section_from_bundles(bundles).unwrap();
+        assert_eq!(section.burns_v2.len(), 1);
+        let sorted_section = ledger
+            .burn_bundle_section_from_bundles(vec![super::super::BurnBundle {
+                height: ledger.height() + 1,
+                prev_hash: ledger.tip_hash().to_string(),
+                slot: 1,
+                member: wallet.address().to_string(),
+                reward_address: None,
+                burns: Vec::new(),
+                burns_v2: vec![expected_burns[1].clone(), expected_burns[0].clone()],
+                signature: "test-signature".to_string(),
+            }])
+            .unwrap();
+        assert_eq!(
+            sorted_section.expand(ledger.height() + 1, ledger.tip_hash())[0].burns_v2,
+            expected_burns
+        );
+
+        let selection = ledger
+            .select_block_transactions_with_required_burn_owner(
+                Some(wallet.address()),
+                None,
+                super::super::FinalizerMode::Ticket,
+                &section,
+            )
+            .unwrap();
+        assert!(selection.transactions.is_empty());
+        assert_eq!(selection.transactions_v2.len(), 2);
+
+        let mut block = ledger.tip().clone();
+        block.height = post_activation_height();
+        block.transactions.clear();
+        block.transactions_v2 = selection.transactions_v2;
+        let tickets =
+            super::super::ticket::tickets_created_by_block(&block, ledger.launch_profile())
+                .unwrap();
+        assert_eq!(tickets.len(), 2);
+        assert_eq!(tickets[0].owner, wallet.address());
+        assert_eq!(tickets[0].amount, 9);
+        assert_eq!(tickets[1].owner, wallet.address());
+        assert_eq!(tickets[1].amount, 7);
     }
 
     #[test]

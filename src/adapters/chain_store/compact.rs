@@ -3,14 +3,16 @@ use std::{collections::BTreeMap, sync::Arc};
 use anyhow::{Context, Result, bail};
 
 use crate::domain::{
-    Amount, Block, BurnBundleSection, BurnBundleSignature, ChainSnapshot, FinalizerMode,
-    LaunchProfile, LeaderProof, MaskedBurn, OutPoint, Transaction, TxInput, TxOutput,
+    AddressNetwork, Amount, Block, BurnBundleSection, BurnBundleSignature, ChainSnapshot,
+    FinalizerMode, LaunchProfile, LeaderProof, MaskedBurn, OutPoint, Transaction, TxInput,
+    TxOutput, decode_versioned_address,
 };
 
 const COMPACT_SNAPSHOT_MAGIC: &[u8] = b"IUNA-SNAPSHOT";
 const MIN_SUPPORTED_COMPACT_SNAPSHOT_VERSION: u8 = 6;
-const COMPACT_SNAPSHOT_VERSION: u8 = 8;
+const COMPACT_SNAPSHOT_VERSION: u8 = 9;
 const TRANSACTION_V2_COMPACT_SNAPSHOT_VERSION: u8 = 8;
+const HYBRID_REWARD_COMPACT_SNAPSHOT_VERSION: u8 = 9;
 const VDF_SOLUTION_PREFIX: &str = "classgroup-wesolowski-bqfc-v1:";
 const MAX_COMPACT_GENESIS_ALLOCATIONS: usize = 100_000;
 const MAX_COMPACT_SNAPSHOT_BLOCKS: usize = 10_000;
@@ -74,7 +76,17 @@ impl CompactBlockContext {
         // Preserve the exact pre-v2 consensus size for legacy-only blocks. Snapshot v8 has one
         // additional count field, but that storage framing must not move the historical block-size
         // boundary before height 3000.
-        let version = if block.transactions_v2.is_empty() {
+        let has_hybrid_rewards = block.reward_address.is_some()
+            || block.reward_address_signature.is_some()
+            || !block.burn_bundle_section.burns_v2.is_empty()
+            || block
+                .burn_bundle_section
+                .signatures
+                .iter()
+                .any(|signature| signature.reward_address.is_some());
+        let version = if has_hybrid_rewards {
+            HYBRID_REWARD_COMPACT_SNAPSHOT_VERSION
+        } else if block.transactions_v2.is_empty() {
             TRANSACTION_V2_COMPACT_SNAPSHOT_VERSION - 1
         } else {
             TRANSACTION_V2_COMPACT_SNAPSHOT_VERSION
@@ -343,6 +355,18 @@ fn encode_block_body_with_size_breakdown_for_version(
     let block_start = writer.bytes.len();
     writer.varint(block.timestamp_ms);
     writer.address(&block.miner, tables)?;
+    if version >= HYBRID_REWARD_COMPACT_SNAPSHOT_VERSION {
+        writer.bool(block.reward_address.is_some());
+        if let Some(address) = &block.reward_address {
+            writer.address(address, tables)?;
+        }
+        writer.bool(block.reward_address_signature.is_some());
+        if let Some(signature) = &block.reward_address_signature {
+            writer.fixed_hex::<64>(signature, "reward address signature")?;
+        }
+    } else if block.reward_address.is_some() || block.reward_address_signature.is_some() {
+        bail!("compact snapshot version {version} cannot encode a hybrid reward address");
+    }
     writer.u8(match block.finalizer_mode {
         FinalizerMode::Ticket => 0,
         FinalizerMode::Recovery => 1,
@@ -385,7 +409,7 @@ fn encode_block_body_with_size_breakdown_for_version(
         bail!("compact snapshot version {version} cannot encode transaction v2 envelopes");
     }
     let burn_bundle_start = writer.bytes.len();
-    encode_burn_bundle_section(writer, block, tables)?;
+    encode_burn_bundle_section(writer, block, tables, version)?;
     let block_end = writer.bytes.len();
     Ok(CompactBlockSizeBreakdown {
         total_bytes: block_end.saturating_sub(block_start),
@@ -417,6 +441,17 @@ fn decode_block_body_for_version(
 ) -> Result<Block> {
     let timestamp_ms = reader.varint()?;
     let miner = reader.address(tables)?;
+    let reward_address = if version >= HYBRID_REWARD_COMPACT_SNAPSHOT_VERSION && reader.bool()? {
+        Some(reader.address(tables)?)
+    } else {
+        None
+    };
+    let reward_address_signature =
+        if version >= HYBRID_REWARD_COMPACT_SNAPSHOT_VERSION && reader.bool()? {
+            Some(reader.fixed_hex::<64>()?)
+        } else {
+            None
+        };
     let finalizer_mode = match reader.u8()? {
         0 => FinalizerMode::Ticket,
         1 => FinalizerMode::Recovery,
@@ -453,12 +488,15 @@ fn decode_block_body_for_version(
     } else {
         Vec::new()
     };
-    let burn_bundle_section = decode_burn_bundle_section(reader, &transactions, tables)?;
+    let burn_bundle_section =
+        decode_burn_bundle_section(reader, &transactions, &transactions_v2, tables, version)?;
     let mut block = Block {
         height,
         prev_hash,
         timestamp_ms,
         miner,
+        reward_address,
+        reward_address_signature,
         finalizer_mode,
         finalizer_rank,
         reward,
@@ -478,12 +516,21 @@ fn encode_burn_bundle_section(
     writer: &mut CompactWriter,
     block: &Block,
     tables: &mut EncodeTables,
+    version: u8,
 ) -> Result<()> {
     let section = &block.burn_bundle_section;
     writer.varint(section.signatures.len() as u64);
     for signature in &section.signatures {
         writer.varint(u64::from(signature.slot));
         writer.address(&signature.member, tables)?;
+        if version >= HYBRID_REWARD_COMPACT_SNAPSHOT_VERSION {
+            writer.bool(signature.reward_address.is_some());
+            if let Some(address) = &signature.reward_address {
+                writer.address(address, tables)?;
+            }
+        } else if signature.reward_address.is_some() {
+            bail!("compact snapshot version {version} cannot encode a committee reward address");
+        }
         writer.fixed_hex::<64>(&signature.signature, "burn bundle signature")?;
     }
     writer.varint(section.burns.len() as u64);
@@ -496,13 +543,29 @@ fn encode_burn_bundle_section(
         writer.varint(transaction_index as u64);
         writer.u8(masked.bundle_mask);
     }
+    if version >= HYBRID_REWARD_COMPACT_SNAPSHOT_VERSION {
+        writer.varint(section.burns_v2.len() as u64);
+        for masked in &section.burns_v2 {
+            let transaction_index = block
+                .transactions_v2
+                .iter()
+                .position(|envelope| envelope == &masked.envelope)
+                .context("transaction v2 burn bundle envelope is missing from block")?;
+            writer.varint(transaction_index as u64);
+            writer.u8(masked.bundle_mask);
+        }
+    } else if !section.burns_v2.is_empty() {
+        bail!("compact snapshot version {version} cannot encode transaction v2 burn attestations");
+    }
     Ok(())
 }
 
 fn decode_burn_bundle_section(
     reader: &mut CompactReader<'_>,
     transactions: &[Transaction],
+    transactions_v2: &[String],
     tables: &mut DecodeTables,
+    version: u8,
 ) -> Result<BurnBundleSection> {
     let signatures = decode_vec(
         reader,
@@ -512,6 +575,13 @@ fn decode_burn_bundle_section(
             Ok(BurnBundleSignature {
                 slot: u8::try_from(reader.varint()?).context("burn bundle slot does not fit u8")?,
                 member: reader.address(tables)?,
+                reward_address: if version >= HYBRID_REWARD_COMPACT_SNAPSHOT_VERSION
+                    && reader.bool()?
+                {
+                    Some(reader.address(tables)?)
+                } else {
+                    None
+                },
                 signature: reader.fixed_hex::<64>()?,
             })
         },
@@ -538,7 +608,33 @@ fn decode_burn_bundle_section(
             })
         },
     )?;
-    Ok(BurnBundleSection { signatures, burns })
+    let burns_v2 = if version >= HYBRID_REWARD_COMPACT_SNAPSHOT_VERSION {
+        decode_vec(
+            reader,
+            "transaction v2 burn bundle count",
+            MAX_COMPACT_VEC_ITEMS,
+            |reader| {
+                let transaction_index = reader.bounded_usize(
+                    "transaction v2 burn bundle index",
+                    transactions_v2.len().saturating_sub(1),
+                )?;
+                Ok(crate::domain::MaskedBurnV2 {
+                    envelope: transactions_v2
+                        .get(transaction_index)
+                        .context("transaction v2 burn bundle index is out of bounds")?
+                        .clone(),
+                    bundle_mask: reader.u8()?,
+                })
+            },
+        )?
+    } else {
+        Vec::new()
+    };
+    Ok(BurnBundleSection {
+        signatures,
+        burns,
+        burns_v2,
+    })
 }
 
 fn encode_transaction(
@@ -869,8 +965,13 @@ impl CompactWriter {
             self.u8(0);
             self.varint(*index);
         } else {
-            self.u8(1);
-            self.fixed_hex::<32>(value, "address")?;
+            if decode_hex(value).is_ok() {
+                self.u8(1);
+                self.fixed_hex::<32>(value, "address")?;
+            } else {
+                self.u8(2);
+                self.string(value);
+            }
             tables.register_address(value);
         }
         Ok(())
@@ -1032,6 +1133,21 @@ impl<'a> CompactReader<'a> {
                 tables.register_address(&value);
                 Ok(value)
             }
+            2 => {
+                let value = self.string()?;
+                let network = if value.starts_with("tiuna1") {
+                    AddressNetwork::Testnet
+                } else {
+                    AddressNetwork::Mainnet
+                };
+                decode_versioned_address(&value, network)
+                    .context("compact versioned address is invalid")?;
+                if tables.address_indices.contains_key(&value) {
+                    bail!("compact address is encoded twice instead of referenced");
+                }
+                tables.register_address(&value);
+                Ok(value)
+            }
             other => bail!("invalid compact address tag {other}"),
         }
     }
@@ -1107,8 +1223,9 @@ mod tests {
     use std::{collections::BTreeMap, panic};
 
     use crate::domain::{
-        Block, BurnBundleSection, FinalizerMode, LaunchProfile, Ledger, MICRO_IUNA, MaskedBurn,
-        OutPoint, Transaction, TxInput, TxOutput, Wallet,
+        AddressNetwork, Block, BurnBundleSection, BurnBundleSignature, FinalizerMode,
+        LaunchProfile, Ledger, MICRO_IUNA, MaskedBurn, MaskedBurnV2, OutPoint, Transaction,
+        TxInput, TxOutput, Wallet,
     };
 
     use super::{
@@ -1122,7 +1239,7 @@ mod tests {
     };
 
     #[test]
-    fn compact_snapshot_v8_roundtrips_default_and_local_profiles() {
+    fn compact_snapshot_v9_roundtrips_default_and_local_profiles() {
         let wallet = Wallet::from_seed("compact-profile-wire-version");
         let allocations = BTreeMap::from([(wallet.address().to_string(), MICRO_IUNA)]);
         let default_snapshot = Ledger::new(allocations.clone(), 1).snapshot();
@@ -1359,6 +1476,8 @@ mod tests {
                 prev_hash: "0".repeat(64),
                 timestamp_ms: 1,
                 miner: owner.clone(),
+                reward_address: None,
+                reward_address_signature: None,
                 finalizer_mode: FinalizerMode::Ticket,
                 finalizer_rank: 0,
                 reward: 0,
@@ -1380,6 +1499,7 @@ mod tests {
                 burn: burn.clone(),
                 bundle_mask: 0b10,
             }],
+            burns_v2: Vec::new(),
         });
         let encode = |block: &Block| {
             let mut writer = CompactWriter::default();
@@ -1393,7 +1513,7 @@ mod tests {
         let mut context = CompactBlockContext::default();
         let breakdown = context.append_block_with_size_breakdown(&with).unwrap();
         assert_eq!(breakdown.total_bytes, with_bytes.len());
-        assert_eq!(breakdown.burn_bundle_bytes, 4);
+        assert_eq!(breakdown.burn_bundle_bytes, 5);
         assert!(breakdown.burn_bytes > 0);
         assert_eq!(breakdown.transfer_bytes, 0);
         assert_eq!(breakdown.mine_bytes, 0);
@@ -1431,6 +1551,46 @@ mod tests {
         .blocks[0]
             .clone();
         block.transactions_v2 = vec!["000102ff".to_string()];
+        block.hash = block.compute_hash();
+        let mut writer = CompactWriter::default();
+        encode_block_body(&mut writer, &block, &mut EncodeTables::default()).unwrap();
+        let bytes = writer.into_inner();
+        let mut reader = CompactReader::new(&bytes);
+
+        let decoded = decode_block_body(
+            &mut reader,
+            block.height,
+            block.prev_hash.clone(),
+            &mut DecodeTables::default(),
+        )
+        .unwrap();
+
+        reader.finish().unwrap();
+        assert_eq!(decoded, block);
+    }
+
+    #[test]
+    fn compact_v9_roundtrips_hybrid_reward_addresses() {
+        let wallet = Wallet::from_seed("compact-hybrid-reward");
+        let mut block = Ledger::new(
+            BTreeMap::from([(wallet.address().to_string(), MICRO_IUNA)]),
+            1,
+        )
+        .snapshot()
+        .blocks[0]
+            .clone();
+        block.reward_address = Some(wallet.hybrid_address(AddressNetwork::Mainnet));
+        block.burn_bundle_section.signatures = vec![BurnBundleSignature {
+            slot: 1,
+            member: wallet.address().to_string(),
+            reward_address: Some(wallet.hybrid_address(AddressNetwork::Mainnet)),
+            signature: "11".repeat(64),
+        }];
+        block.transactions_v2 = vec!["aa".to_string()];
+        block.burn_bundle_section.burns_v2 = vec![MaskedBurnV2 {
+            envelope: "aa".to_string(),
+            bundle_mask: 1 << 1,
+        }];
         block.hash = block.compute_hash();
         let mut writer = CompactWriter::default();
         encode_block_body(&mut writer, &block, &mut EncodeTables::default()).unwrap();
@@ -1496,6 +1656,8 @@ mod tests {
         writer
             .fixed_hex::<32>(&"0".repeat(64), "test miner")
             .unwrap();
+        writer.bool(false);
+        writer.bool(false);
     }
 
     fn block_body_through_leader_proof_flag(writer: &mut CompactWriter) {

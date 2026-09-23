@@ -138,7 +138,9 @@ impl Wallet {
             prev_hash: payload.prev_hash,
             slot: payload.slot,
             member: self.address.clone(),
+            reward_address: payload.reward_address,
             burns: payload.burns,
+            burns_v2: payload.burns_v2,
             signature,
         }
     }

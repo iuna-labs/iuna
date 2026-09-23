@@ -278,7 +278,9 @@ mod tests {
             prev_hash: "parent".to_string(),
             slot,
             member: format!("member-{slot}"),
+            reward_address: None,
             burns: vec![burn(signature)],
+            burns_v2: Vec::new(),
             signature: format!("bundle-{signature}"),
         }
     }
@@ -289,6 +291,8 @@ mod tests {
             prev_hash: "0".repeat(64),
             timestamp_ms: height,
             miner: "0".repeat(64),
+            reward_address: None,
+            reward_address_signature: None,
             finalizer_mode: FinalizerMode::Ticket,
             finalizer_rank: 0,
             reward: 0,

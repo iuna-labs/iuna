@@ -44,8 +44,10 @@ pub const PROTOCOL_VERSION: u32 = 2;
 pub const MAX_PROTOCOL_CAPABILITIES: usize = 16;
 pub const MAX_PROTOCOL_CAPABILITY_BYTES: usize = 64;
 pub const CAPABILITY_ADDRESS_V1_READ: &str = "address-v1-read";
+pub const CAPABILITY_HYBRID_REWARD_PAYOUTS: &str = "hybrid-reward-payouts";
 pub const CAPABILITY_SIGNATURE_SCHEMES_V1: &str = "signature-schemes-v1";
 pub const CAPABILITY_TRANSACTION_V2_BLOCKS: &str = "transaction-v2-blocks";
+pub const CAPABILITY_TRANSACTION_V2_BURNS: &str = "transaction-v2-burns";
 pub const CAPABILITY_TRANSACTION_V2_MEMPOOL: &str = "transaction-v2-mempool";
 pub const MAINNET_CANDIDATE_NETWORK_ID: &str = "iuna-mainnet-candidate";
 pub const MAINNET_CANDIDATE_GENESIS_HASH: &str =
@@ -68,8 +70,10 @@ static DEBUG_LOGGING: AtomicBool = AtomicBool::new(false);
 pub fn protocol_capabilities() -> Vec<String> {
     vec![
         CAPABILITY_ADDRESS_V1_READ.to_string(),
+        CAPABILITY_HYBRID_REWARD_PAYOUTS.to_string(),
         CAPABILITY_SIGNATURE_SCHEMES_V1.to_string(),
         CAPABILITY_TRANSACTION_V2_BLOCKS.to_string(),
+        CAPABILITY_TRANSACTION_V2_BURNS.to_string(),
         CAPABILITY_TRANSACTION_V2_MEMPOOL.to_string(),
     ]
 }
@@ -110,14 +114,31 @@ pub fn validate_transaction_v2_peer_capability(
     {
         anyhow::bail!("peer lacks transaction-v2 block capability near activation");
     }
+    if activation_is_next
+        && !capabilities
+            .iter()
+            .any(|capability| capability == CAPABILITY_TRANSACTION_V2_BURNS)
+    {
+        anyhow::bail!("peer lacks transaction-v2 burn capability near activation");
+    }
+    let hybrid_rewards_are_next = local_height.max(remote_height).saturating_add(1)
+        >= crate::domain::HYBRID_REWARD_ACTIVATION_HEIGHT;
+    if hybrid_rewards_are_next
+        && !capabilities
+            .iter()
+            .any(|capability| capability == CAPABILITY_HYBRID_REWARD_PAYOUTS)
+    {
+        anyhow::bail!("peer lacks hybrid reward payout capability near activation");
+    }
     Ok(())
 }
 
 #[cfg(test)]
 mod tests {
     use super::{
-        BLOCK_REQUEST_LIMIT, CAPABILITY_ADDRESS_V1_READ, CAPABILITY_SIGNATURE_SCHEMES_V1,
-        CAPABILITY_TRANSACTION_V2_BLOCKS, CAPABILITY_TRANSACTION_V2_MEMPOOL, DEFAULT_VDF_ROUNDS,
+        BLOCK_REQUEST_LIMIT, CAPABILITY_ADDRESS_V1_READ, CAPABILITY_HYBRID_REWARD_PAYOUTS,
+        CAPABILITY_SIGNATURE_SCHEMES_V1, CAPABILITY_TRANSACTION_V2_BLOCKS,
+        CAPABILITY_TRANSACTION_V2_BURNS, CAPABILITY_TRANSACTION_V2_MEMPOOL, DEFAULT_VDF_ROUNDS,
         MAINNET_CANDIDATE_GENESIS_HASH, MAINNET_CANDIDATE_NETWORK_ID, MAINNET_NETWORK_ID,
         MAX_PROTOCOL_CAPABILITIES, NETWORK_ID, PROTOCOL_VERSION, TRANSACTION_BATCH_LIMIT,
         protocol_capabilities, validate_network_genesis, validate_protocol_capabilities,
@@ -154,8 +175,10 @@ mod tests {
             capabilities,
             [
                 CAPABILITY_ADDRESS_V1_READ,
+                CAPABILITY_HYBRID_REWARD_PAYOUTS,
                 CAPABILITY_SIGNATURE_SCHEMES_V1,
                 CAPABILITY_TRANSACTION_V2_BLOCKS,
+                CAPABILITY_TRANSACTION_V2_BURNS,
                 CAPABILITY_TRANSACTION_V2_MEMPOOL,
             ]
         );
@@ -188,9 +211,34 @@ mod tests {
         assert!(validate_transaction_v2_peer_capability(&[], 2_999, 2_998).is_err());
         assert!(
             validate_transaction_v2_peer_capability(
-                &[CAPABILITY_TRANSACTION_V2_BLOCKS.to_string()],
+                &[
+                    CAPABILITY_TRANSACTION_V2_BLOCKS.to_string(),
+                    CAPABILITY_TRANSACTION_V2_BURNS.to_string(),
+                ],
                 2_999,
                 2_998,
+            )
+            .is_ok()
+        );
+    }
+
+    #[test]
+    fn hybrid_reward_capability_is_required_when_activation_is_next() {
+        let v2 = CAPABILITY_TRANSACTION_V2_BLOCKS.to_string();
+        let burns = CAPABILITY_TRANSACTION_V2_BURNS.to_string();
+        assert!(
+            validate_transaction_v2_peer_capability(&[v2.clone(), burns.clone()], 3_748, 3_748)
+                .is_ok()
+        );
+        assert!(
+            validate_transaction_v2_peer_capability(&[v2.clone(), burns.clone()], 3_749, 3_748)
+                .is_err()
+        );
+        assert!(
+            validate_transaction_v2_peer_capability(
+                &[v2, burns, CAPABILITY_HYBRID_REWARD_PAYOUTS.to_string(),],
+                3_749,
+                3_748,
             )
             .is_ok()
         );

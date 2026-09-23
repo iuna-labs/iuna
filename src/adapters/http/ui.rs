@@ -16,7 +16,7 @@ use super::types::{
 };
 
 pub(super) fn wallet_transaction_rows(
-    wallet: &str,
+    wallet_addresses: &[String],
     pending: Vec<Transaction>,
     chain: &[Block],
     outputs: &BTreeMap<OutPoint, TxOutput>,
@@ -34,7 +34,9 @@ pub(super) fn wallet_transaction_rows(
         if !filters.allows(tx) {
             continue;
         }
-        if let Some(row) = wallet_transaction_row(wallet, tx, outputs, &pending_context) {
+        if let Some(row) =
+            wallet_transaction_row_for_addresses(wallet_addresses, tx, outputs, &pending_context)
+        {
             rows.push((u128::MAX - index as u128, row));
         }
     }
@@ -44,8 +46,8 @@ pub(super) fn wallet_transaction_rows(
             if !filters.allows(tx) {
                 continue;
             }
-            if let Some(row) = wallet_transaction_row(
-                wallet,
+            if let Some(row) = wallet_transaction_row_for_addresses(
+                wallet_addresses,
                 tx,
                 outputs,
                 &WalletTransactionContext {
@@ -163,26 +165,42 @@ pub(super) fn wallet_transaction_v2_row(
     }))
 }
 
+#[cfg(test)]
 pub(super) fn wallet_transaction_row(
     wallet: &str,
     tx: &Transaction,
     outputs_by_outpoint: &BTreeMap<OutPoint, TxOutput>,
     context: &WalletTransactionContext,
 ) -> Option<WalletTransactionRow> {
+    wallet_transaction_row_for_addresses(
+        std::slice::from_ref(&wallet.to_string()),
+        tx,
+        outputs_by_outpoint,
+        context,
+    )
+}
+
+pub(super) fn wallet_transaction_row_for_addresses(
+    wallet_addresses: &[String],
+    tx: &Transaction,
+    outputs_by_outpoint: &BTreeMap<OutPoint, TxOutput>,
+    context: &WalletTransactionContext,
+) -> Option<WalletTransactionRow> {
+    let owns = |address: &str| wallet_addresses.iter().any(|wallet| wallet == address);
     match tx {
         Transaction::Transfer {
             inputs,
             outputs,
             fee,
             signature,
-        } if tx.sender() == wallet || outputs.iter().any(|output| output.address == wallet) => {
-            let sent = tx.sender() == wallet;
+        } if owns(tx.sender()) || outputs.iter().any(|output| owns(&output.address)) => {
+            let sent = owns(tx.sender());
             let amount = if sent {
                 tx.amount()
             } else {
                 outputs
                     .iter()
-                    .filter(|output| output.address == wallet)
+                    .filter(|output| owns(&output.address))
                     .fold(0_u64, |total, output| total.saturating_add(output.amount))
             };
             Some(WalletTransactionRow {
@@ -215,7 +233,7 @@ pub(super) fn wallet_transaction_row(
             fee,
             signature,
             ..
-        } if tx.sender() == wallet => Some(WalletTransactionRow {
+        } if owns(tx.sender()) => Some(WalletTransactionRow {
             kind: "burn",
             from: tx.sender().to_string(),
             to: None,
@@ -242,7 +260,7 @@ pub(super) fn wallet_transaction_row(
             difficulty_bits,
             signature,
             ..
-        } if recipient == wallet => Some(WalletTransactionRow {
+        } if owns(recipient) => Some(WalletTransactionRow {
             kind: "mine",
             from: "pow".to_string(),
             to: Some(recipient.clone()),
@@ -425,16 +443,28 @@ fn ui_block_with_v2(
         .burn_bundle_section
         .expand(block.height, &block.prev_hash)
         .into_iter()
-        .map(|bundle| UiBurnBundle {
-            slot: bundle.slot,
-            member: bundle.member.clone(),
-            hash: bundle.bundle_hash(),
-            byte_size: bundle.serialized_size_bytes().unwrap_or_default(),
-            burns: bundle
+        .map(|bundle| {
+            let mut burns = bundle
                 .burns
                 .iter()
                 .map(|burn| ui_transaction(burn, outputs))
-                .collect(),
+                .collect::<Vec<_>>();
+            if let Some(domain) = transaction_v2_domain {
+                burns.extend(bundle.burns_v2.iter().filter_map(|envelope| {
+                    let encoded = crate::domain::decode_hex(envelope).ok()?;
+                    let (decoded_domain, transaction) = TransactionV2::decode(&encoded).ok()?;
+                    (decoded_domain == *domain)
+                        .then(|| ui_transaction_v2(&transaction, outputs, domain, network).ok())
+                        .flatten()
+                }));
+            }
+            UiBurnBundle {
+                slot: bundle.slot,
+                member: bundle.member.clone(),
+                hash: bundle.bundle_hash(),
+                byte_size: bundle.serialized_size_bytes().unwrap_or_default(),
+                burns,
+            }
         })
         .collect();
     let burn_bundle_bytes = storage_size
@@ -1178,6 +1208,8 @@ mod tests {
             prev_hash: "parent".to_string(),
             timestamp_ms: 1_000,
             miner: "finalizer".to_string(),
+            reward_address: None,
+            reward_address_signature: None,
             finalizer_mode: FinalizerMode::Ticket,
             finalizer_rank: 0,
             reward: 5,
@@ -1188,9 +1220,11 @@ mod tests {
                 signatures: vec![BurnBundleSignature {
                     slot: 2,
                     member: "committee".to_string(),
+                    reward_address: None,
                     signature: "attestation".to_string(),
                 }],
                 burns: Vec::new(),
+                burns_v2: Vec::new(),
             },
             transactions: vec![transfer("transfer", 2), burn("burn")],
             transactions_v2: Vec::new(),
@@ -1275,6 +1309,8 @@ mod tests {
             prev_hash: "parent".to_string(),
             timestamp_ms: 1,
             miner: "finalizer".to_string(),
+            reward_address: None,
+            reward_address_signature: None,
             finalizer_mode: FinalizerMode::Ticket,
             finalizer_rank: 0,
             reward: 1,
@@ -1285,12 +1321,14 @@ mod tests {
                 signatures: vec![crate::domain::BurnBundleSignature {
                     slot: 1,
                     member: "member-1".to_string(),
+                    reward_address: None,
                     signature: "sig-1".to_string(),
                 }],
                 burns: vec![MaskedBurn {
                     burn: burn.clone(),
                     bundle_mask: 1 << 1,
                 }],
+                burns_v2: Vec::new(),
             },
             transactions: vec![burn],
             transactions_v2: Vec::new(),
@@ -1332,6 +1370,8 @@ mod tests {
             prev_hash: "parent".to_string(),
             timestamp_ms: 1,
             miner: "finalizer".to_string(),
+            reward_address: None,
+            reward_address_signature: None,
             finalizer_mode: FinalizerMode::Ticket,
             finalizer_rank: 0,
             reward: 1,
@@ -1368,6 +1408,8 @@ mod tests {
             prev_hash: "parent".to_string(),
             timestamp_ms: 1,
             miner: "finalizer".to_string(),
+            reward_address: None,
+            reward_address_signature: None,
             finalizer_mode: FinalizerMode::Ticket,
             finalizer_rank: 0,
             reward: 1,
@@ -1378,9 +1420,11 @@ mod tests {
                 signatures: vec![crate::domain::BurnBundleSignature {
                     slot: 1,
                     member: "member-1".to_string(),
+                    reward_address: None,
                     signature: "sig-1".to_string(),
                 }],
                 burns: Vec::new(),
+                burns_v2: Vec::new(),
             },
             transactions: vec![burn("burn-a")],
             transactions_v2: Vec::new(),
@@ -1445,6 +1489,8 @@ mod tests {
             prev_hash: "parent".to_string(),
             timestamp_ms: 1,
             miner: "fallback".to_string(),
+            reward_address: None,
+            reward_address_signature: None,
             finalizer_mode: FinalizerMode::Ticket,
             finalizer_rank: 1,
             reward: 1,
@@ -1455,9 +1501,11 @@ mod tests {
                 signatures: vec![crate::domain::BurnBundleSignature {
                     slot: 1,
                     member: "member-1".to_string(),
+                    reward_address: None,
                     signature: "sig-1".to_string(),
                 }],
                 burns: Vec::new(),
+                burns_v2: Vec::new(),
             },
             transactions: vec![burn("burn-a")],
             transactions_v2: Vec::new(),

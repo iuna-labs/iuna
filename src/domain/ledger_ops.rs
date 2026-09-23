@@ -143,6 +143,8 @@ pub(super) fn estimated_block_selection_size_bytes(
         prev_hash: "f".repeat(64),
         timestamp_ms: u64::MAX,
         miner: "f".repeat(64),
+        reward_address: None,
+        reward_address_signature: None,
         finalizer_mode,
         finalizer_rank: 0,
         reward: u64::MAX,
@@ -303,6 +305,7 @@ pub(super) fn vdf_content_commitment(
     height: u64,
     prev_hash: &str,
     miner: &str,
+    reward_address: Option<&str>,
     finalizer_mode: FinalizerMode,
     finalizer_rank: u32,
     reward: Amount,
@@ -329,6 +332,15 @@ pub(super) fn vdf_content_commitment(
         "iuna-vdf-burn-section-v1:{}",
         burn_bundle_section.canonical()
     ));
+    if let Some(reward_address) = reward_address {
+        let transaction_v2_hash = hex_hash(format!(
+            "iuna-vdf-transactions-v2:{}",
+            transactions_v2.join("|")
+        ));
+        return hex_hash(format!(
+            "iuna-vdf-content-v3:{height}:{prev_hash}:{miner}:{reward_address}:{mode}:{finalizer_rank}:{reward}:{vdf_rounds}:{ticket_id}:{transaction_hash}:{transaction_v2_hash}:{burn_section_hash}"
+        ));
+    }
     if transactions_v2.is_empty() {
         return hex_hash(format!(
             "iuna-vdf-content-v1:{height}:{prev_hash}:{miner}:{mode}:{finalizer_rank}:{reward}:{vdf_rounds}:{ticket_id}:{transaction_hash}:{burn_section_hash}"
@@ -593,7 +605,10 @@ pub fn reward_outputs_for_block(
         outputs.push((
             reward_outpoint(&block.hash),
             TxOutput {
-                address: block.miner.clone(),
+                address: block
+                    .reward_address
+                    .clone()
+                    .unwrap_or_else(|| block.miner.clone()),
                 amount: finalizer_amount,
             },
         ));
@@ -614,7 +629,13 @@ pub fn reward_outputs_for_block(
         outputs.push((
             committee_reward_outpoint(&block.hash, member.slot),
             TxOutput {
-                address: member.owner.clone(),
+                address: block
+                    .burn_bundle_section
+                    .signatures
+                    .iter()
+                    .find(|signature| signature.slot == member.slot)
+                    .and_then(|signature| signature.reward_address.clone())
+                    .unwrap_or_else(|| member.owner.clone()),
                 amount,
             },
         ));
@@ -655,18 +676,38 @@ pub(super) fn ensure_outputs_do_not_overflow(
     Ok(())
 }
 
-pub(super) fn ensure_block_has_burn(transactions: &[Transaction]) -> Result<()> {
-    if !transactions.iter().any(Transaction::is_burn) {
+pub(super) fn ensure_block_has_burn(
+    transactions: &[Transaction],
+    transactions_v2: &[String],
+) -> Result<()> {
+    let has_v2_burn = transactions_v2.iter().any(|envelope| {
+        super::decode_hex(envelope)
+            .ok()
+            .and_then(|encoded| super::TransactionV2::decode(&encoded).ok())
+            .is_some_and(|(_, transaction)| transaction.is_burn())
+    });
+    if !transactions.iter().any(Transaction::is_burn) && !has_v2_burn {
         bail!("block must include at least one burn transaction");
     }
     Ok(())
 }
 
-pub(super) fn ensure_block_has_burn_from(transactions: &[Transaction], miner: &str) -> Result<()> {
-    if !transactions
+pub(super) fn ensure_block_has_burn_from(
+    transactions: &[Transaction],
+    transactions_v2: &[String],
+    miner: &str,
+) -> Result<()> {
+    let has_legacy_burn = transactions
         .iter()
-        .any(|transaction| transaction.is_burn() && transaction.sender() == miner)
-    {
+        .any(|transaction| transaction.is_burn() && transaction.sender() == miner);
+    let has_v2_burn = transactions_v2.iter().any(|envelope| {
+        super::decode_hex(envelope)
+            .ok()
+            .and_then(|encoded| super::TransactionV2::decode(&encoded).ok())
+            .and_then(|(_, transaction)| transaction.burn_legacy_owner().ok().flatten())
+            .is_some_and(|owner| owner == miner)
+    });
+    if !has_legacy_burn && !has_v2_burn {
         bail!("recovery block must include a burn from the finalizer");
     }
     Ok(())
@@ -683,7 +724,7 @@ pub(super) fn ensure_valid_recovery_block(block: &Block, parent: &Block) -> Resu
     if block.timestamp_ms < min_timestamp {
         bail!("recovery block is not available before timestamp {min_timestamp}");
     }
-    ensure_block_has_burn_from(&block.transactions, &block.miner)
+    ensure_block_has_burn_from(&block.transactions, &block.transactions_v2, &block.miner)
 }
 
 pub(super) fn best_selectable_transaction_index(
@@ -762,6 +803,8 @@ mod tests {
             prev_hash: "p".repeat(64),
             timestamp_ms: 1,
             miner: "finalizer".to_string(),
+            reward_address: None,
+            reward_address_signature: None,
             finalizer_mode,
             finalizer_rank,
             reward,
@@ -792,6 +835,7 @@ mod tests {
             .map(|slot| BurnBundleSignature {
                 slot: *slot,
                 member: format!("committee-{slot}"),
+                reward_address: None,
                 signature: format!("signature-{slot}"),
             })
             .collect();
@@ -803,6 +847,30 @@ mod tests {
             .filter(|(_, output)| output.address == owner)
             .map(|(_, output)| output.amount)
             .sum()
+    }
+
+    #[test]
+    fn activated_rewards_use_explicit_hybrid_payout_addresses() {
+        let mut block = reward_block(FinalizerMode::Ticket, 0, 100);
+        block.height = super::super::HYBRID_REWARD_ACTIVATION_HEIGHT;
+        block.reward_address = Some("finalizer-hybrid".to_string());
+        block.burn_bundle_section.signatures = vec![BurnBundleSignature {
+            slot: 1,
+            member: "committee".to_string(),
+            reward_address: Some("committee-hybrid".to_string()),
+            signature: "signature".to_string(),
+        }];
+        let committee = vec![
+            committee_member(0, "finalizer"),
+            committee_member(1, "committee"),
+        ];
+
+        let outputs = reward_outputs_for_block(&block, &committee);
+
+        assert_eq!(output_amount(&outputs, "finalizer-hybrid"), 50);
+        assert_eq!(output_amount(&outputs, "committee-hybrid"), 50);
+        assert_eq!(output_amount(&outputs, "finalizer"), 0);
+        assert_eq!(output_amount(&outputs, "committee"), 0);
     }
 
     #[test]

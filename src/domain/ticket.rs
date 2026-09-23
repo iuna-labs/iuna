@@ -5,7 +5,8 @@ use sha2::{Digest, Sha256};
 
 use super::{
     Amount, Block, FinalizerMode, GRINDING_RESISTANCE_ACTIVATION_HEIGHT, LaunchProfile,
-    MAX_VDF_ROUNDS, Transaction, VDF_TARGET_BLOCK_MS, hex_hash,
+    MAX_VDF_ROUNDS, Transaction, TransactionV2, VDF_TARGET_BLOCK_MS, decode_hex, hex_encode,
+    hex_hash,
 };
 
 pub(super) const MISSED_FALLBACK_TICKET_INVALIDATION_HEIGHT: u64 = 300;
@@ -134,7 +135,33 @@ pub(super) fn tickets_created_by_block(
     block: &Block,
     profile: &LaunchProfile,
 ) -> Result<Vec<BurnTicket>> {
-    tickets_created_by_transactions(block.height, &block.transactions, profile)
+    let mut tickets = tickets_created_by_transactions(block.height, &block.transactions, profile)?;
+    for envelope in &block.transactions_v2 {
+        let encoded = decode_hex(envelope).context("transaction v2 envelope is not hexadecimal")?;
+        let (domain, transaction) = TransactionV2::decode(&encoded)?;
+        if !transaction.is_burn() {
+            continue;
+        }
+        let owner = transaction
+            .burn_legacy_owner()?
+            .context("transaction v2 burn owner is missing")?;
+        let amount = transaction.amount();
+        let target_height = block
+            .height
+            .checked_add(profile.ticket_maturity_delay_heights)
+            .with_context(|| format!("ticket target height overflow at block {}", block.height))?;
+        let eligible_until_height = target_height
+            .checked_add(profile.ticket_expiry_window_heights - 1)
+            .with_context(|| format!("ticket expiry height overflow at block {}", block.height))?;
+        tickets.push(BurnTicket {
+            id: hex_encode(transaction.transaction_id(&domain)?),
+            owner,
+            amount,
+            eligible_from_height: target_height,
+            eligible_until_height,
+        });
+    }
+    Ok(tickets)
 }
 
 pub(super) fn tickets_created_by_transactions(
@@ -347,6 +374,8 @@ mod tests {
             prev_hash: "0".repeat(64),
             timestamp_ms: 1_000,
             miner: "parent".to_string(),
+            reward_address: None,
+            reward_address_signature: None,
             finalizer_mode: FinalizerMode::Ticket,
             finalizer_rank: 0,
             reward: 0,
@@ -398,6 +427,8 @@ mod tests {
             prev_hash: parent.hash.clone(),
             timestamp_ms: ticket_block_min_timestamp(parent, rank).unwrap(),
             miner: selected.owner.clone(),
+            reward_address: None,
+            reward_address_signature: None,
             finalizer_mode: FinalizerMode::Ticket,
             finalizer_rank: rank,
             reward: 0,

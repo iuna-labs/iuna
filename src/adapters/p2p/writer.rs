@@ -89,6 +89,8 @@ mod tests {
             prev_hash: format!("{:064x}", height.saturating_sub(1)),
             timestamp_ms: height,
             miner: "0".repeat(64),
+            reward_address: None,
+            reward_address_signature: None,
             finalizer_mode: FinalizerMode::Ticket,
             finalizer_rank: 0,
             reward: 0,

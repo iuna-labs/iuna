@@ -304,6 +304,25 @@ impl NodeCore {
             self.last_auto_burn_height = Some(current_height);
             return Ok(anchor_burn);
         }
+        let hybrid_anchor_amount = self
+            .ledger
+            .pending_v2()
+            .iter()
+            .filter(|transaction| {
+                transaction.is_burn()
+                    && self
+                        .ledger
+                        .transaction_v2_is_eligible_for_next_block(transaction)
+                    && transaction.burn_legacy_owner().ok().flatten().as_deref()
+                        == Some(self.wallet.address())
+            })
+            .map(crate::domain::TransactionV2::amount)
+            .max()
+            .unwrap_or(0);
+        if hybrid_anchor_amount >= self.burn_per_block {
+            self.last_auto_burn_height = Some(current_height);
+            return Ok(anchor_burn);
+        }
         if self.last_auto_burn_height == Some(current_height) {
             return Ok(anchor_burn);
         }
@@ -313,6 +332,17 @@ impl NodeCore {
         let ledger = self.wallet_build_ledger()?;
         let best = self.best_automatic_burn_on_ledger(&ledger, fee_per_byte, balance);
         let Some(tx) = best else {
+            let hybrid_address = self.wallet.unlocked()?.hybrid_address(
+                crate::domain::AddressNetwork::from_profile_id(
+                    &self.ledger.launch_profile().profile_id,
+                ),
+            );
+            let hybrid_balance = self.ledger.balance_of(&hybrid_address);
+            if let Some((transaction, _)) =
+                self.best_automatic_v2_burn_on_ledger(&ledger, fee_per_byte, hybrid_balance, false)
+            {
+                self.submit_public_transaction_v2(transaction)?;
+            }
             self.last_auto_burn_height = Some(current_height);
             return Ok(anchor_burn);
         };
@@ -335,6 +365,20 @@ impl NodeCore {
             return Ok(None);
         }
         if self.last_auto_anchor_burn_height == Some(current_height) {
+            return Ok(None);
+        }
+        if self.ledger.pending_v2().iter().any(|transaction| {
+            transaction.is_burn()
+                && self
+                    .ledger
+                    .transaction_v2_is_eligible_for_next_block(transaction)
+                && transaction.burn_legacy_owner().ok().flatten().as_deref()
+                    == Some(self.wallet.address())
+        }) {
+            // A journal-restored hybrid anchor is already available for this
+            // height. Reuse it instead of trying to spend the same confirmed
+            // hybrid inputs again after a restart.
+            self.last_auto_anchor_burn_height = Some(current_height);
             return Ok(None);
         }
 
@@ -406,9 +450,27 @@ impl NodeCore {
             }
         }) {
             Ok((burn, _)) => burn,
-            Err(error) => {
-                self.last_auto_anchor_burn_height = Some(current_height);
-                return Err(error).context("automatic finalizer anchor burn failed");
+            Err(legacy_error) => {
+                match self.build_v2_burn_with_fee_rate_on_ledger(
+                    &ledger,
+                    anchor_burn_amount,
+                    self.burn_fee,
+                    true,
+                ) {
+                    Ok((transaction, _)) => {
+                        self.submit_public_transaction_v2(transaction)?;
+                        self.last_auto_anchor_burn_height = Some(current_height);
+                        return Ok(None);
+                    }
+                    Err(hybrid_error) => {
+                        self.last_auto_anchor_burn_height = Some(current_height);
+                        return Err(hybrid_error).with_context(|| {
+                            format!(
+                                "automatic finalizer anchor burn failed; legacy path: {legacy_error:#}"
+                            )
+                        });
+                    }
+                }
             }
         };
         self.local_block_anchor_burn = Some((current_height, burn.clone()));
@@ -468,6 +530,56 @@ impl NodeCore {
                 Err(_) => {
                     high = amount.saturating_sub(1);
                 }
+            }
+        }
+        best
+    }
+
+    fn best_automatic_v2_burn_on_ledger(
+        &self,
+        ledger: &Ledger,
+        fee_per_byte: Amount,
+        balance: Amount,
+        for_next_block: bool,
+    ) -> Option<(crate::domain::TransactionV2, super::FeeEstimate)> {
+        let target = self.burn_per_block.min(balance);
+        if target == 0 {
+            return None;
+        }
+        if let Ok(candidate) =
+            self.build_v2_burn_with_fee_rate_on_ledger(ledger, target, fee_per_byte, for_next_block)
+        {
+            if target
+                .checked_add(candidate.1.fee)
+                .is_some_and(|required| required <= balance)
+            {
+                return Some(candidate);
+            }
+        }
+
+        let mut low = 1;
+        let mut high = target;
+        let mut best = None;
+        while low <= high {
+            let amount = low + (high - low) / 2;
+            match self.build_v2_burn_with_fee_rate_on_ledger(
+                ledger,
+                amount,
+                fee_per_byte,
+                for_next_block,
+            ) {
+                Ok(candidate)
+                    if amount
+                        .checked_add(candidate.1.fee)
+                        .is_some_and(|required| required <= balance) =>
+                {
+                    best = Some(candidate);
+                    if amount == Amount::MAX {
+                        break;
+                    }
+                    low = amount + 1;
+                }
+                Ok(_) | Err(_) => high = amount.saturating_sub(1),
             }
         }
         best
@@ -617,8 +729,18 @@ impl NodeCore {
         let finalizer_rank = ledger
             .finalizer_rank_for_next_block(self.wallet.address())
             .context("cannot prepare ticket block without a mature burn ticket")?;
+        let reward_address = if ledger.height().saturating_add(1)
+            >= crate::domain::HYBRID_REWARD_ACTIVATION_HEIGHT
+        {
+            Some(self.wallet.unlocked()?.hybrid_address(
+                crate::domain::AddressNetwork::from_profile_id(&ledger.launch_profile().profile_id),
+            ))
+        } else {
+            None
+        };
         ledger.prepare_next_block_with_required_burn_and_burn_bundles(
             self.wallet.address(),
+            reward_address.as_deref(),
             timestamp_ms,
             self.usable_burn_bundles_for_finalizer_rank(finalizer_rank),
             required_burn_signature.as_deref(),
@@ -627,8 +749,18 @@ impl NodeCore {
 
     fn prepare_recovery_block_with_local_anchor(&self, timestamp_ms: u64) -> Result<PreparedBlock> {
         let (ledger, required_burn_signature) = self.ledger_with_local_block_anchor();
+        let reward_address = if ledger.height().saturating_add(1)
+            >= crate::domain::HYBRID_REWARD_ACTIVATION_HEIGHT
+        {
+            Some(self.wallet.unlocked()?.hybrid_address(
+                crate::domain::AddressNetwork::from_profile_id(&ledger.launch_profile().profile_id),
+            ))
+        } else {
+            None
+        };
         ledger.prepare_recovery_block_with_required_burn_and_burn_bundles(
             self.wallet.address(),
+            reward_address.as_deref(),
             timestamp_ms,
             Vec::new(),
             required_burn_signature.as_deref(),
@@ -887,7 +1019,9 @@ mod tests {
             prev_hash: node.ledger.tip_hash().to_string(),
             slot: 1,
             member: "alpha".to_string(),
+            reward_address: None,
             burns: Vec::new(),
+            burns_v2: Vec::new(),
             signature: "sig-alpha".to_string(),
         };
         let beta = BurnBundle {
@@ -895,7 +1029,9 @@ mod tests {
             prev_hash: node.ledger.tip_hash().to_string(),
             slot: 1,
             member: "beta".to_string(),
+            reward_address: None,
             burns: Vec::new(),
+            burns_v2: Vec::new(),
             signature: "sig-beta".to_string(),
         };
 
@@ -1600,6 +1736,7 @@ mod tests {
         let without_bundle = ledger_with_anchor
             .prepare_next_block_with_required_burn_and_burn_bundles(
                 node.wallet_address(),
+                None,
                 1,
                 Vec::new(),
                 required_burn_signature.as_deref(),

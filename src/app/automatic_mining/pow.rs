@@ -107,7 +107,7 @@ impl NodeCore {
             self.auto_pow_mine_cursor = None;
             return Ok(None);
         }
-        let wallet_address = self.wallet.address().to_string();
+        let wallet_address = self.reward_address_for_next_block()?;
         let needs_cursor = self
             .auto_pow_mine_cursor
             .as_ref()

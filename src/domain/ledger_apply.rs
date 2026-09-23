@@ -5,7 +5,7 @@ use anyhow::{Context, Result, bail};
 use super::ledger_ops::{
     block_reward, credit_reward_outputs, ensure_block_has_burn, ensure_outputs_do_not_overflow,
     ensure_single_input_owner, ensure_valid_recovery_block, validate_block_fee_policy,
-    verify_leader_proof,
+    verify_address_signature, verify_leader_proof,
 };
 use super::ledger_v2::{
     apply_transaction_v2_with_lineage, decode_canonical_transaction_v2_envelope,
@@ -16,11 +16,11 @@ use super::ticket::{
 };
 use super::transaction::transaction_inputs_available;
 use super::{
-    AddressNetwork, Amount, BLOCK_MEDIAN_TIME_PAST_WINDOW, Block, BurnBundleSection,
-    FinalityCheckpoint, FinalizerMode, Ledger, MAX_BLOCK_TIMESTAMP_FUTURE_DRIFT_MS,
-    TRANSACTION_REPLAY_PROTECTION_ACTIVATION_HEIGHT, Transaction, ensure_transaction_v2_active,
-    hex_encode, insert_output_with_lineage, output_lineage_root_for_transaction,
-    spend_inputs_with_lineage, unix_now_ms, verify_vdf,
+    AddressNetwork, AddressVersion, Amount, BLOCK_MEDIAN_TIME_PAST_WINDOW, Block,
+    BurnBundleSection, FinalityCheckpoint, FinalizerMode, Ledger,
+    MAX_BLOCK_TIMESTAMP_FUTURE_DRIFT_MS, TRANSACTION_REPLAY_PROTECTION_ACTIVATION_HEIGHT,
+    Transaction, ensure_transaction_v2_active, hex_encode, insert_output_with_lineage,
+    output_lineage_root_for_transaction, spend_inputs_with_lineage, unix_now_ms, verify_vdf,
 };
 
 impl Ledger {
@@ -109,6 +109,7 @@ impl Ledger {
         for envelope in &block.transactions_v2 {
             let transaction =
                 decode_canonical_transaction_v2_envelope(envelope, &transaction_v2_domain)?;
+            self.validate_transaction_v2_anchor_for_block(&transaction, block.height)?;
             let transaction_id = hex_encode(transaction.transaction_id(&transaction_v2_domain)?);
             if !transaction_v2_ids.insert(transaction_id) {
                 bail!("duplicate transaction v2 in block");
@@ -306,6 +307,32 @@ impl Ledger {
         if block.compute_hash() != block.hash {
             bail!("block hash is invalid");
         }
+        self.validate_reward_address(block.height, block.reward_address.as_deref(), "finalizer")?;
+        if block.height < super::HYBRID_REWARD_ACTIVATION_HEIGHT {
+            if block.reward_address_signature.is_some() {
+                bail!("finalizer reward address signature is not active yet");
+            }
+        } else {
+            let reward_address = block
+                .reward_address
+                .as_deref()
+                .context("finalizer hybrid reward address is required")?;
+            let signature = block
+                .reward_address_signature
+                .as_deref()
+                .context("finalizer reward address signature is required")?;
+            verify_address_signature(
+                &block.miner,
+                &super::block::reward_address_payload(
+                    block.height,
+                    &block.prev_hash,
+                    &block.miner,
+                    reward_address,
+                ),
+                signature,
+                "finalizer reward address",
+            )?;
+        }
         self.ensure_block_transactions_are_not_replays(block)?;
         if block.reward != self.expected_reward_for_block(block)? {
             bail!("block reward is invalid");
@@ -350,7 +377,7 @@ impl Ledger {
             bail!("block exceeds max block size");
         }
         ensure_mine_anchor_limit(block.height, &block.transactions)?;
-        ensure_block_has_burn(&block.transactions)?;
+        ensure_block_has_burn(&block.transactions, &block.transactions_v2)?;
         validate_block_fee_policy(block)?;
         self.validate_burn_bundle_section_for_block(block)?;
         match block.finalizer_mode {
@@ -407,6 +434,33 @@ impl Ledger {
     fn expected_reward_for_block(&self, block: &Block) -> Result<Amount> {
         let v2_fees = self.transaction_v2_fees(&block.transactions_v2)?;
         block_reward(&block.transactions, v2_fees)
+    }
+
+    pub(super) fn validate_reward_address(
+        &self,
+        height: u64,
+        address: Option<&str>,
+        label: &str,
+    ) -> Result<()> {
+        if height < super::HYBRID_REWARD_ACTIVATION_HEIGHT {
+            if address.is_some() {
+                bail!(
+                    "{label} hybrid reward address is not active before height {}",
+                    super::HYBRID_REWARD_ACTIVATION_HEIGHT
+                );
+            }
+            return Ok(());
+        }
+        let address =
+            address.with_context(|| format!("{label} hybrid reward address is required"))?;
+        let decoded = super::decode_versioned_address(
+            address,
+            AddressNetwork::from_profile_id(&self.launch_profile.profile_id),
+        )?;
+        if decoded.version != AddressVersion::HybridKeyCommitment {
+            bail!("{label} reward address must use address v1");
+        }
+        Ok(())
     }
 
     fn transaction_v2_fees(&self, envelopes: &[String]) -> Result<Amount> {

@@ -239,6 +239,8 @@ mod tests {
             prev_hash: format!("{height:064x}"),
             timestamp_ms,
             miner: "finalizer".to_string(),
+            reward_address: None,
+            reward_address_signature: None,
             finalizer_mode: mode,
             finalizer_rank: rank,
             reward: 0,

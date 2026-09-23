@@ -4,6 +4,9 @@ pub const MICRO_IUNA: Amount = 1_000_000;
 pub const BLOCK_REWARD: Amount = MICRO_IUNA;
 pub const MINE_REWARD: Amount = MICRO_IUNA;
 pub const MINE_FINALIZER_FEE: Amount = MICRO_IUNA;
+/// Consensus height at which every newly-created reward output must use an
+/// address-v1 hybrid Ed25519 + ML-DSA payout address.
+pub const HYBRID_REWARD_ACTIVATION_HEIGHT: u64 = 3_750;
 pub const DEFAULT_MINE_FEE: Amount = MINE_FINALIZER_FEE;
 pub const DEFAULT_TRANSACTION_FEE: Amount = MICRO_IUNA;
 pub const DEFAULT_FEE_PER_BYTE: Amount = 1;
@@ -61,6 +64,7 @@ mod tests {
         assert_eq!(BLOCK_REWARD, MICRO_IUNA);
         assert_eq!(MINE_REWARD, MICRO_IUNA);
         assert_eq!(MINE_FINALIZER_FEE, MICRO_IUNA);
+        assert_eq!(HYBRID_REWARD_ACTIVATION_HEIGHT, 3_750);
         assert_eq!(MAX_BLOCK_BYTES, 1_000_000);
         #[cfg(not(feature = "e2e"))]
         assert_eq!(VDF_TARGET_BLOCK_MS, 10 * 60 * 1_000);

@@ -25,6 +25,8 @@ pub(super) fn build_genesis_block(
         prev_hash: "0".repeat(64),
         timestamp_ms: 0,
         miner,
+        reward_address: None,
+        reward_address_signature: None,
         finalizer_mode: FinalizerMode::Ticket,
         finalizer_rank: 0,
         reward,

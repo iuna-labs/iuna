@@ -8,13 +8,39 @@ use super::{
 
 impl Ledger {
     pub fn mine_next_block(&self, wallet: &Wallet, timestamp_ms: u64) -> Result<super::Block> {
-        let prepared = self.prepare_next_block(wallet.address(), timestamp_ms)?;
+        let reward_address = (self.height().saturating_add(1)
+            >= super::HYBRID_REWARD_ACTIVATION_HEIGHT)
+            .then(|| {
+                wallet.hybrid_address(super::AddressNetwork::from_profile_id(
+                    &self.launch_profile.profile_id,
+                ))
+            });
+        let prepared = self.prepare_next_block_with_required_burn_and_burn_bundles(
+            wallet.address(),
+            reward_address.as_deref(),
+            timestamp_ms,
+            Vec::new(),
+            None,
+        )?;
         let vdf_output = run_vdf(prepared.vdf_seed(), prepared.vdf_rounds());
         Ok(prepared.finish(wallet, vdf_output))
     }
 
     pub fn mine_recovery_block(&self, wallet: &Wallet, timestamp_ms: u64) -> Result<super::Block> {
-        let prepared = self.prepare_recovery_block(wallet.address(), timestamp_ms)?;
+        let reward_address = (self.height().saturating_add(1)
+            >= super::HYBRID_REWARD_ACTIVATION_HEIGHT)
+            .then(|| {
+                wallet.hybrid_address(super::AddressNetwork::from_profile_id(
+                    &self.launch_profile.profile_id,
+                ))
+            });
+        let prepared = self.prepare_recovery_block_with_required_burn_and_burn_bundles(
+            wallet.address(),
+            reward_address.as_deref(),
+            timestamp_ms,
+            Vec::new(),
+            None,
+        )?;
         let vdf_output = run_vdf(prepared.vdf_seed(), prepared.vdf_rounds());
         Ok(prepared.finish(wallet, vdf_output))
     }
@@ -31,6 +57,7 @@ impl Ledger {
     ) -> Result<PreparedBlock> {
         self.prepare_next_block_with_required_burn_and_burn_bundles(
             miner,
+            None,
             timestamp_ms,
             burn_bundles,
             None,
@@ -40,11 +67,13 @@ impl Ledger {
     pub(crate) fn prepare_next_block_with_required_burn_and_burn_bundles(
         &self,
         miner: &str,
+        reward_address: Option<&str>,
         timestamp_ms: u64,
         burn_bundles: Vec<BurnBundle>,
         required_burn_signature: Option<&str>,
     ) -> Result<PreparedBlock> {
         let height = self.tip().height + 1;
+        self.validate_reward_address(height, reward_address, "finalizer")?;
         let Some((finalizer_rank, leader_ticket)) = self.finalizer_ticket_for_miner(height, miner)
         else {
             bail!("cannot mine block without a mature burn ticket");
@@ -55,13 +84,13 @@ impl Ledger {
 
         let burn_bundles =
             self.validate_next_block_burn_bundles_for_finalizer_rank(finalizer_rank, burn_bundles)?;
-        let burn_bundle_section = self.burn_bundle_section_from_bundles(burn_bundles);
+        let burn_bundle_section = self.burn_bundle_section_from_bundles(burn_bundles)?;
         let selection = self.select_block_transactions_with_burn_section(
             miner,
             required_burn_signature,
             &burn_bundle_section,
         )?;
-        ensure_block_has_burn(&selection.transactions)?;
+        ensure_block_has_burn(&selection.transactions, &selection.transactions_v2)?;
 
         let tip = self.tip();
         let prev_hash = tip.hash.clone();
@@ -77,6 +106,7 @@ impl Ledger {
             height,
             &prev_hash,
             miner,
+            reward_address,
             FinalizerMode::Ticket,
             finalizer_rank,
             reward,
@@ -92,6 +122,7 @@ impl Ledger {
             prev_hash,
             timestamp_ms,
             miner: miner.to_string(),
+            reward_address: reward_address.map(str::to_string),
             finalizer_mode: FinalizerMode::Ticket,
             reward,
             vdf_rounds,
@@ -126,6 +157,7 @@ impl Ledger {
     ) -> Result<PreparedBlock> {
         self.prepare_recovery_block_with_required_burn_and_burn_bundles(
             miner,
+            None,
             timestamp_ms,
             burn_bundles,
             None,
@@ -135,25 +167,27 @@ impl Ledger {
     pub(crate) fn prepare_recovery_block_with_required_burn_and_burn_bundles(
         &self,
         miner: &str,
+        reward_address: Option<&str>,
         timestamp_ms: u64,
         burn_bundles: Vec<BurnBundle>,
         required_burn_signature: Option<&str>,
     ) -> Result<PreparedBlock> {
         let height = self.tip().height + 1;
+        self.validate_reward_address(height, reward_address, "finalizer")?;
         let min_timestamp = self.recovery_block_min_timestamp();
         if timestamp_ms < min_timestamp {
             bail!("recovery block is not available before timestamp {min_timestamp}");
         }
 
         let burn_bundles = self.validate_next_block_burn_bundles(burn_bundles)?;
-        let burn_bundle_section = self.burn_bundle_section_from_bundles(burn_bundles);
+        let burn_bundle_section = self.burn_bundle_section_from_bundles(burn_bundles)?;
         let selection = self.select_recovery_block_transactions_with_burn_section(
             miner,
             required_burn_signature,
             &burn_bundle_section,
         )?;
-        ensure_block_has_burn(&selection.transactions)?;
-        ensure_block_has_burn_from(&selection.transactions, miner)?;
+        ensure_block_has_burn(&selection.transactions, &selection.transactions_v2)?;
+        ensure_block_has_burn_from(&selection.transactions, &selection.transactions_v2, miner)?;
 
         let tip = self.tip();
         let prev_hash = tip.hash.clone();
@@ -169,6 +203,7 @@ impl Ledger {
             height,
             &prev_hash,
             miner,
+            reward_address,
             FinalizerMode::Recovery,
             0,
             reward,
@@ -190,6 +225,7 @@ impl Ledger {
             prev_hash,
             timestamp_ms,
             miner: miner.to_string(),
+            reward_address: reward_address.map(str::to_string),
             finalizer_mode: FinalizerMode::Recovery,
             finalizer_rank: 0,
             reward,

@@ -57,20 +57,20 @@ Changing any value in this section requires a conscious mainnet-candidate reset 
 
 The consensus block-size limit is the exact number of bytes produced by the current compact snapshot block-body encoder when the block is appended to its parent chain. The encoder's reference tables are seeded by genesis allocations and extended in chain order, so all nodes calculate the same context-dependent size. The snapshot header, launch profile, block-count field, SQLite row metadata, and SQLite page overhead are not charged to an individual block.
 
-The compact representation stores binary hashes, addresses, signatures, and VDF data instead of their hexadecimal text. It uses base-128 varints for integers, chain-wide references for repeated addresses and protocol IDs, a single shared owner and signature for transaction inputs, implicit burn change where possible, and transaction indexes for burns repeated by the burn-bundle section. Heights, parent hashes, and block hashes are reconstructed from chain order and canonical block contents rather than repeated in each stored block body. Burns benefit most from this layout, followed by transfers and mine actions.
+The compact representation stores binary hashes, addresses, signatures, and VDF data instead of their hexadecimal text. It uses base-128 varints for integers, chain-wide references for repeated addresses and protocol IDs, a single shared owner and signature for legacy transaction inputs, implicit legacy burn change where possible, and transaction indexes for legacy and v2 burns repeated by the burn-bundle section. Heights, parent hashes, and block hashes are reconstructed from chain order and canonical block contents rather than repeated in each stored block body. Burns benefit most from this layout, followed by transfers and mine actions. Snapshot v9 stores authenticated hybrid reward destinations and v2 burn attestations while retaining v7 and v8 read compatibility.
 
 P2P messages and management API responses still use JSON. Their byte length is not the consensus block size. Transaction fee-rate ordering uses a separate compact economic transaction weight, so changing JSON whitespace, key order, or hexadecimal formatting cannot change consensus size or fee priority.
 
 ## Wallet address format
 
-Wallets display and accept version `0` Bech32m addresses. Mainnet and the
+Wallets display and accept version `0` legacy and version `1` hybrid Bech32m addresses. Mainnet and the
 mainnet-candidate use the human-readable prefix `iuna`; local testnet uses
-`tiuna`. The payload is one 5-bit version value followed by the wallet's exact
-32-byte Ed25519 verifying key converted from 8-bit to 5-bit groups. Decoding
-must verify the Bech32m constant, reject mixed case and non-zero padding, require
-the expected network prefix and version, require exactly 32 payload bytes, and
-parse those bytes as a non-weak Ed25519 verifying key. An all-uppercase address
-is accepted and normalized to lowercase; mixed uppercase/lowercase is invalid.
+`tiuna`. A version `0` payload contains the wallet's exact 32-byte Ed25519
+verifying key. A version `1` payload contains a commitment to the wallet's
+Ed25519 and ML-DSA-44 public keys. Decoding verifies the Bech32m constant,
+rejects mixed case and non-zero padding, and requires the expected network,
+version, and payload length. An all-uppercase address is accepted and normalized
+to lowercase; mixed uppercase/lowercase is invalid.
 
 Consensus identity is the exact 32-byte Ed25519 verifying key, represented in
 consensus objects and persisted chainstate as canonical 64-character lowercase
@@ -86,7 +86,7 @@ iuna uses a UTXO-style ledger. The main transaction types are:
 
 1. **Transfer:** moves IUNA from one address to another and pays a sender-chosen fee.
 2. **Burn:** destroys an amount of IUNA, pays a sender-chosen fee, and creates a future lottery ticket.
-3. **Mine action:** proves SHA-256-style PoW against the current chain tip. A valid mine action mints a fixed `1 IUNA` reward to its recipient and pays a fixed `1 IUNA` fee to the block finalizer.
+3. **Mine action:** proves SHA-256-style PoW against the current chain tip. A valid mine action mints a fixed `1 IUNA` reward to its recipient and pays a fixed `1 IUNA` fee to the block finalizer. Starting at height 3750, the recipient must be a version-1 hybrid address.
 
 Burn and transfer fees are chosen by the sender. Mine action reward and mine action fee are deterministic protocol values.
 
@@ -94,7 +94,7 @@ Burn and transfer fees are chosen by the sender. Mine action reward and mine act
 
 Every transfer, burn, and mine action is cryptographically scoped to one chain. Its signing or proof preimage starts with the fixed `IUNA-TX` type tag, the big-endian signing-format version `1`, a length-prefixed UTF-8 chain ID, and the length-prefixed 32-byte genesis block hash. The remaining payload uses an explicit one-byte transaction type and canonical binary fields: big-endian fixed-width integers, length-prefixed decoded hashes, signatures and Ed25519 keys, and ordered input/output counts. JSON spelling, field order, and separators never enter the sighash. Hexadecimal fields committed by format v1 must use canonical lowercase encoding; alternate casing is rejected during signature or proof validation.
 
-Transfers and burns use Ed25519 over this binary preimage. Native and Stratum mine proofs commit the same domain and logical mine fields before proof-specific hashing. Validators reconstruct the domain from their local launch profile and genesis block, so a transaction valid on candidate, mainnet, testnet, or another genesis fails signature/proof validation everywhere else. Only format v1 is accepted.
+Legacy transfers and burns use Ed25519 over this binary preimage. Transaction-v2 spends from version-1 addresses use both Ed25519 and ML-DSA-44 over one canonical v2 payload; this includes hybrid transfers and burns. Native and Stratum mine proofs commit the same domain and logical mine fields before proof-specific hashing. Validators reconstruct the domain from their local launch profile and genesis block, so a transaction valid on candidate, mainnet, testnet, or another genesis fails signature/proof validation everywhere else. Only the defined legacy and v2 formats are accepted.
 
 A block is invalid if any transaction ID already occurred earlier on that chain. This is especially important for inputless mine actions: without this check, someone could replay an included proof after spending its reward, recreate the same outpoint, and inflate the supply.
 
@@ -129,6 +129,8 @@ Fallback finalization invalidates missed ticket opportunities. If a ticket block
 Every normal block must include at least one burn. This keeps the future ticket pool alive even during quiet periods. A node that may finalize prepares a local anchor burn for the next block from the finalizer wallet, and that anchor burn appears directly in the block.
 
 Burns use a one-block admission pipeline. A public burn is signed against the current chain tip, then queued while the child of that tip is produced. It may appear only in the following block. Validators require its signed anchor to equal the containing block's grandparent hash (the containing block's parent `prev_hash`). This gives the burn a full VDF interval plus the next burn-collection window to propagate without allowing the finalizer to change the transaction list after starting its VDF. A queued burn survives the first tip change and expires after its single inclusion height if it was not included. The finalizer's mandatory local burn is signed directly for the next block using the same grandparent anchor rule.
+
+Legacy and v2 burns follow the same admission, fee, inclusion, maturity, and expiry rules. A v2 burn spends hybrid outputs with dual signatures. Its ticket owner is the legacy Ed25519 component of that same hybrid wallet identity, so existing leader proofs and ticket ownership remain compatible while the funds being destroyed are protected by the hybrid authorization.
 
 The anchor burn is not a fairness mechanism. By itself, it would mostly help the current finalizer keep creating future tickets. Fairness against self-serving finalizers comes from the burn inclusion committee described below.
 
@@ -267,18 +269,18 @@ For normal ticket blocks, lower-rank finalization pays more to the independent b
 
 Recovery blocks pay `100%` to the recovery finalizer.
 
-Only attestations actually included in the block earn a committee share. If no extra committee attestation is required, the finalizer receives the full reward. Integer amounts are rounded down into the committee half (`reward / 2`), so the finalizer receives the remainder when the reward is odd. Committee reward outputs do not create UTXO lineage; lineage selection remains based on mature mine-action descendants.
+Only attestations actually included in the block earn a committee share. If no extra committee attestation is required, the finalizer receives the full reward. Integer amounts are rounded down into the committee half (`reward / 2`), so the finalizer receives the remainder when the reward is odd. Committee reward outputs do not create UTXO lineage; lineage selection remains based on mature mine-action descendants. Starting at height 3750, finalizer and rewarded committee outputs use authenticated version-1 hybrid payout addresses. The finalizer signs its block payout address with its legacy identity; each committee member binds its payout address into its signed burn bundle.
 
-A committee member can sign one burn bundle for its slot, height, and parent hash. A bundle is at most `10,000` bytes and lists valid fee-paying pending burns eligible at that height, ordered by absolute fee with signature as the deterministic tie-breaker. Burns queued for the following height are not included yet. Honest committee policy is to include every valid burn it selects by that canonical ordering, or to sign an empty bundle only when the signer knows no valid burn for that height. Empty bundles are an honest-policy signal, not something validators can prove from their own mempools. Consensus checks committee membership, signature validity, lineage assignment, ordering, and threshold.
+A committee member can sign one burn bundle for its slot, height, and parent hash. A bundle is at most `10,000` bytes and lists valid fee-paying pending legacy and v2 burns eligible at that height, ordered by absolute fee and then transaction identifier. Burns queued for the following height are not included yet. Honest committee policy is to include every valid burn it selects by that canonical ordering, or to sign an empty bundle only when the signer knows no valid burn for that height. Empty bundles are an honest-policy signal, not something validators can prove from their own mempools. Consensus checks committee membership, signature validity, lineage assignment, ordering, and threshold.
 
 Automatic nodes wait about `30 seconds` after seeing pending burns for the next height before signing a burn bundle or starting the burn-list-bound VDF. This gives burn gossip time to settle and avoids locking in an underfilled bundle from the first partial batch a node received.
 
-A block contains transfers, burns, mine actions, and one compact burn-bundle section. The finalizer's local anchor burn is still reserved as the first block item.
+A block contains legacy and v2 transactions plus one compact burn-bundle section. The finalizer's anchor burn is reserved before optional transactions, whether it uses legacy or hybrid funds.
 
 The compact burn-bundle section stores:
 
 - up to four explicit burn committee bundle signatures for non-finalizer slots, in slot order;
-- one deduplicated required burn list;
+- deduplicated required legacy and v2 burn lists; and
 - a small bitmask per burn saying which of the included committee bundles contained that burn.
 
 The required burn list is the union of fee-paying burns contained in the attestations the block uses. If one committee member signs an empty bundle and another signs a bundle with burns, the required list still includes the burns from the non-empty bundle.
@@ -331,12 +333,13 @@ Nodes gossip:
 
 - transfers;
 - burns;
+- canonical transaction-v2 envelopes, including hybrid transfers and burns;
 - mine actions;
 - signed burn bundles;
 - burn-bundle requests for missing committee slots at a specific next-block height and parent hash;
 - block inventory and blocks.
 
-Anchor burns are prepared locally by the finalizer and are not normal wallet traffic.
+Legacy anchor burns are prepared locally by the finalizer. Hybrid anchor burns use the v2 mempool so they survive restart and can be relayed and attested before inclusion.
 
 When a ticket finalizer is collecting burn-bundle attestations and has fewer signatures than its
 rank requires, it may request the missing slots. Peers answer from their local cache with matching
@@ -351,10 +354,10 @@ When the pending count or byte bound is reached, a node admits an independent tr
 When a node builds a block, the flow is:
 
 1. Collect valid signed burn bundles for the next height.
-2. Reserve the local anchor burn as the first block item.
+2. Reserve an eligible legacy or v2 anchor burn from the finalizer wallet.
 3. For recovery blocks, ensure at least one anchor burn is from the recovery finalizer.
-4. Include every burn required by the selected burn-bundle attestations.
-5. Fill remaining block space with valid fee-paying transfers, additional burns, and mine actions ordered by fee rate. Mine actions are limited to `2` actions per anchor.
+4. Include every legacy and v2 burn required by the selected burn-bundle attestations.
+5. Fill remaining block space with valid fee-paying legacy and v2 transactions ordered by fee rate. Mine actions are limited to `2` actions per anchor.
 6. Bind the VDF seed to the five burn-attestation slot hashes, using default hashes for missing slots. Slot `0` uses the synthetic finalizer attestation hash instead of a separate burn-bundle signature.
 
 Blocks are bounded by transaction count and exact compact stored block-body size. The mainnet-candidate maximum is `1,000,000` bytes. Block admission checks the finished block with the parent chain's compact reference context. Block construction uses the same encoder while reserving mandatory anchor and attested burns before filling the remaining space.

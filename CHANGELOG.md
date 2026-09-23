@@ -5,6 +5,16 @@ from the Git history and Conventional Commit titles by `deployment.sh`.
 
 ## [Unreleased]
 
+### Added
+
+- route PoW, finalizer, and committee rewards to hybrid wallets from height 3750
+- allow confirmed hybrid funds to create anchored v2 burns and lottery tickets
+- carry v2 burns through burn bundles, compact snapshots, mempool views, and automatic burning
+
+### Changed
+
+- require the `transaction-v2-burns` peer capability once transaction v2 is active
+
 ## [0.4.37] - 2026-09-22
 
 ### Fixed

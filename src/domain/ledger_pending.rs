@@ -127,30 +127,76 @@ impl Ledger {
             .filter(|transaction| self.transaction_is_eligible_for_next_block(transaction))
             .collect::<Vec<_>>();
         let mut selected = Vec::new();
+        let height = self.height().saturating_add(1);
+        let domain = self.transaction_v2_domain()?;
+        let network = AddressNetwork::from_profile_id(&self.launch_profile.profile_id);
+        let mut remaining_v2 = if transaction_v2_is_active(height) {
+            self.pending_v2
+                .iter()
+                .filter(|transaction| self.transaction_v2_is_eligible_for_next_block(transaction))
+                .collect::<Vec<_>>()
+        } else {
+            Vec::new()
+        };
+        let mut selected_v2 = Vec::new();
 
         let required_burn_signatures = burn_bundle_section
             .required_burns()
             .into_iter()
             .map(|burn| burn.signature().to_string())
             .collect::<BTreeSet<_>>();
+        let required_burns_v2 = burn_bundle_section
+            .required_burns_v2()
+            .into_iter()
+            .map(str::to_string)
+            .collect::<BTreeSet<_>>();
         let mut selected_required_burn_signatures = BTreeSet::new();
+        let mut selected_required_burns_v2 = BTreeSet::new();
 
+        let mut anchor_v2_index = None;
         let anchor_index = if let Some(signature) = required_burn_signature {
-            Some(
-                remaining
-                    .iter()
-                    .position(|transaction| transaction.signature() == signature)
-                    .with_context(|| format!("required burn {signature} is not pending"))?,
-            )
+            let legacy = remaining
+                .iter()
+                .position(|transaction| transaction.signature() == signature);
+            if legacy.is_none() {
+                anchor_v2_index = remaining_v2.iter().position(|transaction| {
+                    transaction
+                        .transaction_id(&domain)
+                        .ok()
+                        .is_some_and(|id| hex_encode(id) == signature)
+                });
+            }
+            if legacy.is_none() && anchor_v2_index.is_none() {
+                bail!("required burn {signature} is not pending");
+            }
+            legacy
         } else if let Some(owner) = required_burn_owner {
-            best_selectable_burn_from_index(&remaining, &utxos, owner, &signing_domain)
+            let legacy =
+                best_selectable_burn_from_index(&remaining, &utxos, owner, &signing_domain);
+            if legacy.is_none() {
+                anchor_v2_index = remaining_v2.iter().position(|transaction| {
+                    transaction.is_burn()
+                        && transaction
+                            .burn_legacy_owner()
+                            .ok()
+                            .flatten()
+                            .is_some_and(|candidate| candidate == owner)
+                });
+            }
+            legacy
         } else {
-            best_selectable_transaction_index(
+            let legacy = best_selectable_transaction_index(
                 &remaining,
                 &utxos,
                 Some(TransactionKind::Burn),
                 &signing_domain,
-            )
+            );
+            if legacy.is_none() {
+                anchor_v2_index = remaining_v2
+                    .iter()
+                    .position(|transaction| transaction.is_burn());
+            }
+            legacy
         };
         if let Some(index) = anchor_index {
             let tx = remaining.remove(index);
@@ -159,6 +205,24 @@ impl Ledger {
             if required_burn_signatures.contains(&signature) {
                 selected_required_burn_signatures.insert(signature);
             }
+        }
+        if let Some(index) = anchor_v2_index {
+            let transaction = remaining_v2.remove(index);
+            if !transaction.is_burn() {
+                bail!("required block anchor must be a burn transaction");
+            }
+            if let Some(owner) = required_burn_owner {
+                if transaction.burn_legacy_owner()?.as_deref() != Some(owner) {
+                    bail!("required block anchor burn must be from the recovery finalizer");
+                }
+            }
+            apply_prevalidated_transaction_v2_to_utxos(transaction, &domain, network, &mut utxos)
+                .context("required transaction v2 anchor burn is not spendable")?;
+            let envelope = hex_encode(transaction.encode(&domain)?);
+            if required_burns_v2.contains(&envelope) {
+                selected_required_burns_v2.insert(envelope.clone());
+            }
+            selected_v2.push(envelope);
         }
 
         let mut index = 0;
@@ -189,10 +253,38 @@ impl Ledger {
                 .expect("required burn set differs");
             bail!("attested burn {missing} is not pending");
         }
+        let mut index = 0;
+        while index < remaining_v2.len()
+            && selected_required_burns_v2.len() < required_burns_v2.len()
+        {
+            let envelope = hex_encode(remaining_v2[index].encode(&domain)?);
+            if !required_burns_v2.contains(&envelope) {
+                index += 1;
+                continue;
+            }
+            let transaction = remaining_v2.remove(index);
+            if !transaction.is_burn() {
+                bail!("attested transaction v2 must be a burn");
+            }
+            if selected.len().saturating_add(selected_v2.len())
+                >= self.launch_profile.max_block_transactions
+            {
+                bail!(
+                    "attested transaction v2 burns do not fit within the block transaction count limit"
+                );
+            }
+            apply_prevalidated_transaction_v2_to_utxos(transaction, &domain, network, &mut utxos)
+                .context("attested transaction v2 burn is not spendable")?;
+            selected_required_burns_v2.insert(envelope.clone());
+            selected_v2.push(envelope);
+        }
+        if selected_required_burns_v2.len() != required_burns_v2.len() {
+            bail!("attested transaction v2 burn is not pending");
+        }
 
         let required_selection = BlockSelection {
             transactions: selected.clone(),
-            transactions_v2: Vec::new(),
+            transactions_v2: selected_v2.clone(),
         };
         if estimated_block_selection_size_bytes(
             block_context,
@@ -206,15 +298,7 @@ impl Ledger {
 
         let mut selection = BlockSelection {
             transactions: selected,
-            transactions_v2: Vec::new(),
-        };
-        let height = self.height().saturating_add(1);
-        let domain = self.transaction_v2_domain()?;
-        let network = AddressNetwork::from_profile_id(&self.launch_profile.profile_id);
-        let mut remaining_v2 = if transaction_v2_is_active(height) {
-            self.pending_v2.iter().collect::<Vec<_>>()
-        } else {
-            Vec::new()
+            transactions_v2: selected_v2,
         };
 
         loop {
@@ -511,7 +595,18 @@ impl Ledger {
                 signature,
                 ..
             } => {
-                validate_address(recipient, "mine recipient")?;
+                let next_height = self.height().saturating_add(1);
+                if next_height >= super::HYBRID_REWARD_ACTIVATION_HEIGHT {
+                    let address = super::decode_versioned_address(
+                        recipient,
+                        super::AddressNetwork::from_profile_id(&self.launch_profile.profile_id),
+                    )?;
+                    if address.version != super::AddressVersion::HybridKeyCommitment {
+                        bail!("mine reward must use a hybrid address at height {next_height}");
+                    }
+                } else {
+                    validate_address(recipient, "mine recipient")?;
+                }
                 validate_hash(anchor, "mine transaction anchor")?;
                 validate_hash(signature, "mine transaction proof hash")?;
                 if let Some(proof_header) = proof_header {
@@ -946,6 +1041,7 @@ mod tests {
                 burn: attested,
                 bundle_mask: 0,
             }],
+            burns_v2: Vec::new(),
         };
 
         assert!(

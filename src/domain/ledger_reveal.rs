@@ -5,15 +5,18 @@ use anyhow::{Context, Result, bail};
 use super::ledger_ops::verify_address_signature;
 use super::reveal::{burn_bundle_slot_mask, burn_committee_mask};
 use super::{
-    Amount, BURN_COMMITTEE_SIZE, Block, BurnBundle, BurnBundlePayload, BurnBundleSection,
-    BurnBundleSignature, BurnCommitteeMember, FinalizerMode, Ledger, MAX_BURN_BUNDLE_BYTES,
-    MaskedBurn, OBJECTIVE_FINALITY_ACTIVATION_HEIGHT, Transaction, Wallet,
+    AddressNetwork, Amount, BURN_COMMITTEE_SIZE, Block, BurnBundle, BurnBundlePayload,
+    BurnBundleSection, BurnBundleSignature, BurnCommitteeMember, FinalizerMode, Ledger,
+    MAX_BURN_BUNDLE_BYTES, MaskedBurn, MaskedBurnV2, OBJECTIVE_FINALITY_ACTIVATION_HEIGHT,
+    Transaction, Wallet, hex_encode,
 };
 
 impl Ledger {
     pub fn burn_bundle_attestations_required_for_next_block(&self) -> bool {
         self.pending.iter().any(|transaction| {
             transaction.is_burn() && self.transaction_is_eligible_for_next_block(transaction)
+        }) || self.pending_v2.iter().any(|transaction| {
+            transaction.is_burn() && self.transaction_v2_is_eligible_for_next_block(transaction)
         })
     }
 
@@ -48,35 +51,68 @@ impl Ledger {
         if memberships.is_empty() {
             return Ok(Vec::new());
         }
-        let mut burns = self
+        let burns = self
             .valid_pending_transactions()
             .into_iter()
             .filter(|transaction| {
                 transaction.is_burn() && self.transaction_is_eligible_for_next_block(transaction)
             })
             .collect::<Vec<_>>();
-        burns.sort_by(|left, right| {
-            right
-                .fee()
-                .cmp(&left.fee())
-                .then_with(|| left.signature().cmp(right.signature()))
-        });
+        let domain = self.transaction_v2_domain()?;
+        let burns_v2 = self
+            .pending_v2
+            .iter()
+            .filter(|transaction| {
+                transaction.is_burn() && self.transaction_v2_is_eligible_for_next_block(transaction)
+            })
+            .map(|transaction| {
+                Ok((
+                    transaction.fee(),
+                    hex_encode(transaction.transaction_id(&domain)?),
+                    hex_encode(transaction.encode(&domain)?),
+                ))
+            })
+            .collect::<Result<Vec<_>>>()?;
+        let mut candidates = burns
+            .into_iter()
+            .map(|burn| (burn.fee(), burn.signature().to_string(), Some(burn), None))
+            .chain(
+                burns_v2
+                    .into_iter()
+                    .map(|(fee, id, envelope)| (fee, id, None, Some(envelope))),
+            )
+            .collect::<Vec<_>>();
+        candidates.sort_by(|left, right| right.0.cmp(&left.0).then_with(|| left.1.cmp(&right.1)));
 
         let mut bundles = Vec::new();
         for member in memberships {
             let mut selected = Vec::new();
-            for burn in &burns {
+            let mut selected_v2 = Vec::new();
+            for (_, _, legacy_burn, v2_envelope) in &candidates {
                 let mut candidate = selected.clone();
-                candidate.push(burn.clone());
+                let mut candidate_v2 = selected_v2.clone();
+                if let Some(burn) = legacy_burn {
+                    candidate.push(burn.clone());
+                }
+                if let Some(envelope) = v2_envelope {
+                    candidate_v2.push(envelope.clone());
+                }
                 let bundle = wallet.burn_bundle(BurnBundlePayload {
                     height,
                     prev_hash: prev_hash.clone(),
                     slot: member.slot,
                     member: wallet.address().to_string(),
+                    reward_address: (height >= super::HYBRID_REWARD_ACTIVATION_HEIGHT).then(|| {
+                        wallet.hybrid_address(AddressNetwork::from_profile_id(
+                            &self.launch_profile.profile_id,
+                        ))
+                    }),
                     burns: candidate.clone(),
+                    burns_v2: candidate_v2.clone(),
                 });
                 if bundle.serialized_size_bytes()? <= MAX_BURN_BUNDLE_BYTES {
                     selected = candidate;
+                    selected_v2 = candidate_v2;
                 }
             }
             bundles.push(wallet.burn_bundle(BurnBundlePayload {
@@ -84,7 +120,13 @@ impl Ledger {
                 prev_hash: prev_hash.clone(),
                 slot: member.slot,
                 member: wallet.address().to_string(),
+                reward_address: (height >= super::HYBRID_REWARD_ACTIVATION_HEIGHT).then(|| {
+                    wallet.hybrid_address(AddressNetwork::from_profile_id(
+                        &self.launch_profile.profile_id,
+                    ))
+                }),
                 burns: selected,
+                burns_v2: selected_v2,
             }));
         }
         Ok(bundles)
@@ -180,24 +222,32 @@ impl Ledger {
             prev_hash,
             slot: member.slot,
             member: wallet.address().to_string(),
+            reward_address: (height >= super::HYBRID_REWARD_ACTIVATION_HEIGHT).then(|| {
+                wallet.hybrid_address(AddressNetwork::from_profile_id(
+                    &self.launch_profile.profile_id,
+                ))
+            }),
             burns,
+            burns_v2: Vec::new(),
         })
     }
 
     pub(super) fn burn_bundle_section_from_bundles(
         &self,
         bundles: Vec<BurnBundle>,
-    ) -> BurnBundleSection {
+    ) -> Result<BurnBundleSection> {
         let signatures = bundles
             .iter()
             .filter(|bundle| bundle.slot != 0)
             .map(|bundle| BurnBundleSignature {
                 slot: bundle.slot,
                 member: bundle.member.clone(),
+                reward_address: bundle.reward_address.clone(),
                 signature: bundle.signature.clone(),
             })
             .collect::<Vec<_>>();
         let mut by_signature: BTreeMap<String, MaskedBurn> = BTreeMap::new();
+        let mut by_v2_id: BTreeMap<String, MaskedBurnV2> = BTreeMap::new();
         for bundle in bundles {
             let slot_mask = if bundle.slot == 0 {
                 0
@@ -213,6 +263,15 @@ impl Ledger {
                         bundle_mask: slot_mask,
                     });
             }
+            for envelope in bundle.burns_v2 {
+                by_v2_id
+                    .entry(envelope.clone())
+                    .and_modify(|masked| masked.bundle_mask |= slot_mask)
+                    .or_insert(MaskedBurnV2 {
+                        envelope,
+                        bundle_mask: slot_mask,
+                    });
+            }
         }
         let mut burns = by_signature.into_values().collect::<Vec<_>>();
         burns.sort_by(|left, right| {
@@ -222,7 +281,27 @@ impl Ledger {
                 .cmp(&left.burn.fee())
                 .then_with(|| left.burn.signature().cmp(right.burn.signature()))
         });
-        BurnBundleSection { signatures, burns }
+        let domain = self.transaction_v2_domain()?;
+        let mut burns_v2 = by_v2_id
+            .into_values()
+            .map(|masked| {
+                let burn = super::ledger_v2::decode_canonical_transaction_v2_envelope(
+                    &masked.envelope,
+                    &domain,
+                )?;
+                Ok((
+                    burn.fee(),
+                    hex_encode(burn.transaction_id(&domain)?),
+                    masked,
+                ))
+            })
+            .collect::<Result<Vec<_>>>()?;
+        burns_v2.sort_by(|left, right| right.0.cmp(&left.0).then_with(|| left.1.cmp(&right.1)));
+        Ok(BurnBundleSection {
+            signatures,
+            burns,
+            burns_v2: burns_v2.into_iter().map(|(_, _, masked)| masked).collect(),
+        })
     }
 
     pub(super) fn validate_burn_bundle_section_for_block(&self, block: &Block) -> Result<()> {
@@ -264,6 +343,11 @@ impl Ledger {
             if signature.member != member.owner {
                 bail!("burn bundle member is not assigned to slot");
             }
+            self.validate_reward_address(
+                block.height,
+                signature.reward_address.as_deref(),
+                "committee member",
+            )?;
             included_mask |= burn_bundle_slot_mask(signature.slot)?;
         }
         let required_signatures = self.required_explicit_burn_signatures(
@@ -305,6 +389,31 @@ impl Ledger {
                 }
             }
             previous_key = Some(key);
+        }
+        let domain = self.transaction_v2_domain()?;
+        let mut seen_burns_v2 = BTreeSet::new();
+        for masked in &section.burns_v2 {
+            if masked.bundle_mask & !burn_committee_mask() != 0 {
+                bail!("masked transaction v2 burn references an invalid burn bundle slot");
+            }
+            if masked.bundle_mask & !included_mask != 0 {
+                bail!("masked transaction v2 burn references a missing burn bundle signature");
+            }
+            let burn = super::ledger_v2::decode_canonical_transaction_v2_envelope(
+                &masked.envelope,
+                &domain,
+            )?;
+            if !burn.is_burn() {
+                bail!("burn bundle section contains a non-burn transaction v2");
+            }
+            let id = hex_encode(burn.transaction_id(&domain)?);
+            if !seen_burns_v2.insert(id) {
+                bail!("duplicate transaction v2 burn in burn bundle section");
+            }
+            if !block.transactions_v2.contains(&masked.envelope) {
+                bail!("attested transaction v2 burn is not included in the block");
+            }
+            self.validate_transaction_v2_anchor_for_block(&burn, block.height)?;
         }
 
         for bundle in section.expand(block.height, &block.prev_hash) {
@@ -401,6 +510,7 @@ impl Ledger {
             bail!("duplicate burn bundle slot");
         }
         let mut seen_members = BTreeSet::new();
+        let domain = self.transaction_v2_domain()?;
         for bundle in &bundles {
             if !seen_members.insert(bundle.member.clone()) {
                 bail!("duplicate burn bundle member");
@@ -414,6 +524,20 @@ impl Ledger {
             for burn in &bundle.burns {
                 if matching_burn_by_signature(burn, &self.pending).is_none() {
                     bail!("burn bundle references a burn that is not in the mempool");
+                }
+            }
+            for envelope in &bundle.burns_v2 {
+                let burn =
+                    super::ledger_v2::decode_canonical_transaction_v2_envelope(envelope, &domain)?;
+                let id = burn.transaction_id(&domain)?;
+                if !self
+                    .pending_v2
+                    .iter()
+                    .any(|pending| pending.transaction_id(&domain).ok() == Some(id))
+                {
+                    bail!(
+                        "burn bundle references a transaction v2 burn that is not in the mempool"
+                    );
                 }
             }
         }
@@ -442,6 +566,11 @@ impl Ledger {
         if bundle.member != member.owner {
             bail!("burn bundle member is not assigned to slot");
         }
+        self.validate_reward_address(
+            expected_height,
+            bundle.reward_address.as_deref(),
+            "committee member",
+        )?;
         if bundle.serialized_size_bytes()? > MAX_BURN_BUNDLE_BYTES {
             bail!("burn bundle exceeds max size");
         }
@@ -469,6 +598,28 @@ impl Ledger {
                 }
             }
             previous_key = Some(key);
+        }
+        let domain = self.transaction_v2_domain()?;
+        let mut seen_bundle_burns_v2 = BTreeSet::new();
+        let mut previous_v2_key: Option<(Amount, String)> = None;
+        for envelope in &bundle.burns_v2 {
+            let burn =
+                super::ledger_v2::decode_canonical_transaction_v2_envelope(envelope, &domain)?;
+            if !burn.is_burn() {
+                bail!("burn bundle contains a non-burn transaction v2");
+            }
+            let id = hex_encode(burn.transaction_id(&domain)?);
+            if !seen_bundle_burns_v2.insert(id.clone()) {
+                bail!("duplicate transaction v2 burn in burn bundle");
+            }
+            self.validate_transaction_v2_anchor_for_block(&burn, expected_height)?;
+            let key = (burn.fee(), id);
+            if let Some((previous_fee, previous_id)) = &previous_v2_key {
+                if key.0 > *previous_fee || key.0 == *previous_fee && key.1 < *previous_id {
+                    bail!("transaction v2 burn bundle is not fee ordered");
+                }
+            }
+            previous_v2_key = Some(key);
         }
         Ok(())
     }
@@ -650,6 +801,7 @@ mod tests {
             .map(|slot| BurnBundleSignature {
                 slot,
                 member: format!("member-{slot}"),
+                reward_address: None,
                 signature: format!("signature-{slot}"),
             })
             .collect();
@@ -667,6 +819,7 @@ mod tests {
             .push(BurnBundleSignature {
                 slot: 3,
                 member: "member-3".to_string(),
+                reward_address: None,
                 signature: "signature-3".to_string(),
             });
         block.finalizer_rank = 1;
@@ -684,7 +837,9 @@ mod tests {
                 prev_hash: "parent".to_string(),
                 slot: 1,
                 member: "member-1".to_string(),
+                reward_address: None,
                 burns: vec![low_fee_burn.clone(), high_fee_burn.clone()],
+                burns_v2: Vec::new(),
                 signature: "sig-1".to_string(),
             },
             BurnBundle {
@@ -692,12 +847,14 @@ mod tests {
                 prev_hash: "parent".to_string(),
                 slot: 2,
                 member: "member-2".to_string(),
+                reward_address: None,
                 burns: vec![high_fee_burn.clone()],
+                burns_v2: Vec::new(),
                 signature: "sig-2".to_string(),
             },
         ];
 
-        let section = ledger.burn_bundle_section_from_bundles(bundles);
+        let section = ledger.burn_bundle_section_from_bundles(bundles).unwrap();
 
         assert_eq!(section.signatures.len(), 2);
         assert_eq!(section.burns.len(), 2);
@@ -738,7 +895,9 @@ mod tests {
             prev_hash: ledger.tip_hash().to_string(),
             slot: member.slot,
             member: alice.address().to_string(),
+            reward_address: None,
             burns: vec![attested_burn],
+            burns_v2: Vec::new(),
         });
 
         let error = ledger
@@ -766,7 +925,9 @@ mod tests {
             prev_hash: ledger.tip_hash().to_string(),
             slot: 1,
             member: member.address().to_string(),
+            reward_address: None,
             burns: vec![future_burn],
+            burns_v2: Vec::new(),
         });
         let committee = BTreeMap::from([(
             1,
@@ -861,7 +1022,9 @@ mod tests {
             .unwrap()
             .finish(finalizer, "unused-vdf".to_string());
         let bundle = ledger.test_burn_bundle(finalizer, vec![pending_burn.clone()]);
-        block.burn_bundle_section = ledger.burn_bundle_section_from_bundles(vec![bundle]);
+        block.burn_bundle_section = ledger
+            .burn_bundle_section_from_bundles(vec![bundle])
+            .unwrap();
         block
             .transactions
             .retain(|transaction| transaction.signature() != pending_burn.signature());

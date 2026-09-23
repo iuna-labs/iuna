@@ -494,6 +494,18 @@ LIMIT ?1
         })
     }
 
+    pub fn load_wallet_transactions_for_addresses(
+        &self,
+        addresses: &[String],
+        kinds: &[&str],
+        offset: usize,
+        limit: usize,
+    ) -> Result<(Vec<WalletTransactionProjection>, usize)> {
+        self.with_connection(|connection| {
+            load_wallet_transactions_for_addresses(connection, addresses, kinds, offset, limit)
+        })
+    }
+
     pub fn load_wallet_transactions_v2(
         &self,
         addresses: &[String],
@@ -1333,6 +1345,62 @@ LIMIT ? OFFSET ?
     Ok((rows, total))
 }
 
+fn load_wallet_transactions_for_addresses(
+    connection: &Connection,
+    addresses: &[String],
+    kinds: &[&str],
+    offset: usize,
+    limit: usize,
+) -> Result<(Vec<WalletTransactionProjection>, usize)> {
+    if addresses.is_empty() || kinds.is_empty() {
+        return Ok((Vec::new(), 0));
+    }
+    let address_placeholders = std::iter::repeat_n("?", addresses.len())
+        .collect::<Vec<_>>()
+        .join(", ");
+    let kind_placeholders = std::iter::repeat_n("?", kinds.len())
+        .collect::<Vec<_>>()
+        .join(", ");
+    let predicate =
+        format!("address IN ({address_placeholders}) AND kind IN ({kind_placeholders})");
+    let mut filter_params = Vec::<Value>::with_capacity(addresses.len() + kinds.len());
+    filter_params.extend(addresses.iter().cloned().map(Value::Text));
+    filter_params.extend(kinds.iter().map(|kind| Value::Text((*kind).to_string())));
+
+    let count_sql =
+        format!("SELECT COUNT(DISTINCT signature) FROM ui_wallet_transactions WHERE {predicate}");
+    let total = connection
+        .query_row(&count_sql, params_from_iter(filter_params.iter()), |row| {
+            row.get::<_, u64>(0)
+        })
+        .context("failed to count UI wallet transactions")? as usize;
+
+    let query_sql = format!(
+        r#"
+SELECT DISTINCT sort_key, kind, block_height, timestamp_ms, block_finalizer, transaction_json,
+       signature
+FROM ui_wallet_transactions
+WHERE {predicate}
+ORDER BY sort_key DESC, signature ASC
+LIMIT ? OFFSET ?
+"#
+    );
+    let mut query_params = filter_params;
+    query_params.push(Value::Integer(limit as i64));
+    query_params.push(Value::Integer(offset as i64));
+    let mut statement = connection
+        .prepare(&query_sql)
+        .context("failed to prepare UI wallet transactions query")?;
+    let rows = read_wallet_transaction_rows(
+        statement
+            .query_map(params_from_iter(query_params.iter()), |row| {
+                wallet_transaction_projection_from_row(row)
+            })
+            .context("failed to load UI wallet transactions")?,
+    )?;
+    Ok((rows, total))
+}
+
 fn load_wallet_transactions_v2(
     connection: &Connection,
     addresses: &[String],
@@ -1796,6 +1864,33 @@ fn incremental_metric_for_block(
             }
         }
     }
+    for envelope in &block.transactions_v2 {
+        let encoded = decode_hex(envelope).context("block transaction v2 is not hexadecimal")?;
+        let (_, transaction) = TransactionV2::decode(&encoded)?;
+        fees_amount = fees_amount
+            .checked_add(transaction.fee())
+            .context("block metric transaction v2 fees overflow")?;
+        circulating_supply = circulating_supply
+            .checked_sub(transaction.fee())
+            .context("transaction v2 fee exceeds circulating supply")?;
+        match transaction {
+            TransactionV2::Migration { .. } | TransactionV2::Transfer { .. } => {
+                transfer_count += 1;
+            }
+            TransactionV2::Burn { amount, .. } => {
+                burn_count += 1;
+                burned_amount = burned_amount
+                    .checked_add(amount)
+                    .context("block metric transaction v2 burns overflow")?;
+                circulating_supply = circulating_supply
+                    .checked_sub(amount)
+                    .context("transaction v2 burn exceeds circulating supply")?;
+            }
+            TransactionV2::Mine { .. } => {
+                mine_count += 1;
+            }
+        }
+    }
     circulating_supply = circulating_supply
         .checked_add(block.reward)
         .context("block reward circulating supply overflows")?;
@@ -1933,7 +2028,8 @@ mod tests {
     use crate::domain::{AddressNetwork, ChainSnapshot, GenesisBurn, Ledger, Wallet, hex_encode};
 
     use super::{
-        SqliteUiDataStore, replace_ui_wallet_transactions_v2, wallet_transactions_v2_from_snapshot,
+        SqliteUiDataStore, replace_ui_wallet_transactions, replace_ui_wallet_transactions_v2,
+        wallet_transactions_from_snapshot, wallet_transactions_v2_from_snapshot,
     };
 
     fn test_snapshot(seed: &str) -> ChainSnapshot {
@@ -1983,6 +2079,38 @@ mod tests {
         assert_eq!(rows[0].timestamp_ms, 1_234);
         assert_eq!(rows[0].transaction.to(), Some(wallet.address()));
         assert!(rows[0].transaction.amount() > 0);
+    }
+
+    #[test]
+    fn wallet_projection_queries_hybrid_reward_addresses() {
+        let dir = tempdir().unwrap();
+        let store = SqliteUiDataStore::open(dir.path().join("ui_data.sqlite3")).unwrap();
+        let (mut ledger, wallet) = test_ledger("wallet-hybrid-reward-history");
+        append_test_block(&mut ledger, &wallet, 1_234);
+        let hybrid_address = wallet.hybrid_address(AddressNetwork::Mainnet);
+        let mut snapshot = ledger.snapshot();
+        snapshot.blocks[1].reward_address = Some(hybrid_address.clone());
+
+        let projection = wallet_transactions_from_snapshot(&snapshot);
+        store
+            .with_connection_mut(|connection| {
+                let transaction = connection.transaction()?;
+                replace_ui_wallet_transactions(&transaction, &projection)?;
+                transaction.commit()?;
+                Ok(())
+            })
+            .unwrap();
+        let (rows, total) = store
+            .load_wallet_transactions_for_addresses(
+                &[wallet.address().to_string(), hybrid_address.clone()],
+                &["reward"],
+                0,
+                10,
+            )
+            .unwrap();
+
+        assert_eq!(total, 1);
+        assert_eq!(rows[0].transaction.to(), Some(hybrid_address.as_str()));
     }
 
     #[test]

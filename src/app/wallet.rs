@@ -193,8 +193,18 @@ impl NodeCore {
     }
 
     pub fn estimate_burn_fee(&self, amount: Amount, fee_per_byte: Amount) -> Result<FeeEstimate> {
-        self.build_burn_with_fee_rate(amount, fee_per_byte)
-            .map(|(_, estimate)| estimate)
+        match self.build_burn_with_fee_rate(amount, fee_per_byte) {
+            Ok((_, estimate)) => Ok(estimate),
+            Err(legacy_error) => self
+                .build_v2_burn_with_fee_rate_on_ledger(
+                    &self.wallet_build_ledger()?,
+                    amount,
+                    fee_per_byte,
+                    false,
+                )
+                .map(|(_, estimate)| estimate)
+                .with_context(|| format!("legacy burn unavailable: {legacy_error:#}")),
+        }
     }
 
     pub fn transfer(&mut self, to: impl Into<String>, amount: Amount) -> Result<Transaction> {
@@ -261,7 +271,7 @@ impl NodeCore {
 
     pub fn estimate_mine_fee(&self, _fee_per_byte: Amount) -> Result<FeeEstimate> {
         let tx = Transaction::Mine {
-            recipient: self.wallet.address().to_string(),
+            recipient: self.reward_address_for_next_block()?,
             anchor: self.ledger.tip_hash().to_string(),
             salt: 0,
             nonce: 0,
@@ -441,6 +451,38 @@ impl NodeCore {
         })
     }
 
+    pub(super) fn build_v2_burn_with_fee_rate_on_ledger(
+        &self,
+        ledger: &Ledger,
+        amount: Amount,
+        fee_per_byte: Amount,
+        for_next_block: bool,
+    ) -> Result<(TransactionV2, FeeEstimate)> {
+        if fee_per_byte == 0 {
+            bail!("fee per byte must be greater than zero");
+        }
+        let domain = ledger.transaction_v2_domain()?;
+        let wallet = self.wallet.unlocked()?;
+        let mut fee = 1;
+        for _ in 0..64 {
+            let transaction = if for_next_block {
+                ledger.build_v2_burn_for_next_block(wallet, amount, fee)?
+            } else {
+                ledger.build_v2_burn(wallet, amount, fee)?
+            };
+            let bytes = transaction.encoded_size_bytes(&domain)?;
+            let required_fee = fee_per_byte
+                .checked_mul(bytes as Amount)
+                .context("fee per byte times transaction bytes overflows")?
+                .max(1);
+            if fee >= required_fee {
+                return Ok((transaction, FeeEstimate { bytes, fee }));
+            }
+            fee = required_fee;
+        }
+        bail!("hybrid burn fee did not converge")
+    }
+
     pub(super) fn build_transfer_with_fee_rate(
         &self,
         to: impl Into<String>,
@@ -466,7 +508,9 @@ impl NodeCore {
     }
 
     pub(super) fn build_mine_estimate(&self) -> Result<(Transaction, FeeEstimate)> {
-        let tx = self.ledger.build_mine(self.wallet.address())?;
+        let tx = self
+            .ledger
+            .build_mine(self.reward_address_for_next_block()?)?;
         Ok((
             tx.clone(),
             FeeEstimate {
@@ -480,6 +524,18 @@ impl NodeCore {
         let mut ledger = self.ledger.clone();
         self.reserve_local_block_anchor_inputs(&mut ledger)?;
         Ok(ledger)
+    }
+
+    pub(super) fn reward_address_for_next_block(&self) -> Result<String> {
+        if self.ledger.height().saturating_add(1) < crate::domain::HYBRID_REWARD_ACTIVATION_HEIGHT {
+            return Ok(self.wallet.address().to_string());
+        }
+        Ok(self
+            .wallet
+            .unlocked()?
+            .hybrid_address(crate::domain::AddressNetwork::from_profile_id(
+                &self.ledger.launch_profile().profile_id,
+            )))
     }
 
     pub(super) fn wallet_anchor_build_ledger(&self) -> Result<Ledger> {

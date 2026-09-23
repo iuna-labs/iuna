@@ -94,6 +94,9 @@ Application, transport, and consensus versions move independently:
    feature must not be introduced and activated in the same release.
 4. Wallet defaults may change after activation without another consensus version. Refusing new
    legacy outputs, changing the VDF, or removing Ed25519 each requires its own later activation.
+5. At candidate height 3750, mine-action, finalizer, and committee rewards switch from legacy
+   Ed25519 destinations to authenticated version-1 hybrid payout addresses. This is a coordinated
+   consensus transition; every block producer and validating node must upgrade before the boundary.
 
 There is no separate public Iuna testnet. The `iuna-mainnet-candidate` network is the rehearsal
 network for this migration. Once hybrid wallet keys and the complete transaction-v2 path are
@@ -122,10 +125,29 @@ Verification uses the exact-pinned RustCrypto `ml-dsa` 0.1.1 implementation. Tha
 has not been independently audited, so an independent review and an explicit backend acceptance
 decision remain prerequisites for treating the active rules as production-ready. Nodes advertise
 the transaction-v2 block capability and relay canonical transaction-v2 envelopes only to peers
-that advertise the separate `transaction-v2-mempool` capability. This keeps 0.4.35 block-validating
-peers connected during a gradual relay upgrade. The management
-wallet can submit reviewed migration batches and ordinary hybrid transfers; address rotation and
-broader recovery rehearsal remain release blockers.
+that advertise the separate `transaction-v2-mempool` capability. Hybrid burns extend the active
+height-3000 consensus path, including ticket creation and committee burn bundles. Nodes therefore
+require the additional `transaction-v2-burns` capability once transaction v2 is active; validators
+that lack it must be upgraded together rather than remaining connected through a gradual relay
+rollout. The management wallet can submit reviewed migration batches, ordinary hybrid transfers,
+and anchored hybrid burns. Address rotation and broader recovery rehearsal remain release blockers.
+
+### Hybrid reward activation target
+
+Candidate height 3750 is the fixed activation target for hybrid reward payouts. Through height
+3749, mine actions and implicit block rewards retain their historical legacy destinations. From
+height 3750 onward:
+
+- PoW mine actions must name an address-v1 hybrid recipient;
+- every block must carry a version-1 finalizer payout address authenticated by the finalizer's
+  Ed25519 identity and committed by the block hash and VDF seed;
+- every rewarded committee attestation must carry its own version-1 payout address inside the
+  signed burn-bundle payload; and
+- peers preparing the activation boundary must advertise `hybrid-reward-payouts`.
+
+Compact snapshot v9 preserves the authenticated payout fields while v7 and v8 remain readable.
+Nodes without the hybrid reward rules will diverge at height 3750, so unlike the earlier gradual
+transaction-v2 mempool rollout, this boundary requires a coordinated validator upgrade.
 
 Pending and confirmed transaction-v2 entries are included in the management wallet history and
 chain views. Confirmed history is materialized from the canonical chain snapshot, so a chain
@@ -161,12 +183,17 @@ ledger-derived chain domain, canonical encoded byte limits, UTXO ownership, valu
 legacy/v2 double-spends, and dependent v2 transactions. At and after height 3000, block selection
 can include those transactions; their exact envelopes are committed by the VDF seed and block
 hash, counted against the shared transaction and byte limits, applied with UTXO lineage, persisted
-in compact snapshot v8, and carried forward after reorgs. Snapshot v7 remains readable. Blocks
+in compact snapshot v8, and carried forward after reorgs. Snapshot v7 remains readable. Snapshot
+v9 extends that framing with authenticated hybrid reward destinations and indexed v2 burn-bundle
+attestations while retaining v7/v8 read compatibility. Blocks
 therefore propagate through the existing block P2P path. Standalone v2 mempool gossip now accepts,
 validates, canonicalizes, rebroadcasts, and periodically re-announces v2 envelopes. The management
 wallet reports legacy and hybrid balances, exposes an authenticated migration preview, submits one
-reviewed block-bounded migration batch at a time, and can spend confirmed hybrid value to another
-address-v1 recipient. Automatic address rotation and full recovery rehearsal remain incomplete.
+reviewed block-bounded migration batch at a time, can spend confirmed hybrid value to another
+address-v1 recipient, and can destroy confirmed hybrid value through the same one-block burn queue
+used by legacy burns. Hybrid burns create ordinary lottery tickets linked to the Ed25519 component
+of the hybrid wallet and participate in the same anti-censorship bundle rules. Automatic address
+rotation and full recovery rehearsal remain incomplete.
 
 ## Other trust boundaries
 

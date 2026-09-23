@@ -2,7 +2,8 @@ use anyhow::{Context, Result};
 use sha2::{Digest, Sha256};
 
 use super::{
-    HASH_BYTES, TransactionSigningDomain, decode_hex_array, hex_encode, mine_signing_bytes,
+    AddressNetwork, AddressVersion, HASH_BYTES, TransactionSigningDomain, decode_hex_array,
+    decode_versioned_address, hex_encode, mine_signing_bytes,
     validation::{decode_canonical_hex_array, validate_address, validate_hash},
 };
 
@@ -136,7 +137,18 @@ pub(super) fn stratum_mine_template(
     difficulty_bits: u32,
 ) -> Result<StratumMineTemplate> {
     let recipient = recipient.into();
-    validate_address(&recipient, "mine recipient")?;
+    if validate_address(&recipient, "mine recipient").is_err() {
+        let network = if recipient.starts_with("tiuna1") {
+            AddressNetwork::Testnet
+        } else {
+            AddressNetwork::Mainnet
+        };
+        let decoded =
+            decode_versioned_address(&recipient, network).context("mine recipient is invalid")?;
+        if decoded.version != AddressVersion::HybridKeyCommitment {
+            anyhow::bail!("mine recipient must use a legacy or hybrid address");
+        }
+    }
     validate_hash(anchor, "mine transaction anchor")?;
     let anchor_bytes = if domain.is_chain_bound() {
         decode_canonical_hex_array::<HASH_BYTES>(anchor)

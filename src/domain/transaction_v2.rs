@@ -5,7 +5,7 @@ use sha2::{Digest, Sha256};
 
 use super::{
     AddressVersion, ProtocolPublicKey, ProtocolSignature, SignatureScheme, VersionedAddress,
-    verify_ed25519, verify_ml_dsa44,
+    hex_encode, verify_ed25519, verify_ml_dsa44,
 };
 
 const TRANSACTION_V2_TAG: &[u8] = b"IUNA-TX-V2";
@@ -167,6 +167,58 @@ impl V2SpendingAuthorization {
 }
 
 impl TransactionV2 {
+    pub fn is_burn(&self) -> bool {
+        matches!(self, Self::Burn { .. })
+    }
+
+    pub fn amount(&self) -> u64 {
+        match self {
+            Self::Burn { amount, .. } => *amount,
+            Self::Migration { .. } | Self::Transfer { .. } | Self::Mine { .. } => 0,
+        }
+    }
+
+    pub fn burn_anchor(&self) -> Option<[u8; 32]> {
+        match self {
+            Self::Burn { anchor, .. } => *anchor,
+            Self::Migration { .. } | Self::Transfer { .. } | Self::Mine { .. } => None,
+        }
+    }
+
+    pub fn burn_legacy_owner(&self) -> Result<Option<String>> {
+        let Self::Burn {
+            inputs,
+            authorizations,
+            ..
+        } = self
+        else {
+            return Ok(None);
+        };
+        let owner = inputs
+            .first()
+            .context("transaction v2 burn has no owner")?
+            .owner;
+        if inputs.iter().any(|input| input.owner != owner) {
+            bail!("transaction v2 burn inputs must have one owner");
+        }
+        let authorization = authorizations
+            .first()
+            .context("transaction v2 burn has no authorization")?;
+        if authorization.scheme() != SignatureScheme::HybridEd25519MlDsa44
+            || authorizations.iter().any(|candidate| {
+                candidate.public_key().as_bytes() != authorization.public_key().as_bytes()
+            })
+        {
+            bail!("transaction v2 burn must use one hybrid wallet identity");
+        }
+        if authorization.committed_address()? != owner {
+            bail!("transaction v2 burn authorization does not match its owner");
+        }
+        Ok(Some(hex_encode(
+            &authorization.public_key().as_bytes()[..32],
+        )))
+    }
+
     pub fn fee(&self) -> u64 {
         match self {
             Self::Migration { fee, .. } | Self::Transfer { fee, .. } | Self::Burn { fee, .. } => {

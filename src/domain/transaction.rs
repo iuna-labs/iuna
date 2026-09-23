@@ -5,10 +5,11 @@ use serde::{Deserialize, Serialize};
 
 use super::validation::{decode_canonical_hex, decode_canonical_hex_array};
 use super::{
-    Amount, HASH_BYTES, MINE_FINALIZER_FEE, MINE_REWARD, PUBLIC_KEY_BYTES, SIGNATURE_BYTES, Wallet,
-    canonical_transaction_size_bytes, decode_hex_array, genesis_allocation_outpoint,
-    hash_meets_difficulty, hex_encode, hex_hash, mine_payload, mine_signature,
-    stratum_mine_header_bytes, stratum_mine_signature, verify_ed25519,
+    AddressNetwork, Amount, HASH_BYTES, MINE_FINALIZER_FEE, MINE_REWARD, PUBLIC_KEY_BYTES,
+    SIGNATURE_BYTES, Wallet, canonical_transaction_size_bytes, decode_hex_array,
+    decode_versioned_address, genesis_allocation_outpoint, hash_meets_difficulty, hex_encode,
+    hex_hash, mine_payload, mine_signature, stratum_mine_header_bytes, stratum_mine_signature,
+    verify_ed25519,
 };
 
 pub const TRANSACTION_SIGNING_FORMAT_VERSION: u16 = 1;
@@ -622,9 +623,20 @@ pub(super) fn mine_signing_bytes(
     let mut bytes = Vec::new();
     domain.encode(&mut bytes)?;
     bytes.push(3);
-    let recipient = decode_canonical_hex_array::<PUBLIC_KEY_BYTES>(recipient)
-        .context("mine recipient is invalid")?;
-    encode_bytes(&mut bytes, &recipient, "mine recipient")?;
+    if let Ok(recipient) = decode_canonical_hex_array::<PUBLIC_KEY_BYTES>(recipient) {
+        encode_bytes(&mut bytes, &recipient, "mine recipient")?;
+    } else {
+        let network = if recipient.starts_with("tiuna1") {
+            AddressNetwork::Testnet
+        } else {
+            AddressNetwork::Mainnet
+        };
+        let recipient =
+            decode_versioned_address(recipient, network).context("mine recipient is invalid")?;
+        let mut encoded = vec![recipient.version.wire_id()];
+        encoded.extend_from_slice(&recipient.payload);
+        encode_bytes(&mut bytes, &encoded, "mine recipient")?;
+    }
     let anchor =
         decode_canonical_hex_array::<HASH_BYTES>(anchor).context("mine anchor is invalid")?;
     encode_bytes(&mut bytes, &anchor, "mine anchor")?;

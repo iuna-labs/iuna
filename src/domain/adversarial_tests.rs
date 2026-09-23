@@ -306,7 +306,9 @@ impl Harness {
                     prev_hash: prev_hash.clone(),
                     slot: member.slot,
                     member: member.owner,
+                    reward_address: None,
                     burns: burns.clone(),
+                    burns_v2: Vec::new(),
                 }))
             })
             .collect()
@@ -1930,12 +1932,20 @@ fn mini_validate_burn_bundle_section(ledger: &Ledger, block: &Block) -> Option<(
             .filter(|masked| masked.bundle_mask & slot_mask != 0)
             .map(|masked| masked.burn.clone())
             .collect::<Vec<_>>();
+        let burns_v2 = section
+            .burns_v2
+            .iter()
+            .filter(|masked| masked.bundle_mask & slot_mask != 0)
+            .map(|masked| masked.envelope.clone())
+            .collect::<Vec<_>>();
         let bundle = BurnBundle {
             height: block.height,
             prev_hash: block.prev_hash.clone(),
             slot: signature.slot,
             member: signature.member.clone(),
+            reward_address: signature.reward_address.clone(),
             burns: burns.clone(),
+            burns_v2: burns_v2.clone(),
             signature: signature.signature.clone(),
         };
         if bundle.serialized_size_bytes().ok()? > MAX_BURN_BUNDLE_BYTES {
@@ -1946,7 +1956,9 @@ fn mini_validate_burn_bundle_section(ledger: &Ledger, block: &Block) -> Option<(
             prev_hash: block.prev_hash.clone(),
             slot: signature.slot,
             member: signature.member.clone(),
+            reward_address: signature.reward_address.clone(),
             burns,
+            burns_v2,
         };
         if verify_address_signature(
             &signature.member,
@@ -2256,7 +2268,9 @@ proptest! {
             prev_hash: harness.ledger.tip_hash().to_string(),
             slot: 0,
             member: finalizer.address().to_string(),
+            reward_address: None,
             burns: vec![victim_burn.clone()],
+            burns_v2: Vec::new(),
         });
         let mut block = harness.finish_ticket_block_from_pending(0, vec![bundle]);
         block.transactions.retain(|tx| tx.signature() != victim_burn.signature());
@@ -2455,7 +2469,9 @@ fn attested_burn_is_not_selected_again_as_normal_transaction() {
         prev_hash: harness.ledger.tip_hash().to_string(),
         slot: 0,
         member: finalizer.address().to_string(),
+        reward_address: None,
         burns: vec![attested_burn.clone()],
+        burns_v2: Vec::new(),
     });
 
     let block = harness.finish_ticket_block_from_pending(0, vec![bundle]);
@@ -2658,7 +2674,9 @@ fn attested_burn_block_validates_independent_of_local_mempool() {
         prev_hash: harness.ledger.tip_hash().to_string(),
         slot: 0,
         member: finalizer.address().to_string(),
+        reward_address: None,
         burns: vec![attested_burn.clone()],
+        burns_v2: Vec::new(),
     });
     let block = harness.finish_ticket_block_from_pending(0, vec![bundle]);
     let parent_snapshot = harness.ledger.snapshot();
@@ -2716,6 +2734,7 @@ fn misused_or_extra_committee_bundle_is_rejected() {
         .push(BurnBundleSignature {
             slot: 1,
             member: harness.attacker.wallet.address().to_string(),
+            reward_address: None,
             signature: "00".repeat(64),
         });
     rehash(&mut block);
@@ -2903,7 +2922,9 @@ fn rank_one_committee_excludes_missed_rank_zero_owner_and_requires_remaining_slo
         prev_hash: harness.ledger.tip_hash().to_string(),
         slot: member.slot,
         member: member.owner,
+        reward_address: None,
         burns: Vec::new(),
+        burns_v2: Vec::new(),
     });
     let with_committee = finish_prepared_block(
         &finalizer,

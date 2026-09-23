@@ -25,8 +25,8 @@ use super::{
     DATASET_LIMIT, DATASET_PAGE_LIMIT, EXPLORER_LIMIT, EXPLORER_PAGE_LIMIT, HttpState,
     add_pending_outputs, add_pending_v2_outputs, metrics_response, network_health,
     populate_wallet_reward_flow, top_mine_proofs, transaction_v2_input_outpoints,
-    ui_blocks_from_indexes, ui_transaction, ui_transaction_v2, wallet_transaction_row,
-    wallet_transaction_rows, wallet_transaction_v2_row, wallet_transaction_v2_rows,
+    ui_blocks_from_indexes, ui_transaction, ui_transaction_v2, wallet_transaction_rows,
+    wallet_transaction_v2_row, wallet_transaction_v2_rows,
 };
 
 pub(super) async fn api_status(State(state): State<HttpState>) -> Json<NodeStatus> {
@@ -145,7 +145,7 @@ pub(super) async fn api_wallet_transactions(
         .unwrap_or(DATASET_PAGE_LIMIT)
         .clamp(1, DATASET_LIMIT);
     let filters = WalletTransactionFilters::from_query(query);
-    let (wallet, wallet_addresses, pending, pending_v2, domain, network, v2_outputs) = {
+    let (wallet_addresses, pending, pending_v2, domain, network, v2_outputs) = {
         let node = state.node.lock().await;
         let status = node.status();
         let wallet = node.wallet_address().to_string();
@@ -164,7 +164,6 @@ pub(super) async fn api_wallet_transactions(
             })
             .collect::<BTreeMap<_, _>>();
         (
-            wallet,
             wallet_addresses,
             node.pending_transactions(),
             pending_v2,
@@ -179,8 +178,13 @@ pub(super) async fn api_wallet_transactions(
         .await
         .unwrap_or_default();
     add_pending_outputs(&mut pending_outputs, &pending);
-    let mut pending_rows =
-        wallet_transaction_rows(&wallet, pending.clone(), &[], &pending_outputs, filters);
+    let mut pending_rows = wallet_transaction_rows(
+        &wallet_addresses,
+        pending.clone(),
+        &[],
+        &pending_outputs,
+        filters,
+    );
     if let Some(domain) = domain.as_ref() {
         let mut v2_outputs = v2_outputs;
         let _ = add_pending_v2_outputs(&mut v2_outputs, &pending_v2, domain, network);
@@ -206,14 +210,13 @@ pub(super) async fn api_wallet_transactions(
     let remaining_limit = limit.saturating_sub(items.len());
     let kinds = wallet_transaction_filter_kinds(filters);
     let store = state.ui_data_store.clone();
-    let wallet_for_query = wallet.clone();
     let wallet_addresses_for_query = wallet_addresses.clone();
     let confirmed_fetch_limit = confirmed_offset.saturating_add(remaining_limit);
     let ((confirmed_rows, confirmed_legacy_total), (confirmed_v2_rows, confirmed_v2_total)) =
         tokio::task::spawn_blocking(move || -> Result<_> {
             Ok((
-                store.load_wallet_transactions(
-                    &wallet_for_query,
+                store.load_wallet_transactions_for_addresses(
+                    &wallet_addresses_for_query,
                     &kinds,
                     0,
                     confirmed_fetch_limit,
@@ -267,8 +270,8 @@ pub(super) async fn api_wallet_transactions(
         .filter_map(|row| {
             let sort_key = row.sort_key;
             let is_reward = row.kind == "reward";
-            let mut item = wallet_transaction_row(
-                &wallet,
+            let mut item = super::ui::wallet_transaction_row_for_addresses(
+                &wallet_addresses,
                 &row.transaction,
                 &confirmed_outputs,
                 &WalletTransactionContext {
@@ -281,7 +284,6 @@ pub(super) async fn api_wallet_transactions(
             if is_reward {
                 item.kind = "reward";
                 item.from = "fees".to_string();
-                item.to = Some(wallet.clone());
                 item.direction = "reward";
                 if let Some(block) = reward_blocks.get(&row.block_height) {
                     populate_wallet_reward_flow(&mut item, block);

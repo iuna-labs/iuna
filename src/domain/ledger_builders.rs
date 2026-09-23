@@ -212,6 +212,106 @@ impl Ledger {
         Ok(transaction)
     }
 
+    pub fn build_v2_burn(
+        &self,
+        wallet: &Wallet,
+        amount: Amount,
+        fee: Amount,
+    ) -> Result<TransactionV2> {
+        self.build_v2_burn_with_anchor(wallet, amount, fee, self.tip_hash())
+    }
+
+    pub(crate) fn build_v2_burn_for_next_block(
+        &self,
+        wallet: &Wallet,
+        amount: Amount,
+        fee: Amount,
+    ) -> Result<TransactionV2> {
+        self.build_v2_burn_with_anchor(wallet, amount, fee, &self.tip().prev_hash)
+    }
+
+    fn build_v2_burn_with_anchor(
+        &self,
+        wallet: &Wallet,
+        amount: Amount,
+        fee: Amount,
+        anchor: &str,
+    ) -> Result<TransactionV2> {
+        if amount == 0 {
+            bail!("burn amount must be greater than zero");
+        }
+        let required = amount
+            .checked_add(fee)
+            .context("burn amount plus fee overflows")?;
+        let owner = wallet.hybrid_versioned_address();
+        let owner_address = wallet.hybrid_address(AddressNetwork::from_profile_id(
+            &self.launch_profile.profile_id,
+        ));
+        let mut available = self.available_utxos_for_address(&owner_address)?;
+        available.sort_by(|(left_point, left), (right_point, right)| {
+            right
+                .amount
+                .cmp(&left.amount)
+                .then_with(|| left_point.cmp(right_point))
+        });
+        let mut total = 0_u64;
+        let mut inputs = Vec::new();
+        for (outpoint, output) in available {
+            total = total
+                .checked_add(output.amount)
+                .context("transaction v2 input total overflows")?;
+            inputs.push(TransactionV2Input {
+                outpoint_txid: decode_hex_array::<32>(&outpoint.txid)
+                    .context("transaction v2 outpoint ID must be a 32-byte hash")?,
+                outpoint_index: outpoint.index,
+                owner,
+            });
+            if total >= required {
+                break;
+            }
+        }
+        if total < required {
+            bail!("insufficient hybrid funds");
+        }
+        let change_amount = total - required;
+        let change = (change_amount > 0)
+            .then_some(TransactionV2Output {
+                address: owner,
+                amount: change_amount,
+            })
+            .into_iter()
+            .collect();
+        let domain = self.transaction_v2_domain()?;
+        let mut transaction = TransactionV2::Burn {
+            inputs,
+            change,
+            amount,
+            fee,
+            anchor: Some(
+                decode_hex_array::<32>(anchor).context("transaction v2 burn anchor is invalid")?,
+            ),
+            authorizations: Vec::new(),
+        };
+        let payload = transaction.signing_bytes(&domain)?;
+        let authorization = wallet.sign_v2_authorization(owner, &payload)?;
+        if let TransactionV2::Burn {
+            inputs,
+            authorizations,
+            ..
+        } = &mut transaction
+        {
+            authorizations.resize(inputs.len(), authorization);
+        }
+        transaction.verify_authorizations(&domain)?;
+        ensure_v2_transaction_within_block_budget(
+            self,
+            &transaction,
+            &domain,
+            self.launch_profile.max_block_bytes,
+        )?;
+        Ok(transaction)
+    }
+
     pub fn build_transfer(
         &self,
         wallet: &Wallet,
@@ -436,7 +536,7 @@ impl Ledger {
 
     pub fn build_mine(&self, recipient: impl Into<String>) -> Result<Transaction> {
         let recipient = recipient.into();
-        validate_address(&recipient, "mine recipient")?;
+        self.validate_mine_reward_address(&recipient)?;
         let anchor = self.tip().hash.clone();
         let salt = 1;
         let difficulty_bits = self.current_mine_difficulty_bits();
@@ -479,7 +579,7 @@ impl Ledger {
         max_attempts: u64,
     ) -> Result<MineSearchOutcome> {
         let recipient = recipient.into();
-        validate_address(&recipient, "mine recipient")?;
+        self.validate_mine_reward_address(&recipient)?;
         let anchor = self.tip().hash.clone();
         let difficulty_bits = self.current_mine_difficulty_bits();
         let signing_domain = self.transaction_signing_domain();
@@ -531,6 +631,8 @@ impl Ledger {
         salt: u64,
         difficulty_bits: u32,
     ) -> Result<StratumMineTemplate> {
+        let recipient = recipient.into();
+        self.validate_mine_reward_address(&recipient)?;
         stratum_mine_template(
             &self.transaction_signing_domain(),
             recipient,
@@ -538,6 +640,21 @@ impl Ledger {
             salt,
             difficulty_bits,
         )
+    }
+
+    fn validate_mine_reward_address(&self, recipient: &str) -> Result<()> {
+        let height = self.height().saturating_add(1);
+        if height < super::HYBRID_REWARD_ACTIVATION_HEIGHT {
+            return validate_address(recipient, "mine recipient");
+        }
+        let address = super::decode_versioned_address(
+            recipient,
+            AddressNetwork::from_profile_id(&self.launch_profile.profile_id),
+        )?;
+        if address.version != super::AddressVersion::HybridKeyCommitment {
+            bail!("mine reward must use a hybrid address at height {height}");
+        }
+        Ok(())
     }
 
     pub fn build_stratum_mine(
@@ -606,6 +723,30 @@ mod v2_migration_tests {
     use std::collections::BTreeMap;
 
     use super::*;
+
+    #[test]
+    fn mine_reward_destination_switches_to_hybrid_at_3750() {
+        let wallet = Wallet::from_seed("hybrid-mine-reward-wallet");
+        let mut ledger = Ledger::new(BTreeMap::new(), 1);
+        ledger.chain.last_mut().unwrap().height = super::super::HYBRID_REWARD_ACTIVATION_HEIGHT - 2;
+        assert!(
+            ledger
+                .validate_mine_reward_address(wallet.address())
+                .is_ok()
+        );
+
+        ledger.chain.last_mut().unwrap().height = super::super::HYBRID_REWARD_ACTIVATION_HEIGHT - 1;
+        assert!(
+            ledger
+                .validate_mine_reward_address(wallet.address())
+                .is_err()
+        );
+        assert!(
+            ledger
+                .validate_mine_reward_address(&wallet.hybrid_address(AddressNetwork::Mainnet))
+                .is_ok()
+        );
+    }
 
     #[test]
     fn migration_builder_consolidates_legacy_value_into_one_hybrid_output() {

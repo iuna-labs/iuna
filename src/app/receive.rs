@@ -73,6 +73,9 @@ impl NodeCore {
         for burn in &bundle.burns {
             self.receive_gossiped_transaction(burn.clone())?;
         }
+        for envelope in &bundle.burns_v2 {
+            self.receive_gossiped_transaction_v2(envelope.clone())?;
+        }
         self.ledger
             .validate_next_block_burn_bundles(vec![bundle.clone()])?;
         if self.equivocated_burn_bundle_slots.contains(&key) {
