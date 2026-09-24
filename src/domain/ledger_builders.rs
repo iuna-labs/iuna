@@ -440,6 +440,98 @@ impl Ledger {
         Ok(transaction)
     }
 
+    /// Builds a transaction-v2 transfer that consolidates exactly the selected hybrid outputs.
+    /// Inputs may belong to different derived addresses owned by the same wallet.
+    pub(crate) fn build_v2_consolidation_with_inputs(
+        &self,
+        wallet: &Wallet,
+        amount: Amount,
+        fee: Amount,
+        outpoints: &[OutPoint],
+    ) -> Result<TransactionV2> {
+        if amount == 0 {
+            bail!("transfer amount must be greater than zero");
+        }
+        let recipient = self
+            .wallet_external_addresses(wallet)?
+            .last()
+            .map(|(_, address)| *address)
+            .context("wallet receive address is unavailable")?;
+
+        let mut available = Vec::new();
+        for owner in self.wallet_owned_hybrid_addresses(wallet)? {
+            let owner_address = encode_versioned_address(owner, self.address_network())?;
+            available.extend(
+                self.available_utxos_for_address(&owner_address)?
+                    .into_iter()
+                    .map(|(outpoint, output)| (outpoint, output, owner)),
+            );
+        }
+        let available = available
+            .into_iter()
+            .map(|(outpoint, output, owner)| (outpoint, (output, owner)))
+            .collect::<std::collections::BTreeMap<_, _>>();
+
+        let mut seen = std::collections::BTreeSet::new();
+        let mut total = 0_u64;
+        let mut inputs = Vec::with_capacity(outpoints.len());
+        for outpoint in outpoints {
+            if !seen.insert(outpoint) {
+                bail!("outputs changed or are reserved; review a new preview");
+            }
+            let (output, owner) = available
+                .get(outpoint)
+                .context("output is no longer an available hybrid output in this wallet")?;
+            total = total
+                .checked_add(output.amount)
+                .context("transaction v2 input total overflows")?;
+            inputs.push(TransactionV2Input {
+                outpoint_txid: decode_hex_array::<32>(&outpoint.txid)
+                    .context("transaction v2 outpoint ID must be a 32-byte hash")?,
+                outpoint_index: outpoint.index,
+                owner: *owner,
+            });
+        }
+        if total
+            != amount
+                .checked_add(fee)
+                .context("amount plus fee overflows")?
+        {
+            bail!("selected hybrid outputs do not match amount plus fee");
+        }
+
+        let domain = self.transaction_v2_domain()?;
+        let mut transaction = TransactionV2::Transfer {
+            inputs,
+            outputs: vec![TransactionV2Output {
+                address: recipient,
+                amount,
+            }],
+            fee,
+            authorizations: Vec::new(),
+        };
+        let payload = transaction.signing_bytes(&domain)?;
+        if let TransactionV2::Transfer {
+            inputs,
+            authorizations,
+            ..
+        } = &mut transaction
+        {
+            *authorizations = inputs
+                .iter()
+                .map(|input| wallet.sign_v2_authorization(input.owner, &payload))
+                .collect::<Result<Vec<_>>>()?;
+        }
+        transaction.verify_authorizations(&domain)?;
+        ensure_v2_transaction_within_block_budget(
+            self,
+            &transaction,
+            &domain,
+            self.launch_profile.max_block_bytes,
+        )?;
+        Ok(transaction)
+    }
+
     pub fn build_v2_burn(
         &self,
         wallet: &Wallet,

@@ -16,6 +16,8 @@ use crate::domain::{
 
 mod automatic_mining;
 mod consolidation;
+#[cfg(test)]
+pub(crate) use consolidation::ConsolidationKind;
 mod gossip;
 mod helpers;
 mod in_memory_network;

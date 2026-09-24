@@ -5,6 +5,10 @@ from the Git history and Conventional Commit titles by `deployment.sh`.
 
 ## [Unreleased]
 
+### Fixed
+
+- optimize both legacy and hybrid wallet UTXOs
+
 ## [0.4.43] - 2026-09-24
 
 ### Added

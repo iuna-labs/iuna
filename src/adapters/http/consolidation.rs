@@ -52,11 +52,12 @@ pub(super) async fn submit(
         (result, node.drain_outbox())
     };
     match result {
-        Ok(transaction) => {
-            // Submission has already happened. Return the signature even if broadcasting fails;
-            // the UI must never blindly retry a possibly accepted financial action.
+        Ok(transaction_id) => {
+            // Submission has already happened. Return its identifier even if broadcasting fails;
+            // the UI must never blindly retry a possibly accepted financial action. Keep the
+            // legacy `signature` field name for API compatibility with existing clients.
             let broadcast = state.gossip.broadcast(outbox).await;
-            Json(json!({ "ok": true, "signature": transaction.signature(),
+            Json(json!({ "ok": true, "signature": transaction_id,
                 "broadcast_error": broadcast.err().map(|error| error.to_string()) }))
         }
         Err(error) => Json(json!({ "ok": false, "error": error.to_string() })),

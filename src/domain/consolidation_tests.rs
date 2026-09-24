@@ -1,6 +1,6 @@
 use std::collections::{BTreeMap, BTreeSet};
 
-use super::{Ledger, OutPoint, TxOutput, UtxoLineageRoot, Wallet};
+use super::{AddressNetwork, Ledger, OutPoint, TransactionV2, TxOutput, UtxoLineageRoot, Wallet};
 use crate::app::NodeCore;
 
 fn fixture(count: usize, value: u64, roots: bool) -> (Wallet, Ledger) {
@@ -49,11 +49,17 @@ fn consolidation_large_wallet_is_bounded_disjoint_and_keeps_a_reserve() {
         let tx = node
             .consolidate(&batch.utxos, 1, batch.fee, false, wallet.address())
             .unwrap();
-        let outputs = tx.outputs();
+        assert!(!tx.is_empty());
+        let pending = node
+            .pending_transactions()
+            .into_iter()
+            .find(|transaction| transaction.signature() == tx)
+            .unwrap();
+        let outputs = pending.outputs();
         assert_eq!(outputs.len(), 1);
         assert_eq!(outputs[0].address, wallet.address());
         assert_eq!(
-            outputs[0].amount + tx.fee(),
+            outputs[0].amount + pending.fee(),
             batch.utxos.len() as u64 * 1_000_000
         );
     }
@@ -67,6 +73,116 @@ fn consolidation_large_wallet_is_bounded_disjoint_and_keeps_a_reserve() {
         node.consolidate(&batch.utxos, 1, batch.fee, false, wallet.address())
             .is_err()
     );
+}
+
+#[test]
+fn consolidation_plan_includes_hybrid_outputs_in_separate_v2_batches() {
+    let (wallet, mut ledger) = fixture(3, 1_000_000, false);
+    let hybrid_address = wallet.hybrid_address(AddressNetwork::Mainnet);
+    for index in 0..3 {
+        ledger.utxos.insert(
+            OutPoint {
+                txid: format!("{:064x}", index + 10),
+                index: 0,
+            },
+            TxOutput {
+                address: hybrid_address.clone(),
+                amount: 2_000_000,
+            },
+        );
+    }
+
+    let node = NodeCore::from_ledger(wallet, ledger, 0);
+    let plan = node.consolidation_plan(1, true).unwrap();
+    assert_eq!(plan.before, 6);
+    assert_eq!(plan.after, 4);
+    assert_eq!(plan.batches.len(), 2);
+    assert_eq!(
+        plan.batches
+            .iter()
+            .filter(|batch| batch.kind == crate::app::ConsolidationKind::Legacy)
+            .count(),
+        1
+    );
+    assert_eq!(
+        plan.batches
+            .iter()
+            .filter(|batch| batch.kind == crate::app::ConsolidationKind::Hybrid)
+            .count(),
+        1
+    );
+}
+
+#[test]
+fn selected_hybrid_outputs_build_one_v2_consolidation_output() {
+    let wallet = Wallet::from_seed("hybrid-consolidation-builder");
+    let address = wallet.hybrid_address(AddressNetwork::Mainnet);
+    let points = (0..2)
+        .map(|index| OutPoint {
+            txid: format!("{:064x}", index + 1),
+            index: 0,
+        })
+        .collect::<Vec<_>>();
+    let mut ledger = Ledger::new(BTreeMap::new(), 1);
+    for point in &points {
+        ledger.utxos.insert(
+            point.clone(),
+            TxOutput {
+                address: address.clone(),
+                amount: 1_000_000,
+            },
+        );
+    }
+
+    let transaction = ledger
+        .build_v2_consolidation_with_inputs(&wallet, 1_990_000, 10_000, &points)
+        .unwrap();
+    let TransactionV2::Transfer {
+        inputs,
+        outputs,
+        fee,
+        ..
+    } = transaction
+    else {
+        panic!("expected a transaction-v2 transfer");
+    };
+    assert_eq!(inputs.len(), 2);
+    assert_eq!(outputs.len(), 1);
+    assert_eq!(outputs[0].address, wallet.hybrid_versioned_address());
+    assert_eq!(outputs[0].amount, 1_990_000);
+    assert_eq!(fee, 10_000);
+}
+
+#[test]
+fn consolidation_plan_excludes_outputs_reserved_by_pending_v2() {
+    let wallet = Wallet::from_seed("pending-v2-consolidation");
+    let address = wallet.hybrid_address(AddressNetwork::Mainnet);
+    let points = (0..3)
+        .map(|index| OutPoint {
+            txid: format!("{:064x}", index + 1),
+            index: 0,
+        })
+        .collect::<Vec<_>>();
+    let mut ledger = Ledger::new(BTreeMap::new(), 1);
+    for point in &points {
+        ledger.utxos.insert(
+            point.clone(),
+            TxOutput {
+                address: address.clone(),
+                amount: 1_000_000,
+            },
+        );
+    }
+    let pending = ledger
+        .build_v2_consolidation_with_inputs(&wallet, 1_990_000, 10_000, &points[..2])
+        .unwrap();
+    ledger.pending_v2.push(pending);
+
+    let node = NodeCore::from_ledger(wallet, ledger, 0);
+    let plan = node.consolidation_plan(1, true).unwrap();
+    assert_eq!(plan.before, 3);
+    assert_eq!(plan.after, 3);
+    assert!(plan.batches.is_empty());
 }
 
 #[test]
