@@ -5,6 +5,12 @@ from the Git history and Conventional Commit titles by `deployment.sh`.
 
 ## [Unreleased]
 
+## [0.4.43] - 2026-09-24
+
+### Added
+
+- upgrade web wallet to hybrid addresses
+
 ## [0.4.42] - 2026-09-24
 
 ### Added
