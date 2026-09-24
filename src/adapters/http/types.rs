@@ -250,11 +250,11 @@ impl WalletTransactionsQuery {
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub(super) struct WalletTransactionFilters {
-    pub(super) transfer: bool,
-    pub(super) mine: bool,
-    pub(super) burn: bool,
-    pub(super) reward: bool,
+pub(crate) struct WalletTransactionFilters {
+    pub(crate) transfer: bool,
+    pub(crate) mine: bool,
+    pub(crate) burn: bool,
+    pub(crate) reward: bool,
 }
 
 impl Default for WalletTransactionFilters {
@@ -432,7 +432,7 @@ mod secret_tests {
 
 #[derive(Clone, Debug, Eq, PartialEq, Serialize)]
 #[serde(rename_all = "camelCase")]
-pub(super) struct WalletTransactionRow {
+pub(crate) struct WalletTransactionRow {
     pub(super) kind: &'static str,
     pub(super) from: String,
     pub(super) to: Option<String>,
@@ -482,11 +482,11 @@ pub(super) struct WalletUtxoRow {
 }
 
 #[derive(Clone, Debug)]
-pub(super) struct WalletTransactionContext {
-    pub(super) status: &'static str,
-    pub(super) block_height: Option<u64>,
-    pub(super) timestamp_ms: Option<u64>,
-    pub(super) block_finalizer: Option<String>,
+pub(crate) struct WalletTransactionContext {
+    pub(crate) status: &'static str,
+    pub(crate) block_height: Option<u64>,
+    pub(crate) timestamp_ms: Option<u64>,
+    pub(crate) block_finalizer: Option<String>,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq, Serialize)]

@@ -374,7 +374,9 @@ mod tests {
 
     use super::{HybridAddressBranch, Wallet};
     use crate::domain::{
-        AddressNetwork, SignatureScheme, hex_encode, verify_ed25519, verify_ml_dsa44,
+        AddressNetwork, LegacyTransactionId, SignatureScheme, TransactionV2, TransactionV2Domain,
+        TransactionV2Input, TransactionV2LegacyInput, TransactionV2Output, hex_encode,
+        verify_ed25519, verify_ml_dsa44,
     };
 
     #[test]
@@ -398,6 +400,14 @@ mod tests {
         assert!(first.hybrid_public_key.get().is_none());
         assert_eq!(first.address(), second.address());
         assert_eq!(first.hybrid_public_key(), second.hybrid_public_key());
+        assert_eq!(
+            first.hybrid_address(AddressNetwork::Mainnet),
+            "iuna1py9qlrnw6cm3mpz26hwwkww9spaa96zrw2g34gu0p4y3ea5cqhg0qa82x9s"
+        );
+        assert_eq!(
+            first.hybrid_address_at(HybridAddressBranch::External, 1, AddressNetwork::Mainnet),
+            "iuna1pkxdcktlzf5tc2p59xns2nccq7rg5zjhwg2zn5r9u73c5j9jxgk8s0e5l4e"
+        );
         assert!(first.hybrid_public_key.get().is_some());
         assert_eq!(
             first.hybrid_address(AddressNetwork::Mainnet),
@@ -418,6 +428,81 @@ mod tests {
         assert_eq!(
             first.hybrid_address(AddressNetwork::Mainnet),
             "iuna1py9qlrnw6cm3mpz26hwwkww9spaa96zrw2g34gu0p4y3ea5cqhg0qa82x9s"
+        );
+    }
+
+    #[test]
+    fn browser_v2_transfer_vector_matches_node_encoding_and_signatures() {
+        let wallet = Wallet::from_seed("hybrid-wallet-seed");
+        let owner = wallet.hybrid_versioned_address_at(HybridAddressBranch::External, 0);
+        let recipient = wallet.hybrid_versioned_address_at(HybridAddressBranch::External, 1);
+        let change = wallet.hybrid_versioned_address_at(HybridAddressBranch::External, 2);
+        let domain = TransactionV2Domain::new("iuna-mainnet-candidate", [0x11; 32]).unwrap();
+        let mut transaction = TransactionV2::Transfer {
+            inputs: vec![TransactionV2Input {
+                outpoint_txid: [0x22; 32],
+                outpoint_index: 7,
+                owner,
+            }],
+            outputs: vec![
+                TransactionV2Output {
+                    address: recipient,
+                    amount: 1_000_000,
+                },
+                TransactionV2Output {
+                    address: change,
+                    amount: 995_921,
+                },
+            ],
+            fee: 4_079,
+            authorizations: Vec::new(),
+        };
+        let payload = transaction.signing_bytes(&domain).unwrap();
+        let authorization = wallet.sign_v2_authorization(owner, &payload).unwrap();
+        let TransactionV2::Transfer { authorizations, .. } = &mut transaction else {
+            unreachable!();
+        };
+        authorizations.push(authorization);
+
+        transaction.verify_authorizations(&domain).unwrap();
+        assert_eq!(transaction.encoded_size_bytes(&domain).unwrap(), 4_079);
+        assert_eq!(
+            hex_encode(transaction.transaction_id(&domain).unwrap()),
+            "bda748b6ba9fd6550ca47d580f980a1c00d0050a20992750265a62d23b0b590d"
+        );
+    }
+
+    #[test]
+    fn browser_v2_migration_vector_matches_node_encoding_and_signature() {
+        let wallet = Wallet::from_seed("hybrid-wallet-seed");
+        let owner = wallet.legacy_versioned_address();
+        let destination = wallet.hybrid_versioned_address_at(HybridAddressBranch::External, 2);
+        let domain = TransactionV2Domain::new("iuna-mainnet-candidate", [0x11; 32]).unwrap();
+        let mut transaction = TransactionV2::Migration {
+            inputs: vec![TransactionV2LegacyInput {
+                outpoint_id: LegacyTransactionId::Hash([0x33; 32]),
+                outpoint_index: 4,
+                owner,
+            }],
+            outputs: vec![TransactionV2Output {
+                address: destination,
+                amount: 1_999_693,
+            }],
+            fee: 307,
+            authorizations: Vec::new(),
+        };
+        let payload = transaction.signing_bytes(&domain).unwrap();
+        let authorization = wallet.sign_v2_authorization(owner, &payload).unwrap();
+        let TransactionV2::Migration { authorizations, .. } = &mut transaction else {
+            unreachable!();
+        };
+        authorizations.push(authorization);
+
+        transaction.verify_authorizations(&domain).unwrap();
+        assert_eq!(transaction.encoded_size_bytes(&domain).unwrap(), 307);
+        assert_eq!(
+            hex_encode(transaction.transaction_id(&domain).unwrap()),
+            "37539c9d89a391c599b838c3f415e7adc93a36c22cd4fb5fe44a79433f336075"
         );
     }
 

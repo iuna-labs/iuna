@@ -15,7 +15,7 @@ use super::types::{
     WalletTransactionRow,
 };
 
-pub(super) fn wallet_transaction_rows(
+pub(crate) fn wallet_transaction_rows(
     wallet_addresses: &[String],
     pending: Vec<Transaction>,
     chain: &[Block],
@@ -66,7 +66,7 @@ pub(super) fn wallet_transaction_rows(
     rows.into_iter().map(|(_, row)| row).collect()
 }
 
-pub(super) fn wallet_transaction_v2_rows(
+pub(crate) fn wallet_transaction_v2_rows(
     wallet_addresses: &[String],
     pending: &[TransactionV2],
     outputs: &BTreeMap<OutPoint, TxOutput>,
@@ -99,7 +99,7 @@ pub(super) fn wallet_transaction_v2_rows(
         .collect()
 }
 
-pub(super) fn wallet_transaction_v2_row(
+pub(crate) fn wallet_transaction_v2_row(
     wallet_addresses: &[String],
     transaction: &TransactionV2,
     outputs: &BTreeMap<OutPoint, TxOutput>,
@@ -178,7 +178,7 @@ pub(super) fn wallet_transaction_row(
     )
 }
 
-pub(super) fn wallet_transaction_row_for_addresses(
+pub(crate) fn wallet_transaction_row_for_addresses(
     wallet_addresses: &[String],
     tx: &Transaction,
     outputs_by_outpoint: &BTreeMap<OutPoint, TxOutput>,
@@ -865,7 +865,7 @@ pub(super) fn ui_transaction_v2(
     }
 }
 
-pub(super) fn transaction_v2_input_outpoints(transaction: &TransactionV2) -> Vec<OutPoint> {
+pub(crate) fn transaction_v2_input_outpoints(transaction: &TransactionV2) -> Vec<OutPoint> {
     match transaction {
         TransactionV2::Migration { inputs, .. } => inputs
             .iter()
@@ -888,7 +888,7 @@ pub(super) fn transaction_v2_input_outpoints(transaction: &TransactionV2) -> Vec
     }
 }
 
-pub(super) fn add_pending_v2_outputs(
+pub(crate) fn add_pending_v2_outputs(
     outputs: &mut BTreeMap<OutPoint, TxOutput>,
     pending: &[TransactionV2],
     domain: &TransactionV2Domain,
@@ -1007,7 +1007,7 @@ fn hex_nibble(byte: u8) -> Option<u8> {
     }
 }
 
-pub(super) fn add_pending_outputs(
+pub(crate) fn add_pending_outputs(
     outputs: &mut BTreeMap<OutPoint, TxOutput>,
     pending: &[Transaction],
 ) {

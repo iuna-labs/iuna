@@ -1,9 +1,14 @@
 import {
-  API_BASE, LEGACY_STORAGE_KEY, STORAGE_KEY, api, buildSignedTransfer, decodeAddress,
+  API_BASE, LEGACY_STORAGE_KEY, STORAGE_KEY, api, buildSignedTransfer, decodeVersionedAddress,
   decryptWallet, encodeAddress, encryptWallet, formatIuna, hexToBytes, normalizeWalletStore,
   parseFeeRate, parseIuna, removeWallet, upsertWallet, walletFromSeed, walletId,
 } from "./wallet-core.js";
 import { generateMnemonic, validateMnemonic } from "./mnemonic.js";
+import initQuantumCrypto, {
+  build_migration as buildQuantumMigration,
+  build_transfer as buildQuantumTransfer,
+  derive_external_addresses as deriveExternalAddresses,
+} from "./crypto/iuna_wallet_crypto.js";
 
 const app = document.querySelector("#app");
 const toastElement = document.querySelector("#toast");
@@ -11,7 +16,9 @@ const TRANSACTION_PAGE_SIZE = 25;
 const ALL_TRANSACTION_FILTERS = { transfer: true, mine: true, burn: true, reward: true };
 const state = {
   store: null, wallet: null, walletMeta: null, status: null, address: "", balance: null,
-  utxos: [], transactions: [], recentTransactions: [], view: "home", timer: null,
+  addresses: [], addressIndex: 0, legacyAddress: "", legacyUtxos: [], hybridUtxos: [],
+  derivedAddresses: [], derivedWalletId: null,
+  hybridSpendable: 0, utxos: [], transactions: [], recentTransactions: [], view: "home", timer: null,
   transactionFilters: { ...ALL_TRANSACTION_FILTERS },
   transactionPage: { offset: 0, total: 0, hasMore: true, loading: false, error: "" },
   transactionRequest: 0,
@@ -19,6 +26,12 @@ const state = {
   selectedTransaction: null,
   transactionReturnView: "home",
 };
+let quantumCryptoPromise;
+
+async function ensureQuantumCrypto() {
+  quantumCryptoPromise ||= initQuantumCrypto();
+  await quantumCryptoPromise;
+}
 const icon = (name) => {
   const paths = {
     send: '<path d="M6 18 18 6M6 6h12v12"/>',
@@ -129,50 +142,121 @@ async function saveAndOpen(seed, password, name) {
 async function openStoredWallet(meta) {
   state.walletMeta = meta;
   state.wallet = meta.type === "readonly"
-    ? { type: "readonly", publicKeyHex: meta.publicKeyHex, publicKey: Uint8Array.from(meta.publicKeyHex.match(/.{2}/g), (pair) => Number.parseInt(pair, 16)) }
+    ? { type: "readonly", publicKeyHex: meta.publicKeyHex, address: meta.address || "", publicKey: Uint8Array.from(meta.publicKeyHex.match(/.{2}/g), (pair) => Number.parseInt(pair, 16)) }
     : state.wallet;
   await openWallet();
 }
 
 async function fetchWalletData() {
+  const previousAddress = state.address;
   state.status = await api("/status");
-  const address = encodeAddress(state.wallet.publicKey, state.status.chain_id);
-  if (state.address && state.address !== address) {
+  state.legacyAddress = state.walletMeta?.type === "readonly" && state.wallet.address
+    ? state.wallet.address
+    : encodeAddress(state.wallet.publicKey, state.status.chain_id);
+  let snapshot;
+  if (state.walletMeta?.type === "readonly") {
+    const address = state.wallet.address || state.legacyAddress;
+    snapshot = await fetchSnapshot([address]);
+    state.addresses = [address];
+    state.addressIndex = 0;
+    state.address = address;
+  } else if (state.status.transaction_v2_active) {
+    if (Number(state.status.api_version || 0) < 2) throw new Error("The public iuna endpoint must be upgraded for rotating quantum-resistant wallets");
+    await ensureQuantumCrypto();
+    const gapLimit = Math.max(1, Number(state.status.hybrid_address_gap_limit || 20));
+    let count = gapLimit + 1;
+    let derived;
+    const derivationScope = `${state.walletMeta.id}:${state.status.chain_id}`;
+    if (state.derivedWalletId !== derivationScope) {
+      state.derivedAddresses = [];
+      state.derivedWalletId = derivationScope;
+    }
+    for (;;) {
+      if (state.derivedAddresses.length < count) {
+        state.derivedAddresses = JSON.parse(deriveExternalAddresses(state.wallet.seedPhrase, count, state.status.chain_id));
+      }
+      derived = state.derivedAddresses.slice(0, count);
+      snapshot = await fetchSnapshot([state.legacyAddress, ...derived.map((item) => item.address)]);
+      const used = new Set(snapshot.addresses.filter((item) => item.used).map((item) => item.address));
+      const highestUsed = derived.reduce((highest, item) => used.has(item.address) ? Math.max(highest, item.index) : highest, -1);
+      if (highestUsed < count - gapLimit || count >= 10_000) break;
+      count = Math.min(10_000, highestUsed + gapLimit + 1);
+    }
+    const used = new Set(snapshot.addresses.filter((item) => item.used).map((item) => item.address));
+    const highestUsed = derived.reduce((highest, item) => used.has(item.address) ? Math.max(highest, item.index) : highest, -1);
+    state.addressIndex = highestUsed + 1;
+    const current = derived.find((item) => item.index === state.addressIndex);
+    if (!current) throw new Error("Wallet address discovery exceeded its recovery limit");
+    state.addresses = [state.legacyAddress, ...derived.map((item) => item.address)];
+    state.address = current.address;
+    const indexByAddress = new Map(derived.map((item) => [item.address, item.index]));
+    state.legacyUtxos = (snapshot.utxos || []).filter((utxo) => utxo.address === state.legacyAddress);
+    state.hybridUtxos = (snapshot.utxos || []).filter((utxo) => indexByAddress.has(utxo.address)).map((utxo) => ({
+      ...utxo,
+      addressIndex: indexByAddress.get(utxo.address),
+    }));
+    state.hybridSpendable = snapshot.addresses.filter((item) => item.version === 1).reduce((sum, item) => sum + Number(item.spendable || 0), 0);
+  } else {
+    snapshot = await fetchSnapshot([state.legacyAddress]);
+    state.addresses = [state.legacyAddress];
+    state.addressIndex = 0;
+    state.address = state.legacyAddress;
+    state.legacyUtxos = snapshot.utxos || [];
+    state.hybridUtxos = [];
+    state.hybridSpendable = 0;
+  }
+  const address = state.address;
+  if (previousAddress && previousAddress !== address) {
     state.transactions = [];
     state.recentTransactions = [];
     Object.assign(state.transactionPage, { offset: 0, total: 0, hasMore: true, loading: false, error: "" });
   }
   state.address = address;
-  const encoded = encodeURIComponent(state.address);
   const previousTransactionCount = state.transactions.length;
   const transactionLimit = Math.min(100, Math.max(TRANSACTION_PAGE_SIZE, previousTransactionCount));
   const refreshTransactions = !state.transactionPage.loading;
   const transactionRequest = refreshTransactions ? ++state.transactionRequest : null;
-  const [balance, utxos, transactions, recentTransactions] = await Promise.all([
-    api(`/addresses/${encoded}/balance`),
-    api(`/addresses/${encoded}/utxos`),
-    refreshTransactions ? api(transactionPath(0, transactionLimit)) : Promise.resolve(null),
-    api(transactionPath(0, 5, ALL_TRANSACTION_FILTERS)),
+  const [transactions, recentTransactions] = await Promise.all([
+    refreshTransactions ? fetchTransactions(0, transactionLimit) : Promise.resolve(null),
+    fetchTransactions(0, 5, ALL_TRANSACTION_FILTERS),
   ]);
-  state.balance = balance;
-  state.utxos = utxos.utxos || [];
-  state.recentTransactions = Array.isArray(recentTransactions?.items) ? recentTransactions.items : [];
+  state.balance = snapshot;
+  state.utxos = snapshot.utxos || [];
+  state.recentTransactions = normalizeTransactionItems(recentTransactions?.items);
   if (transactions && transactionRequest === state.transactionRequest) {
+    transactions.items = normalizeTransactionItems(transactions.items);
     applyTransactionPage(transactions, true, previousTransactionCount);
   }
 }
 
-function transactionPath(offset, limit, filters = state.transactionFilters) {
-  const encoded = encodeURIComponent(state.address);
-  const params = new URLSearchParams({
-    tx: String(filters.transfer),
-    mine: String(filters.mine),
-    burn: String(filters.burn),
-    reward: String(filters.reward),
-    offset: String(offset),
-    limit: String(limit),
+function fetchSnapshot(addresses) {
+  return api("/wallets/snapshot", { method: "POST", body: JSON.stringify({ addresses }) });
+}
+
+function fetchTransactions(offset, limit, filters = state.transactionFilters) {
+  return api("/wallets/transactions", {
+    method: "POST",
+    body: JSON.stringify({ addresses: state.addresses, ...filters, offset, limit }),
   });
-  return `/addresses/${encoded}/transactions?${params.toString()}`;
+}
+
+function normalizeTransactionItems(items) {
+  return Array.isArray(items) ? items.map((row) => ({
+    kind: row.kind === "migration" ? "transfer" : row.kind,
+    status: row.status,
+    block_height: row.blockHeight,
+    timestamp_ms: row.timestampMs,
+    direction: row.direction,
+    transaction: {
+      kind: row.kind,
+      inputs: row.inputs || [],
+      outputs: row.outputs || [],
+      change: row.change || [],
+      amount: row.amount || 0,
+      fee: row.fee || 0,
+      signature: row.signature,
+    },
+  })) : [];
 }
 
 function transactionKey(item) {
@@ -181,6 +265,7 @@ function transactionKey(item) {
 
 function networkAddress(publicKey) {
   if (!publicKey) return "Unknown";
+  if (/^(t?iuna)1/i.test(publicKey)) return publicKey;
   try {
     return encodeAddress(hexToBytes(publicKey), state.status?.chain_id);
   } catch {
@@ -229,8 +314,9 @@ async function loadTransactions({ replace = false } = {}) {
   if (state.view === "activity") renderApp();
   try {
     const offset = replace ? 0 : state.transactionPage.offset;
-    const payload = await api(transactionPath(offset, TRANSACTION_PAGE_SIZE));
+    const payload = await fetchTransactions(offset, TRANSACTION_PAGE_SIZE);
     if (request !== state.transactionRequest) return;
+    payload.items = normalizeTransactionItems(payload.items);
     applyTransactionPage(payload, replace);
   } catch (error) {
     if (request === state.transactionRequest) {
@@ -281,15 +367,16 @@ function nav() {
 
 function transactionInfo(item) {
   const tx = item.transaction || {};
-  const owner = state.wallet.publicKeyHex;
+  const owns = (address) => state.addresses.includes(address) || address === state.wallet.publicKeyHex;
+  if (tx.kind === "migration") return { title: "Migrated", incoming: true, amount: tx.amount || 0, symbol: "◇" };
   if (item.kind === "reward") {
-    const amount = tx.outputs?.find((output) => output.address === owner)?.amount || 0;
+    const amount = tx.outputs?.filter((output) => owns(output.address)).reduce((sum, output) => sum + Number(output.amount || 0), 0) || 0;
     return { title: "Block reward", incoming: true, amount, symbol: "★" };
   }
   if (tx.kind === "mine") return { title: "Mining reward", incoming: true, amount: 1_000_000, symbol: "✦" };
   if (tx.kind === "burn") return { title: "Burn", incoming: false, amount: tx.amount || 0, symbol: "×" };
-  const sent = tx.inputs?.some((input) => input.owner === owner);
-  const relevant = tx.outputs?.filter((output) => sent ? output.address !== owner : output.address === owner) || [];
+  const sent = tx.inputs?.some((input) => owns(input.owner));
+  const relevant = tx.outputs?.filter((output) => sent ? !owns(output.address) : owns(output.address)) || [];
   return { title: sent ? "Sent" : "Received", incoming: !sent, amount: relevant.reduce((sum, output) => sum + Number(output.amount || 0), 0), symbol: sent ? "↗" : "↙" };
 }
 
@@ -369,17 +456,26 @@ function renderTransaction() {
 
 function renderHome() {
   const readonly = state.walletMeta?.type === "readonly";
-  return `${topbar()}<section>${readonly ? '<div class="mode-badge">Watch-only · signing disabled</div>' : ""}<p class="eyebrow">Available balance</p><h1 class="balance">${formatIuna(state.balance?.spendable, 6)} <span>IUNA</span></h1><p class="subbalance">${formatIuna(state.balance?.confirmed, 6)} confirmed · block ${escapeHtml(state.balance?.height)}</p><div class="actions"><button class="button" data-view="send" ${readonly ? "disabled" : ""}>${icon("send")} Send</button><button class="button secondary" data-view="receive">${icon("receive")} Receive</button></div><div class="section-head"><h2>Recent activity</h2><button data-view="activity">View all</button></div><div class="panel">${activityList(5, false, state.recentTransactions)}</div></section>`;
+  const legacySpendable = state.legacyUtxos.reduce((sum, utxo) => sum + Number(utxo.output.amount || 0), 0);
+  const migration = !readonly && state.status?.transaction_v2_active && legacySpendable > 0
+    ? `<div class="panel migration-card"><p class="eyebrow">Quantum-resistant wallet</p><h2>Migrate ${formatIuna(legacySpendable, 6)} IUNA</h2><p>Move the remaining legacy outputs into your rotating hybrid wallet.</p><button class="button" data-action="migrate">Migrate now</button></div>`
+    : "";
+  return `${topbar()}<section>${readonly ? '<div class="mode-badge">Watch-only · signing disabled</div>' : ""}<p class="eyebrow">Available balance</p><h1 class="balance">${formatIuna(state.balance?.spendable, 6)} <span>IUNA</span></h1><p class="subbalance">${formatIuna(state.balance?.confirmed, 6)} confirmed · block ${escapeHtml(state.balance?.height)}</p><div class="actions"><button class="button" data-view="send" ${readonly ? "disabled" : ""}>${icon("send")} Send</button><button class="button secondary" data-view="receive">${icon("receive")} Receive</button></div>${migration}<div class="section-head"><h2>Recent activity</h2><button data-view="activity">View all</button></div><div class="panel">${activityList(5, false, state.recentTransactions)}</div></section>`;
 }
 
 function renderSend() {
   if (state.walletMeta?.type === "readonly") return `${topbar()}<p class="eyebrow">Watch-only</p><h1 class="view-title">Sending is disabled.</h1><p class="view-copy">This wallet contains no seed or private key, so it cannot sign transactions.</p><button class="button secondary" data-view="home" style="width:100%">Back to overview</button>`;
   const defaultFeeRate = state.status.default_fee_per_byte ?? 1;
-  return `${topbar()}<p class="eyebrow">Transaction</p><h1 class="view-title">Send IUNA</h1><p class="view-copy">The transaction is signed on this device.</p><form id="send-form" class="panel send-card"><div class="field"><label for="recipient">Recipient</label><input id="recipient" autocomplete="off" autocapitalize="none" spellcheck="false" placeholder="iuna1q…" required></div><div class="field"><label for="amount">Amount</label><div class="amount-wrap"><input id="amount" inputmode="decimal" placeholder="0.00" required><span>IUNA</span></div></div><div class="field"><label for="fee-rate">Fee rate (µIUNA per byte)</label><input id="fee-rate" name="fee-rate" type="number" inputmode="numeric" min="1" step="1" value="${escapeHtml(defaultFeeRate)}" required></div><div class="fee-line"><span>Available</span><strong>${formatIuna(state.balance?.spendable)} IUNA</strong></div><button class="button" type="submit">Review transaction</button></form>`;
+  const available = state.status?.transaction_v2_active ? state.hybridSpendable : state.balance?.spendable;
+  return `${topbar()}<p class="eyebrow">Transaction</p><h1 class="view-title">Send IUNA</h1><p class="view-copy">The transaction is signed on this device with your hybrid quantum-resistant key.</p><form id="send-form" class="panel send-card"><div class="field"><label for="recipient">Recipient</label><input id="recipient" autocomplete="off" autocapitalize="none" spellcheck="false" placeholder="iuna1p…" required></div><div class="field"><label for="amount">Amount</label><div class="amount-wrap"><input id="amount" inputmode="decimal" placeholder="0.00" required><span>IUNA</span></div></div><div class="field"><label for="fee-rate">Fee rate (µIUNA per byte)</label><input id="fee-rate" name="fee-rate" type="number" inputmode="numeric" min="1" step="1" value="${escapeHtml(defaultFeeRate)}" required></div><div class="fee-line"><span>Available</span><strong>${formatIuna(available)} IUNA</strong></div><button class="button" type="submit">Review transaction</button></form>`;
 }
 
 function renderReceive() {
-  return `${topbar()}<p class="eyebrow">Your address</p><h1 class="view-title">Receive IUNA</h1><p class="view-copy">Share this mainnet address with the sender.</p><div class="panel"><div class="receive-emblem">${icon("receive")}</div><p class="eyebrow">Receiving address</p><div class="address-box"><code>${escapeHtml(state.address)}</code><button class="icon-button" data-action="copy-address" aria-label="Copy address">${icon("copy")}</button></div><p class="security-note">Always verify the first and last characters when sharing an address.</p></div>`;
+  const readonly = state.walletMeta?.type === "readonly";
+  const explanation = readonly
+    ? "This watch-only entry follows this address only; it cannot derive future rotating addresses."
+    : "This address rotates automatically after funds arrive. Previous addresses remain part of your wallet.";
+  return `${topbar()}<p class="eyebrow">Your address</p><h1 class="view-title">Receive IUNA</h1><p class="view-copy">Share this current mainnet address with the sender.</p><div class="panel"><div class="receive-emblem">${icon("receive")}</div><p class="eyebrow">${readonly ? "Watched address" : "Current receiving address"}</p><div class="address-box"><code>${escapeHtml(state.address)}</code><button class="icon-button" data-action="copy-address" aria-label="Copy address">${icon("copy")}</button></div><p class="security-note">${explanation}</p></div>`;
 }
 
 function renderActivity() {
@@ -419,7 +515,12 @@ function renderConfirmation(transaction, fee, recipientAddress, amount) {
     const button = event.currentTarget;
     button.disabled = true; button.innerHTML = '<span class="spinner"></span> Sending…';
     try {
-      const result = await api("/transactions", { method: "POST", body: JSON.stringify(transaction) });
+      const isV2 = typeof transaction.envelope === "string";
+      const result = await api(isV2 ? "/transactions-v2" : "/transactions", {
+        method: "POST",
+        body: JSON.stringify(isV2 ? { envelope: transaction.envelope } : transaction),
+        timeoutMs: 20_000,
+      });
       toast(result.status === "accepted" ? "Transaction sent" : "Transaction was already known");
       state.view = "home";
       await fetchWalletData();
@@ -482,6 +583,28 @@ app.addEventListener("click", async (event) => {
   if (action === "seed-saved") renderPasswordSetup();
   if (action === "copy-seed") { await navigator.clipboard.writeText(app.dataset.pendingSeed); toast("Seed copied — clear your clipboard after use"); }
   if (action === "copy-address") { await navigator.clipboard.writeText(state.address); toast("Address copied"); }
+  if (action === "migrate") {
+    button.disabled = true;
+    button.innerHTML = '<span class="spinner"></span> Preparing…';
+    try {
+      await ensureQuantumCrypto();
+      const built = JSON.parse(buildQuantumMigration(JSON.stringify({
+        seed: state.wallet.seedPhrase,
+        chainId: state.status.chain_id,
+        genesisHash: state.status.genesis_hash,
+        destinationIndex: state.addressIndex,
+        feeRate: String(state.status.default_fee_per_byte || 1),
+        utxos: state.legacyUtxos,
+      })));
+      const amount = state.legacyUtxos.reduce((sum, utxo) => sum + BigInt(utxo.output.amount), 0n) - BigInt(built.fee);
+      renderConfirmation(built, BigInt(built.fee), state.address, amount);
+    } catch (error) {
+      toast(error.message || String(error), true);
+      button.disabled = false;
+      button.textContent = "Migrate now";
+    }
+    return;
+  }
   if (action === "retry") await openWallet();
   if (action === "wallets") { window.clearInterval(state.timer); state.wallet = null; state.walletMeta = null; state.view = "home"; renderWalletPicker(); }
   if (action === "lock") {
@@ -523,20 +646,36 @@ app.addEventListener("submit", async (event) => {
       const address = form["watch-address"].value.trim().toLowerCase();
       const walletName = form["wallet-name"].value.trim();
       if (!walletName) throw new Error("Enter a wallet name");
-      const publicKeyHex = decodeAddress(address, "iuna");
-      if (state.store.wallets.some((wallet) => wallet.publicKeyHex === publicKeyHex)) throw new Error("This wallet is already on this device");
-      const meta = { id: walletId(publicKeyHex), name: walletName, type: "readonly", publicKeyHex };
+      const decoded = decodeVersionedAddress(address, "iuna");
+      const publicKeyHex = decoded.payloadHex;
+      if (state.store.wallets.some((wallet) => (wallet.address || "").toLowerCase() === address || (!wallet.address && wallet.publicKeyHex === publicKeyHex))) throw new Error("This wallet is already on this device");
+      const meta = { id: `watch-${decoded.version}-${publicKeyHex}`, name: walletName, type: "readonly", publicKeyHex, address };
       saveStore(upsertWallet(state.store, meta));
       await openStoredWallet(meta);
     } else if (form.id === "send-form") {
       if (state.walletMeta?.type === "readonly") throw new Error("Watch-only wallets cannot sign transactions");
       const amount = parseIuna(form.amount.value);
       const feeRate = parseFeeRate(form["fee-rate"].value);
-      const built = await buildSignedTransfer({ wallet: state.wallet, status: state.status, utxos: state.utxos, recipientAddress: form.recipient.value, amount, feeRate });
-      renderConfirmation(built.transaction, built.fee, form.recipient.value.trim(), amount);
+      if (state.status.transaction_v2_active) {
+        await ensureQuantumCrypto();
+        const built = JSON.parse(buildQuantumTransfer(JSON.stringify({
+          seed: state.wallet.seedPhrase,
+          chainId: state.status.chain_id,
+          genesisHash: state.status.genesis_hash,
+          recipientAddress: form.recipient.value.trim(),
+          amount: amount.toString(),
+          feeRate: feeRate.toString(),
+          changeIndex: state.addressIndex,
+          utxos: state.hybridUtxos,
+        })));
+        renderConfirmation(built, BigInt(built.fee), form.recipient.value.trim(), amount);
+      } else {
+        const built = await buildSignedTransfer({ wallet: state.wallet, status: state.status, utxos: state.utxos, recipientAddress: form.recipient.value, amount, feeRate });
+        renderConfirmation(built.transaction, built.fee, form.recipient.value.trim(), amount);
+      }
     }
   } catch (error) {
-    toast(error.message, true); button.disabled = false; button.textContent = original;
+    toast(error?.message || String(error), true); button.disabled = false; button.textContent = original;
   }
 });
 

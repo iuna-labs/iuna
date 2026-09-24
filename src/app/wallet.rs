@@ -171,6 +171,31 @@ impl NodeCore {
         Ok(outcome)
     }
 
+    /// Accept a canonical v2 envelope signed by an external/lightweight wallet.
+    /// Mining and burn transactions remain node-managed operations.
+    pub fn submit_external_wallet_transaction_v2(
+        &mut self,
+        envelope: &str,
+    ) -> Result<(String, TransactionSubmitOutcome)> {
+        let encoded = crate::domain::decode_hex(envelope)?;
+        let transaction = self.ledger.decode_transaction_v2(&encoded)?;
+        if !matches!(
+            transaction,
+            TransactionV2::Migration { .. } | TransactionV2::Transfer { .. }
+        ) {
+            bail!("the wallet endpoint accepts only migration and transfer v2 transactions");
+        }
+        let domain = self.ledger.transaction_v2_domain()?;
+        let transaction_id = hex_encode(transaction.transaction_id(&domain)?);
+        let outcome = self.ledger.submit_transaction_v2(transaction)?;
+        if outcome.added() {
+            self.outbox.push(GossipEnvelope::TransactionV2 {
+                envelope: hex_encode(encoded),
+            });
+        }
+        Ok((transaction_id, outcome))
+    }
+
     pub fn burn(&mut self, amount: Amount) -> Result<Transaction> {
         self.burn_with_fee(amount, DEFAULT_TRANSACTION_FEE)
     }

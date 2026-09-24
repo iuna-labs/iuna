@@ -1,0 +1,7 @@
+*
+!.gitignore
+!package.json
+!iuna_wallet_crypto.js
+!iuna_wallet_crypto.d.ts
+!iuna_wallet_crypto_bg.wasm
+!iuna_wallet_crypto_bg.wasm.d.ts

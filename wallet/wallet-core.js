@@ -14,7 +14,7 @@ export function normalizeWalletStore(value, legacyWallet = null) {
   if (value?.version === 2 && Array.isArray(value.wallets)) {
     const wallets = value.wallets.filter((wallet) => wallet
       && wallet.id
-      && /^[0-9a-f]{64}$/.test(wallet.publicKeyHex)
+      && (/^[0-9a-f]{64}$/.test(wallet.publicKeyHex) || (wallet.type === "readonly" && typeof wallet.address === "string"))
       && ["signing", "readonly"].includes(wallet.type)
       && (wallet.type === "readonly" || wallet.record));
     const activeId = wallets.some((wallet) => wallet.id === value.activeId) ? value.activeId : wallets[0]?.id || null;
@@ -202,6 +202,12 @@ export function encodeAddress(publicKey, networkId = "iuna-mainnet-v1") {
 }
 
 export function decodeAddress(address, expectedHrp = "iuna") {
+  const decoded = decodeVersionedAddress(address, expectedHrp);
+  if (decoded.version !== 0) throw new Error("This operation requires a legacy address");
+  return decoded.payloadHex;
+}
+
+export function decodeVersionedAddress(address, expectedHrp = "iuna") {
   const normalized = address.trim().toLowerCase();
   if (address !== address.toLowerCase() && address !== address.toUpperCase()) throw new Error("Address mixes uppercase and lowercase characters");
   const separator = normalized.lastIndexOf("1");
@@ -213,10 +219,11 @@ export function decodeAddress(address, expectedHrp = "iuna") {
   });
   if (polymod([...hrpExpand(expectedHrp), ...data]) !== BECH32M) throw new Error("Address checksum is invalid");
   const payload = data.slice(0, -6);
-  if (payload.shift() !== 0) throw new Error("Unsupported address version");
+  const version = payload.shift();
+  if (![0, 1].includes(version)) throw new Error("Unsupported address version");
   const key = Uint8Array.from(convertBits(payload, 5, 8, false));
   if (key.length !== 32) throw new Error("Invalid address key");
-  return bytesToHex(key);
+  return { version, payloadHex: bytesToHex(key) };
 }
 
 function pushU32(target, value) {
@@ -374,7 +381,7 @@ export async function api(path, options = {}) {
   }
   let body;
   try { body = await response.json(); } catch { body = {}; }
-  if (response.status === 413 && path === "/transactions" && requestOptions.method === "POST") {
+  if (response.status === 413 && ["/transactions", "/transactions-v2"].includes(path) && requestOptions.method === "POST") {
     throw new Error("Transaction is too large for the public endpoint. Try a smaller amount or consolidate this wallet’s UTXOs first.");
   }
   if (!response.ok) throw new Error(body.error || `Endpoint returned status ${response.status}`);

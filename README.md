@@ -297,27 +297,34 @@ with `IUNA_WALLET_ENDPOINT_ENABLED=true` and
 `IUNA_WALLET_ENDPOINT_PORT=18662`. A settings change takes effect after restart.
 Keep port `18661` local or access-controlled; forward only the wallet API port.
 
-The v1 API provides:
+The public API provides:
 
-- `GET /v1/status` — chain/signing parameters and current tip;
+- `GET /v1/status` — chain/signing/v2 parameters and current tip;
+- `POST /v1/wallets/snapshot` — aggregate balance, address-use state, and spendable
+  outputs across a deterministic wallet address set;
+- `POST /v1/wallets/transactions` — merged legacy/v2 history across that address set;
 - `GET /v1/addresses/{address}/balance` — confirmed and spendable balance;
 - `GET /v1/addresses/{address}/utxos` — spendable inputs for local signing;
 - `GET /v1/addresses/{address}/transactions` — paginated pending/confirmed history;
 - `GET /v1/transactions/{signature}` — pending or confirmed transaction lookup;
-- `POST /v1/transactions` — validate, relay, and gossip a signed transfer/burn.
+- `POST /v1/transactions` — validate, relay, and gossip a signed legacy transfer/burn;
+- `POST /v1/transactions-v2` — validate, relay, and gossip a canonical signed migration
+  or hybrid transfer envelope.
 
 Clients keep private keys and seed phrases locally. The public endpoint never
 creates signatures and does not expose management, local-wallet, mining, peer,
-configuration, or authentication routes. JSON request bodies are capped at 64
-KiB. The production manifest exposes this API as `https://iuna.jhx.app/v1` while
+configuration, or authentication routes. JSON request bodies are capped just above twice
+the consensus block budget so a hex-encoded v2 envelope can fit. The production manifest exposes this API as `https://iuna.jhx.app/v1` while
 `https://admin.iuna.jhx.app/` remains the separately protected management UI.
 
 The lightweight browser wallet lives in `wallet/` and is served at
 `https://wallet.getiuna.org/`. It supports multiple named wallets. Signing
-wallets keep each seed encrypted in browser `localStorage`; watch-only wallets
-store only a public address and cannot sign or send. The app talks only to the
-public v1 wallet endpoint. Requests to the old `/wallet/` path redirect to the
-dedicated host.
+wallets keep each seed encrypted in browser `localStorage`, derive ML-DSA-44 hybrid
+keys inside a bundled WebAssembly module, recover addresses with the protocol gap limit,
+and rotate the displayed receive/change address after it is used. Legacy funds remain
+visible and can be migrated in the app. Watch-only wallets store one public address and
+cannot follow future private derivations, sign, or send. The app talks only to the public
+wallet endpoint. Requests to the old `/wallet/` path redirect to the dedicated host.
 
 ## Optional: Stratum Mining
 

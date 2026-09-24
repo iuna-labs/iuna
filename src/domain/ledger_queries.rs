@@ -610,6 +610,14 @@ impl Ledger {
             .collect()
     }
 
+    pub fn utxos_for_addresses(&self, addresses: &BTreeSet<String>) -> Vec<(OutPoint, TxOutput)> {
+        self.utxos
+            .iter()
+            .filter(|(_, output)| addresses.contains(&output.address))
+            .map(|(outpoint, output)| (outpoint.clone(), output.clone()))
+            .collect()
+    }
+
     pub fn all_utxos(&self) -> Vec<(OutPoint, TxOutput)> {
         self.utxos
             .iter()
@@ -633,6 +641,17 @@ impl Ledger {
             .utxos_after_spendable_pending()?
             .into_iter()
             .filter(|(_, output)| output.address == address)
+            .collect())
+    }
+
+    pub fn available_utxos_for_addresses(
+        &self,
+        addresses: &BTreeSet<String>,
+    ) -> Result<Vec<(OutPoint, TxOutput)>> {
+        Ok(self
+            .utxos_after_spendable_pending()?
+            .into_iter()
+            .filter(|(_, output)| addresses.contains(&output.address))
             .collect())
     }
 

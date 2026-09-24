@@ -1,0 +1,21 @@
+{
+  "name": "iuna-wallet-crypto",
+  "description": "Deterministic hybrid wallet cryptography for the iuna browser wallet",
+  "version": "0.1.0",
+  "type": "module",
+  "license": "Apache-2.0",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/jhartog/iuna"
+  },
+  "files": [
+    "iuna_wallet_crypto_bg.wasm",
+    "iuna_wallet_crypto.js",
+    "iuna_wallet_crypto.d.ts"
+  ],
+  "module": "iuna_wallet_crypto.js",
+  "types": "iuna_wallet_crypto.d.ts",
+  "sideEffects": [
+    "./snippets/*"
+  ]
+}

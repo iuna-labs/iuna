@@ -186,6 +186,17 @@ impl Ledger {
         Ok(used)
     }
 
+    /// Returns every hybrid address that has appeared as a transaction or reward output,
+    /// including unconfirmed outputs. External wallets use this to recover their deterministic
+    /// receive cursor without exposing their seed or public-key material to the node.
+    pub fn used_hybrid_encoded_addresses(&self) -> Result<Vec<String>> {
+        let network = self.address_network();
+        self.used_hybrid_addresses()?
+            .into_iter()
+            .map(|address| encode_versioned_address(address, network))
+            .collect()
+    }
+
     fn pending_hybrid_addresses(&self) -> Vec<VersionedAddress> {
         let mut used = Vec::new();
         let network = self.address_network();

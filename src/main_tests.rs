@@ -282,7 +282,7 @@ fn management_ui_uses_the_native_desktop_updater_when_available() {
 fn lightweight_wallet_recent_activity_does_not_use_view_all_filters() {
     let javascript = include_str!("../wallet/app.js");
 
-    assert!(javascript.contains("api(transactionPath(0, 5, ALL_TRANSACTION_FILTERS))"));
+    assert!(javascript.contains("fetchTransactions(0, 5, ALL_TRANSACTION_FILTERS)"));
     assert!(javascript.contains("activityList(5, false, state.recentTransactions)"));
 }
 

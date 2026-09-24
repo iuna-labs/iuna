@@ -35,7 +35,7 @@ mod quantum_migration;
 mod request_auth;
 mod state;
 mod static_assets;
-mod ui;
+pub(crate) mod ui;
 mod wallet;
 use actions::{
     api_address_book_delete_form, api_address_book_form, api_burn_fee_estimate_form,
@@ -97,7 +97,7 @@ const UNKNOWN_CLIENT_KEY: &str = "unknown";
 const PEER_STALE_AFTER_MS: u64 = 20 * 60 * 1_000;
 const SLOW_UI_REQUEST_LOG_MS: u128 = 250;
 
-mod types;
+pub(crate) mod types;
 use types::{
     ActionResponse, AuthForm, AuthStatusResponse, BlocksQuery, ChangePasswordForm, ConfigForm,
     ConfigResponse, MempoolCounts, MetricsQuery, MetricsResponse, NetworkHealthLocalState,

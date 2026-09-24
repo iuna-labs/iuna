@@ -50,6 +50,7 @@ use fork::{FinalityCheckpoint, LeaderScore};
 pub(crate) use genesis::genesis_allocation_outpoint;
 pub use hex::hex_hash;
 pub(crate) use hex::{decode_hex, decode_hex_array, hex_encode};
+pub use ledger_builders::HYBRID_EXTERNAL_ADDRESS_GAP_LIMIT;
 use ledger_lineage::{
     LineageOwnerValues, UtxoLineageRoot, attach_existing_output_lineage,
     insert_output_with_lineage, newest_lineage_root, output_lineage_root_for_transaction,

@@ -1,6 +1,7 @@
 const { test } = require('node:test');
 const assert = require('node:assert/strict');
 const { readFileSync } = require('node:fs');
+const { pathToFileURL } = require('node:url');
 
 let core;
 
@@ -83,4 +84,57 @@ test('uses the selected fee rate when calculating a transfer', () => {
   const priority = core.selectInputs(utxos, 100_000n, 5n, owner, recipient);
 
   assert.equal(priority.fee, standard.fee * 5n);
+});
+
+test('recognizes hybrid Bech32m addresses without treating them as legacy keys', () => {
+  const address = 'iuna1py9qlrnw6cm3mpz26hwwkww9spaa96zrw2g34gu0p4y3ea5cqhg0qa82x9s';
+  const decoded = core.decodeVersionedAddress(address, 'iuna');
+  assert.equal(decoded.version, 1);
+  assert.equal(decoded.payloadHex.length, 64);
+  assert.throws(() => core.decodeAddress(address, 'iuna'), /requires a legacy address/);
+});
+
+test('browser crypto derives the same rotating hybrid address vectors as the node', async () => {
+  const modulePath = require.resolve('../wallet/crypto/iuna_wallet_crypto.js');
+  const wasmPath = require.resolve('../wallet/crypto/iuna_wallet_crypto_bg.wasm');
+  const quantum = await import(pathToFileURL(modulePath));
+  await quantum.default({ module_or_path: readFileSync(wasmPath) });
+  const addresses = JSON.parse(quantum.derive_external_addresses('hybrid-wallet-seed', 2, 'iuna-mainnet-v1'));
+  assert.deepEqual(addresses, [
+    { index: 0, address: 'iuna1py9qlrnw6cm3mpz26hwwkww9spaa96zrw2g34gu0p4y3ea5cqhg0qa82x9s' },
+    { index: 1, address: 'iuna1pkxdcktlzf5tc2p59xns2nccq7rg5zjhwg2zn5r9u73c5j9jxgk8s0e5l4e' },
+  ]);
+
+  const built = JSON.parse(quantum.build_transfer(JSON.stringify({
+    seed: 'hybrid-wallet-seed',
+    chainId: 'iuna-mainnet-candidate',
+    genesisHash: '11'.repeat(32),
+    recipientAddress: addresses[1].address,
+    amount: '1000000',
+    feeRate: '1',
+    changeIndex: 2,
+    utxos: [{
+      addressIndex: 0,
+      outpoint: { txid: '22'.repeat(32), index: 7 },
+      output: { amount: 2000000 },
+    }],
+  })));
+  assert.equal(built.fee, '4079');
+  assert.equal(built.envelope.length / 2, 4079);
+  assert.equal(built.transactionId, 'bda748b6ba9fd6550ca47d580f980a1c00d0050a20992750265a62d23b0b590d');
+
+  const migration = JSON.parse(quantum.build_migration(JSON.stringify({
+    seed: 'hybrid-wallet-seed',
+    chainId: 'iuna-mainnet-candidate',
+    genesisHash: '11'.repeat(32),
+    destinationIndex: 2,
+    feeRate: '1',
+    utxos: [{
+      outpoint: { txid: '33'.repeat(32), index: 4 },
+      output: { amount: 2000000 },
+    }],
+  })));
+  assert.equal(migration.fee, '307');
+  assert.equal(migration.envelope.length / 2, 307);
+  assert.equal(migration.transactionId, '37539c9d89a391c599b838c3f415e7adc93a36c22cd4fb5fe44a79433f336075');
 });
