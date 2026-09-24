@@ -1325,6 +1325,7 @@ pub(super) const INDEX_HTML: &str = concat!(
           <div class="metric"><div class="label">Latest block</div><div class="value" x-text="metricsLatest().height ?? '-'"></div></div>
           <div class="metric"><div class="label">Supply</div><div class="value" x-text="metricAmountLabel(metricsLatest().circulatingSupply)"></div></div>
           <div class="metric"><div class="label">Known addresses</div><div class="value" x-text="metricsLatest().knownWalletAddresses ?? '-'"></div></div>
+          <div class="metric"><div class="label">Total UTXOs</div><div class="value" x-text="metricsLatest().utxoCount ?? '-'"></div></div>
           <div class="metric"><div class="label">Total burned</div><div class="value" x-text="metricAmountLabel(metricsLatest().totalBurnedAmount)"></div></div>
           <div class="metric"><div class="label">Difficulty</div><div class="value" x-text="metricsLatest().mineDifficultyBits ?? '-'"></div></div>
         </div>

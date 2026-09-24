@@ -29,6 +29,7 @@ CREATE TABLE IF NOT EXISTS block_metrics (
     mine_difficulty_bits INTEGER NOT NULL,
     circulating_supply INTEGER NOT NULL,
     known_wallet_addresses INTEGER NOT NULL DEFAULT 0,
+    utxo_count INTEGER NOT NULL DEFAULT 0,
     transaction_count INTEGER NOT NULL,
     transfer_count INTEGER NOT NULL,
     burn_count INTEGER NOT NULL,
@@ -163,7 +164,7 @@ DROP TABLE IF EXISTS ui_burn_leader_rank_blocks;
 
 const UI_DATA_SCHEMA_VERSION: u32 = 2;
 const UI_CACHE_SCHEMA_VERSION: u32 = 5;
-const METRICS_CACHE_SCHEMA_VERSION: u32 = 1;
+const METRICS_CACHE_SCHEMA_VERSION: u32 = 2;
 
 #[derive(Clone, Debug, Eq, PartialEq, Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -175,6 +176,7 @@ pub struct BlockMetricRow {
     pub mine_difficulty_bits: u32,
     pub circulating_supply: Amount,
     pub known_wallet_addresses: u64,
+    pub utxo_count: u64,
     pub transaction_count: u64,
     pub transfer_count: u64,
     pub burn_count: u64,
@@ -422,7 +424,7 @@ impl SqliteUiDataStore {
                 .prepare(
                     r#"
 SELECT height, block_hash, timestamp_ms, block_time_ms, mine_difficulty_bits,
-       circulating_supply, known_wallet_addresses, transaction_count, transfer_count, burn_count,
+       circulating_supply, known_wallet_addresses, utxo_count, transaction_count, transfer_count, burn_count,
        mine_count, burned_amount, total_burned_amount, fees_amount, reward_amount,
        vdf_rounds, finalizer_rank
 FROM block_metrics
@@ -440,16 +442,17 @@ ORDER BY height ASC
                         mine_difficulty_bits: row.get(4)?,
                         circulating_supply: row.get(5)?,
                         known_wallet_addresses: row.get(6)?,
-                        transaction_count: row.get(7)?,
-                        transfer_count: row.get(8)?,
-                        burn_count: row.get(9)?,
-                        mine_count: row.get(10)?,
-                        burned_amount: row.get(11)?,
-                        total_burned_amount: row.get(12)?,
-                        fees_amount: row.get(13)?,
-                        reward_amount: row.get(14)?,
-                        vdf_rounds: row.get(15)?,
-                        finalizer_rank: row.get(16)?,
+                        utxo_count: row.get(7)?,
+                        transaction_count: row.get(8)?,
+                        transfer_count: row.get(9)?,
+                        burn_count: row.get(10)?,
+                        mine_count: row.get(11)?,
+                        burned_amount: row.get(12)?,
+                        total_burned_amount: row.get(13)?,
+                        fees_amount: row.get(14)?,
+                        reward_amount: row.get(15)?,
+                        vdf_rounds: row.get(16)?,
+                        finalizer_rank: row.get(17)?,
                     })
                 })
                 .context("failed to load block metrics")?;
@@ -464,7 +467,7 @@ ORDER BY height ASC
                 .prepare(
                     r#"
 SELECT height, block_hash, timestamp_ms, block_time_ms, mine_difficulty_bits,
-       circulating_supply, known_wallet_addresses, transaction_count, transfer_count, burn_count,
+       circulating_supply, known_wallet_addresses, utxo_count, transaction_count, transfer_count, burn_count,
        mine_count, burned_amount, total_burned_amount, fees_amount, reward_amount,
        vdf_rounds, finalizer_rank
 FROM block_metrics
@@ -483,16 +486,17 @@ LIMIT ?1
                         mine_difficulty_bits: row.get(4)?,
                         circulating_supply: row.get(5)?,
                         known_wallet_addresses: row.get(6)?,
-                        transaction_count: row.get(7)?,
-                        transfer_count: row.get(8)?,
-                        burn_count: row.get(9)?,
-                        mine_count: row.get(10)?,
-                        burned_amount: row.get(11)?,
-                        total_burned_amount: row.get(12)?,
-                        fees_amount: row.get(13)?,
-                        reward_amount: row.get(14)?,
-                        vdf_rounds: row.get(15)?,
-                        finalizer_rank: row.get(16)?,
+                        utxo_count: row.get(7)?,
+                        transaction_count: row.get(8)?,
+                        transfer_count: row.get(9)?,
+                        burn_count: row.get(10)?,
+                        mine_count: row.get(11)?,
+                        burned_amount: row.get(12)?,
+                        total_burned_amount: row.get(13)?,
+                        fees_amount: row.get(14)?,
+                        reward_amount: row.get(15)?,
+                        vdf_rounds: row.get(16)?,
+                        finalizer_rank: row.get(17)?,
                     })
                 })
                 .context("failed to load recent block metrics")?;
@@ -658,6 +662,7 @@ fn initialize_ui_data_schema(connection: &mut Connection, path: &Path) -> Result
         "known_wallet_addresses",
         "INTEGER NOT NULL DEFAULT 0",
     )?;
+    ensure_block_metrics_column(connection, "utxo_count", "INTEGER NOT NULL DEFAULT 0")?;
     connection
         .pragma_update(None, "user_version", UI_DATA_SCHEMA_VERSION)
         .context("failed to record UI data database schema version")?;
@@ -866,7 +871,7 @@ fn load_metric_at_height(
         .query_row(
             r#"
 SELECT height, block_hash, timestamp_ms, block_time_ms, mine_difficulty_bits,
-       circulating_supply, known_wallet_addresses, transaction_count, transfer_count, burn_count,
+       circulating_supply, known_wallet_addresses, utxo_count, transaction_count, transfer_count, burn_count,
        mine_count, burned_amount, total_burned_amount, fees_amount, reward_amount,
        vdf_rounds, finalizer_rank
 FROM block_metrics
@@ -882,16 +887,17 @@ WHERE height = ?1
                     mine_difficulty_bits: row.get(4)?,
                     circulating_supply: row.get(5)?,
                     known_wallet_addresses: row.get(6)?,
-                    transaction_count: row.get(7)?,
-                    transfer_count: row.get(8)?,
-                    burn_count: row.get(9)?,
-                    mine_count: row.get(10)?,
-                    burned_amount: row.get(11)?,
-                    total_burned_amount: row.get(12)?,
-                    fees_amount: row.get(13)?,
-                    reward_amount: row.get(14)?,
-                    vdf_rounds: row.get(15)?,
-                    finalizer_rank: row.get(16)?,
+                    utxo_count: row.get(7)?,
+                    transaction_count: row.get(8)?,
+                    transfer_count: row.get(9)?,
+                    burn_count: row.get(10)?,
+                    mine_count: row.get(11)?,
+                    burned_amount: row.get(12)?,
+                    total_burned_amount: row.get(13)?,
+                    fees_amount: row.get(14)?,
+                    reward_amount: row.get(15)?,
+                    vdf_rounds: row.get(16)?,
+                    finalizer_rank: row.get(17)?,
                 })
             },
         )
@@ -905,10 +911,10 @@ fn insert_metric(transaction: &rusqlite::Transaction<'_>, metric: &BlockMetricRo
             r#"
 INSERT INTO block_metrics (
     height, block_hash, timestamp_ms, block_time_ms, mine_difficulty_bits,
-    circulating_supply, known_wallet_addresses, transaction_count, transfer_count, burn_count,
+    circulating_supply, known_wallet_addresses, utxo_count, transaction_count, transfer_count, burn_count,
     mine_count, burned_amount, total_burned_amount, fees_amount, reward_amount, vdf_rounds,
     finalizer_rank
-) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17)
+) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18)
 "#,
             params![
                 metric.height,
@@ -918,6 +924,7 @@ INSERT INTO block_metrics (
                 metric.mine_difficulty_bits,
                 metric.circulating_supply,
                 metric.known_wallet_addresses,
+                metric.utxo_count,
                 metric.transaction_count,
                 metric.transfer_count,
                 metric.burn_count,
@@ -2009,20 +2016,40 @@ fn incremental_metric_for_block(
     let mut mine_count = 0_u64;
     let mut burned_amount = 0_u64;
     let mut fees_amount = 0_u64;
+    let mut utxo_count = previous.map(|row| row.utxo_count).unwrap_or_else(|| {
+        snapshot
+            .genesis_allocations
+            .values()
+            .filter(|amount| **amount > 0)
+            .count() as u64
+    });
 
     for transaction in &block.transactions {
         fees_amount = fees_amount
             .checked_add(transaction.fee())
             .context("block metric fees overflow")?;
         match transaction {
-            Transaction::Transfer { fee, .. } => {
+            Transaction::Transfer {
+                inputs,
+                outputs,
+                fee,
+                ..
+            } => {
                 transfer_count += 1;
+                apply_utxo_count_delta(&mut utxo_count, inputs.len(), outputs.len())?;
                 circulating_supply = circulating_supply
                     .checked_sub(*fee)
                     .context("transfer fee exceeds circulating supply")?;
             }
-            Transaction::Burn { amount, fee, .. } => {
+            Transaction::Burn {
+                inputs,
+                change,
+                amount,
+                fee,
+                ..
+            } => {
                 burn_count += 1;
+                apply_utxo_count_delta(&mut utxo_count, inputs.len(), change.len())?;
                 burned_amount = burned_amount
                     .checked_add(*amount)
                     .context("block metric burns overflow")?;
@@ -2033,6 +2060,7 @@ fn incremental_metric_for_block(
             }
             Transaction::Mine { .. } => {
                 mine_count += 1;
+                utxo_count = utxo_count.checked_add(1).context("UTXO count overflows")?;
                 circulating_supply = circulating_supply
                     .checked_add(MINE_REWARD)
                     .context("mine reward circulating supply overflows")?;
@@ -2049,11 +2077,26 @@ fn incremental_metric_for_block(
             .checked_sub(transaction.fee())
             .context("transaction v2 fee exceeds circulating supply")?;
         match transaction {
-            TransactionV2::Migration { .. } | TransactionV2::Transfer { .. } => {
+            TransactionV2::Migration {
+                inputs, outputs, ..
+            } => {
                 transfer_count += 1;
+                apply_utxo_count_delta(&mut utxo_count, inputs.len(), outputs.len())?;
             }
-            TransactionV2::Burn { amount, .. } => {
+            TransactionV2::Transfer {
+                inputs, outputs, ..
+            } => {
+                transfer_count += 1;
+                apply_utxo_count_delta(&mut utxo_count, inputs.len(), outputs.len())?;
+            }
+            TransactionV2::Burn {
+                inputs,
+                change,
+                amount,
+                ..
+            } => {
                 burn_count += 1;
+                apply_utxo_count_delta(&mut utxo_count, inputs.len(), change.len())?;
                 burned_amount = burned_amount
                     .checked_add(amount)
                     .context("block metric transaction v2 burns overflow")?;
@@ -2069,6 +2112,9 @@ fn incremental_metric_for_block(
     circulating_supply = circulating_supply
         .checked_add(block.reward)
         .context("block reward circulating supply overflows")?;
+    utxo_count = utxo_count
+        .checked_add(projected_reward_outputs(block).len() as u64)
+        .context("UTXO count overflows")?;
     let total_burned_amount = previous
         .map(|row| row.total_burned_amount)
         .unwrap_or_default()
@@ -2083,6 +2129,7 @@ fn incremental_metric_for_block(
         mine_difficulty_bits: metric_difficulty_for_block(snapshot, block, previous),
         circulating_supply,
         known_wallet_addresses: 0,
+        utxo_count,
         transaction_count: block
             .transactions
             .len()
@@ -2097,6 +2144,15 @@ fn incremental_metric_for_block(
         vdf_rounds: block.vdf_rounds,
         finalizer_rank: block.finalizer_rank,
     })
+}
+
+fn apply_utxo_count_delta(count: &mut u64, spent: usize, created: usize) -> Result<()> {
+    *count = count
+        .checked_sub(spent as u64)
+        .context("transaction spends more UTXOs than exist")?
+        .checked_add(created as u64)
+        .context("UTXO count overflows")?;
+    Ok(())
 }
 
 fn metric_difficulty_for_block(
@@ -2451,6 +2507,10 @@ END;
         assert_eq!(&metrics[..prefix.len()], prefix.as_slice());
         assert_eq!(metrics.len(), snapshot.blocks.len());
         assert_eq!(metrics.last().unwrap().block_hash, ledger.tip_hash());
+        assert_eq!(
+            metrics.last().unwrap().utxo_count,
+            ledger.all_utxos().len() as u64
+        );
         assert_eq!(
             metrics.last().unwrap().circulating_supply,
             ledger

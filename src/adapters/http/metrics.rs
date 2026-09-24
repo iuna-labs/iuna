@@ -89,6 +89,14 @@ pub(super) fn metrics_response(
                 |row| Some(row.known_wallet_addresses as f64),
             ),
             metrics_chart(
+                "total-utxos",
+                "Total UTXOs",
+                "UTXOs",
+                MetricsValueKind::Number,
+                &rows,
+                |row| Some(row.utxo_count as f64),
+            ),
+            metrics_chart(
                 "transactions",
                 "Transactions",
                 "tx",
@@ -395,6 +403,7 @@ mod tests {
             mine_difficulty_bits: 10,
             circulating_supply: 100,
             known_wallet_addresses: 2,
+            utxo_count: 4,
             transaction_count: 1,
             transfer_count: 0,
             burn_count: 1,
@@ -428,6 +437,15 @@ mod tests {
                 .and_then(|chart| chart.points.first())
                 .map(|point| point.value),
             Some(12_345.0)
+        );
+        assert_eq!(
+            response
+                .charts
+                .iter()
+                .find(|chart| chart.id == "total-utxos")
+                .and_then(|chart| chart.points.first())
+                .map(|point| point.value),
+            Some(4.0)
         );
     }
 
