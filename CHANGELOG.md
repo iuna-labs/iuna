@@ -5,6 +5,12 @@ from the Git history and Conventional Commit titles by `deployment.sh`.
 
 ## [Unreleased]
 
+## [0.4.42] - 2026-09-24
+
+### Added
+
+- rotate hybrid wallet addresses
+
 ## [0.4.41] - 2026-09-23
 
 ### Performance
