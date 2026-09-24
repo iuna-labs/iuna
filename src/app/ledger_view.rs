@@ -3,7 +3,10 @@ use anyhow::Result;
 use std::collections::BTreeSet;
 
 use crate::compact::CompactBlockSizeBreakdown;
-use crate::domain::{Block, BurnLeaderRank, Ledger, OutPoint, Transaction, TransactionV2};
+use crate::domain::{
+    Block, BurnLeaderRank, Ledger, LegacyTransactionId, OutPoint, Transaction, TransactionV2,
+    hex_encode,
+};
 use std::collections::BTreeMap;
 
 use super::{NodeCore, helpers::transaction_input_outpoints};
@@ -33,6 +36,26 @@ impl NodeCore {
         if let Some((height, burn)) = &self.local_block_anchor_burn {
             if *height == self.ledger.height() && !self.ledger.has_transaction(burn.signature()) {
                 spent.extend(transaction_input_outpoints(burn));
+            }
+        }
+        for transaction in self.ledger.pending_v2() {
+            match transaction {
+                TransactionV2::Migration { inputs, .. } => {
+                    spent.extend(inputs.iter().map(|input| OutPoint {
+                        txid: match &input.outpoint_id {
+                            LegacyTransactionId::Hash(value) => hex_encode(value),
+                            LegacyTransactionId::Signature(value) => hex_encode(value),
+                        },
+                        index: input.outpoint_index,
+                    }));
+                }
+                TransactionV2::Transfer { inputs, .. } | TransactionV2::Burn { inputs, .. } => {
+                    spent.extend(inputs.iter().map(|input| OutPoint {
+                        txid: hex_encode(input.outpoint_txid),
+                        index: input.outpoint_index,
+                    }));
+                }
+                TransactionV2::Mine { .. } => {}
             }
         }
         spent

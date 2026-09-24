@@ -1,6 +1,10 @@
 use std::{
+    collections::BTreeMap,
     fmt,
-    sync::{Arc, OnceLock},
+    sync::{
+        Arc, OnceLock, RwLock,
+        atomic::{AtomicU32, Ordering},
+    },
 };
 
 use secrecy::{ExposeSecret, SecretBox, zeroize::Zeroize};
@@ -16,6 +20,30 @@ use super::{
 
 const WALLET_SEED_DOMAIN: &str = "iuna-wallet-seed";
 const WALLET_ML_DSA44_SEED_DOMAIN: &str = "iuna-wallet-ml-dsa44-seed-v1";
+const WALLET_ML_DSA44_CHILD_SEED_DOMAIN: &str = "iuna-wallet-ml-dsa44-child-seed-v1";
+
+#[derive(Clone, Copy, Debug, Eq, Ord, PartialEq, PartialOrd)]
+pub enum HybridAddressBranch {
+    External,
+    Reward,
+}
+
+impl HybridAddressBranch {
+    fn domain_label(self) -> &'static str {
+        match self {
+            Self::External => "external",
+            Self::Reward => "reward",
+        }
+    }
+}
+
+struct HybridChildKey {
+    signing_seed: SecretBox<[u8; 32]>,
+    public_key: ProtocolPublicKey,
+    address: VersionedAddress,
+}
+
+type HybridChildKeyCache = BTreeMap<(HybridAddressBranch, u32), Arc<HybridChildKey>>;
 
 #[derive(Clone)]
 pub struct Wallet {
@@ -23,6 +51,11 @@ pub struct Wallet {
     signing_seed: Arc<SecretBox<[u8; 32]>>,
     ml_dsa44_signing_seed: Arc<SecretBox<[u8; 32]>>,
     hybrid_public_key: Arc<OnceLock<ProtocolPublicKey>>,
+    hybrid_child_keys: Arc<RwLock<HybridChildKeyCache>>,
+    external_address_cursor: Arc<AtomicU32>,
+    external_discovery_tip: Arc<RwLock<Option<String>>>,
+    reward_address_cursor: Arc<AtomicU32>,
+    reward_discovery_tip: Arc<RwLock<Option<String>>>,
 }
 
 impl Wallet {
@@ -35,6 +68,11 @@ impl Wallet {
             signing_seed: Arc::new(signing_seed),
             ml_dsa44_signing_seed: Arc::new(ml_dsa44_signing_seed),
             hybrid_public_key: Arc::new(OnceLock::new()),
+            hybrid_child_keys: Arc::new(RwLock::new(BTreeMap::new())),
+            external_address_cursor: Arc::new(AtomicU32::new(0)),
+            external_discovery_tip: Arc::new(RwLock::new(None)),
+            reward_address_cursor: Arc::new(AtomicU32::new(0)),
+            reward_discovery_tip: Arc::new(RwLock::new(None)),
         }
     }
 
@@ -61,6 +99,27 @@ impl Wallet {
             .expect("wallet hybrid address has a valid fixed-size commitment")
     }
 
+    pub fn hybrid_versioned_address_at(
+        &self,
+        branch: HybridAddressBranch,
+        index: u32,
+    ) -> VersionedAddress {
+        if branch == HybridAddressBranch::External && index == 0 {
+            return self.hybrid_versioned_address();
+        }
+        self.hybrid_child_key(branch, index).address
+    }
+
+    pub fn hybrid_address_at(
+        &self,
+        branch: HybridAddressBranch,
+        index: u32,
+        network: AddressNetwork,
+    ) -> String {
+        encode_versioned_address(self.hybrid_versioned_address_at(branch, index), network)
+            .expect("wallet hybrid address has a valid fixed-size commitment")
+    }
+
     pub fn hybrid_public_key(&self) -> &ProtocolPublicKey {
         self.hybrid_public_key.get_or_init(|| {
             let mut public_key =
@@ -72,6 +131,54 @@ impl Wallet {
             ProtocolPublicKey::new(SignatureScheme::HybridEd25519MlDsa44, public_key)
                 .expect("wallet hybrid public key has the scheme-defined length")
         })
+    }
+
+    pub(crate) fn external_address_cursor(&self) -> u32 {
+        self.external_address_cursor.load(Ordering::Relaxed)
+    }
+
+    pub(crate) fn advance_external_address_cursor(&self, index: u32) {
+        self.external_address_cursor
+            .fetch_max(index, Ordering::Relaxed);
+    }
+
+    pub(crate) fn external_discovery_tip_matches(&self, tip: &str) -> bool {
+        self.external_discovery_tip
+            .read()
+            .expect("wallet external discovery lock is not poisoned")
+            .as_deref()
+            == Some(tip)
+    }
+
+    pub(crate) fn mark_external_discovery_tip(&self, tip: &str) {
+        *self
+            .external_discovery_tip
+            .write()
+            .expect("wallet external discovery lock is not poisoned") = Some(tip.to_string());
+    }
+
+    pub(crate) fn reward_address_cursor(&self) -> u32 {
+        self.reward_address_cursor.load(Ordering::Relaxed)
+    }
+
+    pub(crate) fn advance_reward_address_cursor(&self, index: u32) {
+        self.reward_address_cursor
+            .fetch_max(index, Ordering::Relaxed);
+    }
+
+    pub(crate) fn reward_discovery_tip_matches(&self, tip: &str) -> bool {
+        self.reward_discovery_tip
+            .read()
+            .expect("wallet reward discovery lock is not poisoned")
+            .as_deref()
+            == Some(tip)
+    }
+
+    pub(crate) fn mark_reward_discovery_tip(&self, tip: &str) {
+        *self
+            .reward_discovery_tip
+            .write()
+            .expect("wallet reward discovery lock is not poisoned") = Some(tip.to_string());
     }
 
     /// Creates both signatures over the same canonical transaction-v2 payload.
@@ -111,7 +218,54 @@ impl Wallet {
         if owner == self.hybrid_versioned_address() {
             return self.sign_hybrid_authorization(payload);
         }
+        let child = self
+            .hybrid_child_keys
+            .read()
+            .expect("wallet hybrid child-key cache lock is not poisoned")
+            .values()
+            .find(|child| child.address == owner)
+            .cloned();
+        if let Some(child) = child {
+            return sign_hybrid_authorization_with_key(
+                self.signing_seed.expose_secret(),
+                child.signing_seed.expose_secret(),
+                &child.public_key,
+                payload,
+            );
+        }
         anyhow::bail!("transaction v2 input is not owned by this wallet")
+    }
+
+    fn hybrid_child_key(&self, branch: HybridAddressBranch, index: u32) -> Arc<HybridChildKey> {
+        let descriptor = (branch, index);
+        if let Some(key) = self
+            .hybrid_child_keys
+            .read()
+            .expect("wallet hybrid child-key cache lock is not poisoned")
+            .get(&descriptor)
+        {
+            return Arc::clone(key);
+        }
+        let signing_seed =
+            derive_child_signing_seed(self.ml_dsa44_signing_seed.expose_secret(), branch, index);
+        let mut bytes =
+            Vec::with_capacity(SignatureScheme::HybridEd25519MlDsa44.public_key_bytes());
+        bytes.extend_from_slice(&ed25519_public_key(self.signing_seed.expose_secret()));
+        bytes.extend_from_slice(&ml_dsa44_public_key(signing_seed.expose_secret()));
+        let public_key = ProtocolPublicKey::new(SignatureScheme::HybridEd25519MlDsa44, bytes)
+            .expect("wallet hybrid child public key has the scheme-defined length");
+        let address = hybrid_key_commitment_address(&public_key)
+            .expect("wallet always constructs a valid hybrid child public key");
+        let key = Arc::new(HybridChildKey {
+            signing_seed,
+            public_key,
+            address,
+        });
+        self.hybrid_child_keys
+            .write()
+            .expect("wallet hybrid child-key cache lock is not poisoned")
+            .insert(descriptor, Arc::clone(&key));
+        key
     }
 
     pub(super) fn sign_payload(&self, payload: &str) -> String {
@@ -178,11 +332,47 @@ fn derive_signing_seed(domain: &str, seed: &str) -> SecretBox<[u8; 32]> {
     signing_seed
 }
 
+fn derive_child_signing_seed(
+    parent: &[u8; 32],
+    branch: HybridAddressBranch,
+    index: u32,
+) -> SecretBox<[u8; 32]> {
+    let mut hasher = Sha256::new();
+    hasher.update(WALLET_ML_DSA44_CHILD_SEED_DOMAIN.as_bytes());
+    hasher.update(b":");
+    hasher.update(branch.domain_label().as_bytes());
+    hasher.update(b":");
+    hasher.update(index.to_be_bytes());
+    hasher.update(b":");
+    hasher.update(parent);
+    let mut seed_hash = hasher.finalize();
+    let signing_seed = SecretBox::init_with_mut(|signing_seed: &mut [u8; 32]| {
+        signing_seed.copy_from_slice(&seed_hash);
+    });
+    seed_hash.zeroize();
+    signing_seed
+}
+
+fn sign_hybrid_authorization_with_key(
+    ed25519_signing_seed: &[u8; 32],
+    ml_dsa44_signing_seed: &[u8; 32],
+    public_key: &ProtocolPublicKey,
+    payload: &[u8],
+) -> anyhow::Result<V2SpendingAuthorization> {
+    let mut signature = Vec::with_capacity(SignatureScheme::HybridEd25519MlDsa44.signature_bytes());
+    signature.extend_from_slice(&sign_ed25519(ed25519_signing_seed, payload));
+    signature.extend_from_slice(&sign_ml_dsa44(ml_dsa44_signing_seed, payload)?);
+    V2SpendingAuthorization::new(
+        public_key.clone(),
+        ProtocolSignature::new(SignatureScheme::HybridEd25519MlDsa44, signature)?,
+    )
+}
+
 #[cfg(test)]
 mod tests {
     use secrecy::ExposeSecret;
 
-    use super::Wallet;
+    use super::{HybridAddressBranch, Wallet};
     use crate::domain::{
         AddressNetwork, SignatureScheme, hex_encode, verify_ed25519, verify_ml_dsa44,
     };
@@ -298,5 +488,27 @@ mod tests {
                 )
                 .is_err()
         );
+    }
+
+    #[test]
+    fn child_hybrid_addresses_are_deterministic_separated_and_spendable() {
+        let first = Wallet::from_seed("rotating-hybrid-wallet-seed");
+        let restored = Wallet::from_seed("rotating-hybrid-wallet-seed");
+        let external_zero = first.hybrid_versioned_address_at(HybridAddressBranch::External, 0);
+        let external_one = first.hybrid_versioned_address_at(HybridAddressBranch::External, 1);
+        let reward_zero = first.hybrid_versioned_address_at(HybridAddressBranch::Reward, 0);
+
+        assert_eq!(external_zero, first.hybrid_versioned_address());
+        assert_eq!(
+            external_one,
+            restored.hybrid_versioned_address_at(HybridAddressBranch::External, 1)
+        );
+        assert_ne!(external_one, external_zero);
+        assert_ne!(reward_zero, external_one);
+
+        let authorization = first
+            .sign_v2_authorization(external_one, b"rotated child spend")
+            .unwrap();
+        assert_eq!(authorization.committed_address().unwrap(), external_one);
     }
 }

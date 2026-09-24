@@ -323,6 +323,14 @@ pub(super) const INDEX_HTML: &str = concat!(
     .compact-number-field input:focus { border-color: #d5f55f; outline: 2px solid rgba(213,245,95,.2); outline-offset: 2px; }
     .receive-address { display: grid; gap: 8px; }
     .address-box { border: 1px solid #2f363c; border-radius: 8px; padding: 11px; background: #111316; }
+    .wallet-address-summary { display: flex; justify-content: space-between; gap: 12px; align-items: center; width: 100%; padding: 9px 10px; text-align: left; color: #b9c2c7; background: #111316; border-color: #2f363c; }
+    .wallet-address-summary:hover, .wallet-address-summary:focus-visible { border-color: #59656c; color: #eef6f8; outline: none; }
+    .wallet-address-summary-action { flex: 0 0 auto; color: #d5f55f; font-weight: 800; }
+    .wallet-address-list { display: grid; gap: 8px; }
+    .wallet-address-row { display: grid; gap: 8px; border: 1px solid #2f363c; border-radius: 8px; padding: 11px; background: #111316; }
+    .wallet-address-row-head { display: flex; justify-content: space-between; gap: 10px; align-items: center; }
+    .wallet-address-state { color: #9eb3bc; font-size: 11px; font-weight: 850; text-transform: uppercase; }
+    .wallet-address-state.pending { color: #efca75; }
     .wallet-address-link { cursor: pointer; text-decoration: underline; text-decoration-style: dotted; text-decoration-color: #59656c; text-underline-offset: 3px; }
     .wallet-address-link:hover, .wallet-address-link:focus-visible { color: #d5f55f; text-decoration-color: #d5f55f; outline: none; }
     .address-book-list { display: grid; gap: 8px; margin-top: 12px; }
@@ -803,19 +811,16 @@ pub(super) const INDEX_HTML: &str = concat!(
           <div class="panel">
             <div class="panel-head">
               <h3>Receive</h3>
-              <button type="button" @click="copyAddress">Copy</button>
+              <button type="button" @click="copyReceiveAddress">Copy</button>
             </div>
             <div class="receive-address">
-              <div class="muted">Legacy Ed25519 address</div>
-              <div class="address-box"><code class="wallet-address-link" role="button" tabindex="0" x-text="setupAddress()" @click="openAddressContact(setupAddress())" @keydown.enter.prevent="openAddressContact(setupAddress())" @keydown.space.prevent="openAddressContact(setupAddress())" title="Add or edit contact"></code></div>
-            </div>
-            <div class="receive-address" x-show="status.quantum_migration?.active && status.quantum_migration?.hybrid_address">
-              <div class="panel-head">
-                <div class="muted">Hybrid Ed25519 + ML-DSA address</div>
-                <button type="button" @click="copyHybridAddress">Copy</button>
-              </div>
-              <div class="address-box"><code x-text="status.quantum_migration?.hybrid_address || '-'"></code></div>
-              <div class="muted">Do not reuse this address after its key has been revealed by a spend. Address rotation is the next wallet upgrade.</div>
+              <div class="muted" x-text="status.quantum_migration?.active ? 'Current hybrid Ed25519 + ML-DSA receive address' : 'Legacy Ed25519 address'"></div>
+              <div class="address-box"><code class="wallet-address-link" role="button" tabindex="0" x-text="receiveAddress()" @click="openAddressContact(receiveAddress())" @keydown.enter.prevent="openAddressContact(receiveAddress())" @keydown.space.prevent="openAddressContact(receiveAddress())" title="Add or edit contact"></code></div>
+              <div class="muted" x-show="status.quantum_migration?.active">A new receive address is selected after funds are received. Previous addresses remain monitored by this wallet.</div>
+              <button class="wallet-address-summary" type="button" x-show="fundedWalletAddresses().length > 0" @click="openWalletAddressesModal">
+                <span x-text="walletAddressSummary()"></span>
+                <span class="wallet-address-summary-action">View details</span>
+              </button>
             </div>
           </div>
           <div class="panel">
@@ -1825,6 +1830,30 @@ pub(super) const INDEX_HTML: &str = concat!(
       </div>
     </section>
   </div>
+  <div class="setup-overlay transaction-overlay" x-show="showWalletAddresses" x-transition.opacity @click.self="closeWalletAddressesModal()" @keydown.escape.stop="closeWalletAddressesModal()" role="dialog" aria-modal="true" aria-labelledby="wallet-addresses-title">
+    <section class="tx-modal">
+      <div class="tx-modal-head">
+        <div class="tx-modal-title">
+          <h2 id="wallet-addresses-title">Funded wallet addresses</h2>
+          <div class="muted">Previous receive and reward addresses remain monitored automatically.</div>
+        </div>
+        <button type="button" @click="closeWalletAddressesModal">Close</button>
+      </div>
+      <div class="wallet-address-list">
+        <template x-for="entry in fundedWalletAddresses()" :key="entry.address">
+          <div class="wallet-address-row">
+            <div class="wallet-address-row-head">
+              <span class="wallet-address-state" :class="{ pending: walletAddressHasPendingSpend(entry) }" x-text="walletAddressState(entry)"></span>
+              <span class="utxo-node-amount">IUNA <span x-text="amountLabel(entry.balance)"></span></span>
+            </div>
+            <code class="tx-value hash" x-text="entry.address"></code>
+            <div class="muted" x-text="walletAddressUtxoLabel(entry)"></div>
+          </div>
+        </template>
+        <div class="tx-modal-empty" x-show="fundedWalletAddresses().length === 0">No funded wallet addresses</div>
+      </div>
+    </section>
+  </div>
   <div class="setup-overlay transaction-overlay" x-show="showPowDifficultyInfo" x-transition.opacity @click.self="closePowDifficultyInfo()" role="dialog" aria-modal="true" aria-labelledby="pow-difficulty-title">
     <section class="tx-modal">
       <div class="tx-modal-head">
@@ -2179,5 +2208,22 @@ mod tests {
         assert!(!INDEX_HTML.contains(
             r#"status.quantum_migration?.legacy_balance > 0 || status.quantum_migration?.hybrid_balance > 0"#
         ));
+    }
+
+    #[test]
+    fn receive_panel_presents_the_current_rotating_address() {
+        assert!(INDEX_HTML.contains(r#"@click="copyReceiveAddress""#));
+        assert!(INDEX_HTML.contains(r#"x-text="receiveAddress()""#));
+        assert!(INDEX_HTML.contains(
+            "A new receive address is selected after funds are received. Previous addresses remain monitored by this wallet."
+        ));
+        assert!(INDEX_HTML.contains(r#"x-text="walletAddressSummary()""#));
+        assert!(INDEX_HTML.contains(r#"x-show="showWalletAddresses""#));
+        assert!(INDEX_HTML.contains("Funded wallet addresses"));
+        assert!(!INDEX_HTML.contains("copyWalletAddress"));
+        assert!(
+            !INDEX_HTML
+                .contains("Do not reuse this address after its key has been revealed by a spend.")
+        );
     }
 }

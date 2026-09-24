@@ -192,6 +192,8 @@ pub struct NodeStatus {
     pub app_version: String,
     pub wallet_address: String,
     pub wallet_receive_address: String,
+    #[serde(default)]
+    pub funded_wallet_addresses: Vec<FundedWalletAddressStatus>,
     pub wallet_balance: Amount,
     pub wallet_locked: bool,
     pub quantum_migration: QuantumMigrationStatus,
@@ -200,6 +202,15 @@ pub struct NodeStatus {
     pub stratum: StratumStatus,
     pub chain: ChainStatus,
     pub network_migration: NetworkMigrationStatus,
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+pub struct FundedWalletAddressStatus {
+    pub address: String,
+    pub balance: Amount,
+    pub utxos: usize,
+    pub spendable_utxos: usize,
+    pub legacy: bool,
 }
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]

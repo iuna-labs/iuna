@@ -334,12 +334,13 @@ impl NodeCore {
         let ledger = self.wallet_build_ledger()?;
         let next_height = current_height.saturating_add(1);
         if transaction_v2_is_active(next_height) {
-            let hybrid_address = self.wallet.unlocked()?.hybrid_address(
-                crate::domain::AddressNetwork::from_profile_id(
-                    &self.ledger.launch_profile().profile_id,
-                ),
-            );
-            let hybrid_balance = self.ledger.balance_of(&hybrid_address);
+            let hybrid_balance = self
+                .ledger
+                .wallet_owned_hybrid_encoded_addresses(self.wallet.unlocked()?)?
+                .iter()
+                .fold(0_u64, |total, address| {
+                    total.saturating_add(self.ledger.balance_of(address))
+                });
             if let Some((transaction, _)) =
                 self.best_automatic_v2_burn_on_ledger(&ledger, fee_per_byte, hybrid_balance, false)
             {
@@ -751,12 +752,9 @@ impl NodeCore {
         let finalizer_rank = ledger
             .finalizer_rank_for_next_block(self.wallet.address())
             .context("cannot prepare ticket block without a mature burn ticket")?;
-        let reward_address = if ledger.height().saturating_add(1)
-            >= crate::domain::HYBRID_REWARD_ACTIVATION_HEIGHT
-        {
-            Some(self.wallet.unlocked()?.hybrid_address(
-                crate::domain::AddressNetwork::from_profile_id(&ledger.launch_profile().profile_id),
-            ))
+        let next_height = ledger.height().saturating_add(1);
+        let reward_address = if next_height >= crate::domain::HYBRID_REWARD_ACTIVATION_HEIGHT {
+            Some(ledger.wallet_reward_address(self.wallet.unlocked()?, next_height))
         } else {
             None
         };
@@ -771,12 +769,9 @@ impl NodeCore {
 
     fn prepare_recovery_block_with_local_anchor(&self, timestamp_ms: u64) -> Result<PreparedBlock> {
         let (ledger, required_burn_signature) = self.ledger_with_local_block_anchor();
-        let reward_address = if ledger.height().saturating_add(1)
-            >= crate::domain::HYBRID_REWARD_ACTIVATION_HEIGHT
-        {
-            Some(self.wallet.unlocked()?.hybrid_address(
-                crate::domain::AddressNetwork::from_profile_id(&ledger.launch_profile().profile_id),
-            ))
+        let next_height = ledger.height().saturating_add(1);
+        let reward_address = if next_height >= crate::domain::HYBRID_REWARD_ACTIVATION_HEIGHT {
+            Some(ledger.wallet_reward_address(self.wallet.unlocked()?, next_height))
         } else {
             None
         };

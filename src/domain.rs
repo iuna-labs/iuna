@@ -130,7 +130,7 @@ pub use vdf::{
     VdfProgress, VdfProgressPhase, run_vdf, run_vdf_cancellable_with_progress,
     run_vdf_with_progress, verify_vdf,
 };
-pub use wallet::Wallet;
+pub use wallet::{HybridAddressBranch, Wallet};
 
 pub fn burn_committee_slot_count(eligible_rank_count: usize) -> usize {
     eligible_rank_count.min(BURN_COMMITTEE_SIZE)

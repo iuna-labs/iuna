@@ -30,8 +30,9 @@ pub use in_memory_network::InMemoryNetwork;
 pub use peer_book::{PeerBook, PeerDirection, PeerInfo};
 pub use types::{
     AutoMineOutcome, AutoMinePlan, BlockInventory, ChainBootstrap, ExternalMineJob, FeeEstimate,
-    GossipEnvelope, LaunchProfileStatus, MiningStatus, NetworkMigrationStatus, NodeConfig,
-    NodeStatus, ProtocolHello, QuantumMigrationPreview, QuantumMigrationStatus, StratumStatus,
+    FundedWalletAddressStatus, GossipEnvelope, LaunchProfileStatus, MiningStatus,
+    NetworkMigrationStatus, NodeConfig, NodeStatus, ProtocolHello, QuantumMigrationPreview,
+    QuantumMigrationStatus, StratumStatus,
 };
 use wallet::NodeWallet;
 

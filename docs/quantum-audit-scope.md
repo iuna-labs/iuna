@@ -142,8 +142,8 @@ until all of the following are resolved:
 - the cryptographic backend and Iuna integration are independently reviewed;
 - the final consensus call sites and byte-based fee accounting receive independent review;
 - wallet backup compatibility, migration batching, hybrid spending, recovery, and no-address-reuse
-  behavior are reviewed; deterministic hybrid keys, block-bounded migration batches, and hybrid
-  transfers exist, but address rotation remains incomplete;
+  behavior are reviewed; deterministic external/change rotation and spend-triggered reward
+  rotation now exist, but their recovery and no-reuse behavior still require independent review;
 - migration progress is observable without exposing wallet secrets;
 - advertised `transaction-v2-blocks` behavior (including already-open sessions), restored
   snapshot-v7 behavior, and activation-boundary recovery are rehearsed on the mainnet-candidate

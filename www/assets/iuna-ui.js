@@ -142,6 +142,7 @@ window.iunaApp = function iunaApp() {
     chainResetConfirm: "",
     chainResetBusy: false,
     showWalletUtxos: false,
+    showWalletAddresses: false,
     showPowDifficultyInfo: false,
     lastUpdated: null,
     pollHandle: null,
@@ -586,6 +587,41 @@ window.iunaApp = function iunaApp() {
 
     setupAddress() {
       return this.setupWallet.address || this.status.wallet_receive_address || "-";
+    },
+
+    receiveAddress() {
+      return this.status.wallet_receive_address || this.setupWallet.address || "-";
+    },
+
+    fundedWalletAddresses() {
+      return Array.isArray(this.status.funded_wallet_addresses)
+        ? this.status.funded_wallet_addresses
+        : [];
+    },
+
+    walletAddressSummary() {
+      const count = this.fundedWalletAddresses().length;
+      return `Funds are held across ${count} wallet address${count === 1 ? "" : "es"}`;
+    },
+
+    walletAddressHasPendingSpend(entry) {
+      return Number(entry?.spendable_utxos || 0) < Number(entry?.utxos || 0);
+    },
+
+    walletAddressState(entry) {
+      if (this.walletAddressHasPendingSpend(entry)) return "Pending spend";
+      if (entry?.address === this.receiveAddress()) return "Current";
+      if (entry?.legacy === true) return "Legacy funds";
+      return "Funded";
+    },
+
+    walletAddressUtxoLabel(entry) {
+      const total = Number(entry?.utxos || 0);
+      const available = Number(entry?.spendable_utxos || 0);
+      const pending = Math.max(0, total - available);
+      const parts = [`${total} UTXO${total === 1 ? "" : "s"}`];
+      if (pending > 0) parts.push(`${available} available`, `${pending} pending`);
+      return parts.join(" · ");
     },
 
     selectSetupWalletMode(mode) {
@@ -1356,6 +1392,14 @@ window.iunaApp = function iunaApp() {
       this.showWalletUtxos = false;
     },
 
+    openWalletAddressesModal() {
+      this.showWalletAddresses = true;
+    },
+
+    closeWalletAddressesModal() {
+      this.showWalletAddresses = false;
+    },
+
     openPowDifficultyInfo() {
       this.showPowDifficultyInfo = true;
     },
@@ -1417,6 +1461,7 @@ window.iunaApp = function iunaApp() {
       this.closeSendConfirmModal();
       this.closeTransactionModal();
       this.closeWalletUtxosModal();
+      this.closeWalletAddressesModal();
       this.closePowDifficultyInfo();
       this.closeBurnLeaderRanksModal();
       this.closeBurnBundleModal();
@@ -3105,14 +3150,12 @@ window.iunaApp = function iunaApp() {
       }
     },
 
-    async copyHybridAddress() {
+    async copyReceiveAddress() {
       try {
-        const address = this.status.quantum_migration?.hybrid_address;
-        if (!address) throw new Error("Hybrid address unavailable");
-        await navigator.clipboard.writeText(address);
-        this.showFlash("Hybrid address copied", "success");
+        await navigator.clipboard.writeText(this.receiveAddress());
+        this.showFlash("Address copied", "success");
       } catch (error) {
-        this.showFlash("Could not copy hybrid address", "error");
+        this.showFlash("Could not copy address", "error");
       }
     },
 

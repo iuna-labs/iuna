@@ -148,11 +148,12 @@ pub(super) async fn api_wallet_transactions(
     let (wallet_addresses, pending, pending_v2, domain, network, v2_outputs) = {
         let node = state.node.lock().await;
         let status = node.status();
-        let wallet = node.wallet_address().to_string();
-        let mut wallet_addresses = vec![wallet.clone(), status.wallet_receive_address];
-        if let Some(address) = status.quantum_migration.hybrid_address {
-            wallet_addresses.push(address);
-        }
+        let mut wallet_addresses = node
+            .wallet_owned_addresses()
+            .unwrap_or_else(|_| vec![node.wallet_address().to_string()]);
+        wallet_addresses.push(status.wallet_receive_address);
+        wallet_addresses.sort();
+        wallet_addresses.dedup();
         let pending_v2 = node.pending_transactions_v2();
         let v2_outputs = pending_v2
             .iter()
@@ -373,19 +374,32 @@ pub(super) async fn api_wallet_utxos(
     State(state): State<HttpState>,
     Query(query): Query<PageQuery>,
 ) -> Json<Page<WalletUtxoRow>> {
-    let (wallet, pending_spent) = {
+    let (wallet_addresses, pending_spent) = {
         let node = state.node.lock().await;
         (
-            node.wallet_address().to_string(),
+            node.wallet_owned_addresses()
+                .unwrap_or_else(|_| vec![node.wallet_address().to_string()]),
             node.wallet_pending_spent_outpoints(),
         )
     };
     let store = state.ui_data_store.clone();
-    let utxos = tokio::task::spawn_blocking(move || store.load_wallet_utxos(&wallet))
-        .await
-        .ok()
-        .and_then(Result::ok)
-        .unwrap_or_default();
+    let utxos = tokio::task::spawn_blocking(move || -> Result<Vec<_>> {
+        let mut utxos = Vec::new();
+        for address in wallet_addresses {
+            utxos.extend(store.load_wallet_utxos(&address)?);
+        }
+        utxos.sort_by(|(left_point, left), (right_point, right)| {
+            right
+                .amount
+                .cmp(&left.amount)
+                .then_with(|| left_point.cmp(right_point))
+        });
+        Ok(utxos)
+    })
+    .await
+    .ok()
+    .and_then(Result::ok)
+    .unwrap_or_default();
     Json(page_items(
         wallet_utxo_rows_from_ui_data(utxos, &pending_spent),
         query,

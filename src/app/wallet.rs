@@ -530,12 +530,10 @@ impl NodeCore {
         if self.ledger.height().saturating_add(1) < crate::domain::HYBRID_REWARD_ACTIVATION_HEIGHT {
             return Ok(self.wallet.address().to_string());
         }
-        Ok(self
-            .wallet
-            .unlocked()?
-            .hybrid_address(crate::domain::AddressNetwork::from_profile_id(
-                &self.ledger.launch_profile().profile_id,
-            )))
+        Ok(self.ledger.wallet_reward_address(
+            self.wallet.unlocked()?,
+            self.ledger.height().saturating_add(1),
+        ))
     }
 
     pub(super) fn wallet_anchor_build_ledger(&self) -> Result<Ledger> {

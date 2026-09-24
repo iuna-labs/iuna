@@ -5,10 +5,10 @@ use anyhow::{Context, Result, bail};
 use super::ledger_ops::verify_address_signature;
 use super::reveal::{burn_bundle_slot_mask, burn_committee_mask};
 use super::{
-    AddressNetwork, Amount, BURN_COMMITTEE_SIZE, Block, BurnBundle, BurnBundlePayload,
-    BurnBundleSection, BurnBundleSignature, BurnCommitteeMember, FinalizerMode, Ledger,
-    MAX_BURN_BUNDLE_BYTES, MaskedBurn, MaskedBurnV2, OBJECTIVE_FINALITY_ACTIVATION_HEIGHT,
-    Transaction, Wallet, hex_encode,
+    Amount, BURN_COMMITTEE_SIZE, Block, BurnBundle, BurnBundlePayload, BurnBundleSection,
+    BurnBundleSignature, BurnCommitteeMember, FinalizerMode, Ledger, MAX_BURN_BUNDLE_BYTES,
+    MaskedBurn, MaskedBurnV2, OBJECTIVE_FINALITY_ACTIVATION_HEIGHT, Transaction, Wallet,
+    hex_encode,
 };
 
 impl Ledger {
@@ -102,11 +102,8 @@ impl Ledger {
                     prev_hash: prev_hash.clone(),
                     slot: member.slot,
                     member: wallet.address().to_string(),
-                    reward_address: (height >= super::HYBRID_REWARD_ACTIVATION_HEIGHT).then(|| {
-                        wallet.hybrid_address(AddressNetwork::from_profile_id(
-                            &self.launch_profile.profile_id,
-                        ))
-                    }),
+                    reward_address: (height >= super::HYBRID_REWARD_ACTIVATION_HEIGHT)
+                        .then(|| self.wallet_reward_address(wallet, height)),
                     burns: candidate.clone(),
                     burns_v2: candidate_v2.clone(),
                 });
@@ -115,19 +112,18 @@ impl Ledger {
                     selected_v2 = candidate_v2;
                 }
             }
-            bundles.push(wallet.burn_bundle(BurnBundlePayload {
-                height,
-                prev_hash: prev_hash.clone(),
-                slot: member.slot,
-                member: wallet.address().to_string(),
-                reward_address: (height >= super::HYBRID_REWARD_ACTIVATION_HEIGHT).then(|| {
-                    wallet.hybrid_address(AddressNetwork::from_profile_id(
-                        &self.launch_profile.profile_id,
-                    ))
+            bundles.push(
+                wallet.burn_bundle(BurnBundlePayload {
+                    height,
+                    prev_hash: prev_hash.clone(),
+                    slot: member.slot,
+                    member: wallet.address().to_string(),
+                    reward_address: (height >= super::HYBRID_REWARD_ACTIVATION_HEIGHT)
+                        .then(|| self.wallet_reward_address(wallet, height)),
+                    burns: selected,
+                    burns_v2: selected_v2,
                 }),
-                burns: selected,
-                burns_v2: selected_v2,
-            }));
+            );
         }
         Ok(bundles)
     }
@@ -222,11 +218,8 @@ impl Ledger {
             prev_hash,
             slot: member.slot,
             member: wallet.address().to_string(),
-            reward_address: (height >= super::HYBRID_REWARD_ACTIVATION_HEIGHT).then(|| {
-                wallet.hybrid_address(AddressNetwork::from_profile_id(
-                    &self.launch_profile.profile_id,
-                ))
-            }),
+            reward_address: (height >= super::HYBRID_REWARD_ACTIVATION_HEIGHT)
+                .then(|| self.wallet_reward_address(wallet, height)),
             burns,
             burns_v2: Vec::new(),
         })

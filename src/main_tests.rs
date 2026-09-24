@@ -179,6 +179,25 @@ fn management_ui_opens_contact_editor_from_wallet_addresses() {
 }
 
 #[test]
+fn management_ui_prefers_the_live_rotating_receive_address() {
+    let javascript = include_str!("../www/assets/iuna-ui.js");
+    let receive_address = javascript
+        .split_once("receiveAddress()")
+        .and_then(|(_, rest)| rest.split_once("\n    },"))
+        .map(|(body, _)| body)
+        .expect("receive address helper");
+
+    assert!(receive_address.contains(
+        "return this.status.wallet_receive_address || this.setupWallet.address || \"-\";"
+    ));
+    assert!(javascript.contains("await navigator.clipboard.writeText(this.receiveAddress())"));
+    assert!(javascript.contains("fundedWalletAddresses()"));
+    assert!(javascript.contains("Funds are held across ${count} wallet address"));
+    assert!(javascript.contains("openWalletAddressesModal()"));
+    assert!(!javascript.contains("copyHybridAddress"));
+}
+
+#[test]
 fn management_ui_only_offers_wallet_optimization_when_relevant_or_requested() {
     let html = include_str!("adapters/http/index_html.rs");
     let javascript = include_str!("../www/assets/iuna-ui.js");

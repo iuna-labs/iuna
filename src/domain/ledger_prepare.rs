@@ -8,13 +8,9 @@ use super::{
 
 impl Ledger {
     pub fn mine_next_block(&self, wallet: &Wallet, timestamp_ms: u64) -> Result<super::Block> {
-        let reward_address = (self.height().saturating_add(1)
-            >= super::HYBRID_REWARD_ACTIVATION_HEIGHT)
-            .then(|| {
-                wallet.hybrid_address(super::AddressNetwork::from_profile_id(
-                    &self.launch_profile.profile_id,
-                ))
-            });
+        let next_height = self.height().saturating_add(1);
+        let reward_address = (next_height >= super::HYBRID_REWARD_ACTIVATION_HEIGHT)
+            .then(|| self.wallet_reward_address(wallet, next_height));
         let prepared = self.prepare_next_block_with_required_burn_and_burn_bundles(
             wallet.address(),
             reward_address.as_deref(),
@@ -27,13 +23,9 @@ impl Ledger {
     }
 
     pub fn mine_recovery_block(&self, wallet: &Wallet, timestamp_ms: u64) -> Result<super::Block> {
-        let reward_address = (self.height().saturating_add(1)
-            >= super::HYBRID_REWARD_ACTIVATION_HEIGHT)
-            .then(|| {
-                wallet.hybrid_address(super::AddressNetwork::from_profile_id(
-                    &self.launch_profile.profile_id,
-                ))
-            });
+        let next_height = self.height().saturating_add(1);
+        let reward_address = (next_height >= super::HYBRID_REWARD_ACTIVATION_HEIGHT)
+            .then(|| self.wallet_reward_address(wallet, next_height));
         let prepared = self.prepare_recovery_block_with_required_burn_and_burn_bundles(
             wallet.address(),
             reward_address.as_deref(),

@@ -6,7 +6,7 @@ use crate::{
     adapters::config_store::{DEFAULT_POW_MINING_WORKERS, clamp_pow_mining_workers},
     domain::{
         AddressNetwork, Amount, BurnBundle, DEFAULT_FEE_PER_BYTE, Ledger, VersionedAddress, Wallet,
-        decode_address, decode_versioned_address, encode_address,
+        decode_address, decode_versioned_address, encode_address, transaction_v2_is_active,
     },
 };
 
@@ -133,7 +133,22 @@ impl NodeCore {
     }
 
     pub fn wallet_receive_address(&self) -> Result<String> {
+        if transaction_v2_is_active(self.ledger.height()) {
+            if let Ok(wallet) = self.wallet.unlocked() {
+                return self.ledger.wallet_receive_address(wallet);
+            }
+        }
         encode_address(self.wallet.address(), self.address_network())
+    }
+
+    pub fn wallet_owned_addresses(&self) -> Result<Vec<String>> {
+        let mut addresses = vec![self.wallet.address().to_string()];
+        if let Ok(wallet) = self.wallet.unlocked() {
+            addresses.extend(self.ledger.wallet_owned_hybrid_encoded_addresses(wallet)?);
+        }
+        addresses.sort();
+        addresses.dedup();
+        Ok(addresses)
     }
 
     pub fn normalize_user_address(&self, address: &str) -> Result<String> {

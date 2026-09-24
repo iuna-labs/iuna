@@ -130,7 +130,9 @@ height-3000 consensus path, including ticket creation and committee burn bundles
 require the additional `transaction-v2-burns` capability once transaction v2 is active; validators
 that lack it must be upgraded together rather than remaining connected through a gradual relay
 rollout. The management wallet can submit reviewed migration batches, ordinary hybrid transfers,
-and anchored hybrid burns. Address rotation and broader recovery rehearsal remain release blockers.
+and anchored hybrid burns. It deterministically rotates hybrid receive/change addresses and uses a
+separate reward branch that rotates after a spend reveals its current key. Broader recovery
+rehearsal and independent review of the rotation behavior remain release blockers.
 
 ### Hybrid reward activation target
 
@@ -192,8 +194,14 @@ wallet reports legacy and hybrid balances, exposes an authenticated migration pr
 reviewed block-bounded migration batch at a time, can spend confirmed hybrid value to another
 address-v1 recipient, and can destroy confirmed hybrid value through the same one-block burn queue
 used by legacy burns. Hybrid burns create ordinary lottery tickets linked to the Ed25519 component
-of the hybrid wallet and participate in the same anti-censorship bundle rules. Automatic address
-rotation and full recovery rehearsal remain incomplete.
+of the hybrid wallet and participate in the same anti-censorship bundle rules. The original hybrid
+address remains derivation index zero for backup compatibility. Once an external address appears
+in the chain or local mempool, the wallet exposes the next deterministic address and sends v2
+change there. Reward destinations use a separately domain-separated branch and rotate as soon as
+the current reward key is revealed by a confirmed or pending spend. Seed recovery scans both
+branches with a 20-address gap limit. Child addresses retain the wallet's Ed25519 identity for
+ticket/finalizer compatibility while using distinct ML-DSA-44 keys. Full recovery rehearsal
+remains incomplete.
 
 ## Other trust boundaries
 

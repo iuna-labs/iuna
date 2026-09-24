@@ -9,8 +9,8 @@ use crate::{
 };
 
 use super::{
-    LaunchProfileStatus, MiningStatus, NETWORK_ID, NetworkMigrationStatus, NodeCore, NodeStatus,
-    QuantumMigrationStatus, StratumStatus,
+    FundedWalletAddressStatus, LaunchProfileStatus, MiningStatus, NETWORK_ID,
+    NetworkMigrationStatus, NodeCore, NodeStatus, QuantumMigrationStatus, StratumStatus,
     helpers::{transaction_input_total_from_outputs, transaction_output_total_for_address},
     now_ms,
 };
@@ -31,10 +31,51 @@ impl NodeCore {
                 &self.ledger.launch_profile().profile_id,
             ))
         });
-        let hybrid_balance = hybrid_address
-            .as_deref()
-            .map(|address| self.ledger.balance_of(address))
-            .unwrap_or(0);
+        let hybrid_addresses = self
+            .wallet
+            .unlocked()
+            .ok()
+            .and_then(|wallet| {
+                self.ledger
+                    .wallet_owned_hybrid_encoded_addresses(wallet)
+                    .ok()
+            })
+            .unwrap_or_default();
+        let hybrid_balance = hybrid_addresses.iter().fold(0_u64, |total, address| {
+            total.saturating_add(self.ledger.balance_of(address))
+        });
+        let pending_spent = self.wallet_pending_spent_outpoints();
+        let mut owned_addresses = vec![legacy_address.to_string()];
+        owned_addresses.extend(hybrid_addresses);
+        owned_addresses.sort();
+        owned_addresses.dedup();
+        let mut funded_wallet_addresses = owned_addresses
+            .into_iter()
+            .filter_map(|address| {
+                let utxos = self.ledger.utxos_for_address(&address);
+                if utxos.is_empty() {
+                    return None;
+                }
+                Some(FundedWalletAddressStatus {
+                    legacy: address == legacy_address,
+                    address,
+                    balance: utxos.iter().fold(0_u64, |total, (_, output)| {
+                        total.saturating_add(output.amount)
+                    }),
+                    utxos: utxos.len(),
+                    spendable_utxos: utxos
+                        .iter()
+                        .filter(|(outpoint, _)| !pending_spent.contains(outpoint))
+                        .count(),
+                })
+            })
+            .collect::<Vec<_>>();
+        funded_wallet_addresses.sort_by(|left, right| {
+            right
+                .balance
+                .cmp(&left.balance)
+                .then_with(|| left.address.cmp(&right.address))
+        });
         let address_network =
             AddressNetwork::from_profile_id(&self.ledger.launch_profile().profile_id);
         let transaction_v2_domain = self.ledger.transaction_v2_domain().ok();
@@ -60,6 +101,7 @@ impl NodeCore {
             app_version: env!("CARGO_PKG_VERSION").to_string(),
             wallet_address: self.wallet.address().to_string(),
             wallet_receive_address: self.wallet_receive_address().unwrap_or_default(),
+            funded_wallet_addresses,
             wallet_balance: self.wallet_projected_balance(),
             wallet_locked: self.wallet.is_locked(),
             quantum_migration: QuantumMigrationStatus {
@@ -118,10 +160,11 @@ impl NodeCore {
         let address = self.wallet.address();
         let mut balance = self.ledger.balance_of(address);
         if let Ok(wallet) = self.wallet.unlocked() {
-            let hybrid_address = wallet.hybrid_address(AddressNetwork::from_profile_id(
-                &self.ledger.launch_profile().profile_id,
-            ));
-            balance = balance.saturating_add(self.ledger.balance_of(&hybrid_address));
+            if let Ok(addresses) = self.ledger.wallet_owned_hybrid_encoded_addresses(wallet) {
+                for hybrid_address in addresses {
+                    balance = balance.saturating_add(self.ledger.balance_of(&hybrid_address));
+                }
+            }
         }
         let confirmed_outputs = self
             .ledger
@@ -293,8 +336,9 @@ mod tests {
     #[test]
     fn status_omits_full_balance_map_for_ui_polling() {
         let wallet = Wallet::from_seed("status-light-wallet");
+        let wallet_address = wallet.address().to_string();
         let mut allocations = BTreeMap::new();
-        allocations.insert(wallet.address().to_string(), 10);
+        allocations.insert(wallet_address.clone(), 10);
         allocations.insert(
             Wallet::from_seed("status-light-peer").address().to_string(),
             5,
@@ -305,6 +349,12 @@ mod tests {
         let status = node.status();
 
         assert_eq!(status.wallet_balance, 10);
+        assert_eq!(status.funded_wallet_addresses.len(), 1);
+        assert_eq!(status.funded_wallet_addresses[0].address, wallet_address);
+        assert_eq!(status.funded_wallet_addresses[0].balance, 10);
+        assert_eq!(status.funded_wallet_addresses[0].utxos, 1);
+        assert_eq!(status.funded_wallet_addresses[0].spendable_utxos, 1);
+        assert!(status.funded_wallet_addresses[0].legacy);
         assert!(status.chain.balances.is_empty());
     }
 
