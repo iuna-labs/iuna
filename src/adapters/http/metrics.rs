@@ -42,7 +42,7 @@ pub(super) fn metrics_response(
         charts: vec![
             metrics_chart(
                 "block-time",
-                "Time per block",
+                "Block interval",
                 "s",
                 MetricsValueKind::Seconds,
                 &rows,
@@ -54,7 +54,7 @@ pub(super) fn metrics_response(
             ),
             metrics_chart(
                 "difficulty",
-                "Difficulty",
+                "Mining difficulty",
                 "bits",
                 MetricsValueKind::Number,
                 &rows,
@@ -62,7 +62,7 @@ pub(super) fn metrics_response(
             ),
             metrics_chart(
                 "supply",
-                "IUNA in circulation",
+                "Circulating supply",
                 "IUNA",
                 MetricsValueKind::Iuna,
                 &rows,
@@ -70,7 +70,7 @@ pub(super) fn metrics_response(
             ),
             metrics_chart(
                 "chain-storage-bytes",
-                "Total chain size",
+                "Compact chain size",
                 "bytes",
                 MetricsValueKind::Bytes,
                 &rows,
@@ -81,16 +81,8 @@ pub(super) fn metrics_response(
                 },
             ),
             metrics_chart(
-                "known-wallet-addresses",
-                "Known wallet addresses",
-                "addresses",
-                MetricsValueKind::Number,
-                &rows,
-                |row| Some(row.known_wallet_addresses as f64),
-            ),
-            metrics_chart(
                 "total-utxos",
-                "Total UTXOs",
+                "UTXO set size",
                 "UTXOs",
                 MetricsValueKind::Number,
                 &rows,
@@ -98,7 +90,7 @@ pub(super) fn metrics_response(
             ),
             metrics_chart(
                 "transactions",
-                "Transactions",
+                "Transactions per block",
                 "tx",
                 MetricsValueKind::Number,
                 &rows,
@@ -106,7 +98,7 @@ pub(super) fn metrics_response(
             ),
             metrics_chart(
                 "burn-count",
-                "Burn transactions",
+                "Burns per block",
                 "burns",
                 MetricsValueKind::Number,
                 &rows,
@@ -114,7 +106,7 @@ pub(super) fn metrics_response(
             ),
             metrics_chart(
                 "burn-amount",
-                "Burn amount",
+                "Burned per block",
                 "IUNA",
                 MetricsValueKind::Iuna,
                 &rows,
@@ -122,7 +114,7 @@ pub(super) fn metrics_response(
             ),
             metrics_chart(
                 "total-burn",
-                "Total burn",
+                "Cumulative burned",
                 "IUNA",
                 MetricsValueKind::Iuna,
                 &rows,
@@ -130,7 +122,7 @@ pub(super) fn metrics_response(
             ),
             metrics_chart(
                 "fees",
-                "Fees",
+                "Fees per block",
                 "IUNA",
                 MetricsValueKind::Iuna,
                 &rows,
@@ -138,7 +130,7 @@ pub(super) fn metrics_response(
             ),
             metrics_chart(
                 "mine-actions",
-                "Mine actions",
+                "Mine actions per block",
                 "mine",
                 MetricsValueKind::Number,
                 &rows,
@@ -146,7 +138,7 @@ pub(super) fn metrics_response(
             ),
             metrics_chart(
                 "vdf-rounds",
-                "VDF rounds",
+                "VDF work per block",
                 "rounds",
                 MetricsValueKind::Number,
                 &rows,
@@ -446,6 +438,27 @@ mod tests {
                 .and_then(|chart| chart.points.first())
                 .map(|point| point.value),
             Some(4.0)
+        );
+        assert_eq!(
+            response
+                .charts
+                .iter()
+                .map(|chart| chart.id)
+                .collect::<Vec<_>>(),
+            vec![
+                "block-time",
+                "difficulty",
+                "supply",
+                "chain-storage-bytes",
+                "total-utxos",
+                "transactions",
+                "burn-count",
+                "burn-amount",
+                "total-burn",
+                "fees",
+                "mine-actions",
+                "vdf-rounds",
+            ]
         );
     }
 
