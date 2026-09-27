@@ -485,6 +485,47 @@ mod tests {
     }
 
     #[test]
+    fn browser_reward_transfer_vector_matches_node_encoding_and_signatures() {
+        let wallet = Wallet::from_seed("hybrid-wallet-seed");
+        let owner = wallet.hybrid_versioned_address_at(HybridAddressBranch::Reward, 0);
+        let recipient = wallet.hybrid_versioned_address_at(HybridAddressBranch::External, 1);
+        let change = wallet.hybrid_versioned_address_at(HybridAddressBranch::External, 2);
+        let domain = TransactionV2Domain::new("iuna-mainnet-candidate", [0x11; 32]).unwrap();
+        let mut transaction = TransactionV2::Transfer {
+            inputs: vec![TransactionV2Input {
+                outpoint_txid: [0x44; 32],
+                outpoint_index: 8,
+                owner,
+            }],
+            outputs: vec![
+                TransactionV2Output {
+                    address: recipient,
+                    amount: 1_000_000,
+                },
+                TransactionV2Output {
+                    address: change,
+                    amount: 995_921,
+                },
+            ],
+            fee: 4_079,
+            authorizations: Vec::new(),
+        };
+        let payload = transaction.signing_bytes(&domain).unwrap();
+        let authorization = wallet.sign_v2_authorization(owner, &payload).unwrap();
+        let TransactionV2::Transfer { authorizations, .. } = &mut transaction else {
+            unreachable!();
+        };
+        authorizations.push(authorization);
+
+        transaction.verify_authorizations(&domain).unwrap();
+        assert_eq!(transaction.encoded_size_bytes(&domain).unwrap(), 4_079);
+        assert_eq!(
+            hex_encode(transaction.transaction_id(&domain).unwrap()),
+            "558cee1dfa1425e0b214681445e3d0641a898e15245f80d4524d2b98d762df88"
+        );
+    }
+
+    #[test]
     fn browser_v2_migration_vector_matches_node_encoding_and_signature() {
         let wallet = Wallet::from_seed("hybrid-wallet-seed");
         let owner = wallet.legacy_versioned_address();
@@ -602,6 +643,14 @@ mod tests {
         );
         assert_ne!(external_one, external_zero);
         assert_ne!(reward_zero, external_one);
+        assert_eq!(
+            Wallet::from_seed("hybrid-wallet-seed").hybrid_address_at(
+                HybridAddressBranch::Reward,
+                0,
+                AddressNetwork::Mainnet,
+            ),
+            "iuna1pvxpc35gavamxw0tvqj3ms82gwtvchh7mdyzqdttx7ktx7pfkgz4qkaq24k"
+        );
 
         let authorization = first
             .sign_v2_authorization(external_one, b"rotated child spend")

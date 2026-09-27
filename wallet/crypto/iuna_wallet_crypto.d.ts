@@ -7,11 +7,14 @@ export function build_transfer(request_json: string): string;
 
 export function derive_external_addresses(seed: string, count: number, network_id: string): string;
 
+export function derive_reward_addresses(seed: string, count: number, network_id: string): string;
+
 export type InitInput = RequestInfo | URL | Response | BufferSource | WebAssembly.Module;
 
 export interface InitOutput {
     readonly memory: WebAssembly.Memory;
     readonly derive_external_addresses: (a: number, b: number, c: number, d: number, e: number, f: number) => void;
+    readonly derive_reward_addresses: (a: number, b: number, c: number, d: number, e: number, f: number) => void;
     readonly build_transfer: (a: number, b: number, c: number) => void;
     readonly build_migration: (a: number, b: number, c: number) => void;
     readonly __wbindgen_export: (a: number, b: number) => number;

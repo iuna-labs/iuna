@@ -22,9 +22,9 @@ use crate::{
         http::{
             types::{WalletTransactionContext, WalletTransactionFilters, WalletTransactionRow},
             ui::{
-                add_pending_outputs, add_pending_v2_outputs, transaction_v2_input_outpoints,
-                wallet_transaction_row_for_addresses, wallet_transaction_rows,
-                wallet_transaction_v2_row, wallet_transaction_v2_rows,
+                add_pending_outputs, add_pending_v2_outputs, mark_wallet_reward_row,
+                transaction_v2_input_outpoints, wallet_transaction_row_for_addresses,
+                wallet_transaction_rows, wallet_transaction_v2_row, wallet_transaction_v2_rows,
             },
         },
         p2p::GossipNetwork,
@@ -45,7 +45,8 @@ use crate::{
 // over twice the consensus block budget.
 const MAX_TRANSACTION_BODY_BYTES: usize = MAX_BLOCK_BYTES * 2 + 4 * 1024;
 const MAX_CONCURRENT_TRANSACTION_SUBMISSIONS: usize = 32;
-const MAX_WALLET_ADDRESSES: usize = 10_001;
+// One legacy address plus the maximum external and reward address branches.
+const MAX_WALLET_ADDRESSES: usize = 20_001;
 
 #[derive(Clone)]
 struct WalletEndpointState {
@@ -605,10 +606,22 @@ async fn wallet_transactions(
             .map_err(internal_error)?
             .map_err(internal_error)?
     };
+    let reward_blocks = {
+        let node = state.node.lock().await;
+        legacy_rows
+            .iter()
+            .filter(|row| row.kind == "reward")
+            .filter_map(|row| {
+                let block = node.chain().get(row.block_height as usize)?.clone();
+                Some((row.block_height, block))
+            })
+            .collect::<BTreeMap<_, _>>()
+    };
     let mut confirmed = legacy_rows
         .into_iter()
         .filter_map(|row| {
-            wallet_transaction_row_for_addresses(
+            let is_reward = row.kind == "reward";
+            let mut item = wallet_transaction_row_for_addresses(
                 &addresses,
                 &row.transaction,
                 &confirmed_outputs,
@@ -618,8 +631,11 @@ async fn wallet_transactions(
                     timestamp_ms: Some(row.timestamp_ms),
                     block_finalizer: Some(row.block_finalizer),
                 },
-            )
-            .map(|item| (row.sort_key, item))
+            )?;
+            if is_reward {
+                mark_wallet_reward_row(&mut item, reward_blocks.get(&row.block_height));
+            }
+            Some((row.sort_key, item))
         })
         .collect::<Vec<_>>();
     confirmed.extend(decoded_v2.into_iter().filter_map(|(row, transaction)| {

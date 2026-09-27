@@ -45,8 +45,27 @@ struct TransferRequest {
 #[serde(rename_all = "camelCase")]
 struct HybridUtxo {
     address_index: u32,
+    #[serde(default)]
+    address_branch: HybridAddressBranch,
     outpoint: Outpoint,
     output: Output,
+}
+
+#[derive(Clone, Copy, Default, Deserialize)]
+#[serde(rename_all = "lowercase")]
+enum HybridAddressBranch {
+    #[default]
+    External,
+    Reward,
+}
+
+impl HybridAddressBranch {
+    fn domain_label(self) -> &'static str {
+        match self {
+            Self::External => "external",
+            Self::Reward => "reward",
+        }
+    }
 }
 
 #[derive(Deserialize, Clone)]
@@ -92,12 +111,30 @@ pub fn derive_external_addresses(
     count: u32,
     network_id: &str,
 ) -> Result<String, JsValue> {
+    derive_addresses(seed, count, network_id, HybridAddressBranch::External)
+}
+
+#[wasm_bindgen]
+pub fn derive_reward_addresses(
+    seed: &str,
+    count: u32,
+    network_id: &str,
+) -> Result<String, JsValue> {
+    derive_addresses(seed, count, network_id, HybridAddressBranch::Reward)
+}
+
+fn derive_addresses(
+    seed: &str,
+    count: u32,
+    network_id: &str,
+    branch: HybridAddressBranch,
+) -> Result<String, JsValue> {
     if count == 0 || count > 10_000 {
         return Err(js_error("address count must be between 1 and 10000"));
     }
     let addresses = (0..count)
         .map(|index| {
-            let (_, _, address) = hybrid_key(seed, index);
+            let (_, _, address) = hybrid_key(seed, branch, index);
             DerivedAddress {
                 index,
                 address: encode_address(address, network_id),
@@ -154,7 +191,11 @@ pub fn build_transfer(request_json: &str) -> Result<String, JsValue> {
         let mut outputs = vec![(recipient, amount)];
         let change = total - required;
         if change > 0 {
-            let (_, _, change_address) = hybrid_key(&request.seed, request.change_index);
+            let (_, _, change_address) = hybrid_key(
+                &request.seed,
+                HybridAddressBranch::External,
+                request.change_index,
+            );
             outputs.push((change_address, change));
         }
         let size = transfer_encoded_size(&request.chain_id, selected.len(), outputs.len());
@@ -185,7 +226,11 @@ pub fn build_transfer(request_json: &str) -> Result<String, JsValue> {
             "v2 transaction ID",
         )?);
         signing.extend_from_slice(&input.outpoint.index.to_be_bytes());
-        let (_, _, owner) = hybrid_key(&request.seed, input.address_index);
+        let (_, _, owner) = hybrid_key(
+            &request.seed,
+            input.address_branch,
+            input.address_index,
+        );
         encode_address_bytes(&mut signing, owner);
     }
     encode_outputs(&mut signing, &outputs)?;
@@ -194,7 +239,11 @@ pub fn build_transfer(request_json: &str) -> Result<String, JsValue> {
     let mut envelope = signing.clone();
     push_u32(&mut envelope, selected.len())?;
     for input in &selected {
-        let (public_key, ml_seed, _) = hybrid_key(&request.seed, input.address_index);
+        let (public_key, ml_seed, _) = hybrid_key(
+            &request.seed,
+            input.address_branch,
+            input.address_index,
+        );
         let signature = hybrid_signature(&request.seed, ml_seed, &signing)?;
         encode_authorization(&mut envelope, 2, &public_key, &signature)?;
     }
@@ -232,7 +281,11 @@ pub fn build_migration(request_json: &str) -> Result<String, JsValue> {
         .ok_or_else(|| js_error("migration fee exceeds the available legacy balance"))?;
     let ed_seed = derive_seed(ED_SEED_DOMAIN, &request.seed);
     let ed_public = SigningKey::from_bytes(&ed_seed).verifying_key().to_bytes();
-    let (_, _, destination) = hybrid_key(&request.seed, request.destination_index);
+    let (_, _, destination) = hybrid_key(
+        &request.seed,
+        HybridAddressBranch::External,
+        request.destination_index,
+    );
 
     let mut signing = encode_prefix(&request.chain_id, genesis_hash)?;
     signing.push(4);
@@ -270,13 +323,17 @@ pub fn build_migration(request_json: &str) -> Result<String, JsValue> {
     built_json(envelope, fee, request.utxos.len())
 }
 
-fn hybrid_key(seed: &str, index: u32) -> ([u8; HYBRID_PUBLIC_KEY_BYTES], [u8; 32], Address) {
+fn hybrid_key(
+    seed: &str,
+    branch: HybridAddressBranch,
+    index: u32,
+) -> ([u8; HYBRID_PUBLIC_KEY_BYTES], [u8; 32], Address) {
     let ed_seed = derive_seed(ED_SEED_DOMAIN, seed);
     let parent_ml_seed = derive_seed(ML_SEED_DOMAIN, seed);
-    let ml_seed = if index == 0 {
+    let ml_seed = if matches!(branch, HybridAddressBranch::External) && index == 0 {
         parent_ml_seed
     } else {
-        derive_child_seed(parent_ml_seed, index)
+        derive_child_seed(parent_ml_seed, branch, index)
     };
     let ed_public = SigningKey::from_bytes(&ed_seed).verifying_key().to_bytes();
     let ml_public = ml_public_key(ml_seed);
@@ -333,10 +390,16 @@ fn derive_seed(domain: &str, seed: &str) -> [u8; 32] {
     hasher.finalize().into()
 }
 
-fn derive_child_seed(parent: [u8; 32], index: u32) -> [u8; 32] {
+fn derive_child_seed(
+    parent: [u8; 32],
+    branch: HybridAddressBranch,
+    index: u32,
+) -> [u8; 32] {
     let mut hasher = Sha256::new();
     hasher.update(ML_CHILD_DOMAIN.as_bytes());
-    hasher.update(b":external:");
+    hasher.update(b":");
+    hasher.update(branch.domain_label().as_bytes());
+    hasher.update(b":");
     hasher.update(index.to_be_bytes());
     hasher.update(b":");
     hasher.update(parent);

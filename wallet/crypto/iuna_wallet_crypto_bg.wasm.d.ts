@@ -2,6 +2,7 @@
 /* eslint-disable */
 export const memory: WebAssembly.Memory;
 export const derive_external_addresses: (a: number, b: number, c: number, d: number, e: number, f: number) => void;
+export const derive_reward_addresses: (a: number, b: number, c: number, d: number, e: number, f: number) => void;
 export const build_transfer: (a: number, b: number, c: number) => void;
 export const build_migration: (a: number, b: number, c: number) => void;
 export const __wbindgen_export: (a: number, b: number) => number;

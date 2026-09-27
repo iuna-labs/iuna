@@ -331,6 +331,15 @@ pub(super) fn populate_wallet_reward_flow(row: &mut WalletTransactionRow, block:
         .collect();
 }
 
+pub(crate) fn mark_wallet_reward_row(row: &mut WalletTransactionRow, block: Option<&Block>) {
+    row.kind = "reward";
+    row.from = "fees".to_string();
+    row.direction = "reward";
+    if let Some(block) = block {
+        populate_wallet_reward_flow(row, block);
+    }
+}
+
 fn transaction_kind(transaction: &Transaction) -> &'static str {
     match transaction {
         Transaction::Transfer { .. } => "transfer",
@@ -1052,7 +1061,7 @@ mod tests {
     };
 
     use super::{
-        block_lost_iuna, populate_wallet_reward_flow, ui_block, ui_blocks_from_indexes,
+        block_lost_iuna, mark_wallet_reward_row, ui_block, ui_blocks_from_indexes,
         ui_transaction_v2, wallet_transaction_row, wallet_transaction_v2_rows,
     };
     use crate::adapters::http::types::{WalletTransactionContext, WalletTransactionFilters};
@@ -1244,7 +1253,6 @@ mod tests {
             },
         )
         .unwrap();
-        row.kind = "reward";
         let committee_row = wallet_transaction_row(
             "committee",
             &reward_projection,
@@ -1288,8 +1296,11 @@ mod tests {
             hash: "block".to_string(),
         };
 
-        populate_wallet_reward_flow(&mut row, &block);
+        mark_wallet_reward_row(&mut row, Some(&block));
 
+        assert_eq!(row.kind, "reward");
+        assert_eq!(row.from, "fees");
+        assert_eq!(row.direction, "reward");
         assert_eq!(row.reward_fee_inputs.len(), 2);
         assert_eq!(row.reward_total, Some(5));
         assert_eq!(row.reward_fee_inputs[0].transaction_kind, "transfer");

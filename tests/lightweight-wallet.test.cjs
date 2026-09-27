@@ -104,6 +104,11 @@ test('browser crypto derives the same rotating hybrid address vectors as the nod
     { index: 0, address: 'iuna1py9qlrnw6cm3mpz26hwwkww9spaa96zrw2g34gu0p4y3ea5cqhg0qa82x9s' },
     { index: 1, address: 'iuna1pkxdcktlzf5tc2p59xns2nccq7rg5zjhwg2zn5r9u73c5j9jxgk8s0e5l4e' },
   ]);
+  const rewardAddresses = JSON.parse(quantum.derive_reward_addresses('hybrid-wallet-seed', 2, 'iuna-mainnet-v1'));
+  assert.deepEqual(rewardAddresses, [
+    { index: 0, address: 'iuna1pvxpc35gavamxw0tvqj3ms82gwtvchh7mdyzqdttx7ktx7pfkgz4qkaq24k' },
+    { index: 1, address: 'iuna1p6cj9c3ths75p7vnsdx9tgkvu4jlzs8cxpnh2lc4klsu5fvd0cpxq8ypw45' },
+  ]);
 
   const built = JSON.parse(quantum.build_transfer(JSON.stringify({
     seed: 'hybrid-wallet-seed',
@@ -122,6 +127,25 @@ test('browser crypto derives the same rotating hybrid address vectors as the nod
   assert.equal(built.fee, '4079');
   assert.equal(built.envelope.length / 2, 4079);
   assert.equal(built.transactionId, 'bda748b6ba9fd6550ca47d580f980a1c00d0050a20992750265a62d23b0b590d');
+
+  const rewardBuilt = JSON.parse(quantum.build_transfer(JSON.stringify({
+    seed: 'hybrid-wallet-seed',
+    chainId: 'iuna-mainnet-candidate',
+    genesisHash: '11'.repeat(32),
+    recipientAddress: addresses[1].address,
+    amount: '1000000',
+    feeRate: '1',
+    changeIndex: 2,
+    utxos: [{
+      addressBranch: 'reward',
+      addressIndex: 0,
+      outpoint: { txid: '44'.repeat(32), index: 8 },
+      output: { amount: 2000000 },
+    }],
+  })));
+  assert.equal(rewardBuilt.fee, '4079');
+  assert.equal(rewardBuilt.inputCount, 1);
+  assert.equal(rewardBuilt.transactionId, '558cee1dfa1425e0b214681445e3d0641a898e15245f80d4524d2b98d762df88');
 
   const migration = JSON.parse(quantum.build_migration(JSON.stringify({
     seed: 'hybrid-wallet-seed',

@@ -8,6 +8,7 @@ import initQuantumCrypto, {
   build_migration as buildQuantumMigration,
   build_transfer as buildQuantumTransfer,
   derive_external_addresses as deriveExternalAddresses,
+  derive_reward_addresses as deriveRewardAddresses,
 } from "./crypto/iuna_wallet_crypto.js";
 
 const app = document.querySelector("#app");
@@ -17,7 +18,7 @@ const ALL_TRANSACTION_FILTERS = { transfer: true, mine: true, burn: true, reward
 const state = {
   store: null, wallet: null, walletMeta: null, status: null, address: "", balance: null,
   addresses: [], addressIndex: 0, legacyAddress: "", legacyUtxos: [], hybridUtxos: [],
-  derivedAddresses: [], derivedWalletId: null,
+  derivedAddresses: [], derivedRewardAddresses: [], derivedWalletId: null,
   hybridSpendable: 0, utxos: [], transactions: [], recentTransactions: [], view: "home", timer: null,
   transactionFilters: { ...ALL_TRANSACTION_FILTERS },
   transactionPage: { offset: 0, total: 0, hasMore: true, loading: false, error: "" },
@@ -164,37 +165,62 @@ async function fetchWalletData() {
     if (Number(state.status.api_version || 0) < 2) throw new Error("The public iuna endpoint must be upgraded for rotating quantum-resistant wallets");
     await ensureQuantumCrypto();
     const gapLimit = Math.max(1, Number(state.status.hybrid_address_gap_limit || 20));
-    let count = gapLimit + 1;
+    let externalCount = gapLimit + 1;
+    let rewardCount = gapLimit;
     let derived;
+    let rewardDerived;
     const derivationScope = `${state.walletMeta.id}:${state.status.chain_id}`;
     if (state.derivedWalletId !== derivationScope) {
       state.derivedAddresses = [];
+      state.derivedRewardAddresses = [];
       state.derivedWalletId = derivationScope;
     }
     for (;;) {
-      if (state.derivedAddresses.length < count) {
-        state.derivedAddresses = JSON.parse(deriveExternalAddresses(state.wallet.seedPhrase, count, state.status.chain_id));
+      if (state.derivedAddresses.length < externalCount) {
+        state.derivedAddresses = JSON.parse(deriveExternalAddresses(state.wallet.seedPhrase, externalCount, state.status.chain_id));
       }
-      derived = state.derivedAddresses.slice(0, count);
-      snapshot = await fetchSnapshot([state.legacyAddress, ...derived.map((item) => item.address)]);
+      if (state.derivedRewardAddresses.length < rewardCount) {
+        state.derivedRewardAddresses = JSON.parse(deriveRewardAddresses(state.wallet.seedPhrase, rewardCount, state.status.chain_id));
+      }
+      derived = state.derivedAddresses.slice(0, externalCount);
+      rewardDerived = state.derivedRewardAddresses.slice(0, rewardCount);
+      snapshot = await fetchSnapshot([
+        state.legacyAddress,
+        ...derived.map((item) => item.address),
+        ...rewardDerived.map((item) => item.address),
+      ]);
       const used = new Set(snapshot.addresses.filter((item) => item.used).map((item) => item.address));
-      const highestUsed = derived.reduce((highest, item) => used.has(item.address) ? Math.max(highest, item.index) : highest, -1);
-      if (highestUsed < count - gapLimit || count >= 10_000) break;
-      count = Math.min(10_000, highestUsed + gapLimit + 1);
+      const highestExternal = derived.reduce((highest, item) => used.has(item.address) ? Math.max(highest, item.index) : highest, -1);
+      const highestReward = rewardDerived.reduce((highest, item) => used.has(item.address) ? Math.max(highest, item.index) : highest, -1);
+      const nextExternalCount = highestExternal < externalCount - gapLimit || externalCount >= 10_000
+        ? externalCount
+        : Math.min(10_000, highestExternal + gapLimit + 1);
+      const nextRewardCount = highestReward < rewardCount - gapLimit || rewardCount >= 10_000
+        ? rewardCount
+        : Math.min(10_000, highestReward + gapLimit + 1);
+      if (nextExternalCount === externalCount && nextRewardCount === rewardCount) break;
+      externalCount = nextExternalCount;
+      rewardCount = nextRewardCount;
     }
     const used = new Set(snapshot.addresses.filter((item) => item.used).map((item) => item.address));
     const highestUsed = derived.reduce((highest, item) => used.has(item.address) ? Math.max(highest, item.index) : highest, -1);
     state.addressIndex = highestUsed + 1;
     const current = derived.find((item) => item.index === state.addressIndex);
     if (!current) throw new Error("Wallet address discovery exceeded its recovery limit");
-    state.addresses = [state.legacyAddress, ...derived.map((item) => item.address)];
+    state.addresses = [
+      state.legacyAddress,
+      ...derived.map((item) => item.address),
+      ...rewardDerived.map((item) => item.address),
+    ];
     state.address = current.address;
-    const indexByAddress = new Map(derived.map((item) => [item.address, item.index]));
+    const descriptorByAddress = new Map([
+      ...derived.map((item) => [item.address, { addressIndex: item.index, addressBranch: "external" }]),
+      ...rewardDerived.map((item) => [item.address, { addressIndex: item.index, addressBranch: "reward" }]),
+    ]);
     state.legacyUtxos = (snapshot.utxos || []).filter((utxo) => utxo.address === state.legacyAddress);
-    state.hybridUtxos = (snapshot.utxos || []).filter((utxo) => indexByAddress.has(utxo.address)).map((utxo) => ({
-      ...utxo,
-      addressIndex: indexByAddress.get(utxo.address),
-    }));
+    state.hybridUtxos = (snapshot.utxos || [])
+      .filter((utxo) => descriptorByAddress.has(utxo.address))
+      .map((utxo) => ({ ...utxo, ...descriptorByAddress.get(utxo.address) }));
     state.hybridSpendable = snapshot.addresses.filter((item) => item.version === 1).reduce((sum, item) => sum + Number(item.spendable || 0), 0);
   } else {
     snapshot = await fetchSnapshot([state.legacyAddress]);
