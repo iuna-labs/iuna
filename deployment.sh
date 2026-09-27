@@ -6,6 +6,7 @@ cd "$(dirname "${BASH_SOURCE[0]}")"
 RELEASE_ROLLBACK_ARMED=false
 RELEASE_START_HEAD=""
 CARGO_FUZZ_VERSION="0.13.2"
+TAURI_CLI_VERSION="2.11.5"
 RELEASE_VERSION_FILES=(
   CHANGELOG.md
   Cargo.toml
@@ -175,8 +176,8 @@ rollback_release_changes() {
 ensure_tauri_cli() {
   require_command cargo
 
-  if ! cargo tauri --version >/dev/null 2>&1; then
-    cargo install tauri-cli --locked --version "^2"
+  if [ "$(cargo tauri --version 2>/dev/null || true)" != "tauri-cli ${TAURI_CLI_VERSION}" ]; then
+    cargo install tauri-cli --locked --version "=${TAURI_CLI_VERSION}"
   fi
 }
 
@@ -526,6 +527,7 @@ build_windows_desktop_in_docker_if_possible() {
     -e "IUNA_VERSION=${version}" \
     -e "HOST_UID=$(id -u)" \
     -e "HOST_GID=$(id -g)" \
+    -e "TAURI_CLI_VERSION=${TAURI_CLI_VERSION}" \
     -e "TAURI_SIGNING_PRIVATE_KEY_PASSWORD=${TAURI_SIGNING_PRIVATE_KEY_PASSWORD-}" \
     -v iuna-windows-cargo-registry:/usr/local/cargo/registry \
     -v iuna-windows-cargo-git:/usr/local/cargo/git \
@@ -554,7 +556,7 @@ build_windows_desktop_in_docker_if_possible() {
       rm -rf /var/lib/apt/lists/*
       rustup target add x86_64-pc-windows-msvc
       cargo install --locked cargo-xwin --version 0.19.2
-      cargo install --locked tauri-cli --version "^2"
+      cargo install --locked tauri-cli --version "=${TAURI_CLI_VERSION}"
 
       nsis_utils_path=/root/.cache/tauri/NSIS/Plugins/x86-unicode/additional/nsis_tauri_utils.dll
       mkdir -p "$(dirname "$nsis_utils_path")"
