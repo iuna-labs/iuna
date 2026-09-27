@@ -3,7 +3,7 @@ use std::{
     fmt,
     sync::{
         Arc, OnceLock, RwLock,
-        atomic::{AtomicU32, Ordering},
+        atomic::{AtomicBool, AtomicU32, Ordering},
     },
 };
 
@@ -56,6 +56,7 @@ pub struct Wallet {
     external_discovery_tip: Arc<RwLock<Option<String>>>,
     reward_address_cursor: Arc<AtomicU32>,
     reward_discovery_tip: Arc<RwLock<Option<String>>>,
+    historical_address_recovery_complete: Arc<AtomicBool>,
 }
 
 impl Wallet {
@@ -73,6 +74,7 @@ impl Wallet {
             external_discovery_tip: Arc::new(RwLock::new(None)),
             reward_address_cursor: Arc::new(AtomicU32::new(0)),
             reward_discovery_tip: Arc::new(RwLock::new(None)),
+            historical_address_recovery_complete: Arc::new(AtomicBool::new(false)),
         }
     }
 
@@ -179,6 +181,16 @@ impl Wallet {
             .reward_discovery_tip
             .write()
             .expect("wallet reward discovery lock is not poisoned") = Some(tip.to_string());
+    }
+
+    pub(crate) fn historical_address_recovery_complete(&self) -> bool {
+        self.historical_address_recovery_complete
+            .load(Ordering::Relaxed)
+    }
+
+    pub(crate) fn mark_historical_address_recovery_complete(&self) {
+        self.historical_address_recovery_complete
+            .store(true, Ordering::Relaxed);
     }
 
     /// Creates both signatures over the same canonical transaction-v2 payload.
