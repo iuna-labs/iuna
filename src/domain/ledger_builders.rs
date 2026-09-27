@@ -431,16 +431,20 @@ impl Ledger {
             authorizations: Vec::new(),
         };
         let payload = transaction.signing_bytes(&domain)?;
-        let authorization =
-            wallet.sign_v2_authorization(wallet.legacy_versioned_address(), &payload)?;
         if let TransactionV2::Migration {
             inputs,
             authorizations,
             ..
         } = &mut transaction
         {
-            authorizations.resize(inputs.len(), authorization);
+            *authorizations = sign_v2_authorizations(
+                wallet,
+                inputs.iter().map(|input| input.owner),
+                &payload,
+                self.height().saturating_add(1),
+            )?;
         }
+        transaction.validate_authorization_policy_at_height(self.height().saturating_add(1))?;
         transaction.verify_authorizations(&domain)?;
         if enforce_block_budget {
             ensure_v2_transaction_within_block_budget(
@@ -535,11 +539,14 @@ impl Ledger {
             ..
         } = &mut transaction
         {
-            *authorizations = inputs
-                .iter()
-                .map(|input| wallet.sign_v2_authorization(input.owner, &payload))
-                .collect::<Result<Vec<_>>>()?;
+            *authorizations = sign_v2_authorizations(
+                wallet,
+                inputs.iter().map(|input| input.owner),
+                &payload,
+                self.height().saturating_add(1),
+            )?;
         }
+        transaction.validate_authorization_policy_at_height(self.height().saturating_add(1))?;
         transaction.verify_authorizations(&domain)?;
         ensure_v2_transaction_within_block_budget(
             self,
@@ -627,11 +634,14 @@ impl Ledger {
             ..
         } = &mut transaction
         {
-            *authorizations = inputs
-                .iter()
-                .map(|input| wallet.sign_v2_authorization(input.owner, &payload))
-                .collect::<Result<Vec<_>>>()?;
+            *authorizations = sign_v2_authorizations(
+                wallet,
+                inputs.iter().map(|input| input.owner),
+                &payload,
+                self.height().saturating_add(1),
+            )?;
         }
+        transaction.validate_authorization_policy_at_height(self.height().saturating_add(1))?;
         transaction.verify_authorizations(&domain)?;
         ensure_v2_transaction_within_block_budget(
             self,
@@ -740,15 +750,20 @@ impl Ledger {
             authorizations: Vec::new(),
         };
         let payload = transaction.signing_bytes(&domain)?;
-        let authorization = wallet.sign_v2_authorization(owner, &payload)?;
         if let TransactionV2::Burn {
             inputs,
             authorizations,
             ..
         } = &mut transaction
         {
-            authorizations.resize(inputs.len(), authorization);
+            *authorizations = sign_v2_authorizations(
+                wallet,
+                inputs.iter().map(|input| input.owner),
+                &payload,
+                self.height().saturating_add(1),
+            )?;
         }
+        transaction.validate_authorization_policy_at_height(self.height().saturating_add(1))?;
         transaction.verify_authorizations(&domain)?;
         ensure_v2_transaction_within_block_budget(
             self,
@@ -1174,6 +1189,25 @@ fn collect_v2_input_addresses(transaction: &TransactionV2, spent: &mut Vec<Versi
     }
 }
 
+fn sign_v2_authorizations(
+    wallet: &Wallet,
+    owners: impl IntoIterator<Item = VersionedAddress>,
+    payload: &[u8],
+    height: u64,
+) -> Result<Vec<V2SpendingAuthorization>> {
+    let aggregate = height >= super::TRANSACTION_V2_AUTHORIZATION_AGGREGATION_ACTIVATION_HEIGHT;
+    let mut signed_owners = Vec::new();
+    let mut authorizations = Vec::new();
+    for owner in owners {
+        if aggregate && signed_owners.contains(&owner) {
+            continue;
+        }
+        authorizations.push(wallet.sign_v2_authorization(owner, payload)?);
+        signed_owners.push(owner);
+    }
+    Ok(authorizations)
+}
+
 fn collect_wallet_hybrid_input_addresses(
     inputs: &[TransactionV2Input],
     authorizations: &[V2SpendingAuthorization],
@@ -1181,13 +1215,17 @@ fn collect_wallet_hybrid_input_addresses(
     owned: &mut Vec<VersionedAddress>,
 ) -> bool {
     let mut authored = false;
-    for (input, authorization) in inputs.iter().zip(authorizations) {
+    for authorization in authorizations {
         let public_key = authorization.public_key().as_bytes();
         if authorization.scheme() == SignatureScheme::HybridEd25519MlDsa44
             && public_key.get(..legacy_public_key.len()) == Some(legacy_public_key)
         {
-            push_unique_address(owned, input.owner);
-            authored = true;
+            if let Ok(owner) = authorization.authorized_address() {
+                for input in inputs.iter().filter(|input| input.owner == owner) {
+                    push_unique_address(owned, input.owner);
+                    authored = true;
+                }
+            }
         }
     }
     authored
@@ -1237,6 +1275,41 @@ mod v2_migration_tests {
     use std::collections::BTreeMap;
 
     use super::*;
+
+    #[test]
+    fn migration_builder_aggregates_repeated_owner_authorizations_at_height_4250() {
+        let wallet = Wallet::from_seed("aggregated-migration-wallet");
+        let mut ledger = Ledger::new(BTreeMap::from([(wallet.address().to_string(), 100)]), 1);
+        ledger.utxos.insert(
+            OutPoint {
+                txid: "42".repeat(32),
+                index: 0,
+            },
+            TxOutput {
+                address: wallet.address().to_string(),
+                amount: 50,
+            },
+        );
+        ledger.chain.last_mut().unwrap().height =
+            super::super::TRANSACTION_V2_AUTHORIZATION_AGGREGATION_ACTIVATION_HEIGHT - 1;
+
+        let transaction = ledger.build_v2_migration(&wallet, 1).unwrap();
+        let TransactionV2::Migration {
+            inputs,
+            authorizations,
+            ..
+        } = &transaction
+        else {
+            panic!("builder returned a non-migration transaction");
+        };
+        assert_eq!(inputs.len(), 2);
+        assert_eq!(authorizations.len(), 1);
+        transaction
+            .validate_authorization_policy_at_height(
+                super::super::TRANSACTION_V2_AUTHORIZATION_AGGREGATION_ACTIVATION_HEIGHT,
+            )
+            .unwrap();
+    }
 
     #[test]
     fn mine_reward_destination_switches_to_hybrid_at_3750() {

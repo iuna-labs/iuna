@@ -110,6 +110,7 @@ impl Ledger {
             let transaction =
                 decode_canonical_transaction_v2_envelope(envelope, &transaction_v2_domain)?;
             self.validate_transaction_v2_anchor_for_block(&transaction, block.height)?;
+            transaction.validate_authorization_policy_at_height(block.height)?;
             let transaction_id = hex_encode(transaction.transaction_id(&transaction_v2_domain)?);
             if !transaction_v2_ids.insert(transaction_id) {
                 bail!("duplicate transaction v2 in block");

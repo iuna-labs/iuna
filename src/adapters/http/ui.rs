@@ -742,8 +742,7 @@ pub(super) fn ui_transaction_v2(
             fee: *fee,
             inputs: inputs
                 .iter()
-                .enumerate()
-                .map(|(index, input)| {
+                .map(|input| {
                     let txid = match &input.outpoint_id {
                         LegacyTransactionId::Hash(value) => hex_encode(value),
                         LegacyTransactionId::Signature(value) => hex_encode(value),
@@ -754,7 +753,7 @@ pub(super) fn ui_transaction_v2(
                             index: input.outpoint_index,
                         },
                         input.owner,
-                        authorizations.get(index),
+                        v2_authorization_for_owner(authorizations, input.owner),
                         outputs_by_outpoint,
                         network,
                     )
@@ -784,15 +783,14 @@ pub(super) fn ui_transaction_v2(
             fee: *fee,
             inputs: inputs
                 .iter()
-                .enumerate()
-                .map(|(index, input)| {
+                .map(|input| {
                     v2_ui_input(
                         OutPoint {
                             txid: hex_encode(input.outpoint_txid),
                             index: input.outpoint_index,
                         },
                         input.owner,
-                        authorizations.get(index),
+                        v2_authorization_for_owner(authorizations, input.owner),
                         outputs_by_outpoint,
                         network,
                     )
@@ -824,15 +822,14 @@ pub(super) fn ui_transaction_v2(
             fee: *fee,
             inputs: inputs
                 .iter()
-                .enumerate()
-                .map(|(index, input)| {
+                .map(|input| {
                     v2_ui_input(
                         OutPoint {
                             txid: hex_encode(input.outpoint_txid),
                             index: input.outpoint_index,
                         },
                         input.owner,
-                        authorizations.get(index),
+                        v2_authorization_for_owner(authorizations, input.owner),
                         outputs_by_outpoint,
                         network,
                     )
@@ -936,6 +933,15 @@ fn first_v2_output_address(
         .first()
         .map(|output| encode_versioned_address(output.address, network))
         .transpose()
+}
+
+fn v2_authorization_for_owner(
+    authorizations: &[crate::domain::V2SpendingAuthorization],
+    owner: crate::domain::VersionedAddress,
+) -> Option<&crate::domain::V2SpendingAuthorization> {
+    authorizations
+        .iter()
+        .find(|authorization| authorization.authorized_address().ok() == Some(owner))
 }
 
 fn v2_ui_input(

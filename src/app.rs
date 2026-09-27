@@ -49,6 +49,8 @@ pub const MAX_PROTOCOL_CAPABILITY_BYTES: usize = 64;
 pub const CAPABILITY_ADDRESS_V1_READ: &str = "address-v1-read";
 pub const CAPABILITY_HYBRID_REWARD_PAYOUTS: &str = "hybrid-reward-payouts";
 pub const CAPABILITY_SIGNATURE_SCHEMES_V1: &str = "signature-schemes-v1";
+pub const CAPABILITY_TRANSACTION_V2_AGGREGATED_AUTHORIZATIONS: &str =
+    "transaction-v2-aggregated-authorizations";
 pub const CAPABILITY_TRANSACTION_V2_BLOCKS: &str = "transaction-v2-blocks";
 pub const CAPABILITY_TRANSACTION_V2_BURNS: &str = "transaction-v2-burns";
 pub const CAPABILITY_TRANSACTION_V2_MEMPOOL: &str = "transaction-v2-mempool";
@@ -75,6 +77,7 @@ pub fn protocol_capabilities() -> Vec<String> {
         CAPABILITY_ADDRESS_V1_READ.to_string(),
         CAPABILITY_HYBRID_REWARD_PAYOUTS.to_string(),
         CAPABILITY_SIGNATURE_SCHEMES_V1.to_string(),
+        CAPABILITY_TRANSACTION_V2_AGGREGATED_AUTHORIZATIONS.to_string(),
         CAPABILITY_TRANSACTION_V2_BLOCKS.to_string(),
         CAPABILITY_TRANSACTION_V2_BURNS.to_string(),
         CAPABILITY_TRANSACTION_V2_MEMPOOL.to_string(),
@@ -133,6 +136,17 @@ pub fn validate_transaction_v2_peer_capability(
     {
         anyhow::bail!("peer lacks hybrid reward payout capability near activation");
     }
+    let aggregated_authorizations_are_next = local_height.max(remote_height).saturating_add(1)
+        >= crate::domain::TRANSACTION_V2_AUTHORIZATION_AGGREGATION_ACTIVATION_HEIGHT;
+    if aggregated_authorizations_are_next
+        && !capabilities
+            .iter()
+            .any(|capability| capability == CAPABILITY_TRANSACTION_V2_AGGREGATED_AUTHORIZATIONS)
+    {
+        anyhow::bail!(
+            "peer lacks transaction-v2 aggregated authorization capability near activation"
+        );
+    }
     Ok(())
 }
 
@@ -140,12 +154,12 @@ pub fn validate_transaction_v2_peer_capability(
 mod tests {
     use super::{
         BLOCK_REQUEST_LIMIT, CAPABILITY_ADDRESS_V1_READ, CAPABILITY_HYBRID_REWARD_PAYOUTS,
-        CAPABILITY_SIGNATURE_SCHEMES_V1, CAPABILITY_TRANSACTION_V2_BLOCKS,
-        CAPABILITY_TRANSACTION_V2_BURNS, CAPABILITY_TRANSACTION_V2_MEMPOOL, DEFAULT_VDF_ROUNDS,
-        MAINNET_CANDIDATE_GENESIS_HASH, MAINNET_CANDIDATE_NETWORK_ID, MAINNET_NETWORK_ID,
-        MAX_PROTOCOL_CAPABILITIES, NETWORK_ID, PROTOCOL_VERSION, TRANSACTION_BATCH_LIMIT,
-        protocol_capabilities, validate_network_genesis, validate_protocol_capabilities,
-        validate_transaction_v2_peer_capability,
+        CAPABILITY_SIGNATURE_SCHEMES_V1, CAPABILITY_TRANSACTION_V2_AGGREGATED_AUTHORIZATIONS,
+        CAPABILITY_TRANSACTION_V2_BLOCKS, CAPABILITY_TRANSACTION_V2_BURNS,
+        CAPABILITY_TRANSACTION_V2_MEMPOOL, DEFAULT_VDF_ROUNDS, MAINNET_CANDIDATE_GENESIS_HASH,
+        MAINNET_CANDIDATE_NETWORK_ID, MAINNET_NETWORK_ID, MAX_PROTOCOL_CAPABILITIES, NETWORK_ID,
+        PROTOCOL_VERSION, TRANSACTION_BATCH_LIMIT, protocol_capabilities, validate_network_genesis,
+        validate_protocol_capabilities, validate_transaction_v2_peer_capability,
     };
 
     #[test]
@@ -180,6 +194,7 @@ mod tests {
                 CAPABILITY_ADDRESS_V1_READ,
                 CAPABILITY_HYBRID_REWARD_PAYOUTS,
                 CAPABILITY_SIGNATURE_SCHEMES_V1,
+                CAPABILITY_TRANSACTION_V2_AGGREGATED_AUTHORIZATIONS,
                 CAPABILITY_TRANSACTION_V2_BLOCKS,
                 CAPABILITY_TRANSACTION_V2_BURNS,
                 CAPABILITY_TRANSACTION_V2_MEMPOOL,
@@ -245,6 +260,21 @@ mod tests {
             )
             .is_ok()
         );
+    }
+
+    #[test]
+    fn aggregated_authorization_capability_is_required_at_height_4250() {
+        let capabilities = vec![
+            CAPABILITY_TRANSACTION_V2_BLOCKS.to_string(),
+            CAPABILITY_TRANSACTION_V2_BURNS.to_string(),
+            CAPABILITY_HYBRID_REWARD_PAYOUTS.to_string(),
+        ];
+        assert!(validate_transaction_v2_peer_capability(&capabilities, 4_248, 4_248).is_ok());
+        assert!(validate_transaction_v2_peer_capability(&capabilities, 4_249, 4_248).is_err());
+
+        let mut upgraded = capabilities;
+        upgraded.push(CAPABILITY_TRANSACTION_V2_AGGREGATED_AUTHORIZATIONS.to_string());
+        assert!(validate_transaction_v2_peer_capability(&upgraded, 4_249, 4_248).is_ok());
     }
 }
 

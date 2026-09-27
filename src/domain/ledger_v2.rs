@@ -55,6 +55,7 @@ impl Ledger {
         height: u64,
     ) -> Result<TransactionSubmitOutcome> {
         ensure_transaction_v2_active(height)?;
+        transaction.validate_authorization_policy_at_height(height)?;
         self.validate_transaction_v2_anchor_for_pending(&transaction)?;
         let domain = self.transaction_v2_domain()?;
         let transaction_id = transaction.transaction_id(&domain)?;
@@ -145,6 +146,7 @@ impl Ledger {
             let mut candidate_utxos = utxos.clone();
             if self
                 .validate_transaction_v2_anchor_for_pending(&transaction)
+                .and_then(|()| transaction.validate_authorization_policy_at_height(height))
                 .and_then(|()| {
                     apply_prevalidated_transaction_v2_to_utxos(
                         &transaction,
@@ -169,6 +171,7 @@ impl Ledger {
         height: u64,
     ) -> Result<BTreeMap<OutPoint, TxOutput>> {
         ensure_transaction_v2_active(height)?;
+        transaction.validate_authorization_policy_at_height(height)?;
         let domain = self.transaction_v2_domain()?;
         let mut utxos = self.utxos.clone();
         apply_transaction_v2_to_utxos(

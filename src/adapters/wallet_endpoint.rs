@@ -35,9 +35,10 @@ use crate::{
         AddressNetwork, AddressVersion, Amount, DEFAULT_FEE_PER_BYTE,
         HYBRID_EXTERNAL_ADDRESS_GAP_LIMIT, MAX_BLOCK_BYTES, MICRO_IUNA, OutPoint,
         TRANSACTION_SIGNING_FORMAT_VERSION, TRANSACTION_SIGNING_V1_ACTIVATION_HEIGHT,
-        TRANSACTION_V2_ACTIVATION_HEIGHT, TRANSACTION_V2_WIRE_VERSION, Transaction,
-        TransactionSubmitOutcome, TransactionV2, TxOutput, decode_hex, encode_versioned_address,
-        hex_encode, transaction_v2_is_active,
+        TRANSACTION_V2_ACTIVATION_HEIGHT,
+        TRANSACTION_V2_AUTHORIZATION_AGGREGATION_ACTIVATION_HEIGHT, TRANSACTION_V2_WIRE_VERSION,
+        Transaction, TransactionSubmitOutcome, TransactionV2, TxOutput, decode_hex,
+        encode_versioned_address, hex_encode, transaction_v2_is_active,
     },
 };
 
@@ -79,6 +80,7 @@ struct WalletEndpointStatus {
     microiuna_per_iuna: Amount,
     transaction_v2_wire_version: u16,
     transaction_v2_activation_height: Option<u64>,
+    transaction_v2_authorization_aggregation_activation_height: u64,
     transaction_v2_active: bool,
     hybrid_address_gap_limit: u32,
 }
@@ -321,6 +323,8 @@ async fn status(State(state): State<WalletEndpointState>) -> Json<WalletEndpoint
         microiuna_per_iuna: MICRO_IUNA,
         transaction_v2_wire_version: TRANSACTION_V2_WIRE_VERSION,
         transaction_v2_activation_height: TRANSACTION_V2_ACTIVATION_HEIGHT,
+        transaction_v2_authorization_aggregation_activation_height:
+            TRANSACTION_V2_AUTHORIZATION_AGGREGATION_ACTIVATION_HEIGHT,
         transaction_v2_active: transaction_v2_is_active(ledger.height().saturating_add(1)),
         hybrid_address_gap_limit: HYBRID_EXTERNAL_ADDRESS_GAP_LIMIT,
     })

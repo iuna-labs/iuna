@@ -25,6 +25,10 @@ pub const TRANSACTION_V2_WIRE_VERSION: u16 = 2;
 /// transactions through this gate until the complete integration is present.
 pub const TRANSACTION_V2_ACTIVATION_HEIGHT: Option<u64> = Some(3_000);
 
+/// From this height, spending authorizations are encoded once per unique input owner instead of
+/// once per input. Historical v2 transactions retain their original per-input authorization rule.
+pub const TRANSACTION_V2_AUTHORIZATION_AGGREGATION_ACTIVATION_HEIGHT: u64 = 4_250;
+
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct TransactionV2Domain {
     chain_id: String,
@@ -363,12 +367,34 @@ impl TransactionV2 {
 
     pub fn validate_authorization_commitments(&self) -> Result<()> {
         self.validate_shape()?;
+        if self.validate_legacy_authorization_commitments().is_ok() {
+            return Ok(());
+        }
+        self.validate_aggregated_authorization_commitments()
+    }
+
+    /// Enforces the consensus authorization layout at a candidate block height.
+    pub fn validate_authorization_policy_at_height(&self, height: u64) -> Result<()> {
+        self.validate_shape()?;
+        if height < TRANSACTION_V2_AUTHORIZATION_AGGREGATION_ACTIVATION_HEIGHT {
+            self.validate_legacy_authorization_commitments()
+        } else {
+            self.validate_aggregated_authorization_commitments()
+        }
+    }
+
+    fn validate_legacy_authorization_commitments(&self) -> Result<()> {
         match self {
             Self::Migration {
                 inputs,
                 authorizations,
                 ..
             } => {
+                if authorizations.len() != inputs.len() {
+                    bail!(
+                        "transaction v2 requires exactly one authorization per input before authorization aggregation activation"
+                    );
+                }
                 for (input, authorization) in inputs.iter().zip(authorizations) {
                     if input.owner.version != AddressVersion::Ed25519PublicKey
                         || authorization.scheme() != SignatureScheme::Ed25519
@@ -390,6 +416,11 @@ impl TransactionV2 {
                 authorizations,
                 ..
             } => {
+                if authorizations.len() != inputs.len() {
+                    bail!(
+                        "transaction v2 requires exactly one authorization per input before authorization aggregation activation"
+                    );
+                }
                 for (input, authorization) in inputs.iter().zip(authorizations) {
                     if input.owner.version != AddressVersion::HybridKeyCommitment
                         || authorization.scheme() != SignatureScheme::HybridEd25519MlDsa44
@@ -406,9 +437,40 @@ impl TransactionV2 {
         Ok(())
     }
 
-    /// Verifies the authorization required by each input version. Version-0 inputs retain their
-    /// Ed25519 rule so existing value can migrate; version-1 inputs require both signature
-    /// components. Live consensus must call `ensure_transaction_v2_active` before acceptance.
+    fn validate_aggregated_authorization_commitments(&self) -> Result<()> {
+        let input_owners = self.input_owners();
+        if self.authorizations().len() != input_owners.len() {
+            bail!("transaction v2 requires exactly one authorization per unique input owner");
+        }
+
+        let (expected_version, expected_scheme) = match self {
+            Self::Migration { .. } => (AddressVersion::Ed25519PublicKey, SignatureScheme::Ed25519),
+            Self::Transfer { .. } | Self::Burn { .. } => (
+                AddressVersion::HybridKeyCommitment,
+                SignatureScheme::HybridEd25519MlDsa44,
+            ),
+            Self::Mine { .. } => return Ok(()),
+        };
+        let mut authorized_owners = Vec::with_capacity(self.authorizations().len());
+        for authorization in self.authorizations() {
+            let owner = authorization.authorized_address()?;
+            if owner.version != expected_version || authorization.scheme() != expected_scheme {
+                bail!("transaction v2 authorization does not match its input owner version");
+            }
+            if !input_owners.contains(&owner) {
+                bail!("transaction v2 authorization does not match any input owner");
+            }
+            if authorized_owners.contains(&owner) {
+                bail!("transaction v2 contains a duplicate authorization owner");
+            }
+            authorized_owners.push(owner);
+        }
+        Ok(())
+    }
+
+    /// Verifies every supplied authorization. Version-0 owners retain their Ed25519 rule so
+    /// existing value can migrate; version-1 owners require both signature components. Live
+    /// consensus must also enforce the height-dependent authorization policy before acceptance.
     pub fn verify_authorizations(&self, domain: &TransactionV2Domain) -> Result<()> {
         self.validate_authorization_commitments()?;
         let payload = self.signing_bytes(domain)?;
@@ -463,8 +525,13 @@ impl TransactionV2 {
 
     fn validate_shape(&self) -> Result<()> {
         self.validate_unsigned_shape()?;
-        if self.authorizations().len() != self.input_count() {
-            bail!("transaction v2 requires exactly one authorization per input");
+        if !matches!(self, Self::Mine { .. }) {
+            let authorization_count = self.authorizations().len();
+            if authorization_count != self.input_count()
+                && authorization_count != self.input_owners().len()
+            {
+                bail!("transaction v2 authorization count is invalid");
+            }
         }
         Ok(())
     }
@@ -570,6 +637,23 @@ impl TransactionV2 {
             | Self::Burn { authorizations, .. } => authorizations,
             Self::Mine { .. } => &[],
         }
+    }
+
+    fn input_owners(&self) -> Vec<VersionedAddress> {
+        let owners: Vec<_> = match self {
+            Self::Migration { inputs, .. } => inputs.iter().map(|input| input.owner).collect(),
+            Self::Transfer { inputs, .. } | Self::Burn { inputs, .. } => {
+                inputs.iter().map(|input| input.owner).collect()
+            }
+            Self::Mine { .. } => Vec::new(),
+        };
+        let mut unique = Vec::new();
+        for owner in owners {
+            if !unique.contains(&owner) {
+                unique.push(owner);
+            }
+        }
+        unique
     }
 
     fn encode_unsigned_body(&self, bytes: &mut Vec<u8>) -> Result<()> {
@@ -1058,12 +1142,74 @@ mod tests {
     #[test]
     fn v2_activates_at_the_fixed_consensus_height() {
         assert_eq!(TRANSACTION_V2_ACTIVATION_HEIGHT, Some(3_000));
+        assert_eq!(
+            TRANSACTION_V2_AUTHORIZATION_AGGREGATION_ACTIVATION_HEIGHT,
+            4_250
+        );
         assert!(!transaction_v2_is_active(0));
         assert!(!transaction_v2_is_active(2_999));
         assert!(ensure_transaction_v2_active(2_999).is_err());
         assert!(transaction_v2_is_active(3_000));
         assert!(transaction_v2_is_active(u64::MAX));
         ensure_transaction_v2_active(3_000).unwrap();
+    }
+
+    #[test]
+    fn repeated_owner_uses_one_authorization_from_height_4250() {
+        let public_key = hybrid_public_key();
+        let owner = hybrid_key_commitment_address(&public_key).unwrap();
+        let mut transaction = TransactionV2::Transfer {
+            inputs: vec![
+                TransactionV2Input {
+                    outpoint_txid: [0x11; 32],
+                    outpoint_index: 0,
+                    owner,
+                },
+                TransactionV2Input {
+                    outpoint_txid: [0x22; 32],
+                    outpoint_index: 1,
+                    owner,
+                },
+            ],
+            outputs: vec![TransactionV2Output {
+                address: owner,
+                amount: 9,
+            }],
+            fee: 1,
+            authorizations: Vec::new(),
+        };
+        let payload = transaction.signing_bytes(&domain()).unwrap();
+        let authorization = hybrid_authorization(&payload);
+        if let TransactionV2::Transfer { authorizations, .. } = &mut transaction {
+            authorizations.push(authorization.clone());
+        }
+
+        assert!(
+            transaction
+                .validate_authorization_policy_at_height(4_249)
+                .is_err()
+        );
+        transaction
+            .validate_authorization_policy_at_height(4_250)
+            .unwrap();
+        transaction.verify_authorizations(&domain()).unwrap();
+        let aggregated_size = transaction.encoded_size_bytes(&domain()).unwrap();
+
+        if let TransactionV2::Transfer { authorizations, .. } = &mut transaction {
+            authorizations.push(authorization);
+        }
+        transaction
+            .validate_authorization_policy_at_height(4_249)
+            .unwrap();
+        assert!(
+            transaction
+                .validate_authorization_policy_at_height(4_250)
+                .is_err()
+        );
+        assert_eq!(
+            transaction.encoded_size_bytes(&domain()).unwrap() - aggregated_size,
+            3_837
+        );
     }
 
     #[test]

@@ -115,7 +115,8 @@ pub use transaction::{
 };
 use transaction::{TransactionSigningDomain, mine_signing_bytes};
 pub use transaction_v2::{
-    LegacyTransactionId, TRANSACTION_V2_ACTIVATION_HEIGHT, TRANSACTION_V2_WIRE_VERSION,
+    LegacyTransactionId, TRANSACTION_V2_ACTIVATION_HEIGHT,
+    TRANSACTION_V2_AUTHORIZATION_AGGREGATION_ACTIVATION_HEIGHT, TRANSACTION_V2_WIRE_VERSION,
     TransactionV2, TransactionV2Domain, TransactionV2Input, TransactionV2LegacyInput,
     TransactionV2Output, V2SpendingAuthorization, ensure_transaction_v2_active,
     hybrid_key_commitment_address, transaction_v2_is_active,

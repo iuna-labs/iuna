@@ -5,6 +5,10 @@ from the Git history and Conventional Commit titles by `deployment.sh`.
 
 ## [Unreleased]
 
+### Performance
+
+- aggregate transaction-v2 authorizations by input owner from block 4250
+
 ## [0.4.46] - 2026-09-27
 
 ### Fixed

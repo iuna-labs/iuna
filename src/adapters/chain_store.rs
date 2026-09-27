@@ -43,10 +43,11 @@ CREATE TABLE IF NOT EXISTS pending_transactions_v2 (
 // other non-consensus releases must not invalidate a chain that this node already verified.
 // Bump this value only when historical validation semantics change, and add the old ruleset to
 // `revalidation_from_height` with the first affected block height.
-const CURRENT_CONSENSUS_RULESET: &str = "iuna-consensus-v1";
+const CURRENT_CONSENSUS_RULESET: &str = "iuna-consensus-v2";
 
 // v0.4.10 introduced the verification marker and wrote the package version into it. Its
-// validator is identical to the first stable consensus ruleset, so it can be migrated safely.
+// validator is identical to the first stable consensus ruleset, so it follows that ruleset's
+// migration boundary.
 const LEGACY_EQUIVALENT_VERIFIER_VERSIONS: &[&str] = &["0.4.10"];
 
 struct ConsensusRulesetMigration {
@@ -57,7 +58,11 @@ struct ConsensusRulesetMigration {
 // When a future release changes consensus validation, bump CURRENT_CONSENSUS_RULESET and add a
 // direct migration for every still-supported older ruleset. The height is the first block whose
 // validity can differ under the new rules.
-const CONSENSUS_RULESET_MIGRATIONS: &[ConsensusRulesetMigration] = &[];
+const CONSENSUS_RULESET_MIGRATIONS: &[ConsensusRulesetMigration] = &[ConsensusRulesetMigration {
+    from_ruleset: "iuna-consensus-v1",
+    revalidate_from_height:
+        crate::domain::TRANSACTION_V2_AUTHORIZATION_AGGREGATION_ACTIVATION_HEIGHT,
+}];
 
 #[derive(Clone, Debug)]
 pub struct SqliteChainStore {
@@ -490,7 +495,9 @@ fn snapshot_tip(snapshot: &ChainSnapshot) -> Option<(u64, String)> {
 fn revalidation_from_height(stored_ruleset: Option<&str>) -> Option<u64> {
     match stored_ruleset {
         Some(CURRENT_CONSENSUS_RULESET) => None,
-        Some(version) if LEGACY_EQUIVALENT_VERIFIER_VERSIONS.contains(&version) => None,
+        Some(version) if LEGACY_EQUIVALENT_VERIFIER_VERSIONS.contains(&version) => {
+            Some(crate::domain::TRANSACTION_V2_AUTHORIZATION_AGGREGATION_ACTIVATION_HEIGHT)
+        }
         Some(ruleset) => CONSENSUS_RULESET_MIGRATIONS
             .iter()
             .find(|migration| migration.from_ruleset == ruleset)
@@ -787,7 +794,7 @@ VALUES (1, 0, 'bad-tip', ?1, 0)
     }
 
     #[test]
-    fn v0410_verification_marker_migrates_without_historical_revalidation() {
+    fn v0410_verification_marker_revalidates_from_the_v2_authorization_fork() {
         let dir = tempdir().unwrap();
         let store = SqliteChainStore::open(dir.path().join("chain.sqlite3")).unwrap();
         let snapshot = test_snapshot("chain-store-legacy-ruleset-marker");
@@ -804,6 +811,33 @@ VALUES (1, 0, 'bad-tip', ?1, 0)
 
         let loaded = store.load_with_verification_status().unwrap().unwrap();
 
-        assert_eq!(loaded.revalidation_from_height, None);
+        assert_eq!(
+            loaded.revalidation_from_height,
+            Some(crate::domain::TRANSACTION_V2_AUTHORIZATION_AGGREGATION_ACTIVATION_HEIGHT)
+        );
+    }
+
+    #[test]
+    fn consensus_v1_marker_revalidates_from_the_v2_authorization_fork() {
+        let dir = tempdir().unwrap();
+        let store = SqliteChainStore::open(dir.path().join("chain.sqlite3")).unwrap();
+        let snapshot = test_snapshot("chain-store-v1-ruleset-marker");
+        store.save_verified(&snapshot).unwrap();
+        store
+            .with_connection_mut(|connection| {
+                connection.execute(
+                    "UPDATE chain_verification SET verifier_version = 'iuna-consensus-v1'",
+                    [],
+                )?;
+                Ok(())
+            })
+            .unwrap();
+
+        let loaded = store.load_with_verification_status().unwrap().unwrap();
+
+        assert_eq!(
+            loaded.revalidation_from_height,
+            Some(crate::domain::TRANSACTION_V2_AUTHORIZATION_AGGREGATION_ACTIVATION_HEIGHT)
+        );
     }
 }
