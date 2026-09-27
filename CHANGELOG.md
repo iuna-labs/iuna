@@ -5,6 +5,18 @@ from the Git history and Conventional Commit titles by `deployment.sh`.
 
 ## [Unreleased]
 
+## [0.4.45] - 2026-09-27
+
+### Added
+
+- track total UTXOs
+
+### Fixed
+
+- remove misleading wallet address chart
+- recover hybrid addresses across pending gaps
+- pin compatible tauri cli
+
 ## [0.4.44] - 2026-09-24
 
 ### Fixed
