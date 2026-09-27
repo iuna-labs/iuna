@@ -5,6 +5,12 @@ from the Git history and Conventional Commit titles by `deployment.sh`.
 
 ## [Unreleased]
 
+## [0.4.46] - 2026-09-27
+
+### Fixed
+
+- include hybrid rewards in balance
+
 ## [0.4.45] - 2026-09-27
 
 ### Added
