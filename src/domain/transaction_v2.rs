@@ -365,6 +365,31 @@ impl TransactionV2 {
         Ok(self.encode(domain)?.len())
     }
 
+    /// Returns the exact encoded size for this unsigned transaction with the given
+    /// authorization layout, without generating any signatures.
+    pub(crate) fn encoded_size_bytes_with_authorizations(
+        &self,
+        domain: &TransactionV2Domain,
+        scheme: SignatureScheme,
+        authorization_count: usize,
+    ) -> Result<usize> {
+        let unsigned_bytes = self.signing_bytes(domain)?.len();
+        let authorization_bytes = 1_usize
+            .checked_add(4)
+            .and_then(|bytes| bytes.checked_add(scheme.public_key_bytes()))
+            .and_then(|bytes| bytes.checked_add(4))
+            .and_then(|bytes| bytes.checked_add(scheme.signature_bytes()))
+            .context("transaction v2 authorization size overflows")?;
+        unsigned_bytes
+            .checked_add(4)
+            .and_then(|bytes| {
+                authorization_bytes
+                    .checked_mul(authorization_count)
+                    .and_then(|authorizations| bytes.checked_add(authorizations))
+            })
+            .context("transaction v2 encoded size overflows")
+    }
+
     pub fn validate_authorization_commitments(&self) -> Result<()> {
         self.validate_shape()?;
         if self.validate_legacy_authorization_commitments().is_ok() {

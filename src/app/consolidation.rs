@@ -5,8 +5,8 @@ use serde::Serialize;
 
 use super::{NodeCore, helpers::converge_fee_by_byte};
 use crate::domain::{
-    Amount, Ledger, OutPoint, Transaction, TransactionV2, TxOutput, hex_encode,
-    minimum_transfer_economic_size_bytes,
+    Amount, Ledger, OutPoint, SignatureScheme, Transaction, TransactionV2, TxInput, TxOutput,
+    hex_encode, minimum_transfer_economic_size_bytes,
 };
 
 const BATCH_INPUTS: usize = 128;
@@ -31,6 +31,11 @@ pub(crate) struct ConsolidationBatch {
 enum BuiltConsolidation {
     Legacy(Transaction),
     Hybrid(TransactionV2),
+}
+
+struct ConsolidationInputs {
+    kind: ConsolidationKind,
+    total: Amount,
 }
 
 #[derive(Serialize)]
@@ -123,12 +128,13 @@ impl NodeCore {
                         .iter()
                         .map(|(point, _)| point.clone())
                         .collect::<Vec<_>>();
-                    match self.build_consolidation(&ledger, &outpoints, fee_per_byte, merge_roots) {
-                        Ok(value) => break Some(value),
+                    match self.preview_consolidation(&ledger, &outpoints, fee_per_byte, merge_roots)
+                    {
+                        Ok(batch) => break Some(batch),
                         Err(_) => count /= 2,
                     }
                 };
-                if let Some((_, batch)) = built {
+                if let Some(batch) = built {
                     debug_assert_eq!(batch.kind, *kind);
                     plan.after -= batch.utxos.len() - 1;
                     plan.fee = plan
@@ -145,13 +151,12 @@ impl NodeCore {
         Ok(plan)
     }
 
-    fn build_consolidation(
+    fn consolidation_inputs(
         &self,
         ledger: &Ledger,
         outpoints: &[OutPoint],
-        fee_per_byte: Amount,
         merge_roots: bool,
-    ) -> Result<(BuiltConsolidation, ConsolidationBatch)> {
+    ) -> Result<ConsolidationInputs> {
         if !(2..=BATCH_INPUTS).contains(&outpoints.len()) {
             bail!("choose between 2 and 128 outputs per batch");
         }
@@ -204,10 +209,50 @@ impl NodeCore {
                 .context("input total overflows")?;
         }
         let kind = kind.context("consolidation batch has no outputs")?;
-        let (transaction, bytes, fee) = match kind {
+        Ok(ConsolidationInputs { kind, total })
+    }
+
+    fn preview_consolidation(
+        &self,
+        ledger: &Ledger,
+        outpoints: &[OutPoint],
+        fee_per_byte: Amount,
+        merge_roots: bool,
+    ) -> Result<ConsolidationBatch> {
+        let inputs = self.consolidation_inputs(ledger, outpoints, merge_roots)?;
+        let wallet = self.wallet.unlocked()?;
+        let (bytes, fee) = match inputs.kind {
+            ConsolidationKind::Legacy => estimate_legacy_consolidation_fee(
+                ledger,
+                self.wallet.address(),
+                outpoints,
+                inputs.total,
+                fee_per_byte,
+            )?,
+            ConsolidationKind::Hybrid => estimate_v2_consolidation_fee(
+                ledger,
+                wallet,
+                outpoints,
+                inputs.total,
+                fee_per_byte,
+            )?,
+        };
+        consolidation_batch(inputs.kind, outpoints, inputs.total, bytes, fee)
+    }
+
+    fn build_consolidation(
+        &self,
+        ledger: &Ledger,
+        outpoints: &[OutPoint],
+        fee_per_byte: Amount,
+        merge_roots: bool,
+    ) -> Result<(BuiltConsolidation, ConsolidationBatch)> {
+        let inputs = self.consolidation_inputs(ledger, outpoints, merge_roots)?;
+        let wallet = self.wallet.unlocked()?;
+        let (transaction, bytes, fee) = match inputs.kind {
             ConsolidationKind::Legacy => {
                 let (transaction, estimate) = converge_fee_by_byte(fee_per_byte, |fee| {
-                    let amount = consolidation_amount(total, fee)?;
+                    let amount = consolidation_amount(inputs.total, fee)?;
                     ledger.build_transfer_with_inputs(
                         wallet,
                         self.wallet.address(),
@@ -223,22 +268,17 @@ impl NodeCore {
                 )
             }
             ConsolidationKind::Hybrid => {
-                let (transaction, bytes, fee) =
-                    converge_v2_consolidation_fee(ledger, wallet, outpoints, total, fee_per_byte)?;
+                let (transaction, bytes, fee) = converge_v2_consolidation_fee(
+                    ledger,
+                    wallet,
+                    outpoints,
+                    inputs.total,
+                    fee_per_byte,
+                )?;
                 (BuiltConsolidation::Hybrid(transaction), bytes, fee)
             }
         };
-        // Never recommend or accept batches spending over 1% of their value on fees.
-        if u128::from(fee) * 100 > u128::from(total) {
-            bail!("batch fee exceeds 1% of its value; use a lower fee or wait");
-        }
-        let batch = ConsolidationBatch {
-            kind,
-            utxos: outpoints.to_vec(),
-            fee,
-            amount: total - fee,
-            bytes,
-        };
+        let batch = consolidation_batch(inputs.kind, outpoints, inputs.total, bytes, fee)?;
         Ok((transaction, batch))
     }
 
@@ -304,6 +344,88 @@ fn consolidation_amount(total: Amount, fee: Amount) -> Result<Amount> {
         .context("outputs do not cover the network fee")
 }
 
+fn consolidation_batch(
+    kind: ConsolidationKind,
+    outpoints: &[OutPoint],
+    total: Amount,
+    bytes: usize,
+    fee: Amount,
+) -> Result<ConsolidationBatch> {
+    // Never recommend or accept batches spending over 1% of their value on fees.
+    if u128::from(fee) * 100 > u128::from(total) {
+        bail!("batch fee exceeds 1% of its value; use a lower fee or wait");
+    }
+    Ok(ConsolidationBatch {
+        kind,
+        utxos: outpoints.to_vec(),
+        fee,
+        amount: consolidation_amount(total, fee)?,
+        bytes,
+    })
+}
+
+fn estimate_legacy_consolidation_fee(
+    ledger: &Ledger,
+    address: &str,
+    outpoints: &[OutPoint],
+    total: Amount,
+    fee_per_byte: Amount,
+) -> Result<(usize, Amount)> {
+    let signature = "00".repeat(SignatureScheme::Ed25519.signature_bytes());
+    let mut fee = 1;
+    for _ in 0..64 {
+        let amount = consolidation_amount(total, fee)?;
+        let transaction = Transaction::Transfer {
+            inputs: outpoints
+                .iter()
+                .map(|outpoint| TxInput {
+                    outpoint: outpoint.clone(),
+                    owner: address.to_string(),
+                    signature: signature.clone(),
+                })
+                .collect(),
+            outputs: vec![TxOutput {
+                address: address.to_string(),
+                amount,
+            }],
+            fee,
+            signature: signature.clone(),
+        };
+        let bytes = transaction.economic_size_bytes();
+        let required_fee = fee_per_byte
+            .checked_mul(bytes as Amount)
+            .context("fee per byte times transaction bytes overflows")?
+            .max(1);
+        if fee >= required_fee {
+            ledger.ensure_legacy_transaction_within_block_budget(&transaction)?;
+            return Ok((bytes, fee));
+        }
+        fee = required_fee;
+    }
+    bail!("legacy consolidation fee did not converge")
+}
+
+fn estimate_v2_consolidation_fee(
+    ledger: &Ledger,
+    wallet: &crate::domain::Wallet,
+    outpoints: &[OutPoint],
+    total: Amount,
+    fee_per_byte: Amount,
+) -> Result<(usize, Amount)> {
+    let bytes = ledger.estimate_v2_consolidation_size_with_inputs(
+        wallet,
+        consolidation_amount(total, 1)?,
+        1,
+        outpoints,
+    )?;
+    let fee = fee_per_byte
+        .checked_mul(bytes as Amount)
+        .context("fee per byte times transaction bytes overflows")?
+        .max(1);
+    consolidation_amount(total, fee)?;
+    Ok((bytes, fee))
+}
+
 fn converge_v2_consolidation_fee(
     ledger: &Ledger,
     wallet: &crate::domain::Wallet,
@@ -311,23 +433,15 @@ fn converge_v2_consolidation_fee(
     total: Amount,
     fee_per_byte: Amount,
 ) -> Result<(TransactionV2, usize, Amount)> {
-    let domain = ledger.transaction_v2_domain()?;
-    let mut fee = 1;
-    for _ in 0..64 {
-        let amount = consolidation_amount(total, fee)?;
-        let transaction =
-            ledger.build_v2_consolidation_with_inputs(wallet, amount, fee, outpoints)?;
-        let bytes = transaction.encoded_size_bytes(&domain)?;
-        let required_fee = fee_per_byte
-            .checked_mul(bytes as Amount)
-            .context("fee per byte times transaction bytes overflows")?
-            .max(1);
-        if fee >= required_fee {
-            return Ok((transaction, bytes, fee));
-        }
-        fee = required_fee;
+    let (estimated_bytes, fee) =
+        estimate_v2_consolidation_fee(ledger, wallet, outpoints, total, fee_per_byte)?;
+    let amount = consolidation_amount(total, fee)?;
+    let transaction = ledger.build_v2_consolidation_with_inputs(wallet, amount, fee, outpoints)?;
+    let bytes = transaction.encoded_size_bytes(&ledger.transaction_v2_domain()?)?;
+    if bytes != estimated_bytes {
+        bail!("hybrid consolidation size changed after signing; review a new preview");
     }
-    bail!("hybrid consolidation fee did not converge")
+    Ok((transaction, bytes, fee))
 }
 
 fn can_meet_consolidation_fee_cap(candidates: &[(OutPoint, Amount)], fee_per_byte: Amount) -> bool {

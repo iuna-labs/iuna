@@ -1,6 +1,9 @@
 use std::collections::{BTreeMap, BTreeSet};
 
-use super::{AddressNetwork, Ledger, OutPoint, TransactionV2, TxOutput, UtxoLineageRoot, Wallet};
+use super::{
+    AddressNetwork, Ledger, OutPoint, TRANSACTION_V2_AUTHORIZATION_AGGREGATION_ACTIVATION_HEIGHT,
+    TransactionV2, TxOutput, UtxoLineageRoot, Wallet,
+};
 use crate::app::NodeCore;
 
 fn fixture(count: usize, value: u64, roots: bool) -> (Wallet, Ledger) {
@@ -151,6 +154,90 @@ fn selected_hybrid_outputs_build_one_v2_consolidation_output() {
     assert_eq!(outputs[0].address, wallet.hybrid_versioned_address());
     assert_eq!(outputs[0].amount, 1_990_000);
     assert_eq!(fee, 10_000);
+}
+
+#[test]
+fn hybrid_consolidation_preview_matches_signed_size_before_and_after_aggregation() {
+    let activation = TRANSACTION_V2_AUTHORIZATION_AGGREGATION_ACTIVATION_HEIGHT;
+    for next_height in [activation - 1, activation] {
+        let wallet = Wallet::from_seed(&format!("hybrid-preview-{next_height}"));
+        let address = wallet.hybrid_address(AddressNetwork::Mainnet);
+        let mut ledger = Ledger::new(BTreeMap::new(), 1);
+        ledger.chain.last_mut().unwrap().height = next_height - 1;
+        for index in 0..4 {
+            ledger.utxos.insert(
+                OutPoint {
+                    txid: format!("{:064x}", index + 1),
+                    index: 0,
+                },
+                TxOutput {
+                    address: address.clone(),
+                    amount: 2_000_000,
+                },
+            );
+        }
+
+        let node = NodeCore::from_ledger(wallet.clone(), ledger.clone(), 0);
+        let plan = node.consolidation_plan(1, true).unwrap();
+        let batch = plan
+            .batches
+            .iter()
+            .find(|batch| batch.kind == crate::app::ConsolidationKind::Hybrid)
+            .unwrap();
+        let transaction = ledger
+            .build_v2_consolidation_with_inputs(&wallet, batch.amount, batch.fee, &batch.utxos)
+            .unwrap();
+        let TransactionV2::Transfer { authorizations, .. } = &transaction else {
+            panic!("expected a transaction-v2 transfer");
+        };
+        let expected_authorizations = if next_height < activation {
+            batch.utxos.len()
+        } else {
+            1
+        };
+
+        assert_eq!(authorizations.len(), expected_authorizations);
+        assert_eq!(
+            batch.bytes,
+            transaction
+                .encoded_size_bytes(&ledger.transaction_v2_domain().unwrap())
+                .unwrap()
+        );
+        assert_eq!(batch.fee, batch.bytes as u64);
+    }
+}
+
+#[test]
+fn hybrid_consolidation_preview_scales_to_a_large_pre_aggregation_wallet() {
+    let wallet = Wallet::from_seed("large-hybrid-preview");
+    let address = wallet.hybrid_address(AddressNetwork::Mainnet);
+    let mut ledger = Ledger::new(BTreeMap::new(), 1);
+    ledger.chain.last_mut().unwrap().height =
+        TRANSACTION_V2_AUTHORIZATION_AGGREGATION_ACTIVATION_HEIGHT - 300;
+    for index in 0..3_800 {
+        ledger.utxos.insert(
+            OutPoint {
+                txid: format!("{:064x}", index + 1),
+                index: 0,
+            },
+            TxOutput {
+                address: address.clone(),
+                amount: 2_000_000,
+            },
+        );
+    }
+
+    let node = NodeCore::from_ledger(wallet, ledger, 0);
+    let plan = node.consolidation_plan(1, true).unwrap();
+
+    assert_eq!(plan.before, 3_800);
+    assert_eq!(plan.batches.len(), 30);
+    assert!(
+        plan.batches
+            .iter()
+            .all(|batch| batch.kind == crate::app::ConsolidationKind::Hybrid)
+    );
+    assert_eq!(plan.batches[0].utxos.len(), 128);
 }
 
 #[test]

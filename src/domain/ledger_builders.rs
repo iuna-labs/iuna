@@ -1,5 +1,8 @@
 use super::hex::{decode_hex, decode_hex_array, hex_encode};
-use super::ledger_ops::{compact_block_context, ensure_transaction_v2_fits_empty_block};
+use super::ledger_ops::{
+    compact_block_context, ensure_transaction_fits_empty_block,
+    ensure_transaction_v2_fits_empty_block,
+};
 use super::mining::mine_signature;
 use super::stratum::{
     hash_meets_difficulty, stratum_mine_header_bytes, stratum_mine_signature, stratum_mine_template,
@@ -19,6 +22,17 @@ pub const HYBRID_EXTERNAL_ADDRESS_GAP_LIMIT: u32 = 20;
 const MAX_DISCOVERED_EXTERNAL_ADDRESSES: u32 = 10_000;
 
 impl Ledger {
+    pub(crate) fn ensure_legacy_transaction_within_block_budget(
+        &self,
+        transaction: &Transaction,
+    ) -> Result<()> {
+        ensure_transaction_fits_empty_block(
+            compact_block_context(self),
+            transaction,
+            self.launch_profile.max_block_bytes,
+        )
+    }
+
     pub fn wallet_receive_address(&self, wallet: &Wallet) -> Result<String> {
         let (_, address) = self
             .wallet_external_addresses(wallet)?
@@ -569,6 +583,79 @@ impl Ledger {
         fee: Amount,
         outpoints: &[OutPoint],
     ) -> Result<TransactionV2> {
+        let mut transaction =
+            self.unsigned_v2_consolidation_with_inputs(wallet, amount, fee, outpoints)?;
+        let domain = self.transaction_v2_domain()?;
+        let payload = transaction.signing_bytes(&domain)?;
+        if let TransactionV2::Transfer {
+            inputs,
+            authorizations,
+            ..
+        } = &mut transaction
+        {
+            *authorizations = sign_v2_authorizations(
+                wallet,
+                inputs.iter().map(|input| input.owner),
+                &payload,
+                self.height().saturating_add(1),
+            )?;
+        }
+        transaction.validate_authorization_policy_at_height(self.height().saturating_add(1))?;
+        transaction.verify_authorizations(&domain)?;
+        ensure_v2_transaction_within_block_budget(
+            self,
+            &transaction,
+            &domain,
+            self.launch_profile.max_block_bytes,
+        )?;
+        Ok(transaction)
+    }
+
+    pub(crate) fn estimate_v2_consolidation_size_with_inputs(
+        &self,
+        wallet: &Wallet,
+        amount: Amount,
+        fee: Amount,
+        outpoints: &[OutPoint],
+    ) -> Result<usize> {
+        let transaction =
+            self.unsigned_v2_consolidation_with_inputs(wallet, amount, fee, outpoints)?;
+        let TransactionV2::Transfer { inputs, .. } = &transaction else {
+            unreachable!("v2 consolidation always builds a transfer");
+        };
+        let next_height = self.height().saturating_add(1);
+        let authorization_count =
+            if next_height >= super::TRANSACTION_V2_AUTHORIZATION_AGGREGATION_ACTIVATION_HEIGHT {
+                let mut owners = Vec::new();
+                for input in inputs {
+                    if !owners.contains(&input.owner) {
+                        owners.push(input.owner);
+                    }
+                }
+                owners.len()
+            } else {
+                inputs.len()
+            };
+        let bytes = transaction.encoded_size_bytes_with_authorizations(
+            &self.transaction_v2_domain()?,
+            SignatureScheme::HybridEd25519MlDsa44,
+            authorization_count,
+        )?;
+        ensure_v2_transaction_size_within_block_budget(
+            self,
+            bytes,
+            self.launch_profile.max_block_bytes,
+        )?;
+        Ok(bytes)
+    }
+
+    fn unsigned_v2_consolidation_with_inputs(
+        &self,
+        wallet: &Wallet,
+        amount: Amount,
+        fee: Amount,
+        outpoints: &[OutPoint],
+    ) -> Result<TransactionV2> {
         if amount == 0 {
             bail!("transfer amount must be greater than zero");
         }
@@ -620,8 +707,7 @@ impl Ledger {
             bail!("selected hybrid outputs do not match amount plus fee");
         }
 
-        let domain = self.transaction_v2_domain()?;
-        let mut transaction = TransactionV2::Transfer {
+        Ok(TransactionV2::Transfer {
             inputs,
             outputs: vec![TransactionV2Output {
                 address: recipient,
@@ -629,30 +715,7 @@ impl Ledger {
             }],
             fee,
             authorizations: Vec::new(),
-        };
-        let payload = transaction.signing_bytes(&domain)?;
-        if let TransactionV2::Transfer {
-            inputs,
-            authorizations,
-            ..
-        } = &mut transaction
-        {
-            *authorizations = sign_v2_authorizations(
-                wallet,
-                inputs.iter().map(|input| input.owner),
-                &payload,
-                self.height().saturating_add(1),
-            )?;
-        }
-        transaction.validate_authorization_policy_at_height(self.height().saturating_add(1))?;
-        transaction.verify_authorizations(&domain)?;
-        ensure_v2_transaction_within_block_budget(
-            self,
-            &transaction,
-            &domain,
-            self.launch_profile.max_block_bytes,
-        )?;
-        Ok(transaction)
+        })
     }
 
     pub fn build_v2_burn(
@@ -1271,6 +1334,24 @@ fn ensure_v2_transaction_within_block_budget(
         max_block_bytes,
     )?;
     Ok(())
+}
+
+fn ensure_v2_transaction_size_within_block_budget(
+    ledger: &Ledger,
+    transaction_bytes: usize,
+    max_block_bytes: usize,
+) -> Result<()> {
+    if transaction_bytes > max_block_bytes {
+        bail!(
+            "transaction v2 requires {transaction_bytes} bytes and exceeds the {max_block_bytes}-byte block budget"
+        );
+    }
+    let envelope = "00".repeat(transaction_bytes);
+    ensure_transaction_v2_fits_empty_block(
+        compact_block_context(ledger),
+        &envelope,
+        max_block_bytes,
+    )
 }
 
 #[cfg(test)]
