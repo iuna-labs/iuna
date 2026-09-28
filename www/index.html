@@ -379,6 +379,79 @@
     .principle-row .tag { width: fit-content; margin: 0; }
     .principle-row h3 { margin: 0; font-size: 18px; }
     .principle-row p { margin: 0; font-size: 15px; }
+    .power-comparison {
+      margin-bottom: clamp(48px, 6vw, 72px);
+    }
+    .comparison-intro {
+      display: flex;
+      justify-content: space-between;
+      gap: 24px;
+      align-items: end;
+      margin-bottom: 20px;
+    }
+    .comparison-intro h3 {
+      max-width: 620px;
+      margin: 0;
+      font-size: clamp(23px, 2.8vw, 31px);
+      line-height: 1.12;
+      letter-spacing: -.02em;
+    }
+    .comparison-grid {
+      display: grid;
+      grid-template-columns: repeat(3, minmax(0, 1fr));
+      border: 1px solid var(--line);
+      border-radius: var(--radius-large);
+      overflow: hidden;
+      background: rgba(16, 19, 21, .72);
+    }
+    .comparison-card {
+      min-width: 0;
+      padding: clamp(20px, 2.5vw, 28px);
+    }
+    .comparison-card + .comparison-card { border-left: 1px solid var(--line); }
+    .comparison-card header {
+      display: flex;
+      flex-wrap: wrap;
+      justify-content: space-between;
+      gap: 12px;
+      align-items: baseline;
+      margin-bottom: 14px;
+    }
+    .comparison-card h4 { margin: 0; font-size: 19px; }
+    .comparison-kind {
+      color: var(--muted);
+      font-size: 11px;
+      font-weight: 850;
+      letter-spacing: .05em;
+      text-transform: uppercase;
+    }
+    .comparison-chart {
+      width: 100%;
+      height: auto;
+      display: block;
+      margin: 0 0 14px;
+      overflow: visible;
+    }
+    .chart-axis { stroke: #526068; stroke-width: 1; }
+    .chart-grid { stroke: #273036; stroke-width: 1; stroke-dasharray: 3 5; }
+    .chart-line {
+      fill: none;
+      stroke: var(--chart-color, var(--cyan));
+      stroke-width: 3;
+      stroke-linecap: round;
+      stroke-linejoin: round;
+    }
+    .chart-area { fill: var(--chart-color, var(--cyan)); opacity: .08; }
+    .chart-label {
+      fill: #8f9da4;
+      font: 700 9px Inter, ui-sans-serif, system-ui, sans-serif;
+      letter-spacing: .02em;
+    }
+    .comparison-card p { margin: 0; font-size: 14px; line-height: 1.52; }
+    .comparison-card.pow { --chart-color: var(--amber); }
+    .comparison-card.pos { --chart-color: var(--blue); }
+    .comparison-card.pob { --chart-color: var(--green); background: linear-gradient(145deg, rgba(213, 245, 95, .055), transparent 68%); }
+    .comparison-card.pob .comparison-kind { color: var(--green); }
     .roadmap {
       position: relative;
       display: grid;
@@ -515,6 +588,10 @@
       .section-head { grid-template-columns: 1fr; row-gap: 8px; }
       .section-head .section-meta, .section-head h2, .section-head p { grid-column: 1; grid-row: auto; }
       .principle-row { grid-template-columns: 1fr; gap: 8px; align-items: start; }
+      .comparison-intro { display: grid; gap: 8px; align-items: start; }
+      .comparison-grid { grid-template-columns: 1fr; }
+      .comparison-card + .comparison-card { border-top: 1px solid var(--line); border-left: 0; }
+      .comparison-chart { max-width: 430px; }
       .mechanism-flow { grid-template-columns: 1fr; }
       .mechanism-step, .mechanism-step:first-child, .mechanism-step:last-child { padding: 18px 0; }
       .mechanism-step + .mechanism-step { border-top: 1px solid var(--line); border-left: 0; }
@@ -604,6 +681,55 @@
           <div class="section-meta"><span class="section-icon" aria-hidden="true"><svg><use href="#idea-icon"></use></svg></span><span class="section-kicker">The idea</span></div>
           <h2>What are we trying to change?</h2>
           <p>Many networks give lasting influence to whoever already controls the most capital or mining scale. iuna tests a different balance: open coin issuance, lightweight finalization, and influence that expires.</p>
+        </div>
+        <div class="power-comparison" aria-labelledby="power-comparison-title">
+          <div class="comparison-intro">
+            <h3 id="power-comparison-title">How capital turns into network influence</h3>
+          </div>
+          <div class="comparison-grid">
+            <article class="comparison-card pow">
+              <header><h4>Proof of Work</h4><span class="comparison-kind">Scale advantage</span></header>
+              <svg class="comparison-chart" viewBox="0 0 300 176" width="300" height="176" role="img" aria-labelledby="pow-chart-title pow-chart-desc">
+                <title id="pow-chart-title">Proof of Work scale advantage</title>
+                <desc id="pow-chart-desc">A conceptual curve showing mining efficiency rising sharply after access to specialized ASIC scale.</desc>
+                <path class="chart-grid" d="M36 30H284M36 74H284M36 118H284"></path>
+                <path class="chart-axis" d="M36 18V146H288"></path>
+                <path class="chart-area" d="M38 137 C92 136 127 132 158 122 C184 113 200 94 211 70 C224 43 246 27 282 22 L282 145 L38 145 Z"></path>
+                <path class="chart-line" d="M38 137 C92 136 127 132 158 122 C184 113 200 94 211 70 C224 43 246 27 282 22"></path>
+                <text class="chart-label" x="36" y="163">Capital &amp; infrastructure →</text>
+                <text class="chart-label" x="8" y="82" text-anchor="middle" transform="rotate(-90 8 82)">Efficiency →</text>
+              </svg>
+              <p>Specialized hardware and operating scale can make additional investment more productive once a miner crosses the entry threshold.</p>
+            </article>
+            <article class="comparison-card pos">
+              <header><h4>Proof of Stake</h4><span class="comparison-kind">Persistent capital</span></header>
+              <svg class="comparison-chart" viewBox="0 0 300 176" width="300" height="176" role="img" aria-labelledby="pos-chart-title pos-chart-desc">
+                <title id="pos-chart-title">Proof of Stake proportional influence</title>
+                <desc id="pos-chart-desc">A straight rising line showing recurring influence and expected rewards proportional to the amount staked.</desc>
+                <path class="chart-grid" d="M36 30H284M36 74H284M36 118H284"></path>
+                <path class="chart-axis" d="M36 18V146H288"></path>
+                <path class="chart-area" d="M38 140 L282 22 L282 145 L38 145 Z"></path>
+                <path class="chart-line" d="M38 140L282 22"></path>
+                <text class="chart-label" x="36" y="163">Stake held →</text>
+                <text class="chart-label" x="8" y="82" text-anchor="middle" transform="rotate(-90 8 82)">Recurring influence →</text>
+              </svg>
+              <p>More stake brings proportionally more recurring influence and expected rewards, while the underlying stake remains owned.</p>
+            </article>
+            <article class="comparison-card pob">
+              <header><h4>iuna Proof of Burn</h4><span class="comparison-kind">Temporary cost</span></header>
+              <svg class="comparison-chart" viewBox="0 0 300 176" width="300" height="176" role="img" aria-labelledby="pob-chart-title pob-chart-desc">
+                <title id="pob-chart-title">iuna fixed-burn effect</title>
+                <desc id="pob-chart-desc">A flat line showing that a ten euro burn has the same temporary lottery weight at every existing wallet size.</desc>
+                <path class="chart-grid" d="M36 30H284M36 74H284M36 118H284"></path>
+                <path class="chart-axis" d="M36 18V146H288"></path>
+                <path class="chart-area" d="M38 77H282V145H38Z"></path>
+                <path class="chart-line" d="M38 77H282"></path>
+                <text class="chart-label" x="36" y="163">Existing wallet size →</text>
+                <text class="chart-label" x="8" y="82" text-anchor="middle" transform="rotate(-90 8 82)">Temporary weight →</text>
+              </svg>
+              <p>A €10 burn buys the same temporary lottery weight for a small or large holder. It is spent, expires, and must be paid again.</p>
+            </article>
+          </div>
         </div>
         <div class="principle-list">
           <div class="principle-row">
