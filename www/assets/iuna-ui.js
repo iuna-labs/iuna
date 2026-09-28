@@ -2052,7 +2052,7 @@ window.iunaApp = function iunaApp() {
     currentFinalizerLabel() {
       const leader = this.currentFinalizerAddress();
       if (!leader) return "-";
-      if (leader === this.status.wallet_address) return "you";
+      if (this.isOwnAddress(leader)) return "you";
       return this.shortAddressLabel(leader);
     },
 
@@ -2172,7 +2172,7 @@ window.iunaApp = function iunaApp() {
         : this.blocks.find((block) => Number(block?.height) > 0);
       if (latestBlock) {
         const finalizer = this.addressLabel(latestBlock.miner);
-        const locallyFinalized = latestBlock.miner === status.wallet_address;
+        const locallyFinalized = this.isOwnAddress(latestBlock.miner);
         if (locallyFinalized) {
           this.noteMiningStateChange(
             "latest-local-block",
@@ -3231,12 +3231,28 @@ window.iunaApp = function iunaApp() {
       return null;
     },
 
+    isOwnAddress(address) {
+      if (!address) return false;
+      const canonical = this.canonicalAddressKey(address);
+      const owned = [
+        ...(Array.isArray(this.status.wallet_owned_addresses)
+          ? this.status.wallet_owned_addresses
+          : []),
+        this.status.wallet_address,
+        this.status.wallet_receive_address,
+        ...this.fundedWalletAddresses().map((entry) => entry.address),
+      ];
+      return owned.some((candidate) => candidate && this.canonicalAddressKey(candidate) === canonical);
+    },
+
     addressLabel(address) {
-      return this.addressName(address) || address || "-";
+      const label = this.addressName(address) || address || "-";
+      return this.isOwnAddress(address) ? `${label} (me)` : label;
     },
 
     shortAddressLabel(address) {
-      return this.addressName(address) || this.short(address);
+      const label = this.addressName(address) || this.short(address);
+      return this.isOwnAddress(address) ? `${label} (me)` : label;
     },
 
     txFrom(tx) {
@@ -3670,7 +3686,7 @@ window.iunaApp = function iunaApp() {
 
     blockFinalizerLabel(block) {
       const finalizer = this.shortAddressLabel(block.miner);
-      const owner = block.miner === this.status.wallet_address ? `${finalizer} (me)` : finalizer;
+      const owner = finalizer;
       return block.finalizer_mode === "recovery" ? `${owner} · Recovery` : owner;
     },
 

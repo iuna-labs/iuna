@@ -315,14 +315,28 @@ async fn main() -> Result<()> {
 
     let finalizer_node = Arc::clone(&node);
     let finalizer_gossip = gossip.clone();
+    let finalizer_peers = Arc::clone(&peers);
     tokio::spawn(async move {
-        run_automatic_finalizer(finalizer_node, finalizer_gossip, debug_logging).await;
+        run_automatic_finalizer(
+            finalizer_node,
+            finalizer_peers,
+            finalizer_gossip,
+            debug_logging,
+        )
+        .await;
     });
 
     let pow_miner_node = Arc::clone(&node);
     let pow_miner_gossip = gossip.clone();
+    let pow_miner_peers = Arc::clone(&peers);
     tokio::spawn(async move {
-        run_automatic_pow_miner(pow_miner_node, pow_miner_gossip, debug_logging).await;
+        run_automatic_pow_miner(
+            pow_miner_node,
+            pow_miner_peers,
+            pow_miner_gossip,
+            debug_logging,
+        )
+        .await;
     });
 
     let sync_node = Arc::clone(&node);
@@ -849,10 +863,27 @@ async fn join_chain_ledger(
     )
 }
 
-async fn run_automatic_finalizer(node: SharedNode, gossip: p2p::GossipNetwork, debug: bool) {
+async fn run_automatic_finalizer(
+    node: SharedNode,
+    peers: SharedPeerBook,
+    gossip: p2p::GossipNetwork,
+    debug: bool,
+) {
     let mut last_logged_skip: Option<(u64, String)> = None;
     loop {
         if !node.lock().await.has_real_chain() {
+            tokio::time::sleep(std::time::Duration::from_secs(1)).await;
+            continue;
+        }
+        if !peers.lock().await.has_good_connection_at(now_ms()) {
+            {
+                let mut node = node.lock().await;
+                if node.automatic_mining_enabled() {
+                    node.record_automatic_finalization_status(
+                        "waiting for a good peer connection before mining".to_string(),
+                    );
+                }
+            }
             tokio::time::sleep(std::time::Duration::from_secs(1)).await;
             continue;
         }
@@ -929,6 +960,7 @@ async fn run_automatic_finalizer(node: SharedNode, gossip: p2p::GossipNetwork, d
         });
         let mut cancelled_for_new_tip = false;
         let mut cancelled_for_disabled = false;
+        let mut cancelled_for_no_peer = false;
         let vdf_output = loop {
             tokio::select! {
                 result = &mut vdf_worker => {
@@ -950,6 +982,7 @@ async fn run_automatic_finalizer(node: SharedNode, gossip: p2p::GossipNetwork, d
                         }
                         node.lock().await.record_automatic_finalization_status(message);
                     }
+                    let peer_connected = peers.lock().await.has_good_connection_at(now_ms());
                     let (tip_changed, finalization_disabled) = {
                         let node = node.lock().await;
                         (
@@ -962,6 +995,9 @@ async fn run_automatic_finalizer(node: SharedNode, gossip: p2p::GossipNetwork, d
                         cancellation.store(true, Ordering::Relaxed);
                     } else if finalization_disabled {
                         cancelled_for_disabled = true;
+                        cancellation.store(true, Ordering::Relaxed);
+                    } else if !peer_connected {
+                        cancelled_for_no_peer = true;
                         cancellation.store(true, Ordering::Relaxed);
                     }
                 }
@@ -983,6 +1019,10 @@ async fn run_automatic_finalizer(node: SharedNode, gossip: p2p::GossipNetwork, d
                 format!(
                     "cancelled VDF for candidate block {candidate_height} because automatic finalization is disabled"
                 )
+            } else if cancelled_for_no_peer {
+                format!(
+                    "cancelled VDF for candidate block {candidate_height}: waiting for a good peer connection before mining"
+                )
             } else {
                 format!("VDF worker failed for candidate block {candidate_height}")
             };
@@ -998,6 +1038,7 @@ async fn run_automatic_finalizer(node: SharedNode, gossip: p2p::GossipNetwork, d
         let completed_at_ms = now_ms();
         let mut stale_before_publish = false;
         let mut disabled_before_publish = false;
+        let mut disconnected_before_publish = false;
         if completed_at_ms < publish_at_ms {
             let wait_ms = publish_at_ms - completed_at_ms;
             let message = format!(
@@ -1025,19 +1066,25 @@ async fn run_automatic_finalizer(node: SharedNode, gossip: p2p::GossipNetwork, d
                         !node.automatic_mining_enabled(),
                     )
                 };
-                if tip_changed || finalization_disabled {
+                let peer_connected = peers.lock().await.has_good_connection_at(now_ms());
+                if tip_changed || finalization_disabled || !peer_connected {
                     stale_before_publish = tip_changed;
                     disabled_before_publish = finalization_disabled;
+                    disconnected_before_publish = !peer_connected;
                     break;
                 }
             }
         }
-        if stale_before_publish || disabled_before_publish {
+        if stale_before_publish || disabled_before_publish || disconnected_before_publish {
             let message = if stale_before_publish {
                 format!("cancelled completed VDF for stale candidate block {candidate_height}")
-            } else {
+            } else if disabled_before_publish {
                 format!(
                     "cancelled completed VDF for candidate block {candidate_height} because automatic finalization is disabled"
+                )
+            } else {
+                format!(
+                    "cancelled completed VDF for candidate block {candidate_height}: waiting for a good peer connection before mining"
                 )
             };
             if debug {
@@ -1049,6 +1096,13 @@ async fn run_automatic_finalizer(node: SharedNode, gossip: p2p::GossipNetwork, d
             continue;
         }
         let publish_timestamp_ms = now_ms().max(publish_at_ms);
+
+        if !peers.lock().await.has_good_connection_at(now_ms()) {
+            node.lock().await.record_automatic_finalization_status(format!(
+                "cancelled completed VDF for candidate block {candidate_height}: waiting for a good peer connection before mining"
+            ));
+            continue;
+        }
 
         let (finalized, outbox) = {
             let mut node = node.lock().await;
@@ -1135,9 +1189,23 @@ fn format_vdf_progress(candidate_height: u64, progress: VdfProgress) -> String {
     )
 }
 
-async fn run_automatic_pow_miner(node: SharedNode, gossip: p2p::GossipNetwork, debug: bool) {
+async fn run_automatic_pow_miner(
+    node: SharedNode,
+    peers: SharedPeerBook,
+    gossip: p2p::GossipNetwork,
+    debug: bool,
+) {
     loop {
         tokio::time::sleep(std::time::Duration::from_secs(1)).await;
+        if !peers.lock().await.has_good_connection_at(now_ms()) {
+            let mut node = node.lock().await;
+            if node.pow_mining_enabled() {
+                node.record_automatic_pow_mining_error(
+                    "waiting for a good peer connection before mining".to_string(),
+                );
+            }
+            continue;
+        }
         let (height, job) = {
             let mut node = node.lock().await;
             if !node.pow_mining_enabled() {
@@ -1163,6 +1231,12 @@ async fn run_automatic_pow_miner(node: SharedNode, gossip: p2p::GossipNetwork, d
         };
 
         let search = tokio::task::spawn_blocking(move || job.search()).await;
+        if !peers.lock().await.has_good_connection_at(now_ms()) {
+            node.lock().await.record_automatic_pow_mining_error(
+                "waiting for a good peer connection before mining".to_string(),
+            );
+            continue;
+        }
         let (pow_mined, outbox) = {
             let mut node = node.lock().await;
             let pow_mined = match search {

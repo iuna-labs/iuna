@@ -20,7 +20,7 @@ use tokio::{net::TcpListener, sync::Mutex};
 
 use crate::{
     adapters::{config_store, config_store::UiConfig, p2p::GossipNetwork},
-    app::{SharedNode, SharedPeerBook},
+    app::{PEER_GOOD_CONNECTION_MAX_AGE_MS, SharedNode, SharedPeerBook},
     ip_geolocation::IpGeolocation,
 };
 
@@ -94,7 +94,7 @@ const AUTH_SESSION_TTL_MS: u64 = 12 * 60 * 60 * 1_000;
 const AUTH_MAX_FAILED_ATTEMPTS: u32 = 5;
 const AUTH_LOCKOUT_MS: u64 = 60 * 1_000;
 const UNKNOWN_CLIENT_KEY: &str = "unknown";
-const PEER_STALE_AFTER_MS: u64 = 20 * 60 * 1_000;
+const PEER_STALE_AFTER_MS: u64 = PEER_GOOD_CONNECTION_MAX_AGE_MS;
 const SLOW_UI_REQUEST_LOG_MS: u128 = 250;
 
 pub(crate) mod types;

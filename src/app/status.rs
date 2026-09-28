@@ -49,8 +49,15 @@ impl NodeCore {
         owned_addresses.extend(hybrid_addresses);
         owned_addresses.sort();
         owned_addresses.dedup();
+        let wallet_receive_address = self.wallet_receive_address().unwrap_or_default();
+        if !wallet_receive_address.is_empty() {
+            owned_addresses.push(wallet_receive_address.clone());
+            owned_addresses.sort();
+            owned_addresses.dedup();
+        }
         let mut funded_wallet_addresses = owned_addresses
-            .into_iter()
+            .iter()
+            .cloned()
             .filter_map(|address| {
                 let utxos = self.ledger.utxos_for_address(&address);
                 if utxos.is_empty() {
@@ -100,7 +107,8 @@ impl NodeCore {
         NodeStatus {
             app_version: env!("CARGO_PKG_VERSION").to_string(),
             wallet_address: self.wallet.address().to_string(),
-            wallet_receive_address: self.wallet_receive_address().unwrap_or_default(),
+            wallet_receive_address,
+            wallet_owned_addresses: owned_addresses,
             funded_wallet_addresses,
             wallet_balance: self.wallet_projected_balance(),
             wallet_locked: self.wallet.is_locked(),
@@ -285,6 +293,16 @@ mod tests {
         let status = node.status();
         assert_eq!(status.app_version, env!("CARGO_PKG_VERSION"));
         assert!(status.wallet_receive_address.starts_with("iuna1q"));
+        assert!(
+            status
+                .wallet_owned_addresses
+                .contains(&status.wallet_address)
+        );
+        assert!(
+            status
+                .wallet_owned_addresses
+                .contains(&status.wallet_receive_address)
+        );
     }
 
     #[test]
@@ -331,6 +349,10 @@ mod tests {
 
         assert_eq!(status.wallet_address, "corrupt-wallet-address");
         assert!(status.wallet_receive_address.is_empty());
+        assert_eq!(
+            status.wallet_owned_addresses,
+            vec!["corrupt-wallet-address"]
+        );
     }
 
     #[test]

@@ -18,6 +18,17 @@ pub struct PeerBook {
 }
 
 impl PeerBook {
+    pub fn has_good_connection_at(&self, now_ms: u64) -> bool {
+        self.peers.values().any(|peer| {
+            !peer.is_banned_at(now_ms)
+                && peer.last_error.is_none()
+                && peer.last_known_height.is_some()
+                && peer.last_success_ms.is_some_and(|last_success| {
+                    now_ms.saturating_sub(last_success) <= super::PEER_GOOD_CONNECTION_MAX_AGE_MS
+                })
+        })
+    }
+
     pub fn from_addresses(addresses: Vec<String>) -> Self {
         let mut book = Self::default();
         for address in addresses {
@@ -587,4 +598,57 @@ pub enum PeerDirection {
     Outbound,
     Discovered,
     Inbound,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn good_connection_requires_a_recent_success_without_an_error_or_ban() {
+        let now = super::super::PEER_GOOD_CONNECTION_MAX_AGE_MS + 1_000;
+        let mut peers = PeerBook::from_addresses(vec!["127.0.0.1:9444".to_string()]);
+        assert!(!peers.has_good_connection_at(now));
+
+        peers
+            .peers
+            .get_mut("127.0.0.1:9444")
+            .unwrap()
+            .last_success_ms = Some(now - 1_000);
+        assert!(!peers.has_good_connection_at(now));
+
+        peers
+            .peers
+            .get_mut("127.0.0.1:9444")
+            .unwrap()
+            .last_known_height = Some(1);
+        assert!(peers.has_good_connection_at(now));
+
+        peers.peers.get_mut("127.0.0.1:9444").unwrap().last_error = Some("offline".to_string());
+        assert!(!peers.has_good_connection_at(now));
+
+        let peer = peers.peers.get_mut("127.0.0.1:9444").unwrap();
+        peer.last_error = None;
+        peer.banned_until_ms = Some(now + 1);
+        assert!(!peers.has_good_connection_at(now));
+    }
+
+    #[test]
+    fn good_connection_rejects_stale_success() {
+        let max_age = super::super::PEER_GOOD_CONNECTION_MAX_AGE_MS;
+        let now = max_age + 1_000;
+        let mut peers = PeerBook::from_addresses(vec!["127.0.0.1:9444".to_string()]);
+        peers
+            .peers
+            .get_mut("127.0.0.1:9444")
+            .unwrap()
+            .last_success_ms = Some(now - max_age - 1);
+        peers
+            .peers
+            .get_mut("127.0.0.1:9444")
+            .unwrap()
+            .last_known_height = Some(1);
+
+        assert!(!peers.has_good_connection_at(now));
+    }
 }

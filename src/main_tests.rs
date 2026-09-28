@@ -676,6 +676,28 @@ fn automatic_pow_worker_searches_outside_node_lock() {
 }
 
 #[test]
+fn automatic_miners_require_a_good_peer_connection() {
+    let main_rs = include_str!("main.rs");
+    let finalizer = main_rs
+        .split("async fn run_automatic_finalizer")
+        .nth(1)
+        .and_then(|source| {
+            source
+                .split("fn automatic_finalization_precheck_time")
+                .next()
+        })
+        .expect("automatic finalizer should exist");
+    let pow_miner = main_rs
+        .split("async fn run_automatic_pow_miner")
+        .nth(1)
+        .and_then(|source| source.split("async fn run_peer_sync").next())
+        .expect("automatic PoW miner should exist");
+
+    assert!(finalizer.contains("has_good_connection_at"));
+    assert!(pow_miner.contains("has_good_connection_at"));
+}
+
+#[test]
 fn automatic_finalization_skip_logging_only_reports_state_changes() {
     let mut last = None;
 

@@ -193,6 +193,8 @@ pub struct NodeStatus {
     pub wallet_address: String,
     pub wallet_receive_address: String,
     #[serde(default)]
+    pub wallet_owned_addresses: Vec<String>,
+    #[serde(default)]
     pub funded_wallet_addresses: Vec<FundedWalletAddressStatus>,
     pub wallet_balance: Amount,
     pub wallet_locked: bool,
