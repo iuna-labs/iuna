@@ -3552,7 +3552,7 @@ window.iunaApp = function iunaApp() {
         kind: "reward",
         label: "Finalizer reward",
         amount: reward - committeePool,
-        address: block.miner,
+        address: this.blockRewardAddress(block),
       }];
 
       let remaining = committeePool;
@@ -3565,11 +3565,19 @@ window.iunaApp = function iunaApp() {
             kind: "reward",
             label: `Committee reward (slot ${bundle.slot})`,
             amount,
-            address: bundle.member,
+            address: this.bundleRewardAddress(bundle),
           });
         }
       });
       return outputs;
+    },
+
+    blockRewardAddress(block) {
+      return block?.rewardAddress ?? block?.reward_address ?? block?.miner ?? null;
+    },
+
+    bundleRewardAddress(bundle) {
+      return bundle?.rewardAddress ?? bundle?.reward_address ?? bundle?.member ?? null;
     },
 
     blockTimestampLabel(block) {
@@ -3601,6 +3609,7 @@ window.iunaApp = function iunaApp() {
         {
           slot: 0,
           member: block.miner,
+          rewardAddress: block.rewardAddress ?? block.reward_address ?? null,
           role: "Finalizer",
           implicit: true,
           burns: this.blockTransactions(block).filter((tx) => tx.kind === "burn"),
@@ -3610,6 +3619,7 @@ window.iunaApp = function iunaApp() {
         ...bundles.map((bundle) => ({
           slot: Number(bundle.slot),
           member: bundle.member,
+          rewardAddress: bundle.rewardAddress ?? bundle.reward_address ?? null,
           role: "Committee member",
           implicit: false,
           burns: bundle.burns || [],

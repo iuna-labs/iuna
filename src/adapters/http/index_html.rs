@@ -1212,6 +1212,10 @@ pub(super) const INDEX_HTML: &str = concat!(
                     <code x-text="shortAddressLabel(selectedBlock.miner)"></code>
                   </button>
                 </div>
+                <div class="detail-kv" x-show="selectedBlock.reward_address || selectedBlock.rewardAddress">
+                  <div class="key">Reward to</div>
+                  <code class="wallet-address-link" role="button" tabindex="0" x-text="shortAddressLabel(blockRewardAddress(selectedBlock))" @click="openAddressContact(blockRewardAddress(selectedBlock))" @keydown.enter.prevent="openAddressContact(blockRewardAddress(selectedBlock))" @keydown.space.prevent="openAddressContact(blockRewardAddress(selectedBlock))" title="Add or edit contact"></code>
+                </div>
                 <div class="detail-kv"><div class="key">Mode</div><div x-text="selectedBlock.finalizer_mode === 'recovery' ? 'Recovery' : `Rank ${selectedBlock.finalizer_rank ?? 0}`"></div></div>
                 <div class="detail-kv">
                   <div class="key">Reward</div>
@@ -1920,6 +1924,7 @@ pub(super) const INDEX_HTML: &str = concat!(
               <span class="bundle-slot-status">Included</span>
             </div>
             <div class="tx-field"><span class="tx-label" x-text="slot.role"></span><code class="wallet-address-link" role="button" tabindex="0" x-text="addressLabel(slot.member)" @click="openAddressContact(slot.member)" @keydown.enter.prevent="openAddressContact(slot.member)" @keydown.space.prevent="openAddressContact(slot.member)" title="Add or edit contact"></code></div>
+            <div class="tx-field" x-show="slot.rewardAddress"><span class="tx-label">Reward to</span><code class="wallet-address-link" role="button" tabindex="0" x-text="addressLabel(slot.rewardAddress)" @click="openAddressContact(slot.rewardAddress)" @keydown.enter.prevent="openAddressContact(slot.rewardAddress)" @keydown.space.prevent="openAddressContact(slot.rewardAddress)" title="Add or edit contact"></code></div>
             <div class="tx-field"><span class="tx-label">Contribution</span><span class="tx-value text" x-text="burnBundleSlotDetail(slot)"></span></div>
             <div class="tx-field" x-show="slot.hash"><span class="tx-label">Bundle</span><code x-text="short(slot.hash)"></code></div>
           </div>
@@ -1942,6 +1947,7 @@ pub(super) const INDEX_HTML: &str = concat!(
         <div class="tx-modal-title">
           <h2 id="burn-ranks-title" x-text="burnLeaderRanksTitle(selectedBurnLeaderBlock)"></h2>
           <div class="tx-field"><span class="tx-label">Finalizer</span><code class="tx-value hash wallet-address-link" role="button" tabindex="0" x-text="selectedBurnLeaderBlock ? addressLabel(selectedBurnLeaderBlock.miner) : '-'" @click="openAddressContact(selectedBurnLeaderBlock?.miner)" @keydown.enter.prevent="openAddressContact(selectedBurnLeaderBlock?.miner)" @keydown.space.prevent="openAddressContact(selectedBurnLeaderBlock?.miner)" title="Add or edit contact"></code></div>
+          <div class="tx-field" x-show="selectedBurnLeaderBlock?.reward_address || selectedBurnLeaderBlock?.rewardAddress"><span class="tx-label">Reward to</span><code class="tx-value hash wallet-address-link" role="button" tabindex="0" x-text="addressLabel(blockRewardAddress(selectedBurnLeaderBlock))" @click="openAddressContact(blockRewardAddress(selectedBurnLeaderBlock))" @keydown.enter.prevent="openAddressContact(blockRewardAddress(selectedBurnLeaderBlock))" @keydown.space.prevent="openAddressContact(blockRewardAddress(selectedBurnLeaderBlock))" title="Add or edit contact"></code></div>
         </div>
         <button type="button" @click="closeBurnLeaderRanksModal">Close</button>
       </div>

@@ -468,6 +468,7 @@ fn ui_block_with_v2(
             UiBurnBundle {
                 slot: bundle.slot,
                 member: bundle.member.clone(),
+                reward_address: bundle.reward_address.clone(),
                 hash: bundle.bundle_hash(),
                 byte_size: bundle.serialized_size_bytes().unwrap_or_default(),
                 burns,
@@ -494,6 +495,7 @@ fn ui_block_with_v2(
         prev_hash: block.prev_hash,
         timestamp_ms: block.timestamp_ms,
         miner: block.miner,
+        reward_address: block.reward_address,
         finalizer_mode: block.finalizer_mode,
         finalizer_rank: block.finalizer_rank,
         reward: block.reward,
@@ -1383,7 +1385,7 @@ mod tests {
             prev_hash: "parent".to_string(),
             timestamp_ms: 1,
             miner: "finalizer".to_string(),
-            reward_address: None,
+            reward_address: Some("finalizer-hybrid".to_string()),
             reward_address_signature: None,
             finalizer_mode: FinalizerMode::Ticket,
             finalizer_rank: 0,
@@ -1395,7 +1397,7 @@ mod tests {
                 signatures: vec![crate::domain::BurnBundleSignature {
                     slot: 1,
                     member: "member-1".to_string(),
-                    reward_address: None,
+                    reward_address: Some("member-1-hybrid".to_string()),
                     signature: "sig-1".to_string(),
                 }],
                 burns: vec![MaskedBurn {
@@ -1430,6 +1432,11 @@ mod tests {
         assert_eq!(ui.lost_iuna, 1);
         assert_eq!(ui.burn_bundles.len(), 1);
         assert_eq!(ui.burn_bundles[0].slot, 1);
+        assert_eq!(ui.reward_address.as_deref(), Some("finalizer-hybrid"));
+        assert_eq!(
+            ui.burn_bundles[0].reward_address.as_deref(),
+            Some("member-1-hybrid")
+        );
         assert_eq!(ui.burn_bundles[0].burns.len(), 1);
         assert_eq!(ui.total_bytes, 120);
         assert_eq!(ui.header_and_proof_bytes, 10);

@@ -89,6 +89,22 @@ pub(super) fn metrics_response(
                 |row| Some(row.utxo_count as f64),
             ),
             metrics_chart(
+                "revealed-hybrid-identities",
+                "Hybrid identities observed",
+                "identities",
+                MetricsValueKind::Number,
+                &rows,
+                |row| Some(row.revealed_hybrid_identities as f64),
+            ),
+            metrics_chart(
+                "revealed-key-value",
+                "Value on revealed keys",
+                "IUNA",
+                MetricsValueKind::Iuna,
+                &rows,
+                |row| Some(micro_iuna_as_iuna(row.revealed_key_value)),
+            ),
+            metrics_chart(
                 "transactions",
                 "Transactions per block",
                 "tx",
@@ -406,6 +422,8 @@ mod tests {
             reward_amount: 1,
             vdf_rounds: 10,
             finalizer_rank: 0,
+            revealed_hybrid_identities: 3,
+            revealed_key_value: 25,
         };
 
         let chain_storage_bytes = BTreeMap::from([("cached-tip".to_string(), 12_345)]);
@@ -451,6 +469,8 @@ mod tests {
                 "supply",
                 "chain-storage-bytes",
                 "total-utxos",
+                "revealed-hybrid-identities",
+                "revealed-key-value",
                 "transactions",
                 "burn-count",
                 "burn-amount",

@@ -14,9 +14,9 @@ use crate::{
     adapters::ui_index::{UiChainIndex, build_ui_chain_index_for_blocks, projected_reward_outputs},
     domain::{
         AddressNetwork, Amount, Block, BurnLeaderRank, ChainSnapshot, Ledger,
-        MINE_RETARGET_WINDOW_BLOCKS, MINE_REWARD, OutPoint, Transaction, TransactionV2,
-        TransactionV2Domain, TxInput, TxOutput, decode_hex, encode_versioned_address, hex_encode,
-        retarget_mine_difficulty_bits,
+        MINE_RETARGET_WINDOW_BLOCKS, MINE_REWARD, OutPoint, SignatureScheme, Transaction,
+        TransactionV2, TransactionV2Domain, TxInput, TxOutput, decode_hex,
+        encode_versioned_address, hex_encode, retarget_mine_difficulty_bits,
     },
 };
 
@@ -39,7 +39,9 @@ CREATE TABLE IF NOT EXISTS block_metrics (
     fees_amount INTEGER NOT NULL,
     reward_amount INTEGER NOT NULL,
     vdf_rounds INTEGER NOT NULL,
-    finalizer_rank INTEGER NOT NULL
+    finalizer_rank INTEGER NOT NULL,
+    revealed_hybrid_identities INTEGER NOT NULL DEFAULT 0,
+    revealed_key_value INTEGER NOT NULL DEFAULT 0
 );
 
 CREATE TABLE IF NOT EXISTS metrics_cache_meta (
@@ -51,6 +53,16 @@ CREATE TABLE IF NOT EXISTS metrics_cache_meta (
 );
 
 CREATE TABLE IF NOT EXISTS metric_known_addresses (
+    address TEXT PRIMARY KEY,
+    first_seen_height INTEGER NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS metric_revealed_hybrid_identities (
+    identity TEXT PRIMARY KEY,
+    first_seen_height INTEGER NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS metric_revealed_hybrid_addresses (
     address TEXT PRIMARY KEY,
     first_seen_height INTEGER NOT NULL
 );
@@ -151,6 +163,8 @@ const RESET_SCHEMA: &str = r#"
 DROP TABLE IF EXISTS block_metrics;
 DROP TABLE IF EXISTS metrics_cache_meta;
 DROP TABLE IF EXISTS metric_known_addresses;
+DROP TABLE IF EXISTS metric_revealed_hybrid_identities;
+DROP TABLE IF EXISTS metric_revealed_hybrid_addresses;
 DROP TABLE IF EXISTS ui_leaderboards;
 DROP TABLE IF EXISTS ui_cache_meta;
 DROP TABLE IF EXISTS ui_output_index;
@@ -164,7 +178,7 @@ DROP TABLE IF EXISTS ui_burn_leader_rank_blocks;
 
 const UI_DATA_SCHEMA_VERSION: u32 = 2;
 const UI_CACHE_SCHEMA_VERSION: u32 = 5;
-const METRICS_CACHE_SCHEMA_VERSION: u32 = 2;
+const METRICS_CACHE_SCHEMA_VERSION: u32 = 3;
 
 #[derive(Clone, Debug, Eq, PartialEq, Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -187,6 +201,8 @@ pub struct BlockMetricRow {
     pub reward_amount: Amount,
     pub vdf_rounds: u64,
     pub finalizer_rank: u32,
+    pub revealed_hybrid_identities: u64,
+    pub revealed_key_value: Amount,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -426,7 +442,7 @@ impl SqliteUiDataStore {
 SELECT height, block_hash, timestamp_ms, block_time_ms, mine_difficulty_bits,
        circulating_supply, known_wallet_addresses, utxo_count, transaction_count, transfer_count, burn_count,
        mine_count, burned_amount, total_burned_amount, fees_amount, reward_amount,
-       vdf_rounds, finalizer_rank
+       vdf_rounds, finalizer_rank, revealed_hybrid_identities, revealed_key_value
 FROM block_metrics
 ORDER BY height ASC
 "#,
@@ -453,6 +469,8 @@ ORDER BY height ASC
                         reward_amount: row.get(15)?,
                         vdf_rounds: row.get(16)?,
                         finalizer_rank: row.get(17)?,
+                        revealed_hybrid_identities: row.get(18)?,
+                        revealed_key_value: row.get(19)?,
                     })
                 })
                 .context("failed to load block metrics")?;
@@ -469,7 +487,7 @@ ORDER BY height ASC
 SELECT height, block_hash, timestamp_ms, block_time_ms, mine_difficulty_bits,
        circulating_supply, known_wallet_addresses, utxo_count, transaction_count, transfer_count, burn_count,
        mine_count, burned_amount, total_burned_amount, fees_amount, reward_amount,
-       vdf_rounds, finalizer_rank
+       vdf_rounds, finalizer_rank, revealed_hybrid_identities, revealed_key_value
 FROM block_metrics
 ORDER BY height DESC
 LIMIT ?1
@@ -497,6 +515,8 @@ LIMIT ?1
                         reward_amount: row.get(15)?,
                         vdf_rounds: row.get(16)?,
                         finalizer_rank: row.get(17)?,
+                        revealed_hybrid_identities: row.get(18)?,
+                        revealed_key_value: row.get(19)?,
                     })
                 })
                 .context("failed to load recent block metrics")?;
@@ -663,6 +683,16 @@ fn initialize_ui_data_schema(connection: &mut Connection, path: &Path) -> Result
         "INTEGER NOT NULL DEFAULT 0",
     )?;
     ensure_block_metrics_column(connection, "utxo_count", "INTEGER NOT NULL DEFAULT 0")?;
+    ensure_block_metrics_column(
+        connection,
+        "revealed_hybrid_identities",
+        "INTEGER NOT NULL DEFAULT 0",
+    )?;
+    ensure_block_metrics_column(
+        connection,
+        "revealed_key_value",
+        "INTEGER NOT NULL DEFAULT 0",
+    )?;
     connection
         .pragma_update(None, "user_version", UI_DATA_SCHEMA_VERSION)
         .context("failed to record UI data database schema version")?;
@@ -755,6 +785,18 @@ fn project_metrics_in_transaction(
                     [height],
                 )
                 .context("failed to truncate reorged metric addresses")?;
+            transaction
+                .execute(
+                    "DELETE FROM metric_revealed_hybrid_identities WHERE first_seen_height > ?1",
+                    [height],
+                )
+                .context("failed to truncate reorged revealed hybrid identities")?;
+            transaction
+                .execute(
+                    "DELETE FROM metric_revealed_hybrid_addresses WHERE first_seen_height > ?1",
+                    [height],
+                )
+                .context("failed to truncate reorged revealed hybrid addresses")?;
         }
         None => clear_metrics_in_transaction(transaction)?,
     }
@@ -772,6 +814,18 @@ fn project_metrics_in_transaction(
     }
 
     let start_height = common_height.map_or(0, |height| height.saturating_add(1));
+    let base_height = start_height.saturating_sub(1);
+    let mut exposure_snapshot = snapshot.clone();
+    exposure_snapshot
+        .blocks
+        .truncate(base_height.saturating_add(1) as usize);
+    let mut exposure_ledger = Ledger::from_preverified_snapshot(exposure_snapshot)
+        .context("failed to rebuild ledger for hybrid exposure metrics")?;
+    let network = AddressNetwork::from_profile_id(&snapshot.launch_profile.profile_id);
+    let mut revealed_identities =
+        load_metric_string_set(transaction, "metric_revealed_hybrid_identities", "identity")?;
+    let mut revealed_addresses =
+        load_metric_string_set(transaction, "metric_revealed_hybrid_addresses", "address")?;
     for block in snapshot
         .blocks
         .iter()
@@ -782,6 +836,25 @@ fn project_metrics_in_transaction(
             .context("known metric address count overflows")?;
         let mut metric = incremental_metric_for_block(snapshot, block, previous.as_ref())?;
         metric.known_wallet_addresses = known_wallet_addresses;
+        index_revealed_hybrid_keys(
+            transaction,
+            block,
+            network,
+            &mut revealed_identities,
+            &mut revealed_addresses,
+        )?;
+        if block.height > base_height {
+            exposure_ledger
+                .apply_preverified_block_at(block.clone(), block.timestamp_ms)
+                .with_context(|| {
+                    format!(
+                        "failed to apply block {} for hybrid exposure metrics",
+                        block.height
+                    )
+                })?;
+        }
+        metric.revealed_hybrid_identities = revealed_identities.len() as u64;
+        metric.revealed_key_value = revealed_key_value(&exposure_ledger, &revealed_addresses)?;
         insert_metric(transaction, &metric)?;
         previous = Some(metric);
     }
@@ -873,7 +946,7 @@ fn load_metric_at_height(
 SELECT height, block_hash, timestamp_ms, block_time_ms, mine_difficulty_bits,
        circulating_supply, known_wallet_addresses, utxo_count, transaction_count, transfer_count, burn_count,
        mine_count, burned_amount, total_burned_amount, fees_amount, reward_amount,
-       vdf_rounds, finalizer_rank
+       vdf_rounds, finalizer_rank, revealed_hybrid_identities, revealed_key_value
 FROM block_metrics
 WHERE height = ?1
 "#,
@@ -898,6 +971,8 @@ WHERE height = ?1
                     reward_amount: row.get(15)?,
                     vdf_rounds: row.get(16)?,
                     finalizer_rank: row.get(17)?,
+                    revealed_hybrid_identities: row.get(18)?,
+                    revealed_key_value: row.get(19)?,
                 })
             },
         )
@@ -913,8 +988,8 @@ INSERT INTO block_metrics (
     height, block_hash, timestamp_ms, block_time_ms, mine_difficulty_bits,
     circulating_supply, known_wallet_addresses, utxo_count, transaction_count, transfer_count, burn_count,
     mine_count, burned_amount, total_burned_amount, fees_amount, reward_amount, vdf_rounds,
-    finalizer_rank
-) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18)
+    finalizer_rank, revealed_hybrid_identities, revealed_key_value
+) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18, ?19, ?20)
 "#,
             params![
                 metric.height,
@@ -935,6 +1010,8 @@ INSERT INTO block_metrics (
                 metric.reward_amount,
                 metric.vdf_rounds,
                 metric.finalizer_rank,
+                metric.revealed_hybrid_identities,
+                metric.revealed_key_value,
             ],
         )
         .with_context(|| format!("failed to insert metrics for block {}", metric.height))?;
@@ -976,6 +1053,12 @@ fn clear_metrics_in_transaction(transaction: &rusqlite::Transaction<'_>) -> Resu
     transaction
         .execute("DELETE FROM metric_known_addresses", [])
         .context("failed to clear old metric addresses")?;
+    transaction
+        .execute("DELETE FROM metric_revealed_hybrid_identities", [])
+        .context("failed to clear revealed hybrid identities")?;
+    transaction
+        .execute("DELETE FROM metric_revealed_hybrid_addresses", [])
+        .context("failed to clear revealed hybrid addresses")?;
     Ok(())
 }
 
@@ -2143,6 +2226,12 @@ fn incremental_metric_for_block(
         reward_amount: block.reward,
         vdf_rounds: block.vdf_rounds,
         finalizer_rank: block.finalizer_rank,
+        revealed_hybrid_identities: previous
+            .map(|row| row.revealed_hybrid_identities)
+            .unwrap_or_default(),
+        revealed_key_value: previous
+            .map(|row| row.revealed_key_value)
+            .unwrap_or_default(),
     })
 }
 
@@ -2212,6 +2301,96 @@ fn insert_metric_address(
     Ok(inserted as u64)
 }
 
+fn load_metric_string_set(
+    transaction: &rusqlite::Transaction<'_>,
+    table: &str,
+    column: &str,
+) -> Result<BTreeSet<String>> {
+    let mut statement = transaction
+        .prepare(&format!("SELECT {column} FROM {table}"))
+        .with_context(|| format!("failed to prepare {table} lookup"))?;
+    let rows = statement
+        .query_map([], |row| row.get::<_, String>(0))
+        .with_context(|| format!("failed to query {table}"))?;
+    rows.collect::<std::result::Result<BTreeSet<_>, _>>()
+        .with_context(|| format!("failed to read {table}"))
+}
+
+fn index_revealed_hybrid_keys(
+    database: &rusqlite::Transaction<'_>,
+    block: &Block,
+    network: AddressNetwork,
+    identities: &mut BTreeSet<String>,
+    addresses: &mut BTreeSet<String>,
+) -> Result<()> {
+    for envelope in &block.transactions_v2 {
+        let encoded = decode_hex(envelope).context("block transaction v2 is not hexadecimal")?;
+        let (_, transaction) = TransactionV2::decode(&encoded)?;
+        for (identity, address) in revealed_hybrid_keys(&transaction, network)? {
+            if identities.insert(identity.clone()) {
+                database
+                    .execute(
+                        "INSERT INTO metric_revealed_hybrid_identities (identity, first_seen_height) VALUES (?1, ?2)",
+                        params![identity, block.height],
+                    )
+                    .with_context(|| {
+                        format!(
+                            "failed to index revealed hybrid identity at block {}",
+                            block.height
+                        )
+                    })?;
+            }
+            if addresses.insert(address.clone()) {
+                database
+                    .execute(
+                        "INSERT INTO metric_revealed_hybrid_addresses (address, first_seen_height) VALUES (?1, ?2)",
+                        params![address, block.height],
+                    )
+                    .with_context(|| {
+                        format!(
+                            "failed to index revealed hybrid address at block {}",
+                            block.height
+                        )
+                    })?;
+            }
+        }
+    }
+    Ok(())
+}
+
+fn revealed_hybrid_keys(
+    transaction: &TransactionV2,
+    network: AddressNetwork,
+) -> Result<Vec<(String, String)>> {
+    let authorizations = match transaction {
+        TransactionV2::Transfer { authorizations, .. }
+        | TransactionV2::Burn { authorizations, .. } => authorizations,
+        TransactionV2::Migration { .. } | TransactionV2::Mine { .. } => return Ok(Vec::new()),
+    };
+    authorizations
+        .iter()
+        .filter(|authorization| authorization.scheme() == SignatureScheme::HybridEd25519MlDsa44)
+        .map(|authorization| {
+            Ok((
+                hex_encode(&authorization.public_key().as_bytes()[..32]),
+                encode_versioned_address(authorization.committed_address()?, network)?,
+            ))
+        })
+        .collect()
+}
+
+fn revealed_key_value(ledger: &Ledger, revealed_addresses: &BTreeSet<String>) -> Result<Amount> {
+    ledger
+        .all_utxos()
+        .into_iter()
+        .filter(|(_, output)| revealed_addresses.contains(&output.address))
+        .try_fold(0_u64, |total, (_, output)| {
+            total
+                .checked_add(output.amount)
+                .context("revealed hybrid key value overflows")
+        })
+}
+
 fn collect_transaction_addresses(transaction: &Transaction, addresses: &mut BTreeSet<String>) {
     match transaction {
         Transaction::Transfer {
@@ -2256,12 +2435,55 @@ mod tests {
     use rusqlite::Connection;
     use tempfile::tempdir;
 
-    use crate::domain::{AddressNetwork, ChainSnapshot, GenesisBurn, Ledger, Wallet, hex_encode};
+    use crate::domain::{
+        AddressNetwork, ChainSnapshot, GenesisBurn, HybridAddressBranch, Ledger, TransactionV2,
+        TransactionV2Domain, TransactionV2Input, TransactionV2Output, Wallet, hex_encode,
+    };
 
     use super::{
         SqliteUiDataStore, replace_ui_wallet_transactions, replace_ui_wallet_transactions_v2,
-        wallet_transactions_from_snapshot, wallet_transactions_v2_from_snapshot,
+        revealed_hybrid_keys, wallet_transactions_from_snapshot,
+        wallet_transactions_v2_from_snapshot,
     };
+
+    #[test]
+    fn revealed_hybrid_keys_group_rotated_addresses_by_ed25519_identity() {
+        let wallet = Wallet::from_seed("revealed-hybrid-metrics");
+        let first = wallet.hybrid_versioned_address_at(HybridAddressBranch::External, 1);
+        let second = wallet.hybrid_versioned_address_at(HybridAddressBranch::External, 2);
+        let domain = TransactionV2Domain::new("metrics", [7; 32]).unwrap();
+        let mut transaction = TransactionV2::Transfer {
+            inputs: vec![
+                TransactionV2Input {
+                    outpoint_txid: [1; 32],
+                    outpoint_index: 0,
+                    owner: first,
+                },
+                TransactionV2Input {
+                    outpoint_txid: [2; 32],
+                    outpoint_index: 0,
+                    owner: second,
+                },
+            ],
+            outputs: vec![TransactionV2Output {
+                address: first,
+                amount: 1,
+            }],
+            fee: 1,
+            authorizations: Vec::new(),
+        };
+        let payload = transaction.signing_bytes(&domain).unwrap();
+        let TransactionV2::Transfer { authorizations, .. } = &mut transaction else {
+            unreachable!();
+        };
+        authorizations.push(wallet.sign_v2_authorization(first, &payload).unwrap());
+        authorizations.push(wallet.sign_v2_authorization(second, &payload).unwrap());
+
+        let revealed = revealed_hybrid_keys(&transaction, AddressNetwork::Mainnet).unwrap();
+        assert_eq!(revealed.len(), 2);
+        assert_eq!(revealed[0].0, revealed[1].0);
+        assert_ne!(revealed[0].1, revealed[1].1);
+    }
 
     fn test_snapshot(seed: &str) -> ChainSnapshot {
         let wallet = Wallet::from_seed(seed);

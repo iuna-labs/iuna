@@ -495,6 +495,7 @@ pub(super) struct UiBlock {
     pub(super) prev_hash: String,
     pub(super) timestamp_ms: u64,
     pub(super) miner: String,
+    pub(super) reward_address: Option<String>,
     pub(super) finalizer_mode: crate::domain::FinalizerMode,
     pub(super) finalizer_rank: u32,
     pub(super) reward: Amount,
@@ -532,6 +533,7 @@ pub(super) struct UiByteBreakdown {
 pub(super) struct UiBurnBundle {
     pub(super) slot: u8,
     pub(super) member: String,
+    pub(super) reward_address: Option<String>,
     pub(super) hash: String,
     pub(super) byte_size: usize,
     pub(super) burns: Vec<UiTransaction>,

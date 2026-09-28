@@ -49,3 +49,40 @@ test('recognizes the primary address when the owned-address list is absent or em
     assert.equal(ui.shortAddressLabel('legacy'), 'legacy (me)');
   }
 });
+
+test('uses hybrid payout addresses for block rewards', () => {
+  const ui = app();
+  const block = {
+    miner: 'legacy-finalizer',
+    reward_address: 'rotated-finalizer',
+    reward: 10,
+    finalizer_mode: 'ticket',
+    finalizer_rank: 0,
+    burn_bundles: [{
+      slot: 1,
+      member: 'legacy-committee',
+      rewardAddress: 'rotated-committee',
+    }],
+  };
+
+  assert.equal(
+    ui.blockRewardOutputs(block).map((output) => output.address).join(','),
+    'rotated-finalizer,rotated-committee',
+  );
+});
+
+test('falls back to legacy identities for pre-activation block rewards', () => {
+  const ui = app();
+  const block = {
+    miner: 'legacy-finalizer',
+    reward: 10,
+    finalizer_mode: 'ticket',
+    finalizer_rank: 0,
+    burn_bundles: [{ slot: 1, member: 'legacy-committee' }],
+  };
+
+  assert.equal(
+    ui.blockRewardOutputs(block).map((output) => output.address).join(','),
+    'legacy-finalizer,legacy-committee',
+  );
+});
