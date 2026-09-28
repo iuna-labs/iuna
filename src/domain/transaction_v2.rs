@@ -27,7 +27,7 @@ pub const TRANSACTION_V2_ACTIVATION_HEIGHT: Option<u64> = Some(3_000);
 
 /// From this height, spending authorizations are encoded once per unique input owner instead of
 /// once per input. Historical v2 transactions retain their original per-input authorization rule.
-pub const TRANSACTION_V2_AUTHORIZATION_AGGREGATION_ACTIVATION_HEIGHT: u64 = 4_250;
+pub const TRANSACTION_V2_AUTHORIZATION_AGGREGATION_ACTIVATION_HEIGHT: u64 = 4_500;
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct TransactionV2Domain {
@@ -1144,7 +1144,7 @@ mod tests {
         assert_eq!(TRANSACTION_V2_ACTIVATION_HEIGHT, Some(3_000));
         assert_eq!(
             TRANSACTION_V2_AUTHORIZATION_AGGREGATION_ACTIVATION_HEIGHT,
-            4_250
+            4_500
         );
         assert!(!transaction_v2_is_active(0));
         assert!(!transaction_v2_is_active(2_999));
@@ -1155,7 +1155,7 @@ mod tests {
     }
 
     #[test]
-    fn repeated_owner_uses_one_authorization_from_height_4250() {
+    fn repeated_owner_uses_one_authorization_from_height_4500() {
         let public_key = hybrid_public_key();
         let owner = hybrid_key_commitment_address(&public_key).unwrap();
         let mut transaction = TransactionV2::Transfer {
@@ -1186,11 +1186,11 @@ mod tests {
 
         assert!(
             transaction
-                .validate_authorization_policy_at_height(4_249)
+                .validate_authorization_policy_at_height(4_499)
                 .is_err()
         );
         transaction
-            .validate_authorization_policy_at_height(4_250)
+            .validate_authorization_policy_at_height(4_500)
             .unwrap();
         transaction.verify_authorizations(&domain()).unwrap();
         let aggregated_size = transaction.encoded_size_bytes(&domain()).unwrap();
@@ -1199,11 +1199,11 @@ mod tests {
             authorizations.push(authorization);
         }
         transaction
-            .validate_authorization_policy_at_height(4_249)
+            .validate_authorization_policy_at_height(4_499)
             .unwrap();
         assert!(
             transaction
-                .validate_authorization_policy_at_height(4_250)
+                .validate_authorization_policy_at_height(4_500)
                 .is_err()
         );
         assert_eq!(

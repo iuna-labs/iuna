@@ -1277,7 +1277,7 @@ mod v2_migration_tests {
     use super::*;
 
     #[test]
-    fn migration_builder_aggregates_repeated_owner_authorizations_at_height_4250() {
+    fn migration_builder_aggregates_repeated_owner_authorizations_at_height_4500() {
         let wallet = Wallet::from_seed("aggregated-migration-wallet");
         let mut ledger = Ledger::new(BTreeMap::from([(wallet.address().to_string(), 100)]), 1);
         ledger.utxos.insert(

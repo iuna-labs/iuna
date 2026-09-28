@@ -264,18 +264,18 @@ mod tests {
     }
 
     #[test]
-    fn aggregated_authorization_capability_is_required_at_height_4250() {
+    fn aggregated_authorization_capability_is_required_at_height_4500() {
         let capabilities = vec![
             CAPABILITY_TRANSACTION_V2_BLOCKS.to_string(),
             CAPABILITY_TRANSACTION_V2_BURNS.to_string(),
             CAPABILITY_HYBRID_REWARD_PAYOUTS.to_string(),
         ];
-        assert!(validate_transaction_v2_peer_capability(&capabilities, 4_248, 4_248).is_ok());
-        assert!(validate_transaction_v2_peer_capability(&capabilities, 4_249, 4_248).is_err());
+        assert!(validate_transaction_v2_peer_capability(&capabilities, 4_498, 4_498).is_ok());
+        assert!(validate_transaction_v2_peer_capability(&capabilities, 4_499, 4_498).is_err());
 
         let mut upgraded = capabilities;
         upgraded.push(CAPABILITY_TRANSACTION_V2_AGGREGATED_AUTHORIZATIONS.to_string());
-        assert!(validate_transaction_v2_peer_capability(&upgraded, 4_249, 4_248).is_ok());
+        assert!(validate_transaction_v2_peer_capability(&upgraded, 4_499, 4_498).is_ok());
     }
 }
 
