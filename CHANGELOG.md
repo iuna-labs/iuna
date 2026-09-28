@@ -5,9 +5,17 @@ from the Git history and Conventional Commit titles by `deployment.sh`.
 
 ## [Unreleased]
 
-### Performance
+## [0.4.47] - 2026-09-28
 
-- aggregate transaction-v2 authorizations by input owner from block 4250
+### Added
+
+- aggregate v2 input authorizations
+- gate mining and label owned addresses
+
+### Fixed
+
+- move v2 authorization aggregation to 4500
+- recover balances across address gaps
 
 ## [0.4.46] - 2026-09-27
 
