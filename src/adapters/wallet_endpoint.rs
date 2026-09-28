@@ -1,7 +1,7 @@
 use std::{
     collections::{BTreeMap, BTreeSet},
     net::SocketAddr,
-    sync::Arc,
+    sync::{Arc, Mutex as StdMutex},
 };
 
 use anyhow::{Context, Result};
@@ -46,6 +46,7 @@ use crate::{
 // over twice the consensus block budget.
 const MAX_TRANSACTION_BODY_BYTES: usize = MAX_BLOCK_BYTES * 2 + 4 * 1024;
 const MAX_CONCURRENT_TRANSACTION_SUBMISSIONS: usize = 32;
+const MAX_WALLET_RECOVERY_CACHE_ENTRIES: usize = 256;
 // One legacy address plus the maximum external and reward address branches.
 const MAX_WALLET_ADDRESSES: usize = 20_001;
 
@@ -55,6 +56,13 @@ struct WalletEndpointState {
     gossip: GossipNetwork,
     transaction_slots: Arc<Semaphore>,
     ui_data_store: SqliteUiDataStore,
+    recovery_cache: Arc<StdMutex<WalletRecoveryCache>>,
+}
+
+#[derive(Default)]
+struct WalletRecoveryCache {
+    tip_hash: String,
+    addresses_by_public_key: BTreeMap<[u8; 32], Vec<String>>,
 }
 
 #[derive(Debug, Serialize)]
@@ -88,11 +96,14 @@ struct WalletEndpointStatus {
 #[derive(Debug, Deserialize)]
 struct WalletSnapshotRequest {
     addresses: Vec<String>,
+    #[serde(default)]
+    recovery_address: Option<String>,
 }
 
 #[derive(Debug, Serialize)]
 struct WalletSnapshotResponse {
     addresses: Vec<WalletAddressSnapshot>,
+    recovery_addresses: Vec<String>,
     confirmed: Amount,
     spendable: Amount,
     pending_outgoing: Amount,
@@ -300,6 +311,7 @@ fn router(node: SharedNode, gossip: GossipNetwork, ui_data_store: SqliteUiDataSt
             gossip,
             transaction_slots: Arc::new(Semaphore::new(MAX_CONCURRENT_TRANSACTION_SUBMISSIONS)),
             ui_data_store,
+            recovery_cache: Arc::new(StdMutex::new(WalletRecoveryCache::default())),
         })
 }
 
@@ -307,7 +319,7 @@ async fn status(State(state): State<WalletEndpointState>) -> Json<WalletEndpoint
     let node = state.node.lock().await;
     let ledger = node.ledger();
     Json(WalletEndpointStatus {
-        api_version: 2,
+        api_version: 3,
         ready: node.has_real_chain() && node.network_migration_from().is_none(),
         network_migration_required: node.network_migration_from().is_some(),
         network_id: NETWORK_ID.to_string(),
@@ -351,6 +363,56 @@ async fn wallet_snapshot(
     let ledger = node.ledger();
     let network =
         crate::domain::AddressNetwork::from_profile_id(&ledger.launch_profile().profile_id);
+    let recovery_addresses = if let Some(recovery_address) = request.recovery_address {
+        let decoded = node
+            .decode_user_address(&recovery_address)
+            .map_err(bad_request)?;
+        if decoded.version != AddressVersion::Ed25519PublicKey {
+            return Err(api_error(
+                StatusCode::BAD_REQUEST,
+                "wallet recovery requires a legacy address",
+            ));
+        }
+        let tip_hash = ledger.tip_hash();
+        let cached = {
+            let mut cache = state
+                .recovery_cache
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner());
+            if cache.tip_hash != tip_hash {
+                cache.tip_hash = tip_hash.to_string();
+                cache.addresses_by_public_key.clear();
+            }
+            cache.addresses_by_public_key.get(&decoded.payload).cloned()
+        };
+        if let Some(addresses) = cached {
+            addresses
+        } else {
+            let addresses = ledger
+                .wallet_authored_hybrid_addresses(decoded.payload)
+                .map_err(internal_error)?
+                .into_iter()
+                .map(|address| encode_versioned_address(address, network).map_err(internal_error))
+                .collect::<Result<Vec<_>, _>>()?;
+            let mut cache = state
+                .recovery_cache
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner());
+            if cache.tip_hash == tip_hash {
+                if cache.addresses_by_public_key.len() >= MAX_WALLET_RECOVERY_CACHE_ENTRIES {
+                    if let Some(evicted) = cache.addresses_by_public_key.keys().next().copied() {
+                        cache.addresses_by_public_key.remove(&evicted);
+                    }
+                }
+                cache
+                    .addresses_by_public_key
+                    .insert(decoded.payload, addresses.clone());
+            }
+            addresses
+        }
+    } else {
+        Vec::new()
+    };
     let used_hybrid = ledger
         .used_hybrid_encoded_addresses()
         .map_err(internal_error)?
@@ -460,6 +522,7 @@ async fn wallet_snapshot(
     });
     Ok(Json(WalletSnapshotResponse {
         addresses,
+        recovery_addresses,
         confirmed,
         spendable,
         pending_outgoing: confirmed.saturating_sub(spendable),
@@ -1106,6 +1169,21 @@ mod tests {
             .clone()
             .oneshot(
                 Request::builder()
+                    .uri("/v1/status")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+        let body = to_bytes(response.into_body(), 64 * 1024).await.unwrap();
+        let value: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        assert_eq!(value["api_version"], 3);
+
+        let response = app
+            .clone()
+            .oneshot(
+                Request::builder()
                     .uri(format!("/v1/addresses/{receive_address}/balance"))
                     .body(Body::empty())
                     .unwrap(),
@@ -1129,7 +1207,8 @@ mod tests {
                     .header(header::CONTENT_TYPE, "application/json")
                     .body(Body::from(
                         serde_json::to_vec(&serde_json::json!({
-                            "addresses": [receive_address.clone()]
+                            "addresses": [receive_address.clone()],
+                            "recovery_address": receive_address.clone()
                         }))
                         .unwrap(),
                     ))
@@ -1144,6 +1223,7 @@ mod tests {
         assert_eq!(value["spendable"], 5 * MICRO_IUNA);
         assert_eq!(value["addresses"][0]["version"], 0);
         assert_eq!(value["addresses"][0]["used"], false);
+        assert_eq!(value["recovery_addresses"], serde_json::json!([]));
         assert_eq!(value["utxos"].as_array().unwrap().len(), 1);
 
         let wrong_network = encode_address(wallet.address(), AddressNetwork::Testnet).unwrap();

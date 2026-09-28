@@ -171,7 +171,8 @@ impl Ledger {
             return Ok(());
         }
 
-        let mut targets = self.wallet_authored_hybrid_addresses(wallet)?;
+        let mut targets =
+            self.wallet_authored_hybrid_addresses(wallet.legacy_versioned_address().payload)?;
         let mut highest_external = None;
         let mut highest_reward = None;
         for index in 0..MAX_DISCOVERED_EXTERNAL_ADDRESSES {
@@ -200,8 +201,10 @@ impl Ledger {
         Ok(())
     }
 
-    fn wallet_authored_hybrid_addresses(&self, wallet: &Wallet) -> Result<Vec<VersionedAddress>> {
-        let legacy_public_key = wallet.legacy_versioned_address().payload;
+    pub(crate) fn wallet_authored_hybrid_addresses(
+        &self,
+        legacy_public_key: [u8; 32],
+    ) -> Result<Vec<VersionedAddress>> {
         let domain = self.transaction_v2_domain()?;
         let mut owned = Vec::new();
         for block in self.chain() {
@@ -1503,6 +1506,11 @@ mod v2_migration_tests {
             .unwrap()
             .transactions_v2
             .push(hex_encode(burn.encode(&domain).unwrap()));
+
+        let recovery_addresses = ledger
+            .wallet_authored_hybrid_addresses(signing_wallet.legacy_versioned_address().payload)
+            .unwrap();
+        assert_eq!(recovery_addresses, vec![source, change]);
 
         let restored = Wallet::from_seed(seed);
         let owned = ledger.wallet_owned_hybrid_addresses(&restored).unwrap();

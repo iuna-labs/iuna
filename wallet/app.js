@@ -1,7 +1,8 @@
 import {
   API_BASE, LEGACY_STORAGE_KEY, STORAGE_KEY, api, buildSignedTransfer, decodeVersionedAddress,
   decryptWallet, encodeAddress, encryptWallet, formatIuna, hexToBytes, normalizeWalletStore,
-  parseFeeRate, parseIuna, removeWallet, upsertWallet, walletFromSeed, walletId,
+  nextRecoveryScanCounts, parseFeeRate, parseIuna, removeWallet, upsertWallet, walletFromSeed,
+  walletId,
 } from "./wallet-core.js";
 import { generateMnemonic, validateMnemonic } from "./mnemonic.js";
 import initQuantumCrypto, {
@@ -162,7 +163,7 @@ async function fetchWalletData() {
     state.addressIndex = 0;
     state.address = address;
   } else if (state.status.transaction_v2_active) {
-    if (Number(state.status.api_version || 0) < 2) throw new Error("The public iuna endpoint must be upgraded for rotating quantum-resistant wallets");
+    if (Number(state.status.api_version || 0) < 3) throw new Error("The public iuna endpoint must be upgraded for complete rotating-wallet recovery");
     await ensureQuantumCrypto();
     const gapLimit = Math.max(1, Number(state.status.hybrid_address_gap_limit || 20));
     let externalCount = gapLimit + 1;
@@ -174,6 +175,9 @@ async function fetchWalletData() {
       state.derivedAddresses = [];
       state.derivedRewardAddresses = [];
       state.derivedWalletId = derivationScope;
+    } else {
+      externalCount = Math.max(externalCount, state.derivedAddresses.length);
+      rewardCount = Math.max(rewardCount, state.derivedRewardAddresses.length);
     }
     for (;;) {
       if (state.derivedAddresses.length < externalCount) {
@@ -188,7 +192,21 @@ async function fetchWalletData() {
         state.legacyAddress,
         ...derived.map((item) => item.address),
         ...rewardDerived.map((item) => item.address),
-      ]);
+      ], state.legacyAddress);
+      const recoveryScan = nextRecoveryScanCounts({
+        externalAddresses: derived,
+        rewardAddresses: rewardDerived,
+        recoveryAddresses: snapshot.recovery_addresses,
+        gapLimit,
+      });
+      if (recoveryScan.unresolved.length) {
+        if (recoveryScan.externalCount === externalCount && recoveryScan.rewardCount === rewardCount) {
+          throw new Error("Wallet address recovery exceeded its recovery limit");
+        }
+        externalCount = recoveryScan.externalCount;
+        rewardCount = recoveryScan.rewardCount;
+        continue;
+      }
       const used = new Set(snapshot.addresses.filter((item) => item.used).map((item) => item.address));
       const highestExternal = derived.reduce((highest, item) => used.has(item.address) ? Math.max(highest, item.index) : highest, -1);
       const highestReward = rewardDerived.reduce((highest, item) => used.has(item.address) ? Math.max(highest, item.index) : highest, -1);
@@ -255,8 +273,11 @@ async function fetchWalletData() {
   }
 }
 
-function fetchSnapshot(addresses) {
-  return api("/wallets/snapshot", { method: "POST", body: JSON.stringify({ addresses }) });
+function fetchSnapshot(addresses, recoveryAddress = null) {
+  return api("/wallets/snapshot", {
+    method: "POST",
+    body: JSON.stringify({ addresses, ...(recoveryAddress ? { recovery_address: recoveryAddress } : {}) }),
+  });
 }
 
 function fetchTransactions(offset, limit, filters = state.transactionFilters) {

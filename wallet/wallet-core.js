@@ -51,6 +51,35 @@ export function removeWallet(store, id) {
   return { version: 2, activeId: wallets[0]?.id || null, wallets };
 }
 
+export function nextRecoveryScanCounts({
+  externalAddresses,
+  rewardAddresses,
+  recoveryAddresses,
+  gapLimit,
+  maxAddresses = 10_000,
+}) {
+  const known = new Set([
+    ...externalAddresses.map((item) => item.address),
+    ...rewardAddresses.map((item) => item.address),
+  ]);
+  const unresolved = [...new Set(recoveryAddresses || [])]
+    .filter((address) => !known.has(address));
+  if (!unresolved.length) {
+    return {
+      externalCount: externalAddresses.length,
+      rewardCount: rewardAddresses.length,
+      unresolved,
+    };
+  }
+  const increment = Math.max(1, Number(gapLimit) || 1);
+  const nextCount = (count) => Math.min(maxAddresses, Math.max(count + increment, count * 2));
+  return {
+    externalCount: nextCount(externalAddresses.length),
+    rewardCount: nextCount(rewardAddresses.length),
+    unresolved,
+  };
+}
+
 export function ensureTransactionBodySize(transaction) {
   const bodyBytes = encoder.encode(JSON.stringify(transaction)).byteLength;
   if (bodyBytes > MAX_TRANSACTION_BODY_BYTES) {

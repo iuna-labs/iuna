@@ -36,6 +36,56 @@ test('adds, selects, and removes multiple wallet types', () => {
   assert.deepEqual(store.wallets.map((wallet) => wallet.id), ['signing']);
 });
 
+test('extends both hybrid branches until historical recovery addresses are found', () => {
+  const externalAddresses = Array.from({ length: 21 }, (_, index) => ({ index, address: `external-${index}` }));
+  const rewardAddresses = Array.from({ length: 20 }, (_, index) => ({ index, address: `reward-${index}` }));
+  const expanded = core.nextRecoveryScanCounts({
+    externalAddresses,
+    rewardAddresses,
+    recoveryAddresses: ['external-27'],
+    gapLimit: 20,
+  });
+
+  assert.equal(expanded.externalCount, 42);
+  assert.equal(expanded.rewardCount, 40);
+  assert.deepEqual(expanded.unresolved, ['external-27']);
+
+  const recovered = core.nextRecoveryScanCounts({
+    externalAddresses: Array.from({ length: 41 }, (_, index) => ({ index, address: `external-${index}` })),
+    rewardAddresses: Array.from({ length: 40 }, (_, index) => ({ index, address: `reward-${index}` })),
+    recoveryAddresses: ['external-27'],
+    gapLimit: 20,
+  });
+  assert.equal(recovered.externalCount, 41);
+  assert.equal(recovered.rewardCount, 40);
+  assert.deepEqual(recovered.unresolved, []);
+
+  const rewardRecovered = core.nextRecoveryScanCounts({
+    externalAddresses,
+    rewardAddresses,
+    recoveryAddresses: ['reward-27'],
+    gapLimit: 20,
+  });
+  assert.equal(rewardRecovered.externalCount, 42);
+  assert.equal(rewardRecovered.rewardCount, 40);
+  assert.deepEqual(rewardRecovered.unresolved, ['reward-27']);
+});
+
+test('stops historical recovery cleanly at the derivation safety limit', () => {
+  const addresses = Array.from({ length: 10 }, (_, index) => ({ index, address: `address-${index}` }));
+  const result = core.nextRecoveryScanCounts({
+    externalAddresses: addresses,
+    rewardAddresses: addresses,
+    recoveryAddresses: ['missing'],
+    gapLimit: 20,
+    maxAddresses: 10,
+  });
+
+  assert.equal(result.externalCount, 10);
+  assert.equal(result.rewardCount, 10);
+  assert.deepEqual(result.unresolved, ['missing']);
+});
+
 test('refuses to sign with a watch-only wallet', async () => {
   await assert.rejects(
     core.buildSignedTransfer({ wallet: { publicKeyHex: '22'.repeat(32) } }),
@@ -109,6 +159,26 @@ test('browser crypto derives the same rotating hybrid address vectors as the nod
     { index: 0, address: 'iuna1pvxpc35gavamxw0tvqj3ms82gwtvchh7mdyzqdttx7ktx7pfkgz4qkaq24k' },
     { index: 1, address: 'iuna1p6cj9c3ths75p7vnsdx9tgkvu4jlzs8cxpnh2lc4klsu5fvd0cpxq8ypw45' },
   ]);
+
+  const externalRecoveryAddresses = JSON.parse(quantum.derive_external_addresses('hybrid-wallet-seed', 42, 'iuna-mainnet-v1'));
+  const rewardRecoveryAddresses = JSON.parse(quantum.derive_reward_addresses('hybrid-wallet-seed', 40, 'iuna-mainnet-v1'));
+  const recoveryTargets = [externalRecoveryAddresses[27].address, rewardRecoveryAddresses[27].address];
+  const initialRecovery = core.nextRecoveryScanCounts({
+    externalAddresses: externalRecoveryAddresses.slice(0, 21),
+    rewardAddresses: rewardRecoveryAddresses.slice(0, 20),
+    recoveryAddresses: recoveryTargets,
+    gapLimit: 20,
+  });
+  assert.equal(initialRecovery.externalCount, 42);
+  assert.equal(initialRecovery.rewardCount, 40);
+  assert.deepEqual(initialRecovery.unresolved, recoveryTargets);
+  const completedRecovery = core.nextRecoveryScanCounts({
+    externalAddresses: externalRecoveryAddresses,
+    rewardAddresses: rewardRecoveryAddresses,
+    recoveryAddresses: recoveryTargets,
+    gapLimit: 20,
+  });
+  assert.deepEqual(completedRecovery.unresolved, []);
 
   const built = JSON.parse(quantum.build_transfer(JSON.stringify({
     seed: 'hybrid-wallet-seed',
