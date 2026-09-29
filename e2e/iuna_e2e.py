@@ -516,6 +516,9 @@ def automatic_finalization_settings(statuses: dict[str, dict]) -> dict[str, dict
             "enabled": bool(statuses[service]["mining"]["automatic"]),
             "amount": int(statuses[service]["mining"]["burn_per_block"]),
             "fee_per_byte": int(statuses[service]["mining"]["automatic_burn_fee"]),
+            "recovery_top_rank_percent": int(
+                statuses[service]["mining"]["recovery_vdf_top_rank_percent"]
+            ),
         }
         for service in SERVICES
     }
@@ -524,10 +527,6 @@ def automatic_finalization_settings(statuses: dict[str, dict]) -> dict[str, dict
 def configure_partition_recovery_workers(
     statuses: dict[str, dict], settings: dict[str, dict], timeout: float
 ) -> dict[str, str]:
-    workers = {
-        "left": PARTITION_GROUPS[0][0],
-        "right": PARTITION_GROUPS[1][0],
-    }
     for label, group in (("left", PARTITION_GROUPS[0]), ("right", PARTITION_GROUPS[1])):
         tips = {statuses[service]["chain"]["tip_hash"] for service in group}
         if len(tips) != 1:
@@ -537,8 +536,6 @@ def configure_partition_recovery_workers(
 
     for service in SERVICES:
         mining = statuses[service]["mining"]
-        if service == workers["left"]:
-            continue
         node_form(
             service,
             "/api/settings/burn-per-block",
@@ -555,18 +552,35 @@ def configure_partition_recovery_workers(
     time.sleep(2)
     current = all_statuses()
     target = max(status["chain"]["height"] for status in current.values())
-    wait_for_height(target, timeout, converge=True)
+    settled = wait_for_height(target, timeout, converge=True)
 
-    right_settings = settings[workers["right"]]
-    node_form(
-        workers["right"],
-        "/api/settings/burn-per-block",
-        {
-            "enabled": "true",
-            "amount": right_settings["amount"],
-            "fee_per_byte": right_settings["fee_per_byte"],
-        },
-    )
+    workers = {}
+    for label, group in (("left", PARTITION_GROUPS[0]), ("right", PARTITION_GROUPS[1])):
+        candidates = [
+            service
+            for service in group
+            if not settled[service]["mining"]["wallet_is_current_leader"]
+        ]
+        if not candidates:
+            raise E2EError(f"cannot select a non-leader {label} recovery worker")
+        workers[label] = candidates[0]
+
+    for worker in workers.values():
+        worker_settings = settings[worker]
+        node_form(
+            worker,
+            "/api/settings/recovery-vdf",
+            {"top_rank_percent": 0},
+        )
+        node_form(
+            worker,
+            "/api/settings/burn-per-block",
+            {
+                "enabled": "true",
+                "amount": worker_settings["amount"],
+                "fee_per_byte": worker_settings["fee_per_byte"],
+            },
+        )
     print(
         "partition recovery workers: " + json.dumps(workers, sort_keys=True),
         flush=True,
@@ -576,6 +590,11 @@ def configure_partition_recovery_workers(
 
 def restore_automatic_finalization(settings: dict[str, dict]) -> None:
     for service, values in settings.items():
+        node_form(
+            service,
+            "/api/settings/recovery-vdf",
+            {"top_rank_percent": values["recovery_top_rank_percent"]},
+        )
         node_form(
             service,
             "/api/settings/burn-per-block",

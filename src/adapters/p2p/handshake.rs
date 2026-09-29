@@ -50,13 +50,13 @@ pub(super) async fn record_peer_status(
     } else {
         let peer = remote_addr.to_string();
         let mut peers = network.inner.peers.lock().await;
+        peers.record_inbound_status(&peer, peer_status.height, peer_status.tip_hash.clone());
         peers.record_clock_observation(
             &peer,
             PeerDirection::Inbound,
             peer_status.time_ms,
             local_receive_time_ms,
         );
-        peers.record_received(&peer, 1);
     }
 }
 
@@ -461,7 +461,7 @@ mod tests {
     use std::sync::Arc;
 
     use crate::{
-        app::{PeerBook, PeerDirection},
+        app::{PeerBook, PeerDirection, now_ms},
         domain::Wallet,
     };
 
@@ -552,9 +552,13 @@ mod tests {
 
         let peers = peers.lock().await;
         assert!(peers.addresses().is_empty());
+        assert!(peers.has_good_connection_at(now_ms()));
         let listed = peers.list();
         assert_eq!(listed.len(), 1);
         assert_eq!(listed[0].direction, PeerDirection::Inbound);
+        assert_eq!(listed[0].messages_received, 1);
+        assert_eq!(listed[0].last_known_height, Some(4));
+        assert_eq!(listed[0].last_known_tip_hash.as_deref(), Some("tip"));
     }
 
     #[tokio::test]

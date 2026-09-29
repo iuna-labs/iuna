@@ -371,6 +371,20 @@ impl PeerBook {
         }
     }
 
+    pub fn record_inbound_status(&mut self, address: &str, height: u64, tip_hash: String) {
+        let now = now_ms();
+        let peer = self.ensure(address, PeerDirection::Inbound);
+        peer.messages_received += 1;
+        peer.last_known_height = Some(height);
+        peer.last_known_tip_hash = Some(tip_hash);
+        peer.last_contact_ms = Some(now);
+        peer.last_success_ms = Some(now);
+        if !peer.is_banned_at(now) {
+            peer.last_error = None;
+            peer.clear_misbehavior();
+        }
+    }
+
     pub fn record_hello(&mut self, address: &str, direction: PeerDirection, hello: ProtocolHello) {
         self.ensure(address, direction).last_hello = Some(hello);
     }
@@ -650,5 +664,21 @@ mod tests {
             .last_known_height = Some(1);
 
         assert!(!peers.has_good_connection_at(now));
+    }
+
+    #[test]
+    fn inbound_status_counts_as_a_good_connection_without_becoming_connectable() {
+        let mut peers = PeerBook::default();
+        let address = "127.0.0.1:49152";
+
+        peers.record_inbound_status(address, 42, "tip".to_string());
+
+        assert!(peers.has_good_connection_at(now_ms()));
+        assert_eq!(peers.list()[0].messages_received, 1);
+        assert_eq!(
+            peers.direction_for_tests(address),
+            Some(PeerDirection::Inbound)
+        );
+        assert!(!peers.is_connectable_peer(address));
     }
 }
