@@ -5,6 +5,18 @@ from the Git history and Conventional Commit titles by `deployment.sh`.
 
 ## [Unreleased]
 
+## [0.4.48] - 2026-09-29
+
+### Added
+
+- track value on revealed keys
+- add consensus influence comparison charts
+
+### Fixed
+
+- preview consolidation without signing
+- restore partition recovery coverage
+
 ## [0.4.47] - 2026-09-28
 
 ### Added
