@@ -1216,6 +1216,7 @@ async fn startup_resumes_persisted_chain_without_genesis_flag() {
     assert_eq!(resumed.status().tip_hash, persisted.status().tip_hash);
     assert_eq!(resumed.genesis_hash(), persisted.genesis_hash());
     assert_eq!(resumed.balance_of(fresh_wallet.address()), 0);
+    assert!(resumed.requires_persistence);
 }
 
 #[tokio::test]
@@ -1259,6 +1260,7 @@ async fn startup_rebuilds_state_from_a_locally_trusted_chain() {
         persisted.balance_of(wallet.address())
     );
     assert_eq!(resumed.snapshot(), persisted.snapshot());
+    assert!(!resumed.requires_persistence);
 }
 
 #[test]

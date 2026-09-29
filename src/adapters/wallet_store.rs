@@ -169,14 +169,14 @@ pub fn load_with_password(path: &Path, password: &str) -> Result<Wallet> {
     load_encrypted_or_plaintext(path, Some(password))
 }
 
-pub fn encrypt_existing_with_password(path: &Path, password: &str) -> Result<()> {
+pub fn load_or_encrypt_with_password(path: &Path, password: &str) -> Result<Wallet> {
     if !path.exists() {
-        return Ok(());
+        return replace_with_generated_seed_phrase_encrypted(path, password)
+            .map(|(wallet, _)| wallet);
     }
     let stored = read_wallet_file(path)?;
     if stored.encryption.is_some() {
-        let _ = wallet_from_stored(&stored, Some(password))?;
-        return Ok(());
+        return wallet_from_stored(&stored, Some(password));
     }
     let data = wallet_data(&stored, None)?;
     let seed = data.seed;
@@ -196,7 +196,15 @@ pub fn encrypt_existing_with_password(path: &Path, password: &str) -> Result<()>
         password,
         WalletFileMode::Replace,
     )
-    .with_context(|| format!("failed to encrypt wallet file {}", path.display()))
+    .with_context(|| format!("failed to encrypt wallet file {}", path.display()))?;
+    Ok(wallet)
+}
+
+pub fn encrypt_existing_with_password(path: &Path, password: &str) -> Result<()> {
+    if !path.exists() {
+        return Ok(());
+    }
+    load_or_encrypt_with_password(path, password).map(drop)
 }
 
 pub fn reencrypt_with_password(

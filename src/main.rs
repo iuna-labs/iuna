@@ -182,6 +182,7 @@ async fn main() -> Result<()> {
     )
     .await?;
     let migration_from = initialized_ledger.migration_from.clone();
+    let chain_requires_persistence = initialized_ledger.requires_persistence;
     let migration_required = migration_from.is_some();
     let ledger = initialized_ledger.ledger;
     let has_chain = migration_from.is_none() && (opts.has_chain() || persisted_chain_exists);
@@ -228,7 +229,9 @@ async fn main() -> Result<()> {
     if has_chain {
         let initial_snapshot = { node.lock().await.chain_snapshot() };
         let keep_metrics = ui_config.lock().await.keep_track_of_metrics;
-        persist_chain_snapshot(&chain_store, initial_snapshot.clone()).await?;
+        if chain_requires_persistence {
+            persist_chain_snapshot(&chain_store, initial_snapshot.clone()).await?;
+        }
         warm_ui_data_store(&ui_data_store, initial_snapshot, keep_metrics).await?;
     } else if !migration_required {
         clear_ui_data_store(&ui_data_store).await?;
@@ -395,13 +398,7 @@ fn load_startup_wallet(
     startup_wallet_password: Option<&str>,
 ) -> Result<StartupWallet> {
     if let Some(password) = startup_wallet_password {
-        if wallet_path.exists() {
-            wallet_store::encrypt_existing_with_password(wallet_path, password)?;
-            let wallet = wallet_store::load_with_password(wallet_path, password)?;
-            return Ok(StartupWallet::Unlocked { wallet });
-        }
-        let (wallet, _) =
-            wallet_store::replace_with_generated_seed_phrase_encrypted(wallet_path, password)?;
+        let wallet = wallet_store::load_or_encrypt_with_password(wallet_path, password)?;
         return Ok(StartupWallet::Unlocked { wallet });
     }
 
@@ -627,6 +624,7 @@ async fn initialize_ledger(
             return Ok(InitializedLedger {
                 ledger: setup_ledger(local_testnet),
                 migration_from: Some(snapshot.launch_profile.profile_id),
+                requires_persistence: false,
             });
         }
         if enforce_pinned_genesis {
@@ -645,6 +643,7 @@ async fn initialize_ledger(
                 "local chain is trusted under the current consensus ruleset; skipping historical validation"
             ),
         }
+        let requires_persistence = loaded.revalidation_from_height.is_some();
         let ledger = Ledger::from_persisted_snapshot_revalidating_from(
             snapshot,
             loaded.revalidation_from_height,
@@ -662,6 +661,7 @@ async fn initialize_ledger(
         Ok(InitializedLedger {
             ledger,
             migration_from: None,
+            requires_persistence,
         })
     } else {
         let ledger = match opts.chain_mode {
@@ -684,6 +684,7 @@ async fn initialize_ledger(
         Ok(InitializedLedger {
             ledger,
             migration_from: None,
+            requires_persistence: opts.has_chain(),
         })
     }
 }
@@ -692,6 +693,7 @@ async fn initialize_ledger(
 struct InitializedLedger {
     ledger: Ledger,
     migration_from: Option<String>,
+    requires_persistence: bool,
 }
 
 fn restore_pending_transactions_v2(

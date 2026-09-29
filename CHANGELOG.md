@@ -5,6 +5,10 @@ from the Git history and Conventional Commit titles by `deployment.sh`.
 
 ## [Unreleased]
 
+### Performance
+
+- Avoid duplicate wallet key derivation and redundant chain snapshot writes during node startup
+
 ## [0.4.50] - 2026-09-29
 
 ### Fixed
