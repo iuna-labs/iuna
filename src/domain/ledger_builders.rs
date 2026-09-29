@@ -1423,7 +1423,7 @@ mod v2_migration_tests {
     fn receive_and_change_advance_after_the_current_external_address_is_used() {
         let wallet = Wallet::from_seed("rotating-external-wallet");
         let recipient = Wallet::from_seed("rotating-external-recipient");
-        let mut ledger = Ledger::new(BTreeMap::new(), 1);
+        let mut ledger = Ledger::new(BTreeMap::from([(wallet.address().to_string(), 101)]), 1);
         let owner = wallet.hybrid_versioned_address();
         let initial_receive = ledger.wallet_receive_address(&wallet).unwrap();
         assert_eq!(
@@ -1431,15 +1431,8 @@ mod v2_migration_tests {
             wallet.hybrid_address(AddressNetwork::Mainnet)
         );
 
-        ledger.pending_v2.push(TransactionV2::Migration {
-            inputs: Vec::new(),
-            outputs: vec![TransactionV2Output {
-                address: owner,
-                amount: 100,
-            }],
-            fee: 0,
-            authorizations: Vec::new(),
-        });
+        let pending_migration = ledger.build_v2_migration(&wallet, 1).unwrap();
+        ledger.pending_v2.push(pending_migration);
         let rotated_receive = ledger.wallet_receive_address(&wallet).unwrap();
         assert_eq!(
             rotated_receive,

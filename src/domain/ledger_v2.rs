@@ -91,15 +91,7 @@ impl Ledger {
             bail!("mempool byte limit exceeded");
         }
 
-        let mut utxos = self.utxos_after_spendable_pending()?;
-        for pending in &self.pending_v2 {
-            apply_prevalidated_transaction_v2_to_utxos(
-                pending,
-                &domain,
-                AddressNetwork::from_profile_id(&self.launch_profile.profile_id),
-                &mut utxos,
-            )?;
-        }
+        let mut utxos = self.utxos_after_all_spendable_pending()?;
         apply_transaction_v2_to_utxos(
             &transaction,
             &domain,
@@ -109,6 +101,20 @@ impl Ledger {
         self.pending_v2.push(transaction);
         self.pending_v2_bytes = self.pending_v2_bytes.saturating_add(transaction_bytes);
         Ok(TransactionSubmitOutcome::Added)
+    }
+
+    pub(super) fn utxos_after_all_spendable_pending(&self) -> Result<BTreeMap<OutPoint, TxOutput>> {
+        let mut utxos = self.utxos_after_spendable_pending()?;
+        if self.pending_v2.is_empty() {
+            return Ok(utxos);
+        }
+
+        let domain = self.transaction_v2_domain()?;
+        let network = AddressNetwork::from_profile_id(&self.launch_profile.profile_id);
+        for pending in &self.pending_v2 {
+            apply_prevalidated_transaction_v2_to_utxos(pending, &domain, network, &mut utxos)?;
+        }
+        Ok(utxos)
     }
 
     pub(super) fn transaction_conflicts_with_pending_v2(&self, transaction: &Transaction) -> bool {
@@ -522,7 +528,7 @@ fn internal_address(address: super::VersionedAddress, network: AddressNetwork) -
 
 #[cfg(test)]
 mod tests {
-    use std::collections::BTreeMap;
+    use std::collections::{BTreeMap, BTreeSet};
 
     use super::*;
     use crate::domain::{
@@ -658,13 +664,7 @@ mod tests {
         );
         assert_eq!(burn.amount(), 9);
         ledger.submit_transaction_v2(burn.clone()).unwrap();
-        let mut low_fee_build_ledger = ledger.clone();
-        low_fee_build_ledger
-            .utxos
-            .retain(|_, output| output.amount == 40);
-        let low_fee_burn = low_fee_build_ledger
-            .build_v2_burn_for_next_block(&wallet, 7, 1)
-            .unwrap();
+        let low_fee_burn = ledger.build_v2_burn_for_next_block(&wallet, 7, 1).unwrap();
         ledger.submit_transaction_v2(low_fee_burn.clone()).unwrap();
 
         let bundles = ledger.build_burn_bundles(&wallet).unwrap();
@@ -822,6 +822,37 @@ mod tests {
             TransactionSubmitOutcome::Added
         );
         assert_eq!(ledger.pending_v2().len(), 2);
+    }
+
+    #[test]
+    fn available_utxos_include_pending_v2_state() {
+        let wallet = Wallet::from_seed("v2-ledger-available-utxos-wallet");
+        let mut ledger = Ledger::new(BTreeMap::from([(wallet.address().to_string(), 100)]), 1);
+        let migration = ledger.build_v2_migration(&wallet, 3).unwrap();
+        ledger
+            .submit_transaction_v2_at_height(migration, 3_000)
+            .unwrap();
+
+        assert!(
+            ledger
+                .available_utxos_for_address(wallet.address())
+                .unwrap()
+                .is_empty()
+        );
+        let hybrid = ledger
+            .available_utxos_for_address(&wallet.hybrid_address(AddressNetwork::Mainnet))
+            .unwrap();
+        assert_eq!(hybrid.len(), 1);
+        assert_eq!(hybrid[0].1.amount, 97);
+
+        let wallet_addresses = BTreeSet::from([
+            wallet.address().to_string(),
+            wallet.hybrid_address(AddressNetwork::Mainnet),
+        ]);
+        let snapshot_utxos = ledger
+            .available_utxos_for_addresses(&wallet_addresses)
+            .unwrap();
+        assert_eq!(snapshot_utxos, hybrid);
     }
 
     #[test]

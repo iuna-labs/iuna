@@ -685,7 +685,7 @@ impl Ledger {
 
     pub fn available_utxos_for_address(&self, address: &str) -> Result<Vec<(OutPoint, TxOutput)>> {
         Ok(self
-            .utxos_after_spendable_pending()?
+            .utxos_after_all_spendable_pending()?
             .into_iter()
             .filter(|(_, output)| output.address == address)
             .collect())
@@ -696,7 +696,7 @@ impl Ledger {
         addresses: &BTreeSet<String>,
     ) -> Result<Vec<(OutPoint, TxOutput)>> {
         Ok(self
-            .utxos_after_spendable_pending()?
+            .utxos_after_all_spendable_pending()?
             .into_iter()
             .filter(|(_, output)| addresses.contains(&output.address))
             .collect())
