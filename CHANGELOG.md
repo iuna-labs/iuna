@@ -5,9 +5,15 @@ from the Git history and Conventional Commit titles by `deployment.sh`.
 
 ## [Unreleased]
 
+## [0.4.51] - 2026-09-30
+
+### Added
+
+- collapse mining event log by default
+
 ### Performance
 
-- Avoid duplicate wallet key derivation and redundant chain snapshot writes during node startup
+- speed up startup on slower hardware
 
 ## [0.4.50] - 2026-09-29
 
