@@ -279,8 +279,14 @@ pub(super) const INDEX_HTML: &str = concat!(
     .mine-include-status.ready { color: #d5f55f; }
     .mine-include-status.muted { color: #879198; }
     .mine-save-row { display: flex; justify-content: flex-start; }
-    .mining-event-log { display: grid; gap: 8px; max-height: 360px; overflow: auto; margin-top: 12px; border: 1px solid #2f363c; border-radius: 8px; padding: 8px; background: #0f1114; }
-    .mining-event-log-head { display: flex; justify-content: space-between; gap: 10px; align-items: baseline; color: #879198; font-size: 10px; font-weight: 850; text-transform: uppercase; }
+    .mining-event-log { margin-top: 8px; color: #7f888e; }
+    .mining-event-log[open] { display: grid; gap: 8px; max-height: 360px; overflow: auto; margin-top: 12px; border: 1px solid #2f363c; border-radius: 8px; padding: 8px; background: #0f1114; }
+    .mining-event-log-head { display: inline-flex; gap: 5px; align-items: baseline; padding: 4px 2px; color: #7f888e; font-size: 11px; font-weight: 700; cursor: pointer; list-style: none; }
+    .mining-event-log-head::-webkit-details-marker { display: none; }
+    .mining-event-log-head > span:first-child::before { content: "\25B8"; display: inline-block; width: 11px; color: currentColor; transition: transform .16s ease; }
+    .mining-event-log-head > span:last-child::before { content: "\00B7"; margin-right: 5px; }
+    .mining-event-log[open] .mining-event-log-head > span:first-child::before { transform: rotate(90deg); }
+    .mining-event-log-head:hover, .mining-event-log-head:focus-visible { color: #b8c1c6; outline: none; }
     .mining-event { display: grid; grid-template-columns: auto minmax(0, 1fr) auto; gap: 10px; align-items: start; border: 1px solid #30383d; border-radius: 8px; padding: 10px; background: #111316; }
     .mining-event-dot { width: 8px; height: 8px; margin-top: 5px; border-radius: 999px; background: #7f888e; }
     .mining-event.active .mining-event-dot { background: #d5f55f; box-shadow: 0 0 12px rgba(213, 245, 95, .45); }
@@ -932,8 +938,8 @@ pub(super) const INDEX_HTML: &str = concat!(
               <div class="mine-stat-value" x-text="localMiningMempoolLabel()"></div>
             </div>
           </div>
-          <div class="mining-event-log" x-show="developmentMode()" aria-label="Mining event log">
-            <div class="mining-event-log-head"><span>Event log</span><span x-text="`${miningEventLog().length} lines`"></span></div>
+          <details class="mining-event-log" x-show="developmentMode()" aria-label="Mining event log">
+            <summary class="mining-event-log-head"><span>Event log</span><span x-text="`${miningEventLog().length} lines`"></span></summary>
             <template x-if="miningEventLog().length === 0">
               <div class="mining-event-empty skeleton-card" aria-hidden="true"><div class="skeleton-line"></div></div>
             </template>
@@ -947,7 +953,7 @@ pub(super) const INDEX_HTML: &str = concat!(
                 <div class="mining-event-time" x-text="event.time"></div>
               </div>
             </template>
-          </div>
+          </details>
         </div>
         <div class="panel">
           <div class="panel-head mining-head">

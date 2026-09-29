@@ -126,6 +126,14 @@ fn management_ui_opens_on_the_dashboard_and_exposes_chain_health_thresholds() {
 }
 
 #[test]
+fn management_ui_collapses_the_mining_event_log_by_default() {
+    let html = include_str!("adapters/http/index_html.rs");
+    assert!(html.contains("<details class=\"mining-event-log\""));
+    assert!(html.contains("<summary class=\"mining-event-log-head\""));
+    assert!(!html.contains("<details class=\"mining-event-log\" open"));
+}
+
+#[test]
 fn management_ui_exposes_complete_peer_details() {
     let html = include_str!("adapters/http/index_html.rs");
     let javascript = include_str!("../www/assets/iuna-ui.js");
