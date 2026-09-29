@@ -5,6 +5,12 @@ from the Git history and Conventional Commit titles by `deployment.sh`.
 
 ## [Unreleased]
 
+## [0.4.50] - 2026-09-29
+
+### Fixed
+
+- account for pending v2 inputs
+
 ## [0.4.49] - 2026-09-29
 
 ### Added
