@@ -5,9 +5,20 @@ from the Git history and Conventional Commit titles by `deployment.sh`.
 
 ## [Unreleased]
 
+## [0.4.49] - 2026-09-29
+
+### Added
+
+- show building block in chain overview
+
 ### Fixed
 
-- recognize authenticated hybrid owners in burn-committee lineage selection from height 4750
+- handle burn leader ranks loading
+- link hybrid burn committee identities
+
+### Documentation
+
+- update roadmap for 10k IUNA milestone
 
 ## [0.4.48] - 2026-09-29
 
