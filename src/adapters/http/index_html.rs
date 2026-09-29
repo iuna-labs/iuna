@@ -1952,6 +1952,11 @@ pub(super) const INDEX_HTML: &str = concat!(
         <button type="button" @click="closeBurnLeaderRanksModal">Close</button>
       </div>
       <div class="rank-list">
+        <div class="dataset-loader" x-show="burnLeaderRanksLoading(selectedBurnLeaderBlock)" role="status" aria-label="Loading burn leader ranks">
+          <div class="rank-row skeleton-card" aria-hidden="true"><div class="skeleton-line short"></div><div class="rank-details"><div class="skeleton-line medium"></div><div class="skeleton-line long"></div><div class="skeleton-line short"></div></div></div>
+          <div class="rank-row skeleton-card" aria-hidden="true"><div class="skeleton-line short"></div><div class="rank-details"><div class="skeleton-line long"></div><div class="skeleton-line medium"></div><div class="skeleton-line short"></div></div></div>
+        </div>
+        <div class="tx-modal-empty" x-show="burnLeaderRanksError" x-text="burnLeaderRanksError" role="alert"></div>
         <template x-for="rank in burnLeaderRanks(selectedBurnLeaderBlock)" :key="`${selectedBurnLeaderBlock.hash}-${rank.rank}-${rank.ticket_id ?? rank.ticketId}`">
           <div class="rank-row">
             <div class="rank-number" x-text="burnLeaderRankLabel(rank)"></div>
@@ -1963,7 +1968,7 @@ pub(super) const INDEX_HTML: &str = concat!(
             </div>
           </div>
         </template>
-        <div class="tx-modal-empty" x-show="burnLeaderRanks(selectedBurnLeaderBlock).length === 0">No burn leader ranks</div>
+        <div class="tx-modal-empty" x-show="!burnLeaderRanksError && !burnLeaderRanksLoading(selectedBurnLeaderBlock) && burnLeaderRanks(selectedBurnLeaderBlock).length === 0">No burn leader ranks</div>
       </div>
     </section>
   </div>
@@ -2231,6 +2236,17 @@ mod tests {
         assert!(
             !INDEX_HTML
                 .contains("Do not reuse this address after its key has been revealed by a spend.")
+        );
+    }
+
+    #[test]
+    fn burn_leader_ranks_modal_distinguishes_loading_errors_and_empty_results() {
+        assert!(INDEX_HTML.contains("burnLeaderRanksLoading(selectedBurnLeaderBlock)"));
+        assert!(INDEX_HTML.contains(r#"x-show="burnLeaderRanksError""#));
+        assert!(
+            INDEX_HTML.contains(
+                "!burnLeaderRanksError && !burnLeaderRanksLoading(selectedBurnLeaderBlock)"
+            )
         );
     }
 }

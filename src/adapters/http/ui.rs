@@ -352,6 +352,7 @@ pub(super) fn ui_blocks_from_indexes(
     blocks: Vec<Block>,
     outputs: &BTreeMap<OutPoint, TxOutput>,
     burn_leader_ranks: &BTreeMap<String, Vec<BurnLeaderRank>>,
+    burn_leader_ranks_loaded: bool,
     storage_size_breakdowns: &BTreeMap<String, CompactBlockSizeBreakdown>,
     transaction_v2_domain: Option<&TransactionV2Domain>,
     network: AddressNetwork,
@@ -364,6 +365,7 @@ pub(super) fn ui_blocks_from_indexes(
                 block,
                 outputs,
                 burn_leader_ranks,
+                burn_leader_ranks_loaded,
                 storage_size,
                 transaction_v2_domain,
                 network,
@@ -383,6 +385,7 @@ pub(super) fn ui_block(
         block,
         outputs,
         burn_leader_ranks,
+        true,
         storage_size,
         None,
         AddressNetwork::Mainnet,
@@ -393,6 +396,7 @@ fn ui_block_with_v2(
     block: Block,
     outputs: &BTreeMap<OutPoint, TxOutput>,
     burn_leader_ranks: &BTreeMap<String, Vec<BurnLeaderRank>>,
+    burn_leader_ranks_loaded: bool,
     storage_size: Option<&CompactBlockSizeBreakdown>,
     transaction_v2_domain: Option<&TransactionV2Domain>,
     network: AddressNetwork,
@@ -514,6 +518,7 @@ fn ui_block_with_v2(
         vdf_output: block.vdf_output,
         leader_proof: block.leader_proof,
         burn_leader_ranks: ranks,
+        burn_leader_ranks_loaded,
         transactions,
         burn_bundles,
         hash: block.hash,
@@ -1219,6 +1224,7 @@ mod tests {
             vec![block],
             &ledger.all_utxos().into_iter().collect(),
             &BTreeMap::new(),
+            true,
             &BTreeMap::new(),
             Some(&domain),
             AddressNetwork::Mainnet,
@@ -1230,6 +1236,25 @@ mod tests {
         assert_eq!(blocks[0].transactions[0].fee, 100);
         assert_eq!(blocks[0].transactions[0].signature.len(), 64);
         assert_eq!(blocks[0].total_fees, 100);
+    }
+
+    #[test]
+    fn ui_blocks_expose_pending_burn_leader_rank_projection() {
+        let wallet = Wallet::from_seed("pending-burn-rank-ui-wallet");
+        let ledger = Ledger::new(BTreeMap::from([(wallet.address().to_string(), 100_000)]), 1);
+        let blocks = ui_blocks_from_indexes(
+            vec![ledger.chain().last().unwrap().clone()],
+            &BTreeMap::new(),
+            &BTreeMap::new(),
+            false,
+            &BTreeMap::new(),
+            None,
+            AddressNetwork::Mainnet,
+        );
+
+        assert_eq!(blocks.len(), 1);
+        assert!(!blocks[0].burn_leader_ranks_loaded);
+        assert!(blocks[0].burn_leader_ranks.is_empty());
     }
 
     #[test]

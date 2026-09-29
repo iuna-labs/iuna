@@ -5,6 +5,7 @@ use anyhow::Result;
 use axum::{
     Json,
     extract::{Query, State},
+    http::StatusCode,
 };
 
 use crate::{
@@ -38,7 +39,7 @@ pub(super) async fn api_status(State(state): State<HttpState>) -> Json<NodeStatu
 pub(super) async fn api_blocks(
     State(state): State<HttpState>,
     Query(query): Query<BlocksQuery>,
-) -> Json<Vec<UiBlock>> {
+) -> std::result::Result<Json<Vec<UiBlock>>, (StatusCode, &'static str)> {
     let limit = query
         .limit
         .unwrap_or(EXPLORER_PAGE_LIMIT)
@@ -61,18 +62,31 @@ pub(super) async fn api_blocks(
     let store = state.ui_data_store.clone();
     let view = tokio::task::spawn_blocking(move || store.load_ui_chain_index(&tip_hash))
         .await
-        .ok()
-        .and_then(Result::ok)
-        .flatten()
-        .unwrap_or_default();
-    Json(ui_blocks_from_indexes(
+        .map_err(|error| {
+            eprintln!("UI chain index worker failed: {error}");
+            (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "failed to load UI chain index",
+            )
+        })?
+        .map_err(|error| {
+            eprintln!("UI chain index load failed: {error:#}");
+            (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "failed to load UI chain index",
+            )
+        })?;
+    let burn_leader_ranks_loaded = view.is_some();
+    let view = view.unwrap_or_default();
+    Ok(Json(ui_blocks_from_indexes(
         blocks,
         &view.outputs,
         &view.burn_leader_ranks_by_hash,
+        burn_leader_ranks_loaded,
         &storage_size_breakdowns,
         transaction_v2_domain.as_ref(),
         network,
-    ))
+    )))
 }
 
 pub(super) async fn api_config(State(state): State<HttpState>) -> Json<ConfigResponse> {

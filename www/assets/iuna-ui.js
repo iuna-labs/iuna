@@ -12,6 +12,9 @@ window.iunaApp = function iunaApp() {
     selectedBurnBundleBlock: null,
     selectedTransaction: null,
     selectedBurnLeaderBlock: null,
+    burnLeaderRanksError: null,
+    burnLeaderRanksRefreshPromise: null,
+    burnLeaderRanksRefreshTimer: null,
     loadingInitialBlocks: false,
     loadingOlder: false,
     hasMoreBlocks: true,
@@ -1290,6 +1293,15 @@ window.iunaApp = function iunaApp() {
       } else {
         this.selectedBlock = known.get(this.selectedBlock.hash);
       }
+      if (this.selectedBurnLeaderBlock) {
+        this.selectedBurnLeaderBlock = known.get(this.selectedBurnLeaderBlock.hash) || null;
+        if (!this.burnLeaderRanksPending(this.selectedBurnLeaderBlock)) {
+          this.burnLeaderRanksError = null;
+          this.stopBurnLeaderRanksRefresh();
+        } else if (!this.burnLeaderRanksError) {
+          this.scheduleBurnLeaderRanksRefresh(this.syncingNode() ? 1000 : 5000);
+        }
+      }
       this.hasMoreBlocks =
         this.blocks.some((block) => block.height > 0) &&
         !this.blocks.some((block) => block.height === 0);
@@ -1344,11 +1356,77 @@ window.iunaApp = function iunaApp() {
     },
 
     openBurnLeaderRanksModal(block) {
+      this.stopBurnLeaderRanksRefresh();
+      this.burnLeaderRanksError = null;
       this.selectedBurnLeaderBlock = block;
+      this.scheduleBurnLeaderRanksRefresh(0);
     },
 
     closeBurnLeaderRanksModal() {
+      this.stopBurnLeaderRanksRefresh();
+      this.burnLeaderRanksError = null;
       this.selectedBurnLeaderBlock = null;
+    },
+
+    stopBurnLeaderRanksRefresh() {
+      if (this.burnLeaderRanksRefreshTimer === null) return;
+      clearTimeout(this.burnLeaderRanksRefreshTimer);
+      this.burnLeaderRanksRefreshTimer = null;
+    },
+
+    scheduleBurnLeaderRanksRefresh(delay) {
+      this.stopBurnLeaderRanksRefresh();
+      if (
+        !this.burnLeaderRanksPending(this.selectedBurnLeaderBlock) ||
+        this.burnLeaderRanksError
+      ) return;
+      this.burnLeaderRanksRefreshTimer = setTimeout(() => {
+        this.burnLeaderRanksRefreshTimer = null;
+        this.refreshSelectedBurnLeaderRanks();
+      }, delay);
+    },
+
+    async refreshSelectedBurnLeaderRanks() {
+      const selected = this.selectedBurnLeaderBlock;
+      if (
+        !this.burnLeaderRanksPending(selected) ||
+        this.burnLeaderRanksError ||
+        this.burnLeaderRanksRefreshPromise
+      ) return;
+      const expectedHash = selected.hash;
+      const beforeHeight = Number(selected.height) + 1;
+      if (!Number.isSafeInteger(beforeHeight) || beforeHeight <= 0) {
+        this.burnLeaderRanksError = "Unable to refresh burn leader ranks for this block.";
+        return;
+      }
+      this.burnLeaderRanksRefreshPromise = this.fetchJson(
+        `/api/blocks?before_height=${beforeHeight}&limit=1`
+      );
+      try {
+        const blocks = await this.burnLeaderRanksRefreshPromise;
+        if (this.selectedBurnLeaderBlock?.hash !== expectedHash) return;
+        const refreshed = blocks.find((block) => block.hash === expectedHash);
+        if (!refreshed) {
+          this.burnLeaderRanksError = "This block is no longer on the active chain.";
+          return;
+        }
+        this.blocks = this.blocks.map((block) => block.hash === expectedHash ? refreshed : block);
+        if (this.selectedBlock?.hash === expectedHash) this.selectedBlock = refreshed;
+        this.selectedBurnLeaderBlock = refreshed;
+        this.burnLeaderRanksError = null;
+      } catch (error) {
+        if (this.selectedBurnLeaderBlock?.hash === expectedHash) {
+          this.burnLeaderRanksError = error.message || "Failed to load burn leader ranks.";
+        }
+      } finally {
+        this.burnLeaderRanksRefreshPromise = null;
+        if (
+          this.burnLeaderRanksPending(this.selectedBurnLeaderBlock) &&
+          !this.burnLeaderRanksError
+        ) {
+          this.scheduleBurnLeaderRanksRefresh(this.syncingNode() ? 1000 : 5000);
+        }
+      }
     },
 
     openBlockBytesModal(block) {
@@ -3703,6 +3781,14 @@ window.iunaApp = function iunaApp() {
     burnLeaderRanks(block) {
       if (Array.isArray(block?.burn_leader_ranks)) return block.burn_leader_ranks;
       return Array.isArray(block?.burnLeaderRanks) ? block.burnLeaderRanks : [];
+    },
+
+    burnLeaderRanksLoading(block) {
+      return !this.burnLeaderRanksError && this.burnLeaderRanksPending(block);
+    },
+
+    burnLeaderRanksPending(block) {
+      return block?.burn_leader_ranks_loaded === false;
     },
 
     burnLeaderRanksTitle(block) {

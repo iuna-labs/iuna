@@ -511,6 +511,7 @@ pub(super) struct UiBlock {
     pub(super) vdf_output: String,
     pub(super) leader_proof: Option<crate::domain::LeaderProof>,
     pub(super) burn_leader_ranks: Vec<BurnLeaderRank>,
+    pub(super) burn_leader_ranks_loaded: bool,
     pub(super) transactions: Vec<UiTransaction>,
     pub(super) burn_bundles: Vec<UiBurnBundle>,
     pub(super) hash: String,
