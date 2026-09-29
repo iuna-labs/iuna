@@ -418,10 +418,14 @@ pub(super) const INDEX_HTML: &str = concat!(
     .block-rail { display: flex; gap: 8px; overflow-x: auto; padding: 1px 0 10px; scroll-snap-type: x proximity; }
     .block-card { flex: 0 0 122px; min-height: 100px; display: grid; gap: 6px; border: 1px solid #2f363c; border-radius: 8px; padding: 9px; background: #111316; color: #e8edf0; text-align: left; scroll-snap-align: start; }
     button.block-card { cursor: pointer; user-select: none; }
-    .block-card:hover { border-color: #d5f55f; color: #d5f55f; }
+    button.block-card:hover { border-color: #d5f55f; color: #d5f55f; }
     .block-card.selected { background: #202616; border-color: #d5f55f; box-shadow: inset 0 0 0 1px #d5f55f; }
     .block-card.new-block { animation: block-arrive .45s ease both; }
+    .block-card-building { border-color: #697b31; border-style: dashed; background: linear-gradient(145deg, #202616, #141912); box-shadow: inset 0 0 18px rgba(213, 245, 95, .05); user-select: none; }
+    .block-building-status { width: 7px; height: 7px; margin-top: 5px; border-radius: 50%; background: #d5f55f; box-shadow: 0 0 0 0 rgba(213, 245, 95, .4); animation: building-dot-pulse 1.7s ease-out infinite; }
+    @keyframes building-dot-pulse { 0% { box-shadow: 0 0 0 0 rgba(213, 245, 95, .4); } 70%, 100% { box-shadow: 0 0 0 7px rgba(213, 245, 95, 0); } }
     .block-card-select { display: grid; gap: 6px; padding: 0; border: 0; background: transparent; color: inherit; text-align: left; }
+    .block-card-head { display: flex; align-items: flex-start; justify-content: space-between; gap: 6px; }
     @keyframes block-arrive { from { opacity: .2; transform: translateX(-12px); } to { opacity: 1; transform: translateX(0); } }
     .block-height { font-size: 18px; font-weight: 900; }
     .block-meta { display: flex; gap: 8px; color: #8d989f; font-size: 12px; }
@@ -436,6 +440,9 @@ pub(super) const INDEX_HTML: &str = concat!(
     .skeleton-card { pointer-events: none; position: relative; overflow: hidden; }
     .skeleton-card::after { content: ""; position: absolute; inset: 0; background: linear-gradient(90deg, transparent, rgba(213, 245, 95, .12), transparent); animation: skeleton-sweep 1.15s ease-in-out infinite; }
     @keyframes skeleton-sweep { from { transform: translateX(-100%); } to { transform: translateX(100%); } }
+    @media (prefers-reduced-motion: reduce) {
+      .block-building-status { animation: none; }
+    }
     .skeleton-line { height: 12px; border-radius: 6px; background: #2b3136; }
     .skeleton-line.short { width: 42%; }
     .skeleton-line.medium { width: 68%; }
@@ -1149,10 +1156,24 @@ pub(super) const INDEX_HTML: &str = concat!(
             <div class="muted"><span x-text="blocks.length"></span> loaded</div>
           </div>
           <div class="block-rail" x-ref="blockRail" @scroll.debounce.200ms="maybeLoadOlderBlocks($event)">
+            <div class="block-card block-card-building" role="status" aria-live="polite" aria-label="Block currently being built">
+              <div class="block-card-select">
+                <div class="block-card-head">
+                  <div class="block-height" x-text="buildingBlockHeight()"></div>
+                  <div class="block-building-status" aria-hidden="true"></div>
+                </div>
+                <div class="block-meta">
+                  <span x-text="burnCountLabel(buildingBlockOverview())"></span>
+                  <span x-text="transferCountLabel(buildingBlockOverview())"></span>
+                  <span x-text="mineCountLabel(buildingBlockOverview())"></span>
+                </div>
+              </div>
+              <div class="block-miner" x-text="blockFinalizerLabel(buildingBlockOverview())"></div>
+            </div>
             <template x-for="block in blocks" :key="block.hash">
               <button class="block-card" :class="{ selected: selectedBlock?.hash === block.hash, 'new-block': newBlockHashes.has(block.hash) }" @click="selectBlock(block)" type="button" title="Open block details">
                 <div class="block-card-select">
-                  <div class="block-height" x-text="block.height"></div>
+                  <div class="block-card-head"><div class="block-height" x-text="block.height"></div></div>
                   <div class="block-meta">
                     <span x-text="burnCountLabel(block)"></span>
                     <span x-text="transferCountLabel(block)"></span>
@@ -2248,5 +2269,28 @@ mod tests {
                 "!burnLeaderRanksError && !burnLeaderRanksLoading(selectedBurnLeaderBlock)"
             )
         );
+    }
+
+    #[test]
+    fn chain_rail_starts_with_the_building_block() {
+        let building = INDEX_HTML
+            .find("block-card block-card-building")
+            .expect("building block card");
+        let confirmed = INDEX_HTML
+            .find(r#"<template x-for="block in blocks""#)
+            .expect("confirmed block cards");
+
+        assert!(building < confirmed);
+        assert!(!INDEX_HTML.contains("Likely finalizer"));
+        assert!(!INDEX_HTML.contains(">Building</div>"));
+        assert!(INDEX_HTML.contains("user-select: none"));
+        assert!(!INDEX_HTML.contains("syncBuildingBlockWidth()"));
+        assert!(INDEX_HTML.contains("button.block-card:hover"));
+        assert!(INDEX_HTML.contains("burnCountLabel(buildingBlockOverview())"));
+        assert!(INDEX_HTML.contains("transferCountLabel(buildingBlockOverview())"));
+        assert!(INDEX_HTML.contains("mineCountLabel(buildingBlockOverview())"));
+        assert!(INDEX_HTML.contains(
+            r#"<div class="block-miner" x-text="blockFinalizerLabel(buildingBlockOverview())"></div>"#
+        ));
     }
 }

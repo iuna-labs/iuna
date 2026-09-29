@@ -394,6 +394,12 @@ pub struct ChainStatus {
     pub current_mine_difficulty_bits: u32,
     pub balances: BTreeMap<String, Amount>,
     pub pending_transactions: usize,
+    #[serde(default)]
+    pub pending_burns: usize,
+    #[serde(default)]
+    pub pending_transfers: usize,
+    #[serde(default)]
+    pub pending_mines: usize,
 }
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]

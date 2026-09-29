@@ -11,7 +11,7 @@ use super::ticket::{
 };
 use super::{
     Amount, Block, BurnCommitteeMember, BurnLeaderRank, ChainSnapshot, ChainStatus, LaunchProfile,
-    Ledger, OutPoint, Transaction, TxOutput, UtxoLineageRoot,
+    Ledger, OutPoint, Transaction, TransactionV2, TxOutput, UtxoLineageRoot,
 };
 
 fn apply_historical_ticket_block(
@@ -127,6 +127,39 @@ impl Ledger {
                 Default::default()
             },
             pending_transactions: self.pending.len().saturating_add(self.pending_v2.len()),
+            pending_burns: self
+                .pending
+                .iter()
+                .filter(|transaction| matches!(transaction, Transaction::Burn { .. }))
+                .count()
+                .saturating_add(
+                    self.pending_v2
+                        .iter()
+                        .filter(|transaction| matches!(transaction, TransactionV2::Burn { .. }))
+                        .count(),
+                ),
+            pending_transfers: self
+                .pending
+                .iter()
+                .filter(|transaction| matches!(transaction, Transaction::Transfer { .. }))
+                .count()
+                .saturating_add(
+                    self.pending_v2
+                        .iter()
+                        .filter(|transaction| matches!(transaction, TransactionV2::Transfer { .. }))
+                        .count(),
+                ),
+            pending_mines: self
+                .pending
+                .iter()
+                .filter(|transaction| matches!(transaction, Transaction::Mine { .. }))
+                .count()
+                .saturating_add(
+                    self.pending_v2
+                        .iter()
+                        .filter(|transaction| matches!(transaction, TransactionV2::Mine { .. }))
+                        .count(),
+                ),
         }
     }
 
@@ -677,6 +710,43 @@ mod tests {
     };
     use proptest::prelude::*;
     use proptest::test_runner::Config;
+
+    #[test]
+    fn status_splits_pending_transactions_by_kind() {
+        let mut ledger = Ledger::new(BTreeMap::new(), 1);
+        ledger.pending = vec![
+            Transaction::Burn {
+                inputs: Vec::new(),
+                change: Vec::new(),
+                amount: 1,
+                fee: 0,
+                anchor: None,
+                signature: String::new(),
+            },
+            Transaction::Transfer {
+                inputs: Vec::new(),
+                outputs: Vec::new(),
+                fee: 0,
+                signature: String::new(),
+            },
+            Transaction::Mine {
+                recipient: String::new(),
+                anchor: String::new(),
+                salt: 0,
+                nonce: 0,
+                difficulty_bits: 0,
+                proof_header: None,
+                signature: String::new(),
+            },
+        ];
+
+        let status = ledger.status();
+
+        assert_eq!(status.pending_transactions, 3);
+        assert_eq!(status.pending_burns, 1);
+        assert_eq!(status.pending_transfers, 1);
+        assert_eq!(status.pending_mines, 1);
+    }
 
     fn synthetic_committee_ledger(seed: u64) -> Ledger {
         let mut ledger = Ledger::new(BTreeMap::new(), 1);

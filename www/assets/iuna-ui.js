@@ -3742,14 +3742,20 @@ window.iunaApp = function iunaApp() {
     },
 
     blockBurnCount(block) {
+      const count = Number(block?.burnCount ?? block?.burn_count);
+      if (Number.isFinite(count)) return count;
       return this.blockTransactions(block).filter((tx) => tx.kind === "burn").length;
     },
 
     blockTransferCount(block) {
+      const count = Number(block?.transferCount ?? block?.transfer_count);
+      if (Number.isFinite(count)) return count;
       return this.blockTransactions(block).filter((tx) => tx.kind === "transfer").length;
     },
 
     blockMineCount(block) {
+      const count = Number(block?.mineCount ?? block?.mine_count);
+      if (Number.isFinite(count)) return count;
       return this.blockTransactions(block).filter((tx) => tx.kind === "mine").length;
     },
 
@@ -3776,6 +3782,20 @@ window.iunaApp = function iunaApp() {
       const finalizer = this.shortAddressLabel(block.miner);
       const owner = finalizer;
       return block.finalizer_mode === "recovery" ? `${owner} · Recovery` : owner;
+    },
+
+    buildingBlockHeight() {
+      const height = Number(this.status.chain?.height);
+      return Number.isSafeInteger(height) && height >= 0 ? height + 1 : "-";
+    },
+
+    buildingBlockOverview() {
+      return {
+        burnCount: Number(this.status.chain?.pending_burns ?? 0),
+        transferCount: Number(this.status.chain?.pending_transfers ?? 0),
+        mineCount: Number(this.status.chain?.pending_mines ?? 0),
+        miner: this.currentFinalizerAddress(),
+      };
     },
 
     burnLeaderRanks(block) {
