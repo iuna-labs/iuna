@@ -17,6 +17,7 @@ pub struct Ledger {
     pub(super) utxo_lineage: BTreeMap<OutPoint, UtxoLineageRoot>,
     pub(super) lineage_values: BTreeMap<UtxoLineageRoot, Amount>,
     pub(super) lineage_owners: LineageOwnerValues,
+    pub(super) hybrid_legacy_owners: BTreeMap<String, String>,
     pub(super) tickets: Vec<BurnTicket>,
     pub(super) mined_transaction_ids: BTreeSet<String>,
     pub(super) pending: Vec<Transaction>,

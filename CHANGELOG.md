@@ -5,6 +5,10 @@ from the Git history and Conventional Commit titles by `deployment.sh`.
 
 ## [Unreleased]
 
+### Fixed
+
+- recognize authenticated hybrid owners in burn-committee lineage selection from height 4750
+
 ## [0.4.48] - 2026-09-29
 
 ### Added

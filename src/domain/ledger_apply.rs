@@ -19,8 +19,9 @@ use super::{
     AddressNetwork, AddressVersion, Amount, BLOCK_MEDIAN_TIME_PAST_WINDOW, Block,
     BurnBundleSection, FinalityCheckpoint, FinalizerMode, Ledger,
     MAX_BLOCK_TIMESTAMP_FUTURE_DRIFT_MS, TRANSACTION_REPLAY_PROTECTION_ACTIVATION_HEIGHT,
-    Transaction, ensure_transaction_v2_active, hex_encode, insert_output_with_lineage,
-    output_lineage_root_for_transaction, spend_inputs_with_lineage, unix_now_ms, verify_vdf,
+    Transaction, TransactionV2, encode_versioned_address, ensure_transaction_v2_active, hex_encode,
+    insert_output_with_lineage, output_lineage_root_for_transaction, spend_inputs_with_lineage,
+    unix_now_ms, verify_vdf,
 };
 
 impl Ledger {
@@ -85,6 +86,7 @@ impl Ledger {
         let mut utxo_lineage = self.utxo_lineage.clone();
         let mut lineage_values = self.lineage_values.clone();
         let mut lineage_owners = self.lineage_owners.clone();
+        let mut hybrid_legacy_owners = self.hybrid_legacy_owners.clone();
         let signing_domain = self.transaction_signing_domain_at(block.height);
         let mut signatures = BTreeSet::new();
         for tx in &block.transactions {
@@ -125,6 +127,7 @@ impl Ledger {
                 &mut lineage_owners,
                 true,
             )?;
+            record_hybrid_legacy_owner_bindings(&mut hybrid_legacy_owners, &transaction, network)?;
         }
         let expected_reward = self.expected_reward_for_block(&block)?;
         if block.reward != expected_reward {
@@ -144,6 +147,7 @@ impl Ledger {
         self.utxo_lineage = utxo_lineage;
         self.lineage_values = lineage_values;
         self.lineage_owners = lineage_owners;
+        self.hybrid_legacy_owners = hybrid_legacy_owners;
         self.tickets = tickets;
         self.mined_transaction_ids
             .extend(mined_signatures.iter().cloned());
@@ -227,6 +231,11 @@ impl Ledger {
                 &mut self.lineage_values,
                 &mut self.lineage_owners,
                 false,
+            )?;
+            record_hybrid_legacy_owner_bindings(
+                &mut self.hybrid_legacy_owners,
+                &transaction,
+                network,
             )?;
             transaction_v2_ids.insert(transaction_id);
         }
@@ -478,6 +487,24 @@ impl Ledger {
     }
 }
 
+fn record_hybrid_legacy_owner_bindings(
+    bindings: &mut std::collections::BTreeMap<String, String>,
+    transaction: &TransactionV2,
+    network: AddressNetwork,
+) -> Result<()> {
+    for (hybrid_owner, legacy_owner) in transaction.hybrid_legacy_owner_bindings()? {
+        let hybrid_owner = encode_versioned_address(hybrid_owner, network)?;
+        if let Some(existing) = bindings.get(&hybrid_owner) {
+            if existing != &legacy_owner {
+                bail!("hybrid address is bound to conflicting legacy identities");
+            }
+            continue;
+        }
+        bindings.insert(hybrid_owner, legacy_owner);
+    }
+    Ok(())
+}
+
 fn apply_transaction_with_lineage(
     transaction: &Transaction,
     block_height: u64,
@@ -568,6 +595,25 @@ mod tests {
             proof_header: None,
             signature: signature.to_string(),
         }
+    }
+
+    #[test]
+    fn confirmed_hybrid_authorization_records_legacy_identity_binding() {
+        let wallet = Wallet::from_seed("hybrid-lineage-binding");
+        let mut ledger = Ledger::new(BTreeMap::from([(wallet.address().to_string(), 100)]), 1);
+        ledger.chain.last_mut().unwrap().height = 2_999;
+        let migration = ledger.build_v2_migration(&wallet, 3).unwrap();
+        ledger.utxos = ledger
+            .validated_v2_utxos_at_height(&migration, 3_000)
+            .unwrap();
+        ledger.chain.last_mut().unwrap().height = 3_000;
+        let burn = ledger.build_v2_burn_for_next_block(&wallet, 9, 1).unwrap();
+        let mut bindings = BTreeMap::new();
+
+        record_hybrid_legacy_owner_bindings(&mut bindings, &burn, AddressNetwork::Mainnet).unwrap();
+
+        assert_eq!(bindings.len(), 1);
+        assert!(bindings.values().all(|owner| owner == wallet.address()));
     }
 
     #[test]

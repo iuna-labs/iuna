@@ -421,10 +421,22 @@ impl Ledger {
     }
 
     fn lineage_root_has_owner(&self, root: &UtxoLineageRoot, owner: &str) -> bool {
-        self.lineage_owners
-            .get(root)
-            .and_then(|owners| owners.get(owner))
-            .is_some_and(|outputs| !outputs.is_empty())
+        self.lineage_owners.get(root).is_some_and(|owners| {
+            owners.iter().any(|(lineage_owner, outputs)| {
+                !outputs.is_empty()
+                    && self.committee_identity_for_lineage_owner(lineage_owner) == owner
+            })
+        })
+    }
+
+    fn committee_identity_for_lineage_owner<'a>(&'a self, owner: &'a str) -> &'a str {
+        if self.tip().height.saturating_add(1) < super::HYBRID_LINEAGE_IDENTITY_ACTIVATION_HEIGHT {
+            return owner;
+        }
+        self.hybrid_legacy_owners
+            .get(owner)
+            .map(String::as_str)
+            .unwrap_or(owner)
     }
 
     fn representative_owner_for_lineage_root(
@@ -437,15 +449,17 @@ impl Ledger {
             owners
                 .iter()
                 .filter(|(owner, outputs)| {
-                    eligible_ticket_owners.contains(*owner)
-                        && !skipped_owners.contains(*owner)
+                    let identity = self.committee_identity_for_lineage_owner(owner);
+                    eligible_ticket_owners.contains(identity)
+                        && !skipped_owners.contains(identity)
                         && !outputs.is_empty()
                 })
                 .filter_map(|(owner, outputs)| {
+                    let identity = self.committee_identity_for_lineage_owner(owner);
                     let (outpoint, amount) = outputs.iter().max_by(|left, right| {
                         left.1.cmp(right.1).then_with(|| right.0.cmp(left.0))
                     })?;
-                    Some((owner.clone(), *amount, outpoint.clone()))
+                    Some((identity.to_string(), *amount, outpoint.clone()))
                 })
                 .max_by(|left, right| {
                     left.1
@@ -706,7 +720,8 @@ impl Ledger {
 mod tests {
     use super::*;
     use crate::domain::{
-        BURN_COMMITTEE_SIZE, GRINDING_RESISTANCE_ACTIVATION_HEIGHT, GenesisBurn, MICRO_IUNA, Wallet,
+        BURN_COMMITTEE_SIZE, GRINDING_RESISTANCE_ACTIVATION_HEIGHT, GenesisBurn,
+        HYBRID_LINEAGE_IDENTITY_ACTIVATION_HEIGHT, MICRO_IUNA, Wallet,
     };
     use proptest::prelude::*;
     use proptest::test_runner::Config;
@@ -913,6 +928,51 @@ mod tests {
         assert_eq!(committee[1].root, ticket_root.outpoint.id());
         assert_eq!(committee[1].owner, ticket_owner.address());
         assert_ne!(committee[1].owner, non_ticket_owner.address());
+    }
+
+    #[test]
+    fn hybrid_lineage_resolves_to_legacy_ticket_identity_only_at_activation() {
+        let mut ledger = Ledger::new(BTreeMap::new(), 1);
+        let legacy_owner = "legacy-owner".to_string();
+        let hybrid_owner = "iuna1phybrid-owner".to_string();
+        let root = UtxoLineageRoot {
+            outpoint: OutPoint {
+                txid: "a".repeat(64),
+                index: 0,
+            },
+            height: 0,
+        };
+        ledger.lineage_values.insert(root.clone(), 10);
+        ledger.lineage_owners.insert(
+            root.clone(),
+            BTreeMap::from([(
+                hybrid_owner.clone(),
+                BTreeMap::from([(
+                    OutPoint {
+                        txid: "b".repeat(64),
+                        index: 0,
+                    },
+                    10,
+                )]),
+            )]),
+        );
+        ledger
+            .hybrid_legacy_owners
+            .insert(hybrid_owner, legacy_owner.clone());
+        let eligible = BTreeSet::from([legacy_owner.clone()]);
+
+        ledger.chain.last_mut().unwrap().height = HYBRID_LINEAGE_IDENTITY_ACTIVATION_HEIGHT - 2;
+        assert_eq!(
+            ledger.representative_owner_for_lineage_root(&root, &BTreeSet::new(), &eligible),
+            None
+        );
+
+        ledger.chain.last_mut().unwrap().height = HYBRID_LINEAGE_IDENTITY_ACTIVATION_HEIGHT - 1;
+        assert_eq!(
+            ledger.representative_owner_for_lineage_root(&root, &BTreeSet::new(), &eligible),
+            Some(legacy_owner.clone())
+        );
+        assert!(ledger.lineage_root_has_owner(&root, &legacy_owner));
     }
 
     #[test]

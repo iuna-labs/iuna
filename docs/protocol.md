@@ -51,6 +51,7 @@ The current mainnet-candidate parameter set is intentionally close to Bitcoin wh
 - burn committee size: `5` slots;
 - maximum signed burn bundle size: `10,000` bytes;
 - burn committee lineage maturity: `20` blocks;
+- hybrid lineage identity activation height: `4750`;
 - transaction signing format: `1`.
 
 Changing any value in this section requires a conscious mainnet-candidate reset or later hard-fork process.
@@ -252,6 +253,8 @@ The lineage weight is logarithmic. A larger root has more chance to be selected,
 For a target height and committee slot, validators derive a deterministic committee seed from the parent hash, parent VDF output, target height, and slot number. Slot `0` is assigned to the actual block finalizer. Every ticket rank can derive up to four additional slots, while the rank-dependent quorum determines how many attestations are required. Lower-ranked ticket owners that missed their slot are skipped for fallback committee selection. Extra slots are assigned without replacement by weighted deterministic draws over eligible lineage roots using `root_weight`.
 
 After a lineage root wins, validators deterministically choose one representative from the owners of unspent outputs tagged with that root. The representative must own a valid ticket for the target height. Non-ticket owners cannot sign for the group, even when they hold the root's largest output. The finalizer, missed fallback owners, and addresses already selected for an earlier slot are skipped. If no eligible ticket-owning representative remains for a root, that root cannot provide a committee slot.
+
+Starting at height `4750`, an address-v1 lineage owner is resolved to the legacy Ed25519 identity revealed by a confirmed hybrid spending authorization. This lets post-quantum PoW outputs participate through burn tickets owned by the same wallet while preventing an address from claiming another wallet's lineage. Before height `4750`, committee selection keeps the historical exact-address comparison.
 
 The protocol can detect addresses and lineage roots, not hidden common control, so a finalizer using unrelated addresses is still a social and economic risk rather than something this rule can perfectly identify.
 

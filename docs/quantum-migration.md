@@ -151,6 +151,11 @@ Compact snapshot v9 preserves the authenticated payout fields while v7 and v8 re
 Nodes without the hybrid reward rules will diverge at height 3750, so unlike the earlier gradual
 transaction-v2 mempool rollout, this boundary requires a coordinated validator upgrade.
 
+At height 4750, burn-committee lineage selection starts resolving address-v1 owners to the legacy
+Ed25519 identity authenticated by confirmed hybrid spending authorizations. This restores committee
+eligibility for mature PoW lineages paid to hybrid addresses without changing historical committee
+selection before the activation height.
+
 Pending and confirmed transaction-v2 entries are included in the management wallet history and
 chain views. Confirmed history is materialized from the canonical chain snapshot, so a chain
 reorganization atomically replaces entries from the abandoned branch.

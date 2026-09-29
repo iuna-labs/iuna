@@ -223,6 +223,28 @@ impl TransactionV2 {
         )))
     }
 
+    pub(super) fn hybrid_legacy_owner_bindings(&self) -> Result<Vec<(VersionedAddress, String)>> {
+        let input_owners = self.input_owners();
+        let mut bindings = Vec::new();
+        for authorization in self.authorizations() {
+            if authorization.scheme() != SignatureScheme::HybridEd25519MlDsa44 {
+                continue;
+            }
+            let hybrid_owner = authorization.authorized_address()?;
+            if !input_owners.contains(&hybrid_owner) {
+                continue;
+            }
+            let legacy_owner = hex_encode(&authorization.public_key().as_bytes()[..32]);
+            if !bindings
+                .iter()
+                .any(|binding| binding == &(hybrid_owner, legacy_owner.clone()))
+            {
+                bindings.push((hybrid_owner, legacy_owner));
+            }
+        }
+        Ok(bindings)
+    }
+
     pub fn fee(&self) -> u64 {
         match self {
             Self::Migration { fee, .. } | Self::Transfer { fee, .. } | Self::Burn { fee, .. } => {
@@ -1162,6 +1184,22 @@ mod tests {
             fee: 1,
             authorizations: Vec::new(),
         }
+    }
+
+    #[test]
+    fn hybrid_authorization_exposes_authenticated_legacy_owner_binding() {
+        let public_key = hybrid_public_key();
+        let owner = hybrid_key_commitment_address(&public_key).unwrap();
+        let mut transaction = unsigned_transfer(owner);
+        let payload = transaction.signing_bytes(&domain()).unwrap();
+        if let TransactionV2::Transfer { authorizations, .. } = &mut transaction {
+            authorizations.push(hybrid_authorization(&payload));
+        }
+
+        assert_eq!(
+            transaction.hybrid_legacy_owner_bindings().unwrap(),
+            vec![(owner, hex_encode(&public_key.as_bytes()[..32]))]
+        );
     }
 
     #[test]

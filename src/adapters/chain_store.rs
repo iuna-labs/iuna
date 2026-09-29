@@ -43,7 +43,7 @@ CREATE TABLE IF NOT EXISTS pending_transactions_v2 (
 // other non-consensus releases must not invalidate a chain that this node already verified.
 // Bump this value only when historical validation semantics change, and add the old ruleset to
 // `revalidation_from_height` with the first affected block height.
-const CURRENT_CONSENSUS_RULESET: &str = "iuna-consensus-v2";
+const CURRENT_CONSENSUS_RULESET: &str = "iuna-consensus-v3";
 
 // v0.4.10 introduced the verification marker and wrote the package version into it. Its
 // validator is identical to the first stable consensus ruleset, so it follows that ruleset's
@@ -58,11 +58,17 @@ struct ConsensusRulesetMigration {
 // When a future release changes consensus validation, bump CURRENT_CONSENSUS_RULESET and add a
 // direct migration for every still-supported older ruleset. The height is the first block whose
 // validity can differ under the new rules.
-const CONSENSUS_RULESET_MIGRATIONS: &[ConsensusRulesetMigration] = &[ConsensusRulesetMigration {
-    from_ruleset: "iuna-consensus-v1",
-    revalidate_from_height:
-        crate::domain::TRANSACTION_V2_AUTHORIZATION_AGGREGATION_ACTIVATION_HEIGHT,
-}];
+const CONSENSUS_RULESET_MIGRATIONS: &[ConsensusRulesetMigration] = &[
+    ConsensusRulesetMigration {
+        from_ruleset: "iuna-consensus-v1",
+        revalidate_from_height:
+            crate::domain::TRANSACTION_V2_AUTHORIZATION_AGGREGATION_ACTIVATION_HEIGHT,
+    },
+    ConsensusRulesetMigration {
+        from_ruleset: "iuna-consensus-v2",
+        revalidate_from_height: crate::domain::HYBRID_LINEAGE_IDENTITY_ACTIVATION_HEIGHT,
+    },
+];
 
 #[derive(Clone, Debug)]
 pub struct SqliteChainStore {
@@ -838,6 +844,30 @@ VALUES (1, 0, 'bad-tip', ?1, 0)
         assert_eq!(
             loaded.revalidation_from_height,
             Some(crate::domain::TRANSACTION_V2_AUTHORIZATION_AGGREGATION_ACTIVATION_HEIGHT)
+        );
+    }
+
+    #[test]
+    fn consensus_v2_marker_revalidates_from_the_hybrid_lineage_identity_fork() {
+        let dir = tempdir().unwrap();
+        let store = SqliteChainStore::open(dir.path().join("chain.sqlite3")).unwrap();
+        let snapshot = test_snapshot("chain-store-v2-ruleset-marker");
+        store.save_verified(&snapshot).unwrap();
+        store
+            .with_connection_mut(|connection| {
+                connection.execute(
+                    "UPDATE chain_verification SET verifier_version = 'iuna-consensus-v2'",
+                    [],
+                )?;
+                Ok(())
+            })
+            .unwrap();
+
+        let loaded = store.load_with_verification_status().unwrap().unwrap();
+
+        assert_eq!(
+            loaded.revalidation_from_height,
+            Some(crate::domain::HYBRID_LINEAGE_IDENTITY_ACTIVATION_HEIGHT)
         );
     }
 }
