@@ -22,8 +22,8 @@ use super::{
     apply_startup_wallet_endpoint_config_overrides, apply_startup_wallet_password_config,
     automatic_finalization_precheck_time, configured_p2p_announce_addr, configured_p2p_bind_addr,
     configured_stratum_addr, extrapolate_vdf_rounds, help_text, initial_burn_fee,
-    initial_burn_per_block, initialize_ledger, load_startup_wallet, measure_vdf_rounds,
-    parse_startup_bool_env_value, parse_startup_pow_mining_workers_env_value,
+    initial_burn_per_block, initial_projected_metrics_mode, initialize_ledger, load_startup_wallet,
+    measure_vdf_rounds, parse_startup_bool_env_value, parse_startup_pow_mining_workers_env_value,
     persist_chain_snapshot, project_ui_data_store, restore_pending_transactions_v2,
     run_chain_persistence_with_interval, setup_ledger, should_defer_sync_checkpoint,
     should_log_automatic_finalization_skip, start_genesis_ledger, validate_wallet_for_mode,
@@ -1757,7 +1757,15 @@ fn management_ui_shows_a_banner_instead_of_errors_while_chain_data_loads() {
     assert!(html.contains("x-show=\"uiDataLoading()\""));
     assert!(javascript.contains("return this.status.ui_data_ready === false;"));
     assert!(javascript.contains("if (response.status === 503) {"));
+    assert!(javascript.contains("if (error.uiDataLoading) return null;"));
     assert!(
         javascript.contains("if (!error.uiDataLoading) this.showFlash(error.message, \"error\");")
     );
+}
+
+#[test]
+fn startup_persistence_uses_the_metrics_mode_that_warmed_the_projection() {
+    assert!(!initial_projected_metrics_mode(Some(false), true));
+    assert!(initial_projected_metrics_mode(Some(true), false));
+    assert!(initial_projected_metrics_mode(None, true));
 }

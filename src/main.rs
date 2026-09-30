@@ -318,10 +318,14 @@ async fn main() -> Result<()> {
             .context("management UI task failed before binding")?;
     }
 
-    if let Some((initial_snapshot, keep_metrics)) = startup_ui_projection {
-        warm_ui_data_store(&ui_data_store, initial_snapshot, keep_metrics).await?;
-        ui_data_ready.store(true, Ordering::Release);
-    }
+    let startup_warmed_keep_metrics =
+        if let Some((initial_snapshot, keep_metrics)) = startup_ui_projection {
+            warm_ui_data_store(&ui_data_store, initial_snapshot, keep_metrics).await?;
+            ui_data_ready.store(true, Ordering::Release);
+            Some(keep_metrics)
+        } else {
+            None
+        };
 
     let persistence_node = Arc::clone(&node);
     let persistence_store = chain_store.clone();
@@ -336,7 +340,9 @@ async fn main() -> Result<()> {
             None
         }
     };
-    let persistence_initial_keep_metrics = ui_config.lock().await.keep_track_of_metrics;
+    let configured_keep_metrics = ui_config.lock().await.keep_track_of_metrics;
+    let persistence_initial_keep_metrics =
+        initial_projected_metrics_mode(startup_warmed_keep_metrics, configured_keep_metrics);
     tokio::spawn(async move {
         run_chain_persistence(
             persistence_node,
@@ -1388,6 +1394,13 @@ struct ChainPersistenceState {
     projected_tip: Option<String>,
     projected_keep_metrics: bool,
     sync_checkpoint_interval: Duration,
+}
+
+fn initial_projected_metrics_mode(
+    startup_warmed_keep_metrics: Option<bool>,
+    configured_keep_metrics: bool,
+) -> bool {
+    startup_warmed_keep_metrics.unwrap_or(configured_keep_metrics)
 }
 
 async fn run_chain_persistence_loop(

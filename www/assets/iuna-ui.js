@@ -825,7 +825,12 @@ window.iunaApp = function iunaApp() {
           this.fetchJson("/api/config"),
           this.fetchJson("/api/status"),
           this.refreshNetworkHealth({ silent: options.silent === true }),
-          shouldLoadBlocks ? this.fetchJson("/api/blocks?limit=30") : Promise.resolve(null),
+          shouldLoadBlocks
+            ? this.fetchJson("/api/blocks?limit=30").catch((error) => {
+                if (error.uiDataLoading) return null;
+                throw error;
+              })
+            : Promise.resolve(null),
           shouldLoadP2pMetrics ? this.fetchJson("/api/p2p/metrics") : Promise.resolve(this.p2pMetrics),
           Promise.resolve(this.blockchainMetrics),
         ]);
