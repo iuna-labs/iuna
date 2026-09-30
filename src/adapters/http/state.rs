@@ -1,7 +1,12 @@
-use std::{collections::BTreeMap, net::SocketAddr, path::PathBuf, sync::Arc};
+use std::{
+    collections::BTreeMap,
+    net::SocketAddr,
+    path::PathBuf,
+    sync::{Arc, atomic::AtomicBool},
+};
 
 use secrecy::SecretString;
-use tokio::sync::Mutex;
+use tokio::sync::{Mutex, oneshot};
 
 use crate::{
     adapters::{
@@ -27,6 +32,7 @@ pub(super) struct HttpState {
     pub(super) setup_capability: Arc<Mutex<Option<SecretString>>>,
     pub(super) management_port: u16,
     pub(super) wallet_endpoint_addr: Option<SocketAddr>,
+    pub(super) ui_data_ready: Arc<AtomicBool>,
 }
 
 #[derive(Clone)]
@@ -52,4 +58,6 @@ pub struct ServeOptions {
     pub stratum: StratumStatus,
     pub wallet_endpoint_addr: Option<SocketAddr>,
     pub addr: SocketAddr,
+    pub ui_data_ready: Arc<AtomicBool>,
+    pub started: Option<oneshot::Sender<()>>,
 }

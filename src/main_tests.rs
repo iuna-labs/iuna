@@ -109,8 +109,8 @@ fn management_ui_opens_on_the_dashboard_and_exposes_chain_health_thresholds() {
     assert!(html.contains(".dashboard-card.burning .dashboard-status"));
     assert!(html.contains("basicNetworkStatusLabel()"));
     assert!(javascript.contains("tab: \"dashboard\""));
-    assert!(javascript.contains("ageMs < 15 * 60 * 1000"));
-    assert!(javascript.contains("ageMs < 20 * 60 * 1000"));
+    assert!(javascript.contains("ageMs <= 20 * 60 * 1000"));
+    assert!(javascript.contains("ageMs <= 60 * 60 * 1000"));
     assert!(javascript.contains(
         "`${this.powMiningWorkers} worker${this.powMiningWorkers === 1 ? \"\" : \"s\"}`"
     ));
@@ -1748,4 +1748,16 @@ async fn persistence_loop_skips_setup_placeholder_chain() {
 
     assert!(store.load().unwrap().is_none());
     assert!(ui_data_store.load_metrics().unwrap().is_empty());
+}
+
+#[test]
+fn management_ui_shows_a_banner_instead_of_errors_while_chain_data_loads() {
+    let html = include_str!("adapters/http/index_html.rs");
+    let javascript = include_str!("../www/assets/iuna-ui.js");
+    assert!(html.contains("x-show=\"uiDataLoading()\""));
+    assert!(javascript.contains("return this.status.ui_data_ready === false;"));
+    assert!(javascript.contains("if (response.status === 503) {"));
+    assert!(
+        javascript.contains("if (!error.uiDataLoading) this.showFlash(error.message, \"error\");")
+    );
 }

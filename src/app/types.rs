@@ -213,6 +213,12 @@ pub struct NodeStatus {
     pub stratum: StratumStatus,
     pub chain: ChainStatus,
     pub network_migration: NetworkMigrationStatus,
+    #[serde(default = "ui_data_ready_default")]
+    pub ui_data_ready: bool,
+}
+
+fn ui_data_ready_default() -> bool {
+    true
 }
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]

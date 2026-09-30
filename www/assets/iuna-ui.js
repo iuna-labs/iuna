@@ -873,7 +873,7 @@ window.iunaApp = function iunaApp() {
           await this.refreshAuth();
           return;
         }
-        this.showFlash(error.message, "error");
+        if (!error.uiDataLoading) this.showFlash(error.message, "error");
       } finally {
         if (shouldLoadBlocks) this.loadingInitialBlocks = false;
       }
@@ -948,10 +948,19 @@ window.iunaApp = function iunaApp() {
         headers: { Accept: "application/json" },
         cache: "no-store",
       });
+      if (response.status === 503) {
+        const error = new Error("Chain data is still loading");
+        error.uiDataLoading = true;
+        throw error;
+      }
       if (!response.ok) {
         throw new Error(`${path} returned ${response.status}`);
       }
       return response.json();
+    },
+
+    uiDataLoading() {
+      return this.status.ui_data_ready === false;
     },
 
     async fetchWithTimeout(path, options = {}) {
@@ -1072,7 +1081,7 @@ window.iunaApp = function iunaApp() {
           this.pruneSelectedTransferUtxos();
         }
       } catch (error) {
-        this.showFlash(error.message, "error");
+        if (!error.uiDataLoading) this.showFlash(error.message, "error");
       } finally {
         page[loadingKey] = false;
       }
@@ -2378,7 +2387,7 @@ window.iunaApp = function iunaApp() {
         }
         return metrics;
       } catch (error) {
-        if (options.silent !== true) this.showFlash(error.message, "error");
+        if (options.silent !== true && !error.uiDataLoading) this.showFlash(error.message, "error");
         return this.blockchainMetrics;
       } finally {
         if (requestId === this.metricsRequestSeq) {

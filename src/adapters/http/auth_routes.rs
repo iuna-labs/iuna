@@ -285,6 +285,7 @@ mod tests {
             setup_capability: Arc::new(Mutex::new(Some(SETUP_CAPABILITY.into()))),
             management_port: MANAGEMENT_PORT,
             wallet_endpoint_addr: None,
+            ui_data_ready: Arc::new(std::sync::atomic::AtomicBool::new(true)),
         }
     }
 

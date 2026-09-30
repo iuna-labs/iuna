@@ -33,6 +33,9 @@ use super::{
 pub(super) async fn api_status(State(state): State<HttpState>) -> Json<NodeStatus> {
     let mut status = state.node.lock().await.status();
     status.stratum = state.stratum.clone();
+    status.ui_data_ready = state
+        .ui_data_ready
+        .load(std::sync::atomic::Ordering::Acquire);
     Json(status)
 }
 

@@ -680,6 +680,7 @@ pub(super) const INDEX_HTML: &str = concat!(
 
     <div class="flash" :class="flash?.kind" x-show="flash" x-transition x-text="flash?.message"></div>
     <div class="persistent-banner" x-show="p2pRestartRequired()" x-transition x-text="p2pRestartMessage()"></div>
+    <div class="persistent-banner" x-show="uiDataLoading()" x-transition>Loading chain data. Blocks, wallet history and metrics appear once it is ready.</div>
 
     <section class="dashboard-section" x-show="tab === 'dashboard'">
       <div class="dashboard-grid">

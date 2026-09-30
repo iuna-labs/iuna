@@ -710,6 +710,7 @@ mod tests {
             setup_capability: Arc::new(Mutex::new(Some("test-setup-capability".into()))),
             management_port: 9444,
             wallet_endpoint_addr: None,
+            ui_data_ready: Arc::new(std::sync::atomic::AtomicBool::new(true)),
         };
 
         reset_local_chain(&state, CHAIN_RESET_CONFIRMATION)

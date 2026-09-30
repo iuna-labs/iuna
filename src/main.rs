@@ -26,7 +26,7 @@ use iuna::{
     },
 };
 use secrecy::{ExposeSecret, SecretString};
-use tokio::sync::Mutex;
+use tokio::sync::{Mutex, oneshot};
 
 mod cli;
 #[cfg(feature = "cli-updater")]
@@ -226,16 +226,20 @@ async fn main() -> Result<()> {
     let mut peers = ui_config.lock().await.peers.clone();
     peers.extend(opts.peers);
     let peers: SharedPeerBook = Arc::new(Mutex::new(PeerBook::from_addresses(peers)));
-    if has_chain {
+    let startup_ui_projection = if has_chain {
         let initial_snapshot = { node.lock().await.chain_snapshot() };
         let keep_metrics = ui_config.lock().await.keep_track_of_metrics;
         if chain_requires_persistence {
             persist_chain_snapshot(&chain_store, initial_snapshot.clone()).await?;
         }
-        warm_ui_data_store(&ui_data_store, initial_snapshot, keep_metrics).await?;
+        Some((initial_snapshot, keep_metrics))
     } else if !migration_required {
         clear_ui_data_store(&ui_data_store).await?;
-    }
+        None
+    } else {
+        None
+    };
+    let ui_data_ready = Arc::new(AtomicBool::new(startup_ui_projection.is_none()));
 
     println!("iuna wallet: {}", node.lock().await.wallet_address());
     if node.lock().await.wallet_is_locked() {
@@ -287,6 +291,36 @@ async fn main() -> Result<()> {
             enabled: true,
             listen_addr: Some(stratum.listen_addr().to_string()),
         };
+    }
+
+    let (management_started_tx, management_started_rx) = oneshot::channel();
+    let management_ui_data_ready = Arc::clone(&ui_data_ready);
+    let management = tokio::spawn(http::serve(
+        Arc::clone(&node),
+        Arc::clone(&peers),
+        gossip.clone(),
+        Arc::clone(&ui_config),
+        http::ServeOptions {
+            config_path: config_path.clone(),
+            chain_store: chain_store.clone(),
+            ui_data_store: ui_data_store.clone(),
+            wallet_path: wallet_path.clone(),
+            stratum: stratum_status.clone(),
+            wallet_endpoint_addr: configured_wallet_endpoint_addr,
+            addr: opts.http_addr,
+            ui_data_ready: management_ui_data_ready,
+            started: Some(management_started_tx),
+        },
+    ));
+    if management_started_rx.await.is_err() {
+        return management
+            .await
+            .context("management UI task failed before binding")?;
+    }
+
+    if let Some((initial_snapshot, keep_metrics)) = startup_ui_projection {
+        warm_ui_data_store(&ui_data_store, initial_snapshot, keep_metrics).await?;
+        ui_data_ready.store(true, Ordering::Release);
     }
 
     let persistence_node = Arc::clone(&node);
@@ -353,21 +387,7 @@ async fn main() -> Result<()> {
     }
 
     let wallet_endpoint_ui_data_store = ui_data_store.clone();
-    let management = http::serve(
-        Arc::clone(&node),
-        peers,
-        gossip.clone(),
-        ui_config,
-        http::ServeOptions {
-            config_path,
-            chain_store,
-            ui_data_store,
-            wallet_path,
-            stratum: stratum_status,
-            wallet_endpoint_addr: configured_wallet_endpoint_addr,
-            addr: opts.http_addr,
-        },
-    );
+    let management = async move { management.await.context("management UI task failed")? };
     if let Some(addr) = configured_wallet_endpoint_addr {
         tokio::try_join!(
             management,

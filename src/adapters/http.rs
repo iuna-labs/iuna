@@ -13,7 +13,7 @@ use axum::{
     http::Request,
     middleware,
     middleware::Next,
-    response::Response,
+    response::{IntoResponse, Response},
     routing::{get, post},
 };
 use tokio::{net::TcpListener, sync::Mutex};
@@ -116,6 +116,8 @@ pub async fn serve(
     // Validate the embedded prefix index before the UI can issue its first peer request.
     IpGeolocation::bundled();
     let addr = options.addr;
+    let ui_data_ready = Arc::clone(&options.ui_data_ready);
+    let started = options.started;
     let setup_capability = auth::random_hex(32)?;
     let state = HttpState {
         node,
@@ -132,6 +134,7 @@ pub async fn serve(
         setup_capability: Arc::new(Mutex::new(Some(setup_capability))),
         management_port: addr.port(),
         wallet_endpoint_addr: options.wallet_endpoint_addr,
+        ui_data_ready: Arc::clone(&ui_data_ready),
     };
     let app = Router::new()
         .route("/", get(index))
@@ -211,6 +214,10 @@ pub async fn serve(
         .route("/transfer", post(transfer_form))
         .route("/peers", post(peer_form))
         .layer(middleware::from_fn_with_state(
+            ui_data_ready,
+            require_ui_data_ready,
+        ))
+        .layer(middleware::from_fn_with_state(
             state.clone(),
             require_auth_middleware,
         ))
@@ -220,12 +227,43 @@ pub async fn serve(
     let listener = TcpListener::bind(addr)
         .await
         .with_context(|| format!("binding HTTP management UI on {addr}"))?;
+    if let Some(started) = started {
+        let _ = started.send(());
+    }
     axum::serve(
         listener,
         app.into_make_service_with_connect_info::<SocketAddr>(),
     )
     .await
     .context("serving HTTP management UI")
+}
+
+async fn require_ui_data_ready(
+    State(ready): State<Arc<std::sync::atomic::AtomicBool>>,
+    request: Request<Body>,
+    next: Next,
+) -> Response {
+    if ui_data_required(request.uri().path()) && !ready.load(std::sync::atomic::Ordering::Acquire) {
+        return (
+            axum::http::StatusCode::SERVICE_UNAVAILABLE,
+            "Chain data is still loading; try again shortly",
+        )
+            .into_response();
+    }
+    next.run(request).await
+}
+
+fn ui_data_required(path: &str) -> bool {
+    matches!(
+        path,
+        "/api/blocks"
+            | "/api/mempool"
+            | "/api/wallet/transactions"
+            | "/api/wallet/utxos"
+            | "/api/wallet/utxos/selectable"
+            | "/api/metrics"
+            | "/api/settings/chain-reset"
+    )
 }
 
 async fn log_slow_api_request(request: Request<Body>, next: Next) -> Response {
@@ -276,4 +314,89 @@ fn now_ms() -> u64 {
         .duration_since(UNIX_EPOCH)
         .unwrap_or_default()
         .as_millis() as u64
+}
+
+#[cfg(test)]
+mod readiness_tests {
+    use std::sync::{Arc, atomic::AtomicBool};
+
+    use axum::{
+        Router,
+        body::Body,
+        http::Request,
+        middleware,
+        routing::{get, post},
+    };
+    use tower::ServiceExt;
+
+    use super::{require_ui_data_ready, ui_data_required};
+
+    #[test]
+    fn only_projection_backed_endpoints_wait_for_ui_data() {
+        for path in [
+            "/api/blocks",
+            "/api/mempool",
+            "/api/wallet/transactions",
+            "/api/wallet/utxos",
+            "/api/wallet/utxos/selectable",
+            "/api/metrics",
+            "/api/settings/chain-reset",
+        ] {
+            assert!(ui_data_required(path), "{path} should wait for UI data");
+        }
+        for path in ["/", "/api/status", "/api/config", "/api/peers"] {
+            assert!(
+                !ui_data_required(path),
+                "{path} should remain available during warming"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn projection_endpoints_return_503_until_ui_data_is_ready() {
+        let ready = Arc::new(AtomicBool::new(false));
+        let app = Router::new()
+            .route("/api/blocks", get(|| async { "blocks" }))
+            .route("/api/status", get(|| async { "status" }))
+            .route("/api/settings/chain-reset", post(|| async { "reset" }))
+            .layer(middleware::from_fn_with_state(
+                Arc::clone(&ready),
+                require_ui_data_ready,
+            ));
+
+        let warming = app
+            .clone()
+            .oneshot(Request::get("/api/blocks").body(Body::empty()).unwrap())
+            .await
+            .unwrap();
+        assert_eq!(
+            warming.status(),
+            axum::http::StatusCode::SERVICE_UNAVAILABLE
+        );
+
+        let reset = app
+            .clone()
+            .oneshot(
+                Request::post("/api/settings/chain-reset")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(reset.status(), axum::http::StatusCode::SERVICE_UNAVAILABLE);
+
+        let status = app
+            .clone()
+            .oneshot(Request::get("/api/status").body(Body::empty()).unwrap())
+            .await
+            .unwrap();
+        assert_eq!(status.status(), axum::http::StatusCode::OK);
+
+        ready.store(true, std::sync::atomic::Ordering::Release);
+        let warmed = app
+            .oneshot(Request::get("/api/blocks").body(Body::empty()).unwrap())
+            .await
+            .unwrap();
+        assert_eq!(warmed.status(), axum::http::StatusCode::OK);
+    }
 }

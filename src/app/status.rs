@@ -161,6 +161,7 @@ impl NodeCore {
                 from_network: self.network_migration_from().map(str::to_string),
                 to_network: NETWORK_ID.to_string(),
             },
+            ui_data_ready: true,
         }
     }
 
