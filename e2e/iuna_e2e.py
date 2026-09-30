@@ -705,9 +705,21 @@ def read_chain_metadata(path: Path) -> dict:
         raise E2EError(f"chain database does not exist: {path}")
     connection = sqlite3.connect(f"file:{path}?mode=ro", uri=True, timeout=2)
     try:
-        row = connection.execute(
-            "SELECT height, tip_hash, updated_at_ms FROM chain_snapshots WHERE id = 1"
-        ).fetchone()
+        tables = {
+            name
+            for (name,) in connection.execute(
+                "SELECT name FROM sqlite_master WHERE type = 'table'"
+            )
+        }
+        row = None
+        # Segmented chains keep their tip in chain_metadata; legacy databases use chain_snapshots.
+        for table in ("chain_metadata", "chain_snapshots"):
+            if table in tables:
+                row = connection.execute(
+                    f"SELECT height, tip_hash, updated_at_ms FROM {table} WHERE id = 1"
+                ).fetchone()
+                if row is not None:
+                    break
     finally:
         connection.close()
     if row is None:
