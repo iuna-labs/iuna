@@ -3952,8 +3952,8 @@ window.iunaApp = function iunaApp() {
     dashboardBlockState() {
       const ageMs = this.networkHealth.last_block_age_ms;
       if (typeof ageMs !== "number" || !Number.isFinite(ageMs)) return "neutral";
-      if (ageMs < 15 * 60 * 1000) return "good";
-      if (ageMs < 20 * 60 * 1000) return "warning";
+      if (ageMs <= 20 * 60 * 1000) return "good";
+      if (ageMs <= 60 * 60 * 1000) return "warning";
       return "bad";
     },
 
