@@ -5,6 +5,22 @@ from the Git history and Conventional Commit titles by `deployment.sh`.
 
 ## [Unreleased]
 
+## [0.4.52] - 2026-09-30
+
+### Added
+
+- persist chain in incremental segments
+
+### Fixed
+
+- adjust last-block warning thresholds
+- read chain tip from segmented chain metadata
+- enable partition recovery workers after the split
+
+### Performance
+
+- serve management UI before warming UI data store
+
 ## [0.4.51] - 2026-09-30
 
 ### Added
