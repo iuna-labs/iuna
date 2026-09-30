@@ -14,6 +14,8 @@ pub const DEFAULT_MINE_FEE: Amount = MINE_FINALIZER_FEE;
 pub const DEFAULT_TRANSACTION_FEE: Amount = MICRO_IUNA;
 pub const DEFAULT_FEE_PER_BYTE: Amount = 1;
 pub const MAX_BLOCK_BYTES: usize = 1_000_000;
+/// Number of blocks in an independently persisted and synchronized chain segment.
+pub const CHAIN_SEGMENT_BLOCKS: usize = 256;
 #[cfg(not(feature = "e2e"))]
 pub const VDF_TARGET_BLOCK_MS: u64 = 10 * 60 * 1_000;
 #[cfg(feature = "e2e")]

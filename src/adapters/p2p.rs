@@ -60,7 +60,8 @@ use session::{accept_loop, outbound_session, outbound_supervisor};
 use sync::{apply_peer_list, envelopes_for_peer, maybe_request_catchup, write_peer_exchange};
 use writer::{byte_bounded_block_page, write_envelope, write_payload};
 
-const MAX_BLOCK_BATCH: usize = 128;
+const MAX_BLOCK_BATCH: usize = crate::domain::CHAIN_SEGMENT_BLOCKS;
+const LEGACY_MAX_BLOCK_BATCH: usize = 128;
 const MAX_OBJECT_REQUESTS: usize = 128;
 const MAX_INVENTORY_ITEMS: usize = 512;
 const MAX_BLOCK_LOCATOR_HASHES: usize = 64;
@@ -91,6 +92,18 @@ const MAX_PEER_VERIFICATION_ENVELOPES: usize = 8;
 const INITIAL_RECONNECT_DELAY: Duration = Duration::from_secs(1);
 const MAX_RECONNECT_DELAY: Duration = Duration::from_secs(30);
 const INBOUND_SESSION_PREFIX: &str = "inbound://";
+
+fn negotiated_block_batch_limit(capabilities: &[String]) -> usize {
+    if capabilities
+        .iter()
+        .any(|capability| capability == crate::app::CAPABILITY_CHAIN_SEGMENT_SYNC)
+    {
+        MAX_BLOCK_BATCH
+    } else {
+        LEGACY_MAX_BLOCK_BATCH
+    }
+}
+
 struct OutboundBatch {
     envelopes: Arc<[GossipEnvelope]>,
     _queued_bytes: OwnedSemaphorePermit,

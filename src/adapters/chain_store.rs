@@ -6,10 +6,14 @@ use std::{
 
 use anyhow::{Context, Result};
 use rusqlite::{Connection, OptionalExtension, params};
+use sha2::{Digest, Sha256};
 
 use crate::{
-    compact::{decode_compact_snapshot, encode_compact_snapshot, legacy_compact_snapshot_version},
-    domain::ChainSnapshot,
+    compact::{
+        decode_compact_segment, decode_compact_snapshot, encode_compact_segment,
+        encode_compact_snapshot, legacy_compact_snapshot_version,
+    },
+    domain::{CHAIN_SEGMENT_BLOCKS, ChainSnapshot, hex_encode},
 };
 
 #[cfg(feature = "fuzzing")]
@@ -24,6 +28,21 @@ CREATE TABLE IF NOT EXISTS chain_snapshots (
     tip_hash TEXT NOT NULL,
     snapshot_blob BLOB NOT NULL,
     updated_at_ms INTEGER NOT NULL
+);
+CREATE TABLE IF NOT EXISTS chain_metadata (
+    id INTEGER PRIMARY KEY CHECK (id = 1),
+    height INTEGER NOT NULL,
+    tip_hash TEXT NOT NULL,
+    header_blob BLOB NOT NULL,
+    updated_at_ms INTEGER NOT NULL
+);
+CREATE TABLE IF NOT EXISTS chain_segments (
+    segment_id INTEGER PRIMARY KEY,
+    first_height INTEGER NOT NULL,
+    last_height INTEGER NOT NULL,
+    end_block_hash TEXT NOT NULL,
+    blob_hash TEXT NOT NULL,
+    blocks_blob BLOB NOT NULL
 );
 CREATE TABLE IF NOT EXISTS chain_verification (
     id INTEGER PRIMARY KEY CHECK (id = 1),
@@ -128,7 +147,10 @@ impl SqliteChainStore {
         self.with_connection(|connection| {
             connection
                 .query_row(
-                    "SELECT EXISTS(SELECT 1 FROM chain_snapshots WHERE id = 1)",
+                    r#"
+SELECT EXISTS(SELECT 1 FROM chain_metadata WHERE id = 1)
+    OR EXISTS(SELECT 1 FROM chain_snapshots WHERE id = 1)
+"#,
                     [],
                     |row| row.get(0),
                 )
@@ -211,6 +233,15 @@ VALUES (?1, ?2, ?3, ?4)
 
     pub fn load_with_verification_status(&self) -> Result<Option<LoadedChainSnapshot>> {
         self.with_connection(|connection| {
+            if let Some(snapshot) = load_segmented_snapshot(connection)? {
+                let tip_hash = snapshot_tip(&snapshot)
+                    .context("segmented chain snapshot contains no blocks")?
+                    .1;
+                return Ok(Some(LoadedChainSnapshot {
+                    snapshot,
+                    revalidation_from_height: load_revalidation_height(connection, &tip_hash)?,
+                }));
+            }
             let stored = connection
                 .query_row(
                     "SELECT height, tip_hash, snapshot_blob FROM chain_snapshots WHERE id = 1",
@@ -243,20 +274,9 @@ VALUES (?1, ?2, ?3, ?4)
             let Some((snapshot, tip_hash)) = snapshot else {
                 return Ok(None);
             };
-            let stored_ruleset = connection
-                .query_row(
-                    r#"
-SELECT verifier_version FROM chain_verification
-WHERE id = 1 AND tip_hash = ?1
-"#,
-                    params![tip_hash],
-                    |row| row.get::<_, String>(0),
-                )
-                .optional()
-                .context("failed to inspect chain verification status")?;
             Ok(Some(LoadedChainSnapshot {
                 snapshot,
-                revalidation_from_height: revalidation_from_height(stored_ruleset.as_deref()),
+                revalidation_from_height: load_revalidation_height(connection, &tip_hash)?,
             }))
         })
     }
@@ -276,28 +296,114 @@ WHERE id = 1 AND tip_hash = ?1
         verified: bool,
     ) -> Result<()> {
         let (height, tip_hash) = snapshot_tip(snapshot).context("cannot persist empty chain")?;
-        let snapshot_blob =
-            encode_compact_snapshot(snapshot).context("failed to encode compact chain snapshot")?;
+        let header = ChainSnapshot {
+            genesis_allocations: snapshot.genesis_allocations.clone(),
+            vdf_rounds: snapshot.vdf_rounds,
+            launch_profile: snapshot.launch_profile.clone(),
+            blocks: Vec::new(),
+        };
+        let header_blob =
+            encode_compact_snapshot(&header).context("failed to encode compact chain header")?;
         let updated_at_ms = unix_ms();
 
         self.with_connection_mut(|connection| {
             let transaction = connection
                 .transaction()
                 .context("failed to start chain persistence transaction")?;
+            let stored_tip = transaction
+                .query_row(
+                    "SELECT height, tip_hash, header_blob FROM chain_metadata WHERE id = 1",
+                    [],
+                    |row| {
+                        Ok((
+                            row.get::<_, u64>(0)?,
+                            row.get::<_, String>(1)?,
+                            row.get::<_, Vec<u8>>(2)?,
+                        ))
+                    },
+                )
+                .optional()
+                .context("failed to inspect persisted chain metadata")?;
+            let first_segment_to_check = stored_tip
+                .filter(|(_, _, stored_header)| stored_header == &header_blob)
+                .and_then(|(stored_height, stored_hash, _)| {
+                    let stored_height = usize::try_from(stored_height).ok()?;
+                    (snapshot.blocks.get(stored_height)?.hash == stored_hash)
+                        .then_some((stored_height + 1) / CHAIN_SEGMENT_BLOCKS)
+                })
+                .unwrap_or(0);
+            for (segment_id, blocks) in snapshot
+                .blocks
+                .chunks(CHAIN_SEGMENT_BLOCKS)
+                .enumerate()
+                .skip(first_segment_to_check)
+            {
+                let last = blocks
+                    .last()
+                    .context("cannot persist empty chain segment")?;
+                let stored_end_hash = transaction
+                    .query_row(
+                        "SELECT end_block_hash FROM chain_segments WHERE segment_id = ?1",
+                        [segment_id as u64],
+                        |row| row.get::<_, String>(0),
+                    )
+                    .optional()
+                    .context("failed to inspect persisted chain segment")?;
+                if stored_end_hash.as_deref() == Some(last.hash.as_str()) {
+                    continue;
+                }
+                let blocks_blob = encode_compact_segment(&snapshot.genesis_allocations, blocks)
+                    .with_context(|| format!("failed to encode chain segment {segment_id}"))?;
+                let blob_hash = sha256_hex(&blocks_blob);
+                transaction
+                    .execute(
+                        r#"
+INSERT INTO chain_segments (
+    segment_id, first_height, last_height, end_block_hash, blob_hash, blocks_blob
+)
+VALUES (?1, ?2, ?3, ?4, ?5, ?6)
+ON CONFLICT(segment_id) DO UPDATE SET
+    first_height = excluded.first_height,
+    last_height = excluded.last_height,
+    end_block_hash = excluded.end_block_hash,
+    blob_hash = excluded.blob_hash,
+    blocks_blob = excluded.blocks_blob
+"#,
+                        params![
+                            segment_id as u64,
+                            blocks[0].height,
+                            last.height,
+                            last.hash,
+                            blob_hash,
+                            blocks_blob
+                        ],
+                    )
+                    .with_context(|| format!("failed to persist chain segment {segment_id}"))?;
+            }
+            let segment_count = snapshot.blocks.len().div_ceil(CHAIN_SEGMENT_BLOCKS);
+            transaction
+                .execute(
+                    "DELETE FROM chain_segments WHERE segment_id >= ?1",
+                    [segment_count as u64],
+                )
+                .context("failed to remove obsolete chain segments")?;
             transaction
                 .execute(
                     r#"
-INSERT INTO chain_snapshots (id, height, tip_hash, snapshot_blob, updated_at_ms)
+INSERT INTO chain_metadata (id, height, tip_hash, header_blob, updated_at_ms)
 VALUES (1, ?1, ?2, ?3, ?4)
 ON CONFLICT(id) DO UPDATE SET
     height = excluded.height,
     tip_hash = excluded.tip_hash,
-    snapshot_blob = excluded.snapshot_blob,
+    header_blob = excluded.header_blob,
     updated_at_ms = excluded.updated_at_ms
 "#,
-                    params![height, tip_hash, snapshot_blob, updated_at_ms],
+                    params![height, tip_hash, header_blob, updated_at_ms],
                 )
-                .context("failed to persist chain snapshot")?;
+                .context("failed to persist chain metadata")?;
+            transaction
+                .execute("DELETE FROM chain_snapshots", [])
+                .context("failed to remove migrated monolithic chain snapshot")?;
             if verified {
                 transaction
                     .execute(
@@ -329,6 +435,12 @@ ON CONFLICT(id) DO UPDATE SET
             let transaction = connection
                 .transaction()
                 .context("failed to start chain reset transaction")?;
+            transaction
+                .execute("DELETE FROM chain_metadata", [])
+                .context("failed to delete chain metadata")?;
+            transaction
+                .execute("DELETE FROM chain_segments", [])
+                .context("failed to delete chain segments")?;
             transaction
                 .execute("DELETE FROM chain_snapshots", [])
                 .context("failed to delete chain snapshot")?;
@@ -376,6 +488,106 @@ PRAGMA synchronous = NORMAL;
         Connection::open(&self.path)
             .with_context(|| format!("failed to open chain database {}", self.path.display()))
     }
+}
+
+fn load_segmented_snapshot(connection: &Connection) -> Result<Option<ChainSnapshot>> {
+    let metadata = connection
+        .query_row(
+            "SELECT height, tip_hash, header_blob FROM chain_metadata WHERE id = 1",
+            [],
+            |row| {
+                Ok((
+                    row.get::<_, u64>(0)?,
+                    row.get::<_, String>(1)?,
+                    row.get::<_, Vec<u8>>(2)?,
+                ))
+            },
+        )
+        .optional()
+        .context("failed to load segmented chain metadata")?;
+    let Some((stored_height, stored_tip_hash, header_blob)) = metadata else {
+        return Ok(None);
+    };
+    let mut snapshot = decode_compact_snapshot(&header_blob)
+        .context("failed to parse compact chain header from database")?;
+    if !snapshot.blocks.is_empty() {
+        anyhow::bail!("compact chain header unexpectedly contains blocks");
+    }
+
+    let mut statement = connection
+        .prepare(
+            r#"
+SELECT segment_id, first_height, last_height, end_block_hash, blob_hash, blocks_blob
+FROM chain_segments
+ORDER BY segment_id ASC
+"#,
+        )
+        .context("failed to prepare chain segment query")?;
+    let rows = statement
+        .query_map([], |row| {
+            Ok((
+                row.get::<_, u64>(0)?,
+                row.get::<_, u64>(1)?,
+                row.get::<_, u64>(2)?,
+                row.get::<_, String>(3)?,
+                row.get::<_, String>(4)?,
+                row.get::<_, Vec<u8>>(5)?,
+            ))
+        })
+        .context("failed to load chain segments")?;
+    for row in rows {
+        let (segment_id, first_height, last_height, end_block_hash, blob_hash, blocks_blob) =
+            row.context("failed to read chain segment row")?;
+        let expected_segment_id = snapshot.blocks.len() / CHAIN_SEGMENT_BLOCKS;
+        if segment_id != expected_segment_id as u64 || first_height != snapshot.blocks.len() as u64
+        {
+            anyhow::bail!("chain segments are missing or out of order at segment {segment_id}");
+        }
+        if sha256_hex(&blocks_blob) != blob_hash {
+            anyhow::bail!("chain segment {segment_id} blob hash does not match its contents");
+        }
+        let blocks = decode_compact_segment(&blocks_blob, &snapshot.genesis_allocations)
+            .with_context(|| format!("failed to parse compact chain segment {segment_id}"))?;
+        let first = blocks.first().context("compact chain segment is empty")?;
+        let last = blocks.last().context("compact chain segment is empty")?;
+        let expected_prev_hash = snapshot
+            .blocks
+            .last()
+            .map_or_else(|| "0".repeat(64), |block| block.hash.clone());
+        if first.height != first_height
+            || first.prev_hash != expected_prev_hash
+            || last.height != last_height
+            || last.hash != end_block_hash
+        {
+            anyhow::bail!("chain segment {segment_id} metadata does not match its contents");
+        }
+        snapshot.blocks.extend(blocks);
+    }
+    let (height, tip_hash) =
+        snapshot_tip(&snapshot).context("segmented chain database contains no block segments")?;
+    if height != stored_height || tip_hash != stored_tip_hash {
+        anyhow::bail!("segmented chain tip does not match database metadata");
+    }
+    Ok(Some(snapshot))
+}
+
+fn load_revalidation_height(connection: &Connection, tip_hash: &str) -> Result<Option<u64>> {
+    let stored_ruleset = connection
+        .query_row(
+            r#"
+SELECT verifier_version FROM chain_verification
+WHERE id = 1 AND tip_hash = ?1
+"#,
+            params![tip_hash],
+            |row| row.get::<_, String>(0),
+        )
+        .optional()
+        .context("failed to inspect chain verification status")?;
+    Ok(revalidation_from_height(stored_ruleset.as_deref()))
+}
+
+fn sha256_hex(bytes: &[u8]) -> String {
+    hex_encode(Sha256::digest(bytes))
 }
 
 fn legacy_chain_reason(path: &Path) -> Result<Option<String>> {
@@ -526,7 +738,7 @@ fn unix_ms() -> u64 {
 mod tests {
     use std::{collections::BTreeMap, fs};
 
-    use rusqlite::Connection;
+    use rusqlite::{Connection, params};
     use tempfile::tempdir;
 
     use crate::domain::{ChainSnapshot, GenesisBurn, Ledger, Wallet};
@@ -552,6 +764,22 @@ VALUES (1, 0, 'legacy-tip', '{}', 0);
         Ledger::new_with_genesis_burns(allocations, vec![GenesisBurn::new(wallet.address(), 1)], 1)
             .unwrap()
             .snapshot()
+    }
+
+    fn synthetic_snapshot(seed: &str, block_count: usize) -> ChainSnapshot {
+        assert!(block_count > 0);
+        let mut snapshot = test_snapshot(seed);
+        let template = snapshot.blocks[0].clone();
+        while snapshot.blocks.len() < block_count {
+            let previous = snapshot.blocks.last().unwrap();
+            let mut block = template.clone();
+            block.height = snapshot.blocks.len() as u64;
+            block.prev_hash = previous.hash.clone();
+            block.timestamp_ms = previous.timestamp_ms.saturating_add(1);
+            block.hash = block.compute_hash();
+            snapshot.blocks.push(block);
+        }
+        snapshot
     }
 
     #[test]
@@ -701,7 +929,7 @@ VALUES (1, 0, 'bad-tip', ?1, 0)
         store
             .with_connection_mut(|connection| {
                 connection.execute(
-                    "UPDATE chain_snapshots SET tip_hash = ?1 WHERE id = 1",
+                    "UPDATE chain_metadata SET tip_hash = ?1 WHERE id = 1",
                     ["0".repeat(64)],
                 )?;
                 Ok(())
@@ -712,8 +940,143 @@ VALUES (1, 0, 'bad-tip', ?1, 0)
         assert!(
             error
                 .to_string()
-                .contains("snapshot tip does not match database metadata")
+                .contains("chain tip does not match database metadata")
         );
+    }
+
+    #[test]
+    fn save_uses_segmented_storage_and_removes_the_monolithic_snapshot() {
+        let dir = tempdir().unwrap();
+        let store = SqliteChainStore::open(dir.path().join("chain.sqlite3")).unwrap();
+        let snapshot = test_snapshot("chain-store-segmented");
+
+        store.save(&snapshot).unwrap();
+
+        store
+            .with_connection(|connection| {
+                let segment_count: u64 =
+                    connection
+                        .query_row("SELECT COUNT(*) FROM chain_segments", [], |row| row.get(0))?;
+                let snapshot_count: u64 =
+                    connection
+                        .query_row("SELECT COUNT(*) FROM chain_snapshots", [], |row| row.get(0))?;
+                assert_eq!(segment_count, 1);
+                assert_eq!(snapshot_count, 0);
+                Ok(())
+            })
+            .unwrap();
+        assert_eq!(store.load().unwrap().unwrap(), snapshot);
+    }
+
+    #[test]
+    fn current_monolithic_snapshot_loads_and_migrates_on_save() {
+        let dir = tempdir().unwrap();
+        let store = SqliteChainStore::open(dir.path().join("chain.sqlite3")).unwrap();
+        let snapshot = test_snapshot("chain-store-current-monolithic");
+        let blob = super::encode_compact_snapshot(&snapshot).unwrap();
+        let tip = snapshot.blocks.last().unwrap();
+        store
+            .with_connection_mut(|connection| {
+                connection.execute(
+                    r#"
+INSERT INTO chain_snapshots (id, height, tip_hash, snapshot_blob, updated_at_ms)
+VALUES (1, ?1, ?2, ?3, 0)
+"#,
+                    params![tip.height, tip.hash, blob],
+                )?;
+                Ok(())
+            })
+            .unwrap();
+
+        assert_eq!(store.load().unwrap().unwrap(), snapshot);
+        store.save(&snapshot).unwrap();
+
+        store
+            .with_connection(|connection| {
+                let old_count: u64 =
+                    connection
+                        .query_row("SELECT COUNT(*) FROM chain_snapshots", [], |row| row.get(0))?;
+                let segment_count: u64 =
+                    connection
+                        .query_row("SELECT COUNT(*) FROM chain_segments", [], |row| row.get(0))?;
+                assert_eq!(old_count, 0);
+                assert_eq!(segment_count, 1);
+                Ok(())
+            })
+            .unwrap();
+    }
+
+    #[test]
+    fn appending_only_rewrites_the_active_segment() {
+        let dir = tempdir().unwrap();
+        let store = SqliteChainStore::open(dir.path().join("chain.sqlite3")).unwrap();
+        let snapshot = synthetic_snapshot("chain-store-multiple-segments", 300);
+        store.save(&snapshot).unwrap();
+        let sealed_blob = store
+            .with_connection(|connection| {
+                Ok(connection.query_row(
+                    "SELECT blocks_blob FROM chain_segments WHERE segment_id = 0",
+                    [],
+                    |row| row.get::<_, Vec<u8>>(0),
+                )?)
+            })
+            .unwrap();
+        store
+            .with_connection_mut(|connection| {
+                connection.execute_batch(
+                    r#"
+CREATE TRIGGER reject_sealed_segment_rewrite
+BEFORE UPDATE ON chain_segments
+WHEN OLD.segment_id = 0
+BEGIN
+    SELECT RAISE(ABORT, 'sealed segment was rewritten');
+END;
+"#,
+                )?;
+                Ok(())
+            })
+            .unwrap();
+
+        let extended = synthetic_snapshot("chain-store-multiple-segments", 301);
+        store.save(&extended).unwrap();
+
+        store
+            .with_connection(|connection| {
+                let segment_count: u64 =
+                    connection
+                        .query_row("SELECT COUNT(*) FROM chain_segments", [], |row| row.get(0))?;
+                let persisted_sealed_blob: Vec<u8> = connection.query_row(
+                    "SELECT blocks_blob FROM chain_segments WHERE segment_id = 0",
+                    [],
+                    |row| row.get(0),
+                )?;
+                assert_eq!(segment_count, 2);
+                assert_eq!(persisted_sealed_blob, sealed_blob);
+                Ok(())
+            })
+            .unwrap();
+        assert_eq!(store.load().unwrap().unwrap(), extended);
+    }
+
+    #[test]
+    fn load_rejects_a_segment_with_corrupted_bytes() {
+        let dir = tempdir().unwrap();
+        let store = SqliteChainStore::open(dir.path().join("chain.sqlite3")).unwrap();
+        store
+            .save(&test_snapshot("chain-store-corrupt-segment"))
+            .unwrap();
+        store
+            .with_connection_mut(|connection| {
+                connection.execute(
+                    "UPDATE chain_segments SET blocks_blob = X'00' WHERE segment_id = 0",
+                    [],
+                )?;
+                Ok(())
+            })
+            .unwrap();
+
+        let error = store.load().unwrap_err();
+        assert!(error.to_string().contains("blob hash does not match"));
     }
 
     #[test]

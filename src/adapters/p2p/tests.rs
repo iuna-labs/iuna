@@ -15,6 +15,20 @@ use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 
 use super::test_support::{allocations, gossip_network, node, queue_plaintext_burn};
 
+#[test]
+fn segmented_block_batches_require_an_explicit_peer_capability() {
+    assert_eq!(
+        super::negotiated_block_batch_limit(&[]),
+        super::LEGACY_MAX_BLOCK_BATCH
+    );
+    assert_eq!(
+        super::negotiated_block_batch_limit(&[
+            crate::app::CAPABILITY_CHAIN_SEGMENT_SYNC.to_string(),
+        ]),
+        super::MAX_BLOCK_BATCH
+    );
+}
+
 #[tokio::test]
 async fn block_batch_validation_reports_each_validated_height() {
     let alice = Wallet::from_seed("batch-validation-progress-alice");
@@ -669,6 +683,7 @@ async fn single_block_fork_error_requests_blocks_by_locator() {
     else {
         panic!("expected block locator request");
     };
+    assert_eq!(limit, super::LEGACY_MAX_BLOCK_BATCH);
     let fork_blocks = remote_node.blocks_after_locator(&locator, limit);
     assert_eq!(fork_blocks.len(), 2);
     let local_ledger = network.inner.node.lock().await.clone_ledger();
@@ -743,6 +758,7 @@ async fn block_page_without_local_ancestor_requests_blocks_by_locator() {
     else {
         panic!("expected block locator request");
     };
+    assert_eq!(limit, super::LEGACY_MAX_BLOCK_BATCH);
     let fork_blocks = remote_node.blocks_after_locator(&locator, limit);
     assert_eq!(fork_blocks.len(), 2);
     let local_ledger = network.inner.node.lock().await.clone_ledger();

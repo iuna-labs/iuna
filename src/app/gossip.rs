@@ -1,10 +1,11 @@
 use anyhow::Result;
 
-use crate::domain::{Block, ChainSnapshot, hex_encode};
+use crate::domain::{Block, CHAIN_SEGMENT_BLOCKS, ChainSnapshot, hex_encode};
 
 use super::{
-    BLOCK_REQUEST_LIMIT, ChainBootstrap, GossipEnvelope, NETWORK_ID, NodeCore, PROTOCOL_VERSION,
-    ProtocolHello, TRANSACTION_BATCH_LIMIT, now_ms, protocol_capabilities, types::BlockInventory,
+    BLOCK_REQUEST_LIMIT, ChainBootstrap, ChainSegmentSummary, GossipEnvelope, NETWORK_ID, NodeCore,
+    PROTOCOL_VERSION, ProtocolHello, TRANSACTION_BATCH_LIMIT, now_ms, protocol_capabilities,
+    types::BlockInventory,
 };
 
 impl NodeCore {
@@ -59,6 +60,21 @@ impl NodeCore {
 
     pub fn chain_bootstrap(&self) -> ChainBootstrap {
         let snapshot = self.ledger.genesis_snapshot();
+        let segment_summaries = self
+            .ledger
+            .chain()
+            .chunks(CHAIN_SEGMENT_BLOCKS)
+            .enumerate()
+            .filter(|(_, blocks)| blocks.len() == CHAIN_SEGMENT_BLOCKS)
+            .map(|(segment_id, blocks)| {
+                let end = blocks.last().expect("completed segment is not empty");
+                ChainSegmentSummary {
+                    segment_id: segment_id as u64,
+                    end_height: end.height,
+                    end_block_hash: end.hash.clone(),
+                }
+            })
+            .collect();
         ChainBootstrap {
             genesis_allocations: snapshot.genesis_allocations,
             vdf_rounds: snapshot.vdf_rounds,
@@ -66,6 +82,7 @@ impl NodeCore {
             genesis_block: snapshot.blocks[0].clone(),
             height: self.ledger.height(),
             tip_hash: self.ledger.tip_hash().to_string(),
+            segment_summaries,
         }
     }
 

@@ -3,13 +3,15 @@ use std::{collections::BTreeMap, sync::Arc};
 use anyhow::{Context, Result, bail};
 
 use crate::domain::{
-    AddressNetwork, Amount, Block, BurnBundleSection, BurnBundleSignature, ChainSnapshot,
-    FinalizerMode, LaunchProfile, LeaderProof, MaskedBurn, OutPoint, Transaction, TxInput,
-    TxOutput, decode_versioned_address,
+    AddressNetwork, Amount, Block, BurnBundleSection, BurnBundleSignature, CHAIN_SEGMENT_BLOCKS,
+    ChainSnapshot, FinalizerMode, LaunchProfile, LeaderProof, MaskedBurn, OutPoint, Transaction,
+    TxInput, TxOutput, decode_versioned_address,
 };
 
 const COMPACT_SNAPSHOT_MAGIC: &[u8] = b"IUNA-SNAPSHOT";
+const COMPACT_SEGMENT_MAGIC: &[u8] = b"IUNA-SEGMENT";
 const MIN_SUPPORTED_COMPACT_SNAPSHOT_VERSION: u8 = 6;
+const MIN_SUPPORTED_COMPACT_SEGMENT_VERSION: u8 = 9;
 const COMPACT_SNAPSHOT_VERSION: u8 = 9;
 const TRANSACTION_V2_COMPACT_SNAPSHOT_VERSION: u8 = 8;
 const HYBRID_REWARD_COMPACT_SNAPSHOT_VERSION: u8 = 9;
@@ -299,6 +301,88 @@ pub(super) fn decode_compact_snapshot(bytes: &[u8]) -> Result<ChainSnapshot> {
         launch_profile,
         blocks,
     })
+}
+
+/// Encode a self-contained block segment. Tables intentionally restart at every segment so an
+/// individual segment can be checked and decoded without reading all earlier chain data.
+pub(super) fn encode_compact_segment(
+    genesis_allocations: &BTreeMap<String, Amount>,
+    blocks: &[Block],
+) -> Result<Vec<u8>> {
+    if blocks.is_empty() || blocks.len() > CHAIN_SEGMENT_BLOCKS {
+        bail!("compact chain segment must contain between 1 and {CHAIN_SEGMENT_BLOCKS} blocks");
+    }
+    let first_height = blocks[0].height;
+    let expected_segment_id = first_height / CHAIN_SEGMENT_BLOCKS as u64;
+    if first_height != expected_segment_id * CHAIN_SEGMENT_BLOCKS as u64 {
+        bail!("compact chain segment does not start at a segment boundary");
+    }
+
+    let mut writer = CompactWriter::default();
+    let mut tables = EncodeTables::default();
+    for address in genesis_allocations.keys() {
+        tables.register_address(address);
+    }
+    writer.bytes(COMPACT_SEGMENT_MAGIC);
+    writer.u8(COMPACT_SNAPSHOT_VERSION);
+    writer.varint(first_height);
+    writer.fixed_hex::<32>(&blocks[0].prev_hash, "segment previous block hash")?;
+    writer.varint(blocks.len() as u64);
+
+    let mut expected_prev_hash = blocks[0].prev_hash.clone();
+    for (offset, block) in blocks.iter().enumerate() {
+        let expected_height = first_height + offset as u64;
+        if block.height != expected_height || block.prev_hash != expected_prev_hash {
+            bail!("compact chain segment is not contiguous at height {expected_height}");
+        }
+        if block.hash != block.compute_hash() {
+            bail!("compact chain segment block {expected_height} has a non-canonical hash");
+        }
+        encode_block_body(&mut writer, block, &mut tables)?;
+        tables.register_protocol_id(&block.hash);
+        expected_prev_hash = block.hash.clone();
+    }
+    Ok(writer.into_inner())
+}
+
+pub(super) fn decode_compact_segment(
+    bytes: &[u8],
+    genesis_allocations: &BTreeMap<String, Amount>,
+) -> Result<Vec<Block>> {
+    let mut reader = CompactReader::new(bytes);
+    let mut tables = DecodeTables::default();
+    for address in genesis_allocations.keys() {
+        tables.register_address(address);
+    }
+    reader.magic(COMPACT_SEGMENT_MAGIC)?;
+    let version = reader.u8()?;
+    if !(MIN_SUPPORTED_COMPACT_SEGMENT_VERSION..=COMPACT_SNAPSHOT_VERSION).contains(&version) {
+        bail!("unsupported compact chain segment version {version}");
+    }
+    let first_height = reader.varint()?;
+    if first_height % CHAIN_SEGMENT_BLOCKS as u64 != 0 {
+        bail!("compact chain segment does not start at a segment boundary");
+    }
+    let mut prev_hash = reader.fixed_hex::<32>()?;
+    let block_count = reader.bounded_usize("segment block count", CHAIN_SEGMENT_BLOCKS)?;
+    if block_count == 0 {
+        bail!("compact chain segment is empty");
+    }
+    let mut blocks = Vec::with_capacity(block_count);
+    for offset in 0..block_count {
+        let block = decode_block_body_for_version(
+            &mut reader,
+            first_height + offset as u64,
+            prev_hash,
+            &mut tables,
+            version,
+        )?;
+        tables.register_protocol_id(&block.hash);
+        prev_hash = block.hash.clone();
+        blocks.push(block);
+    }
+    reader.finish()?;
+    Ok(blocks)
 }
 
 fn encode_launch_profile(writer: &mut CompactWriter, profile: &LaunchProfile) {

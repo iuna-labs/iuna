@@ -12,12 +12,12 @@ use crate::{
         debug_logging_enabled, now_ms, protocol_capabilities, validate_network_genesis,
         validate_protocol_capabilities, validate_transaction_v2_peer_capability,
     },
-    domain::{Block, ChainSnapshot, LaunchProfile, Ledger, verify_vdf},
+    domain::{Block, CHAIN_SEGMENT_BLOCKS, ChainSnapshot, LaunchProfile, Ledger, verify_vdf},
 };
 
 use super::{
-    GossipNetwork, JOIN_RESPONSE_TIMEOUT, LimitedLineReader, MAX_BLOCK_BATCH,
-    MAX_JOIN_RESPONSE_ENVELOPES, PeerStatus, parse_envelope, write_envelope,
+    GossipNetwork, JOIN_RESPONSE_TIMEOUT, LimitedLineReader, MAX_JOIN_RESPONSE_ENVELOPES,
+    PeerStatus, negotiated_block_batch_limit, parse_envelope, write_envelope,
 };
 
 pub async fn fetch_snapshot(peer: &str) -> Result<ChainSnapshot> {
@@ -111,7 +111,7 @@ pub async fn fetch_snapshot_with_announcement(
         .read_line()
         .await?
         .with_context(|| format!("join peer {peer} closed before sending its peer status"))?;
-    match parse_envelope(&line)? {
+    let peer_capabilities = match parse_envelope(&line)? {
         GossipEnvelope::Hello(hello) => {
             if hello.protocol_version != PROTOCOL_VERSION {
                 anyhow::bail!(
@@ -129,10 +129,12 @@ pub async fn fetch_snapshot_with_announcement(
             }
             validate_protocol_capabilities(&hello.capabilities)?;
             validate_transaction_v2_peer_capability(&hello.capabilities, 0, hello.height)?;
+            hello.capabilities
         }
-        GossipEnvelope::PeerStatus { .. } => {}
+        GossipEnvelope::PeerStatus { .. } => Vec::new(),
         other => anyhow::bail!("join peer {peer} sent {other:?} instead of peer status"),
-    }
+    };
+    let block_batch_limit = negotiated_block_batch_limit(&peer_capabilities);
 
     write_envelope(&mut writer, &join_client_hello()).await?;
     write_envelope(&mut writer, &GossipEnvelope::ChainBootstrapRequest).await?;
@@ -145,6 +147,7 @@ pub async fn fetch_snapshot_with_announcement(
         launch_profile: bootstrap.launch_profile,
         blocks: vec![bootstrap.genesis_block],
     };
+    let mut checked_segments = 0_usize;
     while snapshot.blocks.last().map_or(0, |block| block.height) < bootstrap.height {
         let from_height = snapshot.blocks.last().map_or(0, |block| block.height) + 1;
         let remaining = bootstrap.height - from_height + 1;
@@ -152,7 +155,7 @@ pub async fn fetch_snapshot_with_announcement(
             &mut writer,
             &GossipEnvelope::BlockRangeRequest {
                 from_height,
-                limit: remaining.min(MAX_BLOCK_BATCH as u64) as usize,
+                limit: remaining.min(block_batch_limit as u64) as usize,
             },
         )
         .await?;
@@ -164,6 +167,19 @@ pub async fn fetch_snapshot_with_announcement(
             anyhow::bail!("join peer {peer} returned a non-contiguous block page");
         }
         snapshot.blocks.extend(blocks);
+        while let Some(summary) = bootstrap.segment_summaries.get(checked_segments) {
+            if summary.end_height >= snapshot.blocks.len() as u64 {
+                break;
+            }
+            let block = &snapshot.blocks[summary.end_height as usize];
+            if block.hash != summary.end_block_hash {
+                anyhow::bail!(
+                    "join peer {peer} segment {} does not match its announced end hash",
+                    summary.segment_id
+                );
+            }
+            checked_segments += 1;
+        }
     }
     if snapshot.blocks.last().map(|block| &block.hash) != Some(&bootstrap.tip_hash) {
         anyhow::bail!("join peer {peer} changed tips while serving block pages");
@@ -265,7 +281,29 @@ fn validate_bootstrap_genesis(expected_profile_id: &str, bootstrap: &ChainBootst
             bootstrap.launch_profile.profile_id
         );
     }
-    validate_network_genesis(expected_profile_id, &bootstrap.genesis_block.hash)
+    validate_network_genesis(expected_profile_id, &bootstrap.genesis_block.hash)?;
+    if !bootstrap.segment_summaries.is_empty() {
+        let segment_blocks = CHAIN_SEGMENT_BLOCKS as u64;
+        let expected_count = bootstrap.height / segment_blocks
+            + u64::from(bootstrap.height % segment_blocks == segment_blocks - 1);
+        if bootstrap.segment_summaries.len() as u64 != expected_count {
+            anyhow::bail!("chain bootstrap has an incomplete segment summary list");
+        }
+        for (segment_id, summary) in bootstrap.segment_summaries.iter().enumerate() {
+            let expected_end_height = (segment_id as u64 + 1) * segment_blocks - 1;
+            if summary.segment_id != segment_id as u64
+                || summary.end_height != expected_end_height
+                || summary.end_block_hash.len() != 64
+                || !summary
+                    .end_block_hash
+                    .bytes()
+                    .all(|byte| byte.is_ascii_hexdigit())
+            {
+                anyhow::bail!("chain bootstrap has an invalid segment summary");
+            }
+        }
+    }
+    Ok(())
 }
 
 pub(super) async fn validate_blocks_extension(
@@ -405,8 +443,10 @@ pub(super) async fn verify_block_vdf(block: Block) -> Result<Block> {
 mod tests {
     use std::collections::BTreeMap;
 
-    use super::{join_client_hello, verify_block_vdfs_parallel};
-    use crate::app::{GossipEnvelope, NETWORK_ID, PROTOCOL_VERSION};
+    use super::{join_client_hello, validate_bootstrap_genesis, verify_block_vdfs_parallel};
+    use crate::app::{
+        ChainBootstrap, ChainSegmentSummary, GossipEnvelope, NETWORK_ID, PROTOCOL_VERSION,
+    };
     use crate::domain::Ledger;
 
     #[test]
@@ -436,5 +476,33 @@ mod tests {
         let error = verify_block_vdfs_parallel([&later, &earlier]).unwrap_err();
 
         assert_eq!(error.to_string(), "block VDF output is invalid");
+    }
+
+    #[test]
+    fn bootstrap_rejects_segment_summaries_that_do_not_match_its_height() {
+        let ledger = Ledger::new(BTreeMap::new(), 1);
+        let mut snapshot = ledger.snapshot();
+        snapshot.launch_profile.profile_id = "segment-summary-test".to_string();
+        let bootstrap = ChainBootstrap {
+            genesis_allocations: snapshot.genesis_allocations,
+            vdf_rounds: snapshot.vdf_rounds,
+            launch_profile: snapshot.launch_profile,
+            genesis_block: snapshot.blocks.remove(0),
+            height: 0,
+            tip_hash: ledger.tip_hash().to_string(),
+            segment_summaries: vec![ChainSegmentSummary {
+                segment_id: 0,
+                end_height: 255,
+                end_block_hash: ledger.tip_hash().to_string(),
+            }],
+        };
+
+        let error = validate_bootstrap_genesis("segment-summary-test", &bootstrap).unwrap_err();
+
+        assert!(
+            error
+                .to_string()
+                .contains("incomplete segment summary list")
+        );
     }
 }

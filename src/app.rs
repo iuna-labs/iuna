@@ -31,10 +31,10 @@ mod wallet;
 pub use in_memory_network::InMemoryNetwork;
 pub use peer_book::{PeerBook, PeerDirection, PeerInfo};
 pub use types::{
-    AutoMineOutcome, AutoMinePlan, BlockInventory, ChainBootstrap, ExternalMineJob, FeeEstimate,
-    FundedWalletAddressStatus, GossipEnvelope, LaunchProfileStatus, MiningStatus,
-    NetworkMigrationStatus, NodeConfig, NodeStatus, ProtocolHello, QuantumMigrationPreview,
-    QuantumMigrationStatus, StratumStatus,
+    AutoMineOutcome, AutoMinePlan, BlockInventory, ChainBootstrap, ChainSegmentSummary,
+    ExternalMineJob, FeeEstimate, FundedWalletAddressStatus, GossipEnvelope, LaunchProfileStatus,
+    MiningStatus, NetworkMigrationStatus, NodeConfig, NodeStatus, ProtocolHello,
+    QuantumMigrationPreview, QuantumMigrationStatus, StratumStatus,
 };
 use wallet::NodeWallet;
 
@@ -47,6 +47,7 @@ pub const PROTOCOL_VERSION: u32 = 2;
 pub const MAX_PROTOCOL_CAPABILITIES: usize = 16;
 pub const MAX_PROTOCOL_CAPABILITY_BYTES: usize = 64;
 pub const CAPABILITY_ADDRESS_V1_READ: &str = "address-v1-read";
+pub const CAPABILITY_CHAIN_SEGMENT_SYNC: &str = "chain-segment-sync";
 pub const CAPABILITY_HYBRID_LINEAGE_IDENTITIES: &str = "hybrid-lineage-identities";
 pub const CAPABILITY_HYBRID_REWARD_PAYOUTS: &str = "hybrid-reward-payouts";
 pub const CAPABILITY_SIGNATURE_SCHEMES_V1: &str = "signature-schemes-v1";
@@ -77,6 +78,7 @@ static DEBUG_LOGGING: AtomicBool = AtomicBool::new(false);
 pub fn protocol_capabilities() -> Vec<String> {
     vec![
         CAPABILITY_ADDRESS_V1_READ.to_string(),
+        CAPABILITY_CHAIN_SEGMENT_SYNC.to_string(),
         CAPABILITY_HYBRID_LINEAGE_IDENTITIES.to_string(),
         CAPABILITY_HYBRID_REWARD_PAYOUTS.to_string(),
         CAPABILITY_SIGNATURE_SCHEMES_V1.to_string(),
@@ -165,14 +167,14 @@ pub fn validate_transaction_v2_peer_capability(
 #[cfg(test)]
 mod tests {
     use super::{
-        BLOCK_REQUEST_LIMIT, CAPABILITY_ADDRESS_V1_READ, CAPABILITY_HYBRID_LINEAGE_IDENTITIES,
-        CAPABILITY_HYBRID_REWARD_PAYOUTS, CAPABILITY_SIGNATURE_SCHEMES_V1,
-        CAPABILITY_TRANSACTION_V2_AGGREGATED_AUTHORIZATIONS, CAPABILITY_TRANSACTION_V2_BLOCKS,
-        CAPABILITY_TRANSACTION_V2_BURNS, CAPABILITY_TRANSACTION_V2_MEMPOOL, DEFAULT_VDF_ROUNDS,
-        MAINNET_CANDIDATE_GENESIS_HASH, MAINNET_CANDIDATE_NETWORK_ID, MAINNET_NETWORK_ID,
-        MAX_PROTOCOL_CAPABILITIES, NETWORK_ID, PROTOCOL_VERSION, TRANSACTION_BATCH_LIMIT,
-        protocol_capabilities, validate_network_genesis, validate_protocol_capabilities,
-        validate_transaction_v2_peer_capability,
+        BLOCK_REQUEST_LIMIT, CAPABILITY_ADDRESS_V1_READ, CAPABILITY_CHAIN_SEGMENT_SYNC,
+        CAPABILITY_HYBRID_LINEAGE_IDENTITIES, CAPABILITY_HYBRID_REWARD_PAYOUTS,
+        CAPABILITY_SIGNATURE_SCHEMES_V1, CAPABILITY_TRANSACTION_V2_AGGREGATED_AUTHORIZATIONS,
+        CAPABILITY_TRANSACTION_V2_BLOCKS, CAPABILITY_TRANSACTION_V2_BURNS,
+        CAPABILITY_TRANSACTION_V2_MEMPOOL, DEFAULT_VDF_ROUNDS, MAINNET_CANDIDATE_GENESIS_HASH,
+        MAINNET_CANDIDATE_NETWORK_ID, MAINNET_NETWORK_ID, MAX_PROTOCOL_CAPABILITIES, NETWORK_ID,
+        PROTOCOL_VERSION, TRANSACTION_BATCH_LIMIT, protocol_capabilities, validate_network_genesis,
+        validate_protocol_capabilities, validate_transaction_v2_peer_capability,
     };
 
     #[test]
@@ -205,6 +207,7 @@ mod tests {
             capabilities,
             [
                 CAPABILITY_ADDRESS_V1_READ,
+                CAPABILITY_CHAIN_SEGMENT_SYNC,
                 CAPABILITY_HYBRID_LINEAGE_IDENTITIES,
                 CAPABILITY_HYBRID_REWARD_PAYOUTS,
                 CAPABILITY_SIGNATURE_SCHEMES_V1,

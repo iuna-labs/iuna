@@ -10,9 +10,10 @@ use crate::{
 };
 
 use super::{
-    GossipNetwork, MAX_BLOCK_BATCH, P2pMetricsCounters, apply_peer_list, forget_stale_self_peer,
-    is_possible_fork_error, normalize_advertised_peer, peer_verification_response, process_hello,
-    validate_blocks_extension, validate_chain_bootstrap, verify_block_vdf, write_envelope,
+    GossipNetwork, LEGACY_MAX_BLOCK_BATCH, MAX_BLOCK_BATCH, P2pMetricsCounters, apply_peer_list,
+    forget_stale_self_peer, is_possible_fork_error, normalize_advertised_peer,
+    peer_verification_response, process_hello, validate_blocks_extension, validate_chain_bootstrap,
+    verify_block_vdf, write_envelope,
 };
 
 pub(super) async fn respond_to_peer_verification_challenge(
@@ -340,7 +341,9 @@ async fn request_fork_blocks(network: &GossipNetwork, writer: &mut OwnedWriteHal
         writer,
         &GossipEnvelope::BlockLocatorRequest {
             locator,
-            limit: MAX_BLOCK_BATCH,
+            // This recovery path does not retain the peer's negotiated capabilities. Keep the
+            // request acceptable to protocol-v2 nodes that predate segmented sync.
+            limit: LEGACY_MAX_BLOCK_BATCH,
         },
     )
     .await

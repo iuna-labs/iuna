@@ -7,7 +7,7 @@ use super::metrics::P2pMetricsCounters;
 use super::peer_addr::{
     is_self_peer_address_for, normalize_advertised_peer, peer_list_address_is_discoverable,
 };
-use super::{GossipNetwork, MAX_BLOCK_BATCH, PeerStatus, write_envelope};
+use super::{GossipNetwork, PeerStatus, negotiated_block_batch_limit, write_envelope};
 use crate::app::{
     CAPABILITY_TRANSACTION_V2_MEMPOOL, GossipEnvelope, SharedNode, debug_logging_enabled,
 };
@@ -22,6 +22,7 @@ pub(super) async fn maybe_request_catchup(
         let status = node.ledger().status();
         (status.height, status.tip_hash)
     };
+    let block_batch_limit = negotiated_block_batch_limit(&peer_status.capabilities);
     if peer_status.request_bootstrap {
         write_envelope(writer, &GossipEnvelope::ChainBootstrapRequest).await?;
         return Ok(true);
@@ -30,7 +31,7 @@ pub(super) async fn maybe_request_catchup(
             writer,
             &GossipEnvelope::BlockRangeRequest {
                 from_height: local_height + 1,
-                limit: MAX_BLOCK_BATCH,
+                limit: block_batch_limit,
             },
         )
         .await?;
@@ -41,7 +42,7 @@ pub(super) async fn maybe_request_catchup(
             writer,
             &GossipEnvelope::BlockLocatorRequest {
                 locator,
-                limit: MAX_BLOCK_BATCH,
+                limit: block_batch_limit,
             },
         )
         .await?;

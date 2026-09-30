@@ -117,6 +117,15 @@ pub struct ChainBootstrap {
     pub genesis_block: Block,
     pub height: u64,
     pub tip_hash: String,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub segment_summaries: Vec<ChainSegmentSummary>,
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+pub struct ChainSegmentSummary {
+    pub segment_id: u64,
+    pub end_height: u64,
+    pub end_block_hash: String,
 }
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
