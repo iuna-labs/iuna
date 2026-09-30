@@ -5,6 +5,12 @@ from the Git history and Conventional Commit titles by `deployment.sh`.
 
 ## [Unreleased]
 
+## [0.4.53] - 2026-09-30
+
+### Fixed
+
+- handle UI projection warm-up races
+
 ## [0.4.52] - 2026-09-30
 
 ### Added
