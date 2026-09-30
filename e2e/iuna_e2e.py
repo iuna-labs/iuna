@@ -564,7 +564,12 @@ def configure_partition_recovery_workers(
         if not candidates:
             raise E2EError(f"cannot select a non-leader {label} recovery worker")
         workers[label] = candidates[0]
+    return workers
 
+
+def enable_partition_recovery_workers(
+    workers: dict[str, str], settings: dict[str, dict]
+) -> None:
     for worker in workers.values():
         worker_settings = settings[worker]
         node_form(
@@ -585,7 +590,6 @@ def configure_partition_recovery_workers(
         "partition recovery workers: " + json.dumps(workers, sort_keys=True),
         flush=True,
     )
-    return workers
 
 
 def restore_automatic_finalization(settings: dict[str, dict]) -> None:
@@ -1302,6 +1306,8 @@ def run_partition_recovery_scenario(
         recovery_workers = configure_partition_recovery_workers(
             initial, mining_settings, timeout
         )
+        # Split before the workers start finalizing, so every recovery block above
+        # the boundary is produced inside its own partition instead of racing it.
         apply_partition()
         partitioned_start = all_statuses()
         left, right = PARTITION_GROUPS
@@ -1311,6 +1317,7 @@ def run_partition_recovery_scenario(
             )
             for label, group in (("left", left), ("right", right))
         }
+        enable_partition_recovery_workers(recovery_workers, mining_settings)
         evidence["phases"]["partition_started"] = {
             "boundaries": partition_boundaries,
             "recovery_workers": recovery_workers,
