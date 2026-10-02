@@ -38,6 +38,8 @@ struct TransferRequest {
     amount: String,
     fee_rate: String,
     change_index: u32,
+    signing_height: u64,
+    authorization_aggregation_activation_height: u64,
     utxos: Vec<HybridUtxo>,
 }
 
@@ -51,7 +53,7 @@ struct HybridUtxo {
     output: Output,
 }
 
-#[derive(Clone, Copy, Default, Deserialize)]
+#[derive(Clone, Copy, Default, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "lowercase")]
 enum HybridAddressBranch {
     #[default]
@@ -87,6 +89,8 @@ struct MigrationRequest {
     genesis_hash: String,
     destination_index: u32,
     fee_rate: String,
+    signing_height: u64,
+    authorization_aggregation_activation_height: u64,
     utxos: Vec<LegacyUtxo>,
 }
 
@@ -157,6 +161,8 @@ pub fn build_transfer(request_json: &str) -> Result<String, JsValue> {
         return Err(js_error("hybrid transfers require an address-v1 recipient"));
     }
     let genesis_hash = decode_array::<32>(&request.genesis_hash, "genesis hash")?;
+    let aggregate_authorizations =
+        request.signing_height >= request.authorization_aggregation_activation_height;
     let mut available = request.utxos;
     available.sort_by(|left, right| {
         right
@@ -198,7 +204,17 @@ pub fn build_transfer(request_json: &str) -> Result<String, JsValue> {
             );
             outputs.push((change_address, change));
         }
-        let size = transfer_encoded_size(&request.chain_id, selected.len(), outputs.len());
+        let authorization_count = if aggregate_authorizations {
+            unique_hybrid_owner_count(&selected)
+        } else {
+            selected.len()
+        };
+        let size = transfer_encoded_size(
+            &request.chain_id,
+            selected.len(),
+            outputs.len(),
+            authorization_count,
+        );
         if size > MAX_BLOCK_BYTES {
             return Err(js_error(
                 "transaction exceeds the block budget; send a smaller amount or consolidate first",
@@ -226,24 +242,22 @@ pub fn build_transfer(request_json: &str) -> Result<String, JsValue> {
             "v2 transaction ID",
         )?);
         signing.extend_from_slice(&input.outpoint.index.to_be_bytes());
-        let (_, _, owner) = hybrid_key(
-            &request.seed,
-            input.address_branch,
-            input.address_index,
-        );
+        let (_, _, owner) = hybrid_key(&request.seed, input.address_branch, input.address_index);
         encode_address_bytes(&mut signing, owner);
     }
     encode_outputs(&mut signing, &outputs)?;
     signing.extend_from_slice(&fee.to_be_bytes());
 
     let mut envelope = signing.clone();
-    push_u32(&mut envelope, selected.len())?;
-    for input in &selected {
-        let (public_key, ml_seed, _) = hybrid_key(
-            &request.seed,
-            input.address_branch,
-            input.address_index,
-        );
+    let authorization_inputs = if aggregate_authorizations {
+        unique_hybrid_owner_inputs(&selected)
+    } else {
+        selected.iter().collect()
+    };
+    push_u32(&mut envelope, authorization_inputs.len())?;
+    for input in authorization_inputs {
+        let (public_key, ml_seed, _) =
+            hybrid_key(&request.seed, input.address_branch, input.address_index);
         let signature = hybrid_signature(&request.seed, ml_seed, &signing)?;
         encode_authorization(&mut envelope, 2, &public_key, &signature)?;
     }
@@ -265,7 +279,15 @@ pub fn build_migration(request_json: &str) -> Result<String, JsValue> {
         sum.checked_add(utxo.output.amount)
             .ok_or_else(|| js_error("input total overflows"))
     })?;
-    let encoded_size = migration_encoded_size(&request.chain_id, &request.utxos);
+    let aggregate_authorizations =
+        request.signing_height >= request.authorization_aggregation_activation_height;
+    let authorization_count = if aggregate_authorizations {
+        1
+    } else {
+        request.utxos.len()
+    };
+    let encoded_size =
+        migration_encoded_size(&request.chain_id, &request.utxos, authorization_count);
     if encoded_size > MAX_BLOCK_BYTES {
         return Err(js_error(
             "migration exceeds the block budget; migrate fewer legacy outputs at a time",
@@ -316,8 +338,8 @@ pub fn build_migration(request_json: &str) -> Result<String, JsValue> {
 
     let signature = SigningKey::from_bytes(&ed_seed).sign(&signing).to_bytes();
     let mut envelope = signing;
-    push_u32(&mut envelope, request.utxos.len())?;
-    for _ in &request.utxos {
+    push_u32(&mut envelope, authorization_count)?;
+    for _ in 0..authorization_count {
         encode_authorization(&mut envelope, 0, &ed_public, &signature)?;
     }
     built_json(envelope, fee, request.utxos.len())
@@ -390,11 +412,7 @@ fn derive_seed(domain: &str, seed: &str) -> [u8; 32] {
     hasher.finalize().into()
 }
 
-fn derive_child_seed(
-    parent: [u8; 32],
-    branch: HybridAddressBranch,
-    index: u32,
-) -> [u8; 32] {
+fn derive_child_seed(parent: [u8; 32], branch: HybridAddressBranch, index: u32) -> [u8; 32] {
     let mut hasher = Sha256::new();
     hasher.update(ML_CHILD_DOMAIN.as_bytes());
     hasher.update(b":");
@@ -446,7 +464,29 @@ fn encode_authorization(
     push_bytes(bytes, signature)
 }
 
-fn transfer_encoded_size(chain_id: &str, inputs: usize, outputs: usize) -> usize {
+fn unique_hybrid_owner_inputs(inputs: &[HybridUtxo]) -> Vec<&HybridUtxo> {
+    let mut unique = Vec::new();
+    for input in inputs {
+        if !unique.iter().any(|candidate: &&HybridUtxo| {
+            candidate.address_branch == input.address_branch
+                && candidate.address_index == input.address_index
+        }) {
+            unique.push(input);
+        }
+    }
+    unique
+}
+
+fn unique_hybrid_owner_count(inputs: &[HybridUtxo]) -> usize {
+    unique_hybrid_owner_inputs(inputs).len()
+}
+
+fn transfer_encoded_size(
+    chain_id: &str,
+    inputs: usize,
+    outputs: usize,
+    authorizations: usize,
+) -> usize {
     TX_TAG.len()
         + 2
         + 4
@@ -459,10 +499,10 @@ fn transfer_encoded_size(chain_id: &str, inputs: usize, outputs: usize) -> usize
         + outputs * 41
         + 8
         + 4
-        + inputs * (1 + 4 + HYBRID_PUBLIC_KEY_BYTES + 4 + HYBRID_SIGNATURE_BYTES)
+        + authorizations * (1 + 4 + HYBRID_PUBLIC_KEY_BYTES + 4 + HYBRID_SIGNATURE_BYTES)
 }
 
-fn migration_encoded_size(chain_id: &str, inputs: &[LegacyUtxo]) -> usize {
+fn migration_encoded_size(chain_id: &str, inputs: &[LegacyUtxo], authorizations: usize) -> usize {
     let input_bytes = inputs
         .iter()
         .map(|input| 1 + input.outpoint.txid.len() / 2 + 4 + 33)
@@ -479,7 +519,7 @@ fn migration_encoded_size(chain_id: &str, inputs: &[LegacyUtxo]) -> usize {
         + 41
         + 8
         + 4
-        + inputs.len() * (1 + 4 + 32 + 4 + 64)
+        + authorizations * (1 + 4 + 32 + 4 + 64)
 }
 
 fn built_json(envelope: Vec<u8>, fee: u64, input_count: usize) -> Result<String, JsValue> {

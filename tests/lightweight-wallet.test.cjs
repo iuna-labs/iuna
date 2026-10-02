@@ -188,6 +188,8 @@ test('browser crypto derives the same rotating hybrid address vectors as the nod
     amount: '1000000',
     feeRate: '1',
     changeIndex: 2,
+    signingHeight: 4500,
+    authorizationAggregationActivationHeight: 4500,
     utxos: [{
       addressIndex: 0,
       outpoint: { txid: '22'.repeat(32), index: 7 },
@@ -198,6 +200,27 @@ test('browser crypto derives the same rotating hybrid address vectors as the nod
   assert.equal(built.envelope.length / 2, 4079);
   assert.equal(built.transactionId, 'bda748b6ba9fd6550ca47d580f980a1c00d0050a20992750265a62d23b0b590d');
 
+  const repeatedOwnerRequest = {
+    seed: 'hybrid-wallet-seed',
+    chainId: 'iuna-mainnet-candidate',
+    genesisHash: '11'.repeat(32),
+    recipientAddress: addresses[1].address,
+    amount: '1500000',
+    feeRate: '1',
+    changeIndex: 2,
+    authorizationAggregationActivationHeight: 4500,
+    utxos: [
+      { addressIndex: 0, outpoint: { txid: '55'.repeat(32), index: 0 }, output: { amount: 1000000 } },
+      { addressIndex: 0, outpoint: { txid: '66'.repeat(32), index: 1 }, output: { amount: 1000000 } },
+    ],
+  };
+  const aggregated = JSON.parse(quantum.build_transfer(JSON.stringify({ ...repeatedOwnerRequest, signingHeight: 4500 })));
+  const perInput = JSON.parse(quantum.build_transfer(JSON.stringify({ ...repeatedOwnerRequest, signingHeight: 4499 })));
+  assert.equal(aggregated.inputCount, 2);
+  assert.equal(aggregated.fee, '4148');
+  assert.equal(aggregated.envelope.length / 2, 4148);
+  assert.equal(BigInt(perInput.fee) - BigInt(aggregated.fee), 3837n);
+
   const rewardBuilt = JSON.parse(quantum.build_transfer(JSON.stringify({
     seed: 'hybrid-wallet-seed',
     chainId: 'iuna-mainnet-candidate',
@@ -206,6 +229,8 @@ test('browser crypto derives the same rotating hybrid address vectors as the nod
     amount: '1000000',
     feeRate: '1',
     changeIndex: 2,
+    signingHeight: 4500,
+    authorizationAggregationActivationHeight: 4500,
     utxos: [{
       addressBranch: 'reward',
       addressIndex: 0,
@@ -223,6 +248,8 @@ test('browser crypto derives the same rotating hybrid address vectors as the nod
     genesisHash: '11'.repeat(32),
     destinationIndex: 2,
     feeRate: '1',
+    signingHeight: 4500,
+    authorizationAggregationActivationHeight: 4500,
     utxos: [{
       outpoint: { txid: '33'.repeat(32), index: 4 },
       output: { amount: 2000000 },
@@ -231,4 +258,23 @@ test('browser crypto derives the same rotating hybrid address vectors as the nod
   assert.equal(migration.fee, '307');
   assert.equal(migration.envelope.length / 2, 307);
   assert.equal(migration.transactionId, '37539c9d89a391c599b838c3f415e7adc93a36c22cd4fb5fe44a79433f336075');
+
+  const repeatedMigrationRequest = {
+    seed: 'hybrid-wallet-seed',
+    chainId: 'iuna-mainnet-candidate',
+    genesisHash: '11'.repeat(32),
+    destinationIndex: 2,
+    feeRate: '1',
+    authorizationAggregationActivationHeight: 4500,
+    utxos: [
+      { outpoint: { txid: '77'.repeat(32), index: 0 }, output: { amount: 1000000 } },
+      { outpoint: { txid: '88'.repeat(32), index: 1 }, output: { amount: 1000000 } },
+    ],
+  };
+  const aggregatedMigration = JSON.parse(quantum.build_migration(JSON.stringify({ ...repeatedMigrationRequest, signingHeight: 4500 })));
+  const perInputMigration = JSON.parse(quantum.build_migration(JSON.stringify({ ...repeatedMigrationRequest, signingHeight: 4499 })));
+  assert.equal(aggregatedMigration.inputCount, 2);
+  assert.equal(aggregatedMigration.fee, '377');
+  assert.equal(aggregatedMigration.envelope.length / 2, 377);
+  assert.equal(BigInt(perInputMigration.fee) - BigInt(aggregatedMigration.fee), 105n);
 });

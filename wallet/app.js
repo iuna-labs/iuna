@@ -641,6 +641,8 @@ app.addEventListener("click", async (event) => {
         genesisHash: state.status.genesis_hash,
         destinationIndex: state.addressIndex,
         feeRate: String(state.status.default_fee_per_byte || 1),
+        signingHeight: Number(state.status.height || 0) + 1,
+        authorizationAggregationActivationHeight: Number(state.status.transaction_v2_authorization_aggregation_activation_height ?? Number.MAX_SAFE_INTEGER),
         utxos: state.legacyUtxos,
       })));
       const amount = state.legacyUtxos.reduce((sum, utxo) => sum + BigInt(utxo.output.amount), 0n) - BigInt(built.fee);
@@ -713,6 +715,8 @@ app.addEventListener("submit", async (event) => {
           amount: amount.toString(),
           feeRate: feeRate.toString(),
           changeIndex: state.addressIndex,
+          signingHeight: Number(state.status.height || 0) + 1,
+          authorizationAggregationActivationHeight: Number(state.status.transaction_v2_authorization_aggregation_activation_height ?? Number.MAX_SAFE_INTEGER),
           utxos: state.hybridUtxos,
         })));
         renderConfirmation(built, BigInt(built.fee), form.recipient.value.trim(), amount);
