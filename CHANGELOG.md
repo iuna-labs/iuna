@@ -5,6 +5,13 @@ from the Git history and Conventional Commit titles by `deployment.sh`.
 
 ## [Unreleased]
 
+## [0.4.54] - 2026-10-02
+
+### Fixed
+
+- aggregate v2 authorizations
+- explain legacy recipients for hybrid funds
+
 ## [0.4.53] - 2026-09-30
 
 ### Fixed
