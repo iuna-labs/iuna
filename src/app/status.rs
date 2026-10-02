@@ -31,19 +31,8 @@ impl NodeCore {
                 &self.ledger.launch_profile().profile_id,
             ))
         });
-        let hybrid_addresses = self
-            .wallet
-            .unlocked()
-            .ok()
-            .and_then(|wallet| {
-                self.ledger
-                    .wallet_owned_hybrid_encoded_addresses(wallet)
-                    .ok()
-            })
-            .unwrap_or_default();
-        let hybrid_balance = hybrid_addresses.iter().fold(0_u64, |total, address| {
-            total.saturating_add(self.ledger.balance_of(address))
-        });
+        let hybrid_addresses = self.wallet_hybrid_addresses();
+        let hybrid_balance = self.balance_of_addresses(&hybrid_addresses);
         let pending_spent = self.wallet_pending_spent_outpoints();
         let mut owned_addresses = vec![legacy_address.to_string()];
         owned_addresses.extend(hybrid_addresses);

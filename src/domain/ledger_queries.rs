@@ -79,6 +79,11 @@ impl Ledger {
             .height = height;
     }
 
+    #[cfg(test)]
+    pub(crate) fn insert_utxo_for_test(&mut self, outpoint: OutPoint, output: TxOutput) {
+        self.utxos.insert(outpoint, output);
+    }
+
     pub fn snapshot(&self) -> ChainSnapshot {
         ChainSnapshot {
             genesis_allocations: self.genesis_allocations.clone(),

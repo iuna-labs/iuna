@@ -2922,11 +2922,29 @@ window.iunaApp = function iunaApp() {
       if (this.hybridTransferRecipient()) {
         return Number(this.status.quantum_migration?.hybrid_balance || 0) <= 0;
       }
-      return this.selectedTransferUtxoTotal() <= 0 && Number(this.status.wallet_balance || 0) <= 0;
+      return this.selectedTransferUtxoTotal() <= 0 && Number(this.status.quantum_migration?.legacy_balance || 0) <= 0;
     },
 
     hybridTransferRecipient() {
-      return /^(?:iuna|tiuna)1p/i.test(this.transferTo.trim());
+      return !this.isLegacyAddress(this.transferTo);
+    },
+
+    isLegacyAddress(address) {
+      return !/^(?:iuna|tiuna)1p/i.test(String(address ?? "").trim());
+    },
+
+    // Transaction v2 outputs must use address v1, so legacy recipients can only be paid from
+    // legacy outputs. Flag the case where all value already sits at hybrid addresses.
+    legacyRecipientNeedsHybridAddress() {
+      const migration = this.status.quantum_migration || {};
+      return this.transferTo.trim() !== ""
+        && !this.hybridTransferRecipient()
+        && Number(migration.legacy_balance || 0) <= 0
+        && Number(migration.hybrid_balance || 0) > 0;
+    },
+
+    legacyTransferUtxos() {
+      return this.walletUtxos.filter((utxo) => utxo.address === this.status.wallet_address);
     },
 
     transferRecipientChanged() {
@@ -3467,8 +3485,8 @@ window.iunaApp = function iunaApp() {
       return this.txInputOutpoint({ outpoint: utxo.outpoint });
     },
 
-    spendableWalletUtxos() {
-      return this.walletUtxos.filter((utxo) => utxo.spendable !== false);
+    spendableTransferUtxos() {
+      return this.legacyTransferUtxos().filter((utxo) => utxo.spendable !== false);
     },
 
     rememberUtxoAmounts(utxos) {
@@ -3496,7 +3514,7 @@ window.iunaApp = function iunaApp() {
       }
 
       this.rememberUtxoAmounts([utxo]);
-      const spendable = this.spendableWalletUtxos();
+      const spendable = this.spendableTransferUtxos();
       const outpoints = spendable.map((item) => this.utxoOutpoint(item));
       const currentIndex = outpoints.indexOf(outpoint);
       const anchorIndex = this.lastSelectedTransferUtxo

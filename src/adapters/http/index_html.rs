@@ -780,6 +780,7 @@ pub(super) const INDEX_HTML: &str = concat!(
                   <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M4 5.5A2.5 2.5 0 0 1 6.5 3H20v18H6.5A2.5 2.5 0 0 1 4 18.5z"></path><path d="M8 7h8"></path><path d="M8 11h6"></path><path d="M8 15h4"></path></svg>
                 </button>
               </div>
+              <div class="fee-warning" x-show="legacyRecipientNeedsHybridAddress()" role="status" aria-live="polite">Legacy address: it can only receive legacy funds and your balance is held at hybrid addresses. Ask the recipient for their iuna1p… address.</div>
               <div class="amount-field">
                 <label>Amount<input x-model="transferAmount" @input="scheduleFeeEstimates" type="number" min="0.000001" step="0.000001" required></label>
                 <button class="amount-max-button" type="button" @click="setMaxTransferAmount" :disabled="transferMaxDisabled()" title="Use maximum spendable amount">Max</button>
@@ -797,11 +798,11 @@ pub(super) const INDEX_HTML: &str = concat!(
                   <div class="send-utxo-list-head">
                     <span>UTXOs</span>
                     <span class="send-utxo-actions">
-                      <button class="utxo-select-button" type="button" @click="selectAllTransferUtxos" :disabled="walletUtxoPage.loading && walletUtxos.length === 0">Select all</button>
+                      <button class="utxo-select-button" type="button" @click="selectAllTransferUtxos" :disabled="walletUtxoPage.loading && legacyTransferUtxos().length === 0">Select all</button>
                       <button class="utxo-select-button" type="button" @click="clearTransferUtxos" :disabled="selectedTransferUtxos.length === 0">None</button>
                     </span>
                   </div>
-                  <template x-for="utxo in walletUtxos" :key="utxoOutpoint(utxo)">
+                  <template x-for="utxo in legacyTransferUtxos()" :key="utxoOutpoint(utxo)">
                     <label class="send-utxo-option" :class="{ disabled: !utxo.spendable }" @click.prevent="toggleTransferUtxoSelection($event, utxo)">
                       <input type="checkbox" :value="utxoOutpoint(utxo)" :checked="selectedTransferUtxos.includes(utxoOutpoint(utxo))" :disabled="!utxo.spendable">
                       <span>
@@ -816,7 +817,7 @@ pub(super) const INDEX_HTML: &str = concat!(
                     <div class="send-utxo-option skeleton-card"><span><span class="skeleton-line short"></span><span class="skeleton-line long"></span></span></div>
                   </div>
                   <div class="page-sentinel" x-show="walletUtxoPage.hasMore" x-init="$nextTick(() => observePageSentinel('walletUtxo', $el))"></div>
-                  <div class="tx-modal-empty" x-show="walletUtxos.length === 0 && !walletUtxoPage.loading">No UTXOs</div>
+                  <div class="tx-modal-empty" x-show="legacyTransferUtxos().length === 0 && !walletUtxoPage.loading">No legacy UTXOs</div>
                 </div>
               </div>
               <button class="primary" type="submit" :disabled="sendPreparing || sendConfirmBusy" x-text="sendPreparing ? 'Checking...' : 'Send'"></button>
@@ -850,7 +851,7 @@ pub(super) const INDEX_HTML: &str = concat!(
               <template x-for="entry in addressBookEntries()" :key="entry.address">
                 <button class="address-book-row" type="button" @click="editAddressBookEntry(entry)" :title="`Edit ${entry.name}`">
                   <div>
-                    <div class="address-book-name" x-text="entry.name"></div>
+                    <div class="address-book-name"><span x-text="entry.name"></span> <span class="utxo-status" x-show="isLegacyAddress(entry.address)" title="Legacy address: can only receive legacy funds">Legacy</span></div>
                     <code class="tx-value hash" x-text="short(entry.address)"></code>
                   </div>
                   <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M9 18l6-6-6-6"></path></svg>
@@ -2073,7 +2074,7 @@ pub(super) const INDEX_HTML: &str = concat!(
       <div class="address-book-picker-list" x-show="!addressBookModalOpen">
         <template x-for="entry in addressBookEntries()" :key="entry.address">
           <button class="address-book-picker-row" type="button" @click="selectTransferContact(entry.address)" :title="`Send to ${entry.name}`">
-            <span class="address-book-name" x-text="entry.name"></span>
+            <span class="address-book-name"><span x-text="entry.name"></span> <span class="utxo-status" x-show="isLegacyAddress(entry.address)" title="Legacy address: can only receive legacy funds">Legacy</span></span>
             <code class="tx-value hash" x-text="short(entry.address)"></code>
           </button>
         </template>

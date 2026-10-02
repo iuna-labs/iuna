@@ -13,6 +13,10 @@ use super::{
     helpers::converge_fee_by_byte, now_ms,
 };
 
+pub(crate) const LEGACY_RECIPIENT_HYBRID_FUNDS_ERROR: &str = "the recipient uses a legacy address, \
+which can only receive legacy funds; your balance is held at hybrid addresses, so ask the \
+recipient for their address-v1 (iuna1p…) address";
+
 #[derive(Clone, Debug)]
 pub(super) enum NodeWallet {
     Unlocked(Wallet),
@@ -530,6 +534,37 @@ impl NodeCore {
                 )
             }
         })
+        .map_err(|error| self.explain_legacy_transfer_error(error, amount))
+    }
+
+    /// Legacy recipients can only be paid from legacy outputs: transaction v2 outputs must use
+    /// address v1. Point users at the real cause when their value already sits at hybrid
+    /// addresses instead of surfacing a bare insufficient-funds or ownership error.
+    fn explain_legacy_transfer_error(&self, error: anyhow::Error, amount: Amount) -> anyhow::Error {
+        let legacy_balance = self.ledger.balance_of(self.wallet.address());
+        let hybrid_balance = self.balance_of_addresses(&self.wallet_hybrid_addresses());
+        if legacy_balance >= amount || hybrid_balance == 0 {
+            return error;
+        }
+        error.context(LEGACY_RECIPIENT_HYBRID_FUNDS_ERROR)
+    }
+
+    pub(super) fn wallet_hybrid_addresses(&self) -> Vec<String> {
+        self.wallet
+            .unlocked()
+            .ok()
+            .and_then(|wallet| {
+                self.ledger
+                    .wallet_owned_hybrid_encoded_addresses(wallet)
+                    .ok()
+            })
+            .unwrap_or_default()
+    }
+
+    pub(super) fn balance_of_addresses(&self, addresses: &[String]) -> Amount {
+        addresses.iter().fold(0, |total, address| {
+            total.saturating_add(self.ledger.balance_of(address))
+        })
     }
 
     pub(super) fn build_mine_estimate(&self) -> Result<(Transaction, FeeEstimate)> {
@@ -663,5 +698,57 @@ mod quantum_migration_tests {
         assert_eq!(preview.amount + preview.fee, 1_000_000);
         assert_eq!(preview.transaction_id.len(), 64);
         assert!(preview.address.starts_with("iuna1p"));
+    }
+}
+
+#[cfg(test)]
+mod legacy_recipient_tests {
+    use std::collections::BTreeMap;
+
+    use super::LEGACY_RECIPIENT_HYBRID_FUNDS_ERROR;
+    use crate::{
+        app::NodeCore,
+        domain::{AddressNetwork, Ledger, OutPoint, TxOutput, Wallet},
+    };
+
+    #[test]
+    fn legacy_transfer_from_hybrid_funds_explains_the_address_version_mismatch() {
+        let wallet = Wallet::from_seed("legacy-recipient-hybrid-wallet");
+        let recipient = Wallet::from_seed("legacy-recipient").address().to_string();
+        let mut ledger = Ledger::new(BTreeMap::new(), 1);
+        ledger.insert_utxo_for_test(
+            OutPoint {
+                txid: "42".repeat(32),
+                index: 0,
+            },
+            TxOutput {
+                address: wallet.hybrid_address(AddressNetwork::Mainnet),
+                amount: 1_000_000,
+            },
+        );
+        let node = NodeCore::from_ledger(wallet, ledger, 0);
+
+        let error = node
+            .estimate_transfer_fee(recipient, 1_000, 1, &[])
+            .unwrap_err();
+
+        assert!(
+            format!("{error:#}").starts_with(LEGACY_RECIPIENT_HYBRID_FUNDS_ERROR),
+            "{error:#}"
+        );
+    }
+
+    #[test]
+    fn legacy_transfer_without_any_funds_keeps_the_plain_error() {
+        let wallet = Wallet::from_seed("legacy-recipient-empty-wallet");
+        let recipient = Wallet::from_seed("legacy-recipient").address().to_string();
+        let ledger = Ledger::new(BTreeMap::new(), 1);
+        let node = NodeCore::from_ledger(wallet, ledger, 0);
+
+        let error = node
+            .estimate_transfer_fee(recipient, 1_000, 1, &[])
+            .unwrap_err();
+
+        assert!(!format!("{error:#}").contains(LEGACY_RECIPIENT_HYBRID_FUNDS_ERROR));
     }
 }
