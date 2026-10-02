@@ -5,6 +5,12 @@ from the Git history and Conventional Commit titles by `deployment.sh`.
 
 ## [Unreleased]
 
+## [0.4.55] - 2026-10-02
+
+### Added
+
+- warn when local VDF is too slow to finalize
+
 ## [0.4.54] - 2026-10-02
 
 ### Fixed
