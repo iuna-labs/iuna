@@ -262,6 +262,9 @@ pub(super) const INDEX_HTML: &str = concat!(
     .fee-preview { flex-basis: 100%; color: #9eb3bc; font-size: 12px; font-weight: 700; }
     .fee-preview.error { color: #ffb1a8; }
     .fee-warning { flex-basis: 100%; color: #ffd070; font-size: 12px; font-weight: 800; }
+    .vdf-speed-hint { display: flex; flex-wrap: wrap; gap: 8px 12px; align-items: center; margin-top: 10px; border: 1px solid #2f363c; border-radius: 8px; padding: 9px 10px; color: #9eb3bc; font-size: 12px; font-weight: 700; line-height: 1.45; }
+    .vdf-speed-hint span { flex: 1 1 320px; }
+    .vdf-speed-hint.warning { border-color: #5c4a1c; color: #ffd070; }
     .mine-stats { display: grid; grid-template-columns: repeat(4, minmax(112px, 1fr)); gap: 8px; min-width: 0; }
     .local-mining-stats { grid-template-columns: repeat(auto-fit, minmax(150px, 1fr)); }
     .fee-history { grid-template-columns: repeat(3, minmax(112px, 1fr)); margin-top: 12px; }
@@ -976,6 +979,10 @@ pub(super) const INDEX_HTML: &str = concat!(
             <div class="fee-preview" x-text="feeEstimateLabel('burn')"></div>
             <div class="fee-warning" x-show="feeExceedsAmount('burn')" x-text="feeExceedsAmountLabel('burn')" role="status" aria-live="polite"></div>
           </form>
+          <div class="vdf-speed-hint" :class="vdfSpeedHint()?.level" x-show="vdfSpeedHint()" role="status" aria-live="polite">
+            <span x-text="vdfSpeedHint()?.text"></span>
+            <button class="subtle" type="button" x-show="vdfSpeedHint()?.canLower" @click="useLowBurnAmount">Lower to 0.0001 IUNA</button>
+          </div>
           <div class="mine-stats fee-history" aria-label="Recent block fees">
             <div class="mine-stat">
               <div class="mine-stat-label">Last block fees</div>

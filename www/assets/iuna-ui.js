@@ -1,6 +1,8 @@
 const IUNA_DOWNLOADS_URL = "https://getiuna.org/downloads/";
 const IUNA_RELEASE_METADATA_URL = "https://getiuna.org/downloads/latest.json";
 const IUNA_RELEASE_CHECK_INTERVAL_MS = 30 * 60 * 1000;
+// Matches the node's default burn amount, in micro-IUNA.
+const IUNA_LOW_BURN_AMOUNT = 100;
 
 window.iunaApp = function iunaApp() {
   return {
@@ -1735,6 +1737,36 @@ window.iunaApp = function iunaApp() {
         : this.parseiunaAmount(this.transferAmount);
       const fee = Number(this.feeEstimates[kind].fee);
       return `Warning: estimated fee IUNA ${this.amountLabel(fee)} exceeds the ${label} amount IUNA ${this.amountLabel(amount)}.`;
+    },
+
+    // Rank 1 may publish from the parent timestamp plus two target block times. A slower rank 0
+    // finalizer loses the block and its other eligible tickets, while committee seats come from
+    // mined-coin lineage and accept any ticket, however small.
+    vdfSpeedHint() {
+      const mining = this.status.mining;
+      const estimateMs = mining?.estimated_vdf_ms;
+      const targetMs = mining?.vdf_target_block_ms;
+      if (typeof estimateMs !== "number" || !targetMs) return null;
+      const fallbackSlotMs = 2 * targetMs;
+      if (estimateMs < 0.75 * fallbackSlotMs) return null;
+      const tooSlow = estimateMs >= fallbackSlotMs;
+      const source = mining.vdf_speed_source === "finalization" ? "Your last VDF run" : "A quick benchmark";
+      const timing = `${source} suggests this machine needs about ${this.durationLabel(estimateMs)} for a block VDF; a fallback finalizer can take over after ${this.durationLabel(fallbackSlotMs)}.`;
+      const risk = tooSlow
+        ? "If your burn wins, the block will most likely go to a fallback and your eligible tickets are invalidated."
+        : "On a busy moment you could miss your slot and lose your eligible tickets.";
+      return {
+        level: tooSlow ? "warning" : "notice",
+        text: `${timing} ${risk} Keep your burn low: committee seats depend on mined coins, not burn size.`,
+        canLower: this.burnAmount > IUNA_LOW_BURN_AMOUNT,
+      };
+    },
+
+    async useLowBurnAmount() {
+      this.burnAmountDraft = this.amountLabel(IUNA_LOW_BURN_AMOUNT);
+      this.burnAmountDirty = true;
+      await this.saveBurn();
+      this.scheduleFeeEstimates();
     },
 
     async saveBurn() {

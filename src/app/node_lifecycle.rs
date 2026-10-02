@@ -113,6 +113,7 @@ impl NodeCore {
             local_block_anchor_burn: None,
             outbox: Vec::<GossipEnvelope>::new(),
             network_migration_from: None,
+            vdf_speed_sample: None,
         }
     }
 

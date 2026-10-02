@@ -1,3 +1,5 @@
+use std::time::Duration;
+
 use anyhow::Result;
 
 use crate::{
@@ -11,6 +13,7 @@ use crate::{
 use super::{
     FundedWalletAddressStatus, LaunchProfileStatus, MiningStatus, NETWORK_ID,
     NetworkMigrationStatus, NodeCore, NodeStatus, QuantumMigrationStatus, StratumStatus,
+    VdfSpeedSample, VdfSpeedSource,
     helpers::{transaction_input_total_from_outputs, transaction_output_total_for_address},
     now_ms,
 };
@@ -139,6 +142,8 @@ impl NodeCore {
                 wallet_is_current_leader,
                 last_auto_burn_height: self.last_auto_burn_height,
                 recovery_vdf_top_rank_percent: self.recovery_vdf_top_rank_percent,
+                estimated_vdf_ms: self.estimated_vdf_ms(self.ledger.vdf_rounds()),
+                vdf_speed_source: self.vdf_speed_sample.map(|sample| sample.source),
             },
             stratum: StratumStatus {
                 enabled: false,
@@ -256,14 +261,46 @@ impl NodeCore {
     pub fn set_recovery_vdf_top_rank_percent(&mut self, percent: u8) {
         self.recovery_vdf_top_rank_percent = percent.min(100);
     }
+
+    /// Records how fast this machine ran VDF rounds. A completed finalization run reflects the
+    /// real workload size, so a later startup benchmark does not replace it.
+    pub fn record_vdf_speed_sample(
+        &mut self,
+        rounds: u64,
+        elapsed: Duration,
+        source: VdfSpeedSource,
+    ) {
+        if rounds == 0
+            || (source == VdfSpeedSource::Benchmark
+                && self
+                    .vdf_speed_sample
+                    .is_some_and(|sample| sample.source == VdfSpeedSource::Finalization))
+        {
+            return;
+        }
+        self.vdf_speed_sample = Some(VdfSpeedSample {
+            rounds,
+            elapsed_us: u64::try_from(elapsed.as_micros())
+                .unwrap_or(u64::MAX)
+                .max(1),
+            source,
+        });
+    }
+
+    fn estimated_vdf_ms(&self, rounds: u64) -> Option<u64> {
+        let sample = self.vdf_speed_sample?;
+        let estimated_us =
+            u128::from(rounds) * u128::from(sample.elapsed_us) / u128::from(sample.rounds);
+        Some(u64::try_from(estimated_us / 1_000).unwrap_or(u64::MAX))
+    }
 }
 
 #[cfg(test)]
 mod tests {
-    use std::collections::BTreeMap;
+    use std::{collections::BTreeMap, time::Duration};
 
     use crate::{
-        app::{NodeConfig, NodeCore},
+        app::{NodeConfig, NodeCore, VdfSpeedSource},
         domain::{LaunchProfile, Ledger, Wallet},
     };
 
@@ -399,5 +436,37 @@ mod tests {
             Some("iuna-devnet-v5")
         );
         assert_eq!(status.network_migration.to_network, crate::app::NETWORK_ID);
+    }
+
+    #[test]
+    fn vdf_estimate_scales_latest_speed_sample_to_current_rounds() {
+        let mut node = NodeCore::new(NodeConfig {
+            wallet: Wallet::from_seed("status-vdf-speed-wallet"),
+            genesis_allocations: BTreeMap::new(),
+            vdf_rounds: 1,
+            burn_per_block: 0,
+            burn_fee: 0,
+            pow_mining_workers: 1,
+            recovery_vdf_top_rank_percent: 100,
+        });
+        assert_eq!(node.status().mining.estimated_vdf_ms, None);
+
+        node.record_vdf_speed_sample(1_000, Duration::from_millis(500), VdfSpeedSource::Benchmark);
+        assert_eq!(node.estimated_vdf_ms(4_000), Some(2_000));
+        assert_eq!(
+            node.status().mining.vdf_speed_source,
+            Some(VdfSpeedSource::Benchmark)
+        );
+
+        node.record_vdf_speed_sample(1_000, Duration::from_secs(3), VdfSpeedSource::Finalization);
+        node.record_vdf_speed_sample(1_000, Duration::from_millis(1), VdfSpeedSource::Benchmark);
+        assert_eq!(node.estimated_vdf_ms(1_000), Some(3_000));
+        assert_eq!(
+            node.status().mining.vdf_speed_source,
+            Some(VdfSpeedSource::Finalization)
+        );
+
+        node.record_vdf_speed_sample(0, Duration::from_secs(1), VdfSpeedSource::Finalization);
+        assert_eq!(node.estimated_vdf_ms(1_000), Some(3_000));
     }
 }

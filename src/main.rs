@@ -16,8 +16,8 @@ use iuna::{
         ui_data_store::SqliteUiDataStore, wallet_endpoint, wallet_store,
     },
     app::{
-        NodeCore, PeerBook, SharedNode, SharedPeerBook, StratumStatus, debug_logging_enabled,
-        now_ms, set_debug_logging, validate_network_genesis,
+        NodeCore, PeerBook, SharedNode, SharedPeerBook, StratumStatus, VdfSpeedSource,
+        debug_logging_enabled, now_ms, set_debug_logging, validate_network_genesis,
     },
     domain::{
         Amount, ChainSnapshot, GenesisBurn, LaunchProfile, Ledger, MAX_VDF_ROUNDS, MICRO_IUNA,
@@ -47,6 +47,7 @@ const GENESIS_INITIAL_BURN_FEE: Amount = config_store::DEFAULT_BURN_FEE;
 const VDF_MEASUREMENT_INITIAL_ROUNDS: u64 = 1_000;
 const VDF_MEASUREMENT_MAX_ROUNDS: u64 = 10_000_000;
 const VDF_MEASUREMENT_MIN_ELAPSED: Duration = Duration::from_millis(150);
+const VDF_SPEED_BENCHMARK_MIN_ELAPSED: Duration = Duration::from_secs(2);
 const VDF_PROGRESS_LOG_INTERVAL: Duration = Duration::from_secs(10);
 const SYNC_CHAIN_CHECKPOINT_INTERVAL: Duration = Duration::from_secs(30);
 const AUTOMATIC_BURN_ENABLED_ENV: &str = "IUNA_AUTOMATIC_BURN_ENABLED";
@@ -891,12 +892,45 @@ async fn join_chain_ledger(
     )
 }
 
+/// Gives the UI a local VDF speed estimate before this node has finalized a block.
+async fn record_vdf_speed_benchmark(node: SharedNode, debug: bool) {
+    let measurement = tokio::task::spawn_blocking(|| {
+        measure_vdf_rounds(
+            "iuna-vdf-speed-benchmark",
+            VDF_MEASUREMENT_INITIAL_ROUNDS,
+            VDF_SPEED_BENCHMARK_MIN_ELAPSED,
+            VDF_MEASUREMENT_MAX_ROUNDS,
+        )
+    })
+    .await;
+    match measurement {
+        Ok((rounds, elapsed)) => {
+            if debug {
+                println!(
+                    "VDF speed benchmark: {rounds} rounds in {:.3}s",
+                    elapsed.as_secs_f64()
+                );
+            }
+            node.lock()
+                .await
+                .record_vdf_speed_sample(rounds, elapsed, VdfSpeedSource::Benchmark);
+        }
+        Err(error) => {
+            if debug {
+                eprintln!("VDF speed benchmark failed: {error:#}");
+            }
+        }
+    }
+}
+
 async fn run_automatic_finalizer(
     node: SharedNode,
     peers: SharedPeerBook,
     gossip: p2p::GossipNetwork,
     debug: bool,
 ) {
+    // The benchmark only feeds the UI, so it must not delay a pending finalization VDF.
+    tokio::spawn(record_vdf_speed_benchmark(node.clone(), debug));
     let mut last_logged_skip: Option<(u64, String)> = None;
     loop {
         if !node.lock().await.has_real_chain() {
@@ -975,6 +1009,7 @@ async fn run_automatic_finalizer(
         let (progress_tx, progress_rx) = std::sync::mpsc::channel();
         let cancellation = Arc::new(AtomicBool::new(false));
         let worker_cancellation = Arc::clone(&cancellation);
+        let vdf_started = Instant::now();
         let mut vdf_worker = tokio::task::spawn_blocking(move || {
             run_vdf_cancellable_with_progress(
                 &seed,
@@ -1039,6 +1074,13 @@ async fn run_automatic_finalizer(
             node.lock()
                 .await
                 .record_automatic_finalization_status(message);
+        }
+        if vdf_output.is_some() {
+            node.lock().await.record_vdf_speed_sample(
+                rounds,
+                vdf_started.elapsed(),
+                VdfSpeedSource::Finalization,
+            );
         }
         let Some(vdf_output) = vdf_output else {
             let message = if cancelled_for_new_tip {

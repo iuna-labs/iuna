@@ -244,7 +244,7 @@ Checks:
 1. Confirm whether recovery blocks are accepted by multiple peers.
 2. Check if selected ticket finalizers were offline, locked, not burning, or missing committee attestations.
 3. Check clock warnings. Large clock skew can cause valid-looking local candidates to be rejected by peers.
-4. Check VDF rounds and host performance if VDF work consistently finishes late.
+4. Check VDF rounds and host performance if VDF work consistently finishes late. The Burn panel shows a speed hint when the local VDF estimate approaches the rank `1` fallback slot; such hosts should keep their burn low and participate through the burn committee.
 
 Recovery:
 

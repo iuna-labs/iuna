@@ -276,6 +276,25 @@ pub struct MiningStatus {
     pub wallet_is_current_leader: bool,
     pub last_auto_burn_height: Option<u64>,
     pub recovery_vdf_top_rank_percent: u8,
+    /// Estimated local time for the current base VDF rounds, from the latest speed sample.
+    pub estimated_vdf_ms: Option<u64>,
+    pub vdf_speed_source: Option<VdfSpeedSource>,
+}
+
+#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum VdfSpeedSource {
+    /// Short VDF run when the automatic finalizer starts.
+    Benchmark,
+    /// Completed VDF run for a candidate block.
+    Finalization,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) struct VdfSpeedSample {
+    pub(crate) rounds: u64,
+    pub(crate) elapsed_us: u64,
+    pub(crate) source: VdfSpeedSource,
 }
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]

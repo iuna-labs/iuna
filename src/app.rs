@@ -30,11 +30,12 @@ mod types;
 mod wallet;
 pub use in_memory_network::InMemoryNetwork;
 pub use peer_book::{PeerBook, PeerDirection, PeerInfo};
+use types::VdfSpeedSample;
 pub use types::{
     AutoMineOutcome, AutoMinePlan, BlockInventory, ChainBootstrap, ChainSegmentSummary,
     ExternalMineJob, FeeEstimate, FundedWalletAddressStatus, GossipEnvelope, LaunchProfileStatus,
     MiningStatus, NetworkMigrationStatus, NodeConfig, NodeStatus, ProtocolHello,
-    QuantumMigrationPreview, QuantumMigrationStatus, StratumStatus,
+    QuantumMigrationPreview, QuantumMigrationStatus, StratumStatus, VdfSpeedSource,
 };
 use wallet::NodeWallet;
 
@@ -385,6 +386,7 @@ pub struct NodeCore {
     local_block_anchor_burn: Option<(u64, Transaction)>,
     outbox: Vec<GossipEnvelope>,
     network_migration_from: Option<String>,
+    vdf_speed_sample: Option<VdfSpeedSample>,
 }
 
 pub fn now_ms() -> u64 {
