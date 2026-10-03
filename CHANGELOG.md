@@ -5,6 +5,13 @@ from the Git history and Conventional Commit titles by `deployment.sh`.
 
 ## [Unreleased]
 
+## [0.4.59] - 2026-10-03
+
+### Fixed
+
+- force revalidation of wallet assets so new versions load
+- keep mempool conflicts from poisoning peers
+
 ## [0.4.58] - 2026-10-03
 
 ### Fixed
