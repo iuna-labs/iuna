@@ -16,6 +16,7 @@ pub(crate) enum ValidationError {
     BurnAnchorOutsidePendingWindow,
     MineAnchorNotOnChain,
     MineAnchorLimitReached,
+    MempoolConflict,
 }
 
 impl ValidationError {
@@ -84,6 +85,9 @@ impl fmt::Display for ValidationError {
             }
             Self::MineAnchorLimitReached => {
                 formatter.write_str("mine transaction anchor limit reached")
+            }
+            Self::MempoolConflict => {
+                formatter.write_str("transaction conflicts with another pending transaction")
             }
         }
     }

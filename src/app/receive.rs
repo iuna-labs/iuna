@@ -35,7 +35,17 @@ impl NodeCore {
     pub fn receive_gossiped_transaction_v2(&mut self, envelope: String) -> Result<()> {
         let encoded = decode_hex(&envelope)?;
         let transaction = self.ledger.decode_transaction_v2(&encoded)?;
-        let outcome = self.ledger.submit_transaction_v2(transaction)?;
+        let outcome = match self.ledger.submit_transaction_v2(transaction) {
+            Ok(outcome) => outcome,
+            Err(error)
+                if error_has_validation(&error, |kind| {
+                    kind == ValidationError::MempoolConflict
+                }) =>
+            {
+                return Ok(());
+            }
+            Err(error) => return Err(error),
+        };
         if outcome.added() {
             self.outbox.push(GossipEnvelope::TransactionV2 {
                 envelope: hex_encode(encoded),

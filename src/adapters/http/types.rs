@@ -43,6 +43,7 @@ pub(super) struct NetworkHealthResponse {
     pub(super) outbound_peers: usize,
     pub(super) inbound_peers: usize,
     pub(super) healthy_peers: usize,
+    pub(super) forked_peers: usize,
     pub(super) failed_peers: usize,
     pub(super) stale_peers: usize,
     pub(super) banned_peers: usize,

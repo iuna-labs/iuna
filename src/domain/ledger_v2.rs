@@ -92,6 +92,30 @@ impl Ledger {
         }
 
         let mut utxos = self.utxos_after_all_spendable_pending()?;
+        let missing_inputs = transaction_v2_outpoints(&transaction)
+            .into_iter()
+            .filter(|outpoint| !utxos.contains_key(outpoint))
+            .collect::<Vec<_>>();
+        if !missing_inputs.is_empty()
+            && missing_inputs.iter().all(|outpoint| {
+                self.utxos.contains_key(outpoint)
+                    || self.pending_v2.iter().any(|pending| {
+                        pending.transaction_id(&domain).is_ok_and(|transaction_id| {
+                            hex_encode(transaction_id) == outpoint.txid
+                                && usize::try_from(outpoint.index).is_ok_and(|index| {
+                                    index < transaction_v2_outputs(pending).len()
+                                })
+                        })
+                    })
+            })
+        {
+            return Err(
+                anyhow::Error::new(super::ValidationError::MempoolConflict).context(format!(
+                    "transaction v2 input {} is already reserved",
+                    missing_inputs[0].id()
+                )),
+            );
+        }
         apply_transaction_v2_to_utxos(
             &transaction,
             &domain,
@@ -573,7 +597,7 @@ mod tests {
     use super::*;
     use crate::domain::{
         GenesisBurn, LaunchProfile, SignatureScheme, TRANSACTION_V2_ACTIVATION_HEIGHT,
-        TransactionV2Output, Wallet,
+        TransactionV2Output, ValidationError, Wallet, error_has_validation,
     };
 
     fn set_next_height(ledger: &mut Ledger, next_height: u64) {
@@ -874,6 +898,26 @@ mod tests {
                 .unwrap(),
             TransactionSubmitOutcome::ConflictsWithPending
         );
+    }
+
+    #[test]
+    fn v2_mempool_reports_a_typed_conflict_for_an_already_reserved_input() {
+        let wallet = Wallet::from_seed("v2-ledger-pending-conflict-wallet");
+        let mut ledger = Ledger::new(BTreeMap::from([(wallet.address().to_string(), 100)]), 1);
+        let first = ledger.build_v2_migration(&wallet, 3).unwrap();
+        let conflicting = ledger.build_v2_migration(&wallet, 4).unwrap();
+
+        ledger
+            .submit_transaction_v2_at_height(first, 3_000)
+            .unwrap();
+        let error = ledger
+            .submit_transaction_v2_at_height(conflicting, 3_000)
+            .unwrap_err();
+
+        assert!(error_has_validation(&error, |kind| {
+            kind == ValidationError::MempoolConflict
+        }));
+        assert_eq!(ledger.pending_v2().len(), 1);
     }
 
     #[test]
