@@ -130,8 +130,9 @@ height-3000 consensus path, including ticket creation and committee burn bundles
 require the additional `transaction-v2-burns` capability once transaction v2 is active; validators
 that lack it must be upgraded together rather than remaining connected through a gradual relay
 rollout. The management wallet can submit reviewed migration batches, ordinary hybrid transfers,
-and anchored hybrid burns. It deterministically rotates hybrid receive/change addresses and uses a
-separate reward branch that rotates after a spend reveals its current key. Broader recovery
+and anchored hybrid burns. It deterministically rotates hybrid receive and transfer-change
+addresses and uses a separate reward branch that rotates after a spend reveals its current key.
+Hybrid burn change deliberately returns to the spent address; see the wallet section below. Broader recovery
 rehearsal and independent review of the rotation behavior remain release blockers.
 
 ### Hybrid reward activation target
@@ -202,7 +203,12 @@ used by legacy burns. Hybrid burns create ordinary lottery tickets linked to the
 of the hybrid wallet and participate in the same anti-censorship bundle rules. The original hybrid
 address remains derivation index zero for backup compatibility. Once an external address appears
 in the chain or local mempool, the wallet exposes the next deterministic address and sends v2
-change there. Reward destinations use a separately domain-separated branch and rotate as soon as
+transfer change there. Hybrid burn change instead returns to the address the burn spends. That
+spend binds the address to the wallet's legacy ticket identity, so the change keeps its mature
+lineage eligible for burn-committee slots from height 4750; change on a fresh address would stay
+unbound until it is spent again. The trade-off is that this value stays behind a revealed hybrid
+key. The Ed25519 component is already public through the wallet's tickets, so only that address's
+ML-DSA-44 public key loses the hash commitment's extra protection. Reward destinations use a separately domain-separated branch and rotate as soon as
 the current reward key is revealed by a confirmed or pending spend. Seed recovery scans both
 branches with a 20-address gap limit. Child addresses retain the wallet's Ed25519 identity for
 ticket/finalizer compatibility while using distinct ML-DSA-44 keys. Full recovery rehearsal

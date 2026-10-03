@@ -617,6 +617,34 @@ mod tests {
     }
 
     #[test]
+    fn hybrid_burn_change_returns_to_the_bound_input_address() {
+        let wallet = Wallet::from_seed("hybrid-burn-change-binding");
+        let mut ledger = Ledger::new(BTreeMap::from([(wallet.address().to_string(), 100)]), 1);
+        ledger.chain.last_mut().unwrap().height = 2_999;
+        let migration = ledger.build_v2_migration(&wallet, 3).unwrap();
+        ledger.utxos = ledger
+            .validated_v2_utxos_at_height(&migration, 3_000)
+            .unwrap();
+        ledger.chain.last_mut().unwrap().height = 3_000;
+        let burn = ledger.build_v2_burn_for_next_block(&wallet, 9, 1).unwrap();
+        let mut bindings = BTreeMap::new();
+        record_hybrid_legacy_owner_bindings(&mut bindings, &burn, AddressNetwork::Mainnet).unwrap();
+
+        let TransactionV2::Burn { inputs, change, .. } = &burn else {
+            panic!("expected a burn");
+        };
+        assert_eq!(change.len(), 1);
+        assert_eq!(change[0].amount, 87);
+        assert!(inputs.iter().all(|input| input.owner == change[0].address));
+        let change_address =
+            encode_versioned_address(change[0].address, AddressNetwork::Mainnet).unwrap();
+        assert_eq!(
+            bindings.get(&change_address).map(String::as_str),
+            Some(wallet.address())
+        );
+    }
+
+    #[test]
     fn historical_mine_replay_is_rejected_from_height_1000() {
         let signature = "3".repeat(64);
         let mut ledger = Ledger::new(BTreeMap::new(), 1);

@@ -847,14 +847,12 @@ impl Ledger {
             bail!("insufficient hybrid funds");
         }
         let change_amount = total - required;
-        let change_address = self
-            .wallet_external_addresses(wallet)?
-            .last()
-            .map(|(_, address)| *address)
-            .context("wallet change address is unavailable")?;
+        // Return burn change to the spent address. Its hybrid authorization binds that address to
+        // the wallet's legacy ticket identity, so the change keeps its lineage eligible for the
+        // burn committee instead of landing on a fresh, unbound address.
         let change = (change_amount > 0)
             .then_some(TransactionV2Output {
-                address: change_address,
+                address: owner,
                 amount: change_amount,
             })
             .into_iter()
