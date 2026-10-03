@@ -19,14 +19,20 @@ pub struct PeerBook {
 
 impl PeerBook {
     pub fn has_good_connection_at(&self, now_ms: u64) -> bool {
-        self.peers.values().any(|peer| {
-            !peer.is_banned_at(now_ms)
-                && peer.last_error.is_none()
-                && peer.last_known_height.is_some()
-                && peer.last_success_ms.is_some_and(|last_success| {
-                    now_ms.saturating_sub(last_success) <= super::PEER_GOOD_CONNECTION_MAX_AGE_MS
-                })
-        })
+        self.peers
+            .values()
+            .any(|peer| peer.is_good_connection_at(now_ms))
+    }
+
+    pub fn has_good_connection_for_chain_at(
+        &self,
+        height: u64,
+        tip_hash: &str,
+        now_ms: u64,
+    ) -> bool {
+        self.peers
+            .values()
+            .any(|peer| peer.is_good_connection_for_chain_at(height, tip_hash, now_ms))
     }
 
     pub fn from_addresses(addresses: Vec<String>) -> Self {
@@ -575,6 +581,26 @@ impl PeerInfo {
             .is_some_and(|banned_until| banned_until > now_ms)
     }
 
+    pub fn is_good_connection_at(&self, now_ms: u64) -> bool {
+        !self.is_banned_at(now_ms)
+            && self.last_error.is_none()
+            && self.last_known_height.is_some()
+            && self.last_success_ms.is_some_and(|last_success| {
+                now_ms.saturating_sub(last_success) <= super::PEER_GOOD_CONNECTION_MAX_AGE_MS
+            })
+    }
+
+    pub fn is_good_connection_for_chain_at(
+        &self,
+        height: u64,
+        tip_hash: &str,
+        now_ms: u64,
+    ) -> bool {
+        self.is_good_connection_at(now_ms)
+            && self.last_known_height == Some(height)
+            && self.last_known_tip_hash.as_deref() == Some(tip_hash)
+    }
+
     fn clear_misbehavior(&mut self) {
         self.misbehavior_score = 0;
         self.banned_until_ms = None;
@@ -664,6 +690,18 @@ mod tests {
             .last_known_height = Some(1);
 
         assert!(!peers.has_good_connection_at(now));
+    }
+
+    #[test]
+    fn good_connection_for_chain_requires_matching_height_and_tip() {
+        let now = now_ms();
+        let mut peers = PeerBook::from_addresses(vec!["127.0.0.1:9444".to_string()]);
+        peers.record_status("127.0.0.1:9444", 42, "peer-tip".to_string());
+
+        assert!(peers.has_good_connection_at(now));
+        assert!(!peers.has_good_connection_for_chain_at(41, "peer-tip", now));
+        assert!(!peers.has_good_connection_for_chain_at(42, "local-tip", now));
+        assert!(peers.has_good_connection_for_chain_at(42, "peer-tip", now));
     }
 
     #[test]

@@ -264,7 +264,16 @@ pub(super) fn network_health_at(
         .count();
     let healthy_peers = peers
         .iter()
-        .filter(|peer| peer.last_error.is_none() && peer.last_known_height.is_some())
+        .filter(|peer| peer.is_good_connection_for_chain_at(local_height, &local.tip_hash, now_ms))
+        .count();
+    let forked_peers = peers
+        .iter()
+        .filter(|peer| peer.last_known_height == Some(local_height))
+        .filter(|peer| {
+            peer.last_known_tip_hash
+                .as_deref()
+                .is_some_and(|tip_hash| tip_hash != local.tip_hash)
+        })
         .count();
     let failed_peers = peers
         .iter()
@@ -314,9 +323,11 @@ pub(super) fn network_health_at(
         "banned"
     } else if lag_blocks > 0 {
         "syncing"
+    } else if forked_peers > 0 && healthy_peers == 0 {
+        "forked"
     } else if failed_peers > 0 && healthy_peers == 0 {
         "peer errors"
-    } else if stale_peers > 0 && healthy_peers == stale_peers {
+    } else if stale_peers > 0 && healthy_peers == 0 {
         "stale"
     } else if remote_best_height.is_some_and(|height| local_height > height) {
         "ahead of peers"
@@ -326,7 +337,7 @@ pub(super) fn network_health_at(
     .to_string();
 
     NetworkHealthResponse {
-        ok: !peers.is_empty() && lag_blocks == 0 && healthy_peers > stale_peers,
+        ok: lag_blocks == 0 && healthy_peers > 0,
         state,
         local_height,
         local_tip_hash: local.tip_hash,
@@ -342,6 +353,7 @@ pub(super) fn network_health_at(
         outbound_peers,
         inbound_peers,
         healthy_peers,
+        forked_peers,
         failed_peers,
         stale_peers,
         banned_peers,
@@ -393,6 +405,7 @@ mod tests {
 
     use crate::{
         adapters::ui_data_store::BlockMetricRow,
+        app::{PEER_GOOD_CONNECTION_MAX_AGE_MS, PeerDirection, PeerInfo},
         domain::{Block, BurnBundleSection, FinalizerMode, Transaction},
     };
 
@@ -608,5 +621,74 @@ mod tests {
             health.last_chain_payload_error.as_deref(),
             Some("snapshot: invalid block")
         );
+    }
+
+    #[test]
+    fn network_health_counts_only_mining_eligible_peers_as_healthy() {
+        let now_ms = PEER_GOOD_CONNECTION_MAX_AGE_MS + 10_000;
+        let peer = |address: &str, last_success_ms, banned_until_ms, last_error| PeerInfo {
+            address: address.to_string(),
+            direction: PeerDirection::Outbound,
+            messages_sent: 1,
+            messages_received: 1,
+            last_known_height: Some(42),
+            last_known_tip_hash: Some("tip-hash".to_string()),
+            last_hello: None,
+            last_clock_offset_ms: None,
+            last_clock_offset_accepted: None,
+            last_clock_observed_ms: None,
+            last_error,
+            last_contact_ms: last_success_ms,
+            last_success_ms,
+            last_error_ms: None,
+            misbehavior_score: 0,
+            banned_until_ms,
+            ban_reason: None,
+        };
+        let local = NetworkHealthLocalState {
+            height: 42,
+            tip_hash: "tip-hash".to_string(),
+            finalized_height: Some(42),
+            finalized_hash: Some("tip-hash".to_string()),
+            tip_timestamp_ms: Some(now_ms),
+            sync_start_height: None,
+            sync_validated_height: None,
+            sync_target_height: None,
+            pending_transactions: 0,
+            last_finalizer_mode: None,
+            last_finalizer_rank: None,
+            last_block_finalizer: None,
+            current_leader: None,
+            wallet_is_current_leader: false,
+            last_auto_finalization_status: None,
+            vdf_rounds: 1,
+            vdf_target_block_ms: 1,
+            rejected_blocks: 0,
+            rejected_block_batches: 0,
+            rejected_snapshots: 0,
+            last_chain_payload_error: None,
+        };
+        let mut peers = [
+            peer("fresh", Some(now_ms), None, None),
+            peer(
+                "stale",
+                Some(now_ms - PEER_GOOD_CONNECTION_MAX_AGE_MS - 1),
+                None,
+                None,
+            ),
+            peer("banned", Some(now_ms), Some(now_ms + 1), None),
+            peer("failed", Some(now_ms), None, Some("offline".to_string())),
+            peer("forked", Some(now_ms), None, None),
+        ];
+        peers[4].last_known_tip_hash = Some("fork-tip".to_string());
+
+        let health = network_health_at(local, &peers, MempoolCounts::default(), now_ms);
+
+        assert_eq!(health.healthy_peers, 1);
+        assert_eq!(health.forked_peers, 1);
+        assert_eq!(health.stale_peers, 1);
+        assert_eq!(health.banned_peers, 1);
+        assert_eq!(health.failed_peers, 1);
+        assert!(health.ok);
     }
 }

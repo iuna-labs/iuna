@@ -4089,7 +4089,20 @@ window.iunaApp = function iunaApp() {
     },
 
     healthyPeers() {
-      return this.peers.filter((peer) => !peer.last_error && typeof peer.last_known_height === "number");
+      return this.peers.filter((peer) =>
+        !peer.last_error
+        && !this.bannedPeer(peer)
+        && !this.stalePeer(peer)
+        && typeof peer.last_success_ms === "number"
+        && this.peerOnLocalTip(peer)
+      );
+    },
+
+    peerOnLocalTip(peer) {
+      return typeof peer.last_known_height === "number"
+        && peer.last_known_height === this.networkHealth.local_height
+        && typeof peer.last_known_tip_hash === "string"
+        && peer.last_known_tip_hash === this.networkHealth.local_tip_hash;
     },
 
     failedPeers() {
@@ -4111,7 +4124,16 @@ window.iunaApp = function iunaApp() {
       if (this.bannedPeer(peer)) return "banned";
       if (peer.last_error) return "error";
       if (this.stalePeer(peer)) return "stale";
-      if (typeof peer.last_known_height === "number") return "synced";
+      if (typeof peer.last_known_height === "number") {
+        const localHeight = this.networkHealth.local_height;
+        if (typeof localHeight === "number" && peer.last_known_height < localHeight) return "behind";
+        if (typeof localHeight === "number" && peer.last_known_height > localHeight) return "ahead";
+        if (typeof localHeight === "number"
+            && typeof peer.last_known_tip_hash === "string"
+            && typeof this.networkHealth.local_tip_hash === "string"
+            && peer.last_known_tip_hash !== this.networkHealth.local_tip_hash) return "forked";
+        return "synced";
+      }
       if ((peer.messages_sent ?? 0) > 0 || (peer.messages_received ?? 0) > 0) return "active";
       return "pending";
     },
@@ -4120,6 +4142,9 @@ window.iunaApp = function iunaApp() {
       return {
         error: "Error",
         banned: "Banned",
+        forked: "Forked",
+        ahead: "Ahead",
+        behind: "Behind",
         stale: "Stale",
         synced: "Synced",
         active: "Active",

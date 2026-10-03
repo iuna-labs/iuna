@@ -396,8 +396,9 @@ pub(super) const INDEX_HTML: &str = concat!(
     .peer-status { display: inline-flex; align-items: center; border: 1px solid #3a4248; border-radius: 999px; padding: 3px 8px; color: #a8b2b8; font-size: 11px; font-weight: 850; }
     .peer-status.synced, .peer-status.active { border-color: #566d25; color: #d5f55f; background: #1c2516; }
     .peer-status.stale { border-color: #5f5125; color: #ffe08a; background: #211d12; }
-    .peer-status.banned { border-color: #713434; color: #ffb1a8; background: #2a1717; }
+    .peer-status.banned, .peer-status.forked { border-color: #713434; color: #ffb1a8; background: #2a1717; }
     .peer-status.error { border-color: #713434; color: #ffb1a8; background: #2a1717; }
+    .peer-status.ahead, .peer-status.behind { border-color: #5f5125; color: #ffe08a; background: #211d12; }
     .peer-actions { display: flex; gap: 6px; align-items: center; }
     .peer-address { display: inline-flex; gap: 7px; align-items: center; flex-wrap: wrap; }
     .country-code { border: 1px solid #3a4248; border-radius: 4px; padding: 1px 5px; color: #a8b2b8; font-size: 10px; font-weight: 850; letter-spacing: .06em; }
@@ -1078,6 +1079,7 @@ pub(super) const INDEX_HTML: &str = concat!(
             <div class="peer-summary-item"><div class="peer-summary-label">Best Known</div><div class="peer-summary-value" x-text="networkHealth.best_known_height ?? '-'"></div></div>
             <div class="peer-summary-item"><div class="peer-summary-label">Lag</div><div class="peer-summary-value" x-text="networkLagLabel()"></div></div>
             <div class="peer-summary-item"><div class="peer-summary-label">Stale</div><div class="peer-summary-value" x-text="networkHealth.stale_peers ?? '-'"></div></div>
+            <div class="peer-summary-item"><div class="peer-summary-label">Forked</div><div class="peer-summary-value" x-text="networkHealth.forked_peers ?? '-'"></div></div>
             <div class="peer-summary-item"><div class="peer-summary-label">Banned</div><div class="peer-summary-value" x-text="networkHealth.banned_peers ?? '-'"></div></div>
             <div class="peer-summary-item"><div class="peer-summary-label">Mempool</div><div class="peer-summary-value" x-text="networkHealth.pending_transactions ?? '-'"></div></div>
             <div class="peer-summary-item"><div class="peer-summary-label">Plain Tx</div><div class="peer-summary-value" x-text="networkHealth.pending_plain_transactions ?? '-'"></div></div>

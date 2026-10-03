@@ -143,7 +143,11 @@ pub(super) fn is_possible_fork_error(error: &anyhow::Error) -> bool {
 
 pub(super) fn inbound_error_counts_as_misbehavior(error: &anyhow::Error) -> bool {
     !is_possible_fork_error(error)
-        && !error_has_validation(error, |kind| kind.is_fork_relative() || kind.is_temporal())
+        && !error_has_validation(error, |kind| {
+            kind.is_fork_relative()
+                || kind.is_temporal()
+                || kind == ValidationError::MempoolConflict
+        })
 }
 
 #[cfg(test)]
@@ -187,6 +191,7 @@ mod tests {
             ValidationError::BurnBundleParentMismatch,
             ValidationError::BurnAnchorOutsidePendingWindow,
             ValidationError::MineAnchorNotOnChain,
+            ValidationError::MempoolConflict,
         ] {
             let error = anyhow::Error::new(kind);
             assert!(!inbound_error_counts_as_misbehavior(&error));

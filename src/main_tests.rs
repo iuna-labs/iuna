@@ -701,8 +701,8 @@ fn automatic_miners_require_a_good_peer_connection() {
         .and_then(|source| source.split("async fn run_peer_sync").next())
         .expect("automatic PoW miner should exist");
 
-    assert!(finalizer.contains("has_good_connection_at"));
-    assert!(pow_miner.contains("has_good_connection_at"));
+    assert!(finalizer.contains("has_good_peer_for_chain"));
+    assert!(pow_miner.contains("has_good_peer_for_chain"));
 }
 
 #[test]
