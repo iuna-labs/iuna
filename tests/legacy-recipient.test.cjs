@@ -42,7 +42,7 @@ test('allows legacy recipients while legacy funds remain', () => {
   assert.equal(ui.transferMaxDisabled(), false);
 });
 
-test('offers only legacy-address UTXOs for manual legacy selection', () => {
+test('offers only hybrid-address UTXOs for manual hybrid selection', () => {
   const ui = app();
   ui.status = { wallet_address: 'legacy' };
   ui.walletUtxos = [
@@ -51,8 +51,8 @@ test('offers only legacy-address UTXOs for manual legacy selection', () => {
     { outpoint: { txid: 'cc', index: 2 }, address: 'legacy', amount: 3, spendable: false },
   ];
 
-  assert.deepEqual(ui.legacyTransferUtxos().map((utxo) => utxo.outpoint.txid), ['bb', 'cc']);
-  assert.deepEqual(ui.spendableTransferUtxos().map((utxo) => utxo.outpoint.txid), ['bb']);
+  assert.deepEqual(ui.hybridTransferUtxos().map((utxo) => utxo.outpoint.txid), ['aa']);
+  assert.deepEqual(ui.spendableTransferUtxos().map((utxo) => utxo.outpoint.txid), ['aa']);
 });
 
 test('flags legacy address-book entries', () => {

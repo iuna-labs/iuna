@@ -426,19 +426,36 @@ pub(super) async fn api_wallet_utxos(
 pub(super) async fn api_wallet_selectable_utxos(
     State(state): State<HttpState>,
 ) -> Json<Vec<WalletUtxoRow>> {
-    let (wallet, pending_spent) = {
+    let (wallet_addresses, pending_spent) = {
         let node = state.node.lock().await;
+        let legacy_address = node.wallet_address();
         (
-            node.wallet_address().to_string(),
+            node.wallet_owned_addresses()
+                .unwrap_or_default()
+                .into_iter()
+                .filter(|address| address != legacy_address)
+                .collect::<Vec<_>>(),
             node.wallet_pending_spent_outpoints(),
         )
     };
     let store = state.ui_data_store.clone();
-    let utxos = tokio::task::spawn_blocking(move || store.load_wallet_utxos(&wallet))
-        .await
-        .ok()
-        .and_then(Result::ok)
-        .unwrap_or_default();
+    let utxos = tokio::task::spawn_blocking(move || -> Result<Vec<_>> {
+        let mut utxos = Vec::new();
+        for address in wallet_addresses {
+            utxos.extend(store.load_wallet_utxos(&address)?);
+        }
+        utxos.sort_by(|(left_point, left), (right_point, right)| {
+            right
+                .amount
+                .cmp(&left.amount)
+                .then_with(|| left_point.cmp(right_point))
+        });
+        Ok(utxos)
+    })
+    .await
+    .ok()
+    .and_then(Result::ok)
+    .unwrap_or_default();
     Json(
         wallet_utxo_rows_from_ui_data(utxos, &pending_spent)
             .into_iter()

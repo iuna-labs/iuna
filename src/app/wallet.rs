@@ -112,8 +112,9 @@ impl NodeCore {
         recipient: VersionedAddress,
         amount: Amount,
         fee_per_byte: Amount,
+        outpoints: &[OutPoint],
     ) -> Result<FeeEstimate> {
-        self.build_hybrid_transfer_with_fee_rate(recipient, amount, fee_per_byte)
+        self.build_hybrid_transfer_with_fee_rate(recipient, amount, fee_per_byte, outpoints)
             .map(|(_, estimate)| estimate)
     }
 
@@ -122,9 +123,10 @@ impl NodeCore {
         recipient: VersionedAddress,
         amount: Amount,
         fee_per_byte: Amount,
+        outpoints: &[OutPoint],
     ) -> Result<String> {
         let (transaction, _) =
-            self.build_hybrid_transfer_with_fee_rate(recipient, amount, fee_per_byte)?;
+            self.build_hybrid_transfer_with_fee_rate(recipient, amount, fee_per_byte, outpoints)?;
         let domain = self.ledger.transaction_v2_domain()?;
         let transaction_id = hex_encode(transaction.transaction_id(&domain)?);
         self.submit_public_transaction_v2(transaction)?;
@@ -136,6 +138,7 @@ impl NodeCore {
         recipient: VersionedAddress,
         amount: Amount,
         fee_per_byte: Amount,
+        outpoints: &[OutPoint],
     ) -> Result<(TransactionV2, FeeEstimate)> {
         if fee_per_byte == 0 {
             bail!("fee per byte must be greater than zero");
@@ -145,7 +148,11 @@ impl NodeCore {
         let wallet = self.wallet.unlocked()?;
         let mut fee = 1;
         for _ in 0..64 {
-            let transaction = ledger.build_v2_transfer(wallet, recipient, amount, fee)?;
+            let transaction = if outpoints.is_empty() {
+                ledger.build_v2_transfer(wallet, recipient, amount, fee)?
+            } else {
+                ledger.build_v2_transfer_with_inputs(wallet, recipient, amount, fee, outpoints)?
+            };
             let bytes = transaction.encoded_size_bytes(&domain)?;
             let required_fee = fee_per_byte
                 .checked_mul(bytes as Amount)

@@ -526,6 +526,80 @@ impl Ledger {
             bail!("insufficient hybrid funds");
         }
 
+        self.finish_v2_transfer(wallet, recipient, amount, fee, inputs, total)
+    }
+
+    /// Builds a transaction-v2 transfer from exactly the selected hybrid wallet outputs.
+    pub(crate) fn build_v2_transfer_with_inputs(
+        &self,
+        wallet: &Wallet,
+        recipient: VersionedAddress,
+        amount: Amount,
+        fee: Amount,
+        outpoints: &[OutPoint],
+    ) -> Result<TransactionV2> {
+        if recipient.version != super::AddressVersion::HybridKeyCommitment {
+            bail!("transaction v2 recipient must use address v1");
+        }
+        if amount == 0 {
+            bail!("transfer amount must be greater than zero");
+        }
+        if outpoints.is_empty() {
+            bail!("choose at least one hybrid output");
+        }
+
+        let mut available = std::collections::BTreeMap::new();
+        for owner in self.wallet_owned_hybrid_addresses(wallet)? {
+            let owner_address = encode_versioned_address(owner, self.address_network())?;
+            available.extend(
+                self.available_utxos_for_address(&owner_address)?
+                    .into_iter()
+                    .map(|(outpoint, output)| (outpoint, (output, owner))),
+            );
+        }
+
+        let mut seen = std::collections::BTreeSet::new();
+        let mut total = 0_u64;
+        let mut inputs = Vec::with_capacity(outpoints.len());
+        for outpoint in outpoints {
+            if !seen.insert(outpoint) {
+                bail!("a hybrid output was selected more than once");
+            }
+            let (output, owner) = available
+                .get(outpoint)
+                .context("output is no longer an available hybrid output in this wallet")?;
+            total = total
+                .checked_add(output.amount)
+                .context("transaction v2 input total overflows")?;
+            inputs.push(TransactionV2Input {
+                outpoint_txid: decode_hex_array::<32>(&outpoint.txid)
+                    .context("transaction v2 outpoint ID must be a 32-byte hash")?,
+                outpoint_index: outpoint.index,
+                owner: *owner,
+            });
+        }
+        let required = amount
+            .checked_add(fee)
+            .context("transfer amount plus fee overflows")?;
+        if total < required {
+            bail!("selected hybrid outputs do not cover transfer");
+        }
+
+        self.finish_v2_transfer(wallet, recipient, amount, fee, inputs, total)
+    }
+
+    fn finish_v2_transfer(
+        &self,
+        wallet: &Wallet,
+        recipient: VersionedAddress,
+        amount: Amount,
+        fee: Amount,
+        inputs: Vec<TransactionV2Input>,
+        total: Amount,
+    ) -> Result<TransactionV2> {
+        let required = amount
+            .checked_add(fee)
+            .context("transfer amount plus fee overflows")?;
         let mut outputs = vec![TransactionV2Output {
             address: recipient,
             amount,
@@ -1697,6 +1771,55 @@ mod v2_migration_tests {
         migrated
             .validate_transaction_v2_at_height(&transfer, 3_001)
             .unwrap();
+    }
+
+    #[test]
+    fn hybrid_transfer_builder_spends_only_selected_outputs() {
+        let wallet = Wallet::from_seed("selected-v2-transfer-wallet");
+        let recipient = Wallet::from_seed("selected-v2-transfer-recipient");
+        let owner = wallet.hybrid_address(AddressNetwork::Mainnet);
+        let selected = OutPoint {
+            txid: "42".repeat(32),
+            index: 0,
+        };
+        let mut ledger = Ledger::new(BTreeMap::new(), 1);
+        ledger.utxos.insert(
+            selected.clone(),
+            TxOutput {
+                address: owner.clone(),
+                amount: 100,
+            },
+        );
+        ledger.utxos.insert(
+            OutPoint {
+                txid: "43".repeat(32),
+                index: 0,
+            },
+            TxOutput {
+                address: owner,
+                amount: 1_000,
+            },
+        );
+
+        let transfer = ledger
+            .build_v2_transfer_with_inputs(
+                &wallet,
+                recipient.hybrid_versioned_address(),
+                40,
+                2,
+                std::slice::from_ref(&selected),
+            )
+            .unwrap();
+        let TransactionV2::Transfer {
+            inputs, outputs, ..
+        } = transfer
+        else {
+            panic!("builder returned a non-transfer transaction");
+        };
+
+        assert_eq!(inputs.len(), 1);
+        assert_eq!(inputs[0].outpoint_txid, [0x42; 32]);
+        assert_eq!(outputs[1].amount, 58);
     }
 
     #[test]

@@ -1685,7 +1685,7 @@ window.iunaApp = function iunaApp() {
         to: this.transferTo,
         amount,
         fee_per_byte: feePerByte,
-        utxos: this.selectedTransferUtxos.join("\n"),
+        utxos: this.hybridTransferRecipient() ? this.selectedTransferUtxos.join("\n") : "",
       });
     },
 
@@ -2903,7 +2903,7 @@ window.iunaApp = function iunaApp() {
           feePerByte: fee,
           bytes: Number(estimate.bytes),
           fee: this.microiunaAmount(estimate.fee),
-          utxos: this.hybridTransferRecipient() ? "" : this.selectedTransferUtxos.join("\n"),
+          utxos: this.hybridTransferRecipient() ? this.selectedTransferUtxos.join("\n") : "",
         };
         this.sendConfirmModalOpen = true;
       } catch (error) {
@@ -2952,9 +2952,9 @@ window.iunaApp = function iunaApp() {
 
     transferMaxDisabled() {
       if (this.hybridTransferRecipient()) {
-        return Number(this.status.quantum_migration?.hybrid_balance || 0) <= 0;
+        return this.selectedTransferUtxoTotal() <= 0 && Number(this.status.quantum_migration?.hybrid_balance || 0) <= 0;
       }
-      return this.selectedTransferUtxoTotal() <= 0 && Number(this.status.quantum_migration?.legacy_balance || 0) <= 0;
+      return Number(this.status.quantum_migration?.legacy_balance || 0) <= 0;
     },
 
     hybridTransferRecipient() {
@@ -2975,12 +2975,12 @@ window.iunaApp = function iunaApp() {
         && Number(migration.hybrid_balance || 0) > 0;
     },
 
-    legacyTransferUtxos() {
-      return this.walletUtxos.filter((utxo) => utxo.address === this.status.wallet_address);
+    hybridTransferUtxos() {
+      return this.walletUtxos.filter((utxo) => !this.isLegacyAddress(utxo.address));
     },
 
     transferRecipientChanged() {
-      if (this.hybridTransferRecipient()) {
+      if (!this.hybridTransferRecipient()) {
         this.showSendAdvanced = false;
         this.selectedTransferUtxos = [];
         this.selectedTransferUtxoAmounts = {};
@@ -2991,9 +2991,9 @@ window.iunaApp = function iunaApp() {
     async setMaxTransferAmount() {
       try {
         let selectedTotal = this.hybridTransferRecipient()
-          ? Number(this.status.quantum_migration?.hybrid_balance || 0)
-          : this.selectedTransferUtxoTotal();
-        if (!this.hybridTransferRecipient() && this.selectedTransferUtxos.length === 0) {
+          ? this.selectedTransferUtxoTotal()
+          : Number(this.status.quantum_migration?.legacy_balance || 0);
+        if (this.hybridTransferRecipient() && this.selectedTransferUtxos.length === 0) {
           const utxos = await this.fetchJson("/api/wallet/utxos/selectable");
           this.rememberUtxoAmounts(utxos);
           this.selectedTransferUtxos = utxos.map((utxo) => this.utxoOutpoint(utxo));
@@ -3055,7 +3055,7 @@ window.iunaApp = function iunaApp() {
         to: recipient,
         amount,
         fee_per_byte: this.parseiunaAmount(this.transferFee),
-        utxos: this.hybridTransferRecipient() ? "" : this.selectedTransferUtxos.join("\n"),
+        utxos: this.hybridTransferRecipient() ? this.selectedTransferUtxos.join("\n") : "",
       });
       if (
         estimate?.error
@@ -3518,7 +3518,7 @@ window.iunaApp = function iunaApp() {
     },
 
     spendableTransferUtxos() {
-      return this.legacyTransferUtxos().filter((utxo) => utxo.spendable !== false);
+      return this.hybridTransferUtxos().filter((utxo) => utxo.spendable !== false);
     },
 
     rememberUtxoAmounts(utxos) {

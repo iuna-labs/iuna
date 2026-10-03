@@ -791,8 +791,8 @@ pub(super) const INDEX_HTML: &str = concat!(
               <label>Fee / byte<input x-model="transferFee" @input="scheduleFeeEstimates" type="number" min="0" step="0.000001" required></label>
               <div class="fee-preview" :class="{ error: feeEstimateError('transfer') }" x-text="feeEstimateLabel('transfer')" role="status" aria-live="polite"></div>
               <div class="fee-warning" x-show="feeExceedsAmount('transfer')" x-text="feeExceedsAmountLabel('transfer')" role="status" aria-live="polite"></div>
-              <button class="advanced-toggle" type="button" x-show="!hybridTransferRecipient()" @click="toggleSendAdvanced" x-text="showSendAdvanced ? 'Hide UTXOs' : 'UTXOs'"></button>
-              <div class="send-utxo-summary" x-show="showSendAdvanced && !hybridTransferRecipient()">
+              <button class="advanced-toggle" type="button" x-show="hybridTransferRecipient()" @click="toggleSendAdvanced" x-text="showSendAdvanced ? 'Hide UTXOs' : 'UTXOs'"></button>
+              <div class="send-utxo-summary" x-show="showSendAdvanced && hybridTransferRecipient()">
                 <div>Selected UTXOs: <span x-text="selectedTransferUtxos.length"></span></div>
                 <div>Selected total: IUNA <span x-text="amountLabel(selectedTransferUtxoTotal())"></span></div>
                 <div>Required: IUNA <span x-text="amountLabel(transferRequiredTotal())"></span></div>
@@ -801,11 +801,11 @@ pub(super) const INDEX_HTML: &str = concat!(
                   <div class="send-utxo-list-head">
                     <span>UTXOs</span>
                     <span class="send-utxo-actions">
-                      <button class="utxo-select-button" type="button" @click="selectAllTransferUtxos" :disabled="walletUtxoPage.loading && legacyTransferUtxos().length === 0">Select all</button>
+                      <button class="utxo-select-button" type="button" @click="selectAllTransferUtxos" :disabled="walletUtxoPage.loading && hybridTransferUtxos().length === 0">Select all</button>
                       <button class="utxo-select-button" type="button" @click="clearTransferUtxos" :disabled="selectedTransferUtxos.length === 0">None</button>
                     </span>
                   </div>
-                  <template x-for="utxo in legacyTransferUtxos()" :key="utxoOutpoint(utxo)">
+                  <template x-for="utxo in hybridTransferUtxos()" :key="utxoOutpoint(utxo)">
                     <label class="send-utxo-option" :class="{ disabled: !utxo.spendable }" @click.prevent="toggleTransferUtxoSelection($event, utxo)">
                       <input type="checkbox" :value="utxoOutpoint(utxo)" :checked="selectedTransferUtxos.includes(utxoOutpoint(utxo))" :disabled="!utxo.spendable">
                       <span>
@@ -820,7 +820,7 @@ pub(super) const INDEX_HTML: &str = concat!(
                     <div class="send-utxo-option skeleton-card"><span><span class="skeleton-line short"></span><span class="skeleton-line long"></span></span></div>
                   </div>
                   <div class="page-sentinel" x-show="walletUtxoPage.hasMore" x-init="$nextTick(() => observePageSentinel('walletUtxo', $el))"></div>
-                  <div class="tx-modal-empty" x-show="legacyTransferUtxos().length === 0 && !walletUtxoPage.loading">No legacy UTXOs</div>
+                  <div class="tx-modal-empty" x-show="hybridTransferUtxos().length === 0 && !walletUtxoPage.loading">No hybrid UTXOs</div>
                 </div>
               </div>
               <button class="primary" type="submit" :disabled="sendPreparing || sendConfirmBusy" x-text="sendPreparing ? 'Checking...' : 'Send'"></button>

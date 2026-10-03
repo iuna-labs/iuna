@@ -122,16 +122,16 @@ test('broadcast failure explains that the saved migration will retry', async () 
   assert.match(ui.quantumMigrationError, /rebroadcast automatically/);
 });
 
-test('hybrid recipients never reuse selected legacy UTXOs', () => {
+test('legacy recipients never reuse selected hybrid UTXOs', () => {
   const ui = app();
-  ui.transferTo = `iuna1p${'q'.repeat(58)}`;
-  ui.selectedTransferUtxos = ['legacy:0'];
-  ui.selectedTransferUtxoAmounts = { 'legacy:0': 10 };
+  ui.transferTo = `iuna1q${'q'.repeat(58)}`;
+  ui.selectedTransferUtxos = ['hybrid:0'];
+  ui.selectedTransferUtxoAmounts = { 'hybrid:0': 10 };
   ui.showSendAdvanced = true;
 
   ui.transferRecipientChanged();
 
-  assert.equal(ui.hybridTransferRecipient(), true);
+  assert.equal(ui.hybridTransferRecipient(), false);
   assert.equal(ui.selectedTransferUtxos.length, 0);
   assert.equal(ui.showSendAdvanced, false);
 });
