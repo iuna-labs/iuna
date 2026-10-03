@@ -5,7 +5,17 @@ from the Git history and Conventional Commit titles by `deployment.sh`.
 
 ## [Unreleased]
 
-## [0.4.55] - 2026-10-02
+## [0.4.56] - 2026-10-03
+
+### Fixed
+
+- select hybrid UTXOs for sends
+
+### Performance
+
+- optimize UTXO consolidation
+
+## [0.4.55] - 2026-10-03
 
 ### Added
 
