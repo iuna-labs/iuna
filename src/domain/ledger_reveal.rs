@@ -3,6 +3,7 @@ use std::collections::{BTreeMap, BTreeSet};
 use anyhow::{Context, Result, bail};
 
 use super::ledger_ops::verify_address_signature;
+use super::ledger_v2::transaction_v2_inputs_are_confirmed;
 use super::reveal::{burn_bundle_slot_mask, burn_committee_mask};
 use super::{
     Amount, BURN_COMMITTEE_SIZE, Block, BurnBundle, BurnBundlePayload, BurnBundleSection,
@@ -63,7 +64,9 @@ impl Ledger {
             .pending_v2
             .iter()
             .filter(|transaction| {
-                transaction.is_burn() && self.transaction_v2_is_eligible_for_next_block(transaction)
+                transaction.is_burn()
+                    && self.transaction_v2_is_eligible_for_next_block(transaction)
+                    && transaction_v2_inputs_are_confirmed(transaction, &self.utxos)
             })
             .map(|transaction| {
                 Ok((

@@ -9,7 +9,10 @@ use super::ledger_ops::{
     estimated_block_selection_size_bytes, transaction_has_missing_inputs,
     validate_transaction_inputs, validate_transaction_outputs,
 };
-use super::ledger_v2::apply_prevalidated_transaction_v2_to_utxos;
+use super::ledger_v2::{
+    apply_prevalidated_transaction_v2_to_utxos,
+    apply_prevalidated_transaction_v2_with_pending_parents,
+};
 use super::mine_policy::{
     MINE_MAX_ANCHOR_AGE_BLOCKS, mine_anchor, mine_anchor_count_before_height,
 };
@@ -216,8 +219,20 @@ impl Ledger {
                     bail!("required block anchor burn must be from the recovery finalizer");
                 }
             }
-            apply_prevalidated_transaction_v2_to_utxos(transaction, &domain, network, &mut utxos)
-                .context("required transaction v2 anchor burn is not spendable")?;
+            apply_prevalidated_transaction_v2_with_pending_parents(
+                transaction,
+                &mut remaining_v2,
+                &mut selected_v2,
+                &domain,
+                network,
+                &mut utxos,
+            )
+            .context("required transaction v2 anchor burn is not spendable")?;
+            for parent in &selected_v2 {
+                if required_burns_v2.contains(parent) {
+                    selected_required_burns_v2.insert(parent.clone());
+                }
+            }
             let envelope = hex_encode(transaction.encode(&domain)?);
             if required_burns_v2.contains(&envelope) {
                 selected_required_burns_v2.insert(envelope.clone());
@@ -266,17 +281,34 @@ impl Ledger {
             if !transaction.is_burn() {
                 bail!("attested transaction v2 must be a burn");
             }
+            // An attested burn may spend the output of a transaction that is still pending;
+            // that parent has to be included earlier in the same block.
+            let selected_before = selected_v2.len();
+            apply_prevalidated_transaction_v2_with_pending_parents(
+                transaction,
+                &mut remaining_v2,
+                &mut selected_v2,
+                &domain,
+                network,
+                &mut utxos,
+            )
+            .context("attested transaction v2 burn is not spendable")?;
+            for parent in &selected_v2[selected_before..] {
+                if required_burns_v2.contains(parent) {
+                    selected_required_burns_v2.insert(parent.clone());
+                }
+            }
+            selected_required_burns_v2.insert(envelope.clone());
+            selected_v2.push(envelope);
             if selected.len().saturating_add(selected_v2.len())
-                >= self.launch_profile.max_block_transactions
+                > self.launch_profile.max_block_transactions
             {
                 bail!(
                     "attested transaction v2 burns do not fit within the block transaction count limit"
                 );
             }
-            apply_prevalidated_transaction_v2_to_utxos(transaction, &domain, network, &mut utxos)
-                .context("attested transaction v2 burn is not spendable")?;
-            selected_required_burns_v2.insert(envelope.clone());
-            selected_v2.push(envelope);
+            // Pulling parents may have removed entries before `index`.
+            index = 0;
         }
         if selected_required_burns_v2.len() != required_burns_v2.len() {
             bail!("attested transaction v2 burn is not pending");

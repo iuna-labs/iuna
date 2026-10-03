@@ -368,6 +368,46 @@ pub(super) fn apply_prevalidated_transaction_v2_to_utxos(
     apply_transaction_v2_to_utxos_with_policy(transaction, domain, network, utxos, false)
 }
 
+/// Applies `transaction` after first pulling any pending parents it spends out of
+/// `pending` and applying them (recursively) in dependency order. The envelopes of the
+/// pulled parents are appended to `selected` before the caller records `transaction`.
+pub(super) fn apply_prevalidated_transaction_v2_with_pending_parents(
+    transaction: &TransactionV2,
+    pending: &mut Vec<&TransactionV2>,
+    selected: &mut Vec<String>,
+    domain: &TransactionV2Domain,
+    network: AddressNetwork,
+    utxos: &mut BTreeMap<OutPoint, TxOutput>,
+) -> Result<()> {
+    for outpoint in transaction_v2_outpoints(transaction) {
+        if utxos.contains_key(&outpoint) {
+            continue;
+        }
+        let Some(parent_index) = pending.iter().position(|candidate| {
+            candidate
+                .transaction_id(domain)
+                .is_ok_and(|id| hex_encode(id) == outpoint.txid)
+        }) else {
+            continue;
+        };
+        let parent = pending.remove(parent_index);
+        apply_prevalidated_transaction_v2_with_pending_parents(
+            parent, pending, selected, domain, network, utxos,
+        )?;
+        selected.push(hex_encode(parent.encode(domain)?));
+    }
+    apply_prevalidated_transaction_v2_to_utxos(transaction, domain, network, utxos)
+}
+
+pub(super) fn transaction_v2_inputs_are_confirmed(
+    transaction: &TransactionV2,
+    utxos: &BTreeMap<OutPoint, TxOutput>,
+) -> bool {
+    transaction_v2_outpoints(transaction)
+        .iter()
+        .all(|outpoint| utxos.contains_key(outpoint))
+}
+
 fn apply_transaction_v2_to_utxos_with_policy(
     transaction: &TransactionV2,
     domain: &TransactionV2Domain,
@@ -731,6 +771,59 @@ mod tests {
         assert_eq!(tickets[0].amount, 9);
         assert_eq!(tickets[1].owner, wallet.address());
         assert_eq!(tickets[1].amount, 7);
+    }
+
+    #[test]
+    fn attested_v2_burn_spending_a_pending_transfer_pulls_in_its_parent() {
+        let wallet = Wallet::from_seed("v2-burn-pending-parent-wallet");
+        let mut ledger = Ledger::new(BTreeMap::from([(wallet.address().to_string(), 100)]), 1);
+        let migration = ledger.build_v2_migration(&wallet, 3).unwrap();
+        ledger.utxos = ledger
+            .validated_v2_utxos_at_height(&migration, 3_000)
+            .unwrap();
+        set_next_height(&mut ledger, post_activation_height());
+
+        let transfer = ledger
+            .build_v2_transfer(&wallet, wallet.hybrid_versioned_address(), 40, 1)
+            .unwrap();
+        ledger.submit_transaction_v2(transfer.clone()).unwrap();
+        let burn = ledger.build_v2_burn_for_next_block(&wallet, 9, 5).unwrap();
+        ledger.submit_transaction_v2(burn.clone()).unwrap();
+        assert!(!transaction_v2_inputs_are_confirmed(&burn, &ledger.utxos));
+
+        // Our own bundles must not attest a burn whose parent is still pending.
+        let bundles = ledger.build_burn_bundles(&wallet).unwrap();
+        assert!(!bundles.is_empty());
+        assert!(bundles.iter().all(|bundle| bundle.burns_v2.is_empty()));
+
+        // A peer may still attest it; finalizing must include the parent first.
+        let domain = ledger.transaction_v2_domain().unwrap();
+        let transfer_envelope = hex_encode(transfer.encode(&domain).unwrap());
+        let burn_envelope = hex_encode(burn.encode(&domain).unwrap());
+        let attesting_bundle = wallet.burn_bundle(super::super::BurnBundlePayload {
+            height: bundles[0].height,
+            prev_hash: bundles[0].prev_hash.clone(),
+            slot: bundles[0].slot,
+            member: bundles[0].member.clone(),
+            reward_address: bundles[0].reward_address.clone(),
+            burns: Vec::new(),
+            burns_v2: vec![burn_envelope.clone()],
+        });
+        let section = ledger
+            .burn_bundle_section_from_bundles(vec![attesting_bundle])
+            .unwrap();
+        let selection = ledger
+            .select_block_transactions_with_required_burn_owner(
+                None,
+                None,
+                super::super::FinalizerMode::Ticket,
+                &section,
+            )
+            .unwrap();
+        assert_eq!(
+            selection.transactions_v2,
+            vec![transfer_envelope, burn_envelope]
+        );
     }
 
     #[test]
