@@ -5,6 +5,12 @@ from the Git history and Conventional Commit titles by `deployment.sh`.
 
 ## [Unreleased]
 
+## [0.4.57] - 2026-10-03
+
+### Fixed
+
+- include pending parents of attested v2 burns
+
 ## [0.4.56] - 2026-10-03
 
 ### Fixed
