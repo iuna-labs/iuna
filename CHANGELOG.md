@@ -5,6 +5,12 @@ from the Git history and Conventional Commit titles by `deployment.sh`.
 
 ## [Unreleased]
 
+## [0.4.58] - 2026-10-03
+
+### Fixed
+
+- return burn change to the spent hybrid address
+
 ## [0.4.57] - 2026-10-03
 
 ### Fixed
