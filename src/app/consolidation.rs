@@ -5,8 +5,9 @@ use serde::Serialize;
 
 use super::{NodeCore, helpers::converge_fee_by_byte};
 use crate::domain::{
-    Amount, Ledger, OutPoint, SignatureScheme, Transaction, TransactionV2, TxInput, TxOutput,
-    hex_encode, minimum_transfer_economic_size_bytes,
+    AddressNetwork, Amount, Ledger, OutPoint, SignatureScheme, Transaction, TransactionV2, TxInput,
+    TxOutput, VersionedAddress, encode_versioned_address, hex_encode,
+    minimum_transfer_economic_size_bytes,
 };
 
 const BATCH_INPUTS: usize = 128;
@@ -36,6 +37,13 @@ enum BuiltConsolidation {
 struct ConsolidationInputs {
     kind: ConsolidationKind,
     total: Amount,
+    hybrid_inputs: Vec<(OutPoint, VersionedAddress)>,
+}
+
+struct ConsolidationInventory {
+    confirmed: BTreeMap<OutPoint, (TxOutput, ConsolidationKind)>,
+    available: BTreeSet<OutPoint>,
+    hybrid_owners: BTreeMap<String, VersionedAddress>,
 }
 
 #[derive(Serialize)]
@@ -55,30 +63,13 @@ impl NodeCore {
     ) -> Result<ConsolidationPlan> {
         let wallet = self.wallet.unlocked()?;
         let ledger = self.wallet_build_ledger()?;
-        let mut confirmed = Vec::new();
-        let mut available = BTreeSet::new();
-        collect_consolidation_outputs(
-            &ledger,
-            self.wallet.address(),
-            ConsolidationKind::Legacy,
-            &mut confirmed,
-            &mut available,
-        )?;
-        for address in ledger.wallet_owned_hybrid_encoded_addresses(wallet)? {
-            collect_consolidation_outputs(
-                &ledger,
-                &address,
-                ConsolidationKind::Hybrid,
-                &mut confirmed,
-                &mut available,
-            )?;
-        }
-        let pending_spent = self.wallet_pending_spent_outpoints();
-        available.retain(|point| !pending_spent.contains(point));
-        let before = confirmed.len();
-        let mut candidates = confirmed
-            .into_iter()
-            .filter(|(_, point, _)| available.contains(point))
+        let inventory = self.consolidation_inventory(&ledger, wallet)?;
+        let before = inventory.confirmed.len();
+        let mut candidates = inventory
+            .confirmed
+            .iter()
+            .map(|(point, (output, kind))| (*kind, point.clone(), output.clone()))
+            .filter(|(_, point, _)| inventory.available.contains(point))
             .collect::<Vec<_>>();
         candidates.sort_by_key(|(kind, point, output)| (*kind, output.amount, point.clone()));
         // Keep the largest output of each protocol available for payments and automatic burns.
@@ -128,8 +119,13 @@ impl NodeCore {
                         .iter()
                         .map(|(point, _)| point.clone())
                         .collect::<Vec<_>>();
-                    match self.preview_consolidation(&ledger, &outpoints, fee_per_byte, merge_roots)
-                    {
+                    match self.preview_consolidation(
+                        &ledger,
+                        &inventory,
+                        &outpoints,
+                        fee_per_byte,
+                        merge_roots,
+                    ) {
                         Ok(batch) => break Some(batch),
                         Err(_) => count /= 2,
                     }
@@ -151,75 +147,102 @@ impl NodeCore {
         Ok(plan)
     }
 
+    fn consolidation_inventory(
+        &self,
+        ledger: &Ledger,
+        wallet: &crate::domain::Wallet,
+    ) -> Result<ConsolidationInventory> {
+        let network = AddressNetwork::from_profile_id(&ledger.launch_profile().profile_id);
+        let hybrid_owners = ledger
+            .wallet_owned_hybrid_addresses(wallet)?
+            .into_iter()
+            .map(|owner| Ok((encode_versioned_address(owner, network)?, owner)))
+            .collect::<Result<BTreeMap<_, _>>>()?;
+        let mut wallet_addresses = hybrid_owners.keys().cloned().collect::<BTreeSet<_>>();
+        wallet_addresses.insert(self.wallet.address().to_string());
+
+        let confirmed = ledger
+            .utxos_for_addresses(&wallet_addresses)
+            .into_iter()
+            .map(|(point, output)| {
+                let kind = if hybrid_owners.contains_key(&output.address) {
+                    ConsolidationKind::Hybrid
+                } else {
+                    ConsolidationKind::Legacy
+                };
+                (point, (output, kind))
+            })
+            .collect();
+        let mut available = ledger
+            .available_utxos_for_addresses(&wallet_addresses)?
+            .into_iter()
+            .map(|(point, _)| point)
+            .collect::<BTreeSet<_>>();
+        let pending_spent = self.wallet_pending_spent_outpoints();
+        available.retain(|point| !pending_spent.contains(point));
+        Ok(ConsolidationInventory {
+            confirmed,
+            available,
+            hybrid_owners,
+        })
+    }
+
     fn consolidation_inputs(
         &self,
         ledger: &Ledger,
+        inventory: &ConsolidationInventory,
         outpoints: &[OutPoint],
         merge_roots: bool,
     ) -> Result<ConsolidationInputs> {
         if !(2..=BATCH_INPUTS).contains(&outpoints.len()) {
             bail!("choose between 2 and 128 outputs per batch");
         }
-        let wallet = self.wallet.unlocked()?;
-        let hybrid_addresses = ledger.wallet_owned_hybrid_encoded_addresses(wallet)?;
-        let mut confirmed = BTreeMap::new();
-        let mut available = BTreeSet::new();
-        for address in std::iter::once(self.wallet.address())
-            .chain(hybrid_addresses.iter().map(String::as_str))
-        {
-            confirmed.extend(ledger.utxos_for_address(address));
-            available.extend(
-                ledger
-                    .available_utxos_for_address(address)?
-                    .into_iter()
-                    .map(|(point, _)| point),
-            );
-        }
-        let pending_spent = self.wallet_pending_spent_outpoints();
-        available.retain(|point| !pending_spent.contains(point));
         let mut seen = BTreeSet::new();
         let root = ledger.consolidation_root(&outpoints[0]);
         let mut total: Amount = 0;
         let mut kind = None;
+        let mut hybrid_inputs = Vec::new();
         for point in outpoints {
-            if !seen.insert(point) || !available.contains(point) {
+            if !seen.insert(point) || !inventory.available.contains(point) {
                 bail!("outputs changed or are reserved; review a new preview");
             }
             if !merge_roots && ledger.consolidation_root(point) != root {
                 bail!("merging mining groups requires explicit consent");
             }
-            let output = confirmed
+            let (output, output_kind) = inventory
+                .confirmed
                 .get(point)
                 .context("output is no longer confirmed in this wallet")?;
-            let output_kind = if output.address == self.wallet.address() {
-                ConsolidationKind::Legacy
-            } else if hybrid_addresses.contains(&output.address) {
-                ConsolidationKind::Hybrid
-            } else {
-                bail!("output is not owned by this wallet");
-            };
             if kind
-                .replace(output_kind)
-                .is_some_and(|kind| kind != output_kind)
+                .replace(*output_kind)
+                .is_some_and(|kind| kind != *output_kind)
             {
                 bail!("legacy and hybrid outputs require separate consolidation batches");
+            }
+            if let Some(owner) = inventory.hybrid_owners.get(&output.address) {
+                hybrid_inputs.push((point.clone(), *owner));
             }
             total = total
                 .checked_add(output.amount)
                 .context("input total overflows")?;
         }
         let kind = kind.context("consolidation batch has no outputs")?;
-        Ok(ConsolidationInputs { kind, total })
+        Ok(ConsolidationInputs {
+            kind,
+            total,
+            hybrid_inputs,
+        })
     }
 
     fn preview_consolidation(
         &self,
         ledger: &Ledger,
+        inventory: &ConsolidationInventory,
         outpoints: &[OutPoint],
         fee_per_byte: Amount,
         merge_roots: bool,
     ) -> Result<ConsolidationBatch> {
-        let inputs = self.consolidation_inputs(ledger, outpoints, merge_roots)?;
+        let inputs = self.consolidation_inputs(ledger, inventory, outpoints, merge_roots)?;
         let wallet = self.wallet.unlocked()?;
         let (bytes, fee) = match inputs.kind {
             ConsolidationKind::Legacy => estimate_legacy_consolidation_fee(
@@ -232,7 +255,7 @@ impl NodeCore {
             ConsolidationKind::Hybrid => estimate_v2_consolidation_fee(
                 ledger,
                 wallet,
-                outpoints,
+                &inputs.hybrid_inputs,
                 inputs.total,
                 fee_per_byte,
             )?,
@@ -243,11 +266,12 @@ impl NodeCore {
     fn build_consolidation(
         &self,
         ledger: &Ledger,
+        inventory: &ConsolidationInventory,
         outpoints: &[OutPoint],
         fee_per_byte: Amount,
         merge_roots: bool,
     ) -> Result<(BuiltConsolidation, ConsolidationBatch)> {
-        let inputs = self.consolidation_inputs(ledger, outpoints, merge_roots)?;
+        let inputs = self.consolidation_inputs(ledger, inventory, outpoints, merge_roots)?;
         let wallet = self.wallet.unlocked()?;
         let (transaction, bytes, fee) = match inputs.kind {
             ConsolidationKind::Legacy => {
@@ -271,7 +295,7 @@ impl NodeCore {
                 let (transaction, bytes, fee) = converge_v2_consolidation_fee(
                     ledger,
                     wallet,
-                    outpoints,
+                    &inputs.hybrid_inputs,
                     inputs.total,
                     fee_per_byte,
                 )?;
@@ -294,8 +318,10 @@ impl NodeCore {
             bail!("wallet changed; review a new preview");
         }
         let ledger = self.wallet_build_ledger()?;
+        let wallet = self.wallet.unlocked()?;
+        let inventory = self.consolidation_inventory(&ledger, wallet)?;
         let (transaction, batch) =
-            self.build_consolidation(&ledger, outpoints, fee_per_byte, merge_roots)?;
+            self.build_consolidation(&ledger, &inventory, outpoints, fee_per_byte, merge_roots)?;
         if batch.fee > max_fee {
             bail!("fee exceeds the approved limit; review a new preview");
         }
@@ -313,28 +339,6 @@ impl NodeCore {
             }
         }
     }
-}
-
-fn collect_consolidation_outputs(
-    ledger: &Ledger,
-    address: &str,
-    kind: ConsolidationKind,
-    confirmed: &mut Vec<(ConsolidationKind, OutPoint, TxOutput)>,
-    available: &mut BTreeSet<OutPoint>,
-) -> Result<()> {
-    confirmed.extend(
-        ledger
-            .utxos_for_address(address)
-            .into_iter()
-            .map(|(point, output)| (kind, point, output)),
-    );
-    available.extend(
-        ledger
-            .available_utxos_for_address(address)?
-            .into_iter()
-            .map(|(point, _)| point),
-    );
-    Ok(())
 }
 
 fn consolidation_amount(total: Amount, fee: Amount) -> Result<Amount> {
@@ -408,15 +412,15 @@ fn estimate_legacy_consolidation_fee(
 fn estimate_v2_consolidation_fee(
     ledger: &Ledger,
     wallet: &crate::domain::Wallet,
-    outpoints: &[OutPoint],
+    inputs: &[(OutPoint, VersionedAddress)],
     total: Amount,
     fee_per_byte: Amount,
 ) -> Result<(usize, Amount)> {
-    let bytes = ledger.estimate_v2_consolidation_size_with_inputs(
+    let bytes = ledger.estimate_v2_consolidation_size_with_input_owners(
         wallet,
         consolidation_amount(total, 1)?,
         1,
-        outpoints,
+        inputs,
     )?;
     let fee = fee_per_byte
         .checked_mul(bytes as Amount)
@@ -429,14 +433,15 @@ fn estimate_v2_consolidation_fee(
 fn converge_v2_consolidation_fee(
     ledger: &Ledger,
     wallet: &crate::domain::Wallet,
-    outpoints: &[OutPoint],
+    inputs: &[(OutPoint, VersionedAddress)],
     total: Amount,
     fee_per_byte: Amount,
 ) -> Result<(TransactionV2, usize, Amount)> {
     let (estimated_bytes, fee) =
-        estimate_v2_consolidation_fee(ledger, wallet, outpoints, total, fee_per_byte)?;
+        estimate_v2_consolidation_fee(ledger, wallet, inputs, total, fee_per_byte)?;
     let amount = consolidation_amount(total, fee)?;
-    let transaction = ledger.build_v2_consolidation_with_inputs(wallet, amount, fee, outpoints)?;
+    let transaction =
+        ledger.build_v2_consolidation_with_input_owners(wallet, amount, fee, inputs)?;
     let bytes = transaction.encoded_size_bytes(&ledger.transaction_v2_domain()?)?;
     if bytes != estimated_bytes {
         bail!("hybrid consolidation size changed after signing; review a new preview");

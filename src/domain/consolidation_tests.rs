@@ -2,7 +2,7 @@ use std::collections::{BTreeMap, BTreeSet};
 
 use super::{
     AddressNetwork, Ledger, OutPoint, TRANSACTION_V2_AUTHORIZATION_AGGREGATION_ACTIVATION_HEIGHT,
-    TransactionV2, TxOutput, UtxoLineageRoot, Wallet,
+    TransactionV2, TxOutput, UtxoLineageRoot, VersionedAddress, Wallet,
 };
 use crate::app::NodeCore;
 
@@ -32,6 +32,14 @@ fn fixture(count: usize, value: u64, roots: bool) -> (Wallet, Ledger) {
         }
     }
     (wallet, ledger)
+}
+
+fn hybrid_inputs(wallet: &Wallet, points: &[OutPoint]) -> Vec<(OutPoint, VersionedAddress)> {
+    points
+        .iter()
+        .cloned()
+        .map(|point| (point, wallet.hybrid_versioned_address()))
+        .collect()
 }
 
 #[test]
@@ -138,7 +146,12 @@ fn selected_hybrid_outputs_build_one_v2_consolidation_output() {
     }
 
     let transaction = ledger
-        .build_v2_consolidation_with_inputs(&wallet, 1_990_000, 10_000, &points)
+        .build_v2_consolidation_with_input_owners(
+            &wallet,
+            1_990_000,
+            10_000,
+            &hybrid_inputs(&wallet, &points),
+        )
         .unwrap();
     let TransactionV2::Transfer {
         inputs,
@@ -185,7 +198,12 @@ fn hybrid_consolidation_preview_matches_signed_size_before_and_after_aggregation
             .find(|batch| batch.kind == crate::app::ConsolidationKind::Hybrid)
             .unwrap();
         let transaction = ledger
-            .build_v2_consolidation_with_inputs(&wallet, batch.amount, batch.fee, &batch.utxos)
+            .build_v2_consolidation_with_input_owners(
+                &wallet,
+                batch.amount,
+                batch.fee,
+                &hybrid_inputs(&wallet, &batch.utxos),
+            )
             .unwrap();
         let TransactionV2::Transfer { authorizations, .. } = &transaction else {
             panic!("expected a transaction-v2 transfer");
@@ -261,7 +279,12 @@ fn consolidation_plan_excludes_outputs_reserved_by_pending_v2() {
         );
     }
     let pending = ledger
-        .build_v2_consolidation_with_inputs(&wallet, 1_990_000, 10_000, &points[..2])
+        .build_v2_consolidation_with_input_owners(
+            &wallet,
+            1_990_000,
+            10_000,
+            &hybrid_inputs(&wallet, &points[..2]),
+        )
         .unwrap();
     ledger.pending_v2.push(pending);
 
