@@ -173,7 +173,9 @@ pub(super) const INDEX_HTML: &str = concat!(
     .auth-form { width: min(420px, 100%); display: grid; gap: 10px; }
     .auth-form form { display: grid; gap: 10px; align-items: stretch; }
     .auth-form input { width: 100%; }
-    .settings-grid { width: min(760px, 100%); display: grid; gap: 12px; }
+    .settings-grid { width: min(1040px, 100%); display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 12px; align-items: start; }
+    .settings-grid > .settings-wide { grid-column: 1 / -1; }
+    .settings-section-label { grid-column: 1 / -1; margin: 8px 0 -2px; color: #8d989f; font-size: 11px; font-weight: 900; letter-spacing: .08em; text-transform: uppercase; }
     .settings-mode-row { display: flex; justify-content: space-between; gap: 14px; align-items: center; }
     .settings-mode-copy { min-width: 0; display: grid; gap: 4px; }
     .settings-mode-title { color: #e8edf0; font-size: 15px; font-weight: 850; }
@@ -213,7 +215,7 @@ pub(super) const INDEX_HTML: &str = concat!(
     .leaderboard-tabs button { flex: 1 0 auto; border: 0; border-bottom: 2px solid transparent; border-radius: 0; padding: 6px 2px 8px; background: transparent; color: #8d989f; font-size: 12px; white-space: nowrap; }
     .leaderboard-tabs button:hover { border-bottom-color: #566d25; color: #d6dee2; }
     .leaderboard-tabs button.active { border-bottom-color: #d5f55f; background: transparent; color: #d5f55f; }
-    .leaderboard-grid { width: min(100%, 400px); justify-self: center; display: grid; grid-template-columns: minmax(0, 1fr); gap: 12px; margin-top: 8px; }
+    .leaderboard-grid { width: min(100%, 620px); display: grid; grid-template-columns: minmax(0, 1fr); gap: 12px; margin: 8px auto 0; }
     .leaderboard-card { min-width: 0; border: 1px solid #2a3035; border-radius: 8px; padding: 12px; background: #181b1f; }
     .leaderboard-card h3 { margin: 0 0 10px; }
     .leaderboard-list { display: grid; gap: 8px; }
@@ -225,8 +227,17 @@ pub(super) const INDEX_HTML: &str = concat!(
     .leaderboard-rank.medal-3 { border-color: #c69262; background: #2a1f17; color: #ffc18a; }
     .leaderboard-main { min-width: 0; display: grid; gap: 3px; }
     .leaderboard-amount { color: #d5f55f; font-size: 13px; font-weight: 900; font-variant-numeric: tabular-nums; white-space: nowrap; }
-    .wallet-grid { width: 100%; display: grid; grid-template-columns: minmax(0, 1fr) minmax(300px, .8fr); gap: 12px; align-items: start; }
+    .wallet-grid { width: 100%; display: grid; grid-template-columns: minmax(340px, .72fr) minmax(0, 1.28fr); gap: 12px; align-items: start; }
     .wallet-actions { display: grid; gap: 12px; }
+    .wallet-action-card { overflow: hidden; padding: 0; }
+    .wallet-action-tabs { display: grid; grid-template-columns: 1fr 1fr; border-bottom: 1px solid #2f363c; background: #14171a; }
+    .wallet-action-tabs button { min-height: 48px; border: 0; border-radius: 0; border-bottom: 2px solid transparent; background: transparent; color: #8d989f; }
+    .wallet-action-tabs button.active { border-bottom-color: #d5f55f; background: #1c2119; color: #d5f55f; }
+    .wallet-action-body { padding: 16px; }
+    .wallet-action-body h3 { margin-bottom: 14px; }
+    .wallet-action-body form { width: 100%; display: grid; grid-template-columns: minmax(0, 1fr); gap: 10px; align-items: stretch; }
+    .wallet-action-body form > label, .wallet-action-body form > label > input { width: 100%; min-width: 0; }
+    .wallet-secondary-actions { display: flex; gap: 8px; flex-wrap: wrap; }
     .optimize-form { display: grid; gap: 12px; }
     .optimize-form .optimize-choice { display: flex; align-items: center; gap: 8px; }
     .optimize-choice input { width: auto; min-width: auto; margin: 0; }
@@ -252,7 +263,8 @@ pub(super) const INDEX_HTML: &str = concat!(
     .wallet-balance-line { display: inline-grid; grid-template-columns: auto auto; gap: 10px; align-items: baseline; padding: 8px 10px; border: 1px solid #2f363c; border-radius: 8px; background: #111316; color: inherit; cursor: pointer; }
     .wallet-balance-line:hover, .wallet-balance-line:focus-visible { border-color: #d5f55f; outline: none; }
     .wallet-balance-line .tx-value { font-size: 16px; font-weight: 850; }
-    .mining-grid { width: 100%; display: grid; grid-template-columns: minmax(0, 1fr); gap: 12px; align-items: start; }
+    .mining-grid { width: 100%; display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 12px; align-items: start; }
+    .mining-grid > .mining-status-panel { grid-column: 1 / -1; }
     .panel-description { max-width: 760px; margin: -4px 0 12px; color: #9eb3bc; font-size: 13px; line-height: 1.45; }
     .mining-form { width: 100%; display: flex; flex-wrap: wrap; gap: 10px; align-items: end; }
     .burn-fields { display: flex; flex-wrap: wrap; gap: 10px; align-items: end; }
@@ -332,9 +344,9 @@ pub(super) const INDEX_HTML: &str = concat!(
     .compact-number-field input:focus { border-color: #d5f55f; outline: 2px solid rgba(213,245,95,.2); outline-offset: 2px; }
     .receive-address { display: grid; gap: 8px; }
     .address-box { border: 1px solid #2f363c; border-radius: 8px; padding: 11px; background: #111316; }
-    .wallet-address-summary { display: flex; justify-content: space-between; gap: 12px; align-items: center; width: 100%; padding: 9px 10px; text-align: left; color: #b9c2c7; background: #111316; border-color: #2f363c; }
-    .wallet-address-summary:hover, .wallet-address-summary:focus-visible { border-color: #59656c; color: #eef6f8; outline: none; }
-    .wallet-address-summary-action { flex: 0 0 auto; color: #d5f55f; font-weight: 800; }
+    .wallet-address-summary { justify-self: start; display: inline-flex; gap: 6px; align-items: center; width: auto; padding: 3px 0; text-align: left; color: #8d989f; background: transparent; border: 0; font-size: 12px; font-weight: 650; }
+    .wallet-address-summary:hover, .wallet-address-summary:focus-visible { color: #d5f55f; outline: none; }
+    .wallet-address-summary-action { flex: 0 0 auto; color: inherit; font-weight: 800; }
     .wallet-address-list { display: grid; gap: 8px; }
     .wallet-address-row { display: grid; gap: 8px; border: 1px solid #2f363c; border-radius: 8px; padding: 11px; background: #111316; }
     .wallet-address-row-head { display: flex; justify-content: space-between; gap: 10px; align-items: center; }
@@ -355,7 +367,8 @@ pub(super) const INDEX_HTML: &str = concat!(
     .address-book-picker-list { display: grid; gap: 8px; }
     .address-book-picker-row { width: 100%; display: grid; gap: 3px; text-align: left; border: 1px solid #2f363c; border-radius: 8px; padding: 10px; background: #111316; color: inherit; }
     .address-book-picker-row:hover { border-color: #4c565c; background: #15181b; }
-    .recipient-field { display: grid; grid-template-columns: minmax(0, 1fr) auto; gap: 8px; align-items: end; }
+    .recipient-field { width: 100%; display: grid; grid-template-columns: minmax(0, 1fr) auto; gap: 8px; align-items: end; }
+    .recipient-field label, .recipient-field input { width: 100%; min-width: 0; }
     .icon-button { display: inline-grid; place-items: center; width: 38px; height: 38px; padding: 0; line-height: 0; border-radius: 8px; }
     .icon-button svg { width: 19px; height: 19px; stroke: currentColor; stroke-width: 2; fill: none; stroke-linecap: round; stroke-linejoin: round; }
     .modal-delete-button { color: #ffb4b4; }
@@ -371,12 +384,17 @@ pub(super) const INDEX_HTML: &str = concat!(
     .tx-filter input { position: absolute; width: 1px; height: 1px; min-width: 0; margin: 0; opacity: 0; pointer-events: none; }
     .tx-filter.active { border-color: #d5f55f; background: #202616; color: #d5f55f; }
     .tx-filter:focus-within { outline: 2px solid #d5f55f; outline-offset: 2px; }
-    .wallet-tx-list { max-height: min(620px, calc(100vh - 220px)); min-width: 0; display: grid; gap: 8px; overflow-y: auto; overscroll-behavior-y: contain; padding-right: 4px; }
-    .wallet-tx-row { position: relative; display: grid; grid-template-columns: minmax(0, 1fr); gap: 8px; align-items: start; border: 1px solid #2f363c; border-radius: 8px; padding: 12px; background: #111316; cursor: pointer; text-align: left; }
+    .wallet-tx-list { max-height: min(720px, calc(100vh - 220px)); min-width: 0; display: grid; gap: 6px; overflow-y: auto; overscroll-behavior-y: contain; padding-right: 4px; }
+    .wallet-tx-row { position: relative; display: grid; grid-template-columns: minmax(0, 1fr) auto; gap: 14px; align-items: center; border: 1px solid #2f363c; border-radius: 8px; padding: 11px 12px; background: #111316; cursor: pointer; text-align: left; }
     .wallet-tx-row:hover, .wallet-tx-row:focus-visible, .tx-card:hover, .tx-card:focus-visible, .mempool-item:hover, .mempool-item:focus-visible { border-color: #d5f55f; box-shadow: 0 0 0 1px rgba(213, 245, 95, .22); outline: none; }
     .wallet-tx-row.pending { border-color: #3a4147; background: #191c20; box-shadow: inset 3px 0 0 #6f7880; }
-    .wallet-tx-row .pill { position: absolute; top: 10px; right: 10px; }
-    .wallet-tx-main { display: grid; gap: 5px; min-width: 0; padding-right: 92px; }
+    .wallet-tx-row .pill { position: static; width: 76px; justify-content: center; text-align: center; }
+    .wallet-tx-main { display: grid; grid-template-columns: 76px minmax(0, 1fr); gap: 8px 12px; align-items: center; min-width: 0; }
+    .wallet-tx-copy { min-width: 0; display: grid; gap: 3px; }
+    .wallet-tx-title { color: #e8edf0; font-weight: 850; text-transform: capitalize; }
+    .wallet-tx-meta { color: #8d989f; font-size: 12px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+    .wallet-tx-amount { color: #d5f55f; font-size: 15px; font-weight: 900; font-variant-numeric: tabular-nums; white-space: nowrap; text-align: right; }
+    .wallet-tx-status { margin-top: 4px; color: #8d989f; font-size: 11px; font-weight: 750; text-align: right; }
     .tx-field { display: grid; grid-template-columns: 74px minmax(0, 1fr); gap: 8px; align-items: baseline; min-width: 0; }
     .tx-label { color: #879198; font-size: 10px; font-weight: 800; text-transform: uppercase; letter-spacing: 0; }
     .tx-value { min-width: 0; color: #dce4e7; font-size: 13px; font-weight: 600; overflow-wrap: anywhere; }
@@ -421,6 +439,15 @@ pub(super) const INDEX_HTML: &str = concat!(
     .network-health-value { color: #e8edf0; font-size: 20px; font-weight: 900; text-transform: capitalize; }
     .network-health-detail { color: #a8b2b8; font-size: 12px; }
     .network-health-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(116px, 1fr)); gap: 8px; }
+    .network-overview { display: grid; grid-template-columns: minmax(240px, 1.1fr) repeat(3, minmax(140px, .7fr)); gap: 8px; margin-bottom: 12px; }
+    .network-overview .network-health-state { min-height: 112px; }
+    .network-diagnostics { margin: 0 0 12px; border: 1px solid #2f363c; border-radius: 8px; background: #14171a; }
+    .network-diagnostics > summary { cursor: pointer; padding: 11px 12px; color: #a8b2b8; font-size: 12px; font-weight: 850; }
+    .network-diagnostics[open] > summary { border-bottom: 1px solid #2f363c; color: #d5f55f; }
+    .network-diagnostics-body { display: grid; gap: 8px; padding: 10px; }
+    .p2p-metrics-panel { padding: 0; overflow: hidden; }
+    .p2p-metrics-panel > summary { cursor: pointer; padding: 13px; font-size: 15px; font-weight: 850; }
+    .p2p-metrics-body { padding: 0 13px 13px; }
     .panel .grid + form { margin-top: 12px; }
     .explorer-shell { width: 100%; display: grid; gap: 12px; }
     .block-rail-wrap { background: #181b1f; border: 1px solid #2a3035; border-radius: 8px; padding: 12px; overflow: hidden; }
@@ -532,7 +559,7 @@ pub(super) const INDEX_HTML: &str = concat!(
     .utxo-list { display: grid; gap: 8px; }
     .wallet-utxo-row { display: grid; gap: 6px; border: 1px solid #2f363c; border-radius: 8px; padding: 10px; background: #111316; }
     @media (max-width: 760px) { .utxo-flow, .mine-action-row, .mine-stats { grid-template-columns: 1fr; } .utxo-arrow { min-height: 28px; transform: rotate(90deg); } .tx-modal-head { align-items: stretch; } }
-    @media (max-width: 920px) { .setup-grid, .wallet-grid, .mining-grid, .detail-grid, .network-health { grid-template-columns: 1fr; } }
+    @media (max-width: 920px) { .setup-grid, .wallet-grid, .mining-grid, .detail-grid, .network-health, .network-overview, .settings-grid { grid-template-columns: 1fr; } .settings-grid > .settings-wide, .settings-section-label, .mining-grid > .mining-status-panel { grid-column: 1; } }
     @media (max-width: 760px) {
       body { padding-bottom: calc(68px + env(safe-area-inset-bottom)); }
       .app-shell { display: block; min-height: calc(100vh - 68px - env(safe-area-inset-bottom)); min-height: calc(100dvh - 68px - env(safe-area-inset-bottom)); overflow: visible; }
@@ -609,8 +636,8 @@ pub(super) const INDEX_HTML: &str = concat!(
       .panel, .metric, .block-rail-wrap { border-radius: 7px; padding: 10px; }
       .grid, .peer-summary, .network-health-grid, .metrics-summary, .tx-modal-summary { grid-template-columns: 1fr 1fr; }
       .wallet-balance-line { width: 100%; justify-content: space-between; }
-      .wallet-tx-main { padding-right: 0; padding-top: 24px; }
-      .wallet-tx-row .pill { top: 9px; left: 9px; right: auto; }
+      .wallet-tx-row { grid-template-columns: minmax(0, 1fr); }
+      .wallet-tx-amount, .wallet-tx-status { text-align: left; }
       .tx-field, .detail-kv, .stratum-field { grid-template-columns: 1fr; gap: 3px; }
       .seed-grid { grid-template-columns: 1fr; }
     }
@@ -775,7 +802,12 @@ pub(super) const INDEX_HTML: &str = concat!(
       </div>
       <div class="wallet-grid">
         <div class="wallet-actions">
-          <div class="panel">
+          <div class="panel wallet-action-card">
+            <div class="wallet-action-tabs" role="tablist" aria-label="Wallet action">
+              <button id="wallet-send-tab" type="button" role="tab" aria-controls="wallet-send-panel" :aria-selected="walletAction === 'send'" :tabindex="walletAction === 'send' ? 0 : -1" :class="{ active: walletAction === 'send' }" @click="walletAction = 'send'">Send</button>
+              <button id="wallet-receive-tab" type="button" role="tab" aria-controls="wallet-receive-panel" :aria-selected="walletAction === 'receive'" :tabindex="walletAction === 'receive' ? 0 : -1" :class="{ active: walletAction === 'receive' }" @click="walletAction = 'receive'">Receive</button>
+            </div>
+            <div id="wallet-send-panel" class="wallet-action-body" role="tabpanel" aria-labelledby="wallet-send-tab" x-show="walletAction === 'send'">
             <h3>Send</h3>
             <form @submit.prevent="sendTransfer">
               <div class="recipient-field">
@@ -826,8 +858,8 @@ pub(super) const INDEX_HTML: &str = concat!(
               </div>
               <button class="primary" type="submit" :disabled="sendPreparing || sendConfirmBusy" x-text="sendPreparing ? 'Checking...' : 'Send'"></button>
             </form>
-          </div>
-          <div class="panel">
+            </div>
+            <div id="wallet-receive-panel" class="wallet-action-body" role="tabpanel" aria-labelledby="wallet-receive-tab" x-show="walletAction === 'receive'">
             <div class="panel-head">
               <h3>Receive</h3>
               <button type="button" @click="copyReceiveAddress">Copy</button>
@@ -841,27 +873,18 @@ pub(super) const INDEX_HTML: &str = concat!(
                 <span class="wallet-address-summary-action">View details</span>
               </button>
             </div>
+            </div>
           </div>
           <div class="panel">
             <div class="panel-head">
-              <h3>Address Book</h3>
-              <div class="address-book-actions">
-                <button class="icon-button" type="button" @click="openAddressBookModal()" title="Add contact" aria-label="Add contact">
-                  <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 5v14"></path><path d="M5 12h14"></path></svg>
-                </button>
+              <div>
+                <h3>Wallet tools</h3>
+                <div class="panel-description">Manage saved contacts and the outputs that make up your balance.</div>
               </div>
             </div>
-            <div class="address-book-list">
-              <template x-for="entry in addressBookEntries()" :key="entry.address">
-                <button class="address-book-row" type="button" @click="editAddressBookEntry(entry)" :title="`Edit ${entry.name}`">
-                  <div>
-                    <div class="address-book-name"><span x-text="entry.name"></span> <span class="utxo-status" x-show="isLegacyAddress(entry.address)" title="Legacy address: can only receive legacy funds">Legacy</span></div>
-                    <code class="tx-value hash" x-text="short(entry.address)"></code>
-                  </div>
-                  <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M9 18l6-6-6-6"></path></svg>
-                </button>
-              </template>
-              <div class="muted" x-show="addressBookEntries().length === 0">No saved addresses</div>
+            <div class="wallet-secondary-actions">
+              <button type="button" @click="openAddressBookModal()">Address book <span class="muted" x-text="`(${addressBookEntries().length})`"></span></button>
+              <button type="button" @click="openWalletUtxosModal">Wallet UTXOs</button>
             </div>
           </div>
         </div>
@@ -890,17 +913,16 @@ pub(super) const INDEX_HTML: &str = concat!(
           <div class="wallet-tx-list">
             <template x-for="tx in walletTransactions()" :key="tx.status + '-' + tx.signature">
               <div class="wallet-tx-row" :class="{ pending: tx.status === 'pending' }" role="button" tabindex="0" @click="openTransactionModal(tx, { source: 'Wallet' })" @keydown.enter.prevent="openTransactionModal(tx, { source: 'Wallet' })" @keydown.space.prevent="openTransactionModal(tx, { source: 'Wallet' })">
-                <span class="pill" :class="tx.kind" x-text="tx.direction"></span>
                 <div class="wallet-tx-main">
-                  <div class="tx-field"><span class="tx-label">Amount</span><span class="tx-value money">IUNA <span x-text="amountLabel(tx.amount)"></span></span></div>
-                  <div class="tx-field"><span class="tx-label">Fee</span><span class="tx-value money" x-text="txFeeLabel(tx)"></span></div>
-                  <div class="tx-field"><span class="tx-label">Status</span><span class="tx-value text" x-text="txTitle(tx)"></span></div>
-                  <div class="tx-field"><span class="tx-label">Time</span><span class="tx-value text" x-text="walletTxTimeLabel(tx)"></span></div>
-                  <div class="tx-field"><span class="tx-label">From</span><code class="tx-value hash" :class="{ 'wallet-address-link': hasWalletAddress(tx.from) }" role="button" :tabindex="hasWalletAddress(tx.from) ? 0 : -1" x-text="shortAddressLabel(tx.from)" @click.stop="openAddressContact(tx.from)" @keydown.enter.stop.prevent="openAddressContact(tx.from)" @keydown.space.stop.prevent="openAddressContact(tx.from)" :title="hasWalletAddress(tx.from) ? 'Add or edit contact' : null"></code></div>
-                  <div class="tx-field" x-show="tx.to"><span class="tx-label">To</span><code class="tx-value hash wallet-address-link" role="button" tabindex="0" x-text="shortAddressLabel(tx.to)" @click.stop="openAddressContact(tx.to)" @keydown.enter.stop.prevent="openAddressContact(tx.to)" @keydown.space.stop.prevent="openAddressContact(tx.to)" title="Add or edit contact"></code></div>
-                  <div class="tx-field" x-show="isMineTx(tx)"><span class="tx-label">Proof Bits</span><span class="tx-value number"><span x-text="txProofBits(tx) ?? '-'"></span> / <span x-text="txDifficultyBits(tx) ?? '-'"></span></span></div>
-                  <div class="tx-field" x-show="isMineTx(tx)"><span class="tx-label">Proof Hash</span><code class="tx-value hash" x-text="short(txProofHash(tx))"></code></div>
-                  <div class="tx-field"><span class="tx-label">Signature</span><code class="tx-value hash" x-text="short(tx.signature)"></code></div>
+                  <span class="pill" :class="tx.kind" x-text="tx.direction"></span>
+                  <div class="wallet-tx-copy">
+                    <div class="wallet-tx-title" x-text="txTitle(tx)"></div>
+                    <div class="wallet-tx-meta"><span x-text="walletTxTimeLabel(tx)"></span><span x-show="tx.to"> · <span x-text="shortAddressLabel(tx.to)"></span></span></div>
+                  </div>
+                </div>
+                <div>
+                  <div class="wallet-tx-amount">IUNA <span x-text="amountLabel(tx.amount)"></span></div>
+                  <div class="wallet-tx-status" x-text="tx.status === 'pending' ? 'Pending' : txFeeLabel(tx)"></div>
                 </div>
               </div>
             </template>
@@ -920,7 +942,7 @@ pub(super) const INDEX_HTML: &str = concat!(
         <div class="muted">PoB/VDF block production with PoW issuance actions</div>
       </div>
       <div class="mining-grid">
-        <div class="panel">
+        <div class="panel mining-status-panel">
           <h3>Status</h3>
           <div class="mine-stats local-mining-stats" aria-label="Local mining status">
             <div class="mine-stat">
@@ -1064,13 +1086,20 @@ pub(super) const INDEX_HTML: &str = concat!(
             <button class="primary" type="submit">Add</button>
           </form>
         </div>
-        <div class="network-health" x-show="developmentMode()">
+        <div class="network-overview">
           <div class="network-health-state" :class="networkHealthClass()">
             <div class="network-health-label">Network Health</div>
-            <div class="network-health-value" x-text="networkHealth.state || '-'"></div>
-            <div class="network-health-detail" x-text="networkHealth.last_chain_payload_error || networkHealth.last_error || 'No peer errors reported'"></div>
+            <div class="network-health-value" x-text="failedPeers().length > 0 && healthyPeers().length > 0 ? 'Connected' : (networkHealth.state || '-')"></div>
+            <div class="network-health-detail" x-text="`${healthyPeers().length} active · ${failedPeers().length} need attention`"></div>
           </div>
-          <div class="network-health-grid">
+          <div class="peer-summary-item"><div class="peer-summary-label">Active peers</div><div class="peer-summary-value" x-text="healthyPeers().length"></div></div>
+          <div class="peer-summary-item"><div class="peer-summary-label">Chain height</div><div class="peer-summary-value" x-text="networkHealth.local_height ?? '-'"></div><div class="network-health-detail" x-text="networkLagLabel()"></div></div>
+          <div class="peer-summary-item"><div class="peer-summary-label">Last block</div><div class="peer-summary-value" x-text="networkLastBlockAgeLabel()"></div><div class="network-health-detail" x-text="failedPeers().length === 1 ? '1 peer issue' : `${failedPeers().length} peer issues`"></div></div>
+        </div>
+        <details class="network-diagnostics" x-show="developmentMode()">
+          <summary>Network diagnostics</summary>
+          <div class="network-diagnostics-body">
+            <div class="network-health-grid">
             <div class="peer-summary-item"><div class="peer-summary-label">Local Height</div><div class="peer-summary-value" x-text="networkHealth.local_height ?? '-'"></div></div>
             <div class="peer-summary-item"><div class="peer-summary-label">Tip</div><code class="peer-summary-value" x-text="networkTipLabel()"></code></div>
             <div class="peer-summary-item"><div class="peer-summary-label">Finalized</div><div class="peer-summary-value" x-text="networkHealth.finalized_height ?? '-'"></div></div>
@@ -1090,18 +1119,19 @@ pub(super) const INDEX_HTML: &str = concat!(
             <div class="peer-summary-item"><div class="peer-summary-label">Rejected Chain</div><div class="peer-summary-value" x-text="networkHealth.rejected_chain_payloads ?? '-'"></div></div>
             <div class="peer-summary-item"><div class="peer-summary-label">Time Offset</div><div class="peer-summary-value" x-text="networkTimeOffsetLabel()"></div></div>
             <div class="peer-summary-item"><div class="peer-summary-label">Clock Warnings</div><div class="peer-summary-value" x-text="networkHealth.bad_clock_peers ?? '-'"></div></div>
+            </div>
+            <div class="peer-summary">
+              <div class="peer-summary-item"><div class="peer-summary-label">Outbound</div><div class="peer-summary-value" x-text="outboundPeers().length"></div></div>
+              <div class="peer-summary-item"><div class="peer-summary-label">Inbound</div><div class="peer-summary-value" x-text="inboundPeers().length"></div></div>
+              <div class="peer-summary-item"><div class="peer-summary-label">Healthy</div><div class="peer-summary-value" x-text="healthyPeers().length"></div></div>
+              <div class="peer-summary-item"><div class="peer-summary-label">Errors</div><div class="peer-summary-value" x-text="failedPeers().length"></div></div>
+              <div class="peer-summary-item"><div class="peer-summary-label">Shared Height</div><div class="peer-summary-value" x-text="sharedHeightLabel()"></div></div>
+            </div>
           </div>
-        </div>
-        <div class="peer-summary" x-show="developmentMode()">
-          <div class="peer-summary-item"><div class="peer-summary-label">Outbound</div><div class="peer-summary-value" x-text="outboundPeers().length"></div></div>
-          <div class="peer-summary-item"><div class="peer-summary-label">Inbound</div><div class="peer-summary-value" x-text="inboundPeers().length"></div></div>
-          <div class="peer-summary-item"><div class="peer-summary-label">Healthy</div><div class="peer-summary-value" x-text="healthyPeers().length"></div></div>
-          <div class="peer-summary-item"><div class="peer-summary-label">Errors</div><div class="peer-summary-value" x-text="failedPeers().length"></div></div>
-          <div class="peer-summary-item"><div class="peer-summary-label">Shared Height</div><div class="peer-summary-value" x-text="sharedHeightLabel()"></div></div>
-        </div>
+        </details>
         <div class="table-wrap">
           <table class="peer-table">
-            <thead><tr><th>Status</th><th>Address</th><th>Direction</th><th>Last Contact</th><th x-show="developmentMode()">Clock</th><th x-show="developmentMode()">Ban</th><th x-show="developmentMode()">Score</th><th>Height</th><th x-show="developmentMode()">Delta</th><th x-show="developmentMode()">Tip</th><th x-show="developmentMode()">Sent</th><th x-show="developmentMode()">Received</th><th x-show="developmentMode()">Last Error</th><th>Actions</th></tr></thead>
+            <thead><tr><th>Status</th><th>Address</th><th>Direction</th><th>Last Contact</th><th>Height</th><th>Actions</th></tr></thead>
             <tbody>
               <template x-for="peer in peers" :key="peer.address">
                 <tr>
@@ -1109,33 +1139,26 @@ pub(super) const INDEX_HTML: &str = concat!(
                   <td data-label="Address"><span class="peer-address"><code x-text="peer.address"></code><span class="country-code" x-show="peer.country_code" x-text="peer.country_code"></span></span></td>
                   <td data-label="Direction" x-text="peer.direction"></td>
                   <td data-label="Last contact" x-text="peerLastContactLabel(peer)"></td>
-                  <td data-label="Clock" x-show="developmentMode()" x-text="peerClockLabel(peer)"></td>
-                  <td data-label="Ban" x-show="developmentMode()" x-text="peerBanLabel(peer)"></td>
-                  <td data-label="Score" x-show="developmentMode()" x-text="peer.misbehavior_score ?? 0"></td>
                   <td data-label="Height" x-text="peer.last_known_height ?? '-'"></td>
-                  <td data-label="Delta" x-show="developmentMode()" x-text="peerHeightDelta(peer)"></td>
-                  <td data-label="Tip" x-show="developmentMode()"><code x-text="short(peer.last_known_tip_hash)"></code></td>
-                  <td data-label="Sent" x-show="developmentMode()" x-text="peer.messages_sent"></td>
-                  <td data-label="Received" x-show="developmentMode()" x-text="peer.messages_received"></td>
-                  <td data-label="Last error" x-show="developmentMode()" x-text="peer.last_error || ''"></td>
                   <td data-label="Actions"><div class="peer-actions"><button class="peer-details" type="button" @click="openPeerModal(peer)">Details</button><button class="peer-remove" type="button" x-show="canRemovePeer(peer)" @click="removePeer(peer)">Remove</button><span class="muted" x-show="!canRemovePeer(peer)">Observed</span></div></td>
                 </tr>
               </template>
               <tr class="skeleton-card" x-show="peerPage.loading" aria-hidden="true">
-                <td colspan="14"><div class="skeleton-table-cell"></div></td>
+                <td colspan="6"><div class="skeleton-table-cell"></div></td>
               </tr>
               <tr class="skeleton-card" x-show="peerPage.loading" aria-hidden="true">
-                <td colspan="14"><div class="skeleton-table-cell"></div></td>
+                <td colspan="6"><div class="skeleton-table-cell"></div></td>
               </tr>
-              <tr x-show="peerPage.hasMore"><td colspan="14"><div class="page-sentinel" x-init="$nextTick(() => observePageSentinel('peer', $el))"></div></td></tr>
-              <tr x-show="peers.length === 0 && !peerPage.loading"><td colspan="14">No peers</td></tr>
+              <tr x-show="peerPage.hasMore"><td colspan="6"><div class="page-sentinel" x-init="$nextTick(() => observePageSentinel('peer', $el))"></div></td></tr>
+              <tr x-show="peers.length === 0 && !peerPage.loading"><td colspan="6">No peers</td></tr>
             </tbody>
           </table>
         </div>
       </div>
-      <div class="panel" x-show="developmentMode()">
-        <h2>Metrics</h2>
-        <div class="grid">
+      <details class="panel p2p-metrics-panel" x-show="developmentMode()">
+        <summary>Protocol diagnostics</summary>
+        <div class="p2p-metrics-body">
+          <div class="grid">
           <div class="metric"><div class="label">Inbound Sessions</div><div class="value" x-text="p2pMetrics.inbound_sessions_started ?? 0"></div></div>
           <div class="metric"><div class="label">Inbound Rejects</div><div class="value" x-text="p2pMetrics.inbound_sessions_rejected ?? 0"></div></div>
           <div class="metric"><div class="label">Outbound Attempts</div><div class="value" x-text="p2pMetrics.outbound_connect_attempts ?? 0"></div></div>
@@ -1156,13 +1179,14 @@ pub(super) const INDEX_HTML: &str = concat!(
           <div class="metric"><div class="label">Burn Bundles Rx</div><div class="value" x-text="p2pMetrics.burn_bundles_received ?? 0"></div></div>
           <div class="metric"><div class="label">Burn Bundle Envelopes Rx</div><div class="value" x-text="p2pMetrics.burn_bundle_envelopes_received ?? 0"></div></div>
           <div class="metric"><div class="label">Control Rx</div><div class="value" x-text="p2pMetrics.control_envelopes_received ?? 0"></div></div>
-        </div>
-        <div class="metric-context">
+          </div>
+          <div class="metric-context">
           <div class="tx-field"><span class="tx-label">Last Failure</span><span class="tx-value text" x-text="p2pMetrics.last_session_failure || '-'"></span></div>
           <div class="tx-field"><span class="tx-label">Last Empty</span><span class="tx-value text" x-text="p2pMetrics.last_empty_frame_remote || '-'"></span></div>
           <div class="tx-field"><span class="tx-label">Last Parse</span><span class="tx-value text" x-text="p2pMetrics.last_parse_error || '-'"></span></div>
+          </div>
         </div>
-      </div>
+      </details>
     </section>
 
     <section x-show="tab === 'chain'">
@@ -1483,11 +1507,8 @@ pub(super) const INDEX_HTML: &str = concat!(
     </section>
     <section x-show="tab === 'settings'">
       <div class="settings-grid">
-        <div class="panel">
-          <div class="panel-head">
-            <h2>Settings</h2>
-            <span class="pill" x-text="advancedMode() ? 'Node mode' : 'Wallet mode'"></span>
-          </div>
+        <div class="settings-section-label">General</div>
+        <div class="panel settings-wide">
           <div class="settings-mode-row">
             <div class="settings-mode-copy">
               <div class="settings-mode-title">Mode</div>
@@ -1500,18 +1521,19 @@ pub(super) const INDEX_HTML: &str = concat!(
             </label>
           </div>
         </div>
-        <div class="panel" x-show="advancedMode()">
+        <div class="panel settings-wide" x-show="advancedMode()">
           <div class="settings-mode-row">
             <div class="settings-mode-copy">
               <div class="settings-mode-title">Fallback VDF</div>
               <div class="muted">Top <span x-text="recoveryVdfTopRankPercent"></span>% of ticket ranks run fallback work. Recovery remains available to every node.</div>
             </div>
-            <label>Top ranks
+            <label><span>Top ranks · <strong x-text="`${recoveryVdfTopRankPercent}%`"></strong></span>
               <input type="range" min="0" max="100" step="5" :value="recoveryVdfTopRankPercent" @change="setRecoveryVdfTopRankPercent($event.target.value)">
             </label>
           </div>
         </div>
-        <div class="panel" x-show="advancedMode()">
+        <div class="settings-section-label" x-show="advancedMode()">Network services</div>
+        <div class="panel settings-wide" x-show="advancedMode()">
           <h3>Node Networking</h3>
           <div class="settings-mode-row">
             <div class="settings-mode-copy">
@@ -1566,7 +1588,8 @@ pub(super) const INDEX_HTML: &str = concat!(
             <div class="setup-actions"><button class="primary" type="submit">Save</button></div>
           </form>
         </div>
-        <div class="panel">
+        <div class="settings-section-label">Security</div>
+        <div class="panel settings-wide">
           <h3>Change Password</h3>
           <div class="setup-feedback" :class="settingsFeedback?.kind" x-show="settingsFeedback" x-transition x-text="settingsFeedback?.message"></div>
           <form class="settings-form" @submit.prevent="changePassword">
@@ -1577,7 +1600,8 @@ pub(super) const INDEX_HTML: &str = concat!(
             <div class="setup-actions"><button class="primary" type="submit">Change password</button></div>
           </form>
         </div>
-        <div class="panel">
+        <div class="settings-section-label">Advanced</div>
+        <div class="panel settings-wide">
           <div class="settings-mode-row">
             <div class="settings-mode-copy">
               <div class="settings-mode-title">Development mode</div>
@@ -1590,7 +1614,7 @@ pub(super) const INDEX_HTML: &str = concat!(
             </label>
           </div>
         </div>
-        <div class="panel danger-panel">
+        <div class="panel danger-panel settings-wide">
           <h3>Danger Zone</h3>
           <div class="settings-mode-row">
             <div class="settings-mode-copy">
@@ -2275,6 +2299,17 @@ mod tests {
             !INDEX_HTML
                 .contains("Do not reuse this address after its key has been revealed by a spend.")
         );
+    }
+
+    #[test]
+    fn operator_screens_prioritize_primary_actions_over_diagnostics() {
+        assert!(INDEX_HTML.contains(r#"aria-label="Wallet action""#));
+        assert!(INDEX_HTML.contains(r#"x-show="walletAction === 'send'""#));
+        assert!(INDEX_HTML.contains(r#"x-show="walletAction === 'receive'""#));
+        assert!(INDEX_HTML.contains(r#"<details class="network-diagnostics""#));
+        assert!(INDEX_HTML.contains(r#"<details class="panel p2p-metrics-panel""#));
+        assert!(INDEX_HTML.contains("grid-template-columns: repeat(2, minmax(0, 1fr))"));
+        assert!(INDEX_HTML.contains("width: min(100%, 620px)"));
     }
 
     #[test]

@@ -22,6 +22,7 @@ window.iunaApp = function iunaApp() {
     hasMoreBlocks: true,
     walletTxs: [],
     walletUtxos: [],
+    walletAction: "send",
     mempool: [],
     peers: [],
     selectedPeerAddress: null,
@@ -290,7 +291,7 @@ window.iunaApp = function iunaApp() {
     pageTitle() {
       return {
         dashboard: "Dashboard",
-        wallet: "iuna",
+        wallet: "Wallet",
         mining: "Mining",
         p2p: "P2P",
         chain: "Chain",
