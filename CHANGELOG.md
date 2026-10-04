@@ -5,6 +5,12 @@ from the Git history and Conventional Commit titles by `deployment.sh`.
 
 ## [Unreleased]
 
+## [0.4.60] - 2026-10-04
+
+### Added
+
+- streamline node management screens
+
 ## [0.4.59] - 2026-10-03
 
 ### Fixed
