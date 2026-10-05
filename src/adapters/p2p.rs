@@ -91,6 +91,7 @@ const MAX_JOIN_RESPONSE_ENVELOPES: usize = 16;
 const MAX_PEER_VERIFICATION_ENVELOPES: usize = 8;
 const INITIAL_RECONNECT_DELAY: Duration = Duration::from_secs(1);
 const MAX_RECONNECT_DELAY: Duration = Duration::from_secs(30);
+const INITIAL_CONNECT_ATTEMPTS_BEFORE_REMOVAL: u32 = 3;
 const INBOUND_SESSION_PREFIX: &str = "inbound://";
 
 fn negotiated_block_batch_limit(capabilities: &[String]) -> usize {
