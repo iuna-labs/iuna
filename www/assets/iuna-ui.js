@@ -3896,6 +3896,10 @@ window.iunaApp = function iunaApp() {
       return this.walletTxs;
     },
 
+    walletTxIsIncoming(tx) {
+      return ["received", "reward", "migrated"].includes(tx?.direction);
+    },
+
     txTitle(tx) {
       if (tx.status === "pending") return "Pending";
       return tx.blockHeight === null ? "Confirmed" : `Block ${tx.blockHeight}`;

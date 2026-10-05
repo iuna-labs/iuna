@@ -255,6 +255,20 @@ fn management_ui_wallet_transactions_share_the_generic_detail_flow() {
 }
 
 #[test]
+fn management_ui_distinguishes_incoming_and_outgoing_wallet_amounts() {
+    let html = include_str!("adapters/http/index_html.rs");
+    let javascript = include_str!("../www/assets/iuna-ui.js");
+
+    assert!(html.contains(".wallet-tx-amount { color: #dce4e7;"));
+    assert!(html.contains(".wallet-tx-amount.incoming { color: #d5f55f; }"));
+    assert!(html.contains(":class=\"{ incoming: walletTxIsIncoming(tx) }\""));
+    assert!(html.contains("walletTxIsIncoming(tx) ? '+' : '−'"));
+    assert!(
+        javascript.contains("[\"received\", \"reward\", \"migrated\"].includes(tx?.direction)")
+    );
+}
+
+#[test]
 fn transaction_filters_default_to_every_transaction_type() {
     let management_javascript = include_str!("../www/assets/iuna-ui.js");
     let wallet_javascript = include_str!("../wallet/app.js");
