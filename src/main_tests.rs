@@ -187,6 +187,26 @@ fn management_ui_opens_contact_editor_from_wallet_addresses() {
 }
 
 #[test]
+fn management_ui_wallet_tools_open_overviews_and_mine_controls_are_in_the_header() {
+    let html = include_str!("adapters/http/index_html.rs");
+    let javascript = include_str!("../www/assets/iuna-ui.js");
+
+    assert!(html.contains("@click=\"openAddressBookOverview()\""));
+    assert!(html.contains("@click=\"openWalletAddressesModal\">Wallets"));
+    assert!(html.contains("addressBookOverview ? openAddressBookModal(entry, false)"));
+    assert!(javascript.contains("openAddressBookOverview()"));
+    assert!(javascript.contains("addressBookOverview: false"));
+
+    let mine_panel = html
+        .split_once("<h3>Mine</h3>")
+        .and_then(|(_, rest)| rest.split_once("<div class=\"panel-description\">"))
+        .map(|(header, _)| header)
+        .expect("mine panel header");
+    assert!(mine_panel.contains("setPowMiningEnabled"));
+    assert!(mine_panel.contains("setPowMiningWorkers"));
+}
+
+#[test]
 fn management_ui_prefers_the_live_rotating_receive_address() {
     let javascript = include_str!("../www/assets/iuna-ui.js");
     let receive_address = javascript
