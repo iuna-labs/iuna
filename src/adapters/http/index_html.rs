@@ -29,7 +29,7 @@ pub(super) const INDEX_HTML: &str = concat!(
     .brand-mark:hover::after { animation: mark-sheen .72s ease both; }
     @keyframes mark-sheen { from { opacity: 0; transform: translateX(-58%) rotate(8deg); } 32% { opacity: 1; } to { opacity: 0; transform: translateX(58%) rotate(8deg); } }
     .side-nav { display: grid; gap: 10px; width: 100%; }
-    .nav-button { width: 64px; min-height: 58px; display: grid; place-items: center; gap: 4px; border: 1px solid transparent; border-radius: 8px; padding: 7px 4px; background: transparent; color: #9fa8ad; }
+    .nav-button { position: relative; width: 64px; min-height: 58px; display: grid; place-items: center; gap: 4px; border: 1px solid transparent; border-radius: 8px; padding: 7px 4px; background: transparent; color: #9fa8ad; }
     .nav-button svg { width: 21px; height: 21px; stroke: currentColor; stroke-width: 2; fill: none; }
     .nav-button svg.chain-icon { stroke-width: 1.35; }
     .nav-button span { font-size: 11px; font-weight: 800; }
@@ -39,10 +39,11 @@ pub(super) const INDEX_HTML: &str = concat!(
     .discord-button svg { width: 18px; height: 18px; fill: currentColor; }
     .discord-button span { display: none; font-size: 10px; font-weight: 800; }
     .discord-button:hover { border-color: #8e99ff; background: rgba(88, 101, 242, .28); color: #fff; }
-    .settings-button { width: 64px; min-height: 54px; display: grid; place-items: center; gap: 4px; border: 1px solid transparent; border-radius: 8px; padding: 7px 4px; color: #9fa8ad; background: transparent; text-align: center; }
+    .settings-button { position: relative; width: 64px; min-height: 54px; display: grid; place-items: center; gap: 4px; border: 1px solid transparent; border-radius: 8px; padding: 7px 4px; color: #9fa8ad; background: transparent; text-align: center; }
     .settings-button svg { width: 23px; height: 23px; stroke: currentColor; stroke-width: 1.9; fill: none; }
     .settings-button span { display: none; font-size: 10px; font-weight: 800; }
     .settings-button:hover, .settings-button.active { background: #202328; border-color: #3b4448; color: #d5f55f; }
+    .brand-mark .nav-shortcut, .nav-button .nav-shortcut, .settings-button .nav-shortcut { position: absolute; z-index: 2; top: 5px; right: 5px; width: 16px; height: 16px; display: grid; place-items: center; border: 1px solid #4a555c; border-radius: 5px; background: rgba(15, 16, 18, .92); color: #c7d0d4; box-shadow: 0 2px 7px rgba(0, 0, 0, .28); font-size: 9px; font-weight: 900; line-height: 1; font-variant-numeric: tabular-nums; pointer-events: none; }
     .brand-mark, .nav-button, .discord-button, .settings-button { transition: filter .1s ease, background-color .14s ease, border-color .14s ease, color .14s ease; }
     .brand-mark:active, .nav-button:active, .discord-button:active, .settings-button:active { filter: brightness(1.14); }
     .version-panel { width: 64px; display: grid; gap: 4px; justify-items: center; border: 1px solid transparent; border-radius: 8px; padding: 7px 4px; color: #7f888e; background: transparent; font-size: 10px; font-weight: 850; text-align: center; }
@@ -649,40 +650,47 @@ pub(super) const INDEX_HTML: &str = concat!(
     r#""></script>
   <script defer src="/assets/alpine.min.js"></script>
 </head>
-<body x-data="iunaApp()" x-init="init()" @keydown.window.escape="closeModals()" x-cloak>
+<body x-data="iunaApp()" x-init="init()" @keydown.window="handleNavigationKeydown($event)" @keyup.window="handleNavigationKeyup($event)" @blur.window="releaseCommandKey()" @keydown.window.escape="closeModals()" x-cloak>
   <div class="app-shell" :inert="syncingNode()">
     <aside class="sidebar" aria-label="iuna navigation">
-      <button class="brand-mark" :class="{ active: tab === 'dashboard' }" type="button" @click="setTab('dashboard')" title="Dashboard" aria-label="Dashboard"><svg viewBox="0 0 32 32" aria-hidden="true" focusable="false"><circle class="mark-dot" cx="9.4" cy="7.6" r="2.8"></circle><path class="mark-loop" d="M9.4 13v7.1c0 3.7 2.9 6.4 6.6 6.4s6.6-2.7 6.6-6.4V13"></path></svg></button>
+      <button class="brand-mark" :class="{ active: tab === 'dashboard' }" type="button" @click="setTab('dashboard')" title="Dashboard" aria-label="Dashboard"><svg viewBox="0 0 32 32" aria-hidden="true" focusable="false"><circle class="mark-dot" cx="9.4" cy="7.6" r="2.8"></circle><path class="mark-loop" d="M9.4 13v7.1c0 3.7 2.9 6.4 6.6 6.4s6.6-2.7 6.6-6.4V13"></path></svg><span class="nav-shortcut" x-show="commandKeyHeld" x-text="navigationShortcutNumber('dashboard')" aria-hidden="true"></span></button>
       <nav class="side-nav">
         <button class="nav-button" :class="{ active: tab === 'wallet' }" @click="setTab('wallet')" type="button" title="Wallet" aria-label="Wallet">
           <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M3 7h16a2 2 0 0 1 2 2v8a2 2 0 0 1-2 2H3z"></path><path d="M3 7V5a2 2 0 0 1 2-2h12"></path><path d="M16 13h3"></path></svg>
           <span>Wallet</span>
+          <span class="nav-shortcut" x-show="commandKeyHeld" x-text="navigationShortcutNumber('wallet')" aria-hidden="true"></span>
         </button>
         <button class="nav-button" x-show="advancedMode()" :class="{ active: tab === 'mining' }" @click="setTab('mining')" type="button" title="Mining" aria-label="Mining">
           <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M4 19V5"></path><path d="M4 19h16"></path><path d="M7 15l4-4 3 3 5-7"></path></svg>
           <span>Mining</span>
+          <span class="nav-shortcut" x-show="commandKeyHeld" x-text="navigationShortcutNumber('mining')" aria-hidden="true"></span>
         </button>
         <button class="nav-button" :class="{ active: tab === 'p2p' }" @click="setTab('p2p')" type="button" title="P2P" aria-label="P2P">
           <svg viewBox="0 0 24 24" aria-hidden="true"><circle cx="6" cy="12" r="3"></circle><circle cx="18" cy="6" r="3"></circle><circle cx="18" cy="18" r="3"></circle><path d="M8.5 10.5 15.5 7.5"></path><path d="M8.5 13.5 15.5 16.5"></path></svg>
           <span>P2P</span>
+          <span class="nav-shortcut" x-show="commandKeyHeld" x-text="navigationShortcutNumber('p2p')" aria-hidden="true"></span>
         </button>
         <button class="nav-button" :class="{ active: tab === 'chain' }" @click="setTab('chain')" type="button" title="Explorer" aria-label="Explorer">
           <svg class="chain-icon" viewBox="0 0 24 24" aria-hidden="true"><rect x="1.5" y="9" width="5.5" height="5.5"></rect><rect x="9.25" y="9" width="5.5" height="5.5"></rect><rect x="17" y="9" width="5.5" height="5.5"></rect></svg>
           <span>Chain</span>
+          <span class="nav-shortcut" x-show="commandKeyHeld" x-text="navigationShortcutNumber('chain')" aria-hidden="true"></span>
         </button>
         <button class="nav-button" x-show="developmentMode()" :class="{ active: tab === 'metrics' }" @click="setTab('metrics')" type="button" title="Metrics" aria-label="Metrics">
           <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M4 19V5"></path><path d="M4 19h16"></path><path d="M7 15l3-4 3 2 4-7"></path><path d="M7 17h10"></path></svg>
           <span>Metrics</span>
+          <span class="nav-shortcut" x-show="commandKeyHeld" x-text="navigationShortcutNumber('metrics')" aria-hidden="true"></span>
         </button>
         <button class="nav-button" x-show="developmentMode()" :class="{ active: tab === 'leaderboards' }" @click="setTab('leaderboards')" type="button" title="Leaderboards" aria-label="Leaderboards">
           <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M8 4h8v4a4 4 0 0 1-8 0V4Z"></path><path d="M8 6H5v1a4 4 0 0 0 4 4"></path><path d="M16 6h3v1a4 4 0 0 1-4 4"></path><path d="M12 12v4"></path><path d="M8 20h8"></path><path d="M9 16h6v4H9z"></path></svg>
           <span>Leaders</span>
+          <span class="nav-shortcut" x-show="commandKeyHeld" x-text="navigationShortcutNumber('leaderboards')" aria-hidden="true"></span>
         </button>
       </nav>
       <div class="sidebar-bottom-actions">
         <button class="settings-button" :class="{ active: tab === 'settings' }" type="button" @click="setTab('settings')" title="Settings" aria-label="Settings">
           <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M9.7 3.2 9.2 5.5a7.2 7.2 0 0 0-1.4.8L5.6 5.6 3.2 9.8l1.7 1.6a7.8 7.8 0 0 0 0 1.6l-1.7 1.6 2.4 4.2 2.2-.7a7.2 7.2 0 0 0 1.4.8l.5 2.3h4.8l.5-2.3a7.2 7.2 0 0 0 1.4-.8l2.2.7 2.4-4.2-1.7-1.6a7.8 7.8 0 0 0 0-1.6L21 9.8l-2.4-4.2-2.2.7a7.2 7.2 0 0 0-1.4-.8l-.5-2.3H9.7Z"></path><circle cx="12" cy="12.2" r="3.1"></circle></svg>
           <span>Settings</span>
+          <span class="nav-shortcut" x-show="commandKeyHeld" x-text="navigationShortcutNumber('settings')" aria-hidden="true"></span>
         </button>
         <button class="version-panel" type="button" :disabled="desktopUpdateBusy" :class="{ update: updateAvailable(), checking: releaseCheckState === 'checking', failed: releaseCheckState === 'failed' }" :title="versionPanelTitle()" @click="openLatestRelease">
         <span class="version-dot" aria-hidden="true"></span>

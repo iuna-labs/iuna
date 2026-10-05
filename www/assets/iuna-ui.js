@@ -7,6 +7,7 @@ const IUNA_LOW_BURN_AMOUNT = 100;
 window.iunaApp = function iunaApp() {
   return {
     tab: "dashboard",
+    commandKeyHeld: false,
     status: {},
     blocks: [],
     selectedBlock: null,
@@ -261,6 +262,55 @@ window.iunaApp = function iunaApp() {
         tabs.splice(tabs.indexOf("chain") + 1, 0, "metrics", "leaderboards");
       }
       return tabs;
+    },
+
+    navigationShortcutNumber(tab) {
+      const index = this.allowedTabs().indexOf(tab);
+      return index >= 0 ? String(index + 1) : "";
+    },
+
+    navigationShortcutsAvailable() {
+      return (
+        this.canUseProtectedApi() &&
+        this.config.setup_complete === true &&
+        !this.showingNetworkMigration() &&
+        !this.syncingNode()
+      );
+    },
+
+    handleNavigationKeydown(event) {
+      if (event.key === "Meta") {
+        this.commandKeyHeld = this.navigationShortcutsAvailable();
+        return;
+      }
+      if (
+        !event.metaKey ||
+        event.altKey ||
+        event.ctrlKey ||
+        event.shiftKey ||
+        !this.navigationShortcutsAvailable()
+      ) return;
+      this.commandKeyHeld = true;
+      const keyNumber = /^[1-9]$/.test(event.key || "")
+        ? Number(event.key)
+        : /^Digit[1-9]$/.test(event.code || "")
+          ? Number(event.code.slice(-1))
+          : 0;
+      const tab = this.allowedTabs()[keyNumber - 1];
+      if (!tab) return;
+      event.preventDefault();
+      this.closeModals();
+      this.setTab(tab);
+    },
+
+    handleNavigationKeyup(event) {
+      if (event.key === "Meta" || !event.metaKey) {
+        this.commandKeyHeld = false;
+      }
+    },
+
+    releaseCommandKey() {
+      this.commandKeyHeld = false;
     },
 
     developmentMode() {
