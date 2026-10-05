@@ -73,6 +73,7 @@ window.iunaApp = function iunaApp() {
     addressBookModalOpen: false,
     addressBookPickerOpen: false,
     addressBookStandalone: false,
+    addressBookOverview: false,
     addressBookEditingAddress: null,
     addressBookDraftAddress: "",
     addressBookDraftName: "",
@@ -3144,8 +3145,19 @@ window.iunaApp = function iunaApp() {
       this.addressBookDraftAddress = entry?.address || "";
       this.addressBookDraftName = entry?.name || "";
       this.addressBookStandalone = standalone;
+      if (standalone) this.addressBookOverview = false;
       this.addressBookPickerOpen = true;
       this.addressBookModalOpen = true;
+    },
+
+    openAddressBookOverview() {
+      this.addressBookEditingAddress = null;
+      this.addressBookDraftAddress = "";
+      this.addressBookDraftName = "";
+      this.addressBookStandalone = false;
+      this.addressBookOverview = true;
+      this.addressBookModalOpen = false;
+      this.addressBookPickerOpen = true;
     },
 
     openAddressContact(address) {
@@ -3162,6 +3174,7 @@ window.iunaApp = function iunaApp() {
         : publicAddress;
       this.addressBookDraftName = entry?.name || "";
       this.addressBookStandalone = true;
+      this.addressBookOverview = false;
       this.addressBookPickerOpen = true;
       this.addressBookModalOpen = true;
     },
@@ -3224,11 +3237,13 @@ window.iunaApp = function iunaApp() {
 
     openAddressBookPicker() {
       this.addressBookStandalone = false;
+      this.addressBookOverview = false;
       this.addressBookPickerOpen = true;
     },
 
     closeAddressBookPicker() {
       this.addressBookPickerOpen = false;
+      this.addressBookOverview = false;
       this.closeAddressBookModal();
     },
 

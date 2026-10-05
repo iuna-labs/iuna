@@ -268,7 +268,7 @@ pub(super) const INDEX_HTML: &str = concat!(
     .panel-description { max-width: 760px; margin: -4px 0 12px; color: #9eb3bc; font-size: 13px; line-height: 1.45; }
     .mining-form { width: 100%; display: flex; flex-wrap: wrap; gap: 10px; align-items: end; }
     .burn-fields { display: flex; flex-wrap: wrap; gap: 10px; align-items: end; }
-    .mine-action-row { display: grid; grid-template-columns: minmax(0, 1fr) auto auto; gap: 12px; align-items: center; }
+    .mine-action-row { display: grid; gap: 12px; align-items: center; }
     .mine-settings-form { display: grid; gap: 10px; }
     .mine-fee-fields { display: flex; flex-wrap: wrap; gap: 10px; align-items: end; }
     .fee-preview { flex-basis: 100%; color: #9eb3bc; font-size: 12px; font-weight: 700; }
@@ -330,6 +330,7 @@ pub(super) const INDEX_HTML: &str = concat!(
     .info-fact .label { color: #879198; font-size: 10px; font-weight: 850; text-transform: uppercase; }
     .info-fact .value { margin-top: 5px; color: #d5f55f; font-weight: 850; }
     .mining-head { align-items: center; }
+    .mine-head-controls { display: flex; flex-wrap: wrap; justify-content: flex-end; gap: 12px; align-items: center; }
     .toggle-switch { display: inline-flex; grid-template-columns: none; align-items: center; gap: 9px; color: #9fa8ad; font-size: 12px; font-weight: 850; cursor: pointer; user-select: none; }
     .toggle-switch input { position: absolute; width: 1px; height: 1px; min-width: 0; margin: 0; opacity: 0; pointer-events: none; }
     .toggle-track { position: relative; width: 46px; height: 26px; border: 1px solid #3a4248; border-radius: 999px; background: #101215; transition: background .16s ease, border-color .16s ease; }
@@ -884,7 +885,8 @@ pub(super) const INDEX_HTML: &str = concat!(
               </div>
             </div>
             <div class="wallet-secondary-actions">
-              <button type="button" @click="openAddressBookModal()">Address book <span class="muted" x-text="`(${addressBookEntries().length})`"></span></button>
+              <button type="button" @click="openAddressBookOverview()">Address book <span class="muted" x-text="`(${addressBookEntries().length})`"></span></button>
+              <button type="button" @click="openWalletAddressesModal">Wallets</button>
               <button type="button" @click="openWalletUtxosModal">Wallet UTXOs</button>
             </div>
           </div>
@@ -1023,7 +1025,20 @@ pub(super) const INDEX_HTML: &str = concat!(
           </div>
         </div>
         <div class="panel">
-          <h3>Mine</h3>
+          <div class="panel-head mining-head">
+            <h3>Mine</h3>
+            <div class="mine-head-controls">
+              <label class="toggle-switch" :class="{ active: powMiningEnabled }" title="Continuously search for PoW mine actions with a small local work budget">
+                <input type="checkbox" :checked="powMiningEnabled" @change="setPowMiningEnabled($event.target.checked)">
+                <span class="toggle-track"><span class="toggle-thumb"></span></span>
+                <span class="toggle-text" x-text="powMiningEnabled ? 'On' : 'Off'"></span>
+              </label>
+              <label class="compact-number-field" title="Local PoW worker count">
+                <span>Workers</span>
+                <input type="number" min="1" :max="maxPowMiningWorkers" :value="powMiningWorkers" @change="setPowMiningWorkers($event.target.value)">
+              </label>
+            </div>
+          </div>
           <div class="panel-description">Search for PoW actions that mint a fixed IUNA reward.</div>
           <div class="mine-settings-form">
             <div class="mine-action-row">
@@ -1041,15 +1056,6 @@ pub(super) const INDEX_HTML: &str = concat!(
                   <div class="mine-stat-value"><span x-text="powDifficultyLabel()"></span> bits</div>
                 </div>
               </div>
-              <label class="toggle-switch" :class="{ active: powMiningEnabled }" title="Continuously search for PoW mine actions with a small local work budget">
-                <input type="checkbox" :checked="powMiningEnabled" @change="setPowMiningEnabled($event.target.checked)">
-                <span class="toggle-track"><span class="toggle-thumb"></span></span>
-                <span class="toggle-text" x-text="powMiningEnabled ? 'On' : 'Off'"></span>
-              </label>
-              <label class="compact-number-field" title="Local PoW worker count">
-                <span>Workers</span>
-                <input type="number" min="1" :max="maxPowMiningWorkers" :value="powMiningWorkers" @change="setPowMiningWorkers($event.target.value)">
-              </label>
             </div>
             <div class="fee-preview" x-text="autoPowStatusLabel()"></div>
           </div>
@@ -2093,8 +2099,8 @@ pub(super) const INDEX_HTML: &str = concat!(
     <section class="tx-modal address-book-modal">
       <div class="tx-modal-head">
         <div class="tx-modal-title">
-          <span class="pill" x-text="addressBookStandalone ? 'Contact' : 'Send'"></span>
-          <h2 id="address-book-picker-title" x-text="addressBookStandalone ? (addressBookEditingAddress ? 'Edit Contact' : 'Add Contact') : 'Choose Contact'"></h2>
+          <span class="pill" x-text="addressBookStandalone || addressBookOverview ? 'Contact' : 'Send'"></span>
+          <h2 id="address-book-picker-title" x-text="addressBookModalOpen ? (addressBookEditingAddress ? 'Edit Contact' : 'Add Contact') : (addressBookOverview ? 'Address Book' : 'Choose Contact')"></h2>
         </div>
         <div class="address-book-actions">
           <button class="icon-button" type="button" x-show="!addressBookModalOpen" @click="openAddressBookModal(null, false)" title="Add contact" aria-label="Add contact">
@@ -2107,7 +2113,7 @@ pub(super) const INDEX_HTML: &str = concat!(
       </div>
       <div class="address-book-picker-list" x-show="!addressBookModalOpen">
         <template x-for="entry in addressBookEntries()" :key="entry.address">
-          <button class="address-book-picker-row" type="button" @click="selectTransferContact(entry.address)" :title="`Send to ${entry.name}`">
+          <button class="address-book-picker-row" type="button" @click="addressBookOverview ? openAddressBookModal(entry, false) : selectTransferContact(entry.address)" :title="addressBookOverview ? `Edit ${entry.name}` : `Send to ${entry.name}`">
             <span class="address-book-name"><span x-text="entry.name"></span> <span class="utxo-status" x-show="isLegacyAddress(entry.address)" title="Legacy address: can only receive legacy funds">Legacy</span></span>
             <code class="tx-value hash" x-text="short(entry.address)"></code>
           </button>
