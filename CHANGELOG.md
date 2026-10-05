@@ -5,6 +5,16 @@ from the Git history and Conventional Commit titles by `deployment.sh`.
 
 ## [Unreleased]
 
+## [0.4.63] - 2026-10-05
+
+### Added
+
+- add command number navigation shortcuts
+
+### Fixed
+
+- prune unreachable peers after initial retries
+
 ## [0.4.62] - 2026-10-05
 
 ### Added
