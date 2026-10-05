@@ -5,6 +5,12 @@ from the Git history and Conventional Commit titles by `deployment.sh`.
 
 ## [Unreleased]
 
+## [0.4.62] - 2026-10-05
+
+### Added
+
+- improve wallet and mining controls
+
 ## [0.4.61] - 2026-10-05
 
 ### Added
