@@ -1,63 +1,16 @@
 # syntax=docker/dockerfile:1
 
 ########################################################################
-# 1. Build stagit - static git page generator (log/commits/files/refs).
-#    Low-resource on purpose: once generated, serving is plain static
-#    files, no git process or CGI running at request time.
+# 1. Generate the static website.
 ########################################################################
-FROM debian:bookworm-slim AS stagit-builder
+FROM debian:bookworm-slim AS site-builder
 
 RUN apt-get update && apt-get install -y --no-install-recommends \
-        build-essential \
-        pkg-config \
-        libgit2-dev \
-        git \
         python3 \
         ca-certificates \
     && rm -rf /var/lib/apt/lists/*
 
-RUN git clone --depth 1 https://github.com/oxalorg/stagit.git /usr/src/stagit
-WORKDIR /usr/src/stagit
-RUN make PREFIX=/usr/local && make PREFIX=/usr/local install
-
-########################################################################
-# 2. Generate the site: HTML browser pages + a clonable bare repo.
-#
-#    The build context must include .git. The .dockerignore in this repo
-#    keeps it available so stagit can publish history and refs.
-########################################################################
-FROM stagit-builder AS site-builder
-
 COPY . /src/iuna-work
-
-RUN set -eux; \
-    test -d /src/iuna-work/.git; \
-    git clone --bare /src/iuna-work /src/iuna.git; \
-    mkdir -p /site/git/iuna /var/cache/stagit-iuna; \
-    echo "iuna - experimental mainnet-candidate protocol" > /src/iuna.git/description; \
-    echo "iuna-labs" > /src/iuna.git/owner; \
-    echo "https://getiuna.org/git/iuna.git" > /src/iuna.git/url; \
-    cd /src/iuna.git; \
-    mkdir -p /tmp/iuna-packs; \
-    mv objects/pack/* /tmp/iuna-packs/; \
-    for pack in /tmp/iuna-packs/*.pack; do \
-        [ -e "$pack" ] || continue; \
-        git unpack-objects < "$pack"; \
-    done; \
-    rm -rf /tmp/iuna-packs; \
-    git update-server-info; \
-    cd /site/git/iuna; \
-    stagit -c /var/cache/stagit-iuna/cache /src/iuna.git; \
-    test -f /site/git/iuna/log.html; \
-    cp /site/git/iuna/log.html /site/git/iuna/index.html; \
-    cd /site/git && stagit-index /src/iuna.git > index.html; \
-    cp /src/iuna-work/www/assets/static-listing.css /site/git/style.css; \
-    cp /src/iuna-work/www/assets/static-listing.css /site/git/iuna/style.css; \
-    cp /src/iuna-work/src-tauri/icons/32x32.png /site/git/logo.png; \
-    cp /src/iuna-work/src-tauri/icons/32x32.png /site/git/iuna/logo.png; \
-    cp -a /src/iuna.git /site/git/iuna.git; \
-    find /site/git -type f -name '*.html' -exec sed -i -E 's|<a href="(\.\./)+"><img |<a href="/"><img |g' {} +; \
-    python3 /src/iuna-work/scripts/postprocess_stagit_site.py /site/git
 
 COPY www /site
 COPY wallet /site/wallet
@@ -75,7 +28,7 @@ RUN set -eux; \
     python3 /src/iuna-work/scripts/inject_cloudflare_analytics.py /site
 
 ########################################################################
-# 3. Ship it - plain nginx, static files only.
+# 2. Ship it - plain nginx, static files only.
 ########################################################################
 FROM nginx:1.27-alpine
 
