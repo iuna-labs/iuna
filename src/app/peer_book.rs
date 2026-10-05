@@ -265,6 +265,20 @@ impl PeerBook {
         }
     }
 
+    pub fn remove_never_connected_peer_if_other_connection_works_at(
+        &mut self,
+        address: &str,
+        now_ms: u64,
+    ) -> bool {
+        let removable = self.peers.get(address).is_some_and(|peer| {
+            peer.direction != PeerDirection::Inbound && peer.last_success_ms.is_none()
+        });
+        if !removable || !self.has_good_connection_at(now_ms) {
+            return false;
+        }
+        self.peers.remove(address).is_some()
+    }
+
     pub fn is_connectable_peer(&self, address: &str) -> bool {
         self.peers
             .get(address)
@@ -718,5 +732,45 @@ mod tests {
             Some(PeerDirection::Inbound)
         );
         assert!(!peers.is_connectable_peer(address));
+    }
+
+    #[test]
+    fn never_connected_peer_is_removed_when_another_connection_works() {
+        let now = now_ms();
+        let unreachable = "127.0.0.1:9444";
+        let working = "127.0.0.1:9445";
+        let mut peers =
+            PeerBook::from_addresses(vec![unreachable.to_string(), working.to_string()]);
+        peers.record_error(unreachable, "connection refused");
+        peers.record_status(working, 42, "tip".to_string());
+
+        assert!(peers.remove_never_connected_peer_if_other_connection_works_at(unreachable, now));
+        assert!(!peers.is_connectable_peer(unreachable));
+        assert!(peers.is_connectable_peer(working));
+    }
+
+    #[test]
+    fn never_connected_peer_is_kept_when_no_connection_works() {
+        let now = now_ms();
+        let unreachable = "127.0.0.1:9444";
+        let mut peers = PeerBook::from_addresses(vec![unreachable.to_string()]);
+        peers.record_error(unreachable, "connection refused");
+
+        assert!(!peers.remove_never_connected_peer_if_other_connection_works_at(unreachable, now));
+        assert!(peers.is_connectable_peer(unreachable));
+    }
+
+    #[test]
+    fn previously_connected_peer_is_never_removed_as_initially_unreachable() {
+        let now = now_ms();
+        let recovered = "127.0.0.1:9444";
+        let working = "127.0.0.1:9445";
+        let mut peers = PeerBook::from_addresses(vec![recovered.to_string(), working.to_string()]);
+        peers.record_status(recovered, 41, "old-tip".to_string());
+        peers.record_error(recovered, "connection refused");
+        peers.record_status(working, 42, "tip".to_string());
+
+        assert!(!peers.remove_never_connected_peer_if_other_connection_works_at(recovered, now));
+        assert!(peers.is_connectable_peer(recovered));
     }
 }

@@ -12,11 +12,11 @@ use crate::app::{GossipEnvelope, debug_logging_enabled};
 use super::{
     CATCHUP_REQUEST_TIMEOUT, CONNECT_TIMEOUT, GossipNetwork, GossipSession, HANDSHAKE_TIMEOUT,
     INBOUND_PEER_QUEUE_BYTES, INBOUND_PEER_QUEUE_SIZE, INBOUND_SESSION_PREFIX,
-    INITIAL_RECONNECT_DELAY, MAX_RECONNECT_DELAY, OutboundBatch, PEER_EXCHANGE_INTERVAL,
-    PEER_QUEUE_BYTES, PEER_QUEUE_SIZE, PeerStatus, SESSION_SYNC_INTERVAL, is_self_peer_address_for,
-    next_reconnect_delay_with_max, process_envelope, process_hello_with_verification,
-    read_session_envelope, record_peer_status, respond_to_peer_verification_challenge,
-    write_envelope, write_payload, write_peer_exchange,
+    INITIAL_CONNECT_ATTEMPTS_BEFORE_REMOVAL, INITIAL_RECONNECT_DELAY, MAX_RECONNECT_DELAY,
+    OutboundBatch, PEER_EXCHANGE_INTERVAL, PEER_QUEUE_BYTES, PEER_QUEUE_SIZE, PeerStatus,
+    SESSION_SYNC_INTERVAL, is_self_peer_address_for, next_reconnect_delay_with_max,
+    process_envelope, process_hello_with_verification, read_session_envelope, record_peer_status,
+    respond_to_peer_verification_challenge, write_envelope, write_payload, write_peer_exchange,
 };
 
 struct InboundRegistration {
@@ -121,6 +121,7 @@ pub(super) async fn outbound_session(
     mut shutdown: watch::Receiver<bool>,
 ) {
     let mut reconnect_delay = INITIAL_RECONNECT_DELAY;
+    let mut initial_connect_attempts = 0u32;
     loop {
         let self_filter_addr = network.self_filter_addr().await;
         if !peer_is_connectable(&network, &peer).await
@@ -133,6 +134,7 @@ pub(super) async fn outbound_session(
             sleep(MAX_RECONNECT_DELAY).await;
             continue;
         }
+        initial_connect_attempts = initial_connect_attempts.saturating_add(1);
         super::P2pMetricsCounters::inc(&network.inner.metrics.outbound_connect_attempts);
         let stream = match timeout(CONNECT_TIMEOUT, TcpStream::connect(&peer)).await {
             Ok(Ok(stream)) => {
@@ -147,6 +149,11 @@ pub(super) async fn outbound_session(
                     .lock()
                     .await
                     .record_error(&peer, format!("connecting to peer {peer}: {error}"));
+                if remove_initially_unreachable_peer(&network, &peer, initial_connect_attempts)
+                    .await
+                {
+                    return;
+                }
                 sleep(reconnect_delay).await;
                 reconnect_delay = next_reconnect_delay(reconnect_delay);
                 continue;
@@ -159,6 +166,11 @@ pub(super) async fn outbound_session(
                     .lock()
                     .await
                     .record_error(&peer, format!("connecting to peer {peer}: timeout"));
+                if remove_initially_unreachable_peer(&network, &peer, initial_connect_attempts)
+                    .await
+                {
+                    return;
+                }
                 sleep(reconnect_delay).await;
                 reconnect_delay = next_reconnect_delay(reconnect_delay);
                 continue;
@@ -211,6 +223,10 @@ pub(super) async fn outbound_session(
             }
         }
 
+        if remove_initially_unreachable_peer(&network, &peer, initial_connect_attempts).await {
+            return;
+        }
+
         let (sender, next_receiver) = mpsc::channel(PEER_QUEUE_SIZE);
         let (next_shutdown, next_shutdown_receiver) = watch::channel(false);
         let queue_bytes = std::sync::Arc::new(tokio::sync::Semaphore::new(PEER_QUEUE_BYTES));
@@ -232,6 +248,35 @@ pub(super) async fn outbound_session(
         sleep(reconnect_delay).await;
         reconnect_delay = next_reconnect_delay(reconnect_delay);
     }
+}
+
+async fn remove_initially_unreachable_peer(
+    network: &GossipNetwork,
+    peer: &str,
+    attempts: u32,
+) -> bool {
+    if !initial_connect_attempts_exhausted(attempts) {
+        return false;
+    }
+    let removed = network
+        .inner
+        .peers
+        .lock()
+        .await
+        .remove_never_connected_peer_if_other_connection_works_at(peer, crate::app::now_ms());
+    if removed {
+        network.inner.sessions.lock().await.remove(peer);
+        if debug_logging_enabled() {
+            eprintln!(
+                "p2p removed peer {peer} after {attempts} unsuccessful initial connection attempts"
+            );
+        }
+    }
+    removed
+}
+
+fn initial_connect_attempts_exhausted(attempts: u32) -> bool {
+    attempts >= INITIAL_CONNECT_ATTEMPTS_BEFORE_REMOVAL
 }
 
 async fn session_loop(
@@ -670,7 +715,15 @@ mod tests {
     use tokio::time::Instant;
 
     use super::super::{INITIAL_RECONNECT_DELAY, MAX_RECONNECT_DELAY};
-    use super::{next_reconnect_delay, update_catchup_request_state};
+    use super::{
+        initial_connect_attempts_exhausted, next_reconnect_delay, update_catchup_request_state,
+    };
+
+    #[test]
+    fn initially_unreachable_peer_gets_three_attempts() {
+        assert!(!initial_connect_attempts_exhausted(2));
+        assert!(initial_connect_attempts_exhausted(3));
+    }
 
     #[test]
     fn reconnect_backoff_is_capped() {
