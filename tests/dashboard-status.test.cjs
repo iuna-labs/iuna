@@ -55,3 +55,68 @@ test('counts only mining-eligible peers as healthy', () => {
   assert.equal(ui.healthyPeers().length, 1);
   assert.equal(ui.peerStatus(ui.peers.at(-1)), 'forked');
 });
+
+test('navigation shortcuts stay contiguous in every interface mode', () => {
+  const ui = app();
+
+  ui.uiMode = 'basic';
+  ui.keepTrackOfMetrics = false;
+  assert.deepEqual(
+    Array.from(ui.allowedTabs()),
+    ['dashboard', 'wallet', 'p2p', 'chain', 'settings']
+  );
+  assert.equal(ui.navigationShortcutNumber('dashboard'), '1');
+  assert.equal(ui.navigationShortcutNumber('wallet'), '2');
+  assert.equal(ui.navigationShortcutNumber('p2p'), '3');
+
+  ui.keepTrackOfMetrics = true;
+  assert.deepEqual(
+    Array.from(ui.allowedTabs()),
+    ['dashboard', 'wallet', 'p2p', 'chain', 'metrics', 'leaderboards', 'settings']
+  );
+  assert.equal(ui.navigationShortcutNumber('metrics'), '5');
+  assert.equal(ui.navigationShortcutNumber('settings'), '7');
+
+  ui.uiMode = 'advanced';
+  ui.keepTrackOfMetrics = false;
+  assert.deepEqual(
+    Array.from(ui.allowedTabs()),
+    ['dashboard', 'wallet', 'mining', 'p2p', 'chain', 'settings']
+  );
+  assert.equal(ui.navigationShortcutNumber('mining'), '3');
+  assert.equal(ui.navigationShortcutNumber('settings'), '6');
+
+  ui.keepTrackOfMetrics = true;
+  assert.deepEqual(
+    Array.from(ui.allowedTabs()),
+    ['dashboard', 'wallet', 'mining', 'p2p', 'chain', 'metrics', 'leaderboards', 'settings']
+  );
+  assert.equal(ui.navigationShortcutNumber('metrics'), '6');
+  assert.equal(ui.navigationShortcutNumber('settings'), '8');
+});
+
+test('command-number switches screens and command release hides hints', () => {
+  const ui = app();
+  ui.authLoaded = true;
+  ui.auth = { configured: true, authenticated: true };
+  ui.config = { setup_complete: true, keep_track_of_metrics: false };
+  ui.networkHealthLoaded = false;
+  const selected = [];
+  ui.setTab = (tab) => selected.push(tab);
+  ui.closeModals = () => {};
+  let prevented = false;
+
+  ui.handleNavigationKeydown({ key: 'Meta', code: 'MetaLeft', metaKey: true });
+  assert.equal(ui.commandKeyHeld, true);
+  ui.handleNavigationKeydown({
+    key: '2',
+    code: 'Digit2',
+    metaKey: true,
+    preventDefault: () => { prevented = true; },
+  });
+  assert.deepEqual(selected, ['wallet']);
+  assert.equal(prevented, true);
+
+  ui.handleNavigationKeyup({ key: 'Meta', metaKey: false });
+  assert.equal(ui.commandKeyHeld, false);
+});
