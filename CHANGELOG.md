@@ -5,6 +5,24 @@ from the Git history and Conventional Commit titles by `deployment.sh`.
 
 ## [Unreleased]
 
+## [0.4.61] - 2026-10-05
+
+### Added
+
+- add dice entropy setup
+
+### Fixed
+
+- clarify transaction amount direction
+
+### Documentation
+
+- simplify README
+
+### Maintenance
+
+- use GitHub as source repository
+
 ## [0.4.60] - 2026-10-04
 
 ### Added
