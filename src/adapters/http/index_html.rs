@@ -393,7 +393,8 @@ pub(super) const INDEX_HTML: &str = concat!(
     .wallet-tx-copy { min-width: 0; display: grid; gap: 3px; }
     .wallet-tx-title { color: #e8edf0; font-weight: 850; text-transform: capitalize; }
     .wallet-tx-meta { color: #8d989f; font-size: 12px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
-    .wallet-tx-amount { color: #d5f55f; font-size: 15px; font-weight: 900; font-variant-numeric: tabular-nums; white-space: nowrap; text-align: right; }
+    .wallet-tx-amount { color: #dce4e7; font-size: 15px; font-weight: 900; font-variant-numeric: tabular-nums; white-space: nowrap; text-align: right; }
+    .wallet-tx-amount.incoming { color: #d5f55f; }
     .wallet-tx-status { margin-top: 4px; color: #8d989f; font-size: 11px; font-weight: 750; text-align: right; }
     .tx-field { display: grid; grid-template-columns: 74px minmax(0, 1fr); gap: 8px; align-items: baseline; min-width: 0; }
     .tx-label { color: #879198; font-size: 10px; font-weight: 800; text-transform: uppercase; letter-spacing: 0; }
@@ -921,7 +922,7 @@ pub(super) const INDEX_HTML: &str = concat!(
                   </div>
                 </div>
                 <div>
-                  <div class="wallet-tx-amount">IUNA <span x-text="amountLabel(tx.amount)"></span></div>
+                  <div class="wallet-tx-amount" :class="{ incoming: walletTxIsIncoming(tx) }"><span x-text="walletTxIsIncoming(tx) ? '+' : '−'"></span><span x-text="amountLabel(tx.amount)"></span> IUNA</div>
                   <div class="wallet-tx-status" x-text="tx.status === 'pending' ? 'Pending' : txFeeLabel(tx)"></div>
                 </div>
               </div>
