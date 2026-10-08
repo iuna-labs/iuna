@@ -5,6 +5,16 @@ from the Git history and Conventional Commit titles by `deployment.sh`.
 
 ## [Unreleased]
 
+## [0.4.64] - 2026-10-08
+
+### Added
+
+- bound memory use and index chain history
+
+### Fixed
+
+- collect peer burns before ticket finalization
+
 ## [0.4.63] - 2026-10-05
 
 ### Added
