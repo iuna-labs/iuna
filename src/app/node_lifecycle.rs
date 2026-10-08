@@ -10,7 +10,7 @@ use crate::{
     },
 };
 
-use super::{GossipEnvelope, NodeConfig, NodeCore, NodeWallet};
+use super::{NodeConfig, NodeCore, NodeWallet};
 
 impl NodeCore {
     pub fn new(config: NodeConfig) -> Self {
@@ -101,6 +101,7 @@ impl NodeCore {
             burn_per_block,
             burn_fee,
             recovery_vdf_top_rank_percent: recovery_vdf_top_rank_percent.min(100),
+            vdf_memory_mib: crate::domain::DEFAULT_VDF_MEMORY_MIB,
             last_auto_burn_height: None,
             last_auto_anchor_burn_height: None,
             last_auto_finalization_status: None,
@@ -111,7 +112,8 @@ impl NodeCore {
             equivocated_burn_bundle_slots: BTreeSet::new(),
             burn_bundle_collection_started: None,
             local_block_anchor_burn: None,
-            outbox: Vec::<GossipEnvelope>::new(),
+            outbox: std::collections::VecDeque::new(),
+            outbox_bytes: 0,
             network_migration_from: None,
             vdf_speed_sample: None,
         }

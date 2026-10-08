@@ -1547,6 +1547,17 @@ pub(super) const INDEX_HTML: &str = concat!(
             </label>
           </div>
         </div>
+        <div class="panel settings-wide" x-show="advancedMode()">
+          <div class="settings-mode-row">
+            <div class="settings-mode-copy">
+              <div class="settings-mode-title">VDF memory</div>
+              <div class="muted">Hard budget for VDF checkpoints and workspace. Lower values trade speed for predictable memory use; the change applies to the next VDF.</div>
+            </div>
+            <label><span>Budget · MiB</span>
+              <input type="number" min="32" max="4096" step="16" :value="vdfMemoryMib" @change="setVdfMemoryMib($event.target.value)">
+            </label>
+          </div>
+        </div>
         <div class="settings-section-label" x-show="advancedMode()">Network services</div>
         <div class="panel settings-wide" x-show="advancedMode()">
           <h3>Node Networking</h3>

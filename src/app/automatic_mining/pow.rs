@@ -130,13 +130,13 @@ impl NodeCore {
             cursor.searched
         ));
         Ok(Some(AutoPowMineJob {
-            ledger: self.wallet_build_ledger()?,
-            recipient: wallet_address,
-            anchor,
-            salt: cursor.salt,
-            start_nonce: cursor.next_nonce,
-            max_attempts: AUTO_POW_NONCE_ATTEMPTS_PER_WORKER_TICK
-                .saturating_mul(u64::from(self.pow_mining_workers)),
+            work: self.ledger.prepare_mine_search_work(
+                wallet_address,
+                cursor.salt,
+                cursor.next_nonce,
+                AUTO_POW_NONCE_ATTEMPTS_PER_WORKER_TICK
+                    .saturating_mul(u64::from(self.pow_mining_workers)),
+            )?,
         }))
     }
 }

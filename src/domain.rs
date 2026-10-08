@@ -65,6 +65,7 @@ use ledger_ops::{
 pub use ledger_state::Ledger;
 use ledger_state::unix_now_ms;
 pub(crate) use mine_policy::{MINE_RETARGET_WINDOW_BLOCKS, retarget_mine_difficulty_bits};
+pub use mining::MineSearchWork;
 use mining::{mine_payload, mine_signature};
 pub use profile::{GenesisBurn, LaunchProfile};
 pub use protocol::{
@@ -93,6 +94,11 @@ pub use signature::{ProtocolPublicKey, ProtocolSignature, SignatureScheme};
 pub(crate) use signature::{
     ed25519_public_key, ml_dsa44_public_key, sign_ed25519, sign_ml_dsa44,
     validate_ed25519_public_key, verify_ed25519, verify_ml_dsa44,
+};
+pub use vdf::{
+    DEFAULT_VDF_MEMORY_MIB, MAX_VDF_MEMORY_MIB, MIN_VDF_MEMORY_MIB,
+    run_vdf_cancellable_with_progress_and_memory_limit, run_vdf_with_memory_limit,
+    run_vdf_with_progress_and_memory_limit,
 };
 
 #[cfg(feature = "fuzzing")]

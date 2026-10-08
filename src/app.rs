@@ -1,5 +1,6 @@
 use std::{
-    collections::{BTreeMap, BTreeSet},
+    collections::{BTreeMap, BTreeSet, VecDeque},
+    io::{self, Write},
     sync::{
         Arc,
         atomic::{AtomicBool, Ordering},
@@ -11,7 +12,8 @@ use anyhow::Result;
 use tokio::sync::Mutex;
 
 use crate::domain::{
-    Amount, BurnBundle, Ledger, MINE_ACTIONS_PER_ANCHOR_LIMIT, PreparedBlock, Transaction, run_vdf,
+    Amount, BurnBundle, Ledger, MINE_ACTIONS_PER_ANCHOR_LIMIT, PreparedBlock, Transaction,
+    run_vdf_with_memory_limit,
 };
 
 mod automatic_mining;
@@ -47,6 +49,8 @@ pub const DEFAULT_VDF_ROUNDS: u32 = 67_000_000;
 pub const PROTOCOL_VERSION: u32 = 2;
 pub const MAX_PROTOCOL_CAPABILITIES: usize = 16;
 pub const MAX_PROTOCOL_CAPABILITY_BYTES: usize = 64;
+const MAX_GOSSIP_OUTBOX_BYTES: usize = 16 * 1024 * 1024;
+const MAX_GOSSIP_OUTBOX_ENTRIES: usize = 1_024;
 pub const CAPABILITY_ADDRESS_V1_READ: &str = "address-v1-read";
 pub const CAPABILITY_CHAIN_SEGMENT_SYNC: &str = "chain-segment-sync";
 pub const CAPABILITY_HYBRID_LINEAGE_IDENTITIES: &str = "hybrid-lineage-identities";
@@ -340,26 +344,16 @@ struct AutoPowMineCursor {
 
 #[derive(Clone, Debug)]
 pub struct AutoPowMineJob {
-    ledger: Ledger,
-    recipient: String,
-    anchor: String,
-    salt: u64,
-    start_nonce: u64,
-    max_attempts: u64,
+    work: crate::domain::MineSearchWork,
 }
 
 impl AutoPowMineJob {
     pub fn anchor(&self) -> &str {
-        &self.anchor
+        self.work.anchor()
     }
 
     pub fn search(self) -> Result<(Self, crate::domain::MineSearchOutcome)> {
-        let outcome = self.ledger.search_mine(
-            self.recipient.clone(),
-            self.salt,
-            self.start_nonce,
-            self.max_attempts,
-        )?;
+        let outcome = self.work.search()?;
         Ok((self, outcome))
     }
 }
@@ -374,6 +368,7 @@ pub struct NodeCore {
     burn_per_block: Amount,
     burn_fee: Amount,
     recovery_vdf_top_rank_percent: u8,
+    vdf_memory_mib: u64,
     last_auto_burn_height: Option<u64>,
     last_auto_anchor_burn_height: Option<u64>,
     last_auto_finalization_status: Option<String>,
@@ -384,9 +379,47 @@ pub struct NodeCore {
     equivocated_burn_bundle_slots: BTreeSet<(u64, u8, String)>,
     burn_bundle_collection_started: Option<(u64, u64)>,
     local_block_anchor_burn: Option<(u64, Transaction)>,
-    outbox: Vec<GossipEnvelope>,
+    outbox: VecDeque<(GossipEnvelope, usize)>,
+    outbox_bytes: usize,
     network_migration_from: Option<String>,
     vdf_speed_sample: Option<VdfSpeedSample>,
+}
+
+impl NodeCore {
+    fn enqueue_gossip(&mut self, envelope: GossipEnvelope) {
+        let encoded_bytes = gossip_envelope_size(&envelope).unwrap_or(usize::MAX);
+        if encoded_bytes > MAX_GOSSIP_OUTBOX_BYTES {
+            return;
+        }
+        while self.outbox.len() >= MAX_GOSSIP_OUTBOX_ENTRIES
+            || self.outbox_bytes.saturating_add(encoded_bytes) > MAX_GOSSIP_OUTBOX_BYTES
+        {
+            let Some((_, removed_bytes)) = self.outbox.pop_front() else {
+                break;
+            };
+            self.outbox_bytes = self.outbox_bytes.saturating_sub(removed_bytes);
+        }
+        self.outbox.push_back((envelope, encoded_bytes));
+        self.outbox_bytes = self.outbox_bytes.saturating_add(encoded_bytes);
+    }
+}
+
+fn gossip_envelope_size(envelope: &GossipEnvelope) -> Result<usize> {
+    struct ByteCounter(usize);
+    impl Write for ByteCounter {
+        fn write(&mut self, buffer: &[u8]) -> io::Result<usize> {
+            self.0 = self.0.saturating_add(buffer.len());
+            Ok(buffer.len())
+        }
+
+        fn flush(&mut self) -> io::Result<()> {
+            Ok(())
+        }
+    }
+
+    let mut counter = ByteCounter(0);
+    serde_json::to_writer(&mut counter, envelope)?;
+    Ok(counter.0)
 }
 
 pub fn now_ms() -> u64 {

@@ -751,7 +751,7 @@ impl Ledger {
                 &self.transaction_signing_domain_for_pending(&pending),
             )?;
         }
-        Ok(utxos)
+        Ok(utxos.into_owned())
     }
 
     pub(super) fn utxos_after_spendable_pending(&self) -> Result<BTreeMap<OutPoint, TxOutput>> {
@@ -770,7 +770,7 @@ impl Ledger {
                 continue;
             }
         }
-        Ok(utxos)
+        Ok(utxos.into_owned())
     }
 }
 

@@ -126,6 +126,11 @@ pub(super) struct RecoveryVdfSettingsForm {
 }
 
 #[derive(Debug, Deserialize)]
+pub(super) struct VdfMemorySettingsForm {
+    pub(super) memory_mib: u64,
+}
+
+#[derive(Debug, Deserialize)]
 pub(super) struct PowMiningForm {
     pub(super) enabled: bool,
     pub(super) workers: Option<u8>,

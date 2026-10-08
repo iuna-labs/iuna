@@ -19,9 +19,14 @@ pub(super) fn prove(
     progress: impl FnMut(VdfProgressPhase, u64),
 ) -> Result<Vec<u8>, KynVdfError> {
     let cancelled = AtomicBool::new(false);
-    prove_cancellable(seed, rounds, progress, &cancelled)?.ok_or_else(|| {
-        KynVdfError::ArithmeticError("non-cancellable VDF was cancelled".to_string())
-    })
+    prove_cancellable(
+        seed,
+        rounds,
+        progress,
+        &cancelled,
+        super::DEFAULT_VDF_MEMORY_MIB * 1024 * 1024,
+    )?
+    .ok_or_else(|| KynVdfError::ArithmeticError("non-cancellable VDF was cancelled".to_string()))
 }
 
 pub(super) fn prove_cancellable(
@@ -29,6 +34,7 @@ pub(super) fn prove_cancellable(
     rounds: u64,
     mut progress: impl FnMut(VdfProgressPhase, u64),
     cancelled: &AtomicBool,
+    memory_budget_bytes: u64,
 ) -> Result<Option<Vec<u8>>, KynVdfError> {
     if rounds == 0 {
         return Err(KynVdfError::InvalidIterations(rounds));
@@ -46,6 +52,7 @@ pub(super) fn prove_cancellable(
         rounds,
         &mut progress,
         cancelled,
+        memory_budget_bytes,
     )?
     else {
         return Ok(None);

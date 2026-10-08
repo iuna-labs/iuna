@@ -11,6 +11,12 @@ use super::{VdfProgressPhase, limb_arithmetic};
 const MAX_CHECKPOINTS: u64 = 262_144;
 const MAX_BUCKETS: u64 = 65_536;
 const INVALID_BUCKET: usize = usize::MAX;
+// A checkpoint owns three independently allocated big integers. Accounting for
+// allocator metadata and temporary arithmetic storage is deliberately
+// conservative: the configured budget is a ceiling for the checkpoint path,
+// not a promise that every byte can be used for payload.
+const CHECKPOINT_BUDGET_BYTES: u64 = 4 * 1024;
+const CHECKPOINT_WORKSPACE_BYTES: u64 = 16 * 1024 * 1024;
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 struct ProofParameters {
@@ -50,6 +56,7 @@ pub(super) fn prove(
         rounds,
         progress,
         &cancelled,
+        super::DEFAULT_VDF_MEMORY_MIB * 1024 * 1024,
     )?
     .ok_or_else(|| arithmetic_error("non-cancellable VDF was cancelled"))
 }
@@ -61,12 +68,25 @@ pub(super) fn prove_cancellable(
     rounds: u64,
     progress: impl FnMut(VdfProgressPhase, u64),
     cancelled: &AtomicBool,
+    memory_budget_bytes: u64,
 ) -> Result<Option<(Form, Form)>, KynVdfError> {
     let group = ClassGroup {
         discriminant,
         threshold,
     };
-    let parameters = ProofParameters::for_rounds(rounds);
+    let max_checkpoints = checkpoint_limit_for_memory_budget(memory_budget_bytes);
+    if max_checkpoints == 0 {
+        return prove_constant_memory_cancellable(
+            discriminant,
+            generator,
+            threshold,
+            rounds,
+            progress,
+            cancelled,
+        );
+    }
+    let parameters =
+        ProofParameters::for_rounds(rounds).fit_checkpoint_budget(rounds, max_checkpoints);
     if parameters.checkpoint_count > MAX_CHECKPOINTS || parameters.bucket_count > MAX_BUCKETS {
         return prove_constant_memory_cancellable(
             discriminant,
@@ -79,6 +99,14 @@ pub(super) fn prove_cancellable(
     }
 
     prove_checkpointed_cancellable(group, generator, rounds, parameters, progress, cancelled)
+}
+
+fn checkpoint_limit_for_memory_budget(memory_budget_bytes: u64) -> u64 {
+    memory_budget_bytes
+        .saturating_sub(CHECKPOINT_WORKSPACE_BYTES)
+        .checked_div(CHECKPOINT_BUDGET_BYTES)
+        .unwrap_or(0)
+        .min(MAX_CHECKPOINTS)
 }
 
 fn prove_checkpointed_cancellable(
@@ -549,7 +577,8 @@ mod tests {
     use num_traits::Signed;
 
     use super::{
-        ClassGroup, ProofParameters, VdfProgressPhase, prove, prove_checkpointed,
+        CHECKPOINT_BUDGET_BYTES, CHECKPOINT_WORKSPACE_BYTES, ClassGroup, ProofParameters,
+        VdfProgressPhase, checkpoint_limit_for_memory_budget, prove, prove_checkpointed,
         prove_constant_memory,
     };
 
@@ -591,6 +620,19 @@ mod tests {
             }
         );
         assert!(parameters.checkpoint_count <= super::MAX_CHECKPOINTS);
+    }
+
+    #[test]
+    fn checkpoint_count_respects_the_configured_memory_budget() {
+        for memory_mib in [32_u64, 64, 128, 256, 4_096] {
+            let budget = memory_mib * 1024 * 1024;
+            let checkpoints = checkpoint_limit_for_memory_budget(budget);
+            assert!(
+                CHECKPOINT_WORKSPACE_BYTES
+                    .saturating_add(checkpoints.saturating_mul(CHECKPOINT_BUDGET_BYTES))
+                    <= budget
+            );
+        }
     }
 
     #[test]

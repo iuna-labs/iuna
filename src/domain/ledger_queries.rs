@@ -71,6 +71,22 @@ fn lineage_committee_draw_seed(parent: &Block, target_height: u64, slot: u8) -> 
 }
 
 impl Ledger {
+    /// Keep genesis plus a bounded recent consensus window. Historical data must be served by
+    /// the chain store once this is enabled.
+    pub fn retain_recent_chain_blocks(&mut self, recent_limit: usize) {
+        let recent_limit = recent_limit.max(1);
+        if self.chain.len() <= recent_limit.saturating_add(1) {
+            return;
+        }
+        let recent_start = self.chain.len().saturating_sub(recent_limit);
+        self.chain.drain(1..recent_start);
+        self.history_pruned = true;
+    }
+
+    pub fn history_is_pruned(&self) -> bool {
+        self.history_pruned
+    }
+
     #[cfg(test)]
     pub(crate) fn set_tip_height_for_test(&mut self, height: u64) {
         self.chain
@@ -89,7 +105,7 @@ impl Ledger {
             genesis_allocations: self.genesis_allocations.clone(),
             vdf_rounds: self.initial_vdf_rounds,
             launch_profile: self.launch_profile.clone(),
-            blocks: self.chain.clone(),
+            blocks: self.chain.to_vec(),
         }
     }
 
@@ -524,13 +540,9 @@ impl Ledger {
         if limit == 0 {
             return Vec::new();
         }
-        let Ok(start) = usize::try_from(from_height) else {
-            return Vec::new();
-        };
         self.chain
-            .get(start..)
-            .unwrap_or_default()
             .iter()
+            .filter(|block| block.height >= from_height)
             .take(limit)
             .cloned()
             .collect()
@@ -538,9 +550,9 @@ impl Ledger {
 
     pub(crate) fn contains_block_sequence(&self, blocks: &[Block]) -> bool {
         blocks.iter().all(|block| {
-            usize::try_from(block.height)
-                .ok()
-                .and_then(|height| self.chain.get(height))
+            self.chain
+                .iter()
+                .find(|known| known.height == block.height)
                 .is_some_and(|known| known.hash == block.hash)
         })
     }
@@ -730,6 +742,37 @@ mod tests {
     };
     use proptest::prelude::*;
     use proptest::test_runner::Config;
+
+    #[test]
+    fn recent_chain_window_keeps_genesis_and_height_addressable_tail() {
+        let mut ledger = Ledger::new(BTreeMap::new(), 1);
+        let template = ledger.chain[0].clone();
+        while ledger.chain.len() < 20 {
+            let previous = ledger.chain.last().unwrap();
+            let mut block = template.clone();
+            block.height = previous.height + 1;
+            block.prev_hash = previous.hash.clone();
+            block.timestamp_ms = previous.timestamp_ms.saturating_add(1);
+            block.hash = block.compute_hash();
+            ledger.chain.push(block);
+        }
+
+        ledger.retain_recent_chain_blocks(5);
+
+        assert!(ledger.history_is_pruned());
+        assert_eq!(ledger.chain.len(), 6);
+        assert_eq!(ledger.chain[0].height, 0);
+        assert_eq!(ledger.chain[1].height, 15);
+        assert_eq!(ledger.height(), 19);
+        assert_eq!(
+            ledger
+                .blocks_from(17, 10)
+                .iter()
+                .map(|block| block.height)
+                .collect::<Vec<_>>(),
+            vec![17, 18, 19]
+        );
+    }
 
     #[test]
     fn status_splits_pending_transactions_by_kind() {

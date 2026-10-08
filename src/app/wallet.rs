@@ -5,7 +5,7 @@ use anyhow::{Context, Result, bail};
 use crate::domain::{
     AddressNetwork, Amount, Block, BurnBundle, DEFAULT_TRANSACTION_FEE, Ledger, OutPoint,
     PreparedBlock, StratumMineShare, StratumMineTemplate, Transaction, TransactionSubmitOutcome,
-    TransactionV2, VersionedAddress, Wallet, hex_encode, run_vdf,
+    TransactionV2, VersionedAddress, Wallet, hex_encode,
 };
 
 use super::{
@@ -177,7 +177,7 @@ impl NodeCore {
         }
         let outcome = self.ledger.submit_transaction_with_outcome(tx.clone())?;
         if outcome.added() {
-            self.outbox.push(GossipEnvelope::Transaction(tx));
+            self.enqueue_gossip(GossipEnvelope::Transaction(tx));
         }
         Ok(outcome)
     }
@@ -200,7 +200,7 @@ impl NodeCore {
         let transaction_id = hex_encode(transaction.transaction_id(&domain)?);
         let outcome = self.ledger.submit_transaction_v2(transaction)?;
         if outcome.added() {
-            self.outbox.push(GossipEnvelope::TransactionV2 {
+            self.enqueue_gossip(GossipEnvelope::TransactionV2 {
                 envelope: hex_encode(encoded),
             });
         }
@@ -428,13 +428,12 @@ impl NodeCore {
                 continue;
             }
             if let Some(existing) = self.burn_bundles.get(&key) {
-                self.outbox
-                    .push(GossipEnvelope::BurnBundle(existing.clone()));
+                self.enqueue_gossip(GossipEnvelope::BurnBundle(existing.clone()));
                 continue;
             }
             ledger.validate_next_block_burn_bundles(vec![bundle.clone()])?;
             self.burn_bundles.insert(key, bundle.clone());
-            self.outbox.push(GossipEnvelope::BurnBundle(bundle));
+            self.enqueue_gossip(GossipEnvelope::BurnBundle(bundle));
         }
         Ok(())
     }
@@ -448,7 +447,7 @@ impl NodeCore {
             .submit_transaction_with_outcome(tx.clone())?
             .added()
         {
-            self.outbox.push(GossipEnvelope::Transaction(tx.clone()));
+            self.enqueue_gossip(GossipEnvelope::Transaction(tx.clone()));
         }
         Ok(tx)
     }
@@ -462,7 +461,7 @@ impl NodeCore {
             .submit_transaction_with_outcome(tx.clone())?
             .added()
         {
-            self.outbox.push(GossipEnvelope::Transaction(tx.clone()));
+            self.enqueue_gossip(GossipEnvelope::Transaction(tx.clone()));
         }
         Ok(tx)
     }
@@ -637,7 +636,11 @@ impl NodeCore {
     pub fn mine_one_at(&mut self, timestamp_ms: u64) -> Result<Block> {
         self.publish_burn_bundle_for_next_block()?;
         let work = self.prepare_next_block_with_local_anchor(timestamp_ms)?;
-        let vdf_output = run_vdf(work.vdf_seed(), work.vdf_rounds());
+        let vdf_output = crate::domain::run_vdf_with_memory_limit(
+            work.vdf_seed(),
+            work.vdf_rounds(),
+            self.vdf_memory_mib,
+        );
         self.complete_prepared_block_at(work, vdf_output, timestamp_ms)
     }
 
@@ -659,7 +662,7 @@ impl NodeCore {
         self.ledger.apply_locally_mined_block(block.clone())?;
         self.clear_stale_local_block_anchor();
         self.prune_burn_bundles();
-        self.outbox.push(GossipEnvelope::Block(block.clone()));
+        self.enqueue_gossip(GossipEnvelope::Block(block.clone()));
         Ok(block)
     }
 

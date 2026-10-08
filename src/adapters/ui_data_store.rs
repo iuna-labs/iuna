@@ -613,6 +613,9 @@ LIMIT 1
                 r#"
 PRAGMA busy_timeout = 5000;
 PRAGMA synchronous = NORMAL;
+PRAGMA cache_size = -8192;
+PRAGMA temp_store = FILE;
+PRAGMA mmap_size = 0;
 "#,
             )
             .context("failed to configure UI data database connection")?;
@@ -627,6 +630,9 @@ PRAGMA synchronous = NORMAL;
 PRAGMA journal_mode = WAL;
 PRAGMA busy_timeout = 5000;
 PRAGMA synchronous = NORMAL;
+PRAGMA cache_size = -8192;
+PRAGMA temp_store = FILE;
+PRAGMA mmap_size = 0;
 "#,
             )
             .context("failed to configure UI data database connection")?;

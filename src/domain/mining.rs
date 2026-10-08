@@ -1,6 +1,84 @@
 use anyhow::Result;
 
-use super::{TransactionSigningDomain, hex_hash, mine_signing_bytes};
+use super::{
+    MineSearchOutcome, Transaction, TransactionSigningDomain, hash_meets_difficulty, hex_hash,
+    mine_signing_bytes,
+};
+
+#[derive(Clone, Debug)]
+pub struct MineSearchWork {
+    recipient: String,
+    anchor: String,
+    salt: u64,
+    start_nonce: u64,
+    max_attempts: u64,
+    difficulty_bits: u32,
+    signing_domain: TransactionSigningDomain,
+}
+
+impl MineSearchWork {
+    pub fn anchor(&self) -> &str {
+        &self.anchor
+    }
+
+    pub fn search(&self) -> Result<MineSearchOutcome> {
+        let mut attempts = 0_u64;
+        let mut nonce = self.start_nonce;
+        while attempts < self.max_attempts {
+            let signature = mine_signature(
+                &self.signing_domain,
+                &self.recipient,
+                &self.anchor,
+                self.salt,
+                nonce,
+                self.difficulty_bits,
+            )?;
+            attempts = attempts.saturating_add(1);
+            let next_nonce = nonce.checked_add(1).unwrap_or(0);
+            if hash_meets_difficulty(&signature, self.difficulty_bits) {
+                return Ok(MineSearchOutcome {
+                    transaction: Some(Transaction::Mine {
+                        recipient: self.recipient.clone(),
+                        anchor: self.anchor.clone(),
+                        salt: self.salt,
+                        nonce,
+                        difficulty_bits: self.difficulty_bits,
+                        proof_header: None,
+                        signature,
+                    }),
+                    next_nonce,
+                    attempts,
+                });
+            }
+            nonce = next_nonce;
+        }
+        Ok(MineSearchOutcome {
+            transaction: None,
+            next_nonce: nonce,
+            attempts,
+        })
+    }
+}
+
+pub(super) fn mine_search_work(
+    recipient: String,
+    anchor: String,
+    salt: u64,
+    start_nonce: u64,
+    max_attempts: u64,
+    difficulty_bits: u32,
+    signing_domain: TransactionSigningDomain,
+) -> MineSearchWork {
+    MineSearchWork {
+        recipient,
+        anchor,
+        salt,
+        start_nonce,
+        max_attempts,
+        difficulty_bits,
+        signing_domain,
+    }
+}
 
 pub(super) fn mine_payload(
     recipient: &str,

@@ -8,6 +8,7 @@ use super::{
 };
 
 pub const MAX_DISCOVERED_PEERS: usize = 256;
+pub const MAX_TOTAL_PEERS: usize = 512;
 pub const MAX_DISCOVERED_PEERS_PER_IP: usize = 4;
 pub const MAX_DISCOVERED_PEERS_PER_IPV4_PREFIX: usize = 16;
 pub const MAX_DISCOVERED_PEERS_PER_IPV6_PREFIX: usize = 16;
@@ -45,6 +46,9 @@ impl PeerBook {
 
     pub fn add_peer(&mut self, address: impl Into<String>) {
         let address = address.into();
+        if !self.peers.contains_key(&address) && self.peers.len() >= MAX_TOTAL_PEERS {
+            return;
+        }
         let peer = self
             .peers
             .entry(address.clone())
@@ -188,6 +192,9 @@ impl PeerBook {
 
     pub fn observe_inbound_peer(&mut self, address: impl Into<String>) {
         let address = address.into();
+        if !self.peers.contains_key(&address) && self.peers.len() >= MAX_TOTAL_PEERS {
+            return;
+        }
         self.peers
             .entry(address.clone())
             .or_insert_with(|| PeerInfo::new(address, PeerDirection::Inbound));
@@ -772,5 +779,16 @@ mod tests {
 
         assert!(!peers.remove_never_connected_peer_if_other_connection_works_at(recovered, now));
         assert!(peers.is_connectable_peer(recovered));
+    }
+
+    #[test]
+    fn configured_and_inbound_peers_share_a_hard_total_cap() {
+        let configured = (0..super::MAX_TOTAL_PEERS + 20)
+            .map(|index| format!("192.0.2.{}:{}", index % 255, 10_000 + index))
+            .collect();
+        let mut peers = PeerBook::from_addresses(configured);
+        peers.observe_inbound_peer("198.51.100.1:40000");
+
+        assert_eq!(peers.peer_count_for_tests(), super::MAX_TOTAL_PEERS);
     }
 }

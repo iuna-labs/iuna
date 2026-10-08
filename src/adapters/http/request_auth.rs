@@ -13,9 +13,11 @@ use crate::{
     domain::Wallet,
 };
 
+use super::state::AuthBackoff;
 use super::{
     AUTH_COOKIE_NAME, AUTH_LOCKOUT_MS, AUTH_MAX_FAILED_ATTEMPTS, AUTH_SESSION_TTL_MS, AuthSession,
-    HttpState, SETUP_COOKIE_NAME, SETUP_COOKIE_TTL_SECS, UNKNOWN_CLIENT_KEY,
+    HttpState, MAX_AUTH_BACKOFF_KEYS, MAX_AUTH_SESSIONS, SETUP_COOKIE_NAME, SETUP_COOKIE_TTL_SECS,
+    UNKNOWN_CLIENT_KEY,
     auth::{hash_password, random_hex, session_token_hash, validate_password, verify_password},
     now_ms,
 };
@@ -350,7 +352,8 @@ pub(super) async fn restore_node_wallet_from_store(
 async fn check_auth_backoff(state: &HttpState, client_key: &str) -> Result<()> {
     let now = now_ms();
     let mut backoffs = state.auth_backoff.lock().await;
-    let backoff = backoffs.entry(client_key.to_string()).or_default();
+    let client_key = bounded_auth_backoff_key(&mut backoffs, client_key, now);
+    let backoff = backoffs.entry(client_key).or_default();
     if backoff
         .locked_until_ms
         .is_some_and(|locked_until| locked_until > now)
@@ -366,10 +369,12 @@ async fn check_auth_backoff(state: &HttpState, client_key: &str) -> Result<()> {
 
 async fn record_auth_failure(state: &HttpState, client_key: &str) {
     let mut backoffs = state.auth_backoff.lock().await;
-    let backoff = backoffs.entry(client_key.to_string()).or_default();
+    let now = now_ms();
+    let client_key = bounded_auth_backoff_key(&mut backoffs, client_key, now);
+    let backoff = backoffs.entry(client_key).or_default();
     backoff.failed_attempts = backoff.failed_attempts.saturating_add(1);
     if backoff.failed_attempts >= AUTH_MAX_FAILED_ATTEMPTS {
-        backoff.locked_until_ms = Some(now_ms().saturating_add(AUTH_LOCKOUT_MS));
+        backoff.locked_until_ms = Some(now.saturating_add(AUTH_LOCKOUT_MS));
     }
 }
 
@@ -381,7 +386,18 @@ async fn create_session_cookie(state: &HttpState, password: SecretString) -> Res
     let token = random_hex(32)?;
     let token_hash = session_token_hash(token.expose_secret());
     let expires_at = now_ms().saturating_add(AUTH_SESSION_TTL_MS);
-    state.auth_sessions.lock().await.insert(
+    let mut sessions = state.auth_sessions.lock().await;
+    sessions.retain(|_, session| session.expires_at > now_ms());
+    if sessions.len() >= MAX_AUTH_SESSIONS {
+        if let Some(oldest) = sessions
+            .iter()
+            .min_by_key(|(_, session)| session.expires_at)
+            .map(|(token, _)| token.clone())
+        {
+            sessions.remove(&oldest);
+        }
+    }
+    sessions.insert(
         token_hash,
         AuthSession {
             expires_at,
@@ -393,6 +409,27 @@ async fn create_session_cookie(state: &HttpState, password: SecretString) -> Res
         token.expose_secret(),
         AUTH_SESSION_TTL_MS / 1000
     ))
+}
+
+fn bounded_auth_backoff_key(
+    backoffs: &mut std::collections::BTreeMap<String, AuthBackoff>,
+    client_key: &str,
+    now: u64,
+) -> String {
+    if backoffs.contains_key(client_key) || backoffs.len() < MAX_AUTH_BACKOFF_KEYS {
+        return client_key.to_string();
+    }
+    if !backoffs.contains_key(UNKNOWN_CLIENT_KEY) {
+        let removable = backoffs
+            .iter()
+            .find(|(_, entry)| entry.locked_until_ms.is_none_or(|until| until <= now))
+            .or_else(|| backoffs.iter().next())
+            .map(|(key, _)| key.clone());
+        if let Some(removable) = removable {
+            backoffs.remove(&removable);
+        }
+    }
+    UNKNOWN_CLIENT_KEY.to_string()
 }
 
 pub(super) fn auth_cookie(headers: &HeaderMap) -> Option<&str> {

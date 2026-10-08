@@ -11,9 +11,12 @@ use tokio::{
 };
 
 use crate::app::{
-    BlockInventory, GossipEnvelope, SharedNode, SharedPeerBook, debug_logging_enabled, now_ms,
+    BlockInventory, ChainBootstrap, ChainSegmentSummary, GossipEnvelope, SharedNode,
+    SharedPeerBook, debug_logging_enabled, now_ms,
 };
 
+#[cfg(not(test))]
+use super::global_peer_queue_bytes;
 use super::{
     ChainValidationCoordinator, ChainValidationGuard, GossipNetwork, GossipNetworkInner,
     GossipSession, INBOUND_SESSION_PREFIX, InboundConnectionLimiter, InboundSessionPermit,
@@ -44,6 +47,8 @@ impl GossipNetwork {
                 metrics: P2pMetricsCounters::default(),
                 sync_progress: StdMutex::new(super::SyncProgressState::default()),
                 chain_validation: Arc::new(ChainValidationCoordinator::default()),
+                #[cfg(not(test))]
+                chain_store: tokio::sync::Mutex::new(None),
             }),
         };
 
@@ -53,6 +58,61 @@ impl GossipNetwork {
         tokio::spawn(outbound_supervisor(network.clone()));
         network.ensure_outbound_sessions().await;
         Ok(network)
+    }
+
+    pub async fn set_chain_store(&self, store: crate::adapters::chain_store::SqliteChainStore) {
+        #[cfg(not(test))]
+        {
+            *self.inner.chain_store.lock().await = Some(store);
+        }
+        #[cfg(test)]
+        {
+            let _ = store;
+        }
+    }
+
+    pub(super) async fn chain_store(
+        &self,
+    ) -> Option<crate::adapters::chain_store::SqliteChainStore> {
+        #[cfg(not(test))]
+        {
+            self.inner.chain_store.lock().await.clone()
+        }
+        #[cfg(test)]
+        {
+            None
+        }
+    }
+
+    pub(super) async fn current_chain_store(
+        &self,
+    ) -> Result<Option<crate::adapters::chain_store::SqliteChainStore>> {
+        let Some(store) = self.chain_store().await else {
+            return Ok(None);
+        };
+        let live_tip = {
+            let node = self.inner.node.lock().await;
+            (node.chain_height(), node.chain_tip_hash())
+        };
+        Ok((store.tip()?.as_ref() == Some(&live_tip)).then_some(store))
+    }
+
+    pub(super) async fn chain_bootstrap(&self) -> Result<ChainBootstrap> {
+        let mut bootstrap = self.inner.node.lock().await.chain_bootstrap();
+        if let Some(store) = self.current_chain_store().await? {
+            bootstrap.segment_summaries = store
+                .completed_segment_summaries()?
+                .into_iter()
+                .map(
+                    |(segment_id, end_height, end_block_hash)| ChainSegmentSummary {
+                        segment_id,
+                        end_height,
+                        end_block_hash,
+                    },
+                )
+                .collect();
+        }
+        Ok(bootstrap)
     }
 
     pub async fn set_accept_inbound(&self, enabled: bool) -> Result<()> {
@@ -293,6 +353,15 @@ impl GossipNetwork {
                 continue;
             }
             for (envelopes, encoded_bytes) in &batches {
+                #[cfg(not(test))]
+                let global_permit =
+                    match global_peer_queue_bytes().try_acquire_many_owned(*encoded_bytes) {
+                        Ok(permit) => permit,
+                        Err(_) => {
+                            P2pMetricsCounters::inc(&self.inner.metrics.outbound_queue_full);
+                            break;
+                        }
+                    };
                 let permit =
                     match Arc::clone(&session.queue_bytes).try_acquire_many_owned(*encoded_bytes) {
                         Ok(permit) => permit,
@@ -308,6 +377,8 @@ impl GossipNetwork {
                 let batch = OutboundBatch {
                     envelopes: Arc::clone(envelopes),
                     _queued_bytes: permit,
+                    #[cfg(not(test))]
+                    _global_queued_bytes: global_permit,
                 };
                 match session.sender.try_send(batch) {
                     Ok(()) => {}

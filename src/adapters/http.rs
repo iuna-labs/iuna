@@ -42,9 +42,9 @@ use actions::{
     api_burn_per_block_form, api_chain_reset_form, api_metrics_settings_form,
     api_mine_fee_estimate_form, api_p2p_announce_form, api_p2p_inbound_form, api_peer_delete_form,
     api_peer_form, api_pow_mining_form, api_recovery_vdf_settings_form, api_stratum_settings_form,
-    api_transfer_fee_estimate_form, api_transfer_form, api_wallet_endpoint_settings_form,
-    api_wallet_generate_form, api_wallet_import_form, apply_config_form, burn_per_block_form,
-    peer_form, transfer_form,
+    api_transfer_fee_estimate_form, api_transfer_form, api_vdf_memory_settings_form,
+    api_wallet_endpoint_settings_form, api_wallet_generate_form, api_wallet_import_form,
+    apply_config_form, burn_per_block_form, peer_form, transfer_form,
 };
 use api::{
     api_blocks, api_config, api_mempool, api_metrics, api_network_health, api_p2p_metrics,
@@ -93,6 +93,8 @@ const SETUP_COOKIE_TTL_SECS: u64 = 10 * 60;
 const AUTH_SESSION_TTL_MS: u64 = 12 * 60 * 60 * 1_000;
 const AUTH_MAX_FAILED_ATTEMPTS: u32 = 5;
 const AUTH_LOCKOUT_MS: u64 = 60 * 1_000;
+const MAX_AUTH_SESSIONS: usize = 128;
+const MAX_AUTH_BACKOFF_KEYS: usize = 1_024;
 const UNKNOWN_CLIENT_KEY: &str = "unknown";
 const PEER_STALE_AFTER_MS: u64 = PEER_GOOD_CONNECTION_MAX_AGE_MS;
 const SLOW_UI_REQUEST_LOG_MS: u128 = 250;
@@ -190,6 +192,10 @@ pub async fn serve(
         .route(
             "/api/settings/recovery-vdf",
             post(api_recovery_vdf_settings_form),
+        )
+        .route(
+            "/api/settings/vdf-memory",
+            post(api_vdf_memory_settings_form),
         )
         .route("/api/settings/chain-reset", post(api_chain_reset_form))
         .route("/api/settings/p2p-inbound", post(api_p2p_inbound_form))

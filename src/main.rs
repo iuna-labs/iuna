@@ -21,8 +21,8 @@ use iuna::{
     },
     domain::{
         Amount, ChainSnapshot, GenesisBurn, LaunchProfile, Ledger, MAX_VDF_ROUNDS, MICRO_IUNA,
-        VDF_TARGET_BLOCK_MS, VdfProgress, VdfProgressPhase, run_vdf,
-        run_vdf_cancellable_with_progress,
+        VDF_TARGET_BLOCK_MS, VdfProgress, VdfProgressPhase,
+        run_vdf_cancellable_with_progress_and_memory_limit, run_vdf_with_memory_limit,
     },
 };
 use secrecy::{ExposeSecret, SecretString};
@@ -209,6 +209,7 @@ async fn main() -> Result<()> {
     node_core.set_pow_mining_workers(ui_config.pow_mining_workers);
     node_core.set_pow_mining_enabled(ui_config.pow_mining_enabled);
     node_core.set_recovery_vdf_top_rank_percent(ui_config.recovery_vdf_top_rank_percent);
+    node_core.set_vdf_memory_mib(ui_config.vdf_memory_mib);
     if let Some(from_network) = migration_from {
         println!(
             "network upgrade requires local chain reset: {from_network} -> {}",
@@ -231,7 +232,7 @@ async fn main() -> Result<()> {
         let initial_snapshot = { node.lock().await.chain_snapshot() };
         let keep_metrics = ui_config.lock().await.keep_track_of_metrics;
         if chain_requires_persistence {
-            persist_chain_snapshot(&chain_store, initial_snapshot.clone()).await?;
+            persist_chain_snapshot(&chain_store, Arc::new(initial_snapshot.clone())).await?;
         }
         Some((initial_snapshot, keep_metrics))
     } else if !migration_required {
@@ -280,6 +281,7 @@ async fn main() -> Result<()> {
         p2p_accept_inbound,
     )
     .await?;
+    gossip.set_chain_store(chain_store.clone()).await;
     let mut stratum_status = StratumStatus {
         enabled: false,
         listen_addr: None,
@@ -830,13 +832,29 @@ fn measure_vdf_rounds(
     min_elapsed: Duration,
     max_rounds_per_attempt: u64,
 ) -> (u64, Duration) {
+    measure_vdf_rounds_with_memory_limit(
+        seed,
+        initial_rounds,
+        min_elapsed,
+        max_rounds_per_attempt,
+        config_store::DEFAULT_VDF_MEMORY_MIB,
+    )
+}
+
+fn measure_vdf_rounds_with_memory_limit(
+    seed: &str,
+    initial_rounds: u64,
+    min_elapsed: Duration,
+    max_rounds_per_attempt: u64,
+    memory_mib: u64,
+) -> (u64, Duration) {
     let mut rounds = initial_rounds.max(1).min(max_rounds_per_attempt.max(1));
     let mut measured_rounds = 0_u64;
     let mut measured_elapsed = Duration::ZERO;
 
     loop {
         let started = Instant::now();
-        let _ = run_vdf(seed, rounds);
+        let _ = run_vdf_with_memory_limit(seed, rounds, memory_mib);
         measured_elapsed += started.elapsed();
         measured_rounds = measured_rounds.saturating_add(rounds);
 
@@ -894,12 +912,14 @@ async fn join_chain_ledger(
 
 /// Gives the UI a local VDF speed estimate before this node has finalized a block.
 async fn record_vdf_speed_benchmark(node: SharedNode, debug: bool) {
-    let measurement = tokio::task::spawn_blocking(|| {
-        measure_vdf_rounds(
+    let memory_mib = node.lock().await.vdf_memory_mib();
+    let measurement = tokio::task::spawn_blocking(move || {
+        measure_vdf_rounds_with_memory_limit(
             "iuna-vdf-speed-benchmark",
             VDF_MEASUREMENT_INITIAL_ROUNDS,
             VDF_SPEED_BENCHMARK_MIN_ELAPSED,
             VDF_MEASUREMENT_MAX_ROUNDS,
+            memory_mib,
         )
     })
     .await;
@@ -949,12 +969,13 @@ async fn run_automatic_finalizer(
             tokio::time::sleep(std::time::Duration::from_secs(1)).await;
             continue;
         }
-        let (height, plan, outbox) = {
+        let (height, plan, outbox, vdf_memory_mib) = {
             let mut node = node.lock().await;
             let height = node.chain_height();
             let plan = node.prepare_automatic_finalization(now_ms());
             let outbox = node.drain_outbox();
-            (height, plan, outbox)
+            let vdf_memory_mib = node.vdf_memory_mib();
+            (height, plan, outbox, vdf_memory_mib)
         };
 
         if let Err(error) = gossip.broadcast(outbox).await {
@@ -1011,11 +1032,12 @@ async fn run_automatic_finalizer(
         let worker_cancellation = Arc::clone(&cancellation);
         let vdf_started = Instant::now();
         let mut vdf_worker = tokio::task::spawn_blocking(move || {
-            run_vdf_cancellable_with_progress(
+            run_vdf_cancellable_with_progress_and_memory_limit(
                 &seed,
                 rounds,
                 VDF_PROGRESS_LOG_INTERVAL,
                 worker_cancellation.as_ref(),
+                vdf_memory_mib,
                 |progress| {
                     let _ = progress_tx.send(progress);
                 },
@@ -1516,24 +1538,35 @@ async fn run_chain_persistence_loop(
             last_chain_checkpoint.elapsed(),
             initial_state.sync_checkpoint_interval,
         );
-        let snapshot = {
+        let observed_tip_hash = {
             let node = node.lock().await;
             if !node.has_real_chain() {
                 continue;
             }
-            let tip_hash = node.ledger().tip_hash();
-            if syncing {
-                let tip_changed = last_saved_tip.as_deref() != Some(tip_hash);
-                if !tip_changed || defer_sync_checkpoint {
-                    continue;
-                }
+            node.ledger().tip_hash().to_string()
+        };
+        let keep_metrics = ui_config.lock().await.keep_track_of_metrics;
+        let observed_tip_changed = last_saved_tip.as_deref() != Some(observed_tip_hash.as_str());
+        let observed_projection_changed =
+            last_projected_tip.as_deref() != Some(observed_tip_hash.as_str());
+        let metrics_mode_changed = last_projected_keep_metrics != keep_metrics;
+        if !observed_tip_changed && !observed_projection_changed && !metrics_mode_changed {
+            continue;
+        }
+        if syncing && (!observed_tip_changed || defer_sync_checkpoint) {
+            continue;
+        }
+
+        let snapshot = Arc::new({
+            let node = node.lock().await;
+            if !node.has_real_chain() {
+                continue;
             }
             node.chain_snapshot()
-        };
+        });
         let Some(tip_hash) = snapshot.blocks.last().map(|block| block.hash.clone()) else {
             continue;
         };
-        let keep_metrics = ui_config.lock().await.keep_track_of_metrics;
         let tip_changed = last_saved_tip.as_deref() != Some(tip_hash.as_str());
         let projected_tip_changed = last_projected_tip.as_deref() != Some(tip_hash.as_str());
         let metrics_mode_changed = last_projected_keep_metrics != keep_metrics;
@@ -1578,16 +1611,20 @@ fn should_defer_sync_checkpoint(
 async fn persist_chain_and_project_ui_data(
     store: &SqliteChainStore,
     ui_data_store: &SqliteUiDataStore,
-    snapshot: ChainSnapshot,
+    snapshot: Arc<ChainSnapshot>,
     keep_metrics: bool,
 ) -> Result<()> {
-    persist_chain_snapshot(store, snapshot.clone()).await?;
+    persist_chain_snapshot(store, Arc::clone(&snapshot)).await?;
     project_ui_data_store(ui_data_store, snapshot, keep_metrics).await
 }
 
-async fn persist_chain_snapshot(store: &SqliteChainStore, snapshot: ChainSnapshot) -> Result<()> {
+async fn persist_chain_snapshot(
+    store: &SqliteChainStore,
+    snapshot: impl Into<Arc<ChainSnapshot>>,
+) -> Result<()> {
+    let snapshot = snapshot.into();
     let store = store.clone();
-    tokio::task::spawn_blocking(move || store.save_verified(&snapshot))
+    tokio::task::spawn_blocking(move || store.save_verified_resident(&snapshot))
         .await
         .context("chain persistence worker failed")??;
     Ok(())
@@ -1628,7 +1665,7 @@ async fn warm_ui_data_store(
     .context("UI data readiness worker failed")??;
 
     if !ui_ready {
-        project_ui_data_store(store, snapshot, keep_metrics).await?;
+        project_ui_data_store(store, Arc::new(snapshot), keep_metrics).await?;
     } else if keep_metrics && !metrics_ready {
         let metrics_store = store.clone();
         tokio::task::spawn_blocking(move || metrics_store.replace_metrics_for_snapshot(&snapshot))
@@ -1649,9 +1686,10 @@ async fn warm_ui_data_store(
 
 async fn project_ui_data_store(
     store: &SqliteUiDataStore,
-    snapshot: ChainSnapshot,
+    snapshot: impl Into<Arc<ChainSnapshot>>,
     keep_metrics: bool,
 ) -> Result<()> {
+    let snapshot = snapshot.into();
     let store = store.clone();
     tokio::task::spawn_blocking(move || store.project_snapshot(&snapshot, keep_metrics))
         .await
