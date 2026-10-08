@@ -38,7 +38,7 @@ struct EncodeTables {
 
 #[derive(Clone, Debug, Default)]
 pub(crate) struct CompactBlockContext {
-    tables: EncodeTables,
+    tables: Arc<EncodeTables>,
     size_breakdowns: Arc<BTreeMap<String, CompactBlockSizeBreakdown>>,
 }
 
@@ -60,7 +60,7 @@ impl CompactBlockContext {
     ) -> Result<Self> {
         let mut context = Self::default();
         for address in genesis_allocations.keys() {
-            context.tables.register_address(address);
+            Arc::make_mut(&mut context.tables).register_address(address);
         }
         for block in blocks {
             context.append_block_with_size_breakdown(block)?;
@@ -73,7 +73,7 @@ impl CompactBlockContext {
     }
 
     pub(crate) fn block_size_breakdown(&self, block: &Block) -> Result<CompactBlockSizeBreakdown> {
-        let mut tables = self.tables.clone();
+        let mut tables = (*self.tables).clone();
         let mut writer = CompactWriter::default();
         // Preserve the exact pre-v2 consensus size for legacy-only blocks. Snapshot v8 has one
         // additional count field, but that storage framing must not move the historical block-size
@@ -104,11 +104,11 @@ impl CompactBlockContext {
         &mut self,
         block: &Block,
     ) -> Result<CompactBlockSizeBreakdown> {
-        let mut tables = self.tables.clone();
+        let mut tables = (*self.tables).clone();
         let mut writer = CompactWriter::default();
         let breakdown = encode_block_body_with_size_breakdown(&mut writer, block, &mut tables)?;
         tables.register_protocol_id(&block.hash);
-        self.tables = tables;
+        self.tables = Arc::new(tables);
         Arc::make_mut(&mut self.size_breakdowns).insert(block.hash.clone(), breakdown.clone());
         Ok(breakdown)
     }

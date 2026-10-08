@@ -43,31 +43,48 @@ pub(super) async fn process_envelope(
             let _ = process_hello(network, remote_addr, known_peer, hello).await?;
         }
         GossipEnvelope::ChainBootstrapRequest => {
-            let bootstrap = network.inner.node.lock().await.chain_bootstrap();
+            let bootstrap = network.chain_bootstrap().await?;
             write_envelope(writer, &GossipEnvelope::ChainBootstrap(bootstrap)).await?;
         }
         GossipEnvelope::BlockLocatorRequest { locator, limit } => {
-            let blocks = network
-                .inner
-                .node
-                .lock()
-                .await
-                .blocks_after_locator(&locator, limit.min(MAX_BLOCK_BATCH));
+            let limit = limit.min(MAX_BLOCK_BATCH);
+            let blocks = if let Some(store) = network.current_chain_store().await? {
+                store.blocks_after_locator(&locator, limit)?
+            } else {
+                network
+                    .inner
+                    .node
+                    .lock()
+                    .await
+                    .blocks_after_locator(&locator, limit)
+            };
             let blocks = super::byte_bounded_block_page(blocks);
             write_envelope(writer, &GossipEnvelope::Blocks { blocks }).await?;
         }
         GossipEnvelope::BlockRangeRequest { from_height, limit } => {
-            let blocks = network
-                .inner
-                .node
-                .lock()
-                .await
-                .blocks_from(from_height, limit.min(MAX_BLOCK_BATCH));
+            let limit = limit.min(MAX_BLOCK_BATCH);
+            let blocks = if let Some(store) = network.current_chain_store().await? {
+                store.blocks_from(from_height, limit)?
+            } else {
+                network
+                    .inner
+                    .node
+                    .lock()
+                    .await
+                    .blocks_from(from_height, limit)
+            };
             let blocks = super::byte_bounded_block_page(blocks);
             write_envelope(writer, &GossipEnvelope::Blocks { blocks }).await?;
         }
         GossipEnvelope::BlockRequest { hashes } => {
-            let blocks = network.inner.node.lock().await.blocks_by_hash(&hashes);
+            let blocks = if let Some(store) = network.current_chain_store().await? {
+                hashes
+                    .iter()
+                    .filter_map(|hash| store.block_by_hash(hash).transpose())
+                    .collect::<Result<Vec<_>>>()?
+            } else {
+                network.inner.node.lock().await.blocks_by_hash(&hashes)
+            };
             if !blocks.is_empty() {
                 let blocks = super::byte_bounded_block_page(blocks);
                 write_envelope(writer, &GossipEnvelope::Blocks { blocks }).await?;
@@ -81,7 +98,7 @@ pub(super) async fn process_envelope(
             } else if node_id.is_some() && debug_logging_enabled() {
                 eprintln!("p2p peer announcement for {peer} ignored until hello verification");
             }
-            let bootstrap = network.inner.node.lock().await.chain_bootstrap();
+            let bootstrap = network.chain_bootstrap().await?;
             write_envelope(writer, &GossipEnvelope::ChainBootstrap(bootstrap)).await?;
         }
         GossipEnvelope::PeerVerificationChallenge { address, nonce } => {

@@ -46,13 +46,9 @@ impl Ledger {
     }
 
     pub(crate) fn apply_self_produced_block_at(&mut self, block: Block, now_ms: u64) -> Result<()> {
-        self.verify_self_produced_block_at(&block, now_ms)?;
-        self.apply_preverified_block_at(block, now_ms)
-    }
-
-    pub(crate) fn verify_self_produced_block_at(&self, block: &Block, now_ms: u64) -> Result<()> {
-        let mut verifier = self.clone();
-        verifier.apply_preverified_block_at(block.clone(), now_ms)?;
+        let mut candidate = self.clone();
+        candidate.apply_preverified_block_at(block, now_ms)?;
+        *self = candidate;
         Ok(())
     }
 
@@ -292,7 +288,8 @@ impl Ledger {
         if block.height <= self.tip().height {
             let existing = self
                 .chain
-                .get(block.height as usize)
+                .iter()
+                .find(|known| known.height == block.height)
                 .with_context(|| format!("local chain has no block at height {}", block.height))?;
             if existing.hash == block.hash {
                 return Ok(false);
@@ -605,7 +602,8 @@ mod tests {
         let migration = ledger.build_v2_migration(&wallet, 3).unwrap();
         ledger.utxos = ledger
             .validated_v2_utxos_at_height(&migration, 3_000)
-            .unwrap();
+            .unwrap()
+            .into();
         ledger.chain.last_mut().unwrap().height = 3_000;
         let burn = ledger.build_v2_burn_for_next_block(&wallet, 9, 1).unwrap();
         let mut bindings = BTreeMap::new();
@@ -624,7 +622,8 @@ mod tests {
         let migration = ledger.build_v2_migration(&wallet, 3).unwrap();
         ledger.utxos = ledger
             .validated_v2_utxos_at_height(&migration, 3_000)
-            .unwrap();
+            .unwrap()
+            .into();
         ledger.chain.last_mut().unwrap().height = 3_000;
         let burn = ledger.build_v2_burn_for_next_block(&wallet, 9, 1).unwrap();
         let mut bindings = BTreeMap::new();

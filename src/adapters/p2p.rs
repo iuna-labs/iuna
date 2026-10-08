@@ -10,6 +10,8 @@ use tokio::{
     task::JoinHandle,
 };
 
+#[cfg(not(test))]
+use crate::adapters::chain_store::SqliteChainStore;
 use crate::app::{GossipEnvelope, SharedNode, SharedPeerBook};
 
 mod error;
@@ -76,6 +78,8 @@ const INBOUND_PEER_QUEUE_SIZE: usize = 16;
 const MAX_OUTBOUND_BATCH_BYTES: usize = MAX_GOSSIP_LINE_BYTES + 1;
 const PEER_QUEUE_BYTES: usize = 4 * MAX_OUTBOUND_BATCH_BYTES;
 const INBOUND_PEER_QUEUE_BYTES: usize = 2 * MAX_OUTBOUND_BATCH_BYTES;
+#[cfg(not(test))]
+const GLOBAL_PEER_QUEUE_BYTES: usize = 64 * 1024 * 1024;
 const MAX_CONCURRENT_CHAIN_VALIDATIONS: usize = 2;
 const STALE_INBOUND_PEER_RETENTION_MS: u64 = 60 * 60 * 1_000;
 const STALE_DISCOVERED_PEER_RETENTION_MS: u64 = 60 * 60 * 1_000;
@@ -108,6 +112,14 @@ fn negotiated_block_batch_limit(capabilities: &[String]) -> usize {
 struct OutboundBatch {
     envelopes: Arc<[GossipEnvelope]>,
     _queued_bytes: OwnedSemaphorePermit,
+    #[cfg(not(test))]
+    _global_queued_bytes: OwnedSemaphorePermit,
+}
+
+#[cfg(not(test))]
+fn global_peer_queue_bytes() -> Arc<Semaphore> {
+    static BUDGET: std::sync::OnceLock<Arc<Semaphore>> = std::sync::OnceLock::new();
+    Arc::clone(BUDGET.get_or_init(|| Arc::new(Semaphore::new(GLOBAL_PEER_QUEUE_BYTES))))
 }
 
 #[derive(Clone)]
@@ -196,6 +208,8 @@ struct GossipNetworkInner {
     metrics: P2pMetricsCounters,
     sync_progress: StdMutex<SyncProgressState>,
     chain_validation: Arc<ChainValidationCoordinator>,
+    #[cfg(not(test))]
+    chain_store: Mutex<Option<SqliteChainStore>>,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]

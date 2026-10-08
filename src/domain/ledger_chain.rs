@@ -1,6 +1,6 @@
 use std::collections::{BTreeMap, BTreeSet};
 
-use anyhow::{Result, bail};
+use anyhow::{Context, Result, bail};
 
 use crate::compact::CompactBlockContext;
 
@@ -80,17 +80,18 @@ impl Ledger {
             .transactions
             .iter()
             .map(|transaction| transaction.signature().to_string())
-            .collect();
+            .collect::<BTreeSet<_>>();
         Ok(Self {
-            chain: vec![genesis],
+            chain: vec![genesis].into(),
+            history_pruned: false,
             genesis_allocations: genesis_allocations.clone(),
-            utxos,
-            utxo_lineage: BTreeMap::new(),
-            lineage_values: BTreeMap::new(),
-            lineage_owners: BTreeMap::new(),
-            hybrid_legacy_owners: BTreeMap::new(),
+            utxos: utxos.into(),
+            utxo_lineage: BTreeMap::new().into(),
+            lineage_values: BTreeMap::new().into(),
+            lineage_owners: BTreeMap::new().into(),
+            hybrid_legacy_owners: BTreeMap::new().into(),
             tickets,
-            mined_transaction_ids,
+            mined_transaction_ids: mined_transaction_ids.into(),
             pending: Vec::new(),
             orphans: Vec::new(),
             pending_bytes: 0,
@@ -205,18 +206,19 @@ impl Ledger {
             .transactions
             .iter()
             .map(|transaction| transaction.signature().to_string())
-            .collect();
+            .collect::<BTreeSet<_>>();
 
         let mut ledger = Self {
-            chain: vec![genesis],
+            chain: vec![genesis].into(),
+            history_pruned: false,
             genesis_allocations,
-            utxos,
-            utxo_lineage: BTreeMap::new(),
-            lineage_values: BTreeMap::new(),
-            lineage_owners: BTreeMap::new(),
-            hybrid_legacy_owners: BTreeMap::new(),
+            utxos: utxos.into(),
+            utxo_lineage: BTreeMap::new().into(),
+            lineage_values: BTreeMap::new().into(),
+            lineage_owners: BTreeMap::new().into(),
+            hybrid_legacy_owners: BTreeMap::new().into(),
             tickets: Vec::new(),
-            mined_transaction_ids,
+            mined_transaction_ids: mined_transaction_ids.into(),
             pending: Vec::new(),
             orphans: Vec::new(),
             pending_bytes: 0,
@@ -337,20 +339,19 @@ impl Ledger {
         if candidate.genesis_hash() != self.genesis_hash() {
             bail!("candidate chain has no common genesis block");
         }
-        let max_common_index = self.chain.len().min(candidate.chain.len()) - 1;
-        for index in 0..=max_common_index {
-            if self.chain[index] != candidate.chain[index] {
-                if index == 0 {
-                    bail!("candidate chain has no common genesis block");
-                }
-                return Ok(ForkPoint {
-                    common_ancestor_height: index as u64 - 1,
-                });
-            }
-        }
-        Ok(ForkPoint {
-            common_ancestor_height: max_common_index as u64,
-        })
+        self.chain
+            .iter()
+            .rev()
+            .find_map(|local| {
+                candidate
+                    .chain
+                    .iter()
+                    .find(|remote| remote.height == local.height && remote.hash == local.hash)
+                    .map(|_| ForkPoint {
+                        common_ancestor_height: local.height,
+                    })
+            })
+            .context("candidate chain has no common block in the resident fork window")
     }
 
     fn choose_fork(&self, candidate: &Ledger, fork_point: ForkPoint) -> ForkChoice {
@@ -394,11 +395,11 @@ impl Ledger {
         let local_fork = self
             .chain
             .iter()
-            .skip(fork_point.first_diverging_height() as usize);
+            .filter(|block| block.height >= fork_point.first_diverging_height());
         let remote_fork = candidate
             .chain
             .iter()
-            .skip(fork_point.first_diverging_height() as usize);
+            .filter(|block| block.height >= fork_point.first_diverging_height());
         for (local, remote) in local_fork.zip(remote_fork) {
             match local.leader_score().cmp(&remote.leader_score()) {
                 std::cmp::Ordering::Equal => continue,
@@ -414,7 +415,7 @@ impl Ledger {
         for block in self
             .chain
             .iter()
-            .skip(fork_point.first_diverging_height() as usize)
+            .filter(|block| block.height >= fork_point.first_diverging_height())
         {
             carry_forward.extend(block.transactions.clone());
         }
@@ -435,7 +436,7 @@ impl Ledger {
         for block in self
             .chain
             .iter()
-            .skip(fork_point.first_diverging_height() as usize)
+            .filter(|block| block.height >= fork_point.first_diverging_height())
         {
             for envelope in &block.transactions_v2 {
                 if let Ok(bytes) = super::decode_hex(envelope)
@@ -507,6 +508,15 @@ mod tests {
             mine_difficulty_bits: 0,
             ..LaunchProfile::default()
         }
+    }
+
+    #[test]
+    fn cloned_ledgers_share_immutable_chain_and_state_backing() {
+        let ledger = Ledger::new(BTreeMap::new(), 1);
+        let cloned = ledger.clone();
+
+        assert_eq!(ledger.chain.as_ptr(), cloned.chain.as_ptr());
+        assert_eq!(ledger.utxos.backing_ptr(), cloned.utxos.backing_ptr());
     }
 
     fn ledger_with_profile(allocations: BTreeMap<String, u64>, profile_id: &str) -> Ledger {

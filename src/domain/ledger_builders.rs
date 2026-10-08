@@ -1205,6 +1205,26 @@ impl Ledger {
         })
     }
 
+    pub fn prepare_mine_search_work(
+        &self,
+        recipient: impl Into<String>,
+        salt: u64,
+        start_nonce: u64,
+        max_attempts: u64,
+    ) -> Result<super::MineSearchWork> {
+        let recipient = recipient.into();
+        self.validate_mine_reward_address(&recipient)?;
+        Ok(super::mining::mine_search_work(
+            recipient,
+            self.tip().hash.clone(),
+            salt,
+            start_nonce,
+            max_attempts,
+            self.current_mine_difficulty_bits(),
+            self.transaction_signing_domain(),
+        ))
+    }
+
     pub fn stratum_mine_template(
         &self,
         recipient: impl Into<String>,
@@ -1724,7 +1744,8 @@ mod v2_migration_tests {
         let mut migrated = ledger.clone();
         migrated.utxos = ledger
             .validated_v2_utxos_at_height(&migration, 3_000)
-            .unwrap();
+            .unwrap()
+            .into();
 
         let transfer = migrated
             .build_v2_transfer(&wallet, recipient.hybrid_versioned_address(), 40, 2)

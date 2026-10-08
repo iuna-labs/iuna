@@ -210,7 +210,7 @@ impl Ledger {
             AddressNetwork::from_profile_id(&self.launch_profile.profile_id),
             &mut utxos,
         )?;
-        Ok(utxos)
+        Ok(utxos.into_owned())
     }
 
     pub(super) fn validate_transaction_v2_anchor_for_block(
@@ -656,7 +656,7 @@ mod tests {
             .validated_v2_utxos_at_height(&migration, 3_000)
             .unwrap();
         let mut migrated_ledger = ledger.clone();
-        migrated_ledger.utxos = migrated_utxos;
+        migrated_ledger.utxos = migrated_utxos.into();
 
         let mut transfer = TransactionV2::Transfer {
             inputs: vec![TransactionV2Input {
@@ -714,11 +714,15 @@ mod tests {
         let migration = ledger.build_v2_migration(&wallet, 3).unwrap();
         ledger.utxos = ledger
             .validated_v2_utxos_at_height(&migration, 3_000)
-            .unwrap();
+            .unwrap()
+            .into();
         let split = ledger
             .build_v2_transfer(&wallet, wallet.hybrid_versioned_address(), 40, 1)
             .unwrap();
-        ledger.utxos = ledger.validated_v2_utxos_at_height(&split, 3_000).unwrap();
+        ledger.utxos = ledger
+            .validated_v2_utxos_at_height(&split, 3_000)
+            .unwrap()
+            .into();
         set_next_height(&mut ledger, post_activation_height());
 
         let burn = ledger.build_v2_burn_for_next_block(&wallet, 9, 5).unwrap();
@@ -804,7 +808,8 @@ mod tests {
         let migration = ledger.build_v2_migration(&wallet, 3).unwrap();
         ledger.utxos = ledger
             .validated_v2_utxos_at_height(&migration, 3_000)
-            .unwrap();
+            .unwrap()
+            .into();
         set_next_height(&mut ledger, post_activation_height());
 
         let transfer = ledger

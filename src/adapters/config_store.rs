@@ -21,6 +21,7 @@ pub const DEFAULT_BURN_FEE: Amount = 1;
 pub const DEFAULT_RECOVERY_VDF_TOP_RANK_PERCENT: u8 = 50;
 pub const DEFAULT_POW_MINING_WORKERS: u8 = 1;
 pub const MAX_POW_MINING_WORKERS: u8 = 32;
+pub const DEFAULT_VDF_MEMORY_MIB: u64 = crate::domain::DEFAULT_VDF_MEMORY_MIB;
 pub const DEFAULT_P2P_BIND_PORT: u16 = 9444;
 pub const DEFAULT_STRATUM_BIND_PORT: u16 = 3333;
 pub const DEFAULT_WALLET_ENDPOINT_BIND_PORT: u16 = 18662;
@@ -36,6 +37,7 @@ pub struct UiConfig {
     pub burn_per_block: Amount,
     pub burn_fee: Amount,
     pub recovery_vdf_top_rank_percent: u8,
+    pub vdf_memory_mib: u64,
     pub keep_track_of_metrics: bool,
     pub p2p_accept_inbound: bool,
     pub p2p_bind_port: u16,
@@ -59,6 +61,7 @@ impl Default for UiConfig {
             burn_per_block: DEFAULT_BURN_AMOUNT,
             burn_fee: DEFAULT_BURN_FEE,
             recovery_vdf_top_rank_percent: DEFAULT_RECOVERY_VDF_TOP_RANK_PERCENT,
+            vdf_memory_mib: DEFAULT_VDF_MEMORY_MIB,
             keep_track_of_metrics: false,
             p2p_accept_inbound: false,
             p2p_bind_port: DEFAULT_P2P_BIND_PORT,
@@ -93,6 +96,8 @@ struct ConfigFile {
     burn_fee: Option<Amount>,
     #[serde(default)]
     recovery_vdf_top_rank_percent: Option<u8>,
+    #[serde(default = "default_vdf_memory_mib")]
+    vdf_memory_mib: u64,
     #[serde(default)]
     keep_track_of_metrics: bool,
     #[serde(default)]
@@ -142,6 +147,7 @@ pub fn save(path: &Path, config: &UiConfig) -> Result<()> {
         burn_per_block: config.burn_per_block,
         burn_fee: Some(config.burn_fee),
         recovery_vdf_top_rank_percent: Some(config.recovery_vdf_top_rank_percent),
+        vdf_memory_mib: clamp_vdf_memory_mib(config.vdf_memory_mib),
         keep_track_of_metrics: config.keep_track_of_metrics,
         p2p_accept_inbound: Some(config.p2p_accept_inbound),
         p2p_bind_port: config.p2p_bind_port,
@@ -204,6 +210,7 @@ fn parse_config_bytes(bytes: &[u8], source: &str) -> Result<UiConfig> {
             .recovery_vdf_top_rank_percent
             .unwrap_or(DEFAULT_RECOVERY_VDF_TOP_RANK_PERCENT)
             .min(100),
+        vdf_memory_mib: clamp_vdf_memory_mib(stored.vdf_memory_mib),
         keep_track_of_metrics: stored.keep_track_of_metrics,
         p2p_accept_inbound,
         p2p_bind_port: stored.p2p_bind_port,
@@ -224,6 +231,17 @@ pub fn fuzz_parse_config(bytes: &[u8]) -> Result<UiConfig> {
 
 pub fn clamp_pow_mining_workers(workers: u8) -> u8 {
     workers.clamp(1, MAX_POW_MINING_WORKERS)
+}
+
+pub fn clamp_vdf_memory_mib(memory_mib: u64) -> u64 {
+    memory_mib.clamp(
+        crate::domain::MIN_VDF_MEMORY_MIB,
+        crate::domain::MAX_VDF_MEMORY_MIB,
+    )
+}
+
+fn default_vdf_memory_mib() -> u64 {
+    DEFAULT_VDF_MEMORY_MIB
 }
 
 fn default_pow_mining_workers() -> u8 {
@@ -353,6 +371,7 @@ mod tests {
         assert!(stored.contains("\"pow_mining_workers\": 1"));
         assert!(stored.contains("\"burn_per_block\": 100"));
         assert!(stored.contains("\"burn_fee\": 1"));
+        assert!(stored.contains("\"vdf_memory_mib\": 256"));
         assert!(!stored.contains("\"pow_mine_fee\""));
         assert!(!stored.contains("required_burn"));
         assert!(stored.contains("\"keep_track_of_metrics\": false"));
@@ -484,6 +503,7 @@ mod tests {
         assert_eq!(config.pow_mining_workers, 1);
         assert_eq!(config.burn_per_block, 0);
         assert_eq!(config.burn_fee, DEFAULT_BURN_FEE);
+        assert_eq!(config.vdf_memory_mib, super::DEFAULT_VDF_MEMORY_MIB);
         assert!(!config.keep_track_of_metrics);
         assert!(!config.p2p_accept_inbound);
         assert_eq!(config.p2p_bind_port, 9444);
@@ -504,6 +524,23 @@ mod tests {
         assert_eq!(config.burn_fee, DEFAULT_BURN_FEE);
         assert_eq!(config.burn_per_block, 100);
         assert_eq!(config.burn_fee, 1);
+    }
+
+    #[test]
+    fn vdf_memory_budget_is_persisted_and_clamped() {
+        let dir = tempdir().unwrap();
+        let path = dir.path().join("config.json");
+        let mut config = UiConfig {
+            vdf_memory_mib: 1,
+            ..UiConfig::default()
+        };
+
+        save(&path, &config).unwrap();
+        assert_eq!(load_or_create(&path).unwrap().vdf_memory_mib, 32);
+
+        config.vdf_memory_mib = u64::MAX;
+        save(&path, &config).unwrap();
+        assert_eq!(load_or_create(&path).unwrap().vdf_memory_mib, 4_096);
     }
 
     #[test]

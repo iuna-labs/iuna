@@ -27,7 +27,7 @@ impl NodeCore {
             Err(error) => return Err(error),
         };
         if outcome.added() {
-            self.outbox.push(GossipEnvelope::Transaction(tx));
+            self.enqueue_gossip(GossipEnvelope::Transaction(tx));
         }
         Ok(())
     }
@@ -47,7 +47,7 @@ impl NodeCore {
             Err(error) => return Err(error),
         };
         if outcome.added() {
-            self.outbox.push(GossipEnvelope::TransactionV2 {
+            self.enqueue_gossip(GossipEnvelope::TransactionV2 {
                 envelope: hex_encode(encoded),
             });
         }
@@ -65,7 +65,7 @@ impl NodeCore {
             .submit_transaction_v2(transaction.clone())?
             .added()
         {
-            self.outbox.push(GossipEnvelope::TransactionV2 { envelope });
+            self.enqueue_gossip(GossipEnvelope::TransactionV2 { envelope });
         }
         Ok(transaction)
     }
@@ -79,7 +79,7 @@ impl NodeCore {
         let mut candidate = self.ledger.clone();
         if candidate.prioritize_transaction_v2_for_block_building(transaction.clone())? {
             self.ledger = candidate;
-            self.outbox.push(GossipEnvelope::TransactionV2 { envelope });
+            self.enqueue_gossip(GossipEnvelope::TransactionV2 { envelope });
         }
         Ok(transaction)
     }
@@ -113,7 +113,7 @@ impl NodeCore {
             return Ok(());
         }
         self.burn_bundles.insert(key, bundle.clone());
-        self.outbox.push(GossipEnvelope::BurnBundle(bundle));
+        self.enqueue_gossip(GossipEnvelope::BurnBundle(bundle));
         Ok(())
     }
 
@@ -158,7 +158,7 @@ impl NodeCore {
                     self.clear_stale_local_block_anchor();
                     self.clear_stale_burn_bundle_collection();
                     self.prune_burn_bundles();
-                    self.outbox.push(GossipEnvelope::Block(block));
+                    self.enqueue_gossip(GossipEnvelope::Block(block));
                 }
                 Ok(())
             }
@@ -175,7 +175,7 @@ impl NodeCore {
                     }
                 }
                 for block in imported {
-                    self.outbox.push(GossipEnvelope::Block(block));
+                    self.enqueue_gossip(GossipEnvelope::Block(block));
                 }
                 Ok(())
             }
@@ -194,7 +194,7 @@ impl NodeCore {
             self.clear_stale_local_block_anchor();
             self.clear_stale_burn_bundle_collection();
             self.prune_burn_bundles();
-            self.outbox.push(GossipEnvelope::Block(block));
+            self.enqueue_gossip(GossipEnvelope::Block(block));
         }
         Ok(())
     }
@@ -253,7 +253,11 @@ impl NodeCore {
     }
 
     pub fn drain_outbox(&mut self) -> Vec<GossipEnvelope> {
+        self.outbox_bytes = 0;
         std::mem::take(&mut self.outbox)
+            .into_iter()
+            .map(|(envelope, _)| envelope)
+            .collect()
     }
 
     fn enqueue_imported_blocks(&mut self, previous_height: u64) -> Result<()> {
@@ -268,7 +272,7 @@ impl NodeCore {
             self.clear_stale_burn_bundle_collection();
         }
         if !blocks.is_empty() {
-            self.outbox.push(GossipEnvelope::Blocks { blocks });
+            self.enqueue_gossip(GossipEnvelope::Blocks { blocks });
         }
         Ok(())
     }

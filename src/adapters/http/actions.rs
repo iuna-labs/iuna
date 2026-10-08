@@ -14,7 +14,7 @@ use super::types::{
     ActionResponse, AddressBookDeleteForm, AddressBookForm, BurnSettingsForm, ChainResetForm,
     ConfigForm, FeeEstimateResponse, MetricsSettingsForm, P2pAnnounceForm, P2pInboundForm,
     PeerForm, PowMiningForm, RecoveryVdfSettingsForm, SeedPhraseForm, StratumSettingsForm,
-    TransferForm, WalletEndpointSettingsForm, WalletSetupResponse,
+    TransferForm, VdfMemorySettingsForm, WalletEndpointSettingsForm, WalletSetupResponse,
 };
 use super::{
     HttpState, action_json, api_error, config_store, estimate_burn_fee, estimate_mine_fee,
@@ -116,6 +116,13 @@ pub(super) async fn api_recovery_vdf_settings_form(
     Form(form): Form<RecoveryVdfSettingsForm>,
 ) -> Json<ActionResponse> {
     action_json(set_recovery_vdf_top_rank_percent(&state, form.top_rank_percent).await)
+}
+
+pub(super) async fn api_vdf_memory_settings_form(
+    State(state): State<HttpState>,
+    Form(form): Form<VdfMemorySettingsForm>,
+) -> Json<ActionResponse> {
+    action_json(set_vdf_memory_mib(&state, form.memory_mib).await)
 }
 
 pub(super) async fn api_chain_reset_form(
@@ -312,6 +319,14 @@ pub(super) async fn set_recovery_vdf_top_rank_percent(
     }
     let mut config = state.ui_config.lock().await;
     config.recovery_vdf_top_rank_percent = percent;
+    config_store::save(&state.config_path, &config)
+}
+
+pub(super) async fn set_vdf_memory_mib(state: &HttpState, memory_mib: u64) -> Result<()> {
+    let memory_mib = config_store::clamp_vdf_memory_mib(memory_mib);
+    state.node.lock().await.set_vdf_memory_mib(memory_mib);
+    let mut config = state.ui_config.lock().await;
+    config.vdf_memory_mib = memory_mib;
     config_store::save(&state.config_path, &config)
 }
 

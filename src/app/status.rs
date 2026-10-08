@@ -142,6 +142,7 @@ impl NodeCore {
                 wallet_is_current_leader,
                 last_auto_burn_height: self.last_auto_burn_height,
                 recovery_vdf_top_rank_percent: self.recovery_vdf_top_rank_percent,
+                vdf_memory_mib: self.vdf_memory_mib,
                 estimated_vdf_ms: self.estimated_vdf_ms(self.ledger.vdf_rounds()),
                 vdf_speed_source: self.vdf_speed_sample.map(|sample| sample.source),
             },
@@ -260,6 +261,17 @@ impl NodeCore {
 
     pub fn set_recovery_vdf_top_rank_percent(&mut self, percent: u8) {
         self.recovery_vdf_top_rank_percent = percent.min(100);
+    }
+
+    pub fn set_vdf_memory_mib(&mut self, memory_mib: u64) {
+        self.vdf_memory_mib = memory_mib.clamp(
+            crate::domain::MIN_VDF_MEMORY_MIB,
+            crate::domain::MAX_VDF_MEMORY_MIB,
+        );
+    }
+
+    pub fn vdf_memory_mib(&self) -> u64 {
+        self.vdf_memory_mib
     }
 
     /// Records how fast this machine ran VDF rounds. A completed finalization run reflects the

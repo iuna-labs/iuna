@@ -4,7 +4,7 @@ use super::helpers::{allowed_fallback_vdf_rank_count, converge_fee_by_byte};
 use super::{
     AUTO_PLAINTEXT_BURN_BEFORE_RECOVERY_MS, AutoMineOutcome, AutoMinePlan,
     BURN_BUNDLE_COLLECTION_MS, GossipEnvelope, Ledger, MIN_AUTO_BLOCK_ANCHOR_BURN_AMOUNT, NodeCore,
-    PreparedBlock, Transaction, run_vdf,
+    PreparedBlock, Transaction, run_vdf_with_memory_limit,
 };
 use crate::domain::{
     Amount, BurnCommitteeMember, FinalizerMode, HYBRID_REWARD_ACTIVATION_HEIGHT,
@@ -26,7 +26,8 @@ impl NodeCore {
         let Some(work) = plan.work else {
             return outcome;
         };
-        let vdf_output = run_vdf(work.vdf_seed(), work.vdf_rounds());
+        let vdf_output =
+            run_vdf_with_memory_limit(work.vdf_seed(), work.vdf_rounds(), self.vdf_memory_mib);
         match self.complete_prepared_block_at(work, vdf_output, timestamp_ms) {
             Ok(block) => {
                 outcome.block = Some(block);
@@ -709,7 +710,7 @@ impl NodeCore {
             return;
         }
 
-        self.outbox.push(GossipEnvelope::BurnBundleRequest {
+        self.enqueue_gossip(GossipEnvelope::BurnBundleRequest {
             height,
             prev_hash,
             slots,
@@ -826,7 +827,7 @@ mod tests {
         domain::{
             BurnBundle, BurnCommitteeMember, FinalizerMode, GenesisBurn,
             HYBRID_REWARD_ACTIVATION_HEIGHT, LaunchProfile, Ledger, MICRO_IUNA, Transaction,
-            TransactionV2, Wallet, run_vdf,
+            TransactionV2, Wallet,
         },
     };
     use tempfile::tempdir;
@@ -886,7 +887,7 @@ mod tests {
         let block = node
             .complete_prepared_block_at(
                 work.clone(),
-                run_vdf(work.vdf_seed(), work.vdf_rounds()),
+                crate::domain::run_vdf(work.vdf_seed(), work.vdf_rounds()),
                 1 + BURN_BUNDLE_COLLECTION_MS,
             )
             .unwrap();
@@ -1341,7 +1342,7 @@ mod tests {
             alpha
                 .complete_prepared_block_at(
                     work.clone(),
-                    run_vdf(work.vdf_seed(), work.vdf_rounds()),
+                    crate::domain::run_vdf(work.vdf_seed(), work.vdf_rounds()),
                     2,
                 )
                 .unwrap()
@@ -1876,7 +1877,7 @@ mod tests {
         let block = producer
             .complete_prepared_block_at(
                 work.clone(),
-                run_vdf(work.vdf_seed(), work.vdf_rounds()),
+                crate::domain::run_vdf(work.vdf_seed(), work.vdf_rounds()),
                 1,
             )
             .unwrap();

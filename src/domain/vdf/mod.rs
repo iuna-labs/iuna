@@ -23,6 +23,9 @@ mod reference;
 
 const VDF_SOLUTION_PREFIX: &str = "classgroup-wesolowski-bqfc-v1:";
 const MIN_VDF_ROUNDS: u64 = 1;
+pub const DEFAULT_VDF_MEMORY_MIB: u64 = 256;
+pub const MIN_VDF_MEMORY_MIB: u64 = 32;
+pub const MAX_VDF_MEMORY_MIB: u64 = 4_096;
 #[cfg(feature = "e2e")]
 static E2E_VDF_ROUND_DIVISOR: AtomicU64 = AtomicU64::new(1);
 pub(super) const VDF_RETARGET_WINDOW_BLOCKS: usize = 20;
@@ -54,7 +57,11 @@ pub fn configure_e2e_vdf_round_divisor_for_tests(divisor: u64) {
 }
 
 pub fn run_vdf(seed: &str, rounds: u64) -> String {
-    run_vdf_with_progress(seed, rounds, Duration::MAX, |_| {})
+    run_vdf_with_memory_limit(seed, rounds, DEFAULT_VDF_MEMORY_MIB)
+}
+
+pub fn run_vdf_with_memory_limit(seed: &str, rounds: u64, memory_mib: u64) -> String {
+    run_vdf_with_progress_and_memory_limit(seed, rounds, Duration::MAX, memory_mib, |_| {})
 }
 
 pub fn run_vdf_with_progress(
@@ -63,9 +70,32 @@ pub fn run_vdf_with_progress(
     progress_interval: Duration,
     progress: impl FnMut(VdfProgress),
 ) -> String {
+    run_vdf_with_progress_and_memory_limit(
+        seed,
+        rounds,
+        progress_interval,
+        DEFAULT_VDF_MEMORY_MIB,
+        progress,
+    )
+}
+
+pub fn run_vdf_with_progress_and_memory_limit(
+    seed: &str,
+    rounds: u64,
+    progress_interval: Duration,
+    memory_mib: u64,
+    progress: impl FnMut(VdfProgress),
+) -> String {
     let cancelled = AtomicBool::new(false);
-    run_vdf_cancellable_with_progress(seed, rounds, progress_interval, &cancelled, progress)
-        .expect("non-cancellable VDF must finish")
+    run_vdf_cancellable_with_progress_and_memory_limit(
+        seed,
+        rounds,
+        progress_interval,
+        &cancelled,
+        memory_mib,
+        progress,
+    )
+    .expect("non-cancellable VDF must finish")
 }
 
 pub fn run_vdf_cancellable_with_progress(
@@ -73,6 +103,24 @@ pub fn run_vdf_cancellable_with_progress(
     rounds: u64,
     progress_interval: Duration,
     cancelled: &AtomicBool,
+    progress: impl FnMut(VdfProgress),
+) -> Option<String> {
+    run_vdf_cancellable_with_progress_and_memory_limit(
+        seed,
+        rounds,
+        progress_interval,
+        cancelled,
+        DEFAULT_VDF_MEMORY_MIB,
+        progress,
+    )
+}
+
+pub fn run_vdf_cancellable_with_progress_and_memory_limit(
+    seed: &str,
+    rounds: u64,
+    progress_interval: Duration,
+    cancelled: &AtomicBool,
+    memory_mib: u64,
     mut progress: impl FnMut(VdfProgress),
 ) -> Option<String> {
     let (proof_seed, proof_rounds) = vdf_proof_parameters(seed, rounds);
@@ -100,6 +148,7 @@ pub fn run_vdf_cancellable_with_progress(
             );
         },
         cancelled,
+        memory_mib.clamp(MIN_VDF_MEMORY_MIB, MAX_VDF_MEMORY_MIB) * 1024 * 1024,
     )
     .expect("valid IUNA VDF parameters must produce a class-group proof");
     solution.map(|solution| encode_vdf_solution(&solution))

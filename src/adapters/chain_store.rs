@@ -13,7 +13,7 @@ use crate::{
         decode_compact_segment, decode_compact_snapshot, encode_compact_segment,
         encode_compact_snapshot, legacy_compact_snapshot_version,
     },
-    domain::{CHAIN_SEGMENT_BLOCKS, ChainSnapshot, hex_encode},
+    domain::{Block, CHAIN_SEGMENT_BLOCKS, ChainSnapshot, Ledger, hex_encode},
 };
 
 #[cfg(feature = "fuzzing")]
@@ -44,6 +44,14 @@ CREATE TABLE IF NOT EXISTS chain_segments (
     blob_hash TEXT NOT NULL,
     blocks_blob BLOB NOT NULL
 );
+CREATE TABLE IF NOT EXISTS chain_block_index (
+    height INTEGER PRIMARY KEY,
+    block_hash TEXT NOT NULL UNIQUE,
+    segment_id INTEGER NOT NULL,
+    segment_offset INTEGER NOT NULL
+);
+CREATE INDEX IF NOT EXISTS chain_block_index_hash
+ON chain_block_index(block_hash);
 CREATE TABLE IF NOT EXISTS chain_verification (
     id INTEGER PRIMARY KEY CHECK (id = 1),
     tip_hash TEXT NOT NULL,
@@ -102,7 +110,215 @@ pub struct LoadedChainSnapshot {
     pub revalidation_from_height: Option<u64>,
 }
 
+pub struct LoadedBoundedLedger {
+    pub ledger: Ledger,
+    pub revalidation_from_height: Option<u64>,
+}
+
 impl SqliteChainStore {
+    /// Rebuild derived consensus state while retaining only genesis and a recent block window.
+    /// Segment decoding and replay are bounded independently of total chain height.
+    pub fn load_bounded_ledger(
+        &self,
+        resident_blocks: usize,
+    ) -> Result<Option<LoadedBoundedLedger>> {
+        self.with_connection(|connection| {
+            let metadata = connection
+                .query_row(
+                    "SELECT height, tip_hash FROM chain_metadata WHERE id = 1",
+                    [],
+                    |row| Ok((row.get::<_, u64>(0)?, row.get::<_, String>(1)?)),
+                )
+                .optional()
+                .context("failed to load bounded ledger metadata")?;
+            let Some((stored_height, stored_tip_hash)) = metadata else {
+                return Ok(None);
+            };
+            let header = load_chain_header(connection)?
+                .context("chain metadata is missing its compact header")?;
+            let revalidation_from_height = load_revalidation_height(connection, &stored_tip_hash)?;
+            let mut statement = connection
+                .prepare("SELECT segment_id FROM chain_segments ORDER BY segment_id ASC")
+                .context("failed to prepare bounded ledger segment stream")?;
+            let segment_ids = statement
+                .query_map([], |row| row.get::<_, u64>(0))
+                .context("failed to query bounded ledger segments")?;
+            let mut ledger = None::<Ledger>;
+            for segment_id in segment_ids {
+                let segment_id = segment_id.context("failed to read bounded ledger segment id")?;
+                let blocks =
+                    load_chain_segment(connection, segment_id, &header.genesis_allocations)?
+                        .with_context(|| format!("missing chain segment {segment_id}"))?;
+                for block in blocks {
+                    if let Some(current) = ledger.as_mut() {
+                        if revalidation_from_height.is_some_and(|height| block.height >= height) {
+                            current.apply_block_at(block, u64::MAX)?;
+                        } else {
+                            current.apply_preverified_block_at(block, u64::MAX)?;
+                        }
+                        current.retain_recent_chain_blocks(resident_blocks);
+                    } else {
+                        let mut genesis_snapshot = header.clone();
+                        genesis_snapshot.blocks.push(block);
+                        ledger = Some(Ledger::from_preverified_snapshot(genesis_snapshot)?);
+                    }
+                }
+            }
+            let ledger = ledger.context("segmented chain database contains no blocks")?;
+            if ledger.height() != stored_height || ledger.tip_hash() != stored_tip_hash {
+                anyhow::bail!("bounded ledger tip does not match database metadata");
+            }
+            Ok(Some(LoadedBoundedLedger {
+                ledger,
+                revalidation_from_height,
+            }))
+        })
+    }
+
+    /// Read a bounded block range without reconstructing the complete chain in memory.
+    pub fn blocks_from(&self, from_height: u64, limit: usize) -> Result<Vec<Block>> {
+        if limit == 0 {
+            return Ok(Vec::new());
+        }
+        self.with_connection(|connection| {
+            let header = load_chain_header(connection)?
+                .context("cannot read blocks from an empty chain database")?;
+            let last_height = from_height.saturating_add(limit.saturating_sub(1) as u64);
+            let first_segment = from_height / CHAIN_SEGMENT_BLOCKS as u64;
+            let last_segment = last_height / CHAIN_SEGMENT_BLOCKS as u64;
+            let mut blocks = Vec::with_capacity(limit.min(CHAIN_SEGMENT_BLOCKS));
+            for segment_id in first_segment..=last_segment {
+                let Some(segment) =
+                    load_chain_segment(connection, segment_id, &header.genesis_allocations)?
+                else {
+                    break;
+                };
+                blocks.extend(
+                    segment
+                        .into_iter()
+                        .filter(|block| block.height >= from_height)
+                        .take(limit.saturating_sub(blocks.len())),
+                );
+                if blocks.len() == limit {
+                    break;
+                }
+            }
+            Ok(blocks)
+        })
+    }
+
+    pub fn block_at_height(&self, height: u64) -> Result<Option<Block>> {
+        Ok(self.blocks_from(height, 1)?.into_iter().next())
+    }
+
+    pub fn tip(&self) -> Result<Option<(u64, String)>> {
+        self.with_connection(|connection| {
+            connection
+                .query_row(
+                    "SELECT height, tip_hash FROM chain_metadata WHERE id = 1",
+                    [],
+                    |row| Ok((row.get(0)?, row.get(1)?)),
+                )
+                .optional()
+                .context("failed to load persisted chain tip")
+        })
+    }
+
+    pub fn block_by_hash(&self, hash: &str) -> Result<Option<Block>> {
+        self.with_connection(|connection| {
+            let location = connection
+                .query_row(
+                    "SELECT height FROM chain_block_index WHERE block_hash = ?1",
+                    [hash],
+                    |row| row.get::<_, u64>(0),
+                )
+                .optional()
+                .context("failed to query chain block index")?;
+            let Some(height) = location else {
+                return Ok(None);
+            };
+            let header = load_chain_header(connection)?
+                .context("chain block index exists without chain metadata")?;
+            Ok(load_chain_segment(
+                connection,
+                height / CHAIN_SEGMENT_BLOCKS as u64,
+                &header.genesis_allocations,
+            )?
+            .and_then(|blocks| blocks.into_iter().find(|block| block.hash == hash)))
+        })
+    }
+
+    pub fn blocks_after_locator(&self, locator: &[String], limit: usize) -> Result<Vec<Block>> {
+        if limit == 0 {
+            return Ok(Vec::new());
+        }
+        self.with_connection(|connection| {
+            let mut common_height = None;
+            for hash in locator {
+                common_height = connection
+                    .query_row(
+                        "SELECT height FROM chain_block_index WHERE block_hash = ?1",
+                        [hash],
+                        |row| row.get::<_, u64>(0),
+                    )
+                    .optional()
+                    .context("failed to resolve block locator")?;
+                if common_height.is_some() {
+                    break;
+                }
+            }
+            common_height.map_or_else(
+                || Ok(Vec::new()),
+                |height| self.blocks_from(height.saturating_add(1), limit),
+            )
+        })
+    }
+
+    /// Visit persisted segments one at a time. At most one 256-block segment is resident.
+    pub fn for_each_segment(&self, mut visit: impl FnMut(&[Block]) -> Result<()>) -> Result<()> {
+        self.with_connection(|connection| {
+            let Some(header) = load_chain_header(connection)? else {
+                return Ok(());
+            };
+            let mut statement = connection
+                .prepare("SELECT segment_id FROM chain_segments ORDER BY segment_id ASC")
+                .context("failed to prepare chain segment stream")?;
+            let segment_ids = statement
+                .query_map([], |row| row.get::<_, u64>(0))
+                .context("failed to query chain segment stream")?;
+            for segment_id in segment_ids {
+                let segment_id = segment_id.context("failed to read chain segment id")?;
+                let blocks =
+                    load_chain_segment(connection, segment_id, &header.genesis_allocations)?
+                        .with_context(|| format!("missing chain segment {segment_id}"))?;
+                visit(&blocks)?;
+            }
+            Ok(())
+        })
+    }
+
+    pub fn completed_segment_summaries(&self) -> Result<Vec<(u64, u64, String)>> {
+        self.with_connection(|connection| {
+            let mut statement = connection
+                .prepare(
+                    r#"
+SELECT segment_id, last_height, end_block_hash
+FROM chain_segments
+WHERE last_height - first_height + 1 = ?1
+ORDER BY segment_id ASC
+"#,
+                )
+                .context("failed to prepare completed chain segment summaries")?;
+            statement
+                .query_map([CHAIN_SEGMENT_BLOCKS as u64], |row| {
+                    Ok((row.get(0)?, row.get(1)?, row.get(2)?))
+                })
+                .context("failed to query completed chain segment summaries")?
+                .collect::<std::result::Result<Vec<_>, _>>()
+                .context("failed to read completed chain segment summaries")
+        })
+    }
+
     pub fn open(path: impl AsRef<Path>) -> Result<Self> {
         let path = path.as_ref().to_path_buf();
         if let Some(parent) = path.parent() {
@@ -128,6 +344,7 @@ impl SqliteChainStore {
             connection
                 .execute_batch(SCHEMA)
                 .context("failed to initialize chain database schema")?;
+            ensure_chain_block_index(connection)?;
             Ok(())
         })?;
         Ok(store)
@@ -290,6 +507,182 @@ VALUES (?1, ?2, ?3, ?4)
         self.save_with_verification_status(snapshot, true)
     }
 
+    /// Persist genesis plus a bounded resident tail without loading historical segments.
+    /// A normal contiguous snapshot is accepted as well, which keeps the startup/bootstrap path
+    /// simple while allowing a running node to discard old blocks after its first checkpoint.
+    pub fn save_verified_resident(&self, snapshot: &ChainSnapshot) -> Result<()> {
+        let is_full_snapshot = snapshot
+            .blocks
+            .iter()
+            .enumerate()
+            .all(|(height, block)| block.height == height as u64);
+        if is_full_snapshot {
+            return self.save_verified(snapshot);
+        }
+
+        let genesis = snapshot
+            .blocks
+            .first()
+            .context("cannot persist an empty resident chain")?;
+        if genesis.height != 0 {
+            anyhow::bail!("resident chain does not start with genesis");
+        }
+        let tail = snapshot
+            .blocks
+            .get(1..)
+            .filter(|blocks| !blocks.is_empty())
+            .context("pruned resident chain has no recent blocks")?;
+        for pair in tail.windows(2) {
+            if pair[1].height != pair[0].height.saturating_add(1)
+                || pair[1].prev_hash != pair[0].hash
+            {
+                anyhow::bail!("resident chain tail is not contiguous");
+            }
+        }
+        let tail_start = tail[0].height;
+        let tip = tail.last().expect("resident tail is not empty");
+        let header = ChainSnapshot {
+            genesis_allocations: snapshot.genesis_allocations.clone(),
+            vdf_rounds: snapshot.vdf_rounds,
+            launch_profile: snapshot.launch_profile.clone(),
+            blocks: Vec::new(),
+        };
+        let header_blob =
+            encode_compact_snapshot(&header).context("failed to encode compact chain header")?;
+        let updated_at_ms = unix_ms();
+
+        self.with_connection_mut(|connection| {
+            let transaction = connection
+                .transaction()
+                .context("failed to start resident chain persistence transaction")?;
+            let stored_header = transaction
+                .query_row(
+                    "SELECT header_blob FROM chain_metadata WHERE id = 1",
+                    [],
+                    |row| row.get::<_, Vec<u8>>(0),
+                )
+                .optional()
+                .context("failed to inspect resident chain metadata")?
+                .context("cannot append a resident tail before the full chain is persisted")?;
+            if stored_header != header_blob {
+                anyhow::bail!("resident chain header does not match persisted chain");
+            }
+            let predecessor_height = tail_start.saturating_sub(1);
+            let predecessor_hash = transaction
+                .query_row(
+                    "SELECT block_hash FROM chain_block_index WHERE height = ?1",
+                    [predecessor_height],
+                    |row| row.get::<_, String>(0),
+                )
+                .optional()
+                .context("failed to inspect resident tail predecessor")?
+                .context("persisted chain does not reach the resident tail")?;
+            if predecessor_hash != tail[0].prev_hash {
+                anyhow::bail!("resident tail does not extend its persisted predecessor");
+            }
+
+            let first_segment_id = tail_start / CHAIN_SEGMENT_BLOCKS as u64;
+            let last_segment_id = tip.height / CHAIN_SEGMENT_BLOCKS as u64;
+            let mut first_prefix = if tail_start % CHAIN_SEGMENT_BLOCKS as u64 == 0 {
+                Vec::new()
+            } else {
+                load_chain_segment(
+                    &transaction,
+                    first_segment_id,
+                    &snapshot.genesis_allocations,
+                )?
+                .context("persisted chain is missing the resident tail's first segment")?
+                .into_iter()
+                .filter(|block| block.height < tail_start)
+                .collect::<Vec<_>>()
+            };
+
+            transaction
+                .execute(
+                    "DELETE FROM chain_block_index WHERE height >= ?1",
+                    [tail_start],
+                )
+                .context("failed to truncate the resident chain block index")?;
+            for segment_id in first_segment_id..=last_segment_id {
+                let segment_start = segment_id * CHAIN_SEGMENT_BLOCKS as u64;
+                let segment_end = segment_start + CHAIN_SEGMENT_BLOCKS as u64;
+                let mut blocks = if segment_id == first_segment_id {
+                    std::mem::take(&mut first_prefix)
+                } else {
+                    Vec::new()
+                };
+                blocks.extend(
+                    tail.iter()
+                        .filter(|block| segment_start <= block.height && block.height < segment_end)
+                        .cloned(),
+                );
+                let last = blocks
+                    .last()
+                    .context("resident tail produced an empty chain segment")?;
+                let blocks_blob = encode_compact_segment(&snapshot.genesis_allocations, &blocks)
+                    .with_context(|| format!("failed to encode resident chain segment {segment_id}"))?;
+                let blob_hash = sha256_hex(&blocks_blob);
+                transaction.execute(
+                    r#"
+INSERT INTO chain_segments (
+    segment_id, first_height, last_height, end_block_hash, blob_hash, blocks_blob
+)
+VALUES (?1, ?2, ?3, ?4, ?5, ?6)
+ON CONFLICT(segment_id) DO UPDATE SET
+    first_height = excluded.first_height,
+    last_height = excluded.last_height,
+    end_block_hash = excluded.end_block_hash,
+    blob_hash = excluded.blob_hash,
+    blocks_blob = excluded.blocks_blob
+"#,
+                    params![segment_id, blocks[0].height, last.height, last.hash, blob_hash, blocks_blob],
+                )
+                .with_context(|| format!("failed to persist resident chain segment {segment_id}"))?;
+                transaction
+                    .execute("DELETE FROM chain_block_index WHERE segment_id = ?1", [segment_id])
+                    .with_context(|| format!("failed to replace resident block index segment {segment_id}"))?;
+                for (segment_offset, block) in blocks.iter().enumerate() {
+                    transaction.execute(
+                        "INSERT INTO chain_block_index (height, block_hash, segment_id, segment_offset) VALUES (?1, ?2, ?3, ?4)",
+                        params![block.height, block.hash, segment_id, segment_offset as u64],
+                    )
+                    .with_context(|| format!("failed to index resident block at height {}", block.height))?;
+                }
+            }
+            transaction
+                .execute("DELETE FROM chain_segments WHERE segment_id > ?1", [last_segment_id])
+                .context("failed to remove obsolete resident chain segments")?;
+            transaction
+                .execute("DELETE FROM chain_block_index WHERE height > ?1", [tip.height])
+                .context("failed to remove obsolete resident block index rows")?;
+            transaction.execute(
+                r#"
+UPDATE chain_metadata
+SET height = ?1, tip_hash = ?2, updated_at_ms = ?3
+WHERE id = 1
+"#,
+                params![tip.height, tip.hash, updated_at_ms],
+            )
+            .context("failed to advance resident chain metadata")?;
+            transaction.execute(
+                r#"
+INSERT INTO chain_verification (id, tip_hash, verifier_version, verified_at_ms)
+VALUES (1, ?1, ?2, ?3)
+ON CONFLICT(id) DO UPDATE SET
+    tip_hash = excluded.tip_hash,
+    verifier_version = excluded.verifier_version,
+    verified_at_ms = excluded.verified_at_ms
+"#,
+                params![tip.hash, CURRENT_CONSENSUS_RULESET, updated_at_ms],
+            )
+            .context("failed to persist resident chain verification status")?;
+            transaction
+                .commit()
+                .context("failed to commit resident chain persistence transaction")?;
+            Ok(())
+        })
+    }
+
     fn save_with_verification_status(
         &self,
         snapshot: &ChainSnapshot,
@@ -379,6 +772,36 @@ ON CONFLICT(segment_id) DO UPDATE SET
                         ],
                     )
                     .with_context(|| format!("failed to persist chain segment {segment_id}"))?;
+                transaction
+                    .execute(
+                        "DELETE FROM chain_block_index WHERE segment_id = ?1",
+                        [segment_id as u64],
+                    )
+                    .with_context(|| {
+                        format!("failed to replace block index for segment {segment_id}")
+                    })?;
+                for (segment_offset, block) in blocks.iter().enumerate() {
+                    transaction
+                        .execute(
+                            r#"
+INSERT INTO chain_block_index (height, block_hash, segment_id, segment_offset)
+VALUES (?1, ?2, ?3, ?4)
+ON CONFLICT(height) DO UPDATE SET
+    block_hash = excluded.block_hash,
+    segment_id = excluded.segment_id,
+    segment_offset = excluded.segment_offset
+"#,
+                            params![
+                                block.height,
+                                block.hash,
+                                segment_id as u64,
+                                segment_offset as u64
+                            ],
+                        )
+                        .with_context(|| {
+                            format!("failed to index block at height {}", block.height)
+                        })?;
+                }
             }
             let segment_count = snapshot.blocks.len().div_ceil(CHAIN_SEGMENT_BLOCKS);
             transaction
@@ -387,6 +810,32 @@ ON CONFLICT(segment_id) DO UPDATE SET
                     [segment_count as u64],
                 )
                 .context("failed to remove obsolete chain segments")?;
+            transaction
+                .execute("DELETE FROM chain_block_index WHERE height > ?1", [height])
+                .context("failed to remove obsolete chain block index rows")?;
+            let indexed_blocks = transaction
+                .query_row("SELECT COUNT(*) FROM chain_block_index", [], |row| {
+                    row.get::<_, u64>(0)
+                })
+                .context("failed to count chain block index rows")?;
+            if indexed_blocks != snapshot.blocks.len() as u64 {
+                transaction
+                    .execute("DELETE FROM chain_block_index", [])
+                    .context("failed to rebuild chain block index")?;
+                for (height_index, block) in snapshot.blocks.iter().enumerate() {
+                    transaction
+                        .execute(
+                            "INSERT INTO chain_block_index (height, block_hash, segment_id, segment_offset) VALUES (?1, ?2, ?3, ?4)",
+                            params![
+                                block.height,
+                                block.hash,
+                                height_index / CHAIN_SEGMENT_BLOCKS,
+                                height_index % CHAIN_SEGMENT_BLOCKS,
+                            ],
+                        )
+                        .with_context(|| format!("failed to rebuild block index at height {}", block.height))?;
+                }
+            }
             transaction
                 .execute(
                     r#"
@@ -442,6 +891,9 @@ ON CONFLICT(id) DO UPDATE SET
                 .execute("DELETE FROM chain_segments", [])
                 .context("failed to delete chain segments")?;
             transaction
+                .execute("DELETE FROM chain_block_index", [])
+                .context("failed to delete chain block index")?;
+            transaction
                 .execute("DELETE FROM chain_snapshots", [])
                 .context("failed to delete chain snapshot")?;
             transaction
@@ -464,6 +916,9 @@ ON CONFLICT(id) DO UPDATE SET
                 r#"
 PRAGMA busy_timeout = 5000;
 PRAGMA synchronous = NORMAL;
+PRAGMA cache_size = -8192;
+PRAGMA temp_store = FILE;
+PRAGMA mmap_size = 0;
 "#,
             )
             .context("failed to configure chain database connection")?;
@@ -478,6 +933,9 @@ PRAGMA synchronous = NORMAL;
 PRAGMA journal_mode = WAL;
 PRAGMA busy_timeout = 5000;
 PRAGMA synchronous = NORMAL;
+PRAGMA cache_size = -8192;
+PRAGMA temp_store = FILE;
+PRAGMA mmap_size = 0;
 "#,
             )
             .context("failed to configure chain database connection")?;
@@ -488,6 +946,117 @@ PRAGMA synchronous = NORMAL;
         Connection::open(&self.path)
             .with_context(|| format!("failed to open chain database {}", self.path.display()))
     }
+}
+
+fn load_chain_header(connection: &Connection) -> Result<Option<ChainSnapshot>> {
+    let header_blob = connection
+        .query_row(
+            "SELECT header_blob FROM chain_metadata WHERE id = 1",
+            [],
+            |row| row.get::<_, Vec<u8>>(0),
+        )
+        .optional()
+        .context("failed to load chain metadata header")?;
+    header_blob
+        .map(|blob| {
+            let header =
+                decode_compact_snapshot(&blob).context("failed to decode chain metadata header")?;
+            if !header.blocks.is_empty() {
+                anyhow::bail!("chain metadata header unexpectedly contains blocks");
+            }
+            Ok(header)
+        })
+        .transpose()
+}
+
+fn ensure_chain_block_index(connection: &mut Connection) -> Result<()> {
+    let metadata_height = connection
+        .query_row(
+            "SELECT height FROM chain_metadata WHERE id = 1",
+            [],
+            |row| row.get::<_, u64>(0),
+        )
+        .optional()
+        .context("failed to inspect chain metadata for block index migration")?;
+    let Some(metadata_height) = metadata_height else {
+        return Ok(());
+    };
+    let indexed_blocks = connection
+        .query_row("SELECT COUNT(*) FROM chain_block_index", [], |row| {
+            row.get::<_, u64>(0)
+        })
+        .context("failed to inspect chain block index migration state")?;
+    if indexed_blocks == metadata_height.saturating_add(1) {
+        return Ok(());
+    }
+    let header = load_chain_header(connection)?
+        .context("chain metadata is missing its header during block index migration")?;
+    let segment_ids = {
+        let mut statement = connection
+            .prepare("SELECT segment_id FROM chain_segments ORDER BY segment_id ASC")
+            .context("failed to prepare chain block index migration")?;
+        statement
+            .query_map([], |row| row.get::<_, u64>(0))
+            .context("failed to query chain block index migration segments")?
+            .collect::<std::result::Result<Vec<_>, _>>()
+            .context("failed to read chain block index migration segments")?
+    };
+    let transaction = connection
+        .transaction()
+        .context("failed to start chain block index migration")?;
+    transaction
+        .execute("DELETE FROM chain_block_index", [])
+        .context("failed to reset chain block index during migration")?;
+    for segment_id in segment_ids {
+        let blocks = load_chain_segment(&transaction, segment_id, &header.genesis_allocations)?
+            .with_context(|| {
+                format!("missing chain segment {segment_id} during index migration")
+            })?;
+        for (segment_offset, block) in blocks.iter().enumerate() {
+            transaction
+                .execute(
+                    "INSERT INTO chain_block_index (height, block_hash, segment_id, segment_offset) VALUES (?1, ?2, ?3, ?4)",
+                    params![block.height, block.hash, segment_id, segment_offset as u64],
+                )
+                .with_context(|| format!("failed to index migrated block at height {}", block.height))?;
+        }
+    }
+    let migrated_blocks = transaction
+        .query_row("SELECT COUNT(*) FROM chain_block_index", [], |row| {
+            row.get::<_, u64>(0)
+        })
+        .context("failed to verify migrated chain block index")?;
+    if migrated_blocks != metadata_height.saturating_add(1) {
+        anyhow::bail!("chain block index migration did not cover the persisted height");
+    }
+    transaction
+        .commit()
+        .context("failed to commit chain block index migration")?;
+    Ok(())
+}
+
+fn load_chain_segment(
+    connection: &Connection,
+    segment_id: u64,
+    genesis_allocations: &std::collections::BTreeMap<String, crate::domain::Amount>,
+) -> Result<Option<Vec<Block>>> {
+    let stored = connection
+        .query_row(
+            "SELECT blob_hash, blocks_blob FROM chain_segments WHERE segment_id = ?1",
+            [segment_id],
+            |row| Ok((row.get::<_, String>(0)?, row.get::<_, Vec<u8>>(1)?)),
+        )
+        .optional()
+        .with_context(|| format!("failed to load chain segment {segment_id}"))?;
+    let Some((blob_hash, blocks_blob)) = stored else {
+        return Ok(None);
+    };
+    if sha256_hex(&blocks_blob) != blob_hash {
+        anyhow::bail!("chain segment {segment_id} blob hash does not match its contents");
+    }
+    decode_compact_segment(&blocks_blob, genesis_allocations)
+        .with_context(|| format!("failed to decode chain segment {segment_id}"))
+        .map(Some)
 }
 
 fn load_segmented_snapshot(connection: &Connection) -> Result<Option<ChainSnapshot>> {
@@ -782,6 +1351,15 @@ VALUES (1, 0, 'legacy-tip', '{}', 0);
         snapshot
     }
 
+    fn resident_tail(snapshot: &ChainSnapshot, recent_blocks: usize) -> ChainSnapshot {
+        let mut resident = snapshot.clone();
+        let tail_start = snapshot.blocks.len().saturating_sub(recent_blocks).max(1);
+        resident.blocks = std::iter::once(snapshot.blocks[0].clone())
+            .chain(snapshot.blocks[tail_start..].iter().cloned())
+            .collect();
+        resident
+    }
+
     #[test]
     fn open_archives_legacy_json_schema_and_creates_fresh_database() {
         let dir = tempdir().unwrap();
@@ -889,6 +1467,61 @@ VALUES (1, 0, 'bad-tip', ?1, 0)
     }
 
     #[test]
+    fn resident_tail_updates_segments_without_loading_the_full_chain() {
+        let dir = tempdir().unwrap();
+        let store = SqliteChainStore::open(dir.path().join("chain.sqlite3")).unwrap();
+        let original = synthetic_snapshot("chain-store-resident-tail", 300);
+        let extended = synthetic_snapshot("chain-store-resident-tail", 340);
+        store.save_verified(&original).unwrap();
+
+        store
+            .save_verified_resident(&resident_tail(&extended, 80))
+            .unwrap();
+
+        assert_eq!(store.load().unwrap().unwrap(), extended);
+        assert_eq!(
+            store.block_at_height(257).unwrap(),
+            extended.blocks.get(257).cloned()
+        );
+    }
+
+    #[test]
+    fn bounded_loader_restores_a_genesis_chain() {
+        let dir = tempdir().unwrap();
+        let store = SqliteChainStore::open(dir.path().join("chain.sqlite3")).unwrap();
+        let snapshot = test_snapshot("chain-store-bounded-loader");
+        store.save_verified(&snapshot).unwrap();
+
+        let loaded = store.load_bounded_ledger(16).unwrap().unwrap();
+
+        assert_eq!(loaded.ledger.snapshot(), snapshot);
+        assert_eq!(loaded.revalidation_from_height, None);
+    }
+
+    #[test]
+    fn opening_an_existing_segmented_chain_backfills_the_block_index() {
+        let dir = tempdir().unwrap();
+        let path = dir.path().join("chain.sqlite3");
+        let store = SqliteChainStore::open(&path).unwrap();
+        let snapshot = synthetic_snapshot("chain-store-index-backfill", 300);
+        store.save_verified(&snapshot).unwrap();
+        store
+            .with_connection_mut(|connection| {
+                connection.execute("DELETE FROM chain_block_index", [])?;
+                Ok(())
+            })
+            .unwrap();
+        drop(store);
+
+        let reopened = SqliteChainStore::open(&path).unwrap();
+
+        assert_eq!(
+            reopened.block_at_height(299).unwrap(),
+            snapshot.blocks.get(299).cloned()
+        );
+    }
+
+    #[test]
     fn pending_transaction_v2_journal_preserves_order_and_clears_with_chain() {
         let dir = tempdir().unwrap();
         let store = SqliteChainStore::open(dir.path().join("chain.sqlite3")).unwrap();
@@ -966,6 +1599,45 @@ VALUES (1, 0, 'bad-tip', ?1, 0)
             })
             .unwrap();
         assert_eq!(store.load().unwrap().unwrap(), snapshot);
+    }
+
+    #[test]
+    fn persisted_blocks_support_bounded_point_range_and_stream_queries() {
+        let dir = tempdir().unwrap();
+        let store = SqliteChainStore::open(dir.path().join("chain.sqlite3")).unwrap();
+        let snapshot = test_snapshot("chain-store-bounded-queries");
+        store.save(&snapshot).unwrap();
+
+        let expected = snapshot.blocks.last().unwrap();
+        assert_eq!(
+            store.block_at_height(expected.height).unwrap().as_ref(),
+            Some(expected)
+        );
+        assert_eq!(
+            store.block_by_hash(&expected.hash).unwrap().as_ref(),
+            Some(expected)
+        );
+        assert_eq!(
+            store.blocks_from(0, 1).unwrap(),
+            snapshot.blocks[..1].to_vec()
+        );
+
+        let mut streamed = Vec::new();
+        store
+            .for_each_segment(|blocks| {
+                assert!(blocks.len() <= crate::domain::CHAIN_SEGMENT_BLOCKS);
+                streamed.extend(blocks.iter().map(|block| block.hash.clone()));
+                Ok(())
+            })
+            .unwrap();
+        assert_eq!(
+            streamed,
+            snapshot
+                .blocks
+                .iter()
+                .map(|block| block.hash.clone())
+                .collect::<Vec<_>>()
+        );
     }
 
     #[test]
