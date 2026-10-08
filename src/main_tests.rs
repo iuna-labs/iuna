@@ -881,22 +881,29 @@ fn genesis_default_auto_mining_keeps_burning_after_first_block() {
         GENESIS_INITIAL_BURN_FEE,
     );
 
-    let first = node.automatic_mine_once(1_000);
-    let second = node.automatic_mine_once(2_000);
-    let third = node.automatic_mine_once(3_000);
+    let collection_window_ms = VDF_TARGET_BLOCK_MS / 20;
+    let first_started_at = 1_000;
+    let first_burn = node.automatic_mine_once(first_started_at);
+    let first = node.automatic_mine_once(first_started_at + collection_window_ms);
+    let second_started_at = first_started_at + collection_window_ms + 1;
+    let second_burn = node.automatic_mine_once(second_started_at);
+    let second = node.automatic_mine_once(second_started_at + collection_window_ms);
+    let third_started_at = second_started_at + collection_window_ms + 1;
+    let third_burn = node.automatic_mine_once(third_started_at);
+    let third = node.automatic_mine_once(third_started_at + collection_window_ms);
 
     assert_eq!(
-        first.burned.as_ref().map(|tx| tx.amount()),
+        first_burn.burned.as_ref().map(|tx| tx.amount()),
         Some(GENESIS_INITIAL_BURN_PER_BLOCK)
     );
     assert!(first.block.is_some(), "{first:?}");
     assert_eq!(
-        second.burned.as_ref().map(|tx| tx.amount()),
+        second_burn.burned.as_ref().map(|tx| tx.amount()),
         Some(GENESIS_INITIAL_BURN_PER_BLOCK)
     );
     assert!(second.block.is_some(), "{second:?}");
     assert_eq!(
-        third.burned.as_ref().map(|tx| tx.amount()),
+        third_burn.burned.as_ref().map(|tx| tx.amount()),
         Some(GENESIS_INITIAL_BURN_PER_BLOCK)
     );
     assert!(third.block.is_some(), "{third:?}");
