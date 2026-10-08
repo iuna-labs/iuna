@@ -98,7 +98,7 @@ impl NodeCore {
         let will_run_recovery_vdf = self.should_prepare_recovery_vdf(timestamp_ms);
         if let Some(wait_ms) = self.burn_bundle_collection_wait_ms(
             timestamp_ms,
-            will_run_ticket_vdf || will_run_recovery_vdf,
+            will_run_ticket_vdf && !will_run_recovery_vdf,
         ) {
             self.request_missing_burn_bundles_for_next_block(timestamp_ms);
             plan.skipped_reason = Some(format!(
@@ -205,7 +205,7 @@ impl NodeCore {
         let will_run_recovery_vdf = self.should_prepare_recovery_vdf(timestamp_ms);
         if let Some(wait_ms) = self.burn_bundle_collection_wait_ms(
             timestamp_ms,
-            will_run_ticket_vdf || will_run_recovery_vdf,
+            will_run_ticket_vdf && !will_run_recovery_vdf,
         ) {
             self.request_missing_burn_bundles_for_next_block(timestamp_ms);
             plan.skipped_reason = Some(format!(
@@ -634,39 +634,11 @@ impl NodeCore {
     fn burn_bundle_collection_wait_ms(
         &mut self,
         timestamp_ms: u64,
-        will_run_vdf: bool,
+        will_run_ticket_vdf: bool,
     ) -> Option<u64> {
         let next_height = self.ledger.height().saturating_add(1);
-        let (attestation_ledger, _) = self.ledger_with_local_block_anchor();
-        let explicit_signatures_required = if will_run_vdf {
-            let wallet_rank =
-                attestation_ledger.finalizer_rank_for_next_block(self.wallet.address());
-            let finalizer_mode = if self.should_prepare_recovery_vdf(timestamp_ms) {
-                FinalizerMode::Recovery
-            } else {
-                FinalizerMode::Ticket
-            };
-            let finalizer_rank = if matches!(finalizer_mode, FinalizerMode::Ticket) {
-                wallet_rank.unwrap_or(0)
-            } else {
-                0
-            };
-            attestation_ledger.explicit_burn_bundle_signatures_required_for_next_block(
-                finalizer_mode,
-                finalizer_rank,
-                self.wallet.address(),
-            )
-        } else {
-            0
-        };
-        let wallet_is_committee_member = !self
-            .ledger
-            .burn_committee_memberships_for_next_block(self.wallet.address())
-            .is_empty();
-        if explicit_signatures_required == 0 || (!wallet_is_committee_member && !will_run_vdf) {
-            if explicit_signatures_required == 0 {
-                self.burn_bundle_collection_started = None;
-            }
+        if !will_run_ticket_vdf {
+            self.burn_bundle_collection_started = None;
             return None;
         }
 
@@ -878,6 +850,53 @@ mod tests {
         assert_eq!(
             burn_bundle_collection_remaining_ms(started_at_ms, finished_ms),
             None
+        );
+    }
+
+    #[test]
+    fn sole_ticket_finalizer_waits_for_peer_burns_before_building_block() {
+        let finalizer = Wallet::from_seed("sole-ticket-finalizer");
+        let peer = Wallet::from_seed("sole-ticket-peer-burner");
+        let ledger = Ledger::new_with_genesis_burns(
+            BTreeMap::from([
+                (finalizer.address().to_string(), 10 * MICRO_IUNA),
+                (peer.address().to_string(), 10 * MICRO_IUNA),
+            ]),
+            vec![GenesisBurn::new(finalizer.address(), MICRO_IUNA)],
+            1,
+        )
+        .unwrap();
+        let peer_burn = ledger.build_burn(&peer, 100, 1).unwrap();
+        let mut node =
+            NodeCore::from_ledger_with_burn_fee_and_enabled(finalizer, ledger, true, 0, 1);
+
+        let collecting = node.prepare_automatic_finalization(1);
+        assert!(collecting.work.is_none());
+        assert_eq!(
+            collecting.skipped_reason,
+            Some(format!(
+                "collecting burns for next block ({:.1}s remaining)",
+                BURN_BUNDLE_COLLECTION_MS as f64 / 1000.0
+            ))
+        );
+
+        node.receive_transaction(peer_burn.clone()).unwrap();
+        let ready = node.prepare_automatic_finalization(1 + BURN_BUNDLE_COLLECTION_MS);
+        let work = ready.work.expect("collection window should have ended");
+        let block = node
+            .complete_prepared_block_at(
+                work.clone(),
+                run_vdf(work.vdf_seed(), work.vdf_rounds()),
+                1 + BURN_BUNDLE_COLLECTION_MS,
+            )
+            .unwrap();
+
+        assert!(
+            block
+                .transactions
+                .iter()
+                .any(|transaction| transaction.signature() == peer_burn.signature()),
+            "the peer burn that arrived during collection must be included"
         );
     }
 
@@ -1400,7 +1419,14 @@ mod tests {
 
         node.prepare_automatic_burn(1).unwrap();
 
-        assert_eq!(node.burn_bundle_collection_wait_ms(1, true), None);
+        assert_eq!(
+            node.burn_bundle_collection_wait_ms(1, true),
+            Some(BURN_BUNDLE_COLLECTION_MS)
+        );
+        assert_eq!(
+            node.burn_bundle_collection_wait_ms(1 + BURN_BUNDLE_COLLECTION_MS, true),
+            None
+        );
 
         node.publish_burn_bundle_for_next_block().unwrap();
 
