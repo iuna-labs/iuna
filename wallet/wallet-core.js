@@ -3,6 +3,7 @@ const encoder = new TextEncoder();
 export const API_BASE = "https://iuna.jhx.app/v1";
 export const STORAGE_KEY = "iuna.wallets.v2";
 export const LEGACY_STORAGE_KEY = "iuna.wallet.v1";
+export const CONTACTS_STORAGE_KEY = "iuna.contacts.v1";
 export const MICRO_IUNA = 1_000_000n;
 export const MAX_TRANSACTION_BODY_BYTES = 64 * 1024;
 
@@ -49,6 +50,35 @@ export function upsertWallet(store, wallet) {
 export function removeWallet(store, id) {
   const wallets = store.wallets.filter((wallet) => wallet.id !== id);
   return { version: 2, activeId: wallets[0]?.id || null, wallets };
+}
+
+export function emptyContactBook() {
+  return { version: 1, contacts: [] };
+}
+
+export function normalizeContactBook(value) {
+  if (value?.version !== 1 || !Array.isArray(value.contacts)) return emptyContactBook();
+  const addresses = new Set();
+  const contacts = value.contacts.flatMap((contact) => {
+    const id = typeof contact?.id === "string" ? contact.id.trim() : "";
+    const name = typeof contact?.name === "string" ? contact.name.trim().slice(0, 40) : "";
+    const address = typeof contact?.address === "string" ? contact.address.trim().toLowerCase() : "";
+    if (!id || !name || !address || addresses.has(address)) return [];
+    addresses.add(address);
+    return [{ id, name, address }];
+  });
+  return { version: 1, contacts };
+}
+
+export function upsertContact(book, contact) {
+  const contacts = book.contacts.filter((item) => item.id !== contact.id);
+  contacts.push(contact);
+  contacts.sort((left, right) => left.name.localeCompare(right.name, undefined, { sensitivity: "base" }));
+  return { version: 1, contacts };
+}
+
+export function removeContact(book, id) {
+  return { version: 1, contacts: book.contacts.filter((contact) => contact.id !== id) };
 }
 
 export function nextRecoveryScanCounts({

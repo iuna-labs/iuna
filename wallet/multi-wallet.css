@@ -55,3 +55,18 @@
 .migration-card h2 { margin: 0 0 8px; font: 600 20px/1.2 Georgia, serif; }
 .migration-card p:not(.eyebrow) { margin: 0 0 14px; color: var(--muted); font-size: 13px; line-height: 1.5; }
 .migration-card .button { width: 100%; }
+.contacts-head { align-items: flex-end; margin-top: 0; }
+.contacts-head .eyebrow, .contacts-head .view-title { margin-bottom: 0; }
+.button.compact { min-height: 42px; padding: 0 16px; }
+.contact-panel { padding: 4px 16px; }
+.contact-list { display: grid; }
+.contact-row { display: grid; grid-template-columns: 1fr auto; align-items: center; gap: 8px; border-bottom: 1px solid var(--line); }
+.contact-row:last-child { border-bottom: 0; }
+.contact-main { appearance: none; border: 0; background: transparent; color: var(--ink); padding: 13px 0; min-width: 0; display: flex; align-items: center; gap: 12px; text-align: left; cursor: pointer; }
+.contact-main > span:last-child { min-width: 0; display: grid; gap: 5px; }
+.contact-main strong, .contact-main small { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.contact-main small { color: var(--muted); font: 11px/1.2 monospace; }
+.contact-avatar { width: 40px; height: 40px; flex: none; display: grid; place-items: center; border-radius: 13px; background: rgba(213,245,95,.1); color: var(--lime); font-weight: 800; }
+.contact-edit { width: 38px; height: 38px; font-weight: 800; letter-spacing: 1px; }
+.contact-empty { padding: 44px 12px; line-height: 1.6; }
+.inline-action { appearance: none; border: 0; background: transparent; color: var(--lime); padding: 0 0 17px; font: 700 12px/1 inherit; cursor: pointer; }

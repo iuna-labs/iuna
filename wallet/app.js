@@ -1,8 +1,8 @@
 import {
-  API_BASE, LEGACY_STORAGE_KEY, STORAGE_KEY, api, buildSignedTransfer, decodeVersionedAddress,
-  decryptWallet, encodeAddress, encryptWallet, formatIuna, hexToBytes, normalizeWalletStore,
-  nextRecoveryScanCounts, parseFeeRate, parseIuna, removeWallet, upsertWallet, walletFromSeed,
-  walletId,
+  API_BASE, CONTACTS_STORAGE_KEY, LEGACY_STORAGE_KEY, STORAGE_KEY, api, buildSignedTransfer,
+  decodeVersionedAddress, decryptWallet, encodeAddress, encryptWallet, formatIuna, hexToBytes,
+  normalizeContactBook, normalizeWalletStore, nextRecoveryScanCounts, parseFeeRate, parseIuna,
+  removeContact, removeWallet, upsertContact, upsertWallet, walletFromSeed, walletId,
 } from "./wallet-core.js";
 import { DICE_ROLL_COUNT, generateMnemonic, generateMnemonicFromDice, validateMnemonic } from "./mnemonic.js";
 import initQuantumCrypto, {
@@ -18,6 +18,7 @@ const TRANSACTION_PAGE_SIZE = 25;
 const ALL_TRANSACTION_FILTERS = { transfer: true, mine: true, burn: true, reward: true };
 const state = {
   store: null, wallet: null, walletMeta: null, status: null, address: "", balance: null,
+  contactBook: null, editingContactId: null, sendRecipient: "",
   addresses: [], addressIndex: 0, legacyAddress: "", legacyUtxos: [], hybridUtxos: [],
   derivedAddresses: [], derivedRewardAddresses: [], derivedWalletId: null,
   hybridSpendable: 0, utxos: [], transactions: [], recentTransactions: [], view: "home", timer: null,
@@ -43,6 +44,7 @@ const icon = (name) => {
     home: '<rect x="3" y="5" width="18" height="15" rx="3"/><path d="M3 9h18M16 14h2"/>',
     activity: '<path d="M4 6h16M4 12h16M4 18h10"/>',
     settings: '<path d="M4 7h16M4 17h16"/><circle cx="9" cy="7" r="3"/><circle cx="15" cy="17" r="3"/>',
+    contacts: '<circle cx="9" cy="8" r="3"/><path d="M3.5 19a5.5 5.5 0 0 1 11 0M16 8h5M18.5 5.5v5"/>',
     lock: '<rect x="5" y="10" width="14" height="11" rx="2"/><path d="M8 10V7a4 4 0 0 1 8 0v3M12 14v3"/>',
     copy: '<rect x="8" y="8" width="12" height="13" rx="2"/><path d="M15 8V3H3v13h5"/>',
     refresh: '<path d="M20 7v5h-5M4 17v-5h5M6 6a8 8 0 0 1 14 6M18 18a8 8 0 0 1-14-6"/>',
@@ -75,6 +77,11 @@ function loadStore() {
 function saveStore(store) {
   state.store = store;
   localStorage.setItem(STORAGE_KEY, JSON.stringify(store));
+}
+
+function saveContactBook(contactBook) {
+  state.contactBook = contactBook;
+  localStorage.setItem(CONTACTS_STORAGE_KEY, JSON.stringify(contactBook));
 }
 
 function activeWallet() {
@@ -459,7 +466,7 @@ function topbar() {
 }
 
 function nav() {
-  return `<nav class="bottom-nav">${[["home","Overview"],["send","Send"],["receive","Receive"],["settings","Settings"]].map(([view,label]) => `<button class="nav-item ${state.view === view ? "active" : ""}" data-view="${view}"><span>${icon(view)}</span>${label}</button>`).join("")}</nav>`;
+  return `<nav class="bottom-nav">${[["home","Overview"],["send","Send"],["receive","Receive"],["contacts","Contacts"],["settings","Settings"]].map(([view,label]) => `<button class="nav-item ${state.view === view || (view === "contacts" && state.view === "contact-edit") ? "active" : ""}" data-view="${view}"><span>${icon(view)}</span>${label}</button>`).join("")}</nav>`;
 }
 
 function transactionInfo(item) {
@@ -564,7 +571,22 @@ function renderSend() {
   if (state.walletMeta?.type === "readonly") return `${topbar()}<p class="eyebrow">Watch-only</p><h1 class="view-title">Sending is disabled.</h1><p class="view-copy">This wallet contains no seed or private key, so it cannot sign transactions.</p><button class="button secondary" data-view="home" style="width:100%">Back to overview</button>`;
   const defaultFeeRate = state.status.default_fee_per_byte ?? 1;
   const available = state.status?.transaction_v2_active ? state.hybridSpendable : state.balance?.spendable;
-  return `${topbar()}<p class="eyebrow">Transaction</p><h1 class="view-title">Send IUNA</h1><p class="view-copy">The transaction is signed on this device with your hybrid quantum-resistant key.</p><form id="send-form" class="panel send-card"><div class="field"><label for="recipient">Recipient</label><input id="recipient" autocomplete="off" autocapitalize="none" spellcheck="false" placeholder="iuna1p…" required></div><div class="field"><label for="amount">Amount</label><div class="amount-wrap"><input id="amount" inputmode="decimal" placeholder="0.00" required><span>IUNA</span></div></div><div class="field"><label for="fee-rate">Fee rate (µIUNA per byte)</label><input id="fee-rate" name="fee-rate" type="number" inputmode="numeric" min="1" step="1" value="${escapeHtml(defaultFeeRate)}" required></div><div class="fee-line"><span>Available</span><strong>${formatIuna(available)} IUNA</strong></div><button class="button" type="submit">Review transaction</button></form>`;
+  const contacts = state.contactBook.contacts.map((contact) => `<option value="${escapeHtml(contact.address)}">${escapeHtml(contact.name)}</option>`).join("");
+  const contactPicker = contacts ? `<div class="field"><label for="contact-recipient">Choose a contact</label><select id="contact-recipient"><option value="">Select a contact…</option>${contacts}</select></div>` : `<button class="inline-action" type="button" data-view="contacts">+ Add your first contact</button>`;
+  return `${topbar()}<p class="eyebrow">Transaction</p><h1 class="view-title">Send IUNA</h1><p class="view-copy">The transaction is signed on this device with your hybrid quantum-resistant key.</p><form id="send-form" class="panel send-card">${contactPicker}<div class="field"><label for="recipient">Recipient address</label><input id="recipient" autocomplete="off" autocapitalize="none" spellcheck="false" placeholder="iuna1p…" value="${escapeHtml(state.sendRecipient)}" required></div><div class="field"><label for="amount">Amount</label><div class="amount-wrap"><input id="amount" inputmode="decimal" placeholder="0.00" required><span>IUNA</span></div></div><div class="field"><label for="fee-rate">Fee rate (µIUNA per byte)</label><input id="fee-rate" name="fee-rate" type="number" inputmode="numeric" min="1" step="1" value="${escapeHtml(defaultFeeRate)}" required></div><div class="fee-line"><span>Available</span><strong>${formatIuna(available)} IUNA</strong></div><button class="button" type="submit">Review transaction</button></form>`;
+}
+
+function renderContacts() {
+  const contacts = state.contactBook.contacts;
+  const list = contacts.length
+    ? `<div class="contact-list">${contacts.map((contact) => `<article class="contact-row"><button class="contact-main" data-action="send-contact" data-contact-id="${escapeHtml(contact.id)}"><span class="contact-avatar">${escapeHtml(contact.name.charAt(0).toUpperCase())}</span><span><strong>${escapeHtml(contact.name)}</strong><small>${escapeHtml(contact.address.slice(0, 14))}…${escapeHtml(contact.address.slice(-8))}</small></span></button><button class="icon-button contact-edit" data-action="edit-contact" data-contact-id="${escapeHtml(contact.id)}" aria-label="Edit ${escapeHtml(contact.name)}">•••</button></article>`).join("")}</div>`
+    : '<div class="empty contact-empty">No contacts yet.<br>Add a trusted address for faster sending.</div>';
+  return `${topbar()}<div class="section-head contacts-head"><div><p class="eyebrow">Address book</p><h1 class="view-title">Contacts</h1></div><button class="button compact" data-action="add-contact">+ Add</button></div><div class="panel contact-panel">${list}</div><p class="security-note">Contacts are stored only in this browser. Always verify the address before sending.</p>`;
+}
+
+function renderContactForm() {
+  const contact = state.contactBook.contacts.find((item) => item.id === state.editingContactId);
+  return `${topbar()}<button class="back" data-view="contacts">← Contacts</button><p class="eyebrow">Address book</p><h1 class="view-title">${contact ? "Edit contact" : "New contact"}</h1><p class="view-copy">Save a name with a mainnet iuna address.</p><form id="contact-form" class="panel"><input type="hidden" name="contact-id" value="${escapeHtml(contact?.id || "")}"><div class="field"><label for="contact-name">Name</label><input id="contact-name" name="contact-name" maxlength="40" autocomplete="name" value="${escapeHtml(contact?.name || "")}" placeholder="Alice" required></div><div class="field"><label for="contact-address">Mainnet iuna address</label><input id="contact-address" name="contact-address" autocomplete="off" autocapitalize="none" spellcheck="false" value="${escapeHtml(contact?.address || "")}" placeholder="iuna1p…" required></div><button class="button" type="submit" style="width:100%">${contact ? "Save changes" : "Add contact"}</button></form>${contact ? '<button class="button danger" data-action="delete-contact" style="width:100%;margin-top:10px">Delete contact</button>' : ""}`;
 }
 
 function renderReceive() {
@@ -591,7 +613,7 @@ function renderSettings() {
 }
 
 function renderApp() {
-  const renderers = { home: renderHome, send: renderSend, receive: renderReceive, activity: renderActivity, transaction: renderTransaction, settings: renderSettings };
+  const renderers = { home: renderHome, send: renderSend, receive: renderReceive, contacts: renderContacts, "contact-edit": renderContactForm, activity: renderActivity, transaction: renderTransaction, settings: renderSettings };
   state.activityObserver?.disconnect();
   state.activityObserver = null;
   app.innerHTML = `${(renderers[state.view] || renderHome)()}${nav()}`;
@@ -619,6 +641,7 @@ function renderConfirmation(transaction, fee, recipientAddress, amount) {
         timeoutMs: 20_000,
       });
       toast(result.status === "accepted" ? "Transaction sent" : "Transaction was already known");
+      state.sendRecipient = "";
       state.view = "home";
       await fetchWalletData();
       renderApp();
@@ -660,6 +683,38 @@ app.addEventListener("click", async (event) => {
   }
   if (action === "retry-transactions") {
     await loadTransactions({ replace: state.transactions.length === 0 });
+    return;
+  }
+  if (action === "add-contact") {
+    state.editingContactId = null;
+    state.view = "contact-edit";
+    renderApp();
+    return;
+  }
+  if (action === "edit-contact") {
+    state.editingContactId = button.dataset.contactId;
+    state.view = "contact-edit";
+    renderApp();
+    return;
+  }
+  if (action === "send-contact") {
+    const contact = state.contactBook.contacts.find((item) => item.id === button.dataset.contactId);
+    if (contact) {
+      state.sendRecipient = contact.address;
+      state.view = "send";
+      renderApp();
+    }
+    return;
+  }
+  if (action === "delete-contact") {
+    const contact = state.contactBook.contacts.find((item) => item.id === state.editingContactId);
+    if (contact && window.confirm(`Delete “${contact.name}” from your contacts?`)) {
+      saveContactBook(removeContact(state.contactBook, contact.id));
+      state.editingContactId = null;
+      state.view = "contacts";
+      renderApp();
+      toast("Contact deleted");
+    }
     return;
   }
   if (button.dataset.view) {
@@ -770,8 +825,23 @@ app.addEventListener("submit", async (event) => {
       const meta = { id: `watch-${decoded.version}-${publicKeyHex}`, name: walletName, type: "readonly", publicKeyHex, address };
       saveStore(upsertWallet(state.store, meta));
       await openStoredWallet(meta);
+    } else if (form.id === "contact-form") {
+      const name = form.elements.namedItem("contact-name").value.trim();
+      const address = form.elements.namedItem("contact-address").value.trim().toLowerCase();
+      const existingId = form.elements.namedItem("contact-id").value;
+      if (!name) throw new Error("Enter a contact name");
+      decodeVersionedAddress(address, "iuna");
+      if (state.contactBook.contacts.some((contact) => contact.id !== existingId && contact.address === address)) throw new Error("This address is already in your contacts");
+      const id = existingId || `contact-${crypto.randomUUID?.() || `${Date.now()}-${Math.random().toString(16).slice(2)}`}`;
+      saveContactBook(upsertContact(state.contactBook, { id, name, address }));
+      state.editingContactId = null;
+      state.view = "contacts";
+      renderApp();
+      toast(existingId ? "Contact updated" : "Contact added");
     } else if (form.id === "send-form") {
       if (state.walletMeta?.type === "readonly") throw new Error("Watch-only wallets cannot sign transactions");
+      const recipientAddress = form.recipient.value.trim();
+      state.sendRecipient = recipientAddress;
       const amount = parseIuna(form.amount.value);
       const feeRate = parseFeeRate(form["fee-rate"].value);
       if (state.status.transaction_v2_active) {
@@ -780,7 +850,7 @@ app.addEventListener("submit", async (event) => {
           seed: state.wallet.seedPhrase,
           chainId: state.status.chain_id,
           genesisHash: state.status.genesis_hash,
-          recipientAddress: form.recipient.value.trim(),
+          recipientAddress,
           amount: amount.toString(),
           feeRate: feeRate.toString(),
           changeIndex: state.addressIndex,
@@ -788,10 +858,10 @@ app.addEventListener("submit", async (event) => {
           authorizationAggregationActivationHeight: Number(state.status.transaction_v2_authorization_aggregation_activation_height ?? Number.MAX_SAFE_INTEGER),
           utxos: state.hybridUtxos,
         })));
-        renderConfirmation(built, BigInt(built.fee), form.recipient.value.trim(), amount);
+        renderConfirmation(built, BigInt(built.fee), recipientAddress, amount);
       } else {
-        const built = await buildSignedTransfer({ wallet: state.wallet, status: state.status, utxos: state.utxos, recipientAddress: form.recipient.value, amount, feeRate });
-        renderConfirmation(built.transaction, built.fee, form.recipient.value.trim(), amount);
+        const built = await buildSignedTransfer({ wallet: state.wallet, status: state.status, utxos: state.utxos, recipientAddress, amount, feeRate });
+        renderConfirmation(built.transaction, built.fee, recipientAddress, amount);
       }
     }
   } catch (error) {
@@ -799,7 +869,19 @@ app.addEventListener("submit", async (event) => {
   }
 });
 
+app.addEventListener("change", (event) => {
+  if (event.target.id !== "contact-recipient" || !event.target.value) return;
+  const recipient = document.querySelector("#recipient");
+  if (recipient) {
+    recipient.value = event.target.value;
+    state.sendRecipient = event.target.value;
+    recipient.focus();
+  }
+});
+
 state.store = loadStore();
+state.contactBook = normalizeContactBook(readJson(CONTACTS_STORAGE_KEY));
+saveContactBook(state.contactBook);
 
 if (!window.isSecureContext || !crypto?.subtle) {
   app.innerHTML = '<section class="center-card"><div><h1>Secure connection required</h1><p>Open this wallet over HTTPS or localhost.</p></div></section>';
