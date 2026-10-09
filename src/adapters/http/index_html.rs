@@ -181,6 +181,7 @@ pub(super) const INDEX_HTML: &str = concat!(
     .settings-mode-copy { min-width: 0; display: grid; gap: 4px; }
     .settings-mode-title { color: #e8edf0; font-size: 15px; font-weight: 850; }
     .settings-form { display: grid; gap: 10px; align-items: stretch; }
+    .settings-service + .settings-service { margin-top: 16px; border-top: 1px solid #2f363c; padding-top: 16px; }
     .public-p2p-form { margin-top: 14px; }
     .settings-form label, .settings-form input { width: 100%; }
     .danger-panel { border-color: #6a332c; background: #201313; }
@@ -1523,61 +1524,82 @@ pub(super) const INDEX_HTML: &str = concat!(
     <section x-show="tab === 'settings'">
       <div class="settings-grid">
         <div class="settings-section-label">General</div>
-        <div class="panel settings-wide">
-          <div class="settings-mode-row">
-            <div class="settings-mode-copy">
-              <div class="settings-mode-title">Mode</div>
-              <div class="muted" x-text="advancedMode() ? 'Node mode shows mining and peer controls.' : 'Wallet mode keeps the interface focused on wallet and chain views.'"></div>
+        <div class="panel settings-wide general-settings-panel">
+          <div class="settings-service">
+            <div class="settings-mode-row">
+              <div class="settings-mode-copy">
+                <div class="settings-mode-title">Mode</div>
+                <div class="muted" x-text="advancedMode() ? 'Node mode shows mining and peer controls.' : 'Wallet mode keeps the interface focused on wallet and chain views.'"></div>
+              </div>
+              <label class="toggle-switch" :class="{ active: advancedMode() }">
+                <input type="checkbox" :checked="advancedMode()" @change="setUiMode($event.target.checked ? 'advanced' : 'basic')">
+                <span class="toggle-track" aria-hidden="true"><span class="toggle-thumb"></span></span>
+                <span class="toggle-text" x-text="advancedMode() ? 'Node' : 'Wallet'"></span>
+              </label>
             </div>
-            <label class="toggle-switch" :class="{ active: advancedMode() }">
-              <input type="checkbox" :checked="advancedMode()" @change="setUiMode($event.target.checked ? 'advanced' : 'basic')">
-              <span class="toggle-track" aria-hidden="true"><span class="toggle-thumb"></span></span>
-              <span class="toggle-text" x-text="advancedMode() ? 'Node' : 'Wallet'"></span>
-            </label>
           </div>
-        </div>
-        <div class="panel settings-wide" x-show="advancedMode()">
-          <div class="settings-mode-row">
-            <div class="settings-mode-copy">
-              <div class="settings-mode-title">Fallback VDF</div>
-              <div class="muted">Top <span x-text="recoveryVdfTopRankPercent"></span>% of ticket ranks run fallback work. Recovery remains available to every node.</div>
+          <div class="settings-service" x-show="advancedMode()">
+            <div class="settings-mode-row">
+              <div class="settings-mode-copy">
+                <div class="settings-mode-title">Fallback VDF</div>
+                <div class="muted">Top <span x-text="recoveryVdfTopRankPercent"></span>% of ticket ranks run fallback work. Recovery remains available to every node.</div>
+              </div>
+              <label><span>Top ranks · <strong x-text="`${recoveryVdfTopRankPercent}%`"></strong></span>
+                <input type="range" min="0" max="100" step="5" :value="recoveryVdfTopRankPercent" @change="setRecoveryVdfTopRankPercent($event.target.value)">
+              </label>
             </div>
-            <label><span>Top ranks · <strong x-text="`${recoveryVdfTopRankPercent}%`"></strong></span>
-              <input type="range" min="0" max="100" step="5" :value="recoveryVdfTopRankPercent" @change="setRecoveryVdfTopRankPercent($event.target.value)">
-            </label>
           </div>
-        </div>
-        <div class="panel settings-wide" x-show="advancedMode()">
-          <div class="settings-mode-row">
-            <div class="settings-mode-copy">
-              <div class="settings-mode-title">VDF memory</div>
-              <div class="muted">Hard budget for VDF checkpoints and workspace. Lower values trade speed for predictable memory use; the change applies to the next VDF.</div>
+          <div class="settings-service" x-show="advancedMode()">
+            <div class="settings-mode-row">
+              <div class="settings-mode-copy">
+                <div class="settings-mode-title">VDF memory</div>
+                <div class="muted">Hard budget for VDF checkpoints and workspace. Lower values trade speed for predictable memory use; the change applies to the next VDF.</div>
+              </div>
+              <label><span>Budget · MiB</span>
+                <input type="number" min="32" max="4096" step="16" :value="vdfMemoryMib" @change="setVdfMemoryMib($event.target.value)">
+              </label>
             </div>
-            <label><span>Budget · MiB</span>
-              <input type="number" min="32" max="4096" step="16" :value="vdfMemoryMib" @change="setVdfMemoryMib($event.target.value)">
-            </label>
           </div>
         </div>
         <div class="settings-section-label" x-show="advancedMode()">Network services</div>
-        <div class="panel settings-wide" x-show="advancedMode()">
+        <div class="panel settings-wide network-services-panel" x-show="advancedMode()">
           <h3>Node Networking</h3>
-          <div class="settings-mode-row">
-            <div class="settings-mode-copy">
-              <div class="settings-mode-title">Public node</div>
-              <div class="muted" x-text="p2pAcceptInbound ? 'Accepting inbound P2P connections.' : 'Outbound-only P2P; no inbound port is open.'"></div>
+          <div class="settings-service">
+            <div class="settings-mode-row">
+              <div class="settings-mode-copy">
+                <div class="settings-mode-title">Public node</div>
+                <div class="muted" x-text="p2pAcceptInbound ? 'Accepting inbound P2P connections.' : 'Outbound-only P2P; no inbound port is open.'"></div>
+              </div>
+              <label class="toggle-switch" :class="{ active: p2pAcceptInbound }">
+                <input type="checkbox" :checked="p2pAcceptInbound" @change="setP2pAcceptInbound($event.target.checked)">
+                <span class="toggle-track" aria-hidden="true"><span class="toggle-thumb"></span></span>
+                <span class="toggle-text" x-text="p2pAcceptInbound ? 'Public' : 'Private'"></span>
+              </label>
             </div>
-            <label class="toggle-switch" :class="{ active: p2pAcceptInbound }">
-              <input type="checkbox" :checked="p2pAcceptInbound" @change="setP2pAcceptInbound($event.target.checked)">
-              <span class="toggle-track" aria-hidden="true"><span class="toggle-thumb"></span></span>
-              <span class="toggle-text" x-text="p2pAcceptInbound ? 'Public' : 'Private'"></span>
-            </label>
+            <form class="settings-form public-p2p-form" x-show="p2pAcceptInbound" x-transition @submit.prevent="saveP2pAnnounce">
+              <label>Bind port<input x-model.number="p2pBindPort" @input="p2pBindPortDirty = true" type="number" min="1" max="65535" step="1" required></label>
+              <label>Public P2P address<input x-model="p2pAnnounceAddr" @input="p2pAnnounceDirty = true" placeholder="203.0.113.10:9444"></label>
+              <div class="muted">Use this only when TCP port <span x-text="p2pBindPort"></span> is reachable from the internet.</div>
+              <div class="setup-actions"><button class="primary" type="submit">Save</button></div>
+            </form>
           </div>
-          <form class="settings-form public-p2p-form" x-show="p2pAcceptInbound" x-transition @submit.prevent="saveP2pAnnounce">
-            <label>Bind port<input x-model.number="p2pBindPort" @input="p2pBindPortDirty = true" type="number" min="1" max="65535" step="1" required></label>
-            <label>Public P2P address<input x-model="p2pAnnounceAddr" @input="p2pAnnounceDirty = true" placeholder="203.0.113.10:9444"></label>
-            <div class="muted">Use this only when TCP port <span x-text="p2pBindPort"></span> is reachable from the internet.</div>
-            <div class="setup-actions"><button class="primary" type="submit">Save</button></div>
-          </form>
+          <div class="settings-service">
+            <div class="settings-mode-row">
+              <div class="settings-mode-copy">
+                <div class="settings-mode-title">Stratum endpoint</div>
+                <div class="muted" x-text="stratumEnabled ? 'ASIC miners can connect after the listener is active.' : 'Stratum listener is disabled.'"></div>
+              </div>
+              <label class="toggle-switch" :class="{ active: stratumEnabled }">
+                <input type="checkbox" :checked="stratumEnabled" @change="setStratumEnabled($event.target.checked)">
+                <span class="toggle-track" aria-hidden="true"><span class="toggle-thumb"></span></span>
+                <span class="toggle-text" x-text="stratumEnabled ? 'On' : 'Off'"></span>
+              </label>
+            </div>
+            <form class="settings-form public-p2p-form" x-show="stratumEnabled" x-transition @submit.prevent="saveStratumSettings">
+              <label>Bind port<input x-model.number="stratumBindPort" @input="stratumBindPortDirty = true" type="number" min="1" max="65535" step="1" required></label>
+              <div class="setup-actions"><button class="primary" type="submit">Save</button></div>
+            </form>
+          </div>
         </div>
         <div class="panel" x-show="advancedMode() && p2pAcceptInbound">
           <div class="settings-mode-row">
@@ -1594,23 +1616,6 @@ pub(super) const INDEX_HTML: &str = concat!(
           <form class="settings-form" x-show="walletEndpointEnabled" x-transition @submit.prevent="saveWalletEndpointSettings">
             <label>Wallet API port<input x-model.number="walletEndpointBindPort" @input="walletEndpointBindPortDirty = true" type="number" min="1" max="65535" step="1" required></label>
             <div class="muted">This is a separate listener from the management UI. Only forward this port publicly.</div>
-            <div class="setup-actions"><button class="primary" type="submit">Save</button></div>
-          </form>
-        </div>
-        <div class="panel" x-show="advancedMode()">
-          <div class="settings-mode-row">
-            <div class="settings-mode-copy">
-              <div class="settings-mode-title">Stratum endpoint</div>
-              <div class="muted" x-text="stratumEnabled ? 'ASIC miners can connect after the listener is active.' : 'Stratum listener is disabled.'"></div>
-            </div>
-            <label class="toggle-switch" :class="{ active: stratumEnabled }">
-              <input type="checkbox" :checked="stratumEnabled" @change="setStratumEnabled($event.target.checked)">
-              <span class="toggle-track" aria-hidden="true"><span class="toggle-thumb"></span></span>
-              <span class="toggle-text" x-text="stratumEnabled ? 'On' : 'Off'"></span>
-            </label>
-          </div>
-          <form class="settings-form" x-show="stratumEnabled" x-transition @submit.prevent="saveStratumSettings">
-            <label>Bind port<input x-model.number="stratumBindPort" @input="stratumBindPortDirty = true" type="number" min="1" max="65535" step="1" required></label>
             <div class="setup-actions"><button class="primary" type="submit">Save</button></div>
           </form>
         </div>
@@ -2285,19 +2290,38 @@ mod tests {
     }
 
     #[test]
-    fn wallet_endpoint_is_public_only_and_precedes_stratum() {
+    fn network_services_group_public_node_and_stratum() {
+        let networking = INDEX_HTML
+            .find(r#"<div class="panel settings-wide network-services-panel""#)
+            .expect("network services panel");
         let wallet = INDEX_HTML.find("Wallet endpoint").expect("wallet endpoint");
         let stratum = INDEX_HTML
             .find("Stratum endpoint")
             .expect("stratum endpoint");
 
-        assert!(wallet < stratum);
+        assert!(networking < stratum);
+        assert!(stratum < wallet);
         assert!(
             INDEX_HTML
                 .contains(r#"<div class="panel" x-show="advancedMode() && p2pAcceptInbound">"#)
         );
         assert!(!INDEX_HTML.contains(r#"x-text="walletEndpointRestartMessage()""#));
         assert!(!INDEX_HTML.contains(r#"x-text="stratumRestartMessage()""#));
+    }
+
+    #[test]
+    fn general_settings_share_one_panel() {
+        let general = INDEX_HTML
+            .find(r#"<div class="panel settings-wide general-settings-panel">"#)
+            .expect("general settings panel");
+        let networking = INDEX_HTML
+            .find(r#"<div class="panel settings-wide network-services-panel""#)
+            .expect("network services panel");
+        let panel = &INDEX_HTML[general..networking];
+
+        assert!(panel.contains(r#"<div class="settings-mode-title">Mode</div>"#));
+        assert!(panel.contains(r#"<div class="settings-mode-title">Fallback VDF</div>"#));
+        assert!(panel.contains(r#"<div class="settings-mode-title">VDF memory</div>"#));
     }
 
     #[test]
