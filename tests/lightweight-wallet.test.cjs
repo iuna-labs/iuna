@@ -36,6 +36,24 @@ test('adds, selects, and removes multiple wallet types', () => {
   assert.deepEqual(store.wallets.map((wallet) => wallet.id), ['signing']);
 });
 
+test('normalizes, sorts, updates, and removes address-book contacts', () => {
+  const normalized = core.normalizeContactBook({
+    version: 1,
+    contacts: [
+      { id: 'bob', name: ' Bob ', address: 'IUNA1ABC' },
+      { id: 'duplicate', name: 'Duplicate', address: 'iuna1abc' },
+      { id: '', name: 'Invalid', address: 'iuna1invalid' },
+    ],
+  });
+  assert.deepEqual(normalized.contacts, [{ id: 'bob', name: 'Bob', address: 'iuna1abc' }]);
+
+  let book = core.upsertContact(normalized, { id: 'alice', name: 'Alice', address: 'iuna1alice' });
+  assert.deepEqual(book.contacts.map((contact) => contact.name), ['Alice', 'Bob']);
+  book = core.upsertContact(book, { id: 'bob', name: 'Bobby', address: 'iuna1bob' });
+  assert.deepEqual(book.contacts.map((contact) => contact.name), ['Alice', 'Bobby']);
+  assert.deepEqual(core.removeContact(book, 'alice').contacts.map((contact) => contact.id), ['bob']);
+});
+
 test('extends both hybrid branches until historical recovery addresses are found', () => {
   const externalAddresses = Array.from({ length: 21 }, (_, index) => ({ index, address: `external-${index}` }));
   const rewardAddresses = Array.from({ length: 20 }, (_, index) => ({ index, address: `reward-${index}` }));
