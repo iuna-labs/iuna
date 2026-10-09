@@ -5,6 +5,20 @@ from the Git history and Conventional Commit titles by `deployment.sh`.
 
 ## [Unreleased]
 
+## [0.4.65] - 2026-10-09
+
+### Added
+
+- add local contact book
+
+### Fixed
+
+- hide optimization prompt for pending inputs
+
+### Changed
+
+- group related controls into cards
+
 ## [0.4.64] - 2026-10-08
 
 ### Added
