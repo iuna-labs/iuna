@@ -231,7 +231,8 @@ fn management_ui_only_offers_wallet_optimization_when_relevant_or_requested() {
     let javascript = include_str!("../www/assets/iuna-ui.js");
     assert_eq!(html.matches("@click=\"openOptimizeWallet\"").count(), 2);
     assert!(html.contains("x-show=\"showOptimizeSuggestion()\""));
-    assert!(javascript.contains("this.walletUtxoPage.total < 500"));
+    assert!(javascript.contains("this.walletSpendableUtxoCount() < 500"));
+    assert!(javascript.contains("entry?.spendable_utxos"));
     assert!(html.contains("id=\"wallet-utxos-title\""));
 }
 

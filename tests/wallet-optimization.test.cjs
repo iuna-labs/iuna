@@ -71,3 +71,34 @@ test('broadcast failure stops without silently retrying', async () => {
   assert.match(ui.optimizeError, /queued locally/);
   assert.equal(ui.optimizePlan, null);
 });
+
+test('hides the optimization suggestion once submitted inputs are pending', () => {
+  const ui = app();
+  ui.walletUtxoPage.total = 500;
+  ui.status.funded_wallet_addresses = [
+    { address: 'wallet', utxos: 500, spendable_utxos: 1 },
+  ];
+
+  assert.equal(ui.walletSpendableUtxoCount(), 1);
+  assert.equal(ui.showOptimizeSuggestion(), false);
+});
+
+test('keeps the optimization suggestion when enough spendable inputs remain', () => {
+  const ui = app();
+  ui.walletUtxoPage.total = 900;
+  ui.status.funded_wallet_addresses = [
+    { address: 'wallet', utxos: 600, spendable_utxos: 450 },
+    { address: 'wallet-2', utxos: 300, spendable_utxos: 100 },
+  ];
+
+  assert.equal(ui.walletSpendableUtxoCount(), 550);
+  assert.equal(ui.showOptimizeSuggestion(), true);
+});
+
+test('falls back to the paged UTXO total for older status payloads', () => {
+  const ui = app();
+  ui.walletUtxoPage.total = 500;
+
+  assert.equal(ui.walletSpendableUtxoCount(), 500);
+  assert.equal(ui.showOptimizeSuggestion(), true);
+});

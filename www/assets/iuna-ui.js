@@ -2807,10 +2807,18 @@ window.iunaApp = function iunaApp() {
     },
 
     showOptimizeSuggestion() {
-      if (this.optimizeDismissed || this.walletUtxoPage.total < 500) return false;
+      if (this.optimizeDismissed || this.walletSpendableUtxoCount() < 500) return false;
       try {
         return Date.now() > Number(localStorage.getItem(`iunaOptimizeLater:${this.status.wallet_address}`) || 0);
       } catch { return true; }
+    },
+
+    walletSpendableUtxoCount() {
+      const funded = this.fundedWalletAddresses();
+      if (funded.length > 0 && funded.every((entry) => Number.isFinite(Number(entry?.spendable_utxos)))) {
+        return funded.reduce((total, entry) => total + Number(entry.spendable_utxos), 0);
+      }
+      return Number(this.walletUtxoPage.total || 0);
     },
 
     dismissOptimizeSuggestion() {
