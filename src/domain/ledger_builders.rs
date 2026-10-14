@@ -1,4 +1,8 @@
 use super::hex::{decode_hex, decode_hex_array, hex_encode};
+use super::ledger_history_index::{
+    HybridAddressLookup, collect_legacy_hybrid_outputs, collect_v2_input_addresses,
+    collect_v2_output_addresses,
+};
 use super::ledger_ops::{
     compact_block_context, ensure_transaction_fits_empty_block,
     ensure_transaction_v2_fits_empty_block,
@@ -14,9 +18,10 @@ use super::{
     LegacyTransactionId, MineSearchOutcome, OutPoint, SignatureScheme, StratumMineShare,
     StratumMineTemplate, Transaction, TransactionV2, TransactionV2Domain, TransactionV2Input,
     TransactionV2LegacyInput, TransactionV2Output, TxOutput, V2SpendingAuthorization,
-    VersionedAddress, Wallet, decode_versioned_address, encode_versioned_address,
+    VersionedAddress, Wallet, encode_versioned_address,
 };
 use anyhow::{Context, Result, bail};
+use std::collections::BTreeSet;
 
 pub const HYBRID_EXTERNAL_ADDRESS_GAP_LIMIT: u32 = 20;
 const MAX_DISCOVERED_EXTERNAL_ADDRESSES: u32 = 10_000;
@@ -44,15 +49,13 @@ impl Ledger {
         encode_versioned_address(address, self.address_network())
     }
 
-    pub fn wallet_reward_address(&self, wallet: &Wallet, _height: u64) -> String {
+    pub fn wallet_reward_address(&self, wallet: &Wallet, _height: u64) -> Result<String> {
         let (_, address) = self
-            .wallet_reward_addresses(wallet)
-            .expect("valid chain has discoverable wallet reward addresses")
+            .wallet_reward_addresses(wallet)?
             .last()
             .copied()
-            .expect("wallet reward discovery always returns a current address");
+            .context("wallet reward discovery did not return a current address")?;
         encode_versioned_address(address, self.address_network())
-            .expect("wallet reward address has a valid fixed-size commitment")
     }
 
     pub fn wallet_owned_hybrid_addresses(&self, wallet: &Wallet) -> Result<Vec<VersionedAddress>> {
@@ -86,9 +89,9 @@ impl Ledger {
         self.recover_historical_hybrid_address_cursors(wallet)?;
         let tip_changed = !wallet.external_discovery_tip_matches(self.tip_hash());
         let used = if tip_changed {
-            self.used_hybrid_addresses()?
+            self.used_hybrid_addresses()
         } else {
-            self.pending_hybrid_addresses()
+            HybridAddressLookup::pending_only(self.pending_hybrid_addresses())
         };
         let start = wallet.external_address_cursor();
         let mut index = start;
@@ -133,9 +136,9 @@ impl Ledger {
         self.recover_historical_hybrid_address_cursors(wallet)?;
         let tip_changed = !wallet.reward_discovery_tip_matches(self.tip_hash());
         let spent = if tip_changed {
-            self.spent_hybrid_addresses()?
+            self.spent_hybrid_addresses()
         } else {
-            self.pending_spent_hybrid_addresses()
+            HybridAddressLookup::pending_only(self.pending_spent_hybrid_addresses())
         };
         let start = wallet.reward_address_cursor();
         let mut index = start;
@@ -219,98 +222,14 @@ impl Ledger {
         &self,
         legacy_public_key: [u8; 32],
     ) -> Result<Vec<VersionedAddress>> {
-        let domain = self.transaction_v2_domain()?;
-        let mut owned = Vec::new();
-        for block in self.chain() {
-            for envelope in &block.transactions_v2 {
-                let bytes = decode_hex(envelope).context("invalid confirmed transaction-v2 hex")?;
-                let (decoded_domain, transaction) = TransactionV2::decode(&bytes)?;
-                if decoded_domain != domain {
-                    continue;
-                }
-                match &transaction {
-                    TransactionV2::Migration {
-                        outputs,
-                        authorizations,
-                        ..
-                    } => {
-                        if authorizations.iter().any(|authorization| {
-                            authorization.scheme() == SignatureScheme::Ed25519
-                                && authorization.public_key().as_bytes() == legacy_public_key
-                        }) {
-                            for output in outputs {
-                                push_unique_address(&mut owned, output.address);
-                            }
-                        }
-                    }
-                    TransactionV2::Transfer {
-                        inputs,
-                        outputs,
-                        authorizations,
-                        ..
-                    } => {
-                        let authored = collect_wallet_hybrid_input_addresses(
-                            inputs,
-                            authorizations,
-                            &legacy_public_key,
-                            &mut owned,
-                        );
-                        if authored {
-                            // Native and browser builders place the external recipient first and
-                            // deterministic wallet change, when present, in subsequent outputs.
-                            for output in outputs.iter().skip(1) {
-                                push_unique_address(&mut owned, output.address);
-                            }
-                        }
-                    }
-                    TransactionV2::Burn {
-                        inputs,
-                        change,
-                        authorizations,
-                        ..
-                    } => {
-                        if collect_wallet_hybrid_input_addresses(
-                            inputs,
-                            authorizations,
-                            &legacy_public_key,
-                            &mut owned,
-                        ) {
-                            for output in change {
-                                push_unique_address(&mut owned, output.address);
-                            }
-                        }
-                    }
-                    TransactionV2::Mine { .. } => {}
-                }
-            }
-        }
-        Ok(owned)
+        Ok(self.confirmed_hybrid_authored_addresses(&legacy_public_key))
     }
 
-    fn used_hybrid_addresses(&self) -> Result<Vec<VersionedAddress>> {
-        let mut used = self.pending_hybrid_addresses();
-        let network = self.address_network();
-        let domain = self.transaction_v2_domain()?;
-        for block in self.chain() {
-            if let Some(address) = block.reward_address.as_deref() {
-                if let Ok(address) = decode_versioned_address(address, network) {
-                    if address.version == super::AddressVersion::HybridKeyCommitment {
-                        push_unique_address(&mut used, address);
-                    }
-                }
-            }
-            for transaction in &block.transactions {
-                collect_legacy_hybrid_outputs(transaction, network, &mut used);
-            }
-            for envelope in &block.transactions_v2 {
-                let bytes = decode_hex(envelope).context("invalid confirmed transaction-v2 hex")?;
-                let (decoded_domain, transaction) = TransactionV2::decode(&bytes)?;
-                if decoded_domain == domain {
-                    collect_v2_output_addresses(&transaction, &mut used);
-                }
-            }
-        }
-        Ok(used)
+    fn used_hybrid_addresses(&self) -> HybridAddressLookup<'_> {
+        HybridAddressLookup::new(
+            self.pending_hybrid_addresses(),
+            self.confirmed_hybrid_used_addresses(),
+        )
     }
 
     /// Returns every hybrid address that has appeared as a transaction or reward output,
@@ -318,13 +237,13 @@ impl Ledger {
     /// receive cursor without exposing their seed or public-key material to the node.
     pub fn used_hybrid_encoded_addresses(&self) -> Result<Vec<String>> {
         let network = self.address_network();
-        self.used_hybrid_addresses()?
-            .into_iter()
+        self.used_hybrid_addresses()
+            .iter()
             .map(|address| encode_versioned_address(address, network))
             .collect()
     }
 
-    fn pending_hybrid_addresses(&self) -> Vec<VersionedAddress> {
+    fn pending_hybrid_addresses(&self) -> BTreeSet<VersionedAddress> {
         let mut used = Vec::new();
         let network = self.address_network();
         for transaction in &self.pending {
@@ -333,30 +252,22 @@ impl Ledger {
         for transaction in &self.pending_v2 {
             collect_v2_output_addresses(transaction, &mut used);
         }
-        used
+        used.into_iter().collect()
     }
 
-    fn spent_hybrid_addresses(&self) -> Result<Vec<VersionedAddress>> {
-        let mut spent = self.pending_spent_hybrid_addresses();
-        let domain = self.transaction_v2_domain()?;
-        for block in self.chain() {
-            for envelope in &block.transactions_v2 {
-                let bytes = decode_hex(envelope).context("invalid confirmed transaction-v2 hex")?;
-                let (decoded_domain, transaction) = TransactionV2::decode(&bytes)?;
-                if decoded_domain == domain {
-                    collect_v2_input_addresses(&transaction, &mut spent);
-                }
-            }
-        }
-        Ok(spent)
+    fn spent_hybrid_addresses(&self) -> HybridAddressLookup<'_> {
+        HybridAddressLookup::new(
+            self.pending_spent_hybrid_addresses(),
+            self.confirmed_hybrid_spent_addresses(),
+        )
     }
 
-    fn pending_spent_hybrid_addresses(&self) -> Vec<VersionedAddress> {
+    fn pending_spent_hybrid_addresses(&self) -> BTreeSet<VersionedAddress> {
         let mut spent = Vec::new();
         for transaction in &self.pending_v2 {
             collect_v2_input_addresses(transaction, &mut spent);
         }
-        spent
+        spent.into_iter().collect()
     }
 
     /// Builds one consolidation transaction from every currently spendable legacy wallet output
@@ -707,7 +618,7 @@ impl Ledger {
             ..
         } = &transaction
         else {
-            unreachable!("v2 consolidation always builds a transfer");
+            bail!("v2 consolidation builder returned another transaction kind");
         };
         let next_height = self.height().saturating_add(1);
         let authorization_count =
@@ -1286,48 +1197,6 @@ impl Ledger {
     }
 }
 
-fn collect_legacy_hybrid_outputs(
-    transaction: &Transaction,
-    network: AddressNetwork,
-    used: &mut Vec<VersionedAddress>,
-) {
-    for output in transaction.outputs() {
-        if let Ok(address) = decode_versioned_address(&output.address, network) {
-            if address.version == super::AddressVersion::HybridKeyCommitment {
-                push_unique_address(used, address);
-            }
-        }
-    }
-}
-
-fn collect_v2_output_addresses(transaction: &TransactionV2, used: &mut Vec<VersionedAddress>) {
-    let outputs = match transaction {
-        TransactionV2::Migration { outputs, .. } | TransactionV2::Transfer { outputs, .. } => {
-            outputs.as_slice()
-        }
-        TransactionV2::Burn { change, .. } => change.as_slice(),
-        TransactionV2::Mine { recipient, .. } => {
-            push_unique_address(used, *recipient);
-            return;
-        }
-    };
-    for output in outputs {
-        push_unique_address(used, output.address);
-    }
-}
-
-fn collect_v2_input_addresses(transaction: &TransactionV2, spent: &mut Vec<VersionedAddress>) {
-    let inputs = match transaction {
-        TransactionV2::Transfer { inputs, .. } | TransactionV2::Burn { inputs, .. } => {
-            inputs.as_slice()
-        }
-        TransactionV2::Migration { .. } | TransactionV2::Mine { .. } => return,
-    };
-    for input in inputs {
-        push_unique_address(spent, input.owner);
-    }
-}
-
 fn sign_v2_authorizations(
     wallet: &Wallet,
     owners: impl IntoIterator<Item = VersionedAddress>,
@@ -1347,30 +1216,10 @@ fn sign_v2_authorizations(
     Ok(authorizations)
 }
 
-fn collect_wallet_hybrid_input_addresses(
-    inputs: &[TransactionV2Input],
-    authorizations: &[V2SpendingAuthorization],
-    legacy_public_key: &[u8; 32],
-    owned: &mut Vec<VersionedAddress>,
-) -> bool {
-    let mut authored = false;
-    for authorization in authorizations {
-        let public_key = authorization.public_key().as_bytes();
-        if authorization.scheme() == SignatureScheme::HybridEd25519MlDsa44
-            && public_key.get(..legacy_public_key.len()) == Some(legacy_public_key)
-        {
-            if let Ok(owner) = authorization.authorized_address() {
-                for input in inputs.iter().filter(|input| input.owner == owner) {
-                    push_unique_address(owned, input.owner);
-                    authored = true;
-                }
-            }
-        }
-    }
-    authored
-}
-
-fn push_unique_address(addresses: &mut Vec<VersionedAddress>, address: VersionedAddress) {
+pub(super) fn push_unique_address(
+    addresses: &mut Vec<VersionedAddress>,
+    address: VersionedAddress,
+) {
     if !addresses.contains(&address) {
         addresses.push(address);
     }
@@ -1379,12 +1228,12 @@ fn push_unique_address(addresses: &mut Vec<VersionedAddress>, address: Versioned
 fn legacy_transaction_id(txid: &str) -> Result<LegacyTransactionId> {
     let bytes = decode_hex(txid).context("legacy outpoint ID is not hexadecimal")?;
     match bytes.len() {
-        32 => Ok(LegacyTransactionId::Hash(
-            bytes.try_into().expect("checked legacy hash length"),
-        )),
-        64 => Ok(LegacyTransactionId::Signature(
-            bytes.try_into().expect("checked legacy signature length"),
-        )),
+        32 => Ok(LegacyTransactionId::Hash(bytes.try_into().map_err(
+            |_| anyhow::anyhow!("legacy transaction hash has an invalid length"),
+        )?)),
+        64 => Ok(LegacyTransactionId::Signature(bytes.try_into().map_err(
+            |_| anyhow::anyhow!("legacy transaction signature has an invalid length"),
+        )?)),
         length => bail!("legacy outpoint ID must contain 32 or 64 bytes, got {length}"),
     }
 }
@@ -1551,10 +1400,12 @@ mod v2_migration_tests {
         let mut ledger = Ledger::new(BTreeMap::new(), 1);
         let activation = super::super::HYBRID_REWARD_ACTIVATION_HEIGHT;
 
-        let first = ledger.wallet_reward_address(&wallet, activation);
+        let first = ledger.wallet_reward_address(&wallet, activation).unwrap();
         assert_eq!(
             first,
-            ledger.wallet_reward_address(&wallet, activation + 1_000)
+            ledger
+                .wallet_reward_address(&wallet, activation + 1_000)
+                .unwrap()
         );
         let first_owner = wallet.hybrid_versioned_address_at(HybridAddressBranch::Reward, 0);
         ledger.pending_v2.push(TransactionV2::Burn {
@@ -1569,11 +1420,15 @@ mod v2_migration_tests {
             anchor: Some([0x24; 32]),
             authorizations: Vec::new(),
         });
-        let second = ledger.wallet_reward_address(&wallet, activation + 1);
+        let second = ledger
+            .wallet_reward_address(&wallet, activation + 1)
+            .unwrap();
         assert_ne!(first, second);
         let restored = Wallet::from_seed("rotating-reward-wallet");
         assert_eq!(
-            ledger.wallet_reward_address(&restored, activation + 1),
+            ledger
+                .wallet_reward_address(&restored, activation + 1)
+                .unwrap(),
             second
         );
 
@@ -1653,6 +1508,8 @@ mod v2_migration_tests {
             .unwrap()
             .transactions_v2
             .push(hex_encode(burn.encode(&domain).unwrap()));
+        let tip = ledger.chain.last().unwrap().clone();
+        ledger.index_unapplied_block_addresses(&tip).unwrap();
 
         let recovery_addresses = ledger
             .wallet_authored_hybrid_addresses(signing_wallet.legacy_versioned_address().payload)

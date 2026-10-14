@@ -2,6 +2,7 @@ use std::collections::BTreeSet;
 
 use anyhow::{Context, Result, bail};
 
+use super::ledger_history_index::BlockAddressEffects;
 use super::ledger_ops::{
     block_reward, credit_reward_outputs, ensure_block_has_burn, ensure_outputs_do_not_overflow,
     ensure_single_input_owner, ensure_valid_recovery_block, validate_block_fee_policy,
@@ -103,10 +104,12 @@ impl Ledger {
         }
         let transaction_v2_domain = self.transaction_v2_domain()?;
         let network = AddressNetwork::from_profile_id(&self.launch_profile.profile_id);
+        let mut address_effects = BlockAddressEffects::for_block_outputs(&block, network);
         let mut transaction_v2_ids = BTreeSet::new();
         for envelope in &block.transactions_v2 {
             let transaction =
                 decode_canonical_transaction_v2_envelope(envelope, &transaction_v2_domain)?;
+            address_effects.record_transaction_v2(&transaction);
             self.validate_transaction_v2_anchor_for_block(&transaction, block.height)?;
             transaction.validate_authorization_policy_at_height(block.height)?;
             let transaction_id = hex_encode(transaction.transaction_id(&transaction_v2_domain)?);
@@ -134,6 +137,7 @@ impl Ledger {
             .iter()
             .map(|tx| tx.signature().to_string())
             .collect::<BTreeSet<_>>();
+        let ticket_draw = self.ticket_draw_before(&block);
         let mut tickets = self.tickets.clone();
         apply_finalizer_ticket_effects(self.tip(), &block, &mut tickets)?;
         tickets.extend(tickets_created_by_block(&block, &self.launch_profile)?);
@@ -149,6 +153,9 @@ impl Ledger {
             .extend(mined_signatures.iter().cloned());
         self.mined_transaction_ids
             .extend(transaction_v2_ids.iter().cloned());
+        self.commit_block_address_effects(address_effects);
+        self.record_ticket_draw(block.height, ticket_draw);
+        self.record_vdf_retarget_observation(&block);
         self.chain.push(block);
         self.update_mine_difficulty_cache_after_tip();
         if let Some(checkpoint) = certified_parent {
@@ -213,10 +220,12 @@ impl Ledger {
         }
         let transaction_v2_domain = self.transaction_v2_domain()?;
         let network = AddressNetwork::from_profile_id(&self.launch_profile.profile_id);
+        let mut address_effects = BlockAddressEffects::for_block_outputs(&block, network);
         let mut transaction_v2_ids = BTreeSet::new();
         for envelope in &block.transactions_v2 {
             let transaction =
                 decode_canonical_transaction_v2_envelope(envelope, &transaction_v2_domain)?;
+            address_effects.record_transaction_v2(&transaction);
             let transaction_id = hex_encode(transaction.transaction_id(&transaction_v2_domain)?);
             apply_transaction_v2_with_lineage(
                 &transaction,
@@ -241,6 +250,7 @@ impl Ledger {
             .iter()
             .map(|transaction| transaction.signature().to_string())
             .collect::<BTreeSet<_>>();
+        let ticket_draw = self.ticket_draw_before(&block);
         let parent = self.tip().clone();
         apply_finalizer_ticket_effects(&parent, &block, &mut self.tickets)?;
         self.tickets
@@ -249,6 +259,9 @@ impl Ledger {
         self.compact_block_context.append_trusted_block(&block)?;
         self.mined_transaction_ids.extend(mined_signatures);
         self.mined_transaction_ids.extend(transaction_v2_ids);
+        self.commit_block_address_effects(address_effects);
+        self.record_ticket_draw(block.height, ticket_draw);
+        self.record_vdf_retarget_observation(&block);
         self.chain.push(block);
         self.update_mine_difficulty_cache_after_tip();
         if let Some(checkpoint) = certified_parent {
@@ -809,7 +822,7 @@ mod tests {
         let mine_transaction_id = mine.signature().to_string();
         ledger.submit_transaction(mine).unwrap();
         let prepared = ledger.prepare_next_block(wallet.address(), 1).unwrap();
-        let vdf_output = run_vdf(prepared.vdf_seed(), prepared.vdf_rounds());
+        let vdf_output = run_vdf(prepared.vdf_seed(), prepared.vdf_rounds()).unwrap();
         let block = prepared.finish(&wallet, vdf_output);
         ledger.apply_preverified_block_at(block, 1).unwrap();
 

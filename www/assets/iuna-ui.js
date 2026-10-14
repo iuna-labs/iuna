@@ -69,7 +69,7 @@ window.iunaApp = function iunaApp() {
     settingsPasswordConfirm: "",
     settingsFeedback: null,
     keepTrackOfMetrics: false,
-    vdfMemoryMib: 256,
+    vdfMemoryMib: 64,
     addressBook: {},
     addressBookVersion: 0,
     addressBookModalOpen: false,
@@ -596,7 +596,7 @@ window.iunaApp = function iunaApp() {
           this.config.recoveryVdfTopRankPercent ??
           this.recoveryVdfTopRankPercent
       );
-      this.vdfMemoryMib = Number(this.config.vdf_memory_mib || 256);
+      this.vdfMemoryMib = Number(this.config.vdf_memory_mib || 64);
       this.p2pAcceptInbound = this.config.p2p_accept_inbound === true;
       if (!this.p2pBindPortDirty) {
         this.p2pBindPort = Number(this.config.p2p_bind_port || 9444);
@@ -1967,7 +1967,7 @@ window.iunaApp = function iunaApp() {
 
     async setVdfMemoryMib(memoryMib) {
       const previous = this.vdfMemoryMib;
-      const normalized = Math.max(32, Math.min(4096, Math.round(Number(memoryMib) || 256)));
+      const normalized = Math.max(32, Math.min(4096, Math.round(Number(memoryMib) || 64)));
       try {
         this.vdfMemoryMib = normalized;
         await this.postForm(

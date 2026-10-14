@@ -143,6 +143,12 @@ pub(super) fn is_possible_fork_error(error: &anyhow::Error) -> bool {
 
 pub(super) fn inbound_error_counts_as_misbehavior(error: &anyhow::Error) -> bool {
     !is_possible_fork_error(error)
+        && !error.chain().any(|cause| {
+            matches!(
+                cause.downcast_ref::<SyncError>(),
+                Some(SyncError::ForkValidationThrottled | SyncError::ForkHistoryUnavailable)
+            )
+        })
         && !error_has_validation(error, |kind| {
             kind.is_fork_relative()
                 || kind.is_temporal()
@@ -174,6 +180,18 @@ mod tests {
         assert!(inbound_error_counts_as_misbehavior(&anyhow!(
             "block hash is invalid"
         )));
+    }
+
+    #[test]
+    fn local_fork_validation_conditions_are_not_peer_misbehavior() {
+        for condition in [
+            SyncError::ForkValidationThrottled,
+            SyncError::ForkHistoryUnavailable,
+        ] {
+            let error = anyhow::Error::new(condition).context("block batch");
+            assert!(!inbound_error_counts_as_misbehavior(&error));
+            assert!(!is_possible_fork_error(&error));
+        }
     }
 
     #[test]

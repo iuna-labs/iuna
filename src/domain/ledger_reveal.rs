@@ -105,8 +105,11 @@ impl Ledger {
                     prev_hash: prev_hash.clone(),
                     slot: member.slot,
                     member: wallet.address().to_string(),
-                    reward_address: (height >= super::HYBRID_REWARD_ACTIVATION_HEIGHT)
-                        .then(|| self.wallet_reward_address(wallet, height)),
+                    reward_address: if height >= super::HYBRID_REWARD_ACTIVATION_HEIGHT {
+                        Some(self.wallet_reward_address(wallet, height)?)
+                    } else {
+                        None
+                    },
                     burns: candidate.clone(),
                     burns_v2: candidate_v2.clone(),
                 });
@@ -115,18 +118,19 @@ impl Ledger {
                     selected_v2 = candidate_v2;
                 }
             }
-            bundles.push(
-                wallet.burn_bundle(BurnBundlePayload {
-                    height,
-                    prev_hash: prev_hash.clone(),
-                    slot: member.slot,
-                    member: wallet.address().to_string(),
-                    reward_address: (height >= super::HYBRID_REWARD_ACTIVATION_HEIGHT)
-                        .then(|| self.wallet_reward_address(wallet, height)),
-                    burns: selected,
-                    burns_v2: selected_v2,
-                }),
-            );
+            bundles.push(wallet.burn_bundle(BurnBundlePayload {
+                height,
+                prev_hash: prev_hash.clone(),
+                slot: member.slot,
+                member: wallet.address().to_string(),
+                reward_address: if height >= super::HYBRID_REWARD_ACTIVATION_HEIGHT {
+                    Some(self.wallet_reward_address(wallet, height)?)
+                } else {
+                    None
+                },
+                burns: selected,
+                burns_v2: selected_v2,
+            }));
         }
         Ok(bundles)
     }
@@ -222,7 +226,7 @@ impl Ledger {
             slot: member.slot,
             member: wallet.address().to_string(),
             reward_address: (height >= super::HYBRID_REWARD_ACTIVATION_HEIGHT)
-                .then(|| self.wallet_reward_address(wallet, height)),
+                .then(|| self.wallet_reward_address(wallet, height).unwrap()),
             burns,
             burns_v2: Vec::new(),
         })

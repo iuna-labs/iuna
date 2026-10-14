@@ -364,7 +364,9 @@ async fn session_loop(
         maybe_start_catchup(
             &network,
             &mut writer,
-            peer_status.as_ref().unwrap(),
+            peer_status
+                .as_ref()
+                .context("inbound handshake completed without peer status")?,
             &mut catchup_requested_at,
         )
         .await?;
@@ -400,7 +402,9 @@ async fn session_loop(
                 maybe_start_catchup(
                     &network,
                     &mut writer,
-                    peer_status.as_ref().unwrap(),
+                    peer_status
+                        .as_ref()
+                        .context("outbound Hello completed without peer status")?,
                     &mut catchup_requested_at,
                 )
                 .await?;
@@ -424,7 +428,9 @@ async fn session_loop(
                 maybe_start_catchup(
                     &network,
                     &mut writer,
-                    peer_status.as_ref().unwrap(),
+                    peer_status
+                        .as_ref()
+                        .context("outbound status update was not retained")?,
                     &mut catchup_requested_at,
                 )
                 .await?;
@@ -529,7 +535,9 @@ async fn session_loop(
                     maybe_start_catchup(
                         &network,
                         &mut writer,
-                        peer_status.as_ref().unwrap(),
+                        peer_status
+                            .as_ref()
+                            .context("session Hello completed without peer status")?,
                         &mut catchup_requested_at,
                     ).await?;
                     write_peer_exchange(&network, &mut writer, &known_peer).await?;
@@ -553,7 +561,9 @@ async fn session_loop(
                     maybe_start_catchup(
                         &network,
                         &mut writer,
-                        peer_status.as_ref().unwrap(),
+                        peer_status
+                            .as_ref()
+                            .context("session status update was not retained")?,
                         &mut catchup_requested_at,
                     ).await?;
                     write_peer_exchange(&network, &mut writer, &known_peer).await?;

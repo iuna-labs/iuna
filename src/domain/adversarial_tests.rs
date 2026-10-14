@@ -339,7 +339,7 @@ impl Harness {
                     self.seed
                 )
             });
-        let vdf_output = run_vdf(prepared.vdf_seed(), prepared.vdf_rounds());
+        let vdf_output = run_vdf(prepared.vdf_seed(), prepared.vdf_rounds()).unwrap();
         prepared.finish(&wallet, vdf_output)
     }
 
@@ -367,7 +367,7 @@ impl Harness {
             .ledger
             .prepare_recovery_block(wallet.address(), timestamp)
             .unwrap();
-        let vdf_output = run_vdf(prepared.vdf_seed(), prepared.vdf_rounds());
+        let vdf_output = run_vdf(prepared.vdf_seed(), prepared.vdf_rounds()).unwrap();
         let block = prepared.finish(wallet, vdf_output);
         self.ledger
             .apply_block_at(block.clone(), NOW_MS.saturating_add(block.timestamp_ms))
@@ -2153,7 +2153,7 @@ fn expected_supply(snapshot: &ChainSnapshot) -> Amount {
 }
 
 fn finish_prepared_block(wallet: &Wallet, block: super::PreparedBlock) -> Block {
-    let vdf_output = run_vdf(block.vdf_seed(), block.vdf_rounds());
+    let vdf_output = run_vdf(block.vdf_seed(), block.vdf_rounds()).unwrap();
     block.finish(wallet, vdf_output)
 }
 
@@ -4539,7 +4539,7 @@ fn blockspace_flood_stays_bounded_by_transaction_count_and_bytes() {
     let prepared = ledger
         .prepare_next_block_with_burn_bundles(finalizer.address(), 1, Vec::new())
         .unwrap();
-    let vdf_output = run_vdf(prepared.vdf_seed(), prepared.vdf_rounds());
+    let vdf_output = run_vdf(prepared.vdf_seed(), prepared.vdf_rounds()).unwrap();
     let block = prepared.finish(&finalizer, vdf_output);
 
     assert!(

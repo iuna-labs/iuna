@@ -66,13 +66,12 @@ impl NodeCore {
             .chunks(CHAIN_SEGMENT_BLOCKS)
             .enumerate()
             .filter(|(_, blocks)| blocks.len() == CHAIN_SEGMENT_BLOCKS)
-            .map(|(segment_id, blocks)| {
-                let end = blocks.last().expect("completed segment is not empty");
-                ChainSegmentSummary {
+            .filter_map(|(segment_id, blocks)| {
+                blocks.last().map(|end| ChainSegmentSummary {
                     segment_id: segment_id as u64,
                     end_height: end.height,
                     end_block_hash: end.hash.clone(),
-                }
+                })
             })
             .collect();
         ChainBootstrap {

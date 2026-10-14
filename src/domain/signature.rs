@@ -131,7 +131,10 @@ fn decode_material(encoded: &[u8]) -> Result<(SignatureScheme, &[u8])> {
     let (length, bytes) = encoded
         .split_at_checked(4)
         .context("signature material length is missing")?;
-    let declared = u32::from_be_bytes(length.try_into().expect("four-byte length")) as usize;
+    let length: [u8; 4] = length
+        .try_into()
+        .context("signature material length must contain four bytes")?;
+    let declared = u32::from_be_bytes(length) as usize;
     if bytes.len() != declared {
         bail!(
             "signature material declares {declared} bytes but contains {}",
@@ -210,13 +213,11 @@ fn verify_ml_dsa44_with_context(
 }
 
 pub(crate) fn ml_dsa44_public_key(signing_seed: &[u8; 32]) -> [u8; 1_312] {
-    let signing_key = ml_dsa44_signing_key(signing_seed);
-    signing_key
+    // The encoded key is a fixed-size array, so the length is checked at compile time.
+    ml_dsa44_signing_key(signing_seed)
         .verifying_key()
         .encode()
-        .as_slice()
-        .try_into()
-        .expect("ML-DSA-44 public key has a fixed 1,312-byte encoding")
+        .into()
 }
 
 pub(crate) fn sign_ml_dsa44(signing_seed: &[u8; 32], payload: &[u8]) -> Result<[u8; 2_420]> {
@@ -225,11 +226,11 @@ pub(crate) fn sign_ml_dsa44(signing_seed: &[u8; 32], payload: &[u8]) -> Result<[
         .expanded_key()
         .sign_deterministic(payload, &[])
         .context("failed to create deterministic ML-DSA-44 signature")?;
-    Ok(signature
+    signature
         .encode()
         .as_slice()
         .try_into()
-        .expect("ML-DSA-44 signature has a fixed 2,420-byte encoding"))
+        .context("ML-DSA-44 signer returned an invalid signature length")
 }
 
 fn ml_dsa44_signing_key(signing_seed: &[u8; 32]) -> MlDsaSigningKey<MlDsa44> {

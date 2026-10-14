@@ -38,21 +38,9 @@ pub(crate) fn burn_leader_ranks_for_blocks(
     ledger: &Ledger,
     blocks: &[Block],
 ) -> BTreeMap<String, Vec<BurnLeaderRank>> {
-    let Ok(ranks_by_height) =
-        ledger.burn_leader_ranks_for_blocks(blocks.iter().map(|block| block.height))
-    else {
-        return BTreeMap::new();
-    };
-
-    blocks
-        .iter()
-        .filter_map(|block| {
-            ranks_by_height
-                .get(&block.height)
-                .cloned()
-                .map(|ranks| (block.hash.clone(), ranks))
-        })
-        .collect()
+    ledger
+        .burn_leader_ranks_by_block_hash(blocks)
+        .unwrap_or_default()
 }
 
 fn known_chain_output_index(

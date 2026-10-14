@@ -23,7 +23,7 @@ mod reference;
 
 const VDF_SOLUTION_PREFIX: &str = "classgroup-wesolowski-bqfc-v1:";
 const MIN_VDF_ROUNDS: u64 = 1;
-pub const DEFAULT_VDF_MEMORY_MIB: u64 = 256;
+pub const DEFAULT_VDF_MEMORY_MIB: u64 = 64;
 pub const MIN_VDF_MEMORY_MIB: u64 = 32;
 pub const MAX_VDF_MEMORY_MIB: u64 = 4_096;
 #[cfg(feature = "e2e")]
@@ -56,11 +56,15 @@ pub fn configure_e2e_vdf_round_divisor_for_tests(divisor: u64) {
     E2E_VDF_ROUND_DIVISOR.store(divisor.max(1), Ordering::Relaxed);
 }
 
-pub fn run_vdf(seed: &str, rounds: u64) -> String {
+pub fn run_vdf(seed: &str, rounds: u64) -> anyhow::Result<String> {
     run_vdf_with_memory_limit(seed, rounds, DEFAULT_VDF_MEMORY_MIB)
 }
 
-pub fn run_vdf_with_memory_limit(seed: &str, rounds: u64, memory_mib: u64) -> String {
+pub fn run_vdf_with_memory_limit(
+    seed: &str,
+    rounds: u64,
+    memory_mib: u64,
+) -> anyhow::Result<String> {
     run_vdf_with_progress_and_memory_limit(seed, rounds, Duration::MAX, memory_mib, |_| {})
 }
 
@@ -69,7 +73,7 @@ pub fn run_vdf_with_progress(
     rounds: u64,
     progress_interval: Duration,
     progress: impl FnMut(VdfProgress),
-) -> String {
+) -> anyhow::Result<String> {
     run_vdf_with_progress_and_memory_limit(
         seed,
         rounds,
@@ -85,7 +89,7 @@ pub fn run_vdf_with_progress_and_memory_limit(
     progress_interval: Duration,
     memory_mib: u64,
     progress: impl FnMut(VdfProgress),
-) -> String {
+) -> anyhow::Result<String> {
     let cancelled = AtomicBool::new(false);
     run_vdf_cancellable_with_progress_and_memory_limit(
         seed,
@@ -94,8 +98,8 @@ pub fn run_vdf_with_progress_and_memory_limit(
         &cancelled,
         memory_mib,
         progress,
-    )
-    .expect("non-cancellable VDF must finish")
+    )?
+    .ok_or_else(|| anyhow::anyhow!("uncancelled VDF stopped without a result"))
 }
 
 pub fn run_vdf_cancellable_with_progress(
@@ -104,7 +108,7 @@ pub fn run_vdf_cancellable_with_progress(
     progress_interval: Duration,
     cancelled: &AtomicBool,
     progress: impl FnMut(VdfProgress),
-) -> Option<String> {
+) -> anyhow::Result<Option<String>> {
     run_vdf_cancellable_with_progress_and_memory_limit(
         seed,
         rounds,
@@ -122,7 +126,7 @@ pub fn run_vdf_cancellable_with_progress_and_memory_limit(
     cancelled: &AtomicBool,
     memory_mib: u64,
     mut progress: impl FnMut(VdfProgress),
-) -> Option<String> {
+) -> anyhow::Result<Option<String>> {
     let (proof_seed, proof_rounds) = vdf_proof_parameters(seed, rounds);
     let total_steps = proof_rounds.saturating_mul(2);
     let mut last_progress = Instant::now();
@@ -150,8 +154,8 @@ pub fn run_vdf_cancellable_with_progress_and_memory_limit(
         cancelled,
         memory_mib.clamp(MIN_VDF_MEMORY_MIB, MAX_VDF_MEMORY_MIB) * 1024 * 1024,
     )
-    .expect("valid IUNA VDF parameters must produce a class-group proof");
-    solution.map(|solution| encode_vdf_solution(&solution))
+    .map_err(|error| anyhow::anyhow!("VDF prover failed: {error}"))?;
+    Ok(solution.map(|solution| encode_vdf_solution(&solution)))
 }
 
 pub fn verify_vdf(seed: &str, rounds: u64, solution: &str) -> bool {
@@ -231,14 +235,21 @@ pub(super) fn recent_vdf_retarget_average_observed_block_ms(chain: &[Block]) -> 
         .filter_map(|pair| vdf_retarget_observed_block_ms(&pair[0], &pair[1]))
         .take(VDF_RETARGET_WINDOW_BLOCKS)
         .collect::<Vec<_>>();
-    if observations.is_empty() {
-        return None;
-    }
+    average_vdf_retarget_observation(&observations)
+}
+
+pub(super) fn average_vdf_retarget_observation<'a>(
+    observations: impl IntoIterator<Item = &'a u64>,
+) -> Option<u64> {
+    let mut count = 0_u128;
     let total = observations
-        .iter()
-        .map(|observed| u128::from(*observed))
+        .into_iter()
+        .map(|observed| {
+            count += 1;
+            u128::from(*observed)
+        })
         .sum::<u128>();
-    Some((total / observations.len() as u128) as u64)
+    (count > 0).then(|| (total / count) as u64)
 }
 
 fn maybe_report_vdf_progress(
@@ -375,7 +386,7 @@ mod tests {
 
     #[test]
     fn vdf_solution_verifies_and_is_bound_to_seed_and_rounds() {
-        let solution = run_vdf("test-seed", 128);
+        let solution = run_vdf("test-seed", 128).unwrap();
 
         assert!(verify_vdf("test-seed", 128, &solution));
         assert!(!verify_vdf("other-seed", 128, &solution));
@@ -388,7 +399,8 @@ mod tests {
         let mut progress = Vec::new();
         let solution = run_vdf_with_progress("progress-seed", 4, Duration::ZERO, |snapshot| {
             progress.push(snapshot);
-        });
+        })
+        .unwrap();
 
         assert!(verify_vdf("progress-seed", 4, &solution));
         assert!(
@@ -425,7 +437,8 @@ mod tests {
                         cancelled.store(true, Ordering::Relaxed);
                     }
                 },
-            );
+            )
+            .unwrap();
 
             assert!(solution.is_none(), "VDF did not stop during {phase:?}");
         }
@@ -433,7 +446,7 @@ mod tests {
 
     #[test]
     fn vdf_solution_uses_chia_bqfc_protocol_format() {
-        let solution = run_vdf("test-seed", 16);
+        let solution = run_vdf("test-seed", 16).unwrap();
         let encoded = solution.strip_prefix(VDF_SOLUTION_PREFIX).unwrap();
 
         assert_eq!(encoded.len(), wesolowski::SOLUTION_BYTES * 2);

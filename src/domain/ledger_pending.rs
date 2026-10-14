@@ -262,10 +262,12 @@ impl Ledger {
             selected_required_burn_signatures.insert(signature);
         }
         if selected_required_burn_signatures.len() != required_burn_signatures.len() {
-            let missing = required_burn_signatures
+            let Some(missing) = required_burn_signatures
                 .difference(&selected_required_burn_signatures)
                 .next()
-                .expect("required burn set differs");
+            else {
+                bail!("attested burn selection is inconsistent");
+            };
             bail!("attested burn {missing} is not pending");
         }
         let mut index = 0;
@@ -375,7 +377,9 @@ impl Ledger {
                 .as_ref()
                 .is_some_and(|(_, v2_rate, _)| legacy.is_none_or(|(_, rate)| *v2_rate > rate))
             {
-                let (index, _, candidate_utxos) = v2.expect("v2 candidate was selected");
+                let Some((index, _, candidate_utxos)) = v2 else {
+                    bail!("transaction-v2 selection became inconsistent");
+                };
                 let transaction = remaining_v2.remove(index);
                 let mut candidate = selection.clone();
                 candidate
@@ -392,7 +396,9 @@ impl Ledger {
                     selection = candidate;
                 }
             } else {
-                let (index, _) = legacy.expect("legacy candidate was selected");
+                let Some((index, _)) = legacy else {
+                    bail!("legacy transaction selection became inconsistent");
+                };
                 let transaction = remaining.remove(index);
                 let mut candidate = selection.clone();
                 candidate.transactions.push(transaction.clone());

@@ -160,7 +160,10 @@ impl SqliteChainStore {
                     } else {
                         let mut genesis_snapshot = header.clone();
                         genesis_snapshot.blocks.push(block);
-                        ledger = Some(Ledger::from_preverified_snapshot(genesis_snapshot)?);
+                        let mut genesis_ledger =
+                            Ledger::from_preverified_snapshot(genesis_snapshot)?;
+                        genesis_ledger.set_ticket_draw_horizon(stored_height);
+                        ledger = Some(genesis_ledger);
                     }
                 }
             }
@@ -209,6 +212,41 @@ impl SqliteChainStore {
 
     pub fn block_at_height(&self, height: u64) -> Result<Option<Block>> {
         Ok(self.blocks_from(height, 1)?.into_iter().next())
+    }
+
+    /// Load the persisted blocks at the given heights, decoding each segment at most once.
+    pub fn blocks_at_heights(
+        &self,
+        heights: &std::collections::BTreeSet<u64>,
+    ) -> Result<std::collections::BTreeMap<u64, Block>> {
+        let mut blocks = std::collections::BTreeMap::new();
+        if heights.is_empty() {
+            return Ok(blocks);
+        }
+        self.with_connection(|connection| {
+            let Some(header) = load_chain_header(connection)? else {
+                return Ok(blocks);
+            };
+            let mut segment_ids = heights
+                .iter()
+                .map(|height| height / CHAIN_SEGMENT_BLOCKS as u64)
+                .collect::<Vec<_>>();
+            segment_ids.dedup();
+            for segment_id in segment_ids {
+                let Some(segment) =
+                    load_chain_segment(connection, segment_id, &header.genesis_allocations)?
+                else {
+                    continue;
+                };
+                blocks.extend(
+                    segment
+                        .into_iter()
+                        .filter(|block| heights.contains(&block.height))
+                        .map(|block| (block.height, block)),
+                );
+            }
+            Ok(blocks)
+        })
     }
 
     pub fn tip(&self) -> Result<Option<(u64, String)>> {
@@ -540,7 +578,7 @@ VALUES (?1, ?2, ?3, ?4)
             }
         }
         let tail_start = tail[0].height;
-        let tip = tail.last().expect("resident tail is not empty");
+        let tip = tail.last().context("resident chain tail is empty")?;
         let header = ChainSnapshot {
             genesis_allocations: snapshot.genesis_allocations.clone(),
             vdf_rounds: snapshot.vdf_rounds,
@@ -1224,7 +1262,7 @@ fn archive_legacy_chain(path: &Path) -> Result<PathBuf> {
         .context("failed to checkpoint legacy chain database before archiving")?;
     drop(connection);
 
-    let archive_path = available_archive_path(path);
+    let archive_path = available_archive_path(path)?;
     for suffix in ["-wal", "-shm"] {
         let source = path_with_suffix(path, suffix);
         if source.exists() {
@@ -1248,7 +1286,41 @@ fn archive_legacy_chain(path: &Path) -> Result<PathBuf> {
     Ok(archive_path)
 }
 
-fn available_archive_path(path: &Path) -> PathBuf {
+/// Blocks at the given heights, served from the resident chain where possible and from the
+/// chain store for history that has been pruned from memory.
+pub(crate) async fn load_blocks_at_heights(
+    node: &crate::app::SharedNode,
+    store: &SqliteChainStore,
+    heights: std::collections::BTreeSet<u64>,
+) -> Result<std::collections::BTreeMap<u64, Block>> {
+    let (mut blocks, missing) = {
+        let node = node.lock().await;
+        let mut blocks = std::collections::BTreeMap::new();
+        let mut missing = std::collections::BTreeSet::new();
+        for height in heights {
+            match node.ledger().resident_block_at_height(height) {
+                Some(block) => {
+                    blocks.insert(height, block.clone());
+                }
+                None => {
+                    missing.insert(height);
+                }
+            }
+        }
+        (blocks, missing)
+    };
+    if missing.is_empty() {
+        return Ok(blocks);
+    }
+    let store = store.clone();
+    let persisted = tokio::task::spawn_blocking(move || store.blocks_at_heights(&missing))
+        .await
+        .context("block lookup worker failed")??;
+    blocks.extend(persisted);
+    Ok(blocks)
+}
+
+fn available_archive_path(path: &Path) -> Result<PathBuf> {
     for index in 0_u64.. {
         let suffix = if index == 0 {
             ".pre-v6".to_string()
@@ -1260,10 +1332,10 @@ fn available_archive_path(path: &Path) -> PathBuf {
             && !path_with_suffix(&candidate, "-wal").exists()
             && !path_with_suffix(&candidate, "-shm").exists()
         {
-            return candidate;
+            return Ok(candidate);
         }
     }
-    unreachable!("archive suffix counter exhausted")
+    anyhow::bail!("archive suffix counter exhausted")
 }
 
 fn path_with_suffix(path: &Path, suffix: &str) -> PathBuf {
@@ -1482,6 +1554,27 @@ VALUES (1, 0, 'bad-tip', ?1, 0)
         assert_eq!(
             store.block_at_height(257).unwrap(),
             extended.blocks.get(257).cloned()
+        );
+    }
+
+    #[test]
+    fn blocks_at_heights_reads_scattered_heights_across_segments() {
+        let dir = tempdir().unwrap();
+        let store = SqliteChainStore::open(dir.path().join("chain.sqlite3")).unwrap();
+        let snapshot = synthetic_snapshot("chain-store-scattered-heights", 300);
+        store.save_verified(&snapshot).unwrap();
+
+        let heights = [0, 5, 255, 256, 299, 300].into_iter().collect();
+        let blocks = store.blocks_at_heights(&heights).unwrap();
+
+        assert_eq!(
+            blocks.keys().copied().collect::<Vec<_>>(),
+            vec![0, 5, 255, 256, 299]
+        );
+        assert!(
+            blocks
+                .iter()
+                .all(|(height, block)| snapshot.blocks[*height as usize] == *block)
         );
     }
 

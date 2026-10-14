@@ -153,7 +153,7 @@ impl V2SpendingAuthorization {
                     .public_key
                     .as_bytes()
                     .try_into()
-                    .expect("validated Ed25519 public key length"),
+                    .context("Ed25519 authorization has an invalid public key length")?,
             }),
             SignatureScheme::HybridEd25519MlDsa44 => {
                 hybrid_key_commitment_address(&self.public_key)
@@ -528,37 +528,43 @@ impl TransactionV2 {
                         .public_key()
                         .as_bytes()
                         .try_into()
-                        .expect("validated Ed25519 public key length");
+                        .context("Ed25519 authorization has an invalid public key length")?;
                     let signature = authorization
                         .signature()
                         .as_bytes()
                         .try_into()
-                        .expect("validated Ed25519 signature length");
+                        .context("Ed25519 authorization has an invalid signature length")?;
                     verify_ed25519(public_key, &payload, signature, "transaction v2 input")?;
                 }
                 SignatureScheme::HybridEd25519MlDsa44 => {
-                    let (ed25519_public_key, ml_dsa_public_key) =
-                        authorization.public_key().as_bytes().split_at(32);
-                    let (ed25519_signature, ml_dsa_signature) =
-                        authorization.signature().as_bytes().split_at(64);
+                    let (ed25519_public_key, ml_dsa_public_key) = authorization
+                        .public_key()
+                        .as_bytes()
+                        .split_at_checked(32)
+                        .context("hybrid authorization public key is truncated")?;
+                    let (ed25519_signature, ml_dsa_signature) = authorization
+                        .signature()
+                        .as_bytes()
+                        .split_at_checked(64)
+                        .context("hybrid authorization signature is truncated")?;
                     verify_ed25519(
                         ed25519_public_key
                             .try_into()
-                            .expect("validated hybrid key length"),
+                            .context("hybrid Ed25519 public key has an invalid length")?,
                         &payload,
                         ed25519_signature
                             .try_into()
-                            .expect("validated hybrid signature length"),
+                            .context("hybrid Ed25519 signature has an invalid length")?,
                         "transaction v2 classical component",
                     )?;
                     verify_ml_dsa44(
                         ml_dsa_public_key
                             .try_into()
-                            .expect("validated hybrid key length"),
+                            .context("hybrid ML-DSA public key has an invalid length")?,
                         &payload,
                         ml_dsa_signature
                             .try_into()
-                            .expect("validated hybrid signature length"),
+                            .context("hybrid ML-DSA signature has an invalid length")?,
                         "transaction v2 post-quantum component",
                     )?;
                 }
@@ -1081,10 +1087,9 @@ impl<'a> Reader<'a> {
     }
 
     fn array<const N: usize>(&mut self, label: &str) -> Result<[u8; N]> {
-        Ok(self
-            .take(N, label)?
+        self.take(N, label)?
             .try_into()
-            .expect("reader returned requested fixed length"))
+            .with_context(|| format!("{label} has an invalid fixed length"))
     }
 
     fn count(&mut self, maximum: usize, label: &str) -> Result<usize> {

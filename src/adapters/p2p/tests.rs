@@ -416,6 +416,7 @@ async fn full_outbound_queue_is_metric_not_peer_error() {
             metrics: super::P2pMetricsCounters::default(),
             sync_progress: StdMutex::new(super::SyncProgressState::default()),
             chain_validation: Arc::new(super::ChainValidationCoordinator::default()),
+            last_fork_hydration: std::sync::Mutex::new(None),
         }),
     };
     let (sender, _receiver) = tokio::sync::mpsc::channel(1);
@@ -781,7 +782,7 @@ async fn future_block_rejection_does_not_poison_peer_or_later_acceptance() {
         .ledger()
         .prepare_next_block(alice.address(), future_timestamp)
         .unwrap();
-    let vdf_output = run_vdf(prepared.vdf_seed(), prepared.vdf_rounds());
+    let vdf_output = run_vdf(prepared.vdf_seed(), prepared.vdf_rounds()).unwrap();
     let future_block = prepared.finish(&alice, vdf_output);
 
     let local_node = node("future-block-local", alice.clone(), allocations);
@@ -999,6 +1000,7 @@ async fn hello_rejects_wrong_network_or_genesis_without_banning() {
             metrics: super::P2pMetricsCounters::default(),
             sync_progress: StdMutex::new(super::SyncProgressState::default()),
             chain_validation: Arc::new(super::ChainValidationCoordinator::default()),
+            last_fork_hydration: std::sync::Mutex::new(None),
         }),
     };
 
@@ -1109,6 +1111,7 @@ async fn hello_records_remote_clock_observation() {
             metrics: super::P2pMetricsCounters::default(),
             sync_progress: StdMutex::new(super::SyncProgressState::default()),
             chain_validation: Arc::new(super::ChainValidationCoordinator::default()),
+            last_fork_hydration: std::sync::Mutex::new(None),
         }),
     };
     let remote_time_ms = crate::app::now_ms().saturating_add(60_000);
@@ -1171,6 +1174,7 @@ async fn hello_remembers_advertised_address_after_signed_session_and_dialback() 
             metrics: super::P2pMetricsCounters::default(),
             sync_progress: StdMutex::new(super::SyncProgressState::default()),
             chain_validation: Arc::new(super::ChainValidationCoordinator::default()),
+            last_fork_hydration: std::sync::Mutex::new(None),
         }),
     };
     let remote_node_id = super::new_node_id();
@@ -1251,6 +1255,7 @@ async fn hello_ignores_advertised_address_when_connected_peer_cannot_sign_claime
             metrics: super::P2pMetricsCounters::default(),
             sync_progress: StdMutex::new(super::SyncProgressState::default()),
             chain_validation: Arc::new(super::ChainValidationCoordinator::default()),
+            last_fork_hydration: std::sync::Mutex::new(None),
         }),
     };
     let victim_node_id = super::new_node_id();
@@ -1325,6 +1330,7 @@ async fn dialback_rejects_address_that_signs_with_different_node_id() {
             metrics: super::P2pMetricsCounters::default(),
             sync_progress: StdMutex::new(super::SyncProgressState::default()),
             chain_validation: Arc::new(super::ChainValidationCoordinator::default()),
+            last_fork_hydration: std::sync::Mutex::new(None),
         }),
     };
     let honest_node_id = super::new_node_id();
@@ -1439,6 +1445,7 @@ async fn setup_placeholder_rejects_bootstrap_with_unpinned_candidate_genesis() {
             metrics: super::P2pMetricsCounters::default(),
             sync_progress: StdMutex::new(super::SyncProgressState::default()),
             chain_validation: Arc::new(super::ChainValidationCoordinator::default()),
+            last_fork_hydration: std::sync::Mutex::new(None),
         }),
     };
 
@@ -1517,6 +1524,7 @@ async fn real_node_accepts_setup_placeholder_peer_without_requesting_its_chain()
             metrics: super::P2pMetricsCounters::default(),
             sync_progress: StdMutex::new(super::SyncProgressState::default()),
             chain_validation: Arc::new(super::ChainValidationCoordinator::default()),
+            last_fork_hydration: std::sync::Mutex::new(None),
         }),
     };
     let setup_ledger = Ledger::new(BTreeMap::new(), 1);
@@ -1632,6 +1640,7 @@ async fn hello_ignores_private_advertised_listen_address() {
             metrics: super::P2pMetricsCounters::default(),
             sync_progress: StdMutex::new(super::SyncProgressState::default()),
             chain_validation: Arc::new(super::ChainValidationCoordinator::default()),
+            last_fork_hydration: std::sync::Mutex::new(None),
         }),
     };
     let status = node.lock().await.ledger().status();
@@ -1680,6 +1689,7 @@ async fn hello_ignores_loopback_alias_for_unspecified_self() {
             metrics: super::P2pMetricsCounters::default(),
             sync_progress: StdMutex::new(super::SyncProgressState::default()),
             chain_validation: Arc::new(super::ChainValidationCoordinator::default()),
+            last_fork_hydration: std::sync::Mutex::new(None),
         }),
     };
     let hello = ProtocolHello {
@@ -1738,6 +1748,7 @@ async fn hello_removes_outbound_peer_that_announces_self_address() {
             metrics: super::P2pMetricsCounters::default(),
             sync_progress: StdMutex::new(super::SyncProgressState::default()),
             chain_validation: Arc::new(super::ChainValidationCoordinator::default()),
+            last_fork_hydration: std::sync::Mutex::new(None),
         }),
     };
     let hello = ProtocolHello {
@@ -1795,6 +1806,7 @@ async fn hello_removes_outbound_peer_with_same_node_id() {
             metrics: super::P2pMetricsCounters::default(),
             sync_progress: StdMutex::new(super::SyncProgressState::default()),
             chain_validation: Arc::new(super::ChainValidationCoordinator::default()),
+            last_fork_hydration: std::sync::Mutex::new(None),
         }),
     };
     let hello = ProtocolHello {

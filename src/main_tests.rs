@@ -613,11 +613,11 @@ fn no_args_starts_setup_mode() {
 #[test]
 fn setup_ledger_uses_the_requested_address_network_profile() {
     assert_eq!(
-        setup_ledger(false).launch_profile().profile_id,
+        setup_ledger(false).unwrap().launch_profile().profile_id,
         "iuna-mainnet-candidate"
     );
     assert_eq!(
-        setup_ledger(true).launch_profile().profile_id,
+        setup_ledger(true).unwrap().launch_profile().profile_id,
         if cfg!(feature = "e2e") {
             "iuna-local-e2e-5s-v1"
         } else {
@@ -1193,7 +1193,7 @@ fn vdf_measurement_keeps_sampling_until_elapsed_is_useful() {
     let min_elapsed = Duration::from_millis(1);
     let max_rounds = 1_000_000;
     let (rounds, elapsed) =
-        measure_vdf_rounds("iuna-test-vdf-calibration", 1, min_elapsed, max_rounds);
+        measure_vdf_rounds("iuna-test-vdf-calibration", 1, min_elapsed, max_rounds).unwrap();
 
     assert!(rounds >= 1);
     assert!(elapsed >= min_elapsed || rounds >= max_rounds);
@@ -1218,6 +1218,7 @@ async fn genesis_refuses_to_start_when_chain_database_exists() {
         fresh_wallet.address(),
         &store,
         opts.p2p_addr,
+        false,
         false,
         false,
     )
@@ -1250,6 +1251,7 @@ async fn startup_resumes_persisted_chain_without_genesis_flag() {
         opts.p2p_addr,
         false,
         false,
+        false,
     )
     .await
     .unwrap();
@@ -1259,6 +1261,34 @@ async fn startup_resumes_persisted_chain_without_genesis_flag() {
     assert_eq!(resumed.genesis_hash(), persisted.genesis_hash());
     assert_eq!(resumed.balance_of(fresh_wallet.address()), 0);
     assert!(resumed.requires_persistence);
+}
+
+#[tokio::test]
+async fn startup_uses_bounded_loader_when_ui_cache_is_ready() {
+    let dir = tempdir().unwrap();
+    let chain_path = dir.path().join("chain.sqlite3");
+    let store = SqliteChainStore::open(&chain_path).unwrap();
+    let wallet = Wallet::from_seed("bounded-startup-owner");
+    let ledger = ledger_with_one_mined_block(&wallet);
+    store.save_verified(&ledger.snapshot()).unwrap();
+    let opts = parse(&["--chain-db", chain_path.to_str().unwrap()])
+        .unwrap()
+        .unwrap();
+
+    let resumed = initialize_ledger(
+        &opts,
+        wallet.address(),
+        &store,
+        opts.p2p_addr,
+        false,
+        false,
+        true,
+    )
+    .await
+    .unwrap();
+
+    assert_eq!(resumed.ledger.height(), 1);
+    assert!(resumed.bounded_history);
 }
 
 #[tokio::test]
@@ -1273,9 +1303,17 @@ async fn startup_rejects_unpinned_candidate_genesis() {
         .unwrap()
         .unwrap();
 
-    let error = initialize_ledger(&opts, wallet.address(), &store, opts.p2p_addr, false, true)
-        .await
-        .unwrap_err();
+    let error = initialize_ledger(
+        &opts,
+        wallet.address(),
+        &store,
+        opts.p2p_addr,
+        false,
+        true,
+        false,
+    )
+    .await
+    .unwrap_err();
 
     assert!(error.to_string().contains("does not match pinned genesis"));
 }
@@ -1292,9 +1330,17 @@ async fn startup_rebuilds_state_from_a_locally_trusted_chain() {
         .unwrap()
         .unwrap();
 
-    let resumed = initialize_ledger(&opts, wallet.address(), &store, opts.p2p_addr, false, false)
-        .await
-        .unwrap();
+    let resumed = initialize_ledger(
+        &opts,
+        wallet.address(),
+        &store,
+        opts.p2p_addr,
+        false,
+        false,
+        false,
+    )
+    .await
+    .unwrap();
 
     assert_eq!(resumed.status(), persisted.status());
     assert_eq!(
@@ -1336,6 +1382,7 @@ async fn local_testnet_requests_reset_for_persisted_normal_launch_profile() {
         opts.p2p_addr,
         true,
         false,
+        false,
     )
     .await
     .unwrap();
@@ -1360,10 +1407,17 @@ async fn startup_requests_reset_for_a_legacy_network_profile() {
         .unwrap()
         .unwrap();
 
-    let initialized =
-        initialize_ledger(&opts, wallet.address(), &store, opts.p2p_addr, false, false)
-            .await
-            .unwrap();
+    let initialized = initialize_ledger(
+        &opts,
+        wallet.address(),
+        &store,
+        opts.p2p_addr,
+        false,
+        false,
+        false,
+    )
+    .await
+    .unwrap();
 
     assert_eq!(
         initialized.migration_from.as_deref(),
@@ -1402,6 +1456,7 @@ async fn candidate_promotion_reuses_chain_data_and_can_continue_mining() {
         wallets[0].address(),
         &store,
         opts.p2p_addr,
+        false,
         false,
         false,
     )
@@ -1487,6 +1542,7 @@ async fn startup_resumes_persisted_chain_with_network_accepted_future_tip() {
         opts.p2p_addr,
         false,
         false,
+        false,
     )
     .await
     .unwrap();
@@ -1516,9 +1572,17 @@ async fn persisted_chain_satisfies_join_mode_without_contacting_peer() {
     .unwrap()
     .unwrap();
 
-    let resumed = initialize_ledger(&opts, bob.address(), &store, opts.p2p_addr, false, false)
-        .await
-        .unwrap();
+    let resumed = initialize_ledger(
+        &opts,
+        bob.address(),
+        &store,
+        opts.p2p_addr,
+        false,
+        false,
+        false,
+    )
+    .await
+    .unwrap();
 
     assert_eq!(resumed.status().height, 1);
     assert_eq!(resumed.status().tip_hash, persisted.status().tip_hash);
@@ -1544,9 +1608,17 @@ VALUES (1, 4, 'bad-tip', x'00010203', 0)
         .unwrap()
         .unwrap();
 
-    let error = initialize_ledger(&opts, wallet.address(), &store, opts.p2p_addr, false, false)
-        .await
-        .unwrap_err();
+    let error = initialize_ledger(
+        &opts,
+        wallet.address(),
+        &store,
+        opts.p2p_addr,
+        false,
+        false,
+        false,
+    )
+    .await
+    .unwrap_err();
 
     assert!(
         format!("{error:#}").contains("failed to parse compact chain snapshot from database"),
@@ -1682,9 +1754,14 @@ async fn persistence_loop_skips_tip_already_projected_at_startup() {
     persist_chain_snapshot(&store, initial_snapshot.clone())
         .await
         .unwrap();
-    project_ui_data_store(&ui_data_store, initial_snapshot, false)
-        .await
-        .unwrap();
+    project_ui_data_store(
+        &store,
+        &ui_data_store,
+        node.lock().await.ledger().clone(),
+        false,
+    )
+    .await
+    .unwrap();
     let ui_data_connection = Connection::open(ui_data_store.path()).unwrap();
     ui_data_connection
         .execute(
@@ -1738,9 +1815,14 @@ async fn persistence_loop_projects_metrics_when_mode_changes_without_a_new_tip()
     persist_chain_snapshot(&store, initial_snapshot.clone())
         .await
         .unwrap();
-    project_ui_data_store(&ui_data_store, initial_snapshot, false)
-        .await
-        .unwrap();
+    project_ui_data_store(
+        &store,
+        &ui_data_store,
+        node.lock().await.ledger().clone(),
+        false,
+    )
+    .await
+    .unwrap();
     let ui_config = Arc::new(Mutex::new(UiConfig::default()));
 
     let persistence_task = tokio::spawn(run_chain_persistence_with_interval(

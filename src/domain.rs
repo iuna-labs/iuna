@@ -14,6 +14,7 @@ mod ledger_apply;
 mod ledger_builders;
 mod ledger_chain;
 mod ledger_consensus;
+mod ledger_history_index;
 mod ledger_lineage;
 mod ledger_mempool;
 mod ledger_ops;

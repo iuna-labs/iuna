@@ -30,6 +30,22 @@ impl Ledger {
         self.compact_block_context.block_size_bytes(block)
     }
 
+    /// Storage sizes recorded when the blocks were applied; blocks without one are omitted
+    /// rather than estimated against the current compact context.
+    pub(crate) fn recorded_storage_size_breakdowns(
+        &self,
+        requested_blocks: &[Block],
+    ) -> BTreeMap<String, CompactBlockSizeBreakdown> {
+        requested_blocks
+            .iter()
+            .filter_map(|block| {
+                self.compact_block_context
+                    .stored_block_size_breakdown(&block.hash)
+                    .map(|breakdown| (block.hash.clone(), breakdown.clone()))
+            })
+            .collect()
+    }
+
     pub(crate) fn storage_size_breakdowns(
         &self,
         requested_blocks: &[Block],

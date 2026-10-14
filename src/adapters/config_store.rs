@@ -371,7 +371,7 @@ mod tests {
         assert!(stored.contains("\"pow_mining_workers\": 1"));
         assert!(stored.contains("\"burn_per_block\": 100"));
         assert!(stored.contains("\"burn_fee\": 1"));
-        assert!(stored.contains("\"vdf_memory_mib\": 256"));
+        assert!(stored.contains("\"vdf_memory_mib\": 64"));
         assert!(!stored.contains("\"pow_mine_fee\""));
         assert!(!stored.contains("required_burn"));
         assert!(stored.contains("\"keep_track_of_metrics\": false"));

@@ -318,7 +318,7 @@ fn post_activation_recovery_candidates_converge_and_ticket_finalization_resumes(
         ticket_timestamp,
         burn_bundles,
     )?;
-    let output = run_vdf(prepared.vdf_seed(), prepared.vdf_rounds());
+    let output = run_vdf(prepared.vdf_seed(), prepared.vdf_rounds()).unwrap();
     let ticket_block = prepared.finish(leader_wallet, output);
     assert_eq!(ticket_block.finalizer_mode, FinalizerMode::Ticket);
     assert_eq!(ticket_block.finalizer_rank, 0);
@@ -552,7 +552,7 @@ async fn complete_if_ready(
     let Some(work) = work else {
         return Ok(None);
     };
-    let vdf_output = run_vdf(work.vdf_seed(), work.vdf_rounds());
+    let vdf_output = run_vdf(work.vdf_seed(), work.vdf_rounds()).unwrap();
     let block =
         node.node
             .lock()
@@ -568,7 +568,7 @@ async fn produce_recovery_block(node: &SoakNode, timestamp_ms: u64) -> Result<iu
         core.wallet_view_ledger()?
             .prepare_recovery_block(node.wallet.address(), timestamp_ms)?
     };
-    let vdf_output = run_vdf(work.vdf_seed(), work.vdf_rounds());
+    let vdf_output = run_vdf(work.vdf_seed(), work.vdf_rounds()).unwrap();
     let block =
         node.node
             .lock()

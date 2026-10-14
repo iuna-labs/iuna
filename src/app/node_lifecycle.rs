@@ -1,6 +1,6 @@
 use std::collections::{BTreeMap, BTreeSet};
 
-use anyhow::Result;
+use anyhow::{Context, Result};
 
 use crate::{
     adapters::config_store::{DEFAULT_POW_MINING_WORKERS, clamp_pow_mining_workers},
@@ -13,6 +13,56 @@ use crate::{
 use super::{NodeConfig, NodeCore, NodeWallet};
 
 impl NodeCore {
+    /// Keep only a recent window of committed history resident from now on.
+    pub fn bound_resident_chain_history(&mut self) {
+        self.bounded_history = true;
+        self.prune_persisted_history();
+    }
+
+    /// Stop pruning, for modes such as metrics tracking that need the complete chain resident.
+    pub fn keep_complete_chain_history(&mut self) {
+        self.bounded_history = false;
+    }
+
+    pub fn bounds_resident_chain_history(&self) -> bool {
+        self.bounded_history
+    }
+
+    /// Record that the chain store has committed the chain up to and including this block.
+    pub fn mark_chain_persisted(&mut self, height: u64, hash: &str) {
+        self.persisted_tip = Some((height, hash.to_string()));
+        self.prune_persisted_history();
+    }
+
+    /// Reattach pruned history loaded from the chain store, provided it still matches the tip.
+    pub fn restore_complete_chain_history(&mut self, complete: Ledger) -> Result<bool> {
+        self.ledger.restore_pruned_history(complete)
+    }
+
+    /// Prune resident history down to the recent window, but never past the persisted tip.
+    pub(super) fn prune_persisted_history(&mut self) {
+        if !self.bounded_history {
+            return;
+        }
+        let Some((persisted_height, persisted_hash)) = self.persisted_tip.as_ref() else {
+            return;
+        };
+        // After a reorg below the persisted tip the store must first be rewritten from the
+        // fork point, which needs the blocks above it to stay resident.
+        if self
+            .ledger
+            .resident_block_at_height(*persisted_height)
+            .is_none_or(|block| block.hash != *persisted_hash)
+        {
+            return;
+        }
+        let unpersisted = self.ledger.height().saturating_sub(*persisted_height);
+        let keep = usize::try_from(unpersisted)
+            .unwrap_or(usize::MAX)
+            .max(super::RESIDENT_CHAIN_BLOCKS);
+        self.ledger.retain_recent_chain_blocks(keep);
+    }
+
     pub fn new(config: NodeConfig) -> Self {
         let ledger = Ledger::new(config.genesis_allocations, config.vdf_rounds);
         let mut node = Self::from_ledger_with_burn_fee(
@@ -116,6 +166,8 @@ impl NodeCore {
             outbox_bytes: 0,
             network_migration_from: None,
             vdf_speed_sample: None,
+            bounded_history: false,
+            persisted_tip: None,
         }
     }
 
@@ -179,7 +231,7 @@ impl NodeCore {
         self.local_block_anchor_burn = None;
     }
 
-    pub fn reset_chain_to_setup_placeholder(&mut self) {
+    pub fn reset_chain_to_setup_placeholder(&mut self) -> Result<()> {
         let launch_profile = self.ledger.launch_profile().clone();
         self.ledger = Ledger::new_with_genesis_burns_and_profile(
             BTreeMap::new(),
@@ -187,13 +239,15 @@ impl NodeCore {
             1,
             launch_profile,
         )
-        .expect("empty setup ledger is valid");
+        .context("failed to construct setup ledger")?;
+        self.persisted_tip = None;
         self.reset_automatic_mining_progress();
         self.burn_bundles.clear();
         self.equivocated_burn_bundle_slots.clear();
         self.burn_bundle_collection_started = None;
         self.local_block_anchor_burn = None;
         self.outbox.clear();
+        Ok(())
     }
 
     pub(super) fn reset_automatic_mining_progress(&mut self) {

@@ -73,7 +73,7 @@ impl NodeCore {
                         .context("migration amount overflows")
                 })?,
             ),
-            _ => unreachable!("migration builder returned another transaction kind"),
+            _ => bail!("migration builder returned another transaction kind"),
         };
         Ok(QuantumMigrationPreview {
             address: wallet.hybrid_address(AddressNetwork::from_profile_id(
@@ -596,10 +596,10 @@ impl NodeCore {
         if self.ledger.height().saturating_add(1) < crate::domain::HYBRID_REWARD_ACTIVATION_HEIGHT {
             return Ok(self.wallet.address().to_string());
         }
-        Ok(self.ledger.wallet_reward_address(
+        self.ledger.wallet_reward_address(
             self.wallet.unlocked()?,
             self.ledger.height().saturating_add(1),
-        ))
+        )
     }
 
     pub(super) fn wallet_anchor_build_ledger(&self) -> Result<Ledger> {
@@ -640,7 +640,7 @@ impl NodeCore {
             work.vdf_seed(),
             work.vdf_rounds(),
             self.vdf_memory_mib,
-        );
+        )?;
         self.complete_prepared_block_at(work, vdf_output, timestamp_ms)
     }
 
@@ -662,6 +662,7 @@ impl NodeCore {
         self.ledger.apply_locally_mined_block(block.clone())?;
         self.clear_stale_local_block_anchor();
         self.prune_burn_bundles();
+        self.prune_persisted_history();
         self.enqueue_gossip(GossipEnvelope::Block(block.clone()));
         Ok(block)
     }

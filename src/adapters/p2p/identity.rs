@@ -16,16 +16,23 @@ use super::GossipNetwork;
 static NODE_SIGNING_KEYS: OnceLock<StdMutex<BTreeMap<String, SecretBox<[u8; 32]>>>> =
     OnceLock::new();
 
-pub(super) fn new_node_id() -> String {
-    let signing_seed = SecretBox::init_with_mut(|bytes: &mut [u8; 32]| {
-        getrandom::getrandom(bytes).expect("secure randomness unavailable for p2p node id");
-    });
+pub(super) fn try_new_node_id() -> Result<String> {
+    let mut seed = [0_u8; 32];
+    getrandom::getrandom(&mut seed).map_err(|error| {
+        anyhow::anyhow!("secure randomness unavailable for p2p node id: {error}")
+    })?;
+    let signing_seed = SecretBox::new(Box::new(seed));
     let node_id = hex_encode(&ed25519_public_key(signing_seed.expose_secret()));
     node_signing_keys()
         .lock()
-        .expect("node signing key registry mutex poisoned")
+        .unwrap_or_else(|poisoned| poisoned.into_inner())
         .insert(node_id.clone(), signing_seed);
-    node_id
+    Ok(node_id)
+}
+
+#[cfg(test)]
+pub(super) fn new_node_id() -> String {
+    try_new_node_id().expect("test environment provides secure randomness")
 }
 
 fn node_signing_keys() -> &'static StdMutex<BTreeMap<String, SecretBox<[u8; 32]>>> {
@@ -64,11 +71,17 @@ pub(super) fn hex_nibble(byte: u8) -> Result<u8> {
     }
 }
 
-pub(super) fn new_verification_nonce() -> String {
+pub(super) fn try_new_verification_nonce() -> Result<String> {
     let mut bytes = [0_u8; 32];
-    getrandom::getrandom(&mut bytes)
-        .expect("secure randomness unavailable for p2p verification nonce");
-    hex_encode(&bytes)
+    getrandom::getrandom(&mut bytes).map_err(|error| {
+        anyhow::anyhow!("secure randomness unavailable for p2p verification nonce: {error}")
+    })?;
+    Ok(hex_encode(&bytes))
+}
+
+#[cfg(test)]
+pub(super) fn new_verification_nonce() -> String {
+    try_new_verification_nonce().expect("test environment provides secure randomness")
 }
 
 pub(super) fn peer_verification_payload(address: &str, nonce: &str, node_id: &str) -> String {
@@ -90,7 +103,7 @@ pub(super) fn peer_verification_response_for_node_id(
 ) -> Option<GossipEnvelope> {
     let keys = node_signing_keys()
         .lock()
-        .expect("node signing key registry mutex poisoned");
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
     let signing_seed = keys.get(node_id)?;
     let payload = peer_verification_payload(address, nonce, node_id);
     let signature = sign_ed25519(signing_seed.expose_secret(), payload.as_bytes());

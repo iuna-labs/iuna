@@ -9,8 +9,11 @@ use super::{
 impl Ledger {
     pub fn mine_next_block(&self, wallet: &Wallet, timestamp_ms: u64) -> Result<super::Block> {
         let next_height = self.height().saturating_add(1);
-        let reward_address = (next_height >= super::HYBRID_REWARD_ACTIVATION_HEIGHT)
-            .then(|| self.wallet_reward_address(wallet, next_height));
+        let reward_address = if next_height >= super::HYBRID_REWARD_ACTIVATION_HEIGHT {
+            Some(self.wallet_reward_address(wallet, next_height)?)
+        } else {
+            None
+        };
         let prepared = self.prepare_next_block_with_required_burn_and_burn_bundles(
             wallet.address(),
             reward_address.as_deref(),
@@ -18,14 +21,17 @@ impl Ledger {
             Vec::new(),
             None,
         )?;
-        let vdf_output = run_vdf(prepared.vdf_seed(), prepared.vdf_rounds());
+        let vdf_output = run_vdf(prepared.vdf_seed(), prepared.vdf_rounds())?;
         Ok(prepared.finish(wallet, vdf_output))
     }
 
     pub fn mine_recovery_block(&self, wallet: &Wallet, timestamp_ms: u64) -> Result<super::Block> {
         let next_height = self.height().saturating_add(1);
-        let reward_address = (next_height >= super::HYBRID_REWARD_ACTIVATION_HEIGHT)
-            .then(|| self.wallet_reward_address(wallet, next_height));
+        let reward_address = if next_height >= super::HYBRID_REWARD_ACTIVATION_HEIGHT {
+            Some(self.wallet_reward_address(wallet, next_height)?)
+        } else {
+            None
+        };
         let prepared = self.prepare_recovery_block_with_required_burn_and_burn_bundles(
             wallet.address(),
             reward_address.as_deref(),
@@ -33,7 +39,7 @@ impl Ledger {
             Vec::new(),
             None,
         )?;
-        let vdf_output = run_vdf(prepared.vdf_seed(), prepared.vdf_rounds());
+        let vdf_output = run_vdf(prepared.vdf_seed(), prepared.vdf_rounds())?;
         Ok(prepared.finish(wallet, vdf_output))
     }
 

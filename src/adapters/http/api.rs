@@ -47,7 +47,14 @@ pub(super) async fn api_blocks(
         .limit
         .unwrap_or(EXPLORER_PAGE_LIMIT)
         .min(EXPLORER_LIMIT);
-    let (tip_hash, blocks, storage_size_breakdowns, transaction_v2_domain, network) = {
+    let (
+        tip_hash,
+        mut blocks,
+        mut storage_size_breakdowns,
+        transaction_v2_domain,
+        network,
+        resident_from,
+    ) = {
         let node = state.node.lock().await;
         let blocks = match query.before_height {
             Some(before_height) => node.blocks_before(before_height, limit),
@@ -60,8 +67,51 @@ pub(super) async fn api_blocks(
             storage_size_breakdowns,
             node.ledger().transaction_v2_domain().ok(),
             AddressNetwork::from_profile_id(&node.ledger().launch_profile().profile_id),
+            node.ledger().first_contiguous_resident_height(),
         )
     };
+    // Pages that reach below the resident window continue from the chain store.
+    let page_end = blocks
+        .last()
+        .map(|block| block.height)
+        .or(query.before_height)
+        .map_or(resident_from, |height| height.min(resident_from));
+    if blocks.len() < limit && resident_from > 0 && page_end > 0 {
+        let count = (limit - blocks.len()).min(usize::try_from(page_end).unwrap_or(usize::MAX));
+        let start = page_end - count as u64;
+        let store = state.chain_store.clone();
+        let persisted = tokio::task::spawn_blocking(move || store.blocks_from(start, count))
+            .await
+            .map_err(|error| {
+                eprintln!("explorer block worker failed: {error}");
+                (StatusCode::INTERNAL_SERVER_ERROR, "failed to load blocks")
+            })?
+            .map_err(|error| {
+                eprintln!("explorer block load failed: {error:#}");
+                (StatusCode::INTERNAL_SERVER_ERROR, "failed to load blocks")
+            })?;
+        blocks.extend(
+            persisted
+                .into_iter()
+                .rev()
+                .filter(|block| block.height < page_end),
+        );
+    }
+    let unsized_blocks = blocks
+        .iter()
+        .map(|block| block.hash.clone())
+        .filter(|hash| !storage_size_breakdowns.contains_key(hash))
+        .collect::<Vec<_>>();
+    if !unsized_blocks.is_empty() {
+        let store = state.ui_data_store.clone();
+        match tokio::task::spawn_blocking(move || store.load_block_storage_sizes(&unsized_blocks))
+            .await
+        {
+            Ok(Ok(sizes)) => storage_size_breakdowns.extend(sizes),
+            Ok(Err(error)) => eprintln!("block storage size load failed: {error:#}"),
+            Err(error) => eprintln!("block storage size worker failed: {error}"),
+        }
+    }
     let store = state.ui_data_store.clone();
     let view = tokio::task::spawn_blocking(move || store.load_ui_chain_index(&tip_hash))
         .await
@@ -272,17 +322,21 @@ pub(super) async fn api_wallet_transactions(
     let confirmed_outputs = load_outputs_for_outpoints(&state, confirmed_required_outputs)
         .await
         .unwrap_or_default();
-    let reward_blocks = {
-        let node = state.node.lock().await;
+    let reward_blocks = crate::adapters::chain_store::load_blocks_at_heights(
+        &state.node,
+        &state.chain_store,
         confirmed_rows
             .iter()
             .filter(|row| row.kind == "reward")
-            .filter_map(|row| {
-                let block = node.chain().get(row.block_height as usize)?.clone();
-                Some((row.block_height, block))
-            })
-            .collect::<BTreeMap<_, _>>()
-    };
+            .map(|row| row.block_height)
+            .collect(),
+    )
+    .await
+    .unwrap_or_else(|error| {
+        // Wallet history stays usable without reward details, but the failure must be visible.
+        eprintln!("reward block lookup failed: {error:#}");
+        BTreeMap::new()
+    });
     let mut confirmed_items = confirmed_rows
         .into_iter()
         .filter_map(|row| {

@@ -501,7 +501,7 @@ mod tests {
             hash: String::new(),
         };
         let original_seed = block.vdf_seed();
-        let output = run_vdf(&original_seed, block.vdf_rounds);
+        let output = run_vdf(&original_seed, block.vdf_rounds).unwrap();
         block.vdf_output = output.clone();
         assert!(verify_vdf(&block.vdf_seed(), block.vdf_rounds, &output));
 
@@ -609,7 +609,7 @@ mod tests {
             &commitment,
         );
         let expected_seed = prepared.vdf_seed.clone();
-        let output = run_vdf(&expected_seed, prepared.vdf_rounds);
+        let output = run_vdf(&expected_seed, prepared.vdf_rounds).unwrap();
 
         let block = prepared.finish_at(&wallet, output, 20);
 

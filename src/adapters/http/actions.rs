@@ -347,7 +347,7 @@ pub(super) async fn reset_local_chain(state: &HttpState, confirmation: &str) -> 
     {
         let mut node = state.node.lock().await;
         state.gossip.invalidate_sync_progress();
-        node.reset_chain_to_setup_placeholder();
+        node.reset_chain_to_setup_placeholder()?;
     }
     clear_chain(&state.chain_store).await?;
     clear_ui_data(&state.ui_data_store).await?;

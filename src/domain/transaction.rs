@@ -411,7 +411,7 @@ impl Transaction {
                 anchor: anchor.clone(),
             }
             .signing_bytes(domain),
-            Self::Mine { .. } => unreachable!("mine transactions use proof hashes"),
+            Self::Mine { .. } => bail!("mine transactions use proof hashes instead of signatures"),
         }
     }
 }

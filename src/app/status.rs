@@ -367,7 +367,7 @@ mod tests {
 
         let receive_address = status.wallet_receive_address;
         let mut reset_node = node;
-        reset_node.reset_chain_to_setup_placeholder();
+        reset_node.reset_chain_to_setup_placeholder().unwrap();
         assert_eq!(
             reset_node.wallet_receive_address().unwrap(),
             receive_address

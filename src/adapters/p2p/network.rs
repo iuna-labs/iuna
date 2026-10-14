@@ -23,7 +23,7 @@ use super::{
     InboundSessionRejection, MAX_DISCOVERED_OUTBOUND_DIALS_PER_CYCLE, MAX_GOSSIP_LINE_BYTES,
     MAX_OUTBOUND_BATCH_BYTES, OutboundBatch, P2pMetrics, P2pMetricsCounters, PEER_QUEUE_BYTES,
     PEER_QUEUE_SIZE, STALE_DISCOVERED_PEER_RETENTION_MS, STALE_INBOUND_PEER_RETENTION_MS,
-    accept_loop, is_self_peer_address_for, new_node_id, outbound_session, outbound_supervisor,
+    accept_loop, is_self_peer_address_for, outbound_session, outbound_supervisor, try_new_node_id,
 };
 
 impl GossipNetwork {
@@ -40,13 +40,14 @@ impl GossipNetwork {
                 peers,
                 listen_addr: addr,
                 p2p_announce_addr: tokio::sync::Mutex::new(p2p_announce_addr),
-                node_id: new_node_id(),
+                node_id: try_new_node_id()?,
                 accept_task: tokio::sync::Mutex::new(None),
                 sessions: tokio::sync::Mutex::new(BTreeMap::new()),
                 inbound_limiter: Arc::new(StdMutex::new(InboundConnectionLimiter::default())),
                 metrics: P2pMetricsCounters::default(),
                 sync_progress: StdMutex::new(super::SyncProgressState::default()),
                 chain_validation: Arc::new(ChainValidationCoordinator::default()),
+                last_fork_hydration: StdMutex::new(None),
                 #[cfg(not(test))]
                 chain_store: tokio::sync::Mutex::new(None),
             }),
@@ -175,7 +176,7 @@ impl GossipNetwork {
         self.inner
             .sync_progress
             .lock()
-            .expect("sync progress mutex poisoned")
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
             .active
             .values()
             .copied()
@@ -191,7 +192,7 @@ impl GossipNetwork {
             .inner
             .sync_progress
             .lock()
-            .expect("sync progress mutex poisoned");
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
         state.next_id = state.next_id.wrapping_add(1);
         let id = state.next_id;
         state.active.insert(
@@ -215,7 +216,7 @@ impl GossipNetwork {
             .inner
             .sync_progress
             .lock()
-            .expect("sync progress mutex poisoned");
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
         state.generation = state.generation.wrapping_add(1);
         state.active.clear();
     }
@@ -224,7 +225,7 @@ impl GossipNetwork {
         self.inner
             .sync_progress
             .lock()
-            .expect("sync progress mutex poisoned")
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
             .generation
     }
 
@@ -237,7 +238,7 @@ impl GossipNetwork {
             .inner
             .sync_progress
             .lock()
-            .expect("sync progress mutex poisoned");
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
         if let Some(progress) = state.active.get_mut(&id) {
             progress.validated_height =
                 validated_height.clamp(progress.start_height, progress.target_height);
@@ -250,7 +251,7 @@ impl GossipNetwork {
             .inner
             .sync_progress
             .lock()
-            .expect("sync progress mutex poisoned");
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
         state.active.remove(&id);
         state.last_activity = Some(std::time::Instant::now());
     }
@@ -260,7 +261,7 @@ impl GossipNetwork {
             .inner
             .sync_progress
             .lock()
-            .expect("sync progress mutex poisoned");
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
         if !state.active.is_empty() {
             return true;
         }
@@ -276,7 +277,7 @@ impl GossipNetwork {
         self.inner
             .inbound_limiter
             .lock()
-            .expect("inbound limiter mutex poisoned")
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
             .try_acquire(ip, now_ms())?;
         Ok(InboundSessionPermit {
             limiter: Arc::clone(&self.inner.inbound_limiter),
@@ -291,7 +292,7 @@ impl GossipNetwork {
                 .chain_validation
                 .active
                 .lock()
-                .expect("chain validation mutex poisoned")
+                .unwrap_or_else(|poisoned| poisoned.into_inner())
                 .get(&key)
                 .map(watch::Sender::subscribe);
             if let Some(mut active) = active {
@@ -313,7 +314,7 @@ impl GossipNetwork {
                     .chain_validation
                     .active
                     .lock()
-                    .expect("chain validation mutex poisoned");
+                    .unwrap_or_else(|poisoned| poisoned.into_inner());
                 if let Some(sender) = active.get(&key) {
                     Some(sender.subscribe())
                 } else {
