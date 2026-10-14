@@ -267,6 +267,12 @@ pub struct MiningStatus {
     pub burn_per_block: Amount,
     pub automatic_burn_fee: Amount,
     pub automatic_pow_mine_fee: Amount,
+    /// Burn-ticket weight participating in the next finalizer draw.
+    #[serde(default)]
+    pub eligible_burn_total: Amount,
+    /// The share of `eligible_burn_total` controlled by this wallet.
+    #[serde(default)]
+    pub wallet_eligible_burn: Amount,
     pub last_auto_finalization_status: Option<String>,
     pub last_auto_pow_mine_anchor: Option<String>,
     pub last_auto_pow_mine_status: Option<String>,

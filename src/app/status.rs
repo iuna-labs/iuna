@@ -95,6 +95,8 @@ impl NodeCore {
                 })?
             })
         });
+        let (eligible_burn_total, wallet_eligible_burn) =
+            self.ledger.burn_weights_for_next_block(&owned_addresses);
 
         NodeStatus {
             app_version: env!("CARGO_PKG_VERSION").to_string(),
@@ -129,6 +131,8 @@ impl NodeCore {
                 burn_per_block: self.burn_per_block,
                 automatic_burn_fee: self.burn_fee,
                 automatic_pow_mine_fee: MINE_FINALIZER_FEE,
+                eligible_burn_total,
+                wallet_eligible_burn,
                 last_auto_finalization_status: self.last_auto_finalization_status.clone(),
                 last_auto_pow_mine_anchor: self.last_auto_pow_mine_anchor.clone(),
                 last_auto_pow_mine_status: if self.pow_mining_enabled && !self.has_real_chain() {
