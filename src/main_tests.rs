@@ -88,11 +88,11 @@ fn local_testnet_bootstrap_only_uses_genesis_for_an_empty_chain() {
 }
 
 #[test]
-fn management_ui_warns_when_estimated_fees_exceed_amounts() {
+fn management_ui_warns_when_transfer_fees_exceed_amount_but_not_for_burns() {
     let html = include_str!("adapters/http/index_html.rs");
     let javascript = include_str!("../www/assets/iuna-ui.js");
     assert!(html.contains("feeExceedsAmount('transfer')"));
-    assert!(html.contains("feeExceedsAmount('burn')"));
+    assert!(!html.contains("feeExceedsAmount('burn')"));
     assert!(javascript.contains("feeExceedsAmount(kind)"));
     assert!(javascript.contains("estimated fee IUNA ${this.amountLabel(fee)} exceeds"));
 }
