@@ -1026,11 +1026,11 @@ pub(super) const INDEX_HTML: &str = concat!(
             <div class="burn-fields">
               <label>IUNA per block<input x-model="burnAmountDraft" @input="burnAmountDirty = true; scheduleFeeEstimates()" type="number" min="0.000001" step="0.000001"></label>
               <label>Fee / byte<input x-model="burnFeeDraft" @input="burnAmountDirty = true; scheduleFeeEstimates()" type="number" min="0" step="0.000001" required></label>
-              <button class="primary" type="submit">Save</button>
+              <button type="submit" :class="burnAmountDirty ? 'primary' : 'subtle'">Save</button>
             </div>
             <div class="fee-preview" x-text="feeEstimateLabel('burn')"></div>
           </form>
-          <div class="burn-outlook" aria-label="Burn chance and return estimate">
+          <div class="burn-outlook" x-show="miningEnabled" x-transition.opacity aria-label="Burn chance and return estimate">
             <div class="burn-outlook-head">
               <div class="burn-outlook-title">Burn outlook</div>
               <div class="burn-outlook-verdict" :class="burnOutlook().level" x-text="burnOutlook().verdict"></div>
