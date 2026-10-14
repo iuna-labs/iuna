@@ -43,10 +43,12 @@ use handshake::{
     forget_stale_self_peer, process_hello, process_hello_with_verification, record_peer_status,
 };
 #[cfg(test)]
+use identity::new_node_id;
+#[cfg(test)]
 use identity::peer_verification_response_for_node_id;
-use identity::{new_node_id, peer_verification_response};
 #[cfg(test)]
 use identity::{new_verification_nonce, peer_verification_response_is_valid};
+use identity::{peer_verification_response, try_new_node_id};
 use inbound_limiter::{InboundConnectionLimiter, InboundSessionPermit, InboundSessionRejection};
 use line_codec::{LimitedLineReader, parse_envelope, read_session_envelope};
 pub use metrics::P2pMetrics;
@@ -79,8 +81,11 @@ const MAX_OUTBOUND_BATCH_BYTES: usize = MAX_GOSSIP_LINE_BYTES + 1;
 const PEER_QUEUE_BYTES: usize = 4 * MAX_OUTBOUND_BATCH_BYTES;
 const INBOUND_PEER_QUEUE_BYTES: usize = 2 * MAX_OUTBOUND_BATCH_BYTES;
 #[cfg(not(test))]
-const GLOBAL_PEER_QUEUE_BYTES: usize = 64 * 1024 * 1024;
-const MAX_CONCURRENT_CHAIN_VALIDATIONS: usize = 2;
+const GLOBAL_PEER_QUEUE_BYTES: usize = 32 * 1024 * 1024;
+const MAX_CONCURRENT_CHAIN_VALIDATIONS: usize = 1;
+/// Rebuilding complete history for fork validation costs O(chain); peers cannot force it more
+/// often than this.
+const FORK_HYDRATION_INTERVAL: std::time::Duration = std::time::Duration::from_secs(30);
 const STALE_INBOUND_PEER_RETENTION_MS: u64 = 60 * 60 * 1_000;
 const STALE_DISCOVERED_PEER_RETENTION_MS: u64 = 60 * 60 * 1_000;
 const MAX_DISCOVERED_OUTBOUND_DIALS_PER_CYCLE: usize = 32;
@@ -156,7 +161,7 @@ impl Drop for ChainValidationGuard {
             .coordinator
             .active
             .lock()
-            .expect("chain validation mutex poisoned")
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
             .remove(&self.key);
         if let Some(sender) = sender {
             let _ = sender.send(true);
@@ -208,6 +213,8 @@ struct GossipNetworkInner {
     metrics: P2pMetricsCounters,
     sync_progress: StdMutex<SyncProgressState>,
     chain_validation: Arc<ChainValidationCoordinator>,
+    /// When complete history was last rebuilt from the chain store to validate a fork.
+    last_fork_hydration: StdMutex<Option<std::time::Instant>>,
     #[cfg(not(test))]
     chain_store: Mutex<Option<SqliteChainStore>>,
 }

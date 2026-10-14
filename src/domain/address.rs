@@ -11,14 +11,14 @@ pub enum AddressNetwork {
     Testnet,
 }
 
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[derive(Clone, Copy, Debug, Eq, PartialEq, PartialOrd, Ord, Hash)]
 #[repr(u8)]
 pub enum AddressVersion {
     Ed25519PublicKey = 0,
     HybridKeyCommitment = 1,
 }
 
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[derive(Clone, Copy, Debug, Eq, PartialEq, PartialOrd, Ord, Hash)]
 pub struct VersionedAddress {
     pub version: AddressVersion,
     pub payload: [u8; PUBLIC_KEY_BYTES],

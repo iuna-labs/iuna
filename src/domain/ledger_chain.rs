@@ -81,7 +81,7 @@ impl Ledger {
             .iter()
             .map(|transaction| transaction.signature().to_string())
             .collect::<BTreeSet<_>>();
-        Ok(Self {
+        let mut ledger = Self {
             chain: vec![genesis].into(),
             history_pruned: false,
             genesis_allocations: genesis_allocations.clone(),
@@ -105,7 +105,16 @@ impl Ledger {
             launch_profile,
             compact_block_context,
             objective_finality_checkpoint: None,
-        })
+            confirmed_hybrid_used_addresses: Default::default(),
+            confirmed_hybrid_spent_addresses: Default::default(),
+            confirmed_hybrid_authored_addresses: Default::default(),
+            vdf_retarget_observations: Default::default(),
+            ticket_draw_horizon: 0,
+            resident_ticket_draws: Default::default(),
+        };
+        let genesis = ledger.chain[0].clone();
+        ledger.index_unapplied_block_addresses(&genesis)?;
+        Ok(ledger)
     }
 
     pub fn from_snapshot(snapshot: ChainSnapshot) -> Result<Self> {
@@ -232,13 +241,22 @@ impl Ledger {
             launch_profile,
             compact_block_context,
             objective_finality_checkpoint: None,
+            confirmed_hybrid_used_addresses: Default::default(),
+            confirmed_hybrid_spent_addresses: Default::default(),
+            confirmed_hybrid_authored_addresses: Default::default(),
+            vdf_retarget_observations: Default::default(),
+            ticket_draw_horizon: 0,
+            resident_ticket_draws: Default::default(),
         };
+        let genesis = ledger.chain[0].clone();
+        ledger.index_unapplied_block_addresses(&genesis)?;
         ledger.tickets = genesis_tickets(
             &ledger.genesis_allocations,
             ledger.tip(),
             &ledger.launch_profile,
         )?;
 
+        ledger.ticket_draw_horizon = blocks.last().map_or(0, |block| block.height);
         for block in blocks.into_iter().skip(1) {
             if trusted_before_height.is_some_and(|height| block.height < height) {
                 ledger.apply_trusted_block_at(block)?;

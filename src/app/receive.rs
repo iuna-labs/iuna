@@ -159,6 +159,7 @@ impl NodeCore {
                     self.clear_stale_burn_bundle_collection();
                     self.prune_burn_bundles();
                     self.enqueue_gossip(GossipEnvelope::Block(block));
+                    self.prune_persisted_history();
                 }
                 Ok(())
             }
@@ -177,6 +178,7 @@ impl NodeCore {
                 for block in imported {
                     self.enqueue_gossip(GossipEnvelope::Block(block));
                 }
+                self.prune_persisted_history();
                 Ok(())
             }
             GossipEnvelope::PeerAnnouncement { .. }
@@ -195,6 +197,7 @@ impl NodeCore {
             self.clear_stale_burn_bundle_collection();
             self.prune_burn_bundles();
             self.enqueue_gossip(GossipEnvelope::Block(block));
+            self.prune_persisted_history();
         }
         Ok(())
     }
@@ -220,6 +223,7 @@ impl NodeCore {
             self.clear_stale_burn_bundle_collection();
             self.prune_burn_bundles();
             self.enqueue_imported_blocks(previous_height)?;
+            self.prune_persisted_history();
         }
         Ok(())
     }
@@ -249,6 +253,7 @@ impl NodeCore {
         self.clear_stale_burn_bundle_collection();
         self.prune_burn_bundles();
         self.enqueue_imported_blocks(previous_height)?;
+        self.prune_persisted_history();
         Ok(true)
     }
 
@@ -297,6 +302,57 @@ mod tests {
             .map(|wallet| GenesisBurn::new(wallet.address(), MICRO_IUNA))
             .collect::<Vec<_>>();
         Ledger::new_with_genesis_burns(allocations, genesis_burns, 1).unwrap()
+    }
+
+    fn node_with_synthetic_chain(seed: &str, blocks: u64) -> NodeCore {
+        let mut ledger = Ledger::new(BTreeMap::new(), 1);
+        ledger.extend_with_synthetic_blocks_for_test(blocks);
+        NodeCore::from_ledger(Wallet::from_seed(seed), ledger, 0)
+    }
+
+    fn hash_at(node: &NodeCore, height: u64) -> String {
+        node.ledger()
+            .resident_block_at_height(height)
+            .unwrap()
+            .hash
+            .clone()
+    }
+
+    #[test]
+    fn bounded_history_never_prunes_blocks_the_store_has_not_committed() {
+        let mut node = node_with_synthetic_chain("bounded-history-watermark", 80);
+        node.bound_resident_chain_history();
+        assert!(!node.ledger().history_is_pruned());
+
+        let persisted = hash_at(&node, 3);
+        node.mark_chain_persisted(3, &persisted);
+        assert_eq!(node.ledger().first_resident_tail_height(), Some(4));
+
+        let persisted = hash_at(&node, 80);
+        node.mark_chain_persisted(80, &persisted);
+        assert_eq!(
+            node.ledger().first_resident_tail_height(),
+            Some(80 - crate::app::RESIDENT_CHAIN_BLOCKS as u64 + 1)
+        );
+    }
+
+    #[test]
+    fn complete_history_mode_does_not_prune() {
+        let mut node = node_with_synthetic_chain("complete-history-mode", 80);
+        node.keep_complete_chain_history();
+        let persisted = hash_at(&node, 80);
+        node.mark_chain_persisted(80, &persisted);
+
+        assert!(!node.ledger().history_is_pruned());
+    }
+
+    #[test]
+    fn persisted_tip_on_an_abandoned_branch_blocks_pruning() {
+        let mut node = node_with_synthetic_chain("abandoned-persisted-tip", 80);
+        node.bound_resident_chain_history();
+        node.mark_chain_persisted(40, "hash-of-a-block-on-another-branch");
+
+        assert!(!node.ledger().history_is_pruned());
     }
 
     #[test]

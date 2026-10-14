@@ -81,6 +81,8 @@ impl Ledger {
         let recent_start = self.chain.len().saturating_sub(recent_limit);
         self.chain.drain(1..recent_start);
         self.history_pruned = true;
+        self.compact_block_context
+            .retain_size_breakdowns_for_blocks(self.chain.iter().map(|block| block.hash.as_str()));
     }
 
     pub fn history_is_pruned(&self) -> bool {
@@ -93,6 +95,22 @@ impl Ledger {
             .last_mut()
             .expect("ledger is always initialized with genesis")
             .height = height;
+    }
+
+    /// Append structurally linked blocks without validating them, for tests of chain
+    /// bookkeeping that does not depend on block contents.
+    #[cfg(test)]
+    pub(crate) fn extend_with_synthetic_blocks_for_test(&mut self, count: u64) {
+        let template = self.chain[0].clone();
+        for _ in 0..count {
+            let previous = self.tip().clone();
+            let mut block = template.clone();
+            block.height = previous.height + 1;
+            block.prev_hash = previous.hash.clone();
+            block.timestamp_ms = previous.timestamp_ms.saturating_add(1);
+            block.hash = block.compute_hash();
+            self.chain.push(block);
+        }
     }
 
     #[cfg(test)]
@@ -218,6 +236,28 @@ impl Ledger {
             ranks_by_height.insert(0, Vec::new());
         }
         if requested.is_empty() {
+            return Ok(ranks_by_height);
+        }
+
+        // Recent blocks rank from their retained draw inputs. Older heights need a replay from
+        // genesis, which is only possible while the complete history is still resident; with
+        // pruned history those heights are omitted from the result.
+        requested.retain(|height| {
+            let cached = self
+                .resident_block_at_height(*height)
+                .and_then(|block| self.cached_burn_leader_ranks(*height, &block.hash));
+            match cached {
+                Some(ranks) => {
+                    ranks_by_height.insert(*height, ranks);
+                    false
+                }
+                None => true,
+            }
+        });
+        if requested.is_empty() {
+            return Ok(ranks_by_height);
+        }
+        if self.history_pruned {
             return Ok(ranks_by_height);
         }
 
@@ -388,25 +428,20 @@ impl Ledger {
                 owner: selected.owner,
                 weight: selected.value,
             });
-            remaining.retain(|candidate| {
-                candidate.root != selected.root
-                    && self
-                        .representative_owner_for_lineage_root(
-                            &candidate.root,
-                            &skipped_owners,
-                            &eligible_ticket_owners,
-                        )
-                        .is_some()
-            });
-            for candidate in &mut remaining {
-                candidate.owner = self
-                    .representative_owner_for_lineage_root(
+            remaining = remaining
+                .into_iter()
+                .filter_map(|mut candidate| {
+                    if candidate.root == selected.root {
+                        return None;
+                    }
+                    candidate.owner = self.representative_owner_for_lineage_root(
                         &candidate.root,
                         &skipped_owners,
                         &eligible_ticket_owners,
-                    )
-                    .expect("retained lineage candidate has representative owner");
-            }
+                    )?;
+                    Some(candidate)
+                })
+                .collect();
         }
 
         committee
@@ -523,21 +558,31 @@ impl Ledger {
     }
 
     pub fn recent_blocks(&self, limit: usize) -> Vec<Block> {
-        self.chain.iter().rev().take(limit).cloned().collect()
-    }
-
-    pub fn blocks_before(&self, before_height: u64, limit: usize) -> Vec<Block> {
+        let first_contiguous = self.first_contiguous_resident_height();
         self.chain
             .iter()
             .rev()
-            .filter(|block| block.height < before_height)
+            .take_while(|block| block.height >= first_contiguous)
             .take(limit)
             .cloned()
             .collect()
     }
 
+    pub fn blocks_before(&self, before_height: u64, limit: usize) -> Vec<Block> {
+        let first_contiguous = self.first_contiguous_resident_height();
+        self.chain
+            .iter()
+            .rev()
+            .filter(|block| block.height < before_height && block.height >= first_contiguous)
+            .take(limit)
+            .cloned()
+            .collect()
+    }
+
+    /// Blocks from `from_height` onwards. Returns nothing when the range starts below the
+    /// resident window, so callers never receive a sequence with a pruned gap in it.
     pub fn blocks_from(&self, from_height: u64, limit: usize) -> Vec<Block> {
-        if limit == 0 {
+        if limit == 0 || from_height < self.first_contiguous_resident_height() {
             return Vec::new();
         }
         self.chain
@@ -546,6 +591,26 @@ impl Ledger {
             .take(limit)
             .cloned()
             .collect()
+    }
+
+    /// Lowest height from which the resident chain is contiguous up to the tip.
+    pub fn first_contiguous_resident_height(&self) -> u64 {
+        if self.history_pruned {
+            self.first_resident_tail_height().unwrap_or_default()
+        } else {
+            0
+        }
+    }
+
+    /// Number of leading `blocks` this ledger already holds at the same heights.
+    pub(crate) fn known_block_prefix_len(&self, blocks: &[Block]) -> usize {
+        blocks
+            .iter()
+            .take_while(|block| {
+                self.resident_block_at_height(block.height)
+                    .is_some_and(|known| known.hash == block.hash)
+            })
+            .count()
     }
 
     pub(crate) fn contains_block_sequence(&self, blocks: &[Block]) -> bool {

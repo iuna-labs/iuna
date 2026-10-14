@@ -5,7 +5,11 @@ use super::ticket::{
     BurnTicket, base_vdf_rounds_for_finalizer_rank, mine_action_count, ranked_tickets_for_height,
     vdf_rounds_for_finalizer_rank,
 };
-use super::vdf::{recent_vdf_retarget_average_observed_block_ms, retarget_vdf_rounds};
+use super::vdf::{
+    VDF_RETARGET_WINDOW_BLOCKS, average_vdf_retarget_observation,
+    recent_vdf_retarget_average_observed_block_ms, retarget_vdf_rounds,
+    vdf_retarget_observed_block_ms,
+};
 use super::{Block, FinalizerMode, Ledger};
 
 impl Ledger {
@@ -17,12 +21,33 @@ impl Ledger {
             return self.vdf_rounds;
         }
 
-        let Some(average_observed_ms) = recent_vdf_retarget_average_observed_block_ms(&self.chain)
-        else {
+        let average_observed_ms = if self.vdf_retarget_observations.is_empty() {
+            // Synthetic test chains bypass the apply paths that maintain the observations.
+            recent_vdf_retarget_average_observed_block_ms(&self.chain)
+        } else {
+            average_vdf_retarget_observation(&self.vdf_retarget_observations)
+        };
+        let Some(average_observed_ms) = average_observed_ms else {
             return self.vdf_rounds;
         };
         let base_rounds = base_vdf_rounds_for_finalizer_rank(tip.vdf_rounds, tip.finalizer_rank);
         retarget_vdf_rounds(base_rounds, average_observed_ms)
+    }
+
+    /// Record the retarget observation of `block` against the current tip, its parent. Call
+    /// just before `block` becomes the tip. This mirrors the full-chain scan in
+    /// `recent_vdf_retarget_average_observed_block_ms`: pairs whose parent is genesis are skipped.
+    pub(super) fn record_vdf_retarget_observation(&mut self, block: &Block) {
+        let parent = self.tip();
+        if parent.height == 0 {
+            return;
+        }
+        if let Some(observed) = vdf_retarget_observed_block_ms(parent, block) {
+            self.vdf_retarget_observations.push_back(observed);
+            while self.vdf_retarget_observations.len() > VDF_RETARGET_WINDOW_BLOCKS {
+                self.vdf_retarget_observations.pop_front();
+            }
+        }
     }
 
     pub fn expected_leader_for_next_block(&self) -> Option<String> {

@@ -51,13 +51,16 @@ pub(super) fn byte_bounded_block_page(
     blocks: Vec<crate::domain::Block>,
 ) -> Vec<crate::domain::Block> {
     let mut page = Vec::new();
-    let mut encoded_len = serde_json::to_vec(&GossipEnvelope::Blocks { blocks: Vec::new() })
-        .expect("block envelope serialization cannot fail")
-        .len();
+    let Ok(empty_envelope) = serde_json::to_vec(&GossipEnvelope::Blocks { blocks: Vec::new() })
+    else {
+        return page;
+    };
+    let mut encoded_len = empty_envelope.len();
     for block in blocks {
-        let block_len = serde_json::to_vec(&block)
-            .expect("block serialization cannot fail")
-            .len();
+        let Ok(encoded_block) = serde_json::to_vec(&block) else {
+            break;
+        };
+        let block_len = encoded_block.len();
         let separator_len = usize::from(!page.is_empty());
         let Some(candidate_len) = encoded_len
             .checked_add(separator_len)

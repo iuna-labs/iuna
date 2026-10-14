@@ -1,4 +1,7 @@
-use std::{collections::BTreeMap, sync::Arc};
+use std::{
+    collections::{BTreeMap, BTreeSet},
+    sync::Arc,
+};
 
 use anyhow::{Context, Result, bail};
 
@@ -122,6 +125,15 @@ impl CompactBlockContext {
         block_hash: &str,
     ) -> Option<&CompactBlockSizeBreakdown> {
         self.size_breakdowns.get(block_hash)
+    }
+
+    pub(crate) fn retain_size_breakdowns_for_blocks<'a>(
+        &mut self,
+        block_hashes: impl IntoIterator<Item = &'a str>,
+    ) {
+        let retained = block_hashes.into_iter().collect::<BTreeSet<_>>();
+        Arc::make_mut(&mut self.size_breakdowns)
+            .retain(|block_hash, _| retained.contains(block_hash.as_str()));
     }
 }
 

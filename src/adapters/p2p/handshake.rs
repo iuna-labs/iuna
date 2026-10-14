@@ -7,7 +7,7 @@ use tokio::{
 };
 
 use super::identity::{
-    new_verification_nonce, peer_verification_response, peer_verification_response_is_valid,
+    peer_verification_response, peer_verification_response_is_valid, try_new_verification_nonce,
 };
 use super::line_codec::{LimitedLineReader, parse_envelope, read_session_envelope};
 use super::metrics::P2pMetricsCounters;
@@ -251,7 +251,7 @@ async fn verify_connected_peer_node_id(
     peer: &str,
     expected_node_id: &str,
 ) -> Result<bool> {
-    let nonce = new_verification_nonce();
+    let nonce = try_new_verification_nonce()?;
     write_envelope(
         session.writer,
         &GossipEnvelope::PeerVerificationChallenge {
@@ -346,7 +346,9 @@ pub(super) async fn verify_advertised_peer_node_id(
         return false;
     }
 
-    let nonce = new_verification_nonce();
+    let Ok(nonce) = try_new_verification_nonce() else {
+        return false;
+    };
     if write_envelope(
         &mut writer,
         &GossipEnvelope::PeerVerificationChallenge {

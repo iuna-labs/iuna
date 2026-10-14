@@ -147,7 +147,7 @@ impl Wallet {
     pub(crate) fn external_discovery_tip_matches(&self, tip: &str) -> bool {
         self.external_discovery_tip
             .read()
-            .expect("wallet external discovery lock is not poisoned")
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
             .as_deref()
             == Some(tip)
     }
@@ -156,7 +156,7 @@ impl Wallet {
         *self
             .external_discovery_tip
             .write()
-            .expect("wallet external discovery lock is not poisoned") = Some(tip.to_string());
+            .unwrap_or_else(|poisoned| poisoned.into_inner()) = Some(tip.to_string());
     }
 
     pub(crate) fn reward_address_cursor(&self) -> u32 {
@@ -171,7 +171,7 @@ impl Wallet {
     pub(crate) fn reward_discovery_tip_matches(&self, tip: &str) -> bool {
         self.reward_discovery_tip
             .read()
-            .expect("wallet reward discovery lock is not poisoned")
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
             .as_deref()
             == Some(tip)
     }
@@ -180,7 +180,7 @@ impl Wallet {
         *self
             .reward_discovery_tip
             .write()
-            .expect("wallet reward discovery lock is not poisoned") = Some(tip.to_string());
+            .unwrap_or_else(|poisoned| poisoned.into_inner()) = Some(tip.to_string());
     }
 
     pub(crate) fn historical_address_recovery_complete(&self) -> bool {
@@ -233,7 +233,7 @@ impl Wallet {
         let child = self
             .hybrid_child_keys
             .read()
-            .expect("wallet hybrid child-key cache lock is not poisoned")
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
             .values()
             .find(|child| child.address == owner)
             .cloned();
@@ -253,7 +253,7 @@ impl Wallet {
         if let Some(key) = self
             .hybrid_child_keys
             .read()
-            .expect("wallet hybrid child-key cache lock is not poisoned")
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
             .get(&descriptor)
         {
             return Arc::clone(key);
@@ -275,7 +275,7 @@ impl Wallet {
         });
         self.hybrid_child_keys
             .write()
-            .expect("wallet hybrid child-key cache lock is not poisoned")
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
             .insert(descriptor, Arc::clone(&key));
         key
     }

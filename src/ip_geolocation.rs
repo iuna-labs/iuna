@@ -23,7 +23,7 @@ impl CountryCode {
     }
 
     pub fn as_str(&self) -> &str {
-        std::str::from_utf8(&self.0).expect("country codes contain ASCII only")
+        std::str::from_utf8(&self.0).unwrap_or("--")
     }
 }
 
@@ -57,8 +57,9 @@ impl EmbeddedDatabase {
 
         let mut counts_cursor = 8;
         let mut read_count = || {
-            let count =
-                u32::from_le_bytes(bytes[counts_cursor..counts_cursor + 4].try_into().unwrap());
+            let mut encoded = [0_u8; 4];
+            encoded.copy_from_slice(&bytes[counts_cursor..counts_cursor + 4]);
+            let count = u32::from_le_bytes(encoded);
             counts_cursor += 4;
             count
         };
@@ -138,11 +139,19 @@ fn binary_search_group(
     while left < right {
         let middle = left + (right - left) / 2;
         let offset = group.offset as usize + middle * record_size;
-        let record = &database[offset..offset + record_size];
+        let record = database.get(offset..offset + record_size)?;
         let value = match address_len {
-            4 => u128::from(u32::from_be_bytes(record[..4].try_into().unwrap())),
-            16 => u128::from_be_bytes(record[..16].try_into().unwrap()),
-            _ => unreachable!(),
+            4 => {
+                let mut encoded = [0_u8; 4];
+                encoded.copy_from_slice(record.get(..4)?);
+                u128::from(u32::from_be_bytes(encoded))
+            }
+            16 => {
+                let mut encoded = [0_u8; 16];
+                encoded.copy_from_slice(record.get(..16)?);
+                u128::from_be_bytes(encoded)
+            }
+            _ => return None,
         };
         match value.cmp(&target) {
             std::cmp::Ordering::Less => left = middle + 1,
@@ -178,7 +187,13 @@ pub struct IpGeolocation {
 impl IpGeolocation {
     pub fn bundled() -> &'static Self {
         BUNDLED_GEOLOCATION.get_or_init(|| {
-            Self::from_database(DATABASE).expect("bundled IP geolocation database must be valid")
+            Self::from_database(DATABASE).unwrap_or_else(|_| Self {
+                database: EmbeddedDatabase {
+                    bytes: &[],
+                    ipv4: [PrefixGroup::default(); 33],
+                    ipv6: [PrefixGroup::default(); 129],
+                },
+            })
         })
     }
 

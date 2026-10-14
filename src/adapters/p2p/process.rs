@@ -1,6 +1,6 @@
 use std::net::SocketAddr;
 
-use anyhow::Result;
+use anyhow::{Context, Result};
 use sha2::{Digest, Sha256};
 use tokio::net::tcp::OwnedWriteHalf;
 
@@ -200,8 +200,44 @@ pub(super) async fn process_envelope(
             }
             network.forward_outbox().await;
         }
-        GossipEnvelope::Blocks { blocks } => {
+        GossipEnvelope::Blocks { mut blocks } => {
             let adjusted_time_ms = super::network_adjusted_time_ms(network).await;
+            // A lagging peer's catch-up page can lie entirely below the resident window. Blocks
+            // the chain store already holds are dropped here, so such a page is not mistaken
+            // for a fork that needs complete history rebuilt.
+            let resident_from = network
+                .inner
+                .node
+                .lock()
+                .await
+                .ledger()
+                .first_contiguous_resident_height();
+            if blocks
+                .first()
+                .is_some_and(|block| block.height < resident_from)
+                && let Some(store) = network.chain_store().await
+            {
+                let heights = blocks
+                    .iter()
+                    .map(|block| block.height)
+                    .filter(|height| *height < resident_from)
+                    .collect::<std::collections::BTreeSet<_>>();
+                let persisted =
+                    tokio::task::spawn_blocking(move || store.blocks_at_heights(&heights))
+                        .await
+                        .ok()
+                        .and_then(Result::ok)
+                        .unwrap_or_default();
+                let known = blocks
+                    .iter()
+                    .take_while(|block| {
+                        persisted
+                            .get(&block.height)
+                            .is_some_and(|persisted| persisted.hash == block.hash)
+                    })
+                    .count();
+                blocks.drain(..known);
+            }
             let (base_tip, sync_generation) = {
                 let node = network.inner.node.lock().await;
                 if blocks.is_empty() || node.ledger().contains_block_sequence(&blocks) {
@@ -209,6 +245,10 @@ pub(super) async fn process_envelope(
                     record_inbound_result(network, known_peer, remote_addr, Ok(())).await;
                     return Ok(false);
                 }
+                // Overlapping catch-up pages start with blocks this node already has; dropping
+                // them keeps such pages on the cheap extend-the-tip path.
+                let known = node.ledger().known_block_prefix_len(&blocks);
+                blocks.drain(..known);
                 (
                     node.ledger().tip_hash().to_string(),
                     network.sync_generation(),
@@ -241,14 +281,22 @@ pub(super) async fn process_envelope(
             };
             let progress_id = progress_guard.id();
             let progress_network = network.clone();
-            let result = match validate_blocks_extension(
-                local_ledger,
-                blocks,
-                adjusted_time_ms,
-                move |height| progress_network.update_sync_progress(progress_id, height),
-            )
-            .await
-            {
+            let validated =
+                match hydrate_pruned_fork_validation_ledger(network, local_ledger, &blocks).await {
+                    Ok(local_ledger) => {
+                        validate_blocks_extension(
+                            local_ledger,
+                            blocks,
+                            adjusted_time_ms,
+                            move |height| {
+                                progress_network.update_sync_progress(progress_id, height)
+                            },
+                        )
+                        .await
+                    }
+                    Err(error) => Err(error),
+                };
+            let result = match validated {
                 Ok(ledger) => {
                     let mut node = network.inner.node.lock().await;
                     if progress_guard.is_current()
@@ -335,6 +383,78 @@ pub(super) async fn process_envelope(
         }
     }
     Ok(requested_chain_data)
+}
+
+/// Fork validation rebuilds the candidate from genesis, so a pruned ledger first gets its
+/// history back from the chain store. That is only worth doing for a fork from a block this node
+/// knows; an unknown ancestor is answered with a cheap locator request instead.
+async fn hydrate_pruned_fork_validation_ledger(
+    network: &GossipNetwork,
+    mut ledger: crate::domain::Ledger,
+    blocks: &[crate::domain::Block],
+) -> Result<crate::domain::Ledger> {
+    let Some(first) = blocks.first() else {
+        return Ok(ledger);
+    };
+    if first.prev_hash == ledger.tip_hash() || !ledger.history_is_pruned() {
+        return Ok(ledger);
+    }
+    let Some(store) = network.chain_store().await else {
+        return Ok(ledger);
+    };
+    let ancestor_hash = first.prev_hash.clone();
+    let ancestor_is_resident = ledger.has_block(&ancestor_hash);
+    if !ancestor_is_resident {
+        let lookup_store = store.clone();
+        let lookup_hash = ancestor_hash.clone();
+        let ancestor_is_persisted =
+            tokio::task::spawn_blocking(move || lookup_store.block_by_hash(&lookup_hash))
+                .await
+                .map_err(anyhow::Error::from)
+                .and_then(|lookup| lookup)
+                .map_err(local_history_unavailable)?
+                .is_some();
+        if !ancestor_is_persisted {
+            return Err(anyhow::Error::new(
+                super::SyncError::BlockPageHasNoCommonAncestor,
+            ));
+        }
+    }
+    {
+        let mut last = network
+            .inner
+            .last_fork_hydration
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        if last.is_some_and(|started| started.elapsed() < super::FORK_HYDRATION_INTERVAL) {
+            return Err(anyhow::Error::new(
+                super::SyncError::ForkValidationThrottled,
+            ));
+        }
+        *last = Some(std::time::Instant::now());
+    }
+    tokio::task::spawn_blocking(move || {
+        let loaded = store
+            .load_with_verification_status()?
+            .context("persisted chain disappeared while preparing fork validation")?;
+        let complete = crate::domain::Ledger::from_persisted_snapshot_revalidating_from(
+            loaded.snapshot,
+            loaded.revalidation_from_height,
+        )?;
+        if !ledger.restore_pruned_history(complete)? {
+            anyhow::bail!("persisted chain does not reach the resident chain");
+        }
+        Ok(ledger)
+    })
+    .await
+    .map_err(anyhow::Error::from)
+    .and_then(|hydrated| hydrated)
+    .map_err(local_history_unavailable)
+}
+
+/// Failures to rebuild this node's own history are local conditions, not peer misbehavior.
+fn local_history_unavailable(error: anyhow::Error) -> anyhow::Error {
+    anyhow::Error::new(super::SyncError::ForkHistoryUnavailable).context(format!("{error:#}"))
 }
 
 fn chain_validation_key(kind: &str, base_tip: &str, blocks: &[crate::domain::Block]) -> String {

@@ -26,9 +26,12 @@ impl NodeCore {
         let Some(work) = plan.work else {
             return outcome;
         };
-        let vdf_output =
-            run_vdf_with_memory_limit(work.vdf_seed(), work.vdf_rounds(), self.vdf_memory_mib);
-        match self.complete_prepared_block_at(work, vdf_output, timestamp_ms) {
+        let completed =
+            run_vdf_with_memory_limit(work.vdf_seed(), work.vdf_rounds(), self.vdf_memory_mib)
+                .and_then(|vdf_output| {
+                    self.complete_prepared_block_at(work, vdf_output, timestamp_ms)
+                });
+        match completed {
             Ok(block) => {
                 outcome.block = Some(block);
                 outcome.skipped_reason = None;
@@ -727,7 +730,7 @@ impl NodeCore {
             .context("cannot prepare ticket block without a mature burn ticket")?;
         let next_height = ledger.height().saturating_add(1);
         let reward_address = if next_height >= crate::domain::HYBRID_REWARD_ACTIVATION_HEIGHT {
-            Some(ledger.wallet_reward_address(self.wallet.unlocked()?, next_height))
+            Some(ledger.wallet_reward_address(self.wallet.unlocked()?, next_height)?)
         } else {
             None
         };
@@ -744,7 +747,7 @@ impl NodeCore {
         let (ledger, required_burn_signature) = self.ledger_with_local_block_anchor();
         let next_height = ledger.height().saturating_add(1);
         let reward_address = if next_height >= crate::domain::HYBRID_REWARD_ACTIVATION_HEIGHT {
-            Some(ledger.wallet_reward_address(self.wallet.unlocked()?, next_height))
+            Some(ledger.wallet_reward_address(self.wallet.unlocked()?, next_height)?)
         } else {
             None
         };
@@ -887,7 +890,7 @@ mod tests {
         let block = node
             .complete_prepared_block_at(
                 work.clone(),
-                crate::domain::run_vdf(work.vdf_seed(), work.vdf_rounds()),
+                crate::domain::run_vdf(work.vdf_seed(), work.vdf_rounds()).unwrap(),
                 1 + BURN_BUNDLE_COLLECTION_MS,
             )
             .unwrap();
@@ -1342,7 +1345,7 @@ mod tests {
             alpha
                 .complete_prepared_block_at(
                     work.clone(),
-                    crate::domain::run_vdf(work.vdf_seed(), work.vdf_rounds()),
+                    crate::domain::run_vdf(work.vdf_seed(), work.vdf_rounds()).unwrap(),
                     2,
                 )
                 .unwrap()
@@ -1877,7 +1880,7 @@ mod tests {
         let block = producer
             .complete_prepared_block_at(
                 work.clone(),
-                crate::domain::run_vdf(work.vdf_seed(), work.vdf_rounds()),
+                crate::domain::run_vdf(work.vdf_seed(), work.vdf_rounds()).unwrap(),
                 1,
             )
             .unwrap();

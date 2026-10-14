@@ -11,14 +11,28 @@ use rusqlite::{Connection, OptionalExtension, params, params_from_iter, types::V
 use serde::Serialize;
 
 use crate::{
-    adapters::ui_index::{UiChainIndex, build_ui_chain_index_for_blocks, projected_reward_outputs},
+    adapters::{
+        chain_store::SqliteChainStore,
+        ui_index::{UiChainIndex, build_ui_chain_index_for_blocks, projected_reward_outputs},
+    },
+    compact::CompactBlockSizeBreakdown,
     domain::{
-        AddressNetwork, Amount, Block, BurnLeaderRank, ChainSnapshot, Ledger,
+        AddressNetwork, Amount, Block, BurnLeaderRank, CHAIN_SEGMENT_BLOCKS, ChainSnapshot, Ledger,
         MINE_RETARGET_WINDOW_BLOCKS, MINE_REWARD, OutPoint, SignatureScheme, Transaction,
         TransactionV2, TransactionV2Domain, TxInput, TxOutput, decode_hex,
         encode_versioned_address, hex_encode, retarget_mine_difficulty_bits,
     },
 };
+
+struct ProjectionStart {
+    from_height: u64,
+    previous_hash: String,
+    /// Projected rows above this height belong to an abandoned branch and are removed first.
+    rewind_above: Option<u64>,
+}
+
+/// Projected block hashes kept for finding the fork point after a reorg.
+const UI_PROJECTED_BLOCKS_RETAINED: u64 = 256;
 
 const SCHEMA: &str = r#"
 CREATE TABLE IF NOT EXISTS block_metrics (
@@ -157,6 +171,22 @@ CREATE TABLE IF NOT EXISTS ui_burn_leader_ranks (
 CREATE TABLE IF NOT EXISTS ui_burn_leader_rank_blocks (
     block_hash TEXT PRIMARY KEY
 );
+
+CREATE TABLE IF NOT EXISTS ui_projected_blocks (
+    height INTEGER PRIMARY KEY,
+    block_hash TEXT NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS ui_block_storage_sizes (
+    block_hash TEXT PRIMARY KEY,
+    total_bytes INTEGER NOT NULL,
+    header_and_proof_bytes INTEGER NOT NULL,
+    transaction_bytes INTEGER NOT NULL,
+    transfer_bytes INTEGER NOT NULL,
+    burn_bytes INTEGER NOT NULL,
+    mine_bytes INTEGER NOT NULL,
+    burn_bundle_bytes INTEGER NOT NULL
+);
 "#;
 
 const RESET_SCHEMA: &str = r#"
@@ -174,6 +204,8 @@ DROP TABLE IF EXISTS ui_wallet_transactions_v2;
 DROP TABLE IF EXISTS ui_revealed_transactions;
 DROP TABLE IF EXISTS ui_burn_leader_ranks;
 DROP TABLE IF EXISTS ui_burn_leader_rank_blocks;
+DROP TABLE IF EXISTS ui_projected_blocks;
+DROP TABLE IF EXISTS ui_block_storage_sizes;
 "#;
 
 const UI_DATA_SCHEMA_VERSION: u32 = 2;
@@ -259,6 +291,47 @@ impl SqliteUiDataStore {
 
     pub fn path(&self) -> &Path {
         &self.path
+    }
+
+    /// Storage sizes recorded when the given blocks were projected.
+    pub(crate) fn load_block_storage_sizes(
+        &self,
+        block_hashes: &[String],
+    ) -> Result<BTreeMap<String, CompactBlockSizeBreakdown>> {
+        self.with_connection(|connection| {
+            let mut statement = connection
+                .prepare(
+                    r#"
+SELECT total_bytes, header_and_proof_bytes, transaction_bytes, transfer_bytes, burn_bytes,
+       mine_bytes, burn_bundle_bytes
+FROM ui_block_storage_sizes
+WHERE block_hash = ?1
+"#,
+                )
+                .context("failed to prepare block storage size query")?;
+            let mut sizes = BTreeMap::new();
+            for block_hash in block_hashes {
+                let size = statement
+                    .query_row([block_hash], |row| {
+                        let column = |index| row.get::<_, u64>(index).map(|bytes| bytes as usize);
+                        Ok(CompactBlockSizeBreakdown {
+                            total_bytes: column(0)?,
+                            header_and_proof_bytes: column(1)?,
+                            transaction_bytes: column(2)?,
+                            transfer_bytes: column(3)?,
+                            burn_bytes: column(4)?,
+                            mine_bytes: column(5)?,
+                            burn_bundle_bytes: column(6)?,
+                        })
+                    })
+                    .optional()
+                    .context("failed to load block storage size")?;
+                if let Some(size) = size {
+                    sizes.insert(block_hash.clone(), size);
+                }
+            }
+            Ok(sizes)
+        })
     }
 
     pub(crate) fn load_ui_chain_index(&self, tip_hash: &str) -> Result<Option<UiChainIndex>> {
@@ -356,12 +429,22 @@ impl SqliteUiDataStore {
                 .transaction()
                 .context("failed to start UI data projection transaction")?;
             if incremental_start.is_some() {
+                record_ui_projected_blocks(&transaction, blocks)?;
+                record_ui_block_storage_sizes(
+                    &transaction,
+                    &ledger.recorded_storage_size_breakdowns(blocks),
+                )?;
                 append_ui_chain_index(&transaction, &ui_index, updated_at_ms)?;
                 replace_ui_utxos(&transaction, &utxos)?;
                 append_ui_wallet_transactions(&transaction, &wallet_transactions)?;
                 append_ui_wallet_transactions_v2(&transaction, &wallet_transactions_v2)?;
             } else {
                 replace_ui_chain_index(&transaction, &ui_index, updated_at_ms)?;
+                record_ui_projected_blocks(&transaction, blocks)?;
+                record_ui_block_storage_sizes(
+                    &transaction,
+                    &ledger.recorded_storage_size_breakdowns(blocks),
+                )?;
                 replace_ui_utxos(&transaction, &utxos)?;
                 replace_ui_wallet_transactions(&transaction, &wallet_transactions)?;
                 replace_ui_wallet_transactions_v2(&transaction, &wallet_transactions_v2)?;
@@ -372,6 +455,192 @@ impl SqliteUiDataStore {
                 .context("failed to commit UI data projection transaction")?;
             Ok(())
         })
+    }
+
+    /// Incrementally project a live ledger whose historical block list may be pruned. The
+    /// materialized UI database already owns the older history, so only the resident suffix and
+    /// the current derived state need to be held in memory. When the projection lags behind the
+    /// resident window (for example after a long sync), the missing blocks are streamed from the
+    /// chain store one segment at a time.
+    pub fn project_ledger(
+        &self,
+        ledger: &Ledger,
+        keep_metrics: bool,
+        chain_store: &SqliteChainStore,
+    ) -> Result<()> {
+        if !ledger.history_is_pruned() {
+            return self.project_snapshot(&ledger.snapshot(), keep_metrics);
+        }
+        if keep_metrics {
+            anyhow::bail!("metrics projection requires complete resident chain history");
+        }
+
+        let snapshot = ledger.snapshot();
+        validate_pruned_projection_snapshot_structure(&snapshot)?;
+        let tip = snapshot
+            .blocks
+            .last()
+            .context("pruned chain snapshot is empty")?;
+        let resident_tail_height = snapshot
+            .blocks
+            .get(1)
+            .map(|block| block.height)
+            .context("pruned chain snapshot has no resident tail")?;
+        let start = self.pruned_projection_start(ledger, resident_tail_height, chain_store)?;
+        if start.rewind_above.is_none() && start.from_height > tip.height {
+            return self.clear_metrics();
+        }
+
+        let network = AddressNetwork::from_profile_id(&snapshot.launch_profile.profile_id);
+        let domain = ledger.transaction_v2_domain()?;
+        let utxos = ledger.all_utxos();
+        let resident_blocks = snapshot.blocks[1..]
+            .iter()
+            .filter(|block| block.height >= start.from_height)
+            .cloned()
+            .collect::<Vec<_>>();
+        let updated_at_ms = unix_ms();
+
+        self.with_connection_mut(|connection| {
+            let transaction = connection
+                .transaction()
+                .context("failed to start pruned UI projection transaction")?;
+            clear_metrics_in_transaction(&transaction)?;
+            let mut leaderboards = load_ui_activity_leaderboards(&transaction)?;
+            if let Some(fork_height) = start.rewind_above {
+                rewind_ui_projection_above(&transaction, fork_height, &mut leaderboards)?;
+            }
+            let mut previous_hash = start.previous_hash.clone();
+            let mut append = |blocks: &[Block]| -> Result<()> {
+                for block in blocks {
+                    if block.prev_hash != previous_hash {
+                        anyhow::bail!("UI projection blocks do not extend the projected chain");
+                    }
+                    previous_hash = block.hash.clone();
+                }
+                let ui_index = build_ui_chain_index_for_blocks(&snapshot, ledger, blocks, false);
+                let wallet_transactions = wallet_transactions_from_blocks(blocks);
+                let wallet_transactions_v2 =
+                    wallet_transactions_v2_from_blocks(blocks, &domain, network);
+                accumulate_activity_leaderboards(&mut leaderboards, &wallet_transactions)?;
+                append_ui_chain_index(&transaction, &ui_index, updated_at_ms)?;
+                append_ui_wallet_transactions(&transaction, &wallet_transactions)?;
+                append_ui_wallet_transactions_v2(&transaction, &wallet_transactions_v2)?;
+                record_ui_block_storage_sizes(
+                    &transaction,
+                    &ledger.recorded_storage_size_breakdowns(blocks),
+                )?;
+                record_ui_projected_blocks(&transaction, blocks)
+            };
+            // Blocks below the resident window are streamed from the chain store one segment
+            // at a time, so a projection that lagged behind never loads the whole chain.
+            let mut next_height = start.from_height;
+            while next_height < resident_tail_height {
+                let count = usize::try_from(resident_tail_height - next_height)
+                    .unwrap_or(usize::MAX)
+                    .min(CHAIN_SEGMENT_BLOCKS);
+                let blocks = chain_store.blocks_from(next_height, count)?;
+                if blocks.len() != count
+                    || blocks
+                        .iter()
+                        .enumerate()
+                        .any(|(offset, block)| block.height != next_height + offset as u64)
+                {
+                    anyhow::bail!("persisted chain is missing blocks below the resident window");
+                }
+                append(&blocks)?;
+                next_height += count as u64;
+            }
+            append(&resident_blocks)?;
+            replace_ui_utxos(&transaction, &utxos)?;
+            accumulate_balance_leaderboards(&mut leaderboards, &utxos)?;
+            replace_ui_leaderboards(&transaction, &leaderboard_rows(leaderboards))?;
+            transaction
+                .commit()
+                .context("failed to commit pruned UI projection transaction")?;
+            Ok(())
+        })
+    }
+
+    /// Where a pruned projection continues: right after the projected tip when it is still on
+    /// the live chain, or after the newest projected block the live chain shares when a reorg
+    /// abandoned the projected tip.
+    fn pruned_projection_start(
+        &self,
+        ledger: &Ledger,
+        resident_tail_height: u64,
+        chain_store: &SqliteChainStore,
+    ) -> Result<ProjectionStart> {
+        let projected_tip_hash = self
+            .with_connection(|connection| {
+                connection
+                    .query_row(
+                        "SELECT schema_version, tip_hash FROM ui_cache_meta WHERE id = 1",
+                        [],
+                        |row| Ok((row.get::<_, u32>(0)?, row.get::<_, String>(1)?)),
+                    )
+                    .optional()
+                    .context("failed to load UI projection metadata")
+            })?
+            .filter(|(schema_version, _)| *schema_version == UI_CACHE_SCHEMA_VERSION)
+            .map(|(_, tip_hash)| tip_hash)
+            .context("UI projection has no tip to continue from")?;
+
+        let projected_height = match ledger.block_by_hash(&projected_tip_hash) {
+            Some(block) => Some(block.height),
+            None => chain_store
+                .block_by_hash(&projected_tip_hash)?
+                .map(|block| block.height)
+                .filter(|height| *height < resident_tail_height),
+        };
+        if let Some(height) = projected_height {
+            return Ok(ProjectionStart {
+                from_height: height + 1,
+                previous_hash: projected_tip_hash,
+                rewind_above: None,
+            });
+        }
+
+        let projected_blocks = self.with_connection(|connection| {
+            let mut statement = connection
+                .prepare("SELECT height, block_hash FROM ui_projected_blocks ORDER BY height DESC")
+                .context("failed to prepare UI projected block query")?;
+            let rows = statement
+                .query_map([], |row| {
+                    Ok((row.get::<_, u64>(0)?, row.get::<_, String>(1)?))
+                })
+                .context("failed to query UI projected blocks")?;
+            rows.collect::<std::result::Result<Vec<_>, _>>()
+                .context("failed to read UI projected blocks")
+        })?;
+        // The chain store matches the live chain below the resident window: the node never
+        // prunes past its persisted tip, and reorgs of a pruned ledger fork inside the window.
+        // Persisted hashes are loaded in one batch, decoding each segment once.
+        let persisted_heights = projected_blocks
+            .iter()
+            .map(|(height, _)| *height)
+            .filter(|height| *height > 0 && *height < resident_tail_height)
+            .collect();
+        let persisted = chain_store.blocks_at_heights(&persisted_heights)?;
+        let live_hash_at = |height: u64| {
+            if height == 0 || height >= resident_tail_height {
+                ledger
+                    .resident_block_at_height(height)
+                    .map(|block| block.hash.as_str())
+            } else {
+                persisted.get(&height).map(|block| block.hash.as_str())
+            }
+        };
+        for (height, hash) in projected_blocks {
+            if live_hash_at(height) == Some(hash.as_str()) {
+                return Ok(ProjectionStart {
+                    from_height: height + 1,
+                    previous_hash: hash,
+                    rewind_above: Some(height),
+                });
+            }
+        }
+        anyhow::bail!("UI projection shares no recent block with the live chain")
     }
 
     fn incremental_projection_start(&self, snapshot: &ChainSnapshot) -> Result<Option<usize>> {
@@ -1161,7 +1430,7 @@ fn append_ui_chain_index(
         transaction
             .execute(
                 r#"
-INSERT INTO ui_output_index (txid, output_index, address, amount)
+INSERT OR REPLACE INTO ui_output_index (txid, output_index, address, amount)
 VALUES (?1, ?2, ?3, ?4)
 "#,
                 params![outpoint.txid, outpoint.index, output.address, output.amount],
@@ -1176,7 +1445,7 @@ VALUES (?1, ?2, ?3, ?4)
     for (block_hash, ranks) in &index.burn_leader_ranks_by_hash {
         transaction
             .execute(
-                "INSERT INTO ui_burn_leader_rank_blocks (block_hash) VALUES (?1)",
+                "INSERT OR REPLACE INTO ui_burn_leader_rank_blocks (block_hash) VALUES (?1)",
                 params![block_hash],
             )
             .with_context(|| format!("failed to append UI burn leader rank block {block_hash}"))?;
@@ -1184,7 +1453,7 @@ VALUES (?1, ?2, ?3, ?4)
             transaction
                 .execute(
                     r#"
-INSERT INTO ui_burn_leader_ranks (
+INSERT OR REPLACE INTO ui_burn_leader_ranks (
     block_hash, rank, ticket_id, owner, amount, eligible_from_height, eligible_until_height
 ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)
 "#,
@@ -1444,6 +1713,12 @@ fn clear_ui_chain_index_in_transaction(transaction: &rusqlite::Transaction<'_>) 
     transaction
         .execute("DELETE FROM ui_burn_leader_rank_blocks", [])
         .context("failed to clear old UI burn leader rank block index")?;
+    transaction
+        .execute("DELETE FROM ui_projected_blocks", [])
+        .context("failed to clear old UI projected block index")?;
+    transaction
+        .execute("DELETE FROM ui_block_storage_sizes", [])
+        .context("failed to clear old UI block storage sizes")?;
     Ok(())
 }
 
@@ -1836,51 +2111,215 @@ fn build_ui_leaderboards(
     utxos: &[(OutPoint, TxOutput)],
     wallet_transactions: &[(String, WalletTransactionProjection)],
 ) -> Result<Vec<(String, UiLeaderboardEntry)>> {
-    let mut by_kind = BTreeMap::<(String, String), UiLeaderboardEntry>::new();
-    for (_, output) in utxos {
-        if output.amount == 0 {
-            continue;
-        }
-        let key = ("balances".to_string(), output.address.clone());
-        let entry = by_kind.entry(key).or_insert_with(|| UiLeaderboardEntry {
-            address: output.address.clone(),
+    let mut by_kind = UiLeaderboardTotals::new();
+    accumulate_balance_leaderboards(&mut by_kind, utxos)?;
+    accumulate_activity_leaderboards(&mut by_kind, wallet_transactions)?;
+    Ok(leaderboard_rows(by_kind))
+}
+
+type UiLeaderboardTotals = BTreeMap<(String, String), UiLeaderboardEntry>;
+
+/// Mine and burn totals already projected; balances are always rebuilt from the UTXO set.
+fn load_ui_activity_leaderboards(
+    transaction: &rusqlite::Transaction<'_>,
+) -> Result<UiLeaderboardTotals> {
+    let mut by_kind = UiLeaderboardTotals::new();
+    let mut statement = transaction
+        .prepare(
+            "SELECT kind, address, amount, count FROM ui_leaderboards WHERE kind != 'balances'",
+        )
+        .context("failed to prepare existing UI leaderboard query")?;
+    let rows = statement
+        .query_map([], |row| {
+            Ok((
+                row.get::<_, String>(0)?,
+                UiLeaderboardEntry {
+                    address: row.get(1)?,
+                    amount: row.get(2)?,
+                    count: row.get(3)?,
+                },
+            ))
+        })
+        .context("failed to query existing UI leaderboards")?;
+    for row in rows {
+        let (kind, entry) = row.context("failed to read existing UI leaderboard row")?;
+        by_kind.insert((kind, entry.address.clone()), entry);
+    }
+    Ok(by_kind)
+}
+
+fn add_leaderboard_entry(
+    by_kind: &mut UiLeaderboardTotals,
+    kind: &str,
+    address: &str,
+    amount: Amount,
+) -> Result<()> {
+    let entry = by_kind
+        .entry((kind.to_string(), address.to_string()))
+        .or_insert_with(|| UiLeaderboardEntry {
+            address: address.to_string(),
             amount: 0,
             count: 0,
         });
-        entry.amount = entry
-            .amount
-            .checked_add(output.amount)
-            .context("balance leaderboard amount overflows")?;
-        entry.count = entry
-            .count
-            .checked_add(1)
-            .context("balance leaderboard count overflows")?;
+    entry.amount = entry
+        .amount
+        .checked_add(amount)
+        .with_context(|| format!("{kind} leaderboard amount overflows"))?;
+    entry.count = entry
+        .count
+        .checked_add(1)
+        .with_context(|| format!("{kind} leaderboard count overflows"))?;
+    Ok(())
+}
+
+fn accumulate_balance_leaderboards(
+    by_kind: &mut UiLeaderboardTotals,
+    utxos: &[(OutPoint, TxOutput)],
+) -> Result<()> {
+    for (_, output) in utxos {
+        if output.amount != 0 {
+            add_leaderboard_entry(by_kind, "balances", &output.address, output.amount)?;
+        }
     }
+    Ok(())
+}
+
+fn accumulate_activity_leaderboards(
+    by_kind: &mut UiLeaderboardTotals,
+    wallet_transactions: &[(String, WalletTransactionProjection)],
+) -> Result<()> {
     for (address, projection) in wallet_transactions {
         let (kind, amount) = match &projection.transaction {
             Transaction::Mine { .. } => ("mine", MINE_REWARD),
             Transaction::Burn { amount, .. } => ("burn", *amount),
             Transaction::Transfer { .. } => continue,
         };
-        let key = (kind.to_string(), address.clone());
-        let entry = by_kind.entry(key).or_insert_with(|| UiLeaderboardEntry {
-            address: address.clone(),
-            amount: 0,
-            count: 0,
-        });
-        entry.amount = entry
-            .amount
-            .checked_add(amount)
-            .with_context(|| format!("{kind} leaderboard amount overflows"))?;
-        entry.count = entry
-            .count
-            .checked_add(1)
-            .with_context(|| format!("{kind} leaderboard count overflows"))?;
+        add_leaderboard_entry(by_kind, kind, address, amount)?;
     }
-    Ok(by_kind
+    Ok(())
+}
+
+fn record_ui_projected_blocks(
+    transaction: &rusqlite::Transaction<'_>,
+    blocks: &[Block],
+) -> Result<()> {
+    let Some(newest) = blocks.last() else {
+        return Ok(());
+    };
+    let oldest_retained = newest
+        .height
+        .saturating_sub(UI_PROJECTED_BLOCKS_RETAINED - 1);
+    for block in blocks
+        .iter()
+        .filter(|block| block.height >= oldest_retained)
+    {
+        transaction
+            .execute(
+                "INSERT OR REPLACE INTO ui_projected_blocks (height, block_hash) VALUES (?1, ?2)",
+                params![block.height, block.hash],
+            )
+            .with_context(|| format!("failed to record UI projected block {}", block.height))?;
+    }
+    transaction
+        .execute(
+            "DELETE FROM ui_projected_blocks WHERE height < ?1 OR height > ?2",
+            params![oldest_retained, newest.height],
+        )
+        .context("failed to trim UI projected block index")?;
+    Ok(())
+}
+
+fn record_ui_block_storage_sizes(
+    transaction: &rusqlite::Transaction<'_>,
+    sizes: &BTreeMap<String, CompactBlockSizeBreakdown>,
+) -> Result<()> {
+    for (block_hash, size) in sizes {
+        let columns = [
+            size.total_bytes,
+            size.header_and_proof_bytes,
+            size.transaction_bytes,
+            size.transfer_bytes,
+            size.burn_bytes,
+            size.mine_bytes,
+            size.burn_bundle_bytes,
+        ]
+        .map(|bytes| bytes as u64);
+        transaction
+            .execute(
+                r#"
+INSERT OR REPLACE INTO ui_block_storage_sizes (
+    block_hash, total_bytes, header_and_proof_bytes, transaction_bytes, transfer_bytes,
+    burn_bytes, mine_bytes, burn_bundle_bytes
+) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)
+"#,
+                params![
+                    block_hash, columns[0], columns[1], columns[2], columns[3], columns[4],
+                    columns[5], columns[6],
+                ],
+            )
+            .with_context(|| format!("failed to record storage size of block {block_hash}"))?;
+    }
+    Ok(())
+}
+
+/// Remove projected rows for blocks above `fork_height`, which a reorg abandoned, and take their
+/// contribution back out of the mine and burn leaderboards.
+fn rewind_ui_projection_above(
+    transaction: &rusqlite::Transaction<'_>,
+    fork_height: u64,
+    leaderboards: &mut UiLeaderboardTotals,
+) -> Result<()> {
+    let abandoned = {
+        let mut statement = transaction
+            .prepare(
+                "SELECT address, transaction_json FROM ui_wallet_transactions WHERE block_height > ?1",
+            )
+            .context("failed to prepare abandoned UI wallet transaction query")?;
+        let rows = statement
+            .query_map([fork_height], |row| {
+                Ok((row.get::<_, String>(0)?, row.get::<_, Vec<u8>>(1)?))
+            })
+            .context("failed to query abandoned UI wallet transactions")?;
+        rows.collect::<std::result::Result<Vec<_>, _>>()
+            .context("failed to read abandoned UI wallet transactions")?
+    };
+    for (address, transaction_json) in abandoned {
+        let abandoned_transaction = serde_json::from_slice::<Transaction>(&transaction_json)
+            .context("failed to decode abandoned UI wallet transaction")?;
+        let (kind, amount) = match &abandoned_transaction {
+            Transaction::Mine { .. } => ("mine", MINE_REWARD),
+            Transaction::Burn { amount, .. } => ("burn", *amount),
+            Transaction::Transfer { .. } => continue,
+        };
+        let key = (kind.to_string(), address);
+        if let Some(entry) = leaderboards.get_mut(&key) {
+            entry.amount = entry.amount.saturating_sub(amount);
+            entry.count = entry.count.saturating_sub(1);
+            if entry.count == 0 {
+                leaderboards.remove(&key);
+            }
+        }
+    }
+    for statement in [
+        "DELETE FROM ui_wallet_transactions WHERE block_height > ?1",
+        "DELETE FROM ui_wallet_transactions_v2 WHERE block_height > ?1",
+        "DELETE FROM ui_burn_leader_ranks WHERE block_hash IN (SELECT block_hash FROM ui_projected_blocks WHERE height > ?1)",
+        "DELETE FROM ui_burn_leader_rank_blocks WHERE block_hash IN (SELECT block_hash FROM ui_projected_blocks WHERE height > ?1)",
+        "DELETE FROM ui_block_storage_sizes WHERE block_hash IN (SELECT block_hash FROM ui_projected_blocks WHERE height > ?1)",
+        "DELETE FROM ui_projected_blocks WHERE height > ?1",
+    ] {
+        transaction
+            .execute(statement, [fork_height])
+            .context("failed to rewind abandoned UI projection rows")?;
+    }
+    Ok(())
+}
+
+fn leaderboard_rows(by_kind: UiLeaderboardTotals) -> Vec<(String, UiLeaderboardEntry)> {
+    by_kind
         .into_iter()
         .map(|((kind, _), entry)| (kind, entry))
-        .collect())
+        .collect()
 }
 
 fn wallet_transactions_from_snapshot(
@@ -2079,6 +2518,21 @@ fn validate_projection_snapshot_structure(snapshot: &ChainSnapshot) -> Result<()
         }
         if index > 0 && block.prev_hash != snapshot.blocks[index - 1].hash {
             anyhow::bail!("chain snapshot parent hashes are not contiguous");
+        }
+    }
+    Ok(())
+}
+
+fn validate_pruned_projection_snapshot_structure(snapshot: &ChainSnapshot) -> Result<()> {
+    let Some((genesis, tail)) = snapshot.blocks.split_first() else {
+        anyhow::bail!("chain snapshot is empty");
+    };
+    if genesis.height != 0 {
+        anyhow::bail!("pruned chain snapshot is missing genesis");
+    }
+    for pair in tail.windows(2) {
+        if pair[1].height != pair[0].height.saturating_add(1) || pair[1].prev_hash != pair[0].hash {
+            anyhow::bail!("pruned chain snapshot tail is not contiguous");
         }
     }
     Ok(())
@@ -2538,6 +2992,187 @@ mod tests {
         assert_eq!(rows[0].timestamp_ms, 1_234);
         assert_eq!(rows[0].transaction.to(), Some(wallet.address()));
         assert!(rows[0].transaction.amount() > 0);
+    }
+
+    #[test]
+    fn pruned_ledger_projects_only_the_resident_suffix() {
+        let dir = tempdir().unwrap();
+        let store = SqliteUiDataStore::open(dir.path().join("ui_data.sqlite3")).unwrap();
+        let (mut ledger, wallet) = test_ledger("pruned-ledger-projection");
+        append_test_block(&mut ledger, &wallet, 1_000);
+        append_test_block(&mut ledger, &wallet, 2_000);
+        store.project_snapshot(&ledger.snapshot(), false).unwrap();
+
+        append_test_block(&mut ledger, &wallet, 3_000);
+        ledger.retain_recent_chain_blocks(2);
+        assert!(ledger.history_is_pruned());
+        let chain_store =
+            crate::adapters::chain_store::SqliteChainStore::open(dir.path().join("chain.sqlite3"))
+                .unwrap();
+        store.project_ledger(&ledger, false, &chain_store).unwrap();
+
+        assert!(store.is_projected_to(ledger.tip_hash()).unwrap());
+        let (rows, total) = store
+            .load_wallet_transactions(wallet.address(), &["reward"], 0, 10)
+            .unwrap();
+        assert_eq!(total, 3);
+        assert_eq!(rows[0].block_height, 3);
+        assert_eq!(store.load_leaderboards(10).unwrap().burners[0].count, 4);
+    }
+
+    #[test]
+    fn lagging_pruned_projection_streams_the_gap_from_the_chain_store() {
+        let dir = tempdir().unwrap();
+        let store = SqliteUiDataStore::open(dir.path().join("ui_data.sqlite3")).unwrap();
+        let chain_store =
+            crate::adapters::chain_store::SqliteChainStore::open(dir.path().join("chain.sqlite3"))
+                .unwrap();
+        let (mut ledger, wallet) = test_ledger("lagging-pruned-projection");
+        for timestamp_ms in [1_000, 2_000] {
+            append_test_block(&mut ledger, &wallet, timestamp_ms);
+        }
+        store.project_snapshot(&ledger.snapshot(), false).unwrap();
+        for timestamp_ms in [3_000, 4_000, 5_000, 6_000] {
+            append_test_block(&mut ledger, &wallet, timestamp_ms);
+        }
+        let complete = ledger.snapshot();
+        chain_store.save_verified(&complete).unwrap();
+        ledger.retain_recent_chain_blocks(2);
+
+        store.project_ledger(&ledger, false, &chain_store).unwrap();
+
+        let reference =
+            SqliteUiDataStore::open(dir.path().join("reference_ui_data.sqlite3")).unwrap();
+        reference.project_snapshot(&complete, false).unwrap();
+        assert!(store.is_projected_to(ledger.tip_hash()).unwrap());
+        let wallet_rows = |store: &SqliteUiDataStore| {
+            store
+                .load_wallet_transactions(wallet.address(), &["reward", "burn"], 0, 50)
+                .unwrap()
+        };
+        let (rows, total) = wallet_rows(&store);
+        let (reference_rows, reference_total) = wallet_rows(&reference);
+        assert_eq!(total, reference_total);
+        assert_eq!(rows, reference_rows);
+        assert_eq!(
+            store.load_leaderboards(10).unwrap(),
+            reference.load_leaderboards(10).unwrap()
+        );
+    }
+
+    fn assert_matches_full_projection(
+        store: &SqliteUiDataStore,
+        complete: &ChainSnapshot,
+        wallet: &Wallet,
+        dir: &std::path::Path,
+    ) {
+        let reference = SqliteUiDataStore::open(dir.join("reference_ui_data.sqlite3")).unwrap();
+        reference.project_snapshot(complete, false).unwrap();
+        let tip_hash = &complete.blocks.last().unwrap().hash;
+        assert!(store.is_projected_to(tip_hash).unwrap());
+        let rows = |store: &SqliteUiDataStore| {
+            store
+                .load_wallet_transactions(
+                    wallet.address(),
+                    &["reward", "burn", "mine", "transfer"],
+                    0,
+                    100,
+                )
+                .unwrap()
+        };
+        assert_eq!(rows(store), rows(&reference));
+        let hashes = complete
+            .blocks
+            .iter()
+            .map(|block| block.hash.clone())
+            .collect::<Vec<_>>();
+        // Sizes are only known for blocks still resident when projected; blocks streamed from
+        // the chain store have none, but no recorded size may disagree with the reference.
+        let sizes = store.load_block_storage_sizes(&hashes).unwrap();
+        let reference_sizes = reference.load_block_storage_sizes(&hashes).unwrap();
+        assert!(
+            complete.blocks[complete.blocks.len() - 2..]
+                .iter()
+                .all(|block| sizes.contains_key(&block.hash))
+        );
+        assert!(
+            sizes
+                .iter()
+                .all(|(hash, size)| reference_sizes.get(hash) == Some(size))
+        );
+        assert_eq!(
+            store.load_leaderboards(10).unwrap(),
+            reference.load_leaderboards(10).unwrap()
+        );
+        let index = store.load_ui_chain_index(tip_hash).unwrap().unwrap();
+        let reference_index = reference.load_ui_chain_index(tip_hash).unwrap().unwrap();
+        // A rewind keeps outputs indexed for abandoned blocks; nothing on the live chain refers
+        // to them, so only completeness matters here.
+        assert!(
+            reference_index
+                .outputs
+                .iter()
+                .all(|(outpoint, output)| index.outputs.get(outpoint) == Some(output))
+        );
+        for block in &complete.blocks[complete.blocks.len() - 2..] {
+            assert_eq!(
+                index.burn_leader_ranks_by_hash.get(&block.hash),
+                reference_index.burn_leader_ranks_by_hash.get(&block.hash)
+            );
+        }
+    }
+
+    #[test]
+    fn pruned_projection_from_genesis_streams_every_pruned_block() {
+        let dir = tempdir().unwrap();
+        let store = SqliteUiDataStore::open(dir.path().join("ui_data.sqlite3")).unwrap();
+        let chain_store =
+            crate::adapters::chain_store::SqliteChainStore::open(dir.path().join("chain.sqlite3"))
+                .unwrap();
+        let (mut ledger, wallet) = test_ledger("pruned-projection-from-genesis");
+        store.project_snapshot(&ledger.snapshot(), false).unwrap();
+        for timestamp_ms in [1_000, 2_000, 3_000, 4_000, 5_000] {
+            append_test_block(&mut ledger, &wallet, timestamp_ms);
+        }
+        let complete = ledger.snapshot();
+        chain_store.save_verified(&complete).unwrap();
+        ledger.retain_recent_chain_blocks(2);
+
+        store.project_ledger(&ledger, false, &chain_store).unwrap();
+
+        assert_matches_full_projection(&store, &complete, &wallet, dir.path());
+    }
+
+    #[test]
+    fn pruned_projection_rewinds_a_reorged_tip_without_a_full_rebuild() {
+        let dir = tempdir().unwrap();
+        let store = SqliteUiDataStore::open(dir.path().join("ui_data.sqlite3")).unwrap();
+        let chain_store =
+            crate::adapters::chain_store::SqliteChainStore::open(dir.path().join("chain.sqlite3"))
+                .unwrap();
+        let (mut ledger, wallet) = test_ledger("pruned-projection-reorg");
+        for timestamp_ms in [1_000, 2_000, 3_000, 4_000] {
+            append_test_block(&mut ledger, &wallet, timestamp_ms);
+        }
+        let fork_base = ledger.clone();
+        append_test_block(&mut ledger, &wallet, 5_000);
+        append_test_block(&mut ledger, &wallet, 6_000);
+        chain_store.save_verified(&ledger.snapshot()).unwrap();
+        store.project_snapshot(&ledger.snapshot(), false).unwrap();
+
+        let mut fork = fork_base;
+        for timestamp_ms in [5_500, 6_500, 7_500] {
+            append_test_block(&mut fork, &wallet, timestamp_ms);
+        }
+        let complete = fork.snapshot();
+        fork.retain_recent_chain_blocks(4);
+        // Remove the old branch from the chain store, as a projection after a reorg may run
+        // before persistence rewrote it; only blocks below the resident window are read.
+        chain_store.save_verified(&complete).unwrap();
+
+        store.project_ledger(&fork, false, &chain_store).unwrap();
+
+        assert_matches_full_projection(&store, &complete, &wallet, dir.path());
     }
 
     #[test]

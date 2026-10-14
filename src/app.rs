@@ -49,6 +49,10 @@ pub const DEFAULT_VDF_ROUNDS: u32 = 67_000_000;
 pub const PROTOCOL_VERSION: u32 = 2;
 pub const MAX_PROTOCOL_CAPABILITIES: usize = 16;
 pub const MAX_PROTOCOL_CAPABILITY_BYTES: usize = 64;
+/// Number of recent blocks retained in the live ledger. Older blocks remain available from the
+/// segmented chain store. This covers the locator window and is comfortably larger than the
+/// consensus finality window without making RAM usage grow with chain height.
+pub const RESIDENT_CHAIN_BLOCKS: usize = 64;
 const MAX_GOSSIP_OUTBOX_BYTES: usize = 16 * 1024 * 1024;
 const MAX_GOSSIP_OUTBOX_ENTRIES: usize = 1_024;
 pub const CAPABILITY_ADDRESS_V1_READ: &str = "address-v1-read";
@@ -383,6 +387,11 @@ pub struct NodeCore {
     outbox_bytes: usize,
     network_migration_from: Option<String>,
     vdf_speed_sample: Option<VdfSpeedSample>,
+    /// Whether committed history may be pruned from the live ledger.
+    bounded_history: bool,
+    /// Height and hash of the newest block the chain store has committed. Pruning never drops
+    /// a block above it, so the persistence loop can always append the resident tail.
+    persisted_tip: Option<(u64, String)>,
 }
 
 impl NodeCore {
@@ -425,6 +434,8 @@ fn gossip_envelope_size(envelope: &GossipEnvelope) -> Result<usize> {
 pub fn now_ms() -> u64 {
     SystemTime::now()
         .duration_since(UNIX_EPOCH)
-        .expect("system time is before unix epoch")
-        .as_millis() as u64
+        .unwrap_or_default()
+        .as_millis()
+        .try_into()
+        .unwrap_or(u64::MAX)
 }

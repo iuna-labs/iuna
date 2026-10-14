@@ -19,6 +19,7 @@ use tokio::{net::TcpListener, sync::Semaphore};
 
 use crate::{
     adapters::{
+        chain_store::SqliteChainStore,
         http::{
             types::{WalletTransactionContext, WalletTransactionFilters, WalletTransactionRow},
             ui::{
@@ -56,6 +57,7 @@ struct WalletEndpointState {
     gossip: GossipNetwork,
     transaction_slots: Arc<Semaphore>,
     ui_data_store: SqliteUiDataStore,
+    chain_store: SqliteChainStore,
     recovery_cache: Arc<StdMutex<WalletRecoveryCache>>,
 }
 
@@ -279,18 +281,24 @@ pub async fn serve(
     node: SharedNode,
     gossip: GossipNetwork,
     ui_data_store: SqliteUiDataStore,
+    chain_store: SqliteChainStore,
     addr: SocketAddr,
 ) -> Result<()> {
     let listener = TcpListener::bind(addr)
         .await
         .with_context(|| format!("binding public wallet endpoint on {addr}"))?;
     println!("wallet endpoint: http://{}", listener.local_addr()?);
-    axum::serve(listener, router(node, gossip, ui_data_store))
+    axum::serve(listener, router(node, gossip, ui_data_store, chain_store))
         .await
         .context("serving public wallet endpoint")
 }
 
-fn router(node: SharedNode, gossip: GossipNetwork, ui_data_store: SqliteUiDataStore) -> Router {
+fn router(
+    node: SharedNode,
+    gossip: GossipNetwork,
+    ui_data_store: SqliteUiDataStore,
+    chain_store: SqliteChainStore,
+) -> Router {
     Router::new()
         .route("/v1/status", get(status))
         .route("/v1/wallets/snapshot", post(wallet_snapshot))
@@ -311,6 +319,7 @@ fn router(node: SharedNode, gossip: GossipNetwork, ui_data_store: SqliteUiDataSt
             gossip,
             transaction_slots: Arc::new(Semaphore::new(MAX_CONCURRENT_TRANSACTION_SUBMISSIONS)),
             ui_data_store,
+            chain_store,
             recovery_cache: Arc::new(StdMutex::new(WalletRecoveryCache::default())),
         })
 }
@@ -673,17 +682,21 @@ async fn wallet_transactions(
             .map_err(internal_error)?
             .map_err(internal_error)?
     };
-    let reward_blocks = {
-        let node = state.node.lock().await;
+    let reward_blocks = crate::adapters::chain_store::load_blocks_at_heights(
+        &state.node,
+        &state.chain_store,
         legacy_rows
             .iter()
             .filter(|row| row.kind == "reward")
-            .filter_map(|row| {
-                let block = node.chain().get(row.block_height as usize)?.clone();
-                Some((row.block_height, block))
-            })
-            .collect::<BTreeMap<_, _>>()
-    };
+            .map(|row| row.block_height)
+            .collect(),
+    )
+    .await
+    .unwrap_or_else(|error| {
+        // Wallet history stays usable without reward details, matching the management UI.
+        eprintln!("reward block lookup failed: {error:#}");
+        BTreeMap::new()
+    });
     let mut confirmed = legacy_rows
         .into_iter()
         .filter_map(|row| {
@@ -1158,7 +1171,13 @@ mod tests {
         ui_data_store
             .project_snapshot(&ledger.snapshot(), false)
             .unwrap();
-        (router(node, gossip, ui_data_store), wallet, ledger, dir)
+        let chain_store = SqliteChainStore::open(dir.path().join("chain.sqlite3")).unwrap();
+        (
+            router(node, gossip, ui_data_store, chain_store),
+            wallet,
+            ledger,
+            dir,
+        )
     }
 
     #[tokio::test]

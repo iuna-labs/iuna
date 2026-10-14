@@ -22,11 +22,11 @@ use iuna::{
     domain::{
         Amount, ChainSnapshot, GenesisBurn, LaunchProfile, Ledger, MAX_VDF_ROUNDS, MICRO_IUNA,
         VDF_TARGET_BLOCK_MS, VdfProgress, VdfProgressPhase,
-        run_vdf_cancellable_with_progress_and_memory_limit, run_vdf_with_memory_limit,
+        run_vdf_cancellable_with_progress_and_memory_limit,
     },
 };
 use secrecy::{ExposeSecret, SecretString};
-use tokio::sync::{Mutex, oneshot};
+use tokio::sync::{Mutex, Semaphore, oneshot};
 
 mod cli;
 #[cfg(feature = "cli-updater")]
@@ -48,6 +48,7 @@ const VDF_MEASUREMENT_INITIAL_ROUNDS: u64 = 1_000;
 const VDF_MEASUREMENT_MAX_ROUNDS: u64 = 10_000_000;
 const VDF_MEASUREMENT_MIN_ELAPSED: Duration = Duration::from_millis(150);
 const VDF_SPEED_BENCHMARK_MIN_ELAPSED: Duration = Duration::from_secs(2);
+const VDF_FAILURE_RETRY_DELAY: Duration = Duration::from_secs(5);
 const VDF_PROGRESS_LOG_INTERVAL: Duration = Duration::from_secs(10);
 const SYNC_CHAIN_CHECKPOINT_INTERVAL: Duration = Duration::from_secs(30);
 const AUTOMATIC_BURN_ENABLED_ENV: &str = "IUNA_AUTOMATIC_BURN_ENABLED";
@@ -173,6 +174,13 @@ async fn main() -> Result<()> {
     if ui_config_dirty || auth_config_dirty {
         config_store::save(&config_path, &ui_config)?;
     }
+    let bounded_startup_ready = if ui_config.keep_track_of_metrics {
+        false
+    } else if let Some((_, tip_hash)) = chain_store.tip()? {
+        ui_data_store.is_projected_to(&tip_hash)?
+    } else {
+        false
+    };
     let initialized_ledger = initialize_ledger(
         &opts,
         &wallet_address,
@@ -180,6 +188,7 @@ async fn main() -> Result<()> {
         advertised_p2p_addr,
         startup_local_testnet,
         true,
+        bounded_startup_ready,
     )
     .await?;
     let migration_from = initialized_ledger.migration_from.clone();
@@ -242,6 +251,12 @@ async fn main() -> Result<()> {
         None
     };
     let ui_data_ready = Arc::new(AtomicBool::new(startup_ui_projection.is_none()));
+    if has_chain && let Some((height, tip_hash)) = chain_store.tip()? {
+        let mut node = node.lock().await;
+        if node.chain_tip_hash() == tip_hash {
+            node.mark_chain_persisted(height, &tip_hash);
+        }
+    }
 
     println!("iuna wallet: {}", node.lock().await.wallet_address());
     if node.lock().await.wallet_is_locked() {
@@ -329,6 +344,9 @@ async fn main() -> Result<()> {
         } else {
             None
         };
+    if !ui_config.lock().await.keep_track_of_metrics {
+        node.lock().await.bound_resident_chain_history();
+    }
 
     let persistence_node = Arc::clone(&node);
     let persistence_store = chain_store.clone();
@@ -362,11 +380,14 @@ async fn main() -> Result<()> {
     let finalizer_node = Arc::clone(&node);
     let finalizer_gossip = gossip.clone();
     let finalizer_peers = Arc::clone(&peers);
+    let vdf_slot = Arc::new(VdfSlot::new());
+    let finalizer_vdf_slot = Arc::clone(&vdf_slot);
     tokio::spawn(async move {
         run_automatic_finalizer(
             finalizer_node,
             finalizer_peers,
             finalizer_gossip,
+            finalizer_vdf_slot,
             debug_logging,
         )
         .await;
@@ -396,11 +417,18 @@ async fn main() -> Result<()> {
     }
 
     let wallet_endpoint_ui_data_store = ui_data_store.clone();
+    let wallet_endpoint_chain_store = chain_store.clone();
     let management = async move { management.await.context("management UI task failed")? };
     if let Some(addr) = configured_wallet_endpoint_addr {
         tokio::try_join!(
             management,
-            wallet_endpoint::serve(node, gossip, wallet_endpoint_ui_data_store, addr)
+            wallet_endpoint::serve(
+                node,
+                gossip,
+                wallet_endpoint_ui_data_store,
+                wallet_endpoint_chain_store,
+                addr
+            )
         )?;
         Ok(())
     } else {
@@ -635,7 +663,58 @@ async fn initialize_ledger(
     advertised_p2p_addr: SocketAddr,
     local_testnet: bool,
     enforce_pinned_genesis: bool,
+    prefer_bounded: bool,
 ) -> Result<InitializedLedger> {
+    if prefer_bounded
+        && let Some(loaded) = chain_store.load_bounded_ledger(iuna::app::RESIDENT_CHAIN_BLOCKS)?
+    {
+        if opts.chain_mode == ChainMode::Genesis {
+            bail!(
+                "--genesis refuses to run because chain database already contains a blockchain at {}; start without --genesis to resume it",
+                chain_store.path().display()
+            );
+        }
+        let expected_profile = if local_testnet {
+            LaunchProfile::local_testnet()
+        } else {
+            LaunchProfile::default()
+        };
+        if loaded.ledger.launch_profile().profile_id != expected_profile.profile_id {
+            return Ok(InitializedLedger {
+                ledger: setup_ledger(local_testnet)?,
+                migration_from: Some(loaded.ledger.launch_profile().profile_id.clone()),
+                requires_persistence: false,
+                #[cfg(test)]
+                bounded_history: false,
+            });
+        }
+        if enforce_pinned_genesis {
+            validate_network_genesis(
+                &loaded.ledger.launch_profile().profile_id,
+                loaded.ledger.genesis_hash(),
+            )?;
+        }
+        let height = loaded.ledger.height();
+        match loaded.revalidation_from_height {
+            Some(from_height) => println!(
+                "validating local chain from height {from_height} for the current consensus ruleset..."
+            ),
+            None => println!(
+                "local chain is trusted under the current consensus ruleset; skipping historical validation"
+            ),
+        }
+        println!(
+            "resumed chain from {} at height {height} with bounded resident history",
+            chain_store.path().display()
+        );
+        return Ok(InitializedLedger {
+            ledger: loaded.ledger,
+            migration_from: None,
+            requires_persistence: loaded.revalidation_from_height.is_some(),
+            #[cfg(test)]
+            bounded_history: true,
+        });
+    }
     if let Some(loaded) = chain_store.load_with_verification_status()? {
         let snapshot = loaded.snapshot;
         if opts.chain_mode == ChainMode::Genesis {
@@ -651,9 +730,11 @@ async fn initialize_ledger(
         };
         if snapshot.launch_profile.profile_id != expected_profile.profile_id {
             return Ok(InitializedLedger {
-                ledger: setup_ledger(local_testnet),
+                ledger: setup_ledger(local_testnet)?,
                 migration_from: Some(snapshot.launch_profile.profile_id),
                 requires_persistence: false,
+                #[cfg(test)]
+                bounded_history: false,
             });
         }
         if enforce_pinned_genesis {
@@ -691,10 +772,12 @@ async fn initialize_ledger(
             ledger,
             migration_from: None,
             requires_persistence,
+            #[cfg(test)]
+            bounded_history: false,
         })
     } else {
         let ledger = match opts.chain_mode {
-            ChainMode::Setup => Ok(setup_ledger(local_testnet)),
+            ChainMode::Setup => setup_ledger(local_testnet),
             ChainMode::Genesis => start_genesis_ledger(wallet_address, local_testnet),
             ChainMode::Join => {
                 let expected_profile = if local_testnet {
@@ -714,6 +797,8 @@ async fn initialize_ledger(
             ledger,
             migration_from: None,
             requires_persistence: opts.has_chain(),
+            #[cfg(test)]
+            bounded_history: false,
         })
     }
 }
@@ -723,6 +808,8 @@ struct InitializedLedger {
     ledger: Ledger,
     migration_from: Option<String>,
     requires_persistence: bool,
+    #[cfg(test)]
+    bounded_history: bool,
 }
 
 fn restore_pending_transactions_v2(
@@ -765,7 +852,7 @@ fn snapshot_height(snapshot: &ChainSnapshot) -> u64 {
         .unwrap_or(0)
 }
 
-fn setup_ledger(local_testnet: bool) -> Ledger {
+fn setup_ledger(local_testnet: bool) -> Result<Ledger> {
     if local_testnet {
         Ledger::new_with_genesis_burns_and_profile(
             BTreeMap::new(),
@@ -773,9 +860,9 @@ fn setup_ledger(local_testnet: bool) -> Ledger {
             1,
             LaunchProfile::local_testnet(),
         )
-        .expect("empty local-testnet setup ledger is valid")
+        .context("failed to construct local-testnet setup ledger")
     } else {
-        Ledger::new(BTreeMap::new(), 1)
+        Ok(Ledger::new(BTreeMap::new(), 1))
     }
 }
 
@@ -785,7 +872,7 @@ fn start_genesis_ledger(wallet_address: &str, local_testnet: bool) -> Result<Led
             "mainnet-candidate genesis is pinned; use --join instead of creating a new candidate chain"
         );
     }
-    let vdf_rounds = measure_initial_vdf_rounds();
+    let vdf_rounds = measure_initial_vdf_rounds()?;
     let mut genesis = BTreeMap::new();
     genesis.insert(wallet_address.to_string(), GENESIS_BOOTSTRAP_BALANCE);
     let launch_profile = if local_testnet {
@@ -806,14 +893,14 @@ fn start_genesis_ledger(wallet_address: &str, local_testnet: bool) -> Result<Led
     Ok(ledger)
 }
 
-fn measure_initial_vdf_rounds() -> u64 {
+fn measure_initial_vdf_rounds() -> Result<u64> {
     let seed = "iuna-vdf-calibration";
     let (measured_rounds, elapsed) = measure_vdf_rounds(
         seed,
         VDF_MEASUREMENT_INITIAL_ROUNDS,
         VDF_MEASUREMENT_MIN_ELAPSED,
         VDF_MEASUREMENT_MAX_ROUNDS,
-    );
+    )?;
     let rounds = extrapolate_vdf_rounds(
         measured_rounds,
         elapsed,
@@ -823,7 +910,7 @@ fn measure_initial_vdf_rounds() -> u64 {
         "measured {measured_rounds} VDF rounds in {:.3}ms; initial VDF rounds: {rounds}",
         elapsed.as_secs_f64() * 1000.0
     );
-    rounds
+    Ok(rounds)
 }
 
 fn measure_vdf_rounds(
@@ -831,37 +918,68 @@ fn measure_vdf_rounds(
     initial_rounds: u64,
     min_elapsed: Duration,
     max_rounds_per_attempt: u64,
-) -> (u64, Duration) {
+) -> Result<(u64, Duration)> {
     measure_vdf_rounds_with_memory_limit(
         seed,
         initial_rounds,
         min_elapsed,
         max_rounds_per_attempt,
         config_store::DEFAULT_VDF_MEMORY_MIB,
-    )
+        &AtomicBool::new(false),
+    )?
+    .context("uncancelled VDF measurement stopped without a result")
 }
 
+/// Returns `None` when `cancelled` is raised before the measurement completes.
 fn measure_vdf_rounds_with_memory_limit(
     seed: &str,
     initial_rounds: u64,
     min_elapsed: Duration,
     max_rounds_per_attempt: u64,
     memory_mib: u64,
-) -> (u64, Duration) {
+    cancelled: &AtomicBool,
+) -> Result<Option<(u64, Duration)>> {
     let mut rounds = initial_rounds.max(1).min(max_rounds_per_attempt.max(1));
     let mut measured_rounds = 0_u64;
     let mut measured_elapsed = Duration::ZERO;
 
     loop {
         let started = Instant::now();
-        let _ = run_vdf_with_memory_limit(seed, rounds, memory_mib);
+        if run_vdf_cancellable_with_progress_and_memory_limit(
+            seed,
+            rounds,
+            Duration::MAX,
+            cancelled,
+            memory_mib,
+            |_| {},
+        )?
+        .is_none()
+        {
+            return Ok(None);
+        }
         measured_elapsed += started.elapsed();
         measured_rounds = measured_rounds.saturating_add(rounds);
 
         if measured_elapsed >= min_elapsed || rounds >= max_rounds_per_attempt {
-            return (measured_rounds, measured_elapsed);
+            return Ok(Some((measured_rounds, measured_elapsed)));
         }
         rounds = rounds.saturating_mul(2).min(max_rounds_per_attempt);
+    }
+}
+
+/// One VDF runs at a time to bound memory. The finalizer has priority: a pending finalization
+/// stops the UI speed benchmark instead of waiting behind it.
+struct VdfSlot {
+    permit: Arc<Semaphore>,
+    benchmark_cancelled: AtomicBool,
+}
+
+impl VdfSlot {
+    fn new() -> Self {
+        Self {
+            permit: Arc::new(Semaphore::new(1)),
+            benchmark_cancelled: AtomicBool::new(false),
+        }
     }
 }
 
@@ -911,8 +1029,15 @@ async fn join_chain_ledger(
 }
 
 /// Gives the UI a local VDF speed estimate before this node has finalized a block.
-async fn record_vdf_speed_benchmark(node: SharedNode, debug: bool) {
+async fn record_vdf_speed_benchmark(node: SharedNode, vdf_slot: Arc<VdfSlot>, debug: bool) {
+    let Ok(_permit) = Arc::clone(&vdf_slot.permit).acquire_owned().await else {
+        return;
+    };
+    if vdf_slot.benchmark_cancelled.load(Ordering::Relaxed) {
+        return;
+    }
     let memory_mib = node.lock().await.vdf_memory_mib();
+    let worker_slot = Arc::clone(&vdf_slot);
     let measurement = tokio::task::spawn_blocking(move || {
         measure_vdf_rounds_with_memory_limit(
             "iuna-vdf-speed-benchmark",
@@ -920,11 +1045,19 @@ async fn record_vdf_speed_benchmark(node: SharedNode, debug: bool) {
             VDF_SPEED_BENCHMARK_MIN_ELAPSED,
             VDF_MEASUREMENT_MAX_ROUNDS,
             memory_mib,
+            &worker_slot.benchmark_cancelled,
         )
     })
-    .await;
+    .await
+    .map_err(anyhow::Error::from)
+    .and_then(|measurement| measurement);
     match measurement {
-        Ok((rounds, elapsed)) => {
+        Ok(None) => {
+            if debug {
+                println!("VDF speed benchmark yielded to a pending finalization");
+            }
+        }
+        Ok(Some((rounds, elapsed))) => {
             if debug {
                 println!(
                     "VDF speed benchmark: {rounds} rounds in {:.3}s",
@@ -947,10 +1080,15 @@ async fn run_automatic_finalizer(
     node: SharedNode,
     peers: SharedPeerBook,
     gossip: p2p::GossipNetwork,
+    vdf_slot: Arc<VdfSlot>,
     debug: bool,
 ) {
     // The benchmark only feeds the UI, so it must not delay a pending finalization VDF.
-    tokio::spawn(record_vdf_speed_benchmark(node.clone(), debug));
+    tokio::spawn(record_vdf_speed_benchmark(
+        node.clone(),
+        Arc::clone(&vdf_slot),
+        debug,
+    ));
     let mut last_logged_skip: Option<(u64, String)> = None;
     loop {
         if !node.lock().await.has_real_chain() {
@@ -1031,6 +1169,14 @@ async fn run_automatic_finalizer(
         let cancellation = Arc::new(AtomicBool::new(false));
         let worker_cancellation = Arc::clone(&cancellation);
         let vdf_started = Instant::now();
+        vdf_slot.benchmark_cancelled.store(true, Ordering::Relaxed);
+        let Ok(_vdf_permit) = Arc::clone(&vdf_slot.permit).acquire_owned().await else {
+            return;
+        };
+        if node.lock().await.ledger().tip_hash() != candidate_parent {
+            // The tip moved while waiting for the slot; prepare a fresh candidate.
+            continue;
+        }
         let mut vdf_worker = tokio::task::spawn_blocking(move || {
             run_vdf_cancellable_with_progress_and_memory_limit(
                 &seed,
@@ -1043,6 +1189,7 @@ async fn run_automatic_finalizer(
                 },
             )
         });
+        let mut vdf_failure = None::<String>;
         let mut cancelled_for_new_tip = false;
         let mut cancelled_for_disabled = false;
         let mut cancelled_for_no_peer = false;
@@ -1050,11 +1197,13 @@ async fn run_automatic_finalizer(
             tokio::select! {
                 result = &mut vdf_worker => {
                     break match result {
-                        Ok(output) => output,
+                        Ok(Ok(output)) => output,
+                        Ok(Err(error)) => {
+                            vdf_failure = Some(format!("{error:#}"));
+                            None
+                        }
                         Err(error) => {
-                            if debug {
-                                eprintln!("VDF worker failed: {error:#}");
-                            }
+                            vdf_failure = Some(format!("{error:#}"));
                             None
                         }
                     };
@@ -1109,6 +1258,17 @@ async fn run_automatic_finalizer(
             );
         }
         let Some(vdf_output) = vdf_output else {
+            if let Some(error) = vdf_failure {
+                // A prover failure is not a cancellation: report it and back off instead of
+                // immediately retrying the same work.
+                let message = format!("VDF failed for candidate block {candidate_height}: {error}");
+                eprintln!("auto-finalization {message}");
+                node.lock()
+                    .await
+                    .record_automatic_finalization_status(message);
+                tokio::time::sleep(VDF_FAILURE_RETRY_DELAY).await;
+                continue;
+            }
             let message = if cancelled_for_new_tip {
                 format!("cancelled stale VDF for candidate block {candidate_height}")
             } else if cancelled_for_disabled {
@@ -1506,9 +1666,9 @@ async fn run_chain_persistence_loop(
     let mut last_saved_pending_v2_ids = None::<Vec<String>>;
     loop {
         tokio::time::sleep(interval).await;
+        let pending_v2 = node.lock().await.pending_transaction_v2_envelopes();
         {
-            let node = node.lock().await;
-            match node.pending_transaction_v2_envelopes() {
+            match pending_v2 {
                 Ok(pending_v2) => {
                     let pending_v2_ids = pending_v2
                         .iter()
@@ -1557,14 +1717,27 @@ async fn run_chain_persistence_loop(
             continue;
         }
 
-        let snapshot = Arc::new({
+        if let Err(error) =
+            align_resident_history_with_metrics_mode(&node, &store, keep_metrics).await
+        {
+            eprintln!("restoring complete chain history for metrics failed: {error:#}");
+        }
+
+        // While syncing only the chain is checkpointed. A ledger clone for the UI projection is
+        // taken only after the save: holding one across it would make every block applied in
+        // the meantime copy the shared state.
+        let snapshot = {
             let node = node.lock().await;
             if !node.has_real_chain() {
                 continue;
             }
-            node.chain_snapshot()
-        });
-        let Some(tip_hash) = snapshot.blocks.last().map(|block| block.hash.clone()) else {
+            Arc::new(node.chain_snapshot())
+        };
+        let Some((tip_height, tip_hash)) = snapshot
+            .blocks
+            .last()
+            .map(|block| (block.height, block.hash.clone()))
+        else {
             continue;
         };
         let tip_changed = last_saved_tip.as_deref() != Some(tip_hash.as_str());
@@ -1574,17 +1747,28 @@ async fn run_chain_persistence_loop(
             continue;
         }
 
-        let result = if syncing && tip_changed {
-            persist_chain_snapshot(&store, snapshot).await
-        } else if tip_changed {
-            persist_chain_and_project_ui_data(&store, &ui_data_store, snapshot, keep_metrics).await
-        } else {
-            project_ui_data_store(&ui_data_store, snapshot, keep_metrics).await
-        };
+        let mut result = Ok(());
+        if tip_changed {
+            result = persist_chain_snapshot(&store, snapshot).await;
+            if result.is_ok() {
+                node.lock()
+                    .await
+                    .mark_chain_persisted(tip_height, &tip_hash);
+            }
+        }
+        let mut projected_tip = tip_hash.clone();
+        if result.is_ok() && !syncing {
+            // The tip may have moved on since the snapshot; projecting the newer ledger is fine
+            // because blocks above the persisted tip are still resident.
+            let projection_ledger = node.lock().await.ledger().clone();
+            projected_tip = projection_ledger.tip_hash().to_string();
+            result = project_ui_data_store(&store, &ui_data_store, projection_ledger, keep_metrics)
+                .await;
+        }
         match result {
             Ok(()) => {
                 if !syncing {
-                    last_projected_tip = Some(tip_hash.clone());
+                    last_projected_tip = Some(projected_tip);
                     last_projected_keep_metrics = keep_metrics;
                 }
                 last_saved_tip = Some(tip_hash);
@@ -1608,14 +1792,43 @@ fn should_defer_sync_checkpoint(
     syncing && since_last_checkpoint < checkpoint_interval
 }
 
-async fn persist_chain_and_project_ui_data(
+/// Metrics tracking needs the complete chain resident; without it the node keeps only a
+/// recent window. Switching to metrics reattaches the pruned history from the chain store once.
+async fn align_resident_history_with_metrics_mode(
+    node: &SharedNode,
     store: &SqliteChainStore,
-    ui_data_store: &SqliteUiDataStore,
-    snapshot: Arc<ChainSnapshot>,
     keep_metrics: bool,
 ) -> Result<()> {
-    persist_chain_snapshot(store, Arc::clone(&snapshot)).await?;
-    project_ui_data_store(ui_data_store, snapshot, keep_metrics).await
+    let history_pruned = {
+        let mut node = node.lock().await;
+        if !node.has_real_chain() {
+            return Ok(());
+        }
+        match (keep_metrics, node.bounds_resident_chain_history()) {
+            (false, false) => {
+                node.bound_resident_chain_history();
+                return Ok(());
+            }
+            (true, true) => node.keep_complete_chain_history(),
+            _ => {}
+        }
+        node.ledger().history_is_pruned()
+    };
+    if !keep_metrics || !history_pruned {
+        return Ok(());
+    }
+    let store = store.clone();
+    let complete = tokio::task::spawn_blocking(move || {
+        let snapshot = store
+            .load()?
+            .context("cannot restore chain history because the persisted chain is unavailable")?;
+        Ledger::from_persisted_snapshot_revalidating_from(snapshot, None)
+    })
+    .await
+    .context("chain history restore worker failed")??;
+    // A false result means the tip moved past the loaded copy; the next tick retries.
+    node.lock().await.restore_complete_chain_history(complete)?;
+    Ok(())
 }
 
 async fn persist_chain_snapshot(
@@ -1665,7 +1878,12 @@ async fn warm_ui_data_store(
     .context("UI data readiness worker failed")??;
 
     if !ui_ready {
-        project_ui_data_store(store, Arc::new(snapshot), keep_metrics).await?;
+        let projection_store = store.clone();
+        tokio::task::spawn_blocking(move || {
+            projection_store.project_snapshot(&snapshot, keep_metrics)
+        })
+        .await
+        .context("UI data warm-up worker failed")??;
     } else if keep_metrics && !metrics_ready {
         let metrics_store = store.clone();
         tokio::task::spawn_blocking(move || metrics_store.replace_metrics_for_snapshot(&snapshot))
@@ -1685,15 +1903,31 @@ async fn warm_ui_data_store(
 }
 
 async fn project_ui_data_store(
+    chain_store: &SqliteChainStore,
     store: &SqliteUiDataStore,
-    snapshot: impl Into<Arc<ChainSnapshot>>,
+    ledger: Ledger,
     keep_metrics: bool,
 ) -> Result<()> {
-    let snapshot = snapshot.into();
     let store = store.clone();
-    tokio::task::spawn_blocking(move || store.project_snapshot(&snapshot, keep_metrics))
-        .await
-        .context("UI data projection worker failed")??;
+    let chain_store = chain_store.clone();
+    tokio::task::spawn_blocking(move || {
+        match store.project_ledger(&ledger, keep_metrics, &chain_store) {
+            Ok(()) => Ok(()),
+            Err(incremental_error) if ledger.history_is_pruned() => {
+                let snapshot = chain_store.load()?.context(
+                    "cannot rebuild UI projection because the persisted chain is unavailable",
+                )?;
+                store.project_snapshot(&snapshot, keep_metrics).with_context(|| {
+                format!(
+                    "bounded UI projection failed ({incremental_error:#}); full rebuild also failed"
+                )
+            })
+            }
+            Err(error) => Err(error),
+        }
+    })
+    .await
+    .context("UI data projection worker failed")??;
     Ok(())
 }
 

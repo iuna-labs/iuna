@@ -1,5 +1,5 @@
 use std::{
-    collections::{BTreeMap, BTreeSet},
+    collections::{BTreeMap, BTreeSet, VecDeque},
     ops::{Deref, DerefMut},
     sync::Arc,
     time::{SystemTime, UNIX_EPOCH},
@@ -111,9 +111,10 @@ impl DerefMut for SharedChain {
     }
 }
 
+use super::ledger_history_index::ResidentTicketDraw;
 use super::{
     Amount, Block, BurnTicket, FinalityCheckpoint, LaunchProfile, OutPoint, Transaction,
-    TransactionV2, TxOutput, UtxoLineageRoot,
+    TransactionV2, TxOutput, UtxoLineageRoot, VersionedAddress,
 };
 use crate::compact::CompactBlockContext;
 
@@ -146,6 +147,21 @@ pub struct Ledger {
     pub(super) launch_profile: LaunchProfile,
     pub(super) compact_block_context: CompactBlockContext,
     pub(super) objective_finality_checkpoint: Option<FinalityCheckpoint>,
+    /// Hybrid addresses that appeared as confirmed outputs, kept so wallet discovery does not
+    /// depend on blocks that may have been pruned from `chain`.
+    pub(super) confirmed_hybrid_used_addresses: SharedSet<VersionedAddress>,
+    /// Hybrid addresses that were spent by confirmed transactions.
+    pub(super) confirmed_hybrid_spent_addresses: SharedSet<VersionedAddress>,
+    /// Hybrid addresses authored by each legacy Ed25519 wallet key in confirmed transactions.
+    pub(super) confirmed_hybrid_authored_addresses: SharedMap<[u8; 32], Vec<VersionedAddress>>,
+    /// The newest VDF retarget observations (oldest first), maintained as blocks are applied so
+    /// the retarget does not depend on how much history is resident.
+    pub(super) vdf_retarget_observations: VecDeque<u64>,
+    /// Height a snapshot replay is heading for; draws for blocks far below it are never read,
+    /// so replays skip capturing them.
+    pub(super) ticket_draw_horizon: u64,
+    /// Ticket draw inputs for recent blocks, keyed by block height.
+    pub(super) resident_ticket_draws: SharedMap<u64, Arc<ResidentTicketDraw>>,
 }
 
 pub(super) fn unix_now_ms() -> u64 {

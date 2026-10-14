@@ -25,6 +25,20 @@ pub(super) fn ranked_tickets_for_height(
     target_height: u64,
     tickets: &[BurnTicket],
 ) -> Vec<BurnTicket> {
+    ranked_tickets_for_parent_randomness(
+        &draw_parent_randomness(parent, target_height),
+        target_height,
+        tickets,
+    )
+}
+
+/// Rank tickets using only the parent's draw randomness, so callers that no longer hold the
+/// parent block can still reproduce the ranking.
+pub(super) fn ranked_tickets_for_parent_randomness(
+    parent_randomness: &str,
+    target_height: u64,
+    tickets: &[BurnTicket],
+) -> Vec<BurnTicket> {
     let mut remaining = tickets
         .iter()
         .filter(|ticket| ticket_is_eligible_for_height(ticket, target_height))
@@ -34,7 +48,7 @@ pub(super) fn ranked_tickets_for_height(
 
     for rank in 0.. {
         let Some(selected_index) =
-            select_weighted_ticket_index(parent, target_height, rank, &remaining)
+            select_weighted_ticket_index(parent_randomness, target_height, rank, &remaining)
         else {
             break;
         };
@@ -45,7 +59,7 @@ pub(super) fn ranked_tickets_for_height(
 }
 
 fn select_weighted_ticket_index(
-    parent: &Block,
+    parent_randomness: &str,
     target_height: u64,
     rank: u32,
     tickets: &[BurnTicket],
@@ -57,7 +71,7 @@ fn select_weighted_ticket_index(
         return None;
     }
 
-    let draw = weighted_ticket_draw(parent, target_height, rank, total_weight);
+    let draw = weighted_ticket_draw(parent_randomness, target_height, rank, total_weight);
     let mut cumulative = 0_u128;
     for (index, ticket) in tickets.iter().enumerate() {
         cumulative = cumulative.checked_add(u128::from(ticket.amount))?;
@@ -68,8 +82,13 @@ fn select_weighted_ticket_index(
     None
 }
 
-fn weighted_ticket_draw(parent: &Block, target_height: u64, rank: u32, total_weight: u128) -> u128 {
-    let seed = ticket_draw_seed(parent, target_height, rank);
+fn weighted_ticket_draw(
+    parent_randomness: &str,
+    target_height: u64,
+    rank: u32,
+    total_weight: u128,
+) -> u128 {
+    let seed = ticket_draw_seed_from_randomness(parent_randomness, target_height, rank);
     let digest = Sha256::digest(seed.as_bytes());
     let mut bytes = [0_u8; 16];
     bytes.copy_from_slice(&digest[..16]);
@@ -84,8 +103,20 @@ pub(super) fn draw_parent_randomness(parent: &Block, target_height: u64) -> Stri
     }
 }
 
+#[cfg(test)]
 fn ticket_draw_seed(parent: &Block, target_height: u64, rank: u32) -> String {
-    let parent_randomness = draw_parent_randomness(parent, target_height);
+    ticket_draw_seed_from_randomness(
+        &draw_parent_randomness(parent, target_height),
+        target_height,
+        rank,
+    )
+}
+
+fn ticket_draw_seed_from_randomness(
+    parent_randomness: &str,
+    target_height: u64,
+    rank: u32,
+) -> String {
     if rank == 0 {
         format!("iuna-ticket-draw:{target_height}:{parent_randomness}")
     } else {

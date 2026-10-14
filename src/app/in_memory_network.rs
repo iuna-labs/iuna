@@ -94,7 +94,7 @@ impl InMemoryNetwork {
 
         self.nodes
             .get_mut(to)
-            .expect("sync target exists")
+            .ok_or_else(|| anyhow::anyhow!("missing sync target node {to}"))?
             .receive(GossipEnvelope::Blocks { blocks })?;
         Ok(true)
     }

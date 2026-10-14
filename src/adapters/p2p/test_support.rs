@@ -57,6 +57,7 @@ pub(super) fn gossip_network(
             metrics: P2pMetricsCounters::default(),
             sync_progress: std::sync::Mutex::new(super::SyncProgressState::default()),
             chain_validation: Arc::new(super::ChainValidationCoordinator::default()),
+            last_fork_hydration: std::sync::Mutex::new(None),
         }),
     }
 }
