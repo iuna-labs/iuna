@@ -3,6 +3,8 @@ const assert = require('node:assert/strict');
 const { readFileSync } = require('node:fs');
 const vm = require('node:vm');
 
+const indexHtml = readFileSync(require.resolve('../src/adapters/http/index_html.rs'), 'utf8');
+
 function app() {
   const context = {
     window: {},
@@ -14,6 +16,14 @@ function app() {
   vm.runInNewContext(readFileSync(require.resolve('../www/assets/iuna-ui.js'), 'utf8'), context);
   return context.window.iunaApp();
 }
+
+test('burn outlook is hidden while automatic burn is off', () => {
+  assert.match(indexHtml, /class="burn-outlook" x-show="miningEnabled"/);
+});
+
+test('burn save button is primary only while settings are dirty', () => {
+  assert.match(indexHtml, /:class="burnAmountDirty \? 'primary' : 'subtle'">Save<\/button>/);
+});
 
 test('burn outlook shows the proposed share and single-draw return', () => {
   const ui = app();
