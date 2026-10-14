@@ -5,6 +5,26 @@ from the Git history and Conventional Commit titles by `deployment.sh`.
 
 ## [Unreleased]
 
+## [0.4.66] - 2026-10-15
+
+### Added
+
+- add burn strategy outlook
+
+### Fixed
+
+- bound resident chain history safely and remove runtime panics
+- refine burn outlook states
+- update audited transport dependencies
+
+### Tests
+
+- update burn fee warning expectation
+
+### Maintenance
+
+- add lexandry code
+
 ## [0.4.65] - 2026-10-09
 
 ### Added
