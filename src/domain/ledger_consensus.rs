@@ -1,4 +1,5 @@
 use anyhow::Result;
+use std::collections::BTreeSet;
 
 use super::mine_policy::{MINE_RETARGET_WINDOW_BLOCKS, retarget_mine_difficulty_bits};
 use super::ticket::{
@@ -62,6 +63,29 @@ impl Ledger {
 
     pub fn finalizer_rank_count_for_next_block(&self) -> usize {
         ranked_tickets_for_height(self.tip(), self.tip().height + 1, &self.tickets).len()
+    }
+
+    /// Return the total eligible burn weight for the next draw and the part owned by `owners`.
+    /// These are status-only aggregates; consensus still uses the individual tickets above.
+    pub fn burn_weights_for_next_block(&self, owners: &[String]) -> (u64, u64) {
+        let target_height = self.tip().height.saturating_add(1);
+        let owners = owners.iter().map(String::as_str).collect::<BTreeSet<_>>();
+        self.tickets
+            .iter()
+            .filter(|ticket| {
+                ticket.eligible_from_height <= target_height
+                    && target_height <= ticket.eligible_until_height
+            })
+            .fold((0_u64, 0_u64), |(total, wallet), ticket| {
+                (
+                    total.saturating_add(ticket.amount),
+                    wallet.saturating_add(if owners.contains(ticket.owner.as_str()) {
+                        ticket.amount
+                    } else {
+                        0
+                    }),
+                )
+            })
     }
 
     pub(super) fn selected_ticket_for_height(&self, height: u64) -> Option<BurnTicket> {
@@ -232,5 +256,38 @@ mod tests {
         let mut uncached = ledger.clone();
         uncached.mine_difficulty_windows.truncate(1);
         assert_eq!(uncached.mine_difficulty_bits_for_anchor_height(20), 10);
+    }
+
+    #[test]
+    fn burn_weight_status_counts_only_next_draw_and_wallet_owners() {
+        let mut ledger = Ledger::new(BTreeMap::new(), 1);
+        ledger.tickets = vec![
+            BurnTicket {
+                id: "wallet-a".to_string(),
+                owner: "wallet".to_string(),
+                amount: 30,
+                eligible_from_height: 1,
+                eligible_until_height: 2,
+            },
+            BurnTicket {
+                id: "other".to_string(),
+                owner: "other".to_string(),
+                amount: 70,
+                eligible_from_height: 1,
+                eligible_until_height: 1,
+            },
+            BurnTicket {
+                id: "future".to_string(),
+                owner: "wallet".to_string(),
+                amount: 900,
+                eligible_from_height: 2,
+                eligible_until_height: 3,
+            },
+        ];
+
+        assert_eq!(
+            ledger.burn_weights_for_next_block(&["wallet".to_string()]),
+            (100, 30)
+        );
     }
 }

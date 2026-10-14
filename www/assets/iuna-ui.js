@@ -3892,10 +3892,127 @@ window.iunaApp = function iunaApp() {
         .filter((row) => row[1] > 0);
     },
 
-    recentBlockFeeAverage(count) {
+    blockFinalizerPayout(block) {
+      const reward = this.microiunaAmount(block?.reward);
+      const rank = Number(block?.finalizer_rank ?? block?.finalizerRank ?? 0);
+      const mode = block?.finalizer_mode ?? block?.finalizerMode;
+      const hasPaidCommittee = mode === "ticket" && rank <= 1 && (block?.burn_bundles || block?.burnBundles || []).length > 0;
+      return hasPaidCommittee ? reward - Math.floor(reward / 2) : reward;
+    },
+
+    recentFinalizerRewardAverage(count) {
       const sample = this.blocks.filter((block) => block.height > 0).slice(0, count);
       if (sample.length === 0) return 0;
-      return Math.round(sample.reduce((sum, block) => sum + this.blockTotalFees(block), 0) / sample.length);
+      return Math.round(sample.reduce((sum, block) => sum + this.blockFinalizerPayout(block), 0) / sample.length);
+    },
+
+    burnOutlook() {
+      const proposedBurn = this.parseiunaAmount(this.burnAmountDraft);
+      const activeTotal = this.microiunaAmount(this.status.mining?.eligible_burn_total);
+      const walletActive = Math.min(activeTotal, this.microiunaAmount(this.status.mining?.wallet_eligible_burn));
+      const otherBurn = Math.max(0, activeTotal - walletActive);
+      const scenarioTotal = otherBurn + proposedBurn;
+      const chance = scenarioTotal > 0 ? proposedBurn / scenarioTotal : 0;
+      const chancePercent = Math.max(0, Math.min(100, chance * 100));
+      const reward = this.recentFinalizerRewardAverage(30);
+      const expectedPayout = chance * reward;
+      const fee = this.microiunaAmount(this.feeEstimates.burn?.fee);
+      const net = expectedPayout - proposedBurn - fee;
+      const maxExpectedValueBurn = reward > otherBurn
+        ? otherBurn > 0
+          ? Math.max(1, Math.round(Math.sqrt(reward * otherBurn) - otherBurn))
+          : 1
+        : 0;
+      const maxExpectedPayout = maxExpectedValueBurn > 0
+        ? reward * maxExpectedValueBurn / (otherBurn + maxExpectedValueBurn)
+        : 0;
+      const maxExpectedNet = Math.max(0, maxExpectedPayout - maxExpectedValueBurn - fee);
+      const excessBurn = Math.max(0, proposedBurn - maxExpectedValueBurn);
+      let level = "neutral";
+      let verdict = "Waiting for reward history";
+      if (reward > 0) {
+        level = net >= 0 ? "positive" : "negative";
+        verdict = otherBurn === 0 && proposedBurn > 0
+          ? "No competition: minimum burn wins"
+          : otherBurn >= reward
+            ? "Do not burn: competition exceeds payout"
+            : maxExpectedNet <= 0
+              ? "Do not burn: fees erase the expected gain"
+            : proposedBurn < maxExpectedValueBurn
+              ? "Below max-EV: more burn raises expected net"
+            : proposedBurn > maxExpectedValueBurn
+              ? "Overburn: extra burn lowers expected profit"
+              : "At max-EV";
+      }
+      return {
+        proposedBurn,
+        activeTotal,
+        walletActive,
+        otherBurn,
+        scenarioTotal,
+        chance,
+        chancePercent,
+        reward,
+        expectedPayout,
+        fee,
+        net,
+        maxExpectedValueBurn,
+        maxExpectedNet,
+        excessBurn,
+        level,
+        verdict,
+      };
+    },
+
+    burnOutlookPercentLabel() {
+      const percent = this.burnOutlook().chancePercent;
+      if (percent === 0 || percent === 100) return `${percent.toFixed(0)}%`;
+      if (percent > 99.9) return `${percent.toFixed(6).replace(/0+$/, "").replace(/\.$/, "")}%`;
+      return `${percent.toFixed(percent < 1 ? 2 : 1)}%`;
+    },
+
+    burnOutlookShareAriaLabel() {
+      return `Proposed burn has an estimated ${this.burnOutlookPercentLabel()} share of this single-draw scenario`;
+    },
+
+    signedAmountLabel(value) {
+      const amount = Number(value);
+      if (!Number.isFinite(amount)) return "-";
+      const sign = amount > 0 ? "+" : amount < 0 ? "-" : "";
+      return `${sign}IUNA ${this.amountLabel(Math.abs(amount))}`;
+    },
+
+    burnOutlookCurrentLabel() {
+      const outlook = this.burnOutlook();
+      if (outlook.activeTotal === 0) return "Next draw now: no eligible burn tickets.";
+      const percent = 100 * outlook.walletActive / outlook.activeTotal;
+      const percentLabel = `${percent.toFixed(percent > 0 && percent < 1 ? 2 : 1)}%`;
+      return `Next draw now: your active tickets are IUNA ${this.amountLabel(outlook.walletActive)} of IUNA ${this.amountLabel(outlook.activeTotal)} (${percentLabel}).`;
+    },
+
+    canUseMaxEvBurn() {
+      const amount = this.burnOutlook().maxExpectedValueBurn;
+      return amount > 0 && amount !== this.parseiunaAmount(this.burnAmountDraft);
+    },
+
+    useMaxEvBurn() {
+      const amount = this.burnOutlook().maxExpectedValueBurn;
+      if (amount <= 0) return;
+      this.burnAmountDraft = this.amountLabel(amount);
+      this.burnAmountDirty = true;
+      this.scheduleFeeEstimates();
+    },
+
+    burnOutlookSizingLabel() {
+      const { reward, otherBurn, maxExpectedValueBurn, excessBurn } = this.burnOutlook();
+      if (reward <= 0) return "Sizing signal: waiting for recent payout data.";
+      if (otherBurn >= reward) return "Sizing signal: 0 IUNA — competing burn already equals or exceeds the estimated payout.";
+      if (otherBurn === 0) return "Sizing signal: there is no stable optimum without competing burn; use the minimum practical amount.";
+      const breakEvenCeiling = Math.max(0, reward - otherBurn);
+      const excess = excessBurn > 0
+        ? ` IUNA ${this.amountLabel(excessBurn)} of the draft is beyond that point.`
+        : " The draft is not beyond that point.";
+      return `Risk-neutral single-draw max-EV point: IUNA ${this.amountLabel(maxExpectedValueBurn)}.${excess} Break-even ceiling before the transaction fee: IUNA ${this.amountLabel(breakEvenCeiling)}.`;
     },
 
     blockBurnCount(block) {

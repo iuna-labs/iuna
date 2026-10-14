@@ -281,7 +281,24 @@ pub(super) const INDEX_HTML: &str = concat!(
     .vdf-speed-hint.warning { border-color: #5c4a1c; color: #ffd070; }
     .mine-stats { display: grid; grid-template-columns: repeat(4, minmax(112px, 1fr)); gap: 8px; min-width: 0; }
     .local-mining-stats { grid-template-columns: repeat(auto-fit, minmax(150px, 1fr)); }
-    .fee-history { grid-template-columns: repeat(3, minmax(112px, 1fr)); margin-top: 12px; }
+    .burn-outlook { display: grid; gap: 11px; margin-top: 12px; border: 1px solid #2f363c; border-radius: 8px; padding: 12px; background: #111316; }
+    .burn-outlook-head { display: flex; justify-content: space-between; gap: 12px; align-items: baseline; }
+    .burn-outlook-title { color: #e8edf0; font-size: 13px; font-weight: 900; }
+    .burn-outlook-verdict { color: #9eb3bc; font-size: 12px; font-weight: 850; text-align: right; }
+    .burn-outlook-verdict.positive { color: #d5f55f; }
+    .burn-outlook-verdict.negative { color: #ff9d91; }
+    .burn-share-labels { display: flex; justify-content: space-between; gap: 12px; color: #9eb3bc; font-size: 11px; font-weight: 800; }
+    .burn-share-track { height: 14px; overflow: hidden; border: 1px solid #3a4248; border-radius: 999px; background: #282e33; }
+    .burn-share-fill { min-width: 0; height: 100%; border-radius: inherit; background: linear-gradient(90deg, #8de9cd, #d5f55f); transition: width .2s ease; }
+    .burn-outlook-stats { display: grid; grid-template-columns: repeat(auto-fit, minmax(110px, 1fr)); gap: 7px; }
+    .burn-outlook-stat { min-width: 0; border: 1px solid #2f363c; border-radius: 7px; padding: 8px; background: #181b1f; }
+    .burn-outlook-stat span { display: block; color: #879198; font-size: 9px; font-weight: 850; text-transform: uppercase; }
+    .burn-outlook-stat strong { display: block; margin-top: 4px; color: #dce4e7; font-size: 12px; font-variant-numeric: tabular-nums; overflow-wrap: anywhere; }
+    .burn-outlook-stat strong.positive { color: #d5f55f; }
+    .burn-outlook-stat strong.negative { color: #ff9d91; }
+    .burn-outlook-stat-action { display: flex; justify-content: space-between; gap: 6px; align-items: end; }
+    .burn-outlook-stat-action strong { min-width: 0; }
+    .burn-outlook-use { flex: 0 0 auto; padding: 3px 7px; border-color: #566d25; background: #1c2516; color: #d5f55f; font-size: 10px; }
     .mine-stat { min-width: 0; border: 1px solid #2f363c; border-radius: 8px; padding: 9px 10px; background: #111316; }
     .mine-stat-label { display: flex; gap: 5px; align-items: center; color: #879198; font-size: 10px; font-weight: 850; text-transform: uppercase; }
     .mine-stat-value { margin-top: 5px; color: #dce4e7; font-size: 14px; font-weight: 850; font-variant-numeric: tabular-nums; overflow-wrap: anywhere; }
@@ -562,7 +579,7 @@ pub(super) const INDEX_HTML: &str = concat!(
     .tx-modal-empty { border: 1px dashed #3a4248; border-radius: 8px; padding: 10px; color: #8d989f; }
     .utxo-list { display: grid; gap: 8px; }
     .wallet-utxo-row { display: grid; gap: 6px; border: 1px solid #2f363c; border-radius: 8px; padding: 10px; background: #111316; }
-    @media (max-width: 760px) { .utxo-flow, .mine-action-row, .mine-stats { grid-template-columns: 1fr; } .utxo-arrow { min-height: 28px; transform: rotate(90deg); } .tx-modal-head { align-items: stretch; } }
+    @media (max-width: 760px) { .utxo-flow, .mine-action-row, .mine-stats { grid-template-columns: 1fr; } .burn-outlook-stats { grid-template-columns: repeat(2, minmax(0, 1fr)); } .utxo-arrow { min-height: 28px; transform: rotate(90deg); } .tx-modal-head { align-items: stretch; } }
     @media (max-width: 920px) { .setup-grid, .wallet-grid, .mining-grid, .detail-grid, .network-health, .network-overview, .settings-grid { grid-template-columns: 1fr; } .settings-grid > .settings-wide, .settings-section-label, .mining-grid > .mining-status-panel { grid-column: 1; } }
     @media (max-width: 760px) {
       body { padding-bottom: calc(68px + env(safe-area-inset-bottom)); }
@@ -1012,25 +1029,37 @@ pub(super) const INDEX_HTML: &str = concat!(
               <button class="primary" type="submit">Save</button>
             </div>
             <div class="fee-preview" x-text="feeEstimateLabel('burn')"></div>
-            <div class="fee-warning" x-show="feeExceedsAmount('burn')" x-text="feeExceedsAmountLabel('burn')" role="status" aria-live="polite"></div>
           </form>
+          <div class="burn-outlook" aria-label="Burn chance and return estimate">
+            <div class="burn-outlook-head">
+              <div class="burn-outlook-title">Burn outlook</div>
+              <div class="burn-outlook-verdict" :class="burnOutlook().level" x-text="burnOutlook().verdict"></div>
+            </div>
+            <div class="burn-share-labels">
+              <span>Your proposed share</span>
+              <strong x-text="burnOutlookPercentLabel()"></strong>
+            </div>
+            <div class="burn-share-track" role="img" :aria-label="burnOutlookShareAriaLabel()">
+              <div class="burn-share-fill" :style="`width: ${burnOutlook().chancePercent}%`"></div>
+            </div>
+            <div class="burn-outlook-stats">
+              <div class="burn-outlook-stat"><span>Other active burn</span><strong x-text="`IUNA ${amountLabel(burnOutlook().otherBurn)}`"></strong></div>
+              <div class="burn-outlook-stat"><span>Scenario total</span><strong x-text="`IUNA ${amountLabel(burnOutlook().scenarioTotal)}`"></strong></div>
+              <div class="burn-outlook-stat"><span>30-block avg finalizer payout</span><strong x-text="`IUNA ${amountLabel(burnOutlook().reward)}`"></strong></div>
+              <div class="burn-outlook-stat">
+                <span>Max-EV burn</span>
+                <div class="burn-outlook-stat-action">
+                  <strong class="positive" x-text="`IUNA ${amountLabel(burnOutlook().maxExpectedValueBurn)}`"></strong>
+                  <button class="burn-outlook-use" type="button" @click="useMaxEvBurn" :disabled="!canUseMaxEvBurn()">Use</button>
+                </div>
+              </div>
+              <div class="burn-outlook-stat"><span>Max expected net</span><strong class="positive" x-text="signedAmountLabel(burnOutlook().maxExpectedNet)"></strong></div>
+              <div class="burn-outlook-stat"><span>Expected net / draw</span><strong :class="burnOutlook().net >= 0 ? 'positive' : 'negative'" x-text="signedAmountLabel(burnOutlook().net)"></strong></div>
+            </div>
+          </div>
           <div class="vdf-speed-hint" :class="vdfSpeedHint()?.level" x-show="vdfSpeedHint()" role="status" aria-live="polite">
             <span x-text="vdfSpeedHint()?.text"></span>
             <button class="subtle" type="button" x-show="vdfSpeedHint()?.canLower" @click="useLowBurnAmount">Lower to 0.0001 IUNA</button>
-          </div>
-          <div class="mine-stats fee-history" aria-label="Recent block fees">
-            <div class="mine-stat">
-              <div class="mine-stat-label">Last block fees</div>
-              <div class="mine-stat-value money">IUNA <span x-text="amountLabel(recentBlockFeeAverage(1))"></span></div>
-            </div>
-            <div class="mine-stat">
-              <div class="mine-stat-label">5 block avg</div>
-              <div class="mine-stat-value money">IUNA <span x-text="amountLabel(recentBlockFeeAverage(5))"></span></div>
-            </div>
-            <div class="mine-stat">
-              <div class="mine-stat-label">30 block avg</div>
-              <div class="mine-stat-value money">IUNA <span x-text="amountLabel(recentBlockFeeAverage(30))"></span></div>
-            </div>
           </div>
         </div>
         <div class="panel">
