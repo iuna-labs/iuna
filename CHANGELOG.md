@@ -5,6 +5,12 @@ from the Git history and Conventional Commit titles by `deployment.sh`.
 
 ## [Unreleased]
 
+## [0.4.68] - 2026-10-16
+
+### Fixed
+
+- reject private IPv4 embedded in IPv6
+
 ## [0.4.67] - 2026-10-16
 
 ### Fixed
