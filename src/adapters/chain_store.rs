@@ -122,6 +122,27 @@ impl SqliteChainStore {
         &self,
         resident_blocks: usize,
     ) -> Result<Option<LoadedBoundedLedger>> {
+        self.load_bounded_ledger_through(resident_blocks, None)
+    }
+
+    /// Rebuild derived consensus state through one persisted block while retaining only a
+    /// bounded block window. This is used as the base for fork validation: replay cost remains
+    /// linear in chain height, but historical blocks are streamed instead of accumulated in the
+    /// returned ledger.
+    pub fn load_bounded_ledger_at_block(
+        &self,
+        height: u64,
+        hash: &str,
+        resident_blocks: usize,
+    ) -> Result<Option<LoadedBoundedLedger>> {
+        self.load_bounded_ledger_through(resident_blocks, Some((height, hash)))
+    }
+
+    fn load_bounded_ledger_through(
+        &self,
+        resident_blocks: usize,
+        target: Option<(u64, &str)>,
+    ) -> Result<Option<LoadedBoundedLedger>> {
         self.with_connection(|connection| {
             let metadata = connection
                 .query_row(
@@ -134,6 +155,23 @@ impl SqliteChainStore {
             let Some((stored_height, stored_tip_hash)) = metadata else {
                 return Ok(None);
             };
+            let (target_height, target_hash) = target
+                .map(|(height, hash)| (height, hash.to_string()))
+                .unwrap_or_else(|| (stored_height, stored_tip_hash.clone()));
+            if target_height > stored_height {
+                return Ok(None);
+            }
+            let indexed_target_height = connection
+                .query_row(
+                    "SELECT height FROM chain_block_index WHERE block_hash = ?1",
+                    [&target_hash],
+                    |row| row.get::<_, u64>(0),
+                )
+                .optional()
+                .context("failed to resolve bounded ledger target")?;
+            if indexed_target_height != Some(target_height) {
+                return Ok(None);
+            }
             let header = load_chain_header(connection)?
                 .context("chain metadata is missing its compact header")?;
             let revalidation_from_height = load_revalidation_height(connection, &stored_tip_hash)?;
@@ -144,12 +182,15 @@ impl SqliteChainStore {
                 .query_map([], |row| row.get::<_, u64>(0))
                 .context("failed to query bounded ledger segments")?;
             let mut ledger = None::<Ledger>;
-            for segment_id in segment_ids {
+            'segments: for segment_id in segment_ids {
                 let segment_id = segment_id.context("failed to read bounded ledger segment id")?;
                 let blocks =
                     load_chain_segment(connection, segment_id, &header.genesis_allocations)?
                         .with_context(|| format!("missing chain segment {segment_id}"))?;
                 for block in blocks {
+                    if block.height > target_height {
+                        break 'segments;
+                    }
                     if let Some(current) = ledger.as_mut() {
                         if revalidation_from_height.is_some_and(|height| block.height >= height) {
                             current.apply_block_at(block, u64::MAX)?;
@@ -162,14 +203,19 @@ impl SqliteChainStore {
                         genesis_snapshot.blocks.push(block);
                         let mut genesis_ledger =
                             Ledger::from_preverified_snapshot(genesis_snapshot)?;
-                        genesis_ledger.set_ticket_draw_horizon(stored_height);
+                        genesis_ledger.set_ticket_draw_horizon(target_height);
                         ledger = Some(genesis_ledger);
+                    }
+                    if ledger.as_ref().is_some_and(|ledger| {
+                        ledger.height() == target_height && ledger.tip_hash() == target_hash
+                    }) {
+                        break 'segments;
                     }
                 }
             }
             let ledger = ledger.context("segmented chain database contains no blocks")?;
-            if ledger.height() != stored_height || ledger.tip_hash() != stored_tip_hash {
-                anyhow::bail!("bounded ledger tip does not match database metadata");
+            if ledger.height() != target_height || ledger.tip_hash() != target_hash {
+                anyhow::bail!("bounded ledger tip does not match requested persisted block");
             }
             Ok(Some(LoadedBoundedLedger {
                 ledger,
@@ -1589,6 +1635,44 @@ VALUES (1, 0, 'bad-tip', ?1, 0)
 
         assert_eq!(loaded.ledger.snapshot(), snapshot);
         assert_eq!(loaded.revalidation_from_height, None);
+    }
+
+    #[test]
+    fn bounded_loader_stops_at_requested_persisted_block() {
+        let dir = tempdir().unwrap();
+        let store = SqliteChainStore::open(dir.path().join("chain.sqlite3")).unwrap();
+        let wallet = Wallet::from_seed("chain-store-bounded-fork-base");
+        let mut ledger = Ledger::new(
+            [(wallet.address().to_string(), 10_000)]
+                .into_iter()
+                .collect(),
+            1,
+        );
+        for timestamp_ms in 1..=20 {
+            let burn = ledger.build_burn(&wallet, 1, 1).unwrap();
+            ledger.submit_transaction(burn).unwrap();
+            let block = ledger.mine_next_block(&wallet, timestamp_ms).unwrap();
+            ledger.apply_locally_mined_block(block).unwrap();
+        }
+        let snapshot = ledger.snapshot();
+        store.save_verified(&snapshot).unwrap();
+        let target = snapshot.blocks[12].clone();
+
+        let loaded = store
+            .load_bounded_ledger_at_block(target.height, &target.hash, 4)
+            .unwrap()
+            .unwrap();
+
+        assert_eq!(loaded.ledger.height(), target.height);
+        assert_eq!(loaded.ledger.tip_hash(), target.hash);
+        assert_eq!(loaded.ledger.chain().len(), 5);
+        assert!(loaded.ledger.history_is_pruned());
+        assert!(
+            store
+                .load_bounded_ledger_at_block(target.height, "wrong-hash", 4)
+                .unwrap()
+                .is_none()
+        );
     }
 
     #[test]

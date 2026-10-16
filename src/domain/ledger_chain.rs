@@ -9,7 +9,7 @@ use super::genesis::{build_genesis_block, utxos_after_genesis, validate_genesis_
 use super::ledger_ops::validate_genesis_allocations;
 use super::ticket::genesis_tickets;
 use super::{
-    Amount, ChainSnapshot, GenesisBurn, LaunchProfile, Ledger, MINE_REWARD,
+    Amount, Block, ChainSnapshot, GenesisBurn, LaunchProfile, Ledger, MINE_REWARD,
     OBJECTIVE_FINALITY_ACTIVATION_HEIGHT, Transaction, unix_now_ms,
 };
 
@@ -322,8 +322,66 @@ impl Ledger {
             return Ok(false);
         }
 
-        self.replace_with_better_chain(candidate, fork_point);
+        let stale_blocks = self
+            .chain
+            .iter()
+            .filter(|block| block.height >= fork_point.first_diverging_height())
+            .cloned()
+            .collect();
+        self.replace_with_better_chain(candidate, stale_blocks);
 
+        Ok(true)
+    }
+
+    /// Adopt a candidate whose state was reconstructed incrementally from a persisted common
+    /// ancestor. The caller has already applied and consensus-checked the untrusted suffix and
+    /// verified its VDF proofs. `local_fork_blocks` is a bounded persisted prefix used for
+    /// equal-height fork quality and for carrying recent transactions forward.
+    pub(crate) fn adopt_prevalidated_fork(
+        &mut self,
+        candidate: Ledger,
+        common_ancestor_hash: &str,
+        local_fork_blocks: Vec<Block>,
+    ) -> Result<bool> {
+        if candidate.initial_vdf_rounds != self.initial_vdf_rounds
+            || candidate.launch_profile != self.launch_profile
+            || candidate.genesis_allocations != self.genesis_allocations
+            || candidate.genesis_hash() != self.genesis_hash()
+        {
+            bail!("candidate fork identity does not match local chain");
+        }
+        let common_ancestor_height = candidate
+            .chain
+            .iter()
+            .find(|block| block.hash == common_ancestor_hash)
+            .map(|block| block.height)
+            .context("candidate fork is missing its requested common ancestor")?;
+        let fork_point = ForkPoint {
+            common_ancestor_height,
+        };
+        let mut previous_hash = common_ancestor_hash;
+        let mut expected_height = fork_point.first_diverging_height();
+        for block in &local_fork_blocks {
+            if block.height != expected_height || block.prev_hash != previous_hash {
+                bail!("persisted local fork blocks are not contiguous from the common ancestor");
+            }
+            previous_hash = &block.hash;
+            expected_height = expected_height.saturating_add(1);
+        }
+        if candidate.height() == self.height()
+            && local_fork_blocks
+                .last()
+                .is_none_or(|block| block.hash != self.tip_hash())
+        {
+            bail!("persisted local fork does not reach the equal-height local tip");
+        }
+
+        if self.choose_fork_with_local_blocks(&candidate, fork_point, &local_fork_blocks)
+            == ForkChoice::KeepLocal
+        {
+            return Ok(false);
+        }
+        self.replace_with_better_chain(candidate, local_fork_blocks);
         Ok(true)
     }
 
@@ -409,6 +467,56 @@ impl Ledger {
         }
     }
 
+    fn choose_fork_with_local_blocks(
+        &self,
+        candidate: &Ledger,
+        fork_point: ForkPoint,
+        local_fork_blocks: &[Block],
+    ) -> ForkChoice {
+        let local_height = self.height();
+        let remote_height = candidate.height();
+        if remote_height == local_height && candidate.tip().hash == self.tip().hash {
+            return ForkChoice::KeepLocal;
+        }
+
+        if fork_point.first_diverging_height() < OBJECTIVE_FINALITY_ACTIVATION_HEIGHT {
+            if local_height >= OBJECTIVE_FINALITY_ACTIVATION_HEIGHT
+                || fork_rewrites_finalized_history(local_height, fork_point.common_ancestor_height)
+            {
+                return ForkChoice::KeepLocal;
+            }
+        } else {
+            match objective_finality_quality(
+                self.objective_finality_checkpoint.as_ref(),
+                candidate.objective_finality_checkpoint.as_ref(),
+            ) {
+                ForkQuality::RemoteBetter => return ForkChoice::SwitchToCandidate,
+                ForkQuality::LocalBetter => return ForkChoice::KeepLocal,
+                ForkQuality::Equal => {}
+            }
+        }
+
+        if remote_height > local_height {
+            return ForkChoice::SwitchToCandidate;
+        }
+        if remote_height < local_height {
+            return ForkChoice::KeepLocal;
+        }
+
+        let remote_fork = candidate
+            .chain
+            .iter()
+            .filter(|block| block.height >= fork_point.first_diverging_height());
+        for (local, remote) in local_fork_blocks.iter().zip(remote_fork) {
+            match local.leader_score().cmp(&remote.leader_score()) {
+                std::cmp::Ordering::Equal => continue,
+                std::cmp::Ordering::Less => return ForkChoice::KeepLocal,
+                std::cmp::Ordering::Greater => return ForkChoice::SwitchToCandidate,
+            }
+        }
+        ForkChoice::KeepLocal
+    }
+
     fn fork_quality(&self, candidate: &Ledger, fork_point: ForkPoint) -> ForkQuality {
         let local_fork = self
             .chain
@@ -427,14 +535,10 @@ impl Ledger {
         ForkQuality::Equal
     }
 
-    fn replace_with_better_chain(&mut self, mut candidate: Ledger, fork_point: ForkPoint) {
+    fn replace_with_better_chain(&mut self, mut candidate: Ledger, stale_blocks: Vec<Block>) {
         let mut carry_forward = self.pending.clone();
         carry_forward.extend(self.orphans.clone());
-        for block in self
-            .chain
-            .iter()
-            .filter(|block| block.height >= fork_point.first_diverging_height())
-        {
+        for block in &stale_blocks {
             carry_forward.extend(block.transactions.clone());
         }
 
@@ -451,11 +555,7 @@ impl Ledger {
         }
 
         let mut carry_forward_v2 = Vec::new();
-        for block in self
-            .chain
-            .iter()
-            .filter(|block| block.height >= fork_point.first_diverging_height())
-        {
+        for block in &stale_blocks {
             for envelope in &block.transactions_v2 {
                 if let Ok(bytes) = super::decode_hex(envelope)
                     && let Ok(transaction) = self.decode_transaction_v2(&bytes)
