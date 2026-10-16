@@ -1,6 +1,6 @@
 use std::{
     io::ErrorKind,
-    net::{IpAddr, SocketAddr},
+    net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr},
     time::Duration,
 };
 
@@ -77,6 +77,9 @@ fn ip_is_publicly_discoverable(ip: IpAddr) -> bool {
                 || [a, b, c, d] == [255, 255, 255, 255])
         }
         IpAddr::V6(ip) => {
+            if let Some(ip) = embedded_ipv4(ip) {
+                return ip_is_publicly_discoverable(IpAddr::V4(ip));
+            }
             let segments = ip.segments();
             !(ip.is_unspecified()
                 || ip.is_loopback()
@@ -85,6 +88,21 @@ fn ip_is_publicly_discoverable(ip: IpAddr) -> bool {
                 || (segments[0] & 0xff00) == 0xff00)
         }
     }
+}
+
+fn embedded_ipv4(ip: Ipv6Addr) -> Option<Ipv4Addr> {
+    if let Some(ip) = ip.to_ipv4_mapped() {
+        return Some(ip);
+    }
+
+    let segments = ip.segments();
+    if segments[..6] != [0; 6] {
+        return None;
+    }
+
+    let [a, b] = segments[6].to_be_bytes();
+    let [c, d] = segments[7].to_be_bytes();
+    Some(Ipv4Addr::new(a, b, c, d))
 }
 
 pub(super) fn is_self_peer_address_for(
@@ -158,13 +176,43 @@ pub(super) fn inbound_error_counts_as_misbehavior(error: &anyhow::Error) -> bool
 
 #[cfg(test)]
 mod tests {
+    use std::net::IpAddr;
+
     use anyhow::anyhow;
 
     use crate::domain::ValidationError;
 
     use super::super::SyncError;
 
-    use super::{inbound_error_counts_as_misbehavior, is_possible_fork_error};
+    use super::{
+        inbound_error_counts_as_misbehavior, ip_is_publicly_discoverable, is_possible_fork_error,
+    };
+
+    #[test]
+    fn embedded_ipv4_addresses_use_the_ipv4_discoverability_filter() {
+        for address in [
+            "::ffff:127.0.0.1",
+            "::ffff:10.42.0.1",
+            "::ffff:169.254.169.254",
+            "::ffff:192.168.1.1",
+            "::127.0.0.1",
+            "::10.42.0.1",
+            "::169.254.169.254",
+            "::192.168.1.1",
+        ] {
+            assert!(
+                !ip_is_publicly_discoverable(address.parse::<IpAddr>().unwrap()),
+                "{address} must not be publicly discoverable"
+            );
+        }
+
+        for address in ["::ffff:8.8.8.8", "::8.8.8.8"] {
+            assert!(
+                ip_is_publicly_discoverable(address.parse::<IpAddr>().unwrap()),
+                "{address} should follow the public IPv4 address policy"
+            );
+        }
+    }
 
     #[test]
     fn future_and_unopened_rank_slot_errors_are_temporal_not_misbehavior() {

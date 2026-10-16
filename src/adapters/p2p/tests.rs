@@ -30,6 +30,35 @@ fn segmented_block_batches_require_an_explicit_peer_capability() {
 }
 
 #[tokio::test]
+async fn peer_list_rejects_private_ipv4_embedded_in_ipv6() {
+    let alice = Wallet::from_seed("embedded-ipv4-peer-list-alice");
+    let allocations = allocations(std::slice::from_ref(&alice), 1_000);
+    let node = Arc::new(tokio::sync::Mutex::new(node("alice", alice, allocations)));
+    let peers = Arc::new(tokio::sync::Mutex::new(PeerBook::default()));
+    let network = gossip_network(
+        node,
+        Arc::clone(&peers),
+        "0.0.0.0:9546".parse().unwrap(),
+        None,
+    );
+    let attacker_remote_addr = "142.132.164.59:51234".parse().unwrap();
+
+    super::apply_peer_list(
+        &network,
+        attacker_remote_addr,
+        vec![
+            "[::ffff:127.0.0.1]:9999".to_string(),
+            "[::ffff:169.254.169.254]:80".to_string(),
+            "[::192.168.1.1]:9999".to_string(),
+        ],
+    )
+    .await
+    .unwrap();
+
+    assert_eq!(peers.lock().await.peer_count_for_tests(), 0);
+}
+
+#[tokio::test]
 async fn block_batch_validation_reports_each_validated_height() {
     let alice = Wallet::from_seed("batch-validation-progress-alice");
     let allocations = allocations(std::slice::from_ref(&alice), 1_000);
