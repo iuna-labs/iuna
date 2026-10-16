@@ -5,15 +5,15 @@ use sha2::{Digest, Sha256};
 use tokio::net::tcp::OwnedWriteHalf;
 
 use crate::{
-    app::{GossipEnvelope, debug_logging_enabled},
+    app::{GossipEnvelope, RESIDENT_CHAIN_BLOCKS, debug_logging_enabled},
     domain::{BurnBundle, Transaction},
 };
 
 use super::{
-    GossipNetwork, LEGACY_MAX_BLOCK_BATCH, MAX_BLOCK_BATCH, P2pMetricsCounters, apply_peer_list,
-    forget_stale_self_peer, is_possible_fork_error, normalize_advertised_peer,
-    peer_verification_response, process_hello, validate_blocks_extension, validate_chain_bootstrap,
-    verify_block_vdf, write_envelope,
+    GossipNetwork, LEGACY_MAX_BLOCK_BATCH, MAX_BLOCK_BATCH, P2pMetricsCounters, PersistedForkBase,
+    apply_peer_list, forget_stale_self_peer, is_possible_fork_error, normalize_advertised_peer,
+    peer_verification_response, process_hello, validate_blocks_extension_with_fork_base,
+    validate_chain_bootstrap, verify_block_vdf, write_envelope,
 };
 
 pub(super) async fn respond_to_peer_verification_challenge(
@@ -282,10 +282,11 @@ pub(super) async fn process_envelope(
             let progress_id = progress_guard.id();
             let progress_network = network.clone();
             let validated =
-                match hydrate_pruned_fork_validation_ledger(network, local_ledger, &blocks).await {
-                    Ok(local_ledger) => {
-                        validate_blocks_extension(
+                match prepare_pruned_fork_validation_base(network, &local_ledger, &blocks).await {
+                    Ok(fork_base) => {
+                        validate_blocks_extension_with_fork_base(
                             local_ledger,
+                            fork_base,
                             blocks,
                             adjusted_time_ms,
                             move |height| {
@@ -385,41 +386,31 @@ pub(super) async fn process_envelope(
     Ok(requested_chain_data)
 }
 
-/// Fork validation rebuilds the candidate from genesis, so a pruned ledger first gets its
-/// history back from the chain store. That is only worth doing for a fork from a block this node
-/// knows; an unknown ancestor is answered with a cheap locator request instead.
-async fn hydrate_pruned_fork_validation_ledger(
+/// Reconstruct the candidate's common-ancestor state by streaming persisted segments and keeping
+/// only a bounded resident window. An unknown ancestor is answered with a cheap locator request.
+async fn prepare_pruned_fork_validation_base(
     network: &GossipNetwork,
-    mut ledger: crate::domain::Ledger,
+    ledger: &crate::domain::Ledger,
     blocks: &[crate::domain::Block],
-) -> Result<crate::domain::Ledger> {
+) -> Result<Option<PersistedForkBase>> {
     let Some(first) = blocks.first() else {
-        return Ok(ledger);
+        return Ok(None);
     };
     if first.prev_hash == ledger.tip_hash() || !ledger.history_is_pruned() {
-        return Ok(ledger);
+        return Ok(None);
     }
-    let Some(store) = network.chain_store().await else {
-        return Ok(ledger);
+    let Some(store) = network.current_chain_store().await? else {
+        return Ok(None);
     };
     let ancestor_hash = first.prev_hash.clone();
-    let ancestor_is_resident = ledger.has_block(&ancestor_hash);
-    if !ancestor_is_resident {
-        let lookup_store = store.clone();
-        let lookup_hash = ancestor_hash.clone();
-        let ancestor_is_persisted =
-            tokio::task::spawn_blocking(move || lookup_store.block_by_hash(&lookup_hash))
-                .await
-                .map_err(anyhow::Error::from)
-                .and_then(|lookup| lookup)
-                .map_err(local_history_unavailable)?
-                .is_some();
-        if !ancestor_is_persisted {
-            return Err(anyhow::Error::new(
-                super::SyncError::BlockPageHasNoCommonAncestor,
-            ));
-        }
-    }
+    let lookup_store = store.clone();
+    let lookup_hash = ancestor_hash.clone();
+    let ancestor = tokio::task::spawn_blocking(move || lookup_store.block_by_hash(&lookup_hash))
+        .await
+        .map_err(anyhow::Error::from)
+        .and_then(|lookup| lookup)
+        .map_err(local_history_unavailable)?
+        .ok_or_else(|| anyhow::Error::new(super::SyncError::BlockPageHasNoCommonAncestor))?;
     {
         let mut last = network
             .inner
@@ -433,18 +424,18 @@ async fn hydrate_pruned_fork_validation_ledger(
         }
         *last = Some(std::time::Instant::now());
     }
+    let local_fork_limit = blocks.len();
     tokio::task::spawn_blocking(move || {
-        let loaded = store
-            .load_with_verification_status()?
+        let base = store
+            .load_bounded_ledger_at_block(ancestor.height, &ancestor_hash, RESIDENT_CHAIN_BLOCKS)?
             .context("persisted chain disappeared while preparing fork validation")?;
-        let complete = crate::domain::Ledger::from_persisted_snapshot_revalidating_from(
-            loaded.snapshot,
-            loaded.revalidation_from_height,
-        )?;
-        if !ledger.restore_pruned_history(complete)? {
-            anyhow::bail!("persisted chain does not reach the resident chain");
-        }
-        Ok(ledger)
+        let local_fork_blocks =
+            store.blocks_from(ancestor.height.saturating_add(1), local_fork_limit)?;
+        Ok(Some(PersistedForkBase {
+            ledger: base.ledger,
+            common_ancestor_hash: ancestor_hash,
+            local_fork_blocks,
+        }))
     })
     .await
     .map_err(anyhow::Error::from)
@@ -452,7 +443,8 @@ async fn hydrate_pruned_fork_validation_ledger(
     .map_err(local_history_unavailable)
 }
 
-/// Failures to rebuild this node's own history are local conditions, not peer misbehavior.
+/// Failures to replay this node's persisted ancestor state are local conditions, not peer
+/// misbehavior.
 fn local_history_unavailable(error: anyhow::Error) -> anyhow::Error {
     anyhow::Error::new(super::SyncError::ForkHistoryUnavailable).context(format!("{error:#}"))
 }

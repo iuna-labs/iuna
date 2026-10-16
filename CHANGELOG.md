@@ -5,6 +5,10 @@ from the Git history and Conventional Commit titles by `deployment.sh`.
 
 ## [Unreleased]
 
+### Fixed
+
+- bound pruned fork validation memory by streaming persisted ancestor state
+
 ## [0.4.66] - 2026-10-15
 
 ### Added

@@ -306,8 +306,25 @@ fn validate_bootstrap_genesis(expected_profile_id: &str, bootstrap: &ChainBootst
     Ok(())
 }
 
+#[cfg(test)]
 pub(super) async fn validate_blocks_extension(
+    ledger: Ledger,
+    blocks: Vec<Block>,
+    now_ms: u64,
+    on_progress: impl Fn(u64) + Send + 'static,
+) -> Result<Ledger> {
+    validate_blocks_extension_with_fork_base(ledger, None, blocks, now_ms, on_progress).await
+}
+
+pub(super) struct PersistedForkBase {
+    pub ledger: Ledger,
+    pub common_ancestor_hash: String,
+    pub local_fork_blocks: Vec<Block>,
+}
+
+pub(super) async fn validate_blocks_extension_with_fork_base(
     mut ledger: Ledger,
+    fork_base: Option<PersistedForkBase>,
     blocks: Vec<Block>,
     now_ms: u64,
     on_progress: impl Fn(u64) + Send + 'static,
@@ -320,6 +337,34 @@ pub(super) async fn validate_blocks_extension(
         let state_started = Instant::now();
         let target_height = blocks.last().map(|block| block.height);
         if blocks[0].prev_hash != ledger.tip_hash() {
+            if let Some(mut fork_base) = fork_base {
+                if fork_base.ledger.tip_hash() != blocks[0].prev_hash
+                    || fork_base.common_ancestor_hash != blocks[0].prev_hash
+                {
+                    return Err(super::SyncError::BlockPageHasNoCommonAncestor.into());
+                }
+                for block in blocks.iter().cloned() {
+                    fork_base.ledger.apply_preverified_block_at(block, now_ms)?;
+                }
+                let state_elapsed = state_started.elapsed();
+                let vdf_started = Instant::now();
+                verify_block_vdfs_parallel(&blocks)?;
+                ledger.adopt_prevalidated_fork(
+                    fork_base.ledger,
+                    &fork_base.common_ancestor_hash,
+                    fork_base.local_fork_blocks,
+                )?;
+                log_batch_validation_timing(
+                    blocks.len(),
+                    state_elapsed,
+                    vdf_started.elapsed(),
+                    true,
+                );
+                if let Some(target_height) = target_height {
+                    on_progress(target_height);
+                }
+                return Ok(ledger);
+            }
             let mut candidate = ledger.snapshot();
             let ancestor = candidate
                 .blocks

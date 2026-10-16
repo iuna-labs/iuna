@@ -31,11 +31,14 @@ mod sync;
 mod test_support;
 mod writer;
 use error::SyncError;
+#[cfg(test)]
+use fetch::validate_blocks_extension;
+use fetch::{
+    PersistedForkBase, network_adjusted_time_ms, validate_blocks_extension_with_fork_base,
+    validate_chain_bootstrap, verify_block_vdf,
+};
 pub use fetch::{
     fetch_peer_height, fetch_snapshot, fetch_snapshot_with_announcement, validate_chain_snapshot,
-};
-use fetch::{
-    network_adjusted_time_ms, validate_blocks_extension, validate_chain_bootstrap, verify_block_vdf,
 };
 #[cfg(test)]
 use handshake::verify_advertised_peer_node_id;
@@ -83,8 +86,8 @@ const INBOUND_PEER_QUEUE_BYTES: usize = 2 * MAX_OUTBOUND_BATCH_BYTES;
 #[cfg(not(test))]
 const GLOBAL_PEER_QUEUE_BYTES: usize = 32 * 1024 * 1024;
 const MAX_CONCURRENT_CHAIN_VALIDATIONS: usize = 1;
-/// Rebuilding complete history for fork validation costs O(chain); peers cannot force it more
-/// often than this.
+/// Replaying bounded ancestor state for fork validation costs O(chain) CPU; peers cannot force it
+/// more often than this.
 const FORK_HYDRATION_INTERVAL: std::time::Duration = std::time::Duration::from_secs(30);
 const STALE_INBOUND_PEER_RETENTION_MS: u64 = 60 * 60 * 1_000;
 const STALE_DISCOVERED_PEER_RETENTION_MS: u64 = 60 * 60 * 1_000;

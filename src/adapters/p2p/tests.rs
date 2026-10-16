@@ -59,6 +59,108 @@ async fn block_batch_validation_reports_each_validated_height() {
 }
 
 #[tokio::test]
+async fn pruned_fork_validation_adopts_from_bounded_persisted_ancestor_state() {
+    let alice = Wallet::from_seed("bounded-fork-validation-alice");
+    let allocations = allocations(std::slice::from_ref(&alice), 1_000);
+    let base = node(
+        "bounded-fork-validation-base",
+        alice.clone(),
+        allocations.clone(),
+    )
+    .clone_ledger();
+    let mut local = NodeCore::from_ledger(alice.clone(), base.clone(), 0);
+    let mut remote = NodeCore::from_ledger(alice.clone(), base.clone(), 0);
+    for timestamp_ms in [1, 2] {
+        queue_plaintext_burn(&mut local, &alice, 1);
+        local.drain_outbox();
+        local.mine_one_at(timestamp_ms).unwrap();
+        local.drain_outbox();
+    }
+    for timestamp_ms in [3, 4, 5] {
+        queue_plaintext_burn(&mut remote, &alice, 1);
+        remote.drain_outbox();
+        remote.mine_one_at(timestamp_ms).unwrap();
+        remote.drain_outbox();
+    }
+    let local_fork_blocks = local.ledger().blocks_from(1, 3);
+    let remote_blocks = remote.ledger().blocks_from(1, 3);
+    let mut local_ledger = local.clone_ledger();
+    local_ledger.retain_recent_chain_blocks(1);
+    assert!(local_ledger.history_is_pruned());
+
+    let adopted = super::validate_blocks_extension_with_fork_base(
+        local_ledger,
+        Some(super::PersistedForkBase {
+            common_ancestor_hash: base.genesis_hash().to_string(),
+            ledger: base,
+            local_fork_blocks,
+        }),
+        remote_blocks,
+        crate::app::now_ms(),
+        |_| {},
+    )
+    .await
+    .unwrap();
+
+    assert_eq!(adopted.tip_hash(), remote.ledger().tip_hash());
+    assert_eq!(adopted.height(), 3);
+}
+
+#[tokio::test]
+async fn bounded_fork_validation_preserves_equal_height_leader_choice() {
+    let alice = Wallet::from_seed("bounded-fork-quality-alice");
+    let allocations = allocations(std::slice::from_ref(&alice), 1_000);
+    let base = node(
+        "bounded-fork-quality-base",
+        alice.clone(),
+        allocations.clone(),
+    )
+    .clone_ledger();
+    let mut local = NodeCore::from_ledger(alice.clone(), base.clone(), 0);
+    let mut remote = NodeCore::from_ledger(alice.clone(), base.clone(), 0);
+    for timestamp_ms in [1, 2] {
+        queue_plaintext_burn(&mut local, &alice, 1);
+        local.drain_outbox();
+        local.mine_one_at(timestamp_ms).unwrap();
+        local.drain_outbox();
+    }
+    for timestamp_ms in [3, 4] {
+        queue_plaintext_burn(&mut remote, &alice, 1);
+        remote.drain_outbox();
+        remote.mine_one_at(timestamp_ms).unwrap();
+        remote.drain_outbox();
+    }
+    let local_fork_blocks = local.ledger().blocks_from(1, 2);
+    let remote_blocks = remote.ledger().blocks_from(1, 2);
+    let expected = super::validate_blocks_extension(
+        local.clone_ledger(),
+        remote_blocks.clone(),
+        crate::app::now_ms(),
+        |_| {},
+    )
+    .await
+    .unwrap();
+    let mut pruned = local.clone_ledger();
+    pruned.retain_recent_chain_blocks(1);
+
+    let adopted = super::validate_blocks_extension_with_fork_base(
+        pruned,
+        Some(super::PersistedForkBase {
+            common_ancestor_hash: base.genesis_hash().to_string(),
+            ledger: base,
+            local_fork_blocks,
+        }),
+        remote_blocks,
+        crate::app::now_ms(),
+        |_| {},
+    )
+    .await
+    .unwrap();
+
+    assert_eq!(adopted.tip_hash(), expected.tip_hash());
+}
+
+#[tokio::test]
 async fn session_serializes_inventory_and_paginated_catchup_requests() {
     let alice = Wallet::from_seed("immediate-page-sync-alice");
     let allocations = allocations(std::slice::from_ref(&alice), 1_000);
