@@ -1,6 +1,7 @@
 const IUNA_DOWNLOADS_URL = "https://getiuna.org/downloads/";
 const IUNA_RELEASE_METADATA_URL = "https://getiuna.org/downloads/latest.json";
 const IUNA_RELEASE_CHECK_INTERVAL_MS = 30 * 60 * 1000;
+const IUNA_TOUR_STORAGE_KEY = "iunaUiTourCompletedV1";
 // Matches the node's default burn amount, in micro-IUNA.
 const IUNA_LOW_BURN_AMOUNT = 100;
 
@@ -8,6 +9,11 @@ window.iunaApp = function iunaApp() {
   return {
     tab: "dashboard",
     commandKeyHeld: false,
+    tourActive: false,
+    tourStepIndex: 0,
+    tourOfferChecked: false,
+    tourSpotlightStyle: "left:-9999px;top:-9999px;width:0;height:0",
+    tourCardStyle: "left:-9999px;top:-9999px",
     status: {},
     blocks: [],
     selectedBlock: null,
@@ -190,6 +196,7 @@ window.iunaApp = function iunaApp() {
         this.hashListenerInstalled = true;
       }
       await this.refresh();
+      this.maybeStartTour();
       this.checkLatestRelease();
       this.scheduleReleaseCheck();
       this.schedulePoll();
@@ -228,6 +235,7 @@ window.iunaApp = function iunaApp() {
       this.pollHandle = setTimeout(async () => {
         this.pollHandle = null;
         await this.refresh({ silent: true });
+        this.maybeStartTour();
         this.schedulePoll();
       }, delay);
     },
@@ -320,6 +328,157 @@ window.iunaApp = function iunaApp() {
         leaderboards: "Leaderboards",
         settings: "Settings",
       }[this.tab] || "iuna";
+    },
+
+    tourSteps() {
+      return [
+        { selector: '[data-tour="dashboard"]', clickTarget: "dashboard", title: "Welcome", text: "This tour lets you explore the interface yourself. Click the highlighted Dashboard button to begin." },
+        { tab: "dashboard", title: "Dashboard", text: "See your balance, mining and burning status, the latest block, and your node's network connection at a glance." },
+        { tab: "dashboard", selector: '[data-tour="wallet"]', clickTarget: "wallet", title: "Continue to Wallet", text: "Click the highlighted Wallet tab to explore the next screen." },
+        { tab: "wallet", title: "Wallet", text: "Send and receive IUNA, review activity, manage addresses, and optimize unspent outputs." },
+        { tab: "wallet", selector: '[data-tour="mining"]', clickTarget: "mining", title: "Continue to Mining", text: "Click the highlighted Mining tab to see how your node can earn IUNA." },
+        { tab: "mining", title: "Mining", text: "This screen contains both ways your node can earn IUNA: proof-of-work mining and burn-based finalization." },
+        { tab: "mining", title: "Mine new coins", text: "Turn on Mine to search for proof-of-work actions that mint new IUNA. More workers search in parallel and increase your chance, but use more CPU." },
+        { tab: "mining", title: "Burn to finalize", text: "Once you own IUNA, turn on Burn to compete for block finalization and earn the finalizer payout. Burning more increases your chance; burned IUNA is permanently spent." },
+        { tab: "mining", selector: '[data-tour="p2p"]', clickTarget: "p2p", title: "Continue to P2P", text: "Click the highlighted P2P tab to inspect your node's network connections." },
+        { tab: "p2p", title: "P2P", text: "Check network health, inspect the peers that keep your chain in sync, and manage node connections." },
+        { tab: "p2p", selector: '[data-tour="chain"]', clickTarget: "chain", title: "Continue to Chain", text: "Click the highlighted Chain tab to explore blocks and transactions." },
+        { tab: "chain", title: "Chain", text: "Explore blocks and transactions, including transfers, burns, mining proofs, finalizers, fees, and rewards." },
+        { tab: "chain", selector: '[data-tour="settings"]', clickTarget: "settings", title: "Continue to Settings", text: "Click the highlighted Settings button to view your node configuration." },
+        { tab: "settings", title: "Settings", text: "Configure networking, VDF resources, optional endpoints, security, and developer mode. You can also restart this tour from this screen." },
+        { tab: "settings", title: "Questions?", text: "Join the IUNA Discord for questions, feedback, and help from the community. The Discord link is always available at the bottom of the navigation bar." },
+      ];
+    },
+
+    currentTourStep() {
+      return this.tourSteps()[this.tourStepIndex] || this.tourSteps()[0];
+    },
+
+    tourCompleted() {
+      try {
+        return localStorage.getItem(IUNA_TOUR_STORAGE_KEY) === "true";
+      } catch {
+        return false;
+      }
+    },
+
+    maybeStartTour() {
+      if (
+        this.tourOfferChecked ||
+        this.tourActive ||
+        !this.canUseProtectedApi() ||
+        this.config.setup_complete !== true ||
+        this.showingNetworkMigration() ||
+        !this.networkHealthLoaded
+      ) return;
+      if (this.syncingNode()) return;
+      this.tourOfferChecked = true;
+      if (!this.tourCompleted()) this.startTour();
+    },
+
+    startTour() {
+      this.closeModals();
+      this.tourActive = true;
+      this.tourStepIndex = 0;
+      this.showTourStep();
+    },
+
+    showTourStep() {
+      const step = this.currentTourStep();
+      if (step.tab && this.tab !== step.tab) this.setTab(step.tab);
+      setTimeout(() => {
+        const target = typeof document === "undefined" || !step.selector
+          ? null
+          : document.querySelector(step.selector);
+        target?.scrollIntoView({ block: "center", inline: "center" });
+        setTimeout(() => this.positionTour(), 0);
+      }, 0);
+    },
+
+    positionTour() {
+      if (!this.tourActive || typeof document === "undefined") return;
+      const step = this.currentTourStep();
+      const viewportWidth = window.innerWidth;
+      const viewportHeight = window.innerHeight;
+      const card = document.querySelector("[data-tour-card]");
+      const cardWidth = Math.min(card?.offsetWidth || 360, viewportWidth - 24);
+      const cardHeight = card?.offsetHeight || 210;
+      if (!step.selector) {
+        const left = Math.max(12, viewportWidth - cardWidth - 24);
+        const top = Math.max(12, viewportHeight - cardHeight - 24);
+        this.tourSpotlightStyle = "left:-9999px;top:-9999px;width:0;height:0";
+        this.tourCardStyle = `left:${left}px;top:${top}px;width:${cardWidth}px`;
+        if (card && !card.contains(document.activeElement)) card.focus({ preventScroll: true });
+        return;
+      }
+      const target = document.querySelector(step.selector);
+      if (!target) {
+        setTimeout(() => this.positionTour(), 50);
+        return;
+      }
+      const rect = target.getBoundingClientRect();
+      if (rect.width === 0 && rect.height === 0) {
+        setTimeout(() => this.positionTour(), 50);
+        return;
+      }
+      const padding = 10;
+      const diameter = Math.max(rect.width, rect.height) + padding * 2;
+      const spotlightLeft = rect.left + rect.width / 2 - diameter / 2;
+      const spotlightTop = rect.top + rect.height / 2 - diameter / 2;
+      this.tourSpotlightStyle = `left:${spotlightLeft}px;top:${spotlightTop}px;width:${diameter}px;height:${diameter}px`;
+
+      const gap = 22;
+      const clamp = (value, min, max) => Math.max(min, Math.min(value, max));
+      let left;
+      let top;
+      if (rect.right + gap + cardWidth <= viewportWidth - 12) {
+        left = rect.right + gap;
+        top = clamp(rect.top + rect.height / 2 - cardHeight / 2, 12, viewportHeight - cardHeight - 12);
+      } else if (rect.left - gap - cardWidth >= 12) {
+        left = rect.left - gap - cardWidth;
+        top = clamp(rect.top + rect.height / 2 - cardHeight / 2, 12, viewportHeight - cardHeight - 12);
+      } else {
+        left = clamp(rect.left + rect.width / 2 - cardWidth / 2, 12, viewportWidth - cardWidth - 12);
+        top = rect.bottom + gap + cardHeight <= viewportHeight
+          ? rect.bottom + gap
+          : Math.max(12, rect.top - gap - cardHeight);
+      }
+      this.tourCardStyle = `left:${left}px;top:${top}px;width:${cardWidth}px`;
+      const focusTarget = step.clickTarget ? target : card;
+      if (focusTarget && !focusTarget.contains(document.activeElement)) focusTarget.focus({ preventScroll: true });
+    },
+
+    tourTargetClicked(target) {
+      if (!this.tourActive || this.currentTourStep().clickTarget !== target) return;
+      this.nextTourStep();
+    },
+
+    nextTourStep() {
+      if (this.tourStepIndex >= this.tourSteps().length - 1) {
+        this.finishTour();
+        return;
+      }
+      this.tourStepIndex += 1;
+      this.showTourStep();
+    },
+
+    previousTourStep() {
+      if (this.tourStepIndex === 0) return;
+      this.tourStepIndex -= 1;
+      this.showTourStep();
+    },
+
+    finishTour() {
+      this.dismissTour();
+      try {
+        localStorage.setItem(IUNA_TOUR_STORAGE_KEY, "true");
+      } catch {}
+    },
+
+    dismissTour() {
+      this.tourActive = false;
+      this.tourSpotlightStyle = "left:-9999px;top:-9999px;width:0;height:0";
+      this.tourCardStyle = "left:-9999px;top:-9999px";
     },
 
     appVersionLabel() {
@@ -893,6 +1052,7 @@ window.iunaApp = function iunaApp() {
             this.refreshPagedDataset(kind, { silent: options.silent === true })
           )
         );
+        this.maybeStartTour();
       } catch (error) {
         if (String(error.message || "").includes("401")) {
           this.stopPolling();
@@ -944,6 +1104,7 @@ window.iunaApp = function iunaApp() {
           this.lastUpdated = new Date();
           this.syncMiningEvents({ status, blocks: null });
           this.scheduleFeeEstimates();
+          this.maybeStartTour();
         })
         .catch((error) => {
           if (options.silent !== true) this.showFlash(error.message, "error");
@@ -1569,6 +1730,7 @@ window.iunaApp = function iunaApp() {
     },
 
     closeModals() {
+      if (this.tourActive) this.dismissTour();
       this.closeDesktopUpdateModal();
       this.closeOptimizeWallet();
       this.closeSendConfirmModal();
