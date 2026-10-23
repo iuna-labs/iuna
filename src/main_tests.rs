@@ -101,7 +101,7 @@ fn management_ui_warns_when_transfer_fees_exceed_amount_but_not_for_burns() {
 fn management_ui_opens_on_the_dashboard_and_exposes_chain_health_thresholds() {
     let html = include_str!("adapters/http/index_html.rs");
     let javascript = include_str!("../www/assets/iuna-ui.js");
-    assert!(html.contains("@click=\"setTab('dashboard')\""));
+    assert!(html.contains("@click=\"setTab('dashboard'); tourTargetClicked('dashboard')\""));
     assert!(html.contains("Current balance"));
     assert!(html.contains("dashboardLastBlockLabel()"));
     assert!(html.contains("dashboardMiningLabel()"));
