@@ -149,7 +149,7 @@ pub(super) const INDEX_HTML: &str = concat!(
     .setup-grid { width: 100%; display: grid; grid-template-columns: minmax(0, .9fr) minmax(320px, .7fr); gap: 12px; align-items: start; }
     .setup-section { border: 1px solid #2f363c; border-radius: 8px; padding: 13px; background: #111316; }
     .setup-node-mode, .setup-network, .setup-wallet-section { grid-column: 1 / -1; }
-    .segmented.setup-mode-picker { width: 100%; display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); }
+    .segmented.setup-mode-picker { width: 100%; display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); }
     .setup-mode-picker button { min-width: 0; min-height: 38px; white-space: normal; }
     .setup-network-row { display: grid; grid-template-columns: minmax(0, 1fr); gap: 10px; align-items: end; }
     .setup-network-copy { margin-top: 8px; color: #a8b2b8; line-height: 1.45; }
@@ -678,7 +678,7 @@ pub(super) const INDEX_HTML: &str = concat!(
           <span>Wallet</span>
           <span class="nav-shortcut" x-show="commandKeyHeld" x-text="navigationShortcutNumber('wallet')" aria-hidden="true"></span>
         </button>
-        <button class="nav-button" x-show="advancedMode()" :class="{ active: tab === 'mining' }" @click="setTab('mining')" type="button" title="Mining" aria-label="Mining">
+        <button class="nav-button" :class="{ active: tab === 'mining' }" @click="setTab('mining')" type="button" title="Mining" aria-label="Mining">
           <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M4 19V5"></path><path d="M4 19h16"></path><path d="M7 15l4-4 3 3 5-7"></path></svg>
           <span>Mining</span>
           <span class="nav-shortcut" x-show="commandKeyHeld" x-text="navigationShortcutNumber('mining')" aria-hidden="true"></span>
@@ -726,10 +726,6 @@ pub(super) const INDEX_HTML: &str = concat!(
     <header>
       <div>
         <h1 x-text="pageTitle()">iuna</h1>
-        <div class="basic-status-row" x-show="basicMode()">
-          <span class="basic-status" :class="networkHealthClass()" x-text="basicNetworkStatusLabel()"></span>
-          <button class="basic-status-detail" type="button" x-show="basicNetworkNeedsAttention()" @click="setTab('p2p')">Details</button>
-        </div>
       </div>
       <div class="header-actions">
         <div class="muted" x-text="lastUpdatedLabel()"></div>
@@ -1557,19 +1553,6 @@ pub(super) const INDEX_HTML: &str = concat!(
           <div class="settings-service">
             <div class="settings-mode-row">
               <div class="settings-mode-copy">
-                <div class="settings-mode-title">Mode</div>
-                <div class="muted" x-text="advancedMode() ? 'Node mode shows mining and peer controls.' : 'Wallet mode keeps the interface focused on wallet and chain views.'"></div>
-              </div>
-              <label class="toggle-switch" :class="{ active: advancedMode() }">
-                <input type="checkbox" :checked="advancedMode()" @change="setUiMode($event.target.checked ? 'advanced' : 'basic')">
-                <span class="toggle-track" aria-hidden="true"><span class="toggle-thumb"></span></span>
-                <span class="toggle-text" x-text="advancedMode() ? 'Node' : 'Wallet'"></span>
-              </label>
-            </div>
-          </div>
-          <div class="settings-service" x-show="advancedMode()">
-            <div class="settings-mode-row">
-              <div class="settings-mode-copy">
                 <div class="settings-mode-title">Fallback VDF</div>
                 <div class="muted">Top <span x-text="recoveryVdfTopRankPercent"></span>% of ticket ranks run fallback work. Recovery remains available to every node.</div>
               </div>
@@ -1578,7 +1561,7 @@ pub(super) const INDEX_HTML: &str = concat!(
               </label>
             </div>
           </div>
-          <div class="settings-service" x-show="advancedMode()">
+          <div class="settings-service">
             <div class="settings-mode-row">
               <div class="settings-mode-copy">
                 <div class="settings-mode-title">VDF memory</div>
@@ -1590,8 +1573,8 @@ pub(super) const INDEX_HTML: &str = concat!(
             </div>
           </div>
         </div>
-        <div class="settings-section-label" x-show="advancedMode()">Network services</div>
-        <div class="panel settings-wide network-services-panel" x-show="advancedMode()">
+        <div class="settings-section-label">Network services</div>
+        <div class="panel settings-wide network-services-panel">
           <h3>Node Networking</h3>
           <div class="settings-service">
             <div class="settings-mode-row">
@@ -1630,7 +1613,7 @@ pub(super) const INDEX_HTML: &str = concat!(
             </form>
           </div>
         </div>
-        <div class="panel" x-show="advancedMode() && p2pAcceptInbound">
+        <div class="panel" x-show="p2pAcceptInbound">
           <div class="settings-mode-row">
             <div class="settings-mode-copy">
               <div class="settings-mode-title">Wallet endpoint</div>
@@ -2202,11 +2185,9 @@ pub(super) const INDEX_HTML: &str = concat!(
       <div class="setup-grid">
         <div class="setup-section setup-node-mode">
           <div class="panel-head">
-            <h3>Mode</h3>
-            <span class="pill">Change later in Settings</span>
+            <h3>Node connectivity</h3>
           </div>
           <div class="segmented setup-mode-picker" role="tablist" aria-label="Initial node mode">
-            <button type="button" :class="{ active: setupNodeMode === 'wallet' }" @click="selectSetupNodeMode('wallet')">Wallet</button>
             <button type="button" :class="{ active: setupNodeMode === 'non-listening' }" @click="selectSetupNodeMode('non-listening')">Non-listening node</button>
             <button type="button" :class="{ active: setupNodeMode === 'listening' }" @click="selectSetupNodeMode('listening')">Listening node</button>
           </div>
@@ -2323,17 +2304,12 @@ mod tests {
         let networking = INDEX_HTML
             .find(r#"<div class="panel settings-wide network-services-panel""#)
             .expect("network services panel");
-        let wallet = INDEX_HTML.find("Wallet endpoint").expect("wallet endpoint");
-        let stratum = INDEX_HTML
-            .find("Stratum endpoint")
-            .expect("stratum endpoint");
+        let settings = &INDEX_HTML[networking..];
+        let wallet = settings.find("Wallet endpoint").expect("wallet endpoint");
+        let stratum = settings.find("Stratum endpoint").expect("stratum endpoint");
 
-        assert!(networking < stratum);
         assert!(stratum < wallet);
-        assert!(
-            INDEX_HTML
-                .contains(r#"<div class="panel" x-show="advancedMode() && p2pAcceptInbound">"#)
-        );
+        assert!(INDEX_HTML.contains(r#"<div class="panel" x-show="p2pAcceptInbound">"#));
         assert!(!INDEX_HTML.contains(r#"x-text="walletEndpointRestartMessage()""#));
         assert!(!INDEX_HTML.contains(r#"x-text="stratumRestartMessage()""#));
     }
@@ -2348,9 +2324,16 @@ mod tests {
             .expect("network services panel");
         let panel = &INDEX_HTML[general..networking];
 
-        assert!(panel.contains(r#"<div class="settings-mode-title">Mode</div>"#));
+        assert!(!panel.contains(r#"<div class="settings-mode-title">Mode</div>"#));
         assert!(panel.contains(r#"<div class="settings-mode-title">Fallback VDF</div>"#));
         assert!(panel.contains(r#"<div class="settings-mode-title">VDF memory</div>"#));
+    }
+
+    #[test]
+    fn node_mode_is_the_only_interface() {
+        assert!(!INDEX_HTML.contains("Wallet mode"));
+        assert!(!INDEX_HTML.contains("selectSetupNodeMode('wallet')"));
+        assert!(!INDEX_HTML.contains(r#"x-show="tab === 'guide'""#));
     }
 
     #[test]
