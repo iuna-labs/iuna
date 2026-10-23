@@ -137,7 +137,7 @@ pub(super) const INDEX_HTML: &str = concat!(
     .sync-progress-fill { height: 100%; border-radius: inherit; background: linear-gradient(90deg, #8de9cd, #d5f55f); transition: width .35s ease; }
     .sync-progress-label { color: #d5f55f; font-size: 14px; font-weight: 850; font-variant-numeric: tabular-nums; }
     @keyframes sync-spin { to { transform: rotate(360deg); } }
-    @media (prefers-reduced-motion: reduce) { .sync-spinner { animation-duration: 1.8s; } .sync-progress-fill, .brand-mark, .nav-button, .discord-button, .settings-button { transition: none; } .brand-mark:hover::after { animation: none; } }
+    @media (prefers-reduced-motion: reduce) { .sync-spinner { animation-duration: 1.8s; } .sync-progress-fill, .brand-mark, .nav-button, .discord-button, .settings-button, .tour-spotlight, .tour-card { transition: none; } .brand-mark:hover::after { animation: none; } }
     .setup-modal { width: min(980px, 100%); max-height: calc(100vh - 44px); overflow: auto; border: 1px solid #3b4448; border-radius: 8px; padding: 18px; background: #181b1f; box-shadow: 0 24px 80px rgba(0, 0, 0, .42); }
     .setup-modal-head { display: grid; gap: 5px; margin-bottom: 16px; }
     .setup-modal-head h2 { margin: 0; font-size: 24px; }
@@ -180,6 +180,15 @@ pub(super) const INDEX_HTML: &str = concat!(
     .settings-mode-row { display: flex; justify-content: space-between; gap: 14px; align-items: center; }
     .settings-mode-copy { min-width: 0; display: grid; gap: 4px; }
     .settings-mode-title { color: #e8edf0; font-size: 15px; font-weight: 850; }
+    .tour-overlay { position: fixed; z-index: 70; inset: 0; pointer-events: none; }
+    .tour-spotlight { position: fixed; border: 2px solid #d5f55f; border-radius: 999px; box-shadow: 0 0 0 9999px rgba(5, 6, 7, .78), 0 0 28px rgba(213, 245, 95, .42); transition: left .2s ease, top .2s ease, width .2s ease, height .2s ease; }
+    .tour-card { position: fixed; display: grid; gap: 12px; max-width: calc(100vw - 24px); border: 1px solid #566d25; border-radius: 12px; padding: 16px; background: #181b1f; box-shadow: 0 18px 50px rgba(0, 0, 0, .5); pointer-events: auto; transition: left .2s ease, top .2s ease; }
+    .tour-progress { color: #d5f55f; font-size: 11px; font-weight: 900; letter-spacing: .07em; text-transform: uppercase; }
+    .tour-card h2 { margin: 0; font-size: 20px; }
+    .tour-card p { margin: 0; color: #b8c1c6; line-height: 1.55; }
+    .tour-click-hint { color: #d5f55f; font-size: 12px; font-weight: 850; }
+    .tour-actions { display: flex; justify-content: space-between; gap: 8px; }
+    .tour-actions-group { display: flex; gap: 8px; margin-left: auto; }
     .settings-form { display: grid; gap: 10px; align-items: stretch; }
     .settings-service + .settings-service { margin-top: 16px; border-top: 1px solid #2f363c; padding-top: 16px; }
     .public-p2p-form { margin-top: 14px; }
@@ -671,24 +680,24 @@ pub(super) const INDEX_HTML: &str = concat!(
 <body x-data="iunaApp()" x-init="init()" @keydown.window="handleNavigationKeydown($event)" @keyup.window="handleNavigationKeyup($event)" @blur.window="releaseCommandKey()" @keydown.window.escape="closeModals()" x-cloak>
   <div class="app-shell" :inert="syncingNode()">
     <aside class="sidebar" aria-label="iuna navigation">
-      <button class="brand-mark" :class="{ active: tab === 'dashboard' }" type="button" @click="setTab('dashboard')" title="Dashboard" aria-label="Dashboard"><svg viewBox="0 0 32 32" aria-hidden="true" focusable="false"><circle class="mark-dot" cx="9.4" cy="7.6" r="2.8"></circle><path class="mark-loop" d="M9.4 13v7.1c0 3.7 2.9 6.4 6.6 6.4s6.6-2.7 6.6-6.4V13"></path></svg><span class="nav-shortcut" x-show="commandKeyHeld" x-text="navigationShortcutNumber('dashboard')" aria-hidden="true"></span></button>
+      <button class="brand-mark" data-tour="dashboard" :class="{ active: tab === 'dashboard' }" type="button" @click="setTab('dashboard'); tourTargetClicked('dashboard')" title="Dashboard" aria-label="Dashboard"><svg viewBox="0 0 32 32" aria-hidden="true" focusable="false"><circle class="mark-dot" cx="9.4" cy="7.6" r="2.8"></circle><path class="mark-loop" d="M9.4 13v7.1c0 3.7 2.9 6.4 6.6 6.4s6.6-2.7 6.6-6.4V13"></path></svg><span class="nav-shortcut" x-show="commandKeyHeld" x-text="navigationShortcutNumber('dashboard')" aria-hidden="true"></span></button>
       <nav class="side-nav">
-        <button class="nav-button" :class="{ active: tab === 'wallet' }" @click="setTab('wallet')" type="button" title="Wallet" aria-label="Wallet">
+        <button class="nav-button" data-tour="wallet" :class="{ active: tab === 'wallet' }" @click="setTab('wallet'); tourTargetClicked('wallet')" type="button" title="Wallet" aria-label="Wallet">
           <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M3 7h16a2 2 0 0 1 2 2v8a2 2 0 0 1-2 2H3z"></path><path d="M3 7V5a2 2 0 0 1 2-2h12"></path><path d="M16 13h3"></path></svg>
           <span>Wallet</span>
           <span class="nav-shortcut" x-show="commandKeyHeld" x-text="navigationShortcutNumber('wallet')" aria-hidden="true"></span>
         </button>
-        <button class="nav-button" :class="{ active: tab === 'mining' }" @click="setTab('mining')" type="button" title="Mining" aria-label="Mining">
+        <button class="nav-button" data-tour="mining" :class="{ active: tab === 'mining' }" @click="setTab('mining'); tourTargetClicked('mining')" type="button" title="Mining" aria-label="Mining">
           <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M4 19V5"></path><path d="M4 19h16"></path><path d="M7 15l4-4 3 3 5-7"></path></svg>
           <span>Mining</span>
           <span class="nav-shortcut" x-show="commandKeyHeld" x-text="navigationShortcutNumber('mining')" aria-hidden="true"></span>
         </button>
-        <button class="nav-button" :class="{ active: tab === 'p2p' }" @click="setTab('p2p')" type="button" title="P2P" aria-label="P2P">
+        <button class="nav-button" data-tour="p2p" :class="{ active: tab === 'p2p' }" @click="setTab('p2p'); tourTargetClicked('p2p')" type="button" title="P2P" aria-label="P2P">
           <svg viewBox="0 0 24 24" aria-hidden="true"><circle cx="6" cy="12" r="3"></circle><circle cx="18" cy="6" r="3"></circle><circle cx="18" cy="18" r="3"></circle><path d="M8.5 10.5 15.5 7.5"></path><path d="M8.5 13.5 15.5 16.5"></path></svg>
           <span>P2P</span>
           <span class="nav-shortcut" x-show="commandKeyHeld" x-text="navigationShortcutNumber('p2p')" aria-hidden="true"></span>
         </button>
-        <button class="nav-button" :class="{ active: tab === 'chain' }" @click="setTab('chain')" type="button" title="Explorer" aria-label="Explorer">
+        <button class="nav-button" data-tour="chain" :class="{ active: tab === 'chain' }" @click="setTab('chain'); tourTargetClicked('chain')" type="button" title="Explorer" aria-label="Explorer">
           <svg class="chain-icon" viewBox="0 0 24 24" aria-hidden="true"><rect x="1.5" y="9" width="5.5" height="5.5"></rect><rect x="9.25" y="9" width="5.5" height="5.5"></rect><rect x="17" y="9" width="5.5" height="5.5"></rect></svg>
           <span>Chain</span>
           <span class="nav-shortcut" x-show="commandKeyHeld" x-text="navigationShortcutNumber('chain')" aria-hidden="true"></span>
@@ -705,7 +714,7 @@ pub(super) const INDEX_HTML: &str = concat!(
         </button>
       </nav>
       <div class="sidebar-bottom-actions">
-        <button class="settings-button" :class="{ active: tab === 'settings' }" type="button" @click="setTab('settings')" title="Settings" aria-label="Settings">
+        <button class="settings-button" data-tour="settings" :class="{ active: tab === 'settings' }" type="button" @click="setTab('settings'); tourTargetClicked('settings')" title="Settings" aria-label="Settings">
           <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M9.7 3.2 9.2 5.5a7.2 7.2 0 0 0-1.4.8L5.6 5.6 3.2 9.8l1.7 1.6a7.8 7.8 0 0 0 0 1.6l-1.7 1.6 2.4 4.2 2.2-.7a7.2 7.2 0 0 0 1.4.8l.5 2.3h4.8l.5-2.3a7.2 7.2 0 0 0 1.4-.8l2.2.7 2.4-4.2-1.7-1.6a7.8 7.8 0 0 0 0-1.6L21 9.8l-2.4-4.2-2.2.7a7.2 7.2 0 0 0-1.4-.8l-.5-2.3H9.7Z"></path><circle cx="12" cy="12.2" r="3.1"></circle></svg>
           <span>Settings</span>
           <span class="nav-shortcut" x-show="commandKeyHeld" x-text="navigationShortcutNumber('settings')" aria-hidden="true"></span>
@@ -715,7 +724,7 @@ pub(super) const INDEX_HTML: &str = concat!(
         <span class="version-label" x-text="appVersionLabel()"></span>
         <span class="version-update" x-show="updateAvailable()">Update</span>
         </button>
-        <a class="discord-button" href="https://discord.gg/wdk8cjkj2G" target="_blank" rel="noopener noreferrer" title="Discord" aria-label="Discord">
+        <a class="discord-button" data-tour="discord" href="https://discord.gg/wdk8cjkj2G" target="_blank" rel="noopener noreferrer" title="Discord" aria-label="Discord">
         <svg viewBox="0 0 24 24" aria-hidden="true" focusable="false"><path d="M19.54 5.34A16.9 16.9 0 0 0 15.35 4a11.7 11.7 0 0 0-.54 1.1 15.8 15.8 0 0 0-4.62 0A11.7 11.7 0 0 0 9.65 4a16.9 16.9 0 0 0-4.19 1.34C2.81 9.28 2.09 13.12 2.45 16.9A16.8 16.8 0 0 0 7.59 19.5a12.8 12.8 0 0 0 1.1-1.79 10.9 10.9 0 0 1-1.73-.83c.14-.1.28-.21.42-.32a12.1 12.1 0 0 0 9.24 0c.14.11.28.22.42.32-.55.32-1.13.6-1.74.83.32.63.69 1.23 1.1 1.79a16.8 16.8 0 0 0 5.15-2.6c.42-4.38-.72-8.18-2.01-11.56ZM9.32 14.57c-1 0-1.82-.92-1.82-2.04 0-1.13.8-2.05 1.82-2.05 1.02 0 1.84.92 1.82 2.05 0 1.12-.8 2.04-1.82 2.04Zm5.36 0c-1 0-1.82-.92-1.82-2.04 0-1.13.8-2.05 1.82-2.05 1.02 0 1.84.92 1.82 2.05 0 1.12-.8 2.04-1.82 2.04Z"></path></svg>
         <span>Discord</span>
         </a>
@@ -1011,7 +1020,7 @@ pub(super) const INDEX_HTML: &str = concat!(
         <div class="panel">
           <div class="panel-head mining-head">
             <h3>Burn</h3>
-            <label class="toggle-switch" :class="{ active: miningEnabled }">
+            <label class="toggle-switch" data-tour="burn" :class="{ active: miningEnabled }">
               <input type="checkbox" :checked="miningEnabled" @change="setMiningEnabled($event.target.checked)">
               <span class="toggle-track" aria-hidden="true"><span class="toggle-thumb"></span></span>
               <span class="toggle-text" x-text="miningEnabled ? 'On' : 'Off'"></span>
@@ -1061,7 +1070,7 @@ pub(super) const INDEX_HTML: &str = concat!(
         <div class="panel">
           <div class="panel-head mining-head">
             <h3>Mine</h3>
-            <div class="mine-head-controls">
+            <div class="mine-head-controls" data-tour="mine-workers">
               <label class="toggle-switch" :class="{ active: powMiningEnabled }" title="Continuously search for PoW mine actions with a small local work budget">
                 <input type="checkbox" :checked="powMiningEnabled" @change="setPowMiningEnabled($event.target.checked)">
                 <span class="toggle-track"><span class="toggle-thumb"></span></span>
@@ -1572,6 +1581,15 @@ pub(super) const INDEX_HTML: &str = concat!(
               </label>
             </div>
           </div>
+          <div class="settings-service">
+            <div class="settings-mode-row">
+              <div class="settings-mode-copy">
+                <div class="settings-mode-title">Interface tour</div>
+                <div class="muted">Replay the guided introduction to the node controls.</div>
+              </div>
+              <button type="button" @click="startTour">Start tour</button>
+            </div>
+          </div>
         </div>
         <div class="settings-section-label">Network services</div>
         <div class="panel settings-wide network-services-panel">
@@ -1670,6 +1688,22 @@ pub(super) const INDEX_HTML: &str = concat!(
       </div>
     </section>
     </main>
+  </div>
+  <div class="tour-overlay" x-show="tourActive" @resize.window="positionTour" @scroll.window="positionTour" role="dialog" aria-labelledby="tour-title" aria-describedby="tour-copy">
+    <div class="tour-spotlight" x-show="currentTourStep().clickTarget" :style="tourSpotlightStyle" aria-hidden="true"></div>
+    <section class="tour-card" data-tour-card :style="tourCardStyle" tabindex="-1">
+      <div class="tour-progress" x-text="`Step ${tourStepIndex + 1} of ${tourSteps().length}`"></div>
+      <h2 id="tour-title" x-text="currentTourStep().title"></h2>
+      <p id="tour-copy" x-text="currentTourStep().text"></p>
+      <div class="tour-click-hint" x-show="currentTourStep().clickTarget">Click the highlighted item to continue</div>
+      <div class="tour-actions">
+        <button type="button" class="subtle" @click="dismissTour">Close</button>
+        <div class="tour-actions-group">
+          <button type="button" x-show="tourStepIndex > 0" @click="previousTourStep">Back</button>
+          <button type="button" class="primary" x-show="!currentTourStep().clickTarget" @click="nextTourStep" x-text="tourStepIndex === tourSteps().length - 1 ? 'Finish' : 'Next'"></button>
+        </div>
+      </div>
+    </section>
   </div>
   <div class="setup-overlay" x-show="showingNetworkMigration()" x-transition.opacity role="dialog" aria-modal="true" aria-labelledby="network-migration-title">
     <section class="setup-modal">
@@ -2330,10 +2364,25 @@ mod tests {
     }
 
     #[test]
-    fn node_mode_is_the_only_interface() {
+    fn node_mode_is_the_only_interface_and_tour_can_be_replayed() {
         assert!(!INDEX_HTML.contains("Wallet mode"));
         assert!(!INDEX_HTML.contains("selectSetupNodeMode('wallet')"));
         assert!(!INDEX_HTML.contains(r#"x-show="tab === 'guide'""#));
+        for target in [
+            "dashboard",
+            "wallet",
+            "mining",
+            "mine-workers",
+            "burn",
+            "p2p",
+            "chain",
+            "settings",
+            "discord",
+        ] {
+            assert!(INDEX_HTML.contains(&format!(r#"data-tour="{target}""#)));
+        }
+        assert!(INDEX_HTML.contains(r#"x-show="tourActive""#));
+        assert!(INDEX_HTML.contains(r#"@click="startTour">Start tour"#));
     }
 
     #[test]
