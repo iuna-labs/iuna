@@ -45,13 +45,6 @@ window.iunaApp = function iunaApp() {
     })(),
     networkHealth: {},
     networkHealthLoaded: false,
-    uiMode: (() => {
-      try {
-        return localStorage.getItem("iunaUiMode") === "advanced" ? "advanced" : "basic";
-      } catch {
-        return "basic";
-      }
-    })(),
     latestRelease: null,
     releaseCheckState: "idle",
     releaseCheckError: null,
@@ -91,7 +84,7 @@ window.iunaApp = function iunaApp() {
     walletEndpointBindPort: 18662,
     walletEndpointBindPortDirty: false,
     setupWallet: { address: null, seed_phrase: null, dev_verify_bypass: false, requires_peer: false },
-    setupNodeMode: "wallet",
+    setupNodeMode: "non-listening",
     setupWalletMode: "create",
     setupSeedStep: "write",
     generatedSeedPhrase: "",
@@ -256,9 +249,7 @@ window.iunaApp = function iunaApp() {
     },
 
     allowedTabs() {
-      const tabs = this.advancedMode()
-        ? ["dashboard", "wallet", "mining", "p2p", "chain", "settings"]
-        : ["dashboard", "wallet", "p2p", "chain", "settings"];
+      const tabs = ["dashboard", "wallet", "mining", "p2p", "chain", "settings"];
       if (this.developmentMode()) {
         tabs.splice(tabs.indexOf("chain") + 1, 0, "metrics", "leaderboards");
       }
@@ -316,28 +307,6 @@ window.iunaApp = function iunaApp() {
 
     developmentMode() {
       return this.keepTrackOfMetrics === true || this.config.keep_track_of_metrics === true;
-    },
-
-    basicMode() {
-      return this.uiMode !== "advanced";
-    },
-
-    advancedMode() {
-      return this.uiMode === "advanced";
-    },
-
-    setUiMode(mode) {
-      this.uiMode = mode === "advanced" ? "advanced" : "basic";
-      try {
-        localStorage.setItem("iunaUiMode", this.uiMode);
-      } catch {}
-      if (!this.allowedTabs().includes(this.tab)) {
-        this.setTab("dashboard");
-      }
-    },
-
-    toggleUiMode() {
-      this.setUiMode(this.advancedMode() ? "basic" : "advanced");
     },
 
     pageTitle() {
@@ -468,9 +437,9 @@ window.iunaApp = function iunaApp() {
     },
 
     selectSetupNodeMode(mode) {
-      this.setupNodeMode = ["wallet", "non-listening", "listening"].includes(mode)
+      this.setupNodeMode = ["non-listening", "listening"].includes(mode)
         ? mode
-        : "wallet";
+        : "non-listening";
       this.setupFeedback = null;
     },
 
@@ -478,10 +447,7 @@ window.iunaApp = function iunaApp() {
       if (this.setupNodeMode === "listening") {
         return "Listening node shows mining and P2P controls and accepts inbound P2P connections when TCP port 9444 is reachable.";
       }
-      if (this.setupNodeMode === "non-listening") {
-        return "Non-listening node shows mining and P2P controls, connects out to peers, and keeps inbound P2P closed.";
-      }
-      return "Wallet mode keeps the interface focused on your wallet and chain, while this node only connects out to peers.";
+      return "Non-listening node connects out to peers and keeps inbound P2P closed.";
     },
 
     async refreshAuth() {
@@ -827,9 +793,9 @@ window.iunaApp = function iunaApp() {
     },
 
     async applySetupNodeMode() {
-      const mode = ["wallet", "non-listening", "listening"].includes(this.setupNodeMode)
+      const mode = ["non-listening", "listening"].includes(this.setupNodeMode)
         ? this.setupNodeMode
-        : "wallet";
+        : "non-listening";
       const acceptInbound = mode === "listening";
       if (this.p2pAcceptInbound !== acceptInbound) {
         await this.submitForm("/api/settings/p2p-inbound", {
@@ -838,7 +804,6 @@ window.iunaApp = function iunaApp() {
         });
         this.p2pAcceptInbound = acceptInbound;
       }
-      this.setUiMode(mode === "wallet" ? "basic" : "advanced");
     },
 
     async refresh(options = {}) {
