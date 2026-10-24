@@ -2488,10 +2488,10 @@ fn wallet_transaction_addresses(transaction: &Transaction) -> Vec<String> {
     match transaction {
         Transaction::Transfer { .. } => {
             let mut addresses = vec![transaction.sender().to_string()];
-            if let Some(to) = transaction.to() {
-                if to != transaction.sender() {
-                    addresses.push(to.to_string());
-                }
+            if let Some(to) = transaction.to()
+                && to != transaction.sender()
+            {
+                addresses.push(to.to_string());
             }
             addresses
         }
@@ -2712,7 +2712,7 @@ fn metric_difficulty_for_block(
     let previous_difficulty = previous
         .map(|row| row.mine_difficulty_bits)
         .unwrap_or(snapshot.launch_profile.mine_difficulty_bits);
-    if block.height == 0 || block.height % MINE_RETARGET_WINDOW_BLOCKS != 0 {
+    if block.height == 0 || !block.height.is_multiple_of(MINE_RETARGET_WINDOW_BLOCKS) {
         return previous_difficulty;
     }
     let window_start = block.height + 1 - MINE_RETARGET_WINDOW_BLOCKS;

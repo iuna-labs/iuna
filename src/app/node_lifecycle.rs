@@ -188,10 +188,10 @@ impl NodeCore {
     }
 
     pub fn wallet_receive_address(&self) -> Result<String> {
-        if transaction_v2_is_active(self.ledger.height()) {
-            if let Ok(wallet) = self.wallet.unlocked() {
-                return self.ledger.wallet_receive_address(wallet);
-            }
+        if transaction_v2_is_active(self.ledger.height())
+            && let Ok(wallet) = self.wallet.unlocked()
+        {
+            return self.ledger.wallet_receive_address(wallet);
         }
         encode_address(self.wallet.address(), self.address_network())
     }

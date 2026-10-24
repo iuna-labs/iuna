@@ -203,10 +203,10 @@ pub(super) async fn wallet_password_for_request(
 }
 
 pub(super) fn auth_client_key(headers: &HeaderMap, socket_addr: Option<SocketAddr>) -> String {
-    if let Some(addr) = socket_addr {
-        if !trusted_forwarding_peer(addr.ip()) {
-            return addr.ip().to_string();
-        }
+    if let Some(addr) = socket_addr
+        && !trusted_forwarding_peer(addr.ip())
+    {
+        return addr.ip().to_string();
     }
     forwarded_for_client(headers)
         .or_else(|| header_string(headers, "x-real-ip"))
@@ -388,14 +388,13 @@ async fn create_session_cookie(state: &HttpState, password: SecretString) -> Res
     let expires_at = now_ms().saturating_add(AUTH_SESSION_TTL_MS);
     let mut sessions = state.auth_sessions.lock().await;
     sessions.retain(|_, session| session.expires_at > now_ms());
-    if sessions.len() >= MAX_AUTH_SESSIONS {
-        if let Some(oldest) = sessions
+    if sessions.len() >= MAX_AUTH_SESSIONS
+        && let Some(oldest) = sessions
             .iter()
             .min_by_key(|(_, session)| session.expires_at)
             .map(|(token, _)| token.clone())
-        {
-            sessions.remove(&oldest);
-        }
+    {
+        sessions.remove(&oldest);
     }
     sessions.insert(
         token_hash,

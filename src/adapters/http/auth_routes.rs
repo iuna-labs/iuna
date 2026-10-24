@@ -48,12 +48,11 @@ pub(super) async fn require_auth_middleware(
     request.extensions_mut().insert(AuthClientKey(client_key));
     if auth_exempt_path(&path) {
         let mut response = next.run(request).await;
-        if issue_setup_cookie {
-            if let Some(cookie) = setup_capability_cookie(&state).await {
-                if let Ok(value) = cookie.parse() {
-                    response.headers_mut().append(header::SET_COOKIE, value);
-                }
-            }
+        if issue_setup_cookie
+            && let Some(cookie) = setup_capability_cookie(&state).await
+            && let Ok(value) = cookie.parse()
+        {
+            response.headers_mut().append(header::SET_COOKIE, value);
         }
         return response;
     }

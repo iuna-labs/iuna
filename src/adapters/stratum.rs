@@ -167,10 +167,10 @@ async fn run_listener(server: StratumServer, listener: TcpListener) {
                 let server = server.clone();
                 tokio::spawn(async move {
                     let _permit = permit;
-                    if let Err(error) = handle_connection(server, stream).await {
-                        if debug_logging_enabled() {
-                            eprintln!("stratum session with {remote} failed: {error:#}");
-                        }
+                    if let Err(error) = handle_connection(server, stream).await
+                        && debug_logging_enabled()
+                    {
+                        eprintln!("stratum session with {remote} failed: {error:#}");
                     }
                 });
             }
@@ -486,11 +486,11 @@ fn hex_array_4(input: &str) -> Result<[u8; 4]> {
 }
 
 fn decode_hex(input: &str) -> Result<Vec<u8>> {
-    if input.len() % 2 != 0 {
+    if !input.len().is_multiple_of(2) {
         bail!("hex string has odd length");
     }
     let mut bytes = Vec::with_capacity(input.len() / 2);
-    for pair in input.as_bytes().chunks_exact(2) {
+    for pair in input.as_bytes().as_chunks::<2>().0 {
         bytes.push((hex_value(pair[0])? << 4) | hex_value(pair[1])?);
     }
     Ok(bytes)

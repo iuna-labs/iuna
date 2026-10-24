@@ -383,10 +383,10 @@ impl Ledger {
             }
             self.validate_transaction_terms(&masked.burn)?;
             let key = (masked.burn.fee(), masked.burn.signature().to_string());
-            if let Some((previous_fee, previous_signature)) = &previous_key {
-                if key.0 > *previous_fee || key.0 == *previous_fee && key.1 < *previous_signature {
-                    bail!("burn bundle section is not fee ordered");
-                }
+            if let Some((previous_fee, previous_signature)) = &previous_key
+                && (key.0 > *previous_fee || key.0 == *previous_fee && key.1 < *previous_signature)
+            {
+                bail!("burn bundle section is not fee ordered");
             }
             previous_key = Some(key);
         }
@@ -592,10 +592,10 @@ impl Ledger {
             self.validate_transaction_terms(burn)?;
             self.validate_transaction_anchor_for_block(burn, expected_height)?;
             let key = (burn.fee(), burn.signature().to_string());
-            if let Some((previous_fee, previous_signature)) = &previous_key {
-                if key.0 > *previous_fee || key.0 == *previous_fee && key.1 < *previous_signature {
-                    bail!("burn bundle is not fee ordered");
-                }
+            if let Some((previous_fee, previous_signature)) = &previous_key
+                && (key.0 > *previous_fee || key.0 == *previous_fee && key.1 < *previous_signature)
+            {
+                bail!("burn bundle is not fee ordered");
             }
             previous_key = Some(key);
         }
@@ -614,10 +614,10 @@ impl Ledger {
             }
             self.validate_transaction_v2_anchor_for_block(&burn, expected_height)?;
             let key = (burn.fee(), id);
-            if let Some((previous_fee, previous_id)) = &previous_v2_key {
-                if key.0 > *previous_fee || key.0 == *previous_fee && key.1 < *previous_id {
-                    bail!("transaction v2 burn bundle is not fee ordered");
-                }
+            if let Some((previous_fee, previous_id)) = &previous_v2_key
+                && (key.0 > *previous_fee || key.0 == *previous_fee && key.1 < *previous_id)
+            {
+                bail!("transaction v2 burn bundle is not fee ordered");
             }
             previous_v2_key = Some(key);
         }

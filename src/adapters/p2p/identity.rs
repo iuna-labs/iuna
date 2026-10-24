@@ -54,7 +54,7 @@ pub(super) fn decode_hex_array<const N: usize>(value: &str) -> Result<[u8; N]> {
         anyhow::bail!("hex value has {} chars, expected {}", value.len(), N * 2);
     }
     let mut bytes = [0_u8; N];
-    for (index, chunk) in value.as_bytes().chunks_exact(2).enumerate() {
+    for (index, chunk) in value.as_bytes().as_chunks::<2>().0.iter().enumerate() {
         let high = hex_nibble(chunk[0])?;
         let low = hex_nibble(chunk[1])?;
         bytes[index] = (high << 4) | low;

@@ -451,7 +451,7 @@ mod tests {
     use std::collections::BTreeMap;
 
     use super::*;
-    use crate::domain::{GenesisBurn, Wallet};
+    use crate::domain::{GenesisBurn, VDF_TARGET_BLOCK_MS, Wallet};
 
     fn mined_ledger(seed: &str, blocks: u64) -> (Ledger, Wallet) {
         let wallet = Wallet::from_seed(seed);
@@ -484,7 +484,14 @@ mod tests {
     #[test]
     fn vdf_retarget_does_not_depend_on_resident_history() {
         let (mut ledger, wallet) = mined_ledger("vdf-retarget-window", 0);
-        for delay_ms in [200_000, 300_000, 400_000, 600_000, 900_000, 1_200_000] {
+        for delay_ms in [
+            VDF_TARGET_BLOCK_MS / 2,
+            VDF_TARGET_BLOCK_MS,
+            VDF_TARGET_BLOCK_MS * 3 / 2,
+            VDF_TARGET_BLOCK_MS * 2,
+            VDF_TARGET_BLOCK_MS * 3,
+            VDF_TARGET_BLOCK_MS * 4,
+        ] {
             mine_block_after(&mut ledger, &wallet, delay_ms);
         }
         let full_chain_average =
