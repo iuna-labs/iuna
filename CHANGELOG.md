@@ -5,6 +5,34 @@ from the Git history and Conventional Commit titles by `deployment.sh`.
 
 ## [Unreleased]
 
+## [0.4.69] - 2026-10-24
+
+### Added
+
+- remove wallet mode
+- add interactive interface tour
+
+### Fixed
+
+- update audited transitive dependencies
+- update ctutils in auxiliary lockfiles
+- satisfy Rust lint and test checks
+- use released updater dependency
+- account for burn ticket horizon
+- install release targets for pinned toolchain
+
+### Documentation
+
+- thank community tester
+
+### Tests
+
+- align dashboard assertion with tour
+
+### Maintenance
+
+- update Rust toolchain and Tauri updater
+
 ## [0.4.68] - 2026-10-16
 
 ### Fixed
