@@ -2,7 +2,7 @@
 name = "iuna-desktop"
 version = "0.4.68"
 edition = "2024"
-rust-version = "1.88"
+rust-version = "1.99.1"
 license = "Apache-2.0"
 publish = false
 
@@ -13,4 +13,4 @@ tauri-build = { version = "2", features = [] }
 serde_json = "1"
 tauri = { version = "2", features = ["tray-icon"] }
 tauri-plugin-shell = "2"
-tauri-plugin-updater = { version = "2", default-features = false, features = ["native-tls", "zip"] }
+tauri-plugin-updater = { git = "https://github.com/tauri-apps/plugins-workspace", rev = "c75459d8996b8e7097d556de4e9948bd730f6e9c", default-features = false, features = ["native-tls", "zip"] }
