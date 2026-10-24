@@ -1,6 +1,6 @@
 [package]
 name = "iuna-desktop"
-version = "0.4.68"
+version = "0.4.69"
 edition = "2024"
 rust-version = "1.99.1"
 license = "Apache-2.0"
