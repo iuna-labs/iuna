@@ -646,8 +646,6 @@ build_linux_cli_archives() {
           ;;
       esac
       rm -rf /var/lib/apt/lists/*
-      rustup target add aarch64-unknown-linux-gnu x86_64-unknown-linux-gnu
-
       mkdir -p /work/iuna
       tar -C /src/iuna \
         --exclude=./target \
@@ -659,6 +657,7 @@ build_linux_cli_archives() {
         -cf - . | tar -C /work/iuna -xf -
 
       cd /work/iuna
+      rustup target add aarch64-unknown-linux-gnu x86_64-unknown-linux-gnu
       CC_aarch64_unknown_linux_gnu=aarch64-linux-gnu-gcc \
       AR_aarch64_unknown_linux_gnu=aarch64-linux-gnu-ar \
       CARGO_TARGET_AARCH64_UNKNOWN_LINUX_GNU_LINKER=aarch64-linux-gnu-gcc \

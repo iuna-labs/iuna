@@ -25,9 +25,12 @@ test('burn save button is primary only while settings are dirty', () => {
   assert.match(indexHtml, /:class="burnAmountDirty \? 'primary' : 'subtle'">Save<\/button>/);
 });
 
-test('burn outlook shows the proposed share and single-draw return', () => {
+test('burn outlook uses the full configured ticket lifetime', () => {
   const ui = app();
-  ui.status = { mining: { eligible_burn_total: 1_000_000, wallet_eligible_burn: 200_000 } };
+  ui.status = {
+    launch_profile: { ticket_expiry_window_heights: 3 },
+    mining: { eligible_burn_total: 1_000_000, wallet_eligible_burn: 200_000 },
+  };
   ui.burnAmountDraft = '0.2';
   ui.feeEstimates.burn = { fee: 0 };
   ui.blocks = [{
@@ -41,17 +44,19 @@ test('burn outlook shows the proposed share and single-draw return', () => {
   const outlook = ui.burnOutlook();
   assert.equal(outlook.otherBurn, 800_000);
   assert.equal(outlook.scenarioTotal, 1_000_000);
-  assert.equal(outlook.chancePercent, 20);
+  assert.equal(outlook.drawHorizon, 3);
+  assert.ok(Math.abs(outlook.chancePercent - 48.8) < 1e-9);
   assert.equal(outlook.reward, 1_000_000);
-  assert.equal(outlook.expectedPayout, 200_000);
-  assert.equal(outlook.net, 0);
+  assert.ok(Math.abs(outlook.expectedPayout - 488_000) < 1e-6);
+  assert.ok(Math.abs(outlook.net - 288_000) < 1e-6);
   assert.equal(outlook.level, 'positive');
-  assert.equal(outlook.maxExpectedValueBurn, 94_427);
-  assert.equal(Math.round(outlook.maxExpectedNet), 11_146);
-  assert.equal(Math.round(outlook.excessBurn), 105_573);
-  assert.match(ui.burnOutlookSizingLabel(), /max-EV point: IUNA 0\.094427/);
-  assert.match(ui.burnOutlookSizingLabel(), /IUNA 0\.105573 of the draft is beyond/);
-  assert.match(ui.burnOutlookSizingLabel(), /Break-even ceiling.*IUNA 0\.2/);
+  assert.equal(outlook.maxExpectedValueBurn, 313_263);
+  assert.equal(Math.round(outlook.maxExpectedNet), 315_649);
+  assert.equal(outlook.excessBurn, 0);
+  assert.equal(outlook.breakEvenCeiling, 894_830);
+  assert.match(ui.burnOutlookSizingLabel(), /3-draw ticket-lifetime max-EV point: IUNA 0\.313263/);
+  assert.match(ui.burnOutlookSizingLabel(), /draft is not beyond/);
+  assert.match(ui.burnOutlookSizingLabel(), /Break-even ceiling.*IUNA 0\.89483/);
 });
 
 test('burn outlook distinguishes below, at, and above the max-EV point', () => {
@@ -86,16 +91,34 @@ test('max-EV action fills the burn draft without saving it', () => {
   assert.equal(ui.canUseMaxEvBurn(), false);
 });
 
-test('burn outlook warns when the scenario pool exceeds the payout', () => {
+test('burn outlook does not reject competition that remains profitable over three draws', () => {
   const ui = app();
-  ui.status = { mining: { eligible_burn_total: 2_000_000, wallet_eligible_burn: 0 } };
+  ui.status = {
+    launch_profile: { ticket_expiry_window_heights: 3 },
+    mining: { eligible_burn_total: 2_000_000, wallet_eligible_burn: 0 },
+  };
   ui.burnAmountDraft = '1';
   ui.blocks = [{ height: 1, reward: 1_000_000, finalizer_mode: 'recovery', burn_bundles: [] }];
 
   const outlook = ui.burnOutlook();
-  assert.ok(Math.abs(outlook.chancePercent - 100 / 3) < 1e-9);
+  assert.ok(Math.abs(outlook.chancePercent - 100 * (1 - (2 / 3) ** 3)) < 1e-9);
   assert.ok(outlook.net < 0);
-  assert.equal(outlook.verdict, 'Do not burn: competition exceeds payout');
+  assert.equal(outlook.verdict, 'Overburn: extra burn lowers expected profit');
+  assert.ok(outlook.maxExpectedValueBurn > 0);
+});
+
+test('burn outlook warns only when competition exceeds the ticket-lifetime payout', () => {
+  const ui = app();
+  ui.status = {
+    launch_profile: { ticket_expiry_window_heights: 3 },
+    mining: { eligible_burn_total: 3_000_000, wallet_eligible_burn: 0 },
+  };
+  ui.burnAmountDraft = '1';
+  ui.blocks = [{ height: 1, reward: 1_000_000, finalizer_mode: 'recovery', burn_bundles: [] }];
+
+  const outlook = ui.burnOutlook();
+  assert.equal(outlook.maxExpectedValueBurn, 0);
+  assert.equal(outlook.verdict, 'Do not burn: competition exceeds ticket-lifetime payout');
   assert.match(ui.burnOutlookSizingLabel(), /Sizing signal: 0 IUNA/);
 });
 
