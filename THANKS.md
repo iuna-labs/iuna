@@ -9,3 +9,4 @@ Special thanks to:
 - Robin - Valuable UX/UI and protocol testing
 - Pim - Windows testing
 - [intergalactisch](https://github.com/intergalactisch) - running a testnet node
+- [banditia](https://github.com/banditiaeja) - testing and giving feedback
