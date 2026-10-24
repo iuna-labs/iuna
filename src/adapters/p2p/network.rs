@@ -465,7 +465,7 @@ impl GossipNetwork {
             })
             .collect::<Vec<_>>();
         GossipEnvelope::PeerList {
-            peers: self_addr.into_iter().chain(peers.into_iter()).collect(),
+            peers: self_addr.into_iter().chain(peers).collect(),
         }
     }
 
@@ -533,10 +533,10 @@ impl GossipNetwork {
 
     pub(super) async fn forward_outbox(&self) {
         let outbox = self.inner.node.lock().await.drain_outbox();
-        if let Err(error) = self.broadcast(outbox).await {
-            if debug_logging_enabled() {
-                eprintln!("p2p rebroadcast failed: {error:#}");
-            }
+        if let Err(error) = self.broadcast(outbox).await
+            && debug_logging_enabled()
+        {
+            eprintln!("p2p rebroadcast failed: {error:#}");
         }
     }
 }

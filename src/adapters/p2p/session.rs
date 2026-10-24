@@ -373,96 +373,92 @@ async fn session_loop(
         write_peer_exchange(&network, &mut writer, &known_peer).await?;
     }
 
-    if is_outbound_session {
-        if let Ok(Ok(Some(envelope))) = timeout(
+    if is_outbound_session
+        && let Ok(Ok(Some(envelope))) = timeout(
             HANDSHAKE_TIMEOUT,
             read_session_envelope(&network, &connection_label, &mut reader),
         )
         .await
-        {
-            if let GossipEnvelope::Hello(hello) = envelope {
-                let status = process_hello_with_verification(
-                    &network,
-                    &mut writer,
-                    &mut reader,
-                    &connection_label,
-                    remote_addr,
-                    &mut known_peer,
-                    hello,
-                )
-                .await?;
-                if status.reject_session {
-                    return Ok(());
-                }
-                peer_status = Some(status);
-                handshake_complete = true;
-                if is_outbound_session && known_peer.is_none() {
-                    return Ok(());
-                }
-                maybe_start_catchup(
-                    &network,
-                    &mut writer,
-                    peer_status
-                        .as_ref()
-                        .context("outbound Hello completed without peer status")?,
-                    &mut catchup_requested_at,
-                )
-                .await?;
-                write_peer_exchange(&network, &mut writer, &known_peer).await?;
-            } else if let GossipEnvelope::PeerStatus {
-                height,
-                tip_hash,
-                time_ms,
-            } = envelope
-            {
-                let status = PeerStatus::from_envelope(height, tip_hash, time_ms)
-                    .with_capabilities(
-                        peer_status
-                            .as_ref()
-                            .map(|status| status.capabilities.clone())
-                            .unwrap_or_default(),
-                    );
-                record_peer_status(&network, &known_peer, remote_addr, &status).await;
-                peer_status = Some(status);
-                handshake_complete = true;
-                maybe_start_catchup(
-                    &network,
-                    &mut writer,
-                    peer_status
-                        .as_ref()
-                        .context("outbound status update was not retained")?,
-                    &mut catchup_requested_at,
-                )
-                .await?;
-                write_peer_exchange(&network, &mut writer, &known_peer).await?;
-            } else if respond_to_peer_verification_challenge(&network, &mut writer, &envelope)
-                .await?
-            {
-                if known_peer.is_none() {
-                    return Ok(());
-                }
-            } else if !maybe_request_inventory(
+    {
+        if let GossipEnvelope::Hello(hello) = envelope {
+            let status = process_hello_with_verification(
                 &network,
                 &mut writer,
-                &envelope,
+                &mut reader,
+                &connection_label,
+                remote_addr,
+                &mut known_peer,
+                hello,
+            )
+            .await?;
+            if status.reject_session {
+                return Ok(());
+            }
+            peer_status = Some(status);
+            handshake_complete = true;
+            if is_outbound_session && known_peer.is_none() {
+                return Ok(());
+            }
+            maybe_start_catchup(
+                &network,
+                &mut writer,
+                peer_status
+                    .as_ref()
+                    .context("outbound Hello completed without peer status")?,
                 &mut catchup_requested_at,
             )
-            .await?
-            {
-                let requested_chain_data = process_envelope(
-                    &network,
-                    &mut writer,
-                    remote_addr,
-                    &mut known_peer,
-                    envelope,
-                )
-                .await?;
-                if requested_chain_data {
-                    catchup_requested_at = Some(Instant::now());
-                }
-                if is_outbound_session && known_peer.is_none() {
-                    return Ok(());
-                }
+            .await?;
+            write_peer_exchange(&network, &mut writer, &known_peer).await?;
+        } else if let GossipEnvelope::PeerStatus {
+            height,
+            tip_hash,
+            time_ms,
+        } = envelope
+        {
+            let status = PeerStatus::from_envelope(height, tip_hash, time_ms).with_capabilities(
+                peer_status
+                    .as_ref()
+                    .map(|status| status.capabilities.clone())
+                    .unwrap_or_default(),
+            );
+            record_peer_status(&network, &known_peer, remote_addr, &status).await;
+            peer_status = Some(status);
+            handshake_complete = true;
+            maybe_start_catchup(
+                &network,
+                &mut writer,
+                peer_status
+                    .as_ref()
+                    .context("outbound status update was not retained")?,
+                &mut catchup_requested_at,
+            )
+            .await?;
+            write_peer_exchange(&network, &mut writer, &known_peer).await?;
+        } else if respond_to_peer_verification_challenge(&network, &mut writer, &envelope).await? {
+            if known_peer.is_none() {
+                return Ok(());
+            }
+        } else if !maybe_request_inventory(
+            &network,
+            &mut writer,
+            &envelope,
+            &mut catchup_requested_at,
+        )
+        .await?
+        {
+            let requested_chain_data = process_envelope(
+                &network,
+                &mut writer,
+                remote_addr,
+                &mut known_peer,
+                envelope,
+            )
+            .await?;
+            if requested_chain_data {
+                catchup_requested_at = Some(Instant::now());
+            }
+            if is_outbound_session && known_peer.is_none() {
+                return Ok(());
             }
         }
     }
@@ -627,8 +623,8 @@ async fn session_loop(
                     response_satisfied,
                     requested_chain_data,
                 );
-                if continue_catchup && response_satisfied && !requested_chain_data {
-                    if let Some(status) = peer_status.as_ref() {
+                if continue_catchup && response_satisfied && !requested_chain_data
+                    && let Some(status) = peer_status.as_ref() {
                         maybe_start_catchup(
                             &network,
                             &mut writer,
@@ -636,7 +632,6 @@ async fn session_loop(
                             &mut catchup_requested_at,
                         ).await?;
                     }
-                }
                 if session_peer_is_banned(&network, &known_peer, remote_addr).await {
                     return Ok(());
                 }

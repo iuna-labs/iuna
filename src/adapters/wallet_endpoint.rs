@@ -408,10 +408,10 @@ async fn wallet_snapshot(
                 .lock()
                 .unwrap_or_else(|poisoned| poisoned.into_inner());
             if cache.tip_hash == tip_hash {
-                if cache.addresses_by_public_key.len() >= MAX_WALLET_RECOVERY_CACHE_ENTRIES {
-                    if let Some(evicted) = cache.addresses_by_public_key.keys().next().copied() {
-                        cache.addresses_by_public_key.remove(&evicted);
-                    }
+                if cache.addresses_by_public_key.len() >= MAX_WALLET_RECOVERY_CACHE_ENTRIES
+                    && let Some(evicted) = cache.addresses_by_public_key.keys().next().copied()
+                {
+                    cache.addresses_by_public_key.remove(&evicted);
                 }
                 cache
                     .addresses_by_public_key
@@ -736,7 +736,7 @@ async fn wallet_transactions(
         .flatten()
         .map(|item| (row.sort_key, item))
     }));
-    confirmed.sort_by(|left, right| right.0.cmp(&left.0));
+    confirmed.sort_by_key(|item| std::cmp::Reverse(item.0));
     items.extend(
         confirmed
             .into_iter()

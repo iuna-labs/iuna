@@ -519,11 +519,11 @@ fn hex_encode(bytes: impl AsRef<[u8]>) -> String {
 }
 
 fn decode_hex(input: &str) -> Result<Vec<u8>> {
-    if input.len() % 2 != 0 {
+    if !input.len().is_multiple_of(2) {
         bail!("hex string has odd length");
     }
     let mut bytes = Vec::with_capacity(input.len() / 2);
-    for pair in input.as_bytes().chunks_exact(2) {
+    for pair in input.as_bytes().as_chunks::<2>().0 {
         let high = decode_hex_nibble(pair[0])?;
         let low = decode_hex_nibble(pair[1])?;
         bytes.push((high << 4) | low);
@@ -706,10 +706,10 @@ fn temp_file_path(path: &Path, attempt: u64) -> PathBuf {
 }
 
 fn sync_parent_dir(path: &Path) {
-    if let Some(parent) = path.parent() {
-        if let Ok(dir) = File::open(parent) {
-            let _ = dir.sync_all();
-        }
+    if let Some(parent) = path.parent()
+        && let Ok(dir) = File::open(parent)
+    {
+        let _ = dir.sync_all();
     }
 }
 

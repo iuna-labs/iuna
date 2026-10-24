@@ -167,11 +167,11 @@ impl NodeCore {
     fn wallet_projected_balance(&self) -> Amount {
         let address = self.wallet.address();
         let mut balance = self.ledger.balance_of(address);
-        if let Ok(wallet) = self.wallet.unlocked() {
-            if let Ok(addresses) = self.ledger.wallet_owned_hybrid_encoded_addresses(wallet) {
-                for hybrid_address in addresses {
-                    balance = balance.saturating_add(self.ledger.balance_of(&hybrid_address));
-                }
+        if let Ok(wallet) = self.wallet.unlocked()
+            && let Ok(addresses) = self.ledger.wallet_owned_hybrid_encoded_addresses(wallet)
+        {
+            for hybrid_address in addresses {
+                balance = balance.saturating_add(self.ledger.balance_of(&hybrid_address));
             }
         }
         let confirmed_outputs = self
@@ -180,15 +180,16 @@ impl NodeCore {
             .into_iter()
             .map(|(outpoint, output)| (outpoint, output.amount))
             .collect::<std::collections::BTreeMap<_, _>>();
-        if let Some((height, burn)) = &self.local_block_anchor_burn {
-            if *height == self.ledger.height() && !self.ledger.has_transaction(burn.signature()) {
-                let output_total = transaction_output_total_for_address(burn, address);
-                let input_total =
-                    transaction_input_total_from_outputs(burn, address, &confirmed_outputs);
-                balance = balance
-                    .saturating_sub(input_total)
-                    .saturating_add(output_total);
-            }
+        if let Some((height, burn)) = &self.local_block_anchor_burn
+            && *height == self.ledger.height()
+            && !self.ledger.has_transaction(burn.signature())
+        {
+            let output_total = transaction_output_total_for_address(burn, address);
+            let input_total =
+                transaction_input_total_from_outputs(burn, address, &confirmed_outputs);
+            balance = balance
+                .saturating_sub(input_total)
+                .saturating_add(output_total);
         }
 
         balance

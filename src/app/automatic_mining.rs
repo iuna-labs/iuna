@@ -517,13 +517,12 @@ impl NodeCore {
         }
         let exact_at_fee_rate =
             self.build_burn_with_fee_rate_on_ledger(ledger, target, fee_per_byte);
-        if let Ok((built, estimate)) = exact_at_fee_rate {
-            if target
+        if let Ok((built, estimate)) = exact_at_fee_rate
+            && target
                 .checked_add(estimate.fee)
                 .is_some_and(|required| required <= balance)
-            {
-                return Some(built);
-            }
+        {
+            return Some(built);
         }
         if self.burn_per_block <= balance {
             let affordable_fee = balance.saturating_sub(target);
@@ -575,13 +574,11 @@ impl NodeCore {
         }
         if let Ok(candidate) =
             self.build_v2_burn_with_fee_rate_on_ledger(ledger, target, fee_per_byte, for_next_block)
-        {
-            if target
+            && target
                 .checked_add(candidate.1.fee)
                 .is_some_and(|required| required <= balance)
-            {
-                return Some(candidate);
-            }
+        {
+            return Some(candidate);
         }
 
         let mut low = 1;

@@ -256,21 +256,21 @@ fn generate_checkpoint_proof_cancellable(
                     });
                 }
             }
-            if row_start != 0 {
-                if let Some(aggregate) = aggregate {
-                    let aggregate = aggregate.fast_pow_u64_with_scratch(
-                        row_start,
-                        &limb_discriminant,
-                        &limb_threshold,
-                        &mut proof_scratch,
-                    );
-                    proof = proof.compose_unreduced(
-                        &aggregate,
-                        &limb_discriminant,
-                        &limb_threshold,
-                        &mut proof_scratch,
-                    );
-                }
+            if row_start != 0
+                && let Some(aggregate) = aggregate
+            {
+                let aggregate = aggregate.fast_pow_u64_with_scratch(
+                    row_start,
+                    &limb_discriminant,
+                    &limb_threshold,
+                    &mut proof_scratch,
+                );
+                proof = proof.compose_unreduced(
+                    &aggregate,
+                    &limb_discriminant,
+                    &limb_threshold,
+                    &mut proof_scratch,
+                );
             }
             completed_work += 1;
             report_proof_progress(progress, rounds, completed_work, total_work);
@@ -294,21 +294,21 @@ fn generate_checkpoint_proof_cancellable(
                     });
                 }
             }
-            if b0 != 0 {
-                if let Some(aggregate) = aggregate {
-                    let aggregate = aggregate.fast_pow_u64_with_scratch(
-                        b0,
-                        &limb_discriminant,
-                        &limb_threshold,
-                        &mut proof_scratch,
-                    );
-                    proof = proof.compose_unreduced(
-                        &aggregate,
-                        &limb_discriminant,
-                        &limb_threshold,
-                        &mut proof_scratch,
-                    );
-                }
+            if b0 != 0
+                && let Some(aggregate) = aggregate
+            {
+                let aggregate = aggregate.fast_pow_u64_with_scratch(
+                    b0,
+                    &limb_discriminant,
+                    &limb_threshold,
+                    &mut proof_scratch,
+                );
+                proof = proof.compose_unreduced(
+                    &aggregate,
+                    &limb_discriminant,
+                    &limb_threshold,
+                    &mut proof_scratch,
+                );
             }
             completed_work += 1;
             report_proof_progress(progress, rounds, completed_work, total_work);

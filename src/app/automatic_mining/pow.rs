@@ -54,12 +54,12 @@ impl NodeCore {
             return Ok(None);
         }
         let mut searched = outcome.attempts;
-        if let Some(cursor) = &mut self.auto_pow_mine_cursor {
-            if cursor.anchor == current_anchor {
-                cursor.next_nonce = outcome.next_nonce;
-                cursor.searched = cursor.searched.saturating_add(outcome.attempts);
-                searched = cursor.searched;
-            }
+        if let Some(cursor) = &mut self.auto_pow_mine_cursor
+            && cursor.anchor == current_anchor
+        {
+            cursor.next_nonce = outcome.next_nonce;
+            cursor.searched = cursor.searched.saturating_add(outcome.attempts);
+            searched = cursor.searched;
         }
         let Some(tx) = outcome.transaction else {
             self.last_auto_pow_mine_status = Some(format!(

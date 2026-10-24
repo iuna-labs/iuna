@@ -214,10 +214,10 @@ impl Ledger {
             if !transaction.is_burn() {
                 bail!("required block anchor must be a burn transaction");
             }
-            if let Some(owner) = required_burn_owner {
-                if transaction.burn_legacy_owner()?.as_deref() != Some(owner) {
-                    bail!("required block anchor burn must be from the recovery finalizer");
-                }
+            if let Some(owner) = required_burn_owner
+                && transaction.burn_legacy_owner()?.as_deref() != Some(owner)
+            {
+                bail!("required block anchor burn must be from the recovery finalizer");
             }
             apply_prevalidated_transaction_v2_with_pending_parents(
                 transaction,
@@ -427,10 +427,10 @@ impl Ledger {
         if !tx.is_burn() {
             bail!("required block anchor must be a burn transaction");
         }
-        if let Some(owner) = required_burn_owner {
-            if tx.sender() != owner {
-                bail!("required block anchor burn must be from the recovery finalizer");
-            }
+        if let Some(owner) = required_burn_owner
+            && tx.sender() != owner
+        {
+            bail!("required block anchor burn must be from the recovery finalizer");
         }
         if selected.len() >= self.launch_profile.max_block_transactions {
             bail!("required block anchor burn does not fit within the transaction count limit");

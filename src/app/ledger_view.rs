@@ -33,10 +33,11 @@ impl NodeCore {
             .iter()
             .flat_map(transaction_input_outpoints)
             .collect::<BTreeSet<_>>();
-        if let Some((height, burn)) = &self.local_block_anchor_burn {
-            if *height == self.ledger.height() && !self.ledger.has_transaction(burn.signature()) {
-                spent.extend(transaction_input_outpoints(burn));
-            }
+        if let Some((height, burn)) = &self.local_block_anchor_burn
+            && *height == self.ledger.height()
+            && !self.ledger.has_transaction(burn.signature())
+        {
+            spent.extend(transaction_input_outpoints(burn));
         }
         for transaction in self.ledger.pending_v2() {
             match transaction {

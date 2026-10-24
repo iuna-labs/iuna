@@ -667,11 +667,10 @@ impl Harness {
                 if let Ok(burn) =
                     self.ledger
                         .build_burn(&pressure_wallet, 1, 10 + u64::from(pressure_index))
+                    && self.ledger.submit_transaction(burn.clone()).is_ok()
                 {
-                    if self.ledger.submit_transaction(burn.clone()).is_ok() {
-                        metrics.fee_pressure_burns += 1;
-                        pressure_burns.push(burn);
-                    }
+                    metrics.fee_pressure_burns += 1;
+                    pressure_burns.push(burn);
                 }
             }
 
@@ -1916,10 +1915,10 @@ fn mini_validate_burn_bundle_section(ledger: &Ledger, block: &Block) -> Option<(
             return None;
         }
         let key = (masked.burn.fee(), masked.burn.signature().to_string());
-        if let Some((previous_fee, previous_signature)) = &previous_key {
-            if key.0 > *previous_fee || key.0 == *previous_fee && key.1 < *previous_signature {
-                return None;
-            }
+        if let Some((previous_fee, previous_signature)) = &previous_key
+            && (key.0 > *previous_fee || key.0 == *previous_fee && key.1 < *previous_signature)
+        {
+            return None;
         }
         previous_key = Some(key);
     }
@@ -3924,7 +3923,7 @@ fn replay_and_double_spend_do_not_change_supply() {
             actors[1].address(),
             1,
             1,
-            &[spend_outpoint.clone()],
+            std::slice::from_ref(&spend_outpoint),
         )
         .unwrap();
     let double_spend = harness

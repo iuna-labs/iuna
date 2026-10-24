@@ -388,7 +388,7 @@ pub(super) async fn api_wallet_transactions(
             },
         ));
     }
-    confirmed_items.sort_by(|left, right| right.0.cmp(&left.0));
+    confirmed_items.sort_by_key(|item| std::cmp::Reverse(item.0));
     items.extend(
         confirmed_items
             .into_iter()

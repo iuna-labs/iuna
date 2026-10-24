@@ -277,10 +277,8 @@ async fn main() -> Result<()> {
     } else {
         println!("public wallet endpoint: disabled");
     }
-    if p2p_accept_inbound {
-        if let Some(addr) = p2p_announce_addr {
-            println!("p2p announce address: {addr}");
-        }
+    if p2p_accept_inbound && let Some(addr) = p2p_announce_addr {
+        println!("p2p announce address: {addr}");
     }
     println!(
         "automatic finalization: VDF-driven, burning {} IUNA per block with {} IUNA per byte fee rate",
@@ -571,23 +569,23 @@ fn apply_startup_mining_config_overrides(
     pow_mining_workers: Option<u8>,
 ) -> bool {
     let mut dirty = false;
-    if let Some(enabled) = automatic_burn_enabled {
-        if ui_config.mining_enabled != enabled {
-            ui_config.mining_enabled = enabled;
-            dirty = true;
-        }
+    if let Some(enabled) = automatic_burn_enabled
+        && ui_config.mining_enabled != enabled
+    {
+        ui_config.mining_enabled = enabled;
+        dirty = true;
     }
-    if let Some(enabled) = pow_mining_enabled {
-        if ui_config.pow_mining_enabled != enabled {
-            ui_config.pow_mining_enabled = enabled;
-            dirty = true;
-        }
+    if let Some(enabled) = pow_mining_enabled
+        && ui_config.pow_mining_enabled != enabled
+    {
+        ui_config.pow_mining_enabled = enabled;
+        dirty = true;
     }
-    if let Some(workers) = pow_mining_workers {
-        if ui_config.pow_mining_workers != workers {
-            ui_config.pow_mining_workers = workers;
-            dirty = true;
-        }
+    if let Some(workers) = pow_mining_workers
+        && ui_config.pow_mining_workers != workers
+    {
+        ui_config.pow_mining_workers = workers;
+        dirty = true;
     }
     dirty
 }
@@ -1116,19 +1114,18 @@ async fn run_automatic_finalizer(
             (height, plan, outbox, vdf_memory_mib)
         };
 
-        if let Err(error) = gossip.broadcast(outbox).await {
-            if debug {
-                eprintln!("p2p broadcast failed after automatic burn: {error:#}");
-            }
+        if let Err(error) = gossip.broadcast(outbox).await
+            && debug
+        {
+            eprintln!("p2p broadcast failed after automatic burn: {error:#}");
         }
 
         let Some(work) = plan.work else {
-            if let Some(reason) = &plan.skipped_reason {
-                if debug
-                    && should_log_automatic_finalization_skip(&mut last_logged_skip, height, reason)
-                {
-                    println!("auto-finalization skipped at height {height}: {reason}");
-                }
+            if let Some(reason) = &plan.skipped_reason
+                && debug
+                && should_log_automatic_finalization_skip(&mut last_logged_skip, height, reason)
+            {
+                println!("auto-finalization skipped at height {height}: {reason}");
             }
             tokio::time::sleep(std::time::Duration::from_secs(1)).await;
             continue;
@@ -1399,10 +1396,10 @@ async fn run_automatic_finalizer(
             Err(_) => {}
         }
 
-        if let Err(error) = gossip.broadcast(outbox).await {
-            if debug {
-                eprintln!("p2p broadcast failed after automatic block: {error:#}");
-            }
+        if let Err(error) = gossip.broadcast(outbox).await
+            && debug
+        {
+            eprintln!("p2p broadcast failed after automatic block: {error:#}");
         }
 
         if failed_after_vdf {
@@ -1532,20 +1529,18 @@ async fn run_automatic_pow_miner(
             (pow_mined, outbox)
         };
 
-        if let Err(error) = gossip.broadcast(outbox).await {
-            if debug {
-                eprintln!("p2p broadcast failed after automatic PoW mining: {error:#}");
-            }
+        if let Err(error) = gossip.broadcast(outbox).await
+            && debug
+        {
+            eprintln!("p2p broadcast failed after automatic PoW mining: {error:#}");
         }
 
-        if debug {
-            if let Some(tx) = &pow_mined {
-                println!(
-                    "auto-pow queued mine action for height {} ({})",
-                    height,
-                    tx.signature()
-                );
-            }
+        if debug && let Some(tx) = &pow_mined {
+            println!(
+                "auto-pow queued mine action for height {} ({})",
+                height,
+                tx.signature()
+            );
         }
     }
 }
@@ -1573,10 +1568,10 @@ async fn run_peer_sync(node: SharedNode, gossip: p2p::GossipNetwork, debug: bool
         };
         let mut envelopes = envelopes;
         envelopes.push(gossip.peer_exchange().await);
-        if let Err(error) = gossip.broadcast(envelopes).await {
-            if debug {
-                eprintln!("p2p sync gossip failed: {error:#}");
-            }
+        if let Err(error) = gossip.broadcast(envelopes).await
+            && debug
+        {
+            eprintln!("p2p sync gossip failed: {error:#}");
         }
     }
 }

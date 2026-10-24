@@ -124,10 +124,10 @@ impl PeerBook {
     }
 
     pub fn promote_discovered_peer(&mut self, address: &str) {
-        if let Some(peer) = self.peers.get_mut(address) {
-            if peer.direction == PeerDirection::Discovered {
-                peer.direction = PeerDirection::Outbound;
-            }
+        if let Some(peer) = self.peers.get_mut(address)
+            && peer.direction == PeerDirection::Discovered
+        {
+            peer.direction = PeerDirection::Outbound;
         }
     }
 
@@ -150,10 +150,8 @@ impl PeerBook {
     pub fn add_discovered_peer_at(&mut self, address: impl Into<String>, now_ms: u64) -> bool {
         let address = address.into();
         let added = self.add_discovered_peer(address.clone());
-        if added {
-            if let Some(peer) = self.peers.get_mut(&address) {
-                peer.last_contact_ms = Some(now_ms);
-            }
+        if added && let Some(peer) = self.peers.get_mut(&address) {
+            peer.last_contact_ms = Some(now_ms);
         }
         added
     }

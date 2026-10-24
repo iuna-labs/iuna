@@ -81,10 +81,10 @@ impl InboundConnectionLimiter {
         if self.active > 0 {
             self.active -= 1;
         }
-        if let Some(peer) = self.peers.get_mut(&ip) {
-            if peer.active > 0 {
-                peer.active -= 1;
-            }
+        if let Some(peer) = self.peers.get_mut(&ip)
+            && peer.active > 0
+        {
+            peer.active -= 1;
         }
     }
 

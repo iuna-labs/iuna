@@ -14,12 +14,12 @@ pub(crate) fn decode_hex_array<const N: usize>(input: &str) -> Result<[u8; N]> {
 }
 
 pub(crate) fn decode_hex(input: &str) -> Result<Vec<u8>> {
-    if input.len() % 2 != 0 {
+    if !input.len().is_multiple_of(2) {
         bail!("hex string has odd length");
     }
 
     let mut bytes = Vec::with_capacity(input.len() / 2);
-    for pair in input.as_bytes().chunks_exact(2) {
+    for pair in input.as_bytes().as_chunks::<2>().0 {
         let high = hex_value(pair[0])?;
         let low = hex_value(pair[1])?;
         bytes.push((high << 4) | low);
