@@ -226,6 +226,7 @@ run_release_tests() {
   ./scripts/check-dependencies.sh
   cargo test --locked
   cargo check --locked --manifest-path fuzz/Cargo.toml
+  cargo check --locked --manifest-path src-tauri/Cargo.toml
   ./e2e/iuna_e2e.py test snapshots
 
   if [ "$skip_long_tests" = "true" ]; then
@@ -554,7 +555,6 @@ build_windows_desktop_in_docker_if_possible() {
         nsis \
         pkg-config
       rm -rf /var/lib/apt/lists/*
-      rustup target add x86_64-pc-windows-msvc
       cargo install --locked cargo-xwin --version 0.19.2
       cargo install --locked tauri-cli --version "=${TAURI_CLI_VERSION}"
 
@@ -577,6 +577,12 @@ build_windows_desktop_in_docker_if_possible() {
         -cf - . | tar -C /work/iuna -xf -
 
       cd /work/iuna
+      # Cargo uses this root toolchain for the root, fuzz, and src-tauri manifests.
+      # Resolve it only after entering the extracted repository; the base image has
+      # a different default toolchain.
+      repo_toolchain="$(rustup show active-toolchain)"
+      repo_toolchain="${repo_toolchain%% *}"
+      rustup target add --toolchain "$repo_toolchain" x86_64-pc-windows-msvc
       cargo xwin build --release --locked --target x86_64-pc-windows-msvc
       mkdir -p src-tauri/binaries
       cp target/x86_64-pc-windows-msvc/release/iuna.exe src-tauri/binaries/iuna-sidecar-x86_64-pc-windows-msvc.exe
@@ -657,7 +663,13 @@ build_linux_cli_archives() {
         -cf - . | tar -C /work/iuna -xf -
 
       cd /work/iuna
-      rustup target add aarch64-unknown-linux-gnu x86_64-unknown-linux-gnu
+      # Resolve the repository toolchain after entering the extracted checkout so
+      # the target libraries are installed for the same rustc Cargo will invoke.
+      repo_toolchain="$(rustup show active-toolchain)"
+      repo_toolchain="${repo_toolchain%% *}"
+      rustup target add --toolchain "$repo_toolchain" \
+        aarch64-unknown-linux-gnu \
+        x86_64-unknown-linux-gnu
       CC_aarch64_unknown_linux_gnu=aarch64-linux-gnu-gcc \
       AR_aarch64_unknown_linux_gnu=aarch64-linux-gnu-ar \
       CARGO_TARGET_AARCH64_UNKNOWN_LINUX_GNU_LINKER=aarch64-linux-gnu-gcc \
