@@ -1041,7 +1041,7 @@ pub(super) const INDEX_HTML: &str = concat!(
               <div class="burn-outlook-verdict" :class="burnOutlook().level" x-text="burnOutlook().verdict"></div>
             </div>
             <div class="burn-share-labels">
-              <span>Your proposed share</span>
+              <span>Chance before ticket expiry</span>
               <strong x-text="burnOutlookPercentLabel()"></strong>
             </div>
             <div class="burn-share-track" role="img" :aria-label="burnOutlookShareAriaLabel()">
@@ -1049,7 +1049,8 @@ pub(super) const INDEX_HTML: &str = concat!(
             </div>
             <div class="burn-outlook-stats">
               <div class="burn-outlook-stat"><span>Other active burn</span><strong x-text="`IUNA ${amountLabel(burnOutlook().otherBurn)}`"></strong></div>
-              <div class="burn-outlook-stat"><span>Scenario total</span><strong x-text="`IUNA ${amountLabel(burnOutlook().scenarioTotal)}`"></strong></div>
+              <div class="burn-outlook-stat"><span>Per-draw scenario total</span><strong x-text="`IUNA ${amountLabel(burnOutlook().scenarioTotal)}`"></strong></div>
+              <div class="burn-outlook-stat"><span>Ticket draw horizon</span><strong x-text="burnOutlook().drawHorizon"></strong></div>
               <div class="burn-outlook-stat"><span>30-block avg finalizer payout</span><strong x-text="`IUNA ${amountLabel(burnOutlook().reward)}`"></strong></div>
               <div class="burn-outlook-stat">
                 <span>Max-EV burn</span>

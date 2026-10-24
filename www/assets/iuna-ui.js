@@ -4033,36 +4033,67 @@ window.iunaApp = function iunaApp() {
       return Math.round(sample.reduce((sum, block) => sum + this.blockFinalizerPayout(block), 0) / sample.length);
     },
 
+    burnTicketDrawHorizon() {
+      const configured = Number(this.status.launch_profile?.ticket_expiry_window_heights);
+      return Number.isSafeInteger(configured) && configured > 0 ? configured : 1;
+    },
+
+    burnTicketWinChance(burn, otherBurn, drawHorizon) {
+      if (burn <= 0 || drawHorizon <= 0) return 0;
+      if (otherBurn <= 0) return 1;
+      if (drawHorizon === 1) return burn / (otherBurn + burn);
+      const singleDrawLossChance = otherBurn / (otherBurn + burn);
+      return -Math.expm1(drawHorizon * Math.log(singleDrawLossChance));
+    },
+
     burnOutlook() {
       const proposedBurn = this.parseiunaAmount(this.burnAmountDraft);
       const activeTotal = this.microiunaAmount(this.status.mining?.eligible_burn_total);
       const walletActive = Math.min(activeTotal, this.microiunaAmount(this.status.mining?.wallet_eligible_burn));
       const otherBurn = Math.max(0, activeTotal - walletActive);
       const scenarioTotal = otherBurn + proposedBurn;
-      const chance = scenarioTotal > 0 ? proposedBurn / scenarioTotal : 0;
+      const drawHorizon = this.burnTicketDrawHorizon();
+      const chance = this.burnTicketWinChance(proposedBurn, otherBurn, drawHorizon);
       const chancePercent = Math.max(0, Math.min(100, chance * 100));
       const reward = this.recentFinalizerRewardAverage(30);
       const expectedPayout = chance * reward;
       const fee = this.microiunaAmount(this.feeEstimates.burn?.fee);
       const net = expectedPayout - proposedBurn - fee;
-      const maxExpectedValueBurn = reward > otherBurn
+      const maxExpectedValueBurn = reward * drawHorizon > otherBurn
         ? otherBurn > 0
-          ? Math.max(1, Math.round(Math.sqrt(reward * otherBurn) - otherBurn))
+          ? Math.max(1, Math.round(
+            otherBurn * (Math.pow(reward * drawHorizon / otherBurn, 1 / (drawHorizon + 1)) - 1),
+          ))
           : 1
         : 0;
       const maxExpectedPayout = maxExpectedValueBurn > 0
-        ? reward * maxExpectedValueBurn / (otherBurn + maxExpectedValueBurn)
+        ? reward * this.burnTicketWinChance(maxExpectedValueBurn, otherBurn, drawHorizon)
         : 0;
       const maxExpectedNet = Math.max(0, maxExpectedPayout - maxExpectedValueBurn - fee);
       const excessBurn = Math.max(0, proposedBurn - maxExpectedValueBurn);
+      let breakEvenCeiling = 0;
+      if (otherBurn > 0 && maxExpectedValueBurn > 0) {
+        let low = 1;
+        let high = Math.floor(reward);
+        while (low <= high) {
+          const candidate = Math.floor((low + high) / 2);
+          const candidateNet = reward * this.burnTicketWinChance(candidate, otherBurn, drawHorizon) - candidate;
+          if (candidateNet >= 0) {
+            breakEvenCeiling = candidate;
+            low = candidate + 1;
+          } else {
+            high = candidate - 1;
+          }
+        }
+      }
       let level = "neutral";
       let verdict = "Waiting for reward history";
       if (reward > 0) {
         level = net >= 0 ? "positive" : "negative";
         verdict = otherBurn === 0 && proposedBurn > 0
           ? "No competition: minimum burn wins"
-          : otherBurn >= reward
-            ? "Do not burn: competition exceeds payout"
+          : otherBurn >= reward * drawHorizon
+            ? "Do not burn: competition exceeds ticket-lifetime payout"
             : maxExpectedNet <= 0
               ? "Do not burn: fees erase the expected gain"
             : proposedBurn < maxExpectedValueBurn
@@ -4077,6 +4108,7 @@ window.iunaApp = function iunaApp() {
         walletActive,
         otherBurn,
         scenarioTotal,
+        drawHorizon,
         chance,
         chancePercent,
         reward,
@@ -4085,6 +4117,7 @@ window.iunaApp = function iunaApp() {
         net,
         maxExpectedValueBurn,
         maxExpectedNet,
+        breakEvenCeiling,
         excessBurn,
         level,
         verdict,
@@ -4099,7 +4132,8 @@ window.iunaApp = function iunaApp() {
     },
 
     burnOutlookShareAriaLabel() {
-      return `Proposed burn has an estimated ${this.burnOutlookPercentLabel()} share of this single-draw scenario`;
+      const outlook = this.burnOutlook();
+      return `Proposed burn has an estimated ${this.burnOutlookPercentLabel()} chance to win within its ${outlook.drawHorizon}-draw ticket lifetime`;
     },
 
     signedAmountLabel(value) {
@@ -4131,15 +4165,14 @@ window.iunaApp = function iunaApp() {
     },
 
     burnOutlookSizingLabel() {
-      const { reward, otherBurn, maxExpectedValueBurn, excessBurn } = this.burnOutlook();
+      const { reward, otherBurn, drawHorizon, maxExpectedValueBurn, breakEvenCeiling, excessBurn } = this.burnOutlook();
       if (reward <= 0) return "Sizing signal: waiting for recent payout data.";
-      if (otherBurn >= reward) return "Sizing signal: 0 IUNA — competing burn already equals or exceeds the estimated payout.";
+      if (otherBurn >= reward * drawHorizon) return `Sizing signal: 0 IUNA — competing burn already equals or exceeds ${drawHorizon} estimated payouts over the ticket lifetime.`;
       if (otherBurn === 0) return "Sizing signal: there is no stable optimum without competing burn; use the minimum practical amount.";
-      const breakEvenCeiling = Math.max(0, reward - otherBurn);
       const excess = excessBurn > 0
         ? ` IUNA ${this.amountLabel(excessBurn)} of the draft is beyond that point.`
         : " The draft is not beyond that point.";
-      return `Risk-neutral single-draw max-EV point: IUNA ${this.amountLabel(maxExpectedValueBurn)}.${excess} Break-even ceiling before the transaction fee: IUNA ${this.amountLabel(breakEvenCeiling)}.`;
+      return `Risk-neutral ${drawHorizon}-draw ticket-lifetime max-EV point: IUNA ${this.amountLabel(maxExpectedValueBurn)}.${excess} Break-even ceiling before the transaction fee: IUNA ${this.amountLabel(breakEvenCeiling)}.`;
     },
 
     blockBurnCount(block) {
