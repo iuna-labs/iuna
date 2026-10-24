@@ -2,7 +2,7 @@
 name = "iuna"
 version = "0.4.68"
 edition = "2024"
-rust-version = "1.88"
+rust-version = "1.99.1"
 license = "Apache-2.0"
 
 [dependencies]
