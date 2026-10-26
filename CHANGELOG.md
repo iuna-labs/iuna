@@ -5,6 +5,16 @@ from the Git history and Conventional Commit titles by `deployment.sh`.
 
 ## [Unreleased]
 
+## [0.4.70] - 2026-10-26
+
+### Added
+
+- add getting started guide
+
+### Fixed
+
+- remember dismissed interface tour
+
 ## [0.4.69] - 2026-10-24
 
 ### Added
