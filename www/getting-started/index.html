@@ -51,102 +51,113 @@
   <main class="wrap guide-page">
     <header class="guide-hero">
       <span class="tag">Start here</span>
-      <h1>Getting started with iuna</h1>
-      <p class="guide-lead">Choose how your node participates based on your device and how much power you want it to use. You can change mining and burning later.</p>
-      <div class="guide-actions">
-        <a class="button" href="/downloads/">Download iuna</a>
-        <a class="button secondary" href="#choose-a-setup">Choose a setup</a>
-      </div>
+      <h1>Build your iuna setup</h1>
+      <p class="guide-lead">Answer three quick questions. We will turn them into a short installation plan for your node.</p>
     </header>
 
-    <section class="guide-section" aria-labelledby="two-jobs-title">
-      <div class="guide-section-head">
-        <span class="guide-step">01 · The basics</span>
-        <h2 id="two-jobs-title">Mining and burning do different jobs</h2>
-        <p>They can run together, but neither one is required just to keep a node online and synchronized.</p>
-      </div>
-      <div class="principle-grid">
-        <article class="principle-card mine-card">
-          <span class="tag">Mine</span>
-          <h3>Create new IUNA</h3>
-          <p>Your CPU searches for proof-of-work mine actions. Faster hardware finds more opportunities; older hardware can still participate, only more slowly.</p>
-        </article>
-        <article class="principle-card burn-card">
-          <span class="tag">Burn</span>
-          <h3>Finalize blocks and earn fees</h3>
-          <p>You permanently spend existing IUNA for temporary tickets. A winning ticket lets you finalize a block and receive transaction fees; tickets can also let an eligible mined lineage serve on the burn committee.</p>
-        </article>
-      </div>
-    </section>
-
-    <section class="guide-section" id="choose-a-setup" aria-labelledby="choose-title">
-      <div class="guide-section-head">
-        <span class="guide-step">02 · Choose a setup</span>
-        <h2 id="choose-title">Match participation to your device</h2>
-        <p>These are practical starting points, not profitability promises. Watch the live guidance in the node and adjust as the network changes.</p>
-      </div>
-      <div class="setup-grid">
-        <article class="setup-card">
-          <div class="setup-card-top">
-            <span class="setup-icon" aria-hidden="true">◫</span>
-            <div><span class="setup-kicker">Small or older hardware</span><h3>Mine slowly, burn low</h3></div>
+    <section class="configurator" aria-label="Build your iuna setup">
+      <div data-choices-view>
+        <div class="configurator-head">
+          <div>
+            <span class="guide-step">Your device</span>
+            <h2 id="configurator-title" tabindex="-1">Choose what fits</h2>
           </div>
-          <ul>
-            <li>Mining is fine if the extra power use is acceptable, but expect it to be slow.</li>
-            <li>Use the lowest practical burn amount instead of competing aggressively for blocks.</li>
-            <li>This is better suited to committee participation: committee weight comes from mature mined-coin lineage, not from a larger burn.</li>
-          </ul>
-        </article>
-        <article class="setup-card recommended">
-          <div class="setup-card-top">
-            <span class="setup-icon" aria-hidden="true">◆</span>
-            <div><span class="setup-kicker">Modern hardware</span><h3>Mine and follow max-EV</h3></div>
-          </div>
-          <ul>
-            <li>Enable mining to search continuously for new IUNA.</li>
-            <li>For burning, use the node's max-EV guidance when competing burn exists.</li>
-            <li>Max-EV is a risk-neutral estimate from current conditions—not a guarantee of winning a block or earning a return.</li>
-          </ul>
-        </article>
-        <article class="setup-card">
-          <div class="setup-card-top">
-            <span class="setup-icon" aria-hidden="true">◒</span>
-            <div><span class="setup-kicker">Low-energy device</span><h3>Burn only</h3></div>
-          </div>
-          <ul>
-            <li>Turn mining off to avoid continuous proof-of-work use.</li>
-            <li>Enable burning only when you want to participate with IUNA you already own.</li>
-            <li>A laptop on battery can stay synchronized without mining or opening an inbound port.</li>
-          </ul>
-        </article>
-      </div>
-    </section>
-
-    <section class="guide-section" aria-labelledby="network-title">
-      <div class="guide-section-head">
-        <span class="guide-step">03 · Help the network</span>
-        <h2 id="network-title">An open port is optional—and valuable</h2>
-      </div>
-      <div class="network-card">
-        <div>
-          <h3>No inbound port required</h3>
-          <p>A non-listening node connects out to peers, synchronizes normally, and keeps inbound P2P closed. This is the easiest option behind restrictive routers or on a mobile connection.</p>
+          <span class="configurator-progress" data-progress>0 of 3</span>
         </div>
-        <div>
-          <h3>Listening nodes make iuna stronger</h3>
-          <p>If you can accept inbound connections, select <strong>Listening node</strong> during setup and make its P2P port reachable. The default is TCP <code>9444</code>. Expose only P2P—keep the management interface private.</p>
+        <div class="choice-groups">
+          <fieldset class="choice-group" data-choice-group="cpu">
+            <legend><span>1</span> How powerful is the CPU?</legend>
+            <div class="choice-options">
+              <button type="button" class="choice-option" data-value="strong" aria-pressed="false">
+                <strong>Modern computer</strong>
+                <span>MacBook, recent laptop or desktop</span>
+              </button>
+              <button type="button" class="choice-option" data-value="light" aria-pressed="false">
+                <strong>Lightweight or older</strong>
+                <span>Raspberry Pi, mini PC or older laptop</span>
+              </button>
+            </div>
+          </fieldset>
+
+          <fieldset class="choice-group" data-choice-group="power">
+            <legend><span>2</span> How will it be powered?</legend>
+            <div class="choice-options">
+              <button type="button" class="choice-option" data-value="plugged" aria-pressed="false">
+                <strong>Usually plugged in</strong>
+                <span>Continuous CPU use is acceptable</span>
+              </button>
+              <button type="button" class="choice-option" data-value="battery" aria-pressed="false">
+                <strong>On battery or energy-saving</strong>
+                <span>Keep continuous power use low</span>
+              </button>
+            </div>
+          </fieldset>
+
+          <fieldset class="choice-group" data-choice-group="network">
+            <legend><span>3</span> Can TCP port 9444 be public?</legend>
+            <div class="choice-options">
+              <button type="button" class="choice-option" data-value="public" aria-pressed="false">
+                <strong>Yes, accept inbound peers</strong>
+                <span>This helps the network</span>
+              </button>
+              <button type="button" class="choice-option" data-value="private" aria-pressed="false">
+                <strong>No, outbound only</strong>
+                <span>No open port is required</span>
+              </button>
+            </div>
+          </fieldset>
         </div>
+        <div class="configurator-actions">
+          <button class="configurator-next" type="button" data-next hidden>
+            <span>Next</span>
+            <span class="configurator-next-arrow" aria-hidden="true">→</span>
+          </button>
+        </div>
+        <noscript><p class="safety-note">This interactive guide requires JavaScript. You can still download iuna and choose conservative defaults: non-listening node, mining off, and the lowest practical burn.</p></noscript>
+      </div>
+
+      <div class="recommendation" data-recommendation hidden aria-labelledby="recommendation-title">
+        <div class="recommendation-head">
+          <div>
+            <span class="guide-step">Your plan</span>
+            <h2 id="recommendation-title" tabindex="-1">Three steps to get running</h2>
+          </div>
+          <button class="reset-choices" type="button" data-reset>Change choices</button>
+        </div>
+        <div class="selection-summary" data-summary></div>
+        <ol class="plan-steps">
+          <li class="plan-step">
+            <span class="plan-number">1</span>
+            <div>
+              <span class="plan-label">Download</span>
+              <h3>Install iuna</h3>
+              <p>Download the desktop app for the simplest setup, or the node binary if you prefer the command line.</p>
+              <a class="button" href="/downloads/">Choose a download</a>
+            </div>
+          </li>
+          <li class="plan-step">
+            <span class="plan-number">2</span>
+            <div>
+              <span class="plan-label">Node setup</span>
+              <h3 data-network-title></h3>
+              <p data-network-copy></p>
+            </div>
+          </li>
+          <li class="plan-step">
+            <span class="plan-number">3</span>
+            <div>
+              <span class="plan-label">Mine &amp; burn</span>
+              <div class="settings-result">
+                <div><strong data-mine-title></strong><span data-mine-copy></span></div>
+                <div><strong data-burn-title></strong><span data-burn-copy></span></div>
+              </div>
+            </div>
+          </li>
+        </ol>
+        <p class="recommendation-note">Mining creates new IUNA. Burning spends existing IUNA for temporary tickets that can finalize blocks and earn fees. These are conservative starting points, not profitability promises.</p>
       </div>
     </section>
-
-    <aside class="guide-cta">
-      <div>
-        <span class="guide-step">Ready?</span>
-        <h2>Run a node and start with the conservative option.</h2>
-        <p>You can change mining, burn amount, and public-node settings from the interface later.</p>
-      </div>
-      <a class="button" href="/downloads/">Go to downloads</a>
-    </aside>
   </main>
+  <script src="/assets/iuna-getting-started.js"></script>
 </body>
 </html>
