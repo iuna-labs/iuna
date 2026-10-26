@@ -152,15 +152,41 @@ test('finishing the tour closes it and resets its visual state', () => {
   assert.equal(storage.get('iunaUiTourCompletedV1'), 'true');
 });
 
-test('closing the tour does not mark it complete', () => {
+test('closing the tour prevents it from being offered automatically again', () => {
   const storage = new Map();
   const ui = app(storage);
   ui.tourActive = true;
 
-  ui.dismissTour();
+  ui.closeTour();
 
   assert.equal(ui.tourActive, false);
-  assert.equal(storage.has('iunaUiTourCompletedV1'), false);
+  assert.equal(storage.get('iunaUiTourCompletedV1'), 'true');
+
+  const nextUi = app(storage);
+  nextUi.authLoaded = true;
+  nextUi.auth = { configured: true, authenticated: true };
+  nextUi.config = { setup_complete: true };
+  nextUi.networkHealthLoaded = true;
+  nextUi.networkHealth = { state: 'healthy' };
+  let starts = 0;
+  nextUi.startTour = () => { starts += 1; };
+
+  nextUi.maybeStartTour();
+
+  assert.equal(starts, 0);
+  assert.equal(nextUi.tourOfferChecked, true);
+});
+
+test('a previously closed tour can still be started manually', () => {
+  const storage = new Map([['iunaUiTourCompletedV1', 'true']]);
+  const ui = app(storage);
+  ui.closeModals = () => {};
+  ui.showTourStep = () => {};
+
+  ui.startTour();
+
+  assert.equal(ui.tourActive, true);
+  assert.equal(ui.tourStepIndex, 0);
 });
 
 test('automatic tour is offered once only when setup is ready', () => {
