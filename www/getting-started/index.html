@@ -1,0 +1,152 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="color-scheme" content="dark">
+  <meta name="theme-color" content="#0d0f10">
+  <meta name="description" content="Choose a practical iuna node setup for older hardware, modern systems, or low-energy devices, and learn when to mine, burn, and accept inbound peers.">
+  <meta name="robots" content="index, follow, max-image-preview:large">
+  <link rel="canonical" href="https://getiuna.org/getting-started/">
+  <link rel="icon" href="/favicon.svg" type="image/svg+xml">
+  <link rel="icon" href="/favicon.ico" sizes="any">
+  <link rel="apple-touch-icon" href="/apple-touch-icon.png">
+  <link rel="manifest" href="/site.webmanifest">
+  <meta property="og:title" content="Getting started with iuna">
+  <meta property="og:description" content="A short guide to mining, burning, hardware choices, and running a helpful iuna node.">
+  <meta property="og:type" content="website">
+  <meta property="og:url" content="https://getiuna.org/getting-started/">
+  <meta property="og:site_name" content="iuna">
+  <meta property="og:locale" content="en_US">
+  <meta property="og:image" content="https://getiuna.org/assets/og.png">
+  <meta property="og:image:width" content="1200">
+  <meta property="og:image:height" content="630">
+  <meta property="og:image:type" content="image/png">
+  <meta property="og:image:alt" content="iuna — Help test a different kind of network">
+  <meta name="twitter:card" content="summary_large_image">
+  <meta name="twitter:title" content="Getting started with iuna">
+  <meta name="twitter:description" content="A short guide to mining, burning, hardware choices, and running a helpful iuna node.">
+  <meta name="twitter:image" content="https://getiuna.org/assets/og.png">
+  <meta name="twitter:image:alt" content="iuna — Help test a different kind of network">
+  <title>Getting started with iuna</title>
+  <link rel="stylesheet" href="/assets/static-listing.css">
+</head>
+<body>
+  <div class="topbar">
+    <div class="wrap">
+      <a class="brand repo-link" href="/">
+        <span class="mark" aria-hidden="true"><svg viewBox="0 0 32 32" focusable="false"><circle cx="9.4" cy="7.6" r="2.8" fill="currentColor"></circle><path d="M9.4 13v7.1c0 3.7 2.9 6.4 6.6 6.4s6.6-2.7 6.6-6.4V13" fill="none" stroke="currentColor" stroke-width="4.2" stroke-linecap="round" stroke-linejoin="round"></path></svg></span>
+        <span>iuna</span>
+      </a>
+      <nav aria-label="Page sections">
+        <a href="/">Home</a>
+        <a href="/getting-started/" aria-current="page">Getting started</a>
+        <a href="https://github.com/iuna-labs/iuna/blob/main/docs/protocol.md" target="_blank" rel="noopener noreferrer">Protocol</a>
+        <a href="https://github.com/iuna-labs/iuna" target="_blank" rel="noopener noreferrer">Source</a>
+        <a href="/downloads/">Downloads</a>
+      </nav>
+    </div>
+  </div>
+
+  <main class="wrap guide-page">
+    <header class="guide-hero">
+      <span class="tag">Start here</span>
+      <h1>Getting started with iuna</h1>
+      <p class="guide-lead">Choose how your node participates based on your device and how much power you want it to use. You can change mining and burning later.</p>
+      <div class="guide-actions">
+        <a class="button" href="/downloads/">Download iuna</a>
+        <a class="button secondary" href="#choose-a-setup">Choose a setup</a>
+      </div>
+    </header>
+
+    <section class="guide-section" aria-labelledby="two-jobs-title">
+      <div class="guide-section-head">
+        <span class="guide-step">01 · The basics</span>
+        <h2 id="two-jobs-title">Mining and burning do different jobs</h2>
+        <p>They can run together, but neither one is required just to keep a node online and synchronized.</p>
+      </div>
+      <div class="principle-grid">
+        <article class="principle-card mine-card">
+          <span class="tag">Mine</span>
+          <h3>Create new IUNA</h3>
+          <p>Your CPU searches for proof-of-work mine actions. Faster hardware finds more opportunities; older hardware can still participate, only more slowly.</p>
+        </article>
+        <article class="principle-card burn-card">
+          <span class="tag">Burn</span>
+          <h3>Finalize blocks and earn fees</h3>
+          <p>You permanently spend existing IUNA for temporary tickets. A winning ticket lets you finalize a block and receive transaction fees; tickets can also let an eligible mined lineage serve on the burn committee.</p>
+        </article>
+      </div>
+    </section>
+
+    <section class="guide-section" id="choose-a-setup" aria-labelledby="choose-title">
+      <div class="guide-section-head">
+        <span class="guide-step">02 · Choose a setup</span>
+        <h2 id="choose-title">Match participation to your device</h2>
+        <p>These are practical starting points, not profitability promises. Watch the live guidance in the node and adjust as the network changes.</p>
+      </div>
+      <div class="setup-grid">
+        <article class="setup-card">
+          <div class="setup-card-top">
+            <span class="setup-icon" aria-hidden="true">◫</span>
+            <div><span class="setup-kicker">Small or older hardware</span><h3>Mine slowly, burn low</h3></div>
+          </div>
+          <ul>
+            <li>Mining is fine if the extra power use is acceptable, but expect it to be slow.</li>
+            <li>Use the lowest practical burn amount instead of competing aggressively for blocks.</li>
+            <li>This is better suited to committee participation: committee weight comes from mature mined-coin lineage, not from a larger burn.</li>
+          </ul>
+        </article>
+        <article class="setup-card recommended">
+          <div class="setup-card-top">
+            <span class="setup-icon" aria-hidden="true">◆</span>
+            <div><span class="setup-kicker">Modern hardware</span><h3>Mine and follow max-EV</h3></div>
+          </div>
+          <ul>
+            <li>Enable mining to search continuously for new IUNA.</li>
+            <li>For burning, use the node's max-EV guidance when competing burn exists.</li>
+            <li>Max-EV is a risk-neutral estimate from current conditions—not a guarantee of winning a block or earning a return.</li>
+          </ul>
+        </article>
+        <article class="setup-card">
+          <div class="setup-card-top">
+            <span class="setup-icon" aria-hidden="true">◒</span>
+            <div><span class="setup-kicker">Low-energy device</span><h3>Burn only</h3></div>
+          </div>
+          <ul>
+            <li>Turn mining off to avoid continuous proof-of-work use.</li>
+            <li>Enable burning only when you want to participate with IUNA you already own.</li>
+            <li>A laptop on battery can stay synchronized without mining or opening an inbound port.</li>
+          </ul>
+        </article>
+      </div>
+    </section>
+
+    <section class="guide-section" aria-labelledby="network-title">
+      <div class="guide-section-head">
+        <span class="guide-step">03 · Help the network</span>
+        <h2 id="network-title">An open port is optional—and valuable</h2>
+      </div>
+      <div class="network-card">
+        <div>
+          <h3>No inbound port required</h3>
+          <p>A non-listening node connects out to peers, synchronizes normally, and keeps inbound P2P closed. This is the easiest option behind restrictive routers or on a mobile connection.</p>
+        </div>
+        <div>
+          <h3>Listening nodes make iuna stronger</h3>
+          <p>If you can accept inbound connections, select <strong>Listening node</strong> during setup and make its P2P port reachable. The default is TCP <code>9444</code>. Expose only P2P—keep the management interface private.</p>
+        </div>
+      </div>
+    </section>
+
+    <aside class="guide-cta">
+      <div>
+        <span class="guide-step">Ready?</span>
+        <h2>Run a node and start with the conservative option.</h2>
+        <p>You can change mining, burn amount, and public-node settings from the interface later.</p>
+      </div>
+      <a class="button" href="/downloads/">Go to downloads</a>
+    </aside>
+  </main>
+</body>
+</html>
