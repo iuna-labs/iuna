@@ -1698,7 +1698,7 @@ pub(super) const INDEX_HTML: &str = concat!(
       <p id="tour-copy" x-text="currentTourStep().text"></p>
       <div class="tour-click-hint" x-show="currentTourStep().clickTarget">Click the highlighted item to continue</div>
       <div class="tour-actions">
-        <button type="button" class="subtle" @click="dismissTour">Close</button>
+        <button type="button" class="subtle" @click="closeTour">Close</button>
         <div class="tour-actions-group">
           <button type="button" x-show="tourStepIndex > 0" @click="previousTourStep">Back</button>
           <button type="button" class="primary" x-show="!currentTourStep().clickTarget" @click="nextTourStep" x-text="tourStepIndex === tourSteps().length - 1 ? 'Finish' : 'Next'"></button>

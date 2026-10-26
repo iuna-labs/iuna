@@ -469,6 +469,10 @@ window.iunaApp = function iunaApp() {
     },
 
     finishTour() {
+      this.closeTour();
+    },
+
+    closeTour() {
       this.dismissTour();
       try {
         localStorage.setItem(IUNA_TOUR_STORAGE_KEY, "true");
