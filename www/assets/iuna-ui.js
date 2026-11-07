@@ -1017,7 +1017,26 @@ window.iunaApp = function iunaApp() {
 
     networkLabel() {
       if (!this.status.network) return "Connecting";
+      if (this.syncTarget()) return `Syncing ${this.syncPercent()}%`;
       return this.peers.length ? "Connected" : "Isolated";
+    },
+
+    // Rounded down, so 100% only shows once nothing is left to fetch.
+    syncPercent() {
+      const target = this.syncTarget();
+      if (!target) return 100;
+      return Math.min(99, Math.floor((100 * Number(this.status.heartbeat_height || 0)) / target));
+    },
+
+    networkHeight() {
+      const best = Math.max(0, ...this.peers.map((peer) => Number(peer.heartbeat_height || 0)));
+      return this.peers.length ? Math.max(best, Number(this.status.heartbeat_height || 0)) : null;
+    },
+
+    syncLabel() {
+      if (!this.status.network) return "Waiting";
+      if (!this.peers.length) return "No peers";
+      return this.syncTarget() ? `Syncing ${this.syncPercent()}%` : "Up to date";
     },
 
     // Highest Heartbeat a connected peer announced, when it is ahead of this node.
@@ -1030,6 +1049,7 @@ window.iunaApp = function iunaApp() {
     networkDetail() {
       if (!this.status.network) return "Waiting for the local node to respond.";
       if (!this.peers.length) return "No peers yet. The node keeps retrying its configured peers; you can still use it on your own.";
+      if (this.syncTarget()) return `Synchronizing Heartbeat ${Number(this.status.heartbeat_height || 0)} of ${this.syncTarget()}. Blocks appear as they arrive.`;
       return `${this.peers.length} peer${this.peers.length === 1 ? "" : "s"} connected. Blocks and transactions arrive automatically.`;
     },
 
@@ -1396,7 +1416,9 @@ window.iunaApp = function iunaApp() {
       if (card === "balance") return status.wallet_unlocked ? "good" : "warn";
       if (card === "heartbeatMining") return status.heartbeat_mining_enabled ? "good" : "idle";
       if (card === "ledgerMining") return status.ledger_mining_enabled ? "good" : "idle";
-      if (card === "p2p") return this.peers.length ? "good" : "warn";
+      if (card === "p2p") return this.peers.length && !this.syncTarget() ? "good" : "warn";
+      // An old tip while catching up is expected, not a stalled chain.
+      if ((card === "heartbeat" || card === "ledger") && this.syncTarget()) return "warn";
       if (card === "heartbeat") {
         const tip = this.heartbeats[0];
         if (!tip || Number(tip.height) === 0) return "warn";
@@ -1415,10 +1437,12 @@ window.iunaApp = function iunaApp() {
     },
 
     heartbeatAgeLabel() {
+      if (this.syncTarget()) return `Syncing ${this.syncPercent()}%`;
       return this.blockAgeLabel(this.heartbeats[0], "No Heartbeats");
     },
 
     ledgerAgeLabel() {
+      if (this.syncTarget()) return `Syncing ${this.syncPercent()}%`;
       return this.blockAgeLabel(this.ledgerBlocks[0], "No Ledger blocks");
     },
 

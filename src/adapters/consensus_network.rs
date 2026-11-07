@@ -421,6 +421,21 @@ impl PeerRegistry {
         }
     }
 
+    /// The Hello height ages from the moment it arrives, so every block a peer sends moves its
+    /// height on. That keeps the screen's sync progress honest after the handshake.
+    fn observe_block(&self, key: &str, height: u64, hash: &[u8; 32]) {
+        if let Some(peer) = self
+            .peers
+            .write()
+            .expect("peer registry lock poisoned")
+            .get_mut(key)
+            .filter(|peer| peer.heartbeat_height.is_none_or(|known| height > known))
+        {
+            peer.heartbeat_height = Some(height);
+            peer.tip_hash = Some(hex(hash));
+        }
+    }
+
     fn disconnect(&self, key: &str) {
         self.peers
             .write()
@@ -784,8 +799,17 @@ async fn run_connection(
                 };
                 read_deadline = Instant::now() + IDLE_TIMEOUT;
                 let envelope = decode_line(&line)?;
-                if let Envelope::Hello(hello) = &envelope {
-                    peers.update_hello(&peer_key, hello);
+                match &envelope {
+                    Envelope::Hello(hello) => peers.update_hello(&peer_key, hello),
+                    Envelope::Blocks { blocks } => {
+                        if let Some(block) = blocks.iter().max_by_key(|block| block.header.height) {
+                            peers.observe_block(&peer_key, block.header.height, &block.hash());
+                        }
+                    }
+                    Envelope::CompactBlock(compact) => {
+                        peers.observe_block(&peer_key, compact.header.height, &compact.header.hash());
+                    }
+                    _ => {}
                 }
                 let (responses, gossip) = {
                     let mut node = node.lock().await;

@@ -543,6 +543,17 @@ test('dashboard cards report stale chains and isolated nodes', () => {
   assert.equal(app.syncTarget(), null, 'one block behind is normal propagation');
   app.peers = [{ heartbeat_height: 50 }, { heartbeat_height: null }];
   assert.equal(app.syncTarget(), 50);
+  assert.equal(app.syncPercent(), 18);
+  assert.equal(app.networkLabel(), 'Syncing 18%');
+  assert.equal(app.syncLabel(), 'Syncing 18%');
+  assert.equal(app.networkHeight(), 50);
+  assert.equal(app.dashboardState('heartbeat'), 'warn', 'an old tip while syncing is not a stall');
+  app.status.heartbeat_height = 50;
+  assert.equal(app.syncLabel(), 'Up to date');
+  assert.equal(app.networkLabel(), 'Connected');
+  app.peers = [];
+  assert.equal(app.syncLabel(), 'No peers');
+  assert.equal(app.networkHeight(), null);
 });
 
 test('dashboard uses single-line ages and wallet activity grows in pages', () => {

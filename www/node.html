@@ -360,7 +360,7 @@
         <div><h1 x-text="pageTitle()">iuna</h1><div class="muted" x-text="status.network || 'Connecting…'"></div></div>
         <div class="header-meta"><span x-text="lastUpdatedLabel()"></span><span class="pill" x-text="networkLabel()"></span></div>
       </header>
-      <div class="notice sync" x-show="syncTarget()" role="status">Synchronizing: Heartbeat <b x-text="status.heartbeat_height ?? 0"></b> of <b x-text="syncTarget()"></b> from peers. Balances and mining catch up when this finishes.</div>
+      <div class="notice sync" x-show="syncTarget()" role="status">Synchronizing: Heartbeat <b x-text="status.heartbeat_height ?? 0"></b> of <b x-text="syncTarget()"></b> from peers (<span x-text="syncPercent()"></span>%). Balances and mining catch up when this finishes.</div>
       <div class="flash" :class="flash?.kind" x-show="flash" x-transition x-text="flash?.message" :role="flash?.kind === 'error' ? 'alert' : 'status'" aria-live="polite"></div>
 
       <section class="dashboard" x-show="tab === 'dashboard'">
@@ -371,7 +371,7 @@
           <article class="dashboard-card" :class="dashboardState('ledgerMining')"><div class="dashboard-card-icon" aria-hidden="true"><svg viewBox="0 0 24 24"><path d="M4 7.5h16v10H4z"></path><path d="M7 4.5h10M7 20.5h10"></path><circle cx="12" cy="12.5" r="2.5"></circle></svg></div><div class="dashboard-card-copy"><div class="dashboard-label">Ledger Mining</div><div class="dashboard-value" x-text="status.ledger_mining_enabled ? 'On' : 'Off'"></div></div></article>
           <article class="dashboard-card" :class="dashboardState('heartbeat')"><div class="dashboard-card-icon" aria-hidden="true"><svg viewBox="0 0 24 24"><path d="m12 2.8 8 4.4v9.6l-8 4.4-8-4.4V7.2z"></path><path d="m4.3 7.4 7.7 4.3 7.7-4.3M12 11.7v9.1"></path></svg></div><div class="dashboard-card-copy"><div class="dashboard-label">Heartbeat chain</div><div class="dashboard-value" x-text="heartbeatAgeLabel()"></div></div></article>
           <article class="dashboard-card"><div class="dashboard-card-icon" aria-hidden="true"><svg viewBox="0 0 24 24"><rect x="2" y="4" width="20" height="16" rx="2"></rect><path d="M2 9h20M7 4v16"></path></svg></div><div class="dashboard-card-copy"><div class="dashboard-label">Ledger chain</div><div class="dashboard-value" x-text="ledgerAgeLabel()"></div></div></article>
-          <article class="dashboard-card" :class="dashboardState('p2p')"><div class="dashboard-card-icon" aria-hidden="true"><svg viewBox="0 0 24 24"><circle cx="5" cy="12" r="2.5"></circle><circle cx="19" cy="6" r="2.5"></circle><circle cx="19" cy="18" r="2.5"></circle><path d="m7.3 11 9.4-4M7.3 13l9.4 4"></path></svg></div><div class="dashboard-card-copy"><div class="dashboard-label">P2P</div><div class="dashboard-value"><span x-text="peers.length"></span> peer<span x-show="peers.length !== 1">s</span></div></div></article>
+          <article class="dashboard-card" :class="dashboardState('p2p')"><div class="dashboard-card-icon" aria-hidden="true"><svg viewBox="0 0 24 24"><circle cx="5" cy="12" r="2.5"></circle><circle cx="19" cy="6" r="2.5"></circle><circle cx="19" cy="18" r="2.5"></circle><path d="m7.3 11 9.4-4M7.3 13l9.4 4"></path></svg></div><div class="dashboard-card-copy"><div class="dashboard-label">P2P</div><div class="dashboard-value" x-show="!syncTarget()"><span x-text="peers.length"></span> peer<span x-show="peers.length !== 1">s</span></div><div class="dashboard-value" x-show="syncTarget()" x-text="`Syncing ${syncPercent()}%`"></div></div></article>
         </div>
         </div>
       </section>
@@ -490,6 +490,8 @@
           <div class="grid">
             <div class="stat"><div class="stat-label">Status</div><div class="stat-value" x-text="networkLabel()"></div></div>
             <div class="stat"><div class="stat-label">Local height</div><div class="stat-value" x-text="`Heartbeat ${status.heartbeat_height ?? 0}`"></div></div>
+            <div class="stat"><div class="stat-label">Network height</div><div class="stat-value" x-text="networkHeight() == null ? 'Unknown' : `Heartbeat ${networkHeight()}`"></div></div>
+            <div class="stat"><div class="stat-label">Sync</div><div class="stat-value" x-text="syncLabel()"></div></div>
             <div class="stat"><div class="stat-label">Network</div><div class="stat-value" x-text="status.network || 'iuna'"></div></div>
           </div>
         </article>
@@ -831,7 +833,7 @@
 
       <div x-show="setupStep === 1">
         <h2 x-text="peers.length ? 'Your node is connected' : 'Your node is running'"></h2><p class="muted">iuna keeps the network connection running in the background. There is normally nothing to configure here.</p>
-        <div class="setup-check"><span class="setup-check-mark" :class="{warning: !peers.length}" x-text="peers.length ? '✓' : '!'" aria-hidden="true"></span><div><b x-text="peers.length ? 'Connected to iuna' : 'Looking for peers'"></b><div class="muted" x-text="networkDetail()"></div></div></div>
+        <div class="setup-check"><span class="setup-check-mark" :class="{warning: !peers.length}" x-text="peers.length ? '✓' : '!'" aria-hidden="true"></span><div><b x-text="!peers.length ? 'Looking for peers' : (syncTarget() ? 'Synchronizing' : 'Connected to iuna')"></b><div class="muted" x-text="networkDetail()"></div></div></div>
       </div>
 
       <div x-show="setupStep === 2">
