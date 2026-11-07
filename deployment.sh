@@ -802,7 +802,7 @@ deploy_website_image() {
   require_command kubectl
 
   tmp_folder="$(mktemp -d)"
-  trap 'rm -rf "$tmp_folder"' RETURN
+  trap 'rm -rf "${tmp_folder:-}"; trap - RETURN' RETURN
 
   import_image_to_k3s "$image" "$tmp_folder"
   kubectl --context "$kubectl_context" -n iuna set image deployment/www "iuna-www=${image}"
@@ -869,7 +869,7 @@ deploy_docker_image() {
   require_command kubectl
 
   tmp_folder="$(mktemp -d)"
-  trap 'rm -rf "$tmp_folder"' RETURN
+  trap 'rm -rf "${tmp_folder:-}"; trap - RETURN' RETURN
 
   import_image_to_k3s "$www_image" "$tmp_folder"
   import_image_to_k3s "$node_image" "$tmp_folder"
