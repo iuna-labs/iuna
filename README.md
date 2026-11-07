@@ -44,7 +44,7 @@ cargo run --release
 ```
 
 By default the operator screen is available at `http://127.0.0.1:8080` and the
-P2P listener uses TCP port `19733`, with node data stored in `~/.iuna`. On the
+P2P listener uses TCP port `9444`, with node data stored in `~/.iuna`. On the
 first upgrade from the old protocol, recognized legacy files are renamed
 to collision-safe `.backup` files before the new data is created. A chain of
 another network or genesis is set aside the same way; the wallet is kept. Initial

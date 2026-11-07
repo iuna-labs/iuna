@@ -18,7 +18,7 @@ test('modern plugged-in computer reports the hash-miner preview boundary', () =>
   assert.equal(result.mining.title, 'Hash miner not packaged yet');
   assert.equal(result.ticketMining.title, 'Quote a mining ticket');
   assert.equal(result.network.title, 'Choose Listening node');
-  assert.match(result.network.copy, /19733/);
+  assert.match(result.network.copy, /9444/);
 });
 
 test('lightweight plugged-in computer validates and can use ticket mining', () => {

@@ -8,4 +8,4 @@
 #
 # Use the P2P listener port here, not the management UI port.
 
-iuna.jhx.app:19733
+iuna.jhx.app:9444

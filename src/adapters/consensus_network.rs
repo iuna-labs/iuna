@@ -109,7 +109,7 @@ impl FromStr for PeerAddress {
             {
                 Ok(Self(value.to_ascii_lowercase()))
             }
-            _ => bail!("use host:port or IP:port, for example iuna.jhx.app:19733"),
+            _ => bail!("use host:port or IP:port, for example iuna.jhx.app:9444"),
         }
     }
 }
@@ -232,12 +232,38 @@ pub struct PeerRegistry {
 /// Reads the runtime-added peers saved by an earlier run. A missing file means none.
 /// Saves `peers` as the runtime peers unless a peer list already exists. Unlike `--peer` these are
 /// the user's to remove: a removal is saved, and this never adds them again.
+/// Seeds the bootstrap peers once, so a user can remove them for good. A saved peer on a bootstrap
+/// host with another port is the same node after a port change, so it follows that change.
 pub fn seed_added_peers(path: &Path, peers: &[PeerAddress]) -> Result<()> {
-    if peers.is_empty() || path.exists() {
+    if peers.is_empty() {
         return Ok(());
     }
-    let peers = peers.iter().map(PeerAddress::as_str).collect::<Vec<_>>();
-    fs::write(path, serde_json::to_vec_pretty(&peers)?).context("writing bootstrap peers")
+    let seeded = if path.exists() {
+        let saved = load_added_peers(path)?;
+        let host = |peer: &PeerAddress| {
+            peer.as_str()
+                .rsplit_once(':')
+                .map(|(host, _)| host.to_owned())
+        };
+        let mut moved = Vec::new();
+        for peer in &saved {
+            let current = peers
+                .iter()
+                .find(|bootstrap| host(bootstrap) == host(peer))
+                .unwrap_or(peer);
+            if !moved.contains(current) {
+                moved.push(current.clone());
+            }
+        }
+        if moved == saved {
+            return Ok(());
+        }
+        moved
+    } else {
+        peers.to_vec()
+    };
+    let seeded = seeded.iter().map(PeerAddress::as_str).collect::<Vec<_>>();
+    fs::write(path, serde_json::to_vec_pretty(&seeded)?).context("writing bootstrap peers")
 }
 
 pub fn load_added_peers(path: &Path) -> Result<Vec<PeerAddress>> {
@@ -886,16 +912,16 @@ mod tests {
     #[test]
     fn peer_addresses_accept_host_names_and_reject_the_rest() {
         for valid in [
-            "iuna.jhx.app:19733",
-            "203.0.113.7:19733",
-            "[2001:db8::1]:19733",
+            "iuna.jhx.app:9444",
+            "203.0.113.7:9444",
+            "[2001:db8::1]:9444",
             "node-1:9",
         ] {
             assert_eq!(valid.parse::<PeerAddress>().unwrap().as_str(), valid);
         }
         for (spelling, normal) in [
-            ("IUNA.jhx.app:19733", "iuna.jhx.app:19733"),
-            ("[2001:DB8:0::1]:19733", "[2001:db8::1]:19733"),
+            ("IUNA.jhx.app:9444", "iuna.jhx.app:9444"),
+            ("[2001:DB8:0::1]:9444", "[2001:db8::1]:9444"),
         ] {
             assert_eq!(spelling.parse::<PeerAddress>().unwrap().as_str(), normal);
         }
@@ -903,7 +929,7 @@ mod tests {
             "iuna.jhx.app",
             "iuna.jhx.app:0",
             "iuna.jhx.app:99999",
-            ":19733",
+            ":9444",
             "a b:1",
             "",
         ] {
@@ -975,7 +1001,7 @@ mod tests {
     fn bootstrap_peers_are_seeded_once_and_stay_removed() {
         let directory = tempfile::tempdir().unwrap();
         let path = directory.path().join("peers.json");
-        let peers = ["iuna.jhx.app:19733".parse::<PeerAddress>().unwrap()];
+        let peers = ["iuna.jhx.app:9444".parse::<PeerAddress>().unwrap()];
 
         seed_added_peers(&path, &peers).unwrap();
         assert_eq!(load_added_peers(&path).unwrap(), peers);
@@ -986,11 +1012,34 @@ mod tests {
     }
 
     #[test]
+    fn a_saved_bootstrap_peer_follows_a_port_change_and_others_stay() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("peers.json");
+        fs::write(
+            &path,
+            r#"["iuna.jhx.app:9444", "203.0.113.7:9444", "iuna.jhx.app:9444"]"#,
+        )
+        .unwrap();
+        let peers = ["iuna.jhx.app:9444".parse::<PeerAddress>().unwrap()];
+
+        seed_added_peers(&path, &peers).unwrap();
+
+        assert_eq!(
+            load_added_peers(&path)
+                .unwrap()
+                .iter()
+                .map(PeerAddress::as_str)
+                .collect::<Vec<_>>(),
+            ["iuna.jhx.app:9444", "203.0.113.7:9444"]
+        );
+    }
+
+    #[test]
     fn runtime_peers_are_validated_saved_and_removed() {
         let directory = tempfile::tempdir().unwrap();
         let path = directory.path().join("peers.json");
         let registry = PeerRegistry::default();
-        let address: SocketAddr = "203.0.113.7:19733".parse().unwrap();
+        let address: SocketAddr = "203.0.113.7:9444".parse().unwrap();
         assert!(
             registry.add_target(address).is_err(),
             "needs a running network"

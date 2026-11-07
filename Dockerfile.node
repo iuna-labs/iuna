@@ -14,7 +14,7 @@ COPY LICENSE /usr/share/doc/iuna/LICENSE
 
 WORKDIR /data
 
-EXPOSE 8080 18662 19733
+EXPOSE 8080 18662 9444
 
 ENTRYPOINT ["iuna"]
-CMD ["--data-dir", "/data", "--http", "0.0.0.0:8080", "--p2p", "0.0.0.0:19733"]
+CMD ["--data-dir", "/data", "--http", "0.0.0.0:8080", "--p2p", "0.0.0.0:9444"]

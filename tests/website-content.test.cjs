@@ -24,7 +24,7 @@ test('public protocol copy uses Heartbeat, Ledger, and expenditure vocabulary', 
     'Ledger Chain',
     'Proof of Expenditure',
     'candidate mainnet',
-    '19733',
+    '9444',
   ]) {
     assert.match(combined, new RegExp(expected));
   }
@@ -33,7 +33,6 @@ test('public protocol copy uses Heartbeat, Ledger, and expenditure vocabulary', 
     /experimental L1/i,
     /proof[- ]of[- ]burn/i,
     /verifiable delay/i,
-    /TCP port 9444/i,
     /devnet-v2/i,
     /protocol-v2/i,
   ]) {
@@ -71,14 +70,14 @@ test('container and deployment defaults match the canonical toolchain and ports'
   ].join('\n');
 
   assert.match(deployment, /rust:1\.99\.1-bookworm/);
-  assert.match(content('Dockerfile.node'), /EXPOSE 8080 18662 19733/);
+  assert.match(content('Dockerfile.node'), /EXPOSE 8080 18662 9444/);
   const compose = content('docker-compose.yml');
   assert.match(compose, /127\.0\.0\.1:8081:8080/);
   assert.match(compose, /127\.0\.0\.1:18662:18662/);
   assert.match(compose, /--wallet-endpoint/);
   assert.match(compose, /127\.0\.0\.1:8082:8080/);
   assert.match(compose, /IUNA_INSECURE_OPERATOR_API: "1"/);
-  assert.doesNotMatch(deployment, /rust:1\.88(?:\.0)?-bookworm|18661|9444/i);
+  assert.doesNotMatch(deployment, /rust:1\.88(?:\.0)?-bookworm|18661/i);
 });
 
 test('downloads page exposes only the canonical source build', () => {

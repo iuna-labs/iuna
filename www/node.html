@@ -503,7 +503,7 @@
         <article class="panel">
           <div class="panel-head"><div><h2>Configured peers</h2><div class="muted">Outbound peers this node keeps dialling. Peers you add here are saved and survive a restart.</div></div></div>
           <form class="form-row" @submit.prevent="changePeer('add', peerForm.address)" x-show="browserCanManage()">
-            <label>Peer address<input x-model="peerForm.address" placeholder="iuna.jhx.app:19733" autocomplete="off" required></label>
+            <label>Peer address<input x-model="peerForm.address" placeholder="iuna.jhx.app:9444" autocomplete="off" required></label>
             <button class="primary" type="submit" :disabled="peerForm.busy">Add peer</button>
           </form>
           <div style="overflow-x:auto;margin-top:12px" x-show="peerTargets.length">

@@ -42,7 +42,7 @@
       network: publicNode
         ? {
             title: "Choose Listening node",
-            copy: "Keep TCP port 19733 reachable through your firewall and router. Expose only P2P; keep the operator interface on loopback.",
+            copy: "Keep TCP port 9444 reachable through your firewall and router. Expose only P2P; keep the operator interface on loopback.",
           }
         : {
             title: "Choose Non-listening node",

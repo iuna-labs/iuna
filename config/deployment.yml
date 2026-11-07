@@ -212,14 +212,14 @@ spec:
             - --http
             - 0.0.0.0:8080
             - --p2p
-            - 0.0.0.0:19733
+            - 0.0.0.0:9444
             - --wallet-endpoint
             - 0.0.0.0:18662
           ports:
             - name: management
               containerPort: 8080
             - name: p2p
-              containerPort: 19733
+              containerPort: 9444
             - name: wallet-api
               containerPort: 18662
           readinessProbe:
@@ -275,5 +275,5 @@ spec:
     app: iuna-node
   ports:
     - name: p2p
-      port: 19733
-      targetPort: 19733
+      port: 9444
+      targetPort: 9444

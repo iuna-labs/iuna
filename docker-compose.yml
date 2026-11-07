@@ -36,13 +36,13 @@ services:
       - --http
       - 0.0.0.0:8080
       - --p2p
-      - 0.0.0.0:19733
+      - 0.0.0.0:9444
       - --wallet-endpoint
       - 0.0.0.0:18662
     ports:
       - "127.0.0.1:8081:8080"
       - "127.0.0.1:18662:18662"
-      - "19733:19733"
+      - "9444:9444"
     volumes:
       - bootstrap-data:/data
     networks:
@@ -57,9 +57,9 @@ services:
       - --http
       - 0.0.0.0:8080
       - --p2p
-      - 0.0.0.0:19733
+      - 0.0.0.0:9444
       - --peer
-      - 172.28.0.10:19733
+      - 172.28.0.10:9444
     depends_on:
       bootstrap:
         condition: service_healthy

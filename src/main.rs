@@ -50,7 +50,7 @@ impl Default for Options {
                 .parse()
                 .expect("valid default HTTP address"),
             wallet_endpoint_addr: None,
-            p2p_addr: "0.0.0.0:19733".parse().expect("valid default P2P address"),
+            p2p_addr: "0.0.0.0:9444".parse().expect("valid default P2P address"),
             peers: Vec::new(),
             bootstrap_peers: Vec::new(),
         }
@@ -610,7 +610,7 @@ fn print_help() {
          --data-dir PATH   Chain and screen-data directory (default ~/.iuna)\n\
          --http ADDRESS    Operator HTTP address (default 127.0.0.1:8080)\n\
          --wallet-endpoint ADDRESS  Opt-in public wallet API on a separate listener\n\
-         --p2p ADDRESS     P2P listen address (default 0.0.0.0:19733)\n\
+         --p2p ADDRESS     P2P listen address (default 0.0.0.0:9444)\n\
          --peer ADDRESS    Outbound peer, IP:port or host:port; may be repeated\n\
          --bootstrap-peer ADDRESS  Outbound peer added once to peers.json; may be repeated\n\
          -h, --help        Show this help\n\

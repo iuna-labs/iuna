@@ -678,7 +678,7 @@ mod tests {
                 "two.example:2"
             ]
         );
-        assert!(bootstrap_peer_args(KNOWN_NODES).contains(&"iuna.jhx.app:19733"));
+        assert!(bootstrap_peer_args(KNOWN_NODES).contains(&"iuna.jhx.app:9444"));
     }
 
     #[test]
