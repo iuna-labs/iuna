@@ -40,6 +40,18 @@ struct Options {
     p2p_addr: SocketAddr,
     peers: Vec<PeerAddress>,
     bootstrap_peers: Vec<PeerAddress>,
+    no_bootstrap_peers: bool,
+}
+
+/// Public nodes a fresh node starts from, so it finds the network before anyone types an address.
+const KNOWN_NODES: &str = include_str!("../KNOWN_NODES.txt");
+
+fn known_nodes(text: &str) -> Result<Vec<PeerAddress>> {
+    text.lines()
+        .map(str::trim)
+        .filter(|line| !line.is_empty() && !line.starts_with('#'))
+        .map(|line| line.parse().context("parsing KNOWN_NODES.txt"))
+        .collect()
 }
 
 impl Default for Options {
@@ -53,6 +65,7 @@ impl Default for Options {
             p2p_addr: "0.0.0.0:9444".parse().expect("valid default P2P address"),
             peers: Vec::new(),
             bootstrap_peers: Vec::new(),
+            no_bootstrap_peers: false,
         }
     }
 }
@@ -160,16 +173,13 @@ async fn main() -> Result<()> {
     };
     println!("IUNA mainnet-candidate node");
     println!("operator API: http://{http_addr}/api/status");
-    println!(
-        "management API: {}",
-        if operator_token_hash.is_some() {
-            "enabled (operator token)"
-        } else if trusted_management {
-            "enabled for same-origin local browser requests (no token)"
-        } else {
-            "disabled"
-        }
-    );
+    if operator_token_hash.is_some() {
+        println!("management UI: http://{http_addr}/ (operator token)");
+    } else if trusted_management {
+        println!("management UI: http://{http_addr}/ (local browser, no token)");
+    } else {
+        println!("management UI: disabled");
+    }
     println!("P2P listener: {}", network.local_addr());
     if let Some(listener) = &wallet_listener {
         println!("public wallet endpoint: http://{}", listener.local_addr()?);
@@ -575,6 +585,7 @@ fn parse_options(arguments: impl IntoIterator<Item = String>) -> Result<Option<O
                         .context("parsing --bootstrap-peer address")?,
                 );
             }
+            "--no-bootstrap-peers" => options.no_bootstrap_peers = true,
             "--peer" => {
                 options.peers.push(
                     value(&mut arguments, "--peer")?
@@ -584,6 +595,11 @@ fn parse_options(arguments: impl IntoIterator<Item = String>) -> Result<Option<O
             }
             _ => bail!("unknown option {argument}; use --help"),
         }
+    }
+    if options.no_bootstrap_peers {
+        options.bootstrap_peers.clear();
+    } else if options.bootstrap_peers.is_empty() {
+        options.bootstrap_peers = known_nodes(KNOWN_NODES)?;
     }
     Ok(Some(options))
 }
@@ -613,6 +629,8 @@ fn print_help() {
          --p2p ADDRESS     P2P listen address (default 0.0.0.0:9444)\n\
          --peer ADDRESS    Outbound peer, IP:port or host:port; may be repeated\n\
          --bootstrap-peer ADDRESS  Outbound peer added once to peers.json; may be repeated\n\
+                           (default: the nodes in KNOWN_NODES.txt)\n\
+         --no-bootstrap-peers  Start without bootstrap peers, as for a private network\n\
          -h, --help        Show this help\n\
 \n\
          Environment:\n\
@@ -688,6 +706,30 @@ mod tests {
         assert_eq!(options.p2p_addr.port(), 9001);
         assert_eq!(options.wallet_endpoint_addr.unwrap().port(), 9004);
         assert_eq!(options.peers.len(), 2);
+    }
+
+    #[test]
+    fn a_fresh_node_starts_from_the_known_nodes_unless_told_otherwise() {
+        let parse = |arguments: &[&str]| {
+            parse_options(arguments.iter().map(|argument| argument.to_string()))
+                .unwrap()
+                .unwrap()
+                .bootstrap_peers
+                .iter()
+                .map(|peer| peer.to_string())
+                .collect::<Vec<_>>()
+        };
+
+        assert!(parse(&[]).contains(&"iuna.jhx.app:9444".to_owned()));
+        assert_eq!(
+            parse(&["--bootstrap-peer", "203.0.113.7:9444"]),
+            ["203.0.113.7:9444"]
+        );
+        assert!(parse(&["--no-bootstrap-peers"]).is_empty());
+        assert_eq!(
+            known_nodes("# comment\n\n  one.example:1  \n").unwrap(),
+            ["one.example:1".parse::<PeerAddress>().unwrap()]
+        );
     }
 
     #[test]

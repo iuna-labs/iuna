@@ -229,7 +229,9 @@ the session. Addresses are `IP:port` or `host:port`; a host name resolves on eve
 this way are saved in `peers.json` in the data directory and restored at the
 next start, next to any `--peer` arguments. `--bootstrap-peer` fills `peers.json`
 only when that file does not exist yet, so a removed bootstrap peer stays
-removed; the desktop app uses it for the peers in `KNOWN_NODES.txt`. A node keeps at most `32` outbound
+removed. Without it a node uses the peers in `KNOWN_NODES.txt`, so a fresh
+node finds the network on its own; `--no-bootstrap-peers` turns that off for a
+private network. A node keeps at most `32` outbound
 peers.
 
 Accepted Heartbeats are re-advertised to other peers by inventory, while newly

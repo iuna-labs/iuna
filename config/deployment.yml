@@ -213,6 +213,8 @@ spec:
             - 0.0.0.0:8080
             - --p2p
             - 0.0.0.0:9444
+            # This is the bootstrap node itself.
+            - --no-bootstrap-peers
             - --wallet-endpoint
             - 0.0.0.0:18662
           ports:

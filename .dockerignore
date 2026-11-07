@@ -12,6 +12,7 @@
 !Cargo.lock
 !rust-toolchain.toml
 !src/**
+!KNOWN_NODES.txt
 !config/update-signing.key.pub
 
 # Static website (Dockerfile).

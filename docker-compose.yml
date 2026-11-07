@@ -37,6 +37,7 @@ services:
       - 0.0.0.0:8080
       - --p2p
       - 0.0.0.0:9444
+      - --no-bootstrap-peers
       - --wallet-endpoint
       - 0.0.0.0:18662
     ports:
@@ -58,6 +59,7 @@ services:
       - 0.0.0.0:8080
       - --p2p
       - 0.0.0.0:9444
+      - --no-bootstrap-peers
       - --peer
       - 172.28.0.10:9444
     depends_on:
