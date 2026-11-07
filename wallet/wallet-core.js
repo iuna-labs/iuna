@@ -1,7 +1,7 @@
 const encoder = new TextEncoder();
 // Signatures are scoped to one network, so they cannot be replayed on a fork or relaunch.
 const NETWORK_ID = "iuna-mainnet-candidate";
-const GENESIS_HASH = hexBytes("0000002b212b84a6457c11300d51d3dfbf743ba635dd4ab145c4f3538c582903");
+const GENESIS_HASH = hexBytes("0000003e0a96d767b897dcfa647e3c152c3486020040a3190803e5db25ae9792");
 const PKCS8_ED25519_PREFIX = hexBytes("302e020100300506032b657004220420");
 
 export function normalizeSeed(value) {

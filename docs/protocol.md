@@ -21,9 +21,9 @@ This is still experimental. The rules below describe the current candidate mainn
 - median-time-past window: `11` blocks;
 - maximum future timestamp drift: `10 minutes`;
 - proof-of-work limit and genesis target: `0000003fffffffffffffffffffffffffffffffffffffffffffffffffffffffff`;
-- genesis nonce: `20175954`;
-- genesis hash: `0000002b212b84a6457c11300d51d3dfbf743ba635dd4ab145c4f3538c582903`;
-- genesis timestamp: `1794039759`;
+- genesis nonce: `44288543`;
+- genesis hash: `0000003e0a96d767b897dcfa647e3c152c3486020040a3190803e5db25ae9792`;
+- genesis timestamp: `1794077841`;
 - genesis miner key: `d75a980182b10ab7d54bfed3c964073a0ee172f3daa62325af021a68f707511a`;
 - smallest unit: `1 IUNA = 100_000_000` units;
 - `MAX_MONEY`: `4_207_680_100_000_000` units (`42,076,801 IUNA`);
