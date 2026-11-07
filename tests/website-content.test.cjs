@@ -7,9 +7,7 @@ const vm = require('node:vm');
 const publicFiles = [
   'README.md',
   'www/index.html',
-  'www/getting-started/index.html',
   'www/downloads.html',
-  'www/assets/iuna-getting-started.js',
 ];
 
 function content(path) {
@@ -101,7 +99,7 @@ test('homepage keeps its original calls to action and links to the live wallet h
   const hero = html.slice(heroStart, calloutStart);
 
   assert.match(hero, />Download iuna<\/a>/);
-  assert.match(hero, />Getting started<\/a>/);
+  assert.doesNotMatch(html, /getting-started/i);
   assert.match(hero, />Why iuna<\/a>/);
   assert.match(hero, />How it works<\/a>/);
   assert.match(hero, />Roadmap<\/a>/);
