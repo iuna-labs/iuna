@@ -80,13 +80,18 @@ test('container and deployment defaults match the canonical toolchain and ports'
   assert.doesNotMatch(deployment, /rust:1\.88(?:\.0)?-bookworm|18661/i);
 });
 
-test('downloads page exposes only the canonical source build', () => {
+test('downloads page lists the release artifacts and the source build', () => {
   const downloads = content('www/downloads.html');
 
   assert.match(downloads, /cargo run --release/);
   assert.doesNotMatch(downloads, /iuna-mainnet-candidate/);
-  assert.doesNotMatch(downloads, /iuna-downloads\.js/);
-  assert.doesNotMatch(downloads, /wallet\.getiuna\.org/);
+  assert.match(downloads, /src="\/assets\/iuna-downloads\.js"/);
+  assert.match(downloads, /data-downloads-version="\$\{IUNA_VERSION\}"/);
+  assert.match(downloads, /Candidate mainnet/);
+  assert.doesNotMatch(downloads, /<script>/);
+  for (const file of ['linux-x86_64.tar.gz', 'linux-aarch64.tar.gz', 'macos-aarch64-desktop.app.zip', 'windows-x86_64-desktop-setup.exe']) {
+    assert.match(content('www/assets/iuna-downloads.js'), new RegExp(file.replace(/\./g, '\\.')));
+  }
 });
 
 test('homepage keeps its original calls to action and links to the live wallet host', () => {
