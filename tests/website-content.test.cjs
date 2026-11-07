@@ -285,6 +285,24 @@ test('initial setup completion is remembered per node data directory', () => {
   assert.equal(app.setupCompleted(), false);
 });
 
+test('unlocking closes the login even when the following refresh fails', async () => {
+  const { app } = nodeApp();
+  app.setupReady = true;
+  app.showSetup = false;
+  app.status = { wallet_public_key: '11'.repeat(32), wallet_unlocked: false };
+  app.syncLoginVisibility();
+  assert.equal(app.showLogin, true);
+  app.postJson = async () => ({ created: false, public_key: '11'.repeat(32) });
+  app.refresh = async () => {};
+  app.notify = () => {};
+  app.walletAccess.password = 'correct horse battery';
+
+  await app.accessWallet();
+
+  assert.equal(app.showLogin, false);
+  assert.equal(app.status.wallet_unlocked, true);
+});
+
 test('an existing locked wallet opens the login modal after restart', () => {
   const { app } = nodeApp();
   app.setupReady = true;
@@ -1039,6 +1057,7 @@ test('a locked wallet cannot submit the backup form as an unlock', async () => {
   await app.accessWallet();
   assert.equal(posted[0].action, 'unlock');
 
+  app.status = { wallet_unlocked: false };
   app.selectWalletMode('backup');
   app.walletAccess.recoveryPhrase = 'twenty four words';
   app.syncLoginVisibility();

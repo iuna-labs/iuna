@@ -492,6 +492,10 @@ window.iunaApp = function iunaApp() {
         } else {
           this.walletAccess.phase = "complete";
         }
+        // The answer already says the wallet is open. Waiting for the next full refresh to close the
+        // login would keep it up whenever any unrelated part of that refresh fails.
+        if (action !== "backup") this.status = { ...this.status, wallet_unlocked: true };
+        this.syncLoginVisibility();
         await this.refresh(true);
         this.notify(action === "backup" ? "Recovery phrase ready — save it safely" : (action === "restore" ? "Wallet restored and encrypted" : (result.created ? "Wallet created — save your recovery phrase" : "Wallet unlocked")));
       } catch (error) {
@@ -697,12 +701,15 @@ window.iunaApp = function iunaApp() {
         if (this.tab === "chain") {
           this.$nextTick(() => this.ensureChainRailScrollable(this.chainView));
         }
-        if (this.setupReady) this.syncLoginVisibility();
         this.lastUpdated = new Date();
         this.pollFailures = 0;
       } catch (error) {
         this.pollFailures = Math.min(4, this.pollFailures + 1);
+        // Background refreshes stay quiet on screen, which made their failures invisible.
+        console.error("refresh failed", error);
         if (!silent) this.notify(error.message, "error");
+      } finally {
+        if (this.setupReady) this.syncLoginVisibility();
       }
     },
 
