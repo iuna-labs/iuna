@@ -809,6 +809,20 @@ async fn run_connection(
                     Envelope::CompactBlock(compact) => {
                         peers.observe_block(&peer_key, compact.header.height, &compact.header.hash());
                     }
+                    // A peer announces its new tips by hash. Blocks it got from us never come back
+                    // as blocks, so a hash this node already holds is how its height moves on.
+                    Envelope::Inventory { block_hashes } => {
+                        let node = node.lock().await;
+                        let known = block_hashes
+                            .iter()
+                            .filter_map(|hash| node.chain().block(hash))
+                            .max_by_key(|block| block.header.height)
+                            .map(|block| (block.header.height, block.hash()));
+                        drop(node);
+                        if let Some((height, hash)) = known {
+                            peers.observe_block(&peer_key, height, &hash);
+                        }
+                    }
                     _ => {}
                 }
                 let (responses, gossip) = {
