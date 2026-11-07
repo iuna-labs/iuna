@@ -3,8 +3,7 @@ set -euo pipefail
 
 cargo fmt -- --check
 cargo clippy --all-targets --all-features -- -D warnings
-cargo test --lib -- \
-  --skip domain::adversarial_tests:: \
-  --skip adapters::p2p:: \
-  --skip domain::vdf::arithmetic::tests::optimized_nudupl_matches_kyn_across_sequential_squares \
-  --skip domain::vdf::limb_arithmetic::tests::limb_nudupl_matches_kyn_across_sequential_squares
+cargo clippy --locked --manifest-path src-tauri/Cargo.toml --all-targets -- -D warnings
+cargo test --all-targets --all-features
+cargo test --locked --manifest-path src-tauri/Cargo.toml
+node --test tests/*.test.cjs

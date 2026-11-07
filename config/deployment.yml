@@ -73,9 +73,33 @@ spec:
                 name: iuna-www
                 port:
                   number: 80
+    - host: wallet.getiuna.com
+      http:
+        paths:
+          - path: /api/public
+            pathType: Prefix
+            backend:
+              service:
+                name: iuna-wallet
+                port:
+                  number: 18662
+          - path: /
+            pathType: Prefix
+            backend:
+              service:
+                name: iuna-www
+                port:
+                  number: 80
     - host: wallet.getiuna.org
       http:
         paths:
+          - path: /api/public
+            pathType: Prefix
+            backend:
+              service:
+                name: iuna-wallet
+                port:
+                  number: 18662
           - path: /
             pathType: Prefix
             backend:
@@ -87,6 +111,7 @@ spec:
     - secretName: iuna-tls
       hosts:
         - getiuna.org
+        - wallet.getiuna.com
         - wallet.getiuna.org
 ---
 apiVersion: traefik.containo.us/v1alpha1
@@ -111,12 +136,6 @@ spec:
     - web
     - websecure
   routes:
-    - match: Host(`iuna.jhx.app`) && PathPrefix(`/v1`)
-      kind: Rule
-      priority: 100
-      services:
-        - name: iuna-wallet
-          port: 18662
     - match: Host(`iuna.jhx.app`)
       kind: Rule
       priority: 1
@@ -148,7 +167,7 @@ spec:
               service:
                 name: iuna-management
                 port:
-                  number: 18661
+                  number: 8080
   tls:
     - secretName: iuna-admin-tls
       hosts:
@@ -188,22 +207,19 @@ spec:
           image: ${IUNA_NODE_IMAGE}
           imagePullPolicy: IfNotPresent
           args:
-${IUNA_NODE_GENESIS_ARG}
             - --data-dir
             - /data
             - --http
-            - 0.0.0.0:18661
+            - 0.0.0.0:8080
             - --p2p
-            - 0.0.0.0:9444
-            - --p2p-announce
-            - 142.132.164.59:9444
+            - 0.0.0.0:19733
             - --wallet-endpoint
             - 0.0.0.0:18662
           ports:
             - name: management
-              containerPort: 18661
+              containerPort: 8080
             - name: p2p
-              containerPort: 9444
+              containerPort: 19733
             - name: wallet-api
               containerPort: 18662
           readinessProbe:
@@ -231,8 +247,8 @@ spec:
     app: iuna-node
   ports:
     - name: management
-      port: 18661
-      targetPort: 18661
+      port: 8080
+      targetPort: 8080
 ---
 apiVersion: v1
 kind: Service
@@ -259,5 +275,5 @@ spec:
     app: iuna-node
   ports:
     - name: p2p
-      port: 9444
-      targetPort: 9444
+      port: 19733
+      targetPort: 19733

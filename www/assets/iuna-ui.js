@@ -1,320 +1,215 @@
 const IUNA_DOWNLOADS_URL = "https://getiuna.org/downloads/";
 const IUNA_RELEASE_METADATA_URL = "https://getiuna.org/downloads/latest.json";
 const IUNA_RELEASE_CHECK_INTERVAL_MS = 30 * 60 * 1000;
-const IUNA_TOUR_STORAGE_KEY = "iunaUiTourCompletedV1";
-// Matches the node's default burn amount, in micro-IUNA.
-const IUNA_LOW_BURN_AMOUNT = 100;
+const IUNA_CHART_MAX_POINTS = 300;
+const iunaChartCaches = new WeakMap();
 
 window.iunaApp = function iunaApp() {
   return {
     tab: "dashboard",
-    commandKeyHeld: false,
-    tourActive: false,
-    tourStepIndex: 0,
-    tourOfferChecked: false,
-    tourSpotlightStyle: "left:-9999px;top:-9999px;width:0;height:0",
-    tourCardStyle: "left:-9999px;top:-9999px",
     status: {},
-    blocks: [],
-    selectedBlock: null,
-    selectedByteBlock: null,
-    selectedBurnBundleBlock: null,
-    selectedTransaction: null,
-    selectedBurnLeaderBlock: null,
-    burnLeaderRanksError: null,
-    burnLeaderRanksRefreshPromise: null,
-    burnLeaderRanksRefreshTimer: null,
-    loadingInitialBlocks: false,
-    loadingOlder: false,
-    hasMoreBlocks: true,
-    walletTxs: [],
-    walletUtxos: [],
-    walletAction: "send",
-    mempool: [],
     peers: [],
-    selectedPeerAddress: null,
-    p2pMetrics: {},
-    blockchainMetrics: { enabled: false, latest: null, charts: [] },
-    loadingMetrics: false,
-    metricsRequestSeq: 0,
-    metricHover: null,
-    leaderboardTab: "balances",
+    peerTargets: [],
+    peerForm: { address: "", busy: false },
+    activity: null,
+    activityVisibleCount: 25,
+    activityObserver: null,
+    activityFilters: { transfers: true, tickets: true, heartbeatRewards: true, ledgerRewards: true },
+    showUtxos: false,
+    utxosBusy: false,
+    contacts: [],
+    contactForm: { name: "", address: "" },
+    contactModalOpen: false,
+    contactEditingAddress: null,
+    tourStep: null,
+    passwordForm: { current: "", next: "", confirmation: "", busy: false },
+    heartbeats: [],
+    ledgerBlocks: [],
+    mempool: { ledger_transactions: [], mining_tickets: [] },
+    metricsRows: [],
+    metricsBusy: false,
+    metricsRequestId: 0,
     metricsRange: (() => {
       try {
         const stored = localStorage.getItem("iunaMetricsRange");
         if (stored === "1000") return 1000;
         if (stored === "all") return "all";
-      } catch {
-        // Ignore storage failures; the in-memory default is enough.
-      }
+      } catch {}
       return 100;
     })(),
-    networkHealth: {},
-    networkHealthLoaded: false,
+    chainView: "ledger",
+    heartbeatPage: { limit: 100, busy: false, hasMore: true },
+    selectedTransaction: null,
+    transactionModalTrigger: null,
+    selectedBlock: null,
+    selectedBlockDetail: null,
+    selectedBlockChain: null,
+    selectedBlockFollowsLatest: false,
+    blockDetailBusy: false,
+    blockDetailRequestId: 0,
+    showSetup: false,
+    showLogin: false,
+    setupStep: 1,
+    setupReady: false,
+    lastUpdated: null,
+    pollTimer: null,
+    releaseCheckTimer: null,
+    pollFailures: 0,
+    operatorToken: "",
+    tokenStored: false,
+    flash: null,
+    flashTimer: null,
     latestRelease: null,
     releaseCheckState: "idle",
     releaseCheckError: null,
     desktopUpdateModalOpen: false,
     desktopUpdateBusy: false,
-    config: { setup_complete: false },
-    auth: { configured: false, authenticated: false },
-    authLoaded: false,
-    authPassword: "",
-    authPasswordConfirm: "",
-    loginPassword: "",
-    authFeedback: null,
-    settingsOldPassword: "",
-    settingsNewPassword: "",
-    settingsPasswordConfirm: "",
-    settingsFeedback: null,
-    keepTrackOfMetrics: false,
-    vdfMemoryMib: 64,
-    addressBook: {},
-    addressBookVersion: 0,
-    addressBookModalOpen: false,
-    addressBookPickerOpen: false,
-    addressBookStandalone: false,
-    addressBookOverview: false,
-    addressBookEditingAddress: null,
-    addressBookDraftAddress: "",
-    addressBookDraftName: "",
-    p2pAcceptInbound: false,
-    p2pBindPort: 9444,
-    p2pBindPortDirty: false,
-    p2pAnnounceAddr: "",
-    p2pAnnounceDirty: false,
-    stratumEnabled: false,
-    stratumBindPort: 3333,
-    stratumBindPortDirty: false,
-    walletEndpointEnabled: false,
-    walletEndpointBindPort: 18662,
-    walletEndpointBindPortDirty: false,
-    setupWallet: { address: null, seed_phrase: null, dev_verify_bypass: false, requires_peer: false },
-    setupNodeMode: "non-listening",
-    setupWalletMode: "create",
-    setupSeedStep: "write",
-    generatedSeedPhrase: "",
-    verifyChallenges: [],
-    verifyAnswers: {},
-    importSeedPhrase: "",
-    walletVerified: false,
-    setupFeedback: null,
-    migrationBusy: false,
-    burnAmount: 100,
-    burnAmountDraft: "0.0001",
-    burnFee: 1,
-    burnFeeDraft: "0.000001",
-    miningEnabled: false,
-    powMiningEnabled: false,
-    powMiningWorkers: 1,
-    maxPowMiningWorkers: 32,
-    recoveryVdfTopRankPercent: 50,
-    burnAmountDirty: false,
-    miningEvents: [],
-    miningEventLimit: 1000,
-    miningEventState: {},
-    miningEventCounter: 0,
-    transferTo: "",
-    transferAmount: null,
-    transferFee: "0.000001",
-    sendPreparing: false,
-    sendConfirmModalOpen: false,
-    sendConfirmBusy: false,
+    transfer: { recipient: "", amount: "", fee: "0.00001", busy: false },
     pendingTransfer: null,
-    feeEstimates: { transfer: null, burn: null, mine: null },
-    feeEstimateTimer: null,
-    showSendAdvanced: false,
-    optimizeOpen: false,
-    optimizeBusy: false,
-    optimizeRunning: false,
-    optimizeFee: "0.000001",
-    optimizeMergeRoots: false,
-    optimizePlan: null,
-    optimizeMessage: "",
-    optimizeError: "",
-    optimizeDismissed: false,
-    quantumMigrationFee: "0.000001",
-    quantumMigrationBusy: false,
-    quantumMigrationSubmitting: false,
-    quantumMigrationPreview: null,
-    quantumMigrationError: "",
-    selectedTransferUtxos: [],
-    selectedTransferUtxoAmounts: {},
-    lastSelectedTransferUtxo: null,
-    walletTxFilters: { transfer: true, mine: true, burn: true, reward: true },
-    setupPeerAddress: "iuna.jhx.app:9444",
-    peerAddress: "",
-    flash: null,
-    flashTimer: null,
-    chainResetModalOpen: false,
-    chainResetConfirm: "",
-    chainResetBusy: false,
-    showWalletUtxos: false,
-    showWalletAddresses: false,
-    showPowDifficultyInfo: false,
-    lastUpdated: null,
-    pollHandle: null,
-    releaseCheckTimer: null,
-    refreshPromise: null,
-    shellRefreshPromise: null,
-    networkHealthPromise: null,
-    requestTimeoutMs: 12000,
-    hashListenerInstalled: false,
-    newBlockHashes: new Set(),
-    newBlockTimer: null,
-    lastBlockMempoolHeight: null,
-    mempoolFirstSeenHeights: {},
-    mempoolFirstSeenAt: {},
-    mempoolSeenInitialized: false,
-    blockPageSize: 20,
-    datasetPageSize: 25,
-    walletTxPage: { offset: 0, total: 0, hasMore: true, loading: false, backgroundLoading: false },
-    walletUtxoPage: { offset: 0, total: 0, hasMore: true, loading: false, backgroundLoading: false },
-    mempoolPage: { offset: 0, total: 0, hasMore: true, loading: false, backgroundLoading: false },
-    peerPage: { offset: 0, total: 0, hasMore: true, loading: false, backgroundLoading: false },
-
-    init() {
-      this.bootstrap();
+    shortcutKeyHeld: false,
+    chartHover: null,
+    mining: { busy: false, workers: 1, message: "Proof-of-work mining is off" },
+    ticket: { budget: "", duration: 10, fee: "0.00000001", quote: null, continuousQuote: null, busy: false, continuousBusy: false },
+    walletAccess: {
+      mode: "",
+      phase: "credentials",
+      password: "",
+      confirmation: "",
+      recoveryInput: "",
+      recoveryPhrase: "",
+      confirmationWords: ["", "", ""],
+      confirmationIndices: [2, 11, 20],
+      busy: false,
     },
 
-    async bootstrap() {
-      await this.refreshAuth();
-      if (this.showingAuth()) return;
-      await this.bootstrapAuthenticated();
-    },
-
-    async bootstrapAuthenticated() {
-      await this.refreshConfig();
-      if (!this.config.setup_complete) {
-        await this.refreshWalletSetup();
-      }
+    async init() {
+      this.captureDesktopToken();
+      this.tokenStored = Boolean(this.storedOperatorToken());
+      this.contacts = this.loadContacts();
       this.tab = this.tabFromHash();
-      if (!this.hashListenerInstalled) {
-        window.addEventListener("hashchange", () => {
-          this.setTab(this.tabFromHash());
-        });
-        this.hashListenerInstalled = true;
-      }
+      window.addEventListener("hashchange", () => { this.tab = this.tabFromHash(); });
+      window.addEventListener("keydown", (event) => this.handleKeydown(event));
+      window.addEventListener("keyup", (event) => this.handleKeyup(event));
+      window.addEventListener("blur", () => { this.shortcutKeyHeld = false; });
+      document.addEventListener("visibilitychange", () => {
+        if (!document.hidden) this.refresh(true).then(() => this.schedulePoll());
+      });
       await this.refresh();
-      this.maybeStartTour();
       this.checkLatestRelease();
       this.scheduleReleaseCheck();
+      await this.quoteTicket(true);
+      this.setupReady = true;
+      this.showSetup = !this.setupCompleted();
+      this.syncLoginVisibility();
+      if (!this.showSetup && !this.showLogin && !this.tourDismissed()) this.startTour();
       this.schedulePoll();
+      this.$watch("showSetup", (open) => {
+        if (open) this.$nextTick(() => this.$refs.setupModal?.focus());
+      });
+      this.$watch("showLogin", (open) => {
+        if (open) this.$nextTick(() => this.$refs.loginPassword?.focus());
+      });
+      if (this.showSetup) this.$nextTick(() => this.$refs.setupModal?.focus());
+      if (this.showLogin) this.$nextTick(() => this.$refs.loginPassword?.focus());
     },
 
-    canUseProtectedApi() {
-      return this.authLoaded && this.auth.configured === true && this.auth.authenticated === true;
+    captureDesktopToken() {
+      const match = window.location.hash.match(/(?:^#|&)operator-token=([^&]+)/);
+      if (!match) return;
+      try { sessionStorage.setItem("iunaOperatorToken", decodeURIComponent(match[1])); } catch {}
+      history.replaceState(null, "", `${window.location.pathname}${window.location.search}`);
     },
 
-    stopPolling() {
-      this.stopReleaseCheck();
-      if (!this.pollHandle) return;
-      clearTimeout(this.pollHandle);
-      this.pollHandle = null;
-    },
-
-    stopReleaseCheck() {
-      if (!this.releaseCheckTimer) return;
-      clearTimeout(this.releaseCheckTimer);
-      this.releaseCheckTimer = null;
-    },
-
-    scheduleReleaseCheck() {
-      if (this.releaseCheckTimer || !this.canUseProtectedApi()) return;
-      this.releaseCheckTimer = setTimeout(async () => {
-        this.releaseCheckTimer = null;
-        if (!this.canUseProtectedApi()) return;
-        await this.checkLatestRelease();
-        this.scheduleReleaseCheck();
-      }, IUNA_RELEASE_CHECK_INTERVAL_MS);
-    },
-
-    schedulePoll() {
-      if (this.pollHandle || !this.canUseProtectedApi()) return;
-      const delay = this.syncingNode() ? 1000 : 5000;
-      this.pollHandle = setTimeout(async () => {
-        this.pollHandle = null;
-        await this.refresh({ silent: true });
-        this.maybeStartTour();
-        this.schedulePoll();
-      }, delay);
+    tabs() {
+      return ["dashboard", "wallet", "mining", "p2p", "chain", "metrics", "settings"];
     },
 
     tabFromHash() {
-      const hash = window.location.hash.replace(/^#\/?/, "");
-      return this.allowedTabs().includes(hash) ? hash : "dashboard";
+      const value = window.location.hash.replace(/^#\/?/, "");
+      return this.tabs().includes(value) ? value : "dashboard";
     },
 
     setTab(tab) {
-      if (!this.allowedTabs().includes(tab)) return;
-      const alreadyActive = this.tab === tab;
+      if (!this.tabs().includes(tab)) return;
+      const changed = this.tab !== tab;
       this.tab = tab;
-      if (window.location.hash !== `#${tab}`) {
-        window.location.hash = tab;
-      }
-      if (alreadyActive) return;
-      this.refresh({ silent: true });
+      if (window.location.hash !== `#${tab}`) window.location.hash = tab;
+      if (changed && tab === "wallet") this.refresh(true);
+      if (changed && tab === "metrics") this.refreshMetrics();
+      if (changed && tab === "chain") this.$nextTick(() => this.ensureChainRailScrollable(this.chainView));
     },
 
-    allowedTabs() {
-      const tabs = ["dashboard", "wallet", "mining", "p2p", "chain", "settings"];
-      if (this.developmentMode()) {
-        tabs.splice(tabs.indexOf("chain") + 1, 0, "metrics", "leaderboards");
-      }
-      return tabs;
+    // Cmd (macOS) or Ctrl plus 1-7 opens the matching sidebar screen; badges show while held.
+    shortcutModifier(event) {
+      return /Mac|iPhone|iPad/.test(navigator.platform || "") ? event.metaKey : event.ctrlKey;
     },
 
-    navigationShortcutNumber(tab) {
-      const index = this.allowedTabs().indexOf(tab);
-      return index >= 0 ? String(index + 1) : "";
+    shortcutsAvailable() {
+      return !(this.setupReady && (this.showSetup || this.showLogin))
+        && !this.pendingTransfer
+        && !this.showUtxos
+        && !this.selectedTransaction
+        && this.tourStep === null;
     },
 
-    navigationShortcutsAvailable() {
-      return (
-        this.canUseProtectedApi() &&
-        this.config.setup_complete === true &&
-        !this.showingNetworkMigration() &&
-        !this.syncingNode()
-      );
+    shortcutNumber(tab) {
+      return this.tabs().indexOf(tab) + 1;
     },
 
-    handleNavigationKeydown(event) {
-      if (event.key === "Meta") {
-        this.commandKeyHeld = this.navigationShortcutsAvailable();
+    handleKeydown(event) {
+      if (event.key === "Escape") {
+        this.closeModals();
         return;
       }
-      if (
-        !event.metaKey ||
-        event.altKey ||
-        event.ctrlKey ||
-        event.shiftKey ||
-        !this.navigationShortcutsAvailable()
-      ) return;
-      this.commandKeyHeld = true;
-      const keyNumber = /^[1-9]$/.test(event.key || "")
-        ? Number(event.key)
-        : /^Digit[1-9]$/.test(event.code || "")
-          ? Number(event.code.slice(-1))
-          : 0;
-      const tab = this.allowedTabs()[keyNumber - 1];
+      if (["Meta", "Control"].includes(event.key)) {
+        this.shortcutKeyHeld = this.shortcutModifier(event) && this.shortcutsAvailable();
+        return;
+      }
+      if (!this.shortcutModifier(event) || event.altKey || event.shiftKey || !this.shortcutsAvailable()) return;
+      const match = /^Digit([1-9])$/.exec(event.code || "") || /^([1-9])$/.exec(event.key || "");
+      const tab = match && this.tabs()[Number(match[1]) - 1];
       if (!tab) return;
       event.preventDefault();
-      this.closeModals();
       this.setTab(tab);
     },
 
-    handleNavigationKeyup(event) {
-      if (event.key === "Meta" || !event.metaKey) {
-        this.commandKeyHeld = false;
+    handleKeyup(event) {
+      if (!this.shortcutModifier(event)) this.shortcutKeyHeld = false;
+    },
+
+    closeModals() {
+      if (this.showLogin) return;
+      if (this.selectedTransaction) {
+        this.closeTransactionModal();
+        return;
       }
-    },
-
-    releaseCommandKey() {
-      this.commandKeyHeld = false;
-    },
-
-    developmentMode() {
-      return this.keepTrackOfMetrics === true || this.config.keep_track_of_metrics === true;
+      if (this.contactModalOpen) {
+        this.closeContactEditor();
+        return;
+      }
+      if (this.desktopUpdateModalOpen && !this.desktopUpdateBusy) {
+        this.desktopUpdateModalOpen = false;
+        return;
+      }
+      if (this.tourStep !== null) {
+        this.endTour();
+        return;
+      }
+      if (this.pendingTransfer && !this.transfer.busy) {
+        this.pendingTransfer = null;
+        return;
+      }
+      if (this.showUtxos) {
+        this.showUtxos = false;
+        return;
+      }
+      if (this.showSetup) {
+        this.closeSetup();
+        return;
+      }
+      if (this.selectedBlock) {
+        this.clearSelectedBlock();
+      }
     },
 
     pageTitle() {
@@ -325,164 +220,316 @@ window.iunaApp = function iunaApp() {
         p2p: "P2P",
         chain: "Chain",
         metrics: "Metrics",
-        leaderboards: "Leaderboards",
         settings: "Settings",
       }[this.tab] || "iuna";
     },
 
+    setupCompleted() {
+      const instance = String(this.status.node_instance_id || "");
+      if (!/^[0-9a-f]{32}$/.test(instance)) return false;
+      try { return localStorage.getItem(`iunaSetupComplete:${instance}`) === "true"; } catch { return false; }
+    },
+
+    completeSetup() {
+      const instance = String(this.status.node_instance_id || "");
+      if (/^[0-9a-f]{32}$/.test(instance)) {
+        try { localStorage.setItem(`iunaSetupComplete:${instance}`, "true"); } catch {}
+      }
+      this.showSetup = false;
+      this.setupStep = 1;
+      this.setTab("dashboard");
+      this.notify("Setup complete");
+      this.syncLoginVisibility();
+      if (!this.showLogin && !this.tourDismissed()) this.startTour();
+    },
+
+    // Contacts live only in this browser; they are a convenience, not wallet data.
+    loadContacts() {
+      try {
+        const stored = JSON.parse(localStorage.getItem("iunaContacts") || "[]");
+        return Array.isArray(stored) ? stored.filter((contact) => /^[0-9a-f]{64}$/.test(contact?.address)) : [];
+      } catch { return []; }
+    },
+
+    saveContacts() {
+      try { localStorage.setItem("iunaContacts", JSON.stringify(this.contacts)); } catch {}
+    },
+
+    addContact(name = this.contactForm.name, address = this.contactForm.address) {
+      const key = String(address).trim().toLowerCase();
+      const label = String(name).trim().slice(0, 40);
+      if (!label) return this.notify("Give the contact a name", "error");
+      if (!/^[0-9a-f]{64}$/.test(key)) return this.notify("A contact needs a 64-character public key", "error");
+      if (this.contacts.some((contact) => contact.address === key)) return this.notify("That key is already a contact", "error");
+      this.contacts = [...this.contacts, { name: label, address: key }].sort((a, b) => a.name.localeCompare(b.name));
+      this.saveContacts();
+      this.contactForm = { name: "", address: "" };
+      this.notify(`Saved ${label}`);
+    },
+
+    openContactEditor(address) {
+      const key = String(address || "").trim().toLowerCase();
+      if (!/^[0-9a-f]{64}$/.test(key)) return;
+      const existing = this.contacts.find((contact) => contact.address === key);
+      this.contactEditingAddress = existing?.address || null;
+      this.contactForm = { name: existing?.name || "", address: key };
+      this.contactModalOpen = true;
+      this.$nextTick(() => this.$refs.contactName?.focus());
+    },
+
+    closeContactEditor() {
+      this.contactModalOpen = false;
+      this.contactEditingAddress = null;
+      this.contactForm = { name: "", address: "" };
+    },
+
+    saveContactEditor() {
+      const key = String(this.contactForm.address).trim().toLowerCase();
+      const label = String(this.contactForm.name).trim().slice(0, 40);
+      if (!label) return this.notify("Give the contact a name", "error");
+      if (!/^[0-9a-f]{64}$/.test(key)) return this.notify("A contact needs a 64-character public key", "error");
+      const duplicate = this.contacts.some((contact) => (
+        contact.address === key && contact.address !== this.contactEditingAddress
+      ));
+      if (duplicate) return this.notify("That key is already a contact", "error");
+      this.contacts = [
+        ...this.contacts.filter((contact) => contact.address !== this.contactEditingAddress),
+        { name: label, address: key },
+      ].sort((left, right) => left.name.localeCompare(right.name));
+      this.saveContacts();
+      this.closeContactEditor();
+      this.notify(`Saved ${label}`);
+    },
+
+    removeContact(address) {
+      this.contacts = this.contacts.filter((contact) => contact.address !== address);
+      this.saveContacts();
+      if (this.contactEditingAddress === address) this.closeContactEditor();
+    },
+
+    contactName(address) {
+      return this.contacts.find((contact) => contact.address === address)?.name || "";
+    },
+
+    // A short spotlight tour of the sidebar, shown once after Initial Setup.
     tourSteps() {
       return [
-        { selector: '[data-tour="dashboard"]', clickTarget: "dashboard", title: "Welcome", text: "This tour lets you explore the interface yourself. Click the highlighted Dashboard button to begin." },
-        { tab: "dashboard", title: "Dashboard", text: "See your balance, mining and burning status, the latest block, and your node's network connection at a glance." },
-        { tab: "dashboard", selector: '[data-tour="wallet"]', clickTarget: "wallet", title: "Continue to Wallet", text: "Click the highlighted Wallet tab to explore the next screen." },
-        { tab: "wallet", title: "Wallet", text: "Send and receive IUNA, review activity, manage addresses, and optimize unspent outputs." },
-        { tab: "wallet", selector: '[data-tour="mining"]', clickTarget: "mining", title: "Continue to Mining", text: "Click the highlighted Mining tab to see how your node can earn IUNA." },
-        { tab: "mining", title: "Mining", text: "This screen contains both ways your node can earn IUNA: proof-of-work mining and burn-based finalization." },
-        { tab: "mining", title: "Mine new coins", text: "Turn on Mine to search for proof-of-work actions that mint new IUNA. More workers search in parallel and increase your chance, but use more CPU." },
-        { tab: "mining", title: "Burn to finalize", text: "Once you own IUNA, turn on Burn to compete for block finalization and earn the finalizer payout. Burning more increases your chance; burned IUNA is permanently spent." },
-        { tab: "mining", selector: '[data-tour="p2p"]', clickTarget: "p2p", title: "Continue to P2P", text: "Click the highlighted P2P tab to inspect your node's network connections." },
-        { tab: "p2p", title: "P2P", text: "Check network health, inspect the peers that keep your chain in sync, and manage node connections." },
-        { tab: "p2p", selector: '[data-tour="chain"]', clickTarget: "chain", title: "Continue to Chain", text: "Click the highlighted Chain tab to explore blocks and transactions." },
-        { tab: "chain", title: "Chain", text: "Explore blocks and transactions, including transfers, burns, mining proofs, finalizers, fees, and rewards." },
-        { tab: "chain", selector: '[data-tour="settings"]', clickTarget: "settings", title: "Continue to Settings", text: "Click the highlighted Settings button to view your node configuration." },
-        { tab: "settings", title: "Settings", text: "Configure networking, VDF resources, optional endpoints, security, and developer mode. You can also restart this tour from this screen." },
-        { tab: "settings", title: "Questions?", text: "Join the IUNA Discord for questions, feedback, and help from the community. The Discord link is always available at the bottom of the navigation bar." },
+        { tab: "dashboard", target: "dashboard", title: "Dashboard", text: "Your balance, mining state, both chains and peers at a glance. Cards turn amber or red when something needs attention." },
+        { tab: "wallet", target: "wallet", title: "Wallet", text: "Send and receive IUNA. Every transfer is reviewed before it is signed, and your activity and unspent outputs are listed here." },
+        { tab: "mining", target: "mining", title: "Mining", text: "Heartbeat mining searches for proof of work continuously. Ledger mining buys a ticket for the public lottery." },
+        { tab: "p2p", target: "p2p", title: "P2P", text: "See connected nodes and add peers by IP address and port. Added peers are remembered." },
+        { tab: "metrics", target: "metrics", title: "Metrics", text: "Heartbeat intervals and difficulty over recent blocks, compared with the 60-second target." },
+        { tab: "settings", target: "settings", title: "Settings", text: "Wallet password, interface tour and Initial Setup. Hold Cmd or Ctrl to see the number shortcuts for each screen." },
       ];
     },
 
-    currentTourStep() {
-      return this.tourSteps()[this.tourStepIndex] || this.tourSteps()[0];
-    },
-
-    tourCompleted() {
-      try {
-        return localStorage.getItem(IUNA_TOUR_STORAGE_KEY) === "true";
-      } catch {
-        return false;
-      }
-    },
-
-    maybeStartTour() {
-      if (
-        this.tourOfferChecked ||
-        this.tourActive ||
-        !this.canUseProtectedApi() ||
-        this.config.setup_complete !== true ||
-        this.showingNetworkMigration() ||
-        !this.networkHealthLoaded
-      ) return;
-      if (this.syncingNode()) return;
-      this.tourOfferChecked = true;
-      if (!this.tourCompleted()) this.startTour();
+    tourDismissed() {
+      try { return localStorage.getItem("iunaTourDismissed") === "true"; } catch { return true; }
     },
 
     startTour() {
-      this.closeModals();
-      this.tourActive = true;
-      this.tourStepIndex = 0;
-      this.showTourStep();
+      this.tourStep = 0;
+      this.setTab(this.tourSteps()[0].tab);
     },
 
-    showTourStep() {
+    moveTour(delta) {
+      const next = this.tourStep + delta;
+      if (next < 0) return;
+      if (next >= this.tourSteps().length) return this.endTour();
+      this.tourStep = next;
+      this.setTab(this.tourSteps()[next].tab);
+    },
+
+    endTour() {
+      this.tourStep = null;
+      try { localStorage.setItem("iunaTourDismissed", "true"); } catch {}
+    },
+
+    currentTourStep() {
+      return this.tourStep === null ? null : this.tourSteps()[this.tourStep];
+    },
+
+    // Places the tour card next to the highlighted sidebar button.
+    tourSpotlightStyle() {
       const step = this.currentTourStep();
-      if (step.tab && this.tab !== step.tab) this.setTab(step.tab);
-      setTimeout(() => {
-        const target = typeof document === "undefined" || !step.selector
-          ? null
-          : document.querySelector(step.selector);
-        target?.scrollIntoView({ block: "center", inline: "center" });
-        setTimeout(() => this.positionTour(), 0);
-      }, 0);
+      const element = step && document.querySelector(`[data-tour="${step.target}"]`);
+      if (!element) return "display:none";
+      const box = element.getBoundingClientRect();
+      return `left:${box.left - 4}px;top:${box.top - 4}px;width:${box.width + 8}px;height:${box.height + 8}px`;
     },
 
-    positionTour() {
-      if (!this.tourActive || typeof document === "undefined") return;
+    tourCardStyle() {
       const step = this.currentTourStep();
-      const viewportWidth = window.innerWidth;
-      const viewportHeight = window.innerHeight;
-      const card = document.querySelector("[data-tour-card]");
-      const cardWidth = Math.min(card?.offsetWidth || 360, viewportWidth - 24);
-      const cardHeight = card?.offsetHeight || 210;
-      if (!step.selector) {
-        const left = Math.max(12, viewportWidth - cardWidth - 24);
-        const top = Math.max(12, viewportHeight - cardHeight - 24);
-        this.tourSpotlightStyle = "left:-9999px;top:-9999px;width:0;height:0";
-        this.tourCardStyle = `left:${left}px;top:${top}px;width:${cardWidth}px`;
-        if (card && !card.contains(document.activeElement)) card.focus({ preventScroll: true });
+      const element = step && document.querySelector(`[data-tour="${step.target}"]`);
+      if (!element) return "";
+      const box = element.getBoundingClientRect();
+      if (window.innerWidth <= 650) return `left:16px;right:16px;top:${box.bottom + 12}px`;
+      return `left:${box.right + 16}px;top:${Math.min(box.top, window.innerHeight - 220)}px`;
+    },
+
+    resetSetup() {
+      this.setupStep = 1;
+      this.showSetup = true;
+    },
+
+    closeSetup() {
+      if (!this.setupCompleted()) return;
+      this.showSetup = false;
+      this.setupStep = 1;
+      this.syncLoginVisibility();
+    },
+
+    syncLoginVisibility() {
+      // A backup needs an unlocked wallet; left set, the unlock form would submit a backup.
+      if (this.walletAccess.mode === "backup" && !this.status.wallet_unlocked) {
+        this.walletAccess.recoveryPhrase = "";
+        this.selectWalletMode("");
+      }
+      const shouldOpen = this.setupReady
+        && !this.showSetup
+        && Boolean(this.status.wallet_public_key)
+        && this.status.wallet_unlocked !== true;
+      if (shouldOpen && !this.showLogin) this.selectWalletMode("");
+      this.showLogin = shouldOpen;
+    },
+
+    nextSetupStep() {
+      this.setupStep = Math.min(3, this.setupStep + 1);
+    },
+
+    previousSetupStep() {
+      this.setupStep = Math.max(1, this.setupStep - 1);
+    },
+
+    walletNeedsCreation() {
+      return !this.status.wallet_public_key;
+    },
+
+    walletActionLabel() {
+      if (this.walletAccess.busy) return this.walletAccess.mode === "restore" ? "Restoring wallet…" : (this.walletNeedsCreation() ? "Creating wallet…" : "Unlocking wallet…");
+      if (!this.walletNeedsCreation()) return "Unlock wallet";
+      return this.walletAccess.mode === "restore" ? "Restore wallet" : "Create wallet";
+    },
+
+    selectWalletMode(mode) {
+      this.walletAccess.mode = mode;
+      this.walletAccess.phase = "credentials";
+      this.walletAccess.password = "";
+      this.walletAccess.confirmation = "";
+      this.walletAccess.recoveryInput = "";
+    },
+
+    startWalletBackup() {
+      this.selectWalletMode("backup");
+    },
+
+    recoveryWords() {
+      return this.walletAccess.recoveryPhrase.trim().split(/\s+/).filter(Boolean);
+    },
+
+    startRecoveryCheck() {
+      this.walletAccess.confirmationIndices = this.randomWordIndices(3, this.recoveryWords().length || 24);
+      this.walletAccess.confirmationWords = ["", "", ""];
+      this.walletAccess.phase = "confirm";
+    },
+
+    verifyRecoveryPhrase() {
+      const words = this.recoveryWords();
+      const valid = this.walletAccess.confirmationIndices.every((index, position) =>
+        (this.walletAccess.confirmationWords[position] || "").trim().toLowerCase() === words[index - 1]
+      );
+      if (!valid) {
+        this.notify("Those words do not match your recovery phrase", "error");
         return;
       }
-      const target = document.querySelector(step.selector);
-      if (!target) {
-        setTimeout(() => this.positionTour(), 50);
+      this.walletAccess.recoveryPhrase = "";
+      this.walletAccess.confirmationWords = ["", "", ""];
+      this.walletAccess.phase = "complete";
+      this.walletAccess.mode = "";
+      this.notify("Recovery phrase confirmed");
+    },
+
+    async accessWallet() {
+      if (this.walletAccess.busy) return;
+      if (this.walletNeedsCreation() && !["create", "restore"].includes(this.walletAccess.mode)) {
+        this.notify("Choose whether to create or restore a wallet", "error");
         return;
       }
-      const rect = target.getBoundingClientRect();
-      if (rect.width === 0 && rect.height === 0) {
-        setTimeout(() => this.positionTour(), 50);
+      // Matches MIN_NEW_PASSWORD_CHARS in the wallet store; unlocking accepts existing passwords.
+      const choosingPassword = this.walletNeedsCreation() && this.walletAccess.mode !== "backup";
+      if (choosingPassword && [...this.walletAccess.password].length < 10) {
+        this.notify("Use a wallet password of at least 10 characters", "error");
         return;
       }
-      const padding = 10;
-      const diameter = Math.max(rect.width, rect.height) + padding * 2;
-      const spotlightLeft = rect.left + rect.width / 2 - diameter / 2;
-      const spotlightTop = rect.top + rect.height / 2 - diameter / 2;
-      this.tourSpotlightStyle = `left:${spotlightLeft}px;top:${spotlightTop}px;width:${diameter}px;height:${diameter}px`;
-
-      const gap = 22;
-      const clamp = (value, min, max) => Math.max(min, Math.min(value, max));
-      let left;
-      let top;
-      if (rect.right + gap + cardWidth <= viewportWidth - 12) {
-        left = rect.right + gap;
-        top = clamp(rect.top + rect.height / 2 - cardHeight / 2, 12, viewportHeight - cardHeight - 12);
-      } else if (rect.left - gap - cardWidth >= 12) {
-        left = rect.left - gap - cardWidth;
-        top = clamp(rect.top + rect.height / 2 - cardHeight / 2, 12, viewportHeight - cardHeight - 12);
-      } else {
-        left = clamp(rect.left + rect.width / 2 - cardWidth / 2, 12, viewportWidth - cardWidth - 12);
-        top = rect.bottom + gap + cardHeight <= viewportHeight
-          ? rect.bottom + gap
-          : Math.max(12, rect.top - gap - cardHeight);
-      }
-      this.tourCardStyle = `left:${left}px;top:${top}px;width:${cardWidth}px`;
-      const focusTarget = step.clickTarget ? target : card;
-      if (focusTarget && !focusTarget.contains(document.activeElement)) focusTarget.focus({ preventScroll: true });
-    },
-
-    tourTargetClicked(target) {
-      if (!this.tourActive || this.currentTourStep().clickTarget !== target) return;
-      this.nextTourStep();
-    },
-
-    nextTourStep() {
-      if (this.tourStepIndex >= this.tourSteps().length - 1) {
-        this.finishTour();
+      if (!this.walletAccess.password) {
+        this.notify("Enter your wallet password", "error");
         return;
       }
-      this.tourStepIndex += 1;
-      this.showTourStep();
-    },
-
-    previousTourStep() {
-      if (this.tourStepIndex === 0) return;
-      this.tourStepIndex -= 1;
-      this.showTourStep();
-    },
-
-    finishTour() {
-      this.closeTour();
-    },
-
-    closeTour() {
-      this.dismissTour();
+      if (this.walletNeedsCreation() && this.walletAccess.password !== this.walletAccess.confirmation) {
+        this.notify("The wallet passwords do not match", "error");
+        return;
+      }
+      const recoveryPhrase = this.walletAccess.recoveryInput.trim().toLowerCase().replace(/\s+/g, " ");
+      if (this.walletAccess.mode === "restore" && recoveryPhrase.split(" ").length !== 24) {
+        this.notify("Enter the complete 24-word recovery phrase", "error");
+        return;
+      }
+      this.walletAccess.busy = true;
       try {
-        localStorage.setItem(IUNA_TOUR_STORAGE_KEY, "true");
-      } catch {}
+        const backup = this.walletAccess.mode === "backup" && this.status.wallet_unlocked;
+        const action = backup ? "backup" : (this.walletNeedsCreation() ? this.walletAccess.mode : "unlock");
+        const result = await this.postJson("/api/wallet", {
+          password: this.walletAccess.password,
+          action,
+          recovery_phrase: action === "restore" ? recoveryPhrase : undefined,
+        });
+        this.walletAccess.password = "";
+        this.walletAccess.confirmation = "";
+        this.walletAccess.recoveryInput = "";
+        if (result.recovery_phrase) {
+          this.walletAccess.recoveryPhrase = result.recovery_phrase;
+          this.walletAccess.phase = "backup";
+        } else {
+          this.walletAccess.phase = "complete";
+        }
+        await this.refresh(true);
+        this.notify(action === "backup" ? "Recovery phrase ready — save it safely" : (action === "restore" ? "Wallet restored and encrypted" : (result.created ? "Wallet created — save your recovery phrase" : "Wallet unlocked")));
+      } catch (error) {
+        this.notify(error.message, "error");
+      } finally {
+        this.walletAccess.busy = false;
+      }
     },
 
-    dismissTour() {
-      this.tourActive = false;
-      this.tourSpotlightStyle = "left:-9999px;top:-9999px;width:0;height:0";
-      this.tourCardStyle = "left:-9999px;top:-9999px";
+    randomWordIndices(count, total) {
+      const indices = new Set();
+      while (indices.size < count) indices.add(1 + (crypto.getRandomValues(new Uint32Array(1))[0] % total));
+      return [...indices].sort((left, right) => left - right);
+    },
+
+    canContinueSetup() {
+      if (this.setupStep !== 2) return true;
+      return this.status.wallet_unlocked === true && !this.walletAccess.recoveryPhrase;
+    },
+
+    // Poll every 5 seconds, back off up to a minute while the node is unreachable, and stop
+    // while the tab is hidden (visibilitychange resumes it).
+    schedulePoll() {
+      clearTimeout(this.pollTimer);
+      if (document.hidden) return;
+      const delay = Math.min(60_000, 5000 * 2 ** this.pollFailures);
+      this.pollTimer = setTimeout(async () => {
+        await this.refresh(true);
+        this.schedulePoll();
+      }, delay);
+    },
+
+    scheduleReleaseCheck() {
+      clearTimeout(this.releaseCheckTimer);
+      this.releaseCheckTimer = setTimeout(async () => {
+        await this.checkLatestRelease();
+        this.scheduleReleaseCheck();
+      }, IUNA_RELEASE_CHECK_INTERVAL_MS);
     },
 
     appVersionLabel() {
@@ -496,9 +543,7 @@ window.iunaApp = function iunaApp() {
     updateAvailable() {
       const current = this.normalizeVersion(this.status.app_version);
       const latest = this.normalizeVersion(this.latestRelease?.tag);
-      if (!current || !latest) return false;
-      if (current === latest) return false;
-      return this.compareVersions(latest, current) > 0;
+      return Boolean(current && latest && current !== latest && this.compareVersions(latest, current) > 0);
     },
 
     versionPanelTitle() {
@@ -509,14 +554,40 @@ window.iunaApp = function iunaApp() {
       return "iuna is up to date";
     },
 
+    async checkLatestRelease() {
+      if (this.releaseCheckState === "checking") return;
+      this.releaseCheckState = "checking";
+      this.releaseCheckError = null;
+      try {
+        const response = await fetch(IUNA_RELEASE_METADATA_URL, {
+          cache: "no-store",
+          headers: { Accept: "application/json" },
+        });
+        if (!response.ok) throw new Error(`Release check failed (${response.status})`);
+        const release = await response.json();
+        const version = this.normalizeVersion(release.tag || release.version);
+        if (!version) throw new Error("Release metadata is missing a version");
+        let desktopVersion = null;
+        const invoke = window.__TAURI__?.core?.invoke;
+        if (typeof invoke === "function") {
+          try { desktopVersion = this.normalizeVersion(await invoke("check_desktop_update")); } catch {}
+        }
+        this.latestRelease = {
+          tag: `v${version}`,
+          url: release.url || IUNA_DOWNLOADS_URL,
+          desktopReady: desktopVersion === version,
+        };
+        this.releaseCheckState = "done";
+      } catch (error) {
+        this.releaseCheckError = error?.message || "Release check failed";
+        this.releaseCheckState = "failed";
+      }
+    },
+
     async openLatestRelease() {
       const url = this.latestRelease?.url || IUNA_DOWNLOADS_URL;
       const invoke = window.__TAURI__?.core?.invoke;
-      if (
-        this.updateAvailable()
-        && this.latestRelease?.desktopReady === true
-        && typeof invoke === "function"
-      ) {
+      if (this.updateAvailable() && this.latestRelease?.desktopReady === true && typeof invoke === "function") {
         this.desktopUpdateModalOpen = true;
         return;
       }
@@ -531,4056 +602,20 @@ window.iunaApp = function iunaApp() {
     },
 
     closeDesktopUpdateModal() {
-      if (this.desktopUpdateBusy) return;
-      this.desktopUpdateModalOpen = false;
+      if (!this.desktopUpdateBusy) this.desktopUpdateModalOpen = false;
     },
 
     async installDesktopUpdate() {
       const invoke = window.__TAURI__?.core?.invoke;
-      if (typeof invoke !== "function") return;
+      if (typeof invoke !== "function" || this.desktopUpdateBusy) return;
       this.desktopUpdateBusy = true;
       try {
         await invoke("install_desktop_update");
       } catch (error) {
         this.desktopUpdateBusy = false;
         this.desktopUpdateModalOpen = false;
-        this.showFlash(error?.message || String(error) || "Desktop update failed", "error");
+        this.notify(error?.message || String(error) || "Desktop update failed", "error");
       }
-    },
-
-    showingSetup() {
-      return this.authLoaded && !this.showingAuth() && !this.showingNetworkMigration() && !this.config.setup_complete;
-    },
-
-    showingNetworkMigration() {
-      return this.authLoaded && !this.showingAuth() && this.status.network_migration?.required === true;
-    },
-
-    migrationNetworkLabel() {
-      return this.status.network_migration?.to_network || "the new Iuna network";
-    },
-
-    async finishNetworkMigration(setUpDifferentWallet) {
-      this.migrationBusy = true;
-      try {
-        await this.submitForm("/api/settings/chain-reset", { confirm: "RESET" });
-        if (setUpDifferentWallet) {
-          const response = await this.fetchWithTimeout("/api/config", {
-            method: "POST",
-            headers: { Accept: "application/json", "Content-Type": "application/x-www-form-urlencoded" },
-            body: new URLSearchParams({ setup_complete: "false", peer: "" }),
-          });
-          const payload = await response.json();
-          if (!response.ok || !payload.ok) throw new Error(payload.error || "Could not open wallet setup");
-          this.config.setup_complete = false;
-        }
-        await this.refresh({ force: true });
-        this.showFlash(setUpDifferentWallet ? "Local chain reset. Choose or import a wallet." : "Local chain reset. Sync requested from peers.", "success");
-      } catch (error) {
-        this.showFlash(error.message, "error");
-      } finally {
-        this.migrationBusy = false;
-      }
-    },
-
-    showingAuth() {
-      return this.authLoaded && (!this.auth.configured || !this.auth.authenticated);
-    },
-
-    setupRequiresPeer() {
-      return this.setupWallet.requires_peer === true;
-    },
-
-    setupHasPeer() {
-      return this.setupPeerAddress.trim().length > 0 || this.outboundPeers().length > 0;
-    },
-
-    setupCanContinue() {
-      return this.walletVerified && (!this.setupRequiresPeer() || this.setupHasPeer());
-    },
-
-    selectSetupNodeMode(mode) {
-      this.setupNodeMode = ["non-listening", "listening"].includes(mode)
-        ? mode
-        : "non-listening";
-      this.setupFeedback = null;
-    },
-
-    setupNodeModeCopy() {
-      if (this.setupNodeMode === "listening") {
-        return "Listening node shows mining and P2P controls and accepts inbound P2P connections when TCP port 9444 is reachable.";
-      }
-      return "Non-listening node connects out to peers and keeps inbound P2P closed.";
-    },
-
-    async refreshAuth() {
-      this.auth = await this.fetchJson("/api/auth/status");
-      this.authLoaded = true;
-    },
-
-    async setupPassword() {
-      try {
-        this.authFeedback = null;
-        if (this.authPassword !== this.authPasswordConfirm) {
-          throw new Error("Passwords do not match");
-        }
-        await this.postAuth("/api/auth/setup", this.authPassword);
-        this.authPassword = "";
-        this.authPasswordConfirm = "";
-        await this.refreshAuth();
-        await this.bootstrapAuthenticated();
-        this.showFlash("Password set", "success");
-      } catch (error) {
-        this.showAuthFeedback(error.message, "error");
-      }
-    },
-
-    async login() {
-      try {
-        this.authFeedback = null;
-        await this.postAuth("/api/auth/login", this.loginPassword);
-        this.loginPassword = "";
-        await this.refreshAuth();
-        await this.bootstrapAuthenticated();
-        this.showFlash("Logged in", "success");
-      } catch (error) {
-        this.showAuthFeedback(error.message, "error");
-      }
-    },
-
-    async postAuth(path, password) {
-      const response = await this.fetchWithTimeout(path, {
-        method: "POST",
-        headers: { Accept: "application/json", "Content-Type": "application/x-www-form-urlencoded" },
-        body: new URLSearchParams({ password }),
-      });
-      const text = await response.text();
-      let payload = { ok: response.ok, error: null };
-      if (text) {
-        try {
-          payload = JSON.parse(text);
-        } catch {
-          payload = { ok: false, error: text };
-        }
-      }
-      if (!response.ok || !payload.ok) {
-        throw new Error(payload.error || `${path} returned ${response.status}`);
-      }
-      return payload;
-    },
-
-    async logout() {
-      try {
-        await this.postAuth("/api/auth/logout", "");
-        this.stopPolling();
-        await this.refreshAuth();
-        this.showFlash("Locked", "success");
-      } catch (error) {
-        this.showFlash(error.message, "error");
-      }
-    },
-
-    async changePassword() {
-      try {
-        this.settingsFeedback = null;
-        if (this.settingsNewPassword !== this.settingsPasswordConfirm) {
-          throw new Error("New passwords do not match");
-        }
-        const body = new URLSearchParams({
-          old_password: this.settingsOldPassword,
-          new_password: this.settingsNewPassword,
-        });
-        const response = await this.fetchWithTimeout("/api/auth/change-password", {
-          method: "POST",
-          headers: {
-            Accept: "application/json",
-            "Content-Type": "application/x-www-form-urlencoded",
-          },
-          body,
-        });
-        const payload = await response.json();
-        if (!response.ok || !payload.ok) {
-          throw new Error(payload.error || `/api/auth/change-password returned ${response.status}`);
-        }
-        this.settingsOldPassword = "";
-        this.settingsNewPassword = "";
-        this.settingsPasswordConfirm = "";
-        await this.refreshAuth();
-        this.showSettingsFeedback("Password changed", "success");
-        this.showFlash("Password changed", "success");
-      } catch (error) {
-        this.showSettingsFeedback(error.message, "error");
-      }
-    },
-
-    async refreshConfig() {
-      this.config = await this.fetchJson("/api/config");
-      this.syncConfigState({ addressBookVersion: this.addressBookVersion });
-    },
-
-    syncConfigState(options = {}) {
-      this.keepTrackOfMetrics = this.config.keep_track_of_metrics === true;
-      this.recoveryVdfTopRankPercent = Number(
-        this.config.recovery_vdf_top_rank_percent ??
-          this.config.recoveryVdfTopRankPercent ??
-          this.recoveryVdfTopRankPercent
-      );
-      this.vdfMemoryMib = Number(this.config.vdf_memory_mib || 64);
-      this.p2pAcceptInbound = this.config.p2p_accept_inbound === true;
-      if (!this.p2pBindPortDirty) {
-        this.p2pBindPort = Number(this.config.p2p_bind_port || 9444);
-      }
-      this.stratumEnabled = this.config.stratum_enabled === true;
-      if (!this.stratumBindPortDirty) {
-        this.stratumBindPort = Number(this.config.stratum_bind_port || 3333);
-      }
-      this.walletEndpointEnabled = this.config.wallet_endpoint_enabled === true;
-      if (!this.walletEndpointBindPortDirty) {
-        this.walletEndpointBindPort = Number(this.config.wallet_endpoint_bind_port || 18662);
-      }
-      if (
-        options.addressBookVersion === undefined ||
-        options.addressBookVersion >= this.addressBookVersion
-      ) {
-        this.addressBook = this.config.address_book || this.config.addressBook || {};
-      }
-      if (!this.p2pAnnounceDirty) {
-        this.p2pAnnounceAddr = this.config.p2p_announce_addr || "";
-      }
-    },
-
-    async refreshWalletSetup() {
-      const payload = await this.fetchJson("/api/wallet/setup");
-      if (!payload.ok) {
-        throw new Error(payload.error || "Could not load wallet setup");
-      }
-      this.setupWallet = payload;
-      if (
-        payload.seed_phrase &&
-        payload.seed_phrase !== this.generatedSeedPhrase &&
-        this.setupWalletMode === "create" &&
-        !this.walletVerified
-      ) {
-        this.generatedSeedPhrase = payload.seed_phrase;
-        this.walletVerified = false;
-        this.setupSeedStep = "write";
-        this.verifyChallenges = [];
-        this.verifyAnswers = {};
-      }
-    },
-
-    setupSeedWords() {
-      return this.generatedSeedPhrase ? this.generatedSeedPhrase.split(/\s+/) : [];
-    },
-
-    setupAddress() {
-      return this.setupWallet.address || this.status.wallet_receive_address || "-";
-    },
-
-    receiveAddress() {
-      return this.status.wallet_receive_address || this.setupWallet.address || "-";
-    },
-
-    fundedWalletAddresses() {
-      return Array.isArray(this.status.funded_wallet_addresses)
-        ? this.status.funded_wallet_addresses
-        : [];
-    },
-
-    walletAddressSummary() {
-      const count = this.fundedWalletAddresses().length;
-      return `Funds are held across ${count} wallet address${count === 1 ? "" : "es"}`;
-    },
-
-    walletAddressHasPendingSpend(entry) {
-      return Number(entry?.spendable_utxos || 0) < Number(entry?.utxos || 0);
-    },
-
-    walletAddressState(entry) {
-      if (this.walletAddressHasPendingSpend(entry)) return "Pending spend";
-      if (entry?.address === this.receiveAddress()) return "Current";
-      if (entry?.legacy === true) return "Legacy funds";
-      return "Funded";
-    },
-
-    walletAddressUtxoLabel(entry) {
-      const total = Number(entry?.utxos || 0);
-      const available = Number(entry?.spendable_utxos || 0);
-      const pending = Math.max(0, total - available);
-      const parts = [`${total} UTXO${total === 1 ? "" : "s"}`];
-      if (pending > 0) parts.push(`${available} available`, `${pending} pending`);
-      return parts.join(" · ");
-    },
-
-    selectSetupWalletMode(mode) {
-      this.setupWalletMode = mode;
-      this.walletVerified = mode === "import" ? this.walletVerified && !this.generatedSeedPhrase : false;
-      this.setupFeedback = null;
-    },
-
-    async generateSetupSeed() {
-      try {
-        this.setupFeedback = null;
-        const payload = await this.postWalletSetup("/api/wallet/generate", {});
-        this.setupWallet = payload;
-        this.generatedSeedPhrase = payload.seed_phrase || "";
-        this.setupWalletMode = "create";
-        this.setupSeedStep = "write";
-        this.walletVerified = false;
-        this.verifyChallenges = [];
-        this.verifyAnswers = {};
-        await this.refresh({ force: true });
-      } catch (error) {
-        this.showSetupFeedback(error.message, "error");
-      }
-    },
-
-    beginSeedVerification() {
-      this.setupFeedback = null;
-      const words = this.setupSeedWords();
-      if (words.length < 4) {
-        this.showSetupFeedback("Generate a recovery phrase first", "error");
-        return;
-      }
-      const positions = words.map((_, index) => index);
-      for (let index = positions.length - 1; index > 0; index -= 1) {
-        const swapIndex = Math.floor(Math.random() * (index + 1));
-        [positions[index], positions[swapIndex]] = [positions[swapIndex], positions[index]];
-      }
-      this.verifyChallenges = positions
-        .slice(0, 4)
-        .sort((left, right) => left - right)
-        .map((index) => ({ index, position: index + 1 }));
-      this.verifyAnswers = {};
-      for (const challenge of this.verifyChallenges) {
-        this.verifyAnswers[challenge.index] = "";
-      }
-      this.setupSeedStep = "verify";
-    },
-
-    verifyGeneratedSeed() {
-      const words = this.setupSeedWords();
-      const ok = this.verifyChallenges.every((challenge) => {
-        const expected = words[challenge.index] || "";
-        const actual = (this.verifyAnswers[challenge.index] || "").trim().toLowerCase();
-        return actual === expected;
-      });
-      if (!ok) {
-        this.showSetupFeedback("Seed word check failed", "error");
-        return;
-      }
-      this.walletVerified = true;
-      this.setupSeedStep = "verified";
-      this.showSetupFeedback("Recovery phrase verified", "success");
-    },
-
-    skipSeedVerificationForDev() {
-      if (!this.setupWallet.dev_verify_bypass) return;
-      this.walletVerified = true;
-      this.setupSeedStep = "verified";
-      this.showSetupFeedback("Recovery phrase verification skipped", "success");
-    },
-
-    async importSetupSeed() {
-      try {
-        this.setupFeedback = null;
-        const payload = await this.postWalletSetup("/api/wallet/import", {
-          seed_phrase: this.importSeedPhrase,
-        });
-        this.setupWallet = payload;
-        this.generatedSeedPhrase = "";
-        this.verifyChallenges = [];
-        this.verifyAnswers = {};
-        this.walletVerified = true;
-        this.setupSeedStep = "verified";
-        await this.refresh({ force: true });
-        this.showSetupFeedback("Recovery phrase imported", "success");
-      } catch (error) {
-        this.showSetupFeedback(error.message, "error");
-      }
-    },
-
-    async postWalletSetup(path, fields) {
-      const body = new URLSearchParams();
-      for (const [key, value] of Object.entries(fields)) {
-        body.set(key, value);
-      }
-      const response = await this.fetchWithTimeout(path, {
-        method: "POST",
-        headers: { Accept: "application/json", "Content-Type": "application/x-www-form-urlencoded" },
-        body,
-      });
-      const payload = await response.json();
-      if (!response.ok || !payload.ok) {
-        throw new Error(payload.error || `${path} returned ${response.status}`);
-      }
-      return payload;
-    },
-
-    async completeSetup() {
-      try {
-        if (!this.walletVerified) {
-          throw new Error("Verify or import a recovery phrase first");
-        }
-        if (this.setupRequiresPeer() && !this.setupHasPeer()) {
-          throw new Error("Add a bootstrap peer before continuing");
-        }
-        await this.applySetupNodeMode();
-        const response = await this.fetchWithTimeout("/api/config", {
-          method: "POST",
-          headers: {
-            Accept: "application/json",
-            "Content-Type": "application/x-www-form-urlencoded",
-          },
-          body: new URLSearchParams({
-            setup_complete: "true",
-            peer: this.setupPeerAddress.trim(),
-          }),
-        });
-        const payload = await response.json();
-        if (!response.ok || !payload.ok) {
-          throw new Error(payload.error || `/api/config returned ${response.status}`);
-        }
-        await this.refresh({ force: true });
-        this.setupFeedback = null;
-        this.generatedSeedPhrase = "";
-        this.importSeedPhrase = "";
-        this.setupPeerAddress = "";
-        this.verifyChallenges = [];
-        this.verifyAnswers = {};
-        this.showFlash("Setup complete", "success");
-        this.setTab("dashboard");
-      } catch (error) {
-        this.showSetupFeedback(error.message, "error");
-      }
-    },
-
-    async applySetupNodeMode() {
-      const mode = ["non-listening", "listening"].includes(this.setupNodeMode)
-        ? this.setupNodeMode
-        : "non-listening";
-      const acceptInbound = mode === "listening";
-      if (this.p2pAcceptInbound !== acceptInbound) {
-        await this.submitForm("/api/settings/p2p-inbound", {
-          enabled: acceptInbound,
-          bind_port: this.p2pBindPortValue(),
-        });
-        this.p2pAcceptInbound = acceptInbound;
-      }
-    },
-
-    async refresh(options = {}) {
-      if (this.refreshPromise) {
-        if (options.force === true) {
-          try {
-            await this.refreshPromise;
-          } catch {
-            // The forced refresh below should report the current state.
-          }
-        } else {
-          return this.refreshPromise;
-        }
-      }
-      this.refreshPromise = this.refreshNow(options).finally(() => {
-        this.refreshPromise = null;
-      });
-      return this.refreshPromise;
-    },
-
-    async refreshNow(options = {}) {
-      if (!this.canUseProtectedApi()) return;
-      const addressBookVersion = this.addressBookVersion;
-      const tab = this.tab;
-      const shouldLoadBlocks = tab === "chain" || tab === "mining";
-      const shouldLoadP2pMetrics = tab === "p2p" && this.developmentMode();
-      const shouldLoadMetrics = tab === "metrics" || tab === "leaderboards";
-      if (shouldLoadMetrics) {
-        await this.refreshMetrics(options);
-        this.refreshShellState({ addressBookVersion, silent: true });
-        return;
-      }
-      if (shouldLoadBlocks && this.blocks.length === 0) this.loadingInitialBlocks = true;
-      const pagedDatasets = [];
-      if (tab === "wallet") pagedDatasets.push("walletTx", "walletUtxo");
-      if (tab === "chain") pagedDatasets.push("mempool");
-      if (tab === "p2p") pagedDatasets.push("peer");
-      try {
-        const [config, status, networkHealth, blocks, p2pMetrics, blockchainMetrics] = await Promise.all([
-          this.fetchJson("/api/config"),
-          this.fetchJson("/api/status"),
-          this.refreshNetworkHealth({ silent: options.silent === true }),
-          shouldLoadBlocks
-            ? this.fetchJson("/api/blocks?limit=30").catch((error) => {
-                if (error.uiDataLoading) return null;
-                throw error;
-              })
-            : Promise.resolve(null),
-          shouldLoadP2pMetrics ? this.fetchJson("/api/p2p/metrics") : Promise.resolve(this.p2pMetrics),
-          Promise.resolve(this.blockchainMetrics),
-        ]);
-        const previousChainHeight = this.status.chain?.height;
-        this.status = status;
-        if (networkHealth) {
-          this.networkHealth = networkHealth;
-          this.networkHealthLoaded = true;
-        }
-        this.config = config;
-        this.syncConfigState({ addressBookVersion });
-        if (!this.allowedTabs().includes(this.tab)) {
-          this.setTab("dashboard");
-        }
-        if (!this.config.setup_complete || status.network_migration?.required === true) {
-          await this.refreshWalletSetup();
-        }
-        this.syncMempoolBlockMarker(previousChainHeight, status.chain?.height);
-        if (blocks) this.mergeFreshBlocks(blocks, { animateHead: true });
-        this.pruneSelectedTransferUtxos();
-        this.p2pMetrics = p2pMetrics;
-        this.blockchainMetrics = blockchainMetrics;
-        this.burnAmount = status.mining?.burn_per_block ?? this.burnAmount;
-        this.burnFee = status.mining?.automatic_burn_fee ?? this.burnFee;
-        this.miningEnabled = status.mining?.automatic ?? this.miningEnabled;
-        this.powMiningEnabled = status.mining?.pow_mining_enabled ?? this.powMiningEnabled;
-        this.powMiningWorkers = status.mining?.pow_mining_workers ?? this.powMiningWorkers;
-        this.maxPowMiningWorkers =
-          status.mining?.max_pow_mining_workers ?? this.maxPowMiningWorkers;
-        if (!this.burnAmountDirty) {
-          this.burnAmountDraft = this.amountLabel(this.burnAmount);
-          this.burnFeeDraft = this.amountLabel(this.burnFee);
-        }
-        this.lastUpdated = new Date();
-        this.syncMiningEvents({ status, blocks });
-        this.scheduleFeeEstimates();
-        await Promise.all(
-          pagedDatasets.map((kind) =>
-            this.refreshPagedDataset(kind, { silent: options.silent === true })
-          )
-        );
-        this.maybeStartTour();
-      } catch (error) {
-        if (String(error.message || "").includes("401")) {
-          this.stopPolling();
-          await this.refreshAuth();
-          return;
-        }
-        if (!error.uiDataLoading) this.showFlash(error.message, "error");
-      } finally {
-        if (shouldLoadBlocks) this.loadingInitialBlocks = false;
-      }
-    },
-
-    async refreshShellState(options = {}) {
-      if (!this.canUseProtectedApi()) return;
-      if (this.shellRefreshPromise) return this.shellRefreshPromise;
-      const addressBookVersion = options.addressBookVersion ?? this.addressBookVersion;
-      this.shellRefreshPromise = Promise.all([
-        this.fetchJson("/api/config"),
-        this.fetchJson("/api/status"),
-        this.refreshNetworkHealth({ silent: true }),
-      ])
-        .then(async ([config, status, networkHealth]) => {
-          const previousChainHeight = this.status.chain?.height;
-          this.status = status;
-          if (networkHealth) {
-            this.networkHealth = networkHealth;
-            this.networkHealthLoaded = true;
-          }
-          this.config = config;
-          this.syncConfigState({ addressBookVersion });
-          if (!this.allowedTabs().includes(this.tab)) {
-            this.setTab("dashboard");
-          }
-          if (!this.config.setup_complete) {
-            await this.refreshWalletSetup();
-          }
-          this.syncMempoolBlockMarker(previousChainHeight, status.chain?.height);
-          this.burnAmount = status.mining?.burn_per_block ?? this.burnAmount;
-          this.burnFee = status.mining?.automatic_burn_fee ?? this.burnFee;
-          this.miningEnabled = status.mining?.automatic ?? this.miningEnabled;
-          this.powMiningEnabled = status.mining?.pow_mining_enabled ?? this.powMiningEnabled;
-          this.powMiningWorkers = status.mining?.pow_mining_workers ?? this.powMiningWorkers;
-          this.maxPowMiningWorkers =
-            status.mining?.max_pow_mining_workers ?? this.maxPowMiningWorkers;
-          if (!this.burnAmountDirty) {
-            this.burnAmountDraft = this.amountLabel(this.burnAmount);
-            this.burnFeeDraft = this.amountLabel(this.burnFee);
-          }
-          this.lastUpdated = new Date();
-          this.syncMiningEvents({ status, blocks: null });
-          this.scheduleFeeEstimates();
-          this.maybeStartTour();
-        })
-        .catch((error) => {
-          if (options.silent !== true) this.showFlash(error.message, "error");
-        })
-        .finally(() => {
-          this.shellRefreshPromise = null;
-        });
-      return this.shellRefreshPromise;
-    },
-
-    async refreshNetworkHealth(options = {}) {
-      if (!this.canUseProtectedApi()) return null;
-      if (this.networkHealthPromise) return this.networkHealthPromise;
-      this.networkHealthPromise = this.fetchJson("/api/network/health")
-        .then((networkHealth) => networkHealth)
-        .catch((error) => {
-          if (options.silent !== true) this.showFlash(error.message, "error");
-          return null;
-        })
-        .finally(() => {
-          this.networkHealthPromise = null;
-        });
-      return this.networkHealthPromise;
-    },
-
-    async fetchJson(path) {
-      const response = await this.fetchWithTimeout(path, {
-        headers: { Accept: "application/json" },
-        cache: "no-store",
-      });
-      if (response.status === 503) {
-        const error = new Error("Chain data is still loading");
-        error.uiDataLoading = true;
-        throw error;
-      }
-      if (!response.ok) {
-        throw new Error(`${path} returned ${response.status}`);
-      }
-      return response.json();
-    },
-
-    uiDataLoading() {
-      return this.status.ui_data_ready === false;
-    },
-
-    async fetchWithTimeout(path, options = {}) {
-      const controller = new AbortController();
-      const timeout = setTimeout(() => controller.abort(), this.requestTimeoutMs);
-      try {
-        return await fetch(path, { ...options, signal: controller.signal });
-      } catch (error) {
-        if (error?.name === "AbortError") {
-          throw new Error(`${path} timed out`);
-        }
-        throw error;
-      } finally {
-        clearTimeout(timeout);
-      }
-    },
-
-    datasetConfig(kind) {
-      return {
-        walletTx: {
-          items: "walletTxs",
-          page: "walletTxPage",
-          path: () => this.walletTransactionsPath(),
-          key: (tx) => `${tx.status || ""}:${tx.signature || ""}`,
-        },
-        walletUtxo: {
-          items: "walletUtxos",
-          page: "walletUtxoPage",
-          path: () => "/api/wallet/utxos",
-          key: (utxo) => this.utxoOutpoint(utxo),
-        },
-        mempool: {
-          items: "mempool",
-          page: "mempoolPage",
-          path: () => "/api/mempool",
-          key: (tx) => tx.signature || "",
-        },
-        peer: {
-          items: "peers",
-          page: "peerPage",
-          path: () => "/api/peers",
-          key: (peer) => peer.address || "",
-        },
-      }[kind];
-    },
-
-    async resetPagedDataset(kind) {
-      const config = this.datasetConfig(kind);
-      if (!config) return;
-      this[config.items] = [];
-      this.resetPageState(kind);
-      await this.refreshPagedDataset(kind);
-    },
-
-    resetPageState(kind) {
-      const config = this.datasetConfig(kind);
-      if (!config) return;
-      Object.assign(this[config.page], {
-        offset: 0,
-        total: 0,
-        hasMore: true,
-        loading: false,
-        backgroundLoading: false,
-      });
-    },
-
-    async refreshPagedDataset(kind, options = {}) {
-      if (!this.canUseProtectedApi()) return;
-      const config = this.datasetConfig(kind);
-      if (!config) return;
-      const page = this[config.page];
-      if (page.loading || page.backgroundLoading) return;
-      const currentLength = this[config.items].length;
-      const limit = Math.max(this.datasetPageSize, currentLength || 0);
-      await this.loadPagedDataset(kind, {
-        offset: 0,
-        limit,
-        replace: true,
-        silent: options.silent === true,
-      });
-    },
-
-    async loadNextPage(kind) {
-      if (!this.canUseProtectedApi()) return;
-      const config = this.datasetConfig(kind);
-      if (!config) return;
-      const page = this[config.page];
-      if (page.loading || page.backgroundLoading || !page.hasMore) return;
-      await this.loadPagedDataset(kind, {
-        offset: page.offset ?? this[config.items].length,
-        limit: this.datasetPageSize,
-        replace: false,
-      });
-    },
-
-    async loadPagedDataset(kind, options) {
-      const config = this.datasetConfig(kind);
-      const page = this[config.page];
-      const loadingKey = options.silent === true ? "backgroundLoading" : "loading";
-      page[loadingKey] = true;
-      try {
-        const payload = await this.fetchJson(
-          this.paginatedPath(config.path(), options.offset, options.limit)
-        );
-        const normalized = this.normalizedPage(payload, options.offset, options.limit);
-        this[config.items] = options.replace
-          ? normalized.items
-          : this.mergeDatasetItems(this[config.items], normalized.items, config.key);
-        if (kind === "mempool") {
-          this.trackMempoolFirstSeenHeights({ append: options.replace !== true });
-          this.sortMempoolNewestFirst();
-        }
-        page.offset = normalized.nextOffset ?? this[config.items].length;
-        page.total = normalized.total;
-        page.hasMore = normalized.hasMore;
-        if (kind === "walletUtxo") {
-          this.rememberUtxoAmounts(this.walletUtxos);
-          this.pruneSelectedTransferUtxos();
-        }
-      } catch (error) {
-        if (!error.uiDataLoading) this.showFlash(error.message, "error");
-      } finally {
-        page[loadingKey] = false;
-      }
-    },
-
-    paginatedPath(path, offset, limit) {
-      const url = new URL(path, window.location.origin);
-      url.searchParams.set("offset", String(offset));
-      url.searchParams.set("limit", String(limit));
-      return `${url.pathname}?${url.searchParams.toString()}`;
-    },
-
-    normalizedPage(payload, offset, limit) {
-      if (Array.isArray(payload)) {
-        const nextOffset = offset + payload.length;
-        return {
-          items: payload,
-          total: nextOffset,
-          hasMore: payload.length >= limit,
-          nextOffset,
-        };
-      }
-      const items = Array.isArray(payload?.items) ? payload.items : [];
-      return {
-        items,
-        total: Number(payload?.total ?? offset + items.length),
-        hasMore: payload?.hasMore === true,
-        nextOffset: payload?.nextOffset ?? offset + items.length,
-      };
-    },
-
-    mergeDatasetItems(existing, incoming, keyFn) {
-      const rows = [];
-      const seen = new Set();
-      for (const item of [...existing, ...incoming]) {
-        const key = keyFn(item);
-        if (!key || seen.has(key)) continue;
-        seen.add(key);
-        rows.push(item);
-      }
-      return rows;
-    },
-
-    syncMempoolBlockMarker(previousHeight, currentHeight) {
-      const normalizedCurrent = Number(currentHeight);
-      if (!Number.isFinite(normalizedCurrent)) return;
-      const normalizedPrevious = Number(previousHeight);
-      if (this.lastBlockMempoolHeight === null) {
-        this.lastBlockMempoolHeight = normalizedCurrent;
-        return;
-      }
-      if (!Number.isFinite(normalizedPrevious) || normalizedCurrent > normalizedPrevious) {
-        this.lastBlockMempoolHeight = normalizedCurrent;
-      }
-    },
-
-    trackMempoolFirstSeenHeights(options = {}) {
-      const height = Number(this.status.chain?.height);
-      if (!Number.isFinite(height)) return;
-      const active = new Set();
-      const firstBatch = !this.mempoolSeenInitialized;
-      const seenHeight = firstBatch ? height - 1 : height;
-      const knownSeenTimes = Object.values(this.mempoolFirstSeenAt)
-        .map((value) => Number(value))
-        .filter((value) => Number.isFinite(value));
-      const oldestSeenAt = knownSeenTimes.length ? Math.min(...knownSeenTimes) : Date.now();
-      const baseSeenAt = options.append && this.mempoolSeenInitialized
-        ? oldestSeenAt - 1
-        : Date.now();
-      let newIndex = 0;
-      for (const tx of this.mempool) {
-        const key = this.mempoolKey(tx);
-        if (!key) continue;
-        active.add(key);
-        if (this.mempoolFirstSeenHeights[key] === undefined) {
-          this.mempoolFirstSeenHeights[key] = seenHeight;
-          this.mempoolFirstSeenAt[key] = baseSeenAt - newIndex;
-          newIndex += 1;
-        }
-      }
-      this.mempoolSeenInitialized = true;
-      for (const key of Object.keys(this.mempoolFirstSeenHeights)) {
-        if (!active.has(key)) {
-          delete this.mempoolFirstSeenHeights[key];
-          delete this.mempoolFirstSeenAt[key];
-        }
-      }
-    },
-
-    mempoolKey(tx) {
-      return tx?.signature || "";
-    },
-
-    mempoolItemClass(tx) {
-      const key = this.mempoolKey(tx);
-      const firstSeenHeight = Number(this.mempoolFirstSeenHeights[key]);
-      const markerHeight = Number(this.status.chain?.height ?? this.lastBlockMempoolHeight);
-      const classes = [];
-      if (key && Number.isFinite(firstSeenHeight) && Number.isFinite(markerHeight)) {
-        classes.push(firstSeenHeight >= markerHeight ? "new-since-block" : "before-last-block");
-      }
-      return classes.join(" ");
-    },
-
-    mempoolSeenTimeLabel(tx) {
-      const seenAt = Number(this.mempoolFirstSeenAt[this.mempoolKey(tx)]);
-      if (!Number.isFinite(seenAt)) return "";
-      return `Seen ${new Date(seenAt).toLocaleTimeString()}`;
-    },
-
-    sortMempoolNewestFirst() {
-      this.mempool = [...this.mempool].sort((left, right) => {
-        const leftSeenAt = Number(this.mempoolFirstSeenAt[this.mempoolKey(left)]);
-        const rightSeenAt = Number(this.mempoolFirstSeenAt[this.mempoolKey(right)]);
-        if (Number.isFinite(leftSeenAt) && Number.isFinite(rightSeenAt) && leftSeenAt !== rightSeenAt) {
-          return rightSeenAt - leftSeenAt;
-        }
-        const leftSeen = Number(this.mempoolFirstSeenHeights[this.mempoolKey(left)]);
-        const rightSeen = Number(this.mempoolFirstSeenHeights[this.mempoolKey(right)]);
-        if (Number.isFinite(leftSeen) && Number.isFinite(rightSeen) && leftSeen !== rightSeen) {
-          return rightSeen - leftSeen;
-        }
-        return this.mempoolKey(right).localeCompare(this.mempoolKey(left));
-      });
-    },
-
-    observePageSentinel(kind, element) {
-      if (!element || element.__iunaPageObserver) return;
-      const observer = new IntersectionObserver((entries) => {
-        if (this.canUseProtectedApi() && entries.some((entry) => entry.isIntersecting)) {
-          this.loadNextPage(kind);
-        }
-      }, { root: null, rootMargin: "180px 0px" });
-      observer.observe(element);
-      element.__iunaPageObserver = observer;
-    },
-
-    observeBlockSentinel(element) {
-      if (!element || element.__iunaBlockObserver) return;
-      const observer = new IntersectionObserver((entries) => {
-        if (this.canUseProtectedApi() && entries.some((entry) => entry.isIntersecting)) {
-          this.loadOlderBlocks();
-        }
-      }, { root: null, rootMargin: "180px 0px" });
-      observer.observe(element);
-      element.__iunaBlockObserver = observer;
-    },
-
-    walletTransactionsPath() {
-      const params = new URLSearchParams({
-        tx: String(this.walletTxFilters.transfer),
-        mine: String(this.walletTxFilters.mine),
-        burn: String(this.walletTxFilters.burn),
-        reward: String(this.walletTxFilters.reward),
-      });
-      return `/api/wallet/transactions?${params.toString()}`;
-    },
-
-    async refreshWalletTransactions() {
-      await this.resetPagedDataset("walletTx");
-    },
-
-    async checkLatestRelease() {
-      if (this.releaseCheckState === "checking") return;
-      this.releaseCheckState = "checking";
-      this.releaseCheckError = null;
-      try {
-        const response = await fetch(IUNA_RELEASE_METADATA_URL, {
-          cache: "no-store",
-          headers: { Accept: "application/json" },
-        });
-        if (!response.ok) {
-          throw new Error(`Release check failed (${response.status})`);
-        }
-        const release = await response.json();
-        const version = this.normalizeVersion(release.tag || release.version);
-        if (!version) {
-          throw new Error("Release metadata is missing a version");
-        }
-        let desktopVersion = null;
-        const invoke = window.__TAURI__?.core?.invoke;
-        if (typeof invoke === "function") {
-          try {
-            desktopVersion = this.normalizeVersion(await invoke("check_desktop_update"));
-          } catch {}
-        }
-        this.latestRelease = {
-          tag: `v${version}`,
-          url: release.url || IUNA_DOWNLOADS_URL,
-          desktopReady: desktopVersion === version,
-        };
-        this.releaseCheckState = "done";
-      } catch (error) {
-        this.releaseCheckError = error.message || "Release check failed";
-        this.releaseCheckState = "failed";
-      }
-    },
-
-    mergeFreshBlocks(freshBlocks, options = {}) {
-      const hadBlocks = this.blocks.length > 0;
-      const previousHeights = new Set(this.blocks.map((block) => block.height));
-      const previousHead = this.blocks[0]?.height;
-      const previousHeadHash = this.blocks[0]?.hash;
-      const wasFollowingHead =
-        !this.selectedBlock || (previousHeadHash && this.selectedBlock.hash === previousHeadHash);
-      const rail = this.$refs.blockRail;
-      const previousScrollWidth = hadBlocks ? rail?.scrollWidth ?? 0 : 0;
-      const known = new Map(this.blocks.map((block) => [block.hash, block]));
-      for (const block of freshBlocks) {
-        known.set(block.hash, block);
-      }
-      this.blocks = Array.from(known.values()).sort((left, right) => right.height - left.height);
-      const currentHead = this.blocks[0] || null;
-      if (wasFollowingHead) {
-        this.selectedBlock = currentHead;
-      } else if (!this.selectedBlock || !known.has(this.selectedBlock.hash)) {
-        this.selectedBlock = this.blocks[0] || null;
-      } else {
-        this.selectedBlock = known.get(this.selectedBlock.hash);
-      }
-      if (this.selectedBurnLeaderBlock) {
-        this.selectedBurnLeaderBlock = known.get(this.selectedBurnLeaderBlock.hash) || null;
-        if (!this.burnLeaderRanksPending(this.selectedBurnLeaderBlock)) {
-          this.burnLeaderRanksError = null;
-          this.stopBurnLeaderRanksRefresh();
-        } else if (!this.burnLeaderRanksError) {
-          this.scheduleBurnLeaderRanksRefresh(this.syncingNode() ? 1000 : 5000);
-        }
-      }
-      this.hasMoreBlocks =
-        this.blocks.some((block) => block.height > 0) &&
-        !this.blocks.some((block) => block.height === 0);
-
-      const newHeadBlocks = options.animateHead
-        && hadBlocks
-        ? this.blocks.filter(
-            (block) =>
-              !previousHeights.has(block.height) &&
-              (typeof previousHead !== "number" || block.height > previousHead)
-          )
-        : [];
-      if (newHeadBlocks.length > 0) {
-        this.markNewBlocks(newHeadBlocks.map((block) => block.hash));
-        this.$nextTick(() =>
-          this.slideNewHeadBlocks(previousScrollWidth, { force: wasFollowingHead })
-        );
-      } else if (!hadBlocks) {
-        this.$nextTick(() => this.resetBlockRailPosition());
-      }
-      this.$nextTick(() => this.maybeLoadOlderBlocksFromRail());
-    },
-
-    markNewBlocks(hashes) {
-      this.newBlockHashes = new Set(hashes);
-      if (this.newBlockTimer) {
-        clearTimeout(this.newBlockTimer);
-      }
-      this.newBlockTimer = setTimeout(() => {
-        this.newBlockHashes = new Set();
-        this.newBlockTimer = null;
-      }, 650);
-    },
-
-    slideNewHeadBlocks(previousScrollWidth, options = {}) {
-      const rail = this.$refs.blockRail;
-      if (!rail || previousScrollWidth === 0 || (!options.force && rail.scrollLeft > 4)) return;
-      const addedWidth = rail.scrollWidth - previousScrollWidth;
-      if (addedWidth <= 0) return;
-      rail.scrollLeft = addedWidth;
-      rail.scrollTo({ left: 0, behavior: "smooth" });
-    },
-
-    resetBlockRailPosition() {
-      const rail = this.$refs.blockRail;
-      if (!rail) return;
-      rail.scrollLeft = 0;
-    },
-
-    selectBlock(block) {
-      this.selectedBlock = block;
-    },
-
-    openBurnLeaderRanksModal(block) {
-      this.stopBurnLeaderRanksRefresh();
-      this.burnLeaderRanksError = null;
-      this.selectedBurnLeaderBlock = block;
-      this.scheduleBurnLeaderRanksRefresh(0);
-    },
-
-    closeBurnLeaderRanksModal() {
-      this.stopBurnLeaderRanksRefresh();
-      this.burnLeaderRanksError = null;
-      this.selectedBurnLeaderBlock = null;
-    },
-
-    stopBurnLeaderRanksRefresh() {
-      if (this.burnLeaderRanksRefreshTimer === null) return;
-      clearTimeout(this.burnLeaderRanksRefreshTimer);
-      this.burnLeaderRanksRefreshTimer = null;
-    },
-
-    scheduleBurnLeaderRanksRefresh(delay) {
-      this.stopBurnLeaderRanksRefresh();
-      if (
-        !this.burnLeaderRanksPending(this.selectedBurnLeaderBlock) ||
-        this.burnLeaderRanksError
-      ) return;
-      this.burnLeaderRanksRefreshTimer = setTimeout(() => {
-        this.burnLeaderRanksRefreshTimer = null;
-        this.refreshSelectedBurnLeaderRanks();
-      }, delay);
-    },
-
-    async refreshSelectedBurnLeaderRanks() {
-      const selected = this.selectedBurnLeaderBlock;
-      if (
-        !this.burnLeaderRanksPending(selected) ||
-        this.burnLeaderRanksError ||
-        this.burnLeaderRanksRefreshPromise
-      ) return;
-      const expectedHash = selected.hash;
-      const beforeHeight = Number(selected.height) + 1;
-      if (!Number.isSafeInteger(beforeHeight) || beforeHeight <= 0) {
-        this.burnLeaderRanksError = "Unable to refresh burn leader ranks for this block.";
-        return;
-      }
-      this.burnLeaderRanksRefreshPromise = this.fetchJson(
-        `/api/blocks?before_height=${beforeHeight}&limit=1`
-      );
-      try {
-        const blocks = await this.burnLeaderRanksRefreshPromise;
-        if (this.selectedBurnLeaderBlock?.hash !== expectedHash) return;
-        const refreshed = blocks.find((block) => block.hash === expectedHash);
-        if (!refreshed) {
-          this.burnLeaderRanksError = "This block is no longer on the active chain.";
-          return;
-        }
-        this.blocks = this.blocks.map((block) => block.hash === expectedHash ? refreshed : block);
-        if (this.selectedBlock?.hash === expectedHash) this.selectedBlock = refreshed;
-        this.selectedBurnLeaderBlock = refreshed;
-        this.burnLeaderRanksError = null;
-      } catch (error) {
-        if (this.selectedBurnLeaderBlock?.hash === expectedHash) {
-          this.burnLeaderRanksError = error.message || "Failed to load burn leader ranks.";
-        }
-      } finally {
-        this.burnLeaderRanksRefreshPromise = null;
-        if (
-          this.burnLeaderRanksPending(this.selectedBurnLeaderBlock) &&
-          !this.burnLeaderRanksError
-        ) {
-          this.scheduleBurnLeaderRanksRefresh(this.syncingNode() ? 1000 : 5000);
-        }
-      }
-    },
-
-    openBlockBytesModal(block) {
-      this.selectedByteBlock = block;
-    },
-
-    closeBlockBytesModal() {
-      this.selectedByteBlock = null;
-    },
-
-    openBurnBundleModal(block) {
-      this.selectedBurnBundleBlock = block;
-    },
-
-    closeBurnBundleModal() {
-      this.selectedBurnBundleBlock = null;
-    },
-
-    openTransactionModal(tx, context = {}) {
-      this.selectedTransaction = { tx, context };
-    },
-
-    openBlockRewardModal(block) {
-      this.openTransactionModal(this.blockRewardTransaction(block), {
-        source: "Block reward",
-        blockHeight: block.height,
-        blockFinalizer: block.miner,
-        reward: true,
-      });
-    },
-
-    closeTransactionModal() {
-      this.selectedTransaction = null;
-    },
-
-    openWalletUtxosModal() {
-      this.showWalletUtxos = true;
-    },
-
-    closeWalletUtxosModal() {
-      this.showWalletUtxos = false;
-    },
-
-    openWalletAddressesModal() {
-      this.showWalletAddresses = true;
-    },
-
-    closeWalletAddressesModal() {
-      this.showWalletAddresses = false;
-    },
-
-    openPowDifficultyInfo() {
-      this.showPowDifficultyInfo = true;
-    },
-
-    closePowDifficultyInfo() {
-      this.showPowDifficultyInfo = false;
-    },
-
-    openChainResetModal() {
-      this.chainResetConfirm = "";
-      this.chainResetModalOpen = true;
-    },
-
-    closeChainResetModal() {
-      if (this.chainResetBusy) return;
-      this.chainResetModalOpen = false;
-      this.chainResetConfirm = "";
-    },
-
-    async resetLocalChain() {
-      if (this.chainResetConfirm.trim() !== "RESET") {
-        this.showFlash("Type RESET to confirm deleting the local chain", "error");
-        return;
-      }
-      this.chainResetBusy = true;
-      try {
-        await this.submitForm("/api/settings/chain-reset", {
-          confirm: this.chainResetConfirm,
-        });
-        this.blocks = [];
-        this.selectedBlock = null;
-        this.selectedByteBlock = null;
-        this.selectedBurnLeaderBlock = null;
-        this.selectedTransaction = null;
-        this.mempool = [];
-        this.walletTxs = [];
-        this.walletUtxos = [];
-        this.mempoolFirstSeenHeights = {};
-        this.mempoolFirstSeenAt = {};
-        this.mempoolSeenInitialized = false;
-        this.lastBlockMempoolHeight = null;
-        this.resetPageState("walletTx");
-        this.resetPageState("walletUtxo");
-        this.resetPageState("mempool");
-        this.chainResetModalOpen = false;
-        this.chainResetConfirm = "";
-        await this.refresh({ force: true });
-        this.showFlash("Local chain deleted. Sync requested from peers.", "success");
-      } catch (error) {
-        this.showFlash(error.message, "error");
-      } finally {
-        this.chainResetBusy = false;
-      }
-    },
-
-    closeModals() {
-      if (this.tourActive) this.dismissTour();
-      this.closeDesktopUpdateModal();
-      this.closeOptimizeWallet();
-      this.closeSendConfirmModal();
-      this.closeTransactionModal();
-      this.closeWalletUtxosModal();
-      this.closeWalletAddressesModal();
-      this.closePowDifficultyInfo();
-      this.closeBurnLeaderRanksModal();
-      this.closeBurnBundleModal();
-      this.closeChainResetModal();
-      this.closePeerModal();
-    },
-
-    async loadOlderBlocks() {
-      if (!this.canUseProtectedApi()) return;
-      if (this.loadingOlder || !this.hasMoreBlocks || this.blocks.length === 0) return;
-      const oldest = Math.min(...this.blocks.map((block) => block.height));
-      if (oldest <= 0) {
-        this.hasMoreBlocks = false;
-        return;
-      }
-      this.loadingOlder = true;
-      try {
-        const older = await this.fetchJson(
-          `/api/blocks?before_height=${oldest}&limit=${this.blockPageSize}`
-        );
-        if (
-          older.length === 0 ||
-          older.length < this.blockPageSize ||
-          older.some((block) => block.height === 0)
-        ) {
-          this.hasMoreBlocks = false;
-        }
-        this.mergeFreshBlocks(older);
-      } catch (error) {
-        this.showFlash(error.message, "error");
-      } finally {
-        this.loadingOlder = false;
-      }
-    },
-
-    maybeLoadOlderBlocks(event) {
-      this.maybeLoadOlderBlocksFromRail(event.currentTarget);
-    },
-
-    maybeLoadOlderBlocksFromRail(rail = this.$refs.blockRail) {
-      if (this.tab !== "chain" || !rail || this.loadingOlder || !this.hasMoreBlocks) return;
-      const remaining = rail.scrollWidth - rail.scrollLeft - rail.clientWidth;
-      if (remaining <= 180) {
-        this.loadOlderBlocks();
-      }
-    },
-
-    async postForm(path, fields, successMessage, method = "POST") {
-      await this.submitForm(path, fields, method);
-      await this.refresh({ force: true });
-      this.showFlash(successMessage, "success");
-    },
-
-    async submitForm(path, fields, method = "POST") {
-      const body = new URLSearchParams();
-      for (const [key, value] of Object.entries(fields)) {
-        if (Array.isArray(value)) {
-          for (const item of value) body.append(key, item);
-        } else {
-          body.set(key, value);
-        }
-      }
-      const response = await this.fetchWithTimeout(path, {
-        method,
-        headers: { Accept: "application/json", "Content-Type": "application/x-www-form-urlencoded" },
-        body,
-      });
-      const text = await response.text();
-      let payload = { ok: response.ok, error: null };
-      if (text) {
-        try {
-          payload = JSON.parse(text);
-        } catch {
-          payload = { ok: false, error: text };
-        }
-      }
-      if (!response.ok || !payload.ok) {
-        throw new Error(payload?.error || `${path} returned ${response.status}`);
-      }
-      return payload;
-    },
-
-    scheduleFeeEstimates() {
-      if (this.feeEstimateTimer) clearTimeout(this.feeEstimateTimer);
-      this.feeEstimateTimer = setTimeout(() => this.refreshFeeEstimates(), 220);
-    },
-
-    async refreshFeeEstimates() {
-      if (this.showingAuth()) return;
-      if (this.tab === "wallet") {
-        await this.refreshTransferFeeEstimate();
-        return;
-      }
-      if (this.tab === "mining") {
-        await Promise.all([
-          this.refreshBurnFeeEstimate(),
-          this.refreshMineFeeEstimate(),
-        ]);
-      }
-    },
-
-    async refreshBurnFeeEstimate() {
-      const amount = this.parseiunaAmount(this.burnAmountDraft);
-      const feePerByte = this.parseiunaAmount(this.burnFeeDraft);
-      if (amount <= 0) {
-        this.feeEstimates.burn = null;
-        return;
-      }
-      this.feeEstimates.burn = await this.fetchFeeEstimate("/api/fee-estimate/burn", {
-        amount,
-        fee_per_byte: feePerByte,
-      });
-    },
-
-    async refreshMineFeeEstimate() {
-      this.feeEstimates.mine = await this.fetchFeeEstimate("/api/fee-estimate/mine", {});
-    },
-
-    async refreshTransferFeeEstimate() {
-      const amount = this.parseiunaAmount(this.transferAmount);
-      const feePerByte = this.parseiunaAmount(this.transferFee);
-      if (!this.transferTo.trim() || amount <= 0) {
-        this.feeEstimates.transfer = null;
-        return;
-      }
-      this.feeEstimates.transfer = await this.fetchFeeEstimate("/api/fee-estimate/transfer", {
-        to: this.transferTo,
-        amount,
-        fee_per_byte: feePerByte,
-        utxos: this.hybridTransferRecipient() ? this.selectedTransferUtxos.join("\n") : "",
-      });
-    },
-
-    async fetchFeeEstimate(path, fields) {
-      try {
-        const body = new URLSearchParams();
-        for (const [key, value] of Object.entries(fields)) body.set(key, value);
-        const response = await this.fetchWithTimeout(path, {
-          method: "POST",
-          headers: { Accept: "application/json", "Content-Type": "application/x-www-form-urlencoded" },
-          body,
-        });
-        const payload = await response.json();
-        if (!response.ok || !payload.ok) {
-          return { error: payload.error || `${path} returned ${response.status}` };
-        }
-        return payload;
-      } catch (error) {
-        return { error: error.message };
-      }
-    },
-
-    feeEstimateLabel(kind) {
-      const estimate = this.feeEstimates[kind];
-      if (!estimate) return "Enter details to estimate fee";
-      if (estimate.error) return estimate.error;
-      return `${estimate.bytes} bytes -> IUNA ${this.amountLabel(estimate.fee)}`;
-    },
-
-    feeEstimateError(kind) {
-      return Boolean(this.feeEstimates[kind]?.error);
-    },
-
-    feeExceedsAmount(kind) {
-      const estimate = this.feeEstimates[kind];
-      if (!estimate || estimate.error) return false;
-      const amount = kind === "burn"
-        ? this.parseiunaAmount(this.burnAmountDraft)
-        : this.parseiunaAmount(this.transferAmount);
-      const fee = Number(estimate.fee);
-      return amount > 0 && Number.isFinite(fee) && fee > amount;
-    },
-
-    feeExceedsAmountLabel(kind) {
-      if (!this.feeExceedsAmount(kind)) return "";
-      const label = kind === "burn" ? "burn" : "transfer";
-      const amount = kind === "burn"
-        ? this.parseiunaAmount(this.burnAmountDraft)
-        : this.parseiunaAmount(this.transferAmount);
-      const fee = Number(this.feeEstimates[kind].fee);
-      return `Warning: estimated fee IUNA ${this.amountLabel(fee)} exceeds the ${label} amount IUNA ${this.amountLabel(amount)}.`;
-    },
-
-    // Rank 1 may publish from the parent timestamp plus two target block times. A slower rank 0
-    // finalizer loses the block and its other eligible tickets, while committee seats come from
-    // mined-coin lineage and accept any ticket, however small.
-    vdfSpeedHint() {
-      const mining = this.status.mining;
-      const estimateMs = mining?.estimated_vdf_ms;
-      const targetMs = mining?.vdf_target_block_ms;
-      if (typeof estimateMs !== "number" || !targetMs) return null;
-      const fallbackSlotMs = 2 * targetMs;
-      if (estimateMs < 0.75 * fallbackSlotMs) return null;
-      const tooSlow = estimateMs >= fallbackSlotMs;
-      const source = mining.vdf_speed_source === "finalization" ? "Your last VDF run" : "A quick benchmark";
-      const timing = `${source} suggests this machine needs about ${this.durationLabel(estimateMs)} for a block VDF; a fallback finalizer can take over after ${this.durationLabel(fallbackSlotMs)}.`;
-      const risk = tooSlow
-        ? "If your burn wins, the block will most likely go to a fallback and your eligible tickets are invalidated."
-        : "On a busy moment you could miss your slot and lose your eligible tickets.";
-      return {
-        level: tooSlow ? "warning" : "notice",
-        text: `${timing} ${risk} Keep your burn low: committee seats depend on mined coins, not burn size.`,
-        canLower: this.burnAmount > IUNA_LOW_BURN_AMOUNT,
-      };
-    },
-
-    async useLowBurnAmount() {
-      this.burnAmountDraft = this.amountLabel(IUNA_LOW_BURN_AMOUNT);
-      this.burnAmountDirty = true;
-      await this.saveBurn();
-      this.scheduleFeeEstimates();
-    },
-
-    async saveBurn() {
-      try {
-        const amount = this.parseiunaAmount(this.burnAmountDraft);
-        const fee = this.parseiunaAmountRequired(this.burnFeeDraft, "Burn fee per byte is required");
-        if (amount === 0) {
-          throw new Error("IUNA per block must be greater than zero");
-        }
-        this.burnAmountDraft = this.amountLabel(amount);
-        this.burnFeeDraft = this.amountLabel(fee);
-        await this.postForm(
-          "/api/settings/burn-per-block",
-          { enabled: this.miningEnabled, amount, fee_per_byte: fee },
-          this.miningEnabled
-            ? `Finalization burns on: ${this.amountLabel(amount)} IUNA per block with ${this.amountLabel(fee)} per byte`
-            : `Burn settings saved while off`
-        );
-        this.appendMiningEvent("Burn settings saved", `Configured ${this.amountLabel(amount)} IUNA per block with ${this.amountLabel(fee)} IUNA fee/byte.`, "info");
-        this.burnAmountDirty = false;
-        this.burnAmount = amount;
-        this.burnFee = fee;
-      } catch (error) {
-        this.showFlash(error.message, "error");
-      }
-    },
-
-    async setMiningEnabled(enabled) {
-      const previous = this.miningEnabled;
-      try {
-        const amount = this.parseiunaAmount(this.burnAmountDraft);
-        const fee = this.parseiunaAmountRequired(this.burnFeeDraft, "Burn fee per byte is required");
-        if (enabled && amount === 0) {
-          this.miningEnabled = false;
-          throw new Error("Set IUNA per block before turning finalization burns on");
-        }
-        this.miningEnabled = enabled;
-        await this.postForm(
-          "/api/settings/burn-per-block",
-          { enabled, amount, fee_per_byte: fee },
-          enabled ? "Finalization burns turned on" : "Finalization burns turned off"
-        );
-        this.appendMiningEvent(
-          enabled ? "Finalization burns turned on" : "Finalization burns turned off",
-          enabled
-            ? `Burning ${this.amountLabel(amount)} IUNA per block with ${this.amountLabel(fee)} IUNA fee/byte.`
-            : "Automatic burn preparation paused.",
-          enabled ? "active" : "warning"
-        );
-        this.miningEventState.pob = enabled ? "on" : "off";
-        this.burnAmountDirty = false;
-        this.burnAmount = amount;
-        this.burnFee = fee;
-      } catch (error) {
-        this.miningEnabled = previous;
-        this.showFlash(error.message, "error");
-      }
-    },
-
-    async setPowMiningEnabled(enabled) {
-      const previous = this.powMiningEnabled;
-      try {
-        this.powMiningEnabled = enabled;
-        await this.postForm(
-          "/api/settings/pow-mining",
-          { enabled, workers: this.powMiningWorkers },
-          enabled ? "PoW mining turned on" : "PoW mining turned off"
-        );
-        this.appendMiningEvent(
-          enabled ? "PoW mining turned on" : "PoW mining turned off",
-          enabled
-            ? `Resource budget: ${this.powMiningWorkers} worker${this.powMiningWorkers === 1 ? "" : "s"}.`
-            : "PoW worker search paused.",
-          enabled ? "active" : "warning"
-        );
-        this.miningEventState["pow-workers"] = String(this.powMiningWorkers);
-      } catch (error) {
-        this.powMiningEnabled = previous;
-        this.showFlash(error.message, "error");
-      }
-    },
-
-    async setPowMiningWorkers(workers) {
-      const previous = this.powMiningWorkers;
-      const parsed = Number.parseInt(workers, 10);
-      const clamped = Math.min(
-        this.maxPowMiningWorkers,
-        Math.max(1, Number.isFinite(parsed) ? parsed : 1)
-      );
-      try {
-        this.powMiningWorkers = clamped;
-        await this.postForm(
-          "/api/settings/pow-mining",
-          { enabled: this.powMiningEnabled, workers: clamped },
-          `PoW workers set to ${clamped}`
-        );
-        this.appendMiningEvent(
-          "PoW worker budget changed",
-          `Resource budget: ${clamped} worker${clamped === 1 ? "" : "s"}.`,
-          "info"
-        );
-        this.miningEventState["pow-workers"] = String(clamped);
-      } catch (error) {
-        this.powMiningWorkers = previous;
-        this.showFlash(error.message, "error");
-      }
-    },
-
-    async setKeepTrackOfMetrics(enabled) {
-      const previous = this.keepTrackOfMetrics;
-      try {
-        this.keepTrackOfMetrics = enabled;
-        await this.postForm(
-          "/api/settings/metrics",
-          { enabled },
-          enabled ? "Development mode is preparing" : "Development mode turned off"
-        );
-        await this.refreshConfig();
-        if (!enabled && (this.tab === "metrics" || this.tab === "leaderboards")) {
-          this.setTab("settings");
-        }
-      } catch (error) {
-        this.keepTrackOfMetrics = previous;
-        this.showFlash(error.message, "error");
-      }
-    },
-
-    async setRecoveryVdfTopRankPercent(percent) {
-      const previous = this.recoveryVdfTopRankPercent;
-      const normalized = Math.max(0, Math.min(100, Math.round(Number(percent) || 0)));
-      try {
-        this.recoveryVdfTopRankPercent = normalized;
-        await this.postForm(
-          "/api/settings/recovery-vdf",
-          { top_rank_percent: String(normalized) },
-          `Fallback VDF threshold set to top ${normalized}%`
-        );
-        await this.refreshConfig();
-      } catch (error) {
-        this.recoveryVdfTopRankPercent = previous;
-        this.showFlash(error.message, "error");
-      }
-    },
-
-    async setVdfMemoryMib(memoryMib) {
-      const previous = this.vdfMemoryMib;
-      const normalized = Math.max(32, Math.min(4096, Math.round(Number(memoryMib) || 64)));
-      try {
-        this.vdfMemoryMib = normalized;
-        await this.postForm(
-          "/api/settings/vdf-memory",
-          { memory_mib: String(normalized) },
-          `VDF memory budget set to ${normalized} MiB; applies to the next VDF`
-        );
-        await this.refreshConfig();
-      } catch (error) {
-        this.vdfMemoryMib = previous;
-        this.showFlash(error.message, "error");
-      }
-    },
-
-    async setP2pAcceptInbound(enabled) {
-      const previous = this.p2pAcceptInbound;
-      const walletWasEnabled = this.walletEndpointEnabled;
-      try {
-        this.p2pAcceptInbound = enabled;
-        await this.postForm(
-          "/api/settings/p2p-inbound",
-          { enabled, bind_port: this.p2pBindPortValue() },
-          enabled ? "Public node setting saved" : "Switched to outbound-only P2P"
-        );
-        this.p2pBindPortDirty = false;
-        await this.refreshConfig();
-        if (!enabled && walletWasEnabled && this.walletEndpointRestartRequired()) {
-          this.showFlash(this.walletEndpointRestartMessage(), "success");
-        }
-      } catch (error) {
-        this.p2pAcceptInbound = previous;
-        this.showFlash(error.message, "error");
-      }
-    },
-
-    p2pBindPortValue() {
-      const port = Number(this.p2pBindPort);
-      if (!Number.isInteger(port) || port < 1 || port > 65535) {
-        throw new Error("P2P bind port must be between 1 and 65535");
-      }
-      return port;
-    },
-
-    p2pConfiguredBindAddr() {
-      const port = Number(this.config.p2p_bind_port || 9444);
-      if (!Number.isInteger(port) || port < 1 || port > 65535) return null;
-      return `0.0.0.0:${port}`;
-    },
-
-    p2pRestartRequired() {
-      const runtimeActive = this.config.p2p_inbound_runtime_active === true;
-      if (this.p2pAcceptInbound !== runtimeActive) return true;
-      if (!this.p2pAcceptInbound) return false;
-      const configured = this.p2pConfiguredBindAddr();
-      return configured ? this.config.p2p_runtime_bind_addr !== configured : false;
-    },
-
-    p2pRestartMessage() {
-      if (!this.p2pRestartRequired()) return "";
-      if (!this.p2pAcceptInbound && this.config.p2p_inbound_runtime_active === true) {
-        return "Restart iuna to close the public P2P listener.";
-      }
-      const configured = this.p2pConfiguredBindAddr();
-      return `Restart iuna to open public P2P on ${configured || "the configured bind port"}.`;
-    },
-
-    async setStratumEnabled(enabled) {
-      const previous = this.stratumEnabled;
-      try {
-        this.stratumEnabled = enabled;
-        await this.postForm(
-          "/api/settings/stratum",
-          { enabled, bind_port: this.stratumBindPortValue() },
-          enabled ? "Stratum endpoint setting saved" : "Stratum endpoint disabled"
-        );
-        this.stratumBindPortDirty = false;
-        await this.refreshConfig();
-        const restartMessage = this.stratumRestartMessage();
-        if (restartMessage) this.showFlash(restartMessage, "success");
-      } catch (error) {
-        this.stratumEnabled = previous;
-        this.showFlash(error.message, "error");
-      }
-    },
-
-    stratumBindPortValue() {
-      const port = Number(this.stratumBindPort);
-      if (!Number.isInteger(port) || port < 1 || port > 65535) {
-        throw new Error("Stratum bind port must be between 1 and 65535");
-      }
-      return port;
-    },
-
-    stratumConfiguredBindAddr() {
-      const port = Number(this.config.stratum_bind_port || 3333);
-      if (!Number.isInteger(port) || port < 1 || port > 65535) return null;
-      return `0.0.0.0:${port}`;
-    },
-
-    stratumRestartRequired() {
-      const runtimeActive = this.config.stratum_runtime_enabled === true;
-      if (this.stratumEnabled !== runtimeActive) return true;
-      if (!this.stratumEnabled) return false;
-      const configured = this.stratumConfiguredBindAddr();
-      return configured ? this.config.stratum_runtime_listen_addr !== configured : false;
-    },
-
-    stratumRestartMessage() {
-      if (!this.stratumRestartRequired()) return "";
-      if (!this.stratumEnabled && this.config.stratum_runtime_enabled === true) {
-        return "Restart iuna to close the Stratum listener.";
-      }
-      const configured = this.stratumConfiguredBindAddr();
-      return `Restart iuna to open Stratum on ${configured || "the configured bind port"}.`;
-    },
-
-    async saveStratumSettings() {
-      try {
-        await this.postForm(
-          "/api/settings/stratum",
-          { enabled: this.stratumEnabled, bind_port: this.stratumBindPortValue() },
-          "Stratum endpoint setting saved"
-        );
-        this.stratumBindPortDirty = false;
-        await this.refreshConfig();
-        const restartMessage = this.stratumRestartMessage();
-        if (restartMessage) this.showFlash(restartMessage, "success");
-      } catch (error) {
-        this.showFlash(error.message, "error");
-      }
-    },
-
-    async setWalletEndpointEnabled(enabled) {
-      if (enabled && !this.p2pAcceptInbound) {
-        this.showFlash("Enable Public node before enabling the wallet endpoint", "error");
-        return;
-      }
-      const previous = this.walletEndpointEnabled;
-      try {
-        this.walletEndpointEnabled = enabled;
-        await this.postForm(
-          "/api/settings/wallet-endpoint",
-          { enabled, bind_port: this.walletEndpointBindPortValue() },
-          enabled ? "Wallet endpoint setting saved" : "Wallet endpoint disabled"
-        );
-        this.walletEndpointBindPortDirty = false;
-        await this.refreshConfig();
-        const restartMessage = this.walletEndpointRestartMessage();
-        if (restartMessage) this.showFlash(restartMessage, "success");
-      } catch (error) {
-        this.walletEndpointEnabled = previous;
-        this.showFlash(error.message, "error");
-      }
-    },
-
-    walletEndpointBindPortValue() {
-      const port = Number(this.walletEndpointBindPort);
-      if (!Number.isInteger(port) || port < 1 || port > 65535) {
-        throw new Error("Wallet endpoint bind port must be between 1 and 65535");
-      }
-      return port;
-    },
-
-    walletEndpointConfiguredBindAddr() {
-      const port = Number(this.config.wallet_endpoint_bind_port || 18662);
-      if (!Number.isInteger(port) || port < 1 || port > 65535) return null;
-      return `0.0.0.0:${port}`;
-    },
-
-    walletEndpointRestartRequired() {
-      const runtimeActive = this.config.wallet_endpoint_runtime_enabled === true;
-      if (this.walletEndpointEnabled !== runtimeActive) return true;
-      if (!this.walletEndpointEnabled) return false;
-      const configured = this.walletEndpointConfiguredBindAddr();
-      return configured
-        ? this.config.wallet_endpoint_runtime_listen_addr !== configured
-        : false;
-    },
-
-    walletEndpointRestartMessage() {
-      if (!this.walletEndpointRestartRequired()) return "";
-      if (!this.walletEndpointEnabled && this.config.wallet_endpoint_runtime_enabled === true) {
-        return "Restart iuna to close the public wallet listener.";
-      }
-      const configured = this.walletEndpointConfiguredBindAddr();
-      return `Restart iuna to open the wallet API on ${configured || "the configured bind port"}.`;
-    },
-
-    async saveWalletEndpointSettings() {
-      if (!this.p2pAcceptInbound) {
-        this.showFlash("Enable Public node before configuring the wallet endpoint", "error");
-        return;
-      }
-      try {
-        await this.postForm(
-          "/api/settings/wallet-endpoint",
-          { enabled: this.walletEndpointEnabled, bind_port: this.walletEndpointBindPortValue() },
-          "Wallet endpoint setting saved"
-        );
-        this.walletEndpointBindPortDirty = false;
-        await this.refreshConfig();
-        const restartMessage = this.walletEndpointRestartMessage();
-        if (restartMessage) this.showFlash(restartMessage, "success");
-      } catch (error) {
-        this.showFlash(error.message, "error");
-      }
-    },
-
-    async saveP2pAnnounce() {
-      if (!this.p2pAcceptInbound) {
-        this.showFlash("Enable public node before setting a public P2P address", "error");
-        return;
-      }
-      const addr = this.p2pAnnounceAddr.trim();
-      try {
-        if (this.p2pBindPortDirty) {
-          await this.submitForm("/api/settings/p2p-inbound", {
-            enabled: true,
-            bind_port: this.p2pBindPortValue(),
-          });
-          this.p2pBindPortDirty = false;
-        }
-        await this.postForm(
-          "/api/settings/p2p-announce",
-          { addr },
-          addr ? "P2P announce address saved" : "P2P announce address cleared"
-        );
-        this.p2pAnnounceAddr = addr;
-        this.p2pAnnounceDirty = false;
-        await this.refreshConfig();
-      } catch (error) {
-        this.showFlash(error.message, "error");
-      }
-    },
-
-    automaticBurnFeeDraft() {
-      return this.parseiunaAmount(this.burnFeeDraft);
-    },
-
-    powMineReward() {
-      return Math.max(0, Math.trunc(Number(this.status.chain?.mine_reward ?? 1000000)));
-    },
-
-    pobStatusLabel() {
-      const mining = this.status.mining;
-      if (!mining) return "-";
-      if (this.status.wallet_locked) return "Wallet locked";
-      if (!mining.automatic) return "Off";
-      if ((mining.burn_per_block ?? 0) <= 0) return "Anchor only";
-      if (mining.wallet_is_current_leader) return "Selected";
-      if (mining.current_leader) return "Waiting";
-      return "Recovery standby";
-    },
-
-    powStatusShortLabel() {
-      if (this.status.wallet_locked) return "Wallet locked";
-      if (!this.powMiningEnabled) return "Off";
-      const status = this.status.mining?.last_auto_pow_mine_status || "";
-      if (status.includes("queued")) return "Queued";
-      if (status.includes("searched")) return "Searching";
-      if (status.includes("waiting")) return "Waiting";
-      if (status.includes("failed")) return "Error";
-      return `${this.powMiningWorkers} worker${this.powMiningWorkers === 1 ? "" : "s"}`;
-    },
-
-    pobDetailLabel() {
-      return this.status.mining?.last_auto_finalization_status || "Waiting for next automatic finalization tick";
-    },
-
-    autoPowStatusLabel() {
-      if (!this.powMiningEnabled) return "PoW mining is off";
-      const status =
-        this.status.mining?.last_auto_pow_mine_status || "Waiting for next automatic PoW mining tick";
-      return `${status} (${this.powMiningWorkers} worker${this.powMiningWorkers === 1 ? "" : "s"})`;
-    },
-
-    currentFinalizerLabel() {
-      const leader = this.currentFinalizerAddress();
-      if (!leader) return "-";
-      if (this.isOwnAddress(leader)) return "you";
-      return this.shortAddressLabel(leader);
-    },
-
-    currentFinalizerAddress() {
-      return this.status.mining?.current_leader ?? this.status.chain?.next_leader ?? null;
-    },
-
-    localMiningMempoolLabel() {
-      const pending = this.status.chain?.pending_transactions;
-      if (typeof pending !== "number") return "-";
-      const visibleMines = this.localMineActionCount();
-      return `${pending} pending / ${visibleMines} visible mines`;
-    },
-
-    powDifficultyLabel() {
-      return this.status.chain?.current_mine_difficulty_bits ?? this.status.launch_profile?.mine_difficulty_bits ?? "-";
-    },
-
-    localMineActionCount() {
-      return this.mempool.filter((tx) => tx?.kind === "mine").length;
-    },
-
-    appendMiningEvent(title, detail, kind = "info", timestamp = new Date()) {
-      const last = this.miningEvents[0];
-      if (last?.title === title && last?.detail === detail && last?.kind === kind) return;
-      this.miningEventCounter += 1;
-      const entry = {
-        key: `${timestamp.getTime()}-${this.miningEventCounter}`,
-        timestamp,
-        time: timestamp.toLocaleTimeString(),
-        kind,
-        title,
-        detail,
-      };
-      this.miningEvents = [entry, ...this.miningEvents].slice(0, this.miningEventLimit);
-    },
-
-    isPowMineSuccessStatus(status) {
-      return /queued mine action/i.test(status || "");
-    },
-
-    syncMiningEvents({ status, blocks }) {
-      const mining = status?.mining || {};
-      const chain = status?.chain || {};
-      if (!this.miningEventState.started) {
-        this.appendMiningEvent(
-          "Mining log started",
-          `Height ${chain.height ?? "-"}, PoB ${mining.automatic ? "on" : "off"}, PoW ${mining.pow_mining_enabled ? "on" : "off"}.`,
-          "info"
-        );
-        this.miningEventState.started = true;
-      }
-
-      this.noteMiningStateChange(
-        "pob",
-        mining.automatic ? "on" : "off",
-        mining.automatic ? "Finalization burns active" : "Finalization burns inactive",
-        mining.automatic
-          ? `Burning ${this.amountLabel(mining.burn_per_block || 0)} IUNA per block with ${this.amountLabel(mining.automatic_burn_fee || 0)} IUNA fee/byte.`
-          : "Automatic burn preparation is off.",
-        mining.automatic ? "active" : "warning"
-      );
-      const finalizationStatus = mining.last_auto_finalization_status || "";
-      this.noteMiningStateChange(
-        "pob-status",
-        finalizationStatus,
-        "PoB status",
-        finalizationStatus || "Waiting for next automatic finalization tick.",
-        mining.automatic ? "active" : "info"
-      );
-      this.noteMiningStateChange(
-        "pow-workers",
-        String(mining.pow_mining_workers ?? this.powMiningWorkers),
-        "PoW worker budget",
-        `Resource budget: ${mining.pow_mining_workers ?? this.powMiningWorkers} worker${(mining.pow_mining_workers ?? this.powMiningWorkers) === 1 ? "" : "s"}.`,
-        "info"
-      );
-      const powMineStatus = mining.last_auto_pow_mine_status || "";
-      if (this.isPowMineSuccessStatus(powMineStatus)) {
-        this.noteMiningStateChange(
-          "pow-mine-success",
-          powMineStatus,
-          "You mined a PoW action",
-          `${powMineStatus}. Waiting for a finalizer to include it in a block.`,
-          "active"
-        );
-      } else {
-        this.noteMiningStateChange(
-          "pow-status",
-          powMineStatus,
-          "PoW status",
-          powMineStatus || "Waiting for next automatic PoW mining tick.",
-          mining.pow_mining_enabled ? "active" : "info"
-        );
-      }
-      this.noteMiningStateChange(
-        "leader",
-        mining.current_leader || "",
-        mining.wallet_is_current_leader ? "This wallet is selected" : "Selected finalizer changed",
-        mining.current_leader
-          ? `Current finalizer: ${this.currentFinalizerLabel()} at height ${chain.height ?? "-"}.`
-          : `No current finalizer reported at height ${chain.height ?? "-"}.`,
-        mining.wallet_is_current_leader ? "active" : "info"
-      );
-      if (typeof mining.last_auto_burn_height === "number") {
-        this.noteMiningStateChange(
-          "last-burn-height",
-          String(mining.last_auto_burn_height),
-          `Automatic burn prepared at height ${mining.last_auto_burn_height}`,
-          "Eligible for the next block opportunity.",
-          "active"
-        );
-      }
-
-      const latestBlock = Array.isArray(blocks)
-        ? blocks.find((block) => Number(block?.height) > 0)
-        : this.blocks.find((block) => Number(block?.height) > 0);
-      if (latestBlock) {
-        const finalizer = this.addressLabel(latestBlock.miner);
-        const locallyFinalized = this.isOwnAddress(latestBlock.miner);
-        if (locallyFinalized) {
-          this.noteMiningStateChange(
-            "latest-local-block",
-            latestBlock.hash || String(latestBlock.height),
-            `You finalized block ${latestBlock.height}`,
-            `Success. ${this.burnCountLabel(latestBlock)} burned, fees IUNA ${this.amountLabel(latestBlock.total_fees ?? latestBlock.totalFees ?? 0)}.`,
-            "active",
-            new Date(Number(latestBlock.timestamp_ms ?? latestBlock.timestampMs) || Date.now())
-          );
-        }
-        if (!locallyFinalized) {
-          this.noteMiningStateChange(
-            "latest-block",
-            latestBlock.hash || String(latestBlock.height),
-            `Observed block ${latestBlock.height}`,
-            `Finalized by ${finalizer}. ${this.burnCountLabel(latestBlock)} burned, fees IUNA ${this.amountLabel(latestBlock.total_fees ?? latestBlock.totalFees ?? 0)}.`,
-            "active",
-            new Date(Number(latestBlock.timestamp_ms ?? latestBlock.timestampMs) || Date.now())
-          );
-        }
-      }
-    },
-
-    noteMiningStateChange(key, value, title, detail, kind = "info", timestamp = new Date()) {
-      if (this.miningEventState[key] === value) return;
-      this.miningEventState[key] = value;
-      if (value === "" && key !== "pow-status" && key !== "leader") return;
-      this.appendMiningEvent(title, detail, kind, timestamp);
-    },
-
-    miningEventLog() {
-      return this.miningEvents;
-    },
-
-    metricsCharts() {
-      return Array.isArray(this.blockchainMetrics?.charts) ? this.blockchainMetrics.charts : [];
-    },
-
-    metricsPreparing() {
-      return this.blockchainMetrics?.preparing === true;
-    },
-
-    metricsLatest() {
-      return this.blockchainMetrics?.latest || {};
-    },
-
-    metricsLeaderboards() {
-      return this.blockchainMetrics?.leaderboards || {};
-    },
-
-    topMineProofRows() {
-      const rows = this.blockchainMetrics?.topMineProofs;
-      return Array.isArray(rows) ? rows : [];
-    },
-
-    leaderboardRows(kind) {
-      const rows = this.metricsLeaderboards()?.[kind];
-      return Array.isArray(rows) ? rows : [];
-    },
-
-    leaderboardPlaceholderRanks(rowCount) {
-      const count = Math.min(10, Math.max(0, Number(rowCount) || 0));
-      return Array.from({ length: 10 - count }, (_, index) => count + index);
-    },
-
-    leaderboardTitle(kind) {
-      return {
-        balances: "Top 10 Balance",
-        miners: "Top 10 Miners",
-        burners: "Top 10 Burners",
-      }[kind] || "Leaderboard";
-    },
-
-    leaderboardRankLabel(index) {
-      return ["Gold", "Silver", "Bronze"][index] || `#${index + 1}`;
-    },
-
-    leaderboardRankClass(index) {
-      return index < 3 ? `medal-${index + 1}` : "";
-    },
-
-    leaderboardAmountLabel(row) {
-      return `IUNA ${this.amountLabel(row?.amount || 0)}`;
-    },
-
-    leaderboardCountLabel(kind, row) {
-      const count = Number(row?.count || 0);
-      if (kind === "miners") return `${count} mine${count === 1 ? "" : "s"}`;
-      if (kind === "burners") return `${count} burn${count === 1 ? "" : "s"}`;
-      return `${count} UTXO${count === 1 ? "" : "s"}`;
-    },
-
-    metricsPath(range = this.metricsRange) {
-      return range === "all" ? "/api/metrics" : `/api/metrics?limit=${range}`;
-    },
-
-    setMetricsRange(range) {
-      this.metricsRange = range === 1000 || range === "all" ? range : 100;
-      this.metricHover = null;
-      try {
-        localStorage.setItem("iunaMetricsRange", String(this.metricsRange));
-      } catch {
-        // Non-persistent filtering is fine when storage is unavailable.
-      }
-      if (this.tab === "metrics") {
-        this.refreshMetrics();
-      }
-    },
-
-    async fetchMetricsResponse(range = this.metricsRange) {
-      return this.prepareMetricsResponse(await this.fetchJson(this.metricsPath(range)));
-    },
-
-    async refreshMetrics(options = {}) {
-      if (!this.canUseProtectedApi()) return this.blockchainMetrics;
-      const requestId = ++this.metricsRequestSeq;
-      const range = this.metricsRange;
-      if (this.metricsCharts().length === 0 && options.silent !== true) {
-        this.loadingMetrics = true;
-      }
-      try {
-        const metrics = await this.fetchMetricsResponse(range);
-        if (requestId === this.metricsRequestSeq && this.metricsRange === range) {
-          this.blockchainMetrics = metrics;
-        }
-        return metrics;
-      } catch (error) {
-        if (options.silent !== true && !error.uiDataLoading) this.showFlash(error.message, "error");
-        return this.blockchainMetrics;
-      } finally {
-        if (requestId === this.metricsRequestSeq) {
-          this.loadingMetrics = false;
-        }
-      }
-    },
-
-    prepareMetricsResponse(metrics) {
-      const charts = Array.isArray(metrics?.charts)
-        ? metrics.charts.map((chart) => this.prepareMetricChart(chart))
-        : [];
-      return { ...(metrics || {}), charts };
-    },
-
-    prepareMetricChart(chart) {
-      const points = this.metricValidPoints(chart);
-      const bounds = this.metricChartBoundsForPoints(points);
-      const yTicks = this.metricYAxisTicksForPoints(points);
-      const xTicks = this.metricXAxisTicksForPoints(points);
-      const linePoints = points
-        .map((point) => {
-          const x = this.metricXAxisPositionFromBounds(bounds, Number(point.height));
-          const y = this.metricYAxisPositionFromBounds(bounds, Number(point.value));
-          return `${x.toFixed(1)},${y.toFixed(1)}`;
-        })
-        .join(" ");
-      const markers = points.map((point) => {
-        const height = Number(point.height);
-        const value = Number(point.value);
-        return {
-          height,
-          value,
-          x: this.metricXAxisPositionFromBounds(bounds, height),
-          y: this.metricYAxisPositionFromBounds(bounds, value),
-        };
-      });
-      const gridPath = [
-        ...yTicks.map((tick) => {
-          const y = this.metricYAxisPositionFromBounds(bounds, Number(tick)).toFixed(1);
-          return `M4 ${y} H296`;
-        }),
-        ...xTicks.map((tick) => {
-          const x = this.metricXAxisPositionFromBounds(bounds, Number(tick)).toFixed(1);
-          return `M${x} 8 V132`;
-        }),
-      ].join(" ");
-      return {
-        ...chart,
-        _visiblePoints: points,
-        _bounds: bounds,
-        _yTicks: yTicks,
-        _xTicks: xTicks,
-        _linePoints: linePoints,
-        _markers: markers,
-        _gridPath: gridPath,
-      };
-    },
-
-    metricChartPoints(chart) {
-      return chart?._linePoints || "";
-    },
-
-    metricChartPointMarkers(chart) {
-      return chart?._markers || [];
-    },
-
-    metricGridPath(chart) {
-      return chart?._gridPath || "";
-    },
-
-    metricValidPoints(chart) {
-      const points = Array.isArray(chart?.points) ? chart.points : [];
-      return points.filter((point) => Number.isFinite(Number(point.value)));
-    },
-
-    metricVisiblePoints(chart) {
-      return chart?._visiblePoints || this.metricValidPoints(chart);
-    },
-
-    metricLatestValueLabel(chart) {
-      const points = this.metricVisiblePoints(chart);
-      if (points.length === 0) return "-";
-      return this.metricValueLabel(chart, points[points.length - 1].value);
-    },
-
-    metricChartBounds(chart) {
-      return chart?._bounds || this.metricChartBoundsForPoints(this.metricVisiblePoints(chart));
-    },
-
-    metricChartBoundsForPoints(points) {
-      if (points.length === 0) {
-        return { minHeight: 0, maxHeight: 1, minValue: 0, maxValue: 1 };
-      }
-      const heights = points.map((point) => Number(point.height));
-      const values = points.map((point) => Number(point.value));
-      const valueTicks = this.niceTicks(Math.min(...values), Math.max(...values), 5);
-      return {
-        minHeight: Math.min(...heights),
-        maxHeight: Math.max(...heights),
-        minValue: Math.min(...valueTicks),
-        maxValue: Math.max(...valueTicks),
-      };
-    },
-
-    metricYAxisTicks(chart) {
-      return chart?._yTicks || this.metricYAxisTicksForPoints(this.metricVisiblePoints(chart));
-    },
-
-    metricYAxisTicksForPoints(points) {
-      if (points.length === 0) return [];
-      const values = points.map((point) => Number(point.value));
-      return this.niceTicks(Math.min(...values), Math.max(...values), 5).reverse();
-    },
-
-    metricXAxisTicks(chart) {
-      return chart?._xTicks || this.metricXAxisTicksForPoints(this.metricVisiblePoints(chart));
-    },
-
-    metricXAxisTicksForPoints(points) {
-      if (points.length === 0) return [];
-      const heights = points.map((point) => Number(point.height));
-      const minHeight = Math.min(...heights);
-      const maxHeight = Math.max(...heights);
-      if (minHeight === maxHeight) return [minHeight];
-      return this.niceTicks(minHeight, maxHeight, 5)
-        .map((tick) => Math.round(tick))
-        .filter((tick) => tick >= minHeight && tick <= maxHeight)
-        .filter((tick, index, ticks) => ticks.indexOf(tick) === index);
-    },
-
-    niceTicks(minValue, maxValue, maxTicks = 5) {
-      const min = Number(minValue);
-      const max = Number(maxValue);
-      if (!Number.isFinite(min) || !Number.isFinite(max)) return [];
-      if (min === max) {
-        if (min === 0) return [0];
-        const step = this.niceTickStep(Math.abs(min) / Math.max(1, maxTicks - 1));
-        const tickMin = Math.floor(Math.min(0, min) / step) * step;
-        const tickMax = Math.ceil(max / step) * step;
-        return this.tickRange(tickMin, tickMax, step);
-      }
-      const range = this.niceTickStep((max - min) / Math.max(1, maxTicks - 1));
-      const tickMin = Math.floor(min / range) * range;
-      const tickMax = Math.ceil(max / range) * range;
-      return this.tickRange(tickMin, tickMax, range);
-    },
-
-    niceTickStep(value) {
-      if (!Number.isFinite(value) || value <= 0) return 1;
-      const exponent = Math.floor(Math.log10(value));
-      const fraction = value / Math.pow(10, exponent);
-      const niceFraction = fraction <= 1 ? 1 : fraction <= 2 ? 2 : fraction <= 5 ? 5 : 10;
-      return niceFraction * Math.pow(10, exponent);
-    },
-
-    tickRange(min, max, step) {
-      if (!Number.isFinite(step) || step <= 0) return [];
-      const precision = Math.max(0, Math.ceil(-Math.log10(step)) + 2);
-      const ticks = [];
-      for (let tick = min; tick <= max + step / 2; tick += step) {
-        ticks.push(Number(tick.toFixed(precision)));
-        if (ticks.length > 8) break;
-      }
-      return ticks;
-    },
-
-    metricYAxisPositionFromBounds(bounds, value) {
-      const valueRange = Math.max(1, bounds.maxValue - bounds.minValue);
-      return 132 - ((value - bounds.minValue) / valueRange) * 124;
-    },
-
-    metricXAxisPositionFromBounds(bounds, height) {
-      const heightRange = Math.max(1, bounds.maxHeight - bounds.minHeight);
-      return 4 + ((height - bounds.minHeight) / heightRange) * 292;
-    },
-
-    metricYAxisLabelStyle(chart, value) {
-      const y = this.metricYAxisPositionFromBounds(this.metricChartBounds(chart), Number(value));
-      return `top: ${(y / 148) * 100}%`;
-    },
-
-    metricXAxisLabelStyle(chart, height) {
-      const x = this.metricXAxisPositionFromBounds(this.metricChartBounds(chart), Number(height));
-      return `left: ${(x / 300) * 100}%`;
-    },
-
-    metricHoverPointStyle(chart) {
-      const hover = this.metricHover;
-      if (!hover || hover.chartId !== chart.id) return "";
-      return `left: ${(hover.x / 300) * 100}%; top: ${(hover.y / 148) * 100}%;`;
-    },
-
-    setMetricHover(chart, marker) {
-      this.metricHover = {
-        chartId: chart.id,
-        height: marker.height,
-        value: marker.value,
-        x: marker.x,
-        y: marker.y,
-        label: this.metricPointLabel(chart, marker),
-      };
-    },
-
-    setMetricHoverFromPlot(chart, event) {
-      const markers = this.metricChartPointMarkers(chart);
-      if (markers.length === 0) {
-        this.clearMetricHover(chart);
-        return;
-      }
-      const rect = event.currentTarget.getBoundingClientRect();
-      const relativeX = Math.min(Math.max(event.clientX - rect.left, 0), rect.width);
-      const chartX = (relativeX / Math.max(1, rect.width)) * 300;
-      const nearest = markers.reduce((best, marker) => {
-        const distance = Math.abs(marker.x - chartX);
-        return !best || distance < best.distance ? { marker, distance } : best;
-      }, null)?.marker;
-      if (nearest) {
-        this.setMetricHover(chart, nearest);
-      }
-    },
-
-    clearMetricHover(chart) {
-      if (this.metricHover?.chartId === chart.id) {
-        this.metricHover = null;
-      }
-    },
-
-    metricTooltipLabel(chart) {
-      return this.metricHover?.chartId === chart.id ? this.metricHover.label : "";
-    },
-
-    metricTooltipStyle(chart) {
-      const hover = this.metricHover;
-      if (!hover || hover.chartId !== chart.id) return "";
-      const left = (hover.x / 300) * 100;
-      const top = (hover.y / 148) * 100;
-      const xShift = hover.x > 238 ? "-100%" : hover.x < 62 ? "0" : "-50%";
-      const yShift = hover.y < 34 ? "12px" : "-115%";
-      return `left: ${left}%; top: ${top}%; transform: translate(${xShift}, ${yShift});`;
-    },
-
-    metricPointLabel(chart, point) {
-      return `#${point.height}: ${this.metricValueLabel(chart, point.value)}`;
-    },
-
-    metricAxisValueLabel(chart, value) {
-      const number = Number(value);
-      if (!Number.isFinite(number)) return "-";
-      if (chart?.valueKind === "seconds") return `${this.compactNumber(number)}s`;
-      if (chart?.valueKind === "bytes") return `${this.compactNumber(number)} B`;
-      return this.compactNumber(number);
-    },
-
-    metricValueLabel(chart, value) {
-      const number = Number(value);
-      if (!Number.isFinite(number)) return "-";
-      if (chart?.valueKind === "iuna") return `IUNA ${this.compactNumber(number)}`;
-      if (chart?.valueKind === "seconds") return `${this.compactNumber(number)} s`;
-      if (chart?.valueKind === "bytes") return `${this.compactNumber(number)} bytes`;
-      return `${this.compactNumber(number)}${chart?.unit ? ` ${chart.unit}` : ""}`;
-    },
-
-    compactNumber(value) {
-      const number = Number(value);
-      if (!Number.isFinite(number)) return "-";
-      if (Math.abs(number) >= 1000) {
-        return new Intl.NumberFormat(undefined, { maximumFractionDigits: 2 }).format(number);
-      }
-      if (Number.isInteger(number)) return String(number);
-      return number.toFixed(6).replace(/0+$/, "").replace(/\.$/, "");
-    },
-
-    amountLabel(value) {
-      const microiuna = this.microiunaAmount(value);
-      const whole = Math.floor(microiuna / 1000000);
-      const fractional = String(microiuna % 1000000).padStart(6, "0").replace(/0+$/, "");
-      return fractional ? `${whole}.${fractional}` : `${whole}`;
-    },
-
-    microiunaAmount(value) {
-      return Math.max(0, Math.round(Number(value) || 0));
-    },
-
-    metricAmountLabel(value) {
-      return value === null || value === undefined ? "-" : `IUNA ${this.amountLabel(value)}`;
-    },
-
-    amountNumber(value) {
-      return Number(this.amountLabel(value));
-    },
-
-    parseiunaAmount(value) {
-      const text = String(value ?? "").trim().replace(",", ".");
-      if (!text) return 0;
-      const match = text.match(/^(\d+)(?:\.(\d{0,6})\d*)?$/);
-      if (!match) return 0;
-      const whole = Number(match[1] || 0);
-      const fractional = Number((match[2] || "").padEnd(6, "0"));
-      return Math.max(0, Math.trunc(whole * 1000000 + fractional));
-    },
-
-    parseiunaAmountRequired(value, message) {
-      const text = String(value ?? "").trim().replace(",", ".");
-      if (!text) throw new Error(message);
-      const parsed = this.parseiunaAmount(text);
-      if (parsed === 0 && !/^0(?:\.0*)?$/.test(text)) throw new Error(message);
-      return parsed;
-    },
-
-    showOptimizeSuggestion() {
-      if (this.optimizeDismissed || this.walletSpendableUtxoCount() < 500) return false;
-      try {
-        return Date.now() > Number(localStorage.getItem(`iunaOptimizeLater:${this.status.wallet_address}`) || 0);
-      } catch { return true; }
-    },
-
-    walletSpendableUtxoCount() {
-      const funded = this.fundedWalletAddresses();
-      if (funded.length > 0 && funded.every((entry) => Number.isFinite(Number(entry?.spendable_utxos)))) {
-        return funded.reduce((total, entry) => total + Number(entry.spendable_utxos), 0);
-      }
-      return Number(this.walletUtxoPage.total || 0);
-    },
-
-    dismissOptimizeSuggestion() {
-      this.optimizeDismissed = true;
-      try { localStorage.setItem(`iunaOptimizeLater:${this.status.wallet_address}`, String(Date.now() + 7 * 86400000)); } catch {}
-    },
-
-    openOptimizeWallet() {
-      this.showWalletUtxos = false;
-      this.optimizeOpen = true;
-    },
-
-    closeOptimizeWallet() {
-      if (this.optimizeRunning) return;
-      this.optimizeOpen = false;
-    },
-
-    async previewOptimization() {
-      if (this.optimizeBusy || this.optimizeRunning) return;
-      this.optimizeBusy = true;
-      this.optimizePlan = null;
-      this.optimizeError = "";
-      this.optimizeMessage = "";
-      try {
-        const rate = this.parseiunaAmountRequired(this.optimizeFee, "Enter a fee per byte");
-        if (!Number.isSafeInteger(rate) || rate < 1) throw new Error("Fee per byte must be at least 0.000001 IUNA");
-        const result = await this.submitForm("/api/wallet/optimize/preview", {
-          fee_per_byte: rate, merge_roots: this.optimizeMergeRoots,
-        });
-        const plan = result.plan;
-        if (![plan.fee, ...plan.batches.flatMap(batch => [batch.fee, batch.amount])].every(Number.isSafeInteger)) {
-          throw new Error("Amounts exceed the safe range for this interface");
-        }
-        this.optimizePlan = { ...plan, rate, mergeRoots: this.optimizeMergeRoots };
-      } catch (error) { this.optimizeError = error.message; }
-      finally { this.optimizeBusy = false; }
-    },
-
-    async previewQuantumMigration() {
-      if (this.quantumMigrationBusy) return;
-      this.quantumMigrationBusy = true;
-      this.quantumMigrationPreview = null;
-      this.quantumMigrationError = "";
-      try {
-        const rate = this.parseiunaAmountRequired(
-          this.quantumMigrationFee,
-          "Enter a migration fee per byte"
-        );
-        if (!Number.isSafeInteger(rate) || rate < 1) {
-          throw new Error("Fee per byte must be at least 0.000001 IUNA");
-        }
-        const result = await this.submitForm("/api/wallet/quantum-migration/preview", {
-          fee_per_byte: rate,
-        });
-        const preview = result.preview;
-        if (![preview.fee, preview.amount, preview.bytes, preview.input_count, preview.remaining_legacy_utxos].every(Number.isSafeInteger)) {
-          throw new Error("Migration values exceed the safe range for this interface");
-        }
-        this.quantumMigrationPreview = { ...preview, rate };
-      } catch (error) {
-        this.quantumMigrationError = error.message;
-      } finally {
-        this.quantumMigrationBusy = false;
-      }
-    },
-
-    async submitQuantumMigration() {
-      const preview = this.quantumMigrationPreview;
-      if (!preview || this.quantumMigrationSubmitting || this.quantumMigrationBusy) return;
-      this.quantumMigrationSubmitting = true;
-      this.quantumMigrationError = "";
-      try {
-        let result;
-        try {
-          result = await this.submitForm("/api/wallet/quantum-migration/submit", {
-            fee_per_byte: preview.rate,
-            max_fee: preview.fee,
-            transaction_id: preview.transaction_id,
-          });
-        } catch (error) {
-          this.quantumMigrationPreview = null;
-          throw new Error(`${error.message}. Check wallet activity before requesting a new preview.`);
-        }
-        this.quantumMigrationPreview = null;
-        if (result.persistence_error) {
-          throw new Error("Migration queued locally, but durable recovery failed. Keep this node running and check its storage before continuing.");
-        }
-        if (result.broadcast_error) {
-          throw new Error("Migration saved locally, but broadcasting failed. It will be rebroadcast automatically; check connectivity before continuing.");
-        }
-        const remainder = Number(result.remaining_legacy_utxos || 0);
-        this.showFlash(
-          remainder > 0
-            ? `Migration batch queued. ${remainder} legacy UTXOs remain after confirmation.`
-            : "Wallet migration queued.",
-          "success"
-        );
-        await this.refresh({ force: true });
-      } catch (error) {
-        this.quantumMigrationError = error.message;
-      } finally {
-        this.quantumMigrationSubmitting = false;
-      }
-    },
-
-    async runOptimization() {
-      const plan = this.optimizePlan;
-      if (!plan || this.optimizeRunning || this.optimizeBusy) return;
-      this.optimizeRunning = true;
-      this.optimizeError = "";
-      try {
-        for (let batchIndex = 0; batchIndex < plan.batches.length; batchIndex += 1) {
-          if (this.status.wallet_locked || this.status.wallet_address !== plan.address) {
-            throw new Error("Wallet locked or changed. Unlock the original wallet and request a new preview.");
-          }
-          const batch = plan.batches[batchIndex];
-          this.optimizeMessage = `Submitting batch ${batchIndex + 1} of ${plan.batches.length}…`;
-          let result;
-          try {
-            result = await this.submitForm("/api/wallet/optimize/submit", {
-              address: plan.address, fee_per_byte: plan.rate, max_fee: batch.fee,
-              merge_roots: plan.mergeRoots, utxos: JSON.stringify(batch.utxos),
-            });
-            if (!result.signature) throw new Error("No transaction confirmation received from the node");
-          } catch (error) {
-            // A timeout may mean the transaction was accepted. Never retry it automatically.
-            this.optimizePlan = null;
-            throw new Error(`${error.message}. Check wallet activity before requesting a new preview.`);
-          }
-          if (result.broadcast_error) {
-            this.optimizePlan = null;
-            throw new Error("Batch queued locally, but broadcasting failed. Check connectivity before requesting a new preview.");
-          }
-        }
-        this.optimizeMessage = `Optimization submitted. Expected after confirmation: ${plan.before - plan.after} fewer balance parts; network fees ${this.amountLabel(plan.fee)} IUNA.`;
-        this.optimizePlan = null;
-        this.optimizeOpen = false;
-        this.showFlash(this.optimizeMessage, "success");
-        await this.refresh({ force: true });
-      } catch (error) {
-        this.optimizePlan = null;
-        this.optimizeError = error.message;
-      }
-      finally { this.optimizeRunning = false; }
-    },
-
-    async sendTransfer() {
-      if (this.sendPreparing || this.sendConfirmBusy) return;
-      this.sendPreparing = true;
-      try {
-        const amount = this.parseiunaAmountRequired(this.transferAmount, "Transfer amount is required");
-        if (amount <= 0) throw new Error("Transfer amount must be greater than zero");
-        const fee = this.parseiunaAmountRequired(this.transferFee, "Transfer fee per byte is required");
-        const fullRecipient = this.transferTo.trim();
-        if (!fullRecipient) throw new Error("Recipient is required");
-        const estimate = await this.transferFeeEstimateForAmount(amount);
-        this.feeEstimates.transfer = estimate;
-        this.pendingTransfer = {
-          recipient: fullRecipient,
-          amount,
-          feePerByte: fee,
-          bytes: Number(estimate.bytes),
-          fee: this.microiunaAmount(estimate.fee),
-          utxos: this.hybridTransferRecipient() ? this.selectedTransferUtxos.join("\n") : "",
-        };
-        this.sendConfirmModalOpen = true;
-      } catch (error) {
-        this.showFlash(error.message, "error");
-      } finally {
-        this.sendPreparing = false;
-      }
-    },
-
-    closeSendConfirmModal() {
-      if (this.sendConfirmBusy) return;
-      this.sendConfirmModalOpen = false;
-      this.pendingTransfer = null;
-    },
-
-    async confirmTransfer() {
-      const transfer = this.pendingTransfer;
-      if (!transfer || this.sendConfirmBusy) return;
-      this.sendConfirmBusy = true;
-      try {
-        const recipient = this.short(transfer.recipient);
-        await this.postForm(
-          "/api/transfer",
-          {
-            to: transfer.recipient,
-            amount: transfer.amount,
-            fee_per_byte: transfer.feePerByte,
-            utxos: transfer.utxos,
-          },
-          `Queued transfer of ${this.amountLabel(transfer.amount)} IUNA to ${recipient}`
-        );
-        this.sendConfirmModalOpen = false;
-        this.pendingTransfer = null;
-        this.transferTo = "";
-        this.transferAmount = null;
-        this.selectedTransferUtxos = [];
-        this.selectedTransferUtxoAmounts = {};
-        this.showSendAdvanced = false;
-        this.feeEstimates.transfer = null;
-      } catch (error) {
-        this.showFlash(error.message, "error");
-      } finally {
-        this.sendConfirmBusy = false;
-      }
-    },
-
-    transferMaxDisabled() {
-      if (this.hybridTransferRecipient()) {
-        return this.selectedTransferUtxoTotal() <= 0 && Number(this.status.quantum_migration?.hybrid_balance || 0) <= 0;
-      }
-      return Number(this.status.quantum_migration?.legacy_balance || 0) <= 0;
-    },
-
-    hybridTransferRecipient() {
-      return !this.isLegacyAddress(this.transferTo);
-    },
-
-    isLegacyAddress(address) {
-      return !/^(?:iuna|tiuna)1p/i.test(String(address ?? "").trim());
-    },
-
-    // Transaction v2 outputs must use address v1, so legacy recipients can only be paid from
-    // legacy outputs. Flag the case where all value already sits at hybrid addresses.
-    legacyRecipientNeedsHybridAddress() {
-      const migration = this.status.quantum_migration || {};
-      return this.transferTo.trim() !== ""
-        && !this.hybridTransferRecipient()
-        && Number(migration.legacy_balance || 0) <= 0
-        && Number(migration.hybrid_balance || 0) > 0;
-    },
-
-    hybridTransferUtxos() {
-      return this.walletUtxos.filter((utxo) => !this.isLegacyAddress(utxo.address));
-    },
-
-    transferRecipientChanged() {
-      if (!this.hybridTransferRecipient()) {
-        this.showSendAdvanced = false;
-        this.selectedTransferUtxos = [];
-        this.selectedTransferUtxoAmounts = {};
-      }
-      this.scheduleFeeEstimates();
-    },
-
-    async setMaxTransferAmount() {
-      try {
-        let selectedTotal = this.hybridTransferRecipient()
-          ? this.selectedTransferUtxoTotal()
-          : Number(this.status.quantum_migration?.legacy_balance || 0);
-        if (this.hybridTransferRecipient() && this.selectedTransferUtxos.length === 0) {
-          const utxos = await this.fetchJson("/api/wallet/utxos/selectable");
-          this.rememberUtxoAmounts(utxos);
-          this.selectedTransferUtxos = utxos.map((utxo) => this.utxoOutpoint(utxo));
-          this.lastSelectedTransferUtxo =
-            this.selectedTransferUtxos[this.selectedTransferUtxos.length - 1] || null;
-          selectedTotal = utxos.reduce((sum, utxo) => sum + Number(utxo.amount || 0), 0);
-        }
-
-        if (selectedTotal <= 0) {
-          this.showFlash("No spendable UTXOs", "error");
-          return;
-        }
-
-        const amount = await this.maxTransferAmountForSelectedUtxos(selectedTotal);
-        this.transferAmount = this.amountLabel(amount);
-        this.scheduleFeeEstimates();
-      } catch (error) {
-        this.showFlash(error.message, "error");
-      }
-    },
-
-    async maxTransferAmountForSelectedUtxos(selectedTotal) {
-      const total = this.microiunaAmount(selectedTotal);
-      let low = 1;
-      let high = total;
-      let bestAmount = 0;
-      let bestEstimate = null;
-
-      while (low <= high) {
-        const amount = Math.floor((low + high) / 2);
-        try {
-          const estimate = await this.transferFeeEstimateForAmount(amount);
-          const required = amount + this.microiunaAmount(estimate.fee);
-          if (required <= total) {
-            bestAmount = amount;
-            bestEstimate = estimate;
-            low = amount + 1;
-          } else {
-            high = amount - 1;
-          }
-        } catch {
-          high = amount - 1;
-        }
-      }
-
-      if (bestAmount <= 0 || !bestEstimate) {
-        throw new Error("Selected UTXOs do not cover amount plus fee");
-      }
-      this.feeEstimates.transfer = bestEstimate;
-      return bestAmount;
-    },
-
-    async transferFeeEstimateForAmount(amount) {
-      const recipient = this.transferTo.trim() || this.status.wallet_address;
-      if (!recipient) {
-        throw new Error("Recipient is required before max can estimate fees");
-      }
-      const estimate = await this.fetchFeeEstimate("/api/fee-estimate/transfer", {
-        to: recipient,
-        amount,
-        fee_per_byte: this.parseiunaAmount(this.transferFee),
-        utxos: this.hybridTransferRecipient() ? this.selectedTransferUtxos.join("\n") : "",
-      });
-      if (
-        estimate?.error
-        || !Number.isFinite(Number(estimate?.fee))
-        || !Number.isInteger(Number(estimate?.bytes))
-        || Number(estimate.bytes) <= 0
-      ) {
-        throw new Error(estimate?.error || "Could not estimate transfer fee");
-      }
-      return estimate;
-    },
-
-    toggleSendAdvanced() {
-      this.showSendAdvanced = !this.showSendAdvanced;
-      if (!this.showSendAdvanced) {
-        this.selectedTransferUtxos = [];
-      }
-    },
-
-    async addPeer() {
-      try {
-        const peer = this.peerAddress.trim();
-        await this.postForm("/api/peers", { peer }, `Added peer ${peer}`);
-        this.peerAddress = "";
-      } catch (error) {
-        this.showFlash(error.message, "error");
-      }
-    },
-
-    async removePeer(peer) {
-      try {
-        await this.postForm("/api/peers", { peer: peer.address }, `Removed peer ${peer.address}`, "DELETE");
-        if (this.selectedPeerAddress === peer.address) this.closePeerModal();
-      } catch (error) {
-        this.showFlash(error.message, "error");
-      }
-    },
-
-    openPeerModal(peer) {
-      this.selectedPeerAddress = peer?.address || null;
-    },
-
-    closePeerModal() {
-      this.selectedPeerAddress = null;
-    },
-
-    peerDetail() {
-      return this.peers.find((peer) => peer.address === this.selectedPeerAddress) || null;
-    },
-
-    peerCapabilities(peer) {
-      return Array.isArray(peer?.last_hello?.capabilities) ? peer.last_hello.capabilities : [];
-    },
-
-    peerTimestampLabel(timestampMs) {
-      if (typeof timestampMs !== "number" || !Number.isFinite(timestampMs) || timestampMs <= 0) return "-";
-      return `${new Date(timestampMs).toLocaleString()} (${this.relativeTimeLabel(timestampMs)})`;
-    },
-
-    addressBookEntries() {
-      return Object.entries(this.addressBook || {})
-        .map(([address, name]) => ({ address, name }))
-        .sort((left, right) => left.name.localeCompare(right.name) || left.address.localeCompare(right.address));
-    },
-
-    validAddressBookAddress(address) {
-      const text = String(address ?? "").trim();
-      const hasLower = /[a-z]/.test(text);
-      const hasUpper = /[A-Z]/.test(text);
-      if (hasLower && hasUpper) return false;
-      const normalized = text.toLowerCase();
-      const prefix = this.setupAddress().startsWith("tiuna1") ? "tiuna1" : "iuna1";
-      return normalized.startsWith(prefix) && /^[02-9ac-hj-np-z]{59}$/.test(normalized.slice(prefix.length));
-    },
-
-    selectTransferContact(address) {
-      if (!address) return;
-      this.transferTo = address;
-      this.scheduleFeeEstimates();
-      this.closeAddressBookPicker();
-    },
-
-    openAddressBookModal(entry = null, standalone = true) {
-      this.addressBookEditingAddress = entry?.address || null;
-      this.addressBookDraftAddress = entry?.address || "";
-      this.addressBookDraftName = entry?.name || "";
-      this.addressBookStandalone = standalone;
-      if (standalone) this.addressBookOverview = false;
-      this.addressBookPickerOpen = true;
-      this.addressBookModalOpen = true;
-    },
-
-    openAddressBookOverview() {
-      this.addressBookEditingAddress = null;
-      this.addressBookDraftAddress = "";
-      this.addressBookDraftName = "";
-      this.addressBookStandalone = false;
-      this.addressBookOverview = true;
-      this.addressBookModalOpen = false;
-      this.addressBookPickerOpen = true;
-    },
-
-    openAddressContact(address) {
-      const value = String(address ?? "").trim();
-      const publicAddress = this.contactAddress(value);
-      if (!publicAddress) return;
-      const canonical = this.canonicalAddressKey(value);
-      const entry = this.addressBookEntries().find(
-        (candidate) => this.canonicalAddressKey(candidate.address) === canonical,
-      );
-      this.addressBookEditingAddress = entry?.address || null;
-      this.addressBookDraftAddress = entry && this.validAddressBookAddress(entry.address)
-        ? entry.address
-        : publicAddress;
-      this.addressBookDraftName = entry?.name || "";
-      this.addressBookStandalone = true;
-      this.addressBookOverview = false;
-      this.addressBookPickerOpen = true;
-      this.addressBookModalOpen = true;
-    },
-
-    contactAddress(address) {
-      const normalized = String(address ?? "").trim().toLowerCase();
-      if (this.validAddressBookAddress(normalized)) return normalized;
-      if (!/^[0-9a-f]{64}$/.test(normalized)) return null;
-
-      const hrp = this.setupAddress().startsWith("tiuna1") ? "tiuna" : "iuna";
-      const charset = "qpzry9x8gf2tvdw0s3jn54khce6mua7l";
-      const bytes = normalized.match(/../g).map((pair) => Number.parseInt(pair, 16));
-      const data = [0];
-      let accumulator = 0;
-      let bits = 0;
-      for (const byte of bytes) {
-        accumulator = ((accumulator << 8) | byte) & 0xfff;
-        bits += 8;
-        while (bits >= 5) {
-          bits -= 5;
-          data.push((accumulator >> bits) & 31);
-        }
-      }
-      if (bits > 0) data.push((accumulator << (5 - bits)) & 31);
-
-      const values = [
-        ...[...hrp].map((character) => character.charCodeAt(0) >> 5),
-        0,
-        ...[...hrp].map((character) => character.charCodeAt(0) & 31),
-        ...data,
-        0, 0, 0, 0, 0, 0,
-      ];
-      const generators = [0x3b6a57b2, 0x26508e6d, 0x1ea119fa, 0x3d4233dd, 0x2a1462b3];
-      let polymod = 1;
-      for (const value of values) {
-        const top = polymod >>> 25;
-        polymod = (((polymod & 0x1ffffff) << 5) ^ value) >>> 0;
-        for (let index = 0; index < generators.length; index += 1) {
-          if ((top >>> index) & 1) polymod = (polymod ^ generators[index]) >>> 0;
-        }
-      }
-      polymod = (polymod ^ 0x2bc830a3) >>> 0;
-      const checksum = Array.from({ length: 6 }, (_, index) => (polymod >>> (5 * (5 - index))) & 31);
-      return `${hrp}1${[...data, ...checksum].map((value) => charset[value]).join("")}`;
-    },
-
-    hasWalletAddress(address) {
-      return this.contactAddress(address) !== null;
-    },
-
-    closeAddressBookModal() {
-      const closePicker = this.addressBookStandalone;
-      this.addressBookModalOpen = false;
-      this.addressBookStandalone = false;
-      this.addressBookEditingAddress = null;
-      this.addressBookDraftAddress = "";
-      this.addressBookDraftName = "";
-      if (closePicker) this.addressBookPickerOpen = false;
-    },
-
-    openAddressBookPicker() {
-      this.addressBookStandalone = false;
-      this.addressBookOverview = false;
-      this.addressBookPickerOpen = true;
-    },
-
-    closeAddressBookPicker() {
-      this.addressBookPickerOpen = false;
-      this.addressBookOverview = false;
-      this.closeAddressBookModal();
-    },
-
-    async saveAddressBookEntry() {
-      const address = this.addressBookDraftAddress.trim();
-      const name = this.addressBookDraftName.trim();
-      if (!address || !name) {
-        this.showFlash("Address and name are required", "error");
-        return;
-      }
-      if (!this.validAddressBookAddress(address)) {
-        this.showFlash("Address must be a Bech32m address for this network", "error");
-        return;
-      }
-      const canonicalAddress = address.toLowerCase();
-      const oldAddress = this.addressBookEditingAddress;
-      if (this.addressBook?.[canonicalAddress] && canonicalAddress !== oldAddress) {
-        this.showFlash("Address is already saved", "error");
-        return;
-      }
-      try {
-        const fields = oldAddress ? { address, name, old_address: oldAddress } : { address, name };
-        await this.submitForm("/api/address-book", fields);
-        this.addressBookVersion += 1;
-        const nextBook = { ...(this.addressBook || {}) };
-        if (oldAddress && oldAddress !== canonicalAddress) delete nextBook[oldAddress];
-        nextBook[canonicalAddress] = name;
-        this.addressBook = nextBook;
-        this.config = { ...this.config, address_book: this.addressBook };
-        this.closeAddressBookModal();
-        this.showFlash(`Saved ${name}`, "success");
-      } catch (error) {
-        this.showFlash(error.message, "error");
-      }
-    },
-
-    editAddressBookEntry(entry) {
-      this.openAddressBookModal(entry);
-    },
-
-    async removeAddressBookEntry(entry) {
-      try {
-        await this.submitForm("/api/address-book", { address: entry.address }, "DELETE");
-        this.addressBookVersion += 1;
-        const nextBook = { ...(this.addressBook || {}) };
-        delete nextBook[entry.address];
-        this.addressBook = nextBook;
-        this.config = { ...this.config, address_book: nextBook };
-        if (this.addressBookEditingAddress === entry.address) this.closeAddressBookModal();
-        this.showFlash(`Removed ${entry.name}`, "success");
-      } catch (error) {
-        this.showFlash(error.message, "error");
-      }
-    },
-
-    async copyAddress() {
-      try {
-        await navigator.clipboard.writeText(this.setupAddress());
-        this.showFlash("Address copied", "success");
-      } catch (error) {
-        this.showFlash("Could not copy address", "error");
-      }
-    },
-
-    async copyReceiveAddress() {
-      try {
-        await navigator.clipboard.writeText(this.receiveAddress());
-        this.showFlash("Address copied", "success");
-      } catch (error) {
-        this.showFlash("Could not copy address", "error");
-      }
-    },
-
-    showFlash(message, kind) {
-      this.flash = { message, kind };
-      if (this.flashTimer) {
-        clearTimeout(this.flashTimer);
-      }
-      this.flashTimer = setTimeout(() => {
-        this.flash = null;
-        this.flashTimer = null;
-      }, kind === "error" ? 7000 : 3500);
-    },
-
-    showSetupFeedback(message, kind) {
-      this.setupFeedback = { message, kind };
-    },
-
-    showAuthFeedback(message, kind) {
-      this.authFeedback = { message, kind };
-    },
-
-    showSettingsFeedback(message, kind) {
-      this.settingsFeedback = { message, kind };
-    },
-
-    short(value) {
-      if (!value) return "-";
-      if (value.length <= 16) return value;
-      return `${value.slice(0, 8)}...${value.slice(-8)}`;
-    },
-
-    canonicalAddressKey(address) {
-      const normalized = String(address ?? "").trim().toLowerCase();
-      if (/^[0-9a-f]{64}$/.test(normalized)) return normalized;
-
-      const separator = normalized.lastIndexOf("1");
-      const hrp = normalized.slice(0, separator);
-      if (separator <= 0 || (hrp !== "iuna" && hrp !== "tiuna")) return normalized;
-
-      const charset = "qpzry9x8gf2tvdw0s3jn54khce6mua7l";
-      const encoded = normalized.slice(separator + 1);
-      if (encoded.length < 7) return normalized;
-      const payload = [...encoded.slice(0, -6)].map((character) => charset.indexOf(character));
-      if (payload.length === 0 || payload[0] !== 0 || payload.some((value) => value < 0)) return normalized;
-
-      let accumulator = 0;
-      let bits = 0;
-      const bytes = [];
-      for (const value of payload.slice(1)) {
-        accumulator = (accumulator << 5) | value;
-        bits += 5;
-        while (bits >= 8) {
-          bits -= 8;
-          bytes.push((accumulator >> bits) & 0xff);
-          accumulator &= (1 << bits) - 1;
-        }
-      }
-      if (bits >= 5 || accumulator !== 0 || bytes.length !== 32) return normalized;
-      return bytes.map((byte) => byte.toString(16).padStart(2, "0")).join("");
-    },
-
-    addressName(address) {
-      if (!address) return null;
-      const normalized = String(address).trim().toLowerCase();
-      const directName = this.addressBook?.[normalized];
-      if (directName) return directName;
-
-      const canonical = this.canonicalAddressKey(normalized);
-      for (const [savedAddress, name] of Object.entries(this.addressBook || {})) {
-        if (this.canonicalAddressKey(savedAddress) === canonical) return name;
-      }
-      return null;
-    },
-
-    isOwnAddress(address) {
-      if (!address) return false;
-      const canonical = this.canonicalAddressKey(address);
-      const owned = [
-        ...(Array.isArray(this.status.wallet_owned_addresses)
-          ? this.status.wallet_owned_addresses
-          : []),
-        this.status.wallet_address,
-        this.status.wallet_receive_address,
-        ...this.fundedWalletAddresses().map((entry) => entry.address),
-      ];
-      return owned.some((candidate) => candidate && this.canonicalAddressKey(candidate) === canonical);
-    },
-
-    addressLabel(address) {
-      const label = this.addressName(address) || address || "-";
-      return this.isOwnAddress(address) ? `${label} (me)` : label;
-    },
-
-    shortAddressLabel(address) {
-      const label = this.addressName(address) || this.short(address);
-      return this.isOwnAddress(address) ? `${label} (me)` : label;
-    },
-
-    txFrom(tx) {
-      return tx.from ?? tx.inputs?.[0]?.owner ?? "";
-    },
-
-    txTo(tx) {
-      return tx.to ?? tx.outputs?.[0]?.address ?? null;
-    },
-
-    txAmount(tx) {
-      if (tx?.kind === "reward" && tx.rewardTotal !== null && tx.rewardTotal !== undefined) {
-        return tx.rewardTotal;
-      }
-      return tx.amount ?? tx.outputs?.[0]?.amount ?? 0;
-    },
-
-    isMineTx(tx) {
-      return tx?.kind === "mine";
-    },
-
-    isRewardTx(tx) {
-      return tx?.kind === "reward";
-    },
-
-    txFeeLabel(tx) {
-      return `IUNA ${this.amountLabel(tx?.fee ?? 0)}`;
-    },
-
-    txPillLabel(tx) {
-      return tx?.kind || "-";
-    },
-
-    txPillClass(tx) {
-      return tx?.kind || "";
-    },
-
-    txDifficultyBits(tx) {
-      return tx?.difficulty_bits ?? tx?.difficultyBits ?? null;
-    },
-
-    txProofBits(tx) {
-      return tx?.proof_bits ?? tx?.proofBits ?? null;
-    },
-
-    txProofHash(tx) {
-      return tx?.proof_hash ?? tx?.proofHash ?? tx?.signature ?? null;
-    },
-
-    txInputs(tx) {
-      if (tx?.kind === "reward" && Array.isArray(tx.rewardFeeInputs)) {
-        return tx.rewardFeeInputs.map((input) => ({
-          ...input,
-          rewardFee: true,
-          outpoint: { txid: input.signature, index: "fee" },
-        }));
-      }
-      return Array.isArray(tx.inputs) ? tx.inputs : [];
-    },
-
-    txVisualOutputs(tx) {
-      if (tx?.kind === "reward" && Array.isArray(tx.rewardOutputs)) {
-        return tx.rewardOutputs.map((output) => ({ ...output, kind: "reward" }));
-      }
-      const rows = [];
-      if (tx.kind === "burn" && Number(tx.amount || 0) > 0) {
-        rows.push({
-          kind: "burned",
-          label: "Burn",
-          amount: tx.amount,
-          address: null,
-        });
-      }
-      if (Number(tx.fee || 0) > 0) {
-        rows.push({
-          kind: "fee",
-          label: "Fee",
-          amount: tx.fee,
-          address: null,
-          detailLabel: "To",
-          detail: this.txFeeRecipient(tx),
-        });
-      }
-      const directOutputs = Array.isArray(tx.outputs) ? tx.outputs : [];
-      for (const [index, output] of directOutputs.entries()) {
-        rows.push({
-          kind: output.kind || "output",
-          label: output.label || `Output ${index + 1}`,
-          amount: output.amount,
-          address: output.address,
-        });
-      }
-      const changeOutputs = Array.isArray(tx.change) ? tx.change : [];
-      for (const [index, output] of changeOutputs.entries()) {
-        rows.push({
-          kind: "change",
-          label: `Change ${index + 1}`,
-          amount: output.amount,
-          address: output.address,
-        });
-      }
-      return rows;
-    },
-
-    txInputKey(input, index) {
-      return `${input.outpoint?.txid || "input"}:${input.outpoint?.index ?? index}`;
-    },
-
-    txOutputKey(output, index) {
-      return `${output.kind}:${output.address || output.kind}:${output.amount}:${index}`;
-    },
-
-    txInputOutpoint(input) {
-      const txid = input.outpoint?.txid || "-";
-      const index = input.outpoint?.index ?? "-";
-      return `${txid}:${index}`;
-    },
-
-    utxoOutpoint(utxo) {
-      return this.txInputOutpoint({ outpoint: utxo.outpoint });
-    },
-
-    spendableTransferUtxos() {
-      return this.hybridTransferUtxos().filter((utxo) => utxo.spendable !== false);
-    },
-
-    rememberUtxoAmounts(utxos) {
-      for (const utxo of utxos || []) {
-        this.selectedTransferUtxoAmounts[this.utxoOutpoint(utxo)] = Number(utxo.amount || 0);
-      }
-    },
-
-    pruneSelectedTransferUtxos() {
-      const visible = new Map(this.walletUtxos.map((utxo) => [this.utxoOutpoint(utxo), utxo]));
-      this.selectedTransferUtxos = this.selectedTransferUtxos.filter((outpoint) => {
-        const utxo = visible.get(outpoint);
-        return !utxo || utxo.spendable !== false;
-      });
-      if (this.lastSelectedTransferUtxo && !this.selectedTransferUtxos.includes(this.lastSelectedTransferUtxo)) {
-        this.lastSelectedTransferUtxo = null;
-      }
-    },
-
-    toggleTransferUtxoSelection(event, utxo) {
-      const outpoint = this.utxoOutpoint(utxo);
-      if (!utxo || utxo.spendable === false || !outpoint) {
-        this.scheduleFeeEstimates();
-        return;
-      }
-
-      this.rememberUtxoAmounts([utxo]);
-      const spendable = this.spendableTransferUtxos();
-      const outpoints = spendable.map((item) => this.utxoOutpoint(item));
-      const currentIndex = outpoints.indexOf(outpoint);
-      const anchorIndex = this.lastSelectedTransferUtxo
-        ? outpoints.indexOf(this.lastSelectedTransferUtxo)
-        : -1;
-
-      const selected = new Set(this.selectedTransferUtxos);
-      const checked = !selected.has(outpoint);
-      if (event?.shiftKey && anchorIndex >= 0 && currentIndex >= 0) {
-        const [from, to] = [anchorIndex, currentIndex].sort((left, right) => left - right);
-        const range = spendable.slice(from, to + 1);
-        this.rememberUtxoAmounts(range);
-        for (const item of range) {
-          const itemOutpoint = this.utxoOutpoint(item);
-          if (checked) {
-            selected.add(itemOutpoint);
-          } else {
-            selected.delete(itemOutpoint);
-          }
-        }
-      } else if (checked) {
-        selected.add(outpoint);
-      } else {
-        selected.delete(outpoint);
-      }
-      this.selectedTransferUtxos = Array.from(selected);
-
-      this.lastSelectedTransferUtxo = outpoint;
-      this.scheduleFeeEstimates();
-    },
-
-    async selectAllTransferUtxos() {
-      try {
-        const utxos = await this.fetchJson("/api/wallet/utxos/selectable");
-        this.rememberUtxoAmounts(utxos);
-        this.selectedTransferUtxos = utxos.map((utxo) => this.utxoOutpoint(utxo));
-        this.lastSelectedTransferUtxo =
-          this.selectedTransferUtxos[this.selectedTransferUtxos.length - 1] || null;
-        this.scheduleFeeEstimates();
-        if (this.selectedTransferUtxos.length === 0) {
-          this.showFlash("No spendable UTXOs", "error");
-        }
-      } catch (error) {
-        this.showFlash(error.message, "error");
-      }
-    },
-
-    clearTransferUtxos() {
-      this.selectedTransferUtxos = [];
-      this.selectedTransferUtxoAmounts = {};
-      this.lastSelectedTransferUtxo = null;
-      this.scheduleFeeEstimates();
-    },
-
-    selectedTransferUtxoTotal() {
-      return this.selectedTransferUtxos.reduce((sum, outpoint) => {
-        return sum + this.microiunaAmount(this.selectedTransferUtxoAmounts[outpoint]);
-      }, 0);
-    },
-
-    transferRequiredTotal() {
-      return this.parseiunaAmount(this.transferAmount) + this.microiunaAmount(this.feeEstimates.transfer?.fee);
-    },
-
-    selectedTransferUtxosCoverTransfer() {
-      return this.selectedTransferUtxoShortfall() === 0;
-    },
-
-    selectedTransferUtxoShortfall() {
-      if (this.selectedTransferUtxos.length === 0) return 0;
-      return Math.max(0, this.microiunaAmount(this.transferRequiredTotal()) - this.microiunaAmount(this.selectedTransferUtxoTotal()));
-    },
-
-    txInputAmountLabel(input) {
-      return input.amount === null || input.amount === undefined ? "-" : `IUNA ${this.amountLabel(input.amount)}`;
-    },
-
-    txFeeRecipient(tx) {
-      const context = this.selectedTransaction?.context || {};
-      const address = tx.blockFinalizer ?? tx.blockMiner ?? context.blockFinalizer ?? context.blockMiner;
-      return address ? this.addressLabel(address) : "future block finalizer";
-    },
-
-    selectedTransactionLabel() {
-      if (!this.selectedTransaction) return "-";
-      const { tx, context } = this.selectedTransaction;
-      if (context.reward && context.blockHeight !== undefined) return `Block ${context.blockHeight} reward`;
-      if (context.blockHeight !== undefined) return `Block ${context.blockHeight}`;
-      if (tx?.status === "pending") return "Wallet pending";
-      if (tx?.blockHeight !== null && tx?.blockHeight !== undefined) {
-        return `Wallet block ${tx.blockHeight}`;
-      }
-      return context.source || "-";
-    },
-
-    blockLostIuna(block) {
-      const explicitTotal = block?.lostIuna ?? block?.lost_iuna;
-      if (explicitTotal !== null && explicitTotal !== undefined) return Number(explicitTotal) || 0;
-      return this.blockTransactions(block)
-        .filter((tx) => tx.kind === "burn")
-        .reduce((sum, tx) => sum + this.txAmount(tx), 0);
-    },
-
-    blockTotalFees(block) {
-      const explicitTotal = block?.totalFees ?? block?.total_fees ?? block?.reward;
-      if (explicitTotal !== null && explicitTotal !== undefined) return Number(explicitTotal) || 0;
-      return this.blockTransactions(block).reduce((sum, tx) => sum + Number(tx.fee || 0), 0);
-    },
-
-    blockRewardTransaction(block) {
-      const inputs = this.blockTransactions(block)
-        .filter((tx) => Number(tx.fee || 0) > 0)
-        .map((tx) => ({
-          rewardFee: true,
-          transactionKind: tx.kind || "transaction",
-          amount: tx.fee,
-          owner: this.txFrom(tx) || this.txTo(tx) || null,
-          signature: tx.signature,
-          outpoint: { txid: tx.signature, index: "fee" },
-        }));
-      return {
-        kind: "reward",
-        signature: block.hash,
-        amount: block.reward,
-        fee: 0,
-        inputs,
-        outputs: this.blockRewardOutputs(block),
-      };
-    },
-
-    blockRewardOutputs(block) {
-      const reward = Math.max(0, Math.trunc(Number(block?.reward || 0)));
-      if (reward === 0) return [];
-
-      const bundles = Array.isArray(block?.burn_bundles)
-        ? block.burn_bundles
-        : (Array.isArray(block?.burnBundles) ? block.burnBundles : []);
-      const committee = block?.finalizer_mode === "ticket" && Number(block?.finalizer_rank || 0) <= 1
-        ? [...bundles]
-            .sort((left, right) => Number(left.slot || 0) - Number(right.slot || 0))
-            .filter((bundle) => bundle.member && bundle.member !== block.miner)
-        : [];
-      const committeePool = committee.length > 0 ? Math.floor(reward / 2) : 0;
-      const outputs = [{
-        kind: "reward",
-        label: "Finalizer reward",
-        amount: reward - committeePool,
-        address: this.blockRewardAddress(block),
-      }];
-
-      let remaining = committeePool;
-      committee.forEach((bundle, index) => {
-        const membersLeft = committee.length - index;
-        const amount = membersLeft === 1 ? remaining : Math.floor(remaining / membersLeft);
-        remaining -= amount;
-        if (amount > 0) {
-          outputs.push({
-            kind: "reward",
-            label: `Committee reward (slot ${bundle.slot})`,
-            amount,
-            address: this.bundleRewardAddress(bundle),
-          });
-        }
-      });
-      return outputs;
-    },
-
-    blockRewardAddress(block) {
-      return block?.rewardAddress ?? block?.reward_address ?? block?.miner ?? null;
-    },
-
-    bundleRewardAddress(bundle) {
-      return bundle?.rewardAddress ?? bundle?.reward_address ?? bundle?.member ?? null;
-    },
-
-    blockTimestampLabel(block) {
-      const timestamp = Number(block?.timestamp_ms ?? block?.timestampMs);
-      if (Number(block?.height) === 0) return "Genesis";
-      if (!Number.isFinite(timestamp) || timestamp <= 0) return "-";
-      return new Date(timestamp).toLocaleString();
-    },
-
-    blockTotalBytes(block) {
-      return Number(block?.totalBytes ?? block?.total_bytes ?? 0);
-    },
-
-    blockBurnBundleQuorum(block) {
-      return block?.burnBundleQuorum ?? block?.burn_bundle_quorum ?? {};
-    },
-
-    blockBurnBundleRatio(block) {
-      const quorum = this.blockBurnBundleQuorum(block);
-      const included = Number(quorum.burnBundlesIncluded ?? quorum.burn_bundles_included ?? 0);
-      const committeeSize = Number(quorum.committeeSize ?? quorum.committee_size ?? 0);
-      return `${included}/${committeeSize}`;
-    },
-
-    blockBurnBundleSlots(block) {
-      if (!block || block.finalizer_mode === "recovery") return [];
-      const bundles = block.burn_bundles || block.burnBundles || [];
-      return [
-        {
-          slot: 0,
-          member: block.miner,
-          rewardAddress: block.rewardAddress ?? block.reward_address ?? null,
-          role: "Finalizer",
-          implicit: true,
-          burns: this.blockTransactions(block).filter((tx) => tx.kind === "burn"),
-          byteSize: 0,
-          hash: "",
-        },
-        ...bundles.map((bundle) => ({
-          slot: Number(bundle.slot),
-          member: bundle.member,
-          rewardAddress: bundle.rewardAddress ?? bundle.reward_address ?? null,
-          role: "Committee member",
-          implicit: false,
-          burns: bundle.burns || [],
-          byteSize: Number(bundle.byte_size ?? bundle.byteSize ?? 0),
-          hash: bundle.hash || "",
-        })),
-      ].sort((left, right) => left.slot - right.slot);
-    },
-
-    burnBundleSlotDetail(slot) {
-      if (slot?.implicit) return "Implicit block attestation";
-      const count = slot?.burns?.length || 0;
-      return `${count} burn${count === 1 ? "" : "s"} · ${slot?.byteSize || 0}B gossip JSON`;
-    },
-
-    blockByteBreakdown(block) {
-      const transactionRows = this.blockTransactionByteBreakdown(block);
-      return [
-        ["Header and proof", Number(block?.headerAndProofBytes ?? block?.header_and_proof_bytes ?? 0), ""],
-        ...(transactionRows.length
-          ? transactionRows
-          : [["Transactions", Number(block?.transactionBytes ?? block?.transaction_bytes ?? 0), ""]]),
-        ["Burn bundles", Number(block?.burnBundleBytes ?? block?.burn_bundle_bytes ?? 0), "burn"],
-      ];
-    },
-
-    blockTransactionByteBreakdown(block) {
-      const rows = block?.transactionByteBreakdown ?? block?.transaction_byte_breakdown;
-      if (!Array.isArray(rows)) return [];
-      return rows
-        .map((row) => {
-          const label = row.label || row.kind || "transaction";
-          return [label, Number(row.bytes ?? 0), label];
-        })
-        .filter((row) => row[1] > 0);
-    },
-
-    blockFinalizerPayout(block) {
-      const reward = this.microiunaAmount(block?.reward);
-      const rank = Number(block?.finalizer_rank ?? block?.finalizerRank ?? 0);
-      const mode = block?.finalizer_mode ?? block?.finalizerMode;
-      const hasPaidCommittee = mode === "ticket" && rank <= 1 && (block?.burn_bundles || block?.burnBundles || []).length > 0;
-      return hasPaidCommittee ? reward - Math.floor(reward / 2) : reward;
-    },
-
-    recentFinalizerRewardAverage(count) {
-      const sample = this.blocks.filter((block) => block.height > 0).slice(0, count);
-      if (sample.length === 0) return 0;
-      return Math.round(sample.reduce((sum, block) => sum + this.blockFinalizerPayout(block), 0) / sample.length);
-    },
-
-    burnTicketDrawHorizon() {
-      const configured = Number(this.status.launch_profile?.ticket_expiry_window_heights);
-      return Number.isSafeInteger(configured) && configured > 0 ? configured : 1;
-    },
-
-    burnTicketWinChance(burn, otherBurn, drawHorizon) {
-      if (burn <= 0 || drawHorizon <= 0) return 0;
-      if (otherBurn <= 0) return 1;
-      if (drawHorizon === 1) return burn / (otherBurn + burn);
-      const singleDrawLossChance = otherBurn / (otherBurn + burn);
-      return -Math.expm1(drawHorizon * Math.log(singleDrawLossChance));
-    },
-
-    burnOutlook() {
-      const proposedBurn = this.parseiunaAmount(this.burnAmountDraft);
-      const activeTotal = this.microiunaAmount(this.status.mining?.eligible_burn_total);
-      const walletActive = Math.min(activeTotal, this.microiunaAmount(this.status.mining?.wallet_eligible_burn));
-      const otherBurn = Math.max(0, activeTotal - walletActive);
-      const scenarioTotal = otherBurn + proposedBurn;
-      const drawHorizon = this.burnTicketDrawHorizon();
-      const chance = this.burnTicketWinChance(proposedBurn, otherBurn, drawHorizon);
-      const chancePercent = Math.max(0, Math.min(100, chance * 100));
-      const reward = this.recentFinalizerRewardAverage(30);
-      const expectedPayout = chance * reward;
-      const fee = this.microiunaAmount(this.feeEstimates.burn?.fee);
-      const net = expectedPayout - proposedBurn - fee;
-      const maxExpectedValueBurn = reward * drawHorizon > otherBurn
-        ? otherBurn > 0
-          ? Math.max(1, Math.round(
-            otherBurn * (Math.pow(reward * drawHorizon / otherBurn, 1 / (drawHorizon + 1)) - 1),
-          ))
-          : 1
-        : 0;
-      const maxExpectedPayout = maxExpectedValueBurn > 0
-        ? reward * this.burnTicketWinChance(maxExpectedValueBurn, otherBurn, drawHorizon)
-        : 0;
-      const maxExpectedNet = Math.max(0, maxExpectedPayout - maxExpectedValueBurn - fee);
-      const excessBurn = Math.max(0, proposedBurn - maxExpectedValueBurn);
-      let breakEvenCeiling = 0;
-      if (otherBurn > 0 && maxExpectedValueBurn > 0) {
-        let low = 1;
-        let high = Math.floor(reward);
-        while (low <= high) {
-          const candidate = Math.floor((low + high) / 2);
-          const candidateNet = reward * this.burnTicketWinChance(candidate, otherBurn, drawHorizon) - candidate;
-          if (candidateNet >= 0) {
-            breakEvenCeiling = candidate;
-            low = candidate + 1;
-          } else {
-            high = candidate - 1;
-          }
-        }
-      }
-      let level = "neutral";
-      let verdict = "Waiting for reward history";
-      if (reward > 0) {
-        level = net >= 0 ? "positive" : "negative";
-        verdict = otherBurn === 0 && proposedBurn > 0
-          ? "No competition: minimum burn wins"
-          : otherBurn >= reward * drawHorizon
-            ? "Do not burn: competition exceeds ticket-lifetime payout"
-            : maxExpectedNet <= 0
-              ? "Do not burn: fees erase the expected gain"
-            : proposedBurn < maxExpectedValueBurn
-              ? "Below max-EV: more burn raises expected net"
-            : proposedBurn > maxExpectedValueBurn
-              ? "Overburn: extra burn lowers expected profit"
-              : "At max-EV";
-      }
-      return {
-        proposedBurn,
-        activeTotal,
-        walletActive,
-        otherBurn,
-        scenarioTotal,
-        drawHorizon,
-        chance,
-        chancePercent,
-        reward,
-        expectedPayout,
-        fee,
-        net,
-        maxExpectedValueBurn,
-        maxExpectedNet,
-        breakEvenCeiling,
-        excessBurn,
-        level,
-        verdict,
-      };
-    },
-
-    burnOutlookPercentLabel() {
-      const percent = this.burnOutlook().chancePercent;
-      if (percent === 0 || percent === 100) return `${percent.toFixed(0)}%`;
-      if (percent > 99.9) return `${percent.toFixed(6).replace(/0+$/, "").replace(/\.$/, "")}%`;
-      return `${percent.toFixed(percent < 1 ? 2 : 1)}%`;
-    },
-
-    burnOutlookShareAriaLabel() {
-      const outlook = this.burnOutlook();
-      return `Proposed burn has an estimated ${this.burnOutlookPercentLabel()} chance to win within its ${outlook.drawHorizon}-draw ticket lifetime`;
-    },
-
-    signedAmountLabel(value) {
-      const amount = Number(value);
-      if (!Number.isFinite(amount)) return "-";
-      const sign = amount > 0 ? "+" : amount < 0 ? "-" : "";
-      return `${sign}IUNA ${this.amountLabel(Math.abs(amount))}`;
-    },
-
-    burnOutlookCurrentLabel() {
-      const outlook = this.burnOutlook();
-      if (outlook.activeTotal === 0) return "Next draw now: no eligible burn tickets.";
-      const percent = 100 * outlook.walletActive / outlook.activeTotal;
-      const percentLabel = `${percent.toFixed(percent > 0 && percent < 1 ? 2 : 1)}%`;
-      return `Next draw now: your active tickets are IUNA ${this.amountLabel(outlook.walletActive)} of IUNA ${this.amountLabel(outlook.activeTotal)} (${percentLabel}).`;
-    },
-
-    canUseMaxEvBurn() {
-      const amount = this.burnOutlook().maxExpectedValueBurn;
-      return amount > 0 && amount !== this.parseiunaAmount(this.burnAmountDraft);
-    },
-
-    useMaxEvBurn() {
-      const amount = this.burnOutlook().maxExpectedValueBurn;
-      if (amount <= 0) return;
-      this.burnAmountDraft = this.amountLabel(amount);
-      this.burnAmountDirty = true;
-      this.scheduleFeeEstimates();
-    },
-
-    burnOutlookSizingLabel() {
-      const { reward, otherBurn, drawHorizon, maxExpectedValueBurn, breakEvenCeiling, excessBurn } = this.burnOutlook();
-      if (reward <= 0) return "Sizing signal: waiting for recent payout data.";
-      if (otherBurn >= reward * drawHorizon) return `Sizing signal: 0 IUNA — competing burn already equals or exceeds ${drawHorizon} estimated payouts over the ticket lifetime.`;
-      if (otherBurn === 0) return "Sizing signal: there is no stable optimum without competing burn; use the minimum practical amount.";
-      const excess = excessBurn > 0
-        ? ` IUNA ${this.amountLabel(excessBurn)} of the draft is beyond that point.`
-        : " The draft is not beyond that point.";
-      return `Risk-neutral ${drawHorizon}-draw ticket-lifetime max-EV point: IUNA ${this.amountLabel(maxExpectedValueBurn)}.${excess} Break-even ceiling before the transaction fee: IUNA ${this.amountLabel(breakEvenCeiling)}.`;
-    },
-
-    blockBurnCount(block) {
-      const count = Number(block?.burnCount ?? block?.burn_count);
-      if (Number.isFinite(count)) return count;
-      return this.blockTransactions(block).filter((tx) => tx.kind === "burn").length;
-    },
-
-    blockTransferCount(block) {
-      const count = Number(block?.transferCount ?? block?.transfer_count);
-      if (Number.isFinite(count)) return count;
-      return this.blockTransactions(block).filter((tx) => tx.kind === "transfer").length;
-    },
-
-    blockMineCount(block) {
-      const count = Number(block?.mineCount ?? block?.mine_count);
-      if (Number.isFinite(count)) return count;
-      return this.blockTransactions(block).filter((tx) => tx.kind === "mine").length;
-    },
-
-    blockTransactions(block) {
-      return block?.transactions || [];
-    },
-
-    burnCountLabel(block) {
-      const count = this.blockBurnCount(block);
-      return `${count} burn${count === 1 ? "" : "s"}`;
-    },
-
-    transferCountLabel(block) {
-      const count = this.blockTransferCount(block);
-      return `${count} transfer${count === 1 ? "" : "s"}`;
-    },
-
-    mineCountLabel(block) {
-      const count = this.blockMineCount(block);
-      return `${count} mine${count === 1 ? "" : "s"}`;
-    },
-
-    blockFinalizerLabel(block) {
-      const finalizer = this.shortAddressLabel(block.miner);
-      const owner = finalizer;
-      return block.finalizer_mode === "recovery" ? `${owner} · Recovery` : owner;
-    },
-
-    buildingBlockHeight() {
-      const height = Number(this.status.chain?.height);
-      return Number.isSafeInteger(height) && height >= 0 ? height + 1 : "-";
-    },
-
-    buildingBlockOverview() {
-      return {
-        burnCount: Number(this.status.chain?.pending_burns ?? 0),
-        transferCount: Number(this.status.chain?.pending_transfers ?? 0),
-        mineCount: Number(this.status.chain?.pending_mines ?? 0),
-        miner: this.currentFinalizerAddress(),
-      };
-    },
-
-    burnLeaderRanks(block) {
-      if (Array.isArray(block?.burn_leader_ranks)) return block.burn_leader_ranks;
-      return Array.isArray(block?.burnLeaderRanks) ? block.burnLeaderRanks : [];
-    },
-
-    burnLeaderRanksLoading(block) {
-      return !this.burnLeaderRanksError && this.burnLeaderRanksPending(block);
-    },
-
-    burnLeaderRanksPending(block) {
-      return block?.burn_leader_ranks_loaded === false;
-    },
-
-    burnLeaderRanksTitle(block) {
-      if (!block) return "Burn Leader Ranks";
-      return `Block ${block.height} Burn Leader Ranks`;
-    },
-
-    burnLeaderRankLabel(rank) {
-      const value = Number(rank?.rank ?? 0);
-      return `#${value + 1}`;
-    },
-
-    burnLeaderEligibilityLabel(rank) {
-      const from = rank?.eligible_from_height ?? rank?.eligibleFromHeight ?? "-";
-      const until = rank?.eligible_until_height ?? rank?.eligibleUntilHeight ?? "-";
-      return `${from}-${until}`;
-    },
-
-    walletTransactions() {
-      return this.walletTxs;
-    },
-
-    walletTxIsIncoming(tx) {
-      return ["received", "reward", "migrated"].includes(tx?.direction);
-    },
-
-    txTitle(tx) {
-      if (tx.status === "pending") return "Pending";
-      return tx.blockHeight === null ? "Confirmed" : `Block ${tx.blockHeight}`;
-    },
-
-    walletTxTimeLabel(tx) {
-      const timestamp = Number(tx?.timestampMs ?? tx?.timestamp_ms);
-      if (!Number.isFinite(timestamp) || timestamp <= 0) {
-        return tx?.status === "pending" ? "Pending" : "-";
-      }
-      return new Date(timestamp).toLocaleString();
-    },
-
-    isLeaderLabel() {
-      if (!this.status.mining) return "-";
-      return this.status.mining.wallet_is_current_leader ? "yes" : "no";
-    },
-
-    sharedHeightLabel() {
-      const local = this.status.chain?.height;
-      if (typeof local !== "number") return "-";
-      const peerHeights = this.peers
-        .filter((peer) => !peer.last_error)
-        .map((peer) => peer.last_known_height)
-        .filter((height) => typeof height === "number");
-      if (peerHeights.length === 0) return local;
-      return Math.min(local, ...peerHeights);
-    },
-
-    networkHealthClass() {
-      if (this.networkHealth.ok) return "healthy";
-      if (this.networkHealth.state === "syncing") return "syncing";
-      if (this.networkHealth.state === "isolated") return "isolated";
-      if (this.networkHealth.state === "stale") return "stale";
-      if (this.networkHealth.state === "banned") return "banned";
-      return "error";
-    },
-
-    syncingNode() {
-      return (
-        this.canUseProtectedApi() &&
-        !this.showingNetworkMigration() &&
-        !this.chainResetModalOpen &&
-        this.config.setup_complete === true &&
-        this.networkHealthLoaded &&
-        this.networkHealth.state === "syncing"
-      );
-    },
-
-    syncCurrentHeight() {
-      const height = Number(
-        this.networkHealth.sync_validated_height ??
-          this.networkHealth.local_height ??
-          this.status.chain?.height ??
-          0
-      );
-      return Number.isFinite(height) && height >= 0 ? Math.floor(height) : 0;
-    },
-
-    syncTargetHeight() {
-      const batchTarget = Number(this.networkHealth.sync_target_height ?? 0);
-      const knownTarget = Number(this.networkHealth.best_known_height ?? 0);
-      const target = Math.max(
-        Number.isFinite(batchTarget) ? batchTarget : 0,
-        Number.isFinite(knownTarget) ? knownTarget : 0,
-        this.syncCurrentHeight()
-      );
-      return Number.isFinite(target) && target >= 0
-        ? Math.max(this.syncCurrentHeight(), Math.floor(target))
-        : this.syncCurrentHeight();
-    },
-
-    syncProgressPercent() {
-      const current = this.syncCurrentHeight();
-      const target = this.syncTargetHeight();
-      if (target <= 0) return 0;
-      return Math.max(0, Math.min(100, (current / target) * 100));
-    },
-
-    syncProgressLabel() {
-      return `Syncing ${this.syncCurrentHeight().toLocaleString()} of ${this.syncTargetHeight().toLocaleString()}`;
-    },
-
-    networkLagLabel() {
-      const lag = this.networkHealth.lag_blocks;
-      if (typeof lag !== "number") return "-";
-      if (lag === 0) return "even";
-      return `${lag} behind`;
-    },
-
-    networkTipLabel() {
-      return this.short(this.networkHealth.local_tip_hash);
-    },
-
-    networkLastBlockAgeLabel() {
-      const ageMs = this.networkHealth.last_block_age_ms;
-      if (typeof ageMs !== "number" || !Number.isFinite(ageMs)) return "-";
-      return this.durationLabel(ageMs);
-    },
-
-    dashboardMiningState() {
-      return this.powMiningEnabled ? "good" : "neutral";
-    },
-
-    dashboardMiningLabel() {
-      if (!this.powMiningEnabled) return "Off";
-      return `${this.powMiningWorkers} worker${this.powMiningWorkers === 1 ? "" : "s"}`;
-    },
-
-    dashboardBurnState() {
-      return this.miningEnabled ? "good" : "neutral";
-    },
-
-    dashboardBurnLabel() {
-      if (!this.miningEnabled) return "Off";
-      return `IUNA ${this.amountLabel(this.burnAmount)} / blk`;
-    },
-
-    dashboardBlockState() {
-      const ageMs = this.networkHealth.last_block_age_ms;
-      if (typeof ageMs !== "number" || !Number.isFinite(ageMs)) return "neutral";
-      if (ageMs <= 20 * 60 * 1000) return "good";
-      if (ageMs <= 60 * 60 * 1000) return "warning";
-      return "bad";
-    },
-
-    dashboardLastBlockLabel() {
-      const age = this.networkLastBlockAgeLabel();
-      return age === "-" ? "Unavailable" : `${age} ago`;
-    },
-
-    dashboardNetworkState() {
-      const state = this.networkHealth.state;
-      if (!state) return "neutral";
-      if (state === "healthy" || state === "ahead of peers") return "good";
-      if (
-        state === "syncing" ||
-        state === "mempool syncing" ||
-        state === "stale" ||
-        state === "peer errors" ||
-        state === "banned"
-      ) {
-        return "warning";
-      }
-      return "bad";
-    },
-
-    networkFinalizerLabel() {
-      return this.shortAddressLabel(this.networkHealth.current_leader);
-    },
-
-    networkFinalizerModeLabel() {
-      const mode = this.networkHealth.last_finalizer_mode;
-      if (!mode) return "-";
-      const rank = this.networkHealth.last_finalizer_rank;
-      const label = mode.charAt(0).toUpperCase() + mode.slice(1);
-      return typeof rank === "number" ? `${label} #${rank}` : label;
-    },
-
-    networkVdfLabel() {
-      const rounds = this.networkHealth.vdf_rounds;
-      const targetMs = this.networkHealth.vdf_target_block_ms;
-      if (typeof rounds !== "number") return "-";
-      const target = typeof targetMs === "number" ? ` / ${this.durationLabel(targetMs)}` : "";
-      return `${rounds.toLocaleString()}${target}`;
-    },
-
-    basicNetworkStatusLabel() {
-      const state = this.networkHealth.state;
-      if (!state) return "Network starting";
-      if (state === "healthy" || state === "ahead of peers") return "Connected";
-      if (state === "syncing" || state === "mempool syncing") return "Syncing";
-      if (state === "isolated") return "Offline";
-      return state.charAt(0).toUpperCase() + state.slice(1);
-    },
-
-    basicNetworkNeedsAttention() {
-      if (!this.networkHealth.state) return false;
-      return !this.networkHealth.ok && this.networkHealth.state !== "syncing";
-    },
-
-    networkTimeOffsetLabel() {
-      return this.clockOffsetLabel(this.networkHealth.network_time_offset_ms, true);
-    },
-
-    outboundPeers() {
-      return this.peers.filter((peer) => peer.direction !== "inbound");
-    },
-
-    inboundPeers() {
-      return this.peers.filter((peer) => peer.direction === "inbound");
-    },
-
-    healthyPeers() {
-      return this.peers.filter((peer) =>
-        !peer.last_error
-        && !this.bannedPeer(peer)
-        && !this.stalePeer(peer)
-        && typeof peer.last_success_ms === "number"
-        && this.peerOnLocalTip(peer)
-      );
-    },
-
-    peerOnLocalTip(peer) {
-      return typeof peer.last_known_height === "number"
-        && peer.last_known_height === this.networkHealth.local_height
-        && typeof peer.last_known_tip_hash === "string"
-        && peer.last_known_tip_hash === this.networkHealth.local_tip_hash;
-    },
-
-    failedPeers() {
-      return this.peers.filter((peer) => peer.last_error);
-    },
-
-    stalePeer(peer) {
-      const lastSuccess = peer.last_success_ms;
-      if (typeof lastSuccess !== "number") return false;
-      return Date.now() - lastSuccess > 20 * 60 * 1000;
-    },
-
-    bannedPeer(peer) {
-      const bannedUntil = peer.banned_until_ms;
-      return typeof bannedUntil === "number" && bannedUntil > Date.now();
-    },
-
-    peerStatus(peer) {
-      if (this.bannedPeer(peer)) return "banned";
-      if (peer.last_error) return "error";
-      if (this.stalePeer(peer)) return "stale";
-      if (typeof peer.last_known_height === "number") {
-        const localHeight = this.networkHealth.local_height;
-        if (typeof localHeight === "number" && peer.last_known_height < localHeight) return "behind";
-        if (typeof localHeight === "number" && peer.last_known_height > localHeight) return "ahead";
-        if (typeof localHeight === "number"
-            && typeof peer.last_known_tip_hash === "string"
-            && typeof this.networkHealth.local_tip_hash === "string"
-            && peer.last_known_tip_hash !== this.networkHealth.local_tip_hash) return "forked";
-        return "synced";
-      }
-      if ((peer.messages_sent ?? 0) > 0 || (peer.messages_received ?? 0) > 0) return "active";
-      return "pending";
-    },
-
-    peerStatusLabel(peer) {
-      return {
-        error: "Error",
-        banned: "Banned",
-        forked: "Forked",
-        ahead: "Ahead",
-        behind: "Behind",
-        stale: "Stale",
-        synced: "Synced",
-        active: "Active",
-        pending: "Pending",
-      }[this.peerStatus(peer)];
-    },
-
-    relativeTimeLabel(timestampMs) {
-      if (typeof timestampMs !== "number" || !Number.isFinite(timestampMs)) return "-";
-      const ageSeconds = Math.max(0, Math.round((Date.now() - timestampMs) / 1000));
-      if (ageSeconds < 5) return "now";
-      if (ageSeconds < 60) return `${ageSeconds}s ago`;
-      const ageMinutes = Math.round(ageSeconds / 60);
-      if (ageMinutes < 60) return `${ageMinutes}m ago`;
-      const ageHours = Math.round(ageMinutes / 60);
-      if (ageHours < 48) return `${ageHours}h ago`;
-      return `${Math.round(ageHours / 24)}d ago`;
-    },
-
-    durationLabel(durationMs) {
-      if (typeof durationMs !== "number" || !Number.isFinite(durationMs)) return "-";
-      const seconds = Math.max(0, Math.round(durationMs / 1000));
-      if (seconds < 60) return `${seconds}s`;
-      const minutes = Math.round(seconds / 60);
-      if (minutes < 60) return `${minutes}m`;
-      const hours = Math.round(minutes / 60);
-      if (hours < 48) return `${hours}h`;
-      return `${Math.round(hours / 24)}d`;
-    },
-
-    peerLastContactLabel(peer) {
-      return this.relativeTimeLabel(peer.last_contact_ms);
-    },
-
-    peerClockLabel(peer) {
-      const label = this.clockOffsetLabel(peer.last_clock_offset_ms, false);
-      if (label === "-") return "-";
-      return peer.last_clock_offset_accepted === false ? `${label} ignored` : label;
-    },
-
-    clockOffsetLabel(offsetMs, zeroAsSynced) {
-      if (typeof offsetMs !== "number") return "-";
-      const sign = offsetMs > 0 ? "+" : offsetMs < 0 ? "-" : "";
-      const absoluteSeconds = Math.round(Math.abs(offsetMs) / 1000);
-      if (absoluteSeconds === 0) return zeroAsSynced ? "even" : "0s";
-      if (absoluteSeconds < 60) return `${sign}${absoluteSeconds}s`;
-      const minutes = Math.round(absoluteSeconds / 60);
-      if (minutes < 60) return `${sign}${minutes}m`;
-      return `${sign}${Math.round(minutes / 60)}h`;
-    },
-
-    peerBanLabel(peer) {
-      if (!this.bannedPeer(peer)) return "-";
-      const remainingSeconds = Math.max(0, Math.round((peer.banned_until_ms - Date.now()) / 1000));
-      if (remainingSeconds < 60) return `${remainingSeconds}s`;
-      const remainingMinutes = Math.round(remainingSeconds / 60);
-      if (remainingMinutes < 60) return `${remainingMinutes}m`;
-      return `${Math.round(remainingMinutes / 60)}h`;
     },
 
     normalizeVersion(version) {
@@ -4597,56 +632,1307 @@ window.iunaApp = function iunaApp() {
       const rightParts = this.versionParts(right);
       const length = Math.max(leftParts.length, rightParts.length, 3);
       for (let index = 0; index < length; index += 1) {
-        const diff = (leftParts[index] || 0) - (rightParts[index] || 0);
-        if (diff !== 0) return diff;
+        const difference = (leftParts[index] || 0) - (rightParts[index] || 0);
+        if (difference !== 0) return difference;
       }
       return 0;
     },
 
-    peerHeightDelta(peer) {
-      const local = this.status.chain?.height;
-      const remote = peer.last_known_height;
-      if (typeof local !== "number" || typeof remote !== "number") return "-";
-      if (remote === local) return "even";
-      if (remote > local) return `+${remote - local}`;
-      return `-${local - remote}`;
-    },
-
-    canRemovePeer(peer) {
-      return peer.direction !== "inbound";
-    },
-
-    targetSecondsLabel() {
-      const ms = this.status.mining?.vdf_target_block_ms;
-      if (!ms) return "-";
-      const seconds = Math.round(ms / 1000);
-      if (seconds % 60 === 0) return `${seconds / 60}m`;
-      return `${seconds}s`;
-    },
-
-    stratumListenAddr() {
-      return this.status.stratum?.listen_addr || "-";
-    },
-
-    stratumRuntimeEnabled() {
-      return this.status.stratum?.enabled === true;
-    },
-
-    stratumPoolUrl() {
-      const listen = this.status.stratum?.listen_addr;
-      if (!this.status.stratum?.enabled || !listen) return "-";
-      const lastColon = listen.lastIndexOf(":");
-      if (lastColon < 0) return `stratum+tcp://${listen}`;
-      let host = listen.slice(0, lastColon);
-      const port = listen.slice(lastColon + 1);
-      if (host === "0.0.0.0" || host === "::" || host === "[::]") {
-        host = window.location.hostname || "127.0.0.1";
+    async refresh(silent = false) {
+      try {
+        const previousHeartbeatHead = this.heartbeats[0]?.block_hash;
+        const previousLedgerHead = this.ledgerBlocks[0]?.block_hash;
+        const heartbeatRail = this.chainRailState("heartbeatRail");
+        const ledgerRail = this.chainRailState("ledgerRail");
+        const [status, heartbeats, peers, mempool] = await Promise.all([
+          this.getJson("/api/status"),
+          this.getJson(`/api/heartbeats?limit=${this.heartbeatPage.limit}`),
+          this.getJson("/api/peers"),
+          this.getJson("/api/mempool"),
+        ]);
+        this.status = status;
+        if (!this.mining.busy) this.mining.workers = Number(status.heartbeat_mining_workers || 1);
+        const oldestFreshHeight = heartbeats.at(-1)?.height;
+        const olderLoaded = oldestFreshHeight == null
+          ? []
+          : this.heartbeats.filter((block) => Number(block.height) < Number(oldestFreshHeight));
+        this.heartbeats = [...heartbeats, ...olderLoaded];
+        this.peers = peers;
+        this.mempool = mempool;
+        void this.reconcileSelectedTransaction();
+        this.peerTargets = await this.getJson("/api/peer-targets").catch(() => this.peerTargets);
+        if (this.tab === "metrics") await this.refreshMetrics(true);
+        if (status.wallet_public_key && this.tab === "wallet") {
+          this.activity = await this.getJson("/api/wallet/activity").catch(() => this.activity);
+        }
+        if (!this.mining.busy) {
+          this.mining.message = status.heartbeat_mining_enabled
+            ? "Mining is on. The node searches for the next Heartbeat continuously."
+            : "Proof-of-work mining is off";
+        }
+        this.syncLedgerBlocks();
+        if (status.ledger_mining_enabled
+            && previousLedgerHead
+            && previousLedgerHead !== this.ledgerBlocks[0]?.block_hash) {
+          await this.quoteContinuousTicket(true, false);
+        }
+        this.heartbeatPage.hasMore = this.heartbeats.at(-1)?.height > 0
+          && heartbeats.length === this.heartbeatPage.limit;
+        this.scheduleChainHeadSlide(
+          "heartbeatRail",
+          heartbeatRail,
+          previousHeartbeatHead,
+          this.heartbeats[0]?.block_hash,
+        );
+        this.scheduleChainHeadSlide(
+          "ledgerRail",
+          ledgerRail,
+          previousLedgerHead,
+          this.ledgerBlocks[0]?.block_hash,
+        );
+        if (this.reconcileSelectedBlock()) {
+          this.selectedBlockDetail = null;
+          await this.loadBlockDetail(this.selectedBlock, true);
+        }
+        if (this.tab === "chain") {
+          this.$nextTick(() => this.ensureChainRailScrollable(this.chainView));
+        }
+        if (this.setupReady) this.syncLoginVisibility();
+        this.lastUpdated = new Date();
+        this.pollFailures = 0;
+      } catch (error) {
+        this.pollFailures = Math.min(4, this.pollFailures + 1);
+        if (!silent) this.notify(error.message, "error");
       }
-      return `stratum+tcp://${host}:${port}`;
+    },
+
+    chainRailState(reference) {
+      const rail = this.$refs?.[reference];
+      return {
+        width: rail?.scrollWidth || 0,
+        atStart: !rail || rail.scrollLeft <= 4,
+      };
+    },
+
+    scheduleChainHeadSlide(reference, previous, previousHead, currentHead) {
+      if (!previousHead || !currentHead || previousHead === currentHead || !previous.atStart) return;
+      this.$nextTick(() => this.slideNewChainHead(reference, previous.width));
+    },
+
+    slideNewChainHead(reference, previousWidth) {
+      const rail = this.$refs?.[reference];
+      if (!rail || previousWidth === 0) return;
+      const addedWidth = rail.scrollWidth - previousWidth;
+      if (addedWidth <= 0) return;
+      rail.scrollLeft = addedWidth;
+      if (typeof rail.scrollTo === "function") {
+        rail.scrollTo({ left: 0, behavior: "smooth" });
+      } else {
+        rail.scrollLeft = 0;
+      }
+    },
+
+    async getJson(path) {
+      const response = await fetch(path, { headers: this.headers(), cache: "no-store" });
+      const payload = await this.responseJson(response);
+      if (!response.ok) {
+        const error = new Error(payload.error || `${path} returned ${response.status}`);
+        error.status = response.status;
+        throw error;
+      }
+      return payload;
+    },
+
+    storedOperatorToken() {
+      try { return sessionStorage.getItem("iunaOperatorToken") || ""; } catch { return ""; }
+    },
+
+    hasOperatorToken() {
+      return this.tokenStored;
+    },
+
+    async saveOperatorToken() {
+      const token = this.operatorToken.trim();
+      if (token.length < 32) {
+        this.notify("An operator token has at least 32 characters", "error");
+        return;
+      }
+      try { sessionStorage.setItem("iunaOperatorToken", token); } catch {
+        this.notify("Session storage is unavailable in this browser", "error");
+        return;
+      }
+      this.operatorToken = "";
+      this.tokenStored = true;
+      this.notify("Operator token saved for this browser session");
+      await this.refresh(true);
+    },
+
+    async forgetOperatorToken() {
+      try { sessionStorage.removeItem("iunaOperatorToken"); } catch {}
+      this.tokenStored = false;
+      this.notify("Operator token removed");
+      await this.refresh(true);
+    },
+
+    headers(json = false) {
+      const headers = { Accept: "application/json" };
+      const token = this.storedOperatorToken();
+      if (token) headers.Authorization = `Bearer ${token}`;
+      if (json) headers["Content-Type"] = "application/json";
+      return headers;
+    },
+
+    async responseJson(response) {
+      const text = await response.text();
+      if (!text) return {};
+      try { return JSON.parse(text); } catch { return { error: text }; }
+    },
+
+    // The node may offer management, but in token mode this browser also needs the token.
+    browserCanManage() {
+      if (this.status.management_enabled !== true) return false;
+      return this.status.management_requires_token !== true || this.tokenStored;
+    },
+
+    canManage() {
+      return this.browserCanManage() && this.status.wallet_unlocked === true;
+    },
+
+    // The form only prepares the transfer; nothing is sent until the confirm dialog is accepted.
+    reviewTransaction() {
+      if (!this.canManage() || this.transfer.busy) return;
+      try {
+        const recipient = this.transfer.recipient.trim().toLowerCase();
+        if (!/^[0-9a-f]{64}$/.test(recipient)) throw new Error("The recipient must be a 64-character public key");
+        const amount = this.parseAmount(this.transfer.amount, "Enter an amount");
+        if (amount <= 0) throw new Error("Enter an amount above zero");
+        const fee = this.parseAmount(this.transfer.fee);
+        const spendable = Number(this.status.wallet_spendable_balance || 0);
+        if (amount + fee > spendable) throw new Error("Amount plus fee exceeds the spendable balance");
+        this.pendingTransfer = { recipient, amount, fee, remaining: spendable - amount - fee };
+        this.$nextTick(() => this.$refs.confirmTransfer?.focus());
+      } catch (error) {
+        this.notify(error.message, "error");
+      }
+    },
+
+    async confirmTransaction() {
+      const pending = this.pendingTransfer;
+      if (!pending || !this.canManage() || this.transfer.busy) return;
+      this.transfer.busy = true;
+      try {
+        const payload = await this.postJson("/api/ledger-transactions", {
+          recipient: pending.recipient,
+          amount: pending.amount,
+          fee: pending.fee,
+        });
+        this.notify(`Ledger transaction ${this.short(payload.id)} submitted`);
+        this.pendingTransfer = null;
+        this.transfer.recipient = "";
+        this.transfer.amount = "";
+        await this.refresh(true);
+      } catch (error) {
+        this.notify(error.message, "error");
+      } finally {
+        this.transfer.busy = false;
+      }
+    },
+
+    useMaximumAmount() {
+      try {
+        const fee = this.parseAmount(this.transfer.fee);
+        const maximum = Number(this.status.wallet_spendable_balance || 0) - fee;
+        if (maximum <= 0) throw new Error("The spendable balance does not cover the fee");
+        this.transfer.amount = this.amountLabel(maximum);
+      } catch (error) {
+        this.notify(error.message, "error");
+      }
+    },
+
+    async setHeartbeatMining(enabled) {
+      if (!this.canManage() || this.mining.busy) return;
+      this.mining.busy = true;
+      this.mining.message = enabled ? "Starting proof-of-work miner…" : "Stopping proof-of-work miner…";
+      try {
+        const payload = await this.postJson("/api/hash-mining", {
+          enabled,
+          workers: this.normalizedMiningWorkers(),
+        });
+        this.status.heartbeat_mining_enabled = payload.enabled;
+        this.status.heartbeat_mining_workers = payload.workers;
+        this.mining.workers = payload.workers;
+        this.mining.message = payload.enabled
+          ? "Mining is on. The node searches for the next Heartbeat continuously."
+          : "Proof-of-work mining is off";
+        this.notify(payload.bootstrap_ticket_submitted
+          ? "Heartbeat mining enabled; the public genesis funds created the first Proof of Expenditure ticket"
+          : (payload.enabled ? "Heartbeat mining enabled" : "Heartbeat mining disabled"));
+        await this.refresh(true);
+      } catch (error) {
+        this.mining.message = error.message;
+        this.notify(error.message, "error");
+      } finally {
+        this.mining.busy = false;
+      }
+    },
+
+    normalizedMiningWorkers() {
+      const maximum = Number(this.status.heartbeat_mining_max_workers || 256);
+      return Math.min(maximum, Math.max(1, Math.trunc(Number(this.mining.workers) || 1)));
+    },
+
+    async updateMiningWorkers() {
+      if (!this.canManage() || this.mining.busy) return;
+      this.mining.workers = this.normalizedMiningWorkers();
+      this.mining.busy = true;
+      try {
+        const payload = await this.postJson("/api/hash-mining", {
+          enabled: this.status.heartbeat_mining_enabled === true,
+          workers: this.mining.workers,
+        });
+        this.status.heartbeat_mining_enabled = payload.enabled;
+        this.status.heartbeat_mining_workers = payload.workers;
+        this.mining.workers = payload.workers;
+        this.notify(`Heartbeat mining will use ${payload.workers} worker${payload.workers === 1 ? "" : "s"}`);
+      } catch (error) {
+        this.notify(error.message, "error");
+        await this.refresh(true);
+      } finally {
+        this.mining.busy = false;
+      }
+    },
+
+    async setLedgerMining(enabled) {
+      if (!this.canManage() || this.ticket.continuousBusy) return;
+      this.ticket.continuousBusy = true;
+      try {
+        const payload = await this.postJson("/api/ledger-mining", { enabled });
+        this.status.ledger_mining_enabled = payload.enabled;
+        if (payload.enabled) await this.quoteContinuousTicket(true, false);
+        this.notify(payload.enabled ? "Continuous Ledger mining enabled" : "Continuous Ledger mining disabled");
+        await this.refresh(true);
+      } catch (error) {
+        this.notify(error.message, "error");
+      } finally {
+        this.ticket.continuousBusy = false;
+      }
+    },
+
+    async quoteTicket(silent = false) {
+      const duration = Math.max(1, Math.trunc(Number(this.ticket.duration) || 1));
+      this.ticket.duration = duration;
+      try {
+        this.ticket.quote = await this.getJson(`/api/mining-ticket-quote?duration=${duration}`);
+        if (duration === 10) this.ticket.continuousQuote = this.ticket.quote;
+        if (!this.ticket.budget) {
+          this.ticket.budget = this.amountLabel(this.ticket.quote.recommended_budget);
+        }
+      } catch (error) {
+        this.ticket.quote = null;
+        if (!silent) this.notify(error.message, "error");
+      }
+    },
+
+    async quoteContinuousTicket(silent = false, useManualQuote = true) {
+      if (useManualQuote && Number(this.ticket.quote?.duration) === 10) {
+        this.ticket.continuousQuote = this.ticket.quote;
+        return;
+      }
+      try {
+        this.ticket.continuousQuote = await this.getJson("/api/mining-ticket-quote?duration=10");
+      } catch (error) {
+        this.ticket.continuousQuote = null;
+        if (!silent) this.notify(error.message, "error");
+      }
+    },
+
+    ledgerMiningMessage() {
+      if (this.ticket.continuousBusy) return "Updating continuous Ledger mining…";
+      return this.status.ledger_mining_enabled
+        ? "Mining is on. The node submits a recommended Ledger ticket every 10 Heartbeats."
+        : "Continuous Ledger mining is off. Submit a ticket manually below.";
+    },
+
+    ledgerNextTicketLabel() {
+      const lastHeight = this.status.ledger_last_ticket_height;
+      if (lastHeight == null) return "As soon as possible";
+      const nextHeight = Number(lastHeight) + 10;
+      return Number(this.status.heartbeat_height || 0) >= nextHeight ? "Due now" : `Heartbeat #${nextHeight}`;
+    },
+
+    async submitTicket() {
+      if (!this.canManage() || this.ticket.busy) return;
+      this.ticket.busy = true;
+      try {
+        const payload = await this.postJson("/api/mining-tickets", {
+          budget: this.parseAmount(this.ticket.budget, "Enter a ticket budget"),
+          duration: Math.max(1, Math.trunc(Number(this.ticket.duration) || 1)),
+          fee: this.parseAmount(this.ticket.fee),
+        });
+        this.notify(`Mining ticket ${this.short(payload.id)} submitted`);
+        await this.refresh(true);
+      } catch (error) {
+        this.notify(error.message, "error");
+      } finally {
+        this.ticket.busy = false;
+      }
+    },
+
+    async postJson(path, body) {
+      const response = await fetch(path, {
+        method: "POST",
+        headers: this.headers(true),
+        body: JSON.stringify(body),
+      });
+      const payload = await this.responseJson(response);
+      if (!response.ok) throw new Error(payload.error || `${path} returned ${response.status}`);
+      return payload;
+    },
+
+    parseAmount(value, message = "Enter a valid amount") {
+      const text = String(value ?? "").trim().replace(",", ".");
+      const match = text.match(/^(\d+)(?:\.(\d{0,8}))?$/);
+      if (!match) throw new Error(message);
+      const amount = Number(match[1]) * 100_000_000 + Number((match[2] || "").padEnd(8, "0"));
+      if (!Number.isSafeInteger(amount) || amount < 0) throw new Error(message);
+      return amount;
+    },
+
+    amountLabel(value) {
+      const amount = Math.max(0, Math.round(Number(value) || 0));
+      const whole = Math.floor(amount / 100_000_000);
+      const fraction = String(amount % 100_000_000).padStart(8, "0").replace(/0+$/, "");
+      return fraction ? `${whole}.${fraction}` : String(whole);
+    },
+
+    balanceValueStyle() {
+      const characters = `IUNA ${this.amountLabel(this.status.wallet_balance)}`.length;
+      const fontSize = characters <= 12 ? 13 : characters <= 16 ? 10.5 : characters <= 20 ? 8.5 : 7.5;
+      return `font-size:${fontSize}px`;
+    },
+
+    pendingCount() {
+      return Number(this.status.pending_ledger_transactions || 0) + Number(this.status.pending_mining_tickets || 0);
+    },
+
+    networkLabel() {
+      if (!this.status.network) return "Connecting";
+      return this.peers.length ? "Connected" : "Isolated";
+    },
+
+    // Highest Heartbeat a connected peer announced, when it is ahead of this node.
+    syncTarget() {
+      const local = Number(this.status.heartbeat_height || 0);
+      const best = Math.max(0, ...this.peers.map((peer) => Number(peer.heartbeat_height || 0)));
+      return best > local + 1 ? best : null;
+    },
+
+    networkDetail() {
+      if (!this.status.network) return "Waiting for the local node to respond.";
+      if (!this.peers.length) return "No peers yet. The node keeps retrying its configured peers; you can still use it on your own.";
+      return `${this.peers.length} peer${this.peers.length === 1 ? "" : "s"} connected. Blocks and transactions arrive automatically.`;
+    },
+
+    // Median interval over the loaded Heartbeats, to compare against the 60-second target. The
+    // median ignores outages (a node that was off for hours); genesis is excluded because its
+    // pinned timestamp predates the network's first mined block.
+    averageHeartbeatSeconds() {
+      const cache = this.chartCache();
+      if (cache.medianInterval !== undefined) return cache.medianInterval;
+      const intervals = this.chartSeries("interval").map((point) => point.y).sort((a, b) => a - b);
+      if (!intervals.length) {
+        cache.medianInterval = null;
+        return null;
+      }
+      const middle = Math.floor(intervals.length / 2);
+      cache.medianInterval = intervals.length % 2 ? intervals[middle] : (intervals[middle - 1] + intervals[middle]) / 2;
+      return cache.medianInterval;
+    },
+
+    averageHeartbeatLabel() {
+      const seconds = this.averageHeartbeatSeconds();
+      return seconds == null ? "-" : `${seconds.toFixed(seconds < 10 ? 1 : 0)} s`;
+    },
+
+    // Bar width relative to twice the target, so the 60-second target sits in the middle.
+    heartbeatIntervalShare() {
+      const seconds = this.averageHeartbeatSeconds();
+      return seconds == null ? 0 : Math.min(100, (seconds / 120) * 100);
+    },
+
+    async selectBlock(block, chain) {
+      const sameBlock = this.selectedBlock?.block_hash === block.block_hash;
+      if (sameBlock && this.selectedBlockChain === chain) {
+        this.clearSelectedBlock();
+        return;
+      }
+      this.selectedBlock = block;
+      this.selectedBlockChain = chain;
+      const blocks = chain === "ledger" ? this.ledgerBlocks : this.heartbeats;
+      this.selectedBlockFollowsLatest = blocks[0]?.block_hash === block.block_hash;
+      if (sameBlock) return;
+      this.selectedBlockDetail = null;
+      await this.loadBlockDetail(block);
+    },
+
+    clearSelectedBlock() {
+      this.blockDetailRequestId += 1;
+      this.selectedBlock = null;
+      this.selectedBlockDetail = null;
+      this.selectedBlockChain = null;
+      this.selectedBlockFollowsLatest = false;
+      this.blockDetailBusy = false;
+    },
+
+    reconcileSelectedBlock() {
+      if (!this.selectedBlock) return false;
+      const previousHash = this.selectedBlock.block_hash;
+      if (this.selectedBlockFollowsLatest) {
+        const blocks = this.selectedBlockChain === "ledger" ? this.ledgerBlocks : this.heartbeats;
+        if (blocks.length) this.selectedBlock = blocks[0];
+      } else {
+        // Refresh the selected summary when it is still in the loaded window. If an old block has
+        // moved beyond that window, retain its selection and already-loaded details.
+        this.selectedBlock = this.heartbeats.find((block) => block.block_hash === previousHash)
+          || this.selectedBlock;
+      }
+      return this.selectedBlock.block_hash !== previousHash;
+    },
+
+    async loadBlockDetail(block, silent = false) {
+      const requestId = ++this.blockDetailRequestId;
+      this.blockDetailBusy = true;
+      try {
+        const detail = await this.getJson(`/api/blocks/${block.block_hash}`);
+        if (requestId === this.blockDetailRequestId
+            && this.selectedBlock?.block_hash === block.block_hash) {
+          this.selectedBlockDetail = detail;
+        }
+      } catch (error) {
+        if (!silent) this.notify(error.message, "error");
+      } finally {
+        if (requestId === this.blockDetailRequestId) this.blockDetailBusy = false;
+      }
+    },
+
+    blockSelected(block) {
+      return this.selectedBlock?.block_hash === block.block_hash;
+    },
+
+    setChainView(chain) {
+      if (!["heartbeat", "ledger"].includes(chain)) return;
+      this.chainView = chain;
+      this.$nextTick(() => this.ensureChainRailScrollable(chain));
+    },
+
+    syncLedgerBlocks() {
+      this.ledgerBlocks = this.heartbeats
+        .filter((block) => block.has_ledger_block)
+        .map((block, index) => ({
+          ...block,
+          ledger_height: Math.max(1, Number(this.status.ledger_blocks || 0) - index),
+        }));
+    },
+
+    async loadMoreHeartbeats(chain = this.chainView) {
+      if (this.heartbeatPage.busy || !this.heartbeatPage.hasMore || !this.heartbeats.length) return;
+      this.heartbeatPage.busy = true;
+      const previousLedgerCount = this.ledgerBlocks.length;
+      try {
+        do {
+          const beforeHeight = Number(this.heartbeats.at(-1)?.height);
+          if (!Number.isFinite(beforeHeight) || beforeHeight <= 0) {
+            this.heartbeatPage.hasMore = false;
+            break;
+          }
+          const page = await this.getJson(`/api/heartbeats?limit=${this.heartbeatPage.limit}&before_height=${beforeHeight}`);
+          const known = new Set(this.heartbeats.map((block) => block.block_hash));
+          const older = page.filter((block) => !known.has(block.block_hash));
+          this.heartbeats.push(...older);
+          this.syncLedgerBlocks();
+          this.heartbeatPage.hasMore = page.length === this.heartbeatPage.limit
+            && Number(page.at(-1)?.height) > 0;
+          if (!page.length || !older.length) this.heartbeatPage.hasMore = false;
+        } while (chain === "ledger"
+          && this.ledgerBlocks.length === previousLedgerCount
+          && this.heartbeatPage.hasMore);
+      } catch (error) {
+        this.notify(error.message, "error");
+      } finally {
+        this.heartbeatPage.busy = false;
+      }
+    },
+
+    handleChainScroll(chain, event) {
+      const rail = event?.currentTarget;
+      if (!rail || rail.scrollLeft + rail.clientWidth < rail.scrollWidth - 180) return;
+      this.loadMoreHeartbeats(chain);
+    },
+
+    async ensureChainRailScrollable(chain) {
+      if (this.tab !== "chain" || this.chainView !== chain || this.heartbeatPage.busy || !this.heartbeatPage.hasMore) return;
+      const reference = chain === "ledger" ? "ledgerRail" : "heartbeatRail";
+      const rail = this.$refs?.[reference];
+      if (!rail || rail.clientWidth <= 0) return;
+      const needsInitialLedgerWindow = chain === "ledger" && this.ledgerBlocks.length < 20;
+      if (!needsInitialLedgerWindow && rail.scrollWidth > rail.clientWidth + 4) return;
+      const previousHeartbeatCount = this.heartbeats.length;
+      await this.loadMoreHeartbeats(chain);
+      if (this.heartbeats.length === previousHeartbeatCount) return;
+      this.$nextTick(() => this.ensureChainRailScrollable(chain));
+    },
+
+    minerLabel(publicKey) {
+      const key = String(publicKey || "").toLowerCase();
+      if (!/^[0-9a-f]{64}$/.test(key)) return "-";
+      const mine = key === String(this.status.wallet_public_key || "").toLowerCase();
+      return `${key.slice(-8)}${mine ? " (me)" : ""}`;
+    },
+
+    mempoolItems() {
+      return [
+        ...(this.mempool?.ledger_transactions || []).map((item) => ({
+          ...item,
+          kind: "Ledger transaction",
+          amount: item.total_output,
+        })),
+        ...(this.mempool?.mining_tickets || []).map((item) => ({
+          ...item,
+          kind: "Mining ticket",
+          amount: item.budget,
+        })),
+      ];
+    },
+
+    openTransactionModal(item, source = "Mempool") {
+      this.transactionModalTrigger = globalThis.document?.activeElement || null;
+      this.selectedTransaction = { item, source };
+      this.$nextTick(() => this.$refs.transactionModal?.focus());
+    },
+
+    // The strip only holds summaries; inputs, outputs and signatures load with the modal.
+    async openMempoolModal(item) {
+      this.openTransactionModal(item);
+      this.selectedTransaction = { ...this.selectedTransaction, loading: true };
+      const stillSelected = () => this.selectedTransaction?.item?.id === item.id;
+      try {
+        const detail = await this.getJson(`/api/mempool/${item.id}`);
+        if (stillSelected()) {
+          this.selectedTransaction = { ...this.selectedTransaction, item: { ...item, ...detail }, loading: false };
+        }
+      } catch (error) {
+        if (stillSelected()) {
+          this.selectedTransaction = {
+            ...this.selectedTransaction,
+            source: error.status === 404 ? "No longer in mempool" : "Mempool",
+            loading: false,
+            detailMissing: true,
+          };
+        }
+      }
+    },
+
+    // The label follows the loaded detail: `selectedBlock` can already point at a newer head.
+    selectedBlockSource() {
+      return `Heartbeat ${this.selectedBlockDetail?.height ?? this.selectedBlock?.height ?? "-"}`;
+    },
+
+    openHeartbeatTicketModal(ticket) {
+      this.openTransactionModal({
+        ...ticket,
+        kind: "Mining ticket",
+        amount: ticket.budget,
+      }, this.selectedBlockSource());
+    },
+
+    openBlockTransactionModal(transaction) {
+      this.openTransactionModal({
+        ...transaction,
+        kind: "Ledger transaction",
+        amount: transaction.total_output,
+      }, this.selectedBlockSource());
+    },
+
+    closeTransactionModal() {
+      this.selectedTransaction = null;
+      const trigger = this.transactionModalTrigger;
+      this.transactionModalTrigger = null;
+      this.$nextTick(() => trigger?.focus?.());
+    },
+
+    // The open modal shows a snapshot, so say when the item stopped being pending. The strip is a
+    // capped preview, so only the node can confirm that an item missing from it is gone.
+    async reconcileSelectedTransaction() {
+      const selected = this.selectedTransaction;
+      if (selected?.source !== "Mempool") return;
+      const { id, kind } = selected.item;
+      const inPreview = this.mempoolItems().some((item) => item.kind === kind && item.id === id);
+      if (inPreview && !selected.detailMissing) return;
+      const stillShown = () => this.selectedTransaction?.item?.id === id
+        && this.selectedTransaction?.source === "Mempool";
+      try {
+        const detail = await this.getJson(`/api/mempool/${id}`);
+        if (stillShown() && this.selectedTransaction.detailMissing) {
+          this.selectedTransaction = {
+            ...this.selectedTransaction,
+            item: { ...this.selectedTransaction.item, ...detail },
+            detailMissing: false,
+          };
+        }
+      } catch (error) {
+        if (error.status === 404 && stillShown()) {
+          this.selectedTransaction = { ...this.selectedTransaction, source: "No longer in mempool" };
+        }
+      }
+    },
+
+    trapTransactionModalFocus(event) {
+      const modal = this.$refs.transactionModal;
+      const focusable = [...(modal?.querySelectorAll('button:not([disabled]), a[href], [tabindex="0"]') || [])];
+      if (!focusable.length) {
+        event.preventDefault();
+        return;
+      }
+      const active = globalThis.document?.activeElement;
+      const first = focusable[0];
+      const last = focusable[focusable.length - 1];
+      if (event.shiftKey && (active === first || active === modal)) {
+        event.preventDefault();
+        last.focus();
+      } else if (!event.shiftKey && active === last) {
+        event.preventDefault();
+        first.focus();
+      }
+    },
+
+    transactionModalInputs() {
+      return this.selectedTransaction?.item?.inputs || [];
+    },
+
+    transactionModalOutputs() {
+      const item = this.selectedTransaction?.item;
+      if (!item) return [];
+      if (item.kind === "Ledger transaction") {
+        return [
+          ...(item.outputs || []).map((output, index) => ({
+            ...output,
+            label: `Output ${index + 1}`,
+            kind: "output",
+          })),
+          ...this.transactionFeeOutputs(item.fee_split),
+        ];
+      }
+      const slice = Math.floor(Number(item.budget) / Number(item.lifecycle_heartbeats));
+      return [
+        {
+          label: "Ticket budget",
+          kind: "ticket",
+          status: "locked",
+          note: `Paid to Heartbeat miners in ${item.lifecycle_heartbeats} slices of about IUNA ${this.amountLabel(slice)}, starting at the inclusion Heartbeat. Not a spendable output.`,
+          value: item.budget,
+        },
+        ...(item.change ? [{ ...item.change, label: "Change", kind: "change" }] : []),
+        ...(item.fee == null ? [] : [{
+          label: "Inclusion fee",
+          kind: "fee",
+          owner: item.fee_recipient,
+          note: item.fee_recipient ? "" : "Goes to the miner of the inclusion Heartbeat, known once mined.",
+          value: item.fee,
+        }]),
+      ];
+    },
+
+    transactionFeeOutputs(split) {
+      if (!split) return [];
+      const output = (label, share, recipient) => ({
+        label,
+        kind: "fee",
+        value: share.value,
+        owner: share.owner,
+        note: share.owner ? "" : `Goes to the ${recipient}, known once mined. Rounding across the block can move one unit.`,
+      });
+      return [
+        output("Heartbeat miner fee", split.heartbeat_miner, "Heartbeat miner"),
+        output("Ledger winner fee", split.ledger_winner, "Ledger winner"),
+      ].filter((fee) => fee.value > 0);
+    },
+
+    // Null when an amount is unknown, so the modal never presents a partial sum as a total.
+    transactionModalTotals() {
+      const sum = (items) => items.reduce(
+        (total, { value }) => (total == null || value == null ? null : total + Number(value)),
+        0,
+      );
+      const partial = this.selectedTransaction?.loading || this.selectedTransaction?.detailMissing;
+      const inputs = this.transactionModalInputs();
+      const totalIn = partial || !inputs.length ? null : sum(inputs);
+      const totalOut = partial ? null : sum(this.transactionModalOutputs());
+      return { in: totalIn, out: totalOut, balanced: totalIn != null && totalIn === totalOut };
+    },
+
+    difficultyLabel() {
+      return this.status.difficulty || "-";
+    },
+
+    // Share of loaded Heartbeats carrying a Ledger block; the target is 1 in 10, drawn at 50%.
+    ledgerShare() {
+      const rows = this.metricsRows.length ? this.metricsRows : this.heartbeats;
+      if (!rows.length) return 0;
+      const ledgerCount = rows.filter((block) => block.has_ledger_block).length;
+      return Math.min(100, (ledgerCount / rows.length) * 500);
+    },
+
+    ledgerShareLabel() {
+      const rows = this.metricsRows.length ? this.metricsRows : this.heartbeats;
+      if (!rows.length) return "-";
+      const ledgerCount = rows.filter((block) => block.has_ledger_block).length;
+      return `${((ledgerCount / rows.length) * 100).toFixed(1)}%`;
+    },
+
+    // good / warn / bad state for each dashboard card.
+    dashboardState(card) {
+      const status = this.status;
+      if (!status.network) return "warn";
+      if (card === "balance") return status.wallet_unlocked ? "good" : "warn";
+      if (card === "heartbeatMining") return status.heartbeat_mining_enabled ? "good" : "idle";
+      if (card === "ledgerMining") return status.ledger_mining_enabled ? "good" : "idle";
+      if (card === "p2p") return this.peers.length ? "good" : "warn";
+      if (card === "heartbeat") {
+        const tip = this.heartbeats[0];
+        if (!tip || Number(tip.height) === 0) return "warn";
+        const age = Date.now() / 1000 - Number(tip.timestamp);
+        return age > 600 ? "bad" : (age > 180 ? "warn" : "good");
+      }
+      return "good";
+    },
+
+    blockAgeLabel(block, emptyLabel = "No blocks") {
+      if (!block || Number(block.height) === 0) return emptyLabel;
+      const seconds = Math.max(0, Math.round(Date.now() / 1000 - Number(block.timestamp)));
+      if (seconds < 60) return `${seconds} s ago`;
+      if (seconds < 3600) return `${Math.floor(seconds / 60)} min ago`;
+      return `${Math.floor(seconds / 3600)} h ago`;
+    },
+
+    heartbeatAgeLabel() {
+      return this.blockAgeLabel(this.heartbeats[0], "No Heartbeats");
+    },
+
+    ledgerAgeLabel() {
+      return this.blockAgeLabel(this.ledgerBlocks[0], "No Ledger blocks");
+    },
+
+    metricsPath() {
+      return this.metricsRange === "all" ? "/api/metrics" : `/api/metrics?limit=${this.metricsRange}`;
+    },
+
+    async refreshMetrics(silent = false) {
+      const requestId = ++this.metricsRequestId;
+      const path = this.metricsPath();
+      this.metricsBusy = true;
+      try {
+        const rows = await this.getJson(path);
+        if (requestId === this.metricsRequestId) this.metricsRows = rows;
+      } catch (error) {
+        if (!silent && requestId === this.metricsRequestId) this.notify(error.message, "error");
+      } finally {
+        if (requestId === this.metricsRequestId) this.metricsBusy = false;
+      }
+    },
+
+    setMetricsRange(range) {
+      this.metricsRange = range === 1000 || range === "all" ? range : 100;
+      this.chartHover = null;
+      try { localStorage.setItem("iunaMetricsRange", String(this.metricsRange)); } catch {}
+      this.refreshMetrics();
+    },
+
+    metricsLatest() {
+      return this.metricsRows[0] || this.heartbeats[0] || {};
+    },
+
+    metricsCharts() {
+      return [
+        { kind: "interval", title: "Heartbeat interval" },
+        { kind: "difficulty", title: "Proof-of-work difficulty" },
+        { kind: "transactions", title: "Ledger transactions" },
+        { kind: "chainBytes", title: "Compact chain size" },
+        { kind: "heartbeatBytes", title: "Heartbeat size" },
+        { kind: "tickets", title: "Mining tickets" },
+        { kind: "ticketBudget", title: "Ticket budget" },
+        { kind: "supply", title: "Total IUNA supply" },
+        { kind: "utxos", title: "UTXO set size" },
+        { kind: "ledgerBlocks", title: "Cumulative Ledger blocks" },
+      ];
+    },
+
+    // Alpine evaluates chart expressions repeatedly while updating the DOM. Keep the expensive
+    // sort, BigInt difficulty conversion and SVG projection outside its reactive hot path.
+    chartCache() {
+      const source = this.metricsRows.length ? this.metricsRows : this.heartbeats;
+      const first = source[0];
+      const last = source[source.length - 1];
+      const powLimit = this.status.pow_limit || "";
+      const cached = iunaChartCaches.get(this);
+      if (cached
+          && cached.source === source
+          && cached.length === source.length
+          && cached.first === first
+          && cached.last === last
+          && cached.powLimit === powLimit) return cached;
+      const cache = {
+        source,
+        length: source.length,
+        first,
+        last,
+        powLimit,
+        blocks: source
+          .filter((block) => Number(block.height) > 0)
+          .slice()
+          .sort((a, b) => a.height - b.height),
+        series: {},
+        bounds: {},
+        polylines: {},
+        medianInterval: undefined,
+      };
+      iunaChartCaches.set(this, cache);
+      return cache;
+    },
+
+    // Chart series from the selected Metrics range, oldest first.
+    chartSeries(kind) {
+      const cache = this.chartCache();
+      if (cache.series[kind]) return cache.series[kind];
+      const blocks = cache.blocks;
+      let points = [];
+      if (kind === "interval") {
+        points = blocks
+          .map((block, index) => ({
+            x: block.height,
+            y: block.interval_seconds == null
+              ? (index ? Number(block.timestamp) - Number(blocks[index - 1].timestamp) : null)
+              : Number(block.interval_seconds),
+          }))
+          .filter((point) => point.y != null);
+      } else if (kind === "difficulty" && cache.powLimit) {
+        const limit = BigInt(`0x${cache.powLimit}`);
+        points = blocks.map((block) => {
+          const target = BigInt(`0x${block.target}`);
+          return { x: block.height, y: Number((limit * 1000n) / (target === 0n ? 1n : target)) / 1000 };
+        });
+      } else {
+        const fields = {
+          transactions: "ledger_transaction_count",
+          chainBytes: "chain_bytes",
+          heartbeatBytes: "heartbeat_bytes",
+          tickets: "active_tickets",
+          ticketBudget: "ticket_weight",
+          supply: "minted",
+          utxos: "utxos",
+          ledgerBlocks: "ledger_blocks",
+        };
+        const field = fields[kind];
+        if (field) points = blocks.map((block) => ({ x: block.height, y: Number(block[field] || 0) }));
+      }
+      cache.series[kind] = points;
+      return points;
+    },
+
+    chartBounds(kind) {
+      const cache = this.chartCache();
+      if (Object.prototype.hasOwnProperty.call(cache.bounds, kind)) return cache.bounds[kind];
+      const points = this.chartSeries(kind);
+      if (!points.length) {
+        cache.bounds[kind] = null;
+        return null;
+      }
+      let minimum = points[0].y;
+      let maximum = points[0].y;
+      for (const point of points) {
+        minimum = Math.min(minimum, point.y);
+        maximum = Math.max(maximum, point.y);
+      }
+      let low = kind === "interval" ? 0 : minimum;
+      // Intervals are drawn up to 10 minutes so one outage does not flatten the chart.
+      let high = kind === "interval" ? Math.min(600, Math.max(maximum, 120)) : Math.max(maximum, low);
+      if (high === low) { high += 1; low = Math.max(0, low - 1); }
+      const ticks = this.niceTicks(low, high, 5);
+      low = ticks[0] ?? low;
+      high = ticks[ticks.length - 1] ?? high;
+      cache.bounds[kind] = { minX: points[0].x, maxX: points[points.length - 1].x, low, high, ticks };
+      return cache.bounds[kind];
+    },
+
+    niceTicks(minValue, maxValue, maxTicks = 5) {
+      const min = Number(minValue);
+      const max = Number(maxValue);
+      if (!Number.isFinite(min) || !Number.isFinite(max)) return [];
+      const step = this.niceTickStep((max - min) / Math.max(1, maxTicks - 1));
+      const tickMin = Math.floor(min / step) * step;
+      const tickMax = Math.ceil(max / step) * step;
+      const precision = Math.max(0, Math.ceil(-Math.log10(step)) + 2);
+      const ticks = [];
+      for (let tick = tickMin; tick <= tickMax + step / 2; tick += step) {
+        ticks.push(Number(tick.toFixed(precision)));
+        if (ticks.length > 8) break;
+      }
+      return ticks;
+    },
+
+    niceTickStep(value) {
+      if (!Number.isFinite(value) || value <= 0) return 1;
+      const exponent = Math.floor(Math.log10(value));
+      const fraction = value / (10 ** exponent);
+      const niceFraction = fraction <= 1 ? 1 : fraction <= 2 ? 2 : fraction <= 5 ? 5 : 10;
+      return niceFraction * (10 ** exponent);
+    },
+
+    chartPoint(kind, point) {
+      const bounds = this.chartBounds(kind);
+      const spanX = Math.max(1, bounds.maxX - bounds.minX);
+      const x = 6 + ((point.x - bounds.minX) / spanX) * 288;
+      const value = Math.min(point.y, bounds.high);
+      const y = 132 - ((value - bounds.low) / (bounds.high - bounds.low)) * 122;
+      return { x, y };
+    },
+
+    chartPolyline(kind) {
+      const cache = this.chartCache();
+      if (Object.prototype.hasOwnProperty.call(cache.polylines, kind)) return cache.polylines[kind];
+      if (!this.chartBounds(kind)) return "";
+      const points = this.chartDisplaySeries(kind);
+      cache.polylines[kind] = points.map((point) => {
+        const { x, y } = this.chartPoint(kind, point);
+        return `${x.toFixed(1)},${y.toFixed(1)}`;
+      }).join(" ");
+      return cache.polylines[kind];
+    },
+
+    // More points than horizontal SVG pixels add memory and layout work without adding detail.
+    // Preserve both extremes per bucket so short spikes remain visible.
+    chartDisplaySeries(kind) {
+      const points = this.chartSeries(kind);
+      if (points.length <= IUNA_CHART_MAX_POINTS) return points;
+      const result = [points[0]];
+      const bucketCount = Math.floor((IUNA_CHART_MAX_POINTS - 2) / 2);
+      const bucketSize = Math.ceil((points.length - 2) / bucketCount);
+      for (let start = 1; start < points.length - 1; start += bucketSize) {
+        const bucket = points.slice(start, Math.min(points.length - 1, start + bucketSize));
+        let low = bucket[0];
+        let high = bucket[0];
+        for (const point of bucket) {
+          if (point.y < low.y) low = point;
+          if (point.y > high.y) high = point;
+        }
+        if (low.x <= high.x) result.push(low, ...(high === low ? [] : [high]));
+        else result.push(high, low);
+      }
+      result.push(points[points.length - 1]);
+      return result;
+    },
+
+    // Dashed reference line at the 60-second target for the interval chart.
+    chartTargetY(kind) {
+      const bounds = this.chartBounds(kind);
+      if (!bounds || kind !== "interval") return null;
+      return 132 - ((60 - bounds.low) / (bounds.high - bounds.low)) * 122;
+    },
+
+    chartTicks(kind) {
+      const bounds = this.chartBounds(kind);
+      if (!bounds) return [];
+      return bounds.ticks.slice().reverse();
+    },
+
+    chartTickStyle(kind, value) {
+      const bounds = this.chartBounds(kind);
+      if (!bounds) return "";
+      const y = 132 - ((value - bounds.low) / (bounds.high - bounds.low)) * 122;
+      return `top:${(y / 148) * 100}%`;
+    },
+
+    chartGridPath(kind) {
+      const bounds = this.chartBounds(kind);
+      if (!bounds) return "";
+      return bounds.ticks.map((tick) => {
+        const y = 132 - ((tick - bounds.low) / (bounds.high - bounds.low)) * 122;
+        return `M6 ${y.toFixed(1)}H294`;
+      }).join("");
+    },
+
+    chartValueLabel(kind, value) {
+      if (value == null) return "-";
+      if (kind === "interval") return `${Math.round(value)} s`;
+      if (kind === "difficulty") return `${value >= 100 ? Math.round(value) : value.toFixed(2)}×`;
+      if (["ticketBudget", "supply"].includes(kind)) return `IUNA ${this.amountLabel(Math.round(value))}`;
+      if (["chainBytes", "heartbeatBytes"].includes(kind)) return this.bytesLabel(value);
+      return Math.round(value).toLocaleString("en-US");
+    },
+
+    chartAxisValueLabel(kind, value) {
+      if (value == null) return "-";
+      if (kind === "interval") return `${this.compactNumber(value)}s`;
+      if (kind === "difficulty") return `${this.compactNumber(value)}×`;
+      if (["ticketBudget", "supply"].includes(kind)) return this.compactNumber(Number(value) / 100_000_000);
+      if (["chainBytes", "heartbeatBytes"].includes(kind)) return this.compactBytesLabel(value);
+      return this.compactNumber(value);
+    },
+
+    compactBytesLabel(value) {
+      const bytes = Math.max(0, Number(value) || 0);
+      const units = [[1024 ** 3, "GiB"], [1024 ** 2, "MiB"], [1024, "KiB"]];
+      const unit = units.find(([size]) => bytes >= size);
+      if (!unit) return `${Math.round(bytes)}B`;
+      const scaled = bytes / unit[0];
+      const digits = scaled < 10 ? 1 : 0;
+      return `${scaled.toFixed(digits).replace(/\.0$/, "")}${unit[1]}`;
+    },
+
+    compactNumber(value) {
+      const number = Number(value);
+      if (!Number.isFinite(number)) return "-";
+      const absolute = Math.abs(number);
+      const suffixes = [[1e12, "T"], [1e9, "B"], [1e6, "M"], [1e3, "k"]];
+      const compact = suffixes.find(([threshold]) => absolute >= threshold);
+      if (compact) {
+        const scaled = number / compact[0];
+        const digits = Math.abs(scaled) < 10 ? 1 : 0;
+        return `${scaled.toFixed(digits).replace(/\.0$/, "")}${compact[1]}`;
+      }
+      if (Number.isInteger(number)) return String(number);
+      return number.toFixed(2).replace(/0+$/, "").replace(/\.$/, "");
+    },
+
+    bytesLabel(value) {
+      const bytes = Math.max(0, Number(value) || 0);
+      if (bytes < 1024) return `${Math.round(bytes)} B`;
+      if (bytes < 1024 ** 2) return `${(bytes / 1024).toFixed(1)} KiB`;
+      if (bytes < 1024 ** 3) return `${(bytes / 1024 ** 2).toFixed(1)} MiB`;
+      return `${(bytes / 1024 ** 3).toFixed(2)} GiB`;
+    },
+
+    chartLatest(kind) {
+      const points = this.chartSeries(kind);
+      return points.length ? this.chartValueLabel(kind, points[points.length - 1].y) : "-";
+    },
+
+    hoverChart(kind, event) {
+      const points = this.chartSeries(kind);
+      if (!points.length) return;
+      const box = event.currentTarget.getBoundingClientRect();
+      const ratio = Math.min(1, Math.max(0, (event.clientX - box.left) / box.width));
+      const bounds = this.chartBounds(kind);
+      const height = bounds.minX + ratio * (bounds.maxX - bounds.minX);
+      const point = points.reduce((best, item) => (Math.abs(item.x - height) < Math.abs(best.x - height) ? item : best));
+      const position = this.chartPoint(kind, point);
+      this.chartHover = { kind, point, left: (position.x / 300) * 100, top: (position.y / 148) * 100 };
+    },
+
+    chartTooltip(kind) {
+      if (this.chartHover?.kind !== kind) return "";
+      return `#${this.chartHover.point.x} · ${this.chartValueLabel(kind, this.chartHover.point.y)}`;
+    },
+
+    activityItems() {
+      if (!this.activity) return [];
+      return [
+        ...this.activity.pending.map((item) => ({ ...item, pending: true })),
+        ...this.activity.confirmed.map((item) => ({ ...item, pending: false })),
+      ];
+    },
+
+    activityType(item) {
+      if (["sent", "received", "self"].includes(item?.kind)) return "transfers";
+      if (item?.kind === "ticket") return "tickets";
+      if (item?.kind === "heartbeat_reward") return "heartbeatRewards";
+      if (item?.kind === "ledger_reward") return "ledgerRewards";
+      return "transfers";
+    },
+
+    filteredActivityItems() {
+      return this.activityItems().filter((item) => this.activityFilters[this.activityType(item)] === true);
+    },
+
+    activityFiltersChanged() {
+      this.activityVisibleCount = 25;
+      this.$nextTick(() => this.loadMoreActivityIfNeeded());
+    },
+
+    visibleActivityItems() {
+      return this.filteredActivityItems().slice(0, this.activityVisibleCount);
+    },
+
+    activityHasMore() {
+      return this.activityVisibleCount < this.filteredActivityItems().length;
+    },
+
+    loadMoreActivity() {
+      if (this.activityHasMore()) this.activityVisibleCount += 25;
+    },
+
+    loadMoreActivityIfNeeded() {
+      const sentinel = this.$refs?.activitySentinel;
+      const scroller = sentinel?.closest(".activity-scroll");
+      if (sentinel && scroller && sentinel.offsetTop <= scroller.scrollTop + scroller.clientHeight + 160) {
+        this.loadMoreActivity();
+      }
+    },
+
+    observeActivitySentinel(element) {
+      this.activityObserver?.disconnect();
+      if (typeof IntersectionObserver === "undefined") {
+        this.activityVisibleCount = Number.MAX_SAFE_INTEGER;
+        return;
+      }
+      this.activityObserver = new IntersectionObserver((entries) => {
+        if (entries.some((entry) => entry.isIntersecting)) this.loadMoreActivity();
+      }, { root: element.closest(".activity-scroll"), rootMargin: "160px" });
+      this.activityObserver.observe(element);
+    },
+
+    activityLabel(item) {
+      return {
+        sent: "Sent",
+        received: "Received",
+        self: "To yourself",
+        ticket: "Mining ticket",
+        heartbeat_reward: "Heartbeat reward",
+        ledger_reward: "Ledger reward",
+      }[item.kind] || item.kind;
+    },
+
+    activityCode(item) {
+      return {
+        transfers: "TX",
+        tickets: "TI",
+        heartbeatRewards: "HR",
+        ledgerRewards: "LR",
+      }[this.activityType(item)] || "TX";
+    },
+
+    activitySign(item) {
+      return ["received", "self", "heartbeat_reward", "ledger_reward"].includes(item.kind) ? "+" : "−";
+    },
+
+    activityMetaLabel(item) {
+      if (item.pending) return "Waiting for confirmation";
+      const height = item.heartbeat_height == null ? "" : `Heartbeat #${item.heartbeat_height}`;
+      const time = item.timestamp == null ? "" : this.timeLabel(item.timestamp);
+      return [height, time].filter(Boolean).join(" · ") || "Confirmed";
+    },
+
+    async openUtxos() {
+      this.showUtxos = true;
+      if (this.activity || this.utxosBusy) return;
+      this.utxosBusy = true;
+      try {
+        this.activity = await this.getJson("/api/wallet/activity");
+      } catch (error) {
+        this.notify(error.message, "error");
+      } finally {
+        this.utxosBusy = false;
+      }
+    },
+
+    async copyValue(value, label = "Copied") {
+      if (!value) return;
+      try {
+        await this.copyText(value);
+        this.notify(label);
+      } catch (error) {
+        this.notify(error.message, "error");
+      }
+    },
+
+    useRecipient(address) {
+      this.transfer.recipient = address;
+      this.setTab("wallet");
+      this.notify("Recipient filled in");
+    },
+
+    async changePeer(action, address) {
+      if (!this.browserCanManage() || this.peerForm.busy) return;
+      this.peerForm.busy = true;
+      try {
+        this.peerTargets = await this.postJson("/api/peers", { action, address: address.trim() });
+        if (action === "add") this.peerForm.address = "";
+        this.notify(action === "add" ? `Connecting to ${address.trim()}` : `Removed ${address}`);
+      } catch (error) {
+        this.notify(error.message, "error");
+      } finally {
+        this.peerForm.busy = false;
+      }
+    },
+
+    peerTargetState(target) {
+      if (target.connected) return "Connected";
+      return target.last_attempt ? "Retrying" : "Waiting";
+    },
+
+    async changeWalletPassword() {
+      const form = this.passwordForm;
+      if (form.busy) return;
+      if ([...form.next].length < 10) {
+        this.notify("Use a new password of at least 10 characters", "error");
+        return;
+      }
+      if (form.next !== form.confirmation) {
+        this.notify("The new passwords do not match", "error");
+        return;
+      }
+      form.busy = true;
+      try {
+        await this.postJson("/api/wallet", { action: "change_password", password: form.current, new_password: form.next });
+        Object.assign(form, { current: "", next: "", confirmation: "" });
+        this.notify("Wallet password changed");
+      } catch (error) {
+        this.notify(error.message, "error");
+      } finally {
+        form.busy = false;
+      }
+    },
+
+    short(value) {
+      const text = String(value || "");
+      return text.length > 18 ? `${text.slice(0, 9)}…${text.slice(-7)}` : text || "-";
+    },
+
+    timeLabel(timestamp) {
+      const value = Number(timestamp);
+      if (!Number.isFinite(value)) return "-";
+      return new Date(value * 1000).toLocaleString();
     },
 
     lastUpdatedLabel() {
-      return this.lastUpdated ? `Updated ${this.lastUpdated.toLocaleTimeString()}` : "Loading";
+      return this.lastUpdated ? `Updated ${this.lastUpdated.toLocaleTimeString()}` : "Loading…";
+    },
+
+    async copyWalletAddress() {
+      const address = this.status.wallet_public_key;
+      if (!address) return;
+      try {
+        await this.copyText(address);
+        this.notify("Wallet public key copied");
+      } catch (error) {
+        this.notify(error.message, "error");
+      }
+    },
+
+    // navigator.clipboard only exists in secure contexts; plain-HTTP remote access falls back.
+    async copyText(text) {
+      if (navigator.clipboard?.writeText) return navigator.clipboard.writeText(text);
+      const field = Object.assign(document.createElement("textarea"), { value: text, readOnly: true });
+      document.body.append(field);
+      field.select();
+      const copied = document.execCommand("copy");
+      field.remove();
+      if (!copied) throw new Error("Copying is unavailable here; select the address manually");
+    },
+
+    notify(message, kind = "success") {
+      this.flash = { message, kind };
+      clearTimeout(this.flashTimer);
+      this.flashTimer = setTimeout(() => { this.flash = null; }, 4500);
     },
   };
 };

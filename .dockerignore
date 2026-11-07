@@ -16,11 +16,16 @@
 
 # Static website (Dockerfile).
 !www/**
-!downloads/**
 !wallet/**
-wallet/crypto-wasm/**
+!downloads/**
 !scripts/inject_cloudflare_analytics.py
 !src-tauri/icons/128x128@2x.png
 !src-tauri/icons/icon.ico
 !src-tauri/icons/icon.svg
 !nginx.conf
+
+# Never send host build caches, even when a negated source pattern above is
+# interpreted broadly by a Docker/BuildKit version.
+target/**
+src-tauri/target/**
+fuzz/target/**

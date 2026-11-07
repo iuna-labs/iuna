@@ -1,0 +1,11 @@
+# Automatically generated - DO NOT EDIT!
+
+[[permission]]
+identifier = "allow-desktop-operator-token"
+description = "Enables the desktop_operator_token command without any pre-configured scope."
+commands.allow = ["desktop_operator_token"]
+
+[[permission]]
+identifier = "deny-desktop-operator-token"
+description = "Denies the desktop_operator_token command without any pre-configured scope."
+commands.deny = ["desktop_operator_token"]

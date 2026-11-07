@@ -1,1945 +1,705 @@
 use std::{
-    collections::BTreeMap,
+    env,
     net::SocketAddr,
-    path::{Path, PathBuf},
+    path::PathBuf,
     sync::{
-        Arc,
-        atomic::{AtomicBool, Ordering},
+        Arc, RwLock,
+        atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering},
     },
-    time::{Duration, Instant},
+    time::{Duration, SystemTime, UNIX_EPOCH},
 };
 
 use anyhow::{Context, Result, bail};
+use getrandom::getrandom;
 use iuna::{
     adapters::{
-        chain_store::SqliteChainStore, config_store, http, p2p, stratum,
-        ui_data_store::SqliteUiDataStore, wallet_endpoint, wallet_store,
+        consensus_http::{
+            ConsensusHttpState, WalletState, operator_router, operator_token_hash,
+            public_wallet_router,
+        },
+        consensus_local_state::{self, MempoolSnapshot},
+        consensus_network::{
+            ConsensusNetwork, ConsensusRelay, PeerAddress, SharedConsensusNode, seed_added_peers,
+        },
+        consensus_store::ConsensusChainStore,
+        consensus_ui_store::ConsensusUiStore,
+        consensus_wallet_store,
     },
-    app::{
-        NodeCore, PeerBook, SharedNode, SharedPeerBook, StratumStatus, VdfSpeedSource,
-        debug_logging_enabled, now_ms, set_debug_logging, validate_network_genesis,
-    },
-    domain::{
-        Amount, ChainSnapshot, GenesisBurn, LaunchProfile, Ledger, MAX_VDF_ROUNDS, MICRO_IUNA,
-        VDF_TARGET_BLOCK_MS, VdfProgress, VdfProgressPhase,
-        run_vdf_cancellable_with_progress_and_memory_limit,
-    },
+    app::{consensus_node::Node, wallet_commands::TicketParameters},
+    consensus::{LEDGER_TARGET_INTERVAL_HEARTBEATS, minimum_ticket_budget, subsidy},
 };
-use secrecy::{ExposeSecret, SecretString};
-use tokio::sync::{Mutex, Semaphore, oneshot};
+use tokio::{net::TcpListener, sync::Mutex};
 
-mod cli;
-#[cfg(feature = "cli-updater")]
-mod updater;
-use cli::{
-    ChainMode, CliOptions, apply_cli_p2p_config_overrides, apply_cli_stratum_config_overrides,
-    apply_cli_wallet_endpoint_config_overrides, configured_p2p_announce_addr,
-    configured_p2p_bind_addr, configured_stratum_addr, configured_wallet_endpoint_addr,
-    initial_burn_fee, initial_burn_per_block, validate_wallet_for_mode,
-};
-#[cfg(test)]
-use cli::{default_data_dir, help_text};
+mod legacy_data;
 
-const GENESIS_BOOTSTRAP_BALANCE: Amount = MICRO_IUNA;
-const GENESIS_BOOTSTRAP_BURN_AMOUNT: Amount = MICRO_IUNA;
-const GENESIS_INITIAL_BURN_PER_BLOCK: Amount = config_store::DEFAULT_BURN_AMOUNT;
-const GENESIS_INITIAL_BURN_FEE: Amount = config_store::DEFAULT_BURN_FEE;
-const VDF_MEASUREMENT_INITIAL_ROUNDS: u64 = 1_000;
-const VDF_MEASUREMENT_MAX_ROUNDS: u64 = 10_000_000;
-const VDF_MEASUREMENT_MIN_ELAPSED: Duration = Duration::from_millis(150);
-const VDF_SPEED_BENCHMARK_MIN_ELAPSED: Duration = Duration::from_secs(2);
-const VDF_FAILURE_RETRY_DELAY: Duration = Duration::from_secs(5);
-const VDF_PROGRESS_LOG_INTERVAL: Duration = Duration::from_secs(10);
-const SYNC_CHAIN_CHECKPOINT_INTERVAL: Duration = Duration::from_secs(30);
-const AUTOMATIC_BURN_ENABLED_ENV: &str = "IUNA_AUTOMATIC_BURN_ENABLED";
-const POW_MINING_ENABLED_ENV: &str = "IUNA_POW_MINING_ENABLED";
-const POW_MINING_WORKERS_ENV: &str = "IUNA_POW_MINING_WORKERS";
-const LOCAL_TESTNET_ENV: &str = "IUNA_LOCAL_TESTNET";
-const SETUP_COMPLETE_ENV: &str = "IUNA_SETUP_COMPLETE";
-const WALLET_PASSWORD_ENV: &str = "IUNA_WALLET_PASSWORD";
-const WALLET_ENDPOINT_ENABLED_ENV: &str = "IUNA_WALLET_ENDPOINT_ENABLED";
-const WALLET_ENDPOINT_PORT_ENV: &str = "IUNA_WALLET_ENDPOINT_PORT";
+#[derive(Debug, Eq, PartialEq)]
+struct Options {
+    data_dir: PathBuf,
+    http_addr: SocketAddr,
+    wallet_endpoint_addr: Option<SocketAddr>,
+    p2p_addr: SocketAddr,
+    peers: Vec<PeerAddress>,
+    bootstrap_peers: Vec<PeerAddress>,
+}
+
+impl Default for Options {
+    fn default() -> Self {
+        Self {
+            data_dir: default_data_dir(),
+            http_addr: "127.0.0.1:8080"
+                .parse()
+                .expect("valid default HTTP address"),
+            wallet_endpoint_addr: None,
+            p2p_addr: "0.0.0.0:19733".parse().expect("valid default P2P address"),
+            peers: Vec::new(),
+            bootstrap_peers: Vec::new(),
+        }
+    }
+}
 
 #[tokio::main]
 async fn main() -> Result<()> {
-    #[cfg(feature = "cli-updater")]
-    if updater::handle_cli_command().await? {
-        return Ok(());
-    }
-    let Some(opts) = CliOptions::parse()? else {
+    let Some(options) = parse_options(env::args().skip(1))? else {
+        print_help();
         return Ok(());
     };
-    let startup_local_testnet = startup_bool_from_env(LOCAL_TESTNET_ENV)?.unwrap_or(false);
-    #[cfg(feature = "e2e")]
-    if !startup_local_testnet {
-        bail!("the e2e build requires {LOCAL_TESTNET_ENV}=true");
-    }
-    set_debug_logging(opts.debug);
-    let debug_logging = opts.debug;
-    let wallet_path = opts.wallet_path();
-    let config_path = opts.config_path();
-    let wallet_file_exists = wallet_path.exists();
-    validate_wallet_for_mode(&opts, &wallet_path, wallet_file_exists)?;
-    let chain_db_path = opts.chain_db_path();
-    let ui_data_db_path = ui_data_db_path(&chain_db_path);
-    let chain_store = SqliteChainStore::open(&chain_db_path)?;
-    let ui_data_store = SqliteUiDataStore::open(&ui_data_db_path)?;
-    let persisted_chain_exists = chain_store.contains_chain()?;
-    if opts.chain_mode == ChainMode::Genesis && persisted_chain_exists {
-        bail!(
-            "--genesis refuses to run because chain database already contains a blockchain at {}; start without --genesis to resume it",
-            chain_store.path().display()
+    std::fs::create_dir_all(&options.data_dir)
+        .with_context(|| format!("creating data directory {}", options.data_dir.display()))?;
+    for (source, backup) in legacy_data::archive(&options.data_dir)? {
+        eprintln!(
+            "legacy data: moved {} to {}",
+            source.display(),
+            backup.display()
         );
     }
-    let mut ui_config = config_store::load_or_create(&config_path)?;
-    let startup_wallet_password = startup_wallet_password_from_env()?;
-    let startup_automatic_burn_enabled = startup_bool_from_env(AUTOMATIC_BURN_ENABLED_ENV)?;
-    let startup_pow_mining_enabled = startup_bool_from_env(POW_MINING_ENABLED_ENV)?;
-    let startup_pow_mining_workers = startup_pow_mining_workers_from_env()?;
-    let startup_setup_complete = startup_bool_from_env(SETUP_COMPLETE_ENV)?;
-    let startup_wallet_endpoint_enabled = startup_bool_from_env(WALLET_ENDPOINT_ENABLED_ENV)?;
-    let startup_wallet_endpoint_port = startup_port_from_env(WALLET_ENDPOINT_PORT_ENV)?;
-    let wallet_endpoint_env_dirty = apply_startup_wallet_endpoint_config_overrides(
-        &mut ui_config,
-        startup_wallet_endpoint_enabled,
-        startup_wallet_endpoint_port,
-    );
-    let p2p_config_dirty = apply_cli_p2p_config_overrides(&opts, &mut ui_config);
-    let stratum_config_dirty = apply_cli_stratum_config_overrides(&opts, &mut ui_config);
-    let wallet_endpoint_cli_dirty =
-        apply_cli_wallet_endpoint_config_overrides(&opts, &mut ui_config);
-    let p2p_announce_addr = configured_p2p_announce_addr(&opts, &ui_config)?;
-    let configured_p2p_addr = configured_p2p_bind_addr(&opts, &ui_config);
-    let configured_stratum_addr = configured_stratum_addr(&opts, &ui_config);
-    let configured_wallet_endpoint_addr = configured_wallet_endpoint_addr(&opts, &ui_config);
-    if let Some(wallet_addr) = configured_wallet_endpoint_addr {
-        if !ui_config.p2p_accept_inbound {
-            bail!("wallet endpoint requires the node to be configured as Public");
+    let chain_store = ConsensusChainStore::open(options.data_dir.join("chain.sqlite3"))?;
+    let ui_store = ConsensusUiStore::open(options.data_dir.join("ui.sqlite3"))?;
+    let wallet_path = options.data_dir.join("wallet.json");
+    let node_instance_id = consensus_local_state::load_or_create_instance_id(&options.data_dir)?;
+    let wallet_password = env::var("IUNA_WALLET_PASSWORD").ok();
+    if wallet_password.as_deref() == Some("") {
+        bail!("IUNA_WALLET_PASSWORD must not be empty");
+    }
+    let wallet = match (wallet_path.exists(), wallet_password.as_deref()) {
+        (true, Some(password)) => match consensus_wallet_store::load(&wallet_path, password) {
+            Ok(wallet) => Some(Arc::new(wallet)),
+            Err(error) => {
+                eprintln!("wallet remains locked: {error}");
+                None
+            }
+        },
+        // Initial Setup must show and verify the recovery phrase for new wallets.
+        (false, Some(_)) => None,
+        (_, None) => None,
+    };
+    let wallet_public_key = match &wallet {
+        Some(wallet) => Some(wallet.public_key()),
+        None if wallet_path.exists() => Some(consensus_wallet_store::public_key(&wallet_path)?),
+        None => None,
+    };
+    let operator_token_hash = env::var("IUNA_OPERATOR_TOKEN")
+        .ok()
+        .map(|token| operator_token_hash(&token))
+        .transpose()?;
+    if operator_token_hash.is_some() && !options.http_addr.ip().is_loopback() {
+        bail!("management API requires a loopback --http address");
+    }
+    let insecure_operator_api = env::var("IUNA_INSECURE_OPERATOR_API").as_deref() == Ok("1");
+    let trusted_management = options.http_addr.ip().is_loopback() || insecure_operator_api;
+    if insecure_operator_api {
+        eprintln!("warning: unauthenticated operator API enabled for local development");
+    }
+    if let Some(wallet_addr) = options.wallet_endpoint_addr {
+        if wallet_addr.port() == options.http_addr.port() {
+            bail!("wallet endpoint port must differ from the operator HTTP port");
         }
-        if wallet_addr.port() == 0 {
-            bail!("wallet endpoint port must be between 1 and 65535");
-        }
-        if wallet_addr.port() == opts.http_addr.port() {
-            bail!("wallet endpoint port must differ from the management UI port");
-        }
-        if ui_config.p2p_accept_inbound && wallet_addr.port() == configured_p2p_addr.port() {
+        if wallet_addr.port() == options.p2p_addr.port() {
             bail!("wallet endpoint port must differ from the P2P listener port");
         }
-        if configured_stratum_addr.is_some_and(|addr| addr.port() == wallet_addr.port()) {
-            bail!("wallet endpoint port must differ from the Stratum listener port");
-        }
     }
-    let p2p_accept_inbound = ui_config.p2p_accept_inbound;
-    let advertised_p2p_addr = p2p_announce_addr.unwrap_or(configured_p2p_addr);
-    if opts.chain_mode == ChainMode::Genesis {
-        ui_config.setup_complete = false;
-        ui_config.mining_enabled = true;
-        ui_config.pow_mining_enabled = false;
-        ui_config.burn_per_block = GENESIS_INITIAL_BURN_PER_BLOCK;
-        ui_config.burn_fee = GENESIS_INITIAL_BURN_FEE;
-    }
-    let mining_config_dirty = apply_startup_mining_config_overrides(
-        &mut ui_config,
-        startup_automatic_burn_enabled,
-        startup_pow_mining_enabled,
-        startup_pow_mining_workers,
-    );
-    let setup_config_dirty = apply_startup_setup_config_override(
-        &opts,
-        persisted_chain_exists,
-        &mut ui_config,
-        startup_setup_complete,
-    )?;
-    let auth_config_dirty = apply_startup_wallet_password_config(
-        &config_path,
-        &mut ui_config,
-        startup_wallet_password
-            .as_ref()
-            .map(ExposeSecret::expose_secret),
-    )?;
-    let wallet_load = load_startup_wallet(
-        &wallet_path,
-        startup_wallet_password
-            .as_ref()
-            .map(ExposeSecret::expose_secret),
-    )?;
-    let wallet_address = wallet_load.address().to_string();
-    let ui_config_dirty = opts.chain_mode == ChainMode::Genesis
-        || p2p_config_dirty
-        || stratum_config_dirty
-        || wallet_endpoint_env_dirty
-        || wallet_endpoint_cli_dirty
-        || mining_config_dirty
-        || setup_config_dirty;
-    if ui_config_dirty || auth_config_dirty {
-        config_store::save(&config_path, &ui_config)?;
-    }
-    let bounded_startup_ready = if ui_config.keep_track_of_metrics {
-        false
-    } else if let Some((_, tip_hash)) = chain_store.tip()? {
-        ui_data_store.is_projected_to(&tip_hash)?
-    } else {
-        false
+    let node = Arc::new(Mutex::new(Node::open(chain_store)?));
+    let projected_tip = {
+        let node = node.lock().await;
+        ui_store.project(node.chain())?;
+        node.status().tip
     };
-    let initialized_ledger = initialize_ledger(
-        &opts,
-        &wallet_address,
-        &chain_store,
-        advertised_p2p_addr,
-        startup_local_testnet,
-        true,
-        bounded_startup_ready,
+    let mempool_path = consensus_local_state::mempool_path(&options.data_dir);
+    match consensus_local_state::load_mempool(&mempool_path) {
+        Ok(saved) if !saved.transactions.is_empty() || !saved.tickets.is_empty() => {
+            let total = saved.transactions.len() + saved.tickets.len();
+            let restored = node
+                .lock()
+                .await
+                .restore_mempool(saved.transactions, saved.tickets);
+            println!("mempool: restored {restored} of {total} saved entries");
+        }
+        Ok(_) => {}
+        Err(error) => eprintln!("saved mempool ignored: {error:#}"),
+    }
+
+    let peer_store = options.data_dir.join("peers.json");
+    seed_added_peers(&peer_store, &options.bootstrap_peers)?;
+    let network = ConsensusNetwork::start_with_peer_store(
+        Arc::clone(&node),
+        options.p2p_addr,
+        options.peers,
+        Some(peer_store),
     )
     .await?;
-    let migration_from = initialized_ledger.migration_from.clone();
-    let chain_requires_persistence = initialized_ledger.requires_persistence;
-    let migration_required = migration_from.is_some();
-    let ledger = initialized_ledger.ledger;
-    let has_chain = migration_from.is_none() && (opts.has_chain() || persisted_chain_exists);
-    let initial_burn_per_block = initial_burn_per_block(&opts, &ui_config);
-    let initial_burn_fee = initial_burn_fee(&opts, &ui_config);
-
-    let mut node_core = match wallet_load {
-        StartupWallet::Unlocked { wallet } => NodeCore::from_ledger_with_burn_fee_and_enabled(
-            wallet,
-            ledger,
-            ui_config.mining_enabled,
-            initial_burn_per_block,
-            initial_burn_fee,
+    let http_listener = TcpListener::bind(options.http_addr)
+        .await
+        .with_context(|| format!("binding operator HTTP listener on {}", options.http_addr))?;
+    let http_addr = http_listener.local_addr()?;
+    let wallet_listener = match options.wallet_endpoint_addr {
+        Some(addr) => Some(
+            TcpListener::bind(addr)
+                .await
+                .with_context(|| format!("binding public wallet listener on {addr}"))?,
         ),
-        StartupWallet::Locked { address } => NodeCore::from_locked_wallet_address(
-            address,
-            ledger,
-            ui_config.mining_enabled,
-            initial_burn_per_block,
-            initial_burn_fee,
-        ),
+        None => None,
     };
-    node_core.set_pow_mining_workers(ui_config.pow_mining_workers);
-    node_core.set_pow_mining_enabled(ui_config.pow_mining_enabled);
-    node_core.set_recovery_vdf_top_rank_percent(ui_config.recovery_vdf_top_rank_percent);
-    node_core.set_vdf_memory_mib(ui_config.vdf_memory_mib);
-    if let Some(from_network) = migration_from {
-        println!(
-            "network upgrade requires local chain reset: {from_network} -> {}",
-            iuna::app::NETWORK_ID
-        );
-        node_core.require_network_migration(from_network);
-    }
-    if !migration_required {
-        let restored = restore_pending_transactions_v2(&mut node_core, &chain_store)?;
-        if restored > 0 {
-            println!("restored {restored} pending transaction-v2 envelope(s)");
+    println!("IUNA mainnet-candidate node");
+    println!("operator API: http://{http_addr}/api/status");
+    println!(
+        "management API: {}",
+        if operator_token_hash.is_some() {
+            "enabled (operator token)"
+        } else if trusted_management {
+            "enabled for same-origin local browser requests (no token)"
+        } else {
+            "disabled"
         }
-    }
-    let node: SharedNode = Arc::new(Mutex::new(node_core));
-    let ui_config = Arc::new(Mutex::new(ui_config));
-    let mut peers = ui_config.lock().await.peers.clone();
-    peers.extend(opts.peers);
-    let peers: SharedPeerBook = Arc::new(Mutex::new(PeerBook::from_addresses(peers)));
-    let startup_ui_projection = if has_chain {
-        let initial_snapshot = { node.lock().await.chain_snapshot() };
-        let keep_metrics = ui_config.lock().await.keep_track_of_metrics;
-        if chain_requires_persistence {
-            persist_chain_snapshot(&chain_store, Arc::new(initial_snapshot.clone())).await?;
-        }
-        Some((initial_snapshot, keep_metrics))
-    } else if !migration_required {
-        clear_ui_data_store(&ui_data_store).await?;
-        None
-    } else {
-        None
-    };
-    let ui_data_ready = Arc::new(AtomicBool::new(startup_ui_projection.is_none()));
-    if has_chain && let Some((height, tip_hash)) = chain_store.tip()? {
-        let mut node = node.lock().await;
-        if node.chain_tip_hash() == tip_hash {
-            node.mark_chain_persisted(height, &tip_hash);
-        }
-    }
-
-    println!("iuna wallet: {}", node.lock().await.wallet_address());
-    if node.lock().await.wallet_is_locked() {
-        println!("wallet locked: unlock it in the management UI");
-    }
-    println!("wallet file: {}", wallet_path.display());
-    println!("config file: {}", config_path.display());
-    println!("chain database: {}", chain_store.path().display());
-    println!("UI data database: {}", ui_data_store.path().display());
-    println!("management UI: http://{}", opts.http_addr);
-    if p2p_accept_inbound {
-        println!("p2p listener: {configured_p2p_addr}");
-    } else {
-        println!("p2p listener: disabled (outbound-only)");
-    }
-    if let Some(addr) = configured_wallet_endpoint_addr {
-        println!("public wallet endpoint configured on separate listener: {addr}");
+    );
+    println!("P2P listener: {}", network.local_addr());
+    if let Some(listener) = &wallet_listener {
+        println!("public wallet endpoint: http://{}", listener.local_addr()?);
     } else {
         println!("public wallet endpoint: disabled");
     }
-    if p2p_accept_inbound && let Some(addr) = p2p_announce_addr {
-        println!("p2p announce address: {addr}");
-    }
-    println!(
-        "automatic finalization: VDF-driven, burning {} IUNA per block with {} IUNA per byte fee rate",
-        format_iuna(initial_burn_per_block),
-        format_iuna(initial_burn_fee)
-    );
 
-    let gossip = p2p::GossipNetwork::start(
-        Arc::clone(&node),
-        Arc::clone(&peers),
-        configured_p2p_addr,
-        p2p_announce_addr,
-        p2p_accept_inbound,
-    )
-    .await?;
-    gossip.set_chain_store(chain_store.clone()).await;
-    let mut stratum_status = StratumStatus {
-        enabled: false,
-        listen_addr: None,
-    };
-    if let Some(stratum_addr) = configured_stratum_addr {
-        let stratum =
-            stratum::StratumServer::start(Arc::clone(&node), gossip.clone(), stratum_addr).await?;
-        println!("stratum listener: {}", stratum.listen_addr());
-        stratum_status = StratumStatus {
-            enabled: true,
-            listen_addr: Some(stratum.listen_addr().to_string()),
-        };
-    }
-
-    let (management_started_tx, management_started_rx) = oneshot::channel();
-    let management_ui_data_ready = Arc::clone(&ui_data_ready);
-    let management = tokio::spawn(http::serve(
-        Arc::clone(&node),
-        Arc::clone(&peers),
-        gossip.clone(),
-        Arc::clone(&ui_config),
-        http::ServeOptions {
-            config_path: config_path.clone(),
-            chain_store: chain_store.clone(),
-            ui_data_store: ui_data_store.clone(),
-            wallet_path: wallet_path.clone(),
-            stratum: stratum_status.clone(),
-            wallet_endpoint_addr: configured_wallet_endpoint_addr,
-            addr: opts.http_addr,
-            ui_data_ready: management_ui_data_ready,
-            started: Some(management_started_tx),
-        },
-    ));
-    if management_started_rx.await.is_err() {
-        return management
-            .await
-            .context("management UI task failed before binding")?;
-    }
-
-    let startup_warmed_keep_metrics =
-        if let Some((initial_snapshot, keep_metrics)) = startup_ui_projection {
-            warm_ui_data_store(&ui_data_store, initial_snapshot, keep_metrics).await?;
-            ui_data_ready.store(true, Ordering::Release);
-            Some(keep_metrics)
-        } else {
-            None
-        };
-    if !ui_config.lock().await.keep_track_of_metrics {
-        node.lock().await.bound_resident_chain_history();
-    }
-
-    let persistence_node = Arc::clone(&node);
-    let persistence_store = chain_store.clone();
-    let persistence_ui_data_store = ui_data_store.clone();
-    let persistence_config = Arc::clone(&ui_config);
-    let persistence_gossip = gossip.clone();
-    let persistence_initial_tip = {
-        let node = node.lock().await;
-        if node.has_real_chain() {
-            Some(node.chain_tip_hash())
-        } else {
-            None
-        }
-    };
-    let configured_keep_metrics = ui_config.lock().await.keep_track_of_metrics;
-    let persistence_initial_keep_metrics =
-        initial_projected_metrics_mode(startup_warmed_keep_metrics, configured_keep_metrics);
-    tokio::spawn(async move {
-        run_chain_persistence(
-            persistence_node,
-            persistence_store,
-            persistence_ui_data_store,
-            persistence_config,
-            persistence_gossip,
-            persistence_initial_tip,
-            persistence_initial_keep_metrics,
-        )
-        .await;
-    });
-
-    let finalizer_node = Arc::clone(&node);
-    let finalizer_gossip = gossip.clone();
-    let finalizer_peers = Arc::clone(&peers);
-    let vdf_slot = Arc::new(VdfSlot::new());
-    let finalizer_vdf_slot = Arc::clone(&vdf_slot);
-    tokio::spawn(async move {
-        run_automatic_finalizer(
-            finalizer_node,
-            finalizer_peers,
-            finalizer_gossip,
-            finalizer_vdf_slot,
-            debug_logging,
-        )
-        .await;
-    });
-
-    let pow_miner_node = Arc::clone(&node);
-    let pow_miner_gossip = gossip.clone();
-    let pow_miner_peers = Arc::clone(&peers);
-    tokio::spawn(async move {
-        run_automatic_pow_miner(
-            pow_miner_node,
-            pow_miner_peers,
-            pow_miner_gossip,
-            debug_logging,
-        )
-        .await;
-    });
-
-    let sync_node = Arc::clone(&node);
-    let sync_gossip = gossip.clone();
-    tokio::spawn(async move {
-        run_peer_sync(sync_node, sync_gossip, debug_logging).await;
-    });
-
-    if !has_chain {
-        println!("setup mode: waiting to join or create a chain");
-    }
-
-    let wallet_endpoint_ui_data_store = ui_data_store.clone();
-    let wallet_endpoint_chain_store = chain_store.clone();
-    let management = async move { management.await.context("management UI task failed")? };
-    if let Some(addr) = configured_wallet_endpoint_addr {
-        tokio::try_join!(
-            management,
-            wallet_endpoint::serve(
-                node,
-                gossip,
-                wallet_endpoint_ui_data_store,
-                wallet_endpoint_chain_store,
-                addr
-            )
-        )?;
-        Ok(())
-    } else {
-        management.await
-    }
-}
-
-enum StartupWallet {
-    Unlocked { wallet: iuna::domain::Wallet },
-    Locked { address: String },
-}
-
-impl StartupWallet {
-    fn address(&self) -> &str {
-        match self {
-            Self::Unlocked { wallet, .. } => wallet.address(),
-            Self::Locked { address } => address,
-        }
-    }
-}
-
-fn load_startup_wallet(
-    wallet_path: &Path,
-    startup_wallet_password: Option<&str>,
-) -> Result<StartupWallet> {
-    if let Some(password) = startup_wallet_password {
-        let wallet = wallet_store::load_or_encrypt_with_password(wallet_path, password)?;
-        return Ok(StartupWallet::Unlocked { wallet });
-    }
-
-    match wallet_store::load_or_create(wallet_path) {
-        Ok(wallet) => Ok(StartupWallet::Unlocked { wallet }),
-        Err(error) => {
-            let Some(metadata) = wallet_store::metadata(wallet_path)? else {
-                return Err(error);
+    let projection_node = Arc::clone(&node);
+    let projection_store = ui_store.clone();
+    let projection = tokio::spawn(async move {
+        let mut projected_tip = projected_tip;
+        loop {
+            let prepared = {
+                let node = projection_node.lock().await;
+                let tip = node.status().tip;
+                (tip != projected_tip)
+                    .then(|| (tip, projection_store.prepare_projection(node.chain())))
             };
-            if metadata.encrypted {
-                Ok(StartupWallet::Locked {
-                    address: metadata.address,
-                })
-            } else {
-                Err(error)
-            }
-        }
-    }
-}
-
-fn startup_wallet_password_from_env() -> Result<Option<SecretString>> {
-    let Some(password) = std::env::var_os(WALLET_PASSWORD_ENV) else {
-        return Ok(None);
-    };
-    let password = password
-        .into_string()
-        .map_err(|_| anyhow::anyhow!("{WALLET_PASSWORD_ENV} must be valid UTF-8"))?;
-    http::validate_management_password(&password)
-        .with_context(|| format!("{WALLET_PASSWORD_ENV} is not a valid wallet password"))?;
-    Ok(Some(password.into()))
-}
-
-fn startup_bool_from_env(name: &str) -> Result<Option<bool>> {
-    let Some(value) = std::env::var_os(name) else {
-        return Ok(None);
-    };
-    let value = value
-        .into_string()
-        .map_err(|_| anyhow::anyhow!("{name} must be valid UTF-8"))?;
-    let normalized = value.trim().to_ascii_lowercase();
-    parse_startup_bool_env_value(name, &normalized).map(Some)
-}
-
-fn parse_startup_bool_env_value(name: &str, normalized: &str) -> Result<bool> {
-    match normalized {
-        "1" | "true" | "yes" | "on" => Ok(true),
-        "0" | "false" | "no" | "off" => Ok(false),
-        _ => bail!("{name} must be one of true, false, 1, 0, yes, no, on, or off"),
-    }
-}
-
-fn startup_pow_mining_workers_from_env() -> Result<Option<u8>> {
-    let Some(value) = std::env::var_os(POW_MINING_WORKERS_ENV) else {
-        return Ok(None);
-    };
-    let value = value
-        .into_string()
-        .map_err(|_| anyhow::anyhow!("{POW_MINING_WORKERS_ENV} must be valid UTF-8"))?;
-    parse_startup_pow_mining_workers_env_value(value.trim()).map(Some)
-}
-
-fn startup_port_from_env(name: &str) -> Result<Option<u16>> {
-    let Some(value) = std::env::var_os(name) else {
-        return Ok(None);
-    };
-    let value = value
-        .into_string()
-        .map_err(|_| anyhow::anyhow!("{name} must be valid UTF-8"))?;
-    let port = value
-        .trim()
-        .parse::<u16>()
-        .with_context(|| format!("{name} must be an integer between 1 and 65535"))?;
-    if port == 0 {
-        bail!("{name} must be between 1 and 65535");
-    }
-    Ok(Some(port))
-}
-
-fn apply_startup_wallet_endpoint_config_overrides(
-    ui_config: &mut config_store::UiConfig,
-    enabled: Option<bool>,
-    port: Option<u16>,
-) -> bool {
-    let mut dirty = false;
-    if let Some(enabled) = enabled {
-        dirty |= ui_config.wallet_endpoint_enabled != enabled;
-        ui_config.wallet_endpoint_enabled = enabled;
-    }
-    if let Some(port) = port {
-        dirty |= ui_config.wallet_endpoint_bind_port != port;
-        ui_config.wallet_endpoint_bind_port = port;
-    }
-    dirty
-}
-
-fn parse_startup_pow_mining_workers_env_value(value: &str) -> Result<u8> {
-    let workers = value
-        .parse::<u8>()
-        .with_context(|| format!("{POW_MINING_WORKERS_ENV} must be an integer"))?;
-    if !(1..=config_store::MAX_POW_MINING_WORKERS).contains(&workers) {
-        bail!(
-            "{POW_MINING_WORKERS_ENV} must be between 1 and {}",
-            config_store::MAX_POW_MINING_WORKERS
-        );
-    }
-    Ok(workers)
-}
-
-fn apply_startup_mining_config_overrides(
-    ui_config: &mut config_store::UiConfig,
-    automatic_burn_enabled: Option<bool>,
-    pow_mining_enabled: Option<bool>,
-    pow_mining_workers: Option<u8>,
-) -> bool {
-    let mut dirty = false;
-    if let Some(enabled) = automatic_burn_enabled
-        && ui_config.mining_enabled != enabled
-    {
-        ui_config.mining_enabled = enabled;
-        dirty = true;
-    }
-    if let Some(enabled) = pow_mining_enabled
-        && ui_config.pow_mining_enabled != enabled
-    {
-        ui_config.pow_mining_enabled = enabled;
-        dirty = true;
-    }
-    if let Some(workers) = pow_mining_workers
-        && ui_config.pow_mining_workers != workers
-    {
-        ui_config.pow_mining_workers = workers;
-        dirty = true;
-    }
-    dirty
-}
-
-fn apply_startup_setup_config_override(
-    opts: &CliOptions,
-    persisted_chain_exists: bool,
-    ui_config: &mut config_store::UiConfig,
-    setup_complete: Option<bool>,
-) -> Result<bool> {
-    let Some(setup_complete) = setup_complete else {
-        return Ok(false);
-    };
-    if setup_complete
-        && opts.chain_mode == ChainMode::Setup
-        && !persisted_chain_exists
-        && opts.join_peers.is_empty()
-    {
-        bail!(
-            "{SETUP_COMPLETE_ENV}=true requires --genesis, --join, or an existing chain database"
-        );
-    }
-    if ui_config.setup_complete == setup_complete {
-        return Ok(false);
-    }
-    ui_config.setup_complete = setup_complete;
-    Ok(true)
-}
-
-fn apply_startup_wallet_password_config(
-    config_path: &Path,
-    ui_config: &mut config_store::UiConfig,
-    password: Option<&str>,
-) -> Result<bool> {
-    let Some(password) = password else {
-        return Ok(false);
-    };
-    let Some(existing_hash) = ui_config.auth_password_hash.as_deref() else {
-        ui_config.auth_password_hash = Some(http::hash_management_password(password)?);
-        return Ok(true);
-    };
-    if !http::verify_management_password(password, existing_hash)? {
-        bail!(
-            "{WALLET_PASSWORD_ENV} does not match the configured management UI and wallet password in {}",
-            config_path.display()
-        );
-    }
-    Ok(false)
-}
-
-fn format_iuna(amount: Amount) -> String {
-    let whole = amount / MICRO_IUNA;
-    let fractional = amount % MICRO_IUNA;
-    if fractional == 0 {
-        whole.to_string()
-    } else {
-        let mut fractional = format!("{fractional:06}");
-        while fractional.ends_with('0') {
-            fractional.pop();
-        }
-        format!("{whole}.{fractional}")
-    }
-}
-
-fn ui_data_db_path(chain_db_path: &Path) -> PathBuf {
-    chain_db_path.with_file_name("ui_data.sqlite3")
-}
-
-async fn initialize_ledger(
-    opts: &CliOptions,
-    wallet_address: &str,
-    chain_store: &SqliteChainStore,
-    advertised_p2p_addr: SocketAddr,
-    local_testnet: bool,
-    enforce_pinned_genesis: bool,
-    prefer_bounded: bool,
-) -> Result<InitializedLedger> {
-    if prefer_bounded
-        && let Some(loaded) = chain_store.load_bounded_ledger(iuna::app::RESIDENT_CHAIN_BLOCKS)?
-    {
-        if opts.chain_mode == ChainMode::Genesis {
-            bail!(
-                "--genesis refuses to run because chain database already contains a blockchain at {}; start without --genesis to resume it",
-                chain_store.path().display()
-            );
-        }
-        let expected_profile = if local_testnet {
-            LaunchProfile::local_testnet()
-        } else {
-            LaunchProfile::default()
-        };
-        if loaded.ledger.launch_profile().profile_id != expected_profile.profile_id {
-            return Ok(InitializedLedger {
-                ledger: setup_ledger(local_testnet)?,
-                migration_from: Some(loaded.ledger.launch_profile().profile_id.clone()),
-                requires_persistence: false,
-                #[cfg(test)]
-                bounded_history: false,
-            });
-        }
-        if enforce_pinned_genesis {
-            validate_network_genesis(
-                &loaded.ledger.launch_profile().profile_id,
-                loaded.ledger.genesis_hash(),
-            )?;
-        }
-        let height = loaded.ledger.height();
-        match loaded.revalidation_from_height {
-            Some(from_height) => println!(
-                "validating local chain from height {from_height} for the current consensus ruleset..."
-            ),
-            None => println!(
-                "local chain is trusted under the current consensus ruleset; skipping historical validation"
-            ),
-        }
-        println!(
-            "resumed chain from {} at height {height} with bounded resident history",
-            chain_store.path().display()
-        );
-        return Ok(InitializedLedger {
-            ledger: loaded.ledger,
-            migration_from: None,
-            requires_persistence: loaded.revalidation_from_height.is_some(),
-            #[cfg(test)]
-            bounded_history: true,
-        });
-    }
-    if let Some(loaded) = chain_store.load_with_verification_status()? {
-        let snapshot = loaded.snapshot;
-        if opts.chain_mode == ChainMode::Genesis {
-            bail!(
-                "--genesis refuses to run because chain database already contains a blockchain at {}; start without --genesis to resume it",
-                chain_store.path().display()
-            );
-        }
-        let expected_profile = if local_testnet {
-            LaunchProfile::local_testnet()
-        } else {
-            LaunchProfile::default()
-        };
-        if snapshot.launch_profile.profile_id != expected_profile.profile_id {
-            return Ok(InitializedLedger {
-                ledger: setup_ledger(local_testnet)?,
-                migration_from: Some(snapshot.launch_profile.profile_id),
-                requires_persistence: false,
-                #[cfg(test)]
-                bounded_history: false,
-            });
-        }
-        if enforce_pinned_genesis {
-            let stored_genesis = snapshot
-                .blocks
-                .first()
-                .context("persisted chain is missing its genesis block")?;
-            validate_network_genesis(&snapshot.launch_profile.profile_id, &stored_genesis.hash)?;
-        }
-        let height = snapshot_height(&snapshot);
-        match loaded.revalidation_from_height {
-            Some(from_height) => println!(
-                "validating local chain from height {from_height} for the current consensus ruleset..."
-            ),
-            None => println!(
-                "local chain is trusted under the current consensus ruleset; skipping historical validation"
-            ),
-        }
-        let requires_persistence = loaded.revalidation_from_height.is_some();
-        let ledger = Ledger::from_persisted_snapshot_revalidating_from(
-            snapshot,
-            loaded.revalidation_from_height,
-        )
-        .with_context(|| {
-            format!(
-                "failed to load chain database {}",
-                chain_store.path().display()
-            )
-        })?;
-        println!(
-            "resumed chain from {} at height {height}",
-            chain_store.path().display()
-        );
-        Ok(InitializedLedger {
-            ledger,
-            migration_from: None,
-            requires_persistence,
-            #[cfg(test)]
-            bounded_history: false,
-        })
-    } else {
-        let ledger = match opts.chain_mode {
-            ChainMode::Setup => setup_ledger(local_testnet),
-            ChainMode::Genesis => start_genesis_ledger(wallet_address, local_testnet),
-            ChainMode::Join => {
-                let expected_profile = if local_testnet {
-                    LaunchProfile::local_testnet()
+            if let Some((tip, batch)) = prepared {
+                // Only the build needs the node; the commit waits for the disk.
+                let store = projection_store.clone();
+                let result = tokio::task::spawn_blocking(move || store.apply_projection(&batch?))
+                    .await
+                    .context("joining screen-data projection")
+                    .and_then(|result| result);
+                if let Err(error) = result {
+                    eprintln!("screen-data projection failed: {error:#}");
                 } else {
-                    LaunchProfile::default()
-                };
-                join_chain_ledger(
-                    &opts.join_peers,
-                    advertised_p2p_addr,
-                    &expected_profile.profile_id,
-                )
-                .await
+                    projected_tip = tip;
+                }
             }
-        }?;
-        Ok(InitializedLedger {
-            ledger,
-            migration_from: None,
-            requires_persistence: opts.has_chain(),
-            #[cfg(test)]
-            bounded_history: false,
-        })
-    }
-}
-
-#[derive(Debug)]
-struct InitializedLedger {
-    ledger: Ledger,
-    migration_from: Option<String>,
-    requires_persistence: bool,
-    #[cfg(test)]
-    bounded_history: bool,
-}
-
-fn restore_pending_transactions_v2(
-    node: &mut NodeCore,
-    chain_store: &SqliteChainStore,
-) -> Result<usize> {
-    let mut restored = 0_usize;
-    for (transaction_id, envelope) in chain_store.load_pending_transactions_v2()? {
-        match node.receive_gossiped_transaction_v2(envelope) {
-            Ok(()) => restored = restored.saturating_add(1),
-            Err(error) if debug_logging_enabled() => {
-                eprintln!("dropping stale pending transaction v2 {transaction_id}: {error:#}");
-            }
-            Err(_) => {}
+            tokio::time::sleep(Duration::from_millis(250)).await;
         }
-    }
-    chain_store.replace_pending_transactions_v2(&node.pending_transaction_v2_envelopes()?)?;
-    Ok(restored)
-}
+    });
 
-impl std::ops::Deref for InitializedLedger {
-    type Target = Ledger;
-
-    fn deref(&self) -> &Self::Target {
-        &self.ledger
-    }
-}
-
-impl std::ops::DerefMut for InitializedLedger {
-    fn deref_mut(&mut self) -> &mut Self::Target {
-        &mut self.ledger
-    }
-}
-
-fn snapshot_height(snapshot: &ChainSnapshot) -> u64 {
-    snapshot
-        .blocks
-        .last()
-        .map(|block| block.height)
-        .unwrap_or(0)
-}
-
-fn setup_ledger(local_testnet: bool) -> Result<Ledger> {
-    if local_testnet {
-        Ledger::new_with_genesis_burns_and_profile(
-            BTreeMap::new(),
-            Vec::new(),
-            1,
-            LaunchProfile::local_testnet(),
-        )
-        .context("failed to construct local-testnet setup ledger")
-    } else {
-        Ok(Ledger::new(BTreeMap::new(), 1))
-    }
-}
-
-fn start_genesis_ledger(wallet_address: &str, local_testnet: bool) -> Result<Ledger> {
-    if !local_testnet {
-        bail!(
-            "mainnet-candidate genesis is pinned; use --join instead of creating a new candidate chain"
-        );
-    }
-    let vdf_rounds = measure_initial_vdf_rounds()?;
-    let mut genesis = BTreeMap::new();
-    genesis.insert(wallet_address.to_string(), GENESIS_BOOTSTRAP_BALANCE);
-    let launch_profile = if local_testnet {
-        LaunchProfile::local_testnet()
-    } else {
-        LaunchProfile::default()
+    let relay = network.relay();
+    let peers = network.peer_registry();
+    let wallet_state = Arc::new(RwLock::new(WalletState {
+        path: wallet_path,
+        unlocked: wallet,
+        public_key: wallet_public_key,
+    }));
+    // Resume mining after a restart when the operator left it on and the wallet is unlocked.
+    let preference = consensus_local_state::load_mining(&consensus_local_state::mining_path(
+        &wallet_state
+            .read()
+            .expect("wallet state lock poisoned")
+            .path,
+    ))
+    .unwrap_or_else(|error| {
+        eprintln!("saved mining preference ignored: {error:#}");
+        None
+    });
+    let wallet_unlocked = wallet_state
+        .read()
+        .expect("wallet state lock poisoned")
+        .unlocked
+        .is_some();
+    let heartbeat_mining = Arc::new(AtomicBool::new(
+        preference.is_some_and(|preference| preference.enabled) && wallet_unlocked,
+    ));
+    let heartbeat_mining_workers = Arc::new(AtomicUsize::new(
+        preference.map_or(1, |preference| preference.workers.clamp(1, 256)),
+    ));
+    let ledger_mining = Arc::new(AtomicBool::new(
+        preference.is_some_and(|preference| preference.ledger_enabled) && wallet_unlocked,
+    ));
+    let ledger_last_ticket_height = Arc::new(AtomicU64::new(
+        preference
+            .and_then(|preference| preference.last_ledger_ticket_height)
+            .and_then(|height| height.checked_add(1))
+            .unwrap_or(0),
+    ));
+    let persistence = tokio::spawn(persist_mempool(Arc::clone(&node), mempool_path.clone()));
+    let mining = tokio::spawn(run_heartbeat_miner(
+        Arc::clone(&node),
+        Arc::clone(&wallet_state),
+        Arc::clone(&heartbeat_mining),
+        Arc::clone(&heartbeat_mining_workers),
+        relay.clone(),
+    ));
+    let ledger_mining_task = tokio::spawn(run_ledger_miner(
+        Arc::clone(&node),
+        Arc::clone(&wallet_state),
+        Arc::clone(&heartbeat_mining),
+        Arc::clone(&heartbeat_mining_workers),
+        Arc::clone(&ledger_mining),
+        Arc::clone(&ledger_last_ticket_height),
+        relay.clone(),
+    ));
+    let http_state = ConsensusHttpState {
+        node_instance_id,
+        node: Arc::clone(&node),
+        ui_store,
+        wallet: wallet_state,
+        operator_token_hash,
+        trusted_management,
+        relay: Some(relay),
+        peers,
+        heartbeat_mining,
+        heartbeat_mining_workers,
+        ledger_mining,
+        ledger_last_ticket_height,
     };
-    let ledger = Ledger::new_with_genesis_burns_and_profile(
-        genesis,
-        vec![GenesisBurn::new(
-            wallet_address,
-            GENESIS_BOOTSTRAP_BURN_AMOUNT,
-        )],
-        vdf_rounds,
-        launch_profile,
-    )?;
-    validate_network_genesis(&ledger.launch_profile().profile_id, ledger.genesis_hash())?;
-    Ok(ledger)
+    let application = operator_router(http_state.clone(), options.http_addr);
+    let server = axum::serve(http_listener, application).with_graceful_shutdown(async {
+        let _ = tokio::signal::ctrl_c().await;
+    });
+    let wallet_server = async move {
+        match wallet_listener {
+            Some(listener) => axum::serve(listener, public_wallet_router(http_state))
+                .await
+                .context("serving public wallet API"),
+            None => std::future::pending::<Result<()>>().await,
+        }
+    };
+    let result = tokio::select! {
+        result = server => result.context("serving operator API"),
+        result = wallet_server => result,
+    };
+    projection.abort();
+    let _ = projection.await;
+    mining.abort();
+    let _ = mining.await;
+    ledger_mining_task.abort();
+    let _ = ledger_mining_task.await;
+    persistence.abort();
+    let _ = persistence.await;
+    if let Err(error) = save_mempool(&node, &mempool_path).await {
+        eprintln!("saving mempool on shutdown failed: {error:#}");
+    }
+    network.shutdown().await;
+    result
 }
 
-fn measure_initial_vdf_rounds() -> Result<u64> {
-    let seed = "iuna-vdf-calibration";
-    let (measured_rounds, elapsed) = measure_vdf_rounds(
-        seed,
-        VDF_MEASUREMENT_INITIAL_ROUNDS,
-        VDF_MEASUREMENT_MIN_ELAPSED,
-        VDF_MEASUREMENT_MAX_ROUNDS,
-    )?;
-    let rounds = extrapolate_vdf_rounds(
-        measured_rounds,
-        elapsed,
-        Duration::from_millis(VDF_TARGET_BLOCK_MS),
-    );
-    println!(
-        "measured {measured_rounds} VDF rounds in {:.3}ms; initial VDF rounds: {rounds}",
-        elapsed.as_secs_f64() * 1000.0
-    );
-    Ok(rounds)
-}
-
-fn measure_vdf_rounds(
-    seed: &str,
-    initial_rounds: u64,
-    min_elapsed: Duration,
-    max_rounds_per_attempt: u64,
-) -> Result<(u64, Duration)> {
-    measure_vdf_rounds_with_memory_limit(
-        seed,
-        initial_rounds,
-        min_elapsed,
-        max_rounds_per_attempt,
-        config_store::DEFAULT_VDF_MEMORY_MIB,
-        &AtomicBool::new(false),
-    )?
-    .context("uncancelled VDF measurement stopped without a result")
-}
-
-/// Returns `None` when `cancelled` is raised before the measurement completes.
-fn measure_vdf_rounds_with_memory_limit(
-    seed: &str,
-    initial_rounds: u64,
-    min_elapsed: Duration,
-    max_rounds_per_attempt: u64,
-    memory_mib: u64,
-    cancelled: &AtomicBool,
-) -> Result<Option<(u64, Duration)>> {
-    let mut rounds = initial_rounds.max(1).min(max_rounds_per_attempt.max(1));
-    let mut measured_rounds = 0_u64;
-    let mut measured_elapsed = Duration::ZERO;
-
+/// Writes the mempool to disk whenever it changed, at most every few seconds, so pending
+/// transactions and tickets survive a restart.
+async fn persist_mempool(node: SharedConsensusNode, path: PathBuf) {
+    let mut saved_generation = None;
     loop {
-        let started = Instant::now();
-        if run_vdf_cancellable_with_progress_and_memory_limit(
-            seed,
-            rounds,
-            Duration::MAX,
-            cancelled,
-            memory_mib,
-            |_| {},
-        )?
-        .is_none()
-        {
-            return Ok(None);
+        tokio::time::sleep(Duration::from_secs(5)).await;
+        let generation = node.lock().await.mempool_generation();
+        if saved_generation == Some(generation) {
+            continue;
         }
-        measured_elapsed += started.elapsed();
-        measured_rounds = measured_rounds.saturating_add(rounds);
-
-        if measured_elapsed >= min_elapsed || rounds >= max_rounds_per_attempt {
-            return Ok(Some((measured_rounds, measured_elapsed)));
-        }
-        rounds = rounds.saturating_mul(2).min(max_rounds_per_attempt);
-    }
-}
-
-/// One VDF runs at a time to bound memory. The finalizer has priority: a pending finalization
-/// stops the UI speed benchmark instead of waiting behind it.
-struct VdfSlot {
-    permit: Arc<Semaphore>,
-    benchmark_cancelled: AtomicBool,
-}
-
-impl VdfSlot {
-    fn new() -> Self {
-        Self {
-            permit: Arc::new(Semaphore::new(1)),
-            benchmark_cancelled: AtomicBool::new(false),
+        match save_mempool(&node, &path).await {
+            Ok(()) => saved_generation = Some(generation),
+            Err(error) => eprintln!("saving mempool failed: {error:#}"),
         }
     }
 }
 
-fn extrapolate_vdf_rounds(measured_rounds: u64, elapsed: Duration, target: Duration) -> u64 {
-    let elapsed_ns = elapsed.as_nanos().max(1);
-    let target_ns = target.as_nanos().max(1);
-    let rounds = u128::from(measured_rounds)
-        .saturating_mul(target_ns)
-        .saturating_div(elapsed_ns)
-        .max(1);
-    rounds.min(u128::from(MAX_VDF_ROUNDS)) as u64
-}
-
-async fn join_chain_ledger(
-    join_peers: &[String],
-    advertised_addr: SocketAddr,
-    expected_profile_id: &str,
-) -> Result<Ledger> {
-    let mut errors = Vec::new();
-    for peer in join_peers {
-        match p2p::fetch_snapshot_with_announcement(
-            peer,
-            Some(advertised_addr),
-            expected_profile_id,
-        )
+async fn save_mempool(node: &SharedConsensusNode, path: &std::path::Path) -> Result<()> {
+    let snapshot = {
+        let node = node.lock().await;
+        MempoolSnapshot {
+            transactions: node.pending_transactions(),
+            tickets: node.pending_tickets(),
+        }
+    };
+    let path = path.to_owned();
+    tokio::task::spawn_blocking(move || consensus_local_state::save_mempool(&path, &snapshot))
         .await
-        {
-            Ok(snapshot) => {
-                let height = snapshot
-                    .blocks
-                    .last()
-                    .map(|block| block.height)
-                    .unwrap_or(0);
-                println!("joined chain from {peer} at height {height}");
-                return p2p::validate_chain_snapshot(snapshot).await;
+        .context("mempool save task failed")?
+}
+
+/// Rebuild the work template this often so its timestamp and Ledger contents stay current.
+const MINING_TEMPLATE_REFRESH: Duration = Duration::from_secs(10);
+
+/// Stops the blocking nonce search when the miner task is aborted, e.g. on shutdown.
+struct StopOnDrop(Arc<AtomicBool>);
+
+impl Drop for StopOnDrop {
+    fn drop(&mut self) {
+        self.0.store(true, Ordering::Relaxed);
+    }
+}
+
+async fn run_heartbeat_miner(
+    node: SharedConsensusNode,
+    wallet: Arc<RwLock<WalletState>>,
+    enabled: Arc<AtomicBool>,
+    workers: Arc<AtomicUsize>,
+    relay: ConsensusRelay,
+) {
+    loop {
+        if !enabled.load(Ordering::Relaxed) {
+            tokio::time::sleep(Duration::from_millis(500)).await;
+            continue;
+        }
+        let Some(wallet) = wallet
+            .read()
+            .expect("wallet state lock poisoned")
+            .unlocked
+            .clone()
+        else {
+            enabled.store(false, Ordering::Relaxed);
+            continue;
+        };
+        // Heartbeat pacing comes only from proof of work and the ASERT target; the miner never
+        // waits for the 60-second interval itself.
+        let (parent_tip, prepared, timestamp) = {
+            let node = node.lock().await;
+            let prepared = node
+                .prepare_next()
+                .and_then(|prepared| Ok((prepared.timestamp(unix_time_secs())?, prepared)));
+            match prepared {
+                Ok((timestamp, prepared)) => (node.status().tip, prepared, timestamp),
+                Err(error) => {
+                    eprintln!("preparing Heartbeat mining work failed: {error:#}");
+                    drop(node);
+                    tokio::time::sleep(Duration::from_secs(1)).await;
+                    continue;
+                }
+            }
+        };
+        let public_key = wallet.public_key();
+        let worker_count = workers.load(Ordering::Relaxed);
+        let stop = Arc::new(AtomicBool::new(false));
+        let search_stop = Arc::clone(&stop);
+        let _stop_on_drop = StopOnDrop(Arc::clone(&stop));
+        let mut search = tokio::task::spawn_blocking(move || {
+            prepared.mine_until(timestamp, public_key, worker_count, &search_stop)
+        });
+        let refresh_at = tokio::time::Instant::now() + MINING_TEMPLATE_REFRESH;
+        let mined = loop {
+            tokio::select! {
+                result = &mut search => break result,
+                _ = tokio::time::sleep(Duration::from_millis(250)) => {
+                    let stale = !enabled.load(Ordering::Relaxed)
+                        || tokio::time::Instant::now() >= refresh_at
+                        || node.lock().await.status().tip != parent_tip;
+                    if stale {
+                        stop.store(true, Ordering::Relaxed);
+                    }
+                }
+            }
+        };
+        let block = match mined {
+            Ok(Ok(Some(block))) => block,
+            Ok(Ok(None)) => continue,
+            Ok(Err(error)) => {
+                eprintln!("Heartbeat proof-of-work search failed: {error:#}");
+                tokio::time::sleep(Duration::from_secs(1)).await;
+                continue;
             }
             Err(error) => {
-                errors.push(format!("{peer}: {error:#}"));
-            }
-        }
-    }
-
-    bail!(
-        "could not join any requested peer; refusing to start a separate chain: {}",
-        errors.join("; ")
-    )
-}
-
-/// Gives the UI a local VDF speed estimate before this node has finalized a block.
-async fn record_vdf_speed_benchmark(node: SharedNode, vdf_slot: Arc<VdfSlot>, debug: bool) {
-    let Ok(_permit) = Arc::clone(&vdf_slot.permit).acquire_owned().await else {
-        return;
-    };
-    if vdf_slot.benchmark_cancelled.load(Ordering::Relaxed) {
-        return;
-    }
-    let memory_mib = node.lock().await.vdf_memory_mib();
-    let worker_slot = Arc::clone(&vdf_slot);
-    let measurement = tokio::task::spawn_blocking(move || {
-        measure_vdf_rounds_with_memory_limit(
-            "iuna-vdf-speed-benchmark",
-            VDF_MEASUREMENT_INITIAL_ROUNDS,
-            VDF_SPEED_BENCHMARK_MIN_ELAPSED,
-            VDF_MEASUREMENT_MAX_ROUNDS,
-            memory_mib,
-            &worker_slot.benchmark_cancelled,
-        )
-    })
-    .await
-    .map_err(anyhow::Error::from)
-    .and_then(|measurement| measurement);
-    match measurement {
-        Ok(None) => {
-            if debug {
-                println!("VDF speed benchmark yielded to a pending finalization");
-            }
-        }
-        Ok(Some((rounds, elapsed))) => {
-            if debug {
-                println!(
-                    "VDF speed benchmark: {rounds} rounds in {:.3}s",
-                    elapsed.as_secs_f64()
-                );
-            }
-            node.lock()
-                .await
-                .record_vdf_speed_sample(rounds, elapsed, VdfSpeedSource::Benchmark);
-        }
-        Err(error) => {
-            if debug {
-                eprintln!("VDF speed benchmark failed: {error:#}");
-            }
-        }
-    }
-}
-
-async fn run_automatic_finalizer(
-    node: SharedNode,
-    peers: SharedPeerBook,
-    gossip: p2p::GossipNetwork,
-    vdf_slot: Arc<VdfSlot>,
-    debug: bool,
-) {
-    // The benchmark only feeds the UI, so it must not delay a pending finalization VDF.
-    tokio::spawn(record_vdf_speed_benchmark(
-        node.clone(),
-        Arc::clone(&vdf_slot),
-        debug,
-    ));
-    let mut last_logged_skip: Option<(u64, String)> = None;
-    loop {
-        if !node.lock().await.has_real_chain() {
-            tokio::time::sleep(std::time::Duration::from_secs(1)).await;
-            continue;
-        }
-        if !has_good_peer_for_chain(&node, &peers).await {
-            {
-                let mut node = node.lock().await;
-                if node.automatic_mining_enabled() {
-                    node.record_automatic_finalization_status(
-                        "waiting for a good peer connection before mining".to_string(),
-                    );
-                }
-            }
-            tokio::time::sleep(std::time::Duration::from_secs(1)).await;
-            continue;
-        }
-        let (height, plan, outbox, vdf_memory_mib) = {
-            let mut node = node.lock().await;
-            let height = node.chain_height();
-            let plan = node.prepare_automatic_finalization(now_ms());
-            let outbox = node.drain_outbox();
-            let vdf_memory_mib = node.vdf_memory_mib();
-            (height, plan, outbox, vdf_memory_mib)
-        };
-
-        if let Err(error) = gossip.broadcast(outbox).await
-            && debug
-        {
-            eprintln!("p2p broadcast failed after automatic burn: {error:#}");
-        }
-
-        let Some(work) = plan.work else {
-            if let Some(reason) = &plan.skipped_reason
-                && debug
-                && should_log_automatic_finalization_skip(&mut last_logged_skip, height, reason)
-            {
-                println!("auto-finalization skipped at height {height}: {reason}");
-            }
-            tokio::time::sleep(std::time::Duration::from_secs(1)).await;
-            continue;
-        };
-
-        let candidate_height = work.height();
-        let candidate_parent = work.prev_hash().to_string();
-        let seed = work.vdf_seed().to_string();
-        let rounds = work.vdf_rounds();
-        let publish_at_ms = work.timestamp_ms();
-        let precheck_at_ms = automatic_finalization_precheck_time(now_ms(), publish_at_ms);
-        let precheck = {
-            let node = node.lock().await;
-            node.precheck_prepared_block_without_vdf_at(&work, precheck_at_ms)
-        };
-        if let Err(error) = precheck {
-            let message = format!("skipped before VDF: {error:#}");
-            if debug
-                && should_log_automatic_finalization_skip(&mut last_logged_skip, height, &message)
-            {
-                println!("auto-finalization {message}");
-            }
-            node.lock()
-                .await
-                .record_automatic_finalization_status(message);
-            tokio::time::sleep(std::time::Duration::from_secs(1)).await;
-            continue;
-        }
-        last_logged_skip = None;
-        if debug {
-            println!(
-                "leader selected locally for candidate block {}; running VDF for {} rounds",
-                work.height(),
-                work.vdf_rounds()
-            );
-        }
-        let (progress_tx, progress_rx) = std::sync::mpsc::channel();
-        let cancellation = Arc::new(AtomicBool::new(false));
-        let worker_cancellation = Arc::clone(&cancellation);
-        let vdf_started = Instant::now();
-        vdf_slot.benchmark_cancelled.store(true, Ordering::Relaxed);
-        let Ok(_vdf_permit) = Arc::clone(&vdf_slot.permit).acquire_owned().await else {
-            return;
-        };
-        if node.lock().await.ledger().tip_hash() != candidate_parent {
-            // The tip moved while waiting for the slot; prepare a fresh candidate.
-            continue;
-        }
-        let mut vdf_worker = tokio::task::spawn_blocking(move || {
-            run_vdf_cancellable_with_progress_and_memory_limit(
-                &seed,
-                rounds,
-                VDF_PROGRESS_LOG_INTERVAL,
-                worker_cancellation.as_ref(),
-                vdf_memory_mib,
-                |progress| {
-                    let _ = progress_tx.send(progress);
-                },
-            )
-        });
-        let mut vdf_failure = None::<String>;
-        let mut cancelled_for_new_tip = false;
-        let mut cancelled_for_disabled = false;
-        let mut cancelled_for_no_peer = false;
-        let vdf_output = loop {
-            tokio::select! {
-                result = &mut vdf_worker => {
-                    break match result {
-                        Ok(Ok(output)) => output,
-                        Ok(Err(error)) => {
-                            vdf_failure = Some(format!("{error:#}"));
-                            None
-                        }
-                        Err(error) => {
-                            vdf_failure = Some(format!("{error:#}"));
-                            None
-                        }
-                    };
-                }
-                _ = tokio::time::sleep(std::time::Duration::from_millis(500)) => {
-                    while let Ok(progress) = progress_rx.try_recv() {
-                        let message = format_vdf_progress(candidate_height, progress);
-                        if debug {
-                            println!("{message}");
-                        }
-                        node.lock().await.record_automatic_finalization_status(message);
-                    }
-                    let peer_connected = peers.lock().await.has_good_connection_for_chain_at(
-                        candidate_height.saturating_sub(1),
-                        &candidate_parent,
-                        now_ms(),
-                    );
-                    let (tip_changed, finalization_disabled) = {
-                        let node = node.lock().await;
-                        (
-                            node.ledger().tip_hash() != candidate_parent,
-                            !node.automatic_mining_enabled(),
-                        )
-                    };
-                    if tip_changed {
-                        cancelled_for_new_tip = true;
-                        cancellation.store(true, Ordering::Relaxed);
-                    } else if finalization_disabled {
-                        cancelled_for_disabled = true;
-                        cancellation.store(true, Ordering::Relaxed);
-                    } else if !peer_connected {
-                        cancelled_for_no_peer = true;
-                        cancellation.store(true, Ordering::Relaxed);
-                    }
-                }
-            }
-        };
-        while let Ok(progress) = progress_rx.try_recv() {
-            let message = format_vdf_progress(candidate_height, progress);
-            if debug {
-                println!("{message}");
-            }
-            node.lock()
-                .await
-                .record_automatic_finalization_status(message);
-        }
-        if vdf_output.is_some() {
-            node.lock().await.record_vdf_speed_sample(
-                rounds,
-                vdf_started.elapsed(),
-                VdfSpeedSource::Finalization,
-            );
-        }
-        let Some(vdf_output) = vdf_output else {
-            if let Some(error) = vdf_failure {
-                // A prover failure is not a cancellation: report it and back off instead of
-                // immediately retrying the same work.
-                let message = format!("VDF failed for candidate block {candidate_height}: {error}");
-                eprintln!("auto-finalization {message}");
-                node.lock()
-                    .await
-                    .record_automatic_finalization_status(message);
-                tokio::time::sleep(VDF_FAILURE_RETRY_DELAY).await;
+                eprintln!("Heartbeat proof-of-work task failed: {error}");
+                tokio::time::sleep(Duration::from_secs(1)).await;
                 continue;
             }
-            let message = if cancelled_for_new_tip {
-                format!("cancelled stale VDF for candidate block {candidate_height}")
-            } else if cancelled_for_disabled {
-                format!(
-                    "cancelled VDF for candidate block {candidate_height} because automatic finalization is disabled"
-                )
-            } else if cancelled_for_no_peer {
-                format!(
-                    "cancelled VDF for candidate block {candidate_height}: waiting for a good peer connection before mining"
-                )
-            } else {
-                format!("VDF worker failed for candidate block {candidate_height}")
-            };
-            if debug {
-                println!("auto-finalization {message}");
-            }
-            node.lock()
-                .await
-                .record_automatic_finalization_status(message);
-            continue;
         };
+        let activated = node
+            .lock()
+            .await
+            .submit_block(block.clone(), unix_time_secs());
+        match activated {
+            Ok(true) => relay.heartbeat(&block),
+            Ok(false) => {}
+            Err(error) => eprintln!("submitting mined Heartbeat failed: {error:#}"),
+        }
+    }
+}
 
-        let completed_at_ms = now_ms();
-        let mut stale_before_publish = false;
-        let mut disabled_before_publish = false;
-        let mut disconnected_before_publish = false;
-        if completed_at_ms < publish_at_ms {
-            let wait_ms = publish_at_ms - completed_at_ms;
-            let message = format!(
-                "VDF complete for candidate block {}; waiting for finalizer rank time slot ({:.1}s)",
-                work.height(),
-                wait_ms as f64 / 1000.0
-            );
-            if debug {
-                println!("{message}");
-            }
-            node.lock()
-                .await
-                .record_automatic_finalization_status(message);
-            loop {
-                let current_ms = now_ms();
-                if current_ms >= publish_at_ms {
-                    break;
-                }
-                let wait_ms = publish_at_ms - current_ms;
-                tokio::time::sleep(std::time::Duration::from_millis(wait_ms.min(1_000))).await;
-                let (tip_changed, finalization_disabled) = {
-                    let node = node.lock().await;
-                    (
-                        node.ledger().tip_hash() != candidate_parent,
-                        !node.automatic_mining_enabled(),
-                    )
+async fn run_ledger_miner(
+    node: SharedConsensusNode,
+    wallet_state: Arc<RwLock<WalletState>>,
+    heartbeat_enabled: Arc<AtomicBool>,
+    heartbeat_workers: Arc<AtomicUsize>,
+    enabled: Arc<AtomicBool>,
+    last_ticket_height: Arc<AtomicU64>,
+    relay: ConsensusRelay,
+) {
+    loop {
+        tokio::time::sleep(Duration::from_secs(1)).await;
+        if !enabled.load(Ordering::Relaxed) {
+            continue;
+        }
+        let (wallet, preference_path) = {
+            let state = wallet_state.read().expect("wallet state lock poisoned");
+            let Some(wallet) = state.unlocked.clone() else {
+                enabled.store(false, Ordering::Relaxed);
+                continue;
+            };
+            (wallet, consensus_local_state::mining_path(&state.path))
+        };
+        let mut lottery_seed = [0; 32];
+        if getrandom(&mut lottery_seed).is_err() {
+            eprintln!("continuous Ledger mining needs secure randomness");
+            continue;
+        }
+        let submission = {
+            let mut node = node.lock().await;
+            let height = node.status().height;
+            let encoded_last = last_ticket_height.load(Ordering::Relaxed);
+            let due = encoded_last == 0
+                || height
+                    >= encoded_last
+                        .saturating_sub(1)
+                        .saturating_add(LEDGER_TARGET_INTERVAL_HEARTBEATS);
+            let already_pending = node
+                .pending_tickets()
+                .iter()
+                .any(|ticket| ticket.mining_public_key == wallet.public_key());
+            if !due || already_pending {
+                None
+            } else {
+                let budget = match recommended_ledger_budget(node.chain().tip()) {
+                    Ok(budget) => budget,
+                    Err(error) => {
+                        eprintln!("calculating continuous Ledger budget failed: {error:#}");
+                        continue;
+                    }
                 };
-                let peer_connected = peers.lock().await.has_good_connection_for_chain_at(
-                    candidate_height.saturating_sub(1),
-                    &candidate_parent,
-                    now_ms(),
-                );
-                if tip_changed || finalization_disabled || !peer_connected {
-                    stale_before_publish = tip_changed;
-                    disabled_before_publish = finalization_disabled;
-                    disconnected_before_publish = !peer_connected;
-                    break;
-                }
-            }
-        }
-        if stale_before_publish || disabled_before_publish || disconnected_before_publish {
-            let message = if stale_before_publish {
-                format!("cancelled completed VDF for stale candidate block {candidate_height}")
-            } else if disabled_before_publish {
-                format!(
-                    "cancelled completed VDF for candidate block {candidate_height} because automatic finalization is disabled"
-                )
-            } else {
-                format!(
-                    "cancelled completed VDF for candidate block {candidate_height}: waiting for a good peer connection before mining"
-                )
-            };
-            if debug {
-                println!("auto-finalization {message}");
-            }
-            node.lock()
-                .await
-                .record_automatic_finalization_status(message);
-            continue;
-        }
-        let publish_timestamp_ms = now_ms().max(publish_at_ms);
-
-        if !peers.lock().await.has_good_connection_for_chain_at(
-            candidate_height.saturating_sub(1),
-            &candidate_parent,
-            now_ms(),
-        ) {
-            node.lock().await.record_automatic_finalization_status(format!(
-                "cancelled completed VDF for candidate block {candidate_height}: waiting for a good peer connection before mining"
-            ));
-            continue;
-        }
-
-        let (finalized, outbox) = {
-            let mut node = node.lock().await;
-            if !node.automatic_mining_enabled() {
-                node.record_automatic_finalization_status(format!(
-                    "cancelled completed VDF for candidate block {candidate_height} because automatic finalization is disabled"
-                ));
-                continue;
-            }
-            let finalized = node.complete_prepared_block_at(work, vdf_output, publish_timestamp_ms);
-            match &finalized {
-                Ok(block) => node.record_automatic_finalization_status(format!(
-                    "finalized block {} ({})",
-                    block.height, block.hash
-                )),
-                Err(error) => node
-                    .record_automatic_finalization_status(format!("skipped after VDF: {error:#}")),
-            }
-            let outbox = node.drain_outbox();
-            (finalized, outbox)
-        };
-
-        let failed_after_vdf = finalized.is_err();
-        match finalized {
-            Ok(block) if debug => {
-                println!("auto-finalized block {} ({})", block.height, block.hash);
-            }
-            Ok(_) => {}
-            Err(error) if debug => println!("auto-finalization skipped after VDF: {error:#}"),
-            Err(_) => {}
-        }
-
-        if let Err(error) = gossip.broadcast(outbox).await
-            && debug
-        {
-            eprintln!("p2p broadcast failed after automatic block: {error:#}");
-        }
-
-        if failed_after_vdf {
-            tokio::time::sleep(std::time::Duration::from_secs(10)).await;
-        }
-
-        tokio::task::yield_now().await;
-    }
-}
-
-fn automatic_finalization_precheck_time(now_ms: u64, publish_at_ms: u64) -> u64 {
-    // A fallback ticket's rank slot can be well beyond the normal future-drift
-    // allowance. Validate the candidate as it will stand when that known slot
-    // opens, so its VDF can run in advance; final application still validates
-    // the actual publication timestamp against the then-current clock.
-    now_ms.max(publish_at_ms)
-}
-
-fn should_log_automatic_finalization_skip(
-    last_logged_skip: &mut Option<(u64, String)>,
-    height: u64,
-    reason: &str,
-) -> bool {
-    let skip = (height, reason.to_string());
-    if last_logged_skip.as_ref() == Some(&skip) {
-        return false;
-    }
-    *last_logged_skip = Some(skip);
-    true
-}
-
-fn format_vdf_progress(candidate_height: u64, progress: VdfProgress) -> String {
-    let phase = match progress.phase {
-        VdfProgressPhase::Output => "output",
-        VdfProgressPhase::Proof => "proof",
-    };
-    let percent = if progress.total_steps == 0 {
-        100.0
-    } else {
-        progress.completed_steps as f64 * 100.0 / progress.total_steps as f64
-    };
-    format!(
-        "running VDF for candidate block {candidate_height}: {phase} {}/{} rounds, total {}/{} steps ({percent:.1}%)",
-        progress.completed_phase_rounds,
-        progress.phase_rounds,
-        progress.completed_steps,
-        progress.total_steps
-    )
-}
-
-async fn run_automatic_pow_miner(
-    node: SharedNode,
-    peers: SharedPeerBook,
-    gossip: p2p::GossipNetwork,
-    debug: bool,
-) {
-    loop {
-        tokio::time::sleep(std::time::Duration::from_secs(1)).await;
-        if !has_good_peer_for_chain(&node, &peers).await {
-            let mut node = node.lock().await;
-            if node.pow_mining_enabled() {
-                node.record_automatic_pow_mining_error(
-                    "waiting for a good peer connection before mining".to_string(),
-                );
-            }
-            continue;
-        }
-        let (height, job) = {
-            let mut node = node.lock().await;
-            if !node.pow_mining_enabled() {
-                continue;
-            }
-            if !node.has_real_chain() {
-                continue;
-            }
-            let height = node.chain_height();
-            let job = match node.prepare_automatic_pow_mining_job() {
-                Ok(job) => job,
-                Err(error) => {
-                    node.record_automatic_pow_mining_error(format!(
-                        "automatic PoW mining failed: {error:#}"
-                    ));
-                    None
-                }
-            };
-            (height, job)
-        };
-        let Some(job) = job else {
-            continue;
-        };
-
-        let search = tokio::task::spawn_blocking(move || job.search()).await;
-        if !has_good_peer_for_chain(&node, &peers).await {
-            node.lock().await.record_automatic_pow_mining_error(
-                "waiting for a good peer connection before mining".to_string(),
-            );
-            continue;
-        }
-        let (pow_mined, outbox) = {
-            let mut node = node.lock().await;
-            let pow_mined = match search {
-                Ok(Ok((job, outcome))) => {
-                    match node.finish_automatic_pow_mining_job(job, outcome) {
-                        Ok(tx) => tx,
-                        Err(error) => {
-                            node.record_automatic_pow_mining_error(format!(
-                                "automatic PoW mining failed: {error:#}"
-                            ));
-                            None
-                        }
+                match wallet.submit_consolidating_ticket(
+                    &mut node,
+                    TicketParameters {
+                        budget,
+                        duration: LEDGER_TARGET_INTERVAL_HEARTBEATS,
+                        fee: 1,
+                        mining_public_key: wallet.public_key(),
+                        lottery_seed,
+                    },
+                ) {
+                    Ok(receipt) => node
+                        .pending_ticket(&receipt.id)
+                        .cloned()
+                        .map(|ticket| (height, ticket)),
+                    Err(error) => {
+                        eprintln!("continuous Ledger ticket skipped: {error:#}");
+                        None
                     }
                 }
-                Ok(Err(error)) => {
-                    node.record_automatic_pow_mining_error(format!(
-                        "automatic PoW mining failed: {error:#}"
-                    ));
-                    None
-                }
-                Err(error) => {
-                    node.record_automatic_pow_mining_error(format!(
-                        "automatic PoW mining task failed: {error:#}"
-                    ));
-                    None
-                }
-            };
-            let outbox = node.drain_outbox();
-            (pow_mined, outbox)
+            }
         };
-
-        if let Err(error) = gossip.broadcast(outbox).await
-            && debug
-        {
-            eprintln!("p2p broadcast failed after automatic PoW mining: {error:#}");
-        }
-
-        if debug && let Some(tx) = &pow_mined {
-            println!(
-                "auto-pow queued mine action for height {} ({})",
-                height,
-                tx.signature()
-            );
+        let Some((height, ticket)) = submission else {
+            continue;
+        };
+        last_ticket_height.store(height.saturating_add(1), Ordering::Relaxed);
+        relay.tickets(vec![ticket]);
+        if let Err(error) = consensus_local_state::save_mining_from(&preference_path, || {
+            consensus_local_state::MiningPreference {
+                enabled: heartbeat_enabled.load(Ordering::Relaxed),
+                workers: heartbeat_workers.load(Ordering::Relaxed),
+                ledger_enabled: enabled.load(Ordering::Relaxed),
+                last_ledger_ticket_height: Some(height),
+            }
+        }) {
+            eprintln!("saving continuous Ledger mining state failed: {error:#}");
         }
     }
 }
 
-async fn has_good_peer_for_chain(node: &SharedNode, peers: &SharedPeerBook) -> bool {
-    let (height, tip_hash) = {
-        let node = node.lock().await;
-        (node.chain_height(), node.ledger().tip_hash().to_string())
-    };
-    peers
-        .lock()
-        .await
-        .has_good_connection_for_chain_at(height, &tip_hash, now_ms())
+fn recommended_ledger_budget(state: &iuna::consensus::ConsensusState) -> Result<u64> {
+    let current_reward = subsidy(state.ledger_blocks, state.minted)?;
+    let current = minimum_ticket_budget(LEDGER_TARGET_INTERVAL_HEARTBEATS, current_reward)?;
+    let after_ledger_blocks = state
+        .ledger_blocks
+        .checked_add(1)
+        .context("Ledger block count overflow")?;
+    let after_minted = state
+        .minted
+        .checked_add(current_reward)
+        .context("minted supply overflow")?;
+    let reward_after_same_heartbeat = subsidy(after_ledger_blocks, after_minted)?;
+    let after = minimum_ticket_budget(
+        LEDGER_TARGET_INTERVAL_HEARTBEATS,
+        reward_after_same_heartbeat,
+    )?;
+    Ok(current.max(after))
 }
 
-async fn run_peer_sync(node: SharedNode, gossip: p2p::GossipNetwork, debug: bool) {
-    loop {
-        tokio::time::sleep(std::time::Duration::from_secs(5)).await;
-        let envelopes = {
-            let mut node = node.lock().await;
-            let mut envelopes = vec![node.peer_status()];
-            envelopes.extend(node.drain_outbox());
-            envelopes.extend(node.mempool_gossip());
-            envelopes
-        };
-        let mut envelopes = envelopes;
-        envelopes.push(gossip.peer_exchange().await);
-        if let Err(error) = gossip.broadcast(envelopes).await
-            && debug
-        {
-            eprintln!("p2p sync gossip failed: {error:#}");
+fn parse_options(arguments: impl IntoIterator<Item = String>) -> Result<Option<Options>> {
+    let mut options = Options::default();
+    let mut arguments = arguments.into_iter();
+    while let Some(argument) = arguments.next() {
+        match argument.as_str() {
+            "-h" | "--help" => return Ok(None),
+            "--data-dir" => {
+                options.data_dir = PathBuf::from(value(&mut arguments, "--data-dir")?);
+            }
+            "--http" => {
+                options.http_addr = value(&mut arguments, "--http")?
+                    .parse()
+                    .context("parsing --http socket address")?;
+            }
+            "--wallet-endpoint" => {
+                options.wallet_endpoint_addr = Some(
+                    value(&mut arguments, "--wallet-endpoint")?
+                        .parse()
+                        .context("parsing --wallet-endpoint socket address")?,
+                );
+            }
+            "--p2p" => {
+                options.p2p_addr = value(&mut arguments, "--p2p")?
+                    .parse()
+                    .context("parsing --p2p socket address")?;
+            }
+            "--bootstrap-peer" => {
+                options.bootstrap_peers.push(
+                    value(&mut arguments, "--bootstrap-peer")?
+                        .parse()
+                        .context("parsing --bootstrap-peer address")?,
+                );
+            }
+            "--peer" => {
+                options.peers.push(
+                    value(&mut arguments, "--peer")?
+                        .parse()
+                        .context("parsing --peer socket address")?,
+                );
+            }
+            _ => bail!("unknown option {argument}; use --help"),
         }
     }
+    Ok(Some(options))
 }
 
-async fn run_chain_persistence(
-    node: SharedNode,
-    store: SqliteChainStore,
-    ui_data_store: SqliteUiDataStore,
-    ui_config: Arc<Mutex<config_store::UiConfig>>,
-    gossip: p2p::GossipNetwork,
-    initial_saved_tip: Option<String>,
-    initial_projected_keep_metrics: bool,
-) {
-    let initial_state = ChainPersistenceState {
-        projected_tip: initial_saved_tip.clone(),
-        saved_tip: initial_saved_tip,
-        projected_keep_metrics: initial_projected_keep_metrics,
-        sync_checkpoint_interval: SYNC_CHAIN_CHECKPOINT_INTERVAL,
-    };
-    run_chain_persistence_loop(
-        node,
-        store,
-        ui_data_store,
-        ui_config,
-        Duration::from_secs(2),
-        Some(gossip),
-        initial_state,
-    )
-    .await;
+fn value(arguments: &mut impl Iterator<Item = String>, option: &str) -> Result<String> {
+    arguments
+        .next()
+        .with_context(|| format!("{option} requires a value"))
+}
+
+fn default_data_dir() -> PathBuf {
+    env::var_os("HOME")
+        .filter(|home| !home.is_empty())
+        .or_else(|| env::var_os("USERPROFILE").filter(|home| !home.is_empty()))
+        .map(PathBuf::from)
+        .map(|home| home.join(".iuna"))
+        .unwrap_or_else(|| PathBuf::from(".iuna"))
+}
+
+fn print_help() {
+    println!(
+        "IUNA mainnet-candidate node\n\n\
+         Usage: iuna [options]\n\n\
+         --data-dir PATH   Chain and screen-data directory (default ~/.iuna)\n\
+         --http ADDRESS    Operator HTTP address (default 127.0.0.1:8080)\n\
+         --wallet-endpoint ADDRESS  Opt-in public wallet API on a separate listener\n\
+         --p2p ADDRESS     P2P listen address (default 0.0.0.0:19733)\n\
+         --peer ADDRESS    Outbound peer, IP:port or host:port; may be repeated\n\
+         --bootstrap-peer ADDRESS  Outbound peer added once to peers.json; may be repeated\n\
+         -h, --help        Show this help\n\
+\n\
+         Environment:\n\
+         IUNA_WALLET_PASSWORD  Unlock an existing encrypted wallet\n\
+         IUNA_OPERATOR_TOKEN   Enable management API (minimum 32 bytes)\n\
+         IUNA_INSECURE_OPERATOR_API=1  Allow unauthenticated management (development only)"
+    );
+}
+
+fn unix_time_secs() -> u64 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_secs()
 }
 
 #[cfg(test)]
-async fn run_chain_persistence_with_interval(
-    node: SharedNode,
-    store: SqliteChainStore,
-    ui_data_store: SqliteUiDataStore,
-    ui_config: Arc<Mutex<config_store::UiConfig>>,
-    interval: Duration,
-    initial_saved_tip: Option<String>,
-    initial_projected_keep_metrics: bool,
-) {
-    let initial_state = ChainPersistenceState {
-        projected_tip: initial_saved_tip.clone(),
-        saved_tip: initial_saved_tip,
-        projected_keep_metrics: initial_projected_keep_metrics,
-        sync_checkpoint_interval: SYNC_CHAIN_CHECKPOINT_INTERVAL,
-    };
-    run_chain_persistence_loop(
-        node,
-        store,
-        ui_data_store,
-        ui_config,
-        interval,
-        None,
-        initial_state,
-    )
-    .await;
-}
+mod tests {
+    use super::*;
 
-struct ChainPersistenceState {
-    saved_tip: Option<String>,
-    projected_tip: Option<String>,
-    projected_keep_metrics: bool,
-    sync_checkpoint_interval: Duration,
-}
+    /// The binary normally links the production parameters, so check its pinned genesis here.
+    /// The explicit `e2e` feature substitutes the fast test network for the live TCP test.
+    #[cfg(not(feature = "e2e"))]
+    #[test]
+    fn production_genesis_is_pinned_at_the_proof_of_work_limit() {
+        use iuna::consensus::{GENESIS_HASH, MAX_TARGET, pinned_genesis};
 
-fn initial_projected_metrics_mode(
-    startup_warmed_keep_metrics: Option<bool>,
-    configured_keep_metrics: bool,
-) -> bool {
-    startup_warmed_keep_metrics.unwrap_or(configured_keep_metrics)
-}
+        let (genesis, state) = pinned_genesis().unwrap();
+        assert_eq!(genesis.hash(), GENESIS_HASH);
+        assert_eq!(genesis.header.target, MAX_TARGET);
+        assert_eq!(state.tip_target, MAX_TARGET);
+        // 26 leading zero bits: one ~60-second Heartbeat for a single ~1 MH/s CPU thread.
+        assert_eq!(&MAX_TARGET[..4], &[0x00, 0x00, 0x00, 0x3f]);
+    }
 
-async fn run_chain_persistence_loop(
-    node: SharedNode,
-    store: SqliteChainStore,
-    ui_data_store: SqliteUiDataStore,
-    ui_config: Arc<Mutex<config_store::UiConfig>>,
-    interval: Duration,
-    gossip: Option<p2p::GossipNetwork>,
-    initial_state: ChainPersistenceState,
-) {
-    let mut last_saved_tip = initial_state.saved_tip;
-    let mut last_projected_tip = initial_state.projected_tip;
-    let mut last_projected_keep_metrics = initial_state.projected_keep_metrics;
-    let mut last_chain_checkpoint = Instant::now();
-    let mut last_saved_pending_v2_ids = None::<Vec<String>>;
-    loop {
-        tokio::time::sleep(interval).await;
-        let pending_v2 = node.lock().await.pending_transaction_v2_envelopes();
-        {
-            match pending_v2 {
-                Ok(pending_v2) => {
-                    let pending_v2_ids = pending_v2
-                        .iter()
-                        .map(|(transaction_id, _)| transaction_id.clone())
-                        .collect::<Vec<_>>();
-                    if last_saved_pending_v2_ids.as_ref() != Some(&pending_v2_ids) {
-                        match persist_pending_transactions_v2(&store, pending_v2).await {
-                            Ok(()) => last_saved_pending_v2_ids = Some(pending_v2_ids),
-                            Err(error) if debug_logging_enabled() => {
-                                eprintln!("pending transaction-v2 persistence failed: {error:#}");
-                            }
-                            Err(_) => {}
-                        }
-                    }
-                }
-                Err(error) if debug_logging_enabled() => {
-                    eprintln!("pending transaction-v2 encoding failed: {error:#}");
-                }
-                Err(_) => {}
-            }
-        }
-        let syncing = gossip
-            .as_ref()
-            .is_some_and(|network| network.chain_sync_active_or_recent(Duration::from_secs(5)));
-        let defer_sync_checkpoint = should_defer_sync_checkpoint(
-            syncing,
-            last_chain_checkpoint.elapsed(),
-            initial_state.sync_checkpoint_interval,
-        );
-        let observed_tip_hash = {
-            let node = node.lock().await;
-            if !node.has_real_chain() {
-                continue;
-            }
-            node.ledger().tip_hash().to_string()
-        };
-        let keep_metrics = ui_config.lock().await.keep_track_of_metrics;
-        let observed_tip_changed = last_saved_tip.as_deref() != Some(observed_tip_hash.as_str());
-        let observed_projection_changed =
-            last_projected_tip.as_deref() != Some(observed_tip_hash.as_str());
-        let metrics_mode_changed = last_projected_keep_metrics != keep_metrics;
-        if !observed_tip_changed && !observed_projection_changed && !metrics_mode_changed {
-            continue;
-        }
-        if syncing && (!observed_tip_changed || defer_sync_checkpoint) {
-            continue;
-        }
+    #[cfg(feature = "e2e")]
+    #[test]
+    fn e2e_genesis_uses_the_fast_proof_of_work_limit() {
+        use iuna::consensus::{GENESIS_HASH, MAX_TARGET, pinned_genesis};
 
-        if let Err(error) =
-            align_resident_history_with_metrics_mode(&node, &store, keep_metrics).await
-        {
-            eprintln!("restoring complete chain history for metrics failed: {error:#}");
-        }
+        let (genesis, state) = pinned_genesis().unwrap();
+        assert_eq!(genesis.hash(), GENESIS_HASH);
+        assert_eq!(genesis.header.target, MAX_TARGET);
+        assert_eq!(state.tip_target, MAX_TARGET);
+        assert_eq!(&MAX_TARGET[..2], &[0x00, 0x0f]);
+    }
 
-        // While syncing only the chain is checkpointed. A ledger clone for the UI projection is
-        // taken only after the save: holding one across it would make every block applied in
-        // the meantime copy the shared state.
-        let snapshot = {
-            let node = node.lock().await;
-            if !node.has_real_chain() {
-                continue;
-            }
-            Arc::new(node.chain_snapshot())
-        };
-        let Some((tip_height, tip_hash)) = snapshot
-            .blocks
-            .last()
-            .map(|block| (block.height, block.hash.clone()))
-        else {
-            continue;
-        };
-        let tip_changed = last_saved_tip.as_deref() != Some(tip_hash.as_str());
-        let projected_tip_changed = last_projected_tip.as_deref() != Some(tip_hash.as_str());
-        let metrics_mode_changed = last_projected_keep_metrics != keep_metrics;
-        if !tip_changed && !projected_tip_changed && !metrics_mode_changed {
-            continue;
-        }
+    #[test]
+    fn options_parse_repeatable_peers_and_listener_addresses() {
+        let options = parse_options(
+            [
+                "--data-dir",
+                "state",
+                "--http",
+                "127.0.0.1:9000",
+                "--p2p",
+                "127.0.0.1:9001",
+                "--wallet-endpoint",
+                "127.0.0.1:9004",
+                "--peer",
+                "127.0.0.1:9002",
+                "--peer",
+                "127.0.0.1:9003",
+            ]
+            .into_iter()
+            .map(str::to_owned),
+        )
+        .unwrap()
+        .unwrap();
 
-        let mut result = Ok(());
-        if tip_changed {
-            result = persist_chain_snapshot(&store, snapshot).await;
-            if result.is_ok() {
-                node.lock()
-                    .await
-                    .mark_chain_persisted(tip_height, &tip_hash);
-            }
-        }
-        let mut projected_tip = tip_hash.clone();
-        if result.is_ok() && !syncing {
-            // The tip may have moved on since the snapshot; projecting the newer ledger is fine
-            // because blocks above the persisted tip are still resident.
-            let projection_ledger = node.lock().await.ledger().clone();
-            projected_tip = projection_ledger.tip_hash().to_string();
-            result = project_ui_data_store(&store, &ui_data_store, projection_ledger, keep_metrics)
-                .await;
-        }
-        match result {
-            Ok(()) => {
-                if !syncing {
-                    last_projected_tip = Some(projected_tip);
-                    last_projected_keep_metrics = keep_metrics;
-                }
-                last_saved_tip = Some(tip_hash);
-                if tip_changed {
-                    last_chain_checkpoint = Instant::now();
-                }
-            }
-            Err(error) if debug_logging_enabled() => {
-                eprintln!("chain persistence failed: {error:#}")
-            }
-            Err(_) => {}
-        }
+        assert_eq!(options.data_dir, PathBuf::from("state"));
+        assert_eq!(options.http_addr.port(), 9000);
+        assert_eq!(options.p2p_addr.port(), 9001);
+        assert_eq!(options.wallet_endpoint_addr.unwrap().port(), 9004);
+        assert_eq!(options.peers.len(), 2);
+    }
+
+    #[test]
+    fn missing_and_unknown_options_fail_closed() {
+        assert!(parse_options(["--http".to_owned()]).is_err());
+        assert!(parse_options(["--wallet-endpoint".to_owned()]).is_err());
+        assert!(parse_options(["--mystery".to_owned()]).is_err());
+    }
+
+    #[test]
+    fn operator_tokens_have_a_strict_minimum_length() {
+        assert!(operator_token_hash("short").is_err());
+        assert!(operator_token_hash("0123456789abcdef0123456789abcdef").is_ok());
     }
 }
-
-fn should_defer_sync_checkpoint(
-    syncing: bool,
-    since_last_checkpoint: Duration,
-    checkpoint_interval: Duration,
-) -> bool {
-    syncing && since_last_checkpoint < checkpoint_interval
-}
-
-/// Metrics tracking needs the complete chain resident; without it the node keeps only a
-/// recent window. Switching to metrics reattaches the pruned history from the chain store once.
-async fn align_resident_history_with_metrics_mode(
-    node: &SharedNode,
-    store: &SqliteChainStore,
-    keep_metrics: bool,
-) -> Result<()> {
-    let history_pruned = {
-        let mut node = node.lock().await;
-        if !node.has_real_chain() {
-            return Ok(());
-        }
-        match (keep_metrics, node.bounds_resident_chain_history()) {
-            (false, false) => {
-                node.bound_resident_chain_history();
-                return Ok(());
-            }
-            (true, true) => node.keep_complete_chain_history(),
-            _ => {}
-        }
-        node.ledger().history_is_pruned()
-    };
-    if !keep_metrics || !history_pruned {
-        return Ok(());
-    }
-    let store = store.clone();
-    let complete = tokio::task::spawn_blocking(move || {
-        let snapshot = store
-            .load()?
-            .context("cannot restore chain history because the persisted chain is unavailable")?;
-        Ledger::from_persisted_snapshot_revalidating_from(snapshot, None)
-    })
-    .await
-    .context("chain history restore worker failed")??;
-    // A false result means the tip moved past the loaded copy; the next tick retries.
-    node.lock().await.restore_complete_chain_history(complete)?;
-    Ok(())
-}
-
-async fn persist_chain_snapshot(
-    store: &SqliteChainStore,
-    snapshot: impl Into<Arc<ChainSnapshot>>,
-) -> Result<()> {
-    let snapshot = snapshot.into();
-    let store = store.clone();
-    tokio::task::spawn_blocking(move || store.save_verified_resident(&snapshot))
-        .await
-        .context("chain persistence worker failed")??;
-    Ok(())
-}
-
-async fn persist_pending_transactions_v2(
-    store: &SqliteChainStore,
-    pending: Vec<(String, String)>,
-) -> Result<()> {
-    let store = store.clone();
-    tokio::task::spawn_blocking(move || store.replace_pending_transactions_v2(&pending))
-        .await
-        .context("pending transaction-v2 persistence worker failed")??;
-    Ok(())
-}
-
-async fn warm_ui_data_store(
-    store: &SqliteUiDataStore,
-    snapshot: ChainSnapshot,
-    keep_metrics: bool,
-) -> Result<()> {
-    println!("warming UI data database...");
-    let started = Instant::now();
-    let tip_hash = snapshot
-        .blocks
-        .last()
-        .map(|block| block.hash.clone())
-        .context("cannot warm UI data database from an empty chain")?;
-    let readiness_store = store.clone();
-    let readiness_tip = tip_hash.clone();
-    let (ui_ready, metrics_ready) = tokio::task::spawn_blocking(move || {
-        Ok::<_, anyhow::Error>((
-            readiness_store.is_projected_to(&readiness_tip)?,
-            readiness_store.metrics_are_projected_to(&readiness_tip)?,
-        ))
-    })
-    .await
-    .context("UI data readiness worker failed")??;
-
-    if !ui_ready {
-        let projection_store = store.clone();
-        tokio::task::spawn_blocking(move || {
-            projection_store.project_snapshot(&snapshot, keep_metrics)
-        })
-        .await
-        .context("UI data warm-up worker failed")??;
-    } else if keep_metrics && !metrics_ready {
-        let metrics_store = store.clone();
-        tokio::task::spawn_blocking(move || metrics_store.replace_metrics_for_snapshot(&snapshot))
-            .await
-            .context("metrics warm-up worker failed")??;
-    } else if !keep_metrics {
-        let metrics_store = store.clone();
-        tokio::task::spawn_blocking(move || metrics_store.clear_metrics())
-            .await
-            .context("metrics cleanup worker failed")??;
-    }
-    println!(
-        "UI data database ready in {:.2}s",
-        started.elapsed().as_secs_f64()
-    );
-    Ok(())
-}
-
-async fn project_ui_data_store(
-    chain_store: &SqliteChainStore,
-    store: &SqliteUiDataStore,
-    ledger: Ledger,
-    keep_metrics: bool,
-) -> Result<()> {
-    let store = store.clone();
-    let chain_store = chain_store.clone();
-    tokio::task::spawn_blocking(move || {
-        match store.project_ledger(&ledger, keep_metrics, &chain_store) {
-            Ok(()) => Ok(()),
-            Err(incremental_error) if ledger.history_is_pruned() => {
-                let snapshot = chain_store.load()?.context(
-                    "cannot rebuild UI projection because the persisted chain is unavailable",
-                )?;
-                store.project_snapshot(&snapshot, keep_metrics).with_context(|| {
-                format!(
-                    "bounded UI projection failed ({incremental_error:#}); full rebuild also failed"
-                )
-            })
-            }
-            Err(error) => Err(error),
-        }
-    })
-    .await
-    .context("UI data projection worker failed")??;
-    Ok(())
-}
-
-async fn clear_ui_data_store(store: &SqliteUiDataStore) -> Result<()> {
-    println!("clearing UI data database...");
-    let started = Instant::now();
-    let store = store.clone();
-    tokio::task::spawn_blocking(move || store.clear_all())
-        .await
-        .context("UI data cleanup worker failed")??;
-    println!(
-        "UI data database ready in {:.2}s",
-        started.elapsed().as_secs_f64()
-    );
-    Ok(())
-}
-
-#[cfg(test)]
-#[path = "main_tests.rs"]
-mod tests;

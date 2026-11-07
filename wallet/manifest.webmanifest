@@ -3,8 +3,8 @@
   "short_name": "iuna",
   "start_url": "./",
   "display": "standalone",
-  "background_color": "#0d1512",
-  "theme_color": "#0d1512",
-  "description": "A lightweight, self-custody wallet for iuna.",
+  "background_color": "#0d0f10",
+  "theme_color": "#0d0f10",
+  "description": "A self-custody Ed25519 wallet for iuna.",
   "icons": [{ "src": "./icon.svg", "sizes": "any", "type": "image/svg+xml", "purpose": "any maskable" }]
 }

@@ -2,34 +2,34 @@
   function recommendationFor({ cpu, power, network }) {
     const publicNode = network === "public";
     let mining;
-    let burning;
+    let ticketMining;
 
     if (power === "battery") {
       mining = {
-        title: "Mining off",
-        copy: "Leave mining disabled to avoid continuous proof-of-work use while on battery or saving energy.",
+        title: "Hash mining off",
+        copy: "Run only the validating node while on battery or saving energy. It does not perform continuous Proof-of-Work by itself.",
       };
-      burning = {
-        title: "Burn only, start low",
-        copy: "If you already own IUNA, enable Burn with the lowest practical amount. You can still support the burn committee when your mined lineage is eligible.",
+      ticketMining = {
+        title: "Ticket mining optional",
+        copy: "A ticket does not require continuous hashing, but its expenditure is irreversible. Start with a short duration and the quoted minimum budget.",
       };
     } else if (cpu === "strong") {
       mining = {
-        title: "Mining on",
-        copy: "Enable Mine and choose a worker count that keeps the computer comfortable for its other tasks.",
+        title: "Hash miner not packaged yet",
+        copy: "The source preview validates Heartbeats, but does not yet expose an automatic Hash-mining worker. Use this device as a validating node for now.",
       };
-      burning = {
-        title: "Use the max-EV burn",
-        copy: "Use Max-EV in the Burn outlook.",
+      ticketMining = {
+        title: "Quote a mining ticket",
+        copy: "Choose an active duration in the Mining screen and use its current minimum expenditure quote as a conservative starting point.",
       };
     } else {
       mining = {
-        title: "Mining optional",
-        copy: "Mining works on this CPU, but it will be slow. Enable it only if continuous CPU use is acceptable.",
+        title: "Run a validating node",
+        copy: "The source preview does not yet expose an automatic Hash-mining worker. Validation and P2P relay still help test this device class.",
       };
-      burning = {
-        title: "Keep the burn low",
-        copy: "Use the lowest practical amount. Focus on committee participation rather than competing aggressively to finalize blocks.",
+      ticketMining = {
+        title: "Ticket mining works",
+        copy: "Ledger ticket selection does not depend on a fast CPU. Start with a short duration and the quoted minimum expenditure budget.",
       };
     }
 
@@ -42,14 +42,14 @@
       network: publicNode
         ? {
             title: "Choose Listening node",
-            copy: "During setup, select Listening node and keep TCP port 9444 reachable through your firewall and router. Expose only P2P; keep the management interface private.",
+            copy: "Keep TCP port 19733 reachable through your firewall and router. Expose only P2P; keep the operator interface on loopback.",
           }
         : {
             title: "Choose Non-listening node",
-            copy: "During setup, select Non-listening node. It connects out to peers and synchronizes normally without an open inbound port.",
+            copy: "Bind P2P locally or behind your firewall and configure outbound peers. The operator interface must remain private.",
           },
       mining,
-      burning,
+      ticketMining,
     };
   }
 
@@ -81,8 +81,8 @@
     document.querySelector("[data-network-copy]").textContent = result.network.copy;
     document.querySelector("[data-mine-title]").textContent = result.mining.title;
     document.querySelector("[data-mine-copy]").textContent = result.mining.copy;
-    document.querySelector("[data-burn-title]").textContent = result.burning.title;
-    document.querySelector("[data-burn-copy]").textContent = result.burning.copy;
+    document.querySelector("[data-ticket-title]").textContent = result.ticketMining.title;
+    document.querySelector("[data-ticket-copy]").textContent = result.ticketMining.copy;
     choicesView.hidden = true;
     recommendation.hidden = false;
     configurator.classList.add("is-plan");

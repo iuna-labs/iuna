@@ -1,47 +1,17 @@
-# iuna Fuzz Targets
+# Fuzzing
 
-These targets exercise external input boundaries and persistence decoders.
+Targets for the bytes a node accepts from outside. They need a nightly toolchain and
+[`cargo-fuzz`](https://github.com/rust-fuzz/cargo-fuzz):
 
-Install the release-pinned `cargo-fuzz` version once. Building the helper may use a newer stable
-toolchain without changing Iuna's Rust 1.88 build contract:
-
-```sh
-cargo +1.98.1 install cargo-fuzz --version 0.13.2 --locked
+```bash
+cargo +nightly fuzz run p2p_envelope -- -max_total_time=60
+cargo +nightly fuzz run signed_objects -- -max_total_time=60
+cargo +nightly fuzz run wallet_file -- -max_total_time=60
 ```
 
-Run a target:
+- `p2p_envelope`: lines from peers, including the encode and decode roundtrip.
+- `signed_objects`: transactions and tickets as JSON, from the public API and relay.
+- `wallet_file`: damaged or hand-edited `wallet.json` files.
 
-```sh
-cargo fuzz run p2p_envelope
-cargo fuzz run compact_snapshot
-cargo fuzz run domain_json
-cargo fuzz run stratum_request
-cargo fuzz run wallet_config
-cargo fuzz run vdf_proof
-cargo fuzz run transaction_v2
-```
-
-`cargo fuzz` requires a nightly Rust toolchain and adds sanitizer and coverage instrumentation.
-For a bounded run, use for example:
-
-```sh
-cargo +nightly fuzz run transaction_v2 -- -max_total_time=300
-```
-
-The release gate also applies a 10-second per-input timeout so hangs are retained
-as actionable fuzzing failures alongside crashes.
-
-Short, uninstrumented crash smoke run without installing `cargo-fuzz`:
-
-```sh
-cargo run --manifest-path fuzz/Cargo.toml --bin p2p_envelope -- -runs=1 fuzz/corpus/p2p_envelope
-cargo run --manifest-path fuzz/Cargo.toml --bin compact_snapshot -- -runs=1 fuzz/corpus/compact_snapshot
-cargo run --manifest-path fuzz/Cargo.toml --bin domain_json -- -runs=1 fuzz/corpus/domain_json
-cargo run --manifest-path fuzz/Cargo.toml --bin stratum_request -- -runs=1 fuzz/corpus/stratum_request
-cargo run --manifest-path fuzz/Cargo.toml --bin wallet_config -- -runs=1 fuzz/corpus/wallet_config
-cargo run --manifest-path fuzz/Cargo.toml --bin vdf_proof -- -runs=1 fuzz/corpus/vdf_proof
-cargo run --manifest-path fuzz/Cargo.toml --bin transaction_v2 -- -runs=1 fuzz/corpus/transaction_v2
-```
-
-Targets intentionally accept malformed input. A parse error is fine; panics,
-crashes, excessive allocation, or timeouts are failures.
+Seeds live in `corpus/<target>/`. A crash is saved in `artifacts/<target>/` and replays with
+`cargo +nightly fuzz run <target> <file>`.

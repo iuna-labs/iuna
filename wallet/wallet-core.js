@@ -1,189 +1,52 @@
 const encoder = new TextEncoder();
+// Signatures are scoped to one network, so they cannot be replayed on a fork or relaunch.
+const NETWORK_ID = "iuna-mainnet-candidate";
+const GENESIS_HASH = hexBytes("0000002b212b84a6457c11300d51d3dfbf743ba635dd4ab145c4f3538c582903");
+const PKCS8_ED25519_PREFIX = hexBytes("302e020100300506032b657004220420");
 
-export const API_BASE = "https://iuna.jhx.app/v1";
-export const STORAGE_KEY = "iuna.wallets.v2";
-export const LEGACY_STORAGE_KEY = "iuna.wallet.v1";
-export const CONTACTS_STORAGE_KEY = "iuna.contacts.v1";
-export const MICRO_IUNA = 1_000_000n;
-export const MAX_TRANSACTION_BODY_BYTES = 64 * 1024;
-
-export function emptyWalletStore() {
-  return { version: 2, activeId: null, wallets: [] };
+export function normalizeSeed(value) {
+  return String(value).trim().toLowerCase().replace(/\s+/g, " ");
 }
 
-export function normalizeWalletStore(value, legacyWallet = null) {
-  if (value?.version === 2 && Array.isArray(value.wallets)) {
-    const wallets = value.wallets.filter((wallet) => wallet
-      && wallet.id
-      && (/^[0-9a-f]{64}$/.test(wallet.publicKeyHex) || (wallet.type === "readonly" && typeof wallet.address === "string"))
-      && ["signing", "readonly"].includes(wallet.type)
-      && (wallet.type === "readonly" || wallet.record));
-    const activeId = wallets.some((wallet) => wallet.id === value.activeId) ? value.activeId : wallets[0]?.id || null;
-    return { version: 2, activeId, wallets };
-  }
-  if (legacyWallet?.address) {
-    return {
-      version: 2,
-      activeId: `wallet-${legacyWallet.address}`,
-      wallets: [{
-        id: `wallet-${legacyWallet.address}`,
-        name: "My wallet",
-        type: "signing",
-        record: legacyWallet,
-        publicKeyHex: legacyWallet.address,
-      }],
-    };
-  }
-  return emptyWalletStore();
+export function apiEndpoint(location = globalThis.location) {
+  const configured = globalThis.localStorage?.getItem("iunaWalletApi");
+  if (configured) return configured.replace(/\/$/, "");
+  return defaultApiEndpoint(location);
 }
 
-export function walletId(publicKeyHex) {
-  return `wallet-${publicKeyHex}`;
+// The hosted wallet talks to its own origin (the ingress routes /api/public to a node); a local
+// copy defaults to the Docker Compose bootstrap node.
+export function defaultApiEndpoint(location = globalThis.location) {
+  if (["wallet.getiuna.com", "wallet.getiuna.org"].includes(location?.hostname)) return location.origin;
+  return "http://127.0.0.1:18662";
 }
 
-export function upsertWallet(store, wallet) {
-  const wallets = store.wallets.filter((item) => item.id !== wallet.id);
-  wallets.push(wallet);
-  return { version: 2, activeId: wallet.id, wallets };
-}
-
-export function removeWallet(store, id) {
-  const wallets = store.wallets.filter((wallet) => wallet.id !== id);
-  return { version: 2, activeId: wallets[0]?.id || null, wallets };
-}
-
-export function emptyContactBook() {
-  return { version: 1, contacts: [] };
-}
-
-export function normalizeContactBook(value) {
-  if (value?.version !== 1 || !Array.isArray(value.contacts)) return emptyContactBook();
-  const addresses = new Set();
-  const contacts = value.contacts.flatMap((contact) => {
-    const id = typeof contact?.id === "string" ? contact.id.trim() : "";
-    const name = typeof contact?.name === "string" ? contact.name.trim().slice(0, 40) : "";
-    const address = typeof contact?.address === "string" ? contact.address.trim().toLowerCase() : "";
-    if (!id || !name || !address || addresses.has(address)) return [];
-    addresses.add(address);
-    return [{ id, name, address }];
-  });
-  return { version: 1, contacts };
-}
-
-export function upsertContact(book, contact) {
-  const contacts = book.contacts.filter((item) => item.id !== contact.id);
-  contacts.push(contact);
-  contacts.sort((left, right) => left.name.localeCompare(right.name, undefined, { sensitivity: "base" }));
-  return { version: 1, contacts };
-}
-
-export function removeContact(book, id) {
-  return { version: 1, contacts: book.contacts.filter((contact) => contact.id !== id) };
-}
-
-export function nextRecoveryScanCounts({
-  externalAddresses,
-  rewardAddresses,
-  recoveryAddresses,
-  gapLimit,
-  maxAddresses = 10_000,
-}) {
-  const known = new Set([
-    ...externalAddresses.map((item) => item.address),
-    ...rewardAddresses.map((item) => item.address),
-  ]);
-  const unresolved = [...new Set(recoveryAddresses || [])]
-    .filter((address) => !known.has(address));
-  if (!unresolved.length) {
-    return {
-      externalCount: externalAddresses.length,
-      rewardCount: rewardAddresses.length,
-      unresolved,
-    };
-  }
-  const increment = Math.max(1, Number(gapLimit) || 1);
-  const nextCount = (count) => Math.min(maxAddresses, Math.max(count + increment, count * 2));
-  return {
-    externalCount: nextCount(externalAddresses.length),
-    rewardCount: nextCount(rewardAddresses.length),
-    unresolved,
-  };
-}
-
-export function ensureTransactionBodySize(transaction) {
-  const bodyBytes = encoder.encode(JSON.stringify(transaction)).byteLength;
-  if (bodyBytes > MAX_TRANSACTION_BODY_BYTES) {
-    const inputCount = transaction.inputs?.length || 0;
-    const bodyKiB = Math.ceil(bodyBytes / 1024);
-    throw new Error(`Transaction is too large (${inputCount} inputs, ${bodyKiB} KiB; maximum 64 KiB). Try a smaller amount or consolidate this wallet’s UTXOs first.`);
-  }
-  return bodyBytes;
-}
-
-export function bytesToHex(bytes) {
-  return Array.from(bytes, (byte) => byte.toString(16).padStart(2, "0")).join("");
-}
-
-export function hexToBytes(hex) {
-  if (!/^[0-9a-f]*$/.test(hex) || hex.length % 2) throw new Error("Invalid hexadecimal value");
-  return Uint8Array.from(hex.match(/.{2}/g) || [], (pair) => Number.parseInt(pair, 16));
-}
-
-function base64url(bytes) {
-  let binary = "";
-  bytes.forEach((byte) => { binary += String.fromCharCode(byte); });
-  return btoa(binary).replaceAll("+", "-").replaceAll("/", "_").replace(/=+$/, "");
-}
-
-function fromBase64url(value) {
-  const normalized = value.replaceAll("-", "+").replaceAll("_", "/");
-  const binary = atob(normalized + "=".repeat((4 - normalized.length % 4) % 4));
-  return Uint8Array.from(binary, (character) => character.charCodeAt(0));
-}
-
-export async function walletFromSeed(seedPhrase) {
-  const normalized = normalizeSeed(seedPhrase);
-  const digest = new Uint8Array(await crypto.subtle.digest("SHA-256", encoder.encode(`iuna-wallet-seed:${normalized}`)));
-  const pkcs8Prefix = hexToBytes("302e020100300506032b657004220420");
-  const pkcs8 = new Uint8Array(pkcs8Prefix.length + digest.length);
-  pkcs8.set(pkcs8Prefix);
-  pkcs8.set(digest, pkcs8Prefix.length);
-  let privateKey;
-  try {
-    privateKey = await crypto.subtle.importKey("pkcs8", pkcs8, { name: "Ed25519" }, true, ["sign"]);
-  } catch {
-    throw new Error("This browser does not support secure Ed25519 keys. Use a recent version of Safari, Chrome, Edge, or Firefox.");
-  }
-  const jwk = await crypto.subtle.exportKey("jwk", privateKey);
+export async function walletFromEntropy(entropy) {
+  if (!(entropy instanceof Uint8Array) || entropy.length !== 32) throw new Error("Wallet entropy must be 32 bytes");
+  const pkcs8 = concat(PKCS8_ED25519_PREFIX, entropy);
+  // WebCrypto only derives the public key through an export, so a short-lived
+  // extractable copy is used for that; the retained signing key is non-extractable.
+  const exportable = await crypto.subtle.importKey("pkcs8", pkcs8, { name: "Ed25519" }, true, ["sign"]);
+  const jwk = await crypto.subtle.exportKey("jwk", exportable);
+  if (!jwk.x) throw new Error("This browser cannot derive an Ed25519 public key");
+  const privateKey = await crypto.subtle.importKey("pkcs8", pkcs8, { name: "Ed25519" }, false, ["sign"]);
+  pkcs8.fill(0);
   const publicKey = fromBase64url(jwk.x);
-  return { seedPhrase: normalized, privateKey, publicKey, publicKeyHex: bytesToHex(publicKey) };
-}
-
-export function normalizeSeed(seed) {
-  return seed.trim().toLowerCase().split(/\s+/).join(" ");
+  return { privateKey, publicKey, publicKeyHex: bytesHex(publicKey) };
 }
 
 export async function encryptWallet(seedPhrase, password, publicKeyHex) {
-  if (password.length < 10) throw new Error("Choose a password of at least 10 characters");
+  if (password.length < 10) throw new Error("Use a password of at least 10 characters");
   const salt = crypto.getRandomValues(new Uint8Array(16));
   const iv = crypto.getRandomValues(new Uint8Array(12));
-  const material = await crypto.subtle.importKey("raw", encoder.encode(password), "PBKDF2", false, ["deriveKey"]);
-  const key = await crypto.subtle.deriveKey(
-    { name: "PBKDF2", hash: "SHA-256", salt, iterations: 310_000 },
-    material,
-    { name: "AES-GCM", length: 256 },
-    false,
-    ["encrypt"],
-  );
-  const plaintext = encoder.encode(JSON.stringify({ seed: normalizeSeed(seedPhrase) }));
+  const key = await passwordKey(password, salt, ["encrypt"]);
+  const plaintext = encoder.encode(JSON.stringify({ seedPhrase: normalizeSeed(seedPhrase) }));
   const ciphertext = new Uint8Array(await crypto.subtle.encrypt(
-    { name: "AES-GCM", iv, additionalData: encoder.encode(publicKeyHex) },
-    key,
-    plaintext,
+    { name: "AES-GCM", iv, additionalData: encoder.encode(publicKeyHex) }, key, plaintext,
   ));
   return {
     version: 1,
-    address: publicKeyHex,
+    publicKey: publicKeyHex,
     kdf: "PBKDF2-SHA256",
     iterations: 310_000,
     cipher: "AES-256-GCM",
@@ -193,256 +56,183 @@ export async function encryptWallet(seedPhrase, password, publicKeyHex) {
   };
 }
 
-export async function decryptWallet(record, password) {
+export async function decryptWallet(record, password, entropyFromMnemonic) {
   try {
-    const material = await crypto.subtle.importKey("raw", encoder.encode(password), "PBKDF2", false, ["deriveKey"]);
-    const key = await crypto.subtle.deriveKey(
-      { name: "PBKDF2", hash: "SHA-256", salt: fromBase64url(record.salt), iterations: record.iterations },
-      material,
-      { name: "AES-GCM", length: 256 },
-      false,
-      ["decrypt"],
-    );
+    const salt = fromBase64url(record.salt);
+    const key = await passwordKey(password, salt, ["decrypt"]);
     const plaintext = await crypto.subtle.decrypt(
-      { name: "AES-GCM", iv: fromBase64url(record.iv), additionalData: encoder.encode(record.address) },
+      { name: "AES-GCM", iv: fromBase64url(record.iv), additionalData: encoder.encode(record.publicKey) },
       key,
       fromBase64url(record.ciphertext),
     );
-    const wallet = await walletFromSeed(JSON.parse(new TextDecoder().decode(plaintext)).seed);
-    if (wallet.publicKeyHex !== record.address) throw new Error("Address verification failed");
-    return wallet;
+    const { seedPhrase } = JSON.parse(new TextDecoder().decode(plaintext));
+    const wallet = await walletFromEntropy(await entropyFromMnemonic(seedPhrase));
+    if (wallet.publicKeyHex !== record.publicKey) throw new Error("public key mismatch");
+    return { ...wallet, seedPhrase };
   } catch {
     throw new Error("Incorrect password or damaged wallet");
   }
 }
 
-const CHARSET = "qpzry9x8gf2tvdw0s3jn54khce6mua7l";
-const BECH32M = 0x2bc830a3;
+async function passwordKey(password, salt, usages) {
+  const material = await crypto.subtle.importKey("raw", encoder.encode(password), "PBKDF2", false, ["deriveKey"]);
+  return crypto.subtle.deriveKey(
+    { name: "PBKDF2", hash: "SHA-256", salt, iterations: 310_000 },
+    material,
+    { name: "AES-GCM", length: 256 },
+    false,
+    usages,
+  );
+}
 
-function polymod(values) {
-  const generators = [0x3b6a57b2, 0x26508e6d, 0x1ea119fa, 0x3d4233dd, 0x2a1462b3];
-  let checksum = 1;
-  for (const value of values) {
-    const top = checksum >>> 25;
-    checksum = ((checksum & 0x1ffffff) << 5) ^ value;
-    for (let index = 0; index < 5; index += 1) if ((top >>> index) & 1) checksum ^= generators[index];
-    checksum >>>= 0;
+export async function fetchWalletView(endpoint, publicKeyHex) {
+  const path = `${endpoint}/api/public/wallet/${publicKeyHex}`;
+  // Keep every page on one Heartbeat tip. If the chain advances while paging, restart so input
+  // selection never mixes duplicate or skipped offsets from two different UTXO sets.
+  for (let attempt = 0; attempt < 3; attempt += 1) {
+    const first = await requestJson(path);
+    const utxos = [...first.utxos];
+    let offset = first.next_utxo_offset;
+    let consistent = true;
+    while (offset != null) {
+      const page = await requestJson(`${path}?utxo_offset=${offset}`);
+      if (page.tip_hash !== first.tip_hash) {
+        consistent = false;
+        break;
+      }
+      utxos.push(...page.utxos);
+      const next = page.next_utxo_offset;
+      if (next != null && next <= offset) throw new Error("The node returned an invalid wallet page");
+      offset = next;
+    }
+    if (consistent) return { ...first, utxos, utxos_truncated: false, next_utxo_offset: null };
   }
-  return checksum >>> 0;
+  throw new Error("The wallet changed while outputs were loading; try again");
 }
 
-function hrpExpand(hrp) {
-  return [...hrp].map((c) => c.charCodeAt(0) >>> 5).concat(0, [...hrp].map((c) => c.charCodeAt(0) & 31));
-}
-
-function convertBits(data, from, to, pad) {
-  let acc = 0;
-  let bits = 0;
-  const result = [];
-  const max = (1 << to) - 1;
-  for (const value of data) {
-    if (value >>> from) throw new Error("Invalid address data");
-    acc = ((acc << from) | value) & ((1 << (from + to - 1)) - 1);
-    bits += from;
-    while (bits >= to) { bits -= to; result.push((acc >>> bits) & max); }
-  }
-  if (pad && bits) result.push((acc << (to - bits)) & max);
-  else if (!pad && (bits >= from || ((acc << (to - bits)) & max))) throw new Error("Invalid address padding");
-  return result;
-}
-
-export function encodeAddress(publicKey, networkId = "iuna-mainnet-v1") {
-  const hrp = networkId.includes("testnet") || networkId.includes("e2e") ? "tiuna" : "iuna";
-  const data = [0, ...convertBits(publicKey, 8, 5, true)];
-  const values = [...hrpExpand(hrp), ...data, 0, 0, 0, 0, 0, 0];
-  const mod = (polymod(values) ^ BECH32M) >>> 0;
-  const checksum = Array.from({ length: 6 }, (_, index) => (mod >>> (5 * (5 - index))) & 31);
-  return `${hrp}1${[...data, ...checksum].map((value) => CHARSET[value]).join("")}`;
-}
-
-export function decodeAddress(address, expectedHrp = "iuna") {
-  const decoded = decodeVersionedAddress(address, expectedHrp);
-  if (decoded.version !== 0) throw new Error("This operation requires a legacy address");
-  return decoded.payloadHex;
-}
-
-export function decodeVersionedAddress(address, expectedHrp = "iuna") {
-  const normalized = address.trim().toLowerCase();
-  if (address !== address.toLowerCase() && address !== address.toUpperCase()) throw new Error("Address mixes uppercase and lowercase characters");
-  const separator = normalized.lastIndexOf("1");
-  if (separator < 1 || separator + 7 > normalized.length || normalized.slice(0, separator) !== expectedHrp) throw new Error(`This is not a valid ${expectedHrp} address`);
-  const data = [...normalized.slice(separator + 1)].map((char) => {
-    const value = CHARSET.indexOf(char);
-    if (value < 0) throw new Error("Address contains an invalid character");
-    return value;
+export async function submitTransaction(endpoint, transaction) {
+  return requestJson(`${endpoint}/api/public/transactions`, {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify(transaction),
   });
-  if (polymod([...hrpExpand(expectedHrp), ...data]) !== BECH32M) throw new Error("Address checksum is invalid");
-  const payload = data.slice(0, -6);
-  const version = payload.shift();
-  if (![0, 1].includes(version)) throw new Error("Unsupported address version");
-  const key = Uint8Array.from(convertBits(payload, 5, 8, false));
-  if (key.length !== 32) throw new Error("Invalid address key");
-  return { version, payloadHex: bytesToHex(key) };
 }
 
-function pushU32(target, value) {
-  const view = new DataView(new ArrayBuffer(4));
-  view.setUint32(0, value, false);
-  target.push(...new Uint8Array(view.buffer));
+async function requestJson(url, options) {
+  const response = await fetch(url, { cache: "no-store", ...options });
+  const isJson = (response.headers.get("content-type") || "").includes("application/json");
+  const body = isJson ? await response.json().catch(() => null) : null;
+  if (!response.ok) throw new Error(body?.error || `Request failed (${response.status})`);
+  if (!body || typeof body !== "object") throw new Error("The node returned an unexpected response; check the wallet endpoint");
+  return body;
 }
 
-function pushU64(target, value) {
-  const view = new DataView(new ArrayBuffer(8));
-  view.setBigUint64(0, BigInt(value), false);
-  target.push(...new Uint8Array(view.buffer));
-}
-
-function pushBytes(target, value) {
-  pushU32(target, value.length);
-  target.push(...value);
-}
-
-export function transferSigningBytes(status, inputs, outputs, fee) {
-  const bytes = [...encoder.encode("IUNA-TX"), 0, Number(status.transaction_signing_format_version || 1)];
-  pushBytes(bytes, encoder.encode(status.chain_id));
-  pushBytes(bytes, hexToBytes(status.genesis_hash));
-  bytes.push(1);
-  pushU32(bytes, inputs.length);
-  inputs.forEach((input) => {
-    pushBytes(bytes, hexToBytes(input.outpoint.txid));
-    pushU32(bytes, input.outpoint.index);
-    pushBytes(bytes, hexToBytes(input.owner));
+// The outputs a signed transaction spends, as `transaction_id:output_index` keys.
+export function spentOutpoints(transaction) {
+  return transaction.inputs.map(({ previous_output: output }) => {
+    const id = output.transaction_id.map((byte) => byte.toString(16).padStart(2, "0")).join("");
+    return `${id}:${output.output_index}`;
   });
-  pushU32(bytes, outputs.length);
-  outputs.forEach((output) => {
-    pushBytes(bytes, hexToBytes(output.address));
-    pushU64(bytes, output.amount);
-  });
-  pushU64(bytes, fee);
-  return Uint8Array.from(bytes);
 }
 
-function legacyTransferPayload(inputs, outputs, fee) {
-  const canonicalInputs = inputs.map((input) => `${input.outpoint.txid}:${input.outpoint.index}:${input.owner}`).join("|");
-  const canonicalOutputs = outputs.map((output) => `${output.address}:${output.amount}`).join("|");
-  return `utxo-transfer:${canonicalInputs}:${canonicalOutputs}:${fee}`;
+// A transaction spends all inputs at once, so one unspent input proves it was not mined: it left
+// the mempool without confirming and the coins never moved.
+export function sentStatus(item, view) {
+  if (!view?.tip_hash || (view.pending_transaction_ids || []).includes(item.id)) return "pending";
+  const unspent = new Set((view.utxos || []).map((utxo) => `${utxo.transaction_id}:${utxo.output_index}`));
+  return (item.inputs || []).some((input) => unspent.has(input)) ? "dropped" : "sent";
 }
 
-function compactLength(value) {
-  let n = BigInt(value);
-  let length = 1;
-  while (n >= 128n) { n >>= 7n; length += 1; }
-  return length;
-}
-
-function protocolIdSize(hex) { return 1 + hex.length / 2; }
-
-export function estimateTransferSize(inputs, outputs, fee) {
-  return 1 + compactLength(inputs.length)
-    + inputs.reduce((sum, input) => sum + protocolIdSize(input.outpoint.txid) + compactLength(input.outpoint.index) + 33, 0)
-    + compactLength(outputs.length)
-    + outputs.reduce((sum, output) => sum + 33 + compactLength(output.amount), 0)
-    + compactLength(fee) + 65;
-}
-
-export function selectInputs(utxos, amount, feeRate, owner, recipient) {
-  const sorted = [...utxos].sort((a, b) => Number(BigInt(b.output.amount) - BigInt(a.output.amount)));
+export async function buildSignedTransaction({ wallet, utxos, recipient, amount, fee }) {
+  const recipientKey = hexBytes(recipient);
+  if (recipientKey.length !== 32) throw new Error("Recipient must be a 64-character public key");
+  const required = BigInt(amount) + BigInt(fee);
+  if (amount <= 0 || fee < 0) throw new Error("Amount must be positive and fee cannot be negative");
+  if (!Array.isArray(utxos)) throw new Error("Wallet outputs are unavailable; reconnect to a node first");
+  const available = utxos
+    .filter((utxo) => !utxo.reserved)
+    .sort((left, right) => left.transaction_id.localeCompare(right.transaction_id) || left.output_index - right.output_index);
   const selected = [];
   let total = 0n;
-  let fee = 0n;
-  for (const utxo of sorted) {
-    selected.push({ outpoint: utxo.outpoint, owner });
-    total += BigInt(utxo.output.amount);
-    for (let pass = 0; pass < 8; pass += 1) {
-      const provisionalChange = total - amount - fee;
-      const outputs = [{ address: recipient, amount }];
-      if (provisionalChange > 0n) outputs.push({ address: owner, amount: provisionalChange });
-      const nextFee = BigInt(estimateTransferSize(selected, outputs, fee)) * BigInt(feeRate);
-      if (nextFee === fee) break;
-      fee = nextFee;
-    }
-    if (total >= amount + fee) return { inputs: selected, total, fee };
+  for (const utxo of available) {
+    selected.push(utxo);
+    total += BigInt(utxo.value);
+    if (total >= required) break;
   }
-  throw new Error("Insufficient spendable balance for the amount and network fee");
+  if (total < required) throw new Error("Insufficient spendable balance");
+  const transaction = {
+    version: 1,
+    inputs: selected.map((utxo) => ({
+      previous_output: {
+        transaction_id: [...hexBytes(utxo.transaction_id)],
+        output_index: utxo.output_index,
+      },
+      public_key: [...wallet.publicKey],
+      signature: [],
+    })),
+    outputs: [{ owner: [...recipientKey], value: Number(amount) }],
+  };
+  const change = total - required;
+  if (change > 0n) transaction.outputs.push({ owner: [...wallet.publicKey], value: Number(change) });
+  for (let index = 0; index < transaction.inputs.length; index += 1) {
+    const digest = await signingDigest(transaction, index, selected.map((utxo) => utxo.value));
+    transaction.inputs[index].signature = [...new Uint8Array(await crypto.subtle.sign("Ed25519", wallet.privateKey, digest))];
+  }
+  return transaction;
 }
 
-export async function buildSignedTransfer({ wallet, status, utxos, recipientAddress, amount, feeRate }) {
-  if (!wallet?.privateKey) throw new Error("This watch-only wallet cannot sign transactions");
-  const expectedHrp = status.chain_id.includes("testnet") || status.chain_id.includes("e2e") ? "tiuna" : "iuna";
-  const recipient = decodeAddress(recipientAddress, expectedHrp);
-  const selectedFeeRate = BigInt(feeRate ?? status.default_fee_per_byte ?? 1);
-  if (selectedFeeRate < 1n) throw new Error("Fee rate must be at least 1 µIUNA per byte");
-  const { inputs, total, fee } = selectInputs(utxos, amount, selectedFeeRate, wallet.publicKeyHex, recipient);
-  const outputs = [{ address: recipient, amount }];
-  const change = total - amount - fee;
-  if (change > 0n) outputs.push({ address: wallet.publicKeyHex, amount: change });
-  const activation = BigInt(status.transaction_signing_v1_activation_height || 1000);
-  const signingHeight = BigInt(status.height || 0) + 1n;
-  const signingPayload = signingHeight >= activation
-    ? transferSigningBytes(status, inputs, outputs, fee)
-    : encoder.encode(legacyTransferPayload(inputs, outputs, fee));
-  const signature = bytesToHex(new Uint8Array(await crypto.subtle.sign("Ed25519", wallet.privateKey, signingPayload)));
-  const transaction = {
-    kind: "transfer",
-    inputs: inputs.map((input) => ({ ...input, signature })),
-    outputs: outputs.map((output) => ({ ...output, amount: Number(output.amount) })),
-    fee: Number(fee),
-    signature,
-  };
-  ensureTransactionBodySize(transaction);
-  return { transaction, fee };
+// `inputValues` are signed too: a node reporting a wrong value yields an invalid signature instead
+// of change that silently pays the difference as a fee.
+export async function signingDigest(transaction, inputIndex, inputValues) {
+  const unsigned = canonicalTransaction(transaction, false);
+  const scope = concat(sized(encoder.encode(NETWORK_ID)), GENESIS_HASH);
+  return taggedHash("IUNA-TX-SIGN-v1", concat(scope, unsigned, ...inputValues.map(u64), u32(inputIndex)));
+}
+
+export function canonicalTransaction(transaction, includeSignatures = true) {
+  const chunks = [u16(transaction.version), u32(transaction.inputs.length)];
+  for (const input of transaction.inputs) {
+    chunks.push(new Uint8Array(input.previous_output.transaction_id), u32(input.previous_output.output_index), new Uint8Array(input.public_key));
+    if (includeSignatures) chunks.push(sized(new Uint8Array(input.signature)));
+  }
+  chunks.push(u32(transaction.outputs.length));
+  for (const output of transaction.outputs) chunks.push(new Uint8Array(output.owner), u64(output.value));
+  return concat(...chunks);
+}
+
+async function taggedHash(domain, bytes) {
+  return new Uint8Array(await crypto.subtle.digest("SHA-256", concat(u64(encoder.encode(domain).length), encoder.encode(domain), u64(bytes.length), bytes)));
 }
 
 export function parseIuna(value) {
-  const normalized = value.trim().replace(",", ".");
-  if (!/^\d+(\.\d{0,6})?$/.test(normalized)) throw new Error("Enter a valid amount (up to 6 decimal places)");
-  const [whole, fraction = ""] = normalized.split(".");
-  return BigInt(whole) * MICRO_IUNA + BigInt(fraction.padEnd(6, "0"));
+  const match = String(value).trim().match(/^(\d+)(?:\.(\d{1,8}))?$/);
+  if (!match) throw new Error("Use an IUNA amount with at most 8 decimals");
+  const amount = BigInt(match[1]) * 100_000_000n + BigInt((match[2] || "").padEnd(8, "0"));
+  if (amount > BigInt(Number.MAX_SAFE_INTEGER)) throw new Error("Amount is too large");
+  return Number(amount);
 }
 
-export function formatIuna(value, maximumFractionDigits = 6) {
+export function formatIuna(value) {
   const amount = BigInt(value || 0);
-  const whole = amount / MICRO_IUNA;
-  const fraction = (amount % MICRO_IUNA).toString().padStart(6, "0").slice(0, maximumFractionDigits).replace(/0+$/, "");
-  return `${whole.toLocaleString("en-US")}${fraction ? `.${fraction}` : ""}`;
+  const whole = amount / 100_000_000n;
+  const fraction = (amount % 100_000_000n).toString().padStart(8, "0").replace(/0+$/, "");
+  return fraction ? `${whole}.${fraction}` : whole.toString();
 }
 
-export function parseFeeRate(value) {
-  const normalized = String(value).trim();
-  if (!/^\d+$/.test(normalized) || BigInt(normalized) < 1n) {
-    throw new Error("Fee rate must be a whole number of at least 1 µIUNA per byte");
-  }
-  const feeRate = BigInt(normalized);
-  if (feeRate > BigInt(Number.MAX_SAFE_INTEGER)) throw new Error("Fee rate is too large");
-  return feeRate;
+export function hexBytes(value) {
+  const normalized = String(value).trim().toLowerCase();
+  if (!/^(?:[0-9a-f]{2})+$/.test(normalized)) throw new Error("Expected hexadecimal bytes");
+  return Uint8Array.from(normalized.match(/../g), (byte) => Number.parseInt(byte, 16));
 }
 
-export async function api(path, options = {}) {
-  const controller = new AbortController();
-  const timeout = window.setTimeout(() => controller.abort(), options.timeoutMs || 8_000);
-  const { timeoutMs: _timeoutMs, signal: callerSignal, ...requestOptions } = options;
-  if (callerSignal) callerSignal.addEventListener("abort", () => controller.abort(), { once: true });
-  let response;
-  try {
-    response = await fetch(`${API_BASE}${path}`, {
-      ...requestOptions,
-      signal: controller.signal,
-      headers: {
-        ...(requestOptions.method && requestOptions.method !== "GET" ? { "content-type": "application/json" } : {}),
-        ...(requestOptions.headers || {}),
-      },
-    });
-  } catch (error) {
-    if (error.name === "AbortError") throw new Error(`No response from iuna after ${(_timeoutMs || 8_000) / 1000} seconds`);
-    throw new Error("Could not connect to the iuna endpoint");
-  } finally {
-    window.clearTimeout(timeout);
-  }
-  let body;
-  try { body = await response.json(); } catch { body = {}; }
-  if (response.status === 413 && ["/transactions", "/transactions-v2"].includes(path) && requestOptions.method === "POST") {
-    throw new Error("Transaction is too large for the public endpoint. Try a smaller amount or consolidate this wallet’s UTXOs first.");
-  }
-  if (!response.ok) throw new Error(body.error || `Endpoint returned status ${response.status}`);
-  return body;
+export function bytesHex(bytes) {
+  return [...bytes].map((byte) => byte.toString(16).padStart(2, "0")).join("");
 }
+
+function u16(value) { const out = new Uint8Array(2); new DataView(out.buffer).setUint16(0, Number(value)); return out; }
+function u32(value) { const out = new Uint8Array(4); new DataView(out.buffer).setUint32(0, Number(value)); return out; }
+function u64(value) { const out = new Uint8Array(8); new DataView(out.buffer).setBigUint64(0, BigInt(value)); return out; }
+function sized(bytes) { return concat(u32(bytes.length), bytes); }
+function concat(...values) { const out = new Uint8Array(values.reduce((sum, value) => sum + value.length, 0)); let offset = 0; for (const value of values) { out.set(value, offset); offset += value.length; } return out; }
+function base64url(bytes) { return btoa(String.fromCharCode(...bytes)).replace(/\+/g, "-").replace(/\//g, "_").replace(/=+$/, ""); }
+function fromBase64url(value) { const normalized = value.replace(/-/g, "+").replace(/_/g, "/"); return Uint8Array.from(atob(normalized.padEnd(Math.ceil(normalized.length / 4) * 4, "=")), (character) => character.charCodeAt(0)); }

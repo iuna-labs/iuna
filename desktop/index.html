@@ -98,21 +98,27 @@
     </div>
     <h1>Starting iuna</h1>
     <p>The local node is starting. The management UI opens here when it is ready.</p>
-    <div id="status" class="status">Waiting for http://127.0.0.1:18661</div>
+    <div id="status" class="status">Waiting for http://127.0.0.1:8080</div>
   </main>
   <script>
-    const managementUrl = "http://127.0.0.1:18661/";
+    const managementUrl = "http://127.0.0.1:8080/";
     const statusEl = document.getElementById("status");
     let attempts = 0;
 
+    // Navigates only when the desktop shell confirms its own node owns the port, so a different
+    // server on that port never receives the token or IPC access.
     async function waitForNode() {
       attempts += 1;
       try {
-        await fetch(managementUrl, { method: "GET", mode: "no-cors", cache: "no-store" });
-        window.location.replace(managementUrl);
-      } catch (error) {
+        const token = await window.__TAURI__.core.invoke("desktop_operator_token");
+        if (token) {
+          window.location.replace(`${managementUrl}#operator-token=${encodeURIComponent(token)}`);
+          return;
+        }
         statusEl.textContent = `Waiting for ${managementUrl} (${attempts})`;
-        window.setTimeout(waitForNode, 700);
+        window.setTimeout(waitForNode, 300);
+      } catch (error) {
+        statusEl.textContent = `Could not start the local node: ${error}`;
       }
     }
 

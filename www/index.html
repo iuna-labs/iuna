@@ -5,7 +5,7 @@
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <meta name="color-scheme" content="dark">
   <meta name="theme-color" content="#0d0f10">
-  <meta name="description" content="iuna is an experimental L1 cryptocurrency designed to keep network power temporary. Download it, run a node, and help test the network.">
+  <meta name="description" content="iuna is an experimental cryptocurrency with one-minute Proof-of-Work Heartbeats and temporary Proof-of-Expenditure Ledger mining.">
   <meta name="robots" content="index, follow, max-image-preview:large">
   <link rel="canonical" href="https://getiuna.org/">
   <link rel="icon" href="/favicon.svg" type="image/svg+xml">
@@ -13,7 +13,7 @@
   <link rel="apple-touch-icon" href="/apple-touch-icon.png">
   <link rel="manifest" href="/site.webmanifest">
   <meta property="og:title" content="iuna — Network Power, Made Temporary">
-  <meta property="og:description" content="An experimental L1 cryptocurrency exploring an open alternative to conventional Proof of Work and Proof of Stake.">
+  <meta property="og:description" content="An experimental cryptocurrency combining a Heartbeat Chain with temporary Proof-of-Expenditure Ledger mining.">
   <meta property="og:type" content="website">
   <meta property="og:url" content="https://getiuna.org/">
   <meta property="og:site_name" content="iuna">
@@ -25,10 +25,10 @@
   <meta property="og:image:alt" content="iuna — Help test a different kind of network">
   <meta name="twitter:card" content="summary_large_image">
   <meta name="twitter:title" content="iuna — Network Power, Made Temporary">
-  <meta name="twitter:description" content="An experimental L1 cryptocurrency designed to keep network power temporary. Run a node and help test it.">
+  <meta name="twitter:description" content="One-minute Proof-of-Work Heartbeats and temporary Proof-of-Expenditure Ledger mining. Run a candidate mainnet node and help test it.">
   <meta name="twitter:image" content="https://getiuna.org/assets/og.png">
   <meta name="twitter:image:alt" content="iuna — Help test a different kind of network">
-  <title>iuna — An Experimental L1 With Temporary Network Power</title>
+  <title>iuna — Temporary Mining Power, Open Heartbeats</title>
   <script type="application/ld+json">
     {
       "@context": "https://schema.org",
@@ -38,7 +38,7 @@
           "@id": "https://getiuna.org/#website",
           "url": "https://getiuna.org/",
           "name": "iuna",
-          "description": "An experimental L1 cryptocurrency designed to keep network power temporary through open issuance, burns, and VDF-based pacing.",
+          "description": "An experimental cryptocurrency combining a Proof-of-Work Heartbeat Chain with temporary Proof-of-Expenditure Ledger mining.",
           "inLanguage": "en"
         },
         {
@@ -50,7 +50,7 @@
           "applicationCategory": "FinanceApplication",
           "operatingSystem": "Linux, macOS, Windows",
           "isAccessibleForFree": true,
-          "description": "Experimental node and wallet software for testing an L1 cryptocurrency designed to keep network power temporary."
+          "description": "Experimental node and wallet software for testing the iuna Heartbeat and Ledger chains."
         }
       ]
     }
@@ -451,7 +451,6 @@
     .comparison-card.pow { --chart-color: var(--amber); }
     .comparison-card.pos { --chart-color: var(--blue); }
     .comparison-card.pob { --chart-color: var(--green); background: linear-gradient(145deg, rgba(213, 245, 95, .055), transparent 68%); }
-    .comparison-card.pob .comparison-kind { color: var(--green); }
     .roadmap {
       position: relative;
       display: grid;
@@ -645,6 +644,7 @@
         <a href="#why">Why iuna</a>
         <a href="#how">How it works</a>
         <a href="/getting-started/">Getting started</a>
+        <a href="https://wallet.getiuna.org/">Wallet</a>
         <a href="#roadmap">Roadmap</a>
         <a href="/downloads/">Downloads</a>
       </nav>
@@ -655,8 +655,8 @@
       <div>
         <div class="eyebrow"><span class="dot"></span> Open experiment · Public testing</div>
         <h1>Cryptocurrency designed to keep power temporary.</h1>
-        <p class="lead">iuna is an experimental L1 exploring a more open alternative to conventional Proof of Work and Proof of Stake by separating issuance, block selection, and timing.</p>
-        <p class="hero-support">This is an experimental network under public testing—not a proven or production-ready system. Download the software, run an independent node, and report what you observe or where it fails.</p>
+        <p class="lead">iuna combines one-minute Proof-of-Work Heartbeats with a Ledger mined through temporary Proof of Expenditure.</p>
+        <p class="hero-support">iuna runs as a candidate mainnet: it is not mainnet yet, and the protocol remains experimental. The chain is intended to carry forward if the candidate is promoted, so coins will probably remain valid, but that is not guaranteed. Run an independent node and report what you observe or where it fails.</p>
         <div class="actions">
           <a class="button primary" href="/downloads/">Download iuna</a>
           <a class="button" href="/getting-started/">Getting started</a>
@@ -666,7 +666,7 @@
         </div>
       </div>
       <aside class="candidate-callout" aria-label="Why participation matters now">
-        <span class="callout-kicker">Mainnet candidate</span>
+        <span class="callout-kicker">candidate mainnet</span>
         <h2>We need people to test this network.</h2>
         <p>iuna needs independent nodes running across different devices and environments. Share your observations and failure reports so the experiment can be challenged in the open.</p>
         <div class="actions">
@@ -682,7 +682,7 @@
         <div class="section-head">
           <div class="section-meta"><span class="section-icon" aria-hidden="true"><svg><use href="#idea-icon"></use></svg></span><span class="section-kicker">The idea</span></div>
           <h2>What are we trying to change?</h2>
-          <p>Many networks give lasting influence to whoever already controls the most capital or mining scale. iuna tests a different balance: open coin issuance, lightweight finalization, and influence that expires.</p>
+          <p>Many networks give lasting influence to whoever already controls the most capital or mining scale. iuna tests a different balance: open Heartbeat mining and Ledger mining weight that expires.</p>
         </div>
         <div class="power-comparison" aria-labelledby="power-comparison-title">
           <div class="comparison-intro">
@@ -718,10 +718,10 @@
               <p>More stake brings proportionally more recurring influence and expected rewards, while the underlying stake remains owned.</p>
             </article>
             <article class="comparison-card pob">
-              <header><h4>iuna Proof of Burn</h4><span class="comparison-kind">Temporary cost</span></header>
+              <header><h4>iuna Proof of Expenditure</h4></header>
               <svg class="comparison-chart" viewBox="0 0 300 176" width="300" height="176" role="img" aria-labelledby="pob-chart-title pob-chart-desc">
-                <title id="pob-chart-title">iuna fixed-burn effect</title>
-                <desc id="pob-chart-desc">A flat line showing that a ten euro burn has the same temporary lottery weight at every existing wallet size.</desc>
+                <title id="pob-chart-title">iuna expenditure effect</title>
+                <desc id="pob-chart-desc">A flat line showing that the same expenditure buys the same temporary lottery weight at every existing wallet size.</desc>
                 <path class="chart-grid" d="M36 30H284M36 74H284M36 118H284"></path>
                 <path class="chart-axis" d="M36 18V146H288"></path>
                 <path class="chart-area" d="M38 77H282V145H38Z"></path>
@@ -729,7 +729,7 @@
                 <text class="chart-label" x="36" y="163">Existing wallet size →</text>
                 <text class="chart-label" x="8" y="82" text-anchor="middle" transform="rotate(-90 8 82)">Temporary weight →</text>
               </svg>
-              <p>A €10 burn buys the same temporary lottery weight for a small or large holder. It is spent, expires, and must be paid again.</p>
+              <p>The same expenditure buys the same temporary lottery weight for a small or large holder. It is paid to Heartbeat miners, expires, and must be paid again.</p>
             </article>
           </div>
         </div>
@@ -737,12 +737,12 @@
           <div class="principle-row">
             <span class="tag green">Temporary influence</span>
             <h3>No permanent seat at the table</h3>
-            <p>Finalization power is paid for again each time. Past participation does not become a permanent claim on the network.</p>
+            <p>Ledger mining weight is paid for again each time. Past participation does not become a permanent claim on the network.</p>
           </div>
           <div class="principle-row">
             <span class="tag cyan">Open entry</span>
-            <h3>New supply stays mineable</h3>
-            <p>Anyone can search for proof-of-work mine actions. Issuance is kept separate from block finalization.</p>
+            <h3>Heartbeats stay open</h3>
+            <p>Anyone can search for SHA-256 Heartbeats. Ticket expenditure and Ledger transaction fees reward published work.</p>
           </div>
           <div class="principle-row">
             <span class="tag amber">Still unproven</span>
@@ -757,28 +757,28 @@
       <div class="wrap">
         <div class="section-head">
           <div class="section-meta"><span class="section-icon" aria-hidden="true"><svg><use href="#mechanism-icon"></use></svg></span><span class="section-kicker">Under the hood</span></div>
-          <h2>Three mechanisms, three different jobs</h2>
-          <p>iuna separates coin issuance, block selection, and timing instead of asking one scarce resource to control everything.</p>
+          <h2>Two chains, one validated state</h2>
+          <p>Every full node validates the Heartbeat Chain, the Ledger Chain, and their shared UTXO state.</p>
         </div>
         <div class="mechanism-flow">
           <article class="mechanism-step">
-            <span class="mechanism-number">01 · Issue</span>
-            <h3>Proof of work creates IUNA</h3>
-            <p>Open proof-of-work mine actions introduce new coins without deciding who finalizes the next block.</p>
+            <span class="mechanism-number">01 · Heartbeat</span>
+            <h3>Proof of Work sets the pace</h3>
+            <p>SHA-256 Heartbeats target one minute, order ticket activity, and provide fresh public randomness.</p>
           </article>
           <article class="mechanism-step">
-            <span class="mechanism-number">02 · Select</span>
-            <h3>Burns enter a block lottery</h3>
-            <p>Nodes permanently spend IUNA for a temporary chance to finalize. That influence must be paid for again.</p>
+            <span class="mechanism-number">02 · Ticket</span>
+            <h3>Expenditure buys temporary weight</h3>
+            <p>A ticket spreads its budget across a chosen active duration. The budget is streamed to Heartbeat miners.</p>
           </article>
           <article class="mechanism-step">
-            <span class="mechanism-number">03 · Time</span>
-            <h3>A verifiable delay sets the pace</h3>
-            <p>Sequential work creates a checkable clock and gives fallback finalizers a predictable way to take over.</p>
+            <span class="mechanism-number">03 · Ledger</span>
+            <h3>A public lottery settles transactions</h3>
+            <p>About every ten Heartbeats, the best normalized ticket output wins the next Ledger block and its reward.</p>
           </article>
         </div>
         <div class="actions">
-          <a class="button" href="https://github.com/iuna-labs/iuna/blob/main/docs/protocol.md" target="_blank" rel="noopener noreferrer">Read the full protocol</a>
+          <a class="button" href="https://github.com/iuna-labs/iuna/blob/main/PLAN.md" target="_blank" rel="noopener noreferrer">Read the protocol plan</a>
         </div>
       </div>
     </section>
@@ -793,28 +793,28 @@
         <div class="roadmap" aria-label="iuna milestones">
           <article class="roadmap-item done">
             <span class="roadmap-dot" aria-hidden="true">✓</span>
-            <div class="roadmap-label"><span class="roadmap-status">Done · Devnet</span><h3>Development</h3></div>
-            <p>Build the core protocol, establish liveness, and test baseline stability.</p>
+            <div class="roadmap-label"><span class="roadmap-status">Done · Protocol core</span><h3>Build the protocol</h3></div>
+            <p>Implement Heartbeats, Ledger settlement, expenditure tickets, persistence, and P2P validation.</p>
           </article>
           <article class="roadmap-item done">
             <span class="roadmap-dot" aria-hidden="true">✓</span>
-            <div class="roadmap-label"><span class="roadmap-status">Done · 0–10,000 IUNA</span><h3>Hardening</h3></div>
-            <p>Security, bug fixes, documentation, and wider public testing.</p>
+            <div class="roadmap-label"><span class="roadmap-status">Done · Operator preview</span><h3>Node and wallet</h3></div>
+            <p>Expose separate chain projections, wallet commands, mining-ticket quotes, and secure local controls.</p>
           </article>
           <article class="roadmap-item now">
             <span class="roadmap-dot" aria-hidden="true">3</span>
-            <div class="roadmap-label"><span class="roadmap-status">Now · 10,000–25,000 IUNA</span><h3>Ecosystem</h3></div>
-            <p>More nodes, atomic BTC swaps using HTLCs, and community testing.</p>
+            <div class="roadmap-label"><span class="roadmap-status">Now · candidate mainnet</span><h3>Hardening</h3></div>
+            <p>Remove legacy protocol paths, expand adversarial tests, and run independent nodes across environments.</p>
           </article>
           <article class="roadmap-item">
             <span class="roadmap-dot" aria-hidden="true">4</span>
-            <div class="roadmap-label"><span class="roadmap-status">25,000–50,000 IUNA</span><h3>Market</h3></div>
-            <p>A small P2P BTC swap marketplace, real users, and organic price discovery.</p>
+            <div class="roadmap-label"><span class="roadmap-status">After evidence</span><h3>Freeze the candidate</h3></div>
+            <p>Freeze parameters only after the candidate's behavior is understood under real use.</p>
           </article>
           <article class="roadmap-item">
             <span class="roadmap-dot" aria-hidden="true">5</span>
-            <div class="roadmap-label"><span class="roadmap-status">50,000+ IUNA</span><h3>Exchange access</h3></div>
-            <p>Explore CEX listings only after sufficient stability, security, participation, and organic demand.</p>
+            <div class="roadmap-label"><span class="roadmap-status">Not scheduled</span><h3>Production decision</h3></div>
+            <p>Promote the candidate to mainnet only after security review, stable operation, and explicit launch planning.</p>
           </article>
         </div>
         <p class="roadmap-disclaimer">These milestones are directional, not promises, and may change as the experiment develops.</p>
@@ -840,7 +840,7 @@
         <footer class="footer">
           <div class="wrap footer-inner">
             <span>iuna <span aria-hidden="true">·</span> an open cryptocurrency experiment</span>
-            <span><a href="/getting-started/">Getting started</a> · <a href="/downloads/">Downloads</a> · <a href="https://github.com/iuna-labs/iuna" target="_blank" rel="noopener noreferrer">Source</a> · <a href="https://discord.gg/wdk8cjkj2G" target="_blank" rel="noopener noreferrer">Discord</a></span>
+            <span><a href="/getting-started/">Getting started</a> · <a href="https://wallet.getiuna.org/">Wallet</a> · <a href="/downloads/">Downloads</a> · <a href="https://github.com/iuna-labs/iuna" target="_blank" rel="noopener noreferrer">Source</a> · <a href="https://discord.gg/wdk8cjkj2G" target="_blank" rel="noopener noreferrer">Discord</a></span>
           </div>
         </footer>
       </div>

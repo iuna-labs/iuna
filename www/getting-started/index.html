@@ -5,7 +5,7 @@
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <meta name="color-scheme" content="dark">
   <meta name="theme-color" content="#0d0f10">
-  <meta name="description" content="Choose a practical iuna node setup for older hardware, modern systems, or low-energy devices, and learn when to mine, burn, and accept inbound peers.">
+  <meta name="description" content="Choose a practical iuna node setup and learn when to use Hash mining, Ticket mining, and inbound P2P.">
   <meta name="robots" content="index, follow, max-image-preview:large">
   <link rel="canonical" href="https://getiuna.org/getting-started/">
   <link rel="icon" href="/favicon.svg" type="image/svg+xml">
@@ -13,7 +13,7 @@
   <link rel="apple-touch-icon" href="/apple-touch-icon.png">
   <link rel="manifest" href="/site.webmanifest">
   <meta property="og:title" content="Getting started with iuna">
-  <meta property="og:description" content="A short guide to mining, burning, hardware choices, and running a helpful iuna node.">
+  <meta property="og:description" content="A short guide to Hash mining, Ticket mining, hardware choices, and running a helpful iuna node.">
   <meta property="og:type" content="website">
   <meta property="og:url" content="https://getiuna.org/getting-started/">
   <meta property="og:site_name" content="iuna">
@@ -25,7 +25,7 @@
   <meta property="og:image:alt" content="iuna — Help test a different kind of network">
   <meta name="twitter:card" content="summary_large_image">
   <meta name="twitter:title" content="Getting started with iuna">
-  <meta name="twitter:description" content="A short guide to mining, burning, hardware choices, and running a helpful iuna node.">
+  <meta name="twitter:description" content="A short guide to Hash mining, Ticket mining, hardware choices, and running a helpful iuna node.">
   <meta name="twitter:image" content="https://getiuna.org/assets/og.png">
   <meta name="twitter:image:alt" content="iuna — Help test a different kind of network">
   <title>Getting started with iuna</title>
@@ -41,7 +41,7 @@
       <nav aria-label="Page sections">
         <a href="/">Home</a>
         <a href="/getting-started/" aria-current="page">Getting started</a>
-        <a href="https://github.com/iuna-labs/iuna/blob/main/docs/protocol.md" target="_blank" rel="noopener noreferrer">Protocol</a>
+        <a href="https://github.com/iuna-labs/iuna/blob/main/PLAN.md" target="_blank" rel="noopener noreferrer">Protocol</a>
         <a href="https://github.com/iuna-labs/iuna" target="_blank" rel="noopener noreferrer">Source</a>
         <a href="/downloads/">Downloads</a>
       </nav>
@@ -94,7 +94,7 @@
           </fieldset>
 
           <fieldset class="choice-group" data-choice-group="network">
-            <legend><span>3</span> Can TCP port 9444 be public?</legend>
+            <legend><span>3</span> Can TCP port 19733 be public?</legend>
             <div class="choice-options">
               <button type="button" class="choice-option" data-value="public" aria-pressed="false">
                 <strong>Yes, accept inbound peers</strong>
@@ -113,7 +113,7 @@
             <span class="configurator-next-arrow" aria-hidden="true">→</span>
           </button>
         </div>
-        <noscript><p class="safety-note">This interactive guide requires JavaScript. You can still download iuna and choose conservative defaults: non-listening node, mining off, and the lowest practical burn.</p></noscript>
+        <noscript><p class="safety-note">This interactive guide requires JavaScript. You can still run a node with outbound P2P only, Hash mining off, and no mining ticket.</p></noscript>
       </div>
 
       <div class="recommendation" data-recommendation hidden aria-labelledby="recommendation-title">
@@ -129,10 +129,10 @@
           <li class="plan-step">
             <span class="plan-number">1</span>
             <div>
-              <span class="plan-label">Download</span>
-              <h3>Install iuna</h3>
-              <p>Download the desktop app for the simplest setup, or the node binary if you prefer the command line.</p>
-              <a class="button" href="/downloads/">Choose a download</a>
+              <span class="plan-label">Build</span>
+              <h3>Run a node</h3>
+              <p>Build the dedicated development-node binary from source. Packaged desktop releases are not available for this new network yet.</p>
+              <a class="button" href="/downloads/">Build instructions</a>
             </div>
           </li>
           <li class="plan-step">
@@ -146,15 +146,15 @@
           <li class="plan-step">
             <span class="plan-number">3</span>
             <div>
-              <span class="plan-label">Mine &amp; burn</span>
+              <span class="plan-label">Hash &amp; ticket mining</span>
               <div class="settings-result">
                 <div><strong data-mine-title></strong><span data-mine-copy></span></div>
-                <div><strong data-burn-title></strong><span data-burn-copy></span></div>
+                <div><strong data-ticket-title></strong><span data-ticket-copy></span></div>
               </div>
             </div>
           </li>
         </ol>
-        <p class="recommendation-note">Mining creates new IUNA. Burning spends existing IUNA for temporary tickets that can finalize blocks and earn fees. These are conservative starting points, not profitability promises.</p>
+        <p class="recommendation-note">Hash mining produces Heartbeats. Ticket mining spends an IUNA budget for temporary Ledger lottery weight; the budget is paid to Heartbeat miners. These are conservative starting points, not profitability promises.</p>
       </div>
     </section>
   </main>

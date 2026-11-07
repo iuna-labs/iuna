@@ -7,12 +7,15 @@ x-iuna-node: &iuna-node
   image: iuna-local-testnet:latest
   init: true
   restart: unless-stopped
+  environment:
+    IUNA_WALLET_PASSWORD: ${IUNA_TESTNET_PASSWORD:-testtesttest}
+    IUNA_INSECURE_OPERATOR_API: "1"
   healthcheck:
-    test: ["CMD", "curl", "-fsS", "http://127.0.0.1:18661/api/auth/status"]
-    interval: 10s
+    test: ["CMD", "curl", "-fsS", "http://127.0.0.1:8080/api/status"]
+    interval: 5s
     timeout: 3s
     retries: 12
-    start_period: 10s
+    start_period: 5s
 
 services:
   website:
@@ -27,19 +30,19 @@ services:
 
   bootstrap:
     <<: *iuna-node
-    hostname: iuna-bootstrap
-    environment:
-      IUNA_WALLET_PASSWORD: ${IUNA_TESTNET_PASSWORD:-testtesttest}
-      IUNA_SETUP_COMPLETE: "true"
-      IUNA_LOCAL_TESTNET: "true"
-      IUNA_AUTOMATIC_BURN_ENABLED: "true"
-      IUNA_POW_MINING_ENABLED: "false"
-    entrypoint: ["/bin/sh", "-c"]
     command:
-      - if [ -s /data/chain.sqlite3 ]; then exec iuna --data-dir /data --http 0.0.0.0:18661 --p2p 0.0.0.0:9444 --p2p-announce 172.28.0.10:9444 --debug; else exec iuna --genesis --data-dir /data --http 0.0.0.0:18661 --p2p 0.0.0.0:9444 --p2p-announce 172.28.0.10:9444 --debug; fi
+      - --data-dir
+      - /data
+      - --http
+      - 0.0.0.0:8080
+      - --p2p
+      - 0.0.0.0:19733
+      - --wallet-endpoint
+      - 0.0.0.0:18662
     ports:
-      - "8661:18661"
-      - "19444:9444"
+      - "127.0.0.1:8081:8080"
+      - "127.0.0.1:18662:18662"
+      - "19733:19733"
     volumes:
       - bootstrap-data:/data
     networks:
@@ -48,129 +51,25 @@ services:
 
   node2:
     <<: *iuna-node
-    hostname: iuna-node2
-    environment:
-      IUNA_WALLET_PASSWORD: ${IUNA_TESTNET_PASSWORD:-testtesttest}
-      IUNA_SETUP_COMPLETE: "true"
-      IUNA_LOCAL_TESTNET: "true"
-      IUNA_AUTOMATIC_BURN_ENABLED: "true"
-      IUNA_POW_MINING_ENABLED: "true"
-      IUNA_POW_MINING_WORKERS: "1"
-    entrypoint: ["/bin/sh", "-c"]
     command:
-      - exec iuna --join 172.28.0.10:9444 --data-dir /data --http 0.0.0.0:18661 --p2p 0.0.0.0:9444 --p2p-announce 172.28.0.11:9444 --debug
+      - --data-dir
+      - /data
+      - --http
+      - 0.0.0.0:8080
+      - --p2p
+      - 0.0.0.0:19733
+      - --peer
+      - 172.28.0.10:19733
     depends_on:
       bootstrap:
         condition: service_healthy
     ports:
-      - "8662:18661"
-      - "19445:9444"
+      - "127.0.0.1:8082:8080"
     volumes:
       - node2-data:/data
     networks:
       iuna-testnet:
         ipv4_address: 172.28.0.11
-
-  node3:
-    <<: *iuna-node
-    hostname: iuna-node3
-    environment:
-      IUNA_WALLET_PASSWORD: ${IUNA_TESTNET_PASSWORD:-testtesttest}
-      IUNA_SETUP_COMPLETE: "true"
-      IUNA_LOCAL_TESTNET: "true"
-      IUNA_AUTOMATIC_BURN_ENABLED: "true"
-      IUNA_POW_MINING_ENABLED: "true"
-      IUNA_POW_MINING_WORKERS: "1"
-    entrypoint: ["/bin/sh", "-c"]
-    command:
-      - exec iuna --join 172.28.0.10:9444 --data-dir /data --http 0.0.0.0:18661 --p2p 0.0.0.0:9444 --p2p-announce 172.28.0.12:9444 --stratum 0.0.0.0:3333 --debug
-    depends_on:
-      bootstrap:
-        condition: service_healthy
-    ports:
-      - "8663:18661"
-      - "19446:9444"
-      - "3333:3333"
-    volumes:
-      - node3-data:/data
-    networks:
-      iuna-testnet:
-        ipv4_address: 172.28.0.12
-
-  node4:
-    <<: *iuna-node
-    hostname: iuna-node4
-    environment:
-      IUNA_WALLET_PASSWORD: ${IUNA_TESTNET_PASSWORD:-testtesttest}
-      IUNA_SETUP_COMPLETE: "true"
-      IUNA_LOCAL_TESTNET: "true"
-      IUNA_AUTOMATIC_BURN_ENABLED: "true"
-      IUNA_POW_MINING_ENABLED: "true"
-      IUNA_POW_MINING_WORKERS: "1"
-    entrypoint: ["/bin/sh", "-c"]
-    command:
-      - exec iuna --join 172.28.0.10:9444 --data-dir /data --http 0.0.0.0:18661 --p2p 0.0.0.0:9444 --p2p-announce 172.28.0.13:9444 --debug
-    depends_on:
-      bootstrap:
-        condition: service_healthy
-    ports:
-      - "8664:18661"
-      - "19447:9444"
-    volumes:
-      - node4-data:/data
-    networks:
-      iuna-testnet:
-        ipv4_address: 172.28.0.13
-
-  node5:
-    <<: *iuna-node
-    hostname: iuna-node5
-    environment:
-      IUNA_WALLET_PASSWORD: ${IUNA_TESTNET_PASSWORD:-testtesttest}
-      IUNA_SETUP_COMPLETE: "true"
-      IUNA_LOCAL_TESTNET: "true"
-      IUNA_AUTOMATIC_BURN_ENABLED: "true"
-      IUNA_POW_MINING_ENABLED: "true"
-      IUNA_POW_MINING_WORKERS: "1"
-    entrypoint: ["/bin/sh", "-c"]
-    command:
-      - exec iuna --join 172.28.0.10:9444 --data-dir /data --http 0.0.0.0:18661 --p2p 0.0.0.0:9444 --p2p-announce 172.28.0.14:9444 --debug
-    depends_on:
-      bootstrap:
-        condition: service_healthy
-    ports:
-      - "8665:18661"
-      - "19448:9444"
-    volumes:
-      - node5-data:/data
-    networks:
-      iuna-testnet:
-        ipv4_address: 172.28.0.14
-
-  node6:
-    <<: *iuna-node
-    hostname: iuna-node6
-    environment:
-      IUNA_WALLET_PASSWORD: ${IUNA_TESTNET_PASSWORD:-testtesttest}
-      IUNA_SETUP_COMPLETE: "true"
-      IUNA_LOCAL_TESTNET: "true"
-      IUNA_AUTOMATIC_BURN_ENABLED: "true"
-      IUNA_POW_MINING_ENABLED: "true"
-      IUNA_POW_MINING_WORKERS: "1"
-    entrypoint: ["/bin/sh", "-c"]
-    command:
-      - exec iuna --join 172.28.0.10:9444 --data-dir /data --http 0.0.0.0:18661 --p2p 0.0.0.0:9444 --p2p-announce 172.28.0.15:9444 --debug
-    depends_on:
-      bootstrap:
-        condition: service_healthy
-    ports:
-      - "8666:18661"
-      - "19449:9444"
-    volumes:
-      - node6-data:/data
-    networks:
-      iuna-testnet:
-        ipv4_address: 172.28.0.15
 
 networks:
   iuna-testnet:
@@ -182,7 +81,3 @@ networks:
 volumes:
   bootstrap-data:
   node2-data:
-  node3-data:
-  node4-data:
-  node5-data:
-  node6-data:

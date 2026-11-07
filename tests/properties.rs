@@ -1,636 +1,312 @@
 #![cfg(feature = "e2e")]
 
-use std::{
-    net::{Ipv4Addr, SocketAddr, TcpListener as StdTcpListener},
-    path::Path,
-    sync::Arc,
-    time::Duration,
-};
+use std::{net::SocketAddr, sync::Arc, time::Duration};
 
-use anyhow::{Context, Result, bail};
 use iuna::{
-    adapters::{
-        chain_store::SqliteChainStore, p2p::GossipNetwork, stratum::StratumServer, wallet_store,
+    adapters::{consensus_network::ConsensusNetwork, consensus_store::ConsensusChainStore},
+    app::{
+        consensus_node::Node,
+        wallet_commands::{TicketParameters, Wallet},
     },
-    app::{NodeCore, PeerBook, SharedNode, SharedPeerBook, now_ms},
-    domain::{
-        FinalizerMode, Ledger, OBJECTIVE_FINALITY_ACTIVATION_HEIGHT, Transaction,
-        VDF_TARGET_BLOCK_MS, Wallet, configure_e2e_vdf_round_divisor_for_tests, run_vdf,
-        verify_vdf,
+    consensus::{
+        GENESIS_TIMESTAMP, HEARTBEAT_TARGET_INTERVAL_SECS, Hash, INITIAL_LEDGER_SUBSIDY,
+        MAX_TICKET_DURATION, minimum_ticket_budget,
     },
 };
-use serde_json::{Value, json};
-use tempfile::tempdir;
-use tokio::{
-    io::{AsyncBufReadExt, AsyncWriteExt, BufReader},
-    net::TcpStream,
-    sync::Mutex,
-    time::{sleep, timeout},
-};
+use proptest::prelude::*;
+use tokio::{io::AsyncReadExt, sync::Mutex};
 
-const SOAK_BLOCKS: u64 = 12;
-const SOAK_VDF_ROUND_DIVISOR: u64 = 100;
-const BURN_COLLECTION_MS: u64 = VDF_TARGET_BLOCK_MS / 20 + 1;
-const SOAK_START_HEIGHT: u64 = OBJECTIVE_FINALITY_ACTIVATION_HEIGHT + 1;
-const FIXTURE_SERVICES: [&str; 6] = ["bootstrap", "node2", "node3", "node4", "node5", "node6"];
+const GENESIS_SECRET: [u8; 32] = [
+    0x9d, 0x61, 0xb1, 0x9d, 0xef, 0xfd, 0x5a, 0x60, 0xba, 0x84, 0x4a, 0xf4, 0x92, 0xec, 0x2c, 0xc4,
+    0x44, 0x49, 0xc5, 0x69, 0x7b, 0x32, 0x69, 0x19, 0x70, 0x3b, 0xac, 0x03, 0x1c, 0xae, 0x7f, 0x60,
+];
 
-#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-#[ignore = "long-running post-activation soak; run with cargo test --release --features e2e --test properties -- --ignored"]
-async fn release_soak_post_activation_auto_finalization_p2p_stratum_and_restarts() -> Result<()> {
-    configure_e2e_vdf_round_divisor_for_tests(SOAK_VDF_ROUND_DIVISOR);
-    let (wallets, genesis) = post_activation_fixture()?;
-    let p2p_addrs = reserve_loopback_addrs(wallets.len())?;
-    let stratum_addr = reserve_loopback_addrs(1)?.remove(0);
-    let store_dirs = (0..wallets.len())
-        .map(|_| tempdir())
-        .collect::<std::result::Result<Vec<_>, _>>()?;
-    let stores = store_dirs
-        .iter()
-        .map(|dir| SqliteChainStore::open(dir.path().join("chain.sqlite3")))
-        .collect::<Result<Vec<_>>>()?;
-    let mut nodes = Vec::new();
-
-    for (index, wallet) in wallets.iter().cloned().enumerate() {
-        let burn_per_block = if index == 0 { 2 } else { 0 };
-        let mut core = NodeCore::from_ledger_with_burn_fee_and_enabled(
-            wallet,
-            genesis.clone(),
-            true,
-            burn_per_block,
-            1,
-        );
-        core.set_recovery_vdf_top_rank_percent(0);
-        let node = Arc::new(Mutex::new(core));
-        let peer_addresses = p2p_addrs
-            .iter()
-            .enumerate()
-            .filter(|(peer_index, _)| *peer_index != index)
-            .map(|(_, addr)| addr.to_string())
-            .collect::<Vec<_>>();
-        let peers = Arc::new(Mutex::new(PeerBook::from_addresses(peer_addresses)));
-        let network =
-            GossipNetwork::start(node.clone(), peers.clone(), p2p_addrs[index], None, true).await?;
-        nodes.push(SoakNode {
-            wallet: wallets[index].clone(),
-            burn_per_block,
-            node,
-            peers,
-            network,
-            store: stores[index].clone(),
-        });
+proptest! {
+    #[test]
+    fn minimum_ticket_budget_is_defined_for_every_valid_duration(
+        duration in 1_u64..=MAX_TICKET_DURATION,
+        reward in 0_u64..=INITIAL_LEDGER_SUBSIDY,
+    ) {
+        let budget = minimum_ticket_budget(duration, reward).unwrap();
+        prop_assert!(budget > 0);
+        prop_assert!(budget <= iuna::consensus::MAX_MONEY);
     }
+}
 
-    let _stratum = StratumServer::start(
-        nodes[0].node.clone(),
-        nodes[0].network.clone(),
-        stratum_addr,
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[ignore = "requires permission to bind local TCP sockets"]
+async fn three_nodes_regossip_persist_and_resume_a_heartbeat() {
+    let directory = tempfile::tempdir().unwrap();
+    let source_store = ConsensusChainStore::open(directory.path().join("source.sqlite3")).unwrap();
+    let relay_store = ConsensusChainStore::open(directory.path().join("relay.sqlite3")).unwrap();
+    let target_store = ConsensusChainStore::open(directory.path().join("target.sqlite3")).unwrap();
+    let source = Arc::new(Mutex::new(Node::open(source_store.clone()).unwrap()));
+    let target = Arc::new(Mutex::new(Node::open(target_store.clone()).unwrap()));
+    let relay = Arc::new(Mutex::new(Node::open(relay_store).unwrap()));
+    let target_network = ConsensusNetwork::start(
+        Arc::clone(&target),
+        "127.0.0.1:0".parse().unwrap(),
+        Vec::new(),
     )
-    .await?;
-    let stratum_worker = nodes[1]
-        .node
-        .lock()
-        .await
-        .wallet_receive_address()
-        .context("release-soak wallet must have a checksummed receive address")?;
-    assert_stratum_serves_work(stratum_addr, &stratum_worker).await?;
-    sleep(Duration::from_secs(2)).await;
-
-    for target_height in (SOAK_START_HEIGHT + 1)..=(SOAK_START_HEIGHT + SOAK_BLOCKS) {
-        finalize_one_block(&nodes, target_height, None).await?;
-        wait_for_convergence(&nodes, target_height, Duration::from_secs(8)).await?;
-
-        if target_height % 3 == 0 {
-            restart_node_core(&nodes[1]).await?;
-            wait_for_convergence(&nodes, target_height, Duration::from_secs(8)).await?;
-        }
-        if target_height % 4 == 0 {
-            restart_node_core(&nodes[2]).await?;
-            wait_for_convergence(&nodes, target_height, Duration::from_secs(8)).await?;
-        }
-    }
-
-    let final_tip = nodes[0].node.lock().await.chain_tip_hash();
-    for node in &nodes {
-        let core = node.node.lock().await;
-        assert_eq!(core.chain_tip_hash(), final_tip);
-        assert!(core.chain_height() > OBJECTIVE_FINALITY_ACTIVATION_HEIGHT);
-        assert!(
-            core.status()
-                .chain
-                .finalized_height
-                .is_some_and(|height| height >= OBJECTIVE_FINALITY_ACTIVATION_HEIGHT)
-        );
-    }
-    assert!(configured_automatic_burn_was_included(&nodes[0]).await);
-    Ok(())
-}
-
-#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-#[ignore = "accelerated post-activation P2P recovery partition; run with cargo test --release --features e2e --test properties -- --ignored"]
-async fn post_activation_p2p_partition_recovers_converges_and_resumes_tickets() -> Result<()> {
-    configure_e2e_vdf_round_divisor_for_tests(SOAK_VDF_ROUND_DIVISOR);
-    let (wallets, parent) = post_activation_fixture()?;
-    let wallets = &wallets[..4];
-    let p2p_addrs = reserve_loopback_addrs(wallets.len())?;
-    let store_dirs = (0..wallets.len())
-        .map(|_| tempdir())
-        .collect::<std::result::Result<Vec<_>, _>>()?;
-    let stores = store_dirs
-        .iter()
-        .map(|dir| SqliteChainStore::open(dir.path().join("chain.sqlite3")))
-        .collect::<Result<Vec<_>>>()?;
-    let mut nodes = Vec::new();
-
-    for (index, wallet) in wallets.iter().cloned().enumerate() {
-        let island = if index < 2 { 0..2 } else { 2..4 };
-        let peer_addresses = island
-            .filter(|peer_index| *peer_index != index)
-            .map(|peer_index| p2p_addrs[peer_index].to_string())
-            .collect::<Vec<_>>();
-        let mut core = NodeCore::from_ledger_with_burn_fee_and_enabled(
-            wallet.clone(),
-            parent.clone(),
-            true,
-            2,
-            1,
-        );
-        core.set_recovery_vdf_top_rank_percent(100);
-        let node = Arc::new(Mutex::new(core));
-        let peers = Arc::new(Mutex::new(PeerBook::from_addresses(peer_addresses)));
-        let network =
-            GossipNetwork::start(node.clone(), peers.clone(), p2p_addrs[index], None, true).await?;
-        nodes.push(SoakNode {
-            wallet,
-            burn_per_block: 2,
-            node,
-            peers,
-            network,
-            store: stores[index].clone(),
-        });
-    }
-    sleep(Duration::from_secs(2)).await;
-
-    let recovery_height = parent.height() + 1;
-    let recovery_timestamp = parent.recovery_block_min_timestamp();
-    let left_block = produce_recovery_block(&nodes[0], recovery_timestamp).await?;
-    let right_block = produce_recovery_block(&nodes[2], recovery_timestamp).await?;
-    assert_ne!(left_block.hash, right_block.hash);
-    wait_for_convergence(&nodes[..2], recovery_height, Duration::from_secs(8)).await?;
-    wait_for_convergence(&nodes[2..], recovery_height, Duration::from_secs(8)).await?;
-    assert_eq!(nodes[0].node.lock().await.chain_tip_hash(), left_block.hash);
-    assert_eq!(
-        nodes[2].node.lock().await.chain_tip_hash(),
-        right_block.hash
-    );
-
-    nodes[0]
-        .peers
-        .lock()
-        .await
-        .add_peer(p2p_addrs[2].to_string());
-    nodes[2]
-        .peers
-        .lock()
-        .await
-        .add_peer(p2p_addrs[0].to_string());
-    wait_for_convergence(&nodes, recovery_height, Duration::from_secs(20)).await?;
-
-    let converged_recovery_hash = nodes[0].node.lock().await.chain_tip_hash();
-    for node in &nodes {
-        let core = node.node.lock().await;
-        assert_eq!(core.chain_tip_hash(), converged_recovery_hash);
-        assert_eq!(
-            core.chain()
-                .last()
-                .context("P2P recovery chain has no tip")?
-                .finalizer_mode,
-            FinalizerMode::Recovery
-        );
-    }
-
-    restart_node_core(&nodes[3]).await?;
-    wait_for_convergence(&nodes, recovery_height, Duration::from_secs(8)).await?;
-    // The committed fixture has historical timestamps, so wall-clock time is
-    // already beyond the next recovery deadline. Exercise ticket resumption
-    // immediately after the recovery block instead.
-    finalize_one_block(
-        &nodes,
-        recovery_height + 1,
-        Some(recovery_timestamp.saturating_add(1)),
+    .await
+    .unwrap();
+    let relay_network = ConsensusNetwork::start(
+        Arc::clone(&relay),
+        "127.0.0.1:0".parse().unwrap(),
+        vec![target_network.local_addr().into()],
     )
-    .await?;
-    wait_for_convergence(&nodes, recovery_height + 1, Duration::from_secs(8)).await?;
-    for node in &nodes {
-        let core = node.node.lock().await;
-        let tip = core
-            .chain()
-            .last()
-            .context("continued P2P chain has no tip")?;
-        assert_eq!(tip.finalizer_mode, FinalizerMode::Ticket);
-        assert_eq!(tip.finalizer_rank, 0);
-        assert_eq!(
-            core.ledger().objective_finality_checkpoint(),
-            Some((recovery_height, converged_recovery_hash.as_str()))
-        );
-    }
-    Ok(())
-}
+    .await
+    .unwrap();
+    let source_network = ConsensusNetwork::start(
+        Arc::clone(&source),
+        "127.0.0.1:0".parse().unwrap(),
+        vec![relay_network.local_addr().into()],
+    )
+    .await
+    .unwrap();
+    tokio::time::sleep(Duration::from_millis(100)).await;
 
-#[test]
-#[ignore = "accelerated post-activation recovery soak; run with cargo test --release --features e2e --test properties -- --ignored"]
-fn post_activation_recovery_candidates_converge_and_ticket_finalization_resumes() -> Result<()> {
-    configure_e2e_vdf_round_divisor_for_tests(SOAK_VDF_ROUND_DIVISOR);
-    let (wallets, parent) = post_activation_fixture()?;
-    let recovery_height = parent.height() + 1;
-    let recovery_timestamp = parent.recovery_block_min_timestamp();
-
-    let mut branches = Vec::new();
-    for wallet in &wallets {
-        let mut candidate = NodeCore::from_ledger_with_burn_fee_and_enabled(
-            wallet.clone(),
-            parent.clone(),
-            true,
-            2,
-            1,
-        );
-        candidate.set_recovery_vdf_top_rank_percent(100);
-        let _ = candidate.prepare_automatic_finalization(recovery_timestamp);
-        let Ok(mut branch) = candidate.wallet_view_ledger() else {
-            continue;
-        };
-        let block = branch.mine_recovery_block(wallet, recovery_timestamp)?;
-        assert_eq!(block.height, recovery_height);
-        assert_eq!(block.finalizer_mode, FinalizerMode::Recovery);
-        assert!(verify_vdf(
-            &block.vdf_seed(),
-            block.vdf_rounds,
-            &block.vdf_output
-        ));
-        branch.apply_locally_mined_block(block.clone())?;
-        branches.push((branch, block));
-        if branches.len() == 2 {
-            break;
-        }
-    }
-    if branches.len() < 2 {
-        bail!("post-activation fixture needs two funded recovery candidates");
-    }
-
-    let (mut left, left_block) = branches.remove(0);
-    let (mut right, right_block) = branches.remove(0);
-    assert_ne!(left_block.hash, right_block.hash);
-    let left_snapshot = left.snapshot();
-    let right_snapshot = right.snapshot();
-
-    left.extend_from_preverified_snapshot_for_e2e(right_snapshot)?;
-    right.extend_from_preverified_snapshot_for_e2e(left_snapshot)?;
-    assert_eq!(left.height(), recovery_height);
-    assert_eq!(right.height(), recovery_height);
-    assert_eq!(left.tip_hash(), right.tip_hash());
-    assert_eq!(
-        left.chain()
-            .last()
-            .context("converged recovery chain has no tip")?
-            .finalizer_mode,
-        FinalizerMode::Recovery
-    );
-
-    let recovery_hash = left.tip_hash().to_string();
-    let leader = left
-        .expected_leader_for_next_block()
-        .context("ticket finalization did not resume after recovery")?;
-    let leader_wallet = wallets
-        .iter()
-        .find(|wallet| wallet.address() == leader)
-        .context("selected post-recovery leader is absent from the fixture")?;
-    let mut leader_node =
-        NodeCore::from_ledger_with_burn_fee_and_enabled(leader_wallet.clone(), left, true, 2, 1);
-    leader_node.set_recovery_vdf_top_rank_percent(100);
-    let ticket_timestamp = recovery_timestamp.saturating_add(1);
-    let _ = leader_node.prepare_automatic_finalization(ticket_timestamp);
-    let mut continued = leader_node.wallet_view_ledger()?;
-    let burn_bundles = wallets.iter().try_fold(Vec::new(), |mut bundles, wallet| {
-        bundles.extend(continued.build_burn_bundles(wallet)?);
-        Ok::<_, anyhow::Error>(bundles)
-    })?;
-    let prepared = continued.prepare_next_block_with_burn_bundles(
-        leader_wallet.address(),
-        ticket_timestamp,
-        burn_bundles,
-    )?;
-    let output = run_vdf(prepared.vdf_seed(), prepared.vdf_rounds()).unwrap();
-    let ticket_block = prepared.finish(leader_wallet, output);
-    assert_eq!(ticket_block.finalizer_mode, FinalizerMode::Ticket);
-    assert_eq!(ticket_block.finalizer_rank, 0);
-    assert!(verify_vdf(
-        &ticket_block.vdf_seed(),
-        ticket_block.vdf_rounds,
-        &ticket_block.vdf_output
-    ));
-    continued.apply_locally_mined_block(ticket_block)?;
-
-    assert_eq!(continued.height(), recovery_height + 1);
-    assert_eq!(
-        continued.objective_finality_checkpoint(),
-        Some((recovery_height, recovery_hash.as_str()))
-    );
-    Ok(())
-}
-
-struct SoakNode {
-    wallet: Wallet,
-    burn_per_block: u64,
-    node: SharedNode,
-    peers: SharedPeerBook,
-    network: GossipNetwork,
-    store: SqliteChainStore,
-}
-
-fn post_activation_fixture() -> Result<(Vec<Wallet>, Ledger)> {
-    if !cfg!(feature = "e2e") {
-        bail!("post-activation soak requires --features e2e");
-    }
-
-    let fixture =
-        Path::new(env!("CARGO_MANIFEST_DIR")).join("e2e/snapshots/first-objective-checkpoint");
-    let wallets = FIXTURE_SERVICES
-        .iter()
-        .map(|service| {
-            wallet_store::load_with_password(
-                &fixture.join(service).join("wallet.json"),
-                "testtesttest",
+    let wallet = Wallet::from_seed(GENESIS_SECRET);
+    let ticket = {
+        let mut source = source.lock().await;
+        let receipt = wallet
+            .submit_ticket(
+                &mut source,
+                TicketParameters {
+                    budget: minimum_ticket_budget(1, INITIAL_LEDGER_SUBSIDY).unwrap(),
+                    duration: 1,
+                    fee: 1,
+                    mining_public_key: wallet.public_key(),
+                    lottery_seed: [60; 32],
+                },
             )
-        })
-        .collect::<Result<Vec<_>>>()?;
-    // SQLite may create journals while opening a database; never open the committed fixture in place.
-    let chain_copy_dir = tempdir()?;
-    let chain_copy = chain_copy_dir.path().join("chain.sqlite3");
-    std::fs::copy(fixture.join("bootstrap/chain.sqlite3"), &chain_copy)?;
-    let snapshot = SqliteChainStore::open(chain_copy)?
-        .load()?
-        .context("post-activation checkpoint has no chain snapshot")?;
-    let ledger = Ledger::from_persisted_snapshot(snapshot)?;
-    if ledger.height() != SOAK_START_HEIGHT {
-        bail!(
-            "post-activation checkpoint height is {}, expected {SOAK_START_HEIGHT}",
-            ledger.height()
-        );
-    }
-    Ok((wallets, ledger))
-}
-
-fn reserve_loopback_addrs(count: usize) -> Result<Vec<SocketAddr>> {
-    let mut listeners = Vec::new();
-    let mut addrs = Vec::new();
-    for _ in 0..count {
-        let listener = StdTcpListener::bind((Ipv4Addr::LOCALHOST, 0))?;
-        addrs.push(listener.local_addr()?);
-        listeners.push(listener);
-    }
-    drop(listeners);
-    Ok(addrs)
-}
-
-async fn assert_stratum_serves_work(addr: SocketAddr, worker: &str) -> Result<()> {
-    let stream = timeout(Duration::from_secs(5), TcpStream::connect(addr)).await??;
-    let (read, mut write) = stream.into_split();
-    let mut lines = BufReader::new(read).lines();
-
-    write
-        .write_all(
-            json_line(json!({"id": 1, "method": "mining.subscribe", "params": []}))?.as_bytes(),
-        )
-        .await?;
-    write
-        .write_all(
-            json_line(json!({"id": 2, "method": "mining.authorize", "params": [worker, "x"]}))?
-                .as_bytes(),
-        )
-        .await?;
-
-    let mut authorized = false;
-    let mut notified = false;
-    for _ in 0..4 {
-        let line = timeout(Duration::from_secs(5), lines.next_line())
-            .await??
-            .context("stratum server closed before sending work")?;
-        let value: Value = serde_json::from_str(&line)?;
-        authorized |=
-            value.get("id") == Some(&json!(2)) && value.get("result") == Some(&json!(true));
-        notified |= value.get("method") == Some(&json!("mining.notify"));
-        if authorized && notified {
-            return Ok(());
-        }
-    }
-    bail!("stratum did not authorize and send mining.notify")
-}
-
-fn json_line(value: Value) -> Result<String> {
-    Ok(format!("{}\n", serde_json::to_string(&value)?))
-}
-
-async fn finalize_one_block(
-    nodes: &[SoakNode],
-    target_height: u64,
-    fixed_timestamp_ms: Option<u64>,
-) -> Result<()> {
-    let timestamp_ms = || fixed_timestamp_ms.unwrap_or_else(now_ms);
-    let start = timestamp_ms().saturating_sub(BURN_COLLECTION_MS + 1);
-    prepare_and_broadcast(nodes, start).await?;
-    sleep(Duration::from_millis(250)).await;
-    // Post-activation finalizers must see the complete committee quorum before preparing VDF work.
-    for _ in 0..3 {
-        prepare_and_broadcast(nodes, timestamp_ms()).await?;
-        sleep(Duration::from_millis(100)).await;
-    }
-
-    let deadline = tokio::time::Instant::now() + Duration::from_secs(8);
-    loop {
-        for node in nodes {
-            let block = complete_if_ready(node, timestamp_ms()).await?;
-            node.network
-                .broadcast(node.node.lock().await.drain_outbox())
-                .await?;
-            if let Some(block) = block {
-                assert_eq!(block.height, target_height);
-                return Ok(());
+            .unwrap();
+        source.pending_ticket(&receipt.id).unwrap().clone()
+    };
+    source_network.broadcast_tickets(vec![ticket]);
+    tokio::time::timeout(Duration::from_secs(3), async {
+        loop {
+            if target.lock().await.pending_ticket_count() == 1 {
+                break;
             }
+            tokio::time::sleep(Duration::from_millis(20)).await;
         }
-        if tokio::time::Instant::now() >= deadline {
-            bail!(
-                "no node finalized block {target_height}:\n{}",
-                soak_diagnostics(nodes, target_height).await
-            );
+    })
+    .await
+    .unwrap();
+
+    let timestamp = GENESIS_TIMESTAMP + HEARTBEAT_TARGET_INTERVAL_SECS;
+    let block = source.lock().await.mine_next(timestamp, [61; 32]).unwrap();
+    source_network.broadcast_block(&block);
+
+    tokio::time::timeout(Duration::from_secs(3), async {
+        loop {
+            if target.lock().await.status().tip == block.hash() {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(20)).await;
         }
-        sleep(Duration::from_millis(100)).await;
+    })
+    .await
+    .unwrap();
+
+    source_network.shutdown().await;
+    relay_network.shutdown().await;
+    target_network.shutdown().await;
+    drop(target);
+
+    let resumed = Node::open(target_store).unwrap();
+    assert_eq!(resumed.status().tip, block.hash());
+    assert_eq!(resumed.status().height, 1);
+    assert_eq!(resumed.status().tracked_tickets, 1);
+}
+
+type SharedNode = Arc<Mutex<Node<ConsensusChainStore>>>;
+
+const LOCAL_ADDRESS: &str = "127.0.0.1:0";
+const SYNC_TIMEOUT: Duration = Duration::from_secs(15);
+
+fn open_node(store: &ConsensusChainStore) -> SharedNode {
+    Arc::new(Mutex::new(Node::open(store.clone()).unwrap()))
+}
+
+async fn start_network(node: &SharedNode, peers: Vec<SocketAddr>) -> ConsensusNetwork {
+    let peers = peers.into_iter().map(Into::into).collect();
+    ConsensusNetwork::start(Arc::clone(node), LOCAL_ADDRESS.parse().unwrap(), peers)
+        .await
+        .unwrap()
+}
+
+async fn mine_to(node: &SharedNode, height: u64, miner: [u8; 32]) -> Hash {
+    let mut node = node.lock().await;
+    while node.status().height < height {
+        // Peers check this against the real clock, and genesis may be recent.
+        let timestamp = node.chain().tip().tip_timestamp + 1;
+        node.mine_next(timestamp, miner).unwrap();
     }
+    node.status().tip
 }
 
-async fn soak_diagnostics(nodes: &[SoakNode], target_height: u64) -> String {
-    let mut lines = Vec::new();
-    for (index, node) in nodes.iter().enumerate() {
-        let core = node.node.lock().await;
-        let status = core.status();
-        let rank = core
-            .burn_leader_ranks_for_block(target_height)
-            .ok()
-            .and_then(|ranks| {
-                ranks
-                    .into_iter()
-                    .find(|rank| rank.owner == core.wallet_address())
-                    .map(|rank| rank.rank)
-            });
-        let pending = core.pending_transactions();
-        let pending_burns = pending.iter().filter(|tx| tx.is_burn()).count();
-        let pending_burn_details = pending
-            .iter()
-            .filter(|tx| tx.is_burn())
-            .map(|tx| {
-                let Transaction::Burn { anchor, .. } = tx else {
-                    unreachable!();
-                };
-                let eligible_anchor = core.chain()[core.chain().len() - 1].prev_hash.as_str();
-                format!(
-                    "sender={}, amount={}, anchor={:?}, eligible={}",
-                    tx.sender(),
-                    tx.amount(),
-                    anchor,
-                    anchor.as_deref() == Some(eligible_anchor)
-                )
-            })
-            .collect::<Vec<_>>();
-        let wallet_view_pending = core
-            .wallet_view_ledger()
-            .map(|ledger| ledger.pending().len())
-            .unwrap_or_default();
-        let metrics = node.network.metrics();
-        lines.push(format!(
-            "node {index}: height={}, tip={}, wallet_rank={rank:?}, leader={:?}, \
-             last_finalization={:?}, pending={} (burns={pending_burns}, \
-             wallet_view={wallet_view_pending}, details={pending_burn_details:?}), \
-             burn_bundles_received={}, control_received={}, rejected_blocks={}, \
-             session_failures={}, last_session_failure={:?}, last_chain_error={:?}, \
-             sync_progress={:?}",
-            status.chain.height,
-            status.chain.tip_hash,
-            status.mining.current_leader,
-            status.mining.last_auto_finalization_status,
-            pending.len(),
-            metrics.burn_bundles_received,
-            metrics.control_envelopes_received,
-            metrics.rejected_blocks,
-            metrics.session_failures,
-            metrics.last_session_failure,
-            metrics.last_chain_payload_error,
-            node.network.sync_progress(),
-        ));
-    }
-    lines.join("\n")
-}
-
-async fn prepare_and_broadcast(nodes: &[SoakNode], timestamp_ms: u64) -> Result<()> {
-    for node in nodes {
-        {
-            let mut core = node.node.lock().await;
-            let _ = core.prepare_automatic_finalization(timestamp_ms);
+async fn wait_for_tip(node: &SharedNode, tip: Hash) {
+    tokio::time::timeout(SYNC_TIMEOUT, async {
+        loop {
+            if node.lock().await.status().tip == tip {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(20)).await;
         }
-        node.network
-            .broadcast(node.node.lock().await.drain_outbox())
-            .await?;
-    }
-    Ok(())
+    })
+    .await
+    .unwrap();
 }
 
-async fn complete_if_ready(
-    node: &SoakNode,
-    timestamp_ms: u64,
-) -> Result<Option<iuna::domain::Block>> {
-    let work = {
-        let mut core = node.node.lock().await;
-        core.prepare_automatic_finalization(timestamp_ms).work
-    };
-    let Some(work) = work else {
-        return Ok(None);
-    };
-    let vdf_output = run_vdf(work.vdf_seed(), work.vdf_rounds()).unwrap();
-    let block =
-        node.node
-            .lock()
-            .await
-            .complete_prepared_block_at(work, vdf_output, timestamp_ms)?;
-    Ok(Some(block))
+/// Two islands build competing branches that differ by more than one sync batch. When the link
+/// heals, the lighter island reorganizes, and its relay-only member follows through gossip.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[ignore = "requires permission to bind local TCP sockets"]
+async fn healed_partition_converges_on_the_heavier_branch() {
+    let directory = tempfile::tempdir().unwrap();
+    let store = |name: &str| ConsensusChainStore::open(directory.path().join(name)).unwrap();
+    let heavy = open_node(&store("heavy.sqlite3"));
+    let light = open_node(&store("light.sqlite3"));
+    let follower = open_node(&store("follower.sqlite3"));
+    let heavy_tip = mine_to(&heavy, 12, [62; 32]).await;
+    let light_tip = mine_to(&light, 10, [63; 32]).await;
+
+    let heavy_network = start_network(&heavy, Vec::new()).await;
+    let light_network = start_network(&light, Vec::new()).await;
+    let follower_network = start_network(&follower, vec![light_network.local_addr()]).await;
+    wait_for_tip(&follower, light_tip).await;
+    assert_eq!(heavy.lock().await.status().tip, heavy_tip);
+
+    light_network
+        .peer_registry()
+        .add_target(heavy_network.local_addr())
+        .unwrap();
+    wait_for_tip(&light, heavy_tip).await;
+    wait_for_tip(&follower, heavy_tip).await;
+
+    let next_tip = mine_to(&light, 13, [64; 32]).await;
+    let block = light.lock().await.chain().block(&next_tip).unwrap().clone();
+    light_network.broadcast_block(&block);
+    wait_for_tip(&heavy, next_tip).await;
+    wait_for_tip(&follower, next_tip).await;
+
+    follower_network.shutdown().await;
+    light_network.shutdown().await;
+    heavy_network.shutdown().await;
 }
 
-async fn produce_recovery_block(node: &SoakNode, timestamp_ms: u64) -> Result<iuna::domain::Block> {
-    let work = {
-        let mut core = node.node.lock().await;
-        let _ = core.prepare_automatic_finalization(timestamp_ms);
-        core.wallet_view_ledger()?
-            .prepare_recovery_block(node.wallet.address(), timestamp_ms)?
-    };
-    let vdf_output = run_vdf(work.vdf_seed(), work.vdf_rounds()).unwrap();
-    let block =
-        node.node
-            .lock()
-            .await
-            .complete_prepared_block_at(work, vdf_output, timestamp_ms)?;
-    node.network
-        .broadcast(node.node.lock().await.drain_outbox())
-        .await?;
-    Ok(block)
-}
+/// A restarted node resumes from its store, catches up on what it missed over the network and then
+/// keeps following new blocks.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[ignore = "requires permission to bind local TCP sockets"]
+async fn restarted_node_catches_up_and_keeps_following() {
+    let directory = tempfile::tempdir().unwrap();
+    let source_store = ConsensusChainStore::open(directory.path().join("source.sqlite3")).unwrap();
+    let store = ConsensusChainStore::open(directory.path().join("restarted.sqlite3")).unwrap();
+    let source = open_node(&source_store);
+    let restarted = open_node(&store);
+    let source_network = start_network(&source, Vec::new()).await;
+    let peers = vec![source_network.local_addr()];
 
-async fn wait_for_convergence(nodes: &[SoakNode], height: u64, duration: Duration) -> Result<()> {
-    let deadline = tokio::time::Instant::now() + duration;
-    loop {
-        let mut tips = Vec::new();
-        for node in nodes {
-            let core = node.node.lock().await;
-            tips.push((core.chain_height(), core.chain_tip_hash()));
-        }
-        if tips
-            .iter()
-            .all(|(node_height, tip)| *node_height >= height && tip == &tips[0].1)
-        {
-            return Ok(());
-        }
-        if tokio::time::Instant::now() >= deadline {
-            bail!(
-                "nodes did not converge at height {height}: {tips:?}\n{}",
-                soak_diagnostics(nodes, height).await
-            );
-        }
-        sleep(Duration::from_millis(250)).await;
-    }
-}
-
-async fn configured_automatic_burn_was_included(node: &SoakNode) -> bool {
-    node.node
+    let network = start_network(&restarted, peers.clone()).await;
+    let first_tip = mine_to(&source, 3, [65; 32]).await;
+    let block = source
         .lock()
         .await
         .chain()
-        .iter()
-        .filter(|block| block.height > SOAK_START_HEIGHT)
-        .flat_map(|block| &block.transactions)
-        .any(|tx| tx.is_burn() && tx.sender() == node.wallet.address() && tx.amount() == 2)
+        .block(&first_tip)
+        .unwrap()
+        .clone();
+    source_network.broadcast_block(&block);
+    wait_for_tip(&restarted, first_tip).await;
+    network.shutdown().await;
+    drop(restarted);
+
+    let missed_tip = mine_to(&source, 13, [65; 32]).await;
+    let restarted = open_node(&store);
+    assert_eq!(restarted.lock().await.status().tip, first_tip);
+    let network = start_network(&restarted, peers).await;
+    wait_for_tip(&restarted, missed_tip).await;
+
+    let next_tip = mine_to(&source, 14, [65; 32]).await;
+    let block = source
+        .lock()
+        .await
+        .chain()
+        .block(&next_tip)
+        .unwrap()
+        .clone();
+    source_network.broadcast_block(&block);
+    wait_for_tip(&restarted, next_tip).await;
+
+    network.shutdown().await;
+    source_network.shutdown().await;
 }
 
-async fn restart_node_core(node: &SoakNode) -> Result<()> {
-    let snapshot = node.node.lock().await.chain_snapshot();
-    node.store.save(&snapshot)?;
-    let restored = Ledger::from_persisted_snapshot(
-        node.store
-            .load()?
-            .context("persisted snapshot should exist after save")?,
-    )?;
-    let mut restored_node = NodeCore::from_ledger_with_burn_fee_and_enabled(
-        node.wallet.clone(),
-        restored,
-        true,
-        node.burn_per_block,
-        1,
-    );
-    restored_node.set_recovery_vdf_top_rank_percent(0);
-    *node.node.lock().await = restored_node;
-    Ok(())
+/// Published bootstrap nodes are host names, so a node must sync from one.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[ignore = "requires permission to bind local TCP sockets"]
+async fn a_node_syncs_from_a_peer_given_by_host_name() {
+    let directory = tempfile::tempdir().unwrap();
+    let store = |name: &str| ConsensusChainStore::open(directory.path().join(name)).unwrap();
+    let source = open_node(&store("source.sqlite3"));
+    let target = open_node(&store("target.sqlite3"));
+    let tip = mine_to(&source, 3, [67; 32]).await;
+    let source_network = start_network(&source, Vec::new()).await;
+
+    let peer = format!("localhost:{}", source_network.local_addr().port())
+        .parse()
+        .unwrap();
+    let target_network = ConsensusNetwork::start(
+        Arc::clone(&target),
+        LOCAL_ADDRESS.parse().unwrap(),
+        vec![peer],
+    )
+    .await
+    .unwrap();
+    wait_for_tip(&target, tip).await;
+
+    target_network.shutdown().await;
+    source_network.shutdown().await;
+}
+
+/// A connection that never says hello must give its inbound slot back, so the same host can still
+/// connect once its silent connections are gone.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[ignore = "requires permission to bind local TCP sockets"]
+async fn silent_inbound_connections_give_their_slots_back() {
+    let directory = tempfile::tempdir().unwrap();
+    let store = |name: &str| ConsensusChainStore::open(directory.path().join(name)).unwrap();
+    let source = open_node(&store("source.sqlite3"));
+    let target = open_node(&store("target.sqlite3"));
+    let tip = mine_to(&source, 1, [68; 32]).await;
+    let network = start_network(&source, Vec::new()).await;
+
+    // More than one host may hold, so a leaked permit would lock this address out below.
+    let mut silent = Vec::new();
+    for _ in 0..9 {
+        silent.push(
+            tokio::net::TcpStream::connect(network.local_addr())
+                .await
+                .unwrap(),
+        );
+    }
+    for connection in &mut silent {
+        let mut received = Vec::new();
+        tokio::time::timeout(
+            Duration::from_secs(25),
+            connection.read_to_end(&mut received),
+        )
+        .await
+        .expect("the node must close a silent connection")
+        .ok();
+    }
+
+    let follower = start_network(&target, vec![network.local_addr()]).await;
+    wait_for_tip(&target, tip).await;
+
+    follower.shutdown().await;
+    network.shutdown().await;
 }

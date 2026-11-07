@@ -1,5 +1,9 @@
 fn main() {
-    const COMMANDS: &[&str] = &["check_desktop_update", "install_desktop_update"];
+    const COMMANDS: &[&str] = &[
+        "check_desktop_update",
+        "install_desktop_update",
+        "desktop_operator_token",
+    ];
 
     let attributes = tauri_build::Attributes::new()
         .app_manifest(tauri_build::AppManifest::new().commands(COMMANDS));

@@ -8,13 +8,11 @@ license = "Apache-2.0"
 [dependencies]
 anyhow = "1.0.98"
 axum = "0.8.4"
-base64 = { version = "0.22", optional = true }
-bip39 = "2.2.2"
+bip39 = "2.2.0"
 chacha20poly1305 = "0.10.1"
 ed25519-dalek = "2.2.0"
 getrandom = "0.2.17"
-num-bigint = "=0.4.6"
-num-integer = "=0.1.46"
+num-bigint = { version = "=0.4.6", features = ["serde"] }
 num-traits = "0.2.19"
 pbkdf2 = "0.12.2"
 serde = { version = "1.0.228", features = ["derive"] }
@@ -22,32 +20,11 @@ serde_json = "1.0.150"
 sha2 = "0.10.9"
 rusqlite = { version = "0.32.1", features = ["bundled"] }
 tokio = { version = "1.45.1", features = ["full"] }
-kyn-vdf = "=0.1.1"
-ml-dsa = { version = "=0.1.1", features = ["zeroize"] }
 secrecy = { version = "0.10.3", default-features = false, features = ["serde"] }
-reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls-native-roots"], optional = true }
-semver = { version = "1", optional = true }
-flate2 = { version = "1", optional = true }
-tar = { version = "0.4", optional = true }
-minisign-verify = { version = "0.2.5", optional = true }
-
 [features]
-default = ["cli-updater"]
-cli-updater = [
-    "dep:base64",
-    "dep:flate2",
-    "dep:minisign-verify",
-    "dep:reqwest",
-    "dep:semver",
-    "dep:tar",
-]
+default = []
+# Test-only network parameters used by the ignored live TCP integration test.
 e2e = []
-fuzzing = []
-
-[[bin]]
-name = "iuna-e2e-checkpoint"
-path = "src/bin/iuna-e2e-checkpoint.rs"
-required-features = ["e2e"]
 
 [dev-dependencies]
 proptest = "1.6.0"

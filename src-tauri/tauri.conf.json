@@ -21,7 +21,7 @@
       }
     ],
     "security": {
-      "csp": "default-src 'self'; connect-src http://127.0.0.1:18661; script-src 'self' 'unsafe-inline'; style-src 'self' 'unsafe-inline'"
+      "csp": "default-src 'self'; connect-src ipc: http://ipc.localhost; script-src 'self' 'unsafe-inline'; style-src 'self' 'unsafe-inline'"
     }
   },
   "bundle": {
@@ -40,7 +40,7 @@
     ],
     "category": "DeveloperTool",
     "shortDescription": "Local iuna mainnet-candidate node",
-    "longDescription": "Runs a local iuna mainnet-candidate node and opens its management UI.",
+    "longDescription": "Runs a local iuna mainnet-candidate node and opens its Operator Screen.",
     "windows": {
       "webviewInstallMode": {
         "type": "downloadBootstrapper"

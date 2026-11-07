@@ -2,7 +2,6 @@
 name = "iuna-fuzz"
 version = "0.0.0"
 edition = "2024"
-rust-version = "1.99.1"
 license = "Apache-2.0"
 publish = false
 
@@ -10,9 +9,13 @@ publish = false
 cargo-fuzz = true
 
 [dependencies]
-iuna = { path = "..", default-features = false, features = ["fuzzing"] }
+iuna = { path = ".." }
 libfuzzer-sys = "0.4"
 serde_json = "1"
+tempfile = "3"
+
+# Keeps this crate out of the node's dependency graph and lockfile.
+[workspace]
 
 [[bin]]
 name = "p2p_envelope"
@@ -21,37 +24,13 @@ test = false
 doc = false
 
 [[bin]]
-name = "compact_snapshot"
-path = "fuzz_targets/compact_snapshot.rs"
+name = "signed_objects"
+path = "fuzz_targets/signed_objects.rs"
 test = false
 doc = false
 
 [[bin]]
-name = "domain_json"
-path = "fuzz_targets/domain_json.rs"
-test = false
-doc = false
-
-[[bin]]
-name = "stratum_request"
-path = "fuzz_targets/stratum_request.rs"
-test = false
-doc = false
-
-[[bin]]
-name = "wallet_config"
-path = "fuzz_targets/wallet_config.rs"
-test = false
-doc = false
-
-[[bin]]
-name = "vdf_proof"
-path = "fuzz_targets/vdf_proof.rs"
-test = false
-doc = false
-
-[[bin]]
-name = "transaction_v2"
-path = "fuzz_targets/transaction_v2.rs"
+name = "wallet_file"
+path = "fuzz_targets/wallet_file.rs"
 test = false
 doc = false

@@ -1,0 +1,904 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>iuna</title>
+  <style>
+    [x-cloak] { display: none !important; }
+    :root {
+      color-scheme: dark; font-family: Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif; background: var(--bg); color: var(--text);
+      /* Same names and base values as the website tokens in www/index.html. */
+      --bg: #0d0f10;
+      --panel: #15191b;
+      --panel-2: #101315;
+      --line: #273036;
+      --line-strong: #3a4248;
+      --muted: #a8b5bb;
+      --muted-2: #8a959b;
+      --text: #edf2f5;
+      --green: #d5f55f;
+      --green-soft: #1c2516;
+      --green-line: #566d25;
+      --on-green: #15171a;
+      --amber: #ffd070;
+      --amber-soft: #292315;
+      --amber-line: #766027;
+      --amber-text: #ffe099;
+      --danger-soft: #2a1717;
+      --danger-line: #793b34;
+      --danger-text: #ffaaa0;
+      --radius: 12px;
+    }
+    * { box-sizing: border-box; }
+    body { margin: 0; min-height: 100vh; background: var(--bg); color: var(--text); }
+    button, input, select, textarea { font: inherit; }
+    button { border: 1px solid var(--line-strong); border-radius: 7px; padding: 8px 11px; background: var(--panel); color: var(--text); cursor: pointer; font-weight: 750; }
+    button:hover { border-color: var(--green); color: var(--green); }
+    button:disabled { cursor: default; opacity: .45; }
+    button.primary { border-color: var(--green); background: var(--green); color: var(--on-green); }
+    input, select, textarea { width: 100%; margin-top: 6px; border: 1px solid var(--line-strong); border-radius: 7px; padding: 9px 10px; background: var(--panel-2); color: var(--text); }
+    textarea { min-height: 108px; resize: vertical; line-height: 1.6; }
+    label { display: grid; color: var(--muted); font-size: 12px; font-weight: 750; }
+    code { color: var(--muted); overflow-wrap: anywhere; }
+    h1 { margin: 0; font-size: 28px; }
+    h2 { margin: 0 0 12px; font-size: 18px; }
+    h3 { margin: 0 0 8px; font-size: 15px; }
+    .shell { min-height: 100vh; }
+    .sidebar { position: fixed; inset: 0 auto 0 0; z-index: 10; width: 84px; display: flex; flex-direction: column; align-items: center; gap: 18px; padding: 16px 10px; border-right: 1px solid var(--line); background: var(--panel-2); }
+    .brand, .nav-button { width: 64px; min-height: 56px; display: grid; place-items: center; gap: 3px; border-color: transparent; background: transparent; color: var(--muted); }
+    .brand { color: var(--green); }
+    .brand svg { width: 24px; height: 24px; }
+    .brand .mark-loop { fill: none; stroke: currentColor; stroke-width: 4.2; stroke-linecap: round; stroke-linejoin: round; }
+    .brand .mark-dot { fill: currentColor; }
+    .nav-button svg { width: 21px; height: 21px; fill: none; stroke: currentColor; stroke-width: 2; stroke-linecap: round; stroke-linejoin: round; }
+    /* The default side padding leaves 40px, less than "Settings": it would overflow to the right. */
+    .nav-button { padding-inline: 0; }
+    .nav-button span { font-size: 10px; font-weight: 850; }
+    .nav-button.active, .nav-button:hover, .brand:hover { border-color: var(--line-strong); background: var(--panel); color: var(--green); }
+    .nav { display: grid; gap: 7px; }
+    .sidebar-bottom { display: grid; gap: 7px; margin-top: auto; }
+    .version-panel { width: 64px; display: grid; justify-items: center; gap: 4px; border-color: transparent; padding: 7px 4px; background: transparent; color: var(--muted-2); font-size: 10px; text-align: center; }
+    .version-panel.update { border-color: var(--green-line); background: var(--green-soft); color: var(--green); }
+    .version-panel.checking { color: var(--muted); }
+    .version-panel.failed { color: var(--danger-text); }
+    .version-dot { width: 6px; height: 6px; border-radius: 999px; background: var(--line-strong); }
+    .version-panel.update .version-dot { background: var(--green); box-shadow: 0 0 0 3px rgba(213, 245, 95, .12); }
+    .version-panel.failed .version-dot { background: var(--danger-text); }
+    .version-label { line-height: 1; }
+    .version-update { color: var(--green); font-size: 9px; line-height: 1; text-transform: uppercase; }
+    .content { min-height: 100vh; padding: 22px 24px 50px 108px; }
+    header { display: flex; align-items: start; justify-content: space-between; gap: 18px; margin-bottom: 18px; }
+    .header-meta { display: flex; align-items: center; gap: 10px; color: var(--muted-2); font-size: 12px; }
+    .panel { margin-bottom: 12px; border: 1px solid var(--line); border-radius: 9px; padding: 14px; background: var(--panel); }
+    .panel-head { display: flex; align-items: start; justify-content: space-between; gap: 14px; margin-bottom: 12px; }
+    .muted { color: var(--muted-2); font-size: 12px; }
+    .grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(175px, 1fr)); gap: 11px; }
+    .dashboard { min-height: calc(100vh - 115px); display: grid; place-items: center; }
+    .dashboard-grid { width: 100%; display: grid; grid-template-columns: repeat(6, minmax(0, 140px)); justify-content: center; align-content: center; gap: 10px; }
+    .dashboard-card { aspect-ratio: 1; min-width: 0; display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 13px; border: 1px solid var(--line); border-radius: 9px; padding: 15px; background: var(--panel); text-align: center; }
+    .dashboard-card-icon { width: 52px; height: 52px; display: grid; place-items: center; flex: 0 0 auto; border-radius: 10px; background: var(--green-soft); color: var(--green); }
+    .dashboard-card-icon svg { width: 31px; height: 31px; fill: none; stroke: currentColor; stroke-width: 1.6; stroke-linecap: round; stroke-linejoin: round; }
+    .dashboard-card-copy { min-width: 0; width: 100%; display: grid; justify-items: center; }
+    .dashboard-label, .stat-label { color: var(--muted-2); font-size: 10px; font-weight: 850; letter-spacing: .04em; text-transform: uppercase; }
+    .dashboard-label { margin-bottom: 6px; }
+    .dashboard-value { color: var(--green); font-size: 14px; font-weight: 850; font-variant-numeric: tabular-nums; line-height: 1.25; overflow-wrap: anywhere; }
+    .dashboard-card.balance { padding-inline: 10px; }
+    .dashboard-card.balance .dashboard-value { max-width: 100%; letter-spacing: -.025em; white-space: nowrap; }
+    .dashboard-card.heartbeat-mining .dashboard-label { font-size: 8px; letter-spacing: .015em; white-space: nowrap; }
+    .stat { min-width: 0; border: 1px solid var(--line); border-radius: 8px; padding: 11px; background: var(--panel-2); }
+    .stat-value { margin-top: 7px; font-size: 15px; font-weight: 850; overflow-wrap: anywhere; }
+    .form-row { display: flex; flex-wrap: wrap; gap: 10px; align-items: end; }
+    .form-row label { min-width: 150px; flex: 1; }
+    .wallet-layout { display: grid; grid-template-columns: minmax(0, .9fr) minmax(360px, 1.1fr); gap: 12px; align-items: start; }
+    .wallet-primary { min-width: 0; display: grid; gap: 12px; }
+    .wallet-actions { display: grid; gap: 12px; }
+    .mining-grid { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 12px; }
+    .mining-panel { min-width: 0; }
+    .mining-panel .panel-head { flex-wrap: wrap; align-items: center; }
+    .mining-controls { display: grid; grid-template-columns: minmax(0, 220px); gap: 10px; margin-bottom: 12px; }
+    .mining-mode { display: grid; gap: 12px; }
+    .mining-form { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); margin: 0; }
+    .mining-form label { min-width: 0; }
+    .mining-form button { min-height: 38px; }
+    .mining-stats { grid-template-columns: repeat(3, minmax(0, 1fr)); }
+    .mining-readonly { display: grid; gap: 12px; }
+    .wallet-primary .panel, .wallet-activity-panel { margin: 0; }
+    .wallet-activity-panel { min-width: 0; overflow: hidden; }
+    .wallet-activity-panel .panel-head { flex-wrap: wrap; align-items: center; }
+    .activity-heading { display: flex; align-items: center; gap: 8px; }
+    .activity-heading h2 { margin: 0; }
+    .activity-filters { display: flex; flex-wrap: wrap; justify-content: flex-end; gap: 6px; }
+    .activity-filter { --activity-color: var(--muted); --activity-border: var(--line-strong); --activity-bg: var(--panel-2); position: relative; display: inline-flex; align-items: center; border: 1px solid var(--line-strong); border-radius: 999px; padding: 4px 8px; background: var(--panel-2); color: var(--muted); font-size: 11px; font-weight: 850; cursor: pointer; user-select: none; }
+    .activity-filter input { position: absolute; width: 1px; height: 1px; margin: 0; opacity: 0; pointer-events: none; }
+    .activity-filter.active { border-color: var(--activity-border); background: var(--activity-bg); color: var(--activity-color); }
+    .activity-filter:focus-within { outline: 2px solid var(--activity-color); outline-offset: 2px; }
+    .activity-filter.transfers, .activity-main > .pill.transfers { --activity-color: #8de9cd; --activity-border: #346f60; --activity-bg: #17312a; }
+    .activity-filter.tickets, .activity-main > .pill.tickets { --activity-color: var(--amber); --activity-border: var(--amber-line); --activity-bg: var(--amber-soft); }
+    .activity-filter.heartbeatRewards, .activity-main > .pill.heartbeatRewards { --activity-color: #8bdcff; --activity-border: #376b80; --activity-bg: #172a34; }
+    .activity-filter.ledgerRewards, .activity-main > .pill.ledgerRewards { --activity-color: var(--green); --activity-border: var(--green-line); --activity-bg: var(--green-soft); }
+    .activity-scroll { max-height: min(720px, calc(100vh - 190px)); overflow-y: auto; overscroll-behavior: contain; padding-right: 4px; }
+    .activity-list { min-width: 0; display: grid; gap: 6px; }
+    .activity-card { display: grid; grid-template-columns: minmax(0, 1fr) auto; gap: 14px; align-items: center; border: 1px solid var(--line); border-radius: 8px; padding: 11px 12px; background: var(--panel-2); }
+    .activity-card.pending { border-color: var(--line-strong); background: #191c20; box-shadow: inset 3px 0 0 var(--muted-2); }
+    .activity-main { min-width: 0; display: grid; grid-template-columns: 42px minmax(0, 1fr); gap: 12px; align-items: center; }
+    .activity-main > .pill { width: 42px; justify-content: center; border-color: var(--activity-border); background: var(--activity-bg); color: var(--activity-color); font-size: 10px; letter-spacing: .04em; text-align: center; }
+    .activity-main > .pill.pending { border-color: var(--activity-border); color: var(--activity-color); }
+    .activity-copy { min-width: 0; display: grid; gap: 3px; }
+    .activity-title { color: var(--text); font-size: 13px; font-weight: 850; }
+    .activity-meta { min-width: 0; color: var(--muted-2); font-size: 11px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+    .activity-counterparty { display: inline; }
+    .activity-counterparty button { max-width: 130px; overflow: hidden; text-overflow: ellipsis; vertical-align: bottom; white-space: nowrap; }
+    .contact-link { cursor: pointer; text-decoration-color: var(--line-strong); text-underline-offset: 3px; }
+    .contact-link:hover, .contact-link:focus-visible { color: var(--green); text-decoration-color: var(--green); outline: none; }
+    .activity-side { min-width: 0; text-align: right; }
+    .activity-amount { color: var(--text); font-size: 14px; font-weight: 900; font-variant-numeric: tabular-nums; white-space: nowrap; }
+    .activity-amount.incoming { color: var(--green); }
+    .activity-id { display: inline-block; max-width: 130px; margin-top: 4px; overflow: hidden; color: var(--muted-2); font-size: 10px; text-overflow: ellipsis; vertical-align: bottom; white-space: nowrap; }
+    .activity-sentinel { height: 1px; }
+    .utxo-details-button { align-self: start; border: 0; padding: 2px 0; background: transparent; color: var(--muted-2); font-size: 10px; font-weight: 750; text-decoration: underline dotted; text-underline-offset: 2px; }
+    .utxo-details-button:hover { border: 0; color: var(--green); }
+    .address { border: 1px solid var(--line); border-radius: 8px; padding: 12px; background: var(--panel-2); }
+    .flash { position: fixed; z-index: 80; top: 18px; left: 50%; transform: translateX(-50%); max-width: min(600px, calc(100% - 32px)); border: 1px solid var(--green-line); border-radius: 8px; padding: 10px 14px; background: var(--green-soft); color: var(--green); font-weight: 800; }
+    .flash.error { border-color: var(--danger-line); background: var(--danger-soft); color: var(--danger-text); }
+    .pill { display: inline-flex; align-items: center; border: 1px solid var(--line-strong); border-radius: 999px; padding: 3px 7px; color: var(--muted); font-size: 10px; font-weight: 850; white-space: nowrap; }
+    .chain-row { display: flex; gap: 8px; overflow-x: auto; padding: 1px 0 10px; scroll-snap-type: x proximity; }
+    .chain-panel { position: relative; margin-top: 43px; padding-top: 18px; }
+    .chain-tabs { position: absolute; top: -34px; right: 10px; display: flex; align-items: end; gap: 4px; }
+    .chain-tab { min-width: 94px; height: 34px; border-color: var(--line); border-bottom-color: var(--line-strong); border-radius: 9px 9px 0 0; padding: 7px 14px; background: var(--panel-2); color: var(--muted); }
+    .chain-tab:hover { border-color: var(--green); border-bottom-color: var(--line-strong); }
+    .chain-tab.active { height: 35px; border-color: var(--line-strong); border-bottom-color: var(--panel); background: var(--panel); color: var(--green); }
+    .chain-toolbar { display: flex; align-items: center; justify-content: space-between; gap: 12px; margin-bottom: 12px; }
+    .chain-block { flex: 0 0 122px; min-height: 100px; display: grid; align-content: space-between; gap: 6px; border: 1px solid #2f363c; border-radius: 8px; padding: 9px; background: #111316; color: var(--text); text-align: left; scroll-snap-align: start; }
+    button.chain-block { cursor: pointer; user-select: none; }
+    button.chain-block:hover, button.chain-block:focus-visible { border-color: var(--green); color: var(--green); outline: none; }
+    .chain-block.selected { border-color: var(--green); background: #202616; box-shadow: inset 0 0 0 1px var(--green); }
+    .chain-block.new-block { animation: chain-block-arrive .45s ease both; }
+    .chain-block-main { display: grid; gap: 6px; }
+    .chain-block-head { display: flex; align-items: flex-start; justify-content: space-between; gap: 6px; }
+    .chain-height { font-size: 18px; font-weight: 900; }
+    .chain-block-meta { display: flex; flex-wrap: wrap; gap: 3px 8px; color: var(--muted-2); font-size: 11px; line-height: 1.25; }
+    .chain-miner { width: 100%; color: #9eb3bc; font-size: 11px; overflow-wrap: anywhere; }
+    .chain-block-building { align-content: start; border-color: #697b31; border-style: dashed; background: linear-gradient(145deg, #202616, #141912); box-shadow: inset 0 0 18px rgba(213, 245, 95, .05); user-select: none; }
+    .chain-building-status { width: 7px; height: 7px; margin-top: 5px; border-radius: 50%; background: var(--green); box-shadow: 0 0 0 0 rgba(213, 245, 95, .4); animation: chain-building-pulse 1.7s ease-out infinite; }
+    @keyframes chain-building-pulse { 0% { box-shadow: 0 0 0 0 rgba(213, 245, 95, .4); } 70%, 100% { box-shadow: 0 0 0 7px rgba(213, 245, 95, 0); } }
+    @keyframes chain-block-arrive { from { opacity: .2; transform: translateX(-12px); } to { opacity: 1; transform: translateX(0); } }
+    .block-detail-layout { display: grid; grid-template-columns: minmax(280px, .9fr) minmax(0, 1.1fr); gap: 12px; align-items: start; }
+    .chain-detail { min-width: 0; }
+    .chain-detail .detail-kv { display: grid; grid-template-columns: 90px minmax(0, 1fr); gap: 8px; margin: 7px 0; border: 0; border-radius: 0; padding: 0; background: transparent; font-size: 13px; }
+    .chain-detail .detail-kv .key { margin: 0; color: var(--muted-2); font-size: 12px; font-weight: 500; letter-spacing: 0; text-transform: none; }
+    .chain-detail .detail-kv code { overflow-wrap: anywhere; }
+    .detail-value-stack { min-width: 0; display: grid; gap: 3px; }
+    .detail-value-stack .stat-value { font-size: 13px; }
+    .detail-kv { min-width: 0; border: 1px solid var(--line); border-radius: 8px; padding: 10px; background: var(--panel-2); }
+    .detail-kv .key { margin-bottom: 5px; color: var(--muted-2); font-size: 10px; font-weight: 800; letter-spacing: .05em; text-transform: uppercase; }
+    .tx-list { min-width: 0; display: grid; gap: 12px; }
+    .tx-section { min-width: 0; border: 1px solid var(--line); border-radius: 8px; padding: 11px; background: var(--panel-2); }
+    .tx-section-title { display: flex; justify-content: space-between; gap: 10px; align-items: center; margin-bottom: 9px; color: var(--text); font-size: 13px; font-weight: 850; }
+    .tx-section-meta { color: var(--muted-2); font-size: 11px; font-weight: 700; }
+    .tx-scroll-list { display: grid; gap: 8px; max-height: 420px; overflow: auto; }
+    .tx-card { min-width: 0; border: 1px solid var(--line); border-radius: 8px; background: var(--panel); }
+    .tx-card-button { width: 100%; display: grid; grid-template-columns: auto minmax(0, 1fr) auto; gap: 10px; align-items: center; padding: 10px; color: var(--text); text-align: left; }
+    .tx-card-button:hover, .tx-card-button:focus-visible { border-color: var(--green); color: var(--text); outline: none; }
+    .tx-summary-main { min-width: 0; display: grid; gap: 3px; }
+    .tx-summary-id { overflow: hidden; color: var(--muted); font-family: ui-monospace, monospace; font-size: 11px; text-overflow: ellipsis; white-space: nowrap; }
+    .tx-summary-value { color: var(--green); font-size: 12px; font-weight: 850; white-space: nowrap; }
+    .tx-fields { display: grid; gap: 8px; padding: 10px; }
+    .tx-field { min-width: 0; display: grid; grid-template-columns: 105px minmax(0, 1fr); gap: 8px; align-items: start; }
+    .tx-label { color: var(--muted-2); font-size: 10px; font-weight: 800; text-transform: uppercase; }
+    .tx-value { min-width: 0; color: var(--text); font-size: 12px; overflow-wrap: anywhere; }
+    .tx-value.money { color: var(--green); font-weight: 850; }
+    .io-list { display: grid; gap: 6px; margin-top: 2px; }
+    .io-row { min-width: 0; border-left: 2px solid var(--line-strong); padding: 5px 8px; background: var(--panel-2); }
+    .io-row code { display: block; font-size: 11px; }
+    .detail-loading { border: 1px dashed var(--line-strong); border-radius: 8px; padding: 16px; color: var(--muted-2); text-align: center; }
+    .mempool-panel { min-width: 0; overflow: hidden; }
+    .mempool-strip { width: 100%; min-width: 0; display: flex; gap: 8px; overflow-x: auto; overscroll-behavior-x: contain; padding: 1px 0 10px; scroll-snap-type: x proximity; }
+    .mempool-item { flex: 0 0 220px; min-width: 0; display: grid; align-content: start; gap: 7px; border: 1px solid var(--line); border-radius: 8px; padding: 12px; background: var(--panel-2); cursor: pointer; scroll-snap-align: start; }
+    .mempool-item:hover, .mempool-item:focus-visible { border-color: var(--green); outline: none; box-shadow: 0 0 0 1px rgba(213, 245, 95, .18); }
+    .mempool-top { display: flex; justify-content: space-between; gap: 8px; align-items: flex-start; min-width: 0; }
+    .transaction-overlay { padding: 22px; }
+    .tx-modal { width: min(940px, 100%); max-height: calc(100vh - 44px); max-height: calc(100dvh - 44px); overflow: auto; border: 1px solid var(--line-strong); border-radius: 8px; padding: 16px; background: var(--panel); box-shadow: 0 24px 80px rgba(0, 0, 0, .46); }
+    .tx-modal:focus { outline: none; }
+    .tx-modal-head { display: flex; justify-content: space-between; gap: 16px; align-items: flex-start; margin-bottom: 14px; }
+    .tx-modal-title { min-width: 0; display: grid; justify-items: start; gap: 6px; }
+    .tx-modal-title h2 { margin: 0; }
+    .tx-modal-id { max-width: 100%; color: #9eb3bc; font-size: 11px; overflow-wrap: anywhere; }
+    .tx-modal-summary { display: grid; grid-template-columns: repeat(auto-fit, minmax(180px, 1fr)); gap: 8px; margin-bottom: 12px; }
+    .tx-modal-summary .tx-field { display: grid; grid-template-columns: 1fr; gap: 5px; border: 1px solid var(--line); border-radius: 8px; padding: 10px; background: var(--panel-2); }
+    .utxo-flow { display: grid; grid-template-columns: minmax(0, 1fr) auto minmax(0, 1fr); gap: 12px; align-items: stretch; }
+    .utxo-column { min-width: 0; display: grid; align-content: start; gap: 8px; }
+    .utxo-column h3 { margin: 0; color: var(--muted-2); font-size: 11px; text-transform: uppercase; }
+    .utxo-node { min-width: 0; display: grid; gap: 6px; border: 1px solid var(--line); border-radius: 8px; padding: 10px; background: var(--panel-2); }
+    .utxo-node.ticket { border-color: var(--amber-line); background: var(--amber-soft); }
+    .utxo-node.change { border-color: var(--green-line); background: var(--green-soft); }
+    .utxo-node.fee { border-style: dashed; }
+    .utxo-node-label { display: flex; justify-content: space-between; gap: 8px; color: var(--muted-2); font-size: 11px; font-weight: 800; text-transform: uppercase; }
+    .utxo-node-amount { color: var(--green); font-weight: 850; font-variant-numeric: tabular-nums; }
+    .utxo-node-ref { color: #9eb3bc; font-family: ui-monospace, monospace; font-size: 11px; overflow-wrap: anywhere; }
+    .utxo-arrow { display: grid; place-items: center; color: var(--green); font-size: 24px; font-weight: 900; }
+    .tx-modal-empty { border: 1px dashed var(--line-strong); border-radius: 8px; padding: 10px; color: var(--muted-2); }
+    .peer-table { width: 100%; border-collapse: collapse; font-size: 13px; }
+    .peer-table th, .peer-table td { padding: 10px 8px; border-bottom: 1px solid var(--line); text-align: left; }
+    .peer-table th { color: var(--muted-2); font-size: 10px; text-transform: uppercase; }
+    .toggle-switch { display: inline-flex; align-items: center; gap: 9px; color: var(--muted); font-size: 12px; font-weight: 850; cursor: pointer; user-select: none; }
+    .toggle-switch input { position: absolute; width: 1px; height: 1px; opacity: 0; pointer-events: none; }
+    .toggle-track { position: relative; width: 46px; height: 26px; border: 1px solid var(--line-strong); border-radius: 999px; background: var(--panel-2); transition: background .16s ease, border-color .16s ease; }
+    .toggle-thumb { position: absolute; top: 3px; left: 3px; width: 18px; height: 18px; border-radius: 999px; background: var(--muted-2); transition: transform .16s ease, background .16s ease; }
+    .toggle-switch.active { color: var(--green); }
+    .toggle-switch.active .toggle-track { border-color: var(--green); background: var(--green-soft); }
+    .toggle-switch.active .toggle-thumb { transform: translateX(20px); background: var(--green); }
+    .toggle-switch:focus-within .toggle-track { outline: 2px solid var(--green); outline-offset: 2px; }
+    .empty { border: 1px dashed var(--line); border-radius: 8px; padding: 18px; color: var(--muted-2); text-align: center; }
+    .empty h2 { color: var(--text); }
+    .empty p { max-width: 560px; margin: 0 auto 14px; }
+    .metrics-bars { display: grid; gap: 8px; }
+    .metrics-head { display: flex; justify-content: flex-end; margin-bottom: 12px; }
+    .metrics-range { flex-wrap: wrap; }
+    .metric-row { display: grid; grid-template-columns: 150px minmax(0, 1fr) auto; gap: 10px; align-items: center; }
+    .bar { height: 8px; overflow: hidden; border-radius: 999px; background: var(--line); }
+    .bar > span { display: block; height: 100%; border-radius: inherit; background: var(--green); }
+    .setup-overlay { position: fixed; z-index: 70; inset: 0; display: grid; place-items: center; padding: 22px; background: rgba(9, 10, 11, .96); }
+    .setup-modal { width: min(920px, 100%); max-height: calc(100vh - 44px); overflow: auto; border: 1px solid var(--line-strong); border-radius: 11px; padding: 20px; background: var(--panel); }
+    .login-overlay { padding: 40px 22px; overflow-y: auto; }
+    .login-modal { width: min(340px, 100%); max-height: calc(100vh - 80px); }
+    .login-modal h1 { margin-bottom: 22px; }
+    .login-form { display: grid; gap: 16px; }
+    .login-form label { gap: 8px; }
+    .login-form input { margin-top: 0; }
+    .setup-kicker { color: var(--green); font-size: 11px; font-weight: 900; letter-spacing: .09em; text-transform: uppercase; }
+    .setup-progress { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 7px; margin: 18px 0; }
+    .setup-progress span { height: 4px; border-radius: 999px; background: var(--line); }
+    .setup-progress span.active { background: var(--green); }
+    .setup-check { display: flex; align-items: center; gap: 12px; border: 1px solid var(--line); border-radius: 8px; padding: 13px; background: var(--panel-2); }
+    .setup-check + .setup-check { margin-top: 9px; }
+    .setup-check-mark { width: 30px; height: 30px; flex: 0 0 auto; display: grid; place-items: center; border-radius: 999px; background: var(--green-soft); color: var(--green); font-weight: 900; }
+    .setup-check-mark.warning { background: var(--amber-soft); color: var(--amber); }
+    .setup-grid { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 12px; margin: 18px 0; }
+    .setup-actions { display: flex; justify-content: flex-end; gap: 9px; margin-top: 12px; }
+    /* A class, not inline: x-show removes an inline display when it shows the element. */
+    .stacked-form { display: grid; gap: 10px; }
+    .stacked-form p, .stacked-form .backup-actions { margin: 0; }
+    .backup-actions { display: flex; gap: 8px; margin-top: 10px; }
+    .wallet-choice { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 10px; }
+    .wallet-choice button { min-height: 92px; padding: 14px; text-align: left; }
+    .wallet-choice b, .wallet-choice span { display: block; }
+    .wallet-choice span { margin-top: 6px; color: var(--muted-2); font-size: 12px; font-weight: 500; }
+    .recovery-warning { border: 1px solid var(--amber-line); border-radius: 8px; padding: 11px 12px; background: var(--amber-soft); color: var(--amber-text); }
+    .recovery-grid { counter-reset: recovery-word; display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 7px; margin: 12px 0; }
+    .recovery-word { counter-increment: recovery-word; min-width: 0; border: 1px solid var(--line); border-radius: 7px; padding: 8px; background: var(--panel-2); font-family: ui-monospace, monospace; font-size: 12px; overflow-wrap: anywhere; }
+    .recovery-word::before { content: counter(recovery-word) '. '; color: var(--muted-2); }
+    .segmented { display: flex; gap: 6px; }
+    .segmented button.active { border-color: var(--green); color: var(--green); }
+    @media (prefers-reduced-motion: reduce) { *, *::before, *::after { transition-duration: 0s !important; animation-duration: 0s !important; scroll-behavior: auto !important; } }
+    .setup-modal:focus { outline: none; }
+    .metric-target { position: relative; }
+    .metric-target::after { content: ""; position: absolute; top: -3px; bottom: -3px; left: 50%; width: 2px; background: var(--text); opacity: .55; }
+    .nav-button, .brand { position: relative; }
+    .nav-shortcut { position: absolute; top: 4px; right: 4px; width: 16px; height: 16px; display: grid; place-items: center; border: 1px solid var(--line-strong); border-radius: 5px; background: var(--panel-2); color: var(--text); font-size: 9px; font-weight: 900; pointer-events: none; }
+    .dashboard-card.warn .dashboard-value { color: var(--amber); }
+    .dashboard-card.warn .dashboard-card-icon { background: var(--amber-soft); color: var(--amber); }
+    .dashboard-card.bad .dashboard-value { color: var(--danger-text); }
+    .dashboard-card.bad .dashboard-card-icon { background: var(--danger-soft); color: var(--danger-text); }
+    .dashboard-card.idle .dashboard-value { color: var(--muted); }
+    .dashboard-card.idle .dashboard-card-icon { background: var(--panel-2); color: var(--muted); }
+    .charts { display: grid; grid-template-columns: repeat(auto-fit, minmax(min(100%, 420px), 1fr)); gap: 12px; margin-top: 12px; }
+    .chart-card { min-width: 0; border: 1px solid var(--line); border-radius: 9px; padding: 12px; background: var(--panel); }
+    .chart-head { display: flex; justify-content: space-between; align-items: baseline; gap: 10px; margin-bottom: 8px; }
+    .chart-head h3 { margin: 0; }
+    .chart-value { color: var(--green); font-size: 13px; font-weight: 850; font-variant-numeric: tabular-nums; }
+    .chart-frame { display: grid; grid-template-columns: 48px minmax(0, 1fr); gap: 6px; }
+    .chart-axis { position: relative; height: 156px; }
+    .chart-axis span { position: absolute; right: 0; max-width: 100%; overflow: hidden; transform: translateY(-50%); color: var(--muted-2); font-size: 10px; font-weight: 750; font-variant-numeric: tabular-nums; text-overflow: ellipsis; white-space: nowrap; }
+    .chart-plot { position: relative; min-width: 0; }
+    .chart-plot svg { width: 100%; height: 156px; display: block; border: 1px solid var(--line); border-radius: 8px; background: var(--panel-2); }
+    .chart-line { fill: none; stroke: var(--green); stroke-width: 2; stroke-linejoin: round; vector-effect: non-scaling-stroke; }
+    .chart-grid { stroke: var(--line-strong); stroke-width: 1; stroke-dasharray: 3 6; vector-effect: non-scaling-stroke; }
+    .chart-target { stroke: var(--amber); stroke-width: 1; stroke-dasharray: 5 4; vector-effect: non-scaling-stroke; }
+    .chart-dot { position: absolute; width: 8px; height: 8px; border-radius: 50%; background: var(--green); transform: translate(-50%, -50%); box-shadow: 0 0 0 4px rgba(213, 245, 95, .18); pointer-events: none; }
+    .chart-tip { position: absolute; transform: translate(-50%, calc(-100% - 10px)); border: 1px solid var(--green-line); border-radius: 6px; padding: 4px 7px; background: var(--green-soft); color: var(--text); font-size: 11px; font-weight: 850; white-space: nowrap; pointer-events: none; }
+    .confirm-facts { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 9px; margin: 12px 0; }
+    .amount-row { display: flex; gap: 6px; align-items: end; }
+    .amount-row input { flex: 1; }
+    .activity-row { display: grid; grid-template-columns: auto minmax(0, 1fr) auto; gap: 10px; align-items: center; border: 1px solid var(--line); border-radius: 8px; padding: 9px 10px; background: var(--panel-2); }
+    .activity-row .tx-summary-main { display: flex; flex-wrap: wrap; gap: 4px 10px; align-items: baseline; }
+    .tx-summary-value.incoming { color: var(--green); }
+    .tx-summary-value:not(.incoming) { color: var(--text); }
+    .pill.pending { border-color: var(--amber-line); color: var(--amber); }
+    .title-with-pill { display: flex; align-items: center; gap: 8px; }
+    .title-with-pill h2 { margin: 0; }
+    .info-details { position: relative; display: inline-block; }
+    .info-details > summary { width: 18px; height: 18px; display: grid; place-items: center; border: 1px solid var(--line-strong); border-radius: 50%; color: var(--muted); font-size: 11px; font-weight: 900; cursor: pointer; list-style: none; }
+    .info-details > summary::-webkit-details-marker { display: none; }
+    .info-details[open] > summary { border-color: var(--green); color: var(--green); }
+    .info-popover { position: absolute; z-index: 12; top: 25px; right: 0; width: min(320px, 75vw); border: 1px solid var(--line-strong); border-radius: 8px; padding: 10px 12px; background: var(--panel); color: var(--muted); font-size: 12px; font-weight: 500; line-height: 1.45; box-shadow: 0 16px 40px rgba(0,0,0,.4); }
+    .mining-runtime { display: flex; align-items: center; gap: 9px; margin-top: 12px; border: 1px solid var(--line); border-radius: 8px; padding: 10px 12px; background: var(--panel-2); color: var(--muted); font-size: 12px; font-weight: 750; }
+    .mining-runtime-dot { width: 9px; height: 9px; flex: 0 0 auto; border-radius: 50%; background: var(--muted-2); }
+    .mining-runtime.active { border-color: var(--green-line); color: var(--green); background: var(--green-soft); }
+    .mining-runtime.active .mining-runtime-dot { background: var(--green); box-shadow: 0 0 0 5px rgba(213,245,95,.12); animation: mining-pulse 1.6s ease-in-out infinite; }
+    @keyframes mining-pulse { 50% { opacity: .45; transform: scale(.8); } }
+    button.link { border: 0; padding: 0; background: none; font: inherit; font-family: ui-monospace, monospace; font-weight: 600; color: var(--muted); text-decoration: underline dotted; }
+    button.link:hover { color: var(--green); }
+    .tour { position: fixed; z-index: 75; inset: 0; }
+    .tour-spotlight { position: fixed; border: 2px solid var(--green); border-radius: 10px; box-shadow: 0 0 0 9999px rgba(9, 10, 11, .78); pointer-events: none; transition: all .2s ease; }
+    .tour-card { position: fixed; width: min(340px, calc(100vw - 32px)); border: 1px solid var(--line-strong); border-radius: 11px; padding: 16px; background: var(--panel); box-shadow: 0 20px 50px rgba(0, 0, 0, .5); }
+    .tour-card p { margin: 6px 0 4px; }
+    .notice.sync { margin-bottom: 12px; border-color: var(--amber-line); background: var(--amber-soft); color: var(--amber-text); }
+    .notice { border: 1px solid var(--line-strong); border-radius: 8px; padding: 10px 12px; color: var(--muted); background: var(--panel-2); }
+    @media (max-width: 1100px) { .dashboard-grid { grid-template-columns: repeat(3, minmax(0, 156px)); } }
+    @media (max-width: 950px) { .dashboard-grid { grid-template-columns: repeat(2, minmax(0, 156px)); } .wallet-layout, .wallet-actions, .mining-grid, .setup-grid, .block-detail-layout { grid-template-columns: 1fr; } .activity-scroll { max-height: 560px; } }
+    @media (max-width: 760px) { .utxo-flow { grid-template-columns: 1fr; } .utxo-arrow { min-height: 28px; transform: rotate(90deg); } .tx-modal-head { align-items: stretch; } }
+    @media (max-width: 560px) { .mining-form, .mining-stats { grid-template-columns: 1fr; } .chain-block { flex-basis: 108px; } }
+    @media (max-width: 650px) { .confirm-facts { grid-template-columns: 1fr; } .dashboard { min-height: 0; display: block; } .dashboard-card { aspect-ratio: auto; display: grid; grid-template-columns: 52px minmax(0, 1fr); column-gap: 14px; row-gap: 3px; align-items: center; justify-items: start; text-align: left; } .dashboard-card-icon { grid-row: span 3; } .sidebar { position: static; width: 100%; height: auto; flex-direction: row; overflow-x: auto; } .nav, .sidebar-bottom { display: flex; margin: 0; } .content { padding: 18px; } .dashboard-grid, .wallet-choice, .tx-modal-summary { grid-template-columns: 1fr; } .setup-overlay { padding: 10px; } .setup-modal, .tx-modal { max-height: calc(100vh - 20px); max-height: calc(100dvh - 20px); padding: 14px; } .tx-modal-head { flex-direction: column; } .tx-modal-head > button { width: 100%; min-height: 44px; } .login-overlay { padding: 24px 14px; } .login-modal { max-height: calc(100vh - 48px); } .recovery-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); } .activity-filters { justify-content: flex-start; } .activity-card { grid-template-columns: 1fr; gap: 8px; } .activity-side { text-align: left; padding-left: 54px; } }
+  </style>
+  <script defer src="/assets/iuna-ui.js"></script>
+  <script defer src="/assets/alpine.min.js"></script>
+</head>
+<body x-data="iunaApp()" x-init="init()" x-cloak>
+  <div class="shell">
+    <aside class="sidebar" aria-label="iuna navigation">
+      <button class="brand" data-tour="dashboard" @click="setTab('dashboard')" title="Dashboard" aria-label="Dashboard"><svg viewBox="0 0 32 32" aria-hidden="true"><circle class="mark-dot" cx="9.4" cy="7.6" r="2.8"></circle><path class="mark-loop" d="M9.4 13v7.1c0 3.7 2.9 6.4 6.6 6.4s6.6-2.7 6.6-6.4V13"></path></svg><span class="nav-shortcut" x-show="shortcutKeyHeld" x-text="shortcutNumber('dashboard')" aria-hidden="true"></span></button>
+      <nav class="nav">
+        <button class="nav-button" data-tour="wallet" :class="{active: tab === 'wallet'}" :aria-current="tab === 'wallet' ? 'page' : null" @click="setTab('wallet')"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M3 7h16a2 2 0 0 1 2 2v8a2 2 0 0 1-2 2H3z"></path><path d="M3 7V5a2 2 0 0 1 2-2h12"></path><path d="M16 13h3"></path></svg><span>Wallet</span><span class="nav-shortcut" x-show="shortcutKeyHeld" x-text="shortcutNumber('wallet')" aria-hidden="true"></span></button>
+        <button class="nav-button" data-tour="mining" :class="{active: tab === 'mining'}" :aria-current="tab === 'mining' ? 'page' : null" @click="setTab('mining')"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M4 19V5"></path><path d="M4 19h16"></path><path d="M7 15l4-4 3 3 5-7"></path></svg><span>Mining</span><span class="nav-shortcut" x-show="shortcutKeyHeld" x-text="shortcutNumber('mining')" aria-hidden="true"></span></button>
+        <button class="nav-button" data-tour="p2p" :class="{active: tab === 'p2p'}" :aria-current="tab === 'p2p' ? 'page' : null" @click="setTab('p2p')"><svg viewBox="0 0 24 24" aria-hidden="true"><circle cx="6" cy="12" r="3"></circle><circle cx="18" cy="6" r="3"></circle><circle cx="18" cy="18" r="3"></circle><path d="M8.5 10.5 15.5 7.5"></path><path d="M8.5 13.5 15.5 16.5"></path></svg><span>P2P</span><span class="nav-shortcut" x-show="shortcutKeyHeld" x-text="shortcutNumber('p2p')" aria-hidden="true"></span></button>
+        <button class="nav-button" data-tour="chain" :class="{active: tab === 'chain'}" :aria-current="tab === 'chain' ? 'page' : null" @click="setTab('chain')"><svg viewBox="0 0 24 24" aria-hidden="true"><rect x="1.5" y="9" width="5.5" height="5.5"></rect><rect x="9.25" y="9" width="5.5" height="5.5"></rect><rect x="17" y="9" width="5.5" height="5.5"></rect></svg><span>Chain</span><span class="nav-shortcut" x-show="shortcutKeyHeld" x-text="shortcutNumber('chain')" aria-hidden="true"></span></button>
+        <button class="nav-button" data-tour="metrics" :class="{active: tab === 'metrics'}" :aria-current="tab === 'metrics' ? 'page' : null" @click="setTab('metrics')"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M4 19V5"></path><path d="M4 19h16"></path><path d="M7 15l3-4 3 2 4-7"></path><path d="M7 17h10"></path></svg><span>Metrics</span><span class="nav-shortcut" x-show="shortcutKeyHeld" x-text="shortcutNumber('metrics')" aria-hidden="true"></span></button>
+      </nav>
+      <div class="sidebar-bottom">
+        <button class="nav-button" data-tour="settings" :class="{active: tab === 'settings'}" :aria-current="tab === 'settings' ? 'page' : null" @click="setTab('settings')"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M9.7 3.2 9.2 5.5a7.2 7.2 0 0 0-1.4.8L5.6 5.6 3.2 9.8l1.7 1.6a7.8 7.8 0 0 0 0 1.6l-1.7 1.6 2.4 4.2 2.2-.7a7.2 7.2 0 0 0 1.4.8l.5 2.3h4.8l.5-2.3a7.2 7.2 0 0 0 1.4-.8l2.2.7 2.4-4.2-1.7-1.6a7.8 7.8 0 0 0 0-1.6L21 9.8l-2.4-4.2-2.2.7a7.2 7.2 0 0 0-1.4-.8l-.5-2.3H9.7Z"></path><circle cx="12" cy="12.2" r="3.1"></circle></svg><span>Settings</span><span class="nav-shortcut" x-show="shortcutKeyHeld" x-text="shortcutNumber('settings')" aria-hidden="true"></span></button>
+        <button class="version-panel" type="button" :disabled="desktopUpdateBusy" :class="{update: updateAvailable(), checking: releaseCheckState === 'checking', failed: releaseCheckState === 'failed'}" :title="versionPanelTitle()" @click="openLatestRelease">
+          <span class="version-dot" aria-hidden="true"></span>
+          <span class="version-label" x-text="appVersionLabel()"></span>
+          <span class="version-update" x-show="updateAvailable()">Update</span>
+        </button>
+      </div>
+    </aside>
+
+    <main class="content">
+      <header>
+        <div><h1 x-text="pageTitle()">iuna</h1><div class="muted" x-text="status.network || 'Connecting…'"></div></div>
+        <div class="header-meta"><span x-text="lastUpdatedLabel()"></span><span class="pill" x-text="networkLabel()"></span></div>
+      </header>
+      <div class="notice sync" x-show="syncTarget()" role="status">Synchronizing: Heartbeat <b x-text="status.heartbeat_height ?? 0"></b> of <b x-text="syncTarget()"></b> from peers. Balances and mining catch up when this finishes.</div>
+      <div class="flash" :class="flash?.kind" x-show="flash" x-transition x-text="flash?.message" :role="flash?.kind === 'error' ? 'alert' : 'status'" aria-live="polite"></div>
+
+      <section class="dashboard" x-show="tab === 'dashboard'">
+        <div style="width:min(100%,900px)">
+        <div class="dashboard-grid">
+          <article class="dashboard-card balance" :class="dashboardState('balance')"><div class="dashboard-card-icon" aria-hidden="true"><svg viewBox="0 0 24 24"><path d="M4 7.5h14a2 2 0 0 1 2 2v9H4a2 2 0 0 1-2-2v-11a2 2 0 0 1 2-2h13"></path><path d="M15 12h5"></path><circle cx="15" cy="12" r=".5"></circle></svg></div><div class="dashboard-card-copy"><div class="dashboard-label">Current balance</div><div class="dashboard-value" :style="balanceValueStyle()">IUNA <span x-text="amountLabel(status.wallet_balance)"></span></div></div></article>
+          <article class="dashboard-card heartbeat-mining" :class="dashboardState('heartbeatMining')"><div class="dashboard-card-icon" aria-hidden="true"><svg viewBox="0 0 24 24"><path d="m14 13-8.4 8.4a1 1 0 0 1-3-3L11 10"></path><path d="M16 4A13 13 0 0 0 6 2.4c-1.4.3-1.1 2.1.2 2.6A20 20 0 0 1 12 8"></path><path d="M16 12a20 20 0 0 1 3 5.8c.5 1.4 2.3 1.7 2.6.3A13 13 0 0 0 20 8"></path><path d="m18.4 3.4-7 7 2.2 2.2 7-7z"></path></svg></div><div class="dashboard-card-copy"><div class="dashboard-label">Heartbeat Mining</div><div class="dashboard-value" x-text="status.heartbeat_mining_enabled ? 'On' : 'Off'"></div></div></article>
+          <article class="dashboard-card" :class="dashboardState('ledgerMining')"><div class="dashboard-card-icon" aria-hidden="true"><svg viewBox="0 0 24 24"><path d="M4 7.5h16v10H4z"></path><path d="M7 4.5h10M7 20.5h10"></path><circle cx="12" cy="12.5" r="2.5"></circle></svg></div><div class="dashboard-card-copy"><div class="dashboard-label">Ledger Mining</div><div class="dashboard-value" x-text="status.ledger_mining_enabled ? 'On' : 'Off'"></div></div></article>
+          <article class="dashboard-card" :class="dashboardState('heartbeat')"><div class="dashboard-card-icon" aria-hidden="true"><svg viewBox="0 0 24 24"><path d="m12 2.8 8 4.4v9.6l-8 4.4-8-4.4V7.2z"></path><path d="m4.3 7.4 7.7 4.3 7.7-4.3M12 11.7v9.1"></path></svg></div><div class="dashboard-card-copy"><div class="dashboard-label">Heartbeat chain</div><div class="dashboard-value" x-text="heartbeatAgeLabel()"></div></div></article>
+          <article class="dashboard-card"><div class="dashboard-card-icon" aria-hidden="true"><svg viewBox="0 0 24 24"><rect x="2" y="4" width="20" height="16" rx="2"></rect><path d="M2 9h20M7 4v16"></path></svg></div><div class="dashboard-card-copy"><div class="dashboard-label">Ledger chain</div><div class="dashboard-value" x-text="ledgerAgeLabel()"></div></div></article>
+          <article class="dashboard-card" :class="dashboardState('p2p')"><div class="dashboard-card-icon" aria-hidden="true"><svg viewBox="0 0 24 24"><circle cx="5" cy="12" r="2.5"></circle><circle cx="19" cy="6" r="2.5"></circle><circle cx="19" cy="18" r="2.5"></circle><path d="m7.3 11 9.4-4M7.3 13l9.4 4"></path></svg></div><div class="dashboard-card-copy"><div class="dashboard-label">P2P</div><div class="dashboard-value"><span x-text="peers.length"></span> peer<span x-show="peers.length !== 1">s</span></div></div></article>
+        </div>
+        </div>
+      </section>
+
+      <section x-show="tab === 'wallet'">
+        <div class="empty" x-show="!status.wallet_unlocked"><h2 x-text="status.wallet_public_key ? 'Unlock your wallet' : 'Create your wallet'"></h2><button class="primary" @click="resetSetup(); setupStep = 2">Open wallet setup</button></div>
+        <div class="wallet-layout" x-show="status.wallet_unlocked">
+          <div class="wallet-primary">
+            <div class="wallet-actions">
+              <article class="panel">
+                <div class="panel-head"><div class="title-with-pill"><h2>Send IUNA</h2><span class="pill">Transaction</span></div></div>
+                <form class="form-row" @submit.prevent="reviewTransaction">
+                  <label>Recipient public key<input x-model.trim="transfer.recipient" list="contact-keys" minlength="64" maxlength="64" placeholder="64 hexadecimal characters or pick a contact" required></label>
+                  <datalist id="contact-keys"><template x-for="contact in contacts" :key="contact.address"><option :value="contact.address" x-text="contact.name"></option></template></datalist>
+                  <label>Amount (IUNA)<span class="amount-row"><input x-model="transfer.amount" type="number" min="0.00000001" step="0.00000001" required><button type="button" @click="useMaximumAmount" title="Send the whole spendable balance minus the fee">Max</button></span></label>
+                  <label>Fee (IUNA)<input x-model="transfer.fee" type="number" min="0.00000001" step="0.00000001" required></label>
+                  <button class="primary" type="submit" :disabled="transfer.busy || !canManage()" x-text="transfer.busy ? 'Submitting…' : 'Review'"></button>
+                </form>
+              </article>
+              <article class="panel">
+                <div class="panel-head"><h2>Receive</h2><button @click="copyWalletAddress">Copy address</button></div>
+                <div class="address"><code x-text="status.wallet_public_key || 'Wallet unavailable'"></code></div>
+                <div class="grid" style="margin-top:12px">
+                  <div class="stat"><div class="stat-label">Balance</div><div class="stat-value">IUNA <span x-text="amountLabel(status.wallet_balance)"></span></div></div>
+                  <div class="stat"><div class="stat-label">Spendable</div><div class="stat-value">IUNA <span x-text="amountLabel(status.wallet_spendable_balance)"></span></div></div>
+                  <div class="stat"><div class="panel-head" style="margin:0"><div><div class="stat-label">Wallet UTXOs</div><div class="stat-value"><span x-text="status.wallet_utxos ?? 0"></span> unspent</div><div class="muted" x-show="status.wallet_spendable_utxos !== status.wallet_utxos"><span x-text="status.wallet_spendable_utxos ?? 0"></span> spendable now</div></div><button class="utxo-details-button" @click="openUtxos()">View details</button></div></div>
+                </div>
+              </article>
+            </div>
+            <article class="panel" x-show="status.wallet_public_key">
+              <div class="panel-head"><h2>Contacts</h2></div>
+              <div class="tx-scroll-list" x-show="contacts.length" style="margin-bottom:12px">
+                <template x-for="contact in contacts" :key="contact.address"><div class="activity-row"><button class="link contact-link" @click="openContactEditor(contact.address)" title="Edit contact" x-text="contact.name"></button><button class="link contact-link tx-summary-id" @click="openContactEditor(contact.address)" title="Edit contact" x-text="contact.address"></button><span class="backup-actions" style="margin:0"><button @click="useRecipient(contact.address)">Use</button><button @click="removeContact(contact.address)">Remove</button></span></div></template>
+              </div>
+              <form class="form-row" @submit.prevent="addContact()"><label>Name<input x-model="contactForm.name" maxlength="40" required></label><label style="flex:3">Public key<input x-model.trim="contactForm.address" minlength="64" maxlength="64" autocomplete="off" spellcheck="false" required></label><button type="submit">Save contact</button></form>
+            </article>
+          </div>
+          <article class="panel wallet-activity-panel" x-show="status.wallet_public_key">
+            <div class="panel-head">
+              <div class="activity-heading"><h2>Activity</h2><span class="pill pending" x-show="status.pending_ledger_transactions || status.pending_mining_tickets"><span x-text="pendingCount()"></span>&nbsp;pending</span></div>
+              <div class="activity-filters" aria-label="Activity filters">
+                <label class="activity-filter transfers" :class="{active: activityFilters.transfers}"><input type="checkbox" x-model="activityFilters.transfers" @change="activityFiltersChanged()"><span>Transfers</span></label>
+                <label class="activity-filter tickets" :class="{active: activityFilters.tickets}"><input type="checkbox" x-model="activityFilters.tickets" @change="activityFiltersChanged()"><span>Tickets</span></label>
+                <label class="activity-filter heartbeatRewards" :class="{active: activityFilters.heartbeatRewards}"><input type="checkbox" x-model="activityFilters.heartbeatRewards" @change="activityFiltersChanged()"><span>Heartbeat rewards</span></label>
+                <label class="activity-filter ledgerRewards" :class="{active: activityFilters.ledgerRewards}"><input type="checkbox" x-model="activityFilters.ledgerRewards" @change="activityFiltersChanged()"><span>Ledger rewards</span></label>
+              </div>
+            </div>
+            <div class="activity-scroll">
+              <div class="activity-list" x-show="filteredActivityItems().length">
+                <template x-for="item in visibleActivityItems()" :key="`${item.pending}:${item.kind}:${item.id}`">
+                  <div class="activity-card" :class="{pending: item.pending}">
+                    <div class="activity-main">
+                      <span class="pill" :class="[activityType(item), {pending: item.pending}]" :title="activityLabel(item)" :aria-label="activityLabel(item)" x-text="activityCode(item)"></span>
+                      <div class="activity-copy">
+                        <div class="activity-title" x-text="activityLabel(item)"></div>
+                        <div class="activity-meta"><span class="activity-counterparty" x-show="item.counterparty"><span x-text="item.kind === 'received' ? 'From ' : 'To '"></span><button class="link contact-link" @click="openContactEditor(item.counterparty)" :title="contactName(item.counterparty) ? 'Edit contact' : 'Add contact'" x-text="contactName(item.counterparty) || short(item.counterparty)"></button><span> · </span></span><span x-text="activityMetaLabel(item)"></span><span> · </span><button class="link activity-id" @click="copyValue(item.id, 'Transaction ID copied')" :title="item.id" x-text="short(item.id)"></button></div>
+                      </div>
+                    </div>
+                    <div class="activity-side"><div class="activity-amount" :class="{incoming: activitySign(item) === '+'}"><span x-text="activitySign(item)"></span><span x-text="amountLabel(item.amount)"></span> IUNA</div><div class="activity-meta" x-text="item.pending ? 'Pending' : 'Confirmed'"></div></div>
+                  </div>
+                </template>
+                <div class="activity-sentinel" x-ref="activitySentinel" x-show="activityHasMore()" x-init="$nextTick(() => observeActivitySentinel($el))"></div>
+              </div>
+              <div class="empty" x-show="activity && !activityItems().length">No wallet activity.</div>
+              <div class="empty" x-show="activityItems().length && !filteredActivityItems().length">No activity matches these filters.</div>
+            </div>
+          </article>
+        </div>
+      </section>
+
+      <section x-show="tab === 'mining'">
+        <div class="mining-grid">
+          <article class="panel mining-panel">
+            <div class="panel-head"><div class="title-with-pill"><h2>Heartbeat mining</h2><span class="pill">Proof of Work</span></div><label class="toggle-switch" :class="{active: status.heartbeat_mining_enabled}"><input type="checkbox" :checked="status.heartbeat_mining_enabled" @change="setHeartbeatMining($event.target.checked)" :disabled="mining.busy || !canManage()"><span class="toggle-track" aria-hidden="true"><span class="toggle-thumb"></span></span><span x-text="status.heartbeat_mining_enabled ? 'On' : 'Off'"></span></label></div>
+            <div class="mining-controls">
+              <label>Worker threads<input x-model.number="mining.workers" @change="updateMiningWorkers" type="number" min="1" :max="status.heartbeat_mining_max_workers || 256" step="1" :disabled="mining.busy || !canManage()"></label>
+            </div>
+            <div class="grid mining-stats">
+              <div class="stat"><div class="stat-label">Height</div><div class="stat-value" x-text="status.heartbeat_height ?? 0"></div></div>
+              <div class="stat"><div class="stat-label">Difficulty</div><div class="stat-value" x-text="difficultyLabel()"></div></div>
+              <div class="stat"><div class="stat-label">Wallet</div><div class="stat-value" x-text="status.wallet_unlocked ? 'Unlocked' : 'Locked'"></div></div>
+            </div>
+            <div class="mining-runtime" :class="{active: status.heartbeat_mining_enabled}" role="status"><span class="mining-runtime-dot" aria-hidden="true"></span><span x-text="mining.message"></span></div>
+          </article>
+          <article class="panel mining-panel">
+            <div class="panel-head"><div class="title-with-pill"><h2>Ledger mining</h2><span class="pill">Proof of Expenditure</span></div><label class="toggle-switch" :class="{active: status.ledger_mining_enabled}"><input type="checkbox" :checked="status.ledger_mining_enabled" @change="setLedgerMining($event.target.checked)" :disabled="ticket.continuousBusy || !canManage()"><span class="toggle-track" aria-hidden="true"><span class="toggle-thumb"></span></span><span x-text="status.ledger_mining_enabled ? 'Continuous' : 'Manual'"></span></label></div>
+            <div class="mining-mode" x-show="!status.ledger_mining_enabled">
+              <form class="form-row mining-form" @submit.prevent="submitTicket">
+                <label>Budget (IUNA)<input x-model="ticket.budget" type="number" min="0.00000001" step="0.00000001" required></label>
+                <label>Duration (Heartbeats)<input x-model.number="ticket.duration" @input.debounce.250ms="quoteTicket" type="number" min="1" max="1440" required></label>
+                <label>Fee (IUNA)<input x-model="ticket.fee" type="number" min="0.00000001" step="0.00000001" required></label>
+                <button class="primary" type="submit" :disabled="ticket.busy || !canManage()" x-text="ticket.busy ? 'Submitting…' : 'Submit ticket'"></button>
+              </form>
+              <div class="grid">
+                <div class="stat"><div class="stat-label title-with-pill">Minimum <details class="info-details"><summary aria-label="Why is there a minimum budget?">i</summary><div class="info-popover">The minimum prices one of the limited active ticket slots. It rises with the next Ledger reward and the selected duration, preventing free slot exhaustion.</div></details></div><div class="stat-value">IUNA <span x-text="ticket.quote ? amountLabel(ticket.quote.current_minimum_budget) : '…'"></span></div></div>
+                <div class="stat"><div class="stat-label">Recommended</div><div class="stat-value">IUNA <span x-text="ticket.quote ? amountLabel(ticket.quote.recommended_budget) : '…'"></span></div></div>
+              </div>
+            </div>
+            <div class="mining-readonly" x-show="status.ledger_mining_enabled">
+              <div class="grid">
+                <div class="stat"><div class="stat-label">Automatic budget</div><div class="stat-value">IUNA <span x-text="ticket.continuousQuote ? amountLabel(ticket.continuousQuote.recommended_budget) : '…'"></span></div></div>
+                <div class="stat"><div class="stat-label">Ticket duration</div><div class="stat-value">10 Heartbeats</div></div>
+                <div class="stat"><div class="stat-label">Ticket fee</div><div class="stat-value">IUNA <span x-text="amountLabel(1)"></span></div></div>
+                <div class="stat"><div class="stat-label">Next ticket</div><div class="stat-value" x-text="ledgerNextTicketLabel()"></div></div>
+              </div>
+            </div>
+            <div class="mining-runtime" :class="{active: status.ledger_mining_enabled}" role="status"><span class="mining-runtime-dot" aria-hidden="true"></span><span x-text="ledgerMiningMessage()"></span></div>
+          </article>
+        </div>
+        <div class="notice" x-show="status.network && !browserCanManage()">Mining controls are read-only in this browser.</div>
+      </section>
+
+      <section x-show="tab === 'p2p'">
+        <article class="panel">
+          <div class="panel-head"><div><h2>Peer-to-peer network</h2><div class="muted">Connected inbound and outbound node sessions.</div></div><span class="pill"><span x-text="peers.length"></span>&nbsp;connected</span></div>
+          <div class="grid">
+            <div class="stat"><div class="stat-label">Status</div><div class="stat-value" x-text="networkLabel()"></div></div>
+            <div class="stat"><div class="stat-label">Local height</div><div class="stat-value" x-text="`Heartbeat ${status.heartbeat_height ?? 0}`"></div></div>
+            <div class="stat"><div class="stat-label">Network</div><div class="stat-value" x-text="status.network || 'iuna'"></div></div>
+          </div>
+        </article>
+        <article class="panel">
+          <h2>Connected nodes</h2>
+          <div style="overflow-x:auto" x-show="peers.length">
+            <table class="peer-table"><thead><tr><th>Address</th><th>Direction</th><th>Height</th><th>Tip</th><th>Connected</th></tr></thead><tbody><template x-for="peer in peers" :key="`${peer.direction}:${peer.address}`"><tr><td><code x-text="peer.address"></code></td><td><span class="pill" x-text="peer.direction"></span></td><td x-text="peer.heartbeat_height ?? 'Handshaking'"></td><td><code x-text="short(peer.tip_hash)"></code></td><td x-text="timeLabel(peer.connected_at)"></td></tr></template></tbody></table>
+          </div>
+          <div class="empty" x-show="!peers.length">No active P2P sessions. The node keeps retrying configured outbound peers in the background.</div>
+        </article>
+        <article class="panel">
+          <div class="panel-head"><div><h2>Configured peers</h2><div class="muted">Outbound peers this node keeps dialling. Peers you add here are saved and survive a restart.</div></div></div>
+          <form class="form-row" @submit.prevent="changePeer('add', peerForm.address)" x-show="browserCanManage()">
+            <label>Peer address<input x-model="peerForm.address" placeholder="iuna.jhx.app:19733" autocomplete="off" required></label>
+            <button class="primary" type="submit" :disabled="peerForm.busy">Add peer</button>
+          </form>
+          <div style="overflow-x:auto;margin-top:12px" x-show="peerTargets.length">
+            <table class="peer-table"><thead><tr><th>Address</th><th>Source</th><th>State</th><th>Last attempt</th><th>Last error</th><th></th></tr></thead><tbody><template x-for="target in peerTargets" :key="target.address"><tr><td><code x-text="target.address"></code></td><td><span class="pill" x-text="target.source === 'startup' ? 'Command line' : 'Added'"></span></td><td x-text="peerTargetState(target)"></td><td x-text="target.last_attempt ? timeLabel(target.last_attempt) : '-'"></td><td class="muted" x-text="target.last_error || '-'"></td><td><button x-show="browserCanManage()" @click="changePeer('remove', target.address)" :disabled="peerForm.busy">Remove</button></td></tr></template></tbody></table>
+          </div>
+          <div class="empty" x-show="!peerTargets.length">No outbound peers configured. Add one to join an existing network.</div>
+        </article>
+      </section>
+
+      <section x-show="tab === 'chain'">
+        <article class="panel chain-panel" aria-label="Chain overview">
+          <div class="chain-tabs" role="tablist" aria-label="Chain">
+            <button class="chain-tab" :class="{active: chainView === 'heartbeat'}" :aria-selected="chainView === 'heartbeat'" role="tab" @click="setChainView('heartbeat')">Heartbeat</button>
+            <button class="chain-tab" :class="{active: chainView === 'ledger'}" :aria-selected="chainView === 'ledger'" role="tab" @click="setChainView('ledger')">Ledger</button>
+          </div>
+          <div x-show="chainView === 'heartbeat'" role="tabpanel">
+            <div class="chain-toolbar"><div class="muted">Proof of Work · target every 60 seconds</div><span class="pill"><span x-text="heartbeats.length"></span>&nbsp;loaded</span></div>
+            <div class="chain-row" x-ref="heartbeatRail" @scroll.passive="handleChainScroll('heartbeat', $event)">
+              <div class="chain-block chain-block-building" role="status" aria-live="polite" aria-label="Next Heartbeat being searched">
+                <div class="chain-block-main">
+                  <div class="chain-block-head"><div class="chain-height" x-text="Number(status.heartbeat_height || 0) + 1"></div><span class="chain-building-status" aria-hidden="true"></span></div>
+                  <div class="chain-block-meta"><span>Searching</span><span><span x-text="mempool.mining_tickets?.length || 0"></span> ticket<span x-show="Number(mempool.mining_tickets?.length || 0) !== 1">s</span></span></div>
+                </div>
+              </div>
+              <template x-for="block in heartbeats" :key="block.block_hash">
+                <button class="chain-block" :class="{selected: blockSelected(block), 'new-block': block.block_hash === heartbeats[0]?.block_hash}" @click="selectBlock(block, 'heartbeat')" type="button" title="Open Heartbeat details">
+                  <div class="chain-block-main">
+                    <div class="chain-block-head"><div class="chain-height" x-text="block.height"></div><span class="pill" x-show="block.has_ledger_block">Ledger</span></div>
+                    <div class="chain-block-meta"><span x-text="blockAgeLabel(block, 'Genesis')"></span><span><span x-text="block.ticket_count || 0"></span> ticket<span x-show="Number(block.ticket_count || 0) !== 1">s</span></span></div>
+                  </div>
+                  <code class="chain-miner" :title="block.miner_public_key" x-text="minerLabel(block.miner_public_key)"></code>
+                </button>
+              </template>
+            </div>
+          </div>
+          <div x-show="chainView === 'ledger'" role="tabpanel">
+            <div class="chain-toolbar"><div class="muted">Proof of Expenditure · target every 10 Heartbeats</div><span class="pill"><span x-text="ledgerBlocks.length"></span>&nbsp;loaded</span></div>
+            <div class="chain-row" x-ref="ledgerRail" @scroll.passive="handleChainScroll('ledger', $event)">
+              <div class="chain-block chain-block-building" role="status" aria-live="polite" aria-label="Next Ledger block being searched">
+                <div class="chain-block-main">
+                  <div class="chain-block-head"><div class="chain-height" x-text="Number(status.ledger_blocks || 0) + 1"></div><span class="chain-building-status" aria-hidden="true"></span></div>
+                  <div class="chain-block-meta"><span>Searching</span><span><span x-text="mempool.ledger_transactions?.length || 0"></span> tx<span x-show="Number(mempool.ledger_transactions?.length || 0) !== 1">s</span></span></div>
+                </div>
+              </div>
+              <template x-for="block in ledgerBlocks" :key="block.block_hash">
+                <button class="chain-block" :class="{selected: blockSelected(block), 'new-block': block.block_hash === ledgerBlocks[0]?.block_hash}" @click="selectBlock(block, 'ledger')" type="button" title="Open Ledger block details">
+                  <div class="chain-block-main">
+                    <div class="chain-block-head"><div class="chain-height" x-text="block.ledger_height"></div><span class="pill">Heartbeat&nbsp;<span x-text="block.height"></span></span></div>
+                    <div class="chain-block-meta"><span x-text="blockAgeLabel(block)"></span><span><span x-text="block.ledger_transaction_count || 0"></span> tx</span></div>
+                  </div>
+                  <code class="chain-miner" :title="block.ledger_miner_public_key || block.miner_public_key" x-text="minerLabel(block.ledger_miner_public_key || block.miner_public_key)"></code>
+                </button>
+              </template>
+            </div>
+            <div class="empty" x-show="!ledgerBlocks.length">No Ledger block has been carried by a Heartbeat yet.</div>
+          </div>
+          <div class="muted" x-show="heartbeatPage.busy" role="status">Loading older blocks…</div>
+        </article>
+        <article class="panel" x-show="selectedBlock">
+          <div class="panel-head"><div><h2>Block details</h2><div class="muted">The corresponding block is highlighted in both chains.</div></div><button @click="clearSelectedBlock()">Close</button></div>
+          <div class="detail-loading" x-show="blockDetailBusy">Loading block contents…</div>
+          <div class="block-detail-layout" x-show="selectedBlockDetail && !blockDetailBusy">
+            <div class="chain-detail">
+              <div class="detail-kv"><div class="key">Heartbeat height</div><div x-text="selectedBlock?.height"></div></div>
+              <div class="detail-kv"><div class="key">Timestamp</div><div x-text="timeLabel(selectedBlock?.timestamp)"></div></div>
+              <div class="detail-kv"><div class="key">Hash</div><code x-text="selectedBlock?.block_hash"></code></div>
+              <div class="detail-kv"><div class="key">Previous</div><code x-text="selectedBlock?.parent_hash || 'Genesis'"></code></div>
+              <div class="detail-kv"><div class="key">Miner</div><code x-text="selectedBlock?.miner_public_key"></code></div>
+              <div class="detail-kv"><div class="key">Target</div><code x-text="selectedBlock?.target"></code></div>
+              <div class="detail-kv"><div class="key">Heartbeat reward</div><div class="detail-value-stack"><div class="stat-value">IUNA <span x-text="amountLabel(selectedBlockDetail?.rewards.heartbeat.total)"></span></div><div class="muted">Fees <span x-text="amountLabel(selectedBlockDetail?.rewards.heartbeat.ledger_transaction_fees)"></span> · tickets <span x-text="amountLabel(selectedBlockDetail?.rewards.heartbeat.ticket_inclusion_fees)"></span> · expenditure <span x-text="amountLabel(selectedBlockDetail?.rewards.heartbeat.expenditure)"></span></div></div></div>
+              <div class="detail-kv"><div class="key">Ledger reward</div><div class="detail-value-stack"><div class="stat-value" x-show="selectedBlockDetail?.rewards.ledger">IUNA <span x-text="amountLabel(selectedBlockDetail?.rewards.ledger?.total)"></span></div><div x-show="!selectedBlockDetail?.rewards.ledger" class="muted">No Ledger block</div><div class="muted" x-show="selectedBlockDetail?.rewards.ledger">Subsidy <span x-text="amountLabel(selectedBlockDetail?.rewards.ledger?.subsidy)"></span> · fees <span x-text="amountLabel(selectedBlockDetail?.rewards.ledger?.ledger_transaction_fees)"></span></div></div></div>
+              <div class="detail-kv"><div class="key">Ticket purchases</div><div x-text="selectedBlockDetail?.tickets.length ?? 0"></div></div>
+            </div>
+            <div class="tx-list">
+              <section class="tx-section">
+                <div class="tx-section-title"><span>Heartbeat ticket purchases</span><span class="tx-section-meta"><span x-text="selectedBlockDetail?.tickets.length ?? 0"></span> included</span></div>
+                <div class="tx-scroll-list" x-show="selectedBlockDetail?.tickets.length">
+                  <template x-for="ticket in selectedBlockDetail?.tickets || []" :key="ticket.id">
+                    <button class="tx-card tx-card-button" type="button" @click="openHeartbeatTicketModal(ticket)"><span class="pill">Ticket</span><span class="tx-summary-main"><code class="tx-summary-id" x-text="ticket.id"></code><span class="muted"><span x-text="ticket.duration"></span> Heartbeats · <span x-text="ticket.inputs.length"></span> input<span x-show="ticket.inputs.length !== 1">s</span></span></span><span class="tx-summary-value">IUNA <span x-text="amountLabel(ticket.budget)"></span></span></button>
+                  </template>
+                </div>
+                <div class="muted" x-show="!selectedBlockDetail?.tickets.length">No ticket purchases in this Heartbeat.</div>
+              </section>
+              <section class="tx-section" x-show="selectedBlockDetail?.ledger">
+                <div class="tx-section-title"><span>Ledger transactions</span><span class="tx-section-meta"><span x-text="selectedBlockDetail?.ledger?.transactions.length ?? 0"></span> included</span></div>
+                <div class="tx-fields" style="padding:0 0 10px">
+                  <div class="tx-field"><span class="tx-label">Candidate</span><code class="tx-value" x-text="selectedBlockDetail?.ledger?.candidate_hash"></code></div>
+                  <div class="tx-field"><span class="tx-label">Winning ticket</span><code class="tx-value" x-text="selectedBlockDetail?.ledger?.winning_ticket_id"></code></div>
+                  <div class="tx-field"><span class="tx-label">Lottery</span><span class="tx-value">Heartbeat #<span x-text="selectedBlockDetail?.ledger?.lottery_height"></span> · slot <span x-text="selectedBlockDetail?.ledger?.slot"></span></span></div>
+                </div>
+                <div class="tx-scroll-list" x-show="selectedBlockDetail?.ledger?.transactions.length">
+                  <template x-for="transaction in selectedBlockDetail?.ledger?.transactions || []" :key="transaction.id">
+                    <button class="tx-card tx-card-button" type="button" @click="openBlockTransactionModal(transaction)"><span class="pill">Transaction</span><span class="tx-summary-main"><code class="tx-summary-id" x-text="transaction.id"></code><span class="muted"><span x-text="transaction.inputs.length"></span> input<span x-show="transaction.inputs.length !== 1">s</span> · <span x-text="transaction.outputs.length"></span> output<span x-show="transaction.outputs.length !== 1">s</span></span></span><span class="tx-summary-value">IUNA <span x-text="amountLabel(transaction.total_output)"></span></span></button>
+                  </template>
+                </div>
+                <div class="muted" x-show="!selectedBlockDetail?.ledger?.transactions.length">This Ledger block contains no user transactions.</div>
+              </section>
+              <section class="tx-section" x-show="!selectedBlockDetail?.ledger"><div class="muted">No Ledger block is attached to this Heartbeat.</div></section>
+            </div>
+          </div>
+        </article>
+        <section class="panel mempool-panel" x-show="mempoolItems().length > 0">
+          <div class="panel-head"><h2>Mempool</h2><span class="muted" x-show="pendingCount() > mempoolItems().length">Showing <span x-text="mempoolItems().length"></span> of <span x-text="pendingCount()"></span></span></div>
+          <div class="mempool-strip">
+            <template x-for="item in mempoolItems()" :key="`${item.kind}:${item.id}`">
+              <div class="mempool-item" role="button" tabindex="0" @click="openMempoolModal(item)" @keydown.enter.prevent="openMempoolModal(item)" @keydown.space.prevent="openMempoolModal(item)">
+                <div class="mempool-top"><code class="tx-summary-id" :title="item.id" x-text="short(item.id)"></code><span class="pill" x-text="item.kind"></span></div>
+                <div class="tx-field"><span class="tx-label" x-text="item.kind === 'Mining ticket' ? 'Budget' : 'Output total'"></span><span class="tx-value money">IUNA <span x-text="amountLabel(item.amount)"></span></span></div>
+                <div class="tx-field"><span class="tx-label">Fee</span><span class="tx-value money" x-text="item.fee == null ? 'Unavailable' : `IUNA ${amountLabel(item.fee)}`"></span></div>
+                <div class="tx-field" x-show="item.kind === 'Mining ticket'"><span class="tx-label">Duration</span><span class="tx-value"><span x-text="item.duration"></span> Heartbeats</span></div>
+                <div class="tx-field" x-show="item.kind === 'Mining ticket'"><span class="tx-label">Miner</span><code class="tx-value" x-text="minerLabel(item.mining_public_key)"></code></div>
+                <div class="tx-field" x-show="item.kind === 'Ledger transaction'"><span class="tx-label">Inputs</span><span class="tx-value" x-text="item.input_count"></span></div>
+                <div class="tx-field" x-show="item.kind === 'Ledger transaction'"><span class="tx-label">Outputs</span><span class="tx-value" x-text="item.output_count"></span></div>
+              </div>
+            </template>
+          </div>
+        </section>
+      </section>
+
+      <section x-show="tab === 'metrics'">
+        <div class="metrics-head">
+          <div class="segmented metrics-range" role="group" aria-label="Metrics Heartbeat range">
+            <button type="button" :class="{active: metricsRange === 100}" @click="setMetricsRange(100)">Last 100</button>
+            <button type="button" :class="{active: metricsRange === 1000}" @click="setMetricsRange(1000)">Last 1000</button>
+            <button type="button" :class="{active: metricsRange === 'all'}" @click="setMetricsRange('all')">All</button>
+          </div>
+        </div>
+        <div class="empty" x-show="!metricsBusy && metricsRows.length === 0"><h2>No activity to chart yet</h2><p>Metrics will fill automatically after the first Heartbeat is mined.</p><button class="primary" @click="setTab('mining')">Start mining</button></div>
+        <div class="detail-loading" x-show="metricsBusy && metricsRows.length === 0">Loading metrics…</div>
+        <div x-show="metricsRows.length > 0">
+        <div class="grid">
+          <div class="stat"><div class="stat-label">Total IUNA supply</div><div class="stat-value">IUNA <span x-text="amountLabel(metricsLatest().minted)"></span></div></div>
+          <div class="stat"><div class="stat-label">Transactions in Heartbeat</div><div class="stat-value" x-text="metricsLatest().ledger_transaction_count ?? 0"></div></div>
+          <div class="stat"><div class="stat-label">Total chain size</div><div class="stat-value" x-text="bytesLabel(metricsLatest().chain_bytes)"></div></div>
+          <div class="stat"><div class="stat-label">UTXOs</div><div class="stat-value" x-text="metricsLatest().utxos ?? 0"></div></div>
+          <div class="stat"><div class="stat-label">Mining tickets</div><div class="stat-value" x-text="metricsLatest().active_tickets ?? 0"></div></div>
+          <div class="stat"><div class="stat-label">Ticket budget</div><div class="stat-value">IUNA <span x-text="amountLabel(metricsLatest().ticket_weight)"></span></div></div>
+          <div class="stat"><div class="stat-label">PoW difficulty</div><div class="stat-value" x-text="chartLatest('difficulty')"></div></div>
+          <div class="stat"><div class="stat-label">Median Heartbeat interval</div><div class="stat-value" x-text="averageHeartbeatLabel()"></div></div>
+        </div>
+        <article class="panel" style="margin-top:12px"><div class="panel-head"><div><h2>Against target</h2><div class="muted">Over the selected <span x-text="metricsRows.length"></span> Heartbeats. The line marks the protocol target.</div></div></div><div class="metrics-bars"><div class="metric-row"><span>Heartbeat interval</span><div class="bar metric-target" role="img" :aria-label="`Median Heartbeat interval ${averageHeartbeatLabel()}, target 60 s`"><span :style="`width:${heartbeatIntervalShare()}%`"></span></div><b x-text="averageHeartbeatLabel()"></b></div><div class="metric-row"><span>Heartbeats with Ledger</span><div class="bar metric-target" role="img" :aria-label="`${ledgerShareLabel()} of Heartbeats carry a Ledger block, target 10%`"><span :style="`width:${ledgerShare()}%`"></span></div><b x-text="ledgerShareLabel()"></b></div></div></article>
+        <div class="charts">
+          <template x-for="chart in metricsCharts()" :key="chart.kind">
+            <article class="chart-card">
+              <div class="chart-head"><h3 x-text="chart.title"></h3><span class="chart-value" x-text="chartLatest(chart.kind)"></span></div>
+              <div class="chart-frame" x-show="chartBounds(chart.kind)">
+                <div class="chart-axis" aria-hidden="true"><template x-for="tick in chartTicks(chart.kind)" :key="tick"><span :style="chartTickStyle(chart.kind, tick)" x-text="chartAxisValueLabel(chart.kind, tick)"></span></template></div>
+                <div class="chart-plot" @mousemove="hoverChart(chart.kind, $event)" @mouseleave="chartHover = null">
+                  <svg viewBox="0 0 300 148" preserveAspectRatio="none" role="img" :aria-label="`${chart.title}, latest ${chartLatest(chart.kind)}`">
+                    <path class="chart-grid" :d="chartGridPath(chart.kind)"></path>
+                    <line class="chart-target" x1="6" x2="294" :y1="chartTargetY(chart.kind)" :y2="chartTargetY(chart.kind)" x-show="chartTargetY(chart.kind) !== null"></line>
+                    <polyline class="chart-line" :points="chartPolyline(chart.kind)"></polyline>
+                  </svg>
+                  <template x-if="chartHover?.kind === chart.kind"><div class="chart-dot" :style="`left:${chartHover.left}%;top:${chartHover.top}%`"></div></template>
+                  <template x-if="chartHover?.kind === chart.kind"><div class="chart-tip" :style="`left:${chartHover.left}%;top:${chartHover.top}%`" x-text="chartTooltip(chart.kind)"></div></template>
+                </div>
+              </div>
+              <div class="muted" x-show="!chartBounds(chart.kind)">Needs at least two mined Heartbeats.</div>
+              <div class="muted" x-show="chart.kind === 'interval' && chartBounds(chart.kind)" style="margin-top:6px">Dashed line: the 60-second target. Gaps over 10 minutes are drawn at the top.</div>
+            </article>
+          </template>
+        </div>
+        </div>
+      </section>
+
+      <section x-show="tab === 'settings'">
+        <div class="grid">
+          <article class="panel" x-show="status.wallet_public_key">
+            <h2>Wallet password</h2>
+            <p class="muted">Re-encrypts this node's wallet file. The recovery phrase stays the same.</p>
+            <form @submit.prevent="changeWalletPassword" style="display:grid;gap:10px">
+              <label>Current password<input x-model="passwordForm.current" type="password" maxlength="1024" autocomplete="current-password" required></label>
+              <label>New password<input x-model="passwordForm.next" type="password" minlength="10" maxlength="1024" autocomplete="new-password" required></label>
+              <label>Repeat new password<input x-model="passwordForm.confirmation" type="password" minlength="10" maxlength="1024" autocomplete="new-password" required></label>
+              <button class="primary" type="submit" :disabled="passwordForm.busy || !browserCanManage()" x-text="passwordForm.busy ? 'Changing…' : 'Change password'"></button>
+            </form>
+          </article>
+          <article class="panel"><h2>Interface tour</h2><p class="muted">A short walk past each screen in the sidebar.</p><button @click="startTour">Start tour</button></article>
+          <article class="panel"><h2>Initial Setup</h2><p class="muted">Go through the network and wallet setup steps again.</p><button @click="resetSetup">Open Initial Setup</button></article>
+        </div>
+      </section>
+    </main>
+  </div>
+
+  <div class="setup-overlay transaction-overlay" x-show="selectedTransaction" x-transition:enter.opacity @click.self="closeTransactionModal()" role="dialog" aria-modal="true" aria-labelledby="transaction-modal-title">
+    <section class="tx-modal" x-ref="transactionModal" tabindex="-1" @keydown.tab="trapTransactionModalFocus($event)">
+      <div class="tx-modal-head">
+        <div class="tx-modal-title">
+          <span class="pill" x-text="selectedTransaction?.item?.kind"></span>
+          <h2 id="transaction-modal-title" x-text="selectedTransaction?.item?.kind || 'Transaction details'"></h2>
+          <code class="tx-modal-id" x-text="selectedTransaction?.item?.id || '-'"></code>
+        </div>
+        <button type="button" @click="closeTransactionModal()">Close</button>
+      </div>
+      <div class="tx-modal-summary">
+        <div class="tx-field"><span class="tx-label">Source</span><span class="tx-value" x-text="selectedTransaction?.source || '-'"></span></div>
+        <div class="tx-field"><span class="tx-label">Version</span><span class="tx-value" x-text="selectedTransaction?.item?.version ?? '-'"></span></div>
+        <div class="tx-field"><span class="tx-label" x-text="selectedTransaction?.item?.kind === 'Mining ticket' ? 'Budget' : 'Output total'"></span><span class="tx-value money">IUNA <span x-text="amountLabel(selectedTransaction?.item?.amount)"></span></span></div>
+        <div class="tx-field"><span class="tx-label">Fee</span><span class="tx-value money" x-text="selectedTransaction?.item?.fee == null ? 'Unavailable' : `IUNA ${amountLabel(selectedTransaction.item.fee)}`"></span></div>
+        <div class="tx-field"><span class="tx-label">Total in</span><span class="tx-value money" x-text="transactionModalTotals().in == null ? 'Unavailable' : `IUNA ${amountLabel(transactionModalTotals().in)}`"></span></div>
+        <div class="tx-field"><span class="tx-label">Total out</span><span class="tx-value money" x-text="transactionModalTotals().out == null ? 'Unavailable' : `IUNA ${amountLabel(transactionModalTotals().out)}`"></span></div>
+        <div class="tx-field" x-show="selectedTransaction?.item?.kind === 'Mining ticket'"><span class="tx-label">Lottery duration</span><span class="tx-value"><span x-text="selectedTransaction?.item?.duration"></span> Heartbeats</span></div>
+        <div class="tx-field" x-show="selectedTransaction?.item?.kind === 'Mining ticket'"><span class="tx-label">Budget payout</span><span class="tx-value"><span x-text="selectedTransaction?.item?.lifecycle_heartbeats"></span> Heartbeats</span></div>
+        <div class="tx-field" x-show="selectedTransaction?.item?.kind === 'Mining ticket'"><span class="tx-label">Mining public key</span><code class="tx-value" x-text="selectedTransaction?.item?.mining_public_key"></code></div>
+        <div class="tx-field" x-show="selectedTransaction?.item?.kind === 'Mining ticket'"><span class="tx-label">Lottery seed</span><code class="tx-value" x-text="selectedTransaction?.item?.lottery_seed"></code></div>
+      </div>
+      <div class="utxo-flow">
+        <div class="utxo-column">
+          <h3>Inputs</h3>
+          <template x-for="(input, index) in transactionModalInputs()" :key="`${input.transaction_id}:${input.output_index}`">
+            <div class="utxo-node">
+              <div class="utxo-node-label"><span>Input <span x-text="index + 1"></span></span><span>spent</span></div>
+              <code class="utxo-node-ref" x-text="`${input.transaction_id}:${input.output_index}`"></code>
+              <div class="tx-field" x-show="input.value != null"><span class="tx-label">Value</span><span class="tx-value money">IUNA <span x-text="amountLabel(input.value)"></span></span></div>
+              <div class="tx-field"><span class="tx-label">Public key</span><code class="tx-value" x-text="input.public_key"></code></div>
+              <div class="tx-field"><span class="tx-label">Signature</span><code class="tx-value" x-text="input.signature"></code></div>
+            </div>
+          </template>
+          <div class="tx-modal-empty" x-show="selectedTransaction?.loading">Loading…</div>
+          <div class="tx-modal-empty" x-show="selectedTransaction?.detailMissing">Details unavailable</div>
+          <div class="tx-modal-empty" x-show="!selectedTransaction?.loading && !selectedTransaction?.detailMissing && transactionModalInputs().length === 0">No inputs</div>
+        </div>
+        <div class="utxo-arrow" aria-hidden="true">&rarr;</div>
+        <div class="utxo-column">
+          <h3>Outputs</h3>
+          <template x-for="(output, index) in transactionModalOutputs()" :key="`${output.label}:${index}`">
+            <div class="utxo-node" :class="output.kind">
+              <div class="utxo-node-label"><span x-text="output.label"></span><span x-text="output.status || output.kind"></span></div>
+              <div class="utxo-node-amount">IUNA <span x-text="amountLabel(output.value)"></span></div>
+              <div class="tx-field" x-show="output.owner"><span class="tx-label">Owner</span><code class="tx-value" x-text="output.owner"></code></div>
+              <div class="muted" x-show="output.note" x-text="output.note"></div>
+            </div>
+          </template>
+          <div class="tx-modal-empty" x-show="!selectedTransaction?.loading && !selectedTransaction?.detailMissing && transactionModalOutputs().length === 0">No outputs</div>
+        </div>
+      </div>
+    </section>
+  </div>
+
+  <div class="tour" x-show="tourStep !== null" @resize.window="tourStep = tourStep">
+    <div class="tour-spotlight" :style="tourSpotlightStyle()"></div>
+    <section class="tour-card" role="dialog" aria-modal="true" aria-labelledby="tour-title" :style="tourCardStyle()">
+      <div class="setup-kicker">Tour · <span x-text="(tourStep ?? 0) + 1"></span> of <span x-text="tourSteps().length"></span></div>
+      <h2 id="tour-title" x-text="currentTourStep()?.title"></h2>
+      <p class="muted" x-text="currentTourStep()?.text"></p>
+      <div class="setup-actions">
+        <button @click="endTour">Skip</button>
+        <button x-show="tourStep > 0" @click="moveTour(-1)">Back</button>
+        <button class="primary" @click="moveTour(1)" x-text="tourStep === tourSteps().length - 1 ? 'Done' : 'Next'"></button>
+      </div>
+    </section>
+  </div>
+
+  <div class="setup-overlay" x-show="contactModalOpen" x-transition.opacity @click.self="closeContactEditor()">
+    <section class="setup-modal" role="dialog" aria-modal="true" aria-labelledby="contact-editor-title" style="width:min(480px,100%)">
+      <div class="panel-head"><div><div class="setup-kicker">Contact</div><h1 id="contact-editor-title" x-text="contactEditingAddress ? 'Edit contact' : 'Add contact'"></h1></div><button type="button" @click="closeContactEditor()">Close</button></div>
+      <form @submit.prevent="saveContactEditor()" style="display:grid;gap:12px">
+        <label>Name<input x-ref="contactName" x-model="contactForm.name" maxlength="40" autocomplete="off" required></label>
+        <label>Public key<input x-model="contactForm.address" readonly></label>
+        <div class="setup-actions"><button class="utxo-details-button" type="button" x-show="contactEditingAddress" @click="removeContact(contactEditingAddress)">Remove contact</button><button type="button" @click="closeContactEditor()">Cancel</button><button class="primary" type="submit">Save contact</button></div>
+      </form>
+    </section>
+  </div>
+
+  <div class="setup-overlay" x-show="pendingTransfer" x-transition.opacity @click.self="closeModals()">
+    <section class="setup-modal" role="dialog" aria-modal="true" aria-labelledby="confirm-title" style="width:min(640px,100%)" x-ref="confirmTransfer" tabindex="-1">
+      <div class="setup-kicker">Send IUNA</div><h1 id="confirm-title">Confirm transfer</h1>
+      <p class="muted">Check the full recipient key. Ledger transactions cannot be reversed.</p>
+      <div class="detail-kv"><div class="key">Recipient<span x-show="contactName(pendingTransfer?.recipient)" x-text="` · ${contactName(pendingTransfer?.recipient)}`"></span></div><code x-text="pendingTransfer?.recipient"></code></div>
+      <div class="confirm-facts">
+        <div class="stat"><div class="stat-label">Amount</div><div class="stat-value">IUNA <span x-text="amountLabel(pendingTransfer?.amount)"></span></div></div>
+        <div class="stat"><div class="stat-label">Fee</div><div class="stat-value">IUNA <span x-text="amountLabel(pendingTransfer?.fee)"></span></div></div>
+        <div class="stat"><div class="stat-label">Spendable after</div><div class="stat-value">IUNA <span x-text="amountLabel(pendingTransfer?.remaining)"></span></div></div>
+      </div>
+      <div class="setup-actions">
+        <button @click="closeModals()" :disabled="transfer.busy">Cancel</button>
+        <button class="primary" @click="confirmTransaction" :disabled="transfer.busy" x-text="transfer.busy ? 'Sending…' : 'Confirm and send'"></button>
+      </div>
+    </section>
+  </div>
+
+  <div class="setup-overlay" x-show="showUtxos" x-transition.opacity @click.self="closeModals()">
+    <section class="setup-modal" role="dialog" aria-modal="true" aria-labelledby="utxo-title" style="width:min(720px,100%)" tabindex="-1">
+      <div class="panel-head"><div><div class="setup-kicker">Wallet details</div><h1 id="utxo-title">Unspent outputs</h1></div><button @click="showUtxos = false">Close</button></div>
+      <div class="grid" style="margin-bottom:12px">
+        <div class="stat"><div class="stat-label">Balance</div><div class="stat-value">IUNA <span x-text="amountLabel(status.wallet_balance)"></span></div></div>
+        <div class="stat"><div class="stat-label">Spendable</div><div class="stat-value">IUNA <span x-text="amountLabel(status.wallet_spendable_balance)"></span></div></div>
+        <div class="stat"><div class="stat-label">Wallet UTXOs</div><div class="stat-value"><span x-text="status.wallet_utxos ?? activity?.utxos.length ?? 0"></span> unspent</div></div>
+      </div>
+      <div class="detail-loading" x-show="utxosBusy">Loading unspent outputs…</div>
+      <div class="tx-scroll-list" x-show="!utxosBusy && activity?.utxos.length">
+        <template x-for="utxo in activity?.utxos || []" :key="`${utxo.transaction_id}:${utxo.output_index}`"><div class="io-row"><span class="tx-value money">IUNA <span x-text="amountLabel(utxo.value)"></span></span> <span class="pill" x-show="utxo.reserved">Reserved</span><code x-text="`${utxo.transaction_id}:${utxo.output_index}`"></code></div></template>
+      </div>
+      <div class="empty" x-show="!utxosBusy && activity && !activity.utxos.length">No unspent outputs.</div>
+    </section>
+  </div>
+
+  <div class="setup-overlay" x-show="desktopUpdateModalOpen" x-transition.opacity @click.self="closeDesktopUpdateModal()">
+    <section class="setup-modal" role="dialog" aria-modal="true" aria-labelledby="desktop-update-title" style="width:min(520px,100%)">
+      <div class="panel-head"><div><div class="setup-kicker">Update</div><h1 id="desktop-update-title">Install <span x-text="latestReleaseLabel()"></span></h1></div><button @click="closeDesktopUpdateModal" :disabled="desktopUpdateBusy">Close</button></div>
+      <div class="notice"><p>Iuna downloads and verifies the signed update, stops the local node, installs it, and restarts the desktop app.</p><p>Your wallet, settings, and local chain data stay on this device.</p></div>
+      <div class="setup-actions"><button @click="closeDesktopUpdateModal" :disabled="desktopUpdateBusy">Later</button><button class="primary" @click="installDesktopUpdate" :disabled="desktopUpdateBusy" x-text="desktopUpdateBusy ? 'Installing…' : 'Install and restart'"></button></div>
+    </section>
+  </div>
+
+  <div class="setup-overlay login-overlay" x-show="setupReady && showLogin" x-transition>
+    <section class="setup-modal login-modal" role="dialog" aria-modal="true" aria-labelledby="login-title" tabindex="-1">
+      <div class="setup-kicker">Welcome back</div>
+      <h1 id="login-title">Unlock iuna</h1>
+      <form class="notice stacked-form" x-show="status.management_requires_token && !hasOperatorToken()" @submit.prevent="saveOperatorToken" style="margin-bottom:12px">
+        <label>Operator token<input x-model="operatorToken" type="password" minlength="32" maxlength="1024" autocomplete="off" required></label>
+        <button class="primary" type="submit">Use token</button>
+      </form>
+      <form class="login-form" @submit.prevent="accessWallet">
+        <label>Wallet password<input x-ref="loginPassword" x-model="walletAccess.password" type="password" maxlength="1024" autocomplete="current-password" required></label>
+        <button class="primary" type="submit" :disabled="walletAccess.busy || !browserCanManage()" x-text="walletAccess.busy ? 'Unlocking wallet…' : 'Unlock wallet'"></button>
+      </form>
+    </section>
+  </div>
+
+  <div class="setup-overlay" x-show="setupReady && showSetup" x-transition>
+    <section class="setup-modal" role="dialog" aria-modal="true" aria-labelledby="setup-title" x-ref="setupModal" tabindex="-1">
+      <div class="setup-kicker">Welcome to iuna · Step <span x-text="setupStep"></span> of 3</div><h1 id="setup-title">Initial Setup</h1>
+      <div class="setup-progress" aria-hidden="true"><span :class="{active: setupStep >= 1}"></span><span :class="{active: setupStep >= 2}"></span><span :class="{active: setupStep >= 3}"></span></div>
+
+      <div x-show="setupStep === 1">
+        <h2 x-text="peers.length ? 'Your node is connected' : 'Your node is running'"></h2><p class="muted">iuna keeps the network connection running in the background. There is normally nothing to configure here.</p>
+        <div class="setup-check"><span class="setup-check-mark" :class="{warning: !peers.length}" x-text="peers.length ? '✓' : '!'" aria-hidden="true"></span><div><b x-text="peers.length ? 'Connected to iuna' : 'Looking for peers'"></b><div class="muted" x-text="networkDetail()"></div></div></div>
+      </div>
+
+      <div x-show="setupStep === 2">
+        <div x-show="walletAccess.recoveryPhrase && walletAccess.phase === 'backup'">
+          <h2>Save your recovery phrase</h2>
+          <p class="recovery-warning"><b>This is the only way to recover your wallet.</b> Write these 24 words down in order. Never share them and do not store them in a screenshot.</p>
+          <div class="recovery-grid"><template x-for="word in recoveryWords()"><div class="recovery-word" x-text="word"></div></template></div>
+          <button class="primary" @click="startRecoveryCheck">I wrote down all 24 words</button>
+        </div>
+        <div x-show="walletAccess.recoveryPhrase && walletAccess.phase === 'confirm'">
+          <h2>Check your recovery phrase</h2>
+          <p class="muted">Enter the requested words to prove that your backup is complete.</p>
+          <div class="setup-grid">
+            <template x-for="(index, position) in walletAccess.confirmationIndices">
+              <label>Word <span x-text="index"></span><input x-model="walletAccess.confirmationWords[position]" type="text" autocomplete="off" autocapitalize="none" spellcheck="false"></label>
+            </template>
+          </div>
+          <button class="primary" @click="verifyRecoveryPhrase">Confirm recovery phrase</button>
+        </div>
+        <div x-show="!walletAccess.recoveryPhrase">
+          <h2 x-text="status.wallet_unlocked ? 'Your wallet is ready' : (walletNeedsCreation() ? 'Set up your wallet' : 'Unlock your wallet')"></h2>
+          <p class="muted" x-text="status.wallet_unlocked ? 'Your encrypted wallet is ready on this device.' : (walletNeedsCreation() ? 'Create a new wallet or restore one from its 24-word recovery phrase.' : 'Enter the password you chose when this wallet was created.')"></p>
+        </div>
+        <div x-show="status.wallet_unlocked && !walletAccess.recoveryPhrase">
+          <div class="setup-check"><span class="setup-check-mark">✓</span><div><b>Wallet protected</b><div class="muted">Ready to receive, send and mine.</div></div></div>
+          <div class="address" style="margin-top:10px"><code x-text="status.wallet_public_key"></code></div>
+          <button style="margin-top:10px" @click="copyWalletAddress">Copy wallet address</button>
+          <button style="margin-top:10px" x-show="walletAccess.mode !== 'backup'" @click="startWalletBackup">Back up recovery phrase</button>
+          <form class="stacked-form" x-show="walletAccess.mode === 'backup'" @submit.prevent="accessWallet" style="margin-top:10px">
+            <label>Wallet password<input x-model="walletAccess.password" type="password" maxlength="1024" autocomplete="current-password" required></label>
+            <div class="backup-actions"><button type="button" @click="selectWalletMode('')">Cancel</button><button class="primary" type="submit" :disabled="walletAccess.busy || !browserCanManage()">Show recovery phrase</button></div>
+          </form>
+        </div>
+        <form class="notice stacked-form" x-show="status.management_requires_token && !hasOperatorToken()" @submit.prevent="saveOperatorToken" style="margin-bottom:12px">
+          <div>This node requires its operator token before the wallet can be set up here.</div>
+          <label>Operator token<input x-model="operatorToken" type="password" minlength="32" maxlength="1024" autocomplete="off" required></label>
+          <button class="primary" type="submit">Use token</button>
+        </form>
+        <div class="wallet-choice" x-show="!status.wallet_unlocked && walletNeedsCreation() && !walletAccess.mode">
+          <button @click="selectWalletMode('create')"><b>Create a new wallet</b><span>Generate a new 24-word recovery phrase.</span></button>
+          <button @click="selectWalletMode('restore')"><b>Restore an existing wallet</b><span>Use a recovery phrase you already have.</span></button>
+        </div>
+        <form class="stacked-form" x-show="!status.wallet_unlocked && (!walletNeedsCreation() || walletAccess.mode)" @submit.prevent="accessWallet">
+          <div x-show="walletNeedsCreation()" class="panel-head" style="margin:0"><button type="button" @click="selectWalletMode('')">← Choose another option</button></div>
+          <label x-show="walletAccess.mode === 'restore'">24-word recovery phrase<textarea x-model="walletAccess.recoveryInput" autocomplete="off" autocapitalize="none" spellcheck="false" placeholder="Enter all 24 words in order" :required="walletAccess.mode === 'restore'"></textarea></label>
+          <label>Wallet password<input x-model="walletAccess.password" type="password" :minlength="walletNeedsCreation() ? 10 : null" maxlength="1024" :autocomplete="walletNeedsCreation() ? 'new-password' : 'current-password'" required></label>
+          <label x-show="walletNeedsCreation()">Repeat password<input x-model="walletAccess.confirmation" type="password" minlength="10" maxlength="1024" autocomplete="new-password" :required="walletNeedsCreation()"></label>
+          <p class="muted" x-text="walletAccess.mode === 'restore' ? 'Choose a new password to encrypt the restored wallet on this device.' : 'This password encrypts the wallet on this device. You will back up the recovery phrase next.'"></p>
+          <button class="primary" type="submit" :disabled="walletAccess.busy || !browserCanManage()" x-text="walletActionLabel()"></button>
+        </form>
+      </div>
+
+      <div x-show="setupStep === 3">
+        <h2>You're ready</h2><p class="muted">Start on the dashboard, or mine the first Heartbeat on a new local network.</p>
+        <div class="setup-grid">
+          <div class="stat"><div class="stat-label">Network</div><div class="stat-value" x-text="networkLabel()"></div></div>
+          <div class="stat"><div class="stat-label">Wallet</div><div class="stat-value" x-text="status.wallet_unlocked ? 'Ready' : 'Set up later'"></div></div>
+        </div>
+      </div>
+
+      <div class="setup-actions">
+        <button x-show="setupCompleted()" @click="closeSetup">Close</button>
+        <button x-show="setupStep > 1" @click="previousSetupStep">Back</button>
+        <button class="primary" x-show="setupStep < 3" @click="nextSetupStep" :disabled="setupStep === 2 && !canContinueSetup() && status.wallet_unlocked" x-text="setupStep === 2 && !status.wallet_unlocked ? 'Set up later' : 'Continue'"></button>
+        <button class="primary" x-show="setupStep === 3" @click="completeSetup">Open iuna</button>
+      </div>
+    </section>
+  </div>
+</body>
+</html>

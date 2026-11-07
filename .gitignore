@@ -2,6 +2,9 @@
 /fuzz/target
 /fuzz/artifacts
 /fuzz/coverage
+# Generated inputs stay local; only the named seeds are tracked.
+/fuzz/corpus/*/*
+!/fuzz/corpus/*/*.json
 /.docker-build
 /.iuna
 /e2e/.runtime

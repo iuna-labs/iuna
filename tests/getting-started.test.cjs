@@ -12,27 +12,27 @@ function recommendationFor(input) {
   return context.window.iunaGettingStartedRecommendation(input);
 }
 
-test('modern plugged-in computer mines and follows max-EV', () => {
+test('modern plugged-in computer reports the hash-miner preview boundary', () => {
   const result = recommendationFor({ cpu: 'strong', power: 'plugged', network: 'public' });
 
-  assert.equal(result.mining.title, 'Mining on');
-  assert.equal(result.burning.title, 'Use the max-EV burn');
+  assert.equal(result.mining.title, 'Hash miner not packaged yet');
+  assert.equal(result.ticketMining.title, 'Quote a mining ticket');
   assert.equal(result.network.title, 'Choose Listening node');
-  assert.match(result.network.copy, /9444/);
+  assert.match(result.network.copy, /19733/);
 });
 
-test('lightweight plugged-in computer keeps burn low', () => {
+test('lightweight plugged-in computer validates and can use ticket mining', () => {
   const result = recommendationFor({ cpu: 'light', power: 'plugged', network: 'private' });
 
-  assert.equal(result.mining.title, 'Mining optional');
-  assert.equal(result.burning.title, 'Keep the burn low');
+  assert.equal(result.mining.title, 'Run a validating node');
+  assert.equal(result.ticketMining.title, 'Ticket mining works');
   assert.equal(result.network.title, 'Choose Non-listening node');
 });
 
 test('battery power overrides CPU mining recommendation', () => {
   for (const cpu of ['strong', 'light']) {
     const result = recommendationFor({ cpu, power: 'battery', network: 'private' });
-    assert.equal(result.mining.title, 'Mining off');
-    assert.equal(result.burning.title, 'Burn only, start low');
+    assert.equal(result.mining.title, 'Hash mining off');
+    assert.equal(result.ticketMining.title, 'Ticket mining optional');
   }
 });

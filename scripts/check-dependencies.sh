@@ -14,12 +14,12 @@ require_command cargo
 require_command cargo-audit
 require_command jq
 
-lockfiles=(Cargo.lock fuzz/Cargo.lock src-tauri/Cargo.lock)
+lockfiles=(Cargo.lock src-tauri/Cargo.lock)
 for lockfile in "${lockfiles[@]}"; do
   cargo audit --file "$lockfile"
 done
 
-manifests=(Cargo.toml fuzz/Cargo.toml src-tauri/Cargo.toml)
+manifests=(Cargo.toml src-tauri/Cargo.toml)
 metadata_file="$(mktemp)"
 trap 'rm -f "$metadata_file"' EXIT
 

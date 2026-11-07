@@ -35,8 +35,10 @@ def main() -> int:
         print(f"error: no HTML pages found below {site_root}", file=sys.stderr)
         return 1
 
+    wallet_root = site_root / "wallet"
+    eligible_paths = [path for path in html_paths if not path.is_relative_to(wallet_root)]
     injected = 0
-    for path in html_paths:
+    for path in eligible_paths:
         html = path.read_text(encoding="utf-8")
         updated_html = inject_analytics(html)
         if updated_html == html:
@@ -45,7 +47,7 @@ def main() -> int:
         injected += 1
 
     print(
-        f"Cloudflare Web Analytics present on {len(html_paths)} HTML pages "
+        f"Cloudflare Web Analytics present on {len(eligible_paths)} HTML pages "
         f"({injected} injected)"
     )
     return 0

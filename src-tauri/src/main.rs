@@ -1,16 +1,20 @@
 use std::{
     error::Error,
-    io,
+    fs::{self, OpenOptions},
+    io::{self, ErrorKind, Write},
+    path::Path,
     sync::{Mutex, OnceLock},
 };
 
-use tauri::{AppHandle, State, WindowEvent};
-use tauri_plugin_shell::{ShellExt, process::CommandChild};
+use tauri::{AppHandle, Manager, State, WindowEvent};
+use tauri_plugin_shell::{
+    ShellExt,
+    process::{CommandChild, CommandEvent},
+};
 use tauri_plugin_updater::{Update, UpdaterExt};
 
 #[cfg(any(target_os = "macos", target_os = "windows"))]
 use tauri::{
-    Manager,
     menu::{Menu, MenuItem},
     tray::{MouseButton, MouseButtonState, TrayIconBuilder, TrayIconEvent},
 };
@@ -18,6 +22,66 @@ use tauri::{
 struct IunaSidecar(Mutex<Option<CommandChild>>);
 struct IunaSleepInhibitor(Mutex<Option<SleepInhibitor>>);
 struct PendingDesktopUpdate(Mutex<Option<Update>>);
+struct DesktopCredentials {
+    operator_token: String,
+}
+/// The launch of the current sidecar. Events of a replaced sidecar carry an older generation.
+struct NodeLaunchState(Mutex<(u64, NodeLaunch)>);
+
+const KNOWN_NODES: &str = include_str!("../../KNOWN_NODES.txt");
+
+/// A desktop node cannot find the network on its own, so it starts with the published bootstrap
+/// nodes. They do not decide which blocks are valid, and the user can remove them for good.
+fn bootstrap_peer_args(known_nodes: &str) -> Vec<&str> {
+    known_nodes
+        .lines()
+        .map(str::trim)
+        .filter(|line| !line.is_empty() && !line.starts_with('#'))
+        .flat_map(|peer| ["--bootstrap-peer", peer])
+        .collect()
+}
+
+/// The node prints this on stdout only after binding the management port. Seeing it from our own
+/// child proves that child owns the port, so the launcher never trusts whatever else listens there.
+const NODE_READY_LINE: &str = "operator API: http://127.0.0.1:8080/api/status";
+
+#[derive(Debug, Eq, PartialEq)]
+enum NodeLaunch {
+    Starting { error: Option<String> },
+    Ready,
+    Failed(String),
+}
+
+impl NodeLaunch {
+    fn observe(&mut self, event: &CommandEvent) {
+        match event {
+            CommandEvent::Stdout(line) if matches!(self, Self::Starting { .. }) => {
+                if String::from_utf8_lossy(line).trim_end() == NODE_READY_LINE {
+                    *self = Self::Ready;
+                }
+            }
+            CommandEvent::Stderr(line) => {
+                if let Self::Starting { error } = self
+                    && let Some(message) = String::from_utf8_lossy(line)
+                        .trim_end()
+                        .strip_prefix("Error: ")
+                {
+                    *error = Some(message.to_owned());
+                }
+            }
+            CommandEvent::Error(message) => *self = Self::Failed(message.clone()),
+            CommandEvent::Terminated(_) => {
+                let reason = match self {
+                    Self::Starting { error: Some(error) } => error.clone(),
+                    Self::Failed(reason) => reason.clone(),
+                    _ => "the node process stopped".to_owned(),
+                };
+                *self = Self::Failed(reason);
+            }
+            _ => {}
+        }
+    }
+}
 
 static SIDECAR: OnceLock<IunaSidecar> = OnceLock::new();
 static SLEEP_INHIBITOR: OnceLock<IunaSleepInhibitor> = OnceLock::new();
@@ -29,27 +93,24 @@ fn main() {
         .plugin(tauri_plugin_shell::init())
         .plugin(updater.build())
         .manage(PendingDesktopUpdate(Mutex::new(None)))
+        .manage(NodeLaunchState(Mutex::new((
+            0,
+            NodeLaunch::Starting { error: None },
+        ))))
         .invoke_handler(tauri::generate_handler![
             check_desktop_update,
-            install_desktop_update
+            install_desktop_update,
+            desktop_operator_token
         ])
         .setup(|app| {
             #[cfg(any(target_os = "macos", target_os = "windows"))]
             setup_desktop_tray(app)?;
 
-            let (mut events, child) = app
-                .shell()
-                .sidecar("iuna-sidecar")
-                .map_err(setup_error)?
-                .spawn()
-                .map_err(setup_error)?;
-
-            keep_system_awake_while_node_runs();
-
-            tauri::async_runtime::spawn(async move { while events.recv().await.is_some() {} });
-
-            let sidecar = SIDECAR.get_or_init(|| IunaSidecar(Mutex::new(None)));
-            *sidecar.0.lock().expect("sidecar mutex poisoned") = Some(child);
+            let app_data = app.path().app_data_dir().map_err(setup_error)?;
+            fs::create_dir_all(&app_data).map_err(setup_error)?;
+            let operator_token = load_or_create_secret(&app_data.join("operator.token"))?;
+            app.manage(DesktopCredentials { operator_token });
+            start_node(app.handle()).map_err(io::Error::other)?;
 
             Ok(())
         })
@@ -90,6 +151,119 @@ fn main() {
         });
 }
 
+fn start_node(app: &AppHandle) -> Result<(), String> {
+    let operator_token = app.state::<DesktopCredentials>().operator_token.clone();
+    let app_data = app
+        .path()
+        .app_data_dir()
+        .map_err(|error| error.to_string())?;
+    let generation = {
+        let launch = app.state::<NodeLaunchState>();
+        let mut launch = launch.0.lock().expect("node launch mutex poisoned");
+        launch.0 += 1;
+        launch.1 = NodeLaunch::Starting { error: None };
+        launch.0
+    };
+    let (mut events, child) = app
+        .shell()
+        .sidecar("iuna-sidecar")
+        .map_err(|error| error.to_string())?
+        .current_dir(&app_data)
+        .env("IUNA_OPERATOR_TOKEN", operator_token)
+        .args(bootstrap_peer_args(KNOWN_NODES))
+        .spawn()
+        .map_err(|error| error.to_string())?;
+
+    keep_system_awake_while_node_runs();
+
+    let handle = app.clone();
+    tauri::async_runtime::spawn(async move {
+        while let Some(event) = events.recv().await {
+            let launch = handle.state::<NodeLaunchState>();
+            let mut launch = launch.0.lock().expect("node launch mutex poisoned");
+            if launch.0 == generation {
+                launch.1.observe(&event);
+            }
+        }
+    });
+
+    let sidecar = SIDECAR.get_or_init(|| IunaSidecar(Mutex::new(None)));
+    *sidecar.0.lock().expect("sidecar mutex poisoned") = Some(child);
+    Ok(())
+}
+
+/// `None` while the node starts. The token is released only once our own child owns the port.
+#[tauri::command]
+fn desktop_operator_token(
+    credentials: State<'_, DesktopCredentials>,
+    launch: State<'_, NodeLaunchState>,
+) -> Result<Option<String>, String> {
+    match &launch.0.lock().expect("node launch mutex poisoned").1 {
+        NodeLaunch::Starting { .. } => Ok(None),
+        NodeLaunch::Ready => Ok(Some(credentials.operator_token.clone())),
+        NodeLaunch::Failed(reason) => Err(reason.clone()),
+    }
+}
+
+fn load_or_create_secret(path: &Path) -> io::Result<String> {
+    match fs::read_to_string(path) {
+        // Left by a crash in a version that wrote the file in place. It never held a secret.
+        Ok(secret) if secret.is_empty() => fs::remove_file(path)?,
+        Ok(secret) => return validate_secret(secret),
+        Err(error) if error.kind() == ErrorKind::NotFound => {}
+        Err(error) => return Err(error),
+    }
+
+    let mut bytes = [0u8; 32];
+    getrandom::fill(&mut bytes)
+        .map_err(|error| io::Error::other(format!("secure randomness unavailable: {error}")))?;
+    let secret = hex(&bytes);
+    let temporary = path.with_extension(format!("tmp-{}", std::process::id()));
+    let mut options = OpenOptions::new();
+    options.write(true).create(true).truncate(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        options.mode(0o600);
+    }
+    let mut file = options.open(&temporary)?;
+    file.write_all(secret.as_bytes())?;
+    file.sync_all()?;
+    drop(file);
+    // Linking is atomic and refuses to overwrite, so a crash leaves no partial secret and two
+    // processes agree on one.
+    let installed = fs::hard_link(&temporary, path);
+    let _ = fs::remove_file(&temporary);
+    match installed {
+        Ok(()) => Ok(secret),
+        Err(error) if error.kind() == ErrorKind::AlreadyExists => {
+            validate_secret(fs::read_to_string(path)?)
+        }
+        Err(error) => Err(error),
+    }
+}
+
+fn validate_secret(secret: String) -> io::Result<String> {
+    if secret.len() == 64 && secret.bytes().all(|byte| byte.is_ascii_hexdigit()) {
+        Ok(secret)
+    } else {
+        Err(io::Error::new(
+            ErrorKind::InvalidData,
+            "desktop credential file is invalid",
+        ))
+    }
+}
+
+fn hex(bytes: &[u8]) -> String {
+    const DIGITS: &[u8; 16] = b"0123456789abcdef";
+    let mut output = String::with_capacity(bytes.len() * 2);
+    for byte in bytes {
+        output.push(DIGITS[(byte >> 4) as usize] as char);
+        output.push(DIGITS[(byte & 0x0f) as usize] as char);
+    }
+    output
+}
+
 #[tauri::command]
 async fn check_desktop_update(
     app: AppHandle,
@@ -123,7 +297,12 @@ async fn install_desktop_update(
         .map_err(|error| error.to_string())?;
 
     stop_sidecar();
-    update.install(bytes).map_err(|error| error.to_string())?;
+    if let Err(error) = update.install(bytes) {
+        // The app keeps running on the old version, so it needs its node back.
+        *pending.0.lock().map_err(|_| "updater mutex poisoned")? = Some(update);
+        start_node(&app)?;
+        return Err(error.to_string());
+    }
 
     #[cfg(not(target_os = "windows"))]
     app.restart();
@@ -189,10 +368,10 @@ fn show_main_window(app: &tauri::AppHandle) {
 }
 
 fn stop_sidecar() {
-    if let Some(sidecar) = SIDECAR.get() {
-        if let Some(child) = sidecar.0.lock().expect("sidecar mutex poisoned").take() {
-            let _ = child.kill();
-        }
+    if let Some(sidecar) = SIDECAR.get()
+        && let Some(child) = sidecar.0.lock().expect("sidecar mutex poisoned").take()
+    {
+        let _ = child.kill();
     }
     release_system_awake_inhibitor();
 }
@@ -427,12 +606,127 @@ impl SleepInhibitor {
 
 #[cfg(test)]
 mod tests {
+    use std::time::{SystemTime, UNIX_EPOCH};
+
+    use super::*;
+
+    fn stdout(line: &str) -> CommandEvent {
+        CommandEvent::Stdout(line.as_bytes().to_vec())
+    }
+
+    fn terminated() -> CommandEvent {
+        CommandEvent::Terminated(tauri_plugin_shell::process::TerminatedPayload {
+            code: Some(1),
+            signal: None,
+        })
+    }
+
+    #[test]
+    fn node_is_ready_only_after_our_child_reports_the_bound_port() {
+        let mut launch = NodeLaunch::Starting { error: None };
+        launch.observe(&stdout("IUNA mainnet-candidate node"));
+        assert_eq!(launch, NodeLaunch::Starting { error: None });
+        launch.observe(&stdout(&format!("{NODE_READY_LINE}\n")));
+        assert_eq!(launch, NodeLaunch::Ready);
+    }
+
+    #[test]
+    fn occupied_port_fails_with_the_node_error_and_never_becomes_ready() {
+        let mut launch = NodeLaunch::Starting { error: None };
+        launch.observe(&CommandEvent::Stderr(
+            b"Error: binding operator HTTP listener on 127.0.0.1:8080".to_vec(),
+        ));
+        launch.observe(&CommandEvent::Stderr(b"Caused by:".to_vec()));
+        launch.observe(&terminated());
+        assert_eq!(
+            launch,
+            NodeLaunch::Failed("binding operator HTTP listener on 127.0.0.1:8080".to_owned())
+        );
+        launch.observe(&stdout(NODE_READY_LINE));
+        assert!(matches!(launch, NodeLaunch::Failed(_)));
+    }
+
+    #[test]
+    fn an_empty_secret_file_from_a_crash_is_replaced() {
+        let directory = std::env::temp_dir().join(format!(
+            "iuna-secret-test-{}-{}",
+            std::process::id(),
+            SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        fs::create_dir_all(&directory).unwrap();
+        let path = directory.join("operator.token");
+        fs::write(&path, "").unwrap();
+
+        let secret = load_or_create_secret(&path).unwrap();
+
+        assert_eq!(load_or_create_secret(&path).unwrap(), secret);
+        assert_eq!(fs::read_dir(&directory).unwrap().count(), 1);
+        fs::remove_dir_all(&directory).unwrap();
+    }
+
+    #[test]
+    fn known_nodes_become_peer_arguments_without_comments() {
+        assert_eq!(
+            bootstrap_peer_args("# comment\n\n  one.example:1  \ntwo.example:2\n"),
+            [
+                "--bootstrap-peer",
+                "one.example:1",
+                "--bootstrap-peer",
+                "two.example:2"
+            ]
+        );
+        assert!(bootstrap_peer_args(KNOWN_NODES).contains(&"iuna.jhx.app:19733"));
+    }
+
+    #[test]
+    fn a_stopped_node_is_no_longer_ready() {
+        let mut launch = NodeLaunch::Ready;
+        launch.observe(&terminated());
+        assert!(matches!(launch, NodeLaunch::Failed(_)));
+    }
+
     #[test]
     fn tray_icon_contains_rgba8_pixels_for_its_declared_dimensions() {
         let icon = tauri::include_image!("./icons/tray-icon.png");
         let expected_bytes = icon.width() as usize * icon.height() as usize * 4;
 
         assert_eq!(icon.rgba().len(), expected_bytes);
-        assert!(icon.rgba().chunks_exact(4).any(|pixel| pixel[3] > 0));
+        assert!(
+            icon.rgba()
+                .as_chunks::<4>()
+                .0
+                .iter()
+                .any(|pixel| pixel[3] > 0)
+        );
+    }
+
+    #[test]
+    fn desktop_secret_is_randomly_created_and_stably_reloaded() {
+        let unique = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let directory = std::env::temp_dir().join(format!(
+            "iuna-desktop-secret-test-{}-{unique}",
+            std::process::id()
+        ));
+        fs::create_dir(&directory).unwrap();
+        let path = directory.join("secret");
+
+        let created = load_or_create_secret(&path).unwrap();
+        assert_eq!(created.len(), 64);
+        assert!(created.bytes().all(|byte| byte.is_ascii_hexdigit()));
+        assert_eq!(load_or_create_secret(&path).unwrap(), created);
+
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            assert_eq!(fs::metadata(&path).unwrap().permissions().mode() & 0o077, 0);
+        }
+
+        fs::remove_dir_all(directory).unwrap();
     }
 }

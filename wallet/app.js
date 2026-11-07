@@ -1,888 +1,335 @@
+import { generateMnemonic, mnemonicEntropy, validateMnemonic } from "./mnemonic.js";
 import {
-  API_BASE, CONTACTS_STORAGE_KEY, LEGACY_STORAGE_KEY, STORAGE_KEY, api, buildSignedTransfer,
-  decodeVersionedAddress, decryptWallet, encodeAddress, encryptWallet, formatIuna, hexToBytes,
-  normalizeContactBook, normalizeWalletStore, nextRecoveryScanCounts, parseFeeRate, parseIuna,
-  removeContact, removeWallet, upsertContact, upsertWallet, walletFromSeed, walletId,
+  apiEndpoint, buildSignedTransaction, decryptWallet, defaultApiEndpoint, encryptWallet, fetchWalletView,
+  formatIuna, parseIuna, submitTransaction, walletFromEntropy,
+  sentStatus,
+  spentOutpoints,
 } from "./wallet-core.js";
-import { DICE_ROLL_COUNT, generateMnemonic, generateMnemonicFromDice, validateMnemonic } from "./mnemonic.js";
-import initQuantumCrypto, {
-  build_migration as buildQuantumMigration,
-  build_transfer as buildQuantumTransfer,
-  derive_external_addresses as deriveExternalAddresses,
-  derive_reward_addresses as deriveRewardAddresses,
-} from "./crypto/iuna_wallet_crypto.js";
 
 const app = document.querySelector("#app");
 const toastElement = document.querySelector("#toast");
-const TRANSACTION_PAGE_SIZE = 25;
-const ALL_TRANSACTION_FILTERS = { transfer: true, mine: true, burn: true, reward: true };
-const state = {
-  store: null, wallet: null, walletMeta: null, status: null, address: "", balance: null,
-  contactBook: null, editingContactId: null, sendRecipient: "",
-  addresses: [], addressIndex: 0, legacyAddress: "", legacyUtxos: [], hybridUtxos: [],
-  derivedAddresses: [], derivedRewardAddresses: [], derivedWalletId: null,
-  hybridSpendable: 0, utxos: [], transactions: [], recentTransactions: [], view: "home", timer: null,
-  transactionFilters: { ...ALL_TRANSACTION_FILTERS },
-  transactionPage: { offset: 0, total: 0, hasMore: true, loading: false, error: "" },
-  transactionRequest: 0,
-  activityObserver: null,
-  selectedTransaction: null,
-  transactionReturnView: "home",
-};
-let quantumCryptoPromise;
-let diceRolls = "";
-let seedVerificationIndexes = [];
+const WALLETS_KEY = "iunaWallets";
+const LEGACY_WALLET_KEY = "iunaEd25519Wallet";
+const ENDPOINT_KEY = "iunaWalletApi";
+// Wallets of the previous network. Their records stay untouched; this version cannot read them.
+const PREVIOUS_NETWORK_KEYS = ["iuna.wallets.v2", "iuna.wallet.v1"];
+const MAX_ACTIVITY = 100;
+const SHOWN_INCOMING = 10;
+const CHECK_COUNT = 3;
+const IDLE_LOCK_MS = 10 * 60 * 1000;
+const POLL_MS = 5000;
+let checkIndexes = [];
+let pendingSeed = "";
+let wallet = null;
+let view = null;
+let pendingTransfer = null;
+let pollTimer = null;
+let idleTimer = null;
+let awayFromDashboard = false;
 
-async function ensureQuantumCrypto() {
-  quantumCryptoPromise ||= initQuantumCrypto();
-  await quantumCryptoPromise;
+// Storage: { selected: publicKey, wallets: [{ name, record }] }, each record encrypted on its own.
+function readJson(key, fallback) { try { return JSON.parse(localStorage.getItem(key)) ?? fallback; } catch { return fallback; } }
+function writeJson(key, value) { localStorage.setItem(key, JSON.stringify(value)); }
+function store() {
+  const stored = readJson(WALLETS_KEY, null);
+  if (stored?.wallets) return stored;
+  // One-time migration from the single-wallet layout.
+  const legacy = readJson(LEGACY_WALLET_KEY, null);
+  const migrated = { selected: legacy?.publicKey || "", wallets: legacy ? [{ name: "Wallet 1", record: legacy }] : [] };
+  if (legacy) { writeJson(WALLETS_KEY, migrated); localStorage.removeItem(LEGACY_WALLET_KEY); }
+  return migrated;
 }
-const icon = (name) => {
-  const paths = {
-    send: '<path d="M6 18 18 6M6 6h12v12"/>',
-    receive: '<path d="M18 6 6 18M6 6v12h12"/>',
-    home: '<rect x="3" y="5" width="18" height="15" rx="3"/><path d="M3 9h18M16 14h2"/>',
-    activity: '<path d="M4 6h16M4 12h16M4 18h10"/>',
-    settings: '<path d="M4 7h16M4 17h16"/><circle cx="9" cy="7" r="3"/><circle cx="15" cy="17" r="3"/>',
-    contacts: '<circle cx="9" cy="8" r="3"/><path d="M3.5 19a5.5 5.5 0 0 1 11 0M16 8h5M18.5 5.5v5"/>',
-    lock: '<rect x="5" y="10" width="14" height="11" rx="2"/><path d="M8 10V7a4 4 0 0 1 8 0v3M12 14v3"/>',
-    copy: '<rect x="8" y="8" width="12" height="13" rx="2"/><path d="M15 8V3H3v13h5"/>',
-    refresh: '<path d="M20 7v5h-5M4 17v-5h5M6 6a8 8 0 0 1 14 6M18 18a8 8 0 0 1-14-6"/>',
-  };
-  return '<svg class="ui-icon" viewBox="0 0 24 24" aria-hidden="true">' + (paths[name] || paths.activity) + '</svg>';
-};
+function selectedEntry() { const { selected, wallets } = store(); return wallets.find((entry) => entry.record.publicKey === selected) || wallets[0] || null; }
+function activityKey(publicKey) { return `iunaActivity:${publicKey}`; }
+function sentActivity() { return wallet ? readJson(activityKey(wallet.publicKeyHex), []) : []; }
+function recordSent(item) { writeJson(activityKey(wallet.publicKeyHex), [item, ...sentActivity()].slice(0, MAX_ACTIVITY)); }
 
-function escapeHtml(value) {
-  return String(value ?? "").replace(/[&<>'"]/g, (character) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", "'": "&#39;", '"': "&quot;" })[character]);
+function shell(content, controls = "") { return `<div class="top"><div class="brand"><img src="./icon.svg" alt=""><span>iuna wallet</span></div><div class="actions tight">${controls}</div></div><section class="card">${content}</section>`; }
+function toast(message, error = false) { toastElement.textContent = message; toastElement.className = `toast show${error ? " error" : ""}`; clearTimeout(toastElement.timer); toastElement.timer = setTimeout(() => { toastElement.className = "toast"; }, 4000); }
+function escape(value) { return String(value).replace(/[&<>"']/g, (character) => ({ "&":"&amp;", "<":"&lt;", ">":"&gt;", '"':"&quot;", "'":"&#39;" })[character]); }
+function words(seed) { return seed.split(" ").map((word) => `<div class="seed-word">${escape(word)}</div>`).join(""); }
+function short(value) { const text = String(value || ""); return text.length > 18 ? `${text.slice(0, 9)}…${text.slice(-7)}` : text; }
+function timeLabel(seconds) { return new Date(seconds * 1000).toLocaleString(); }
+function randomCheckIndexes() {
+  const indexes = new Set();
+  while (indexes.size < CHECK_COUNT) indexes.add(1 + (crypto.getRandomValues(new Uint32Array(1))[0] % 24));
+  return [...indexes].sort((left, right) => left - right);
 }
-
-function toast(message, error = false) {
-  toastElement.textContent = message;
-  toastElement.className = `toast show${error ? " error" : ""}`;
-  window.clearTimeout(toastElement.timeout);
-  toastElement.timeout = window.setTimeout(() => { toastElement.className = "toast"; }, error ? 7000 : 3000);
-}
-
-function readJson(key) {
-  try { return JSON.parse(localStorage.getItem(key)); } catch { return null; }
-}
-
-function loadStore() {
-  const store = normalizeWalletStore(readJson(STORAGE_KEY), readJson(LEGACY_STORAGE_KEY));
-  localStorage.setItem(STORAGE_KEY, JSON.stringify(store));
-  if (localStorage.getItem(LEGACY_STORAGE_KEY)) localStorage.removeItem(LEGACY_STORAGE_KEY);
-  return store;
+async function copyText(text) {
+  if (navigator.clipboard?.writeText) return navigator.clipboard.writeText(text);
+  const field = Object.assign(document.createElement("textarea"), { value: text, readOnly: true });
+  document.body.append(field); field.select();
+  const copied = document.execCommand("copy"); field.remove();
+  if (!copied) throw new Error("Copying is unavailable; select the address manually");
 }
 
-function saveStore(store) {
-  state.store = store;
-  localStorage.setItem(STORAGE_KEY, JSON.stringify(store));
-}
-
-function saveContactBook(contactBook) {
-  state.contactBook = contactBook;
-  localStorage.setItem(CONTACTS_STORAGE_KEY, JSON.stringify(contactBook));
-}
-
-function activeWallet() {
-  return state.store?.wallets.find((wallet) => wallet.id === state.store.activeId) || null;
-}
-
-function defaultWalletName(type) {
-  const count = state.store.wallets.filter((wallet) => wallet.type === type).length + 1;
-  return type === "readonly" ? `Watch-only ${count}` : `Wallet ${count}`;
-}
-
-function logo() {
-  return '<div class="brand"><div class="brand-mark" aria-hidden="true"><svg viewBox="0 0 32 32" focusable="false"><circle class="mark-dot" cx="9.4" cy="7.6" r="2.8"></circle><path class="mark-loop" d="M9.4 13v7.1c0 3.7 2.9 6.4 6.6 6.4s6.6-2.7 6.6-6.4V13"></path></svg></div><span>iuna wallet</span></div>';
+function previousNetworkNotice() {
+  if (!PREVIOUS_NETWORK_KEYS.some((key) => localStorage.getItem(key))) return "";
+  return `<p class="muted">This browser still holds a wallet from the previous iuna network. This version cannot open it, and its balance did not carry over to the Heartbeat and Ledger network.</p>`;
 }
 
 function renderWelcome() {
-  app.innerHTML = `<section class="onboarding"><div class="hero">${logo()}<h1>Your iuna.<br><em>In your hands.</em></h1><p>A lightweight wallet that connects directly to the iuna network. Manage multiple signing and watch-only wallets on this device.</p></div><div class="onboarding-actions"><button class="button" data-action="create">Create a new wallet</button><button class="button secondary" data-action="import">Use an existing seed</button><button class="button ghost" data-action="watch">Add a watch-only wallet</button><div class="security-note"><span>◇</span><span>Self-custody means only you can recover your seed. iuna cannot retrieve it for you.</span></div></div></section>`;
+  const back = store().wallets.length ? `<button data-action="unlock-screen">Back to wallets</button>` : "";
+  app.innerHTML = shell(`<h1>Add an iuna wallet</h1><p>Create a new Ed25519 wallet for the Heartbeat and Ledger network, or restore one from its 24-word recovery phrase.</p>${previousNetworkNotice()}<div class="choice"><button data-action="create"><b>Create a new wallet</b><span>Generate and verify a new recovery phrase.</span></button><button data-action="restore"><b>Restore an existing wallet</b><span>Use your existing 24 words.</span></button></div><p class="muted">Seeds are encrypted in this browser and never sent to the node.</p>`, `${back}<button data-action="settings">Settings</button>`);
 }
 
-function renderCreateMethod() {
-  diceRolls = "";
-  seedVerificationIndexes = [];
-  delete app.dataset.pendingSeed;
-  app.innerHTML = `<section class="onboarding"><div><button class="back" data-action="back-to-wallets">← Back</button><p class="eyebrow">New wallet</p><h1 class="view-title">Choose your entropy.</h1><p class="view-copy">With a fair die and independent rolls, both methods create a 24-word seed with 256-bit entropy.</p><div class="entropy-options"><button class="entropy-option" data-action="system-entropy"><strong>Secure randomness</strong><span>Generated by your device's cryptographic random-number generator.</span><small>Recommended</small></button><button class="entropy-option" data-action="dice-entropy"><strong>Physical dice</strong><span>Enter ${DICE_ROLL_COUNT} independent rolls from a six-sided die.</span></button></div></div><div class="security-note" style="margin-top:auto"><span>◇</span><span>For dice entropy, use a physical die in private — never an online dice roller.</span></div></section>`;
-}
-
-function renderLock() {
-  const wallet = activeWallet();
-  if (!wallet) { renderWelcome(); return; }
-  if (wallet.type === "readonly") { openStoredWallet(wallet); return; }
-  app.innerHTML = `<section class="onboarding"><div class="lock-card">${logo()}<p class="eyebrow">${escapeHtml(wallet.name)}</p><h1>Welcome back.</h1><p class="view-copy">Unlock this wallet on this device.</p><form id="unlock-form"><div class="field"><label for="password">Password</label><input id="password" type="password" autocomplete="current-password" autofocus required></div><button class="button" type="submit">Unlock</button></form><button class="button ghost" data-action="wallets" style="width:100%;margin-top:10px">Choose another wallet</button><p class="security-note">Wallet ${escapeHtml(wallet.publicKeyHex?.slice(0, 8))}… is encrypted locally.</p></div></section>`;
-}
-
-function renderWalletPicker() {
-  const items = state.store.wallets.map((wallet) => `<button class="wallet-row ${wallet.id === state.store.activeId ? "active" : ""}" data-wallet-id="${escapeHtml(wallet.id)}"><span><strong>${escapeHtml(wallet.name)}</strong><small>${wallet.type === "readonly" ? "Watch-only" : "Signing wallet"} · ${escapeHtml(wallet.publicKeyHex.slice(0, 10))}…</small></span><span>›</span></button>`).join("");
-  app.innerHTML = `<section class="onboarding"><div>${logo()}<p class="eyebrow picker-title">Wallets</p><h1 class="view-title">Choose a wallet</h1><div class="wallet-list">${items}</div></div><div class="onboarding-actions"><button class="button" data-action="create">Create a new wallet</button><button class="button secondary" data-action="import">Import a seed</button><button class="button ghost" data-action="watch">Add watch-only</button></div></section>`;
-}
-
-function renderWatchOnly() {
-  app.innerHTML = `<section class="onboarding"><div><button class="back" data-action="back-to-wallets">← Back</button><p class="eyebrow">Watch-only</p><h1 class="view-title">Follow an address.</h1><p class="view-copy">View its balance and activity without storing a seed or private key. This wallet can never sign transactions.</p><form id="watch-form"><div class="field"><label for="wallet-name">Wallet name</label><input id="wallet-name" maxlength="40" placeholder="Savings" required></div><div class="field"><label for="watch-address">Mainnet iuna address</label><input id="watch-address" autocomplete="off" autocapitalize="none" spellcheck="false" placeholder="iuna1q…" required></div><button class="button" type="submit" style="width:100%">Add watch-only wallet</button></form></div><div class="security-note" style="margin-top:auto"><span>◇</span><span>Only the public address is saved on this device.</span></div></section>`;
-  document.querySelector("#wallet-name").value = defaultWalletName("readonly");
-}
-
-function renderImport() {
-  app.innerHTML = `<section class="onboarding"><div><button class="back" data-action="back-to-wallets">← Back</button><p class="eyebrow">Recover wallet</p><h1 class="view-title">Existing seed</h1><p class="view-copy">Enter the 24 words in the same order. They are processed locally only.</p><form id="import-form"><div class="field"><label for="import-name">Wallet name</label><input id="import-name" maxlength="40" required></div><div class="field"><label for="seed">Seed phrase</label><textarea id="seed" autocomplete="off" autocapitalize="none" spellcheck="false" placeholder="word 1  word 2  word 3 …" required></textarea></div><div class="field"><label for="new-password">New wallet password</label><input id="new-password" type="password" minlength="10" autocomplete="new-password" placeholder="At least 10 characters" required></div><button class="button" type="submit" style="width:100%">Recover wallet</button></form></div><div class="security-note" style="margin-top:auto"><span>◇</span><span>Your seed never leaves this browser.</span></div></section>`;
-  document.querySelector("#import-name").value = defaultWalletName("signing");
-}
-
-function renderGeneratedSeed(seed) {
-  const words = seed.split(" ").map((word) => `<div class="seed-word">${word}</div>`).join("");
-  app.innerHTML = `<section class="onboarding"><div><button class="back" data-action="create">← Back</button><p class="eyebrow">Step 1 of 3</p><h1 class="view-title">Save your seed.</h1><p class="view-copy">Write these 24 words on paper in this exact order.</p><div class="seed-grid">${words}</div><div class="warning">Do not take a screenshot. Anyone with these words can access your wallet.</div><button class="button secondary" data-action="copy-seed" style="width:100%">Copy seed</button><button class="button" data-action="seed-saved" style="width:100%;margin-top:10px">I have saved the words</button></div></section>`;
-  app.dataset.pendingSeed = seed;
-}
-
-async function renderNewSeed() {
-  app.innerHTML = `<section class="center-card"><div class="spinner"></div><p>Creating a secure seed…</p></section>`;
-  renderGeneratedSeed(await generateMnemonic());
-}
-
-function updateDiceEntry() {
-  const count = diceRolls.length;
-  const countElement = document.querySelector("#dice-count");
-  const sequenceElement = document.querySelector("#dice-sequence");
-  const progressElement = document.querySelector("#dice-progress");
-  const submit = document.querySelector("#dice-form [type=submit]");
-  if (countElement) countElement.textContent = `${count} / ${DICE_ROLL_COUNT}`;
-  if (sequenceElement) sequenceElement.textContent = diceRolls.match(/.{1,5}/g)?.join(" ") || "No rolls entered yet";
-  if (progressElement) progressElement.value = count;
-  if (submit) submit.disabled = count !== DICE_ROLL_COUNT;
-}
-
-function renderDiceEntropy() {
-  diceRolls = "";
-  app.innerHTML = `<section class="onboarding"><div><button class="back" data-action="create">← Back</button><p class="eyebrow">Physical dice</p><h1 class="view-title">Roll ${DICE_ROLL_COUNT} times.</h1><p class="view-copy">After every independent roll, tap the matching number. The extra rolls let the app convert the result without modulo bias.</p><form id="dice-form"><div class="dice-status"><span id="dice-count">0 / ${DICE_ROLL_COUNT}</span><progress id="dice-progress" max="${DICE_ROLL_COUNT}" value="0"></progress></div><output id="dice-sequence" class="dice-sequence" aria-live="polite">No rolls entered yet</output><div class="dice-buttons" aria-label="Dice roll"><button type="button" data-die="1">1</button><button type="button" data-die="2">2</button><button type="button" data-die="3">3</button><button type="button" data-die="4">4</button><button type="button" data-die="5">5</button><button type="button" data-die="6">6</button></div><div class="dice-tools"><button type="button" class="button ghost" data-action="dice-undo">Undo</button><button type="button" class="button ghost" data-action="dice-reset">Reset</button></div><button class="button" type="submit" disabled style="width:100%;margin-top:18px">Create seed from rolls</button></form><div class="warning">Use a physical six-sided die in private. Digital dice, patterns, or invented numbers do not provide reliable entropy.</div></div></section>`;
-}
-
-function randomSeedWordIndexes(wordCount, challengeCount) {
-  const indexes = Array.from({ length: wordCount }, (_, index) => index);
-  const random = new Uint32Array(wordCount - 1);
-  crypto.getRandomValues(random);
-  for (let index = indexes.length - 1; index > 0; index -= 1) {
-    const swapIndex = random[index - 1] % (index + 1);
-    [indexes[index], indexes[swapIndex]] = [indexes[swapIndex], indexes[index]];
-  }
-  return indexes.slice(0, challengeCount).sort((left, right) => left - right);
-}
-
-function renderSeedVerification() {
-  const seed = app.dataset.pendingSeed;
-  if (!seed) { renderCreateMethod(); return; }
-  const words = seed.split(" ");
-  seedVerificationIndexes = randomSeedWordIndexes(words.length, 4);
-  const fields = seedVerificationIndexes.map((index) => `<div class="field"><label for="verify-word-${index}">Word ${index + 1}</label><input id="verify-word-${index}" name="word-${index}" autocomplete="off" autocapitalize="none" spellcheck="false" required></div>`).join("");
-  app.innerHTML = `<section class="onboarding"><div><button class="back" data-action="verify-back">← Back</button><p class="eyebrow">Step 2 of 3</p><h1 class="view-title">Check your backup.</h1><p class="view-copy">Enter these four words from your written seed to confirm it can be recovered.</p><form id="seed-verify-form"><div class="verify-grid">${fields}</div><button class="button" type="submit" style="width:100%">Verify words</button></form></div><div class="security-note" style="margin-top:auto"><span>◇</span><span>The seed stays on this device and is not sent anywhere.</span></div></section>`;
-  document.querySelector("#seed-verify-form input")?.focus();
-}
-
-function renderPasswordSetup() {
-  const seed = app.dataset.pendingSeed;
-  app.innerHTML = `<section class="onboarding"><div><button class="back" data-action="seed-saved">← Back</button><p class="eyebrow">Step 3 of 3</p><h1 class="view-title">Secure this device.</h1><p class="view-copy">This password encrypts your seed before it is stored in the browser.</p><form id="create-form"><div class="field"><label for="create-name">Wallet name</label><input id="create-name" maxlength="40" required></div><div class="field"><label for="create-password">Password</label><input id="create-password" type="password" minlength="10" autocomplete="new-password" required></div><div class="field"><label for="confirm-password">Repeat password</label><input id="confirm-password" type="password" minlength="10" autocomplete="new-password" required></div><button class="button" type="submit" style="width:100%">Open wallet</button></form></div></section>`;
-  document.querySelector("#create-name").value = defaultWalletName("signing");
-  app.dataset.pendingSeed = seed;
-}
-
-async function saveAndOpen(seed, password, name) {
-  const walletName = name.trim();
-  if (!walletName) throw new Error("Enter a wallet name");
-  const wallet = await walletFromSeed(seed);
-  const record = await encryptWallet(seed, password, wallet.publicKeyHex);
-  const meta = { id: walletId(wallet.publicKeyHex), name: walletName, type: "signing", publicKeyHex: wallet.publicKeyHex, record };
-  saveStore(upsertWallet(state.store, meta));
-  state.wallet = wallet;
-  state.walletMeta = meta;
-  await openWallet();
-}
-
-async function openStoredWallet(meta) {
-  state.walletMeta = meta;
-  state.wallet = meta.type === "readonly"
-    ? { type: "readonly", publicKeyHex: meta.publicKeyHex, address: meta.address || "", publicKey: Uint8Array.from(meta.publicKeyHex.match(/.{2}/g), (pair) => Number.parseInt(pair, 16)) }
-    : state.wallet;
-  await openWallet();
-}
-
-async function fetchWalletData() {
-  const previousAddress = state.address;
-  state.status = await api("/status");
-  state.legacyAddress = state.walletMeta?.type === "readonly" && state.wallet.address
-    ? state.wallet.address
-    : encodeAddress(state.wallet.publicKey, state.status.chain_id);
-  let snapshot;
-  if (state.walletMeta?.type === "readonly") {
-    const address = state.wallet.address || state.legacyAddress;
-    snapshot = await fetchSnapshot([address]);
-    state.addresses = [address];
-    state.addressIndex = 0;
-    state.address = address;
-  } else if (state.status.transaction_v2_active) {
-    if (Number(state.status.api_version || 0) < 3) throw new Error("The public iuna endpoint must be upgraded for complete rotating-wallet recovery");
-    await ensureQuantumCrypto();
-    const gapLimit = Math.max(1, Number(state.status.hybrid_address_gap_limit || 20));
-    let externalCount = gapLimit + 1;
-    let rewardCount = gapLimit;
-    let derived;
-    let rewardDerived;
-    const derivationScope = `${state.walletMeta.id}:${state.status.chain_id}`;
-    if (state.derivedWalletId !== derivationScope) {
-      state.derivedAddresses = [];
-      state.derivedRewardAddresses = [];
-      state.derivedWalletId = derivationScope;
-    } else {
-      externalCount = Math.max(externalCount, state.derivedAddresses.length);
-      rewardCount = Math.max(rewardCount, state.derivedRewardAddresses.length);
-    }
-    for (;;) {
-      if (state.derivedAddresses.length < externalCount) {
-        state.derivedAddresses = JSON.parse(deriveExternalAddresses(state.wallet.seedPhrase, externalCount, state.status.chain_id));
-      }
-      if (state.derivedRewardAddresses.length < rewardCount) {
-        state.derivedRewardAddresses = JSON.parse(deriveRewardAddresses(state.wallet.seedPhrase, rewardCount, state.status.chain_id));
-      }
-      derived = state.derivedAddresses.slice(0, externalCount);
-      rewardDerived = state.derivedRewardAddresses.slice(0, rewardCount);
-      snapshot = await fetchSnapshot([
-        state.legacyAddress,
-        ...derived.map((item) => item.address),
-        ...rewardDerived.map((item) => item.address),
-      ], state.legacyAddress);
-      const recoveryScan = nextRecoveryScanCounts({
-        externalAddresses: derived,
-        rewardAddresses: rewardDerived,
-        recoveryAddresses: snapshot.recovery_addresses,
-        gapLimit,
-      });
-      if (recoveryScan.unresolved.length) {
-        if (recoveryScan.externalCount === externalCount && recoveryScan.rewardCount === rewardCount) {
-          throw new Error("Wallet address recovery exceeded its recovery limit");
-        }
-        externalCount = recoveryScan.externalCount;
-        rewardCount = recoveryScan.rewardCount;
-        continue;
-      }
-      const used = new Set(snapshot.addresses.filter((item) => item.used).map((item) => item.address));
-      const highestExternal = derived.reduce((highest, item) => used.has(item.address) ? Math.max(highest, item.index) : highest, -1);
-      const highestReward = rewardDerived.reduce((highest, item) => used.has(item.address) ? Math.max(highest, item.index) : highest, -1);
-      const nextExternalCount = highestExternal < externalCount - gapLimit || externalCount >= 10_000
-        ? externalCount
-        : Math.min(10_000, highestExternal + gapLimit + 1);
-      const nextRewardCount = highestReward < rewardCount - gapLimit || rewardCount >= 10_000
-        ? rewardCount
-        : Math.min(10_000, highestReward + gapLimit + 1);
-      if (nextExternalCount === externalCount && nextRewardCount === rewardCount) break;
-      externalCount = nextExternalCount;
-      rewardCount = nextRewardCount;
-    }
-    const used = new Set(snapshot.addresses.filter((item) => item.used).map((item) => item.address));
-    const highestUsed = derived.reduce((highest, item) => used.has(item.address) ? Math.max(highest, item.index) : highest, -1);
-    state.addressIndex = highestUsed + 1;
-    const current = derived.find((item) => item.index === state.addressIndex);
-    if (!current) throw new Error("Wallet address discovery exceeded its recovery limit");
-    state.addresses = [
-      state.legacyAddress,
-      ...derived.map((item) => item.address),
-      ...rewardDerived.map((item) => item.address),
-    ];
-    state.address = current.address;
-    const descriptorByAddress = new Map([
-      ...derived.map((item) => [item.address, { addressIndex: item.index, addressBranch: "external" }]),
-      ...rewardDerived.map((item) => [item.address, { addressIndex: item.index, addressBranch: "reward" }]),
-    ]);
-    state.legacyUtxos = (snapshot.utxos || []).filter((utxo) => utxo.address === state.legacyAddress);
-    state.hybridUtxos = (snapshot.utxos || [])
-      .filter((utxo) => descriptorByAddress.has(utxo.address))
-      .map((utxo) => ({ ...utxo, ...descriptorByAddress.get(utxo.address) }));
-    state.hybridSpendable = snapshot.addresses.filter((item) => item.version === 1).reduce((sum, item) => sum + Number(item.spendable || 0), 0);
-  } else {
-    snapshot = await fetchSnapshot([state.legacyAddress]);
-    state.addresses = [state.legacyAddress];
-    state.addressIndex = 0;
-    state.address = state.legacyAddress;
-    state.legacyUtxos = snapshot.utxos || [];
-    state.hybridUtxos = [];
-    state.hybridSpendable = 0;
-  }
-  const address = state.address;
-  if (previousAddress && previousAddress !== address) {
-    state.transactions = [];
-    state.recentTransactions = [];
-    Object.assign(state.transactionPage, { offset: 0, total: 0, hasMore: true, loading: false, error: "" });
-  }
-  state.address = address;
-  const previousTransactionCount = state.transactions.length;
-  const transactionLimit = Math.min(100, Math.max(TRANSACTION_PAGE_SIZE, previousTransactionCount));
-  const refreshTransactions = !state.transactionPage.loading;
-  const transactionRequest = refreshTransactions ? ++state.transactionRequest : null;
-  const [transactions, recentTransactions] = await Promise.all([
-    refreshTransactions ? fetchTransactions(0, transactionLimit) : Promise.resolve(null),
-    fetchTransactions(0, 5, ALL_TRANSACTION_FILTERS),
-  ]);
-  state.balance = snapshot;
-  state.utxos = snapshot.utxos || [];
-  state.recentTransactions = normalizeTransactionItems(recentTransactions?.items);
-  if (transactions && transactionRequest === state.transactionRequest) {
-    transactions.items = normalizeTransactionItems(transactions.items);
-    applyTransactionPage(transactions, true, previousTransactionCount);
-  }
-}
-
-function fetchSnapshot(addresses, recoveryAddress = null) {
-  return api("/wallets/snapshot", {
-    method: "POST",
-    body: JSON.stringify({ addresses, ...(recoveryAddress ? { recovery_address: recoveryAddress } : {}) }),
-  });
-}
-
-function fetchTransactions(offset, limit, filters = state.transactionFilters) {
-  return api("/wallets/transactions", {
-    method: "POST",
-    body: JSON.stringify({ addresses: state.addresses, ...filters, offset, limit }),
-  });
-}
-
-function normalizeTransactionItems(items) {
-  return Array.isArray(items) ? items.map((row) => ({
-    kind: row.kind === "migration" ? "transfer" : row.kind,
-    status: row.status,
-    block_height: row.blockHeight,
-    timestamp_ms: row.timestampMs,
-    direction: row.direction,
-    transaction: {
-      kind: row.kind,
-      inputs: row.inputs || [],
-      outputs: row.outputs || [],
-      change: row.change || [],
-      amount: row.amount || 0,
-      fee: row.fee || 0,
-      signature: row.signature,
-    },
-  })) : [];
-}
-
-function transactionKey(item) {
-  return `${item.kind || ""}:${item.transaction?.signature || ""}`;
-}
-
-function networkAddress(publicKey) {
-  if (!publicKey) return "Unknown";
-  if (/^(t?iuna)1/i.test(publicKey)) return publicKey;
-  try {
-    return encodeAddress(hexToBytes(publicKey), state.status?.chain_id);
-  } catch {
-    return String(publicKey);
-  }
-}
-
-function applyTransactionPage(payload, replace, preserveCount = 0) {
-  const items = Array.isArray(payload?.items) ? payload.items : [];
-  state.transactionPage.error = "";
-  if (replace) {
-    if (preserveCount > items.length && payload?.has_more === true) {
-      const fresh = new Set(items.map(transactionKey));
-      const retained = state.transactions.filter((item) => !fresh.has(transactionKey(item)));
-      state.transactions = items.concat(retained).slice(0, preserveCount);
-    } else {
-      state.transactions = items;
-    }
-  } else {
-    const known = new Set(state.transactions.map(transactionKey));
-    state.transactions = state.transactions.concat(items.filter((item) => {
-      const key = transactionKey(item);
-      if (known.has(key)) return false;
-      known.add(key);
-      return true;
-    }));
-  }
-  state.transactionPage.offset = preserveCount > items.length
-    ? state.transactions.length
-    : Number(payload?.next_offset ?? (replace ? items.length : state.transactionPage.offset + items.length));
-  state.transactionPage.total = Number(payload?.total ?? state.transactions.length);
-  state.transactionPage.hasMore = state.transactions.length < state.transactionPage.total;
-}
-
-async function loadTransactions({ replace = false } = {}) {
-  if (!state.wallet || (state.transactionPage.loading && !replace)) return;
-  const request = ++state.transactionRequest;
-  if (replace) {
-    state.transactions = [];
-    Object.assign(state.transactionPage, { offset: 0, total: 0, hasMore: true });
-  } else if (!state.transactionPage.hasMore) {
-    return;
-  }
-  state.transactionPage.loading = true;
-  state.transactionPage.error = "";
-  if (state.view === "activity") renderApp();
-  try {
-    const offset = replace ? 0 : state.transactionPage.offset;
-    const payload = await fetchTransactions(offset, TRANSACTION_PAGE_SIZE);
-    if (request !== state.transactionRequest) return;
-    payload.items = normalizeTransactionItems(payload.items);
-    applyTransactionPage(payload, replace);
-  } catch (error) {
-    if (request === state.transactionRequest) {
-      state.transactionPage.error = error.message;
-      toast(error.message, true);
-    }
-  } finally {
-    if (request === state.transactionRequest) {
-      state.transactionPage.loading = false;
-      if (state.view === "activity") renderApp();
-    }
-  }
-}
-
-async function openWallet() {
-  state.transactionRequest += 1;
-  state.transactionPage.loading = false;
-  state.activityObserver?.disconnect();
-  state.activityObserver = null;
-  app.innerHTML = `<section class="center-card"><div class="spinner"></div><p>Connecting to iuna…</p></section>`;
-  try {
-    await fetchWalletData();
-    renderApp();
-    window.clearInterval(state.timer);
-    state.timer = window.setInterval(refreshSilently, 20_000);
-  } catch (error) {
-    renderOffline(error.message);
-  }
-}
-
-function renderOffline(message) {
-  app.innerHTML = `<section class="onboarding"><div class="lock-card">${logo()}<p class="eyebrow">Connection failed</p><h1 class="view-title">Endpoint unavailable.</h1><p class="view-copy">${escapeHtml(message)}</p><button class="button" data-action="retry" style="width:100%">Try again</button><button class="button ghost" data-action="lock" style="width:100%;margin-top:10px">Lock wallet</button><p class="security-note">Endpoint: ${escapeHtml(API_BASE)}</p></div></section>`;
-}
-
-async function refreshSilently() {
-  if (!state.wallet) return;
-  try { await fetchWalletData(); if (["home", "activity"].includes(state.view)) renderApp(); } catch { /* keep the last known state */ }
-}
-
-function topbar() {
-  const online = state.status?.ready;
-  return `<header class="topbar"><button class="wallet-button" data-action="wallets" aria-label="Switch wallet">${logo()}<span><strong>${escapeHtml(state.walletMeta?.name)}</strong><small>${state.walletMeta?.type === "readonly" ? "Watch-only" : "Signing"}</small></span></button><div style="display:flex;align-items:center;gap:10px"><div class="network"><span class="dot ${online ? "live" : ""}"></span>${online ? "Mainnet" : "Syncing"}</div><button class="icon-button" data-action="lock" aria-label="Lock">${icon("lock")}</button></div></header>`;
-}
-
-function nav() {
-  return `<nav class="bottom-nav">${[["home","Overview"],["send","Send"],["receive","Receive"],["contacts","Contacts"],["settings","Settings"]].map(([view,label]) => `<button class="nav-item ${state.view === view || (view === "contacts" && state.view === "contact-edit") ? "active" : ""}" data-view="${view}"><span>${icon(view)}</span>${label}</button>`).join("")}</nav>`;
-}
-
-function transactionInfo(item) {
-  const tx = item.transaction || {};
-  const owns = (address) => state.addresses.includes(address) || address === state.wallet.publicKeyHex;
-  if (tx.kind === "migration") return { title: "Migrated", incoming: true, amount: tx.amount || 0, symbol: "◇" };
-  if (item.kind === "reward") {
-    const amount = tx.outputs?.filter((output) => owns(output.address)).reduce((sum, output) => sum + Number(output.amount || 0), 0) || 0;
-    return { title: "Block reward", incoming: true, amount, symbol: "★" };
-  }
-  if (tx.kind === "mine") return { title: "Mining reward", incoming: true, amount: 1_000_000, symbol: "✦" };
-  if (tx.kind === "burn") return { title: "Burn", incoming: false, amount: tx.amount || 0, symbol: "×" };
-  const sent = tx.inputs?.some((input) => owns(input.owner));
-  const relevant = tx.outputs?.filter((output) => sent ? !owns(output.address) : owns(output.address)) || [];
-  return { title: sent ? "Sent" : "Received", incoming: !sent, amount: relevant.reduce((sum, output) => sum + Number(output.amount || 0), 0), symbol: sent ? "↗" : "↙" };
-}
-
-function formatTransactionDate(item) {
-  if (!item.timestamp_ms) return "Pending";
-  const timestamp = new Date(Number(item.timestamp_ms));
-  if (Number.isNaN(timestamp.getTime())) return "Unknown time";
-  return timestamp.toLocaleString("en-GB", {
-    day: "numeric",
-    month: "short",
-    hour: "2-digit",
-    minute: "2-digit",
-  }).replace(",", "");
-}
-
-function activityList(limit, filtered = false, source = state.transactions) {
-  const items = typeof limit === "number" ? source.slice(0, limit) : source;
-  if (!items.length && filtered && state.transactionPage.loading) return '';
-  if (!items.length) return filtered
-    ? '<div class="empty">No transactions match these filters.</div>'
-    : '<div class="empty">No transactions yet.<br>Your new wallet is ready to use.</div>';
-  return `<div class="activity-list">${items.map((item) => {
-    const info = transactionInfo(item);
-    const date = formatTransactionDate(item);
-    return `<button class="activity" data-transaction-key="${escapeHtml(transactionKey(item))}" type="button" aria-label="View ${escapeHtml(info.title.toLowerCase())} transaction details"><span class="activity-icon">${info.symbol}</span><span><span class="activity-title">${info.title}</span><span class="activity-meta">${escapeHtml(date)} · ${escapeHtml(item.status)}</span></span><span class="activity-amount ${info.incoming ? "in" : ""}">${info.incoming ? "+" : "−"}${formatIuna(info.amount, 4)} IUNA</span><span class="activity-chevron" aria-hidden="true">›</span></button>`;
-  }).join("")}</div>`;
-}
-
-function addressDetail(label, address, amount = null) {
-  const formattedAmount = amount === null ? "" : `<small>${formatIuna(amount, 6)} IUNA</small>`;
-  return `<div class="address-detail"><span>${escapeHtml(label)}</span><div><code>${escapeHtml(address)}</code>${formattedAmount}</div></div>`;
-}
-
-function transactionFlow(item) {
-  const tx = item.transaction || {};
-  if (item.kind === "reward") {
-    return {
-      from: [{ label: "From", address: "Network reward", amount: null }],
-      to: (tx.outputs || []).map((output) => ({ label: "To", address: networkAddress(output.address), amount: output.amount })),
-    };
-  }
-  if (tx.kind === "mine") {
-    return {
-      from: [{ label: "From", address: "Mining protocol", amount: null }],
-      to: [{ label: "To", address: networkAddress(tx.recipient), amount: 1_000_000 }],
-    };
-  }
-  const owners = [...new Set((tx.inputs || []).map((input) => input.owner).filter(Boolean))];
-  const outputs = tx.kind === "burn" ? (tx.change || []) : (tx.outputs || []);
-  const from = owners.map((owner) => ({ label: "From", address: networkAddress(owner), amount: null }));
-  const to = outputs.map((output) => ({
-    label: owners.includes(output.address) ? "Change to" : "To",
-    address: networkAddress(output.address),
-    amount: output.amount,
-  }));
-  if (tx.kind === "burn") to.unshift({ label: "To", address: "Burned permanently", amount: tx.amount || 0 });
-  return {
-    from: from.length ? from : [{ label: "From", address: "Unknown", amount: null }],
-    to: to.length ? to : [{ label: "To", address: "Unknown", amount: null }],
-  };
-}
-
-function renderTransaction() {
-  const item = state.selectedTransaction;
-  if (!item) {
-    state.view = state.transactionReturnView;
-    return state.view === "activity" ? renderActivity() : renderHome();
-  }
-  const tx = item.transaction || {};
-  const info = transactionInfo(item);
-  const flow = transactionFlow(item);
-  const transactionId = tx.signature || "Unknown";
-  const fee = Number(tx.fee || 0);
-  const addresses = [...flow.from, ...flow.to].map((entry) => addressDetail(entry.label, entry.address, entry.amount)).join("");
-  return `${topbar()}<button class="back" data-action="close-transaction">← Back</button><p class="eyebrow">Transaction details</p><h1 class="view-title">${escapeHtml(info.title)}</h1><p class="transaction-total ${info.incoming ? "in" : ""}">${info.incoming ? "+" : "−"}${formatIuna(info.amount, 6)} IUNA</p><div class="panel transaction-detail">${addresses}<div class="detail-line"><span>Status</span><strong class="status-value">${escapeHtml(item.status || "Unknown")}</strong></div><div class="detail-line"><span>Date</span><strong>${escapeHtml(formatTransactionDate(item))}</strong></div>${item.block_height === null || item.block_height === undefined ? "" : `<div class="detail-line"><span>Block</span><strong>${escapeHtml(item.block_height)}</strong></div>`}${fee ? `<div class="detail-line"><span>Network fee</span><strong>${formatIuna(fee, 6)} IUNA</strong></div>` : ""}<div class="transaction-id"><span>Transaction ID</span><code>${escapeHtml(transactionId)}</code><button class="icon-button" data-action="copy-transaction-id" aria-label="Copy transaction ID">${icon("copy")}</button></div></div>`;
-}
-
-function renderHome() {
-  const readonly = state.walletMeta?.type === "readonly";
-  const legacySpendable = state.legacyUtxos.reduce((sum, utxo) => sum + Number(utxo.output.amount || 0), 0);
-  const migration = !readonly && state.status?.transaction_v2_active && legacySpendable > 0
-    ? `<div class="panel migration-card"><p class="eyebrow">Quantum-resistant wallet</p><h2>Migrate ${formatIuna(legacySpendable, 6)} IUNA</h2><p>Move the remaining legacy outputs into your rotating hybrid wallet.</p><button class="button" data-action="migrate">Migrate now</button></div>`
-    : "";
-  return `${topbar()}<section>${readonly ? '<div class="mode-badge">Watch-only · signing disabled</div>' : ""}<p class="eyebrow">Available balance</p><h1 class="balance">${formatIuna(state.balance?.spendable, 6)} <span>IUNA</span></h1><p class="subbalance">${formatIuna(state.balance?.confirmed, 6)} confirmed · block ${escapeHtml(state.balance?.height)}</p><div class="actions"><button class="button" data-view="send" ${readonly ? "disabled" : ""}>${icon("send")} Send</button><button class="button secondary" data-view="receive">${icon("receive")} Receive</button></div>${migration}<div class="section-head"><h2>Recent activity</h2><button data-view="activity">View all</button></div><div class="panel">${activityList(5, false, state.recentTransactions)}</div></section>`;
-}
-
-function renderSend() {
-  if (state.walletMeta?.type === "readonly") return `${topbar()}<p class="eyebrow">Watch-only</p><h1 class="view-title">Sending is disabled.</h1><p class="view-copy">This wallet contains no seed or private key, so it cannot sign transactions.</p><button class="button secondary" data-view="home" style="width:100%">Back to overview</button>`;
-  const defaultFeeRate = state.status.default_fee_per_byte ?? 1;
-  const available = state.status?.transaction_v2_active ? state.hybridSpendable : state.balance?.spendable;
-  const contacts = state.contactBook.contacts.map((contact) => `<option value="${escapeHtml(contact.address)}">${escapeHtml(contact.name)}</option>`).join("");
-  const contactPicker = contacts ? `<div class="field"><label for="contact-recipient">Choose a contact</label><select id="contact-recipient"><option value="">Select a contact…</option>${contacts}</select></div>` : `<button class="inline-action" type="button" data-view="contacts">+ Add your first contact</button>`;
-  return `${topbar()}<p class="eyebrow">Transaction</p><h1 class="view-title">Send IUNA</h1><p class="view-copy">The transaction is signed on this device with your hybrid quantum-resistant key.</p><form id="send-form" class="panel send-card">${contactPicker}<div class="field"><label for="recipient">Recipient address</label><input id="recipient" autocomplete="off" autocapitalize="none" spellcheck="false" placeholder="iuna1p…" value="${escapeHtml(state.sendRecipient)}" required></div><div class="field"><label for="amount">Amount</label><div class="amount-wrap"><input id="amount" inputmode="decimal" placeholder="0.00" required><span>IUNA</span></div></div><div class="field"><label for="fee-rate">Fee rate (µIUNA per byte)</label><input id="fee-rate" name="fee-rate" type="number" inputmode="numeric" min="1" step="1" value="${escapeHtml(defaultFeeRate)}" required></div><div class="fee-line"><span>Available</span><strong>${formatIuna(available)} IUNA</strong></div><button class="button" type="submit">Review transaction</button></form>`;
-}
-
-function renderContacts() {
-  const contacts = state.contactBook.contacts;
-  const list = contacts.length
-    ? `<div class="contact-list">${contacts.map((contact) => `<article class="contact-row"><button class="contact-main" data-action="send-contact" data-contact-id="${escapeHtml(contact.id)}"><span class="contact-avatar">${escapeHtml(contact.name.charAt(0).toUpperCase())}</span><span><strong>${escapeHtml(contact.name)}</strong><small>${escapeHtml(contact.address.slice(0, 14))}…${escapeHtml(contact.address.slice(-8))}</small></span></button><button class="icon-button contact-edit" data-action="edit-contact" data-contact-id="${escapeHtml(contact.id)}" aria-label="Edit ${escapeHtml(contact.name)}">•••</button></article>`).join("")}</div>`
-    : '<div class="empty contact-empty">No contacts yet.<br>Add a trusted address for faster sending.</div>';
-  return `${topbar()}<div class="section-head contacts-head"><div><p class="eyebrow">Address book</p><h1 class="view-title">Contacts</h1></div><button class="button compact" data-action="add-contact">+ Add</button></div><div class="panel contact-panel">${list}</div><p class="security-note">Contacts are stored only in this browser. Always verify the address before sending.</p>`;
-}
-
-function renderContactForm() {
-  const contact = state.contactBook.contacts.find((item) => item.id === state.editingContactId);
-  return `${topbar()}<button class="back" data-view="contacts">← Contacts</button><p class="eyebrow">Address book</p><h1 class="view-title">${contact ? "Edit contact" : "New contact"}</h1><p class="view-copy">Save a name with a mainnet iuna address.</p><form id="contact-form" class="panel"><input type="hidden" name="contact-id" value="${escapeHtml(contact?.id || "")}"><div class="field"><label for="contact-name">Name</label><input id="contact-name" name="contact-name" maxlength="40" autocomplete="name" value="${escapeHtml(contact?.name || "")}" placeholder="Alice" required></div><div class="field"><label for="contact-address">Mainnet iuna address</label><input id="contact-address" name="contact-address" autocomplete="off" autocapitalize="none" spellcheck="false" value="${escapeHtml(contact?.address || "")}" placeholder="iuna1p…" required></div><button class="button" type="submit" style="width:100%">${contact ? "Save changes" : "Add contact"}</button></form>${contact ? '<button class="button danger" data-action="delete-contact" style="width:100%;margin-top:10px">Delete contact</button>' : ""}`;
-}
-
-function renderReceive() {
-  const readonly = state.walletMeta?.type === "readonly";
-  const explanation = readonly
-    ? "This watch-only entry follows this address only; it cannot derive future rotating addresses."
-    : "This address rotates automatically after funds arrive. Previous addresses remain part of your wallet.";
-  return `${topbar()}<p class="eyebrow">Your address</p><h1 class="view-title">Receive IUNA</h1><p class="view-copy">Share this current mainnet address with the sender.</p><div class="panel"><div class="receive-emblem">${icon("receive")}</div><p class="eyebrow">${readonly ? "Watched address" : "Current receiving address"}</p><div class="address-box"><code>${escapeHtml(state.address)}</code><button class="icon-button" data-action="copy-address" aria-label="Copy address">${icon("copy")}</button></div><p class="security-note">${explanation}</p></div>`;
-}
-
-function renderActivity() {
-  const filters = [["transfer", "Tx"], ["mine", "Mine"], ["burn", "Burn"], ["reward", "Reward"]]
-    .map(([kind, label]) => `<button class="transaction-filter ${state.transactionFilters[kind] ? "active" : ""}" data-transaction-filter="${kind}" aria-pressed="${state.transactionFilters[kind]}">${label}</button>`)
-    .join("");
-  const loader = state.transactionPage.loading ? '<div class="activity-loader"><span class="spinner"></span><span>Loading transactions…</span></div>' : '';
-  const retry = state.transactionPage.error ? '<button class="activity-retry" data-action="retry-transactions">Loading failed · try again</button>' : '';
-  const sentinel = state.transactionPage.hasMore && !state.transactionPage.error ? '<div id="activity-sentinel" class="activity-sentinel" aria-hidden="true"></div>' : '';
-  return `${topbar()}<p class="eyebrow">Wallet</p><h1 class="view-title">Activity</h1><p class="view-copy">Confirmed and pending transactions.</p><div class="transaction-filters" aria-label="Transaction filters">${filters}</div><div class="panel">${activityList(undefined, true)}${loader}${retry}${sentinel}</div>`;
+function renderUnlock() {
+  const { wallets } = store();
+  const selected = selectedEntry();
+  const options = wallets.map((entry) => `<option value="${escape(entry.record.publicKey)}"${entry === selected ? " selected" : ""}>${escape(entry.name)} · ${escape(short(entry.record.publicKey))}</option>`).join("");
+  app.innerHTML = shell(`<h1>Unlock wallet</h1><form id="unlock" class="stack"><label>Wallet<select name="wallet">${options}</select></label><label>Password<input name="password" type="password" autocomplete="current-password" required></label><button class="primary" type="submit">Unlock</button></form><div class="actions"><button data-action="welcome">Add another wallet</button><button data-action="forget">Remove selected wallet</button></div>`, `<button data-action="settings">Settings</button>`);
 }
 
 function renderSettings() {
-  const security = state.walletMeta?.type === "readonly" ? "Watch-only · no private key stored" : "AES-256-GCM · PBKDF2-SHA256 · 310,000 iterations";
-  return `${topbar()}<p class="eyebrow">Wallet</p><h1 class="view-title">Settings</h1><div class="panel"><div class="setting"><h3>Name</h3><p>${escapeHtml(state.walletMeta?.name)}</p></div><div class="setting"><h3>Network</h3><p>${escapeHtml(state.status.network_id)} · block ${escapeHtml(state.status.height)}</p></div><div class="setting"><h3>Public endpoint</h3><p>${escapeHtml(API_BASE)}</p></div><div class="setting"><h3>Local security</h3><p>${security}</p></div><div class="setting"><h3>Wallet address</h3><p style="word-break:break-all">${escapeHtml(state.address)}</p></div></div><button class="button secondary" data-action="wallets" style="width:100%;margin-top:12px">Switch or add wallet</button><button class="button ghost" data-action="lock" style="width:100%;margin-top:10px">Lock wallet</button><button class="button danger" data-action="forget" style="width:100%;margin-top:10px">Remove this wallet</button><p class="security-note">iuna is experimental software. Only use funds you can afford to lose.</p>`;
+  const configured = localStorage.getItem(ENDPOINT_KEY) || "";
+  app.innerHTML = shell(`<h1>Settings</h1><form id="endpoint" class="stack"><label>Node endpoint<input name="endpoint" type="url" value="${escape(configured)}" placeholder="${escape(apiEndpoint())}" autocomplete="off" spellcheck="false"></label><p class="muted">The wallet reads public outputs from this node and submits signed transactions to it. Leave empty to use the default (<code>${escape(defaultApiEndpoint())}</code>). Browser security lets this wallet reach only its own origin and <code>http://127.0.0.1:18662</code>, and the node must serve the public wallet API.</p><div class="actions"><button class="primary" type="submit">Save and test</button><button type="button" data-action="reset-endpoint">Use default</button></div></form>`, `<button data-action="${wallet ? "dashboard" : (store().wallets.length ? "unlock-screen" : "welcome")}">Back</button>`);
 }
 
-function renderApp() {
-  const renderers = { home: renderHome, send: renderSend, receive: renderReceive, contacts: renderContacts, "contact-edit": renderContactForm, activity: renderActivity, transaction: renderTransaction, settings: renderSettings };
-  state.activityObserver?.disconnect();
-  state.activityObserver = null;
-  app.innerHTML = `${(renderers[state.view] || renderHome)()}${nav()}`;
-  if (state.view === "activity") {
-    const sentinel = document.querySelector("#activity-sentinel");
-    if (sentinel) {
-      state.activityObserver = new IntersectionObserver((entries) => {
-        if (entries.some((entry) => entry.isIntersecting)) loadTransactions();
-      }, { rootMargin: "240px 0px" });
-      state.activityObserver.observe(sentinel);
-    }
+async function renderNewSeed() {
+  pendingSeed = await generateMnemonic();
+  renderSeed();
+}
+
+function renderSeed() {
+  app.innerHTML = shell(`<h1>Save your recovery phrase</h1><div class="warning"><b>This is the only wallet backup.</b> Write all 24 words down in order. Never share them and do not take a screenshot.</div><div class="seed-grid">${words(pendingSeed)}</div><button class="primary" data-action="seed-saved">I wrote down all 24 words</button>`, `<button data-action="welcome">Back</button>`);
+}
+
+function renderSeedCheck() {
+  checkIndexes = randomCheckIndexes();
+  const fields = checkIndexes.map((index) => `<label>Word ${index}<input name="word-${index}" autocomplete="off" autocapitalize="none" spellcheck="false" required></label>`).join("");
+  app.innerHTML = shell(`<h1>Check your recovery phrase</h1><p>Enter the requested words from your paper backup.</p><form id="verify" class="stack">${fields}<button class="primary" type="submit">Verify recovery phrase</button></form>`, `<button data-action="show-seed">Back</button>`);
+}
+
+function nameField() { return `<label>Wallet name<input name="name" maxlength="40" value="Wallet ${store().wallets.length + 1}" required></label>`; }
+
+function renderPassword() {
+  app.innerHTML = shell(`<h1>Protect this device</h1><p>This password encrypts the wallet stored in this browser.</p><form id="create-wallet" class="stack">${nameField()}<label>Password<input name="password" type="password" minlength="10" autocomplete="new-password" required></label><label>Repeat password<input name="confirmation" type="password" minlength="10" autocomplete="new-password" required></label><button class="primary" type="submit">Create wallet</button></form>`);
+}
+
+function renderRestore() {
+  app.innerHTML = shell(`<h1>Restore existing wallet</h1><form id="restore-wallet" class="stack"><label>24-word recovery phrase<textarea name="seed" autocomplete="off" autocapitalize="none" spellcheck="false" required></textarea></label>${nameField()}<label>New local password<input name="password" type="password" minlength="10" autocomplete="new-password" required></label><label>Repeat password<input name="confirmation" type="password" minlength="10" autocomplete="new-password" required></label><button class="primary" type="submit">Restore wallet</button></form>`, `<button data-action="welcome">Back</button>`);
+}
+
+function renderBackupUnlock() {
+  app.innerHTML = shell(`<h1>View recovery phrase</h1><p>Enter your wallet password to show the 24 words.</p><form id="backup" class="stack"><label>Password<input name="password" type="password" autocomplete="current-password" required></label><button class="primary" type="submit">Show recovery phrase</button></form>`, `<button data-action="dashboard">Back</button>`);
+}
+
+function renderBackup(seedPhrase) {
+  app.innerHTML = shell(`<h1>Recovery phrase</h1><div class="warning">Anyone with these words controls this wallet. Keep them offline and private.</div><div class="seed-grid">${words(seedPhrase)}</div><button data-action="dashboard">Done</button>`);
+}
+
+function renderConfirm() {
+  const spendable = Number(view.spendable_balance) - pendingTransfer.amount - pendingTransfer.fee;
+  app.innerHTML = shell(`<h1>Confirm transfer</h1><p>Check the full recipient key. Ledger transactions cannot be reversed.</p><div class="address"><span class="label">Recipient</span><code>${escape(pendingTransfer.recipient)}</code></div><div class="stats"><div class="stat"><span>Amount</span><strong>${escape(formatIuna(pendingTransfer.amount))} IUNA</strong></div><div class="stat"><span>Fee</span><strong>${escape(formatIuna(pendingTransfer.fee))} IUNA</strong></div><div class="stat"><span>Spendable after</span><strong>${escape(formatIuna(Math.max(0, spendable)))} IUNA</strong></div></div><div class="actions"><button data-action="cancel-transfer">Cancel</button><button class="primary" data-action="confirm-transfer">Sign and send</button></div>`);
+}
+
+// Sent items come from this browser's own log; received items are current outputs from other
+// transactions. Spent incoming outputs drop out, so this is recent activity, not full history.
+const SENT_LABELS = { pending: "Pending", sent: "Sent", dropped: "Not sent" };
+
+function activityRows() {
+  const sent = sentActivity();
+  const sentIds = new Set(sent.map((item) => item.id));
+  const incoming = (view?.utxos || []).filter((utxo) => !sentIds.has(utxo.transaction_id));
+  const received = incoming.slice(0, SHOWN_INCOMING).map((utxo) => ({ kind: "received", id: utxo.transaction_id, amount: utxo.value }));
+  const hidden = incoming.length - received.length;
+  const rows = [
+    ...sent.map((item) => ({ ...item, status: sentStatus(item, view) })),
+    ...received,
+  ];
+  if (!rows.length) return `<p class="muted">No activity yet. Sent transactions and incoming outputs appear here.</p>`;
+  return `<div class="activity">${rows.map((row) => row.kind === "received"
+    ? `<div class="activity-row"><span class="pill">Received</span><button class="link" data-action="copy" data-value="${escape(row.id)}" title="${escape(row.id)}">${escape(short(row.id))}</button><b class="incoming">+ ${escape(formatIuna(row.amount))} IUNA</b></div>`
+    : `<div class="activity-row"><span class="pill${row.status === "sent" ? "" : " pending"}">${SENT_LABELS[row.status]}</span><span>to <button class="link" data-action="use-recipient" data-value="${escape(row.recipient)}" title="Send to ${escape(row.recipient)}">${escape(short(row.recipient))}</button> · ${escape(timeLabel(row.time))}</span><b>− ${escape(formatIuna(row.amount))} IUNA</b></div>`).join("")}${hidden > 0 ? `<p class="muted">and ${hidden} more incoming output${hidden === 1 ? "" : "s"}</p>` : ""}</div>`;
+}
+
+function renderDashboard() {
+  if (!view) return;
+  awayFromDashboard = false;
+  const entry = selectedEntry();
+  app.innerHTML = shell(`<h1>${escape(entry?.name || "Wallet")}</h1><div class="stats"><div class="stat"><span>Balance</span><strong data-field="balance">${escape(formatIuna(view.balance))} IUNA</strong></div><div class="stat"><span>Spendable</span><strong data-field="spendable">${escape(formatIuna(view.spendable_balance))} IUNA</strong></div><div class="stat"><span>Heartbeat</span><strong data-field="heartbeat">${escape(view.heartbeat_height)}</strong></div></div><h2>Receive</h2><div class="address"><code>${escape(wallet.publicKeyHex)}</code></div><div class="actions"><button data-action="copy" data-value="${escape(wallet.publicKeyHex)}">Copy address</button><button data-action="backup">View recovery phrase</button></div><form id="send" class="send"><h2>Send IUNA</h2><label>Recipient public key<input name="recipient" minlength="64" maxlength="64" autocomplete="off" autocapitalize="none" spellcheck="false" required></label><div class="row"><label>Amount<span class="amount-row"><input name="amount" inputmode="decimal" placeholder="0.00" required><button type="button" data-action="max">Max</button></span></label><label>Fee<input name="fee" inputmode="decimal" value="0.00000001" required></label></div><button class="primary" type="submit">Review</button></form><h2 class="spaced">Activity</h2><div data-field="activity">${activityRows()}</div><p class="muted" data-field="connection">${escape(connectionLabel())}</p>`, `<button data-action="settings">Settings</button><button data-action="lock">Lock</button>`);
+}
+
+function connectionLabel() { return `Connected to ${apiEndpoint()} · ${view.network} · ${view.ledger_blocks} Ledger blocks`; }
+
+// Polling only updates the live values, so it never clears the send form or
+// replaces another screen such as the recovery phrase.
+function updateDashboard() {
+  if (!view) return;
+  const fields = {
+    balance: `${formatIuna(view.balance)} IUNA`,
+    spendable: `${formatIuna(view.spendable_balance)} IUNA`,
+    heartbeat: view.heartbeat_height,
+    connection: connectionLabel(),
+  };
+  for (const [name, value] of Object.entries(fields)) app.querySelector(`[data-field=${name}]`).textContent = value;
+  app.querySelector("[data-field=activity]").innerHTML = activityRows();
+}
+
+function showScreen(render) { awayFromDashboard = true; render(); }
+
+async function save(seedPhrase, password, name) {
+  const derived = await walletFromEntropy(await mnemonicEntropy(seedPhrase));
+  const record = await encryptWallet(seedPhrase, password, derived.publicKeyHex);
+  const stored = store();
+  if (stored.wallets.some((entry) => entry.record.publicKey === derived.publicKeyHex)) throw new Error("This wallet is already in this browser");
+  stored.wallets.push({ name: name.trim() || `Wallet ${stored.wallets.length + 1}`, record });
+  stored.selected = derived.publicKeyHex;
+  writeJson(WALLETS_KEY, stored);
+  unlocked(derived);
+  pendingSeed = "";
+  return refresh();
+}
+
+function unlocked({ seedPhrase: _seedPhrase, ...derived }) {
+  // The recovery phrase is only decrypted again on demand; keep the signing key only.
+  wallet = derived;
+  awayFromDashboard = false;
+  resetIdleTimer();
+}
+
+function lock() {
+  wallet = null; view = null; pendingSeed = ""; pendingTransfer = null; awayFromDashboard = false;
+  clearTimeout(pollTimer); clearTimeout(idleTimer);
+  renderUnlock();
+}
+
+function resetIdleTimer() {
+  if (!wallet) return;
+  clearTimeout(idleTimer);
+  idleTimer = setTimeout(() => { lock(); toast("Wallet locked after inactivity"); }, IDLE_LOCK_MS);
+}
+
+async function refresh(silent = false) {
+  if (!wallet) return;
+  if (document.hidden) return true;
+  let connected = true;
+  const render = () => {
+    if (awayFromDashboard) return;
+    if (app.querySelector("[data-field=balance]")) updateDashboard(); else renderDashboard();
+  };
+  try { view = await fetchWalletView(apiEndpoint(), wallet.publicKeyHex); if (wallet) render(); }
+  catch (error) {
+    connected = false;
+    view ||= { network: "Disconnected", heartbeat_height: "—", ledger_blocks: "—", balance: 0, spendable_balance: 0, utxos: [] };
+    if (wallet) render();
+    if (!silent) toast(error.message, true);
   }
+  clearTimeout(pollTimer); pollTimer = setTimeout(() => refresh(true), POLL_MS);
+  return connected;
 }
 
-function renderConfirmation(transaction, fee, recipientAddress, amount) {
-  app.innerHTML = `${topbar()}<button class="back" data-view="send">← Edit</button><p class="eyebrow">Review</p><h1 class="view-title">Does everything look right?</h1><div class="panel"><div class="detail-line"><span>You send</span><strong>${formatIuna(amount)} IUNA</strong></div><div class="detail-line"><span>To</span><strong>${escapeHtml(recipientAddress.slice(0, 12))}…${escapeHtml(recipientAddress.slice(-8))}</strong></div><div class="detail-line"><span>Network fee</span><strong>${formatIuna(fee)} IUNA</strong></div><div class="detail-line"><span>Total</span><strong>${formatIuna(amount + fee)} IUNA</strong></div></div><button class="button" id="confirm-send" style="width:100%;margin-top:14px">Sign & send</button><p class="security-note">This action cannot be reversed after submission.</p>${nav()}`;
-  document.querySelector("#confirm-send").addEventListener("click", async (event) => {
-    const button = event.currentTarget;
-    button.disabled = true; button.innerHTML = '<span class="spinner"></span> Sending…';
-    try {
-      const isV2 = typeof transaction.envelope === "string";
-      const result = await api(isV2 ? "/transactions-v2" : "/transactions", {
-        method: "POST",
-        body: JSON.stringify(isV2 ? { envelope: transaction.envelope } : transaction),
-        timeoutMs: 20_000,
-      });
-      toast(result.status === "accepted" ? "Transaction sent" : "Transaction was already known");
-      state.sendRecipient = "";
-      state.view = "home";
-      await fetchWalletData();
-      renderApp();
-    } catch (error) { toast(error.message, true); button.disabled = false; button.textContent = "Try again"; }
-  });
+async function sendPendingTransfer() {
+  const transfer = pendingTransfer;
+  const transaction = await buildSignedTransaction({ wallet, utxos: view.utxos, ...transfer });
+  const result = await submitTransaction(apiEndpoint(), transaction);
+  recordSent({ kind: "sent", id: result.id, inputs: spentOutpoints(transaction), amount: transfer.amount, fee: transfer.fee, recipient: transfer.recipient, time: Math.floor(Date.now() / 1000) });
+  pendingTransfer = null;
+  toast(`Transaction submitted: ${result.id.slice(0, 12)}…`);
+  renderDashboard();
+  await refresh(true);
 }
 
 app.addEventListener("click", async (event) => {
-  const button = event.target.closest("button");
-  if (!button) return;
-  const action = button.dataset.action;
-  if (button.dataset.transactionKey) {
-    const key = button.dataset.transactionKey;
-    const item = [...state.recentTransactions, ...state.transactions].find((transaction) => transactionKey(transaction) === key);
-    if (item) {
-      state.transactionReturnView = state.view === "activity" ? "activity" : "home";
-      state.selectedTransaction = item;
-      state.view = "transaction";
-      renderApp();
+  const button = event.target.closest("button[data-action]"); if (!button) return;
+  try {
+    const action = button.dataset.action;
+    if (action === "create") await renderNewSeed();
+    if (action === "restore") renderRestore();
+    if (action === "welcome") renderWelcome();
+    if (action === "unlock-screen") renderUnlock();
+    if (action === "settings") showScreen(renderSettings);
+    if (action === "seed-saved") renderSeedCheck();
+    if (action === "show-seed") renderSeed();
+    if (action === "dashboard") renderDashboard();
+    if (action === "backup") showScreen(renderBackupUnlock);
+    if (action === "copy") { await copyText(button.dataset.value); toast("Copied"); }
+    if (action === "use-recipient") { app.querySelector("#send [name=recipient]").value = button.dataset.value; toast("Recipient filled in"); }
+    if (action === "max") {
+      const fee = parseIuna(app.querySelector("#send [name=fee]").value);
+      const maximum = Number(view.spendable_balance) - fee;
+      if (maximum <= 0) throw new Error("The spendable balance does not cover the fee");
+      app.querySelector("#send [name=amount]").value = formatIuna(maximum);
     }
-    return;
-  }
-  if (action === "close-transaction") {
-    state.selectedTransaction = null;
-    state.view = state.transactionReturnView;
-    renderApp();
-    return;
-  }
-  if (action === "copy-transaction-id") {
-    await navigator.clipboard.writeText(state.selectedTransaction?.transaction?.signature || "");
-    toast("Transaction ID copied");
-    return;
-  }
-  if (button.dataset.transactionFilter) {
-    const filter = button.dataset.transactionFilter;
-    state.transactionFilters[filter] = !state.transactionFilters[filter];
-    await loadTransactions({ replace: true });
-    return;
-  }
-  if (action === "retry-transactions") {
-    await loadTransactions({ replace: state.transactions.length === 0 });
-    return;
-  }
-  if (action === "add-contact") {
-    state.editingContactId = null;
-    state.view = "contact-edit";
-    renderApp();
-    return;
-  }
-  if (action === "edit-contact") {
-    state.editingContactId = button.dataset.contactId;
-    state.view = "contact-edit";
-    renderApp();
-    return;
-  }
-  if (action === "send-contact") {
-    const contact = state.contactBook.contacts.find((item) => item.id === button.dataset.contactId);
-    if (contact) {
-      state.sendRecipient = contact.address;
-      state.view = "send";
-      renderApp();
+    if (action === "cancel-transfer") { pendingTransfer = null; renderDashboard(); }
+    if (action === "confirm-transfer") { button.disabled = true; await sendPendingTransfer(); }
+    if (action === "reset-endpoint") { localStorage.removeItem(ENDPOINT_KEY); toast(`Using ${apiEndpoint()}`); renderSettings(); }
+    if (action === "lock") lock();
+    if (action === "forget") {
+      const stored = store();
+      const selected = app.querySelector("#unlock [name=wallet]")?.value;
+      const entry = stored.wallets.find((item) => item.record.publicKey === selected);
+      if (entry && confirm(`Remove "${entry.name}" from this browser? Make sure its recovery phrase is backed up.`)) {
+        stored.wallets = stored.wallets.filter((item) => item !== entry);
+        stored.selected = stored.wallets[0]?.record.publicKey || "";
+        writeJson(WALLETS_KEY, stored);
+        localStorage.removeItem(activityKey(selected));
+        stored.wallets.length ? renderUnlock() : renderWelcome();
+      }
     }
-    return;
-  }
-  if (action === "delete-contact") {
-    const contact = state.contactBook.contacts.find((item) => item.id === state.editingContactId);
-    if (contact && window.confirm(`Delete “${contact.name}” from your contacts?`)) {
-      saveContactBook(removeContact(state.contactBook, contact.id));
-      state.editingContactId = null;
-      state.view = "contacts";
-      renderApp();
-      toast("Contact deleted");
-    }
-    return;
-  }
-  if (button.dataset.view) {
-    if (button.dataset.view === "send" && state.walletMeta?.type === "readonly") { toast("Watch-only wallets cannot send", true); return; }
-    state.view = button.dataset.view; renderApp(); return;
-  }
-  if (button.dataset.walletId) {
-    saveStore({ ...state.store, activeId: button.dataset.walletId });
-    state.wallet = null; state.walletMeta = null; state.view = "home";
-    renderLock();
-    return;
-  }
-  if (action === "welcome") renderWelcome();
-  if (action === "back-to-wallets") state.store.wallets.length ? renderWalletPicker() : renderWelcome();
-  if (action === "create") renderCreateMethod();
-  if (action === "system-entropy") await renderNewSeed();
-  if (action === "dice-entropy") renderDiceEntropy();
-  if (button.dataset.die && diceRolls.length < DICE_ROLL_COUNT) {
-    diceRolls += button.dataset.die;
-    updateDiceEntry();
-  }
-  if (action === "dice-undo") { diceRolls = diceRolls.slice(0, -1); updateDiceEntry(); }
-  if (action === "dice-reset" && (!diceRolls || window.confirm("Clear all entered dice rolls?"))) { diceRolls = ""; updateDiceEntry(); }
-  if (action === "import") renderImport();
-  if (action === "watch") renderWatchOnly();
-  if (action === "seed-saved") renderSeedVerification();
-  if (action === "verify-back") renderGeneratedSeed(app.dataset.pendingSeed);
-  if (action === "copy-seed") { await navigator.clipboard.writeText(app.dataset.pendingSeed); toast("Seed copied — clear your clipboard after use"); }
-  if (action === "copy-address") { await navigator.clipboard.writeText(state.address); toast("Address copied"); }
-  if (action === "migrate") {
-    button.disabled = true;
-    button.innerHTML = '<span class="spinner"></span> Preparing…';
-    try {
-      await ensureQuantumCrypto();
-      const built = JSON.parse(buildQuantumMigration(JSON.stringify({
-        seed: state.wallet.seedPhrase,
-        chainId: state.status.chain_id,
-        genesisHash: state.status.genesis_hash,
-        destinationIndex: state.addressIndex,
-        feeRate: String(state.status.default_fee_per_byte || 1),
-        signingHeight: Number(state.status.height || 0) + 1,
-        authorizationAggregationActivationHeight: Number(state.status.transaction_v2_authorization_aggregation_activation_height ?? Number.MAX_SAFE_INTEGER),
-        utxos: state.legacyUtxos,
-      })));
-      const amount = state.legacyUtxos.reduce((sum, utxo) => sum + BigInt(utxo.output.amount), 0n) - BigInt(built.fee);
-      renderConfirmation(built, BigInt(built.fee), state.address, amount);
-    } catch (error) {
-      toast(error.message || String(error), true);
-      button.disabled = false;
-      button.textContent = "Migrate now";
-    }
-    return;
-  }
-  if (action === "retry") await openWallet();
-  if (action === "wallets") { window.clearInterval(state.timer); state.wallet = null; state.walletMeta = null; state.view = "home"; renderWalletPicker(); }
-  if (action === "lock") {
-    window.clearInterval(state.timer); state.wallet = null; state.walletMeta = null; state.view = "home";
-    if (activeWallet()?.type === "readonly") renderWalletPicker(); else renderLock();
-  }
-  if (action === "forget") {
-    const warning = state.walletMeta?.type === "readonly"
-      ? `Remove “${state.walletMeta.name}” from this device?`
-      : `Remove “${state.walletMeta?.name}” from this device? Make sure you have saved the seed.`;
-    if (window.confirm(warning)) {
-      saveStore(removeWallet(state.store, state.walletMeta.id));
-      window.clearInterval(state.timer); state.wallet = null; state.walletMeta = null; state.view = "home";
-      state.store.wallets.length ? renderWalletPicker() : renderWelcome();
-    }
+  } catch (error) {
+    if (button.dataset.action === "confirm-transfer") button.disabled = false;
+    toast(error.message, true);
   }
 });
 
 app.addEventListener("submit", async (event) => {
-  event.preventDefault();
-  const form = event.target;
-  const button = form.querySelector('[type="submit"]');
-  button.disabled = true;
-  const original = button.textContent;
-  button.innerHTML = '<span class="spinner"></span> Please wait…';
+  event.preventDefault(); const form = event.target; const submit = form.querySelector("button[type=submit]"); submit.disabled = true;
   try {
-    if (form.id === "unlock-form") {
-      const meta = activeWallet();
-      state.wallet = await decryptWallet(meta.record, form.password.value);
-      state.walletMeta = meta;
-      await openWallet();
-    } else if (form.id === "import-form") {
-      const seed = await validateMnemonic(form.seed.value);
-      await saveAndOpen(seed, form["new-password"].value, form["import-name"].value);
-    } else if (form.id === "create-form") {
-      if (form["create-password"].value !== form["confirm-password"].value) throw new Error("The passwords do not match");
-      await saveAndOpen(app.dataset.pendingSeed, form["create-password"].value, form["create-name"].value);
-      delete app.dataset.pendingSeed;
-    } else if (form.id === "dice-form") {
-      const seed = await generateMnemonicFromDice(diceRolls);
-      diceRolls = "";
-      renderGeneratedSeed(seed);
-    } else if (form.id === "seed-verify-form") {
-      const words = app.dataset.pendingSeed.split(" ");
-      const verified = seedVerificationIndexes.every((index) => form.elements.namedItem(`word-${index}`).value.trim().toLowerCase() === words[index]);
-      if (!verified) throw new Error("Seed word check failed — compare your written backup and try again");
-      renderPasswordSetup();
-    } else if (form.id === "watch-form") {
-      const address = form["watch-address"].value.trim().toLowerCase();
-      const walletName = form["wallet-name"].value.trim();
-      if (!walletName) throw new Error("Enter a wallet name");
-      const decoded = decodeVersionedAddress(address, "iuna");
-      const publicKeyHex = decoded.payloadHex;
-      if (state.store.wallets.some((wallet) => (wallet.address || "").toLowerCase() === address || (!wallet.address && wallet.publicKeyHex === publicKeyHex))) throw new Error("This wallet is already on this device");
-      const meta = { id: `watch-${decoded.version}-${publicKeyHex}`, name: walletName, type: "readonly", publicKeyHex, address };
-      saveStore(upsertWallet(state.store, meta));
-      await openStoredWallet(meta);
-    } else if (form.id === "contact-form") {
-      const name = form.elements.namedItem("contact-name").value.trim();
-      const address = form.elements.namedItem("contact-address").value.trim().toLowerCase();
-      const existingId = form.elements.namedItem("contact-id").value;
-      if (!name) throw new Error("Enter a contact name");
-      decodeVersionedAddress(address, "iuna");
-      if (state.contactBook.contacts.some((contact) => contact.id !== existingId && contact.address === address)) throw new Error("This address is already in your contacts");
-      const id = existingId || `contact-${crypto.randomUUID?.() || `${Date.now()}-${Math.random().toString(16).slice(2)}`}`;
-      saveContactBook(upsertContact(state.contactBook, { id, name, address }));
-      state.editingContactId = null;
-      state.view = "contacts";
-      renderApp();
-      toast(existingId ? "Contact updated" : "Contact added");
-    } else if (form.id === "send-form") {
-      if (state.walletMeta?.type === "readonly") throw new Error("Watch-only wallets cannot sign transactions");
-      const recipientAddress = form.recipient.value.trim();
-      state.sendRecipient = recipientAddress;
-      const amount = parseIuna(form.amount.value);
-      const feeRate = parseFeeRate(form["fee-rate"].value);
-      if (state.status.transaction_v2_active) {
-        await ensureQuantumCrypto();
-        const built = JSON.parse(buildQuantumTransfer(JSON.stringify({
-          seed: state.wallet.seedPhrase,
-          chainId: state.status.chain_id,
-          genesisHash: state.status.genesis_hash,
-          recipientAddress,
-          amount: amount.toString(),
-          feeRate: feeRate.toString(),
-          changeIndex: state.addressIndex,
-          signingHeight: Number(state.status.height || 0) + 1,
-          authorizationAggregationActivationHeight: Number(state.status.transaction_v2_authorization_aggregation_activation_height ?? Number.MAX_SAFE_INTEGER),
-          utxos: state.hybridUtxos,
-        })));
-        renderConfirmation(built, BigInt(built.fee), recipientAddress, amount);
-      } else {
-        const built = await buildSignedTransfer({ wallet: state.wallet, status: state.status, utxos: state.utxos, recipientAddress, amount, feeRate });
-        renderConfirmation(built.transaction, built.fee, recipientAddress, amount);
-      }
+    if (form.id === "verify") {
+      const seedWords = pendingSeed.split(" ");
+      if (!checkIndexes.every((index) => form.elements[`word-${index}`].value.trim().toLowerCase() === seedWords[index - 1])) throw new Error("Those words do not match your recovery phrase");
+      renderPassword(); return;
     }
-  } catch (error) {
-    toast(error?.message || String(error), true); button.disabled = false; button.textContent = original;
-  }
+    if (form.id === "create-wallet") {
+      if (form.password.value !== form.confirmation.value) throw new Error("The passwords do not match");
+      const connected = await save(pendingSeed, form.password.value, form.elements.name.value); toast(connected ? "Wallet created" : "Wallet created; node is unavailable", !connected); return;
+    }
+    if (form.id === "restore-wallet") {
+      if (form.password.value !== form.confirmation.value) throw new Error("The passwords do not match");
+      const seed = await validateMnemonic(form.seed.value); const connected = await save(seed, form.password.value, form.elements.name.value); toast(connected ? "Wallet restored" : "Wallet restored; node is unavailable", !connected); return;
+    }
+    if (form.id === "unlock") {
+      const stored = store();
+      stored.selected = form.elements.wallet.value;
+      writeJson(WALLETS_KEY, stored);
+      unlocked(await decryptWallet(selectedEntry().record, form.password.value, mnemonicEntropy)); await refresh(); return;
+    }
+    if (form.id === "backup") {
+      const { seedPhrase } = await decryptWallet(selectedEntry().record, form.password.value, mnemonicEntropy);
+      renderBackup(seedPhrase); return;
+    }
+    if (form.id === "endpoint") {
+      const value = form.endpoint.value.trim().replace(/\/$/, "");
+      if (value && !/^https?:\/\/[^\s/]+$/.test(value)) throw new Error("Use an http(s) origin such as http://127.0.0.1:18662, without a path");
+      if (value) localStorage.setItem(ENDPOINT_KEY, value); else localStorage.removeItem(ENDPOINT_KEY);
+      if (wallet) {
+        const connected = await refresh(true);
+        toast(connected ? `Connected to ${apiEndpoint()}` : `Saved, but ${apiEndpoint()} did not answer`, !connected);
+      } else {
+        toast(`Saved ${apiEndpoint()}`);
+      }
+      return;
+    }
+    if (form.id === "send") {
+      const recipient = form.recipient.value.trim().toLowerCase();
+      if (!/^[0-9a-f]{64}$/.test(recipient)) throw new Error("The recipient must be a 64-character public key");
+      const amount = parseIuna(form.amount.value);
+      const fee = parseIuna(form.fee.value);
+      if (amount <= 0) throw new Error("Enter an amount above zero");
+      if (amount + fee > Number(view.spendable_balance)) throw new Error("Amount plus fee exceeds the spendable balance");
+      pendingTransfer = { recipient, amount, fee };
+      showScreen(renderConfirm);
+      return;
+    }
+  } catch (error) { toast(error.message, true); }
+  finally { submit.disabled = false; }
 });
 
-app.addEventListener("change", (event) => {
-  if (event.target.id !== "contact-recipient" || !event.target.value) return;
-  const recipient = document.querySelector("#recipient");
-  if (recipient) {
-    recipient.value = event.target.value;
-    state.sendRecipient = event.target.value;
-    recipient.focus();
-  }
+document.addEventListener("keydown", (event) => {
+  if (event.key === "Escape" && pendingTransfer) { pendingTransfer = null; renderDashboard(); }
 });
+for (const type of ["pointerdown", "keydown"]) document.addEventListener(type, resetIdleTimer, { passive: true });
+document.addEventListener("visibilitychange", () => { if (!document.hidden) refresh(true); });
 
-state.store = loadStore();
-state.contactBook = normalizeContactBook(readJson(CONTACTS_STORAGE_KEY));
-saveContactBook(state.contactBook);
-
-if (!window.isSecureContext || !crypto?.subtle) {
-  app.innerHTML = '<section class="center-card"><div><h1>Secure connection required</h1><p>Open this wallet over HTTPS or localhost.</p></div></section>';
-} else if (state.store.wallets.length) renderLock(); else renderWelcome();
+store().wallets.length ? renderUnlock() : renderWelcome();

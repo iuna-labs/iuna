@@ -1,397 +1,402 @@
 # iuna protocol in simple terms
 
-iuna is an experimental mainnet-candidate protocol that combines three mechanisms:
+iuna is an experimental protocol built from two chains that every full node runs together:
 
-- **Burn lottery:** burning IUNA creates tickets for future block finalization.
-- **VDF timing:** the selected finalizer must do sequential delay work before publishing a block.
-- **Proof-of-work issuance:** new IUNA enters the chain through PoW mine actions.
+- **Heartbeat Chain:** a SHA-256 Proof of Work chain with a 60-second target block time. It decides fork choice, carries the shared state, and its block hashes are the "heartbeats" that supply randomness.
+- **Ledger Chain:** a linear UTXO transaction chain with a target block time of about 10 minutes. Its blocks are picked by a public lottery and carried inside Heartbeat blocks.
+- **Proof of Expenditure:** anyone can buy temporary Ledger mining weight by spending IUNA on a mining ticket. The spent amount is not destroyed; it is paid out to Heartbeat miners over the ticket's lifetime.
 
-The goal is to make network power scale linearly rather than superlinearly.
+The goal is that the same expenditure always buys the same mining weight, and that this weight is rented rather than owned.
 
-Existing consensus models can amplify existing advantages:
+Spending more IUNA deliberately gives more relative influence over the Ledger lottery. The difference from stake is that ticket weight is paid for again and again: the budget is locked when the ticket is included, is never refunded, and the ticket disappears after at most about a day. The same is true of the old burn idea, but expenditure is a transfer rather than destruction. That keeps the money supply stable without a reissue pool, recovery blocks, claim accumulators, separate state rent or special recovery rewards.
 
-- **Proof of Work:** economies of scale and specialized hardware such as ASICs can amplify advantages in capital and infrastructure.
-- **Proof of Stake:** existing stake directly increases a participant's influence and rewards, creating a wealth-compounding dynamic.
+This is still experimental. The rules below describe the current candidate mainnet protocol, not a proven mainnet design. The chain is intended to carry forward if the candidate is promoted, so coins will probably remain valid, but that is not guaranteed.
 
-iuna uses self-burn Proof of Burn (PoB), where block-finalization power scales directly with the amount burned. VDFs impose a verifiable time cost that limits the feasibility of low-cost attacks. PoW keeps new coin issuance permissionless, allowing anyone capable of producing valid work to earn newly issued coins.
+## Candidate Parameters
 
-Burns do not remove wealth advantage. More capital can still buy more lottery weight. The difference from stake is that burn power is paid again and again: it expires, does not unbond, and does not accumulate into a permanent stake position. The design converts wealth-bias from a growing asset into a recurring cost.
+- network name: `iuna-mainnet-candidate`;
+- protocol version: `1`;
+- Heartbeat target block time: `60 seconds`;
+- difficulty adjustment: relative ASERT with a half-life of `60` Heartbeats (`1 hour`);
+- median-time-past window: `11` blocks;
+- maximum future timestamp drift: `10 minutes`;
+- proof-of-work limit and genesis target: `0000003fffffffffffffffffffffffffffffffffffffffffffffffffffffffff`;
+- genesis nonce: `20175954`;
+- genesis hash: `0000002b212b84a6457c11300d51d3dfbf743ba635dd4ab145c4f3538c582903`;
+- genesis timestamp: `1794039759`;
+- genesis miner key: `d75a980182b10ab7d54bfed3c964073a0ee172f3daa62325af021a68f707511a`;
+- smallest unit: `1 IUNA = 100_000_000` units;
+- `MAX_MONEY`: `4_207_680_100_000_000` units (`42,076,801 IUNA`);
+- genesis reward: `1 IUNA`;
+- initial Ledger subsidy: `50 IUNA`;
+- Ledger halving interval: `420,768` included Ledger blocks;
+- Ledger target interval `D`: `10` Heartbeats;
+- maximum Heartbeat block data: `16 KiB`;
+- maximum Ledger sidecar: `512 KiB`;
+- maximum tracked tickets `M`: `4,096`;
+- ticket duration `K`: `1` to `1,440` Heartbeats;
+- ticket confirmations before activation: `6` Heartbeats;
+- minimum ticket budget: `1,000,000` units (`0.01 IUNA`);
+- winner inclusion window: `3` Heartbeats.
 
-This is still experimental. The rules below describe the frozen mainnet-candidate protocol, not a proven mainnet design.
+The genesis miner key is the public RFC 8032 test key. Its secret is public too, so anyone can spend the genesis output. The first miner's node does exactly that to fund the first ticket. A promoted mainnet may need a controlled key, which would be a new genesis.
 
-## Mainnet-Candidate Frozen Parameters
+Unit tests use regtest-like parameters (a 12-bit proof-of-work limit) so they can mine many blocks quickly.
 
-The current mainnet-candidate parameter set is intentionally close to Bitcoin where that is useful for operator expectations:
+## Amounts
 
-- P2P network ID: `iuna-mainnet-candidate`;
-- genesis hash: `3d677cd7ced1c04d3a276cbee7ea38076e34ac65f18a2c9b8286a4872d986a9a`;
-- protocol version: `2`;
-- launch profile ID: `iuna-mainnet-candidate`;
-- launch profile hash: `eb2f67e9d735474859ceb1fe124fe270977214f6e2f4cd855a4d8c3b5ecac558`;
-- target block time: `10 minutes`;
-- maximum compact stored block-body size: `1,000,000` bytes;
-- maximum transaction items per block: `1,000`;
-- maximum pending transactions per node: `10,000`;
-- maximum pending transaction pool bytes per node: `8 MiB`;
-- maximum orphan transactions per node: `1,024`;
-- ticket maturity delay: `3` blocks;
-- ticket expiry window: `3` block heights;
-- objective finality quorum: strictly more than `2/3` of the selected committee;
-- recovery delay: `6` target block times;
-- future timestamp drift limit: `2 minutes`;
-- VDF retarget window: `20` rank `0` ticket blocks;
-- VDF retarget deadband: `10%`;
-- VDF maximum retarget step: `2%`;
-- PoW mine difficulty start: `12` bits;
-- PoW retarget window: `10` blocks;
-- PoW target mine actions: `10` per retarget window;
-- PoW maximum retarget step: `2` bits;
-- PoW minimum difficulty: `10` bits;
-- maximum mine actions per anchor: `2`;
-- burn committee size: `5` slots;
-- maximum signed burn bundle size: `10,000` bytes;
-- burn committee lineage maturity: `20` blocks;
-- hybrid lineage identity activation height: `4750`;
-- transaction signing format: `1`.
+All amounts are unsigned 64-bit integers in the smallest unit. Every addition and subtraction is checked. A state transition that overflows or exceeds `MAX_MONEY` is invalid.
 
-Changing any value in this section requires a conscious mainnet-candidate reset or later hard-fork process.
+## Architecture
 
-The consensus block-size limit is the exact number of bytes produced by the current compact snapshot block-body encoder when the block is appended to its parent chain. The encoder's reference tables are seeded by genesis allocations and extended in chain order, so all nodes calculate the same context-dependent size. The snapshot header, launch profile, block-count field, SQLite row metadata, and SQLite page overhead are not charged to an individual block.
+- Every full node validates and stores both logical chains and one shared UTXO state.
+- Every Heartbeat block hash is a heartbeat and provides randomness for the Ledger lottery.
+- A Heartbeat block contains zero or one Ledger candidate hash. If it names one, the full valid Ledger sidecar must be available.
+- The canonical Ledger Chain follows entirely from the Heartbeat Chain. The Ledger has no fork choice of its own.
+- A Heartbeat reorg rolls back Ledger sidecars, tickets, payouts and UTXO changes atomically.
+- There is no delay function, fallback consensus, reissue pool or recovery mechanism.
 
-The compact representation stores binary hashes, addresses, signatures, and VDF data instead of their hexadecimal text. It uses base-128 varints for integers, chain-wide references for repeated addresses and protocol IDs, a single shared owner and signature for legacy transaction inputs, implicit legacy burn change where possible, and transaction indexes for legacy and v2 burns repeated by the burn-bundle section. Heights, parent hashes, and block hashes are reconstructed from chain order and canonical block contents rather than repeated in each stored block body. Burns benefit most from this layout, followed by transfers and mine actions. Snapshot v9 stores authenticated hybrid reward destinations and v2 burn attestations while retaining v7 and v8 read compatibility.
+## Genesis and Chain Identity
 
-P2P messages and management API responses still use JSON. Their byte length is not the consensus block size. Transaction fee-rate ordering uses a separate compact economic transaction weight, so changing JSON whitespace, key order, or hexadecimal formatting cannot change consensus size or fee priority.
+- The genesis block is an ordinary mined Heartbeat block with no parent.
+- The genesis reward of `1 IUNA` goes to the miner public key in the header.
+- The genesis block is pinned in the code, like Bitcoin's genesis block. Nodes never mine genesis at startup. Any other root is a different network.
+- In practice the genesis miner holds the first distribution role. That is an explicit launch assumption.
 
-## Wallet address format
+## Heartbeat Blocks and Proof of Work
 
-Wallets display and accept version `0` legacy and version `1` hybrid Bech32m addresses. Mainnet and the
-mainnet-candidate use the human-readable prefix `iuna`; local testnet uses
-`tiuna`. A version `0` payload contains the wallet's exact 32-byte Ed25519
-verifying key. A version `1` payload contains a commitment to the wallet's
-Ed25519 and ML-DSA-44 public keys. Decoding verifies the Bech32m constant,
-rejects mixed case and non-zero padding, and requires the expected network,
-version, and payload length. An all-uppercase address is accepted and normalized
-to lowercase; mixed uppercase/lowercase is invalid.
+A Heartbeat header contains at least:
 
-Consensus identity is the exact 32-byte Ed25519 verifying key, represented in
-consensus objects and persisted chainstate as canonical 64-character lowercase
-hexadecimal. The management wallet, address book, transfer endpoints, and
-Stratum worker usernames accept Bech32m addresses and decode them to that
-internal key before constructing a transaction. Recipient, address-book, and
-Stratum username input rejects raw hexadecimal keys. This boundary keeps the
-checksum and network distinction out of consensus identity.
+- protocol and network version;
+- height and parent hash;
+- timestamp;
+- ASERT target;
+- nonce;
+- miner public key;
+- Merkle root of the Heartbeat ticket transactions;
+- an optional Ledger candidate hash;
+- the shared post-state root;
+- a commitment to the synthetic payouts.
 
-## Coins and Transactions
+The block hash is `SHA256("IUNA-HEARTBEAT-v1" || canonical header)`, and a block is valid only if that hash is at most the header target.
 
-iuna uses a UTXO-style ledger. The main transaction types are:
+The target is not chosen by the miner. Validators recompute it from the parent chain and require the header to match exactly. A block's own timestamp is checked separately and only affects the target of the next block. Consensus uses integer arithmetic only.
 
-1. **Transfer:** moves IUNA from one address to another and pays a sender-chosen fee.
-2. **Burn:** destroys an amount of IUNA, pays a sender-chosen fee, and creates a future lottery ticket.
-3. **Mine action:** proves SHA-256-style PoW against the current chain tip. A valid mine action mints a fixed `1 IUNA` reward to its recipient and pays a fixed `1 IUNA` fee to the block finalizer. Starting at height 3750, the recipient must be a version-1 hybrid address.
+### Difficulty: Relative ASERT
 
-Burn and transfer fees are chosen by the sender. Mine action reward and mine action fee are deterministic protocol values.
+Each block scales its parent's target by how long the parent took to find:
 
-### Transaction signing format v1
+$$
+\text{target}_{n+1} = \min\left(\text{MAX\_TARGET},\ \text{target}_n \cdot 2^{(t_n - t_{n-1} - 60)/\tau}\right),\qquad \tau = 60 \cdot 60\text{ s}
+$$
 
-Every transfer, burn, and mine action is cryptographically scoped to one chain. Its signing or proof preimage starts with the fixed `IUNA-TX` type tag, the big-endian signing-format version `1`, a length-prefixed UTF-8 chain ID, and the length-prefixed 32-byte genesis block hash. The remaining payload uses an explicit one-byte transaction type and canonical binary fields: big-endian fixed-width integers, length-prefixed decoded hashes, signatures and Ed25519 keys, and ordered input/output counts. JSON spelling, field order, and separators never enter the sighash. Hexadecimal fields committed by format v1 must use canonical lowercase encoding; alternate casing is rejected during signature or proof validation.
+In plain terms: if the parent came faster than 60 seconds, the next block gets harder; if it came slower, it gets easier. A full half-life of extra time halves the difficulty.
 
-Legacy transfers and burns use Ed25519 over this binary preimage. Transaction-v2 spends from version-1 addresses use both Ed25519 and ML-DSA-44 over one canonical v2 payload; this includes hybrid transfers and burns. Native and Stratum mine proofs commit the same domain and logical mine fields before proof-specific hashing. Validators reconstruct the domain from their local launch profile and genesis block, so a transaction valid on candidate, mainnet, testnet, or another genesis fails signature/proof validation everywhere else. Only the defined legacy and v2 formats are accepted.
+The exact integer rules are:
 
-A block is invalid if any transaction ID already occurred earlier on that chain. This is especially important for inputless mine actions: without this check, someone could replay an included proof after spending its reward, recreate the same outpoint, and inflate the supply.
+- the exponent is computed with `16` fractional bits and rounded to nearest (always rounding down would push the average Heartbeat above 60 seconds);
+- the fractional power of two uses the same cubic integer polynomial as Bitcoin Cash's aserti3-2d;
+- the result is clamped at the proof-of-work limit and is never zero;
+- block 1 has no parent solvetime and keeps the genesis target.
 
-Synthetic genesis-allocation outpoints keep their address-based derivation for the lifetime of the chain. Chain isolation is applied through transaction signatures and proofs.
+The half-life is `60` Heartbeats (`1 hour`). A young network sees large hashrate swings: one extra machine can multiply it. With this half-life, after a tenfold hashrate jump the difficulty is within a factor two of the right value in under an hour, and within ten percent in about three hours. A half-life of `288` Heartbeats would take four and fifteen hours. One lucky or unlucky block still moves the target by only about one percent. The price is a little more noise: the difficulty wanders around its right value by about eight percent, compared to three percent with the longer half-life.
 
-## Burns Become Tickets
+Why relative instead of absolute ASERT? Without the clamp the two are the same. But absolute ASERT measures against a schedule that starts at the genesis timestamp. A network that sat idle for days would then build up "schedule debt" and burst-mine a run of easy blocks to catch up. Relative ASERT only looks at the last solvetime, so there is no debt to repay.
 
-A burn does not immediately select its own block. Instead:
+Miners do not wait for the 60-second interval. They use `max(now, median-time-past + 1)` as their timestamp. The block pace comes only from proof of work and ASERT.
 
-1. A burn is included in a block.
-2. It becomes a ticket after the maturity delay.
-3. The ticket stays eligible for a short expiry window.
-4. Its lottery weight is the burned amount.
+### Proof-of-Work Limit
 
-In the mainnet-candidate profile, tickets mature after `3` blocks and remain eligible for `3` block heights.
+Like Bitcoin's `powLimit` (difficulty 1), the genesis target is also the easiest target allowed: 26 leading zero bits. That is roughly one 60-second Heartbeat for a single CPU thread doing about 1 MH/s. With less hashrate, Heartbeats are simply slower. ASERT raises difficulty from there.
 
-The lottery draw for the next height is deterministic. Nodes rank all eligible burn tickets using the parent's VDF seed and output, the target height, and the ticket amounts. More burned IUNA means more weight, but the winner is still drawn by the protocol.
+### Timestamp Checks
 
-Blocks commit the finalizer identity, mode, rank, reward, VDF rounds, leader ticket, transactions, and burn-bundle section into their VDF seed. This prevents a finalizer from completing one VDF and then cheaply changing transactions or the publication timestamp to search for a favorable next leader or committee. Ticket-block timestamps can still reflect the actual completion time, but they do not affect either draw.
+- a timestamp must be greater than the median of the last `11` block timestamps;
+- it may be at most `10 minutes` ahead of the validating node's clock.
 
-## Finalizing Blocks
+Abusing that future drift can move one target by at most `2^(600 / τ)`, about `12%`, and the next solvetime reverses it.
 
-For each block height, eligible tickets are ranked:
+### Fork Choice
 
-- Rank `0` is the primary finalizer.
-- Rank `1`, `2`, and later ranks are fallback finalizers.
+The chain with the most cumulative work wins:
 
-The selected finalizer must prove ownership of the selected ticket, respect its rank time slot, and run the required VDF work. A block is valid only if the finalizer matches its ranked ticket, carries the correct leader proof, has a valid timestamp for its rank, includes a valid VDF output, and follows the transaction selection rules.
+$$
+\text{chainwork} = \sum \left( \left\lfloor \frac{2^{256}-1}{\text{target}+1} \right\rfloor + 1 \right)
+$$
 
-Fallback finalization invalidates missed ticket opportunities. If a ticket block is finalized by rank `1` or higher, nodes invalidate all tickets ranked from `0` through the finalizing rank for that height. They also invalidate any other currently eligible tickets owned by those same addresses. Future tickets from those addresses that are not yet eligible remain pending. Rank `0` ticket blocks consume only the winning ticket.
+Block work and chainwork are exact, unbounded integers. The target is widened before computing `target + 1`, so nothing can overflow or wrap around.
 
-Every normal block must include at least one burn. This keeps the future ticket pool alive even during quiet periods. A node that may finalize prepares a local anchor burn for the next block from the finalizer wallet, and that anchor burn appears directly in the block.
+- A node switches only to **strictly more** chainwork.
+- On equal chainwork it keeps its current valid tip.
+- A block that forks off below the recent state window first gets only the checks that need no state: Proof of Work, its target, its timestamp limit and whether its body matches the header. The node validates that branch in full once its chainwork exceeds the active tip. This changes when a block is validated, never which chain wins.
+- The next block with extra work settles a temporary equal-work split.
 
-Burns use a one-block admission pipeline. A public burn is signed against the current chain tip, then queued while the child of that tip is produced. It may appear only in the following block. Validators require its signed anchor to equal the containing block's grandparent hash (the containing block's parent `prev_hash`). This gives the burn a full VDF interval plus the next burn-collection window to propagate without allowing the finalizer to change the transaction list after starting its VDF. A queued burn survives the first tip change and expires after its single inclusion height if it was not included. The finalizer's mandatory local burn is signed directly for the next block using the same grandparent anchor rule.
+### Limits and Data Availability
 
-Legacy and v2 burns follow the same admission, fee, inclusion, maturity, and expiry rules. A v2 burn spends hybrid outputs with dual signatures. Its ticket owner is the legacy Ed25519 component of that same hybrid wallet identity, so existing leader proofs and ticket ownership remain compatible while the funds being destroyed are protected by the hybrid authorization.
+- A Heartbeat block may hold at most `16 KiB` of canonical data.
+- A Ledger sidecar may be at most `512 KiB`.
+- A named sidecar must be fully available and valid; otherwise the Heartbeat block is invalid.
+- `MAX_TRACKED_TICKETS = 4_096` caps all tickets that are confirming, active or in their inclusion grace period combined. A Heartbeat block whose post-state exceeds this cap is invalid.
 
-The anchor burn is not a fairness mechanism. By itself, it would mostly help the current finalizer keep creating future tickets. Fairness against self-serving finalizers comes from the burn inclusion committee described below.
+## Mining Tickets
 
-## VDF Timing
+### The Ticket Transaction
 
-The VDF is there to make block production sequential and time-based. It uses a Chia-compatible Wesolowski proof over a class group of imaginary quadratic forms. The 1024-bit class-group discriminant is derived deterministically from the block VDF seed, so the protocol does not rely on an RSA trusted setup or on anyone destroying hidden factors.
+A ticket contains exactly:
 
-VDF solutions are encoded with the `classgroup-wesolowski-bqfc-v1` prefix followed by two 100-byte Chia BQFC forms in hexadecimal: the output `y` and the Wesolowski proof `pi`. The implementation is Rust-only and has no GMP, MPIR, or other native runtime dependency. Proof generation uses a Chia-compatible checkpoint-and-bucket time-memory tradeoff. For large workloads, the prover increases its internal pass count to keep the checkpoints within a fixed memory budget; a bounded-memory constant-space fallback remains available when no checkpoint configuration fits the allocation limits. These internal strategies produce the same proof and do not change verification or the wire format.
+- UTXO inputs;
+- an expenditure budget `B` in units;
+- an active duration `K` in heartbeats, with `1 <= K <= 1,440` (at most about one day);
+- the mining public key that receives Ledger rewards;
+- a public 32-byte `lottery_seed`;
+- an optional change output;
+- protocol version and signature.
 
-In a local Apple Silicon release benchmark, the Rust-only checkpoint prover completed 100,000 rounds in about `0.9s`. Its lower-memory fallback took about `1.8s`, while the official Python/C++ Chia reference took about `0.67s`. These measurements are only a performance snapshot on one machine; they do not affect consensus or the VDF wire format.
+The ticket ID is `SHA256("IUNA-TICKET-v1" || canonical fully signed transaction data)`.
 
-The target block time is `10 minutes`. The protocol retargets VDF rounds from recent observed block times:
+### Minimum Budget
 
-- It uses a `20` block observation window.
-- It uses rank `0` ticket blocks for retargeting.
-- It ignores fallback and recovery blocks for retargeting because their timestamps include intentional waiting.
-- It has a `10%` deadband and a maximum `2%` retarget step per adjustment.
-- Extremely fast or slow samples are clamped before they affect the next target.
+A ticket's budget must cover its share of the expected issuance while it occupies a slot in the ticket cap. Let `R_next` be the subsidy of the next Ledger inclusion (computed on the state after any sidecar in the same Heartbeat block), `D = 10` and `M = 4_096`:
 
-Fallback finalizers use more VDF work: rank `0` uses the base rounds, rank `1` uses `2x`, rank `2` uses `3x`, and so on. This gives the primary finalizer the first chance while still allowing the network to move if the primary does not publish.
+$$
+B \ge \max\left(1\,000\,000,\ \left\lceil \frac{R_{next}\cdot(K+9)}{D\cdot M} \right\rceil\right)
+$$
 
-VDF rounds alone are not the fallback gate. Faster hardware could otherwise finish a lower-ranked VDF before a slower primary finalizer. iuna therefore also uses rank time slots:
+The absolute minimum is `0.01 IUNA`. If all `M` ticket slots are filled, together they cost at least the expected bootstrap issuance during the time they occupy those slots. This makes the hard cap a priced safety limit rather than a free first-come reservation.
 
-- rank `0` blocks are valid as soon as their timestamp is greater than the parent timestamp;
-- rank `1` blocks are valid from `parent timestamp + 2 * target block time`;
-- rank `2` blocks are valid from `parent timestamp + 4 * target block time`;
-- and so on.
+### Inclusion Fee
 
-If a fallback finalizer finishes the VDF early, it must wait until its slot opens before publishing. Rank `0` does not wait on a rank slot; that keeps the primary path useful as the clean VDF-speed signal for retargeting. If a rank `0` finalizer finishes late, the block timestamp should reflect that later completion/publication time so VDF retargeting can observe slow rounds. Other nodes reject fallback blocks whose timestamp is before their rank slot.
+The inclusion fee is never stated directly; it follows from the amounts. Let `I` be the checked sum of the ticket's input values in the post-sidecar snapshot, and `C` the change output value (exactly zero if there is no change output). A change output exists exactly when `C > 0`; a present zero output is invalid. Then:
 
-## Timestamp Checks
+`inclusion fee = I - C - B`
 
-Rank slots depend on block timestamps, so timestamps are constrained by consensus:
+The ticket is valid only if this subtraction does not underflow and the fee is at least one unit. So `I = B + C + inclusion fee` always holds, and a ticket can neither create value nor silently destroy it.
 
-- a block timestamp must be greater than its parent timestamp;
-- it must exceed median-time-past;
-- it must not be too far in the future relative to the validating node's network-adjusted clock;
-- for fallback ticket blocks, it must be at or after the finalizer rank slot.
+### Paying Out the Budget
 
-The future drift limit is `2 minutes`. A finalizer can lie within that small margin, but cannot skip an entire `10 minute` fallback rank slot by claiming a far-future timestamp. P2P treats too-early future/slot blocks as temporal errors rather than peer-banning evidence.
+A ticket included in Heartbeat block `H` is tracked for exactly `L = K + 9` blocks, from `H` through `H + K + 8`. Its whole budget `B` is paid to the miners of those blocks, one slice per block.
 
-## Recovery Blocks
+The slices are as equal as integers allow. Write `B = q_e·L + r_e`. Lifecycle offsets `0` through `r_e - 1` each pay `q_e + 1`; the remaining offsets pay `q_e`. Offset `0` is the inclusion block `H`.
 
-If the ticket path does not produce a valid block for long enough, recovery finalization becomes available. This can happen because selected ticket finalizers do not publish, or because they cannot satisfy the rules needed for a valid ticket block. The recovery delay is `6` target block times.
+The locked balance is not stored as a separate counter. After `n` offsets have been processed (in the post-state of height `T`, `n = T - H + 1` with `1 <= n < L`), it is:
 
-A recovery block:
+$$
+\text{remaining}(n) = B - \left(n\,q_e + \min(n, r_e)\right)
+$$
 
-- does not use a burn-ticket leader proof;
-- must include at least one burn from the recovery finalizer;
-- uses normal base VDF rounds;
-- is ignored by VDF retarget observations.
+Before the payout at offset `i` the same formula holds with `n = i`, and the payout is deducted atomically. After offset `L - 1`, `remaining(L) = 0` and the ticket record is removed. The budget is fully locked on inclusion, cannot be spent twice, and is never refunded to the buyer.
 
-Recovery is a liveness mechanism. It is not meant to be the normal block path.
+### Active Lottery Slots
 
-## Proof-of-Work Issuance
+- A ticket in `H` waits for six full Heartbeat descendants before it becomes active.
+- It is active in heartbeats `H + 6` through `H + K + 5`.
+- In heartbeat `T` its slot index is `s = T - (H + 6)`, with `0 <= s < K`.
 
-Mine actions are how new IUNA is minted after genesis.
+The same budget is also split exactly over the `K` slots as mining weight. Write `B = q_w·K + r_w`: slots `s < r_w` get weight `q_w + 1`, the rest get `q_w`. The slot weights of one ticket sum to exactly `B`.
 
-A mine action is anchored to a recent chain tip and must meet the current PoW difficulty. It creates `1 IUNA` for the recipient when included in a block, and pays a fixed `1 IUNA` fee to the block finalizer.
+So one locked budget buys two things at once: a fixed payout schedule to Heartbeat miners over `K + 9` blocks, and `K` weighted lottery tickets for the Ledger.
 
-Difficulty targets about one mine action per block:
+## The Public Ledger Lottery
 
-- The retarget window is `10` blocks.
-- The target is `10` mine actions per window.
-- Difficulty can move by at most `2` bits per window.
-- Difficulty has a minimum of `10` bits in the mainnet-candidate profile.
-- Mine actions expire when their anchor is too old.
+### Drawing
 
-This keeps issuance separate from finalization. PoW miners compete to create mine actions; burn-ticket finalizers decide blocks.
+When `Heartbeat_T` is the current tip:
 
-A block may contain at most `2` mine actions for the same anchor. This leaves room for the difficulty retarget to move upward when PoW regularly fills both slots, while still bounding issuance from any single anchor.
+- eligibility follows from the canonical ticket history;
+- the randomness is the fresh hash `H_Heartbeat,T`;
+- the Ledger parent anchor is the current Ledger parent after processing `Heartbeat_T`: that is `H_Heartbeat,T` itself if the block contained a sidecar, otherwise the existing anchor. Before the first sidecar it is the hard-coded `LEDGER_GENESIS_ANCHOR`.
 
-Each mine proof may be included only once in the chain under the transaction-ID uniqueness rule above. Spending a mine reward never makes its proof eligible for inclusion again.
+The lottery for heartbeat `T` is computed only after `Heartbeat_T` is fully validated, so `Heartbeat_T` never commits to its own outcome and there is no hash cycle.
 
-## Fair Burn Inclusion
+For every active ticket, every node computes:
 
-The central censorship risk is simple: what if a finalizer only includes its own burns and ignores everyone else's burns?
+`y = SHA256("IUNA-LEDGER-LOT-v1" || H_Heartbeat,T || Ledger parent anchor || ticket ID || s || lottery_seed)`
 
-Burn fairness is enforced by a burn inclusion committee. The committee gives independently observed burns a path into the next block, even when the block finalizer would rather ignore them.
+Because the seed is public, any node can find the winners and build a candidate. The ticket buyer does not need to be online, and cannot hold back a winning ticket.
 
-The idea is:
+### Weighted Threshold
 
-1. Burns are ordinary mempool transactions.
-2. Committee members look at the valid burns they have seen.
-3. Each committee member signs a burn bundle for the next block height.
-4. The finalizer must include enough committee attestations for its rank.
-5. Every burn in the required burn list must appear in the block.
+Let `w` be the ticket's slot weight and `W` the sum of all active slot weights. A ticket wins if:
 
-So a censoring finalizer cannot simply leave out third-party burns that the committee witnessed. To keep censoring, it must either keep those burns away from committee members, control enough committee influence, or disrupt the normal ticket path until weaker liveness rules take over.
+$$
+y < \left\lfloor \frac{2^{256}\cdot w}{D\cdot W} \right\rfloor
+$$
 
-Each block has one burn-selected finalizer and up to four additional burn committee members. The finalizer is committee slot `0`; the finalizer's block signature counts as its slot `0` burn-list attestation. Additional committee selection is root-first: mature UTXO lineage weight selects a group, then a wallet with a valid ticket for the target height is selected from within that lineage.
+`y`, `w` and `W` are widened to unsigned 512-bit integers first, so the multiplication and division cannot wrap around.
 
-Why not weight the whole committee directly by burn tickets? Because then a large burner could buy both block production and the inclusion watchdog with the same weight. Instead, mature mined-coin lineage value determines which root groups can win additional slots. A valid ticket only determines which wallet may represent a winning group; its burn amount does not determine that root's committee weight.
+- If `W = 0` there are no winners.
+- On average about `1/D` winners appear per heartbeat.
+- `D = 10` is an initial calibration value, not a guarantee of exactly ten minutes between included Ledger blocks. Rounding, simultaneous winners and inclusion delay still need to be covered by launch simulations.
 
-A UTXO lineage is a lightweight ancestry tag:
+### Withholding
 
-1. A mine action output starts a lineage root.
-2. Transfer and change outputs carry that root forward.
-3. If a transaction spends outputs from multiple roots, descendants inherit the newest root.
-4. Deterministic tie-breaks handle roots with the same age.
-5. Outputs with no mine root have no burn-committee lineage weight.
+Every active ticket pays the miner of heartbeat `T` unconditionally. The smallest possible slice per active ticket is `floor(B / (K + 9)) >= 690` units.
 
-A lineage root is eligible for burn committee selection only when its mine action is at least `20` blocks old at the parent tip.
+Still, publishing a valid Heartbeat block is not strictly the best move under protocol rewards alone. A miner who finds a valid header can look at the lottery outcome first and decide to throw the block away. That costs the whole Heartbeat payout of the block and risks another miner taking the height, but gives the miner another shot at a better lottery outcome while it keeps working on the same height. That can be rational when the miner's own expected Ledger subsidy, fees, censorship value or an outside bribe outweighs those costs.
 
-Node implementation note: nodes cache this root tag on every UTXO and maintain an index from root to total unspent value, so normal validation does not need to search full ancestry.
+The expenditure payout makes selective withholding more expensive; it does not remove it. The protocol does not claim cryptographically unbiased randomness or that publishing is always the dominant strategy. Launch simulations need to model this for different concentrations of Heartbeat hashpower and Ledger ticket weight. A stronger randomness construction would be a separate protocol change; this base protocol adds no commit-reveal, delay function or extra consensus path for it.
 
-Committee selection is root-first. For each eligible lineage root, validators sum the unspent value currently tagged with that root:
+## Ledger Candidates and Inclusion
 
-`root_value = sum(unspent_value_micro_iuna_tagged_with_root)`
+### Candidates
 
-The root's committee weight is:
+Any node, in particular any Heartbeat miner, can build a body for a publicly winning ticket. A candidate header contains at least:
 
-`root_weight = floor(log2(1 + root_value))`
+- protocol version;
+- lottery heartbeat hash and height;
+- Ledger parent anchor;
+- ticket ID and slot index;
+- lottery output `y`;
+- the transactions Merkle root.
 
-Splitting one large root across many addresses does not multiply committee influence, because the root is weighted once and can win at most one additional burn committee slot. Merging roots deliberately collapses future descendant lineage to the newest root; lineage is a Sybil-resistance tag, not full coin-provenance accounting.
+The candidate hash is `H_C = SHA256("IUNA-LEDGER-CANDIDATE-v1" || canonical candidate header)`.
 
-The lineage weight is logarithmic. A larger root has more chance to be selected, but doubling value does not double influence forever. This keeps committee selection from becoming a simple rich-get-richer vote while still giving larger, older mined lineages some weight.
+There is no producer signature; ordinary transactions keep their own signatures. The subsidy and the winner's fee share always go to the mining public key in the winning ticket.
 
-For a target height and committee slot, validators derive a deterministic committee seed from the parent hash, parent VDF output, target height, and slot number. Slot `0` is assigned to the actual block finalizer. Every ticket rank can derive up to four additional slots, while the rank-dependent quorum determines how many attestations are required. Lower-ranked ticket owners that missed their slot are skipped for fallback committee selection. Extra slots are assigned without replacement by weighted deterministic draws over eligible lineage roots using `root_weight`.
+### A Linear Chain
 
-After a lineage root wins, validators deterministically choose one representative from the owners of unspent outputs tagged with that root. The representative must own a valid ticket for the target height. Non-ticket owners cannot sign for the group, even when they hold the root's largest output. The finalizer, missed fallback owners, and addresses already selected for an earlier slot are skipped. If no eligible ticket-owning representative remains for a root, that root cannot provide a committee slot.
+- The Ledger parent anchor is the Heartbeat block that included the previous Ledger sidecar.
+- Once included, the hash of the including Heartbeat block becomes that Ledger block's canonical ID and the parent anchor for the next candidate.
 
-Starting at height `4750`, an address-v1 lineage owner is resolved to the legacy Ed25519 identity revealed by a confirmed hybrid spending authorization. This lets post-quantum PoW outputs participate through burn tickets owned by the same wallet while preventing an address from claiming another wallet's lineage. Before height `4750`, committee selection keeps the historical exact-address comparison.
+That way a Ledger ID automatically identifies the full Heartbeat context and post-state, without a second derived ID or a hash cycle.
 
-The protocol can detect addresses and lineage roots, not hidden common control, so a finalizer using unrelated addresses is still a social and economic risk rather than something this rule can perfectly identify.
+### Inclusion Window and Mandatory Fallback
 
-If fewer eligible roots contain an eligible non-finalizer ticket wallet, the committee is smaller. If none exists, burn inclusion quorum falls back to `1-of-1` through the finalizer's implicit slot `0` attestation.
+- A winner from heartbeat `T` may be included in `T + 1`, `T + 2` and `T + 3`, as long as the Ledger parent anchor does not change.
+- Within that window a Heartbeat miner may build and include any fully valid body for a valid winner.
+- Candidates are not relayed as separate consensus objects. Nodes relay transactions, and Heartbeat miners build bodies from their own mempool. This avoids candidate pinning and replacement rules.
+- Before processing the sidecar of Heartbeat block `U`, validators determine `E_U`: all winners from lottery heartbeat `T = U - 3` whose parent anchor is still the current Ledger parent.
+- If `E_U` is not empty, a sidecar is mandatory and must use the winner in `E_U` with the lowest normalized score `y / w`. A younger winner may not take the deadline's place. If the miner has no body with transactions, it builds a canonical empty fallback sidecar for that winner.
+- Scores are compared without floats: `a` beats `b` if `y_a · w_b < y_b · w_a`, with the lowest ticket ID winning a tie. The values are widened to unsigned 512-bit integers and the products are exact.
+- Only when `E_U` is empty may the miner choose freely among the other valid winners still inside their window, or include no sidecar at all.
 
-### Burn Committee Reward Split
+### Compact Block Relay
 
-The block reward is the total fee reward for the block. It remains a single deterministic amount in the block, but validators credit it as one or more implicit reward outputs.
+After finding a Heartbeat block with a sidecar, the miner relays the header, the lottery context and short transaction IDs. Peers rebuild the sidecar from their own mempool and only ask for missing transactions. A peer accepts the Heartbeat block only after the full sidecar is available and validated.
 
-For normal ticket blocks, lower-rank finalization pays more to the independent burn-inclusion committee:
+## Rewards and Fees
 
-- rank `0`: the finalizer receives `50%`; the non-finalizer members whose attestations are included split the other `50%` equally;
-- rank `1`: the finalizer receives `50%`; the non-finalizer members whose attestations are included split the other `50%` equally;
-- rank `2` and later: the finalizer receives `100%`.
+### Bootstrap Subsidy
 
-Recovery blocks pay `100%` to the recovery finalizer.
+- target supply: `42,076,801 IUNA`;
+- genesis reward: `1 IUNA`;
+- initial Ledger subsidy: `50 IUNA`;
+- halving every `420,768` included Ledger blocks, expected to be about four years.
 
-Only attestations actually included in the block earn a committee share. If no extra committee attestation is required, the finalizer receives the full reward. Integer amounts are rounded down into the committee half (`reward / 2`), so the finalizer receives the remainder when the reward is odd. Committee reward outputs do not create UTXO lineage; lineage selection remains based on mature mine-action descendants. Starting at height 3750, finalizer and rewarded committee outputs use authenticated version-1 hybrid payout addresses. The finalizer signs its block payout address with its legacy identity; each committee member binds its payout address into its signed burn bundle.
+Let `N` be the number of Ledger blocks already included before the current one, and `minted` the total genesis plus Ledger issuance in that parent state. In units:
 
-A committee member can sign one burn bundle for its slot, height, and parent hash. A bundle is at most `10,000` bytes and lists valid fee-paying pending legacy and v2 burns eligible at that height, ordered by absolute fee and then transaction identifier. Burns queued for the following height are not included yet. Honest committee policy is to include every valid burn it selects by that canonical ordering, or to sign an empty bundle only when the signer knows no valid burn for that height. Empty bundles are an honest-policy signal, not something validators can prove from their own mempools. Consensus checks committee membership, signature validity, lineage assignment, ordering, and threshold.
+- epoch `e = floor(N / 420,768)`;
+- remaining room `R = MAX_MONEY - minted`;
+- scheduled amount `S = 5,000,000,000 >> e` if `e < 33`, otherwise `S = 0` (the shift is never performed with `e >= 33`, which avoids implementation-defined behavior);
+- subsidy = `0` if `R = 0`; `min(S, R)` if `S > 0`; `R` if `S = 0` and `R > 0`.
 
-Automatic nodes wait about `30 seconds` after seeing pending burns for the next height before signing a burn bundle or starting the burn-list-bound VDF. This gives burn gossip time to settle and avoids locking in an underfilled bundle from the first partial batch a node received.
+`N` and `minted` are updated after inclusion. So exactly the first `420,768` Ledger blocks receive the initial subsidy, block index `420,768` starts the first halving, and at most one last reward fills the remaining rounding gap. `R_next` elsewhere in this document is this function applied to the state in which the next Ledger block would be included.
 
-A block contains legacy and v2 transactions plus one compact burn-bundle section. The finalizer's anchor burn is reserved before optional transactions, whether it uses legacy or hybrid funds.
+The full subsidy goes to the mining public key of the winning ticket.
 
-The compact burn-bundle section stores:
+### Transaction Fees
 
-- up to four explicit burn committee bundle signatures for non-finalizer slots, in slot order;
-- deduplicated required legacy and v2 burn lists; and
-- a small bitmask per burn saying which of the included committee bundles contained that burn.
+For each ordinary Ledger transaction, all input values are looked up in the pre-sidecar UTXO snapshot. Let `I` be the checked sum of inputs and `O` the checked sum of new outputs. Every output must be strictly positive and the transaction is valid only if `O <= I`. The fee is exactly `f = I - O`. There is no implicit burn: the whole difference is fee.
 
-The required burn list is the union of fee-paying burns contained in the attestations the block uses. If one committee member signs an empty bundle and another signs a bundle with burns, the required list still includes the burns from the non-empty bundle.
+For a sidecar, `F_tx` is the checked sum of all individual fees. An overflow, a missing input, an input spent twice within the batch, a zero output or `O > I` makes the whole Heartbeat block invalid.
 
-Required burns must fit in the block. Nodes reject burn bundles or attestation sets whose deduplicated required burn list cannot fit within the block size and transaction count limits.
+The fees are split in half:
 
-Validators reconstruct each signed committee bundle from this compact section before checking signatures, bundle size, slot assignment, lineage-based slot assignment, and fee ordering. The finalizer's block signature is treated as its committee attestation for slot `0`. Slot `0` does not have a separate burn bundle signature; it attests to the block's deduplicated required burn list as included by the finalizer. This keeps consensus bound to the independent burn attestations without storing the same burn payload multiple times when multiple committee members selected it.
+- `F_Heartbeat = floor(F_tx / 2)` goes to the miner of the Heartbeat block that includes the sidecar;
+- `F_winner = F_tx - F_Heartbeat` goes to the mining public key of the winning ticket, so an odd remainder goes to the winner.
 
-Block validity is not allowed to depend on a validator's local mempool. Validators decide the required burn-list threshold from deterministic chain and block data only. Pending burns can affect local relay, bundle-signing, and block-building policy, but they cannot make the same block valid on one node and invalid on another.
+On top of that, Heartbeat miners receive all ticket expenditure slices and ticket inclusion fees. There are no separate block reward streams or recovery fees.
 
-A block may contain at most one bundle per slot. If a block includes one valid bundle for a slot, validators check that included bundle and do not need to know whether another bundle for the same slot existed elsewhere. If a block builder sees the same assigned member sign two different bundles for the same height, parent, and slot before block assembly, it ignores that member's bundles for the round as local safety policy. Different ticket ranks can assign different members to the same slot, so those bundles do not conflict. The current protocol does not have a separate slashing rule for this.
+### A Stable Money Supply
 
-Ticket blocks need a rank-dependent threshold of burn-list attestations. Rank `0` has the strictest rule because it is the preferred path. Missed lower-rank ticket owners are excluded from fallback committees, but each rank can still select up to five committee members from the remaining eligible owners.
+- Bootstrap subsidies grow the money supply up to at most the target supply.
+- Ticket expenditure and all fees are transfers within the existing supply.
+- After the bootstrap the supply stays stable; mining neither destroys coins nor mints replacements.
 
-That is a deliberate liveness tradeoff. A block only commits to the bundles it includes, so burns seen exclusively by non-selected or omitted committee members are not required. Lower ranks use a smaller threshold and are therefore weaker for fairness, but preserve liveness when the preferred path is stuck.
+Every full post-state must satisfy:
 
-The available committee size is the finalizer plus the selected non-finalizer committee members for that height:
+`sum(spendable UTXO values) + sum(remaining of tracked tickets) = minted`
 
-- rank `0` needs `min(3, committee size)` attestations (`3-of-5`, `3-of-4`, `3-of-3`, `2-of-2`, or `1-of-1`), where the finalizer's block signature counts as the slot `0` attestation;
-- rank `1` needs `min(2, committee size)` attestations (`2-of-5` through `2-of-2`, or `1-of-1`);
-- rank `2` and later ticket finalizers need only the finalizer's implicit slot `0` attestation (`1-of-n`).
+Here `minted` is only genesis plus Ledger subsidy issuance. A block that breaks this equality (computed checked, without overflow) is invalid.
 
-Recovery blocks do not require burn-list signatures. They are the last liveness escape hatch after the ticket path has failed, so committee failure must not be able to stop the chain forever. Recovery is weaker for fairness and is not meant to be the normal block path.
+## State Transition Order
 
-Burn-committee lineage draws use the same ungrindable parent randomness as the leader lottery: the parent VDF seed and VDF output. The target height and committee slot are separate inputs to each draw. This prevents a completed ticket VDF from being reused with different publication timestamps to search for a favorable next committee.
+For every non-genesis Heartbeat block:
 
-The ticket-block VDF seed includes a content commitment that covers the finalizer, mode, rank, reward, VDF rounds, selected ticket, transactions, and burn-bundle section:
+1. Start from the final state of the Heartbeat parent.
+2. Decide whether a sidecar is optional, mandatory or absent. Validate every Ledger transaction in a present sidecar against the same UTXO snapshot from step 1. A Ledger transaction may not spend an output of another transaction in the same sidecar. If two transactions use the same input, the whole Heartbeat block is invalid.
+3. Apply the valid Ledger transactions as one batch, create the non-zero subsidy and winner-fee outputs for the ticket winner, and set `F_Heartbeat` aside for step 5.
+4. Validate all Heartbeat ticket transactions against the resulting snapshot from step 3. They may spend outputs from the sidecar just included, but not outputs of another ticket transaction in the same block. If two ticket transactions use the same input, the whole block is invalid. Then apply the valid ticket transactions as one batch.
+5. Pay the current Heartbeat miner:
+   - the lifecycle slice of every tracked ticket for this height;
+   - ticket inclusion fees;
+   - `F_Heartbeat` from an included sidecar.
 
-`seed = hash(parent hash || height || content commitment || attestation_hash[0] || ... || attestation_hash[4])`
+   Each lifecycle slice is deducted from that ticket's remaining balance in the same atomic step.
+6. Remove only tickets whose height `H + K + 8` has been fully processed and whose `remaining(L) = 0`.
+7. Outputs created in step 5 can only be spent in a later block.
+8. Commit the full final state in the Heartbeat post-state root.
 
-Recovery blocks also bind the block timestamp into the VDF seed:
+Transaction lists have a canonical order for serialization and Merkle roots, but that order does not change the snapshots above. There are no dependencies inside a sidecar or inside a ticket batch.
 
-`seed = hash(parent hash || height || timestamp_ms || content commitment || attestation_hash[0] || ... || attestation_hash[4])`
+### Synthetic Payout IDs
 
-The burn-list attestation hashes are part of the VDF seed. This forces the finalizer to choose the included burn-attestation set before doing the delay work. After the VDF is computed, changing that attestation set changes the seed and invalidates the work.
+Rewards and miner payouts use synthetic IDs that can be computed in advance. They may not depend on the current Heartbeat block hash, because that hash covers the post-state root.
 
-Slot `0` uses a synthetic finalizer attestation hash derived from the parent, height, finalizer address, and the block's canonical deduplicated required burn list. Slots `1` through `4` use the signed burn-bundle hash or the fixed default hash when absent.
+For an included candidate the settlement ID is:
 
-For recovery blocks, missing burn-list attestations use the fixed default hashes. A recovery block may include available burn bundles, but it does not need burn bundles in order to be valid.
+`S = SHA256("IUNA-LEDGER-SETTLEMENT-v1" || H_Heartbeat,parent || new height || H_C || ticket ID || Heartbeat miner public key || canonical amounts)`
 
-Every burn in the deduplicated required burn list must appear in the block. A required burn is executed only once even if multiple committee bundles contained it. The block may also include additional valid burns not present in the required list, but those additional burns do not count toward the committee attestation threshold.
+Fixed output indexes under `S` identify the subsidy and the winner's fee share. The combined payout to the Heartbeat miner uses a separate ID over the parent, height, miner public key, candidate hash (or zero) and the canonical payout breakdown. All of these inputs are known before the new post-state root is computed.
 
-Every transaction that consumes normal block space must pay a fee. Transfers and burns with zero fee are invalid; the finalizer's local anchor burn is an ordinary fee-paying burn. Mine actions pay the deterministic mine action fee. Genesis burns are the only zero-fee burn transactions, and they are valid only inside the genesis block.
+A synthetic output with amount zero is never created and cannot be referenced as an input. Its fixed index stays reserved, so other outputs do not shift. This also applies to a combined Heartbeat miner payout of zero. A settlement with no subsidy and no winner fees therefore creates no UTXOs under `S`.
 
-This does not make censorship impossible. A finalizer can still censor burns that no committee member has seen, and a well-funded attacker can try to control enough UTXO lineage weight to dominate the burn committee. But the attack is no longer just "win the block and leave out everyone else." The attacker also has to beat the independent inclusion layer, or force the chain onto weaker liveness paths.
+## Confirmations and Finality
 
-## P2P Mempool Gossip
+- Tickets become active after six full Heartbeat descendants.
+- An included Ledger block is immediately provisionally canonical through its Heartbeat block.
+- Wallets show Ledger payments as confirmed after six further Heartbeat blocks by default.
+- Outputs from the sidecar and its settlement may be spent by the ticket batch in the same Heartbeat block. Outputs newly created within a batch may not be spent within that same batch; all other outputs become spendable from a later Heartbeat block.
+- Six confirmations reduce risk; they are not absolute finality.
 
-Nodes gossip:
+## Encoding and State Root
 
-- transfers;
-- burns;
-- canonical transaction-v2 envelopes, including hybrid transfers and burns;
-- mine actions;
-- signed burn bundles;
-- burn-bundle requests for missing committee slots at a specific next-block height and parent hash;
-- block inventory and blocks.
+Canonical encoding is big-endian and length-prefixed. Merkle trees are domain-separated and duplicate the last node on odd levels. Ordinary and ticket inputs use Ed25519 only and sign a domain-separated SHA-256 digest of the network ID, the genesis hash, the unsigned transaction, the value of every spent output in input order, and their input index. The network scope stops a signature from being replayed on a fork or relaunch that shares the same outpoints. The input values stop a node from misreporting a balance so that the wallet pays the difference as a fee: the signature would then be invalid. Synthetic Ledger output index `0` is the subsidy and index `1` the winner fees; the combined Heartbeat payout uses index `0`. Zero outputs are not created.
 
-Legacy anchor burns are prepared locally by the finalizer. Hybrid anchor burns use the v2 mempool so they survive restart and can be relayed and attested before inclusion.
+The state root commits the height, minted supply, Ledger block count, UTXOs and tracked tickets. The tip hash, timestamps, chainwork, heartbeat history and Ledger parent anchor are derived chain indexes. That is why there is no hash cycle when the hash of the including Heartbeat block becomes the next Ledger parent anchor.
 
-When a ticket finalizer is collecting burn-bundle attestations and has fewer signatures than its
-rank requires, it may request the missing slots. Peers answer from their local cache with matching
-signed burn bundles for that height, parent hash, and slot set.
+## Security Claims and Limits
 
-Nodes only keep transactions in their local mempool when they are valid, fee-paying, and unexpired. Pending and orphan transaction pools are bounded by both item count and serialized byte size. A signed burn bundle is limited to `10,000` bytes, and nodes only cache valid bundles for the next height and current parent.
+- The same expenditure gives the same total mining weight under the same `B/K` rules.
+- Faster hardware does not create extra Ledger tickets; every node evaluates one hash per active ticket per heartbeat.
+- More expenditure deliberately gives more relative mining influence.
+- The Heartbeat Chain uses SHA-256 PoW and is not ASIC-resistant. ASIC hashpower gives sequencing, censorship and reorg power over both layers.
+- Fresh Heartbeat hashes are economically, not cryptographically, hard to bias. A miner can discard a found block after seeing the lottery outcome. Expenditure payouts make that more expensive but do not guarantee that publishing is rational; Ledger rewards, ticket-weight concentration, censorship value and outside bribes remain part of the PoW security model.
+- Heartbeat miners sequence the Ledger and choose its transactions. The mandatory deadline fallback guarantees progress, not transaction neutrality.
 
-When the pending count or byte bound is reached, a node admits an independent transaction only if its fee rate is strictly higher than the lowest evictable pending package. Package eviction removes dependent pending transactions and orphan descendants together. This is local relay policy, not a block-consensus rule.
+## Still to Validate for a Mainnet Profile
 
-## Block Selection
+Before a mainnet profile, at least these need to be reviewed again and frozen:
 
-When a node builds a block, the flow is:
-
-1. Collect valid signed burn bundles for the next height.
-2. Reserve an eligible legacy or v2 anchor burn from the finalizer wallet.
-3. For recovery blocks, ensure at least one anchor burn is from the recovery finalizer.
-4. Include every legacy and v2 burn required by the selected burn-bundle attestations.
-5. Fill remaining block space with valid fee-paying legacy and v2 transactions ordered by fee rate. Mine actions are limited to `2` actions per anchor.
-6. Bind the VDF seed to the five burn-attestation slot hashes, using default hashes for missing slots. Slot `0` uses the synthetic finalizer attestation hash instead of a separate burn-bundle signature.
-
-Blocks are bounded by transaction count and exact compact stored block-body size. The mainnet-candidate maximum is `1,000,000` bytes. Block admission checks the finished block with the parent chain's compact reference context. Block construction uses the same encoder while reserving mandatory anchor and attested burns before filling the remaining space.
-
-## Fork Choice
-
-Nodes fully validate candidate blocks or snapshots before considering a reorg. A candidate chain must share the same genesis.
-
-Burn inclusion is part of block validity. If a ticket block carries burn-list attestations but omits a burn required by those attestations, nodes reject the block before fork choice. The fork choice rule only compares chains made of valid blocks.
-
-A rank `0` ticket block requires signatures from strictly more than two thirds of its selected burn committee. The leader counts as one signer through its leader proof; the other signers use burn-bundle signatures. Every signature commits to the child height and parent hash, so a valid rank `0` child certifies its parent. For a five-slot committee, this means the leader plus three explicit committee signatures. Smaller committees require `floor(2n/3) + 1` total signatures. Rank `1`, later ticket ranks, and recovery blocks use their liveness thresholds but do not create an objective finality checkpoint.
-
-Fork choice compares the highest valid checkpoint before chain length. A higher checkpoint wins even when its current tip is shorter, so healthy partitions can converge after more than six blocks. When checkpoints are identical, the taller chain wins. Equal-height chains use the existing first-divergent leader-score comparison. If certificates conflict at the same height, nodes choose the lexicographically smaller checkpoint hash. A strictly higher conflicting certificate supersedes a lower checkpoint.
-
-This is **recoverable objective finality**, not a promise that a finalized block can never be reorganized. “Finalized” means that the selected committee for the next rank `0` block signed the block's hash as its parent with a strict two-thirds quorum, and that no competing chain has a better checkpoint under the public rule above. Nodes do not use first-seen or first-peer trust to resolve a fork.
-
-## Genesis and Joining
-
-Genesis is explicit. A normal node without a chain starts in setup mode and waits to join an existing chain from peers rather than silently creating a separate chain.
-
-The genesis flow bootstraps the mainnet-candidate network with an initial burn ticket and a fixed `1 IUNA` initial reward for the genesis wallet. New nodes fetch and validate chain snapshots from peers, then continue with normal block validation.
+- ASERT half-life, starting target, maximum target, timestamp rules and median-time window;
+- exact canonical binary encoding, endianness, domain strings, Merkle rules and synthetic output indexes;
+- exact transaction signature policy and protocol versions;
+- limits on transaction counts and signature checks alongside the byte limits;
+- benchmarks for `4,096` tracked tickets, the public lottery scan and worst-case state root updates within ten seconds;
+- calibration of `D`, sidecar propagation and real Ledger block intervals;
+- economic simulations of minimum expenditure, cap squatting, expenditure and hashpower concentration, fee income and selective heartbeat withholding, including miners that also control a large share of Ledger ticket weight;
+- a P2P specification for compact relay, initial sync, snapshots, pruning and historical sidecar availability;
+- property tests for quotient and remainder splitting, the ticket lifecycle, mandatory fallbacks, reorgs, equal-work forks, the supply cap and cross-layer UTXO conflicts.
 
 ## What This Design Is Trying to Achieve
 
 iuna is trying to make these things true at the same time:
 
-- Finalization should not require specialized mining hardware.
-- New issuance should not require already owning a large stake.
-- Burns should have real opportunity cost.
-- Burn timing power should expire rather than accumulate into permanent control.
-- Block timing should be hard to rush.
-- Finalizers should have a consensus-level reason to include independently witnessed burn traffic.
+- The Heartbeat Chain decides PoW fork choice, timing, ticket state, Ledger inclusion and the shared state.
+- One locked budget buys both a fixed payout schedule for Heartbeat miners and `K` weighted, public Ledger lottery tickets.
+- Mining weight should be rented, not owned: after `K + 9` blocks the whole budget has gone to Heartbeat miners and the ticket record is gone.
+- Faster Ledger hardware should not buy extra lottery chances.
+- The money supply should stay stable after the bootstrap, because expenditure moves coins instead of destroying them.
+- There should be one reward system: no principal refund, reissue pool, recovery path or parallel reward bookkeeping.
 
-The design is intentionally small and still evolving. The candidate exists to find out whether these assumptions hold under mainnet-like operation and where they break.
+The design is intentionally small and still evolving. The candidate exists to find out whether these assumptions hold in practice and where they break.

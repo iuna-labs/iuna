@@ -1,0 +1,12 @@
+{
+  "$schema": "../gen/schemas/desktop-schema.json",
+  "identifier": "desktop-launcher",
+  "description": "Only the bundled launcher page may read the operator token. This capability must never list remote URLs: the node UI is a remote origin and receives the token through the launcher.",
+  "local": true,
+  "windows": [
+    "main"
+  ],
+  "permissions": [
+    "allow-desktop-operator-token"
+  ]
+}

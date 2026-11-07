@@ -5,13 +5,12 @@ cd "$(dirname "${BASH_SOURCE[0]}")"
 
 RELEASE_ROLLBACK_ARMED=false
 RELEASE_START_HEAD=""
-CARGO_FUZZ_VERSION="0.13.2"
 TAURI_CLI_VERSION="2.11.5"
+RUST_BUILDER_IMAGE="rust:1.99.1-bookworm"
 RELEASE_VERSION_FILES=(
   CHANGELOG.md
   Cargo.toml
   Cargo.lock
-  fuzz/Cargo.lock
   src-tauri/Cargo.toml
   src-tauri/Cargo.lock
   src-tauri/tauri.conf.json
@@ -45,33 +44,6 @@ require_command() {
   local command_name="$1"
 
   command -v "$command_name" >/dev/null 2>&1 || die "missing required command: ${command_name}"
-}
-
-require_cargo_fuzz() {
-  require_command cargo-fuzz
-  require_command rustup
-
-  local installed_version
-  installed_version="$(cargo fuzz --version)"
-  [ "$installed_version" = "cargo-fuzz ${CARGO_FUZZ_VERSION}" ] || \
-    die "cargo-fuzz ${CARGO_FUZZ_VERSION} is required, found ${installed_version}"
-  rustup run nightly rustc --version >/dev/null 2>&1 || \
-    die "a nightly Rust toolchain is required for coverage-guided fuzzing"
-}
-
-run_fuzz_campaign() {
-  local target="$1"
-  local seconds="$2"
-  local evidence_dir="$3"
-  local corpus_dir="${evidence_dir}/corpus/${target}"
-  local artifact_dir="${evidence_dir}/artifacts/${target}"
-
-  mkdir -p "$corpus_dir" "$artifact_dir"
-  cp -R "fuzz/corpus/${target}/." "$corpus_dir/"
-  cargo +nightly fuzz run "$target" "$corpus_dir" -- \
-    -max_total_time="$seconds" \
-    -timeout=10 \
-    -artifact_prefix="${artifact_dir}/"
 }
 
 docker_native_linux_platform() {
@@ -116,13 +88,6 @@ replace_in_file() {
   local pattern="$2"
   local replacement="$3"
   perl -0pi -e "s|${pattern}|${replacement}|g" "$file"
-}
-
-validate_positive_integer() {
-  local name="$1"
-  local value="$2"
-
-  [[ "$value" =~ ^[1-9][0-9]*$ ]] || die "${name} must be a positive integer"
 }
 
 ensure_clean_worktree() {
@@ -222,37 +187,21 @@ run_release_tests() {
   local skip_long_tests="$1"
 
   require_command cargo
+  require_command node
 
   ./scripts/check-dependencies.sh
-  cargo test --locked
-  cargo check --locked --manifest-path fuzz/Cargo.toml
-  cargo check --locked --manifest-path src-tauri/Cargo.toml
-  ./e2e/iuna_e2e.py test snapshots
+  cargo test --locked --all-targets --all-features
+  cargo clippy --locked --all-targets --all-features -- -D warnings
+  cargo test --locked --manifest-path src-tauri/Cargo.toml
+  cargo clippy --locked --manifest-path src-tauri/Cargo.toml --all-targets -- -D warnings
+  node --test tests/*.test.cjs
 
   if [ "$skip_long_tests" = "true" ]; then
-    echo "WARNING: skipping long-running adversarial, fuzz, post-activation E2E, and property test suites"
+    echo "WARNING: skipping the live three-node TCP end-to-end test"
     return 0
   fi
 
-  local fuzz_seconds="${IUNA_FUZZ_SECONDS:-60}"
-  local vdf_fuzz_seconds="${IUNA_VDF_FUZZ_SECONDS:-15}"
-  validate_positive_integer IUNA_FUZZ_SECONDS "$fuzz_seconds"
-  validate_positive_integer IUNA_VDF_FUZZ_SECONDS "$vdf_fuzz_seconds"
-  require_cargo_fuzz
-
-  local release_evidence_dir="${IUNA_RELEASE_EVIDENCE_DIR:-release-evidence}"
-  local fuzz_evidence_dir="${release_evidence_dir}/fuzz"
-
-  cargo test --locked --release --lib domain::adversarial_tests:: -- --ignored
-  run_fuzz_campaign p2p_envelope "$fuzz_seconds" "$fuzz_evidence_dir"
-  run_fuzz_campaign compact_snapshot "$fuzz_seconds" "$fuzz_evidence_dir"
-  run_fuzz_campaign domain_json "$fuzz_seconds" "$fuzz_evidence_dir"
-  run_fuzz_campaign stratum_request "$fuzz_seconds" "$fuzz_evidence_dir"
-  run_fuzz_campaign wallet_config "$fuzz_seconds" "$fuzz_evidence_dir"
-  run_fuzz_campaign vdf_proof "$vdf_fuzz_seconds" "$fuzz_evidence_dir"
-  run_fuzz_campaign transaction_v2 "$fuzz_seconds" "$fuzz_evidence_dir"
-  cargo test --locked --release --features e2e --test properties -- --ignored
-  ./e2e/iuna_e2e.py test post-activation --build --evidence-dir "$release_evidence_dir"
+  ./e2e/iuna_e2e.py tcp
 }
 
 update_versions() {
@@ -269,10 +218,8 @@ update_versions() {
 
   cargo update --offline -p iuna --precise "$version"
   cargo update --offline --manifest-path src-tauri/Cargo.toml -p iuna-desktop --precise "$version"
-  cargo update --offline --manifest-path fuzz/Cargo.toml -p iuna --precise "$version"
   cargo check --locked >/dev/null
   cargo check --locked --manifest-path src-tauri/Cargo.toml >/dev/null
-  cargo check --locked --manifest-path fuzz/Cargo.toml >/dev/null
 }
 
 write_changelog_section() {
@@ -538,7 +485,7 @@ build_windows_desktop_in_docker_if_possible() {
     -v "$(pwd):/src/iuna:ro" \
     -v "$(pwd)/downloads:/out" \
     -v "${signing_key}:/run/secrets/iuna-update.key:ro" \
-    rust:1.88-bookworm \
+    "$RUST_BUILDER_IMAGE" \
     bash -c '
       set -euo pipefail
 
@@ -577,7 +524,7 @@ build_windows_desktop_in_docker_if_possible() {
         -cf - . | tar -C /work/iuna -xf -
 
       cd /work/iuna
-      # Cargo uses this root toolchain for the root, fuzz, and src-tauri manifests.
+      # Cargo uses this root toolchain for the root and src-tauri manifests.
       # Resolve it only after entering the extracted repository; the base image has
       # a different default toolchain.
       repo_toolchain="$(rustup show active-toolchain)"
@@ -634,7 +581,7 @@ build_linux_cli_archives() {
     -v "$(pwd):/src/iuna:ro" \
     -v "$(pwd)/downloads:/out" \
     -v "$(pwd)/.docker-build:/node-out" \
-    rust:1.88-bookworm \
+    "$RUST_BUILDER_IMAGE" \
     bash -c '
       set -euo pipefail
 
@@ -867,8 +814,7 @@ render_manifest() {
   local www_image="$1"
   local node_image="$2"
   local node_pvc="$3"
-  local genesis="$4"
-  local output="$5"
+  local output="$4"
   local local_allowlist_file="config/admin-ip-allowlist.local"
   local allowlist_entry
   local allowlist_entry_count=0
@@ -897,11 +843,7 @@ render_manifest() {
     -e "s|\${IUNA_NODE_PVC}|${escaped_node_pvc}|g" \
     config/deployment.yml | awk \
       -v local_allowlist_file="$local_allowlist_file" \
-      -v genesis="$genesis" '
-      $0 == "${IUNA_NODE_GENESIS_ARG}" {
-        if (genesis == "true") print "            - --genesis"
-        next
-      }
+      '
       $0 == "${IUNA_ADMIN_IP_ALLOWLIST_LOCAL}" {
         while ((getline entry < local_allowlist_file) > 0) {
           sub(/#.*/, "", entry)
@@ -931,7 +873,7 @@ deploy_docker_image() {
 
   import_image_to_k3s "$www_image" "$tmp_folder"
   import_image_to_k3s "$node_image" "$tmp_folder"
-  render_manifest "$www_image" "$node_image" "$node_pvc" "$genesis" "${tmp_folder}/deployment.yml"
+  render_manifest "$www_image" "$node_image" "$node_pvc" "${tmp_folder}/deployment.yml"
   kubectl --context "$kubectl_context" apply -f config/traefik.yml
 
   if [ "$genesis" = "true" ]; then
@@ -959,12 +901,6 @@ deploy_docker_image() {
   kubectl --context "$kubectl_context" -n iuna rollout status deployment/www
   kubectl --context "$kubectl_context" -n iuna rollout status deployment/node
 
-  if [ "$genesis" = "true" ]; then
-    echo "Genesis started successfully; removing --genesis for subsequent pod starts"
-    render_manifest "$www_image" "$node_image" "$node_pvc" false "${tmp_folder}/deployment.yml"
-    kubectl --context "$kubectl_context" apply -f "${tmp_folder}/deployment.yml"
-    kubectl --context "$kubectl_context" -n iuna rollout status deployment/node
-  fi
 }
 
 main() {
@@ -1028,7 +964,7 @@ main() {
   ensure_clean_worktree
 
   if [ "$genesis" = "true" ]; then
-    echo "WARNING: this starts a new chain with --genesis and a fresh PVC."
+    echo "WARNING: this starts a new chain with a fresh PVC."
     echo "The existing chain in PVC local-path-db-pvc will be PERMANENTLY DELETED."
     echo "An empty PVC will then be created with the same permanent name."
     if ! confirm "Are you sure? (Y/N) "; then

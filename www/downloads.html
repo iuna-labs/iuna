@@ -5,15 +5,15 @@
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <meta name="color-scheme" content="dark">
   <meta name="theme-color" content="#0d0f10">
-  <meta name="description" content="Open the lightweight iuna mobile wallet or download the latest node and desktop app releases for Linux, macOS, and Windows.">
+  <meta name="description" content="Build and run an iuna candidate mainnet node from source.">
   <meta name="robots" content="index, follow, max-image-preview:large">
   <link rel="canonical" href="https://getiuna.org/downloads/">
   <link rel="icon" href="/favicon.svg" type="image/svg+xml">
   <link rel="icon" href="/favicon.ico" sizes="any">
   <link rel="apple-touch-icon" href="/apple-touch-icon.png">
   <link rel="manifest" href="/site.webmanifest">
-  <meta property="og:title" content="Download iuna">
-  <meta property="og:description" content="Use the lightweight iuna mobile wallet or get the latest node and desktop app releases.">
+  <meta property="og:title" content="Run iuna">
+  <meta property="og:description" content="Build and run an iuna candidate mainnet node from source.">
   <meta property="og:type" content="website">
   <meta property="og:url" content="https://getiuna.org/downloads/">
   <meta property="og:site_name" content="iuna">
@@ -24,11 +24,11 @@
   <meta property="og:image:type" content="image/png">
   <meta property="og:image:alt" content="iuna — Help test a different kind of network">
   <meta name="twitter:card" content="summary_large_image">
-  <meta name="twitter:title" content="Download iuna">
-  <meta name="twitter:description" content="Use the lightweight iuna mobile wallet or get the latest node and desktop app releases.">
+  <meta name="twitter:title" content="Run iuna">
+  <meta name="twitter:description" content="Build and run an iuna candidate mainnet node from source.">
   <meta name="twitter:image" content="https://getiuna.org/assets/og.png">
   <meta name="twitter:image:alt" content="iuna — Help test a different kind of network">
-  <title>iuna light wallet and node downloads</title>
+  <title>Run iuna</title>
   <link rel="stylesheet" href="/assets/static-listing.css">
 </head>
 <body>
@@ -41,7 +41,7 @@
       <nav aria-label="Page sections">
         <a href="/">Home</a>
         <a href="/getting-started/">Getting started</a>
-        <a href="https://github.com/iuna-labs/iuna/blob/main/docs/protocol.md" target="_blank" rel="noopener noreferrer">Protocol</a>
+        <a href="https://github.com/iuna-labs/iuna/blob/main/PLAN.md" target="_blank" rel="noopener noreferrer">Protocol</a>
         <a href="https://github.com/iuna-labs/iuna" target="_blank" rel="noopener noreferrer">Source</a>
         <a href="/downloads/">Downloads</a>
       </nav>
@@ -50,69 +50,27 @@
 
   <main class="wrap">
     <section class="hero">
-      <h1>iuna Downloads</h1>
-      <p>Release artifacts for iuna <span data-download-version>${IUNA_VERSION}</span>.</p>
+      <h1>Run iuna</h1>
+      <p>The new Heartbeat and Ledger protocol currently ships as a source-only development preview.</p>
     </section>
 
-    <aside class="light-wallet-card" aria-labelledby="light-wallet-title">
-      <div class="light-wallet-icon" aria-hidden="true">
-        <svg viewBox="0 0 24 24" focusable="false">
-          <rect x="7" y="2.5" width="10" height="19" rx="2.5"></rect>
-          <path d="M10 5.5h4M11 18.5h2"></path>
-        </svg>
-      </div>
-      <div class="light-wallet-copy">
-        <div class="light-wallet-tags">
-          <span class="tag">Light wallet</span>
-          <span class="wallet-platform">Mobile ready</span>
-        </div>
-        <h2 id="light-wallet-title">Just need a wallet?</h2>
-        <p>Send and receive IUNA from your phone or browser. No download and no node required—your encrypted seed stays on your device.</p>
-      </div>
-      <a class="button light-wallet-button" href="https://wallet.getiuna.org/">
-        Open light wallet
-        <span aria-hidden="true">↗</span>
-      </a>
-    </aside>
-
-    <div class="download-heading">
-      <div>
-        <h2>Run iuna</h2>
-        <p class="muted">Download the node and desktop software for your platform.</p>
-      </div>
-    </div>
-
-    <div class="grid download-grid" data-download-cards>
-      <article class="card">
-        <span class="tag pending">Checking</span>
-        <h2>Downloads</h2>
-        <p class="muted">Looking for release artifacts.</p>
-      </article>
-    </div>
-
-    <p class="checksum-link">
-      <a href="/downloads/SHA256SUMS">SHA256 checksums</a>
-      <span aria-hidden="true">·</span>
-      <a href="https://github.com/iuna-labs/iuna/blob/main/CHANGELOG.md" target="_blank" rel="noopener noreferrer">Release changelog</a>
-    </p>
-
     <aside class="safety-note">
-      <strong>Public peer safety:</strong> expose only the P2P listener on TCP port <code>9444</code>; keep the management UI local or behind strict access control.
+      <strong>Candidate mainnet:</strong> this is not mainnet yet, and the protocol remains experimental. The chain is intended to carry forward if the candidate is promoted, so coins will probably remain valid, but that is not guaranteed.
     </aside>
 
     <section class="source-build">
       <h2>Build from source</h2>
-      <p class="muted">Clone the repository and run a local release build.</p>
+      <p class="muted">Install a current Rust toolchain, clone the repository, and run the IUNA node.</p>
       <pre><code>git clone https://github.com/iuna-labs/iuna.git
 cd iuna
 cargo run --release</code></pre>
     </section>
 
+    <aside class="safety-note">
+      <strong>Public peer safety:</strong> expose only the P2P listener on TCP port <code>19733</code>. Keep the operator HTTP interface on loopback; management endpoints refuse non-loopback binding.
+    </aside>
+
     <p class="checksum-link">Not sure how to participate? <a href="/getting-started/">Read the getting started guide</a>.</p>
   </main>
-  <script>
-    window.IUNA_DOWNLOADS_VERSION = "${IUNA_VERSION}";
-  </script>
-  <script src="/assets/iuna-downloads.js"></script>
 </body>
 </html>
