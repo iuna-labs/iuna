@@ -5,6 +5,12 @@ from the Git history and Conventional Commit titles by `deployment.sh`.
 
 ## [Unreleased]
 
+## [0.5.1] - 2026-11-07
+
+### Fixed
+
+- move P2P back to TCP port 9444
+
 ## [0.5.0] - 2026-11-07
 
 ### Added
