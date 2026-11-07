@@ -5,6 +5,20 @@ from the Git history and Conventional Commit titles by `deployment.sh`.
 
 ## [Unreleased]
 
+## [0.5.2] - 2026-11-07
+
+### Fixed
+
+- bring back the release downloads
+- let a fresh node find the network on its own
+- show when the node is still catching up
+- close the login as soon as the wallet unlocks
+- keep a peer's height current when it announces known blocks
+
+### Build
+
+- stop the deploy cleanup trap from failing a finished release
+
 ## [0.5.1] - 2026-11-07
 
 ### Fixed
