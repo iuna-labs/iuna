@@ -5,6 +5,16 @@ from the Git history and Conventional Commit titles by `deployment.sh`.
 
 ## [Unreleased]
 
+## [0.5.3] - 2026-11-08
+
+### Fixed
+
+- lead the homepage with what makes iuna fair
+- remove the getting started guide
+- keep the guide redirect on https
+- remove the needless scrollbar from the dashboard
+- open the transaction modal from wallet activity rows
+
 ## [0.5.2] - 2026-11-07
 
 ### Fixed
