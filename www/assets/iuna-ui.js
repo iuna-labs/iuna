@@ -1245,7 +1245,11 @@ window.iunaApp = function iunaApp() {
       try {
         const detail = await this.getJson(`/api/mempool/${item.id}`);
         if (stillSelected()) {
-          this.selectedTransaction = { ...this.selectedTransaction, item: { ...item, ...detail }, loading: false };
+          this.selectedTransaction = {
+            ...this.selectedTransaction,
+            item: { ...item, ...detail, amount: detail.total_output ?? detail.budget ?? item.amount },
+            loading: false,
+          };
         }
       } catch (error) {
         if (stillSelected()) {
@@ -1278,6 +1282,43 @@ window.iunaApp = function iunaApp() {
         kind: "Ledger transaction",
         amount: transaction.total_output,
       }, this.selectedBlockSource());
+    },
+
+    // An activity row only holds a summary. Rewards have no transaction, so they show as is.
+    async openActivityModal(activity) {
+      const { id, amount, heartbeat_height: height } = activity;
+      if (activity.kind === "heartbeat_reward" || activity.kind === "ledger_reward") {
+        this.openTransactionModal({ id, amount, kind: this.activityLabel(activity), reward: true }, `Heartbeat ${height}`);
+        return;
+      }
+      const isTicket = activity.kind === "ticket";
+      const kind = isTicket ? "Mining ticket" : "Ledger transaction";
+      if (activity.pending) {
+        await this.openMempoolModal({ id, kind, amount });
+        return;
+      }
+      this.openTransactionModal({ id, kind, amount }, `Heartbeat ${height}`);
+      this.selectedTransaction = { ...this.selectedTransaction, loading: true };
+      const stillSelected = () => this.selectedTransaction?.item?.id === id;
+      let found = null;
+      try {
+        const [heartbeat] = await this.getJson(`/api/heartbeats?limit=1&before_height=${Number(height) + 1}`);
+        if (Number(heartbeat?.height) === Number(height)) {
+          const block = await this.getJson(`/api/blocks/${heartbeat.block_hash}`);
+          const candidates = isTicket ? block.tickets : block.ledger?.transactions;
+          found = candidates?.find((candidate) => candidate.id === id) || null;
+        }
+      } catch {
+        found = null;
+      }
+      if (!stillSelected()) return;
+      this.selectedTransaction = found
+        ? {
+          ...this.selectedTransaction,
+          item: { ...found, kind, amount: isTicket ? found.budget : found.total_output },
+          loading: false,
+        }
+        : { ...this.selectedTransaction, loading: false, detailMissing: true };
     },
 
     closeTransactionModal() {
@@ -1339,6 +1380,11 @@ window.iunaApp = function iunaApp() {
     transactionModalOutputs() {
       const item = this.selectedTransaction?.item;
       if (!item) return [];
+      if (item.reward) {
+        return [{ label: item.kind, kind: "output", owner: this.status.wallet_public_key, value: item.amount }];
+      }
+      // An activity summary has no ticket terms until its detail loads.
+      if (item.kind === "Mining ticket" && item.lifecycle_heartbeats == null) return [];
       if (item.kind === "Ledger transaction") {
         return [
           ...(item.outputs || []).map((output, index) => ({

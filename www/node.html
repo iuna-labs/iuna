@@ -119,7 +119,8 @@
     .activity-filter.ledgerRewards, .activity-main > .pill.ledgerRewards { --activity-color: var(--green); --activity-border: var(--green-line); --activity-bg: var(--green-soft); }
     .activity-scroll { max-height: min(720px, calc(100vh - 190px)); overflow-y: auto; overscroll-behavior: contain; padding-right: 4px; }
     .activity-list { min-width: 0; display: grid; gap: 6px; }
-    .activity-card { display: grid; grid-template-columns: minmax(0, 1fr) auto; gap: 14px; align-items: center; border: 1px solid var(--line); border-radius: 8px; padding: 11px 12px; background: var(--panel-2); }
+    .activity-card { display: grid; grid-template-columns: minmax(0, 1fr) auto; gap: 14px; align-items: center; border: 1px solid var(--line); border-radius: 8px; padding: 11px 12px; background: var(--panel-2); cursor: pointer; -webkit-user-select: none; user-select: none; }
+    .activity-card:hover, .activity-card:focus-visible { border-color: var(--green); outline: none; box-shadow: 0 0 0 1px rgba(213, 245, 95, .18); }
     .activity-card.pending { border-color: var(--line-strong); background: #191c20; box-shadow: inset 3px 0 0 var(--muted-2); }
     .activity-main { min-width: 0; display: grid; grid-template-columns: 42px minmax(0, 1fr); gap: 12px; align-items: center; }
     .activity-main > .pill { width: 42px; justify-content: center; border-color: var(--activity-border); background: var(--activity-bg); color: var(--activity-color); font-size: 10px; letter-spacing: .04em; text-align: center; }
@@ -422,12 +423,12 @@
             <div class="activity-scroll">
               <div class="activity-list" x-show="filteredActivityItems().length">
                 <template x-for="item in visibleActivityItems()" :key="`${item.pending}:${item.kind}:${item.id}`">
-                  <div class="activity-card" :class="{pending: item.pending}">
+                  <div class="activity-card" :class="{pending: item.pending}" role="button" tabindex="0" @click="openActivityModal(item)" @keydown.enter.self.prevent="openActivityModal(item)" @keydown.space.self.prevent="openActivityModal(item)">
                     <div class="activity-main">
                       <span class="pill" :class="[activityType(item), {pending: item.pending}]" :title="activityLabel(item)" :aria-label="activityLabel(item)" x-text="activityCode(item)"></span>
                       <div class="activity-copy">
                         <div class="activity-title" x-text="activityLabel(item)"></div>
-                        <div class="activity-meta"><span class="activity-counterparty" x-show="item.counterparty"><span x-text="item.kind === 'received' ? 'From ' : 'To '"></span><button class="link contact-link" @click="openContactEditor(item.counterparty)" :title="contactName(item.counterparty) ? 'Edit contact' : 'Add contact'" x-text="contactName(item.counterparty) || short(item.counterparty)"></button><span> · </span></span><span x-text="activityMetaLabel(item)"></span><span> · </span><button class="link activity-id" @click="copyValue(item.id, 'Transaction ID copied')" :title="item.id" x-text="short(item.id)"></button></div>
+                        <div class="activity-meta"><span class="activity-counterparty" x-show="item.counterparty"><span x-text="item.kind === 'received' ? 'From ' : 'To '"></span><button class="link contact-link" @click.stop="openContactEditor(item.counterparty)" :title="contactName(item.counterparty) ? 'Edit contact' : 'Add contact'" x-text="contactName(item.counterparty) || short(item.counterparty)"></button><span> · </span></span><span x-text="activityMetaLabel(item)"></span><span> · </span><button class="link activity-id" @click.stop="copyValue(item.id, 'Transaction ID copied')" :title="item.id" x-text="short(item.id)"></button></div>
                       </div>
                     </div>
                     <div class="activity-side"><div class="activity-amount" :class="{incoming: activitySign(item) === '+'}"><span x-text="activitySign(item)"></span><span x-text="amountLabel(item.amount)"></span> IUNA</div><div class="activity-meta" x-text="item.pending ? 'Pending' : 'Confirmed'"></div></div>
@@ -702,10 +703,10 @@
       </div>
       <div class="tx-modal-summary">
         <div class="tx-field"><span class="tx-label">Source</span><span class="tx-value" x-text="selectedTransaction?.source || '-'"></span></div>
-        <div class="tx-field"><span class="tx-label">Version</span><span class="tx-value" x-text="selectedTransaction?.item?.version ?? '-'"></span></div>
+        <div class="tx-field" x-show="!selectedTransaction?.item?.reward"><span class="tx-label">Version</span><span class="tx-value" x-text="selectedTransaction?.item?.version ?? '-'"></span></div>
         <div class="tx-field"><span class="tx-label" x-text="selectedTransaction?.item?.kind === 'Mining ticket' ? 'Budget' : 'Output total'"></span><span class="tx-value money">IUNA <span x-text="amountLabel(selectedTransaction?.item?.amount)"></span></span></div>
-        <div class="tx-field"><span class="tx-label">Fee</span><span class="tx-value money" x-text="selectedTransaction?.item?.fee == null ? 'Unavailable' : `IUNA ${amountLabel(selectedTransaction.item.fee)}`"></span></div>
-        <div class="tx-field"><span class="tx-label">Total in</span><span class="tx-value money" x-text="transactionModalTotals().in == null ? 'Unavailable' : `IUNA ${amountLabel(transactionModalTotals().in)}`"></span></div>
+        <div class="tx-field" x-show="!selectedTransaction?.item?.reward"><span class="tx-label">Fee</span><span class="tx-value money" x-text="selectedTransaction?.item?.fee == null ? 'Unavailable' : `IUNA ${amountLabel(selectedTransaction.item.fee)}`"></span></div>
+        <div class="tx-field" x-show="!selectedTransaction?.item?.reward"><span class="tx-label">Total in</span><span class="tx-value money" x-text="transactionModalTotals().in == null ? 'Unavailable' : `IUNA ${amountLabel(transactionModalTotals().in)}`"></span></div>
         <div class="tx-field"><span class="tx-label">Total out</span><span class="tx-value money" x-text="transactionModalTotals().out == null ? 'Unavailable' : `IUNA ${amountLabel(transactionModalTotals().out)}`"></span></div>
         <div class="tx-field" x-show="selectedTransaction?.item?.kind === 'Mining ticket'"><span class="tx-label">Lottery duration</span><span class="tx-value"><span x-text="selectedTransaction?.item?.duration"></span> Heartbeats</span></div>
         <div class="tx-field" x-show="selectedTransaction?.item?.kind === 'Mining ticket'"><span class="tx-label">Budget payout</span><span class="tx-value"><span x-text="selectedTransaction?.item?.lifecycle_heartbeats"></span> Heartbeats</span></div>

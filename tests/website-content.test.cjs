@@ -1174,6 +1174,54 @@ test('contacts are validated, de-duplicated and kept in browser storage', () => 
   assert.equal(app.contactName('cd'.repeat(32)), 'Alice');
 });
 
+test('activity rows open the shared transaction modal with loaded details', async () => {
+  const { app } = nodeApp();
+  const requests = [];
+  const ticket = { id: 'ti', version: 1, budget: 38, lifecycle_heartbeats: 19, duration: 10, inputs: [], change: null, fee: 1 };
+  const transaction = { id: 'tx', version: 1, inputs: [{}], outputs: [{ owner: 'a', value: 12 }], total_output: 12, fee: 3, fee_split: null };
+  app.getJson = async (url) => {
+    requests.push(url);
+    if (url.startsWith('/api/heartbeats')) return [{ height: 7, block_hash: 'hash' }];
+    if (url === '/api/blocks/hash') return { tickets: [ticket], ledger: { transactions: [transaction] } };
+    if (url === '/api/mempool/pending') return { ...transaction, id: 'pending' };
+    throw new Error(`unexpected ${url}`);
+  };
+
+  await app.openActivityModal({ kind: 'sent', id: 'tx', heartbeat_height: 7, amount: 5 });
+  assert.equal(requests[0], '/api/heartbeats?limit=1&before_height=8');
+  assert.equal(app.selectedTransaction.source, 'Heartbeat 7');
+  assert.equal(app.selectedTransaction.item.kind, 'Ledger transaction');
+  assert.equal(app.selectedTransaction.item.amount, 12);
+  assert.equal(app.transactionModalInputs().length, 1);
+
+  await app.openActivityModal({ kind: 'ticket', id: 'ti', heartbeat_height: 7, amount: 38 });
+  assert.equal(app.selectedTransaction.item.kind, 'Mining ticket');
+  assert.equal(app.transactionModalOutputs()[0].label, 'Ticket budget');
+
+  await app.openActivityModal({ kind: 'received', id: 'pending', pending: true, amount: 5 });
+  assert.equal(app.selectedTransaction.source, 'Mempool');
+  assert.equal(app.selectedTransaction.item.amount, 12);
+
+  await app.openActivityModal({ kind: 'ticket', id: 'gone', heartbeat_height: 7, amount: 38 });
+  assert.equal(app.selectedTransaction.detailMissing, true);
+  assert.equal(app.transactionModalOutputs().length, 0);
+
+  requests.length = 0;
+  app.status = { wallet_public_key: 'me' };
+  await app.openActivityModal({ kind: 'ledger_reward', id: 'hash', heartbeat_height: 7, amount: 9 });
+  assert.equal(requests.length, 0);
+  assert.equal(app.selectedTransaction.item.kind, 'Ledger reward');
+  assert.equal(
+    app.transactionModalOutputs().map((output) => `${output.label}:${output.owner}:${output.value}`).join(','),
+    'Ledger reward:me:9',
+  );
+
+  const html = content('www/node.html');
+  assert.match(html, /class="activity-card"[^>]*@click="openActivityModal\(item\)"/);
+  assert.match(html, /\.activity-card \{[^}]*cursor: pointer/);
+  assert.match(html, /@click\.stop="copyValue\(item\.id/);
+});
+
 test('clicking an activity public key opens the contact editor', () => {
   const { app, values } = nodeApp();
   const address = 'ab'.repeat(32);
@@ -1194,7 +1242,7 @@ test('clicking an activity public key opens the contact editor', () => {
   assert.equal(app.contactName(address), 'Alice Updated');
 
   const html = content('www/node.html');
-  assert.match(html, /@click="openContactEditor\(item\.counterparty\)"/);
+  assert.match(html, /@click\.stop="openContactEditor\(item\.counterparty\)"/);
   assert.match(html, /id="contact-editor-title"/);
 });
 
