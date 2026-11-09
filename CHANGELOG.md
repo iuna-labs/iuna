@@ -5,6 +5,17 @@ from the Git history and Conventional Commit titles by `deployment.sh`.
 
 ## [Unreleased]
 
+## [0.5.4] - 2026-11-09
+
+### Added
+
+- show local mining power
+
+### Fixed
+
+- link the protocol document instead of the removed plan
+- update sqlite after audit advisory
+
 ## [0.5.3] - 2026-11-08
 
 ### Fixed
