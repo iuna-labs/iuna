@@ -5,10 +5,11 @@ from the Git history and Conventional Commit titles by `deployment.sh`.
 
 ## [Unreleased]
 
-### Changed
+## [0.5.5] - 2026-11-09
 
-- require the Ledger winner to sign non-empty candidates and use an unsigned empty deadline fallback
-- start protocol v2 from a newly pinned genesis
+### Added
+
+- sign ledger candidates
 
 ## [0.5.4] - 2026-11-09
 
