@@ -1,7 +1,7 @@
 const encoder = new TextEncoder();
 // Signatures are scoped to one network, so they cannot be replayed on a fork or relaunch.
 const NETWORK_ID = "iuna-mainnet-candidate";
-const GENESIS_HASH = hexBytes("0000003e0a96d767b897dcfa647e3c152c3486020040a3190803e5db25ae9792");
+const GENESIS_HASH = hexBytes("000000153c54ba2743668be733d2300139288e70be9077e2ea95d09771376309");
 const PKCS8_ED25519_PREFIX = hexBytes("302e020100300506032b657004220420");
 
 export function normalizeSeed(value) {
@@ -161,7 +161,7 @@ export async function buildSignedTransaction({ wallet, utxos, recipient, amount,
   }
   if (total < required) throw new Error("Insufficient spendable balance");
   const transaction = {
-    version: 1,
+    version: 2,
     inputs: selected.map((utxo) => ({
       previous_output: {
         transaction_id: [...hexBytes(utxo.transaction_id)],

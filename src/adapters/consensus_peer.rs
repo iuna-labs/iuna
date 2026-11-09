@@ -131,6 +131,21 @@ impl PeerSession {
                 }
                 Ok(Vec::new())
             }
+            Envelope::Candidates { candidates } => {
+                for candidate in candidates {
+                    if !node.submit_candidate(candidate.clone()).unwrap_or(false) {
+                        continue;
+                    }
+                    for transaction in candidate.transactions {
+                        let id = transaction.id();
+                        self.cache_transaction(transaction.clone());
+                        if !node.has_pending_transaction(&id) {
+                            let _ = node.submit_transaction(transaction);
+                        }
+                    }
+                }
+                Ok(Vec::new())
+            }
         }
     }
 
@@ -540,6 +555,10 @@ mod tests {
                         [31; 32],
                     )
                     .unwrap();
+                }
+                for draft in node.candidate_drafts(wallet.public_key()).unwrap() {
+                    let candidate = wallet.sign_candidate(draft).unwrap();
+                    node.submit_candidate(candidate).unwrap();
                 }
                 let block = node
                     .mine_next(

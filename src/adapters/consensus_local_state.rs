@@ -10,7 +10,7 @@ use std::{
 use anyhow::{Context, Result};
 use serde::{Deserialize, Serialize, de::DeserializeOwned};
 
-use crate::consensus::{TicketTransaction, Transaction};
+use crate::consensus::{Sidecar, TicketTransaction, Transaction};
 
 /// A mempool snapshot is rebuilt from at most this many bytes; anything larger is ignored.
 const MAX_MEMPOOL_FILE_BYTES: u64 = 64 * 1024 * 1024;
@@ -22,6 +22,8 @@ static MINING_WRITE_LOCK: Mutex<()> = Mutex::new(());
 pub struct MempoolSnapshot {
     pub transactions: Vec<Transaction>,
     pub tickets: Vec<TicketTransaction>,
+    #[serde(default)]
+    pub candidates: Vec<Sidecar>,
 }
 
 #[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]

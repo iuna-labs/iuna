@@ -185,7 +185,8 @@ Worker counts are accepted from 1 through 256; using more workers than available
 CPU cores is allowed but normally does not improve throughput.
 The miner never waits for the 60-second interval: pacing comes only from proof
 of work and the difficulty adjustment. It builds work from the current ticket
-and Ledger mempools, refreshes that work every 10 seconds or when a peer
+and signed-candidate pools, or the canonical empty deadline fallback, refreshes
+that work every 10 seconds or when a peer
 extends the tip, searches the SHA-256 nonce space, persists an active tip and
 broadcasts a compact Heartbeat. Its state is reported as `heartbeat_mining_enabled` by
 `GET /api/status`. `POST /api/hash-mining/heartbeat` remains available as a
@@ -196,6 +197,13 @@ mining. The node immediately buys a ten-Heartbeat ticket at the recommended
 budget, then buys another after each ten-Heartbeat interval. This preference and
 the last purchase height survive restarts; it runs without an open browser. The
 state is reported as `ledger_mining_enabled` by `GET /api/status`.
+
+Whenever the wallet is unlocked, the node also watches its active tickets. If
+one wins before its deadline and pending transactions exist, the wallet signs
+the exact candidate body and the node relays it. This signing does not depend on
+continuous ticket purchases being enabled. Heartbeat miners may include that
+candidate unchanged; at the third inclusion slot they instead build the
+mandatory empty unsigned fallback.
 
 Continuous Ledger mining also performs bounded UTXO housekeeping. An automatic
 ticket may consume up to `32` confirmed, unreserved wallet outputs and returns
@@ -210,7 +218,7 @@ the ticket then starts the Proof of Expenditure lottery. This is one-time
 bootstrap behavior: Heartbeat Proof of Work itself has no fixed subsidy.
 
 The node keeps two small files of local, non-consensus state in its data
-directory. `mempool.json` holds pending transactions and tickets; it is written
+directory. `mempool.json` holds pending transactions, tickets and signed candidates; it is written
 at most every 5 seconds when the mempool changed and again on shutdown. At the
 next start every entry goes through normal validation again, so anything that
 was mined or became invalid meanwhile is dropped. `mining.json` remembers whether

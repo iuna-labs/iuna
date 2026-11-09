@@ -138,12 +138,17 @@ async fn main() -> Result<()> {
     };
     let mempool_path = consensus_local_state::mempool_path(&options.data_dir);
     match consensus_local_state::load_mempool(&mempool_path) {
-        Ok(saved) if !saved.transactions.is_empty() || !saved.tickets.is_empty() => {
-            let total = saved.transactions.len() + saved.tickets.len();
-            let restored = node
-                .lock()
-                .await
-                .restore_mempool(saved.transactions, saved.tickets);
+        Ok(saved)
+            if !saved.transactions.is_empty()
+                || !saved.tickets.is_empty()
+                || !saved.candidates.is_empty() =>
+        {
+            let total = saved.transactions.len() + saved.tickets.len() + saved.candidates.len();
+            let restored = node.lock().await.restore_mempool(
+                saved.transactions,
+                saved.tickets,
+                saved.candidates,
+            );
             println!("mempool: restored {restored} of {total} saved entries");
         }
         Ok(_) => {}
@@ -341,6 +346,7 @@ async fn save_mempool(node: &SharedConsensusNode, path: &std::path::Path) -> Res
         MempoolSnapshot {
             transactions: node.pending_transactions(),
             tickets: node.pending_tickets(),
+            candidates: node.pending_candidates(),
         }
     };
     let path = path.to_owned();
@@ -466,9 +472,6 @@ async fn run_ledger_miner(
 ) {
     loop {
         tokio::time::sleep(Duration::from_secs(1)).await;
-        if !enabled.load(Ordering::Relaxed) {
-            continue;
-        }
         let (wallet, preference_path) = {
             let state = wallet_state.read().expect("wallet state lock poisoned");
             let Some(wallet) = state.unlocked.clone() else {
@@ -477,6 +480,41 @@ async fn run_ledger_miner(
             };
             (wallet, consensus_local_state::mining_path(&state.path))
         };
+        let signed_candidates = {
+            let mut node = node.lock().await;
+            match node.candidate_drafts(wallet.public_key()) {
+                Ok(drafts) => {
+                    let mut accepted = Vec::new();
+                    for draft in drafts {
+                        let candidate = match wallet.sign_candidate(draft) {
+                            Ok(candidate) => candidate,
+                            Err(error) => {
+                                eprintln!("signing Ledger candidate failed: {error:#}");
+                                continue;
+                            }
+                        };
+                        match node.submit_candidate(candidate.clone()) {
+                            Ok(true) => accepted.push(candidate),
+                            Ok(false) => {}
+                            Err(error) => {
+                                eprintln!("submitting signed Ledger candidate failed: {error:#}")
+                            }
+                        }
+                    }
+                    accepted
+                }
+                Err(error) => {
+                    eprintln!("building signed Ledger candidate failed: {error:#}");
+                    Vec::new()
+                }
+            }
+        };
+        if !signed_candidates.is_empty() {
+            relay.candidates(signed_candidates);
+        }
+        if !enabled.load(Ordering::Relaxed) {
+            continue;
+        }
         let mut lottery_seed = [0; 32];
         if getrandom(&mut lottery_seed).is_err() {
             eprintln!("continuous Ledger mining needs secure randomness");

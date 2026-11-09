@@ -307,6 +307,8 @@ pub struct LedgerTransactionView {
 #[derive(Debug, Serialize)]
 pub struct LedgerBlockView {
     pub candidate_hash: String,
+    pub candidate_signature: Option<String>,
+    pub deadline_fallback: bool,
     pub winning_ticket_id: String,
     pub lottery_heartbeat: String,
     pub lottery_height: u64,
@@ -869,6 +871,9 @@ pub fn block_detail_view(
     let mut fees_before = 0_u64;
     let ledger = block.sidecar.as_ref().map(|sidecar| LedgerBlockView {
         candidate_hash: hex(&sidecar.header.hash()),
+        candidate_signature: (!sidecar.header.signature.is_empty())
+            .then(|| hex(&sidecar.header.signature)),
+        deadline_fallback: sidecar.transactions.is_empty() && sidecar.header.signature.is_empty(),
         winning_ticket_id: hex(&sidecar.header.ticket_id),
         lottery_heartbeat: hex(&sidecar.header.lottery_heartbeat),
         lottery_height: sidecar.header.lottery_height,
@@ -3032,6 +3037,10 @@ mod tests {
                 .tip()
                 .tip_timestamp
                 .saturating_add(HEARTBEAT_TARGET_INTERVAL_SECS);
+            for draft in node.candidate_drafts(wallet.public_key()).unwrap() {
+                let candidate = wallet.sign_candidate(draft).unwrap();
+                node.submit_candidate(candidate).unwrap();
+            }
             node.mine_next(timestamp, wallet.public_key()).unwrap();
         }
 
@@ -3080,6 +3089,10 @@ mod tests {
                 .tip()
                 .tip_timestamp
                 .saturating_add(HEARTBEAT_TARGET_INTERVAL_SECS);
+            for draft in node.candidate_drafts(wallet.public_key()).unwrap() {
+                let candidate = wallet.sign_candidate(draft).unwrap();
+                node.submit_candidate(candidate).unwrap();
+            }
             node.mine_next(timestamp, wallet.public_key()).unwrap();
             if node.pending_transaction_count() == 0 {
                 break;
@@ -3162,6 +3175,14 @@ mod tests {
         assert_eq!(
             detail["ledger"]["transactions"].as_array().unwrap().len(),
             1
+        );
+        assert_eq!(detail["ledger"]["deadline_fallback"], false);
+        assert_eq!(
+            detail["ledger"]["candidate_signature"]
+                .as_str()
+                .unwrap()
+                .len(),
+            128
         );
         assert!(
             detail["ledger"]["transactions"][0]["outputs"]

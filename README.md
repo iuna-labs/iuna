@@ -13,8 +13,7 @@ regardless of an owner's existing balance.
 
 iuna currently runs as a **candidate mainnet**. It is not mainnet yet, and the
 protocol remains experimental. The chain is intended to carry forward if the
-candidate is promoted, so coins will probably remain valid, but that is not
-guaranteed. It has a new genesis: coins from earlier networks do not carry over.
+candidate is promoted, but that is not guaranteed.
 
 ## Protocol at a glance
 
@@ -23,6 +22,8 @@ guaranteed. It has a new genesis: coins from earlier networks do not carry over.
 - Mining tickets become active after confirmation and last 1–1,440
   heartbeats.
 - Ticket expenditure is paid to Heartbeat miners over the ticket lifecycle.
+- Ledger winners sign non-empty candidates; Heartbeat miners may only include them unchanged.
+- A missed winner deadline settles as a deterministic empty, unsigned fallback.
 - The Ledger winner receives the Ledger subsidy and its share of transaction
   fees.
 - Legacy delay, burn, migration, recovery, and height-activation paths are not

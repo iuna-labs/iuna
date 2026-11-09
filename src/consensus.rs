@@ -24,7 +24,7 @@ pub type Hash = [u8; 32];
 pub type PublicKey = [u8; 32];
 
 pub const NETWORK_ID: &str = "iuna-mainnet-candidate";
-pub const PROTOCOL_VERSION: u16 = 1;
+pub const PROTOCOL_VERSION: u16 = 2;
 pub const UNITS_PER_IUNA: Amount = 100_000_000;
 pub const MAX_MONEY: Amount = 4_207_680_100_000_000;
 pub const GENESIS_REWARD: Amount = UNITS_PER_IUNA;
@@ -71,18 +71,18 @@ pub const MAX_TARGET: Hash = [
 /// Pinned like Bitcoin's genesis block, so nodes never mine it at startup. Re-pin with
 /// [`search_genesis_nonce`] whenever a genesis field or [`MAX_TARGET`] changes.
 #[cfg(not(any(test, feature = "e2e")))]
-pub const GENESIS_NONCE: u64 = 44_288_543;
+pub const GENESIS_NONCE: u64 = 2_191_740;
 #[cfg(not(any(test, feature = "e2e")))]
 pub const GENESIS_HASH: Hash = [
-    0x00, 0x00, 0x00, 0x3e, 0x0a, 0x96, 0xd7, 0x67, 0xb8, 0x97, 0xdc, 0xfa, 0x64, 0x7e, 0x3c, 0x15,
-    0x2c, 0x34, 0x86, 0x02, 0x00, 0x40, 0xa3, 0x19, 0x08, 0x03, 0xe5, 0xdb, 0x25, 0xae, 0x97, 0x92,
+    0x00, 0x00, 0x00, 0x15, 0x3c, 0x54, 0xba, 0x27, 0x43, 0x66, 0x8b, 0xe7, 0x33, 0xd2, 0x30, 0x01,
+    0x39, 0x28, 0x8e, 0x70, 0xbe, 0x90, 0x77, 0xe2, 0xea, 0x95, 0xd0, 0x97, 0x71, 0x37, 0x63, 0x09,
 ];
 #[cfg(any(test, feature = "e2e"))]
-pub const GENESIS_NONCE: u64 = 3_211;
+pub const GENESIS_NONCE: u64 = 7_230;
 #[cfg(any(test, feature = "e2e"))]
 pub const GENESIS_HASH: Hash = [
-    0x00, 0x0e, 0x48, 0xd2, 0x99, 0x0e, 0x51, 0xcc, 0x64, 0x78, 0xaf, 0x56, 0x75, 0xad, 0x26, 0x47,
-    0x68, 0x2f, 0xb3, 0x2d, 0x8e, 0x35, 0xf5, 0x8f, 0xdc, 0x53, 0xfe, 0xf1, 0xb7, 0x31, 0x96, 0x8c,
+    0x00, 0x0b, 0x31, 0xd4, 0x47, 0x4a, 0x3f, 0x5b, 0x44, 0xd8, 0x3a, 0x1c, 0xe7, 0x80, 0xf4, 0x43,
+    0x89, 0x69, 0x86, 0x77, 0xd9, 0x17, 0x52, 0x4b, 0xe3, 0xb0, 0x75, 0x72, 0x93, 0xf0, 0x7d, 0x3b,
 ];
 
 const ZERO_HASH: Hash = [0; 32];
@@ -312,14 +312,25 @@ pub struct CandidateHeader {
     pub slot: u64,
     pub lottery_output: Hash,
     pub transactions_root: Hash,
+    /// Ed25519 signature by the winning ticket's mining key. The canonical deadline fallback is
+    /// deliberately unsigned; every non-empty candidate must carry exactly one valid signature.
+    pub signature: Vec<u8>,
 }
 
 impl CandidateHeader {
     pub fn hash(&self) -> Hash {
-        tagged_hash(b"IUNA-LEDGER-CANDIDATE-v1", &self.canonical())
+        tagged_hash(b"IUNA-LEDGER-CANDIDATE-v2", &self.canonical(true))
     }
 
-    fn canonical(&self) -> Vec<u8> {
+    pub fn signing_digest(&self) -> Hash {
+        let mut out = Vec::new();
+        put_bytes(&mut out, NETWORK_ID.as_bytes());
+        out.extend_from_slice(&GENESIS_HASH);
+        out.extend_from_slice(&self.canonical(false));
+        tagged_hash(b"IUNA-LEDGER-CANDIDATE-SIGN-v1", &out)
+    }
+
+    fn canonical(&self, include_signature: bool) -> Vec<u8> {
         let mut out = Vec::new();
         put_u16(&mut out, self.version);
         out.extend_from_slice(&self.lottery_heartbeat);
@@ -329,6 +340,9 @@ impl CandidateHeader {
         put_u64(&mut out, self.slot);
         out.extend_from_slice(&self.lottery_output);
         out.extend_from_slice(&self.transactions_root);
+        if include_signature {
+            put_bytes(&mut out, &self.signature);
+        }
         out
     }
 }
@@ -345,7 +359,7 @@ impl Sidecar {
     }
 
     fn canonical(&self) -> Vec<u8> {
-        let mut out = self.header.canonical();
+        let mut out = self.header.canonical(true);
         put_u32(&mut out, self.transactions.len() as u32);
         for transaction in &self.transactions {
             put_bytes(&mut out, &transaction.canonical(true));
@@ -1165,6 +1179,33 @@ pub fn inclusion_winners(
     })
 }
 
+/// Validates a signed, non-empty Ledger candidate for one of the winners that may be included in
+/// the next Heartbeat. Deadline fallbacks are constructed by Heartbeat miners and therefore do
+/// not enter the candidate pool.
+pub fn validate_pending_candidate(state: &ConsensusState, sidecar: &Sidecar) -> Result<Amount> {
+    let inclusion_height = next_height(state.height)?;
+    let selection = inclusion_winners(state, inclusion_height)?;
+    if selection.required.is_some() {
+        return Err(ConsensusError::Invalid(
+            "deadline accepts only the canonical empty fallback",
+        ));
+    }
+    if sidecar.transactions.is_empty() {
+        return Err(ConsensusError::Invalid(
+            "signed Ledger candidate must contain transactions",
+        ));
+    }
+    check_sidecar_commitments(sidecar)?;
+    let winner = eligible_sidecar_winner(state, sidecar, selection.available)?;
+    verify_signature(
+        &winner.mining_public_key,
+        &sidecar.header.signing_digest(),
+        &sidecar.header.signature,
+    )?;
+    let mut snapshot = state.clone();
+    apply_ledger_batch(&mut snapshot, &sidecar.transactions)
+}
+
 pub fn validate_pending_transaction(
     state: &ConsensusState,
     transaction: &Transaction,
@@ -1854,18 +1895,26 @@ fn check_body_commitments(block: &HeartbeatBlock) -> Result<()> {
         return Err(ConsensusError::Invalid("candidate commitment mismatch"));
     }
     if let Some(sidecar) = &block.sidecar {
-        let transaction_ids = sidecar
-            .transactions
-            .iter()
-            .map(Transaction::id)
-            .collect::<Vec<_>>();
-        ensure_canonical_order(
-            transaction_ids.iter().copied(),
-            "Ledger transactions are not in canonical order",
-        )?;
-        if sidecar.header.transactions_root != merkle_root(&transaction_ids) {
-            return Err(ConsensusError::Invalid("invalid candidate header"));
-        }
+        check_sidecar_commitments(sidecar)?;
+    }
+    Ok(())
+}
+
+fn check_sidecar_commitments(sidecar: &Sidecar) -> Result<()> {
+    if sidecar.canonical().len() > MAX_LEDGER_SIDECAR_BYTES {
+        return Err(ConsensusError::Invalid("Ledger sidecar exceeds 512 KiB"));
+    }
+    let transaction_ids = sidecar
+        .transactions
+        .iter()
+        .map(Transaction::id)
+        .collect::<Vec<_>>();
+    ensure_canonical_order(
+        transaction_ids.iter().copied(),
+        "Ledger transactions are not in canonical order",
+    )?;
+    if sidecar.header.transactions_root != merkle_root(&transaction_ids) {
+        return Err(ConsensusError::Invalid("invalid candidate header"));
     }
     Ok(())
 }
@@ -1889,8 +1938,47 @@ fn validate_sidecar_selection(
     {
         return Err(ConsensusError::Invalid("invalid candidate header"));
     }
-    let winner = selection
-        .available
+    let winner = eligible_sidecar_winner(parent, sidecar, selection.available)?;
+    match selection.required {
+        Some(required) if required != winner => {
+            return Err(ConsensusError::Invalid(
+                "candidate does not use mandatory deadline winner",
+            ));
+        }
+        Some(_) => {
+            if !sidecar.transactions.is_empty() || !sidecar.header.signature.is_empty() {
+                return Err(ConsensusError::Invalid(
+                    "deadline fallback must be empty and unsigned",
+                ));
+            }
+        }
+        None => {
+            if sidecar.transactions.is_empty() {
+                return Err(ConsensusError::Invalid(
+                    "pre-deadline candidate must contain transactions",
+                ));
+            }
+            verify_signature(
+                &winner.mining_public_key,
+                &sidecar.header.signing_digest(),
+                &sidecar.header.signature,
+            )?;
+        }
+    }
+    Ok(Some(winner))
+}
+
+fn eligible_sidecar_winner(
+    parent: &ConsensusState,
+    sidecar: &Sidecar,
+    available: Vec<Winner>,
+) -> Result<Winner> {
+    if sidecar.header.version != PROTOCOL_VERSION
+        || sidecar.header.parent_anchor != parent.ledger_parent_anchor
+    {
+        return Err(ConsensusError::Invalid("invalid candidate header"));
+    }
+    available
         .into_iter()
         .find(|winner| {
             winner.ticket_id == sidecar.header.ticket_id
@@ -1898,18 +1986,11 @@ fn validate_sidecar_selection(
                 && winner.output == sidecar.header.lottery_output
                 && winner.heartbeat == sidecar.header.lottery_heartbeat
                 && winner.heartbeat_height == sidecar.header.lottery_height
+                && winner.parent_anchor == sidecar.header.parent_anchor
         })
         .ok_or(ConsensusError::Invalid(
             "candidate does not reference an eligible winner",
-        ))?;
-    if let Some(required) = selection.required
-        && required != winner
-    {
-        return Err(ConsensusError::Invalid(
-            "candidate does not use mandatory deadline winner",
-        ));
-    }
-    Ok(Some(winner))
+        ))
 }
 
 fn compare_winners(left: &Winner, right: &Winner) -> std::cmp::Ordering {
@@ -2619,6 +2700,7 @@ mod tests {
                 transactions_root: merkle_root(
                     &transactions.iter().map(Transaction::id).collect::<Vec<_>>(),
                 ),
+                signature: Vec::new(),
             },
             transactions,
         };
@@ -3384,6 +3466,7 @@ mod tests {
                 slot: winner.slot,
                 lottery_output: winner.output,
                 transactions_root: merkle_root(&[]),
+                signature: Vec::new(),
             },
             transactions: Vec::new(),
         };
@@ -3414,6 +3497,106 @@ mod tests {
             validate_sidecar_selection(&state, &included),
             Ok(Some(winner))
         );
+
+        let mut signed_fallback = included;
+        let sidecar = signed_fallback.sidecar.as_mut().unwrap();
+        sidecar.header.signature = vec![0; 64];
+        signed_fallback.header.candidate_hash = Some(sidecar.header.hash());
+        assert_eq!(
+            validate_sidecar_selection(&state, &signed_fallback),
+            Err(ConsensusError::Invalid(
+                "deadline fallback must be empty and unsigned"
+            ))
+        );
+    }
+
+    #[test]
+    fn nonempty_candidate_requires_the_winning_ticket_signature_before_deadline() {
+        let candidate_key = SigningKey::from_bytes(&[27; 32]);
+        let spending_key = SigningKey::from_bytes(&GENESIS_SECRET);
+        let point = OutPoint {
+            transaction_id: [31; 32],
+            output_index: 0,
+        };
+        let mut transaction = Transaction {
+            version: PROTOCOL_VERSION,
+            inputs: vec![Input {
+                previous_output: point.clone(),
+                public_key: spending_key.verifying_key().to_bytes(),
+                signature: Vec::new(),
+            }],
+            outputs: vec![Output {
+                owner: [32; 32],
+                value: 900,
+            }],
+        };
+        transaction.inputs[0].signature = spending_key
+            .sign(&transaction.signing_digest(0, &[1_000]).unwrap())
+            .to_bytes()
+            .to_vec();
+
+        let lottery_heartbeat = Heartbeat {
+            height: 7,
+            hash: [33; 32],
+            parent_anchor: LEDGER_GENESIS_ANCHOR,
+        };
+        let mut tracked = ticket(MIN_TICKET_BUDGET, 2, 1);
+        tracked.mining_public_key = candidate_key.verifying_key().to_bytes();
+        let mut state = ConsensusState {
+            height: 8,
+            tip: [34; 32],
+            tip_timestamp: GENESIS_TIMESTAMP + 80,
+            tip_target: MAX_TARGET,
+            genesis_timestamp: GENESIS_TIMESTAMP,
+            utxos: BTreeMap::from([(
+                point,
+                Output {
+                    owner: spending_key.verifying_key().to_bytes(),
+                    value: 1_000,
+                },
+            )]),
+            tickets: BTreeMap::new(),
+            heartbeats: vec![lottery_heartbeat.clone()],
+            ledger_parent_anchor: LEDGER_GENESIS_ANCHOR,
+            ledger_blocks: 0,
+            minted: 1_000 + tracked.budget,
+            chainwork: BigUint::zero(),
+            recent_timestamps: vec![GENESIS_TIMESTAMP + 80],
+        };
+        let winner = (0u32..10_000)
+            .find_map(|seed| {
+                tracked.lottery_seed[28..].copy_from_slice(&seed.to_be_bytes());
+                state.tickets = BTreeMap::from([(tracked.id, tracked.clone())]);
+                lottery_winners(&state, &lottery_heartbeat)
+                    .unwrap()
+                    .into_iter()
+                    .next()
+            })
+            .expect("the ticket should win a pre-deadline lottery");
+        let mut sidecar = Sidecar {
+            header: CandidateHeader {
+                version: PROTOCOL_VERSION,
+                lottery_heartbeat: winner.heartbeat,
+                lottery_height: winner.heartbeat_height,
+                parent_anchor: winner.parent_anchor,
+                ticket_id: winner.ticket_id,
+                slot: winner.slot,
+                lottery_output: winner.output,
+                transactions_root: merkle_root(&[transaction.id()]),
+                signature: Vec::new(),
+            },
+            transactions: vec![transaction],
+        };
+
+        assert!(validate_pending_candidate(&state, &sidecar).is_err());
+        sidecar.header.signature = candidate_key
+            .sign(&sidecar.header.signing_digest())
+            .to_bytes()
+            .to_vec();
+        assert_eq!(validate_pending_candidate(&state, &sidecar), Ok(100));
+
+        sidecar.header.signature[0] ^= 1;
+        assert!(validate_pending_candidate(&state, &sidecar).is_err());
     }
 
     /// The browser wallet signs Ledger transactions itself; this vector is generated by

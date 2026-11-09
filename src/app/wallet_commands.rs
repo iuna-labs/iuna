@@ -6,7 +6,7 @@ use anyhow::{Result, bail};
 use ed25519_dalek::{Signer, SigningKey};
 
 use crate::consensus::{
-    Amount, ConsensusState, Hash, Input, OutPoint, Output, PROTOCOL_VERSION, PublicKey,
+    Amount, ConsensusState, Hash, Input, OutPoint, Output, PROTOCOL_VERSION, PublicKey, Sidecar,
     TicketInput, TicketTransaction, Transaction, input_values, validate_pending_ticket,
     validate_pending_transaction,
 };
@@ -45,6 +45,21 @@ impl Wallet {
 
     pub fn public_key(&self) -> PublicKey {
         self.signing_key.verifying_key().to_bytes()
+    }
+
+    /// Signs a non-empty Ledger candidate for a ticket whose mining key belongs to this wallet.
+    /// Eligibility and transaction validity are checked by the node when the candidate is
+    /// submitted; signing only proves that the winner authorized this exact content.
+    pub fn sign_candidate(&self, mut candidate: Sidecar) -> Result<Sidecar> {
+        if candidate.transactions.is_empty() {
+            bail!("the unsigned deadline fallback must not be wallet-signed");
+        }
+        candidate.header.signature = self
+            .signing_key
+            .sign(&candidate.header.signing_digest())
+            .to_bytes()
+            .to_vec();
+        Ok(candidate)
     }
 
     pub fn balance(&self, state: &ConsensusState) -> Amount {

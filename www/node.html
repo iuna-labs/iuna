@@ -618,6 +618,7 @@
                 <div class="tx-section-title"><span>Ledger transactions</span><span class="tx-section-meta"><span x-text="selectedBlockDetail?.ledger?.transactions.length ?? 0"></span> included</span></div>
                 <div class="tx-fields" style="padding:0 0 10px">
                   <div class="tx-field"><span class="tx-label">Candidate</span><code class="tx-value" x-text="selectedBlockDetail?.ledger?.candidate_hash"></code></div>
+                  <div class="tx-field"><span class="tx-label">Authorization</span><code class="tx-value" x-text="selectedBlockDetail?.ledger?.deadline_fallback ? 'Unsigned deadline fallback' : selectedBlockDetail?.ledger?.candidate_signature"></code></div>
                   <div class="tx-field"><span class="tx-label">Winning ticket</span><code class="tx-value" x-text="selectedBlockDetail?.ledger?.winning_ticket_id"></code></div>
                   <div class="tx-field"><span class="tx-label">Lottery</span><span class="tx-value">Heartbeat #<span x-text="selectedBlockDetail?.ledger?.lottery_height"></span> · slot <span x-text="selectedBlockDetail?.ledger?.slot"></span></span></div>
                 </div>

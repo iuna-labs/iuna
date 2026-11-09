@@ -1,14 +1,15 @@
 //! Bounded P2P wire objects.
 //!
 //! Transport sessions can reuse the existing TCP supervision, peer book and line framing while
-//! speaking this separate network contract. Ledger candidates are never standalone gossip objects.
+//! speaking this separate network contract. Winner-signed Ledger candidates are relayed as
+//! standalone objects; the unsigned deadline fallback is built deterministically by miners.
 
 use anyhow::{Context, Result, bail};
 use serde::{Deserialize, Serialize};
 
 use crate::consensus::{
     CandidateHeader, GENESIS_HASH, Hash, HeartbeatBlock, HeartbeatHeader, NETWORK_ID,
-    PROTOCOL_VERSION, TicketTransaction, Transaction, tagged_hash,
+    PROTOCOL_VERSION, Sidecar, TicketTransaction, Transaction, tagged_hash,
 };
 
 pub const MAX_WIRE_LINE_BYTES: usize = 8 * 1024 * 1024;
@@ -17,6 +18,7 @@ pub const MAX_LOCATOR_HASHES: usize = 32;
 pub const MAX_INVENTORY_HASHES: usize = 256;
 pub const MAX_RELAY_TRANSACTIONS: usize = 1_024;
 pub const MAX_RELAY_TICKETS: usize = 256;
+pub const MAX_RELAY_CANDIDATES: usize = 8;
 pub const MAX_SHORT_IDS: usize = 32_768;
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
@@ -118,6 +120,9 @@ pub enum Envelope {
     Tickets {
         tickets: Vec<TicketTransaction>,
     },
+    Candidates {
+        candidates: Vec<Sidecar>,
+    },
 }
 
 impl Envelope {
@@ -147,6 +152,14 @@ impl Envelope {
             }
             Self::Tickets { tickets } if tickets.len() > MAX_RELAY_TICKETS => {
                 bail!("ticket relay exceeds item limit")
+            }
+            Self::Candidates { candidates }
+                if candidates.len() > MAX_RELAY_CANDIDATES
+                    || candidates.iter().any(|candidate| {
+                        candidate.canonical_size() > crate::consensus::MAX_LEDGER_SIDECAR_BYTES
+                    }) =>
+            {
+                bail!("signed candidate relay exceeds limits")
             }
             _ => Ok(()),
         }

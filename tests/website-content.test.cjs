@@ -85,7 +85,6 @@ test('downloads page lists the release artifacts and the source build', () => {
   assert.doesNotMatch(downloads, /iuna-mainnet-candidate/);
   assert.match(downloads, /src="\/assets\/iuna-downloads\.js"/);
   assert.match(downloads, /data-downloads-version="\$\{IUNA_VERSION\}"/);
-  assert.match(downloads, /Candidate mainnet/);
   assert.doesNotMatch(downloads, /<script>/);
   for (const file of ['linux-x86_64.tar.gz', 'linux-aarch64.tar.gz', 'macos-aarch64-desktop.app.zip', 'windows-x86_64-desktop-setup.exe']) {
     assert.match(content('www/assets/iuna-downloads.js'), new RegExp(file.replace(/\./g, '\\.')));

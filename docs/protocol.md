@@ -10,19 +10,19 @@ The goal is that the same expenditure always buys the same mining weight, and th
 
 Spending more IUNA deliberately gives more relative influence over the Ledger lottery. The difference from stake is that ticket weight is paid for again and again: the budget is locked when the ticket is included, is never refunded, and the ticket disappears after at most about a day. The same is true of the old burn idea, but expenditure is a transfer rather than destruction. That keeps the money supply stable without a reissue pool, recovery blocks, claim accumulators, separate state rent or special recovery rewards.
 
-This is still experimental. The rules below describe the current candidate mainnet protocol, not a proven mainnet design. The chain is intended to carry forward if the candidate is promoted, so coins will probably remain valid, but that is not guaranteed.
+This is still experimental. The rules below describe candidate protocol, not a proven mainnet design. Version 2 starts from a clean genesis; earlier candidate coins do not carry over. The chain is intended to carry forward if the candidate is promoted, but that is not guaranteed.
 
 ## Candidate Parameters
 
 - network name: `iuna-mainnet-candidate`;
-- protocol version: `1`;
+- protocol version: `2`;
 - Heartbeat target block time: `60 seconds`;
 - difficulty adjustment: relative ASERT with a half-life of `60` Heartbeats (`1 hour`);
 - median-time-past window: `11` blocks;
 - maximum future timestamp drift: `10 minutes`;
 - proof-of-work limit and genesis target: `0000003fffffffffffffffffffffffffffffffffffffffffffffffffffffffff`;
-- genesis nonce: `44288543`;
-- genesis hash: `0000003e0a96d767b897dcfa647e3c152c3486020040a3190803e5db25ae9792`;
+- genesis nonce: `2191740`;
+- genesis hash: `000000153c54ba2743668be733d2300139288e70be9077e2ea95d09771376309`;
 - genesis timestamp: `1794077841`;
 - genesis miner key: `d75a980182b10ab7d54bfed3c964073a0ee172f3daa62325af021a68f707511a`;
 - smallest unit: `1 IUNA = 100_000_000` units;
@@ -240,18 +240,19 @@ The expenditure payout makes selective withholding more expensive; it does not r
 
 ### Candidates
 
-Any node, in particular any Heartbeat miner, can build a body for a publicly winning ticket. A candidate header contains at least:
+The owner of a publicly winning ticket may build a non-empty body and authorize its exact contents with the ticket's mining key. A candidate header contains:
 
 - protocol version;
 - lottery heartbeat hash and height;
 - Ledger parent anchor;
 - ticket ID and slot index;
 - lottery output `y`;
-- the transactions Merkle root.
+- the transactions Merkle root;
+- an Ed25519 signature by the winning ticket's mining key.
 
-The candidate hash is `H_C = SHA256("IUNA-LEDGER-CANDIDATE-v1" || canonical candidate header)`.
+The signature digest is a domain-separated hash of the network ID, genesis hash and unsigned candidate header. The candidate hash is `H_C = SHA256("IUNA-LEDGER-CANDIDATE-v2" || canonical signed candidate header)`.
 
-There is no producer signature; ordinary transactions keep their own signatures. The subsidy and the winner's fee share always go to the mining public key in the winning ticket.
+Ordinary transactions keep their own signatures. A valid candidate signature authorizes selection and ordering only; it cannot change those transactions. The subsidy and the winner's fee share always go to the same mining public key. Heartbeat miners can include a signed candidate unchanged, but cannot construct or edit a non-empty one for somebody else's ticket.
 
 ### A Linear Chain
 
@@ -262,13 +263,13 @@ That way a Ledger ID automatically identifies the full Heartbeat context and pos
 
 ### Inclusion Window and Mandatory Fallback
 
-- A winner from heartbeat `T` may be included in `T + 1`, `T + 2` and `T + 3`, as long as the Ledger parent anchor does not change.
-- Within that window a Heartbeat miner may build and include any fully valid body for a valid winner.
-- Candidates are not relayed as separate consensus objects. Nodes relay transactions, and Heartbeat miners build bodies from their own mempool. This avoids candidate pinning and replacement rules.
+- A winner from heartbeat `T` may publish signed non-empty candidates for inclusion in `T + 1` or `T + 2`, as long as the Ledger parent anchor does not change.
+- Nodes gossip complete signed candidates. A node keeps at most one candidate per winning ticket slot: the candidate with the highest valid transaction-fee total, then the lowest candidate hash.
+- A Heartbeat miner may include an available signed candidate unchanged, or include no sidecar while no winner is at its deadline.
 - Before processing the sidecar of Heartbeat block `U`, validators determine `E_U`: all winners from lottery heartbeat `T = U - 3` whose parent anchor is still the current Ledger parent.
-- If `E_U` is not empty, a sidecar is mandatory and must use the winner in `E_U` with the lowest normalized score `y / w`. A younger winner may not take the deadline's place. If the miner has no body with transactions, it builds a canonical empty fallback sidecar for that winner.
+- If `E_U` is not empty, a sidecar is mandatory and must use the winner in `E_U` with the lowest normalized score `y / w`. That deadline sidecar is canonical, empty and unsigned. A signed or non-empty sidecar and a younger winner may not take its place.
 - Scores are compared without floats: `a` beats `b` if `y_a · w_b < y_b · w_a`, with the lowest ticket ID winning a tie. The values are widened to unsigned 512-bit integers and the products are exact.
-- Only when `E_U` is empty may the miner choose freely among the other valid winners still inside their window, or include no sidecar at all.
+- Only when `E_U` is empty may the miner choose among signed non-empty candidates for the other winners still inside their first two inclusion slots, or include no sidecar at all.
 
 ### Compact Block Relay
 
@@ -361,7 +362,7 @@ A synthetic output with amount zero is never created and cannot be referenced as
 
 ## Encoding and State Root
 
-Canonical encoding is big-endian and length-prefixed. Merkle trees are domain-separated and duplicate the last node on odd levels. Ordinary and ticket inputs use Ed25519 only and sign a domain-separated SHA-256 digest of the network ID, the genesis hash, the unsigned transaction, the value of every spent output in input order, and their input index. The network scope stops a signature from being replayed on a fork or relaunch that shares the same outpoints. The input values stop a node from misreporting a balance so that the wallet pays the difference as a fee: the signature would then be invalid. Synthetic Ledger output index `0` is the subsidy and index `1` the winner fees; the combined Heartbeat payout uses index `0`. Zero outputs are not created.
+Canonical encoding is big-endian and length-prefixed. Merkle trees are domain-separated and duplicate the last node on odd levels. Ordinary and ticket inputs use Ed25519 only and sign a domain-separated SHA-256 digest of the network ID, the genesis hash, the unsigned transaction, the value of every spent output in input order, and their input index. Signed Ledger candidates use a separate domain and sign the network ID, genesis hash and unsigned candidate header with the winning ticket's mining key. The network scope stops signatures from being replayed on a fork or relaunch. The input values stop a node from misreporting a balance so that the wallet pays the difference as a fee: the signature would then be invalid. Synthetic Ledger output index `0` is the subsidy and index `1` the winner fees; the combined Heartbeat payout uses index `0`. Zero outputs are not created.
 
 The state root commits the height, minted supply, Ledger block count, UTXOs and tracked tickets. The tip hash, timestamps, chainwork, heartbeat history and Ledger parent anchor are derived chain indexes. That is why there is no hash cycle when the hash of the including Heartbeat block becomes the next Ledger parent anchor.
 
@@ -372,7 +373,7 @@ The state root commits the height, minted supply, Ledger block count, UTXOs and 
 - More expenditure deliberately gives more relative mining influence.
 - The Heartbeat Chain uses SHA-256 PoW and is not ASIC-resistant. ASIC hashpower gives sequencing, censorship and reorg power over both layers.
 - Fresh Heartbeat hashes are economically, not cryptographically, hard to bias. A miner can discard a found block after seeing the lottery outcome. Expenditure payouts make that more expensive but do not guarantee that publishing is rational; Ledger rewards, ticket-weight concentration, censorship value and outside bribes remain part of the PoW security model.
-- Heartbeat miners sequence the Ledger and choose its transactions. The mandatory deadline fallback guarantees progress, not transaction neutrality.
+- Ledger winners select and sign non-empty transaction bodies. Heartbeat miners still choose which available signed candidate to include and may censor all of them until the mandatory empty deadline fallback. The fallback guarantees progress, not transaction neutrality or throughput.
 
 ## Still to Validate for a Mainnet Profile
 

@@ -41,7 +41,7 @@ test('browser wallet builds signatures accepted by Ed25519', async () => {
     fee: 10,
   });
 
-  assert.equal(transaction.version, 1);
+  assert.equal(transaction.version, 2);
   assert.deepEqual(transaction.outputs.map((output) => output.value), [600, 390]);
   assert.equal(transaction.inputs[0].signature.length, 64);
   const publicKey = await crypto.subtle.importKey('raw', wallet.publicKey, 'Ed25519', false, ['verify']);

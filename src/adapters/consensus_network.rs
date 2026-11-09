@@ -23,14 +23,14 @@ use tokio::{
 use crate::{
     adapters::{
         consensus_p2p::{
-            CompactBlock, Envelope, Hello, MAX_RELAY_TICKETS, MAX_RELAY_TRANSACTIONS,
-            MAX_WIRE_LINE_BYTES, decode_line, encode_line,
+            CompactBlock, Envelope, Hello, MAX_RELAY_CANDIDATES, MAX_RELAY_TICKETS,
+            MAX_RELAY_TRANSACTIONS, MAX_WIRE_LINE_BYTES, decode_line, encode_line,
         },
         consensus_peer::PeerSession,
         consensus_store::ConsensusChainStore,
     },
     app::consensus_node::Node,
-    consensus::{HeartbeatBlock, TicketTransaction, Transaction},
+    consensus::{HeartbeatBlock, Sidecar, TicketTransaction, Transaction},
 };
 
 const MAX_INBOUND_SESSIONS: usize = 128;
@@ -473,6 +473,14 @@ impl ConsensusRelay {
             });
         }
     }
+
+    pub fn candidates(&self, candidates: Vec<Sidecar>) {
+        for candidates in candidates.chunks(MAX_RELAY_CANDIDATES) {
+            let _ = self.outbound.send(Envelope::Candidates {
+                candidates: candidates.to_vec(),
+            });
+        }
+    }
 }
 
 pub struct ConsensusNetwork {
@@ -577,6 +585,10 @@ impl ConsensusNetwork {
 
     pub fn broadcast_tickets(&self, tickets: Vec<TicketTransaction>) {
         self.relay().tickets(tickets);
+    }
+
+    pub fn broadcast_candidates(&self, candidates: Vec<Sidecar>) {
+        self.relay().candidates(candidates);
     }
 
     pub async fn shutdown(self) {
@@ -844,6 +856,16 @@ async fn run_connection(
                             .collect::<std::collections::BTreeMap<_, _>>(),
                         _ => std::collections::BTreeMap::new(),
                     };
+                    let unseen_candidates = match &envelope {
+                        Envelope::Candidates { candidates } => candidates
+                            .iter()
+                            .filter(|candidate| {
+                                !node.has_pending_candidate(&candidate.header.hash())
+                            })
+                            .map(|candidate| (candidate.header.hash(), candidate.clone()))
+                            .collect::<std::collections::BTreeMap<_, _>>(),
+                        _ => std::collections::BTreeMap::new(),
+                    };
                     let responses = session.handle(&mut node, envelope, unix_time_secs())?;
                     let mut gossip = Vec::new();
                     let after_tip = node.status().tip;
@@ -867,6 +889,14 @@ async fn run_connection(
                         .collect::<Vec<_>>();
                     if !tickets.is_empty() {
                         gossip.push(Envelope::Tickets { tickets });
+                    }
+                    let candidates = unseen_candidates
+                        .into_iter()
+                        .filter(|(hash, _)| node.has_pending_candidate(hash))
+                        .map(|(_, candidate)| candidate)
+                        .collect::<Vec<_>>();
+                    if !candidates.is_empty() {
+                        gossip.push(Envelope::Candidates { candidates });
                     }
                     (responses, gossip)
                 };
@@ -944,7 +974,7 @@ mod tests {
     use super::*;
     use crate::{
         adapters::consensus_store::ConsensusChainStore,
-        consensus::{Chain, GENESIS_TIMESTAMP, PROTOCOL_VERSION},
+        consensus::{CandidateHeader, Chain, GENESIS_TIMESTAMP, PROTOCOL_VERSION, merkle_root},
     };
 
     #[test]
@@ -1194,6 +1224,27 @@ mod tests {
             panic!("expected ticket relay");
         };
         assert_eq!(tickets[0].id(), ticket_id);
+
+        let candidate = Sidecar {
+            header: CandidateHeader {
+                version: PROTOCOL_VERSION,
+                lottery_heartbeat: [3; 32],
+                lottery_height: 1,
+                parent_anchor: [4; 32],
+                ticket_id: [5; 32],
+                slot: 0,
+                lottery_output: [6; 32],
+                transactions_root: merkle_root(&[]),
+                signature: vec![7; 64],
+            },
+            transactions: Vec::new(),
+        };
+        let candidate_hash = candidate.header.hash();
+        relay.candidates(vec![candidate]);
+        let Envelope::Candidates { candidates } = receiver.recv().await.unwrap() else {
+            panic!("expected signed candidate relay");
+        };
+        assert_eq!(candidates[0].header.hash(), candidate_hash);
     }
 
     #[tokio::test]

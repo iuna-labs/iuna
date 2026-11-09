@@ -10,10 +10,10 @@ use anyhow::{Context, Result, bail};
 use crate::consensus::{
     CandidateHeader, Chain, ConsensusState, Hash, HeartbeatBlock, MAX_HEARTBEAT_BLOCK_BYTES,
     MAX_LEDGER_SIDECAR_BYTES, OutPoint, Output, PROTOCOL_VERSION, PublicKey, Sidecar,
-    TicketTransaction, Transaction, inclusion_winners, merkle_root, mine_child, mine_child_until,
-    mine_child_until_counted, mine_child_with_workers, tracked_ticket_capacity,
-    validate_pending_ticket, validate_pending_tickets, validate_pending_transaction,
-    validate_pending_transactions,
+    TicketTransaction, Transaction, Winner, inclusion_winners, merkle_root, mine_child,
+    mine_child_until, mine_child_until_counted, mine_child_with_workers, tracked_ticket_capacity,
+    validate_pending_candidate, validate_pending_ticket, validate_pending_tickets,
+    validate_pending_transaction, validate_pending_transactions,
 };
 
 const MAX_PENDING_LEDGER_TRANSACTIONS: usize = 10_000;
@@ -21,6 +21,7 @@ const MAX_PENDING_LEDGER_TRANSACTIONS: usize = 10_000;
 /// transaction needs at least 1 unit and free transactions cannot fill the mempool.
 pub const MIN_RELAY_FEE_PER_KB: u64 = 1;
 const MAX_PENDING_TICKETS: usize = 4_096;
+const MAX_PENDING_CANDIDATES: usize = 256;
 // Header encoding is currently below 256 bytes. Reserving twice that amount keeps mempool policy
 // independent of future non-consensus header fields while `mine_child` remains the exact check.
 const HEARTBEAT_TEMPLATE_OVERHEAD_BYTES: usize = 512;
@@ -52,6 +53,7 @@ pub struct Node<R> {
     chain: Chain,
     pending_transactions: BTreeMap<Hash, Transaction>,
     pending_tickets: BTreeMap<Hash, TicketTransaction>,
+    pending_candidates: BTreeMap<(Hash, u64, Hash), Sidecar>,
     reserved_inputs: BTreeSet<OutPoint>,
     owner_index: OwnerIndex,
     /// Bumped on every mempool change, so callers can persist it only when it changed.
@@ -177,6 +179,7 @@ impl<R: ChainRepository> Node<R> {
             chain,
             pending_transactions: BTreeMap::new(),
             pending_tickets: BTreeMap::new(),
+            pending_candidates: BTreeMap::new(),
             reserved_inputs: BTreeSet::new(),
             owner_index: OwnerIndex::default(),
             mempool_generation: 0,
@@ -205,6 +208,10 @@ impl<R: ChainRepository> Node<R> {
 
     pub fn pending_tickets(&self) -> Vec<TicketTransaction> {
         self.pending_tickets.values().cloned().collect()
+    }
+
+    pub fn pending_candidates(&self) -> Vec<Sidecar> {
+        self.pending_candidates.values().cloned().collect()
     }
 
     /// Up to `limit` pending transactions and tickets, without cloning the whole mempool.
@@ -265,6 +272,12 @@ impl<R: ChainRepository> Node<R> {
         self.pending_tickets.get(id)
     }
 
+    pub fn has_pending_candidate(&self, hash: &Hash) -> bool {
+        self.pending_candidates
+            .values()
+            .any(|candidate| candidate.header.hash() == *hash)
+    }
+
     pub fn submit_transaction(&mut self, transaction: Transaction) -> Result<u64> {
         if self.pending_transactions.len() >= MAX_PENDING_LEDGER_TRANSACTIONS {
             bail!("Ledger transaction mempool is full");
@@ -313,6 +326,33 @@ impl<R: ChainRepository> Node<R> {
         Ok(fee)
     }
 
+    /// Keeps the best signed candidate seen for each winning ticket slot. Higher total fees win;
+    /// the candidate hash is the deterministic tie-break. This bounds equivocation without making
+    /// off-chain arrival order part of consensus.
+    pub fn submit_candidate(&mut self, candidate: Sidecar) -> Result<bool> {
+        let fee = validate_pending_candidate(self.chain.tip(), &candidate)
+            .context("validating pending signed Ledger candidate")?;
+        let key = (
+            candidate.header.ticket_id,
+            candidate.header.slot,
+            candidate.header.parent_anchor,
+        );
+        let hash = candidate.header.hash();
+        if let Some(existing) = self.pending_candidates.get(&key) {
+            let existing_fee = validate_pending_candidate(self.chain.tip(), existing)
+                .context("revalidating pending signed Ledger candidate")?;
+            let existing_hash = existing.header.hash();
+            if fee < existing_fee || (fee == existing_fee && hash >= existing_hash) {
+                return Ok(false);
+            }
+        } else if self.pending_candidates.len() >= MAX_PENDING_CANDIDATES {
+            bail!("signed Ledger candidate pool is full");
+        }
+        self.pending_candidates.insert(key, candidate);
+        self.mempool_generation += 1;
+        Ok(true)
+    }
+
     /// Index a valid block and durably publish a new active tip. A persistence failure removes
     /// that one submission again, so callers never observe an unpersisted tip.
     pub fn submit_block(&mut self, block: HeartbeatBlock, now: u64) -> Result<bool> {
@@ -327,7 +367,7 @@ impl<R: ChainRepository> Node<R> {
             let (transactions, tickets) = self.disconnected_objects(&previous_tip);
             self.reconcile_mempool();
             // What the new branch does not contain is valid again; the rest is refused here.
-            self.restore_mempool(transactions, tickets);
+            self.restore_mempool(transactions, tickets, Vec::new());
         }
         Ok(activated)
     }
@@ -353,8 +393,8 @@ impl<R: ChainRepository> Node<R> {
         Ok(block)
     }
 
-    /// Mine the next Heartbeat using pending tickets and, when a public winner exists, a Ledger
-    /// sidecar assembled from the local transaction mempool.
+    /// Mine the next Heartbeat using pending tickets, the best signed Ledger candidate, or the
+    /// deterministic empty deadline fallback.
     pub fn mine_next(
         &mut self,
         timestamp: u64,
@@ -376,13 +416,52 @@ impl<R: ChainRepository> Node<R> {
             .context("Heartbeat height overflow")?;
         let winners =
             inclusion_winners(self.chain.tip(), next_height).context("selecting Ledger winner")?;
-        let winner = winners
-            .required
-            .or_else(|| winners.available.into_iter().next());
-        let sidecar = winner.map(|winner| {
-            let transactions = self.select_ledger_transactions();
-            let transaction_ids = transactions.iter().map(Transaction::id).collect::<Vec<_>>();
-            Sidecar {
+        let sidecar = match winners.required {
+            Some(winner) => Some(fallback_sidecar(&winner)),
+            None => self
+                .pending_candidates
+                .values()
+                .filter_map(|candidate| {
+                    validate_pending_candidate(self.chain.tip(), candidate)
+                        .ok()
+                        .map(|fee| (fee, candidate.header.hash(), candidate))
+                })
+                .max_by(|left, right| left.0.cmp(&right.0).then_with(|| right.1.cmp(&left.1)))
+                .map(|(_, _, candidate)| candidate.clone()),
+        };
+        let tickets = self.select_tickets();
+        Ok(PreparedHeartbeat {
+            parent: self.chain.tip().clone(),
+            tickets,
+            sidecar,
+        })
+    }
+
+    /// Builds unsigned drafts for every next-block winner controlled by `mining_public_key`.
+    /// The wallet signs and submits them; Heartbeat miners never receive the private key.
+    pub fn candidate_drafts(&self, mining_public_key: PublicKey) -> Result<Vec<Sidecar>> {
+        let next_height = self
+            .chain
+            .tip()
+            .height
+            .checked_add(1)
+            .context("Heartbeat height overflow")?;
+        let winners = inclusion_winners(self.chain.tip(), next_height)
+            .context("selecting signed Ledger candidate winner")?;
+        if winners.required.is_some() {
+            return Ok(Vec::new());
+        }
+        let transactions = self.select_ledger_transactions();
+        if transactions.is_empty() {
+            return Ok(Vec::new());
+        }
+        let transaction_ids = transactions.iter().map(Transaction::id).collect::<Vec<_>>();
+        let transactions_root = merkle_root(&transaction_ids);
+        Ok(winners
+            .available
+            .into_iter()
+            .filter(|winner| winner.mining_public_key == mining_public_key)
+            .map(|winner| Sidecar {
                 header: CandidateHeader {
                     version: PROTOCOL_VERSION,
                     lottery_heartbeat: winner.heartbeat,
@@ -391,17 +470,12 @@ impl<R: ChainRepository> Node<R> {
                     ticket_id: winner.ticket_id,
                     slot: winner.slot,
                     lottery_output: winner.output,
-                    transactions_root: merkle_root(&transaction_ids),
+                    transactions_root,
+                    signature: Vec::new(),
                 },
-                transactions,
-            }
-        });
-        let tickets = self.select_tickets();
-        Ok(PreparedHeartbeat {
-            parent: self.chain.tip().clone(),
-            tickets,
-            sidecar,
-        })
+                transactions: transactions.clone(),
+            })
+            .collect())
     }
 
     fn select_ledger_transactions(&self) -> Vec<Transaction> {
@@ -426,6 +500,7 @@ impl<R: ChainRepository> Node<R> {
                 slot: 0,
                 lottery_output: [0; 32],
                 transactions_root: merkle_root(&[]),
+                signature: Vec::new(),
             },
             transactions: Vec::new(),
         };
@@ -508,6 +583,7 @@ impl<R: ChainRepository> Node<R> {
         &mut self,
         transactions: Vec<Transaction>,
         tickets: Vec<TicketTransaction>,
+        candidates: Vec<Sidecar>,
     ) -> usize {
         let mut restored = 0;
         for ticket in tickets {
@@ -515,6 +591,9 @@ impl<R: ChainRepository> Node<R> {
         }
         for transaction in transactions {
             restored += usize::from(self.submit_transaction(transaction).is_ok());
+        }
+        for candidate in candidates {
+            restored += usize::from(self.submit_candidate(candidate).unwrap_or(false));
         }
         restored
     }
@@ -543,6 +622,8 @@ impl<R: ChainRepository> Node<R> {
         });
         self.pending_tickets
             .retain(|_, ticket| validate_pending_ticket(self.chain.tip(), ticket).is_ok());
+        self.pending_candidates
+            .retain(|_, candidate| validate_pending_candidate(self.chain.tip(), candidate).is_ok());
         self.reserved_inputs.clear();
         self.reserved_inputs.extend(
             self.pending_transactions
@@ -556,6 +637,23 @@ impl<R: ChainRepository> Node<R> {
                 .flat_map(|ticket| ticket.inputs.iter())
                 .map(|input| input.previous_output.clone()),
         );
+    }
+}
+
+fn fallback_sidecar(winner: &Winner) -> Sidecar {
+    Sidecar {
+        header: CandidateHeader {
+            version: PROTOCOL_VERSION,
+            lottery_heartbeat: winner.heartbeat,
+            lottery_height: winner.heartbeat_height,
+            parent_anchor: winner.parent_anchor,
+            ticket_id: winner.ticket_id,
+            slot: winner.slot,
+            lottery_output: winner.output,
+            transactions_root: merkle_root(&[]),
+            signature: Vec::new(),
+        },
+        transactions: Vec::new(),
     }
 }
 
@@ -775,12 +873,15 @@ mod tests {
         // spends the same genesis output conflicts and is dropped instead of restored.
         let mut restarted = Node::open(MemoryRepository::default()).unwrap();
         assert_eq!(
-            restarted.restore_mempool(node.pending_transactions(), vec![ticket]),
+            restarted.restore_mempool(node.pending_transactions(), vec![ticket], Vec::new()),
             1
         );
         assert_eq!(restarted.pending_ticket_count(), 1);
         assert_eq!(restarted.pending_transaction_count(), 0);
-        assert_eq!(restarted.restore_mempool(vec![transaction], Vec::new()), 0);
+        assert_eq!(
+            restarted.restore_mempool(vec![transaction], Vec::new(), Vec::new()),
+            0
+        );
     }
 
     #[test]

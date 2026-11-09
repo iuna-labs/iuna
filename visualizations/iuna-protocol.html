@@ -2037,7 +2037,7 @@ html&gt;body{padding:0}&lt;/style&gt;
         &lt;path class=&quot;wire-strong&quot; d=&quot;M374 79 H418&quot; marker-end=&quot;url(#iuna-arrow-strong)&quot;&gt;&lt;/path&gt;
         &lt;rect class=&quot;node heartbeat&quot; x=&quot;420&quot; y=&quot;48&quot; width=&quot;150&quot; height=&quot;62&quot; rx=&quot;8&quot;&gt;&lt;/rect&gt;
         &lt;text x=&quot;495&quot; y=&quot;73&quot; text-anchor=&quot;middle&quot;&gt;Heartbeat block T+1&lt;/text&gt;
-        &lt;text class=&quot;muted&quot; x=&quot;495&quot; y=&quot;93&quot; text-anchor=&quot;middle&quot;&gt;optional sidecar&lt;/text&gt;
+        &lt;text class=&quot;muted&quot; x=&quot;495&quot; y=&quot;93&quot; text-anchor=&quot;middle&quot;&gt;signed candidate&lt;/text&gt;
         &lt;path class=&quot;wire-strong&quot; d=&quot;M570 79 H614&quot; marker-end=&quot;url(#iuna-arrow-strong)&quot;&gt;&lt;/path&gt;
         &lt;rect class=&quot;node heartbeat&quot; x=&quot;616&quot; y=&quot;48&quot; width=&quot;150&quot; height=&quot;62&quot; rx=&quot;8&quot;&gt;&lt;/rect&gt;
         &lt;text x=&quot;691&quot; y=&quot;73&quot; text-anchor=&quot;middle&quot;&gt;Heartbeat block T+2&lt;/text&gt;
@@ -2067,10 +2067,10 @@ html&gt;body{padding:0}&lt;/style&gt;
       &lt;rect class=&quot;node ledger&quot; x=&quot;537&quot; y=&quot;189&quot; width=&quot;184&quot; height=&quot;98&quot; rx=&quot;8&quot;&gt;&lt;/rect&gt;
       &lt;text x=&quot;629&quot; y=&quot;215&quot; text-anchor=&quot;middle&quot;&gt;Ledger candidate&lt;/text&gt;
       &lt;text class=&quot;muted&quot; x=&quot;629&quot; y=&quot;237&quot; text-anchor=&quot;middle&quot;&gt;0–512 KiB sidecar&lt;/text&gt;
-      &lt;text class=&quot;muted&quot; x=&quot;629&quot; y=&quot;258&quot; text-anchor=&quot;middle&quot;&gt;no producer signature&lt;/text&gt;
+      &lt;text class=&quot;muted&quot; x=&quot;629&quot; y=&quot;258&quot; text-anchor=&quot;middle&quot;&gt;winner signature&lt;/text&gt;
 
       &lt;path class=&quot;wire&quot; d=&quot;M721 238 H792 V112&quot; marker-end=&quot;url(#iuna-arrow)&quot;&gt;&lt;/path&gt;
-      &lt;text class=&quot;small muted&quot; x=&quot;806&quot; y=&quot;183&quot;&gt;inclusion T+1…T+3&lt;/text&gt;
+      &lt;text class=&quot;small muted&quot; x=&quot;806&quot; y=&quot;183&quot;&gt;signed T+1…T+2&lt;/text&gt;
 
       &lt;path class=&quot;wire-strong&quot; d=&quot;M495 110 V345&quot; marker-end=&quot;url(#iuna-arrow-strong)&quot;&gt;&lt;/path&gt;
       &lt;rect class=&quot;node state&quot; x=&quot;276&quot; y=&quot;347&quot; width=&quot;438&quot; height=&quot;80&quot; rx=&quot;8&quot;&gt;&lt;/rect&gt;
@@ -2189,7 +2189,7 @@ html&gt;body{padding:0}&lt;/style&gt;
 
       &lt;svg class=&quot;diagram&quot; viewBox=&quot;0 0 650 390&quot; role=&quot;img&quot; aria-labelledby=&quot;lot-title lot-desc&quot;&gt;
         &lt;title id=&quot;lot-title&quot;&gt;Lottery and fallback timeline&lt;/title&gt;
-        &lt;desc id=&quot;lot-desc&quot;&gt;A public winner at heartbeat T can be included in any of the next three Heartbeat blocks. At T plus three, the lowest normalized score becomes mandatory.&lt;/desc&gt;
+        &lt;desc id=&quot;lot-desc&quot;&gt;A public winner at heartbeat T may sign a non-empty candidate for T plus one or T plus two. At T plus three, the lowest normalized score receives a mandatory empty unsigned fallback.&lt;/desc&gt;
         &lt;defs&gt;
           &lt;marker id=&quot;iuna-lot-arrow&quot; viewBox=&quot;0 0 10 10&quot; refX=&quot;9&quot; refY=&quot;5&quot; markerWidth=&quot;6&quot; markerHeight=&quot;6&quot; orient=&quot;auto-start-reverse&quot;&gt;
             &lt;path d=&quot;M 0 0 L 10 5 L 0 10 z&quot; fill=&quot;var(--muted-foreground)&quot;&gt;&lt;/path&gt;
@@ -2198,7 +2198,7 @@ html&gt;body{padding:0}&lt;/style&gt;
         &lt;rect class=&quot;node ledger&quot; x=&quot;24&quot; y=&quot;28&quot; width=&quot;602&quot; height=&quot;92&quot; rx=&quot;8&quot;&gt;&lt;/rect&gt;
         &lt;text x=&quot;325&quot; y=&quot;52&quot; text-anchor=&quot;middle&quot;&gt;Validity of one entry&lt;/text&gt;
         &lt;text class=&quot;muted&quot; x=&quot;325&quot; y=&quot;76&quot; text-anchor=&quot;middle&quot;&gt;y falls below the weighted threshold&lt;/text&gt;
-        &lt;text class=&quot;muted&quot; x=&quot;325&quot; y=&quot;98&quot; text-anchor=&quot;middle&quot;&gt;ticket buyer need not be online&lt;/text&gt;
+        &lt;text class=&quot;muted&quot; x=&quot;325&quot; y=&quot;98&quot; text-anchor=&quot;middle&quot;&gt;winner signs non-empty content&lt;/text&gt;
 
         &lt;line class=&quot;axis&quot; x1=&quot;70&quot; y1=&quot;206&quot; x2=&quot;582&quot; y2=&quot;206&quot;&gt;&lt;/line&gt;
         &lt;circle class=&quot;series-2&quot; cx=&quot;92&quot; cy=&quot;206&quot; r=&quot;9&quot;&gt;&lt;/circle&gt;
@@ -2212,13 +2212,13 @@ html&gt;body{padding:0}&lt;/style&gt;
         &lt;text class=&quot;muted&quot; x=&quot;92&quot; y=&quot;236&quot; text-anchor=&quot;middle&quot;&gt;winner&lt;/text&gt;
         &lt;text class=&quot;muted&quot; x=&quot;246&quot; y=&quot;236&quot; text-anchor=&quot;middle&quot;&gt;optional&lt;/text&gt;
         &lt;text class=&quot;muted&quot; x=&quot;400&quot; y=&quot;236&quot; text-anchor=&quot;middle&quot;&gt;optional&lt;/text&gt;
-        &lt;text class=&quot;muted&quot; x=&quot;554&quot; y=&quot;236&quot; text-anchor=&quot;middle&quot;&gt;mandatory&lt;/text&gt;
+        &lt;text class=&quot;muted&quot; x=&quot;554&quot; y=&quot;236&quot; text-anchor=&quot;middle&quot;&gt;empty fallback&lt;/text&gt;
 
         &lt;path class=&quot;wire&quot; d=&quot;M554 218 V285&quot; marker-end=&quot;url(#iuna-lot-arrow)&quot;&gt;&lt;/path&gt;
         &lt;rect class=&quot;node risk&quot; x=&quot;378&quot; y=&quot;287&quot; width=&quot;248&quot; height=&quot;76&quot; rx=&quot;8&quot;&gt;&lt;/rect&gt;
         &lt;text x=&quot;502&quot; y=&quot;313&quot; text-anchor=&quot;middle&quot;&gt;Fallback selection&lt;/text&gt;
         &lt;text class=&quot;muted&quot; x=&quot;502&quot; y=&quot;335&quot; text-anchor=&quot;middle&quot;&gt;lowest y / w · ticket ID breaks ties&lt;/text&gt;
-        &lt;text class=&quot;muted&quot; x=&quot;502&quot; y=&quot;353&quot; text-anchor=&quot;middle&quot;&gt;empty sidecar always allowed&lt;/text&gt;
+        &lt;text class=&quot;muted&quot; x=&quot;502&quot; y=&quot;353&quot; text-anchor=&quot;middle&quot;&gt;canonical · empty · unsigned&lt;/text&gt;
 
         &lt;rect class=&quot;node ticket&quot; x=&quot;24&quot; y=&quot;287&quot; width=&quot;300&quot; height=&quot;76&quot; rx=&quot;8&quot;&gt;&lt;/rect&gt;
         &lt;text x=&quot;174&quot; y=&quot;313&quot; text-anchor=&quot;middle&quot;&gt;Anchor stays fixed&lt;/text&gt;
