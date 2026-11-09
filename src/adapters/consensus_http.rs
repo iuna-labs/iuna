@@ -58,6 +58,7 @@ pub struct ConsensusHttpState {
     pub peers: PeerRegistry,
     pub heartbeat_mining: Arc<AtomicBool>,
     pub heartbeat_mining_workers: Arc<AtomicUsize>,
+    pub heartbeat_hashes: Arc<AtomicU64>,
     pub ledger_mining: Arc<AtomicBool>,
     pub ledger_last_ticket_height: Arc<AtomicU64>,
 }
@@ -94,6 +95,10 @@ pub struct OperatorStatus {
     pub heartbeat_mining_enabled: bool,
     pub heartbeat_mining_workers: usize,
     pub heartbeat_mining_max_workers: usize,
+    /// Cumulative nonces attempted by this node since process start.
+    pub heartbeat_hashes: u64,
+    /// Active Proof-of-Expenditure weight owned by this node's wallet at the current height.
+    pub ledger_ticket_power: u64,
     pub ledger_mining_enabled: bool,
     pub ledger_last_ticket_height: Option<u64>,
     pub connected_peers: usize,
@@ -1277,6 +1282,7 @@ async fn status(State(state): State<ConsensusHttpState>) -> Json<OperatorStatus>
                     },
                 )
         });
+    let ledger_ticket_power = local_ledger_ticket_power(node.chain().tip(), wallet.public_key);
     Json(OperatorStatus {
         app_version: env!("CARGO_PKG_VERSION"),
         network: NETWORK_ID,
@@ -1300,6 +1306,8 @@ async fn status(State(state): State<ConsensusHttpState>) -> Json<OperatorStatus>
         heartbeat_mining_enabled: state.heartbeat_mining.load(Ordering::Relaxed),
         heartbeat_mining_workers: state.heartbeat_mining_workers.load(Ordering::Relaxed),
         heartbeat_mining_max_workers: max_mining_workers(),
+        heartbeat_hashes: state.heartbeat_hashes.load(Ordering::Relaxed),
+        ledger_ticket_power,
         ledger_mining_enabled: state.ledger_mining.load(Ordering::Relaxed),
         ledger_last_ticket_height: decode_ledger_ticket_height(
             state.ledger_last_ticket_height.load(Ordering::Relaxed),
@@ -1309,6 +1317,18 @@ async fn status(State(state): State<ConsensusHttpState>) -> Json<OperatorStatus>
         difficulty: difficulty_label(node.chain().tip().tip_target),
         pow_limit: hex(&MAX_TARGET),
     })
+}
+
+fn local_ledger_ticket_power(state: &ConsensusState, public_key: Option<PublicKey>) -> u64 {
+    let Some(public_key) = public_key else {
+        return 0;
+    };
+    state
+        .tickets
+        .values()
+        .filter(|ticket| ticket.mining_public_key == public_key)
+        .filter_map(|ticket| ticket.weight_at(state.height))
+        .sum()
 }
 
 async fn peers(State(state): State<ConsensusHttpState>) -> Json<Vec<ConnectedPeer>> {
@@ -1892,9 +1912,53 @@ mod tests {
 
     use super::*;
     use crate::{
-        adapters::consensus_store::ConsensusChainStore, app::consensus_node::Node,
-        consensus::PROTOCOL_VERSION,
+        adapters::consensus_store::ConsensusChainStore,
+        app::consensus_node::Node,
+        consensus::{PROTOCOL_VERSION, TrackedTicket, pinned_genesis},
     };
+
+    #[test]
+    fn local_ticket_power_counts_only_active_tickets_owned_by_this_wallet() {
+        let (_, mut state) = pinned_genesis().unwrap();
+        state.height = 10;
+        state.tickets.insert(
+            [1; 32],
+            TrackedTicket {
+                id: [1; 32],
+                included_height: 4,
+                budget: 100,
+                duration: 10,
+                mining_public_key: [7; 32],
+                lottery_seed: [11; 32],
+            },
+        );
+        state.tickets.insert(
+            [2; 32],
+            TrackedTicket {
+                id: [2; 32],
+                included_height: 4,
+                budget: 200,
+                duration: 10,
+                mining_public_key: [8; 32],
+                lottery_seed: [12; 32],
+            },
+        );
+        state.tickets.insert(
+            [3; 32],
+            TrackedTicket {
+                id: [3; 32],
+                included_height: 10,
+                budget: 1_000,
+                duration: 10,
+                mining_public_key: [7; 32],
+                lottery_seed: [13; 32],
+            },
+        );
+
+        assert_eq!(local_ledger_ticket_power(&state, Some([7; 32])), 10);
+        assert_eq!(local_ledger_ticket_power(&state, Some([8; 32])), 20);
+        assert_eq!(local_ledger_ticket_power(&state, None), 0);
+    }
 
     #[test]
     fn mining_activity_does_not_crowd_transfers_out_of_wallet_history() {
@@ -1956,6 +2020,7 @@ mod tests {
             peers: PeerRegistry::default(),
             heartbeat_mining: Arc::new(AtomicBool::new(false)),
             heartbeat_mining_workers: Arc::new(AtomicUsize::new(1)),
+            heartbeat_hashes: Arc::new(AtomicU64::new(0)),
             ledger_mining: Arc::new(AtomicBool::new(false)),
             ledger_last_ticket_height: Arc::new(AtomicU64::new(0)),
         };
@@ -2026,6 +2091,8 @@ mod tests {
         assert_eq!(json["wallet_utxos"], 0);
         assert_eq!(json["wallet_spendable_utxos"], 0);
         assert_eq!(json["wallet_spendable_balance"], 0);
+        assert_eq!(json["heartbeat_hashes"], 0);
+        assert_eq!(json["ledger_ticket_power"], 0);
         assert!(json.get("l1_blocks").is_none());
         assert!(json.get("l2_blocks").is_none());
 
@@ -2130,6 +2197,7 @@ mod tests {
             peers: PeerRegistry::default(),
             heartbeat_mining: Arc::new(AtomicBool::new(false)),
             heartbeat_mining_workers: Arc::new(AtomicUsize::new(1)),
+            heartbeat_hashes: Arc::new(AtomicU64::new(0)),
             ledger_mining: Arc::new(AtomicBool::new(false)),
             ledger_last_ticket_height: Arc::new(AtomicU64::new(0)),
         };
@@ -2202,6 +2270,7 @@ mod tests {
             peers: PeerRegistry::default(),
             heartbeat_mining: Arc::new(AtomicBool::new(false)),
             heartbeat_mining_workers: Arc::new(AtomicUsize::new(1)),
+            heartbeat_hashes: Arc::new(AtomicU64::new(0)),
             ledger_mining: Arc::new(AtomicBool::new(false)),
             ledger_last_ticket_height: Arc::new(AtomicU64::new(0)),
         };
@@ -2302,6 +2371,7 @@ mod tests {
             peers: PeerRegistry::default(),
             heartbeat_mining: Arc::new(AtomicBool::new(false)),
             heartbeat_mining_workers: Arc::new(AtomicUsize::new(1)),
+            heartbeat_hashes: Arc::new(AtomicU64::new(0)),
             ledger_mining: Arc::new(AtomicBool::new(false)),
             ledger_last_ticket_height: Arc::new(AtomicU64::new(0)),
         };
@@ -2352,6 +2422,7 @@ mod tests {
             peers: PeerRegistry::default(),
             heartbeat_mining: Arc::new(AtomicBool::new(false)),
             heartbeat_mining_workers: Arc::new(AtomicUsize::new(1)),
+            heartbeat_hashes: Arc::new(AtomicU64::new(0)),
             ledger_mining: Arc::new(AtomicBool::new(false)),
             ledger_last_ticket_height: Arc::new(AtomicU64::new(0)),
         };
@@ -3173,6 +3244,7 @@ mod tests {
             peers: PeerRegistry::default(),
             heartbeat_mining: Arc::new(AtomicBool::new(false)),
             heartbeat_mining_workers: Arc::new(AtomicUsize::new(1)),
+            heartbeat_hashes: Arc::new(AtomicU64::new(0)),
             ledger_mining: Arc::new(AtomicBool::new(false)),
             ledger_last_ticket_height: Arc::new(AtomicU64::new(0)),
         }

@@ -235,6 +235,38 @@ test('node UI preserves the product screens while using the canonical protocol',
   assert.doesNotMatch(combined, /VDF|quantum|proof[- ]of[- ]burn|PoB|devnet-v2|protocol-v2/i);
 });
 
+test('mining explains and meters both kinds of mining power', () => {
+  const { app } = nodeApp();
+  app.status = { ledger_ticket_power: 25_000_000 };
+  app.heartbeats = [
+    { height: 2, timestamp: 1060, interval_seconds: 60, ticket_weight: 25_000_000 },
+    { height: 1, timestamp: 1000, interval_seconds: 60, ticket_weight: 10_000_000 },
+  ];
+
+  app.sampleLocalHashrate({ heartbeat_mining_enabled: true, heartbeat_hashes: 1_000 }, 1_000);
+  assert.equal(app.powHashrateLabel(), 'Measuring…');
+  app.sampleLocalHashrate({ heartbeat_mining_enabled: true, heartbeat_hashes: 5_601_000 }, 6_000);
+  assert.equal(app.powHashrate(), 1_120_000);
+  assert.equal(app.powHashrateLabel(), '1.12 MH/s');
+  assert.equal(app.powHashrateScaleMax(), 2_000_000);
+  assert.ok(app.powHashrateShare() > 50 && app.powHashrateShare() < 60);
+  assert.equal(app.ledgerPower(), 25_000_000);
+  assert.equal(app.ledgerPowerLabel(), 'IUNA 0.25 / Heartbeat');
+  assert.equal(app.ledgerPowerScaleMax(), 50_000_000);
+  assert.equal(app.ledgerPowerShare(), 50);
+  app.sampleLocalHashrate({ heartbeat_mining_enabled: false, heartbeat_hashes: 5_601_000 }, 7_000);
+  assert.equal(app.powHashrateLabel(), '0 H/s');
+
+  const html = content('www/node.html');
+  for (const copy of [
+    '>Hashrate<',
+    "This node's active ticket power",
+    'CPU workers try hashes',
+  ]) assert.match(html, new RegExp(copy));
+  assert.match(html, /class="mining-meter"/);
+  assert.match(html, /class="mining-meter ledger"/);
+});
+
 test('node UI converts IUNA amounts at consensus precision', () => {
   const window = {};
   vm.runInNewContext(content('www/assets/iuna-ui.js'), { window });

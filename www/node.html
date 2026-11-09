@@ -96,6 +96,18 @@
     .mining-grid { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 12px; }
     .mining-panel { min-width: 0; }
     .mining-panel .panel-head { flex-wrap: wrap; align-items: center; }
+    .mining-intro { min-height: 38px; margin: -3px 0 14px; color: var(--muted); font-size: 12px; line-height: 1.55; }
+    .mining-meter { --meter-color: #8bdcff; --meter-soft: #17303a; margin-bottom: 15px; border: 1px solid var(--line); border-radius: 9px; padding: 12px; background: var(--panel-2); }
+    .mining-meter.ledger { --meter-color: var(--amber); --meter-soft: var(--amber-soft); }
+    .mining-meter-head { display: flex; align-items: baseline; justify-content: space-between; gap: 12px; margin-bottom: 10px; }
+    .mining-meter-label { color: var(--muted-2); font-size: 10px; font-weight: 850; letter-spacing: .045em; text-transform: uppercase; }
+    .mining-meter-value { color: var(--meter-color); font-size: 17px; font-weight: 900; font-variant-numeric: tabular-nums; text-align: right; }
+    .mining-meter-track { position: relative; height: 18px; overflow: hidden; border: 1px solid var(--line-strong); border-radius: 5px; background: repeating-linear-gradient(90deg, transparent 0, transparent calc(10% - 1px), rgba(255,255,255,.06) calc(10% - 1px), rgba(255,255,255,.06) 10%), var(--meter-soft); }
+    .mining-meter-fill { position: absolute; inset: 0 auto 0 0; min-width: 0; border-right: 2px solid #fff; background: linear-gradient(90deg, color-mix(in srgb, var(--meter-color) 35%, transparent), var(--meter-color)); box-shadow: 0 0 16px color-mix(in srgb, var(--meter-color) 32%, transparent); transition: width .45s ease; }
+    .mining-meter.active .mining-meter-fill { animation: meter-flow 1.8s ease-in-out infinite alternate; }
+    .mining-meter-scale { display: flex; justify-content: space-between; gap: 10px; margin-top: 6px; color: var(--muted-2); font-size: 10px; font-variant-numeric: tabular-nums; }
+    .mining-meter-note { margin-top: 9px; color: var(--muted); font-size: 11px; line-height: 1.4; }
+    @keyframes meter-flow { from { filter: brightness(.86); } to { filter: brightness(1.14); } }
     .mining-controls { display: grid; grid-template-columns: minmax(0, 220px); gap: 10px; margin-bottom: 12px; }
     .mining-mode { display: grid; gap: 12px; }
     .mining-form { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); margin: 0; }
@@ -447,6 +459,12 @@
         <div class="mining-grid">
           <article class="panel mining-panel">
             <div class="panel-head"><div class="title-with-pill"><h2>Heartbeat mining</h2><span class="pill">Proof of Work</span></div><label class="toggle-switch" :class="{active: status.heartbeat_mining_enabled}"><input type="checkbox" :checked="status.heartbeat_mining_enabled" @change="setHeartbeatMining($event.target.checked)" :disabled="mining.busy || !canManage()"><span class="toggle-track" aria-hidden="true"><span class="toggle-thumb"></span></span><span x-text="status.heartbeat_mining_enabled ? 'On' : 'Off'"></span></label></div>
+            <p class="mining-intro">CPU workers try hashes. More hashes per second means more chances to find the next Heartbeat.</p>
+            <div class="mining-meter" :class="{active: status.heartbeat_mining_enabled}" role="img" :aria-label="powHashrateAriaLabel()">
+              <div class="mining-meter-head"><span class="mining-meter-label">Hashrate</span><strong class="mining-meter-value" x-text="powHashrateLabel()"></strong></div>
+              <div class="mining-meter-track"><span class="mining-meter-fill" :style="`width:${powHashrateShare()}%`"></span></div>
+              <div class="mining-meter-scale"><span>0 H/s</span><span x-text="hashrateLabel(powHashrateScaleMax())"></span></div>
+            </div>
             <div class="mining-controls">
               <label>Worker threads<input x-model.number="mining.workers" @change="updateMiningWorkers" type="number" min="1" :max="status.heartbeat_mining_max_workers || 256" step="1" :disabled="mining.busy || !canManage()"></label>
             </div>
@@ -459,6 +477,12 @@
           </article>
           <article class="panel mining-panel">
             <div class="panel-head"><div class="title-with-pill"><h2>Ledger mining</h2><span class="pill">Proof of Expenditure</span></div><label class="toggle-switch" :class="{active: status.ledger_mining_enabled}"><input type="checkbox" :checked="status.ledger_mining_enabled" @change="setLedgerMining($event.target.checked)" :disabled="ticket.continuousBusy || !canManage()"><span class="toggle-track" aria-hidden="true"><span class="toggle-thumb"></span></span><span x-text="status.ledger_mining_enabled ? 'Continuous' : 'Manual'"></span></label></div>
+            <p class="mining-intro">A ticket spreads its budget over its duration. More active IUNA per Heartbeat from this node means more weight in the Ledger lottery.</p>
+            <div class="mining-meter ledger" :class="{active: ledgerPower() > 0}" role="img" :aria-label="ledgerPowerAriaLabel()">
+              <div class="mining-meter-head"><span class="mining-meter-label">This node's active ticket power</span><strong class="mining-meter-value" x-text="ledgerPowerLabel()"></strong></div>
+              <div class="mining-meter-track"><span class="mining-meter-fill" :style="`width:${ledgerPowerShare()}%`"></span></div>
+              <div class="mining-meter-scale"><span>0 IUNA / Heartbeat</span><span>IUNA <span x-text="amountLabel(ledgerPowerScaleMax())"></span> / Heartbeat</span></div>
+            </div>
             <div class="mining-mode" x-show="!status.ledger_mining_enabled">
               <form class="form-row mining-form" @submit.prevent="submitTicket">
                 <label>Budget (IUNA)<input x-model="ticket.budget" type="number" min="0.00000001" step="0.00000001" required></label>

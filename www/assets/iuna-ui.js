@@ -68,7 +68,7 @@ window.iunaApp = function iunaApp() {
     pendingTransfer: null,
     shortcutKeyHeld: false,
     chartHover: null,
-    mining: { busy: false, workers: 1, message: "Proof-of-work mining is off" },
+    mining: { busy: false, workers: 1, message: "Proof-of-work mining is off", hashes: null, sampledAt: null, hashrate: null },
     ticket: { budget: "", duration: 10, fee: "0.00000001", quote: null, continuousQuote: null, busy: false, continuousBusy: false },
     walletAccess: {
       mode: "",
@@ -654,6 +654,7 @@ window.iunaApp = function iunaApp() {
           this.getJson("/api/peers"),
           this.getJson("/api/mempool"),
         ]);
+        this.sampleLocalHashrate(status);
         this.status = status;
         if (!this.mining.busy) this.mining.workers = Number(status.heartbeat_mining_workers || 1);
         const oldestFreshHeight = heartbeats.at(-1)?.height;
@@ -868,6 +869,7 @@ window.iunaApp = function iunaApp() {
         this.status.heartbeat_mining_enabled = payload.enabled;
         this.status.heartbeat_mining_workers = payload.workers;
         this.mining.workers = payload.workers;
+        if (!payload.enabled) this.mining.hashrate = 0;
         this.mining.message = payload.enabled
           ? "Mining is on. The node searches for the next Heartbeat continuously."
           : "Proof-of-work mining is off";
@@ -1445,6 +1447,88 @@ window.iunaApp = function iunaApp() {
 
     difficultyLabel() {
       return this.status.difficulty || "-";
+    },
+
+    // The node exposes a cumulative attempted-nonce counter. Sampling its delta keeps timing and
+    // UI concerns outside the hot mining loop while reporting this machine's real throughput.
+    sampleLocalHashrate(status, sampledAt = Date.now()) {
+      const hashes = Math.max(0, Number(status.heartbeat_hashes || 0));
+      const previousHashes = this.mining.hashes;
+      const previousSample = this.mining.sampledAt;
+      if (!status.heartbeat_mining_enabled) {
+        this.mining.hashrate = 0;
+      } else if (previousHashes != null && previousSample != null && hashes >= previousHashes && sampledAt > previousSample) {
+        this.mining.hashrate = ((hashes - previousHashes) * 1000) / (sampledAt - previousSample);
+      }
+      this.mining.hashes = hashes;
+      this.mining.sampledAt = sampledAt;
+    },
+
+    powHashrate() {
+      return this.mining.hashrate;
+    },
+
+    hashrateLabel(value) {
+      if (value == null || !Number.isFinite(Number(value))) return "—";
+      const rate = Math.max(0, Number(value));
+      if (rate === 0) return "0 H/s";
+      const units = ["H/s", "kH/s", "MH/s", "GH/s", "TH/s", "PH/s"];
+      let scaled = rate;
+      let unit = 0;
+      while (scaled >= 1000 && unit < units.length - 1) {
+        scaled /= 1000;
+        unit += 1;
+      }
+      const digits = scaled >= 100 ? 0 : scaled >= 10 ? 1 : 2;
+      return `${scaled.toFixed(digits)} ${units[unit]}`;
+    },
+
+    powHashrateLabel() {
+      return this.powHashrate() == null ? "Measuring…" : this.hashrateLabel(this.powHashrate());
+    },
+
+    niceMeterMaximum(value, minimum) {
+      const safe = Math.max(Number(value) || 0, minimum);
+      const exponent = 10 ** Math.floor(Math.log10(safe));
+      const normalized = safe / exponent;
+      const multiplier = normalized <= 1 ? 1 : normalized <= 2 ? 2 : normalized <= 5 ? 5 : 10;
+      return multiplier * exponent;
+    },
+
+    powHashrateScaleMax() {
+      return this.niceMeterMaximum(this.powHashrate(), 1_000_000);
+    },
+
+    powHashrateShare() {
+      const rate = this.powHashrate();
+      return rate == null ? 0 : Math.min(100, (rate / this.powHashrateScaleMax()) * 100);
+    },
+
+    powHashrateAriaLabel() {
+      const label = this.powHashrateLabel();
+      return label === "Measuring…" ? "Measuring this node's hashrate" : `This node's hashrate ${label}`;
+    },
+
+    // The node sums the active ticket weight belonging to its own wallet. Ticket weight is budget
+    // divided across active Heartbeats, making this the local lottery-power analogue of hashrate.
+    ledgerPower() {
+      return Math.max(0, Number(this.status.ledger_ticket_power || 0));
+    },
+
+    ledgerPowerLabel() {
+      return `IUNA ${this.amountLabel(this.ledgerPower())} / Heartbeat`;
+    },
+
+    ledgerPowerScaleMax() {
+      return this.niceMeterMaximum(this.ledgerPower(), 1_000_000);
+    },
+
+    ledgerPowerShare() {
+      return Math.min(100, (this.ledgerPower() / this.ledgerPowerScaleMax()) * 100);
+    },
+
+    ledgerPowerAriaLabel() {
+      return `This node's active ticket power ${this.ledgerPowerLabel()}`;
     },
 
     // Share of loaded Heartbeats carrying a Ledger block; the target is 1 in 10, drawn at 50%.

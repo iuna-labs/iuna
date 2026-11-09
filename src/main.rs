@@ -244,6 +244,7 @@ async fn main() -> Result<()> {
     let heartbeat_mining_workers = Arc::new(AtomicUsize::new(
         preference.map_or(1, |preference| preference.workers.clamp(1, 256)),
     ));
+    let heartbeat_hashes = Arc::new(AtomicU64::new(0));
     let ledger_mining = Arc::new(AtomicBool::new(
         preference.is_some_and(|preference| preference.ledger_enabled) && wallet_unlocked,
     ));
@@ -259,6 +260,7 @@ async fn main() -> Result<()> {
         Arc::clone(&wallet_state),
         Arc::clone(&heartbeat_mining),
         Arc::clone(&heartbeat_mining_workers),
+        Arc::clone(&heartbeat_hashes),
         relay.clone(),
     ));
     let ledger_mining_task = tokio::spawn(run_ledger_miner(
@@ -281,6 +283,7 @@ async fn main() -> Result<()> {
         peers,
         heartbeat_mining,
         heartbeat_mining_workers,
+        heartbeat_hashes,
         ledger_mining,
         ledger_last_ticket_height,
     };
@@ -363,6 +366,7 @@ async fn run_heartbeat_miner(
     wallet: Arc<RwLock<WalletState>>,
     enabled: Arc<AtomicBool>,
     workers: Arc<AtomicUsize>,
+    hashes: Arc<AtomicU64>,
     relay: ConsensusRelay,
 ) {
     loop {
@@ -400,9 +404,16 @@ async fn run_heartbeat_miner(
         let worker_count = workers.load(Ordering::Relaxed);
         let stop = Arc::new(AtomicBool::new(false));
         let search_stop = Arc::clone(&stop);
+        let search_hashes = Arc::clone(&hashes);
         let _stop_on_drop = StopOnDrop(Arc::clone(&stop));
         let mut search = tokio::task::spawn_blocking(move || {
-            prepared.mine_until(timestamp, public_key, worker_count, &search_stop)
+            prepared.mine_until_counted(
+                timestamp,
+                public_key,
+                worker_count,
+                &search_stop,
+                &search_hashes,
+            )
         });
         let refresh_at = tokio::time::Instant::now() + MINING_TEMPLATE_REFRESH;
         let mined = loop {

@@ -9,7 +9,7 @@ use std::{
     collections::{BTreeMap, BTreeSet},
     sync::{
         Arc,
-        atomic::{AtomicBool, Ordering},
+        atomic::{AtomicBool, AtomicU64, Ordering},
     },
 };
 
@@ -1461,7 +1461,12 @@ pub fn pinned_genesis() -> Result<(HeartbeatBlock, ConsensusState)> {
 /// [`GENESIS_NONCE`] and [`GENESIS_HASH`] after a parameter change.
 pub fn search_genesis_nonce(workers: usize) -> Result<(u64, Hash)> {
     let mut block = genesis_template(GENESIS_TIMESTAMP, GENESIS_MINER)?;
-    if !mine_nonce_with_workers(&mut block.header, workers.max(1), &AtomicBool::new(false))? {
+    if !mine_nonce_with_workers(
+        &mut block.header,
+        workers.max(1),
+        &AtomicBool::new(false),
+        None,
+    )? {
         return Err(ConsensusError::Arithmetic);
     }
     Ok((block.header.nonce, block.hash()))
@@ -1565,6 +1570,54 @@ pub fn mine_child_until(
     workers: usize,
     stop: &AtomicBool,
 ) -> Result<Option<(HeartbeatBlock, ConsensusState)>> {
+    mine_child_until_with_counter(
+        parent,
+        timestamp,
+        miner_public_key,
+        tickets,
+        sidecar,
+        workers,
+        stop,
+        None,
+    )
+}
+
+/// Like [`mine_child_until`], while adding every attempted nonce to `hashes`. The counter is
+/// observational only and cannot affect block construction or consensus validation.
+#[allow(clippy::too_many_arguments)]
+pub fn mine_child_until_counted(
+    parent: &ConsensusState,
+    timestamp: u64,
+    miner_public_key: PublicKey,
+    tickets: Vec<TicketTransaction>,
+    sidecar: Option<Sidecar>,
+    workers: usize,
+    stop: &AtomicBool,
+    hashes: &AtomicU64,
+) -> Result<Option<(HeartbeatBlock, ConsensusState)>> {
+    mine_child_until_with_counter(
+        parent,
+        timestamp,
+        miner_public_key,
+        tickets,
+        sidecar,
+        workers,
+        stop,
+        Some(hashes),
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+fn mine_child_until_with_counter(
+    parent: &ConsensusState,
+    timestamp: u64,
+    miner_public_key: PublicKey,
+    tickets: Vec<TicketTransaction>,
+    sidecar: Option<Sidecar>,
+    workers: usize,
+    stop: &AtomicBool,
+    hashes: Option<&AtomicU64>,
+) -> Result<Option<(HeartbeatBlock, ConsensusState)>> {
     if workers == 0 {
         return Err(ConsensusError::Invalid(
             "mining requires at least one worker",
@@ -1599,7 +1652,7 @@ pub fn mine_child_until(
     let (state, payouts) = transition(parent, &block)?;
     block.header.post_state_root = state.state_root();
     block.header.payout_commitment = tagged_hash(b"IUNA-PAYOUTS-v1", &payouts.canonical());
-    if !mine_nonce_with_workers(&mut block.header, workers, stop)? {
+    if !mine_nonce_with_workers(&mut block.header, workers, stop, hashes)? {
         return Ok(None);
     }
     let state = apply_block(parent, &block, timestamp)?;
@@ -1688,6 +1741,7 @@ fn mine_nonce_with_workers(
     header: &mut HeartbeatHeader,
     workers: usize,
     stop: &AtomicBool,
+    hashes: Option<&AtomicU64>,
 ) -> Result<bool> {
     let template = header.clone();
     let target = header.target;
@@ -1700,16 +1754,36 @@ fn mine_nonce_with_workers(
             handles.push(scope.spawn(move || {
                 let mut nonce = worker as u64;
                 let stride = workers as u64;
+                let mut unreported_hashes = 0_u64;
                 loop {
                     if found.load(Ordering::Relaxed) || stop.load(Ordering::Relaxed) {
+                        if let Some(hashes) = hashes {
+                            hashes.fetch_add(unreported_hashes, Ordering::Relaxed);
+                        }
                         return None;
                     }
                     candidate.nonce = nonce;
+                    unreported_hashes += 1;
                     if candidate.hash() <= target {
+                        if let Some(hashes) = hashes {
+                            hashes.fetch_add(unreported_hashes, Ordering::Relaxed);
+                        }
                         found.store(true, Ordering::Relaxed);
                         return Some(candidate);
                     }
-                    nonce = nonce.checked_add(stride)?;
+                    if unreported_hashes == 1_024 {
+                        if let Some(hashes) = hashes {
+                            hashes.fetch_add(unreported_hashes, Ordering::Relaxed);
+                        }
+                        unreported_hashes = 0;
+                    }
+                    let Some(next_nonce) = nonce.checked_add(stride) else {
+                        if let Some(hashes) = hashes {
+                            hashes.fetch_add(unreported_hashes, Ordering::Relaxed);
+                        }
+                        return None;
+                    };
+                    nonce = next_nonce;
                 }
             }));
         }
@@ -3449,5 +3523,25 @@ mod tests {
         )
         .unwrap();
         assert!(mined.is_none());
+    }
+
+    #[test]
+    fn counted_nonce_search_reports_actual_attempts() {
+        let (_, genesis) = pinned_genesis().unwrap();
+        let stop = AtomicBool::new(false);
+        let hashes = AtomicU64::new(0);
+        let mined = mine_child_until_counted(
+            &genesis,
+            genesis.tip_timestamp + 60,
+            [3; 32],
+            Vec::new(),
+            None,
+            2,
+            &stop,
+            &hashes,
+        )
+        .unwrap();
+        assert!(mined.is_some());
+        assert!(hashes.load(Ordering::Relaxed) > 0);
     }
 }

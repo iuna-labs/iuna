@@ -2,7 +2,7 @@
 
 use std::{
     collections::{BTreeMap, BTreeSet, HashMap},
-    sync::atomic::AtomicBool,
+    sync::atomic::{AtomicBool, AtomicU64},
 };
 
 use anyhow::{Context, Result, bail};
@@ -11,8 +11,9 @@ use crate::consensus::{
     CandidateHeader, Chain, ConsensusState, Hash, HeartbeatBlock, MAX_HEARTBEAT_BLOCK_BYTES,
     MAX_LEDGER_SIDECAR_BYTES, OutPoint, Output, PROTOCOL_VERSION, PublicKey, Sidecar,
     TicketTransaction, Transaction, inclusion_winners, merkle_root, mine_child, mine_child_until,
-    mine_child_with_workers, tracked_ticket_capacity, validate_pending_ticket,
-    validate_pending_tickets, validate_pending_transaction, validate_pending_transactions,
+    mine_child_until_counted, mine_child_with_workers, tracked_ticket_capacity,
+    validate_pending_ticket, validate_pending_tickets, validate_pending_transaction,
+    validate_pending_transactions,
 };
 
 const MAX_PENDING_LEDGER_TRANSACTIONS: usize = 10_000;
@@ -106,6 +107,29 @@ impl PreparedHeartbeat {
             self.sidecar,
             workers,
             stop,
+        )
+        .map(|mined| mined.map(|(block, _)| block))
+        .context("mining prepared Heartbeat")
+    }
+
+    /// Search for a nonce while exposing the actual attempted-hash count to the local operator.
+    pub fn mine_until_counted(
+        self,
+        timestamp: u64,
+        miner_public_key: PublicKey,
+        workers: usize,
+        stop: &AtomicBool,
+        hashes: &AtomicU64,
+    ) -> Result<Option<HeartbeatBlock>> {
+        mine_child_until_counted(
+            &self.parent,
+            timestamp,
+            miner_public_key,
+            self.tickets,
+            self.sidecar,
+            workers,
+            stop,
+            hashes,
         )
         .map(|mined| mined.map(|(block, _)| block))
         .context("mining prepared Heartbeat")
