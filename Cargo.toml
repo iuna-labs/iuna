@@ -18,7 +18,7 @@ pbkdf2 = "0.12.2"
 serde = { version = "1.0.228", features = ["derive"] }
 serde_json = "1.0.150"
 sha2 = "0.10.9"
-rusqlite = { version = "0.32.1", features = ["bundled"] }
+rusqlite = { version = "0.41.1", features = ["bundled", "fallible_uint"] }
 tokio = { version = "1.45.1", features = ["full"] }
 secrecy = { version = "0.10.3", default-features = false, features = ["serde"] }
 [features]
