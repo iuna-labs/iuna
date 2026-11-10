@@ -5,9 +5,16 @@ from the Git history and Conventional Commit titles by `deployment.sh`.
 
 ## [Unreleased]
 
+## [0.6.0] - 2026-11-10
+
 ### Added
 
-- commit outputs to unrevealed Ed25519 keys and rotate receive and change addresses
+- commit outputs to unrevealed Ed25519 keys and rotate addresses
+- discover addresses through a batched summary endpoint
+
+### Fixed
+
+- keep change addresses contiguous after rejected submissions
 
 ## [0.5.5] - 2026-11-09
 
