@@ -1,19 +1,20 @@
 //! Application ports for the IUNA consensus domain.
 
 use std::{
-    collections::{BTreeMap, BTreeSet, HashMap},
+    collections::{BTreeMap, BTreeSet, HashMap, HashSet},
     sync::atomic::{AtomicBool, AtomicU64},
 };
 
 use anyhow::{Context, Result, bail};
 
 use crate::consensus::{
-    CandidateHeader, Chain, ConsensusState, Hash, HeartbeatBlock, MAX_HEARTBEAT_BLOCK_BYTES,
-    MAX_LEDGER_SIDECAR_BYTES, OutPoint, Output, PROTOCOL_VERSION, PublicKey, Sidecar,
-    TicketTransaction, Transaction, Winner, inclusion_winners, merkle_root, mine_child,
-    mine_child_until, mine_child_until_counted, mine_child_with_workers, tracked_ticket_capacity,
-    validate_pending_candidate, validate_pending_ticket, validate_pending_tickets,
-    validate_pending_transaction, validate_pending_transactions,
+    Address, CandidateHeader, Chain, ConsensusState, Hash, HeartbeatBlock,
+    MAX_HEARTBEAT_BLOCK_BYTES, MAX_LEDGER_SIDECAR_BYTES, OutPoint, Output, PROTOCOL_VERSION,
+    PublicKey, Sidecar, TicketTransaction, Transaction, Winner, address_from_public_key,
+    inclusion_winners, merkle_root, mine_child, mine_child_until, mine_child_until_counted,
+    mine_child_with_workers, tracked_ticket_capacity, validate_pending_candidate,
+    validate_pending_ticket, validate_pending_tickets, validate_pending_transaction,
+    validate_pending_transactions,
 };
 
 const MAX_PENDING_LEDGER_TRANSACTIONS: usize = 10_000;
@@ -56,6 +57,7 @@ pub struct Node<R> {
     pending_candidates: BTreeMap<(Hash, u64, Hash), Sidecar>,
     reserved_inputs: BTreeSet<OutPoint>,
     owner_index: OwnerIndex,
+    used_address_index: UsedAddressIndex,
     /// Bumped on every mempool change, so callers can persist it only when it changed.
     mempool_generation: u64,
 }
@@ -65,7 +67,16 @@ pub struct Node<R> {
 #[derive(Default)]
 struct OwnerIndex {
     tip: Option<Hash>,
-    outputs: HashMap<PublicKey, Vec<OutPoint>>,
+    outputs: HashMap<Address, Vec<OutPoint>>,
+}
+
+#[derive(Default)]
+struct UsedAddressIndex {
+    tip: Option<Hash>,
+    chain_addresses: HashSet<Address>,
+    /// Rebuilt separately so mempool churn never forces another walk of the whole chain.
+    mempool_generation: Option<u64>,
+    mempool_addresses: HashSet<Address>,
 }
 
 pub fn minimum_relay_fee(canonical_size: usize) -> u64 {
@@ -182,6 +193,7 @@ impl<R: ChainRepository> Node<R> {
             pending_candidates: BTreeMap::new(),
             reserved_inputs: BTreeSet::new(),
             owner_index: OwnerIndex::default(),
+            used_address_index: UsedAddressIndex::default(),
             mempool_generation: 0,
         })
     }
@@ -231,10 +243,10 @@ impl<R: ChainRepository> Node<R> {
     }
 
     /// Confirmed outputs owned by `owner` at the current tip, in outpoint order.
-    pub fn owned_outputs(&mut self, owner: &PublicKey) -> Vec<(OutPoint, Output)> {
+    pub fn owned_outputs(&mut self, owner: &Address) -> Vec<(OutPoint, Output)> {
         let tip = self.chain.tip();
         if self.owner_index.tip != Some(tip.tip) {
-            let mut outputs: HashMap<PublicKey, Vec<OutPoint>> = HashMap::new();
+            let mut outputs: HashMap<Address, Vec<OutPoint>> = HashMap::new();
             for (point, output) in &tip.utxos {
                 outputs.entry(output.owner).or_default().push(point.clone());
             }
@@ -254,6 +266,50 @@ impl<R: ChainRepository> Node<R> {
                     .map(|output| (point.clone(), output.clone()))
             })
             .collect()
+    }
+
+    /// Whether an address has appeared on the active chain or in the local mempool. Unlike the
+    /// UTXO index this remains true after its outputs are spent, which lets a recovered
+    /// deterministic wallet discover the next child address safely.
+    pub fn address_used(&mut self, address: &Address) -> bool {
+        let tip = self.chain.tip().tip;
+        if self.used_address_index.tip != Some(tip) {
+            let mut addresses = HashSet::new();
+            let mut cursor = Some(tip);
+            while let Some(hash) = cursor {
+                let Some(block) = self.chain.block(&hash) else {
+                    break;
+                };
+                addresses.insert(address_from_public_key(&block.header.miner_public_key));
+                for ticket in &block.tickets {
+                    addresses.insert(address_from_public_key(&ticket.mining_public_key));
+                    addresses.extend(ticket.change.iter().map(|output| output.owner));
+                }
+                for transaction in block
+                    .sidecar
+                    .iter()
+                    .flat_map(|sidecar| sidecar.transactions.iter())
+                {
+                    addresses.extend(transaction.outputs.iter().map(|output| output.owner));
+                }
+                cursor = block.header.parent;
+            }
+            self.used_address_index.tip = Some(tip);
+            self.used_address_index.chain_addresses = addresses;
+        }
+        if self.used_address_index.mempool_generation != Some(self.mempool_generation) {
+            let mut addresses = HashSet::new();
+            for transaction in self.pending_transactions.values() {
+                addresses.extend(transaction.outputs.iter().map(|output| output.owner));
+            }
+            for ticket in self.pending_tickets.values() {
+                addresses.extend(ticket.change.iter().map(|output| output.owner));
+            }
+            self.used_address_index.mempool_generation = Some(self.mempool_generation);
+            self.used_address_index.mempool_addresses = addresses;
+        }
+        self.used_address_index.chain_addresses.contains(address)
+            || self.used_address_index.mempool_addresses.contains(address)
     }
 
     pub fn has_pending_transaction(&self, id: &Hash) -> bool {
@@ -760,7 +816,7 @@ mod tests {
             mining_public_key: [42; 32],
             lottery_seed: [43; 32],
             change: Some(Output {
-                owner: GENESIS_MINER,
+                owner: crate::consensus::address_from_public_key(&GENESIS_MINER),
                 value: GENESIS_REWARD - budget - 1,
             }),
         };

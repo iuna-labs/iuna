@@ -120,7 +120,7 @@ function renderBackup(seedPhrase) {
 
 function renderConfirm() {
   const spendable = Number(view.spendable_balance) - pendingTransfer.amount - pendingTransfer.fee;
-  app.innerHTML = shell(`<h1>Confirm transfer</h1><p>Check the full recipient key. Ledger transactions cannot be reversed.</p><div class="address"><span class="label">Recipient</span><code>${escape(pendingTransfer.recipient)}</code></div><div class="stats"><div class="stat"><span>Amount</span><strong>${escape(formatIuna(pendingTransfer.amount))} IUNA</strong></div><div class="stat"><span>Fee</span><strong>${escape(formatIuna(pendingTransfer.fee))} IUNA</strong></div><div class="stat"><span>Spendable after</span><strong>${escape(formatIuna(Math.max(0, spendable)))} IUNA</strong></div></div><div class="actions"><button data-action="cancel-transfer">Cancel</button><button class="primary" data-action="confirm-transfer">Sign and send</button></div>`);
+  app.innerHTML = shell(`<h1>Confirm transfer</h1><p>Check the full recipient address. Ledger transactions cannot be reversed.</p><div class="address"><span class="label">Recipient</span><code>${escape(pendingTransfer.recipient)}</code></div><div class="stats"><div class="stat"><span>Amount</span><strong>${escape(formatIuna(pendingTransfer.amount))} IUNA</strong></div><div class="stat"><span>Fee</span><strong>${escape(formatIuna(pendingTransfer.fee))} IUNA</strong></div><div class="stat"><span>Spendable after</span><strong>${escape(formatIuna(Math.max(0, spendable)))} IUNA</strong></div></div><div class="actions"><button data-action="cancel-transfer">Cancel</button><button class="primary" data-action="confirm-transfer">Sign and send</button></div>`);
 }
 
 // Sent items come from this browser's own log; received items are current outputs from other
@@ -147,7 +147,8 @@ function renderDashboard() {
   if (!view) return;
   awayFromDashboard = false;
   const entry = selectedEntry();
-  app.innerHTML = shell(`<h1>${escape(entry?.name || "Wallet")}</h1><div class="stats"><div class="stat"><span>Balance</span><strong data-field="balance">${escape(formatIuna(view.balance))} IUNA</strong></div><div class="stat"><span>Spendable</span><strong data-field="spendable">${escape(formatIuna(view.spendable_balance))} IUNA</strong></div><div class="stat"><span>Heartbeat</span><strong data-field="heartbeat">${escape(view.heartbeat_height)}</strong></div></div><h2>Receive</h2><div class="address"><code>${escape(wallet.publicKeyHex)}</code></div><div class="actions"><button data-action="copy" data-value="${escape(wallet.publicKeyHex)}">Copy address</button><button data-action="backup">View recovery phrase</button></div><form id="send" class="send"><h2>Send IUNA</h2><label>Recipient public key<input name="recipient" minlength="64" maxlength="64" autocomplete="off" autocapitalize="none" spellcheck="false" required></label><div class="row"><label>Amount<span class="amount-row"><input name="amount" inputmode="decimal" placeholder="0.00" required><button type="button" data-action="max">Max</button></span></label><label>Fee<input name="fee" inputmode="decimal" value="0.00000001" required></label></div><button class="primary" type="submit">Review</button></form><h2 class="spaced">Activity</h2><div data-field="activity">${activityRows()}</div><p class="muted" data-field="connection">${escape(connectionLabel())}</p>`, `<button data-action="settings">Settings</button><button data-action="lock">Lock</button>`);
+  const receiveAddress = view.receive_address || "Unavailable while disconnected";
+  app.innerHTML = shell(`<h1>${escape(entry?.name || "Wallet")}</h1><div class="stats"><div class="stat"><span>Balance</span><strong data-field="balance">${escape(formatIuna(view.balance))} IUNA</strong></div><div class="stat"><span>Spendable</span><strong data-field="spendable">${escape(formatIuna(view.spendable_balance))} IUNA</strong></div><div class="stat"><span>Heartbeat</span><strong data-field="heartbeat">${escape(view.heartbeat_height)}</strong></div></div><h2>Receive</h2><div class="address"><code data-field="receive-address">${escape(receiveAddress)}</code></div><div class="actions"><button data-action="copy" data-field="copy-receive" data-value="${escape(view.receive_address || "")}"${view.receive_address ? "" : " disabled"}>Copy address</button><button data-action="backup">View recovery phrase</button></div><form id="send" class="send"><h2>Send IUNA</h2><label>Recipient address<input name="recipient" minlength="64" maxlength="64" autocomplete="off" autocapitalize="none" spellcheck="false" required></label><div class="row"><label>Amount<span class="amount-row"><input name="amount" inputmode="decimal" placeholder="0.00" required><button type="button" data-action="max">Max</button></span></label><label>Fee<input name="fee" inputmode="decimal" value="0.00000001" required></label></div><button class="primary" type="submit">Review</button></form><h2 class="spaced">Activity</h2><div data-field="activity">${activityRows()}</div><p class="muted" data-field="connection">${escape(connectionLabel())}</p>`, `<button data-action="settings">Settings</button><button data-action="lock">Lock</button>`);
 }
 
 function connectionLabel() { return `Connected to ${apiEndpoint()} · ${view.network} · ${view.ledger_blocks} Ledger blocks`; }
@@ -163,6 +164,9 @@ function updateDashboard() {
     connection: connectionLabel(),
   };
   for (const [name, value] of Object.entries(fields)) app.querySelector(`[data-field=${name}]`).textContent = value;
+  app.querySelector("[data-field=receive-address]").textContent = view.receive_address || "Unavailable while disconnected";
+  app.querySelector("[data-field=copy-receive]").dataset.value = view.receive_address || "";
+  app.querySelector("[data-field=copy-receive]").disabled = !view.receive_address;
   app.querySelector("[data-field=activity]").innerHTML = activityRows();
 }
 
@@ -208,7 +212,7 @@ async function refresh(silent = false) {
     if (awayFromDashboard) return;
     if (app.querySelector("[data-field=balance]")) updateDashboard(); else renderDashboard();
   };
-  try { view = await fetchWalletView(apiEndpoint(), wallet.publicKeyHex); if (wallet) render(); }
+  try { view = await fetchWalletView(apiEndpoint(), wallet); if (wallet) render(); }
   catch (error) {
     connected = false;
     view ||= { network: "Disconnected", heartbeat_height: "—", ledger_blocks: "—", balance: 0, spendable_balance: 0, utxos: [] };
@@ -221,7 +225,7 @@ async function refresh(silent = false) {
 
 async function sendPendingTransfer() {
   const transfer = pendingTransfer;
-  const transaction = await buildSignedTransaction({ wallet, utxos: view.utxos, ...transfer });
+  const transaction = await buildSignedTransaction({ wallet, utxos: view.utxos, changeIndex: view.change_index, ...transfer });
   const result = await submitTransaction(apiEndpoint(), transaction);
   recordSent({ kind: "sent", id: result.id, inputs: spentOutpoints(transaction), amount: transfer.amount, fee: transfer.fee, recipient: transfer.recipient, time: Math.floor(Date.now() / 1000) });
   pendingTransfer = null;
@@ -313,7 +317,7 @@ app.addEventListener("submit", async (event) => {
     }
     if (form.id === "send") {
       const recipient = form.recipient.value.trim().toLowerCase();
-      if (!/^[0-9a-f]{64}$/.test(recipient)) throw new Error("The recipient must be a 64-character public key");
+      if (!/^[0-9a-f]{64}$/.test(recipient)) throw new Error("The recipient must be a 64-character address");
       const amount = parseIuna(form.amount.value);
       const fee = parseIuna(form.fee.value);
       if (amount <= 0) throw new Error("Enter an amount above zero");

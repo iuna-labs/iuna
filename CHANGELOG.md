@@ -5,6 +5,10 @@ from the Git history and Conventional Commit titles by `deployment.sh`.
 
 ## [Unreleased]
 
+### Added
+
+- commit outputs to unrevealed Ed25519 keys and rotate receive and change addresses
+
 ## [0.5.5] - 2026-11-09
 
 ### Added

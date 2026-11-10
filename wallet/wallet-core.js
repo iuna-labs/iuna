@@ -1,8 +1,11 @@
 const encoder = new TextEncoder();
 // Signatures are scoped to one network, so they cannot be replayed on a fork or relaunch.
 const NETWORK_ID = "iuna-mainnet-candidate";
-const GENESIS_HASH = hexBytes("000000153c54ba2743668be733d2300139288e70be9077e2ea95d09771376309");
+const GENESIS_HASH = hexBytes("00000015ff94624a51c05e7bf53e0b837baf105d9cf28d0af49955f1a8b24fdb");
 const PKCS8_ED25519_PREFIX = hexBytes("302e020100300506032b657004220420");
+const ADDRESS_GAP_LIMIT = 20;
+const RECEIVE_BRANCH = 0;
+const CHANGE_BRANCH = 1;
 
 export function normalizeSeed(value) {
   return String(value).trim().toLowerCase().replace(/\s+/g, " ");
@@ -23,7 +26,23 @@ export function defaultApiEndpoint(location = globalThis.location) {
 
 export async function walletFromEntropy(entropy) {
   if (!(entropy instanceof Uint8Array) || entropy.length !== 32) throw new Error("Wallet entropy must be 32 bytes");
-  const pkcs8 = concat(PKCS8_ED25519_PREFIX, entropy);
+  const masterEntropy = entropy.slice();
+  const root = await walletKey(masterEntropy);
+  return {
+    ...root,
+    masterEntropy,
+    async keyAt(branch, index) {
+      if (![RECEIVE_BRANCH, CHANGE_BRANCH].includes(branch) || !Number.isSafeInteger(index) || index < 0 || index > 0xffffffff) {
+        throw new Error("Invalid wallet derivation path");
+      }
+      const seed = await taggedHash("IUNA-WALLET-CHILD-v1", concat(masterEntropy, new Uint8Array([branch]), u32(index)));
+      return walletKey(seed, branch, index);
+    },
+  };
+}
+
+async function walletKey(seed, branch = null, index = null) {
+  const pkcs8 = concat(PKCS8_ED25519_PREFIX, seed);
   // WebCrypto only derives the public key through an export, so a short-lived
   // extractable copy is used for that; the retained signing key is non-extractable.
   const exportable = await crypto.subtle.importKey("pkcs8", pkcs8, { name: "Ed25519" }, true, ["sign"]);
@@ -32,7 +51,8 @@ export async function walletFromEntropy(entropy) {
   const privateKey = await crypto.subtle.importKey("pkcs8", pkcs8, { name: "Ed25519" }, false, ["sign"]);
   pkcs8.fill(0);
   const publicKey = fromBase64url(jwk.x);
-  return { privateKey, publicKey, publicKeyHex: bytesHex(publicKey) };
+  const address = await taggedHash("IUNA-ADDRESS-v1", publicKey);
+  return { privateKey, publicKey, publicKeyHex: bytesHex(publicKey), address, addressHex: bytesHex(address), branch, index };
 }
 
 export async function encryptWallet(seedPhrase, password, publicKeyHex) {
@@ -85,8 +105,8 @@ async function passwordKey(password, salt, usages) {
   );
 }
 
-export async function fetchWalletView(endpoint, publicKeyHex) {
-  const path = `${endpoint}/api/public/wallet/${publicKeyHex}`;
+async function fetchAddressView(endpoint, walletKey) {
+  const path = `${endpoint}/api/public/wallet/${walletKey.addressHex}`;
   // Keep every page on one Heartbeat tip. If the chain advances while paging, restart so input
   // selection never mixes duplicate or skipped offsets from two different UTXO sets.
   for (let attempt = 0; attempt < 3; attempt += 1) {
@@ -105,9 +125,62 @@ export async function fetchWalletView(endpoint, publicKeyHex) {
       if (next != null && next <= offset) throw new Error("The node returned an invalid wallet page");
       offset = next;
     }
-    if (consistent) return { ...first, utxos, utxos_truncated: false, next_utxo_offset: null };
+    if (consistent) return {
+      ...first,
+      utxos: utxos.map((utxo) => ({ ...utxo, walletKey })),
+      utxos_truncated: false,
+      next_utxo_offset: null,
+    };
   }
   throw new Error("The wallet changed while outputs were loading; try again");
+}
+
+export async function fetchWalletView(endpoint, wallet) {
+  // A string remains useful for endpoint diagnostics and older embedding code.
+  if (typeof wallet === "string") {
+    return fetchAddressView(endpoint, { addressHex: wallet });
+  }
+  for (let attempt = 0; attempt < 3; attempt += 1) {
+    const view = await discoverWalletView(endpoint, wallet);
+    if (view) return view;
+  }
+  throw new Error("The wallet changed while addresses were loading; try again");
+}
+
+async function discoverWalletView(endpoint, wallet) {
+  const root = await fetchAddressView(endpoint, wallet);
+  const discovered = [];
+  const discoverBranch = async (branch) => {
+    let unused = 0;
+    let highestUsed = -1;
+    for (let index = 0; unused < ADDRESS_GAP_LIMIT; index += 1) {
+      const key = await wallet.keyAt(branch, index);
+      const addressView = await fetchAddressView(endpoint, key);
+      discovered.push(addressView);
+      if (addressView.used) {
+        highestUsed = index;
+        unused = 0;
+      } else {
+        unused += 1;
+      }
+    }
+    return highestUsed + 1;
+  };
+  const receiveIndex = await discoverBranch(RECEIVE_BRANCH);
+  const changeIndex = await discoverBranch(CHANGE_BRANCH);
+  const receiveKey = await wallet.keyAt(RECEIVE_BRANCH, receiveIndex);
+  const views = [root, ...discovered];
+  if (views.some((item) => item.tip_hash !== root.tip_hash)) return null;
+  return {
+    ...root,
+    balance: views.reduce((sum, item) => sum + Number(item.balance), 0),
+    spendable_balance: views.reduce((sum, item) => sum + Number(item.spendable_balance), 0),
+    utxos: views.flatMap((item) => item.utxos),
+    pending_transaction_ids: [...new Set(views.flatMap((item) => item.pending_transaction_ids || []))],
+    receive_address: receiveKey.addressHex,
+    receive_index: receiveIndex,
+    change_index: changeIndex,
+  };
 }
 
 export async function submitTransaction(endpoint, transaction) {
@@ -143,9 +216,9 @@ export function sentStatus(item, view) {
   return (item.inputs || []).some((input) => unspent.has(input)) ? "dropped" : "sent";
 }
 
-export async function buildSignedTransaction({ wallet, utxos, recipient, amount, fee }) {
-  const recipientKey = hexBytes(recipient);
-  if (recipientKey.length !== 32) throw new Error("Recipient must be a 64-character public key");
+export async function buildSignedTransaction({ wallet, utxos, recipient, amount, fee, changeIndex = 0 }) {
+  const recipientAddress = hexBytes(recipient);
+  if (recipientAddress.length !== 32) throw new Error("Recipient must be a 64-character address");
   const required = BigInt(amount) + BigInt(fee);
   if (amount <= 0 || fee < 0) throw new Error("Amount must be positive and fee cannot be negative");
   if (!Array.isArray(utxos)) throw new Error("Wallet outputs are unavailable; reconnect to a node first");
@@ -161,22 +234,26 @@ export async function buildSignedTransaction({ wallet, utxos, recipient, amount,
   }
   if (total < required) throw new Error("Insufficient spendable balance");
   const transaction = {
-    version: 2,
+    version: 3,
     inputs: selected.map((utxo) => ({
       previous_output: {
         transaction_id: [...hexBytes(utxo.transaction_id)],
         output_index: utxo.output_index,
       },
-      public_key: [...wallet.publicKey],
+      public_key: [...(utxo.walletKey || wallet).publicKey],
       signature: [],
     })),
-    outputs: [{ owner: [...recipientKey], value: Number(amount) }],
+    outputs: [{ owner: [...recipientAddress], value: Number(amount) }],
   };
   const change = total - required;
-  if (change > 0n) transaction.outputs.push({ owner: [...wallet.publicKey], value: Number(change) });
+  if (change > 0n) {
+    const changeKey = await wallet.keyAt(CHANGE_BRANCH, changeIndex);
+    transaction.outputs.push({ owner: [...changeKey.address], value: Number(change) });
+  }
   for (let index = 0; index < transaction.inputs.length; index += 1) {
     const digest = await signingDigest(transaction, index, selected.map((utxo) => utxo.value));
-    transaction.inputs[index].signature = [...new Uint8Array(await crypto.subtle.sign("Ed25519", wallet.privateKey, digest))];
+    const key = selected[index].walletKey || wallet;
+    transaction.inputs[index].signature = [...new Uint8Array(await crypto.subtle.sign("Ed25519", key.privateKey, digest))];
   }
   return transaction;
 }

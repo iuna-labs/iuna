@@ -22,9 +22,12 @@ use sha2::{Digest, Sha256};
 pub type Amount = u64;
 pub type Hash = [u8; 32];
 pub type PublicKey = [u8; 32];
+/// A domain-separated commitment to the Ed25519 public key that may spend an output.
+/// The key itself is revealed only by the spending input.
+pub type Address = [u8; 32];
 
 pub const NETWORK_ID: &str = "iuna-mainnet-candidate";
-pub const PROTOCOL_VERSION: u16 = 2;
+pub const PROTOCOL_VERSION: u16 = 3;
 pub const UNITS_PER_IUNA: Amount = 100_000_000;
 pub const MAX_MONEY: Amount = 4_207_680_100_000_000;
 pub const GENESIS_REWARD: Amount = UNITS_PER_IUNA;
@@ -71,18 +74,18 @@ pub const MAX_TARGET: Hash = [
 /// Pinned like Bitcoin's genesis block, so nodes never mine it at startup. Re-pin with
 /// [`search_genesis_nonce`] whenever a genesis field or [`MAX_TARGET`] changes.
 #[cfg(not(any(test, feature = "e2e")))]
-pub const GENESIS_NONCE: u64 = 2_191_740;
+pub const GENESIS_NONCE: u64 = 44_762_545;
 #[cfg(not(any(test, feature = "e2e")))]
 pub const GENESIS_HASH: Hash = [
-    0x00, 0x00, 0x00, 0x15, 0x3c, 0x54, 0xba, 0x27, 0x43, 0x66, 0x8b, 0xe7, 0x33, 0xd2, 0x30, 0x01,
-    0x39, 0x28, 0x8e, 0x70, 0xbe, 0x90, 0x77, 0xe2, 0xea, 0x95, 0xd0, 0x97, 0x71, 0x37, 0x63, 0x09,
+    0x00, 0x00, 0x00, 0x15, 0xff, 0x94, 0x62, 0x4a, 0x51, 0xc0, 0x5e, 0x7b, 0xf5, 0x3e, 0x0b, 0x83,
+    0x7b, 0xaf, 0x10, 0x5d, 0x9c, 0xf2, 0x8d, 0x0a, 0xf4, 0x99, 0x55, 0xf1, 0xa8, 0xb2, 0x4f, 0xdb,
 ];
 #[cfg(any(test, feature = "e2e"))]
-pub const GENESIS_NONCE: u64 = 7_230;
+pub const GENESIS_NONCE: u64 = 2_400;
 #[cfg(any(test, feature = "e2e"))]
 pub const GENESIS_HASH: Hash = [
-    0x00, 0x0b, 0x31, 0xd4, 0x47, 0x4a, 0x3f, 0x5b, 0x44, 0xd8, 0x3a, 0x1c, 0xe7, 0x80, 0xf4, 0x43,
-    0x89, 0x69, 0x86, 0x77, 0xd9, 0x17, 0x52, 0x4b, 0xe3, 0xb0, 0x75, 0x72, 0x93, 0xf0, 0x7d, 0x3b,
+    0x00, 0x09, 0x1d, 0x92, 0x9c, 0x05, 0x00, 0x40, 0x33, 0x7c, 0xf7, 0x2e, 0x17, 0xce, 0x02, 0x70,
+    0xff, 0xd2, 0xeb, 0x2a, 0xf5, 0x70, 0xf6, 0xc4, 0x10, 0x5a, 0xb3, 0x5f, 0x72, 0xa4, 0x2e, 0x6f,
 ];
 
 const ZERO_HASH: Hash = [0; 32];
@@ -114,7 +117,7 @@ pub struct OutPoint {
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 pub struct Output {
-    pub owner: PublicKey,
+    pub owner: Address,
     pub value: Amount,
 }
 
@@ -1401,7 +1404,7 @@ pub fn validate_genesis(block: &HeartbeatBlock, now: u64) -> Result<ConsensusSta
         utxos: BTreeMap::from([(
             genesis_outpoint,
             Output {
-                owner: block.header.miner_public_key,
+                owner: address_from_public_key(&block.header.miner_public_key),
                 value: GENESIS_REWARD,
             },
         )]),
@@ -1475,7 +1478,7 @@ fn genesis_template(timestamp: u64, miner_public_key: PublicKey) -> Result<Heart
         utxos: BTreeMap::from([(
             genesis_outpoint,
             Output {
-                owner: miner_public_key,
+                owner: address_from_public_key(&miner_public_key),
                 value: GENESIS_REWARD,
             },
         )]),
@@ -2029,7 +2032,7 @@ fn apply_ledger_batch(state: &mut ConsensusState, transactions: &[Transaction]) 
             let previous = snapshot
                 .get(&input.previous_output)
                 .ok_or(ConsensusError::Invalid("missing Ledger input"))?;
-            if previous.owner != input.public_key {
+            if previous.owner != address_from_public_key(&input.public_key) {
                 return Err(ConsensusError::Invalid("Ledger input owner mismatch"));
             }
             verify_signature(
@@ -2116,7 +2119,7 @@ fn apply_ticket_batch(
             let previous = snapshot
                 .get(&input.previous_output)
                 .ok_or(ConsensusError::Invalid("missing ticket input"))?;
-            if previous.owner != input.public_key {
+            if previous.owner != address_from_public_key(&input.public_key) {
                 return Err(ConsensusError::Invalid("ticket input owner mismatch"));
             }
             verify_signature(
@@ -2218,7 +2221,7 @@ fn credit_settlement_outputs(
                 output_index: 0,
             },
             Output {
-                owner: winner.mining_public_key,
+                owner: address_from_public_key(&winner.mining_public_key),
                 value: payouts.subsidy,
             },
         );
@@ -2230,7 +2233,7 @@ fn credit_settlement_outputs(
                 output_index: 1,
             },
             Output {
-                owner: winner.mining_public_key,
+                owner: address_from_public_key(&winner.mining_public_key),
                 value: payouts.winner_fees,
             },
         );
@@ -2265,7 +2268,7 @@ fn credit_heartbeat_payout(
                 output_index: 0,
             },
             Output {
-                owner: miner,
+                owner: address_from_public_key(&miner),
                 value: total,
             },
         )
@@ -2327,6 +2330,11 @@ pub fn tagged_hash(domain: &[u8], bytes: &[u8]) -> Hash {
     put_bytes_to_hasher(&mut hasher, domain);
     put_bytes_to_hasher(&mut hasher, bytes);
     hasher.finalize().into()
+}
+
+/// Commits an output to an Ed25519 key without publishing that key before it is spent.
+pub fn address_from_public_key(public_key: &PublicKey) -> Address {
+    tagged_hash(b"IUNA-ADDRESS-v1", public_key)
 }
 
 fn put_bytes_to_hasher(hasher: &mut Sha256, bytes: &[u8]) {
@@ -3264,7 +3272,7 @@ mod tests {
             mining_public_key: [9; 32],
             lottery_seed: [10; 32],
             change: Some(Output {
-                owner: GENESIS_MINER,
+                owner: address_from_public_key(&GENESIS_MINER),
                 value: GENESIS_REWARD - budget - fee,
             }),
         };
@@ -3385,6 +3393,13 @@ mod tests {
 
         sign(&mut transaction, GENESIS_REWARD);
         assert!(validate_pending_transaction(&genesis, &transaction).is_ok());
+
+        let mut raw_key_owner = genesis.clone();
+        raw_key_owner.utxos.values_mut().next().unwrap().owner = GENESIS_MINER;
+        assert_eq!(
+            validate_pending_transaction(&raw_key_owner, &transaction),
+            Err(ConsensusError::Invalid("Ledger input owner mismatch"))
+        );
     }
 
     #[test]
@@ -3551,7 +3566,7 @@ mod tests {
             utxos: BTreeMap::from([(
                 point,
                 Output {
-                    owner: spending_key.verifying_key().to_bytes(),
+                    owner: address_from_public_key(&spending_key.verifying_key().to_bytes()),
                     value: 1_000,
                 },
             )]),
@@ -3618,6 +3633,11 @@ mod tests {
                 .collect::<String>()
         };
         assert_eq!(vector["public_key_hex"], hex(&public_key));
+        assert_eq!(
+            vector["address_hex"],
+            hex(&address_from_public_key(&public_key))
+        );
+        assert_eq!(transaction.version, PROTOCOL_VERSION);
         let values = serde_json::from_value::<Vec<Amount>>(vector["input_values"].clone()).unwrap();
         let genesis: Hash = (0..32)
             .map(|index| {

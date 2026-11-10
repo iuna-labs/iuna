@@ -20,13 +20,15 @@ test.before(async () => {
   mnemonic = await import(dataModule(mnemonicSource));
 });
 
-test('wallet uses the canonical 24-word entropy and Ed25519 public key', async () => {
+test('wallet uses canonical entropy and commits its Ed25519 public key', async () => {
   const phrase = `${Array(23).fill('abandon').join(' ')} art`;
   const entropy = await mnemonic.mnemonicEntropy(phrase);
   const wallet = await core.walletFromEntropy(entropy);
 
   assert.equal(entropy.length, 32);
   assert.equal(wallet.publicKeyHex, '3b6a27bcceb6a42d62a3a8d02a6f0d73653215771de243a63ac048a18b59da29');
+  assert.equal(wallet.addressHex.length, 64);
+  assert.notEqual(wallet.addressHex, wallet.publicKeyHex);
   assert.equal(await mnemonic.validateMnemonic(phrase), phrase);
   await assert.rejects(mnemonic.validateMnemonic(`${Array(24).fill('abandon').join(' ')}`), /checksum/);
 });
@@ -41,14 +43,25 @@ test('browser wallet builds signatures accepted by Ed25519', async () => {
     fee: 10,
   });
 
-  assert.equal(transaction.version, 2);
+  assert.equal(transaction.version, 3);
   assert.deepEqual(transaction.outputs.map((output) => output.value), [600, 390]);
+  assert.notEqual(core.bytesHex(transaction.outputs[1].owner), wallet.addressHex);
   assert.equal(transaction.inputs[0].signature.length, 64);
   const publicKey = await crypto.subtle.importKey('raw', wallet.publicKey, 'Ed25519', false, ['verify']);
   assert.equal(
     await crypto.subtle.verify('Ed25519', publicKey, new Uint8Array(transaction.inputs[0].signature), await core.signingDigest(transaction, 0, [1000])),
     true,
   );
+
+  const next = await core.buildSignedTransaction({
+    wallet,
+    utxos: [{ transaction_id: '11'.repeat(32), output_index: 3, value: 1000, reserved: false }],
+    recipient: '22'.repeat(32),
+    amount: 600,
+    fee: 10,
+    changeIndex: 1,
+  });
+  assert.notDeepEqual(next.outputs[1].owner, transaction.outputs[1].owner);
 });
 
 test('browser wallet loads every stable UTXO page before selecting inputs', async () => {
@@ -75,6 +88,39 @@ test('browser wallet loads every stable UTXO page before selecting inputs', asyn
     assert.equal(view.utxos_truncated, false);
     assert.equal(view.next_utxo_offset, null);
     assert.equal(requests.length, 2);
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+});
+
+test('browser wallet discovers the next receive and change addresses', async () => {
+  const wallet = await core.walletFromEntropy(new Uint8Array(32));
+  const receive0 = await wallet.keyAt(0, 0);
+  const receive1 = await wallet.keyAt(0, 1);
+  const change0 = await wallet.keyAt(1, 0);
+  const originalFetch = globalThis.fetch;
+  globalThis.fetch = async (url) => {
+    const address = String(url).split('/').pop().split('?')[0];
+    return new Response(JSON.stringify({
+      network: 'iuna-mainnet-candidate',
+      heartbeat_height: 7,
+      tip_hash: 'ff'.repeat(32),
+      ledger_blocks: 1,
+      address,
+      used: [receive0.addressHex, change0.addressHex].includes(address),
+      balance: 0,
+      spendable_balance: 0,
+      utxos: [],
+      pending_transaction_ids: [],
+      utxos_truncated: false,
+      next_utxo_offset: null,
+    }), { status: 200, headers: { 'content-type': 'application/json' } });
+  };
+  try {
+    const view = await core.fetchWalletView('https://wallet.getiuna.com', wallet);
+    assert.equal(view.receive_index, 1);
+    assert.equal(view.receive_address, receive1.addressHex);
+    assert.equal(view.change_index, 1);
   } finally {
     globalThis.fetch = originalFetch;
   }
@@ -110,6 +156,8 @@ test('wallet settings name reachable endpoints and previous wallets are explaine
   for (const policy of source('nginx.conf').match(/connect-src [^;]+/g)) {
     assert.ok(policy.includes('http://127.0.0.1:18662'));
   }
+  assert.match(app, /data-field="receive-address"/);
+  assert.match(app, /copy-receive.*dataset\.value = view\.receive_address/s);
 });
 
 test('wallet app and deployment contain only the current protocol identity', () => {

@@ -259,8 +259,8 @@ window.iunaApp = function iunaApp() {
       const key = String(address).trim().toLowerCase();
       const label = String(name).trim().slice(0, 40);
       if (!label) return this.notify("Give the contact a name", "error");
-      if (!/^[0-9a-f]{64}$/.test(key)) return this.notify("A contact needs a 64-character public key", "error");
-      if (this.contacts.some((contact) => contact.address === key)) return this.notify("That key is already a contact", "error");
+      if (!/^[0-9a-f]{64}$/.test(key)) return this.notify("A contact needs a 64-character address", "error");
+      if (this.contacts.some((contact) => contact.address === key)) return this.notify("That address is already a contact", "error");
       this.contacts = [...this.contacts, { name: label, address: key }].sort((a, b) => a.name.localeCompare(b.name));
       this.saveContacts();
       this.contactForm = { name: "", address: "" };
@@ -287,11 +287,11 @@ window.iunaApp = function iunaApp() {
       const key = String(this.contactForm.address).trim().toLowerCase();
       const label = String(this.contactForm.name).trim().slice(0, 40);
       if (!label) return this.notify("Give the contact a name", "error");
-      if (!/^[0-9a-f]{64}$/.test(key)) return this.notify("A contact needs a 64-character public key", "error");
+      if (!/^[0-9a-f]{64}$/.test(key)) return this.notify("A contact needs a 64-character address", "error");
       const duplicate = this.contacts.some((contact) => (
         contact.address === key && contact.address !== this.contactEditingAddress
       ));
-      if (duplicate) return this.notify("That key is already a contact", "error");
+      if (duplicate) return this.notify("That address is already a contact", "error");
       this.contacts = [
         ...this.contacts.filter((contact) => contact.address !== this.contactEditingAddress),
         { name: label, address: key },
@@ -811,7 +811,7 @@ window.iunaApp = function iunaApp() {
       if (!this.canManage() || this.transfer.busy) return;
       try {
         const recipient = this.transfer.recipient.trim().toLowerCase();
-        if (!/^[0-9a-f]{64}$/.test(recipient)) throw new Error("The recipient must be a 64-character public key");
+        if (!/^[0-9a-f]{64}$/.test(recipient)) throw new Error("The recipient must be a 64-character address");
         const amount = this.parseAmount(this.transfer.amount, "Enter an amount");
         if (amount <= 0) throw new Error("Enter an amount above zero");
         const fee = this.parseAmount(this.transfer.fee);
@@ -2069,11 +2069,11 @@ window.iunaApp = function iunaApp() {
     },
 
     async copyWalletAddress() {
-      const address = this.status.wallet_public_key;
+      const address = this.status.wallet_receive_address;
       if (!address) return;
       try {
         await this.copyText(address);
-        this.notify("Wallet public key copied");
+        this.notify("Wallet address copied");
       } catch (error) {
         this.notify(error.message, "error");
       }

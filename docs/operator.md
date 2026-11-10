@@ -85,8 +85,9 @@ These routes are opt-in and exist only on the separate listener configured with
 
 The self-custody browser wallet uses two deliberately narrow routes:
 
-- `GET /api/public/wallet/{64-character-public-key}` returns only that key's
-  confirmed UTXOs, balance, spendable balance and current chain heights. The
+- `GET /api/public/wallet/{64-character-address}` returns only that address's
+  confirmed UTXOs, balance, spendable balance, historical `used` flag and
+  current chain heights. The
   node keeps a per-owner index that it rebuilds once per new tip, so a lookup
   does not scan the whole UTXO set. Balances always cover every output; the
   UTXO list stops at `1,000` entries and then sets `utxos_truncated`.
@@ -153,17 +154,18 @@ A new password needs at least 10 characters, in the node and in the browser
 wallet alike. Unlocking accepts any existing password, so wallets created under
 the earlier 8-character minimum still open.
 
-The phrase uses the standard BIP39 English word list and checksum, but its 32
-bytes of entropy are used directly as the Ed25519 secret key. It does not use the
+The phrase uses the standard BIP39 English word list and checksum. Its 32 bytes
+of entropy directly define the stable mining key and domain-separated hashes of
+that entropy derive the rotating receive and change keys. It does not use the
 BIP39 seed derivation or BIP32/SLIP-0010 paths that other wallets apply, so the
 same 24 words restore this iuna wallet in the node and the browser wallet but
-give a different key, or nothing useful, in other wallet software.
+give different keys, or nothing useful, in other wallet software.
 
 `POST /api/ledger-transactions` accepts:
 
 ```json
 {
-  "recipient": "32-byte-public-key-as-hex",
+  "recipient": "32-byte-address-commitment-as-hex",
   "amount": 100000000,
   "fee": 1
 }

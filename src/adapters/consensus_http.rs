@@ -1,6 +1,7 @@
 //! HTTP API for operator screens.
 
 use std::{
+    collections::BTreeSet,
     net::SocketAddr,
     path::PathBuf,
     sync::{
@@ -38,11 +39,12 @@ use crate::{
     },
     app::wallet_commands::{TicketParameters, Wallet},
     consensus::{
-        ConsensusError, ConsensusState, GENESIS_MINER, GENESIS_REWARD,
+        Address, ConsensusError, ConsensusState, GENESIS_MINER, GENESIS_REWARD,
         HEARTBEAT_TARGET_INTERVAL_SECS, HeartbeatBlock, LEDGER_TARGET_INTERVAL_HEARTBEATS,
         MAX_TARGET, MAX_TICKET_DURATION, NETWORK_ID, OutPoint, PublicKey, TicketTransaction,
-        Transaction, block_payouts, minimum_ticket_budget, sidecar_winner, split_transaction_fees,
-        subsidy, tagged_hash, ticket_fee, ticket_input_state, ticket_lifecycle_length,
+        Transaction, address_from_public_key, block_payouts, minimum_ticket_budget, sidecar_winner,
+        split_transaction_fees, subsidy, tagged_hash, ticket_fee, ticket_input_state,
+        ticket_lifecycle_length,
     },
 };
 
@@ -83,6 +85,7 @@ pub struct OperatorStatus {
     pub pending_ledger_transactions: usize,
     pub pending_mining_tickets: usize,
     pub wallet_public_key: Option<String>,
+    pub wallet_receive_address: Option<String>,
     pub wallet_balance: u64,
     pub wallet_spendable_balance: u64,
     pub wallet_utxos: usize,
@@ -195,7 +198,9 @@ pub struct PublicWalletView {
     pub heartbeat_height: u64,
     pub tip_hash: String,
     pub ledger_blocks: u64,
-    pub public_key: String,
+    pub address: String,
+    /// True even if every output ever sent here has since been spent.
+    pub used: bool,
     pub balance: u64,
     pub spendable_balance: u64,
     pub utxos: Vec<PublicWalletUtxo>,
@@ -499,7 +504,7 @@ pub fn router(state: ConsensusHttpState) -> Router {
 /// Deliberately narrow router served only when the operator opts into a separate public listener.
 pub fn public_wallet_router(state: ConsensusHttpState) -> Router {
     Router::new()
-        .route("/api/public/wallet/{public_key}", get(public_wallet_view))
+        .route("/api/public/wallet/{address}", get(public_wallet_view))
         .route(
             "/api/public/transactions",
             post(submit_signed_transaction).options(public_wallet_preflight),
@@ -511,13 +516,14 @@ pub fn public_wallet_router(state: ConsensusHttpState) -> Router {
 
 async fn public_wallet_view(
     State(state): State<ConsensusHttpState>,
-    Path(public_key): Path<String>,
+    Path(address): Path<String>,
     Query(query): Query<PublicWalletQuery>,
 ) -> ApiResult<PublicWalletView> {
-    let public_key = decode_hex_32(&public_key, "public key")
+    let address = decode_hex_32(&address, "address")
         .map_err(|error| api_error(StatusCode::BAD_REQUEST, error.to_string()))?;
     let mut node = state.node.lock().await;
-    let owned = node.owned_outputs(&public_key);
+    let owned = node.owned_outputs(&address);
+    let used = node.address_used(&address);
     let chain = node.chain().tip();
     let mut balance = 0_u64;
     let mut spendable_balance = 0_u64;
@@ -554,7 +560,7 @@ async fn public_wallet_view(
             transaction
                 .inputs
                 .iter()
-                .any(|input| input.public_key == public_key)
+                .any(|input| address_from_public_key(&input.public_key) == address)
         })
         .map(|transaction| hex(&transaction.id()))
         .collect();
@@ -563,7 +569,8 @@ async fn public_wallet_view(
         heartbeat_height: chain.height,
         tip_hash: hex(&chain.tip),
         ledger_blocks: chain.ledger_blocks,
-        public_key: hex(&public_key),
+        address: hex(&address),
+        used,
         balance,
         spendable_balance,
         utxos,
@@ -574,7 +581,7 @@ async fn public_wallet_view(
 }
 
 fn transaction_activity(
-    owner: &[u8; 32],
+    owners: &BTreeSet<Address>,
     transaction: &Transaction,
     height: Option<u64>,
     timestamp: Option<u64>,
@@ -582,17 +589,17 @@ fn transaction_activity(
     let spends = transaction
         .inputs
         .iter()
-        .any(|input| &input.public_key == owner);
+        .any(|input| owners.contains(&address_from_public_key(&input.public_key)));
     let to_owner: u64 = transaction
         .outputs
         .iter()
-        .filter(|output| &output.owner == owner)
+        .filter(|output| owners.contains(&output.owner))
         .map(|output| output.value)
         .sum();
     let others = transaction
         .outputs
         .iter()
-        .filter(|output| &output.owner != owner)
+        .filter(|output| !owners.contains(&output.owner))
         .collect::<Vec<_>>();
     let (kind, amount, counterparty) = if spends && others.is_empty() {
         ("self", to_owner, None)
@@ -609,7 +616,7 @@ fn transaction_activity(
             transaction
                 .inputs
                 .first()
-                .map(|input| hex(&input.public_key)),
+                .map(|input| hex(&address_from_public_key(&input.public_key))),
         )
     } else {
         return None;
@@ -625,7 +632,7 @@ fn transaction_activity(
 }
 
 fn ticket_activity(
-    owner: &[u8; 32],
+    owners: &BTreeSet<Address>,
     ticket: &crate::consensus::TicketTransaction,
     height: Option<u64>,
     timestamp: Option<u64>,
@@ -633,7 +640,7 @@ fn ticket_activity(
     ticket
         .inputs
         .iter()
-        .any(|input| &input.public_key == owner)
+        .any(|input| owners.contains(&address_from_public_key(&input.public_key)))
         .then(|| WalletActivityItem {
             kind: "ticket",
             id: hex(&ticket.id()),
@@ -664,15 +671,22 @@ fn push_wallet_activity(
 
 /// The node wallet's UTXOs, mempool entries and recent confirmed activity, newest first.
 async fn wallet_activity(State(state): State<ConsensusHttpState>) -> ApiResult<WalletActivityView> {
-    let owner = state
-        .wallet
-        .read()
-        .expect("wallet state lock poisoned")
-        .public_key
-        .ok_or_else(|| api_error(StatusCode::NOT_FOUND, "this node has no wallet"))?;
+    let (public_key, unlocked) = {
+        let wallet = state.wallet.read().expect("wallet state lock poisoned");
+        (
+            wallet
+                .public_key
+                .ok_or_else(|| api_error(StatusCode::NOT_FOUND, "this node has no wallet"))?,
+            wallet.unlocked.clone(),
+        )
+    };
     // Rewards are read before the node lock: SQLite must not hold up the node.
     let store = state.ui_store.clone();
-    let rewards_owner = hex(&owner);
+    let owners = unlocked.map_or_else(
+        || BTreeSet::from([address_from_public_key(&public_key)]),
+        |wallet| wallet.owned_addresses(),
+    );
+    let rewards_owner = hex(&public_key);
     let rewards = tokio::task::spawn_blocking(move || {
         store.wallet_rewards(&rewards_owner, WALLET_ACTIVITY_HEARTBEATS)
     })
@@ -685,7 +699,10 @@ async fn wallet_activity(State(state): State<ConsensusHttpState>) -> ApiResult<W
         Default::default()
     });
     let mut node = state.node.lock().await;
-    let owned = node.owned_outputs(&owner);
+    let owned = owners
+        .iter()
+        .flat_map(|owner| node.owned_outputs(owner))
+        .collect::<Vec<_>>();
     let utxos = owned
         .iter()
         .take(MAX_PUBLIC_WALLET_UTXOS)
@@ -699,12 +716,12 @@ async fn wallet_activity(State(state): State<ConsensusHttpState>) -> ApiResult<W
     let mut pending = node
         .pending_transactions()
         .iter()
-        .filter_map(|transaction| transaction_activity(&owner, transaction, None, None))
+        .filter_map(|transaction| transaction_activity(&owners, transaction, None, None))
         .collect::<Vec<_>>();
     pending.extend(
         node.pending_tickets()
             .iter()
-            .filter_map(|ticket| ticket_activity(&owner, ticket, None, None)),
+            .filter_map(|ticket| ticket_activity(&owners, ticket, None, None)),
     );
     let chain = node.chain();
     let mut confirmed = Vec::new();
@@ -754,12 +771,12 @@ async fn wallet_activity(State(state): State<ConsensusHttpState>) -> ApiResult<W
             .iter()
             .flat_map(|sidecar| sidecar.transactions.iter())
         {
-            if let Some(item) = transaction_activity(&owner, transaction, height, time) {
+            if let Some(item) = transaction_activity(&owners, transaction, height, time) {
                 push_wallet_activity(&mut confirmed, &mut confirmed_counts, item);
             }
         }
         for ticket in &block.tickets {
-            if let Some(item) = ticket_activity(&owner, ticket, height, time) {
+            if let Some(item) = ticket_activity(&owners, ticket, height, time) {
                 push_wallet_activity(&mut confirmed, &mut confirmed_counts, item);
             }
         }
@@ -767,7 +784,7 @@ async fn wallet_activity(State(state): State<ConsensusHttpState>) -> ApiResult<W
         cursor = block.header.parent;
     }
     Ok(Json(WalletActivityView {
-        public_key: hex(&owner),
+        public_key: hex(&public_key),
         scanned_heartbeats: scanned,
         utxos,
         pending,
@@ -856,7 +873,7 @@ pub fn block_detail_view(
                 duration: ticket.duration,
                 lifecycle_heartbeats: ticket_lifecycle_length(ticket.duration),
                 fee: parts.fee,
-                fee_recipient: hex(&block.header.miner_public_key),
+                fee_recipient: hex(&address_from_public_key(&block.header.miner_public_key)),
                 mining_public_key: parts.mining_public_key,
                 lottery_seed: parts.lottery_seed,
                 inputs: parts.inputs,
@@ -1038,11 +1055,11 @@ fn block_fee_split(
     FeeSplitView {
         heartbeat_miner: FeeShareView {
             value: heartbeat,
-            owner: Some(hex(&heartbeat_miner)),
+            owner: Some(hex(&address_from_public_key(&heartbeat_miner))),
         },
         ledger_winner: FeeShareView {
             value: fee - heartbeat,
-            owner: ledger_winner.map(|key| hex(&key)),
+            owner: ledger_winner.map(|key| hex(&address_from_public_key(&key))),
         },
     }
 }
@@ -1263,17 +1280,27 @@ async fn index() -> impl IntoResponse {
 }
 
 async fn status(State(state): State<ConsensusHttpState>) -> Json<OperatorStatus> {
-    let node = state.node.lock().await;
+    let mut node = state.node.lock().await;
     let chain = node.status();
     let reserved_inputs = node.reserved_inputs();
     let wallet = state.wallet.read().expect("wallet state lock poisoned");
+    let wallet_addresses = wallet.unlocked.as_ref().map_or_else(
+        || {
+            wallet
+                .public_key
+                .map(|key| address_from_public_key(&key))
+                .into_iter()
+                .collect::<BTreeSet<_>>()
+        },
+        |wallet| wallet.owned_addresses(),
+    );
     let (wallet_balance, wallet_spendable_balance, wallet_utxos, wallet_spendable_utxos) =
-        wallet.public_key.map_or((0, 0, 0, 0), |public_key| {
+        wallet.public_key.map_or((0, 0, 0, 0), |_| {
             node.chain()
                 .tip()
                 .utxos
                 .iter()
-                .filter(|(_, output)| output.owner == public_key)
+                .filter(|(_, output)| wallet_addresses.contains(&output.owner))
                 .fold(
                     (0, 0, 0, 0),
                     |(balance, spendable, outputs, spendable_outputs), (point, output)| {
@@ -1288,6 +1315,11 @@ async fn status(State(state): State<ConsensusHttpState>) -> Json<OperatorStatus>
                 )
         });
     let ledger_ticket_power = local_ledger_ticket_power(node.chain().tip(), wallet.public_key);
+    let wallet_receive_address = wallet.unlocked.as_ref().and_then(|wallet| {
+        (0..crate::app::wallet_commands::WALLET_ADDRESS_SCAN_LIMIT)
+            .map(|index| wallet.receive_address(index))
+            .find(|address| !node.address_used(address))
+    });
     Json(OperatorStatus {
         app_version: env!("CARGO_PKG_VERSION"),
         network: NETWORK_ID,
@@ -1301,6 +1333,7 @@ async fn status(State(state): State<ConsensusHttpState>) -> Json<OperatorStatus>
         pending_ledger_transactions: node.pending_transaction_count(),
         pending_mining_tickets: node.pending_ticket_count(),
         wallet_public_key: wallet.public_key.map(|key| hex(&key)),
+        wallet_receive_address: wallet_receive_address.map(|address| hex(&address)),
         wallet_balance,
         wallet_spendable_balance,
         wallet_utxos,
@@ -1472,7 +1505,7 @@ async fn ensure_bootstrap_ticket(
         || !chain
             .utxos
             .values()
-            .any(|output| output.owner == GENESIS_MINER)
+            .any(|output| output.owner == address_from_public_key(&GENESIS_MINER))
     {
         return Ok(false);
     }
@@ -2355,6 +2388,11 @@ mod tests {
             .unwrap();
         let status: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
         assert_eq!(status["wallet_unlocked"], true);
+        assert_eq!(status["wallet_receive_address"].as_str().unwrap().len(), 64);
+        assert_ne!(
+            status["wallet_receive_address"],
+            status["wallet_public_key"]
+        );
         assert_eq!(status["management_enabled"], true);
         assert_eq!(status["management_requires_token"], false);
     }
@@ -2485,7 +2523,7 @@ mod tests {
         };
         let unavailable = router(state.clone())
             .oneshot(
-                Request::get(format!("/api/public/wallet/{}", hex(&wallet.public_key())))
+                Request::get(format!("/api/public/wallet/{}", hex(&wallet.address())))
                     .body(Body::empty())
                     .unwrap(),
             )
@@ -2564,7 +2602,7 @@ mod tests {
             "https://wallet.getiuna.com"
         );
 
-        let request = Request::get(format!("/api/public/wallet/{}", hex(&wallet.public_key())))
+        let request = Request::get(format!("/api/public/wallet/{}", hex(&wallet.address())))
             .body(Body::empty())
             .unwrap();
         let response = public_wallet_router(state.clone())
@@ -2600,7 +2638,7 @@ mod tests {
             "GET, POST, OPTIONS"
         );
 
-        let request = Request::get(format!("/api/public/wallet/{}", hex(&wallet.public_key())))
+        let request = Request::get(format!("/api/public/wallet/{}", hex(&wallet.address())))
             .header(header::ORIGIN, "https://wallet.getiuna.com")
             .body(Body::empty())
             .unwrap();
@@ -2613,13 +2651,15 @@ mod tests {
             .await
             .unwrap();
         let view: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+        assert_eq!(view["address"], hex(&wallet.address()));
+        assert_eq!(view["used"], true);
         assert_eq!(view["balance"], GENESIS_REWARD);
         assert_eq!(view["spendable_balance"], 0);
         assert_eq!(view["utxos"][0]["reserved"], true);
         assert_eq!(view["utxos_truncated"], false);
         assert_eq!(view["next_utxo_offset"], serde_json::Value::Null);
 
-        let request = Request::get(format!("/api/public/wallet/{}", hex(&wallet.public_key())))
+        let request = Request::get(format!("/api/public/wallet/{}", hex(&wallet.address())))
             .header(header::ORIGIN, "https://malicious.example")
             .body(Body::empty())
             .unwrap();
@@ -3196,7 +3236,7 @@ mod tests {
         let split = &detail["ledger"]["transactions"][0]["fee_split"];
         assert_eq!(split["heartbeat_miner"]["value"], 50);
         assert_eq!(split["ledger_winner"]["value"], 50);
-        assert_eq!(split["ledger_winner"]["owner"], hex(&wallet.public_key()));
+        assert_eq!(split["ledger_winner"]["owner"], hex(&wallet.address()));
         assert_eq!(
             split["heartbeat_miner"]["value"],
             detail["rewards"]["heartbeat"]["ledger_transaction_fees"]

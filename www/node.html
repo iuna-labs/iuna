@@ -397,7 +397,7 @@
               <article class="panel">
                 <div class="panel-head"><div class="title-with-pill"><h2>Send IUNA</h2><span class="pill">Transaction</span></div></div>
                 <form class="form-row" @submit.prevent="reviewTransaction">
-                  <label>Recipient public key<input x-model.trim="transfer.recipient" list="contact-keys" minlength="64" maxlength="64" placeholder="64 hexadecimal characters or pick a contact" required></label>
+                  <label>Recipient address<input x-model.trim="transfer.recipient" list="contact-keys" minlength="64" maxlength="64" placeholder="64 hexadecimal characters or pick a contact" required></label>
                   <datalist id="contact-keys"><template x-for="contact in contacts" :key="contact.address"><option :value="contact.address" x-text="contact.name"></option></template></datalist>
                   <label>Amount (IUNA)<span class="amount-row"><input x-model="transfer.amount" type="number" min="0.00000001" step="0.00000001" required><button type="button" @click="useMaximumAmount" title="Send the whole spendable balance minus the fee">Max</button></span></label>
                   <label>Fee (IUNA)<input x-model="transfer.fee" type="number" min="0.00000001" step="0.00000001" required></label>
@@ -406,7 +406,7 @@
               </article>
               <article class="panel">
                 <div class="panel-head"><h2>Receive</h2><button @click="copyWalletAddress">Copy address</button></div>
-                <div class="address"><code x-text="status.wallet_public_key || 'Wallet unavailable'"></code></div>
+                <div class="address"><code x-text="status.wallet_receive_address || 'Wallet unavailable'"></code></div>
                 <div class="grid" style="margin-top:12px">
                   <div class="stat"><div class="stat-label">Balance</div><div class="stat-value">IUNA <span x-text="amountLabel(status.wallet_balance)"></span></div></div>
                   <div class="stat"><div class="stat-label">Spendable</div><div class="stat-value">IUNA <span x-text="amountLabel(status.wallet_spendable_balance)"></span></div></div>
@@ -799,7 +799,7 @@
   <div class="setup-overlay" x-show="pendingTransfer" x-transition.opacity @click.self="closeModals()">
     <section class="setup-modal" role="dialog" aria-modal="true" aria-labelledby="confirm-title" style="width:min(640px,100%)" x-ref="confirmTransfer" tabindex="-1">
       <div class="setup-kicker">Send IUNA</div><h1 id="confirm-title">Confirm transfer</h1>
-      <p class="muted">Check the full recipient key. Ledger transactions cannot be reversed.</p>
+      <p class="muted">Check the full recipient address. Ledger transactions cannot be reversed.</p>
       <div class="detail-kv"><div class="key">Recipient<span x-show="contactName(pendingTransfer?.recipient)" x-text="` · ${contactName(pendingTransfer?.recipient)}`"></span></div><code x-text="pendingTransfer?.recipient"></code></div>
       <div class="confirm-facts">
         <div class="stat"><div class="stat-label">Amount</div><div class="stat-value">IUNA <span x-text="amountLabel(pendingTransfer?.amount)"></span></div></div>
@@ -885,7 +885,7 @@
         </div>
         <div x-show="status.wallet_unlocked && !walletAccess.recoveryPhrase">
           <div class="setup-check"><span class="setup-check-mark">✓</span><div><b>Wallet protected</b><div class="muted">Ready to receive, send and mine.</div></div></div>
-          <div class="address" style="margin-top:10px"><code x-text="status.wallet_public_key"></code></div>
+          <div class="address" style="margin-top:10px"><code x-text="status.wallet_receive_address"></code></div>
           <button style="margin-top:10px" @click="copyWalletAddress">Copy wallet address</button>
           <button style="margin-top:10px" x-show="walletAccess.mode !== 'backup'" @click="startWalletBackup">Back up recovery phrase</button>
           <form class="stacked-form" x-show="walletAccess.mode === 'backup'" @submit.prevent="accessWallet" style="margin-top:10px">

@@ -1,14 +1,20 @@
 //! Ed25519-only wallet operations for IUNA.
 
-use std::collections::BTreeSet;
+use std::{
+    collections::{BTreeMap, BTreeSet},
+    sync::{
+        RwLock,
+        atomic::{AtomicU32, Ordering},
+    },
+};
 
 use anyhow::{Result, bail};
 use ed25519_dalek::{Signer, SigningKey};
 
 use crate::consensus::{
-    Amount, ConsensusState, Hash, Input, OutPoint, Output, PROTOCOL_VERSION, PublicKey, Sidecar,
-    TicketInput, TicketTransaction, Transaction, input_values, validate_pending_ticket,
-    validate_pending_transaction,
+    Address, Amount, ConsensusState, Hash, Input, OutPoint, Output, PROTOCOL_VERSION, PublicKey,
+    Sidecar, TicketInput, TicketTransaction, Transaction, address_from_public_key, input_values,
+    tagged_hash, validate_pending_ticket, validate_pending_transaction,
 };
 
 use super::consensus_node::{ChainRepository, Node};
@@ -16,9 +22,16 @@ use super::consensus_node::{ChainRepository, Node};
 /// Keeps automatic consolidation tickets comfortably below the 16 KiB Heartbeat limit while
 /// still collapsing dust at each ten-Heartbeat purchase.
 pub const AUTOMATIC_TICKET_MAX_INPUTS: usize = 32;
+/// Recovery scans this deterministic window even when older addresses have already been emptied.
+pub const WALLET_ADDRESS_SCAN_LIMIT: u32 = 1_000;
+
+const RECEIVE_BRANCH: u8 = 0;
+const CHANGE_BRANCH: u8 = 1;
 
 pub struct Wallet {
     signing_key: SigningKey,
+    key_cache: RwLock<BTreeMap<Address, SigningKey>>,
+    change_cursor: AtomicU32,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -40,11 +53,39 @@ impl Wallet {
     pub fn from_seed(seed: [u8; 32]) -> Self {
         Self {
             signing_key: SigningKey::from_bytes(&seed),
+            key_cache: RwLock::new(BTreeMap::new()),
+            change_cursor: AtomicU32::new(0),
         }
     }
 
     pub fn public_key(&self) -> PublicKey {
         self.signing_key.verifying_key().to_bytes()
+    }
+
+    pub fn address(&self) -> Address {
+        address_from_public_key(&self.public_key())
+    }
+
+    pub fn receive_address(&self, index: u32) -> Address {
+        address_from_public_key(
+            &self
+                .child_key(RECEIVE_BRANCH, index)
+                .verifying_key()
+                .to_bytes(),
+        )
+    }
+
+    pub fn change_address(&self, index: u32) -> Address {
+        address_from_public_key(
+            &self
+                .child_key(CHANGE_BRANCH, index)
+                .verifying_key()
+                .to_bytes(),
+        )
+    }
+
+    pub fn owned_addresses(&self) -> BTreeSet<Address> {
+        self.keyring().keys().copied().collect()
     }
 
     /// Signs a non-empty Ledger candidate for a ticket whose mining key belongs to this wallet.
@@ -63,10 +104,11 @@ impl Wallet {
     }
 
     pub fn balance(&self, state: &ConsensusState) -> Amount {
+        let keys = self.keyring();
         state
             .utxos
             .values()
-            .filter(|output| output.owner == self.public_key())
+            .filter(|output| keys.contains_key(&output.owner))
             .map(|output| output.value)
             .sum()
     }
@@ -75,7 +117,7 @@ impl Wallet {
         &self,
         state: &ConsensusState,
         reserved_inputs: &BTreeSet<OutPoint>,
-        recipient: PublicKey,
+        recipient: Address,
         amount: Amount,
         fee: Amount,
     ) -> Result<Transaction> {
@@ -85,24 +127,25 @@ impl Wallet {
         let required = amount
             .checked_add(fee)
             .ok_or_else(|| anyhow::anyhow!("amount overflow"))?;
-        let (points, total) = self.select_inputs(state, reserved_inputs, required)?;
+        let (selected, total) = self.select_inputs(state, reserved_inputs, required)?;
         let mut outputs = vec![Output {
             owner: recipient,
             value: amount,
         }];
         if total > required {
+            let change_key = self.fresh_change_key(state)?;
             outputs.push(Output {
-                owner: self.public_key(),
+                owner: address_from_public_key(&change_key.verifying_key().to_bytes()),
                 value: total - required,
             });
         }
         let mut transaction = Transaction {
             version: PROTOCOL_VERSION,
-            inputs: points
+            inputs: selected
                 .into_iter()
-                .map(|previous_output| Input {
+                .map(|(previous_output, key)| Input {
                     previous_output,
-                    public_key: self.public_key(),
+                    public_key: key.verifying_key().to_bytes(),
                     signature: Vec::new(),
                 })
                 .collect(),
@@ -117,10 +160,11 @@ impl Wallet {
             "missing Ledger input",
         )?;
         for index in 0..transaction.inputs.len() {
+            let key = self
+                .key_for_public_key(&transaction.inputs[index].public_key)
+                .ok_or_else(|| anyhow::anyhow!("selected Ledger input key is unavailable"))?;
             transaction.inputs[index].signature = self
-                .signing_key
-                .sign(&transaction.signing_digest(index, &values)?)
-                .to_bytes()
+                .sign_with_key(&key, &transaction.signing_digest(index, &values)?)
                 .to_vec();
         }
         validate_pending_transaction(state, &transaction)?;
@@ -130,10 +174,11 @@ impl Wallet {
     pub fn submit_transaction<R: ChainRepository>(
         &self,
         node: &mut Node<R>,
-        recipient: PublicKey,
+        recipient: Address,
         amount: Amount,
         fee: Amount,
     ) -> Result<SubmissionReceipt> {
+        self.sync_change_cursor(node);
         let transaction = self.build_transaction(
             node.chain().tip(),
             &node.reserved_inputs(),
@@ -190,16 +235,16 @@ impl Wallet {
         state: &ConsensusState,
         parameters: TicketParameters,
         required: Amount,
-        points: Vec<OutPoint>,
+        points: Vec<(OutPoint, SigningKey)>,
         total: Amount,
     ) -> Result<TicketTransaction> {
         let mut ticket = TicketTransaction {
             version: PROTOCOL_VERSION,
             inputs: points
                 .into_iter()
-                .map(|previous_output| TicketInput {
+                .map(|(previous_output, key)| TicketInput {
                     previous_output,
-                    public_key: self.public_key(),
+                    public_key: key.verifying_key().to_bytes(),
                     signature: Vec::new(),
                 })
                 .collect(),
@@ -207,10 +252,15 @@ impl Wallet {
             duration: parameters.duration,
             mining_public_key: parameters.mining_public_key,
             lottery_seed: parameters.lottery_seed,
-            change: (total > required).then(|| Output {
-                owner: self.public_key(),
-                value: total - required,
-            }),
+            change: if total > required {
+                let key = self.fresh_change_key(state)?;
+                Some(Output {
+                    owner: address_from_public_key(&key.verifying_key().to_bytes()),
+                    value: total - required,
+                })
+            } else {
+                None
+            },
         };
         let values = input_values(
             &state.utxos,
@@ -218,10 +268,11 @@ impl Wallet {
             "missing ticket input",
         )?;
         for index in 0..ticket.inputs.len() {
+            let key = self
+                .key_for_public_key(&ticket.inputs[index].public_key)
+                .ok_or_else(|| anyhow::anyhow!("selected ticket input key is unavailable"))?;
             ticket.inputs[index].signature = self
-                .signing_key
-                .sign(&ticket.signing_digest(index, &values)?)
-                .to_bytes()
+                .sign_with_key(&key, &ticket.signing_digest(index, &values)?)
                 .to_vec();
         }
         validate_pending_ticket(state, &ticket)?;
@@ -233,6 +284,7 @@ impl Wallet {
         node: &mut Node<R>,
         parameters: TicketParameters,
     ) -> Result<SubmissionReceipt> {
+        self.sync_change_cursor(node);
         let ticket = self.build_ticket(node.chain().tip(), &node.reserved_inputs(), parameters)?;
         let id = ticket.id();
         let fee = node.submit_ticket(ticket)?;
@@ -244,6 +296,7 @@ impl Wallet {
         node: &mut Node<R>,
         parameters: TicketParameters,
     ) -> Result<SubmissionReceipt> {
+        self.sync_change_cursor(node);
         let ticket = self.build_consolidating_ticket(
             node.chain().tip(),
             &node.reserved_inputs(),
@@ -259,14 +312,18 @@ impl Wallet {
         state: &ConsensusState,
         reserved_inputs: &BTreeSet<OutPoint>,
         required: Amount,
-    ) -> Result<(Vec<OutPoint>, Amount)> {
+    ) -> Result<(Vec<(OutPoint, SigningKey)>, Amount)> {
+        let keys = self.keyring();
         let mut points = Vec::new();
         let mut total = 0u64;
         for (point, output) in &state.utxos {
-            if output.owner != self.public_key() || reserved_inputs.contains(point) {
+            let Some(key) = keys.get(&output.owner) else {
+                continue;
+            };
+            if reserved_inputs.contains(point) {
                 continue;
             }
-            points.push(point.clone());
+            points.push((point.clone(), key.clone()));
             total = total
                 .checked_add(output.value)
                 .ok_or_else(|| anyhow::anyhow!("balance overflow"))?;
@@ -283,21 +340,28 @@ impl Wallet {
         reserved_inputs: &BTreeSet<OutPoint>,
         required: Amount,
         max_inputs: usize,
-    ) -> Result<(Vec<OutPoint>, Amount)> {
+    ) -> Result<(Vec<(OutPoint, SigningKey)>, Amount)> {
+        let keys = self.keyring();
         let mut available = state
             .utxos
             .iter()
-            .filter(|(point, output)| {
-                output.owner == self.public_key() && !reserved_inputs.contains(*point)
+            .filter_map(|(point, output)| {
+                (!reserved_inputs.contains(point))
+                    .then(|| {
+                        keys.get(&output.owner)
+                            .map(|key| (point.clone(), output.value, key.clone()))
+                    })
+                    .flatten()
             })
-            .map(|(point, output)| (point.clone(), output.value))
             .collect::<Vec<_>>();
-        available.sort_by(|(left_point, left_value), (right_point, right_value)| {
-            left_value
-                .cmp(right_value)
-                .then_with(|| left_point.cmp(right_point))
-        });
-        let available_total = available.iter().try_fold(0_u64, |total, (_, value)| {
+        available.sort_by(
+            |(left_point, left_value, _), (right_point, right_value, _)| {
+                left_value
+                    .cmp(right_value)
+                    .then_with(|| left_point.cmp(right_point))
+            },
+        );
+        let available_total = available.iter().try_fold(0_u64, |total, (_, value, _)| {
             total
                 .checked_add(*value)
                 .ok_or_else(|| anyhow::anyhow!("balance overflow"))
@@ -314,7 +378,7 @@ impl Wallet {
                 .iter()
                 .rev()
                 .take(max_inputs)
-                .map(|(_, value)| *value)
+                .map(|(_, value, _)| *value)
                 .sum::<u64>()
                 >= required;
         let protect_largest = fundable_without_largest;
@@ -322,7 +386,7 @@ impl Wallet {
         let candidates = &available[..candidate_count];
         let mut selected = BTreeSet::new();
         let mut total = 0_u64;
-        for (point, value) in candidates.iter().rev() {
+        for (point, value, _) in candidates.iter().rev() {
             if selected.len() >= max_inputs {
                 bail!("automatic Ledger ticket needs more than {max_inputs} inputs");
             }
@@ -338,7 +402,7 @@ impl Wallet {
             bail!("insufficient available balance");
         }
 
-        for (point, value) in candidates {
+        for (point, value, _) in candidates {
             if selected.len() >= max_inputs || selected.contains(point) {
                 continue;
             }
@@ -352,7 +416,89 @@ impl Wallet {
                 .checked_add(*value)
                 .ok_or_else(|| anyhow::anyhow!("balance overflow"))?;
         }
-        Ok((selected.into_iter().collect(), total))
+        Ok((
+            selected
+                .into_iter()
+                .map(|point| {
+                    let key = available
+                        .iter()
+                        .find(|(candidate, _, _)| candidate == &point)
+                        .expect("selected point came from available inputs")
+                        .2
+                        .clone();
+                    (point, key)
+                })
+                .collect(),
+            total,
+        ))
+    }
+
+    fn child_key(&self, branch: u8, index: u32) -> SigningKey {
+        let mut material = Vec::with_capacity(37);
+        material.extend_from_slice(&self.signing_key.to_bytes());
+        material.push(branch);
+        material.extend_from_slice(&index.to_be_bytes());
+        SigningKey::from_bytes(&tagged_hash(b"IUNA-WALLET-CHILD-v1", &material))
+    }
+
+    fn keyring(&self) -> std::sync::RwLockReadGuard<'_, BTreeMap<Address, SigningKey>> {
+        if self
+            .key_cache
+            .read()
+            .expect("wallet key cache lock poisoned")
+            .is_empty()
+        {
+            let mut keys = self
+                .key_cache
+                .write()
+                .expect("wallet key cache lock poisoned");
+            keys.insert(self.address(), self.signing_key.clone());
+            for index in 0..WALLET_ADDRESS_SCAN_LIMIT {
+                for branch in [RECEIVE_BRANCH, CHANGE_BRANCH] {
+                    let key = self.child_key(branch, index);
+                    keys.insert(
+                        address_from_public_key(&key.verifying_key().to_bytes()),
+                        key,
+                    );
+                }
+            }
+        }
+        self.key_cache
+            .read()
+            .expect("wallet key cache lock poisoned")
+    }
+
+    fn key_for_public_key(&self, public_key: &PublicKey) -> Option<SigningKey> {
+        self.keyring()
+            .get(&address_from_public_key(public_key))
+            .cloned()
+    }
+
+    fn fresh_change_key(&self, state: &ConsensusState) -> Result<SigningKey> {
+        let mut index = self.change_cursor.load(Ordering::Relaxed);
+        while index < WALLET_ADDRESS_SCAN_LIMIT {
+            let key = self.child_key(CHANGE_BRANCH, index);
+            let address = address_from_public_key(&key.verifying_key().to_bytes());
+            if !state.utxos.values().any(|output| output.owner == address) {
+                self.change_cursor
+                    .store(index.saturating_add(1), Ordering::Relaxed);
+                return Ok(key);
+            }
+            index = index.saturating_add(1);
+        }
+        bail!("wallet change-address scan limit reached")
+    }
+
+    fn sync_change_cursor<R: ChainRepository>(&self, node: &mut Node<R>) {
+        let mut index = self.change_cursor.load(Ordering::Relaxed);
+        while index < WALLET_ADDRESS_SCAN_LIMIT && node.address_used(&self.change_address(index)) {
+            index = index.saturating_add(1);
+        }
+        self.change_cursor.fetch_max(index, Ordering::Relaxed);
+    }
+
+    fn sign_with_key(&self, key: &SigningKey, message: &[u8]) -> [u8; 64] {
+        key.sign(message).to_bytes()
     }
 }
 
@@ -394,10 +540,36 @@ mod tests {
     }
 
     #[test]
+    fn browser_and_node_wallets_derive_the_same_child_addresses() {
+        let vector: serde_json::Value = serde_json::from_str(include_str!(
+            "../../tests/vectors/browser_wallet_transaction.json"
+        ))
+        .unwrap();
+        let wallet = Wallet::from_seed([0; 32]);
+        let hex = |bytes: &[u8]| {
+            bytes
+                .iter()
+                .map(|byte| format!("{byte:02x}"))
+                .collect::<String>()
+        };
+        assert_eq!(vector["address_hex"], hex(&wallet.address()));
+        assert_eq!(
+            vector["receive_0_address_hex"],
+            hex(&wallet.receive_address(0))
+        );
+        assert_eq!(
+            vector["change_0_address_hex"],
+            hex(&wallet.change_address(0))
+        );
+    }
+
+    #[test]
     fn builds_valid_ledger_transactions_and_mining_tickets() {
         let wallet = Wallet::from_seed(GENESIS_SEED);
         let (_, genesis) = pinned_genesis().unwrap();
         assert_eq!(wallet.public_key(), GENESIS_MINER);
+        assert_eq!(wallet.address(), address_from_public_key(&GENESIS_MINER));
+        assert_ne!(wallet.receive_address(0), wallet.change_address(0));
 
         let transaction = wallet
             .build_transaction(&genesis, &BTreeSet::new(), [91; 32], 10_000_000, 0)
@@ -406,6 +578,7 @@ mod tests {
             validate_pending_transaction(&genesis, &transaction).unwrap(),
             0
         );
+        assert_eq!(transaction.outputs[1].owner, wallet.change_address(0));
 
         let ticket = wallet
             .build_ticket(
@@ -421,6 +594,35 @@ mod tests {
             )
             .unwrap();
         assert_eq!(validate_pending_ticket(&genesis, &ticket).unwrap(), 1);
+        assert_eq!(
+            ticket.change.as_ref().unwrap().owner,
+            wallet.change_address(1)
+        );
+    }
+
+    #[test]
+    fn spends_outputs_from_a_derived_receive_key() {
+        let wallet = Wallet::from_seed(GENESIS_SEED);
+        let (_, mut state) = pinned_genesis().unwrap();
+        state.utxos.clear();
+        state.utxos.insert(
+            OutPoint {
+                transaction_id: [44; 32],
+                output_index: 0,
+            },
+            Output {
+                owner: wallet.receive_address(0),
+                value: 1_000,
+            },
+        );
+        let transaction = wallet
+            .build_transaction(&state, &BTreeSet::new(), [45; 32], 900, 1)
+            .unwrap();
+        assert_eq!(
+            address_from_public_key(&transaction.inputs[0].public_key),
+            wallet.receive_address(0)
+        );
+        assert_eq!(validate_pending_transaction(&state, &transaction), Ok(1));
     }
 
     #[test]
@@ -431,7 +633,7 @@ mod tests {
         let required = budget + 1;
         state.utxos.clear();
         let output = |value| Output {
-            owner: wallet.public_key(),
+            owner: wallet.address(),
             value,
         };
         state.utxos.insert(
@@ -498,7 +700,7 @@ mod tests {
                     output_index: 0,
                 },
                 Output {
-                    owner: wallet.public_key(),
+                    owner: wallet.address(),
                     value: required,
                 },
             );

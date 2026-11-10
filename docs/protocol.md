@@ -10,19 +10,19 @@ The goal is that the same expenditure always buys the same mining weight, and th
 
 Spending more IUNA deliberately gives more relative influence over the Ledger lottery. The difference from stake is that ticket weight is paid for again and again: the budget is locked when the ticket is included, is never refunded, and the ticket disappears after at most about a day. The same is true of the old burn idea, but expenditure is a transfer rather than destruction. That keeps the money supply stable without a reissue pool, recovery blocks, claim accumulators, separate state rent or special recovery rewards.
 
-This is still experimental. The rules below describe candidate protocol, not a proven mainnet design. Version 2 starts from a clean genesis; earlier candidate coins do not carry over. The chain is intended to carry forward if the candidate is promoted, but that is not guaranteed.
+This is still experimental. The rules below describe candidate protocol, not a proven mainnet design. Version 3 starts from a clean genesis; earlier candidate coins do not carry over. The chain is intended to carry forward if the candidate is promoted, but that is not guaranteed.
 
 ## Candidate Parameters
 
 - network name: `iuna-mainnet-candidate`;
-- protocol version: `2`;
+- protocol version: `3`;
 - Heartbeat target block time: `60 seconds`;
 - difficulty adjustment: relative ASERT with a half-life of `60` Heartbeats (`1 hour`);
 - median-time-past window: `11` blocks;
 - maximum future timestamp drift: `10 minutes`;
 - proof-of-work limit and genesis target: `0000003fffffffffffffffffffffffffffffffffffffffffffffffffffffffff`;
-- genesis nonce: `2191740`;
-- genesis hash: `000000153c54ba2743668be733d2300139288e70be9077e2ea95d09771376309`;
+- genesis nonce: `44762545`;
+- genesis hash: `00000015ff94624a51c05e7bf53e0b837baf105d9cf28d0af49955f1a8b24fdb`;
 - genesis timestamp: `1794077841`;
 - genesis miner key: `d75a980182b10ab7d54bfed3c964073a0ee172f3daa62325af021a68f707511a`;
 - smallest unit: `1 IUNA = 100_000_000` units;
@@ -47,6 +47,16 @@ Unit tests use regtest-like parameters (a 12-bit proof-of-work limit) so they ca
 
 All amounts are unsigned 64-bit integers in the smallest unit. Every addition and subtraction is checked. A state transition that overflows or exceeds `MAX_MONEY` is invalid.
 
+## Addresses and Spending
+
+Every output owner is a 32-byte domain-separated commitment to an Ed25519 public key:
+
+`address = SHA256(length("IUNA-ADDRESS-v1") || "IUNA-ADDRESS-v1" || length(public_key) || public_key)`
+
+The output publishes only this address. A spending input supplies the 32-byte public key and an Ed25519 signature. Validation recomputes the address, requires it to equal the spent output owner, and then verifies the signature. The public key is therefore revealed only when that output is spent.
+
+Wallet recovery entropy deterministically derives separate receive and change branches using `IUNA-WALLET-CHILD-v1`, a one-byte branch identifier and a big-endian child index. Receive addresses rotate after use and every transaction sends change to the next unused change address. Recovery scans both branches using address-use history and a gap limit of 20. Mining identity remains a separate stable key; rewards are paid to its address commitment.
+
 ## Architecture
 
 - Every full node validates and stores both logical chains and one shared UTXO state.
@@ -59,7 +69,7 @@ All amounts are unsigned 64-bit integers in the smallest unit. Every addition an
 ## Genesis and Chain Identity
 
 - The genesis block is an ordinary mined Heartbeat block with no parent.
-- The genesis reward of `1 IUNA` goes to the miner public key in the header.
+- The genesis reward of `1 IUNA` goes to the address commitment of the miner public key in the header.
 - The genesis block is pinned in the code, like Bitcoin's genesis block. Nodes never mine genesis at startup. Any other root is a different network.
 - In practice the genesis miner holds the first distribution role. That is an explicit launch assumption.
 
@@ -252,7 +262,7 @@ The owner of a publicly winning ticket may build a non-empty body and authorize 
 
 The signature digest is a domain-separated hash of the network ID, genesis hash and unsigned candidate header. The candidate hash is `H_C = SHA256("IUNA-LEDGER-CANDIDATE-v2" || canonical signed candidate header)`.
 
-Ordinary transactions keep their own signatures. A valid candidate signature authorizes selection and ordering only; it cannot change those transactions. The subsidy and the winner's fee share always go to the same mining public key. Heartbeat miners can include a signed candidate unchanged, but cannot construct or edit a non-empty one for somebody else's ticket.
+Ordinary transactions keep their own signatures. A valid candidate signature authorizes selection and ordering only; it cannot change those transactions. The subsidy and the winner's fee share always go to the address commitment of the same mining public key. Heartbeat miners can include a signed candidate unchanged, but cannot construct or edit a non-empty one for somebody else's ticket.
 
 ### A Linear Chain
 
@@ -293,7 +303,7 @@ Let `N` be the number of Ledger blocks already included before the current one, 
 
 `N` and `minted` are updated after inclusion. So exactly the first `420,768` Ledger blocks receive the initial subsidy, block index `420,768` starts the first halving, and at most one last reward fills the remaining rounding gap. `R_next` elsewhere in this document is this function applied to the state in which the next Ledger block would be included.
 
-The full subsidy goes to the mining public key of the winning ticket.
+The full subsidy goes to the address commitment of the mining public key of the winning ticket.
 
 ### Transaction Fees
 
@@ -304,7 +314,7 @@ For a sidecar, `F_tx` is the checked sum of all individual fees. An overflow, a 
 The fees are split in half:
 
 - `F_Heartbeat = floor(F_tx / 2)` goes to the miner of the Heartbeat block that includes the sidecar;
-- `F_winner = F_tx - F_Heartbeat` goes to the mining public key of the winning ticket, so an odd remainder goes to the winner.
+- `F_winner = F_tx - F_Heartbeat` goes to the address commitment of the mining public key of the winning ticket, so an odd remainder goes to the winner.
 
 On top of that, Heartbeat miners receive all ticket expenditure slices and ticket inclusion fees. There are no separate block reward streams or recovery fees.
 
@@ -362,7 +372,7 @@ A synthetic output with amount zero is never created and cannot be referenced as
 
 ## Encoding and State Root
 
-Canonical encoding is big-endian and length-prefixed. Merkle trees are domain-separated and duplicate the last node on odd levels. Ordinary and ticket inputs use Ed25519 only and sign a domain-separated SHA-256 digest of the network ID, the genesis hash, the unsigned transaction, the value of every spent output in input order, and their input index. Signed Ledger candidates use a separate domain and sign the network ID, genesis hash and unsigned candidate header with the winning ticket's mining key. The network scope stops signatures from being replayed on a fork or relaunch. The input values stop a node from misreporting a balance so that the wallet pays the difference as a fee: the signature would then be invalid. Synthetic Ledger output index `0` is the subsidy and index `1` the winner fees; the combined Heartbeat payout uses index `0`. Zero outputs are not created.
+Canonical encoding is big-endian and length-prefixed. Merkle trees are domain-separated and duplicate the last node on odd levels. Outputs encode a 32-byte address commitment; ordinary and ticket inputs reveal the matching public key. Inputs use Ed25519 only and sign a domain-separated SHA-256 digest of the network ID, the genesis hash, the unsigned transaction, the value of every spent output in input order, and their input index. Signed Ledger candidates use a separate domain and sign the network ID, genesis hash and unsigned candidate header with the winning ticket's mining key. The network scope stops signatures from being replayed on a fork or relaunch. The input values stop a node from misreporting a balance so that the wallet pays the difference as a fee: the signature would then be invalid. Synthetic Ledger output index `0` is the subsidy and index `1` the winner fees; the combined Heartbeat payout uses index `0`. Zero outputs are not created.
 
 The state root commits the height, minted supply, Ledger block count, UTXOs and tracked tickets. The tip hash, timestamps, chainwork, heartbeat history and Ledger parent anchor are derived chain indexes. That is why there is no hash cycle when the hash of the including Heartbeat block becomes the next Ledger parent anchor.
 
