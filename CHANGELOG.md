@@ -5,6 +5,13 @@ from the Git history and Conventional Commit titles by `deployment.sh`.
 
 ## [Unreleased]
 
+## [0.6.1] - 2026-11-10
+
+### Fixed
+
+- bootstrap the first Ledger ticket when mining resumes
+- serve the browser wallet only from wallet.getiuna.org
+
 ## [0.6.0] - 2026-11-10
 
 ### Added
