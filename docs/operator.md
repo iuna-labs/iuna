@@ -109,8 +109,7 @@ policy, not consensus: a block containing a cheaper transaction is still
 valid. Per-IP rate limiting belongs in the ingress in front of these routes.
 
 These routes never receive a seed or password. Browser access is restricted to
-`https://wallet.getiuna.com`, the transitional `.org` host, and loopback origins
-for local testing. The deployment ingress exposes only `/api/public` on the
+`https://wallet.getiuna.org` and loopback origins for local testing. The deployment ingress exposes only `/api/public` on the
 wallet host; management routes remain on the protected operator interface.
 
 ## Management routes

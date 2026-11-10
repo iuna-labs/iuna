@@ -1112,7 +1112,7 @@ test('a fee share of zero is not listed as an output', () => {
 test('release gates and wallet caching cover what the review found', () => {
   assert.doesNotMatch(content('e2e/iuna_e2e.py'), /TCP_TEST/);
   const nginx = content('nginx.conf');
-  const wallet = nginx.slice(nginx.indexOf('server_name wallet.getiuna.com'));
+  const wallet = nginx.slice(nginx.indexOf('server_name wallet.getiuna.org'));
   assert.match(wallet, /add_header Cache-Control "no-cache" always;/);
   const hosted = nginx.slice(nginx.indexOf('location /wallet/'), nginx.indexOf('location = /node.html'));
   assert.match(hosted, /add_header Cache-Control "no-cache" always;/);
@@ -1279,7 +1279,7 @@ test('clicking an activity public key opens the contact editor', () => {
 
 test('browser wallet talks to its own origin when hosted and to the local node otherwise', async () => {
   const core = await import(`data:text/javascript;base64,${Buffer.from(content('wallet/wallet-core.js')).toString('base64')}`);
-  assert.equal(core.defaultApiEndpoint({ hostname: 'wallet.getiuna.com', origin: 'https://wallet.getiuna.com' }), 'https://wallet.getiuna.com');
+  assert.equal(core.defaultApiEndpoint({ hostname: 'wallet.getiuna.org', origin: 'https://wallet.getiuna.org' }), 'https://wallet.getiuna.org');
   assert.equal(core.defaultApiEndpoint({ hostname: '127.0.0.1', origin: 'http://127.0.0.1:8080' }), 'http://127.0.0.1:18662');
   assert.equal(core.defaultApiEndpoint({ hostname: 'localhost', origin: 'http://localhost:18200' }), 'http://127.0.0.1:18662');
 });

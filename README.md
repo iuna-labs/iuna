@@ -36,7 +36,7 @@ API.
 The browser wallet in `wallet/` is a separate self-custody client. It creates
 or restores the same 24-word/Ed25519 wallet entirely in the browser, encrypts
 the seed locally, reads public UTXOs from a node and submits only signed Ledger
-transactions. The deployment serves it at `https://wallet.getiuna.com`.
+transactions. The deployment serves it at `https://wallet.getiuna.org`.
 
 ## Run a node
 

@@ -83,7 +83,7 @@ test('browser wallet loads every stable UTXO page before selecting inputs', asyn
     }), { status: 200, headers: { 'content-type': 'application/json' } });
   };
   try {
-    const view = await core.fetchWalletView('https://wallet.getiuna.com', 'aa'.repeat(32));
+    const view = await core.fetchWalletView('https://wallet.getiuna.org', 'aa'.repeat(32));
     assert.equal(view.utxos.length, 2);
     assert.equal(view.utxos_truncated, false);
     assert.equal(view.next_utxo_offset, null);
@@ -137,7 +137,7 @@ test('browser wallet discovers addresses in batches and loads outputs only where
     });
   };
   try {
-    const view = await core.fetchWalletView('https://wallet.getiuna.com', wallet);
+    const view = await core.fetchWalletView('https://wallet.getiuna.org', wallet);
     assert.equal(view.receive_index, 1);
     assert.equal(view.receive_address, receive1.addressHex);
     // Change index 20 sits at the edge of the first gap window, so discovery needs a second batch.
@@ -197,7 +197,8 @@ test('wallet app and deployment contain only the current protocol identity', () 
   assert.match(combined, /Ledger/);
   assert.match(combined, /Ed25519/);
   assert.doesNotMatch(combined, /quantum|VDF|L1|L2/i);
-  assert.match(source('config/deployment.yml'), /wallet\.getiuna\.com/);
+  assert.match(source('config/deployment.yml'), /wallet\.getiuna\.org/);
+  assert.doesNotMatch(source('config/deployment.yml'), /getiuna\.com/);
   assert.match(source('Dockerfile'), /COPY wallet \/site\/wallet/);
   assert.doesNotMatch(source('wallet/index.html'), /https?:\/\//);
   assert.match(source('scripts/inject_cloudflare_analytics.py'), /is_relative_to\(wallet_root\)/);

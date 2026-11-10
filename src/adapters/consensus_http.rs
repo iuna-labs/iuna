@@ -1280,12 +1280,10 @@ fn allowed_wallet_origin(origin: &HeaderValue) -> bool {
     let Ok(origin) = origin.to_str() else {
         return false;
     };
-    matches!(
-        origin,
-        "https://wallet.getiuna.com" | "https://wallet.getiuna.org"
-    ) || ["http://127.0.0.1:", "http://localhost:", "http://[::1]:"]
-        .iter()
-        .any(|prefix| origin.starts_with(prefix))
+    origin == "https://wallet.getiuna.org"
+        || ["http://127.0.0.1:", "http://localhost:", "http://[::1]:"]
+            .iter()
+            .any(|prefix| origin.starts_with(prefix))
 }
 
 async fn iuna_ui_javascript() -> impl IntoResponse {
@@ -2656,7 +2654,7 @@ mod tests {
         let free = build(0).await;
         let request = Request::post("/api/public/transactions")
             .header(header::CONTENT_TYPE, "application/json")
-            .header(header::ORIGIN, "https://wallet.getiuna.com")
+            .header(header::ORIGIN, "https://wallet.getiuna.org")
             .body(Body::from(serde_json::to_vec(&free).unwrap()))
             .unwrap();
         let response = public_wallet_router(state.clone())
@@ -2689,7 +2687,7 @@ mod tests {
         assert!(body.len() < MAX_PUBLIC_TRANSACTION_JSON_BYTES);
         let request = Request::post("/api/public/transactions")
             .header(header::CONTENT_TYPE, "application/json")
-            .header(header::ORIGIN, "https://wallet.getiuna.com")
+            .header(header::ORIGIN, "https://wallet.getiuna.org")
             .body(Body::from(body))
             .unwrap();
         let response = public_wallet_router(state.clone())
@@ -2701,7 +2699,7 @@ mod tests {
         let transaction = build(1).await;
         let request = Request::post("/api/public/transactions")
             .header(header::CONTENT_TYPE, "application/json")
-            .header(header::ORIGIN, "https://wallet.getiuna.com")
+            .header(header::ORIGIN, "https://wallet.getiuna.org")
             .body(Body::from(serde_json::to_vec(&transaction).unwrap()))
             .unwrap();
         let response = public_wallet_router(state.clone())
@@ -2714,7 +2712,7 @@ mod tests {
                 .headers()
                 .get(header::ACCESS_CONTROL_ALLOW_ORIGIN)
                 .unwrap(),
-            "https://wallet.getiuna.com"
+            "https://wallet.getiuna.org"
         );
 
         let request = Request::get(format!("/api/public/wallet/{}", hex(&wallet.address())))
@@ -2735,7 +2733,7 @@ mod tests {
         let addresses = |addresses: Vec<String>| {
             Request::post("/api/public/wallet-addresses")
                 .header(header::CONTENT_TYPE, "application/json")
-                .header(header::ORIGIN, "https://wallet.getiuna.com")
+                .header(header::ORIGIN, "https://wallet.getiuna.org")
                 .body(Body::from(
                     serde_json::to_vec(&serde_json::json!({ "addresses": addresses })).unwrap(),
                 ))
@@ -2783,7 +2781,7 @@ mod tests {
         let request = Request::builder()
             .method(Method::OPTIONS)
             .uri("/api/public/transactions")
-            .header(header::ORIGIN, "https://wallet.getiuna.com")
+            .header(header::ORIGIN, "https://wallet.getiuna.org")
             .header(header::ACCESS_CONTROL_REQUEST_METHOD, "POST")
             .header(header::ACCESS_CONTROL_REQUEST_HEADERS, "content-type")
             .body(Body::empty())
@@ -2802,7 +2800,7 @@ mod tests {
         );
 
         let request = Request::get(format!("/api/public/wallet/{}", hex(&wallet.address())))
-            .header(header::ORIGIN, "https://wallet.getiuna.com")
+            .header(header::ORIGIN, "https://wallet.getiuna.org")
             .body(Body::empty())
             .unwrap();
         let response = public_wallet_router(state.clone())

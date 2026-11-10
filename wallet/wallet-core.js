@@ -22,7 +22,7 @@ export function apiEndpoint(location = globalThis.location) {
 // The hosted wallet talks to its own origin (the ingress routes /api/public to a node); a local
 // copy defaults to the Docker Compose bootstrap node.
 export function defaultApiEndpoint(location = globalThis.location) {
-  if (["wallet.getiuna.com", "wallet.getiuna.org"].includes(location?.hostname)) return location.origin;
+  if (location?.hostname === "wallet.getiuna.org") return location.origin;
   return "http://127.0.0.1:18662";
 }
 
