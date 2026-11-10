@@ -15,7 +15,7 @@ use iuna::{
     adapters::{
         consensus_http::{
             ConsensusHttpState, WalletState, operator_router, operator_token_hash,
-            public_wallet_router,
+            public_wallet_router, submit_bootstrap_ticket,
         },
         consensus_local_state::{self, MempoolSnapshot},
         consensus_network::{
@@ -392,7 +392,14 @@ async fn run_heartbeat_miner(
         // Heartbeat pacing comes only from proof of work and the ASERT target; the miner never
         // waits for the 60-second interval itself.
         let (parent_tip, prepared, timestamp) = {
-            let node = node.lock().await;
+            let mut node = node.lock().await;
+            // Mining resumed from a saved preference never passes the HTTP toggle, so a fresh
+            // chain would otherwise wait forever for its first Ledger ticket.
+            match submit_bootstrap_ticket(&mut node, wallet.public_key()) {
+                Ok(Some(ticket)) => relay.tickets(vec![ticket]),
+                Ok(None) => {}
+                Err(error) => eprintln!("submitting the bootstrap Ledger ticket failed: {error:#}"),
+            }
             let prepared = node
                 .prepare_next()
                 .and_then(|prepared| Ok((prepared.timestamp(unix_time_secs())?, prepared)));

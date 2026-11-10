@@ -37,7 +37,10 @@ use crate::{
         consensus_ui_store::{ConsensusUiStore, UiHeartbeat},
         consensus_wallet_store,
     },
-    app::wallet_commands::{TicketParameters, Wallet},
+    app::{
+        consensus_node::{ChainRepository, Node},
+        wallet_commands::{TicketParameters, Wallet},
+    },
     consensus::{
         Address, ConsensusError, ConsensusState, GENESIS_MINER, GENESIS_REWARD,
         HEARTBEAT_TARGET_INTERVAL_SECS, HeartbeatBlock, LEDGER_TARGET_INTERVAL_HEARTBEATS,
@@ -1593,39 +1596,52 @@ async fn ensure_bootstrap_ticket(
     state: &ConsensusHttpState,
     mining_public_key: [u8; 32],
 ) -> std::result::Result<bool, ApiErrorResponse> {
-    if NETWORK_ID != "iuna-mainnet-candidate" {
-        return Ok(false);
-    }
     let mut node = state.node.lock().await;
+    let ticket = submit_bootstrap_ticket(&mut node, mining_public_key)
+        .map_err(|error| api_error(StatusCode::CONFLICT, error.to_string()))?;
+    let submitted = ticket.is_some();
+    if let (Some(relay), Some(ticket)) = (&state.relay, ticket) {
+        relay.tickets(vec![ticket]);
+    }
+    Ok(submitted)
+}
+
+/// Spends the public genesis output into the first Ledger ticket for `mining_public_key`, so a
+/// fresh candidate chain can start its Ledger without anyone holding coins yet. It does nothing
+/// once any ticket exists, is pending or the genesis output has moved, so the HTTP toggle and
+/// the miner loop (which also covers mining resumed from a saved preference) can both call it.
+pub fn submit_bootstrap_ticket<R: ChainRepository>(
+    node: &mut Node<R>,
+    mining_public_key: PublicKey,
+) -> anyhow::Result<Option<TicketTransaction>> {
+    if NETWORK_ID != "iuna-mainnet-candidate" {
+        return Ok(None);
+    }
     let chain = node.chain().tip();
+    let genesis_owner = address_from_public_key(&GENESIS_MINER);
     if chain.minted != GENESIS_REWARD
         || !chain.tickets.is_empty()
         || node.pending_ticket_count() != 0
         || !chain
             .utxos
             .values()
-            .any(|output| output.owner == address_from_public_key(&GENESIS_MINER))
+            .any(|output| output.owner == genesis_owner)
     {
-        return Ok(false);
+        return Ok(None);
     }
     let genesis_wallet = Wallet::from_seed(GENESIS_SECRET);
     let lottery_seed = tagged_hash(b"IUNA-BOOTSTRAP-TICKET-v1", &mining_public_key);
-    let receipt = genesis_wallet
-        .submit_ticket(
-            &mut node,
-            TicketParameters {
-                budget: GENESIS_REWARD - 1_000_000,
-                duration: LEDGER_TARGET_INTERVAL_HEARTBEATS,
-                fee: 1_000_000,
-                mining_public_key,
-                lottery_seed,
-            },
-        )
-        .map_err(|error| api_error(StatusCode::CONFLICT, error.to_string()))?;
-    if let (Some(relay), Some(ticket)) = (&state.relay, node.pending_ticket(&receipt.id).cloned()) {
-        relay.tickets(vec![ticket]);
-    }
-    Ok(true)
+    let receipt = genesis_wallet.submit_ticket(
+        node,
+        TicketParameters {
+            budget: GENESIS_REWARD - 1_000_000,
+            duration: LEDGER_TARGET_INTERVAL_HEARTBEATS,
+            fee: 1_000_000,
+            mining_public_key,
+            lottery_seed,
+        },
+    )?;
+    Ok(node.pending_ticket(&receipt.id).cloned())
 }
 
 async fn access_wallet(
@@ -2970,6 +2986,30 @@ mod tests {
         assert_eq!(mined["hash"].as_str().unwrap().len(), 64);
         assert_eq!(ticket_state.node.lock().await.status().height, 1);
         assert_eq!(ticket_state.node.lock().await.pending_ticket_count(), 0);
+    }
+
+    #[tokio::test]
+    async fn resumed_mining_bootstraps_the_first_ticket_exactly_once() {
+        // The miner loop calls this on every iteration, including after a restart that resumed
+        // mining from a saved preference without going through the HTTP toggle.
+        let directory = tempfile::tempdir().unwrap();
+        let state = management_state(
+            &directory,
+            Arc::new(Wallet::from_seed([42; 32])),
+            "0123456789abcdef0123456789abcdef",
+        );
+        let mut node = state.node.lock().await;
+        let ticket = submit_bootstrap_ticket(&mut node, [42; 32])
+            .unwrap()
+            .unwrap();
+        assert_eq!(ticket.mining_public_key, [42; 32]);
+        assert_eq!(node.pending_ticket_count(), 1);
+        assert!(
+            submit_bootstrap_ticket(&mut node, [43; 32])
+                .unwrap()
+                .is_none()
+        );
+        assert_eq!(node.pending_ticket_count(), 1);
     }
 
     #[tokio::test]
