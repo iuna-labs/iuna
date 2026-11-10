@@ -93,34 +93,60 @@ test('browser wallet loads every stable UTXO page before selecting inputs', asyn
   }
 });
 
-test('browser wallet discovers the next receive and change addresses', async () => {
+test('browser wallet discovers addresses in batches and loads outputs only where funded', async () => {
   const wallet = await core.walletFromEntropy(new Uint8Array(32));
   const receive0 = await wallet.keyAt(0, 0);
   const receive1 = await wallet.keyAt(0, 1);
   const change0 = await wallet.keyAt(1, 0);
+  const change20 = await wallet.keyAt(1, 20);
+  const used = new Set([receive0.addressHex, change0.addressHex, change20.addressHex]);
+  const funded = new Set([change20.addressHex]);
+  const chain = { network: 'iuna-mainnet-candidate', heartbeat_height: 7, tip_hash: 'ff'.repeat(32), ledger_blocks: 1 };
+  const json = (body) => new Response(JSON.stringify(body), { status: 200, headers: { 'content-type': 'application/json' } });
+  const batches = [];
+  const singles = [];
   const originalFetch = globalThis.fetch;
-  globalThis.fetch = async (url) => {
+  globalThis.fetch = async (url, options = {}) => {
+    if (String(url).endsWith('/api/public/wallet-addresses')) {
+      const { addresses } = JSON.parse(options.body);
+      batches.push(addresses.length);
+      return json({
+        ...chain,
+        addresses: addresses.map((address) => ({
+          address,
+          used: used.has(address),
+          balance: funded.has(address) ? 5 : 0,
+          spendable_balance: funded.has(address) ? 5 : 0,
+          utxo_count: funded.has(address) ? 1 : 0,
+        })),
+        pending_transaction_ids: [],
+      });
+    }
     const address = String(url).split('/').pop().split('?')[0];
-    return new Response(JSON.stringify({
-      network: 'iuna-mainnet-candidate',
-      heartbeat_height: 7,
-      tip_hash: 'ff'.repeat(32),
-      ledger_blocks: 1,
+    singles.push(address);
+    return json({
+      ...chain,
       address,
-      used: [receive0.addressHex, change0.addressHex].includes(address),
-      balance: 0,
-      spendable_balance: 0,
-      utxos: [],
+      used: true,
+      balance: 5,
+      spendable_balance: 5,
+      utxos: [{ transaction_id: '11'.repeat(32), output_index: 0, value: 5, reserved: false }],
       pending_transaction_ids: [],
       utxos_truncated: false,
       next_utxo_offset: null,
-    }), { status: 200, headers: { 'content-type': 'application/json' } });
+    });
   };
   try {
     const view = await core.fetchWalletView('https://wallet.getiuna.com', wallet);
     assert.equal(view.receive_index, 1);
     assert.equal(view.receive_address, receive1.addressHex);
-    assert.equal(view.change_index, 1);
+    // Change index 20 sits at the edge of the first gap window, so discovery needs a second batch.
+    assert.equal(view.change_index, 21);
+    assert.equal(view.balance, 5);
+    assert.deepEqual(singles, [change20.addressHex]);
+    assert.equal(view.utxos[0].walletKey.addressHex, change20.addressHex);
+    assert.deepEqual(batches, [41, 2, 20]);
+    assert.ok(batches.every((size) => size <= 64));
   } finally {
     globalThis.fetch = originalFetch;
   }

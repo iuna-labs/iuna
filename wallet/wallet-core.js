@@ -4,6 +4,8 @@ const NETWORK_ID = "iuna-mainnet-candidate";
 const GENESIS_HASH = hexBytes("00000015ff94624a51c05e7bf53e0b837baf105d9cf28d0af49955f1a8b24fdb");
 const PKCS8_ED25519_PREFIX = hexBytes("302e020100300506032b657004220420");
 const ADDRESS_GAP_LIMIT = 20;
+// Matches the node limit: the root plus one gap window of both branches fits in one request.
+const MAX_ADDRESS_BATCH = 64;
 const RECEIVE_BRANCH = 0;
 const CHANGE_BRANCH = 1;
 
@@ -147,39 +149,69 @@ export async function fetchWalletView(endpoint, wallet) {
   throw new Error("The wallet changed while addresses were loading; try again");
 }
 
+// One summary request per gap window: full output pages are fetched only for addresses that
+// still hold outputs, so an empty deterministic window costs a single round trip.
+async function fetchAddressSummaries(endpoint, keys) {
+  const batch = await requestJson(`${endpoint}/api/public/wallet-addresses`, {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify({ addresses: keys.map((key) => key.addressHex) }),
+  });
+  if (!Array.isArray(batch.addresses) || batch.addresses.length !== keys.length
+    || batch.addresses.some((summary, index) => summary.address !== keys[index].addressHex)) {
+    throw new Error("The node returned an invalid address summary");
+  }
+  return batch;
+}
+
 async function discoverWalletView(endpoint, wallet) {
-  const root = await fetchAddressView(endpoint, wallet);
-  const discovered = [];
-  const discoverBranch = async (branch) => {
-    let unused = 0;
-    let highestUsed = -1;
-    for (let index = 0; unused < ADDRESS_GAP_LIMIT; index += 1) {
-      const key = await wallet.keyAt(branch, index);
-      const addressView = await fetchAddressView(endpoint, key);
-      discovered.push(addressView);
-      if (addressView.used) {
-        highestUsed = index;
-        unused = 0;
-      } else {
-        unused += 1;
+  const branches = [RECEIVE_BRANCH, CHANGE_BRANCH].map((branch) => ({ branch, scanned: 0, highestUsed: -1 }));
+  const entries = [];
+  const pending = new Set();
+  let first = null;
+  let request = [wallet];
+  for (;;) {
+    for (const state of branches) {
+      while (state.scanned < state.highestUsed + 1 + ADDRESS_GAP_LIMIT && request.length < MAX_ADDRESS_BATCH) {
+        request.push(await wallet.keyAt(state.branch, state.scanned));
+        state.scanned += 1;
       }
     }
-    return highestUsed + 1;
-  };
-  const receiveIndex = await discoverBranch(RECEIVE_BRANCH);
-  const changeIndex = await discoverBranch(CHANGE_BRANCH);
+    if (!request.length) break;
+    const batch = await fetchAddressSummaries(endpoint, request);
+    if (first && batch.tip_hash !== first.tip_hash) return null;
+    first ||= batch;
+    for (const id of batch.pending_transaction_ids || []) pending.add(id);
+    request.forEach((key, index) => {
+      const summary = batch.addresses[index];
+      entries.push({ key, summary });
+      if (summary.used && key.branch != null) {
+        branches[key.branch].highestUsed = Math.max(branches[key.branch].highestUsed, key.index);
+      }
+    });
+    request = [];
+  }
+  const views = await Promise.all(entries
+    .filter(({ summary }) => Number(summary.utxo_count) > 0)
+    .map(({ key }) => fetchAddressView(endpoint, key)));
+  if (views.some((item) => item.tip_hash !== first.tip_hash)) return null;
+  for (const id of views.flatMap((item) => item.pending_transaction_ids || [])) pending.add(id);
+  const receiveIndex = branches[RECEIVE_BRANCH].highestUsed + 1;
   const receiveKey = await wallet.keyAt(RECEIVE_BRANCH, receiveIndex);
-  const views = [root, ...discovered];
-  if (views.some((item) => item.tip_hash !== root.tip_hash)) return null;
   return {
-    ...root,
-    balance: views.reduce((sum, item) => sum + Number(item.balance), 0),
-    spendable_balance: views.reduce((sum, item) => sum + Number(item.spendable_balance), 0),
+    network: first.network,
+    heartbeat_height: first.heartbeat_height,
+    tip_hash: first.tip_hash,
+    ledger_blocks: first.ledger_blocks,
+    balance: entries.reduce((sum, { summary }) => sum + Number(summary.balance), 0),
+    spendable_balance: entries.reduce((sum, { summary }) => sum + Number(summary.spendable_balance), 0),
     utxos: views.flatMap((item) => item.utxos),
-    pending_transaction_ids: [...new Set(views.flatMap((item) => item.pending_transaction_ids || []))],
+    pending_transaction_ids: [...pending],
+    utxos_truncated: false,
+    next_utxo_offset: null,
     receive_address: receiveKey.addressHex,
     receive_index: receiveIndex,
-    change_index: changeIndex,
+    change_index: branches[CHANGE_BRANCH].highestUsed + 1,
   };
 }
 

@@ -212,6 +212,35 @@ pub struct PublicWalletView {
     pub next_utxo_offset: Option<usize>,
 }
 
+/// One address in a [`PublicWalletAddressesView`]: enough for a deterministic wallet to find its
+/// used addresses and balance without fetching the outputs of every empty one.
+#[derive(Debug, Serialize)]
+pub struct PublicWalletAddressSummary {
+    pub address: String,
+    /// True even if every output ever sent here has since been spent.
+    pub used: bool,
+    pub balance: u64,
+    pub spendable_balance: u64,
+    pub utxo_count: usize,
+}
+
+#[derive(Debug, Serialize)]
+pub struct PublicWalletAddressesView {
+    pub network: &'static str,
+    pub heartbeat_height: u64,
+    pub tip_hash: String,
+    pub ledger_blocks: u64,
+    /// In request order.
+    pub addresses: Vec<PublicWalletAddressSummary>,
+    /// Ledger transactions in this node's mempool that spend outputs of any requested address.
+    pub pending_transaction_ids: Vec<String>,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct PublicWalletAddressesRequest {
+    pub addresses: Vec<String>,
+}
+
 #[derive(Debug, Default, Deserialize)]
 pub struct PublicWalletQuery {
     #[serde(default)]
@@ -247,6 +276,8 @@ const WALLET_ACTIVITY_ITEMS_PER_TYPE: usize = 200;
 
 /// Bounds the public response size; such a wallet can still spend by consolidating outputs.
 const MAX_PUBLIC_WALLET_UTXOS: usize = 1_000;
+/// Fits the stable root address plus one 20-address gap window of both wallet branches.
+const MAX_PUBLIC_WALLET_ADDRESSES: usize = 64;
 /// JSON represents fixed-size byte arrays as decimal lists and is substantially larger than the
 /// consensus encoding. This still bounds unauthenticated request memory while allowing a wallet
 /// page of 1,000 outputs to be consolidated in one otherwise-valid transaction.
@@ -506,6 +537,10 @@ pub fn public_wallet_router(state: ConsensusHttpState) -> Router {
     Router::new()
         .route("/api/public/wallet/{address}", get(public_wallet_view))
         .route(
+            "/api/public/wallet-addresses",
+            post(public_wallet_addresses).options(public_wallet_preflight),
+        )
+        .route(
             "/api/public/transactions",
             post(submit_signed_transaction).options(public_wallet_preflight),
         )
@@ -577,6 +612,70 @@ async fn public_wallet_view(
         pending_transaction_ids,
         utxos_truncated,
         next_utxo_offset: utxos_truncated.then_some(page_end),
+    }))
+}
+
+/// Summaries for a batch of addresses at one Heartbeat tip, so wallet discovery costs one
+/// request per gap window instead of one per address.
+async fn public_wallet_addresses(
+    State(state): State<ConsensusHttpState>,
+    Json(request): Json<PublicWalletAddressesRequest>,
+) -> ApiResult<PublicWalletAddressesView> {
+    if request.addresses.is_empty() || request.addresses.len() > MAX_PUBLIC_WALLET_ADDRESSES {
+        return Err(api_error(
+            StatusCode::BAD_REQUEST,
+            format!("request between 1 and {MAX_PUBLIC_WALLET_ADDRESSES} addresses"),
+        ));
+    }
+    let addresses = request
+        .addresses
+        .iter()
+        .map(|address| decode_hex_32(address, "address"))
+        .collect::<Result<Vec<_>, _>>()
+        .map_err(|error| api_error(StatusCode::BAD_REQUEST, error.to_string()))?;
+    let overflow = || api_error(StatusCode::INTERNAL_SERVER_ERROR, "wallet balance overflow");
+    let mut node = state.node.lock().await;
+    let mut summaries = Vec::with_capacity(addresses.len());
+    for address in &addresses {
+        let owned = node.owned_outputs(address);
+        let mut balance = 0_u64;
+        let mut spendable_balance = 0_u64;
+        for (point, output) in &owned {
+            balance = balance.checked_add(output.value).ok_or_else(overflow)?;
+            if !node.is_input_reserved(point) {
+                spendable_balance = spendable_balance
+                    .checked_add(output.value)
+                    .ok_or_else(overflow)?;
+            }
+        }
+        summaries.push(PublicWalletAddressSummary {
+            address: hex(address),
+            used: node.address_used(address),
+            balance,
+            spendable_balance,
+            utxo_count: owned.len(),
+        });
+    }
+    let requested = addresses.iter().copied().collect::<BTreeSet<_>>();
+    let pending_transaction_ids = node
+        .pending_transactions()
+        .iter()
+        .filter(|transaction| {
+            transaction
+                .inputs
+                .iter()
+                .any(|input| requested.contains(&address_from_public_key(&input.public_key)))
+        })
+        .map(|transaction| hex(&transaction.id()))
+        .collect();
+    let chain = node.chain().tip();
+    Ok(Json(PublicWalletAddressesView {
+        network: NETWORK_ID,
+        heartbeat_height: chain.height,
+        tip_hash: hex(&chain.tip),
+        ledger_blocks: chain.ledger_blocks,
+        addresses: summaries,
+        pending_transaction_ids,
     }))
 }
 
@@ -2616,6 +2715,54 @@ mod tests {
         )
         .unwrap();
         assert_eq!(view["pending_transaction_ids"][0], hex(&transaction.id()));
+
+        let addresses = |addresses: Vec<String>| {
+            Request::post("/api/public/wallet-addresses")
+                .header(header::CONTENT_TYPE, "application/json")
+                .header(header::ORIGIN, "https://wallet.getiuna.com")
+                .body(Body::from(
+                    serde_json::to_vec(&serde_json::json!({ "addresses": addresses })).unwrap(),
+                ))
+                .unwrap()
+        };
+        let response = public_wallet_router(state.clone())
+            .oneshot(addresses(vec![
+                hex(&wallet.address()),
+                hex(&transaction.outputs[1].owner),
+                hex(&wallet.receive_address(0)),
+            ]))
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+        let batch: serde_json::Value = serde_json::from_slice(
+            &axum::body::to_bytes(response.into_body(), usize::MAX)
+                .await
+                .unwrap(),
+        )
+        .unwrap();
+        let summaries = batch["addresses"].as_array().unwrap();
+        assert_eq!(summaries[0]["address"], hex(&wallet.address()));
+        assert_eq!(summaries[0]["balance"], GENESIS_REWARD);
+        assert_eq!(summaries[0]["spendable_balance"], 0);
+        assert_eq!(summaries[0]["utxo_count"], 1);
+        // The pending change address already counts as used, so a second send moves on.
+        assert_eq!(summaries[1]["used"], true);
+        assert_eq!(summaries[1]["utxo_count"], 0);
+        assert_eq!(summaries[2]["used"], false);
+        assert_eq!(batch["pending_transaction_ids"][0], hex(&transaction.id()));
+        assert_eq!(batch["tip_hash"], view["tip_hash"]);
+
+        for rejected in [
+            Vec::new(),
+            vec![hex(&wallet.address()); MAX_PUBLIC_WALLET_ADDRESSES + 1],
+            vec!["not-an-address".to_owned()],
+        ] {
+            let response = public_wallet_router(state.clone())
+                .oneshot(addresses(rejected))
+                .await
+                .unwrap();
+            assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+        }
 
         let request = Request::builder()
             .method(Method::OPTIONS)

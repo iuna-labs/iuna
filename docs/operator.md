@@ -83,7 +83,7 @@ management is disabled.
 These routes are opt-in and exist only on the separate listener configured with
 `--wallet-endpoint`; they are never mounted on the operator listener.
 
-The self-custody browser wallet uses two deliberately narrow routes:
+The self-custody browser wallet uses three deliberately narrow routes:
 
 - `GET /api/public/wallet/{64-character-address}` returns only that address's
   confirmed UTXOs, balance, spendable balance, historical `used` flag and
@@ -91,6 +91,12 @@ The self-custody browser wallet uses two deliberately narrow routes:
   node keeps a per-owner index that it rebuilds once per new tip, so a lookup
   does not scan the whole UTXO set. Balances always cover every output; the
   UTXO list stops at `1,000` entries and then sets `utxos_truncated`.
+- `POST /api/public/wallet-addresses` takes `{"addresses": [...]}` with 1 to
+  `64` addresses and returns, in request order, each address's `used` flag,
+  balance, spendable balance and UTXO count at one Heartbeat tip, plus the
+  mempool transactions spending any of them. The browser wallet discovers its
+  receive and change addresses with one such request per gap window and then
+  loads UTXO pages only for addresses that still hold outputs.
 - `POST /api/public/transactions` accepts a complete, client-side signed
   current-protocol `Transaction`. Consensus validation is performed before it
   enters the mempool and relay.
