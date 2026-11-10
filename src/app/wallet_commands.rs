@@ -179,16 +179,18 @@ impl Wallet {
         fee: Amount,
     ) -> Result<SubmissionReceipt> {
         self.sync_change_cursor(node);
-        let transaction = self.build_transaction(
-            node.chain().tip(),
-            &node.reserved_inputs(),
-            recipient,
-            amount,
-            fee,
-        )?;
-        let id = transaction.id();
-        let fee = node.submit_transaction(transaction)?;
-        Ok(SubmissionReceipt { id, fee })
+        self.release_change_on_error(|| {
+            let transaction = self.build_transaction(
+                node.chain().tip(),
+                &node.reserved_inputs(),
+                recipient,
+                amount,
+                fee,
+            )?;
+            let id = transaction.id();
+            let fee = node.submit_transaction(transaction)?;
+            Ok(SubmissionReceipt { id, fee })
+        })
     }
 
     pub fn build_ticket(
@@ -285,10 +287,13 @@ impl Wallet {
         parameters: TicketParameters,
     ) -> Result<SubmissionReceipt> {
         self.sync_change_cursor(node);
-        let ticket = self.build_ticket(node.chain().tip(), &node.reserved_inputs(), parameters)?;
-        let id = ticket.id();
-        let fee = node.submit_ticket(ticket)?;
-        Ok(SubmissionReceipt { id, fee })
+        self.release_change_on_error(|| {
+            let ticket =
+                self.build_ticket(node.chain().tip(), &node.reserved_inputs(), parameters)?;
+            let id = ticket.id();
+            let fee = node.submit_ticket(ticket)?;
+            Ok(SubmissionReceipt { id, fee })
+        })
     }
 
     pub fn submit_consolidating_ticket<R: ChainRepository>(
@@ -297,14 +302,16 @@ impl Wallet {
         parameters: TicketParameters,
     ) -> Result<SubmissionReceipt> {
         self.sync_change_cursor(node);
-        let ticket = self.build_consolidating_ticket(
-            node.chain().tip(),
-            &node.reserved_inputs(),
-            parameters,
-        )?;
-        let id = ticket.id();
-        let fee = node.submit_ticket(ticket)?;
-        Ok(SubmissionReceipt { id, fee })
+        self.release_change_on_error(|| {
+            let ticket = self.build_consolidating_ticket(
+                node.chain().tip(),
+                &node.reserved_inputs(),
+                parameters,
+            )?;
+            let id = ticket.id();
+            let fee = node.submit_ticket(ticket)?;
+            Ok(SubmissionReceipt { id, fee })
+        })
     }
 
     fn select_inputs(
@@ -487,6 +494,18 @@ impl Wallet {
             index = index.saturating_add(1);
         }
         bail!("wallet change-address scan limit reached")
+    }
+
+    /// A change address is only consumed once its object reaches the mempool. Rejected
+    /// submissions hand the index back, so retries cannot open a gap wider than the recovery
+    /// gap limit and hide later change from a restored wallet.
+    fn release_change_on_error<T>(&self, submit: impl FnOnce() -> Result<T>) -> Result<T> {
+        let before = self.change_cursor.load(Ordering::Relaxed);
+        let result = submit();
+        if result.is_err() {
+            self.change_cursor.store(before, Ordering::Relaxed);
+        }
+        result
     }
 
     fn sync_change_cursor<R: ChainRepository>(&self, node: &mut Node<R>) {
@@ -778,5 +797,27 @@ mod tests {
         assert_eq!(receipt.fee, 3);
         assert!(ticket_node.has_pending_ticket(&receipt.id));
         assert_eq!(ticket_node.reserved_inputs().len(), 1);
+    }
+
+    #[test]
+    fn rejected_submissions_do_not_consume_change_addresses() {
+        let wallet = Wallet::from_seed(GENESIS_SEED);
+        let mut node = Node::open(MemoryRepository::default()).unwrap();
+        for _ in 0..3 {
+            assert!(
+                wallet
+                    .submit_transaction(&mut node, [97; 32], 10_000_000, 0)
+                    .is_err()
+            );
+        }
+        let receipt = wallet
+            .submit_transaction(&mut node, [97; 32], 10_000_000, 7)
+            .unwrap();
+        let transaction = node
+            .pending_transactions()
+            .into_iter()
+            .find(|transaction| transaction.id() == receipt.id)
+            .unwrap();
+        assert_eq!(transaction.outputs[1].owner, wallet.change_address(0));
     }
 }

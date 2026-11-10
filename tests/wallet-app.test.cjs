@@ -158,6 +158,7 @@ test('wallet settings name reachable endpoints and previous wallets are explaine
   }
   assert.match(app, /data-field="receive-address"/);
   assert.match(app, /copy-receive.*dataset\.value = view\.receive_address/s);
+  assert.match(app, /submitTransaction\(apiEndpoint\(\), transaction\);[^]*?view\.change_index = \(view\.change_index \|\| 0\) \+ 1/);
 });
 
 test('wallet app and deployment contain only the current protocol identity', () => {
