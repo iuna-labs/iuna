@@ -690,6 +690,31 @@ test('wallet activity filters each protocol action and keeps filtered infinite s
   assert.match(html, /x-ref="activitySentinel"/);
 });
 
+test('wallet activity infinite scroll fetches the next Heartbeat page', async () => {
+  const { app } = nodeApp();
+  app.activity = {
+    public_key: 'wallet',
+    pending: [],
+    confirmed: Array.from({ length: 25 }, (_, index) => ({ kind: 'sent', id: `new-${index}` })),
+    next_before_height: 600,
+  };
+  app.activityVisibleCount = 25;
+  app.getJson = async (path) => {
+    assert.equal(path, '/api/wallet/activity?before_height=600');
+    return {
+      pending: [],
+      confirmed: [{ kind: 'heartbeat_reward', id: 'older', heartbeat_height: 599 }],
+      next_before_height: 400,
+    };
+  };
+
+  await app.loadMoreActivity();
+
+  assert.equal(app.activity.confirmed.at(-1).id, 'older');
+  assert.equal(app.activity.next_before_height, 400);
+  assert.equal(app.activityPageDepth, 1);
+});
+
 test('chain overview labels miners and identifies the local wallet', () => {
   const { app } = nodeApp();
   const mine = '00112233445566778899aabbccddeeff00112233445566778899aabbccddeeff';

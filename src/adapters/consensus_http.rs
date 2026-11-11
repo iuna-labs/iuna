@@ -1,7 +1,7 @@
 //! HTTP API for operator screens.
 
 use std::{
-    collections::BTreeSet,
+    collections::{BTreeMap, BTreeSet},
     net::SocketAddr,
     path::PathBuf,
     sync::{
@@ -34,7 +34,7 @@ use crate::{
             ConnectedPeer, ConsensusRelay, PeerAddress, PeerRegistry, PeerTarget,
             SharedConsensusNode,
         },
-        consensus_ui_store::{ConsensusUiStore, UiHeartbeat},
+        consensus_ui_store::{ConsensusUiStore, UiHeartbeat, WalletRewards},
         consensus_wallet_store,
     },
     app::{
@@ -249,6 +249,9 @@ pub struct PublicWalletAddressesRequest {
 #[derive(Debug, Deserialize)]
 pub struct PublicWalletActivityRequest {
     pub addresses: Vec<String>,
+    pub public_key: String,
+    #[serde(default)]
+    pub before_height: Option<u64>,
 }
 
 #[derive(Debug, Serialize)]
@@ -259,6 +262,13 @@ pub struct PublicWalletActivityView {
     pub scanned_heartbeats: u64,
     pub pending: Vec<WalletActivityItem>,
     pub confirmed: Vec<WalletActivityItem>,
+    pub next_before_height: Option<u64>,
+}
+
+#[derive(Debug, Default, Deserialize)]
+pub struct WalletActivityQuery {
+    #[serde(default)]
+    pub before_height: Option<u64>,
 }
 
 #[derive(Debug, Default, Deserialize)]
@@ -270,10 +280,12 @@ pub struct PublicWalletQuery {
 #[derive(Debug, Serialize)]
 pub struct WalletActivityView {
     pub public_key: String,
+    pub tip_hash: String,
     pub scanned_heartbeats: u64,
     pub utxos: Vec<PublicWalletUtxo>,
     pub pending: Vec<WalletActivityItem>,
     pub confirmed: Vec<WalletActivityItem>,
+    pub next_before_height: Option<u64>,
 }
 
 #[derive(Debug, Serialize)]
@@ -288,11 +300,10 @@ pub struct WalletActivityItem {
     pub counterparty: Option<String>,
 }
 
-/// How far back the node wallet history looks: about one day of Heartbeats.
-const WALLET_ACTIVITY_HEARTBEATS: u64 = 1_440;
+/// Activity pages use Heartbeat boundaries, so no event at a busy height can be skipped.
+const WALLET_ACTIVITY_PAGE_HEARTBEATS: u64 = 200;
 /// The UI polls the mempool constantly and shows a strip; the status holds the full counts.
 const MEMPOOL_PREVIEW_ITEMS: usize = 200;
-const WALLET_ACTIVITY_ITEMS_PER_TYPE: usize = 200;
 
 /// Bounds the public response size; such a wallet can still spend by consolidating outputs.
 const MAX_PUBLIC_WALLET_UTXOS: usize = 1_000;
@@ -707,8 +718,8 @@ async fn public_wallet_addresses(
     }))
 }
 
-/// Recent transfers for a deterministic browser wallet. The caller submits the addresses it
-/// discovered through the bounded summary endpoint; private keys never leave the browser.
+/// Activity for a deterministic browser wallet. The caller submits the public identity and
+/// addresses it discovered through the bounded summary endpoint; private keys never leave it.
 async fn public_wallet_activity(
     State(state): State<ConsensusHttpState>,
     Json(request): Json<PublicWalletActivityRequest>,
@@ -727,6 +738,31 @@ async fn public_wallet_activity(
         .map(|address| decode_hex_32(address, "address"))
         .collect::<Result<BTreeSet<_>, _>>()
         .map_err(|error| api_error(StatusCode::BAD_REQUEST, error.to_string()))?;
+    let public_key = decode_hex_32(&request.public_key, "public key")
+        .map_err(|error| api_error(StatusCode::BAD_REQUEST, error.to_string()))?;
+    if !owners.contains(&address_from_public_key(&public_key)) {
+        return Err(api_error(
+            StatusCode::BAD_REQUEST,
+            "public key does not belong to the requested wallet addresses",
+        ));
+    }
+    let rewards_owner = hex(&public_key);
+    let before_height = request.before_height;
+    let store = state.ui_store.clone();
+    let rewards = tokio::task::spawn_blocking(move || {
+        store.wallet_rewards_before(
+            &rewards_owner,
+            before_height,
+            WALLET_ACTIVITY_PAGE_HEARTBEATS,
+        )
+    })
+    .await
+    .map_err(anyhow::Error::from)
+    .and_then(|rewards| rewards)
+    .unwrap_or_else(|error| {
+        eprintln!("reading public wallet rewards failed: {error:#}");
+        Default::default()
+    });
     let node = state.node.lock().await;
     let chain = node.chain();
     let empty_block_outputs = std::collections::BTreeMap::new();
@@ -743,8 +779,19 @@ async fn public_wallet_activity(
                 None,
             )
         })
+        .chain(
+            node.pending_tickets()
+                .iter()
+                .filter_map(|ticket| ticket_activity(&owners, ticket, None, None)),
+        )
         .collect();
-    let (scanned_heartbeats, confirmed) = confirmed_transaction_activity(chain, &owners);
+    let (scanned_heartbeats, confirmed, next_before_height) = confirmed_wallet_activity(
+        chain,
+        &owners,
+        &rewards,
+        request.before_height,
+        WALLET_ACTIVITY_PAGE_HEARTBEATS,
+    );
     let tip = chain.tip();
     Ok(Json(PublicWalletActivityView {
         heartbeat_height: tip.height,
@@ -753,6 +800,7 @@ async fn public_wallet_activity(
         scanned_heartbeats,
         pending,
         confirmed,
+        next_before_height,
     }))
 }
 
@@ -820,32 +868,60 @@ fn transaction_activity(
     })
 }
 
-/// Recent transfers involving `owners`, newest first. States are replayed once from the oldest
-/// parent instead of once per block; this keeps wallet polling cheap beyond the in-memory window.
-fn confirmed_transaction_activity(
+/// One chronological wallet-activity page, newest first. States are replayed once from the oldest
+/// parent instead of once per block; this keeps pagination cheap beyond the in-memory window.
+fn confirmed_wallet_activity(
     chain: &Chain,
     owners: &BTreeSet<Address>,
-) -> (u64, Vec<WalletActivityItem>) {
+    rewards: &BTreeMap<String, WalletRewards>,
+    before_height: Option<u64>,
+    page_heartbeats: u64,
+) -> (u64, Vec<WalletActivityItem>, Option<u64>) {
     let mut blocks = Vec::new();
     let mut cursor = Some(chain.tip().tip);
     while let Some(hash) = cursor {
-        if blocks.len() >= usize::try_from(WALLET_ACTIVITY_HEARTBEATS).unwrap_or(usize::MAX) {
-            break;
-        }
         let Some(block) = chain.block(&hash) else {
             break;
         };
         cursor = block.header.parent;
-        blocks.push(block);
+        if before_height.is_none_or(|before| block.header.height < before) {
+            blocks.push(block);
+            if blocks.len() >= usize::try_from(page_heartbeats).unwrap_or(usize::MAX) {
+                break;
+            }
+        }
     }
     let scanned = u64::try_from(blocks.len()).unwrap_or(u64::MAX);
     let Some(oldest) = blocks.last() else {
-        return (scanned, Vec::new());
+        return (scanned, Vec::new(), None);
     };
+    let next_before_height = oldest.header.parent.map(|_| oldest.header.height);
     let mut parent_state = oldest.header.parent.and_then(|hash| chain.state(&hash));
     let mut items_by_block = Vec::with_capacity(blocks.len());
     for block in blocks.iter().rev() {
         let mut items = Vec::new();
+        if let Some(reward) = rewards.get(&hex(&block.hash())) {
+            if reward.heartbeat > 0 {
+                items.push(WalletActivityItem {
+                    kind: "heartbeat_reward",
+                    id: hex(&block.hash()),
+                    heartbeat_height: Some(block.header.height),
+                    timestamp: Some(block.header.timestamp),
+                    amount: reward.heartbeat,
+                    counterparty: None,
+                });
+            }
+            if reward.ledger > 0 {
+                items.push(WalletActivityItem {
+                    kind: "ledger_reward",
+                    id: hex(&block.hash()),
+                    heartbeat_height: Some(block.header.height),
+                    timestamp: Some(block.header.timestamp),
+                    amount: reward.ledger,
+                    counterparty: None,
+                });
+            }
+        }
         let mut block_outputs = std::collections::BTreeMap::new();
         if let Some(state) = parent_state.as_deref() {
             for transaction in block
@@ -877,19 +953,22 @@ fn confirmed_transaction_activity(
                 ));
             }
         }
+        items.extend(block.tickets.iter().filter_map(|ticket| {
+            ticket_activity(
+                owners,
+                ticket,
+                Some(block.header.height),
+                Some(block.header.timestamp),
+            )
+        }));
         items_by_block.push(items);
         parent_state = match parent_state.as_deref() {
             Some(state) => chain.child_state(state, block),
             None => chain.state(&block.hash()),
         };
     }
-    let confirmed = items_by_block
-        .into_iter()
-        .rev()
-        .flatten()
-        .take(WALLET_ACTIVITY_ITEMS_PER_TYPE)
-        .collect();
-    (scanned, confirmed)
+    let confirmed = items_by_block.into_iter().rev().flatten().collect();
+    (scanned, confirmed, next_before_height)
 }
 
 fn ticket_activity(
@@ -912,26 +991,11 @@ fn ticket_activity(
         })
 }
 
-fn push_wallet_activity(
-    items: &mut Vec<WalletActivityItem>,
-    counts: &mut [usize; 4],
-    item: WalletActivityItem,
-) {
-    let category = match item.kind {
-        "sent" | "received" | "self" => 0,
-        "ticket" => 1,
-        "heartbeat_reward" => 2,
-        "ledger_reward" => 3,
-        _ => 0,
-    };
-    if counts[category] < WALLET_ACTIVITY_ITEMS_PER_TYPE {
-        counts[category] += 1;
-        items.push(item);
-    }
-}
-
 /// The node wallet's UTXOs, mempool entries and recent confirmed activity, newest first.
-async fn wallet_activity(State(state): State<ConsensusHttpState>) -> ApiResult<WalletActivityView> {
+async fn wallet_activity(
+    State(state): State<ConsensusHttpState>,
+    Query(query): Query<WalletActivityQuery>,
+) -> ApiResult<WalletActivityView> {
     let (public_key, unlocked) = {
         let wallet = state.wallet.read().expect("wallet state lock poisoned");
         (
@@ -948,8 +1012,13 @@ async fn wallet_activity(State(state): State<ConsensusHttpState>) -> ApiResult<W
         |wallet| wallet.owned_addresses(),
     );
     let rewards_owner = hex(&public_key);
+    let before_height = query.before_height;
     let rewards = tokio::task::spawn_blocking(move || {
-        store.wallet_rewards(&rewards_owner, WALLET_ACTIVITY_HEARTBEATS)
+        store.wallet_rewards_before(
+            &rewards_owner,
+            before_height,
+            WALLET_ACTIVITY_PAGE_HEARTBEATS,
+        )
     })
     .await
     .map_err(anyhow::Error::from)
@@ -995,63 +1064,21 @@ async fn wallet_activity(State(state): State<ConsensusHttpState>) -> ApiResult<W
             .iter()
             .filter_map(|ticket| ticket_activity(&owners, ticket, None, None)),
     );
-    let (scanned, mut confirmed) = confirmed_transaction_activity(chain, &owners);
-    let mut confirmed_counts = [confirmed.len(), 0, 0, 0];
-    let mut reward_scanned = 0;
-    let mut cursor = Some(chain.tip().tip);
-    while let Some(hash) = cursor {
-        if reward_scanned >= WALLET_ACTIVITY_HEARTBEATS {
-            break;
-        }
-        let Some(block) = chain.block(&hash) else {
-            break;
-        };
-        let (height, time) = (Some(block.header.height), Some(block.header.timestamp));
-        if let Some(reward) = rewards.get(&hex(&hash)) {
-            if reward.heartbeat > 0 {
-                push_wallet_activity(
-                    &mut confirmed,
-                    &mut confirmed_counts,
-                    WalletActivityItem {
-                        kind: "heartbeat_reward",
-                        id: hex(&hash),
-                        heartbeat_height: height,
-                        timestamp: time,
-                        amount: reward.heartbeat,
-                        counterparty: None,
-                    },
-                );
-            }
-            if reward.ledger > 0 {
-                push_wallet_activity(
-                    &mut confirmed,
-                    &mut confirmed_counts,
-                    WalletActivityItem {
-                        kind: "ledger_reward",
-                        id: hex(&hash),
-                        heartbeat_height: height,
-                        timestamp: time,
-                        amount: reward.ledger,
-                        counterparty: None,
-                    },
-                );
-            }
-        }
-        for ticket in &block.tickets {
-            if let Some(item) = ticket_activity(&owners, ticket, height, time) {
-                push_wallet_activity(&mut confirmed, &mut confirmed_counts, item);
-            }
-        }
-        reward_scanned += 1;
-        cursor = block.header.parent;
-    }
-    confirmed.sort_by_key(|item| std::cmp::Reverse(item.heartbeat_height));
+    let (scanned, confirmed, next_before_height) = confirmed_wallet_activity(
+        chain,
+        &owners,
+        &rewards,
+        query.before_height,
+        WALLET_ACTIVITY_PAGE_HEARTBEATS,
+    );
     Ok(Json(WalletActivityView {
         public_key: hex(&public_key),
+        tip_hash: hex(&chain.tip().tip),
         scanned_heartbeats: scanned,
         utxos,
         pending,
         confirmed,
+        next_before_height,
     }))
 }
 
@@ -2273,47 +2300,6 @@ mod tests {
     }
 
     #[test]
-    fn mining_activity_does_not_crowd_transfers_out_of_wallet_history() {
-        let mut items = Vec::new();
-        let mut counts = [0; 4];
-        for height in 0..=WALLET_ACTIVITY_ITEMS_PER_TYPE {
-            push_wallet_activity(
-                &mut items,
-                &mut counts,
-                WalletActivityItem {
-                    kind: "heartbeat_reward",
-                    id: height.to_string(),
-                    heartbeat_height: Some(height as u64),
-                    timestamp: Some(height as u64),
-                    amount: 1,
-                    counterparty: None,
-                },
-            );
-        }
-        push_wallet_activity(
-            &mut items,
-            &mut counts,
-            WalletActivityItem {
-                kind: "sent",
-                id: "sent-transaction".to_owned(),
-                heartbeat_height: Some(1),
-                timestamp: Some(1),
-                amount: 1,
-                counterparty: Some(hex(&[7; 32])),
-            },
-        );
-
-        assert_eq!(
-            items
-                .iter()
-                .filter(|item| item.kind == "heartbeat_reward")
-                .count(),
-            WALLET_ACTIVITY_ITEMS_PER_TYPE
-        );
-        assert!(items.iter().any(|item| item.kind == "sent"));
-    }
-
-    #[test]
     fn transaction_activity_reports_the_wallet_balance_delta() {
         use crate::consensus::{Input, Output};
 
@@ -2359,6 +2345,36 @@ mod tests {
         assert_eq!(item.kind, "sent");
         assert_eq!(item.amount, 610);
         assert_eq!(item.counterparty, Some(hex(&[7; 32])));
+    }
+
+    #[test]
+    fn activity_pages_continue_at_a_whole_heartbeat_boundary() {
+        let mut chain = Chain::from_genesis().unwrap();
+        let timestamp = chain.tip().tip_timestamp + HEARTBEAT_TARGET_INTERVAL_SECS;
+        let block = crate::consensus::mine_child(chain.tip(), timestamp, [9; 32], Vec::new(), None)
+            .unwrap()
+            .0;
+        assert!(chain.submit(block, timestamp).unwrap());
+        let rewards = BTreeMap::from([(
+            hex(&chain.tip().tip),
+            WalletRewards {
+                heartbeat: 7,
+                ledger: 0,
+            },
+        )]);
+
+        let (scanned, newest, cursor) =
+            confirmed_wallet_activity(&chain, &BTreeSet::new(), &rewards, None, 1);
+        assert_eq!(scanned, 1);
+        assert_eq!(newest.len(), 1);
+        assert_eq!(newest[0].kind, "heartbeat_reward");
+        assert_eq!(cursor, Some(1));
+
+        let (scanned, older, cursor) =
+            confirmed_wallet_activity(&chain, &BTreeSet::new(), &rewards, cursor, 1);
+        assert_eq!(scanned, 1);
+        assert!(older.is_empty());
+        assert_eq!(cursor, None);
     }
 
     #[tokio::test]
@@ -2981,7 +2997,8 @@ mod tests {
             .header(header::ORIGIN, "https://wallet.getiuna.org")
             .body(Body::from(
                 serde_json::to_vec(&serde_json::json!({
-                    "addresses": [hex(&wallet.address()), hex(&transaction.outputs[1].owner)]
+                    "addresses": [hex(&wallet.address()), hex(&transaction.outputs[1].owner)],
+                    "public_key": hex(&wallet.public_key())
                 }))
                 .unwrap(),
             ))
@@ -3001,6 +3018,7 @@ mod tests {
         // One unit goes to the recipient and one to the fee; change remains ours.
         assert_eq!(activity["pending"][0]["amount"], 2);
         assert_eq!(activity["tip_timestamp"], view["tip_timestamp"]);
+        assert_eq!(activity["next_before_height"], serde_json::Value::Null);
 
         for rejected in [
             Vec::new(),

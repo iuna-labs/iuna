@@ -13,6 +13,8 @@ window.iunaApp = function iunaApp() {
     peerForm: { address: "", busy: false },
     activity: null,
     activityVisibleCount: 25,
+    activityBusy: false,
+    activityPageDepth: 0,
     activityObserver: null,
     activityFilters: { transfers: true, tickets: true, heartbeatRewards: true, ledgerRewards: true },
     showUtxos: false,
@@ -668,7 +670,8 @@ window.iunaApp = function iunaApp() {
         this.peerTargets = await this.getJson("/api/peer-targets").catch(() => this.peerTargets);
         if (this.tab === "metrics") await this.refreshMetrics(true);
         if (status.wallet_public_key && this.tab === "wallet") {
-          this.activity = await this.getJson("/api/wallet/activity").catch(() => this.activity);
+          const activity = await this.getJson("/api/wallet/activity").catch(() => null);
+          if (activity) this.applyActivityPage(activity, false);
         }
         if (!this.mining.busy) {
           this.mining.message = status.heartbeat_mining_enabled
@@ -1902,6 +1905,42 @@ window.iunaApp = function iunaApp() {
       ];
     },
 
+    applyActivityPage(page, append) {
+      if (!page) return;
+      if (!this.activity || !append) {
+        const preserveOlder = this.activityPageDepth > 1
+          && this.activity?.public_key === page.public_key;
+        const older = preserveOlder ? (this.activity?.confirmed || []) : [];
+        const firstOlderHeight = page.next_before_height;
+        const preserved = firstOlderHeight == null
+          ? []
+          : older.filter((item) => Number(item.heartbeat_height) < Number(firstOlderHeight));
+        const confirmed = [...page.confirmed, ...preserved];
+        const seen = new Set();
+        this.activity = {
+          ...page,
+          confirmed: confirmed.filter((item) => {
+            const key = `${item.kind}:${item.id}:${item.heartbeat_height ?? ""}`;
+            if (seen.has(key)) return false;
+            seen.add(key);
+            return true;
+          }),
+          next_before_height: preserveOlder ? this.activity.next_before_height : page.next_before_height,
+        };
+        if (!preserveOlder) this.activityPageDepth = 1;
+        return;
+      }
+      const seen = new Set(this.activity.confirmed.map((item) => `${item.kind}:${item.id}:${item.heartbeat_height ?? ""}`));
+      this.activity.confirmed.push(...page.confirmed.filter((item) => {
+        const key = `${item.kind}:${item.id}:${item.heartbeat_height ?? ""}`;
+        if (seen.has(key)) return false;
+        seen.add(key);
+        return true;
+      }));
+      this.activity.next_before_height = page.next_before_height;
+      this.activityPageDepth += 1;
+    },
+
     activityType(item) {
       if (["sent", "received", "self"].includes(item?.kind)) return "transfers";
       if (item?.kind === "ticket") return "tickets";
@@ -1924,11 +1963,26 @@ window.iunaApp = function iunaApp() {
     },
 
     activityHasMore() {
-      return this.activityVisibleCount < this.filteredActivityItems().length;
+      return this.activityVisibleCount < this.filteredActivityItems().length
+        || this.activity?.next_before_height != null;
     },
 
-    loadMoreActivity() {
-      if (this.activityHasMore()) this.activityVisibleCount += 25;
+    async loadMoreActivity() {
+      if (this.activityVisibleCount < this.filteredActivityItems().length) {
+        this.activityVisibleCount += 25;
+      } else if (this.activity?.next_before_height != null && !this.activityBusy) {
+        this.activityBusy = true;
+        try {
+          const page = await this.getJson(`/api/wallet/activity?before_height=${this.activity.next_before_height}`);
+          this.applyActivityPage(page, true);
+          this.activityVisibleCount += 25;
+        } catch (error) {
+          this.notify(error.message, "error");
+        } finally {
+          this.activityBusy = false;
+        }
+      }
+      this.$nextTick(() => this.loadMoreActivityIfNeeded());
     },
 
     loadMoreActivityIfNeeded() {

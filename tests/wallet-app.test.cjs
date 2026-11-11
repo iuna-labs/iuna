@@ -105,10 +105,12 @@ test('browser wallet discovers addresses in batches and loads outputs only where
   const json = (body) => new Response(JSON.stringify(body), { status: 200, headers: { 'content-type': 'application/json' } });
   const batches = [];
   const singles = [];
+  const activityRequests = [];
   const originalFetch = globalThis.fetch;
   globalThis.fetch = async (url, options = {}) => {
     if (String(url).endsWith('/api/public/wallet-activity')) {
-      return json({ ...chain, scanned_heartbeats: 7, pending: [], confirmed: [] });
+      activityRequests.push(JSON.parse(options.body));
+      return json({ ...chain, scanned_heartbeats: 7, pending: [], confirmed: [], next_before_height: null });
     }
     if (String(url).endsWith('/api/public/wallet-addresses')) {
       const { addresses } = JSON.parse(options.body);
@@ -148,7 +150,9 @@ test('browser wallet discovers addresses in batches and loads outputs only where
     assert.equal(view.balance, 5);
     assert.deepEqual(singles, [change20.addressHex]);
     assert.equal(view.utxos[0].walletKey.addressHex, change20.addressHex);
-    assert.deepEqual(view.activity, { ...chain, scanned_heartbeats: 7, pending: [], confirmed: [] });
+    assert.deepEqual(view.activity, { ...chain, scanned_heartbeats: 7, pending: [], confirmed: [], next_before_height: null });
+    assert.equal(activityRequests[0].public_key, wallet.publicKeyHex);
+    assert.ok(activityRequests[0].addresses.includes(change20.addressHex));
     assert.deepEqual(batches, [41, 2, 20]);
     assert.ok(batches.every((size) => size <= 64));
   } finally {
@@ -178,6 +182,29 @@ test('sent activity separates pending, mined and dropped transactions', async ()
   assert.equal(core.sentStatus(item, { utxos: [] }), 'pending');
 });
 
+test('browser wallet activity pages carry the wallet identity and cursor', async () => {
+  const originalFetch = globalThis.fetch;
+  let request;
+  globalThis.fetch = async (url, options) => {
+    request = { url: String(url), body: JSON.parse(options.body) };
+    return new Response(JSON.stringify({ pending: [], confirmed: [], next_before_height: null }), {
+      status: 200,
+      headers: { 'content-type': 'application/json' },
+    });
+  };
+  try {
+    await core.fetchWalletActivity('https://wallet.getiuna.org', '11'.repeat(32), ['22'.repeat(32)], 600);
+    assert.equal(request.url, 'https://wallet.getiuna.org/api/public/wallet-activity');
+    assert.deepEqual(request.body, {
+      public_key: '11'.repeat(32),
+      addresses: ['22'.repeat(32)],
+      before_height: 600,
+    });
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+});
+
 test('wallet settings name reachable endpoints and previous wallets are explained', () => {
   const app = source('wallet/app.js');
   for (const key of ['iuna.wallets.v2', 'iuna.wallet.v1']) assert.ok(app.includes(`"${key}"`));
@@ -191,6 +218,10 @@ test('wallet settings name reachable endpoints and previous wallets are explaine
   assert.match(app, /Overview[\s\S]*Receive[\s\S]*Send[\s\S]*Activity/);
   assert.match(app, /bottom-nav/);
   assert.match(app, /heartbeatLabel\(\)/);
+  for (const label of ['Transfers', 'Tickets', 'Heartbeat rewards', 'Ledger rewards']) {
+    assert.ok(app.includes(label));
+  }
+  assert.match(app, /data-action="load-activity"/);
   assert.match(app, /submitTransaction\(apiEndpoint\(\), transaction\);[^]*?view\.change_index = \(view\.change_index \|\| 0\) \+ 1/);
 });
 

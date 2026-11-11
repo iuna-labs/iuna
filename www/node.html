@@ -433,7 +433,7 @@
               </div>
             </div>
             <div class="activity-scroll">
-              <div class="activity-list" x-show="filteredActivityItems().length">
+              <div class="activity-list" x-show="filteredActivityItems().length || activityHasMore()">
                 <template x-for="item in visibleActivityItems()" :key="`${item.pending}:${item.kind}:${item.id}`">
                   <div class="activity-card" :class="{pending: item.pending}" role="button" tabindex="0" @click="openActivityModal(item)" @keydown.enter.self.prevent="openActivityModal(item)" @keydown.space.self.prevent="openActivityModal(item)">
                     <div class="activity-main">
@@ -449,7 +449,7 @@
                 <div class="activity-sentinel" x-ref="activitySentinel" x-show="activityHasMore()" x-init="$nextTick(() => observeActivitySentinel($el))"></div>
               </div>
               <div class="empty" x-show="activity && !activityItems().length">No wallet activity.</div>
-              <div class="empty" x-show="activityItems().length && !filteredActivityItems().length">No activity matches these filters.</div>
+              <div class="empty" x-show="activityItems().length && !filteredActivityItems().length && !activityHasMore()">No activity matches these filters.</div>
             </div>
           </article>
         </div>

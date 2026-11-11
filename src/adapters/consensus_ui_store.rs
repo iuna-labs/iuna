@@ -237,16 +237,31 @@ impl ConsensusUiStore {
         public_key: &str,
         heartbeats: u64,
     ) -> Result<BTreeMap<String, WalletRewards>> {
+        self.wallet_rewards_before(public_key, None, heartbeats)
+    }
+
+    /// What `public_key` earned in the `heartbeats` blocks immediately before `before_height`.
+    /// With no cursor the page ends at the projected tip.
+    pub fn wallet_rewards_before(
+        &self,
+        public_key: &str,
+        before_height: Option<u64>,
+        heartbeats: u64,
+    ) -> Result<BTreeMap<String, WalletRewards>> {
         self.with_connection(|connection| {
             let mut statement = connection.prepare(
-                "SELECT block_hash, miner_public_key = ?1, ledger_miner_public_key IS ?1, \
+                "WITH boundary(value) AS ( \
+                   SELECT COALESCE(?2, COALESCE(MAX(height), -1) + 1) \
+                   FROM consensus_ui_heartbeats \
+                 ) \
+                 SELECT block_hash, miner_public_key = ?1, ledger_miner_public_key IS ?1, \
                  heartbeat_reward, ledger_reward \
-                 FROM consensus_ui_heartbeats \
-                 WHERE height > (SELECT MAX(height) FROM consensus_ui_heartbeats) - ?2 \
+                 FROM consensus_ui_heartbeats, boundary \
+                 WHERE height < boundary.value AND height >= boundary.value - ?3 \
                  AND (miner_public_key = ?1 OR ledger_miner_public_key = ?1)",
             )?;
             statement
-                .query_map(params![public_key, heartbeats], |row| {
+                .query_map(params![public_key, before_height, heartbeats], |row| {
                     let (mined, won) = (row.get::<_, bool>(1)?, row.get::<_, bool>(2)?);
                     Ok((
                         row.get::<_, String>(0)?,
@@ -747,6 +762,10 @@ mod tests {
         let newest = store.wallet_rewards(&miner, 1).unwrap();
         assert_eq!(newest.len(), 1);
         assert!(newest.contains_key(&hex(&blocks[3].hash())));
+
+        let older = store.wallet_rewards_before(&miner, Some(3), 2).unwrap();
+        assert_eq!(older.len(), 1);
+        assert!(older.contains_key(&hex(&blocks[1].hash())));
     }
 
     #[test]

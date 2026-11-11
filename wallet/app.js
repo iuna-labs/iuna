@@ -1,7 +1,7 @@
 import { generateMnemonic, mnemonicEntropy, validateMnemonic } from "./mnemonic.js";
 import {
   apiEndpoint, buildSignedTransaction, decryptWallet, defaultApiEndpoint, encryptWallet, fetchWalletView,
-  formatIuna, parseIuna, submitTransaction, walletFromEntropy,
+  fetchWalletActivity, formatIuna, parseIuna, submitTransaction, walletFromEntropy,
 } from "./wallet-core.js";
 
 const app = document.querySelector("#app");
@@ -23,6 +23,9 @@ let pollTimer = null;
 let idleTimer = null;
 let awayFromDashboard = false;
 let dashboardTab = "overview";
+let activityBusy = false;
+let activityPageDepth = 1;
+const activityFilters = { transfers: true, tickets: true, heartbeatRewards: true, ledgerRewards: true };
 
 // Storage: { selected: publicKey, wallets: [{ name, record }] }, each record encrypted on its own.
 function readJson(key, fallback) { try { return JSON.parse(localStorage.getItem(key)) ?? fallback; } catch { return fallback; } }
@@ -125,19 +128,32 @@ function renderConfirm() {
   app.innerHTML = shell(`<h1>Confirm transfer</h1><p>Check the full recipient address. Ledger transactions cannot be reversed.</p><div class="address"><span class="label">Recipient</span><code>${escape(pendingTransfer.recipient)}</code></div><div class="stats"><div class="stat"><span>Amount</span><strong>${escape(formatIuna(pendingTransfer.amount))} IUNA</strong></div><div class="stat"><span>Fee</span><strong>${escape(formatIuna(pendingTransfer.fee))} IUNA</strong></div><div class="stat"><span>Spendable after</span><strong>${escape(formatIuna(Math.max(0, spendable)))} IUNA</strong></div></div><div class="actions"><button data-action="cancel-transfer">Cancel</button><button class="primary" data-action="confirm-transfer">Sign and send</button></div>`);
 }
 
-const ACTIVITY_LABELS = { sent: "Sent", received: "Received", self: "To yourself" };
+const ACTIVITY_LABELS = {
+  sent: "Sent", received: "Received", self: "To yourself", ticket: "Mining ticket",
+  heartbeat_reward: "Heartbeat reward", ledger_reward: "Ledger reward",
+};
+
+function activityType(item) {
+  if (["sent", "received", "self"].includes(item?.kind)) return "transfers";
+  if (item?.kind === "ticket") return "tickets";
+  if (item?.kind === "heartbeat_reward") return "heartbeatRewards";
+  if (item?.kind === "ledger_reward") return "ledgerRewards";
+  return "transfers";
+}
 
 function activityRows() {
   const rows = [
     ...(view?.activity?.pending || []).map((item) => ({ ...item, pending: true })),
     ...(view?.activity?.confirmed || []).map((item) => ({ ...item, pending: false })),
-  ];
-  if (!rows.length) return `<p class="muted">No transactions yet.</p>`;
-  return `<div class="activity">${rows.map((row) => {
-    const incoming = row.kind === "received";
+  ].filter((item) => activityFilters[activityType(item)]);
+  if (!rows.length && view?.activity?.next_before_height == null) return `<p class="muted">No activity matches these filters.</p>`;
+  const list = rows.map((row) => {
+    const incoming = ["received", "self", "heartbeat_reward", "ledger_reward"].includes(row.kind);
     const timestamp = row.pending ? "Waiting for confirmation" : (row.timestamp == null ? "Confirmed" : timeLabel(row.timestamp));
     return `<div class="activity-row"><span class="pill${row.pending ? " pending" : ""}">${escape(ACTIVITY_LABELS[row.kind] || row.kind)}</span><span>${escape(timestamp)}</span><b class="${incoming ? "incoming" : ""}">${incoming ? "+" : "−"} ${escape(formatIuna(row.amount))} IUNA</b></div>`;
-  }).join("")}</div>`;
+  }).join("");
+  const more = view?.activity?.next_before_height == null ? "" : `<button class="activity-more" data-action="load-activity"${activityBusy ? " disabled" : ""}>${activityBusy ? "Loading…" : "Load older activity"}</button>`;
+  return `${list ? `<div class="activity">${list}</div>` : ""}${more}`;
 }
 
 function heartbeatLabel() {
@@ -164,7 +180,9 @@ function sendScreen() {
 }
 
 function activityScreen() {
-  return `<h1>Activity</h1><p>Confirmed and pending transactions.</p><div data-field="activity">${activityRows()}</div>`;
+  const filters = [["transfers", "Transfers"], ["tickets", "Tickets"], ["heartbeatRewards", "Heartbeat rewards"], ["ledgerRewards", "Ledger rewards"]]
+    .map(([type, label]) => `<button class="activity-filter${activityFilters[type] ? " active" : ""}" data-action="activity-filter" data-filter="${type}" aria-pressed="${activityFilters[type]}">${label}</button>`).join("");
+  return `<h1>Activity</h1><p>Confirmed and pending wallet activity.</p><div class="activity-filters" aria-label="Activity filters">${filters}</div><div data-field="activity">${activityRows()}</div>`;
 }
 
 function settingsScreen(configured = localStorage.getItem(ENDPOINT_KEY) || defaultApiEndpoint()) {
@@ -210,6 +228,45 @@ function updateDashboard() {
   if (activity) activity.innerHTML = activityRows();
 }
 
+function mergeLoadedActivity(fresh, previous) {
+  if (activityPageDepth <= 1 || !fresh?.activity || !previous?.activity) return;
+  const seen = new Set(fresh.activity.confirmed.map((item) => `${item.kind}:${item.id}:${item.heartbeat_height ?? ""}`));
+  fresh.activity.confirmed.push(...previous.activity.confirmed.filter((item) => {
+    const key = `${item.kind}:${item.id}:${item.heartbeat_height ?? ""}`;
+    if (seen.has(key)) return false;
+    seen.add(key);
+    return true;
+  }));
+  fresh.activity.next_before_height = previous.activity.next_before_height;
+}
+
+async function loadOlderActivity() {
+  const before = view?.activity?.next_before_height;
+  if (before == null || activityBusy) return;
+  activityBusy = true;
+  updateDashboard();
+  try {
+    const page = await fetchWalletActivity(
+      apiEndpoint(),
+      wallet.publicKeyHex,
+      view.activity_addresses,
+      before,
+    );
+    const seen = new Set(view.activity.confirmed.map((item) => `${item.kind}:${item.id}:${item.heartbeat_height ?? ""}`));
+    view.activity.confirmed.push(...page.confirmed.filter((item) => {
+      const key = `${item.kind}:${item.id}:${item.heartbeat_height ?? ""}`;
+      if (seen.has(key)) return false;
+      seen.add(key);
+      return true;
+    }));
+    view.activity.next_before_height = page.next_before_height;
+    activityPageDepth += 1;
+  } finally {
+    activityBusy = false;
+    updateDashboard();
+  }
+}
+
 function showScreen(render) { awayFromDashboard = true; render(); }
 
 async function save(seedPhrase, password, name) {
@@ -229,6 +286,7 @@ function unlocked({ seedPhrase: _seedPhrase, ...derived }) {
   // The recovery phrase is only decrypted again on demand; keep the signing key only.
   wallet = derived;
   dashboardTab = "overview";
+  activityPageDepth = 1;
   awayFromDashboard = false;
   resetIdleTimer();
 }
@@ -253,7 +311,12 @@ async function refresh(silent = false) {
     if (awayFromDashboard) return;
     if (app.querySelector("[data-screen=wallet]")) updateDashboard(); else renderDashboard();
   };
-  try { view = await fetchWalletView(apiEndpoint(), wallet); if (wallet) render(); }
+  try {
+    const fresh = await fetchWalletView(apiEndpoint(), wallet);
+    mergeLoadedActivity(fresh, view);
+    view = fresh;
+    if (wallet) render();
+  }
   catch (error) {
     connected = false;
     view ||= { network: "Disconnected", heartbeat_height: "—", ledger_blocks: "—", balance: 0, spendable_balance: 0, utxos: [], activity: { pending: [], confirmed: [] } };
@@ -286,6 +349,8 @@ app.addEventListener("click", async (event) => {
     if (action === "unlock-screen") renderUnlock();
     if (action === "settings") showScreen(renderSettings);
     if (action === "wallet-tab") renderDashboard(button.dataset.tab);
+    if (action === "activity-filter") { activityFilters[button.dataset.filter] = !activityFilters[button.dataset.filter]; renderDashboard("activity"); }
+    if (action === "load-activity") await loadOlderActivity();
     if (action === "seed-saved") renderSeedCheck();
     if (action === "show-seed") renderSeed();
     if (action === "dashboard") renderDashboard();

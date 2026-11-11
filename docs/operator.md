@@ -65,9 +65,10 @@ history entry.
   tickets in separate arrays so the Chain screen can present both layers in a
   single overview.
 - `GET /api/wallet/activity` returns the node wallet's UTXOs, its pending
-  transactions and tickets, and confirmed activity from the last `1,440`
-  Heartbeats (about a day): what it sent, received or spent on tickets, plus
-  Heartbeat and Ledger rewards won by this wallet.
+  transactions and tickets, and one 200-Heartbeat page of confirmed activity:
+  what it sent, received or spent on tickets, plus Heartbeat and Ledger rewards
+  won by this wallet. Pass `next_before_height` as the `before_height` query
+  parameter to continue chronologically towards genesis.
 - `GET /api/peer-targets` lists the outbound peers the node keeps dialling,
   with their source, connection state and latest error.
 - `GET /api/mining-ticket-quote?duration=60` returns the consensus minimum
@@ -97,11 +98,15 @@ The self-custody browser wallet uses four deliberately narrow routes:
   mempool transactions spending any of them. The browser wallet discovers its
   receive and change addresses with one such request per gap window and then
   loads UTXO pages only for addresses that still hold outputs.
-- `POST /api/public/wallet-activity` takes the wallet's complete discovered
-  address set and returns recent pending and confirmed transfers. Each amount
-  is the absolute wallet balance delta: outputs to those addresses minus the
-  resolved inputs owned by those addresses. This includes change and fees
+- `POST /api/public/wallet-activity` takes the wallet's public key and complete
+  discovered address set. It returns the same transfers, mining tickets,
+  Heartbeat rewards and Ledger rewards as the operator wallet. Each transfer
+  amount is the absolute wallet balance delta: outputs to those addresses minus
+  the resolved inputs owned by those addresses. This includes change and fees
   correctly instead of treating all non-wallet outputs as the sent amount.
+  Confirmed activity is paged by 200 whole Heartbeats; pass the returned
+  `next_before_height` as `before_height` to continue without cutting off a
+  busy Heartbeat or applying a separate limit per activity type.
 - `POST /api/public/transactions` accepts a complete, client-side signed
   current-protocol `Transaction`. Consensus validation is performed before it
   enters the mempool and relay.
