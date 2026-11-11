@@ -5,6 +5,14 @@ from the Git history and Conventional Commit titles by `deployment.sh`.
 
 ## [Unreleased]
 
+## [0.6.4] - 2026-11-11
+
+### Added
+
+- load older activity with infinite scroll
+- colour-coded activity codes like the node app
+- reward breakdowns, Finalizer and contact links in block details
+
 ## [0.6.3] - 2026-11-11
 
 ### Fixed
