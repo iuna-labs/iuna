@@ -316,7 +316,7 @@ const MAX_PUBLIC_WALLET_ACTIVITY_ADDRESSES: usize = 512;
 /// page of 1,000 outputs to be consolidated in one otherwise-valid transaction.
 const MAX_PUBLIC_TRANSACTION_JSON_BYTES: usize = 1024 * 1024;
 
-#[derive(Debug, Serialize)]
+#[derive(Debug, Deserialize, Serialize)]
 pub struct BlockInputView {
     pub transaction_id: String,
     pub output_index: u32,
@@ -325,13 +325,13 @@ pub struct BlockInputView {
     pub value: Option<u64>,
 }
 
-#[derive(Debug, Serialize)]
+#[derive(Debug, Deserialize, Serialize)]
 pub struct BlockOutputView {
     pub owner: String,
     pub value: u64,
 }
 
-#[derive(Debug, Serialize)]
+#[derive(Debug, Deserialize, Serialize)]
 pub struct TicketPurchaseView {
     pub id: String,
     pub version: u16,
@@ -348,19 +348,19 @@ pub struct TicketPurchaseView {
 }
 
 /// One recipient's part of a transaction fee. `owner` is unknown until the transaction is mined.
-#[derive(Debug, Serialize)]
+#[derive(Debug, Deserialize, Serialize)]
 pub struct FeeShareView {
     pub value: u64,
     pub owner: Option<String>,
 }
 
-#[derive(Debug, Serialize)]
+#[derive(Debug, Deserialize, Serialize)]
 pub struct FeeSplitView {
     pub heartbeat_miner: FeeShareView,
     pub ledger_winner: FeeShareView,
 }
 
-#[derive(Debug, Serialize)]
+#[derive(Debug, Deserialize, Serialize)]
 pub struct LedgerTransactionView {
     pub id: String,
     pub version: u16,
@@ -373,7 +373,7 @@ pub struct LedgerTransactionView {
     pub fee_split: Option<FeeSplitView>,
 }
 
-#[derive(Debug, Serialize)]
+#[derive(Debug, Deserialize, Serialize)]
 pub struct LedgerBlockView {
     pub candidate_hash: String,
     pub candidate_signature: Option<String>,
@@ -435,7 +435,7 @@ pub struct MempoolTicketView {
     pub change: Option<BlockOutputView>,
 }
 
-#[derive(Debug, Serialize)]
+#[derive(Debug, Deserialize, Serialize)]
 pub struct BlockDetailView {
     pub block_hash: String,
     pub height: u64,
@@ -444,13 +444,13 @@ pub struct BlockDetailView {
     pub ledger: Option<LedgerBlockView>,
 }
 
-#[derive(Debug, Serialize)]
+#[derive(Debug, Deserialize, Serialize)]
 pub struct BlockRewardsView {
     pub heartbeat: HeartbeatRewardView,
     pub ledger: Option<LedgerRewardView>,
 }
 
-#[derive(Debug, Serialize)]
+#[derive(Debug, Deserialize, Serialize)]
 pub struct HeartbeatRewardView {
     pub total: u64,
     pub ledger_transaction_fees: u64,
@@ -458,11 +458,38 @@ pub struct HeartbeatRewardView {
     pub expenditure: u64,
 }
 
-#[derive(Debug, Serialize)]
+#[derive(Debug, Deserialize, Serialize)]
 pub struct LedgerRewardView {
     pub total: u64,
     pub subsidy: u64,
     pub ledger_transaction_fees: u64,
+}
+
+/// A reward has no transaction of its own. Its inputs are the block's fees and payouts it
+/// collects, and its single output pays `owner`.
+#[derive(Debug, Serialize)]
+pub struct BlockRewardBreakdownView {
+    pub block_hash: String,
+    pub height: u64,
+    pub heartbeat: RewardBreakdownView,
+    pub ledger: Option<RewardBreakdownView>,
+}
+
+#[derive(Debug, Serialize)]
+pub struct RewardBreakdownView {
+    pub total: u64,
+    /// The paid address; unknown for a Ledger winner whose ticket left the kept state.
+    pub owner: Option<String>,
+    pub inputs: Vec<RewardInputView>,
+}
+
+#[derive(Clone, Debug, Serialize)]
+pub struct RewardInputView {
+    /// `ledger_fee_share`, `inclusion_fee`, `expenditure` or `subsidy`.
+    pub source: &'static str,
+    /// The transaction or ticket paying this part; absent for a block-wide amount.
+    pub id: Option<String>,
+    pub value: u64,
 }
 
 #[derive(Debug, Serialize)]
@@ -555,6 +582,7 @@ pub fn router(state: ConsensusHttpState) -> Router {
         .route("/api/heartbeats", get(heartbeats))
         .route("/api/metrics", get(metrics))
         .route("/api/blocks/{block_hash}", get(block_detail))
+        .route("/api/rewards/{block_hash}", get(block_rewards))
         .route("/api/mempool", get(mempool))
         .route("/api/mempool/{id}", get(mempool_item))
         .route("/api/peers", get(peers))
@@ -569,6 +597,10 @@ pub fn router(state: ConsensusHttpState) -> Router {
 pub fn public_wallet_router(state: ConsensusHttpState) -> Router {
     Router::new()
         .route("/api/public/wallet/{address}", get(public_wallet_view))
+        .route(
+            "/api/public/rewards/{block_hash}",
+            get(public_block_rewards),
+        )
         .route(
             "/api/public/wallet-addresses",
             post(public_wallet_addresses).options(public_wallet_preflight),
@@ -1120,6 +1152,187 @@ async fn block_detail(
     let detail = block_detail_view(block, parent_state)
         .map_err(|error| api_error(StatusCode::INTERNAL_SERVER_ERROR, error.to_string()))?;
     Ok(Json(detail).into_response())
+}
+
+/// The operator's view: a block that is not projected yet is built from state at hand.
+async fn block_rewards(
+    State(state): State<ConsensusHttpState>,
+    Path(block_hash): Path<String>,
+) -> ApiResult<BlockRewardBreakdownView> {
+    let block_hash = decode_hex_32(&block_hash, "block hash")
+        .map_err(|error| api_error(StatusCode::BAD_REQUEST, error.to_string()))?;
+    if let Some(rewards) = projected_rewards(&state, &block_hash).await? {
+        return Ok(Json(rewards));
+    }
+    let node = state.node.lock().await;
+    let chain = node.chain();
+    let block = chain
+        .block(&block_hash)
+        .ok_or_else(|| api_error(StatusCode::NOT_FOUND, "unknown Heartbeat block"))?;
+    let parent_state = block
+        .header
+        .parent
+        .and_then(|parent| chain.kept_state(&parent));
+    let detail = block_detail_view(block, parent_state)
+        .map_err(|error| api_error(StatusCode::INTERNAL_SERVER_ERROR, error.to_string()))?;
+    let address = |key: PublicKey| hex(&address_from_public_key(&key));
+    Ok(Json(reward_breakdown(
+        &detail,
+        Some(address(block.header.miner_public_key)),
+        ledger_winner_public_key(block, parent_state).map(address),
+    )))
+}
+
+/// The public listener reads only the projection, so a remote client never takes the node lock
+/// or replays a block. Wallet activity comes from the same projection, so its rewards are there.
+async fn public_block_rewards(
+    State(state): State<ConsensusHttpState>,
+    Path(block_hash): Path<String>,
+) -> ApiResult<BlockRewardBreakdownView> {
+    let block_hash = decode_hex_32(&block_hash, "block hash")
+        .map_err(|error| api_error(StatusCode::BAD_REQUEST, error.to_string()))?;
+    projected_rewards(&state, &block_hash)
+        .await?
+        .map(Json)
+        .ok_or_else(|| {
+            api_error(
+                StatusCode::NOT_FOUND,
+                "unknown or not yet indexed Heartbeat",
+            )
+        })
+}
+
+async fn projected_rewards(
+    state: &ConsensusHttpState,
+    block_hash: &[u8; 32],
+) -> std::result::Result<Option<BlockRewardBreakdownView>, ApiErrorResponse> {
+    let store = state.ui_store.clone();
+    let projected_hash = hex(block_hash);
+    let projected = tokio::task::spawn_blocking(move || store.projected_block(&projected_hash))
+        .await
+        .map_err(anyhow::Error::from)
+        .and_then(|projected| projected)
+        .unwrap_or_else(|error| {
+            eprintln!("reading projected block failed: {error:#}");
+            None
+        });
+    let Some((summary, detail)) = projected else {
+        return Ok(None);
+    };
+    let detail: BlockDetailView = serde_json::from_str(&detail)
+        .map_err(|error| api_error(StatusCode::INTERNAL_SERVER_ERROR, error.to_string()))?;
+    Ok(Some(reward_breakdown(
+        &detail,
+        summary.miner_address,
+        summary.ledger_miner_address,
+    )))
+}
+
+/// The mining key of the ticket that won a carried Ledger block, known from the parent state.
+pub fn ledger_winner_public_key(
+    block: &HeartbeatBlock,
+    parent: Option<&ConsensusState>,
+) -> Option<PublicKey> {
+    let sidecar = block.sidecar.as_ref()?;
+    parent?
+        .tickets
+        .get(&sidecar.header.ticket_id)
+        .map(|ticket| ticket.mining_public_key)
+}
+
+pub fn reward_breakdown(
+    detail: &BlockDetailView,
+    miner_address: Option<String>,
+    finalizer_address: Option<String>,
+) -> BlockRewardBreakdownView {
+    let transactions = detail
+        .ledger
+        .as_ref()
+        .map_or(&[][..], |ledger| &ledger.transactions);
+    let fee_shares = |share: fn(&FeeSplitView) -> &FeeShareView| {
+        transactions.iter().map(move |transaction| {
+            let value = transaction
+                .fee_split
+                .as_ref()
+                .map_or(0, |split| share(split).value);
+            (transaction.id.as_str(), value)
+        })
+    };
+    let heartbeat = &detail.rewards.heartbeat;
+    let heartbeat_inputs = [
+        itemised_inputs(
+            "ledger_fee_share",
+            fee_shares(|split| &split.heartbeat_miner),
+            heartbeat.ledger_transaction_fees,
+        ),
+        itemised_inputs(
+            "inclusion_fee",
+            detail
+                .tickets
+                .iter()
+                .map(|ticket| (ticket.id.as_str(), ticket.fee.unwrap_or(0))),
+            heartbeat.ticket_inclusion_fees,
+        ),
+        itemised_inputs("expenditure", std::iter::empty(), heartbeat.expenditure),
+    ]
+    .concat();
+    BlockRewardBreakdownView {
+        block_hash: detail.block_hash.clone(),
+        height: detail.height,
+        heartbeat: RewardBreakdownView {
+            total: heartbeat.total,
+            owner: miner_address,
+            inputs: heartbeat_inputs,
+        },
+        ledger: detail
+            .rewards
+            .ledger
+            .as_ref()
+            .map(|ledger| RewardBreakdownView {
+                total: ledger.total,
+                owner: finalizer_address,
+                inputs: [
+                    itemised_inputs("subsidy", std::iter::empty(), ledger.subsidy),
+                    itemised_inputs(
+                        "ledger_fee_share",
+                        fee_shares(|split| &split.ledger_winner),
+                        ledger.ledger_transaction_fees,
+                    ),
+                ]
+                .concat(),
+            }),
+    }
+}
+
+/// Lists each paying item when the items add up to the committed `total`, and otherwise (for
+/// instance without the parent state that prices them) one block-wide input.
+fn itemised_inputs<'a>(
+    source: &'static str,
+    items: impl Iterator<Item = (&'a str, u64)>,
+    total: u64,
+) -> Vec<RewardInputView> {
+    let listed: Vec<_> = items.filter(|(_, value)| *value > 0).collect();
+    let sum = listed
+        .iter()
+        .try_fold(0_u64, |sum, (_, value)| sum.checked_add(*value));
+    if !listed.is_empty() && sum == Some(total) {
+        return listed
+            .into_iter()
+            .map(|(id, value)| RewardInputView {
+                source,
+                id: Some(id.to_owned()),
+                value,
+            })
+            .collect();
+    }
+    if total == 0 {
+        return Vec::new();
+    }
+    vec![RewardInputView {
+        source,
+        id: None,
+        value: total,
+    }]
 }
 
 pub fn block_detail_view(
@@ -2161,7 +2374,7 @@ fn constant_time_eq(left: &[u8; 32], right: &[u8; 32]) -> bool {
         == 0
 }
 
-fn decode_hex_32(value: &str, label: &str) -> Result<[u8; 32]> {
+pub(crate) fn decode_hex_32(value: &str, label: &str) -> Result<[u8; 32]> {
     if value.len() != 64 {
         bail!("{label} must be a 32-byte hexadecimal value");
     }
@@ -3638,6 +3851,17 @@ mod tests {
             ledger_summary["ledger_miner_public_key"],
             hex(&wallet.public_key())
         );
+        assert_eq!(
+            ledger_summary["ledger_miner_address"],
+            hex(&address_from_public_key(&wallet.public_key()))
+        );
+        assert_eq!(
+            ledger_summary["miner_address"],
+            hex(&address_from_public_key(
+                &decode_hex_32(ledger_summary["miner_public_key"].as_str().unwrap(), "key")
+                    .unwrap()
+            ))
+        );
 
         let response = router(state.clone())
             .oneshot(
@@ -3694,6 +3918,83 @@ mod tests {
             detail["rewards"]["ledger"]["subsidy"].as_u64().unwrap() + 50
         );
         assert!(detail["rewards"]["heartbeat"]["total"].as_u64().unwrap() > 0);
+
+        let rewards_path = format!("/api/public/rewards/{}", hex(&ledger_hash));
+        let get_rewards = |router: Router, path: String| async move {
+            let response = router
+                .oneshot(Request::get(path).body(Body::empty()).unwrap())
+                .await
+                .unwrap();
+            assert_eq!(response.status(), StatusCode::OK);
+            let bytes = axum::body::to_bytes(response.into_body(), usize::MAX)
+                .await
+                .unwrap();
+            serde_json::from_slice::<serde_json::Value>(&bytes).unwrap()
+        };
+        let rewards = get_rewards(public_wallet_router(state.clone()), rewards_path.clone()).await;
+        let operator_path = format!("/api/rewards/{}", hex(&ledger_hash));
+        assert_eq!(
+            get_rewards(router(state.clone()), operator_path.clone()).await,
+            rewards
+        );
+        let inputs = |side: &str| {
+            rewards[side]["inputs"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .map(|input| {
+                    format!(
+                        "{}:{}:{}",
+                        input["source"].as_str().unwrap(),
+                        input["id"].as_str().unwrap_or("-"),
+                        input["value"]
+                    )
+                })
+                .collect::<Vec<_>>()
+        };
+        let transaction_id = detail["ledger"]["transactions"][0]["id"].as_str().unwrap();
+        assert_eq!(
+            inputs("ledger"),
+            [
+                format!("subsidy:-:{}", detail["rewards"]["ledger"]["subsidy"]),
+                format!("ledger_fee_share:{transaction_id}:50"),
+            ]
+        );
+        assert_eq!(
+            inputs("heartbeat")[0],
+            format!("ledger_fee_share:{transaction_id}:50")
+        );
+        for side in ["heartbeat", "ledger"] {
+            let sum: u64 = rewards[side]["inputs"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .map(|input| input["value"].as_u64().unwrap())
+                .sum();
+            assert_eq!(rewards[side]["total"], detail["rewards"][side]["total"]);
+            assert_eq!(rewards[side]["total"].as_u64().unwrap(), sum);
+        }
+        assert_eq!(rewards["ledger"]["owner"], hex(&wallet.address()));
+        assert_eq!(
+            rewards["heartbeat"]["owner"],
+            ledger_summary["miner_address"]
+        );
+        // Without the projection the operator gets the same breakdown from the chain, while the
+        // public listener never takes the node lock.
+        state.ui_store.clear().unwrap();
+        assert_eq!(
+            get_rewards(router(state.clone()), operator_path).await,
+            rewards
+        );
+        let response = public_wallet_router(state.clone())
+            .oneshot(Request::get(rewards_path).body(Body::empty()).unwrap())
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::NOT_FOUND);
+        state
+            .ui_store
+            .project(state.node.lock().await.chain())
+            .unwrap();
 
         let response = router(state.clone())
             .oneshot(

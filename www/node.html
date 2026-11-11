@@ -180,7 +180,8 @@
     .chain-detail { min-width: 0; }
     .chain-detail .detail-kv { display: grid; grid-template-columns: 90px minmax(0, 1fr); gap: 8px; margin: 7px 0; border: 0; border-radius: 0; padding: 0; background: transparent; font-size: 13px; }
     .chain-detail .detail-kv .key { margin: 0; color: var(--muted-2); font-size: 12px; font-weight: 500; letter-spacing: 0; text-transform: none; }
-    .chain-detail .detail-kv code { overflow-wrap: anywhere; }
+    .chain-detail .detail-kv code, .chain-detail .detail-kv .contact-link, code.tx-value, .utxo-node-ref, .tx-modal-id { display: block; min-width: 0; max-width: 100%; overflow: hidden; text-align: left; text-overflow: ellipsis; white-space: nowrap; }
+    button.reward-link { justify-self: start; font-family: inherit; font-weight: 900; color: var(--text); text-underline-offset: 3px; }
     .detail-value-stack { min-width: 0; display: grid; gap: 3px; }
     .detail-value-stack .stat-value { font-size: 13px; }
     .detail-kv { min-width: 0; border: 1px solid var(--line); border-radius: 8px; padding: 10px; background: var(--panel-2); }
@@ -216,7 +217,7 @@
     .tx-modal-head { display: flex; justify-content: space-between; gap: 16px; align-items: flex-start; margin-bottom: 14px; }
     .tx-modal-title { min-width: 0; display: grid; justify-items: start; gap: 6px; }
     .tx-modal-title h2 { margin: 0; }
-    .tx-modal-id { max-width: 100%; color: #9eb3bc; font-size: 11px; overflow-wrap: anywhere; }
+    .tx-modal-id { color: #9eb3bc; font-size: 11px; }
     .tx-modal-summary { display: grid; grid-template-columns: repeat(auto-fit, minmax(180px, 1fr)); gap: 8px; margin-bottom: 12px; }
     .tx-modal-summary .tx-field { display: grid; grid-template-columns: 1fr; gap: 5px; border: 1px solid var(--line); border-radius: 8px; padding: 10px; background: var(--panel-2); }
     .utxo-flow { display: grid; grid-template-columns: minmax(0, 1fr) auto minmax(0, 1fr); gap: 12px; align-items: stretch; }
@@ -228,7 +229,7 @@
     .utxo-node.fee { border-style: dashed; }
     .utxo-node-label { display: flex; justify-content: space-between; gap: 8px; color: var(--muted-2); font-size: 11px; font-weight: 800; text-transform: uppercase; }
     .utxo-node-amount { color: var(--green); font-weight: 850; font-variant-numeric: tabular-nums; }
-    .utxo-node-ref { color: #9eb3bc; font-family: ui-monospace, monospace; font-size: 11px; overflow-wrap: anywhere; }
+    .utxo-node-ref { color: #9eb3bc; font-family: ui-monospace, monospace; font-size: 11px; }
     .utxo-arrow { display: grid; place-items: center; color: var(--green); font-size: 24px; font-weight: 900; }
     .tx-modal-empty { border: 1px dashed var(--line-strong); border-radius: 8px; padding: 10px; color: var(--muted-2); }
     .peer-table { width: 100%; border-collapse: collapse; font-size: 13px; }
@@ -419,7 +420,7 @@
               <div class="tx-scroll-list" x-show="contacts.length" style="margin-bottom:12px">
                 <template x-for="contact in contacts" :key="contact.address"><div class="activity-row"><button class="link contact-link" @click="openContactEditor(contact.address)" title="Edit contact" x-text="contact.name"></button><button class="link contact-link tx-summary-id" @click="openContactEditor(contact.address)" title="Edit contact" x-text="contact.address"></button><span class="backup-actions" style="margin:0"><button @click="useRecipient(contact.address)">Use</button><button @click="removeContact(contact.address)">Remove</button></span></div></template>
               </div>
-              <form class="form-row" @submit.prevent="addContact()"><label>Name<input x-model="contactForm.name" maxlength="40" required></label><label style="flex:3">Public key<input x-model.trim="contactForm.address" minlength="64" maxlength="64" autocomplete="off" spellcheck="false" required></label><button type="submit">Save contact</button></form>
+              <form class="form-row" @submit.prevent="addContact()"><label>Name<input x-model="contactForm.name" maxlength="40" required></label><label style="flex:3">Address<input x-model.trim="contactForm.address" minlength="64" maxlength="64" autocomplete="off" spellcheck="false" required></label><button type="submit">Save contact</button></form>
             </article>
           </div>
           <article class="panel wallet-activity-panel" x-show="status.wallet_public_key">
@@ -596,12 +597,13 @@
             <div class="chain-detail">
               <div class="detail-kv"><div class="key">Heartbeat height</div><div x-text="selectedBlock?.height"></div></div>
               <div class="detail-kv"><div class="key">Timestamp</div><div x-text="timeLabel(selectedBlock?.timestamp)"></div></div>
-              <div class="detail-kv"><div class="key">Hash</div><code x-text="selectedBlock?.block_hash"></code></div>
-              <div class="detail-kv"><div class="key">Previous</div><code x-text="selectedBlock?.parent_hash || 'Genesis'"></code></div>
-              <div class="detail-kv"><div class="key">Miner</div><code x-text="selectedBlock?.miner_public_key"></code></div>
-              <div class="detail-kv"><div class="key">Target</div><code x-text="selectedBlock?.target"></code></div>
-              <div class="detail-kv"><div class="key">Heartbeat reward</div><div class="detail-value-stack"><div class="stat-value">IUNA <span x-text="amountLabel(selectedBlockDetail?.rewards.heartbeat.total)"></span></div><div class="muted">Fees <span x-text="amountLabel(selectedBlockDetail?.rewards.heartbeat.ledger_transaction_fees)"></span> · tickets <span x-text="amountLabel(selectedBlockDetail?.rewards.heartbeat.ticket_inclusion_fees)"></span> · expenditure <span x-text="amountLabel(selectedBlockDetail?.rewards.heartbeat.expenditure)"></span></div></div></div>
-              <div class="detail-kv"><div class="key">Ledger reward</div><div class="detail-value-stack"><div class="stat-value" x-show="selectedBlockDetail?.rewards.ledger">IUNA <span x-text="amountLabel(selectedBlockDetail?.rewards.ledger?.total)"></span></div><div x-show="!selectedBlockDetail?.rewards.ledger" class="muted">No Ledger block</div><div class="muted" x-show="selectedBlockDetail?.rewards.ledger">Subsidy <span x-text="amountLabel(selectedBlockDetail?.rewards.ledger?.subsidy)"></span> · fees <span x-text="amountLabel(selectedBlockDetail?.rewards.ledger?.ledger_transaction_fees)"></span></div></div></div>
+              <div class="detail-kv"><div class="key">Hash</div><code :title="selectedBlock?.block_hash" x-text="selectedBlock?.block_hash"></code></div>
+              <div class="detail-kv"><div class="key">Previous</div><code :title="selectedBlock?.parent_hash" x-text="selectedBlock?.parent_hash || 'Genesis'"></code></div>
+              <div class="detail-kv"><div class="key">Miner</div><button class="link contact-link" type="button" @click="openContactEditor(selectedBlock?.miner_address)" :title="`Public key ${selectedBlock?.miner_public_key}\n${contactName(selectedBlock?.miner_address) ? 'Edit contact' : 'Add contact'}`" x-text="blockPartyLabel(selectedBlock?.miner_public_key, selectedBlock?.miner_address)"></button></div>
+              <div class="detail-kv" x-show="selectedBlock?.has_ledger_block"><div class="key">Finalizer</div><button class="link contact-link" type="button" x-show="selectedBlock?.ledger_miner_address" @click="openContactEditor(selectedBlock?.ledger_miner_address)" :title="`Public key ${selectedBlock?.ledger_miner_public_key}\n${contactName(selectedBlock?.ledger_miner_address) ? 'Edit contact' : 'Add contact'}`" x-text="blockPartyLabel(selectedBlock?.ledger_miner_public_key, selectedBlock?.ledger_miner_address)"></button><span class="muted" x-show="!selectedBlock?.ledger_miner_address">Unknown</span></div>
+              <div class="detail-kv"><div class="key">Target</div><code :title="selectedBlock?.target" x-text="selectedBlock?.target"></code></div>
+              <div class="detail-kv"><div class="key">Heartbeat reward</div><div class="detail-value-stack"><button class="link reward-link stat-value" type="button" @click="openBlockRewardModal('heartbeat')" title="Open reward details">IUNA <span x-text="amountLabel(selectedBlockDetail?.rewards.heartbeat.total)"></span></button><div class="muted">Fees <span x-text="amountLabel(selectedBlockDetail?.rewards.heartbeat.ledger_transaction_fees)"></span> · tickets <span x-text="amountLabel(selectedBlockDetail?.rewards.heartbeat.ticket_inclusion_fees)"></span> · expenditure <span x-text="amountLabel(selectedBlockDetail?.rewards.heartbeat.expenditure)"></span></div></div></div>
+              <div class="detail-kv"><div class="key">Ledger reward</div><div class="detail-value-stack"><button class="link reward-link stat-value" type="button" x-show="selectedBlockDetail?.rewards.ledger" @click="openBlockRewardModal('ledger')" title="Open reward details">IUNA <span x-text="amountLabel(selectedBlockDetail?.rewards.ledger?.total)"></span></button><div x-show="!selectedBlockDetail?.rewards.ledger" class="muted">No Ledger block</div><div class="muted" x-show="selectedBlockDetail?.rewards.ledger">Subsidy <span x-text="amountLabel(selectedBlockDetail?.rewards.ledger?.subsidy)"></span> · fees <span x-text="amountLabel(selectedBlockDetail?.rewards.ledger?.ledger_transaction_fees)"></span></div></div></div>
               <div class="detail-kv"><div class="key">Ticket purchases</div><div x-text="selectedBlockDetail?.tickets.length ?? 0"></div></div>
             </div>
             <div class="tx-list">
@@ -617,9 +619,9 @@
               <section class="tx-section" x-show="selectedBlockDetail?.ledger">
                 <div class="tx-section-title"><span>Ledger transactions</span><span class="tx-section-meta"><span x-text="selectedBlockDetail?.ledger?.transactions.length ?? 0"></span> included</span></div>
                 <div class="tx-fields" style="padding:0 0 10px">
-                  <div class="tx-field"><span class="tx-label">Candidate</span><code class="tx-value" x-text="selectedBlockDetail?.ledger?.candidate_hash"></code></div>
-                  <div class="tx-field"><span class="tx-label">Authorization</span><code class="tx-value" x-text="selectedBlockDetail?.ledger?.deadline_fallback ? 'Unsigned deadline fallback' : selectedBlockDetail?.ledger?.candidate_signature"></code></div>
-                  <div class="tx-field"><span class="tx-label">Winning ticket</span><code class="tx-value" x-text="selectedBlockDetail?.ledger?.winning_ticket_id"></code></div>
+                  <div class="tx-field"><span class="tx-label">Candidate</span><code class="tx-value" :title="selectedBlockDetail?.ledger?.candidate_hash" x-text="selectedBlockDetail?.ledger?.candidate_hash"></code></div>
+                  <div class="tx-field"><span class="tx-label">Authorization</span><code class="tx-value" :title="selectedBlockDetail?.ledger?.candidate_signature" x-text="selectedBlockDetail?.ledger?.deadline_fallback ? 'Unsigned deadline fallback' : selectedBlockDetail?.ledger?.candidate_signature"></code></div>
+                  <div class="tx-field"><span class="tx-label">Winning ticket</span><code class="tx-value" :title="selectedBlockDetail?.ledger?.winning_ticket_id" x-text="selectedBlockDetail?.ledger?.winning_ticket_id"></code></div>
                   <div class="tx-field"><span class="tx-label">Lottery</span><span class="tx-value">Heartbeat #<span x-text="selectedBlockDetail?.ledger?.lottery_height"></span> · slot <span x-text="selectedBlockDetail?.ledger?.slot"></span></span></div>
                 </div>
                 <div class="tx-scroll-list" x-show="selectedBlockDetail?.ledger?.transactions.length">
@@ -722,7 +724,7 @@
         <div class="tx-modal-title">
           <span class="pill" x-text="selectedTransaction?.item?.kind"></span>
           <h2 id="transaction-modal-title" x-text="selectedTransaction?.item?.kind || 'Transaction details'"></h2>
-          <code class="tx-modal-id" x-text="selectedTransaction?.item?.id || '-'"></code>
+          <code class="tx-modal-id" :title="selectedTransaction?.item?.id" x-text="selectedTransaction?.item?.id || '-'"></code>
         </div>
         <button type="button" @click="closeTransactionModal()">Close</button>
       </div>
@@ -731,23 +733,24 @@
         <div class="tx-field" x-show="!selectedTransaction?.item?.reward"><span class="tx-label">Version</span><span class="tx-value" x-text="selectedTransaction?.item?.version ?? '-'"></span></div>
         <div class="tx-field"><span class="tx-label" x-text="selectedTransaction?.item?.kind === 'Mining ticket' ? 'Budget' : 'Output total'"></span><span class="tx-value money">IUNA <span x-text="amountLabel(selectedTransaction?.item?.amount)"></span></span></div>
         <div class="tx-field" x-show="!selectedTransaction?.item?.reward"><span class="tx-label">Fee</span><span class="tx-value money" x-text="selectedTransaction?.item?.fee == null ? 'Unavailable' : `IUNA ${amountLabel(selectedTransaction.item.fee)}`"></span></div>
-        <div class="tx-field" x-show="!selectedTransaction?.item?.reward"><span class="tx-label">Total in</span><span class="tx-value money" x-text="transactionModalTotals().in == null ? 'Unavailable' : `IUNA ${amountLabel(transactionModalTotals().in)}`"></span></div>
+        <div class="tx-field"><span class="tx-label">Total in</span><span class="tx-value money" x-text="transactionModalTotals().in == null ? 'Unavailable' : `IUNA ${amountLabel(transactionModalTotals().in)}`"></span></div>
         <div class="tx-field"><span class="tx-label">Total out</span><span class="tx-value money" x-text="transactionModalTotals().out == null ? 'Unavailable' : `IUNA ${amountLabel(transactionModalTotals().out)}`"></span></div>
         <div class="tx-field" x-show="selectedTransaction?.item?.kind === 'Mining ticket'"><span class="tx-label">Lottery duration</span><span class="tx-value"><span x-text="selectedTransaction?.item?.duration"></span> Heartbeats</span></div>
         <div class="tx-field" x-show="selectedTransaction?.item?.kind === 'Mining ticket'"><span class="tx-label">Budget payout</span><span class="tx-value"><span x-text="selectedTransaction?.item?.lifecycle_heartbeats"></span> Heartbeats</span></div>
-        <div class="tx-field" x-show="selectedTransaction?.item?.kind === 'Mining ticket'"><span class="tx-label">Mining public key</span><code class="tx-value" x-text="selectedTransaction?.item?.mining_public_key"></code></div>
-        <div class="tx-field" x-show="selectedTransaction?.item?.kind === 'Mining ticket'"><span class="tx-label">Lottery seed</span><code class="tx-value" x-text="selectedTransaction?.item?.lottery_seed"></code></div>
+        <div class="tx-field" x-show="selectedTransaction?.item?.kind === 'Mining ticket'"><span class="tx-label">Mining public key</span><code class="tx-value" :title="selectedTransaction?.item?.mining_public_key" x-text="selectedTransaction?.item?.mining_public_key"></code></div>
+        <div class="tx-field" x-show="selectedTransaction?.item?.kind === 'Mining ticket'"><span class="tx-label">Lottery seed</span><code class="tx-value" :title="selectedTransaction?.item?.lottery_seed" x-text="selectedTransaction?.item?.lottery_seed"></code></div>
       </div>
       <div class="utxo-flow">
         <div class="utxo-column">
           <h3>Inputs</h3>
-          <template x-for="(input, index) in transactionModalInputs()" :key="`${input.transaction_id}:${input.output_index}`">
-            <div class="utxo-node">
-              <div class="utxo-node-label"><span>Input <span x-text="index + 1"></span></span><span>spent</span></div>
-              <code class="utxo-node-ref" x-text="`${input.transaction_id}:${input.output_index}`"></code>
+          <template x-for="(input, index) in transactionModalInputs()" :key="input.key || `${input.transaction_id}:${input.output_index}`">
+            <div class="utxo-node" :class="{fee: input.label}">
+              <div class="utxo-node-label"><span x-text="input.label || `Input ${index + 1}`"></span><span x-text="input.label ? 'collected' : 'spent'"></span></div>
+              <code class="utxo-node-ref" x-show="input.ref || input.transaction_id" :title="input.ref || `${input.transaction_id}:${input.output_index}`" x-text="input.ref || `${input.transaction_id}:${input.output_index}`"></code>
               <div class="tx-field" x-show="input.value != null"><span class="tx-label">Value</span><span class="tx-value money">IUNA <span x-text="amountLabel(input.value)"></span></span></div>
-              <div class="tx-field"><span class="tx-label">Public key</span><code class="tx-value" x-text="input.public_key"></code></div>
-              <div class="tx-field"><span class="tx-label">Signature</span><code class="tx-value" x-text="input.signature"></code></div>
+              <div class="tx-field" x-show="input.public_key"><span class="tx-label">Public key</span><code class="tx-value" :title="input.public_key" x-text="input.public_key"></code></div>
+              <div class="tx-field" x-show="input.signature"><span class="tx-label">Signature</span><code class="tx-value" :title="input.signature" x-text="input.signature"></code></div>
+              <div class="muted" x-show="input.note" x-text="input.note"></div>
             </div>
           </template>
           <div class="tx-modal-empty" x-show="selectedTransaction?.loading">Loading…</div>
@@ -761,7 +764,7 @@
             <div class="utxo-node" :class="output.kind">
               <div class="utxo-node-label"><span x-text="output.label"></span><span x-text="output.status || output.kind"></span></div>
               <div class="utxo-node-amount">IUNA <span x-text="amountLabel(output.value)"></span></div>
-              <div class="tx-field" x-show="output.owner"><span class="tx-label">Owner</span><code class="tx-value" x-text="output.owner"></code></div>
+              <div class="tx-field" x-show="output.owner"><span class="tx-label">Owner</span><code class="tx-value" :title="output.owner" x-text="output.owner"></code></div>
               <div class="muted" x-show="output.note" x-text="output.note"></div>
             </div>
           </template>
@@ -790,7 +793,7 @@
       <div class="panel-head"><div><div class="setup-kicker">Contact</div><h1 id="contact-editor-title" x-text="contactEditingAddress ? 'Edit contact' : 'Add contact'"></h1></div><button type="button" @click="closeContactEditor()">Close</button></div>
       <form @submit.prevent="saveContactEditor()" style="display:grid;gap:12px">
         <label>Name<input x-ref="contactName" x-model="contactForm.name" maxlength="40" autocomplete="off" required></label>
-        <label>Public key<input x-model="contactForm.address" readonly></label>
+        <label>Address<input x-model="contactForm.address" readonly></label>
         <div class="setup-actions"><button class="utxo-details-button" type="button" x-show="contactEditingAddress" @click="removeContact(contactEditingAddress)">Remove contact</button><button type="button" @click="closeContactEditor()">Cancel</button><button class="primary" type="submit">Save contact</button></div>
       </form>
     </section>

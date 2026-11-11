@@ -3,6 +3,13 @@ const IUNA_RELEASE_METADATA_URL = "https://getiuna.org/downloads/latest.json";
 const IUNA_RELEASE_CHECK_INTERVAL_MS = 30 * 60 * 1000;
 const IUNA_CHART_MAX_POINTS = 300;
 const iunaChartCaches = new WeakMap();
+// The node names the parts a reward collects; a note explains a block-wide amount.
+const IUNA_REWARD_INPUTS = {
+  ledger_fee_share: { label: "Ledger fee share", note: "Share of this block's Ledger transaction fees." },
+  inclusion_fee: { label: "Inclusion fee", note: "Fees of the tickets included in this Heartbeat." },
+  expenditure: { label: "Ticket expenditure", note: "Budget slices paid out by active mining tickets in this Heartbeat." },
+  subsidy: { label: "Subsidy", note: "Newly minted by this Ledger block." },
+};
 
 window.iunaApp = function iunaApp() {
   return {
@@ -1221,6 +1228,14 @@ window.iunaApp = function iunaApp() {
       return `${key.slice(-8)}${mine ? " (me)" : ""}`;
     },
 
+    // Blocks name miners by public key, but rewards pay, and contacts store, the address.
+    blockPartyLabel(publicKey, address) {
+      if (!/^[0-9a-f]{64}$/.test(String(address || ""))) return "-";
+      const mine = String(publicKey || "").toLowerCase() === String(this.status.wallet_public_key || "").toLowerCase();
+      const name = this.contactName(address) || (mine ? "Me" : "");
+      return name ? `${name} · ${address}` : address;
+    },
+
     mempoolItems() {
       return [
         ...(this.mempool?.ledger_transactions || []).map((item) => ({
@@ -1281,6 +1296,52 @@ window.iunaApp = function iunaApp() {
       }, this.selectedBlockSource());
     },
 
+    // The link shows the loaded detail, and `selectedBlock` can already point at a newer head.
+    openBlockRewardModal(kind) {
+      const detail = this.selectedBlockDetail;
+      if (!detail) return;
+      return this.openRewardModal(detail.block_hash, kind, detail.rewards?.[kind]?.total, this.selectedBlockSource());
+    },
+
+    // A reward has no transaction of its own: the node lists the fees and payouts it collects.
+    async openRewardModal(blockHash, kind, amount, source) {
+      const label = kind === "heartbeat" ? "Heartbeat reward" : "Ledger reward";
+      this.openTransactionModal({ id: blockHash, kind: label, amount, reward: true }, source);
+      this.selectedTransaction = { ...this.selectedTransaction, loading: true };
+      const stillSelected = () => this.selectedTransaction?.item?.id === blockHash
+        && this.selectedTransaction?.item?.kind === label;
+      let item = null;
+      try {
+        item = this.rewardItem(await this.getJson(`/api/rewards/${blockHash}`), kind);
+      } catch {
+        item = null;
+      }
+      if (!stillSelected()) return;
+      this.selectedTransaction = item
+        ? { ...this.selectedTransaction, item, loading: false }
+        : { ...this.selectedTransaction, loading: false, detailMissing: true };
+    },
+
+    rewardItem(breakdown, kind) {
+      const reward = breakdown?.[kind];
+      if (!reward) return null;
+      const label = kind === "heartbeat" ? "Heartbeat reward" : "Ledger reward";
+      return {
+        id: breakdown.block_hash,
+        kind: label,
+        amount: reward.total,
+        reward: true,
+        inputs: reward.inputs.map((input, index) => ({
+          label: IUNA_REWARD_INPUTS[input.source]?.label || input.source,
+          note: input.id ? "" : IUNA_REWARD_INPUTS[input.source]?.note,
+          ref: input.id,
+          value: input.value,
+          key: `${input.source}:${input.id ?? index}`,
+        })),
+        outputs: [{ label, kind: "output", owner: reward.owner, value: reward.total }],
+      };
+    },
+
     openBlockTransactionModal(transaction) {
       this.openTransactionModal({
         ...transaction,
@@ -1289,11 +1350,24 @@ window.iunaApp = function iunaApp() {
       }, this.selectedBlockSource());
     },
 
-    // An activity row only holds a summary. Rewards have no transaction, so they show as is.
+    // The block detail at a height, or null when it is unavailable.
+    async heartbeatDetailAt(height) {
+      try {
+        const [summary] = await this.getJson(`/api/heartbeats?limit=1&before_height=${Number(height) + 1}`);
+        if (Number(summary?.height) !== Number(height)) return null;
+        return await this.getJson(`/api/blocks/${summary.block_hash}`);
+      } catch {
+        return null;
+      }
+    },
+
+    // An activity row only holds a summary; the modal loads its block for the details.
     async openActivityModal(activity) {
       const { id, amount, heartbeat_height: height } = activity;
-      if (activity.kind === "heartbeat_reward" || activity.kind === "ledger_reward") {
-        this.openTransactionModal({ id, amount, kind: this.activityLabel(activity), reward: true }, `Heartbeat ${height}`);
+      // A reward's ID is the hash of the block that paid it.
+      const rewardKind = { heartbeat_reward: "heartbeat", ledger_reward: "ledger" }[activity.kind];
+      if (rewardKind) {
+        await this.openRewardModal(id, rewardKind, amount, `Heartbeat ${height}`);
         return;
       }
       const isTicket = activity.kind === "ticket";
@@ -1305,24 +1379,13 @@ window.iunaApp = function iunaApp() {
       this.openTransactionModal({ id, kind, amount }, `Heartbeat ${height}`);
       this.selectedTransaction = { ...this.selectedTransaction, loading: true };
       const stillSelected = () => this.selectedTransaction?.item?.id === id;
-      let found = null;
-      try {
-        const [heartbeat] = await this.getJson(`/api/heartbeats?limit=1&before_height=${Number(height) + 1}`);
-        if (Number(heartbeat?.height) === Number(height)) {
-          const block = await this.getJson(`/api/blocks/${heartbeat.block_hash}`);
-          const candidates = isTicket ? block.tickets : block.ledger?.transactions;
-          found = candidates?.find((candidate) => candidate.id === id) || null;
-        }
-      } catch {
-        found = null;
-      }
+      const detail = await this.heartbeatDetailAt(height);
+      const candidates = isTicket ? detail?.tickets : detail?.ledger?.transactions;
+      const found = candidates?.find((candidate) => candidate.id === id);
+      const item = found ? { ...found, kind, amount: isTicket ? found.budget : found.total_output } : null;
       if (!stillSelected()) return;
-      this.selectedTransaction = found
-        ? {
-          ...this.selectedTransaction,
-          item: { ...found, kind, amount: isTicket ? found.budget : found.total_output },
-          loading: false,
-        }
+      this.selectedTransaction = item
+        ? { ...this.selectedTransaction, item, loading: false }
         : { ...this.selectedTransaction, loading: false, detailMissing: true };
     },
 
@@ -1385,9 +1448,7 @@ window.iunaApp = function iunaApp() {
     transactionModalOutputs() {
       const item = this.selectedTransaction?.item;
       if (!item) return [];
-      if (item.reward) {
-        return [{ label: item.kind, kind: "output", owner: this.status.wallet_public_key, value: item.amount }];
-      }
+      if (item.reward) return item.outputs || [];
       // An activity summary has no ticket terms until its detail loads.
       if (item.kind === "Mining ticket" && item.lifecycle_heartbeats == null) return [];
       if (item.kind === "Ledger transaction") {

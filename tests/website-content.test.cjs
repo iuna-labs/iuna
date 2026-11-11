@@ -1263,14 +1263,12 @@ test('activity rows open the shared transaction modal with loaded details', asyn
   assert.equal(app.transactionModalOutputs().length, 0);
 
   requests.length = 0;
-  app.status = { wallet_public_key: 'me' };
   await app.openActivityModal({ kind: 'ledger_reward', id: 'hash', heartbeat_height: 7, amount: 9 });
-  assert.equal(requests.length, 0);
+  assert.equal(requests.join(','), '/api/rewards/hash');
+  assert.equal(app.selectedTransaction.source, 'Heartbeat 7');
   assert.equal(app.selectedTransaction.item.kind, 'Ledger reward');
-  assert.equal(
-    app.transactionModalOutputs().map((output) => `${output.label}:${output.owner}:${output.value}`).join(','),
-    'Ledger reward:me:9',
-  );
+  assert.equal(app.selectedTransaction.detailMissing, true);
+  assert.equal(app.transactionModalOutputs().length, 0);
 
   const html = content('www/node.html');
   assert.match(html, /class="activity-card"[^>]*@click="openActivityModal\(item\)"/);
@@ -1307,4 +1305,74 @@ test('browser wallet talks to its own origin when hosted and to the local node o
   assert.equal(core.defaultApiEndpoint({ hostname: 'wallet.getiuna.org', origin: 'https://wallet.getiuna.org' }), 'https://wallet.getiuna.org');
   assert.equal(core.defaultApiEndpoint({ hostname: '127.0.0.1', origin: 'http://127.0.0.1:8080' }), 'http://127.0.0.1:18662');
   assert.equal(core.defaultApiEndpoint({ hostname: 'localhost', origin: 'http://localhost:18200' }), 'http://127.0.0.1:18662');
+});
+
+test('block rewards open the shared transaction modal with fees as inputs', async () => {
+  const { app } = nodeApp();
+  const requests = [];
+  const breakdown = {
+    block_hash: 'hash',
+    height: 7,
+    heartbeat: {
+      total: 9,
+      owner: 'miner-address',
+      inputs: [
+        { source: 'ledger_fee_share', id: 'x1', value: 2 },
+        { source: 'inclusion_fee', id: 'ta', value: 2 },
+        { source: 'expenditure', id: null, value: 5 },
+      ],
+    },
+    ledger: { total: 55, owner: 'finalizer-address', inputs: [{ source: 'subsidy', id: null, value: 50 }, { source: 'ledger_fee_share', id: 'x1', value: 5 }] },
+  };
+  app.getJson = async (url) => {
+    requests.push(url);
+    if (url === '/api/rewards/hash') return breakdown;
+    throw new Error(`unexpected ${url}`);
+  };
+  // A newer head can already be selected while the loaded detail still shows block 7.
+  app.selectedBlock = { height: 8, block_hash: 'newer' };
+  app.selectedBlockDetail = { block_hash: 'hash', height: 7, rewards: { heartbeat: { total: 9 }, ledger: { total: 55 } } };
+
+  await app.openBlockRewardModal('heartbeat');
+  assert.equal(requests.join(','), '/api/rewards/hash');
+  assert.equal(app.selectedTransaction.source, 'Heartbeat 7');
+  assert.equal(app.selectedTransaction.item.kind, 'Heartbeat reward');
+  assert.equal(
+    app.transactionModalInputs().map((input) => `${input.label}:${input.ref ?? '-'}:${input.value}`).join(','),
+    'Ledger fee share:x1:2,Inclusion fee:ta:2,Ticket expenditure:-:5',
+  );
+  // Only a block-wide amount needs a note; an itemised input names its transaction.
+  assert.equal(app.transactionModalInputs()[0].note, '');
+  assert.match(app.transactionModalInputs()[2].note, /active mining tickets/);
+  assert.equal(
+    app.transactionModalOutputs().map((output) => `${output.label}:${output.owner}:${output.value}`).join(','),
+    'Heartbeat reward:miner-address:9',
+  );
+  assert.equal(JSON.stringify(app.transactionModalTotals()), '{"in":9,"out":9,"balanced":true}');
+
+  await app.openBlockRewardModal('ledger');
+  assert.equal(
+    app.transactionModalInputs().map((input) => `${input.label}:${input.ref ?? '-'}:${input.value}`).join(','),
+    'Subsidy:-:50,Ledger fee share:x1:5',
+  );
+  assert.equal(app.transactionModalOutputs()[0].owner, 'finalizer-address');
+
+  breakdown.ledger = null;
+  await app.openBlockRewardModal('ledger');
+  assert.equal(app.selectedTransaction.detailMissing, true);
+
+  // Miner and Finalizer show the paid address, which contacts store, not the public key.
+  app.status = { wallet_public_key: 'aa'.repeat(32) };
+  app.contacts = [{ name: 'Alice', address: 'cc'.repeat(32) }];
+  assert.equal(app.blockPartyLabel('bb'.repeat(32), 'dd'.repeat(32)), 'dd'.repeat(32));
+  assert.equal(app.blockPartyLabel('bb'.repeat(32), 'cc'.repeat(32)), `Alice · ${'cc'.repeat(32)}`);
+  assert.equal(app.blockPartyLabel('aa'.repeat(32), 'ee'.repeat(32)), `Me · ${'ee'.repeat(32)}`);
+  assert.equal(app.blockPartyLabel('aa'.repeat(32), null), '-');
+
+  const html = content('www/node.html');
+  assert.match(html, /@click="openBlockRewardModal\('heartbeat'\)"/);
+  assert.match(html, /@click="openBlockRewardModal\('ledger'\)"/);
+  assert.match(html, /<div class="key">Finalizer<\/div>/);
+  assert.match(html, /@click="openContactEditor\(selectedBlock\?\.miner_address\)"/);
+  assert.match(html, /@click="openContactEditor\(selectedBlock\?\.ledger_miner_address\)"/);
 });

@@ -231,6 +231,12 @@ async function discoverWalletView(endpoint, wallet) {
   };
 }
 
+// A reward has no transaction of its own: the node lists the fees and payouts it collects.
+export async function fetchBlockRewards(endpoint, blockHash) {
+  if (!/^[0-9a-f]{64}$/.test(blockHash)) throw new Error("Unknown block");
+  return requestJson(`${endpoint}/api/public/rewards/${blockHash}`);
+}
+
 export async function submitTransaction(endpoint, transaction) {
   return requestJson(`${endpoint}/api/public/transactions`, {
     method: "POST",

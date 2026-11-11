@@ -14,8 +14,8 @@ use rusqlite::{Connection, OptionalExtension, Transaction, params};
 use serde::{Deserialize, Serialize};
 
 use crate::{
-    adapters::consensus_http::block_detail_view,
-    consensus::{Chain, Hash, block_payouts},
+    adapters::consensus_http::{block_detail_view, decode_hex_32, ledger_winner_public_key},
+    consensus::{Chain, Hash, address_from_public_key, block_payouts},
 };
 
 const SCHEMA: &str = r#"
@@ -100,8 +100,14 @@ pub struct UiHeartbeat {
     pub parent_hash: Option<String>,
     pub timestamp: u64,
     pub miner_public_key: String,
+    /// The address paid by the Heartbeat reward, derived from `miner_public_key` when read.
+    #[serde(default)]
+    pub miner_address: Option<String>,
     /// The winning ticket's mining key, for Heartbeats carrying a Ledger block.
     pub ledger_miner_public_key: Option<String>,
+    /// The address paid by the Ledger reward, derived from `ledger_miner_public_key` when read.
+    #[serde(default)]
+    pub ledger_miner_address: Option<String>,
     pub target: String,
     pub ticket_count: usize,
     pub has_ledger_block: bool,
@@ -162,6 +168,35 @@ impl ConsensusUiStore {
         })
     }
 
+    /// The summary and stored detail of one projected Heartbeat.
+    pub fn projected_block(&self, block_hash: &str) -> Result<Option<(UiHeartbeat, String)>> {
+        self.with_connection(|connection| {
+            let summary = connection
+                .query_row(
+                    &format!(
+                        "SELECT {HEARTBEAT_SUMMARY_COLUMNS} FROM consensus_ui_heartbeats \
+                         WHERE block_hash = ?1"
+                    ),
+                    [block_hash],
+                    decode_heartbeat,
+                )
+                .optional()
+                .context("reading Heartbeat summary")?;
+            let Some(summary) = summary else {
+                return Ok(None);
+            };
+            let detail: Option<String> = connection
+                .query_row(
+                    "SELECT detail_json FROM consensus_ui_block_details WHERE block_hash = ?1",
+                    [block_hash],
+                    |row| row.get(0),
+                )
+                .optional()
+                .context("reading block detail")?;
+            Ok(detail.map(|detail| (summary, detail)))
+        })
+    }
+
     /// The serialized `BlockDetailView` of a projected block.
     pub fn block_detail(&self, block_hash: &str) -> Result<Option<String>> {
         self.with_connection(|connection| {
@@ -206,15 +241,11 @@ impl ConsensusUiStore {
     ) -> Result<Vec<UiHeartbeat>> {
         self.with_connection(|connection| {
             let mut statement = connection
-                .prepare(
-                    "SELECT height, block_hash, parent_hash, timestamp, miner_public_key, target, \
-                     ticket_count, has_ledger_block, ledger_transaction_count \
-                     , ticket_budget, heartbeat_bytes, chain_bytes, interval_seconds, minted, \
-                     utxos, tracked_tickets, ledger_blocks, active_tickets, ticket_weight, ledger_miner_public_key \
-                     FROM consensus_ui_heartbeats \
-                     WHERE (?2 IS NULL OR height < ?2) \
-                     ORDER BY height DESC LIMIT ?1",
-                )
+                .prepare(&format!(
+                    "SELECT {HEARTBEAT_SUMMARY_COLUMNS} FROM consensus_ui_heartbeats \
+                         WHERE (?2 IS NULL OR height < ?2) \
+                         ORDER BY height DESC LIMIT ?1"
+                ))
                 .context("preparing heartbeat query")?;
             statement
                 .query_map(
@@ -297,16 +328,12 @@ impl ConsensusUiStore {
             } else {
                 1
             };
-            let mut statement = connection.prepare(
-                "SELECT height, block_hash, parent_hash, timestamp, miner_public_key, target, \
-                 ticket_count, has_ledger_block, ledger_transaction_count, ticket_budget, \
-                 heartbeat_bytes, chain_bytes, interval_seconds, minted, utxos, tracked_tickets, \
-                 ledger_blocks, active_tickets, ticket_weight, ledger_miner_public_key \
-                 FROM consensus_ui_heartbeats \
-                 WHERE height % ?2 = 0 \
-                 OR height = (SELECT MAX(height) FROM consensus_ui_heartbeats) \
-                 ORDER BY height DESC LIMIT ?1",
-            )?;
+            let mut statement = connection.prepare(&format!(
+                "SELECT {HEARTBEAT_SUMMARY_COLUMNS} FROM consensus_ui_heartbeats \
+                     WHERE height % ?2 = 0 \
+                     OR height = (SELECT MAX(height) FROM consensus_ui_heartbeats) \
+                     ORDER BY height DESC LIMIT ?1"
+            ))?;
             statement
                 .query_map(params![limit, step], decode_heartbeat)?
                 .collect::<rusqlite::Result<Vec<_>>>()
@@ -404,12 +431,8 @@ fn prepare_projection(transaction: &Transaction<'_>, chain: &Chain) -> Result<Pr
             None => chain.state(&block.hash()),
         }
         .with_context(|| format!("reading state for Heartbeat {height}"))?;
-        let ledger_miner_public_key = block
-            .sidecar
-            .as_ref()
-            .zip(parent.as_ref())
-            .and_then(|(sidecar, parent)| parent.tickets.get(&sidecar.header.ticket_id))
-            .map(|ticket| hex(&ticket.mining_public_key));
+        let ledger_miner_public_key =
+            ledger_winner_public_key(block, parent.as_deref()).map(|key| hex(&key));
         let payouts = parent
             .as_ref()
             .map(|parent| block_payouts(parent, block))
@@ -590,14 +613,24 @@ fn projection_common_height(transaction: &Transaction<'_>, chain: &Chain) -> Res
     Ok(None)
 }
 
+/// The columns `decode_heartbeat` reads, in its order.
+const HEARTBEAT_SUMMARY_COLUMNS: &str = "height, block_hash, parent_hash, timestamp, \
+    miner_public_key, target, ticket_count, has_ledger_block, ledger_transaction_count, \
+    ticket_budget, heartbeat_bytes, chain_bytes, interval_seconds, minted, utxos, \
+    tracked_tickets, ledger_blocks, active_tickets, ticket_weight, ledger_miner_public_key";
+
 fn decode_heartbeat(row: &rusqlite::Row<'_>) -> rusqlite::Result<UiHeartbeat> {
+    let miner_public_key: String = row.get(4)?;
+    let ledger_miner_public_key: Option<String> = row.get(19)?;
     Ok(UiHeartbeat {
         height: row.get(0)?,
         block_hash: row.get(1)?,
         parent_hash: row.get(2)?,
         timestamp: row.get(3)?,
-        miner_public_key: row.get(4)?,
-        ledger_miner_public_key: row.get(19)?,
+        miner_address: address_hex(&miner_public_key),
+        miner_public_key,
+        ledger_miner_address: ledger_miner_public_key.as_deref().and_then(address_hex),
+        ledger_miner_public_key,
         target: row.get(5)?,
         ticket_count: row.get(6)?,
         has_ledger_block: row.get::<_, i64>(7)? != 0,
@@ -613,6 +646,13 @@ fn decode_heartbeat(row: &rusqlite::Row<'_>) -> rusqlite::Result<UiHeartbeat> {
         active_tickets: row.get(17)?,
         ticket_weight: row.get(18)?,
     })
+}
+
+/// Contacts and outputs use addresses, while blocks name miners by public key.
+fn address_hex(public_key: &str) -> Option<String> {
+    decode_hex_32(public_key, "public key")
+        .ok()
+        .map(|key| hex(&address_from_public_key(&key)))
 }
 
 fn active_ticket_metrics(

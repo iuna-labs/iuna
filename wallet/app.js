@@ -1,11 +1,12 @@
 import { generateMnemonic, mnemonicEntropy, validateMnemonic } from "./mnemonic.js";
 import {
-  apiEndpoint, buildSignedTransaction, decryptWallet, defaultApiEndpoint, encryptWallet, fetchWalletView,
-  fetchWalletActivity, formatIuna, parseIuna, submitTransaction, walletFromEntropy,
+  apiEndpoint, buildSignedTransaction, decryptWallet, defaultApiEndpoint, encryptWallet, fetchBlockRewards,
+  fetchWalletView, fetchWalletActivity, formatIuna, parseIuna, submitTransaction, walletFromEntropy,
 } from "./wallet-core.js";
 
 const app = document.querySelector("#app");
 const toastElement = document.querySelector("#toast");
+const modalElement = document.querySelector("#modal");
 const WALLETS_KEY = "iunaWallets";
 const LEGACY_WALLET_KEY = "iunaEd25519Wallet";
 const ENDPOINT_KEY = "iunaWalletApi";
@@ -28,6 +29,8 @@ let activityPageDepth = 1;
 // After a failed page load, automatic loading pauses until the next poll.
 let activityRetryAt = 0;
 let activityObserver = null;
+// The open reward modal: { kind, hash, height, amount, breakdown, failed }.
+let rewardModal = null;
 const activityFilters = { transfers: true, tickets: true, heartbeatRewards: true, ledgerRewards: true };
 
 // Storage: { selected: publicKey, wallets: [{ name, record }] }, each record encrypted on its own.
@@ -161,10 +164,71 @@ function activityRows() {
       row.heartbeat_height == null ? "" : `Heartbeat #${row.heartbeat_height}`,
       row.timestamp == null ? "" : timeLabel(row.timestamp),
     ].filter(Boolean).join(" · ") || "Confirmed";
-    return `<div class="activity-row${row.pending ? " pending" : ""}"><span class="pill activity-code ${type}" title="${escape(label)}" aria-hidden="true">${ACTIVITY_CODES[type]}</span><div class="activity-copy"><div class="activity-title">${escape(label)}</div><div class="activity-meta">${escape(meta)}</div></div><b class="${incoming ? "incoming" : ""}">${incoming ? "+" : "−"} ${escape(formatIuna(row.amount))} IUNA</b></div>`;
+    const content = `<span class="pill activity-code ${type}" title="${escape(label)}" aria-hidden="true">${ACTIVITY_CODES[type]}</span><div class="activity-copy"><div class="activity-title">${escape(label)}</div><div class="activity-meta">${escape(meta)}</div></div><b class="${incoming ? "incoming" : ""}">${incoming ? "+" : "−"} ${escape(formatIuna(row.amount))} IUNA</b>`;
+    // A reward's ID is the hash of the block that paid it.
+    const rewardKind = REWARD_KINDS[row.kind];
+    if (rewardKind) return `<button class="activity-row" data-action="reward" data-kind="${rewardKind}" data-hash="${escape(row.id)}" data-height="${escape(row.heartbeat_height ?? "")}" data-amount="${escape(row.amount)}" title="Open reward details">${content}</button>`;
+    return `<div class="activity-row${row.pending ? " pending" : ""}">${content}</div>`;
   }).join("");
   const more = view?.activity?.next_before_height == null ? "" : `<div class="activity-more" data-field="activity-more" role="status" aria-label="Loading older activity"><span class="spinner" aria-hidden="true"></span></div>`;
   return `${list ? `<div class="activity">${list}</div>` : ""}${more}`;
+}
+
+const REWARD_KINDS = { heartbeat_reward: "heartbeat", ledger_reward: "ledger" };
+// Same names and notes as the node app; a note explains a block-wide amount.
+const REWARD_INPUTS = {
+  ledger_fee_share: { label: "Ledger fee share", note: "Share of this block's Ledger transaction fees." },
+  inclusion_fee: { label: "Inclusion fee", note: "Fees of the tickets included in this Heartbeat." },
+  expenditure: { label: "Ticket expenditure", note: "Budget slices paid out by active mining tickets in this Heartbeat." },
+  subsidy: { label: "Subsidy", note: "Newly minted by this Ledger block." },
+};
+
+function rewardModalHtml({ kind, hash, height, amount, breakdown, failed }) {
+  const label = kind === "heartbeat" ? "Heartbeat reward" : "Ledger reward";
+  const reward = breakdown?.[kind];
+  const empty = (text) => `<div class="flow-empty">${text}</div>`;
+  const pending = failed ? empty("Details unavailable") : empty("Loading…");
+  const inputs = reward ? (reward.inputs.map((input) => {
+    const known = REWARD_INPUTS[input.source] || { label: input.source };
+    const reference = input.id ? `<code class="truncate" title="${escape(input.id)}">${escape(input.id)}</code>` : "";
+    const note = input.id || !known.note ? "" : `<p class="muted">${escape(known.note)}</p>`;
+    return `<div class="flow-node fee"><div class="flow-label"><span>${escape(known.label)}</span><span>collected</span></div>${reference}<div class="flow-amount">${escape(formatIuna(input.value))} IUNA</div>${note}</div>`;
+  }).join("") || empty("No inputs")) : pending;
+  const mine = reward?.owner && view?.activity_addresses?.includes(reward.owner);
+  const owner = reward?.owner ? `<span class="label">Owner${mine ? " · this wallet" : ""}</span><code class="truncate" title="${escape(reward.owner)}">${escape(reward.owner)}</code>` : "";
+  const outputs = reward ? `<div class="flow-node"><div class="flow-label"><span>${label}</span><span>output</span></div><div class="flow-amount">${escape(formatIuna(reward.total))} IUNA</div>${owner}</div>` : pending;
+  const totalIn = reward ? `${formatIuna(reward.inputs.reduce((sum, input) => sum + Number(input.value), 0))} IUNA` : "…";
+  const totalOut = `${formatIuna(reward?.total ?? amount)} IUNA`;
+  return `<div class="modal-backdrop" data-action="close-modal"><section class="modal" role="dialog" aria-modal="true" aria-labelledby="modal-title" tabindex="-1"><div class="modal-head"><div class="modal-title"><span class="pill">${label}</span><h2 id="modal-title">${label}</h2><code class="truncate" title="${escape(hash)}">${escape(hash)}</code></div><button data-action="close-modal">Close</button></div><div class="stats"><div class="stat"><span>Source</span><strong>Heartbeat ${escape(height || "—")}</strong></div><div class="stat"><span>Total in</span><strong>${escape(totalIn)}</strong></div><div class="stat"><span>Total out</span><strong>${escape(totalOut)}</strong></div></div><div class="flow"><div class="flow-column"><h3>Inputs</h3>${inputs}</div><div class="flow-arrow" aria-hidden="true">&rarr;</div><div class="flow-column"><h3>Outputs</h3>${outputs}</div></div></section></div>`;
+}
+
+// Re-rendering replaces the dialog, so focus moves to the new one.
+function renderRewardModal() {
+  modalElement.innerHTML = rewardModal ? rewardModalHtml(rewardModal) : "";
+  modalElement.querySelector(".modal")?.focus();
+}
+
+async function openRewardModal({ kind, hash, height, amount }) {
+  const opened = { kind, hash, height, amount, breakdown: null, failed: false };
+  rewardModal = opened;
+  renderRewardModal();
+  try {
+    opened.breakdown = await fetchBlockRewards(apiEndpoint(), hash);
+    if (!opened.breakdown[kind]) opened.failed = true;
+  } catch {
+    opened.failed = true;
+  }
+  if (rewardModal === opened) renderRewardModal();
+}
+
+// Polling can re-render the activity list meanwhile, so the row is looked up again.
+function closeRewardModal() {
+  if (!rewardModal) return;
+  const { kind, hash } = rewardModal;
+  rewardModal = null;
+  renderRewardModal();
+  [...app.querySelectorAll("[data-action=reward]")]
+    .find((row) => row.dataset.kind === kind && row.dataset.hash === hash)?.focus();
 }
 
 function heartbeatLabel() {
@@ -321,6 +385,7 @@ function unlocked({ seedPhrase: _seedPhrase, ...derived }) {
 
 function lock() {
   activityObserver?.disconnect();
+  closeRewardModal();
   wallet = null; view = null; pendingSeed = ""; pendingTransfer = null; awayFromDashboard = false;
   clearTimeout(pollTimer); clearTimeout(idleTimer);
   renderUnlock();
@@ -378,6 +443,7 @@ app.addEventListener("click", async (event) => {
     if (action === "unlock-screen") renderUnlock();
     if (action === "settings") showScreen(renderSettings);
     if (action === "wallet-tab") renderDashboard(button.dataset.tab);
+    if (action === "reward") await openRewardModal(button.dataset);
     if (action === "activity-filter") { activityFilters[button.dataset.filter] = !activityFilters[button.dataset.filter]; renderDashboard("activity"); }
     if (action === "seed-saved") renderSeedCheck();
     if (action === "show-seed") renderSeed();
@@ -464,7 +530,16 @@ app.addEventListener("submit", async (event) => {
   finally { submit.disabled = false; }
 });
 
+modalElement.addEventListener("click", (event) => {
+  const close = event.target.closest("[data-action=close-modal]");
+  // The backdrop closes on its own clicks only, not on clicks inside the dialog.
+  if (close && (close.tagName === "BUTTON" || event.target === close)) closeRewardModal();
+});
+
 document.addEventListener("keydown", (event) => {
+  if (event.key === "Escape" && rewardModal) { closeRewardModal(); return; }
+  // Close is the dialog's only control, so Tab keeps focus on it rather than the page behind.
+  if (event.key === "Tab" && rewardModal) { event.preventDefault(); modalElement.querySelector("button")?.focus(); return; }
   if (event.key === "Escape" && pendingTransfer) { pendingTransfer = null; renderDashboard("send"); }
 });
 for (const type of ["pointerdown", "keydown"]) document.addEventListener(type, resetIdleTimer, { passive: true });

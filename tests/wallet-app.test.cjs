@@ -205,6 +205,36 @@ test('browser wallet activity pages carry the wallet identity and cursor', async
   }
 });
 
+test('browser wallet loads a reward breakdown from the public API', async () => {
+  const originalFetch = globalThis.fetch;
+  const requests = [];
+  globalThis.fetch = async (url) => {
+    requests.push(String(url));
+    return new Response(JSON.stringify({ block_hash: 'aa'.repeat(32), heartbeat: { total: 1, owner: 'me', inputs: [] }, ledger: null }), {
+      status: 200,
+      headers: { 'content-type': 'application/json' },
+    });
+  };
+  try {
+    const breakdown = await core.fetchBlockRewards('https://wallet.getiuna.org', 'aa'.repeat(32));
+    assert.equal(requests[0], `https://wallet.getiuna.org/api/public/rewards/${'aa'.repeat(32)}`);
+    assert.equal(breakdown.heartbeat.total, 1);
+    await assert.rejects(core.fetchBlockRewards('https://wallet.getiuna.org', '../wallet'), /Unknown block/);
+    assert.equal(requests.length, 1);
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+
+  const app = source('wallet/app.js');
+  assert.match(app, /data-action="reward" data-kind="\$\{rewardKind\}" data-hash="\$\{escape\(row\.id\)\}"/);
+  assert.match(app, /action === "reward"\) await openRewardModal\(button\.dataset\)/);
+  // Both apps describe reward inputs identically.
+  const inputTable = (text, name) => text.match(new RegExp(`const ${name} = \\{([^;]+)\\};`))[1].replace(/\s+/g, ' ').trim();
+  assert.equal(inputTable(app, 'REWARD_INPUTS'), inputTable(source('www/assets/iuna-ui.js'), 'IUNA_REWARD_INPUTS'));
+  for (const label of ['Ledger fee share', 'Inclusion fee', 'Ticket expenditure', 'Subsidy']) assert.ok(app.includes(label));
+  assert.match(source('wallet/index.html'), /<div id="modal"><\/div>/);
+});
+
 test('wallet settings name reachable endpoints and previous wallets are explained', () => {
   const app = source('wallet/app.js');
   for (const key of ['iuna.wallets.v2', 'iuna.wallet.v1']) assert.ok(app.includes(`"${key}"`));
