@@ -5,6 +5,12 @@ from the Git history and Conventional Commit titles by `deployment.sh`.
 
 ## [Unreleased]
 
+## [0.6.2] - 2026-11-11
+
+### Fixed
+
+- correct activity and restore tab navigation
+
 ## [0.6.1] - 2026-11-10
 
 ### Fixed
