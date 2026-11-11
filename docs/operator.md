@@ -83,7 +83,7 @@ management is disabled.
 These routes are opt-in and exist only on the separate listener configured with
 `--wallet-endpoint`; they are never mounted on the operator listener.
 
-The self-custody browser wallet uses three deliberately narrow routes:
+The self-custody browser wallet uses four deliberately narrow routes:
 
 - `GET /api/public/wallet/{64-character-address}` returns only that address's
   confirmed UTXOs, balance, spendable balance, historical `used` flag and
@@ -97,6 +97,11 @@ The self-custody browser wallet uses three deliberately narrow routes:
   mempool transactions spending any of them. The browser wallet discovers its
   receive and change addresses with one such request per gap window and then
   loads UTXO pages only for addresses that still hold outputs.
+- `POST /api/public/wallet-activity` takes the wallet's complete discovered
+  address set and returns recent pending and confirmed transfers. Each amount
+  is the absolute wallet balance delta: outputs to those addresses minus the
+  resolved inputs owned by those addresses. This includes change and fees
+  correctly instead of treating all non-wallet outputs as the sent amount.
 - `POST /api/public/transactions` accepts a complete, client-side signed
   current-protocol `Transaction`. Consensus validation is performed before it
   enters the mempool and relay.

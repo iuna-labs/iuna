@@ -164,6 +164,14 @@ async function fetchAddressSummaries(endpoint, keys) {
   return batch;
 }
 
+async function fetchWalletActivity(endpoint, keys) {
+  return requestJson(`${endpoint}/api/public/wallet-activity`, {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify({ addresses: keys.map((key) => key.addressHex) }),
+  });
+}
+
 async function discoverWalletView(endpoint, wallet) {
   const branches = [RECEIVE_BRANCH, CHANGE_BRANCH].map((branch) => ({ branch, scanned: 0, highestUsed: -1 }));
   const entries = [];
@@ -198,9 +206,12 @@ async function discoverWalletView(endpoint, wallet) {
   for (const id of views.flatMap((item) => item.pending_transaction_ids || [])) pending.add(id);
   const receiveIndex = branches[RECEIVE_BRANCH].highestUsed + 1;
   const receiveKey = await wallet.keyAt(RECEIVE_BRANCH, receiveIndex);
+  const activity = await fetchWalletActivity(endpoint, entries.map(({ key }) => key));
+  if (activity.tip_hash !== first.tip_hash) return null;
   return {
     network: first.network,
     heartbeat_height: first.heartbeat_height,
+    tip_timestamp: first.tip_timestamp,
     tip_hash: first.tip_hash,
     ledger_blocks: first.ledger_blocks,
     balance: entries.reduce((sum, { summary }) => sum + Number(summary.balance), 0),
@@ -212,6 +223,7 @@ async function discoverWalletView(endpoint, wallet) {
     receive_address: receiveKey.addressHex,
     receive_index: receiveIndex,
     change_index: branches[CHANGE_BRANCH].highestUsed + 1,
+    activity,
   };
 }
 

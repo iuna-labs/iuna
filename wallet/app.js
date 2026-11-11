@@ -2,8 +2,6 @@ import { generateMnemonic, mnemonicEntropy, validateMnemonic } from "./mnemonic.
 import {
   apiEndpoint, buildSignedTransaction, decryptWallet, defaultApiEndpoint, encryptWallet, fetchWalletView,
   formatIuna, parseIuna, submitTransaction, walletFromEntropy,
-  sentStatus,
-  spentOutpoints,
 } from "./wallet-core.js";
 
 const app = document.querySelector("#app");
@@ -13,8 +11,6 @@ const LEGACY_WALLET_KEY = "iunaEd25519Wallet";
 const ENDPOINT_KEY = "iunaWalletApi";
 // Wallets of the previous network. Their records stay untouched; this version cannot read them.
 const PREVIOUS_NETWORK_KEYS = ["iuna.wallets.v2", "iuna.wallet.v1"];
-const MAX_ACTIVITY = 100;
-const SHOWN_INCOMING = 10;
 const CHECK_COUNT = 3;
 const IDLE_LOCK_MS = 10 * 60 * 1000;
 const POLL_MS = 5000;
@@ -26,6 +22,7 @@ let pendingTransfer = null;
 let pollTimer = null;
 let idleTimer = null;
 let awayFromDashboard = false;
+let dashboardTab = "overview";
 
 // Storage: { selected: publicKey, wallets: [{ name, record }] }, each record encrypted on its own.
 function readJson(key, fallback) { try { return JSON.parse(localStorage.getItem(key)) ?? fallback; } catch { return fallback; } }
@@ -40,16 +37,20 @@ function store() {
   return migrated;
 }
 function selectedEntry() { const { selected, wallets } = store(); return wallets.find((entry) => entry.record.publicKey === selected) || wallets[0] || null; }
-function activityKey(publicKey) { return `iunaActivity:${publicKey}`; }
-function sentActivity() { return wallet ? readJson(activityKey(wallet.publicKeyHex), []) : []; }
-function recordSent(item) { writeJson(activityKey(wallet.publicKeyHex), [item, ...sentActivity()].slice(0, MAX_ACTIVITY)); }
-
 function shell(content, controls = "") { return `<div class="top"><div class="brand"><img src="./icon.svg" alt=""><span>iuna wallet</span></div><div class="actions tight">${controls}</div></div><section class="card">${content}</section>`; }
 function toast(message, error = false) { toastElement.textContent = message; toastElement.className = `toast show${error ? " error" : ""}`; clearTimeout(toastElement.timer); toastElement.timer = setTimeout(() => { toastElement.className = "toast"; }, 4000); }
 function escape(value) { return String(value).replace(/[&<>"']/g, (character) => ({ "&":"&amp;", "<":"&lt;", ">":"&gt;", '"':"&quot;", "'":"&#39;" })[character]); }
 function words(seed) { return seed.split(" ").map((word) => `<div class="seed-word">${escape(word)}</div>`).join(""); }
 function short(value) { const text = String(value || ""); return text.length > 18 ? `${text.slice(0, 9)}…${text.slice(-7)}` : text; }
 function timeLabel(seconds) { return new Date(seconds * 1000).toLocaleString(); }
+function relativeTime(seconds) {
+  const elapsed = Math.max(0, Math.floor(Date.now() / 1000) - Number(seconds));
+  if (!Number.isFinite(elapsed)) return "";
+  if (elapsed < 60) return `${elapsed}s ago`;
+  if (elapsed < 3600) return `${Math.floor(elapsed / 60)}m ago`;
+  if (elapsed < 86400) return `${Math.floor(elapsed / 3600)}h ago`;
+  return `${Math.floor(elapsed / 86400)}d ago`;
+}
 function randomCheckIndexes() {
   const indexes = new Set();
   while (indexes.size < CHECK_COUNT) indexes.add(1 + (crypto.getRandomValues(new Uint32Array(1))[0] % 24));
@@ -81,8 +82,9 @@ function renderUnlock() {
 }
 
 function renderSettings() {
-  const configured = localStorage.getItem(ENDPOINT_KEY) || "";
-  app.innerHTML = shell(`<h1>Settings</h1><form id="endpoint" class="stack"><label>Node endpoint<input name="endpoint" type="url" value="${escape(configured)}" placeholder="${escape(apiEndpoint())}" autocomplete="off" spellcheck="false"></label><p class="muted">The wallet reads public outputs from this node and submits signed transactions to it. Leave empty to use the default (<code>${escape(defaultApiEndpoint())}</code>). Browser security lets this wallet reach only its own origin and <code>http://127.0.0.1:18662</code>, and the node must serve the public wallet API.</p><div class="actions"><button class="primary" type="submit">Save and test</button><button type="button" data-action="reset-endpoint">Use default</button></div></form>`, `<button data-action="${wallet ? "dashboard" : (store().wallets.length ? "unlock-screen" : "welcome")}">Back</button>`);
+  if (wallet && view) { renderDashboard("settings"); return; }
+  const configured = localStorage.getItem(ENDPOINT_KEY) || defaultApiEndpoint();
+  app.innerHTML = shell(settingsScreen(configured), `<button data-action="${store().wallets.length ? "unlock-screen" : "welcome"}">Back</button>`);
 }
 
 async function renderNewSeed() {
@@ -123,32 +125,65 @@ function renderConfirm() {
   app.innerHTML = shell(`<h1>Confirm transfer</h1><p>Check the full recipient address. Ledger transactions cannot be reversed.</p><div class="address"><span class="label">Recipient</span><code>${escape(pendingTransfer.recipient)}</code></div><div class="stats"><div class="stat"><span>Amount</span><strong>${escape(formatIuna(pendingTransfer.amount))} IUNA</strong></div><div class="stat"><span>Fee</span><strong>${escape(formatIuna(pendingTransfer.fee))} IUNA</strong></div><div class="stat"><span>Spendable after</span><strong>${escape(formatIuna(Math.max(0, spendable)))} IUNA</strong></div></div><div class="actions"><button data-action="cancel-transfer">Cancel</button><button class="primary" data-action="confirm-transfer">Sign and send</button></div>`);
 }
 
-// Sent items come from this browser's own log; received items are current outputs from other
-// transactions. Spent incoming outputs drop out, so this is recent activity, not full history.
-const SENT_LABELS = { pending: "Pending", sent: "Sent", dropped: "Not sent" };
+const ACTIVITY_LABELS = { sent: "Sent", received: "Received", self: "To yourself" };
 
 function activityRows() {
-  const sent = sentActivity();
-  const sentIds = new Set(sent.map((item) => item.id));
-  const incoming = (view?.utxos || []).filter((utxo) => !sentIds.has(utxo.transaction_id));
-  const received = incoming.slice(0, SHOWN_INCOMING).map((utxo) => ({ kind: "received", id: utxo.transaction_id, amount: utxo.value }));
-  const hidden = incoming.length - received.length;
   const rows = [
-    ...sent.map((item) => ({ ...item, status: sentStatus(item, view) })),
-    ...received,
+    ...(view?.activity?.pending || []).map((item) => ({ ...item, pending: true })),
+    ...(view?.activity?.confirmed || []).map((item) => ({ ...item, pending: false })),
   ];
-  if (!rows.length) return `<p class="muted">No activity yet. Sent transactions and incoming outputs appear here.</p>`;
-  return `<div class="activity">${rows.map((row) => row.kind === "received"
-    ? `<div class="activity-row"><span class="pill">Received</span><button class="link" data-action="copy" data-value="${escape(row.id)}" title="${escape(row.id)}">${escape(short(row.id))}</button><b class="incoming">+ ${escape(formatIuna(row.amount))} IUNA</b></div>`
-    : `<div class="activity-row"><span class="pill${row.status === "sent" ? "" : " pending"}">${SENT_LABELS[row.status]}</span><span>to <button class="link" data-action="use-recipient" data-value="${escape(row.recipient)}" title="Send to ${escape(row.recipient)}">${escape(short(row.recipient))}</button> · ${escape(timeLabel(row.time))}</span><b>− ${escape(formatIuna(row.amount))} IUNA</b></div>`).join("")}${hidden > 0 ? `<p class="muted">and ${hidden} more incoming output${hidden === 1 ? "" : "s"}</p>` : ""}</div>`;
+  if (!rows.length) return `<p class="muted">No transactions yet.</p>`;
+  return `<div class="activity">${rows.map((row) => {
+    const incoming = row.kind === "received";
+    const timestamp = row.pending ? "Waiting for confirmation" : (row.timestamp == null ? "Confirmed" : timeLabel(row.timestamp));
+    return `<div class="activity-row"><span class="pill${row.pending ? " pending" : ""}">${escape(ACTIVITY_LABELS[row.kind] || row.kind)}</span><span>${escape(timestamp)}</span><b class="${incoming ? "incoming" : ""}">${incoming ? "+" : "−"} ${escape(formatIuna(row.amount))} IUNA</b></div>`;
+  }).join("")}</div>`;
 }
 
-function renderDashboard() {
+function heartbeatLabel() {
+  const age = relativeTime(view?.tip_timestamp);
+  return age ? `${view.heartbeat_height} (${age})` : String(view?.heartbeat_height ?? "—");
+}
+
+function walletNav() {
+  const tabs = [["overview", "Overview"], ["receive", "Receive"], ["send", "Send"], ["activity", "Activity"], ["settings", "Settings"]];
+  return `<nav class="bottom-nav" aria-label="Wallet">${tabs.map(([tab, label]) => `<button class="nav-item${dashboardTab === tab ? " active" : ""}" data-action="wallet-tab" data-tab="${tab}"${dashboardTab === tab ? ' aria-current="page"' : ""}><span aria-hidden="true">${{ overview: "⌂", receive: "↓", send: "↑", activity: "↕", settings: "⚙" }[tab]}</span>${label}</button>`).join("")}</nav>`;
+}
+
+function overviewScreen(entry) {
+  return `<h1>${escape(entry?.name || "Wallet")}</h1><div class="stats"><div class="stat"><span>Balance</span><strong data-field="balance">${escape(formatIuna(view.balance))} IUNA</strong></div><div class="stat"><span>Spendable</span><strong data-field="spendable">${escape(formatIuna(view.spendable_balance))} IUNA</strong></div><div class="stat"><span>Heartbeat</span><strong data-field="heartbeat">${escape(heartbeatLabel())}</strong></div></div><p class="muted" data-field="connection">${escape(connectionLabel())}</p>`;
+}
+
+function receiveScreen() {
+  const receiveAddress = view.receive_address || "Unavailable while disconnected";
+  return `<h1>Receive IUNA</h1><p>Share this address with the sender. A new receive address is selected after use.</p><div class="address"><code data-field="receive-address">${escape(receiveAddress)}</code></div><div class="actions"><button class="primary" data-action="copy" data-field="copy-receive" data-value="${escape(view.receive_address || "")}"${view.receive_address ? "" : " disabled"}>Copy address</button><button data-action="backup">View recovery phrase</button></div>`;
+}
+
+function sendScreen() {
+  return `<h1>Send IUNA</h1><form id="send" class="send"><label>Recipient address<input name="recipient" minlength="64" maxlength="64" autocomplete="off" autocapitalize="none" spellcheck="false" required></label><div class="row"><label>Amount<span class="amount-row"><input name="amount" inputmode="decimal" placeholder="0.00" required><button type="button" data-action="max">Max</button></span></label><label>Fee<input name="fee" inputmode="decimal" value="0.00000001" required></label></div><button class="primary" type="submit">Review</button></form>`;
+}
+
+function activityScreen() {
+  return `<h1>Activity</h1><p>Confirmed and pending transactions.</p><div data-field="activity">${activityRows()}</div>`;
+}
+
+function settingsScreen(configured = localStorage.getItem(ENDPOINT_KEY) || defaultApiEndpoint()) {
+  return `<h1>Settings</h1><form id="endpoint" class="stack settings-form"><label>Node endpoint<input name="endpoint" type="url" value="${escape(configured)}" autocomplete="off" spellcheck="false"></label><div class="actions"><button class="primary" type="submit">Save and test</button><button type="button" data-action="reset-endpoint">Use default</button></div></form>`;
+}
+
+function renderDashboard(tab = dashboardTab) {
   if (!view) return;
+  dashboardTab = ["overview", "receive", "send", "activity", "settings"].includes(tab) ? tab : "overview";
   awayFromDashboard = false;
   const entry = selectedEntry();
-  const receiveAddress = view.receive_address || "Unavailable while disconnected";
-  app.innerHTML = shell(`<h1>${escape(entry?.name || "Wallet")}</h1><div class="stats"><div class="stat"><span>Balance</span><strong data-field="balance">${escape(formatIuna(view.balance))} IUNA</strong></div><div class="stat"><span>Spendable</span><strong data-field="spendable">${escape(formatIuna(view.spendable_balance))} IUNA</strong></div><div class="stat"><span>Heartbeat</span><strong data-field="heartbeat">${escape(view.heartbeat_height)}</strong></div></div><h2>Receive</h2><div class="address"><code data-field="receive-address">${escape(receiveAddress)}</code></div><div class="actions"><button data-action="copy" data-field="copy-receive" data-value="${escape(view.receive_address || "")}"${view.receive_address ? "" : " disabled"}>Copy address</button><button data-action="backup">View recovery phrase</button></div><form id="send" class="send"><h2>Send IUNA</h2><label>Recipient address<input name="recipient" minlength="64" maxlength="64" autocomplete="off" autocapitalize="none" spellcheck="false" required></label><div class="row"><label>Amount<span class="amount-row"><input name="amount" inputmode="decimal" placeholder="0.00" required><button type="button" data-action="max">Max</button></span></label><label>Fee<input name="fee" inputmode="decimal" value="0.00000001" required></label></div><button class="primary" type="submit">Review</button></form><h2 class="spaced">Activity</h2><div data-field="activity">${activityRows()}</div><p class="muted" data-field="connection">${escape(connectionLabel())}</p>`, `<button data-action="settings">Settings</button><button data-action="lock">Lock</button>`);
+  const content = {
+    overview: () => overviewScreen(entry),
+    receive: receiveScreen,
+    send: sendScreen,
+    activity: activityScreen,
+    settings: settingsScreen,
+  }[dashboardTab]();
+  app.innerHTML = `${shell(`<div data-screen="wallet">${content}</div>`, `<button data-action="lock">Lock</button>`)}${walletNav()}`;
 }
 
 function connectionLabel() { return `Connected to ${apiEndpoint()} · ${view.network} · ${view.ledger_blocks} Ledger blocks`; }
@@ -160,14 +195,19 @@ function updateDashboard() {
   const fields = {
     balance: `${formatIuna(view.balance)} IUNA`,
     spendable: `${formatIuna(view.spendable_balance)} IUNA`,
-    heartbeat: view.heartbeat_height,
+    heartbeat: heartbeatLabel(),
     connection: connectionLabel(),
   };
-  for (const [name, value] of Object.entries(fields)) app.querySelector(`[data-field=${name}]`).textContent = value;
-  app.querySelector("[data-field=receive-address]").textContent = view.receive_address || "Unavailable while disconnected";
-  app.querySelector("[data-field=copy-receive]").dataset.value = view.receive_address || "";
-  app.querySelector("[data-field=copy-receive]").disabled = !view.receive_address;
-  app.querySelector("[data-field=activity]").innerHTML = activityRows();
+  for (const [name, value] of Object.entries(fields)) {
+    const field = app.querySelector(`[data-field=${name}]`);
+    if (field) field.textContent = value;
+  }
+  const address = app.querySelector("[data-field=receive-address]");
+  if (address) address.textContent = view.receive_address || "Unavailable while disconnected";
+  const copy = app.querySelector("[data-field=copy-receive]");
+  if (copy) { copy.dataset.value = view.receive_address || ""; copy.disabled = !view.receive_address; }
+  const activity = app.querySelector("[data-field=activity]");
+  if (activity) activity.innerHTML = activityRows();
 }
 
 function showScreen(render) { awayFromDashboard = true; render(); }
@@ -188,6 +228,7 @@ async function save(seedPhrase, password, name) {
 function unlocked({ seedPhrase: _seedPhrase, ...derived }) {
   // The recovery phrase is only decrypted again on demand; keep the signing key only.
   wallet = derived;
+  dashboardTab = "overview";
   awayFromDashboard = false;
   resetIdleTimer();
 }
@@ -210,12 +251,12 @@ async function refresh(silent = false) {
   let connected = true;
   const render = () => {
     if (awayFromDashboard) return;
-    if (app.querySelector("[data-field=balance]")) updateDashboard(); else renderDashboard();
+    if (app.querySelector("[data-screen=wallet]")) updateDashboard(); else renderDashboard();
   };
   try { view = await fetchWalletView(apiEndpoint(), wallet); if (wallet) render(); }
   catch (error) {
     connected = false;
-    view ||= { network: "Disconnected", heartbeat_height: "—", ledger_blocks: "—", balance: 0, spendable_balance: 0, utxos: [] };
+    view ||= { network: "Disconnected", heartbeat_height: "—", ledger_blocks: "—", balance: 0, spendable_balance: 0, utxos: [], activity: { pending: [], confirmed: [] } };
     if (wallet) render();
     if (!silent) toast(error.message, true);
   }
@@ -229,11 +270,10 @@ async function sendPendingTransfer() {
   const result = await submitTransaction(apiEndpoint(), transaction);
   // A second send before the next refresh must not reuse this change address.
   if (transaction.outputs.length > 1) view.change_index = (view.change_index || 0) + 1;
-  recordSent({ kind: "sent", id: result.id, inputs: spentOutpoints(transaction), amount: transfer.amount, fee: transfer.fee, recipient: transfer.recipient, time: Math.floor(Date.now() / 1000) });
   pendingTransfer = null;
   toast(`Transaction submitted: ${result.id.slice(0, 12)}…`);
-  renderDashboard();
   await refresh(true);
+  renderDashboard("activity");
 }
 
 app.addEventListener("click", async (event) => {
@@ -245,19 +285,19 @@ app.addEventListener("click", async (event) => {
     if (action === "welcome") renderWelcome();
     if (action === "unlock-screen") renderUnlock();
     if (action === "settings") showScreen(renderSettings);
+    if (action === "wallet-tab") renderDashboard(button.dataset.tab);
     if (action === "seed-saved") renderSeedCheck();
     if (action === "show-seed") renderSeed();
     if (action === "dashboard") renderDashboard();
     if (action === "backup") showScreen(renderBackupUnlock);
     if (action === "copy") { await copyText(button.dataset.value); toast("Copied"); }
-    if (action === "use-recipient") { app.querySelector("#send [name=recipient]").value = button.dataset.value; toast("Recipient filled in"); }
     if (action === "max") {
       const fee = parseIuna(app.querySelector("#send [name=fee]").value);
       const maximum = Number(view.spendable_balance) - fee;
       if (maximum <= 0) throw new Error("The spendable balance does not cover the fee");
       app.querySelector("#send [name=amount]").value = formatIuna(maximum);
     }
-    if (action === "cancel-transfer") { pendingTransfer = null; renderDashboard(); }
+    if (action === "cancel-transfer") { pendingTransfer = null; renderDashboard("send"); }
     if (action === "confirm-transfer") { button.disabled = true; await sendPendingTransfer(); }
     if (action === "reset-endpoint") { localStorage.removeItem(ENDPOINT_KEY); toast(`Using ${apiEndpoint()}`); renderSettings(); }
     if (action === "lock") lock();
@@ -269,7 +309,6 @@ app.addEventListener("click", async (event) => {
         stored.wallets = stored.wallets.filter((item) => item !== entry);
         stored.selected = stored.wallets[0]?.record.publicKey || "";
         writeJson(WALLETS_KEY, stored);
-        localStorage.removeItem(activityKey(selected));
         stored.wallets.length ? renderUnlock() : renderWelcome();
       }
     }
@@ -333,7 +372,7 @@ app.addEventListener("submit", async (event) => {
 });
 
 document.addEventListener("keydown", (event) => {
-  if (event.key === "Escape" && pendingTransfer) { pendingTransfer = null; renderDashboard(); }
+  if (event.key === "Escape" && pendingTransfer) { pendingTransfer = null; renderDashboard("send"); }
 });
 for (const type of ["pointerdown", "keydown"]) document.addEventListener(type, resetIdleTimer, { passive: true });
 document.addEventListener("visibilitychange", () => { if (!document.hidden) refresh(true); });

@@ -101,12 +101,15 @@ test('browser wallet discovers addresses in batches and loads outputs only where
   const change20 = await wallet.keyAt(1, 20);
   const used = new Set([receive0.addressHex, change0.addressHex, change20.addressHex]);
   const funded = new Set([change20.addressHex]);
-  const chain = { network: 'iuna-mainnet-candidate', heartbeat_height: 7, tip_hash: 'ff'.repeat(32), ledger_blocks: 1 };
+  const chain = { network: 'iuna-mainnet-candidate', heartbeat_height: 7, tip_timestamp: 123, tip_hash: 'ff'.repeat(32), ledger_blocks: 1 };
   const json = (body) => new Response(JSON.stringify(body), { status: 200, headers: { 'content-type': 'application/json' } });
   const batches = [];
   const singles = [];
   const originalFetch = globalThis.fetch;
   globalThis.fetch = async (url, options = {}) => {
+    if (String(url).endsWith('/api/public/wallet-activity')) {
+      return json({ ...chain, scanned_heartbeats: 7, pending: [], confirmed: [] });
+    }
     if (String(url).endsWith('/api/public/wallet-addresses')) {
       const { addresses } = JSON.parse(options.body);
       batches.push(addresses.length);
@@ -145,6 +148,7 @@ test('browser wallet discovers addresses in batches and loads outputs only where
     assert.equal(view.balance, 5);
     assert.deepEqual(singles, [change20.addressHex]);
     assert.equal(view.utxos[0].walletKey.addressHex, change20.addressHex);
+    assert.deepEqual(view.activity, { ...chain, scanned_heartbeats: 7, pending: [], confirmed: [] });
     assert.deepEqual(batches, [41, 2, 20]);
     assert.ok(batches.every((size) => size <= 64));
   } finally {
@@ -184,6 +188,9 @@ test('wallet settings name reachable endpoints and previous wallets are explaine
   }
   assert.match(app, /data-field="receive-address"/);
   assert.match(app, /copy-receive.*dataset\.value = view\.receive_address/s);
+  assert.match(app, /Overview[\s\S]*Receive[\s\S]*Send[\s\S]*Activity/);
+  assert.match(app, /bottom-nav/);
+  assert.match(app, /heartbeatLabel\(\)/);
   assert.match(app, /submitTransaction\(apiEndpoint\(\), transaction\);[^]*?view\.change_index = \(view\.change_index \|\| 0\) \+ 1/);
 });
 

@@ -42,7 +42,7 @@ use crate::{
         wallet_commands::{TicketParameters, Wallet},
     },
     consensus::{
-        Address, ConsensusError, ConsensusState, GENESIS_MINER, GENESIS_REWARD,
+        Address, Chain, ConsensusError, ConsensusState, GENESIS_MINER, GENESIS_REWARD,
         HEARTBEAT_TARGET_INTERVAL_SECS, HeartbeatBlock, LEDGER_TARGET_INTERVAL_HEARTBEATS,
         MAX_TARGET, MAX_TICKET_DURATION, NETWORK_ID, OutPoint, PublicKey, TicketTransaction,
         Transaction, address_from_public_key, block_payouts, minimum_ticket_budget, sidecar_winner,
@@ -199,6 +199,7 @@ pub struct PublicWalletUtxo {
 pub struct PublicWalletView {
     pub network: &'static str,
     pub heartbeat_height: u64,
+    pub tip_timestamp: u64,
     pub tip_hash: String,
     pub ledger_blocks: u64,
     pub address: String,
@@ -231,6 +232,7 @@ pub struct PublicWalletAddressSummary {
 pub struct PublicWalletAddressesView {
     pub network: &'static str,
     pub heartbeat_height: u64,
+    pub tip_timestamp: u64,
     pub tip_hash: String,
     pub ledger_blocks: u64,
     /// In request order.
@@ -242,6 +244,21 @@ pub struct PublicWalletAddressesView {
 #[derive(Debug, Deserialize)]
 pub struct PublicWalletAddressesRequest {
     pub addresses: Vec<String>,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct PublicWalletActivityRequest {
+    pub addresses: Vec<String>,
+}
+
+#[derive(Debug, Serialize)]
+pub struct PublicWalletActivityView {
+    pub heartbeat_height: u64,
+    pub tip_timestamp: u64,
+    pub tip_hash: String,
+    pub scanned_heartbeats: u64,
+    pub pending: Vec<WalletActivityItem>,
+    pub confirmed: Vec<WalletActivityItem>,
 }
 
 #[derive(Debug, Default, Deserialize)]
@@ -281,6 +298,8 @@ const WALLET_ACTIVITY_ITEMS_PER_TYPE: usize = 200;
 const MAX_PUBLIC_WALLET_UTXOS: usize = 1_000;
 /// Fits the stable root address plus one 20-address gap window of both wallet branches.
 const MAX_PUBLIC_WALLET_ADDRESSES: usize = 64;
+/// Activity needs the complete discovered address set so change is part of the balance delta.
+const MAX_PUBLIC_WALLET_ACTIVITY_ADDRESSES: usize = 512;
 /// JSON represents fixed-size byte arrays as decimal lists and is substantially larger than the
 /// consensus encoding. This still bounds unauthenticated request memory while allowing a wallet
 /// page of 1,000 outputs to be consolidated in one otherwise-valid transaction.
@@ -544,6 +563,10 @@ pub fn public_wallet_router(state: ConsensusHttpState) -> Router {
             post(public_wallet_addresses).options(public_wallet_preflight),
         )
         .route(
+            "/api/public/wallet-activity",
+            post(public_wallet_activity).options(public_wallet_preflight),
+        )
+        .route(
             "/api/public/transactions",
             post(submit_signed_transaction).options(public_wallet_preflight),
         )
@@ -605,6 +628,7 @@ async fn public_wallet_view(
     Ok(Json(PublicWalletView {
         network: NETWORK_ID,
         heartbeat_height: chain.height,
+        tip_timestamp: chain.tip_timestamp,
         tip_hash: hex(&chain.tip),
         ledger_blocks: chain.ledger_blocks,
         address: hex(&address),
@@ -675,6 +699,7 @@ async fn public_wallet_addresses(
     Ok(Json(PublicWalletAddressesView {
         network: NETWORK_ID,
         heartbeat_height: chain.height,
+        tip_timestamp: chain.tip_timestamp,
         tip_hash: hex(&chain.tip),
         ledger_blocks: chain.ledger_blocks,
         addresses: summaries,
@@ -682,46 +707,108 @@ async fn public_wallet_addresses(
     }))
 }
 
+/// Recent transfers for a deterministic browser wallet. The caller submits the addresses it
+/// discovered through the bounded summary endpoint; private keys never leave the browser.
+async fn public_wallet_activity(
+    State(state): State<ConsensusHttpState>,
+    Json(request): Json<PublicWalletActivityRequest>,
+) -> ApiResult<PublicWalletActivityView> {
+    if request.addresses.is_empty()
+        || request.addresses.len() > MAX_PUBLIC_WALLET_ACTIVITY_ADDRESSES
+    {
+        return Err(api_error(
+            StatusCode::BAD_REQUEST,
+            format!("request between 1 and {MAX_PUBLIC_WALLET_ACTIVITY_ADDRESSES} addresses"),
+        ));
+    }
+    let owners = request
+        .addresses
+        .iter()
+        .map(|address| decode_hex_32(address, "address"))
+        .collect::<Result<BTreeSet<_>, _>>()
+        .map_err(|error| api_error(StatusCode::BAD_REQUEST, error.to_string()))?;
+    let node = state.node.lock().await;
+    let chain = node.chain();
+    let empty_block_outputs = std::collections::BTreeMap::new();
+    let pending = node
+        .pending_transactions()
+        .iter()
+        .filter_map(|transaction| {
+            transaction_activity(
+                &owners,
+                transaction,
+                chain.tip(),
+                &empty_block_outputs,
+                None,
+                None,
+            )
+        })
+        .collect();
+    let (scanned_heartbeats, confirmed) = confirmed_transaction_activity(chain, &owners);
+    let tip = chain.tip();
+    Ok(Json(PublicWalletActivityView {
+        heartbeat_height: tip.height,
+        tip_timestamp: tip.tip_timestamp,
+        tip_hash: hex(&tip.tip),
+        scanned_heartbeats,
+        pending,
+        confirmed,
+    }))
+}
+
 fn transaction_activity(
     owners: &BTreeSet<Address>,
     transaction: &Transaction,
+    state: &ConsensusState,
+    block_outputs: &std::collections::BTreeMap<OutPoint, u64>,
     height: Option<u64>,
     timestamp: Option<u64>,
 ) -> Option<WalletActivityItem> {
-    let spends = transaction
+    let owned_inputs = transaction
         .inputs
         .iter()
-        .any(|input| owners.contains(&address_from_public_key(&input.public_key)));
-    let to_owner: u64 = transaction
+        .filter(|input| owners.contains(&address_from_public_key(&input.public_key)))
+        .try_fold(0_u64, |total, input| {
+            let value = block_outputs
+                .get(&input.previous_output)
+                .copied()
+                .or_else(|| {
+                    state
+                        .utxos
+                        .get(&input.previous_output)
+                        .map(|output| output.value)
+                })?;
+            total.checked_add(value)
+        })?;
+    let owned_outputs = transaction
         .outputs
         .iter()
         .filter(|output| owners.contains(&output.owner))
-        .map(|output| output.value)
-        .sum();
-    let others = transaction
-        .outputs
-        .iter()
-        .filter(|output| !owners.contains(&output.owner))
-        .collect::<Vec<_>>();
-    let (kind, amount, counterparty) = if spends && others.is_empty() {
-        ("self", to_owner, None)
-    } else if spends {
-        (
+        .try_fold(0_u64, |total, output| total.checked_add(output.value))?;
+    if owned_inputs == 0 && owned_outputs == 0 {
+        return None;
+    }
+    let delta = i128::from(owned_outputs) - i128::from(owned_inputs);
+    let (kind, amount, counterparty) = match delta.cmp(&0) {
+        std::cmp::Ordering::Less => (
             "sent",
-            others.iter().map(|output| output.value).sum(),
-            Some(hex(&others[0].owner)),
-        )
-    } else if to_owner > 0 {
-        (
+            u64::try_from(-delta).ok()?,
+            transaction
+                .outputs
+                .iter()
+                .find(|output| !owners.contains(&output.owner))
+                .map(|output| hex(&output.owner)),
+        ),
+        std::cmp::Ordering::Greater => (
             "received",
-            to_owner,
+            u64::try_from(delta).ok()?,
             transaction
                 .inputs
-                .first()
+                .iter()
+                .find(|input| !owners.contains(&address_from_public_key(&input.public_key)))
                 .map(|input| hex(&address_from_public_key(&input.public_key))),
-        )
-    } else {
-        return None;
+        ),
+        std::cmp::Ordering::Equal => ("self", 0, None),
     };
     Some(WalletActivityItem {
         kind,
@@ -731,6 +818,78 @@ fn transaction_activity(
         amount,
         counterparty,
     })
+}
+
+/// Recent transfers involving `owners`, newest first. States are replayed once from the oldest
+/// parent instead of once per block; this keeps wallet polling cheap beyond the in-memory window.
+fn confirmed_transaction_activity(
+    chain: &Chain,
+    owners: &BTreeSet<Address>,
+) -> (u64, Vec<WalletActivityItem>) {
+    let mut blocks = Vec::new();
+    let mut cursor = Some(chain.tip().tip);
+    while let Some(hash) = cursor {
+        if blocks.len() >= usize::try_from(WALLET_ACTIVITY_HEARTBEATS).unwrap_or(usize::MAX) {
+            break;
+        }
+        let Some(block) = chain.block(&hash) else {
+            break;
+        };
+        cursor = block.header.parent;
+        blocks.push(block);
+    }
+    let scanned = u64::try_from(blocks.len()).unwrap_or(u64::MAX);
+    let Some(oldest) = blocks.last() else {
+        return (scanned, Vec::new());
+    };
+    let mut parent_state = oldest.header.parent.and_then(|hash| chain.state(&hash));
+    let mut items_by_block = Vec::with_capacity(blocks.len());
+    for block in blocks.iter().rev() {
+        let mut items = Vec::new();
+        let mut block_outputs = std::collections::BTreeMap::new();
+        if let Some(state) = parent_state.as_deref() {
+            for transaction in block
+                .sidecar
+                .iter()
+                .flat_map(|sidecar| sidecar.transactions.iter())
+            {
+                if let Some(item) = transaction_activity(
+                    owners,
+                    transaction,
+                    state,
+                    &block_outputs,
+                    Some(block.header.height),
+                    Some(block.header.timestamp),
+                ) {
+                    items.push(item);
+                }
+                let transaction_id = transaction.id();
+                block_outputs.extend(transaction.outputs.iter().enumerate().map(
+                    |(index, output)| {
+                        (
+                            OutPoint {
+                                transaction_id,
+                                output_index: u32::try_from(index).unwrap_or(u32::MAX),
+                            },
+                            output.value,
+                        )
+                    },
+                ));
+            }
+        }
+        items_by_block.push(items);
+        parent_state = match parent_state.as_deref() {
+            Some(state) => chain.child_state(state, block),
+            None => chain.state(&block.hash()),
+        };
+    }
+    let confirmed = items_by_block
+        .into_iter()
+        .rev()
+        .flatten()
+        .take(WALLET_ACTIVITY_ITEMS_PER_TYPE)
+        .collect();
+    (scanned, confirmed)
 }
 
 fn ticket_activity(
@@ -815,23 +974,33 @@ async fn wallet_activity(State(state): State<ConsensusHttpState>) -> ApiResult<W
             reserved: node.is_input_reserved(point),
         })
         .collect();
+    let chain = node.chain();
+    let empty_block_outputs = std::collections::BTreeMap::new();
     let mut pending = node
         .pending_transactions()
         .iter()
-        .filter_map(|transaction| transaction_activity(&owners, transaction, None, None))
+        .filter_map(|transaction| {
+            transaction_activity(
+                &owners,
+                transaction,
+                chain.tip(),
+                &empty_block_outputs,
+                None,
+                None,
+            )
+        })
         .collect::<Vec<_>>();
     pending.extend(
         node.pending_tickets()
             .iter()
             .filter_map(|ticket| ticket_activity(&owners, ticket, None, None)),
     );
-    let chain = node.chain();
-    let mut confirmed = Vec::new();
-    let mut confirmed_counts = [0; 4];
-    let mut scanned = 0;
+    let (scanned, mut confirmed) = confirmed_transaction_activity(chain, &owners);
+    let mut confirmed_counts = [confirmed.len(), 0, 0, 0];
+    let mut reward_scanned = 0;
     let mut cursor = Some(chain.tip().tip);
     while let Some(hash) = cursor {
-        if scanned >= WALLET_ACTIVITY_HEARTBEATS {
+        if reward_scanned >= WALLET_ACTIVITY_HEARTBEATS {
             break;
         }
         let Some(block) = chain.block(&hash) else {
@@ -868,23 +1037,15 @@ async fn wallet_activity(State(state): State<ConsensusHttpState>) -> ApiResult<W
                 );
             }
         }
-        for transaction in block
-            .sidecar
-            .iter()
-            .flat_map(|sidecar| sidecar.transactions.iter())
-        {
-            if let Some(item) = transaction_activity(&owners, transaction, height, time) {
-                push_wallet_activity(&mut confirmed, &mut confirmed_counts, item);
-            }
-        }
         for ticket in &block.tickets {
             if let Some(item) = ticket_activity(&owners, ticket, height, time) {
                 push_wallet_activity(&mut confirmed, &mut confirmed_counts, item);
             }
         }
-        scanned += 1;
+        reward_scanned += 1;
         cursor = block.header.parent;
     }
+    confirmed.sort_by_key(|item| std::cmp::Reverse(item.heartbeat_height));
     Ok(Json(WalletActivityView {
         public_key: hex(&public_key),
         scanned_heartbeats: scanned,
@@ -2152,6 +2313,54 @@ mod tests {
         assert!(items.iter().any(|item| item.kind == "sent"));
     }
 
+    #[test]
+    fn transaction_activity_reports_the_wallet_balance_delta() {
+        use crate::consensus::{Input, Output};
+
+        let (_, mut state) = pinned_genesis().unwrap();
+        let public_key = [9; 32];
+        let owner = address_from_public_key(&public_key);
+        let point = OutPoint {
+            transaction_id: [8; 32],
+            output_index: 0,
+        };
+        state.utxos.insert(
+            point.clone(),
+            Output {
+                owner,
+                value: 1_000,
+            },
+        );
+        let transaction = Transaction {
+            version: PROTOCOL_VERSION,
+            inputs: vec![Input {
+                previous_output: point,
+                public_key,
+                signature: Vec::new(),
+            }],
+            outputs: vec![
+                Output {
+                    owner: [7; 32],
+                    value: 600,
+                },
+                Output { owner, value: 390 },
+            ],
+        };
+        let item = transaction_activity(
+            &BTreeSet::from([owner]),
+            &transaction,
+            &state,
+            &std::collections::BTreeMap::new(),
+            Some(1),
+            Some(2),
+        )
+        .unwrap();
+
+        assert_eq!(item.kind, "sent");
+        assert_eq!(item.amount, 610);
+        assert_eq!(item.counterparty, Some(hex(&[7; 32])));
+    }
+
     #[tokio::test]
     async fn status_uses_public_heartbeat_and_ledger_vocabulary() {
         let directory = tempfile::tempdir().unwrap();
@@ -2765,6 +2974,33 @@ mod tests {
         assert_eq!(summaries[2]["used"], false);
         assert_eq!(batch["pending_transaction_ids"][0], hex(&transaction.id()));
         assert_eq!(batch["tip_hash"], view["tip_hash"]);
+        assert_eq!(batch["tip_timestamp"], view["tip_timestamp"]);
+
+        let activity_request = Request::post("/api/public/wallet-activity")
+            .header(header::CONTENT_TYPE, "application/json")
+            .header(header::ORIGIN, "https://wallet.getiuna.org")
+            .body(Body::from(
+                serde_json::to_vec(&serde_json::json!({
+                    "addresses": [hex(&wallet.address()), hex(&transaction.outputs[1].owner)]
+                }))
+                .unwrap(),
+            ))
+            .unwrap();
+        let response = public_wallet_router(state.clone())
+            .oneshot(activity_request)
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+        let activity: serde_json::Value = serde_json::from_slice(
+            &axum::body::to_bytes(response.into_body(), usize::MAX)
+                .await
+                .unwrap(),
+        )
+        .unwrap();
+        assert_eq!(activity["pending"][0]["kind"], "sent");
+        // One unit goes to the recipient and one to the fee; change remains ours.
+        assert_eq!(activity["pending"][0]["amount"], 2);
+        assert_eq!(activity["tip_timestamp"], view["tip_timestamp"]);
 
         for rejected in [
             Vec::new(),
@@ -3456,7 +3692,8 @@ mod tests {
         let activity: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
         let confirmed = activity["confirmed"].as_array().unwrap();
         assert!(confirmed.iter().any(|item| item["kind"] == "sent"
-            && item["amount"] == 1_000_000
+            // The balance delta includes the 100-unit fee and excludes wallet change.
+            && item["amount"] == 1_000_100
             && item["counterparty"] == hex(&[77; 32])
             && item["id"] == detail["ledger"]["transactions"][0]["id"]));
         assert!(confirmed.iter().any(|item| item["kind"] == "ticket"));

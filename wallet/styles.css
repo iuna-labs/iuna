@@ -36,7 +36,7 @@ h1 { margin:0 0 8px; font-size:28px; }
 h2 { margin:0 0 10px; font-size:18px; }
 p { color:var(--muted-2); line-height:1.55; }
 code { overflow-wrap:anywhere; color:var(--text); }
-#app { width:min(760px, calc(100% - 28px)); margin:0 auto; padding:34px 0 70px; }
+#app { width:min(760px, calc(100% - 28px)); margin:0 auto; padding:34px 0 112px; }
 .top { display:flex; justify-content:space-between; align-items:center; gap:12px; margin-bottom:18px; }
 .brand { display:flex; align-items:center; gap:10px; color:var(--green); font-weight:900; }
 .brand img { width:34px; height:34px; }
@@ -44,6 +44,7 @@ code { overflow-wrap:anywhere; color:var(--text); }
 .actions,.row { display:flex; flex-wrap:wrap; gap:10px; }
 .actions { margin-top:18px; }
 .stack { display:grid; gap:12px; }
+.settings-form { margin-top:18px; }
 .choice { display:grid; grid-template-columns:1fr 1fr; gap:10px; margin-top:18px; }
 .choice button { min-height:92px; text-align:left; }
 .choice span { display:block; margin-top:6px; color:var(--muted-2); font-weight:500; font-size:12px; }
@@ -75,3 +76,8 @@ code { overflow-wrap:anywhere; color:var(--text); }
 button.link { border:0; padding:0; background:none; color:var(--muted); font-family:ui-monospace,monospace; font-weight:600; text-decoration:underline dotted; }
 button.link:hover { color:var(--green); }
 .activity-row > :nth-child(2) { justify-self:start; min-width:0; }
+.bottom-nav { position:fixed; z-index:10; left:50%; bottom:max(14px, env(safe-area-inset-bottom)); transform:translateX(-50%); width:min(620px, calc(100% - 28px)); display:grid; grid-template-columns:repeat(5, minmax(0, 1fr)); gap:4px; border:1px solid var(--line); border-radius:18px; padding:7px; background:color-mix(in srgb, var(--panel) 94%, transparent); box-shadow:0 16px 50px #000b; backdrop-filter:blur(18px); }
+.bottom-nav .nav-item { display:grid; justify-items:center; gap:3px; min-width:0; border:0; padding:7px 4px; background:transparent; color:var(--muted-2); font-size:10px; }
+.bottom-nav .nav-item span { color:inherit; font-size:18px; line-height:1; }
+.bottom-nav .nav-item.active { background:var(--green-soft); color:var(--green); }
+@media(max-width:600px){ .top{align-items:flex-start}.top>.actions{justify-content:flex-end}.activity-row{grid-template-columns:auto minmax(0,1fr)}.activity-row b{grid-column:2} }
