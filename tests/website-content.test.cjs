@@ -690,6 +690,30 @@ test('wallet activity filters each protocol action and keeps filtered infinite s
   assert.match(html, /x-ref="activitySentinel"/);
 });
 
+test('wallet activity infinite scroll stops re-checking when nothing can load', async () => {
+  const { app } = nodeApp();
+  // Alpine drains $nextTick callbacks synchronously; count how often one is queued.
+  let ticks = 0;
+  app.$nextTick = () => { ticks += 1; };
+  app.activity = { pending: [], confirmed: [{ kind: 'ticket', id: 'only' }], next_before_height: null };
+  app.activityFilters = { transfers: true, tickets: false, heartbeatRewards: false, ledgerRewards: false };
+  await app.loadMoreActivity();
+  assert.equal(ticks, 0, 'an exhausted filtered list must not schedule another check');
+
+  app.activity.next_before_height = 400;
+  app.activityBusy = true;
+  await app.loadMoreActivity();
+  assert.equal(ticks, 0, 'a page already in flight must not schedule another check');
+
+  const hidden = { getClientRects: () => [], closest: () => ({ getClientRects: () => [] }) };
+  app.$refs = { activitySentinel: hidden };
+  app.activityBusy = false;
+  let loads = 0;
+  app.loadMoreActivity = () => { loads += 1; };
+  app.loadMoreActivityIfNeeded();
+  assert.equal(loads, 0, 'a hidden sentinel never counts as in view');
+});
+
 test('wallet activity infinite scroll fetches the next Heartbeat page', async () => {
   const { app } = nodeApp();
   app.activity = {

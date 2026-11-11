@@ -2029,27 +2029,36 @@ window.iunaApp = function iunaApp() {
     },
 
     async loadMoreActivity() {
+      let grew = false;
       if (this.activityVisibleCount < this.filteredActivityItems().length) {
         this.activityVisibleCount += 25;
+        grew = true;
       } else if (this.activity?.next_before_height != null && !this.activityBusy) {
         this.activityBusy = true;
         try {
           const page = await this.getJson(`/api/wallet/activity?before_height=${this.activity.next_before_height}`);
           this.applyActivityPage(page, true);
           this.activityVisibleCount += 25;
+          grew = true;
         } catch (error) {
           this.notify(error.message, "error");
         } finally {
           this.activityBusy = false;
         }
       }
-      this.$nextTick(() => this.loadMoreActivityIfNeeded());
+      // Re-check only after the list actually grew, and only once the DOM shows it.
+      // Alpine drains $nextTick callbacks in one synchronous loop, so scheduling the
+      // check unconditionally (while a page is loading or nothing is left) froze the app.
+      if (grew) this.$nextTick(() => requestAnimationFrame(() => this.loadMoreActivityIfNeeded()));
     },
 
     loadMoreActivityIfNeeded() {
       const sentinel = this.$refs?.activitySentinel;
       const scroller = sentinel?.closest(".activity-scroll");
-      if (sentinel && scroller && sentinel.offsetTop <= scroller.scrollTop + scroller.clientHeight + 160) {
+      // A hidden sentinel or tab has no layout box and would always look "in view".
+      if (!sentinel || !scroller || !this.activityHasMore()
+        || !sentinel.getClientRects().length || !scroller.getClientRects().length) return;
+      if (sentinel.getBoundingClientRect().top <= scroller.getBoundingClientRect().bottom + 160) {
         this.loadMoreActivity();
       }
     },
