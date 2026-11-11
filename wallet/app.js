@@ -136,6 +136,9 @@ const ACTIVITY_LABELS = {
   heartbeat_reward: "Heartbeat reward", ledger_reward: "Ledger reward",
 };
 
+// Same two-letter codes and colours as the node app; the filters double as their legend.
+const ACTIVITY_CODES = { transfers: "TX", tickets: "TI", heartbeatRewards: "HR", ledgerRewards: "LR" };
+
 function activityType(item) {
   if (["sent", "received", "self"].includes(item?.kind)) return "transfers";
   if (item?.kind === "ticket") return "tickets";
@@ -152,8 +155,13 @@ function activityRows() {
   if (!rows.length && view?.activity?.next_before_height == null) return `<p class="muted">No activity matches these filters.</p>`;
   const list = rows.map((row) => {
     const incoming = ["received", "self", "heartbeat_reward", "ledger_reward"].includes(row.kind);
-    const timestamp = row.pending ? "Waiting for confirmation" : (row.timestamp == null ? "Confirmed" : timeLabel(row.timestamp));
-    return `<div class="activity-row"><span class="pill${row.pending ? " pending" : ""}">${escape(ACTIVITY_LABELS[row.kind] || row.kind)}</span><span>${escape(timestamp)}</span><b class="${incoming ? "incoming" : ""}">${incoming ? "+" : "−"} ${escape(formatIuna(row.amount))} IUNA</b></div>`;
+    const type = activityType(row);
+    const label = ACTIVITY_LABELS[row.kind] || row.kind;
+    const meta = row.pending ? "Waiting for confirmation" : [
+      row.heartbeat_height == null ? "" : `Heartbeat #${row.heartbeat_height}`,
+      row.timestamp == null ? "" : timeLabel(row.timestamp),
+    ].filter(Boolean).join(" · ") || "Confirmed";
+    return `<div class="activity-row${row.pending ? " pending" : ""}"><span class="pill activity-code ${type}" title="${escape(label)}" aria-hidden="true">${ACTIVITY_CODES[type]}</span><div class="activity-copy"><div class="activity-title">${escape(label)}</div><div class="activity-meta">${escape(meta)}</div></div><b class="${incoming ? "incoming" : ""}">${incoming ? "+" : "−"} ${escape(formatIuna(row.amount))} IUNA</b></div>`;
   }).join("");
   const more = view?.activity?.next_before_height == null ? "" : `<div class="activity-more" data-field="activity-more" role="status" aria-label="Loading older activity"><span class="spinner" aria-hidden="true"></span></div>`;
   return `${list ? `<div class="activity">${list}</div>` : ""}${more}`;
@@ -184,7 +192,7 @@ function sendScreen() {
 
 function activityScreen() {
   const filters = [["transfers", "Transfers"], ["tickets", "Tickets"], ["heartbeatRewards", "Heartbeat rewards"], ["ledgerRewards", "Ledger rewards"]]
-    .map(([type, label]) => `<button class="activity-filter${activityFilters[type] ? " active" : ""}" data-action="activity-filter" data-filter="${type}" aria-pressed="${activityFilters[type]}">${label}</button>`).join("");
+    .map(([type, label]) => `<button class="activity-filter ${type}${activityFilters[type] ? " active" : ""}" data-action="activity-filter" data-filter="${type}" aria-pressed="${activityFilters[type]}">${label}</button>`).join("");
   return `<h1>Activity</h1><p>Confirmed and pending wallet activity.</p><div class="activity-filters" aria-label="Activity filters">${filters}</div><div data-field="activity">${activityRows()}</div>`;
 }
 

@@ -69,22 +69,31 @@ code { overflow-wrap:anywhere; color:var(--text); }
 .amount-row input { flex:1; }
 .activity { display:grid; gap:7px; }
 .activity-filters { display:flex; flex-wrap:wrap; gap:7px; margin:16px 0; }
-button.activity-filter { border-radius:999px; padding:6px 9px; color:var(--muted-2); font-size:11px; }
-button.activity-filter.active { border-color:var(--green-line); background:var(--green-soft); color:var(--green); }
+button.activity-filter { --activity-color:var(--muted); --activity-border:var(--line-strong); --activity-bg:var(--panel-2); border-radius:999px; padding:6px 9px; color:var(--muted-2); font-size:11px; }
+button.activity-filter.active { border-color:var(--activity-border); background:var(--activity-bg); color:var(--activity-color); }
+button.activity-filter:hover { border-color:var(--activity-color); }
+/* Same colours as the node app, so the filters double as the legend for the row codes. */
+.activity-filter.transfers, .activity-code.transfers { --activity-color:#8de9cd; --activity-border:#346f60; --activity-bg:#17312a; }
+.activity-filter.tickets, .activity-code.tickets { --activity-color:var(--amber); --activity-border:var(--amber-line); --activity-bg:var(--amber-soft); }
+.activity-filter.heartbeatRewards, .activity-code.heartbeatRewards { --activity-color:#8bdcff; --activity-border:#376b80; --activity-bg:#172a34; }
+.activity-filter.ledgerRewards, .activity-code.ledgerRewards { --activity-color:var(--green); --activity-border:var(--green-line); --activity-bg:var(--green-soft); }
 .activity-more { display:flex; justify-content:center; padding:16px 0 8px; }
 .spinner { width:20px; height:20px; border:2px solid var(--line-strong); border-top-color:var(--green); border-radius:50%; animation:spin .8s linear infinite; }
 @keyframes spin { to { transform:rotate(360deg); } }
 @media (prefers-reduced-motion: reduce) { .spinner { animation-duration:2.4s; } }
-.activity-row { display:grid; grid-template-columns:auto minmax(0,1fr) auto; gap:10px; align-items:center; border:1px solid var(--line); border-radius:8px; padding:9px 10px; background:var(--panel-2); font-size:13px; }
+.activity-row { display:grid; grid-template-columns:42px minmax(0,1fr) auto; gap:12px; align-items:center; border:1px solid var(--line); border-radius:8px; padding:9px 10px; background:var(--panel-2); font-size:13px; }
 .activity-row b { white-space:nowrap; }
+.activity-row.pending { border-color:var(--line-strong); background:#191c20; box-shadow:inset 3px 0 0 var(--muted-2); }
+.pill.activity-code { width:42px; justify-content:center; border-color:var(--activity-border); background:var(--activity-bg); color:var(--activity-color); letter-spacing:.04em; }
+.activity-copy { min-width:0; display:grid; gap:3px; }
+.activity-title { color:var(--text); font-size:13px; font-weight:850; }
+.activity-meta { min-width:0; color:var(--muted-2); font-size:11px; white-space:nowrap; overflow:hidden; text-overflow:ellipsis; }
 .incoming { color:var(--green); }
 .pill { display:inline-flex; border:1px solid var(--line-strong); border-radius:999px; padding:3px 7px; color:var(--muted); font-size:10px; font-weight:850; white-space:nowrap; }
-.pill.pending { border-color:var(--amber-line); color:var(--amber); }
 button.link { border:0; padding:0; background:none; color:var(--muted); font-family:ui-monospace,monospace; font-weight:600; text-decoration:underline dotted; }
 button.link:hover { color:var(--green); }
-.activity-row > :nth-child(2) { justify-self:start; min-width:0; }
 .bottom-nav { position:fixed; z-index:10; left:50%; bottom:max(14px, env(safe-area-inset-bottom)); transform:translateX(-50%); width:min(620px, calc(100% - 28px)); display:grid; grid-template-columns:repeat(5, minmax(0, 1fr)); gap:4px; border:1px solid var(--line); border-radius:18px; padding:7px; background:color-mix(in srgb, var(--panel) 94%, transparent); box-shadow:0 16px 50px #000b; backdrop-filter:blur(18px); }
 .bottom-nav .nav-item { display:grid; justify-items:center; gap:3px; min-width:0; border:0; padding:7px 4px; background:transparent; color:var(--muted-2); font-size:10px; }
 .bottom-nav .nav-item span { color:inherit; font-size:18px; line-height:1; }
 .bottom-nav .nav-item.active { background:var(--green-soft); color:var(--green); }
-@media(max-width:600px){ .top{align-items:flex-start}.top>.actions{justify-content:flex-end}.activity-row{grid-template-columns:auto minmax(0,1fr)}.activity-row b{grid-column:2} }
+@media(max-width:600px){ .top{align-items:flex-start}.top>.actions{justify-content:flex-end}.activity-row{grid-template-columns:42px minmax(0,1fr);row-gap:6px}.activity-row b{grid-column:2} }
