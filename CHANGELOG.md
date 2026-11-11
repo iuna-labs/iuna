@@ -5,6 +5,12 @@ from the Git history and Conventional Commit titles by `deployment.sh`.
 
 ## [Unreleased]
 
+## [0.6.5] - 2026-11-11
+
+### Fixed
+
+- stop node wallet infinite scroll from freezing the app
+
 ## [0.6.4] - 2026-11-11
 
 ### Added
