@@ -221,7 +221,9 @@ test('wallet settings name reachable endpoints and previous wallets are explaine
   for (const label of ['Transfers', 'Tickets', 'Heartbeat rewards', 'Ledger rewards']) {
     assert.ok(app.includes(label));
   }
-  assert.match(app, /data-action="load-activity"/);
+  assert.match(app, /data-field="activity-more"/);
+  assert.match(app, /new IntersectionObserver/);
+  assert.doesNotMatch(app, /Load older activity/);
   assert.match(app, /submitTransaction\(apiEndpoint\(\), transaction\);[^]*?view\.change_index = \(view\.change_index \|\| 0\) \+ 1/);
 });
 

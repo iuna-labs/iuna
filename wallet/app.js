@@ -25,6 +25,9 @@ let awayFromDashboard = false;
 let dashboardTab = "overview";
 let activityBusy = false;
 let activityPageDepth = 1;
+// After a failed page load, automatic loading pauses until the next poll.
+let activityRetryAt = 0;
+let activityObserver = null;
 const activityFilters = { transfers: true, tickets: true, heartbeatRewards: true, ledgerRewards: true };
 
 // Storage: { selected: publicKey, wallets: [{ name, record }] }, each record encrypted on its own.
@@ -152,7 +155,7 @@ function activityRows() {
     const timestamp = row.pending ? "Waiting for confirmation" : (row.timestamp == null ? "Confirmed" : timeLabel(row.timestamp));
     return `<div class="activity-row"><span class="pill${row.pending ? " pending" : ""}">${escape(ACTIVITY_LABELS[row.kind] || row.kind)}</span><span>${escape(timestamp)}</span><b class="${incoming ? "incoming" : ""}">${incoming ? "+" : "−"} ${escape(formatIuna(row.amount))} IUNA</b></div>`;
   }).join("");
-  const more = view?.activity?.next_before_height == null ? "" : `<button class="activity-more" data-action="load-activity"${activityBusy ? " disabled" : ""}>${activityBusy ? "Loading…" : "Load older activity"}</button>`;
+  const more = view?.activity?.next_before_height == null ? "" : `<div class="activity-more" data-field="activity-more" role="status" aria-label="Loading older activity"><span class="spinner" aria-hidden="true"></span></div>`;
   return `${list ? `<div class="activity">${list}</div>` : ""}${more}`;
 }
 
@@ -202,6 +205,7 @@ function renderDashboard(tab = dashboardTab) {
     settings: settingsScreen,
   }[dashboardTab]();
   app.innerHTML = `${shell(`<div data-screen="wallet">${content}</div>`, `<button data-action="lock">Lock</button>`)}${walletNav()}`;
+  observeActivityEnd();
 }
 
 function connectionLabel() { return `Connected to ${apiEndpoint()} · ${view.network} · ${view.ledger_blocks} Ledger blocks`; }
@@ -225,7 +229,21 @@ function updateDashboard() {
   const copy = app.querySelector("[data-field=copy-receive]");
   if (copy) { copy.dataset.value = view.receive_address || ""; copy.disabled = !view.receive_address; }
   const activity = app.querySelector("[data-field=activity]");
-  if (activity) activity.innerHTML = activityRows();
+  if (activity) { activity.innerHTML = activityRows(); observeActivityEnd(); }
+}
+
+// Infinite scroll: the spinner at the end of the list loads the next page once
+// it comes near the viewport. Observing a freshly rendered spinner reports its
+// current visibility, so pages keep loading while the end stays in view.
+function observeActivityEnd() {
+  activityObserver?.disconnect();
+  const end = app.querySelector("[data-field=activity-more]");
+  if (!end) return;
+  activityObserver ||= new IntersectionObserver((entries) => {
+    if (!entries.some((entry) => entry.isIntersecting) || Date.now() < activityRetryAt) return;
+    loadOlderActivity().catch((error) => { activityRetryAt = Date.now() + POLL_MS; toast(error.message, true); });
+  }, { rootMargin: "0px 0px 300px 0px" });
+  activityObserver.observe(end);
 }
 
 function mergeLoadedActivity(fresh, previous) {
@@ -244,7 +262,7 @@ async function loadOlderActivity() {
   const before = view?.activity?.next_before_height;
   if (before == null || activityBusy) return;
   activityBusy = true;
-  updateDashboard();
+  const owner = wallet;
   try {
     const page = await fetchWalletActivity(
       apiEndpoint(),
@@ -252,6 +270,8 @@ async function loadOlderActivity() {
       view.activity_addresses,
       before,
     );
+    // The wallet may have been locked or switched while the page was loading.
+    if (wallet !== owner || !view?.activity) return;
     const seen = new Set(view.activity.confirmed.map((item) => `${item.kind}:${item.id}:${item.heartbeat_height ?? ""}`));
     view.activity.confirmed.push(...page.confirmed.filter((item) => {
       const key = `${item.kind}:${item.id}:${item.heartbeat_height ?? ""}`;
@@ -292,6 +312,7 @@ function unlocked({ seedPhrase: _seedPhrase, ...derived }) {
 }
 
 function lock() {
+  activityObserver?.disconnect();
   wallet = null; view = null; pendingSeed = ""; pendingTransfer = null; awayFromDashboard = false;
   clearTimeout(pollTimer); clearTimeout(idleTimer);
   renderUnlock();
@@ -350,7 +371,6 @@ app.addEventListener("click", async (event) => {
     if (action === "settings") showScreen(renderSettings);
     if (action === "wallet-tab") renderDashboard(button.dataset.tab);
     if (action === "activity-filter") { activityFilters[button.dataset.filter] = !activityFilters[button.dataset.filter]; renderDashboard("activity"); }
-    if (action === "load-activity") await loadOlderActivity();
     if (action === "seed-saved") renderSeedCheck();
     if (action === "show-seed") renderSeed();
     if (action === "dashboard") renderDashboard();

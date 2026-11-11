@@ -71,7 +71,10 @@ code { overflow-wrap:anywhere; color:var(--text); }
 .activity-filters { display:flex; flex-wrap:wrap; gap:7px; margin:16px 0; }
 button.activity-filter { border-radius:999px; padding:6px 9px; color:var(--muted-2); font-size:11px; }
 button.activity-filter.active { border-color:var(--green-line); background:var(--green-soft); color:var(--green); }
-.activity-more { width:100%; margin-top:12px; }
+.activity-more { display:flex; justify-content:center; padding:16px 0 8px; }
+.spinner { width:20px; height:20px; border:2px solid var(--line-strong); border-top-color:var(--green); border-radius:50%; animation:spin .8s linear infinite; }
+@keyframes spin { to { transform:rotate(360deg); } }
+@media (prefers-reduced-motion: reduce) { .spinner { animation-duration:2.4s; } }
 .activity-row { display:grid; grid-template-columns:auto minmax(0,1fr) auto; gap:10px; align-items:center; border:1px solid var(--line); border-radius:8px; padding:9px 10px; background:var(--panel-2); font-size:13px; }
 .activity-row b { white-space:nowrap; }
 .incoming { color:var(--green); }
