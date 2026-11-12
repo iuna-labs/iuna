@@ -1513,7 +1513,10 @@ window.iunaApp = function iunaApp() {
       );
       const partial = this.selectedTransaction?.loading || this.selectedTransaction?.detailMissing;
       const inputs = this.transactionModalInputs();
-      const totalIn = partial || !inputs.length ? null : sum(inputs);
+      // A transaction always spends something, so no inputs means unknown. A loaded reward of
+      // zero collects nothing, so its total in is zero, as in the browser wallet.
+      const known = inputs.length || this.selectedTransaction?.item?.reward;
+      const totalIn = partial || !known ? null : sum(inputs);
       const totalOut = partial ? null : sum(this.transactionModalOutputs());
       return { in: totalIn, out: totalOut, balanced: totalIn != null && totalIn === totalOut };
     },

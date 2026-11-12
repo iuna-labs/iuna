@@ -1403,6 +1403,11 @@ test('block rewards open the shared transaction modal with fees as inputs', asyn
     'Ledger reward::finalizer-address:55',
   );
 
+  // A reward of zero collects nothing: its total in is zero, not unavailable.
+  breakdown.heartbeat = { total: 0, owner: 'miner-address', inputs: [], outputs: [] };
+  await app.openBlockRewardModal('heartbeat');
+  assert.equal(JSON.stringify(app.transactionModalTotals()), '{"in":0,"out":0,"balanced":true}');
+
   breakdown.ledger = null;
   await app.openBlockRewardModal('ledger');
   assert.equal(app.selectedTransaction.detailMissing, true);
