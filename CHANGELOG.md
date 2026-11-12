@@ -5,6 +5,17 @@ from the Git history and Conventional Commit titles by `deployment.sh`.
 
 ## [Unreleased]
 
+## [0.6.6] - 2026-11-12
+
+### Added
+
+- list reward outputs at the outpoints consensus credits
+
+### Fixed
+
+- drop a wallet view that loads after a lock or switch
+- a reward of zero totals zero in, not unavailable
+
 ## [0.6.5] - 2026-11-11
 
 ### Fixed
