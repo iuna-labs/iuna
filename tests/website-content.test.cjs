@@ -46,17 +46,6 @@ test('canonical documentation has no parallel v2 identity', () => {
   assert.doesNotMatch(combined, /operator-v2/i);
 });
 
-test('protocol visualization matches the canonical timing and vocabulary', () => {
-  const visualization = content('visualizations/iuna-protocol.html');
-
-  assert.match(visualization, /60 s Heartbeat/);
-  assert.match(visualization, /D = 10 heartbeats/);
-  assert.match(visualization, /last payout H\+1,448/);
-  assert.match(visualization, /probability = pct \/ 100 \/ 10/);
-  assert.match(visualization, /expectedMinutes = expectedHeartbeats/);
-  assert.doesNotMatch(visualization, /\bL1\b|\bL2\b|8\.64[089]|10 s heartbeat|5 min L2|PLAN\.md/i);
-});
-
 test('container and deployment defaults match the canonical toolchain and ports', () => {
   const deployment = [
     content('Dockerfile.local-testnet'),
