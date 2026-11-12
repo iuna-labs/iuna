@@ -8,7 +8,6 @@ const app = document.querySelector("#app");
 const toastElement = document.querySelector("#toast");
 const modalElement = document.querySelector("#modal");
 const WALLETS_KEY = "iunaWallets";
-const LEGACY_WALLET_KEY = "iunaEd25519Wallet";
 const ENDPOINT_KEY = "iunaWalletApi";
 // Wallets of the previous network. Their records stay untouched; this version cannot read them.
 const PREVIOUS_NETWORK_KEYS = ["iuna.wallets.v2", "iuna.wallet.v1"];
@@ -38,12 +37,7 @@ function readJson(key, fallback) { try { return JSON.parse(localStorage.getItem(
 function writeJson(key, value) { localStorage.setItem(key, JSON.stringify(value)); }
 function store() {
   const stored = readJson(WALLETS_KEY, null);
-  if (stored?.wallets) return stored;
-  // One-time migration from the single-wallet layout.
-  const legacy = readJson(LEGACY_WALLET_KEY, null);
-  const migrated = { selected: legacy?.publicKey || "", wallets: legacy ? [{ name: "Wallet 1", record: legacy }] : [] };
-  if (legacy) { writeJson(WALLETS_KEY, migrated); localStorage.removeItem(LEGACY_WALLET_KEY); }
-  return migrated;
+  return stored?.wallets ? stored : { selected: "", wallets: [] };
 }
 function selectedEntry() { const { selected, wallets } = store(); return wallets.find((entry) => entry.record.publicKey === selected) || wallets[0] || null; }
 function shell(content, controls = "") { return `<div class="top"><div class="brand"><img src="./icon.svg" alt=""><span>iuna wallet</span></div><div class="actions tight">${controls}</div></div><section class="card">${content}</section>`; }
