@@ -67,6 +67,55 @@ test('container and deployment defaults match the canonical toolchain and ports'
   assert.doesNotMatch(deployment, /rust:1\.88(?:\.0)?-bookworm|18661/i);
 });
 
+test('a successful deployment removes older releases from downloads', () => {
+  const { execFileSync } = require('node:child_process');
+  const { copyFileSync, mkdtempSync, mkdirSync, readdirSync, rmSync, writeFileSync } = require('node:fs');
+  const { tmpdir } = require('node:os');
+
+  const script = content('deployment.sh');
+  const main = script.slice(script.indexOf('\nmain() {'));
+  // Both release paths prune only after their deployment returned.
+  assert.equal(main.match(/deploy_docker_image "\$version" "\$genesis"\n\s*prune_old_downloads "\$version"/g)?.length, 2);
+
+  // The script resolves downloads/ next to itself, so a copy keeps the real directory untouched.
+  const root = mkdtempSync(join(tmpdir(), 'iuna-prune-'));
+  try {
+    copyFileSync(join(__dirname, '..', 'deployment.sh'), join(root, 'deployment.sh'));
+    mkdirSync(join(root, 'downloads', 'desktop'), { recursive: true });
+    const files = [
+      '.gitkeep',
+      'latest.json',
+      'iuna-v0.5.10-linux-x86_64.tar.gz',
+      'iuna-v0.6.5-linux-x86_64.tar.gz',
+      'iuna-v0.6.5-linux-x86_64.tar.gz.sig',
+      // Newer than the deployed release, as after redeploying an older tag.
+      'iuna-v0.6.60-linux-x86_64.tar.gz',
+      'iuna-v0.6.6-linux-x86_64.tar.gz',
+      'iuna-v0.6.6-windows-x86_64-desktop-setup.exe.sig',
+    ];
+    for (const file of files) writeFileSync(join(root, 'downloads', file), file);
+    writeFileSync(join(root, 'downloads', 'desktop', 'latest.json'), '{}');
+
+    execFileSync('bash', ['-c', 'source ./deployment.sh && prune_old_downloads 0.6.6'], { cwd: root, stdio: 'pipe' });
+
+    assert.deepEqual(readdirSync(join(root, 'downloads')).sort(), [
+      '.gitkeep',
+      'SHA256SUMS',
+      'desktop',
+      'iuna-v0.6.6-linux-x86_64.tar.gz',
+      'iuna-v0.6.6-windows-x86_64-desktop-setup.exe.sig',
+      'iuna-v0.6.60-linux-x86_64.tar.gz',
+      'latest.json',
+    ]);
+    assert.deepEqual(readdirSync(join(root, 'downloads', 'desktop')), ['latest.json']);
+    const sums = readFileSync(join(root, 'downloads', 'SHA256SUMS'), 'utf8');
+    assert.match(sums, /iuna-v0\.6\.6-linux-x86_64\.tar\.gz/);
+    assert.doesNotMatch(sums, /iuna-v0\.6\.5|iuna-v0\.5\.10/);
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
 test('downloads page lists the release artifacts and the source build', () => {
   const downloads = content('www/downloads.html');
 

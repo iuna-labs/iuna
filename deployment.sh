@@ -733,6 +733,40 @@ write_download_checksums() {
   )
 }
 
+# Whether version $1 is lower than version $2, comparing each part as a number.
+version_lt() {
+  local IFS=.
+  local -a left=($1) right=($2)
+  local part
+  for part in 0 1 2; do
+    ((10#${left[part]} < 10#${right[part]})) && return 0
+    ((10#${left[part]} > 10#${right[part]})) && return 1
+  done
+  return 1
+}
+
+# Runs only after a successful deployment, so a failed one keeps the previous artifacts. The site
+# image built next therefore still carries the release before it, next to its own. Newer releases
+# stay, so redeploying an older tag does not delete them.
+prune_old_downloads() {
+  local version="$1"
+  local file
+  local file_version
+  local removed=0
+
+  for file in downloads/iuna-v*; do
+    [ -f "$file" ] || continue
+    file_version="${file#downloads/iuna-v}"
+    file_version="${file_version%%-*}"
+    [[ "$file_version" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]] || continue
+    version_lt "$file_version" "$version" || continue
+    rm -f "$file"
+    removed=$((removed + 1))
+  done
+  write_download_checksums
+  echo "Removed ${removed} download artifact(s) older than v${version}"
+}
+
 build_versions() {
   local version="$1"
 
@@ -985,6 +1019,7 @@ main() {
     build_versions "$version"
     build_docker_image "$version"
     deploy_docker_image "$version" "$genesis"
+    prune_old_downloads "$version"
     exit 0
   fi
 
@@ -997,6 +1032,7 @@ main() {
   disarm_release_rollback
   build_docker_image "$version"
   deploy_docker_image "$version" "$genesis"
+  prune_old_downloads "$version"
 }
 
 if [[ "${BASH_SOURCE[0]}" == "$0" ]]; then
