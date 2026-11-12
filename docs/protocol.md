@@ -39,7 +39,7 @@ This is still experimental. The rules below describe candidate protocol, not a p
 - minimum ticket budget: `1,000,000` units (`0.01 IUNA`);
 - winner inclusion window: `3` Heartbeats.
 
-The genesis miner key is the public RFC 8032 test key. Its secret is public too, so anyone can spend the genesis output. The first miner's node does exactly that to fund the first ticket. A promoted mainnet may need a controlled key, which would be a new genesis.
+The genesis miner key is the public RFC 8032 test key. Its secret is public too, so anyone can spend the genesis output. The first miner's node does exactly that to fund the first ticket.
 
 Unit tests use regtest-like parameters (a 12-bit proof-of-work limit) so they can mine many blocks quickly.
 
@@ -244,7 +244,7 @@ Every active ticket pays the miner of heartbeat `T` unconditionally. The smalles
 
 Still, publishing a valid Heartbeat block is not strictly the best move under protocol rewards alone. A miner who finds a valid header can look at the lottery outcome first and decide to throw the block away. That costs the whole Heartbeat payout of the block and risks another miner taking the height, but gives the miner another shot at a better lottery outcome while it keeps working on the same height. That can be rational when the miner's own expected Ledger subsidy, fees, censorship value or an outside bribe outweighs those costs.
 
-The expenditure payout makes selective withholding more expensive; it does not remove it. The protocol does not claim cryptographically unbiased randomness or that publishing is always the dominant strategy. Launch simulations need to model this for different concentrations of Heartbeat hashpower and Ledger ticket weight. A stronger randomness construction would be a separate protocol change; this base protocol adds no commit-reveal, delay function or extra consensus path for it.
+The expenditure payout makes selective withholding more expensive; it does not remove it. The protocol does not claim cryptographically unbiased randomness or that publishing is always the dominant strategy. Launch simulations need to model this for different concentrations of Heartbeat hashpower and Ledger ticket weight. A first simulation finds withholding a clear loss when all hashpower buys tickets, but profitable for a miner with concentrated ticket weight once the ticket market is small relative to the Ledger prize, as is likely at launch [1]. The protocol has no commit-reveal, delay function or extra consensus path against it.
 
 ## Ledger Candidates and Inclusion
 
@@ -381,9 +381,10 @@ The state root commits the height, minted supply, Ledger block count, UTXOs and 
 - The same expenditure gives the same total mining weight under the same `B/K` rules.
 - Faster hardware does not create extra Ledger tickets; every node evaluates one hash per active ticket per heartbeat.
 - More expenditure deliberately gives more relative mining influence.
+- Expenditure is paid to Heartbeat miners, so a miner with hash share `h` gets back about `h` of every ticket budget, its own included. When all hashpower buys tickets, each miner's equilibrium Ledger weight equals its hash share and buyers without hashpower are priced out; in a thin ticket market active miners can hold more than their hash share [1].
 - The Heartbeat Chain uses SHA-256 PoW and is not ASIC-resistant. ASIC hashpower gives sequencing, censorship and reorg power over both layers.
 - Fresh Heartbeat hashes are economically, not cryptographically, hard to bias. A miner can discard a found block after seeing the lottery outcome. Expenditure payouts make that more expensive but do not guarantee that publishing is rational; Ledger rewards, ticket-weight concentration, censorship value and outside bribes remain part of the PoW security model.
-- Ledger winners select and sign non-empty transaction bodies. Heartbeat miners still choose which available signed candidate to include and may censor all of them until the mandatory empty deadline fallback. The fallback guarantees progress, not transaction neutrality or throughput.
+- Ledger winners select and sign non-empty transaction bodies. Heartbeat miners still choose which available signed candidate to include and may censor all of them until the mandatory empty deadline fallback. The fallback guarantees progress, not transaction neutrality or throughput. While fees are near zero, including only one's own candidate costs a miner nothing and turns some Ledger blocks into empty deadline sidecars [1].
 
 ## Still to Validate for a Mainnet Profile
 
@@ -395,7 +396,7 @@ Before a mainnet profile, at least these need to be reviewed again and frozen:
 - limits on transaction counts and signature checks alongside the byte limits;
 - benchmarks for `4,096` tracked tickets, the public lottery scan and worst-case state root updates within ten seconds;
 - calibration of `D`, sidecar propagation and real Ledger block intervals;
-- economic simulations of minimum expenditure, cap squatting, expenditure and hashpower concentration, fee income and selective heartbeat withholding, including miners that also control a large share of Ledger ticket weight;
+- economic simulations of minimum expenditure, cap squatting, expenditure and hashpower concentration, fee income and selective heartbeat withholding, including miners that also control a large share of Ledger ticket weight (a first static model of the miner ticket discount is in [1]);
 - a P2P specification for compact relay, initial sync, snapshots, pruning and historical sidecar availability;
 - property tests for quotient and remainder splitting, the ticket lifecycle, mandatory fallbacks, reorgs, equal-work forks, the supply cap and cross-layer UTXO conflicts.
 
@@ -411,3 +412,7 @@ iuna is trying to make these things true at the same time:
 - There should be one reward system: no principal refund, reissue pool, recovery path or parallel reward bookkeeping.
 
 The design is intentionally small and still evolving. The candidate exists to find out whether these assumptions hold in practice and where they break.
+
+---
+
+[1] Simulation of the miner ticket discount, block withholding and selective inclusion: [`simulations/ticket_discount.md`](../simulations/ticket_discount.md).
