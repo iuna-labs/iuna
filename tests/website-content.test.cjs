@@ -1345,8 +1345,17 @@ test('block rewards open the shared transaction modal with fees as inputs', asyn
         { source: 'inclusion_fee', id: 'ta', value: 2 },
         { source: 'expenditure', id: null, value: 5 },
       ],
+      outputs: [{ source: 'heartbeat_payout', transaction_id: 'p1', output_index: 0, owner: 'miner-address', value: 9 }],
     },
-    ledger: { total: 55, owner: 'finalizer-address', inputs: [{ source: 'subsidy', id: null, value: 50 }, { source: 'ledger_fee_share', id: 'x1', value: 5 }] },
+    ledger: {
+      total: 55,
+      owner: 'finalizer-address',
+      inputs: [{ source: 'subsidy', id: null, value: 50 }, { source: 'ledger_fee_share', id: 'x1', value: 5 }],
+      outputs: [
+        { source: 'subsidy', transaction_id: 's1', output_index: 0, owner: 'finalizer-address', value: 50 },
+        { source: 'ledger_fee_share', transaction_id: 's1', output_index: 1, owner: 'finalizer-address', value: 5 },
+      ],
+    },
   };
   app.getJson = async (url) => {
     requests.push(url);
@@ -1369,8 +1378,8 @@ test('block rewards open the shared transaction modal with fees as inputs', asyn
   assert.equal(app.transactionModalInputs()[0].note, '');
   assert.match(app.transactionModalInputs()[2].note, /active mining tickets/);
   assert.equal(
-    app.transactionModalOutputs().map((output) => `${output.label}:${output.owner}:${output.value}`).join(','),
-    'Heartbeat reward:miner-address:9',
+    app.transactionModalOutputs().map((output) => `${output.label}:${output.ref}:${output.owner}:${output.value}`).join(','),
+    'Heartbeat reward:p1:0:miner-address:9',
   );
   assert.equal(JSON.stringify(app.transactionModalTotals()), '{"in":9,"out":9,"balanced":true}');
 
@@ -1379,7 +1388,20 @@ test('block rewards open the shared transaction modal with fees as inputs', asyn
     app.transactionModalInputs().map((input) => `${input.label}:${input.ref ?? '-'}:${input.value}`).join(','),
     'Subsidy:-:50,Ledger fee share:x1:5',
   );
-  assert.equal(app.transactionModalOutputs()[0].owner, 'finalizer-address');
+  // The subsidy and the fee share are two outputs of one settlement, as consensus credits them.
+  assert.equal(
+    app.transactionModalOutputs().map((output) => `${output.label}:${output.ref}:${output.owner}:${output.value}`).join(','),
+    'Subsidy:s1:0:finalizer-address:50,Ledger fee share:s1:1:finalizer-address:5',
+  );
+  assert.equal(JSON.stringify(app.transactionModalTotals()), '{"in":55,"out":55,"balanced":true}');
+
+  // A node from before reward outpoints still shows its reward as one output.
+  delete breakdown.ledger.outputs;
+  await app.openBlockRewardModal('ledger');
+  assert.equal(
+    app.transactionModalOutputs().map((output) => `${output.label}:${output.ref}:${output.owner}:${output.value}`).join(','),
+    'Ledger reward::finalizer-address:55',
+  );
 
   breakdown.ledger = null;
   await app.openBlockRewardModal('ledger');

@@ -43,9 +43,10 @@ use crate::{
     },
     consensus::{
         Address, Chain, ConsensusError, ConsensusState, GENESIS_MINER, GENESIS_REWARD,
-        HEARTBEAT_TARGET_INTERVAL_SECS, HeartbeatBlock, LEDGER_TARGET_INTERVAL_HEARTBEATS,
-        MAX_TARGET, MAX_TICKET_DURATION, NETWORK_ID, OutPoint, PublicKey, TicketTransaction,
-        Transaction, address_from_public_key, block_payouts, minimum_ticket_budget, sidecar_winner,
+        HEARTBEAT_TARGET_INTERVAL_SECS, Hash, HeartbeatBlock, LEDGER_TARGET_INTERVAL_HEARTBEATS,
+        MAX_TARGET, MAX_TICKET_DURATION, NETWORK_ID, OutPoint, PayoutBreakdown, PublicKey,
+        TicketTransaction, Transaction, address_from_public_key, block_payouts,
+        heartbeat_payout_id, ledger_settlement_id, minimum_ticket_budget, sidecar_winner,
         split_transaction_fees, subsidy, tagged_hash, ticket_fee, ticket_input_state,
         ticket_lifecycle_length,
     },
@@ -465,8 +466,8 @@ pub struct LedgerRewardView {
     pub ledger_transaction_fees: u64,
 }
 
-/// A reward has no transaction of its own. Its inputs are the block's fees and payouts it
-/// collects, and its single output pays `owner`.
+/// A reward has no signed transaction. Its inputs are the block's fees and payouts it collects,
+/// and its outputs are the UTXOs consensus credits to `owner` under a derived transaction ID.
 #[derive(Debug, Serialize)]
 pub struct BlockRewardBreakdownView {
     pub block_hash: String,
@@ -481,6 +482,18 @@ pub struct RewardBreakdownView {
     /// The paid address; unknown for a Ledger winner whose ticket left the kept state.
     pub owner: Option<String>,
     pub inputs: Vec<RewardInputView>,
+    /// Empty when the amounts are unknown, for instance without the parent state.
+    pub outputs: Vec<RewardOutputView>,
+}
+
+#[derive(Clone, Debug, Serialize)]
+pub struct RewardOutputView {
+    /// `heartbeat_payout`, `subsidy` or `ledger_fee_share`.
+    pub source: &'static str,
+    pub transaction_id: String,
+    pub output_index: u32,
+    pub owner: Option<String>,
+    pub value: u64,
 }
 
 #[derive(Clone, Debug, Serialize)]
@@ -1175,12 +1188,15 @@ async fn block_rewards(
         .and_then(|parent| chain.kept_state(&parent));
     let detail = block_detail_view(block, parent_state)
         .map_err(|error| api_error(StatusCode::INTERNAL_SERVER_ERROR, error.to_string()))?;
-    let address = |key: PublicKey| hex(&address_from_public_key(&key));
-    Ok(Json(reward_breakdown(
+    reward_breakdown(
         &detail,
-        Some(address(block.header.miner_public_key)),
-        ledger_winner_public_key(block, parent_state).map(address),
-    )))
+        block.header.parent,
+        block.header.miner_public_key,
+        ledger_winner_public_key(block, parent_state)
+            .map(|key| hex(&address_from_public_key(&key))),
+    )
+    .map(Json)
+    .map_err(|error| api_error(StatusCode::INTERNAL_SERVER_ERROR, error.to_string()))
 }
 
 /// The public listener reads only the projection, so a remote client never takes the node lock
@@ -1219,13 +1235,20 @@ async fn projected_rewards(
     let Some((summary, detail)) = projected else {
         return Ok(None);
     };
-    let detail: BlockDetailView = serde_json::from_str(&detail)
-        .map_err(|error| api_error(StatusCode::INTERNAL_SERVER_ERROR, error.to_string()))?;
-    Ok(Some(reward_breakdown(
-        &detail,
-        summary.miner_address,
-        summary.ledger_miner_address,
-    )))
+    let internal =
+        |error: anyhow::Error| api_error(StatusCode::INTERNAL_SERVER_ERROR, format!("{error:#}"));
+    let detail: BlockDetailView =
+        serde_json::from_str(&detail).map_err(|error| internal(error.into()))?;
+    let parent = summary
+        .parent_hash
+        .as_deref()
+        .map(|parent| decode_hex_32(parent, "parent hash"))
+        .transpose()
+        .map_err(internal)?;
+    let miner = decode_hex_32(&summary.miner_public_key, "miner public key").map_err(internal)?;
+    reward_breakdown(&detail, parent, miner, summary.ledger_miner_address)
+        .map(Some)
+        .map_err(internal)
 }
 
 /// The mining key of the ticket that won a carried Ledger block, known from the parent state.
@@ -1240,11 +1263,14 @@ pub fn ledger_winner_public_key(
         .map(|ticket| ticket.mining_public_key)
 }
 
+/// `parent` and `miner` are what the reward output IDs commit to besides the detail itself.
 pub fn reward_breakdown(
     detail: &BlockDetailView,
-    miner_address: Option<String>,
+    parent: Option<Hash>,
+    miner: PublicKey,
     finalizer_address: Option<String>,
-) -> BlockRewardBreakdownView {
+) -> Result<BlockRewardBreakdownView> {
+    let miner_address = Some(hex(&address_from_public_key(&miner)));
     let transactions = detail
         .ledger
         .as_ref()
@@ -1276,32 +1302,86 @@ pub fn reward_breakdown(
         itemised_inputs("expenditure", std::iter::empty(), heartbeat.expenditure),
     ]
     .concat();
-    BlockRewardBreakdownView {
+    let ledger_rewards = detail.rewards.ledger.as_ref();
+    let payouts = PayoutBreakdown {
+        subsidy: ledger_rewards.map_or(0, |ledger| ledger.subsidy),
+        winner_fees: ledger_rewards.map_or(0, |ledger| ledger.ledger_transaction_fees),
+        heartbeat_fees: heartbeat.ledger_transaction_fees,
+        inclusion_fees: heartbeat.ticket_inclusion_fees,
+        expenditure: heartbeat.expenditure,
+    };
+    let candidate = detail
+        .ledger
+        .as_ref()
+        .map(|ledger| decode_hex_32(&ledger.candidate_hash, "candidate hash"))
+        .transpose()?;
+    let output = |source, transaction_id: Hash, output_index, owner: &Option<String>, value| {
+        RewardOutputView {
+            source,
+            transaction_id: hex(&transaction_id),
+            output_index,
+            owner: owner.clone(),
+            value,
+        }
+    };
+    // Reward IDs commit to the parent. Without one (genesis) there are no reward amounts either.
+    let heartbeat_outputs = match parent {
+        Some(parent) if heartbeat.total > 0 => vec![output(
+            "heartbeat_payout",
+            heartbeat_payout_id(parent, detail.height, miner, candidate, &payouts),
+            0,
+            &miner_address,
+            heartbeat.total,
+        )],
+        _ => Vec::new(),
+    };
+    let ledger_outputs = match (parent, candidate, detail.ledger.as_ref()) {
+        (Some(parent), Some(candidate), Some(ledger)) => {
+            let settlement = ledger_settlement_id(
+                parent,
+                detail.height,
+                candidate,
+                decode_hex_32(&ledger.winning_ticket_id, "winning ticket")?,
+                miner,
+                &payouts,
+            );
+            [
+                (0, "subsidy", payouts.subsidy),
+                (1, "ledger_fee_share", payouts.winner_fees),
+            ]
+            .into_iter()
+            .filter(|(_, _, value)| *value > 0)
+            .map(|(index, source, value)| {
+                output(source, settlement, index, &finalizer_address, value)
+            })
+            .collect()
+        }
+        _ => Vec::new(),
+    };
+    Ok(BlockRewardBreakdownView {
         block_hash: detail.block_hash.clone(),
         height: detail.height,
         heartbeat: RewardBreakdownView {
             total: heartbeat.total,
             owner: miner_address,
             inputs: heartbeat_inputs,
+            outputs: heartbeat_outputs,
         },
-        ledger: detail
-            .rewards
-            .ledger
-            .as_ref()
-            .map(|ledger| RewardBreakdownView {
-                total: ledger.total,
-                owner: finalizer_address,
-                inputs: [
-                    itemised_inputs("subsidy", std::iter::empty(), ledger.subsidy),
-                    itemised_inputs(
-                        "ledger_fee_share",
-                        fee_shares(|split| &split.ledger_winner),
-                        ledger.ledger_transaction_fees,
-                    ),
-                ]
-                .concat(),
-            }),
-    }
+        ledger: ledger_rewards.map(|ledger| RewardBreakdownView {
+            total: ledger.total,
+            owner: finalizer_address.clone(),
+            outputs: ledger_outputs,
+            inputs: [
+                itemised_inputs("subsidy", std::iter::empty(), ledger.subsidy),
+                itemised_inputs(
+                    "ledger_fee_share",
+                    fee_shares(|split| &split.ledger_winner),
+                    ledger.ledger_transaction_fees,
+                ),
+            ]
+            .concat(),
+        }),
+    })
 }
 
 /// Lists each paying item when the items add up to the committed `total`, and otherwise (for
@@ -3979,6 +4059,44 @@ mod tests {
             rewards["heartbeat"]["owner"],
             ledger_summary["miner_address"]
         );
+        // The outputs are the UTXOs consensus credited, at their own outpoints: the Heartbeat
+        // payout, and the Ledger subsidy and fee share as two outputs of one settlement.
+        {
+            let node = state.node.lock().await;
+            let block_state = node.chain().state(&ledger_hash).unwrap();
+            let outputs = |side: &str| {
+                rewards[side]["outputs"]
+                    .as_array()
+                    .unwrap()
+                    .iter()
+                    .map(|output| {
+                        let point = OutPoint {
+                            transaction_id: decode_hex_32(
+                                output["transaction_id"].as_str().unwrap(),
+                                "id",
+                            )
+                            .unwrap(),
+                            output_index: output["output_index"].as_u64().unwrap() as u32,
+                        };
+                        let credited = &block_state.utxos[&point];
+                        assert_eq!(hex(&credited.owner), output["owner"].as_str().unwrap());
+                        assert_eq!(credited.value, output["value"].as_u64().unwrap());
+                        (
+                            output["source"].as_str().unwrap().to_owned(),
+                            point.output_index,
+                        )
+                    })
+                    .collect::<Vec<_>>()
+            };
+            assert_eq!(outputs("heartbeat"), [("heartbeat_payout".to_owned(), 0)]);
+            assert_eq!(
+                outputs("ledger"),
+                [
+                    ("subsidy".to_owned(), 0),
+                    ("ledger_fee_share".to_owned(), 1)
+                ]
+            );
+        }
         // Without the projection the operator gets the same breakdown from the chain, while the
         // public listener never takes the node lock.
         state.ui_store.clear().unwrap();

@@ -231,6 +231,8 @@ test('browser wallet loads a reward breakdown from the public API', async () => 
   // Both apps describe reward inputs identically.
   const inputTable = (text, name) => text.match(new RegExp(`const ${name} = \\{([^;]+)\\};`))[1].replace(/\s+/g, ' ').trim();
   assert.equal(inputTable(app, 'REWARD_INPUTS'), inputTable(source('www/assets/iuna-ui.js'), 'IUNA_REWARD_INPUTS'));
+  assert.equal(inputTable(app, 'REWARD_OUTPUTS'), inputTable(source('www/assets/iuna-ui.js'), 'IUNA_REWARD_OUTPUTS'));
+  assert.match(app, /`\$\{output\.transaction_id\}:\$\{output\.output_index\}`/);
   for (const label of ['Ledger fee share', 'Inclusion fee', 'Ticket expenditure', 'Subsidy']) assert.ok(app.includes(label));
   assert.match(source('wallet/index.html'), /<div id="modal"><\/div>/);
 });

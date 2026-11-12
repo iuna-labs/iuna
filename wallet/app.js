@@ -182,6 +182,8 @@ const REWARD_INPUTS = {
   expenditure: { label: "Ticket expenditure", note: "Budget slices paid out by active mining tickets in this Heartbeat." },
   subsidy: { label: "Subsidy", note: "Newly minted by this Ledger block." },
 };
+// A Ledger reward pays its subsidy and its fee share as two outputs of one settlement.
+const REWARD_OUTPUTS = { heartbeat_payout: "Heartbeat reward", subsidy: "Subsidy", ledger_fee_share: "Ledger fee share" };
 
 function rewardModalHtml({ kind, hash, height, amount, breakdown, failed }) {
   const label = kind === "heartbeat" ? "Heartbeat reward" : "Ledger reward";
@@ -194,9 +196,17 @@ function rewardModalHtml({ kind, hash, height, amount, breakdown, failed }) {
     const note = input.id || !known.note ? "" : `<p class="muted">${escape(known.note)}</p>`;
     return `<div class="flow-node fee"><div class="flow-label"><span>${escape(known.label)}</span><span>collected</span></div>${reference}<div class="flow-amount">${escape(formatIuna(input.value))} IUNA</div>${note}</div>`;
   }).join("") || empty("No inputs")) : pending;
-  const mine = reward?.owner && view?.activity_addresses?.includes(reward.owner);
-  const owner = reward?.owner ? `<span class="label">Owner${mine ? " · this wallet" : ""}</span><code class="truncate" title="${escape(reward.owner)}">${escape(reward.owner)}</code>` : "";
-  const outputs = reward ? `<div class="flow-node"><div class="flow-label"><span>${label}</span><span>output</span></div><div class="flow-amount">${escape(formatIuna(reward.total))} IUNA</div>${owner}</div>` : pending;
+  const ownerHtml = (address) => {
+    if (!address) return "";
+    const mine = view?.activity_addresses?.includes(address);
+    return `<span class="label">Owner${mine ? " · this wallet" : ""}</span><code class="truncate" title="${escape(address)}">${escape(address)}</code>`;
+  };
+  // A node from before reward outpoints sends no outputs; its reward is then one output.
+  const outputs = reward ? ((reward.outputs || [{ owner: reward.owner, value: reward.total }]).map((output) => {
+    const outpoint = output.transaction_id == null ? "" : `${output.transaction_id}:${output.output_index}`;
+    const reference = outpoint ? `<code class="truncate" title="${escape(outpoint)}">${escape(outpoint)}</code>` : "";
+    return `<div class="flow-node"><div class="flow-label"><span>${escape(REWARD_OUTPUTS[output.source] || label)}</span><span>output</span></div>${reference}<div class="flow-amount">${escape(formatIuna(output.value))} IUNA</div>${ownerHtml(output.owner)}</div>`;
+  }).join("") || empty("No outputs")) : pending;
   const totalIn = reward ? `${formatIuna(reward.inputs.reduce((sum, input) => sum + Number(input.value), 0))} IUNA` : "…";
   const totalOut = `${formatIuna(reward?.total ?? amount)} IUNA`;
   return `<div class="modal-backdrop" data-action="close-modal"><section class="modal" role="dialog" aria-modal="true" aria-labelledby="modal-title" tabindex="-1"><div class="modal-head"><div class="modal-title"><span class="pill">${label}</span><h2 id="modal-title">${label}</h2><code class="truncate" title="${escape(hash)}">${escape(hash)}</code></div><button data-action="close-modal">Close</button></div><div class="stats"><div class="stat"><span>Source</span><strong>Heartbeat ${escape(height || "—")}</strong></div><div class="stat"><span>Total in</span><strong>${escape(totalIn)}</strong></div><div class="stat"><span>Total out</span><strong>${escape(totalOut)}</strong></div></div><div class="flow"><div class="flow-column"><h3>Inputs</h3>${inputs}</div><div class="flow-arrow" aria-hidden="true">&rarr;</div><div class="flow-column"><h3>Outputs</h3>${outputs}</div></div></section></div>`;

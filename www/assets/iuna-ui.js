@@ -10,6 +10,8 @@ const IUNA_REWARD_INPUTS = {
   expenditure: { label: "Ticket expenditure", note: "Budget slices paid out by active mining tickets in this Heartbeat." },
   subsidy: { label: "Subsidy", note: "Newly minted by this Ledger block." },
 };
+// A Ledger reward pays its subsidy and its fee share as two outputs of one settlement.
+const IUNA_REWARD_OUTPUTS = { heartbeat_payout: "Heartbeat reward", subsidy: "Subsidy", ledger_fee_share: "Ledger fee share" };
 
 window.iunaApp = function iunaApp() {
   return {
@@ -1338,7 +1340,14 @@ window.iunaApp = function iunaApp() {
           value: input.value,
           key: `${input.source}:${input.id ?? index}`,
         })),
-        outputs: [{ label, kind: "output", owner: reward.owner, value: reward.total }],
+        // A node from before reward outpoints sends no outputs; its reward is then one output.
+        outputs: (reward.outputs || [{ owner: reward.owner, value: reward.total }]).map((output) => ({
+          label: IUNA_REWARD_OUTPUTS[output.source] || label,
+          kind: "output",
+          owner: output.owner,
+          ref: output.transaction_id == null ? "" : `${output.transaction_id}:${output.output_index}`,
+          value: output.value,
+        })),
       };
     },
 

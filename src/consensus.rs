@@ -2197,6 +2197,52 @@ fn apply_lifecycle_payouts(
     Ok(())
 }
 
+/// The transaction ID of the outputs paying a Ledger block's winner: the subsidy at output 0 and
+/// the winner's fee share at output 1, each present only when nonzero. Settlement happens before
+/// the ticket stage, so only the Ledger amounts of `payouts` are committed.
+pub fn ledger_settlement_id(
+    parent: Hash,
+    height: u64,
+    candidate_hash: Hash,
+    ticket_id: Hash,
+    heartbeat_miner: PublicKey,
+    payouts: &PayoutBreakdown,
+) -> Hash {
+    let ledger_payouts = PayoutBreakdown {
+        subsidy: payouts.subsidy,
+        winner_fees: payouts.winner_fees,
+        heartbeat_fees: payouts.heartbeat_fees,
+        inclusion_fees: 0,
+        expenditure: 0,
+    };
+    let mut preimage = Vec::new();
+    preimage.extend_from_slice(&parent);
+    put_u64(&mut preimage, height);
+    preimage.extend_from_slice(&candidate_hash);
+    preimage.extend_from_slice(&ticket_id);
+    preimage.extend_from_slice(&heartbeat_miner);
+    preimage.extend_from_slice(&ledger_payouts.canonical());
+    tagged_hash(b"IUNA-LEDGER-SETTLEMENT-v1", &preimage)
+}
+
+/// The transaction ID of a Heartbeat miner's single payout output, which exists only when the
+/// Heartbeat total is nonzero. `candidate_hash` names the carried Ledger block, if any.
+pub fn heartbeat_payout_id(
+    parent: Hash,
+    height: u64,
+    miner: PublicKey,
+    candidate_hash: Option<Hash>,
+    payouts: &PayoutBreakdown,
+) -> Hash {
+    let mut preimage = Vec::new();
+    preimage.extend_from_slice(&parent);
+    put_u64(&mut preimage, height);
+    preimage.extend_from_slice(&miner);
+    preimage.extend_from_slice(&candidate_hash.unwrap_or(ZERO_HASH));
+    preimage.extend_from_slice(&payouts.canonical());
+    tagged_hash(b"IUNA-HEARTBEAT-PAYOUT-v1", &preimage)
+}
+
 fn credit_settlement_outputs(
     state: &mut ConsensusState,
     parent: Hash,
@@ -2206,14 +2252,14 @@ fn credit_settlement_outputs(
     heartbeat_miner: PublicKey,
     payouts: &PayoutBreakdown,
 ) -> Result<()> {
-    let mut preimage = Vec::new();
-    preimage.extend_from_slice(&parent);
-    put_u64(&mut preimage, height);
-    preimage.extend_from_slice(&candidate_hash);
-    preimage.extend_from_slice(&winner.ticket_id);
-    preimage.extend_from_slice(&heartbeat_miner);
-    preimage.extend_from_slice(&payouts.canonical());
-    let settlement = tagged_hash(b"IUNA-LEDGER-SETTLEMENT-v1", &preimage);
+    let settlement = ledger_settlement_id(
+        parent,
+        height,
+        candidate_hash,
+        winner.ticket_id,
+        heartbeat_miner,
+        payouts,
+    );
     if payouts.subsidy > 0 {
         state.utxos.insert(
             OutPoint {
@@ -2253,13 +2299,7 @@ fn credit_heartbeat_payout(
     if total == 0 {
         return Ok(());
     }
-    let mut preimage = Vec::new();
-    preimage.extend_from_slice(&parent);
-    put_u64(&mut preimage, height);
-    preimage.extend_from_slice(&miner);
-    preimage.extend_from_slice(&candidate_hash.unwrap_or(ZERO_HASH));
-    preimage.extend_from_slice(&payouts.canonical());
-    let id = tagged_hash(b"IUNA-HEARTBEAT-PAYOUT-v1", &preimage);
+    let id = heartbeat_payout_id(parent, height, miner, candidate_hash, payouts);
     if state
         .utxos
         .insert(

@@ -358,7 +358,7 @@ For an included candidate the settlement ID is:
 
 `S = SHA256("IUNA-LEDGER-SETTLEMENT-v1" || H_Heartbeat,parent || new height || H_C || ticket ID || Heartbeat miner public key || canonical amounts)`
 
-Fixed output indexes under `S` identify the subsidy and the winner's fee share. The combined payout to the Heartbeat miner uses a separate ID over the parent, height, miner public key, candidate hash (or zero) and the canonical payout breakdown. All of these inputs are known before the new post-state root is computed.
+The canonical amounts in `S` are the breakdown at settlement, before the ticket batch: the inclusion fees and expenditure in it are still zero. Fixed output indexes under `S` identify the subsidy and the winner's fee share. The combined payout to the Heartbeat miner uses a separate ID over the parent, height, miner public key, candidate hash (or zero) and the canonical payout breakdown. All of these inputs are known before the new post-state root is computed.
 
 A synthetic output with amount zero is never created and cannot be referenced as an input. Its fixed index stays reserved, so other outputs do not shift. This also applies to a combined Heartbeat miner payout of zero. A settlement with no subsidy and no winner fees therefore creates no UTXOs under `S`.
 
