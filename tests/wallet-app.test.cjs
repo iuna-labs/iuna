@@ -254,6 +254,9 @@ test('wallet settings name reachable endpoints and previous wallets are explaine
   assert.match(app, /data-field="activity-more"/);
   assert.match(app, /new IntersectionObserver/);
   assert.doesNotMatch(app, /Load older activity/);
+  // A view that loads after the wallet was locked or switched never replaces the current one.
+  assert.match(app, /async function refresh[^]*?const owner = wallet;[^]*?fetchWalletView\(apiEndpoint\(\), owner\);\s*if \(wallet !== owner\) return false;\s*mergeLoadedActivity/);
+  assert.match(app, /catch \(error\) \{\s*if \(wallet !== owner\) return false;/);
   assert.match(app, /submitTransaction\(apiEndpoint\(\), transaction\);[^]*?view\.change_index = \(view\.change_index \|\| 0\) \+ 1/);
 });
 

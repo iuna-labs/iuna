@@ -405,16 +405,21 @@ async function refresh(silent = false) {
     if (awayFromDashboard) return;
     if (app.querySelector("[data-screen=wallet]")) updateDashboard(); else renderDashboard();
   };
+  // The wallet may be locked or switched while the view loads. A stale answer is dropped, and
+  // the current wallet's own refresh schedules the next poll.
+  const owner = wallet;
   try {
-    const fresh = await fetchWalletView(apiEndpoint(), wallet);
+    const fresh = await fetchWalletView(apiEndpoint(), owner);
+    if (wallet !== owner) return false;
     mergeLoadedActivity(fresh, view);
     view = fresh;
-    if (wallet) render();
+    render();
   }
   catch (error) {
+    if (wallet !== owner) return false;
     connected = false;
     view ||= { network: "Disconnected", heartbeat_height: "—", ledger_blocks: "—", balance: 0, spendable_balance: 0, utxos: [], activity: { pending: [], confirmed: [] } };
-    if (wallet) render();
+    render();
     if (!silent) toast(error.message, true);
   }
   clearTimeout(pollTimer); pollTimer = setTimeout(() => refresh(true), POLL_MS);
