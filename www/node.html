@@ -325,7 +325,7 @@
     .info-details > summary { width: 18px; height: 18px; display: grid; place-items: center; border: 1px solid var(--line-strong); border-radius: 50%; color: var(--muted); font-size: 11px; font-weight: 900; cursor: pointer; list-style: none; }
     .info-details > summary::-webkit-details-marker { display: none; }
     .info-details[open] > summary { border-color: var(--green); color: var(--green); }
-    .info-popover { position: absolute; z-index: 12; top: 25px; right: 0; width: min(320px, 75vw); border: 1px solid var(--line-strong); border-radius: 8px; padding: 10px 12px; background: var(--panel); color: var(--muted); font-size: 12px; font-weight: 500; line-height: 1.45; box-shadow: 0 16px 40px rgba(0,0,0,.4); }
+    .info-popover { position: absolute; z-index: 12; top: 25px; right: 0; width: min(320px, 75vw); border: 1px solid var(--line-strong); border-radius: 8px; padding: 10px 12px; background: var(--panel); color: var(--muted); font-size: 12px; font-weight: 500; line-height: 1.45; letter-spacing: normal; text-transform: none; box-shadow: 0 16px 40px rgba(0,0,0,.4); }
     .mining-runtime { display: flex; align-items: center; gap: 9px; margin-top: 12px; border: 1px solid var(--line); border-radius: 8px; padding: 10px 12px; background: var(--panel-2); color: var(--muted); font-size: 12px; font-weight: 750; }
     .mining-runtime-dot { width: 9px; height: 9px; flex: 0 0 auto; border-radius: 50%; background: var(--muted-2); }
     .mining-runtime.active { border-color: var(--green-line); color: var(--green); background: var(--green-soft); }
@@ -492,7 +492,7 @@
                 <button class="primary" type="submit" :disabled="ticket.busy || !canManage()" x-text="ticket.busy ? 'Submitting…' : 'Submit ticket'"></button>
               </form>
               <div class="grid">
-                <div class="stat"><div class="stat-label title-with-pill">Minimum <details class="info-details"><summary aria-label="Why is there a minimum budget?">i</summary><div class="info-popover">The minimum prices one of the limited active ticket slots. It rises with the next Ledger reward and the selected duration, preventing free slot exhaustion.</div></details></div><div class="stat-value">IUNA <span x-text="ticket.quote ? amountLabel(ticket.quote.current_minimum_budget) : '…'"></span></div></div>
+                <div class="stat"><div class="stat-label title-with-pill">Minimum <details class="info-details" @click.outside="$el.open = false"><summary aria-label="Why is there a minimum budget?">i</summary><div class="info-popover">The minimum prices one of the limited active ticket slots. It rises with the next Ledger reward and the selected duration, preventing free slot exhaustion.</div></details></div><div class="stat-value">IUNA <span x-text="ticket.quote ? amountLabel(ticket.quote.current_minimum_budget) : '…'"></span></div></div>
                 <div class="stat"><div class="stat-label">Recommended</div><div class="stat-value">IUNA <span x-text="ticket.quote ? amountLabel(ticket.quote.recommended_budget) : '…'"></span></div></div>
               </div>
             </div>
@@ -502,7 +502,7 @@
                 <div class="stat"><div class="stat-label">Ticket duration</div><div class="stat-value">10 Heartbeats</div></div>
                 <div class="stat"><div class="stat-label">Ticket fee</div><div class="stat-value">IUNA <span x-text="amountLabel(1)"></span></div></div>
                 <div class="stat"><div class="stat-label">Other active weight</div><div class="stat-value">IUNA <span x-text="ledgerOtherTicketPowerLabel()"></span> / Heartbeat</div></div>
-                <div class="stat"><div class="stat-label title-with-pill">Maximum net EV <details class="info-details"><summary aria-label="How is maximum net EV calculated?">i</summary><div class="info-popover">Calculated from the total active ticket weight in the latest Heartbeat, minus this wallet's current active weight, and the exact weight of the next automatic ticket. It assumes that competing weight stays unchanged and every eligible win settles. Budget and fee are deducted; variable Ledger fees and Heartbeat-miner rebates are excluded.</div></details></div><div class="stat-value">IUNA <span x-text="ledgerMaximumNetEvLabel()"></span></div></div>
+                <div class="stat"><div class="stat-label title-with-pill">Maximum net EV <details class="info-details" @click.outside="$el.open = false"><summary aria-label="How is maximum net EV calculated?">i</summary><div class="info-popover">Calculated from the total active ticket weight in the latest Heartbeat, minus this wallet's current active weight, and the exact weight of the next automatic ticket. It assumes that competing weight stays unchanged and every eligible win settles. Budget and fee are deducted; variable Ledger fees and Heartbeat-miner rebates are excluded.</div></details></div><div class="stat-value">IUNA <span x-text="ledgerMaximumNetEvLabel()"></span></div></div>
                 <div class="stat"><div class="stat-label">Next ticket</div><div class="stat-value" x-text="ledgerNextTicketLabel()"></div></div>
               </div>
             </div>

@@ -302,6 +302,8 @@ test('mining explains and meters both kinds of mining power', () => {
   ]) assert.match(html, new RegExp(copy));
   assert.match(html, /class="mining-meter"/);
   assert.match(html, /class="mining-meter ledger"/);
+  assert.match(html, /\.info-popover \{[^}]*letter-spacing: normal; text-transform: none;/);
+  assert.equal(html.match(/class="info-details" @click\.outside="\$el\.open = false"/g)?.length, 2);
 });
 
 test('node UI converts IUNA amounts at consensus precision', () => {
