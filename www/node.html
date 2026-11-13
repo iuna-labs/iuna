@@ -199,6 +199,8 @@
     .tx-section-title { display: flex; justify-content: space-between; gap: 10px; align-items: center; margin-bottom: 9px; color: var(--text); font-size: 13px; font-weight: 850; }
     .tx-section-meta { color: var(--muted-2); font-size: 11px; font-weight: 700; }
     .tx-scroll-list { display: grid; gap: 8px; max-height: 420px; overflow: auto; }
+    .wallet-address-row { grid-template-columns: minmax(120px, .25fr) minmax(0, 1fr) auto; }
+    .wallet-address-row code { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
     .tx-card { min-width: 0; border: 1px solid var(--line); border-radius: 8px; background: var(--panel); }
     .tx-card-button { width: 100%; display: grid; grid-template-columns: auto minmax(0, 1fr) auto; gap: 10px; align-items: center; padding: 10px; color: var(--text); text-align: left; }
     .tx-card-button:hover, .tx-card-button:focus-visible { border-color: var(--green); color: var(--text); outline: none; }
@@ -420,7 +422,7 @@
                 </form>
               </article>
               <article class="panel">
-                <div class="panel-head"><h2>Receive</h2><button @click="copyWalletAddress">Copy address</button></div>
+                <div class="panel-head"><h2>Receive</h2><div class="backup-actions" style="margin:0"><button @click="openWalletAddresses()" :disabled="!canManage()">View addresses</button><button @click="copyWalletAddress">Copy address</button></div></div>
                 <div class="address"><code x-text="status.wallet_receive_address || 'Wallet unavailable'"></code></div>
                 <div class="grid" style="margin-top:12px">
                   <div class="stat"><div class="stat-label">Balance</div><div class="stat-value">IUNA <span x-text="amountLabel(status.wallet_balance)"></span></div></div>
@@ -845,6 +847,23 @@
         <template x-for="utxo in activity?.utxos || []" :key="`${utxo.transaction_id}:${utxo.output_index}`"><div class="io-row"><span class="tx-value money">IUNA <span x-text="amountLabel(utxo.value)"></span></span> <span class="pill" x-show="utxo.reserved">Reserved</span><code x-text="`${utxo.transaction_id}:${utxo.output_index}`"></code></div></template>
       </div>
       <div class="empty" x-show="!utxosBusy && activity && !activity.utxos.length">No unspent outputs.</div>
+    </section>
+  </div>
+
+  <div class="setup-overlay" x-show="showWalletAddresses" x-transition.opacity @click.self="closeModals()">
+    <section class="setup-modal" role="dialog" aria-modal="true" aria-labelledby="wallet-addresses-title" style="width:min(820px,100%)" x-ref="walletAddressesModal" tabindex="-1">
+      <div class="panel-head"><div><div class="setup-kicker">Wallet details</div><h1 id="wallet-addresses-title">Wallet addresses</h1></div><button @click="showWalletAddresses = false">Close</button></div>
+      <p class="muted">The mining identity and the receive and change addresses in this wallet's recovery window.</p>
+      <div class="activity-filters" aria-label="Address filters" style="margin-bottom:12px">
+        <button class="activity-filter" :class="{active: walletAddressFilter === 'used'}" :aria-pressed="walletAddressFilter === 'used'" @click="walletAddressFilter = 'used'">Used &amp; current <span x-show="walletAddresses" x-text="`(${relevantWalletAddresses().length})`"></span></button>
+        <button class="activity-filter" :class="{active: walletAddressFilter === 'all'}" :aria-pressed="walletAddressFilter === 'all'" @click="walletAddressFilter = 'all'">All <span x-show="walletAddresses" x-text="`(${walletAddresses?.length || 0})`"></span></button>
+      </div>
+      <div class="detail-loading" x-show="walletAddressesBusy">Loading wallet addresses…</div>
+      <div class="tx-scroll-list" x-show="!walletAddressesBusy && visibleWalletAddresses().length">
+        <template x-for="item in visibleWalletAddresses()" :key="`${item.kind}:${item.index ?? 'root'}`"><div class="activity-row wallet-address-row"><div><b x-text="walletAddressLabel(item)"></b><div class="backup-actions" style="margin:4px 0 0"><span class="pill" x-show="item.current">Current</span><span class="pill" x-show="item.used">Used</span></div></div><code :title="item.address" x-text="item.address"></code><button @click="copyValue(item.address, 'Address copied')">Copy</button></div></template>
+      </div>
+      <div class="empty" x-show="!walletAddressesBusy && walletAddresses && !visibleWalletAddresses().length">No addresses match this filter.</div>
+      <div class="empty" x-show="!walletAddressesBusy && walletAddressesError" x-text="walletAddressesError"></div>
     </section>
   </div>
 

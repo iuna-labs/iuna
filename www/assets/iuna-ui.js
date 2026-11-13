@@ -28,6 +28,11 @@ window.iunaApp = function iunaApp() {
     activityFilters: { transfers: true, tickets: true, heartbeatRewards: true, ledgerRewards: true },
     showUtxos: false,
     utxosBusy: false,
+    showWalletAddresses: false,
+    walletAddresses: null,
+    walletAddressesBusy: false,
+    walletAddressesError: null,
+    walletAddressFilter: "used",
     contacts: [],
     contactForm: { name: "", address: "" },
     contactModalOpen: false,
@@ -159,6 +164,7 @@ window.iunaApp = function iunaApp() {
       return !(this.setupReady && (this.showSetup || this.showLogin))
         && !this.pendingTransfer
         && !this.showUtxos
+        && !this.showWalletAddresses
         && !this.selectedTransaction
         && this.tourStep === null;
     },
@@ -212,6 +218,10 @@ window.iunaApp = function iunaApp() {
       }
       if (this.showUtxos) {
         this.showUtxos = false;
+        return;
+      }
+      if (this.showWalletAddresses) {
+        this.showWalletAddresses = false;
         return;
       }
       if (this.showSetup) {
@@ -2139,6 +2149,41 @@ window.iunaApp = function iunaApp() {
       } finally {
         this.utxosBusy = false;
       }
+    },
+
+    async openWalletAddresses() {
+      this.showWalletAddresses = true;
+      this.$nextTick(() => this.$refs.walletAddressesModal?.focus());
+      if (this.walletAddressesBusy) return;
+      this.walletAddressesBusy = true;
+      this.walletAddresses = null;
+      this.walletAddressesError = null;
+      try {
+        const view = await this.postJson("/api/wallet/addresses", {});
+        this.walletAddresses = Array.isArray(view.addresses) ? view.addresses : [];
+      } catch (error) {
+        this.walletAddressesError = error.message;
+        this.notify(error.message, "error");
+      } finally {
+        this.walletAddressesBusy = false;
+      }
+    },
+
+    visibleWalletAddresses() {
+      const addresses = this.walletAddresses || [];
+      if (this.walletAddressFilter === "all") return addresses;
+      return this.relevantWalletAddresses();
+    },
+
+    relevantWalletAddresses() {
+      return (this.walletAddresses || [])
+        .filter((item) => item.kind === "mining" || item.used || item.current);
+    },
+
+    walletAddressLabel(item) {
+      if (item.kind === "mining") return "Mining address";
+      const branch = item.kind === "receive" ? "Receive" : "Change";
+      return `${branch} #${Number(item.index) + 1}`;
     },
 
     async copyValue(value, label = "Copied") {

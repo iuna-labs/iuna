@@ -714,6 +714,31 @@ test('wallet activity includes mining rewards and UTXOs open separately', async 
   assert.doesNotMatch(html, /<details class="tx-card" style="margin-top:12px" x-show="activity\?\.utxos/);
 });
 
+test('receive panel opens a filterable wallet-address modal', async () => {
+  const { app } = nodeApp();
+  const addresses = [
+    { kind: 'mining', index: null, address: 'aa', used: true, current: false },
+    { kind: 'receive', index: 0, address: 'bb', used: false, current: true },
+    { kind: 'change', index: 0, address: 'cc', used: false, current: false },
+  ];
+  let requested;
+  app.postJson = async (path) => { requested = path; return { addresses }; };
+  await app.openWalletAddresses();
+  assert.equal(requested, '/api/wallet/addresses');
+  assert.equal(app.showWalletAddresses, true);
+  assert.deepEqual(app.visibleWalletAddresses().map((item) => item.address), ['aa', 'bb']);
+  app.walletAddressFilter = 'all';
+  assert.deepEqual(app.visibleWalletAddresses().map((item) => item.address), ['aa', 'bb', 'cc']);
+  assert.equal(app.walletAddressLabel(addresses[0]), 'Mining address');
+  assert.equal(app.walletAddressLabel(addresses[1]), 'Receive #1');
+  assert.equal(app.shortcutsAvailable(), false);
+
+  const html = content('www/node.html');
+  assert.match(html, /@click="openWalletAddresses\(\)"[^>]*>View addresses/);
+  assert.match(html, /id="wallet-addresses-title">Wallet addresses/);
+  assert.match(html, /x-for="item in visibleWalletAddresses\(\)"/);
+});
+
 test('wallet activity filters each protocol action and keeps filtered infinite scroll', () => {
   const { app } = nodeApp();
   const make = (kind, count) => Array.from({ length: count }, (_, index) => ({ kind, id: `${kind}-${index}` }));

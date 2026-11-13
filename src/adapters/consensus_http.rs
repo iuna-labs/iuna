@@ -116,6 +116,21 @@ pub struct OperatorStatus {
     pub pow_limit: String,
 }
 
+#[derive(Debug, Serialize)]
+pub struct WalletAddressView {
+    /// `mining`, `receive` or `change`.
+    pub kind: &'static str,
+    pub index: Option<u32>,
+    pub address: String,
+    pub used: bool,
+    pub current: bool,
+}
+
+#[derive(Debug, Serialize)]
+pub struct WalletAddressesView {
+    pub addresses: Vec<WalletAddressView>,
+}
+
 #[derive(Debug, Deserialize)]
 pub struct LedgerTransactionRequest {
     pub recipient: String,
@@ -580,6 +595,7 @@ fn is_loopback_host(host: &str) -> bool {
 pub fn router(state: ConsensusHttpState) -> Router {
     let management = Router::new()
         .route("/api/wallet", post(access_wallet))
+        .route("/api/wallet/addresses", post(wallet_addresses))
         .route("/api/ledger-transactions", post(submit_transaction))
         .route("/api/mining-tickets", post(submit_ticket))
         .route("/api/hash-mining", post(set_heartbeat_mining))
@@ -1129,6 +1145,57 @@ async fn wallet_activity(
         confirmed,
         next_before_height,
     }))
+}
+
+/// Every address in the node wallet's bounded recovery window. This is an authenticated
+/// management view because the complete address set reveals more wallet history than status.
+async fn wallet_addresses(
+    State(state): State<ConsensusHttpState>,
+) -> std::result::Result<Response, ApiErrorResponse> {
+    let wallet = unlocked_wallet(&state)?;
+    // Deriving the complete recovery window is CPU work and does not need the consensus lock.
+    let receive_addresses = (0..WALLET_ADDRESS_SCAN_LIMIT)
+        .map(|index| wallet.receive_address(index))
+        .collect::<Vec<_>>();
+    let change_addresses = (0..WALLET_ADDRESS_SCAN_LIMIT)
+        .map(|index| wallet.change_address(index))
+        .collect::<Vec<_>>();
+    let mut node = state.node.lock().await;
+    let current_receive_index = receive_addresses
+        .iter()
+        .position(|address| !node.address_used(address));
+    let mut addresses = Vec::with_capacity(1 + 2 * WALLET_ADDRESS_SCAN_LIMIT as usize);
+    let mining_address = wallet.address();
+    addresses.push(WalletAddressView {
+        kind: "mining",
+        index: None,
+        address: hex(&mining_address),
+        used: node.address_used(&mining_address),
+        current: false,
+    });
+    for (index, address) in receive_addresses.into_iter().enumerate() {
+        addresses.push(WalletAddressView {
+            kind: "receive",
+            index: Some(u32::try_from(index).expect("wallet address index fits u32")),
+            address: hex(&address),
+            used: node.address_used(&address),
+            current: current_receive_index == Some(index),
+        });
+    }
+    for (index, address) in change_addresses.into_iter().enumerate() {
+        addresses.push(WalletAddressView {
+            kind: "change",
+            index: Some(u32::try_from(index).expect("wallet address index fits u32")),
+            address: hex(&address),
+            used: node.address_used(&address),
+            current: false,
+        });
+    }
+    let mut response = Json(WalletAddressesView { addresses }).into_response();
+    response
+        .headers_mut()
+        .insert(header::CACHE_CONTROL, HeaderValue::from_static("no-store"));
+    Ok(response)
 }
 
 async fn block_detail(
@@ -3130,7 +3197,7 @@ mod tests {
             node_instance_id: "00112233445566778899aabbccddeeff".to_owned(),
             node: Arc::new(Mutex::new(node)),
             ui_store: ConsensusUiStore::open(directory.path().join("ui.sqlite3")).unwrap(),
-            wallet: wallet_state(&directory, None),
+            wallet: wallet_state(&directory, Some(Arc::new(Wallet::from_seed([42; 32])))),
             operator_token_hash: None,
             trusted_management: true,
             relay: None,
@@ -3165,6 +3232,14 @@ mod tests {
                 "accepted origin {origin:?} for host {host}"
             );
         }
+
+        // Browsers attach Origin to this management POST, so the same-origin local UI can read
+        // the privacy-sensitive address set without an operator token.
+        let response = router(state)
+            .oneshot(local_json_request("/api/wallet/addresses", "{}".to_owned()))
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
     }
 
     #[tokio::test]
@@ -3513,6 +3588,40 @@ mod tests {
         );
         assert_eq!(detail["inputs"][0]["value"], GENESIS_REWARD);
         assert!(mempool["mining_tickets"].as_array().unwrap().is_empty());
+
+        let response = router(transaction_state.clone())
+            .oneshot(json_request(
+                "/api/wallet/addresses",
+                "{}".to_owned(),
+                Some(TOKEN),
+            ))
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+        assert_eq!(
+            response.headers().get(header::CACHE_CONTROL).unwrap(),
+            "no-store"
+        );
+        let bytes = axum::body::to_bytes(response.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        let addresses: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+        let addresses = addresses["addresses"].as_array().unwrap();
+        assert_eq!(addresses.len(), 1 + 2 * WALLET_ADDRESS_SCAN_LIMIT as usize);
+        assert_eq!(addresses[0]["kind"], "mining");
+        assert_eq!(addresses[0]["address"], hex(&wallet.address()));
+        assert_eq!(addresses[1]["kind"], "receive");
+        assert_eq!(addresses[1]["index"], 0);
+        assert_eq!(addresses[1]["current"], true);
+        assert_eq!(
+            addresses[1 + WALLET_ADDRESS_SCAN_LIMIT as usize]["kind"],
+            "change"
+        );
+        assert_eq!(
+            addresses[1 + WALLET_ADDRESS_SCAN_LIMIT as usize]["used"],
+            true
+        );
+
         let response = router(transaction_state)
             .oneshot(Request::get("/api/status").body(Body::empty()).unwrap())
             .await
