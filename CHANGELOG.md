@@ -5,6 +5,35 @@ from the Git history and Conventional Commit titles by `deployment.sh`.
 
 ## [Unreleased]
 
+## [0.6.7] - 2026-11-13
+
+### Added
+
+- estimate ticket EV from active weight
+- show sync progress card
+- optimize automatic ticket budget
+
+### Fixed
+
+- improve mining info popovers
+
+### Changed
+
+- drop the single-wallet storage migration
+
+### Documentation
+
+- simulate the miner ticket discount
+
+### Build
+
+- remove older downloads after a successful deployment
+
+### Maintenance
+
+- remove the unused protocol visualization
+- stop ignoring release-evidence
+
 ## [0.6.6] - 2026-11-12
 
 ### Added
