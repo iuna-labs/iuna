@@ -154,6 +154,14 @@
     .address { border: 1px solid var(--line); border-radius: 8px; padding: 12px; background: var(--panel-2); }
     .flash { position: fixed; z-index: 80; top: 18px; left: 50%; transform: translateX(-50%); max-width: min(600px, calc(100% - 32px)); border: 1px solid var(--green-line); border-radius: 8px; padding: 10px 14px; background: var(--green-soft); color: var(--green); font-weight: 800; }
     .flash.error { border-color: var(--danger-line); background: var(--danger-soft); color: var(--danger-text); }
+    .sync-card { position: fixed; z-index: 60; right: 18px; bottom: 18px; width: min(320px, calc(100vw - 36px)); display: grid; grid-template-columns: auto minmax(0, 1fr); gap: 12px; align-items: center; border: 1px solid var(--amber-line); border-radius: 10px; padding: 13px 14px; background: var(--panel); box-shadow: 0 16px 42px rgba(0, 0, 0, .45); }
+    .sync-card-spinner { width: 22px; height: 22px; border: 2px solid var(--amber-line); border-top-color: var(--amber); border-radius: 50%; animation: sync-spin .9s linear infinite; }
+    .sync-card-copy { min-width: 0; display: grid; gap: 4px; }
+    .sync-card-copy strong { color: var(--amber-text); font-size: 13px; }
+    .sync-card-copy > span { overflow: hidden; color: var(--muted); font-size: 11px; text-overflow: ellipsis; white-space: nowrap; }
+    .sync-card-progress { height: 3px; margin-top: 3px; overflow: hidden; border-radius: 999px; background: var(--line); }
+    .sync-card-progress > span { display: block; height: 100%; border-radius: inherit; background: var(--amber); transition: width .25s ease; }
+    @keyframes sync-spin { to { transform: rotate(360deg); } }
     .pill { display: inline-flex; align-items: center; border: 1px solid var(--line-strong); border-radius: 999px; padding: 3px 7px; color: var(--muted); font-size: 10px; font-weight: 850; white-space: nowrap; }
     .chain-row { display: flex; gap: 8px; overflow-x: auto; padding: 1px 0 10px; scroll-snap-type: x proximity; }
     .chain-panel { position: relative; margin-top: 43px; padding-top: 18px; }
@@ -337,13 +345,12 @@
     .tour-spotlight { position: fixed; border: 2px solid var(--green); border-radius: 10px; box-shadow: 0 0 0 9999px rgba(9, 10, 11, .78); pointer-events: none; transition: all .2s ease; }
     .tour-card { position: fixed; width: min(340px, calc(100vw - 32px)); border: 1px solid var(--line-strong); border-radius: 11px; padding: 16px; background: var(--panel); box-shadow: 0 20px 50px rgba(0, 0, 0, .5); }
     .tour-card p { margin: 6px 0 4px; }
-    .notice.sync { margin-bottom: 12px; border-color: var(--amber-line); background: var(--amber-soft); color: var(--amber-text); }
     .notice { border: 1px solid var(--line-strong); border-radius: 8px; padding: 10px 12px; color: var(--muted); background: var(--panel-2); }
     @media (max-width: 1100px) { .dashboard-grid { grid-template-columns: repeat(3, minmax(0, 156px)); } }
     @media (max-width: 950px) { .dashboard-grid { grid-template-columns: repeat(2, minmax(0, 156px)); } .wallet-layout, .wallet-actions, .mining-grid, .setup-grid, .block-detail-layout { grid-template-columns: 1fr; } .activity-scroll { max-height: 560px; } }
     @media (max-width: 760px) { .utxo-flow { grid-template-columns: 1fr; } .utxo-arrow { min-height: 28px; transform: rotate(90deg); } .tx-modal-head { align-items: stretch; } }
     @media (max-width: 560px) { .mining-form, .mining-stats { grid-template-columns: 1fr; } .chain-block { flex-basis: 108px; } }
-    @media (max-width: 650px) { .confirm-facts { grid-template-columns: 1fr; } .dashboard { min-height: 0; display: block; } .dashboard-card { aspect-ratio: auto; display: grid; grid-template-columns: 52px minmax(0, 1fr); column-gap: 14px; row-gap: 3px; align-items: center; justify-items: start; text-align: left; } .dashboard-card-icon { grid-row: span 3; } .sidebar { position: static; width: 100%; height: auto; flex-direction: row; overflow-x: auto; } .nav, .sidebar-bottom { display: flex; margin: 0; } .content { padding: 18px; } .dashboard-grid, .wallet-choice, .tx-modal-summary { grid-template-columns: 1fr; } .setup-overlay { padding: 10px; } .setup-modal, .tx-modal { max-height: calc(100vh - 20px); max-height: calc(100dvh - 20px); padding: 14px; } .tx-modal-head { flex-direction: column; } .tx-modal-head > button { width: 100%; min-height: 44px; } .login-overlay { padding: 24px 14px; } .login-modal { max-height: calc(100vh - 48px); } .recovery-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); } .activity-filters { justify-content: flex-start; } .activity-card { grid-template-columns: 1fr; gap: 8px; } .activity-side { text-align: left; padding-left: 54px; } }
+    @media (max-width: 650px) { .confirm-facts { grid-template-columns: 1fr; } .dashboard { min-height: 0; display: block; } .dashboard-card { aspect-ratio: auto; display: grid; grid-template-columns: 52px minmax(0, 1fr); column-gap: 14px; row-gap: 3px; align-items: center; justify-items: start; text-align: left; } .dashboard-card-icon { grid-row: span 3; } .sidebar { position: static; width: 100%; height: auto; flex-direction: row; overflow-x: auto; } .nav, .sidebar-bottom { display: flex; margin: 0; } .content { padding: 18px; } .dashboard-grid, .wallet-choice, .tx-modal-summary { grid-template-columns: 1fr; } .setup-overlay { padding: 10px; } .setup-modal, .tx-modal { max-height: calc(100vh - 20px); max-height: calc(100dvh - 20px); padding: 14px; } .tx-modal-head { flex-direction: column; } .tx-modal-head > button { width: 100%; min-height: 44px; } .login-overlay { padding: 24px 14px; } .login-modal { max-height: calc(100vh - 48px); } .recovery-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); } .activity-filters { justify-content: flex-start; } .activity-card { grid-template-columns: 1fr; gap: 8px; } .activity-side { text-align: left; padding-left: 54px; } .sync-card { right: 12px; bottom: 12px; width: calc(100vw - 24px); } }
   </style>
   <script defer src="/assets/iuna-ui.js"></script>
   <script defer src="/assets/alpine.min.js"></script>
@@ -374,8 +381,15 @@
         <div><h1 x-text="pageTitle()">iuna</h1><div class="muted" x-text="status.network || 'Connecting…'"></div></div>
         <div class="header-meta"><span x-text="lastUpdatedLabel()"></span><span class="pill" x-text="networkLabel()"></span></div>
       </header>
-      <div class="notice sync" x-show="syncTarget()" role="status">Synchronizing: Heartbeat <b x-text="status.heartbeat_height ?? 0"></b> of <b x-text="syncTarget()"></b> from peers (<span x-text="syncPercent()"></span>%). Balances and mining catch up when this finishes.</div>
       <div class="flash" :class="flash?.kind" x-show="flash" x-transition x-text="flash?.message" :role="flash?.kind === 'error' ? 'alert' : 'status'" aria-live="polite"></div>
+      <div class="sync-card" x-show="syncTarget()" x-transition role="status" aria-live="polite">
+        <span class="sync-card-spinner" aria-hidden="true"></span>
+        <div class="sync-card-copy">
+          <strong>Syncing…</strong>
+          <span>Heartbeat <b x-text="status.heartbeat_height ?? 0"></b> of <b x-text="syncTarget()"></b> · <span x-text="syncPercent()"></span>%</span>
+          <span class="sync-card-progress" aria-hidden="true"><span :style="`width:${syncPercent()}%`"></span></span>
+        </div>
+      </div>
 
       <section class="dashboard" x-show="tab === 'dashboard'">
         <div style="width:min(100%,900px)">

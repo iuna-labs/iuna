@@ -663,6 +663,10 @@ test('dashboard cards report stale chains and isolated nodes', () => {
   assert.equal(app.syncLabel(), 'Syncing 18%');
   assert.equal(app.networkHeight(), 50);
   assert.equal(app.dashboardState('heartbeat'), 'warn', 'an old tip while syncing is not a stall');
+  assert.match(html, /class="sync-card" x-show="syncTarget\(\)"/);
+  assert.match(html, /<strong>Syncing…<\/strong>/);
+  assert.match(html, /class="sync-card-progress"/);
+  assert.doesNotMatch(html, /class="notice sync"/);
   app.status.heartbeat_height = 50;
   assert.equal(app.syncLabel(), 'Up to date');
   assert.equal(app.networkLabel(), 'Connected');
