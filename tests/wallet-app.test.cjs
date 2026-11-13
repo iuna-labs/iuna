@@ -262,6 +262,13 @@ test('wallet settings name reachable endpoints and previous wallets are explaine
   assert.match(app, /submitTransaction\(apiEndpoint\(\), transaction\);[^]*?view\.change_index = \(view\.change_index \|\| 0\) \+ 1/);
 });
 
+test('wallet only reserves fixed navigation space while it is visible', () => {
+  const styles = source('wallet/styles.css');
+  assert.match(styles, /#app\s*\{[^}]*min-height:100dvh[^}]*padding:clamp\(18px, 4dvh, 34px\) 0;[^}]*\}/);
+  assert.match(styles, /#app:has\(> \.bottom-nav\)\s*\{\s*padding-bottom:112px;\s*\}/);
+  assert.doesNotMatch(styles, /#app\s*\{[^}]*padding:[^;}]*112px/);
+});
+
 test('wallet app and deployment contain only the current protocol identity', () => {
   const combined = [
     source('wallet/index.html'),

@@ -23,7 +23,7 @@
   --radius: 12px;
 }
 * { box-sizing:border-box; }
-body { margin:0; min-height:100vh; background:radial-gradient(circle at 50% 0, var(--green-soft) 0, var(--bg) 34rem); }
+body { margin:0; min-height:100vh; min-height:100dvh; background:radial-gradient(circle at 50% 0, var(--green-soft) 0, var(--bg) 34rem); }
 button,input,textarea,select { font:inherit; }
 button { border:1px solid var(--line-strong); border-radius:8px; padding:10px 13px; background:var(--panel); color:var(--text); cursor:pointer; font-weight:800; }
 button:hover { border-color:var(--green); color:var(--green); }
@@ -36,7 +36,9 @@ h1 { margin:0 0 8px; font-size:28px; }
 h2 { margin:0 0 10px; font-size:18px; }
 p { color:var(--muted-2); line-height:1.55; }
 code { overflow-wrap:anywhere; color:var(--text); }
-#app { width:min(760px, calc(100% - 28px)); margin:0 auto; padding:34px 0 112px; }
+#app { width:min(760px, calc(100% - 28px)); min-height:100dvh; margin:0 auto; padding:clamp(18px, 4dvh, 34px) 0; }
+/* Only an unlocked wallet needs room for the fixed navigation bar. */
+#app:has(> .bottom-nav) { padding-bottom:112px; }
 .top { display:flex; justify-content:space-between; align-items:center; gap:12px; margin-bottom:18px; }
 .brand { display:flex; align-items:center; gap:10px; color:var(--green); font-weight:900; }
 .brand img { width:34px; height:34px; }
@@ -61,7 +63,7 @@ code { overflow-wrap:anywhere; color:var(--text); }
 .toast { position:fixed; top:18px; left:50%; transform:translateX(-50%); display:none; max-width:calc(100% - 30px); border:1px solid var(--green-line); border-radius:8px; padding:10px 14px; background:var(--green-soft); color:var(--green); font-weight:800; }
 .toast.show { display:block; }.toast.error { border-color:var(--danger-line); background:var(--danger-soft); color:var(--danger-text); }
 .muted { color:var(--muted-2); font-size:12px; }
-@media(max-width:600px){ #app{padding-top:18px}.choice,.stats{grid-template-columns:1fr}.seed-grid{grid-template-columns:repeat(2,minmax(0,1fr))}.card{padding:16px} }
+@media(max-width:600px){ .choice,.stats{grid-template-columns:1fr}.seed-grid{grid-template-columns:repeat(2,minmax(0,1fr))}.card{padding:16px} }
 .actions.tight { margin-top:0; }
 .spaced { margin-top:26px; }
 .label { display:block; margin-bottom:6px; color:var(--muted-2); font-size:10px; font-weight:800; text-transform:uppercase; }
