@@ -40,7 +40,7 @@ use crate::{
     app::{
         consensus_node::{ChainRepository, Node},
         mining_policy::{ev_maximizing_ticket_budget, other_active_ticket_weight},
-        wallet_commands::{TicketParameters, Wallet},
+        wallet_commands::{TicketParameters, WALLET_ADDRESS_SCAN_LIMIT, Wallet},
     },
     consensus::{
         Address, Chain, ConsensusError, ConsensusState, GENESIS_MINER, GENESIS_REWARD,
@@ -312,7 +312,8 @@ const MAX_PUBLIC_WALLET_UTXOS: usize = 1_000;
 /// Fits the stable root address plus one 20-address gap window of both wallet branches.
 const MAX_PUBLIC_WALLET_ADDRESSES: usize = 64;
 /// Activity needs the complete discovered address set so change is part of the balance delta.
-const MAX_PUBLIC_WALLET_ACTIVITY_ADDRESSES: usize = 512;
+/// Keep this aligned with the wallet keyring: the stable root plus both derived branches.
+const MAX_PUBLIC_WALLET_ACTIVITY_ADDRESSES: usize = 1 + 2 * WALLET_ADDRESS_SCAN_LIMIT as usize;
 /// JSON represents fixed-size byte arrays as decimal lists and is substantially larger than the
 /// consensus encoding. This still bounds unauthenticated request memory while allowing a wallet
 /// page of 1,000 outputs to be consolidated in one otherwise-valid transaction.
@@ -3352,6 +3353,26 @@ mod tests {
         assert_eq!(activity["pending"][0]["amount"], 2);
         assert_eq!(activity["tip_timestamp"], view["tip_timestamp"]);
         assert_eq!(activity["next_before_height"], serde_json::Value::Null);
+
+        // A browser wallet can discover the root and every key in both bounded derivation
+        // branches. Activity must accept that complete set instead of failing once it grows past
+        // the smaller summary-batch limit.
+        let activity_request = Request::post("/api/public/wallet-activity")
+            .header(header::CONTENT_TYPE, "application/json")
+            .header(header::ORIGIN, "https://wallet.getiuna.org")
+            .body(Body::from(
+                serde_json::to_vec(&serde_json::json!({
+                    "addresses": vec![hex(&wallet.address()); MAX_PUBLIC_WALLET_ACTIVITY_ADDRESSES],
+                    "public_key": hex(&wallet.public_key())
+                }))
+                .unwrap(),
+            ))
+            .unwrap();
+        let response = public_wallet_router(state.clone())
+            .oneshot(activity_request)
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
 
         for rejected in [
             Vec::new(),

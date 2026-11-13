@@ -230,9 +230,12 @@ mandatory empty unsigned fallback.
 
 Continuous Ledger mining also performs bounded UTXO housekeeping. An automatic
 ticket may consume up to `32` confirmed, unreserved wallet outputs and returns
-their excess as one change output. It preserves the largest output whenever the
-remaining outputs can fund the ticket, keeping liquid funds available while the
-ticket is pending. Manually submitted tickets retain minimal input selection.
+their excess to the stable mining address as one change output. Reusing that
+already-public identity prevents continuous mining from consuming the wallet's
+rotating change-address recovery window. It preserves the largest output whenever
+the remaining outputs can fund the ticket, keeping liquid funds available while
+the ticket is pending. Manually submitted tickets retain minimal input selection
+and rotating change addresses.
 
 On an otherwise untouched chain, enabling the first miner also spends the
 public RFC 8032 genesis test output into a protocol-valid bootstrap mining

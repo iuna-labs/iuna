@@ -4,6 +4,9 @@ const NETWORK_ID = "iuna-mainnet-candidate";
 const GENESIS_HASH = hexBytes("00000015ff94624a51c05e7bf53e0b837baf105d9cf28d0af49955f1a8b24fdb");
 const PKCS8_ED25519_PREFIX = hexBytes("302e020100300506032b657004220420");
 const ADDRESS_GAP_LIMIT = 20;
+// Matches the node wallet keyring and bounds discovery if a node falsely reports every address
+// as used.
+const ADDRESS_SCAN_LIMIT = 1_000;
 // Matches the node limit: the root plus one gap window of both branches fits in one request.
 const MAX_ADDRESS_BATCH = 64;
 const RECEIVE_BRANCH = 0;
@@ -182,7 +185,8 @@ async function discoverWalletView(endpoint, wallet) {
   let request = [wallet];
   for (;;) {
     for (const state of branches) {
-      while (state.scanned < state.highestUsed + 1 + ADDRESS_GAP_LIMIT && request.length < MAX_ADDRESS_BATCH) {
+      while (state.scanned < state.highestUsed + 1 + ADDRESS_GAP_LIMIT
+        && state.scanned < ADDRESS_SCAN_LIMIT && request.length < MAX_ADDRESS_BATCH) {
         request.push(await wallet.keyAt(state.branch, state.scanned));
         state.scanned += 1;
       }
@@ -200,6 +204,9 @@ async function discoverWalletView(endpoint, wallet) {
       }
     });
     request = [];
+  }
+  if (branches.some((state) => state.scanned < state.highestUsed + 1 + ADDRESS_GAP_LIMIT)) {
+    throw new Error("Wallet address scan limit reached");
   }
   const views = await Promise.all(entries
     .filter(({ summary }) => Number(summary.utxo_count) > 0)

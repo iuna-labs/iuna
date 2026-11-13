@@ -207,7 +207,7 @@ impl Wallet {
             .checked_add(parameters.fee)
             .ok_or_else(|| anyhow::anyhow!("amount overflow"))?;
         let (points, total) = self.select_inputs(state, reserved_inputs, required)?;
-        self.build_ticket_from_inputs(state, parameters, required, points, total)
+        self.build_ticket_from_inputs(state, parameters, required, points, total, None)
     }
 
     pub fn build_consolidating_ticket(
@@ -229,7 +229,18 @@ impl Wallet {
             required,
             AUTOMATIC_TICKET_MAX_INPUTS,
         )?;
-        self.build_ticket_from_inputs(state, parameters, required, points, total)
+        // Continuous mining tickets already reveal the wallet's stable mining public key, so a
+        // fresh change address adds no privacy. Returning change to the matching stable address
+        // prevents long-running Ledger mining from exhausting the wallet's change branch.
+        let mining_change_owner = self.address();
+        self.build_ticket_from_inputs(
+            state,
+            parameters,
+            required,
+            points,
+            total,
+            Some(mining_change_owner),
+        )
     }
 
     fn build_ticket_from_inputs(
@@ -239,6 +250,7 @@ impl Wallet {
         required: Amount,
         points: Vec<(OutPoint, SigningKey)>,
         total: Amount,
+        fixed_change_owner: Option<Address>,
     ) -> Result<TicketTransaction> {
         let mut ticket = TicketTransaction {
             version: PROTOCOL_VERSION,
@@ -255,9 +267,14 @@ impl Wallet {
             mining_public_key: parameters.mining_public_key,
             lottery_seed: parameters.lottery_seed,
             change: if total > required {
-                let key = self.fresh_change_key(state)?;
                 Some(Output {
-                    owner: address_from_public_key(&key.verifying_key().to_bytes()),
+                    owner: match fixed_change_owner {
+                        Some(owner) => owner,
+                        None => {
+                            let key = self.fresh_change_key(state)?;
+                            address_from_public_key(&key.verifying_key().to_bytes())
+                        }
+                    },
                     value: total - required,
                 })
             } else {
@@ -730,7 +747,33 @@ mod tests {
                 .all(|input| input.previous_output != largest)
         );
         assert_eq!(automatic.change.as_ref().unwrap().value, 10);
+        assert_eq!(automatic.change.as_ref().unwrap().owner, wallet.address());
         assert_eq!(validate_pending_ticket(&state, &automatic).unwrap(), 1);
+    }
+
+    #[test]
+    fn automatic_tickets_do_not_consume_rotating_change_addresses() {
+        let wallet = Wallet::from_seed(GENESIS_SEED);
+        let (_, state) = pinned_genesis().unwrap();
+        let parameters = TicketParameters {
+            budget: automatic_test_ticket_budget(),
+            duration: 10,
+            fee: 1,
+            mining_public_key: wallet.public_key(),
+            lottery_seed: [42; 32],
+        };
+
+        for _ in 0..2 {
+            let ticket = wallet
+                .build_consolidating_ticket(&state, &BTreeSet::new(), parameters.clone())
+                .unwrap();
+            assert_eq!(ticket.change.as_ref().unwrap().owner, wallet.address());
+        }
+
+        let transaction = wallet
+            .build_transaction(&state, &BTreeSet::new(), [91; 32], 10_000_000, 0)
+            .unwrap();
+        assert_eq!(transaction.outputs[1].owner, wallet.change_address(0));
     }
 
     #[test]

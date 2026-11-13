@@ -160,6 +160,40 @@ test('browser wallet discovers addresses in batches and loads outputs only where
   }
 });
 
+test('browser wallet bounds address discovery when a node reports an unending used branch', async () => {
+  const wallet = {
+    publicKeyHex: '11'.repeat(32),
+    addressHex: '22'.repeat(32),
+    async keyAt(branch, index) {
+      return { branch, index, addressHex: `${branch}${String(index).padStart(63, '0')}` };
+    },
+  };
+  const originalFetch = globalThis.fetch;
+  globalThis.fetch = async (url, options = {}) => {
+    assert.ok(String(url).endsWith('/api/public/wallet-addresses'));
+    const { addresses } = JSON.parse(options.body);
+    return new Response(JSON.stringify({
+      network: 'iuna-mainnet-candidate',
+      heartbeat_height: 7,
+      tip_timestamp: 123,
+      tip_hash: 'ff'.repeat(32),
+      ledger_blocks: 1,
+      addresses: addresses.map((address) => ({
+        address, used: true, balance: 0, spendable_balance: 0, utxo_count: 0,
+      })),
+      pending_transaction_ids: [],
+    }), { status: 200, headers: { 'content-type': 'application/json' } });
+  };
+  try {
+    await assert.rejects(
+      core.fetchWalletView('https://wallet.getiuna.org', wallet),
+      /Wallet address scan limit reached/,
+    );
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+});
+
 test('sent activity separates pending, mined and dropped transactions', async () => {
   const wallet = await core.walletFromEntropy(new Uint8Array(32));
   const transaction = await core.buildSignedTransaction({

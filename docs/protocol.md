@@ -55,7 +55,7 @@ Every output owner is a 32-byte domain-separated commitment to an Ed25519 public
 
 The output publishes only this address. A spending input supplies the 32-byte public key and an Ed25519 signature. Validation recomputes the address, requires it to equal the spent output owner, and then verifies the signature. The public key is therefore revealed only when that output is spent.
 
-Wallet recovery entropy deterministically derives separate receive and change branches using `IUNA-WALLET-CHILD-v1`, a one-byte branch identifier and a big-endian child index. Receive addresses rotate after use and every transaction sends change to the next unused change address. Recovery scans both branches using address-use history and a gap limit of 20. Mining identity remains a separate stable key; rewards are paid to its address commitment.
+Wallet recovery entropy deterministically derives separate receive and change branches using `IUNA-WALLET-CHILD-v1`, a one-byte branch identifier and a big-endian child index. Receive addresses rotate after use and ordinary payments and manual tickets send change to the next unused change address. Recovery scans both branches using address-use history and a gap limit of 20. Mining identity remains a separate stable key; rewards and automatic-ticket change are paid to its address commitment. Automatic tickets already publish this identity, so rotating their change would add no privacy and would consume the finite recovery window during continuous mining.
 
 ## Architecture
 
