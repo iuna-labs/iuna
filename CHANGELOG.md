@@ -5,6 +5,21 @@ from the Git history and Conventional Commit titles by `deployment.sh`.
 
 ## [Unreleased]
 
+## [0.6.8] - 2026-11-14
+
+### Added
+
+- show derived addresses
+
+### Fixed
+
+- avoid unnecessary page scrolling
+- preserve change addresses during mining
+
+### Tests
+
+- complete the project test gate
+
 ## [0.6.7] - 2026-11-13
 
 ### Added
