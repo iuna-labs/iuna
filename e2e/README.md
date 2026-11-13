@@ -12,17 +12,18 @@ Run the complete gate:
 ./e2e/iuna_e2e.py
 ```
 
-That runs all unit and property tests first, followed by the ignored TCP test
-with `--nocapture`. To run just one part:
+That runs the node, desktop, browser-wallet, website, and property tests first,
+followed by the ignored TCP tests with `--nocapture`. To run just one part:
 
 ```sh
 ./e2e/iuna_e2e.py test
 ./e2e/iuna_e2e.py tcp
 ```
 
-The TCP test binds only ephemeral loopback ports and leaves no repository data
-behind. It lives in `tests/properties.rs` behind the `e2e` Cargo feature so the
-same test can also be invoked directly:
+The TCP tests bind only ephemeral loopback ports and leave no repository data
+behind. They live in the feature-gated `tests/properties.rs`, while the pure
+property tests in `tests/consensus_properties.rs` run in every normal
+`cargo test`. A TCP test can also be invoked directly:
 
 ```sh
 cargo test --features e2e --test properties \

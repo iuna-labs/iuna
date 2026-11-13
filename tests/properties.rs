@@ -10,28 +10,15 @@ use iuna::{
     },
     consensus::{
         GENESIS_TIMESTAMP, HEARTBEAT_TARGET_INTERVAL_SECS, Hash, INITIAL_LEDGER_SUBSIDY,
-        MAX_TICKET_DURATION, minimum_ticket_budget,
+        minimum_ticket_budget,
     },
 };
-use proptest::prelude::*;
 use tokio::{io::AsyncReadExt, sync::Mutex};
 
 const GENESIS_SECRET: [u8; 32] = [
     0x9d, 0x61, 0xb1, 0x9d, 0xef, 0xfd, 0x5a, 0x60, 0xba, 0x84, 0x4a, 0xf4, 0x92, 0xec, 0x2c, 0xc4,
     0x44, 0x49, 0xc5, 0x69, 0x7b, 0x32, 0x69, 0x19, 0x70, 0x3b, 0xac, 0x03, 0x1c, 0xae, 0x7f, 0x60,
 ];
-
-proptest! {
-    #[test]
-    fn minimum_ticket_budget_is_defined_for_every_valid_duration(
-        duration in 1_u64..=MAX_TICKET_DURATION,
-        reward in 0_u64..=INITIAL_LEDGER_SUBSIDY,
-    ) {
-        let budget = minimum_ticket_budget(duration, reward).unwrap();
-        prop_assert!(budget > 0);
-        prop_assert!(budget <= iuna::consensus::MAX_MONEY);
-    }
-}
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 #[ignore = "requires permission to bind local TCP sockets"]

@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Run Iuna's unit/property gate and live three-node TCP end-to-end test."""
+"""Run Iuna's complete test gate and live TCP end-to-end tests."""
 
 from __future__ import annotations
 
@@ -18,6 +18,8 @@ def run(*command: str) -> None:
 
 def run_tests() -> None:
     run("cargo", "test", "--all-targets", "--all-features")
+    run("cargo", "test", "--manifest-path", "src-tauri/Cargo.toml")
+    run("node", "--test", "tests/wallet-app.test.cjs", "tests/website-content.test.cjs")
 
 
 def run_tcp_test() -> None:

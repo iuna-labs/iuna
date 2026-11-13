@@ -763,11 +763,16 @@ mod tests {
     #[derive(Clone, Default)]
     struct MemoryRepository {
         state: Arc<Mutex<Option<Chain>>>,
+        fail_load: Arc<Mutex<bool>>,
+        fail_new_chain: Arc<Mutex<bool>>,
         fail_save: Arc<Mutex<bool>>,
     }
 
     impl ChainRepository for MemoryRepository {
         fn load(&self) -> Result<Option<Chain>> {
+            if *self.fail_load.lock().unwrap() {
+                anyhow::bail!("injected load failure");
+            }
             Ok(self.state.lock().unwrap().clone())
         }
 
@@ -777,6 +782,13 @@ mod tests {
             }
             *self.state.lock().unwrap() = Some(chain.clone());
             Ok(())
+        }
+
+        fn new_chain(&self) -> Result<Chain> {
+            if *self.fail_new_chain.lock().unwrap() {
+                anyhow::bail!("injected new-chain failure");
+            }
+            Chain::from_genesis().context("creating chain")
         }
     }
 
@@ -844,21 +856,66 @@ mod tests {
     }
 
     #[test]
+    fn repository_open_failures_are_propagated() {
+        let repository = MemoryRepository::default();
+        *repository.fail_load.lock().unwrap() = true;
+        assert!(Node::open(repository).is_err());
+
+        let repository = MemoryRepository::default();
+        *repository.fail_new_chain.lock().unwrap() = true;
+        assert!(Node::open(repository).is_err());
+    }
+
+    #[test]
     fn persistence_failure_rolls_back_the_in_memory_tip() {
         let repository = MemoryRepository::default();
         let mut node = Node::open(repository.clone()).unwrap();
         *repository.fail_save.lock().unwrap() = true;
         let before = node.status();
+        let block = node
+            .prepare_next()
+            .unwrap()
+            .mine(GENESIS_TIMESTAMP + HEARTBEAT_TARGET_INTERVAL_SECS, [32; 32])
+            .unwrap();
+        let block_hash = block.hash();
         assert!(
-            node.mine_block(
-                GENESIS_TIMESTAMP + HEARTBEAT_TARGET_INTERVAL_SECS,
-                [32; 32],
-                Vec::new(),
-                None,
-            )
-            .is_err()
+            node.submit_block(block, GENESIS_TIMESTAMP + HEARTBEAT_TARGET_INTERVAL_SECS)
+                .is_err()
         );
         assert_eq!(node.status(), before);
+        assert!(node.chain().block(&block_hash).is_none());
+        assert_eq!(Node::open(repository).unwrap().status(), before);
+    }
+
+    #[test]
+    fn address_usage_cache_is_invalidated_when_a_tip_drops_a_mempool_object() {
+        let mut node = Node::open(MemoryRepository::default()).unwrap();
+        let transaction = signed_genesis_transaction(&node);
+        let recipient = transaction.outputs[0].owner;
+        node.submit_transaction(transaction).unwrap();
+        assert!(node.address_used(&recipient));
+
+        let mut competing = Node::open(MemoryRepository::default()).unwrap();
+        let ticket = signed_genesis_ticket(&competing);
+        competing.submit_ticket(ticket).unwrap();
+        let block = competing
+            .mine_next(GENESIS_TIMESTAMP + HEARTBEAT_TARGET_INTERVAL_SECS, [44; 32])
+            .unwrap();
+        assert!(
+            node.submit_block(block, GENESIS_TIMESTAMP + HEARTBEAT_TARGET_INTERVAL_SECS)
+                .unwrap()
+        );
+
+        assert_eq!(node.pending_transaction_count(), 0);
+        assert!(!node.address_used(&recipient));
+    }
+
+    #[test]
+    fn relay_fee_rounds_up_at_each_kilobyte_boundary() {
+        assert_eq!(minimum_relay_fee(0), 0);
+        assert_eq!(minimum_relay_fee(1), 1);
+        assert_eq!(minimum_relay_fee(1_000), 1);
+        assert_eq!(minimum_relay_fee(1_001), 2);
     }
 
     #[test]
