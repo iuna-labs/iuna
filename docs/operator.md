@@ -75,6 +75,9 @@ history entry.
   expenditure budget both with and without a Ledger sidecar in the ticket's
   inclusion Heartbeat. Its recommended budget is the higher value and therefore
   remains valid across that inclusion-order uncertainty, including at halvings.
+  It also returns the current active weight of other miners and the affordable,
+  valid ticket budget that maximizes subsidy-only net EV against that weight;
+  the budget is `null` when the unlocked wallet cannot fund the consensus minimum.
 
 These routes do not expose signing or wallet mutation and remain available when
 management is disabled.
@@ -210,8 +213,11 @@ broadcasts a compact Heartbeat. Its state is reported as `heartbeat_mining_enabl
 low-level single-block operator endpoint.
 
 `POST /api/ledger-mining` with `{ "enabled": true }` enables continuous Ledger
-mining. The node immediately buys a ten-Heartbeat ticket at the recommended
-budget, then buys another after each ten-Heartbeat interval. This preference and
+mining. The node immediately buys a ten-Heartbeat ticket at the subsidy-only
+net-EV-maximizing budget against the current active weight of other miners, with
+the consensus-recommended budget as its lower bound and available wallet inputs
+as its upper bound. It recalculates that budget
+before buying another after each ten-Heartbeat interval. This preference and
 the last purchase height survive restarts; it runs without an open browser. The
 state is reported as `ledger_mining_enabled` by `GET /api/status`.
 

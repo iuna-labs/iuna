@@ -258,7 +258,8 @@ test('node UI preserves the product screens while using the canonical protocol',
   assert.match(controller, /\/api\/ledger-mining/);
   assert.match(controller, /\/api\/mempool/);
   assert.match(controller, /observeActivitySentinel/);
-  assert.match(html, /Automatic budget/);
+  assert.match(html, /EV-max budget/);
+  assert.match(html, /Insufficient funds/);
   assert.match(html, /Next ticket/);
   assert.match(html, /x-show="!status\.ledger_mining_enabled"/);
   assert.match(html, /x-show="status\.ledger_mining_enabled"/);
@@ -497,6 +498,8 @@ test('mining controls separate manual tickets from continuous read-only state', 
   app.getJson = async (path) => ({
     duration: 10,
     recommended_budget: 250_000_000,
+    ev_maximizing_budget: 300_000_000,
+    other_active_ticket_weight: 100_000_000,
     current_minimum_budget: 200_000_000,
     path,
   });
@@ -507,19 +510,16 @@ test('mining controls separate manual tickets from continuous read-only state', 
   assert.notEqual(app.ticket.continuousQuote, cachedQuote, 'continuous mode can force a fresh quote');
 
   app.status = { ledger_mining_enabled: true, heartbeat_height: 24, ledger_last_ticket_height: 20 };
-  assert.match(app.ledgerMiningMessage(), /submits a recommended Ledger ticket every 10 Heartbeats/);
+  assert.match(app.ledgerMiningMessage(), /submits an EV-maximized Ledger ticket every 10 Heartbeats/);
   app.ticket.continuousQuote = {
     duration: 10,
-    current_next_ledger_reward: 5_000_000_000,
     recommended_budget: 2_000_000,
+    ev_maximizing_budget: 300_000_000,
+    other_active_ticket_weight: 1_000_000,
     ledger_target_heartbeats: 10,
   };
-  app.heartbeats = [{ ticket_weight: 1_200_000 }];
-  app.status.ledger_ticket_power = 200_000;
   assert.equal(app.ledgerOtherTicketPower(), 1_000_000);
   assert.equal(app.ledgerOtherTicketPowerLabel(), '0.01');
-  assert.equal(app.ledgerMaximumNetEv(), 831_333_332);
-  assert.equal(app.ledgerMaximumNetEvLabel(), '8.31333332');
   assert.equal(app.ledgerNextTicketLabel(), 'Heartbeat #30');
   app.status.heartbeat_height = 30;
   assert.equal(app.ledgerNextTicketLabel(), 'Due now');
@@ -530,20 +530,10 @@ test('mining controls separate manual tickets from continuous read-only state', 
   assert.match(app.ledgerMiningMessage(), /Submit a ticket manually below/);
 });
 
-test('maximum Ledger EV handles unavailable and negative subsidy estimates', () => {
+test('automatic Ledger budget waits for a quote before showing competing weight', () => {
   const { app } = nodeApp();
-  assert.equal(app.ledgerMaximumNetEv(), null);
-  assert.equal(app.ledgerMaximumNetEvLabel(), '…');
-
-  app.heartbeats = [{ ticket_weight: 0 }];
-  app.ticket.continuousQuote = {
-    duration: 10,
-    current_next_ledger_reward: 0,
-    recommended_budget: 1_000_000,
-    ledger_target_heartbeats: 10,
-  };
-  assert.equal(app.ledgerMaximumNetEv(), -1_000_001);
-  assert.equal(app.ledgerMaximumNetEvLabel(), '−0.01000001');
+  assert.equal(app.ledgerOtherTicketPower(), null);
+  assert.equal(app.ledgerOtherTicketPowerLabel(), '…');
 });
 
 test('metrics use the median interval and per-block difficulty', () => {

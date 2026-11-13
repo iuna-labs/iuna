@@ -689,8 +689,8 @@ window.iunaApp = function iunaApp() {
         }
         this.syncLedgerBlocks();
         if (status.ledger_mining_enabled
-            && previousLedgerHead
-            && previousLedgerHead !== this.ledgerBlocks[0]?.block_hash) {
+            && previousHeartbeatHead
+            && previousHeartbeatHead !== this.heartbeats[0]?.block_hash) {
           await this.quoteContinuousTicket(true, false);
         }
         this.heartbeatPage.hasMore = this.heartbeats.at(-1)?.height > 0
@@ -970,53 +970,18 @@ window.iunaApp = function iunaApp() {
     ledgerMiningMessage() {
       if (this.ticket.continuousBusy) return "Updating continuous Ledger mining…";
       return this.status.ledger_mining_enabled
-        ? "Mining is on. The node submits a recommended Ledger ticket every 10 Heartbeats."
+        ? "Mining is on. The node submits an EV-maximized Ledger ticket every 10 Heartbeats."
         : "Continuous Ledger mining is off. Submit a ticket manually below.";
     },
 
-    // Use the latest block's active weight as the competition snapshot. Current tickets belonging
-    // to this wallet are removed because the estimate is for one new automatic ticket replacing
-    // them, rather than for the wallet's combined current and future position.
     ledgerOtherTicketPower() {
-      const latest = this.heartbeats[0] || this.metricsRows[0];
-      const total = Number(latest?.ticket_weight);
-      if (!Number.isSafeInteger(total) || total < 0) return null;
-      return Math.max(0, total - this.ledgerPower());
+      const value = Number(this.ticket.continuousQuote?.other_active_ticket_weight);
+      return Number.isSafeInteger(value) && value >= 0 ? value : null;
     },
 
     ledgerOtherTicketPowerLabel() {
       const value = this.ledgerOtherTicketPower();
       return value == null ? "…" : this.amountLabel(value);
-    },
-
-    // Upper bound for the known subsidy component against the latest observed competition. Slot
-    // weights use the consensus quotient/remainder split. Every eligible draw is assumed to settle;
-    // variable Ledger fees and Heartbeat-miner rebates are excluded.
-    ledgerMaximumNetEv(quote = this.ticket.continuousQuote) {
-      const reward = Number(quote?.current_next_ledger_reward);
-      const duration = Number(quote?.duration);
-      const target = Number(quote?.ledger_target_heartbeats);
-      const budget = Number(quote?.recommended_budget);
-      const otherPower = this.ledgerOtherTicketPower();
-      if (![reward, duration, target, budget, otherPower].every(Number.isSafeInteger)
-          || duration <= 0
-          || target <= 0) return null;
-      const quotient = Math.floor(budget / duration);
-      const remainder = budget % duration;
-      const expectedWins = [
-        [quotient + 1, remainder],
-        [quotient, duration - remainder],
-      ].reduce((total, [weight, slots]) => {
-        if (slots === 0 || weight === 0) return total;
-        return total + (slots * weight) / (target * (otherPower + weight));
-      }, 0);
-      return Math.round(reward * expectedWins) - budget - 1;
-    },
-
-    ledgerMaximumNetEvLabel() {
-      const value = this.ledgerMaximumNetEv();
-      if (value == null) return "…";
-      return `${value < 0 ? "−" : ""}${this.amountLabel(Math.abs(value))}`;
     },
 
     ledgerNextTicketLabel() {

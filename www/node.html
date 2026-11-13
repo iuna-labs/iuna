@@ -512,11 +512,10 @@
             </div>
             <div class="mining-readonly" x-show="status.ledger_mining_enabled">
               <div class="grid">
-                <div class="stat"><div class="stat-label">Automatic budget</div><div class="stat-value">IUNA <span x-text="ticket.continuousQuote ? amountLabel(ticket.continuousQuote.recommended_budget) : '…'"></span></div></div>
+                <div class="stat"><div class="stat-label title-with-pill">EV-max budget <details class="info-details" @click.outside="$el.open = false"><summary aria-label="How is the EV-maximizing budget calculated?">i</summary><div class="info-popover">The affordable ticket budget that maximizes expected subsidy minus expenditure against the other active ticket weight in the latest Heartbeat. The consensus minimum is the lower bound. The estimate assumes competing weight stays unchanged; variable Ledger fees and Heartbeat-miner rebates are excluded.</div></details></div><div class="stat-value" x-text="!ticket.continuousQuote ? 'IUNA …' : (ticket.continuousQuote.ev_maximizing_budget == null ? 'Insufficient funds' : `IUNA ${amountLabel(ticket.continuousQuote.ev_maximizing_budget)}`)"></div></div>
                 <div class="stat"><div class="stat-label">Ticket duration</div><div class="stat-value">10 Heartbeats</div></div>
                 <div class="stat"><div class="stat-label">Ticket fee</div><div class="stat-value">IUNA <span x-text="amountLabel(1)"></span></div></div>
                 <div class="stat"><div class="stat-label">Other active weight</div><div class="stat-value">IUNA <span x-text="ledgerOtherTicketPowerLabel()"></span> / Heartbeat</div></div>
-                <div class="stat"><div class="stat-label title-with-pill">Maximum net EV <details class="info-details" @click.outside="$el.open = false"><summary aria-label="How is maximum net EV calculated?">i</summary><div class="info-popover">Calculated from the total active ticket weight in the latest Heartbeat, minus this wallet's current active weight, and the exact weight of the next automatic ticket. It assumes that competing weight stays unchanged and every eligible win settles. Budget and fee are deducted; variable Ledger fees and Heartbeat-miner rebates are excluded.</div></details></div><div class="stat-value">IUNA <span x-text="ledgerMaximumNetEvLabel()"></span></div></div>
                 <div class="stat"><div class="stat-label">Next ticket</div><div class="stat-value" x-text="ledgerNextTicketLabel()"></div></div>
               </div>
             </div>

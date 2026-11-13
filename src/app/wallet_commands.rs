@@ -314,6 +314,34 @@ impl Wallet {
         })
     }
 
+    /// Largest ticket budget the automatic selector can fund with its bounded input set.
+    pub fn maximum_consolidating_ticket_budget(
+        &self,
+        state: &ConsensusState,
+        reserved_inputs: &BTreeSet<OutPoint>,
+        fee: Amount,
+    ) -> Result<Amount> {
+        let keys = self.keyring();
+        let mut values = state
+            .utxos
+            .iter()
+            .filter_map(|(point, output)| {
+                (!reserved_inputs.contains(point) && keys.contains_key(&output.owner))
+                    .then_some(output.value)
+            })
+            .collect::<Vec<_>>();
+        values.sort_unstable_by(|left, right| right.cmp(left));
+        let total = values
+            .into_iter()
+            .take(AUTOMATIC_TICKET_MAX_INPUTS)
+            .try_fold(0_u64, |total, value| {
+                total
+                    .checked_add(value)
+                    .ok_or_else(|| anyhow::anyhow!("balance overflow"))
+            })?;
+        Ok(total.saturating_sub(fee))
+    }
+
     fn select_inputs(
         &self,
         state: &ConsensusState,
@@ -724,6 +752,12 @@ mod tests {
                 },
             );
         }
+        assert_eq!(
+            wallet
+                .maximum_consolidating_ticket_budget(&state, &BTreeSet::new(), 1)
+                .unwrap(),
+            required * AUTOMATIC_TICKET_MAX_INPUTS as u64 - 1
+        );
         let ticket = wallet
             .build_consolidating_ticket(
                 &state,

@@ -25,8 +25,12 @@ use iuna::{
         consensus_ui_store::ConsensusUiStore,
         consensus_wallet_store,
     },
-    app::{consensus_node::Node, wallet_commands::TicketParameters},
-    consensus::{LEDGER_TARGET_INTERVAL_HEARTBEATS, minimum_ticket_budget, subsidy},
+    app::{
+        consensus_node::Node,
+        mining_policy::{ev_maximizing_ticket_budget, recommended_ticket_budget},
+        wallet_commands::TicketParameters,
+    },
+    consensus::LEDGER_TARGET_INTERVAL_HEARTBEATS,
 };
 use tokio::{net::TcpListener, sync::Mutex};
 
@@ -543,13 +547,43 @@ async fn run_ledger_miner(
             if !due || already_pending {
                 None
             } else {
-                let budget = match recommended_ledger_budget(node.chain().tip()) {
+                let optimal_budget = match ev_maximizing_ticket_budget(
+                    node.chain().tip(),
+                    Some(wallet.public_key()),
+                    LEDGER_TARGET_INTERVAL_HEARTBEATS,
+                ) {
                     Ok(budget) => budget,
                     Err(error) => {
                         eprintln!("calculating continuous Ledger budget failed: {error:#}");
                         continue;
                     }
                 };
+                let minimum_budget = match recommended_ticket_budget(
+                    node.chain().tip(),
+                    LEDGER_TARGET_INTERVAL_HEARTBEATS,
+                ) {
+                    Ok(budget) => budget,
+                    Err(error) => {
+                        eprintln!("calculating continuous Ledger minimum failed: {error:#}");
+                        continue;
+                    }
+                };
+                let maximum_budget = match wallet.maximum_consolidating_ticket_budget(
+                    node.chain().tip(),
+                    &node.reserved_inputs(),
+                    1,
+                ) {
+                    Ok(budget) => budget,
+                    Err(error) => {
+                        eprintln!("calculating available Ledger budget failed: {error:#}");
+                        continue;
+                    }
+                };
+                if maximum_budget < minimum_budget {
+                    eprintln!("continuous Ledger ticket skipped: insufficient available balance");
+                    continue;
+                }
+                let budget = optimal_budget.min(maximum_budget);
                 match wallet.submit_consolidating_ticket(
                     &mut node,
                     TicketParameters {
@@ -587,25 +621,6 @@ async fn run_ledger_miner(
             eprintln!("saving continuous Ledger mining state failed: {error:#}");
         }
     }
-}
-
-fn recommended_ledger_budget(state: &iuna::consensus::ConsensusState) -> Result<u64> {
-    let current_reward = subsidy(state.ledger_blocks, state.minted)?;
-    let current = minimum_ticket_budget(LEDGER_TARGET_INTERVAL_HEARTBEATS, current_reward)?;
-    let after_ledger_blocks = state
-        .ledger_blocks
-        .checked_add(1)
-        .context("Ledger block count overflow")?;
-    let after_minted = state
-        .minted
-        .checked_add(current_reward)
-        .context("minted supply overflow")?;
-    let reward_after_same_heartbeat = subsidy(after_ledger_blocks, after_minted)?;
-    let after = minimum_ticket_budget(
-        LEDGER_TARGET_INTERVAL_HEARTBEATS,
-        reward_after_same_heartbeat,
-    )?;
-    Ok(current.max(after))
 }
 
 fn parse_options(arguments: impl IntoIterator<Item = String>) -> Result<Option<Options>> {

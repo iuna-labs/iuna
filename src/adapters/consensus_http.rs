@@ -39,6 +39,7 @@ use crate::{
     },
     app::{
         consensus_node::{ChainRepository, Node},
+        mining_policy::{ev_maximizing_ticket_budget, other_active_ticket_weight},
         wallet_commands::{TicketParameters, Wallet},
     },
     consensus::{
@@ -512,6 +513,8 @@ pub struct MiningTicketQuote {
     pub current_minimum_budget: u64,
     pub minimum_budget_after_same_heartbeat_ledger: u64,
     pub recommended_budget: u64,
+    pub ev_maximizing_budget: Option<u64>,
+    pub other_active_ticket_weight: u64,
     pub heartbeat_target_seconds: u64,
     pub ledger_target_heartbeats: u64,
 }
@@ -1835,12 +1838,44 @@ async fn mining_ticket_quote(
             )
         })?;
     let recommended_budget = current_minimum_budget.max(minimum_budget_after_same_heartbeat_ledger);
+    let wallet = state.wallet.read().expect("wallet state lock poisoned");
+    let mining_public_key = wallet.public_key;
+    let theoretical_ev_maximizing_budget =
+        ev_maximizing_ticket_budget(chain, mining_public_key, query.duration).map_err(|_| {
+            api_error(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "cannot calculate EV-maximizing ticket budget",
+            )
+        })?;
+    let ev_maximizing_budget = wallet
+        .unlocked
+        .as_ref()
+        .map(|wallet| wallet.maximum_consolidating_ticket_budget(chain, &node.reserved_inputs(), 1))
+        .transpose()
+        .map_err(|_| {
+            api_error(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "cannot calculate available ticket budget",
+            )
+        })?
+        .map_or(Some(theoretical_ev_maximizing_budget), |maximum| {
+            (maximum >= recommended_budget).then(|| theoretical_ev_maximizing_budget.min(maximum))
+        });
+    let other_active_ticket_weight =
+        other_active_ticket_weight(chain, mining_public_key).map_err(|_| {
+            api_error(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "cannot calculate competing ticket weight",
+            )
+        })?;
     Ok(Json(MiningTicketQuote {
         duration: query.duration,
         current_next_ledger_reward: current_reward,
         current_minimum_budget,
         minimum_budget_after_same_heartbeat_ledger,
         recommended_budget,
+        ev_maximizing_budget,
+        other_active_ticket_weight,
         heartbeat_target_seconds: HEARTBEAT_TARGET_INTERVAL_SECS,
         ledger_target_heartbeats: LEDGER_TARGET_INTERVAL_HEARTBEATS,
     }))
@@ -2836,6 +2871,11 @@ mod tests {
             quote["recommended_budget"].as_u64().unwrap()
                 >= quote["current_minimum_budget"].as_u64().unwrap()
         );
+        assert!(
+            quote["ev_maximizing_budget"].as_u64().unwrap()
+                >= quote["recommended_budget"].as_u64().unwrap()
+        );
+        assert_eq!(quote["other_active_ticket_weight"], 0);
 
         let response = router(state)
             .oneshot(
