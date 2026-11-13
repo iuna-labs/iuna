@@ -506,6 +506,18 @@ test('mining controls separate manual tickets from continuous read-only state', 
 
   app.status = { ledger_mining_enabled: true, heartbeat_height: 24, ledger_last_ticket_height: 20 };
   assert.match(app.ledgerMiningMessage(), /submits a recommended Ledger ticket every 10 Heartbeats/);
+  app.ticket.continuousQuote = {
+    duration: 10,
+    current_next_ledger_reward: 5_000_000_000,
+    recommended_budget: 2_000_000,
+    ledger_target_heartbeats: 10,
+  };
+  app.heartbeats = [{ ticket_weight: 1_200_000 }];
+  app.status.ledger_ticket_power = 200_000;
+  assert.equal(app.ledgerOtherTicketPower(), 1_000_000);
+  assert.equal(app.ledgerOtherTicketPowerLabel(), '0.01');
+  assert.equal(app.ledgerMaximumNetEv(), 831_333_332);
+  assert.equal(app.ledgerMaximumNetEvLabel(), '8.31333332');
   assert.equal(app.ledgerNextTicketLabel(), 'Heartbeat #30');
   app.status.heartbeat_height = 30;
   assert.equal(app.ledgerNextTicketLabel(), 'Due now');
@@ -514,6 +526,22 @@ test('mining controls separate manual tickets from continuous read-only state', 
 
   app.status.ledger_mining_enabled = false;
   assert.match(app.ledgerMiningMessage(), /Submit a ticket manually below/);
+});
+
+test('maximum Ledger EV handles unavailable and negative subsidy estimates', () => {
+  const { app } = nodeApp();
+  assert.equal(app.ledgerMaximumNetEv(), null);
+  assert.equal(app.ledgerMaximumNetEvLabel(), '…');
+
+  app.heartbeats = [{ ticket_weight: 0 }];
+  app.ticket.continuousQuote = {
+    duration: 10,
+    current_next_ledger_reward: 0,
+    recommended_budget: 1_000_000,
+    ledger_target_heartbeats: 10,
+  };
+  assert.equal(app.ledgerMaximumNetEv(), -1_000_001);
+  assert.equal(app.ledgerMaximumNetEvLabel(), '−0.01000001');
 });
 
 test('metrics use the median interval and per-block difficulty', () => {
