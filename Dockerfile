@@ -14,6 +14,7 @@ COPY . /src/iuna-work
 
 COPY www /site
 COPY wallet /site/wallet
+COPY stats /site/stats
 COPY downloads /site/downloads
 RUN set -eux; \
     cp /src/iuna-work/src-tauri/icons/icon.svg /site/favicon.svg; \

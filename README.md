@@ -38,6 +38,11 @@ or restores the same 24-word/Ed25519 wallet entirely in the browser, encrypts
 the seed locally, reads public UTXOs from a node and submits only signed Ledger
 transactions. The deployment serves it at `https://wallet.getiuna.org`.
 
+The leaderboard in `stats/` is a static page that reads public statistics from
+a node: Heartbeat miners, Ledger winners, ticket weight and the largest
+balances. The deployment serves it at `https://stats.getiuna.org`; add
+`?node=https://your-node.example` to read another node's public endpoint.
+
 ## Run a node
 
 ```sh

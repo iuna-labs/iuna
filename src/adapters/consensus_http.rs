@@ -34,7 +34,7 @@ use crate::{
             ConnectedPeer, ConsensusRelay, PeerAddress, PeerRegistry, PeerTarget,
             SharedConsensusNode,
         },
-        consensus_ui_store::{ConsensusUiStore, UiHeartbeat, WalletRewards},
+        consensus_ui_store::{ConsensusUiStore, UiHeartbeat, UiLeaderboards, WalletRewards},
         consensus_wallet_store,
     },
     app::{
@@ -286,6 +286,79 @@ pub struct PublicWalletActivityView {
 pub struct WalletActivityQuery {
     #[serde(default)]
     pub before_height: Option<u64>,
+}
+
+/// How many entries each public statistics ranking lists.
+const PUBLIC_STATS_RANKING_LIMIT: usize = 25;
+
+#[derive(Clone, Copy, Debug, Default, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum PublicStatsWindow {
+    Hour,
+    #[default]
+    Day,
+    Week,
+    All,
+}
+
+impl PublicStatsWindow {
+    fn heartbeats(self) -> Option<u64> {
+        let per_hour = 3_600 / HEARTBEAT_TARGET_INTERVAL_SECS;
+        match self {
+            Self::Hour => Some(per_hour),
+            Self::Day => Some(24 * per_hour),
+            Self::Week => Some(7 * 24 * per_hour),
+            Self::All => None,
+        }
+    }
+}
+
+#[derive(Debug, Default, Deserialize)]
+pub struct PublicStatsQuery {
+    #[serde(default)]
+    pub window: PublicStatsWindow,
+}
+
+/// Public network statistics and rankings. Mining rankings cover the requested window of
+/// projected Heartbeats; balances and tickets describe the current tip.
+#[derive(Debug, Serialize)]
+pub struct PublicStatsView {
+    pub network: &'static str,
+    pub app_version: &'static str,
+    pub heartbeat_height: u64,
+    pub tip_hash: String,
+    pub tip_timestamp: u64,
+    pub ledger_blocks: u64,
+    pub minted: u64,
+    pub utxos: usize,
+    pub holders: usize,
+    pub tracked_tickets: usize,
+    pub active_tickets: usize,
+    pub active_ticket_weight: u64,
+    pub locked_budget: u64,
+    pub window: PublicStatsWindow,
+    pub mining: UiLeaderboards,
+    pub balances: Vec<PublicBalanceRank>,
+    pub tickets: Vec<PublicTicketRank>,
+}
+
+#[derive(Debug, Serialize)]
+pub struct PublicBalanceRank {
+    pub address: String,
+    pub amount: u64,
+    pub outputs: usize,
+}
+
+/// The tracked tickets of one mining key at the tip.
+#[derive(Debug, Default, Serialize)]
+pub struct PublicTicketRank {
+    pub address: String,
+    pub tickets: usize,
+    pub active_tickets: usize,
+    /// Lottery weight in the tip's slot.
+    pub weight: u64,
+    /// Budget still to be paid out to Heartbeat miners.
+    pub locked: u64,
 }
 
 #[derive(Debug, Default, Deserialize)]
@@ -648,7 +721,106 @@ pub fn public_wallet_router(state: ConsensusHttpState) -> Router {
         )
         .route_layer(DefaultBodyLimit::max(MAX_PUBLIC_TRANSACTION_JSON_BYTES))
         .route_layer(middleware::from_fn(public_wallet_cors))
+        .merge(
+            Router::new()
+                .route("/api/public/stats", get(public_stats))
+                .route_layer(middleware::from_fn(public_read_cors)),
+        )
         .with_state(state)
+}
+
+/// Public statistics hold only chain data and take no credentials, so any site may read them.
+async fn public_read_cors(request: Request, next: Next) -> Response {
+    let mut response = next.run(request).await;
+    response.headers_mut().insert(
+        header::ACCESS_CONTROL_ALLOW_ORIGIN,
+        HeaderValue::from_static("*"),
+    );
+    response
+}
+
+async fn public_stats(
+    State(state): State<ConsensusHttpState>,
+    Query(query): Query<PublicStatsQuery>,
+) -> ApiResult<PublicStatsView> {
+    let internal =
+        |error: anyhow::Error| api_error(StatusCode::INTERNAL_SERVER_ERROR, format!("{error:#}"));
+    let store = state.ui_store.clone();
+    let heartbeats = query.window.heartbeats();
+    let mining = tokio::task::spawn_blocking(move || {
+        store.leaderboards(heartbeats, PUBLIC_STATS_RANKING_LIMIT)
+    })
+    .await
+    .map_err(|error| internal(error.into()))?
+    .map_err(internal)?;
+
+    let mut node = state.node.lock().await;
+    let (holders, top) = node.top_balances();
+    let balances = top
+        .iter()
+        .take(PUBLIC_STATS_RANKING_LIMIT)
+        .map(|entry| PublicBalanceRank {
+            address: hex(&entry.address),
+            amount: entry.amount,
+            outputs: entry.outputs,
+        })
+        .collect();
+    let tip = node.chain().tip();
+    let mut by_key: BTreeMap<PublicKey, PublicTicketRank> = BTreeMap::new();
+    let (mut active_tickets, mut active_ticket_weight, mut locked_budget) = (0, 0_u64, 0_u64);
+    for ticket in tip.tickets.values() {
+        let processed = tip
+            .height
+            .checked_sub(ticket.included_height)
+            .and_then(|offset| offset.checked_add(1))
+            .ok_or_else(|| internal(anyhow::anyhow!("ticket included above the tip")))?;
+        let locked = ticket
+            .remaining_after(processed)
+            .map_err(|error| internal(error.into()))?;
+        let weight = ticket.weight_at(tip.height);
+        let rank = by_key.entry(ticket.mining_public_key).or_default();
+        rank.tickets += 1;
+        rank.locked = rank.locked.saturating_add(locked);
+        locked_budget = locked_budget.saturating_add(locked);
+        if let Some(weight) = weight {
+            rank.active_tickets += 1;
+            rank.weight = rank.weight.saturating_add(weight);
+            active_tickets += 1;
+            active_ticket_weight = active_ticket_weight.saturating_add(weight);
+        }
+    }
+    let mut tickets: Vec<PublicTicketRank> = by_key
+        .into_iter()
+        .map(|(key, rank)| PublicTicketRank {
+            address: hex(&address_from_public_key(&key)),
+            ..rank
+        })
+        .collect();
+    tickets.sort_by(|left, right| {
+        (right.weight, right.locked)
+            .cmp(&(left.weight, left.locked))
+            .then_with(|| left.address.cmp(&right.address))
+    });
+    tickets.truncate(PUBLIC_STATS_RANKING_LIMIT);
+    Ok(Json(PublicStatsView {
+        network: NETWORK_ID,
+        app_version: env!("CARGO_PKG_VERSION"),
+        heartbeat_height: tip.height,
+        tip_hash: hex(&tip.tip),
+        tip_timestamp: tip.tip_timestamp,
+        ledger_blocks: tip.ledger_blocks,
+        minted: tip.minted,
+        utxos: tip.utxos.len(),
+        holders,
+        tracked_tickets: tip.tickets.len(),
+        active_tickets,
+        active_ticket_weight,
+        locked_budget,
+        window: query.window,
+        mining,
+        balances,
+        tickets,
+    }))
 }
 
 async fn public_wallet_view(
@@ -3240,6 +3412,56 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(response.status(), StatusCode::OK);
+    }
+
+    #[tokio::test]
+    async fn public_stats_are_readable_from_any_origin() {
+        let directory = tempfile::tempdir().unwrap();
+        let state = management_state(
+            &directory,
+            Arc::new(Wallet::from_seed([3; 32])),
+            "unused-token-value-32-bytes-long",
+        );
+        let get = |uri: &str| {
+            Request::get(uri)
+                .header(header::ORIGIN, "https://stats.example")
+                .body(Body::empty())
+                .unwrap()
+        };
+
+        let response = public_wallet_router(state.clone())
+            .oneshot(get("/api/public/stats?window=week"))
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+        assert_eq!(response.headers()[header::ACCESS_CONTROL_ALLOW_ORIGIN], "*");
+        let bytes = axum::body::to_bytes(response.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        let stats: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+        assert_eq!(stats["network"], NETWORK_ID);
+        assert_eq!(stats["window"], "week");
+        assert_eq!(stats["holders"], 1);
+        assert_eq!(
+            stats["balances"][0]["address"],
+            hex(&address_from_public_key(&GENESIS_MINER))
+        );
+        assert_eq!(stats["balances"][0]["amount"], GENESIS_REWARD);
+        assert_eq!(stats["mining"]["heartbeats"], 0);
+        assert!(stats["tickets"].as_array().unwrap().is_empty());
+
+        let invalid = public_wallet_router(state.clone())
+            .oneshot(get("/api/public/stats?window=year"))
+            .await
+            .unwrap();
+        assert_eq!(invalid.status(), StatusCode::BAD_REQUEST);
+
+        // The wallet routes keep their own origin allowlist.
+        let wallet = public_wallet_router(state)
+            .oneshot(get(&format!("/api/public/wallet/{}", hex(&[1; 32]))))
+            .await
+            .unwrap();
+        assert_eq!(wallet.status(), StatusCode::FORBIDDEN);
     }
 
     #[tokio::test]

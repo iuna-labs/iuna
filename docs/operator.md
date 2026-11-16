@@ -125,6 +125,25 @@ These routes never receive a seed or password. Browser access is restricted to
 `https://wallet.getiuna.org` and loopback origins for local testing. The deployment ingress exposes only `/api/public` on the
 wallet host; management routes remain on the protected operator interface.
 
+## Public statistics route
+
+The same listener also serves `GET /api/public/stats?window=hour|day|week|all`
+(default `day`) for the leaderboard at `https://stats.getiuna.org`:
+
+- `mining` ranks Heartbeat miners and Ledger winners by blocks within the
+  newest `60`, `1,440` or `10,080` Heartbeats, or the whole chain, with their
+  rewards. It is read from the screen-data projection, so it can trail the tip
+  briefly, and it leaves out genesis.
+- `tickets` ranks mining keys by lottery weight in the current Heartbeat and
+  shows the expenditure still locked in their tracked tickets.
+- `balances` lists the largest confirmed balances per address. The node ranks
+  them once per new tip, like the per-owner index.
+
+Each ranking lists at most `25` entries. The route holds only chain data, so it
+answers any origin with `Access-Control-Allow-Origin: *`; the wallet routes keep
+their own allowlist. The deployment ingress routes `/api/public` on the stats
+host to the same node.
+
 ## Management routes
 
 Management requests use `Authorization: Bearer <IUNA_OPERATOR_TOKEN>` and JSON

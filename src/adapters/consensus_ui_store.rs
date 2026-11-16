@@ -131,6 +131,32 @@ pub struct WalletRewards {
     pub ledger: u64,
 }
 
+/// One mining key's blocks and rewards within a leaderboard window.
+#[derive(Clone, Debug, Eq, PartialEq, Serialize)]
+pub struct UiMinerRank {
+    pub address: String,
+    pub blocks: u64,
+    pub rewards: u64,
+}
+
+/// Heartbeat and Ledger mining ranked over a window of projected Heartbeats. Genesis is left out:
+/// its key is public and nobody mined it.
+#[derive(Clone, Debug, Default, Eq, PartialEq, Serialize)]
+pub struct UiLeaderboards {
+    pub from_height: Option<u64>,
+    pub to_height: Option<u64>,
+    pub from_timestamp: Option<u64>,
+    pub to_timestamp: Option<u64>,
+    pub heartbeats: u64,
+    pub ledger_blocks: u64,
+    pub heartbeat_rewards: u64,
+    pub ledger_rewards: u64,
+    pub heartbeat_miner_count: u64,
+    pub ledger_winner_count: u64,
+    pub heartbeat_miners: Vec<UiMinerRank>,
+    pub ledger_winners: Vec<UiMinerRank>,
+}
+
 impl ConsensusUiStore {
     pub fn open(path: impl AsRef<Path>) -> Result<Self> {
         let path = path.as_ref().to_path_buf();
@@ -304,6 +330,79 @@ impl ConsensusUiStore {
                 })?
                 .collect::<rusqlite::Result<_>>()
                 .context("decoding wallet rewards")
+        })
+    }
+
+    /// Rankings over the newest `heartbeats` projected Heartbeats, or the whole chain with `None`.
+    /// Each list keeps the `limit` keys with the most blocks.
+    pub fn leaderboards(&self, heartbeats: Option<u64>, limit: usize) -> Result<UiLeaderboards> {
+        let limit = i64::try_from(limit).unwrap_or(i64::MAX);
+        self.with_connection(|connection| {
+            let tip = connection.query_row(
+                "SELECT MAX(height) FROM consensus_ui_heartbeats",
+                [],
+                |row| row.get::<_, Option<u64>>(0),
+            )?;
+            let Some(tip) = tip.filter(|tip| *tip > 0) else {
+                return Ok(UiLeaderboards::default());
+            };
+            let from = heartbeats
+                .map_or(0, |count| (tip + 1).saturating_sub(count))
+                .max(1);
+            let mut board = connection.query_row(
+                "SELECT COUNT(*), COALESCE(SUM(has_ledger_block), 0), \
+                 COALESCE(SUM(heartbeat_reward), 0), COALESCE(SUM(ledger_reward), 0), \
+                 COUNT(DISTINCT miner_public_key), COUNT(DISTINCT ledger_miner_public_key), \
+                 MIN(timestamp), MAX(timestamp) \
+                 FROM consensus_ui_heartbeats WHERE height >= ?1",
+                params![from],
+                |row| {
+                    Ok(UiLeaderboards {
+                        from_height: Some(from),
+                        to_height: Some(tip),
+                        heartbeats: row.get(0)?,
+                        ledger_blocks: row.get(1)?,
+                        heartbeat_rewards: row.get(2)?,
+                        ledger_rewards: row.get(3)?,
+                        heartbeat_miner_count: row.get(4)?,
+                        ledger_winner_count: row.get(5)?,
+                        from_timestamp: row.get(6)?,
+                        to_timestamp: row.get(7)?,
+                        heartbeat_miners: Vec::new(),
+                        ledger_winners: Vec::new(),
+                    })
+                },
+            )?;
+            let ranks = |key: &str, reward: &str| -> Result<Vec<UiMinerRank>> {
+                let mut statement = connection.prepare(&format!(
+                    "SELECT {key}, COUNT(*) AS blocks, SUM({reward}) AS rewards \
+                     FROM consensus_ui_heartbeats WHERE height >= ?1 AND {key} IS NOT NULL \
+                     GROUP BY {key} ORDER BY blocks DESC, rewards DESC, {key} LIMIT ?2"
+                ))?;
+                let rows = statement
+                    .query_map(params![from, limit], |row| {
+                        Ok((
+                            row.get::<_, String>(0)?,
+                            row.get::<_, u64>(1)?,
+                            row.get::<_, u64>(2)?,
+                        ))
+                    })?
+                    .collect::<rusqlite::Result<Vec<_>>>()
+                    .context("decoding leaderboard rows")?;
+                Ok(rows
+                    .into_iter()
+                    .filter_map(|(public_key, blocks, rewards)| {
+                        Some(UiMinerRank {
+                            address: address_hex(&public_key)?,
+                            blocks,
+                            rewards,
+                        })
+                    })
+                    .collect())
+            };
+            board.heartbeat_miners = ranks("miner_public_key", "heartbeat_reward")?;
+            board.ledger_winners = ranks("ledger_miner_public_key", "ledger_reward")?;
+            Ok(board)
         })
     }
 
@@ -806,6 +905,55 @@ mod tests {
         let older = store.wallet_rewards_before(&miner, Some(3), 2).unwrap();
         assert_eq!(older.len(), 1);
         assert!(older.contains_key(&hex(&blocks[1].hash())));
+    }
+
+    #[test]
+    fn leaderboards_rank_miners_within_the_window_without_genesis() {
+        let directory = tempfile::tempdir().unwrap();
+        let store = ConsensusUiStore::open(directory.path().join("ui.sqlite3")).unwrap();
+        let mut chain = Chain::from_genesis().unwrap();
+        store.project(&chain).unwrap();
+        assert_eq!(
+            store.leaderboards(None, 10).unwrap(),
+            UiLeaderboards::default()
+        );
+
+        for (height, miner) in [(1, 81), (2, 82), (3, 81), (4, 83)] {
+            let timestamp = GENESIS_TIMESTAMP + height * HEARTBEAT_TARGET_INTERVAL_SECS;
+            let block = mine_child(chain.tip(), timestamp, [miner; 32], Vec::new(), None)
+                .unwrap()
+                .0;
+            assert!(chain.submit(block, timestamp).unwrap());
+        }
+        store.project(&chain).unwrap();
+        let address = |miner: u8| hex(&address_from_public_key(&[miner; 32]));
+        let addresses = |ranks: &[UiMinerRank]| {
+            ranks
+                .iter()
+                .map(|rank| (rank.address.clone(), rank.blocks))
+                .collect::<Vec<_>>()
+        };
+
+        let all = store.leaderboards(None, 10).unwrap();
+        assert_eq!((all.from_height, all.to_height), (Some(1), Some(4)));
+        assert_eq!((all.heartbeats, all.heartbeat_miner_count), (4, 3));
+        assert_eq!((all.ledger_blocks, all.ledger_winner_count), (0, 0));
+        assert!(all.ledger_winners.is_empty());
+        // Ties in blocks fall back to rewards and then key order, so only the leader is fixed.
+        assert_eq!(addresses(&all.heartbeat_miners)[0], (address(81), 2));
+        assert_eq!(all.heartbeat_miners.len(), 3);
+
+        let limited = store.leaderboards(None, 1).unwrap();
+        assert_eq!(limited.heartbeat_miners.len(), 1);
+        assert_eq!(limited.heartbeat_miner_count, 3);
+
+        let newest = store.leaderboards(Some(2), 10).unwrap();
+        assert_eq!((newest.from_height, newest.heartbeats), (Some(3), 2));
+        let mut ranked = addresses(&newest.heartbeat_miners);
+        ranked.sort();
+        let mut expected = vec![(address(81), 1), (address(83), 1)];
+        expected.sort();
+        assert_eq!(ranked, expected);
     }
 
     #[test]

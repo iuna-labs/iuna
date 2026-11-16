@@ -58,6 +58,7 @@ pub struct Node<R> {
     reserved_inputs: BTreeSet<OutPoint>,
     owner_index: OwnerIndex,
     used_address_index: UsedAddressIndex,
+    balance_ranking: BalanceRanking,
     /// Bumped on every mempool change, so callers can persist it only when it changed.
     mempool_generation: u64,
 }
@@ -68,6 +69,25 @@ pub struct Node<R> {
 struct OwnerIndex {
     tip: Option<Hash>,
     outputs: HashMap<Address, Vec<OutPoint>>,
+}
+
+/// Most an address-balance ranking keeps. Public statistics pages show far fewer.
+pub const MAX_RANKED_BALANCES: usize = 100;
+
+/// Confirmed balance of one address at the current tip.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct AddressBalance {
+    pub address: Address,
+    pub amount: u64,
+    pub outputs: usize,
+}
+
+/// The largest balances at one tip, rebuilt lazily once per new tip like `OwnerIndex`.
+#[derive(Default)]
+struct BalanceRanking {
+    tip: Option<Hash>,
+    holders: usize,
+    top: Vec<AddressBalance>,
 }
 
 #[derive(Default)]
@@ -194,6 +214,7 @@ impl<R: ChainRepository> Node<R> {
             reserved_inputs: BTreeSet::new(),
             owner_index: OwnerIndex::default(),
             used_address_index: UsedAddressIndex::default(),
+            balance_ranking: BalanceRanking::default(),
             mempool_generation: 0,
         })
     }
@@ -266,6 +287,43 @@ impl<R: ChainRepository> Node<R> {
                     .map(|output| (point.clone(), output.clone()))
             })
             .collect()
+    }
+
+    /// The number of addresses holding confirmed outputs, and the largest balances among them in
+    /// descending order (ties by address), at most `MAX_RANKED_BALANCES`.
+    pub fn top_balances(&mut self) -> (usize, &[AddressBalance]) {
+        let tip = self.chain.tip();
+        if self.balance_ranking.tip != Some(tip.tip) {
+            let mut balances: HashMap<Address, (u64, usize)> = HashMap::new();
+            for output in tip.utxos.values() {
+                let entry = balances.entry(output.owner).or_default();
+                // The supply invariant bounds every sum by MAX_MONEY.
+                entry.0 = entry.0.saturating_add(output.value);
+                entry.1 += 1;
+            }
+            let holders = balances.len();
+            let mut top: Vec<AddressBalance> = balances
+                .into_iter()
+                .map(|(address, (amount, outputs))| AddressBalance {
+                    address,
+                    amount,
+                    outputs,
+                })
+                .collect();
+            top.sort_unstable_by(|left, right| {
+                right
+                    .amount
+                    .cmp(&left.amount)
+                    .then_with(|| left.address.cmp(&right.address))
+            });
+            top.truncate(MAX_RANKED_BALANCES);
+            self.balance_ranking = BalanceRanking {
+                tip: Some(tip.tip),
+                holders,
+                top,
+            };
+        }
+        (self.balance_ranking.holders, &self.balance_ranking.top)
     }
 
     /// Whether an address has appeared on the active chain or in the local mempool. Unlike the
@@ -908,6 +966,36 @@ mod tests {
 
         assert_eq!(node.pending_transaction_count(), 0);
         assert!(!node.address_used(&recipient));
+    }
+
+    #[test]
+    fn balance_ranking_follows_the_tip() {
+        let mut node = Node::open(MemoryRepository::default()).unwrap();
+        let (holders, top) = node.top_balances();
+        assert_eq!(holders, 1);
+        assert_eq!(
+            top,
+            [AddressBalance {
+                address: address_from_public_key(&GENESIS_MINER),
+                amount: GENESIS_REWARD,
+                outputs: 1,
+            }]
+        );
+
+        let ticket = signed_genesis_ticket(&node);
+        node.submit_ticket(ticket).unwrap();
+        node.mine_next(GENESIS_TIMESTAMP + HEARTBEAT_TARGET_INTERVAL_SECS, [44; 32])
+            .unwrap();
+        let tip = node.chain().tip().clone();
+        let (holders, top) = node.top_balances();
+        let spendable: u64 = tip.utxos.values().map(|output| output.value).sum();
+        assert_eq!(holders, top.len());
+        assert_eq!(top.iter().map(|entry| entry.amount).sum::<u64>(), spendable);
+        assert!(top.windows(2).all(|pair| pair[0].amount >= pair[1].amount));
+        assert!(
+            top.iter()
+                .any(|entry| entry.address == address_from_public_key(&[44; 32]))
+        );
     }
 
     #[test]
