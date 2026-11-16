@@ -18,6 +18,7 @@
 # Static website (Dockerfile).
 !www/**
 !wallet/**
+!stats/**
 !downloads/**
 !scripts/inject_cloudflare_analytics.py
 !src-tauri/icons/128x128@2x.png

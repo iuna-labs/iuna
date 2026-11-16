@@ -56,3 +56,8 @@ test('amounts, shares and intervals are formatted for the leaderboard', () => {
   assert.equal(core.formatDuration(61), '61s');
   assert.equal(core.formatDuration(300), '5m');
 });
+
+test('the website image receives the stats page', () => {
+  assert.match(source('.dockerignore'), /^!stats\/\*\*$/m);
+  assert.match(source('Dockerfile'), /^COPY stats \/site\/stats$/m);
+});
