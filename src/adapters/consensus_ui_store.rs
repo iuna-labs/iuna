@@ -59,8 +59,9 @@ CREATE TABLE IF NOT EXISTS consensus_ui_heartbeats (
 );
 "#;
 
-/// Roughly what the Metrics charts can draw usefully; about 2 MB of JSON.
-const MAX_METRIC_ROWS: u64 = 5_000;
+/// The browser draws at most 300 points per chart. A little extra source detail lets its
+/// min/max bucketing retain short spikes without sending the whole chain over the local API.
+const MAX_METRIC_ROWS: u64 = 600;
 
 const HEARTBEAT_METRIC_COLUMNS: &[(&str, &str)] = &[
     ("ticket_budget", "INTEGER NOT NULL DEFAULT 0"),
@@ -119,6 +120,25 @@ pub struct UiHeartbeat {
     pub minted: u64,
     pub utxos: usize,
     pub tracked_tickets: usize,
+    pub ledger_blocks: u64,
+    pub active_tickets: usize,
+    pub ticket_weight: u64,
+}
+
+/// Compact projection used only by Metrics. Chain identity and miner fields make a full
+/// `UiHeartbeat` more than twice as large and none of them are used by the charts.
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+pub struct UiMetric {
+    pub height: u64,
+    pub timestamp: u64,
+    pub target: String,
+    pub has_ledger_block: bool,
+    pub ledger_transaction_count: usize,
+    pub heartbeat_bytes: u64,
+    pub chain_bytes: u64,
+    pub interval_seconds: Option<u64>,
+    pub minted: u64,
+    pub utxos: usize,
     pub ledger_blocks: u64,
     pub active_tickets: usize,
     pub ticket_weight: u64,
@@ -406,13 +426,13 @@ impl ConsensusUiStore {
         })
     }
 
-    pub fn metrics(&self, limit: Option<usize>) -> Result<Vec<UiHeartbeat>> {
+    pub fn metrics(&self, limit: Option<usize>) -> Result<Vec<UiMetric>> {
         self.metric_rows(limit, MAX_METRIC_ROWS)
     }
 
     /// Without a limit the whole chain is thinned to about `max_rows` evenly spaced Heartbeats plus
     /// the newest one, so the response stays bounded however long the chain gets.
-    fn metric_rows(&self, limit: Option<usize>, max_rows: u64) -> Result<Vec<UiHeartbeat>> {
+    fn metric_rows(&self, limit: Option<usize>, max_rows: u64) -> Result<Vec<UiMetric>> {
         let limit = limit
             .map(|value| i64::try_from(value).unwrap_or(i64::MAX))
             .unwrap_or(i64::MAX);
@@ -428,13 +448,13 @@ impl ConsensusUiStore {
                 1
             };
             let mut statement = connection.prepare(&format!(
-                "SELECT {HEARTBEAT_SUMMARY_COLUMNS} FROM consensus_ui_heartbeats \
+                "SELECT {METRIC_COLUMNS} FROM consensus_ui_heartbeats \
                      WHERE height % ?2 = 0 \
                      OR height = (SELECT MAX(height) FROM consensus_ui_heartbeats) \
                      ORDER BY height DESC LIMIT ?1"
             ))?;
             statement
-                .query_map(params![limit, step], decode_heartbeat)?
+                .query_map(params![limit, step], decode_metric)?
                 .collect::<rusqlite::Result<Vec<_>>>()
                 .context("decoding metric rows")
         })
@@ -718,6 +738,11 @@ const HEARTBEAT_SUMMARY_COLUMNS: &str = "height, block_hash, parent_hash, timest
     ticket_budget, heartbeat_bytes, chain_bytes, interval_seconds, minted, utxos, \
     tracked_tickets, ledger_blocks, active_tickets, ticket_weight, ledger_miner_public_key";
 
+/// The columns `decode_metric` reads, in its order.
+const METRIC_COLUMNS: &str = "height, timestamp, target, has_ledger_block, \
+    ledger_transaction_count, heartbeat_bytes, chain_bytes, interval_seconds, minted, utxos, \
+    ledger_blocks, active_tickets, ticket_weight";
+
 fn decode_heartbeat(row: &rusqlite::Row<'_>) -> rusqlite::Result<UiHeartbeat> {
     let miner_public_key: String = row.get(4)?;
     let ledger_miner_public_key: Option<String> = row.get(19)?;
@@ -744,6 +769,24 @@ fn decode_heartbeat(row: &rusqlite::Row<'_>) -> rusqlite::Result<UiHeartbeat> {
         ledger_blocks: row.get(16)?,
         active_tickets: row.get(17)?,
         ticket_weight: row.get(18)?,
+    })
+}
+
+fn decode_metric(row: &rusqlite::Row<'_>) -> rusqlite::Result<UiMetric> {
+    Ok(UiMetric {
+        height: row.get(0)?,
+        timestamp: row.get(1)?,
+        target: row.get(2)?,
+        has_ledger_block: row.get::<_, i64>(3)? != 0,
+        ledger_transaction_count: row.get(4)?,
+        heartbeat_bytes: row.get(5)?,
+        chain_bytes: row.get(6)?,
+        interval_seconds: row.get(7)?,
+        minted: row.get(8)?,
+        utxos: row.get(9)?,
+        ledger_blocks: row.get(10)?,
+        active_tickets: row.get(11)?,
+        ticket_weight: row.get(12)?,
     })
 }
 
@@ -969,8 +1012,7 @@ mod tests {
             assert!(chain.submit(block, timestamp).unwrap());
         }
         store.project(&chain).unwrap();
-        let heights =
-            |rows: Vec<UiHeartbeat>| rows.iter().map(|row| row.height).collect::<Vec<_>>();
+        let heights = |rows: Vec<UiMetric>| rows.iter().map(|row| row.height).collect::<Vec<_>>();
 
         assert_eq!(
             heights(store.metric_rows(None, 5).unwrap()),

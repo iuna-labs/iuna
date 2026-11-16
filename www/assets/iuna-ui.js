@@ -3,6 +3,7 @@ const IUNA_RELEASE_METADATA_URL = "https://getiuna.org/downloads/latest.json";
 const IUNA_RELEASE_CHECK_INTERVAL_MS = 30 * 60 * 1000;
 const IUNA_CHART_MAX_POINTS = 300;
 const iunaChartCaches = new WeakMap();
+const iunaMetricsRequests = new WeakMap();
 // The node names the parts a reward collects; a note explains a block-wide amount.
 const IUNA_REWARD_INPUTS = {
   ledger_fee_share: { label: "Ledger fee share", note: "Share of this block's Ledger transaction fees." },
@@ -103,7 +104,7 @@ window.iunaApp = function iunaApp() {
       this.tokenStored = Boolean(this.storedOperatorToken());
       this.contacts = this.loadContacts();
       this.tab = this.tabFromHash();
-      window.addEventListener("hashchange", () => { this.tab = this.tabFromHash(); });
+      window.addEventListener("hashchange", () => this.setTab(this.tabFromHash()));
       window.addEventListener("keydown", (event) => this.handleKeydown(event));
       window.addEventListener("keyup", (event) => this.handleKeyup(event));
       window.addEventListener("blur", () => { this.shortcutKeyHeld = false; });
@@ -148,6 +149,7 @@ window.iunaApp = function iunaApp() {
     setTab(tab) {
       if (!this.tabs().includes(tab)) return;
       const changed = this.tab !== tab;
+      if (changed && this.tab === "metrics") this.cancelMetricsRefresh();
       this.tab = tab;
       if (window.location.hash !== `#${tab}`) window.location.hash = tab;
       if (changed && tab === "wallet") this.refresh(true);
@@ -762,8 +764,8 @@ window.iunaApp = function iunaApp() {
       }
     },
 
-    async getJson(path) {
-      const response = await fetch(path, { headers: this.headers(), cache: "no-store" });
+    async getJson(path, signal) {
+      const response = await fetch(path, { headers: this.headers(), cache: "no-store", signal });
       const payload = await this.responseJson(response);
       if (!response.ok) {
         const error = new Error(payload.error || `${path} returned ${response.status}`);
@@ -1683,17 +1685,32 @@ window.iunaApp = function iunaApp() {
       return this.metricsRange === "all" ? "/api/metrics" : `/api/metrics?limit=${this.metricsRange}`;
     },
 
+    cancelMetricsRefresh() {
+      this.metricsRequestId += 1;
+      iunaMetricsRequests.get(this)?.abort();
+      iunaMetricsRequests.delete(this);
+      this.metricsBusy = false;
+    },
+
     async refreshMetrics(silent = false) {
+      iunaMetricsRequests.get(this)?.abort();
+      const controller = typeof AbortController === "function" ? new AbortController() : null;
+      if (controller) iunaMetricsRequests.set(this, controller);
       const requestId = ++this.metricsRequestId;
       const path = this.metricsPath();
       this.metricsBusy = true;
       try {
-        const rows = await this.getJson(path);
-        if (requestId === this.metricsRequestId) this.metricsRows = rows;
+        const rows = await this.getJson(path, controller?.signal);
+        if (requestId === this.metricsRequestId && this.tab === "metrics") this.metricsRows = rows;
       } catch (error) {
-        if (!silent && requestId === this.metricsRequestId) this.notify(error.message, "error");
+        if (error?.name !== "AbortError" && !silent && requestId === this.metricsRequestId) {
+          this.notify(error.message, "error");
+        }
       } finally {
-        if (requestId === this.metricsRequestId) this.metricsBusy = false;
+        if (requestId === this.metricsRequestId) {
+          iunaMetricsRequests.delete(this);
+          this.metricsBusy = false;
+        }
       }
     },
 

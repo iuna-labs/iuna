@@ -34,7 +34,9 @@ use crate::{
             ConnectedPeer, ConsensusRelay, PeerAddress, PeerRegistry, PeerTarget,
             SharedConsensusNode,
         },
-        consensus_ui_store::{ConsensusUiStore, UiHeartbeat, UiLeaderboards, WalletRewards},
+        consensus_ui_store::{
+            ConsensusUiStore, UiHeartbeat, UiLeaderboards, UiMetric, WalletRewards,
+        },
         consensus_wallet_store,
     },
     app::{
@@ -2763,7 +2765,7 @@ struct MetricsQuery {
 async fn metrics(
     State(state): State<ConsensusHttpState>,
     Query(query): Query<MetricsQuery>,
-) -> Result<Json<Vec<UiHeartbeat>>, (StatusCode, String)> {
+) -> Result<Json<Vec<UiMetric>>, (StatusCode, String)> {
     let store = state.ui_store.clone();
     let limit = query.limit.map(|limit| limit.clamp(1, 1_000));
     match tokio::task::spawn_blocking(move || store.metrics(limit)).await {
@@ -3085,6 +3087,8 @@ mod tests {
         assert!(json[0].get("chain_bytes").is_some());
         assert!(json[0].get("minted").is_some());
         assert!(json[0].get("utxos").is_some());
+        assert!(json[0].get("block_hash").is_none());
+        assert!(json[0].get("miner_public_key").is_none());
 
         let response = router(state.clone())
             .oneshot(

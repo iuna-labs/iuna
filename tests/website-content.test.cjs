@@ -447,12 +447,13 @@ function nodeApp(globals = {}) {
     ...globals,
   });
   const app = window.iunaApp();
+  const setTab = app.setTab.bind(app);
   const messages = [];
   app.notify = (message, kind = 'success') => messages.push({ message, kind });
   app.$nextTick = () => {};
   app.$refs = {};
   app.setTab = (tab) => { app.tab = tab; };
-  return { app, messages, values };
+  return { app, messages, setTab, values };
 }
 
 test('transfers are only signed after review, within the spendable balance', () => {
@@ -582,6 +583,33 @@ test('metrics ranges and protocol charts use per-Heartbeat projection rows', () 
     assert.match(controller, new RegExp(copy));
   }
   assert.doesNotMatch(controller, /per Heartbeat/);
+});
+
+test('leaving Metrics cancels its pending render work before opening Chain', async () => {
+  const { app, setTab } = nodeApp({ AbortController });
+  let aborted = false;
+  let resolveMetrics;
+  app.tab = 'metrics';
+  app.getJson = (_path, signal) => new Promise((resolve, reject) => {
+    resolveMetrics = resolve;
+    signal.addEventListener('abort', () => {
+      aborted = true;
+      const error = new Error('aborted');
+      error.name = 'AbortError';
+      reject(error);
+    });
+  });
+
+  const request = app.refreshMetrics();
+  assert.equal(app.metricsBusy, true);
+  setTab('chain');
+  resolveMetrics([{ height: 1 }]);
+  await request;
+
+  assert.equal(aborted, true);
+  assert.equal(app.tab, 'chain');
+  assert.equal(app.metricsBusy, false);
+  assert.equal(app.metricsRows.length, 0);
 });
 
 test('large metrics ranges cache calculations and only draw useful SVG detail', () => {
