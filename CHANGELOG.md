@@ -5,6 +5,18 @@ from the Git history and Conventional Commit titles by `deployment.sh`.
 
 ## [Unreleased]
 
+## [0.6.10] - 2026-11-16
+
+### Added
+
+- link the stats page from the homepage menu
+- give the stats page the app icon and a web manifest
+- colour addresses and show each board's distribution
+
+### Fixed
+
+- keep metrics navigation responsive
+
 ## [0.6.9] - 2026-11-16
 
 ### Added
