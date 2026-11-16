@@ -5,6 +5,16 @@ from the Git history and Conventional Commit titles by `deployment.sh`.
 
 ## [Unreleased]
 
+## [0.6.9] - 2026-11-16
+
+### Added
+
+- add a public leaderboard at stats.getiuna.org
+
+### Fixed
+
+- send the stats page to the website image build
+
 ## [0.6.8] - 2026-11-14
 
 ### Added
