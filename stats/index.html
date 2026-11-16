@@ -14,7 +14,18 @@
   <link rel="stylesheet" href="./styles.css">
 </head>
 <body>
-  <main id="app"></main>
+  <header class="topbar">
+    <div class="wrap">
+      <a class="brand" href="https://getiuna.org/"><span class="mark" aria-hidden="true"><svg viewBox="0 0 32 32" focusable="false"><circle cx="9.4" cy="7.6" r="2.8" fill="currentColor"></circle><path d="M9.4 13v7.1c0 3.7 2.9 6.4 6.6 6.4s6.6-2.7 6.6-6.4V13" fill="none" stroke="currentColor" stroke-width="4.2" stroke-linecap="round" stroke-linejoin="round"></path></svg></span>iuna <b>stats</b></a>
+      <nav aria-label="Site">
+        <a href="https://getiuna.org/">Home</a>
+        <a href="https://wallet.getiuna.org/">Wallet</a>
+        <a href="https://stats.getiuna.org/" aria-current="page">Stats</a>
+        <a class="wide-only" href="https://getiuna.org/downloads/">Downloads</a>
+      </nav>
+    </div>
+  </header>
+  <main id="app" class="wrap"></main>
   <noscript><p class="noscript">The leaderboard reads live data from a node and needs JavaScript.</p></noscript>
   <script type="module" src="./app.js"></script>
 </body>

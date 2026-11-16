@@ -61,3 +61,12 @@ test('the website image receives the stats page', () => {
   assert.match(source('.dockerignore'), /^!stats\/\*\*$/m);
   assert.match(source('Dockerfile'), /^COPY stats \/site\/stats$/m);
 });
+
+test('address colours stay with the address and run out into a neutral colour', () => {
+  const assigned = new Map();
+  assert.equal(core.addressColor(assigned, 'a', ['#1', '#2']), '#1');
+  assert.equal(core.addressColor(assigned, 'b', ['#1', '#2']), '#2');
+  assert.equal(core.addressColor(assigned, 'a', ['#1', '#2']), '#1');
+  assert.equal(core.addressColor(assigned, 'c', ['#1', '#2']), core.OTHER_COLOR);
+  assert.equal(assigned.has('c'), false);
+});

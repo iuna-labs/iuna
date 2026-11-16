@@ -109,3 +109,18 @@ export function formatDuration(seconds) {
 export function groupDigits(digits) {
   return digits.replace(/\B(?=(\d{3})+(?!\d))/g, ",");
 }
+
+/// Categorical colors stepped for the dark panel, in an order whose neighbours stay apart under
+/// colour-vision deficiencies. Addresses past the last slot share the neutral colour.
+export const ADDRESS_COLORS = ["#3987e5", "#d95926", "#199e70", "#c98500", "#d55181", "#0ca30c", "#9085e9", "#e66767"];
+export const OTHER_COLOR = "#5b666c";
+
+/// The colour follows the address, not its rank: the first address seen keeps the first slot for
+/// the rest of the session, whichever board or window shows it next.
+export function addressColor(assigned, address, palette = ADDRESS_COLORS) {
+  if (!assigned.has(address)) {
+    if (assigned.size >= palette.length) return OTHER_COLOR;
+    assigned.set(address, palette[assigned.size]);
+  }
+  return assigned.get(address);
+}
