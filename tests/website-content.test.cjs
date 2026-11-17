@@ -129,17 +129,19 @@ test('downloads page lists the release artifacts and the source build', () => {
   }
 });
 
-test('homepage keeps its original calls to action and links to the live wallet host', () => {
+test('homepage keeps its calls to action and links to the live wallet host', () => {
   const html = content('www/index.html');
-  const heroStart = html.indexOf('<header class="hero">');
-  const calloutStart = html.indexOf('<aside class="candidate-callout"');
-  const hero = html.slice(heroStart, calloutStart);
+  const hero = html.slice(html.indexOf('<header class="hero">'), html.indexOf('</header>'));
+  const nav = html.slice(html.indexOf('<nav class="nav"'), html.indexOf('</nav>'));
 
   assert.match(hero, />Download iuna<\/a>/);
+  assert.match(hero, /discord\.gg\//);
   assert.doesNotMatch(html, /getting-started/i);
-  assert.match(hero, />Why iuna<\/a>/);
-  assert.match(hero, />How it works<\/a>/);
-  assert.match(hero, />Roadmap<\/a>/);
+  for (const section of ['why', 'how', 'help', 'roadmap', 'faq']) {
+    assert.match(nav, new RegExp(`href="#${section}"`));
+    assert.match(html, new RegExp(`<section id="${section}"`));
+  }
+  assert.match(nav, /https:\/\/stats\.getiuna\.org\//);
   assert.doesNotMatch(hero, />Open wallet<\/a>/);
   assert.doesNotMatch(html, /wallet\.getiuna\.com/);
   assert.match(html, /https:\/\/wallet\.getiuna\.org\//);
