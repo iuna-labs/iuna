@@ -119,7 +119,9 @@ The self-custody browser wallet uses four deliberately narrow routes:
 Every node mempool, for all submission paths, applies a relay policy on top of
 consensus: a Ledger transaction must pay at least `1` unit per started `1,000`
 canonical bytes. A typical transaction therefore needs a fee of `0.00000001
-IUNA`. Free transactions are refused instead of filling the mempool. This is
+IUNA`. Free transactions are refused instead of filling the mempool. A full
+mempool (`10,000` transactions or `4,096` tickets) only admits an object that
+pays more per byte than its cheapest entry, which it then replaces. This is
 policy, not consensus: a block containing a cheaper transaction is still
 valid. Per-IP rate limiting belongs in the ingress in front of these routes.
 
