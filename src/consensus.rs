@@ -685,9 +685,10 @@ impl Chain {
     }
 
     /// Validate and index a block. Returns true only when strict additional chainwork makes this
-    /// branch active; equal-work branches remain available but never replace the current tip.
-    /// A block whose parent state would need a replay is held back until its branch outweighs the
-    /// active one, so the cost of a deep replay falls on whoever asks for it.
+    /// branch active; equal-work branches within the state window remain available but never
+    /// replace the current tip. A block whose parent lies behind that window, because its state
+    /// would need a replay or is only kept as genesis or a checkpoint, is held back until its
+    /// branch outweighs the active one, so the cost falls on whoever asks for it.
     pub fn submit(&mut self, block: HeartbeatBlock, now: u64) -> Result<bool> {
         let parent_hash = block
             .header
@@ -706,12 +707,24 @@ impl Chain {
         if block.header.target != self.child_target(&parent_hash)? {
             return Err(ConsensusError::Invalid("incorrect ASERT target"));
         }
-        if self.states.contains_key(&parent_hash) {
+        if self.live_state(&parent_hash).is_some() {
             self.index_block(block, now)
         } else {
             self.check_deferrable(&block, now)?;
             self.defer_block(block)
         }
+    }
+
+    /// The state of `hash` if it lies inside the window behind the tip. Genesis and checkpoint states
+    /// outside it are kept to rebuild others, not to extend: a branch growing from one of them
+    /// waits in the bounded deferred buffer until it outweighs the tip, like a branch from an
+    /// archived state. Otherwise blocks forking from genesis at the lowest difficulty would each
+    /// be validated and kept for good.
+    pub fn live_state(&self, hash: &Hash) -> Option<&ConsensusState> {
+        let window_start = self.tip().height.saturating_sub(self.state_window);
+        self.states
+            .get(hash)
+            .filter(|state| state.height >= window_start)
     }
 
     /// What needs no state. After this the hash pins the whole body, so the copy kept is the only
@@ -2702,6 +2715,37 @@ mod tests {
 
         assert!(chain.block(&hash).is_none());
         assert_eq!(chain.tip().tip, history[8].tip);
+    }
+
+    #[test]
+    fn a_fork_from_genesis_behind_the_window_waits_until_it_outweighs_the_tip() {
+        let (mut chain, history) = eight_blocks();
+        // Genesis keeps its state for good, but a branch from it is not validated or kept yet.
+        let block = with_bad_root(&history[0], 45);
+        let hash = block.hash();
+        assert_eq!(chain.submit(block, history[1].tip_timestamp), Ok(false));
+        assert!(chain.block(&hash).is_none());
+
+        let (fork, mut state) = mine_child(
+            &history[0],
+            history[1].tip_timestamp,
+            [46; 32],
+            Vec::new(),
+            None,
+        )
+        .unwrap();
+        let fork_hash = fork.hash();
+        assert_eq!(chain.submit(fork, state.tip_timestamp), Ok(false));
+        assert!(chain.block(&fork_hash).is_none());
+        // A branch that outweighs the tip still activates, exactly as before.
+        for _ in 0..8 {
+            let timestamp = state.tip_timestamp + HEARTBEAT_TARGET_INTERVAL_SECS;
+            let (block, next) = mine_child(&state, timestamp, [46; 32], Vec::new(), None).unwrap();
+            chain.submit(block, timestamp).unwrap();
+            state = next;
+        }
+        assert_eq!(chain.tip().tip, state.tip);
+        assert!(chain.block(&fork_hash).is_some());
     }
 
     fn eight_blocks() -> (Chain, Vec<ConsensusState>) {

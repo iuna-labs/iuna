@@ -203,11 +203,12 @@ impl PeerSession {
             return Ok(Vec::new());
         };
         // Without a recent parent this node is behind or the block is an old fork: range sync
-        // covers the gap, including this block, so there is nothing to retry here.
+        // covers the gap, including this block, so there is nothing to retry here. A kept genesis
+        // or checkpoint state behind the window does not count as recent.
         let Some(parent) = compact
             .header
             .parent
-            .and_then(|parent| node.chain().kept_state(&parent))
+            .and_then(|parent| node.chain().live_state(&parent))
         else {
             self.pending_compact.remove(&block_hash);
             return Ok(vec![self.block_request(node)]);
