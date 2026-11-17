@@ -667,7 +667,7 @@ test('dashboard cards report stale chains and isolated nodes', () => {
   assert.equal(app.dashboardState('ledgerMining'), 'good');
   const html = content('www/node.html');
   const dashboard = html.slice(html.indexOf('<section class="dashboard"'), html.indexOf(`<section x-show="tab === 'wallet'">`));
-  assert.equal((dashboard.match(/<article class="dashboard-card/g) || []).length, 6);
+  assert.equal((dashboard.match(/class="dashboard-row"/g) || []).length, 5);
   for (const label of ['Current balance', 'Heartbeat Mining', 'Ledger Mining', 'Heartbeat chain', 'Ledger chain', 'P2P']) {
     assert.match(dashboard, new RegExp(`>${label}<`, 'i'));
   }
@@ -716,11 +716,11 @@ test('dashboard uses single-line ages and wallet activity grows in pages', () =>
 test('dashboard keeps long balances and the Heartbeat mining label inside their cards', () => {
   const { app } = nodeApp();
   app.status = { wallet_balance: 9_007_199_254_740_991 };
-  assert.equal(app.balanceValueStyle(), 'font-size:7.5px');
+  assert.equal(app.balanceValueStyle(), 'font-size:13px');
 
   const html = content('www/node.html');
   assert.match(html, /:style="balanceValueStyle\(\)"/);
-  assert.match(html, /\.dashboard-card\.heartbeat-mining \.dashboard-label \{[^}]*white-space: nowrap/);
+  assert.match(html, /\.dashboard-label \{[^}]*white-space: nowrap/);
 });
 
 test('wallet activity includes mining rewards and UTXOs open separately', async () => {
@@ -731,18 +731,18 @@ test('wallet activity includes mining rewards and UTXOs open separately', async 
   assert.equal(app.activitySign({ kind: 'ledger_reward' }), '+');
   app.getJson = async () => ({ utxos: [{ transaction_id: 'aa', output_index: 0 }] });
   await app.openUtxos();
-  assert.equal(app.showUtxos, true);
+  assert.equal(app.walletView, 'utxos');
   assert.equal(app.activity.utxos.length, 1);
 
   const html = content('www/node.html');
-  assert.match(html, /class="utxo-details-button" @click="openUtxos\(\)">View details/);
+  assert.match(html, /@click="openUtxos\(\)">UTXOs/);
   assert.match(html, /id="utxo-title">Unspent outputs/);
   assert.match(html, /status\.wallet_utxos/);
   assert.doesNotMatch(html, /activity\?\.utxos\.length \?\? status\.utxos/);
   assert.doesNotMatch(html, /<details class="tx-card" style="margin-top:12px" x-show="activity\?\.utxos/);
 });
 
-test('receive panel opens a filterable wallet-address modal', async () => {
+test('wallet panel opens a filterable wallet-address tab', async () => {
   const { app } = nodeApp();
   const addresses = [
     { kind: 'mining', index: null, address: 'aa', used: true, current: false },
@@ -753,16 +753,16 @@ test('receive panel opens a filterable wallet-address modal', async () => {
   app.postJson = async (path) => { requested = path; return { addresses }; };
   await app.openWalletAddresses();
   assert.equal(requested, '/api/wallet/addresses');
-  assert.equal(app.showWalletAddresses, true);
+  assert.equal(app.walletView, 'addresses');
   assert.deepEqual(app.visibleWalletAddresses().map((item) => item.address), ['aa', 'bb']);
   app.walletAddressFilter = 'all';
   assert.deepEqual(app.visibleWalletAddresses().map((item) => item.address), ['aa', 'bb', 'cc']);
   assert.equal(app.walletAddressLabel(addresses[0]), 'Mining address');
   assert.equal(app.walletAddressLabel(addresses[1]), 'Receive #1');
-  assert.equal(app.shortcutsAvailable(), false);
+  assert.equal(app.shortcutsAvailable(), true, 'a tab is not a dialog');
 
   const html = content('www/node.html');
-  assert.match(html, /@click="openWalletAddresses\(\)"[^>]*>View addresses/);
+  assert.match(html, /@click="openWalletAddresses\(\)"[^>]*>Addresses/);
   assert.match(html, /id="wallet-addresses-title">Wallet addresses/);
   assert.match(html, /x-for="item in visibleWalletAddresses\(\)"/);
 });
@@ -886,7 +886,7 @@ test('chain overview labels miners and identifies the local wallet', () => {
   assert.match(html, /block\.ticket_count/);
   assert.match(html, /block\.ledger_transaction_count/);
   assert.match(html, /button\.chain-block:hover, button\.chain-block:focus-visible/);
-  assert.match(html, /\.chain-block\.selected \{ border-color: var\(--green\); background: #202616;/);
+  assert.match(html, /\.chain-block\.selected \{ border-color: var\(--green\); background: var\(--green-soft\);/);
   assert.match(html, /\.chain-block\.new-block \{ animation: chain-block-arrive/);
   assert.doesNotMatch(html, /class="chain-height">#/);
   const heartbeatBuilding = html.slice(
@@ -1018,7 +1018,7 @@ test('new chain heads slide both rails back to the newest block when already at 
   const html = content('www/node.html');
   assert.match(html, /x-ref="heartbeatRail"/);
   assert.match(html, /x-ref="ledgerRail"/);
-  assert.match(html, /\.chain-detail \.detail-kv \{ display: grid; grid-template-columns: 90px/);
+  assert.match(html, /\.chain-detail \.detail-kv \{ display: grid; grid-template-columns: 130px/);
 });
 
 test('chain mempool opens full Ledger transaction and Heartbeat ticket details', async () => {
@@ -1282,8 +1282,11 @@ test('release gates and wallet caching cover what the review found', () => {
   assert.match(hosted, /add_header Cache-Control "no-cache" always;/);
 });
 
-test('sidebar buttons have room to center their longest label', () => {
-  assert.match(content('www/node.html'), /\.nav-button \{ padding-inline: 0; \}/);
+test('sidebar labels stay available to assistive technology in the icon rail', () => {
+  const html = content('www/node.html');
+  assert.match(html, /class="nav-label">Settings</);
+  assert.match(html, /\.nav-label \{ position: absolute; width: 1px; height: 1px; overflow: hidden; clip: rect\(0 0 0 0\);/);
+  assert.doesNotMatch(html, /\.nav-label \{[^}]*display: none/);
 });
 
 test('elements toggled by x-show keep their layout in a class', () => {

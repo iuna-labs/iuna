@@ -27,9 +27,9 @@ window.iunaApp = function iunaApp() {
     activityPageDepth: 0,
     activityObserver: null,
     activityFilters: { transfers: true, tickets: true, heartbeatRewards: true, ledgerRewards: true },
-    showUtxos: false,
+    // Which list the wallet's right-hand panel shows: activity, contacts, utxos or addresses.
+    walletView: "activity",
     utxosBusy: false,
-    showWalletAddresses: false,
     walletAddresses: null,
     walletAddressesBusy: false,
     walletAddressesError: null,
@@ -38,7 +38,6 @@ window.iunaApp = function iunaApp() {
     contactForm: { name: "", address: "" },
     contactModalOpen: false,
     contactEditingAddress: null,
-    tourStep: null,
     passwordForm: { current: "", next: "", confirmation: "", busy: false },
     heartbeats: [],
     ledgerBlocks: [],
@@ -118,7 +117,6 @@ window.iunaApp = function iunaApp() {
       this.setupReady = true;
       this.showSetup = !this.setupCompleted();
       this.syncLoginVisibility();
-      if (!this.showSetup && !this.showLogin && !this.tourDismissed()) this.startTour();
       this.schedulePoll();
       this.$watch("showSetup", (open) => {
         if (open) this.$nextTick(() => this.$refs.setupModal?.focus());
@@ -152,7 +150,7 @@ window.iunaApp = function iunaApp() {
       if (changed && this.tab === "metrics") this.cancelMetricsRefresh();
       this.tab = tab;
       if (window.location.hash !== `#${tab}`) window.location.hash = tab;
-      if (changed && tab === "wallet") this.refresh(true);
+      if (changed && (tab === "wallet" || tab === "dashboard")) this.refresh(true);
       if (changed && tab === "metrics") this.refreshMetrics();
       if (changed && tab === "chain") this.$nextTick(() => this.ensureChainRailScrollable(this.chainView));
     },
@@ -165,10 +163,7 @@ window.iunaApp = function iunaApp() {
     shortcutsAvailable() {
       return !(this.setupReady && (this.showSetup || this.showLogin))
         && !this.pendingTransfer
-        && !this.showUtxos
-        && !this.showWalletAddresses
-        && !this.selectedTransaction
-        && this.tourStep === null;
+        && !this.selectedTransaction;
     },
 
     shortcutNumber(tab) {
@@ -210,20 +205,8 @@ window.iunaApp = function iunaApp() {
         this.desktopUpdateModalOpen = false;
         return;
       }
-      if (this.tourStep !== null) {
-        this.endTour();
-        return;
-      }
       if (this.pendingTransfer && !this.transfer.busy) {
         this.pendingTransfer = null;
-        return;
-      }
-      if (this.showUtxos) {
-        this.showUtxos = false;
-        return;
-      }
-      if (this.showWalletAddresses) {
-        this.showWalletAddresses = false;
         return;
       }
       if (this.showSetup) {
@@ -263,7 +246,6 @@ window.iunaApp = function iunaApp() {
       this.setTab("dashboard");
       this.notify("Setup complete");
       this.syncLoginVisibility();
-      if (!this.showLogin && !this.tourDismissed()) this.startTour();
     },
 
     // Contacts live only in this browser; they are a convenience, not wallet data.
@@ -332,62 +314,6 @@ window.iunaApp = function iunaApp() {
 
     contactName(address) {
       return this.contacts.find((contact) => contact.address === address)?.name || "";
-    },
-
-    // A short spotlight tour of the sidebar, shown once after Initial Setup.
-    tourSteps() {
-      return [
-        { tab: "dashboard", target: "dashboard", title: "Dashboard", text: "Your balance, mining state, both chains and peers at a glance. Cards turn amber or red when something needs attention." },
-        { tab: "wallet", target: "wallet", title: "Wallet", text: "Send and receive IUNA. Every transfer is reviewed before it is signed, and your activity and unspent outputs are listed here." },
-        { tab: "mining", target: "mining", title: "Mining", text: "Heartbeat mining searches for proof of work continuously. Ledger mining buys a ticket for the public lottery." },
-        { tab: "p2p", target: "p2p", title: "P2P", text: "See connected nodes and add peers by IP address and port. Added peers are remembered." },
-        { tab: "metrics", target: "metrics", title: "Metrics", text: "Heartbeat intervals and difficulty over recent blocks, compared with the 60-second target." },
-        { tab: "settings", target: "settings", title: "Settings", text: "Wallet password, interface tour and Initial Setup. Hold Cmd or Ctrl to see the number shortcuts for each screen." },
-      ];
-    },
-
-    tourDismissed() {
-      try { return localStorage.getItem("iunaTourDismissed") === "true"; } catch { return true; }
-    },
-
-    startTour() {
-      this.tourStep = 0;
-      this.setTab(this.tourSteps()[0].tab);
-    },
-
-    moveTour(delta) {
-      const next = this.tourStep + delta;
-      if (next < 0) return;
-      if (next >= this.tourSteps().length) return this.endTour();
-      this.tourStep = next;
-      this.setTab(this.tourSteps()[next].tab);
-    },
-
-    endTour() {
-      this.tourStep = null;
-      try { localStorage.setItem("iunaTourDismissed", "true"); } catch {}
-    },
-
-    currentTourStep() {
-      return this.tourStep === null ? null : this.tourSteps()[this.tourStep];
-    },
-
-    // Places the tour card next to the highlighted sidebar button.
-    tourSpotlightStyle() {
-      const step = this.currentTourStep();
-      const element = step && document.querySelector(`[data-tour="${step.target}"]`);
-      if (!element) return "display:none";
-      const box = element.getBoundingClientRect();
-      return `left:${box.left - 4}px;top:${box.top - 4}px;width:${box.width + 8}px;height:${box.height + 8}px`;
-    },
-
-    tourCardStyle() {
-      const step = this.currentTourStep();
-      const element = step && document.querySelector(`[data-tour="${step.target}"]`);
-      if (!element) return "";
-      const box = element.getBoundingClientRect();
-      if (window.innerWidth <= 650) return `left:16px;right:16px;top:${box.bottom + 12}px`;
-      return `left:${box.right + 16}px;top:${Math.min(box.top, window.innerHeight - 220)}px`;
     },
 
     resetSetup() {
@@ -690,7 +616,8 @@ window.iunaApp = function iunaApp() {
         void this.reconcileSelectedTransaction();
         this.peerTargets = await this.getJson("/api/peer-targets").catch(() => this.peerTargets);
         if (this.tab === "metrics") await this.refreshMetrics(true);
-        if (status.wallet_public_key && this.tab === "wallet") {
+        // The dashboard lists the most recent activity too.
+        if (status.wallet_public_key && (this.tab === "wallet" || this.tab === "dashboard")) {
           const activity = await this.getJson("/api/wallet/activity").catch(() => null);
           if (activity) this.applyActivityPage(activity, false);
         }
@@ -1050,7 +977,7 @@ window.iunaApp = function iunaApp() {
 
     balanceValueStyle() {
       const characters = `IUNA ${this.amountLabel(this.status.wallet_balance)}`.length;
-      const fontSize = characters <= 12 ? 13 : characters <= 16 ? 10.5 : characters <= 20 ? 8.5 : 7.5;
+      const fontSize = characters <= 16 ? 17 : characters <= 20 ? 15 : 13;
       return `font-size:${fontSize}px`;
     },
 
@@ -2156,7 +2083,7 @@ window.iunaApp = function iunaApp() {
     },
 
     async openUtxos() {
-      this.showUtxos = true;
+      this.walletView = "utxos";
       if (this.activity || this.utxosBusy) return;
       this.utxosBusy = true;
       try {
@@ -2169,8 +2096,7 @@ window.iunaApp = function iunaApp() {
     },
 
     async openWalletAddresses() {
-      this.showWalletAddresses = true;
-      this.$nextTick(() => this.$refs.walletAddressesModal?.focus());
+      this.walletView = "addresses";
       if (this.walletAddressesBusy) return;
       this.walletAddressesBusy = true;
       this.walletAddresses = null;
