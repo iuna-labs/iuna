@@ -615,6 +615,10 @@ impl Chain {
         self
     }
 
+    pub fn tip_hash(&self) -> Hash {
+        self.active_tip
+    }
+
     pub fn tip(&self) -> &ConsensusState {
         self.states
             .get(&self.active_tip)

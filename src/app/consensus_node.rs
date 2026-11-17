@@ -2,7 +2,10 @@
 
 use std::{
     collections::{BTreeMap, BTreeSet, HashMap, HashSet},
-    sync::atomic::{AtomicBool, AtomicU64},
+    sync::{
+        Arc, Mutex,
+        atomic::{AtomicBool, AtomicU64},
+    },
 };
 
 use anyhow::{Context, Result, bail};
@@ -61,6 +64,16 @@ pub struct Node<R> {
     balance_ranking: BalanceRanking,
     /// Bumped on every mempool change, so callers can persist it only when it changed.
     mempool_generation: u64,
+    canonical_index: Mutex<CanonicalIndex>,
+}
+
+/// Canonical block hashes by height, for peer sync requests. Without it every locator request
+/// walked and hashed the whole chain under the node lock. It follows the tip incrementally: a new
+/// tip only walks back to the first block the index already holds.
+#[derive(Default)]
+struct CanonicalIndex {
+    tip: Option<Hash>,
+    hashes: Arc<Vec<Hash>>,
 }
 
 /// Outputs per owner at one tip. Rebuilt lazily once per new tip, so public wallet lookups cost
@@ -216,11 +229,53 @@ impl<R: ChainRepository> Node<R> {
             used_address_index: UsedAddressIndex::default(),
             balance_ranking: BalanceRanking::default(),
             mempool_generation: 0,
+            canonical_index: Mutex::new(CanonicalIndex::default()),
         })
     }
 
     pub fn chain(&self) -> &Chain {
         &self.chain
+    }
+
+    /// The hash of every canonical block, indexed by height, genesis first.
+    pub fn canonical_hashes(&self) -> Arc<Vec<Hash>> {
+        let tip = self.chain.tip_hash();
+        let mut index = self
+            .canonical_index
+            .lock()
+            .expect("canonical index lock poisoned");
+        if index.tip == Some(tip) {
+            return Arc::clone(&index.hashes);
+        }
+        // Forget the tip first: an index left empty by a panic below must not pass for current.
+        index.tip = None;
+        let mut hashes = std::mem::take(&mut index.hashes);
+        let hashes_mut = Arc::make_mut(&mut hashes);
+        let mut suffix = Vec::new();
+        let mut cursor = tip;
+        loop {
+            let block = self
+                .chain
+                .block(&cursor)
+                .expect("canonical block is indexed");
+            let height = usize::try_from(block.header.height).expect("height fits in memory");
+            if hashes_mut.get(height) == Some(&cursor) {
+                hashes_mut.truncate(height + 1);
+                break;
+            }
+            suffix.push(cursor);
+            match block.header.parent {
+                Some(parent) => cursor = parent,
+                None => {
+                    hashes_mut.clear();
+                    break;
+                }
+            }
+        }
+        hashes_mut.extend(suffix.into_iter().rev());
+        index.tip = Some(tip);
+        index.hashes = Arc::clone(&hashes);
+        hashes
     }
 
     pub fn status(&self) -> ChainStatus {
@@ -1135,6 +1190,41 @@ mod tests {
         assert_eq!(node.status().tip, other.status().tip);
         assert!(node.has_pending_ticket(&ticket.id()));
         assert_eq!(node.reserved_inputs().len(), 1);
+    }
+
+    #[test]
+    fn canonical_hashes_follow_new_tips_and_reorgs() {
+        let canonical = |node: &Node<MemoryRepository>| {
+            node.chain()
+                .canonical_blocks()
+                .into_iter()
+                .map(HeartbeatBlock::hash)
+                .collect::<Vec<_>>()
+        };
+        let mut node = Node::open(MemoryRepository::default()).unwrap();
+        assert_eq!(*node.canonical_hashes(), canonical(&node));
+        let first = GENESIS_TIMESTAMP + HEARTBEAT_TARGET_INTERVAL_SECS;
+        node.mine_next(first, [44; 32]).unwrap();
+        let held = node.canonical_hashes();
+        assert_eq!(*held, canonical(&node));
+
+        let mut other = Node::open(MemoryRepository::default()).unwrap();
+        let heavier = [
+            other.mine_next(first, [45; 32]).unwrap(),
+            other
+                .mine_next(first + HEARTBEAT_TARGET_INTERVAL_SECS, [45; 32])
+                .unwrap(),
+        ];
+        for block in heavier {
+            node.submit_block(block, first + 2 * HEARTBEAT_TARGET_INTERVAL_SECS)
+                .unwrap();
+        }
+
+        assert_eq!(*node.canonical_hashes(), canonical(&other));
+        assert_eq!(node.canonical_hashes().len(), 3);
+        // A caller holding an earlier index keeps the view it was given.
+        assert_eq!(held.len(), 2);
+        assert_ne!(held[1], node.canonical_hashes()[1]);
     }
 
     #[test]

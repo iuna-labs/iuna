@@ -283,19 +283,18 @@ impl PeerSession {
 }
 
 fn block_locator<R: ChainRepository>(node: &Node<R>) -> Vec<Hash> {
-    let blocks = node.chain().canonical_blocks();
+    let hashes = node.canonical_hashes();
     let mut locator = Vec::new();
     let mut offset = 0usize;
     let mut step = 1usize;
-    while offset < blocks.len() && locator.len() < MAX_LOCATOR_HASHES - 1 {
-        let index = blocks.len() - 1 - offset;
-        locator.push(blocks[index].hash());
+    while offset < hashes.len() && locator.len() < MAX_LOCATOR_HASHES - 1 {
+        locator.push(hashes[hashes.len() - 1 - offset]);
         if locator.len() >= 10 {
             step = step.saturating_mul(2);
         }
         offset = offset.saturating_add(step);
     }
-    let genesis = blocks[0].hash();
+    let genesis = hashes[0];
     if locator.last() != Some(&genesis) {
         locator.push(genesis);
     }
@@ -318,21 +317,24 @@ fn blocks_after_locator<R: ChainRepository>(
     locator: &[Hash],
     limit: usize,
 ) -> Result<Vec<HeartbeatBlock>> {
-    let blocks = node.chain().canonical_blocks();
-    let positions = blocks
-        .iter()
-        .enumerate()
-        .map(|(index, block)| (block.hash(), index))
-        .collect::<BTreeMap<_, _>>();
+    let hashes = node.canonical_hashes();
     let start = locator
         .iter()
-        .find_map(|hash| positions.get(hash).copied())
+        .find_map(|hash| {
+            let height = usize::try_from(node.chain().block(hash)?.header.height).ok()?;
+            (hashes.get(height) == Some(hash)).then_some(height)
+        })
         .context("peer locator has no common canonical ancestor")?;
-    Ok(blocks
-        .into_iter()
+    Ok(hashes
+        .iter()
         .skip(start + 1)
         .take(limit.min(MAX_BLOCKS_PER_MESSAGE))
-        .cloned()
+        .map(|hash| {
+            node.chain()
+                .block(hash)
+                .expect("canonical block is indexed")
+                .clone()
+        })
         .collect())
 }
 
