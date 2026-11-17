@@ -1553,3 +1553,20 @@ test('block rewards open the shared transaction modal with fees as inputs', asyn
   assert.match(html, /@click="openContactEditor\(selectedBlock\?\.miner_address\)"/);
   assert.match(html, /@click="openContactEditor\(selectedBlock\?\.ledger_miner_address\)"/);
 });
+
+test('the dashboard activity link opens the wallet Activity list in view', () => {
+  const { app } = nodeApp();
+  let scrolled = null;
+  app.$refs = { walletActivity: { scrollIntoView: (options) => { scrolled = options; } } };
+  app.$nextTick = (callback) => callback();
+  app.walletView = 'utxos';
+
+  app.openWalletActivity();
+
+  assert.equal(app.tab, 'wallet');
+  assert.equal(app.walletView, 'activity');
+  assert.equal(scrolled?.block, 'start');
+  const html = content('www/node.html');
+  assert.match(html, /@click="openWalletActivity\(\)">View all activity</);
+  assert.match(html, /class="panel wallet-activity-panel"[^>]*x-ref="walletActivity"/);
+});

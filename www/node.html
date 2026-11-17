@@ -233,7 +233,7 @@
     .activity-row { display: grid; grid-template-columns: minmax(90px, .3fr) minmax(0, 1fr) auto; gap: 12px; align-items: center; border-bottom: 1px solid var(--line); padding: 8px 0; }
     .contact-list .activity-row { padding: 8px 16px; }
     .activity-row button:not(.link) { padding: 2px 9px; font-size: 12px; }
-    .wallet-activity-panel { min-width: 0; overflow: hidden; }
+    .wallet-activity-panel { min-width: 0; overflow: hidden; scroll-margin-top: calc(var(--topbar) + 16px); }
     .wallet-activity-panel > .panel-head { flex-wrap: wrap; }
     .activity-filters { display: flex; flex-wrap: wrap; justify-content: flex-start; gap: 4px 14px; }
     .activity-filter { --activity-color: var(--text); position: relative; display: inline-flex; align-items: center; gap: 6px; color: var(--muted-2); font-size: 12.5px; font-weight: 500; cursor: pointer; user-select: none; }
@@ -508,6 +508,7 @@
       .sidebar-bottom { margin-left: auto; }
       .nav-button.active::before { top: auto; right: 8px; bottom: -6px; left: 8px; width: auto; height: 2px; border-radius: 2px 2px 0 0; }
       .topbar { position: static; height: 48px; padding: 0 16px; }
+      .wallet-activity-panel { scroll-margin-top: 62px; }
       .content > section { padding: 16px 16px 0; }
       .status-wide { display: none; }
       .wallet-choice, .tx-modal-summary { grid-template-columns: 1fr; }
@@ -572,7 +573,7 @@
               </div>
             </article>
             <article class="panel">
-              <div class="panel-head"><h2>Recent activity</h2><button class="link" type="button" @click="setTab('wallet')">View all activity</button></div>
+              <div class="panel-head"><h2>Recent activity</h2><button class="link" type="button" @click="openWalletActivity()">View all activity</button></div>
               <div class="recent-list">
                 <template x-for="item in activityItems().slice(0, 6)" :key="`recent:${item.pending}:${item.kind}:${item.id}`">
                   <div class="activity-card" :class="{pending: item.pending}" role="button" tabindex="0" @click="openActivityModal(item)" @keydown.enter.self.prevent="openActivityModal(item)" @keydown.space.self.prevent="openActivityModal(item)">
@@ -620,7 +621,7 @@
               <div class="address"><code x-text="status.wallet_receive_address || 'Wallet unavailable'"></code><button type="button" @click="copyWalletAddress">Copy address</button></div>
             </article>
           </div>
-          <article class="panel wallet-activity-panel" x-show="status.wallet_public_key">
+          <article class="panel wallet-activity-panel" x-show="status.wallet_public_key" x-ref="walletActivity">
             <div class="panel-head">
               <div class="pane-tabs" role="tablist" aria-label="Wallet lists">
                 <button type="button" class="pane-tab" role="tab" :class="{active: walletView === 'activity'}" :aria-selected="walletView === 'activity'" @click="walletView = 'activity'">Activity<span class="count pending" x-show="status.pending_ledger_transactions || status.pending_mining_tickets"><span x-text="pendingCount()"></span>&nbsp;pending</span></button>

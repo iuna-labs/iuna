@@ -2085,6 +2085,14 @@ window.iunaApp = function iunaApp() {
       return [height, time].filter(Boolean).join(" · ") || "Confirmed";
     },
 
+    // The wallet screen keeps the list tab chosen last and shows the lists below Send and Receive,
+    // so the dashboard link selects Activity and brings that panel into view.
+    openWalletActivity() {
+      this.walletView = "activity";
+      this.setTab("wallet");
+      this.$nextTick(() => this.$refs.walletActivity?.scrollIntoView({ block: "start" }));
+    },
+
     async openUtxos() {
       this.walletView = "utxos";
       if (this.activity || this.utxosBusy) return;
