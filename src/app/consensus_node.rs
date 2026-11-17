@@ -11,13 +11,13 @@ use std::{
 use anyhow::{Context, Result, bail};
 
 use crate::consensus::{
-    Address, CandidateHeader, Chain, ConsensusState, Hash, HeartbeatBlock,
-    MAX_HEARTBEAT_BLOCK_BYTES, MAX_LEDGER_SIDECAR_BYTES, OutPoint, Output, PROTOCOL_VERSION,
-    PublicKey, Sidecar, TicketTransaction, Transaction, Winner, address_from_public_key,
-    inclusion_winners, merkle_root, mine_child, mine_child_until, mine_child_until_counted,
-    mine_child_with_workers, tracked_ticket_capacity, validate_pending_candidate,
-    validate_pending_ticket, validate_pending_tickets, validate_pending_transaction,
-    validate_pending_transactions,
+    Address, CandidateHeader, Chain, ConsensusError, ConsensusState, Hash, HeartbeatBlock,
+    InclusionWinners, MAX_HEARTBEAT_BLOCK_BYTES, MAX_LEDGER_SIDECAR_BYTES, OutPoint, Output,
+    PROTOCOL_VERSION, PublicKey, Sidecar, TicketTransaction, Transaction, Winner,
+    address_from_public_key, inclusion_winners, merkle_root, mine_child, mine_child_until,
+    mine_child_until_counted, mine_child_with_workers, tracked_ticket_capacity,
+    validate_pending_candidate_with, validate_pending_ticket, validate_pending_tickets,
+    validate_pending_transaction, validate_pending_transactions,
 };
 
 const MAX_PENDING_LEDGER_TRANSACTIONS: usize = 10_000;
@@ -65,6 +65,9 @@ pub struct Node<R> {
     /// Bumped on every mempool change, so callers can persist it only when it changed.
     mempool_generation: u64,
     canonical_index: Mutex<CanonicalIndex>,
+    /// Winners that may fill the next block, which depend only on the tip. Computing them runs the
+    /// lottery over every tracked ticket, so candidate checks share one result per tip.
+    next_winners: Mutex<Option<(Hash, Arc<InclusionWinners>)>>,
 }
 
 /// Canonical block hashes by height, for peer sync requests. Without it every locator request
@@ -230,11 +233,40 @@ impl<R: ChainRepository> Node<R> {
             balance_ranking: BalanceRanking::default(),
             mempool_generation: 0,
             canonical_index: Mutex::new(CanonicalIndex::default()),
+            next_winners: Mutex::new(None),
         })
     }
 
     pub fn chain(&self) -> &Chain {
         &self.chain
+    }
+
+    fn next_winners(&self) -> std::result::Result<Arc<InclusionWinners>, ConsensusError> {
+        let tip = self.chain.tip_hash();
+        let mut cached = self
+            .next_winners
+            .lock()
+            .expect("next winners lock poisoned");
+        if let Some((cached_tip, winners)) = cached.as_ref()
+            && *cached_tip == tip
+        {
+            return Ok(Arc::clone(winners));
+        }
+        let state = self.chain.tip();
+        let height = state
+            .height
+            .checked_add(1)
+            .ok_or(ConsensusError::Arithmetic)?;
+        let winners = Arc::new(inclusion_winners(state, height)?);
+        *cached = Some((tip, Arc::clone(&winners)));
+        Ok(winners)
+    }
+
+    fn pending_candidate_fee(
+        &self,
+        candidate: &Sidecar,
+    ) -> std::result::Result<u64, ConsensusError> {
+        validate_pending_candidate_with(self.chain.tip(), candidate, || self.next_winners())
     }
 
     /// The hash of every canonical block, indexed by height, genesis first.
@@ -499,7 +531,8 @@ impl<R: ChainRepository> Node<R> {
     /// the candidate hash is the deterministic tie-break. This bounds equivocation without making
     /// off-chain arrival order part of consensus.
     pub fn submit_candidate(&mut self, candidate: Sidecar) -> Result<bool> {
-        let fee = validate_pending_candidate(self.chain.tip(), &candidate)
+        let fee = self
+            .pending_candidate_fee(&candidate)
             .context("validating pending signed Ledger candidate")?;
         let key = (
             candidate.header.ticket_id,
@@ -508,7 +541,8 @@ impl<R: ChainRepository> Node<R> {
         );
         let hash = candidate.header.hash();
         if let Some(existing) = self.pending_candidates.get(&key) {
-            let existing_fee = validate_pending_candidate(self.chain.tip(), existing)
+            let existing_fee = self
+                .pending_candidate_fee(existing)
                 .context("revalidating pending signed Ledger candidate")?;
             let existing_hash = existing.header.hash();
             if fee < existing_fee || (fee == existing_fee && hash >= existing_hash) {
@@ -577,21 +611,14 @@ impl<R: ChainRepository> Node<R> {
     }
 
     pub fn prepare_next(&self) -> Result<PreparedHeartbeat> {
-        let next_height = self
-            .chain
-            .tip()
-            .height
-            .checked_add(1)
-            .context("Heartbeat height overflow")?;
-        let winners =
-            inclusion_winners(self.chain.tip(), next_height).context("selecting Ledger winner")?;
-        let sidecar = match winners.required {
-            Some(winner) => Some(fallback_sidecar(&winner)),
+        let winners = self.next_winners().context("selecting Ledger winner")?;
+        let sidecar = match &winners.required {
+            Some(winner) => Some(fallback_sidecar(winner)),
             None => self
                 .pending_candidates
                 .values()
                 .filter_map(|candidate| {
-                    validate_pending_candidate(self.chain.tip(), candidate)
+                    self.pending_candidate_fee(candidate)
                         .ok()
                         .map(|fee| (fee, candidate.header.hash(), candidate))
                 })
@@ -609,13 +636,8 @@ impl<R: ChainRepository> Node<R> {
     /// Builds unsigned drafts for every next-block winner controlled by `mining_public_key`.
     /// The wallet signs and submits them; Heartbeat miners never receive the private key.
     pub fn candidate_drafts(&self, mining_public_key: PublicKey) -> Result<Vec<Sidecar>> {
-        let next_height = self
-            .chain
-            .tip()
-            .height
-            .checked_add(1)
-            .context("Heartbeat height overflow")?;
-        let winners = inclusion_winners(self.chain.tip(), next_height)
+        let winners = self
+            .next_winners()
             .context("selecting signed Ledger candidate winner")?;
         if winners.required.is_some() {
             return Ok(Vec::new());
@@ -623,8 +645,9 @@ impl<R: ChainRepository> Node<R> {
         // Selecting transactions is the expensive part, and most Heartbeats have no winner here.
         let own_winners = winners
             .available
-            .into_iter()
+            .iter()
             .filter(|winner| winner.mining_public_key == mining_public_key)
+            .cloned()
             .collect::<Vec<_>>();
         if own_winners.is_empty() {
             return Ok(Vec::new());
@@ -795,8 +818,9 @@ impl<R: ChainRepository> Node<R> {
         });
         self.pending_tickets
             .retain(|_, ticket| validate_pending_ticket(self.chain.tip(), ticket).is_ok());
-        self.pending_candidates
-            .retain(|_, candidate| validate_pending_candidate(self.chain.tip(), candidate).is_ok());
+        let mut candidates = std::mem::take(&mut self.pending_candidates);
+        candidates.retain(|_, candidate| self.pending_candidate_fee(candidate).is_ok());
+        self.pending_candidates = candidates;
         self.reserved_inputs.clear();
         self.reserved_inputs.extend(
             self.pending_transactions
