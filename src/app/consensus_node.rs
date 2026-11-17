@@ -565,16 +565,23 @@ impl<R: ChainRepository> Node<R> {
         if winners.required.is_some() {
             return Ok(Vec::new());
         }
+        // Selecting transactions is the expensive part, and most Heartbeats have no winner here.
+        let own_winners = winners
+            .available
+            .into_iter()
+            .filter(|winner| winner.mining_public_key == mining_public_key)
+            .collect::<Vec<_>>();
+        if own_winners.is_empty() {
+            return Ok(Vec::new());
+        }
         let transactions = self.select_ledger_transactions();
         if transactions.is_empty() {
             return Ok(Vec::new());
         }
         let transaction_ids = transactions.iter().map(Transaction::id).collect::<Vec<_>>();
         let transactions_root = merkle_root(&transaction_ids);
-        Ok(winners
-            .available
+        Ok(own_winners
             .into_iter()
-            .filter(|winner| winner.mining_public_key == mining_public_key)
             .map(|winner| Sidecar {
                 header: CandidateHeader {
                     version: PROTOCOL_VERSION,
@@ -618,23 +625,24 @@ impl<R: ChainRepository> Node<R> {
             },
             transactions: Vec::new(),
         };
-        let mut encoded_size = empty_sidecar.canonical_size();
-        let mut selected = Vec::new();
-        for (_, _, transaction) in candidates {
-            let transaction_size = std::mem::size_of::<u32>() + transaction.canonical_size();
-            if encoded_size + transaction_size > MAX_LEDGER_SIDECAR_BYTES {
-                continue;
-            }
-            if select_canonical_if_valid(
-                &mut selected,
-                transaction.clone(),
-                Transaction::id,
-                |candidate| validate_pending_transactions(self.chain.tip(), candidate).is_ok(),
-            ) {
-                encoded_size += transaction_size;
-            }
-        }
-        selected
+        select_template(
+            &candidates,
+            Template {
+                capacity: usize::MAX,
+                used_bytes: empty_sidecar.canonical_size(),
+                byte_limit: MAX_LEDGER_SIDECAR_BYTES,
+            },
+            |transaction| {
+                transaction
+                    .inputs
+                    .iter()
+                    .map(|input| &input.previous_output)
+                    .collect()
+            },
+            Transaction::canonical_size,
+            Transaction::id,
+            |candidate| validate_pending_transactions(self.chain.tip(), candidate).is_ok(),
+        )
     }
 
     fn select_tickets(&self) -> Vec<TicketTransaction> {
@@ -650,28 +658,24 @@ impl<R: ChainRepository> Node<R> {
         candidates.sort_by(|left, right| right.0.cmp(&left.0).then_with(|| left.1.cmp(&right.1)));
 
         // Excess tickets stay pending: a template over the tracked cap could never be mined.
-        let capacity = tracked_ticket_capacity(self.chain.tip()).unwrap_or(0);
-        let payload_limit = MAX_HEARTBEAT_BLOCK_BYTES - HEARTBEAT_TEMPLATE_OVERHEAD_BYTES;
-        let mut payload_size = std::mem::size_of::<u32>();
-        let mut selected = Vec::new();
-        for (_, _, ticket) in candidates {
-            if selected.len() >= capacity {
-                break;
-            }
-            let ticket_size = std::mem::size_of::<u32>() + ticket.canonical_size();
-            if payload_size + ticket_size > payload_limit {
-                continue;
-            }
-            if select_canonical_if_valid(
-                &mut selected,
-                ticket.clone(),
-                TicketTransaction::id,
-                |candidate| validate_pending_tickets(self.chain.tip(), candidate).is_ok(),
-            ) {
-                payload_size += ticket_size;
-            }
-        }
-        selected
+        select_template(
+            &candidates,
+            Template {
+                capacity: tracked_ticket_capacity(self.chain.tip()).unwrap_or(0),
+                used_bytes: std::mem::size_of::<u32>(),
+                byte_limit: MAX_HEARTBEAT_BLOCK_BYTES - HEARTBEAT_TEMPLATE_OVERHEAD_BYTES,
+            },
+            |ticket| {
+                ticket
+                    .inputs
+                    .iter()
+                    .map(|input| &input.previous_output)
+                    .collect()
+            },
+            TicketTransaction::canonical_size,
+            TicketTransaction::id,
+            |candidate| validate_pending_tickets(self.chain.tip(), candidate).is_ok(),
+        )
     }
 
     fn ensure_inputs_available(&self, inputs: &[OutPoint]) -> Result<()> {
@@ -769,6 +773,78 @@ fn fallback_sidecar(winner: &Winner) -> Sidecar {
         },
         transactions: Vec::new(),
     }
+}
+
+struct Template {
+    /// Most items the template may hold.
+    capacity: usize,
+    /// Encoded bytes the template uses before any item.
+    used_bytes: usize,
+    byte_limit: usize,
+}
+
+/// Fills a template from `candidates`, sorted best first, each already valid on its own against
+/// the tip. A batch reads every input from the tip, so items that spend disjoint inputs stay valid
+/// together; one pass with a spent set then gives the same selection as re-validating the growing
+/// set after every item, without its quadratic cost. The result is still validated once, and the
+/// slow selection runs only if that ever fails.
+fn select_template<T: Clone>(
+    candidates: &[(u64, Hash, &T)],
+    template: Template,
+    inputs: impl Fn(&T) -> Vec<&OutPoint>,
+    size: impl Fn(&T) -> usize,
+    id: impl Fn(&T) -> Hash + Copy,
+    valid: impl Fn(&[T]) -> bool,
+) -> Vec<T> {
+    let item_size = |item: &T| std::mem::size_of::<u32>() + size(item);
+    let mut used_bytes = template.used_bytes;
+    let mut fees = 0u64;
+    let mut spent = BTreeSet::new();
+    let mut selected = Vec::new();
+    for (fee, _, item) in candidates {
+        if selected.len() >= template.capacity {
+            break;
+        }
+        let item_bytes = item_size(item);
+        let item_inputs = inputs(item);
+        let Some(total) = fees.checked_add(*fee) else {
+            continue;
+        };
+        if used_bytes + item_bytes > template.byte_limit
+            || item_inputs.iter().any(|point| spent.contains(*point))
+        {
+            continue;
+        }
+        spent.extend(item_inputs);
+        fees = total;
+        used_bytes += item_bytes;
+        selected.push((*item).clone());
+    }
+    selected.sort_by_key(id);
+    if valid(&selected) {
+        return selected;
+    }
+    eprintln!(
+        "warning: a template of independent mempool objects failed validation; selecting one by one"
+    );
+
+    let mut used_bytes = template.used_bytes;
+    let mut selected = Vec::new();
+    for (_, _, item) in candidates {
+        if selected.len() >= template.capacity {
+            break;
+        }
+        let item_bytes = item_size(item);
+        if used_bytes + item_bytes > template.byte_limit {
+            continue;
+        }
+        if select_canonical_if_valid(&mut selected, (*item).clone(), id, |candidate| {
+            valid(candidate)
+        }) {
+            used_bytes += item_bytes;
+        }
+    }
+    selected
 }
 
 /// Insert into canonical order only after the complete candidate set validates. In particular,
@@ -1082,6 +1158,78 @@ mod tests {
         assert_eq!(
             restarted.restore_mempool(vec![transaction], Vec::new(), Vec::new()),
             0
+        );
+    }
+
+    #[test]
+    fn template_selection_skips_spent_inputs_and_respects_its_limits() {
+        #[derive(Clone, Debug, Eq, PartialEq)]
+        struct Item {
+            id: Hash,
+            input: OutPoint,
+            size: usize,
+        }
+        let point = |index| OutPoint {
+            transaction_id: [index; 32],
+            output_index: 0,
+        };
+        let item = |id, input, size| Item {
+            id: [id; 32],
+            input: point(input),
+            size,
+        };
+        let items = [
+            item(9, 1, 10),
+            item(8, 1, 10),
+            item(7, 2, 1_000),
+            item(6, 3, 10),
+        ];
+        let candidates = items
+            .iter()
+            .map(|item| (1, item.id, item))
+            .collect::<Vec<_>>();
+        let template = |capacity| Template {
+            capacity,
+            used_bytes: 0,
+            byte_limit: 100,
+        };
+        let select = |capacity, valid: &dyn Fn(&[Item]) -> bool| {
+            select_template(
+                &candidates,
+                template(capacity),
+                |item: &Item| vec![&item.input],
+                |item: &Item| item.size,
+                |item: &Item| item.id,
+                valid,
+            )
+        };
+
+        // The second spender of input 1 and the oversized item are skipped; ids come out sorted.
+        assert_eq!(
+            select(usize::MAX, &|_| true),
+            vec![items[3].clone(), items[0].clone()]
+        );
+        assert_eq!(select(1, &|_| true), vec![items[0].clone()]);
+        // Fees that would overflow together leave the later item out.
+        let overflowing = [
+            (u64::MAX, items[0].id, &items[0]),
+            (1, items[3].id, &items[3]),
+        ];
+        assert_eq!(
+            select_template(
+                &overflowing,
+                template(usize::MAX),
+                |item: &Item| vec![&item.input],
+                |item: &Item| item.size,
+                |item: &Item| item.id,
+                |_: &[Item]| true,
+            ),
+            vec![items[0].clone()]
+        );
+        // If the combined set were ever refused, the item-by-item selection decides instead.
+        assert_eq!(
+            select(usize::MAX, &|selected: &[Item]| selected.len() <= 1),
+            vec![items[0].clone()]
         );
     }
 
