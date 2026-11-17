@@ -5,6 +5,12 @@ from the Git history and Conventional Commit titles by `deployment.sh`.
 
 ## [Unreleased]
 
+## [0.6.11] - 2026-11-17
+
+### Added
+
+- restructure the node app as a calm desktop wallet
+
 ## [0.6.10] - 2026-11-16
 
 ### Added
