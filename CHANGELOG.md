@@ -5,6 +5,12 @@ from the Git history and Conventional Commit titles by `deployment.sh`.
 
 ## [Unreleased]
 
+## [0.6.13] - 2026-11-17
+
+### Fixed
+
+- pad the Ledger block fields in the block details
+
 ## [0.6.12] - 2026-11-17
 
 ### Fixed
