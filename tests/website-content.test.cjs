@@ -689,12 +689,21 @@ test('dashboard cards report stale chains and isolated nodes', () => {
   assert.equal(app.syncLabel(), 'Syncing 18%');
   assert.equal(app.networkHeight(), 50);
   assert.equal(app.dashboardState('heartbeat'), 'warn', 'an old tip while syncing is not a stall');
-  assert.match(html, /class="sync-card" x-show="syncTarget\(\)"/);
+  assert.match(html, /class="sync-card" x-show="syncing\(\)"/);
   assert.match(html, /<strong>Syncing…<\/strong>/);
   assert.match(html, /class="sync-card-progress"/);
   assert.doesNotMatch(html, /class="notice sync"/);
   app.status.heartbeat_height = 50;
   assert.equal(app.syncLabel(), 'Up to date');
+  assert.equal(app.networkLabel(), 'Connected');
+  // A side branch downloads without a height gap: the node's own branch can be as high.
+  app.peers = [{ heartbeat_height: 50, syncing: true }];
+  assert.equal(app.syncTarget(), null);
+  assert.equal(app.networkLabel(), 'Syncing');
+  assert.equal(app.syncLabel(), 'Syncing');
+  assert.equal(app.dashboardState('p2p'), 'warn');
+  assert.equal(app.dashboardState('heartbeat'), 'warn');
+  app.peers = [{ heartbeat_height: 50, syncing: false }];
   assert.equal(app.networkLabel(), 'Connected');
   app.peers = [];
   assert.equal(app.syncLabel(), 'No peers');

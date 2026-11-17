@@ -596,7 +596,7 @@
               <button type="button" class="dashboard-row" :class="dashboardState('ledger')" @click="setTab('chain'); setChainView('ledger')"><span class="state-dot" aria-hidden="true"></span><span class="dashboard-row-copy"><span class="dashboard-label">Ledger chain</span><span class="dashboard-row-sub" x-text="ledgerAgeLabel()"></span></span><span class="dashboard-value" x-text="`#${status.ledger_blocks ?? 0}`"></span></button>
               <button type="button" class="dashboard-row" :class="dashboardState('heartbeatMining')" @click="setTab('mining')"><span class="state-dot" aria-hidden="true"></span><span class="dashboard-row-copy"><span class="dashboard-label">Heartbeat Mining</span><span class="dashboard-row-sub" x-text="status.heartbeat_mining_enabled ? powHashrateLabel() : 'Proof of Work'"></span></span><span class="dashboard-value" x-text="status.heartbeat_mining_enabled ? 'On' : 'Off'"></span></button>
               <button type="button" class="dashboard-row" :class="dashboardState('ledgerMining')" @click="setTab('mining')"><span class="state-dot" aria-hidden="true"></span><span class="dashboard-row-copy"><span class="dashboard-label">Ledger Mining</span><span class="dashboard-row-sub" x-text="status.ledger_mining_enabled ? ledgerPowerLabel() : 'Proof of Expenditure'"></span></span><span class="dashboard-value" x-text="status.ledger_mining_enabled ? 'On' : 'Off'"></span></button>
-              <button type="button" class="dashboard-row" :class="dashboardState('p2p')" @click="setTab('p2p')"><span class="state-dot" aria-hidden="true"></span><span class="dashboard-row-copy"><span class="dashboard-label">P2P</span><span class="dashboard-row-sub" x-text="syncLabel()"></span></span><span class="dashboard-value" x-text="syncTarget() ? `Syncing ${syncPercent()}%` : `${peers.length} peer${peers.length === 1 ? '' : 's'}`"></span></button>
+              <button type="button" class="dashboard-row" :class="dashboardState('p2p')" @click="setTab('p2p')"><span class="state-dot" aria-hidden="true"></span><span class="dashboard-row-copy"><span class="dashboard-label">P2P</span><span class="dashboard-row-sub" x-text="syncLabel()"></span></span><span class="dashboard-value" x-text="syncing() ? syncingLabel() : `${peers.length} peer${peers.length === 1 ? '' : 's'}`"></span></button>
             </div>
           </article>
         </div>
@@ -968,15 +968,16 @@
     <footer class="statusbar" aria-label="Node status">
       <span class="status-item" :class="networkLabel() === 'Connected' ? 'good' : 'warn'"><span class="status-dot" aria-hidden="true"></span><span x-text="networkLabel()"></span></span>
       <span class="status-item"><b x-text="peers.length"></b><span x-text="peers.length === 1 ? 'peer' : 'peers'"></span></span>
-      <div class="sync-card" x-show="syncTarget()" role="status" aria-live="polite">
+      <div class="sync-card" x-show="syncing()" role="status" aria-live="polite">
         <span class="sync-card-spinner" aria-hidden="true"></span>
         <div class="sync-card-copy">
           <strong>Syncing…</strong>
-          <span>Heartbeat <b x-text="status.heartbeat_height ?? 0"></b> of <b x-text="syncTarget()"></b> · <span x-text="syncPercent()"></span>%</span>
-          <span class="sync-card-progress" aria-hidden="true"><span :style="`width:${syncPercent()}%`"></span></span>
+          <span x-show="syncTarget()">Heartbeat <b x-text="status.heartbeat_height ?? 0"></b> of <b x-text="syncTarget()"></b> · <span x-text="syncPercent()"></span>%</span>
+          <span x-show="!syncTarget()">Fetching the network's chain</span>
+          <span class="sync-card-progress" x-show="syncTarget()" aria-hidden="true"><span :style="`width:${syncPercent()}%`"></span></span>
         </div>
       </div>
-      <span class="status-item status-wide" x-show="!syncTarget()">Heartbeat <b x-text="status.heartbeat_height ?? 0"></b><span x-text="`· ${heartbeatAgeLabel()}`"></span></span>
+      <span class="status-item status-wide" x-show="!syncing()">Heartbeat <b x-text="status.heartbeat_height ?? 0"></b><span x-text="`· ${heartbeatAgeLabel()}`"></span></span>
       <span class="status-item status-wide">Ledger <b x-text="status.ledger_blocks ?? 0"></b></span>
       <span class="status-item status-optional">Mining <b x-text="[status.heartbeat_mining_enabled && 'Heartbeat', status.ledger_mining_enabled && 'Ledger'].filter(Boolean).join(' + ') || 'off'"></b></span>
       <div class="statusbar-end">
@@ -1106,7 +1107,7 @@
 
       <div x-show="setupStep === 1">
         <h2 x-text="peers.length ? 'Your node is connected' : 'Your node is running'"></h2><p class="muted">iuna keeps the network connection running in the background. There is normally nothing to configure here.</p>
-        <div class="setup-check"><span class="setup-check-mark" :class="{warning: !peers.length}" x-text="peers.length ? '✓' : '!'" aria-hidden="true"></span><div><b x-text="!peers.length ? 'Looking for peers' : (syncTarget() ? 'Synchronizing' : 'Connected to iuna')"></b><div class="muted" x-text="networkDetail()"></div></div></div>
+        <div class="setup-check"><span class="setup-check-mark" :class="{warning: !peers.length}" x-text="peers.length ? '✓' : '!'" aria-hidden="true"></span><div><b x-text="!peers.length ? 'Looking for peers' : (syncing() ? 'Synchronizing' : 'Connected to iuna')"></b><div class="muted" x-text="networkDetail()"></div></div></div>
       </div>
 
       <div x-show="setupStep === 2">

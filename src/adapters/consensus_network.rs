@@ -63,6 +63,9 @@ pub struct ConnectedPeer {
     pub connected_at: u64,
     pub heartbeat_height: Option<u64>,
     pub tip_hash: Option<String>,
+    /// This node is fetching a range of blocks from the peer. Heights alone miss a side branch:
+    /// after a restart the node may have mined its own branch as high as the network's.
+    pub syncing: bool,
 }
 
 /// An outbound peer the node keeps dialling, with its latest connection diagnostics.
@@ -405,6 +408,7 @@ impl PeerRegistry {
                     connected_at: unix_time_secs(),
                     heartbeat_height: None,
                     tip_hash: None,
+                    syncing: false,
                 },
             );
     }
@@ -433,6 +437,17 @@ impl PeerRegistry {
         {
             peer.heartbeat_height = Some(height);
             peer.tip_hash = Some(hex(hash));
+        }
+    }
+
+    fn update_syncing(&self, key: &str, syncing: bool) {
+        if let Some(peer) = self
+            .peers
+            .write()
+            .expect("peer registry lock poisoned")
+            .get_mut(key)
+        {
+            peer.syncing = syncing;
         }
     }
 
@@ -866,7 +881,11 @@ async fn run_connection(
                             .collect::<std::collections::BTreeMap<_, _>>(),
                         _ => std::collections::BTreeMap::new(),
                     };
+                    let batch = matches!(envelope, Envelope::Blocks { .. });
                     let responses = session.handle(&mut node, envelope, unix_time_secs())?;
+                    if batch {
+                        peers.update_syncing(&peer_key, session.is_syncing());
+                    }
                     let mut gossip = Vec::new();
                     let after_tip = node.status().tip;
                     if after_tip != before_tip {

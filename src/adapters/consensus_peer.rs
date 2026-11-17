@@ -35,11 +35,19 @@ pub struct PeerSession {
     /// Last block of an unfinished range that did not become the active tip. It leads the locator
     /// so a side branch longer than one batch keeps advancing instead of restarting at the fork.
     sync_cursor: Option<Hash>,
+    /// The last block batch left this node short of the peer, so another one is on its way. Unlike
+    /// a height comparison this also covers a side branch, which is downloaded without moving the
+    /// tip until it outweighs the active chain. A single announced block never sets it.
+    catching_up: bool,
 }
 
 impl PeerSession {
     pub fn remote_hello(&self) -> Option<&Hello> {
         self.remote_hello.as_ref()
+    }
+
+    pub fn is_syncing(&self) -> bool {
+        self.catching_up
     }
 
     pub fn handle<R: ChainRepository>(
@@ -81,6 +89,7 @@ impl PeerSession {
                 usize::from(limit),
             )?)?]),
             Envelope::Blocks { blocks } => {
+                self.catching_up = false;
                 let last_received = blocks.last().map(HeartbeatBlock::hash);
                 for block in blocks {
                     node.submit_block(block, now)
@@ -97,6 +106,7 @@ impl PeerSession {
                     .as_ref()
                     .is_some_and(|remote| local.height < remote.height);
                 if behind || self.sync_cursor.is_some() {
+                    self.catching_up = true;
                     Ok(vec![self.block_request(node)])
                 } else {
                     Ok(Vec::new())
@@ -702,7 +712,11 @@ mod tests {
             )
             .unwrap()
             .pop();
+        let mut batches = 0;
         while let Some(next_request) = request {
+            // Nothing has come back yet before the first batch.
+            assert_eq!(target_session.is_syncing(), batches > 0);
+            batches += 1;
             let response = source_session
                 .handle(&mut source, next_request, now)
                 .unwrap()
@@ -715,6 +729,7 @@ mod tests {
         }
 
         assert_eq!(target.status(), remote);
+        assert!(!target_session.is_syncing());
     }
 
     fn mined_node(miner: [u8; 32], height: u64) -> Node<MemoryRepository> {
