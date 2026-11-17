@@ -30,8 +30,9 @@ cross-origin browser requests. `POST /api/wallet` creates, restores, or unlocks
 the encrypted wallet in process memory. Use an operator token for the packaged
 desktop app or any separately secured deployment.
 
-The packaged desktop app creates a random 256-bit operator token on first
-launch and stores it with owner-only permissions on Unix. Users choose the
+The packaged desktop app creates a random 256-bit operator token at every
+launch and keeps it in memory only, so a token never outlives the node it was
+made for. Users choose the
 wallet password themselves in Initial Setup. Node data defaults to `~/.iuna`.
 On first startup after upgrading from the old protocol, recognized legacy
 chain, wallet, UI and configuration files are preserved alongside it with a
@@ -40,7 +41,8 @@ another network or genesis, such as the earlier `iuna-devnet`, is set aside the
 same way, while the wallet stays in use.
 The operator token is passed to the local UI in a URL fragment, moved into
 `sessionStorage`, and then immediately removed from the visible URL and browser
-history entry.
+history entry. The UI sends it only with management `POST` requests; read-only
+routes need no token, so polling never sends it.
 
 ## Read-only routes
 

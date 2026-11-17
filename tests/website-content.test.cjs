@@ -157,6 +157,14 @@ test('desktop credentials cross into the node UI without entering request URLs',
   assert.match(nodeUi, /history\.replaceState/);
 });
 
+test('the node UI sends the operator token only with management POSTs', () => {
+  const nodeUi = content('www/assets/iuna-ui.js');
+
+  assert.match(nodeUi, /fetch\(path, \{ headers: this\.headers\(\), cache: "no-store", signal \}\)/);
+  assert.match(nodeUi, /method: "POST",\s*headers: this\.headers\(true\)/);
+  assert.match(nodeUi, /if \(!management\) return headers;\s*const token = this\.storedOperatorToken\(\);/);
+});
+
 test('only the bundled launcher can read the desktop operator token', () => {
   const launcher = JSON.parse(content('src-tauri/capabilities/desktop-launcher.json'));
   const shared = JSON.parse(content('src-tauri/capabilities/default.json'));

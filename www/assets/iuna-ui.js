@@ -733,11 +733,14 @@ window.iunaApp = function iunaApp() {
       await this.refresh(true);
     },
 
-    headers(json = false) {
+    // Reads need no token, so only management POSTs carry it. Polling a port that something else
+    // took over after the node stopped then never hands that listener the token.
+    headers(management = false) {
       const headers = { Accept: "application/json" };
+      if (!management) return headers;
       const token = this.storedOperatorToken();
       if (token) headers.Authorization = `Bearer ${token}`;
-      if (json) headers["Content-Type"] = "application/json";
+      headers["Content-Type"] = "application/json";
       return headers;
     },
 

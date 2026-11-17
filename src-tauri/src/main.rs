@@ -1,7 +1,7 @@
 use std::{
     error::Error,
-    fs::{self, OpenOptions},
-    io::{self, ErrorKind, Write},
+    fs,
+    io::{self, ErrorKind},
     path::Path,
     sync::{Mutex, OnceLock},
 };
@@ -108,7 +108,13 @@ fn main() {
 
             let app_data = app.path().app_data_dir().map_err(setup_error)?;
             fs::create_dir_all(&app_data).map_err(setup_error)?;
-            let operator_token = load_or_create_secret(&app_data.join("operator.token"))?;
+            // Earlier versions kept one token for good. Every launch now gets its own, so a
+            // token seen by whatever held the port after a node stopped dies with that launch.
+            // No node accepts the old file's token any more, so failing to delete it is harmless.
+            if let Err(error) = remove_if_present(&app_data.join("operator.token")) {
+                eprintln!("iuna desktop could not remove its old operator token file: {error}");
+            }
+            let operator_token = random_secret()?;
             app.manage(DesktopCredentials { operator_token });
             start_node(app.handle()).map_err(io::Error::other)?;
 
@@ -205,52 +211,17 @@ fn desktop_operator_token(
     }
 }
 
-fn load_or_create_secret(path: &Path) -> io::Result<String> {
-    match fs::read_to_string(path) {
-        // Left by a crash in a version that wrote the file in place. It never held a secret.
-        Ok(secret) if secret.is_empty() => fs::remove_file(path)?,
-        Ok(secret) => return validate_secret(secret),
-        Err(error) if error.kind() == ErrorKind::NotFound => {}
-        Err(error) => return Err(error),
-    }
-
+fn random_secret() -> io::Result<String> {
     let mut bytes = [0u8; 32];
     getrandom::fill(&mut bytes)
         .map_err(|error| io::Error::other(format!("secure randomness unavailable: {error}")))?;
-    let secret = hex(&bytes);
-    let temporary = path.with_extension(format!("tmp-{}", std::process::id()));
-    let mut options = OpenOptions::new();
-    options.write(true).create(true).truncate(true);
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::OpenOptionsExt;
-        options.mode(0o600);
-    }
-    let mut file = options.open(&temporary)?;
-    file.write_all(secret.as_bytes())?;
-    file.sync_all()?;
-    drop(file);
-    // Linking is atomic and refuses to overwrite, so a crash leaves no partial secret and two
-    // processes agree on one.
-    let installed = fs::hard_link(&temporary, path);
-    let _ = fs::remove_file(&temporary);
-    match installed {
-        Ok(()) => Ok(secret),
-        Err(error) if error.kind() == ErrorKind::AlreadyExists => {
-            validate_secret(fs::read_to_string(path)?)
-        }
-        Err(error) => Err(error),
-    }
+    Ok(hex(&bytes))
 }
 
-fn validate_secret(secret: String) -> io::Result<String> {
-    if secret.len() == 64 && secret.bytes().all(|byte| byte.is_ascii_hexdigit()) {
-        Ok(secret)
-    } else {
-        Err(io::Error::new(
-            ErrorKind::InvalidData,
-            "desktop credential file is invalid",
-        ))
+fn remove_if_present(path: &Path) -> io::Result<()> {
+    match fs::remove_file(path) {
+        Err(error) if error.kind() != ErrorKind::NotFound => Err(error),
+        _ => Ok(()),
     }
 }
 
@@ -647,27 +618,6 @@ mod tests {
     }
 
     #[test]
-    fn an_empty_secret_file_from_a_crash_is_replaced() {
-        let directory = std::env::temp_dir().join(format!(
-            "iuna-secret-test-{}-{}",
-            std::process::id(),
-            SystemTime::now()
-                .duration_since(UNIX_EPOCH)
-                .unwrap()
-                .as_nanos()
-        ));
-        fs::create_dir_all(&directory).unwrap();
-        let path = directory.join("operator.token");
-        fs::write(&path, "").unwrap();
-
-        let secret = load_or_create_secret(&path).unwrap();
-
-        assert_eq!(load_or_create_secret(&path).unwrap(), secret);
-        assert_eq!(fs::read_dir(&directory).unwrap().count(), 1);
-        fs::remove_dir_all(&directory).unwrap();
-    }
-
-    #[test]
     fn known_nodes_become_peer_arguments_without_comments() {
         assert_eq!(
             bootstrap_peer_args("# comment\n\n  one.example:1  \ntwo.example:2\n"),
@@ -704,29 +654,30 @@ mod tests {
     }
 
     #[test]
-    fn desktop_secret_is_randomly_created_and_stably_reloaded() {
-        let unique = SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .unwrap()
-            .as_nanos();
+    fn every_launch_gets_a_fresh_random_secret() {
+        let first = random_secret().unwrap();
+        assert_eq!(first.len(), 64);
+        assert!(first.bytes().all(|byte| byte.is_ascii_hexdigit()));
+        assert_ne!(random_secret().unwrap(), first);
+    }
+
+    #[test]
+    fn a_legacy_token_file_is_removed_and_a_missing_one_is_fine() {
         let directory = std::env::temp_dir().join(format!(
-            "iuna-desktop-secret-test-{}-{unique}",
-            std::process::id()
+            "iuna-legacy-token-test-{}-{}",
+            std::process::id(),
+            SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
         ));
-        fs::create_dir(&directory).unwrap();
-        let path = directory.join("secret");
+        fs::create_dir_all(&directory).unwrap();
+        let path = directory.join("operator.token");
+        fs::write(&path, "00").unwrap();
 
-        let created = load_or_create_secret(&path).unwrap();
-        assert_eq!(created.len(), 64);
-        assert!(created.bytes().all(|byte| byte.is_ascii_hexdigit()));
-        assert_eq!(load_or_create_secret(&path).unwrap(), created);
-
-        #[cfg(unix)]
-        {
-            use std::os::unix::fs::PermissionsExt;
-            assert_eq!(fs::metadata(&path).unwrap().permissions().mode() & 0o077, 0);
-        }
-
-        fs::remove_dir_all(directory).unwrap();
+        remove_if_present(&path).unwrap();
+        assert!(!path.exists());
+        remove_if_present(&path).unwrap();
+        fs::remove_dir_all(&directory).unwrap();
     }
 }
