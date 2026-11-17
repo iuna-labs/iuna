@@ -5,6 +5,12 @@ from the Git history and Conventional Commit titles by `deployment.sh`.
 
 ## [Unreleased]
 
+## [0.6.14] - 2026-11-17
+
+### Fixed
+
+- show syncing while the node fetches a side branch
+
 ## [0.6.13] - 2026-11-17
 
 ### Fixed
