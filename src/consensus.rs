@@ -1205,8 +1205,7 @@ pub fn validate_pending_candidate(state: &ConsensusState, sidecar: &Sidecar) -> 
         &sidecar.header.signing_digest(),
         &sidecar.header.signature,
     )?;
-    let mut snapshot = state.clone();
-    apply_ledger_batch(&mut snapshot, &sidecar.transactions)
+    check_pending_ledger_batch(state, &sidecar.transactions)
 }
 
 pub fn validate_pending_transaction(
@@ -1220,8 +1219,23 @@ pub fn validate_pending_transactions(
     state: &ConsensusState,
     transactions: &[Transaction],
 ) -> Result<Amount> {
-    let mut snapshot = state.clone();
-    apply_ledger_batch(&mut snapshot, transactions)
+    check_pending_ledger_batch(state, transactions)
+}
+
+/// Gives the result of applying the batch to `state` without copying any of it, so a relayed
+/// object that spends unknown outputs costs a few lookups instead of a copy of the chain state.
+fn check_pending_ledger_batch(
+    state: &ConsensusState,
+    transactions: &[Transaction],
+) -> Result<Amount> {
+    let batch = check_ledger_batch(&state.utxos, transactions)?;
+    ensure_new_outputs(
+        &state.utxos,
+        &batch.spent,
+        batch.created.iter().map(|(point, _)| point),
+        "duplicate transaction output ID",
+    )?;
+    Ok(batch.fees)
 }
 
 pub fn validate_pending_ticket(
@@ -1239,11 +1253,22 @@ pub fn validate_pending_tickets(
         .height
         .checked_add(1)
         .ok_or(ConsensusError::Arithmetic)?;
-    let mut snapshot = state.clone();
-    snapshot.height = height;
-    let mut payouts = PayoutBreakdown::default();
-    apply_ticket_batch(&mut snapshot, height, tickets, &mut payouts)?;
-    Ok(payouts.inclusion_fees)
+    let batch = check_ticket_batch(state, height, tickets)?;
+    ensure_new_outputs(
+        &state.utxos,
+        &batch.spent,
+        batch.changes.iter().map(|(point, _)| point),
+        "duplicate ticket change ID",
+    )?;
+    let mut records = BTreeSet::new();
+    if batch
+        .records
+        .iter()
+        .any(|record| !records.insert(record.id) || state.tickets.contains_key(&record.id))
+    {
+        return Err(ConsensusError::Invalid("duplicate tracked ticket ID"));
+    }
+    Ok(batch.fees)
 }
 
 /// Heartbeats over which a ticket of `duration` slots pays out its budget, inclusion block first.
@@ -2004,12 +2029,22 @@ fn compare_winners(left: &Winner, right: &Winner) -> std::cmp::Ordering {
         .then_with(|| left.ticket_id.cmp(&right.ticket_id))
 }
 
-fn apply_ledger_batch(state: &mut ConsensusState, transactions: &[Transaction]) -> Result<Amount> {
+/// The effects of a checked Ledger batch. Every input is read from the state before the batch, so
+/// a batch never spends its own outputs and checking it needs no copy of the UTXO set.
+struct LedgerBatch {
+    spent: BTreeSet<OutPoint>,
+    created: Vec<(OutPoint, Output)>,
+    fees: Amount,
+}
+
+fn check_ledger_batch(
+    utxos: &BTreeMap<OutPoint, Output>,
+    transactions: &[Transaction],
+) -> Result<LedgerBatch> {
     ensure_canonical_order(
         transactions.iter().map(Transaction::id),
         "Ledger transactions are not in canonical order",
     )?;
-    let snapshot = state.utxos.clone();
     let mut spent = BTreeSet::new();
     let mut created = Vec::new();
     let mut fees = 0u64;
@@ -2017,7 +2052,7 @@ fn apply_ledger_batch(state: &mut ConsensusState, transactions: &[Transaction]) 
         validate_transaction_shape(transaction)?;
         let id = transaction.id();
         let values = input_values(
-            &snapshot,
+            utxos,
             transaction
                 .inputs
                 .iter()
@@ -2029,7 +2064,7 @@ fn apply_ledger_batch(state: &mut ConsensusState, transactions: &[Transaction]) 
             if !spent.insert(input.previous_output.clone()) {
                 return Err(ConsensusError::Invalid("duplicate input in Ledger batch"));
             }
-            let previous = snapshot
+            let previous = utxos
                 .get(&input.previous_output)
                 .ok_or(ConsensusError::Invalid("missing Ledger input"))?;
             if previous.owner != address_from_public_key(&input.public_key) {
@@ -2064,32 +2099,65 @@ fn apply_ledger_batch(state: &mut ConsensusState, transactions: &[Transaction]) 
             ));
         }
     }
-    for point in spent {
+    Ok(LedgerBatch {
+        spent,
+        created,
+        fees,
+    })
+}
+
+fn apply_ledger_batch(state: &mut ConsensusState, transactions: &[Transaction]) -> Result<Amount> {
+    let batch = check_ledger_batch(&state.utxos, transactions)?;
+    for point in batch.spent {
         state.utxos.remove(&point);
     }
-    for (point, output) in created {
+    for (point, output) in batch.created {
         if state.utxos.insert(point, output).is_some() {
             return Err(ConsensusError::Invalid("duplicate transaction output ID"));
         }
     }
-    Ok(fees)
+    Ok(batch.fees)
 }
 
-fn apply_ticket_batch(
-    state: &mut ConsensusState,
+/// The same result as applying `created` after removing `spent`, without touching `utxos`.
+fn ensure_new_outputs<'a>(
+    utxos: &BTreeMap<OutPoint, Output>,
+    spent: &BTreeSet<OutPoint>,
+    created: impl IntoIterator<Item = &'a OutPoint>,
+    error: &'static str,
+) -> Result<()> {
+    let mut seen = BTreeSet::new();
+    for point in created {
+        if !seen.insert(point) || (utxos.contains_key(point) && !spent.contains(point)) {
+            return Err(ConsensusError::Invalid(error));
+        }
+    }
+    Ok(())
+}
+
+/// The effects of a checked ticket batch; like a Ledger batch, it only reads the prior state.
+struct TicketBatch {
+    spent: BTreeSet<OutPoint>,
+    changes: Vec<(OutPoint, Output)>,
+    records: Vec<TrackedTicket>,
+    fees: Amount,
+}
+
+fn check_ticket_batch(
+    state: &ConsensusState,
     height: u64,
     tickets: &[TicketTransaction],
-    payouts: &mut PayoutBreakdown,
-) -> Result<()> {
+) -> Result<TicketBatch> {
     ensure_canonical_order(
         tickets.iter().map(TicketTransaction::id),
         "mining tickets are not in canonical order",
     )?;
-    let snapshot = state.utxos.clone();
+    let utxos = &state.utxos;
     let next_reward = subsidy(state.ledger_blocks, state.minted)?;
     let mut spent = BTreeSet::new();
     let mut changes = Vec::new();
     let mut records = Vec::new();
+    let mut fees = 0u64;
     for ticket in tickets {
         if ticket.version != PROTOCOL_VERSION || ticket.inputs.is_empty() {
             return Err(ConsensusError::Invalid("invalid ticket shape"));
@@ -2108,7 +2176,7 @@ fn apply_ticket_batch(
         }
         let id = ticket.id();
         let values = input_values(
-            &snapshot,
+            utxos,
             ticket.inputs.iter().map(|input| &input.previous_output),
             "missing ticket input",
         )?;
@@ -2116,7 +2184,7 @@ fn apply_ticket_batch(
             if !spent.insert(input.previous_output.clone()) {
                 return Err(ConsensusError::Invalid("duplicate input in ticket batch"));
             }
-            let previous = snapshot
+            let previous = utxos
                 .get(&input.previous_output)
                 .ok_or(ConsensusError::Invalid("missing ticket input"))?;
             if previous.owner != address_from_public_key(&input.public_key) {
@@ -2128,7 +2196,7 @@ fn apply_ticket_batch(
                 &input.signature,
             )?;
         }
-        let fee = ticket_fee(&snapshot, ticket).ok_or(ConsensusError::Invalid(
+        let fee = ticket_fee(utxos, ticket).ok_or(ConsensusError::Invalid(
             "ticket inputs do not cover budget and change",
         ))?;
         if fee == 0 {
@@ -2136,7 +2204,7 @@ fn apply_ticket_batch(
                 "ticket inclusion fee must be positive",
             ));
         }
-        payouts.inclusion_fees = checked_add(payouts.inclusion_fees, fee)?;
+        fees = checked_add(fees, fee)?;
         if let Some(change) = &ticket.change {
             changes.push((
                 OutPoint {
@@ -2155,15 +2223,31 @@ fn apply_ticket_batch(
             lottery_seed: ticket.lottery_seed,
         });
     }
-    for point in spent {
+    Ok(TicketBatch {
+        spent,
+        changes,
+        records,
+        fees,
+    })
+}
+
+fn apply_ticket_batch(
+    state: &mut ConsensusState,
+    height: u64,
+    tickets: &[TicketTransaction],
+    payouts: &mut PayoutBreakdown,
+) -> Result<()> {
+    let batch = check_ticket_batch(state, height, tickets)?;
+    payouts.inclusion_fees = checked_add(payouts.inclusion_fees, batch.fees)?;
+    for point in batch.spent {
         state.utxos.remove(&point);
     }
-    for (point, output) in changes {
+    for (point, output) in batch.changes {
         if state.utxos.insert(point, output).is_some() {
             return Err(ConsensusError::Invalid("duplicate ticket change ID"));
         }
     }
-    for record in records {
+    for record in batch.records {
         if state.tickets.insert(record.id, record).is_some() {
             return Err(ConsensusError::Invalid("duplicate tracked ticket ID"));
         }
@@ -3138,6 +3222,72 @@ mod tests {
     }
 
     #[test]
+    fn pending_ledger_checks_match_applying_the_batch_to_a_copy() {
+        let key = SigningKey::from_bytes(&GENESIS_SECRET);
+        let point = OutPoint {
+            transaction_id: [41; 32],
+            output_index: 0,
+        };
+        let (_, mut state) = pinned_genesis().unwrap();
+        state.utxos.insert(
+            point.clone(),
+            Output {
+                owner: address_from_public_key(&key.verifying_key().to_bytes()),
+                value: 1_000,
+            },
+        );
+        let mut transaction = Transaction {
+            version: PROTOCOL_VERSION,
+            inputs: vec![Input {
+                previous_output: point,
+                public_key: key.verifying_key().to_bytes(),
+                signature: Vec::new(),
+            }],
+            outputs: vec![Output {
+                owner: [42; 32],
+                value: 900,
+            }],
+        };
+        transaction.inputs[0].signature = key
+            .sign(&transaction.signing_digest(0, &[1_000]).unwrap())
+            .to_bytes()
+            .to_vec();
+        let applied = |state: &ConsensusState, transactions: &[Transaction]| {
+            apply_ledger_batch(&mut state.clone(), transactions)
+        };
+        let batch = [transaction.clone()];
+        assert_eq!(validate_pending_transactions(&state, &batch), Ok(100));
+        assert_eq!(applied(&state, &batch), Ok(100));
+
+        let mut unknown = transaction.clone();
+        unknown.inputs[0].previous_output.output_index = 1;
+        assert_eq!(
+            validate_pending_transactions(&state, &[unknown.clone()]),
+            applied(&state, &[unknown])
+        );
+
+        let mut colliding = state.clone();
+        colliding.utxos.insert(
+            OutPoint {
+                transaction_id: transaction.id(),
+                output_index: 0,
+            },
+            Output {
+                owner: [43; 32],
+                value: 1,
+            },
+        );
+        assert_eq!(
+            validate_pending_transactions(&colliding, &batch),
+            Err(ConsensusError::Invalid("duplicate transaction output ID"))
+        );
+        assert_eq!(
+            applied(&colliding, &batch),
+            validate_pending_transactions(&colliding, &batch)
+        );
+    }
+
+    #[test]
     fn transaction_lists_require_strict_canonical_id_order() {
         assert!(ensure_canonical_order([[1; 32], [2; 32]], "order").is_ok());
         assert_eq!(
@@ -3335,6 +3485,76 @@ mod tests {
             budget - tracked.payout_at(0).unwrap()
         );
         assert_eq!(state.monetary_total().unwrap(), state.minted);
+    }
+
+    #[test]
+    fn pending_ticket_checks_match_applying_the_batch_to_a_copy() {
+        let (_, genesis) = pinned_genesis().unwrap();
+        let signing_key = SigningKey::from_bytes(&GENESIS_SECRET);
+        let budget = minimum_ticket_budget(1, INITIAL_LEDGER_SUBSIDY).unwrap();
+        let mut pending = TicketTransaction {
+            version: PROTOCOL_VERSION,
+            inputs: vec![TicketInput {
+                previous_output: genesis.utxos.keys().next().unwrap().clone(),
+                public_key: GENESIS_MINER,
+                signature: Vec::new(),
+            }],
+            budget,
+            duration: 1,
+            mining_public_key: [9; 32],
+            lottery_seed: [10; 32],
+            change: Some(Output {
+                owner: address_from_public_key(&GENESIS_MINER),
+                value: GENESIS_REWARD - budget - 1,
+            }),
+        };
+        pending.inputs[0].signature = signing_key
+            .sign(&pending.signing_digest(0, &[GENESIS_REWARD]).unwrap())
+            .to_bytes()
+            .to_vec();
+        let batch = [pending.clone()];
+        let applied = |state: &ConsensusState| {
+            let mut copy = state.clone();
+            let mut payouts = PayoutBreakdown::default();
+            let height = state.height + 1;
+            apply_ticket_batch(&mut copy, height, &batch, &mut payouts)
+                .map(|()| payouts.inclusion_fees)
+        };
+        assert_eq!(validate_pending_tickets(&genesis, &batch), Ok(1));
+        assert_eq!(applied(&genesis), Ok(1));
+
+        let mut change_taken = genesis.clone();
+        change_taken.utxos.insert(
+            OutPoint {
+                transaction_id: pending.id(),
+                output_index: 0,
+            },
+            Output {
+                owner: [12; 32],
+                value: 1,
+            },
+        );
+        assert_eq!(
+            validate_pending_tickets(&change_taken, &batch),
+            Err(ConsensusError::Invalid("duplicate ticket change ID"))
+        );
+        assert_eq!(
+            applied(&change_taken),
+            validate_pending_tickets(&change_taken, &batch)
+        );
+
+        let mut ticket_tracked = genesis.clone();
+        ticket_tracked
+            .tickets
+            .insert(pending.id(), ticket(MIN_TICKET_BUDGET, 1, 1));
+        assert_eq!(
+            validate_pending_tickets(&ticket_tracked, &batch),
+            Err(ConsensusError::Invalid("duplicate tracked ticket ID"))
+        );
+        assert_eq!(
+            applied(&ticket_tracked),
+            validate_pending_tickets(&ticket_tracked, &batch)
+        );
     }
 
     #[test]
