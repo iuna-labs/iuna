@@ -5,6 +5,26 @@ from the Git history and Conventional Commit titles by `deployment.sh`.
 
 ## [Unreleased]
 
+## [0.6.12] - 2026-11-17
+
+### Fixed
+
+- check relayed objects without copying the chain state
+- keep the operator token off reads and renew it every launch
+- let a full mempool admit objects that pay more per byte
+- hold back forks from states behind the window
+- open the Activity list from the dashboard's activity link
+
+### Performance
+
+- build block templates in one pass over the mempool
+- answer block requests from an index of canonical hashes
+- check relayed candidates' signatures before the lottery
+
+### Build
+
+- keep the update signing key away from build code
+
 ## [0.6.11] - 2026-11-17
 
 ### Added
