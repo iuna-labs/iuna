@@ -6,7 +6,13 @@ cd "$(dirname "${BASH_SOURCE[0]}")"
 RELEASE_ROLLBACK_ARMED=false
 RELEASE_START_HEAD=""
 TAURI_CLI_VERSION="2.11.5"
-RUST_BUILDER_IMAGE="rust:1.99.1-bookworm"
+# Taken out of the environment at once, so no build, test or install step this script runs can see
+# them; only the bundler and the update signer get the key and its password, below.
+UPDATE_SIGNING_KEY_PASSWORD="${TAURI_SIGNING_PRIVATE_KEY_PASSWORD-}"
+unset TAURI_SIGNING_PRIVATE_KEY TAURI_SIGNING_PRIVATE_KEY_PASSWORD
+# Pinned by digest: the release builders compile everything that ships, so a re-pushed tag must
+# not change them silently. Update both parts together.
+RUST_BUILDER_IMAGE="rust:1.99.1-bookworm@sha256:e6f2cff35d0f309acf8433b4f05878ed77092602c5065cc81801177da0bb3a9c"
 RELEASE_VERSION_FILES=(
   CHANGELOG.md
   Cargo.toml
@@ -146,13 +152,47 @@ ensure_tauri_cli() {
   fi
 }
 
+# Compiling runs the build scripts and proc-macros of every dependency. Those steps never have
+# the signing key or its password in their environment, and the key file lives outside the
+# repository, so no container that mounts the checkout can read it. Only the bundler and the
+# signer, which run no third-party code, receive the key. Code running as this user on the host
+# can still read the key file; a key password keeps that copy useless on its own.
+# The password travels in the environment, never on a command line.
+with_update_signing_key() {
+  local signing_key="$1"
+  local key
+  shift
+  key="$(cat "$signing_key")" || die "cannot read update signing key: ${signing_key}"
+  TAURI_SIGNING_PRIVATE_KEY="$key" \
+    TAURI_SIGNING_PRIVATE_KEY_PASSWORD="$UPDATE_SIGNING_KEY_PASSWORD" \
+    "$@"
+}
+
+sign_update_artifact() {
+  local signing_key="$1"
+  local artifact="$2"
+  if [ -n "$UPDATE_SIGNING_KEY_PASSWORD" ]; then
+    TAURI_SIGNING_PRIVATE_KEY_PASSWORD="$UPDATE_SIGNING_KEY_PASSWORD" \
+      cargo tauri signer sign -f "$signing_key" "$artifact"
+  else
+    cargo tauri signer sign -f "$signing_key" -p "" "$artifact"
+  fi
+}
+
 update_signing_key() {
-  local key="${IUNA_UPDATE_SIGNING_KEY:-config/update-signing.key}"
+  local key="${IUNA_UPDATE_SIGNING_KEY:-${HOME}/.config/iuna/update-signing.key}"
+  local resolved
+  local repository
+  if [ -f config/update-signing.key ]; then
+    die "config/update-signing.key is inside the repository, where builds and containers can read it; move it to ${HOME}/.config/iuna/update-signing.key or set IUNA_UPDATE_SIGNING_KEY"
+  fi
   [ -f "$key" ] || die "missing update signing key: ${key}; restore it from the secure release-key backup"
-  (
-    cd "$(dirname "$key")"
-    printf '%s/%s\n' "$(pwd)" "$(basename "$key")"
-  )
+  resolved="$(realpath "$key")" || die "cannot resolve update signing key: ${key}"
+  repository="$(pwd -P)"
+  case "$resolved" in
+    "$repository"/*) die "update signing key ${resolved} is inside the repository; keep it outside ${repository}" ;;
+  esac
+  printf '%s\n' "$resolved"
 }
 
 validate_update_public_key() {
@@ -412,9 +452,9 @@ build_macos_desktop_if_possible() {
   cp target/aarch64-apple-darwin/release/iuna src-tauri/binaries/iuna-sidecar-aarch64-apple-darwin
   chmod +x src-tauri/binaries/iuna-sidecar-aarch64-apple-darwin
   (cd src-tauri && \
-    TAURI_SIGNING_PRIVATE_KEY="$(cat "$signing_key")" \
-    TAURI_SIGNING_PRIVATE_KEY_PASSWORD="${TAURI_SIGNING_PRIVATE_KEY_PASSWORD-}" \
-    cargo tauri build --target aarch64-apple-darwin --bundles app)
+    cargo tauri build --target aarch64-apple-darwin --no-bundle && \
+    with_update_signing_key "$signing_key" \
+      cargo tauri bundle --target aarch64-apple-darwin --bundles app)
 
   local app="src-tauri/target/aarch64-apple-darwin/release/bundle/macos/iuna.app"
   local updater_archive="${app}.tar.gz"
@@ -445,9 +485,8 @@ build_windows_desktop_if_possible() {
   local nsis_dir="src-tauri/target/release/bundle/nsis"
   clear_nsis_installers "$nsis_dir"
   (cd src-tauri && \
-    TAURI_SIGNING_PRIVATE_KEY="$(cat "$signing_key")" \
-    TAURI_SIGNING_PRIVATE_KEY_PASSWORD="${TAURI_SIGNING_PRIVATE_KEY_PASSWORD-}" \
-    cargo tauri build --bundles nsis)
+    cargo tauri build --no-bundle && \
+    with_update_signing_key "$signing_key" cargo tauri bundle --bundles nsis)
 
   local installer
   installer="$(versioned_nsis_installer "$nsis_dir" "$version")"
@@ -476,7 +515,6 @@ build_windows_desktop_in_docker_if_possible() {
     -e "HOST_UID=$(id -u)" \
     -e "HOST_GID=$(id -g)" \
     -e "TAURI_CLI_VERSION=${TAURI_CLI_VERSION}" \
-    -e "TAURI_SIGNING_PRIVATE_KEY_PASSWORD=${TAURI_SIGNING_PRIVATE_KEY_PASSWORD-}" \
     -v iuna-windows-cargo-registry:/usr/local/cargo/registry \
     -v iuna-windows-cargo-git:/usr/local/cargo/git \
     -v iuna-windows-root-cache:/root/.cache \
@@ -484,12 +522,9 @@ build_windows_desktop_in_docker_if_possible() {
     -v "iuna-windows-${builder_arch}-tauri-target:/work/iuna/src-tauri/target" \
     -v "$(pwd):/src/iuna:ro" \
     -v "$(pwd)/downloads:/out" \
-    -v "${signing_key}:/run/secrets/iuna-update.key:ro" \
     "$RUST_BUILDER_IMAGE" \
     bash -c '
       set -euo pipefail
-
-      export TAURI_SIGNING_PRIVATE_KEY="$(cat /run/secrets/iuna-update.key)"
 
       apt-get update
       # The Linux-hosted Tauri CLI inspects enabled tray features while preparing
@@ -538,15 +573,17 @@ build_windows_desktop_in_docker_if_possible() {
       nsis_dir=target/x86_64-pc-windows-msvc/release/bundle/nsis
       mkdir -p "$nsis_dir"
       find "$nsis_dir" -maxdepth 1 -type f -name "*-setup.exe" -delete
-      cargo tauri build --runner cargo-xwin --target x86_64-pc-windows-msvc --bundles nsis
+      # The container never sees the update signing key; the host signs the installer below.
+      cargo tauri build --runner cargo-xwin --target x86_64-pc-windows-msvc --bundles nsis \
+        --config '"'"'{"bundle":{"createUpdaterArtifacts":false}}'"'"'
 
       installer="${nsis_dir}/iuna_${IUNA_VERSION}_x64-setup.exe"
       [ -f "$installer" ] || { echo "Windows installer for version ${IUNA_VERSION} was not produced at ${installer}" >&2; exit 1; }
       cp "$installer" "/out/iuna-v${IUNA_VERSION}-windows-x86_64-desktop-setup.exe"
-      test -f "${installer}.sig" || { echo "missing Windows updater signature: ${installer}.sig" >&2; exit 1; }
-      cp "${installer}.sig" "/out/iuna-v${IUNA_VERSION}-windows-x86_64-desktop-setup.exe.sig"
-      chown "${HOST_UID}:${HOST_GID}" "/out/iuna-v${IUNA_VERSION}-windows-x86_64-desktop-setup.exe" "/out/iuna-v${IUNA_VERSION}-windows-x86_64-desktop-setup.exe.sig"
+      chown "${HOST_UID}:${HOST_GID}" "/out/iuna-v${IUNA_VERSION}-windows-x86_64-desktop-setup.exe"
     '
+  ensure_tauri_cli
+  sign_update_artifact "$signing_key" "$artifact"
 }
 
 require_desktop_artifacts() {
@@ -652,7 +689,7 @@ sign_cli_archives() {
     "downloads/iuna-v${version}-linux-x86_64.tar.gz" \
     "downloads/iuna-v${version}-linux-aarch64.tar.gz"; do
     [ -f "$artifact" ] || die "missing CLI update artifact: ${artifact}"
-    cargo tauri signer sign -f "$signing_key" -p "${TAURI_SIGNING_PRIVATE_KEY_PASSWORD-}" "$artifact"
+    sign_update_artifact "$signing_key" "$artifact"
   done
 }
 
