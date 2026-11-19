@@ -1738,7 +1738,7 @@ window.iunaApp = function iunaApp() {
         });
       } else {
         const fields = {
-          transactions: "ledger_transaction_count",
+          transactions: "cumulative_ledger_transactions",
           chainBytes: "chain_bytes",
           heartbeatBytes: "heartbeat_bytes",
           tickets: "active_tickets",

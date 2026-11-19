@@ -567,8 +567,8 @@ test('metrics ranges and protocol charts use per-Heartbeat projection rows', () 
   const limit = '0000003f' + 'f'.repeat(56);
   app.status = { pow_limit: limit };
   app.metricsRows = [
-    { height: 2, timestamp: 1060, interval_seconds: 60, target: limit, ledger_transaction_count: 3, chain_bytes: 900, heartbeat_bytes: 450, active_tickets: 2, ticket_weight: 20, minted: 200, utxos: 7, tracked_tickets: 4, ledger_blocks: 1 },
-    { height: 1, timestamp: 1000, interval_seconds: 60, target: limit, ledger_transaction_count: 1, chain_bytes: 450, heartbeat_bytes: 450, active_tickets: 1, ticket_weight: 10, minted: 100, utxos: 5, tracked_tickets: 2, ledger_blocks: 0 },
+    { height: 2, timestamp: 1060, interval_seconds: 60, target: limit, ledger_transaction_count: 3, cumulative_ledger_transactions: 9, chain_bytes: 900, heartbeat_bytes: 450, active_tickets: 2, ticket_weight: 20, minted: 200, utxos: 7, tracked_tickets: 4, ledger_blocks: 1 },
+    { height: 1, timestamp: 1000, interval_seconds: 60, target: limit, ledger_transaction_count: 1, cumulative_ledger_transactions: 6, chain_bytes: 450, heartbeat_bytes: 450, active_tickets: 1, ticket_weight: 10, minted: 100, utxos: 5, tracked_tickets: 2, ledger_blocks: 0 },
   ];
   assert.equal(app.metricsPath(), '/api/metrics?limit=100');
   app.refreshMetrics = () => {};
@@ -577,7 +577,7 @@ test('metrics ranges and protocol charts use per-Heartbeat projection rows', () 
   assert.equal(values.get('iunaMetricsRange'), '1000');
   app.setMetricsRange('all');
   assert.equal(app.metricsPath(), '/api/metrics');
-  assert.equal(app.chartSeries('transactions').map((point) => point.y).join(','), '1,3');
+  assert.equal(app.chartSeries('transactions').map((point) => point.y).join(','), '6,9');
   assert.equal(app.chartSeries('ticketBudget').map((point) => point.y).join(','), '10,20');
   assert.equal(app.chartSeries('chainBytes').at(-1).y, 900);
   assert.equal(app.chartSeries('supply').at(-1).y, 200);

@@ -43,6 +43,7 @@ CREATE TABLE IF NOT EXISTS consensus_ui_heartbeats (
     ticket_count INTEGER NOT NULL,
     has_ledger_block INTEGER NOT NULL,
     ledger_transaction_count INTEGER NOT NULL,
+    cumulative_ledger_transactions INTEGER NOT NULL DEFAULT 0,
     ticket_budget INTEGER NOT NULL DEFAULT 0,
     heartbeat_bytes INTEGER NOT NULL DEFAULT 0,
     chain_bytes INTEGER NOT NULL DEFAULT 0,
@@ -64,6 +65,10 @@ CREATE TABLE IF NOT EXISTS consensus_ui_heartbeats (
 const MAX_METRIC_ROWS: u64 = 600;
 
 const HEARTBEAT_METRIC_COLUMNS: &[(&str, &str)] = &[
+    (
+        "cumulative_ledger_transactions",
+        "INTEGER NOT NULL DEFAULT 0",
+    ),
     ("ticket_budget", "INTEGER NOT NULL DEFAULT 0"),
     ("heartbeat_bytes", "INTEGER NOT NULL DEFAULT 0"),
     ("chain_bytes", "INTEGER NOT NULL DEFAULT 0"),
@@ -134,6 +139,7 @@ pub struct UiMetric {
     pub target: String,
     pub has_ledger_block: bool,
     pub ledger_transaction_count: usize,
+    pub cumulative_ledger_transactions: u64,
     pub heartbeat_bytes: u64,
     pub chain_bytes: u64,
     pub interval_seconds: Option<u64>,
@@ -508,6 +514,7 @@ struct ProjectionRow {
     ticket_count: usize,
     has_ledger_block: bool,
     ledger_transaction_count: usize,
+    cumulative_ledger_transactions: u64,
     ticket_budget: u64,
     heartbeat_bytes: u64,
     chain_bytes: u64,
@@ -522,16 +529,24 @@ struct ProjectionRow {
 
 fn prepare_projection(transaction: &Transaction<'_>, chain: &Chain) -> Result<ProjectionBatch> {
     let common_height = projection_common_height(transaction, chain)?;
-    let (mut chain_bytes, mut previous_timestamp) = match common_height {
-        Some(height) => transaction
-            .query_row(
-                "SELECT chain_bytes, timestamp FROM consensus_ui_heartbeats WHERE height = ?1",
-                [height],
-                |row| Ok((row.get::<_, u64>(0)?, Some(row.get::<_, u64>(1)?))),
-            )
-            .context("reading projection prefix")?,
-        None => (0, None),
-    };
+    let (mut chain_bytes, mut cumulative_ledger_transactions, mut previous_timestamp) =
+        match common_height {
+            Some(height) => transaction
+                .query_row(
+                    "SELECT chain_bytes, cumulative_ledger_transactions, timestamp \
+                 FROM consensus_ui_heartbeats WHERE height = ?1",
+                    [height],
+                    |row| {
+                        Ok((
+                            row.get::<_, u64>(0)?,
+                            row.get::<_, u64>(1)?,
+                            Some(row.get::<_, u64>(2)?),
+                        ))
+                    },
+                )
+                .context("reading projection prefix")?,
+            None => (0, 0, None),
+        };
     let mut rows = Vec::new();
     let mut previous_state = None;
     for block in chain.canonical_blocks_after(common_height) {
@@ -569,6 +584,12 @@ fn prepare_projection(transaction: &Transaction<'_>, chain: &Chain) -> Result<Pr
             .sidecar
             .as_ref()
             .map_or(0, |sidecar| sidecar.transactions.len());
+        cumulative_ledger_transactions = cumulative_ledger_transactions
+            .checked_add(
+                u64::try_from(ledger_transaction_count)
+                    .context("Ledger transaction count overflow")?,
+            )
+            .context("cumulative Ledger transaction count overflow")?;
         let ticket_budget = block.tickets.iter().try_fold(0_u64, |total, ticket| {
             total
                 .checked_add(ticket.budget)
@@ -602,6 +623,7 @@ fn prepare_projection(transaction: &Transaction<'_>, chain: &Chain) -> Result<Pr
             ticket_count: block.tickets.len(),
             has_ledger_block: block.sidecar.is_some(),
             ledger_transaction_count,
+            cumulative_ledger_transactions,
             ticket_budget,
             heartbeat_bytes,
             chain_bytes,
@@ -658,10 +680,10 @@ fn apply_projection(transaction: &Transaction<'_>, batch: &ProjectionBatch) -> R
             .execute(
                 "INSERT INTO consensus_ui_heartbeats(height, block_hash, parent_hash, timestamp, \
                  miner_public_key, target, ticket_count, has_ledger_block, \
-                 ledger_transaction_count, ticket_budget, heartbeat_bytes, chain_bytes, \
+                 ledger_transaction_count, cumulative_ledger_transactions, ticket_budget, heartbeat_bytes, chain_bytes, \
                  interval_seconds, minted, utxos, tracked_tickets, ledger_blocks, active_tickets, \
                  ticket_weight, ledger_miner_public_key, heartbeat_reward, ledger_reward) \
-                 VALUES(?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18, ?19, ?20, ?21, ?22)",
+                 VALUES(?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18, ?19, ?20, ?21, ?22, ?23)",
                 params![
                     row.height,
                     row.block_hash,
@@ -672,6 +694,7 @@ fn apply_projection(transaction: &Transaction<'_>, batch: &ProjectionBatch) -> R
                     row.ticket_count,
                     i64::from(row.has_ledger_block),
                     row.ledger_transaction_count,
+                    row.cumulative_ledger_transactions,
                     row.ticket_budget,
                     row.heartbeat_bytes,
                     row.chain_bytes,
@@ -740,7 +763,7 @@ const HEARTBEAT_SUMMARY_COLUMNS: &str = "height, block_hash, parent_hash, timest
 
 /// The columns `decode_metric` reads, in its order.
 const METRIC_COLUMNS: &str = "height, timestamp, target, has_ledger_block, \
-    ledger_transaction_count, heartbeat_bytes, chain_bytes, interval_seconds, minted, utxos, \
+    ledger_transaction_count, cumulative_ledger_transactions, heartbeat_bytes, chain_bytes, interval_seconds, minted, utxos, \
     ledger_blocks, active_tickets, ticket_weight";
 
 fn decode_heartbeat(row: &rusqlite::Row<'_>) -> rusqlite::Result<UiHeartbeat> {
@@ -779,14 +802,15 @@ fn decode_metric(row: &rusqlite::Row<'_>) -> rusqlite::Result<UiMetric> {
         target: row.get(2)?,
         has_ledger_block: row.get::<_, i64>(3)? != 0,
         ledger_transaction_count: row.get(4)?,
-        heartbeat_bytes: row.get(5)?,
-        chain_bytes: row.get(6)?,
-        interval_seconds: row.get(7)?,
-        minted: row.get(8)?,
-        utxos: row.get(9)?,
-        ledger_blocks: row.get(10)?,
-        active_tickets: row.get(11)?,
-        ticket_weight: row.get(12)?,
+        cumulative_ledger_transactions: row.get(5)?,
+        heartbeat_bytes: row.get(6)?,
+        chain_bytes: row.get(7)?,
+        interval_seconds: row.get(8)?,
+        minted: row.get(9)?,
+        utxos: row.get(10)?,
+        ledger_blocks: row.get(11)?,
+        active_tickets: row.get(12)?,
+        ticket_weight: row.get(13)?,
     })
 }
 
@@ -1098,8 +1122,15 @@ mod tests {
             .0;
         assert!(chain.submit(first, first_timestamp).unwrap());
         store.project(&chain).unwrap();
-        Connection::open(&path)
-            .unwrap()
+        let connection = Connection::open(&path).unwrap();
+        connection
+            .execute(
+                "UPDATE consensus_ui_heartbeats SET cumulative_ledger_transactions = 7 \
+                 WHERE height = 1",
+                [],
+            )
+            .unwrap();
+        connection
             .execute_batch(
                 r#"
 CREATE TRIGGER protect_metric_prefix_update
@@ -1121,6 +1152,10 @@ BEGIN SELECT RAISE(FAIL, 'metric prefix was deleted'); END;
 
         assert_eq!(store.status().unwrap().unwrap().height, 2);
         assert_eq!(store.metrics(None).unwrap().len(), 3);
+        assert_eq!(
+            store.metrics(Some(1)).unwrap()[0].cumulative_ledger_transactions,
+            7
+        );
     }
 
     #[test]
