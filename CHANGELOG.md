@@ -5,6 +5,17 @@ from the Git history and Conventional Commit titles by `deployment.sh`.
 
 ## [Unreleased]
 
+## [0.6.15] - 2026-11-19
+
+### Added
+
+- restructure the homepage around one clear message
+
+### Fixed
+
+- bump nginx to 1.30.7 for the nginx2root CVEs
+- label cumulative ledger transactions
+
 ## [0.6.14] - 2026-11-17
 
 ### Fixed
