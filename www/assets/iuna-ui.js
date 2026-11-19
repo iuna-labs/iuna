@@ -1671,7 +1671,7 @@ window.iunaApp = function iunaApp() {
       return [
         { kind: "interval", title: "Heartbeat interval" },
         { kind: "difficulty", title: "Proof-of-work difficulty" },
-        { kind: "transactions", title: "Ledger transactions" },
+        { kind: "transactions", title: "Cumulative ledger transactions" },
         { kind: "chainBytes", title: "Compact chain size" },
         { kind: "heartbeatBytes", title: "Heartbeat size" },
         { kind: "tickets", title: "Mining tickets" },

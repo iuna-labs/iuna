@@ -589,7 +589,7 @@ test('metrics ranges and protocol charts use per-Heartbeat projection rows', () 
     assert.match(html, new RegExp(copy));
   }
   const controller = content('www/assets/iuna-ui.js');
-  for (const copy of ['Ledger transactions', 'Compact chain size', 'Mining tickets', 'Ticket budget', 'UTXO set size']) {
+  for (const copy of ['Cumulative ledger transactions', 'Compact chain size', 'Mining tickets', 'Ticket budget', 'UTXO set size']) {
     assert.match(controller, new RegExp(copy));
   }
   assert.doesNotMatch(controller, /per Heartbeat/);
