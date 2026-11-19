@@ -5,6 +5,12 @@ from the Git history and Conventional Commit titles by `deployment.sh`.
 
 ## [Unreleased]
 
+## [0.6.16] - 2026-11-19
+
+### Fixed
+
+- track cumulative ledger transactions
+
 ## [0.6.15] - 2026-11-19
 
 ### Added
