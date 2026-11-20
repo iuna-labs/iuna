@@ -729,6 +729,151 @@ test('the accent color is chosen in Settings and remembered', () => {
   assert.match(html, /\.nav-shortcut \{ position: absolute;/, 'shortcut badges overlay the tab instead of widening it');
 });
 
+test('Cmd+K opens a palette that finds screens, heights, hashes and contacts', async () => {
+  const { app } = nodeApp();
+  const key = (overrides) => ({ key: 'k', code: 'KeyK', metaKey: true, ctrlKey: false, altKey: false, shiftKey: false, preventDefault() {}, ...overrides });
+  app.status = { heartbeat_height: 500, ledger_blocks: 50, wallet_receive_address: 'ee'.repeat(32) };
+  app.heartbeats = [{ height: 500, block_hash: `abc123${'0'.repeat(58)}`, has_ledger_block: false, ledger_blocks: 50 }];
+  app.contacts = [{ name: 'Alice', address: 'aa'.repeat(32) }];
+
+  app.handleKeydown(key());
+  assert.equal(app.palette.open, true);
+  assert.equal(app.shortcutsAvailable(), false, 'number shortcuts pause while the palette is open');
+  assert.ok(app.palette.results.some((result) => result.key === 'screen:wallet'), 'an empty query lists the screens');
+  app.handleKeydown(key({ key: 'Escape', metaKey: false }));
+  assert.equal(app.palette.open, false);
+
+  const keys = (query) => Array.from(app.paletteLocalResults(query), (result) => result.key);
+  assert.deepEqual(keys('42'), ['heartbeat:42', 'ledger:42']);
+  assert.deepEqual(keys('#42'), ['heartbeat:42', 'ledger:42']);
+  assert.deepEqual(keys('l 42'), ['ledger:42']);
+  assert.deepEqual(keys('heartbeat 42'), ['heartbeat:42']);
+  assert.deepEqual(keys('120'), ['heartbeat:120'], 'past the Ledger tip only the Heartbeat is offered');
+  assert.deepEqual(keys('501'), [], 'past the tip nothing is offered');
+  assert.deepEqual(keys('wal'), ['screen:wallet']);
+  assert.deepEqual(keys('ali'), ['contact:' + 'aa'.repeat(32)]);
+  assert.deepEqual(keys('abc123'), ['heartbeat:500'], 'a hash prefix matches loaded Heartbeats');
+  assert.deepEqual(keys('bb'.repeat(32)), ['address:send:' + 'bb'.repeat(32), 'address:contact:' + 'bb'.repeat(32), 'address:copy:' + 'bb'.repeat(32)]);
+  assert.deepEqual(keys('aa'.repeat(32)).slice(0, 1), ['contact:' + 'aa'.repeat(32)], 'a known address opens its contact');
+
+  app.getJson = async (path) => {
+    if (path.startsWith('/api/blocks/')) return { height: 77, block_hash: 'x', ledger: {} };
+    const error = new Error('not found'); error.status = 404; throw error;
+  };
+  app.palette.query = 'cc'.repeat(32);
+  await app.paletteSearch();
+  assert.deepEqual(Array.from(app.palette.results.slice(0, 2), (result) => result.key), ['heartbeat:77', 'ledger-at:77'], 'a block hash is asked of the node first');
+  assert.equal(app.palette.busy, false);
+  app.getJson = async () => ({});
+  assert.deepEqual(Array.from(await app.paletteHashResults('cc'.repeat(32))), [], 'an empty answer is neither a block nor a mempool item');
+
+  const stale = [];
+  app.getJson = () => new Promise((resolve) => { stale.push(resolve); });
+  app.palette.query = 'dd'.repeat(32);
+  const pending = app.paletteSearch();
+  app.palette.query = 'wal';
+  await app.paletteSearch();
+  stale.forEach((resolve) => resolve({ height: 9 }));
+  await pending;
+  assert.deepEqual(Array.from(app.palette.results, (result) => result.key), ['screen:wallet'], 'a slow lookup never overwrites a newer query');
+});
+
+test('a Ledger number is found by bisecting Heartbeat heights, even on a long chain', async () => {
+  const { app } = nodeApp();
+  const tip = 10_000_000;
+  // Ledger block N sits in Heartbeat 10N - 7, as `ledger_blocks` counts Ledger blocks up to each Heartbeat.
+  const summary = (height) => ({ height, block_hash: `h${height}`, has_ledger_block: height % 10 === 3, ledger_blocks: Math.floor((height + 7) / 10) });
+  const requests = [];
+  app.getJson = async (path) => {
+    requests.push(path);
+    const before = Number(/before_height=(\d+)/.exec(path)[1]);
+    return [summary(Math.min(before - 1, tip))];
+  };
+  app.status = { heartbeat_height: tip, ledger_blocks: summary(tip).ledger_blocks };
+  app.heartbeats = [];
+  const found = await app.ledgerHeartbeat(123_456);
+  assert.equal(found.height, 1_234_553);
+  assert.ok(requests.length <= Math.ceil(Math.log2(tip)) + 2, `${requests.length} lookups for ${tip} Heartbeats`);
+  await assert.rejects(app.ledgerHeartbeat(summary(tip).ledger_blocks + 1), /was not found/);
+
+  app.heartbeats = [summary(tip - 7)];
+  requests.length = 0;
+  assert.equal((await app.ledgerHeartbeat(summary(tip - 7).ledger_blocks)).height, tip - 7);
+  assert.equal(requests.length, 0, 'a loaded Ledger block needs no lookup');
+
+  const opened = [];
+  app.openChainBlock = (block, chain) => opened.push([block.height, chain]);
+  await app.openLedgerHeight(123_456);
+  await app.openHeartbeatHeight(42);
+  assert.deepEqual(opened, [[1_234_553, 'ledger'], [42, 'heartbeat']]);
+});
+
+test('Alpine starts the app once', () => {
+  // Alpine 3 calls an x-data object's init() itself; an x-init calling it again doubles every
+  // listener and poll, so a toggle such as Cmd+K would open and close in the same keypress.
+  const html = content('www/node.html');
+  assert.match(html, /<body x-data="iunaApp\(\)"/);
+  assert.doesNotMatch(html, /x-init="init\(\)"/);
+});
+
+test('the palette stays out of other dialogs and never navigates late', async () => {
+  const { app, messages } = nodeApp();
+  const key = (overrides) => ({ key: 'k', code: 'KeyK', metaKey: true, ctrlKey: false, altKey: false, shiftKey: false, preventDefault() {}, ...overrides });
+  app.status = { heartbeat_height: 100, ledger_blocks: 10 };
+  app.heartbeats = [];
+  app.contacts = [{ name: 'Alice', address: 'aa'.repeat(32) }];
+
+  for (const dialog of ['contactModalOpen', 'desktopUpdateModalOpen']) {
+    app[dialog] = true;
+    app.handleKeydown(key());
+    assert.equal(app.palette.open, false, `no palette over ${dialog}`);
+    app[dialog] = false;
+  }
+
+  app.shortcutKeyHeld = true;
+  app.handleKeydown(key());
+  assert.equal(app.palette.open, true);
+  assert.equal(app.shortcutKeyHeld, false, 'number badges hide under the palette');
+  app.showLogin = true;
+  app.closeModals();
+  assert.equal(app.palette.open, false, 'Esc closes the palette even when the login is up');
+  app.showLogin = false;
+
+  assert.deepEqual(Array.from(app.paletteLocalResults('0x'), (result) => result.key).filter((key) => key.startsWith('contact:')), [], 'a bare 0x lists no contacts');
+  assert.deepEqual(Array.from(app.paletteLocalResults('a'), (result) => result.key).filter((key) => key.startsWith('contact:')), ['contact:' + 'aa'.repeat(32)], 'a name still matches from one letter');
+  assert.deepEqual(Array.from(app.paletteLocalResults('aaaaaa'), (result) => result.key).filter((key) => key.startsWith('contact:')), ['contact:' + 'aa'.repeat(32)]);
+
+  let finish;
+  app.getJson = () => new Promise((resolve) => { finish = resolve; });
+  const opened = [];
+  app.openChainBlock = (block, chain) => opened.push([block.height, chain]);
+  app.tab = 'dashboard';
+  const lookup = app.openLedgerHeight(5);
+  assert.match(messages.at(-1).message, /Looking up Ledger block #5/);
+  app.tab = 'wallet';
+  finish([{ height: 43, block_hash: 'h43', has_ledger_block: true, ledger_blocks: 5 }]);
+  await lookup.catch(() => {});
+  assert.deepEqual(opened, [], 'a lookup that ends after the user moved on does not navigate');
+
+  app.syncLedgerBlocks.call(Object.assign(app, { heartbeats: [{ height: 43, block_hash: 'h43', has_ledger_block: true, ledger_blocks: 5 }], status: { ledger_blocks: 9 } }));
+  assert.equal(app.ledgerBlocks[0].ledger_height, 5, 'the node’s Ledger count wins over position');
+  app.selectedBlock = { height: 43, block_hash: 'h43', ledger_height: 5 };
+  app.selectedBlockChain = 'ledger';
+  app.selectedBlockFollowsLatest = false;
+  app.reconcileSelectedBlock();
+  assert.equal(app.selectedBlock.ledger_height, 5, 'a Ledger selection keeps its number across a refresh');
+});
+
+test('the palette lives in the tab bar and behaves as a combobox', () => {
+  const html = content('www/node.html');
+  const bar = html.slice(html.indexOf('<aside class="sidebar"'), html.indexOf('</aside>'));
+  assert.match(bar, /class="palette-trigger" @click="openPalette\(\)"/);
+  assert.match(html, /x-ref="paletteInput"[^>]*role="combobox"[^>]*aria-controls="palette-results"/);
+  assert.match(html, /:aria-activedescendant="palette\.results\.length \? `palette-result-\$\{palette\.active\}` : null"/);
+  assert.match(html, /class="palette-result" :id="`palette-result-\$\{index\}`" role="option"/);
+  assert.match(html, /class="palette-status" :hidden="[^"]*"[^>]*aria-live="polite"/, 'the live region stays in the DOM');
+});
+
 test('dashboard cards report stale chains and isolated nodes', () => {
   const { app } = nodeApp();
   app.status = { network: 'iuna-mainnet-candidate', wallet_unlocked: true, heartbeat_mining_enabled: false, ledger_mining_enabled: true };

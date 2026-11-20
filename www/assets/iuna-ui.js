@@ -43,6 +43,10 @@ window.iunaApp = function iunaApp() {
   return {
     tab: "dashboard",
     accent: iunaStoredAccent(),
+    // The Cmd/Ctrl+K palette. `requestId` drops lookups that finish after the query changed.
+    palette: { open: false, query: "", results: [], active: 0, busy: false, requestId: 0, trigger: null },
+    // Bumped by each palette choice, so a slow lookup from an earlier choice cannot navigate.
+    paletteNavigation: 0,
     status: {},
     peers: [],
     peerTargets: [],
@@ -195,6 +199,9 @@ window.iunaApp = function iunaApp() {
 
     shortcutsAvailable() {
       return !(this.setupReady && (this.showSetup || this.showLogin))
+        && !this.palette.open
+        && !this.contactModalOpen
+        && !this.desktopUpdateModalOpen
         && !this.pendingTransfer
         && !this.selectedTransaction;
     },
@@ -206,6 +213,16 @@ window.iunaApp = function iunaApp() {
     handleKeydown(event) {
       if (event.key === "Escape") {
         this.closeModals();
+        return;
+      }
+      if (this.shortcutModifier(event) && !event.altKey && !event.shiftKey && String(event.key).toLowerCase() === "k") {
+        if (this.palette.open) {
+          event.preventDefault();
+          this.closePalette();
+        } else if (this.shortcutsAvailable()) {
+          event.preventDefault();
+          this.openPalette();
+        }
         return;
       }
       if (["Meta", "Control"].includes(event.key)) {
@@ -225,6 +242,10 @@ window.iunaApp = function iunaApp() {
     },
 
     closeModals() {
+      if (this.palette.open) {
+        this.closePalette();
+        return;
+      }
       if (this.showLogin) return;
       if (this.selectedTransaction) {
         this.closeTransactionModal();
@@ -251,7 +272,7 @@ window.iunaApp = function iunaApp() {
       }
     },
 
-    pageTitle() {
+    pageTitle(tab = this.tab) {
       return {
         dashboard: "Dashboard",
         wallet: "Wallet",
@@ -260,7 +281,7 @@ window.iunaApp = function iunaApp() {
         chain: "Chain",
         metrics: "Metrics",
         settings: "Settings",
-      }[this.tab] || "iuna";
+      }[tab] || "iuna";
     },
 
     setupCompleted() {
@@ -372,6 +393,7 @@ window.iunaApp = function iunaApp() {
         && Boolean(this.status.wallet_public_key)
         && this.status.wallet_unlocked !== true;
       if (shouldOpen && !this.showLogin) this.selectWalletMode("");
+      if (shouldOpen && this.palette.open) this.closePalette(false);
       this.showLogin = shouldOpen;
     },
 
@@ -1146,7 +1168,8 @@ window.iunaApp = function iunaApp() {
       } else {
         // Refresh the selected summary when it is still in the loaded window. If an old block has
         // moved beyond that window, retain its selection and already-loaded details.
-        this.selectedBlock = this.heartbeats.find((block) => block.block_hash === previousHash)
+        const blocks = this.selectedBlockChain === "ledger" ? this.ledgerBlocks : this.heartbeats;
+        this.selectedBlock = blocks.find((block) => block.block_hash === previousHash)
           || this.selectedBlock;
       }
       return this.selectedBlock.block_hash !== previousHash;
@@ -1183,7 +1206,7 @@ window.iunaApp = function iunaApp() {
         .filter((block) => block.has_ledger_block)
         .map((block, index) => ({
           ...block,
-          ledger_height: Math.max(1, Number(this.status.ledger_blocks || 0) - index),
+          ledger_height: Number(block.ledger_blocks) || Math.max(1, Number(this.status.ledger_blocks || 0) - index),
         }));
     },
 
@@ -1673,6 +1696,199 @@ window.iunaApp = function iunaApp() {
       try { localStorage.setItem("iunaAccent", accent); } catch {}
     },
 
+    // "⌘K" on macOS, "Ctrl K" elsewhere, matching shortcutModifier.
+    shortcutLabel(key) {
+      return /Mac|iPhone|iPad/.test(navigator.platform || "") ? `⌘${key}` : `Ctrl ${key}`;
+    },
+
+    openPalette() {
+      this.palette.trigger = globalThis.document?.activeElement || null;
+      this.shortcutKeyHeld = false;
+      this.palette.open = true;
+      this.palette.query = "";
+      this.paletteSearch();
+      // Alpine applies x-show in an animation frame, after $nextTick, so focus one frame later.
+      const nextFrame = globalThis.requestAnimationFrame || ((callback) => setTimeout(callback, 16));
+      this.$nextTick(() => nextFrame(() => this.$refs.paletteInput?.focus()));
+    },
+
+    // Focus goes back to where it was right away, so a dialog a result opens records that element,
+    // not the hidden palette input, as the place to return to.
+    closePalette(restoreFocus = true) {
+      const trigger = this.palette.trigger;
+      this.palette.open = false;
+      this.palette.busy = false;
+      this.palette.requestId += 1;
+      this.palette.trigger = null;
+      if (restoreFocus) trigger?.focus?.();
+    },
+
+    paletteMove(delta) {
+      const count = this.palette.results.length;
+      if (!count) return;
+      this.palette.active = (this.palette.active + delta + count) % count;
+      this.$nextTick(() => globalThis.document?.getElementById(`palette-result-${this.palette.active}`)?.scrollIntoView?.({ block: "nearest" }));
+    },
+
+    async paletteRun(index) {
+      const result = this.palette.results[index];
+      if (!result) return;
+      this.closePalette();
+      this.paletteNavigation += 1;
+      try {
+        await result.run();
+      } catch (error) {
+        this.notify(error.message, "error");
+      }
+    },
+
+    // Local matches show at once; a full 64-character hash also asks the node whether it names a
+    // block or a mempool item. Heights resolve only when chosen, so typing costs no requests.
+    async paletteSearch() {
+      const query = this.palette.query.trim();
+      const requestId = ++this.palette.requestId;
+      this.palette.results = this.paletteLocalResults(query);
+      this.palette.active = 0;
+      const hex = query.toLowerCase().replace(/^0x/, "");
+      if (!/^[0-9a-f]{64}$/.test(hex)) {
+        this.palette.busy = false;
+        return;
+      }
+      this.palette.busy = true;
+      const found = await this.paletteHashResults(hex);
+      if (requestId !== this.palette.requestId) return;
+      this.palette.busy = false;
+      const seen = new Set(found.map((result) => result.key));
+      this.palette.results = [...found, ...this.palette.results.filter((result) => !seen.has(result.key))];
+    },
+
+    paletteLocalResults(query) {
+      const text = query.toLowerCase();
+      const results = [];
+      const add = (result) => { if (!results.some((item) => item.key === result.key)) results.push(result); };
+      const number = /^(?:(h|heartbeat|l|ledger)\s*)?#?(\d{1,12})$/.exec(text);
+      if (number) {
+        const value = Number(number[2]);
+        const wantsLedger = number[1]?.startsWith("l");
+        const wantsHeartbeat = number[1]?.startsWith("h");
+        if (!wantsLedger && value <= Number(this.status.heartbeat_height || 0)) {
+          add({ key: `heartbeat:${value}`, kind: "Heartbeat", title: `Heartbeat #${value}`, detail: "Open in Chain", run: () => this.openHeartbeatHeight(value) });
+        }
+        if (!wantsHeartbeat && value >= 1 && value <= Number(this.status.ledger_blocks || 0)) {
+          add({ key: `ledger:${value}`, kind: "Ledger", title: `Ledger block #${value}`, detail: "Open in Chain", run: () => this.openLedgerHeight(value) });
+        }
+      }
+      const hex = text.replace(/^0x/, "");
+      if (/^[0-9a-f]{6,64}$/.test(hex)) {
+        for (const block of this.heartbeats) {
+          if (block.block_hash.startsWith(hex)) {
+            add({ key: `heartbeat:${block.height}`, kind: "Heartbeat", title: `Heartbeat #${block.height}`, detail: this.short(block.block_hash), run: () => this.openChainBlock(block, "heartbeat") });
+          }
+        }
+        for (const item of this.mempoolItems()) {
+          if (item.id.startsWith(hex)) {
+            add({ key: `pending:${item.id}`, kind: "Pending", title: `${item.kind} · ${this.amountLabel(item.amount)} IUNA`, detail: this.short(item.id), run: () => this.openMempoolModal(item) });
+          }
+        }
+        for (const item of this.activityItems?.() || []) {
+          if (String(item.id).startsWith(hex)) {
+            add({ key: `activity:${item.pending}:${item.kind}:${item.id}`, kind: "Wallet", title: `${this.activityLabel(item)} · ${this.activitySign(item)}${this.amountLabel(item.amount)} IUNA`, detail: this.short(item.id), run: () => this.openActivityModal(item) });
+          }
+        }
+      }
+      if (text && !number) {
+        for (const contact of this.contacts) {
+          if (contact.name.toLowerCase().includes(text) || (hex.length >= 6 && contact.address.startsWith(hex))) {
+            add({ key: `contact:${contact.address}`, kind: "Contact", title: contact.name, detail: `Send to ${this.short(contact.address)}`, run: () => this.useRecipient(contact.address) });
+          }
+        }
+      }
+      if (/^[0-9a-f]{64}$/.test(hex)) {
+        if (!this.contacts.some((contact) => contact.address === hex)) {
+          add({ key: `address:send:${hex}`, kind: "Address", title: "Send to this address", detail: this.short(hex), run: () => this.useRecipient(hex) });
+          add({ key: `address:contact:${hex}`, kind: "Address", title: "Save as contact", detail: this.short(hex), run: () => this.openContactEditor(hex) });
+        }
+        add({ key: `address:copy:${hex}`, kind: "Copy", title: "Copy to clipboard", detail: this.short(hex), run: () => this.copyValue(hex, "Copied") });
+      }
+      for (const tab of this.tabs()) {
+        const title = this.pageTitle(tab);
+        if (!number && title.toLowerCase().includes(text)) {
+          add({ key: `screen:${tab}`, kind: "Screen", title, detail: this.shortcutLabel(this.shortcutNumber(tab)), run: () => this.setTab(tab) });
+        }
+      }
+      if (this.status.wallet_receive_address && "copy receive address".includes(text)) {
+        add({ key: "copy-receive", kind: "Wallet", title: "Copy receive address", detail: this.short(this.status.wallet_receive_address), run: () => this.copyWalletAddress() });
+      }
+      return results.slice(0, 12);
+    },
+
+    async paletteHashResults(hex) {
+      const [block, pending] = await Promise.allSettled([
+        this.getJson(`/api/blocks/${hex}`),
+        this.getJson(`/api/mempool/${hex}`),
+      ]);
+      const results = [];
+      if (block.status === "fulfilled" && block.value?.height != null) {
+        const height = Number(block.value.height);
+        results.push({ key: `heartbeat:${height}`, kind: "Heartbeat", title: `Heartbeat #${height}`, detail: "Block hash", run: () => this.openHeartbeatHeight(height) });
+        if (block.value.ledger) {
+          results.push({ key: `ledger-at:${height}`, kind: "Ledger", title: `Ledger block in Heartbeat #${height}`, detail: "Block hash", run: () => this.openHeartbeatHeight(height, "ledger") });
+        }
+      }
+      // Only an answer that carries an amount is a mempool item.
+      if (pending.status === "fulfilled" && (pending.value?.total_output != null || pending.value?.budget != null)) {
+        const ticket = pending.value.budget != null;
+        const item = { ...pending.value, id: hex, kind: ticket ? "Mining ticket" : "Ledger transaction", amount: ticket ? pending.value.budget : pending.value.total_output };
+        results.push({ key: `pending:${hex}`, kind: "Pending", title: `${item.kind} · ${this.amountLabel(item.amount)} IUNA`, detail: "In the mempool", run: () => this.openMempoolModal(item) });
+      }
+      return results;
+    },
+
+    async heartbeatSummaryAt(height) {
+      const [summary] = await this.getJson(`/api/heartbeats?limit=1&before_height=${Number(height) + 1}`);
+      if (Number(summary?.height) !== Number(height)) throw new Error(`Heartbeat #${height} was not found`);
+      return summary;
+    },
+
+    // A lookup that ends after the user switched screens or opened something else is dropped.
+    async navigateWhenFound(lookup, chain) {
+      const navigation = ++this.paletteNavigation;
+      const tab = this.tab;
+      const block = await lookup();
+      if (navigation !== this.paletteNavigation || this.tab !== tab) return;
+      this.openChainBlock(block, chain);
+    },
+
+    async openHeartbeatHeight(height, chain = "heartbeat") {
+      const loaded = this.heartbeats.find((block) => Number(block.height) === Number(height));
+      await this.navigateWhenFound(async () => loaded || this.heartbeatSummaryAt(height), chain);
+    },
+
+    // Every Heartbeat records how many Ledger blocks the chain holds up to it, and that count never
+    // falls, so the Heartbeat carrying Ledger block N is the first one whose count reaches N.
+    async ledgerHeartbeat(number) {
+      const target = Number(number);
+      const loaded = this.heartbeats.find((block) => block.has_ledger_block && Number(block.ledger_blocks) === target);
+      if (loaded) return loaded;
+      let low = 0;
+      let high = Number(this.status.heartbeat_height || 0);
+      while (low < high) {
+        const middle = Math.floor((low + high) / 2);
+        const summary = await this.heartbeatSummaryAt(middle);
+        if (Number(summary.ledger_blocks) >= target) high = middle;
+        else low = middle + 1;
+      }
+      const found = await this.heartbeatSummaryAt(low);
+      if (!found.has_ledger_block || Number(found.ledger_blocks) !== target) throw new Error(`Ledger block #${target} was not found`);
+      return found;
+    },
+
+    async openLedgerHeight(number) {
+      const loaded = this.heartbeats.some((block) => block.has_ledger_block && Number(block.ledger_blocks) === Number(number));
+      if (!loaded) this.notify(`Looking up Ledger block #${number}…`);
+      await this.navigateWhenFound(() => this.ledgerHeartbeat(number), "ledger");
+    },
+
     // The dashboard strip shows the newest 60 Heartbeats, newest first.
     dashboardHeartbeats() {
       return this.heartbeats.slice(0, 60);
@@ -1692,9 +1908,15 @@ window.iunaApp = function iunaApp() {
 
     // A bar with a Ledger block opens that block on the Ledger rail; any other bar opens its Heartbeat.
     openPulseBlock(block) {
-      const chain = block.has_ledger_block ? "ledger" : "heartbeat";
+      this.openChainBlock(block, block.has_ledger_block ? "ledger" : "heartbeat");
+    },
+
+    // Opens a Heartbeat summary on the given rail. A block older than the loaded rail stays
+    // selected with its details, so only blocks on the rail can be scrolled to.
+    openChainBlock(block, chain) {
       const target = chain === "ledger"
-        ? this.ledgerBlocks.find((item) => item.block_hash === block.block_hash) || block
+        ? this.ledgerBlocks.find((item) => item.block_hash === block.block_hash)
+          || { ...block, ledger_height: Number(block.ledger_blocks) }
         : block;
       this.setTab("chain");
       this.setChainView(chain);

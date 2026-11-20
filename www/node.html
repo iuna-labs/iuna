@@ -80,7 +80,12 @@
     .nav-button.active svg { color: var(--accent); }
     /* Positioned over the end of the label, so showing the badges never widens a tab. */
     .nav-shortcut { position: absolute; top: 50%; right: 3px; transform: translateY(-50%); min-width: 16px; height: 16px; display: grid; place-items: center; border: 1px solid var(--line-strong); border-radius: var(--radius); padding: 0 3px; background: var(--panel-2); color: var(--accent); font-size: 10px; font-weight: 600; pointer-events: none; }
-    .sidebar-bottom { display: flex; margin-left: auto; border-left: 1px solid var(--line); }
+    .palette-trigger { flex: 0 1 300px; min-width: 0; display: flex; align-items: center; gap: 8px; height: 100%; margin-left: auto; border: 0; border-left: 1px solid var(--line); border-radius: 0; padding: 0 12px; background: transparent; color: var(--muted-2); font-size: 12px; font-weight: 400; }
+    .palette-trigger:hover { background: var(--panel); color: var(--text); }
+    .palette-trigger svg, .palette-field svg { width: 15px; height: 15px; flex: 0 0 auto; fill: none; stroke: currentColor; stroke-width: 1.8; stroke-linecap: round; }
+    .palette-trigger-label { min-width: 0; flex: 1; overflow: hidden; text-align: left; text-overflow: ellipsis; white-space: nowrap; }
+    kbd { border: 1px solid var(--line-strong); border-radius: var(--radius); padding: 0 5px; background: var(--panel-2); color: var(--muted); font: inherit; font-size: 11px; line-height: 16px; white-space: nowrap; }
+    .sidebar-bottom { display: flex; border-left: 1px solid var(--line); }
     .sidebar-bottom .nav-button { border-right: 0; }
     .content { min-height: 100vh; padding-top: var(--navbar); padding-bottom: calc(var(--statusbar) + 28px); }
     .topbar { position: sticky; z-index: 9; top: var(--navbar); height: var(--topbar); display: flex; align-items: center; justify-content: space-between; gap: 16px; padding: 0 max(24px, calc((100% - 1440px) / 2 + 24px)); border-bottom: 1px solid var(--line); background: var(--bg); }
@@ -454,6 +459,23 @@
     .accent-option::before { content: ""; width: 12px; height: 12px; background: var(--accent); }
     .accent-option.active { border-color: var(--accent); color: var(--text); }
 
+    /* Cmd/Ctrl+K palette: one field, results below it, picked with the arrow keys. */
+    .palette-overlay { position: fixed; z-index: 75; inset: 0; display: grid; justify-items: center; align-items: start; padding: 12vh 16px 16px; background: rgba(6, 7, 5, .6); }
+    .palette { width: min(640px, 100%); max-height: 70vh; display: flex; flex-direction: column; overflow: hidden; border: 1px solid var(--line-strong); background: var(--panel); box-shadow: 0 24px 64px rgba(0, 0, 0, .55); }
+    .palette-field { display: flex; align-items: center; gap: 10px; border-bottom: 1px solid var(--line); padding: 0 14px; color: var(--accent); }
+    .palette-field input { margin: 0; border: 0; padding: 14px 0; background: transparent; font-size: 14px; }
+    .palette-field input:focus { border: 0; box-shadow: none; }
+    .palette-results { min-height: 0; overflow-y: auto; margin: 0; padding: 4px 0; list-style: none; }
+    .palette-result { display: grid; grid-template-columns: 84px minmax(0, 1fr) auto; gap: 12px; align-items: baseline; padding: 7px 14px; cursor: pointer; }
+    .palette-result.active { background: var(--accent-soft); box-shadow: inset 2px 0 0 var(--accent); }
+    .palette-kind { color: var(--muted-2); font-size: 10.5px; font-weight: 500; letter-spacing: .08em; text-transform: uppercase; }
+    .palette-result.active .palette-kind { color: var(--accent); }
+    .palette-title { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+    .palette-detail { color: var(--muted-2); font-size: 12px; white-space: nowrap; }
+    .palette-status { padding: 14px; color: var(--muted-2); font-size: 12.5px; }
+    .palette-hint { display: flex; flex-wrap: wrap; gap: 4px 16px; border-top: 1px solid var(--line); padding: 7px 14px; color: var(--muted-2); font-size: 11.5px; }
+    .palette-hint kbd { margin-right: 3px; }
+
     /* Dialogs */
     .setup-overlay { position: fixed; z-index: 70; inset: 0; display: grid; place-items: center; padding: 24px; background: rgba(6, 7, 8, .74); }
     .setup-modal { width: min(720px, 100%); max-height: calc(100vh - 48px); overflow: auto; border: 1px solid var(--line-strong); border-radius: var(--radius); padding: 22px 24px; background: var(--panel); box-shadow: 0 24px 64px rgba(0, 0, 0, .5); }
@@ -526,6 +548,8 @@
       .status-optional { display: none; }
       .nav-button { width: 46px; justify-content: center; padding: 0; }
       .nav-button svg { display: block; }
+      .palette-trigger { flex: 0 0 auto; width: 46px; justify-content: center; padding: 0; }
+      .palette-trigger-label, .palette-trigger kbd { display: none; }
       .nav-label { position: absolute; width: 1px; height: 1px; overflow: hidden; clip: rect(0 0 0 0); white-space: nowrap; }
       .nav-shortcut { top: 3px; transform: none; }
       .topbar { padding: 0 20px; }
@@ -557,7 +581,7 @@
   <script defer src="/assets/iuna-ui.js"></script>
   <script defer src="/assets/alpine.min.js"></script>
 </head>
-<body x-data="iunaApp()" x-init="init()" x-cloak>
+<body x-data="iunaApp()" x-cloak>
   <div class="shell">
     <aside class="sidebar" aria-label="iuna navigation">
       <button class="brand" @click="setTab('dashboard')" title="Dashboard" aria-label="Dashboard"><svg viewBox="0 0 32 32" aria-hidden="true"><circle class="mark-dot" cx="9.4" cy="7.6" r="2.8"></circle><path class="mark-loop" d="M9.4 13v7.1c0 3.7 2.9 6.4 6.6 6.4s6.6-2.7 6.6-6.4V13"></path></svg></button>
@@ -569,6 +593,7 @@
         <button class="nav-button" :class="{active: tab === 'chain'}" :aria-current="tab === 'chain' ? 'page' : null" @click="setTab('chain')"><svg viewBox="0 0 24 24" aria-hidden="true"><rect x="1.5" y="9" width="5.5" height="5.5"></rect><rect x="9.25" y="9" width="5.5" height="5.5"></rect><rect x="17" y="9" width="5.5" height="5.5"></rect></svg><span class="nav-label">Chain</span><span class="nav-shortcut" x-show="shortcutKeyHeld" x-text="shortcutNumber('chain')" aria-hidden="true"></span></button>
         <button class="nav-button" :class="{active: tab === 'metrics'}" :aria-current="tab === 'metrics' ? 'page' : null" @click="setTab('metrics')"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M4 19V5"></path><path d="M4 19h16"></path><path d="M7 15l3-4 3 2 4-7"></path><path d="M7 17h10"></path></svg><span class="nav-label">Metrics</span><span class="nav-shortcut" x-show="shortcutKeyHeld" x-text="shortcutNumber('metrics')" aria-hidden="true"></span></button>
       </nav>
+      <button type="button" class="palette-trigger" @click="openPalette()" :aria-label="`Jump to a screen, block, transaction or address (${shortcutLabel('K')})`"><svg viewBox="0 0 24 24" aria-hidden="true"><circle cx="11" cy="11" r="6.5"></circle><path d="m16 16 4.5 4.5"></path></svg><span class="palette-trigger-label">Jump to block, tx, address…</span><kbd x-text="shortcutLabel('K')"></kbd></button>
       <div class="sidebar-bottom">
         <button class="nav-button" :class="{active: tab === 'settings'}" :aria-current="tab === 'settings' ? 'page' : null" @click="setTab('settings')"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M9.7 3.2 9.2 5.5a7.2 7.2 0 0 0-1.4.8L5.6 5.6 3.2 9.8l1.7 1.6a7.8 7.8 0 0 0 0 1.6l-1.7 1.6 2.4 4.2 2.2-.7a7.2 7.2 0 0 0 1.4.8l.5 2.3h4.8l.5-2.3a7.2 7.2 0 0 0 1.4-.8l2.2.7 2.4-4.2-1.7-1.6a7.8 7.8 0 0 0 0-1.6L21 9.8l-2.4-4.2-2.2.7a7.2 7.2 0 0 0-1.4-.8l-.5-2.3H9.7Z"></path><circle cx="12" cy="12.2" r="3.1"></circle></svg><span class="nav-label">Settings</span><span class="nav-shortcut" x-show="shortcutKeyHeld" x-text="shortcutNumber('settings')" aria-hidden="true"></span></button>
       </div>
@@ -995,6 +1020,23 @@
         </button>
       </div>
     </footer>
+  </div>
+
+  <div class="palette-overlay" x-show="palette.open" @click.self="closePalette()" role="dialog" aria-modal="true" aria-label="Jump to">
+    <div class="palette">
+      <div class="palette-field">
+        <svg viewBox="0 0 24 24" aria-hidden="true"><circle cx="11" cy="11" r="6.5"></circle><path d="m16 16 4.5 4.5"></path></svg>
+        <input x-ref="paletteInput" x-model="palette.query" @input="paletteSearch()" @keydown.down.prevent="paletteMove(1)" @keydown.up.prevent="paletteMove(-1)" @keydown.enter.prevent="paletteRun(palette.active)" @keydown.tab.prevent role="combobox" aria-expanded="true" aria-autocomplete="list" aria-controls="palette-results" :aria-activedescendant="palette.results.length ? `palette-result-${palette.active}` : null" placeholder="Screen, Heartbeat or Ledger number, hash, transaction, contact" autocomplete="off" spellcheck="false">
+        <kbd>esc</kbd>
+      </div>
+      <ul class="palette-results" id="palette-results" role="listbox" aria-label="Results" x-show="palette.results.length">
+        <template x-for="(result, index) in palette.results" :key="result.key">
+          <li class="palette-result" :id="`palette-result-${index}`" role="option" :aria-selected="index === palette.active" :class="{active: index === palette.active}" @mousemove="palette.active = index" @click="paletteRun(index)"><span class="palette-kind" x-text="result.kind"></span><span class="palette-title" x-text="result.title"></span><span class="palette-detail" x-text="result.detail"></span></li>
+        </template>
+      </ul>
+      <div class="palette-status" :hidden="!palette.busy && palette.results.length > 0" x-text="palette.busy ? 'Asking the node…' : (palette.results.length ? '' : 'Nothing found. Try a height such as 4821, “ledger 4821” or a 64-character hash.')" aria-live="polite"></div>
+      <div class="palette-hint"><span><kbd>↑</kbd><kbd>↓</kbd> choose</span><span><kbd>enter</kbd> open</span><span>“h 120” or “l 12” picks a chain</span></div>
+    </div>
   </div>
 
   <div class="setup-overlay transaction-overlay" x-show="selectedTransaction" x-transition:enter.opacity @click.self="closeTransactionModal()" role="dialog" aria-modal="true" aria-labelledby="transaction-modal-title">

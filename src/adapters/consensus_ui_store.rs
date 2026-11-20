@@ -291,25 +291,33 @@ impl ConsensusUiStore {
         before_height: Option<u64>,
         limit: usize,
     ) -> Result<Vec<UiHeartbeat>> {
+        // Two statements instead of `?2 IS NULL OR height < ?2`: SQLite cannot use the primary key
+        // for that form, so each page would scan every row above it and get slower the further
+        // back it reads. As a plain range every page is one index seek, at any chain length.
+        let limit = limit.min(10_000);
         self.with_connection(|connection| {
-            let mut statement = connection
-                .prepare(&format!(
-                    "SELECT {HEARTBEAT_SUMMARY_COLUMNS} FROM consensus_ui_heartbeats \
-                         WHERE (?2 IS NULL OR height < ?2) \
-                         ORDER BY height DESC LIMIT ?1"
-                ))
-                .context("preparing heartbeat query")?;
-            statement
-                .query_map(
-                    params![
-                        limit.min(10_000),
-                        before_height.map(|height| i64::try_from(height).unwrap_or(i64::MAX))
-                    ],
-                    decode_heartbeat,
-                )
-                .context("querying heartbeats")?
-                .collect::<rusqlite::Result<Vec<_>>>()
-                .context("decoding heartbeat rows")
+            let rows = match before_height {
+                Some(height) => {
+                    let mut statement = connection
+                        .prepare(&heartbeats_before_query(true))
+                        .context("preparing heartbeat query")?;
+                    let height = i64::try_from(height).unwrap_or(i64::MAX);
+                    statement
+                        .query_map(params![limit, height], decode_heartbeat)
+                        .context("querying heartbeats")?
+                        .collect::<rusqlite::Result<Vec<_>>>()
+                }
+                None => {
+                    let mut statement = connection
+                        .prepare(&heartbeats_before_query(false))
+                        .context("preparing heartbeat query")?;
+                    statement
+                        .query_map(params![limit], decode_heartbeat)
+                        .context("querying heartbeats")?
+                        .collect::<rusqlite::Result<Vec<_>>>()
+                }
+            };
+            rows.context("decoding heartbeat rows")
         })
     }
 
@@ -765,6 +773,19 @@ const HEARTBEAT_SUMMARY_COLUMNS: &str = "height, block_hash, parent_hash, timest
 const METRIC_COLUMNS: &str = "height, timestamp, target, has_ledger_block, \
     ledger_transaction_count, cumulative_ledger_transactions, heartbeat_bytes, chain_bytes, interval_seconds, minted, utxos, \
     ledger_blocks, active_tickets, ticket_weight";
+
+/// The newest Heartbeats, optionally below a height: `?1` is the limit and `?2` the height.
+fn heartbeats_before_query(below_height: bool) -> String {
+    let filter = if below_height {
+        "WHERE height < ?2 "
+    } else {
+        ""
+    };
+    format!(
+        "SELECT {HEARTBEAT_SUMMARY_COLUMNS} FROM consensus_ui_heartbeats \
+         {filter}ORDER BY height DESC LIMIT ?1"
+    )
+}
 
 fn decode_heartbeat(row: &rusqlite::Row<'_>) -> rusqlite::Result<UiHeartbeat> {
     let miner_public_key: String = row.get(4)?;
@@ -1234,5 +1255,43 @@ BEGIN SELECT RAISE(FAIL, 'metric prefix was deleted'); END;
                 .prepare("SELECT * FROM unrelated")
                 .is_ok()
         );
+    }
+
+    #[test]
+    fn heartbeat_pages_seek_by_height_instead_of_scanning() {
+        let directory = tempfile::tempdir().unwrap();
+        let store = ConsensusUiStore::open(directory.path().join("ui.sqlite3")).unwrap();
+        store
+            .with_connection(|connection| {
+                for below_height in [false, true] {
+                    let mut statement = connection.prepare(&format!(
+                        "EXPLAIN QUERY PLAN {}",
+                        heartbeats_before_query(below_height)
+                    ))?;
+                    let detail = |row: &rusqlite::Row<'_>| row.get::<_, String>(3);
+                    let plan: Vec<String> = if below_height {
+                        statement
+                            .query_map(params![1, 1], detail)?
+                            .collect::<rusqlite::Result<_>>()?
+                    } else {
+                        statement
+                            .query_map(params![1], detail)?
+                            .collect::<rusqlite::Result<_>>()?
+                    };
+                    let plan = plan.join(" | ");
+                    assert!(
+                        !plan.contains("USE TEMP B-TREE"),
+                        "pages are read in key order: {plan}"
+                    );
+                    if below_height {
+                        assert!(
+                            plan.contains("USING INTEGER PRIMARY KEY"),
+                            "a page below a height seeks on the key: {plan}"
+                        );
+                    }
+                }
+                Ok(())
+            })
+            .unwrap();
     }
 }
