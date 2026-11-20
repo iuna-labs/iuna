@@ -13,10 +13,36 @@ const IUNA_REWARD_INPUTS = {
 };
 // A Ledger reward pays its subsidy and its fee share as two outputs of one settlement.
 const IUNA_REWARD_OUTPUTS = { heartbeat_payout: "Heartbeat reward", subsidy: "Subsidy", ledger_fee_share: "Ledger fee share" };
+// Accent colors offered in Settings; node.html defines each one's tokens under [data-accent].
+const IUNA_ACCENTS = [
+  { id: "orange", label: "Safety orange" },
+  { id: "lime", label: "Lime" },
+  { id: "magenta", label: "Magenta" },
+  { id: "cobalt", label: "Cobalt" },
+  { id: "bone", label: "Bone" },
+];
+const IUNA_DEFAULT_ACCENT = "orange";
+
+function iunaStoredAccent() {
+  try {
+    const stored = localStorage.getItem("iunaAccent");
+    return IUNA_ACCENTS.some((option) => option.id === stored) ? stored : IUNA_DEFAULT_ACCENT;
+  } catch {
+    return IUNA_DEFAULT_ACCENT;
+  }
+}
+
+// Runs before Alpine shows the page (the body is x-cloak until then), so the default never flashes.
+function iunaApplyAccent(accent) {
+  const root = typeof document === "undefined" ? null : document.documentElement;
+  if (root) root.dataset.accent = accent;
+}
+iunaApplyAccent(iunaStoredAccent());
 
 window.iunaApp = function iunaApp() {
   return {
     tab: "dashboard",
+    accent: iunaStoredAccent(),
     status: {},
     peers: [],
     peerTargets: [],
@@ -1634,6 +1660,50 @@ window.iunaApp = function iunaApp() {
       if (seconds < 60) return `${seconds} s ago`;
       if (seconds < 3600) return `${Math.floor(seconds / 60)} min ago`;
       return `${Math.floor(seconds / 3600)} h ago`;
+    },
+
+    accentOptions() {
+      return IUNA_ACCENTS;
+    },
+
+    setAccent(accent) {
+      if (!IUNA_ACCENTS.some((option) => option.id === accent)) return;
+      this.accent = accent;
+      iunaApplyAccent(accent);
+      try { localStorage.setItem("iunaAccent", accent); } catch {}
+    },
+
+    // The dashboard strip shows the newest 60 Heartbeats, newest first.
+    dashboardHeartbeats() {
+      return this.heartbeats.slice(0, 60);
+    },
+
+    minedByWallet(block) {
+      const wallet = String(this.status.wallet_public_key || "").toLowerCase();
+      return Boolean(wallet) && String(block?.miner_public_key || "").toLowerCase() === wallet;
+    },
+
+    pulseTitle(block) {
+      const parts = [`Heartbeat #${block.height}`, this.blockAgeLabel(block, "Genesis")];
+      if (block.has_ledger_block) parts.push("Ledger block");
+      if (this.minedByWallet(block)) parts.push("mined by you");
+      return parts.join(" · ");
+    },
+
+    // A bar with a Ledger block opens that block on the Ledger rail; any other bar opens its Heartbeat.
+    openPulseBlock(block) {
+      const chain = block.has_ledger_block ? "ledger" : "heartbeat";
+      const target = chain === "ledger"
+        ? this.ledgerBlocks.find((item) => item.block_hash === block.block_hash) || block
+        : block;
+      this.setTab("chain");
+      this.setChainView(chain);
+      // selectBlock toggles a selected block off, so leave an already selected block alone.
+      if (!(this.blockSelected(target) && this.selectedBlockChain === chain)) void this.selectBlock(target, chain);
+      this.$nextTick(() => {
+        this.$refs?.[`${chain}Rail`]?.querySelector(".chain-block.selected")
+          ?.scrollIntoView({ block: "nearest", inline: "center" });
+      });
     },
 
     heartbeatAgeLabel() {

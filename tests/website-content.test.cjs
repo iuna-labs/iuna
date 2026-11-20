@@ -663,6 +663,72 @@ test('metric axes use round ticks and compact labels', () => {
   assert.match(html, /chartGridPath\(chart\.kind\)/);
 });
 
+test('the dashboard strip shows the next and newest 60 Heartbeats and opens each on its own rail', () => {
+  const { app } = nodeApp();
+  const mine = 'ab'.repeat(32);
+  app.status = { wallet_public_key: mine.toUpperCase() };
+  app.heartbeats = Array.from({ length: 100 }, (_, index) => ({
+    height: 100 - index,
+    block_hash: `hash-${100 - index}`,
+    timestamp: 0,
+    has_ledger_block: (100 - index) % 10 === 0,
+    miner_public_key: index === 3 ? mine : 'cd'.repeat(32),
+  }));
+  const strip = app.dashboardHeartbeats();
+  assert.equal(strip.length, 60);
+  assert.equal(strip[0].height, 100, 'newest first');
+  assert.equal(strip.at(-1).height, 41, 'oldest last');
+  assert.equal(app.minedByWallet(app.heartbeats[3]), true, 'keys compare case-insensitively');
+  assert.equal(app.minedByWallet(app.heartbeats[0]), false);
+  app.status = {};
+  assert.equal(app.minedByWallet({ miner_public_key: '' }), false, 'no wallet mines nothing');
+  assert.match(app.pulseTitle(app.heartbeats[0]), /^Heartbeat #100 · .* · Ledger block$/);
+
+  const selected = [];
+  app.setChainView = (chain) => { app.chainView = chain; };
+  app.selectBlock = async (block, chain) => { selected.push([block.height, chain]); app.selectedBlock = block; app.selectedBlockChain = chain; };
+  app.openPulseBlock(app.heartbeats[5]);
+  assert.equal(app.tab, 'chain');
+  assert.equal(app.chainView, 'heartbeat');
+  app.openPulseBlock(app.heartbeats[5]);
+  assert.deepEqual(selected, [[95, 'heartbeat']], 'a second click keeps the selection instead of toggling it off');
+
+  app.status.ledger_blocks = 10;
+  app.ledgerBlocks = app.heartbeats.filter((block) => block.has_ledger_block).map((block, index) => ({ ...block, ledger_height: 10 - index }));
+  app.openPulseBlock(app.heartbeats[10]);
+  assert.equal(app.chainView, 'ledger', 'a Ledger bar opens the Ledger rail');
+  assert.deepEqual(selected.at(-1), [90, 'ledger']);
+  assert.equal(app.selectedBlock.ledger_height, 9, 'the Ledger entry is selected, not the bare Heartbeat');
+
+  const html = content('www/node.html');
+  const dashboard = html.slice(html.indexOf('<section class="dashboard"'), html.indexOf(`<section x-show="tab === 'wallet'">`));
+  assert.match(dashboard, /x-for="block in dashboardHeartbeats\(\)"/);
+  assert.match(dashboard, /class="pulse-strip" aria-hidden="true">\s*<span class="pulse-next"/, 'the Heartbeat being searched sits left of the newest');
+  assert.match(dashboard, /tabindex="-1" class="pulse-bar"/, 'bars stay out of the tab order; Open Chain is the keyboard path');
+});
+
+test('the accent color is chosen in Settings and remembered', () => {
+  const { app, values } = nodeApp();
+  assert.equal(app.accent, 'orange', 'Safety orange is the default');
+  assert.deepEqual(Array.from(app.accentOptions(), (option) => option.id), ['orange', 'lime', 'magenta', 'cobalt', 'bone']);
+  app.setAccent('cobalt');
+  assert.equal(app.accent, 'cobalt');
+  assert.equal(values.get('iunaAccent'), 'cobalt');
+  app.setAccent('purple');
+  assert.equal(app.accent, 'cobalt', 'unknown accents are ignored');
+  values.set('iunaAccent', 'lime');
+  assert.equal(nodeApp({ localStorage: { getItem: (key) => values.get(key) ?? null, setItem: () => {} } }).app.accent, 'lime');
+  values.set('iunaAccent', 'nonsense');
+  assert.equal(nodeApp({ localStorage: { getItem: (key) => values.get(key) ?? null, setItem: () => {} } }).app.accent, 'orange');
+
+  const html = content('www/node.html');
+  for (const option of app.accentOptions()) {
+    assert.match(html, new RegExp(`\\[data-accent="${option.id}"\\][^{]*\\{ --accent: #[0-9a-f]{6};`), `${option.id} defines its tokens`);
+  }
+  assert.match(html, /:data-accent="option\.id" :aria-pressed="accent === option\.id" @click="setAccent\(option\.id\)"/);
+  assert.match(html, /\.nav-shortcut \{ position: absolute;/, 'shortcut badges overlay the tab instead of widening it');
+});
+
 test('dashboard cards report stale chains and isolated nodes', () => {
   const { app } = nodeApp();
   app.status = { network: 'iuna-mainnet-candidate', wallet_unlocked: true, heartbeat_mining_enabled: false, ledger_mining_enabled: true };
@@ -912,7 +978,7 @@ test('chain overview labels miners and identifies the local wallet', () => {
   assert.match(html, /block\.ticket_count/);
   assert.match(html, /block\.ledger_transaction_count/);
   assert.match(html, /button\.chain-block:hover, button\.chain-block:focus-visible/);
-  assert.match(html, /\.chain-block\.selected \{ border-color: var\(--green\); background: var\(--green-soft\);/);
+  assert.match(html, /\.chain-block\.selected \{ border-color: var\(--accent\); background: var\(--accent-soft\);/);
   assert.match(html, /\.chain-block\.new-block \{ animation: chain-block-arrive/);
   assert.doesNotMatch(html, /class="chain-height">#/);
   const heartbeatBuilding = html.slice(
