@@ -9,7 +9,7 @@
     :root {
       color-scheme: dark; font-family: var(--mono); font-size: 13px; line-height: 1.5; background: var(--bg); color: var(--text);
       -webkit-font-smoothing: antialiased;
-      /* Instrument palette: black-olive panels, bone text and one safety-orange accent.
+      /* Instrument palette: black-olive panels, bone text and one lime accent.
          Yellow is reserved for pending and warnings, so it never competes with the accent. */
       --bg: #121310;
       --panel: #181a15;
@@ -38,9 +38,9 @@
       --topbar: 46px;
       --statusbar: 30px;
     }
-    /* Accent colors chosen in Settings. Each also colors its own swatch there. Safety orange is the default. */
-    :root, [data-accent="orange"] { --accent: #ff6a13; --accent-hover: #ff8540; --accent-soft: #2a1a0f; --accent-line: #7a3a14; }
-    [data-accent="lime"] { --accent: #d5f55f; --accent-hover: #e3fb86; --accent-soft: #1f2614; --accent-line: #566d25; }
+    /* Accent colors chosen in Settings. Each also colors its own swatch there. Lime is the default. */
+    :root, [data-accent="lime"] { --accent: #d5f55f; --accent-hover: #e3fb86; --accent-soft: #1f2614; --accent-line: #566d25; }
+    [data-accent="orange"] { --accent: #ff6a13; --accent-hover: #ff8540; --accent-soft: #2a1a0f; --accent-line: #7a3a14; }
     [data-accent="magenta"] { --accent: #ff5fa2; --accent-hover: #ff85b8; --accent-soft: #2a1520; --accent-line: #7a2c4d; }
     [data-accent="cobalt"] { --accent: #6b98ff; --accent-hover: #8daeff; --accent-soft: #141b2c; --accent-line: #2d4580; }
     [data-accent="bone"] { --accent: #e8e2cc; --accent-hover: #fffaea; --accent-soft: #24241d; --accent-line: #6b6756; }

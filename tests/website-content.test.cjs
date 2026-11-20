@@ -709,17 +709,17 @@ test('the dashboard strip shows the next and newest 60 Heartbeats and opens each
 
 test('the accent color is chosen in Settings and remembered', () => {
   const { app, values } = nodeApp();
-  assert.equal(app.accent, 'orange', 'Safety orange is the default');
-  assert.deepEqual(Array.from(app.accentOptions(), (option) => option.id), ['orange', 'lime', 'magenta', 'cobalt', 'bone']);
+  assert.equal(app.accent, 'lime', 'Lime is the default');
+  assert.deepEqual(Array.from(app.accentOptions(), (option) => option.id), ['lime', 'orange', 'magenta', 'cobalt', 'bone']);
   app.setAccent('cobalt');
   assert.equal(app.accent, 'cobalt');
   assert.equal(values.get('iunaAccent'), 'cobalt');
   app.setAccent('purple');
   assert.equal(app.accent, 'cobalt', 'unknown accents are ignored');
-  values.set('iunaAccent', 'lime');
-  assert.equal(nodeApp({ localStorage: { getItem: (key) => values.get(key) ?? null, setItem: () => {} } }).app.accent, 'lime');
-  values.set('iunaAccent', 'nonsense');
+  values.set('iunaAccent', 'orange');
   assert.equal(nodeApp({ localStorage: { getItem: (key) => values.get(key) ?? null, setItem: () => {} } }).app.accent, 'orange');
+  values.set('iunaAccent', 'nonsense');
+  assert.equal(nodeApp({ localStorage: { getItem: (key) => values.get(key) ?? null, setItem: () => {} } }).app.accent, 'lime');
 
   const html = content('www/node.html');
   for (const option of app.accentOptions()) {

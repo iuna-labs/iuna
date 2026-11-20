@@ -15,13 +15,13 @@ const IUNA_REWARD_INPUTS = {
 const IUNA_REWARD_OUTPUTS = { heartbeat_payout: "Heartbeat reward", subsidy: "Subsidy", ledger_fee_share: "Ledger fee share" };
 // Accent colors offered in Settings; node.html defines each one's tokens under [data-accent].
 const IUNA_ACCENTS = [
-  { id: "orange", label: "Safety orange" },
   { id: "lime", label: "Lime" },
+  { id: "orange", label: "Orange" },
   { id: "magenta", label: "Magenta" },
   { id: "cobalt", label: "Cobalt" },
   { id: "bone", label: "Bone" },
 ];
-const IUNA_DEFAULT_ACCENT = "orange";
+const IUNA_DEFAULT_ACCENT = "lime";
 
 function iunaStoredAccent() {
   try {
