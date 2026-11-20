@@ -369,7 +369,7 @@ test('unlocking closes the login even when the following refresh fails', async (
   const { app } = nodeApp();
   app.setupReady = true;
   app.showSetup = false;
-  app.status = { wallet_public_key: '11'.repeat(32), wallet_unlocked: false };
+  app.status = { wallet_exists: true, wallet_unlocked: false };
   app.syncLoginVisibility();
   assert.equal(app.showLogin, true);
   app.postJson = async () => ({ created: false, public_key: '11'.repeat(32) });
@@ -388,12 +388,13 @@ test('an existing locked wallet opens the login modal after restart', () => {
   app.setupReady = true;
   app.showSetup = false;
   app.status = {
-    wallet_public_key: '11'.repeat(32),
+    wallet_exists: true,
     wallet_unlocked: false,
   };
   app.syncLoginVisibility();
   assert.equal(app.showLogin, true);
   assert.equal(app.shortcutsAvailable(), false);
+  assert.equal(app.walletNeedsCreation(), false, 'a locked wallet is known to exist without its public key');
 
   app.status.wallet_unlocked = true;
   app.syncLoginVisibility();

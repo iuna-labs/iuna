@@ -634,7 +634,7 @@
       </section>
 
       <section x-show="tab === 'wallet'">
-        <div class="empty" x-show="!status.wallet_unlocked"><h2 x-text="status.wallet_public_key ? 'Unlock your wallet' : 'Create your wallet'"></h2><button class="primary" @click="resetSetup(); setupStep = 2">Open wallet setup</button></div>
+        <div class="empty" x-show="!status.wallet_unlocked"><h2 x-text="walletNeedsCreation() ? 'Create your wallet' : 'Unlock your wallet'"></h2><button class="primary" @click="resetSetup(); setupStep = 2">Open wallet setup</button></div>
         <div class="wallet-layout" x-show="status.wallet_unlocked">
           <div class="wallet-top">
             <article class="panel balance-panel" aria-label="Balance">
@@ -984,7 +984,7 @@
 
       <section x-show="tab === 'settings'">
         <article class="panel settings-list">
-          <div class="settings-row" x-show="status.wallet_public_key">
+          <div class="settings-row" x-show="status.wallet_exists">
             <div><h3>Wallet password</h3><p class="muted">Re-encrypts this node's wallet file. The recovery phrase stays the same.</p></div>
             <form class="stacked-form" @submit.prevent="changeWalletPassword">
               <label>Current password<input x-model="passwordForm.current" type="password" maxlength="1024" autocomplete="current-password" required></label>

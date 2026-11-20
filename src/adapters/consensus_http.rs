@@ -91,12 +91,16 @@ pub struct OperatorStatus {
     pub utxos: usize,
     pub pending_ledger_transactions: usize,
     pub pending_mining_tickets: usize,
+    /// Whether this node has a wallet, locked or not.
+    pub wallet_exists: bool,
+    /// The wallet fields below are reported only while the wallet is unlocked: a locked wallet
+    /// reveals nothing about its keys, funds or mining power.
     pub wallet_public_key: Option<String>,
     pub wallet_receive_address: Option<String>,
-    pub wallet_balance: u64,
-    pub wallet_spendable_balance: u64,
-    pub wallet_utxos: usize,
-    pub wallet_spendable_utxos: usize,
+    pub wallet_balance: Option<u64>,
+    pub wallet_spendable_balance: Option<u64>,
+    pub wallet_utxos: Option<usize>,
+    pub wallet_spendable_utxos: Option<usize>,
     pub wallet_unlocked: bool,
     pub management_enabled: bool,
     /// Management needs `Authorization: Bearer <operator token>`; otherwise it is open to the
@@ -108,7 +112,7 @@ pub struct OperatorStatus {
     /// Cumulative nonces attempted by this node since process start.
     pub heartbeat_hashes: u64,
     /// Active Proof-of-Expenditure weight owned by this node's wallet at the current height.
-    pub ledger_ticket_power: u64,
+    pub ledger_ticket_power: Option<u64>,
     pub ledger_mining_enabled: bool,
     pub ledger_last_ticket_height: Option<u64>,
     pub connected_peers: usize,
@@ -1235,21 +1239,12 @@ async fn wallet_activity(
     State(state): State<ConsensusHttpState>,
     Query(query): Query<WalletActivityQuery>,
 ) -> ApiResult<WalletActivityView> {
-    let (public_key, unlocked) = {
-        let wallet = state.wallet.read().expect("wallet state lock poisoned");
-        (
-            wallet
-                .public_key
-                .ok_or_else(|| api_error(StatusCode::NOT_FOUND, "this node has no wallet"))?,
-            wallet.unlocked.clone(),
-        )
-    };
+    // A locked wallet's history stays private, like its balance in the status.
+    let wallet = unlocked_wallet(&state)?;
+    let public_key = wallet.public_key();
     // Rewards are read before the node lock: SQLite must not hold up the node.
     let store = state.ui_store.clone();
-    let owners = unlocked.map_or_else(
-        || BTreeSet::from([address_from_public_key(&public_key)]),
-        |wallet| wallet.owned_addresses(),
-    );
+    let owners = wallet.owned_addresses();
     let rewards_owner = hex(&public_key);
     let before_height = query.before_height;
     let rewards = tokio::task::spawn_blocking(move || {
@@ -2081,7 +2076,9 @@ async fn mining_ticket_quote(
         })?;
     let recommended_budget = current_minimum_budget.max(minimum_budget_after_same_heartbeat_ledger);
     let wallet = state.wallet.read().expect("wallet state lock poisoned");
-    let mining_public_key = wallet.public_key;
+    // While the wallet is locked the quote does not set the wallet's own tickets apart, so it
+    // cannot reveal their weight.
+    let mining_public_key = wallet.unlocked.as_ref().map(|wallet| wallet.public_key());
     let theoretical_ev_maximizing_budget =
         ev_maximizing_ticket_budget(chain, mining_public_key, query.duration).map_err(|_| {
             api_error(
@@ -2142,38 +2139,30 @@ async fn status(State(state): State<ConsensusHttpState>) -> Json<OperatorStatus>
     let chain = node.status();
     let reserved_inputs = node.reserved_inputs();
     let wallet = state.wallet.read().expect("wallet state lock poisoned");
-    let wallet_addresses = wallet.unlocked.as_ref().map_or_else(
-        || {
-            wallet
-                .public_key
-                .map(|key| address_from_public_key(&key))
-                .into_iter()
-                .collect::<BTreeSet<_>>()
-        },
-        |wallet| wallet.owned_addresses(),
-    );
-    let (wallet_balance, wallet_spendable_balance, wallet_utxos, wallet_spendable_utxos) =
-        wallet.public_key.map_or((0, 0, 0, 0), |_| {
-            node.chain()
-                .tip()
-                .utxos
-                .iter()
-                .filter(|(_, output)| wallet_addresses.contains(&output.owner))
-                .fold(
-                    (0, 0, 0, 0),
-                    |(balance, spendable, outputs, spendable_outputs), (point, output)| {
-                        let reserved = reserved_inputs.contains(point);
-                        (
-                            balance + output.value,
-                            spendable + if reserved { 0 } else { output.value },
-                            outputs + 1,
-                            spendable_outputs + usize::from(!reserved),
-                        )
-                    },
-                )
-        });
-    let ledger_ticket_power = local_ledger_ticket_power(node.chain().tip(), wallet.public_key);
-    let wallet_receive_address = wallet.unlocked.as_ref().and_then(|wallet| {
+    let unlocked = wallet.unlocked.as_ref();
+    let wallet_totals = unlocked.map(|wallet| {
+        let wallet_addresses = wallet.owned_addresses();
+        node.chain()
+            .tip()
+            .utxos
+            .iter()
+            .filter(|(_, output)| wallet_addresses.contains(&output.owner))
+            .fold(
+                (0, 0, 0, 0),
+                |(balance, spendable, outputs, spendable_outputs), (point, output)| {
+                    let reserved = reserved_inputs.contains(point);
+                    (
+                        balance + output.value,
+                        spendable + if reserved { 0 } else { output.value },
+                        outputs + 1,
+                        spendable_outputs + usize::from(!reserved),
+                    )
+                },
+            )
+    });
+    let ledger_ticket_power = unlocked
+        .map(|wallet| local_ledger_ticket_power(node.chain().tip(), Some(wallet.public_key())));
+    let wallet_receive_address = unlocked.and_then(|wallet| {
         (0..crate::app::wallet_commands::WALLET_ADDRESS_SCAN_LIMIT)
             .map(|index| wallet.receive_address(index))
             .find(|address| !node.address_used(address))
@@ -2190,13 +2179,14 @@ async fn status(State(state): State<ConsensusHttpState>) -> Json<OperatorStatus>
         utxos: chain.utxos,
         pending_ledger_transactions: node.pending_transaction_count(),
         pending_mining_tickets: node.pending_ticket_count(),
-        wallet_public_key: wallet.public_key.map(|key| hex(&key)),
+        wallet_exists: wallet.public_key.is_some(),
+        wallet_public_key: unlocked.map(|wallet| hex(&wallet.public_key())),
         wallet_receive_address: wallet_receive_address.map(|address| hex(&address)),
-        wallet_balance,
-        wallet_spendable_balance,
-        wallet_utxos,
-        wallet_spendable_utxos,
-        wallet_unlocked: wallet.unlocked.is_some(),
+        wallet_balance: wallet_totals.map(|totals| totals.0),
+        wallet_spendable_balance: wallet_totals.map(|totals| totals.1),
+        wallet_utxos: wallet_totals.map(|totals| totals.2),
+        wallet_spendable_utxos: wallet_totals.map(|totals| totals.3),
+        wallet_unlocked: unlocked.is_some(),
         management_enabled: state.trusted_management || state.operator_token_hash.is_some(),
         management_requires_token: state.operator_token_hash.is_some(),
         heartbeat_mining_enabled: state.heartbeat_mining.load(Ordering::Relaxed),
@@ -3032,13 +3022,13 @@ mod tests {
         assert_eq!(json["heartbeat_height"], 0);
         assert_eq!(json["ledger_blocks"], 0);
         assert_eq!(json["wallet_unlocked"], false);
-        assert_eq!(json["wallet_balance"], 0);
+        assert_eq!(json["wallet_balance"], serde_json::Value::Null);
         assert_eq!(json["app_version"], env!("CARGO_PKG_VERSION"));
-        assert_eq!(json["wallet_utxos"], 0);
-        assert_eq!(json["wallet_spendable_utxos"], 0);
-        assert_eq!(json["wallet_spendable_balance"], 0);
+        assert_eq!(json["wallet_utxos"], serde_json::Value::Null);
+        assert_eq!(json["wallet_spendable_utxos"], serde_json::Value::Null);
+        assert_eq!(json["wallet_spendable_balance"], serde_json::Value::Null);
         assert_eq!(json["heartbeat_hashes"], 0);
-        assert_eq!(json["ledger_ticket_power"], 0);
+        assert_eq!(json["ledger_ticket_power"], serde_json::Value::Null);
         assert!(json.get("l1_blocks").is_none());
         assert!(json.get("l2_blocks").is_none());
 
@@ -3848,7 +3838,7 @@ mod tests {
             true
         );
 
-        let response = router(transaction_state)
+        let response = router(transaction_state.clone())
             .oneshot(Request::get("/api/status").body(Body::empty()).unwrap())
             .await
             .unwrap();
@@ -3861,6 +3851,40 @@ mod tests {
         assert_eq!(status["wallet_utxos"], 1);
         assert_eq!(status["wallet_spendable_utxos"], 0);
         assert_eq!(status["wallet_public_key"], hex(&wallet.public_key()));
+        assert_eq!(status["wallet_exists"], true);
+
+        // Once locked, the same funded wallet reveals neither its keys, funds nor history.
+        transaction_state.wallet.write().unwrap().unlocked = None;
+        let response = router(transaction_state.clone())
+            .oneshot(Request::get("/api/status").body(Body::empty()).unwrap())
+            .await
+            .unwrap();
+        let bytes = axum::body::to_bytes(response.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        let status: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+        assert_eq!(status["wallet_exists"], true);
+        assert_eq!(status["wallet_unlocked"], false);
+        for field in [
+            "wallet_public_key",
+            "wallet_receive_address",
+            "wallet_balance",
+            "wallet_spendable_balance",
+            "wallet_utxos",
+            "wallet_spendable_utxos",
+            "ledger_ticket_power",
+        ] {
+            assert_eq!(status[field], serde_json::Value::Null, "{field}");
+        }
+        let response = router(transaction_state)
+            .oneshot(
+                Request::get("/api/wallet/activity")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::LOCKED);
 
         let ticket_directory = tempfile::tempdir().unwrap();
         let ticket_state = management_state(&ticket_directory, wallet, TOKEN);

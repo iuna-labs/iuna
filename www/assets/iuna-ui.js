@@ -390,7 +390,7 @@ window.iunaApp = function iunaApp() {
       }
       const shouldOpen = this.setupReady
         && !this.showSetup
-        && Boolean(this.status.wallet_public_key)
+        && this.status.wallet_exists === true
         && this.status.wallet_unlocked !== true;
       if (shouldOpen && !this.showLogin) this.selectWalletMode("");
       if (shouldOpen && this.palette.open) this.closePalette(false);
@@ -405,8 +405,9 @@ window.iunaApp = function iunaApp() {
       this.setupStep = Math.max(1, this.setupStep - 1);
     },
 
+    // The node reports a locked wallet's existence, but none of its keys, funds or history.
     walletNeedsCreation() {
-      return !this.status.wallet_public_key;
+      return this.status.wallet_exists !== true;
     },
 
     walletActionLabel() {
