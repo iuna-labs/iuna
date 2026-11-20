@@ -260,7 +260,10 @@
     .amount-row { display: flex; align-items: center; gap: 6px; }
     .amount-row input { flex: 1; }
     .amount-row button { padding: 1px 8px; font-size: 12px; }
-    .amount-row .contact-pick { flex: 0 0 auto; width: auto; max-width: 160px; margin: 0; padding: 1px 6px; font-size: 12px; cursor: pointer; }
+    /* The contact picker looks like the Max button beside it, with a caret instead of the native control. */
+    .amount-row .contact-pick { flex: 0 0 auto; width: auto; max-width: 160px; margin: 0; border-color: var(--line-strong); padding: 1px 24px 1px 8px; appearance: none; -webkit-appearance: none; background-color: var(--panel-3); background-image: linear-gradient(45deg, transparent 50%, var(--muted) 50%), linear-gradient(135deg, var(--muted) 50%, transparent 50%); background-position: calc(100% - 13px) 50%, calc(100% - 9px) 50%; background-size: 4px 4px; background-repeat: no-repeat; color: var(--text); font-size: 12px; font-weight: 500; line-height: 20px; cursor: pointer; transition: background-color .12s ease, border-color .12s ease; }
+    .amount-row .contact-pick:hover { border-color: #4d5243; background-color: var(--hover); }
+    .amount-row .contact-pick:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; box-shadow: none; }
     /* Visually hidden: the tab already names the list; the heading keeps it labelled. */
     .pane-title { position: absolute; width: 1px; height: 1px; overflow: hidden; clip: rect(0 0 0 0); white-space: nowrap; }
     .pane-list { max-height: max(280px, calc(100vh - 500px)); margin: 0 -16px -16px; }
