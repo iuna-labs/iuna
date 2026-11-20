@@ -259,6 +259,7 @@
     .amount-row { display: flex; align-items: center; gap: 6px; }
     .amount-row input { flex: 1; }
     .amount-row button { padding: 1px 8px; font-size: 12px; }
+    .amount-row .contact-pick { flex: 0 0 auto; width: auto; max-width: 160px; margin: 0; padding: 1px 6px; font-size: 12px; cursor: pointer; }
     /* Visually hidden: the tab already names the list; the heading keeps it labelled. */
     .pane-title { position: absolute; width: 1px; height: 1px; overflow: hidden; clip: rect(0 0 0 0); white-space: nowrap; }
     .pane-list { max-height: max(280px, calc(100vh - 500px)); margin: 0 -16px -16px; }
@@ -397,7 +398,7 @@
     .tx-section-meta { color: var(--muted-2); font-size: 12px; font-weight: 500; }
     .tx-section > .muted { padding: 10px 12px; }
     .tx-section .tx-fields { border-bottom: 1px solid var(--line); }
-    .tx-scroll-list { display: grid; max-height: 420px; overflow: auto; }
+    .tx-scroll-list { display: grid; align-content: start; max-height: 420px; overflow: auto; }
     .wallet-address-row { grid-template-columns: minmax(120px, .25fr) minmax(0, 1fr) auto; }
     .wallet-address-row b { font-weight: 500; }
     .wallet-address-row code { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
@@ -648,8 +649,7 @@
             <article class="panel send-panel">
               <div class="panel-head"><h2>Send IUNA</h2></div>
               <form class="send-form" @submit.prevent="reviewTransaction">
-                <label>Recipient<input x-model.trim="transfer.recipient" list="contact-keys" minlength="64" maxlength="64" placeholder="64 hexadecimal characters or pick a contact" required></label>
-                <datalist id="contact-keys"><template x-for="contact in contacts" :key="contact.address"><option :value="contact.address" x-text="contact.name"></option></template></datalist>
+                <label>Recipient<span class="amount-row"><input x-model.trim="transfer.recipient" minlength="64" maxlength="64" :placeholder="contacts.length ? '64 hexadecimal characters or pick a contact' : '64 hexadecimal characters'" autocomplete="off" spellcheck="false" required><select class="contact-pick" x-show="contacts.length" aria-label="Pick a contact" x-effect="const match = contacts.some((contact) => contact.address === transfer.recipient) ? transfer.recipient : ''; $nextTick(() => { $el.value = match; })" @change="if ($event.target.value) transfer.recipient = $event.target.value; else if (contactName(transfer.recipient)) transfer.recipient = ''"><option value="">Contacts</option><template x-for="contact in contacts" :key="contact.address"><option :value="contact.address" x-text="contact.name"></option></template></select></span></label>
                 <label>Amount (IUNA)<span class="amount-row"><input x-model="transfer.amount" type="number" min="0.00000001" step="0.00000001" required><button type="button" @click="useMaximumAmount" title="Send the whole spendable balance minus the fee">Max</button></span></label>
                 <label>Fee (IUNA)<input x-model="transfer.fee" type="number" min="0.00000001" step="0.00000001" required></label>
                 <button class="primary" type="submit" :disabled="transfer.busy || !canManage()" x-text="transfer.busy ? 'Submitting…' : 'Review'"></button>
