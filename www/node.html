@@ -229,12 +229,13 @@
 
     /* Wallet */
     /* Wallet: balance and receive address beside the send form, the tabbed lists full width below. */
-    /* The wallet fills the window between the bars (48px: section top padding plus the content's bottom gap);
-       only the list inside the lower panel scrolls. */
-    .wallet-layout { height: calc(100vh - var(--navbar) - var(--topbar) - var(--statusbar) - 48px); min-height: 400px; display: grid; grid-template-columns: minmax(0, 1fr); grid-template-rows: auto minmax(0, 1fr); gap: 16px; }
-    .wallet-activity-panel { min-height: 0; display: flex; flex-direction: column; margin: 0; }
-    .activity-pane, .contacts-pane, .utxos-pane, .addresses-pane { min-height: 0; flex: 1; display: flex; flex-direction: column; }
-    .wallet-activity-panel .activity-scroll, .wallet-activity-panel .pane-list, .wallet-activity-panel .contact-list { min-height: 0; flex: 1 1 auto; max-height: none; }
+    /* The lower panel is as tall as its list, up to the window between the bars (48px: section top
+       padding plus the content's bottom gap); beyond that only the list inside it scrolls. */
+    .wallet-layout { max-height: max(520px, calc(100vh - var(--navbar) - var(--topbar) - var(--statusbar) - 48px)); display: flex; flex-direction: column; gap: 16px; }
+    .wallet-layout > .wallet-top { flex: none; }
+    .wallet-activity-panel { min-height: 0; flex: 0 1 auto; display: flex; flex-direction: column; margin: 0; }
+    .activity-pane, .contacts-pane, .utxos-pane, .addresses-pane { min-height: 0; flex: 0 1 auto; display: flex; flex-direction: column; }
+    .wallet-activity-panel .activity-scroll, .wallet-activity-panel .pane-list, .wallet-activity-panel .contact-list { min-height: 0; flex: 0 1 auto; max-height: none; }
     .wallet-top { display: grid; grid-template-columns: minmax(300px, 1fr) minmax(0, 2fr); gap: 1px; border: 1px solid var(--line); background: var(--line); }
     .wallet-top > .panel { min-width: 0; margin: 0; border: 0; border-radius: 0; padding: 14px 16px 16px; }
     .wallet-top .panel > .panel-head:first-child { min-height: 0; margin: 0 0 4px; border: 0; padding: 0; }
@@ -562,7 +563,7 @@
       .content > section { padding: 18px 20px 0; }
       .setup-grid { grid-template-columns: 1fr; }
     }
-    @media (max-width: 760px) { .wallet-top { grid-template-columns: minmax(0, 1fr); } .wallet-layout { height: auto; min-height: 0; } .wallet-activity-panel .activity-scroll, .wallet-activity-panel .pane-list { max-height: 560px; } .send-form > label { grid-template-columns: 120px minmax(0, 1fr); } .utxo-flow { grid-template-columns: 1fr; } .utxo-arrow { min-height: 28px; transform: rotate(90deg); } .tx-modal-head { align-items: stretch; } .mining-form, .mining-stats, .send-form, .confirm-facts { grid-template-columns: 1fr; } .metrics-summary { grid-template-columns: repeat(2, minmax(0, 1fr)); } .chain-block { flex-basis: 112px; } .metric-row { grid-template-columns: 1fr 70px; } .metric-row .bar { grid-column: 1 / -1; grid-row: 2; } .settings-row { grid-template-columns: 1fr; } }
+    @media (max-width: 760px) { .wallet-top { grid-template-columns: minmax(0, 1fr); } .wallet-layout { max-height: none; } .wallet-activity-panel .activity-scroll, .wallet-activity-panel .pane-list { max-height: 560px; } .send-form > label { grid-template-columns: 120px minmax(0, 1fr); } .utxo-flow { grid-template-columns: 1fr; } .utxo-arrow { min-height: 28px; transform: rotate(90deg); } .tx-modal-head { align-items: stretch; } .mining-form, .mining-stats, .send-form, .confirm-facts { grid-template-columns: 1fr; } .metrics-summary { grid-template-columns: repeat(2, minmax(0, 1fr)); } .chain-block { flex-basis: 112px; } .metric-row { grid-template-columns: 1fr 70px; } .metric-row .bar { grid-column: 1 / -1; grid-row: 2; } .settings-row { grid-template-columns: 1fr; } }
     @media (max-width: 480px) { .status-tiles { grid-template-columns: 1fr; } }
     @media (max-width: 650px) {
       .brand { padding: 0 12px; }
