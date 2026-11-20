@@ -61,6 +61,8 @@ window.iunaApp = function iunaApp() {
     selectedBlockDetail: null,
     selectedBlockChain: null,
     selectedBlockFollowsLatest: false,
+    // Opening the Chain screen selects the newest Ledger block once its blocks are loaded.
+    chainDefaultSelectionPending: false,
     blockDetailBusy: false,
     blockDetailRequestId: 0,
     showSetup: false,
@@ -84,7 +86,7 @@ window.iunaApp = function iunaApp() {
     pendingTransfer: null,
     shortcutKeyHeld: false,
     chartHover: null,
-    mining: { busy: false, workers: 1, message: "Proof-of-work mining is off", hashes: null, sampledAt: null, hashrate: null },
+    mining: { busy: false, workers: 1, message: "Heartbeat mining is off", hashes: null, sampledAt: null, hashrate: null },
     ticket: { budget: "", duration: 10, fee: "0.00000001", quote: null, continuousQuote: null, busy: false, continuousBusy: false },
     walletAccess: {
       mode: "",
@@ -103,6 +105,7 @@ window.iunaApp = function iunaApp() {
       this.tokenStored = Boolean(this.storedOperatorToken());
       this.contacts = this.loadContacts();
       this.tab = this.tabFromHash();
+      this.chainDefaultSelectionPending = this.tab === "chain";
       window.addEventListener("hashchange", () => this.setTab(this.tabFromHash()));
       window.addEventListener("keydown", (event) => this.handleKeydown(event));
       window.addEventListener("keyup", (event) => this.handleKeyup(event));
@@ -152,7 +155,11 @@ window.iunaApp = function iunaApp() {
       if (window.location.hash !== `#${tab}`) window.location.hash = tab;
       if (changed && (tab === "wallet" || tab === "dashboard")) this.refresh(true);
       if (changed && tab === "metrics") this.refreshMetrics();
-      if (changed && tab === "chain") this.$nextTick(() => this.ensureChainRailScrollable(this.chainView));
+      if (changed && tab === "chain") {
+        this.chainDefaultSelectionPending = true;
+        this.selectDefaultChainBlock();
+        this.$nextTick(() => this.ensureChainRailScrollable(this.chainView));
+      }
     },
 
     // Cmd (macOS) or Ctrl plus 1-7 opens the matching sidebar screen; badges show while held.
@@ -616,15 +623,14 @@ window.iunaApp = function iunaApp() {
         void this.reconcileSelectedTransaction();
         this.peerTargets = await this.getJson("/api/peer-targets").catch(() => this.peerTargets);
         if (this.tab === "metrics") await this.refreshMetrics(true);
-        // The dashboard lists the most recent activity too.
-        if (status.wallet_public_key && (this.tab === "wallet" || this.tab === "dashboard")) {
+        if (status.wallet_public_key && this.tab === "wallet") {
           const activity = await this.getJson("/api/wallet/activity").catch(() => null);
           if (activity) this.applyActivityPage(activity, false);
         }
         if (!this.mining.busy) {
           this.mining.message = status.heartbeat_mining_enabled
-            ? "Mining is on. The node searches for the next Heartbeat continuously."
-            : "Proof-of-work mining is off";
+            ? "Heartbeat mining is on. The node searches for the next Heartbeat continuously."
+            : "Heartbeat mining is off";
         }
         this.syncLedgerBlocks();
         if (status.ledger_mining_enabled
@@ -651,6 +657,7 @@ window.iunaApp = function iunaApp() {
           await this.loadBlockDetail(this.selectedBlock, true);
         }
         if (this.tab === "chain") {
+          this.selectDefaultChainBlock();
           this.$nextTick(() => this.ensureChainRailScrollable(this.chainView));
         }
         this.lastUpdated = new Date();
@@ -825,8 +832,8 @@ window.iunaApp = function iunaApp() {
         this.mining.workers = payload.workers;
         if (!payload.enabled) this.mining.hashrate = 0;
         this.mining.message = payload.enabled
-          ? "Mining is on. The node searches for the next Heartbeat continuously."
-          : "Proof-of-work mining is off";
+          ? "Heartbeat mining is on. The node searches for the next Heartbeat continuously."
+          : "Heartbeat mining is off";
         this.notify(payload.bootstrap_ticket_submitted
           ? "Heartbeat mining enabled; the public genesis funds created the first Proof of Expenditure ticket"
           : (payload.enabled ? "Heartbeat mining enabled" : "Heartbeat mining disabled"));
@@ -912,8 +919,8 @@ window.iunaApp = function iunaApp() {
     ledgerMiningMessage() {
       if (this.ticket.continuousBusy) return "Updating continuous Ledger mining…";
       return this.status.ledger_mining_enabled
-        ? "Mining is on. The node submits an EV-maximized Ledger ticket every 10 Heartbeats."
-        : "Continuous Ledger mining is off. Submit a ticket manually below.";
+        ? "Continuous Ledger mining is on. The node submits an EV-maximized ticket every 10 Heartbeats."
+        : "Continuous Ledger mining is off. Submit a ticket manually above.";
     },
 
     ledgerOtherTicketPower() {
@@ -978,12 +985,6 @@ window.iunaApp = function iunaApp() {
       return fraction ? `${whole}.${fraction}` : String(whole);
     },
 
-    balanceValueStyle() {
-      const characters = `IUNA ${this.amountLabel(this.status.wallet_balance)}`.length;
-      const fontSize = characters <= 16 ? 17 : characters <= 20 ? 15 : 13;
-      return `font-size:${fontSize}px`;
-    },
-
     pendingCount() {
       return Number(this.status.pending_ledger_transactions || 0) + Number(this.status.pending_mining_tickets || 0);
     },
@@ -1021,6 +1022,13 @@ window.iunaApp = function iunaApp() {
       if (!this.status.network) return "Waiting";
       if (!this.peers.length) return "No peers";
       return this.syncing() ? this.syncingLabel() : "Up to date";
+    },
+
+    networkTileDetail() {
+      if (!this.status.network) return "Waiting for the local node";
+      if (!this.peers.length) return "No peers connected";
+      const peers = `${this.peers.length} peer${this.peers.length === 1 ? "" : "s"}`;
+      return this.syncing() ? peers : `${peers} · up to date`;
     },
 
     // Highest Heartbeat a connected peer announced, when it is ahead of this node.
@@ -1065,7 +1073,21 @@ window.iunaApp = function iunaApp() {
       return seconds == null ? 0 : Math.min(100, (seconds / 120) * 100);
     },
 
+    // Runs once per opening of the Chain screen, so closing the details does not reopen them.
+    selectDefaultChainBlock() {
+      if (!this.chainDefaultSelectionPending || this.tab !== "chain") return;
+      if (this.selectedBlock) {
+        this.chainDefaultSelectionPending = false;
+        return;
+      }
+      const latest = this.ledgerBlocks[0];
+      if (!latest) return;
+      this.chainDefaultSelectionPending = false;
+      this.selectBlock(latest, "ledger");
+    },
+
     async selectBlock(block, chain) {
+      this.chainDefaultSelectionPending = false;
       const sameBlock = this.selectedBlock?.block_hash === block.block_hash;
       if (sameBlock && this.selectedBlockChain === chain) {
         this.clearSelectedBlock();
@@ -1440,7 +1462,7 @@ window.iunaApp = function iunaApp() {
           label: "Ticket budget",
           kind: "ticket",
           status: "locked",
-          note: `Paid to Heartbeat miners in ${item.lifecycle_heartbeats} slices of about IUNA ${this.amountLabel(slice)}, starting at the inclusion Heartbeat. Not a spendable output.`,
+          note: `Paid to Heartbeat miners in ${item.lifecycle_heartbeats} slices of about ${this.amountLabel(slice)} IUNA, starting at the inclusion Heartbeat. Not a spendable output.`,
           value: item.budget,
         },
         ...(item.change ? [{ ...item.change, label: "Change", kind: "change" }] : []),
@@ -1556,7 +1578,7 @@ window.iunaApp = function iunaApp() {
     },
 
     ledgerPowerLabel() {
-      return `IUNA ${this.amountLabel(this.ledgerPower())} / Heartbeat`;
+      return `${this.amountLabel(this.ledgerPower())} IUNA / Heartbeat`;
     },
 
     ledgerPowerScaleMax() {
@@ -1586,17 +1608,18 @@ window.iunaApp = function iunaApp() {
       return `${((ledgerCount / rows.length) * 100).toFixed(1)}%`;
     },
 
-    // good / warn / bad state for each dashboard card.
-    dashboardState(card) {
+    // good / warn / bad / idle state for each dashboard tile.
+    dashboardState(tile) {
       const status = this.status;
       if (!status.network) return "warn";
-      if (card === "balance") return status.wallet_unlocked ? "good" : "warn";
-      if (card === "heartbeatMining") return status.heartbeat_mining_enabled ? "good" : "idle";
-      if (card === "ledgerMining") return status.ledger_mining_enabled ? "good" : "idle";
-      if (card === "p2p") return this.peers.length && !this.syncing() ? "good" : "warn";
+      if (tile === "heartbeatMining") return status.heartbeat_mining_enabled ? "good" : "idle";
+      if (tile === "ledgerMining") return status.ledger_mining_enabled || this.ledgerPower() > 0 ? "good" : "idle";
+      if (tile === "mempool") return this.pendingCount() ? "good" : "idle";
+      if (tile === "p2p") return this.peers.length && !this.syncing() ? "good" : "warn";
       // An old tip while catching up is expected, not a stalled chain.
-      if ((card === "heartbeat" || card === "ledger") && this.syncing()) return "warn";
-      if (card === "heartbeat") {
+      if (this.syncing()) return "warn";
+      if (tile === "ledger") return Number(status.ledger_blocks || 0) > 0 ? "good" : "idle";
+      if (tile === "heartbeat") {
         const tip = this.heartbeats[0];
         if (!tip || Number(tip.height) === 0) return "warn";
         const age = Date.now() / 1000 - Number(tip.timestamp);
@@ -1880,7 +1903,7 @@ window.iunaApp = function iunaApp() {
       if (value == null) return "-";
       if (kind === "interval") return `${Math.round(value)} s`;
       if (kind === "difficulty") return `${value >= 100 ? Math.round(value) : value.toFixed(2)}×`;
-      if (["ticketBudget", "supply"].includes(kind)) return `IUNA ${this.amountLabel(Math.round(value))}`;
+      if (["ticketBudget", "supply"].includes(kind)) return `${this.amountLabel(Math.round(value))} IUNA`;
       if (["chainBytes", "heartbeatBytes"].includes(kind)) return this.bytesLabel(value);
       return Math.round(value).toLocaleString("en-US");
     },
@@ -2095,14 +2118,6 @@ window.iunaApp = function iunaApp() {
       const height = item.heartbeat_height == null ? "" : `Heartbeat #${item.heartbeat_height}`;
       const time = item.timestamp == null ? "" : this.timeLabel(item.timestamp);
       return [height, time].filter(Boolean).join(" · ") || "Confirmed";
-    },
-
-    // The wallet screen keeps the list tab chosen last and shows the lists below Send and Receive,
-    // so the dashboard link selects Activity and brings that panel into view.
-    openWalletActivity() {
-      this.walletView = "activity";
-      this.setTab("wallet");
-      this.$nextTick(() => this.$refs.walletActivity?.scrollIntoView({ block: "start" }));
     },
 
     async openUtxos() {

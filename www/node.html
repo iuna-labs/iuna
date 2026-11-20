@@ -67,11 +67,6 @@
     .brand svg { width: 26px; height: 26px; }
     .brand .mark-loop { fill: none; stroke: currentColor; stroke-width: 4.2; stroke-linecap: round; stroke-linejoin: round; }
     .brand .mark-dot { fill: currentColor; }
-    .sidebar-balance { width: 100%; display: grid; gap: 1px; margin-bottom: 12px; border: 1px solid var(--line); border-radius: var(--radius); padding: 9px 10px; background: var(--panel); font-weight: 400; text-align: left; }
-    .sidebar-balance:hover { border-color: var(--line-strong); background: var(--panel-3); }
-    .sidebar-balance-label { color: var(--muted-2); font-size: 12px; }
-    .sidebar-balance-value { overflow: hidden; color: var(--text); font-size: 17px; font-weight: 600; font-variant-numeric: tabular-nums; letter-spacing: -.01em; line-height: 1.35; text-overflow: ellipsis; white-space: nowrap; }
-    .sidebar-balance-sub { color: var(--muted-2); font-size: 12px; font-variant-numeric: tabular-nums; }
     .nav { display: grid; gap: 1px; }
     .nav-button { position: relative; width: 100%; display: flex; align-items: center; gap: 10px; border: 0; padding: 6px 10px; background: transparent; color: var(--muted); font-size: 13.5px; font-weight: 500; text-align: left; }
     .nav-button svg { width: 17px; height: 17px; flex: 0 0 auto; fill: none; stroke: currentColor; stroke-width: 1.7; stroke-linecap: round; stroke-linejoin: round; }
@@ -182,38 +177,34 @@
     /* Edge-to-edge row lists inside a panel. */
     .list-head { display: flex; align-items: center; justify-content: space-between; gap: 16px; margin: -16px -16px 0; padding: 6px 16px; border-bottom: 1px solid var(--line); background: var(--panel-2); color: var(--muted-2); font-size: 12px; font-weight: 500; }
 
-    /* Dashboard */
-    .overview { display: grid; grid-template-columns: minmax(0, 1.55fr) minmax(300px, 1fr); gap: 16px; align-items: start; }
-    .overview-main { min-width: 0; display: grid; gap: 16px; }
-    .overview .panel { margin: 0; }
-    .balance-amount { overflow: hidden; font-size: 30px; font-weight: 600; font-variant-numeric: tabular-nums; letter-spacing: -.02em; line-height: 1.2; text-overflow: ellipsis; white-space: nowrap; }
+    /* Dashboard: node status only. Each tile opens the matching screen. */
+    .status-tiles { max-width: 1100px; display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 12px; }
+    .status-tile { min-width: 0; display: grid; gap: 4px; align-content: start; border: 1px solid var(--line); border-radius: var(--radius); padding: 14px 16px; background: var(--panel); color: var(--text); font-weight: 400; text-align: left; }
+    .status-tile:hover { border-color: var(--line-strong); background: var(--panel-3); }
+    .status-tile-label { display: flex; align-items: center; gap: 8px; color: var(--muted); font-size: 12.5px; font-weight: 500; }
+    .status-tile-value { overflow: hidden; font-size: 20px; font-weight: 600; font-variant-numeric: tabular-nums; letter-spacing: -.015em; line-height: 1.3; text-overflow: ellipsis; white-space: nowrap; }
+    .status-tile-sub { overflow: hidden; color: var(--muted-2); font-size: 12px; text-overflow: ellipsis; white-space: nowrap; }
+    .state-dot { width: 7px; height: 7px; flex: 0 0 auto; border-radius: 50%; background: var(--muted-2); }
+    .status-tile.good .state-dot { background: var(--green); }
+    .status-tile.warn .state-dot { background: var(--amber); }
+    .status-tile.bad .state-dot { background: var(--danger-text); }
+    .status-tile.idle .state-dot { background: var(--line-strong); }
+    .status-tile.warn .status-tile-value { color: var(--amber-text); }
+    .status-tile.bad .status-tile-value { color: var(--danger-text); }
+    .status-tile.idle .status-tile-value { color: var(--muted); }
     .unit { color: var(--muted-2); font-size: 13px; font-weight: 500; letter-spacing: 0; }
-    .balance-amount .unit { font-size: 15px; }
-    .balance-facts { margin-top: 14px; }
-    .recent-list { margin: -16px -16px -16px; }
-    .recent-list .empty { padding: 20px 16px; }
-    .status-list { margin: -16px -16px -16px; }
-    .dashboard-row { width: 100%; display: grid; grid-template-columns: 8px minmax(0, 1fr) auto; gap: 12px; align-items: center; border: 0; border-bottom: 1px solid var(--line); border-radius: 0; padding: 10px 16px; background: transparent; color: var(--text); font-weight: 400; text-align: left; }
-    .dashboard-row:last-child { border-bottom: 0; }
-    .dashboard-row:hover { border-color: var(--line); background: var(--panel-2); }
-    .dashboard-row:focus-visible { outline-offset: -2px; }
-    .state-dot { width: 8px; height: 8px; border-radius: 50%; background: var(--muted-2); }
-    .dashboard-row.good .state-dot { background: var(--green); }
-    .dashboard-row.warn .state-dot { background: var(--amber); }
-    .dashboard-row.bad .state-dot { background: var(--danger-text); }
-    .dashboard-row.idle .state-dot { background: var(--line-strong); }
-    .dashboard-row-copy { min-width: 0; display: grid; gap: 1px; }
-    .dashboard-label { overflow: hidden; font-size: 13.5px; font-weight: 500; text-overflow: ellipsis; white-space: nowrap; }
-    .dashboard-row-sub { overflow: hidden; color: var(--muted-2); font-size: 12px; text-overflow: ellipsis; white-space: nowrap; }
-    .dashboard-value { color: var(--text); font-size: 13.5px; font-weight: 500; font-variant-numeric: tabular-nums; text-align: right; white-space: nowrap; }
-    .dashboard-row.warn .dashboard-value { color: var(--amber-text); }
-    .dashboard-row.bad .dashboard-value { color: var(--danger-text); }
-    .dashboard-row.idle .dashboard-value { color: var(--muted); }
 
     /* Wallet */
     .wallet-layout { display: grid; grid-template-columns: minmax(340px, 420px) minmax(0, 1fr); gap: 16px; align-items: start; }
     .wallet-primary { min-width: 0; display: grid; gap: 16px; }
     .wallet-primary .panel, .wallet-activity-panel { margin: 0; }
+    .balance-panel { padding: 14px 16px; }
+    .balance-label { color: var(--muted-2); font-size: 12.5px; font-weight: 500; }
+    .balance-amount { overflow: hidden; font-size: 28px; font-weight: 600; font-variant-numeric: tabular-nums; letter-spacing: -.02em; line-height: 1.25; text-overflow: ellipsis; white-space: nowrap; }
+    .balance-amount .unit { font-size: 15px; }
+    .balance-sub { display: flex; flex-wrap: wrap; gap: 2px 14px; margin-top: 2px; color: var(--muted-2); font-size: 12.5px; font-variant-numeric: tabular-nums; }
+    .balance-sub b { color: var(--text); font-weight: 500; }
+    .balance-sub > span + span { color: var(--amber); }
     .send-form { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 12px; }
     .send-form .full { grid-column: 1 / -1; }
     .send-form button[type="submit"] { grid-column: 1 / -1; justify-self: end; min-width: 110px; }
@@ -222,8 +213,6 @@
     .amount-row button { padding: 5px 10px; }
     /* Visually hidden: the tab already names the list; the heading keeps it labelled. */
     .pane-title { position: absolute; width: 1px; height: 1px; overflow: hidden; clip: rect(0 0 0 0); white-space: nowrap; }
-    .utxo-facts { grid-template-columns: repeat(3, minmax(0, 1fr)); margin-bottom: 16px; }
-    .utxo-facts + .list-head { margin-top: 0; border-top: 1px solid var(--line); }
     .pane-list { max-height: max(280px, calc(100vh - 330px)); margin: 0 -16px -16px; }
     .utxo-row { display: grid; grid-template-columns: minmax(0, 1fr) auto auto; gap: 12px; align-items: center; border-bottom: 1px solid var(--line); padding: 8px 16px; line-height: 20px; }
     .utxo-row code { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
@@ -233,7 +222,7 @@
     .activity-row { display: grid; grid-template-columns: minmax(90px, .3fr) minmax(0, 1fr) auto; gap: 12px; align-items: center; border-bottom: 1px solid var(--line); padding: 8px 0; }
     .contact-list .activity-row { padding: 8px 16px; }
     .activity-row button:not(.link) { padding: 2px 9px; font-size: 12px; }
-    .wallet-activity-panel { min-width: 0; overflow: hidden; scroll-margin-top: calc(var(--topbar) + 16px); }
+    .wallet-activity-panel { min-width: 0; overflow: hidden; }
     .wallet-activity-panel > .panel-head { flex-wrap: wrap; }
     .activity-filters { display: flex; flex-wrap: wrap; justify-content: flex-start; gap: 4px 14px; }
     .activity-filter { --activity-color: var(--text); position: relative; display: inline-flex; align-items: center; gap: 6px; color: var(--muted-2); font-size: 12.5px; font-weight: 500; cursor: pointer; user-select: none; }
@@ -287,7 +276,7 @@
     .mining-mode, .mining-readonly { display: grid; gap: 12px; margin-bottom: 16px; }
     .mining-form { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); margin: 0; }
     .mining-form label { min-width: 0; }
-    .mining-stats { grid-template-columns: repeat(3, minmax(0, 1fr)); margin-bottom: 16px; }
+    .mining-stats { grid-template-columns: repeat(2, minmax(0, 1fr)); margin-bottom: 16px; }
     .mining-runtime { display: flex; align-items: center; gap: 9px; margin: auto -16px -16px; border-top: 1px solid var(--line); border-radius: 0 0 var(--radius) var(--radius); padding: 9px 16px; background: var(--panel-2); color: var(--muted); font-size: 12.5px; }
     .mining-runtime-dot { width: 7px; height: 7px; flex: 0 0 auto; border-radius: 50%; background: var(--muted-2); }
     .mining-runtime.active { color: var(--text); }
@@ -484,13 +473,13 @@
     .tx-modal-empty { border: 1px dashed var(--line-strong); border-radius: var(--radius); padding: 10px 12px; color: var(--muted-2); font-size: 13px; }
 
     @media (prefers-reduced-motion: reduce) { *, *::before, *::after { transition-duration: 0s !important; animation-duration: 0s !important; scroll-behavior: auto !important; } }
-    @media (max-width: 1180px) { .overview, .wallet-layout, .mining-grid, .block-detail-layout { grid-template-columns: 1fr; } .mining-intro { min-height: 0; } .activity-scroll { max-height: 560px; } }
+    @media (max-width: 1180px) { .status-tiles { grid-template-columns: repeat(2, minmax(0, 1fr)); } .wallet-layout, .mining-grid, .block-detail-layout { grid-template-columns: 1fr; } .mining-intro { min-height: 0; } .activity-scroll { max-height: 560px; } }
     /* The sidebar narrows to an icon rail; labels stay readable to assistive technology. */
     @media (max-width: 1000px) {
       :root { --sidebar: 60px; }
       .sidebar { align-items: center; padding: 12px 8px 10px; }
       .brand { margin: 0 0 12px; }
-      .sidebar-balance, .status-optional { display: none; }
+      .status-optional { display: none; }
       .nav-button { width: 42px; justify-content: center; padding: 9px 0; }
       .nav-button.active::before { left: -8px; }
       .nav-label { position: absolute; width: 1px; height: 1px; overflow: hidden; clip: rect(0 0 0 0); white-space: nowrap; }
@@ -499,7 +488,8 @@
       .content > section { padding: 18px 20px 0; }
       .setup-grid { grid-template-columns: 1fr; }
     }
-    @media (max-width: 760px) { .utxo-flow { grid-template-columns: 1fr; } .utxo-arrow { min-height: 28px; transform: rotate(90deg); } .tx-modal-head { align-items: stretch; } .mining-form, .mining-stats, .send-form, .confirm-facts, .utxo-facts { grid-template-columns: 1fr; } .metrics-summary { grid-template-columns: repeat(2, minmax(0, 1fr)); } .chain-block { flex-basis: 112px; } .metric-row { grid-template-columns: 1fr 70px; } .metric-row .bar { grid-column: 1 / -1; grid-row: 2; } .settings-row { grid-template-columns: 1fr; } }
+    @media (max-width: 760px) { .utxo-flow { grid-template-columns: 1fr; } .utxo-arrow { min-height: 28px; transform: rotate(90deg); } .tx-modal-head { align-items: stretch; } .mining-form, .mining-stats, .send-form, .confirm-facts { grid-template-columns: 1fr; } .metrics-summary { grid-template-columns: repeat(2, minmax(0, 1fr)); } .chain-block { flex-basis: 112px; } .metric-row { grid-template-columns: 1fr 70px; } .metric-row .bar { grid-column: 1 / -1; grid-row: 2; } .settings-row { grid-template-columns: 1fr; } }
+    @media (max-width: 480px) { .status-tiles { grid-template-columns: 1fr; } }
     @media (max-width: 650px) {
       :root { --sidebar: 0px; }
       .sidebar { position: sticky; top: 0; bottom: auto; width: 100%; height: auto; flex-direction: row; align-items: center; gap: 2px; overflow-x: auto; padding: 6px 10px; border-right: 0; border-bottom: 1px solid var(--line); }
@@ -508,7 +498,6 @@
       .sidebar-bottom { margin-left: auto; }
       .nav-button.active::before { top: auto; right: 8px; bottom: -6px; left: 8px; width: auto; height: 2px; border-radius: 2px 2px 0 0; }
       .topbar { position: static; height: 48px; padding: 0 16px; }
-      .wallet-activity-panel { scroll-margin-top: 62px; }
       .content > section { padding: 16px 16px 0; }
       .status-wide { display: none; }
       .wallet-choice, .tx-modal-summary { grid-template-columns: 1fr; }
@@ -531,11 +520,6 @@
   <div class="shell">
     <aside class="sidebar" aria-label="iuna navigation">
       <button class="brand" @click="setTab('dashboard')" title="Dashboard" aria-label="Dashboard"><svg viewBox="0 0 32 32" aria-hidden="true"><circle class="mark-dot" cx="9.4" cy="7.6" r="2.8"></circle><path class="mark-loop" d="M9.4 13v7.1c0 3.7 2.9 6.4 6.6 6.4s6.6-2.7 6.6-6.4V13"></path></svg></button>
-      <button class="sidebar-balance" type="button" x-show="status.wallet_unlocked" @click="setTab('wallet')" title="Open wallet">
-        <span class="sidebar-balance-label">Balance</span>
-        <span class="sidebar-balance-value" :style="balanceValueStyle()"><span x-text="amountLabel(status.wallet_balance)"></span> <span class="unit">IUNA</span></span>
-        <span class="sidebar-balance-sub" x-show="status.wallet_spendable_balance !== status.wallet_balance">Spendable <span x-text="amountLabel(status.wallet_spendable_balance)"></span></span>
-      </button>
       <nav class="nav">
         <button class="nav-button" :class="{active: tab === 'dashboard'}" :aria-current="tab === 'dashboard' ? 'page' : null" @click="setTab('dashboard')"><svg viewBox="0 0 24 24" aria-hidden="true"><rect x="3.5" y="3.5" width="7" height="7" rx="1"></rect><rect x="13.5" y="3.5" width="7" height="7" rx="1"></rect><rect x="3.5" y="13.5" width="7" height="7" rx="1"></rect><rect x="13.5" y="13.5" width="7" height="7" rx="1"></rect></svg><span class="nav-label">Dashboard</span><span class="nav-shortcut" x-show="shortcutKeyHeld" x-text="shortcutNumber('dashboard')" aria-hidden="true"></span></button>
         <button class="nav-button" :class="{active: tab === 'wallet'}" :aria-current="tab === 'wallet' ? 'page' : null" @click="setTab('wallet')"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M3 7h16a2 2 0 0 1 2 2v8a2 2 0 0 1-2 2H3z"></path><path d="M3 7V5a2 2 0 0 1 2-2h12"></path><path d="M16 13h3"></path></svg><span class="nav-label">Wallet</span><span class="nav-shortcut" x-show="shortcutKeyHeld" x-text="shortcutNumber('wallet')" aria-hidden="true"></span></button>
@@ -557,48 +541,13 @@
       <div class="flash" :class="flash?.kind" x-show="flash" x-transition x-text="flash?.message" :role="flash?.kind === 'error' ? 'alert' : 'status'" aria-live="polite"></div>
 
       <section class="dashboard" x-show="tab === 'dashboard'">
-        <div class="overview">
-          <div class="overview-main">
-            <article class="panel balance-panel">
-              <div class="panel-head">
-                <h2>Current balance</h2>
-                <div class="panel-actions" x-show="status.wallet_unlocked"><button type="button" @click="copyWalletAddress">Copy address</button><button type="button" @click="setTab('wallet')">Send</button></div>
-                <div class="panel-actions" x-show="!status.wallet_unlocked"><button type="button" class="primary" @click="resetSetup(); setupStep = 2" x-text="status.wallet_public_key ? 'Unlock wallet' : 'Create wallet'"></button></div>
-              </div>
-              <div class="balance-amount"><span x-text="amountLabel(status.wallet_balance)"></span> <span class="unit">IUNA</span></div>
-              <div class="grid balance-facts">
-                <div class="stat"><div class="stat-label">Spendable</div><div class="stat-value"><span x-text="amountLabel(status.wallet_spendable_balance)"></span> <span class="unit">IUNA</span></div></div>
-                <div class="stat"><div class="stat-label">Unspent outputs</div><div class="stat-value" x-text="status.wallet_utxos ?? 0"></div></div>
-                <div class="stat"><div class="stat-label">Pending</div><div class="stat-value" x-text="activity?.pending?.length ?? 0"></div></div>
-              </div>
-            </article>
-            <article class="panel">
-              <div class="panel-head"><h2>Recent activity</h2><button class="link" type="button" @click="openWalletActivity()">View all activity</button></div>
-              <div class="recent-list">
-                <template x-for="item in activityItems().slice(0, 6)" :key="`recent:${item.pending}:${item.kind}:${item.id}`">
-                  <div class="activity-card" :class="{pending: item.pending}" role="button" tabindex="0" @click="openActivityModal(item)" @keydown.enter.self.prevent="openActivityModal(item)" @keydown.space.self.prevent="openActivityModal(item)">
-                    <div class="activity-main">
-                      <span class="pill" :class="[activityType(item), {pending: item.pending}]" :aria-label="activityLabel(item)"></span>
-                      <div class="activity-copy"><div class="activity-title" x-text="activityLabel(item)"></div><div class="activity-meta" x-text="activityMetaLabel(item)"></div></div>
-                    </div>
-                    <div class="activity-side"><div class="activity-amount" :class="{incoming: activitySign(item) === '+'}"><span x-text="activitySign(item)"></span><span x-text="amountLabel(item.amount)"></span> IUNA</div><div class="activity-meta" x-text="item.pending ? 'Pending' : 'Confirmed'"></div></div>
-                  </div>
-                </template>
-                <div class="empty" x-show="!status.wallet_unlocked">Unlock the wallet to see its activity.</div>
-                <div class="empty" x-show="status.wallet_unlocked && !activityItems().length">No wallet activity yet.</div>
-              </div>
-            </article>
-          </div>
-          <article class="panel node-panel">
-            <div class="panel-head"><h2>Node status</h2><span class="muted" x-text="lastUpdatedLabel()"></span></div>
-            <div class="status-list">
-              <button type="button" class="dashboard-row" :class="dashboardState('heartbeat')" @click="setTab('chain')"><span class="state-dot" aria-hidden="true"></span><span class="dashboard-row-copy"><span class="dashboard-label">Heartbeat chain</span><span class="dashboard-row-sub" x-text="heartbeatAgeLabel()"></span></span><span class="dashboard-value" x-text="`#${status.heartbeat_height ?? 0}`"></span></button>
-              <button type="button" class="dashboard-row" :class="dashboardState('ledger')" @click="setTab('chain'); setChainView('ledger')"><span class="state-dot" aria-hidden="true"></span><span class="dashboard-row-copy"><span class="dashboard-label">Ledger chain</span><span class="dashboard-row-sub" x-text="ledgerAgeLabel()"></span></span><span class="dashboard-value" x-text="`#${status.ledger_blocks ?? 0}`"></span></button>
-              <button type="button" class="dashboard-row" :class="dashboardState('heartbeatMining')" @click="setTab('mining')"><span class="state-dot" aria-hidden="true"></span><span class="dashboard-row-copy"><span class="dashboard-label">Heartbeat Mining</span><span class="dashboard-row-sub" x-text="status.heartbeat_mining_enabled ? powHashrateLabel() : 'Proof of Work'"></span></span><span class="dashboard-value" x-text="status.heartbeat_mining_enabled ? 'On' : 'Off'"></span></button>
-              <button type="button" class="dashboard-row" :class="dashboardState('ledgerMining')" @click="setTab('mining')"><span class="state-dot" aria-hidden="true"></span><span class="dashboard-row-copy"><span class="dashboard-label">Ledger Mining</span><span class="dashboard-row-sub" x-text="status.ledger_mining_enabled ? ledgerPowerLabel() : 'Proof of Expenditure'"></span></span><span class="dashboard-value" x-text="status.ledger_mining_enabled ? 'On' : 'Off'"></span></button>
-              <button type="button" class="dashboard-row" :class="dashboardState('p2p')" @click="setTab('p2p')"><span class="state-dot" aria-hidden="true"></span><span class="dashboard-row-copy"><span class="dashboard-label">P2P</span><span class="dashboard-row-sub" x-text="syncLabel()"></span></span><span class="dashboard-value" x-text="syncing() ? syncingLabel() : `${peers.length} peer${peers.length === 1 ? '' : 's'}`"></span></button>
-            </div>
-          </article>
+        <div class="status-tiles">
+          <button type="button" class="status-tile" :class="dashboardState('heartbeat')" @click="setTab('chain'); setChainView('heartbeat')"><span class="status-tile-label"><span class="state-dot" aria-hidden="true"></span>Heartbeat chain</span><span class="status-tile-value" x-text="`#${status.heartbeat_height ?? 0}`"></span><span class="status-tile-sub" x-text="heartbeatAgeLabel()"></span></button>
+          <button type="button" class="status-tile" :class="dashboardState('ledger')" @click="setTab('chain'); setChainView('ledger')"><span class="status-tile-label"><span class="state-dot" aria-hidden="true"></span>Ledger chain</span><span class="status-tile-value" x-text="`#${status.ledger_blocks ?? 0}`"></span><span class="status-tile-sub" x-text="ledgerAgeLabel()"></span></button>
+          <button type="button" class="status-tile" :class="dashboardState('p2p')" @click="setTab('p2p')"><span class="status-tile-label"><span class="state-dot" aria-hidden="true"></span>Network</span><span class="status-tile-value" x-text="networkLabel()"></span><span class="status-tile-sub" x-text="networkTileDetail()"></span></button>
+          <button type="button" class="status-tile" :class="dashboardState('heartbeatMining')" @click="setTab('mining')"><span class="status-tile-label"><span class="state-dot" aria-hidden="true"></span>Heartbeat mining</span><span class="status-tile-value" x-text="status.heartbeat_mining_enabled ? powHashrateLabel() : 'Off'"></span><span class="status-tile-sub">Proof of Work</span></button>
+          <button type="button" class="status-tile" :class="dashboardState('ledgerMining')" @click="setTab('mining')"><span class="status-tile-label"><span class="state-dot" aria-hidden="true"></span>Ledger mining</span><span class="status-tile-value" x-text="status.ledger_mining_enabled || ledgerPower() > 0 ? ledgerPowerLabel() : 'Off'"></span><span class="status-tile-sub" x-text="status.ledger_mining_enabled ? 'Proof of Expenditure · continuous' : 'Proof of Expenditure · manual'"></span></button>
+          <button type="button" class="status-tile" :class="dashboardState('mempool')" @click="setTab('chain')"><span class="status-tile-label"><span class="state-dot" aria-hidden="true"></span>Mempool</span><span class="status-tile-value" x-text="`${pendingCount()} pending`"></span><span class="status-tile-sub" x-text="`${status.pending_ledger_transactions ?? 0} transaction${Number(status.pending_ledger_transactions) === 1 ? '' : 's'} · ${status.pending_mining_tickets ?? 0} ticket${Number(status.pending_mining_tickets) === 1 ? '' : 's'}`"></span></button>
         </div>
       </section>
 
@@ -606,6 +555,11 @@
         <div class="empty" x-show="!status.wallet_unlocked"><h2 x-text="status.wallet_public_key ? 'Unlock your wallet' : 'Create your wallet'"></h2><button class="primary" @click="resetSetup(); setupStep = 2">Open wallet setup</button></div>
         <div class="wallet-layout" x-show="status.wallet_unlocked">
           <div class="wallet-primary">
+            <article class="panel balance-panel" aria-label="Balance">
+              <div class="balance-label">Balance</div>
+              <div class="balance-amount"><span x-text="amountLabel(status.wallet_balance)"></span> <span class="unit">IUNA</span></div>
+              <div class="balance-sub"><span>Spendable <b x-text="amountLabel(status.wallet_spendable_balance)"></b> IUNA</span><span x-show="activity?.pending?.length"><span x-text="activity?.pending?.length"></span> pending</span></div>
+            </article>
             <article class="panel">
               <div class="panel-head"><h2>Send IUNA</h2></div>
               <form class="send-form" @submit.prevent="reviewTransaction">
@@ -621,10 +575,10 @@
               <div class="address"><code x-text="status.wallet_receive_address || 'Wallet unavailable'"></code><button type="button" @click="copyWalletAddress">Copy address</button></div>
             </article>
           </div>
-          <article class="panel wallet-activity-panel" x-show="status.wallet_public_key" x-ref="walletActivity">
+          <article class="panel wallet-activity-panel" x-show="status.wallet_public_key">
             <div class="panel-head">
               <div class="pane-tabs" role="tablist" aria-label="Wallet lists">
-                <button type="button" class="pane-tab" role="tab" :class="{active: walletView === 'activity'}" :aria-selected="walletView === 'activity'" @click="walletView = 'activity'">Activity<span class="count pending" x-show="status.pending_ledger_transactions || status.pending_mining_tickets"><span x-text="pendingCount()"></span>&nbsp;pending</span></button>
+                <button type="button" class="pane-tab" role="tab" :class="{active: walletView === 'activity'}" :aria-selected="walletView === 'activity'" @click="walletView = 'activity'">Activity<span class="count pending" x-show="activity?.pending?.length"><span x-text="activity?.pending?.length"></span>&nbsp;pending</span></button>
                 <button type="button" class="pane-tab" role="tab" :class="{active: walletView === 'contacts'}" :aria-selected="walletView === 'contacts'" @click="walletView = 'contacts'">Contacts<span class="count" x-text="contacts.length"></span></button>
                 <button type="button" class="pane-tab" role="tab" :class="{active: walletView === 'utxos'}" :aria-selected="walletView === 'utxos'" @click="openUtxos()">UTXOs<span class="count" x-text="status.wallet_utxos ?? 0"></span></button>
                 <button type="button" class="pane-tab" role="tab" :class="{active: walletView === 'addresses'}" :aria-selected="walletView === 'addresses'" @click="openWalletAddresses()" :disabled="!canManage()">Addresses</button>
@@ -669,12 +623,7 @@
             </div>
             <div class="utxos-pane" x-show="walletView === 'utxos'" role="tabpanel" aria-labelledby="utxo-title">
               <h3 class="pane-title" id="utxo-title">Unspent outputs</h3>
-              <div class="grid utxo-facts">
-                <div class="stat"><div class="stat-label">Balance</div><div class="stat-value"><span x-text="amountLabel(status.wallet_balance)"></span> <span class="unit">IUNA</span></div></div>
-                <div class="stat"><div class="stat-label">Spendable</div><div class="stat-value"><span x-text="amountLabel(status.wallet_spendable_balance)"></span> <span class="unit">IUNA</span></div></div>
-                <div class="stat"><div class="stat-label">Wallet UTXOs</div><div class="stat-value"><span x-text="status.wallet_utxos ?? 0"></span> unspent</div><div class="muted" x-show="status.wallet_spendable_utxos !== status.wallet_utxos"><span x-text="status.wallet_spendable_utxos ?? 0"></span> spendable now</div></div>
-              </div>
-              <div class="list-head"><span>Output</span><span>Value</span></div>
+              <div class="list-head"><span>Output<span x-show="status.wallet_spendable_utxos !== status.wallet_utxos" x-text="` · ${status.wallet_spendable_utxos ?? 0} of ${status.wallet_utxos ?? 0} spendable now`"></span></span><span>Value</span></div>
               <div class="detail-loading" x-show="utxosBusy">Loading unspent outputs…</div>
               <div class="tx-scroll-list pane-list" x-show="!utxosBusy && activity?.utxos.length">
                 <template x-for="utxo in activity?.utxos || []" :key="`${utxo.transaction_id}:${utxo.output_index}`"><div class="utxo-row"><code :title="`${utxo.transaction_id}:${utxo.output_index}`" x-text="`${utxo.transaction_id}:${utxo.output_index}`"></code><span class="pill" x-show="utxo.reserved">Reserved</span><span class="tx-value money"><span x-text="amountLabel(utxo.value)"></span> <span class="unit">IUNA</span></span></div></template>
@@ -717,7 +666,6 @@
             <div class="grid mining-stats">
               <div class="stat"><div class="stat-label">Height</div><div class="stat-value" x-text="status.heartbeat_height ?? 0"></div></div>
               <div class="stat"><div class="stat-label">Difficulty</div><div class="stat-value" x-text="difficultyLabel()"></div></div>
-              <div class="stat"><div class="stat-label">Wallet</div><div class="stat-value" x-text="status.wallet_unlocked ? 'Unlocked' : 'Locked'"></div></div>
             </div>
             <div class="mining-runtime" :class="{active: status.heartbeat_mining_enabled}" role="status"><span class="mining-runtime-dot" aria-hidden="true"></span><span x-text="mining.message"></span></div>
           </article>
@@ -727,7 +675,7 @@
             <div class="mining-meter ledger" :class="{active: ledgerPower() > 0}" role="img" :aria-label="ledgerPowerAriaLabel()">
               <div class="mining-meter-head"><span class="mining-meter-label">This node's active ticket power</span><strong class="mining-meter-value" x-text="ledgerPowerLabel()"></strong></div>
               <div class="mining-meter-track"><span class="mining-meter-fill" :style="`width:${ledgerPowerShare()}%`"></span></div>
-              <div class="mining-meter-scale"><span>0 IUNA / Heartbeat</span><span>IUNA <span x-text="amountLabel(ledgerPowerScaleMax())"></span> / Heartbeat</span></div>
+              <div class="mining-meter-scale"><span>0 IUNA / Heartbeat</span><span><span x-text="amountLabel(ledgerPowerScaleMax())"></span> IUNA / Heartbeat</span></div>
             </div>
             <div class="mining-mode" x-show="!status.ledger_mining_enabled">
               <form class="form-row mining-form" @submit.prevent="submitTicket">
@@ -737,16 +685,16 @@
                 <button class="primary" type="submit" :disabled="ticket.busy || !canManage()" x-text="ticket.busy ? 'Submitting…' : 'Submit ticket'"></button>
               </form>
               <div class="grid">
-                <div class="stat"><div class="stat-label title-with-pill">Minimum <details class="info-details" @click.outside="$el.open = false"><summary aria-label="Why is there a minimum budget?">i</summary><div class="info-popover">The minimum prices one of the limited active ticket slots. It rises with the next Ledger reward and the selected duration, preventing free slot exhaustion.</div></details></div><div class="stat-value">IUNA <span x-text="ticket.quote ? amountLabel(ticket.quote.current_minimum_budget) : '…'"></span></div></div>
-                <div class="stat"><div class="stat-label">Recommended</div><div class="stat-value">IUNA <span x-text="ticket.quote ? amountLabel(ticket.quote.recommended_budget) : '…'"></span></div></div>
+                <div class="stat"><div class="stat-label title-with-pill">Minimum <details class="info-details" @click.outside="$el.open = false"><summary aria-label="Why is there a minimum budget?">i</summary><div class="info-popover">The minimum prices one of the limited active ticket slots. It rises with the next Ledger reward and the selected duration, preventing free slot exhaustion.</div></details></div><div class="stat-value"><span x-text="ticket.quote ? amountLabel(ticket.quote.current_minimum_budget) : '…'"></span> IUNA</div></div>
+                <div class="stat"><div class="stat-label">Recommended</div><div class="stat-value"><span x-text="ticket.quote ? amountLabel(ticket.quote.recommended_budget) : '…'"></span> IUNA</div></div>
               </div>
             </div>
             <div class="mining-readonly" x-show="status.ledger_mining_enabled">
               <div class="grid">
-                <div class="stat"><div class="stat-label title-with-pill">EV-max budget <details class="info-details" @click.outside="$el.open = false"><summary aria-label="How is the EV-maximizing budget calculated?">i</summary><div class="info-popover">The affordable ticket budget that maximizes expected subsidy minus expenditure against the other active ticket weight in the latest Heartbeat. The consensus minimum is the lower bound. The estimate assumes competing weight stays unchanged; variable Ledger fees and Heartbeat-miner rebates are excluded.</div></details></div><div class="stat-value" x-text="!ticket.continuousQuote ? 'IUNA …' : (ticket.continuousQuote.ev_maximizing_budget == null ? 'Insufficient funds' : `IUNA ${amountLabel(ticket.continuousQuote.ev_maximizing_budget)}`)"></div></div>
+                <div class="stat"><div class="stat-label title-with-pill">EV-max budget <details class="info-details" @click.outside="$el.open = false"><summary aria-label="How is the EV-maximizing budget calculated?">i</summary><div class="info-popover">The affordable ticket budget that maximizes expected subsidy minus expenditure against the other active ticket weight in the latest Heartbeat. The consensus minimum is the lower bound. The estimate assumes competing weight stays unchanged; variable Ledger fees and Heartbeat-miner rebates are excluded.</div></details></div><div class="stat-value" x-text="!ticket.continuousQuote ? '… IUNA' : (ticket.continuousQuote.ev_maximizing_budget == null ? 'Insufficient funds' : `${amountLabel(ticket.continuousQuote.ev_maximizing_budget)} IUNA`)"></div></div>
                 <div class="stat"><div class="stat-label">Ticket duration</div><div class="stat-value">10 Heartbeats</div></div>
-                <div class="stat"><div class="stat-label">Ticket fee</div><div class="stat-value">IUNA <span x-text="amountLabel(1)"></span></div></div>
-                <div class="stat"><div class="stat-label">Other active weight</div><div class="stat-value">IUNA <span x-text="ledgerOtherTicketPowerLabel()"></span> / Heartbeat</div></div>
+                <div class="stat"><div class="stat-label">Ticket fee</div><div class="stat-value"><span x-text="amountLabel(1)"></span> IUNA</div></div>
+                <div class="stat"><div class="stat-label">Other active weight</div><div class="stat-value"><span x-text="ledgerOtherTicketPowerLabel()"></span> IUNA / Heartbeat</div></div>
                 <div class="stat"><div class="stat-label">Next ticket</div><div class="stat-value" x-text="ledgerNextTicketLabel()"></div></div>
               </div>
             </div>
@@ -758,13 +706,12 @@
 
       <section x-show="tab === 'p2p'">
         <article class="panel">
-          <div class="panel-head"><div class="title-with-pill"><h2>Peer-to-peer network</h2><span class="pane-tag">Connected inbound and outbound node sessions</span></div><span class="muted"><span x-text="peers.length"></span>&nbsp;connected</span></div>
+          <div class="panel-head"><h2>Network</h2><span class="muted"><span x-text="peers.length"></span>&nbsp;connected</span></div>
           <div class="grid">
             <div class="stat"><div class="stat-label">Status</div><div class="stat-value" x-text="networkLabel()"></div></div>
             <div class="stat"><div class="stat-label">Local height</div><div class="stat-value" x-text="`Heartbeat ${status.heartbeat_height ?? 0}`"></div></div>
             <div class="stat"><div class="stat-label">Network height</div><div class="stat-value" x-text="networkHeight() == null ? 'Unknown' : `Heartbeat ${networkHeight()}`"></div></div>
             <div class="stat"><div class="stat-label">Sync</div><div class="stat-value" x-text="syncLabel()"></div></div>
-            <div class="stat"><div class="stat-label">Network</div><div class="stat-value" x-text="status.network || 'iuna'"></div></div>
           </div>
         </article>
         <article class="panel">
@@ -775,7 +722,7 @@
           <div class="empty" x-show="!peers.length">No active P2P sessions. The node keeps retrying configured outbound peers in the background.</div>
         </article>
         <article class="panel">
-          <div class="panel-head"><div class="title-with-pill"><h2>Configured peers</h2><span class="pane-tag">Outbound peers this node keeps dialling. Peers you add here are saved and survive a restart.</span></div></div>
+          <div class="panel-head"><div class="title-with-pill"><h2>Configured peers</h2><span class="pane-tag">Saved outbound peers this node keeps dialling</span></div></div>
           <form class="form-row" @submit.prevent="changePeer('add', peerForm.address)" x-show="browserCanManage()">
             <label>Peer address<input x-model="peerForm.address" placeholder="iuna.jhx.app:9444" autocomplete="off" required></label>
             <button class="primary" type="submit" :disabled="peerForm.busy">Add peer</button>
@@ -850,8 +797,8 @@
               <div class="detail-kv"><div class="key">Miner</div><button class="link contact-link" type="button" @click="openContactEditor(selectedBlock?.miner_address)" :title="`Public key ${selectedBlock?.miner_public_key}\n${contactName(selectedBlock?.miner_address) ? 'Edit contact' : 'Add contact'}`" x-text="blockPartyLabel(selectedBlock?.miner_public_key, selectedBlock?.miner_address)"></button></div>
               <div class="detail-kv" x-show="selectedBlock?.has_ledger_block"><div class="key">Finalizer</div><button class="link contact-link" type="button" x-show="selectedBlock?.ledger_miner_address" @click="openContactEditor(selectedBlock?.ledger_miner_address)" :title="`Public key ${selectedBlock?.ledger_miner_public_key}\n${contactName(selectedBlock?.ledger_miner_address) ? 'Edit contact' : 'Add contact'}`" x-text="blockPartyLabel(selectedBlock?.ledger_miner_public_key, selectedBlock?.ledger_miner_address)"></button><span class="muted" x-show="!selectedBlock?.ledger_miner_address">Unknown</span></div>
               <div class="detail-kv"><div class="key">Target</div><code :title="selectedBlock?.target" x-text="selectedBlock?.target"></code></div>
-              <div class="detail-kv"><div class="key">Heartbeat reward</div><div class="detail-value-stack"><button class="link reward-link stat-value" type="button" @click="openBlockRewardModal('heartbeat')" title="Open reward details">IUNA <span x-text="amountLabel(selectedBlockDetail?.rewards.heartbeat.total)"></span></button><div class="muted">Fees <span x-text="amountLabel(selectedBlockDetail?.rewards.heartbeat.ledger_transaction_fees)"></span> · tickets <span x-text="amountLabel(selectedBlockDetail?.rewards.heartbeat.ticket_inclusion_fees)"></span> · expenditure <span x-text="amountLabel(selectedBlockDetail?.rewards.heartbeat.expenditure)"></span></div></div></div>
-              <div class="detail-kv"><div class="key">Ledger reward</div><div class="detail-value-stack"><button class="link reward-link stat-value" type="button" x-show="selectedBlockDetail?.rewards.ledger" @click="openBlockRewardModal('ledger')" title="Open reward details">IUNA <span x-text="amountLabel(selectedBlockDetail?.rewards.ledger?.total)"></span></button><div x-show="!selectedBlockDetail?.rewards.ledger" class="muted">No Ledger block</div><div class="muted" x-show="selectedBlockDetail?.rewards.ledger">Subsidy <span x-text="amountLabel(selectedBlockDetail?.rewards.ledger?.subsidy)"></span> · fees <span x-text="amountLabel(selectedBlockDetail?.rewards.ledger?.ledger_transaction_fees)"></span></div></div></div>
+              <div class="detail-kv"><div class="key">Heartbeat reward</div><div class="detail-value-stack"><button class="link reward-link stat-value" type="button" @click="openBlockRewardModal('heartbeat')" title="Open reward details"><span x-text="amountLabel(selectedBlockDetail?.rewards.heartbeat.total)"></span> IUNA</button><div class="muted">Fees <span x-text="amountLabel(selectedBlockDetail?.rewards.heartbeat.ledger_transaction_fees)"></span> · tickets <span x-text="amountLabel(selectedBlockDetail?.rewards.heartbeat.ticket_inclusion_fees)"></span> · expenditure <span x-text="amountLabel(selectedBlockDetail?.rewards.heartbeat.expenditure)"></span></div></div></div>
+              <div class="detail-kv"><div class="key">Ledger reward</div><div class="detail-value-stack"><button class="link reward-link stat-value" type="button" x-show="selectedBlockDetail?.rewards.ledger" @click="openBlockRewardModal('ledger')" title="Open reward details"><span x-text="amountLabel(selectedBlockDetail?.rewards.ledger?.total)"></span> IUNA</button><div x-show="!selectedBlockDetail?.rewards.ledger" class="muted">No Ledger block</div><div class="muted" x-show="selectedBlockDetail?.rewards.ledger">Subsidy <span x-text="amountLabel(selectedBlockDetail?.rewards.ledger?.subsidy)"></span> · fees <span x-text="amountLabel(selectedBlockDetail?.rewards.ledger?.ledger_transaction_fees)"></span></div></div></div>
               <div class="detail-kv"><div class="key">Ticket purchases</div><div x-text="selectedBlockDetail?.tickets.length ?? 0"></div></div>
             </div>
             <div class="tx-list">
@@ -859,7 +806,7 @@
                 <div class="tx-section-title"><span>Heartbeat ticket purchases</span><span class="tx-section-meta"><span x-text="selectedBlockDetail?.tickets.length ?? 0"></span> included</span></div>
                 <div class="tx-scroll-list" x-show="selectedBlockDetail?.tickets.length">
                   <template x-for="ticket in selectedBlockDetail?.tickets || []" :key="ticket.id">
-                    <button class="tx-card tx-card-button" type="button" @click="openHeartbeatTicketModal(ticket)"><span class="pill">Ticket</span><span class="tx-summary-main"><code class="tx-summary-id" x-text="ticket.id"></code><span class="muted"><span x-text="ticket.duration"></span> Heartbeats · <span x-text="ticket.inputs.length"></span> input<span x-show="ticket.inputs.length !== 1">s</span></span></span><span class="tx-summary-value">IUNA <span x-text="amountLabel(ticket.budget)"></span></span></button>
+                    <button class="tx-card tx-card-button" type="button" @click="openHeartbeatTicketModal(ticket)"><span class="pill">Ticket</span><span class="tx-summary-main"><code class="tx-summary-id" x-text="ticket.id"></code><span class="muted"><span x-text="ticket.duration"></span> Heartbeats · <span x-text="ticket.inputs.length"></span> input<span x-show="ticket.inputs.length !== 1">s</span></span></span><span class="tx-summary-value"><span x-text="amountLabel(ticket.budget)"></span> IUNA</span></button>
                   </template>
                 </div>
                 <div class="muted" x-show="!selectedBlockDetail?.tickets.length">No ticket purchases in this Heartbeat.</div>
@@ -874,7 +821,7 @@
                 </div>
                 <div class="tx-scroll-list" x-show="selectedBlockDetail?.ledger?.transactions.length">
                   <template x-for="transaction in selectedBlockDetail?.ledger?.transactions || []" :key="transaction.id">
-                    <button class="tx-card tx-card-button" type="button" @click="openBlockTransactionModal(transaction)"><span class="pill">Transaction</span><span class="tx-summary-main"><code class="tx-summary-id" x-text="transaction.id"></code><span class="muted"><span x-text="transaction.inputs.length"></span> input<span x-show="transaction.inputs.length !== 1">s</span> · <span x-text="transaction.outputs.length"></span> output<span x-show="transaction.outputs.length !== 1">s</span></span></span><span class="tx-summary-value">IUNA <span x-text="amountLabel(transaction.total_output)"></span></span></button>
+                    <button class="tx-card tx-card-button" type="button" @click="openBlockTransactionModal(transaction)"><span class="pill">Transaction</span><span class="tx-summary-main"><code class="tx-summary-id" x-text="transaction.id"></code><span class="muted"><span x-text="transaction.inputs.length"></span> input<span x-show="transaction.inputs.length !== 1">s</span> · <span x-text="transaction.outputs.length"></span> output<span x-show="transaction.outputs.length !== 1">s</span></span></span><span class="tx-summary-value"><span x-text="amountLabel(transaction.total_output)"></span> IUNA</span></button>
                   </template>
                 </div>
                 <div class="muted" x-show="!selectedBlockDetail?.ledger?.transactions.length">This Ledger block contains no user transactions.</div>
@@ -889,8 +836,8 @@
             <template x-for="item in mempoolItems()" :key="`${item.kind}:${item.id}`">
               <div class="mempool-item" role="button" tabindex="0" @click="openMempoolModal(item)" @keydown.enter.prevent="openMempoolModal(item)" @keydown.space.prevent="openMempoolModal(item)">
                 <div class="mempool-top"><code class="tx-summary-id" :title="item.id" x-text="short(item.id)"></code><span class="pill" x-text="item.kind"></span></div>
-                <div class="tx-field"><span class="tx-label" x-text="item.kind === 'Mining ticket' ? 'Budget' : 'Output total'"></span><span class="tx-value money">IUNA <span x-text="amountLabel(item.amount)"></span></span></div>
-                <div class="tx-field"><span class="tx-label">Fee</span><span class="tx-value money" x-text="item.fee == null ? 'Unavailable' : `IUNA ${amountLabel(item.fee)}`"></span></div>
+                <div class="tx-field"><span class="tx-label" x-text="item.kind === 'Mining ticket' ? 'Budget' : 'Output total'"></span><span class="tx-value money"><span x-text="amountLabel(item.amount)"></span> IUNA</span></div>
+                <div class="tx-field"><span class="tx-label">Fee</span><span class="tx-value money" x-text="item.fee == null ? 'Unavailable' : `${amountLabel(item.fee)} IUNA`"></span></div>
                 <div class="tx-field" x-show="item.kind === 'Mining ticket'"><span class="tx-label">Duration</span><span class="tx-value"><span x-text="item.duration"></span> Heartbeats</span></div>
                 <div class="tx-field" x-show="item.kind === 'Mining ticket'"><span class="tx-label">Miner</span><code class="tx-value" x-text="minerLabel(item.mining_public_key)"></code></div>
                 <div class="tx-field" x-show="item.kind === 'Ledger transaction'"><span class="tx-label">Inputs</span><span class="tx-value" x-text="item.input_count"></span></div>
@@ -914,12 +861,12 @@
         <div class="detail-loading" x-show="metricsBusy && metricsRows.length === 0">Loading metrics…</div>
         <div x-show="metricsRows.length > 0">
         <div class="grid metrics-summary">
-          <div class="stat"><div class="stat-label">Total IUNA supply</div><div class="stat-value">IUNA <span x-text="amountLabel(metricsLatest().minted)"></span></div></div>
+          <div class="stat"><div class="stat-label">Total IUNA supply</div><div class="stat-value"><span x-text="amountLabel(metricsLatest().minted)"></span> IUNA</div></div>
           <div class="stat"><div class="stat-label">Transactions in Heartbeat</div><div class="stat-value" x-text="metricsLatest().ledger_transaction_count ?? 0"></div></div>
           <div class="stat"><div class="stat-label">Total chain size</div><div class="stat-value" x-text="bytesLabel(metricsLatest().chain_bytes)"></div></div>
           <div class="stat"><div class="stat-label">UTXOs</div><div class="stat-value" x-text="metricsLatest().utxos ?? 0"></div></div>
           <div class="stat"><div class="stat-label">Mining tickets</div><div class="stat-value" x-text="metricsLatest().active_tickets ?? 0"></div></div>
-          <div class="stat"><div class="stat-label">Ticket budget</div><div class="stat-value">IUNA <span x-text="amountLabel(metricsLatest().ticket_weight)"></span></div></div>
+          <div class="stat"><div class="stat-label">Ticket budget</div><div class="stat-value"><span x-text="amountLabel(metricsLatest().ticket_weight)"></span> IUNA</div></div>
           <div class="stat"><div class="stat-label">PoW difficulty</div><div class="stat-value" x-text="chartLatest('difficulty')"></div></div>
           <div class="stat"><div class="stat-label">Median Heartbeat interval</div><div class="stat-value" x-text="averageHeartbeatLabel()"></div></div>
         </div>
@@ -1004,10 +951,10 @@
       <div class="tx-modal-summary">
         <div class="tx-field"><span class="tx-label">Source</span><span class="tx-value" x-text="selectedTransaction?.source || '-'"></span></div>
         <div class="tx-field" x-show="!selectedTransaction?.item?.reward"><span class="tx-label">Version</span><span class="tx-value" x-text="selectedTransaction?.item?.version ?? '-'"></span></div>
-        <div class="tx-field"><span class="tx-label" x-text="selectedTransaction?.item?.kind === 'Mining ticket' ? 'Budget' : 'Output total'"></span><span class="tx-value money">IUNA <span x-text="amountLabel(selectedTransaction?.item?.amount)"></span></span></div>
-        <div class="tx-field" x-show="!selectedTransaction?.item?.reward"><span class="tx-label">Fee</span><span class="tx-value money" x-text="selectedTransaction?.item?.fee == null ? 'Unavailable' : `IUNA ${amountLabel(selectedTransaction.item.fee)}`"></span></div>
-        <div class="tx-field"><span class="tx-label">Total in</span><span class="tx-value money" x-text="transactionModalTotals().in == null ? 'Unavailable' : `IUNA ${amountLabel(transactionModalTotals().in)}`"></span></div>
-        <div class="tx-field"><span class="tx-label">Total out</span><span class="tx-value money" x-text="transactionModalTotals().out == null ? 'Unavailable' : `IUNA ${amountLabel(transactionModalTotals().out)}`"></span></div>
+        <div class="tx-field"><span class="tx-label" x-text="selectedTransaction?.item?.kind === 'Mining ticket' ? 'Budget' : 'Output total'"></span><span class="tx-value money"><span x-text="amountLabel(selectedTransaction?.item?.amount)"></span> IUNA</span></div>
+        <div class="tx-field" x-show="!selectedTransaction?.item?.reward"><span class="tx-label">Fee</span><span class="tx-value money" x-text="selectedTransaction?.item?.fee == null ? 'Unavailable' : `${amountLabel(selectedTransaction.item.fee)} IUNA`"></span></div>
+        <div class="tx-field"><span class="tx-label">Total in</span><span class="tx-value money" x-text="transactionModalTotals().in == null ? 'Unavailable' : `${amountLabel(transactionModalTotals().in)} IUNA`"></span></div>
+        <div class="tx-field"><span class="tx-label">Total out</span><span class="tx-value money" x-text="transactionModalTotals().out == null ? 'Unavailable' : `${amountLabel(transactionModalTotals().out)} IUNA`"></span></div>
         <div class="tx-field" x-show="selectedTransaction?.item?.kind === 'Mining ticket'"><span class="tx-label">Lottery duration</span><span class="tx-value"><span x-text="selectedTransaction?.item?.duration"></span> Heartbeats</span></div>
         <div class="tx-field" x-show="selectedTransaction?.item?.kind === 'Mining ticket'"><span class="tx-label">Budget payout</span><span class="tx-value"><span x-text="selectedTransaction?.item?.lifecycle_heartbeats"></span> Heartbeats</span></div>
         <div class="tx-field" x-show="selectedTransaction?.item?.kind === 'Mining ticket'"><span class="tx-label">Mining public key</span><code class="tx-value" :title="selectedTransaction?.item?.mining_public_key" x-text="selectedTransaction?.item?.mining_public_key"></code></div>
@@ -1020,7 +967,7 @@
             <div class="utxo-node" :class="{fee: input.label}">
               <div class="utxo-node-label"><span x-text="input.label || `Input ${index + 1}`"></span><span x-text="input.label ? 'collected' : 'spent'"></span></div>
               <code class="utxo-node-ref" x-show="input.ref || input.transaction_id" :title="input.ref || `${input.transaction_id}:${input.output_index}`" x-text="input.ref || `${input.transaction_id}:${input.output_index}`"></code>
-              <div class="tx-field" x-show="input.value != null"><span class="tx-label">Value</span><span class="tx-value money">IUNA <span x-text="amountLabel(input.value)"></span></span></div>
+              <div class="tx-field" x-show="input.value != null"><span class="tx-label">Value</span><span class="tx-value money"><span x-text="amountLabel(input.value)"></span> IUNA</span></div>
               <div class="tx-field" x-show="input.public_key"><span class="tx-label">Public key</span><code class="tx-value" :title="input.public_key" x-text="input.public_key"></code></div>
               <div class="tx-field" x-show="input.signature"><span class="tx-label">Signature</span><code class="tx-value" :title="input.signature" x-text="input.signature"></code></div>
               <div class="muted" x-show="input.note" x-text="input.note"></div>
@@ -1036,7 +983,7 @@
           <template x-for="(output, index) in transactionModalOutputs()" :key="`${output.label}:${index}`">
             <div class="utxo-node" :class="output.kind">
               <div class="utxo-node-label"><span x-text="output.label"></span><span x-text="output.status || output.kind"></span></div>
-              <div class="utxo-node-amount">IUNA <span x-text="amountLabel(output.value)"></span></div>
+              <div class="utxo-node-amount"><span x-text="amountLabel(output.value)"></span> IUNA</div>
               <code class="utxo-node-ref" x-show="output.ref" :title="output.ref" x-text="output.ref"></code>
               <div class="tx-field" x-show="output.owner"><span class="tx-label">Owner</span><code class="tx-value" :title="output.owner" x-text="output.owner"></code></div>
               <div class="muted" x-show="output.note" x-text="output.note"></div>
@@ -1065,9 +1012,9 @@
       <p class="muted">Check the full recipient address. Ledger transactions cannot be reversed.</p>
       <div class="detail-kv"><div class="key">Recipient<span x-show="contactName(pendingTransfer?.recipient)" x-text="` · ${contactName(pendingTransfer?.recipient)}`"></span></div><code x-text="pendingTransfer?.recipient"></code></div>
       <div class="confirm-facts">
-        <div class="stat"><div class="stat-label">Amount</div><div class="stat-value">IUNA <span x-text="amountLabel(pendingTransfer?.amount)"></span></div></div>
-        <div class="stat"><div class="stat-label">Fee</div><div class="stat-value">IUNA <span x-text="amountLabel(pendingTransfer?.fee)"></span></div></div>
-        <div class="stat"><div class="stat-label">Spendable after</div><div class="stat-value">IUNA <span x-text="amountLabel(pendingTransfer?.remaining)"></span></div></div>
+        <div class="stat"><div class="stat-label">Amount</div><div class="stat-value"><span x-text="amountLabel(pendingTransfer?.amount)"></span> IUNA</div></div>
+        <div class="stat"><div class="stat-label">Fee</div><div class="stat-value"><span x-text="amountLabel(pendingTransfer?.fee)"></span> IUNA</div></div>
+        <div class="stat"><div class="stat-label">Spendable after</div><div class="stat-value"><span x-text="amountLabel(pendingTransfer?.remaining)"></span> IUNA</div></div>
       </div>
       <div class="setup-actions">
         <button @click="closeModals()" :disabled="transfer.busy">Cancel</button>

@@ -299,7 +299,7 @@ test('mining explains and meters both kinds of mining power', () => {
   assert.equal(app.powHashrateScaleMax(), 2_000_000);
   assert.ok(app.powHashrateShare() > 50 && app.powHashrateShare() < 60);
   assert.equal(app.ledgerPower(), 25_000_000);
-  assert.equal(app.ledgerPowerLabel(), 'IUNA 0.25 / Heartbeat');
+  assert.equal(app.ledgerPowerLabel(), '0.25 IUNA / Heartbeat');
   assert.equal(app.ledgerPowerScaleMax(), 50_000_000);
   assert.equal(app.ledgerPowerShare(), 50);
   app.sampleLocalHashrate({ heartbeat_mining_enabled: false, heartbeat_hashes: 5_601_000 }, 7_000);
@@ -521,7 +521,7 @@ test('mining controls separate manual tickets from continuous read-only state', 
   assert.notEqual(app.ticket.continuousQuote, cachedQuote, 'continuous mode can force a fresh quote');
 
   app.status = { ledger_mining_enabled: true, heartbeat_height: 24, ledger_last_ticket_height: 20 };
-  assert.match(app.ledgerMiningMessage(), /submits an EV-maximized Ledger ticket every 10 Heartbeats/);
+  assert.match(app.ledgerMiningMessage(), /submits an EV-maximized ticket every 10 Heartbeats/);
   app.ticket.continuousQuote = {
     duration: 10,
     recommended_budget: 2_000_000,
@@ -538,7 +538,7 @@ test('mining controls separate manual tickets from continuous read-only state', 
   assert.equal(app.ledgerNextTicketLabel(), 'As soon as possible');
 
   app.status.ledger_mining_enabled = false;
-  assert.match(app.ledgerMiningMessage(), /Submit a ticket manually below/);
+  assert.match(app.ledgerMiningMessage(), /Submit a ticket manually above/);
 });
 
 test('automatic Ledger budget waits for a quote before showing competing weight', () => {
@@ -675,12 +675,18 @@ test('dashboard cards report stale chains and isolated nodes', () => {
   assert.equal(app.dashboardState('p2p'), 'warn');
   assert.equal(app.dashboardState('heartbeatMining'), 'idle');
   assert.equal(app.dashboardState('ledgerMining'), 'good');
+  assert.equal(app.dashboardState('ledger'), 'idle', 'no Ledger block yet is not a healthy Ledger chain');
+  assert.equal(app.dashboardState('mempool'), 'idle');
+  app.status.pending_mining_tickets = 2;
+  assert.equal(app.dashboardState('mempool'), 'good');
+  assert.equal(app.networkTileDetail(), 'No peers connected');
   const html = content('www/node.html');
   const dashboard = html.slice(html.indexOf('<section class="dashboard"'), html.indexOf(`<section x-show="tab === 'wallet'">`));
-  assert.equal((dashboard.match(/class="dashboard-row"/g) || []).length, 5);
-  for (const label of ['Current balance', 'Heartbeat Mining', 'Ledger Mining', 'Heartbeat chain', 'Ledger chain', 'P2P']) {
-    assert.match(dashboard, new RegExp(`>${label}<`, 'i'));
+  assert.equal((dashboard.match(/class="status-tile"/g) || []).length, 6);
+  for (const label of ['Heartbeat chain', 'Ledger chain', 'Network', 'Heartbeat mining', 'Ledger mining', 'Mempool']) {
+    assert.match(dashboard, new RegExp(`>${label}<`));
   }
+  assert.doesNotMatch(dashboard, /wallet_balance|activityItems/, 'the dashboard shows node status only');
   app.status.heartbeat_height = 9;
   app.peers = [{ heartbeat_height: 10 }];
   assert.equal(app.syncTarget(), null, 'one block behind is normal propagation');
@@ -732,14 +738,15 @@ test('dashboard uses single-line ages and wallet activity grows in pages', () =>
   assert.equal(app.visibleActivityItems().length, 50);
 });
 
-test('dashboard keeps long balances and the Heartbeat mining label inside their cards', () => {
-  const { app } = nodeApp();
-  app.status = { wallet_balance: 9_007_199_254_740_991 };
-  assert.equal(app.balanceValueStyle(), 'font-size:13px');
-
+test('the balance sits at the top of the wallet, not in the sidebar', () => {
   const html = content('www/node.html');
-  assert.match(html, /:style="balanceValueStyle\(\)"/);
-  assert.match(html, /\.dashboard-label \{[^}]*white-space: nowrap/);
+  const sidebar = html.slice(html.indexOf('<aside class="sidebar"'), html.indexOf('</aside>'));
+  assert.doesNotMatch(sidebar, /wallet_balance/);
+  const wallet = html.slice(html.indexOf(`<section x-show="tab === 'wallet'">`), html.indexOf(`<section x-show="tab === 'mining'">`));
+  const balance = wallet.indexOf('class="panel balance-panel"');
+  assert.ok(balance > 0 && balance < wallet.indexOf('<h2>Send IUNA</h2>'), 'the balance comes before Send');
+  assert.match(html, /\.balance-amount \{[^}]*white-space: nowrap/);
+  assert.match(html, /\.status-tile-value \{[^}]*white-space: nowrap/);
 });
 
 test('wallet activity includes mining rewards and UTXOs open separately', async () => {
@@ -1565,19 +1572,25 @@ test('block rewards open the shared transaction modal with fees as inputs', asyn
   assert.match(html, /@click="openContactEditor\(selectedBlock\?\.ledger_miner_address\)"/);
 });
 
-test('the dashboard activity link opens the wallet Activity list in view', () => {
-  const { app } = nodeApp();
-  let scrolled = null;
-  app.$refs = { walletActivity: { scrollIntoView: (options) => { scrolled = options; } } };
-  app.$nextTick = (callback) => callback();
-  app.walletView = 'utxos';
+test('opening Chain selects the newest Ledger block once, and closing keeps it closed', async () => {
+  const { app, setTab } = nodeApp();
+  app.$nextTick = () => {};
+  app.getJson = async () => ({});
+  app.ledgerBlocks = [];
+  app.heartbeats = [];
+  setTab('chain');
+  assert.equal(app.selectedBlock, null, 'nothing to select before a Ledger block exists');
+  const newest = { block_hash: 'bb', height: 20, has_ledger_block: true };
+  app.ledgerBlocks = [newest, { block_hash: 'aa', height: 10, has_ledger_block: true }];
+  app.selectDefaultChainBlock();
+  assert.equal(app.selectedBlock, newest);
+  assert.equal(app.selectedBlockChain, 'ledger');
+  assert.equal(app.selectedBlockFollowsLatest, true);
 
-  app.openWalletActivity();
-
-  assert.equal(app.tab, 'wallet');
-  assert.equal(app.walletView, 'activity');
-  assert.equal(scrolled?.block, 'start');
-  const html = content('www/node.html');
-  assert.match(html, /@click="openWalletActivity\(\)">View all activity</);
-  assert.match(html, /class="panel wallet-activity-panel"[^>]*x-ref="walletActivity"/);
+  app.clearSelectedBlock();
+  app.selectDefaultChainBlock();
+  assert.equal(app.selectedBlock, null, 'a closed selection stays closed while Chain is open');
+  setTab('dashboard');
+  setTab('chain');
+  assert.equal(app.selectedBlock, newest, 'reopening Chain selects the newest Ledger block again');
 });
