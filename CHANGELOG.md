@@ -5,6 +5,17 @@ from the Git history and Conventional Commit titles by `deployment.sh`.
 
 ## [Unreleased]
 
+## [0.6.18] - 2026-11-20
+
+### Added
+
+- restyle the node app as an operator console
+- add a Cmd/Ctrl+K palette to jump to screens, blocks and addresses
+
+### Fixed
+
+- show far blocks in place on the chain rails
+
 ## [0.6.17] - 2026-11-20
 
 ### Fixed
