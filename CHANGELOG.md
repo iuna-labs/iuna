@@ -5,6 +5,12 @@ from the Git history and Conventional Commit titles by `deployment.sh`.
 
 ## [Unreleased]
 
+## [0.6.19] - 2026-11-20
+
+### Fixed
+
+- keep wallet list rows compact and let Send pick a contact
+
 ## [0.6.18] - 2026-11-20
 
 ### Added
