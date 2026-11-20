@@ -5,6 +5,12 @@ from the Git history and Conventional Commit titles by `deployment.sh`.
 
 ## [Unreleased]
 
+## [0.6.17] - 2026-11-20
+
+### Fixed
+
+- keep the dashboard to node status and show the balance in the wallet
+
 ## [0.6.16] - 2026-11-19
 
 ### Fixed
