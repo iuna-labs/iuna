@@ -1224,8 +1224,8 @@ window.iunaApp = function iunaApp() {
           const page = await this.getJson(`/api/heartbeats?limit=${this.heartbeatPage.limit}&before_height=${beforeHeight}`);
           const known = new Set(this.heartbeats.map((block) => block.block_hash));
           const older = page.filter((block) => !known.has(block.block_hash));
-          this.heartbeats.push(...older);
-          this.syncLedgerBlocks();
+          // Merged, not pushed: a window load may have replaced the list while this page loaded.
+          this.mergeHeartbeats(older);
           this.heartbeatPage.hasMore = page.length === this.heartbeatPage.limit
             && Number(page.at(-1)?.height) > 0;
           if (!page.length || !older.length) this.heartbeatPage.hasMore = false;
@@ -1854,8 +1854,13 @@ window.iunaApp = function iunaApp() {
     async navigateWhenFound(lookup, chain) {
       const navigation = ++this.paletteNavigation;
       const tab = this.tab;
-      const block = await lookup();
-      if (navigation !== this.paletteNavigation || this.tab !== tab) return;
+      const stale = () => navigation !== this.paletteNavigation || this.tab !== tab;
+      let block = await lookup();
+      if (stale()) return;
+      if (!this.heartbeats.some((item) => item.block_hash === block.block_hash)) {
+        block = await this.loadHeartbeatWindow(block);
+        if (stale()) return;
+      }
       this.openChainBlock(block, chain);
     },
 
@@ -1913,7 +1918,9 @@ window.iunaApp = function iunaApp() {
 
     // Opens a Heartbeat summary on the given rail. A block older than the loaded rail stays
     // selected with its details, so only blocks on the rail can be scrolled to.
-    openChainBlock(block, chain) {
+    async openChainBlock(block, chain) {
+      // Only a block outside the loaded rail waits for a request; a loaded one opens at once.
+      if (!this.heartbeats.some((item) => item.block_hash === block.block_hash)) block = await this.loadHeartbeatWindow(block);
       const target = chain === "ledger"
         ? this.ledgerBlocks.find((item) => item.block_hash === block.block_hash)
           || { ...block, ledger_height: Number(block.ledger_blocks) }
@@ -1922,10 +1929,72 @@ window.iunaApp = function iunaApp() {
       this.setChainView(chain);
       // selectBlock toggles a selected block off, so leave an already selected block alone.
       if (!(this.blockSelected(target) && this.selectedBlockChain === chain)) void this.selectBlock(target, chain);
-      this.$nextTick(() => {
+      // The rail renders after $nextTick and Alpine shows the screen one frame later.
+      const nextFrame = globalThis.requestAnimationFrame || ((callback) => setTimeout(callback, 16));
+      this.$nextTick(() => nextFrame(() => {
         this.$refs?.[`${chain}Rail`]?.querySelector(".chain-block.selected")
           ?.scrollIntoView({ block: "nearest", inline: "center" });
-      });
+      }));
+    },
+
+    // Puts rows into the loaded Heartbeats, newest first, one per height. Rows that were not
+    // loaded next to each other leave a gap the rails show and can fill.
+    mergeHeartbeats(rows) {
+      const byHeight = new Map(this.heartbeats.map((item) => [Number(item.height), item]));
+      for (const row of rows) byHeight.set(Number(row.height), row);
+      this.heartbeats = [...byHeight.values()].sort((left, right) => Number(right.height) - Number(left.height));
+      this.heartbeatPage.hasMore = Number(this.heartbeats.at(-1)?.height) > 0;
+      this.syncLedgerBlocks();
+    },
+
+    // A block far from the loaded part of the chain gets one page around it, so the rail can show
+    // it in place. One request at any chain length; what lies between shows as a gap. Returns the
+    // block to open: the node's block at that height, which differs after a reorg.
+    async loadHeartbeatWindow(block) {
+      const above = Math.floor(this.heartbeatPage.limit / 2);
+      try {
+        const page = await this.getJson(`/api/heartbeats?limit=${this.heartbeatPage.limit}&before_height=${Number(block.height) + above + 1}`);
+        this.mergeHeartbeats(page);
+        return page.find((item) => Number(item.height) === Number(block.height)) || block;
+      } catch (error) {
+        this.notify(error.message, "error");
+        return block;
+      }
+    },
+
+    // How many blocks are missing just before position `index` on a rail; 0 when none are.
+    railGap(chain, index) {
+      if (index < 1) return 0;
+      const blocks = chain === "ledger" ? this.ledgerBlocks : this.heartbeats;
+      const key = chain === "ledger" ? "ledger_height" : "height";
+      return Math.max(0, Number(blocks[index - 1]?.[key]) - Number(blocks[index]?.[key]) - 1) || 0;
+    },
+
+    railGapLabel(chain, index) {
+      const count = this.railGap(chain, index);
+      const noun = chain === "ledger" ? "Ledger block" : "Heartbeat";
+      return `${count.toLocaleString("en-US")} ${noun}${count === 1 ? "" : "s"}`;
+    },
+
+    // Shrinks a gap from its newer side. A Heartbeat gap loads the page just below it. A Ledger gap
+    // finds the next older Ledger block by bisection and loads the page around it, so each click
+    // shows a new Ledger block however sparse they are.
+    async loadRailGap(chain, index) {
+      const blocks = chain === "ledger" ? this.ledgerBlocks : this.heartbeats;
+      const upper = blocks[index - 1];
+      if (!upper || this.heartbeatPage.busy) return;
+      this.heartbeatPage.busy = true;
+      try {
+        if (chain === "ledger") {
+          await this.loadHeartbeatWindow(await this.ledgerHeartbeat(Number(upper.ledger_height) - 1));
+        } else {
+          this.mergeHeartbeats(await this.getJson(`/api/heartbeats?limit=${this.heartbeatPage.limit}&before_height=${Number(upper.height)}`));
+        }
+      } catch (error) {
+        this.notify(error.message, "error");
+      } finally {
+        this.heartbeatPage.busy = false;
+      }
     },
 
     heartbeatAgeLabel() {

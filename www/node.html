@@ -367,6 +367,11 @@
     .chain-height { font-size: 16px; font-weight: 600; font-variant-numeric: tabular-nums; }
     .chain-block-meta { display: flex; flex-wrap: wrap; gap: 2px 8px; color: var(--muted-2); font-size: 11.5px; line-height: 1.35; }
     .chain-miner { width: 100%; color: var(--muted-2); font-size: 11px; overflow-wrap: anywhere; }
+    /* Each rail item sits in a slot so a gap marker can precede it; the slot itself takes no box. */
+    .chain-slot { display: contents; }
+    .chain-gap { flex: 0 0 96px; min-height: 96px; display: grid; align-content: center; justify-items: center; gap: 2px; border: 1px dashed var(--line-strong); padding: 8px; background: transparent; color: var(--muted-2); font-size: 11.5px; font-weight: 400; text-align: center; }
+    .chain-gap:hover { border-color: var(--accent-line); color: var(--text); }
+    .chain-gap-action { color: var(--accent); text-decoration: underline; text-underline-offset: 3px; }
     .chain-block-building { align-content: start; border-color: var(--accent-line); border-style: dashed; background: transparent; user-select: none; }
     .chain-building-status { width: 7px; height: 7px; border-radius: 50%; background: var(--accent); animation: chain-building-pulse 1.8s ease-in-out infinite; }
     @keyframes chain-building-pulse { 50% { opacity: .35; } }
@@ -828,14 +833,17 @@
                   <div class="chain-block-meta"><span>Searching</span><span><span x-text="mempool.mining_tickets?.length || 0"></span> ticket<span x-show="Number(mempool.mining_tickets?.length || 0) !== 1">s</span></span></div>
                 </div>
               </div>
-              <template x-for="block in heartbeats" :key="block.block_hash">
-                <button class="chain-block" :class="{selected: blockSelected(block), 'new-block': block.block_hash === heartbeats[0]?.block_hash}" @click="selectBlock(block, 'heartbeat')" type="button" title="Open Heartbeat details">
-                  <div class="chain-block-main">
-                    <div class="chain-block-head"><div class="chain-height" x-text="block.height"></div><span class="pill" x-show="block.has_ledger_block">Ledger</span></div>
-                    <div class="chain-block-meta"><span x-text="blockAgeLabel(block, 'Genesis')"></span><span><span x-text="block.ticket_count || 0"></span> ticket<span x-show="Number(block.ticket_count || 0) !== 1">s</span></span></div>
-                  </div>
-                  <code class="chain-miner" :title="block.miner_public_key" x-text="minerLabel(block.miner_public_key)"></code>
-                </button>
+              <template x-for="(block, index) in heartbeats" :key="block.block_hash">
+                <div class="chain-slot">
+                  <button type="button" class="chain-gap" x-show="railGap('heartbeat', index)" @click="loadRailGap('heartbeat', index)" :disabled="heartbeatPage.busy" :title="`Load the Heartbeats just below #${heartbeats[index - 1]?.height}`"><span>⋯</span><span x-text="railGapLabel('heartbeat', index)"></span><span class="chain-gap-action">Load</span></button>
+                  <button class="chain-block" :class="{selected: blockSelected(block), 'new-block': block.block_hash === heartbeats[0]?.block_hash}" @click="selectBlock(block, 'heartbeat')" type="button" title="Open Heartbeat details">
+                    <div class="chain-block-main">
+                      <div class="chain-block-head"><div class="chain-height" x-text="block.height"></div><span class="pill" x-show="block.has_ledger_block">Ledger</span></div>
+                      <div class="chain-block-meta"><span x-text="blockAgeLabel(block, 'Genesis')"></span><span><span x-text="block.ticket_count || 0"></span> ticket<span x-show="Number(block.ticket_count || 0) !== 1">s</span></span></div>
+                    </div>
+                    <code class="chain-miner" :title="block.miner_public_key" x-text="minerLabel(block.miner_public_key)"></code>
+                  </button>
+                </div>
               </template>
             </div>
           </div>
@@ -848,14 +856,17 @@
                   <div class="chain-block-meta"><span>Searching</span><span><span x-text="mempool.ledger_transactions?.length || 0"></span> tx<span x-show="Number(mempool.ledger_transactions?.length || 0) !== 1">s</span></span></div>
                 </div>
               </div>
-              <template x-for="block in ledgerBlocks" :key="block.block_hash">
-                <button class="chain-block" :class="{selected: blockSelected(block), 'new-block': block.block_hash === ledgerBlocks[0]?.block_hash}" @click="selectBlock(block, 'ledger')" type="button" title="Open Ledger block details">
-                  <div class="chain-block-main">
-                    <div class="chain-block-head"><div class="chain-height" x-text="block.ledger_height"></div><span class="pill">Heartbeat&nbsp;<span x-text="block.height"></span></span></div>
-                    <div class="chain-block-meta"><span x-text="blockAgeLabel(block)"></span><span><span x-text="block.ledger_transaction_count || 0"></span> tx</span></div>
-                  </div>
-                  <code class="chain-miner" :title="block.ledger_miner_public_key || block.miner_public_key" x-text="minerLabel(block.ledger_miner_public_key || block.miner_public_key)"></code>
-                </button>
+              <template x-for="(block, index) in ledgerBlocks" :key="block.block_hash">
+                <div class="chain-slot">
+                  <button type="button" class="chain-gap" x-show="railGap('ledger', index)" @click="loadRailGap('ledger', index)" :disabled="heartbeatPage.busy"  title="Load the next older Ledger block"><span>⋯</span><span x-text="railGapLabel('ledger', index)"></span><span class="chain-gap-action">Load</span></button>
+                  <button class="chain-block" :class="{selected: blockSelected(block), 'new-block': block.block_hash === ledgerBlocks[0]?.block_hash}" @click="selectBlock(block, 'ledger')" type="button" title="Open Ledger block details">
+                    <div class="chain-block-main">
+                      <div class="chain-block-head"><div class="chain-height" x-text="block.ledger_height"></div><span class="pill">Heartbeat&nbsp;<span x-text="block.height"></span></span></div>
+                      <div class="chain-block-meta"><span x-text="blockAgeLabel(block)"></span><span><span x-text="block.ledger_transaction_count || 0"></span> tx</span></div>
+                    </div>
+                    <code class="chain-miner" :title="block.ledger_miner_public_key || block.miner_public_key" x-text="minerLabel(block.ledger_miner_public_key || block.miner_public_key)"></code>
+                  </button>
+                </div>
               </template>
             </div>
             <div class="empty" x-show="!ledgerBlocks.length">No Ledger block has been carried by a Heartbeat yet.</div>

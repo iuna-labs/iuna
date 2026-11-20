@@ -864,6 +864,98 @@ test('the palette stays out of other dialogs and never navigates late', async ()
   assert.equal(app.selectedBlock.ledger_height, 5, 'a Ledger selection keeps its number across a refresh');
 });
 
+test('a far block loads a window around it, and the rails mark and fill the gap', async () => {
+  const { app } = nodeApp();
+  const tip = 1_000_000;
+  const summary = (height) => ({ height, block_hash: `h${height}`, has_ledger_block: height % 10 === 3, ledger_blocks: Math.floor((height + 7) / 10) });
+  const page = (before, limit) => Array.from({ length: Math.min(limit, before) }, (_, index) => summary(before - 1 - index));
+  const requests = [];
+  app.getJson = async (path) => {
+    requests.push(path);
+    const before = Number(/before_height=(\d+)/.exec(path)[1]);
+    return page(before, Number(/limit=(\d+)/.exec(path)[1]));
+  };
+  app.status = { heartbeat_height: tip, ledger_blocks: summary(tip).ledger_blocks };
+  app.heartbeats = page(tip + 1, 100);
+  app.syncLedgerBlocks();
+  app.setChainView = (chain) => { app.chainView = chain; };
+  app.selectBlock = async (block, chain) => { app.selectedBlock = block; app.selectedBlockChain = chain; };
+
+  await app.openChainBlock(summary(13), 'ledger');
+  assert.deepEqual(requests, ['/api/heartbeats?limit=100&before_height=64'], 'one page around the block, at any chain length');
+  assert.ok(app.heartbeats.some((block) => block.block_hash === 'h13'), 'the block is on the rail');
+  assert.equal(app.selectedBlock.ledger_height, 2, 'the Ledger entry from the rail is selected');
+  const heights = Array.from(app.heartbeats, (block) => Number(block.height));
+  assert.deepEqual(heights, [...heights].sort((left, right) => right - left), 'newest first');
+  assert.equal(new Set(heights).size, heights.length, 'one block per height');
+
+  const gapAt = app.heartbeats.findIndex((block) => block.height === 63);
+  assert.equal(app.railGap('heartbeat', gapAt), (tip - 99) - 63 - 1, 'between the newest page and the window');
+  assert.equal(app.railGapLabel('heartbeat', gapAt), `${(tip - 163).toLocaleString('en-US')} Heartbeats`);
+  assert.equal(app.railGap('heartbeat', gapAt + 1), 0, 'neighbours inside a page leave no gap');
+  const ledgerGapAt = app.ledgerBlocks.findIndex((block) => block.height === 63);
+  assert.ok(app.railGap('ledger', ledgerGapAt) > 1000, 'the Ledger rail counts missing Ledger blocks');
+  assert.match(app.railGapLabel('ledger', ledgerGapAt), /Ledger blocks$/);
+
+  requests.length = 0;
+  await app.loadRailGap('heartbeat', gapAt);
+  assert.deepEqual(requests, [`/api/heartbeats?limit=100&before_height=${tip - 99}`], 'a gap fills from its newer side');
+  assert.equal(app.railGap('heartbeat', app.heartbeats.findIndex((block) => block.height === 63)), (tip - 199) - 63 - 1);
+});
+
+test('rail windows stay ordered, canonical and late-proof', async () => {
+  const { app } = nodeApp();
+  const tip = 1_000_000;
+  const summary = (height, hash = `h${height}`) => ({ height, block_hash: hash, has_ledger_block: height % 500 === 3, ledger_blocks: Math.floor((height + 497) / 500) });
+  const page = (before, limit) => Array.from({ length: Math.max(0, Math.min(limit, before)) }, (_, index) => summary(before - 1 - index));
+  let respond = async (path) => {
+    const before = Number(/before_height=(\d+)/.exec(path)[1]);
+    return page(before, Number(/limit=(\d+)/.exec(path)[1]));
+  };
+  app.getJson = (path) => respond(path);
+  app.status = { heartbeat_height: tip, ledger_blocks: summary(tip).ledger_blocks };
+  app.heartbeats = page(tip + 1, 100);
+  app.syncLedgerBlocks();
+  app.setChainView = (chain) => { app.chainView = chain; };
+  app.selectBlock = async (block, chain) => { app.selectedBlock = block; app.selectedBlockChain = chain; };
+
+  // An infinite-scroll page that lands after a window load is merged into order, not pushed.
+  let releaseScroll;
+  const scrollPage = new Promise((resolve) => { releaseScroll = resolve; });
+  const plain = respond;
+  respond = (path) => (path.includes(`before_height=${tip - 99}`) ? scrollPage.then(() => plain(path)) : plain(path));
+  app.heartbeatPage.hasMore = true;
+  const scrolling = app.loadMoreHeartbeats('heartbeat');
+  await app.loadHeartbeatWindow(summary(13));
+  releaseScroll();
+  await scrolling;
+  respond = plain;
+  const heights = Array.from(app.heartbeats, (block) => Number(block.height));
+  assert.deepEqual(heights, [...heights].sort((left, right) => right - left), 'still newest first');
+
+  // After a reorg the node's block at that height is opened, not the stale one.
+  const opened = await app.loadHeartbeatWindow(summary(5000, 'orphan'));
+  assert.equal(opened.block_hash, 'h5000');
+  assert.ok(!app.heartbeats.some((block) => block.block_hash === 'orphan'), 'an orphan never joins the rail');
+
+  // A Ledger gap reveals the next older Ledger block in one click, however sparse they are.
+  const ledgerGap = app.ledgerBlocks.findIndex((block, index) => app.railGap('ledger', index) > 0);
+  const upper = app.ledgerBlocks[ledgerGap - 1];
+  await app.loadRailGap('ledger', ledgerGap);
+  assert.ok(app.ledgerBlocks.some((block) => block.ledger_height === upper.ledger_height - 1), 'the next Ledger block is on the rail');
+
+  // A palette jump re-checks after the window request, so moving on meanwhile cancels it.
+  let releaseWindow;
+  respond = (path) => (path.includes('before_height=70051') ? new Promise((resolve) => { releaseWindow = () => resolve(plain(path)); }) : plain(path));
+  app.tab = 'dashboard';
+  const jump = app.openHeartbeatHeight(70_000);
+  await new Promise((resolve) => setImmediate(resolve));
+  app.tab = 'wallet';
+  releaseWindow();
+  await jump;
+  assert.equal(app.tab, 'wallet', 'the late window does not pull the user back to Chain');
+});
+
 test('the palette lives in the tab bar and behaves as a combobox', () => {
   const html = content('www/node.html');
   const bar = html.slice(html.indexOf('<aside class="sidebar"'), html.indexOf('</aside>'));
@@ -872,6 +964,8 @@ test('the palette lives in the tab bar and behaves as a combobox', () => {
   assert.match(html, /:aria-activedescendant="palette\.results\.length \? `palette-result-\$\{palette\.active\}` : null"/);
   assert.match(html, /class="palette-result" :id="`palette-result-\$\{index\}`" role="option"/);
   assert.match(html, /class="palette-status" :hidden="[^"]*"[^>]*aria-live="polite"/, 'the live region stays in the DOM');
+  assert.match(html, /class="chain-gap" x-show="railGap\('heartbeat', index\)" @click="loadRailGap\('heartbeat', index\)"/);
+  assert.match(html, /class="chain-gap" x-show="railGap\('ledger', index\)" @click="loadRailGap\('ledger', index\)"/);
 });
 
 test('dashboard cards report stale chains and isolated nodes', () => {
@@ -1128,13 +1222,13 @@ test('chain overview labels miners and identifies the local wallet', () => {
   assert.doesNotMatch(html, /class="chain-height">#/);
   const heartbeatBuilding = html.slice(
     html.indexOf('aria-label="Next Heartbeat being searched"'),
-    html.indexOf('<template x-for="block in heartbeats"'),
+    html.indexOf('<template x-for="(block, index) in heartbeats"'),
   );
   assert.match(heartbeatBuilding, /mempool\.mining_tickets/);
   assert.doesNotMatch(heartbeatBuilding, /worker|chain-miner/i);
   const ledgerBuilding = html.slice(
     html.indexOf('aria-label="Next Ledger block being searched"'),
-    html.indexOf('<template x-for="block in ledgerBlocks"'),
+    html.indexOf('<template x-for="(block, index) in ledgerBlocks"'),
   );
   assert.match(ledgerBuilding, /mempool\.ledger_transactions/);
   assert.doesNotMatch(ledgerBuilding, /chain-miner/i);
