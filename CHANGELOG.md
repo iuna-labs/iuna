@@ -5,6 +5,18 @@ from the Git history and Conventional Commit titles by `deployment.sh`.
 
 ## [Unreleased]
 
+## [0.6.20] - 2026-11-20
+
+### Added
+
+- make Lime the default accent and rename Safety orange to Orange
+
+### Fixed
+
+- keep a locked wallet's keys, funds and history private
+- size the wallet's tabbed panel to its list
+- style the recipient's contact picker like the buttons beside it
+
 ## [0.6.19] - 2026-11-20
 
 ### Fixed
