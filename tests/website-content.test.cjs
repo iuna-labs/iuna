@@ -464,6 +464,8 @@ function nodeApp(globals = {}) {
   app.$nextTick = () => {};
   app.$refs = {};
   app.setTab = (tab) => { app.tab = tab; };
+  // Most tests drive screens directly, without a node status behind the startup screen.
+  app.startupDismissed = true;
   return { app, messages, setTab, values };
 }
 
@@ -1959,15 +1961,22 @@ test('setup waits for a status that names the node instead of opening over a slo
     console: { error: () => {} },
   });
   values.set(`iunaSetupComplete:${instance}`, 'true');
+  app.startupDismissed = false;
   app.initialized = true;
   await app.refresh(true);
   assert.equal(app.setupReady, false, 'no status yet: neither setup nor login decides');
+  assert.equal(app.shortcutsAvailable(), false, 'shortcuts stay behind the waiting screen');
+  app.startupDismissed = true;
+  assert.equal(app.startupWaiting(), false);
+  app.startupDismissed = false;
   assert.equal(app.showSetup, false);
   statusUp = true;
   await app.refresh(true);
   assert.equal(app.setupReady, true);
   assert.equal(app.showSetup, false, 'a node that finished setup before does not reopen it');
   const html = content('www/node.html');
-  assert.match(html, /class="setup-overlay login-overlay" x-show="!setupReady"/);
+  assert.match(html, /class="setup-overlay login-overlay" x-show="startupWaiting\(\)"/);
+  assert.match(html, /<div class="shell" :inert="startupWaiting\(\)">/);
+  assert.match(html, /@click="startupDismissed = true">Continue without the node/);
   assert.match(html, /Waiting for your node/);
 });

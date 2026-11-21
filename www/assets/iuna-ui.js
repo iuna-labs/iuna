@@ -105,6 +105,8 @@ window.iunaApp = function iunaApp() {
     setupReady: false,
     // Set once init finished its first refresh; later refreshes may then complete setup's start.
     initialized: false,
+    // The operator chose to use the screen while the node still does not answer.
+    startupDismissed: false,
     lastUpdated: null,
     pollTimer: null,
     releaseCheckTimer: null,
@@ -156,6 +158,9 @@ window.iunaApp = function iunaApp() {
       this.initialized = true;
       this.prepareSetup();
       this.schedulePoll();
+      this.$watch("setupReady", (ready) => {
+        if (ready) this.$nextTick(() => (this.showSetup ? this.$refs.setupModal : this.$refs.loginPassword)?.focus());
+      });
       this.$watch("showSetup", (open) => {
         if (open) this.$nextTick(() => this.$refs.setupModal?.focus());
       });
@@ -203,7 +208,8 @@ window.iunaApp = function iunaApp() {
     },
 
     shortcutsAvailable() {
-      return !(this.setupReady && (this.showSetup || this.showLogin))
+      return !this.startupWaiting()
+        && !(this.setupReady && (this.showSetup || this.showLogin))
         && !this.palette.open
         && !this.contactModalOpen
         && !this.desktopUpdateModalOpen
@@ -291,6 +297,16 @@ window.iunaApp = function iunaApp() {
 
     // Setup and login wait for a status that names this node. A slow or still-starting node can
     // fail its first status request, and deciding then opened Initial Setup over an existing wallet.
+    // The waiting screen covers everything until the node answers, unless the operator skips it.
+    startupWaiting() {
+      return !this.setupReady && !this.startupDismissed;
+    },
+
+    async retryStartup() {
+      await this.refresh(true);
+      this.schedulePoll();
+    },
+
     prepareSetup() {
       if (this.setupReady || !/^[0-9a-f]{32}$/.test(String(this.status.node_instance_id || ""))) return;
       this.setupReady = true;
@@ -540,7 +556,8 @@ window.iunaApp = function iunaApp() {
     schedulePoll() {
       clearTimeout(this.pollTimer);
       if (document.hidden) return;
-      const delay = Math.min(60_000, 5000 * 2 ** this.pollFailures);
+      // While the waiting screen is up, back-off would keep it there long after the node answers.
+      const delay = this.startupWaiting() ? 3000 : Math.min(60_000, 5000 * 2 ** this.pollFailures);
       this.pollTimer = setTimeout(async () => {
         await this.refresh(true);
         this.schedulePoll();

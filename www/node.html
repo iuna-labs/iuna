@@ -592,7 +592,7 @@
   <script defer src="/assets/alpine.min.js"></script>
 </head>
 <body x-data="iunaApp()" x-cloak>
-  <div class="shell">
+  <div class="shell" :inert="startupWaiting()">
     <aside class="sidebar" aria-label="iuna navigation">
       <button class="brand" @click="setTab('dashboard')" title="Dashboard" aria-label="Dashboard"><svg viewBox="0 0 32 32" aria-hidden="true"><circle class="mark-dot" cx="9.4" cy="7.6" r="2.8"></circle><path class="mark-loop" d="M9.4 13v7.1c0 3.7 2.9 6.4 6.6 6.4s6.6-2.7 6.6-6.4V13"></path></svg></button>
       <nav class="nav">
@@ -1147,12 +1147,13 @@
     </section>
   </div>
 
-  <div class="setup-overlay login-overlay" x-show="!setupReady" x-transition>
-    <section class="setup-modal login-modal" role="status" aria-live="polite" aria-labelledby="starting-title">
+  <div class="setup-overlay login-overlay" x-show="startupWaiting()" x-transition>
+    <section class="setup-modal login-modal" role="dialog" aria-modal="true" aria-labelledby="starting-title" aria-describedby="starting-detail" x-ref="startupModal" tabindex="-1" x-init="$nextTick(() => startupWaiting() && $el.focus())">
       <svg class="login-mark" viewBox="0 0 32 32" aria-hidden="true"><circle class="mark-dot" cx="9.4" cy="7.6" r="2.8"></circle><path class="mark-loop" d="M9.4 13v7.1c0 3.7 2.9 6.4 6.6 6.4s6.6-2.7 6.6-6.4V13"></path></svg>
       <div class="setup-kicker">Starting</div>
       <h1 id="starting-title">Waiting for your node</h1>
-      <p class="muted" x-text="pollFailures ? 'The node is not answering yet. A slow machine can need a few minutes after a start or update; your wallet stays on disk meanwhile.' : 'Loading the node status…'"></p>
+      <p class="muted" id="starting-detail" aria-live="polite" x-text="pollFailures ? 'The node is not answering yet. A slow machine can need a few minutes after a start or update; your wallet stays on disk meanwhile.' : 'Loading the node status…'"></p>
+      <div class="setup-actions" x-show="initialized && pollFailures >= 3"><button @click="startupDismissed = true">Continue without the node</button><button class="primary" @click="retryStartup">Retry now</button></div>
     </section>
   </div>
 
