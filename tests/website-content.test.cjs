@@ -268,7 +268,7 @@ test('node UI preserves the product screens while using the canonical protocol',
   assert.match(controller, /\/api\/ledger-mining/);
   assert.match(controller, /\/api\/mempool/);
   assert.match(controller, /observeActivitySentinel/);
-  assert.match(html, /EV-max budget/);
+  assert.match(html, /Automatic budget/);
   assert.match(html, /Insufficient funds/);
   assert.match(html, /Next ticket/);
   assert.match(html, /x-show="!status\.ledger_mining_enabled"/);
@@ -510,7 +510,7 @@ test('mining controls separate manual tickets from continuous read-only state', 
   app.getJson = async (path) => ({
     duration: 10,
     recommended_budget: 250_000_000,
-    ev_maximizing_budget: 300_000_000,
+    automatic_budget: 300_000_000,
     other_active_ticket_weight: 100_000_000,
     current_minimum_budget: 200_000_000,
     path,
@@ -522,11 +522,11 @@ test('mining controls separate manual tickets from continuous read-only state', 
   assert.notEqual(app.ticket.continuousQuote, cachedQuote, 'continuous mode can force a fresh quote');
 
   app.status = { ledger_mining_enabled: true, heartbeat_height: 24, ledger_last_ticket_height: 20 };
-  assert.match(app.ledgerMiningMessage(), /submits an EV-maximized ticket every 10 Heartbeats/);
+  assert.match(app.ledgerMiningMessage(), /submits a ticket every 10 Heartbeats/);
   app.ticket.continuousQuote = {
     duration: 10,
     recommended_budget: 2_000_000,
-    ev_maximizing_budget: 300_000_000,
+    automatic_budget: 300_000_000,
     other_active_ticket_weight: 1_000_000,
     ledger_target_heartbeats: 10,
   };

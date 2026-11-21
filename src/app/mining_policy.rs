@@ -1,8 +1,10 @@
 //! Local automatic-mining policy. None of these choices are consensus rules.
 
+use std::collections::BTreeSet;
+
 use crate::consensus::{
     Amount, ConsensusError, ConsensusState, LEDGER_TARGET_INTERVAL_HEARTBEATS, PublicKey,
-    minimum_ticket_budget, subsidy,
+    TICKET_CONFIRMATIONS, minimum_ticket_budget, subsidy,
 };
 
 type Result<T> = std::result::Result<T, ConsensusError>;
@@ -39,66 +41,73 @@ pub fn other_active_ticket_weight(
         })
 }
 
-fn expected_net_value(reward: Amount, other_weight: Amount, budget: Amount, duration: u64) -> f64 {
-    let quotient = budget / duration;
-    let remainder = budget % duration;
-    let expected_wins = [(quotient + 1, remainder), (quotient, duration - remainder)]
-        .into_iter()
-        .filter(|(weight, slots)| *weight != 0 && *slots != 0)
-        .map(|(weight, slots)| {
-            (slots as f64 * weight as f64)
-                / (LEDGER_TARGET_INTERVAL_HEARTBEATS as f64 * (other_weight as f64 + weight as f64))
-        })
-        .sum::<f64>();
-    reward as f64 * expected_wins - budget as f64
+/// Distinct mining keys other than `mining_public_key` that will hold ticket weight while a ticket
+/// included in the next block is active, counting tickets still in the mempool.
+pub fn competing_miners(
+    state: &ConsensusState,
+    pending_keys: impl IntoIterator<Item = PublicKey>,
+    mining_public_key: Option<PublicKey>,
+    duration: u64,
+) -> Result<u64> {
+    let first = state
+        .height
+        .checked_add(1 + TICKET_CONFIRMATIONS)
+        .ok_or(ConsensusError::Arithmetic)?;
+    let end = first
+        .checked_add(duration)
+        .ok_or(ConsensusError::Arithmetic)?;
+    let mut keys = BTreeSet::new();
+    for ticket in state.tickets.values() {
+        let active_from = ticket
+            .included_height
+            .checked_add(TICKET_CONFIRMATIONS)
+            .ok_or(ConsensusError::Arithmetic)?;
+        let active_until = active_from
+            .checked_add(ticket.duration)
+            .ok_or(ConsensusError::Arithmetic)?;
+        if active_from < end && active_until > first {
+            keys.insert(ticket.mining_public_key);
+        }
+    }
+    keys.extend(pending_keys);
+    if let Some(own) = mining_public_key {
+        keys.remove(&own);
+    }
+    Ok(keys.len() as u64)
 }
 
-/// Ticket budget that maximizes subsidy-only net EV against the current weight of other miners.
+/// Ticket budget for automatic Ledger mining: each miner's share of the symmetric equilibrium.
 ///
-/// The continuous optimum seeds a small exact search that applies the protocol's integer
-/// quotient/remainder slot split. The inclusion fee is constant, so it cannot move the optimum.
-/// The consensus-recommended budget remains the lower bound for any automatic ticket.
-pub fn ev_maximizing_ticket_budget(
+/// With `N` miners, including this one, competing for an expected prize `V = reward / D` per
+/// Heartbeat, the equilibrium weight per miner is `V (N - 1) / N^2` per Heartbeat. The
+/// consensus-recommended budget remains the lower bound.
+///
+/// Why not a best response to the competing weight: nodes that decide at about the same time,
+/// each against weight it can already see, overreact together. Above three miners that feedback
+/// is unstable, and in a simulation of nodes joining one by one, total weight swung between 0.1
+/// and 160 times the prize while nodes got back as little as 2% of their spend. Counting
+/// miners instead of weight keeps total weight near the prize from the first few miners on.
+///
+/// Why no ticket is skipped when its EV is negative: once total weight exceeds the prize, a
+/// newcomer always sees a negative EV, while a miner whose own ticket is still active sees less
+/// competition. In the same simulation, the first miners kept buying and every later node stayed
+/// out for good. Without the skip, a full ticket set rotates over all miners at a small loss.
+///
+/// Counting keys has a cost: a miner that spreads tickets over many keys lowers everyone else's
+/// budget, though every key still pays at least the consensus minimum.
+pub fn automatic_ticket_budget(
     state: &ConsensusState,
+    pending_keys: impl IntoIterator<Item = PublicKey>,
     mining_public_key: Option<PublicKey>,
     duration: u64,
 ) -> Result<Amount> {
     let minimum = recommended_ticket_budget(state, duration)?;
     let reward = subsidy(state.ledger_blocks, state.minted)?;
-    let other_weight = other_active_ticket_weight(state, mining_public_key)?;
-    if reward == 0 || other_weight == 0 {
-        return Ok(minimum);
-    }
-
-    // With evenly spread ticket weight, EV(B) = A*B/(C+B)-B where
-    // A = reward*duration/D and C = duration*other_weight.
-    let continuous = duration as f64
-        * ((reward as f64 * other_weight as f64 / LEDGER_TARGET_INTERVAL_HEARTBEATS as f64).sqrt()
-            - other_weight as f64);
-    let center = if continuous.is_finite() && continuous > minimum as f64 {
-        continuous.round() as u64
-    } else {
-        minimum
-    };
-    let radius = duration
-        .checked_mul(2)
-        .and_then(|value| value.checked_add(2))
-        .ok_or(ConsensusError::Arithmetic)?;
-    let start = minimum.max(center.saturating_sub(radius));
-    let end = center
-        .checked_add(radius)
-        .ok_or(ConsensusError::Arithmetic)?;
-
-    let mut best_budget = minimum;
-    let mut best_value = expected_net_value(reward, other_weight, minimum, duration);
-    for budget in start..=end {
-        let value = expected_net_value(reward, other_weight, budget, duration);
-        if value > best_value || (value == best_value && budget < best_budget) {
-            best_budget = budget;
-            best_value = value;
-        }
-    }
-    Ok(best_budget)
+    let others = competing_miners(state, pending_keys, mining_public_key, duration)?;
+    let miners = u128::from(others) + 1;
+    let share = u128::from(reward) * u128::from(duration) * u128::from(others)
+        / (u128::from(LEDGER_TARGET_INTERVAL_HEARTBEATS) * miners * miners);
+    Ok(minimum.max(Amount::try_from(share).map_err(|_| ConsensusError::Arithmetic)?))
 }
 
 #[cfg(test)]
@@ -106,37 +115,99 @@ mod tests {
     use super::*;
     use crate::consensus::{TrackedTicket, pinned_genesis};
 
+    fn ticket(seed: u8, included_height: u64, budget: Amount) -> TrackedTicket {
+        TrackedTicket {
+            id: [seed; 32],
+            included_height,
+            budget,
+            duration: 10,
+            mining_public_key: [seed; 32],
+            lottery_seed: [seed; 32],
+        }
+    }
+
+    fn state_with(tickets: &[TrackedTicket]) -> ConsensusState {
+        let (_, mut state) = pinned_genesis().unwrap();
+        state.height = 6;
+        state.tickets = tickets.iter().map(|t| (t.id, t.clone())).collect();
+        state
+    }
+
     #[test]
     fn no_competition_keeps_the_automatic_budget_at_the_consensus_minimum() {
         let (_, state) = pinned_genesis().unwrap();
         assert_eq!(
-            ev_maximizing_ticket_budget(&state, Some([7; 32]), 10).unwrap(),
+            automatic_ticket_budget(&state, [], Some([7; 32]), 10).unwrap(),
             recommended_ticket_budget(&state, 10).unwrap()
         );
     }
 
     #[test]
-    fn competing_weight_raises_the_ev_maximizing_budget_but_own_weight_does_not() {
-        let (_, mut state) = pinned_genesis().unwrap();
-        state.height = 6;
-        state.tickets.insert(
-            [1; 32],
-            TrackedTicket {
-                id: [1; 32],
-                included_height: 0,
-                budget: 10_000_000,
-                duration: 10,
-                mining_public_key: [8; 32],
-                lottery_seed: [9; 32],
-            },
-        );
-        let minimum = recommended_ticket_budget(&state, 10).unwrap();
-        let competing = ev_maximizing_ticket_budget(&state, Some([7; 32]), 10).unwrap();
-        assert_eq!(competing, 213_606_788);
-        assert!(competing > minimum);
+    fn one_competitor_gives_each_miner_a_quarter_of_the_prize_whatever_its_weight() {
+        let reward = subsidy(0, 0).unwrap();
+        for budget in [MIN_BUDGET, 10_000_000_000] {
+            let state = state_with(&[ticket(8, 0, budget)]);
+            assert_eq!(state.ledger_blocks, 0);
+            assert_eq!(
+                automatic_ticket_budget(&state, [], Some([7; 32]), 10).unwrap(),
+                reward / 4
+            );
+        }
+    }
+
+    #[test]
+    fn own_tickets_do_not_count_as_competition() {
+        let state = state_with(&[ticket(8, 0, MIN_BUDGET)]);
         assert_eq!(
-            ev_maximizing_ticket_budget(&state, Some([8; 32]), 10).unwrap(),
-            minimum
+            automatic_ticket_budget(&state, [[8; 32]], Some([8; 32]), 10).unwrap(),
+            recommended_ticket_budget(&state, 10).unwrap()
         );
     }
+
+    #[test]
+    fn competitors_count_once_by_key_including_pending_and_not_yet_active_tickets() {
+        // Window of a ticket included at 7: active from 13 up to 23.
+        let state = state_with(&[
+            ticket(1, 0, MIN_BUDGET),  // active 6..16: overlaps
+            ticket(2, 5, MIN_BUDGET),  // active 11..21: overlaps
+            ticket(3, 17, MIN_BUDGET), // active 23..33: starts after the window
+        ]);
+        let mut expired = ticket(4, 0, MIN_BUDGET);
+        expired.duration = 7; // active 6..13: ends before the window
+        let mut state = state;
+        state.tickets.insert(expired.id, expired);
+        assert_eq!(competing_miners(&state, [], None, 10).unwrap(), 2);
+        assert_eq!(
+            competing_miners(&state, [[1; 32], [5; 32], [6; 32]], None, 10).unwrap(),
+            4
+        );
+    }
+
+    #[test]
+    fn many_competitors_fall_back_to_the_consensus_minimum() {
+        // The equilibrium share is about reward / N, so the minimum takes over near the miner
+        // count a full ticket set holds.
+        let tickets: Vec<_> = (1..=2_200u32)
+            .map(|index| {
+                let mut ticket = ticket(0, 0, MIN_BUDGET);
+                ticket.id[..4].copy_from_slice(&index.to_le_bytes());
+                ticket.mining_public_key = ticket.id;
+                ticket
+            })
+            .collect();
+        let state = state_with(&tickets);
+        let minimum = recommended_ticket_budget(&state, 10).unwrap();
+        assert_eq!(
+            automatic_ticket_budget(&state, [], Some([0; 32]), 10).unwrap(),
+            minimum
+        );
+        let few = state_with(&tickets[..9]);
+        let ten_miners = subsidy(0, 0).unwrap() * 9 / 100;
+        assert_eq!(
+            automatic_ticket_budget(&few, [], Some([0; 32]), 10).unwrap(),
+            ten_miners.max(minimum)
+        );
+    }
+
+    const MIN_BUDGET: Amount = crate::consensus::MIN_TICKET_BUDGET;
 }

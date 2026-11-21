@@ -968,7 +968,7 @@ window.iunaApp = function iunaApp() {
     ledgerMiningMessage() {
       if (this.ticket.continuousBusy) return "Updating continuous Ledger mining…";
       return this.status.ledger_mining_enabled
-        ? "Continuous Ledger mining is on. The node submits an EV-maximized ticket every 10 Heartbeats."
+        ? "Continuous Ledger mining is on. The node submits a ticket every 10 Heartbeats."
         : "Continuous Ledger mining is off. Submit a ticket manually above.";
     },
 

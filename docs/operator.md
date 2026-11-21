@@ -236,10 +236,13 @@ broadcasts a compact Heartbeat. Its state is reported as `heartbeat_mining_enabl
 low-level single-block operator endpoint.
 
 `POST /api/ledger-mining` with `{ "enabled": true }` enables continuous Ledger
-mining. The node immediately buys a ten-Heartbeat ticket at the subsidy-only
-net-EV-maximizing budget against the current active weight of other miners, with
-the consensus-recommended budget as its lower bound and available wallet inputs
-as its upper bound. It recalculates that budget
+mining. The node immediately buys a ten-Heartbeat ticket. Its budget is this
+miner's share of the equilibrium between all miners that hold ticket weight
+during the ticket's active Heartbeats, pending tickets included: with `N` miners
+that is `(N - 1) / N^2` of the expected subsidy. The consensus-recommended budget
+is the lower bound and available wallet inputs are the upper bound. Counting
+miners instead of reacting to their weight keeps nodes that decide at the same
+time from overbidding together. It recalculates that budget
 before buying another after each ten-Heartbeat interval. This preference and
 the last purchase height survive restarts; it runs without an open browser. The
 state is reported as `ledger_mining_enabled` by `GET /api/status`.

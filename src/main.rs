@@ -27,7 +27,7 @@ use iuna::{
     },
     app::{
         consensus_node::Node,
-        mining_policy::{ev_maximizing_ticket_budget, recommended_ticket_budget},
+        mining_policy::{automatic_ticket_budget, recommended_ticket_budget},
         wallet_commands::TicketParameters,
     },
     consensus::LEDGER_TARGET_INTERVAL_HEARTBEATS,
@@ -540,15 +540,18 @@ async fn run_ledger_miner(
                     >= encoded_last
                         .saturating_sub(1)
                         .saturating_add(LEDGER_TARGET_INTERVAL_HEARTBEATS);
-            let already_pending = node
-                .pending_tickets()
+            let pending_tickets = node.pending_tickets();
+            let already_pending = pending_tickets
                 .iter()
                 .any(|ticket| ticket.mining_public_key == wallet.public_key());
             if !due || already_pending {
                 None
             } else {
-                let optimal_budget = match ev_maximizing_ticket_budget(
+                let optimal_budget = match automatic_ticket_budget(
                     node.chain().tip(),
+                    pending_tickets
+                        .iter()
+                        .map(|ticket| ticket.mining_public_key),
                     Some(wallet.public_key()),
                     LEDGER_TARGET_INTERVAL_HEARTBEATS,
                 ) {

@@ -41,7 +41,7 @@ use crate::{
     },
     app::{
         consensus_node::{ChainRepository, Node},
-        mining_policy::{ev_maximizing_ticket_budget, other_active_ticket_weight},
+        mining_policy::{automatic_ticket_budget, other_active_ticket_weight},
         wallet_commands::{TicketParameters, WALLET_ADDRESS_SCAN_LIMIT, Wallet},
     },
     consensus::{
@@ -608,7 +608,7 @@ pub struct MiningTicketQuote {
     pub current_minimum_budget: u64,
     pub minimum_budget_after_same_heartbeat_ledger: u64,
     pub recommended_budget: u64,
-    pub ev_maximizing_budget: Option<u64>,
+    pub automatic_budget: Option<u64>,
     pub other_active_ticket_weight: u64,
     pub heartbeat_target_seconds: u64,
     pub ledger_target_heartbeats: u64,
@@ -2079,14 +2079,21 @@ async fn mining_ticket_quote(
     // While the wallet is locked the quote does not set the wallet's own tickets apart, so it
     // cannot reveal their weight.
     let mining_public_key = wallet.unlocked.as_ref().map(|wallet| wallet.public_key());
-    let theoretical_ev_maximizing_budget =
-        ev_maximizing_ticket_budget(chain, mining_public_key, query.duration).map_err(|_| {
-            api_error(
-                StatusCode::INTERNAL_SERVER_ERROR,
-                "cannot calculate EV-maximizing ticket budget",
-            )
-        })?;
-    let ev_maximizing_budget = wallet
+    let theoretical_automatic_budget = automatic_ticket_budget(
+        chain,
+        node.pending_tickets()
+            .iter()
+            .map(|ticket| ticket.mining_public_key),
+        mining_public_key,
+        query.duration,
+    )
+    .map_err(|_| {
+        api_error(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            "cannot calculate automatic ticket budget",
+        )
+    })?;
+    let automatic_budget = wallet
         .unlocked
         .as_ref()
         .map(|wallet| wallet.maximum_consolidating_ticket_budget(chain, &node.reserved_inputs(), 1))
@@ -2097,8 +2104,8 @@ async fn mining_ticket_quote(
                 "cannot calculate available ticket budget",
             )
         })?
-        .map_or(Some(theoretical_ev_maximizing_budget), |maximum| {
-            (maximum >= recommended_budget).then(|| theoretical_ev_maximizing_budget.min(maximum))
+        .map_or(Some(theoretical_automatic_budget), |maximum| {
+            (maximum >= recommended_budget).then(|| theoretical_automatic_budget.min(maximum))
         });
     let other_active_ticket_weight =
         other_active_ticket_weight(chain, mining_public_key).map_err(|_| {
@@ -2113,7 +2120,7 @@ async fn mining_ticket_quote(
         current_minimum_budget,
         minimum_budget_after_same_heartbeat_ledger,
         recommended_budget,
-        ev_maximizing_budget,
+        automatic_budget,
         other_active_ticket_weight,
         heartbeat_target_seconds: HEARTBEAT_TARGET_INTERVAL_SECS,
         ledger_target_heartbeats: LEDGER_TARGET_INTERVAL_HEARTBEATS,
@@ -3106,7 +3113,7 @@ mod tests {
                 >= quote["current_minimum_budget"].as_u64().unwrap()
         );
         assert!(
-            quote["ev_maximizing_budget"].as_u64().unwrap()
+            quote["automatic_budget"].as_u64().unwrap()
                 >= quote["recommended_budget"].as_u64().unwrap()
         );
         assert_eq!(quote["other_active_ticket_weight"], 0);
