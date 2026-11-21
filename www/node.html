@@ -1012,7 +1012,7 @@
     </main>
 
     <footer class="statusbar" aria-label="Node status">
-      <span class="status-item" :class="networkLabel() === 'Connected' ? 'good' : 'warn'"><span class="status-dot" aria-hidden="true"></span><span x-text="networkLabel()"></span></span>
+      <span class="status-item" :class="networkLabel() === 'Connected' ? 'good' : (networkLabel() === 'Loading' ? '' : 'warn')"><span class="status-dot" aria-hidden="true"></span><span x-text="networkLabel()"></span></span>
       <span class="status-item"><b x-text="peers.length"></b><span x-text="peers.length === 1 ? 'peer' : 'peers'"></span></span>
       <div class="sync-card" x-show="syncing()" role="status" aria-live="polite">
         <span class="sync-card-spinner" aria-hidden="true"></span>
@@ -1169,8 +1169,8 @@
       <div class="setup-progress" aria-hidden="true"><span :class="{active: setupStep >= 1}"></span><span :class="{active: setupStep >= 2}"></span><span :class="{active: setupStep >= 3}"></span></div>
 
       <div x-show="setupStep === 1">
-        <h2 x-text="peers.length ? 'Your node is connected' : 'Your node is running'"></h2><p class="muted">iuna keeps the network connection running in the background. There is normally nothing to configure here.</p>
-        <div class="setup-check"><span class="setup-check-mark" :class="{warning: !peers.length}" x-text="peers.length ? '✓' : '!'" aria-hidden="true"></span><div><b x-text="!peers.length ? 'Looking for peers' : (syncing() ? 'Synchronizing' : 'Connected to iuna')"></b><div class="muted" x-text="networkDetail()"></div></div></div>
+        <h2 x-text="peersLoaded && peers.length ? 'Your node is connected' : 'Your node is running'"></h2><p class="muted">iuna keeps the network connection running in the background. There is normally nothing to configure here.</p>
+        <div class="setup-check"><span class="setup-check-mark" :class="{warning: peersLoaded && !peers.length}" x-text="!peersLoaded ? '…' : (peers.length ? '✓' : '!')" aria-hidden="true"></span><div><b x-text="!peersLoaded ? 'Loading peers' : !peers.length ? 'Looking for peers' : (syncing() ? 'Synchronizing' : 'Connected to iuna')"></b><div class="muted" x-text="networkDetail()"></div></div></div>
       </div>
 
       <div x-show="setupStep === 2">

@@ -49,6 +49,10 @@ window.iunaApp = function iunaApp() {
     paletteNavigation: 0,
     status: {},
     peers: [],
+    // False until the first peer list arrives, so an empty list is not shown as isolation.
+    peersLoaded: false,
+    // The latest peer request failed; until a list arrives this shows instead of "Loading".
+    peersError: false,
     peerTargets: [],
     peerForm: { address: "", busy: false },
     activity: null,
@@ -648,29 +652,56 @@ window.iunaApp = function iunaApp() {
     },
 
     async refresh(silent = false) {
+      let failures = [];
       try {
         const previousHeartbeatHead = this.heartbeats[0]?.block_hash;
         const previousLedgerHead = this.ledgerBlocks[0]?.block_hash;
         const heartbeatRail = this.chainRailState("heartbeatRail");
         const ledgerRail = this.chainRailState("ledgerRail");
-        const [status, heartbeats, peers, mempool] = await Promise.all([
-          this.getJson("/api/status"),
-          this.getJson(`/api/heartbeats?limit=${this.heartbeatPage.limit}`),
-          this.getJson("/api/peers"),
-          this.getJson("/api/mempool"),
+        // Each response is applied on its own: one bad response used to abort the whole refresh,
+        // which left the chain and peer lists empty while the status above them stayed current.
+        const isObject = (value) => value !== null && typeof value === "object" && !Array.isArray(value);
+        const [statusResult, heartbeatsResult, peersResult, mempoolResult] = await Promise.allSettled([
+          this.getCheckedJson("/api/status", isObject),
+          this.getCheckedJson(`/api/heartbeats?limit=${this.heartbeatPage.limit}`, Array.isArray),
+          this.getCheckedJson("/api/peers", Array.isArray),
+          this.getCheckedJson("/api/mempool", isObject),
         ]);
+        // A failed secondary list is reported but does not slow polling; only the status does.
+        failures = [statusResult, heartbeatsResult, peersResult, mempoolResult]
+          .filter((result) => result.status === "rejected")
+          .map((result) => result.reason);
+        if (peersResult.status === "fulfilled") {
+          this.peers = peersResult.value;
+          this.peersLoaded = true;
+          this.peersError = false;
+        } else {
+          this.peersError = true;
+        }
+        if (mempoolResult.status === "fulfilled") this.mempool = mempoolResult.value;
+        const heartbeats = heartbeatsResult.status === "fulfilled" ? heartbeatsResult.value : null;
+        if (heartbeats) {
+          const oldestFreshHeight = heartbeats.at(-1)?.height;
+          const olderLoaded = oldestFreshHeight == null
+            ? []
+            : this.heartbeats.filter((block) => Number(block.height) < Number(oldestFreshHeight));
+          this.heartbeats = [...heartbeats, ...olderLoaded];
+          this.heartbeatPage.hasMore = this.heartbeats.at(-1)?.height > 0
+            && heartbeats.length === this.heartbeatPage.limit;
+        }
+        this.peerTargets = await this.getCheckedJson("/api/peer-targets", Array.isArray).catch((error) => {
+          failures.push(error);
+          return this.peerTargets;
+        });
+        if (statusResult.status === "rejected") {
+          failures = failures.filter((error) => error !== statusResult.reason);
+          throw statusResult.reason;
+        }
+        const status = statusResult.value;
         this.sampleLocalHashrate(status);
         this.status = status;
         if (!this.mining.busy) this.mining.workers = Number(status.heartbeat_mining_workers || 1);
-        const oldestFreshHeight = heartbeats.at(-1)?.height;
-        const olderLoaded = oldestFreshHeight == null
-          ? []
-          : this.heartbeats.filter((block) => Number(block.height) < Number(oldestFreshHeight));
-        this.heartbeats = [...heartbeats, ...olderLoaded];
-        this.peers = peers;
-        this.mempool = mempool;
         void this.reconcileSelectedTransaction();
-        this.peerTargets = await this.getJson("/api/peer-targets").catch(() => this.peerTargets);
         if (this.tab === "metrics") await this.refreshMetrics(true);
         if (status.wallet_public_key && this.tab === "wallet") {
           const activity = await this.getJson("/api/wallet/activity").catch(() => null);
@@ -687,8 +718,6 @@ window.iunaApp = function iunaApp() {
             && previousHeartbeatHead !== this.heartbeats[0]?.block_hash) {
           await this.quoteContinuousTicket(true, false);
         }
-        this.heartbeatPage.hasMore = this.heartbeats.at(-1)?.height > 0
-          && heartbeats.length === this.heartbeatPage.limit;
         this.scheduleChainHeadSlide(
           "heartbeatRail",
           heartbeatRail,
@@ -713,10 +742,11 @@ window.iunaApp = function iunaApp() {
         this.pollFailures = 0;
       } catch (error) {
         this.pollFailures = Math.min(4, this.pollFailures + 1);
-        // Background refreshes stay quiet on screen, which made their failures invisible.
-        console.error("refresh failed", error);
-        if (!silent) this.notify(error.message, "error");
+        failures.unshift(error);
       } finally {
+        // Background refreshes stay quiet on screen, so every failure at least reaches the console.
+        for (const error of failures) console.error("refresh failed", error);
+        if (failures.length && !silent) this.notify(failures.map((error) => error.message).join("; "), "error");
         if (this.setupReady) this.syncLoginVisibility();
       }
     },
@@ -754,6 +784,25 @@ window.iunaApp = function iunaApp() {
         const error = new Error(payload.error || `${path} returned ${response.status}`);
         error.status = response.status;
         throw error;
+      }
+      return payload;
+    },
+
+    // Like getJson, but rejects a successful response whose body has the wrong shape, and logs
+    // what arrived: an empty or non-JSON body still parses to an object in responseJson.
+    async getCheckedJson(path, valid) {
+      const response = await fetch(path, { headers: this.headers(), cache: "no-store" });
+      const text = await response.text();
+      let payload;
+      try { payload = text ? JSON.parse(text) : undefined; } catch { payload = undefined; }
+      if (!response.ok) {
+        const error = new Error(payload?.error || text || `${path} returned ${response.status}`);
+        error.status = response.status;
+        throw error;
+      }
+      if (!valid(payload)) {
+        console.error("unexpected response", { path, status: response.status, body: text.slice(0, 300) });
+        throw new Error(`${path} returned an unexpected response`);
       }
       return payload;
     },
@@ -1040,6 +1089,7 @@ window.iunaApp = function iunaApp() {
 
     networkLabel() {
       if (!this.status.network) return "Connecting";
+      if (!this.peersLoaded) return this.peersError ? "Unavailable" : "Loading";
       if (this.syncing()) return this.syncingLabel();
       return this.peers.length ? "Connected" : "Isolated";
     },
@@ -1069,12 +1119,14 @@ window.iunaApp = function iunaApp() {
 
     syncLabel() {
       if (!this.status.network) return "Waiting";
+      if (!this.peersLoaded) return this.peersError ? "Unavailable" : "Loading";
       if (!this.peers.length) return "No peers";
       return this.syncing() ? this.syncingLabel() : "Up to date";
     },
 
     networkTileDetail() {
       if (!this.status.network) return "Waiting for the local node";
+      if (!this.peersLoaded) return this.peersError ? "Peer list unavailable" : "Loading peers";
       if (!this.peers.length) return "No peers connected";
       const peers = `${this.peers.length} peer${this.peers.length === 1 ? "" : "s"}`;
       return this.syncing() ? peers : `${peers} · up to date`;
@@ -1089,6 +1141,11 @@ window.iunaApp = function iunaApp() {
 
     networkDetail() {
       if (!this.status.network) return "Waiting for the local node to respond.";
+      if (!this.peersLoaded) {
+        return this.peersError
+          ? "The local node did not return its peer list. Retrying in the background."
+          : "Loading the peer list from the local node.";
+      }
       if (!this.peers.length) return "No peers yet. The node keeps retrying its configured peers; you can still use it on your own.";
       if (this.syncTarget()) return `Synchronizing Heartbeat ${Number(this.status.heartbeat_height || 0)} of ${this.syncTarget()}. Blocks appear as they arrive.`;
       if (this.syncing()) return "Fetching blocks from the network. Blocks appear as they arrive.";
@@ -1665,6 +1722,7 @@ window.iunaApp = function iunaApp() {
       if (tile === "heartbeatMining") return status.heartbeat_mining_enabled ? "good" : "idle";
       if (tile === "ledgerMining") return status.ledger_mining_enabled || this.ledgerPower() > 0 ? "good" : "idle";
       if (tile === "mempool") return this.pendingCount() ? "good" : "idle";
+      if (tile === "p2p" && !this.peersLoaded) return this.peersError ? "warn" : "idle";
       if (tile === "p2p") return this.peers.length && !this.syncing() ? "good" : "warn";
       // An old tip while catching up is expected, not a stalled chain.
       if (this.syncing()) return "warn";

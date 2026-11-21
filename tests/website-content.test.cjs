@@ -973,6 +973,10 @@ test('dashboard cards report stale chains and isolated nodes', () => {
   const { app } = nodeApp();
   app.status = { network: 'iuna-mainnet-candidate', wallet_unlocked: true, heartbeat_mining_enabled: false, ledger_mining_enabled: true };
   app.peers = [];
+  assert.equal(app.networkLabel(), 'Loading', 'an unloaded peer list is not isolation');
+  assert.equal(app.networkTileDetail(), 'Loading peers');
+  app.peersLoaded = true;
+  assert.equal(app.networkLabel(), 'Isolated');
   const now = Math.floor(Date.now() / 1000);
   app.heartbeats = [{ height: 9, timestamp: now - 30 }];
   assert.equal(app.dashboardState('heartbeat'), 'good');
@@ -1899,4 +1903,44 @@ test('opening Chain selects the newest Ledger block once, and closing keeps it c
   setTab('dashboard');
   setTab('chain');
   assert.equal(app.selectedBlock, newest, 'reopening Chain selects the newest Ledger block again');
+});
+
+test('one malformed refresh response leaves the other lists current', async () => {
+  const errors = [];
+  const responses = {
+    '/api/status': { network: 'iuna-mainnet-candidate', heartbeat_height: 12 },
+    '/api/heartbeats?limit=100': '',
+    '/api/peers': [{ address: 'peer.example:9444', heartbeat_height: 12 }],
+    '/api/mempool': { ledger_transactions: [], mining_tickets: [] },
+    '/api/peer-targets': [{ address: 'peer.example:9444', connected: true }],
+  };
+  const { app, messages } = nodeApp({
+    fetch: async (path) => {
+      const body = responses[path];
+      return { ok: true, status: 200, text: async () => (typeof body === 'string' ? body : JSON.stringify(body)) };
+    },
+    console: { error: (...args) => errors.push(args) },
+  });
+  app.heartbeats = [{ height: 11, block_hash: 'aa' }];
+  await app.refresh();
+  assert.equal(app.status.heartbeat_height, 12);
+  assert.equal(app.peers.length, 1);
+  assert.equal(app.peerTargets.length, 1);
+  assert.equal(app.networkLabel(), 'Connected');
+  assert.equal(app.heartbeats[0].block_hash, 'aa', 'a bad page keeps the loaded Heartbeats');
+  assert.equal(app.pollFailures, 0, 'a bad secondary list does not slow the status poll');
+  assert.match(messages.at(-1).message, /\/api\/heartbeats\?limit=100 returned an unexpected response/);
+  assert.ok(errors.some(([label, detail]) => label === 'unexpected response' && detail.path.startsWith('/api/heartbeats')));
+});
+
+test('a failing peer list reads as unavailable, not as loading or isolation', async () => {
+  const { app } = nodeApp({
+    fetch: async (path) => (path === '/api/peers'
+      ? { ok: false, status: 500, text: async () => 'peer registry unavailable' }
+      : { ok: true, status: 200, text: async () => JSON.stringify(path === '/api/status' ? { network: 'iuna-mainnet-candidate' } : path === '/api/mempool' ? { ledger_transactions: [], mining_tickets: [] } : []) }),
+    console: { error: () => {} },
+  });
+  await app.refresh(true);
+  assert.equal(app.networkLabel(), 'Unavailable');
+  assert.equal(app.dashboardState('p2p'), 'warn');
 });
