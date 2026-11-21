@@ -5,6 +5,13 @@ from the Git history and Conventional Commit titles by `deployment.sh`.
 
 ## [Unreleased]
 
+## [0.6.23] - 2026-11-21
+
+### Fixed
+
+- wait for the node's status before opening setup or login
+- make the node startup screen modal and escapable
+
 ## [0.6.22] - 2026-11-21
 
 ### Fixed
