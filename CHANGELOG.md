@@ -5,6 +5,12 @@ from the Git history and Conventional Commit titles by `deployment.sh`.
 
 ## [Unreleased]
 
+## [0.6.21] - 2026-11-21
+
+### Fixed
+
+- bid the symmetric equilibrium share instead of a best response
+
 ## [0.6.20] - 2026-11-20
 
 ### Added
